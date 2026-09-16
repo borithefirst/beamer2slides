@@ -113,6 +113,13 @@ def render_backgrounds(pdf: Path, raw: dict, deck: dict, out: Path) -> list[Path
             page.apply_redactions(images=pymupdf.PDF_REDACT_IMAGE_NONE,
                                   graphics=pymupdf.PDF_REDACT_LINE_ART_NONE,
                                   text=pymupdf.PDF_REDACT_TEXT_REMOVE)
+        strokes = [st for el in texts for st in el.get("strokes", [])]
+        if strokes:  # fraction bars of fractions converted to text
+            for x0, y0, x1, y1 in strokes:
+                page.add_redact_annot(pymupdf.Rect(x0 - 1.5, y0 - 1.5, x1 + 1.5, y1 + 1.5), fill=False)
+            page.apply_redactions(images=pymupdf.PDF_REDACT_IMAGE_NONE,
+                                  graphics=pymupdf.PDF_REDACT_LINE_ART_REMOVE_IF_COVERED,
+                                  text=pymupdf.PDF_REDACT_TEXT_NONE)
 
         for fig in figures:
             path = out / "figures" / f"{fig['id']}.png"

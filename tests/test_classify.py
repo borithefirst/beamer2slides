@@ -73,6 +73,17 @@ def test_inline_math_becomes_text_display_math_pictures():
     assert not any(l["reason"] == "math" for s in d["slides"] for l in s["left_in_background"])
 
 
+def test_simple_inline_fraction_becomes_text():
+    slide = deck("02_math")["slides"][0]
+    lists = [e for e in texts(slide) if any(p["bullet"] for p in e["paragraphs"])]
+    assert len(lists) == 1 and len(lists[0]["paragraphs"]) == 4  # the fraction item stays in the list
+    runs = [r for p in lists[0]["paragraphs"] for r in p["runs"]]
+    i = next(i for i, r in enumerate(runs) if r["text"] == "⁄")
+    assert (runs[i - 1]["text"], runs[i - 1]["script"]) == ("a", "super")
+    assert (runs[i + 1]["text"], runs[i + 1]["script"]) == ("b", "sub")
+    assert lists[0]["strokes"], "the fraction bar leaves the background"
+
+
 def test_figures_are_pictures_with_their_labels():
     d = deck("03_figures")
     plot = [e for e in d["slides"][2]["elements"] if e["kind"] == "image"]

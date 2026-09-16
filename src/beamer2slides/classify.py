@@ -132,6 +132,7 @@ class Line:
     bullet_spans: list[Span] = field(default_factory=list)
     reason: str | None = None
     inline_math: bool = False
+    fractions: list = field(default_factory=list)  # (bar, numerator spans, denominator spans)
 
     def __post_init__(self):
         self.spans.sort(key=lambda s: s.rect.x0)
@@ -238,6 +239,24 @@ def math_text(font: str, text: str) -> tuple[str, bool]:
         else:
             out.append(c)
     return "".join(out), italic
+
+
+FRACTION_SLASH = "⁄"
+
+
+def reading_order(line: "Line") -> list[tuple]:
+    """The line's content spans left to right, except that each simple fraction becomes
+    numerator (superscript), fraction slash, denominator (subscript)."""
+    owner = {id(s): f for f in line.fractions for s in f[1] + f[2]}
+    out, emitted = [], set()
+    for s in line.content:
+        f = owner.get(id(s))
+        if f is None:
+            out.append((s, None))
+        elif id(f) not in emitted:
+            emitted.add(id(f))
+            out += [(x, "super") for x in f[1]] + [(FRACTION_SLASH, None)] + [(x, "sub") for x in f[2]]
+    return out
 
 
 def is_mono(spans: list[Span]) -> bool:
@@ -459,19 +478,42 @@ class PageClassifier:
                 return True
         return False
 
+    def simple_fraction(self, line: Line, bar: Rect):
+        """(bar, numerator spans, denominator spans) for a small inline fraction such as
+        \\frac{1}{2}: short text directly above and below a short bar, no radical sign."""
+        above = [s for s in line.content if s.rect.x0 >= bar.x0 - 1 and s.rect.x1 <= bar.x1 + 1
+                 and s.rect.cy < bar.cy and s.size < 0.85 * line.size]
+        below = [s for s in line.content if s.rect.x0 >= bar.x0 - 1 and s.rect.x1 <= bar.x1 + 1
+                 and s.rect.cy > bar.cy and s.size < 0.85 * line.size]
+        if not above or not below:
+            return None
+        if len("".join(s.text for s in above + below).replace(" ", "")) > 6:
+            return None
+        if any("√" in s.text for s in line.content if abs(s.rect.x1 - bar.x0) < 3):
+            return None  # radical overbar
+        by_x = lambda group: sorted(group, key=lambda s: s.rect.x0)
+        return bar, by_x(above), by_x(below)
+
     def math_kind(self, line: Line) -> str | None:
         """None for plain text, 'inline' for math that Slides text can carry (symbols,
         single-level sub/superscripts), 'complex' for anything that must stay a picture."""
         spans = line.content
-        scripts = [s for s in spans if script_of(s, line)]
+        line_bars = [b for b in self.bars if b.expand(1).intersects(line.rect)]  # fractions, radicals
+        fractions = [f for f in (self.simple_fraction(line, b) for b in line_bars) if f]
+        if len(fractions) == len(line_bars):
+            line.fractions = fractions  # all bars are simple a/b fractions: text can carry them
+            bars = False
+        else:
+            bars = True
+        in_fraction = {id(s) for _, num, den in fractions for s in num + den}
+        scripts = [s for s in spans if script_of(s, line) and id(s) not in in_fraction]
         math_font = any(s.info.family == "math" for s in spans)
-        bars = any(b.expand(1).intersects(line.rect) for b in self.bars)  # fractions, radicals
         chars = "".join(s.text for s in spans).replace(" ", "")
         mathy = sum(len(s.text.strip()) for s in spans if s.info.italic and len(s.text.strip()) <= 2)
         mathy += sum(ch in MATH_OPERATORS for ch in chars)
         formula_like = len(chars) > 0 and mathy / len(chars) >= 0.4  # a display equation, not prose
 
-        if not (math_font or scripts or bars or formula_like or "�" in line.text):
+        if not (math_font or scripts or bars or fractions or formula_like or "�" in line.text):
             return None
         if bars or "�" in line.text:
             return "complex"
@@ -690,9 +732,17 @@ class PageClassifier:
         runs: list[dict] = []
         prev: Span | None = None
         for li, line in enumerate(par.lines):
-            for si, span in enumerate(line.content):
+            for si, (span, forced) in enumerate(reading_order(line)):
+                if span == FRACTION_SLASH:
+                    main = line.main
+                    runs.append({"text": FRACTION_SLASH, "font": main.font, "family": main.info.family,
+                                 "size": round(line.size, 2), "bold": False, "italic": False, "smallcaps": False,
+                                 "color": main.color, "link": main.link, "script": None})
+                    continue
                 text = span.text
-                if prev is not None:
+                if forced == "sub":  # denominator: follows the slash directly
+                    pass
+                elif prev is not None:
                     if si == 0:
                         tail = runs[-1]["text"]
                         if len(tail) >= 2 and tail.endswith("-") and tail[-2].isalpha() and text[:1].islower():
@@ -707,7 +757,7 @@ class PageClassifier:
                             text = sep + text  # keep the space out of the raised/lowered run
                         else:
                             runs[-1]["text"] += sep
-                script = script_of(span, line)
+                script = forced or script_of(span, line)
                 family, italic = span.info.family, span.info.italic
                 if family == "math":
                     # Math fonts carry symbols and variables; show them in the text family.
@@ -975,6 +1025,8 @@ class PageClassifier:
                 } for p in box],
                 "code": code,
                 "spans": [s.id for p in box for s in p.spans],
+                # Fraction bars now written as text: they leave the background with the glyphs.
+                "strokes": [f[0].as_list() for p in box for l in p.lines for f in l.fractions],
             })
 
         text_spans = {sid for e in elements for sid in e["spans"]}
