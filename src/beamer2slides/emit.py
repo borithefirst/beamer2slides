@@ -406,6 +406,98 @@ def table_requests(el: dict, slide_id: str, object_id: str, scale: float, fonts:
     return reqs
 
 
+def diagram_requests(el: dict, slide_id: str, object_id: str, scale: float, fonts: FontMapper) -> list[dict]:
+    """Nodes become shapes with their label inside, edges become lines with arrow heads; the
+    parts are grouped so the diagram moves as one piece but stays editable."""
+    reqs: list[dict] = []
+    children: list[str] = []
+    for j, ln in enumerate(el["lines"]):
+        oid = f"{object_id}_l{j}"
+        (x1, y1), (x2, y2) = ln["from"], ln["to"]
+        dx, dy = (x2 - x1) * scale, (y2 - y1) * scale
+        reqs += [
+            {"createLine": {"objectId": oid, "lineCategory": "STRAIGHT", "elementProperties": {
+                "pageObjectId": slide_id,
+                "size": {"width": emu(abs(dx)), "height": emu(abs(dy))},
+                # The line runs from the transform origin along +size, flipped by negative scales.
+                "transform": {"scaleX": -1 if dx < 0 else 1, "scaleY": -1 if dy < 0 else 1, "unit": "EMU",
+                              "translateX": round(x1 * scale * EMU_PER_PT), "translateY": round(y1 * scale * EMU_PER_PT)}}}},
+            {"updateLineProperties": {"objectId": oid, "fields": "lineFill.solidFill.color,weight,startArrow,endArrow",
+                                      "lineProperties": {
+                                          "lineFill": {"solidFill": {"color": rgb(ln["stroke"])["opaqueColor"]}},
+                                          "weight": pt(round(max(0.5, ln["width"] * scale), 2)),
+                                          "startArrow": "OPEN_ARROW" if ln["arrow_from"] else "NONE",
+                                          "endArrow": "OPEN_ARROW" if ln["arrow_to"] else "NONE"}}},
+        ]
+        children.append(oid)
+    for j, node in enumerate(el["nodes"]):
+        oid = f"{object_id}_n{j}"
+        x0, y0, x1, y1 = (v * scale for v in node["bbox"])
+        props = {"contentAlignment": "MIDDLE", "autofit": {"autofitType": "NONE"},
+                 "shapeBackgroundFill": ({"solidFill": {"color": rgb(node["fill"])["opaqueColor"]}} if node["fill"]
+                                         else {"propertyState": "NOT_RENDERED"}),
+                 "outline": ({"outlineFill": {"solidFill": {"color": rgb(node["stroke"])["opaqueColor"]}},
+                              "weight": pt(round(max(0.5, (node["width"] or 0.4) * scale), 2))}
+                             if node["stroke"] else {"propertyState": "NOT_RENDERED"})}
+        fields = ["contentAlignment", "autofit.autofitType", "shapeBackgroundFill"]
+        fields += ["outline.outlineFill.solidFill.color", "outline.weight"] if node["stroke"] else ["outline.propertyState"]
+        if not node["fill"]:
+            fields[fields.index("shapeBackgroundFill")] = "shapeBackgroundFill.propertyState"
+        else:
+            fields[fields.index("shapeBackgroundFill")] = "shapeBackgroundFill.solidFill.color"
+        reqs += [
+            {"createShape": {"objectId": oid, "shapeType": node["shape"], "elementProperties": {
+                "pageObjectId": slide_id, "size": {"width": emu(x1 - x0), "height": emu(y1 - y0)},
+                "transform": {"scaleX": 1, "scaleY": 1, "unit": "EMU",
+                              "translateX": round(x0 * EMU_PER_PT), "translateY": round(y0 * EMU_PER_PT)}}}},
+            {"updateShapeProperties": {"objectId": oid, "shapeProperties": props, "fields": ",".join(fields)}},
+        ]
+        children.append(oid)
+        text = "\n".join("".join(r["text"] for r in runs).strip() for runs in node["paragraphs"])
+        if text:
+            # TikZ nodes hug their text, but Slides shapes keep ~7 pt of inner padding the API can't
+            # change, so the label would wrap inside the shape. It gets its own wider text box,
+            # centred on the node and grouped with it.
+            label = f"{object_id}_x{j}"
+            cx, w = (x0 + x1) / 2, (x1 - x0) + 2 * PAD_X + 40
+            reqs += [
+                {"createShape": {"objectId": label, "shapeType": "TEXT_BOX", "elementProperties": {
+                    "pageObjectId": slide_id, "size": {"width": emu(w), "height": emu(y1 - y0)},
+                    "transform": {"scaleX": 1, "scaleY": 1, "unit": "EMU",
+                                  "translateX": round((cx - w / 2) * EMU_PER_PT), "translateY": round(y0 * EMU_PER_PT)}}}},
+                {"updateShapeProperties": {"objectId": label, "fields": "contentAlignment,autofit.autofitType",
+                                           "shapeProperties": {"contentAlignment": "MIDDLE",
+                                                               "autofit": {"autofitType": "NONE"}}}},
+            ]
+            children.append(label)
+            oid = label
+            reqs.append({"insertText": {"objectId": oid, "text": text}})
+            start = 0
+            for runs in node["paragraphs"]:
+                line_text = "".join(r["text"] for r in runs).strip()
+                offset = 0
+                for run in runs:
+                    piece = run["text"].strip() if len(runs) == 1 else run["text"]
+                    if offset == 0:
+                        piece = piece.lstrip()
+                    if not piece:
+                        continue
+                    style, sfields = fonts.text_style(run, scale)
+                    style["foregroundColor"] = rgb(run["color"])
+                    reqs.append({"updateTextStyle": {
+                        "objectId": oid, "style": style, "fields": ",".join(sfields + ["foregroundColor"]),
+                        "textRange": {"type": "FIXED_RANGE", "startIndex": start + offset,
+                                      "endIndex": min(start + len(line_text), start + offset + len(piece))}}})
+                    offset += len(piece)
+                start += len(line_text) + 1
+            reqs.append({"updateParagraphStyle": {
+                "objectId": oid, "textRange": {"type": "ALL"}, "fields": "alignment,lineSpacing,spaceAbove,spaceBelow",
+                "style": {"alignment": "CENTER", "lineSpacing": 100, "spaceAbove": pt(0), "spaceBelow": pt(0)}}})
+    if len(children) >= 2:
+        reqs.append({"groupObjects": {"groupObjectId": object_id, "childrenObjectIds": children}})
+    return reqs
+
+
 def title_element(slide: dict) -> int | None:
     """Index of the element that becomes the slide's title placeholder."""
     for i, el in enumerate(slide["elements"]):
@@ -617,6 +709,9 @@ def emit(deck: dict, out: Path, title: str, new_deck: bool = False) -> dict:
                 elif el["kind"] == "table":
                     oid = f"{slide_id}_tab{i}"
                     reqs += table_requests(el, slide_id, oid, scale, fonts)
+                elif el["kind"] == "diagram":
+                    oid = f"{slide_id}_dg{i}"
+                    reqs += diagram_requests(el, slide_id, oid, scale, fonts)
                 elif el["kind"] == "image":
                     oid = f"{slide_id}_f{i}"
                     reqs.append(image_request(el, slide_id, oid, scale, urls[el["file"]]))

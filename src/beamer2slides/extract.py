@@ -17,6 +17,25 @@ def _hex(rgb) -> str | None:
     return "#" + "".join(f"{round(max(0.0, min(1.0, c)) * 255):02x}" for c in rgb[:3])
 
 
+def _path(d: dict, max_items: int = 20) -> list | None:
+    """Path geometry for small drawings (diagram nodes, lines, arrow tips): [op, [[x, y], ...]]."""
+    if len(d["items"]) > max_items:
+        return None
+    out = []
+    for item in d["items"]:
+        op = item[0]
+        if op == "re":
+            r = item[1]
+            pts = [[r.x0, r.y0], [r.x1, r.y1]]
+        elif op == "qu":
+            q = item[1]
+            pts = [[p.x, p.y] for p in (q.ul, q.ur, q.lr, q.ll)]
+        else:
+            pts = [[p.x, p.y] for p in item[1:] if hasattr(p, "x")]
+        out.append([op, [[round(x, 2), round(y, 2)] for x, y in pts]])
+    return out
+
+
 def _rounded_corners(d: dict) -> dict[str, float]:
     """Which bbox corners of a path are drawn with a curve, and the curve's radius."""
     r = d["rect"]
@@ -68,6 +87,7 @@ def extract_page(page: pymupdf.Page) -> dict:
         "width": round(d["width"], 2) if d.get("width") else None,
         "fill_opacity": round(d.get("fill_opacity") or 1.0, 3),
         "corners": _rounded_corners(d),
+        "path": _path(d),
     } for i, d in enumerate(page.get_drawings())]
 
     links = []

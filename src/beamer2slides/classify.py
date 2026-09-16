@@ -259,6 +259,23 @@ def reading_order(line: "Line") -> list[tuple]:
     return out
 
 
+def span_runs(spans: list[Span]) -> list[dict]:
+    """Runs for a short piece of text given as spans in reading order (cells, node labels)."""
+    runs: list[dict] = []
+    for i, s in enumerate(spans):
+        text = s.text
+        if i and s.rect.x0 - spans[i - 1].rect.x1 > 0.15 * s.size and not text.startswith(" "):
+            text = " " + text
+        style = {"font": s.font, "family": s.info.family, "size": round(s.size, 2), "bold": s.info.bold,
+                 "italic": s.info.italic, "smallcaps": s.info.smallcaps, "color": s.color,
+                 "link": s.link, "script": None}
+        if runs and all(runs[-1][k] == v for k, v in style.items()):
+            runs[-1]["text"] += text
+        else:
+            runs.append({"text": text, **style})
+    return runs
+
+
 def is_mono(spans: list[Span]) -> bool:
     return bool(spans) and all(s.info.family == "mono" for s in spans)
 
@@ -850,10 +867,79 @@ class PageClassifier:
             if table:
                 out.append(table)
                 continue
+            diagram = self.diagram_from(c, label_spans, len(out))
+            if diagram:
+                out.append(diagram)
+                continue
             spans = [s.id for s in label_spans if c.expand(0.5).contains_rect(s.rect)]
             out.append({"id": f"p{self.page['index']}f{len(out)}", "kind": "image", "role": "figure",
                         "bbox": c.expand(1.0).as_list(), "spans": spans})
         return out
+
+    def diagram_from(self, c: Rect, label_spans: list[Span], index: int) -> dict | None:
+        """A figure cluster made only of simple nodes (rectangles, rounded rectangles, ellipses)
+        with their text inside, straight lines and arrow tips: rebuilt from native Slides
+        shapes and lines. Anything else (curves, images, math, loose labels) keeps it a picture."""
+        box = c.expand(0.5)
+        if any(box.contains_rect(Rect.of(im["bbox"])) for im in self.page["images"]):
+            return None
+        nodes, lines, tips = [], [], []
+        for d in self.page["drawings"]:
+            r = Rect.of(d["bbox"])
+            if not box.contains_rect(r) or r.w * r.h >= 0.95 * self.W * self.H:
+                continue
+            path = d.get("path")
+            if path is None:
+                return None
+            ops = "".join(op for op, _ in path)
+            shape = {"re": "RECTANGLE", "lclclclc": "ROUND_RECTANGLE", "clclclcl": "ROUND_RECTANGLE",
+                     "cccc": "ELLIPSE"}.get(ops)
+            if shape and r.w > 3 and r.h > 3:
+                nodes.append({"rect": r, "shape": shape, "spans": [],
+                              "fill": d["fill"] if "f" in d["type"] else None,
+                              "stroke": d["stroke"] if "s" in d["type"] else None, "width": d["width"]})
+            elif d["type"] == "s" and ops == "l":
+                (x1, y1), (x2, y2) = path[0][1]
+                lines.append({"from": [x1, y1], "to": [x2, y2], "stroke": d["stroke"] or "#000000",
+                              "width": d["width"] or 0.4, "arrow_from": False, "arrow_to": False})
+            elif d["type"] == "s" and max(r.w, r.h) <= 6 and set(ops) <= {"c", "l"}:
+                tips.append(r)  # arrow heads are drawn as small separate strokes
+            else:
+                return None
+        if not nodes:
+            return None
+        for tip in tips:
+            ends = [(ln, end) for ln in lines for end in ("from", "to") if tip.expand(1).contains(*ln[end])]
+            if not ends:
+                return None
+            ln, end = ends[0]
+            ln["arrow_" + end] = True
+
+        spans = [s for s in label_spans if box.contains_rect(s.rect)]
+        for s in spans:
+            if s.info.family == "math" or not s.horizontal:
+                return None
+            owners = [n for n in nodes if n["rect"].contains(s.rect.cx, s.rect.cy)]
+            if not owners:
+                return None  # labels on edges or floating: keep the picture
+            min(owners, key=lambda n: n["rect"].w * n["rect"].h)["spans"].append(s)
+
+        out_nodes = []
+        for n in nodes:
+            rows: list[list[Span]] = []
+            for s in sorted(n["spans"], key=lambda s: (s.baseline, s.rect.x0)):
+                if rows and abs(s.baseline - rows[-1][0].baseline) <= 0.5 * s.size:
+                    rows[-1].append(s)
+                else:
+                    rows.append([s])
+            out_nodes.append({
+                "bbox": n["rect"].as_list(), "shape": n["shape"], "fill": n["fill"], "stroke": n["stroke"],
+                "width": n["width"], "paragraphs": [span_runs(sorted(row, key=lambda s: s.rect.x0)) for row in rows],
+                "baselines": [round(row[0].baseline, 2) for row in rows],
+            })
+        return {"id": f"p{self.page['index']}dg{index}", "kind": "diagram", "role": "figure",
+                "bbox": c.expand(1.0).as_list(), "nodes": out_nodes, "lines": lines,
+                "spans": [s.id for s in spans]}
 
     def table_from(self, c: Rect, label_spans: list[Span], text_rects: list[Rect], index: int) -> dict | None:
         """A figure cluster that is really a plain table: text framed by horizontal rules of
@@ -965,7 +1051,7 @@ class PageClassifier:
         shape). The render stage additionally checks the panel really shows its fill colour."""
         used = {sid for e in elements for sid in e["spans"]}
         leftovers = [s.rect for l in lines for s in l.spans if s.id not in used]
-        figures = [Rect.of(e["bbox"]) for e in elements if e["kind"] in ("image", "table")]
+        figures = [Rect.of(e["bbox"]) for e in elements if e["kind"] in ("image", "table", "diagram")]
         figures += [Rect.of(p["bullet"]["bbox"]) for e in elements if e["kind"] == "text"
                     for p in e["paragraphs"] if p["bullet"] and p["bullet"].get("patch")]
         loose = [g for g in self.graphics if not any(f.expand(0.5).contains_rect(g) for f in figures)]
@@ -978,7 +1064,7 @@ class PageClassifier:
                 continue
             if r.x0 <= 1 or r.y0 <= 1 or r.x1 >= self.W - 1 or r.y1 >= self.H - 1:
                 continue
-            if any(Rect.of(e["bbox"]).expand(0.5).contains_rect(r) for e in elements if e["kind"] in ("image", "table")):
+            if any(Rect.of(e["bbox"]).expand(0.5).contains_rect(r) for e in elements if e["kind"] in ("image", "table", "diagram")):
                 continue  # already part of a picture
             inner = r.expand(-0.5)
             if any(inner.intersects(x) for x in leftovers):

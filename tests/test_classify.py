@@ -91,6 +91,19 @@ def test_figures_are_pictures_with_their_labels():
     assert kinds(d["slides"][3]).count("image") == 2  # side-by-side images stay separate
 
 
+def test_simple_tikz_diagram_becomes_native():
+    slide = deck("03_figures")["slides"][1]
+    diagrams = [e for e in slide["elements"] if e["kind"] == "diagram"]
+    assert len(diagrams) == 1
+    d = diagrams[0]
+    assert [n["shape"] for n in d["nodes"]] == ["ROUND_RECTANGLE"] * 4
+    labels = sorted("".join(r["text"] for r in n["paragraphs"][0]) for n in d["nodes"])
+    assert labels == ["Classify", "Emit", "Extract", "Render"]
+    assert len(d["lines"]) == 3 and all(l["arrow_to"] and not l["arrow_from"] for l in d["lines"])
+    # the pgfplots plot on the next slide has curves and axis labels: still a picture
+    assert kinds(deck("03_figures")["slides"][2]).count("image") == 1
+
+
 def test_madrid_blocks_tables_and_footer():
     d = deck("04_theme_blocks")
     assert kinds(d["slides"][1]).count("shape") >= 6  # block title bars and bodies
