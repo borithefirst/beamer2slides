@@ -530,7 +530,11 @@ class PageClassifier:
                 near = any(m.rect.expand(0.6 * line.size).intersects(line.rect) for m in maths)
                 small = line.size < 0.9 * self.body or all(s.info.italic for s in line.content)
                 eqno = EQ_NUMBER_RE.match(txt) and any(abs(m.baseline - line.baseline) <= 3 for m in maths)
-                if (near and small and len(txt) <= 6) or eqno:
+                # The left-hand side of a display equation ("L(θ) =") split off from its complex part.
+                same_formula = line.inline_math and any(
+                    abs(m.baseline - line.baseline) <= 0.3 * line.size and
+                    max(0.0, m.rect.x0 - line.rect.x1, line.rect.x0 - m.rect.x1) <= 4 * line.size for m in maths)
+                if (near and small and len(txt) <= 6) or eqno or same_formula:
                     line.reason = "math"
                     changed = True
 
