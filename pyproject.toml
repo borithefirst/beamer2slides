@@ -1,0 +1,17 @@
+[project]
+name = "beamer2slides"
+version = "0.0.1"
+description = "Convert beamer PDFs into editable Google Slides decks"
+requires-python = ">=3.12"
+dependencies = [
+    "pymupdf>=1.28",
+    "google-api-python-client>=2.0",
+    "google-auth-oauthlib>=1.2",
+]
+
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
