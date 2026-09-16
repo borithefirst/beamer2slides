@@ -1,11 +1,11 @@
-"""Calibrate Google Slides fonts against beamer's Computer Modern Sans.
+"""Calibrate Google Slides fonts against beamer's Computer Modern (Sans or Roman).
 
   build    create the calibration deck in Google Slides
   measure  export its slides as PNGs, compile the LaTeX reference, measure both,
-           and write calibration/fonts.json
+           and write calibration/fonts.json (sans) or calibration/fonts_serif.json
   all      build, then measure
 
-Usage: python tools/calibrate.py {build,measure,all} [--refresh]
+Usage: python tools/calibrate.py {build,measure,all} [--family sans|serif] [--refresh]
 """
 
 import argparse
@@ -27,11 +27,29 @@ ROOT = Path(__file__).resolve().parents[1]
 WORK = ROOT / "out" / "calibration"
 RESULT = ROOT / "calibration" / "fonts.json"
 
-FONTS = [
-    "Arial",  # control: also what Slides falls back to for unknown families
-    "Open Sans", "Lato", "Source Sans 3", "Source Sans Pro", "Fira Sans", "PT Sans",
-    "Noto Sans", "Roboto", "IBM Plex Sans", "Nunito Sans", "Inter", "Carlito",
-]
+FONT_SETS = {
+    "sans": [
+        "Arial",  # control: also what Slides falls back to for unknown families
+        "Open Sans", "Lato", "Source Sans 3", "Source Sans Pro", "Fira Sans", "PT Sans",
+        "Noto Sans", "Roboto", "IBM Plex Sans", "Nunito Sans", "Inter", "Carlito",
+    ],
+    "serif": [
+        "Arial",  # control
+        "Times New Roman", "Georgia", "Noto Serif", "Source Serif 4", "PT Serif", "Crimson Text",
+        "Crimson Pro", "Libre Baskerville", "Lora", "Merriweather", "EB Garamond", "Spectral", "Tinos",
+    ],
+}
+FONTS = FONT_SETS["sans"]
+LATEX_PREAMBLE = ""  # beamer font theme for the reference document
+
+
+def configure(family: str) -> None:
+    global FONTS, WORK, RESULT, LATEX_PREAMBLE
+    FONTS = FONT_SETS[family]
+    if family == "serif":
+        WORK = ROOT / "out" / "calibration_serif"
+        RESULT = ROOT / "calibration" / "fonts_serif.json"
+        LATEX_PREAMBLE = r"\usefonttheme{serif}"
 
 # (key, text, style). style picks both the LaTeX markup and the Slides text style.
 WIDTH_ROWS = [
@@ -82,7 +100,7 @@ def styled_box(object_id, page_id, x, y, w, h, text, font, size, bold=False, ita
 
 def build() -> None:
     slides = slides_service()
-    pres = execute(slides.presentations().create(body={"title": "beamer2slides font calibration"}))
+    pres = execute(slides.presentations().create(body={"title": f"beamer2slides font calibration ({WORK.name})"}))
     pid = pres["presentationId"]
     width = pres["pageSize"]["width"]["magnitude"] / 12700
     assert abs(width - SLIDE_W) < 0.5, f"unexpected page width {width}"
@@ -137,7 +155,7 @@ def reference() -> dict:
     frames.append(rf"\begin{{frame}}\mbox{{{CAPS}}}\end{{frame}}")
     tex = "\n".join([
         r"\documentclass[aspectratio=169]{beamer}",
-        r"\setbeamertemplate{navigation symbols}{}",
+        r"\setbeamertemplate{navigation symbols}{}", LATEX_PREAMBLE,
         r"\begin{document}", *frames, r"\end{document}", "",
     ])
     (ref_dir / "reference.tex").write_text(tex, encoding="utf-8")
@@ -198,21 +216,23 @@ def measure_font(fi: int, thumbs: Path, ref: dict) -> dict:
         r = ref["rows"][key]
         ratios[key] = round((box.width / WIDTH_SIZE) / (r["ink_width"] / r["size"]), 4)
 
-    baseline, inset, cap_em, soft_em, para_em = [], [], [], [], []
+    sizes, baseline, inset, cap_em, soft_em, para_em = [], [], [], [], [], []
     for size in VERTICAL_SIZES:
         gray = ink.load_gray(thumbs / f"cal_f{fi}_v{size}.png")
         scale = gray.shape[1] / SLIDE_W
         bands = {}
         for key, (x, _) in VERTICAL_BOXES.items():
             bands[key] = ink.ink_bands(gray, scale, ink.Box(x - 3, V_TOP - 3, x + V_W + 3, V_TOP + V_H + 3))
+        if any(len(bands[k]) != n for k, n in (("single", 1), ("soft", 3), ("paragraphs", 3))):
+            print(f"  skipping f{fi} at {size} pt: test string wraps in this font")
+            continue
         single = bands["single"][0]
+        sizes.append(size)
         baseline.append(single.y1 - V_TOP)
         inset.append(single.x0 - VERTICAL_BOXES["single"][0])
         cap_em.append(single.height / size)
         for key, out in (("soft", soft_em), ("paragraphs", para_em)):
             lines = bands[key]
-            if len(lines) != 3:
-                raise RuntimeError(f"f{fi} size {size} {key}: expected 3 lines, found {len(lines)}")
             out += [(lines[i + 1].y1 - lines[i].y1) / size for i in range(2)]
 
     # Running text sets the size correction; capitals, digits and other styles are judged
@@ -235,8 +255,8 @@ def measure_font(fi: int, thumbs: Path, ref: dict) -> dict:
         "cap_height_em": round(cap, 4),
         # If the size is scaled by 1/regular_mean so widths match CM, how tall do caps look?
         "cap_height_vs_cm_after_width_match": round(cap / mean_ratio / ref["cap_height_em"], 4),
-        "first_baseline_offset": linear_fit(VERTICAL_SIZES, baseline),
-        "left_ink_offset": linear_fit(VERTICAL_SIZES, inset),
+        "first_baseline_offset": linear_fit(sizes, baseline),
+        "left_ink_offset": linear_fit(sizes, inset),
         "line_pitch_em": {"soft_break": round(statistics.fmean(soft_em), 4),
                           "paragraph": round(statistics.fmean(para_em), 4)},
     }
@@ -282,7 +302,9 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("command", choices=["build", "measure", "all"])
     ap.add_argument("--refresh", action="store_true", help="re-download thumbnails")
+    ap.add_argument("--family", choices=["sans", "serif"], default="sans")
     args = ap.parse_args()
+    configure(args.family)
     if args.command in ("build", "all"):
         build()
     if args.command in ("measure", "all"):

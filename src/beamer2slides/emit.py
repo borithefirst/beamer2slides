@@ -27,7 +27,7 @@ PAD_X = 6.7          # box edge -> text start
 BULLET_GAP = 1.9     # bullet glyph's right edge sits this far before indentFirstLine
 PPTX_TITLE_DY = 3.9  # title placeholders of pptx-imported decks have a smaller top inset
 
-FONT_FOR_FAMILY = {"sans": "Lato", "serif": "Noto Serif", "mono": "Roboto Mono"}
+FONT_FOR_FAMILY = {"sans": "Lato", "serif": "PT Serif", "mono": "Roboto Mono"}
 CMTT_ADVANCE_EM, ROBOTO_MONO_ADVANCE_EM = 0.525, 0.6
 
 BULLET_PRESETS = {
@@ -42,20 +42,21 @@ class FontMapper:
     """TeX font + size -> Slides font family + size with calibrated width correction."""
 
     def __init__(self):
-        cal = json.loads(CALIBRATION.read_text(encoding="utf-8"))["fonts"]
-        lato = cal["Lato"]["width_ratio"]
-        self.sans_text = lato["text_mean"]
-        self.sans_title = lato["by_row"]["title"]
+        self.factors = {}  # family -> (running text factor, title factor)
+        for family, path in (("sans", CALIBRATION), ("serif", CALIBRATION.with_name("fonts_serif.json"))):
+            cal = json.loads(path.read_text(encoding="utf-8"))["fonts"]
+            ratios = cal[FONT_FOR_FAMILY[family]]["width_ratio"]
+            self.factors[family] = (ratios["text_mean"], ratios["by_row"]["title"])
 
     def __call__(self, run: dict, scale: float) -> tuple[str, float]:
         info = font_info(run["font"])
         family = FONT_FOR_FAMILY.get(run["family"], "Lato")
         if run["family"] == "mono":
             factor = ROBOTO_MONO_ADVANCE_EM / CMTT_ADVANCE_EM
-        elif run["family"] == "sans":
-            factor = self.sans_title if (info.design_size or 10) >= 11.5 else self.sans_text
         else:
-            factor = 1.0  # serif not calibrated yet
+            text, title = self.factors.get(run["family"], self.factors["sans"])
+            # CM's 12pt+ design sizes (titles) are relatively narrower than the 10pt text cut.
+            factor = title if (info.design_size or 10) >= 11.5 else text
         return family, round(run["size"] * scale / factor, 1)
 
 

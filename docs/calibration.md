@@ -65,6 +65,22 @@ The remaining columns are relative to the font's own `text` ratio, after that co
   After correction, Lato is narrower or equal in every category except titles.
 - "Source Sans Pro" is an alias of "Source Sans 3". No family fell back to Arial.
 
+## 2b. Serif: width vs CM Roman (`--family serif`, `calibration/fonts_serif.json`)
+Reference: CMR10 at 10.91 pt, CMBX10, CMTI10, CMR12 (titles).
+
+| font | text | CAPS | digits | bold | italic | title | worst | cap height after correction |
+|---|---|---|---|---|---|---|---|---|
+| Georgia | 0.997 | 0.937 | 0.983 | 1.005 | 1.034 | 1.029 | 6.3% | 1.038 |
+| Tinos / Times New Roman | 0.913 | 0.996 | 1.007 | 0.925 | 1.009 | 1.010 | 7.5% | 1.048 |
+| **PT Serif** | **1.005** | 0.891 | 0.948 | 0.934 | 0.960 | 1.031 | 10.9% | **1.030** |
+| Spectral | 1.002 | 0.967 | 0.889 | 0.893 | 0.922 | 1.021 | 11.1% | 0.976 |
+| EB Garamond | 0.862 | 1.037 | 0.998 | 0.955 | 0.974 | 1.007 | 4.5% | 1.169 |
+
+**PT Serif** is the default serif substitute: it needs almost no size correction and nothing
+comes out wider than the original, except titles, which have their own factor. Georgia is
+the most consistent, but its italic is 3.4% wider. The vertical model is font-independent
+here too (baseline offset 6.5–7.2 pt + 0.945–0.971 em).
+
 ## 3. Choice
 - **Default for CM Sans: Lato** at size × 1/1.020. Humanist like CM Sans, cap height matches
   within 1%, and nothing gets wider than the original (titles use their own factor).
