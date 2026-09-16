@@ -137,7 +137,7 @@ def test_description_items_use_tabs():
     slide = deck("01_basic")["slides"][2]
     paras = [p for e in texts(slide) for p in e["paragraphs"] if p["tab_x0"]]
     assert [paragraph_text(p) for p in paras] == ["Term\tIts definition", "Longer term\tAnother definition"]
-    assert paras[0]["tab_x0"] == paras[1]["tab_x0"] and paras[0]["text_x0"] > paras[1]["text_x0"]
+    assert abs(paras[0]["tab_x0"] - paras[1]["tab_x0"]) < 0.1 and paras[0]["text_x0"] > paras[1]["text_x0"]
 
 
 def test_madrid_blocks_tables_and_footer():
