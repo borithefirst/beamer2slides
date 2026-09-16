@@ -294,6 +294,10 @@ class PageClassifier:
         for group in rules.values():
             if len(group) >= 2:
                 graphics.append(union_all(group))
+        # A short stroke touching other graphics is an arrow shaft or a tick, not a fraction bar.
+        touching = [b for b in self.bars if any(b.expand(1.5).intersects(g) for g in graphics)]
+        self.bars = [b for b in self.bars if b not in touching]
+        graphics += touching
         for im in self.page["images"]:
             r = Rect.of(im["bbox"])
             if min(r.w, r.h) < SMALL_IMAGE_PT:
@@ -629,6 +633,30 @@ class PageClassifier:
             runs[-1]["text"] = runs[-1]["text"].rstrip()
         return runs
 
+    def figures(self, lines: list[Line], text_elements: list[dict]) -> list[dict]:
+        """Figure regions (graphics, images and their labels) that can become separate pictures.
+
+        Skipped, so they stay in the background: specks (shadow corners, QED boxes),
+        near-full-page artwork, and anything overlapping an editable text box."""
+        label_spans = [s for l in lines if l.reason in ("figure", "rotated") for s in l.spans]
+        # Cluster word by word: one "line" of labels can span two neighbouring figures.
+        rects = list(self.regions) + [s.rect for s in label_spans]
+        if not self.regions:
+            return []
+        text_rects = [Rect.of(e["bbox"]) for e in text_elements]
+        out = []
+        for c in cluster_rects(rects, gap=0.8 * self.body):
+            if max(c.w, c.h) < 25 or c.w * c.h > 0.8 * self.W * self.H:
+                continue
+            if not any(r.intersects(c.expand(0.1)) for r in self.regions):
+                continue  # only stray rotated text, no graphics
+            if any(t.intersects(c) for t in text_rects):
+                continue
+            spans = [s.id for s in label_spans if c.expand(0.5).contains_rect(s.rect)]
+            out.append({"id": f"p{self.page['index']}f{len(out)}", "kind": "image", "role": "figure",
+                        "bbox": c.expand(1.0).as_list(), "spans": spans})
+        return out
+
     def classify(self) -> dict:
         self.analyse_graphics()
         lines = self.build_lines(self.spans())
@@ -655,6 +683,9 @@ class PageClassifier:
                 "spans": [s.id for p in box for s in p.spans],
             })
 
+        text_spans = {sid for e in elements for sid in e["spans"]}
+        elements = self.figures(lines, elements) + elements  # pictures first: they sit below text
+
         used = {sid for e in elements for sid in e["spans"]}
         by_reason: dict[str, list[Span]] = {}
         for line in lines:
@@ -666,7 +697,7 @@ class PageClassifier:
                 for r, ss in by_reason.items()]
 
         chars_total = sum(len(s["text"].strip()) for s in self.page["spans"])
-        chars_native = sum(len(s["text"].strip()) for s in self.page["spans"] if s["id"] in used)
+        chars_native = sum(len(s["text"].strip()) for s in self.page["spans"] if s["id"] in text_spans)
         return {
             "page": n, "frame": self.page["label"], "size": self.page["size"],
             "elements": elements, "left_in_background": left,

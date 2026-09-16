@@ -12,6 +12,7 @@ REASON_COLORS = {
     "unsure": (1.0, 0.55, 0.0),
 }
 NATIVE = (0.0, 0.65, 0.2)
+FIGURE = (0.0, 0.55, 0.75)
 
 
 def render_debug(pdf: Path, deck: dict, out_dir: Path, zoom: float = 3.0) -> list[Path]:
@@ -30,6 +31,10 @@ def render_debug(pdf: Path, deck: dict, out_dir: Path, zoom: float = 3.0) -> lis
                 page.draw_rect(pymupdf.Rect(b), color=None, fill=color, fill_opacity=0.25, width=0)
         for el in slide["elements"]:
             x0, y0, x1, y1 = el["bbox"]
+            if el["kind"] == "image":
+                page.draw_rect(pymupdf.Rect(x0, y0, x1, y1), color=FIGURE, width=1.0)
+                page.insert_text((x0, y0 - 1.5), f"picture {len(el['spans'])} labels", fontsize=3.5, color=FIGURE)
+                continue
             page.draw_rect(pymupdf.Rect(x0 - 1, y0 - 1, x1 + 1, y1 + 1), color=NATIVE, width=0.7)
             for par in el["paragraphs"]:
                 for line in par["lines"]:

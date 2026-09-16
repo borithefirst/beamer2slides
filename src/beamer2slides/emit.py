@@ -244,6 +244,19 @@ def text_box_requests(el: dict, slide_id: str, object_id: str, scale: float, fon
     return reqs
 
 
+def image_request(el: dict, slide_id: str, object_id: str, scale: float, url: str) -> dict:
+    x0, y0, x1, y1 = el["bbox"]
+    return {"createImage": {
+        "objectId": object_id, "url": url,
+        "elementProperties": {
+            "pageObjectId": slide_id,
+            "size": {"width": emu((x1 - x0) * scale), "height": emu((y1 - y0) * scale)},
+            "transform": {"scaleX": 1, "scaleY": 1, "unit": "EMU",
+                          "translateX": round(x0 * scale * EMU_PER_PT), "translateY": round(y0 * scale * EMU_PER_PT)},
+        },
+    }}
+
+
 # ---------------------------------------------------------------- presentation + assets
 
 def create_presentation(slides, drive, title: str, page_w: float, page_h: float) -> dict:
@@ -332,9 +345,14 @@ def emit(deck: dict, out: Path, title: str, new_deck: bool = False) -> dict:
     state = {"presentationId": pid, "url": f"https://docs.google.com/presentation/d/{pid}/edit",
              "scale": scale, "slides": []}
     uploaded: list[tuple[str, str]] = []
+    urls: dict[str, str] = {}  # local file -> public URL
     try:
-        for slide in deck["slides"]:
-            uploaded.append(upload_public_png(drive, out / slide["background"], folder))
+        files = [s["background"] for s in deck["slides"]] + \
+                [e["file"] for s in deck["slides"] for e in s["elements"] if e["kind"] == "image"]
+        for f in files:
+            file_id, perm_id = upload_public_png(drive, out / f, folder)
+            uploaded.append((file_id, perm_id))
+            urls[f] = f"https://drive.google.com/uc?export=view&id={file_id}"
         time.sleep(5)  # a fresh "anyone with the link" permission takes a moment to apply
 
         old = [s["objectId"] for s in pres.get("slides", [])]
@@ -344,7 +362,7 @@ def emit(deck: dict, out: Path, title: str, new_deck: bool = False) -> dict:
                 {"deleteObject": {"objectId": oid}} for oid in old if oid.startswith("b2s_s")]}))
             old = [oid for oid in old if not oid.startswith("b2s_s")]
         cleanup = [{"deleteObject": {"objectId": oid}} for oid in old]
-        for slide, (file_id, _) in zip(deck["slides"], uploaded):
+        for slide in deck["slides"]:
             n = slide["page"]
             slide_id = f"b2s_s{n:03}"
             reqs = [{"createSlide": {"objectId": slide_id, "insertionIndex": n,
@@ -352,18 +370,23 @@ def emit(deck: dict, out: Path, title: str, new_deck: bool = False) -> dict:
                     {"updatePageProperties": {
                         "objectId": slide_id,
                         "pageProperties": {"pageBackgroundFill": {"stretchedPictureFill": {
-                            "contentUrl": f"https://drive.google.com/uc?export=view&id={file_id}"}}},
+                            "contentUrl": urls[slide["background"]]}}},
                         "fields": "pageBackgroundFill"}}]
             element_ids = []
-            for i, el in enumerate(slide["elements"]):
-                oid = f"{slide_id}_t{i}"
+            for i, el in enumerate(slide["elements"]):  # figures come first, so text stays on top
+                if el["kind"] == "image":
+                    oid = f"{slide_id}_f{i}"
+                    reqs.append(image_request(el, slide_id, oid, scale, urls[el["file"]]))
+                else:
+                    oid = f"{slide_id}_t{i}"
+                    reqs += text_box_requests(el, slide_id, oid, scale, fonts)
                 element_ids.append(oid)
-                reqs += text_box_requests(el, slide_id, oid, scale, fonts)
             if n == 0:
                 reqs = reqs + cleanup
             batch_with_image_retry(slides, pid, reqs)
             state["slides"].append({"page": n, "objectId": slide_id, "elements": element_ids})
-            print(f"  slide {n + 1}: {len(element_ids)} text boxes")
+            kinds = [el["kind"] for el in slide["elements"]]
+            print(f"  slide {n + 1}: {kinds.count('text')} text boxes, {kinds.count('image')} pictures")
     finally:
         for file_id, perm_id in uploaded:
             try:

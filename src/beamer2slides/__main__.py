@@ -31,7 +31,9 @@ def cmd_classify(pdf: Path, out: Path) -> tuple[dict, dict]:
           f"({s['native_share']:.0%}) -> {out}")
     for slide in deck["slides"]:
         left = ", ".join(f"{l['reason']} {len(l['spans'])}" for l in slide["left_in_background"])
-        print(f"  slide {slide['page'] + 1:>2}: {len(slide['elements'])} text boxes; background: {left or '-'}")
+        kinds = [e["kind"] for e in slide["elements"]]
+        print(f"  slide {slide['page'] + 1:>2}: {kinds.count('text')} text boxes, {kinds.count('image')} pictures;"
+              f" background: {left or '-'}")
     return raw, deck
 
 

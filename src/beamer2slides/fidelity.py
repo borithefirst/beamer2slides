@@ -98,7 +98,8 @@ def measure(pdf: Path, out: Path, refresh: bool = False) -> dict:
         elements = []
         covered = np.zeros_like(m_ref)
         for el, oid in zip(slide["elements"], emitted["elements"]):
-            size = max(p["size"] for p in el["paragraphs"])
+            is_text = el["kind"] == "text"
+            size = max(p["size"] for p in el["paragraphs"]) if is_text else 4.0
             x0, y0, x1, y1 = el["bbox"]
             # Tight vertically (neighbouring boxes are often only a line apart), generous to
             # the right where a wider font would spill.
@@ -113,7 +114,7 @@ def measure(pdf: Path, out: Path, refresh: bool = False) -> dict:
             to_pt = 1 / px_per_slide_pt
             elements.append({
                 "id": oid,
-                "text": "".join(run["text"] for run in el["paragraphs"][0]["runs"])[:40],
+                "text": "".join(run["text"] for run in el["paragraphs"][0]["runs"])[:40] if is_text else "[picture]",
                 "dx_pt": round((bs[0] - br[0]) * to_pt, 2),
                 "dy_top_pt": round((bs[1] - br[1]) * to_pt, 2),
                 "dy_bottom_pt": round((bs[3] - br[3]) * to_pt, 2),
