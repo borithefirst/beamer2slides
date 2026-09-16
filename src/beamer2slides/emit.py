@@ -1,9 +1,11 @@
 """Stage 4: build the Google Slides deck from deck.json and the background images."""
 
+import hashlib
 import io
 import json
 import threading
 import time
+from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -625,6 +627,12 @@ def upload_public_png(drive, path: Path, folder: str) -> tuple[str, str]:
     return f["id"], perm["id"]
 
 
+def background_key(slide: dict, out: Path) -> tuple:
+    if slide.get("background_color"):
+        return ("color", slide["background_color"].lower())
+    return ("png", hashlib.sha1((out / slide["background"]).read_bytes()).hexdigest())
+
+
 LAYOUT_TEXT_PREFIX = "b2s_L"
 
 
@@ -690,8 +698,15 @@ def emit(deck: dict, out: Path, title: str, new_deck: bool = False) -> dict:
     uploaded: list[tuple[str, str]] = []
     urls: dict[str, str] = {}  # local file -> public URL
     try:
-        files = [s["background"] for s in deck["slides"] if not s.get("background_color")] + \
+        # Backgrounds: identical ones are uploaded once, and the most common one becomes the
+        # master's background (the deck's theme): its slides inherit it, and new slides too.
+        bg_key = {s["page"]: background_key(s, out) for s in deck["slides"]}
+        bg_file = {bg_key[s["page"]]: s["background"] for s in deck["slides"] if not s.get("background_color")}
+        counts = Counter(bg_key.values())
+        shared = counts.most_common(1)[0][0] if counts and counts.most_common(1)[0][1] >= 2 else None
+        files = list(bg_file.values()) + \
                 [e["file"] for s in deck["slides"] for e in s["elements"] if e["kind"] == "image"]
+        files = list(dict.fromkeys(files))
         creds = credentials()
         local = threading.local()
 
@@ -712,9 +727,18 @@ def emit(deck: dict, out: Path, title: str, new_deck: bool = False) -> dict:
             execute(slides.presentations().batchUpdate(presentationId=pid, body={"requests": [
                 {"deleteObject": {"objectId": oid}} for oid in old if oid.startswith("b2s_s")]}))
             old = [oid for oid in old if not oid.startswith("b2s_s")]
+        def fill(key: tuple) -> dict:
+            if key[0] == "color":
+                return {"solidFill": {"color": rgb(key[1])["opaqueColor"]}}
+            return {"stretchedPictureFill": {"contentUrl": urls[bg_file[key]]}}
+
         # Phase 1: slides with backgrounds. Slides with a frame title use the TITLE_ONLY layout
         # and get their title placeholder mapped to our object ID.
-        reqs = []
+        # Layouts can't be switched back to inheriting through the API, so they get the fill too.
+        reqs = [{"updatePageProperties": {
+            "objectId": page["objectId"], "fields": "pageBackgroundFill",
+            "pageProperties": {"pageBackgroundFill": fill(shared or ("color", "#ffffff"))}}}
+            for page in pres.get("masters", []) + pres.get("layouts", [])]
         for position, slide in enumerate(deck["slides"]):
             n = slide["page"]  # PDF page index; slides may skip pages (overlays)
             slide_id = f"b2s_s{n:03}"
@@ -726,14 +750,10 @@ def emit(deck: dict, out: Path, title: str, new_deck: bool = False) -> dict:
             if title_idx is not None:
                 create["placeholderIdMappings"] = [{"layoutPlaceholder": {"type": placeholder, "index": 0},
                                                     "objectId": f"{slide_id}_t{title_idx}"}]
-            reqs += [{"createSlide": create},
-                     {"updatePageProperties": {
-                         "objectId": slide_id,
-                         "pageProperties": {"pageBackgroundFill": (
-                             {"solidFill": {"color": rgb(slide["background_color"])["opaqueColor"]}}
-                             if slide.get("background_color") else
-                             {"stretchedPictureFill": {"contentUrl": urls[slide["background"]]}})},
-                         "fields": "pageBackgroundFill"}}]
+            reqs.append({"createSlide": create})
+            if bg_key[n] != shared:
+                reqs.append({"updatePageProperties": {"objectId": slide_id, "fields": "pageBackgroundFill",
+                                                      "pageProperties": {"pageBackgroundFill": fill(bg_key[n])}}})
         reqs += [{"deleteObject": {"objectId": oid}} for oid in old]
         batch_with_image_retry(slides, pid, reqs)
         write_layout_texts(slides, pid, deck.get("layout_texts", []), scale, fonts)

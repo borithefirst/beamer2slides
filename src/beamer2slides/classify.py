@@ -20,6 +20,7 @@ from .fonts import FontInfo, font_info
 BULLET_GLYPHS = set("▶►▸‣•◦▪■□○●★⋆✓∗–")
 ENUM_RE = re.compile(r"^(\(?\d{1,2}[.)]|\(?[a-z][.)]|\([a-z]\)|\(?[ivx]{1,4}[.)])$")
 LINE_LABEL_RE = re.compile(r"^(\d{1,3}:|\[\d{1,3}\])$")
+FRAME_COUNTER_RE = re.compile(r"^\d{1,4}( ?/ ?\d{1,4})?$")
 EQ_NUMBER_RE = re.compile(r"^\(\d+(\.\d+)*[a-z]?\)$")
 MATH_OPERATORS = set("=+−<>≤≥×·/∑∏∫∈∉⊂⊆∪∩→←⇒⇔≈≠±∞")
 SMALL_IMAGE_PT = 12
@@ -1444,12 +1445,19 @@ def promote_theme_text(slides: list[dict]) -> list[dict]:
     for slide, by_key in zip(slides, keys):
         moved = {sid for k in common for sid in by_key[k]["spans"]}
         slide["on_layout"] = sorted(moved)
+        # Frame counters ("3 / 9") differ per slide: a small text box on the slide. The rest
+        # of the theme then often renders identically on every slide (one shared background).
+        counters = [t for k, t in by_key.items() if k not in common and FRAME_COUNTER_RE.match(t["key"][0])]
+        for j, t in enumerate(counters):
+            slide["elements"].append({**{k: v for k, v in t.items() if k not in ("key", "chars")},
+                                      "id": f"p{slide['page']}n{j}", "role": "footer", "strokes": []})
+            moved |= set(t["spans"])
         for left in slide["left_in_background"]:
             keep = [i for i, sid in enumerate(left["spans"]) if sid not in moved]
             left["spans"] = [left["spans"][i] for i in keep]
             left["bboxes"] = [left["bboxes"][i] for i in keep]
         slide["left_in_background"] = [l for l in slide["left_in_background"] if l["spans"]]
-        slide["stats"]["chars_native"] += sum(by_key[k]["chars"] for k in common)
+        slide["stats"]["chars_native"] += sum(by_key[k]["chars"] for k in common) + sum(t["chars"] for t in counters)
     return [keys[0][k] for k in sorted(common, key=lambda k: (k[2], k[1]))]
 
 
