@@ -430,6 +430,15 @@ class PageClassifier:
                 line.bullet = {"kind": "image", "image": im["id"], "text": token, "bbox": ir.as_list()}
                 line.bullet_spans = on_image
                 return
+        # Vector bullets (shaded balls, squares drawn as paths): a small, roughly square
+        # graphic just left of the text at x-height.
+        x0 = min(s.rect.x0 for s in spans)
+        for g in self.graphics:
+            if 0.25 * line.size <= g.w <= 1.1 * line.size and 0.25 * line.size <= g.h <= 1.1 * line.size \
+                    and g.x1 <= x0 + 0.5 and x0 - g.x1 <= 1.5 * line.size \
+                    and line.baseline - 0.9 * line.size <= g.cy <= line.baseline + 0.1 * line.size:
+                line.bullet = {"kind": "shape", "text": "", "bbox": g.as_list(), "patch": True}
+                return
 
     def continues_prose(self, line: Line) -> bool:
         """A short all-math line that is really the wrapped end of a text line above it
@@ -607,7 +616,7 @@ class PageClassifier:
         gap = par.first.baseline - last.last.baseline
         if not 0 < gap <= 2.6 * max(par.size, last.size):
             return False
-        box_rect = union_all(p.rect for p in box)
+        box_rect = union_all([p.rect for p in box] + [Rect.of(p.bullet["bbox"]) for p in box if p.bullet])
         if is_mono(par.spans) and all(is_mono(p.spans) for p in box):
             # Code block: indentation varies freely, lines follow at normal pitch.
             return par.rect.x0 >= box_rect.x0 - 1.5 and gap <= 1.35 * par.size
@@ -616,7 +625,7 @@ class PageClassifier:
                 return False
         else:
             # A nested item's bullet starts after its parent's text start, but not much further.
-            x = par.rect.x0
+            x = min(par.rect.x0, par.bullet["bbox"][0]) if par.bullet else par.rect.x0
             if not (box_rect.x0 - 1.5 <= x <= max(p.x0 for p in box) + 2 * par.size):
                 return False
             if not (par.rect.x0 < box_rect.x1 and box_rect.x0 < par.rect.x1):
@@ -731,6 +740,8 @@ class PageClassifier:
         used = {sid for e in elements for sid in e["spans"]}
         leftovers = [s.rect for l in lines for s in l.spans if s.id not in used]
         figures = [Rect.of(e["bbox"]) for e in elements if e["kind"] == "image"]
+        figures += [Rect.of(p["bullet"]["bbox"]) for e in elements if e["kind"] == "text"
+                    for p in e["paragraphs"] if p["bullet"] and p["bullet"].get("patch")]
         loose = [g for g in self.graphics if not any(f.expand(0.5).contains_rect(g) for f in figures)]
         bullet_images = {p["bullet"]["image"] for e in elements if e["kind"] == "text"
                          for p in e["paragraphs"] if p["bullet"] and p["bullet"]["kind"] == "image"}
@@ -741,6 +752,8 @@ class PageClassifier:
                 continue
             if r.x0 <= 1 or r.y0 <= 1 or r.x1 >= self.W - 1 or r.y1 >= self.H - 1:
                 continue
+            if any(Rect.of(e["bbox"]).expand(0.5).contains_rect(r) for e in elements if e["kind"] == "image"):
+                continue  # already part of a picture
             inner = r.expand(-0.5)
             if any(inner.intersects(x) for x in leftovers):
                 continue
