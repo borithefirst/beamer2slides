@@ -24,8 +24,25 @@ a per-slide background picture.
   (width ratios, first-baseline offsets) once and feeds correction tables.
 - Local classification debugging = PNG of the PDF page with element boxes drawn on it.
 - Findings about beamer PDFs: `docs/pdf-findings.md`. IR draft: `docs/ir.md`.
-- Overlays: compile in beamer `handout` mode (one page per frame) by default. The Slides
-  API cannot create animations.
+- Overlays: non-handout PDFs keep the last step of each frame (same page label and heading);
+  `--overlays all` keeps every page. The Slides API cannot create animations.
+
+## What becomes native (element kinds in deck.json)
+- `text`: paragraphs, bullet lists (glyph, number, image-ball and vector bullets), inline
+  math as runs with sub/superscripts, links (external URLs and `#page=N` internal links →
+  Slides page links), code blocks. Frame titles, the title page title and big lone headings
+  use the layout's TITLE placeholder (role `title`).
+- `image`: figure regions (TikZ, plots, raster images, plus their labels) cropped as pictures.
+- `table`: text framed by equal-width horizontal rules (`\hline`/booktabs) → Slides table,
+  unless the taller Slides rows would collide with content below.
+- `shape`: opaque filled panels such as beamer blocks, not touching the page edge, with
+  nothing left in the background on top; verified against the rendered colour.
+- Speaker notes: beamer note pages (`show notes`) or `show notes on second screen`
+  (`notes.py`), written to the slide's speaker notes.
+- Everything else (display math, theme decoration, header/footer text) stays in the
+  background picture. A background with nothing left becomes a plain background colour.
+- Theme robustness: `tests/themes/sweep.py` compiles a realistic talk with 28 beamer themes
+  and classifies them locally (no Google calls).
 - Slides API image insertion needs a public URL: upload to Drive, share by link,
   insert, then revoke.
 
@@ -73,6 +90,14 @@ black = both.
 - Inline math: `classify.math_kind` sends lines with fractions, radicals, big operators,
   stacked or second-level scripts, or formula-like density to the background. Everything else becomes runs
   with `script` super/sub and Unicode symbols (MSBM → ℝ).
+- MuPDF's line-art "covered" test is conservative (strokes, transformed TikZ nodes): figure
+  and panel removal redacts with a few points of margin.
+- Title placeholders exist before any other element: bring them to front after adding shapes.
+- Slides table rows are at least 1.195 em + 14.4 pt tall (7.2 pt cell padding, not settable).
+- Bullet colour/size can't be set independently (see docs/calibration.md).
+- Page labels can come back as raw `<FEFF...>` hex strings; `extract._label` decodes them.
+- PowerShell 5.1 mangles double quotes inside native-command arguments: keep them out of
+  git commit messages passed via here-strings.
 
 ## Environment
 - Windows, PowerShell. Python 3.12 venv in `.venv` (`.venv\Scripts\python.exe`).

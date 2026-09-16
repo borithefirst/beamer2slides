@@ -15,13 +15,22 @@ import pymupdf
 from .classify import classify
 from .debug import render_debug
 from .extract import extract, select_overlays
+from .notes import prepare as prepare_notes
 
 ROOT = Path(__file__).resolve().parents[2]
 
 
-def cmd_classify(pdf: Path, out: Path, overlays: str = "last") -> tuple[dict, dict]:
+def cmd_classify(pdf: Path, out: Path, overlays: str = "last") -> tuple[Path, dict, dict]:
     out.mkdir(parents=True, exist_ok=True)
-    raw = select_overlays(extract(pdf), overlays)
+    pdf, notes, notes_mode = prepare_notes(pdf, out)
+    if notes_mode:
+        print(f"speaker notes ({notes_mode}): found notes for {len(notes)} pages")
+    elif (out / "slides.pdf").exists():
+        (out / "slides.pdf").unlink()  # stale from an earlier run of a PDF that had notes
+    raw = extract(pdf)
+    for page in raw["pages"]:
+        page["notes"] = notes.get(page["index"])
+    raw = select_overlays(raw, overlays)
     if raw.get("overlays", {}).get("dropped"):
         print(f"overlays: kept the last step of each frame, skipped {raw['overlays']['dropped']} pages")
     (out / "raw.json").write_text(json.dumps(raw, indent=1, ensure_ascii=False), encoding="utf-8")
@@ -36,17 +45,18 @@ def cmd_classify(pdf: Path, out: Path, overlays: str = "last") -> tuple[dict, di
         kinds = [e["kind"] for e in slide["elements"]]
         print(f"  slide {slide['page'] + 1:>2}: {kinds.count('text')} text boxes, {kinds.count('image')} pictures,"
               f" {kinds.count('shape')} shape candidates, {kinds.count('table')} tables; background: {left or '-'}")
-    return raw, deck
+    return pdf, raw, deck
 
 
 def cmd_convert(pdf: Path, out: Path, title: str | None, new_deck: bool, overlays: str) -> None:
     from .emit import emit
     from .render import render_backgrounds
 
-    raw, deck = cmd_classify(pdf, out, overlays)
+    source = pdf
+    pdf, raw, deck = cmd_classify(pdf, out, overlays)  # pdf: without note pages, if there were any
     render_backgrounds(pdf, raw, deck, out)
     (out / "deck.json").write_text(json.dumps(deck, indent=1, ensure_ascii=False), encoding="utf-8")
-    title = title or pymupdf.open(pdf).metadata.get("title") or pdf.stem
+    title = title or pymupdf.open(pdf).metadata.get("title") or source.stem
     state = emit(deck, out, title, new_deck)
     print(f"Google Slides: {state['url']}")
 
@@ -77,7 +87,8 @@ def main() -> None:
         cmd_convert(args.pdf, out, args.title, args.new_deck, args.overlays)
     elif args.command == "fidelity":
         from .fidelity import measure, print_report
-        print_report(measure(args.pdf, out, args.refresh))
+        prepared = out / "slides.pdf"  # the notes-free PDF the deck was built from
+        print_report(measure(prepared if prepared.exists() else args.pdf, out, args.refresh))
 
 
 if __name__ == "__main__":

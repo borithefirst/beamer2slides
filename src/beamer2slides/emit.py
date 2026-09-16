@@ -520,8 +520,11 @@ def emit(deck: dict, out: Path, title: str, new_deck: bool = False) -> dict:
 
         # Placeholder sizes (needed to resize them) and any extra layout placeholders.
         created = execute(slides.presentations().get(
-            presentationId=pid, fields="slides(objectId,pageElements(objectId,size))"))
+            presentationId=pid,
+            fields="slides(objectId,pageElements(objectId,size),slideProperties/notesPage/notesProperties)"))
         page_elements = {s["objectId"]: s.get("pageElements", []) for s in created["slides"]}
+        speaker_notes = {s["objectId"]: s.get("slideProperties", {}).get("notesPage", {})
+                         .get("notesProperties", {}).get("speakerNotesObjectId") for s in created["slides"]}
         placeholder_dy = 0.0 if abs(page_h / page_w - 9 / 16) < 0.003 else PPTX_TITLE_DY
         # Internal link targets: PDF page -> slide. A skipped overlay step maps to the kept
         # (last) step of its frame, which comes right after it.
@@ -559,6 +562,8 @@ def emit(deck: dict, out: Path, title: str, new_deck: bool = False) -> dict:
                                        "base_h": size["height"]["magnitude"] / EMU_PER_PT, "dy": placeholder_dy}
                     reqs += text_box_requests(el, slide_id, oid, scale, fonts, placeholder, page_slide)
                 element_ids.append(oid)
+            if slide.get("notes") and speaker_notes.get(slide_id):
+                reqs.append({"insertText": {"objectId": speaker_notes[slide_id], "text": slide["notes"]}})
             if title_oid and len(slide["elements"]) > 1:
                 # The placeholder was created with the slide, below everything added since.
                 reqs.append({"updatePageElementsZOrder": {"pageElementObjectIds": [title_oid],

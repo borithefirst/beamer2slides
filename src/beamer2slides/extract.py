@@ -31,6 +31,16 @@ def _rounded_corners(d: dict) -> dict[str, float]:
     return corners
 
 
+def _label(page: pymupdf.Page) -> str:
+    label = page.get_label() or str(page.number + 1)
+    if label.startswith("<FEFF") and label.endswith(">"):  # raw UTF-16BE hex string
+        try:
+            label = bytes.fromhex(label[5:-1]).decode("utf-16-be")
+        except ValueError:
+            pass
+    return label
+
+
 def extract_page(page: pymupdf.Page) -> dict:
     n = page.number
     spans = []
@@ -67,8 +77,16 @@ def extract_page(page: pymupdf.Page) -> dict:
         elif link["kind"] in (pymupdf.LINK_GOTO, pymupdf.LINK_NAMED) and link.get("page", -1) >= 0:
             links.append({"bbox": _r(link["from"]), "page": link["page"]})  # TOC entries, \hyperlink
 
+    # Anything entirely outside the page (e.g. the cut-off half of a notes-on-second-screen page).
+    area = page.rect
+    inside = lambda b: b[2] > area.x0 and b[0] < area.x1 and b[3] > area.y0 and b[1] < area.y1
+    spans = [s for s in spans if inside(s["bbox"])]
+    images = [i for i in images if inside(i["bbox"])]
+    drawings = [d for d in drawings if inside(d["bbox"])]
+    links = [l for l in links if inside(l["bbox"])]
+
     return {
-        "index": n, "label": page.get_label() or str(n + 1),
+        "index": n, "label": _label(page),
         "size": _r((page.rect.width, page.rect.height)),
         "spans": spans, "images": images, "drawings": drawings, "links": links,
     }
@@ -81,7 +99,15 @@ def select_overlays(raw: dict, mode: str) -> dict:
     if mode == "all":
         return raw
     pages = raw["pages"]
-    kept = [p for i, p in enumerate(pages) if i + 1 == len(pages) or pages[i + 1]["label"] != p["label"]]
+
+    def heading(p: dict) -> str:  # text in the top fifth of the page: the frame title
+        return " ".join(s["text"].strip() for s in sorted(p["spans"], key=lambda s: s["bbox"][0])
+                        if s["bbox"][3] < 0.2 * p["size"][1])
+
+    def same_frame(a: dict, b: dict) -> bool:
+        return a["label"] == b["label"] and heading(a) == heading(b)
+
+    kept = [p for i, p in enumerate(pages) if i + 1 == len(pages) or not same_frame(p, pages[i + 1])]
     return {**raw, "pages": kept, "overlays": {"mode": mode, "dropped": len(pages) - len(kept)}}
 
 

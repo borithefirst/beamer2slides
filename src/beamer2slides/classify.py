@@ -948,7 +948,7 @@ class PageClassifier:
         chars_total = sum(len(s["text"].strip()) for s in self.page["spans"])
         chars_native = sum(len(s["text"].strip()) for s in self.page["spans"] if s["id"] in text_spans)
         return {
-            "page": n, "frame": self.page["label"], "size": self.page["size"],
+            "page": n, "frame": self.page["label"], "size": self.page["size"], "notes": self.page.get("notes"),
             "elements": elements, "left_in_background": left,
             "panels": [{"bbox": p["bbox"].as_list(), "fill": p["fill"], "rounded": p["rounded"]} for p in self.panels],
             "figure_regions": [r.as_list() for r in self.regions],
