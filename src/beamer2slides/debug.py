@@ -31,6 +31,13 @@ def render_debug(pdf: Path, deck: dict, out_dir: Path, zoom: float = 3.0) -> lis
                 page.draw_rect(pymupdf.Rect(b), color=None, fill=color, fill_opacity=0.25, width=0)
         for el in slide["elements"]:
             x0, y0, x1, y1 = el["bbox"]
+            if el["kind"] == "table":
+                page.draw_rect(pymupdf.Rect(x0, y0, x1, y1), color=(0.55, 0.1, 0.6), width=1.0)
+                for col in el["columns"]:
+                    page.draw_line((col["x0"], y0), (col["x0"], y1), color=(0.55, 0.1, 0.6), width=0.3)
+                page.insert_text((x0, y0 - 1.5), f"table {len(el['row_baselines'])}x{len(el['columns'])}",
+                                 fontsize=3.5, color=(0.55, 0.1, 0.6))
+                continue
             if el["kind"] == "shape":
                 page.draw_rect(pymupdf.Rect(x0, y0, x1, y1), color=(0.9, 0.4, 0.0), width=0.8, dashes="[2 1] 0")
                 page.insert_text((x1 - 40, y0 + 4), el["shape"].lower()[:18], fontsize=3, color=(0.9, 0.4, 0.0))

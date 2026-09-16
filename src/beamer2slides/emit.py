@@ -284,6 +284,87 @@ def shape_requests(el: dict, slide_id: str, object_id: str, scale: float) -> lis
     ]
 
 
+TABLE_MIN_COLUMN_PT = 32.0  # the API refuses narrower columns
+
+
+def table_requests(el: dict, slide_id: str, object_id: str, scale: float, fonts: FontMapper) -> list[dict]:
+    cols = el["columns"]
+    fx0, _, fx1, _ = el["frame"]
+    bounds = [fx0] + [(a["x1"] + b["x0"]) / 2 for a, b in zip(cols, cols[1:])] + [fx1]
+    widths = [max(TABLE_MIN_COLUMN_PT, (b - a) * scale) for a, b in zip(bounds, bounds[1:])]
+    first_run = next((r for row in el["cells"] for cell in row for r in cell), None)
+    z = fonts(first_run, scale)[1] if first_run else el["size"] * scale
+    x = fx0 * scale
+    y = el["row_baselines"][0] * scale - (BASELINE_A + ASCENT_EM * z)
+    n_rows, n_cols = len(el["cells"]), len(cols)
+    heights = [h * scale for h in el["row_heights"]]
+
+    reqs: list[dict] = [
+        {"createTable": {"objectId": object_id, "rows": n_rows, "columns": n_cols, "elementProperties": {
+            "pageObjectId": slide_id,
+            "size": {"width": emu(sum(widths)), "height": emu(sum(heights))},
+            "transform": {"scaleX": 1, "scaleY": 1, "unit": "EMU",
+                          "translateX": round(x * EMU_PER_PT), "translateY": round(y * EMU_PER_PT)}}}},
+        # No grid: only the rules of the original are drawn.
+        {"updateTableBorderProperties": {
+            "objectId": object_id, "borderPosition": "ALL",
+            "tableRange": {"location": {"rowIndex": 0, "columnIndex": 0}, "rowSpan": n_rows, "columnSpan": n_cols},
+            "tableBorderProperties": {"tableBorderFill": {"solidFill": {"color": {"rgbColor": {}}, "alpha": 0}}},
+            "fields": "tableBorderFill.solidFill.alpha"}},
+    ]
+    for i, w in enumerate(widths):
+        reqs.append({"updateTableColumnProperties": {"objectId": object_id, "columnIndices": [i],
+                                                     "tableColumnProperties": {"columnWidth": emu(w)},
+                                                     "fields": "columnWidth"}})
+    for i, h in enumerate(heights):
+        reqs.append({"updateTableRowProperties": {"objectId": object_id, "rowIndices": [i],
+                                                  "tableRowProperties": {"minRowHeight": emu(h)},
+                                                  "fields": "minRowHeight"}})
+    for rule in el["rules"]:
+        reqs.append({"updateTableBorderProperties": {
+            "objectId": object_id, "borderPosition": rule["position"],
+            "tableRange": {"location": {"rowIndex": rule["row"], "columnIndex": 0}, "rowSpan": 1, "columnSpan": n_cols},
+            "tableBorderProperties": {
+                "tableBorderFill": {"solidFill": {"color": rgb(rule["color"])["opaqueColor"], "alpha": 1}},
+                "weight": pt(round(max(0.5, rule["weight"] * scale), 2))},
+            "fields": "tableBorderFill.solidFill.color,tableBorderFill.solidFill.alpha,weight"}})
+
+    for r, row in enumerate(el["cells"]):
+        for c, runs in enumerate(row):
+            text = "".join(run["text"] for run in runs).strip()
+            if not text:
+                continue
+            loc = {"rowIndex": r, "columnIndex": c}
+            reqs.append({"insertText": {"objectId": object_id, "cellLocation": loc, "text": text}})
+            start = 0
+            for run in runs:
+                piece = run["text"].strip() if len(runs) == 1 else run["text"]
+                if start == 0:
+                    piece = piece.lstrip()
+                if not piece:
+                    continue
+                family, run_size = fonts(run, scale)
+                reqs.append({"updateTextStyle": {
+                    "objectId": object_id, "cellLocation": loc,
+                    "textRange": {"type": "FIXED_RANGE", "startIndex": start, "endIndex": min(len(text), start + len(piece))},
+                    "style": {"fontFamily": family, "fontSize": pt(run_size), "bold": run["bold"], "italic": run["italic"],
+                              "smallCaps": run["smallcaps"], "foregroundColor": rgb(run["color"])},
+                    "fields": "fontFamily,fontSize,bold,italic,smallCaps,foregroundColor"}})
+                start += len(piece)
+            col = cols[c]
+            # Line the text up with the original inside the (contiguous) Slides columns.
+            indent_start = max(0.0, (col["x0"] - bounds[c]) * scale - PAD_X) if col["align"] == "left" else 0.0
+            indent_end = max(0.0, (bounds[c + 1] - col["x1"]) * scale - PAD_X) if col["align"] == "right" else 0.0
+            reqs.append({"updateParagraphStyle": {
+                "objectId": object_id, "cellLocation": loc, "textRange": {"type": "ALL"},
+                "style": {"alignment": {"left": "START", "center": "CENTER", "right": "END"}[col["align"]],
+                          "lineSpacing": 100, "spaceAbove": pt(0), "spaceBelow": pt(0),
+                          "indentStart": pt(round(indent_start, 2)), "indentFirstLine": pt(round(indent_start, 2)),
+                          "indentEnd": pt(round(indent_end, 2))},
+                "fields": "alignment,lineSpacing,spaceAbove,spaceBelow,indentStart,indentFirstLine,indentEnd"}})
+    return reqs
+
+
 def title_element(slide: dict) -> int | None:
     """Index of the element that becomes the slide's title placeholder."""
     for i, el in enumerate(slide["elements"]):
@@ -449,6 +530,9 @@ def emit(deck: dict, out: Path, title: str, new_deck: bool = False) -> dict:
                 if el["kind"] == "shape":
                     oid = f"{slide_id}_s{i}"
                     reqs += shape_requests(el, slide_id, oid, scale)
+                elif el["kind"] == "table":
+                    oid = f"{slide_id}_tab{i}"
+                    reqs += table_requests(el, slide_id, oid, scale, fonts)
                 elif el["kind"] == "image":
                     oid = f"{slide_id}_f{i}"
                     reqs.append(image_request(el, slide_id, oid, scale, urls[el["file"]]))
@@ -469,7 +553,7 @@ def emit(deck: dict, out: Path, title: str, new_deck: bool = False) -> dict:
             state["slides"].append({"page": n, "objectId": slide_id, "elements": element_ids})
             kinds = [el["kind"] for el in slide["elements"]]
             print(f"  slide {n + 1}: {kinds.count('text')} text boxes, {kinds.count('image')} pictures, "
-                  f"{kinds.count('shape')} shapes")
+                  f"{kinds.count('shape')} shapes, {kinds.count('table')} tables")
     finally:
         for file_id, perm_id in uploaded:
             try:

@@ -118,6 +118,9 @@ def render_backgrounds(pdf: Path, raw: dict, deck: dict, out: Path) -> list[Path
             path = out / "figures" / f"{fig['id']}.png"
             fig["px"] = crop_figure(page, fig["bbox"], raw_pages[slide["page"]]["images"], path)
             fig["file"] = str(path.relative_to(out)).replace("\\", "/")
+        # Native tables leave the background the same way pictures do (text and rules), without a crop.
+        figures += [e for e in slide["elements"] if e["kind"] == "table"]
+        for fig in figures:
             page.add_redact_annot(pymupdf.Rect(fig["bbox"]), fill=False)
         if figures:
             # Labels and image pixels: exactly the figure box.

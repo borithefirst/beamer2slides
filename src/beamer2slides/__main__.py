@@ -35,7 +35,7 @@ def cmd_classify(pdf: Path, out: Path, overlays: str = "last") -> tuple[dict, di
         left = ", ".join(f"{l['reason']} {len(l['spans'])}" for l in slide["left_in_background"])
         kinds = [e["kind"] for e in slide["elements"]]
         print(f"  slide {slide['page'] + 1:>2}: {kinds.count('text')} text boxes, {kinds.count('image')} pictures,"
-              f" {kinds.count('shape')} shape candidates; background: {left or '-'}")
+              f" {kinds.count('shape')} shape candidates, {kinds.count('table')} tables; background: {left or '-'}")
     return raw, deck
 
 

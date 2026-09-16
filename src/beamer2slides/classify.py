@@ -307,12 +307,17 @@ class PageClassifier:
                 self.bars.append(r)  # fraction bars, radical overbars
             else:
                 graphics.append(r)
-                if d["type"] == "s" and r.h <= 1.0:
-                    rules.setdefault((round(r.x0), round(r.x1)), []).append(r)
-        # Two or more horizontal rules of equal extent frame a table: the whole span is one figure.
-        for group in rules.values():
-            if len(group) >= 2:
-                graphics.append(union_all(group))
+                stroke_rule = d["type"] == "s" and r.h <= 1.0 and set(d["items"]) <= {"l"}
+                fill_rule = fill_only and r.h <= 1.5 and r.w >= 20  # booktabs rules are thin filled boxes
+                if stroke_rule or fill_rule:
+                    rules.setdefault((round(r.x0), round(r.x1)), []).append({
+                        "rect": r, "color": (d["fill"] if fill_rule else d["stroke"]) or "#000000",
+                        "weight": r.h if fill_rule else (d["width"] or 0.4)})
+        # Two or more horizontal rules of equal extent frame a table: the whole span is one
+        # figure (or a native table, see table_from).
+        self.table_rules = [g for g in rules.values() if len(g) >= 2]
+        for group in self.table_rules:
+            graphics.append(union_all(r["rect"] for r in group))
         # A short stroke touching other graphics is an arrow shaft or a tick, not a fraction bar.
         touching = [b for b in self.bars if any(b.expand(1.5).intersects(g) for g in graphics)]
         self.bars = [b for b in self.bars if b not in touching]
@@ -736,10 +741,115 @@ class PageClassifier:
                 continue  # only stray rotated text, no graphics
             if any(t.intersects(c) for t in text_rects):
                 continue
+            table = self.table_from(c, label_spans, text_rects, len(out))
+            if table:
+                out.append(table)
+                continue
             spans = [s.id for s in label_spans if c.expand(0.5).contains_rect(s.rect)]
             out.append({"id": f"p{self.page['index']}f{len(out)}", "kind": "image", "role": "figure",
                         "bbox": c.expand(1.0).as_list(), "spans": spans})
         return out
+
+    def table_from(self, c: Rect, label_spans: list[Span], text_rects: list[Rect], index: int) -> dict | None:
+        """A figure cluster that is really a plain table: text framed by horizontal rules of
+        equal extent and nothing else. Returns a native table element, or None."""
+        groups = [g for g in self.table_rules if c.expand(1).contains_rect(union_all(r["rect"] for r in g))]
+        if len(groups) != 1:
+            return None
+        rules = sorted(groups[0], key=lambda r: r["rect"].y0)
+        frame = union_all(r["rect"] for r in rules)
+        rule_rects = [r["rect"] for r in rules] + [frame]
+        for g in self.graphics:
+            if c.expand(0.5).contains_rect(g) and not any(abs(g.x0 - rr.x0) < 0.6 and abs(g.x1 - rr.x1) < 0.6
+                                                          and abs(g.y0 - rr.y0) < 0.6 and abs(g.y1 - rr.y1) < 0.6
+                                                          for rr in rule_rects):
+                return None  # vertical rules, cell shading, pictures: keep it a picture
+        spans = sorted((s for s in label_spans if c.expand(0.5).contains_rect(s.rect)), key=lambda s: s.baseline)
+        if not spans or any(s.info.family == "math" or not s.horizontal for s in spans):
+            return None
+
+        # Rows by baseline, cells by horizontal gaps, columns by the union of cell extents.
+        rows: list[list[Span]] = []
+        for s in spans:
+            if rows and abs(s.baseline - rows[-1][0].baseline) <= 0.5 * s.size:
+                rows[-1].append(s)
+            else:
+                rows.append([s])
+        size = max(s.size for s in spans)
+        row_chunks = []
+        for row in rows:
+            chunks: list[list[Span]] = []
+            for s in sorted(row, key=lambda s: s.rect.x0):
+                if chunks and s.rect.x0 - chunks[-1][-1].rect.x1 <= 0.5 * size:
+                    chunks[-1].append(s)
+                else:
+                    chunks.append([s])
+            row_chunks.append(chunks)
+        intervals = sorted((ch[0].rect.x0, ch[-1].rect.x1) for chunks in row_chunks for ch in chunks)
+        columns: list[list[float]] = []
+        for x0, x1 in intervals:
+            if columns and x0 < columns[-1][1] + 1:
+                columns[-1][1] = max(columns[-1][1], x1)
+            else:
+                columns.append([x0, x1])
+        cells = [[[] for _ in columns] for _ in rows]
+        placed: list[list[list[Span]]] = [[] for _ in columns]
+        for r, chunks in enumerate(row_chunks):
+            for ch in chunks:
+                col = next(i for i, (x0, x1) in enumerate(columns) if ch[0].rect.x0 < x1 + 0.5 and x0 - 0.5 < ch[-1].rect.x1)
+                cells[r][col].extend(ch)
+                placed[col].append(ch)
+        col_info = []
+        for (x0, x1), chunks in zip(columns, placed):
+            if all(abs(ch[0].rect.x0 - x0) <= 1 for ch in chunks):
+                align = "left"
+            elif all(abs(ch[-1].rect.x1 - x1) <= 1 for ch in chunks):
+                align = "right"
+            else:
+                align = "center"
+            col_info.append({"x0": round(x0, 2), "x1": round(x1, 2), "align": align})
+
+        baselines = [statistics.fmean(s.baseline for s in row if s.size >= 0.9 * size) for row in rows]
+        pitches = [b - a for a, b in zip(baselines, baselines[1:])] or [1.4 * size]
+        # Slides rows are at least one line plus 7.2 pt padding above and below (see
+        # docs/calibration.md); refuse if the taller table would run into content below.
+        scale = 720.0 / self.W
+        z = size * scale / 1.02
+        row_h = [max(p * scale, 1.195 * z + 14.4) / scale for p in pitches + [pitches[-1]]]
+        top = baselines[0] - (6.48 + 0.968 * z) / scale
+        bottom = top + sum(row_h)
+        grown = Rect(frame.x0, frame.y1, frame.x1, bottom)
+        if bottom > self.H - 2 or any(t.intersects(grown) for t in text_rects) or \
+                any(reg.intersects(grown) and not c.expand(0.5).contains_rect(reg) for reg in self.regions):
+            return None
+
+        def cell_runs(cell: list[Span]) -> list[dict]:
+            runs: list[dict] = []
+            for i, s in enumerate(cell):
+                text = s.text
+                if i and s.rect.x0 - cell[i - 1].rect.x1 > 0.15 * s.size and not text.startswith(" "):
+                    text = " " + text
+                style = {"font": s.font, "family": s.info.family, "size": round(s.size, 2), "bold": s.info.bold,
+                         "italic": s.info.italic, "smallcaps": s.info.smallcaps, "color": s.color,
+                         "link": s.link, "script": None}
+                if runs and all(runs[-1][k] == v for k, v in style.items()):
+                    runs[-1]["text"] += text
+                else:
+                    runs.append({"text": text, **style})
+            return runs
+
+        return {
+            "id": f"p{self.page['index']}tab{index}", "kind": "table", "role": "table",
+            "bbox": c.expand(1.0).as_list(), "frame": frame.as_list(), "size": round(size, 2),
+            "row_baselines": [round(b, 2) for b in baselines],
+            "row_heights": [round(p, 2) for p in pitches + [pitches[-1]]],
+            "columns": col_info,
+            "cells": [[cell_runs(cell) for cell in row] for row in cells],
+            "rules": [{"row": min(k, len(rows) - 1), "position": "TOP" if k < len(rows) else "BOTTOM",
+                       "color": r["color"], "weight": round(r["weight"], 2)}
+                      for r in rules for k in [sum(b < r["rect"].cy for b in baselines)]],
+            "spans": [s.id for s in spans],
+        }
 
     def shapes(self, lines: list[Line], elements: list[dict]) -> list[dict]:
         """Filled panels (beamer blocks and the like) that can become native shapes.
@@ -750,7 +860,7 @@ class PageClassifier:
         shape). The render stage additionally checks the panel really shows its fill colour."""
         used = {sid for e in elements for sid in e["spans"]}
         leftovers = [s.rect for l in lines for s in l.spans if s.id not in used]
-        figures = [Rect.of(e["bbox"]) for e in elements if e["kind"] == "image"]
+        figures = [Rect.of(e["bbox"]) for e in elements if e["kind"] in ("image", "table")]
         figures += [Rect.of(p["bullet"]["bbox"]) for e in elements if e["kind"] == "text"
                     for p in e["paragraphs"] if p["bullet"] and p["bullet"].get("patch")]
         loose = [g for g in self.graphics if not any(f.expand(0.5).contains_rect(g) for f in figures)]
@@ -763,7 +873,7 @@ class PageClassifier:
                 continue
             if r.x0 <= 1 or r.y0 <= 1 or r.x1 >= self.W - 1 or r.y1 >= self.H - 1:
                 continue
-            if any(Rect.of(e["bbox"]).expand(0.5).contains_rect(r) for e in elements if e["kind"] == "image"):
+            if any(Rect.of(e["bbox"]).expand(0.5).contains_rect(r) for e in elements if e["kind"] in ("image", "table")):
                 continue  # already part of a picture
             inner = r.expand(-0.5)
             if any(inner.intersects(x) for x in leftovers):
@@ -816,6 +926,7 @@ class PageClassifier:
 
         text_spans = {sid for e in elements for sid in e["spans"]}
         elements = self.figures(lines, elements) + elements  # pictures first: they sit below text
+        text_spans |= {sid for e in elements if e["kind"] == "table" for sid in e["spans"]}
         elements = self.shapes(lines, elements) + elements   # shapes below pictures
 
         used = {sid for e in elements for sid in e["spans"]}
