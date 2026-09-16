@@ -1,0 +1,70 @@
+\documentclass[10pt]{beamer}
+\usetheme{metropolis}
+\usepackage{booktabs}
+\usepackage[most]{tcolorbox}
+\graphicspath{{img/}}
+\title{Converting Slides}
+\subtitle{A metropolis talk}
+\author{Ada Lovelace}
+\institute{Analytical Engines Ltd.}
+\date{\today}
+
+\begin{document}
+
+\maketitle
+
+\section{Background}
+
+\begin{frame}{Outline}
+  \tableofcontents[currentsection]
+\end{frame}
+
+\begin{frame}{Blocks of every kind}
+  \begin{block}{Standard block}
+    Plain content inside a block.
+  \end{block}
+  \begin{alertblock}{Alert block}
+    Something important.
+  \end{alertblock}
+  \begin{exampleblock}{Example block}
+    An example of something.
+  \end{exampleblock}
+\end{frame}
+
+\begin{frame}{Custom item labels}
+  \begin{itemize}
+    \item[--] Dash item
+    \item[+] Plus item
+    \item[\checkmark] Check item
+  \end{itemize}
+  \vfill
+  {\footnotesize Source: \href{https://example.org}{example.org}, 2026.}
+\end{frame}
+
+\section{Results}
+
+\begin{frame}{A figure with a caption}
+  \begin{figure}
+    \centering
+    \includegraphics[width=0.55\textwidth]{photo.jpg}
+    \caption{A photo of something.}
+  \end{figure}
+\end{frame}
+
+\begin{frame}{A colored box}
+  \begin{tcolorbox}[colback=blue!5, colframe=blue!60!black, title=Key takeaway]
+    Native elements beat pictures for editing.
+  \end{tcolorbox}
+  \begin{columns}[T]
+    \column{0.5\textwidth}
+    \Large Big text
+    \column{0.5\textwidth}
+    \small Small text in the other column.
+  \end{columns}
+\end{frame}
+
+\begin{frame}[standout]
+  Questions?
+\end{frame}
+
+\end{document}

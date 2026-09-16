@@ -142,6 +142,7 @@ def vertical_layout(paras: list[dict], baselines: list[list[float]], sizes: list
     from where Slides will actually have put the previous one: rounding errors don't add up."""
     ratios: list[float] = []
     space_above = [0.0] * len(paras)
+    pulled: dict[int, float] = {}  # paragraph -> lineSpacing < 1 that pulls it up to its target
     first = baselines[0][0]  # predicted Slides baseline of the current paragraph's first line
     for i, (p, bl, z) in enumerate(zip(paras, baselines, sizes)):
         n = len(bl)
@@ -155,13 +156,23 @@ def vertical_layout(paras: list[dict], baselines: list[list[float]], sizes: list
         elif n > 1:
             r = (bl[-1] - bl[0]) / (n - 1) / (LINE_EM * z)
         else:
-            r = 1.0
+            r = pulled.get(i, 1.0)
         r = min(3.0, max(0.5, r))
         ratios.append(r)
         last = first + (n - 1) * line_pitch(z, r)
         if has_next:
             natural = pitch_between(z, r, sizes[i + 1], 1.0)
             if not list_link:
+                gap = baselines[i + 1][0] - last - natural
+                nxt = paras[i + 1]
+                free = len(baselines[i + 1]) == 1 and not (nxt["bullet"] and i + 2 < len(paras) and paras[i + 2]["bullet"])
+                if gap < -PX_PT and free:
+                    # Tighter than Slides' natural pitch (block title right above its body):
+                    # a lineSpacing below 100% moves the next single line up.
+                    zn = sizes[i + 1]
+                    rn = max(0.5, 1 + gap / (0.75 * LINE_EM * zn))
+                    pulled[i + 1] = rn
+                    natural = pitch_between(z, r, zn, rn)
                 space_above[i + 1] = max(0.0, baselines[i + 1][0] - last - natural)
             first = last + natural + space_above[i + 1]
     return ratios, space_above

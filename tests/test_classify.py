@@ -140,6 +140,19 @@ def test_description_items_use_tabs():
     assert abs(paras[0]["tab_x0"] - paras[1]["tab_x0"]) < 0.1 and paras[0]["text_x0"] > paras[1]["text_x0"]
 
 
+def test_custom_item_labels_stay_literal():
+    slide = deck("12_metropolis_talk")["slides"][4]
+    paras = [paragraph_text(p) for e in texts(slide) for p in e["paragraphs"] if p.get("tab_x0")]
+    assert paras == ["–\tDash item", "+\tPlus item", "✓\tCheck item"]
+
+
+def test_metropolis_progress_bar_is_a_shape():
+    slide = deck("12_metropolis_talk")["slides"][5]
+    assert kinds(slide).count("image") == 0
+    bars = [e for e in slide["elements"] if e["kind"] == "shape"]
+    assert len(bars) == 1 and bars[0]["fill"] == "#eb811b"
+
+
 def test_madrid_blocks_tables_and_footer():
     d = deck("04_theme_blocks")
     assert kinds(d["slides"][1]).count("shape") >= 6  # block title bars and bodies

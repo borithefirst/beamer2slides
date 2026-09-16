@@ -18,6 +18,8 @@ from dataclasses import dataclass, field
 from .fonts import FontInfo, font_info
 
 BULLET_GLYPHS = set("▶►▸‣•◦▪■□○●★⋆✓∗–")
+PRESET_GLYPHS = set("▶►▸‣•●")  # glyphs with a close Slides bullet preset (see emit.bullet_preset)
+LABEL_GLYPHS = BULLET_GLYPHS | set("+✗✘→⇒—♦◆⋄")
 ENUM_RE = re.compile(r"^(\(?\d{1,2}[.)]|\(?[a-z][.)]|\([a-z]\)|\(?[ivx]{1,4}[.)])$")
 LINE_LABEL_RE = re.compile(r"^(\d{1,3}:|\[\d{1,3}\])$")
 FRAME_COUNTER_RE = re.compile(r"^\d{1,4}( ?/ ?\d{1,4})?$")
@@ -554,6 +556,11 @@ class PageClassifier:
             first, nxt = spans[0], spans[1]
             gap = nxt.rect.x0 - first.rect.x1
             token = first.text.strip()
+            if gap >= 0.25 * line.size and (token in LABEL_GLYPHS - PRESET_GLYPHS) and len(spans) >= 2:
+                # \item[--], \item[\checkmark]: Slides has no such bullet preset. The glyph stays
+                # literal text, and a tab reaches the item text (hanging indent).
+                line.tab = nxt
+                return
             if gap >= 0.25 * line.size and (token in BULLET_GLYPHS or ENUM_RE.match(token)):
                 kind = "glyph" if token in BULLET_GLYPHS else "number"
                 line.bullet = {"kind": kind, "text": token, "color": first.color, "bbox": first.rect.as_list()}
@@ -995,9 +1002,36 @@ class PageClassifier:
             if diagram:
                 out.append(diagram)
                 continue
+            bars = self.plain_rectangles(c, label_spans, len(out))
+            if bars:
+                out += bars
+                continue
             spans = [s.id for s in label_spans if c.expand(0.5).contains_rect(s.rect)]
             out.append({"id": f"p{self.page['index']}f{len(out)}", "kind": "image", "role": "figure",
                         "bbox": c.expand(1.0).as_list(), "spans": spans})
+        return out
+
+    def plain_rectangles(self, c: Rect, label_spans: list[Span], index: int) -> list[dict]:
+        """A figure cluster that is only opaque filled rectangles without text (progress bars,
+        colour swatches, \\rule): native rectangle shapes."""
+        box = c.expand(0.5)
+        if any(box.contains_rect(s.rect) for s in label_spans) or \
+                any(box.intersects(Rect.of(im["bbox"])) for im in self.page["images"]):
+            return []
+        out = []
+        for d in self.page["drawings"]:
+            r = Rect.of(d["bbox"])
+            if not box.intersects(r) or d["id"] in self.decor_ids or self.is_decoration(r) or r.w * r.h >= 0.95 * self.W * self.H:
+                continue
+            points = [p for _, pts in (d.get("path") or []) for p in pts]
+            axis_aligned = d["items"] == "re" or (set(d["items"]) == {"l"} and points and all(
+                min(abs(x - r.x0), abs(x - r.x1)) < 0.05 and min(abs(y - r.y0), abs(y - r.y1)) < 0.05 for x, y in points))
+            if not box.contains_rect(r) or d["type"] != "f" or not axis_aligned or not d["fill"] \
+                    or d.get("fill_opacity", 1.0) < 0.99:
+                return []
+            out.append({"id": f"p{self.page['index']}r{index + len(out)}", "kind": "shape", "role": "rule",
+                        "bbox": r.as_list(), "fill": d["fill"], "shape": "RECTANGLE", "flip": False,
+                        "radius": 0.0, "drawing": d["id"], "spans": []})
         return out
 
     def diagram_from(self, c: Rect, label_spans: list[Span], index: int) -> dict | None:
