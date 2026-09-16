@@ -1,0 +1,40 @@
+% Math in its different forms: inline in bullets, display, align.
+\documentclass{beamer}
+\usepackage{amsmath,amssymb}
+\title{Math}
+\author{Emmy Noether}
+\date{}
+
+\begin{document}
+
+\begin{frame}{Inline math inside bullets}
+  \begin{itemize}
+    \item Let $x \in \mathbb{R}$ and $f(x) = x^2 + 1$.
+    \item Pure text bullet with no math at all.
+    \item Greek letters $\alpha, \beta, \gamma$ and a fraction $\frac{a}{b}$.
+    \item Subscripts: $a_1, a_2, \ldots, a_n$.
+  \end{itemize}
+\end{frame}
+
+\begin{frame}{Display math}
+  The Gaussian integral:
+  \[
+    \int_{-\infty}^{\infty} e^{-x^2}\,dx = \sqrt{\pi}
+  \]
+  and an aligned system:
+  \begin{align}
+    a &= b + c \\
+    d &= \sum_{i=1}^{n} i^2
+  \end{align}
+\end{frame}
+
+\begin{frame}{Theorem environments}
+  \begin{theorem}[Pythagoras]
+    For a right triangle with legs $a, b$ and hypotenuse $c$: $a^2 + b^2 = c^2$.
+  \end{theorem}
+  \begin{proof}
+    Left to the reader.
+  \end{proof}
+\end{frame}
+
+\end{document}

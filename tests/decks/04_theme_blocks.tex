@@ -1,0 +1,60 @@
+% A busy theme: headline/footline text, colored blocks, columns, table.
+\documentclass{beamer}
+\usetheme{Madrid}
+\usecolortheme{beaver}
+\title[Themed]{Themes, Blocks and Tables}
+\author[B.~Tester]{Beamer Tester}
+\institute[TU]{Test University}
+\date{2026}
+
+\begin{document}
+
+\begin{frame}
+  \titlepage
+\end{frame}
+
+\section{Blocks}
+\begin{frame}{Blocks}
+  \begin{block}{Standard block}
+    Body text of a standard block.
+  \end{block}
+  \begin{alertblock}{Alert block}
+    Something important.
+  \end{alertblock}
+  \begin{exampleblock}{Example block}
+    \begin{itemize}
+      \item A list inside a block
+      \item Second item
+    \end{itemize}
+  \end{exampleblock}
+\end{frame}
+
+\section{Layout}
+\begin{frame}{Columns}
+  \begin{columns}[T]
+    \column{0.48\textwidth}
+    \textbf{Left column}
+
+    Some text on the left side that wraps over a couple of lines.
+    \column{0.48\textwidth}
+    \textbf{Right column}
+    \begin{enumerate}
+      \item Alpha
+      \item Beta
+    \end{enumerate}
+  \end{columns}
+\end{frame}
+
+\begin{frame}{A table}
+  \centering
+  \begin{tabular}{l r r}
+    \hline
+    Method & Precision & Recall \\
+    \hline
+    Baseline & 0.71 & 0.64 \\
+    Ours     & \textbf{0.89} & \textbf{0.83} \\
+    \hline
+  \end{tabular}
+\end{frame}
+
+\end{document}

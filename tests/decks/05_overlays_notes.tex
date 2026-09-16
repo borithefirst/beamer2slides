@@ -1,0 +1,41 @@
+% Overlays (multiple PDF pages per frame) and speaker notes.
+\documentclass{beamer}
+\title{Overlays and Notes}
+\author{Tester}
+\date{}
+
+\begin{document}
+
+\begin{frame}{Pause}
+  \begin{itemize}
+    \item Shown first
+    \pause
+    \item Shown second
+    \pause
+    \item Shown third
+  \end{itemize}
+  \note{Speaker note for the pause frame.}
+\end{frame}
+
+\begin{frame}{Only and uncover}
+  \only<1>{Text only on overlay one.}
+  \only<2>{Different text on overlay two.}
+
+  \uncover<2->{Uncovered from overlay two onwards.}
+
+  \begin{itemize}
+    \item<1-> Item on all overlays
+    \item<2-> Item from overlay two
+  \end{itemize}
+\end{frame}
+
+\begin{frame}[fragile]{Verbatim code}
+\begin{verbatim}
+def convert(pdf):
+    for page in pdf:
+        yield page.get_text("dict")
+\end{verbatim}
+  \note{A note on the code frame.}
+\end{frame}
+
+\end{document}

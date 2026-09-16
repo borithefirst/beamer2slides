@@ -1,0 +1,34 @@
+% !engine = lualatex
+% 16:9, OpenType fonts via fontspec, sidebar-less navigation theme.
+\documentclass[aspectratio=169]{beamer}
+\usepackage{fontspec}
+\usetheme{Warsaw}
+\title{Wide Deck with OpenType Fonts}
+\author{Tester}
+\date{}
+
+\begin{document}
+
+\begin{frame}
+  \titlepage
+\end{frame}
+
+\section{Intro}
+\begin{frame}{Accents and Unicode}
+  \begin{itemize}
+    \item Café, naïve, Straße, Łódź, Ærøskøbing
+    \item Ligatures: office, affine, flow
+    \item Quotes: “double”, ‘single’, and a dash — like this
+  \end{itemize}
+\end{frame}
+
+\section{Body}
+\begin{frame}{Long paragraph}
+  Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor
+  incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam, quis
+  nostrud exercitation ullamco laboris nisi ut aliquip ex ea commodo consequat.
+  Duis aute irure dolor in reprehenderit in voluptate velit esse cillum dolore
+  eu fugiat nulla pariatur.
+\end{frame}
+
+\end{document}

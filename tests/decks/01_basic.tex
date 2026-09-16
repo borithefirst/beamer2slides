@@ -1,0 +1,65 @@
+% Default theme, 4:3. Plain text features only.
+\documentclass{beamer}
+\title{Basic Text Features}
+\subtitle{A deck with no math and no figures}
+\author{Ada Lovelace}
+\institute{Analytical Engine Society}
+\date{16 September 2026}
+
+\begin{document}
+
+\begin{frame}
+  \titlepage
+\end{frame}
+
+\begin{frame}{Itemize, nested}
+  \begin{itemize}
+    \item First level item
+    \item Another first level item that is long enough to wrap onto a second line of the slide
+      \begin{itemize}
+        \item Second level
+        \item Second level again
+          \begin{itemize}
+            \item Third level
+          \end{itemize}
+      \end{itemize}
+    \item Back to first level
+  \end{itemize}
+\end{frame}
+
+\begin{frame}{Enumerate and description}
+  \begin{enumerate}
+    \item One
+    \item Two
+    \item Three
+  \end{enumerate}
+  \begin{description}
+    \item[Term] Its definition
+    \item[Longer term] Another definition
+  \end{description}
+\end{frame}
+
+\begin{frame}{Inline styling}
+  Plain paragraph with \textbf{bold}, \emph{emphasis}, \textit{italic},
+  \texttt{monospace}, \textsc{small caps}, and {\color{red}red} and
+  {\color{blue!60!black}dark blue} words.
+
+  \vspace{1em}
+  A second paragraph with a \href{https://example.com}{hyperlink} and an
+  \alert{alerted phrase}.
+
+  \vspace{1em}
+  {\small Small text,} {\large large text,} {\Large Larger text.}
+\end{frame}
+
+\begin{frame}
+  \frametitle{Frame with title and subtitle}
+  \framesubtitle{The subtitle}
+  \centering
+  Centered text.
+
+  \raggedleft
+  Right-aligned text.
+\end{frame}
+
+\end{document}
