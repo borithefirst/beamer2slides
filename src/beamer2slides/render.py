@@ -105,11 +105,11 @@ def render_backgrounds(pdf: Path, raw: dict, deck: dict, out: Path) -> list[Path
         texts = [e for e in slide["elements"] if e["kind"] == "text"]
         figures = [e for e in slide["elements"] if e["kind"] == "image"]
 
-        for el in texts:
-            for sid in el["spans"]:
-                s = spans[sid]
-                page.add_redact_annot(_band(s["bbox"], s["origin"][1], s["size"]), fill=False)
-        if texts:
+        text_ids = [sid for el in texts for sid in el["spans"]] + slide.get("on_layout", [])
+        for sid in text_ids:
+            s = spans[sid]
+            page.add_redact_annot(_band(s["bbox"], s["origin"][1], s["size"]), fill=False)
+        if text_ids:
             page.apply_redactions(images=pymupdf.PDF_REDACT_IMAGE_NONE,
                                   graphics=pymupdf.PDF_REDACT_LINE_ART_NONE,
                                   text=pymupdf.PDF_REDACT_TEXT_REMOVE)

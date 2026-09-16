@@ -993,11 +993,31 @@ class PageClassifier:
         left = [{"reason": r, "spans": [s.id for s in ss], "bboxes": [s.rect.as_list() for s in ss]}
                 for r, ss in by_reason.items()]
 
+        # Theme text as ready-made text elements: text that is the same on every slide moves to
+        # the slide layout (see promote_theme_text), the rest stays in the background.
+        theme_texts = []
+        for line in lines:
+            if line.reason == "theme" and all(s.id not in used for s in line.spans):
+                par = Paragraph([line], align="left")
+                theme_texts.append({
+                    "kind": "text", "role": "layout", "bbox": line.rect.as_list(), "panel": None, "code": False,
+                    # Colour is part of the identity: section navigation highlights the current
+                    # section by colour, which must not be frozen onto the layout.
+                    "key": [line.text, round(line.rect.x0), round(line.baseline), "".join(s.color for s in line.spans)],
+                    "chars": sum(len(s.text.strip()) for s in line.spans),
+                    "paragraphs": [{"align": "left", "level": 0, "bullet": None, "size": round(line.size, 2),
+                                    "text_x0": round(line.x0, 2),
+                                    "lines": [{"baseline": round(line.baseline, 2), "x0": round(line.x0, 2),
+                                               "x1": round(line.x1, 2)}],
+                                    "runs": self.runs(par)}],
+                    "spans": [s.id for s in line.spans],
+                })
+
         chars_total = sum(len(s["text"].strip()) for s in self.page["spans"])
         chars_native = sum(len(s["text"].strip()) for s in self.page["spans"] if s["id"] in text_spans)
         return {
             "page": n, "frame": self.page["label"], "size": self.page["size"], "notes": self.page.get("notes"),
-            "elements": elements, "left_in_background": left,
+            "elements": elements, "left_in_background": left, "theme_texts": theme_texts,
             "panels": [{"bbox": p["bbox"].as_list(), "fill": p["fill"], "rounded": p["rounded"]} for p in self.panels],
             "figure_regions": [r.as_list() for r in self.regions],
             "stats": {"chars": chars_total, "chars_native": chars_native},
@@ -1022,6 +1042,28 @@ def mark_title_page(slides: list[dict], doc_title: str) -> None:
                 return
 
 
+def promote_theme_text(slides: list[dict]) -> list[dict]:
+    """Theme text (header/footer lines) identical in content and position on every slide
+    - author, short title, institute, date - becomes text on the slide layouts, edited once
+    for the whole deck. Slide numbers and section navigation differ per slide and stay put."""
+    if len(slides) < 2:
+        for s in slides:
+            s["on_layout"] = []
+        return []
+    keys = [{tuple(t["key"]): t for t in s["theme_texts"]} for s in slides]
+    common = set(keys[0]).intersection(*keys[1:])
+    for slide, by_key in zip(slides, keys):
+        moved = {sid for k in common for sid in by_key[k]["spans"]}
+        slide["on_layout"] = sorted(moved)
+        for left in slide["left_in_background"]:
+            keep = [i for i, sid in enumerate(left["spans"]) if sid not in moved]
+            left["spans"] = [left["spans"][i] for i in keep]
+            left["bboxes"] = [left["bboxes"][i] for i in keep]
+        slide["left_in_background"] = [l for l in slide["left_in_background"] if l["spans"]]
+        slide["stats"]["chars_native"] += sum(by_key[k]["chars"] for k in common)
+    return [keys[0][k] for k in sorted(common, key=lambda k: (k[2], k[1]))]
+
+
 def mark_big_headings(slides: list[dict], body: float) -> None:
     """Slides without a frame title (section pages, "Thank you!") use their single, clearly
     largest heading as the title, so it shows up in Slides' outline and navigation."""
@@ -1041,10 +1083,12 @@ def classify(raw: dict) -> dict:
     slides = [PageClassifier(page, body).classify() for page in raw["pages"]]
     mark_title_page(slides, raw["source"].get("title", ""))
     mark_big_headings(slides, body)
+    layout_texts = promote_theme_text(slides)
     chars = sum(s["stats"]["chars"] for s in slides)
     native = sum(s["stats"]["chars_native"] for s in slides)
     return {
         "version": 1, "source": raw["source"], "body_size": body,
         "stats": {"chars": chars, "chars_native": native, "native_share": round(native / chars, 3) if chars else 0},
+        "layout_texts": layout_texts,
         "slides": slides,
     }

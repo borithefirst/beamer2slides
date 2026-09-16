@@ -436,6 +436,25 @@ def upload_public_png(drive, path: Path, folder: str) -> tuple[str, str]:
     return f["id"], perm["id"]
 
 
+LAYOUT_TEXT_PREFIX = "b2s_L"
+
+
+def write_layout_texts(slides, pid: str, texts: list[dict], scale: float, fonts: FontMapper) -> None:
+    """Header/footer text shared by every slide goes onto the two layouts our slides use, so
+    it is edited once for the whole deck. Previous runs' layout texts are replaced."""
+    pres = execute(slides.presentations().get(
+        presentationId=pid, fields="layouts(objectId,layoutProperties,pageElements(objectId))"))
+    reqs = []
+    for li, layout in enumerate(l for l in pres.get("layouts", [])
+                                if l.get("layoutProperties", {}).get("name") in ("TITLE_ONLY", "BLANK")):
+        reqs += [{"deleteObject": {"objectId": e["objectId"]}} for e in layout.get("pageElements", [])
+                 if e["objectId"].startswith(LAYOUT_TEXT_PREFIX)]
+        for ti, el in enumerate(texts):
+            reqs += text_box_requests(el, layout["objectId"], f"{LAYOUT_TEXT_PREFIX}{li}_{ti}", scale, fonts)
+    if reqs:
+        execute(slides.presentations().batchUpdate(presentationId=pid, body={"requests": reqs}))
+
+
 def batch_with_image_retry(slides, pid: str, reqs: list[dict], attempts: int = 4) -> None:
     for attempt in range(attempts):
         try:
@@ -518,6 +537,7 @@ def emit(deck: dict, out: Path, title: str, new_deck: bool = False) -> dict:
                          "fields": "pageBackgroundFill"}}]
         reqs += [{"deleteObject": {"objectId": oid}} for oid in old]
         batch_with_image_retry(slides, pid, reqs)
+        write_layout_texts(slides, pid, deck.get("layout_texts", []), scale, fonts)
 
         # Placeholder sizes (needed to resize them) and any extra layout placeholders.
         created = execute(slides.presentations().get(
