@@ -50,10 +50,12 @@ class FontMapper:
 
     def __init__(self):
         self.factors = {}  # family -> (running text factor, title factor)
+        self.style = {}    # family -> {"bold": ratio, "italic": ratio} relative to running text
         for family, path in (("sans", CALIBRATION), ("serif", CALIBRATION.with_name("fonts_serif.json"))):
             cal = json.loads(path.read_text(encoding="utf-8"))["fonts"]
             ratios = cal[FONT_FOR_FAMILY[family]]["width_ratio"]
             self.factors[family] = (ratios["text_mean"], ratios["by_row"]["title"])
+            self.style[family] = {k: ratios["relative_to_text"][k] for k in ("bold", "italic")}
 
     def text_style(self, run: dict, scale: float) -> tuple[dict, list[str]]:
         """Font part of a Slides TextStyle. Google fonts used by the PDF itself keep their
@@ -79,6 +81,12 @@ class FontMapper:
             text, title = self.factors.get(run["family"], self.factors["sans"])
             # CM's 12pt+ design sizes (titles) are relatively narrower than the 10pt text cut.
             factor = title if (info.design_size or 10) >= 11.5 else text
+            # Bold and italic substitutes run 4-8% narrower than CM's; correct half of that, so
+            # widths come closer without emphasised words looking visibly larger.
+            style = self.style.get(run["family"], self.style["sans"])
+            for key in ("bold", "italic"):
+                if run[key]:
+                    factor *= 1 + (style[key] - 1) / 2
         return family, round(run["size"] * scale / factor, 1)
 
 
@@ -358,6 +366,53 @@ def table_line_spacing(pitch: float, z: float) -> float:
     return min(1.0, max(TABLE_MIN_SPACING, (pitch - TABLE_ROW_PAD) / (TABLE_ROW_EM * z)))
 
 
+def table_rows(el: dict, z: float, scale: float) -> tuple[float, list[float], list[float]]:
+    """Table top, row heights and per-row lineSpacing (Slides pt).
+
+    A row is at least TABLE_ROW_PAD + 1.195·z·lineSpacing tall (tools/probe_table_rows.py), so
+    the line spacing is tightened until rows keep the original pitch. Row boundaries sit on
+    the PDF's rules where there are any (booktabs puts extra space around them) and else just
+    above the next row's text; each row's lineSpacing then moves its baseline to the PDF's."""
+    baselines = [b * scale for b in el["row_baselines"]]
+    n = len(baselines)
+    pitches = [h * scale for h in el["row_heights"]]
+    default = table_line_spacing(min(pitches), z)
+
+    def offset(r: float) -> float:  # row top -> baseline
+        return BASELINE_A + ASCENT_EM * z + extra_above(r, z)
+
+    ruled: dict[int, float] = {}
+    for rule in el.get("rules", []) + [b for b in el.get("borders", []) if b["position"] in ("TOP", "BOTTOM")]:
+        if "y" in rule:
+            ruled.setdefault(rule["row"] + (rule["position"] == "BOTTOM"), rule["y"] * scale)
+    def target(i: int) -> float:  # where row i should start
+        if i in ruled:
+            return ruled[i]
+        if i < n:
+            return baselines[i] - offset(default)
+        return baselines[-1] - offset(default) + pitches[-1]
+
+    def clamp(r: float) -> float:
+        return min(1.0, max(TABLE_MIN_SPACING, r))
+
+    # Row by row from the actual top: a row's baseline offset and its minimum height both grow
+    # with lineSpacing, so when the room above the text (from a rule) asks for more height than
+    # the row has, the error is split between this baseline and the rows below.
+    top = target(0)
+    y, heights, ratios = top, [], []
+    for i in range(n):
+        room = baselines[i] - y  # offset(r) = offset(1) - (1 - r)·0.9·z
+        r_room = clamp(1.0 if room >= offset(1.0) else 1 - (offset(1.0) - room) / (0.75 * LINE_EM * z))
+        h_target = target(i + 1) - y
+        r_fit = clamp((h_target - TABLE_ROW_PAD) / (TABLE_ROW_EM * z))
+        r = r_room if r_room <= r_fit else (r_room + r_fit) / 2
+        h = max(h_target, TABLE_ROW_PAD + TABLE_ROW_EM * z * r)
+        ratios.append(r)
+        heights.append(h)
+        y += h
+    return top, heights, ratios
+
+
 def table_requests(el: dict, slide_id: str, object_id: str, scale: float, fonts: FontMapper) -> list[dict]:
     cols = el["columns"]
     fx0, _, fx1, _ = el["frame"]
@@ -366,12 +421,8 @@ def table_requests(el: dict, slide_id: str, object_id: str, scale: float, fonts:
     first_run = next((r for row in el["cells"] for cell in row for r in cell), None)
     z = fonts(first_run, scale)[1] if first_run else el["size"] * scale
     n_rows, n_cols = len(el["cells"]), len(cols)
-    heights = [h * scale for h in el["row_heights"]]
-    # A row is at least TABLE_ROW_PAD + 1.195 * z * lineSpacing tall (tools/probe_table_rows.py):
-    # tighten the line spacing until rows keep the original pitch.
-    ratio = table_line_spacing(min(heights), z)
+    y, heights, row_ratio = table_rows(el, z, scale)
     x = fx0 * scale
-    y = el["row_baselines"][0] * scale - (BASELINE_A + ASCENT_EM * z + extra_above(ratio, z))
 
     reqs: list[dict] = [
         {"createTable": {"objectId": object_id, "rows": n_rows, "columns": n_cols, "elementProperties": {
@@ -437,7 +488,7 @@ def table_requests(el: dict, slide_id: str, object_id: str, scale: float, fonts:
                     {"updateTextStyle": {"objectId": object_id, "cellLocation": loc, "textRange": {"type": "ALL"},
                                          "style": style, "fields": ",".join(fields)}},
                     {"updateParagraphStyle": {"objectId": object_id, "cellLocation": loc, "textRange": {"type": "ALL"},
-                                              "style": {"lineSpacing": round(100 * ratio, 1), "spaceAbove": pt(0),
+                                              "style": {"lineSpacing": round(100 * row_ratio[r], 1), "spaceAbove": pt(0),
                                                         "spaceBelow": pt(0)},
                                               "fields": "lineSpacing,spaceAbove,spaceBelow"}},
                 ]
@@ -467,7 +518,7 @@ def table_requests(el: dict, slide_id: str, object_id: str, scale: float, fonts:
             reqs.append({"updateParagraphStyle": {
                 "objectId": object_id, "cellLocation": loc, "textRange": {"type": "ALL"},
                 "style": {"alignment": {"left": "START", "center": "CENTER", "right": "END"}[align],
-                          "lineSpacing": round(100 * ratio, 1), "spaceAbove": pt(0), "spaceBelow": pt(0),
+                          "lineSpacing": round(100 * row_ratio[r], 1), "spaceAbove": pt(0), "spaceBelow": pt(0),
                           "indentStart": pt(round(indent_start, 2)), "indentFirstLine": pt(round(indent_start, 2)),
                           "indentEnd": pt(round(indent_end, 2))},
                 "fields": "alignment,lineSpacing,spaceAbove,spaceBelow,indentStart,indentFirstLine,indentEnd"}})

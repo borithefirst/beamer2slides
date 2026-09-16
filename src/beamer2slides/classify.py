@@ -578,6 +578,9 @@ class PageClassifier:
         # Image bullets (ball themes): a small image just left of the text, level with its
         # x-height. Numbered balls draw the digit as a small text span on top of the image.
         for im, ir in self.small_images:
+            if not 0.8 <= ir.w / max(ir.h, 0.01) <= 1.25 or \
+                    any(o is not im and orr.intersects(ir) for o, orr in self.small_images):
+                continue  # icons (beamer's bibliography article, composite images): kept as pictures
             on_image = [s for s in spans if ir.expand(0.5).contains(s.rect.cx, s.rect.cy)]
             rest = [s for s in spans if s not in on_image]
             if not rest:
@@ -724,11 +727,12 @@ class PageClassifier:
     # -- paragraphs -------------------------------------------------------------
 
     def has_side_content(self, a: Line, b: Line) -> bool:
-        """Is there text or graphics beside these two lines (columns, a picture next to text)?"""
+        """Is there text or graphics right of these two lines (a column, a picture next to
+        text)? Content on the left (icons, the left column) does not narrow the text's column."""
         y0, y1 = min(a.rect.y0, b.rect.y0), max(a.rect.y1, b.rect.y1)
-        x0, x1 = min(a.rect.x0, b.rect.x0), max(a.rect.x1, b.rect.x1)
+        x1 = max(a.rect.x1, b.rect.x1)
         others = [l.rect for l in self.all_lines if l is not a and l is not b] + list(self.regions)
-        return any(r.y0 < y1 and y0 < r.y1 and (r.x0 > x1 + 5 or r.x1 < x0 - 5) for r in others)
+        return any(r.y0 < y1 and y0 < r.y1 and r.x0 > x1 + 5 for r in others)
 
     def continues(self, par: Paragraph, line: Line) -> str | None:
         """How `line` continues `par` ('left' | 'center' | 'right'), or None."""
@@ -1011,6 +1015,27 @@ class PageClassifier:
                         "bbox": c.expand(1.0).as_list(), "spans": spans})
         return out
 
+    def icons(self, text_elements: list[dict]) -> list[dict]:
+        """Small raster images next to text that are not bullets (bibliography icons, inline
+        logos): movable pictures. Overlapping parts of one icon are cropped together."""
+        bullets = {p["bullet"].get("image") for e in text_elements for p in e["paragraphs"] if p["bullet"]}
+        starts = [Rect(l["x0"], l["baseline"] - p["size"], l["x1"], l["baseline"])
+                  for e in text_elements for p in e["paragraphs"] for l in p["lines"]]
+
+        def beside_text(r: Rect) -> bool:
+            return any(0 <= s.x0 - r.x1 <= 15 and s.y0 < r.y1 and r.y0 < s.y1 for s in starts)
+
+        rects = [ir for im, ir in self.small_images
+                 if im["id"] not in bullets and max(ir.w, ir.h) <= 20 and min(ir.w, ir.h) >= 3
+                 and 0.15 * self.H < ir.cy < 0.88 * self.H and not self.on_edge_artwork(ir)
+                 and not any(p["bbox"].expand(1).intersects(ir) for p in self.panels)]  # block shadow pieces
+        rects = [c for c in cluster_rects(rects, gap=0.0) if beside_text(c)]
+        out = []
+        for c in rects:
+            out.append({"id": f"p{self.page['index']}ic{len(out)}", "kind": "image", "role": "icon",
+                        "bbox": c.expand(0.5).as_list(), "spans": []})
+        return out
+
     def plain_rectangles(self, c: Rect, label_spans: list[Span], index: int) -> list[dict]:
         """A figure cluster that is only opaque filled rectangles without text (progress bars,
         colour swatches, \\rule): native rectangle shapes."""
@@ -1278,7 +1303,7 @@ class PageClassifier:
             for cc in range(n_cols):
                 if h["rect"].x0 <= bounds[cc] + 2.5 and h["rect"].x1 >= bounds[cc + 1] - 2.5:
                     borders.append({"row": min(k, n_rows - 1), "col": cc, "position": "TOP" if k < n_rows else "BOTTOM",
-                                    "color": h["color"], "weight": round(h["weight"], 2)})
+                                    "color": h["color"], "weight": round(h["weight"], 2), "y": round(h["rect"].cy, 2)})
         for v in vertical:
             k = min(range(len(bounds)), key=lambda i: abs(bounds[i] - v["rect"].cx))
             if abs(bounds[k] - v["rect"].cx) > 1.5:
@@ -1293,7 +1318,7 @@ class PageClassifier:
         # would run into content below.
         scale = 720.0 / self.W
         z = size * scale / 1.02
-        ratio = min(1.0, max(0.5, (min(pitches) * scale - 14.4) / (1.195 * z)))
+        ratio = min(1.0, max(0.5, (min(pitches) * scale - 14.4) / (1.195 * z)))  # emit.table_rows
         row_h = [max(p * scale, 1.195 * z * ratio + 14.4) / scale for p in pitches + [pitches[-1]]]
         top = baselines[0] - (6.48 + 0.968 * z - (1 - ratio) * 0.9 * z) / scale
         bottom = top + sum(row_h)
@@ -1312,7 +1337,7 @@ class PageClassifier:
             "cells": [[span_runs(cell) for cell in row] for row in cells],
             "merges": merges,
             "rules": [{"row": min(k, len(rows) - 1), "position": "TOP" if k < len(rows) else "BOTTOM",
-                       "color": r["color"], "weight": round(r["weight"], 2)}
+                       "color": r["color"], "weight": round(r["weight"], 2), "y": round(r["rect"].cy, 2)}
                       for r in rules for k in [row_boundary(r["rect"].cy)]],
             "borders": borders,
             "spans": [s.id for s in spans],
@@ -1400,7 +1425,7 @@ class PageClassifier:
             })
 
         text_spans = {sid for e in elements for sid in e["spans"]}
-        elements = self.figures(lines, elements) + elements  # pictures first: they sit below text
+        elements = self.figures(lines, elements) + self.icons(elements) + elements  # pictures below text
         text_spans |= {sid for e in elements if e["kind"] == "table" for sid in e["spans"]}
         elements = self.math_pictures(lines, paragraphs, elements) + elements
         elements = self.shapes(lines, elements) + elements   # shapes below pictures
