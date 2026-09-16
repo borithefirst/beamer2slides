@@ -30,7 +30,7 @@ FONT_FOR_FAMILY = {"sans": "Lato", "serif": "Noto Serif", "mono": "Roboto Mono"}
 CMTT_ADVANCE_EM, ROBOTO_MONO_ADVANCE_EM = 0.525, 0.6
 
 BULLET_PRESETS = {
-    "arrow": "BULLET_ARROW_DIAMOND_DISC",
+    "arrow": "BULLET_ARROW3D_CIRCLE_SQUARE",  # ➢ is the closest preset glyph to beamer's ▶
     "disc": "BULLET_DISC_CIRCLE_SQUARE",
     "number": "NUMBERED_DIGIT_ALPHA_ROMAN",
     "number_parens": "NUMBERED_DIGIT_ALPHA_ROMAN_PARENS",
@@ -180,6 +180,18 @@ def text_box_requests(el: dict, slide_id: str, object_id: str, scale: float, fon
             ranges[-1][1] = i
         elif preset:
             ranges.append([i, i, preset])
+    # A bullet keeps the text style it was created with unless its whole paragraph later
+    # shares one style (mixed paragraphs, e.g. with inline math, never update it). So give
+    # every paragraph its base family and size before the bullets exist.
+    for p, start, size in zip(paras, starts_tabbed, sizes):
+        family = fonts(p["runs"][0], scale)[0] if p["runs"] else "Lato"
+        length = (p["level"] if p["bullet"] else 0) + len("".join(r["text"] for r in p["runs"]))
+        if length:
+            reqs.append({"updateTextStyle": {
+                "objectId": object_id, "fields": "fontFamily,fontSize",
+                "style": {"fontFamily": family, "fontSize": pt(size)},
+                "textRange": {"type": "FIXED_RANGE", "startIndex": start, "endIndex": start + length},
+            }})
     for first, last, preset in reversed(ranges):
         end = starts_tabbed[last] + (paras[last]["level"]) + len(texts[last])
         reqs.append({"createParagraphBullets": {
@@ -199,8 +211,9 @@ def text_box_requests(el: dict, slide_id: str, object_id: str, scale: float, fon
             family, run_size = fonts(run, scale)
             style = {"fontFamily": family, "fontSize": pt(run_size), "bold": run["bold"],
                      "italic": run["italic"], "smallCaps": run["smallcaps"],
-                     "foregroundColor": rgb(run["color"]), "underline": False}
-            fields = "fontFamily,fontSize,bold,italic,smallCaps,foregroundColor,underline"
+                     "foregroundColor": rgb(run["color"]), "underline": False,
+                     "baselineOffset": {"super": "SUPERSCRIPT", "sub": "SUBSCRIPT"}.get(run.get("script"), "NONE")}
+            fields = "fontFamily,fontSize,bold,italic,smallCaps,foregroundColor,underline,baselineOffset"
             if run["link"]:
                 style["link"] = {"url": run["link"]}
                 fields += ",link"

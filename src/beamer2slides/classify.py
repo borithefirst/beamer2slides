@@ -11,6 +11,7 @@ Every span ends up in exactly one text element or in `left_in_background`.
 
 import re
 import statistics
+import unicodedata
 from collections import Counter
 from dataclasses import dataclass, field
 
@@ -126,6 +127,7 @@ class Line:
     bullet: dict | None = None
     bullet_spans: list[Span] = field(default_factory=list)
     reason: str | None = None
+    inline_math: bool = False
 
     def __post_init__(self):
         self.spans.sort(key=lambda s: s.rect.x0)
@@ -199,6 +201,39 @@ class Paragraph:
     @property
     def spans(self) -> list[Span]:
         return [s for l in self.lines for s in l.spans]
+
+
+def script_of(span: Span, line: "Line") -> str | None:
+    """'super' / 'sub' for a smaller span raised / lowered from the line's baseline."""
+    if span.size >= 0.85 * line.size:
+        return None
+    shift = span.baseline - line.baseline
+    if shift < -0.12 * line.size:
+        return "super"
+    if shift > 0.12 * line.size:
+        return "sub"
+    return None
+
+
+DOUBLE_STRUCK = {"C": "ℂ", "H": "ℍ", "N": "ℕ", "P": "ℙ", "Q": "ℚ", "R": "ℝ", "Z": "ℤ"}
+
+
+def math_text(font: str, text: str) -> tuple[str, bool]:
+    """Unicode text and italic flag for a span set in a math font."""
+    name = font.upper()
+    if name.startswith("MSBM"):  # \mathbb
+        return "".join(DOUBLE_STRUCK.get(c, chr(0x1D538 + ord(c) - 65) if "A" <= c <= "Z" else c)
+                       for c in text), False
+    out, italic = [], name.startswith("CMMI")
+    for c in text:
+        uname = unicodedata.name(c, "")
+        if uname.startswith("MATHEMATICAL ITALIC "):  # OpenType math fonts: 𝑥 -> x, italic
+            letter = uname.rsplit(" ", 1)[-1]
+            out.append(letter.lower() if "SMALL" in uname else letter)
+            italic = True
+        else:
+            out.append(c)
+    return "".join(out), italic
 
 
 def is_mono(spans: list[Span]) -> bool:
@@ -347,18 +382,32 @@ class PageClassifier:
                 line.bullet_spans = on_image
                 return
 
-    def is_math(self, line: Line) -> bool:
+    def math_kind(self, line: Line) -> str | None:
+        """None for plain text, 'inline' for math that Slides text can carry (symbols,
+        single-level sub/superscripts), 'complex' for anything that must stay a picture."""
         spans = line.content
-        if any(s.info.family == "math" for s in spans) or "�" in line.text:
-            return True
-        if any(s.size < 0.85 * line.size and abs(s.baseline - line.baseline) > 0.12 * line.size for s in spans):
-            return True  # sub/superscripts
-        if any(b.expand(1).intersects(line.rect) for b in self.bars):
-            return True
+        scripts = [s for s in spans if script_of(s, line)]
+        math_font = any(s.info.family == "math" for s in spans)
+        bars = any(b.expand(1).intersects(line.rect) for b in self.bars)  # fractions, radicals
         chars = "".join(s.text for s in spans).replace(" ", "")
         mathy = sum(len(s.text.strip()) for s in spans if s.info.italic and len(s.text.strip()) <= 2)
         mathy += sum(ch in MATH_OPERATORS for ch in chars)
-        return len(chars) > 0 and mathy / len(chars) >= 0.4
+        formula_like = len(chars) > 0 and mathy / len(chars) >= 0.4  # a display equation, not prose
+
+        if not (math_font or scripts or bars or formula_like or "�" in line.text):
+            return None
+        if bars or formula_like or "�" in line.text:
+            return "complex"
+        if any(s.font.upper().startswith("CMEX") for s in spans):
+            return "complex"  # big operators, large delimiters
+        if any(s.size < 0.6 * line.size or abs(s.baseline - line.baseline) > 0.6 * line.size for s in scripts):
+            return "complex"  # second-level scripts, limits
+        for a in scripts:
+            for b in scripts:
+                if a is not b and script_of(a, line) != script_of(b, line) and \
+                        a.rect.x0 < b.rect.x1 - 0.5 and b.rect.x0 < a.rect.x1 - 0.5:
+                    return "complex"  # sub and superscript stacked (a_1^2)
+        return "inline"
 
     def assign_reasons(self, lines: list[Line]) -> None:
         for line in lines:
@@ -384,8 +433,10 @@ class PageClassifier:
         for line in lines:
             if line.reason is None:
                 self.detect_bullet(line)
-                if self.is_math(line):
+                kind = self.math_kind(line)
+                if kind == "complex":
                     line.reason = "math"
+                line.inline_math = kind == "inline"
 
         # Pieces of display math: limits, equation numbers, small italic fragments next to math.
         changed = True
@@ -550,11 +601,23 @@ class PageClassifier:
                     else:
                         sep = " " if span.rect.x0 - prev.rect.x1 > 0.15 * line.size else ""
                     if sep and not runs[-1]["text"].endswith(" ") and not text.startswith(" "):
-                        runs[-1]["text"] += sep
+                        if runs[-1]["script"]:
+                            text = sep + text  # keep the space out of the raised/lowered run
+                        else:
+                            runs[-1]["text"] += sep
+                script = script_of(span, line)
+                family, italic = span.info.family, span.info.italic
+                if family == "math":
+                    # Math fonts carry symbols and variables; show them in the text family.
+                    base = line.main.info.family
+                    family = base if base != "math" else "serif"
+                    text, italic = math_text(span.font, text)
                 style = {
-                    "font": span.font, "family": span.info.family, "size": round(span.size, 2),
-                    "bold": span.info.bold, "italic": span.info.italic, "smallcaps": span.info.smallcaps,
-                    "color": span.color, "link": span.link,
+                    "font": span.font, "family": family,
+                    # Slides shrinks sub/superscripts itself: give them the line's size.
+                    "size": round(line.size if script else span.size, 2),
+                    "bold": span.info.bold, "italic": italic, "smallcaps": span.info.smallcaps,
+                    "color": span.color, "link": span.link, "script": script,
                 }
                 if runs and all(runs[-1][k] == v for k, v in style.items()):
                     runs[-1]["text"] += text

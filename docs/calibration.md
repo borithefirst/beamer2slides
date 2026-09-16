@@ -32,6 +32,12 @@ Model used by `emit.vertical_layout`, for a line of size z with lineSpacing r:
   therefore come from each item's lineSpacing.
 - **Bullet glyphs** (arrow, diamond, disc alike) end ≈ 1.9 pt before `indentFirstLine`.
   Text starts at `indentStart`.
+- **Bullet colour and size cannot be set on their own.** A bullet takes a text style
+  only when the whole paragraph has that style. Styling the first character or the
+  paragraph's newline has no effect, and the list's `bulletStyle` is read-only. Beamer's
+  coloured bullets on black text therefore come out black.
+- Presets have no filled right-pointing triangle (`LEFTTRIANGLE` is ◀). `ARROW3D` (➢) is the
+  closest to beamer's ▶.
 
 ## 2. Horizontal: width vs CM Sans at the same nominal size
 `text` = ink width of running text relative to CMSS10 (size correction = 1/text).

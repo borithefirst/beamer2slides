@@ -67,6 +67,12 @@ black = both.
 - Saving a redacted PDF with `garbage>=3` corrupts beamer soft-mask shadows (black bars).
 - Redacting images in PDFs is unreliable; ball bullets are patched out of the PNG instead.
 - Slides ignores spaceAbove/spaceBelow between bulleted list items (see docs/calibration.md).
+- A bullet keeps the text style from when it was created, unless its whole paragraph later
+  gets one uniform style. Set each paragraph's base family and size *before*
+  createParagraphBullets, or mixed-style paragraphs get oversized 18 pt default bullets.
+- Inline math: `classify.math_kind` sends lines with fractions, radicals, big operators,
+  stacked or second-level scripts, or formula-like density to the background. Everything else becomes runs
+  with `script` super/sub and Unicode symbols (MSBM → ℝ).
 
 ## Environment
 - Windows, PowerShell. Python 3.12 venv in `.venv` (`.venv\Scripts\python.exe`).
