@@ -725,6 +725,36 @@ class PageClassifier:
             runs[-1]["text"] = runs[-1]["text"].rstrip()
         return runs
 
+    def math_pictures(self, lines: list[Line], paragraphs: list[Paragraph], elements: list[dict]) -> list[dict]:
+        """Math that cannot be text (display equations, fractions, and paragraphs containing
+        them) becomes movable pictures instead of staying baked into the background."""
+        used = {sid for e in elements for sid in e["spans"]}
+        para_reason = {id(l): p.reason for p in paragraphs for l in p.lines}
+        spans = [s for l in lines for s in l.spans if s.id not in used
+                 and (l.reason == "math" or (l.reason is None and para_reason.get(id(l)) == "math"))]
+        if not spans:
+            return []
+        # Collisions are checked against the actual text lines, not text box outlines: a math
+        # item inside a bullet list lies within the list's box but touches none of its lines.
+        blocked = [Rect.of(e["bbox"]) for e in elements if e["kind"] != "text"]
+        for e in elements:
+            if e["kind"] == "text":
+                for p in e["paragraphs"]:
+                    blocked += [Rect(l["x0"], l["baseline"] - 0.8 * p["size"], l["x1"], l["baseline"] + 0.25 * p["size"])
+                                for l in p["lines"]]
+                    if p["bullet"]:  # glyph boxes include ascender space; use their visible core
+                        b = Rect.of(p["bullet"]["bbox"])
+                        blocked.append(Rect(b.x0, b.cy - 0.25 * b.h, b.x1, b.cy + 0.25 * b.h))
+        out = []
+        for c in cluster_rects([s.rect for s in spans] + list(self.bars), gap=0.6 * self.body):
+            box = c.expand(1.5)
+            members = [s for s in spans if box.contains_rect(s.rect)]
+            if not members or any(b.intersects(box) for b in blocked):
+                continue  # only a stray bar, or tangled with native content: leave it in the background
+            out.append({"id": f"p{self.page['index']}m{len(out)}", "kind": "image", "role": "math",
+                        "bbox": box.as_list(), "spans": [s.id for s in members]})
+        return out
+
     def figures(self, lines: list[Line], text_elements: list[dict]) -> list[dict]:
         """Figure regions (graphics, images and their labels) that can become separate pictures.
 
@@ -932,6 +962,7 @@ class PageClassifier:
         text_spans = {sid for e in elements for sid in e["spans"]}
         elements = self.figures(lines, elements) + elements  # pictures first: they sit below text
         text_spans |= {sid for e in elements if e["kind"] == "table" for sid in e["spans"]}
+        elements = self.math_pictures(lines, paragraphs, elements) + elements
         elements = self.shapes(lines, elements) + elements   # shapes below pictures
 
         used = {sid for e in elements for sid in e["spans"]}
