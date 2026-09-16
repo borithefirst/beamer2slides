@@ -1,12 +1,16 @@
 """beamer2slides command line.
 
   python -m beamer2slides classify deck.pdf [--out DIR]
-      writes DIR/raw.json, DIR/deck.json and DIR/debug/slide-NNN.png
+      DIR/raw.json, DIR/deck.json and DIR/debug/slide-NNN.png
+  python -m beamer2slides convert deck.pdf [--out DIR] [--title TITLE]
+      classify + backgrounds + Google Slides deck (DIR/emit.json)
 """
 
 import argparse
 import json
 from pathlib import Path
+
+import pymupdf
 
 from .classify import classify
 from .debug import render_debug
@@ -15,7 +19,7 @@ from .extract import extract
 ROOT = Path(__file__).resolve().parents[2]
 
 
-def cmd_classify(pdf: Path, out: Path) -> None:
+def cmd_classify(pdf: Path, out: Path) -> tuple[dict, dict]:
     out.mkdir(parents=True, exist_ok=True)
     raw = extract(pdf)
     (out / "raw.json").write_text(json.dumps(raw, indent=1, ensure_ascii=False), encoding="utf-8")
@@ -28,17 +32,45 @@ def cmd_classify(pdf: Path, out: Path) -> None:
     for slide in deck["slides"]:
         left = ", ".join(f"{l['reason']} {len(l['spans'])}" for l in slide["left_in_background"])
         print(f"  slide {slide['page'] + 1:>2}: {len(slide['elements'])} text boxes; background: {left or '-'}")
+    return raw, deck
+
+
+def cmd_convert(pdf: Path, out: Path, title: str | None, new_deck: bool) -> None:
+    from .emit import emit
+    from .render import render_backgrounds
+
+    raw, deck = cmd_classify(pdf, out)
+    render_backgrounds(pdf, raw, deck, out)
+    (out / "deck.json").write_text(json.dumps(deck, indent=1, ensure_ascii=False), encoding="utf-8")
+    title = title or pymupdf.open(pdf).metadata.get("title") or pdf.stem
+    state = emit(deck, out, title, new_deck)
+    print(f"Google Slides: {state['url']}")
 
 
 def main() -> None:
     ap = argparse.ArgumentParser(prog="beamer2slides")
     sub = ap.add_subparsers(dest="command", required=True)
-    c = sub.add_parser("classify", help="extract + classify a PDF, with debug images")
-    c.add_argument("pdf", type=Path)
-    c.add_argument("--out", type=Path)
+    for name, help_text in (("classify", "extract + classify a PDF, with debug images"),
+                            ("convert", "full conversion into a Google Slides deck"),
+                            ("fidelity", "compare the emitted deck with the PDF")):
+        c = sub.add_parser(name, help=help_text)
+        c.add_argument("pdf", type=Path)
+        c.add_argument("--out", type=Path)
+        if name == "convert":
+            c.add_argument("--title")
+            c.add_argument("--new-deck", action="store_true",
+                           help="create a new presentation instead of rebuilding the previous one")
+        if name == "fidelity":
+            c.add_argument("--refresh", action="store_true", help="re-export slide thumbnails")
     args = ap.parse_args()
+    out = args.out or ROOT / "out" / args.pdf.stem
     if args.command == "classify":
-        cmd_classify(args.pdf, args.out or ROOT / "out" / args.pdf.stem)
+        cmd_classify(args.pdf, out)
+    elif args.command == "convert":
+        cmd_convert(args.pdf, out, args.title, args.new_deck)
+    elif args.command == "fidelity":
+        from .fidelity import measure, print_report
+        print_report(measure(args.pdf, out, args.refresh))
 
 
 if __name__ == "__main__":

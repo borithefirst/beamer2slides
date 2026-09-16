@@ -576,7 +576,7 @@ class PageClassifier:
         n = self.page["index"]
         elements = []
         for bi, box in enumerate(boxes):
-            rect = union_all(p.rect for p in box)
+            rect = union_all([p.rect for p in box] + [Rect.of(p.bullet["bbox"]) for p in box if p.bullet])
             code = all(is_mono(p.spans) for p in box)
             elements.append({
                 "id": f"p{n}t{bi}", "kind": "text", "role": box[0].role, "bbox": rect.as_list(),

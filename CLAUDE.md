@@ -47,6 +47,27 @@ a per-slide background picture.
   6.48 pt + 0.968 em and the line pitch is 1.19 em **for every font**. Default substitute
   for CM Sans is Lato at size / 1.020; titles (CMSS12) need their own factor (~1.035).
 
+- Background images: Drive "beamer2slides assets" folder, shared by link only while the
+  batch runs (`uc?export=view&id=` URL; a fresh permission needs a few seconds before
+  Slides can fetch it). They are set as the slide's `pageBackgroundFill`.
+- 4:3 decks: upload a blank python-pptx deck with Drive conversion (the page size is kept).
+- Re-running `convert` on the same output folder rebuilds the previous deck in place
+  (same URL). Use `--new-deck` to force a new one.
+
+## Usage
+```
+python -m beamer2slides classify deck.pdf   # raw.json, deck.json, debug/ overlays
+python -m beamer2slides convert  deck.pdf   # + background.pdf, backgrounds/, Slides deck, emit.json
+python -m beamer2slides fidelity deck.pdf   # thumbnails vs PDF: fidelity.json, fidelity/diff-NNN.png
+```
+Outputs go to `out/<pdf stem>/`. In the diff PNGs, red = only in PDF, blue = only in Slides,
+black = both.
+
+## Pitfalls found so far
+- Saving a redacted PDF with `garbage>=3` corrupts beamer soft-mask shadows (black bars).
+- Redacting images in PDFs is unreliable; ball bullets are patched out of the PNG instead.
+- Slides ignores spaceAbove/spaceBelow between bulleted list items (see docs/calibration.md).
+
 ## Environment
 - Windows, PowerShell. Python 3.12 venv in `.venv` (`.venv\Scripts\python.exe`).
 - MiKTeX (pdflatex / xelatex / lualatex) for the test decks, with on-demand package install.

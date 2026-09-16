@@ -27,6 +27,10 @@ def execute(request, retries: int = 6):
             if e.resp.status not in (429, 500, 502, 503) or attempt == retries - 1:
                 raise
             time.sleep(min(60, 2 ** attempt * 2) + random.random())
+        except OSError:  # SSL EOFs and connection resets happen now and then
+            if attempt == retries - 1:
+                raise
+            time.sleep(2 ** attempt + random.random())
 
 
 def text_box(object_id: str, page_id: str, x: float, y: float, w: float, h: float) -> dict:

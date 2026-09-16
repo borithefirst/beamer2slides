@@ -18,6 +18,21 @@ PT Sans is the only slight outlier (+0.2 pt). So the converter needs **one verti
 for all fonts: to put a baseline at y, set box top = y − 6.48 − 0.968·size.
 The fixed 6.5–6.7 pt is presumably the default text-box padding (not verified).
 
+### Paragraph spacing (spacing probes, Lato 20 pt)
+Model used by `emit.vertical_layout`, for a line of size z with lineSpacing r:
+
+- The base pitch is **1.195 z**. The part above the baseline is 0.968 z and the part below is 0.227 z.
+- **r ≥ 1** adds (r − 1)·1.195 z **below** each line of the paragraph. The first baseline
+  of a box never moves.
+- **r < 1** removes (1 − r)·1.195 z, about ¾ of it above the line and ¼ below it. This does move the first baseline up.
+- `spaceAbove`/`spaceBelow` add exactly their value between ordinary paragraphs, but
+  `spaceAbove` of the **first** paragraph in a box is ignored.
+- **In bulleted lists, `spaceAbove` and `spaceBelow` between items are ignored** (except the
+  first item's `spaceAbove`, which then shows above the list). The gap between items must
+  therefore come from each item's lineSpacing.
+- **Bullet glyphs** (arrow, diamond, disc alike) end ≈ 1.9 pt before `indentFirstLine`.
+  Text starts at `indentStart`.
+
 ## 2. Horizontal: width vs CM Sans at the same nominal size
 `text` = ink width of running text relative to CMSS10 (size correction = 1/text).
 The remaining columns are relative to the font's own `text` ratio, after that correction:
