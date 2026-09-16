@@ -1007,47 +1007,121 @@ class PageClassifier:
             return None
         rules = sorted(groups[0], key=lambda r: r["rect"].y0)
         frame = union_all(r["rect"] for r in rules)
-        rule_rects = [r["rect"] for r in rules] + [frame]
-        for g in self.graphics:
-            if c.expand(0.5).contains_rect(g) and not any(abs(g.x0 - rr.x0) < 0.6 and abs(g.x1 - rr.x1) < 0.6
-                                                          and abs(g.y0 - rr.y0) < 0.6 and abs(g.y1 - rr.y1) < 0.6
-                                                          for rr in rule_rects):
-                return None  # vertical rules, cell shading, pictures: keep it a picture
-        spans = sorted((s for s in label_spans if c.expand(0.5).contains_rect(s.rect)), key=lambda s: s.baseline)
+        box = c.expand(0.5)
+        if any(box.contains_rect(Rect.of(im["bbox"])) for im in self.page["images"]):
+            return None
+        # Every drawing must be a horizontal or vertical rule (\hline, \cline, |, booktabs);
+        # cell shading and anything else keep the table a picture.
+        horizontal, vertical = [], []
+        for d in self.page["drawings"]:
+            r = Rect.of(d["bbox"])
+            if d["id"] in self.decor_ids or not box.contains_rect(r) or r.w * r.h >= 0.95 * self.W * self.H:
+                continue
+            color = (d["fill"] if d["type"] == "f" else d["stroke"]) or "#000000"
+            stroke = d["type"] == "s" and d["items"] == "l"
+            fill = d["type"] == "f" and d["items"] == "re"
+            if (stroke and r.h <= 1.0) or (fill and r.h <= 1.5 and r.w >= 3):
+                horizontal.append({"rect": r, "color": color, "weight": r.h if fill else (d["width"] or 0.4)})
+            elif (stroke and r.w <= 1.0) or (fill and r.w <= 1.5 and r.h >= 3):
+                vertical.append({"rect": r, "color": color, "weight": r.w if fill else (d["width"] or 0.4)})
+            else:
+                return None
+        if vertical:
+            frame = union_all([frame] + [v["rect"] for v in vertical])
+        spans = sorted((s for s in label_spans if box.contains_rect(s.rect)), key=lambda s: s.baseline)
         if not spans or any(s.info.family == "math" or not s.horizontal for s in spans):
             return None
+        size = max(s.size for s in spans)
 
-        # Rows by baseline, cells by horizontal gaps, columns by the union of cell extents.
+        # Rows by baseline. A row sitting halfway between its neighbours is a \multirow cell
+        # spanning both of them.
         rows: list[list[Span]] = []
         for s in spans:
             if rows and abs(s.baseline - rows[-1][0].baseline) <= 0.5 * s.size:
                 rows[-1].append(s)
             else:
                 rows.append([s])
-        size = max(s.size for s in spans)
-        row_chunks = []
-        for row in rows:
+        base = [statistics.fmean(s.baseline for s in row) for row in rows]
+        between = {i for i in range(1, len(rows) - 1)
+                   if base[i] - base[i - 1] < 0.75 * size and base[i + 1] - base[i] < 0.75 * size
+                   and not any(a.rect.x0 < b.rect.x1 and b.rect.x0 < a.rect.x1
+                               for a in rows[i] for b in rows[i - 1] + rows[i + 1])}
+        if any(i - 1 in between for i in between):
+            return None
+        grid_rows = [row for i, row in enumerate(rows) if i not in between]
+
+        def chunks_of(row: list[Span]) -> list[list[Span]]:
             chunks: list[list[Span]] = []
             for s in sorted(row, key=lambda s: s.rect.x0):
-                if chunks and s.rect.x0 - chunks[-1][-1].rect.x1 <= 0.5 * size:
+                if chunks and s.rect.x0 - chunks[-1][-1].rect.x1 <= 0.5 * size and \
+                        not any(chunks[-1][-1].rect.x1 < v["rect"].cx < s.rect.x0 for v in vertical):
                     chunks[-1].append(s)
                 else:
                     chunks.append([s])
-            row_chunks.append(chunks)
-        intervals = sorted((ch[0].rect.x0, ch[-1].rect.x1) for chunks in row_chunks for ch in chunks)
+            return chunks
+
+        # (row index in grid_rows, row span, chunk)
+        items = []
+        for i, row in enumerate(rows):
+            r = sum(1 for j in range(i) if j not in between)
+            for ch in chunks_of(row):
+                items.append((r - 1, 2, ch) if i in between else (r, 1, ch))
+
+        def extent(ch):
+            return ch[0].rect.x0, ch[-1].rect.x1
+
+        # A chunk overlapping two separate chunks of another row (\multicolumn), or crossing a
+        # vertical rule, spans several columns; columns come from the other chunks.
+        def spanning(item) -> bool:
+            r, _, ch = item
+            x0, x1 = extent(ch)
+            if any(x0 + 1 < v["rect"].cx < x1 - 1 for v in vertical):
+                return True
+            for r2 in {it[0] for it in items if it[0] != r}:
+                under = sorted(extent(it[2]) for it in items if it[0] == r2 and extent(it[2])[0] < x1 and x0 < extent(it[2])[1])
+                if any(b[0] > a[1] for a, b in zip(under, under[1:])):
+                    return True
+            return False
+
+        wide = [it for it in items if spanning(it)]
+        intervals = sorted(extent(it[2]) for it in items if it not in wide)
         columns: list[list[float]] = []
         for x0, x1 in intervals:
-            if columns and x0 < columns[-1][1] + 1:
+            if columns and x0 < columns[-1][1] + 1 and not any(columns[-1][1] - 1 < v["rect"].cx < x0 + 1 for v in vertical):
                 columns[-1][1] = max(columns[-1][1], x1)
             else:
                 columns.append([x0, x1])
-        cells = [[[] for _ in columns] for _ in rows]
+        if not columns:
+            return None
+        bounds = [frame.x0]
+        for a, b in zip(columns, columns[1:]):
+            rule = [v["rect"].cx for v in vertical if a[1] - 1 <= v["rect"].cx <= b[0] + 1]
+            bounds.append(rule[0] if rule else (a[1] + b[0]) / 2)
+        bounds.append(frame.x1)
+
+        n_rows, n_cols = len(grid_rows), len(columns)
+        cells = [[[] for _ in columns] for _ in grid_rows]
         placed: list[list[list[Span]]] = [[] for _ in columns]
-        for r, chunks in enumerate(row_chunks):
-            for ch in chunks:
-                col = next(i for i, (x0, x1) in enumerate(columns) if ch[0].rect.x0 < x1 + 0.5 and x0 - 0.5 < ch[-1].rect.x1)
-                cells[r][col].extend(ch)
-                placed[col].append(ch)
+        merges, covered = [], {}
+        for it in items:
+            r, rs, ch = it
+            x0, x1 = extent(ch)
+            cols = [i for i in range(n_cols) if bounds[i] < x1 - 0.5 and x0 + 0.5 < bounds[i + 1]]
+            if not cols:
+                return None
+            c0, cs = cols[0], len(cols)
+            for rr in range(r, r + rs):
+                for cc in range(c0, c0 + cs):
+                    if covered.get((rr, cc), it) is not it:
+                        return None  # overlapping cells: not a grid we understand
+                    covered[(rr, cc)] = it
+            cells[r][c0].extend(ch)
+            if rs > 1 or cs > 1:
+                mid = (bounds[c0] + bounds[c0 + cs]) / 2
+                align = "center" if abs((x0 + x1) / 2 - mid) <= 2 else "left" if x0 - bounds[c0] < bounds[c0 + cs] - x1 else "right"
+                merges.append({"row": r, "col": c0, "rows": rs, "cols": cs, "align": align})
+            else:
+                placed[c0].append(ch)
         col_info = []
         for (x0, x1), chunks in zip(columns, placed):
             if all(abs(ch[0].rect.x0 - x0) <= 1 for ch in chunks):
@@ -1057,35 +1131,48 @@ class PageClassifier:
             else:
                 align = "center"
             col_info.append({"x0": round(x0, 2), "x1": round(x1, 2), "align": align})
+        rows = grid_rows
 
         baselines = [statistics.fmean(s.baseline for s in row if s.size >= 0.9 * size) for row in rows]
+
+        # Borders: rules across the whole table stay row rules; partial rules (\cline,
+        # \cmidrule) and vertical rules become the borders of the cells they run along.
+        def row_boundary(y: float) -> int:
+            return sum(b < y for b in baselines)
+
+        borders = []
+        full = [h for h in horizontal if h["rect"].x0 <= frame.x0 + 1.5 and h["rect"].x1 >= frame.x1 - 1.5]
+        rules = full
+        for h in horizontal:
+            if h in full:
+                continue
+            k = row_boundary(h["rect"].cy)
+            for cc in range(n_cols):
+                if h["rect"].x0 <= bounds[cc] + 2.5 and h["rect"].x1 >= bounds[cc + 1] - 2.5:
+                    borders.append({"row": min(k, n_rows - 1), "col": cc, "position": "TOP" if k < n_rows else "BOTTOM",
+                                    "color": h["color"], "weight": round(h["weight"], 2)})
+        for v in vertical:
+            k = min(range(len(bounds)), key=lambda i: abs(bounds[i] - v["rect"].cx))
+            if abs(bounds[k] - v["rect"].cx) > 1.5:
+                return None  # a rule inside a column
+            for rr, b in enumerate(baselines):
+                if v["rect"].y0 <= b - 0.5 * size and v["rect"].y1 >= b:
+                    borders.append({"row": rr, "col": min(k, n_cols - 1), "position": "LEFT" if k < n_cols else "RIGHT",
+                                    "color": v["color"], "weight": round(v["weight"], 2)})
         pitches = [b - a for a, b in zip(baselines, baselines[1:])] or [1.4 * size]
-        # Slides rows are at least one line plus 7.2 pt padding above and below (see
-        # docs/calibration.md); refuse if the taller table would run into content below.
+        # Slides rows are at least one line plus 7.2 pt padding above and below, even with the
+        # tightest line spacing emit uses (docs/calibration.md); refuse if the taller table
+        # would run into content below.
         scale = 720.0 / self.W
         z = size * scale / 1.02
-        row_h = [max(p * scale, 1.195 * z + 14.4) / scale for p in pitches + [pitches[-1]]]
-        top = baselines[0] - (6.48 + 0.968 * z) / scale
+        ratio = min(1.0, max(0.5, (min(pitches) * scale - 14.4) / (1.195 * z)))
+        row_h = [max(p * scale, 1.195 * z * ratio + 14.4) / scale for p in pitches + [pitches[-1]]]
+        top = baselines[0] - (6.48 + 0.968 * z - (1 - ratio) * 0.9 * z) / scale
         bottom = top + sum(row_h)
         grown = Rect(frame.x0, frame.y1, frame.x1, bottom)
         if bottom > self.H - 2 or any(t.intersects(grown) for t in text_rects) or \
                 any(reg.intersects(grown) and not c.expand(0.5).contains_rect(reg) for reg in self.regions):
             return None
-
-        def cell_runs(cell: list[Span]) -> list[dict]:
-            runs: list[dict] = []
-            for i, s in enumerate(cell):
-                text = s.text
-                if i and s.rect.x0 - cell[i - 1].rect.x1 > 0.15 * s.size and not text.startswith(" "):
-                    text = " " + text
-                style = {"font": s.font, "family": s.info.family, "size": round(s.size, 2), "bold": s.info.bold,
-                         "italic": s.info.italic, "smallcaps": s.info.smallcaps, "color": s.color,
-                         "link": s.link, "script": None}
-                if runs and all(runs[-1][k] == v for k, v in style.items()):
-                    runs[-1]["text"] += text
-                else:
-                    runs.append({"text": text, **style})
-            return runs
 
         return {
             "id": f"p{self.page['index']}tab{index}", "kind": "table", "role": "table",
@@ -1093,10 +1180,13 @@ class PageClassifier:
             "row_baselines": [round(b, 2) for b in baselines],
             "row_heights": [round(p, 2) for p in pitches + [pitches[-1]]],
             "columns": col_info,
-            "cells": [[cell_runs(cell) for cell in row] for row in cells],
+            "bounds": [round(b, 2) for b in bounds],
+            "cells": [[span_runs(cell) for cell in row] for row in cells],
+            "merges": merges,
             "rules": [{"row": min(k, len(rows) - 1), "position": "TOP" if k < len(rows) else "BOTTOM",
                        "color": r["color"], "weight": round(r["weight"], 2)}
-                      for r in rules for k in [sum(b < r["rect"].cy for b in baselines)]],
+                      for r in rules for k in [row_boundary(r["rect"].cy)]],
+            "borders": borders,
             "spans": [s.id for s in spans],
         }
 

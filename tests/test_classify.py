@@ -123,6 +123,18 @@ def test_madrid_blocks_tables_and_footer():
     assert {t["key"][0] for t in d["layout_texts"]} == {"B. Tester (TU)", "Themed", "2026"}
 
 
+def test_grid_table_with_merged_cells():
+    slide = deck("11_research_talk")["slides"][2]
+    assert kinds(slide).count("image") == 0
+    table = [e for e in slide["elements"] if e["kind"] == "table"][0]
+    cells = [[paragraph_text({"runs": c}) for c in row] for row in table["cells"]]
+    assert cells == [["Model", "Score", ""], ["", "Train", "Test"], ["Linear", "0.80", "0.78"], ["Tree", "0.95", "0.81"]]
+    assert sorted((m["row"], m["col"], m["rows"], m["cols"]) for m in table["merges"]) == [(0, 0, 2, 1), (0, 1, 1, 2)]
+    left = {(b["row"], b["col"]) for b in table["borders"] if b["position"] == "LEFT"}
+    assert left == {(r, c) for r in range(4) for c in range(3)} - {(0, 2)}  # no rule inside "Score"
+    assert {(b["row"], b["col"]) for b in table["borders"] if b["position"] == "TOP"} == {(1, 1), (1, 2)}  # \cline{2-3}
+
+
 def test_image_bullets_numbered_on_balls():
     slide = deck("04_theme_blocks")["slides"][2]
     numbered = [p for e in texts(slide) for p in e["paragraphs"] if p["bullet"] and p["bullet"]["kind"] == "image"]

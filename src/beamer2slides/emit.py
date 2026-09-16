@@ -332,19 +332,30 @@ def shape_requests(el: dict, slide_id: str, object_id: str, scale: float) -> lis
 
 
 TABLE_MIN_COLUMN_PT = 32.0  # the API refuses narrower columns
+TABLE_ROW_PAD = 14.4        # cell padding above and below, not settable through the API
+TABLE_ROW_EM = 1.195
+TABLE_MIN_SPACING = 0.5
+
+
+def table_line_spacing(pitch: float, z: float) -> float:
+    """lineSpacing ratio at which a row of text size z fits into the given row pitch."""
+    return min(1.0, max(TABLE_MIN_SPACING, (pitch - TABLE_ROW_PAD) / (TABLE_ROW_EM * z)))
 
 
 def table_requests(el: dict, slide_id: str, object_id: str, scale: float, fonts: FontMapper) -> list[dict]:
     cols = el["columns"]
     fx0, _, fx1, _ = el["frame"]
-    bounds = [fx0] + [(a["x1"] + b["x0"]) / 2 for a, b in zip(cols, cols[1:])] + [fx1]
+    bounds = el.get("bounds") or [fx0] + [(a["x1"] + b["x0"]) / 2 for a, b in zip(cols, cols[1:])] + [fx1]
     widths = [max(TABLE_MIN_COLUMN_PT, (b - a) * scale) for a, b in zip(bounds, bounds[1:])]
     first_run = next((r for row in el["cells"] for cell in row for r in cell), None)
     z = fonts(first_run, scale)[1] if first_run else el["size"] * scale
-    x = fx0 * scale
-    y = el["row_baselines"][0] * scale - (BASELINE_A + ASCENT_EM * z)
     n_rows, n_cols = len(el["cells"]), len(cols)
     heights = [h * scale for h in el["row_heights"]]
+    # A row is at least TABLE_ROW_PAD + 1.195 * z * lineSpacing tall (tools/probe_table_rows.py):
+    # tighten the line spacing until rows keep the original pitch.
+    ratio = table_line_spacing(min(heights), z)
+    x = fx0 * scale
+    y = el["row_baselines"][0] * scale - (BASELINE_A + ASCENT_EM * z + extra_above(ratio, z))
 
     reqs: list[dict] = [
         {"createTable": {"objectId": object_id, "rows": n_rows, "columns": n_cols, "elementProperties": {
@@ -375,13 +386,46 @@ def table_requests(el: dict, slide_id: str, object_id: str, scale: float, fonts:
                 "tableBorderFill": {"solidFill": {"color": rgb(rule["color"])["opaqueColor"], "alpha": 1}},
                 "weight": pt(round(max(0.5, rule["weight"] * scale), 2))},
             "fields": "tableBorderFill.solidFill.color,tableBorderFill.solidFill.alpha,weight"}})
+    for b in el.get("borders", []):
+        reqs.append({"updateTableBorderProperties": {
+            "objectId": object_id, "borderPosition": b["position"],
+            "tableRange": {"location": {"rowIndex": b["row"], "columnIndex": b["col"]}, "rowSpan": 1, "columnSpan": 1},
+            "tableBorderProperties": {
+                "tableBorderFill": {"solidFill": {"color": rgb(b["color"])["opaqueColor"], "alpha": 1}},
+                "weight": pt(round(max(0.5, b["weight"] * scale), 2))},
+            "fields": "tableBorderFill.solidFill.color,tableBorderFill.solidFill.alpha,weight"}})
+    merged = {(m["row"], m["col"]): m for m in el.get("merges", [])}
+    for m in merged.values():
+        reqs.append({"mergeTableCells": {"objectId": object_id, "tableRange": {
+            "location": {"rowIndex": m["row"], "columnIndex": m["col"]}, "rowSpan": m["rows"], "columnSpan": m["cols"]}}})
+        if m["rows"] > 1:  # \multirow centres its text vertically
+            reqs.append({"updateTableCellProperties": {
+                "objectId": object_id, "tableRange": {"location": {"rowIndex": m["row"], "columnIndex": m["col"]},
+                                                      "rowSpan": m["rows"], "columnSpan": m["cols"]},
+                "tableCellProperties": {"contentAlignment": "MIDDLE"}, "fields": "contentAlignment"}})
 
+    hidden = {(m["row"] + i, m["col"] + j) for m in merged.values()
+              for i in range(m["rows"]) for j in range(m["cols"])} - set(merged)
     for r, row in enumerate(el["cells"]):
         for c, runs in enumerate(row):
             text = "".join(run["text"] for run in runs).strip()
-            if not text:
-                continue
             loc = {"rowIndex": r, "columnIndex": c}
+            if not text:
+                if (r, c) in hidden or first_run is None:
+                    continue
+                # An empty cell still has a line of the default font, which would set the row's
+                # minimum height: give it a space in the table's font and line spacing.
+                style, fields = fonts.text_style(first_run, scale)
+                reqs += [
+                    {"insertText": {"objectId": object_id, "cellLocation": loc, "text": " "}},
+                    {"updateTextStyle": {"objectId": object_id, "cellLocation": loc, "textRange": {"type": "ALL"},
+                                         "style": style, "fields": ",".join(fields)}},
+                    {"updateParagraphStyle": {"objectId": object_id, "cellLocation": loc, "textRange": {"type": "ALL"},
+                                              "style": {"lineSpacing": round(100 * ratio, 1), "spaceAbove": pt(0),
+                                                        "spaceBelow": pt(0)},
+                                              "fields": "lineSpacing,spaceAbove,spaceBelow"}},
+                ]
+                continue
             reqs.append({"insertText": {"objectId": object_id, "cellLocation": loc, "text": text}})
             start = 0
             for run in runs:
@@ -398,13 +442,16 @@ def table_requests(el: dict, slide_id: str, object_id: str, scale: float, fonts:
                     "style": style, "fields": ",".join(fields + ["smallCaps", "foregroundColor"])}})
                 start += len(piece)
             col = cols[c]
+            align = col["align"]
             # Line the text up with the original inside the (contiguous) Slides columns.
-            indent_start = max(0.0, (col["x0"] - bounds[c]) * scale - PAD_X) if col["align"] == "left" else 0.0
-            indent_end = max(0.0, (bounds[c + 1] - col["x1"]) * scale - PAD_X) if col["align"] == "right" else 0.0
+            indent_start = max(0.0, (col["x0"] - bounds[c]) * scale - PAD_X) if align == "left" else 0.0
+            indent_end = max(0.0, (bounds[c + 1] - col["x1"]) * scale - PAD_X) if align == "right" else 0.0
+            if (r, c) in merged and merged[(r, c)]["cols"] > 1:
+                align, indent_start, indent_end = merged[(r, c)]["align"], 0.0, 0.0
             reqs.append({"updateParagraphStyle": {
                 "objectId": object_id, "cellLocation": loc, "textRange": {"type": "ALL"},
-                "style": {"alignment": {"left": "START", "center": "CENTER", "right": "END"}[col["align"]],
-                          "lineSpacing": 100, "spaceAbove": pt(0), "spaceBelow": pt(0),
+                "style": {"alignment": {"left": "START", "center": "CENTER", "right": "END"}[align],
+                          "lineSpacing": round(100 * ratio, 1), "spaceAbove": pt(0), "spaceBelow": pt(0),
                           "indentStart": pt(round(indent_start, 2)), "indentFirstLine": pt(round(indent_start, 2)),
                           "indentEnd": pt(round(indent_end, 2))},
                 "fields": "alignment,lineSpacing,spaceAbove,spaceBelow,indentStart,indentFirstLine,indentEnd"}})

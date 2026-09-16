@@ -46,6 +46,17 @@ Model used by `emit.vertical_layout`, for a line of size z with lineSpacing r:
 - Presets have no filled right-pointing triangle (`LEFTTRIANGLE` is ◀). `ARROW3D` (➢) is the
   closest to beamer's ▶.
 
+### Table cells (`tools/probe_table_rows.py`, Lato 21 pt)
+- A cell places text like a text box: its first baseline is 6.48 + 0.968·z below the row top, moved by lineSpacing as above.
+- The **minimum row height is 14.4 + 1.195·z·r**. The 14.4 pt is 7.2 pt of padding above and
+  below, which the API cannot change. Measured values were 39.6/35.9/32.1/28.2/24.4 pt for r = 1/0.85/0.7/0.55/0.4.
+  Text is not clipped when r < 1: it just starts higher in the cell.
+- TeX tables are much tighter (row pitch ≈ 1.24 em). `emit.table_requests` therefore uses a
+  lineSpacing ratio at which the rows keep the original pitch (at least 50%).
+  Otherwise tables grow by about half their height.
+- An empty cell still holds a line in the default font (a larger minimum), so it gets a
+  space in the table's font.
+
 ## 2. Horizontal: width vs CM Sans at the same nominal size
 `text` = ink width of running text relative to CMSS10 (size correction = 1/text).
 The remaining columns are relative to the font's own `text` ratio, after that correction:
