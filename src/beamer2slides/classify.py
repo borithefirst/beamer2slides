@@ -531,6 +531,13 @@ class PageClassifier:
 
     # -- paragraphs -------------------------------------------------------------
 
+    def has_side_content(self, a: Line, b: Line) -> bool:
+        """Is there text or graphics beside these two lines (columns, a picture next to text)?"""
+        y0, y1 = min(a.rect.y0, b.rect.y0), max(a.rect.y1, b.rect.y1)
+        x0, x1 = min(a.rect.x0, b.rect.x0), max(a.rect.x1, b.rect.x1)
+        others = [l.rect for l in self.all_lines if l is not a and l is not b] + list(self.regions)
+        return any(r.y0 < y1 and y0 < r.y1 and (r.x0 > x1 + 5 or r.x1 < x0 - 5) for r in others)
+
     def continues(self, par: Paragraph, line: Line) -> str | None:
         """How `line` continues `par` ('left' | 'center' | 'right'), or None."""
         last = par.last
@@ -549,6 +556,10 @@ class PageClassifier:
         if left:
             # TeX would have pulled the next word up if it fitted: then this is a new paragraph.
             col_right = max([l.x1 for l in par.lines] + [line.x1])
+            if not self.has_side_content(last, line):
+                # Full-width text: beamer's margins are symmetric, so the text block ends
+                # where the left margin mirrors. Short paragraphs never reach col_right.
+                col_right = max(col_right, self.W - self.text_margin)
             first_word = line.content[0].rect.w
             if not right and last.x1 + 0.3 * par.size + first_word < col_right - 0.5:
                 return None
@@ -779,6 +790,8 @@ class PageClassifier:
         self.analyse_graphics()
         lines = self.build_lines(self.spans())
         self.assign_reasons(lines)
+        body_lines = [l for l in lines if l.reason is None and abs(l.size - self.body) < 1]
+        self.text_margin = min((l.rect.x0 for l in body_lines), default=0.08 * self.W)
         paragraphs = self.build_paragraphs(lines)
         boxes = self.build_boxes(paragraphs)
 

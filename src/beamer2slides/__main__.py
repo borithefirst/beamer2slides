@@ -14,14 +14,16 @@ import pymupdf
 
 from .classify import classify
 from .debug import render_debug
-from .extract import extract
+from .extract import extract, select_overlays
 
 ROOT = Path(__file__).resolve().parents[2]
 
 
-def cmd_classify(pdf: Path, out: Path) -> tuple[dict, dict]:
+def cmd_classify(pdf: Path, out: Path, overlays: str = "last") -> tuple[dict, dict]:
     out.mkdir(parents=True, exist_ok=True)
-    raw = extract(pdf)
+    raw = select_overlays(extract(pdf), overlays)
+    if raw.get("overlays", {}).get("dropped"):
+        print(f"overlays: kept the last step of each frame, skipped {raw['overlays']['dropped']} pages")
     (out / "raw.json").write_text(json.dumps(raw, indent=1, ensure_ascii=False), encoding="utf-8")
     deck = classify(raw)
     (out / "deck.json").write_text(json.dumps(deck, indent=1, ensure_ascii=False), encoding="utf-8")
@@ -37,11 +39,11 @@ def cmd_classify(pdf: Path, out: Path) -> tuple[dict, dict]:
     return raw, deck
 
 
-def cmd_convert(pdf: Path, out: Path, title: str | None, new_deck: bool) -> None:
+def cmd_convert(pdf: Path, out: Path, title: str | None, new_deck: bool, overlays: str) -> None:
     from .emit import emit
     from .render import render_backgrounds
 
-    raw, deck = cmd_classify(pdf, out)
+    raw, deck = cmd_classify(pdf, out, overlays)
     render_backgrounds(pdf, raw, deck, out)
     (out / "deck.json").write_text(json.dumps(deck, indent=1, ensure_ascii=False), encoding="utf-8")
     title = title or pymupdf.open(pdf).metadata.get("title") or pdf.stem
@@ -58,6 +60,9 @@ def main() -> None:
         c = sub.add_parser(name, help=help_text)
         c.add_argument("pdf", type=Path)
         c.add_argument("--out", type=Path)
+        if name in ("classify", "convert"):
+            c.add_argument("--overlays", choices=["last", "all"], default="last",
+                           help="for PDFs with overlay steps: keep the last step of each frame (default) or all pages")
         if name == "convert":
             c.add_argument("--title")
             c.add_argument("--new-deck", action="store_true",
@@ -67,9 +72,9 @@ def main() -> None:
     args = ap.parse_args()
     out = args.out or ROOT / "out" / args.pdf.stem
     if args.command == "classify":
-        cmd_classify(args.pdf, out)
+        cmd_classify(args.pdf, out, args.overlays)
     elif args.command == "convert":
-        cmd_convert(args.pdf, out, args.title, args.new_deck)
+        cmd_convert(args.pdf, out, args.title, args.new_deck, args.overlays)
     elif args.command == "fidelity":
         from .fidelity import measure, print_report
         print_report(measure(args.pdf, out, args.refresh))

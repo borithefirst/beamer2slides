@@ -412,11 +412,11 @@ def emit(deck: dict, out: Path, title: str, new_deck: bool = False) -> dict:
         # Phase 1: slides with backgrounds. Slides with a frame title use the TITLE_ONLY layout
         # and get their title placeholder mapped to our object ID.
         reqs = []
-        for slide in deck["slides"]:
-            n = slide["page"]
+        for position, slide in enumerate(deck["slides"]):
+            n = slide["page"]  # PDF page index; slides may skip pages (overlays)
             slide_id = f"b2s_s{n:03}"
             title_idx = title_element(slide)
-            create = {"objectId": slide_id, "insertionIndex": n,
+            create = {"objectId": slide_id, "insertionIndex": position,
                       "slideLayoutReference": {"predefinedLayout": "TITLE_ONLY" if title_idx is not None else "BLANK"}}
             if title_idx is not None:
                 create["placeholderIdMappings"] = [{"layoutPlaceholder": {"type": "TITLE", "index": 0},

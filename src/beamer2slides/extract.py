@@ -70,6 +70,17 @@ def extract_page(page: pymupdf.Page) -> dict:
     }
 
 
+def select_overlays(raw: dict, mode: str) -> dict:
+    """Beamer gives every overlay step of a frame its own page, all with the frame number
+    as page label. mode 'last' keeps only the final (complete) step of each frame; 'all'
+    keeps every page. Handout PDFs have one page per label, so both are the same there."""
+    if mode == "all":
+        return raw
+    pages = raw["pages"]
+    kept = [p for i, p in enumerate(pages) if i + 1 == len(pages) or pages[i + 1]["label"] != p["label"]]
+    return {**raw, "pages": kept, "overlays": {"mode": mode, "dropped": len(pages) - len(kept)}}
+
+
 def extract(pdf: Path) -> dict:
     doc = pymupdf.open(pdf)
     return {

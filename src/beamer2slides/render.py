@@ -98,6 +98,7 @@ def verify_and_remove_shapes(original: pymupdf.Page, page: pymupdf.Page, slide: 
 def render_backgrounds(pdf: Path, raw: dict, deck: dict, out: Path) -> list[Path]:
     doc = pymupdf.open(pdf)
     original = pymupdf.open(pdf)
+    raw_pages = {p["index"]: p for p in raw["pages"]}  # by PDF page (overlay steps may be skipped)
     spans = {s["id"]: s for page in raw["pages"] for s in page["spans"]}
     for slide in deck["slides"]:
         page = doc[slide["page"]]
@@ -115,7 +116,7 @@ def render_backgrounds(pdf: Path, raw: dict, deck: dict, out: Path) -> list[Path
 
         for fig in figures:
             path = out / "figures" / f"{fig['id']}.png"
-            fig["px"] = crop_figure(page, fig["bbox"], raw["pages"][slide["page"]]["images"], path)
+            fig["px"] = crop_figure(page, fig["bbox"], raw_pages[slide["page"]]["images"], path)
             fig["file"] = str(path.relative_to(out)).replace("\\", "/")
             page.add_redact_annot(pymupdf.Rect(fig["bbox"]), fill=False)
         if figures:
@@ -132,14 +133,15 @@ def render_backgrounds(pdf: Path, raw: dict, deck: dict, out: Path) -> list[Path
                                   text=pymupdf.PDF_REDACT_TEXT_NONE)
 
         # Panels last: figure crops taken above still show the panel colour behind them.
-        verify_and_remove_shapes(original[slide["page"]], page, slide, raw["pages"][slide["page"]])
+        verify_and_remove_shapes(original[slide["page"]], page, slide, raw_pages[slide["page"]])
 
     clean = out / "background.pdf"
     # garbage>=3 deduplicates objects, which after redaction corrupts beamer's soft-mask
     # shadows (Madrid blocks render as black bars). Only drop unused objects.
     doc.save(clean, garbage=1, deflate=True)
 
-    paths = render_pages(clean, out / "backgrounds", BACKGROUND_WIDTH_PX, "bg")
+    paths = render_pages(clean, out / "backgrounds", BACKGROUND_WIDTH_PX, "bg",
+                         [s["page"] for s in deck["slides"]])
     images = {i["id"]: i for page in raw["pages"] for i in page["images"]}
     for slide, path in zip(deck["slides"], paths):
         bullets = []
@@ -157,11 +159,11 @@ def render_backgrounds(pdf: Path, raw: dict, deck: dict, out: Path) -> list[Path
     return paths
 
 
-def render_pages(pdf: Path, out_dir: Path, width_px: int, prefix: str) -> list[Path]:
+def render_pages(pdf: Path, out_dir: Path, width_px: int, prefix: str, pages: list[int]) -> list[Path]:
     doc = pymupdf.open(pdf)
     out_dir.mkdir(parents=True, exist_ok=True)
     paths = []
-    for page in doc:
+    for page in (doc[n] for n in pages):
         zoom = width_px / page.rect.width
         path = out_dir / f"{prefix}-{page.number + 1:03}.png"
         page.get_pixmap(matrix=pymupdf.Matrix(zoom, zoom), alpha=False).save(path)
