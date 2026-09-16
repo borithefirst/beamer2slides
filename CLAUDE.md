@@ -33,10 +33,24 @@ a per-slide background picture.
   Slides page links), code blocks. Frame titles, the title page title and big lone headings
   use the layout's TITLE placeholder (role `title`).
 - `image`: figure regions (TikZ, plots, raster images, plus their labels) cropped as pictures.
-- `table`: text framed by equal-width horizontal rules (`\hline`/booktabs) → Slides table,
-  unless the taller Slides rows would collide with content below.
+- `table`: text framed by equal-width horizontal rules (`\hline`/booktabs), with optional
+  vertical and partial rules (→ per-cell `borders`) and merged cells (`merges`: chunks
+  crossing columns, rows halfway between rows). Cell lineSpacing is tightened so rows keep
+  the PDF pitch (`emit.table_line_spacing`).
+- `diagram` (`classify.diagram_from`): figure clusters of only rectangle/rounded/ellipse nodes,
+  straight lines and small arrow tips (open, filled, stealth) → shapes, lines and text boxes
+  (node labels and free edge labels), grouped. Lines with filled tips are extended to the tip.
 - `shape`: opaque filled panels such as beamer blocks, not touching the page edge, with
-  nothing left in the background on top; verified against the rendered colour.
+  nothing left in the background on top; verified against the rendered colour. Also
+  figure clusters of plain filled rectangles (`plain_rectangles`, role `rule`).
+- Text decorations (`text_decorations`): a thin rule tightly under words → run `underline`,
+  a filled box tightly around words on one line → run `highlight` (backgroundColor).
+- Hanging labels (`Line.tab`, paragraph `tab_x0`): algorithmic line numbers, description
+  items and item labels without a Slides preset are written `label<TAB>text` with
+  indentFirstLine at the label and indentStart at the text (Slides tabs jump to indentStart).
+- Backgrounds: identical PNGs are uploaded once; the most common background is set on the
+  master and all layouts, and those slides inherit it. Frame counters (`FRAME_COUNTER_RE`) become
+  per-slide text elements (role `footer`), so theme backgrounds become identical.
 - Fonts: `fonts.google_font` passes Google fonts used in the PDF through with their weight
   (weightedFontFamily, no width correction) and maps Helvetica/Times/Courier clones to
   metric-compatible Arial/Times New Roman/Courier New. CM fonts use the calibrated substitutes.
@@ -100,7 +114,10 @@ black = both.
 - MuPDF's line-art "covered" test is conservative (strokes, transformed TikZ nodes): figure
   and panel removal redacts with a few points of margin.
 - Title placeholders exist before any other element: bring them to front after adding shapes.
-- Slides table rows are at least 1.195 em + 14.4 pt tall (7.2 pt cell padding, not settable).
+- Slides table rows are at least 1.195 em × lineSpacing + 14.4 pt tall (7.2 pt cell padding,
+  not settable); empty cells count with the default font unless given a styled space.
+- Layout pages reject `pageBackgroundFill.propertyState = INHERIT`; set the fill explicitly.
+- Pixel checks on hairline shapes need a high zoom (`render._fill_fraction`).
 - Bullet colour/size can't be set independently (see docs/calibration.md).
 - Page labels can come back as raw `<FEFF...>` hex strings; `extract._label` decodes them.
 - PowerShell 5.1 mangles double quotes inside native-command arguments: keep them out of

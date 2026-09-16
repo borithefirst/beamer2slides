@@ -11,13 +11,21 @@ slide background.
   Courier and their TeX Gyre/Nimbus clones become the metric-compatible Arial, Times New Roman
   and Courier New. Computer Modern gets calibrated substitutes (CM Sans → Lato, CM Roman →
   PT Serif, CM Typewriter → Roboto Mono). Line breaks and positions match the PDF within a few points.
-- **Bullet and numbered lists** with nesting (glyph, ball, drawn and icon bullets).
+- **Bullet and numbered lists** with nesting (glyph, ball, drawn and icon bullets). Description
+  lists, algorithm line numbers and custom item labels (`\item[--]`) use a hanging label with a
+  tab, so the text lines up exactly.
 - **Inline math** as text: `x ∈ ℝ`, `x²`, `aᵢ`, simple fractions `ᵃ⁄ᵦ`.
+- **Underlines and `\colorbox` highlights** as text styles.
 - **Slide titles** in real title placeholders, so they show in Slides' outline and navigation.
-- **Tables** from `\hline`/booktabs tabulars as native Slides tables.
-- **Pictures** for figures, plots, raster images and display equations, each movable.
-- **Shapes** for beamer blocks (coloured title bars and bodies).
-- **Header/footer text** that is the same on every slide goes onto the slide layouts.
+- **Tables** from ruled tabulars (booktabs, `\hline`, vertical rules, `\cline`) as native Slides
+  tables, including `\multicolumn`/`\multirow` merged cells.
+- **Diagrams**: simple TikZ pictures (rectangles, rounded rectangles, circles, straight arrows,
+  node and edge labels) as grouped native shapes, lines and text.
+- **Pictures** for other figures, plots, raster images and display equations, each movable.
+- **Shapes** for beamer blocks (coloured title bars and bodies) and plain coloured bars.
+- **Theme**: header/footer text that is the same on every slide goes onto the slide layouts.
+  The background shared by most slides is set on the master, so new slides get it too.
+  Frame counters become small text boxes on each slide.
 - **Speaker notes** from `show notes` or `show notes on second screen`.
 - **Internal links**: table-of-contents entries jump to their slides.
 - Overlays: for non-handout PDFs the last step of each frame is kept (`--overlays all` keeps
