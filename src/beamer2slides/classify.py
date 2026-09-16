@@ -1092,6 +1092,7 @@ def mark_title_page(slides: list[dict], doc_title: str) -> None:
             first = norm("".join(r["text"] for r in e["paragraphs"][0]["runs"]))
             if len(first) >= 3 and wanted.startswith(first):
                 e["role"] = "title"
+                slide["title_page"] = True
                 return
 
 

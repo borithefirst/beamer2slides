@@ -452,13 +452,13 @@ LAYOUT_TEXT_PREFIX = "b2s_L"
 
 
 def write_layout_texts(slides, pid: str, texts: list[dict], scale: float, fonts: FontMapper) -> None:
-    """Header/footer text shared by every slide goes onto the two layouts our slides use, so
+    """Header/footer text shared by every slide goes onto the layouts our slides use, so
     it is edited once for the whole deck. Previous runs' layout texts are replaced."""
     pres = execute(slides.presentations().get(
         presentationId=pid, fields="layouts(objectId,layoutProperties,pageElements(objectId))"))
     reqs = []
     for li, layout in enumerate(l for l in pres.get("layouts", [])
-                                if l.get("layoutProperties", {}).get("name") in ("TITLE_ONLY", "BLANK")):
+                                if l.get("layoutProperties", {}).get("name") in ("TITLE", "TITLE_ONLY", "BLANK")):
         reqs += [{"deleteObject": {"objectId": e["objectId"]}} for e in layout.get("pageElements", [])
                  if e["objectId"].startswith(LAYOUT_TEXT_PREFIX)]
         for ti, el in enumerate(texts):
@@ -534,10 +534,12 @@ def emit(deck: dict, out: Path, title: str, new_deck: bool = False) -> dict:
             n = slide["page"]  # PDF page index; slides may skip pages (overlays)
             slide_id = f"b2s_s{n:03}"
             title_idx = title_element(slide)
+            # The title page uses the TITLE layout (centered title), frames with a title TITLE_ONLY.
+            layout, placeholder = ("TITLE", "CENTERED_TITLE") if slide.get("title_page") else ("TITLE_ONLY", "TITLE")
             create = {"objectId": slide_id, "insertionIndex": position,
-                      "slideLayoutReference": {"predefinedLayout": "TITLE_ONLY" if title_idx is not None else "BLANK"}}
+                      "slideLayoutReference": {"predefinedLayout": layout if title_idx is not None else "BLANK"}}
             if title_idx is not None:
-                create["placeholderIdMappings"] = [{"layoutPlaceholder": {"type": "TITLE", "index": 0},
+                create["placeholderIdMappings"] = [{"layoutPlaceholder": {"type": placeholder, "index": 0},
                                                     "objectId": f"{slide_id}_t{title_idx}"}]
             reqs += [{"createSlide": create},
                      {"updatePageProperties": {
