@@ -19,6 +19,7 @@ from .fonts import FontInfo, font_info
 
 BULLET_GLYPHS = set("▶►▸‣•◦▪■□○●★⋆✓∗–")
 ENUM_RE = re.compile(r"^(\(?\d{1,2}[.)]|\(?[a-z][.)]|\([a-z]\)|\(?[ivx]{1,4}[.)])$")
+LINE_LABEL_RE = re.compile(r"^(\d{1,3}:|\[\d{1,3}\])$")
 EQ_NUMBER_RE = re.compile(r"^\(\d+(\.\d+)*[a-z]?\)$")
 MATH_OPERATORS = set("=+−<>≤≥×·/∑∏∫∈∉⊂⊆∪∩→←⇒⇔≈≠±∞")
 SMALL_IMAGE_PT = 12
@@ -135,6 +136,7 @@ class Line:
     reason: str | None = None
     inline_math: bool = False
     fractions: list = field(default_factory=list)  # (bar, numerator spans, denominator spans)
+    tab: Span | None = None  # content after a line label ("4:") starts here, reached by a tab
 
     def __post_init__(self):
         self.spans.sort(key=lambda s: s.rect.x0)
@@ -476,7 +478,62 @@ class PageClassifier:
         groups: dict[int, list[Span]] = {}
         for i, s in enumerate(spans):
             groups.setdefault(find(i), []).append(s)
-        return sorted((Line(g) for g in groups.values()), key=lambda l: (l.baseline, l.rect.x0))
+        lines = sorted((Line(g) for g in groups.values()), key=lambda l: (l.baseline, l.rect.x0))
+        return self.join_line_labels(lines)
+
+    @staticmethod
+    def join_line_labels(lines: list[Line]) -> list[Line]:
+        """A short label ("4:", "[2]") followed, further along the same baseline, by indented
+        content (algorithmic, numbered code): one line whose content starts after a tab."""
+        def is_label(span: Span) -> bool:
+            return span.horizontal and bool(LINE_LABEL_RE.match(span.text.strip()))
+
+        taken: set[int] = set()
+        for label in lines:
+            if len(label.spans) != 1 or not is_label(label.spans[0]) or id(label) in taken:
+                continue
+            candidates = [l for l in lines if l is not label and id(l) not in taken and l.spans[0].horizontal
+                          and abs(l.baseline - label.baseline) <= 0.2 * max(l.size, label.size)
+                          and 0.8 * max(l.size, label.size) <= l.rect.x0 - label.rect.x1 <= 8 * max(l.size, label.size)]
+            if candidates:
+                content = min(candidates, key=lambda l: l.rect.x0)
+                label.spans += content.spans
+                label.spans.sort(key=lambda s: s.rect.x0)
+                label.tab = content.spans[0]
+                taken.add(id(content))
+        out = [l for l in lines if id(l) not in taken]
+        for line in out:  # label and content close enough to have been joined already
+            if line.tab is None and len(line.spans) >= 2 and is_label(line.spans[0]) and \
+                    line.spans[1].rect.x0 - line.spans[0].rect.x1 >= 0.3 * line.size:
+                line.tab = line.spans[1]
+
+        # Description lists: labels of different widths ending (right-aligned) or starting
+        # (left-aligned) at the same x, with the items' text starting at one common x.
+        def splits(line: Line) -> dict[int, Span]:
+            spans = line.spans
+            if len(spans) < 2 or not all(s.horizontal for s in spans) or spans[0].text.strip() in BULLET_GLYPHS \
+                    or ENUM_RE.match(spans[0].text.strip()):
+                return {}
+            width = line.rect.w
+            return {k: spans[k] for k in range(1, len(spans))
+                    if spans[k].rect.x0 - spans[k - 1].rect.x1 >= 0.2 * line.size
+                    and spans[k - 1].rect.x1 - spans[0].rect.x0 <= 0.45 * width}
+
+        for a, b in zip(out, out[1:]):
+            if a.tab is not None and b.tab is not None:
+                continue
+            if abs(a.size - b.size) > 0.5 or not 0 < b.baseline - a.baseline <= 2.5 * a.size:
+                continue
+            if abs(a.spans[0].rect.x0 - b.spans[0].rect.x0) <= 0.6:
+                continue  # labels start together: ordinary text already lines up the same way
+            sa, sb = splits(a), splits(b)
+            for ka, span_a in sa.items():
+                kb = next((k for k, s in sb.items() if abs(s.rect.x0 - span_a.rect.x0) <= 0.6
+                           and abs(b.spans[k - 1].rect.x1 - a.spans[ka - 1].rect.x1) <= 0.6), None)
+                if kb is not None and (a.tab is None or a.tab is span_a) and (b.tab is None or b.tab is sb[kb]):
+                    a.tab, b.tab = span_a, sb[kb]
+                    break
+        return out
 
     # -- line reasons -----------------------------------------------------------
 
@@ -678,6 +735,10 @@ class PageClassifier:
         if self.panel_of(line.rect) != self.panel_of(par.rect):
             return None
         left = abs(line.x0 - par.x0) <= 1.5
+        if par.first.tab is not None:  # hanging label: wrapped lines start under the text
+            if line.tab is not None:
+                return None
+            left = abs(line.x0 - par.first.tab.rect.x0) <= 1.5
         right = abs(line.x1 - last.x1) <= 1.5
         center = abs((line.x0 + line.x1) / 2 - (last.x0 + last.x1) / 2) <= 1.5
         if left:
@@ -766,7 +827,9 @@ class PageClassifier:
         else:
             # A nested item's bullet starts after its parent's text start, but not much further.
             x = min(par.rect.x0, par.bullet["bbox"][0]) if par.bullet else par.rect.x0
-            if not (box_rect.x0 - 1.5 <= x <= max(p.x0 for p in box) + 2 * par.size):
+            tabbed = par.first.tab is not None and any(abs(p.first.tab.rect.x0 - par.first.tab.rect.x0) <= 0.6
+                                                        for p in box if p.first.tab is not None)
+            if not tabbed and not (box_rect.x0 - 1.5 <= x <= max(p.x0 for p in box) + 2 * par.size):
                 return False
             if not (par.rect.x0 < box_rect.x1 and box_rect.x0 < par.rect.x1):
                 return False
@@ -822,6 +885,8 @@ class PageClassifier:
                             sep = ""
                         else:
                             sep = " "
+                    elif span is line.tab:
+                        sep = "\t"
                     else:
                         sep = " " if span.rect.x0 - prev.rect.x1 > 0.15 * line.size else ""
                     if sep and not runs[-1]["text"].endswith(" ") and not text.startswith(" "):
@@ -1285,6 +1350,7 @@ class PageClassifier:
                 "paragraphs": [{
                     "align": p.align, "level": p.level, "bullet": p.bullet, "size": round(p.size, 2),
                     "text_x0": round(p.x0, 2),
+                    "tab_x0": round(p.first.tab.rect.x0, 2) if p.first.tab else None,
                     "lines": [{"baseline": round(l.baseline, 2), "x0": round(l.x0, 2), "x1": round(l.x1, 2)}
                               for l in p.lines],
                     "runs": self.runs(p, code_indent(p, rect.x0) if code else ""),

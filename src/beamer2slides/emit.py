@@ -290,6 +290,9 @@ def text_box_requests(el: dict, slide_id: str, object_id: str, scale: float, fon
         if p["bullet"]:
             # Slides ends the bullet glyph BULLET_GAP before indentFirstLine, whatever the glyph.
             first_indent = (p["bullet"]["bbox"][2] - left_pdf) * scale + BULLET_GAP
+        elif p.get("tab_x0") and not el.get("code"):
+            # "label<TAB>content": a tab after the hanging label jumps to indentStart.
+            first_indent, text_indent = text_indent, (p["tab_x0"] - left_pdf) * scale
         else:
             first_indent = text_indent
         reqs.append({"updateParagraphStyle": {

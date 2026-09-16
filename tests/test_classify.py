@@ -123,6 +123,23 @@ def test_diagram_with_circles_edge_labels_and_stealth_tips():
     assert [round(l["to"][0]) for l in d["lines"]] == [164, 247]
 
 
+def test_algorithm_line_numbers_use_tabs():
+    slide = deck("11_research_talk")["slides"][3]
+    boxes = [e for e in texts(slide) if e["role"] != "title"]
+    assert len(boxes) == 1, "numbers and indented statements stay in one box"
+    paras = boxes[0]["paragraphs"]
+    assert [paragraph_text(p).split("\t")[0] for p in paras[1:]] == ["1:", "2:", "3:", "4:", "5:", "6:"]
+    tabs = [p["tab_x0"] for p in paras[1:]]
+    assert tabs[1] == tabs[2] == tabs[4] and tabs[3] > tabs[1] > tabs[0]  # nesting depth survives
+
+
+def test_description_items_use_tabs():
+    slide = deck("01_basic")["slides"][2]
+    paras = [p for e in texts(slide) for p in e["paragraphs"] if p["tab_x0"]]
+    assert [paragraph_text(p) for p in paras] == ["Term\tIts definition", "Longer term\tAnother definition"]
+    assert paras[0]["tab_x0"] == paras[1]["tab_x0"] and paras[0]["text_x0"] > paras[1]["text_x0"]
+
+
 def test_madrid_blocks_tables_and_footer():
     d = deck("04_theme_blocks")
     assert kinds(d["slides"][1]).count("shape") >= 6  # block title bars and bodies
