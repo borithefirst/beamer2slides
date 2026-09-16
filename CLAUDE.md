@@ -39,7 +39,13 @@ a per-slide background picture.
 - Smoke test: `tools/slides_smoke.py`.
 - **`presentations.create` ignores `pageSize`**: new decks are always 720 × 405 pt (16:9).
   4:3 decks need another route (e.g. upload a blank 4:3 .pptx with Drive conversion).
-- `getThumbnail` LARGE = 1600 px wide (1600 × 900 for 16:9).
+- `getThumbnail` LARGE = 1600 px wide (1600 × 900 for 16:9). Thumbnail download URLs
+  occasionally fail with SSL EOF; `gslides.save_thumbnail` retries.
+- Object IDs must be 5–50 characters.
+- **Font calibration** (`tools/calibrate.py`, results in `docs/calibration.md` and
+  `calibration/fonts.json`): in API-created text boxes the first baseline sits at
+  6.48 pt + 0.968 em and the line pitch is 1.19 em **for every font**. Default substitute
+  for CM Sans is Lato at size / 1.020; titles (CMSS12) need their own factor (~1.035).
 
 ## Environment
 - Windows, PowerShell. Python 3.12 venv in `.venv` (`.venv\Scripts\python.exe`).

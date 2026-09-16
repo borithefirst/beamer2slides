@@ -1,0 +1,722 @@
+{
+  "slide_width_pt": 720,
+  "width_size_pt": 18,
+  "vertical_sizes_pt": [
+    14,
+    24,
+    40
+  ],
+  "presentationId": "1XwSTYZ6heTI2EJu1-C4kp3CNK3vOFfphjqhk8PtDIyY",
+  "reference": {
+    "engine": "pdflatex",
+    "rows": {
+      "pangram": {
+        "font": "CMSS10",
+        "size": 10.909,
+        "ink_width": 206.0
+      },
+      "item": {
+        "font": "CMSS10",
+        "size": 10.909,
+        "ink_width": 235.08333333333334
+      },
+      "lorem": {
+        "font": "CMSS10",
+        "size": 10.909,
+        "ink_width": 248.49999999999997
+      },
+      "digits": {
+        "font": "CMSS10",
+        "size": 10.909,
+        "ink_width": 179.91666666666666
+      },
+      "caps": {
+        "font": "CMSS10",
+        "size": 10.909,
+        "ink_width": 230.33333333333334
+      },
+      "bold": {
+        "font": "CMSSBX10",
+        "size": 10.909,
+        "ink_width": 225.75
+      },
+      "italic": {
+        "font": "CMSSI10",
+        "size": 10.909,
+        "ink_width": 205.58333333333334
+      },
+      "title": {
+        "font": "CMSS12",
+        "size": 14.346,
+        "ink_width": 183.0
+      }
+    },
+    "cap_height_em": 0.6951383364425736,
+    "cap_font": "CMSS10"
+  },
+  "fonts": {
+    "Arial": {
+      "width_ratio": {
+        "text_mean": 1.0416,
+        "text_spread": 0.0257,
+        "relative_to_text": {
+          "caps": 0.9799,
+          "digits": 0.9606,
+          "bold": 0.9882,
+          "italic": 1.0023,
+          "title": 1.0349
+        },
+        "max_relative_deviation": 0.0394,
+        "by_row": {
+          "pangram": 1.0432,
+          "item": 1.0279,
+          "lorem": 1.0536,
+          "digits": 1.0005,
+          "caps": 1.0206,
+          "bold": 1.0293,
+          "italic": 1.044,
+          "title": 1.0779
+        }
+      },
+      "ink_widths_pt_at_18": {
+        "pangram": 354.6,
+        "item": 398.7,
+        "lorem": 432.0,
+        "digits": 297.0,
+        "caps": 387.9,
+        "bold": 383.4,
+        "italic": 354.15,
+        "title": 247.5
+      },
+      "cap_height_em": 0.7132,
+      "cap_height_vs_cm_after_width_match": 0.9851,
+      "first_baseline_offset": {
+        "a_pt": 6.481,
+        "b_em": 0.968,
+        "max_residual_pt": 0.136
+      },
+      "left_ink_offset": {
+        "a_pt": 6.705,
+        "b_em": 0.0863,
+        "max_residual_pt": 0.023
+      },
+      "line_pitch_em": {
+        "soft_break": 1.1896,
+        "paragraph": 1.1896
+      },
+      "same_widths_as_arial": false
+    },
+    "Open Sans": {
+      "width_ratio": {
+        "text_mean": 1.1022,
+        "text_spread": 0.021,
+        "relative_to_text": {
+          "caps": 0.8616,
+          "digits": 0.9132,
+          "bold": 0.9723,
+          "italic": 0.9401,
+          "title": 1.0367
+        },
+        "max_relative_deviation": 0.1384,
+        "by_row": {
+          "pangram": 1.0975,
+          "item": 1.094,
+          "lorem": 1.115,
+          "digits": 1.0065,
+          "caps": 0.9496,
+          "bold": 1.0716,
+          "italic": 1.0361,
+          "title": 1.1426
+        }
+      },
+      "ink_widths_pt_at_18": {
+        "pangram": 373.05,
+        "item": 424.35,
+        "lorem": 457.2,
+        "digits": 298.8,
+        "caps": 360.9,
+        "bold": 399.15,
+        "italic": 351.45,
+        "title": 262.35
+      },
+      "cap_height_em": 0.7095,
+      "cap_height_vs_cm_after_width_match": 0.926,
+      "first_baseline_offset": {
+        "a_pt": 6.481,
+        "b_em": 0.968,
+        "max_residual_pt": 0.136
+      },
+      "left_ink_offset": {
+        "a_pt": 6.597,
+        "b_em": 0.102,
+        "max_residual_pt": 0.204
+      },
+      "line_pitch_em": {
+        "soft_break": 1.1896,
+        "paragraph": 1.1896
+      },
+      "same_widths_as_arial": false
+    },
+    "Lato": {
+      "width_ratio": {
+        "text_mean": 1.0203,
+        "text_spread": 0.0164,
+        "relative_to_text": {
+          "caps": 0.9412,
+          "digits": 0.9553,
+          "bold": 0.9294,
+          "italic": 0.9232,
+          "title": 1.0372
+        },
+        "max_relative_deviation": 0.0768,
+        "by_row": {
+          "pangram": 1.0141,
+          "item": 1.0163,
+          "lorem": 1.0305,
+          "digits": 0.9747,
+          "caps": 0.9603,
+          "bold": 0.9483,
+          "italic": 0.9419,
+          "title": 1.0583
+        }
+      },
+      "ink_widths_pt_at_18": {
+        "pangram": 344.7,
+        "item": 394.2,
+        "lorem": 422.55,
+        "digits": 289.35,
+        "caps": 364.95,
+        "bold": 353.25,
+        "italic": 319.5,
+        "title": 243.0
+      },
+      "cap_height_em": 0.7132,
+      "cap_height_vs_cm_after_width_match": 1.0056,
+      "first_baseline_offset": {
+        "a_pt": 6.481,
+        "b_em": 0.968,
+        "max_residual_pt": 0.136
+      },
+      "left_ink_offset": {
+        "a_pt": 6.705,
+        "b_em": 0.0863,
+        "max_residual_pt": 0.023
+      },
+      "line_pitch_em": {
+        "soft_break": 1.1896,
+        "paragraph": 1.1896
+      },
+      "same_widths_as_arial": false
+    },
+    "Source Sans 3": {
+      "width_ratio": {
+        "text_mean": 0.9822,
+        "text_spread": 0.0277,
+        "relative_to_text": {
+          "caps": 0.8595,
+          "digits": 0.9028,
+          "bold": 0.9581,
+          "italic": 0.9616,
+          "title": 1.0336
+        },
+        "max_relative_deviation": 0.1405,
+        "by_row": {
+          "pangram": 0.977,
+          "item": 0.971,
+          "lorem": 0.9987,
+          "digits": 0.8868,
+          "caps": 0.8442,
+          "bold": 0.9411,
+          "italic": 0.9445,
+          "title": 1.0152
+        }
+      },
+      "ink_widths_pt_at_18": {
+        "pangram": 332.1,
+        "item": 376.65,
+        "lorem": 409.5,
+        "digits": 263.25,
+        "caps": 320.85,
+        "bold": 350.55,
+        "italic": 320.4,
+        "title": 233.1
+      },
+      "cap_height_em": 0.6505,
+      "cap_height_vs_cm_after_width_match": 0.9528,
+      "first_baseline_offset": {
+        "a_pt": 6.481,
+        "b_em": 0.968,
+        "max_residual_pt": 0.136
+      },
+      "left_ink_offset": {
+        "a_pt": 6.705,
+        "b_em": 0.0863,
+        "max_residual_pt": 0.023
+      },
+      "line_pitch_em": {
+        "soft_break": 1.1896,
+        "paragraph": 1.1896
+      },
+      "same_widths_as_arial": false
+    },
+    "Source Sans Pro": {
+      "width_ratio": {
+        "text_mean": 0.9822,
+        "text_spread": 0.0277,
+        "relative_to_text": {
+          "caps": 0.8595,
+          "digits": 0.9028,
+          "bold": 0.9581,
+          "italic": 0.963,
+          "title": 1.0336
+        },
+        "max_relative_deviation": 0.1405,
+        "by_row": {
+          "pangram": 0.977,
+          "item": 0.971,
+          "lorem": 0.9987,
+          "digits": 0.8868,
+          "caps": 0.8442,
+          "bold": 0.9411,
+          "italic": 0.9459,
+          "title": 1.0152
+        }
+      },
+      "ink_widths_pt_at_18": {
+        "pangram": 332.1,
+        "item": 376.65,
+        "lorem": 409.5,
+        "digits": 263.25,
+        "caps": 320.85,
+        "bold": 350.55,
+        "italic": 320.85,
+        "title": 233.1
+      },
+      "cap_height_em": 0.6505,
+      "cap_height_vs_cm_after_width_match": 0.9528,
+      "first_baseline_offset": {
+        "a_pt": 6.481,
+        "b_em": 0.968,
+        "max_residual_pt": 0.136
+      },
+      "left_ink_offset": {
+        "a_pt": 6.705,
+        "b_em": 0.0863,
+        "max_residual_pt": 0.023
+      },
+      "line_pitch_em": {
+        "soft_break": 1.1896,
+        "paragraph": 1.1896
+      },
+      "same_widths_as_arial": false
+    },
+    "Fira Sans": {
+      "width_ratio": {
+        "text_mean": 1.0758,
+        "text_spread": 0.026,
+        "relative_to_text": {
+          "caps": 0.8243,
+          "digits": 0.8468,
+          "bold": 0.9084,
+          "italic": 0.9778,
+          "title": 1.0347
+        },
+        "max_relative_deviation": 0.1757,
+        "by_row": {
+          "pangram": 1.0671,
+          "item": 1.0673,
+          "lorem": 1.0931,
+          "digits": 0.911,
+          "caps": 0.8868,
+          "bold": 0.9773,
+          "italic": 1.052,
+          "title": 1.1132
+        }
+      },
+      "ink_widths_pt_at_18": {
+        "pangram": 362.7,
+        "item": 414.0,
+        "lorem": 448.2,
+        "digits": 270.45,
+        "caps": 337.05,
+        "bold": 364.05,
+        "italic": 356.85,
+        "title": 255.6
+      },
+      "cap_height_em": 0.685,
+      "cap_height_vs_cm_after_width_match": 0.916,
+      "first_baseline_offset": {
+        "a_pt": 6.481,
+        "b_em": 0.968,
+        "max_residual_pt": 0.136
+      },
+      "left_ink_offset": {
+        "a_pt": 7.155,
+        "b_em": 0.0863,
+        "max_residual_pt": 0.023
+      },
+      "line_pitch_em": {
+        "soft_break": 1.1896,
+        "paragraph": 1.1896
+      },
+      "same_widths_as_arial": false
+    },
+    "PT Sans": {
+      "width_ratio": {
+        "text_mean": 1.0131,
+        "text_spread": 0.0159,
+        "relative_to_text": {
+          "caps": 0.8718,
+          "digits": 0.9411,
+          "bold": 0.9038,
+          "italic": 0.9389,
+          "title": 1.0291
+        },
+        "max_relative_deviation": 0.1282,
+        "by_row": {
+          "pangram": 1.0048,
+          "item": 1.0139,
+          "lorem": 1.0207,
+          "digits": 0.9535,
+          "caps": 0.8833,
+          "bold": 0.9157,
+          "italic": 0.9512,
+          "title": 1.0426
+        }
+      },
+      "ink_widths_pt_at_18": {
+        "pangram": 341.55,
+        "item": 393.3,
+        "lorem": 418.5,
+        "digits": 283.05,
+        "caps": 335.7,
+        "bold": 341.1,
+        "italic": 322.65,
+        "title": 239.4
+      },
+      "cap_height_em": 0.7239,
+      "cap_height_vs_cm_after_width_match": 1.0279,
+      "first_baseline_offset": {
+        "a_pt": 6.713,
+        "b_em": 0.9706,
+        "max_residual_pt": 0.159
+      },
+      "left_ink_offset": {
+        "a_pt": 6.705,
+        "b_em": 0.0863,
+        "max_residual_pt": 0.023
+      },
+      "line_pitch_em": {
+        "soft_break": 1.1873,
+        "paragraph": 1.1873
+      },
+      "same_widths_as_arial": false
+    },
+    "Noto Sans": {
+      "width_ratio": {
+        "text_mean": 1.1122,
+        "text_spread": 0.0232,
+        "relative_to_text": {
+          "caps": 0.857,
+          "digits": 0.9076,
+          "bold": 0.9591,
+          "italic": 0.9327,
+          "title": 1.0414
+        },
+        "max_relative_deviation": 0.143,
+        "by_row": {
+          "pangram": 1.1028,
+          "item": 1.1079,
+          "lorem": 1.126,
+          "digits": 1.0095,
+          "caps": 0.9532,
+          "bold": 1.0667,
+          "italic": 1.0374,
+          "title": 1.1583
+        }
+      },
+      "ink_widths_pt_at_18": {
+        "pangram": 374.85,
+        "item": 429.75,
+        "lorem": 461.7,
+        "digits": 299.7,
+        "caps": 362.25,
+        "bold": 397.35,
+        "italic": 351.9,
+        "title": 265.95
+      },
+      "cap_height_em": 0.7095,
+      "cap_height_vs_cm_after_width_match": 0.9176,
+      "first_baseline_offset": {
+        "a_pt": 6.481,
+        "b_em": 0.968,
+        "max_residual_pt": 0.136
+      },
+      "left_ink_offset": {
+        "a_pt": 6.597,
+        "b_em": 0.102,
+        "max_residual_pt": 0.204
+      },
+      "line_pitch_em": {
+        "soft_break": 1.1896,
+        "paragraph": 1.1896
+      },
+      "same_widths_as_arial": false
+    },
+    "Roboto": {
+      "width_ratio": {
+        "text_mean": 1.0451,
+        "text_spread": 0.0322,
+        "relative_to_text": {
+          "caps": 0.9063,
+          "digits": 0.9326,
+          "bold": 0.9225,
+          "italic": 0.9672,
+          "title": 1.0351
+        },
+        "max_relative_deviation": 0.0937,
+        "by_row": {
+          "pangram": 1.0406,
+          "item": 1.0313,
+          "lorem": 1.0635,
+          "digits": 0.9747,
+          "caps": 0.9472,
+          "bold": 0.9641,
+          "italic": 1.0109,
+          "title": 1.0818
+        }
+      },
+      "ink_widths_pt_at_18": {
+        "pangram": 353.7,
+        "item": 400.05,
+        "lorem": 436.05,
+        "digits": 289.35,
+        "caps": 360.0,
+        "bold": 359.1,
+        "italic": 342.9,
+        "title": 248.4
+      },
+      "cap_height_em": 0.7095,
+      "cap_height_vs_cm_after_width_match": 0.9765,
+      "first_baseline_offset": {
+        "a_pt": 6.481,
+        "b_em": 0.968,
+        "max_residual_pt": 0.136
+      },
+      "left_ink_offset": {
+        "a_pt": 6.705,
+        "b_em": 0.0863,
+        "max_residual_pt": 0.023
+      },
+      "line_pitch_em": {
+        "soft_break": 1.1896,
+        "paragraph": 1.1896
+      },
+      "same_widths_as_arial": false
+    },
+    "IBM Plex Sans": {
+      "width_ratio": {
+        "text_mean": 1.055,
+        "text_spread": 0.0258,
+        "relative_to_text": {
+          "caps": 0.8945,
+          "digits": 0.9828,
+          "bold": 0.9527,
+          "italic": 0.9733,
+          "title": 1.0515
+        },
+        "max_relative_deviation": 0.1055,
+        "by_row": {
+          "pangram": 1.0485,
+          "item": 1.0453,
+          "lorem": 1.0711,
+          "digits": 1.0368,
+          "caps": 0.9437,
+          "bold": 1.0051,
+          "italic": 1.0268,
+          "title": 1.1093
+        }
+      },
+      "ink_widths_pt_at_18": {
+        "pangram": 356.4,
+        "item": 405.45,
+        "lorem": 439.2,
+        "digits": 307.8,
+        "caps": 358.65,
+        "bold": 374.4,
+        "italic": 348.3,
+        "title": 254.7
+      },
+      "cap_height_em": 0.6887,
+      "cap_height_vs_cm_after_width_match": 0.9392,
+      "first_baseline_offset": {
+        "a_pt": 6.481,
+        "b_em": 0.968,
+        "max_residual_pt": 0.136
+      },
+      "left_ink_offset": {
+        "a_pt": 6.379,
+        "b_em": 0.1047,
+        "max_residual_pt": 0.091
+      },
+      "line_pitch_em": {
+        "soft_break": 1.1896,
+        "paragraph": 1.1896
+      },
+      "same_widths_as_arial": false
+    },
+    "Nunito Sans": {
+      "width_ratio": {
+        "text_mean": 1.0609,
+        "text_spread": 0.0092,
+        "relative_to_text": {
+          "caps": 0.9353,
+          "digits": 0.9745,
+          "bold": 0.9429,
+          "italic": 0.9954,
+          "title": 1.0253
+        },
+        "max_relative_deviation": 0.0647,
+        "by_row": {
+          "pangram": 1.0565,
+          "item": 1.0604,
+          "lorem": 1.0657,
+          "digits": 1.0338,
+          "caps": 0.9922,
+          "bold": 1.0003,
+          "italic": 1.056,
+          "title": 1.0877
+        }
+      },
+      "ink_widths_pt_at_18": {
+        "pangram": 359.1,
+        "item": 411.3,
+        "lorem": 436.95,
+        "digits": 306.9,
+        "caps": 377.1,
+        "bold": 372.6,
+        "italic": 358.2,
+        "title": 249.75
+      },
+      "cap_height_em": 0.6987,
+      "cap_height_vs_cm_after_width_match": 0.9475,
+      "first_baseline_offset": {
+        "a_pt": 6.481,
+        "b_em": 0.968,
+        "max_residual_pt": 0.136
+      },
+      "left_ink_offset": {
+        "a_pt": 6.705,
+        "b_em": 0.0863,
+        "max_residual_pt": 0.023
+      },
+      "line_pitch_em": {
+        "soft_break": 1.1896,
+        "paragraph": 1.1896
+      },
+      "same_widths_as_arial": false
+    },
+    "Inter": {
+      "width_ratio": {
+        "text_mean": 1.1156,
+        "text_spread": 0.0284,
+        "relative_to_text": {
+          "caps": 0.9096,
+          "digits": 0.943,
+          "bold": 0.9389,
+          "italic": 1.0049,
+          "title": 1.0312
+        },
+        "max_relative_deviation": 0.0904,
+        "by_row": {
+          "pangram": 1.1187,
+          "item": 1.0998,
+          "lorem": 1.1282,
+          "digits": 1.052,
+          "caps": 1.0147,
+          "bold": 1.0474,
+          "italic": 1.121,
+          "title": 1.1504
+        }
+      },
+      "ink_widths_pt_at_18": {
+        "pangram": 380.25,
+        "item": 426.6,
+        "lorem": 462.6,
+        "digits": 312.3,
+        "caps": 385.65,
+        "bold": 390.15,
+        "italic": 380.25,
+        "title": 264.15
+      },
+      "cap_height_em": 0.7232,
+      "cap_height_vs_cm_after_width_match": 0.9326,
+      "first_baseline_offset": {
+        "a_pt": 6.481,
+        "b_em": 0.968,
+        "max_residual_pt": 0.136
+      },
+      "left_ink_offset": {
+        "a_pt": 6.705,
+        "b_em": 0.0863,
+        "max_residual_pt": 0.023
+      },
+      "line_pitch_em": {
+        "soft_break": 1.1896,
+        "paragraph": 1.1896
+      },
+      "same_widths_as_arial": false
+    },
+    "Carlito": {
+      "width_ratio": {
+        "text_mean": 0.9609,
+        "text_spread": 0.0181,
+        "relative_to_text": {
+          "caps": 0.8576,
+          "digits": 0.9449,
+          "bold": 0.9278,
+          "italic": 0.9844,
+          "title": 1.0382
+        },
+        "max_relative_deviation": 0.1424,
+        "by_row": {
+          "pangram": 0.9532,
+          "item": 0.9583,
+          "lorem": 0.9713,
+          "digits": 0.908,
+          "caps": 0.8241,
+          "bold": 0.8916,
+          "italic": 0.9459,
+          "title": 0.9976
+        }
+      },
+      "ink_widths_pt_at_18": {
+        "pangram": 324.0,
+        "item": 371.7,
+        "lorem": 398.25,
+        "digits": 269.55,
+        "caps": 313.2,
+        "bold": 332.1,
+        "italic": 320.85,
+        "title": 229.05
+      },
+      "cap_height_em": 0.6298,
+      "cap_height_vs_cm_after_width_match": 0.9429,
+      "first_baseline_offset": {
+        "a_pt": 6.481,
+        "b_em": 0.968,
+        "max_residual_pt": 0.136
+      },
+      "left_ink_offset": {
+        "a_pt": 6.813,
+        "b_em": 0.0706,
+        "max_residual_pt": 0.159
+      },
+      "line_pitch_em": {
+        "soft_break": 1.1896,
+        "paragraph": 1.1896
+      },
+      "same_widths_as_arial": false
+    }
+  }
+}
