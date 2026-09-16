@@ -48,6 +48,10 @@ a per-slide background picture.
 - Hanging labels (`Line.tab`, paragraph `tab_x0`): algorithmic line numbers, description
   items and item labels without a Slides preset are written `label<TAB>text` with
   indentFirstLine at the label and indentStart at the text (Slides tabs jump to indentStart).
+- Layouts (`style_layout_placeholders`, `write_layout_texts`): every layout's TITLE /
+  CENTERED_TITLE placeholder gets the position and text style of the deck's frame titles /
+  title page, BODY placeholders the most common body font, and shared footer texts go
+  onto all layouts. A slide added later in Slides then looks like the converted ones.
 - Backgrounds: identical PNGs are uploaded once; the most common background is set on the
   master and all layouts, and those slides inherit it. Frame counters (`FRAME_COUNTER_RE`) become
   per-slide text elements (role `footer`), so theme backgrounds become identical.

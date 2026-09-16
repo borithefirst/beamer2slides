@@ -703,13 +703,67 @@ def write_layout_texts(slides, pid: str, texts: list[dict], scale: float, fonts:
     it is edited once for the whole deck. Previous runs' layout texts are replaced."""
     pres = execute(slides.presentations().get(
         presentationId=pid, fields="layouts(objectId,layoutProperties,pageElements(objectId))"))
-    layouts = [l for l in pres.get("layouts", []) if l.get("layoutProperties", {}).get("name") in ("TITLE", "TITLE_ONLY", "BLANK")]
+    layouts = pres.get("layouts", [])  # all of them: slides added later in Slides get the footer too
     # All old ones first: object IDs are unique across the whole presentation.
     reqs = [{"deleteObject": {"objectId": e["objectId"]}} for l in pres.get("layouts", [])
             for e in l.get("pageElements", []) if e["objectId"].startswith(LAYOUT_TEXT_PREFIX)]
     for li, layout in enumerate(layouts):
         for ti, el in enumerate(texts):
             reqs += text_box_requests(el, layout["objectId"], f"{LAYOUT_TEXT_PREFIX}{li}_{ti}", scale, fonts)
+    if reqs:
+        execute(slides.presentations().batchUpdate(presentationId=pid, body={"requests": reqs}))
+
+
+def style_layout_placeholders(slides, pid: str, deck: dict, scale: float, fonts: FontMapper, dy: float) -> None:
+    """Title and body placeholders of every layout take the deck's own look (font, size,
+    colour, title position), so slides added later in Slides match the converted ones."""
+    texts = [(s, e) for s in deck["slides"] for e in s["elements"] if e["kind"] == "text" and e["paragraphs"][0]["runs"]]
+    frame_title = next((e for s, e in texts if e["role"] == "title" and not s.get("title_page")), None)
+    page_title = next((e for s, e in texts if e["role"] == "title" and s.get("title_page")), None) or frame_title
+    body_runs = Counter((r["font"], r["size"], r["color"], r["family"]) for s, e in texts if e["role"] == "body"
+                        for p in e["paragraphs"] for r in p["runs"] for _ in range(len(r["text"])))
+    body = None
+    if body_runs:
+        font, size, color, family = body_runs.most_common(1)[0][0]
+        body = {"font": font, "size": size, "color": color, "family": family, "bold": False, "italic": False}
+    pres = execute(slides.presentations().get(presentationId=pid, fields=(
+        "layouts(objectId,pageElements(objectId,size,transform,shape/placeholder/type))")))
+    reqs = []
+    for layout in pres.get("layouts", []):
+        for pe in layout.get("pageElements", []):
+            kind = pe.get("shape", {}).get("placeholder", {}).get("type")
+            if kind in ("TITLE", "CENTERED_TITLE"):
+                el = page_title if kind == "CENTERED_TITLE" else frame_title
+                if el is None:
+                    continue
+                p = el["paragraphs"][0]
+                run = p["runs"][0]
+                z = fonts(run, scale)[1]
+                x = p["text_x0"] * scale - PAD_X
+                if p["align"] == "center":
+                    x = min(x, 0.1 * SLIDE_W)
+                w = SLIDE_W - 2 * max(x, 10)
+                h = 2 * LINE_EM * z + 2 * BASELINE_A
+                y = p["lines"][0]["baseline"] * scale - (BASELINE_A + ASCENT_EM * z) + dy
+                reqs.append({"updatePageElementTransform": {"objectId": pe["objectId"], "applyMode": "ABSOLUTE", "transform": {
+                    "scaleX": w / (pe["size"]["width"]["magnitude"] / EMU_PER_PT),
+                    "scaleY": h / (pe["size"]["height"]["magnitude"] / EMU_PER_PT), "unit": "EMU",
+                    "translateX": round(max(x, 10) * EMU_PER_PT), "translateY": round(max(0.0, y) * EMU_PER_PT)}}})
+                reqs.append({"updateShapeProperties": {"objectId": pe["objectId"], "fields": "contentAlignment",
+                                                       "shapeProperties": {"contentAlignment": "TOP"}}})
+                align = {"left": "START", "center": "CENTER", "right": "END"}[p["align"]]
+            elif kind == "BODY" and body:
+                run, align = body, "START"
+            else:
+                continue
+            style, fields = fonts.text_style(run, scale)
+            style["foregroundColor"] = rgb(run["color"])
+            reqs += [
+                {"updateTextStyle": {"objectId": pe["objectId"], "textRange": {"type": "ALL"}, "style": style,
+                                     "fields": ",".join(fields + ["foregroundColor"])}},
+                {"updateParagraphStyle": {"objectId": pe["objectId"], "textRange": {"type": "ALL"},
+                                          "style": {"alignment": align}, "fields": "alignment"}},
+            ]
     if reqs:
         execute(slides.presentations().batchUpdate(presentationId=pid, body={"requests": reqs}))
 
@@ -819,6 +873,8 @@ def emit(deck: dict, out: Path, title: str, new_deck: bool = False) -> dict:
         reqs += [{"deleteObject": {"objectId": oid}} for oid in old]
         batch_with_image_retry(slides, pid, reqs)
         write_layout_texts(slides, pid, deck.get("layout_texts", []), scale, fonts)
+        style_layout_placeholders(slides, pid, deck, scale, fonts,
+                                  0.0 if abs(page_h / page_w - 9 / 16) < 0.003 else PPTX_TITLE_DY)
 
         # Placeholder sizes (needed to resize them) and any extra layout placeholders.
         created = execute(slides.presentations().get(
