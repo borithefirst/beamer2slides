@@ -263,9 +263,14 @@ def text_box_requests(el: dict, slide_id: str, object_id: str, scale: float, fon
             if not run["text"]:
                 continue
             style, fields = fonts.text_style(run, scale)
-            style.update({"smallCaps": run["smallcaps"], "foregroundColor": rgb(run["color"]), "underline": False,
+            style.update({"smallCaps": run["smallcaps"], "foregroundColor": rgb(run["color"]),
+                          "underline": bool(run.get("underline")),
                           "baselineOffset": {"super": "SUPERSCRIPT", "sub": "SUBSCRIPT"}.get(run.get("script"), "NONE")})
-            fields = ",".join(fields + ["smallCaps", "foregroundColor", "underline", "baselineOffset"])
+            fields = fields + ["smallCaps", "foregroundColor", "underline", "baselineOffset"]
+            if run.get("highlight"):
+                style["backgroundColor"] = rgb(run["highlight"])
+                fields.append("backgroundColor")
+            fields = ",".join(fields)
             if run["link"] and run["link"].startswith("#page="):
                 target = page_slide.get(int(run["link"][6:])) if page_slide else None
                 if target:

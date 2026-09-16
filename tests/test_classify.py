@@ -104,6 +104,14 @@ def test_simple_tikz_diagram_becomes_native():
     assert kinds(deck("03_figures")["slides"][2]).count("image") == 1
 
 
+def test_underline_and_colorbox_become_text_styles():
+    slide = deck("11_research_talk")["slides"][5]
+    runs = [r for e in texts(slide) for p in e["paragraphs"] for r in p["runs"]]
+    assert [r["text"] for r in runs if r["underline"]] == ["underlined"]
+    assert [(r["text"], r["highlight"]) for r in runs if r["highlight"]] == [("Highlighted", "#fff200")]
+    assert sum(len(e["strokes"]) for e in texts(slide)) == 2  # both drawings leave the background
+
+
 def test_madrid_blocks_tables_and_footer():
     d = deck("04_theme_blocks")
     assert kinds(d["slides"][1]).count("shape") >= 6  # block title bars and bodies

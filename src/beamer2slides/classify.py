@@ -123,6 +123,8 @@ class Span:
     horizontal: bool
     info: FontInfo
     link: str | None = None
+    underline: bool = False
+    highlight: str | None = None  # background colour (\colorbox)
 
 
 @dataclass(eq=False)
@@ -268,7 +270,7 @@ def span_runs(spans: list[Span]) -> list[dict]:
             text = " " + text
         style = {"font": s.font, "family": s.info.family, "size": round(s.size, 2), "bold": s.info.bold,
                  "italic": s.info.italic, "smallcaps": s.info.smallcaps, "color": s.color,
-                 "link": s.link, "script": None}
+                 "link": s.link, "script": None, "underline": s.underline, "highlight": s.highlight}
         if runs and all(runs[-1][k] == v for k, v in style.items()):
             runs[-1]["text"] += text
         else:
@@ -323,11 +325,61 @@ class PageClassifier:
             return True
         return (r.h <= 3 and r.w >= 0.5 * self.W) or (r.w <= 3 and r.h >= 0.5 * self.H)
 
+    def text_decorations(self, spans: list[Span]) -> None:
+        """Underlines and \\colorbox highlights become text styles: a thin rule just below a
+        stretch of words, or a filled box tightly around words and touching no other graphics.
+        Sets the span attributes and remembers the drawings (they leave the background with
+        the text, and are not graphics)."""
+        self.decor_ids: set[str] = set()
+        self.decor_rects: dict[str, list[Rect]] = {}  # span id -> drawings styling it
+        flat = [s for s in spans if s.horizontal and s.text.strip()]
+        drawings = [(d, Rect.of(d["bbox"])) for d in self.page["drawings"]]
+        for d, r in drawings:
+            if self.is_decoration(r) or r.w < 2 or r.w * r.h >= 0.95 * self.W * self.H:
+                continue
+            ops = d["items"]
+            if r.h <= 1.2 and ((d["type"] == "f" and ops == "re") or (d["type"] == "s" and ops == "l")):
+                words = sorted((s for s in flat if r.x0 - 1 <= s.rect.x0 and s.rect.x1 <= r.x1 + 1
+                                and 0 < r.cy - s.baseline <= 0.45 * s.size), key=lambda s: s.rect.x0)
+                if not words:
+                    continue
+                size = max(s.size for s in words)
+                gaps = [b.rect.x0 - a.rect.x1 for a, b in zip(words, words[1:])]
+                covered = sum(s.rect.w for s in words)
+                below = any(s.rect.x0 < r.x1 and r.x0 < s.rect.x1 and s.baseline > r.cy and s.rect.y0 < r.cy + 0.25 * size
+                            for s in flat)
+                if below or covered < 0.8 * r.w or any(g > 0.6 * size for g in gaps) or \
+                        abs(words[0].rect.x0 - r.x0) > 0.3 * size or abs(words[-1].rect.x1 - r.x1) > 0.3 * size:
+                    continue
+                for s in words:
+                    s.underline = True
+            elif d["type"] == "f" and ops == "re" and d.get("fill") and d.get("fill_opacity", 1.0) >= 0.99:
+                inside = [s for s in flat if r.contains_rect(s.rect, tol=0.5)]
+                if not inside or any(s.rect.intersects(r) and s not in inside for s in flat):
+                    continue
+                size = max(s.size for s in inside)
+                if not 0.9 * size <= r.h <= 2.2 * size or len({round(s.baseline) for s in inside}) != 1:
+                    continue
+                if sum(s.rect.w for s in inside) < 0.6 * r.w or \
+                        any(o is not d and ro.expand(2).intersects(r) and not r.contains_rect(ro, tol=0)
+                            for o, ro in drawings if ro.w * ro.h < 0.95 * self.W * self.H):
+                    continue  # part of a figure (a filled TikZ node with lines attached)
+                for s in inside:
+                    s.highlight = d["fill"]
+                words = inside
+            else:
+                continue
+            self.decor_ids.add(d["id"])
+            for s in words:
+                self.decor_rects.setdefault(s.id, []).append(r)
+
     def analyse_graphics(self) -> None:
         graphics = []
         rules: dict[tuple[int, int], list[Rect]] = {}
         self.decorations: list[Rect] = []
         for d in self.page["drawings"]:
+            if d["id"] in self.decor_ids:
+                continue
             r = Rect.of(d["bbox"])
             if r.w * r.h >= 0.95 * self.W * self.H:
                 continue  # page background
@@ -756,7 +808,8 @@ class PageClassifier:
                     main = line.main
                     runs.append({"text": FRACTION_SLASH, "font": main.font, "family": main.info.family,
                                  "size": round(line.size, 2), "bold": False, "italic": False, "smallcaps": False,
-                                 "color": main.color, "link": main.link, "script": None})
+                                 "color": main.color, "link": main.link, "script": None,
+                                 "underline": False, "highlight": None})
                     continue
                 text = span.text
                 if forced == "sub":  # denominator: follows the slash directly
@@ -789,7 +842,12 @@ class PageClassifier:
                     "size": round(line.size if script else span.size, 2),
                     "bold": span.info.bold, "italic": italic, "smallcaps": span.info.smallcaps,
                     "color": span.color, "link": span.link, "script": script,
+                    "underline": span.underline, "highlight": span.highlight,
                 }
+                if runs and runs[-1]["text"].endswith(" ") and (runs[-1]["underline"], runs[-1]["highlight"]) != \
+                        (style["underline"], style["highlight"]) and (runs[-1]["underline"] or runs[-1]["highlight"]):
+                    runs[-1]["text"] = runs[-1]["text"][:-1]  # an underline or highlight ends at the word
+                    text = " " + text
                 if runs and all(runs[-1][k] == v for k, v in style.items()):
                     runs[-1]["text"] += text
                 else:
@@ -1088,8 +1146,10 @@ class PageClassifier:
         return out
 
     def classify(self) -> dict:
+        spans = self.spans()
+        self.text_decorations(spans)
         self.analyse_graphics()
-        lines = self.build_lines(self.spans())
+        lines = self.build_lines(spans)
         self.assign_reasons(lines)
         body_lines = [l for l in lines if l.reason is None and abs(l.size - self.body) < 1]
         self.text_margin = min((l.rect.x0 for l in body_lines), default=0.08 * self.W)
@@ -1113,8 +1173,11 @@ class PageClassifier:
                 } for p in box],
                 "code": code,
                 "spans": [s.id for p in box for s in p.spans],
-                # Fraction bars now written as text: they leave the background with the glyphs.
-                "strokes": [f[0].as_list() for p in box for l in p.lines for f in l.fractions],
+                # Fraction bars now written as text, underlines and highlight boxes now text
+                # styles: they leave the background with the glyphs.
+                "strokes": [f[0].as_list() for p in box for l in p.lines for f in l.fractions] +
+                           list({tuple(r.as_list()): r.as_list() for p in box for s in p.spans
+                                 for r in self.decor_rects.get(s.id, [])}.values()),
             })
 
         text_spans = {sid for e in elements for sid in e["spans"]}
