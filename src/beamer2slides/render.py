@@ -41,8 +41,63 @@ def crop_figure(page: pymupdf.Page, bbox: list[float], raw_images: list[dict], p
     return [pix.width, pix.height]
 
 
+SHAPE_SAMPLE_ZOOM = 2.0
+
+
+def _fill_fraction(page: pymupdf.Page, rect: pymupdf.Rect, fill: str, avoid: list[pymupdf.Rect]) -> float:
+    """Share of sample points inside `rect` (away from text and pictures) that render in `fill`."""
+    pix = page.get_pixmap(matrix=pymupdf.Matrix(SHAPE_SAMPLE_ZOOM, SHAPE_SAMPLE_ZOOM), clip=rect, alpha=False)
+    img = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width, pix.n)[..., :3].astype(int)
+    target = np.array([int(fill[i:i + 2], 16) for i in (1, 3, 5)])
+    ys = np.linspace(0, pix.height - 1, 12).astype(int)
+    xs = np.linspace(0, pix.width - 1, 40).astype(int)
+    hits = total = 0
+    for y in ys:
+        for x in xs:
+            px, py = rect.x0 + x / SHAPE_SAMPLE_ZOOM, rect.y0 + y / SHAPE_SAMPLE_ZOOM
+            if any(a.contains(pymupdf.Point(px, py)) for a in avoid):
+                continue
+            total += 1
+            hits += int(np.abs(img[y, x] - target).max() <= 12)
+    return hits / total if total else 0.0
+
+
+def verify_and_remove_shapes(original: pymupdf.Page, page: pymupdf.Page, slide: dict, raw_page: dict) -> None:
+    """Keep only shapes whose panel visibly shows its fill colour (beamer draws shadows as
+    black rectangles under a soft mask), then remove those panels from the background."""
+    avoid = [pymupdf.Rect(s["bbox"]) for s in raw_page["spans"]] + \
+            [pymupdf.Rect(i["bbox"]) for i in raw_page["images"]] + \
+            [pymupdf.Rect(e["bbox"]) for e in slide["elements"] if e["kind"] == "image"]
+    keep = []
+    for el in slide["elements"]:
+        if el["kind"] != "shape":
+            keep.append(el)
+            continue
+        inset = el["radius"] + 1.5  # stay clear of rounded corners and anti-aliased edges
+        probe = pymupdf.Rect(el["bbox"]) + (inset, 1.5, -inset, -1.5)
+        if probe.is_empty or _fill_fraction(original, probe, el["fill"], avoid) < 0.9:
+            continue
+        keep.append(el)
+    slide["elements"] = keep
+    remaining = [e for e in keep if e["kind"] == "shape"]
+    for margin in (1.5, 5.0):  # MuPDF's "covered" test is conservative; widen if a panel survived
+        if not remaining:
+            break
+        for el in remaining:
+            page.add_redact_annot(pymupdf.Rect(el["bbox"]) + (-margin, -margin, margin, margin), fill=False)
+        page.apply_redactions(images=pymupdf.PDF_REDACT_IMAGE_NONE,
+                              graphics=pymupdf.PDF_REDACT_LINE_ART_REMOVE_IF_COVERED,
+                              text=pymupdf.PDF_REDACT_TEXT_NONE)
+        remaining = [el for el in remaining
+                     if _fill_fraction(page, pymupdf.Rect(el["bbox"]) + (el["radius"] + 1.5, 1.5, -el["radius"] - 1.5, -1.5),
+                                       el["fill"], avoid) >= 0.9]
+    if remaining:  # could not be removed: leave those panels in the background only
+        slide["elements"] = [e for e in slide["elements"] if e not in remaining]
+
+
 def render_backgrounds(pdf: Path, raw: dict, deck: dict, out: Path) -> list[Path]:
     doc = pymupdf.open(pdf)
+    original = pymupdf.open(pdf)
     spans = {s["id"]: s for page in raw["pages"] for s in page["spans"]}
     for slide in deck["slides"]:
         page = doc[slide["page"]]
@@ -75,6 +130,9 @@ def render_backgrounds(pdf: Path, raw: dict, deck: dict, out: Path) -> list[Path
             page.apply_redactions(images=pymupdf.PDF_REDACT_IMAGE_NONE,
                                   graphics=pymupdf.PDF_REDACT_LINE_ART_REMOVE_IF_COVERED,
                                   text=pymupdf.PDF_REDACT_TEXT_NONE)
+
+        # Panels last: figure crops taken above still show the panel colour behind them.
+        verify_and_remove_shapes(original[slide["page"]], page, slide, raw["pages"][slide["page"]])
 
     clean = out / "background.pdf"
     # garbage>=3 deduplicates objects, which after redaction corrupts beamer's soft-mask

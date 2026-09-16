@@ -1,0 +1,113 @@
+% Realistic talk content, compiled once per theme by build_themes.py.
+% The preamble (documentclass + theme) is prepended by the build script.
+\usepackage{amsmath,amssymb,booktabs}
+\graphicspath{{../../../decks/img/}}
+\title[Short Title]{A Realistic Talk About Conversions}
+\subtitle{Robustness across beamer themes}
+\author[A.~Author]{Alice Author \and Bob Builder}
+\institute[Uni]{University of Examples}
+\date{September 2026}
+
+\begin{document}
+
+\begin{frame}
+  \titlepage
+\end{frame}
+
+\begin{frame}{Outline}
+  \tableofcontents
+\end{frame}
+
+\section{Introduction}
+
+\begin{frame}{Motivation}
+  \begin{itemize}
+    \item Slides written in \LaTeX{} are hard to edit collaboratively
+    \item Google Slides is \alert{easy to share}, but has no math typesetting
+    \item We want the best of both\footnote{Within reason.}
+      \begin{itemize}
+        \item Editable text where possible
+        \item Pictures where necessary
+      \end{itemize}
+  \end{itemize}
+\end{frame}
+
+\begin{frame}{Definitions}
+  \begin{definition}[Native element]
+    An element the user can edit directly in the target application.
+  \end{definition}
+  \begin{theorem}
+    For every deck $D$ there is a conversion $c(D)$ with $|c(D)| = |D|$.
+  \end{theorem}
+  \begin{proof}
+    Obvious.
+  \end{proof}
+\end{frame}
+
+\section{Method}
+
+\begin{frame}{Pipeline}
+  \framesubtitle{From PDF to slides}
+  \begin{enumerate}
+    \item Extract text spans, images and drawings
+    \item Classify: text, pictures, shapes, background
+    \item Render the background without converted content
+    \item Emit a Google Slides deck
+  \end{enumerate}
+  \begin{block}{Key idea}
+    Measure fidelity on Google's own renderer.
+  \end{block}
+\end{frame}
+
+\begin{frame}{Results}
+  \begin{columns}[T]
+    \column{0.5\textwidth}
+    \centering
+    \begin{tabular}{lrr}
+      \toprule
+      Deck & Native & Time \\
+      \midrule
+      Basic & 100\% & 12 s \\
+      Math & 80\% & 9 s \\
+      Figures & 85\% & 15 s \\
+      \bottomrule
+    \end{tabular}
+    \column{0.5\textwidth}
+    \includegraphics[width=\linewidth]{plot.png}
+  \end{columns}
+  \vspace{1em}
+  \begin{quote}
+    ``The text is editable.'' --- an early user
+  \end{quote}
+\end{frame}
+
+\begin{frame}{Math in context}
+  The loss is
+  \begin{equation}
+    \mathcal{L}(\theta) = \sum_{i=1}^{n} \bigl(y_i - f_\theta(x_i)\bigr)^2
+  \end{equation}
+  where $\theta \in \mathbb{R}^d$ and $n$ is the number of samples.
+  \begin{description}
+    \item[Inputs] slides as PDF
+    \item[Outputs] editable decks
+  \end{description}
+\end{frame}
+
+\section{Conclusion}
+
+\begin{frame}{References}
+  \begin{thebibliography}{9}
+    \bibitem{a} A.~Author. \newblock Converting slides. \newblock \emph{Journal of Slides}, 2025.
+    \bibitem{b} B.~Builder. \newblock Fidelity matters. \newblock In \emph{Proc.\ SlideConf}, 2026.
+  \end{thebibliography}
+\end{frame}
+
+\begin{frame}
+  \centering
+  {\Huge Thank you!}
+
+  \vspace{1em}
+  Questions?
+\end{frame}
+
+\end{document}

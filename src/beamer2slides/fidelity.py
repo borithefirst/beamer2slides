@@ -114,7 +114,8 @@ def measure(pdf: Path, out: Path, refresh: bool = False) -> dict:
             to_pt = 1 / px_per_slide_pt
             elements.append({
                 "id": oid,
-                "text": "".join(run["text"] for run in el["paragraphs"][0]["runs"])[:40] if is_text else "[picture]",
+                "text": "".join(run["text"] for run in el["paragraphs"][0]["runs"])[:40] if is_text
+                        else f"[{'picture' if el['kind'] == 'image' else el['shape'].lower()}]",
                 "dx_pt": round((bs[0] - br[0]) * to_pt, 2),
                 "dy_top_pt": round((bs[1] - br[1]) * to_pt, 2),
                 "dy_bottom_pt": round((bs[3] - br[3]) * to_pt, 2),
@@ -148,6 +149,6 @@ def print_report(report: dict) -> None:
                 print(f"{'':>15}missing in {e['missing']}: {e['id']}")
                 continue
             lines = f"{e['lines_slides']}/{e['lines_ref']}"
-            flag = "  <-- line count" if e["lines_slides"] != e["lines_ref"] else ""
+            flag = "  <-- line count" if e["lines_slides"] != e["lines_ref"] and not e["text"].startswith("[") else ""
             print(f"{'':>15}{e['dx_pt']:>6.1f} {e['dy_top_pt']:>7.1f} {e['dy_bottom_pt']:>7.1f} "
                   f"{e['width_ratio']:>6.3f} {lines:>6}  {e['text']!r}{flag}")

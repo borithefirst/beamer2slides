@@ -77,6 +77,10 @@ class Rect:
         return [round(v, 2) for v in (self.x0, self.y0, self.x1, self.y1)]
 
 
+def overlap(a: Rect, b: Rect) -> float:
+    return max(0.0, min(a.x1, b.x1) - max(a.x0, b.x0)) * max(0.0, min(a.y1, b.y1) - max(a.y0, b.y0))
+
+
 def union_all(rects) -> Rect:
     rects = list(rects)
     out = rects[0]
@@ -283,7 +287,8 @@ class PageClassifier:
             fill_only = d["type"] == "f" and set(d["items"]) <= set("relcq")
             if fill_only and r.w >= 0.25 * self.W and r.h >= 3:
                 self.panels.append({"bbox": r, "fill": d["fill"], "id": d["id"],
-                                    "rounded": "c" in d["items"]})
+                                    "rounded": "c" in d["items"], "corners": d.get("corners", {}),
+                                    "opacity": d.get("fill_opacity", 1.0), "image": False})
             elif d["type"] == "s" and r.h <= 1.0 and r.w <= 3 * self.body and set(d["items"]) <= {"l"}:
                 self.bars.append(r)  # fraction bars, radical overbars
             else:
@@ -303,9 +308,11 @@ class PageClassifier:
             if min(r.w, r.h) < SMALL_IMAGE_PT:
                 self.small_images.append((im, r))  # bullets, block shadows
             elif r.w >= 0.6 * self.W:
-                self.panels.append({"bbox": r, "fill": None, "id": im["id"], "rounded": False})
+                self.panels.append({"bbox": r, "fill": None, "id": im["id"], "rounded": False,
+                                    "corners": {}, "opacity": 1.0, "image": True})
             else:
                 graphics.append(r)
+        self.graphics = graphics
         self.regions = cluster_rects(graphics, gap=3.0) if graphics else []
 
     def panel_of(self, r: Rect) -> int | None:
@@ -657,6 +664,47 @@ class PageClassifier:
                         "bbox": c.expand(1.0).as_list(), "spans": spans})
         return out
 
+    def shapes(self, lines: list[Line], elements: list[dict]) -> list[dict]:
+        """Filled panels (beamer blocks and the like) that can become native shapes.
+
+        Only panels that are pure content containers qualify: not touching the page edge
+        (those are theme bars, better left in the background like a layout), opaque, and
+        with nothing on top that stays in the background (it would be hidden under the
+        shape). The render stage additionally checks the panel really shows its fill colour."""
+        used = {sid for e in elements for sid in e["spans"]}
+        leftovers = [s.rect for l in lines for s in l.spans if s.id not in used]
+        figures = [Rect.of(e["bbox"]) for e in elements if e["kind"] == "image"]
+        loose = [g for g in self.graphics if not any(f.expand(0.5).contains_rect(g) for f in figures)]
+        bullet_images = {p["bullet"]["image"] for e in elements if e["kind"] == "text"
+                         for p in e["paragraphs"] if p["bullet"] and p["bullet"]["kind"] == "image"}
+        out = []
+        for p in sorted(self.panels, key=lambda p: -p["bbox"].w * p["bbox"].h):
+            r = p["bbox"]
+            if p["image"] or not p["fill"] or p["opacity"] < 0.99:
+                continue
+            if r.x0 <= 1 or r.y0 <= 1 or r.x1 >= self.W - 1 or r.y1 >= self.H - 1:
+                continue
+            inner = r.expand(-0.5)
+            if any(inner.intersects(x) for x in leftovers):
+                continue
+            if any(overlap(inner, g) > 0.9 * max(g.w * g.h, 1e-6) for g in loose):
+                continue  # graphics mostly on the panel (edge decorations like shadows are fine)
+            if any(inner.contains_rect(ir, tol=0) and im["id"] not in bullet_images for im, ir in self.small_images):
+                continue
+            corners = set(p["corners"])
+            if not corners:
+                kind, flip = "RECTANGLE", False
+            elif corners == {"tl", "tr"}:
+                kind, flip = "ROUND_2_SAME_RECTANGLE", False
+            elif corners == {"bl", "br"}:
+                kind, flip = "ROUND_2_SAME_RECTANGLE", True  # same shape rotated 180°
+            else:
+                kind, flip = "ROUND_RECTANGLE", False
+            out.append({"id": f"p{self.page['index']}s{len(out)}", "kind": "shape", "role": "panel",
+                        "bbox": r.as_list(), "fill": p["fill"], "shape": kind, "flip": flip,
+                        "radius": max(p["corners"].values(), default=0.0), "drawing": p["id"], "spans": []})
+        return out
+
     def classify(self) -> dict:
         self.analyse_graphics()
         lines = self.build_lines(self.spans())
@@ -685,6 +733,7 @@ class PageClassifier:
 
         text_spans = {sid for e in elements for sid in e["spans"]}
         elements = self.figures(lines, elements) + elements  # pictures first: they sit below text
+        elements = self.shapes(lines, elements) + elements   # shapes below pictures
 
         used = {sid for e in elements for sid in e["spans"]}
         by_reason: dict[str, list[Span]] = {}

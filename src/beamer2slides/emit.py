@@ -259,6 +259,31 @@ def text_box_requests(el: dict, slide_id: str, object_id: str, scale: float, fon
     return reqs
 
 
+def shape_requests(el: dict, slide_id: str, object_id: str, scale: float) -> list[dict]:
+    x0, y0, x1, y1 = (v * scale for v in el["bbox"])
+    # ROUND_2_SAME_RECTANGLE rounds the top corners; for bottom corners flip both axes
+    # (a 180° rotation), which moves the origin to the opposite corner.
+    flip = -1 if el["flip"] else 1
+    tx, ty = (x1, y1) if el["flip"] else (x0, y0)
+    return [
+        {"createShape": {
+            "objectId": object_id, "shapeType": el["shape"],
+            "elementProperties": {
+                "pageObjectId": slide_id,
+                "size": {"width": emu(x1 - x0), "height": emu(y1 - y0)},
+                "transform": {"scaleX": flip, "scaleY": flip, "unit": "EMU",
+                              "translateX": round(tx * EMU_PER_PT), "translateY": round(ty * EMU_PER_PT)},
+            },
+        }},
+        {"updateShapeProperties": {
+            "objectId": object_id,
+            "shapeProperties": {"shapeBackgroundFill": {"solidFill": {"color": rgb(el["fill"])["opaqueColor"]}},
+                                "outline": {"propertyState": "NOT_RENDERED"}},
+            "fields": "shapeBackgroundFill.solidFill.color,outline.propertyState",
+        }},
+    ]
+
+
 def title_element(slide: dict) -> int | None:
     """Index of the element that becomes the slide's title placeholder."""
     for i, el in enumerate(slide["elements"]):
@@ -420,8 +445,11 @@ def emit(deck: dict, out: Path, title: str, new_deck: bool = False) -> dict:
             reqs = [{"deleteObject": {"objectId": e["objectId"]}}
                     for e in page_elements.get(slide_id, []) if e["objectId"] != title_oid]
             element_ids = []
-            for i, el in enumerate(slide["elements"]):  # figures come first, so text stays on top
-                if el["kind"] == "image":
+            for i, el in enumerate(slide["elements"]):  # shapes, then pictures, then text on top
+                if el["kind"] == "shape":
+                    oid = f"{slide_id}_s{i}"
+                    reqs += shape_requests(el, slide_id, oid, scale)
+                elif el["kind"] == "image":
                     oid = f"{slide_id}_f{i}"
                     reqs.append(image_request(el, slide_id, oid, scale, urls[el["file"]]))
                 else:
@@ -433,10 +461,15 @@ def emit(deck: dict, out: Path, title: str, new_deck: bool = False) -> dict:
                                        "base_h": size["height"]["magnitude"] / EMU_PER_PT, "dy": placeholder_dy}
                     reqs += text_box_requests(el, slide_id, oid, scale, fonts, placeholder)
                 element_ids.append(oid)
+            if title_oid and len(slide["elements"]) > 1:
+                # The placeholder was created with the slide, below everything added since.
+                reqs.append({"updatePageElementsZOrder": {"pageElementObjectIds": [title_oid],
+                                                          "operation": "BRING_TO_FRONT"}})
             batch_with_image_retry(slides, pid, reqs)
             state["slides"].append({"page": n, "objectId": slide_id, "elements": element_ids})
             kinds = [el["kind"] for el in slide["elements"]]
-            print(f"  slide {n + 1}: {kinds.count('text')} text boxes, {kinds.count('image')} pictures")
+            print(f"  slide {n + 1}: {kinds.count('text')} text boxes, {kinds.count('image')} pictures, "
+                  f"{kinds.count('shape')} shapes")
     finally:
         for file_id, perm_id in uploaded:
             try:
