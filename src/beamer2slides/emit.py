@@ -127,7 +127,7 @@ def vertical_layout(paras: list[dict], baselines: list[list[float]], sizes: list
 
 
 def text_box_requests(el: dict, slide_id: str, object_id: str, scale: float, fonts: FontMapper,
-                      placeholder: dict | None = None) -> list[dict]:
+                      placeholder: dict | None = None, page_slide: dict[int, str] | None = None) -> list[dict]:
     paras = el["paragraphs"]
     # A line is as tall as its largest run.
     sizes = [max(fonts(r, scale)[1] for r in p["runs"]) if p["runs"] else p["size"] * scale for p in paras]
@@ -229,7 +229,12 @@ def text_box_requests(el: dict, slide_id: str, object_id: str, scale: float, fon
                      "foregroundColor": rgb(run["color"]), "underline": False,
                      "baselineOffset": {"super": "SUPERSCRIPT", "sub": "SUBSCRIPT"}.get(run.get("script"), "NONE")}
             fields = "fontFamily,fontSize,bold,italic,smallCaps,foregroundColor,underline,baselineOffset"
-            if run["link"]:
+            if run["link"] and run["link"].startswith("#page="):
+                target = page_slide.get(int(run["link"][6:])) if page_slide else None
+                if target:
+                    style["link"] = {"pageObjectId": target}  # TOC entries jump to their slide
+                    fields += ",link"
+            elif run["link"]:
                 style["link"] = {"url": run["link"]}
                 fields += ",link"
             reqs.append({"updateTextStyle": {
@@ -476,7 +481,7 @@ def emit(deck: dict, out: Path, title: str, new_deck: bool = False) -> dict:
     uploaded: list[tuple[str, str]] = []
     urls: dict[str, str] = {}  # local file -> public URL
     try:
-        files = [s["background"] for s in deck["slides"]] + \
+        files = [s["background"] for s in deck["slides"] if not s.get("background_color")] + \
                 [e["file"] for s in deck["slides"] for e in s["elements"] if e["kind"] == "image"]
         for f in files:
             file_id, perm_id = upload_public_png(drive, out / f, folder)
@@ -505,8 +510,10 @@ def emit(deck: dict, out: Path, title: str, new_deck: bool = False) -> dict:
             reqs += [{"createSlide": create},
                      {"updatePageProperties": {
                          "objectId": slide_id,
-                         "pageProperties": {"pageBackgroundFill": {"stretchedPictureFill": {
-                             "contentUrl": urls[slide["background"]]}}},
+                         "pageProperties": {"pageBackgroundFill": (
+                             {"solidFill": {"color": rgb(slide["background_color"])["opaqueColor"]}}
+                             if slide.get("background_color") else
+                             {"stretchedPictureFill": {"contentUrl": urls[slide["background"]]}})},
                          "fields": "pageBackgroundFill"}}]
         reqs += [{"deleteObject": {"objectId": oid}} for oid in old]
         batch_with_image_retry(slides, pid, reqs)
@@ -516,6 +523,13 @@ def emit(deck: dict, out: Path, title: str, new_deck: bool = False) -> dict:
             presentationId=pid, fields="slides(objectId,pageElements(objectId,size))"))
         page_elements = {s["objectId"]: s.get("pageElements", []) for s in created["slides"]}
         placeholder_dy = 0.0 if abs(page_h / page_w - 9 / 16) < 0.003 else PPTX_TITLE_DY
+        # Internal link targets: PDF page -> slide. A skipped overlay step maps to the kept
+        # (last) step of its frame, which comes right after it.
+        kept = sorted(s["page"] for s in deck["slides"])
+        page_slide = {}
+        for page in range(kept[-1] + 1):
+            target = next(k for k in kept if k >= page)
+            page_slide[page] = f"b2s_s{target:03}"
 
         # Phase 2: content, one batch per slide.
         for slide in deck["slides"]:
@@ -543,7 +557,7 @@ def emit(deck: dict, out: Path, title: str, new_deck: bool = False) -> dict:
                         size = next(e["size"] for e in page_elements[slide_id] if e["objectId"] == oid)
                         placeholder = {"base_w": size["width"]["magnitude"] / EMU_PER_PT,
                                        "base_h": size["height"]["magnitude"] / EMU_PER_PT, "dy": placeholder_dy}
-                    reqs += text_box_requests(el, slide_id, oid, scale, fonts, placeholder)
+                    reqs += text_box_requests(el, slide_id, oid, scale, fonts, placeholder, page_slide)
                 element_ids.append(oid)
             if title_oid and len(slide["elements"]) > 1:
                 # The placeholder was created with the slide, below everything added since.

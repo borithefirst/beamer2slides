@@ -159,7 +159,19 @@ def render_backgrounds(pdf: Path, raw: dict, deck: dict, out: Path) -> list[Path
         if bullets:
             patch_rects(path, bullets, BACKGROUND_WIDTH_PX / slide["size"][0])
         slide["background"] = str(path.relative_to(out)).replace("\\", "/")
+        slide["background_color"] = uniform_color(path)
     return paths
+
+
+def uniform_color(png: Path, tolerance: int = 3) -> str | None:
+    """The single colour of a background with nothing left on it, else None. Such slides get
+    a plain Slides background colour instead of a picture."""
+    pix = pymupdf.Pixmap(str(png))
+    img = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width, pix.n)[..., :3]
+    ref = np.median(img[::17, ::17].reshape(-1, 3), axis=0)
+    if np.abs(img.astype(np.int16) - ref.astype(np.int16)).max() > tolerance:
+        return None
+    return "#" + "".join(f"{int(v):02x}" for v in ref)
 
 
 def render_pages(pdf: Path, out_dir: Path, width_px: int, prefix: str, pages: list[int]) -> list[Path]:

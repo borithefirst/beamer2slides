@@ -353,7 +353,8 @@ class PageClassifier:
     # -- lines ----------------------------------------------------------------
 
     def spans(self) -> list[Span]:
-        links = [(Rect.of(l["bbox"]), l["uri"]) for l in self.page["links"]]
+        # External links keep their URL; internal ones become "#page=N" (PDF page index).
+        links = [(Rect.of(l["bbox"]), l.get("uri") or f"#page={l['page']}") for l in self.page["links"]]
         out = []
         for s in self.page["spans"]:
             r = Rect.of(s["bbox"])
@@ -973,10 +974,25 @@ def mark_title_page(slides: list[dict], doc_title: str) -> None:
                 return
 
 
+def mark_big_headings(slides: list[dict], body: float) -> None:
+    """Slides without a frame title (section pages, "Thank you!") use their single, clearly
+    largest heading as the title, so it shows up in Slides' outline and navigation."""
+    for slide in slides:
+        texts = [e for e in slide["elements"] if e["kind"] == "text"]
+        if not texts or any(e["role"] == "title" for e in texts):
+            continue
+        sizes = sorted((max(p["size"] for p in e["paragraphs"]), i) for i, e in enumerate(texts))
+        size, i = sizes[-1]
+        runner_up = sizes[-2][0] if len(sizes) > 1 else 0.0
+        if size >= 1.3 * body and size >= 1.15 * runner_up and texts[i]["paragraphs"][0]["size"] == size:
+            texts[i]["role"] = "title"
+
+
 def classify(raw: dict) -> dict:
     body = body_size(raw)
     slides = [PageClassifier(page, body).classify() for page in raw["pages"]]
     mark_title_page(slides, raw["source"].get("title", ""))
+    mark_big_headings(slides, body)
     chars = sum(s["stats"]["chars"] for s in slides)
     native = sum(s["stats"]["chars_native"] for s in slides)
     return {

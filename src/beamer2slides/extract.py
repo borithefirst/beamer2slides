@@ -60,8 +60,12 @@ def extract_page(page: pymupdf.Page) -> dict:
         "corners": _rounded_corners(d),
     } for i, d in enumerate(page.get_drawings())]
 
-    links = [{"bbox": _r(link["from"]), "uri": link["uri"]}
-             for link in page.get_links() if link.get("uri")]
+    links = []
+    for link in page.get_links():
+        if link.get("uri"):
+            links.append({"bbox": _r(link["from"]), "uri": link["uri"]})
+        elif link["kind"] in (pymupdf.LINK_GOTO, pymupdf.LINK_NAMED) and link.get("page", -1) >= 0:
+            links.append({"bbox": _r(link["from"]), "page": link["page"]})  # TOC entries, \hyperlink
 
     return {
         "index": n, "label": page.get_label() or str(n + 1),
