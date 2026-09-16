@@ -142,9 +142,15 @@ def render_backgrounds(pdf: Path, raw: dict, deck: dict, out: Path) -> list[Path
     paths = render_pages(clean, out / "backgrounds", BACKGROUND_WIDTH_PX, "bg")
     images = {i["id"]: i for page in raw["pages"] for i in page["images"]}
     for slide, path in zip(deck["slides"], paths):
-        bullets = [images[p["bullet"]["image"]]["bbox"]
-                   for el in slide["elements"] if el["kind"] == "text" for p in el["paragraphs"]
-                   if p["bullet"] and p["bullet"]["kind"] == "image"]
+        bullets = []
+        for el in slide["elements"]:
+            for p in el.get("paragraphs", []):
+                b = p["bullet"]
+                if b and b["kind"] == "image":
+                    bullets.append(images[b["image"]]["bbox"])
+                elif b and b.get("patch"):  # number drawn on a vector box
+                    x0, y0, x1, y1 = b["bbox"]
+                    bullets.append([x0 - 0.5, y0 - 0.5, x1 + 0.5, y1 + 0.5])
         if bullets:
             patch_rects(path, bullets, BACKGROUND_WIDTH_PX / slide["size"][0])
         slide["background"] = str(path.relative_to(out)).replace("\\", "/")

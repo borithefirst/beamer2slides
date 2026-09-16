@@ -277,14 +277,28 @@ class PageClassifier:
 
     # -- graphics -------------------------------------------------------------
 
+    def is_decoration(self, r: Rect) -> bool:
+        """Theme artwork: things anchored to a page edge spanning much of it (sidebars, header
+        and footer bars), or hairlines running across most of the page."""
+        edges = (r.x0 <= 1) + (r.y0 <= 1) + (r.x1 >= self.W - 1) + (r.y1 >= self.H - 1)
+        if edges >= 2:
+            return True  # corner pieces (logo boxes, header/sidebar junctions)
+        if edges and (r.w >= 0.4 * self.W or r.h >= 0.4 * self.H):
+            return True
+        return (r.h <= 3 and r.w >= 0.5 * self.W) or (r.w <= 3 and r.h >= 0.5 * self.H)
+
     def analyse_graphics(self) -> None:
         graphics = []
         rules: dict[tuple[int, int], list[Rect]] = {}
+        self.decorations: list[Rect] = []
         for d in self.page["drawings"]:
             r = Rect.of(d["bbox"])
             if r.w * r.h >= 0.95 * self.W * self.H:
                 continue  # page background
             fill_only = d["type"] == "f" and set(d["items"]) <= set("relcq")
+            if self.is_decoration(r) and not (fill_only and r.h >= 3 and r.w >= 0.25 * self.W):
+                self.decorations.append(r)
+                continue
             if fill_only and r.w >= 0.25 * self.W and r.h >= 3:
                 self.panels.append({"bbox": r, "fill": d["fill"], "id": d["id"],
                                     "rounded": "c" in d["items"], "corners": d.get("corners", {}),
@@ -307,6 +321,8 @@ class PageClassifier:
             r = Rect.of(im["bbox"])
             if min(r.w, r.h) < SMALL_IMAGE_PT:
                 self.small_images.append((im, r))  # bullets, block shadows
+            elif self.is_decoration(r):
+                self.decorations.append(r)  # sidebar/header shading
             elif r.w >= 0.6 * self.W:
                 self.panels.append({"bbox": r, "fill": None, "id": im["id"], "rounded": False,
                                     "corners": {}, "opacity": 1.0, "image": True})
@@ -314,6 +330,11 @@ class PageClassifier:
                 graphics.append(r)
         self.graphics = graphics
         self.regions = cluster_rects(graphics, gap=3.0) if graphics else []
+
+    def on_edge_artwork(self, r: Rect) -> bool:
+        edge_panels = [p["bbox"] for p in self.panels
+                       if p["bbox"].x0 <= 1 or p["bbox"].y0 <= 1 or p["bbox"].x1 >= self.W - 1 or p["bbox"].y1 >= self.H - 1]
+        return any(d.contains(r.cx, r.cy) for d in self.decorations + edge_panels)
 
     def panel_of(self, r: Rect) -> int | None:
         """Innermost panel containing the rect's centre."""
@@ -365,6 +386,14 @@ class PageClassifier:
 
     # -- line reasons -----------------------------------------------------------
 
+    def inside_figure_share(self, line: Line) -> float:
+        """Share of the line's characters whose span centre lies in a figure region. A list
+        whose number sits in a drawn box has one character inside, not the whole line."""
+        total = sum(len(s.text.strip()) for s in line.spans) or 1
+        inside = sum(len(s.text.strip()) for s in line.spans
+                     if any(reg.expand(1).contains(s.rect.cx, s.rect.cy) for reg in self.regions))
+        return inside / total
+
     def detect_bullet(self, line: Line) -> None:
         spans = line.spans
         if len(spans) < 2:
@@ -378,6 +407,15 @@ class PageClassifier:
                 line.bullet = {"kind": kind, "text": token, "color": first.color, "bbox": first.rect.as_list()}
                 line.bullet_spans = [first]
                 return
+            # Numbers drawn on a small box or circle (e.g. Bergen's enumerate): the box is
+            # patched out of the background and replaced by a native numbered bullet.
+            if gap >= 0.25 * line.size and re.fullmatch(r"[0-9]{1,2}|[a-zA-Z]", token):
+                for g in self.graphics:
+                    if g.w <= 1.6 * line.size and g.h <= 1.6 * line.size and g.contains(first.rect.cx, first.rect.cy):
+                        line.bullet = {"kind": "number", "text": token, "color": first.color,
+                                       "bbox": g.as_list(), "patch": True}
+                        line.bullet_spans = [first]
+                        return
         # Image bullets (ball themes): a small image just left of the text, level with its
         # x-height. Numbered balls draw the digit as a small text span on top of the image.
         for im, ir in self.small_images:
@@ -393,6 +431,18 @@ class PageClassifier:
                 line.bullet_spans = on_image
                 return
 
+    def continues_prose(self, line: Line) -> bool:
+        """A short all-math line that is really the wrapped end of a text line above it
+        (same left edge, one line pitch higher) - not a display equation."""
+        for other in self.all_lines:
+            if other is line or other.reason is not None:
+                continue
+            pitch = line.baseline - other.baseline
+            if 0 < pitch <= 1.4 * line.size and abs(other.rect.x0 - line.rect.x0) <= 1.5 \
+                    and len(other.text.replace(" ", "")) >= 20:
+                return True
+        return False
+
     def math_kind(self, line: Line) -> str | None:
         """None for plain text, 'inline' for math that Slides text can carry (symbols,
         single-level sub/superscripts), 'complex' for anything that must stay a picture."""
@@ -407,7 +457,9 @@ class PageClassifier:
 
         if not (math_font or scripts or bars or formula_like or "�" in line.text):
             return None
-        if bars or formula_like or "�" in line.text:
+        if bars or "�" in line.text:
+            return "complex"
+        if formula_like and not self.continues_prose(line):
             return "complex"
         if any(s.font.upper().startswith("CMEX") for s in spans):
             return "complex"  # big operators, large delimiters
@@ -421,13 +473,16 @@ class PageClassifier:
         return "inline"
 
     def assign_reasons(self, lines: list[Line]) -> None:
+        self.all_lines = lines
         for line in lines:
             if not all(s.horizontal for s in line.spans):
                 line.reason = "rotated"
-            elif any(reg.expand(1).contains(s.rect.cx, s.rect.cy) for s in line.spans for reg in self.regions):
+            elif self.inside_figure_share(line) >= 0.5:
                 line.reason = "figure"
             elif line.size <= 0.7 * self.body and (line.rect.y1 <= 0.13 * self.H or line.rect.y0 >= 0.87 * self.H):
                 line.reason = "theme"
+            elif line.size < 0.78 * self.body and self.on_edge_artwork(line.rect):
+                line.reason = "theme"  # sidebar navigation, header/footer info
 
         # Short labels next to figures (axis ticks, axis labels) belong to the figure.
         regions = list(self.regions)
@@ -655,6 +710,8 @@ class PageClassifier:
         for c in cluster_rects(rects, gap=0.8 * self.body):
             if max(c.w, c.h) < 25 or c.w * c.h > 0.8 * self.W * self.H:
                 continue
+            if (c.y1 <= 0.15 * self.H or c.y0 >= 0.88 * self.H) and c.h <= 0.1 * self.H:
+                continue  # navigation dots and ornaments in the header/footer band
             if not any(r.intersects(c.expand(0.1)) for r in self.regions):
                 continue  # only stray rotated text, no graphics
             if any(t.intersects(c) for t in text_rects):
@@ -736,11 +793,12 @@ class PageClassifier:
         elements = self.shapes(lines, elements) + elements   # shapes below pictures
 
         used = {sid for e in elements for sid in e["spans"]}
+        paragraph_reason = {id(l): p.reason for p in paragraphs for l in p.lines}
         by_reason: dict[str, list[Span]] = {}
         for line in lines:
             for s in line.spans:
                 if s.id not in used:
-                    reason = line.reason or "unsure"
+                    reason = line.reason or paragraph_reason.get(id(line)) or "unsure"
                     by_reason.setdefault(reason, []).append(s)
         left = [{"reason": r, "spans": [s.id for s in ss], "bboxes": [s.rect.as_list() for s in ss]}
                 for r, ss in by_reason.items()]
