@@ -440,7 +440,7 @@ class PageClassifier:
         # graphic just left of the text at x-height.
         x0 = min(s.rect.x0 for s in spans)
         for g in self.graphics:
-            if 0.25 * line.size <= g.w <= 1.1 * line.size and 0.25 * line.size <= g.h <= 1.1 * line.size \
+            if 0.25 * line.size <= g.w <= 1.3 * line.size and 0.25 * line.size <= g.h <= 1.6 * line.size \
                     and g.x1 <= x0 + 0.5 and x0 - g.x1 <= 1.5 * line.size \
                     and line.baseline - 0.9 * line.size <= g.cy <= line.baseline + 0.1 * line.size:
                 line.bullet = {"kind": "shape", "text": "", "bbox": g.as_list(), "patch": True}
@@ -453,8 +453,9 @@ class PageClassifier:
             if other is line or other.reason is not None:
                 continue
             pitch = line.baseline - other.baseline
-            if 0 < pitch <= 1.4 * line.size and abs(other.rect.x0 - line.rect.x0) <= 1.5 \
-                    and len(other.text.replace(" ", "")) >= 20:
+            # Any word of the line above may start the text column (theorem labels can hang left).
+            aligned = any(abs(s.rect.x0 - line.rect.x0) <= 1.5 for s in other.spans)
+            if 0 < pitch <= 1.4 * line.size and aligned and len(other.text.replace(" ", "")) >= 20:
                 return True
         return False
 
@@ -499,13 +500,18 @@ class PageClassifier:
             elif line.size < 0.78 * self.body and self.on_edge_artwork(line.rect):
                 line.reason = "theme"  # sidebar navigation, header/footer info
 
+        # Bullets first: a short list item next to its icon bullet is not a figure label.
+        for line in lines:
+            if line.reason is None:
+                self.detect_bullet(line)
+
         # Short labels next to figures (axis ticks, axis labels) belong to the figure.
         regions = list(self.regions)
         changed = True
         while changed:
             changed = False
             for line in lines:
-                if line.reason is None and len(line.text.replace(" ", "")) <= 12 and \
+                if line.reason is None and not line.bullet and len(line.text.replace(" ", "")) <= 12 and \
                         any(reg.distance(line.rect) <= 0.8 * line.size for reg in regions):
                     line.reason = "figure"
                     regions.append(line.rect)
@@ -513,7 +519,6 @@ class PageClassifier:
 
         for line in lines:
             if line.reason is None:
-                self.detect_bullet(line)
                 kind = self.math_kind(line)
                 if kind == "complex":
                     line.reason = "math"
@@ -761,18 +766,30 @@ class PageClassifier:
         Skipped, so they stay in the background: specks (shadow corners, QED boxes),
         near-full-page artwork, and anything overlapping an editable text box."""
         label_spans = [s for l in lines if l.reason in ("figure", "rotated") for s in l.spans]
-        # Cluster word by word: one "line" of labels can span two neighbouring figures.
-        rects = list(self.regions) + [s.rect for s in label_spans]
         if not self.regions:
             return []
         text_rects = [Rect.of(e["bbox"]) for e in text_elements]
         out = []
+        # Tables first, from their rules: clustering could merge a table with a picture beside it.
+        for group in self.table_rules:
+            frame = union_all(r["rect"] for r in group).expand(1)
+            table = self.table_from(frame, label_spans, text_rects, len(out))
+            if table:
+                out.append(table)
+                taken = set(table["spans"])
+                label_spans = [s for s in label_spans if s.id not in taken]
+        table_frames = [Rect.of(t["bbox"]) for t in out]
+        regions = [r for r in self.regions if not any(f.expand(0.5).contains_rect(r) for f in table_frames)]
+        if not regions:
+            return out
+        # Cluster word by word: one "line" of labels can span two neighbouring figures.
+        rects = regions + [s.rect for s in label_spans]
         for c in cluster_rects(rects, gap=0.8 * self.body):
             if max(c.w, c.h) < 25 or c.w * c.h > 0.8 * self.W * self.H:
                 continue
             if (c.y1 <= 0.15 * self.H or c.y0 >= 0.88 * self.H) and c.h <= 0.1 * self.H:
                 continue  # navigation dots and ornaments in the header/footer band
-            if not any(r.intersects(c.expand(0.1)) for r in self.regions):
+            if not any(r.intersects(c.expand(0.1)) for r in regions):
                 continue  # only stray rotated text, no graphics
             if any(t.intersects(c) for t in text_rects):
                 continue
