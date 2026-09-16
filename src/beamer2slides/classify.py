@@ -959,28 +959,56 @@ class PageClassifier:
             elif d["type"] == "s" and ops == "l":
                 (x1, y1), (x2, y2) = path[0][1]
                 lines.append({"from": [x1, y1], "to": [x2, y2], "stroke": d["stroke"] or "#000000",
-                              "width": d["width"] or 0.4, "arrow_from": False, "arrow_to": False})
-            elif d["type"] == "s" and max(r.w, r.h) <= 6 and set(ops) <= {"c", "l"}:
-                tips.append(r)  # arrow heads are drawn as small separate strokes
+                              "width": d["width"] or 0.4, "arrow_from": None, "arrow_to": None})
+            elif max(r.w, r.h) <= 6 and set(ops) <= {"c", "l"}:
+                # Arrow heads are small separate paths: stroked (->), filled triangles (latex)
+                # or filled concave quadrilaterals (stealth).
+                if d["type"] == "s":
+                    style = "OPEN_ARROW"
+                else:
+                    style = "STEALTH_ARROW" if ops == "llll" else "FILL_ARROW"
+                points = [p for _, pts in path for p in pts]
+                tips.append((r, style, points))
             else:
                 return None
         if not nodes:
             return None
-        for tip in tips:
+        for tip, style, points in tips:
             ends = [(ln, end) for ln in lines for end in ("from", "to") if tip.expand(1).contains(*ln[end])]
             if not ends:
                 return None
             ln, end = ends[0]
-            ln["arrow_" + end] = True
+            ln["arrow_" + end] = style
+            if style != "OPEN_ARROW":
+                # TikZ stops the line where a filled head begins; Slides draws the head at the
+                # line's end, so extend the line to the tip.
+                other = ln["to" if end == "from" else "from"]
+                ux, uy = ln[end][0] - other[0], ln[end][1] - other[1]
+                length = (ux * ux + uy * uy) ** 0.5 or 1.0
+                ux, uy = ux / length, uy / length
+                reach = max((px - ln[end][0]) * ux + (py - ln[end][1]) * uy for px, py in points)
+                if reach > 0:
+                    ln[end] = [round(ln[end][0] + reach * ux, 2), round(ln[end][1] + reach * uy, 2)]
 
         spans = [s for s in label_spans if box.contains_rect(s.rect)]
+        free: list[Span] = []
         for s in spans:
             if s.info.family == "math" or not s.horizontal:
                 return None
             owners = [n for n in nodes if n["rect"].contains(s.rect.cx, s.rect.cy)]
-            if not owners:
-                return None  # labels on edges or floating: keep the picture
-            min(owners, key=lambda n: n["rect"].w * n["rect"].h)["spans"].append(s)
+            if owners:
+                min(owners, key=lambda n: n["rect"].w * n["rect"].h)["spans"].append(s)
+            else:
+                free.append(s)  # edge labels and captions: a text box in the group
+        # Free labels on one baseline and close together are one label.
+        for s in sorted(free, key=lambda s: (round(s.baseline), s.rect.x0)):
+            last = nodes[-1] if nodes and nodes[-1]["shape"] is None else None
+            if last and abs(last["spans"][-1].baseline - s.baseline) <= 0.3 * s.size and \
+                    s.rect.x0 - last["spans"][-1].rect.x1 <= 0.5 * s.size:
+                last["spans"].append(s)
+                last["rect"] = last["rect"].union(s.rect)
+            else:
+                nodes.append({"rect": s.rect, "shape": None, "spans": [s], "fill": None, "stroke": None, "width": None})
 
         out_nodes = []
         for n in nodes:

@@ -112,6 +112,17 @@ def test_underline_and_colorbox_become_text_styles():
     assert sum(len(e["strokes"]) for e in texts(slide)) == 2  # both drawings leave the background
 
 
+def test_diagram_with_circles_edge_labels_and_stealth_tips():
+    slide = deck("11_research_talk")["slides"][4]
+    d = [e for e in slide["elements"] if e["kind"] == "diagram"][0]
+    assert [n["shape"] for n in d["nodes"]] == ["ELLIPSE", "ELLIPSE", "RECTANGLE", None, None]
+    free = sorted("".join(r["text"] for r in n["paragraphs"][0]) for n in d["nodes"] if n["shape"] is None)
+    assert free == ["build", "parse"]
+    assert [l["arrow_to"] for l in d["lines"]] == ["STEALTH_ARROW"] * 2
+    # the lines reach the circle/rectangle outlines, where the tips end
+    assert [round(l["to"][0]) for l in d["lines"]] == [164, 247]
+
+
 def test_madrid_blocks_tables_and_footer():
     d = deck("04_theme_blocks")
     assert kinds(d["slides"][1]).count("shape") >= 6  # block title bars and bodies

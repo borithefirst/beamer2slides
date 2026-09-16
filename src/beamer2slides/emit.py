@@ -458,6 +458,12 @@ def table_requests(el: dict, slide_id: str, object_id: str, scale: float, fonts:
     return reqs
 
 
+def arrow_style(arrow) -> str:
+    if not arrow:
+        return "NONE"
+    return arrow if isinstance(arrow, str) else "OPEN_ARROW"
+
+
 def diagram_requests(el: dict, slide_id: str, object_id: str, scale: float, fonts: FontMapper) -> list[dict]:
     """Nodes become shapes with their label inside, edges become lines with arrow heads; the
     parts are grouped so the diagram moves as one piece but stays editable."""
@@ -478,33 +484,34 @@ def diagram_requests(el: dict, slide_id: str, object_id: str, scale: float, font
                                       "lineProperties": {
                                           "lineFill": {"solidFill": {"color": rgb(ln["stroke"])["opaqueColor"]}},
                                           "weight": pt(round(max(0.5, ln["width"] * scale), 2)),
-                                          "startArrow": "OPEN_ARROW" if ln["arrow_from"] else "NONE",
-                                          "endArrow": "OPEN_ARROW" if ln["arrow_to"] else "NONE"}}},
+                                          "startArrow": arrow_style(ln["arrow_from"]),
+                                          "endArrow": arrow_style(ln["arrow_to"])}}},
         ]
         children.append(oid)
     for j, node in enumerate(el["nodes"]):
         oid = f"{object_id}_n{j}"
         x0, y0, x1, y1 = (v * scale for v in node["bbox"])
-        props = {"contentAlignment": "MIDDLE", "autofit": {"autofitType": "NONE"},
+        props = None if node["shape"] is None else {"contentAlignment": "MIDDLE", "autofit": {"autofitType": "NONE"},
                  "shapeBackgroundFill": ({"solidFill": {"color": rgb(node["fill"])["opaqueColor"]}} if node["fill"]
                                          else {"propertyState": "NOT_RENDERED"}),
                  "outline": ({"outlineFill": {"solidFill": {"color": rgb(node["stroke"])["opaqueColor"]}},
                               "weight": pt(round(max(0.5, (node["width"] or 0.4) * scale), 2))}
                              if node["stroke"] else {"propertyState": "NOT_RENDERED"})}
-        fields = ["contentAlignment", "autofit.autofitType", "shapeBackgroundFill"]
-        fields += ["outline.outlineFill.solidFill.color", "outline.weight"] if node["stroke"] else ["outline.propertyState"]
-        if not node["fill"]:
-            fields[fields.index("shapeBackgroundFill")] = "shapeBackgroundFill.propertyState"
-        else:
-            fields[fields.index("shapeBackgroundFill")] = "shapeBackgroundFill.solidFill.color"
-        reqs += [
-            {"createShape": {"objectId": oid, "shapeType": node["shape"], "elementProperties": {
-                "pageObjectId": slide_id, "size": {"width": emu(x1 - x0), "height": emu(y1 - y0)},
-                "transform": {"scaleX": 1, "scaleY": 1, "unit": "EMU",
-                              "translateX": round(x0 * EMU_PER_PT), "translateY": round(y0 * EMU_PER_PT)}}}},
-            {"updateShapeProperties": {"objectId": oid, "shapeProperties": props, "fields": ",".join(fields)}},
-        ]
-        children.append(oid)
+        if props:  # free labels (edge labels, captions) have no shape, only the text box below
+            fields = ["contentAlignment", "autofit.autofitType", "shapeBackgroundFill"]
+            fields += ["outline.outlineFill.solidFill.color", "outline.weight"] if node["stroke"] else ["outline.propertyState"]
+            if not node["fill"]:
+                fields[fields.index("shapeBackgroundFill")] = "shapeBackgroundFill.propertyState"
+            else:
+                fields[fields.index("shapeBackgroundFill")] = "shapeBackgroundFill.solidFill.color"
+            reqs += [
+                {"createShape": {"objectId": oid, "shapeType": node["shape"], "elementProperties": {
+                    "pageObjectId": slide_id, "size": {"width": emu(x1 - x0), "height": emu(y1 - y0)},
+                    "transform": {"scaleX": 1, "scaleY": 1, "unit": "EMU",
+                                  "translateX": round(x0 * EMU_PER_PT), "translateY": round(y0 * EMU_PER_PT)}}}},
+                {"updateShapeProperties": {"objectId": oid, "shapeProperties": props, "fields": ",".join(fields)}},
+            ]
+            children.append(oid)
         text = "\n".join("".join(r["text"] for r in runs).strip() for runs in node["paragraphs"])
         if text:
             # TikZ nodes hug their text, but Slides shapes keep ~7 pt of inner padding the API can't
