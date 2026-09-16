@@ -707,9 +707,28 @@ class PageClassifier:
         }
 
 
+def mark_title_page(slides: list[dict], doc_title: str) -> None:
+    """On the title page, the box showing the document title (from the PDF metadata, which
+    beamer fills as "Title - Subtitle") becomes the slide's title."""
+    norm = lambda s: " ".join(s.casefold().split())
+    wanted = norm(doc_title)
+    if len(wanted) < 3:
+        return
+    for slide in slides[:2]:
+        texts = [e for e in slide["elements"] if e["kind"] == "text"]
+        if any(e["role"] == "title" for e in texts):
+            continue
+        for e in texts:
+            first = norm("".join(r["text"] for r in e["paragraphs"][0]["runs"]))
+            if len(first) >= 3 and wanted.startswith(first):
+                e["role"] = "title"
+                return
+
+
 def classify(raw: dict) -> dict:
     body = body_size(raw)
     slides = [PageClassifier(page, body).classify() for page in raw["pages"]]
+    mark_title_page(slides, raw["source"].get("title", ""))
     chars = sum(s["stats"]["chars"] for s in slides)
     native = sum(s["stats"]["chars_native"] for s in slides)
     return {

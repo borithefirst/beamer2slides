@@ -17,6 +17,20 @@ def _hex(rgb) -> str | None:
     return "#" + "".join(f"{round(max(0.0, min(1.0, c)) * 255):02x}" for c in rgb[:3])
 
 
+def _rounded_corners(d: dict) -> dict[str, float]:
+    """Which bbox corners of a path are drawn with a curve, and the curve's radius."""
+    r = d["rect"]
+    corners: dict[str, float] = {}
+    for item in d["items"]:
+        if item[0] != "c":
+            continue
+        p1, p4 = item[1], item[4]
+        mx, my = (p1.x + p4.x) / 2, (p1.y + p4.y) / 2
+        key = ("t" if my < (r.y0 + r.y1) / 2 else "b") + ("l" if mx < (r.x0 + r.x1) / 2 else "r")
+        corners[key] = round(max(abs(p4.x - p1.x), abs(p4.y - p1.y)), 2)
+    return corners
+
+
 def extract_page(page: pymupdf.Page) -> dict:
     n = page.number
     spans = []
@@ -42,6 +56,8 @@ def extract_page(page: pymupdf.Page) -> dict:
         "id": f"p{n}d{i}", "type": d["type"], "items": "".join(item[0] for item in d["items"]),
         "bbox": _r(d["rect"]), "fill": _hex(d.get("fill")), "stroke": _hex(d.get("color")),
         "width": round(d["width"], 2) if d.get("width") else None,
+        "fill_opacity": round(d.get("fill_opacity") or 1.0, 3),
+        "corners": _rounded_corners(d),
     } for i, d in enumerate(page.get_drawings())]
 
     links = [{"bbox": _r(link["from"]), "uri": link["uri"]}
@@ -58,6 +74,7 @@ def extract(pdf: Path) -> dict:
     doc = pymupdf.open(pdf)
     return {
         "version": 1,
-        "source": {"pdf": str(pdf), "producer": doc.metadata.get("producer"), "pages": doc.page_count},
+        "source": {"pdf": str(pdf), "producer": doc.metadata.get("producer"), "pages": doc.page_count,
+                   "title": doc.metadata.get("title") or ""},
         "pages": [extract_page(page) for page in doc],
     }

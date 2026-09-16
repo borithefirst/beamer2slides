@@ -25,6 +25,7 @@ LINE_EM = 1.195      # baseline pitch at lineSpacing 100
 DESCENT_EM = LINE_EM - ASCENT_EM
 PAD_X = 6.7          # box edge -> text start
 BULLET_GAP = 1.9     # bullet glyph's right edge sits this far before indentFirstLine
+PPTX_TITLE_DY = 3.9  # title placeholders of pptx-imported decks have a smaller top inset
 
 FONT_FOR_FAMILY = {"sans": "Lato", "serif": "Noto Serif", "mono": "Roboto Mono"}
 CMTT_ADVANCE_EM, ROBOTO_MONO_ADVANCE_EM = 0.525, 0.6
@@ -125,7 +126,8 @@ def vertical_layout(paras: list[dict], baselines: list[list[float]], sizes: list
     return ratios, space_above
 
 
-def text_box_requests(el: dict, slide_id: str, object_id: str, scale: float, fonts: FontMapper) -> list[dict]:
+def text_box_requests(el: dict, slide_id: str, object_id: str, scale: float, fonts: FontMapper,
+                      placeholder: dict | None = None) -> list[dict]:
     paras = el["paragraphs"]
     # A line is as tall as its largest run.
     sizes = [max(fonts(r, scale)[1] for r in p["runs"]) if p["runs"] else p["size"] * scale for p in paras]
@@ -153,15 +155,28 @@ def text_box_requests(el: dict, slide_id: str, object_id: str, scale: float, fon
     w = inner_w + 2 * PAD_X + slack
     h = last_baseline - y + DESCENT_EM * sizes[-1] + extra_below(ratios[-1], sizes[-1]) + 4
 
-    reqs = [{"createShape": {
-        "objectId": object_id, "shapeType": "TEXT_BOX",
-        "elementProperties": {
-            "pageObjectId": slide_id,
-            "size": {"width": emu(w), "height": emu(h)},
-            "transform": {"scaleX": 1, "scaleY": 1, "unit": "EMU",
-                          "translateX": round(x * EMU_PER_PT), "translateY": round(y * EMU_PER_PT)},
-        },
-    }}]
+    if placeholder:
+        # An existing layout placeholder (the slide title): its size is fixed at creation, so
+        # it is resized through the transform's scale. Text is not scaled by that.
+        y += placeholder["dy"]
+        reqs = [
+            {"updatePageElementTransform": {"objectId": object_id, "applyMode": "ABSOLUTE", "transform": {
+                "scaleX": w / placeholder["base_w"], "scaleY": h / placeholder["base_h"], "unit": "EMU",
+                "translateX": round(x * EMU_PER_PT), "translateY": round(y * EMU_PER_PT)}}},
+            {"updateShapeProperties": {"objectId": object_id, "fields": "contentAlignment,autofit.autofitType",
+                                       "shapeProperties": {"contentAlignment": "TOP",
+                                                           "autofit": {"autofitType": "NONE"}}}},
+        ]
+    else:
+        reqs = [{"createShape": {
+            "objectId": object_id, "shapeType": "TEXT_BOX",
+            "elementProperties": {
+                "pageObjectId": slide_id,
+                "size": {"width": emu(w), "height": emu(h)},
+                "transform": {"scaleX": 1, "scaleY": 1, "unit": "EMU",
+                              "translateX": round(x * EMU_PER_PT), "translateY": round(y * EMU_PER_PT)},
+            },
+        }}]
 
     texts = ["".join(r["text"] for r in p["runs"]) for p in paras]
     tabbed = "\n".join(("\t" * p["level"] if p["bullet"] else "") + t for p, t in zip(paras, texts))
@@ -242,6 +257,14 @@ def text_box_requests(el: dict, slide_id: str, object_id: str, scale: float, fon
             "fields": "alignment,lineSpacing,spaceAbove,spaceBelow,indentStart,indentFirstLine",
         }})
     return reqs
+
+
+def title_element(slide: dict) -> int | None:
+    """Index of the element that becomes the slide's title placeholder."""
+    for i, el in enumerate(slide["elements"]):
+        if el["kind"] == "text" and el["role"] == "title":
+            return i
+    return None
 
 
 def image_request(el: dict, slide_id: str, object_id: str, scale: float, url: str) -> dict:
@@ -361,17 +384,41 @@ def emit(deck: dict, out: Path, title: str, new_deck: bool = False) -> dict:
             execute(slides.presentations().batchUpdate(presentationId=pid, body={"requests": [
                 {"deleteObject": {"objectId": oid}} for oid in old if oid.startswith("b2s_s")]}))
             old = [oid for oid in old if not oid.startswith("b2s_s")]
-        cleanup = [{"deleteObject": {"objectId": oid}} for oid in old]
+        # Phase 1: slides with backgrounds. Slides with a frame title use the TITLE_ONLY layout
+        # and get their title placeholder mapped to our object ID.
+        reqs = []
         for slide in deck["slides"]:
             n = slide["page"]
             slide_id = f"b2s_s{n:03}"
-            reqs = [{"createSlide": {"objectId": slide_id, "insertionIndex": n,
-                                     "slideLayoutReference": {"predefinedLayout": "BLANK"}}},
-                    {"updatePageProperties": {
-                        "objectId": slide_id,
-                        "pageProperties": {"pageBackgroundFill": {"stretchedPictureFill": {
-                            "contentUrl": urls[slide["background"]]}}},
-                        "fields": "pageBackgroundFill"}}]
+            title_idx = title_element(slide)
+            create = {"objectId": slide_id, "insertionIndex": n,
+                      "slideLayoutReference": {"predefinedLayout": "TITLE_ONLY" if title_idx is not None else "BLANK"}}
+            if title_idx is not None:
+                create["placeholderIdMappings"] = [{"layoutPlaceholder": {"type": "TITLE", "index": 0},
+                                                    "objectId": f"{slide_id}_t{title_idx}"}]
+            reqs += [{"createSlide": create},
+                     {"updatePageProperties": {
+                         "objectId": slide_id,
+                         "pageProperties": {"pageBackgroundFill": {"stretchedPictureFill": {
+                             "contentUrl": urls[slide["background"]]}}},
+                         "fields": "pageBackgroundFill"}}]
+        reqs += [{"deleteObject": {"objectId": oid}} for oid in old]
+        batch_with_image_retry(slides, pid, reqs)
+
+        # Placeholder sizes (needed to resize them) and any extra layout placeholders.
+        created = execute(slides.presentations().get(
+            presentationId=pid, fields="slides(objectId,pageElements(objectId,size))"))
+        page_elements = {s["objectId"]: s.get("pageElements", []) for s in created["slides"]}
+        placeholder_dy = 0.0 if abs(page_h / page_w - 9 / 16) < 0.003 else PPTX_TITLE_DY
+
+        # Phase 2: content, one batch per slide.
+        for slide in deck["slides"]:
+            n = slide["page"]
+            slide_id = f"b2s_s{n:03}"
+            title_idx = title_element(slide)
+            title_oid = f"{slide_id}_t{title_idx}" if title_idx is not None else None
+            reqs = [{"deleteObject": {"objectId": e["objectId"]}}
+                    for e in page_elements.get(slide_id, []) if e["objectId"] != title_oid]
             element_ids = []
             for i, el in enumerate(slide["elements"]):  # figures come first, so text stays on top
                 if el["kind"] == "image":
@@ -379,10 +426,13 @@ def emit(deck: dict, out: Path, title: str, new_deck: bool = False) -> dict:
                     reqs.append(image_request(el, slide_id, oid, scale, urls[el["file"]]))
                 else:
                     oid = f"{slide_id}_t{i}"
-                    reqs += text_box_requests(el, slide_id, oid, scale, fonts)
+                    placeholder = None
+                    if oid == title_oid:
+                        size = next(e["size"] for e in page_elements[slide_id] if e["objectId"] == oid)
+                        placeholder = {"base_w": size["width"]["magnitude"] / EMU_PER_PT,
+                                       "base_h": size["height"]["magnitude"] / EMU_PER_PT, "dy": placeholder_dy}
+                    reqs += text_box_requests(el, slide_id, oid, scale, fonts, placeholder)
                 element_ids.append(oid)
-            if n == 0:
-                reqs = reqs + cleanup
             batch_with_image_retry(slides, pid, reqs)
             state["slides"].append({"page": n, "objectId": slide_id, "elements": element_ids})
             kinds = [el["kind"] for el in slide["elements"]]
