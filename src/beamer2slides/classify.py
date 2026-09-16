@@ -668,8 +668,10 @@ class PageClassifier:
                 par.role = "title"
         titles = [p for p in paragraphs if p.role == "title"]
         for par in paragraphs:
-            if par.role == "body" and par.rect.y0 < 0.2 * self.H and par.size < self.body + 0.5 and \
-                    any(0 < par.first.baseline - t.last.baseline <= 2 * t.size for t in titles):
+            # A frame subtitle sits right under the title, aligned with it, and is no list item.
+            if par.role == "body" and not par.bullet and par.rect.y0 < 0.2 * self.H and par.size < self.body + 0.5 and \
+                    any(0 < par.first.baseline - t.last.baseline <= 2 * t.size and abs(par.x0 - t.x0) <= 2
+                        for t in titles):
                 par.role = "subtitle"
         return paragraphs
 

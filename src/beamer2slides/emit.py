@@ -2,26 +2,31 @@
 
 import io
 import json
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from googleapiclient.errors import HttpError
 from googleapiclient.http import MediaFileUpload, MediaIoBaseUpload
 
 from .fonts import font_info, google_font
-from .google_auth import drive_service, slides_service
+from .google_auth import credentials, drive_service, slides_service
 from .gslides import EMU_PER_PT, emu, execute, pt
 
 ROOT = Path(__file__).resolve().parents[2]
 CALIBRATION = ROOT / "calibration" / "fonts.json"
 SLIDE_W = 720.0
-PPTX_MIME = "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+UPLOAD_THREADS = 6
+BATCH_MAX_REQUESTS = 400  # slides are sent together until a batch reaches this size
+PPTX_MIME ="application/vnd.openxmlformats-officedocument.presentationml.presentation"
 
 # Slides text box model, measured by tools/calibrate.py and the spacing probes
 # (docs/calibration.md).
 BASELINE_A = 6.48    # box top -> first baseline = A + ASCENT_EM * size
 ASCENT_EM = 0.968
-LINE_EM = 1.195      # baseline pitch at lineSpacing 100
+LINE_EM = 1.2        # baseline pitch at lineSpacing 100 (before pixel snapping)
+PX_PT = 0.75         # Slides snaps line pitches to whole CSS pixels
 DESCENT_EM = LINE_EM - ASCENT_EM
 PAD_X = 6.7          # box edge -> text start
 BULLET_GAP = 1.9     # bullet glyph's right edge sits this far before indentFirstLine
@@ -102,9 +107,19 @@ def extra_above(r: float, z: float) -> float:
     return 0.0 if r >= 1 else -(1 - r) * 0.75 * LINE_EM * z
 
 
+def snap(v: float) -> float:
+    """Slides lays lines out on whole CSS pixels (0.75 pt)."""
+    return round(v / PX_PT) * PX_PT
+
+
+def line_pitch(z: float, r: float) -> float:
+    """Baseline distance between wrapped lines of one paragraph."""
+    return snap(LINE_EM * z * r)
+
+
 def pitch_between(z1: float, r1: float, z2: float, r2: float) -> float:
     """Baseline distance from the last line of one paragraph to the first line of the next."""
-    return DESCENT_EM * z1 + ASCENT_EM * z2 + extra_below(r1, z1) + extra_above(r2, z2)
+    return snap(DESCENT_EM * z1 + ASCENT_EM * z2 + extra_below(r1, z1) + extra_above(r2, z2))
 
 
 def solve_increasing(f, target: float, lo: float = 0.5, hi: float = 3.0) -> float:
@@ -119,26 +134,34 @@ def vertical_layout(paras: list[dict], baselines: list[list[float]], sizes: list
 
     Slides ignores spaceAbove/spaceBelow between items of a bulleted list, so there the gap
     to the next item has to come from the item's own lineSpacing; for a wrapped item one
-    ratio covers its inner lines plus that gap, spreading the difference evenly."""
-    ratios = []
+    ratio covers its inner lines plus that gap, spreading the difference evenly.
+
+    Pitches snap to whole pixels, so each paragraph aims at the original position measured
+    from where Slides will actually have put the previous one: rounding errors don't add up."""
+    ratios: list[float] = []
+    space_above = [0.0] * len(paras)
+    first = baselines[0][0]  # predicted Slides baseline of the current paragraph's first line
     for i, (p, bl, z) in enumerate(zip(paras, baselines, sizes)):
         n = len(bl)
-        if i + 1 < len(paras) and p["bullet"] and paras[i + 1]["bullet"]:
-            target = baselines[i + 1][0] - bl[0]
+        has_next = i + 1 < len(paras)
+        list_link = has_next and p["bullet"] and paras[i + 1]["bullet"]
+        if list_link:
+            target = baselines[i + 1][0] - first
             zn = sizes[i + 1]
-            r = solve_increasing(lambda r: (n - 1) * LINE_EM * z * r + pitch_between(z, r, zn, 1.0), target)
+            r = solve_increasing(lambda r: (n - 1) * LINE_EM * z * r +
+                                 DESCENT_EM * z + ASCENT_EM * zn + extra_below(r, z), target)
         elif n > 1:
             r = (bl[-1] - bl[0]) / (n - 1) / (LINE_EM * z)
         else:
             r = 1.0
-        ratios.append(min(3.0, max(0.5, r)))
-    space_above = [0.0]
-    for i in range(1, len(paras)):
-        if paras[i - 1]["bullet"] and paras[i]["bullet"]:
-            space_above.append(0.0)
-            continue
-        gap = baselines[i][0] - baselines[i - 1][-1]
-        space_above.append(max(0.0, gap - pitch_between(sizes[i - 1], ratios[i - 1], sizes[i], ratios[i])))
+        r = min(3.0, max(0.5, r))
+        ratios.append(r)
+        last = first + (n - 1) * line_pitch(z, r)
+        if has_next:
+            natural = pitch_between(z, r, sizes[i + 1], 1.0)
+            if not list_link:
+                space_above[i + 1] = max(0.0, baselines[i + 1][0] - last - natural)
+            first = last + natural + space_above[i + 1]
     return ratios, space_above
 
 
@@ -456,11 +479,11 @@ def write_layout_texts(slides, pid: str, texts: list[dict], scale: float, fonts:
     it is edited once for the whole deck. Previous runs' layout texts are replaced."""
     pres = execute(slides.presentations().get(
         presentationId=pid, fields="layouts(objectId,layoutProperties,pageElements(objectId))"))
-    reqs = []
-    for li, layout in enumerate(l for l in pres.get("layouts", [])
-                                if l.get("layoutProperties", {}).get("name") in ("TITLE", "TITLE_ONLY", "BLANK")):
-        reqs += [{"deleteObject": {"objectId": e["objectId"]}} for e in layout.get("pageElements", [])
-                 if e["objectId"].startswith(LAYOUT_TEXT_PREFIX)]
+    layouts = [l for l in pres.get("layouts", []) if l.get("layoutProperties", {}).get("name") in ("TITLE", "TITLE_ONLY", "BLANK")]
+    # All old ones first: object IDs are unique across the whole presentation.
+    reqs = [{"deleteObject": {"objectId": e["objectId"]}} for l in pres.get("layouts", [])
+            for e in l.get("pageElements", []) if e["objectId"].startswith(LAYOUT_TEXT_PREFIX)]
+    for li, layout in enumerate(layouts):
         for ti, el in enumerate(texts):
             reqs += text_box_requests(el, layout["objectId"], f"{LAYOUT_TEXT_PREFIX}{li}_{ti}", scale, fonts)
     if reqs:
@@ -515,10 +538,18 @@ def emit(deck: dict, out: Path, title: str, new_deck: bool = False) -> dict:
     try:
         files = [s["background"] for s in deck["slides"] if not s.get("background_color")] + \
                 [e["file"] for s in deck["slides"] for e in s["elements"] if e["kind"] == "image"]
-        for f in files:
-            file_id, perm_id = upload_public_png(drive, out / f, folder)
-            uploaded.append((file_id, perm_id))
-            urls[f] = f"https://drive.google.com/uc?export=view&id={file_id}"
+        creds = credentials()
+        local = threading.local()
+
+        def upload(f: str) -> tuple[str, str]:
+            if not hasattr(local, "drive"):
+                local.drive = drive_service(creds)
+            return upload_public_png(local.drive, out / f, folder)
+
+        with ThreadPoolExecutor(max_workers=UPLOAD_THREADS) as pool:
+            for f, (file_id, perm_id) in zip(files, pool.map(upload, files)):
+                uploaded.append((file_id, perm_id))
+                urls[f] = f"https://drive.google.com/uc?export=view&id={file_id}"
         time.sleep(5)  # a fresh "anyone with the link" permission takes a moment to apply
 
         old = [s["objectId"] for s in pres.get("slides", [])]
@@ -569,7 +600,8 @@ def emit(deck: dict, out: Path, title: str, new_deck: bool = False) -> dict:
             target = next(k for k in kept if k >= page)
             page_slide[page] = f"b2s_s{target:03}"
 
-        # Phase 2: content, one batch per slide.
+        # Phase 2: content, batched over slides.
+        pending: list[dict] = []
         for slide in deck["slides"]:
             n = slide["page"]
             slide_id = f"b2s_s{n:03}"
@@ -603,17 +635,31 @@ def emit(deck: dict, out: Path, title: str, new_deck: bool = False) -> dict:
                 # The placeholder was created with the slide, below everything added since.
                 reqs.append({"updatePageElementsZOrder": {"pageElementObjectIds": [title_oid],
                                                           "operation": "BRING_TO_FRONT"}})
-            if reqs:  # a slide can be nothing but its background
-                batch_with_image_retry(slides, pid, reqs)
+            # Several slides per round trip; a slide's requests are never split across batches.
+            if pending and len(pending) + len(reqs) > BATCH_MAX_REQUESTS:
+                batch_with_image_retry(slides, pid, pending)
+                pending = []
+            pending += reqs
             state["slides"].append({"page": n, "objectId": slide_id, "elements": element_ids})
             kinds = [el["kind"] for el in slide["elements"]]
             print(f"  slide {n + 1}: {kinds.count('text')} text boxes, {kinds.count('image')} pictures, "
                   f"{kinds.count('shape')} shapes, {kinds.count('table')} tables")
+        if pending:
+            batch_with_image_retry(slides, pid, pending)
     finally:
-        for file_id, perm_id in uploaded:
+        creds = credentials()
+        local = threading.local()
+
+        def revoke(item: tuple[str, str]) -> None:
+            file_id, perm_id = item
+            if not hasattr(local, "drive"):
+                local.drive = drive_service(creds)
             try:
-                execute(drive.permissions().delete(fileId=file_id, permissionId=perm_id))
+                execute(local.drive.permissions().delete(fileId=file_id, permissionId=perm_id))
             except Exception as e:  # keep revoking the others
                 print(f"warning: could not revoke public link on {file_id}: {e}")
+
+        with ThreadPoolExecutor(max_workers=UPLOAD_THREADS) as pool:
+            list(pool.map(revoke, uploaded))
     (out / "emit.json").write_text(json.dumps(state, indent=1), encoding="utf-8")
     return state

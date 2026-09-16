@@ -37,6 +37,13 @@ a per-slide background picture.
   unless the taller Slides rows would collide with content below.
 - `shape`: opaque filled panels such as beamer blocks, not touching the page edge, with
   nothing left in the background on top; verified against the rendered colour.
+- Fonts: `fonts.google_font` passes Google fonts used in the PDF through with their weight
+  (weightedFontFamily, no width correction) and maps Helvetica/Times/Courier clones to
+  metric-compatible Arial/Times New Roman/Courier New. CM fonts use the calibrated substitutes.
+- Simple inline fractions (`classify.simple_fraction`) are written as ᵃ⁄ᵦ; their bars leave
+  the background via the text element's `strokes`.
+- Performance: uploads run in 6 threads (one Drive service per thread) and slide content is
+  sent in batches of up to 400 requests; a 45-slide deck converts in about 80 s.
 - Speaker notes: beamer note pages (`show notes`) or `show notes on second screen`
   (`notes.py`), written to the slide's speaker notes.
 - Everything else (display math, theme decoration, header/footer text) stays in the

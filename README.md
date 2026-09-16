@@ -6,10 +6,13 @@ and block panels become native Slides elements. Only what cannot be rebuilt fait
 slide background.
 
 ## What you get
-- **Text boxes** with the original fonts mapped to calibrated Google fonts (CM Sans → Lato,
-  CM Roman → PT Serif, CM Typewriter → Roboto Mono), colours, bold/italic/small caps, links.
-  Line breaks and positions match the PDF within a few points.
-- **Bullet and numbered lists** with nesting; **inline math** (`x ∈ ℝ`, `x²`, `aᵢ`) as text.
+- **Text boxes** with colours, bold/italic/small caps and links. Fonts that are Google fonts in
+  the PDF (Fira Sans, Source Sans, Roboto, …) keep their family and weight. Helvetica, Times,
+  Courier and their TeX Gyre/Nimbus clones become the metric-compatible Arial, Times New Roman
+  and Courier New. Computer Modern gets calibrated substitutes (CM Sans → Lato, CM Roman →
+  PT Serif, CM Typewriter → Roboto Mono). Line breaks and positions match the PDF within a few points.
+- **Bullet and numbered lists** with nesting (glyph, ball, drawn and icon bullets).
+- **Inline math** as text: `x ∈ ℝ`, `x²`, `aᵢ`, simple fractions `ᵃ⁄ᵦ`.
 - **Slide titles** in real title placeholders, so they show in Slides' outline and navigation.
 - **Tables** from `\hline`/booktabs tabulars as native Slides tables.
 - **Pictures** for figures, plots, raster images and display equations, each movable.

@@ -59,9 +59,10 @@ def credentials() -> Credentials:
     return creds
 
 
-def slides_service():
-    return build("slides", "v1", credentials=credentials(), cache_discovery=False)
+def slides_service(creds: Credentials | None = None):
+    return build("slides", "v1", credentials=creds or credentials(), cache_discovery=False)
 
 
-def drive_service():
-    return build("drive", "v3", credentials=credentials(), cache_discovery=False)
+def drive_service(creds: Credentials | None = None):
+    """Service objects are not thread-safe: build one per thread, sharing `creds`."""
+    return build("drive", "v3", credentials=creds or credentials(), cache_discovery=False)

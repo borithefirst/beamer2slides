@@ -30,6 +30,13 @@ Model used by `emit.vertical_layout`, for a line of size z with lineSpacing r:
 - **In bulleted lists, `spaceAbove` and `spaceBelow` between items are ignored** (except the
   first item's `spaceAbove`, which then shows above the list). The gap between items must
   therefore come from each item's lineSpacing.
+- **Line pitch snaps to whole CSS pixels (0.75 pt).** Measured over 12–14 lines at 21.2 pt:
+  pitch = round(1.2·z·r / 0.75) · 0.75 matches 9 of 11 lineSpacing values from 100% to 140%
+  exactly; the two others were at most 0.7 pt lower. So the base pitch is 1.2 em before
+  snapping, and the earlier 1.19–1.195 em estimates were pixel noise. Unmodelled, the
+  rounding adds up: a 15-entry TOC drifted by 5 pt. `emit.vertical_layout` therefore predicts
+  where Slides will put each line and aims every next paragraph at the original position
+  from there.
 - **Bullet glyphs** (arrow, diamond, disc alike) end ≈ 1.9 pt before `indentFirstLine`.
   Text starts at `indentStart`.
 - **Bullet colour and size cannot be set on their own.** A bullet takes a text style
