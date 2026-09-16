@@ -142,6 +142,16 @@ def test_serif_deck():
     assert "serif" in families
 
 
+def test_google_font_decks_keep_their_font_and_uncounted_frames():
+    from beamer2slides.fonts import google_font
+
+    d = deck("09_metropolis_fira")
+    assert len(d["slides"]) == 4, "title page and section page share a frame number but are not overlays"
+    assert d["stats"]["native_share"] == 1.0
+    fonts = {google_font(r["font"]) for s in d["slides"] for e in texts(s) for p in e["paragraphs"] for r in p["runs"]}
+    assert ("Fira Sans", 300, False) in fonts and ("Fira Sans", 700, False) in fonts
+
+
 # Minimum native text share per theme for the realistic talk (tests/themes/content.tex).
 THEME_FLOORS = {
     "default": 0.95, "Madrid": 0.9, "Warsaw": 0.75, "Berkeley": 0.75, "Bergen": 0.95,

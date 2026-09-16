@@ -512,6 +512,7 @@ class PageClassifier:
             changed = False
             for line in lines:
                 if line.reason is None and not line.bullet and len(line.text.replace(" ", "")) <= 12 and \
+                        line.size <= 1.15 * self.body and \
                         any(reg.distance(line.rect) <= 0.8 * line.size for reg in regions):
                     line.reason = "figure"
                     regions.append(line.rect)

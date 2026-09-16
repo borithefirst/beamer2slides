@@ -44,6 +44,53 @@ EC_VARIANTS = {
 }
 
 
+# PDF font name prefix (spaces removed) -> Google Fonts family available in Google Slides.
+GOOGLE_FAMILIES = {
+    "FiraSans": "Fira Sans", "FiraSansCondensed": "Fira Sans Condensed", "FiraMono": "Fira Mono",
+    "FiraCode": "Fira Code", "SourceSansPro": "Source Sans Pro", "SourceSans3": "Source Sans 3",
+    "SourceSerifPro": "Source Serif Pro", "SourceSerif4": "Source Serif 4", "SourceCodePro": "Source Code Pro",
+    "Roboto": "Roboto", "RobotoMono": "Roboto Mono", "RobotoSlab": "Roboto Slab", "RobotoCondensed": "Roboto Condensed",
+    "OpenSans": "Open Sans", "Lato": "Lato", "Montserrat": "Montserrat", "NotoSans": "Noto Sans",
+    "NotoSerif": "Noto Serif", "NotoSansMono": "Noto Sans Mono", "Inter": "Inter", "IBMPlexSans": "IBM Plex Sans",
+    "IBMPlexSerif": "IBM Plex Serif", "IBMPlexMono": "IBM Plex Mono", "Raleway": "Raleway",
+    "Merriweather": "Merriweather", "MerriweatherSans": "Merriweather Sans", "PTSans": "PT Sans",
+    "PTSerif": "PT Serif", "PTMono": "PT Mono", "EBGaramond": "EB Garamond", "Oswald": "Oswald",
+    "Poppins": "Poppins", "Nunito": "Nunito", "NunitoSans": "Nunito Sans", "Ubuntu": "Ubuntu",
+    "UbuntuMono": "Ubuntu Mono", "Inconsolata": "Inconsolata", "Cabin": "Cabin", "Karla": "Karla",
+    "WorkSans": "Work Sans", "Carlito": "Carlito", "Caladea": "Caladea", "Arimo": "Arimo", "Tinos": "Tinos",
+    "Cousine": "Cousine", "JetBrainsMono": "JetBrains Mono", "Spectral": "Spectral", "Lora": "Lora",
+    "CrimsonText": "Crimson Text", "CrimsonPro": "Crimson Pro", "LibreBaskerville": "Libre Baskerville",
+    "Mulish": "Mulish", "Rubik": "Rubik", "Manrope": "Manrope", "DejaVuSans": None, "Alegreya": "Alegreya",
+    "AlegreyaSans": "Alegreya Sans", "Cormorant": "Cormorant", "Arvo": "Arvo", "Quicksand": "Quicksand",
+}
+WEIGHTS = [("thin", 100), ("hairline", 100), ("extralight", 200), ("ultralight", 200), ("light", 300),
+           ("book", 400), ("regular", 400), ("medium", 500), ("semibold", 600), ("demibold", 600),
+           ("extrabold", 800), ("ultrabold", 800), ("bold", 700), ("black", 900), ("heavy", 900)]
+
+
+@lru_cache(maxsize=None)
+def google_font(name: str) -> tuple[str, int, bool] | None:
+    """(Google family, weight, italic) when the PDF font is itself a Google font, e.g.
+    'ABCDEF+FiraSans-LightItalic' -> ('Fira Sans', 300, True)."""
+    base = name.split("+", 1)[-1]
+    base = re.sub(r"-Identity-H$", "", base)
+    family_part, _, style = base.partition("-")
+    family_part = family_part.replace(" ", "")
+    style_l = style.lower()
+    # "FiraSansLight" style names without a hyphen: peel a known weight suffix off the family.
+    if family_part not in GOOGLE_FAMILIES:
+        for word, _ in WEIGHTS:
+            if family_part.lower().endswith(word) and family_part[:-len(word)] in GOOGLE_FAMILIES:
+                style_l = word + style_l
+                family_part = family_part[:-len(word)]
+                break
+    family = GOOGLE_FAMILIES.get(family_part)
+    if not family:
+        return None
+    weight = next((w for word, w in WEIGHTS if word in style_l), 400)
+    return family, weight, "italic" in style_l or "oblique" in style_l
+
+
 @lru_cache(maxsize=None)
 def font_info(name: str) -> FontInfo:
     base = name.split("+", 1)[-1]

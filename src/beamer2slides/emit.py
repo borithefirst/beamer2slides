@@ -8,7 +8,7 @@ from pathlib import Path
 from googleapiclient.errors import HttpError
 from googleapiclient.http import MediaFileUpload, MediaIoBaseUpload
 
-from .fonts import font_info
+from .fonts import font_info, google_font
 from .google_auth import drive_service, slides_service
 from .gslides import EMU_PER_PT, emu, execute, pt
 
@@ -48,7 +48,22 @@ class FontMapper:
             ratios = cal[FONT_FOR_FAMILY[family]]["width_ratio"]
             self.factors[family] = (ratios["text_mean"], ratios["by_row"]["title"])
 
+    def text_style(self, run: dict, scale: float) -> tuple[dict, list[str]]:
+        """Font part of a Slides TextStyle. Google fonts used by the PDF itself keep their
+        family and weight (e.g. Fira Sans Light); TeX fonts get a calibrated substitute."""
+        family, size = self(run, scale)
+        google = google_font(run["font"])
+        if google:
+            return ({"weightedFontFamily": {"fontFamily": google[0], "weight": google[1]},
+                     "fontSize": pt(size), "italic": google[2] or run["italic"]},
+                    ["weightedFontFamily", "fontSize", "italic"])
+        return ({"fontFamily": family, "fontSize": pt(size), "bold": run["bold"], "italic": run["italic"]},
+                ["fontFamily", "fontSize", "bold", "italic"])
+
     def __call__(self, run: dict, scale: float) -> tuple[str, float]:
+        google = google_font(run["font"])
+        if google:  # same font in Slides: no width correction
+            return google[0], round(run["size"] * scale, 1)
         info = font_info(run["font"])
         family = FONT_FOR_FAMILY.get(run["family"], "Lato")
         if run["family"] == "mono":
@@ -224,12 +239,10 @@ def text_box_requests(el: dict, slide_id: str, object_id: str, scale: float, fon
         for run in p["runs"]:
             if not run["text"]:
                 continue
-            family, run_size = fonts(run, scale)
-            style = {"fontFamily": family, "fontSize": pt(run_size), "bold": run["bold"],
-                     "italic": run["italic"], "smallCaps": run["smallcaps"],
-                     "foregroundColor": rgb(run["color"]), "underline": False,
-                     "baselineOffset": {"super": "SUPERSCRIPT", "sub": "SUBSCRIPT"}.get(run.get("script"), "NONE")}
-            fields = "fontFamily,fontSize,bold,italic,smallCaps,foregroundColor,underline,baselineOffset"
+            style, fields = fonts.text_style(run, scale)
+            style.update({"smallCaps": run["smallcaps"], "foregroundColor": rgb(run["color"]), "underline": False,
+                          "baselineOffset": {"super": "SUPERSCRIPT", "sub": "SUBSCRIPT"}.get(run.get("script"), "NONE")})
+            fields = ",".join(fields + ["smallCaps", "foregroundColor", "underline", "baselineOffset"])
             if run["link"] and run["link"].startswith("#page="):
                 target = page_slide.get(int(run["link"][6:])) if page_slide else None
                 if target:
@@ -349,13 +362,12 @@ def table_requests(el: dict, slide_id: str, object_id: str, scale: float, fonts:
                     piece = piece.lstrip()
                 if not piece:
                     continue
-                family, run_size = fonts(run, scale)
+                style, fields = fonts.text_style(run, scale)
+                style.update({"smallCaps": run["smallcaps"], "foregroundColor": rgb(run["color"])})
                 reqs.append({"updateTextStyle": {
                     "objectId": object_id, "cellLocation": loc,
                     "textRange": {"type": "FIXED_RANGE", "startIndex": start, "endIndex": min(len(text), start + len(piece))},
-                    "style": {"fontFamily": family, "fontSize": pt(run_size), "bold": run["bold"], "italic": run["italic"],
-                              "smallCaps": run["smallcaps"], "foregroundColor": rgb(run["color"])},
-                    "fields": "fontFamily,fontSize,bold,italic,smallCaps,foregroundColor"}})
+                    "style": style, "fields": ",".join(fields + ["smallCaps", "foregroundColor"])}})
                 start += len(piece)
             col = cols[c]
             # Line the text up with the original inside the (contiguous) Slides columns.
@@ -589,7 +601,8 @@ def emit(deck: dict, out: Path, title: str, new_deck: bool = False) -> dict:
                 # The placeholder was created with the slide, below everything added since.
                 reqs.append({"updatePageElementsZOrder": {"pageElementObjectIds": [title_oid],
                                                           "operation": "BRING_TO_FRONT"}})
-            batch_with_image_retry(slides, pid, reqs)
+            if reqs:  # a slide can be nothing but its background
+                batch_with_image_retry(slides, pid, reqs)
             state["slides"].append({"page": n, "objectId": slide_id, "elements": element_ids})
             kinds = [el["kind"] for el in slide["elements"]]
             print(f"  slide {n + 1}: {kinds.count('text')} text boxes, {kinds.count('image')} pictures, "

@@ -104,8 +104,18 @@ def select_overlays(raw: dict, mode: str) -> dict:
         return " ".join(s["text"].strip() for s in sorted(p["spans"], key=lambda s: s["bbox"][0])
                         if s["bbox"][3] < 0.2 * p["size"][1])
 
+    def words(p: dict) -> list[str]:
+        return [w for s in p["spans"] for w in s["text"].split()]
+
     def same_frame(a: dict, b: dict) -> bool:
-        return a["label"] == b["label"] and heading(a) == heading(b)
+        """Overlay steps share the frame number, the heading and most of their text (a later
+        step shows what the earlier one did). Themes that don't count some frames (title and
+        section pages) share numbers too, but not their text."""
+        if a["label"] != b["label"] or heading(a) != heading(b):
+            return False
+        wa, wb = words(a), set(words(b))
+        # \only<n> swaps some text between steps, so require a majority, not everything.
+        return not wa or sum(w in wb for w in wa) >= 0.5 * len(wa)
 
     kept = [p for i, p in enumerate(pages) if i + 1 == len(pages) or not same_frame(p, pages[i + 1])]
     return {**raw, "pages": kept, "overlays": {"mode": mode, "dropped": len(pages) - len(kept)}}

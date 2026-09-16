@@ -1,0 +1,29 @@
+% !engine = xelatex
+% metropolis with its intended Fira Sans (a Google font): text should keep Fira Sans, weights included.
+\documentclass[aspectratio=169]{beamer}
+\usetheme{metropolis}
+\usepackage[sfdefault,light]{FiraSans}  % load Fira by file name (fontspec may not find it by family)
+\title{Metropolis with Fira}
+\subtitle{Google fonts should pass straight through}
+\author{Tester}
+\date{}
+
+\begin{document}
+
+\maketitle
+
+\section{Content}
+
+\begin{frame}{Lists and emphasis}
+  \begin{itemize}
+    \item Fira Sans Light is metropolis' body font
+    \item \alert{Alerted} text and \textbf{bold} text use other weights
+    \item A longer item that wraps onto a second line so we can check the line breaks with the original font
+  \end{itemize}
+\end{frame}
+
+\begin{frame}[standout]
+  Questions?
+\end{frame}
+
+\end{document}
