@@ -1,0 +1,19 @@
+% pdflatex with the helvet package: Nimbus Sans (Helvetica clone) should become Arial, unscaled.
+\documentclass{beamer}
+\usepackage[T1]{fontenc}
+\usepackage[scaled]{helvet}
+\title{Helvetica Deck}
+\author{Tester}
+\date{}
+
+\begin{document}
+
+\begin{frame}{Helvetica via helvet}
+  \begin{itemize}
+    \item Running text in a Helvetica clone
+    \item \textbf{Bold} and \textit{italic} variants
+    \item A longer item that wraps onto a second line so we can check the line breaks in Arial
+  \end{itemize}
+\end{frame}
+
+\end{document}

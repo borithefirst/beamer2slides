@@ -62,6 +62,16 @@ GOOGLE_FAMILIES = {
     "CrimsonText": "Crimson Text", "CrimsonPro": "Crimson Pro", "LibreBaskerville": "Libre Baskerville",
     "Mulish": "Mulish", "Rubik": "Rubik", "Manrope": "Manrope", "DejaVuSans": None, "Alegreya": "Alegreya",
     "AlegreyaSans": "Alegreya Sans", "Cormorant": "Cormorant", "Arvo": "Arvo", "Quicksand": "Quicksand",
+    # Metric-compatible stand-ins for classic PostScript fonts used via helvet/mathptmx/courier
+    # or TeX Gyre, and for Office fonts; all available in Slides.
+    "Helvetica": "Arial", "NimbusSanL": "Arial", "NimbusSans": "Arial", "TeXGyreHeros": "Arial",
+    "Arial": "Arial", "ArialMT": "Arial", "LiberationSans": "Arial",
+    "Times": "Times New Roman", "TimesNewRoman": "Times New Roman", "TimesNewRomanPSMT": "Times New Roman",
+    "NimbusRomNo9L": "Times New Roman", "NimbusRoman": "Times New Roman", "TeXGyreTermes": "Times New Roman",
+    "LiberationSerif": "Times New Roman",
+    "Courier": "Courier New", "CourierNew": "Courier New", "NimbusMonL": "Courier New",
+    "NimbusMonoPS": "Courier New", "TeXGyreCursor": "Courier New", "LiberationMono": "Courier New",
+    "Calibri": "Carlito", "Cambria": "Caladea", "Georgia": "Georgia", "Verdana": "Verdana",
 }
 WEIGHTS = [("thin", 100), ("hairline", 100), ("extralight", 200), ("ultralight", 200), ("light", 300),
            ("book", 400), ("regular", 400), ("medium", 500), ("semibold", 600), ("demibold", 600),
@@ -76,6 +86,9 @@ def google_font(name: str) -> tuple[str, int, bool] | None:
     base = re.sub(r"-Identity-H$", "", base)
     family_part, _, style = base.partition("-")
     family_part = family_part.replace(" ", "")
+    # TeX Gyre and friends come lower-cased from some engines ("texgyreheros-bold").
+    canonical = {k.lower(): k for k in GOOGLE_FAMILIES}
+    family_part = canonical.get(family_part.lower(), family_part)
     style_l = style.lower()
     # "FiraSansLight" style names without a hyphen: peel a known weight suffix off the family.
     if family_part not in GOOGLE_FAMILIES:
@@ -88,7 +101,10 @@ def google_font(name: str) -> tuple[str, int, bool] | None:
     if not family:
         return None
     weight = next((w for word, w in WEIGHTS if word in style_l), 400)
-    return family, weight, "italic" in style_l or "oblique" in style_l
+    if weight == 400 and re.search(r"(^|[^a-z])(medi|bold)", style_l):  # Nimbus: "MediItal", "Bold"
+        weight = 700
+    italic = any(k in style_l for k in ("italic", "oblique", "ital", "obli")) or style_l.endswith("it")
+    return family, weight, italic
 
 
 @lru_cache(maxsize=None)

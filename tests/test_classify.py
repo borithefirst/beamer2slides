@@ -152,6 +152,19 @@ def test_google_font_decks_keep_their_font_and_uncounted_frames():
     assert ("Fira Sans", 300, False) in fonts and ("Fira Sans", 700, False) in fonts
 
 
+def test_metric_compatible_fonts():
+    from beamer2slides.fonts import google_font
+
+    assert google_font("NimbusSanL-ReguItal") == ("Arial", 400, True)
+    assert google_font("NimbusRomNo9L-Medi") == ("Times New Roman", 700, False)
+    assert google_font("texgyreheros-bolditalic") == ("Arial", 700, True)
+    assert google_font("SourceSansPro-It") == ("Source Sans Pro", 400, True)
+    assert google_font("CMSS10") is None
+    d = deck("10_helvet")
+    fonts = {google_font(r["font"]) for s in d["slides"] for e in texts(s) for p in e["paragraphs"] for r in p["runs"]}
+    assert {("Arial", 400, False), ("Arial", 700, False), ("Arial", 400, True)} <= fonts
+
+
 # Minimum native text share per theme for the realistic talk (tests/themes/content.tex).
 THEME_FLOORS = {
     "default": 0.95, "Madrid": 0.9, "Warsaw": 0.75, "Berkeley": 0.75, "Bergen": 0.95,
