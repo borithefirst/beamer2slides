@@ -2496,7 +2496,8 @@ class PageClassifier:
         chars_total = sum(len(s["text"].strip()) for s in self.page["spans"])
         chars_native = sum(len(s["text"].strip()) for s in self.page["spans"] if s["id"] in text_spans)
         return {
-            "page": n, "frame": self.page["label"], "size": self.page["size"], "notes": self.page.get("notes"),
+            "page": n, "frame": self.page["label"], "label": self.page.get("frame_label"), "size": self.page["size"],
+            "notes": self.page.get("notes"),
             "elements": elements, "left_in_background": left, "theme_texts": theme_texts,
             "panels": [{"bbox": p["bbox"].as_list(), "fill": p["fill"], "rounded": p["rounded"]} for p in self.panels],
             "figure_regions": [r.as_list() for r in self.regions],
@@ -2638,7 +2639,8 @@ def classify_page(page: dict, body: float) -> dict:
               f"kept as a picture")
         spans = page["spans"]
         return {
-            "page": page["index"], "frame": page["label"], "size": page["size"], "notes": page.get("notes"),
+            "page": page["index"], "frame": page["label"], "label": page.get("frame_label"), "size": page["size"],
+            "notes": page.get("notes"),
             "elements": [], "theme_texts": [], "panels": [], "figure_regions": [],
             "left_in_background": [{"reason": "error", "spans": [s["id"] for s in spans],
                                     "bboxes": [s["bbox"] for s in spans]}] if spans else [],

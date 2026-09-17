@@ -1922,7 +1922,7 @@ def emit(deck: dict, out: Path, title: str, new_deck: bool = False, measure: boo
                                   state["presentationId"], measure)
         for page, eid in again:
             print(f"warning: slide {page + 1}: {eid} was refused again and is missing")
-    (out / "emit.json").write_text(json.dumps(state, indent=1), encoding="utf-8")
+    (out / "emit.json").write_text(json.dumps({k: v for k, v in state.items() if k != "deck"}, indent=1), encoding="utf-8")
     return state
 
 
@@ -2024,14 +2024,53 @@ def build_deck(slides, drive, deck: dict, out: Path, title: str, existing: str |
             pending, pending_size = [], 0
         pending.append((slide_id, n, parts))
         pending_size += size
-        state["slides"].append({"page": n, "objectId": slide_id, "elements": element_ids})
+        objects, groups = element_objects(parts, element_ids)
+        state["slides"].append({"page": n, "objectId": slide_id, "elements": element_ids, "objects": objects,
+                                "groups": groups})
         kinds = [el["kind"] for el in slide["elements"]]
         print(f"  slide {n + 1}: {kinds.count('text')} text boxes, {kinds.count('image')} pictures, "
               f"{kinds.count('shape')} shapes, {kinds.count('table')} tables")
     if pending:
         send(pending)
     batch(slides, pid, [{"deleteObject": {"objectId": oid}} for oid in [s["objectId"] for s in sources] + scratch])
+    state["deck"] = deck  # (what was built, for the sync snapshot; not written to emit.json)
     return state, refused
+
+
+def created_ids(reqs: list[dict]) -> list[str]:
+    """Object ids a list of requests creates."""
+    out = []
+    for r in reqs:
+        (kind, body), = r.items()
+        if kind in ("createShape", "createLine", "createTable", "createImage", "createSlide"):
+            out.append(body["objectId"])
+        elif kind == "duplicateObject":
+            out += list(body.get("objectIds", {}).values())
+        elif kind == "groupObjects":
+            out.append(body["groupObjectId"])
+    return out
+
+
+def element_objects(parts: list[tuple[dict | None, list[dict]]], element_ids: list[str]) -> tuple[list[list[str]], list[str]]:
+    """Per element (in slide_parts order) every object id created for it: its main object first,
+    then what its requests create and its group with anchored pictures ({oid}_g); and the slide's
+    other groups (blocks, rules)."""
+    objects = [[oid] for oid in element_ids]
+    index = {oid: i for i, oid in enumerate(element_ids)}
+    groups = []
+    k = 0
+    for el, reqs in parts:
+        if el is not None:
+            objects[k] += [o for o in created_ids(reqs) if o != element_ids[k]]
+            k += 1
+            continue
+        for oid in created_ids(reqs):
+            owner = index.get(oid[:-2]) if oid.endswith("_g") else None
+            if owner is not None:
+                objects[owner].append(oid)
+            else:
+                groups.append(oid)
+    return [list(dict.fromkeys(o)) for o in objects], groups
 
 
 class DeckPlan:

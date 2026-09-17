@@ -1,0 +1,993 @@
+"""`sync`: bring a changed beamer PDF into the live, edited Slides deck (docs/sync.md).
+
+    python -m beamer2slides sync deck.pdf --deck <url|id|out folder> [--out DIR] [--dry-run]
+
+ours = the new conversion (planned like emit, nothing sent), theirs = the live deck, base = what
+the converter wrote last time (snapshot). merge.plan_merge decides; this module builds the
+requests (emit's builders under fresh object ids), writes them with requiredRevisionId and
+records the new base."""
+
+import json
+import os
+import random
+import re
+import string
+import subprocess
+import time
+from pathlib import Path
+
+from googleapiclient.errors import HttpError
+
+from . import identity, merge, snapshot
+from .gslides import EMU_PER_PT, emu, execute, pt
+
+ROOT = Path(__file__).resolve().parents[2]
+MAX_ATTEMPTS = 3
+CHUNK = 450
+SCRATCH = re.compile(r"b2s_m\d{3}")  # emit.measure_jobs' scratch slides
+STAND_IN = 100.0  # pt: size of plain shapes standing in for template shapes
+
+
+class RevisionMismatch(Exception):
+    pass
+
+
+def resolve_deck(arg: str) -> tuple[str, Path | None]:
+    """--deck as a URL, a presentation id or an output folder of `convert` (its emit.json)."""
+    path = Path(arg)
+    if path.is_dir():
+        state = path / "emit.json"
+        if state.exists():
+            return json.loads(state.read_text(encoding="utf-8"))["presentationId"], path
+        base = snapshot.local_path(path)
+        if base.exists():
+            return json.loads(base.read_text(encoding="utf-8"))["presentationId"], path
+        raise SystemExit(f"{arg}: no emit.json or sync/base.json in this folder")
+    m = re.search(r"/presentation/d/([\w-]+)", arg)
+    return (m.group(1) if m else arg), None
+
+
+def h6(text: str) -> str:
+    return identity.sha1(text)[:6]
+
+
+# ---------------------------------------------------------------- ours
+
+def build_ours(pdf: Path, work: Path, base: dict, overlays: str = "last") -> dict:
+    """extract, classify and render the new PDF into `work`, plan it like emit and give its
+    slides and elements the keys of the base they match."""
+    from .classify import classify
+    from .emit import DeckPlan, merge_blocks
+    from .extract import extract, select_overlays
+    from .notes import prepare
+    from .render import render_backgrounds
+
+    work.mkdir(parents=True, exist_ok=True)
+    prepared = prepare(pdf, work)
+    raw = extract(prepared.pdf, prepared.labels)
+    for page in raw["pages"]:
+        page["notes"] = prepared.notes.get(page["index"])
+    raw = select_overlays(raw, overlays)
+    deck = classify(raw)
+    render_backgrounds(prepared.pdf, raw, deck, work)
+    (work / "deck.json").write_text(json.dumps(deck, indent=1, ensure_ascii=False), encoding="utf-8")
+    plan = DeckPlan({**deck, "slides": [{**s, "elements": merge_blocks(s["elements"])} for s in deck["slides"]]})
+    deck = plan.deck
+    infos = [identity.slide_info(s) for s in deck["slides"]]
+    base_infos = [{"label": b.get("label"), "title": b.get("title") or "", "text": b.get("text") or "", "page": b["page"]}
+                  for b in base["slides"]]
+    keys, pairs = identity.inherit_slide_keys(base_infos, [b["key"] for b in base["slides"]], infos)
+    ekeys, fps = [], []
+    for j, slide in enumerate(deck["slides"]):
+        matched = [{"key": e["key"], "kind": e["kind"], "role": e.get("role"), "fingerprint": e["fingerprint"]}
+                   for e in base["slides"][pairs[j]]["elements"]] if j in pairs else None
+        k, f = identity.slide_element_keys(slide["elements"], work, matched)
+        ekeys.append(k)
+        fps.append(f)
+    entries = snapshot.slide_entries(deck, work, keys, ekeys, fps)
+    return {"source": pdf, "pdf": prepared.pdf, "out": work, "plan": plan, "deck": deck, "slides": entries, "pairs": pairs}
+
+
+# ---------------------------------------------------------------- requests
+
+def rename(value, mapping: list[tuple[str, str]]):
+    """Object ids in requests: a string equal to a key, or a key followed by a non-digit
+    suffix (`_g`, `n`, `_n0`), gets the new id. `mapping` is longest key first."""
+    if isinstance(value, dict):
+        return {rename(k, mapping): rename(v, mapping) for k, v in value.items()}
+    if isinstance(value, list):
+        return [rename(v, mapping) for v in value]
+    if isinstance(value, str) and value.startswith("b2s_"):
+        for old, new in mapping:
+            if value == old or (value.startswith(old) and not value[len(old)].isdigit()):
+                return new + value[len(old):]
+    return value
+
+
+def letterbox_fix(oid: str, box: list[float], px: tuple[int, int]) -> dict:
+    """createImage fits a picture into its box keeping the aspect ratio; this stretches it to the
+    box, as the .pptx import does."""
+    x0, y0, x1, y1 = box
+    w, h = x1 - x0, y1 - y0
+    s = min(w / px[0], h / px[1])
+    fw, fh = px[0] * s, px[1] * s
+    fx, fy = x0 + (w - fw) / 2, y0 + (h - fh) / 2
+    sx, sy = w / fw, h / fh
+    return {"updatePageElementTransform": {"objectId": oid, "applyMode": "RELATIVE", "transform": {
+        "scaleX": sx, "scaleY": sy, "unit": "EMU",
+        "translateX": round((x0 - sx * fx) * EMU_PER_PT), "translateY": round((y0 - sy * fy) * EMU_PER_PT)}}}
+
+
+def png_size(path: Path) -> tuple[int, int]:
+    from PIL import Image
+    with Image.open(path) as img:
+        return img.size
+
+
+def api_colour(hex_or_theme: str | None) -> dict | None:
+    if not hex_or_theme:
+        return None
+    if hex_or_theme.startswith("theme:"):
+        return {"themeColor": hex_or_theme[6:]}
+    from .emit import rgb
+    return rgb(hex_or_theme)["opaqueColor"]
+
+
+def style_override_requests(oid: str, change: dict) -> list[dict]:
+    """Uniform text style changes the deck made (merge.uniform_changes), over all of the text."""
+    reqs = []
+    runs, paras = change.get("runs") or {}, change.get("paragraphs") or {}
+    style, fields = {}, []
+    for k, v in runs.items():
+        if k in ("fontFamily", "weight"):
+            if "weight" in runs or "weight" in change.get("runs", {}):
+                style["weightedFontFamily"] = {"fontFamily": runs.get("fontFamily"), "weight": runs.get("weight", 400)}
+                fields.append("weightedFontFamily")
+            else:
+                style["fontFamily"] = v
+                fields.append("fontFamily")
+        elif k == "fontSize":
+            style[k] = pt(v)
+            fields.append(k)
+        elif k in ("foregroundColor", "backgroundColor"):
+            style[k] = {"opaqueColor": api_colour(v)} if v else {}
+            fields.append(k)
+        elif k == "link":
+            continue
+        else:
+            style[k] = v
+            fields.append(k)
+    if fields:
+        reqs.append({"updateTextStyle": {"objectId": oid, "textRange": {"type": "ALL"}, "style": style,
+                                         "fields": ",".join(dict.fromkeys(fields))}})
+    pstyle, pfields = {}, []
+    for k, v in paras.items():
+        if k in ("alignment", "lineSpacing", "direction"):
+            pstyle[k] = v
+            pfields.append(k)
+        elif k in ("indentStart", "indentFirstLine", "spaceAbove", "spaceBelow"):
+            pstyle[k] = pt(v)
+            pfields.append(k)
+    if pfields:
+        reqs.append({"updateParagraphStyle": {"objectId": oid, "textRange": {"type": "ALL"}, "style": pstyle,
+                                              "fields": ",".join(pfields)}})
+    return reqs
+
+
+def shape_style_requests(oid: str, style: dict) -> list[dict]:
+    """A shape's fill and outline as the deck has them (snapshot.shape_style)."""
+    props, fields = {}, []
+    fill = style.get("fill") or {}
+    if "color" in fill:
+        props["shapeBackgroundFill"] = {"solidFill": {"color": api_colour(fill["color"]), "alpha": fill.get("alpha", 1.0)}}
+        fields += ["shapeBackgroundFill.solidFill.color", "shapeBackgroundFill.solidFill.alpha"]
+    elif fill.get("state") == "NOT_RENDERED":
+        props["shapeBackgroundFill"] = {"propertyState": "NOT_RENDERED"}
+        fields.append("shapeBackgroundFill.propertyState")
+    outline = style.get("outline") or {}
+    if outline.get("state") == "NOT_RENDERED":
+        props["outline"] = {"propertyState": "NOT_RENDERED"}
+        fields.append("outline.propertyState")
+    elif outline.get("fill") and "color" in outline["fill"]:
+        props["outline"] = {"outlineFill": {"solidFill": {"color": api_colour(outline["fill"]["color"]),
+                                                          "alpha": outline["fill"].get("alpha", 1.0)}},
+                            "weight": pt(outline.get("weight") or 1.0)}
+        fields += ["outline.outlineFill.solidFill.color", "outline.outlineFill.solidFill.alpha", "outline.weight"]
+        if outline.get("dash"):
+            props["outline"]["dashStyle"] = outline["dash"]
+            fields.append("outline.dashStyle")
+    return [{"updateShapeProperties": {"objectId": oid, "shapeProperties": props, "fields": ",".join(fields)}}] if fields else []
+
+
+def matrix_request(oid: str, m: list[float]) -> dict:
+    return {"updatePageElementTransform": {"objectId": oid, "applyMode": "RELATIVE", "transform": {
+        "scaleX": m[0], "shearX": m[1], "shearY": m[2], "scaleY": m[3], "unit": "EMU",
+        "translateX": round(m[4] * EMU_PER_PT), "translateY": round(m[5] * EMU_PER_PT)}}}
+
+
+# ---------------------------------------------------------------- the sync
+
+class Sync:
+    def __init__(self, slides, drive, pid: str, base: dict, ours: dict, out: Path, dry_run: bool = False,
+                 measure: bool = True):
+        self.slides, self.drive, self.pid = slides, drive, pid
+        self.base, self.ours, self.out = base, ours, out
+        self.dry_run, self.measure = dry_run, measure
+        self.plan = ours["plan"]
+        self.scale = self.plan.scale
+        self.tok = f"{base.get('generation', 0) + 1}{''.join(random.choices(string.ascii_lowercase, k=2))}"
+        self.sent: dict[str, int] = {}
+        self.warnings: list[str] = []
+        self.urls: dict[str, str] = {}  # picture file (str) -> contentUrl from the staging deck
+
+    # ---- reading and writing
+
+    def read(self) -> dict:
+        return execute(self.slides.presentations().get(presentationId=self.pid))
+
+    def revision(self) -> str:
+        return execute(self.slides.presentations().get(presentationId=self.pid, fields="revisionId"))["revisionId"]
+
+    def send(self, phase: str, reqs: list[dict], rev: str) -> str:
+        """Batches with requiredRevisionId, chained through the revisions they return."""
+        for i in range(0, len(reqs), CHUNK):
+            chunk = reqs[i:i + CHUNK]
+            try:
+                res = execute(self.slides.presentations().batchUpdate(presentationId=self.pid, body={
+                    "requests": chunk, "writeControl": {"requiredRevisionId": rev}}))
+            except HttpError as e:
+                from .emit import api_error
+                message = api_error(e)
+                if e.resp.status == 400 and "revision" in message.lower() and i == 0:
+                    raise RevisionMismatch(message)
+                raise RuntimeError(f"sync {phase}: batch refused ({message})") from e
+            rev = res.get("writeControl", {}).get("requiredRevisionId") or self.revision()
+            self.sent[phase] = self.sent.get(phase, 0) + len(chunk)
+        return rev
+
+    # ---- planning
+
+    def run(self) -> dict:
+        from .emit import slide_layout  # noqa: F401 (warm import before timing-sensitive steps)
+
+        for attempt in range(1, MAX_ATTEMPTS + 1):
+            pres = self.read()
+            leftovers = [s["objectId"] for s in pres.get("slides", []) if SCRATCH.fullmatch(s["objectId"])]
+            if leftovers and not self.dry_run:  # measure_places' scratch slides of an interrupted run
+                self.delete_scratch(leftovers)
+                pres = self.read()
+            pres = {**pres, "slides": [s for s in pres.get("slides", []) if not SCRATCH.fullmatch(s["objectId"])]}
+            theirs = snapshot.read_presentation(pres)
+            mplan = merge.plan_merge(self.base, self.ours, theirs)
+            work = self.prepare(mplan, pres, theirs)
+            result = {"attempts": attempt, "plan": mplan, "work": work, "theirs": theirs}
+            if self.dry_run or not work["writes"]:
+                return result
+            hook = os.environ.pop("B2S_SYNC_BEFORE_WRITE", None)  # (tests: someone edits the deck now)
+            if hook:
+                subprocess.run(hook, shell=True, check=False)
+            staging = self.stage(work)
+            scratch = []
+            try:
+                if self.revision() != theirs["revisionId"]:
+                    continue  # edited while we planned: plan again
+                moves, scratch = self.measure_places(work, theirs)
+                rev = self.send("content", self.main_requests(work, theirs, pres, moves, scratch), self.revision())
+                scratch = []
+            except RevisionMismatch:
+                continue
+            finally:
+                if scratch:
+                    self.delete_scratch(scratch)
+                if staging:  # (its pictures are only needed until the live deck has them)
+                    execute(self.drive.files().delete(fileId=staging))
+                    self.urls.clear()
+            rev = self.finish(work, mplan, theirs, pres, rev)
+            result["revisionId"] = rev
+            return result
+        raise RuntimeError(f"the deck kept changing while syncing ({MAX_ATTEMPTS} attempts)")
+
+    def prepare(self, mplan: dict, pres: dict, theirs: dict) -> dict:
+        """What to write, per slide: units to (re)create with their requests' inputs, deletions,
+        moves, backgrounds, notes; pictures needed from the staging deck."""
+        ours_slides = self.plan.deck["slides"]
+        new_ids = {p["key"]: f"b2s_{h6(p['key'])}_{self.tok}" for p in mplan["slides"] if p["action"] == "create"}
+        # Internal links: PDF page -> live slide (existing, or created now).
+        kept = sorted((ours_slides[p["ours"]]["page"], p["objectId"] or new_ids.get(p["key"]))
+                      for p in mplan["slides"] if p.get("ours") is not None and p["action"] in ("update", "create"))
+        page_slide = {}
+        if kept:
+            for page in range(kept[-1][0] + 1):
+                page_slide[page] = next(sid for pg, sid in kept if pg >= page)
+        self.plan.page_slide = page_slide
+        master = self.base.get("master_background")
+        work = {"slides": [], "pictures": {}, "new_ids": new_ids, "page_slide": page_slide,
+                "writes": merge.has_writes(mplan, [s["objectId"] for s in theirs["slides"]])}
+        for p in mplan["slides"]:
+            w = {"plan": p, "units": []}
+            if p["action"] == "create":
+                w["sid"] = new_ids[p["key"]]
+                w["units"] = list(range(len(ours_slides[p["ours"]]["elements"])))
+            elif p["action"] == "update":
+                w["sid"] = p["objectId"]
+                index = {e["key"]: k for k, e in enumerate(self.ours["slides"][p["ours"]]["elements"])}
+                w["units"] = [index[k] for u in p["units"] if u["action"] in ("create", "recreate") for k in u["ours_members"]]
+            if w["units"]:
+                slide = ours_slides[p["ours"]]
+                for i in w["units"]:
+                    if slide["elements"][i]["kind"] == "image":
+                        work["pictures"][str(self.ours["out"] / slide["elements"][i]["file"])] = None
+            background = p.get("background") or (self.ours["slides"][p["ours"]]["background"] if p["action"] == "create" else "")
+            if background.startswith("png:") and background != master:
+                work["pictures"][str(self.ours["out"] / ours_slides[p["ours"]]["background"])] = "background"
+            work["slides"].append(w)
+        work["order"] = [new_ids.get(x[4:], x) if x.startswith("new:") else x for x in mplan["order"]]
+        return work
+
+    # ---- pictures
+
+    def stage(self, work: dict) -> str | None:
+        """Pictures go through a staging deck imported from a .pptx; its images' contentUrls are
+        then used in the live deck. Returns the staging file's id: delete it once the live deck
+        has the pictures (the URLs stop working with it)."""
+        from googleapiclient.http import MediaIoBaseUpload
+        from .emit import PPTX_MIME, build_pptx
+
+        needed = [f for f in work["pictures"] if f not in self.urls]
+        if not needed:
+            return None
+        page_w, page_h = self.plan.deck["slides"][0]["size"]
+        pages = []
+        pictures = [f for f in needed if work["pictures"][f] != "background"]
+        backgrounds = [f for f in needed if work["pictures"][f] == "background"]
+        for k in range(0, len(pictures), 40):
+            pages.append({"layout": "BLANK", "fill": None, "templates": False, "pictures": [
+                {"file": f, "bbox": [0, 0, *self._fit(f)], "alt": f"b2s-stage:{k + n}", "title": "stage"}
+                for n, f in enumerate(pictures[k:k + 40])]})
+        for f in backgrounds:
+            pages.append({"layout": "BLANK", "fill": {"picture": Path(f)}, "templates": False, "pictures": []})
+        pptx = build_pptx(page_w, page_h, [], pages, {"color": "#ffffff"})
+        fid = execute(self.drive.files().create(body={"name": "beamer2slides sync staging (temporary)",
+                                                      "mimeType": "application/vnd.google-apps.presentation"},
+                                                media_body=MediaIoBaseUpload(pptx, mimetype=PPTX_MIME), fields="id"))["id"]
+        try:
+            staged = execute(self.slides.presentations().get(presentationId=fid))
+            slides = staged.get("slides", [])
+            for s in slides[:len(pages) - len(backgrounds)]:
+                for e in s.get("pageElements", []):
+                    d = e.get("description") or ""
+                    if "image" in e and d.startswith("b2s-stage:"):
+                        self.urls[pictures[int(d[10:])]] = e["image"]["contentUrl"]
+            for s, f in zip(slides[len(pages) - len(backgrounds):], backgrounds):
+                fill = s.get("pageProperties", {}).get("pageBackgroundFill", {})
+                if "stretchedPictureFill" in fill:
+                    self.urls[f] = fill["stretchedPictureFill"]["contentUrl"]
+            missing = [f for f in needed if f not in self.urls]
+            if missing:
+                raise RuntimeError(f"the staging deck brought no picture for {missing[:3]}")
+        except Exception:
+            execute(self.drive.files().delete(fileId=fid))
+            raise
+        return fid
+
+    def _fit(self, path: str) -> list[float]:
+        w, h = png_size(Path(path))
+        s = min(700 / w, 390 / h, 1.0)
+        return [max(1.0, w * s), max(1.0, h * s)]
+
+    # ---- measuring
+
+    def measure_places(self, work: dict, theirs: dict) -> tuple[dict, list[str]]:
+        from .emit import measure_places, slide_holes
+
+        if not self.measure:
+            return {}, []
+        slides = []
+        for w in work["slides"]:
+            if not w["units"]:
+                continue
+            slide = self.plan.deck["slides"][w["plan"]["ours"]]
+            ids = {slide["elements"][i]["id"] for i in w["units"]}
+            if any(h[3] is not None and h[3]["id"] in ids for h in slide_holes(slide)) or \
+                    any(e.get("marks") and e["id"] in ids for e in slide["elements"]):
+                slides.append(slide)
+        if not slides:
+            return {}, []
+        live_ids = {s["objectId"] for s in theirs["slides"]}
+        first = theirs["slides"][0]["objectId"]
+        page_slide = {k: v if v in live_ids else first for k, v in self.plan.page_slide.items()}
+        return measure_places(self.slides, self.pid, {**self.plan.deck, "slides": slides}, self.scale, self.plan.fonts,
+                              self.plan.placed, page_slide, self.ours["out"])
+
+    def delete_scratch(self, scratch: list[str]) -> None:
+        try:
+            execute(self.slides.presentations().batchUpdate(presentationId=self.pid, body={
+                "requests": [{"deleteObject": {"objectId": s}} for s in scratch]}))
+        except HttpError as e:
+            self.warnings.append(f"could not delete scratch slides {scratch}: {e}")
+
+    # ---- content
+
+    def main_requests(self, work: dict, theirs: dict, pres: dict, moves: dict, scratch: list[str]) -> list[dict]:
+        live = {s["objectId"]: s for s in theirs["slides"]}
+        layouts = {l.get("layoutProperties", {}).get("name"): l for l in pres.get("layouts", [])}
+        reqs: list[dict] = []
+        late: list[dict] = []
+        for w in work["slides"]:
+            p = w["plan"]
+            if p["action"] == "delete":
+                late.append({"deleteObject": {"objectId": p["objectId"]}})
+            elif p["action"] == "create":
+                reqs += self.new_slide(w, layouts, moves, pres)
+            elif p["action"] == "update":
+                reqs += self.update_slide(w, live[p["objectId"]], moves, pres)
+        reqs += late
+        reqs += [{"deleteObject": {"objectId": s}} for s in scratch]
+        # Slide order: created slides were appended.
+        current = [s["objectId"] for s in theirs["slides"] if s["objectId"] not in
+                   {w["plan"]["objectId"] for w in work["slides"] if w["plan"]["action"] == "delete"}]
+        current += [w["sid"] for w in work["slides"] if w["plan"]["action"] == "create"]
+        final = [s for s in work["order"] if s in current]
+        for i, sid in enumerate(final):
+            if current[i] != sid:
+                reqs.append({"updateSlidesPosition": {"slideObjectIds": [sid], "insertionIndex": i}})
+                current.remove(sid)
+                current.insert(i, sid)
+        return reqs
+
+    def slide_requests(self, w: dict, sid: str, in_place: dict[int, dict], templates: dict[tuple, dict],
+                       moves: dict, new_slide: bool) -> tuple[list[dict], dict[int, list[str]], dict[int, str], list[dict]]:
+        """emit's requests for the chosen elements of an ours slide, under live object ids.
+        in_place: element index -> {"id", "size"} of a live placeholder it goes into; templates:
+        template key -> {"id", "w", "h", "text"} of a live object (or stand-in) to duplicate.
+        Returns (requests, element index -> objects created, element index -> new object id,
+        extras: the slide-level requests (groups, z-order) for a new slide)."""
+        from .emit import title_element, subtitle_element
+
+        o = self.ours["slides"][w["plan"]["ours"]]
+        slide = self.plan.deck["slides"][w["plan"]["ours"]]
+        n = slide["page"]
+        vsid = f"b2s_s{n:03}"
+        # A title with no live placeholder to go into becomes a text box.
+        elements = [dict(e) for e in slide["elements"]]
+        title_idx = title_element(slide)
+        if title_idx is not None and title_idx not in in_place:
+            elements[title_idx]["role"] = "body"
+        slide_copy = {**slide, "elements": elements}
+        title_idx = title_element(slide_copy)
+        sub_idx = subtitle_element(slide_copy, title_idx) if title_idx is not None else None
+        if sub_idx is not None and sub_idx not in in_place:
+            slide_copy["title_page"] = False
+        page_elements = {vsid: [{"objectId": f"{vsid}_t{i}", "size": {"width": emu(v["size"][0]), "height": emu(v["size"][1])}}
+                                for i, v in in_place.items()]}
+        keys = self.plan.keys
+        sizes = [(templates[k]["w"], templates[k]["h"]) if k in templates else (STAND_IN, STAND_IN) for k in keys]
+        parts, element_ids = self.plan.slide_parts(slide_copy, page_elements, {}, moves, sizes)
+        mapping = {}
+        new_oid = {}
+        for i, (vid, e) in enumerate(zip(element_ids, o["elements"])):
+            new_oid[i] = in_place[i]["id"] if i in in_place else f"b2s_{h6(o['key'])}_{h6(e['key'])}_{self.tok}"
+            mapping[vid] = new_oid[i]
+        for j, k in enumerate(keys):
+            if k in templates:
+                mapping[f"{vsid}_k{j}"] = templates[k]["id"]
+        mapping[vsid] = sid
+        order = sorted(mapping.items(), key=lambda kv: -len(kv[0]))
+        chosen = set(w["units"])
+        reqs, objects = [], {}
+        from .emit import created_ids
+        for i, (el, rs) in enumerate(parts[1:1 + len(element_ids)]):
+            if i not in chosen:
+                continue
+            rs = rename(rs, order)
+            if not new_slide:
+                rs = [r for r in rs if "updatePageElementsZOrder" not in r]
+            if el["kind"] == "image":
+                path = self.ours["out"] / el["file"]
+                box = [v * self.scale for v in self.plan.placed(slide["elements"][i], n)["bbox"]]
+                x0, y0, x1, y1 = box
+                rs = [{"createImage": {"objectId": new_oid[i], "url": self.urls[str(path)], "elementProperties": {
+                    "pageObjectId": sid, "size": {"width": emu(x1 - x0), "height": emu(y1 - y0)},
+                    "transform": {"scaleX": 1, "scaleY": 1, "unit": "EMU", "translateX": round(x0 * EMU_PER_PT),
+                                  "translateY": round(y0 * EMU_PER_PT)}}}},
+                      letterbox_fix(new_oid[i], box, png_size(path))] + rs
+            if i in in_place and in_place[i].get("text"):
+                rs = [{"deleteText": {"objectId": new_oid[i], "textRange": {"type": "ALL"}}}] + rs
+            out = []
+            for r in rs:  # a duplicated live object brings its text along: clear it
+                out.append(r)
+                if "duplicateObject" in r:
+                    src = r["duplicateObject"]["objectId"]
+                    tpl = next((t for t in templates.values() if t["id"] == src), None)
+                    if tpl and tpl.get("text"):
+                        out += [{"deleteText": {"objectId": v, "textRange": {"type": "ALL"}}}
+                                for v in r["duplicateObject"]["objectIds"].values()]
+            reqs += out
+            objects[i] = list(dict.fromkeys([new_oid[i]] + [x for x in created_ids(rs) if x != new_oid[i]]))
+        extras = []
+        index = {vid: i for i, vid in enumerate(element_ids)}
+        for _, rs in parts[1 + len(element_ids):]:
+            for r in rename(rs, order):
+                if "groupObjects" in r:
+                    gid = r["groupObjects"]["groupObjectId"]
+                    owner = next((i for i, v in new_oid.items() if gid == f"{v}_g"), None)
+                    if owner is not None and owner in chosen:
+                        reqs.append(r)
+                        objects[owner].append(gid)
+                        continue
+                extras.append(r)
+        return reqs, objects, new_oid, extras
+
+    def tag_requests(self, o: dict, objects: dict[int, list[str]], new_oid: dict[int, str], in_place: dict) -> list[dict]:
+        slide = self.plan.deck["slides"][self.ours["slides"].index(o)]
+        reqs = []
+        for i, oids in objects.items():
+            e, el = o["elements"][i], slide["elements"][i]
+            r = {"objectId": new_oid[i], "title": snapshot.tag(o["key"], e["key"])}
+            if el["kind"] == "image" and el.get("alt"):
+                r["description"] = el["alt"]
+            reqs.append({"updatePageElementAltText": r})
+        return reqs
+
+    def new_slide(self, w: dict, layouts: dict, moves: dict, pres: dict) -> list[dict]:
+        from .emit import element_template_keys, slide_layout, subtitle_element, title_element
+
+        p = w["plan"]
+        o = self.ours["slides"][p["ours"]]
+        slide = self.plan.deck["slides"][p["ours"]]
+        sid = w["sid"]
+        layout_name, title_kind = slide_layout(slide)
+        layout = layouts.get(layout_name) or layouts.get("BLANK")
+        if layout is None:
+            raise RuntimeError(f"the deck has no {layout_name} layout for new slide {o['key']}")
+        mappings, in_place, unused = [], {}, []
+        title_idx = title_element(slide)
+        sub_idx = subtitle_element(slide, title_idx) if title_idx is not None else None
+        for k, e in enumerate(layout.get("pageElements", [])):
+            ph = e.get("shape", {}).get("placeholder")
+            if not ph:
+                continue
+            size = [snapshot._unit(e["size"]["width"]), snapshot._unit(e["size"]["height"])] if "size" in e else [STAND_IN, STAND_IN]
+            if ph.get("type") == title_kind and title_idx is not None and title_idx not in in_place:
+                oid = f"b2s_{h6(o['key'])}_{h6(o['elements'][title_idx]['key'])}_{self.tok}"
+                in_place[title_idx] = {"id": oid, "size": size}
+            elif ph.get("type") == "SUBTITLE" and sub_idx is not None and sub_idx not in in_place:
+                oid = f"b2s_{h6(o['key'])}_{h6(o['elements'][sub_idx]['key'])}_{self.tok}"
+                in_place[sub_idx] = {"id": oid, "size": size}
+            else:
+                continue  # (not every layout placeholder is instantiated: the rest go after a read, in finish)
+            mappings.append({"layoutPlaceholder": {"type": ph["type"], "index": ph.get("index", 0)}, "objectId": oid})
+        reqs = [{"createSlide": {"objectId": sid, "slideLayoutReference": {"layoutId": layout["objectId"]},
+                                 "placeholderIdMappings": mappings}}]
+        reqs += self.background_requests(sid, o["background"], slide, pres)
+        templates = {}
+        if self.plan.uses_templates[slide["page"]]:
+            for j, key in enumerate(self.plan.keys):
+                stand = f"b2s_{h6(o['key'])}_k{j}_{self.tok}"
+                templates[key] = {"id": stand, "w": STAND_IN, "h": STAND_IN, "stand_in": True}
+                reqs.append(stand_in_request(stand, sid, key))
+            used = {k for e in slide["elements"] for k in element_template_keys(e, self.scale)}
+            if used:
+                self.warnings.append(f"slide {o['key']}: {len(used)} template shape(s) (shadows, exact corners) made as plain shapes")
+        # Pictures first, as the .pptx brings them; emit's parts then order everything.
+        rs, objects, new_oid, extras = self.slide_requests(w, sid, in_place, templates, moves, True)
+        reqs += [r for r in rs if "createImage" in r]  # (a picture's other requests follow in element order)
+        reqs += [r for r in rs if "createImage" not in r] + extras
+        w["objects"], w["new_oid"], w["in_place"], w["tops"] = objects, new_oid, in_place, {}
+        w["groups"] = [r["groupObjects"]["groupObjectId"] for r in extras if "groupObjects" in r]
+        reqs += self.tag_requests(o, objects, new_oid, in_place)
+        return reqs
+
+    def update_slide(self, w: dict, read: dict, moves: dict, pres: dict) -> list[dict]:
+        from .emit import element_template_keys, label_inside, node_template_key, bend_template_key, template_key
+
+        p = w["plan"]
+        b = self.base["slides"][p["base"]]
+        o = self.ours["slides"][p["ours"]]
+        slide = self.plan.deck["slides"][p["ours"]]
+        sid = p["objectId"]
+        objects = read["objects"]
+        bunits = merge.units(b["elements"])
+        reqs: list[dict] = []
+        w["objects"], w["new_oid"], w["in_place"], w["groups"] = {}, {}, {}, []
+        roots_removed: list[tuple[str, list[str]]] = []  # (unit key, old root ids)
+        recreated = [u for u in p["units"] if u["action"] in ("create", "recreate")]
+        index = {e["key"]: k for k, e in enumerate(o["elements"])}
+
+        # Placeholders: a recreated title goes back into its live placeholder.
+        in_place = {}
+        for u in recreated:
+            for mk in u["ours_members"]:
+                i = index[mk]
+                base_el = next((m for m in bunits.get(u["key"], []) if m["key"] == mk), None)
+                main = base_el.get("main") if base_el else None
+                if main and main in objects and objects[main].get("placeholder"):
+                    in_place[i] = {"id": main, "size": objects[main]["size"], "text": (objects[main].get("text") or "").strip()}
+
+        # Template shapes: duplicate a live object with the same key on this slide, else a stand-in.
+        needed = {k for u in recreated for mk in u["ours_members"] for k in element_template_keys(slide["elements"][index[mk]], self.scale)}
+        templates, stand_ins = {}, []
+        if needed:
+            for el in b["elements"]:
+                ir, main = el.get("ir") or {}, el.get("main")
+                if not main:
+                    continue
+                found = []
+                if ir.get("kind") == "shape" and template_key(ir, self.scale):
+                    found.append((template_key(ir, self.scale), main))
+                elif ir.get("kind") == "diagram":
+                    found += [(node_template_key(nd), f"{main}_n{j}") for j, nd in enumerate(ir["nodes"]) if nd["shape"] and label_inside(nd)]
+                    found += [(bend_template_key(ln), f"{main}_l{j}") for j, ln in enumerate(ir["lines"]) if ln.get("bend")]
+                for key, oid in found:
+                    if key in needed and key not in templates and oid in objects:
+                        templates[key] = {"id": oid, "w": objects[oid]["size"][0], "h": objects[oid]["size"][1],
+                                          "text": (objects[oid].get("text") or "").strip()}
+            for j, key in enumerate(self.plan.keys):
+                if key in needed and key not in templates:
+                    stand = f"b2s_{h6(o['key'])}_k{j}_{self.tok}"
+                    templates[key] = {"id": stand, "w": STAND_IN, "h": STAND_IN, "stand_in": True}
+                    stand_ins.append(stand)
+                    reqs.append(stand_in_request(stand, sid, key))
+                    self.warnings.append(f"slide {o['key']}: no live {key[0]} to copy (shadow, exact corners): made a plain shape")
+
+        # Groups the old objects were in (blocks): ungrouped first, regrouped with the new ones.
+        regroup: dict[str, dict] = {}
+        for u in p["units"]:
+            if u["action"] not in ("recreate", "delete"):
+                continue
+            members = bunits.get(u["key"], [])
+            roots = merge.unit_roots(members, read)
+            roots_removed.append((u["key"], roots))
+            for r in roots:
+                g = objects[r].get("parent_group")
+                if g and g not in roots:
+                    if objects.get(g, {}).get("parent_group"):
+                        self.warnings.append(f"slide {o['key']}: {u['key']} was in a nested group; the new objects stay ungrouped")
+                        continue
+                    regroup.setdefault(g, {"remove": set(), "add": []})["remove"].add(r)
+                    regroup[g].setdefault("unit_of", {})[r] = u["key"]
+        reqs = [{"ungroupObjects": {"objectIds": [g]}} for g in regroup] + reqs
+
+        rs, created, new_oid, _ = self.slide_requests({**w, "units": [index[mk] for u in recreated for mk in u["ours_members"]]},
+                                                      sid, in_place, templates, moves, False)
+        reqs += rs
+        w["objects"], w["new_oid"], w["in_place"] = created, new_oid, in_place
+        # Old objects out (a placeholder refilled in place stays).
+        keep_ids = {v["id"] for v in in_place.values()}
+        for _, roots in roots_removed:
+            reqs += [{"deleteObject": {"objectId": r}} for r in roots if r not in keep_ids]
+        reqs += [{"deleteObject": {"objectId": s}} for s in stand_ins]
+        # Regroup: the unit's new top object takes its old root's place among the children.
+        tops = {}
+        for u in recreated:
+            if u["key"] in index:
+                i = index[u["key"]]
+                oids = created.get(i, [])
+                tops[u["key"]] = next((x for x in oids if x.endswith("_g") and x[:-2] == new_oid[i]), new_oid[i])
+        for g, info in regroup.items():
+            children = []
+            for c in objects[g].get("children", []):
+                if c in info["remove"]:
+                    ukey = info["unit_of"][c]
+                    if ukey in tops and tops[ukey] not in children and tops[ukey] not in keep_ids:
+                        children.append(tops[ukey])
+                else:
+                    children.append(c)
+            if len(children) >= 2:
+                reqs.append({"groupObjects": {"groupObjectId": g, "childrenObjectIds": children}})
+        # Moves: the deck object goes where the source moved the element.
+        for u in p["units"]:
+            if u["action"] == "move":
+                top = merge.unit_top(bunits[u["key"]], read)
+                if top:
+                    dx, dy = (v * self.scale for v in u["delta"])
+                    reqs.append(matrix_request(top, [1, 0, 0, 1, dx, dy]))
+        reqs += self.tag_requests(o, created, new_oid, in_place)
+        if p.get("background"):
+            reqs += self.background_requests(sid, p["background"], slide, pres)
+        if p.get("notes") is not None and read.get("notes_id"):
+            if read.get("notes"):
+                reqs.append({"deleteText": {"objectId": read["notes_id"], "textRange": {"type": "ALL"}}})
+            if p["notes"]:
+                reqs.append({"insertText": {"objectId": read["notes_id"], "text": p["notes"]}})
+        w["tops"] = tops
+        return reqs
+
+    def background_requests(self, sid: str, key: str, slide: dict, pres: dict) -> list[dict]:
+        master = self.base.get("master_background")
+        if key == master:
+            fill = pres["masters"][0].get("pageProperties", {}).get("pageBackgroundFill", {})
+            if "stretchedPictureFill" in fill:
+                return [{"updatePageProperties": {"objectId": sid, "fields": "pageBackgroundFill.stretchedPictureFill.contentUrl",
+                                                  "pageProperties": {"pageBackgroundFill": {"stretchedPictureFill": {
+                                                      "contentUrl": fill["stretchedPictureFill"]["contentUrl"]}}}}}]
+            if "solidFill" in fill:
+                return [{"updatePageProperties": {"objectId": sid, "fields": "pageBackgroundFill.solidFill.color",
+                                                  "pageProperties": {"pageBackgroundFill": {"solidFill": fill["solidFill"]}}}}]
+            return []
+        if key.startswith("color:"):
+            return [{"updatePageProperties": {"objectId": sid, "fields": "pageBackgroundFill.solidFill.color",
+                                              "pageProperties": {"pageBackgroundFill": {"solidFill": {
+                                                  "color": api_colour(key[6:])}}}}}]
+        url = self.urls[str(self.ours["out"] / slide["background"])]
+        return [{"updatePageProperties": {"objectId": sid, "fields": "pageBackgroundFill.stretchedPictureFill.contentUrl",
+                                          "pageProperties": {"pageBackgroundFill": {"stretchedPictureFill": {"contentUrl": url}}}}}]
+
+    # ---- after the content: z-order, notes of new slides, base, deck overrides
+
+    def finish(self, work: dict, mplan: dict, theirs: dict, pres: dict, rev: str) -> str:
+        now = snapshot.read_presentation(self.read())
+        live = {s["objectId"]: s for s in now["slides"]}
+        before = {s["objectId"]: s for s in theirs["slides"]}
+        reqs = []
+        for w in work["slides"]:
+            p = w["plan"]
+            if p["action"] == "create":
+                s = live.get(w["sid"])
+                mine = {x for oids in w["objects"].values() for x in oids} | set(w["groups"])
+                reqs += [{"deleteObject": {"objectId": oid}} for oid, rb in (s["objects"] if s else {}).items()
+                         if rb.get("placeholder") and oid not in mine]
+                if s and s.get("notes_id") and self.ours["slides"][p["ours"]].get("notes"):
+                    reqs.append({"insertText": {"objectId": s["notes_id"], "text": self.ours["slides"][p["ours"]]["notes"]}})
+            if p["action"] == "update" and w["objects"]:
+                reqs += self.restack(w, before[p["objectId"]], live[p["objectId"]])
+        if reqs:
+            rev = self.send("order", reqs, rev)
+            now = snapshot.read_presentation(self.read())
+        self.created = now  # read-back of objects as the converter created them
+        overrides = self.override_requests(work, theirs, now)
+        if overrides:
+            rev = self.send("overrides", overrides, rev)
+        self.final_revision = rev
+        return rev
+
+    def restack(self, w: dict, before: dict, now: dict) -> list[dict]:
+        """BRING_TO_FRONT so recreated elements take their old place in the z-order and new
+        ones follow their predecessor in the source."""
+        p = w["plan"]
+        b = self.base["slides"][p["base"]]
+        o = self.ours["slides"][p["ours"]]
+        bunits = merge.units(b["elements"])
+        top_now = set(now["order"])
+        replace, added = {}, []
+        for u in p["units"]:
+            if u["action"] == "recreate":
+                old = merge.unit_top(bunits[u["key"]], before)
+                new = w["tops"].get(u["key"])
+                if old and new:
+                    replace[old] = new
+            elif u["action"] == "create" and u["key"] in w["tops"]:
+                added.append(u["key"])
+        desired = []
+        for oid in before["order"]:
+            oid = replace.get(oid, oid)
+            if oid in top_now and oid not in desired:
+                desired.append(oid)
+        keys = [e["key"] for e in o["elements"]]
+        for ukey in added:
+            new = w["tops"][ukey]
+            if new not in top_now or new in desired:
+                continue
+            pos = 0
+            for k in reversed(keys[:keys.index(ukey)]):
+                prev = w["tops"].get(k) or (merge.unit_top(bunits[k], now) if k in bunits else None)
+                if prev in desired:
+                    pos = desired.index(prev) + 1
+                    break
+            desired.insert(pos, new)
+        desired += [x for x in now["order"] if x not in desired]
+        k = 0
+        while k < len(desired) and k < len(now["order"]) and desired[k] == now["order"][k]:
+            k += 1
+        return [{"updatePageElementsZOrder": {"pageElementObjectIds": [x], "operation": "BRING_TO_FRONT"}} for x in desired[k:]]
+
+    def override_requests(self, work: dict, theirs: dict, now: dict) -> list[dict]:
+        """Deck edits re-applied to recreated elements: geometry, merged text, styles."""
+        before = {s["objectId"]: s for s in theirs["slides"]}
+        after = {s["objectId"]: s for s in now["slides"]}
+        reqs = []
+        for w in work["slides"]:
+            p = w["plan"]
+            if p["action"] != "update":
+                continue
+            b = self.base["slides"][p["base"]]
+            bunits = merge.units(b["elements"])
+            index = {e["key"]: k for k, e in enumerate(self.ours["slides"][p["ours"]]["elements"])}
+            t_read, n_read = before[p["objectId"]], after[p["objectId"]]
+            for u in p["units"]:
+                ov = u.get("overrides") or {}
+                if u["action"] != "recreate" or not ov:
+                    continue
+                i = index[u["key"]]
+                main = w["new_oid"][i]
+                top = w["tops"].get(u["key"], main)
+                anchor = bunits[u["key"]][0]
+                old_main = anchor["main"]
+                if "text" in ov and main in n_read["objects"]:
+                    current = n_read["objects"][main].get("text") or ""
+                    merged, clashes = merge.diff3(ov["text"]["base"], current, ov["text"]["theirs"])
+                    if clashes:
+                        self.warnings.append(f"slide {p['key']}: {u['key']}: deck text edits clash with the new text; not re-applied")
+                    else:
+                        if not merged.endswith("\n"):
+                            merged += "\n"
+                        reqs += merge.text_edit_requests(main, current, merged)
+                if "text_style" in ov:
+                    reqs += style_override_requests(main, ov["text_style"])
+                if "shape_style" in ov and ov["shape_style"]:
+                    reqs += shape_style_requests(main, ov["shape_style"])
+                if "geometry" in ov and top in n_read["objects"]:
+                    old_top = merge.unit_top(bunits[u["key"]], t_read) or old_main
+                    base_rb = next((m["readback"].get(old_top) for m in bunits[u["key"]] if old_top in m.get("readback", {})), None)
+                    theirs_rb = t_read["objects"].get(old_top)
+                    new_rb = n_read["objects"][top]
+                    if not base_rb or not theirs_rb:
+                        continue
+                    if ov["geometry"]["mode"] == "delta":
+                        d = snapshot.compose(theirs_rb["transform"], snapshot.invert(base_rb["transform"]))
+                    else:
+                        d = [1, 0, 0, 1, theirs_rb["box"][0] - new_rb["box"][0], theirs_rb["box"][1] - new_rb["box"][1]]
+                    if any(abs(x - y) > 1e-4 for x, y in zip(d, [1, 0, 0, 1, 0, 0])):
+                        reqs.append(matrix_request(top, d))
+        return reqs
+
+    # ---- the new base
+
+    def new_base(self, result: dict) -> dict:
+        mplan, work, theirs = result["plan"], result["work"], result["theirs"]
+        now = {s["objectId"]: s for s in self.created["slides"]}
+        before = {s["objectId"]: s for s in theirs["slides"]}
+        by_plan = {id(w["plan"]): w for w in work["slides"]}
+        entries = {}
+        for p in mplan["slides"]:
+            w = by_plan[id(p)]
+            if p["action"] in ("delete",):
+                continue
+            if p["action"] in ("keep_removed", "gone"):
+                entries[p["objectId"] or f"gone:{p['key']}"] = self.base["slides"][p["base"]]
+                continue
+            o = self.ours["slides"][p["ours"]]
+            sid = w["sid"]
+            read = now.get(sid)
+            entry = {k: v for k, v in o.items() if k != "elements"}
+            elements = []
+            if p["action"] == "create":
+                for i, e in enumerate(o["elements"]):
+                    oids = w["objects"].get(i, [w["new_oid"].get(i)])
+                    elements.append(self._element(e, oids, read))
+                entry.update(objectId=sid, layoutObjectId=read["layoutObjectId"] if read else None,
+                             background_readback=read["background"] if read else None,
+                             notes_readback=read["notes"] if read else "", groups=w["groups"],
+                             order=read["order"] if read else [])
+            else:
+                b = self.base["slides"][p["base"]]
+                bunits, ounits = merge.units(b["elements"]), merge.units(o["elements"])
+                index = {e["key"]: k for k, e in enumerate(o["elements"])}
+                for u in p["units"]:
+                    a = u["action"]
+                    if a in ("create", "recreate"):
+                        for mk in u["ours_members"]:
+                            i = index[mk]
+                            elements.append(self._element(o["elements"][i], w["objects"].get(i, [w["new_oid"][i]]), read))
+                    elif a == "move":
+                        for m in ounits[u["key"]]:
+                            old = next((x for x in bunits[u["key"]] if x["key"] == m["key"]), None)
+                            if old is None:
+                                continue
+                            rb = {oid: {**v, **{k: read["objects"][oid][k] for k in ("box", "transform")}}
+                                  if read and oid in read["objects"] else v for oid, v in old["readback"].items()}
+                            elements.append({**m, "objects": old["objects"], "main": old["main"], "readback": rb})
+                    elif a in ("keep",):
+                        elements += bunits.get(u["key"], [])
+                    # delete / none: gone
+                bg_conflict = b.get("background") != o.get("background") and not p.get("background")
+                notes_kept = (b.get("notes") or "") != (o.get("notes") or "") and p.get("notes") is None
+                entry.update(objectId=sid, layoutObjectId=b.get("layoutObjectId"), groups=b.get("groups", []),
+                             order=read["order"] if read else b.get("order", []))
+                if p.get("background"):
+                    entry["background_readback"] = read["background"] if read else None
+                else:
+                    entry["background_readback"] = b.get("background_readback")
+                    if bg_conflict:
+                        entry["background"] = b.get("background")
+                if p.get("notes") is not None:
+                    entry["notes_readback"] = o.get("notes") or ""
+                else:
+                    entry["notes_readback"] = b.get("notes_readback", "")
+                    if notes_kept:
+                        entry["notes"] = b.get("notes")
+            entry["elements"] = elements
+            entries[sid] = entry
+        order = [s["objectId"] for s in self.created["slides"]]
+        slides = [entries.pop(sid) for sid in order if sid in entries] + list(entries.values())
+        return {**self.base, "generation": self.base.get("generation", 0) + 1, "revisionId": self.final_revision,
+                "source": snapshot.source_info(self.ours["source"]), "slides": slides}
+
+    def _element(self, e: dict, oids: list[str], read: dict | None) -> dict:
+        objects = (read or {}).get("objects", {})
+        return {**e, "objects": oids, "main": oids[0] if oids else None,
+                "readback": {oid: objects[oid] for oid in oids if oid in objects}}
+
+
+def stand_in_request(oid: str, sid: str, key: tuple) -> dict:
+    size = {"width": emu(STAND_IN), "height": emu(STAND_IN)}
+    transform = {"scaleX": 1, "scaleY": 1, "translateX": 0, "translateY": 0, "unit": "EMU"}
+    if key[0] == "BENT_CONNECTOR":
+        return {"createLine": {"objectId": oid, "lineCategory": "BENT", "elementProperties": {
+            "pageObjectId": sid, "size": size, "transform": transform}}}
+    return {"createShape": {"objectId": oid, "shapeType": key[0], "elementProperties": {
+        "pageObjectId": sid, "size": size, "transform": transform}}}
+
+
+# ---------------------------------------------------------------- reports
+
+def write_reports(out: Path, info: dict) -> tuple[Path, Path]:
+    folder = out / "sync"
+    folder.mkdir(parents=True, exist_ok=True)
+    stem = "sync-report" if not info.get("dry_run") else "sync-report-dry-run"
+    jpath, mpath = folder / f"{stem}.json", folder / f"{stem}.md"
+    r = info["report"]
+    data = {k: v for k, v in info.items() if k != "report"}
+    data.update({k: v for k, v in r.items() if k != "slides"})
+    data.update({f"slides_{k}": v for k, v in r["slides"].items()})
+    jpath.write_text(json.dumps(data, indent=1, ensure_ascii=False, default=str), encoding="utf-8")
+    lines = [f"# Sync report{' (dry run)' if info.get('dry_run') else ''}", "",
+             f"- PDF: `{info['pdf']}`", f"- Deck: {info['url']}", f"- Base: {info['base_from']} (generation {info['generation']})",
+             f"- Requests sent: {info['requests']}", ""]
+
+    def section(title, items, fmt):
+        lines.append(f"## {title} ({len(items)})")
+        lines.extend(fmt(x) for x in items) if items else lines.append("none")
+        lines.append("")
+    loc = lambda x: f"`{x['slide']}`" + (f" / `{x['element']}`" if x.get("element") else "")
+    section("Source changes applied", r["applied"], lambda x: f"- {loc(x)}: {', '.join(x['fields'])}" + (f" ({x['how']})" if x.get("how") else ""))
+    section("Deck edits kept (overrides)", r["overrides"], lambda x: f"- {loc(x)}: {', '.join(x['fields'])}")
+    section("Conflicts", r["conflicts"], lambda x: f"- {loc(x)}: **{x['field']}**, {x['resolution']}\n  - base: {json.dumps(x['base'], ensure_ascii=False)}\n"
+                                                  f"  - ours: {json.dumps(x['ours'], ensure_ascii=False)}\n  - theirs: {json.dumps(x['theirs'], ensure_ascii=False)}")
+    section("Converged", r["converged"], lambda x: f"- {loc(x)}: {x['field']}")
+    s = r["slides"]
+    lines += ["## Slides", f"- created: {s['created'] or 'none'}", f"- deleted: {s['deleted'] or 'none'}",
+              f"- moved: {s['moved'] or 'none'}", f"- kept (removed from the source, edited in the deck): {s['kept'] or 'none'}",
+              f"- added in the deck: {s['user_added'] or 'none'}", ""]
+    section("Objects added in the deck", r["user_objects"], lambda x: f"- `{x['slide']}`: {x['objectId']}" + (f" (copy of {x['copy_of']})" if x.get("copy_of") else ""))
+    section("Warnings", r["warnings"], lambda x: f"- {x}")
+    mpath.write_text("\n".join(lines), encoding="utf-8")
+    return jpath, mpath
+
+
+def sync(pdf: Path, deck: str, out: Path | None = None, dry_run: bool = False, overlays: str = "last",
+         measure: bool = True) -> dict:
+    from .google_auth import drive_service, slides_service
+
+    started = time.monotonic()
+    pid, folder = resolve_deck(deck)
+    out = out or folder or ROOT / "out" / pdf.stem
+    slides, drive = slides_service(), drive_service()
+    base, where = snapshot.load_base(pid, folder or out, drive)
+    if base is None:
+        raise SystemExit(f"no sync base for presentation {pid}: convert the deck with this version first")
+    ours = build_ours(pdf, out / "sync" / "ours", base, overlays)
+    s = Sync(slides, drive, pid, base, ours, out, dry_run, measure)
+    result = s.run()
+    report = result["plan"]["report"]
+    report["warnings"] += s.warnings
+    info = {"pdf": str(pdf), "presentationId": pid, "url": f"https://docs.google.com/presentation/d/{pid}/edit",
+            "dry_run": dry_run, "base_from": where, "generation": base.get("generation", 0),
+            "attempts": result["attempts"], "requests": s.sent, "seconds": round(time.monotonic() - started, 1),
+            "report": report,
+            "actions": [{"slide": p["key"], "action": p["action"],
+                         "units": [{k: u[k] for k in ("key", "action", "source", "deck") if k in u} for u in p.get("units", [])
+                                   if u["action"] not in ("keep", "none") or u.get("deck")]}
+                        for p in result["plan"]["slides"]]}
+    if not dry_run and result["work"]["writes"]:
+        new = s.new_base(result)
+        snapshot.save_local(new, out)
+        try:
+            snapshot.save_drive(drive, new)
+        except HttpError as e:
+            report["warnings"].append(f"could not store the new base in Drive ({e}); kept locally")
+        info["generation"] = new["generation"]
+    elif not dry_run and where == "drive":
+        snapshot.save_local(base, out)  # (refresh the cache)
+    write_reports(out, info)
+    return info

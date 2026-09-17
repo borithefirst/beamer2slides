@@ -1,0 +1,34 @@
+% Sync smoke test, version 2a: v1 with the first bullet of `intro` reworded.
+\documentclass{beamer}
+\usetheme{Madrid}
+\title{Sync smoke test}
+\author{Test Author}
+
+\begin{document}
+
+\begin{frame}[label=intro]{Why sync}
+  \begin{itemize}
+    \item Authors and their AI keep writing the talk in beamer
+    \item Colleagues polish the slides in Google Slides
+    \item Nobody wants to redo their edits by hand
+  \end{itemize}
+  \vspace{1em}
+  A merge keeps both sides of the work.
+\end{frame}
+
+\begin{frame}[label=results]{Results}
+  \begin{block}{Finding}
+    Edits made in the deck survive a new conversion.
+  \end{block}
+  \vspace{1em}
+  Conflicts are reported, never silently overwritten.
+\end{frame}
+
+\begin{frame}[label=end]{Summary}
+  \begin{itemize}
+    \item Label every frame
+    \item Sync after every change of the source
+  \end{itemize}
+\end{frame}
+
+\end{document}

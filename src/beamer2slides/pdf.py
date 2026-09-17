@@ -656,6 +656,21 @@ class Document:
     def label(self, index: int) -> str:
         return self.pdf.get_page_label(index)
 
+    def named_dests(self) -> list[tuple[str, int]]:
+        """(name, page index) of the document's named destinations; -1 for a deleted page."""
+        out = []
+        for i in range(R.FPDF_CountNamedDests(self.pdf.raw)):
+            size = ctypes.c_long(0)
+            R.FPDF_GetNamedDest(self.pdf.raw, i, None, ctypes.byref(size))
+            if size.value <= 0:
+                continue
+            buf = ctypes.create_string_buffer(size.value)
+            dest = R.FPDF_GetNamedDest(self.pdf.raw, i, buf, ctypes.byref(size))
+            if dest:
+                name = buf.raw[:size.value].decode("utf-16-le", "replace").rstrip("\x00")
+                out.append((name, R.FPDFDest_GetDestPageIndex(self.pdf.raw, dest)))
+        return out
+
     def close(self) -> None:
         self._pages.clear()
         self.pdf.close()

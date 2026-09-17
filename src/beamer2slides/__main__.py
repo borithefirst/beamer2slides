@@ -59,6 +59,12 @@ def cmd_convert(pdf: Path, out: Path, title: str | None, new_deck: bool, overlay
     title = title or raw["source"]["title"] or source.stem
     state = emit(deck, out, title, new_deck, measure)
     print(f"Google Slides: {state['url']}")
+    from .snapshot import snapshot_after_convert
+    try:
+        base = snapshot_after_convert(state["deck"], out, state, source)
+        print(f"sync base: {len(base['slides'])} slides recorded ({out / 'sync' / 'base.json'})")
+    except Exception as e:  # the deck is complete; only a later sync needs the base
+        print(f"warning: could not record the sync base ({type(e).__name__}: {e})")
 
 
 def main() -> None:
@@ -82,7 +88,26 @@ def main() -> None:
                                 "their gaps and words on scratch slides")
         if name == "fidelity":
             c.add_argument("--refresh", action="store_true", help="re-export slide thumbnails")
+    c = sub.add_parser("sync", help="merge a changed PDF into the edited deck (docs/sync.md)")
+    c.add_argument("pdf", type=Path)
+    c.add_argument("--deck", required=True, help="presentation URL or id, or the output folder of its convert")
+    c.add_argument("--out", type=Path, help="where the new conversion, base and reports go (default: the deck's folder)")
+    c.add_argument("--dry-run", action="store_true", help="plan and report without writing to the deck")
+    c.add_argument("--overlays", choices=["last", "all"], default="last")
+    c.add_argument("--predict-places", dest="predict_places", action="store_true")
     args = ap.parse_args()
+    if args.command == "sync":
+        from .sync import sync
+        info = sync(args.pdf, args.deck, args.out, args.dry_run, args.overlays, not args.predict_places)
+        r = info["report"]
+        print(f"sync{' (dry run)' if args.dry_run else ''}: {len(r['applied'])} source changes applied, "
+              f"{len(r['overrides'])} deck edits kept, {len(r['conflicts'])} conflicts, requests {info['requests'] or 0}")
+        for c in r["conflicts"]:
+            print(f"  conflict: {c['slide']} / {c['element']}: {c['field']} ({c['resolution']})")
+        for wmsg in r["warnings"]:
+            print(f"  warning: {wmsg}")
+        print(f"Google Slides: {info['url']}")
+        return
     out = args.out or ROOT / "out" / args.pdf.stem
     if args.command == "classify":
         cmd_classify(args.pdf, out, args.overlays)

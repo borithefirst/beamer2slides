@@ -1,6 +1,7 @@
 """Stage 1: dump each PDF page's text spans, images, drawings and links (raw.json)."""
 
 import math
+import re
 from pathlib import Path
 
 from .pdf import Char, Document, Page
@@ -240,17 +241,37 @@ def select_overlays(raw: dict, mode: str) -> dict:
     return {**raw, "pages": kept, "overlays": {"mode": mode, "dropped": len(pages) - len(kept)}}
 
 
+FRAME_STEP = re.compile(r"(.+)<(\d+)>")
+
+
+def frame_labels(dests: list[tuple[str, int]]) -> dict[int, str]:
+    """Page index -> beamer frame label. `\\begin{frame}[label=x]` puts the destination x on the
+    frame's first page and x<n> on its n-th overlay step; hyperref's own destinations (page.3,
+    Navigation3) have no steps."""
+    names = {name for name, _ in dests}
+    out = {}
+    for name, page in dests:
+        m = FRAME_STEP.fullmatch(name)
+        if m and m.group(1) in names and page >= 0:
+            out.setdefault(page, m.group(1))
+    return out
+
+
 def extract(pdf: Path, labels: list[str] | None = None) -> dict:
     """`labels` replaces the PDF's page labels (notes.prepare deletes pages, and PDFium can't
     rewrite the label tree)."""
     doc = Document(pdf)
     try:
         meta = doc.metadata
+        frames = frame_labels(doc.named_dests())
+        pages = [extract_page(page, _label(labels[page.index] if labels else doc.label(page.index), page.index))
+                 for page in doc]
+        for page in pages:
+            page["frame_label"] = frames.get(page["index"])
         return {
             "version": 1,
             "source": {"pdf": str(pdf), "producer": meta["producer"], "pages": len(doc), "title": meta["title"]},
-            "pages": [extract_page(page, _label(labels[page.index] if labels else doc.label(page.index), page.index))
-                      for page in doc],
+            "pages": pages,
         }
     finally:
         doc.close()
