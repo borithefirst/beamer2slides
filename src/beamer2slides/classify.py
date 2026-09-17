@@ -1260,12 +1260,13 @@ class PageClassifier:
                                math_text(s.font, s.text)[0] if s.info.family == "math" else s.text, round(s.rect.x0, 2)]
                               for s in line.content if s.rect.x1 <= x0 + 0.5 and s.info.family != "icon"
                               and not any(s in h for h in line.holes)]
+                    after = [s.rect.x0 for s in line.content if s.rect.x0 >= x1 - 0.5 and s not in hole and s.info.family != "icon"]
                     runs.append({"text": " ", "font": main.font, "family": main.info.family,
                                  "size": round(line.size, 2), "bold": False, "italic": False, "smallcaps": False,
                                  "color": main.color, "link": None, "script": None, "underline": False,
                                  # (the picture is cropped with HOLE_PAD on both sides: room for that too)
                                  "highlight": None, "hole": round(x1 - x0 + 2 * HOLE_PAD, 2), "hole_x0": round(x0, 2),
-                                 "before": before})
+                                 "before": before, "next_x0": round(min(after), 2) if after else None})
                     prev = max(hole, key=lambda s: s.rect.x1)
                     continue
                 text = span.text

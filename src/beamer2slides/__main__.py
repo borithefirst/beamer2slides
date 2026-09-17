@@ -48,7 +48,7 @@ def cmd_classify(pdf: Path, out: Path, overlays: str = "last") -> tuple[Path, di
     return pdf, raw, deck
 
 
-def cmd_convert(pdf: Path, out: Path, title: str | None, new_deck: bool, overlays: str) -> None:
+def cmd_convert(pdf: Path, out: Path, title: str | None, new_deck: bool, overlays: str, measure: bool = True) -> None:
     from .emit import emit
     from .render import render_backgrounds
 
@@ -57,7 +57,7 @@ def cmd_convert(pdf: Path, out: Path, title: str | None, new_deck: bool, overlay
     render_backgrounds(pdf, raw, deck, out)
     (out / "deck.json").write_text(json.dumps(deck, indent=1, ensure_ascii=False), encoding="utf-8")
     title = title or raw["source"]["title"] or source.stem
-    state = emit(deck, out, title, new_deck)
+    state = emit(deck, out, title, new_deck, measure)
     print(f"Google Slides: {state['url']}")
 
 
@@ -77,6 +77,8 @@ def main() -> None:
             c.add_argument("--title")
             c.add_argument("--new-deck", action="store_true",
                            help="create a new presentation instead of rebuilding the previous one")
+            c.add_argument("--predict-holes", action="store_true",
+                           help="place inline formula pictures by prediction only, without measuring their gaps")
         if name == "fidelity":
             c.add_argument("--refresh", action="store_true", help="re-export slide thumbnails")
     args = ap.parse_args()
@@ -84,7 +86,7 @@ def main() -> None:
     if args.command == "classify":
         cmd_classify(args.pdf, out, args.overlays)
     elif args.command == "convert":
-        cmd_convert(args.pdf, out, args.title, args.new_deck, args.overlays)
+        cmd_convert(args.pdf, out, args.title, args.new_deck, args.overlays, not args.predict_holes)
     elif args.command == "fidelity":
         from .fidelity import measure, print_report
         prepared = out / "slides.pdf"  # the notes-free PDF the deck was built from

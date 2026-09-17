@@ -1,0 +1,31 @@
+% Inline formula pictures in harder layouts: wrapped lines, centred and right-aligned text, blocks.
+\documentclass{beamer}
+\usepackage{amsmath,amssymb}
+
+\begin{document}
+
+\begin{frame}{Formulas on wrapped lines}
+  When we estimate a population quantity from data we often use the sample mean and,
+  under mild conditions, the squared error $\sum_{i=1}^{n} (x_i - \bar x)^2$ shrinks with more samples,
+  while the bias $\hat{\theta}_n^{(k)} - \theta$ stays fixed unless the estimator is corrected.
+  A last sentence ends with a formula $\sum_{i=1}^{n} x_i^2$.
+
+  \medskip
+  Two in a row, the second one on the next line: $\bar x = \frac{1}{n}\sum_i x_i$ and then
+  the variance $\hat\sigma^2 = \frac{1}{n-1}\sum_i (x_i - \bar x)^2$ both appear here.
+\end{frame}
+
+\begin{frame}{Centred and right-aligned}
+  \begin{center}
+    The centred line has $\sqrt{a^2 + b^2}$ in the middle of it.
+  \end{center}
+  \begin{flushright}
+    A right-aligned line with $\frac{p}{q}\sum_k c_k$ near its end.
+  \end{flushright}
+  \begin{block}{In a block}
+    The block body holds $\sum_{j=1}^{m} w_j^2$ between words, and a second line
+    with $\bar{X}_n^{(k)}$ too.
+  \end{block}
+\end{frame}
+
+\end{document}
