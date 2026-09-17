@@ -1472,17 +1472,10 @@ def title_bar_under(el: dict, slide: dict) -> list[float] | None:
                  and e["bbox"][1] <= cy <= e["bbox"][3]), None)
 
 
-def measure_holes(slides, pid: str, deck: dict, scale: float, fonts: FontMapper, placed, page_slide: dict,
-                  out: Path) -> tuple[dict[str, tuple[float, float]], list[str]]:
-    """Moves (dx, dy in slide pt) for hole pictures, measured on scratch slides (see above), and
-    the scratch slides to delete. Holes that can't be found keep their predicted place."""
-    from concurrent.futures import ThreadPoolExecutor
-    from PIL import Image
-    from .google_auth import credentials, slides_service
-    from .gslides import save_thumbnail
-
-    started = time.monotonic()
-    reqs, jobs = [], []  # jobs: (scratch slide id, page, [hole to find])
+def hole_jobs(deck: dict, scale: float, fonts: FontMapper, placed, page_slide: dict) -> tuple[list[dict], list[tuple]]:
+    """The scratch slides of measure_holes: their requests, and per slide (scratch slide id, page,
+    [hole to find: picture, expected gap start x0 and line middle cy, width, pitch, colour, hang])."""
+    reqs, jobs = [], []
     for slide in deck["slides"]:
         holes = [h for h in slide_holes(slide) if h[3] is not None]
         if not holes:
@@ -1521,6 +1514,20 @@ def measure_holes(slides, pid: str, deck: dict, scale: float, fonts: FontMapper,
                               (SYMBOL_ADVANCE_EM[" "] * z if prev_end is not None else 0.0,
                                el["bbox"][0] * scale - PAD_X, el["bbox"][2] * scale + 2 * PAD_X)})
         jobs.append((sid, n, found))
+    return reqs, jobs
+
+
+def measure_holes(slides, pid: str, deck: dict, scale: float, fonts: FontMapper, placed, page_slide: dict,
+                  out: Path) -> tuple[dict[str, tuple[float, float]], list[str]]:
+    """Moves (dx, dy in slide pt) for hole pictures, measured on scratch slides (see above), and
+    the scratch slides to delete. Holes that can't be found keep their predicted place."""
+    from concurrent.futures import ThreadPoolExecutor
+    from PIL import Image
+    from .google_auth import credentials, slides_service
+    from .gslides import save_thumbnail
+
+    started = time.monotonic()
+    reqs, jobs = hole_jobs(deck, scale, fonts, placed, page_slide)
     if not jobs:
         return {}, []
     try:
@@ -1781,28 +1788,8 @@ def build_deck(slides, drive, deck: dict, out: Path, title: str, existing: str |
     elements the API refused ((PDF page, element id)). `measure`: hole pictures go where a
     thumbnail shows their gaps (measure_holes), not only where formula_shifts predicts them."""
     page_w, page_h = deck["slides"][0]["size"]
-    scale = SLIDE_W / page_w
-    fonts = FontMapper()
-    deck = {**deck, "slides": [fit_holes(s, scale, fonts) for s in deck["slides"]]}
-
-    def slide_layout(slide: dict) -> tuple[str, str | None]:
-        """The title page uses the TITLE layout (centered title), frames with a title TITLE_ONLY."""
-        if title_element(slide) is None:
-            return "BLANK", None
-        return ("TITLE", "CENTERED_TITLE") if slide.get("title_page") else ("TITLE_ONLY", "TITLE")
-
-    keys = list(dict.fromkeys(k for s in deck["slides"] for e in s["elements"] for k in element_template_keys(e, scale)))
-    uses_templates = {s["page"]: any(element_template_keys(e, scale) for e in s["elements"]) for s in deck["slides"]}
-    shifts = {s["page"]: formula_shifts(s, scale, fonts) for s in deck["slides"]}
-    overlays = {s["page"]: overlay_boxes(s, scale, fonts) for s in deck["slides"]}
-
-    def placed(el: dict, n: int) -> dict:
-        """Inline formula pictures sit over the gap Slides leaves for them (formula_shifts),
-        graphics drawn at words over those words (overlay_boxes)."""
-        if el["id"] in overlays[n]:
-            return {**el, "bbox": [overlays[n][el["id"]][0], el["bbox"][1], overlays[n][el["id"]][1], el["bbox"][3]]}
-        dx = shifts[n].get(el["id"])
-        return el if dx is None else {**el, "bbox": [el["bbox"][0] + dx, el["bbox"][1], el["bbox"][2] + dx, el["bbox"][3]]}
+    plan = DeckPlan(deck)
+    deck, scale, fonts = plan.deck, plan.scale, plan.fonts
 
     # Backgrounds: the most common one becomes the master's (the deck's theme): layouts and
     # slides inherit it, and slides added later too. Identical pictures are stored once.
@@ -1817,12 +1804,11 @@ def build_deck(slides, drive, deck: dict, out: Path, title: str, existing: str |
     pages = [{
         "layout": slide_layout(s)[0],
         "fill": None if bg_key[s["page"]] == shared else fill(bg_key[s["page"]]),
-        "pictures": [{"file": out / e["file"], "bbox": [v * scale for v in placed(e, s["page"])["bbox"]],
-                      "alt": e.get("alt"), "title": PICTURE_TITLES.get(e.get("role"), "Figure")}
-                     for e in s["elements"] if e["kind"] == "image"],
-        "templates": uses_templates[s["page"]],
+        "pictures": [{"file": out / e["file"], "bbox": bbox, "alt": e.get("alt"),
+                      "title": PICTURE_TITLES.get(e.get("role"), "Figure")} for e, bbox in plan.pictures(s)],
+        "templates": plan.uses_templates[s["page"]],
     } for s in deck["slides"]]
-    pptx = build_pptx(page_w, page_h, keys, pages, fill(shared or ("color", "#ffffff")))
+    pptx = build_pptx(page_w, page_h, plan.keys, pages, fill(shared or ("color", "#ffffff")))
     pres = import_presentation(slides, drive, title, page_w, page_h, pptx, existing)
     pid = pres["presentationId"]
     sources = pres.get("slides", [])
@@ -1834,27 +1820,9 @@ def build_deck(slides, drive, deck: dict, out: Path, title: str, existing: str |
     template_sizes: list[tuple[float, float]] = []
     reqs = []
     for slide, source in zip(deck["slides"], sources):
-        n = slide["page"]  # PDF page index; slides may skip pages (overlays)
-        slide_id = f"b2s_s{n:03}"
-        els = source.get("pageElements", [])
-        placeholders = {e["shape"]["placeholder"]["type"]: e["objectId"] for e in els if "placeholder" in e.get("shape", {})}
-        pictures = [e["objectId"] for e in els if "image" in e]
-        shapes = [e for e in els if "image" not in e and "placeholder" not in e.get("shape", {})]
-        picture_idx = [i for i, e in enumerate(slide["elements"]) if e["kind"] == "image"]
-        if len(pictures) != len(picture_idx) or len(shapes) != (len(keys) if uses_templates[n] else 0):
-            raise RuntimeError(f"slide {n + 1}: the import brought {len(pictures)} pictures and {len(shapes)} "
-                               f"template shapes, expected {len(picture_idx)} and {len(keys) if uses_templates[n] else 0}")
-        ids = {source["objectId"]: slide_id}
-        ids.update({oid: f"{slide_id}_f{i}" for oid, i in zip(pictures, picture_idx)})
-        ids.update({e["objectId"]: f"{slide_id}_k{j}" for j, e in enumerate(shapes)})
-        template_sizes = template_sizes or [size_pt(e) for e in shapes]
-        title_idx = title_element(slide)
-        if title_idx is not None:
-            ids[placeholders[slide_layout(slide)[1]]] = f"{slide_id}_t{title_idx}"
-            sub_idx = subtitle_element(slide, title_idx)
-            if sub_idx is not None and "SUBTITLE" in placeholders:
-                ids[placeholders["SUBTITLE"]] = f"{slide_id}_t{sub_idx}"
-        reqs.append({"duplicateObject": {"objectId": source["objectId"], "objectIds": ids}})
+        request, sizes = plan.copy_request(slide, source)
+        template_sizes = template_sizes or sizes
+        reqs.append(request)
     batch(slides, pid, reqs)
     write_layout_texts(slides, pid, deck.get("layout_texts", []), scale, fonts)
     style_layout_placeholders(slides, pid, deck, scale, fonts, PPTX_TITLE_DY)
@@ -1868,15 +1836,8 @@ def build_deck(slides, drive, deck: dict, out: Path, title: str, existing: str |
     page_elements = {s["objectId"]: s.get("pageElements", []) for s in created["slides"]}
     speaker_notes = {s["objectId"]: s.get("slideProperties", {}).get("notesPage", {})
                      .get("notesProperties", {}).get("speakerNotesObjectId") for s in created["slides"]}
-    placeholder_dy = PPTX_TITLE_DY
-    # Internal link targets: PDF page -> slide. A skipped overlay step maps to the kept
-    # (last) step of its frame, which comes right after it.
-    kept = sorted(s["page"] for s in deck["slides"])
-    page_slide = {}
-    for page in range(kept[-1] + 1):
-        target = next(k for k in kept if k >= page)
-        page_slide[page] = f"b2s_s{target:03}"
-    moves, scratch = measure_holes(slides, pid, deck, scale, fonts, placed, page_slide, out) if measure else ({}, [])
+    moves, scratch = measure_holes(slides, pid, deck, scale, fonts, plan.placed, plan.page_slide, out) \
+        if measure else ({}, [])
 
     # Phase 2: content, batched over slides. Each slide's requests come in parts (one per
     # element) so that a rejected batch can be narrowed down to the element at fault.
@@ -1906,15 +1867,106 @@ def build_deck(slides, drive, deck: dict, out: Path, title: str, existing: str |
                 if el and el["kind"] != "image":
                     refused.append((page, el["id"]))
 
-    def template_on_slide(slide_id: str, key: tuple) -> dict:
-        """The slide's copy of a template shape ({"id", "w", "h"}: its unscaled size in pt)."""
-        j = keys.index(key)
-        w, h = template_sizes[j]
-        return {"id": f"{slide_id}_k{j}", "w": w, "h": h}
-
     pending: list[tuple[str, int, list]] = []
     pending_size = 0
     for slide in deck["slides"]:
+        n = slide["page"]
+        slide_id = f"b2s_s{n:03}"
+        parts, element_ids = plan.slide_parts(slide, page_elements, speaker_notes, moves, template_sizes)
+        size = sum(len(rs) for _, rs in parts)
+        # Several slides per round trip; a slide's requests are never split across batches.
+        if pending and pending_size + size > BATCH_MAX_REQUESTS:
+            send(pending)
+            pending, pending_size = [], 0
+        pending.append((slide_id, n, parts))
+        pending_size += size
+        state["slides"].append({"page": n, "objectId": slide_id, "elements": element_ids})
+        kinds = [el["kind"] for el in slide["elements"]]
+        print(f"  slide {n + 1}: {kinds.count('text')} text boxes, {kinds.count('image')} pictures, "
+              f"{kinds.count('shape')} shapes, {kinds.count('table')} tables")
+    if pending:
+        send(pending)
+    batch(slides, pid, [{"deleteObject": {"objectId": oid}} for oid in [s["objectId"] for s in sources] + scratch])
+    return state, refused
+
+
+class DeckPlan:
+    """The requests build_deck sends, apart from what only Google knows (the imported slides'
+    object IDs, placeholder and template sizes, measured hole moves): pure, so tests can check
+    them offline (plan_offline)."""
+
+    def __init__(self, deck: dict):
+        self.scale = scale = SLIDE_W / deck["slides"][0]["size"][0]
+        self.fonts = fonts = FontMapper()
+        self.deck = deck = {**deck, "slides": [fit_holes(s, scale, fonts) for s in deck["slides"]]}
+        self.keys = list(dict.fromkeys(k for s in deck["slides"] for e in s["elements"] for k in element_template_keys(e, scale)))
+        self.uses_templates = {s["page"]: any(element_template_keys(e, scale) for e in s["elements"]) for s in deck["slides"]}
+        self.shifts = {s["page"]: formula_shifts(s, scale, fonts) for s in deck["slides"]}
+        self.overlays = {s["page"]: overlay_boxes(s, scale, fonts) for s in deck["slides"]}
+        # Internal link targets: PDF page -> slide. A skipped overlay step maps to the kept
+        # (last) step of its frame, which comes right after it.
+        kept = sorted(s["page"] for s in deck["slides"])
+        self.page_slide = {}
+        for page in range(kept[-1] + 1):
+            target = next(k for k in kept if k >= page)
+            self.page_slide[page] = f"b2s_s{target:03}"
+
+    def placed(self, el: dict, n: int) -> dict:
+        """Inline formula pictures sit over the gap Slides leaves for them (formula_shifts),
+        graphics drawn at words over those words (overlay_boxes)."""
+        overlays, shifts = self.overlays[n], self.shifts[n]
+        if el["id"] in overlays:
+            return {**el, "bbox": [overlays[el["id"]][0], el["bbox"][1], overlays[el["id"]][1], el["bbox"][3]]}
+        dx = shifts.get(el["id"])
+        return el if dx is None else {**el, "bbox": [el["bbox"][0] + dx, el["bbox"][1], el["bbox"][2] + dx, el["bbox"][3]]}
+
+    def pictures(self, slide: dict) -> list[tuple[dict, list[float]]]:
+        """The slide's pictures with their boxes in the .pptx (slide pt)."""
+        return [(e, [v * self.scale for v in self.placed(e, slide["page"])["bbox"]])
+                for e in slide["elements"] if e["kind"] == "image"]
+
+    def copy_request(self, slide: dict, source: dict) -> tuple[dict, list[tuple[float, float]]]:
+        """Phase 1: the duplicateObject copying a slide's imported source under our object IDs,
+        and the sizes of the template shapes on the source."""
+        n = slide["page"]  # PDF page index; slides may skip pages (overlays)
+        slide_id = f"b2s_s{n:03}"
+        keys, uses_templates = self.keys, self.uses_templates
+        els = source.get("pageElements", [])
+        placeholders = {e["shape"]["placeholder"]["type"]: e["objectId"] for e in els if "placeholder" in e.get("shape", {})}
+        pictures = [e["objectId"] for e in els if "image" in e]
+        shapes = [e for e in els if "image" not in e and "placeholder" not in e.get("shape", {})]
+        picture_idx = [i for i, e in enumerate(slide["elements"]) if e["kind"] == "image"]
+        if len(pictures) != len(picture_idx) or len(shapes) != (len(keys) if uses_templates[n] else 0):
+            raise RuntimeError(f"slide {n + 1}: the import brought {len(pictures)} pictures and {len(shapes)} "
+                               f"template shapes, expected {len(picture_idx)} and {len(keys) if uses_templates[n] else 0}")
+        ids = {source["objectId"]: slide_id}
+        ids.update({oid: f"{slide_id}_f{i}" for oid, i in zip(pictures, picture_idx)})
+        ids.update({e["objectId"]: f"{slide_id}_k{j}" for j, e in enumerate(shapes)})
+        title_idx = title_element(slide)
+        if title_idx is not None:
+            ids[placeholders[slide_layout(slide)[1]]] = f"{slide_id}_t{title_idx}"
+            sub_idx = subtitle_element(slide, title_idx)
+            if sub_idx is not None and "SUBTITLE" in placeholders:
+                ids[placeholders["SUBTITLE"]] = f"{slide_id}_t{sub_idx}"
+        return {"duplicateObject": {"objectId": source["objectId"], "objectIds": ids}}, [size_pt(e) for e in shapes]
+
+    def slide_parts(self, slide: dict, page_elements: dict[str, list[dict]], speaker_notes: dict[str, str | None],
+                    moves: dict[str, tuple[float, float]], template_sizes: list[tuple[float, float]]
+                    ) -> tuple[list[tuple[dict | None, list[dict]]], list[str]]:
+        """Phase 2 for one slide after its copy: requests in parts ((element, requests), so a
+        rejected batch can be narrowed down to the element at fault) and the element object IDs.
+        `page_elements` and `speaker_notes` describe the copied slides (slide id -> elements with
+        objectId and size, speaker notes object id), `moves` are measure_holes' results."""
+        scale, fonts, keys = self.scale, self.fonts, self.keys
+        placed, page_slide, uses_templates = self.placed, self.page_slide, self.uses_templates
+        placeholder_dy = PPTX_TITLE_DY
+
+        def template_on_slide(slide_id: str, key: tuple) -> dict:
+            """The slide's copy of a template shape ({"id", "w", "h"}: its unscaled size in pt)."""
+            j = keys.index(key)
+            w, h = template_sizes[j]
+            return {"id": f"{slide_id}_k{j}", "w": w, "h": h}
+
         n = slide["page"]
         slide_id = f"b2s_s{n:03}"
         title_idx = title_element(slide)
@@ -1992,18 +2044,49 @@ def build_deck(slides, drive, deck: dict, out: Path, title: str, existing: str |
             extra.append({"updatePageElementsZOrder": {"pageElementObjectIds": [o for o in (title_oid, subtitle_oid) if o],
                                                        "operation": "BRING_TO_FRONT"}})
         parts += [(None, [r]) for r in extra]
-        size = sum(len(rs) for _, rs in parts)
-        # Several slides per round trip; a slide's requests are never split across batches.
-        if pending and pending_size + size > BATCH_MAX_REQUESTS:
-            send(pending)
-            pending, pending_size = [], 0
-        pending.append((slide_id, n, parts))
-        pending_size += size
-        state["slides"].append({"page": n, "objectId": slide_id, "elements": element_ids})
-        kinds = [el["kind"] for el in slide["elements"]]
-        print(f"  slide {n + 1}: {kinds.count('text')} text boxes, {kinds.count('image')} pictures, "
-              f"{kinds.count('shape')} shapes, {kinds.count('table')} tables")
-    if pending:
-        send(pending)
-    batch(slides, pid, [{"deleteObject": {"objectId": oid}} for oid in [s["objectId"] for s in sources] + scratch])
-    return state, refused
+        return parts, element_ids
+
+
+def slide_layout(slide: dict) -> tuple[str, str | None]:
+    """The title page uses the TITLE layout (centered title), frames with a title TITLE_ONLY."""
+    if title_element(slide) is None:
+        return "BLANK", None
+    return ("TITLE", "CENTERED_TITLE") if slide.get("title_page") else ("TITLE_ONLY", "TITLE")
+
+
+LAYOUT_PLACEHOLDERS = {"TITLE": ["CENTERED_TITLE", "SUBTITLE"], "TITLE_ONLY": ["TITLE"], "BLANK": []}
+
+
+def plan_offline(deck: dict, placeholder_size: tuple[float, float] = (612.0, 90.0),
+                 template_size: tuple[float, float] = (100.0, 100.0)) -> dict:
+    """What emit would send for a classified deck, without Google: the imported slides are made
+    up as the .pptx brings them (layout placeholders, pictures, template shapes) and hole
+    pictures keep their predicted places. {"plan": DeckPlan, "pictures": {page: [(element, .pptx
+    box)]}, "copies": phase 1 requests, "measure": measure_holes' scratch slide requests,
+    "slides": [(slide id, page, parts, element ids)]}."""
+    plan = DeckPlan({**deck, "slides": [{**s, "elements": merge_blocks(s["elements"])} for s in deck["slides"]]})
+
+    def size(w: float, h: float) -> dict:
+        return {"width": emu(w), "height": emu(h)}
+
+    copies, page_elements, template_sizes = [], {}, []
+    for slide in plan.deck["slides"]:
+        n, source = slide["page"], f"src{slide['page']:03}"
+        els = [{"objectId": f"{source}_{kind}", "size": size(*placeholder_size), "shape": {"placeholder": {"type": kind}}}
+               for kind in LAYOUT_PLACEHOLDERS[slide_layout(slide)[0]]]
+        els += [{"objectId": f"{source}_p{i}", "size": size(1, 1), "image": {}} for i, _ in enumerate(plan.pictures(slide))]
+        els += [{"objectId": f"{source}_k{j}", "size": size(*template_size), "shape": {}}
+                for j in range(len(plan.keys) if plan.uses_templates[n] else 0)]
+        request, sizes = plan.copy_request(slide, {"objectId": source, "pageElements": els})
+        copies.append(request)
+        template_sizes = template_sizes or sizes
+        ids = request["duplicateObject"]["objectIds"]
+        page_elements[ids[source]] = [{"objectId": ids.get(e["objectId"], f"{e['objectId']}_copy"), "size": e["size"]}
+                                      for e in els]
+    slides = []
+    for slide in plan.deck["slides"]:
+        slide_id = f"b2s_s{slide['page']:03}"
+        parts, element_ids = plan.slide_parts(slide, page_elements, {slide_id: f"{slide_id}_notes"}, {}, template_sizes)
+        slides.append((slide_id, slide["page"], parts, element_ids))
+    return {"plan": plan, "pictures": {s["page"]: plan.pictures(s) for s in plan.deck["slides"]}, "copies": copies,
+            "measure": hole_jobs(plan.deck, plan.scale, plan.fonts, plan.placed, plan.page_slide)[0], "slides": slides}
