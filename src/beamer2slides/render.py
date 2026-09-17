@@ -15,7 +15,7 @@ import numpy as np
 import pymupdf
 
 BACKGROUND_WIDTH_PX = 2000
-FIGURE_PX_PER_PT = 6.0     # ~ 3 px per Slides point on a 4:3 deck
+FIGURE_PX_PER_PT = 8.0     # ~ 4 px per Slides point on a 4:3 deck: sharp on high-DPI screens
 SMALL_FIGURE_PX_PER_PT = 12.0  # inline formulas and other small pictures: crisper text
 FIGURE_MAX_PX = 3000
 
