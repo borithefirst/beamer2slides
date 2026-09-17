@@ -39,7 +39,7 @@ import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from .compare import (HOLE, TOL, Comparison, Para, char_styles, compare, norm_text, para_text, picture_hash,
+from .compare import (HOLE, TOL, Comparison, Para, char_styles, compare, grey16, norm_text, para_text, picture_hash,
                       residual_line, slide_paragraphs, slide_title, text_anchor)
 from .texmap import (OPAQUE, PARA, Frame, Item, ListEnv, Source, Visible, WordMap, build_visible, frame_visible,
                      line_of, locate_words, mask_comments, match_group, page_frames, read_args, skip_space,
@@ -387,8 +387,11 @@ def error_excerpt(log: str) -> str:
 
 
 def copy_tree(src: Path, dst: Path) -> None:
+    dst = Path(dst).resolve()
     for dirpath, dirnames, filenames in os.walk(src):
-        dirnames[:] = [d for d in dirnames if d not in SKIP_DIRS and not d.startswith(".")]
+        dirnames[:] = [d for d in dirnames if d not in SKIP_DIRS and not d.startswith(".")
+                       and (Path(dirpath) / d).resolve() != dst and dst not in (Path(dirpath) / d).resolve().parents
+                       and (Path(dirpath) / d).resolve() not in dst.parents]
         rel = Path(dirpath).relative_to(src)
         (dst / rel).mkdir(parents=True, exist_ok=True)
         for name in filenames:
@@ -1272,7 +1275,8 @@ class Planner:
             else:
                 self.edit(frame.file, start, start + len(m.group(1)), f"{value:.1f}", r)
         else:
-            self.edit(frame.file, ls, ls, f"{indent_at(text, a)}\\vspace{{{dv:.1f}pt}}\n", r)
+            # \par: a column or item starts in horizontal mode, where \vspace would land after the first line
+            self.edit(frame.file, ls, ls, f"{indent_at(text, a)}\\par\\vspace{{{dv:.1f}pt}}\n", r)
         state.update(tries=state["tries"] + 1, err=err, dv=dv, gain=gain)
         self.shifted.add(r["slide"])
         return True
@@ -1539,7 +1543,8 @@ def textblock_latex(te: dict, style_for, ctx: Context, ind: str, reset: bool = F
 
 def frame_latex(ts: dict, style_for, ctx: Context) -> str:
     key = ts.get("key")
-    label = f"[label={key}]" if key and re.fullmatch(r"[A-Za-z][\w:.-]*", key) else ""
+    # sync's own keys for unlabelled frames (title:..., page:N) are not labels
+    label = f"[label={key}]" if key and re.fullmatch(r"[A-Za-z][\w:.-]*", key) and not re.match(r"(title|page):", key) else ""
     title = ""
     body = []
     for e in ts["elements"]:
@@ -1605,7 +1610,7 @@ def picture_hashes(cand: Candidate, target: dict, comp_out: Path) -> dict:
                 if x1 - x0 < 1 or y1 - y0 < 1:
                     continue
                 img = page.render(4.0, (x0, y0, x1, y1))
-                hashes[id(e)] = list(Image.fromarray(img).convert("L").resize((16, 16), Image.BILINEAR).getdata())
+                hashes[id(e)] = grey16(Image.fromarray(img))
     finally:
         doc.close()
     return hashes
@@ -1673,28 +1678,27 @@ def converge(tex: Path, target: dict, work: Path, max_iter: int = 10, handout: b
         check, err = ws.compile()
         if check is None:
             log(f"    the edits break the build:\n{err}")
-            # find the edit that breaks the build: undo all, then apply one at a time
-            restore(ws, before)
-            good = []
+            # find the edits that break the build: from the text before the round, keep adding one
+            # edit to those known to be good (offsets stay those of the original text)
+            good: list[Edit] = []
             for e in applied:
-                snapshot = {p: ws.source.text(p) for p in ws.source.order}
-                ok_edit = remap_edit(e, before, ws)
-                if ok_edit is None:
-                    continue
-                ws.write([ok_edit])
+                restore(ws, before)
+                ws.write(good + [e])
                 pre = ensure_preamble(ws, ctx)
                 if pre:
                     ws.write(pre)
                 if ws.compile()[0] is None:
-                    restore(ws, snapshot)
                     blocked.add(e.signature)
                     unresolved.append({"kind": e.kind, "why": "the edit breaks compilation", "edit": e.text[:200],
                                        "signature": list(map(str, e.signature))})
                 else:
                     good.append(e)
+            restore(ws, before)
+            ws.write(good)
+            pre = ensure_preamble(ws, ctx)
+            if pre:
+                ws.write(pre)
             log(f"    {len(applied) - len(good)} edit(s) broke the build and were dropped")
-        for sig in {e.signature for e in applied}:
-            pass
     open_res = comp.open() if comp else []
     files = {}
     patch = ""
@@ -1712,11 +1716,13 @@ def converge(tex: Path, target: dict, work: Path, max_iter: int = 10, handout: b
         if not (ws.root / rel).exists():
             files[str(ws.root / rel)] = dest  # binary: copied on apply
     final_unresolved = dedupe_unresolved(unresolved, open_res)
+    for u in final_unresolved:
+        si = u.get("slide")
+        frame = cand.frames[si] if cand and si is not None and si < len(cand.frames) else None
+        if frame is not None:
+            u["where"] = f"{(ws.root / frame.file.relative_to(ws.src)).as_posix()}:{frame.begin_line}-{frame.end_line}"
+            u["frame_label"] = frame.label
     return Result(not open_res, iterations, final_unresolved, open_res, files, patch, ws.work)
-
-
-def remap_edit(e: Edit, before: dict, ws: Workspace) -> Edit | None:
-    return e if e.file in before and ws.source.text(e.file) == before[e.file] or True else None
 
 
 def restore(ws: Workspace, texts: dict[Path, str]) -> None:
@@ -1801,3 +1807,64 @@ def report(result: Result, target: dict, cand_deck: dict | None = None) -> tuple
 
 def clean(r: dict) -> dict:
     return json.loads(json.dumps(r, default=str))
+
+
+# ---------------------------------------------------------------- commands
+
+def write_outputs(result: Result, target: dict, tex: Path, work: Path, apply: bool, out: Path | None,
+                  log=print) -> None:
+    """pull.patch, edits.json and edits.md in `work`; the edited files in place (with .bak backups)
+    when `apply`, or the edited source tree in `out`."""
+    data, md = report(result, target)
+    (work / "pull.patch").write_text(result.patch, encoding="utf-8", newline="\n")
+    (work / "edits.json").write_text(json.dumps(data, indent=1, ensure_ascii=False), encoding="utf-8")
+    (work / "edits.md").write_text(md, encoding="utf-8")
+    if out is not None:
+        out = Path(out).resolve()
+        copy_tree(result.work / "src", out)
+        log(f"edited source tree -> {out}")
+    elif apply:
+        for path, new in result.files.items():
+            path = Path(path)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            if isinstance(new, Path):
+                shutil.copy2(new, path)
+            else:
+                if path.exists():
+                    shutil.copy2(path, path.with_name(path.name + ".bak"))
+                path.write_text(new, encoding="utf-8", newline="")
+            log(f"  wrote {path}")
+    state = "converged" if result.converged else f"{len(result.unresolved)} residual(s) left"
+    log(f"{state} after {len(result.iterations) - 1} edit round(s); {len(result.files)} file(s) changed; "
+        f"report {work / 'edits.md'}")
+
+
+def run_pull(target: dict, tex: Path, work: Path, apply: bool = False, out: Path | None = None, max_iter: int = 10,
+             handout: bool = False, engine: str | None = None, log=print) -> Result:
+    work = Path(work).resolve()
+    work.mkdir(parents=True, exist_ok=True)
+    (work / "target.json").write_text(json.dumps(target, indent=1, ensure_ascii=False), encoding="utf-8")
+    result = converge(Path(tex), target, work / "loop", max_iter, handout, engine, log=log)
+    write_outputs(result, target, Path(tex), work, apply, out, log)
+    return result
+
+
+def cmd_pull(deck: str, tex: Path, work: Path | None, apply: bool, out: Path | None, max_iter: int,
+             handout: bool, engine: str | None) -> Result:
+    """Read a live deck (presentations.get only: the deck is never written) and converge the source to it."""
+    from .deck_ir import read_deck
+    ref = Path(deck)
+    if work is None:
+        work = ref / "pull" if ref.is_dir() else Path(tex).resolve().parent / "out" / "pull"
+    work = Path(work).resolve()
+    target = read_deck(deck, images=work / "target-images")
+    print(f"deck: {len(target['slides'])} slides read")
+    return run_pull(target, tex, work, apply, out, max_iter, handout, engine)
+
+
+def cmd_converge(target_path: Path, tex: Path, work: Path | None, apply: bool, out: Path | None, max_iter: int,
+                 handout: bool, engine: str | None) -> Result:
+    """Offline twin of pull: the target is a deck.json-shaped file (deck_ir output or classify's)."""
+    target = json.loads(Path(target_path).read_text(encoding="utf-8"))
+    work = Path(work) if work else Path(target_path).resolve().parent / "pull"
+    return run_pull(target, tex, work, apply, out, max_iter, handout, engine)

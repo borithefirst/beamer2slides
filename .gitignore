@@ -3,6 +3,7 @@ __pycache__/
 *.egg-info/
 tests/decks/out/
 tests/themes/out/
+tests/decks/inverse/out/
 out/
 # Google credentials never go in git
 credentials*.json

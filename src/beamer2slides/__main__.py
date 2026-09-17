@@ -4,6 +4,10 @@
       DIR/raw.json, DIR/deck.json and DIR/debug/slide-NNN.png
   python -m beamer2slides convert deck.pdf [--out DIR] [--title TITLE]
       classify + backgrounds + Google Slides deck (DIR/emit.json)
+  python -m beamer2slides pull --deck URL|ID|DIR --tex main.tex [--apply | --out SRC] [--max-iter N]
+      edit the source until its conversion matches the (edited) deck: WORK/pull.patch, edits.md/json
+  python -m beamer2slides converge --target deck.json --tex main.tex [...]
+      the same against a deck.json-shaped target, offline
 """
 
 import argparse
@@ -82,7 +86,28 @@ def main() -> None:
                                 "their gaps and words on scratch slides")
         if name == "fidelity":
             c.add_argument("--refresh", action="store_true", help="re-export slide thumbnails")
+    for name, help_text in (("pull", "edit the beamer source until its conversion matches an edited deck"),
+                            ("converge", "offline pull: edit the source until its conversion matches a deck.json")):
+        c = sub.add_parser(name, help=help_text)
+        if name == "pull":
+            c.add_argument("--deck", required=True, help="deck URL, presentation id or convert output folder")
+        else:
+            c.add_argument("--target", required=True, type=Path, help="deck.json-shaped target IR")
+        c.add_argument("--tex", required=True, type=Path)
+        c.add_argument("--apply", action="store_true", help="patch the source in place (.bak backups)")
+        c.add_argument("--out", type=Path, help="write the edited source tree here instead")
+        c.add_argument("--work", type=Path, help="loop folder and reports (default: <deck folder>/pull)")
+        c.add_argument("--max-iter", type=int, default=10)
+        c.add_argument("--handout", action="store_true", help="compile in handout mode (one page per frame)")
+        c.add_argument("--engine", help="pdflatex, xelatex or lualatex (default: from the source)")
     args = ap.parse_args()
+    if args.command in ("pull", "converge"):
+        from .inverse import cmd_converge, cmd_pull
+        if args.command == "pull":
+            cmd_pull(args.deck, args.tex, args.work, args.apply, args.out, args.max_iter, args.handout, args.engine)
+        else:
+            cmd_converge(args.target, args.tex, args.work, args.apply, args.out, args.max_iter, args.handout, args.engine)
+        return
     out = args.out or ROOT / "out" / args.pdf.stem
     if args.command == "classify":
         cmd_classify(args.pdf, out, args.overlays)

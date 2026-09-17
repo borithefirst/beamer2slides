@@ -384,9 +384,15 @@ def picture_hash(path) -> list[int] | None:
             ground = Image.new("RGBA", img.size, (255, 255, 255, 255))
             ground.alpha_composite(img)
             img = ground
-        return list(img.convert("L").resize((16, 16), Image.BILINEAR).getdata())
+        return grey16(img)
     except (OSError, ValueError):
         return None
+
+
+def grey16(img) -> list[int]:
+    from PIL import Image
+    small = img.convert("L").resize((16, 16), Image.BILINEAR)
+    return [small.getpixel((x, y)) for y in range(16) for x in range(16)]
 
 
 # ---------------------------------------------------------------- compare
