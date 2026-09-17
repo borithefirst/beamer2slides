@@ -204,6 +204,16 @@ def vertical_layout(paras: list[dict], baselines: list[list[float]], sizes: list
 
     Pitches snap to whole pixels, so each paragraph aims at the original position measured
     from where Slides will actually have put the previous one: rounding errors don't add up."""
+    estimate = None
+    for _ in range(4):  # a paragraph's ratio depends on the next one's (below 100% it moves up)
+        ratios, space_above = _vertical_pass(paras, baselines, sizes, estimate)
+        if ratios == estimate:
+            break
+        estimate = ratios
+    return ratios, space_above
+
+
+def _vertical_pass(paras, baselines, sizes, estimate):
     ratios: list[float] = []
     space_above = [0.0] * len(paras)
     pulled: dict[int, float] = {}  # paragraph -> lineSpacing < 1 that pulls it up to its target
@@ -212,20 +222,21 @@ def vertical_layout(paras: list[dict], baselines: list[list[float]], sizes: list
         n = len(bl)
         has_next = i + 1 < len(paras)
         list_link = has_next and p["bullet"] and paras[i + 1]["bullet"]
+        next_r = estimate[i + 1] if estimate and has_next else 1.0
         if list_link:
             target = baselines[i + 1][0] - first
             zn = sizes[i + 1]
-            r = solve_increasing(lambda r: (n - 1) * LINE_EM * z * r +
-                                 DESCENT_EM * z + ASCENT_EM * zn + extra_below(r, z), target)
+            r = solve_increasing(lambda r: (n - 1) * LINE_EM * z * r + DESCENT_EM * z + ASCENT_EM * zn +
+                                 extra_below(r, z) + extra_above(next_r, zn), target)
         elif n > 1:
             r = (bl[-1] - bl[0]) / (n - 1) / (LINE_EM * z)
         else:
             r = pulled.get(i, 1.0)
-        r = min(3.0, max(0.5, r))
+        r = round(min(3.0, max(0.5, r)), 4)
         ratios.append(r)
         last = first + (n - 1) * line_pitch(z, r)
         if has_next:
-            natural = pitch_between(z, r, sizes[i + 1], 1.0)
+            natural = pitch_between(z, r, sizes[i + 1], next_r)
             if not list_link:
                 gap = baselines[i + 1][0] - last - natural
                 nxt = paras[i + 1]
