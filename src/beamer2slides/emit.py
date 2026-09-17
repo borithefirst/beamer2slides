@@ -670,12 +670,60 @@ def _add_template_shapes(slide, keys: list[tuple]) -> None:
         shape.element.spPr.append(etree.fromstring(f'<a:effectLst xmlns:a="{a}">{effects}</a:effectLst>'))
 
 
-def build_pptx(page_w: float, page_h: float, keys: list[tuple], pages: list[dict], master_fill: dict) -> io.BytesIO:
+VARIANT = "_V"      # layout name suffix: a copy of the layout with another theme decoration (plan_theme)
+THEME_VARIANTS = 3
+
+
+def _clone_layout(prs, layout, name: str):
+    """A copy of a layout (placeholders only, no pictures) added to the master, shown as `name`."""
+    from copy import deepcopy
+
+    from lxml import etree
+    from pptx.opc.constants import RELATIONSHIP_TYPE as RT
+    from pptx.opc.packuri import PackURI
+    from pptx.parts.slide import SlideLayoutPart
+
+    master = prs.slide_master
+    taken = {str(p.partname) for p in prs.part.package.iter_parts()}
+    k = next(k for k in range(1, 1000) if f"/ppt/slideLayouts/slideLayout{k}.xml" not in taken)
+    element = deepcopy(layout.element)
+    element.cSld.set("name", name)
+    element.set("type", "cust")  # (its own layout name in Slides, never taken for the original's)
+    part = SlideLayoutPart(PackURI(f"/ppt/slideLayouts/slideLayout{k}.xml"), layout.part.content_type,
+                           layout.part.package, element)
+    part.relate_to(master.part, RT.SLIDE_MASTER)
+    ids = master.element.get_or_add_sldLayoutIdLst()
+    entry = etree.SubElement(ids, f"{{{NS_P}}}sldLayoutId")
+    entry.set("id", str(max(int(e.get("id")) for e in ids if e.get("id")) + 1))
+    entry.set(f"{{{NS_R}}}id", master.part.relate_to(part, RT.SLIDE_LAYOUT))
+    return part.slide_layout
+
+
+def _add_decoration(layout, picture: Path, width: int, height: int) -> None:
+    """The theme decoration as a full-page picture at the bottom of a layout: above the slide
+    background, below everything on the slide."""
+    from lxml import etree
+
+    _, rid = layout.part.get_or_add_image_part(str(picture))
+    tree = layout.shapes._spTree
+    shape_id = max([int(e.get("id")) for e in tree.iter(f"{{{NS_P}}}cNvPr")] + [1]) + 1
+    tree.insert(2, etree.fromstring(
+        f'<p:pic xmlns:p="{NS_P}" xmlns:a="{NS_A}" xmlns:r="{NS_R}"><p:nvPicPr>'
+        f'<p:cNvPr id="{shape_id}" name="Theme" descr="Theme decoration"/><p:cNvPicPr><a:picLocks noGrp="1"/></p:cNvPicPr>'
+        f'<p:nvPr userDrawn="1"/></p:nvPicPr><p:blipFill><a:blip r:embed="{rid}"/><a:stretch><a:fillRect/></a:stretch>'
+        f'</p:blipFill><p:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="{width}" cy="{height}"/></a:xfrm>'
+        f'<a:prstGeom prst="rect"><a:avLst/></a:prstGeom></p:spPr></p:pic>'))
+
+
+def build_pptx(page_w: float, page_h: float, keys: list[tuple], pages: list[dict], master_fill: dict,
+               decorations: dict | None = None) -> io.BytesIO:
     """The deck's starting point, imported through Drive. It carries everything the Slides API
     could only insert from a public URL, so no picture ever leaves the user's Drive:
 
     - the PDF's page size (presentations.create ignores pageSize);
     - the master background (`master_fill`), inherited by the layouts and most slides;
+    - the theme decoration (`decorations`, see plan_theme) at the bottom of the layouts; a page
+      layout named with the VARIANT suffix is a copy of its layout with that variant's decoration;
     - one source slide per deck slide (`pages`: {"layout", "fill" (None: inherit),
       "pictures": [{"file", "bbox" (slide pt), "alt", "title"}], "templates" (bool)}), holding its
       pictures and, if it needs any, the template shapes (shadows, exact corner radii).
@@ -697,8 +745,21 @@ def build_pptx(page_w: float, page_h: float, keys: list[tuple], pages: list[dict
                     shape.top, shape.height = Emu(round(shape.top * ratio)), Emu(round(shape.height * ratio))
     master = prs.slide_master
     _set_background(master.part, master.element.find(f"{{{NS_P}}}cSld"), master_fill)
+    decorations = decorations or {}
+    layouts = {name: prs.slide_layouts[i] for name, i in TEMPLATE_LAYOUTS.items()}
+    originals = list(prs.slide_layouts)
+    for name in dict.fromkeys(p["layout"] for p in pages if VARIANT in p["layout"]):
+        kind, n = name.rsplit(VARIANT, 1)
+        picture = decorations.get(f"{'TITLE' if kind == 'TITLE' else '*'}{VARIANT}{n}")
+        layouts[name] = _clone_layout(prs, layouts[kind], f"{layouts[kind].name} ({f'theme {int(n) + 1}' if picture else 'no theme'})")
+        if picture:
+            _add_decoration(layouts[name], picture, prs.slide_width, prs.slide_height)
+    for i, layout in enumerate(originals):
+        picture = decorations.get("TITLE" if i == TEMPLATE_LAYOUTS["TITLE"] else "*")
+        if picture:
+            _add_decoration(layout, picture, prs.slide_width, prs.slide_height)
     for page in pages:
-        slide = prs.slides.add_slide(prs.slide_layouts[TEMPLATE_LAYOUTS[page["layout"]]])
+        slide = prs.slides.add_slide(layouts[page["layout"]])
         if page["fill"]:
             _set_background(slide.part, slide.element.find(f"{{{NS_P}}}cSld"), page["fill"])
         for pic in page["pictures"]:
@@ -1769,6 +1830,63 @@ def background_key(slide: dict, out: Path) -> tuple:
     return ("png", hashlib.sha1((out / slide["background"]).read_bytes()).hexdigest())
 
 
+def plan_theme(deck: dict, out: Path, bg_key: dict) -> dict | None:
+    """Theme decoration on the layouts (render.theme_decoration), so a background colour set in
+    Slides changes only the page ground and new slides get the decoration too. Title pages (TITLE
+    layout) and the other slides get one each. Backgrounds that don't show it (a standout frame, a
+    closing page without the headline) get the decoration they share among themselves on a copy of
+    their layout (VARIANT suffix; up to THEME_VARIANTS copies, the last without decoration). Slide
+    backgrounds stay as they are: the decoration drawn over a background showing it changes nothing.
+
+    Returns None without decoration, else {"ground": "#rrggbb", "decorations": {"TITLE" (title layout),
+    "*" (every other layout), "TITLE_V1", "*_V1", ... (copies): Path or None}, "layouts": {page:
+    layout name, e.g. "TITLE_ONLY_V1"}, "exact": {"TITLE", "*": background key that is exactly the
+    ground plus the decoration, or None}}."""
+    from PIL import Image
+
+    from .render import page_ground, save_png, theme_decoration
+
+    counts = Counter(bg_key.values())
+    groups = {"TITLE": [s for s in deck["slides"] if slide_layout(s)[0] == "TITLE"]}
+    groups["*"] = [s for s in deck["slides"] if slide_layout(s)[0] != "TITLE"]
+    load = lambda s: np.asarray(Image.open(out / s["background"]).convert("RGB"))
+    main = groups["*"] or groups["TITLE"]
+    if not main:
+        return None
+    for old in (out / "backgrounds").glob("theme-*.png"):
+        old.unlink()
+    ground = page_ground(load(max(main, key=lambda s: counts[bg_key[s["page"]]])))
+    theme = {"ground": "#" + "".join(f"{int(v):02x}" for v in ground), "decorations": {},
+             "layouts": {s["page"]: slide_layout(s)[0] for s in deck["slides"]}, "exact": {}}
+    for name, members in groups.items():
+        for variant in range(THEME_VARIANTS + 1):
+            if not members:
+                break
+            key = name if variant == 0 else f"{name}{VARIANT}{variant}"
+            keys = sorted(dict.fromkeys(bg_key[s["page"]] for s in members), key=lambda k: -counts[k])
+            first = {k: next(s for s in members if bg_key[s["page"]] == k) for k in keys}
+            picture, inside = None, [True] * len(keys)
+            if variant < THEME_VARIANTS:
+                picture, inside, exact = theme_decoration((load(first[k]) for k in keys), ground)
+                inside = inside if picture is not None else [True] * len(keys)
+                if variant == 0:
+                    theme["exact"][name] = keys[0] if picture is not None and exact else None
+            if picture is not None:
+                path = out / "backgrounds" / f"theme-{'title' if name == 'TITLE' else 'main'}-{variant}.png"
+                save_png(picture, path)
+            theme["decorations"][key] = path if picture is not None else None
+            if variant:
+                for s in members:
+                    if inside[keys.index(bg_key[s["page"]])]:
+                        theme["layouts"][s["page"]] += f"{VARIANT}{variant}"
+            members = [s for s in members if not inside[keys.index(bg_key[s["page"]])]]
+    if not any(theme["decorations"].values()):
+        return None
+    if not groups["TITLE"]:
+        theme["decorations"]["TITLE"] = theme["decorations"].get("*")  # (for title slides added in Slides)
+    return theme
+
+
 def master_ground(shared: tuple | None, files: dict, page_w: float):
     """bbox (PDF pt) -> the master background's median colour there (see background_key)."""
     if shared is None or shared[0] == "color":
@@ -1997,14 +2115,21 @@ def build_deck(slides, drive, deck: dict, out: Path, title: str, existing: str |
     def fill(key: tuple) -> dict:
         return {"color": key[1]} if key[0] == "color" else {"picture": bg_file[key]}
 
+    theme = plan_theme(deck, out, bg_key)
+    master_fill = fill(shared or ("color", "#ffffff"))
+    if theme:
+        group = lambda s: "TITLE" if slide_layout(s)[0] == "TITLE" else "*"
+        # The master's ground colour where the shared background is nothing but ground and decoration.
+        if shared is None or all(theme["exact"].get(group(s)) == shared for s in deck["slides"] if bg_key[s["page"]] == shared):
+            master_fill = {"color": theme["ground"]}
     pages = [{
-        "layout": slide_layout(s)[0],
+        "layout": theme["layouts"][s["page"]] if theme else slide_layout(s)[0],
         "fill": None if bg_key[s["page"]] == shared else fill(bg_key[s["page"]]),
         "pictures": [{"file": out / e["file"], "bbox": bbox, "alt": e.get("alt"),
                       "title": PICTURE_TITLES.get(e.get("role"), "Figure")} for e, bbox in plan.pictures(s)],
         "templates": plan.uses_templates[s["page"]],
     } for s in deck["slides"]]
-    pptx = build_pptx(page_w, page_h, plan.keys, pages, fill(shared or ("color", "#ffffff")))
+    pptx = build_pptx(page_w, page_h, plan.keys, pages, master_fill, theme and theme["decorations"])
     pres = import_presentation(slides, drive, title, page_w, page_h, pptx, existing)
     pid = pres["presentationId"]
     sources = pres.get("slides", [])
@@ -2025,6 +2150,11 @@ def build_deck(slides, drive, deck: dict, out: Path, title: str, existing: str |
 
     state = {"presentationId": pid, "url": f"https://docs.google.com/presentation/d/{pid}/edit",
              "scale": scale, "slides": []}
+    if theme:
+        state["theme"] = {"ground": theme["ground"], "master": master_fill.get("color"),
+                          "decorations": {k: str(p.relative_to(out)).replace("\\", "/") if p else None
+                                          for k, p in theme["decorations"].items()},
+                          "layouts": {str(k): v for k, v in theme["layouts"].items()}}
     # Placeholder sizes (needed to resize them) and any extra layout placeholders.
     created = execute(slides.presentations().get(
         presentationId=pid,

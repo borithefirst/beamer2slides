@@ -411,6 +411,45 @@ def render_backgrounds(pdf: Path, raw: dict, deck: dict, out: Path) -> list[Path
     return paths
 
 
+DECORATION_MIN = 0.002    # share of the page: less is no theme decoration
+DECORATION_AGREE = 0.9    # share of the decoration a background must show to be decorated alike
+DECORATION_TOLERANCE = 2  # levels
+
+
+def page_ground(img: np.ndarray) -> np.ndarray:
+    """The most common colour of a background (the page ground)."""
+    px = img[::4, ::4].reshape(-1, 3).astype(np.int64)
+    packed = (px[:, 0] << 16) | (px[:, 1] << 8) | px[:, 2]
+    values, counts = np.unique(packed, return_counts=True)
+    v = values[counts.argmax()]
+    return np.array([(v >> 16) & 255, (v >> 8) & 255, v & 255])
+
+
+def theme_decoration(images, ground: np.ndarray) -> tuple[np.ndarray | None, list[bool], bool]:
+    """The theme decoration a layout can carry for backgrounds that share it (`images`: distinct
+    backgrounds, the most used first): an RGBA picture of the first one, opaque where it differs
+    from the ground and every background taking it shows the same pixels, transparent elsewhere.
+    Drawn over those backgrounds it changes nothing, and over another ground colour it keeps the
+    bars and lines. Returns (picture or None, per image whether it shows the decoration, whether
+    the first image is exactly the ground plus the picture)."""
+    images = iter(images)
+    first = next(images)
+    ref = first.astype(np.int16)
+    mask = np.abs(ref - ground).max(axis=2) > DECORATION_TOLERANCE
+    total = int(mask.sum())
+    if total < DECORATION_MIN * mask.size:
+        return None, [False] * (1 + sum(1 for _ in images)), False
+    inside = [True]
+    for img in images:
+        same = np.abs(img.astype(np.int16) - ref).max(axis=2) <= DECORATION_TOLERANCE if img.shape == ref.shape else None
+        ok = same is not None and (same & mask).sum() >= DECORATION_AGREE * mask.sum()
+        inside.append(bool(ok))
+        if ok:
+            mask &= same
+    # (binary alpha: over a background showing the same pixels, any soft edge would change them)
+    return np.dstack([first, np.where(mask, 255, 0).astype(np.uint8)]), inside, int(mask.sum()) == total
+
+
 def uniform_color(img: np.ndarray, tolerance: int = 3) -> str | None:
     """The single colour of a background with nothing left on it, else None. Such slides get
     a plain Slides background colour instead of a picture."""

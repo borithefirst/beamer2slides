@@ -118,6 +118,11 @@ a per-slide background picture.
   Emit fills it with no-break spaces in Roboto Mono (a space is exactly 0.6 em), sized to the
   width, and shifts the picture by the predicted width error of the words before it
   (`formula_shifts`). Lines with fewer than two real words stay one display picture.
+- Anchored pictures (holes, icons, number balls) are transparent (`render.clear_ground`): rendered
+  again without what stays in the background (paths not inside the box + 5 pt, images/shadings not
+  inside it), kept when the page under the crop is flat and the result laid on that colour shows the
+  opaque crop, with opaque pixels fading into the ground near the edge turned into alpha
+  (`unblend_rim`: ball shadings, clip edges). Else the opaque crop.
 - Tables also take cell `fills` (filled rects inside a ruled table; their edges give column
   bounds) and simple math in cells (`span_runs` handles math fonts and scripts).
   `plain_tables`: rule-less tabulars (≥3 rows, same cell count, short cells) → borderless tables.
@@ -153,13 +158,27 @@ a per-slide background picture.
 - Hanging labels (`Line.tab`, paragraph `tab_x0`): algorithmic line numbers, description
   items and item labels without a Slides preset are written `label<TAB>text` with
   indentFirstLine at the label and indentStart at the text (Slides tabs jump to indentStart).
-- Layouts (`style_layout_placeholders`, `write_layout_texts`): every layout's TITLE /
+  Description labels pair only across a label gap (`LABEL_SEP_EM` 0.4 em; beamer's labelsep is 0.5 em,
+  word spaces 0.33 em): prose whose word edges line up by chance with an item is no description.
+- Layouts (`style_layout_placeholders`, `write_layout_texts`): the master's and every layout's TITLE /
   CENTERED_TITLE placeholder gets the position and text style of the deck's frame titles /
   title page, BODY placeholders the most common body font, and shared footer texts go
-  onto all layouts. A slide added later in Slides then looks like the converted ones.
+  onto all layouts. A slide added later in Slides then looks like the converted ones. Title colours
+  unreadable on the master background there (`readable_run`, contrast < 2: white title-page text on a
+  native panel) take the panel's colour, else black/white.
 - Backgrounds: identical PNGs are stored once in the .pptx; the most common background is set on
   the master (layouts and those slides inherit it). Frame counters (`FRAME_COUNTER_RE`) become
   per-slide text elements (role `footer`), so theme backgrounds become identical.
+- Theme decoration on the layouts (`emit.plan_theme`, `render.theme_decoration`): the pixels (≠ page
+  ground) that all backgrounds of a group show alike become a full-page binary-alpha picture at the
+  bottom of the layouts (title pages → TITLE layout, the rest → every other layout). Layout pictures
+  draw above the slide background and below its content, so a background colour set in Slides keeps
+  bars and footlines (navigation text that differs per section shows as cut-outs), and new slides get
+  them. Backgrounds that don't show a group's decoration go on layout copies (`TITLE_ONLY_V1`, shown
+  "Title Only (theme 2)", up to 3, the last "(no theme)"). Slide backgrounds keep their meaning (own
+  picture, or inherit the master's); the master becomes the ground colour when the shared background
+  is exactly ground plus decoration. Thumbnails match the old structure except 1 px rows at bar edges.
+  emit.json `theme`: ground, master colour, decoration files, page → layout name.
 - Fonts: `fonts.google_font` passes Google fonts used in the PDF through with their weight
   (weightedFontFamily, no width correction) and maps Helvetica/Times/Courier clones to
   metric-compatible Arial/Times New Roman/Courier New. CM fonts use the calibrated substitutes.
@@ -340,6 +359,10 @@ Sync test harness (opt-in, marker `sync`, deselected by default): `python -m pyt
 - Slides table rows are at least 1.195 em × lineSpacing + 14.4 pt tall (7.2 pt cell padding,
   not settable); empty cells count with the default font unless given a styled space.
 - Layout pages reject `pageBackgroundFill.propertyState = INHERIT`; set the fill explicitly.
+- Imported layout/master placeholders hold "\n" per list level (no visible text): updateTextStyle works
+  on them, insertText is refused. A layout placeholder style equal to its master's reads back as unset.
+- A transparent PNG as a page background fill shows white under its alpha (not the master); pictures on
+  a layout draw over any slide background.
 - Pixel checks on hairline shapes need a high zoom (`render._fill_fraction`).
 - Bullet colour/size can be set independently only through creation order: style the paragraph
   like the bullet, create bullets, then style the text in two or more requests (a single request
