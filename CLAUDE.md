@@ -81,21 +81,30 @@ a per-slide background picture.
 - Graphics drawn over or at native words (`classify.overlay`: tikzmark arrows, braces, callouts,
   emphasis ellipses) become transparent pictures of only their own drawings and labels
   (`overlay`, `render.crop_overlay`), anchored to the text. Their `marks` (word edges they meet,
-  with the words before, holes and em-space gaps closed up) are predicted like formula gaps;
-  `emit.overlay_boxes` moves the picture by the mean drift and stretches it by the slope (±10%).
+  with the words before, holes and em-space gaps closed up) are measured with the holes
+  (`measure_places`): the words they lie on (`mark_words`: found in the box text by the words
+  before them; a left edge pairs with the right edge on its line) are highlighted in a mark
+  colour kept apart from same-coloured highlights nearby, `pick_word` finds them, and
+  `fit_overlay` moves the picture by the mean drift and stretches it by the least-squares slope
+  (±30% measured: a brace spans its phrase, an arrow meets both words; the callout's label
+  stretches along, 5% on the test deck). The move is a RELATIVE transform with scaleX, its
+  translation corrected for the scale about the page origin. Unmeasured marks keep the
+  prediction (`mark_drifts`, formula-gap model; `overlay_boxes`, ±10%).
   A translucent fill over text (`opacity` < 1) becomes a `highlight` shape with fill alpha,
   anchored to that text. Text turned ±90° (`rotated_texts`) becomes a text box laid out in its
   own frame and turned by the transform. Path bounds use the curve's extremes, not its control
   points (`pdf._curve_extremes`). Test deck: `22_overlays_on_text`.
 - Accents PDFium reports as separate chars (`ACCENTS`: ¯ ˆ ˜ …) become combining marks on
   their letter (X̄), also when the accent landed in the previous span.
-- Hole pictures are placed by measurement (`emit.measure_holes`, ~2 s per deck): scratch slides
-  get copies of the text boxes with holes, every hole run highlighted in a mark colour and all
-  text black; one thumbnail each (in parallel) shows the real gaps (`find_marks`, sub-pixel;
+- Hole and overlay pictures are placed by measurement (`emit.measure_places`, ~2-3 s per deck):
+  scratch slides get copies of the text boxes with holes or overlay words (run highlights
+  removed), every hole run and marked word highlighted in a mark colour and all text black; one
+  thumbnail each (in parallel) shows the real gaps (`find_marks`, sub-pixel;
   `pick_gap` also follows a hole Slides wrapped onto another line), a hole hanging past the box
   edge at a line end is found from the ink before it (`ink_end`), and pictures get a RELATIVE
   transform before grouping; scratch slides are deleted with the sources. Debug output:
-  `out/.../holes/marks-NNN.png`, `moves.json`. `--predict-holes` skips it. `fit_holes` sizes a
+  `out/.../holes/marks-NNN.png`, `moves.json`, `overlays.json` (per mark: x, predicted and measured
+  drift). `--predict-places` (alias `--predict-holes`) skips it. `fit_holes` sizes a
   hole to the PDF room up to the next word (`next_x0`) less a Slides space, and `hole_offset`
   shares the spaces left and right of the picture in the PDF's proportion.
 - `formula_shifts` (the fallback prediction) uses Slides' symbol advances
@@ -166,9 +175,10 @@ a per-slide background picture.
   and classifies them locally (no Google calls).
 - Offline request tests (`tests/test_emit_requests.py`, ~5 s for all built decks): `emit.plan_offline`
   plans what `build_deck` sends (`DeckPlan`: .pptx picture boxes, phase 1 copies, each slide's parts;
-  `hole_jobs`: measure_holes' scratch slides) against a made-up imported presentation, and the tests
+  `measure_jobs`: measure_places' scratch slides) against a made-up imported presentation, and the tests
   replay it: object ids, groups, anchored pictures grouped with their text, numbers centred on balls,
-  hole widths, bullet styling order, text ranges and texts, page bounds, predicted shifts < 15 pt.
+  hole widths, bullet styling order, text ranges and texts, page bounds, predicted shifts < 15 pt
+  (overlay stretch ±10%), every overlay mark on a highlighted word.
   Unit tests there cover the placement helpers. `build_deck` only adds Google's answers and batching.
 - Invariants (`checks.py`, `tests/test_invariants.py`, ~40 s over all test decks and theme talks,
   no Google calls): `convert_locally` extracts, classifies and renders with pictures kept in memory,

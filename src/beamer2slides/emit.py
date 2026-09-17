@@ -4,6 +4,7 @@ import hashlib
 import io
 import json
 import math
+import re
 import time
 from collections import Counter
 from pathlib import Path
@@ -326,7 +327,7 @@ def text_box_requests(el: dict, slide_id: str, object_id: str, scale: float, fon
     one-line text sits on) the box fills the bar and centres its text vertically, so the
     title stays in the middle of the bar when the block is resized. `right_limit` (PDF x) is
     how far a box of unwrapped left-aligned text may extend. `marks` highlights the hole runs,
-    one colour each (measure_holes)."""
+    one colour each (measure_places)."""
     marks = list(marks or [])
     paras = [{**p, "runs": [hole_run(r, scale, fonts) if r.get("hole") else r for r in p["runs"]]}
              for p in el["paragraphs"]]
@@ -1358,44 +1359,54 @@ def formula_shifts(slide: dict, scale: float, fonts: FontMapper) -> dict[str, fl
     return out
 
 
-OVERLAY_STRETCH = 0.1  # how much a graphic between words may widen or narrow with them
+OVERLAY_STRETCH = 0.1  # how much a graphic between words may widen or narrow with predicted words
+OVERLAY_STRETCH_MEASURED = 0.3  # ... with measured ones (a brace spans its phrase)
+
+
+def mark_drifts(el: dict, scale: float, fonts: FontMapper) -> list[float]:
+    """Predicted drift (PDF pt, Slides minus PDF) of each of an overlay's marks: a formula gap
+    starting at the mark (formula_shifts)."""
+    drifts = []
+    for m in el["marks"]:
+        run = {"text": " ", "font": m["font"], "family": m["family"], "size": m["size"], "bold": m["bold"],
+               "italic": m["italic"], "hole": 1.0, "hole_x0": m["hole_x0"], "before": m["before"]}
+        probe = {"elements": [{"kind": "text", "id": "mark", "paragraphs": [
+            {"align": "left", "runs": [run], "lines": [{"baseline": 0.35 * m["size"]}]}]},
+                              {"kind": "image", "id": "gap", "anchor": "mark",
+                               "bbox": [m["hole_x0"] - HOLE_PAD, 0, m["hole_x0"], 0]}]}
+        # (the gap's picture starts HOLE_PAD before the gap; shifts under 0.2 pt are not reported)
+        drifts.append(formula_shifts(probe, scale, fonts).get("gap", HOLE_PAD) - HOLE_PAD + m.get("pads", 0))
+    return drifts
+
+
+def fit_overlay(bbox: list[float], drifts: list[tuple[float, float]], cap: float) -> tuple[float, float]:
+    """PDF x extent of a picture following its marks' drifts ((x, drift)): moved by the mean
+    drift and stretched by the least-squares slope (at most `cap`) when the marks are 10 pt apart or more."""
+    xs = [x for x, _ in drifts]
+    mx, md = sum(xs) / len(xs), sum(d for _, d in drifts) / len(drifts)
+    spread = sum((x - mx) ** 2 for x in xs)
+    slope = sum((x - mx) * (d - md) for x, d in drifts) / spread if max(xs) - min(xs) >= 10 else 0.0
+    slope = max(-cap, min(cap, slope))
+    x0, _, x1, _ = bbox
+    return x0 + md + slope * (x0 - mx), x1 + md + slope * (x1 - mx)
 
 
 def overlay_boxes(slide: dict, scale: float, fonts: FontMapper) -> dict[str, tuple[float, float]]:
     """PDF x extents for graphics drawn over or at words (classify.overlay: arrows, braces,
-    callouts), following where Slides sets those words. Each mark (a word edge the graphic
-    meets) is predicted like a formula gap starting there (formula_shifts); the picture moves
-    with the marks, and stretches between marks far apart (a brace under a phrase)."""
-    out = {}
-    for el in slide["elements"]:
-        if not el.get("marks"):
-            continue
-        drifts = []
-        for m in el["marks"]:
-            run = {"text": " ", "font": m["font"], "family": m["family"], "size": m["size"], "bold": m["bold"],
-                   "italic": m["italic"], "hole": 1.0, "hole_x0": m["hole_x0"], "before": m["before"]}
-            probe = {"elements": [{"kind": "text", "id": "mark", "paragraphs": [
-                {"align": "left", "runs": [run], "lines": [{"baseline": 0.35 * m["size"]}]}]},
-                                  {"kind": "image", "id": "gap", "anchor": "mark",
-                                   "bbox": [m["hole_x0"] - HOLE_PAD, 0, m["hole_x0"], 0]}]}
-            # (the gap's picture starts HOLE_PAD before the gap; shifts under 0.2 pt are not reported)
-            drifts.append((m["x"], formula_shifts(probe, scale, fonts).get("gap", HOLE_PAD) - HOLE_PAD + m.get("pads", 0)))
-        xs = [x for x, _ in drifts]
-        mx, md = sum(xs) / len(xs), sum(d for _, d in drifts) / len(drifts)
-        spread = sum((x - mx) ** 2 for x in xs)
-        slope = sum((x - mx) * (d - md) for x, d in drifts) / spread if max(xs) - min(xs) >= 10 else 0.0
-        slope = max(-OVERLAY_STRETCH, min(OVERLAY_STRETCH, slope))
-        x0, _, x1, _ = el["bbox"]
-        out[el["id"]] = (x0 + md + slope * (x0 - mx), x1 + md + slope * (x1 - mx))
-    return out
+    callouts), following where Slides sets those words, as predicted (mark_drifts); measure_places
+    corrects them on the thumbnail."""
+    return {el["id"]: fit_overlay(el["bbox"], list(zip([m["x"] for m in el["marks"]], mark_drifts(el, scale, fonts))),
+                                  OVERLAY_STRETCH)
+            for el in slide["elements"] if el.get("marks")}
 
 
-# ---------------------------------------------------------------- measured hole positions
+# ---------------------------------------------------------------- measured picture positions
 #
 # The prediction above is off by several points now and then (fallback fonts, kerning, wraps).
-# So each slide with holes gets a scratch copy of its text boxes on a white slide, every hole
-# run highlighted in a mark colour and all text black; Google's thumbnail of it shows where
-# the gaps really are, and the pictures are moved there before they are grouped.
+# So each slide with holes or overlays gets a scratch copy of those text boxes on a white slide,
+# every hole run and every word an overlay's marks lie on highlighted in a mark colour and all
+# text black; Google's thumbnail of it shows where the gaps and words really are, and the
+# pictures are moved (overlays also stretched) there before they are grouped.
 
 HOLE_MARKS = ["#ff00ff", "#00ffff", "#ffff00", "#00ff00"]  # 0/255 channels only (mark_alpha)
 MARK_CORE = 0.9  # a pixel at least this much covered by a mark is inside it
@@ -1466,6 +1477,76 @@ def ink_end(img: np.ndarray, px_per_pt: float, y0: float, y1: float, x0: float, 
     return (a + cols[-1] + 1) / px_per_pt if len(cols) else None
 
 
+def slides_texts(el: dict, scale: float, fonts: FontMapper) -> list[str]:
+    """Each paragraph's text as its text box ends up holding it (holes as their no-break spaces)."""
+    return ["".join((hole_run(r, scale, fonts) if r.get("hole") else r)["text"] for r in p["runs"]) for p in el["paragraphs"]]
+
+
+def mark_words(overlay: dict, text: dict, scale: float, fonts: FontMapper) -> list[dict]:
+    """The words an overlay's marks lie on, in the final text of its anchor's text box:
+    {"range": (start, end), "marks": [(mark index, 0 left edge / 1 right edge)], "width": PDF
+    width or None}. A right edge ends the last word before it (the whole run of words before it
+    on its line finds it); a left edge starts the word a right edge on the same line ends, or else
+    the word after the ones before it. Marks whose words aren't found are left out."""
+    paras = slides_texts(text, scale, fonts)
+    starts = [sum(len(t) + 1 for t in paras[:i]) for i in range(len(paras))]
+    tokens = [[(m.start(), m.end(), m.group()) for m in re.finditer(r"\S+", t)] for t in paras]
+
+    def locate(want: list[str]) -> tuple[int, int] | None:
+        """(paragraph, index of the last token) of a run of words; shorter tails if unique."""
+        for k in range(len(want), 0, -1):
+            hits = [(pi, j) for pi, toks in enumerate(tokens) for j in range(k - 1, len(toks))
+                    if [t[2] for t in toks[j - k + 1:j + 1]] == want[-k:]]
+            if hits and (k == len(want) or len(hits) == 1):
+                return hits[0]
+        return None
+
+    words: dict[tuple, dict] = {}
+
+    def add(key: tuple[int, int, int], mark: tuple[int, int], width: float | None) -> None:
+        pi, j0, j1 = key
+        w = words.setdefault(key, {"range": (starts[pi] + tokens[pi][j0][0], starts[pi] + tokens[pi][j1][1]),
+                                   "marks": [], "width": width})
+        w["marks"].append(mark)
+        w["width"] = w["width"] or width
+
+    ends, lefts = [], []  # (mark index, texts before the word, its closed x0, word key)
+    for i, m in enumerate(overlay["marks"]):
+        before = m["before"]
+        if not (before and abs(before[-1][6] + before[-1][0] - m["hole_x0"]) <= 0.3):
+            lefts.append(i)
+            continue
+        n = len(before[-1][5].split())
+        hit = locate(" ".join(b[5] for b in before).split())
+        if hit and n and hit[1] - n + 1 >= 0:
+            key = (hit[0], hit[1] - n + 1, hit[1])
+            ends.append((i, tuple(b[5] for b in before[:-1]), before[-1][6], key))
+            add(key, (i, 1), before[-1][0])
+    for i in lefts:
+        m = overlay["marks"][i]
+        texts = tuple(b[5] for b in m["before"])
+        # (the same words before and x0 on two lines, "Stochastic" and "but" at the left margin:
+        # classify lists a word's left edge right before its right edge)
+        key = min(((abs(j - i - 1), k) for j, t, x0, k in ends if t == texts and abs(x0 - m["hole_x0"]) <= 0.3),
+                  default=(0, None))[1]
+        if key is None and texts:
+            hit = locate(" ".join(texts).split())
+            if hit and hit[1] + 1 < len(tokens[hit[0]]):
+                key = (hit[0], hit[1] + 1, hit[1] + 1)
+        if key is not None:
+            add(key, (i, 0), None)
+    return list(words.values())
+
+
+def pick_word(marks: list[tuple[float, float, float, float]], x0: float, width: float | None,
+              top: float, bottom: float) -> tuple[float, float, float, float] | None:
+    """The highlighted word (slide pt) starting nearest the predicted `x0`, within its text box's
+    rows top..bottom, about as wide as the PDF word if `width` is known, at most 25 pt away."""
+    fits = [m for m in marks if top <= (m[1] + m[3]) / 2 <= bottom and abs(m[0] - x0) <= 25
+            and (width is None or abs((m[2] - m[0]) - width) <= max(3.0, 0.3 * width))]
+    return min(fits, key=lambda m: abs(m[0] - x0)) if fits else None
+
+
 def title_bar_under(el: dict, slide: dict) -> list[float] | None:
     """The PDF box of the block title bar a text element sits on, if any."""
     cx, cy = (el["bbox"][0] + el["bbox"][2]) / 2, (el["bbox"][1] + el["bbox"][3]) / 2
@@ -1474,31 +1555,62 @@ def title_bar_under(el: dict, slide: dict) -> list[float] | None:
                  and e["bbox"][1] <= cy <= e["bbox"][3]), None)
 
 
-def hole_jobs(deck: dict, scale: float, fonts: FontMapper, placed, page_slide: dict) -> tuple[list[dict], list[tuple]]:
-    """The scratch slides of measure_holes: their requests, and per slide (scratch slide id, page,
-    [hole to find: picture, expected gap start x0 and line middle cy, width, pitch, colour, hang])."""
+def measure_jobs(deck: dict, scale: float, fonts: FontMapper, placed, page_slide: dict) -> tuple[list[dict], list[tuple]]:
+    """The scratch slides of measure_places: their requests, and per slide (scratch slide id, page,
+    [hole to find: picture, expected gap start x0 and line middle cy, width, pitch, colour, hang],
+    [overlay: picture, predicted PDF extent, marks' predicted drifts, words (mark_words with their
+    colour, predicted slide x0 and text box rows)])."""
     reqs, jobs = [], []
     for slide in deck["slides"]:
-        holes = [h for h in slide_holes(slide) if h[3] is not None]
-        if not holes:
-            continue
         n = slide["page"]
+        holes = [h for h in slide_holes(slide) if h[3] is not None]
+        texts = {e["id"]: e for e in slide["elements"] if e["kind"] == "text"}
+        overlays = [e for e in slide["elements"] if e.get("marks") and e.get("anchor") in texts]
+        if not holes and not overlays:
+            continue
         sid = f"b2s_m{n:03}"
         reqs += [{"createSlide": {"objectId": sid, "slideLayoutReference": {"predefinedLayout": "BLANK"}}},
                  {"updatePageProperties": {"objectId": sid, "fields": "pageBackgroundFill.solidFill.color",
                                            "pageProperties": {"pageBackgroundFill": {"solidFill": {
                                                "color": {"rgbColor": {"red": 1, "green": 1, "blue": 1}}}}}}}]
-        found = []
+        found, measured, taken = [], [], []  # taken: (colour, x0, x1, y0, y1) of every highlight, slide pt
         for i, el in enumerate(slide["elements"]):
             mine = [h for h in holes if h[0] is el]
-            if not mine:
+            marked = [o for o in overlays if o["anchor"] == el["id"]]
+            if not mine and not marked:
                 continue
             colours = [HOLE_MARKS[(len(found) + k) % len(HOLE_MARKS)] for k in range(len(mine))]
             oid = f"{sid}_t{i}"
-            reqs += text_box_requests(el, sid, oid, scale, fonts, None, page_slide, title_bar_under(el, slide),
+            plain = {**el, "paragraphs": [{**p, "runs": [{**r, "highlight": None} for r in p["runs"]]} for p in el["paragraphs"]]}
+            reqs += text_box_requests(plain, sid, oid, scale, fonts, None, page_slide, title_bar_under(el, slide),
                                       text_right_limit(el, slide), colours)
             reqs.append({"updateTextStyle": {"objectId": oid, "textRange": {"type": "ALL"}, "fields": "foregroundColor",
                                              "style": {"foregroundColor": rgb("#000000")}}})
+            top, bottom = el["bbox"][1] * scale - 4, el["bbox"][3] * scale + 4
+            for (_, _, _, pic), colour in zip(mine, colours):
+                x0, y0, x1, y1 = (v * scale for v in placed(pic, n)["bbox"])
+                taken.append((colour, x0, x1, y0, y1))
+            for o in marked:
+                bx0, _, bx1, _ = o["bbox"]
+                a0, _, a1, _ = placed(o, n)["bbox"]
+                words = []
+                for w in mark_words(o, el, scale, fonts):
+                    m = o["marks"][w["marks"][0][0]]
+                    x = m["x"] - (w["width"] or 0.0) * w["marks"][0][1]  # the word's PDF x0
+                    x0 = (a0 + (x - bx0) * (a1 - a0) / (bx1 - bx0)) * scale
+                    x1 = x0 + (w["width"] or 0.0) * scale
+
+                    def clash(c):  # how close the nearest highlight of colour c on these rows is
+                        return min([max(0.0, t[1] - x1, x0 - t[2]) for t in taken
+                                    if t[0] == c and t[3] < bottom and t[4] > top] + [math.inf])
+                    colour = max(HOLE_MARKS, key=lambda c: (clash(c), -sum(t[0] == c for t in taken)))
+                    taken.append((colour, x0, x1, top, bottom))
+                    words.append({**w, "colour": colour, "x0": x0, "top": top, "bottom": bottom})
+                    reqs.append({"updateTextStyle": {"objectId": oid, "fields": "backgroundColor",
+                                                     "style": {"backgroundColor": rgb(colour)},
+                                                     "textRange": {"type": "FIXED_RANGE", "startIndex": w["range"][0],
+                                                                   "endIndex": w["range"][1]}}})
+                measured.append({"pic": o, "box": (a0, a1), "drifts": mark_drifts(o, scale, fonts), "words": words})
             for (_, p, run, pic), colour in zip(mine, colours):
                 x0, y0, _, y1 = placed(pic, n)["bbox"]
                 z = fonts(run, scale)[1]
@@ -1515,43 +1627,71 @@ def hole_jobs(deck: dict, scale: float, fonts: FontMapper, placed, page_slide: d
                               "hang": None if run.get("next_x0") is not None else
                               (SYMBOL_ADVANCE_EM[" "] * z if prev_end is not None else 0.0,
                                el["bbox"][0] * scale - PAD_X, el["bbox"][2] * scale + 2 * PAD_X)})
-        jobs.append((sid, n, found))
+        jobs.append((sid, n, found, measured))
     return reqs, jobs
 
 
-def measure_holes(slides, pid: str, deck: dict, scale: float, fonts: FontMapper, placed, page_slide: dict,
-                  out: Path) -> tuple[dict[str, tuple[float, float]], list[str]]:
-    """Moves (dx, dy in slide pt) for hole pictures, measured on scratch slides (see above), and
-    the scratch slides to delete. Holes that can't be found keep their predicted place."""
+def overlay_move(o: dict, marks: dict[str, list], scale: float) -> tuple[tuple[float, float, float] | None, list]:
+    """(dx, dy, scaleX) taking an overlay picture from its predicted extent to the one its
+    measured words give (fit_overlay; marks not measured keep their predicted drift), or None if
+    no word was found; and [x, predicted drift, measured drift or None] per mark (PDF pt)."""
+    got = {}
+    for w in o["words"]:
+        rect = pick_word(marks[w["colour"]], w["x0"], w["width"] and w["width"] * scale, w["top"], w["bottom"])
+        for i, side in w["marks"] if rect else []:
+            got[i] = rect[2 * side] / scale - o["pic"]["marks"][i]["x"]
+    xs = [m["x"] for m in o["pic"]["marks"]]
+    table = [[x, round(d, 2), round(got[i], 2) if i in got else None] for i, (x, d) in enumerate(zip(xs, o["drifts"]))]
+    if not got:
+        return None, table
+    b0, b1 = fit_overlay(o["pic"]["bbox"], [(x, got.get(i, d)) for i, (x, d) in enumerate(zip(xs, o["drifts"]))],
+                         OVERLAY_STRETCH_MEASURED)
+    a0, a1 = o["box"]
+    return ((b0 - a0) * scale, 0.0, (b1 - b0) / (a1 - a0)), table
+
+
+def measure_places(slides, pid: str, deck: dict, scale: float, fonts: FontMapper, placed, page_slide: dict,
+                   out: Path) -> tuple[dict[str, tuple], list[str]]:
+    """Moves for hole pictures ((dx, dy) in slide pt) and overlay pictures ((dx, dy, scaleX): dx
+    moves the left edge), measured on scratch slides (see above), and the scratch slides to
+    delete. What can't be found keeps its predicted place."""
     from concurrent.futures import ThreadPoolExecutor
     from PIL import Image
     from .google_auth import credentials, slides_service
     from .gslides import save_thumbnail
 
     started = time.monotonic()
-    reqs, jobs = hole_jobs(deck, scale, fonts, placed, page_slide)
+    reqs, jobs = measure_jobs(deck, scale, fonts, placed, page_slide)
     if not jobs:
         return {}, []
     try:
         batch(slides, pid, reqs)
     except HttpError as e:
-        print(f"warning: could not measure the formula gaps ({api_error(e)}); keeping the predicted places")
+        print(f"warning: could not measure the picture places ({api_error(e)}); keeping the predicted places")
         return {}, []  # (a refused batch created nothing)
 
     creds = credentials()
+    tables = {}
 
     def measure(job):
-        sid, n, found = job
+        sid, n, found, overlays = job
         path = out / "holes" / f"marks-{n + 1:03}.png"
         try:
             save_thumbnail(slides_service(creds), pid, sid, path)
         except (HttpError, OSError) as e:
-            print(f"warning: slide {n + 1}: no thumbnail to measure the formula gaps ({e})")
+            print(f"warning: slide {n + 1}: no thumbnail to measure the picture places ({e})")
             return {}
         img = np.asarray(Image.open(path).convert("RGB"))
         px_per_pt = img.shape[1] / SLIDE_W
-        marks = {c: find_marks(mark_alpha(img, c), px_per_pt) for c in {f["colour"] for f in found}}
+        marks = {c: find_marks(mark_alpha(img, c), px_per_pt)
+                 for c in {f["colour"] for f in found} | {w["colour"] for o in overlays for w in o["words"]}}
         moves = {}
+        for o in overlays:
+            move, tables[o["pic"]["id"]] = overlay_move(o, marks, scale)
+            if move is None:
+                print(f"warning: slide {n + 1}: words of {o['pic']['id']} not found; keeping its predicted place")
+            elif abs(move[0]) >= 0.2 or abs(move[2] - 1) >= 0.002:
+                moves[o["pic"]["id"]] = move
         for f in found:
             move = pick_gap(marks[f["colour"]], f["x0"], f["cy"], f["width"], f["pitch"])
             if move is None and f["hang"]:
@@ -1569,12 +1709,14 @@ def measure_holes(slides, pid: str, deck: dict, scale: float, fonts: FontMapper,
     with ThreadPoolExecutor(max_workers=6) as pool:
         for result in pool.map(measure, jobs):
             moves.update(result)
-    (out / "holes" / "moves.json").write_text(json.dumps({k: [round(v, 2) for v in m] for k, m in moves.items()},
+    (out / "holes" / "moves.json").write_text(json.dumps({k: [round(v, 4) for v in m] for k, m in moves.items()},
                                                          indent=1), encoding="utf-8")
-    n_holes = sum(len(found) for _, _, found in jobs)
-    print(f"  formula gaps: {n_holes} measured on {len(jobs)} slides, {len(moves)} pictures moved "
-          f"({time.monotonic() - started:.1f} s)")
-    return moves, [sid for sid, _, _ in jobs]
+    # (per overlay mark: PDF x, predicted drift, measured drift)
+    (out / "holes" / "overlays.json").write_text(json.dumps(tables), encoding="utf-8")
+    n_holes, n_overlays = sum(len(job[2]) for job in jobs), sum(len(job[3]) for job in jobs)
+    print(f"  picture places: {n_holes} formula gaps and {n_overlays} overlays measured on {len(jobs)} slides, "
+          f"{len(moves)} pictures moved ({time.monotonic() - started:.1f} s)")
+    return moves, [job[0] for job in jobs]
 
 
 def subtitle_element(slide: dict, title_idx: int) -> int | None:
@@ -1787,8 +1929,8 @@ def emit(deck: dict, out: Path, title: str, new_deck: bool = False, measure: boo
 def build_deck(slides, drive, deck: dict, out: Path, title: str, existing: str | None,
                measure: bool = True) -> tuple[dict, list[tuple[int, str]]]:
     """Import the .pptx and fill in the content. Returns the state for emit.json and the
-    elements the API refused ((PDF page, element id)). `measure`: hole pictures go where a
-    thumbnail shows their gaps (measure_holes), not only where formula_shifts predicts them."""
+    elements the API refused ((PDF page, element id)). `measure`: hole and overlay pictures go
+    where a thumbnail shows their gaps and words (measure_places), not only where they are predicted."""
     page_w, page_h = deck["slides"][0]["size"]
     plan = DeckPlan(deck)
     deck, scale, fonts = plan.deck, plan.scale, plan.fonts
@@ -1838,7 +1980,7 @@ def build_deck(slides, drive, deck: dict, out: Path, title: str, existing: str |
     page_elements = {s["objectId"]: s.get("pageElements", []) for s in created["slides"]}
     speaker_notes = {s["objectId"]: s.get("slideProperties", {}).get("notesPage", {})
                      .get("notesProperties", {}).get("speakerNotesObjectId") for s in created["slides"]}
-    moves, scratch = measure_holes(slides, pid, deck, scale, fonts, plan.placed, plan.page_slide, out) \
+    moves, scratch = measure_places(slides, pid, deck, scale, fonts, plan.placed, plan.page_slide, out) \
         if measure else ({}, [])
 
     # Phase 2: content, batched over slides. Each slide's requests come in parts (one per
@@ -1958,7 +2100,7 @@ class DeckPlan:
         """Phase 2 for one slide after its copy: requests in parts ((element, requests), so a
         rejected batch can be narrowed down to the element at fault) and the element object IDs.
         `page_elements` and `speaker_notes` describe the copied slides (slide id -> elements with
-        objectId and size, speaker notes object id), `moves` are measure_holes' results."""
+        objectId and size, speaker notes object id), `moves` are measure_places' results."""
         scale, fonts, keys = self.scale, self.fonts, self.keys
         placed, page_slide, uses_templates = self.placed, self.page_slide, self.uses_templates
         placeholder_dy = PPTX_TITLE_DY
@@ -1998,11 +2140,13 @@ class DeckPlan:
                 # The picture came with the slide: move it to its place in the z-order.
                 oid = f"{slide_id}_f{i}"
                 reqs = [{"updatePageElementsZOrder": {"pageElementObjectIds": [oid], "operation": "BRING_TO_FRONT"}}]
-                if el["id"] in moves:  # to the gap measured for it (measure_holes)
-                    dx, dy = moves[el["id"]]
+                if el["id"] in moves:  # to the gap or words measured for it (measure_places)
+                    dx, dy, sx = (*moves[el["id"]], 1.0)[:3]
+                    # (a relative transform scales about the page origin: the left edge keeps its dx)
                     reqs.insert(0, {"updatePageElementTransform": {"objectId": oid, "applyMode": "RELATIVE", "transform": {
-                        "scaleX": 1, "scaleY": 1, "unit": "EMU",
-                        "translateX": round(dx * EMU_PER_PT), "translateY": round(dy * EMU_PER_PT)}}})
+                        "scaleX": sx, "scaleY": 1, "unit": "EMU",
+                        "translateX": round((dx + (1 - sx) * el["bbox"][0] * scale) * EMU_PER_PT),
+                        "translateY": round(dy * EMU_PER_PT)}}})
                 if el.get("number"):
                     reqs += number_box_requests(el["number"], slide_id, f"{oid}n", scale, fonts)
             else:
@@ -2065,7 +2209,7 @@ def plan_offline(deck: dict, placeholder_size: tuple[float, float] = (612.0, 90.
     up as the .pptx brings them (layout placeholders, pictures, template shapes) and hole
     pictures keep their predicted places. {"plan": DeckPlan, "pictures": {page: [(element, .pptx
     box)]}, "copies": phase 1 requests, "page_elements" and "speaker_notes": the copied slides,
-    "measure": measure_holes' scratch slide requests, "slides": [(slide id, page, parts, element ids)]}."""
+    "measure": measure_places' scratch slide requests, "slides": [(slide id, page, parts, element ids)]}."""
     plan = DeckPlan({**deck, "slides": [{**s, "elements": merge_blocks(s["elements"])} for s in deck["slides"]]})
 
     def size(w: float, h: float) -> dict:
@@ -2092,4 +2236,4 @@ def plan_offline(deck: dict, placeholder_size: tuple[float, float] = (612.0, 90.
         slides.append((f"b2s_s{slide['page']:03}", slide["page"], parts, element_ids))
     return {"plan": plan, "pictures": {s["page"]: plan.pictures(s) for s in plan.deck["slides"]}, "copies": copies,
             "page_elements": page_elements, "speaker_notes": speaker_notes,
-            "measure": hole_jobs(plan.deck, plan.scale, plan.fonts, plan.placed, plan.page_slide)[0], "slides": slides}
+            "measure": measure_jobs(plan.deck, plan.scale, plan.fonts, plan.placed, plan.page_slide)[0], "slides": slides}

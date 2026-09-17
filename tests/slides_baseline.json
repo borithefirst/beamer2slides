@@ -32,10 +32,10 @@
   },
   "19_labels_on_graphics": {
    "12:p11f0.m0": {
-    "overlay_drift": 0.01
+    "overlay_drift": 0.04
    },
    "12:p11f0.m1": {
-    "overlay_drift": 0.81
+    "overlay_drift": 0.12
    },
    "12:p11h0": {
     "hole_gap": 0.32
@@ -436,76 +436,76 @@
   },
   "22_overlays_on_text": {
    "1:p0f0.m0": {
-    "overlay_drift": 0.44
+    "overlay_drift": 1.15
    },
    "1:p0f0.m1": {
-    "overlay_drift": 2.08
+    "overlay_drift": 1.58
    },
    "1:p0f0.m2": {
-    "overlay_drift": 2.07
+    "overlay_drift": 1.2
    },
    "1:p0f0.m3": {
-    "overlay_drift": 0.45
+    "overlay_drift": 0.56
    },
    "1:p0f0.m4": {
-    "overlay_drift": 1.85
+    "overlay_drift": 0.97
    },
    "1:p0f0.m5": {
-    "overlay_drift": 0.08
+    "overlay_drift": 1.14
    },
    "1:p0f1.m0": {
-    "overlay_drift": 0.11
+    "overlay_drift": 0.06
    },
    "1:p0f1.m1": {
-    "overlay_drift": 1.27
+    "overlay_drift": 0.04
    },
    "2:p1f0.m0": {
-    "overlay_drift": 3.57
+    "overlay_drift": 0.15
    },
    "2:p1f0.m1": {
-    "overlay_drift": 5.46
+    "overlay_drift": 0.48
    },
    "2:p1f0.m2": {
-    "overlay_drift": 4.85
+    "overlay_drift": 1.23
    },
    "2:p1f0.m3": {
-    "overlay_drift": 8.17
+    "overlay_drift": 0.46
    },
    "2:p1f1.m0": {
-    "overlay_drift": 2.48
+    "overlay_drift": 0.14
    },
    "2:p1f1.m1": {
-    "overlay_drift": 3.22
+    "overlay_drift": 0.63
    },
    "2:p1f1.m2": {
-    "overlay_drift": 1.82
+    "overlay_drift": 0.8
    },
    "2:p1f1.m3": {
-    "overlay_drift": 3.72
+    "overlay_drift": 0.65
    },
    "3:p2f0.m0": {
-    "overlay_drift": 0.36
+    "overlay_drift": 0.08
    },
    "3:p2f0.m1": {
-    "overlay_drift": 1.86
+    "overlay_drift": 0.96
    },
    "3:p2f0.m2": {
-    "overlay_drift": 0.36
+    "overlay_drift": 0.08
    },
    "3:p2f0.m3": {
-    "overlay_drift": 1.24
+    "overlay_drift": 0.76
    },
    "3:p2f0.m4": {
-    "overlay_drift": 0.43
+    "overlay_drift": 0.96
    },
    "3:p2f0.m5": {
-    "overlay_drift": 1.5
+    "overlay_drift": 0.63
    },
    "3:p2f0.m6": {
-    "overlay_drift": 0.37
+    "overlay_drift": 1.31
    },
    "3:p2f0.m7": {
-    "overlay_drift": 1.8
+    "overlay_drift": 0.32
    },
    "3:p2h0": {
     "hole_gap": 0.37
@@ -535,16 +535,16 @@
     "bullet_size": 0.05
    },
    "6:p5f0.m0": {
-    "overlay_drift": 0.02
+    "overlay_drift": 0.07
    },
    "6:p5f0.m1": {
-    "overlay_drift": 2.49
+    "overlay_drift": 0.43
    },
    "6:p5f0.m2": {
-    "overlay_drift": 4.86
+    "overlay_drift": 0.96
    },
    "6:p5f0.m3": {
-    "overlay_drift": 7.67
+    "overlay_drift": 0.56
    },
    "6:p5t1.0": {
     "bullet_delta_e": 1.1,
@@ -646,20 +646,7 @@
   "19_labels_on_graphics": {},
   "20_marks_edge_cases": {},
   "21_bullet_shapes": {},
-  "22_overlays_on_text": {
-   "1:p0f0.m1 overlay_drift": "REAL (minor), 2.08 pt: the arrow starts mid-word under 'source'; Lato sets the word wider, so its right end drifts from the tail. Left edge (m0) 0.44.",
-   "1:p0f0.m2 overlay_drift": "REAL (minor), 2.07 pt: the curved arrow crosses 'runs' about 2 pt further into the word than in the PDF.",
-   "2:p1f0.m0 overlay_drift": "REAL, 3.57 pt: the teal underbrace starts 3.5 pt left of 'updates'. overlay_boxes stretch is capped at 10%; the Slides phrase is wider.",
-   "2:p1f0.m1 overlay_drift": "REAL, 5.46 pt: same brace as m0, drift grows along the phrase.",
-   "2:p1f0.m2 overlay_drift": "REAL, 4.85 pt: same brace as m0.",
-   "2:p1f0.m3 overlay_drift": "REAL, 8.17 pt: the brace ends 8 pt before the end of 'parameter' (evidence 002-p1f0.m3.png).",
-   "2:p1f1.m0 overlay_drift": "REAL, 2.48 pt: the orange brace starts 2.5 pt left of 'damps'.",
-   "2:p1f1.m1 overlay_drift": "REAL, 3.22 pt: same brace as m0.",
-   "2:p1f1.m3 overlay_drift": "REAL, 3.72 pt: the brace ends before 'oscillations.' does (evidence 002-p1f1.m3.png).",
-   "6:p5f0.m1 overlay_drift": "REAL (minor), 2.49 pt: the callout's pointer starts over the 't' of 'Dropout' instead of at its end.",
-   "6:p5f0.m2 overlay_drift": "REAL, 4.86 pt: 'dense layers' sits 5 pt further right under the callout than in the PDF.",
-   "6:p5f0.m3 overlay_drift": "REAL, 7.67 pt: same callout, right edge of 'layers' (evidence 006-p5f0.m3.png)."
-  },
+  "22_overlays_on_text": {},
   "25_hole_placement": {},
   "demo": {}
  }

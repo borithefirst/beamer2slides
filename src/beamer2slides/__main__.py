@@ -77,8 +77,9 @@ def main() -> None:
             c.add_argument("--title")
             c.add_argument("--new-deck", action="store_true",
                            help="create a new presentation instead of rebuilding the previous one")
-            c.add_argument("--predict-holes", action="store_true",
-                           help="place inline formula pictures by prediction only, without measuring their gaps")
+            c.add_argument("--predict-places", "--predict-holes", dest="predict_places", action="store_true",
+                           help="place inline formula and overlay pictures by prediction only, without measuring "
+                                "their gaps and words on scratch slides")
         if name == "fidelity":
             c.add_argument("--refresh", action="store_true", help="re-export slide thumbnails")
     args = ap.parse_args()
@@ -86,7 +87,7 @@ def main() -> None:
     if args.command == "classify":
         cmd_classify(args.pdf, out, args.overlays)
     elif args.command == "convert":
-        cmd_convert(args.pdf, out, args.title, args.new_deck, args.overlays, not args.predict_holes)
+        cmd_convert(args.pdf, out, args.title, args.new_deck, args.overlays, not args.predict_places)
     elif args.command == "fidelity":
         from .fidelity import measure, print_report
         prepared = out / "slides.pdf"  # the notes-free PDF the deck was built from
