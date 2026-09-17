@@ -574,6 +574,28 @@ def load_drive(drive, pid: str) -> dict | None:
         return None
 
 
+def stale_base_warning(where: str, drive, pid: str) -> str | None:
+    """The deck names a base file in Drive that we cannot read (deleted, or owned by someone else)
+    while we sync against the folder's copy: another checkout may have synced this deck since, so
+    the copy can be older than the deck. Nothing is lost when it is - deck edits win, and the
+    changes that checkout already made read as deck edits - but the user should hear about it."""
+    if where != "local" or drive is None:
+        return None
+    try:
+        info = execute(drive.files().get(fileId=pid, fields="appProperties"))
+    except HttpError:
+        return None
+    fid = (info.get("appProperties") or {}).get(BASE_PROPERTY)
+    if not fid:
+        return None
+    try:
+        execute(drive.files().get_media(fileId=fid))
+    except HttpError:
+        return ("the deck names a sync base in Drive that cannot be read; syncing against the copy in "
+                "<out>/sync/base.json, which may be older than the deck (docs/sync.md, \"Two checkouts\")")
+    return None
+
+
 def load_base(pid: str, out: Path | None, drive=None) -> tuple[dict | None, str]:
     """(base, where it came from): Drive is authoritative, the local copy a cache."""
     if drive is not None:

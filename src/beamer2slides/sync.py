@@ -1294,12 +1294,15 @@ def sync(pdf: Path, deck: str, out: Path | None = None, dry_run: bool = False, o
     base, where = snapshot.load_base(pid, folder or out, drive)
     if base is None:
         raise SystemExit(f"no sync base for presentation {pid}: convert the deck with this version first")
+    stale = snapshot.stale_base_warning(where, drive, pid)
+    if stale:
+        print(f"warning: {stale}")
     ours = build_ours(pdf, out / "sync" / "ours", base, overlays)
     refreshed = snapshot.refresh_pictures(base, ours, out)
     s = Sync(slides, drive, pid, base, ours, out, dry_run, measure)
     result = s.run()
     report = result["plan"]["report"]
-    report["warnings"] += s.warnings
+    report["warnings"] += s.warnings + ([stale] if stale else [])
     report["converged"] += [{**r, "field": "image", "how": "the same picture, written differently"} for r in refreshed]
     info = {"pdf": str(pdf), "presentationId": pid, "url": f"https://docs.google.com/presentation/d/{pid}/edit",
             "dry_run": dry_run, "base_from": where, "generation": base.get("generation", 0),

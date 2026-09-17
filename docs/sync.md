@@ -89,6 +89,22 @@ the app (`drive.file` scope) whose id is kept in the presentation file's `appPro
 Drive is authoritative (anyone with the deck can sync), the local copy is a cache and fallback.
 The base is replaced only when a sync wrote something or adopted converged deck fields (`generation` + 1).
 
+### Two checkouts, one deck
+Because Drive holds the base, a second checkout (or a second person) syncing the same deck reads
+the base the first one wrote, not the deck as it was before. A cache from another deck is refused
+(`presentationId`), and with no base anywhere sync stops: "no sync base for presentation …".
+
+When the deck names a base file in Drive that cannot be read - a Drive cleanup deleted it, or
+`save_drive` failed and only warned - sync falls back to the folder's copy and says so
+(`snapshot.stale_base_warning`, also in the report's warnings), because that copy can be older
+than the deck. Measured on a live deck (2026-09-18): with the Drive base hidden and the local copy
+rolled back one generation, syncing the same source again **wrote nothing and lost nothing** (same
+10 slides, every line still there, the deck edit intact). The stale base only made sync see the
+element the previous sync had recreated as deleted in Slides, and it kept it deleted: base object
+ids that are no longer in the deck read as a deck deletion, and the deck wins. A stale base can
+make sync do less than it should, never lose what the deck holds. Offline tests:
+`tests/test_base_storage.py` (Drive over cache, refusals, the warning, save and repoint).
+
 ## Deck edits detected (per object, per field)
 geometry (box within 0.05 pt, scale within 1e-3), text content, text style, shape fill/outline,
 image replaced, deleted (all or part of a unit), regrouped/ungrouped; user-added objects (no base

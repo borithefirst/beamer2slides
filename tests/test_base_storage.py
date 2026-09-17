@@ -156,6 +156,32 @@ def test_the_local_copy_round_trips(tmp_path):
     assert json.loads(path.read_text(encoding="utf-8"))["generation"] == 8
 
 
+# ---------------------------------------------------------------- the warning about a stale cache
+
+
+def test_a_base_file_that_vanished_is_worth_a_warning(tmp_path):
+    """The pointer is still there, the file is not: another checkout may have synced since."""
+    drive = FakeDrive(props={PID: {snapshot.BASE_PROPERTY: "base-gone"}})
+    assert "may be older than the deck" in snapshot.stale_base_warning("local", drive, PID)
+
+
+def test_a_deck_that_never_had_a_drive_base_is_no_warning(tmp_path):
+    assert snapshot.stale_base_warning("local", FakeDrive(props={PID: {}}), PID) is None
+
+
+def test_no_warning_when_the_base_came_from_drive(tmp_path):
+    assert snapshot.stale_base_warning("drive", drive_with_base(base()), PID) is None
+
+
+def test_no_warning_when_the_deck_itself_cannot_be_read(tmp_path):
+    """Not our business here: the sync will fail on its own, and guessing would be noise."""
+    class Broken(FakeDrive):
+        def get(self, fileId, fields=None):
+            raise http_error(403)
+
+    assert snapshot.stale_base_warning("local", Broken(), PID) is None
+
+
 @pytest.mark.parametrize("status", [403, 404, 500])
 def test_a_drive_that_refuses_everything_leaves_the_cache_in_charge(tmp_path, status):
     class Broken(FakeDrive):
