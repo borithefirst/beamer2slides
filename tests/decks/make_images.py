@@ -3,14 +3,13 @@
 from pathlib import Path
 
 import numpy as np
-import pymupdf
+from PIL import Image
 
 OUT = Path(__file__).resolve().parent / "img"
 
 
 def save_rgb(arr: np.ndarray, path: Path) -> None:
-    h, w, _ = arr.shape
-    pymupdf.Pixmap(pymupdf.csRGB, w, h, np.ascontiguousarray(arr, dtype=np.uint8).tobytes(), False).save(path)
+    Image.fromarray(np.clip(arr, 0, 255).astype(np.uint8)).save(path)
 
 
 def photo(w=1200, h=800) -> np.ndarray:

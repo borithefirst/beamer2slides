@@ -10,8 +10,6 @@ import argparse
 import json
 from pathlib import Path
 
-import pymupdf
-
 from .classify import classify
 from .debug import render_debug
 from .extract import extract, select_overlays
@@ -22,14 +20,15 @@ ROOT = Path(__file__).resolve().parents[2]
 
 def cmd_classify(pdf: Path, out: Path, overlays: str = "last") -> tuple[Path, dict, dict]:
     out.mkdir(parents=True, exist_ok=True)
-    pdf, notes, notes_mode = prepare_notes(pdf, out)
-    if notes_mode:
-        print(f"speaker notes ({notes_mode}): found notes for {len(notes)} pages")
+    prepared = prepare_notes(pdf, out)
+    pdf = prepared.pdf
+    if prepared.mode:
+        print(f"speaker notes ({prepared.mode}): found notes for {len(prepared.notes)} pages")
     elif (out / "slides.pdf").exists():
         (out / "slides.pdf").unlink()  # stale from an earlier run of a PDF that had notes
-    raw = extract(pdf)
+    raw = extract(pdf, prepared.labels)
     for page in raw["pages"]:
-        page["notes"] = notes.get(page["index"])
+        page["notes"] = prepared.notes.get(page["index"])
     raw = select_overlays(raw, overlays)
     if raw.get("overlays", {}).get("dropped"):
         print(f"overlays: kept the last step of each frame, skipped {raw['overlays']['dropped']} pages")
@@ -49,8 +48,7 @@ def cmd_classify(pdf: Path, out: Path, overlays: str = "last") -> tuple[Path, di
     return pdf, raw, deck
 
 
-def cmd_convert(pdf: Path, out: Path, title: str | None, new_deck: bool, overlays: str,
-                keep_assets: bool = False) -> None:
+def cmd_convert(pdf: Path, out: Path, title: str | None, new_deck: bool, overlays: str) -> None:
     from .emit import emit
     from .render import render_backgrounds
 
@@ -58,8 +56,8 @@ def cmd_convert(pdf: Path, out: Path, title: str | None, new_deck: bool, overlay
     pdf, raw, deck = cmd_classify(pdf, out, overlays)  # pdf: without note pages, if there were any
     render_backgrounds(pdf, raw, deck, out)
     (out / "deck.json").write_text(json.dumps(deck, indent=1, ensure_ascii=False), encoding="utf-8")
-    title = title or pymupdf.open(pdf).metadata.get("title") or source.stem
-    state = emit(deck, out, title, new_deck, keep_assets)
+    title = title or raw["source"]["title"] or source.stem
+    state = emit(deck, out, title, new_deck)
     print(f"Google Slides: {state['url']}")
 
 
@@ -79,8 +77,6 @@ def main() -> None:
             c.add_argument("--title")
             c.add_argument("--new-deck", action="store_true",
                            help="create a new presentation instead of rebuilding the previous one")
-            c.add_argument("--keep-assets", action="store_true",
-                           help="keep the uploaded pictures in Drive (by default they go to the trash once inserted)")
         if name == "fidelity":
             c.add_argument("--refresh", action="store_true", help="re-export slide thumbnails")
     args = ap.parse_args()
@@ -88,7 +84,7 @@ def main() -> None:
     if args.command == "classify":
         cmd_classify(args.pdf, out, args.overlays)
     elif args.command == "convert":
-        cmd_convert(args.pdf, out, args.title, args.new_deck, args.overlays, args.keep_assets)
+        cmd_convert(args.pdf, out, args.title, args.new_deck, args.overlays)
     elif args.command == "fidelity":
         from .fidelity import measure, print_report
         prepared = out / "slides.pdf"  # the notes-free PDF the deck was built from

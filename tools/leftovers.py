@@ -14,7 +14,7 @@ import json
 from pathlib import Path
 
 import numpy as np
-import pymupdf
+from PIL import Image, ImageDraw
 
 from beamer2slides.classify import classify
 from beamer2slides.emit import merge_blocks
@@ -73,8 +73,8 @@ def main() -> None:
         render_backgrounds(pdf, raw, deck, out)
         for slide in deck["slides"]:
             png = out / slide["background"]
-            pix = pymupdf.Pixmap(str(png))
-            img = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width, pix.n)[..., :3]
+            image = Image.open(png).convert("RGB")
+            img = np.asarray(image)
             k = BACKGROUND_WIDTH_PX / slide["size"][0]
             flagged = []
             for label, (x0, y0, x1, y1) in boxes(slide):
@@ -84,13 +84,11 @@ def main() -> None:
             if not bad:
                 continue
             print(f"{name} slide {slide['page'] + 1}: " + "; ".join(f"{l} {s:.0%}" for l, _, s in bad))
-            doc = pymupdf.open()
-            page = doc.new_page(width=pix.width, height=pix.height)
-            page.insert_image(page.rect, filename=str(png))
+            draw = ImageDraw.Draw(image)
             for label, (x0, y0, x1, y1), share in flagged:
-                color = (0.9, 0, 0) if share > args.threshold else (0, 0.6, 0)
-                page.draw_rect(pymupdf.Rect(x0 * k, y0 * k, x1 * k, y1 * k), color=color, width=3)
-            page.get_pixmap().save(out / f"leftovers-{slide['page'] + 1:03}.png")
+                color = (230, 0, 0) if share > args.threshold else (0, 153, 0)
+                draw.rectangle([x0 * k, y0 * k, x1 * k, y1 * k], outline=color, width=3)
+            image.save(out / f"leftovers-{slide['page'] + 1:03}.png")
         (out / "deck.json").write_text(json.dumps(deck, indent=1, ensure_ascii=False), encoding="utf-8")
 
 

@@ -17,17 +17,18 @@ import sys
 from pathlib import Path
 
 import numpy as np
-import pymupdf
+from PIL import Image
+
+from beamer2slides.pdf import Document, Page
+from pdf_lines import text_lines
 
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def rgb(pix: pymupdf.Pixmap) -> np.ndarray:
-    if pix.alpha:
-        pix = pymupdf.Pixmap(pix, 0)
-    if pix.n != 3:
-        pix = pymupdf.Pixmap(pymupdf.csRGB, pix)
-    return np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width, 3).astype(np.int16)
+def rgb(image: Image.Image | np.ndarray) -> np.ndarray:
+    if isinstance(image, Image.Image):
+        image = np.asarray(image.convert("RGB"))
+    return image.astype(np.int16)
 
 
 def ink(img: np.ndarray) -> np.ndarray:
@@ -48,8 +49,7 @@ def dilate(m: np.ndarray) -> np.ndarray:
 
 
 def save(arr: np.ndarray, path: Path) -> None:
-    h, w = arr.shape[:2]
-    pymupdf.Pixmap(pymupdf.csRGB, w, h, arr.astype(np.uint8).tobytes(), False).save(path)
+    Image.fromarray(arr.astype(np.uint8)).save(path)
 
 
 EMU = 12700
@@ -89,33 +89,24 @@ def template_lines(slide: dict) -> list[tuple[str, float, float, float]]:
     return out
 
 
-def pdf_lines(page: pymupdf.Page, scale: float) -> list[tuple[str, float, float, float]]:
+def pdf_lines(page: Page, scale: float) -> list[tuple[str, float, float, float]]:
     """(text, x, baseline, size) of every PDF line, in template pt."""
-    lines = []
-    for block in page.get_text("dict")["blocks"]:
-        for line in block.get("lines", []):
-            spans = [s for s in line["spans"] if s["text"].strip()]
-            if spans:
-                text = "".join(s["text"] for s in line["spans"]).strip()
-                lines.append((text, spans[0]["origin"][0] * scale, spans[0]["origin"][1] * scale,
-                              spans[0]["size"] * scale))
-    return lines
+    return [(l["text"], l["origin"][0] * scale, l["origin"][1] * scale, l["size"] * scale) for l in text_lines(page)]
 
 
 def main() -> int:
     pdf, tex, template = Path(sys.argv[1]), Path(sys.argv[2]), sys.argv[3]
     pairs = [int(n) for n in re.findall(r"%\s*template slide (\d+)", tex.read_text(encoding="utf-8"))]
-    doc = pymupdf.open(pdf)
+    doc = Document(pdf)
     presentation = json.loads((ROOT / "out" / "templates" / template / "presentation.json").read_text(encoding="utf-8"))
     out = pdf.parent / "compare"
     out.mkdir(exist_ok=True)
     print(f"{'page':>4} {'slide':>5} {'overlap':>8} {'dx0':>6} {'dy0':>6} {'dx1':>6} {'dy1':>6}  (template pt; + = PDF right/lower)")
     for i, (page, n) in enumerate(zip(doc, pairs), 1):
-        thumb = pymupdf.Pixmap(str(ROOT / "out" / "templates" / template / "slides" / f"{n:03d}.png"))
-        t = rgb(thumb)
+        t = rgb(Image.open(ROOT / "out" / "templates" / template / "slides" / f"{n:03d}.png"))
         h, w = t.shape[:2]
-        zoom = w / page.rect.width
-        p = rgb(page.get_pixmap(matrix=pymupdf.Matrix(zoom, zoom), alpha=False))[:h, :w]
+        zoom = w / page.width
+        p = rgb(page.render(zoom))[:h, :w]
         mt, mp = ink(t), ink(p)
         inter = (dilate(mt) & mp).sum() + (mt & dilate(mp)).sum()
         total = mt.sum() + mp.sum()
@@ -129,7 +120,7 @@ def main() -> int:
         bt, bp = box(mt), box(mp)
         d = [(b - a) / k for a, b in zip(bt, bp)]
         print(f"{i:>4} {n:>5} {overlap:>8.3f} {d[0]:>6.1f} {d[1]:>6.1f} {d[2]:>6.1f} {d[3]:>6.1f}")
-        mine = pdf_lines(page, 720 / page.rect.width)
+        mine = pdf_lines(page, 720 / page.width)
         for text, x, y, size in template_lines(presentation["slides"][n - 1]):
             key = re.sub(r"\W", "", text)[:9]
             match = next((m for m in mine if re.sub(r"\W", "", m[0]).startswith(key)), None)

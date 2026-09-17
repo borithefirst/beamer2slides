@@ -4,24 +4,19 @@ import hashlib
 import io
 import json
 import math
-import threading
-import time
 from collections import Counter
-from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-import pymupdf
 from googleapiclient.errors import HttpError
-from googleapiclient.http import MediaFileUpload, MediaIoBaseUpload
+from googleapiclient.http import MediaIoBaseUpload
 
 from .fonts import font_info, google_font
-from .google_auth import credentials, drive_service, slides_service
+from .google_auth import drive_service, slides_service
 from .gslides import EMU_PER_PT, emu, execute, pt
 
 ROOT = Path(__file__).resolve().parents[2]
 CALIBRATION = ROOT / "calibration" / "fonts.json"
 SLIDE_W = 720.0
-UPLOAD_THREADS = 6
 BATCH_MAX_REQUESTS = 400  # slides are sent together until a batch reaches this size
 PPTX_MIME ="application/vnd.openxmlformats-officedocument.presentationml.presentation"
 
@@ -482,13 +477,82 @@ def template_key(el: dict, scale: float) -> tuple | None:
     return el["shape"], adj, shadow
 
 
-def build_pptx(page_w: float, page_h: float, keys: list[tuple], layouts: list[str]) -> io.BytesIO:
-    """The deck's starting point: an empty .pptx with the PDF's page size (presentations.create
-    ignores pageSize) and one template slide per layout holding the template shapes."""
+NS_A = "http://schemas.openxmlformats.org/drawingml/2006/main"
+NS_P = "http://schemas.openxmlformats.org/presentationml/2006/main"
+NS_R = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+
+
+def _set_background(part, c_sld, fill: dict) -> None:
+    """A page background in the .pptx: {"color": "#rrggbb"} or {"picture": Path} (stretched)."""
     from lxml import etree
-    from pptx import Presentation
+
+    if "color" in fill:
+        inner = f'<a:solidFill><a:srgbClr val="{fill["color"].lstrip("#").upper()}"/></a:solidFill>'
+    else:
+        _, rid = part.get_or_add_image_part(str(fill["picture"]))  # identical files are stored once
+        inner = (f'<a:blipFill dpi="0" rotWithShape="1"><a:blip r:embed="{rid}"/><a:srcRect/>'
+                 f'<a:stretch><a:fillRect/></a:stretch></a:blipFill>')
+    old = c_sld.find(f"{{{NS_P}}}bg")
+    if old is not None:
+        c_sld.remove(old)
+    c_sld.insert(0, etree.fromstring(
+        f'<p:bg xmlns:p="{NS_P}" xmlns:a="{NS_A}" xmlns:r="{NS_R}"><p:bgPr>{inner}<a:effectLst/></p:bgPr></p:bg>'))
+
+
+def _add_template_shapes(slide, keys: list[tuple]) -> None:
+    from lxml import etree
     from pptx.enum.shapes import MSO_CONNECTOR, MSO_SHAPE
-    from pptx.util import Emu, Pt
+    from pptx.util import Pt
+
+    kinds = {"ROUND_RECTANGLE": MSO_SHAPE.ROUNDED_RECTANGLE, "ROUND_2_SAME_RECTANGLE": MSO_SHAPE.ROUND_2_SAME_RECTANGLE,
+             "RECTANGLE": MSO_SHAPE.RECTANGLE, "ELLIPSE": MSO_SHAPE.OVAL, "DIAMOND": MSO_SHAPE.DIAMOND,
+             "TRIANGLE": MSO_SHAPE.ISOSCELES_TRIANGLE}
+    a = NS_A
+    for i, (kind, adj, shadow) in enumerate(keys):
+        if kind == "BENT_CONNECTOR":
+            line = slide.shapes.add_connector(MSO_CONNECTOR.ELBOW, Pt(10), Pt(10), Pt(110), Pt(110))
+            geometry = line._element.spPr.find(f"{{{a}}}prstGeom")
+            geometry.set("prst", "bentConnector3")
+            for old in geometry.findall(f"{{{a}}}avLst"):
+                geometry.remove(old)
+            geometry.append(etree.fromstring(
+                f'<a:avLst xmlns:a="{a}"><a:gd name="adj1" fmla="val {round(adj * 100000)}"/></a:avLst>'))
+            line._element.spPr.append(etree.fromstring(f'<a:effectLst xmlns:a="{a}"/>'))
+            continue
+        shape = slide.shapes.add_shape(kinds[kind], Pt(10 + i % 10 * 20), Pt(10 + i // 10 * 20), Pt(100), Pt(100))
+        if adj is not None and kind in ("ROUND_RECTANGLE", "ROUND_2_SAME_RECTANGLE"):
+            shape.adjustments[0] = adj
+            if kind == "ROUND_2_SAME_RECTANGLE":
+                shape.adjustments[1] = 0.0
+        shape.fill.solid()
+        shape.line.fill.background()
+        # No text padding (the API can't set it): a diagram label fits a node as tight as TikZ's.
+        body_pr = shape.text_frame._txBody.find(f"{{{a}}}bodyPr")
+        for side in ("lIns", "tIns", "rIns", "bIns"):
+            body_pr.set(side, "0")
+        body_pr.set("anchor", "ctr")
+        # python-pptx shapes refer to the theme's effect style, which has a shadow: always
+        # give an explicit (possibly empty) effect list.
+        effects = (f'<a:outerShdw blurRad="{round(SHADOW_BLUR * shadow * EMU_PER_PT)}" '
+                   f'dist="{round(SHADOW_DISTANCE * shadow * EMU_PER_PT)}" dir="2700000" algn="tl" rotWithShape="0">'
+                   f'<a:srgbClr val="000000"><a:alpha val="{round(SHADOW_ALPHA * 100000)}"/></a:srgbClr>'
+                   f'</a:outerShdw>') if shadow else ""
+        shape.element.spPr.append(etree.fromstring(f'<a:effectLst xmlns:a="{a}">{effects}</a:effectLst>'))
+
+
+def build_pptx(page_w: float, page_h: float, keys: list[tuple], pages: list[dict], master_fill: dict) -> io.BytesIO:
+    """The deck's starting point, imported through Drive. It carries everything the Slides API
+    could only insert from a public URL, so no picture ever leaves the user's Drive:
+
+    - the PDF's page size (presentations.create ignores pageSize);
+    - the master background (`master_fill`), inherited by the layouts and most slides;
+    - one source slide per deck slide (`pages`: {"layout", "fill" (None: inherit),
+      "pictures": [{"file", "bbox" (slide pt), "alt", "title"}], "templates" (bool)}), holding its
+      pictures and, if it needs any, the template shapes (shadows, exact corner radii).
+
+    emit copies each source slide under our own object IDs and then deletes it."""
+    from pptx import Presentation
+    from pptx.util import Emu
 
     prs = Presentation()
     height = SLIDE_W * page_h / page_w
@@ -499,42 +563,21 @@ def build_pptx(page_w: float, page_h: float, keys: list[tuple], layouts: list[st
             for shape in page.placeholders:
                 if shape.top is not None and shape.height is not None:
                     shape.top, shape.height = Emu(round(shape.top * ratio)), Emu(round(shape.height * ratio))
-    kinds = {"ROUND_RECTANGLE": MSO_SHAPE.ROUNDED_RECTANGLE, "ROUND_2_SAME_RECTANGLE": MSO_SHAPE.ROUND_2_SAME_RECTANGLE,
-             "RECTANGLE": MSO_SHAPE.RECTANGLE, "ELLIPSE": MSO_SHAPE.OVAL, "DIAMOND": MSO_SHAPE.DIAMOND,
-             "TRIANGLE": MSO_SHAPE.ISOSCELES_TRIANGLE}
-    a = "http://schemas.openxmlformats.org/drawingml/2006/main"
-    for layout in layouts:
-        slide = prs.slides.add_slide(prs.slide_layouts[TEMPLATE_LAYOUTS[layout]])
-        for i, (kind, adj, shadow) in enumerate(keys):
-            if kind == "BENT_CONNECTOR":
-                line = slide.shapes.add_connector(MSO_CONNECTOR.ELBOW, Pt(10), Pt(10), Pt(110), Pt(110))
-                geometry = line._element.spPr.find(f"{{{a}}}prstGeom")
-                geometry.set("prst", "bentConnector3")
-                for old in geometry.findall(f"{{{a}}}avLst"):
-                    geometry.remove(old)
-                geometry.append(etree.fromstring(
-                    f'<a:avLst xmlns:a="{a}"><a:gd name="adj1" fmla="val {round(adj * 100000)}"/></a:avLst>'))
-                line._element.spPr.append(etree.fromstring(f'<a:effectLst xmlns:a="{a}"/>'))
-                continue
-            shape = slide.shapes.add_shape(kinds[kind], Pt(10 + i % 10 * 20), Pt(10 + i // 10 * 20), Pt(100), Pt(100))
-            if adj is not None and kind in ("ROUND_RECTANGLE", "ROUND_2_SAME_RECTANGLE"):
-                shape.adjustments[0] = adj
-                if kind == "ROUND_2_SAME_RECTANGLE":
-                    shape.adjustments[1] = 0.0
-            shape.fill.solid()
-            shape.line.fill.background()
-            # No text padding (the API can't set it): a diagram label fits a node as tight as TikZ's.
-            body_pr = shape.text_frame._txBody.find(f"{{{a}}}bodyPr")
-            for side in ("lIns", "tIns", "rIns", "bIns"):
-                body_pr.set(side, "0")
-            body_pr.set("anchor", "ctr")
-            # python-pptx shapes refer to the theme's effect style, which has a shadow: always
-            # give an explicit (possibly empty) effect list.
-            effects = (f'<a:outerShdw blurRad="{round(SHADOW_BLUR * shadow * EMU_PER_PT)}" '
-                       f'dist="{round(SHADOW_DISTANCE * shadow * EMU_PER_PT)}" dir="2700000" algn="tl" rotWithShape="0">'
-                       f'<a:srgbClr val="000000"><a:alpha val="{round(SHADOW_ALPHA * 100000)}"/></a:srgbClr>'
-                       f'</a:outerShdw>') if shadow else ""
-            shape.element.spPr.append(etree.fromstring(f'<a:effectLst xmlns:a="{a}">{effects}</a:effectLst>'))
+    master = prs.slide_master
+    _set_background(master.part, master.element.find(f"{{{NS_P}}}cSld"), master_fill)
+    for page in pages:
+        slide = prs.slides.add_slide(prs.slide_layouts[TEMPLATE_LAYOUTS[page["layout"]]])
+        if page["fill"]:
+            _set_background(slide.part, slide.element.find(f"{{{NS_P}}}cSld"), page["fill"])
+        for pic in page["pictures"]:
+            x0, y0, x1, y1 = pic["bbox"]
+            shape = slide.shapes.add_picture(str(pic["file"]), Emu(round(x0 * EMU_PER_PT)), Emu(round(y0 * EMU_PER_PT)),
+                                             Emu(round((x1 - x0) * EMU_PER_PT)), Emu(round((y1 - y0) * EMU_PER_PT)))
+            if pic.get("alt"):
+                shape._element.nvPicPr.cNvPr.set("descr", pic["alt"])
+                shape._element.nvPicPr.cNvPr.set("title", pic["title"])
+        if page["templates"]:
+            _add_template_shapes(slide, keys)
     buf = io.BytesIO()
     prs.save(buf)
     buf.seek(0)
@@ -1090,20 +1133,10 @@ def title_element(slide: dict) -> int | None:
     return None
 
 
-def image_request(el: dict, slide_id: str, object_id: str, scale: float, url: str) -> dict:
-    x0, y0, x1, y1 = el["bbox"]
-    return {"createImage": {
-        "objectId": object_id, "url": url,
-        "elementProperties": {
-            "pageObjectId": slide_id,
-            "size": {"width": emu((x1 - x0) * scale), "height": emu((y1 - y0) * scale)},
-            "transform": {"scaleX": 1, "scaleY": 1, "unit": "EMU",
-                          "translateX": round(x0 * scale * EMU_PER_PT), "translateY": round(y0 * scale * EMU_PER_PT)},
-        },
-    }}
+PICTURE_TITLES = {"math": "Formula", "icon": "Icon", "fallback": "Picture"}
 
 
-# ---------------------------------------------------------------- presentation + assets
+# ---------------------------------------------------------------- presentation
 
 def import_presentation(slides, drive, title: str, page_w: float, page_h: float, pptx: io.BytesIO,
                         existing: str | None) -> dict:
@@ -1121,24 +1154,6 @@ def import_presentation(slides, drive, title: str, page_w: float, page_h: float,
     if abs(got - page_h / page_w) > 0.003:
         raise RuntimeError(f"page aspect {got:.4f} != PDF aspect {page_h / page_w:.4f}")
     return pres
-
-
-def asset_folder(drive, name: str) -> str:
-    q = (f"name = '{name}' and mimeType = 'application/vnd.google-apps.folder' and trashed = false")
-    found = execute(drive.files().list(q=q, fields="files(id)")).get("files", [])
-    if found:
-        return found[0]["id"]
-    return execute(drive.files().create(
-        body={"name": name, "mimeType": "application/vnd.google-apps.folder"}, fields="id"))["id"]
-
-
-def upload_public_png(drive, path: Path, folder: str) -> tuple[str, str]:
-    f = execute(drive.files().create(
-        body={"name": path.name, "parents": [folder]},
-        media_body=MediaFileUpload(str(path), mimetype="image/png"), fields="id"))
-    perm = execute(drive.permissions().create(
-        fileId=f["id"], body={"type": "anyone", "role": "reader"}, fields="id"))
-    return f["id"], perm["id"]
 
 
 def background_key(slide: dict, out: Path) -> tuple:
@@ -1237,15 +1252,8 @@ def api_error(e: HttpError) -> str:
         return str(e)[:200]
 
 
-def batch_with_image_retry(slides, pid: str, reqs: list[dict], attempts: int = 4) -> None:
-    for attempt in range(attempts):
-        try:
-            execute(slides.presentations().batchUpdate(presentationId=pid, body={"requests": reqs}))
-            return
-        except HttpError as e:
-            if "problem retrieving the image" not in str(e) or attempt == attempts - 1:
-                raise
-            time.sleep(5 * (attempt + 1))
+def batch(slides, pid: str, reqs: list[dict]) -> None:
+    execute(slides.presentations().batchUpdate(presentationId=pid, body={"requests": reqs}))
 
 
 # ---------------------------------------------------------------- main entry
@@ -1263,12 +1271,60 @@ def existing_presentation(drive, out: Path) -> str | None:
     return pid if not f.get("trashed") and f.get("mimeType") == "application/vnd.google-apps.presentation" else None
 
 
-def emit(deck: dict, out: Path, title: str, new_deck: bool = False, keep_assets: bool = False) -> dict:
+def size_pt(element: dict) -> tuple[float, float]:
+    size = element["size"]
+    return tuple(size[k]["magnitude"] / (EMU_PER_PT if size[k]["unit"] == "EMU" else 1) for k in ("width", "height"))
+
+
+def fallback_pictures(deck: dict, refused: list[tuple[int, str]], out: Path) -> dict:
+    """The deck with every element the API refused ((PDF page, element id)) replaced by a
+    picture of its region, cropped from the PDF the deck was built from."""
+    from .render import crop_region
+
+    source_pdf = out / "slides.pdf" if (out / "slides.pdf").exists() else Path(deck["source"]["pdf"])
+    new_slides = []
+    for slide in deck["slides"]:
+        ids = {eid for page, eid in refused if page == slide["page"]}
+        elements = []
+        for el in slide["elements"]:
+            if el["id"] in ids and el["kind"] != "image":
+                ids.discard(el["id"])
+                x0, y0, x1, y1 = el["bbox"]
+                bbox = [x0 - 2, y0 - 2, x1 + 2, y1 + 2]
+                path = out / "figures" / f"fallback-{el['id']}.png"
+                crop_region(source_pdf, slide["page"], bbox, path, 6.0)
+                el = {"kind": "image", "id": el["id"], "role": "fallback", "bbox": bbox,
+                      "file": str(path.relative_to(out)).replace("\\", "/")}
+            elements.append(el)
+        new_slides.append({**slide, "elements": elements})
+    return {**deck, "slides": new_slides}
+
+
+def emit(deck: dict, out: Path, title: str, new_deck: bool = False) -> dict:
     slides, drive = slides_service(), drive_service()
+    deck = {**deck, "slides": [{**s, "elements": merge_blocks(s["elements"])} for s in deck["slides"]]}
+    existing = None if new_deck else existing_presentation(drive, out)
+    if existing:
+        print(f"updating existing deck {existing}")
+    state, refused = build_deck(slides, drive, deck, out, title, existing)
+    if refused:
+        # A picture can only come with the imported .pptx (the API inserts images from public
+        # URLs only), so the deck is built once more with the refused elements as pictures.
+        print(f"rebuilding the deck with {len(refused)} refused element(s) as pictures")
+        state, again = build_deck(slides, drive, fallback_pictures(deck, refused, out), out, title,
+                                  state["presentationId"])
+        for page, eid in again:
+            print(f"warning: slide {page + 1}: {eid} was refused again and is missing")
+    (out / "emit.json").write_text(json.dumps(state, indent=1), encoding="utf-8")
+    return state
+
+
+def build_deck(slides, drive, deck: dict, out: Path, title: str, existing: str | None) -> tuple[dict, list[tuple[int, str]]]:
+    """Import the .pptx and fill in the content. Returns the state for emit.json and the
+    elements the API refused ((PDF page, element id))."""
     page_w, page_h = deck["slides"][0]["size"]
     scale = SLIDE_W / page_w
     fonts = FontMapper()
-    deck = {**deck, "slides": [{**s, "elements": merge_blocks(s["elements"])} for s in deck["slides"]]}
 
     def slide_layout(slide: dict) -> tuple[str, str | None]:
         """The title page uses the TITLE layout (centered title), frames with a title TITLE_ONLY."""
@@ -1276,288 +1332,212 @@ def emit(deck: dict, out: Path, title: str, new_deck: bool = False, keep_assets:
             return "BLANK", None
         return ("TITLE", "CENTERED_TITLE") if slide.get("title_page") else ("TITLE_ONLY", "TITLE")
 
-    # Every run starts from an imported .pptx: it sets the page size and brings template
-    # shapes (shadows, exact corner radii) on one template slide per layout. Slides needing
-    # templates are duplicates of their layout's template slide; the templates go at the end.
     keys = list(dict.fromkeys(k for s in deck["slides"] for e in s["elements"] for k in element_template_keys(e, scale)))
     uses_templates = {s["page"]: any(element_template_keys(e, scale) for e in s["elements"]) for s in deck["slides"]}
-    layouts = [l for l in TEMPLATE_LAYOUTS if any(uses_templates[s["page"]] and slide_layout(s)[0] == l
-                                                  for s in deck["slides"])]
-    existing = None if new_deck else existing_presentation(drive, out)
-    if existing:
-        print(f"updating existing deck {existing}")
-    pres = import_presentation(slides, drive, title, page_w, page_h, build_pptx(page_w, page_h, keys, layouts), existing)
+    shifts = {s["page"]: formula_shifts(s, scale, fonts) for s in deck["slides"]}
+
+    def placed(el: dict, n: int) -> dict:
+        """Inline formula pictures sit over the gap Slides leaves for them (formula_shifts)."""
+        dx = shifts[n].get(el["id"])
+        return el if dx is None else {**el, "bbox": [el["bbox"][0] + dx, el["bbox"][1], el["bbox"][2] + dx, el["bbox"][3]]}
+
+    # Backgrounds: the most common one becomes the master's (the deck's theme): layouts and
+    # slides inherit it, and slides added later too. Identical pictures are stored once.
+    bg_key = {s["page"]: background_key(s, out) for s in deck["slides"]}
+    bg_file = {bg_key[s["page"]]: out / s["background"] for s in deck["slides"] if not s.get("background_color")}
+    counts = Counter(bg_key.values())
+    shared = counts.most_common(1)[0][0] if counts and counts.most_common(1)[0][1] >= 2 else None
+
+    def fill(key: tuple) -> dict:
+        return {"color": key[1]} if key[0] == "color" else {"picture": bg_file[key]}
+
+    pages = [{
+        "layout": slide_layout(s)[0],
+        "fill": None if bg_key[s["page"]] == shared else fill(bg_key[s["page"]]),
+        "pictures": [{"file": out / e["file"], "bbox": [v * scale for v in placed(e, s["page"])["bbox"]],
+                      "alt": e.get("alt"), "title": PICTURE_TITLES.get(e.get("role"), "Figure")}
+                     for e in s["elements"] if e["kind"] == "image"],
+        "templates": uses_templates[s["page"]],
+    } for s in deck["slides"]]
+    pptx = build_pptx(page_w, page_h, keys, pages, fill(shared or ("color", "#ffffff")))
+    pres = import_presentation(slides, drive, title, page_w, page_h, pptx, existing)
     pid = pres["presentationId"]
-    templates = {}
-    for layout, tpl_slide in zip(layouts, pres.get("slides", [])):
-        els = tpl_slide.get("pageElements", [])
-        shapes = [e for e in els if "placeholder" not in e.get("shape", {})]
-        if len(shapes) != len(keys):
-            raise RuntimeError(f"template slide {layout}: {len(shapes)} shapes imported, expected {len(keys)}")
-        templates[layout] = {
-            "id": tpl_slide["objectId"], "shapes": [e["objectId"] for e in shapes],
-            "placeholders": {e["shape"]["placeholder"]["type"]: e["objectId"] for e in els if "placeholder" in e.get("shape", {})},
-            "sizes": [(e["size"]["width"]["magnitude"] / (EMU_PER_PT if e["size"]["width"]["unit"] == "EMU" else 1),
-                       e["size"]["height"]["magnitude"] / (EMU_PER_PT if e["size"]["height"]["unit"] == "EMU" else 1))
-                      for e in shapes],
-        }
-    folder = asset_folder(drive, "beamer2slides assets")
+    sources = pres.get("slides", [])
+    if len(sources) != len(deck["slides"]):
+        raise RuntimeError(f"the import brought {len(sources)} slides, expected {len(deck['slides'])}")
+
+    # Phase 1: every source slide is copied under our object IDs (slide, title and subtitle
+    # placeholders, pictures, template shapes); the sources are deleted at the end.
+    template_sizes: list[tuple[float, float]] = []
+    reqs = []
+    for slide, source in zip(deck["slides"], sources):
+        n = slide["page"]  # PDF page index; slides may skip pages (overlays)
+        slide_id = f"b2s_s{n:03}"
+        els = source.get("pageElements", [])
+        placeholders = {e["shape"]["placeholder"]["type"]: e["objectId"] for e in els if "placeholder" in e.get("shape", {})}
+        pictures = [e["objectId"] for e in els if "image" in e]
+        shapes = [e for e in els if "image" not in e and "placeholder" not in e.get("shape", {})]
+        picture_idx = [i for i, e in enumerate(slide["elements"]) if e["kind"] == "image"]
+        if len(pictures) != len(picture_idx) or len(shapes) != (len(keys) if uses_templates[n] else 0):
+            raise RuntimeError(f"slide {n + 1}: the import brought {len(pictures)} pictures and {len(shapes)} "
+                               f"template shapes, expected {len(picture_idx)} and {len(keys) if uses_templates[n] else 0}")
+        ids = {source["objectId"]: slide_id}
+        ids.update({oid: f"{slide_id}_f{i}" for oid, i in zip(pictures, picture_idx)})
+        ids.update({e["objectId"]: f"{slide_id}_k{j}" for j, e in enumerate(shapes)})
+        template_sizes = template_sizes or [size_pt(e) for e in shapes]
+        title_idx = title_element(slide)
+        if title_idx is not None:
+            ids[placeholders[slide_layout(slide)[1]]] = f"{slide_id}_t{title_idx}"
+            sub_idx = subtitle_element(slide, title_idx)
+            if sub_idx is not None and "SUBTITLE" in placeholders:
+                ids[placeholders["SUBTITLE"]] = f"{slide_id}_t{sub_idx}"
+        reqs.append({"duplicateObject": {"objectId": source["objectId"], "objectIds": ids}})
+    batch(slides, pid, reqs)
+    write_layout_texts(slides, pid, deck.get("layout_texts", []), scale, fonts)
+    style_layout_placeholders(slides, pid, deck, scale, fonts, PPTX_TITLE_DY)
 
     state = {"presentationId": pid, "url": f"https://docs.google.com/presentation/d/{pid}/edit",
              "scale": scale, "slides": []}
-    uploaded: list[tuple[str, str]] = []
-    urls: dict[str, str] = {}  # local file -> public URL
-    try:
-        # Backgrounds: identical ones are uploaded once, and the most common one becomes the
-        # master's background (the deck's theme): its slides inherit it, and new slides too.
-        bg_key = {s["page"]: background_key(s, out) for s in deck["slides"]}
-        bg_file = {bg_key[s["page"]]: s["background"] for s in deck["slides"] if not s.get("background_color")}
-        counts = Counter(bg_key.values())
-        shared = counts.most_common(1)[0][0] if counts and counts.most_common(1)[0][1] >= 2 else None
-        files = list(bg_file.values()) + \
-                [e["file"] for s in deck["slides"] for e in s["elements"] if e["kind"] == "image"]
-        files = list(dict.fromkeys(files))
-        creds = credentials()
-        local = threading.local()
+    # Placeholder sizes (needed to resize them) and any extra layout placeholders.
+    created = execute(slides.presentations().get(
+        presentationId=pid,
+        fields="slides(objectId,pageElements(objectId,size),slideProperties/notesPage/notesProperties)"))
+    page_elements = {s["objectId"]: s.get("pageElements", []) for s in created["slides"]}
+    speaker_notes = {s["objectId"]: s.get("slideProperties", {}).get("notesPage", {})
+                     .get("notesProperties", {}).get("speakerNotesObjectId") for s in created["slides"]}
+    placeholder_dy = PPTX_TITLE_DY
+    # Internal link targets: PDF page -> slide. A skipped overlay step maps to the kept
+    # (last) step of its frame, which comes right after it.
+    kept = sorted(s["page"] for s in deck["slides"])
+    page_slide = {}
+    for page in range(kept[-1] + 1):
+        target = next(k for k in kept if k >= page)
+        page_slide[page] = f"b2s_s{target:03}"
 
-        def upload(f: str) -> tuple[str, str]:
-            if not hasattr(local, "drive"):
-                local.drive = drive_service(creds)
-            return upload_public_png(local.drive, out / f, folder)
+    # Phase 2: content, batched over slides. Each slide's requests come in parts (one per
+    # element) so that a rejected batch can be narrowed down to the element at fault.
+    refused: list[tuple[int, str]] = []
 
-        with ThreadPoolExecutor(max_workers=UPLOAD_THREADS) as pool:
-            for f, (file_id, perm_id) in zip(files, pool.map(upload, files)):
-                uploaded.append((file_id, perm_id))
-                urls[f] = f"https://drive.google.com/uc?export=view&id={file_id}"
-        time.sleep(5)  # a fresh "anyone with the link" permission takes a moment to apply
-
-        def fill(key: tuple) -> dict:
-            if key[0] == "color":
-                return {"solidFill": {"color": rgb(key[1])["opaqueColor"]}}
-            return {"stretchedPictureFill": {"contentUrl": urls[bg_file[key]]}}
-
-        # Phase 1: slides with backgrounds. Slides with a frame title use the TITLE_ONLY layout
-        # and get their title placeholder mapped to our object ID.
-        # Layouts can't be switched back to inheriting through the API, so they get the fill too.
-        reqs = [{"updatePageProperties": {
-            "objectId": page["objectId"], "fields": "pageBackgroundFill",
-            "pageProperties": {"pageBackgroundFill": fill(shared or ("color", "#ffffff"))}}}
-            for page in pres.get("masters", []) + pres.get("layouts", [])]
-        for position, slide in enumerate(deck["slides"]):
-            n = slide["page"]  # PDF page index; slides may skip pages (overlays)
-            slide_id = f"b2s_s{n:03}"
-            title_idx = title_element(slide)
-            layout, placeholder = slide_layout(slide)
-            sub_idx = subtitle_element(slide, title_idx) if title_idx is not None else None
-            if uses_templates[n]:
-                tpl = templates[layout]
-                ids = {tpl["id"]: slide_id, **{oid: f"{slide_id}_k{j}" for j, oid in enumerate(tpl["shapes"])}}
-                if title_idx is not None:
-                    ids[tpl["placeholders"][placeholder]] = f"{slide_id}_t{title_idx}"
-                if sub_idx is not None and "SUBTITLE" in tpl["placeholders"]:
-                    ids[tpl["placeholders"]["SUBTITLE"]] = f"{slide_id}_t{sub_idx}"
-                reqs.append({"duplicateObject": {"objectId": tpl["id"], "objectIds": ids}})
-                reqs.append({"updateSlidesPosition": {"slideObjectIds": [slide_id], "insertionIndex": position}})
-            else:
-                create = {"objectId": slide_id, "insertionIndex": position,
-                          "slideLayoutReference": {"predefinedLayout": layout}}
-                if title_idx is not None:
-                    create["placeholderIdMappings"] = [{"layoutPlaceholder": {"type": placeholder, "index": 0},
-                                                        "objectId": f"{slide_id}_t{title_idx}"}]
-                    if sub_idx is not None:  # authors, institute, date: the title slide's subtitle
-                        create["placeholderIdMappings"].append({"layoutPlaceholder": {"type": "SUBTITLE", "index": 0},
-                                                                "objectId": f"{slide_id}_t{sub_idx}"})
-                reqs.append({"createSlide": create})
-            if bg_key[n] != shared:
-                reqs.append({"updatePageProperties": {"objectId": slide_id, "fields": "pageBackgroundFill",
-                                                      "pageProperties": {"pageBackgroundFill": fill(bg_key[n])}}})
-        batch_with_image_retry(slides, pid, reqs)
-        write_layout_texts(slides, pid, deck.get("layout_texts", []), scale, fonts)
-        style_layout_placeholders(slides, pid, deck, scale, fonts, PPTX_TITLE_DY)
-
-        # Placeholder sizes (needed to resize them) and any extra layout placeholders.
-        created = execute(slides.presentations().get(
-            presentationId=pid,
-            fields="slides(objectId,pageElements(objectId,size),slideProperties/notesPage/notesProperties)"))
-        page_elements = {s["objectId"]: s.get("pageElements", []) for s in created["slides"]}
-        speaker_notes = {s["objectId"]: s.get("slideProperties", {}).get("notesPage", {})
-                         .get("notesProperties", {}).get("speakerNotesObjectId") for s in created["slides"]}
-        placeholder_dy = PPTX_TITLE_DY
-        # Internal link targets: PDF page -> slide. A skipped overlay step maps to the kept
-        # (last) step of its frame, which comes right after it.
-        kept = sorted(s["page"] for s in deck["slides"])
-        page_slide = {}
-        for page in range(kept[-1] + 1):
-            target = next(k for k in kept if k >= page)
-            page_slide[page] = f"b2s_s{target:03}"
-
-        # Phase 2: content, batched over slides. Each slide's requests come in parts (one per
-        # element) so that a rejected batch can be narrowed down to the element at fault.
-        source_pdf = out / "slides.pdf" if (out / "slides.pdf").exists() else Path(deck["source"]["pdf"])
-
-        def fallback_picture(el: dict, page: int, slide_id: str) -> None:
-            """An element the API refused, as a picture cropped from the original page."""
-            path = out / "figures" / f"fallback-{el['id']}.png"
-            rect = pymupdf.Rect(el["bbox"]) + (-2, -2, 2, 2)
-            src = pymupdf.open(source_pdf)
-            path.parent.mkdir(parents=True, exist_ok=True)
-            src[page].get_pixmap(matrix=pymupdf.Matrix(6, 6), clip=rect, alpha=False).save(path)
-            file_id, perm_id = upload_public_png(drive, path, folder)
-            uploaded.append((file_id, perm_id))
-            time.sleep(5)
-            picture = {**el, "bbox": [rect.x0, rect.y0, rect.x1, rect.y1]}
-            url = f"https://drive.google.com/uc?export=view&id={file_id}"
-            batch_with_image_retry(slides, pid, [image_request(picture, slide_id, f"{slide_id}_fb_{el['id']}", scale, url)])
-
-        def send(batch: list[tuple[str, int, list[tuple[dict | None, list[dict]]]]]) -> None:
-            reqs = [r for _, _, parts in batch for _, rs in parts for r in rs]
-            if not reqs:
+    def send(items: list[tuple[str, int, list[tuple[dict | None, list[dict]]]]]) -> None:
+        reqs = [r for _, _, parts in items for _, rs in parts for r in rs]
+        if not reqs:
+            return
+        try:
+            batch(slides, pid, reqs)
+            return
+        except HttpError as e:
+            if len(items) > 1:
+                for item in items:
+                    send([item])
                 return
+            print(f"warning: {items[0][0]}: batch rejected ({api_error(e)}); retrying element by element")
+        slide_id, page, parts = items[0]
+        for el, rs in parts:
             try:
-                batch_with_image_retry(slides, pid, reqs)
-                return
+                if rs:
+                    batch(slides, pid, rs)
             except HttpError as e:
-                if len(batch) > 1:
-                    for item in batch:
-                        send([item])
-                    return
-                print(f"warning: {batch[0][0]}: batch rejected ({api_error(e)}); retrying element by element")
-            slide_id, page, parts = batch[0]
-            for el, rs in parts:
-                try:
-                    if rs:
-                        batch_with_image_retry(slides, pid, rs)
-                except HttpError as e:
-                    print(f"warning: {slide_id}: {el['kind'] + ' ' + el['id'] if el else 'request'} rejected "
-                          f"({api_error(e)})" + ("; using a picture of it instead" if el and el["kind"] != "image" else ""))
-                    if el and el["kind"] != "image":
-                        fallback_picture(el, page, slide_id)
+                print(f"warning: {slide_id}: {el['kind'] + ' ' + el['id'] if el else 'request'} rejected "
+                      f"({api_error(e)})" + ("; using a picture of it instead" if el and el["kind"] != "image" else ""))
+                if el and el["kind"] != "image":
+                    refused.append((page, el["id"]))
 
-        def template_on_slide(slide_id: str, key: tuple) -> dict:
-            """The slide's copy of a template shape ({"id", "w", "h"}: its unscaled size in pt)."""
-            j = keys.index(key)
-            w, h = next(iter(templates.values()))["sizes"][j]
-            return {"id": f"{slide_id}_k{j}", "w": w, "h": h}
+    def template_on_slide(slide_id: str, key: tuple) -> dict:
+        """The slide's copy of a template shape ({"id", "w", "h"}: its unscaled size in pt)."""
+        j = keys.index(key)
+        w, h = template_sizes[j]
+        return {"id": f"{slide_id}_k{j}", "w": w, "h": h}
 
-        pending: list[tuple[str, int, list]] = []
-        pending_size = 0
-        for slide in deck["slides"]:
-            n = slide["page"]
-            slide_id = f"b2s_s{n:03}"
-            title_idx = title_element(slide)
-            title_oid = f"{slide_id}_t{title_idx}" if title_idx is not None else None
-            sub_idx = subtitle_element(slide, title_idx) if title_idx is not None else None
-            subtitle_oid = f"{slide_id}_t{sub_idx}" if sub_idx is not None else None
-            parts: list[tuple[dict | None, list[dict]]] = [(None, [
-                {"deleteObject": {"objectId": e["objectId"]}}
-                for e in page_elements.get(slide_id, [])
-                if e["objectId"] not in (title_oid, subtitle_oid) and not e["objectId"].startswith(f"{slide_id}_k")])]
-            element_ids = []
-            shifts = formula_shifts(slide, scale, fonts)
-            title_bars = [e for e in slide["elements"] if e["kind"] == "shape" and e.get("block") is not None
-                          and not e.get("title_bar")]
-            for i, el in enumerate(slide["elements"]):  # shapes, then pictures, then text on top
-                if el["id"] in shifts:
-                    el = {**el, "bbox": [el["bbox"][0] + shifts[el["id"]], el["bbox"][1],
-                                         el["bbox"][2] + shifts[el["id"]], el["bbox"][3]]}
-                if el["kind"] == "shape":
-                    oid = f"{slide_id}_s{i}"
-                    key = template_key(el, scale)
-                    reqs = shape_requests(el, slide_id, oid, scale, template_on_slide(slide_id, key) if key else None)
-                elif el["kind"] == "table":
-                    oid = f"{slide_id}_tab{i}"
-                    reqs = table_requests(el, slide_id, oid, scale, fonts)
-                elif el["kind"] == "diagram":
-                    oid = f"{slide_id}_dg{i}"
-                    reqs = diagram_requests(el, slide_id, oid, scale, fonts,
-                                            (lambda key, s=slide_id: template_on_slide(s, key)) if templates else None)
-                elif el["kind"] == "image":
-                    oid = f"{slide_id}_f{i}"
-                    reqs = [image_request(el, slide_id, oid, scale, urls[el["file"]])]
-                    if el.get("alt"):
-                        reqs.append({"updatePageElementAltText": {"objectId": oid, "description": el["alt"],
-                                                                  "title": {"math": "Formula", "icon": "Icon"}.get(el["role"], "Figure")}})
-                else:
-                    oid = f"{slide_id}_t{i}"
-                    placeholder = None
-                    if oid in (title_oid, subtitle_oid):
-                        size = next(e["size"] for e in page_elements[slide_id] if e["objectId"] == oid)
-                        placeholder = {"base_w": size["width"]["magnitude"] / EMU_PER_PT,
-                                       "base_h": size["height"]["magnitude"] / EMU_PER_PT, "dy": placeholder_dy}
-                    cx, cy = (el["bbox"][0] + el["bbox"][2]) / 2, (el["bbox"][1] + el["bbox"][3]) / 2
-                    bar = next((b["bbox"] for b in title_bars if b["bbox"][0] <= cx <= b["bbox"][2]
-                                and b["bbox"][1] <= cy <= b["bbox"][3]), None)
-                    reqs = text_box_requests(el, slide_id, oid, scale, fonts, placeholder, page_slide, bar,
-                                             text_right_limit(el, slide))
-                parts.append((el, reqs))
-                element_ids.append(oid)
-            # The slide's copies of the template shapes have been duplicated from: remove them.
-            extra = [{"deleteObject": {"objectId": f"{slide_id}_k{j}"}} for j in range(len(keys)) if uses_templates[n]]
-            # Inline formula pictures move with their text: group them (placeholders can't be grouped).
-            by_id = {el["id"]: oid for el, oid in zip(slide["elements"], element_ids)}
-            anchored: dict[str, list[str]] = {}
-            for el, oid in zip(slide["elements"], element_ids):
-                if el.get("anchor") in by_id and by_id[el["anchor"]] not in (title_oid, subtitle_oid):
-                    anchored.setdefault(by_id[el["anchor"]], []).append(oid)
-            grouped = set()
-            for text_oid, pictures in anchored.items():
-                extra.append({"groupObjects": {"groupObjectId": f"{text_oid}_g", "childrenObjectIds": [text_oid] + pictures}})
-                grouped |= {text_oid, *pictures}
-            # A beamer block (title bar and body shapes plus everything on them) moves as one.
-            for bi, members in enumerate(block_groups(slide["elements"], element_ids, title_oid)):
-                children = [f"{m}_g" if m in anchored else m for m in members if m not in grouped or m in anchored]
-                if len(children) >= 2:
-                    extra.append({"groupObjects": {"groupObjectId": f"{slide_id}_blk{bi}", "childrenObjectIds": children}})
-                    # A group takes the place of its topmost member, above a table lying on the
-                    # block (tables can't join the group): blocks are backdrops, send them back.
-                    extra.append({"updatePageElementsZOrder": {"pageElementObjectIds": [f"{slide_id}_blk{bi}"],
-                                                               "operation": "SEND_TO_BACK"}})
-            for ri, members in enumerate(rule_groups(slide["elements"], element_ids)):
-                extra.append({"groupObjects": {"groupObjectId": f"{slide_id}_rules{ri}", "childrenObjectIds": members}})
-            if slide.get("notes") and speaker_notes.get(slide_id):
-                extra.append({"insertText": {"objectId": speaker_notes[slide_id], "text": slide["notes"]}})
-            if title_oid and len(slide["elements"]) > 1:
-                # The placeholder was created with the slide, below everything added since.
-                extra.append({"updatePageElementsZOrder": {"pageElementObjectIds": [o for o in (title_oid, subtitle_oid) if o],
-                                                           "operation": "BRING_TO_FRONT"}})
-            parts += [(None, [r]) for r in extra]
-            size = sum(len(rs) for _, rs in parts)
-            # Several slides per round trip; a slide's requests are never split across batches.
-            if pending and pending_size + size > BATCH_MAX_REQUESTS:
-                send(pending)
-                pending, pending_size = [], 0
-            pending.append((slide_id, n, parts))
-            pending_size += size
-            state["slides"].append({"page": n, "objectId": slide_id, "elements": element_ids})
-            kinds = [el["kind"] for el in slide["elements"]]
-            print(f"  slide {n + 1}: {kinds.count('text')} text boxes, {kinds.count('image')} pictures, "
-                  f"{kinds.count('shape')} shapes, {kinds.count('table')} tables")
-        if pending:
+    pending: list[tuple[str, int, list]] = []
+    pending_size = 0
+    for slide in deck["slides"]:
+        n = slide["page"]
+        slide_id = f"b2s_s{n:03}"
+        title_idx = title_element(slide)
+        title_oid = f"{slide_id}_t{title_idx}" if title_idx is not None else None
+        sub_idx = subtitle_element(slide, title_idx) if title_idx is not None else None
+        subtitle_oid = f"{slide_id}_t{sub_idx}" if sub_idx is not None else None
+        ours = (f"{slide_id}_k", f"{slide_id}_f")  # template shapes and pictures from the .pptx
+        parts: list[tuple[dict | None, list[dict]]] = [(None, [
+            {"deleteObject": {"objectId": e["objectId"]}}
+            for e in page_elements.get(slide_id, [])
+            if e["objectId"] not in (title_oid, subtitle_oid) and not e["objectId"].startswith(ours)])]
+        element_ids = []
+        title_bars = [e for e in slide["elements"] if e["kind"] == "shape" and e.get("block") is not None
+                      and not e.get("title_bar")]
+        for i, el in enumerate(slide["elements"]):  # shapes, then pictures, then text on top
+            el = placed(el, n)
+            if el["kind"] == "shape":
+                oid = f"{slide_id}_s{i}"
+                key = template_key(el, scale)
+                reqs = shape_requests(el, slide_id, oid, scale, template_on_slide(slide_id, key) if key else None)
+            elif el["kind"] == "table":
+                oid = f"{slide_id}_tab{i}"
+                reqs = table_requests(el, slide_id, oid, scale, fonts)
+            elif el["kind"] == "diagram":
+                oid = f"{slide_id}_dg{i}"
+                reqs = diagram_requests(el, slide_id, oid, scale, fonts,
+                                        (lambda key, s=slide_id: template_on_slide(s, key)) if keys else None)
+            elif el["kind"] == "image":
+                # The picture came with the slide: move it to its place in the z-order.
+                oid = f"{slide_id}_f{i}"
+                reqs = [{"updatePageElementsZOrder": {"pageElementObjectIds": [oid], "operation": "BRING_TO_FRONT"}}]
+            else:
+                oid = f"{slide_id}_t{i}"
+                placeholder = None
+                if oid in (title_oid, subtitle_oid):
+                    size = next(e["size"] for e in page_elements[slide_id] if e["objectId"] == oid)
+                    placeholder = {"base_w": size["width"]["magnitude"] / EMU_PER_PT,
+                                   "base_h": size["height"]["magnitude"] / EMU_PER_PT, "dy": placeholder_dy}
+                cx, cy = (el["bbox"][0] + el["bbox"][2]) / 2, (el["bbox"][1] + el["bbox"][3]) / 2
+                bar = next((b["bbox"] for b in title_bars if b["bbox"][0] <= cx <= b["bbox"][2]
+                            and b["bbox"][1] <= cy <= b["bbox"][3]), None)
+                reqs = text_box_requests(el, slide_id, oid, scale, fonts, placeholder, page_slide, bar,
+                                         text_right_limit(el, slide))
+            parts.append((el, reqs))
+            element_ids.append(oid)
+        # The slide's copies of the template shapes have been duplicated from: remove them.
+        extra = [{"deleteObject": {"objectId": f"{slide_id}_k{j}"}} for j in range(len(keys)) if uses_templates[n]]
+        # Inline formula pictures move with their text: group them (placeholders can't be grouped).
+        by_id = {el["id"]: oid for el, oid in zip(slide["elements"], element_ids)}
+        anchored: dict[str, list[str]] = {}
+        for el, oid in zip(slide["elements"], element_ids):
+            if el.get("anchor") in by_id and by_id[el["anchor"]] not in (title_oid, subtitle_oid):
+                anchored.setdefault(by_id[el["anchor"]], []).append(oid)
+        grouped = set()
+        for text_oid, pictures in anchored.items():
+            extra.append({"groupObjects": {"groupObjectId": f"{text_oid}_g", "childrenObjectIds": [text_oid] + pictures}})
+            grouped |= {text_oid, *pictures}
+        # A beamer block (title bar and body shapes plus everything on them) moves as one.
+        for bi, members in enumerate(block_groups(slide["elements"], element_ids, title_oid)):
+            children = [f"{m}_g" if m in anchored else m for m in members if m not in grouped or m in anchored]
+            if len(children) >= 2:
+                extra.append({"groupObjects": {"groupObjectId": f"{slide_id}_blk{bi}", "childrenObjectIds": children}})
+                # A group takes the place of its topmost member, above a table lying on the
+                # block (tables can't join the group): blocks are backdrops, send them back.
+                extra.append({"updatePageElementsZOrder": {"pageElementObjectIds": [f"{slide_id}_blk{bi}"],
+                                                           "operation": "SEND_TO_BACK"}})
+        for ri, members in enumerate(rule_groups(slide["elements"], element_ids)):
+            extra.append({"groupObjects": {"groupObjectId": f"{slide_id}_rules{ri}", "childrenObjectIds": members}})
+        if slide.get("notes") and speaker_notes.get(slide_id):
+            extra.append({"insertText": {"objectId": speaker_notes[slide_id], "text": slide["notes"]}})
+        if title_oid and len(slide["elements"]) > 1:
+            # The placeholder was created with the slide, below everything added since.
+            extra.append({"updatePageElementsZOrder": {"pageElementObjectIds": [o for o in (title_oid, subtitle_oid) if o],
+                                                       "operation": "BRING_TO_FRONT"}})
+        parts += [(None, [r]) for r in extra]
+        size = sum(len(rs) for _, rs in parts)
+        # Several slides per round trip; a slide's requests are never split across batches.
+        if pending and pending_size + size > BATCH_MAX_REQUESTS:
             send(pending)
-        if templates:
-            execute(slides.presentations().batchUpdate(presentationId=pid, body={"requests": [
-                {"deleteObject": {"objectId": t["id"]}} for t in templates.values()]}))
-    finally:
-        creds = credentials()
-        local = threading.local()
-
-        def revoke(item: tuple[str, str]) -> None:
-            file_id, perm_id = item
-            if not hasattr(local, "drive"):
-                local.drive = drive_service(creds)
-            try:
-                execute(local.drive.permissions().delete(fileId=file_id, permissionId=perm_id))
-            except Exception as e:  # keep revoking the others
-                print(f"warning: could not revoke public link on {file_id}: {e}")
-            if not keep_assets:
-                # Slides keeps its own copy of every inserted image: the upload was only a
-                # transport. Into the trash (recoverable), not deleted.
-                try:
-                    execute(local.drive.files().update(fileId=file_id, body={"trashed": True}))
-                except Exception as e:
-                    print(f"warning: could not move upload {file_id} to the trash: {e}")
-
-        with ThreadPoolExecutor(max_workers=UPLOAD_THREADS) as pool:
-            list(pool.map(revoke, uploaded))
-    (out / "emit.json").write_text(json.dumps(state, indent=1), encoding="utf-8")
-    return state
+            pending, pending_size = [], 0
+        pending.append((slide_id, n, parts))
+        pending_size += size
+        state["slides"].append({"page": n, "objectId": slide_id, "elements": element_ids})
+        kinds = [el["kind"] for el in slide["elements"]]
+        print(f"  slide {n + 1}: {kinds.count('text')} text boxes, {kinds.count('image')} pictures, "
+              f"{kinds.count('shape')} shapes, {kinds.count('table')} tables")
+    if pending:
+        send(pending)
+    batch(slides, pid, [{"deleteObject": {"objectId": s["objectId"]}} for s in sources])
+    return state, refused

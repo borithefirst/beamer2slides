@@ -13,9 +13,9 @@ import itertools
 from pathlib import Path
 
 import numpy as np
-import pymupdf
 from googleapiclient.http import MediaIoBaseUpload
 from lxml import etree
+from PIL import Image
 from pptx import Presentation
 from pptx.enum.shapes import MSO_SHAPE
 from pptx.util import Emu, Pt
@@ -62,9 +62,8 @@ def main() -> None:
     pres = execute(slides.presentations().get(presentationId=pid))
     path = OUT / "calibrate_shadow.png"
     save_thumbnail(slides, pid, pres["slides"][0]["objectId"], path)
-    pix = pymupdf.Pixmap(str(path))
-    img = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width, pix.n)[..., :3].mean(axis=2)
-    k = pix.width / 720
+    img = np.asarray(Image.open(path).convert("RGB")).mean(axis=2)
+    k = img.shape[1] / 720
     print("dist blur alpha | darkness right of edge at +0,1,2,...,9 pt | below edge")
     for i, (dist, blur, alpha) in enumerate(combos):
         x, y = cell(i)

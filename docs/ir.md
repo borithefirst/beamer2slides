@@ -1,7 +1,7 @@
 # Intermediate representation (draft)
 
 Two JSON files per conversion, both in PDF points with a top-left origin
-(PyMuPDF's convention). Scaling to the Slides page happens only in `emit`.
+(`pdf.Page` converts PDFium's coordinates). Scaling to the Slides page happens only in `emit`.
 
 ## `raw.json`: output of `extract`
 A faithful, lossless-enough dump of each page. No interpretation.

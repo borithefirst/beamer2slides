@@ -13,11 +13,16 @@ a per-slide background picture.
   colours. The `.tex` / SyncTeX may later be used as a hint for structure.
 - Pipeline stages communicate through a **JSON intermediate representation (IR)**
   so each stage is testable in isolation:
-  1. `extract`: PDF → raw spans / images / vector drawings (PyMuPDF)
+  1. `extract`: PDF → raw spans / images / vector drawings (PDFium through pypdfium2, `pdf.py`)
   2. `classify`: group spans into lines, paragraphs and lists; decide native vs. background
   3. `render`: background PNG per slide with the converted elements removed
-     (redaction that keeps images and line art)
-  4. `emit`: Google Slides API (primary); python-pptx → Drive import is the fallback
+     (page objects switched off, partly removed objects composited from a second render)
+  4. `emit`: a python-pptx deck carrying all pictures, imported by Drive, then the Slides API
+- No PyMuPDF: PDF access is PDFium only. `pdf.py` wraps it (`notes.py` also uses pypdfium2 to
+  write slides.pdf); its text and path output reproduces what the MuPDF-based extraction gave (span splitting at word gaps, `re`/`qu`
+  path items, char boxes from font ascent/descent), so classify's thresholds still hold.
+- No public links: pictures reach Slides inside the imported .pptx, never as shared Drive
+  files (they break in protected Workspace domains).
 - **Fidelity is measured on Google's own renderer**, not a local preview: render the PDF page
   to PNG, export the emitted slide with `presentations.pages.getThumbnail`, and compare
   them (whole slide and per text box). A calibration deck measures font substitutes
@@ -71,12 +76,16 @@ a per-slide background picture.
   bars are created after bodies (z-order), block titles fill their bar with contentAlignment
   MIDDLE (baseline = middle + 0.362 em, `tools/probe_middle.py`), and the body carries a native
   drop shadow. The gradient strip and shadow pieces are painted out of the background.
-- Template shapes: every deck starts from an imported .pptx (`build_pptx`, also for 16:9; rebuilds
-  replace the content through `files.update`, keeping the URL) with one template slide per
-  layout. Slides needing templates are `duplicateObject` copies of their layout's template slide;
-  shapes are duplicated from the templates and restyled. This gives what the API can't set:
-  drop shadows (calibrated against beamer: `tools/calibrate_shadow.py`, distance 0.75 and blur
-  1.0 × shadow width, alpha 0.5) and exact corner radii (`adj`). Template slides are deleted at the end.
+- The imported .pptx (`build_pptx`, also for 16:9; rebuilds replace the content through
+  `files.update`, keeping the URL) has one source slide per deck slide: its layout, its own
+  background picture or colour (none when it inherits the master's), its pictures at their exact
+  boxes (alt text in `descr`) and, if needed, template shapes. Phase 1 `duplicateObject`s each
+  source slide with an objectIds map (`b2s_sNNN`, pictures `_fI`, template shapes `_kJ`,
+  placeholders `_tK`), which keeps backgrounds and pictures; the source slides are deleted at the
+  end (`tools/probe_pptx_pictures.py` verified what the import keeps). Template shapes are restyled
+  copies giving what the API can't set: drop shadows (calibrated against beamer:
+  `tools/calibrate_shadow.py`, distance 0.75 and blur 1.0 × shadow width, alpha 0.5) and exact
+  corner radii (`adj`). Pictures get `BRING_TO_FRONT` in element order after the other content.
 - Nothing stays behind when elements move (`tools/leftovers.py` checks it locally): pictures and
   block decorations are painted out of the background where the page around them is flat;
   numbered balls under literal TOC numbers become pictures grouped with their text.
@@ -91,16 +100,16 @@ a per-slide background picture.
   CENTERED_TITLE placeholder gets the position and text style of the deck's frame titles /
   title page, BODY placeholders the most common body font, and shared footer texts go
   onto all layouts. A slide added later in Slides then looks like the converted ones.
-- Backgrounds: identical PNGs are uploaded once; the most common background is set on the
-  master and all layouts, and those slides inherit it. Frame counters (`FRAME_COUNTER_RE`) become
+- Backgrounds: identical PNGs are stored once in the .pptx; the most common background is set on
+  the master (layouts and those slides inherit it). Frame counters (`FRAME_COUNTER_RE`) become
   per-slide text elements (role `footer`), so theme backgrounds become identical.
 - Fonts: `fonts.google_font` passes Google fonts used in the PDF through with their weight
   (weightedFontFamily, no width correction) and maps Helvetica/Times/Courier clones to
   metric-compatible Arial/Times New Roman/Courier New. CM fonts use the calibrated substitutes.
 - Simple inline fractions (`classify.simple_fraction`) are written as ᵃ⁄ᵦ; their bars leave
   the background via the text element's `strokes`.
-- Performance: uploads run in 6 threads (one Drive service per thread) and slide content is
-  sent in batches of up to 400 requests; a 45-slide deck converts in about 80 s.
+- Performance: one .pptx upload, then slide content in batches of up to 400 requests; the test
+  decks convert in 12-20 s (extract + classify + render of a 30-page deck take about 2 s).
 - Speaker notes: beamer note pages (`show notes`) or `show notes on second screen`
   (`notes.py`), written to the slide's speaker notes.
 - Everything else (display math, theme decoration, header/footer text) stays in the
@@ -113,8 +122,6 @@ a per-slide background picture.
 - Google theme (`themes/google`, README there): a beamer theme reproducing the GDG 2024 speaker
   template in Google Sans Flex, written for AI authors; sizes in `\gpt` so the theme's baselines
   follow Slides' text model (first baseline 6.48 + 0.968 em, pitch 1.2 em × line spacing).
-- Slides API image insertion needs a public URL: upload to Drive, share by link,
-  insert, then revoke.
 
 ## Google side
 - GCP project `beamer2slides` (personal Gmail): Slides and Drive APIs enabled. The OAuth
@@ -134,13 +141,13 @@ a per-slide background picture.
   6.48 pt + 0.968 em and the line pitch is 1.19 em **for every font**. Default substitute
   for CM Sans is Lato at size / 1.020; titles (CMSS12) need their own factor (~1.035).
 
-- Background images: Drive "beamer2slides assets" folder, shared by link only while the
-  batch runs (`uc?export=view&id=` URL; a fresh permission needs a few seconds before
-  Slides can fetch it). They are set as the slide's `pageBackgroundFill`. After insertion the
-  uploads are moved to the trash (Slides keeps its own copy), unless `--keep-assets`.
-- Emit robustness: a rejected batch is retried slide by slide, then element by element; an
-  element the API refuses becomes a picture of the original page region (`fallback_picture`).
-  A page whose classification raises becomes a full background picture (`classify_page`).
+- The Slides API's `createImage` needs a URL Google can fetch; that is why pictures go through
+  the .pptx instead (Google's import stretches a picture to its box; `createImage` would
+  letterbox it).
+- Emit robustness: a rejected batch is retried slide by slide, then element by element; if the
+  API refuses elements, the deck is rebuilt once with pictures of those page regions in their
+  place (`fallback_pictures`). A page whose classification raises becomes a full background
+  picture (`classify_page`).
 - Decks are uploaded python-pptx files with Drive conversion (the page size is kept; the default
   template's placeholders are rescaled for 16:9).
 - Re-running `convert` on the same output folder rebuilds the previous deck in place
@@ -149,15 +156,31 @@ a per-slide background picture.
 ## Usage
 ```
 python -m beamer2slides classify deck.pdf   # raw.json, deck.json, debug/ overlays
-python -m beamer2slides convert  deck.pdf   # + background.pdf, backgrounds/, Slides deck, emit.json
+python -m beamer2slides convert  deck.pdf   # + backgrounds/, figures/, Slides deck, emit.json
 python -m beamer2slides fidelity deck.pdf   # thumbnails vs PDF: fidelity.json, fidelity/diff-NNN.png
 ```
 Outputs go to `out/<pdf stem>/`. In the diff PNGs, red = only in PDF, blue = only in Slides,
 black = both.
 
 ## Pitfalls found so far
-- Saving a redacted PDF with `garbage>=3` corrupts beamer soft-mask shadows (black bars).
-- Redacting images in PDFs is unreliable; ball bullets are patched out of the PNG instead.
+- PDFium (`pdf.py` handles these):
+  - Soft-mask contents are not page objects. Beamer's block shadow is a black rectangle under
+    a soft mask (`FPDFPageObj_HasTransparency` with an opaque fill); its visible pieces right
+    of and below the panel are reported as shading images (`extract._shadow_pieces`).
+  - Shadings are page objects of their own (type 4), usually inside form XObjects; their box
+    is the clip. Images and shadings are both `images` in raw.json.
+  - A ligature glyph comes back as several characters at the same origin: merged into one.
+  - The text page reorders text objects on a line; chars are sorted back into content order
+    (big operators' limits, accents).
+  - pypdfium2's `get_cropbox` falls back to Letter when the box is inherited:
+    `FPDF_GetPageBoundingBox` instead. `FPDFPageObj_GetIsActive` takes an out pointer.
+  - Math fonts from xdvipdfmx carry their bounding box as ascent/descent (CMEX: −2.96 em);
+    those get 0.8/−0.2. CMYK colours convert slightly differently from MuPDF (#fff101 yellow).
+  - Page labels can't be rewritten: after `notes.prepare` deletes note pages, the kept pages'
+    labels are passed to `extract(pdf, labels)`.
+- Switching objects off (`FPDFPageObj_SetIsActive`) needs no content regeneration and is
+  undone after each render, so crops and backgrounds share one open page.
+- Ball bullets are patched out of the PNG (themes draw them with soft masks shared with shadows).
 - Slides ignores spaceAbove/spaceBelow between bulleted list items (see docs/calibration.md).
 - A bullet keeps the text style from when it was created, unless its whole paragraph later
   gets one uniform style. Set each paragraph's base family and size *before*
@@ -165,8 +188,8 @@ black = both.
 - Inline math: `classify.math_kind` sends lines with fractions, radicals, big operators,
   stacked or second-level scripts, or formula-like density to the background. Everything else becomes runs
   with `script` super/sub and Unicode symbols (MSBM → ℝ).
-- MuPDF's line-art "covered" test is conservative (strokes, transformed TikZ nodes): figure
-  and panel removal redacts with a few points of margin.
+- Figure removal switches off paths whose bounds lie within the figure box + 5 pt (strokes and
+  arrow tips reach out); panel removal uses 1.5 pt, then 5 pt if the panel's path is still there.
 - Title placeholders exist before any other element: bring them to front after adding shapes.
 - Slides table rows are at least 1.195 em × lineSpacing + 14.4 pt tall (7.2 pt cell padding,
   not settable); empty cells count with the default font unless given a styled space.
@@ -185,7 +208,7 @@ black = both.
 - Resizing a group scales every child (title bars get taller; fonts don't scale). Slides'
   thumbnail renderer draws shadows of children of a scaled group at the unscaled size.
 - Beamer draws block shadows as black rectangles under a soft mask; removing the panels above
-  them without redacting them too leaves solid black bars in the background.
+  them without switching those off too leaves solid black bars in the background.
 - `fidelity` reuses saved thumbnails unless the deck was emitted again (or `--refresh`).
 
 ## Environment

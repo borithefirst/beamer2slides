@@ -1,4 +1,5 @@
-"""Report what beamer2slides has put in Google Drive: uploaded picture assets and decks.
+"""Report what beamer2slides has put in Google Drive: decks, and picture assets left by
+versions that uploaded pictures separately.
 
 Read-only. Usage: python tools/drive_usage.py
 """

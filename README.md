@@ -50,16 +50,18 @@ python -m beamer2slides classify talk.pdf          # local only: see decisions i
 python -m beamer2slides fidelity talk.pdf          # compare Google's rendering with the PDF
 ```
 Outputs go to `out/<pdf name>/`. Re-running `convert` on the same PDF updates the same
-Google Slides deck (`--new-deck` creates a new one). Pictures are uploaded to a Drive folder
-"beamer2slides assets" just long enough for Slides to copy them, then moved to the trash
-(`--keep-assets` keeps them). `python tools/drive_usage.py` lists what the tool has in Drive.
+Google Slides deck (`--new-deck` creates a new one). Pictures and backgrounds travel inside a
+.pptx that Drive imports as the deck's starting point: nothing is ever shared by public link,
+so it works where link sharing is blocked. The only files the tool creates in Drive are the
+decks themselves (`python tools/drive_usage.py` lists them).
 
 In the debug images, green boxes are text, blue are pictures, purple tables and orange shapes.
 Shaded text stays in the background (red math, blue figure, grey theme).
 
 ## How it works
-`extract` (PyMuPDF) → `classify` (lines, paragraphs, lists, tables, figures, shapes) →
-`render` (background without converted content, picture crops) → `emit` (Google Slides API).
+`extract` (PDFium via pypdfium2) → `classify` (lines, paragraphs, lists, tables, figures, shapes) →
+`render` (background without converted content, picture crops) → `emit` (a .pptx with the
+pictures, imported by Drive, then filled through the Google Slides API).
 Fidelity is measured on Google's own renderer via slide thumbnails. See `CLAUDE.md` and
 `docs/` for design notes, calibration data and pitfalls.
 

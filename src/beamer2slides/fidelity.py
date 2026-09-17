@@ -10,20 +10,20 @@ import json
 from pathlib import Path
 
 import numpy as np
-import pymupdf
+from PIL import Image
 
 from .google_auth import slides_service
 from .gslides import save_thumbnail
+from .pdf import Document
 
 DIFF_THRESHOLD = 70  # max channel difference that counts as text rather than resampling noise
 
 
-def rgb_array(pix: pymupdf.Pixmap) -> np.ndarray:
-    if pix.alpha:
-        pix = pymupdf.Pixmap(pix, 0)
-    if pix.n != 3:
-        pix = pymupdf.Pixmap(pymupdf.csRGB, pix)
-    return np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width, 3).astype(np.int16)
+def rgb_array(image: Image.Image, size: tuple[int, int] | None = None) -> np.ndarray:
+    image = image.convert("RGB")
+    if size and image.size != size:
+        image = image.resize(size, Image.Resampling.BILINEAR)
+    return np.asarray(image).astype(np.int16)
 
 
 def text_mask(img: np.ndarray, background: np.ndarray) -> np.ndarray:
@@ -70,7 +70,7 @@ def dilate(mask: np.ndarray) -> np.ndarray:
 def measure(pdf: Path, out: Path, refresh: bool = False) -> dict:
     deck = json.loads((out / "deck.json").read_text(encoding="utf-8"))
     state = json.loads((out / "emit.json").read_text(encoding="utf-8"))
-    original = pymupdf.open(pdf)
+    original = Document(pdf)
     slides = None
     fdir = out / "fidelity"
     fdir.mkdir(exist_ok=True)
@@ -83,15 +83,14 @@ def measure(pdf: Path, out: Path, refresh: bool = False) -> dict:
         if refresh or not thumb_path.exists() or thumb_path.stat().st_mtime < (out / "emit.json").stat().st_mtime:
             slides = slides or slides_service()
             save_thumbnail(slides, state["presentationId"], emitted["objectId"], thumb_path)
-        thumb = rgb_array(pymupdf.Pixmap(str(thumb_path)))
+        thumb = rgb_array(Image.open(thumb_path))
         h, w = thumb.shape[:2]
         # Background: the uploaded PNG (with its patches). The reference goes through the same
         # render-at-upload-size-then-rescale path, so content left in the background cancels out.
-        bg_png = pymupdf.Pixmap(str(out / "backgrounds" / f"bg-{n + 1:03}.png"))
-        bg = rgb_array(pymupdf.Pixmap(bg_png, w, h))
-        zoom = bg_png.width / original[n].rect.width
-        ref_full = original[n].get_pixmap(matrix=pymupdf.Matrix(zoom, zoom), alpha=False)
-        ref = rgb_array(pymupdf.Pixmap(ref_full, w, h))
+        bg_png = Image.open(out / "backgrounds" / f"bg-{n + 1:03}.png")
+        bg = rgb_array(bg_png, (w, h))
+        zoom = bg_png.width / original[n].width
+        ref = rgb_array(Image.fromarray(original[n].render(zoom)), (w, h))
         m_ref, m_sl = text_mask(ref, bg), text_mask(thumb, bg)
 
         px_per_pdf_pt = w / slide["size"][0]
@@ -133,7 +132,7 @@ def measure(pdf: Path, out: Path, refresh: bool = False) -> dict:
         diff[m_ref & ~m_sl] = (220, 40, 40)     # only in the PDF: red
         diff[m_sl & ~m_ref] = (30, 110, 230)    # only in Slides: blue
         diff[m_ref & m_sl] = (0, 0, 0)          # both: black
-        pymupdf.Pixmap(pymupdf.csRGB, w, h, diff.tobytes(), False).save(fdir / f"diff-{n + 1:03}.png")
+        Image.fromarray(diff).save(fdir / f"diff-{n + 1:03}.png")
 
         report["slides"].append({"page": n, "text_overlap": round(overlap, 3), "elements": elements})
 

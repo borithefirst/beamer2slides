@@ -17,9 +17,9 @@ import subprocess
 import time
 from pathlib import Path
 
-import pymupdf
-
 from beamer2slides import ink
+from beamer2slides.extract import spans as page_spans
+from beamer2slides.pdf import Document
 from beamer2slides.google_auth import slides_service
 from beamer2slides.gslides import execute, pt, save_thumbnail, text_box
 
@@ -162,16 +162,15 @@ def reference() -> dict:
     subprocess.run([find_engine("pdflatex"), "-interaction=nonstopmode", "-halt-on-error", "reference.tex"],
                    cwd=ref_dir, check=True, capture_output=True)
 
-    doc = pymupdf.open(ref_dir / "reference.pdf")
+    doc = Document(ref_dir / "reference.pdf")
     zoom = 12.0
     rows = {}
     for (key, text, style), page in zip(WIDTH_ROWS, doc):
-        spans = [s for b in page.get_text("dict")["blocks"] for l in b.get("lines", []) for s in l["spans"]
-                 if s["text"].strip()]
+        spans = [s for s in page_spans(page) if s["text"].strip()]
         box = ink.ink_box(ink.render_gray(page, zoom), zoom)
         rows[key] = {"font": spans[0]["font"], "size": round(spans[0]["size"], 3), "ink_width": box.width}
     caps_page = doc[len(WIDTH_ROWS)]
-    caps_span = caps_page.get_text("dict")["blocks"][0]["lines"][0]["spans"][0]
+    caps_span = page_spans(caps_page)[0]
     caps_box = ink.ink_box(ink.render_gray(caps_page, zoom), zoom)
     return {
         "engine": "pdflatex",

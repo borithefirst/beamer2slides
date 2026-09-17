@@ -1,6 +1,6 @@
 """Measure where ink (dark pixels) is in rendered images.
 
-Used on both sides of every fidelity comparison: PDF pages rendered by PyMuPDF
+Used on both sides of every fidelity comparison: PDF pages rendered by PDFium
 and slide thumbnails rendered by Google. Coordinates come back in points, given
 the image's pixels-per-point scale.
 """
@@ -9,7 +9,9 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
-import pymupdf
+from PIL import Image
+
+from .pdf import Page
 
 INK_THRESHOLD = 128  # grey level below which a pixel counts as ink (50% coverage)
 
@@ -30,20 +32,12 @@ class Box:
         return self.y1 - self.y0
 
 
-def gray_from_pixmap(pix: pymupdf.Pixmap) -> np.ndarray:
-    if pix.alpha:
-        pix = pymupdf.Pixmap(pix, 0)
-    if pix.n != 1:
-        pix = pymupdf.Pixmap(pymupdf.csGRAY, pix)
-    return np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width)
-
-
 def load_gray(path: Path) -> np.ndarray:
-    return gray_from_pixmap(pymupdf.Pixmap(str(path)))
+    return np.asarray(Image.open(path).convert("L"))
 
 
-def render_gray(page: pymupdf.Page, px_per_pt: float) -> np.ndarray:
-    return gray_from_pixmap(page.get_pixmap(matrix=pymupdf.Matrix(px_per_pt, px_per_pt), colorspace=pymupdf.csGRAY))
+def render_gray(page: Page, px_per_pt: float) -> np.ndarray:
+    return np.asarray(Image.fromarray(page.render(px_per_pt)).convert("L"))
 
 
 def _crop(gray: np.ndarray, region: Box | None, px_per_pt: float) -> tuple[np.ndarray, int, int]:

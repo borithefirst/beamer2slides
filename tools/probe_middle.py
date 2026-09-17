@@ -8,7 +8,7 @@ Usage: python tools/probe_middle.py
 from pathlib import Path
 
 import numpy as np
-import pymupdf
+from PIL import Image
 
 from beamer2slides.google_auth import slides_service
 from beamer2slides.gslides import EMU_PER_PT, execute, pt, save_thumbnail, text_box
@@ -44,9 +44,8 @@ def main() -> None:
     execute(slides.presentations().batchUpdate(presentationId=pid, body={"requests": reqs}))
     path = OUT / "probe_middle.png"
     save_thumbnail(slides, pid, page, path)
-    pix = pymupdf.Pixmap(str(path))
-    img = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width, pix.n)[..., :3].mean(axis=2)
-    k = pix.width / 720
+    img = np.asarray(Image.open(path).convert("RGB")).mean(axis=2)
+    k = img.shape[1] / 720
     print("size height  baseline-middle  (in em)")
     for z, x, y, h in boxes:
         crop = img[int(y * k):int((y + h) * k), int((x + 5) * k):int((x + 150) * k)]

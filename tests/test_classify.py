@@ -122,7 +122,7 @@ def test_underline_and_colorbox_become_text_styles():
     slide = deck("11_research_talk")["slides"][6]
     runs = [r for e in texts(slide) for p in e["paragraphs"] for r in p["runs"]]
     assert [r["text"] for r in runs if r["underline"]] == ["underlined"]
-    assert [(r["text"], r["highlight"]) for r in runs if r["highlight"]] == [("Highlighted", "#fff200")]
+    assert [(r["text"], r["highlight"]) for r in runs if r["highlight"]] == [("Highlighted", "#fff101")]  # CMYK yellow as PDFium converts it
     assert sum(len(e["strokes"]) for e in texts(slide)) == 2  # both drawings leave the background
 
 
@@ -288,10 +288,10 @@ def test_speaker_notes(tmp_path, variant, mode):
     pdf = DECKS / "notes" / f"{variant}.pdf"
     if not pdf.exists():
         pytest.skip(f"{pdf.name} not built")
-    path, notes, found = prepare(pdf, tmp_path)
-    assert found == mode
-    assert notes == {0: "Speaker note for the pause frame.", 2: "A note on the code frame."}
-    assert len(extract(path)["pages"]) == 3
+    prepared = prepare(pdf, tmp_path)
+    assert prepared.mode == mode
+    assert prepared.notes == {0: "Speaker note for the pause frame.", 2: "A note on the code frame."}
+    assert len(extract(prepared.pdf, prepared.labels)["pages"]) == 3
 
 
 def test_raster_images_and_full_bleed_background():
@@ -344,7 +344,7 @@ def test_blocks_pair_title_bar_and_body_with_shadow():
     assert len(bodies) == len(bars) == 3
     assert {b["block"] for b in bodies} == {b["block"] for b in bars} == {0, 1, 2}
     for body in bodies:
-        assert body["shadow"]["size"] == 4.0 and len(body["shadow"]["pieces"]) == 5
+        assert body["shadow"]["size"] == 4.0 and len(body["shadow"]["pieces"]) == 2  # right of and below
         assert len(body["strips"]) == 1, "the gradient strip between title bar and body"
     assert not any(b.get("shadow") for b in bars)
 

@@ -1,12 +1,12 @@
 """Stage 1: dump each PDF page's text spans, images, drawings and links (raw.json)."""
 
+import math
 from pathlib import Path
 
-import pymupdf
+from .pdf import Char, Document, Page
 
 LIGATURES = str.maketrans({"ﬀ": "ff", "ﬁ": "fi", "ﬂ": "fl", "ﬃ": "ffi", "ﬄ": "ffl",
                            "ﬅ": "st", "ﬆ": "st"})
-TEXT_FLAGS =pymupdf.TEXT_PRESERVE_LIGATURES | pymupdf.TEXT_PRESERVE_WHITESPACE | pymupdf.TEXT_MEDIABOX_CLIP
 
 
 def _r(values, nd=2):
@@ -19,41 +19,40 @@ def _hex(rgb) -> str | None:
     return "#" + "".join(f"{round(max(0.0, min(1.0, c)) * 255):02x}" for c in rgb[:3])
 
 
+def _points(item: tuple) -> list:
+    op = item[0]
+    if op == "re":
+        x0, y0, x1, y1 = item[1]
+        return [[x0, y0], [x1, y1]]
+    if op == "qu":
+        p0, p1, p2, p3 = item[1]  # the quad's corners in drawing order: ul, ll, lr, ur
+        return [list(p) for p in (p0, p3, p2, p1)]  # ul, ur, lr, ll
+    return [list(p) for p in item[1:]]
+
+
 def _path(d: dict, max_items: int = 20) -> list | None:
     """Path geometry for small drawings (diagram nodes, lines, arrow tips): [op, [[x, y], ...]]."""
     if len(d["items"]) > max_items:
         return None
-    out = []
-    for item in d["items"]:
-        op = item[0]
-        if op == "re":
-            r = item[1]
-            pts = [[r.x0, r.y0], [r.x1, r.y1]]
-        elif op == "qu":
-            q = item[1]
-            pts = [[p.x, p.y] for p in (q.ul, q.ur, q.lr, q.ll)]
-        else:
-            pts = [[p.x, p.y] for p in item[1:] if hasattr(p, "x")]
-        out.append([op, [[round(x, 2), round(y, 2)] for x, y in pts]])
-    return out
+    return [[item[0], [[round(x, 2), round(y, 2)] for x, y in _points(item)]] for item in d["items"]]
 
 
 def _rounded_corners(d: dict) -> dict[str, float]:
     """Which bbox corners of a path are drawn with a curve, and the curve's radius."""
-    r = d["rect"]
+    x0, y0, x1, y1 = d["rect"]
     corners: dict[str, float] = {}
     for item in d["items"]:
         if item[0] != "c":
             continue
         p1, p4 = item[1], item[4]
-        mx, my = (p1.x + p4.x) / 2, (p1.y + p4.y) / 2
-        key = ("t" if my < (r.y0 + r.y1) / 2 else "b") + ("l" if mx < (r.x0 + r.x1) / 2 else "r")
-        corners[key] = round(max(abs(p4.x - p1.x), abs(p4.y - p1.y)), 2)
+        mx, my = (p1[0] + p4[0]) / 2, (p1[1] + p4[1]) / 2
+        key = ("t" if my < (y0 + y1) / 2 else "b") + ("l" if mx < (x0 + x1) / 2 else "r")
+        corners[key] = round(max(abs(p4[0] - p1[0]), abs(p4[1] - p1[1])), 2)
     return corners
 
 
-def _label(page: pymupdf.Page) -> str:
-    label = page.get_label() or str(page.number + 1)
+def _label(label: str | None, index: int) -> str:
+    label = label or str(index + 1)
     if label.startswith("<FEFF") and label.endswith(">"):  # raw UTF-16BE hex string
         try:
             label = bytes.fromhex(label[5:-1]).decode("utf-16-be")
@@ -62,59 +61,128 @@ def _label(page: pymupdf.Page) -> str:
     return label
 
 
-def glyph_defaults(doc: pymupdf.Document) -> dict[tuple[str, int], int]:
-    """(font, character) -> lowest glyph id used for it anywhere in the document."""
-    lowest: dict[tuple[str, int], int] = {}
-    for page in doc:
-        for sp in page.get_texttrace():
-            for ch in sp["chars"]:
-                key = (sp["font"], ch[0])
-                if ch[1] > 0 and (key not in lowest or ch[1] < lowest[key]):
-                    lowest[key] = ch[1]
-    return lowest
+SMALL_CAPS_WIDTH = 0.03  # relative advance difference that marks an alternate glyph
 
 
-def small_caps_spans(page: pymupdf.Page, defaults: dict[tuple[str, int], int]) -> list[pymupdf.Rect]:
-    """Areas set in OpenType small caps (fontspec \\textsc): lowercase letters drawn with an
-    alternate glyph, i.e. a higher glyph id than the same letter elsewhere in the same font.
-    The text layer only says 'metropolis', the page shows METROPOLIS in small capitals."""
+def _small_caps(page: Page, chars: list[Char]) -> bool:
+    """OpenType small caps (fontspec \\textsc): lowercase letters drawn with an alternate glyph.
+    The text layer only says 'metropolis', the page shows METROPOLIS in small capitals. An
+    alternate glyph has another advance than the font's default glyph for the letter."""
+    lower = [ch for ch in chars if not ch.synthetic and len(ch.c) == 1 and ch.c.islower() and ch.exact_advance]
+    if len(lower) < 2:
+        return False
+    alternate = 0
+    for ch in lower:
+        default = page.glyph_width(ch.font_handle, ch.c, ch.size)
+        if default and abs(ch.advance - default) > SMALL_CAPS_WIDTH * max(default, 0.01):
+            alternate += 1
+    return alternate >= 2 and alternate >= 0.7 * len(lower)
+
+
+# Gaps between glyphs on a line, in ems of the following glyph. TeX output has no space
+# characters: word spaces are pen moves. A small move (thin math spaces) becomes a space inside
+# the span; a word space ends the span (classify groups words by geometry).
+JOIN_GAP = 0.15
+WORD_GAP = 0.3
+NEW_LINE_GAP = 1.0
+BACK_GAP = -0.6
+SAME_BASELINE = 0.05
+NEW_BASELINE = 0.8
+
+
+def spans(page: Page) -> list[dict]:
+    """Runs of glyphs on one line with the same font, size and colour, split at word gaps."""
     out = []
-    for sp in page.get_texttrace():
-        lower = [ch for ch in sp["chars"] if chr(ch[0]).islower()]
-        if len(lower) < 2:
+    run: list[Char] = []
+    x0, y0, x1, y1 = page.rect
+
+    def flush():
+        if run and any(not ch.synthetic for ch in run):
+            text = "".join(ch.c for ch in run)
+            bx0 = min(ch.box[0] for ch in run)
+            by0 = min(ch.box[1] for ch in run)
+            bx1 = max(ch.box[2] for ch in run)
+            by1 = max(ch.box[3] for ch in run)
+            first = run[0]
+            out.append({"text": text, "font": first.font, "size": first.size, "color": first.color,
+                        "alpha": first.alpha, "origin": first.origin, "bbox": (bx0, by0, bx1, by1),
+                        "dir": first.dir, "chars": list(run)})
+        run.clear()
+
+    prev: Char | None = None
+    for ch in page.chars():
+        # characters outside the page (e.g. the cut-off half of a notes-on-second-screen page)
+        if ch.box[2] <= x0 or ch.box[0] >= x1 or ch.box[3] <= y0 or ch.box[1] >= y1:
             continue
-        alternate = [ch for ch in lower if ch[1] > defaults.get((sp["font"], ch[0]), ch[1])]
-        if len(alternate) >= 0.7 * len(lower):
-            out += [pymupdf.Rect(ch[3]) for ch in alternate]
+        space = None
+        if prev is not None:
+            ux, uy = ch.dir
+            px, py = prev.origin[0] + prev.dir[0] * prev.advance, prev.origin[1] + prev.dir[1] * prev.advance
+            size = max(ch.size, 0.01)
+            gap = ((ch.origin[0] - px) * ux + (ch.origin[1] - py) * uy) / size
+            offset = abs((ch.origin[0] - px) * uy - (ch.origin[1] - py) * ux) / size
+            style = (ch.font, round(ch.size, 3), ch.color, ch.alpha) != (prev.font, round(prev.size, 3), prev.color, prev.alpha)
+            new_line = ch.dir != prev.dir or offset > NEW_BASELINE or gap > NEW_LINE_GAP or gap < BACK_GAP
+            if new_line or gap >= WORD_GAP:
+                flush()
+            elif gap >= JOIN_GAP and offset < SAME_BASELINE and prev.c != " " and ch.c != " ":
+                if style:
+                    flush()
+                width = gap * size
+                space = Char(" ", ch.font, ch.size, ch.color, ch.alpha, (px, py),
+                             Page.char_box(px, py, ux, uy, width, ch.size, ch.ascent, ch.descent),
+                             ch.dir, 0, ch.font_handle, width, True, ch.ascent, ch.descent)
+            elif style:
+                flush()
+        if space:
+            run.append(space)
+        run.append(ch)
+        prev = ch
+    flush()
     return out
 
 
-def extract_page(page: pymupdf.Page, defaults: dict | None = None) -> dict:
-    n = page.number
-    spans = []
-    small_caps = small_caps_spans(page, defaults) if defaults else []
-    for block in page.get_text("dict", flags=TEXT_FLAGS)["blocks"]:
-        if block["type"] != 0:
+def _shadow_pieces(drawings: list[dict]) -> list[tuple]:
+    """Beamer's block shadows: a black rectangle under a soft mask whose shadings fade its
+    edges, offset right and down from the panel painted over it. The mask contents are not
+    page objects, so the visible parts of the shadow (right of and below the panel) are
+    reported as shading pieces on whole points, as the shadings themselves would be."""
+    pieces = []
+    for i, m in enumerate(drawings):
+        if not m.get("soft_mask") or m["type"] != "f":
             continue
-        for line in block["lines"]:
-            for s in line["spans"]:
-                if not s["text"].strip():
-                    continue
-                bbox = pymupdf.Rect(s["bbox"])
-                alternates = sum(bbox.contains(pymupdf.Point((r.x0 + r.x1) / 2, (r.y0 + r.y1) / 2)) for r in small_caps)
-                spans.append({
-                    # Ligature code points (xelatex/lualatex text layers) as plain letters, so the
-                    # text stays searchable and spell-checkable in Slides.
-                    "id": f"p{n}s{len(spans)}", "text": s["text"].translate(LIGATURES), "font": s["font"],
-                    "size": round(s["size"], 3), "color": f"#{s['color']:06x}", "alpha": s.get("alpha", 255),
-                    "origin": _r(s["origin"]), "bbox": _r(s["bbox"]), "dir": _r(line["dir"], 3),
-                    "smallcaps": alternates >= 2 and alternates >= 0.7 * sum(ch.islower() for ch in s["text"]),
-                })
+        mx0, my0, mx1, my1 = m["rect"]
+        for p in drawings[i + 1:]:
+            if p["type"] not in ("f", "fs") or p.get("soft_mask") or (p.get("fill_opacity") or 1.0) < 1.0:
+                continue
+            px0, py0, px1, py1 = p["rect"]
+            dx, dy = mx1 - px1, my1 - py1
+            if 0.5 <= dx <= 8 and abs(dx - dy) <= 0.25 and abs(mx0 - px0 - dx) <= 0.25 and my0 < py1 - dy:
+                pieces.append((math.floor(px1), math.floor(my0), math.ceil(mx1), math.ceil(my1)))
+                pieces.append((math.floor(mx0), math.floor(py1), math.ceil(mx1), math.ceil(my1)))
+                break
+    return pieces
 
-    images = [{
-        "id": f"p{n}i{i}", "bbox": _r(info["bbox"]), "px": [info["width"], info["height"]],
-        "xref": info.get("xref", 0),
-    } for i, info in enumerate(page.get_image_info(xrefs=True))]
+
+def extract_page(page: Page, label: str) -> dict:
+    n = page.index
+    out_spans = []
+    for s in spans(page):
+        if not s["text"].strip():
+            continue
+        out_spans.append({
+            # Ligature code points (xelatex/lualatex text layers) as plain letters, so the
+            # text stays searchable and spell-checkable in Slides.
+            "id": f"p{n}s{len(out_spans)}", "text": s["text"].translate(LIGATURES), "font": s["font"],
+            "size": round(s["size"], 3), "color": f"#{s['color']:06x}", "alpha": s["alpha"],
+            "origin": _r(s["origin"]), "bbox": _r(s["bbox"]), "dir": _r(s["dir"], 3),
+            "smallcaps": _small_caps(page, s["chars"]),
+        })
+
+    page_drawings = page.drawings()
+    found = [(info["bbox"], [info["width"], info["height"]]) for info in page.images()]
+    found += [(b, [b[2] - b[0], b[3] - b[1]]) for b in _shadow_pieces(page_drawings)]
+    images = [{"id": f"p{n}i{i}", "bbox": _r(b), "px": px} for i, (b, px) in enumerate(found)]
 
     drawings = [{
         "id": f"p{n}d{i}", "type": d["type"], "items": "".join(item[0] for item in d["items"]),
@@ -123,27 +191,23 @@ def extract_page(page: pymupdf.Page, defaults: dict | None = None) -> dict:
         "fill_opacity": round(d.get("fill_opacity") or 1.0, 3),
         "corners": _rounded_corners(d),
         "path": _path(d),
-    } for i, d in enumerate(page.get_drawings())]
+    } for i, d in enumerate(page_drawings)]
 
-    links = []
-    for link in page.get_links():
-        if link.get("uri"):
-            links.append({"bbox": _r(link["from"]), "uri": link["uri"]})
-        elif link["kind"] in (pymupdf.LINK_GOTO, pymupdf.LINK_NAMED) and link.get("page", -1) >= 0:
-            links.append({"bbox": _r(link["from"]), "page": link["page"]})  # TOC entries, \hyperlink
+    links = [{"bbox": _r(link["bbox"]), **({"uri": link["uri"]} if "uri" in link else {"page": link["page"]})}
+             for link in page.links()]
 
     # Anything entirely outside the page (e.g. the cut-off half of a notes-on-second-screen page).
-    area = page.rect
-    inside = lambda b: b[2] > area.x0 and b[0] < area.x1 and b[3] > area.y0 and b[1] < area.y1
-    spans = [s for s in spans if inside(s["bbox"])]
+    x0, y0, x1, y1 = page.rect
+    inside = lambda b: b[2] > x0 and b[0] < x1 and b[3] > y0 and b[1] < y1
+    out_spans = [s for s in out_spans if inside(s["bbox"])]
     images = [i for i in images if inside(i["bbox"])]
     drawings = [d for d in drawings if inside(d["bbox"])]
     links = [l for l in links if inside(l["bbox"])]
 
     return {
-        "index": n, "label": _label(page),
-        "size": _r((page.rect.width, page.rect.height)),
-        "spans": spans, "images": images, "drawings": drawings, "links": links,
+        "index": n, "label": label,
+        "size": _r((page.width, page.height)),
+        "spans": out_spans, "images": images, "drawings": drawings, "links": links,
     }
 
 
@@ -176,12 +240,17 @@ def select_overlays(raw: dict, mode: str) -> dict:
     return {**raw, "pages": kept, "overlays": {"mode": mode, "dropped": len(pages) - len(kept)}}
 
 
-def extract(pdf: Path) -> dict:
-    doc = pymupdf.open(pdf)
-    defaults = glyph_defaults(doc)
-    return {
-        "version": 1,
-        "source": {"pdf": str(pdf), "producer": doc.metadata.get("producer"), "pages": doc.page_count,
-                   "title": doc.metadata.get("title") or ""},
-        "pages": [extract_page(page, defaults) for page in doc],
-    }
+def extract(pdf: Path, labels: list[str] | None = None) -> dict:
+    """`labels` replaces the PDF's page labels (notes.prepare deletes pages, and PDFium can't
+    rewrite the label tree)."""
+    doc = Document(pdf)
+    try:
+        meta = doc.metadata
+        return {
+            "version": 1,
+            "source": {"pdf": str(pdf), "producer": meta["producer"], "pages": len(doc), "title": meta["title"]},
+            "pages": [extract_page(page, _label(labels[page.index] if labels else doc.label(page.index), page.index))
+                      for page in doc],
+        }
+    finally:
+        doc.close()
