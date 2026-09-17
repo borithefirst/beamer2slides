@@ -1046,6 +1046,9 @@ def emit(deck: dict, out: Path, title: str, new_deck: bool = False) -> dict:
                 elif el["kind"] == "image":
                     oid = f"{slide_id}_f{i}"
                     reqs = [image_request(el, slide_id, oid, scale, urls[el["file"]])]
+                    if el.get("alt"):
+                        reqs.append({"updatePageElementAltText": {"objectId": oid, "description": el["alt"],
+                                                                  "title": {"math": "Formula", "icon": "Icon"}.get(el["role"], "Figure")}})
                 else:
                     oid = f"{slide_id}_t{i}"
                     placeholder = None

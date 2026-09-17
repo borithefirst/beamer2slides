@@ -1612,6 +1612,16 @@ class PageClassifier:
                     "spans": [s.id for s in line.spans],
                 })
 
+        # Pictures describe themselves with the text they show (alt text in Slides).
+        by_id = {s.id: s for s in spans}
+        for e in elements:
+            if e["kind"] == "image" and e["spans"]:
+                # formulas left to right (scripts follow their base); figure labels by rows
+                order = (lambda s: s.rect.x0) if e["role"] == "math" else (lambda s: (round(s.baseline / 4), s.rect.x0))
+                shown = sorted((by_id[i] for i in e["spans"] if i in by_id), key=order)
+                words = [math_text(s.font, s.text)[0] if s.info.family == "math" else s.text for s in shown]
+                e["alt"] = " ".join(w.strip() for w in words if w.strip() and "�" not in w)[:500]
+
         chars_total = sum(len(s["text"].strip()) for s in self.page["spans"])
         chars_native = sum(len(s["text"].strip()) for s in self.page["spans"] if s["id"] in text_spans)
         return {
