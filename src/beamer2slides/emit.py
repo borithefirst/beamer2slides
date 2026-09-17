@@ -804,7 +804,7 @@ def style_layout_placeholders(slides, pid: str, deck: dict, scale: float, fonts:
         font, size, color, family = body_runs.most_common(1)[0][0]
         body = {"font": font, "size": size, "color": color, "family": family, "bold": False, "italic": False}
     pres = execute(slides.presentations().get(presentationId=pid, fields=(
-        "layouts(objectId,pageElements(objectId,size,transform,shape/placeholder/type))")))
+        "layouts(objectId,pageElements(objectId,size,transform,shape(placeholder/type,text/textElements)))")))
     reqs = []
     for layout in pres.get("layouts", []):
         for pe in layout.get("pageElements", []):
@@ -835,14 +835,24 @@ def style_layout_placeholders(slides, pid: str, deck: dict, scale: float, fonts:
                 continue
             style, fields = fonts.text_style(run, scale)
             style["foregroundColor"] = rgb(run["color"])
-            reqs += [
+            styling = [
                 {"updateTextStyle": {"objectId": pe["objectId"], "textRange": {"type": "ALL"}, "style": style,
                                      "fields": ",".join(fields + ["foregroundColor"])}},
                 {"updateParagraphStyle": {"objectId": pe["objectId"], "textRange": {"type": "ALL"},
                                           "style": {"alignment": align}, "fields": "alignment"}},
             ]
-    if reqs:
-        execute(slides.presentations().batchUpdate(presentationId=pid, body={"requests": reqs}))
+            if not any(t.get("textRun", {}).get("content", "").strip()
+                       for t in pe["shape"].get("text", {}).get("textElements", [])):
+                # An empty placeholder can't be styled, and the API refuses to put text into
+                # layout placeholders: leave those as the theme has them.
+                styling = [r for r in styling if "updateParagraphStyle" in r]
+                continue
+            reqs += styling
+    for i in range(0, len(reqs), 200):
+        try:
+            execute(slides.presentations().batchUpdate(presentationId=pid, body={"requests": reqs[i:i + 200]}))
+        except HttpError as e:  # the deck's look for new slides is a nicety, never a reason to fail
+            print(f"warning: could not style the layouts ({api_error(e)})")
 
 
 def api_error(e: HttpError) -> str:
