@@ -1,0 +1,451 @@
+﻿% beamerthemegdg.sty -- the Google for Developers look of the public
+% "GDG24 - PRO - Speaker Presentation Template" (Google Slides), rebuilt for beamer.
+%
+% Compile with LuaLaTeX, 16:9:  \documentclass[aspectratio=169]{beamer} \usetheme{gdg}
+% Fonts: fonts/GoogleSansFlex-*.ttf and fonts/GoogleSansCode-*.ttf next to this file
+% (open source, SIL OFL; fonts/build_fonts.py makes them).
+%
+% Theme options: accent=blue|red|yellow|green (default blue), sectionpages (a chapter
+% slide at every \section).
+% Layout vocabulary: see README.md next to this file.
+%
+% Geometry: every dimension is given in \gpt, one point of the 720 x 405 pt Google Slides
+% page, so values can be read straight off the template (1 \gpt = 1/1.5875 bp).
+
+\NeedsTeXFormat{LaTeX2e}
+\ProvidesPackage{beamerthemegdg}[2026/09/17 Google for Developers (GDG 2024) look]
+
+\RequirePackage{iftex}
+\ifluatex\else
+  \PackageError{beamerthemegdg}{The gdg theme needs LuaLaTeX}{Compile with lualatex.}
+\fi
+\RequirePackage{fontspec}
+\RequirePackage{tikz}
+\RequirePackage{etoolbox}
+
+\newdimen\gpt
+\gpt=0.6299213bp
+
+% ---------------------------------------------------------------- options
+\def\gdg@accent{gblue}
+\newif\ifgdg@sectionpages
+\DeclareOptionBeamer{accent}{\def\gdg@accent{g#1}}
+\DeclareOptionBeamer{sectionpages}[]{\gdg@sectionpagestrue}
+\ProcessOptionsBeamer
+
+\mode<presentation>
+
+% ---------------------------------------------------------------- colours
+% Core, halftone and pastel colours from the template's colour slide.
+\definecolor{gblue}{HTML}{4285F4}
+\definecolor{gred}{HTML}{EA4335}
+\definecolor{gyellow}{HTML}{FBBC04}
+\definecolor{ggreen}{HTML}{34A853}
+\definecolor{gblue-halftone}{HTML}{57CAFF}
+\definecolor{gred-halftone}{HTML}{FF7DAF}
+\definecolor{gyellow-halftone}{HTML}{FFD427}
+\definecolor{ggreen-halftone}{HTML}{5CDB6D}
+\definecolor{gblue-pastel}{HTML}{C3ECF6}
+\definecolor{gred-pastel}{HTML}{F8D8D8}
+\definecolor{gyellow-pastel}{HTML}{FFE7A5}
+\definecolor{ggreen-pastel}{HTML}{CCF6C5}
+% darker versions for small coloured text on off-white
+\definecolor{gblue-text}{HTML}{4285F4}
+\definecolor{gred-text}{HTML}{D93025}
+\definecolor{gyellow-text}{HTML}{F29900}
+\definecolor{ggreen-text}{HTML}{34A853}
+\definecolor{goffwhite}{HTML}{F0F0F0}
+\definecolor{gblack}{HTML}{1E1E1E}
+\definecolor{gcodebg}{HTML}{202124}
+\definecolor{ggrey}{HTML}{5F6368}
+\colorlet{gaccent}{\gdg@accent}
+\colorlet{gaccent-text}{\gdg@accent-text}
+\colorlet{gaccent-halftone}{\gdg@accent-halftone}
+\colorlet{gaccent-pastel}{\gdg@accent-pastel}
+
+\setbeamercolor{normal text}{fg=gblack, bg=goffwhite}
+\setbeamercolor{background canvas}{bg=goffwhite}
+\setbeamercolor{structure}{fg=gblack}
+\setbeamercolor{frametitle}{fg=gblack}
+\setbeamercolor{title}{fg=black}
+\setbeamercolor{subtitle}{fg=black}
+\setbeamercolor{alerted text}{fg=gaccent-text}
+\setbeamercolor{example text}{fg=ggreen-text}
+\setbeamercolor{item}{fg=gblack}
+\setbeamercolor{subitem}{fg=gblack}
+\setbeamercolor{local structure}{fg=gblack}
+\setbeamercolor{block title}{fg=gblack}
+\setbeamercolor{block body}{fg=gblack}
+\setbeamercolor{footnote}{fg=ggrey}
+\setbeamercolor{footnote mark}{fg=ggrey}
+
+% ---------------------------------------------------------------- fonts
+% The .ttf files live in fonts/ beside this .sty; find them through kpathsea.
+\edef\gdg@fontdir{\directlua{
+  local f = kpse.find_file("beamerthemegdg.sty") or "./beamerthemegdg.sty"
+  f = f:gsub(string.char(92), "/")
+  tex.sprint((f:match("^(.*/)") or "./") .. "fonts/")}}
+
+\setsansfont{GoogleSansFlex}[
+  Path=\gdg@fontdir, Extension=.ttf,
+  UprightFont=*-Regular, ItalicFont=*-Italic, BoldFont=*-Bold, BoldItalicFont=*-BoldItalic,
+  FontFace={mb}{n}{*-Medium}, FontFace={mb}{it}{*-MediumItalic},
+  FontFace={sb}{n}{*-SemiBold}, FontFace={sb}{it}{*-SemiBoldItalic},
+  Ligatures=TeX]
+\setmonofont{GoogleSansCode}[
+  Path=\gdg@fontdir, Extension=.ttf,
+  UprightFont=*-Regular, ItalicFont=*-Italic, BoldFont=*-Bold,
+  FontFace={mb}{n}{*-Medium}]
+\renewcommand\familydefault{\sfdefault}
+\usefonttheme{professionalfonts}
+
+\newcommand\semibold{\fontseries{sb}\selectfont}
+\newcommand\medium{\fontseries{mb}\selectfont}
+\DeclareTextFontCommand{\textsemibold}{\semibold}
+\DeclareTextFontCommand{\textmedium}{\medium}
+
+% Slides puts consecutive lines of size z at 1.2 z (times the line spacing): keep that
+% pitch so converted text boxes line up with the PDF.
+\newcommand\gdg@size[2][1]{\fontsize{#2\gpt}{\dimexpr #1\dimexpr 1.2\dimexpr #2\gpt\relax\relax\relax}\selectfont}
+\newcommand\gdgbodysize{\gdg@size[1.15]{14}}
+% Public: \gsize[line spacing]{size in Slides pt}, e.g. {\gsize{24}\semibold Recommendation}.
+\newcommand\gsize{\gdg@size}
+
+\setbeamerfont{normal text}{size={\gdgbodysize}}
+\AtBeginDocument{\gdgbodysize}
+\setbeamerfont{frametitle}{size={\gdg@size{47}}, series=\semibold}
+\setbeamerfont{title}{size={\gdg@size{67}}, series=\mdseries}
+\setbeamerfont{subtitle}{size={\gdg@size{18}}, series=\semibold}
+\setbeamerfont{itemize/enumerate body}{size={\gdgbodysize}}
+\setbeamerfont{itemize/enumerate subbody}{size={\gdg@size[1.15]{12}}}
+\setbeamerfont{footnote}{size={\gdg@size{9}}}
+
+% ---------------------------------------------------------------- page geometry
+\setbeamersize{text margin left=48.4\gpt, text margin right=48.4\gpt}
+\setbeamertemplate{navigation symbols}{}
+\setbeamertemplate{headline}{}
+\setbeamertemplate{footline}{}
+% Top-aligned frames without beamer's extra top skip; the frame title template places
+% the first body line itself.
+\beamer@centeredfalse
+\define@key{beamerframe}{t}[true]{%
+  \beamer@frametopskip=0pt\relax
+  \beamer@framebottomskip=0pt plus 1fill\relax
+  \beamer@frametopskipautobreak=\beamer@frametopskip\relax
+  \beamer@framebottomskipautobreak=\beamer@framebottomskip\relax}
+
+% Frame variants: [dark] off-black background; [code] the dark code background.
+\newif\ifgdg@dark
+\newif\ifgdg@code
+\define@key{beamerframe}{dark}[true]{\gdg@darktrue}
+\define@key{beamerframe}{code}[true]{\gdg@codetrue}
+% [split]: the "Learnings" layout. A 24 pt heading and body copy in the left third
+% (222 pt wide); the right half is left for a \statcard, \smallstat or \sidecard.
+\newif\ifgdg@split
+\define@key{beamerframe}{split}[true]{\gdg@splittrue}
+\BeforeBeginEnvironment{frame}{\global\gdg@darkfalse\global\gdg@codefalse\global\gdg@splitfalse}
+\AtBeginEnvironment{beamer@framepauses}{%
+  \ifgdg@split \hsize=222\gpt \linewidth=\hsize \textwidth=\hsize \fi
+  \ifgdg@code\gdg@darkcolours\else\ifgdg@dark\gdg@darkcolours\fi\fi}
+\newcommand\gdg@splittitle{% (the frame title is typeset after the frame body's group)
+  \gdg@titlebaseline=80.2\gpt \gdg@bodybaseline=121.3\gpt \gdg@titlewidth=222\gpt
+  \setbeamerfont{frametitle}{size={\gdg@size{24}}}}
+\newcommand\gdg@darkcolours{%
+  \ifgdg@code
+    \setbeamercolor{background canvas}{bg=gcodebg}%
+  \else
+    \setbeamercolor{background canvas}{bg=gblack}%
+  \fi
+  \setbeamercolor{normal text}{fg=white, bg=gblack}%
+  \setbeamercolor{frametitle}{fg=white}%
+  \setbeamercolor{title}{fg=white}%
+  \setbeamercolor{item}{fg=white}%
+  \setbeamercolor{subitem}{fg=white}%
+  \setbeamercolor{local structure}{fg=white}%
+  \color{white}}
+\setbeamertemplate{background canvas}{%
+  \ifgdg@code\gdg@darkcolours\else\ifgdg@dark\gdg@darkcolours\fi\fi
+  \usebeamercolor[bg]{background canvas}%
+  \vrule width\paperwidth height\paperheight depth 0pt}
+
+% ---------------------------------------------------------------- frame title
+% Headline: Google Sans 600, 47 pt, first baseline 78.8 pt from the top (template text box
+% at y = 26.8 pt). The body starts with its first baseline at 164.8 pt.
+\newlength\gdg@titlebaseline  \gdg@titlebaseline=78.8\gpt
+\newlength\gdg@bodybaseline   \gdg@bodybaseline=164.8\gpt
+% Baselines do not depend on the letters: the title box starts with a zero-height rule
+% (so its first line sits one \baselineskip below it; \prevdepth must be reset, a rule
+% turns interline glue off). Beamer starts the frame body with an empty \vbox, so the
+% first body baseline sits one body \baselineskip (19.32) below the title box, after
+% beamer's \vskip0.25em (3.5).
+\newlength\gdg@frametop  \gdg@frametop=0pt  % page y of the frame's top (measured)
+\newlength\gdg@titlewidth  \gdg@titlewidth=480\gpt
+\setbeamertemplate{frametitle}{%
+  \ifgdg@split\gdg@splittitle\fi
+  \ifgdg@code\gdg@darkcolours\else\ifgdg@dark\gdg@darkcolours\fi\fi
+  \nointerlineskip
+  \vbox to \dimexpr\gdg@bodybaseline-\gdg@frametop-3.5\gpt-19.32\gpt\relax{%
+    \hrule height 0pt\relax\prevdepth=0pt\relax
+    \usebeamerfont{frametitle}\usebeamercolor[fg]{frametitle}%
+    \vskip\dimexpr\gdg@titlebaseline-\gdg@frametop-\baselineskip\relax
+    \hsize=\gdg@titlewidth
+    \raggedright\insertframetitle\par
+    \ifx\insertframesubtitle\@empty\else
+      {\gdg@size{20}\semibold\insertframesubtitle\par}%
+    \fi
+    \vfil}%
+  \nointerlineskip}
+\setbeamertemplate{frametitle continuation}{}
+
+% ---------------------------------------------------------------- text elements
+% Body copy as Slides sets it: ragged right, no hyphenation, 22 pt between paragraphs
+% (the template's spaceAbove), also inside minipages and columns.
+\newcommand\gdg@textsetup{%
+  \setlength\parskip{22\gpt}\setlength\parindent{0pt}\raggedright
+  \hyphenpenalty=10000 \exhyphenpenalty=10000 \uchyph=0 \frenchspacing}
+\AtBeginDocument{\gdg@textsetup}
+\def\@minipagerestore{\gdg@textsetup}
+
+\setbeamertemplate{itemize item}{\raise0.1em\hbox{\tikz\fill (0,0) circle (2.6\gpt);}}
+\setbeamertemplate{itemize subitem}{\raise0.3em\hbox{\tikz\fill (0,0) rectangle (6\gpt,1.5\gpt);}}
+\setbeamertemplate{itemize subsubitem}{\raise0.3em\hbox{\tikz\fill (0,0) rectangle (6\gpt,1.5\gpt);}}
+\setbeamertemplate{enumerate item}{\insertenumlabel.}
+\setbeamertemplate{enumerate subitem}{\insertenumlabel.\insertsubenumlabel}
+\setlength\leftmargini{18\gpt}
+\setlength\leftmarginii{18\gpt}
+\setlength\labelsep{8\gpt}
+\setbeamertemplate{itemize/enumerate body begin}{\setlength\itemsep{12\gpt}\setlength\parskip{0pt}}
+\setbeamertemplate{itemize/enumerate subbody begin}{\setlength\itemsep{6\gpt}}
+
+% Columns: [t] and [T] both align the columns' first baselines where a paragraph's first
+% baseline would be (the columns row is a paragraph, with \parskip above it).
+\def\gdg@colkey#1{\def\beamer@colmode{#1}\def\beamer@colalign{t}\def\beamer@colheadskip{}%
+  \ifx\beamer@colentrycode\gdg@colentrywrapped\else
+    \let\gdg@colentry\beamer@colentrycode
+    \let\beamer@colentrycode\gdg@colentrywrapped
+  \fi}
+\def\gdg@colentrywrapped{\noindent\gdg@colentry}
+\define@key{beamer@col}{t}[true]{\gdg@colkey{t}}
+\define@key{beamer@col}{T}[true]{\gdg@colkey{T}}
+\AfterEndEnvironment{columns}{\par}
+
+% Where a sub head starts, as spacing depends on it: 2 = start of a frame body (after
+% beamer's empty \vbox), 1 = start of a column (only an empty paragraph so far), 0 = else.
+\newcount\gdg@where
+\def\gdg@locate{\directlua{
+  local nest = tex.nest[tex.nest.ptr]
+  local n, where = nest.tail, 0
+  local skip = {[node.id("whatsit")] = true, [node.id("mark")] = true, [node.id("penalty")] = true,
+                [node.id("local_par")] = true, [node.id("dir")] = true}
+  local hlist = node.id("hlist")
+  while n and not (n == nest.head)
+        and (skip[n.id] or (n.id == hlist and n.width == 0 and n.list == nil)) do
+    n = n.prev
+  end
+  if n == nil or n == nest.head then
+    where = 1
+  elseif n.id == node.id("vlist") and n.height == 0 and n.depth == 0 and n.list == nil then
+    where = 2
+  end
+  tex.setcount("gdg@where", where)}}
+
+% Sub head (Google Sans 600, 20 pt) above body copy. Spacing follows Slides' model for a
+% 20 pt paragraph between 14 pt body paragraphs with 22 pt spaceAbove: 47.1 pt from a body
+% baseline down to the sub head, 40.2 pt down to the next body baseline. At the top of a
+% frame or a column the sub head takes the first body baseline.
+\newcommand\subhead[1]{%
+  \gdg@locate
+  \ifcase\gdg@where \par\vskip1.13\gpt\relax
+  \or\or \vskip-4.68\gpt\relax
+  \fi
+  {\gdg@size{20}\semibold #1\par}\vskip-1.13\gpt\relax}
+
+% Blocks: a sub head and body copy, no panel.
+\setbeamertemplate{blocks}[default]
+\setbeamertemplate{block begin}{\par\subhead{\insertblocktitle}}
+\setbeamertemplate{block end}{\par\vspace{11\gpt}}
+\setbeamertemplate{block alerted begin}{\par{\color{gaccent-text}\subhead{\insertblocktitle}}}
+\setbeamertemplate{block alerted end}{\par\vspace{11\gpt}}
+\setbeamertemplate{block example begin}{\par\subhead{\insertblocktitle}}
+\setbeamertemplate{block example end}{\par\vspace{11\gpt}}
+
+% ---------------------------------------------------------------- slide overlays
+% Things placed at slide coordinates are collected during the frame and drawn with the
+% background, so they never start a paragraph or move the text flow (and sit behind text).
+\def\gdg@overlays{}
+\newcommand\gdg@overlay[1]{\g@addto@macro\gdg@overlays{#1}\ignorespaces}
+\setbeamertemplate{background}{%
+  \begingroup\gdg@overlays\endgroup\global\let\gdg@overlays\@empty}
+
+% ---------------------------------------------------------------- shapes
+% All outlines are 2.25 pt black, like the template's shapes.
+\tikzset{
+  gdg outline/.style={draw=black, line width=2.25\gpt},
+  % Slides' default round rectangle: corner radius 1/6 of the shorter side.
+  gdg card/.style={gdg outline, rounded corners=#1},
+  gdg card/.default=16\gpt,
+}
+
+% \gdgarrow[colour]: the chunky outlined arrow of the chapter slides (132 x 83 pt).
+\newcommand\gdgarrow[1][gaccent]{%
+  \begin{tikzpicture}[x=1\gpt, y=-1\gpt, line join=round]
+    \fill[#1] (0,23) -- (70,23) -- (60,13) -- (75.5,-1.5) -- (116,36) -- (75.5,71.5) -- (60,57)
+      -- (70,47) -- (0,47) -- cycle;
+    \draw[gdg outline] (0,23) -- (70,23) -- (60,13) -- (75.5,-1.5) -- (116,36) -- (75.5,71.5)
+      -- (60,57) -- (70,47) -- (0,47) -- cycle;
+  \end{tikzpicture}}
+
+% \gdgdots[colour]: three outlined dots (37.7 pt each, 49 pt apart), top right of a slide.
+\newcommand\gdgdots[1][gaccent]{%
+  \begin{tikzpicture}[x=1\gpt, y=-1\gpt]
+    \foreach \i in {0,1,2}
+      \filldraw[fill=#1, gdg outline] (18.85+49*\i,18.85) circle (18.85);
+  \end{tikzpicture}}
+
+% \gdgpill[colour]: small outlined pill (88 x 25 pt).
+\newcommand\gdgpill[1][gaccent]{%
+  \tikz[x=1\gpt, y=-1\gpt]\filldraw[fill=#1, gdg card=4.2\gpt] (0,0) rectangle (88.2,25.3);}
+
+% Place something at template coordinates (x, y from the top left, in \gpt).
+\newcommand\gdgat[3]{%
+  \gdg@overlay{\begin{tikzpicture}[remember picture, overlay]
+    \node[anchor=north west, inner sep=0pt] at ([xshift=#1\gpt, yshift=-#2\gpt]current page.north west) {#3};
+  \end{tikzpicture}}}
+
+% ---------------------------------------------------------------- title and chapter slides
+\def\gdg@groupname{}
+\def\gdg@location{}
+\newcommand\groupname[1]{\def\gdg@groupname{#1}}
+\newcommand\location[1]{\def\gdg@location{#1}}
+
+% Chapter layout: group name and location top left, 67 pt title (use \textbf for the
+% emphasised word), 18 pt semibold subtitle, accent arrow bottom right.
+\newcommand\gdg@chapter[2]{%
+  \gdg@overlay{\usebeamercolor{title}\usebeamercolor{subtitle}%
+  \begin{tikzpicture}[remember picture, overlay, x=1\gpt, y=-1\gpt]
+    \coordinate (o) at (current page.north west);
+    \ifx\gdg@groupname\@empty\else
+      \node[anchor=base west, inner sep=0pt, font=\gdg@size{15}] at ([shift={(55.2,64.6)}]o)
+        {\gdg@groupname};
+    \fi
+    \ifx\gdg@location\@empty\else
+      \node[anchor=base west, inner sep=0pt, font=\gdg@size{10.5}\medium, text=gaccent-text]
+        at ([shift={(55.2,\ifx\gdg@groupname\@empty 64.6\else 77.9\fi)}]o) {\gdg@location};
+    \fi
+    \node[anchor=base west, inner sep=0pt, text width=560\gpt, align=left,
+          font={\usebeamerfont{title}}, text=title.fg]
+      at ([shift={(48.4,215.1)}]o) {#1};
+    \ifx\relax#2\relax\else
+      \node[anchor=base west, inner sep=0pt, text width=560\gpt, align=left,
+            font={\usebeamerfont{subtitle}}, text=subtitle.fg]
+        at ([shift={(48.4,350.4)}]o) {#2};
+    \fi
+    \node[anchor=north west, inner sep=0pt] at ([shift={(559,285.5)}]o) {\gdgarrow};
+  \end{tikzpicture}}}
+
+\setbeamertemplate{title page}{\gdg@chapter{\inserttitle}{\insertsubtitle}}
+\setbeamertemplate{section page}{\gdg@chapter{\insertsection}{}}
+\ifgdg@sectionpages
+  \AtBeginSection{\begin{frame}[plain,noframenumbering]\sectionpage\end{frame}}
+\fi
+
+% ---------------------------------------------------------------- layouts
+% \bignumber[fill]{97\%}{caption}: whole-slide statistic with a caption pill.
+\newcommand\bignumber[3][none]{%
+  \gdg@overlay{\begin{tikzpicture}[remember picture, overlay, x=1\gpt, y=-1\gpt]
+    \coordinate (o) at (current page.north west);
+    \node[anchor=base, inner sep=0pt, font=\gdg@size{180}\bfseries] at ([shift={(360,209.8)}]o) {#2};
+    \ifx\relax#1\relax\else
+    \fi
+    \filldraw[fill=#1, gdg card=15.07\gpt] ([shift={(164.3,247.5)}]o) rectangle ++(391.4,90.4);
+    \node[anchor=center, inner sep=0pt, text width=360\gpt, align=center,
+          font=\gdg@size{18}\semibold] at ([shift={(360,292.7)}]o) {#3};
+  \end{tikzpicture}}}
+
+% \statcard[fill]{97\%}{caption}: the big rounded card of the "Learnings" slides (335 x 297 pt),
+% placed at the right half of the slide.
+\newcommand\statcard[3][none]{%
+  \gdg@overlay{\begin{tikzpicture}[remember picture, overlay, x=1\gpt, y=-1\gpt]
+    \coordinate (o) at (current page.north west);
+    \filldraw[fill=#1, gdg card=49.6\gpt] ([shift={(347.9,53.7)}]o) rectangle ++(335,297.5);
+    \node[anchor=base, inner sep=0pt, font=\gdg@size{122}\bfseries] at ([shift={(515.4,202.5)}]o) {#2};
+    \node[anchor=north, inner sep=0pt, text width=222\gpt, align=center, font=\gdg@size{18}\bfseries]
+      at ([shift={(515.4,257.1)}]o) {#3};
+  \end{tikzpicture}}}
+
+% \smallstat[fill]{x}{y}{86\%}{caption}: a 217 x 158 pt stat card with its top left at (x, y).
+\newcommand\smallstat[5][none]{%
+  \gdg@overlay{\begin{tikzpicture}[remember picture, overlay, x=1\gpt, y=-1\gpt]
+    \coordinate (o) at ([shift={(#2,#3)}]current page.north west);
+    \filldraw[fill=#1, gdg card=26.3\gpt] (o) rectangle ++(216.7,158.1);
+    \node[anchor=base, inner sep=0pt, font=\gdg@size{72}\bfseries] at ([shift={(108.4,85.6)}]o) {#4};
+    \node[anchor=north, inner sep=0pt, text width=189\gpt, align=center, font=\ttfamily\gdg@size{14}\medium]
+      at ([shift={(108.4,95.8)}]o) {#5};
+  \end{tikzpicture}}}
+
+% \sidecard[fill]{heading}{body}: a tall card on the right half (335 x 332 pt) holding a
+% 24 pt heading and body copy.
+\newcommand\sidecard[3][none]{%
+  \gdg@overlay{\begin{tikzpicture}[remember picture, overlay, x=1\gpt, y=-1\gpt]
+    \coordinate (o) at (current page.north west);
+    \filldraw[fill=#1, gdg card=55.4\gpt] ([shift={(347.9,36.4)}]o) rectangle ++(335,332.1);
+    \node[anchor=base west, inner sep=0pt, text width=222\gpt, align=left]
+      at ([shift={(407.8,141.4)}]o) {{\gdg@size{24}\semibold #2\par}#3};
+  \end{tikzpicture}}}
+
+% \quoteslide[colour][closing colour]{quote}{author}: centred 52 pt quote between big
+% quote marks (94 x 64 pt).
+\newcommand\gdg@quotemark[2]{% colour, rotation
+  \begin{tikzpicture}[x=1\gpt, y=-1\gpt, rotate=#2]
+    \foreach \dx in {0,50} {
+      \filldraw[fill=#1, gdg outline, line join=round]
+        (\dx+2,45) .. controls (\dx+0,20) and (\dx+14,5) .. (\dx+36,0)
+        -- (\dx+40,9) .. controls (\dx+28,14) and (\dx+22,22) .. (\dx+24,30) -- cycle;
+      \filldraw[fill=#1, gdg outline] (\dx+22,43) circle (21);
+    }
+  \end{tikzpicture}}
+\NewDocumentCommand\quoteslide{O{gaccent} O{#1} m m}{\gdg@quoteslide{#1}{#2}{#3}{#4}}
+\newcommand\gdg@quoteslide[4]{%
+  \gdg@overlay{\begin{tikzpicture}[remember picture, overlay, x=1\gpt, y=-1\gpt]
+    \coordinate (o) at (current page.north west);
+    \node[anchor=north west, inner sep=0pt] at ([shift={(23.2,23)}]o) {\gdg@quotemark{#1}{0}};
+    \node[anchor=north west, inner sep=0pt] at ([shift={(588.4,297.7)}]o) {\gdg@quotemark{#2}{180}};
+    \node[anchor=north, inner sep=0pt, text width=470\gpt, align=center, font=\gdg@size{52}]
+      at ([shift={(360,113.1)}]o) {#3};
+    \node[anchor=base, inner sep=0pt, font=\gdg@size{20}\semibold] at ([shift={(360,332.2)}]o) {#4};
+  \end{tikzpicture}}}
+
+% \numbers{\keyfigure{1 billion}{text}}{...}...: six key figures in a 3 x 2 grid.
+\newcommand\gdg@number[3]{% x, y of the first baseline, figure + text
+  \node[anchor=base west, inner sep=0pt, text width=170\gpt, align=left] at ([shift={(#1,#2)}]o) {#3};}
+\newcommand\numbers[6]{%
+  \gdg@overlay{\begin{tikzpicture}[remember picture, overlay, x=1\gpt, y=-1\gpt]
+    \coordinate (o) at (current page.north west);
+    \gdg@number{48.4}{110.6}{#1}\gdg@number{265.2}{110.6}{#2}\gdg@number{483.8}{110.6}{#3}
+    \gdg@number{48.4}{245.1}{#4}\gdg@number{265.2}{245.1}{#5}\gdg@number{483.8}{245.1}{#6}
+  \end{tikzpicture}}}
+% Figure (16 pt semibold) and text (14 pt, line spacing 1.0) 27.8 pt apart, as in the template.
+\newcommand\keyfigure[2]{{\gdg@size{16}\semibold #1\par}\vskip-11\gpt{\gdg@size{14}#2\par}}
+
+% Code frames: \begin{frame}[fragile,code] \begin{code}[language=Java] ... \end{code}
+% Google Sans Code 14.5 pt, 21.75 pt line pitch, with the template's "dark" syntax colours.
+\RequirePackage{listings}
+\definecolor{gcode-punct}{HTML}{A3A3A3}
+\definecolor{gcode-comment}{HTML}{AAAAAA}
+\definecolor{gcode-keyword}{HTML}{7BAAF7}
+\definecolor{gcode-type}{HTML}{FF8A65}
+\definecolor{gcode-string}{HTML}{57BB8A}
+\definecolor{gcode-number}{HTML}{F4B400}
+\lstdefinestyle{gdg}{
+  basicstyle=\gdg@size[1.25]{14.5}\ttfamily\color{white},
+  columns=fullflexible, keepspaces=true, upquote=true, showstringspaces=false,
+  keywordstyle=\color{gcode-keyword}, commentstyle=\color{gcode-comment},
+  stringstyle=\color{gcode-string}, emphstyle=\color{gcode-type},
+  xleftmargin=-8\gpt, aboveskip=0pt, belowskip=0pt, tabsize=4}
+\lstnewenvironment{code}[1][]{\lstset{style=gdg,#1}}{}
+% At the top of an untitled frame, the first code line sits at the template's 77 pt.
+\BeforeBeginEnvironment{code}{\gdg@locate\ifnum\gdg@where=2 \vskip\gdg@codeskip\kern0pt\fi}
+\newlength\gdg@codeskip \gdg@codeskip=77.3\gpt
+
+\mode<all>
+\endinput

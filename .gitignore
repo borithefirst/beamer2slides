@@ -8,3 +8,4 @@ out/
 credentials*.json
 client_secret*.json
 token*.json
+themes/google/fonts/src/

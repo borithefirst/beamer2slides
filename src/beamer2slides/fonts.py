@@ -65,6 +65,8 @@ GOOGLE_FAMILIES = {
     "CrimsonText": "Crimson Text", "CrimsonPro": "Crimson Pro", "LibreBaskerville": "Libre Baskerville",
     "Mulish": "Mulish", "Rubik": "Rubik", "Manrope": "Manrope", "DejaVuSans": None, "Alegreya": "Alegreya",
     "AlegreyaSans": "Alegreya Sans", "Cormorant": "Cormorant", "Arvo": "Arvo", "Quicksand": "Quicksand",
+    # Open-source Google Sans (themes/google); Slides has both families.
+    "GoogleSansFlex": "Google Sans Flex", "GoogleSansCode": "Google Sans Code",
     # Metric-compatible stand-ins for classic PostScript fonts used via helvet/mathptmx/courier
     # or TeX Gyre, and for Office fonts; all available in Slides.
     "Helvetica": "Arial", "NimbusSanL": "Arial", "NimbusSans": "Arial", "TeXGyreHeros": "Arial",

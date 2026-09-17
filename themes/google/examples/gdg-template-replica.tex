@@ -1,0 +1,124 @@
+% !engine = lualatex
+% Replicas of sample slides of the public "GDG24 - PRO - Speaker Presentation Template",
+% built with the gdg theme. tools/theme_compare.py overlays each page with Google's
+% thumbnail of the template slide listed in the "% template slide N" comment.
+\documentclass[aspectratio=169]{beamer}
+\usetheme[accent=green]{gdg}
+
+\title{Chapter \textbf{Title} Goes Here.}
+\subtitle{This is where the subtitle can be displayed.}
+\groupname{Google Developer Group}
+\location{Editable Location}
+
+\begin{document}
+
+% template slide 6
+\begin{frame}[plain]
+  \titlepage
+\end{frame}
+
+% template slide 23
+\begin{frame}{This is a Headline.}
+  \begin{minipage}[t]{443\gpt}
+  This is body copy. Bringing developers together in-person and online. Stay in the know
+  about upcoming events, catch up on content you missed, and connect with Google experts.
+  This is body copy. Bringing developers together in-person and online. Stay in the know
+  about upcoming events, catch up on content you missed, and connect with Google experts.
+  This is body copy. This is body copy.
+
+  Stay in the know about upcoming events, catch up on content you missed, and connect with
+  Google experts. This is body copy. This is body copy. This is body copy.
+  \end{minipage}
+\end{frame}
+
+% template slide 35
+\begin{frame}{This is a Headline.}
+  \gdgat{537.4}{43.9}{\gdgdots[gred]}
+  \gdgat{41.2}{342.6}{\gdgpill[gyellow-pastel]}
+  \begin{columns}[T]
+    \begin{column}{192\gpt}
+      \subhead{This is a Sub Head.}
+      This is body copy. Connect with fellow developers and startups in your area, hear from
+      industry experts, share your skills, and learn new ones.
+    \end{column}
+    \begin{column}{196\gpt}
+      \subhead{This is a Sub Head.}
+      This is body copy. Bringing developers together in-person and online. Stay in the know
+      about upcoming events.
+    \end{column}
+    \begin{column}{192\gpt}
+      \subhead{This is a Sub Head.}
+      This is body copy. Connect with fellow developers and startups in your area, hear from
+      industry experts, share your skills, and learn new ones.
+    \end{column}
+  \end{columns}
+\end{frame}
+
+% template slide 39
+\begin{frame}
+  \numbers
+    {\keyfigure{1 billion}{Connect with fellow developers and startups in your area, hear from industry experts, share your skills, and learn new ones.}}
+    {\keyfigure{2 billion}{Get inspired to use Google technologies. Search for open source projects, learn from other developers, and submit your latest projects.}}
+    {\keyfigure{100,000}{Bringing developers together in-person and online. Stay in the know about upcoming events.}}
+    {\keyfigure{20 million}{Bringing developers together in-person and online. Stay in the know about upcoming events.}}
+    {\keyfigure{2,000}{Connect with fellow developers and startups in your area, hear from industry experts, share your skills, and learn new ones.}}
+    {\keyfigure{10}{Get inspired to use Google technologies. Search for open source projects, learn from other developers, and submit your latest projects.}}
+\end{frame}
+
+% template slide 42
+\begin{frame}
+  \bignumber[gblue]{97\%}{Statistic caption this is body copy and it goes a little like this}
+\end{frame}
+
+% template slide 47
+\begin{frame}[split]{Learnings}
+  This is body copy. Bringing developers together in-person and online. Stay in the know
+  about upcoming events, catch up on content you missed, and connect with Google experts.
+
+  Stay in the know about upcoming events, catch up on content you missed, and connect with
+  Google experts.
+  \statcard{97\%}{Statistic caption this is body copy and it goes a little like this}
+\end{frame}
+
+% template slide 53
+\begin{frame}[split]{Learnings}
+  This is body copy. Bringing developers together in-person and online. Stay in the know
+  about upcoming events, catch up on content you missed, and connect with Google experts.
+  \smallstat[ggreen-pastel]{452.2}{44.4}{14\%}{Statistic caption\\Statistic caption}
+  \smallstat[gblue]{367.1}{202.5}{86\%}{Statistic caption\\Statistic caption}
+\end{frame}
+
+% template slide 58
+\begin{frame}[split]{Learning}
+  This is body copy. Bringing developers together in-person and online. Stay in the know
+  about upcoming events, catch up on content you missed, and connect with Google experts.
+  \sidecard[ggreen]{Recommendation}{%
+    This is body copy. Bringing developers together in-person and online. Stay in the know
+    about upcoming events, catch up on content you missed, and connect with Google experts.}
+\end{frame}
+
+% template slide 67
+\begin{frame}
+  \quoteslide[gred][gblue-pastel]{Good design\\ is as \textbf{little} design\\ as possible.}{- Dieter Rams}
+\end{frame}
+
+% template slide 78
+\begin{frame}[fragile,code]
+\begin{code}[language=Java, emph={Artwork,Builder,Intent}]
+code_slides.txt
+
+protected void onTryUpdate(int reason) throws RetryException {
+    // Do some awesome stuff
+    int foo = 15;
+    publishArtwork(new Artwork.Builder()
+            .title(photo.name)
+            .imageUri(Uri.parse(photo.image_url))
+            .viewIntent(new Intent(Intent.ACTION_VIEW,
+                    Uri.parse("http://500px.com/photo/" + photo.id)))
+            .build());
+    scheduleUpdate(System.currentTimeMillis() + ROTATE_TIME_MILLIS);
+}
+\end{code}
+\end{frame}
+
+\end{document}
