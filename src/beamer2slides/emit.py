@@ -938,7 +938,7 @@ def existing_presentation(slides, out: Path, page_w: float, page_h: float) -> di
     return pres if abs(got - page_h / page_w) < 0.003 else None
 
 
-def emit(deck: dict, out: Path, title: str, new_deck: bool = False) -> dict:
+def emit(deck: dict, out: Path, title: str, new_deck: bool = False, keep_assets: bool = False) -> dict:
     slides, drive = slides_service(), drive_service()
     page_w, page_h = deck["slides"][0]["size"]
     scale = SLIDE_W / page_w
@@ -1159,6 +1159,13 @@ def emit(deck: dict, out: Path, title: str, new_deck: bool = False) -> dict:
                 execute(local.drive.permissions().delete(fileId=file_id, permissionId=perm_id))
             except Exception as e:  # keep revoking the others
                 print(f"warning: could not revoke public link on {file_id}: {e}")
+            if not keep_assets:
+                # Slides keeps its own copy of every inserted image: the upload was only a
+                # transport. Into the trash (recoverable), not deleted.
+                try:
+                    execute(local.drive.files().update(fileId=file_id, body={"trashed": True}))
+                except Exception as e:
+                    print(f"warning: could not move upload {file_id} to the trash: {e}")
 
         with ThreadPoolExecutor(max_workers=UPLOAD_THREADS) as pool:
             list(pool.map(revoke, uploaded))
