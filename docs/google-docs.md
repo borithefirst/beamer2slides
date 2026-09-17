@@ -68,10 +68,83 @@ columns. Selectors: attribute selectors, `@media`, and two-level class descendan
   `'Courier New', monospace` → **`Courier`**. Emit exactly one family name, unquoted,
   no fallback. Single names survive verbatim, even `Comic Sans MS`.
 - `font-size` is rounded to integer pt (7.5pt → 7pt).
-- Table column widths are discarded and recomputed as equal columns (`colgroup`
-  `width:300pt` came back `234pt`); `border-style:dashed` → solid, `2px` → `1.5pt`.
+- Table column widths: the CSS `width:` on a `<col>` is discarded and the columns come
+  back equal — but the **HTML `width=` attribute works** (`<col width="120">` → 90 pt,
+  px × 0.75), so widths are reachable, just not the way you would first spell them.
+  `border-style:dashed` → solid, `2px` → `1.5pt`.
 - HTML `id` attributes are not preserved; Docs mints its own `id.xxxxxxxx` bookmarks.
   **An `id` is therefore not a usable anchor.**
+
+## How far the dialect reaches into Docs' own model
+
+The two sections above graded the HTML *export*, which only shows what survives a second
+lossy conversion. `tools/probe_docs_features.py` instead reads the imported document
+back with `documents.get`, so it reports what Docs actually built. That turns up
+capabilities the export had hidden — several of them things you would not guess.
+
+**Reachable from HTML, beyond the obvious subset:**
+
+| Docs feature | the HTML spelling that reaches it |
+|---|---|
+| paragraph alignment | `text-align`, and also legacy `<center>` and `align="right"` |
+| character colour / size / family | `style=`, and also legacy `<font color size face>` (`size="6"` → 24 pt) |
+| right-to-left paragraphs | `dir="rtl"` → `paragraphStyle.direction: RIGHT_TO_LEFT` |
+| **pinned table header row** | `<thead>` → `tableRowStyle.tableHeader: true` |
+| **table column widths** | the `width=` *attribute* on `<col>`/`<td>` (px × 0.75 → pt) |
+| **cell vertical alignment** | `vertical-align` on a `<td>` → `contentAlignment: MIDDLE`/`BOTTOM` |
+| image alt text | `alt=` → `embeddedObject.description` — the only per-image handle |
+| **internal cross-references** | `<a id="x"></a>` inside a heading plus `<a href="#x">` → a real `link.bookmarkId`. Docs mints its own id, but the *relationship* survives |
+| **page background colour** | `<body style="background-color:…">` → `documentStyle.background`. The only document-level property HTML can set |
+| a link over a whole block | `<a>` wrapping a `<p>` styles the paragraph's runs |
+
+**Page setup is not reachable from HTML at all.** `@page { size: A4 landscape; margin:
+2cm }` does nothing; neither does an explicit `size: 842pt 595pt`; and neither does the
+Word dialect (`@page WordSection1` with `div.WordSection1 { page: WordSection1 }` and
+`mso-*` properties) — which was the most promising lead, since Google's importer must eat
+Word-generated HTML. All three leave Letter 612 × 792 with 72 pt margins.
+
+**Traps — these fail quietly and are the ones that will cost debugging time:**
+- `text-decoration: underline line-through` applies **only the underline**. Use one
+  declaration, or nest `<u><s>`.
+- `text-decoration: underline wavy #cc0000` applies **nothing at all** — the extra
+  keywords kill the whole declaration, so you lose even the plain underline.
+- `font-weight: 600` becomes plain `bold: true`, with the weight recorded as 400. Docs
+  supports real weights on `weightedFontFamily`, but only through `batchUpdate`.
+- `background-color` on a `<p>` becomes a **character highlight on its runs**, not
+  `paragraphStyle.shading`.
+- `<header>`, `<footer>`, `<figure>`, `<details>`, `<section>`, `<aside>` all unwrap —
+  and **consecutive ones merge into a single paragraph**. Content is kept, block
+  boundaries are not. That is the sharpest hazard for a canonical file.
+- `<li value="7">` is ignored, although `<ol start="7">` works. `<ol reversed>`,
+  `list-style-image` and CSS counters are all ignored.
+- `class="title"` / `class="subtitle"` do **not** reach the TITLE/SUBTITLE named styles.
+
+**Dropped with no Docs concept behind them:** inline `<svg>` and SVG data URIs (only
+PNG/JPEG/GIF import), `<iframe>`, MathML and `<ruby>` (both flattened to their text),
+`<big>`/`<tt>`, `letter-spacing`, `word-spacing`, `text-transform`, `writing-mode`,
+arbitrary `vertical-align` offsets, `<abbr>`/`<time>`/`<data>` attributes, link
+`target`/`rel`/`title`, `lang`, and `<title>` as the document's name.
+
+## The phase-two surface: what `batchUpdate` adds
+
+Everything HTML cannot express, tried one request at a time against the imported
+document. **All of these work:**
+
+`updateDocumentStyle` (page size, margins, background) · `updateTextStyle` with
+`smallCaps` and a real `weightedFontFamily` weight · `updateParagraphStyle` with
+`shading`, `borderLeft`, `keepWithNext`, `keepLinesTogether`, `avoidWidowAndOrphan` ·
+`createHeader` · `createFooter` · `createFootnote` · `insertPageBreak` ·
+`insertSectionBreak` · `createParagraphBullets` with `BULLET_CHECKBOX`.
+
+**Refused — not in the public v1 discovery document:** `insertDate`, `insertPerson`,
+`insertRichLink`, `insertTableOfContents`. So smart chips (date, people, file) and a
+table of contents can be *read* from a document a human made, but not *created*. Treat
+them as read-only content to preserve, never to generate.
+
+That is a clean division of labour, and it settles the emit design: import the canonical
+HTML for structure and the bulk of the styling, then one `batchUpdate` for page setup,
+headers/footers, footnotes, page and section breaks, checklists, small caps and
+paragraph decoration — and the named-range anchors, which go in the same batch.
 
 ## The round trip does not close on its own
 
@@ -220,5 +293,20 @@ documents in the probe. Too lossy to be canonical here.
 ```
 
 Uploads the stress file, exports it in all eight formats, re-imports the export twice to
-test stability, and deletes the Drive files again (`--keep` to inspect them). Outputs in
-`out/docs-probe/`.
+test stability, and deletes the Drive files again (`--keep` to inspect them).
+
+```
+.venv\Scripts\python.exe tools\probe_docs_features.py
+```
+
+Imports the exotica file and reads it back with `documents.get`, printing what Docs
+built per case; then tries every page-setup dialect in its own document, and every
+`batchUpdate` request HTML cannot express, one at a time.
+
+```
+.venv\Scripts\python.exe tools\probe_docs_api.py
+.venv\Scripts\python.exe tools\probe_docs_ui.py create   # then edit by hand, then `read`
+```
+
+The anchor probes: named-range behaviour through the API, and under a human editor.
+All four write to `out/docs-probe/`.
