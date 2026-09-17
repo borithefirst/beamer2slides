@@ -480,3 +480,198 @@ def test_replace_file_leaves_no_temporary_behind_when_the_write_fails(tmp_path):
 def _sha1(path: Path) -> str:
     import hashlib
     return hashlib.sha1(path.read_bytes()).hexdigest()
+
+
+# ---------------------------------------------------------------- live: really killing a sync
+#
+# One case per injection point. Each converts v1 into out/sync-crash/<point>, makes the same five
+# human edits in the deck, syncs to `mixed` with B2S_FAIL_AT=!<point> (os._exit, so no `finally`,
+# no report, no cleanup - a kill -9), and then syncs again without the hook. What must hold after
+# that second sync: every deck edit is still there, the source's changes arrived, no duplicates or
+# orphans, the slides nobody edited look like the control case's (an uninterrupted sync of the same
+# source), and a third sync writes nothing.
+
+CASES = {
+    "plan": "planned, the staging deck made, nothing written",
+    "journal": "the pending marker is stored, still nothing written",
+    "measure": "the scratch slides for hole measurement are in the deck",
+    "content": "in the middle of the content: one batch is in, the rest is not",
+    "content:2": "two content batches in",
+    "order": "content written, z-order half applied",
+    "overrides": "content and order written, the deck's own edits going back on",
+    "base:save": "everything written, the new base not stored anywhere",
+    "base:drive": "the new base is on disk, Drive still has the old one",
+    "cleanup": "the new base is stored, the replaced objects not deleted yet",
+}
+MUST_DIE = {"plan", "journal", "content", "base:save", "base:drive"}  # points every sync reaches
+CRASH_PARALLEL = 3
+
+
+def crash_edits(live):
+    """The five edits a person made before the sync that dies. They cover what a killed write can
+    lose: a word inside a bullet the source also rewrites, a moved element on a slide the source
+    redraws (its override has to be re-applied), a run style, speaker notes, and an object of their
+    own that nothing may sweep."""
+    E = live.E
+    return [E("replace_word", slide=live.WHY, text="People polish the converted deck by hand",
+              old="polish", new="refine"),
+            E("move", slide=live.CONV, target={"text": "Conflicts disappear once"}, dx=0, dy=40),
+            E("bold", slide=live.CONCL, word="survive", context="Deck edits survive every sync"),
+            E("set_notes", slide=live.ALGO, text="Walk through the steps slowly."),
+            E("add_shape", slide=live.VERSIONS, shape_type="STAR_5", box=[620, 300, 50, 50], color="#ffc000")]
+
+
+class CrashRun:
+    """One case folder under out/sync-crash: convert, edit, sync (with or without a kill), check."""
+
+    def __init__(self, name: str, live):
+        self.live, self.name = live, name
+        self.out = CRASH_OUT / name.replace(":", "-")
+        self.out.mkdir(parents=True, exist_ok=True)
+        self.log = open(CRASH_OUT / f"{name.replace(':', '-')}.log", "w", encoding="utf-8")
+        self.problems: list[str] = []
+
+    def cli(self, *args, env=None, check=True):
+        self.log.write(f"\n$ beamer2slides {' '.join(map(str, args))}\n")
+        self.log.flush()
+        import subprocess
+        import sys
+        done = subprocess.run([sys.executable, "-m", "beamer2slides", *map(str, args)],
+                              env={**self.live.ENV, **(env or {})}, cwd=self.live.ROOT,
+                              stdout=self.log, stderr=subprocess.STDOUT)
+        if check and done.returncode:
+            raise RuntimeError(f"{self.name}: beamer2slides {args[0]} failed, see {self.log.name}")
+        return done
+
+    def convert(self, pdf):
+        from deck_edits import LiveDeck
+        self.cli("convert", pdf, "--out", self.out)
+        self.deck = LiveDeck(json.loads((self.out / "emit.json").read_text(encoding="utf-8"))["presentationId"])
+
+    def edit(self, specs):
+        from deck_edits import verified
+        self.deck.read()
+        out = []
+        for spec in specs:
+            exp, bad = verified(self.deck, spec)
+            if bad:
+                raise RuntimeError(f"{self.name}: the edit itself failed: {bad}")
+            out.append(exp)
+        return out
+
+    def sync(self, pdf, env=None, check=True):
+        return self.cli("sync", pdf, "--deck", self.out, env=env, check=check)
+
+    def revision(self) -> str:
+        from beamer2slides.gslides import execute
+        return execute(self.deck.api.presentations().get(presentationId=self.deck.pid,
+                                                         fields="revisionId"))["revisionId"]
+
+    def base(self) -> dict | None:
+        path = self.out / "sync" / "base.json"
+        return json.loads(path.read_text(encoding="utf-8")) if path.exists() else None
+
+
+CRASH_OUT: Path
+
+
+def run_case(point: str, live, control) -> list[str]:
+    """Convert, edit, kill a sync at `point`, sync again, and say what is wrong with the result."""
+    import sync_check as sc
+    run = CrashRun(point, live)
+    try:
+        run.convert(live.build("v1"))
+        exps = run.edit(crash_edits(live))
+        before = run.revision()
+        pdf = live.build("mixed")
+        died = run.sync(pdf, env={"B2S_FAIL_AT": f"!{point}"}, check=False)
+        if died.returncode == 0:
+            if point in MUST_DIE:
+                return [f"the sync never reached {point}: nothing was killed"]
+            pytest.skip(f"this sync never reaches {point} ({CASES[point]})")
+        if point == "plan" and run.revision() != before:
+            run.problems.append("the sync wrote to the deck before it had planned anything")
+        # (`journal` is later than measure_places, whose scratch slides do change the revision)
+        if point == "journal" and not (run.base() or {}).get("pending"):
+            run.problems.append("the killed sync left no pending marker in the base")
+
+        run.sync(pdf)  # the recovery run: this one must reach the same deck as the control
+        model = run.deck.read()
+        flags = live.sync_build.VARIANTS["mixed"]
+        checks = [c for e in exps for c in e["checks"]] + live.sync_build.checks(flags) \
+            + [{"check": "slides", "order": live.sync_build.titles(flags)}]
+        run.problems += [f"after being killed at {point}: {p}" for p in sc.check_all(model, checks)]
+        base = run.base() or {}
+        run.problems += sc.integrity(model, base_ids=sc.ids_in(base) if base else None)
+        for left in ("pending", "cleanup"):
+            if base.get(left):
+                run.problems.append(f"the recovery sync left `{left}` in the base: {base[left]!r:.120}")
+
+        if control is not None:  # the same end state as an uninterrupted sync of the same source
+            edited = {s.id for e in exps for sel in e["slides"] for s in model.find(sel)}
+            titles = [t for t in live.sync_build.titles(flags)
+                      if len(model.find(t)) == 1 and model.one(t).id not in edited and len(control.find(t)) == 1]
+            run.problems += [f"unlike an uninterrupted sync: {p}" for p in sc.compare_fresh(model, control, titles)]
+
+        revision = run.revision()
+        run.sync(pdf)
+        if run.revision() != revision:
+            run.problems.append("a third sync still changed the deck: the crash left it unconverged")
+        return run.problems
+    finally:
+        run.log.close()
+
+
+@pytest.fixture(scope="module")
+def crashes(request):
+    """point -> problems (or the exception / skip), every selected case run once, 3 at a time."""
+    global CRASH_OUT
+    import sys
+    from concurrent.futures import ThreadPoolExecutor
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    import test_sync_live as live
+    from test_slides_alignment import MAIN, google_unavailable
+
+    CRASH_OUT = Path(os.environ.get("B2S_SYNC_CRASH_OUT", MAIN / "out" / "sync-crash"))
+    for reason in (live.cli_missing("sync"), live.pdflatex_missing(), google_unavailable()):
+        if reason:
+            pytest.skip(reason)
+    points = [p for p in CASES if any(getattr(i, "callspec", None) and i.callspec.params.get("point") == p
+                                      for i in request.session.items)]
+    CRASH_OUT.mkdir(parents=True, exist_ok=True)
+
+    control = CrashRun("control", live)  # an uninterrupted sync of exactly the same case
+    try:
+        control.convert(live.build("v1"))
+        control.edit(crash_edits(live))
+        control.sync(live.build("mixed"))
+        import sync_check as sc
+        model = sc.read(control.deck.pid)
+    finally:
+        control.log.close()
+
+    def one(point):
+        try:
+            return run_case(point, live, model)
+        except pytest.skip.Exception as e:
+            return e
+        except Exception as e:  # reported by that point's test
+            return e
+
+    with ThreadPoolExecutor(max_workers=CRASH_PARALLEL) as pool:
+        return dict(zip(points, pool.map(one, points)))
+
+
+@pytest.mark.sync
+@pytest.mark.parametrize("point", list(CASES))
+def test_a_sync_killed_at(point, crashes):
+    """Killed with os._exit at this point, the next sync of the same source must reach the deck an
+    uninterrupted sync would have, with every deck edit still in it."""
+    result = crashes[point]
+    if isinstance(result, pytest.skip.Exception):
+        pytest.skip(str(result))
+    if isinstance(result, Exception):
+        raise result
+    if result:
+        pytest.fail(f"killed at {point} ({CASES[point]}), {CRASH_OUT / point.replace(':', '-')}:\n  "
+                    + "\n  ".join(result), pytrace=False)

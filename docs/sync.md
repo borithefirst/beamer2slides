@@ -84,6 +84,8 @@ The base lists slides in the source's order, not the deck's, so a deck reorder s
 the app (`drive.file` scope) whose id is kept in the presentation file's `appProperties.b2sBase`;
 Drive is authoritative (anyone with the deck can sync), the local copy is a cache and fallback.
 The base is replaced only when a sync wrote something or adopted converged deck fields (`generation` + 1).
+Two crash-recovery keys live beside the slides: `pending` (a run has started writing) and `cleanup`
+(objects a finished run has still to delete) - see "If a sync or a pull dies".
 
 ## Deck edits detected (per object, per field)
 geometry (box within 0.05 pt, scale within 1e-3), text content, text style, shape fill/outline,
@@ -159,6 +161,78 @@ deck; leftovers `b2s_mNNN` of an interrupted run are deleted at the next start).
   (same revisionId) and leaves the base alone.
 - After writing, the new base = ours IR + read-back of the objects as sync created them (before
   deck overrides are re-applied); units kept from the deck carry their old base.
+
+## If a sync or a pull dies
+The rule: **either the write completes, or it can be redone**; never a deck where a person's edit
+is gone and no base knows about it. A sync can be killed at any point (`kill -9`, a lost network, an
+expired token, a batch Google refuses) and the next sync of the same source reaches the deck an
+uninterrupted one would have. What makes that true:
+
+- **Nothing is deleted before its replacement exists.** The phases are, in order: *recovery* (only
+  objects the deck holds twice, see below), *content* (creates and in-place updates), *order*
+  (z-order), *overrides* (the deck's own edits back onto recreated objects), *store the new base*
+  (locally, then Drive), and only then *cleanup*: `deleteObject` for the objects and slides this
+  sync replaced. A run that dies before cleanup leaves the old objects in the deck, so the next
+  sync plans exactly the same merge from the same base and writes it again; the duplicates it left
+  are swept. The deletions are listed in the base as `cleanup` **before** they are sent, so a death
+  between the base and the deletions is finished by the next sync. If the base could not be stored
+  in Drive, the deletions are skipped altogether: a machine reading the stale Drive base must never
+  find its objects gone.
+- **Batches are cut at slide boundaries** (`sync.batches`, `BREAK` marks): a death between two
+  batches leaves whole slides, never half an element. Only a single slide larger than 400 requests
+  is split.
+- **A pending marker is stored before the first write** (`Sync.mark_pending`): the base keeps its
+  generation (it still describes the deck) and gains `pending` = this run's generation and id token,
+  the revision it planned against, the source's sha1, the object ids it is about to create, the
+  slides it is about to add, the staging deck's file id, and the read-back of every placeholder it
+  is about to rewrite **in place**. The last one matters: rewriting a title placeholder is the only
+  destructive content write, and `pending.in_place` lets the next sync put the person's text back
+  into what it compares against (`restore_in_place`), so their edit is merged again instead of
+  quietly adopted. The marker is written with the base, so a run that dies leaves a valid base of
+  the old generation plus a note of what it started; a run that finishes removes it.
+- **Leftovers are swept, and only leftovers** (`plan_recovery`, run before anything is planned).
+  An object is deleted only if the base's `cleanup`/`pending` names it, or its id was minted by a
+  sync of a *later* generation than the base's (only our own code makes those ids) *and* the base's
+  own objects for that element are all still alive - i.e. it is a second copy of something the deck
+  already has. A person's object can never match: their ids are Slides' own or the converter's.
+  Each run re-rolls its id token, so a second run never collides with the dead one's ids.
+- **An element whose objects an interrupted run already deleted is healed**, not reported as
+  deleted: its replacement is still on the slide, tagged `b2s:<slide>/<element>`, and the base takes
+  it over. If that run converted a different PDF, the element's hashes are set to `interrupted` so
+  the source is written over it once more.
+- **The base is validated before use** (`snapshot.base_problem`, `read_local`, `base_matches`):
+  a truncated or unreadable file, a schema from a newer beamer2slides, or a base of another
+  presentation is refused with a reason in the report's warnings instead of being merged against.
+  Drive stays authoritative except when the local copy has the higher generation (the last sync's
+  Drive upload failed). `save_local` writes `base.json.writing` and renames, so it is never half a
+  file. If the base describes none of the deck's slides at all, sync stops and says so rather than
+  reporting every element as deleted.
+- **`pull --apply`** writes each file through a temporary and `os.replace`, and the `.bak` backup the
+  same way, so every file is whole (the old one or the new one) whatever the moment of the kill. A
+  source file whose sha1 changed since the pull read it (the person edited while the compile loop
+  ran) is never overwritten: the pull's version lands beside it as `<name>.b2s-new` and is listed in
+  `edits.json` as `not_applied`.
+- What a killed sync **can** leave behind: scratch slides (`b2s_mNNN`, swept at the next start),
+  its staging deck if it died before the pending marker was stored (harmless, it is only a source of
+  picture URLs; one named in the marker is deleted by the next sync), and duplicate objects until
+  the next sync. No sync-report is written.
+
+**Why the next run re-plans instead of resuming.** The pending marker could hold the planned
+requests and let a second run send the rest of them, but the deck is the truth and it may have moved
+on: the person can edit between the two runs, and the requests were planned against a revision that
+no longer exists. Re-planning from the deck as it is now is the only thing that keeps "deck edits
+win" true, and it is cheap (a sync is seconds). So the marker records only what is needed to *undo*
+a half-done run - which objects were its own, and which texts it overwrote. The cost of dying before
+the new base is stored is therefore work, not data: everything that run created is swept as a
+duplicate and written again from the old base, and the deck ends up where it would have been.
+
+Fault injection for the tests (`faults.py`): `B2S_FAIL_AT=<point>[:<n>]`, comma-separated, `!point`
+to leave the process at once with `os._exit` (no `finally`, no cleanup). Points: `plan`, `journal`,
+`measure`, `content`, `order`, `overrides`, `base:save`, `base:drive`, `cleanup`, and `pull:apply`.
+Unset, `fail_at` is one `os.environ.get` and a return. `tests/test_sync_crash.py` has the offline
+tests (write order, base validation, recovery, pull's atomic apply) and, under the `sync` marker,
+one case per point that really kills a sync of a real deck and checks with `tools/sync_check.py`
+that the deck edits are all still there and the deck converges.
 
 ## Reports
 `sync-report.json` (top level: `applied`, `overrides`, `conflicts` with field, base, ours, theirs

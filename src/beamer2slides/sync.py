@@ -556,8 +556,8 @@ class Sync:
             hook = os.environ.pop("B2S_SYNC_BEFORE_WRITE", None)  # (tests: someone edits the deck now)
             if hook:
                 subprocess.run(hook, shell=True, check=False)
-            staging = self.stage(work)
-            scratch = []
+            self.staging = staging = self.stage(work)  # noted in the pending marker: a run that
+            scratch = []                                # dies leaves it for the next one to delete
             try:
                 if self.revision() != theirs["revisionId"]:
                     continue  # edited while we planned: plan again
@@ -579,6 +579,7 @@ class Sync:
                     self.delete_scratch(scratch)
                 if staging:  # (its pictures are only needed until the live deck has them)
                     execute(self.drive.files().delete(fileId=staging))
+                    self.staging = None
                     self.urls.clear()
             rev = self.finish(work, mplan, theirs, pres, rev)
             result["revisionId"] = rev
@@ -594,6 +595,12 @@ class Sync:
         read = snapshot.read_presentation(pres)
         rec = plan_recovery(self.base, read, [s["key"] for s in self.ours["slides"]])
         self.recovery = rec
+        leftover = (self.base.get("pending") or {}).get("staging")
+        if leftover and not self.dry_run:  # the staging deck of a run that died: our own file
+            try:
+                execute(self.drive.files().delete(fileId=leftover))
+            except (HttpError, OSError):
+                pass  # already deleted, or gone from Drive: nothing to clean up
         if rec["heal"]:
             same = (self.base.get("pending") or {}).get("source", {}).get("sha1") == \
                 snapshot.source_info(self.ours["source"]).get("sha1")
@@ -639,7 +646,7 @@ class Sync:
             "generation": self.base.get("generation", 0) + 1, "token": self.tok,
             "revisionId": theirs.get("revisionId"), "started": time.strftime("%Y-%m-%dT%H:%M:%S"),
             "source": snapshot.source_info(self.ours["source"]), "objects": objects, "slides": slides,
-            "in_place": self.in_place_readback}
+            "in_place": self.in_place_readback, "staging": getattr(self, "staging", None)}
         why = snapshot.store_base(self.base, self.out, self.drive, label="pending")
         if why:
             self.warnings.append(f"could not note the started sync in Drive ({why}); noted locally only")

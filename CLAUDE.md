@@ -284,6 +284,14 @@ base, `merge.py` pure planning (offline tests `tests/test_sync.py`), `sync.py` w
 `requiredRevisionId` (re-plans on a mismatch), pictures through a deleted-after-use staging deck.
 Pitfalls: `createImage` letterboxes (sync stretches it back); staging contentUrls die with the
 staging file; `createSlide` doesn't instantiate every layout placeholder.
+A sync killed at any point loses nothing (docs/sync.md, "If a sync or a pull dies"): deletions are
+the last phase and are listed in the base first, batches are cut at slide boundaries, a `pending`
+marker in the base records what a run is about to create (and the placeholder texts it overwrites),
+the next sync sweeps the duplicates and heals what an older version deleted too early, bases are
+validated (truncated/foreign/newer/stale-in-Drive), and `pull --apply` replaces whole files through
+a temporary, keeping a `.bak` and never overwriting a source edited since the pull started.
+Fault injection for the tests: `B2S_FAIL_AT=<point>[:n]` / `!point` (`faults.py`, inert when unset),
+tests in `tests/test_sync_crash.py` (offline, plus one live kill per point under the `sync` marker).
 
 Alignment on Google's renderer (`tools/alignment.py out/<deck>`, after `fidelity`): reads the
 Slides element boxes with `presentations.get` (cached in slides_elements.json) and compares each
