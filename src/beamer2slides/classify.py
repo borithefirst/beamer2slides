@@ -1546,6 +1546,81 @@ class PageClassifier:
                         "radius": max(p["corners"].values(), default=0.0), "drawing": p["id"], "spans": []})
         return out
 
+    def plain_tables(self, lines: list[Line]) -> list[dict]:
+        """Tabulars without rules, used to align short texts in columns: three or more rows at a
+        regular pitch whose cells, separated by wide gaps, keep to the same columns. They
+        become borderless native tables; their lines are taken out of the text flow."""
+        candidates = [l for l in lines if l.reason is None and not l.bullet and l.tab is None
+                      and l.rect.y0 > 0.15 * self.H and all(s.horizontal for s in l.spans)]
+        rows: list[list[Line]] = []
+        for l in sorted(candidates, key=lambda l: l.baseline):
+            if rows and abs(rows[-1][0].baseline - l.baseline) <= 0.3 * l.size:
+                rows[-1].append(l)
+            else:
+                rows.append([l])
+
+        def cells(row: list[Line]) -> list[list[Span]]:
+            spans = sorted((s for l in row for s in l.spans), key=lambda s: s.rect.x0)
+            out: list[list[Span]] = []
+            for s in spans:
+                if out and s.rect.x0 - out[-1][-1].rect.x1 < 0.9 * s.size:
+                    out[-1].append(s)
+                else:
+                    out.append([s])
+            return out
+
+        def extent(chunk):
+            return chunk[0].rect.x0, chunk[-1].rect.x1
+
+        split = [(row, cells(row)) for row in rows]
+        tables, i = [], 0
+        while i < len(split):
+            j = i
+            k = len(split[i][1])
+            size = split[i][0][0].size
+            ok = lambda r: len(r[1]) == k >= 2 and all(len("".join(s.text for s in c).strip()) <= 30 for c in r[1]) \
+                and abs(r[0][0].size - size) <= 0.5
+            while j + 1 < len(split) and ok(split[i]) and ok(split[j + 1]) and \
+                    split[j + 1][0][0].baseline - split[j][0][0].baseline <= 2.0 * size:
+                j += 1
+            group = split[i:j + 1]
+            i = j + 1
+            if len(group) < 3:
+                continue
+            pitches = [b[0][0].baseline - a[0][0].baseline for a, b in zip(group, group[1:])]
+            if max(pitches) > 1.25 * min(pitches):
+                continue
+            columns = [[min(extent(r[1][c])[0] for r in group), max(extent(r[1][c])[1] for r in group)] for c in range(k)]
+            if any(a[1] + 0.5 * size > b[0] for a, b in zip(columns, columns[1:])):
+                continue  # cells of neighbouring columns overlap: not a grid
+            col_info = []
+            for c, (x0, x1) in enumerate(columns):
+                chunks = [r[1][c] for r in group]
+                left = all(abs(extent(ch)[0] - x0) <= 1 for ch in chunks)
+                right = all(abs(extent(ch)[1] - x1) <= 1 for ch in chunks)
+                digits = sum(ch_.isdigit() for ch in chunks for s in ch for ch_ in s.text)
+                letters = sum(ch_.isalpha() for ch in chunks for s in ch for ch_ in s.text)
+                align = "right" if right and (not left or digits > letters) else "left" if left else "center"
+                col_info.append({"x0": round(x0, 2), "x1": round(x1, 2), "align": align})
+            pad = 0.55 * size  # \tabcolsep
+            bounds = [columns[0][0] - pad] + [(a[1] + b[0]) / 2 for a, b in zip(columns, columns[1:])] + [columns[-1][1] + pad]
+            spans = [s for r in group for ch in r[1] for s in ch]
+            rect = union_all(s.rect for s in spans)
+            baselines = [r[0][0].baseline for r in group]
+            for r in group:
+                for l in r[0]:
+                    l.reason = "table"
+            tables.append({
+                "id": f"p{self.page['index']}pt{len(tables)}", "kind": "table", "role": "table",
+                "bbox": rect.expand(1.0).as_list(), "frame": [bounds[0], rect.y0, bounds[-1], rect.y1],
+                "size": round(size, 2), "row_baselines": [round(b, 2) for b in baselines],
+                "row_heights": [round(p, 2) for p in pitches + [pitches[-1]]], "columns": col_info,
+                "bounds": [round(b, 2) for b in bounds],
+                "cells": [[span_runs(ch) for ch in r[1]] for r in group],
+                "merges": [], "rules": [], "borders": [], "spans": [s.id for s in spans],
+            })
+        return tables
+
     def text_element(self, box: list[Paragraph], element_id: str) -> dict:
         rect = union_all([p.rect for p in box] + [Rect.of(p.bullet["bbox"]) for p in box if p.bullet])
         code = all(is_mono(p.spans) for p in box)
@@ -1580,6 +1655,7 @@ class PageClassifier:
         self.analyse_graphics()
         lines = self.build_lines(spans)
         self.assign_reasons(lines)
+        plain_tables = self.plain_tables(lines)
         body_lines = [l for l in lines if l.reason is None and abs(l.size - self.body) < 1]
         self.text_margin = min((l.rect.x0 for l in body_lines), default=0.08 * self.W)
         paragraphs = self.build_paragraphs(lines)
@@ -1599,7 +1675,7 @@ class PageClassifier:
                                   "anchor": anchor})  # grouped with this text element
 
         text_spans = {sid for e in elements for sid in e["spans"]}
-        elements = self.figures(lines, elements) + self.icons(elements) + hole_pictures + elements  # pictures below text
+        elements = self.figures(lines, elements) + self.icons(elements) + hole_pictures + plain_tables + elements  # pictures below text
         text_spans |= {sid for e in elements if e["kind"] == "table" for sid in e["spans"]}
         elements = self.math_pictures(lines, paragraphs, elements) + elements
         text_spans |= {sid for e in elements if e["kind"] == "text" for sid in e["spans"]}  # equation numbers

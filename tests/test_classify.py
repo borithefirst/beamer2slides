@@ -206,6 +206,16 @@ def test_grid_table_with_merged_cells():
     assert {(b["row"], b["col"]) for b in table["borders"] if b["position"] == "TOP"} == {(1, 1), (1, 2)}  # \cline{2-3}
 
 
+def test_tabular_without_rules_is_a_borderless_table():
+    slide = deck("15_plain_tabular")["slides"][0]
+    tables = [e for e in slide["elements"] if e["kind"] == "table"]
+    assert len(tables) == 1 and not tables[0]["rules"] and not tables[0]["borders"]
+    cells = [[paragraph_text({"runs": c}) for c in row] for row in tables[0]["cells"]]
+    assert cells[0] == ["Name", "Role", "Hours"] and cells[-1] == ["Carol", "Designer", "40"]
+    assert [c["align"] for c in tables[0]["columns"]] == ["left", "center", "right"]
+    assert [paragraph_text(p) for e in texts(slide) for p in e["paragraphs"]][-1] == "Some text after the table."
+
+
 def test_image_bullets_numbered_on_balls():
     slide = deck("04_theme_blocks")["slides"][2]
     numbered = [p for e in texts(slide) for p in e["paragraphs"] if p["bullet"] and p["bullet"]["kind"] == "image"]
