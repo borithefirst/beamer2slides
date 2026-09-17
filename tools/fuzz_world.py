@@ -13,6 +13,7 @@ Element IR is the converter's (classify) shape, cut down to what identity and me
 """
 
 import copy
+import json
 import random
 from pathlib import Path
 
@@ -132,18 +133,33 @@ def readback(kind, box, text=None, image=None, parent=None, title=None, z=0, tab
     return out
 
 
+def style_hashes(el) -> tuple[str, str]:
+    """What Google's read-back shows of an element's styling (`snapshot` hashes it): the runs'
+    attributes and the shape's fill, so a restyle in the source really changes the object."""
+    runs = [[r.get("color"), r.get("bold"), r.get("italic"), r.get("size"), r.get("font"), r.get("underline")]
+            for p in el.get("paragraphs") or [] for r in p.get("runs") or []]
+    text = identity.sha1(json.dumps(runs))[:8] if runs else "s0"
+    shape = identity.sha1(json.dumps([el.get("fill"), el.get("shape")]))[:8] if el["kind"] == "shape" else "h0"
+    return text, shape
+
+
+def styled(rb: dict, el: dict) -> dict:
+    rb["text_style_hash"], rb["shape_style_hash"] = style_hashes(el)
+    return rb
+
+
 def object_readback(el, oid, out: Path, parent=None, z=0):
     box = [v * SCALE for v in el["bbox"]]
     if el["kind"] == "image":
         data = (out / el["file"]).read_bytes()
         image = {"contentHash": identity.sha1(data)[:16], "sourceUrl": None, "signature": picture_signature(data)}
-        return readback("image", box, image=image, parent=parent, z=z)
+        return styled(readback("image", box, image=image, parent=parent, z=z), el)
     if el["kind"] == "table":
         rows = el["cells"]
-        return readback("table", box, text=table_text(el), parent=parent, z=z, table=[len(rows), len(rows[0])])
+        return styled(readback("table", box, text=table_text(el), parent=parent, z=z, table=[len(rows), len(rows[0])]), el)
     if el["kind"] == "shape":
-        return readback("shape", box, text="", parent=parent, z=z)
-    return readback("shape", box, text=merge.predicted_text(el), parent=parent, z=z)
+        return styled(readback("shape", box, text="", parent=parent, z=z), el)
+    return styled(readback("shape", box, text=merge.predicted_text(el), parent=parent, z=z), el)
 
 
 def entries(doc, out: Path, keys, all_ekeys, all_fps):
@@ -271,6 +287,14 @@ def new_object(skey, o_el, base_el, live, overrides, tok):
     else:
         rb = readback("shape", box, text=text, parent=parent)
     rb["title"] = snapshot.tag(skey, o_el["key"])
+    styled(rb, ir)
+    live_rb = live["objects"].get(main) if main else None
+    if live_rb and (overrides or {}).get("text_style"):  # the deck's styling, re-applied
+        rb["text_style_hash"] = live_rb.get("text_style_hash")
+        rb["text_styles"] = copy.deepcopy(live_rb.get("text_styles"))
+    if live_rb and (overrides or {}).get("shape_style"):
+        rb["shape_style_hash"] = live_rb.get("shape_style_hash")
+        rb["shape_style"] = copy.deepcopy(live_rb.get("shape_style"))
     return oid, rb
 
 
@@ -350,6 +374,104 @@ def _update_slide(base, ours, live, p, tok):
     if p.get("notes") is not None:
         live["notes"] = p["notes"]
     _drop_lonely_groups(live)
+
+
+def rebase(base, ours, after, mplan, tok="2zz") -> dict:
+    """The base a correct sync records for the next one: ours IR plus the read-back of the objects
+    as it left them (docs/sync.md, "After writing"). Units kept from the deck carry their old base,
+    so a chain of syncs never forgets what the person's version was."""
+    now = {s["objectId"]: s for s in after["slides"]}
+    entries: dict[str, dict] = {}
+    sids = {}
+    for p in mplan["slides"]:
+        if p["action"] == "delete":
+            continue
+        if p["action"] in ("keep_removed", "gone"):
+            entries[p.get("objectId") or f"gone:{p['key']}"] = base["slides"][p["base"]]
+            continue
+        o = ours["slides"][p["ours"]]
+        sid = f"b2s_{h6(p['key'])}_{tok}" if p["action"] == "create" else p["objectId"]
+        sids[id(p)] = sid
+        read = now.get(sid) or {"objects": {}, "order": [], "notes": "", "background": None}
+        entry = {k: v for k, v in o.items() if k != "elements"}
+        elements = []
+        if p["action"] == "create":
+            for el in o["elements"]:
+                elements.append(_rebased_element(el, [f"b2s_{h6(o['key'])}_{h6(el['key'])}_{tok}"], read))
+            entry.update(objectId=sid, layoutObjectId="L", background_readback=read.get("background"),
+                         notes_readback=read.get("notes") or "", groups=[], order=list(read.get("order") or []))
+        else:
+            b = base["slides"][p["base"]]
+            bunits, ounits = merge.units(b["elements"]), merge.units(o["elements"])
+            index = {e["key"]: e for e in o["elements"]}
+            for u in p["units"]:
+                action = u["action"]
+                if action in ("create", "recreate"):
+                    for mk in u["ours_members"]:
+                        elements.append(_rebased_element(index[mk], [f"b2s_{h6(o['key'])}_{h6(mk)}_{tok}"], read))
+                elif action == "adopt_object":
+                    for mk in u["ours_members"]:
+                        elements.append(_rebased_element(index[mk], [u["objectId"]], read))
+                elif action in ("move", "adopt"):
+                    # the deck's own objects stay: ours IR with their read-back (moved, or the
+                    # fields the deck already showed)
+                    fields = {"text": ("text",), "geometry": ("box", "transform", "size"),
+                              "image": ("image", "box", "transform", "size")}
+                    for m in ounits[u["key"]]:
+                        old = next((x for x in bunits[u["key"]] if x["key"] == m["key"]), None)
+                        if old is None:
+                            continue
+                        rb = copy.deepcopy(old["readback"])
+                        for oid in rb:
+                            live_obj = read["objects"].get(oid)
+                            if not live_obj:
+                                continue
+                            if action == "move":
+                                rb[oid].update({k: live_obj[k] for k in ("box", "transform") if k in live_obj})
+                            elif oid == old.get("main"):
+                                for f in u.get("adopt", []):
+                                    rb[oid].update({k: live_obj[k] for k in fields.get(f, ()) if k in live_obj})
+                        elements.append({**m, "objects": old["objects"], "main": old["main"], "readback": rb})
+                elif action == "keep":
+                    elements += bunits.get(u["key"], [])
+                # delete / none: gone
+            entry.update(objectId=sid, layoutObjectId=b.get("layoutObjectId"), groups=list(b.get("groups", [])),
+                         order=list(read.get("order") or b.get("order", [])))
+            if p.get("background"):
+                entry["background_readback"] = read.get("background")
+            else:
+                entry["background_readback"] = b.get("background_readback")
+                if b.get("background") != o.get("background"):
+                    entry["background"] = b.get("background")  # the deck's background stays a conflict
+            if p.get("notes") is not None:
+                entry["notes_readback"] = o.get("notes") or ""
+            else:
+                entry["notes_readback"] = b.get("notes_readback", "")
+                if (b.get("notes") or "") != (o.get("notes") or ""):
+                    entry["notes"] = b.get("notes")
+        entry["elements"] = elements
+        entries[sid] = entry
+    order = [sids[id(p)] for p in sorted((p for p in mplan["slides"] if p["action"] in ("update", "create")),
+                                         key=lambda p: p["ours"])]
+    for k, sid in enumerate([s["objectId"] for s in after["slides"]]):
+        if sid in order:
+            continue
+        prev = next((s["objectId"] for s in reversed(after["slides"][:k]) if s["objectId"] in order), None)
+        order.insert(order.index(prev) + 1 if prev else 0, sid)
+    slides = [entries.pop(sid) for sid in order if sid in entries] + list(entries.values())
+    return {**base, "generation": base.get("generation", 0) + 1, "revisionId": after.get("revisionId"), "slides": slides}
+
+
+def _rebased_element(el: dict, oids: list[str], read: dict) -> dict:
+    objects = read.get("objects") or {}
+    mine = [oid for oid in oids if oid in objects]
+    group = objects.get(mine[0], {}).get("parent_group") if mine else None
+    # like build_base: the unit's anchor owns the converter group its anchored pictures sit in;
+    # a group the person drew around converter objects stays the person's.
+    if not el.get("anchor") and group in objects and group.startswith("b2s_") and group.endswith("_g"):
+        mine = mine + [group]
+    return {**el, "objects": mine, "main": mine[0] if mine else None,
+            "readback": {oid: copy.deepcopy(objects[oid]) for oid in mine}}
 
 
 def _drop_lonely_groups(live):

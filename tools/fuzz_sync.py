@@ -9,8 +9,11 @@ Two modes, the same oracle:
             runs (tests/test_sync_fuzz.py).
   live      a real converted deck: random edits from tools/deck_edits.py, a random source variant
             (tests/decks/sync/build.py), the real `beamer2slides sync`, then the oracle plus
-            tools/sync_check.py's integrity checks. Chains of variants are supported
-            (v1 -> edits -> sync v2 -> edits -> sync v3 ...).
+            tools/sync_check.py's integrity checks.
+
+Both modes chain (`--chain N`: edits -> sync -> edits -> sync ...). Offline, each sync starts from
+the base the previous one wrote (`fuzz_world.rebase`), so a sync undoing what the last one merged,
+or a base that forgot the person's version, shows up as a finding in the next step.
 
 A failing round writes everything needed to reproduce it into its folder (seed, the edits, the
 variant, the deck url, both read-backs, the base, the report) and is then *shrunk*: the same round
@@ -142,7 +145,13 @@ def src_delete_element(rng, doc):
 
 def src_add_slide(rng, doc):
     i = rng.randrange(len(doc["slides"]) + 1)
+    # a label and element ids nothing else uses: two frames with one \label is a broken source,
+    # and two slides with one key would make the whole identity model meaningless
+    labels = {s.get("label") for s in doc["slides"]}
+    ids = {e["id"] for s in doc["slides"] for e in s["elements"]}
     page = len(doc["slides"])
+    while f"new{page}" in labels or f"p{page}t0" in ids:
+        page += 1
     title = "New source frame " + rng.choice(W.WORDS)
     slide = {"page": page, "label": f"new{page}", "title": title, "notes": "", "bg": "#ffffff",
              "elements": [W.text_ir(f"p{page}t0", title, (20, 20, 200, 34), role="title"),
@@ -450,8 +459,48 @@ DECK_OPS = {f.__name__[5:]: f for f in (deck_reword, deck_append, deck_delete_pa
 
 # ---------------------------------------------------------------- offline rounds
 
-def offline_round(seed: int, source_ops=None, deck_ops=None, work: Path | None = None) -> dict:
-    """One offline round. `source_ops` / `deck_ops`: op names (default: drawn from the seed)."""
+def _sync_step(seed: int, step: int, doc: dict, base: dict, live: dict, tmp: Path,
+               deck_ops: list[str], source_ops: list[str], rebase: bool) -> dict:
+    """One edit + sync: the person edits the deck, the author changes the source, merge plans, the
+    reference applier writes the plan and the oracle judges what the person is left with."""
+    applied_deck = []
+    for k, name in enumerate(deck_ops):
+        done = DECK_OPS[name](random.Random(seed * 1009 + 101 * step + k), base, live)
+        applied_deck.append(f"{name}: {done}" if done else f"{name}: (not applicable)")
+    for s in live["slides"]:
+        W._drop_lonely_groups(s)  # (Slides drops a group an edit left with one child)
+    doc2 = copy.deepcopy(doc)
+    applied_src = []
+    for k, name in enumerate(source_ops):
+        fn = SOURCE_OPS[name]
+        r = random.Random(seed * 2003 + 101 * step + k)
+        done = fn(r, doc2, tmp) if name == "repaint" else fn(r, doc2)
+        applied_src.append(f"{name}: {done}" if done else f"{name}: (not applicable)")
+    ours = W.build_ours(doc2, base, tmp)
+    mplan = merge.plan_merge(base, ours, live)
+    tok = f"{step}zz"  # a token per run, like sync's
+    after = W.apply_plan(base, ours, live, mplan, tok)
+    report = mplan["report"]
+    findings = loss_oracle.check(base, live, after, report, ours)
+    return {"seed": seed, "step": step, "source_ops": list(source_ops), "deck_ops": list(deck_ops),
+            "source": applied_src, "deck": applied_deck, "findings": findings,
+            "failures": loss_oracle.failures(findings), "doc": doc2,
+            "state": {"base": base, "before": live, "after": after, "report": report, "ours": ours,
+                      "next_base": W.rebase(base, ours, after, mplan, tok) if rebase else None}}
+
+
+def _draw(rng: random.Random, deck_ops, source_ops):
+    if deck_ops is None:
+        deck_ops = [rng.choice(sorted(DECK_OPS)) for _ in range(rng.randint(MIN_EDITS, MAX_EDITS))]
+    if source_ops is None:
+        source_ops = [rng.choice(sorted(SOURCE_OPS)) for _ in range(rng.randint(1, 4))]
+    return list(deck_ops), list(source_ops)
+
+
+def offline_chain(seed: int, chain: int = 1, ops=None, work: Path | None = None) -> dict:
+    """`chain` edit+sync steps on one deck. Each sync starts from the base the previous one wrote
+    (`fuzz_world.rebase`), which is where a sync undoing what the last one merged would show.
+    `ops`: per step `{"deck": [...], "source": [...]}` (default: drawn from the seed)."""
     rng = random.Random(seed)
     tmp = work or Path(tempfile.mkdtemp(prefix="b2s-fuzz-"))
     tmp.mkdir(parents=True, exist_ok=True)
@@ -459,35 +508,25 @@ def offline_round(seed: int, source_ops=None, deck_ops=None, work: Path | None =
         doc = W.make_doc(rng, tmp)
         base = W.build_base(doc, tmp)
         live = W.live_of(base)
-        if deck_ops is None:
-            deck_ops = [rng.choice(sorted(DECK_OPS)) for _ in range(rng.randint(MIN_EDITS, MAX_EDITS))]
-        if source_ops is None:
-            source_ops = [rng.choice(sorted(SOURCE_OPS)) for _ in range(rng.randint(1, 4))]
-        applied_deck = []
-        for k, name in enumerate(deck_ops):
-            done = DECK_OPS[name](random.Random(seed * 1009 + k), base, live)
-            applied_deck.append(f"{name}: {done}" if done else f"{name}: (not applicable)")
-        for s in live["slides"]:
-            W._drop_lonely_groups(s)  # (Slides drops a group an edit left with one child)
-        doc2 = copy.deepcopy(doc)
-        applied_src = []
-        for k, name in enumerate(source_ops):
-            fn = SOURCE_OPS[name]
-            r = random.Random(seed * 2003 + k)
-            done = fn(r, doc2, tmp) if name == "repaint" else fn(r, doc2)
-            applied_src.append(f"{name}: {done}" if done else f"{name}: (not applicable)")
-        ours = W.build_ours(doc2, base, tmp)
-        mplan = merge.plan_merge(base, ours, live)
-        after = W.apply_plan(base, ours, live, mplan)
-        report = mplan["report"]
-        findings = loss_oracle.check(base, live, after, report, ours)
-        return {"seed": seed, "source_ops": list(source_ops), "deck_ops": list(deck_ops),
-                "source": applied_src, "deck": applied_deck, "findings": findings,
-                "failures": loss_oracle.failures(findings),
-                "state": {"base": base, "before": live, "after": after, "report": report, "ours": ours}}
+        steps = []
+        for step in range(chain):
+            want = (ops[step] if ops and step < len(ops) else None) or {}
+            deck_ops, source_ops = _draw(rng, want.get("deck"), want.get("source"))
+            record = _sync_step(seed, step, doc, base, live, tmp, deck_ops, source_ops, rebase=step + 1 < chain)
+            steps.append(record)
+            doc, live = record.pop("doc"), record["state"]["after"]
+            base = record["state"]["next_base"] or base
+        return {"seed": seed, "chain": chain, "steps": steps,
+                "ops": [{"deck": s["deck_ops"], "source": s["source_ops"]} for s in steps],
+                "failures": [f for s in steps for f in s["failures"]]}
     finally:
         if work is None:
             shutil.rmtree(tmp, ignore_errors=True)
+
+
+def offline_round(seed: int, source_ops=None, deck_ops=None, work: Path | None = None) -> dict:
+    """One offline round. `source_ops` / `deck_ops`: op names (default: drawn from the seed)."""
+    return offline_chain(seed, 1, [{"deck": deck_ops, "source": source_ops}], work)["steps"][0]
 
 
 def shrink_offline(result: dict, limit: int = 200) -> dict:
@@ -511,17 +550,48 @@ def shrink_offline(result: dict, limit: int = 200) -> dict:
     return best
 
 
-def run_offline(rounds: int, seed0: int, shrink: bool, quiet: bool = False) -> list[dict]:
+def shrink_chain(result: dict, limit: int = 300) -> dict:
+    """Drop edits one at a time, in the first failing step and the ones before it."""
+    failing = next(i for i, s in enumerate(result["steps"]) if s["failures"])
+    best = {**result, "ops": result["ops"][:failing + 1], "chain": failing + 1}
+    tries = 0
+    for step in range(failing, -1, -1):
+        for field in ("deck", "source"):
+            changed = True
+            while changed and tries < limit:
+                changed = False
+                for i in range(len(best["ops"][step][field])):
+                    ops = [dict(o) for o in best["ops"]]
+                    ops[step][field] = ops[step][field][:i] + ops[step][field][i + 1:]
+                    if step == failing and field == "deck" and not ops[step][field]:
+                        continue
+                    tries += 1
+                    candidate = offline_chain(best["seed"], best["chain"], ops)
+                    if candidate["steps"][-1]["failures"]:
+                        best, changed = candidate, True
+                        break
+    return best
+
+
+def describe_chain(result: dict) -> str:
+    lines = []
+    for s in result["steps"]:
+        lines.append(f"  step {s['step']}: deck:   " + "; ".join(s["deck"]))
+        lines.append(f"          source: " + "; ".join(s["source"]))
+        if s["failures"]:
+            lines.append(loss_oracle.describe(s["failures"]))
+    return "\n".join(lines)
+
+
+def run_offline(rounds: int, seed0: int, shrink: bool, quiet: bool = False, chain: int = 1) -> list[dict]:
     bad = []
     for seed in range(seed0, seed0 + rounds):
-        result = offline_round(seed)
+        result = offline_chain(seed, chain)
         if result["failures"]:
-            bad.append(shrink_offline(result) if shrink else result)
+            bad.append(shrink_chain(result) if shrink else result)
             if not quiet:
                 print(f"seed {seed}: {len(result['failures'])} finding(s)")
-                print(loss_oracle.describe(bad[-1]["failures"]))
-                print("  deck:   " + "; ".join(bad[-1]["deck"]))
-                print("  source: " + "; ".join(bad[-1]["source"]))
+                print(describe_chain(bad[-1]))
         elif not quiet and (seed - seed0) % 50 == 49:
             print(f"  ... {seed - seed0 + 1} rounds")
     return bad
@@ -533,6 +603,12 @@ MIKTEX = Path(os.environ.get("LOCALAPPDATA", "")) / "Programs" / "MiKTeX" / "mik
 ENV = {**os.environ, "PYTHONPATH": str(ROOT / "src"),
        "PATH": os.pathsep.join([os.environ.get("PATH", "")] + ([str(MIKTEX)] if MIKTEX.exists() else []))}
 PDFIUM = threading.Lock()
+
+
+def _slide_title(spec: dict) -> str | None:
+    """The slide title an edit spec points at (`{"slide": {"title": ...}}` or a plain title)."""
+    sel = (spec.get("args") or {}).get("slide")
+    return sel.get("title") if isinstance(sel, dict) else sel
 
 
 def sync_build():
@@ -747,7 +823,7 @@ class LiveRound:
         self.record["steps"].append({"step": step, "variant": variant, "edits": specs,
                                      "findings": loss_oracle.failures(findings)})
         self.problems += [f"step {step} ({variant}): {loss_oracle.describe([f])}" for f in loss_oracle.failures(findings)]
-        self.problems += [f"step {step} ({variant}): integrity: {p}" for p in self.integrity(pres_before, pres_after)]
+        self.problems += [f"step {step} ({variant}): integrity: {p}" for p in self.integrity(pres_before, pres_after, specs)]
 
     def ours(self, pdf: Path, base: dict, folder: Path):
         """The new conversion the sync used, rebuilt offline (no Google call) so the oracle can tell
@@ -760,10 +836,15 @@ class LiveRound:
             self.log.write(f"could not rebuild ours: {e}\n")
             return None
 
-    def integrity(self, pres_before, pres_after):
+    def integrity(self, pres_before, pres_after, specs: list[dict] = ()):
         import sync_check as sc
         base = json.loads((self.out / "sync" / "base.json").read_text(encoding="utf-8"))
-        return sc.integrity(sc.Model(pres_after), before=sc.Model(pres_before), base_ids=sc.ids_in(base))
+        # A group the person took apart (or a member they deleted) is theirs: the sync rebuilding
+        # the unit ungrouped is the policy, not a broken deck.
+        loose = {_slide_title(spec) for spec in specs if spec["edit"] in ("ungroup", "delete_object")}
+        loose.discard(None)
+        return sc.integrity(sc.Model(pres_after), before=sc.Model(pres_before), base_ids=sc.ids_in(base),
+                            allow_ungrouped=loose, allow_groups_changed=loose)
 
     def drop_deck(self):
         from beamer2slides import snapshot
@@ -846,20 +927,19 @@ def main() -> int:
     ap.add_argument("--replay", type=int, help="run this one seed and print everything")
     ap.add_argument("--no-shrink", action="store_true")
     ap.add_argument("--parallel", type=int, default=3)
-    ap.add_argument("--chain", type=int, default=1, help="live: how many edit+sync steps per round")
+    ap.add_argument("--chain", type=int, default=1, help="how many edit+sync steps per round")
     ap.add_argument("--keep-decks", action="store_true", help="live: don't delete the decks of passing rounds")
     ap.add_argument("--out", type=Path, default=Path(os.environ.get("B2S_FUZZ_OUT", ROOT / "out" / "sync-fuzz")))
     args = ap.parse_args()
 
     if args.mode == "offline":
         if args.replay is not None:
-            result = offline_round(args.replay)
-            print("deck edits:\n  " + "\n  ".join(result["deck"]))
-            print("source changes:\n  " + "\n  ".join(result["source"]))
-            print(loss_oracle.describe(result["findings"]) or "nothing lost")
+            result = offline_chain(args.replay, args.chain)
+            print(describe_chain(result))
+            print(loss_oracle.describe([f for s in result["steps"] for f in s["findings"]]) or "nothing lost")
             return 1 if result["failures"] else 0
         started = time.monotonic()
-        bad = run_offline(args.rounds, args.seed, not args.no_shrink)
+        bad = run_offline(args.rounds, args.seed, not args.no_shrink, chain=args.chain)
         print(f"{args.rounds - len(bad)}/{args.rounds} offline rounds clean in {time.monotonic() - started:.1f} s")
         return 1 if bad else 0
 
