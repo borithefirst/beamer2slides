@@ -971,7 +971,7 @@ def diagram_requests(el: dict, slide_id: str, object_id: str, scale: float, font
 
 def block_groups(elements: list[dict], object_ids: list[str], title_oid: str | None) -> list[list[str]]:
     """Object ids per block: its panel shapes (title bar and body, see classify.blocks), plus
-    the text, pictures and tables lying on them."""
+    the text and pictures lying on them."""
     blocks: dict[int, list] = {}  # block -> [x0, y0, x1, y1, [oids]]
     for el, oid in zip(elements, object_ids):
         if el["kind"] == "shape" and el.get("block") is not None:
@@ -984,7 +984,8 @@ def block_groups(elements: list[dict], object_ids: list[str], title_oid: str | N
         if len(members) < 2:
             continue  # a lone panel is not recognisably a block
         for el, oid in zip(elements, object_ids):
-            if el["kind"] in ("text", "image", "table") and oid != title_oid and not el.get("anchor"):
+            # Tables can't be grouped in Slides: a table in a block stays on its own.
+            if el["kind"] in ("text", "image") and oid != title_oid and not el.get("anchor"):
                 ex0, ey0, ex1, ey1 = el["bbox"]
                 cx, cy = (ex0 + ex1) / 2, (ey0 + ey1) / 2
                 if x0 <= cx <= x1 and y0 <= cy <= y1:
@@ -1498,6 +1499,10 @@ def emit(deck: dict, out: Path, title: str, new_deck: bool = False, keep_assets:
                 children = [f"{m}_g" if m in anchored else m for m in members if m not in grouped or m in anchored]
                 if len(children) >= 2:
                     extra.append({"groupObjects": {"groupObjectId": f"{slide_id}_blk{bi}", "childrenObjectIds": children}})
+                    # A group takes the place of its topmost member, above a table lying on the
+                    # block (tables can't join the group): blocks are backdrops, send them back.
+                    extra.append({"updatePageElementsZOrder": {"pageElementObjectIds": [f"{slide_id}_blk{bi}"],
+                                                               "operation": "SEND_TO_BACK"}})
             for ri, members in enumerate(rule_groups(slide["elements"], element_ids)):
                 extra.append({"groupObjects": {"groupObjectId": f"{slide_id}_rules{ri}", "childrenObjectIds": members}})
             if slide.get("notes") and speaker_notes.get(slide_id):

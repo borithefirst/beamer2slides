@@ -215,18 +215,21 @@ def render_pages(pdf: Path, out_dir: Path, width_px: int, prefix: str, pages: li
     return paths
 
 
-def flat_colour(img: np.ndarray, area: pymupdf.Rect, px_per_pt: float, ring: int = 4) -> np.ndarray | None:
-    """The page colour around an area (a thin ring just outside it), if that ring is flat."""
+def flat_colour(img: np.ndarray, area: pymupdf.Rect, px_per_pt: float, ring: int = 4,
+                ignore: np.ndarray | None = None) -> np.ndarray | None:
+    """The page colour around an area (a thin ring just outside it), if that ring is flat.
+    Pixels marked in `ignore` (other converted elements, a neighbour's shadow) don't count."""
     h, w = img.shape[:2]
     a0, b0 = max(0, int(area.x0 * px_per_pt) - 2), max(0, int(area.y0 * px_per_pt) - 2)
     a1, b1 = min(w, int(np.ceil(area.x1 * px_per_pt)) + 2), min(h, int(np.ceil(area.y1 * px_per_pt)) + 2)
-    pixels = np.concatenate([
-        img[max(0, b0 - ring):b0, max(0, a0 - ring):a1 + ring].reshape(-1, img.shape[2]),
-        img[b1:b1 + ring, max(0, a0 - ring):a1 + ring].reshape(-1, img.shape[2]),
-        img[b0:b1, max(0, a0 - ring):a0].reshape(-1, img.shape[2]),
-        img[b0:b1, a1:a1 + ring].reshape(-1, img.shape[2]),
-    ]).astype(int)
-    if not len(pixels):
+    parts = [(slice(max(0, b0 - ring), b0), slice(max(0, a0 - ring), a1 + ring)),
+             (slice(b1, b1 + ring), slice(max(0, a0 - ring), a1 + ring)),
+             (slice(b0, b1), slice(max(0, a0 - ring), a0)),
+             (slice(b0, b1), slice(a1, a1 + ring))]
+    keep = [~ignore[ys, xs].reshape(-1) if ignore is not None else np.ones(img[ys, xs].shape[0] * img[ys, xs].shape[1], bool)
+            for ys, xs in parts]
+    pixels = np.concatenate([img[ys, xs].reshape(-1, img.shape[2])[k] for (ys, xs), k in zip(parts, keep)]).astype(int)
+    if len(pixels) < 20:
         return None
     colour = np.median(pixels, axis=0)
     return colour if (np.abs(pixels - colour).max(axis=1) <= 6).mean() >= 0.97 else None
@@ -263,9 +266,17 @@ def paint_out_leftovers(png: Path, slide: dict, px_per_pt: float) -> None:
     for el in slide["elements"]:
         if el["kind"] == "image":
             jobs.append((pymupdf.Rect(el["bbox"]), [el["bbox"]], el))
+    # Other elements and everything about to be painted don't count as the page around an area.
+    ignore = np.zeros(img.shape[:2], bool)
+    covered = [e["bbox"] for e in slide["elements"] if e["kind"] in ("shape", "image", "table", "diagram")]
+    covered += [r for _, rects, _ in jobs for r in rects]
+    covered += [[x0, e["title_bar"][1], x1, y1] for e in shapes if e.get("title_bar") for x0, _, x1, y1 in [e["bbox"]]]
+    for rx0, ry0, rx1, ry1 in covered:
+        ignore[max(0, int(ry0 * px_per_pt) - 2):int(np.ceil(ry1 * px_per_pt)) + 2,
+               max(0, int(rx0 * px_per_pt) - 2):int(np.ceil(rx1 * px_per_pt)) + 2] = True
+    colours = [flat_colour(img, area, px_per_pt, ignore=ignore) for area, _, _ in jobs]  # before any painting
     changed = False
-    for area, rects, el in jobs:
-        colour = flat_colour(img, area, px_per_pt)
+    for (area, rects, el), colour in zip(jobs, colours):
         if colour is None:
             if el["kind"] == "shape":
                 el.pop("shadow", None)  # keep the background's shadow; the strip is under the shapes anyway

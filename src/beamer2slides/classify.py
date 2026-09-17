@@ -644,8 +644,10 @@ class PageClassifier:
         # Image bullets (ball themes): a small image just left of the text, level with its
         # x-height. Numbered balls draw the digit as a small text span on top of the image.
         for im, ir in self.small_images:
+            # A block shadow's corner piece may just graze a ball at the bottom of a block.
             if not 0.8 <= ir.w / max(ir.h, 0.01) <= 1.25 or \
-                    any(o is not im and orr.intersects(ir) and max(orr.w, orr.h) <= 20 for o, orr in self.small_images):
+                    any(o is not im and max(orr.w, orr.h) <= 20 and overlap(orr, ir) > 0.2 * ir.w * ir.h
+                        for o, orr in self.small_images):
                 continue  # icons (beamer's bibliography article, composite images): kept as pictures
             on_image = [s for s in spans if ir.expand(0.5).contains(s.rect.cx, s.rect.cy)]
             rest = [s for s in spans if s not in on_image]
@@ -845,14 +847,24 @@ class PageClassifier:
                 if line.reason is not None or line.bullet:
                     continue
                 txt = line.text.replace(" ", "")
-                near = any(m.rect.expand(0.6 * line.size).intersects(line.rect) for m in maths)
+                # Big operators (CMEX) reach further than their glyph boxes: limits sit below them.
+                near = any(m.rect.expand(1.0 * max(m.size, line.size)
+                                         if any(s.font.upper().split("+")[-1].startswith("CMEX") for s in m.spans)
+                                         else 0.6 * line.size).intersects(line.rect) for m in maths)
+                # Numerator or denominator: a short line right at a fraction bar next to a display
+                # formula (a fraction inside prose stays with its line, see formula_holes).
+                fraction_part = len(txt) <= 6 and any(
+                    b.x0 - 1 <= line.rect.cx <= b.x1 + 1 and min(abs(line.rect.y1 - b.y0), abs(line.rect.y0 - b.y1)) <= 0.6 * line.size
+                    and any(m.rect.expand(line.size).intersects(b) for m in maths)
+                    and not any(len(o.text.split()) >= 3 and o.rect.y0 - 1 <= b.y0 <= o.rect.y1 + 1 for o in lines)
+                    for b in self.bars)
                 small = line.size < 0.9 * self.body or all(s.info.italic for s in line.content)
                 eqno = EQ_NUMBER_RE.match(txt) and any(abs(m.baseline - line.baseline) <= 3 for m in maths)
                 # The left-hand side of a display equation ("L(θ) =") split off from its complex part.
                 same_formula = line.inline_math and any(
                     abs(m.baseline - line.baseline) <= 0.3 * line.size and
                     max(0.0, m.rect.x0 - line.rect.x1, line.rect.x0 - m.rect.x1) <= 4 * line.size for m in maths)
-                if (near and small and len(txt) <= 6) or eqno or same_formula:
+                if (near and small and len(txt) <= 6) or eqno or same_formula or fraction_part:
                     line.reason = "math"
                     changed = True
 
@@ -1136,9 +1148,11 @@ class PageClassifier:
                         b = Rect.of(p["bullet"]["bbox"])
                         blocked.append(Rect(b.x0, b.cy - 0.25 * b.h, b.x1, b.cy + 0.25 * b.h))
         out = []
+        taken: set[str] = set()
         for c in cluster_rects([s.rect for s in spans] + list(self.bars), gap=0.6 * self.body):
             box = c.expand(1.5)
-            members = [s for s in spans if box.contains_rect(s.rect)]
+            members = [s for s in spans if box.contains_rect(s.rect) and s.id not in taken]
+            taken |= {s.id for s in members}
             if not members or any(b.intersects(box) for b in blocked):
                 continue  # only a stray bar, or tangled with native content: leave it in the background
             if len(members) == 1 and EQ_NUMBER_RE.match(members[0].text.strip()) and members[0].info.family != "math":

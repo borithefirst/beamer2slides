@@ -1,0 +1,73 @@
+% Blocks in the situations where editing them in Slides tends to break things: side by side,
+% stacked tightly, untitled, with math, lists and tables inside, rounded with shadows and square.
+\documentclass{beamer}
+\usetheme{Madrid}
+\usepackage{amsmath,booktabs}
+\setbeamertemplate{navigation symbols}{}
+\title{Blocks under resizing}
+\author{Beamer Tester}
+
+\begin{document}
+
+\begin{frame}{Blocks side by side}
+  \begin{columns}[T]
+    \column{0.48\textwidth}
+    \begin{block}{Left}
+      A narrow block whose text wraps over a few lines in its column.
+    \end{block}
+    \column{0.48\textwidth}
+    \begin{alertblock}{Right}
+      \begin{itemize}
+        \item First point
+        \item Second point
+      \end{itemize}
+    \end{alertblock}
+  \end{columns}
+\end{frame}
+
+\begin{frame}{Math and tables in blocks}
+  \begin{block}{Theorem}
+    For every $x \in \mathbb{R}$ we have
+    \[ \int_0^1 x^2 \, dx = \frac{1}{3}. \]
+  \end{block}
+  \begin{exampleblock}{Results}
+    \centering
+    \begin{tabular}{lrr}
+      \toprule
+      Method & Precision & Recall \\
+      \midrule
+      Ours & 0.89 & 0.83 \\
+      \bottomrule
+    \end{tabular}
+  \end{exampleblock}
+\end{frame}
+
+\begin{frame}{Untitled and stacked blocks}
+  \begin{block}{}
+    A block without a title.
+  \end{block}
+  \vspace{-0.5em}
+  \begin{block}{Stacked}
+    Right below the untitled one.
+  \end{block}
+  \begin{alertblock}{Numbered}
+    \begin{enumerate}
+      \item One
+      \item Two
+    \end{enumerate}
+  \end{alertblock}
+\end{frame}
+
+{
+\setbeamertemplate{blocks}[default]
+\begin{frame}{Square blocks}
+  \begin{block}{Square block}
+    Plain corners and no shadow.
+  \end{block}
+  \begin{alertblock}{Square alert}
+    Still a block.
+  \end{alertblock}
+\end{frame}
+}
+
+\end{document}
