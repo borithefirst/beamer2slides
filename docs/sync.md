@@ -223,11 +223,71 @@ backups) and copies new picture files; `--out DIR` writes the edited source tree
 neither leaves the source untouched. After the rebuilt PDF is synced, the pulled fields are
 converged overrides.
 
+### Pictures (`deck_ir.picture_props`, `inverse.Planner.picture`, `compare.displayed_picture`)
+What a picture in the deck can be recovered from, measured on a live deck by `tools/probe_images.py`:
+
+| source | pixels | crop | rotation | transparency | brightness/contrast | recolour | outline |
+|---|---|---|---|---|---|---|---|
+| `contentUrl` (`=s2048`) | the stored file byte for byte | kept as `cropProperties` | kept in the transform | kept as a property | **baked** by Google on import | **baked** (duotone; greyscale is dropped) | kept as a property |
+| `.pptx` export (`files.export`) | the same bytes | `a:srcRect` | `xfrm rot` | `a:alphaModFix` | baked | baked | `a:ln` |
+| `sourceUrl` | the original, when the picture came in by URL and is still fetchable | — | — | — | — | — | — |
+
+Google stores at most ~2046 px on the long side (a 3000 × 2000 PNG comes back 2046 × 1364, PNG
+stays PNG, JPEG stays JPEG, an animated GIF keeps its frames, EMF/WMF become PNG). `contentUrl` is
+therefore the recovery source; `sourceUrl` is used only when it holds the same picture with more
+pixels. The bytes are saved as they are, never re-encoded or downscaled.
+
+Pull writes each edit as a LaTeX option where LaTeX can express it, and bakes only what it can't:
+- crop → `trim=l b r t,clip` in the file's natural bp (pixels at its dpi, a PDF's first page);
+- rotation → `angle=` (Slides turns clockwise about the centre; the turned picture is placed by its
+  bounding box, so no `origin` is needed), mirroring → `\reflectbox`;
+- transparency → a `\tikz\node[inner sep=0pt,text opacity=…]`, a tikzpicture → a transparency group;
+- outline → the same tikz node with `draw=` and `line width=`;
+- brightness, contrast and recolour → baked into the saved file, and said so in `edits.md`;
+- animated GIF, WEBP and other formats pdflatex can't read → PNG, first frame, with a note;
+- pictures with edits or without a source of their own go into a `textblock*` at their bounding box.
+
+Files are `figures/<slug of the alt text or `picture`>-<sha8>.<ext>`, but a picture already in the
+source tree is reused instead: identical bytes first, else the best-resolution file that looks the
+same (64 × 64 grey, correlation ≥ 0.98, aspect within 2%) — a PDF before any raster.
+
+A picture the person put over a figure the source draws (tikzpicture, pgfplots) replaces it: the
+environment is commented out under `% b2s pull: replaced by <file>`, with a `\phantom` keeping its
+flow room when the picture goes into a textblock. Formula and icon pictures inside text lines are
+never replaced silently: they are reported (`compare` matches them by thumbnail alone, tolerance
+`inline_phash`). Replaced figures are found by thumbnail: mean difference plus, for opaque pictures
+with contrast, correlation (`compare.picture_differs`) — a curve replaced by bars differs by only
+0.11 on white, while transparent overlays must be judged by the mean alone.
+
 Results: offline test bed (`python -m pytest -m inverse`, ~2 min) converges on 4 source pairs in one
 round each and on 10 synthetic edits of 01_basic in 1-3 rounds; live, the sync talk edited in Slides
 (reword, bold, 30 pt move, new red text box, new slide with bullets) converged in 3 rounds (~40 s)
 and the deck converted from the pulled source compares to the edited deck with 0 open residuals
 (text anchors within 2.1 pt), only the new slide's layout title differing (theme).
+Pictures, live (`tools/pull_images_proof.py` on the same talk: a 3000 × 2000 photo inserted, cropped
+and turned 12°, the TikZ plot replaced by a chart, a half-transparent picture added): converged in 4
+rounds, and the deck converted from the pulled source compares to the edited deck with 0 open
+residuals (largest picture box error 1.9 pt); the photo is on disk as Google's 2046 × 1364 PNG,
+6.1 MB, unchanged.
+
+### Note for sync and convert
+- **After a pull, sync must not duplicate the pulled picture.** The source now has an
+  `\includegraphics` where the person had inserted (or replaced with) a deck picture, so the new
+  conversion carries a picture the deck already shows. Treat them as the same unit when the
+  fingerprint matches: the file's sha1 (identical bytes are the normal case — pull saves the deck's
+  own bytes), else a perceptual match (`compare.picture_hash` / `inverse.same_look`: 64 × 64 grey,
+  correlation ≥ 0.98, aspect within 2%) **and** boxes overlapping by most of their area on the same
+  slide key. On a match, keep the deck's object (its id, crop, rotation, transparency and outline are
+  the person's edit, and the source now says the same) and record it in the base as converged instead
+  of deleting the deck picture and creating a new one. A source figure that was commented out by pull
+  (`% b2s pull: replaced by <file>`) disappears from the conversion: its base unit must be retired
+  without deleting the deck object that replaced it.
+- **Convert should pass raster `\includegraphics` through losslessly.** Today a figure region is
+  re-rendered from the page, so a 2046 px photo becomes a ~600 px crop and a pull afterwards can only
+  recover that. PDFium gives the image object's own bitmap (`FPDFImageObj_GetImageDataDecoded` /
+  `GetRenderedBitmap`): when a figure region is one image object with no vector ink on it, store its
+  bytes and its transform instead of the rendered crop. The deck then keeps the author's full
+  resolution, and a pull returns the same file.
 
 Not translated yet (reported instead): tables, diagram labels, shape colours, paragraph alignment,
 frame title position and theme styles, edits inside math, rotated text, overlays beyond the last
