@@ -12,12 +12,13 @@ picture) and then removed: their labels, vector paths inside the figure box and 
 within it.
 """
 
+import io
 from pathlib import Path
 
 import numpy as np
 from PIL import Image
 
-from .pdf import OBJ_FORM, OBJ_IMAGE, OBJ_PATH, OBJ_SHADING, Char, Document, Page, _addr
+from .pdf import OBJ_FORM, OBJ_IMAGE, OBJ_PATH, OBJ_SHADING, Char, Document, Page, PageObject, _addr
 
 BACKGROUND_WIDTH_PX = 2000
 FIGURE_PX_PER_PT = 8.0     # ~ 4 px per Slides point on a 4:3 deck: sharp on high-DPI screens
@@ -149,6 +150,116 @@ def _span_band(span: dict) -> Box:
     _, y0, _, y1 = span["bbox"]
     x, up, size = span["origin"][0], dy < 0, span["size"]
     return (x - 0.45 * size, y0 + 0.2, x - 0.2 * size, y1 - 0.2) if up else (x + 0.2 * size, y0 + 0.2, x + 0.45 * size, y1 - 0.2)
+
+
+# ------------------------------------------------------------------ embedded images
+
+# A figure region that is nothing but one `\includegraphics` reaches Slides as the image's own
+# file instead of a render of the page: the author's 3000 x 2000 photo arrives as 3000 x 2000
+# pixels (Google keeps up to ~2046 on the long side), and `pull` can hand the very bytes back.
+IMAGE_MAX_PX = 4096        # a rebuilt PNG wider than this: the capped page crop instead
+IMAGE_PIXEL_DIFF = 6       # levels: Pillow's and PDFium's JPEG decoders round differently
+IMAGE_CHECK_PX_PER_PT = 2.0  # the file is verified against the page at this scale
+IMAGE_CHECK_DIFF = 12      # levels of mean difference allowed there
+
+
+def image_file(page: Page, po: PageObject) -> tuple[bytes, str, tuple[int, int], str] | None:
+    """The file to write for an image object drawn on its own, as (bytes, extension, pixel size,
+    route), or None where only a render of the page will do.
+
+    - `raw`: the embedded stream is a plain JPEG (DCTDecode) that Pillow decodes exactly like
+      PDFium, so it is the author's file byte for byte;
+    - `decoded`: PDFium's own pixels (palette expanded, colour space converted) as a PNG, at
+      the image's native resolution.
+
+    Anything that makes the stored pixels mean something else than what the page shows gives
+    None: a turned or mirrored matrix, a clip cutting the image, an exotic colour space or bit
+    depth, and anything see-through (a soft or stencil mask is not in PDFium's pixels, and a
+    constant alpha is not in them either). A y flip is how every PDF draws an image, not one of
+    those."""
+    im = page.embedded_image(po)
+    if im is None or not im.upright or im.clipped or im.transparent or im.blended or im.bpp < 8 \
+            or im.px[0] < 1 or im.px[1] < 1 or im.colorspace in ("unknown", "Pattern"):
+        return None
+    pixels = im.pixels
+    if pixels is None or pixels.shape[1::-1] != im.px:
+        return None
+    if im.jpeg and im.colorspace in ("DeviceRGB", "DeviceGray", "ICCBased"):
+        # The very bytes of the author's file, if they decode to what PDFium draws (a decode
+        # array, a CMYK or Lab JPEG or an Adobe inversion would not).
+        decoded = _pillow_rgb(im.jpeg)
+        if decoded is not None and decoded.shape[:2] == pixels.shape[:2] and \
+                np.abs(decoded.astype(int) - pixels[..., :3].astype(int)).mean() <= IMAGE_PIXEL_DIFF:
+            return im.jpeg, "jpg", im.px, "raw"
+    if max(im.px) > IMAGE_MAX_PX:
+        return None
+    buf = io.BytesIO()
+    Image.fromarray(pixels[..., :3]).save(buf, format="PNG")
+    return buf.getvalue(), "png", im.px, "decoded"
+
+
+def _pillow_rgb(data: bytes) -> np.ndarray | None:
+    try:
+        return np.array(Image.open(io.BytesIO(data)).convert("RGB"))
+    except Exception:
+        return None
+
+
+def sole_image(page: Page, bbox: list[float]) -> PageObject | None:
+    """The image object a figure region consists of: it covers the region and nothing else is
+    drawn there (classify marks such regions, but the page decides)."""
+    found = None
+    for im in page.images():
+        if not _intersects(im["bbox"], bbox):
+            continue
+        if found is not None or im["object"].type != OBJ_IMAGE or \
+                any(abs(im["bbox"][k] - bbox[k]) > 0.5 for k in range(4)):
+            return None
+        found = im["object"]
+    return found
+
+
+def _looks_like(data: bytes, page: Page, po: PageObject, bbox: list[float]) -> bool:
+    """Does the file, laid on the page without the image, show what the page shows there? The
+    last check on PDFium's decode: a palette, colour space or mask read differently would come
+    out as another picture."""
+    want = page.render(IMAGE_CHECK_PX_PER_PT, tuple(bbox)).astype(int)
+    h, w = want.shape[:2]
+    if w < 2 or h < 2:
+        return True
+    page.set_active([po], False)
+    try:
+        under = page.render(IMAGE_CHECK_PX_PER_PT, tuple(bbox)).astype(float)
+    finally:
+        page.set_active([po], True)
+    img = Image.open(io.BytesIO(data)).convert("RGBA").resize((w, h), Image.BILINEAR)
+    px = np.array(img).astype(float)
+    alpha = px[..., 3:] / 255
+    got = px[..., :3] * alpha + under * (1 - alpha)
+    return bool(np.abs(got - want).mean() <= IMAGE_CHECK_DIFF)
+
+
+def embedded_picture(eraser: Eraser, fig: dict, path: Path) -> Path | None:
+    """The figure's picture written from the image object's own data (`image_file`), or None
+    where the page has to be rendered after all. Sets `px` and `picture` on the element."""
+    po = sole_image(eraser.page, fig["bbox"])
+    if po is None:
+        return None
+    chosen = image_file(eraser.page, po)
+    if chosen is None:
+        return None
+    data, ext, px, route = chosen
+    if not _looks_like(data, eraser.page, po, fig["bbox"]):
+        return None
+    path = path.with_suffix("." + ext)
+    save_bytes(data, path)
+    fig["px"], fig["picture"] = [px[0], px[1]], route
+    return path
+
+
+def save_bytes(data: bytes, path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(data)
 
 
 def crop_figure(eraser: Eraser, bbox: list[float], raw_images: list[dict], path: Path,
@@ -366,8 +477,12 @@ def render_backgrounds(pdf: Path, raw: dict, deck: dict, out: Path) -> list[Path
             if fig.get("overlay"):
                 fig["px"] = crop_overlay(eraser, fig, [spans[sid] for sid in fig["spans"]], path)
             else:
-                fig["px"] = crop_figure(eraser, fig["bbox"], raw_pages[slide["page"]]["images"], path,
-                                        transparent=bool(fig.get("anchor")))
+                # A region that is one `\includegraphics` keeps the embedded file itself.
+                own = None if fig.get("anchor") or not fig.get("image") else embedded_picture(eraser, fig, path)
+                path = own or path
+                if own is None:
+                    fig["px"] = crop_figure(eraser, fig["bbox"], raw_pages[slide["page"]]["images"], path,
+                                            transparent=bool(fig.get("anchor")))
             fig["file"] = str(path.relative_to(out)).replace("\\", "/")
         # Native tables leave the background the same way pictures do (text and rules), without a crop.
         figures = [f for f in figures if not f.get("overlay")]
