@@ -14,3 +14,5 @@ themes/google/fonts/src/
 examples/*/*
 !examples/*/*.tex
 .claude/worktrees/
+build/
+dist/

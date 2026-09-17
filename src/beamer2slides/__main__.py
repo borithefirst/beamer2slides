@@ -18,8 +18,7 @@ from .classify import classify
 from .debug import render_debug
 from .extract import extract, select_overlays
 from .notes import prepare as prepare_notes
-
-ROOT = Path(__file__).resolve().parents[2]
+from .paths import out_root
 
 
 def cmd_classify(pdf: Path, out: Path, overlays: str = "last") -> tuple[Path, dict, dict]:
@@ -133,7 +132,7 @@ def main() -> None:
             print(f"  warning: {wmsg}")
         print(f"Google Slides: {info['url']}")
         return
-    out = args.out or ROOT / "out" / args.pdf.stem
+    out = args.out or out_root() / args.pdf.stem
     if args.command == "classify":
         cmd_classify(args.pdf, out, args.overlays)
     elif args.command == "convert":

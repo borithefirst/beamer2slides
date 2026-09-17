@@ -1,7 +1,7 @@
 # Font calibration: Google Slides vs Computer Modern Sans
 
 Produced by `tools/calibrate.py all` (the Slides deck is created once, and thumbnails are
-cached in `out/calibration/thumbs`). Raw numbers are in `calibration/fonts.json`.
+cached in `out/calibration/thumbs`). Raw numbers are in `src/beamer2slides/calibration/fonts.json`.
 Reference: beamer + pdflatex, CMSS10 at 10.91 pt (body), CMSSBX10, CMSSI10, CMSS12 at 14.35 pt (titles).
 
 ## 1. Vertical placement in Slides does not depend on the font
@@ -97,7 +97,7 @@ The size correction divides by these ratios, except for sans 12 pt, which keeps 
 calibrated title factor (the ratio predicts 1.046 against the measured 1.058). Measured effect:
 `\tiny` text (CMSS8 at 6 pt) went from 0.917 to 0.981 of the PDF width, `\Huge` (CMSS17) from 1.034 to 1.004.
 
-## 2b. Serif: width vs CM Roman (`--family serif`, `calibration/fonts_serif.json`)
+## 2b. Serif: width vs CM Roman (`--family serif`, `src/beamer2slides/calibration/fonts_serif.json`)
 Reference: CMR10 at 10.91 pt, CMBX10, CMTI10, CMR12 (titles).
 
 | font | text | CAPS | digits | bold | italic | title | worst | cap height after correction |

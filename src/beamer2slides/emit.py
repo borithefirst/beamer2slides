@@ -18,8 +18,7 @@ from .fonts import font_info, google_font
 from .google_auth import drive_service, slides_service
 from .gslides import EMU_PER_PT, emu, execute, pt
 
-ROOT = Path(__file__).resolve().parents[2]
-CALIBRATION = ROOT / "calibration" / "fonts.json"
+CALIBRATION = Path(__file__).resolve().parent / "calibration" / "fonts.json"  # ships with the package
 SLIDE_W = 720.0
 BATCH_MAX_REQUESTS = 400  # slides are sent together until a batch reaches this size
 PPTX_MIME ="application/vnd.openxmlformats-officedocument.presentationml.presentation"

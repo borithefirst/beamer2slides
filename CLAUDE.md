@@ -225,6 +225,9 @@ a per-slide background picture.
 - Auth: `src/beamer2slides/google_auth.py`, scopes `presentations` + `drive.file`.
   `client_secret.json` and `token.json` sit in the repo root, are git-ignored, and
   are ACL-restricted to the current user. Never print or commit their contents.
+  An installed (pip) beamer2slides finds them in `%APPDATA%\beamer2slides` /
+  `~/.config/beamer2slides` instead; `$B2S_CLIENT_SECRET` / `$B2S_TOKEN` override both
+  (`google_auth.credential_file`). Packaging notes: `docs/install.md`.
 - Smoke test: `tools/slides_smoke.py`.
 - **`presentations.create` ignores `pageSize`**: new decks are always 720 × 405 pt (16:9).
   4:3 decks need another route (e.g. upload a blank 4:3 .pptx with Drive conversion).
@@ -232,7 +235,8 @@ a per-slide background picture.
   occasionally fail with SSL EOF; `gslides.save_thumbnail` retries.
 - Object IDs must be 5–50 characters.
 - **Font calibration** (`tools/calibrate.py`, results in `docs/calibration.md` and
-  `calibration/fonts.json`): in API-created text boxes the first baseline sits at
+  `src/beamer2slides/calibration/fonts.json`, package data so a wheel carries it):
+  in API-created text boxes the first baseline sits at
   6.48 pt + 0.968 em and the line pitch is 1.19 em **for every font**. Default substitute
   for CM Sans is Lato at size / 1.020; titles (CMSS12) need their own factor (~1.035).
 

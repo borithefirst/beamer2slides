@@ -2,7 +2,7 @@
 
   build    create the calibration deck in Google Slides
   measure  export its slides as PNGs, compile the LaTeX reference, measure both,
-           and write calibration/fonts.json (sans) or calibration/fonts_serif.json
+           and write src/beamer2slides/calibration/fonts.json (sans) or fonts_serif.json
   all      build, then measure
 
 Usage: python tools/calibrate.py {build,measure,all} [--family sans|serif] [--refresh]
@@ -25,7 +25,7 @@ from beamer2slides.gslides import execute, pt, save_thumbnail, text_box
 
 ROOT = Path(__file__).resolve().parents[1]
 WORK = ROOT / "out" / "calibration"
-RESULT = ROOT / "calibration" / "fonts.json"
+RESULT = ROOT / "src" / "beamer2slides" / "calibration" / "fonts.json"  # ships with the package
 
 FONT_SETS = {
     "sans": [
@@ -48,7 +48,7 @@ def configure(family: str) -> None:
     FONTS = FONT_SETS[family]
     if family == "serif":
         WORK = ROOT / "out" / "calibration_serif"
-        RESULT = ROOT / "calibration" / "fonts_serif.json"
+        RESULT = RESULT.with_name("fonts_serif.json")
         LATEX_PREAMBLE = r"\usefonttheme{serif}"
 
 # (key, text, style). style picks both the LaTeX markup and the Slides text style.
