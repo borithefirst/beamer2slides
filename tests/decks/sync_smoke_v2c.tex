@@ -1,0 +1,43 @@
+% Sync smoke test, version 2c: v2b with the second bullet of `intro` reworded (the deck edits it too).
+\documentclass{beamer}
+\usetheme{Madrid}
+\title{Sync smoke test}
+\author{Test Author}
+
+\begin{document}
+
+\begin{frame}[label=intro]{Why sync}
+  \begin{itemize}
+    \item Authors and their AI keep writing the talk in beamer
+    \item Teammates polish the slides in Google Slides
+    \item Nobody wants to redo their edits by hand
+  \end{itemize}
+  \vspace{1em}
+  A merge keeps both sides of the work.
+\end{frame}
+
+\begin{frame}[label=method]{Method}
+  \begin{itemize}
+    \item Record what the converter wrote
+    \item Compare the source and the deck with that base
+    \item Apply source changes where the deck did not edit
+  \end{itemize}
+\end{frame}
+
+\begin{frame}[label=results]{Results}
+  \begin{block}{Finding}
+    Edits made in the deck survive a new conversion.
+  \end{block}
+  \vspace{1em}
+  Conflicts are reported, never silently overwritten.
+\end{frame}
+
+\begin{frame}[label=end]{Summary}
+  \begin{itemize}
+    \item Label every frame
+    \item Sync after every change of the source
+    \item The merge costs about $\frac{n^2}{\sqrt{k}}$ comparisons for $n$ elements
+  \end{itemize}
+\end{frame}
+
+\end{document}
