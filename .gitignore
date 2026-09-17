@@ -3,6 +3,7 @@ __pycache__/
 *.egg-info/
 tests/decks/out/
 tests/decks/sync/out/
+tests/decks/stress/out/
 tests/themes/out/
 tests/decks/inverse/out/
 out/
