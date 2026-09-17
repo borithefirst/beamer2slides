@@ -110,7 +110,7 @@ def plan_recovery(base: dict, theirs: dict, ours_keys=()) -> dict:
             if sid in named_slides or (g is not None and g > gen and sid[4:10] in wanted):
                 sweep_slides.append(sid)
                 continue
-        mine = []
+        mine, here = [], []
         for oid, rb in s["objects"].items():
             if oid in base_objects:
                 continue
@@ -119,16 +119,17 @@ def plan_recovery(base: dict, theirs: dict, ours_keys=()) -> dict:
                 continue  # a person's object, or one of this base's own generation
             title = rb.get("title") or ""
             key = title[len(snapshot.TAG_PREFIX):] if title.startswith(snapshot.TAG_PREFIX) else ""
-            skey, _, ekey = key.rpartition("/")
-            if key and not alive.get((skey, ekey), True):
-                heal.append({"slide": skey, "element": ekey, "objectId": oid})
+            skey, _, ekey = key.partition("/")  # the element key has slashes of its own
+            if key and ekey and not alive.get((skey, ekey), True):
+                here.append({"slide": skey, "element": ekey, "objectId": oid})
             else:
                 mine.append(oid)
-        healed = [h["objectId"] for h in heal]
+        healed = [h["objectId"] for h in here]
         # A healed element's own group, number box and anchored pictures carry no tag of their own.
         sweep += [oid for oid in mine if not any(oid.startswith(m) for m in healed)]
-        for h in heal:
+        for h in here:
             h["objects"] = [h["objectId"]] + [oid for oid in mine if oid != h["objectId"] and oid.startswith(h["objectId"])]
+        heal += here
     restore = {oid: rb for oid, rb in ((k, v) for k, v in (pending.get("in_place") or {}).items())}
     return {"sweep": sweep, "sweep_slides": sweep_slides, "heal": heal, "restore": restore}
 
