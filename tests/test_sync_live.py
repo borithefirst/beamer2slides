@@ -453,6 +453,58 @@ def scenario_groups(run: Run):
               any_conflicts=True, mentions=("policy",), allow_ungrouped={ALGO})
 
 
+def repaint_pictures(out: Path) -> int:
+    """Put the deck's anchored pictures back the way the converter wrote them before they got a
+    transparent ground (the page colour painted in), base hashes included, so the next conversion's
+    files differ from the base exactly as they do on the first sync of a deck converted then."""
+    import numpy as np
+    from PIL import Image
+
+    from beamer2slides import identity, snapshot
+    from beamer2slides.google_auth import drive_service
+    base, _ = snapshot.load_base(json.loads((out / "emit.json").read_text(encoding="utf-8"))["presentationId"],
+                                 out, drive_service())
+    page_key = snapshot.page_keys({"slides": [{"page": s["page"]} for s in base["slides"]]},
+                                  [s["key"] for s in base["slides"]])
+    painted = 0
+    for s in base["slides"]:
+        for el in s["elements"]:
+            file = el["ir"].get("file")
+            if el["kind"] != "image" or not file or not (out / file).exists():
+                continue
+            with Image.open(out / file) as img:
+                if img.mode != "RGBA":
+                    continue
+                rgba = np.asarray(img).astype(float)
+            if (rgba[..., 3] == 0).sum() < 20:
+                continue
+            alpha = rgba[..., 3:] / 255
+            flat = rgba[..., :3] * alpha + 255 * (1 - alpha)  # the pages are white under these
+            Image.fromarray(flat.round().astype("uint8"), "RGB").save(out / file)
+            h, fields = identity.ir_fields(el["ir"], out, el.get("anchor"), page_key)
+            assert {k: v for k, v in fields.items() if k != "image"} == {k: v for k, v in el["fields"].items() if k != "image"}
+            el["ir_hash"], el["fields"] = h, fields
+            painted += 1
+    snapshot.save_local(base, out)
+    snapshot.save_drive(drive_service(), base)
+    return painted
+
+
+@scenario
+def scenario_repainted_pictures(run: Run):
+    """A converter change that rewrites the picture files without changing what they show (the
+    transparent ground anchored pictures got): the base takes the new hashes, the deck is left
+    alone instead of every formula and ball being rewritten."""
+    run.convert(build("v1"))
+    painted = repaint_pictures(run.out)
+    if painted < 3:
+        run.problems.append(f"only {painted} anchored picture(s) to repaint: the scenario tests nothing")
+    pdf = build("v1")
+    revision = run.revision()
+    run.check("v1", pdf, run.sync(pdf), [], no_writes_since=revision,
+              converged=[["image", "the same picture"]])
+
+
 XFAIL = {}  # scenario -> why it can't pass yet (docs/sync.md, Not supported yet)
 
 

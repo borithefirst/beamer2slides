@@ -101,6 +101,7 @@ Z-order changes are not detected.
 | changed | text style / shape style | recreate, re-apply the deck's change: uniform over all runs → over all the text; some words (or a table) → the deck's run attributes onto the same words of the new text (character alignment, `sync.style_range_requests`); non-uniform paragraph styles → keep the deck, conflict. A conflict is reported only when the source changed the same style attributes |
 | text changed | text changed | word-level diff3; clean → recreate and write the merged text; overlapping → keep the deck, conflict |
 | text / position changed | the deck shows exactly that (same text; a move the source now reproduces within 2 pt) | `adopt`: nothing written, reported as converged; the base takes ours IR and the deck's version of those fields (e.g. after `pull`) |
+| picture file changed, same picture | anything | no change: the base takes the new hash (`snapshot.refresh_pictures`, reported as converged) |
 | changed | group taken apart (the unit's `_g` group gone) | recreate without that group |
 | changed | image replaced | keep the deck, conflict |
 | changed | deleted (all or part) | keep deleted, conflict |
@@ -108,6 +109,12 @@ Z-order changes are not detected.
 | deleted | deleted | nothing |
 | deleted | edited | keep, conflict |
 | added | — | create |
+
+A picture whose file the converter now writes differently but that puts the same thing on the page
+(`snapshot.same_picture_file`: the same pixels where the new file is opaque, one flat colour under
+it where it is transparent - the ground the older picture painted in) is not a source change: the
+base takes the new hash and is saved, and the deck keeps its object, instead of every formula,
+icon and ball being rewritten the first time a deck converted before that change is synced.
 
 A unit removed from the source is kept when its words went into a unit kept in conflict (classify
 joined two paragraphs), so no text is lost. Slides: new frames are created at the aligned
@@ -131,7 +138,10 @@ deck; leftovers `b2s_mNNN` of an interrupted run are deleted at the next start).
   `stretchedPictureFill` in the live deck (no public links). The staging file is deleted after the
   content batch: its contentUrls stop working once it's gone.
 - New slides: `createSlide` with the layout (title/subtitle placeholders mapped, the others deleted
-  after a read), then emit's `slide_parts` under renamed ids. Updated slides: recreated units are
+  after a read), then emit's `slide_parts` under renamed ids. The theme decoration sits on the
+  layouts (`emit.plan_theme`), and backgrounds that don't show it got a copy of their layout without
+  it, so a new slide with a background picture of its own takes the layout (by object id) of the
+  converted slides with that background; one that inherits the master background takes the plain one. Updated slides: recreated units are
   built the same way; their old objects are deleted, the groups they were in are ungrouped
   (outermost first, since a group inside a group can't be ungrouped) and regrouped under the same
   ids (innermost first), and the new objects are brought into the old z position (`restack`).

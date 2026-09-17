@@ -355,6 +355,65 @@ def background_key(slide: dict, out: Path) -> str:
     return f"{kind}:{value}"
 
 
+PICTURE_FLAT = 6     # levels: the ground the older picture painted in counts as one colour
+PICTURE_MATCH = 16   # levels: the new picture laid on that ground shows the older one (render.clear_ground)
+
+
+def same_picture_file(a: Path, b: Path) -> bool:
+    """`a` (the file the base recorded) and `b` (the new one) put the same thing on the page: the
+    same pixels where `b` is opaque, over one flat colour where it is transparent - the ground the
+    older picture had painted in (render.clear_ground). Anchored pictures became RGBA on a
+    transparent ground, so without this every one of them would be rewritten on the first sync
+    after that change although the slides look the same."""
+    import numpy as np
+    from PIL import Image
+
+    try:
+        with Image.open(a) as ia, Image.open(b) as ib:
+            if ia.size != ib.size:
+                return False
+            old = np.asarray(ia.convert("RGB")).astype(float)
+            new = np.asarray(ib.convert("RGBA")).astype(float)
+    except (OSError, ValueError):
+        return False
+    ground = np.array([255.0, 255.0, 255.0])
+    clear = new[..., 3] == 0
+    if clear.any():
+        under = old[clear]
+        ground = np.median(under, axis=0)
+        if (np.abs(under - ground).max(axis=1) > PICTURE_FLAT).mean() > 0.002:
+            return False  # (the older picture had something else under the new one's clear ground)
+    alpha = new[..., 3:] / 255
+    laid = new[..., :3] * alpha + ground * (1 - alpha)
+    return bool((np.abs(laid - old).max(axis=2) > PICTURE_MATCH).mean() <= 0.002)
+
+
+def refresh_pictures(base: dict, ours: dict, deck_out: Path) -> list[dict]:
+    """Pictures whose file changed but that look the same are not a source change: the base takes
+    the new hash and the deck keeps its object, instead of every anchored picture being rewritten
+    when the converter changes how it writes them. `base` is updated in place; returns
+    [{"slide", "element"}] for the report."""
+    refreshed = []
+    for j, i in ((int(k), v) for k, v in ours["pairs"].items()):
+        b, o = base["slides"][i], ours["slides"][j]
+        ours_by = {e["key"]: e for e in o["elements"]}
+        for el in b["elements"]:
+            oe = ours_by.get(el["key"])
+            old, new = el["ir"].get("file"), (oe or {}).get("ir", {}).get("file")
+            if oe is None or el["kind"] != "image" or not old or not new:
+                continue
+            if identity.source_changes(el, oe) != {"image"}:
+                continue
+            if identity.normalise_ir(el["ir"], el.get("anchor")) != identity.normalise_ir(oe["ir"], oe.get("anchor")):
+                continue  # (the IR changed in a way the field hashes don't see)
+            if not same_picture_file(deck_out / old, ours["out"] / new):
+                continue
+            el["fields"] = {**el["fields"], "image": oe["fields"]["image"]}
+            el["ir_hash"] = oe["ir_hash"]
+            refreshed.append({"slide": b["key"], "element": el["key"]})
+    return refreshed
+
+
 def slide_entries(deck: dict, out: Path, keys: list[str], element_keys: list[list[str]], fingerprints: list[list[dict]]) -> list[dict]:
     """The IR part of base slides (keys, hashes, fingerprints, IR), without objects and read-back."""
     page_key = page_keys(deck, keys)

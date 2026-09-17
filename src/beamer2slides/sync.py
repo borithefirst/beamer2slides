@@ -21,8 +21,8 @@ from googleapiclient.errors import HttpError
 
 from . import identity, merge, snapshot
 from .gslides import EMU_PER_PT, emu, execute, pt
+from .paths import out_root
 
-ROOT = Path(__file__).resolve().parents[2]
 MAX_ATTEMPTS = 3
 CHUNK = 450
 SCRATCH = re.compile(r"b2s_m\d{3}")  # emit.measure_jobs' scratch slides
@@ -647,6 +647,23 @@ class Sync:
             reqs.append({"updatePageElementAltText": r})
         return reqs
 
+    def new_layout(self, slide: dict, layout_name: str, layouts: dict, pres: dict) -> dict | None:
+        """The layout a new slide is created on. In a themed deck emit puts the theme decoration
+        on the layouts (emit.plan_theme, `theme.layouts` in emit.json) and gives backgrounds that
+        don't show it a copy of their layout without it. A new slide that inherits the master
+        background takes the plain layout (the decorated one); one with a background picture of its
+        own already carries whatever decoration it shows, so it goes on the same layout as the
+        converted slides with that background - found by object id, since the copies' names in the
+        deck are the .pptx ones ("Title Only (no theme)"), not the b2s names."""
+        key = snapshot.background_key(slide, self.ours["out"])
+        if key != self.base.get("master_background"):
+            by_id = {l["objectId"]: l for l in pres.get("layouts", [])}
+            same = [b for b in self.base["slides"] if b.get("background") == key
+                    and b.get("layout") == layout_name and b.get("layoutObjectId") in by_id]
+            if same:
+                return by_id[same[0]["layoutObjectId"]]
+        return layouts.get(layout_name) or layouts.get("BLANK")
+
     def new_slide(self, w: dict, layouts: dict, moves: dict, pres: dict) -> list[dict]:
         from .emit import element_template_keys, slide_layout, subtitle_element, title_element
 
@@ -655,7 +672,7 @@ class Sync:
         slide = self.plan.deck["slides"][p["ours"]]
         sid = w["sid"]
         layout_name, title_kind = slide_layout(slide)
-        layout = layouts.get(layout_name) or layouts.get("BLANK")
+        layout = self.new_layout(slide, layout_name, layouts, pres)
         if layout is None:
             raise RuntimeError(f"the deck has no {layout_name} layout for new slide {o['key']}")
         mappings, in_place, unused = [], {}, []
@@ -1167,16 +1184,18 @@ def sync(pdf: Path, deck: str, out: Path | None = None, dry_run: bool = False, o
 
     started = time.monotonic()
     pid, folder = resolve_deck(deck)
-    out = out or folder or ROOT / "out" / pdf.stem
+    out = out or folder or out_root() / pdf.stem
     slides, drive = slides_service(), drive_service()
     base, where = snapshot.load_base(pid, folder or out, drive)
     if base is None:
         raise SystemExit(f"no sync base for presentation {pid}: convert the deck with this version first")
     ours = build_ours(pdf, out / "sync" / "ours", base, overlays)
+    refreshed = snapshot.refresh_pictures(base, ours, out)
     s = Sync(slides, drive, pid, base, ours, out, dry_run, measure)
     result = s.run()
     report = result["plan"]["report"]
     report["warnings"] += s.warnings
+    report["converged"] += [{**r, "field": "image", "how": "the same picture, written differently"} for r in refreshed]
     info = {"pdf": str(pdf), "presentationId": pid, "url": f"https://docs.google.com/presentation/d/{pid}/edit",
             "dry_run": dry_run, "base_from": where, "generation": base.get("generation", 0),
             "attempts": result["attempts"], "requests": s.sent, "seconds": round(time.monotonic() - started, 1),
@@ -1186,7 +1205,7 @@ def sync(pdf: Path, deck: str, out: Path | None = None, dry_run: bool = False, o
                                    if u["action"] not in ("keep", "none") or u.get("deck")]}
                         for p in result["plan"]["slides"]]}
     adopted = any(u["action"] == "adopt" for p in result["plan"]["slides"] for u in p.get("units", []))
-    if not dry_run and (result["work"]["writes"] or adopted):
+    if not dry_run and (result["work"]["writes"] or adopted or refreshed):
         new = s.new_base(result)
         snapshot.save_local(new, out)
         try:

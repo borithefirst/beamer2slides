@@ -876,6 +876,115 @@ def test_unit_rebuilt_inside_a_group_nested_in_a_user_group(tmp_path):
     assert not s.warnings
 
 
+def _picture_files(folder: Path, transparent: bool, mark=(10, 5, 40, 15), ground=(255, 255, 255)):
+    """A small picture on a transparent or a painted ground, written to <folder>/figures/f1.png."""
+    from PIL import Image, ImageDraw
+    img = Image.new("RGBA", (60, 20), (*ground, 0 if transparent else 255))
+    ImageDraw.Draw(img).rectangle(mark, fill=(0, 0, 0, 255))
+    if not transparent:
+        img = img.convert("RGB")
+    (folder / "figures").mkdir(parents=True, exist_ok=True)
+    img.save(folder / "figures" / "f1.png")
+    return folder
+
+
+def _picture_deck(deck_out: Path, ours_out: Path):
+    """A one-slide base with a title and an anchored picture, and ours from `ours_out`'s files."""
+    ir = {"id": "p0i0", "kind": "image", "role": "math", "bbox": [20.0, 60.0, 80.0, 80.0], "file": "figures/f1.png",
+          "alt": None}
+
+    def element(out: Path, oid=None):
+        h, fields = identity.ir_fields(ir, out)
+        el = {"key": "image/math/0", "id": ir["id"], "kind": "image", "role": "math", "ir_hash": h, "fields": fields,
+              "fingerprint": identity.fingerprint(ir, out), "anchor": None, "ir": ir}
+        if oid:
+            el.update(objects=[oid], main=oid,
+                      readback={oid: readback([40, 120, 160, 160], kind="image", image="c1")})
+        return el
+    title = entry("text/title/0", text_ir("Figures", (10, 10, 100, 24), "p0t0", "title"), "b2s_s000_t0")
+    base = {"version": 1, "generation": 0, "presentationId": "P", "master_background": None,
+            "slides": [base_slide("figs", "b2s_s000", [title, element(deck_out, "b2s_s000_i0")], title="Figures")]}
+    ours = {"slides": [{**ours_of(base["slides"][0]),
+                        "elements": [{k: v for k, v in title.items() if k not in ("objects", "main", "readback")},
+                                     element(ours_out)]}],
+            "pairs": {0: 0}, "out": ours_out}
+    return base, ours, {"revisionId": "r", "slides": [live(base["slides"][0])]}
+
+
+def test_a_picture_written_differently_is_no_source_change(tmp_path):
+    """Anchored pictures became RGBA (a transparent ground instead of a white one): the file sha1
+    changes though the slide looks the same. Rewriting every one of them on the first sync after
+    that would churn the deck, so the base takes the new hash and nothing is written."""
+    from beamer2slides import snapshot
+    deck_out = _picture_files(tmp_path / "deck", transparent=False)
+    ours_out = _picture_files(tmp_path / "ours", transparent=True)
+    base, ours, theirs = _picture_deck(deck_out, ours_out)
+    el, oe = base["slides"][0]["elements"][1], ours["slides"][0]["elements"][1]
+    assert identity.source_changes(el, oe) == {"image"}
+    assert merge.has_writes(merge.plan_merge(copy.deepcopy(base), ours, theirs), ["b2s_s000"])
+    assert snapshot.refresh_pictures(base, ours, deck_out) == [{"slide": "figs", "element": "image/math/0"}]
+    assert identity.source_changes(el, oe) == set()
+    mplan = merge.plan_merge(base, ours, theirs)
+    assert unit(mplan, "figs", "image/math/0")["action"] == "keep"
+    assert not merge.has_writes(mplan, ["b2s_s000"])
+
+
+def test_a_picture_that_really_changed_is_still_rewritten(tmp_path):
+    from beamer2slides import snapshot
+    deck_out = _picture_files(tmp_path / "deck", transparent=False)
+    ours_out = _picture_files(tmp_path / "ours", transparent=True, mark=(10, 5, 50, 15))
+    base, ours, theirs = _picture_deck(deck_out, ours_out)
+    assert snapshot.refresh_pictures(base, ours, deck_out) == []
+    mplan = merge.plan_merge(base, ours, theirs)
+    assert unit(mplan, "figs", "image/math/0")["action"] == "recreate"
+
+
+def test_the_ground_a_picture_dropped_must_be_flat(tmp_path):
+    """The older picture painted the page under it: the same picture on a transparent ground is
+    the same only where what it dropped was that one colour."""
+    from beamer2slides.snapshot import same_picture_file
+    clear = _picture_files(tmp_path / "clear", transparent=True) / "figures" / "f1.png"
+    for ground in ((255, 255, 255), (238, 245, 255)):
+        painted = _picture_files(tmp_path / f"g{ground[0]}", transparent=False, ground=ground) / "figures" / "f1.png"
+        assert same_picture_file(painted, clear)
+    # the older picture had a second mark where the new one is clear: not the same picture
+    from PIL import Image, ImageDraw
+    busy = Image.open(painted).convert("RGB")
+    ImageDraw.Draw(busy).rectangle((45, 2, 58, 18), fill=(0, 0, 0))
+    busy.save(tmp_path / "busy.png")
+    assert not same_picture_file(tmp_path / "busy.png", clear)
+
+
+def test_a_new_slide_lands_on_the_layout_of_its_background(tmp_path):
+    """The theme decoration now sits on the layouts, and backgrounds that don't show it got a copy
+    of their layout without it. A new slide with a background picture of its own therefore goes on
+    the layout of the converted slides with that background, not on the decorated one."""
+    from beamer2slides.snapshot import background_key
+    from beamer2slides.sync import Sync
+    (tmp_path / "backgrounds").mkdir()
+    for name, colour in (("bg-000.png", (250, 250, 250)), ("bg-003.png", (20, 20, 40)), ("bg-new.png", (7, 7, 7))):
+        from PIL import Image
+        Image.new("RGB", (16, 9), colour).save(tmp_path / "backgrounds" / name)
+    page = lambda name: {"background": f"backgrounds/{name}"}
+    main, standout = (background_key(page(n), tmp_path) for n in ("bg-000.png", "bg-003.png"))
+    s = Sync.__new__(Sync)
+    s.ours = {"out": tmp_path}
+    s.base = {"master_background": main, "slides": [
+        {"key": "a", "layout": "TITLE_ONLY", "background": main, "layoutObjectId": "L_main"},
+        {"key": "b", "layout": "TITLE_ONLY", "background": standout, "layoutObjectId": "L_plain"},
+        {"key": "c", "layout": "BLANK", "background": standout, "layoutObjectId": "L_blank"}]}
+    pres = {"layouts": [{"objectId": "L_main", "layoutProperties": {"name": "TITLE_ONLY"}},
+                        {"objectId": "L_plain", "layoutProperties": {"name": "Title Only (no theme)"}},
+                        {"objectId": "L_blank", "layoutProperties": {"name": "Blank (no theme)"}},
+                        {"objectId": "L_bare", "layoutProperties": {"name": "BLANK"}}]}
+    layouts = {l["layoutProperties"]["name"]: l for l in pres["layouts"]}
+    pick = lambda name, kind="TITLE_ONLY": s.new_layout(page(name), kind, layouts, pres)["objectId"]
+    assert pick("bg-000.png") == "L_main"       # the master background: the layout draws the decoration
+    assert pick("bg-003.png") == "L_plain"      # a standout frame: the copy without it
+    assert pick("bg-003.png", "BLANK") == "L_blank"
+    assert pick("bg-new.png") == "L_main"       # unknown: the named layout, as before
+
+
 def test_conversion_is_stable():
     """Converting the same PDF twice gives the same keys and hashes (a no-op sync sends nothing)."""
     import tempfile
