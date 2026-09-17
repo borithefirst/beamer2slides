@@ -34,6 +34,11 @@ def paragraph_text(p: dict) -> str:
     return "".join(r["text"] for r in p["runs"])
 
 
+def ball_labels(slide: dict) -> list[str]:
+    """List labels drawn on balls or boxes, in reading order (classify.literal_list_numbers)."""
+    return [e["number"]["text"] for e in sorted((e for e in slide["elements"] if e.get("number")), key=lambda e: e["bbox"][1])]
+
+
 def kinds(slide: dict) -> list[str]:
     return [e["kind"] for e in slide["elements"]]
 
@@ -173,9 +178,9 @@ def test_lettered_labels_and_title_breaks():
     slide = deck("14_misc")["slides"][0]
     paras = [paragraph_text(p) for e in texts(slide) for p in e["paragraphs"]]
     assert paras[0] == "A rather long frame title that does not fit on a single line" + chr(11) + "of the slide"
-    assert "a)\tFirst lettered item" in paras and "b)\tSecond lettered item" in paras
-    icons = [e for e in slide["elements"] if e.get("role") == "icon"]
-    assert len(icons) == 2  # the balls under the letters
+    assert "First lettered item" in paras and "Second lettered item" in paras
+    # The balls under the labels are pictures, each label centred on its ball.
+    assert ball_labels(slide) == ["a)", "b)", "1", "2"]  # then an inner numbered list
 
 
 def test_icon_font_glyphs_are_pictures():
@@ -250,8 +255,39 @@ def test_tabular_without_rules_is_a_borderless_table():
 
 def test_image_bullets_numbered_on_balls():
     slide = deck("04_theme_blocks")["slides"][2]
-    numbered = [p for e in texts(slide) for p in e["paragraphs"] if p["bullet"] and p["bullet"]["kind"] == "image"]
-    assert [p["bullet"]["text"] for p in numbered] == ["1", "2"]
+    # Slides can't draw numbers on balls: each ball is a picture with its number centred on it.
+    assert ball_labels(slide) == ["1", "2"]
+    assert all(e["anchor"] for e in slide["elements"] if e.get("number"))
+
+
+def test_nested_and_two_digit_ball_numbers():
+    d = deck("19_labels_on_graphics")
+    assert ball_labels(d["slides"][0]) == ["1", "2", "1", "2", "3"]
+    assert ball_labels(d["slides"][1]) == ["9", "10", "11"]
+
+
+def test_words_on_small_graphics_become_holes():
+    slide = deck("19_labels_on_graphics")["slides"][7]
+    body = texts(slide)[1]["paragraphs"]
+    # Circled numbers, keycaps and framed words are pictures over gaps in the native line.
+    assert [r["text"] for r in body[0]["runs"] if not r.get("hole")] == ["A ", "circled number and a ", "two-digit one."]
+    assert sum(bool(r.get("hole")) for p in body[:3] for r in p["runs"]) == 6
+    struck = [r for r in body[3]["runs"] if r.get("strike")]
+    assert [r["text"].strip() for r in struck] == ["struck out,"]
+    assert any(r.get("underline") and r["text"] == "underlined" for r in body[3]["runs"])
+    badge = texts(deck("19_labels_on_graphics")["slides"][11])[2]["paragraphs"][0]
+    assert sum(bool(r.get("hole")) for r in badge["runs"]) == 2
+
+
+def test_proof_mark_on_a_panel_is_a_picture():
+    slide = deck("19_labels_on_graphics")["slides"][9]
+    assert [e["id"] for e in slide["elements"] if e["kind"] == "image"] == ["p9k0"]
+
+
+def test_bar_accent_joins_its_letter():
+    slide = deck("13_inline_math")["slides"][1]
+    runs = [r["text"] for r in texts(slide)[1]["paragraphs"][0]["runs"]]
+    assert "X̄" in runs and not any(r.endswith("Var(¯") for r in runs)
 
 
 def test_code_block_keeps_indentation():
@@ -370,8 +406,7 @@ def test_blocks_side_by_side_math_and_lists():
     assert len(maths) == 1, "the display equation, its limits and its fraction are one picture"
     assert not [e for e in texts(d["slides"][1]) if paragraph_text(e["paragraphs"][0]).strip() in ("0", "1", "3")]
     assert len([e for e in d["slides"][1]["elements"] if e["kind"] == "shape" and e.get("title_bar")]) == 2
-    numbered = [p for e in texts(d["slides"][2]) for p in e["paragraphs"] if p["bullet"]]
-    assert [p["bullet"]["kind"] for p in numbered] == ["image", "image"], "the last ball grazes the shadow corner"
+    assert ball_labels(d["slides"][2]) == ["1", "2"], "the last ball grazes the shadow corner"
 
 
 def test_title_page_box_overlapping_parts_is_one_block():

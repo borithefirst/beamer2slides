@@ -1,0 +1,166 @@
+\documentclass[aspectratio=169]{beamer}
+% Text drawn on or around graphics: the text becomes native, the graphic a picture, a shape
+% or background. Each frame checks that the two still line up in Slides.
+\usetheme{Madrid}
+\usepackage{amssymb}
+\usepackage[normalem]{ulem}
+\usepackage{soul}
+\usepackage{tikz}
+\usetikzlibrary{tikzmark}
+\newcommand{\circled}[1]{\tikz[baseline=(c.base)]\node[circle,draw,inner sep=1pt](c){#1};}
+\newcommand{\keycap}[1]{\tikz[baseline=(k.base)]\node[draw,rounded corners=2pt,inner sep=2pt,fill=gray!15](k){\strut #1};}
+\setbeamertemplate{theorems}[numbered]
+\title{Labels on graphics}
+\author{Test}
+\date{}
+
+\begin{document}
+
+\begin{frame}{Ball numbers Slides can count}
+  \begin{enumerate}
+    \item First item
+    \item Second item
+      \begin{enumerate}
+        \item Nested one
+        \item Nested two
+      \end{enumerate}
+    \item Third item
+  \end{enumerate}
+\end{frame}
+
+\begin{frame}{Two-digit balls}
+  \begin{enumerate}
+    \setcounter{enumi}{8}
+    \item Ninth item
+    \item Tenth item
+    \item Eleventh item
+  \end{enumerate}
+\end{frame}
+
+{
+\setbeamertemplate{enumerate items}[circle]
+\begin{frame}{Circle numbers}
+  \begin{enumerate}
+    \item One on a circle
+    \item Two on a circle
+  \end{enumerate}
+  A paragraph between the lists.
+  \begin{enumerate}
+    \setcounter{enumi}{2}
+    \item Three continues
+  \end{enumerate}
+\end{frame}
+}
+
+{
+\setbeamertemplate{enumerate items}[square]
+\begin{frame}{Square numbers}
+  \begin{enumerate}
+    \item One on a square
+    \item Two on a square
+    \item Three on a square
+  \end{enumerate}
+\end{frame}
+}
+
+\begin{frame}{Lettered and custom labels}
+  \begin{enumerate}[(a)]
+    \item Lettered in parentheses
+    \item Second letter
+  \end{enumerate}
+  \begin{enumerate}[i.]
+    \item Roman one
+    \item Roman two
+  \end{enumerate}
+  \begin{itemize}
+    \item[\checkmark] Done with a check mark
+    \item[$\square$] Open box
+    \item[--] Dash item
+    \item[\textbf{Q:}] A question label
+  \end{itemize}
+\end{frame}
+
+{
+\setbeamertemplate{sections/subsections in toc}[square]
+\section{Alpha}\subsection{First part}\subsection{Second part}
+\section{Beta}
+\section{Gamma}
+\begin{frame}{Squares in the outline}
+  \tableofcontents
+\end{frame}
+}
+
+{
+\setbeamertemplate{sections/subsections in toc}[circle]
+\begin{frame}{Circles in the outline}
+  \tableofcontents
+\end{frame}
+}
+
+\begin{frame}{Inline boxes and marks}
+  A \circled{1} circled number and a \circled{12} two-digit one.
+
+  Press \keycap{Ctrl} + \keycap{C} to copy.
+
+  Some \fbox{framed words} and a \fcolorbox{red}{yellow}{coloured frame} here.
+
+  A \colorbox{green!30}{highlight}, \sout{struck out}, \underline{underlined} and \uwave{wavy} text.
+
+  A footnote marker\footnote{The footnote text.} at the end.
+\end{frame}
+
+\begin{frame}{More marks}
+  Soul marks: \hl{highlighted words}, \st{soul strike} and \ul{soul underline} in a line.
+
+  A \textcircled{a} text circle, a boxed $\boxed{x+1}$ formula and \framebox[2.5cm]{wide frame} here.
+
+  \begin{itemize}
+    \item[\circled{A}] A custom circled item label
+    \item[\circled{B}] And a second one
+  \end{itemize}
+  {\setbeamertemplate{enumerate items}[default]
+  \begin{enumerate}
+    \item Default numbers
+      \begin{enumerate}
+        \item Nested default
+      \end{enumerate}
+  \end{enumerate}}
+\end{frame}
+
+\begin{frame}{Theorems}
+  \begin{theorem}[Pythagoras]
+    For a right triangle the squares of the legs add up to the square of the hypotenuse.
+  \end{theorem}
+  \begin{proof}
+    Rearrange four copies of the triangle inside a square.
+  \end{proof}
+  \begin{definition}
+    A triangle is right when one angle is ninety degrees.
+  \end{definition}
+\end{frame}
+
+\begin{frame}{Coloured boxes}
+  \begin{beamercolorbox}[rounded=true,shadow=true,center,wd=6cm,sep=6pt]{block title}
+    A centred callout box
+  \end{beamercolorbox}
+  \vspace{1em}
+  \begin{beamercolorbox}[wd=\textwidth,sep=4pt]{title}
+    A full-width banner with text on it
+  \end{beamercolorbox}
+  \vspace{1em}
+  \centering
+  \tikz\node[draw=blue,fill=blue!10,rounded corners,minimum width=4cm,minimum height=1cm]{Text in a TikZ node};
+\end{frame}
+
+\begin{frame}{Annotations}
+  The \tikzmarknode{w}{important} word gets an arrow.
+  \begin{tikzpicture}[remember picture, overlay]
+    \draw[->, red, thick] ([yshift=-2pt]w.south) -- ++(0,-1cm) node[below, text=red] {note};
+  \end{tikzpicture}
+
+  \vspace{2cm}
+  A \tikz[baseline]\node[anchor=base,fill=orange!40,rounded corners=3pt,inner sep=2pt]{badge}; inline and a
+  \tikz[baseline]\node[anchor=base,draw,dashed,inner sep=2pt]{dashed box}; too.
+\end{frame}
+
+\end{document}

@@ -56,7 +56,17 @@ a per-slide background picture.
   nothing left in the background on top; verified against the rendered colour. Also
   figure clusters of plain filled rectangles (`plain_rectangles`, role `rule`).
 - Text decorations (`text_decorations`): a thin rule tightly under words → run `underline`,
+  a rule through the x-height → run `strike` (ulem draws one piece per word: pieces are merged),
   a filled box tightly around words on one line → run `highlight` (backgroundColor).
+- Words on small graphics (`graphic_holes`: `\circled`, keycaps, `\fbox`, badges, dashed boxes,
+  `\textcircled`'s overlapping glyphs) become holes like inline formulas, so text and graphic
+  move together; `Line.hole_pads` widens a hole to the graphic. Small graphics on a native
+  panel (the QED box) become pictures (`specks_on_panels`), or the panel would hide them.
+- Accents PDFium reports as separate chars (`ACCENTS`: ¯ ˆ ˜ …) become combining marks on
+  their letter (X̄), also when the accent landed in the previous span.
+- `formula_shifts` predicts the picture offset from Slides' symbol advances
+  (`emit.SYMBOL_ADVANCE_EM`, measured by `tools/probe_symbols.py`) and TeX's stretched spaces
+  (`space_shift`); holes get `HOLE_PAD` (1 pt) each side so the picture never touches a word.
 - Inline formula holes (`formula_holes`, `Line.holes`): in a line of prose, complex math
   segments (bars, CMEX, stacked or second-level scripts) become image elements (role `math`,
   `anchor` = text element id, grouped with it). The text keeps a run with `hole` = width.
@@ -68,6 +78,8 @@ a per-slide background picture.
   `plain_tables`: rule-less tabulars (≥3 rows, same cell count, short cells) → borderless tables.
 - `literal_list_numbers`: when Slides would number a list wrongly (TOC split into boxes),
   every number on the slide becomes literal text with a tab (Slides can't set a start number).
+  Labels on balls, circles and squares (numbers or letters) always become the ball picture with
+  a centred text box on it (`number`, `emit.number_box_requests`), grouped with the item text.
   A number drawn on a ball or box instead becomes its own text box centred on the ball picture
   (`number` on the image element, `emit.number_box_requests`), grouped with the item text.
 - Grouping in emit: blocks (`block_groups`: shapes with the same `block` plus content), formula

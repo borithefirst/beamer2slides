@@ -28,6 +28,7 @@ FRAME_COUNTER_RE =re.compile(r"^\d{1,4}( ?/ ?\d{1,4})?$")
 EQ_NUMBER_RE = re.compile(r"^\(\d+(\.\d+)*[a-z]?\)$")
 MATH_OPERATORS = set("=+−<>≤≥×·/∑∏∫∈∉⊂⊆∪∩→←⇒⇔≈≠±∞")
 SMALL_IMAGE_PT = 12
+HOLE_PAD = 1.0  # pt of page around an inline formula picture (antialiasing, italic overhang)
 
 
 # ---------------------------------------------------------------- geometry
@@ -130,6 +131,7 @@ class Span:
     info: FontInfo
     link: str | None = None
     underline: bool = False
+    strike: bool = False          # \sout
     highlight: str | None = None  # background colour (\colorbox)
 
 
@@ -143,9 +145,52 @@ class Line:
     fractions: list = field(default_factory=list)  # (bar, numerator spans, denominator spans)
     tab: Span | None = None  # content after a line label ("4:") starts here, reached by a tab
     holes: list = field(default_factory=list)  # complex inline formulas: pictures over gaps in the text
+    hole_pads: list = field(default_factory=list)  # graphics drawn around words of a hole (a circle, a badge)
+
+    def hole_rect(self, hole: list) -> "Rect":
+        """A hole's extent: its glyphs and the graphics drawn around them."""
+        rect = union_all(s.rect for s in hole)
+        return union_all([rect] + [g for g in self.hole_pads if g.intersects(rect.expand(0.5))])
+
+    def add_holes(self, groups: list[list]) -> None:
+        """Merge new holes with the line's: overlapping holes become one, and a word lying over
+        or under a hole (a wavy underline's glyphs below it) or kerned into it (the "TEX" of the
+        LaTeX logo) joins it."""
+        holes = [list(h) for h in self.holes + groups]
+        off_baseline = lambda s: abs(s.baseline - self.baseline) > 0.1 * self.size
+        for h in holes:
+            grown = True
+            while grown:
+                r = self.hole_rect(h)
+                overlap_x = lambda s: min(s.rect.x1, r.x1) - max(s.rect.x0, r.x0)
+                # (a letter raised or lowered into its neighbour, not an italic overhang)
+                more = [s for s in self.content if s not in h and s.text.strip() and s.rect.w > 0
+                        and (overlap_x(s) >= 0.5 * s.rect.w or
+                             (overlap_x(s) >= min(1.0, 0.5 * s.rect.w) and (off_baseline(s) or any(map(off_baseline, h)))))]
+                h += more
+                grown = bool(more)
+        merged = True
+        while merged:
+            merged = False
+            for i, a in enumerate(holes):
+                for b in holes[i + 1:]:
+                    if set(map(id, a)) & set(map(id, b)) or self.hole_rect(a).intersects(self.hole_rect(b)):
+                        a += [s for s in b if s not in a]
+                        holes.remove(b)
+                        merged = True
+                        break
+                if merged:
+                    break
+        self.holes = [sorted(h, key=lambda s: s.rect.x0) for h in holes]
 
     def __post_init__(self):
         self.spans.sort(key=lambda s: s.rect.x0)
+        # An accent reaching left of its letter follows the letter (it becomes a combining mark).
+        for i in range(len(self.spans) - 1):
+            a, b = self.spans[i], self.spans[i + 1]
+            if a.text.strip() in ACCENTS and b.text.strip() not in ACCENTS and \
+                    min(a.rect.x1, b.rect.x1) - max(a.rect.x0, b.rect.x0) > 0.5 * a.rect.w:
+                self.spans[i], self.spans[i + 1] = b, a
 
     @property
     def rect(self) -> Rect:
@@ -231,6 +276,9 @@ def script_of(span: Span, line: "Line") -> str | None:
 
 
 DOUBLE_STRUCK = {"C": "ℂ", "H": "ℍ", "N": "ℕ", "P": "ℙ", "Q": "ℚ", "R": "ℝ", "Z": "ℤ"}
+# Accents TeX sets as glyphs of their own over a letter (\bar{X}): combining marks in Slides.
+ACCENTS = {"¯": "̄", "ˆ": "̂", "˜": "̃", "˙": "̇", "¨": "̈", "´": "́",
+           "`": "̀", "ˇ": "̌", "˘": "̆"}
 
 
 def math_text(font: str, text: str) -> tuple[str, bool]:
@@ -288,7 +336,7 @@ def span_runs(spans: list[Span]) -> list[dict]:
             script = "super" if shift < -0.12 * main.size else "sub" if shift > 0.12 * main.size else None
         style = {"font": s.font, "family": family, "size": round(main.size if script else s.size, 2),
                  "bold": s.info.bold, "italic": italic, "smallcaps": s.info.smallcaps, "color": s.color,
-                 "link": s.link, "script": script, "underline": s.underline, "highlight": s.highlight}
+                 "link": s.link, "script": script, "underline": s.underline, "strike": s.strike, "highlight": s.highlight}
         if runs and all(runs[-1][k] == v for k, v in style.items()):
             runs[-1]["text"] += text
         else:
@@ -454,33 +502,53 @@ class PageClassifier:
         return (r.h <= 3 and r.w >= 0.5 * self.W) or (r.w <= 3 and r.h >= 0.5 * self.H)
 
     def text_decorations(self, spans: list[Span]) -> None:
-        """Underlines and \\colorbox highlights become text styles: a thin rule just below a
-        stretch of words, or a filled box tightly around words and touching no other graphics.
+        """Underlines, strike-throughs and \\colorbox highlights become text styles: a thin rule
+        just below or through a stretch of words, or a filled box tightly around words and
+        touching no other graphics.
         Sets the span attributes and remembers the drawings (they leave the background with
         the text, and are not graphics)."""
         self.decor_ids: set[str] = set()
         self.decor_rects: dict[str, list[Rect]] = {}  # span id -> drawings styling it
         flat = [s for s in spans if s.horizontal and s.text.strip()]
         drawings = [(d, Rect.of(d["bbox"])) for d in self.page["drawings"]]
-        for d, r in drawings:
+        is_rule = lambda d, r: r.h <= 1.2 and ((d["type"] == "f" and d["items"] == "re") or (d["type"] == "s" and d["items"] == "l"))
+        # ulem draws a rule per word and per space: pieces touching end to end are one rule.
+        candidates: list[tuple[list[dict], Rect]] = [([d], r) for d, r in drawings if not is_rule(d, r)]
+        for d, r in sorted(((d, r) for d, r in drawings if is_rule(d, r)), key=lambda x: (round(x[1].cy), x[1].x0)):
+            last = next((c for c in reversed(candidates) if is_rule(c[0][0], c[1])), None)
+            if last and last[0][0]["type"] == d["type"] and abs(last[1].cy - r.cy) <= 0.2 and -0.1 <= r.x0 - last[1].x1 <= 1:
+                candidates[candidates.index(last)] = (last[0] + [d], last[1].union(r))
+            else:
+                candidates.append(([d], r))
+        for group, r in candidates:
+            d = group[0]
             if self.is_decoration(r) or r.w < 2 or r.w * r.h >= 0.95 * self.W * self.H:
                 continue
             ops = d["items"]
-            if r.h <= 1.2 and ((d["type"] == "f" and ops == "re") or (d["type"] == "s" and ops == "l")):
-                words = sorted((s for s in flat if r.x0 - 1 <= s.rect.x0 and s.rect.x1 <= r.x1 + 1
-                                and 0 < r.cy - s.baseline <= 0.45 * s.size), key=lambda s: s.rect.x0)
+            if is_rule(d, r):
+                within = lambda s: r.x0 - 1 <= s.rect.x0 and s.rect.x1 <= r.x1 + max(1.0, 0.3 * s.size)  # "out," past the rule
+                words = sorted((s for s in flat if within(s) and 0 < r.cy - s.baseline <= 0.45 * s.size), key=lambda s: s.rect.x0)
+                # \sout: the rule runs through the middle of the lower-case letters.
+                struck = sorted((s for s in flat if within(s) and 0.12 * s.size <= s.baseline - r.cy <= 0.4 * s.size),
+                                key=lambda s: s.rect.x0)
+                strike = not words
+                words = words or struck
                 if not words:
                     continue
                 size = max(s.size for s in words)
                 gaps = [b.rect.x0 - a.rect.x1 for a, b in zip(words, words[1:])]
                 covered = sum(s.rect.w for s in words)
-                below = any(s.rect.x0 < r.x1 and r.x0 < s.rect.x1 and s.baseline > r.cy and s.rect.y0 < r.cy + 0.25 * size
-                            for s in flat)
+                below = not strike and any(s.rect.x0 < r.x1 and r.x0 < s.rect.x1 and s.baseline > r.cy and s.rect.y0 < r.cy + 0.25 * size
+                                           for s in flat)
                 if below or covered < 0.8 * r.w or any(g > 0.6 * size for g in gaps) or \
+                        (strike and max(s.baseline for s in words) - min(s.baseline for s in words) > 0.1 * size) or \
                         abs(words[0].rect.x0 - r.x0) > 0.3 * size or abs(words[-1].rect.x1 - r.x1) > 0.3 * size:
                     continue
                 for s in words:
-                    s.underline = True
+                    if strike:
+                        s.strike = True
+                    else:
+                        s.underline = True
             elif d["type"] == "f" and ops == "re" and d.get("fill") and d.get("fill_opacity", 1.0) >= 0.99:
                 inside = [s for s in flat if r.contains_rect(s.rect, tol=0.5)]
                 if not inside or any(s.rect.intersects(r) and s not in inside for s in flat):
@@ -497,7 +565,7 @@ class PageClassifier:
                 words = inside
             else:
                 continue
-            self.decor_ids.add(d["id"])
+            self.decor_ids |= {g["id"] for g in group}
             for s in words:
                 self.decor_rects.setdefault(s.id, []).append(r)
 
@@ -757,12 +825,8 @@ class PageClassifier:
             x0 = min(s.rect.x0 for s in rest)
             if ir.x1 <= x0 + 0.5 and x0 - ir.x1 <= 1.5 * line.size and \
                     line.baseline - 0.9 * line.size <= ir.cy <= line.baseline + 0.1 * line.size:
-                token = "".join(s.text.strip() for s in on_image)
-                if token and not token.isdigit():
-                    # A lettered ball ("a)"): no Slides preset. The ball stays a picture, its
-                    # label native text, with a tab to the item text.
-                    line.tab = min(rest, key=lambda s: s.rect.x0)
-                    return
+                # A label on the ball (1, (a), iv.): literal_list_numbers centres it on the ball picture.
+                token = "".join(s.text.strip() for s in sorted(on_image, key=lambda s: s.rect.x0))
                 line.bullet = {"kind": "image", "image": im["id"], "text": token, "bbox": ir.as_list(),
                                "label": label_of(on_image)}
                 line.bullet_spans = on_image
@@ -858,6 +922,45 @@ class PageClassifier:
                 holes.append(seg)
         return holes
 
+    def graphic_holes(self, line: Line) -> bool:
+        """Words drawn in or on a small graphic in a line of prose (a TikZ circle or badge, a
+        keycap, an \\fbox): the graphic would stay where the PDF has it while Slides sets the
+        words at other widths, so words and graphic become one picture over a gap in the text,
+        like a formula hole. True if the line got such holes."""
+        size = line.size
+        spans = [s for s in line.spans if s.text.strip()]
+        if len(spans) < 3:
+            return False
+        if not hasattr(self, "_word_graphics"):
+            # (an \fbox's top and bottom rules look like a table of one line)
+            frames = [f for f in (union_all(r["rect"] for r in g).expand(1) for g in self.table_rules) if f.h > 2.5 * self.body]
+            self._word_graphics = [c for c in cluster_rects(self.graphics, gap=0.5)
+                                   if not any(f.contains_rect(c) for f in frames)] if self.graphics else []
+        groups = []
+        for g in self._word_graphics:
+            if g.h > 2.2 * size or not line.baseline - size <= g.cy <= line.baseline + 0.4 * size:
+                continue
+            touched = [s for s in spans if min(s.rect.x1, g.x1) - max(s.rect.x0, g.x0) > 0.3 * s.rect.w]
+            if not touched or g.w > sum(s.rect.w for s in touched) + 2 * size:
+                continue  # nothing on it, or a rule or frame reaching well past the words
+            if touched == spans[:1]:
+                continue  # a label on a box at the line start: a list number (detect_bullet)
+            groups.append((touched, g))
+        # Glyphs set on top of each other on one baseline (\textcircled: a circle glyph over a
+        # letter) would come apart as text.
+        for i, a in enumerate(spans):
+            for b in spans[i + 1:]:
+                if not any(t[:1] in ACCENTS or t[-1:] in ACCENTS for t in (a.text.strip(), b.text.strip())) and \
+                        abs(a.baseline - b.baseline) <= 0.3 * size and \
+                        min(a.rect.x1, b.rect.x1) - max(a.rect.x0, b.rect.x0) > 0.5 * min(a.rect.w, b.rect.w) > 0:
+                    groups.append(([a, b], union_all([a.rect, b.rect])))
+        outside = [s for s in spans if not any(s in t for t, _ in groups)]
+        if not groups or sum(sum(ch.isalpha() for ch in s.text) >= 2 for s in outside) < 2:
+            return False
+        line.hole_pads = [g for _, g in groups]
+        line.add_holes([t for t, _ in groups])
+        return True
+
     def math_kind(self, line: Line) -> str | None:
         """None for plain text, 'inline' for math that Slides text can carry (symbols,
         single-level sub/superscripts), 'complex' for anything that must stay a picture."""
@@ -883,8 +986,8 @@ class PageClassifier:
         if holes:
             # Prose with a few complex formulas: the words stay text, each formula becomes a
             # picture placed over a gap left in the text.
-            line.holes = holes
-            hole_ids = {id(s) for h in holes for s in h}
+            line.add_holes(holes)
+            hole_ids = {id(s) for h in line.holes for s in h}
             line.fractions = [f for f in fractions if not any(id(s) in hole_ids for s in f[1] + f[2])]
             return "inline"
         if bars or "�" in line.text:
@@ -907,6 +1010,8 @@ class PageClassifier:
         for line in lines:
             if not all(s.horizontal for s in line.spans):
                 line.reason = "rotated"
+            elif self.graphic_holes(line):
+                pass  # prose with boxed or circled words
             elif self.inside_figure_share(line) >= 0.5:
                 line.reason = "figure"
             elif line.size <= 0.7 * self.body and (line.rect.y1 <= 0.13 * self.H or line.rect.y0 >= 0.87 * self.H):
@@ -1124,7 +1229,9 @@ class PageClassifier:
         runs: list[dict] = []
         prev: Span | None = None
         for li, line in enumerate(par.lines):
-            for si, (span, forced) in enumerate(reading_order(line)):
+            order = reading_order(line)
+            accent = ""  # an accent at the end of a span, for the letter under it in the next one
+            for si, (span, forced) in enumerate(order):
                 if span == FRACTION_SLASH:
                     main = line.main
                     runs.append({"text": FRACTION_SLASH, "font": main.font, "family": main.info.family,
@@ -1139,7 +1246,8 @@ class PageClassifier:
                     if span is not min(hole, key=lambda s: s.rect.x0):
                         continue
                     # A gap as wide as the formula; emit fills it with no-break spaces.
-                    x0, x1 = min(s.rect.x0 for s in hole), max(s.rect.x1 for s in hole)
+                    extent = line.hole_rect(hole)
+                    x0, x1 = extent.x0, extent.x1
                     if prev is not None and runs:
                         gap = x0 - prev.rect.x1
                         if (si == 0 or gap > 0.15 * line.size) and not runs[-1]["text"].endswith(" "):
@@ -1147,17 +1255,32 @@ class PageClassifier:
                     main = line.main
                     # What precedes the formula on its line, for emit to predict where Slides
                     # will actually leave the gap (substitute fonts are not exactly as wide).
-                    before = [[round(s.rect.w, 2), s.font, s.info.family, s.info.bold, s.info.italic]
+                    before = [[round(s.rect.w, 2), s.font, s.info.family, s.info.bold, s.info.italic,
+                               # math spacing is part of the span (" ≥"): Slides sets a plain space there
+                               math_text(s.font, s.text)[0] if s.info.family == "math" else s.text, round(s.rect.x0, 2)]
                               for s in line.content if s.rect.x1 <= x0 + 0.5 and s.info.family != "icon"
                               and not any(s in h for h in line.holes)]
                     runs.append({"text": " ", "font": main.font, "family": main.info.family,
                                  "size": round(line.size, 2), "bold": False, "italic": False, "smallcaps": False,
                                  "color": main.color, "link": None, "script": None, "underline": False,
-                                 "highlight": None, "hole": round(x1 - x0, 2), "hole_x0": round(x0, 2),
+                                 # (the picture is cropped with HOLE_PAD on both sides: room for that too)
+                                 "highlight": None, "hole": round(x1 - x0 + 2 * HOLE_PAD, 2), "hole_x0": round(x0, 2),
                                  "before": before})
                     prev = max(hole, key=lambda s: s.rect.x1)
                     continue
                 text = span.text
+                if text.strip() in ACCENTS and prev is not None and runs and not runs[-1].get("hole") and \
+                        span.rect.x0 < prev.rect.x1 - 0.2 and prev.rect.x0 < span.rect.x1:
+                    runs[-1]["text"] += ACCENTS[text.strip()]  # over the letter before it
+                    continue
+                if accent:
+                    lead = len(text) - len(text.lstrip())
+                    text, accent = text[:lead + 1] + accent + text[lead + 1:], ""
+                body = text.rstrip()
+                nxt = order[si + 1][0] if si + 1 < len(order) else None
+                if len(body) >= 2 and body[-1] in ACCENTS and isinstance(nxt, Span) and nxt.rect.x0 < span.rect.x1 - 0.2:
+                    # "Var(¯" then "X": PDFium reads \bar{X}'s bar with the text before the letter
+                    text, accent = body[:-1] + text[len(body):], ACCENTS[body[-1]]
                 if forced == "sub":  # denominator: follows the slash directly
                     pass
                 elif prev is not None:
@@ -1202,12 +1325,15 @@ class PageClassifier:
                     "size": round(line.size if script else span.size, 2),
                     "bold": span.info.bold, "italic": italic, "smallcaps": span.info.smallcaps,
                     "color": span.color, "link": span.link, "script": script,
-                    "underline": span.underline, "highlight": span.highlight,
+                    "underline": span.underline, "strike": span.strike, "highlight": span.highlight,
                 }
-                if runs and runs[-1]["text"].endswith(" ") and (runs[-1]["underline"], runs[-1]["highlight"]) != \
-                        (style["underline"], style["highlight"]) and (runs[-1]["underline"] or runs[-1]["highlight"]):
-                    runs[-1]["text"] = runs[-1]["text"][:-1]  # an underline or highlight ends at the word
-                    text = " " + text
+                marks = lambda r: (r["underline"], r.get("strike", False), r["highlight"])
+                if runs and runs[-1]["text"].endswith(" ") and marks(runs[-1]) != marks(style) and any(marks(runs[-1])):
+                    runs[-1]["text"] = runs[-1]["text"][:-1]  # an underline, strike or highlight ends at the word
+                    if any(marks(style)):  # and the next one starts at its word: the space between is plain
+                        runs.append({**runs[-1], "text": " ", "underline": False, "strike": False, "highlight": None})
+                    else:
+                        text = " " + text
                 if runs and not runs[-1].get("hole") and all(runs[-1].get(k) == v for k, v in style.items()):
                     runs[-1]["text"] += text
                 else:
@@ -1347,6 +1473,25 @@ class PageClassifier:
         for c in rects:
             out.append({"id": f"p{self.page['index']}ic{len(out)}", "kind": "image", "role": "icon",
                         "bbox": c.expand(0.5).as_list(), "spans": []})
+        return out
+
+    def specks_on_panels(self, spans: list[Span], elements: list[dict]) -> list[dict]:
+        """Small graphics on a block panel that no other element took (a proof's QED box, a
+        TikZ mark): the panel becomes a native shape over the background, so they become
+        pictures above it (grouped with the block) instead of staying hidden in the background."""
+        taken = [Rect.of(e["bbox"]) for e in elements if e["kind"] in ("image", "table", "diagram")]
+        taken += [Rect.of(p["bullet"]["bbox"]) for e in elements if e["kind"] == "text"
+                  for p in e["paragraphs"] if p["bullet"] and p["bullet"].get("bbox")]
+        panels = [p["bbox"] for p in self.panels if p["fill"] and not p["image"]
+                  and p["bbox"].x0 > 1 and p["bbox"].y0 > 1 and p["bbox"].x1 < self.W - 1 and p["bbox"].y1 < self.H - 1]
+        out = []
+        for c in (cluster_rects(self.graphics, gap=0.5) if self.graphics and panels else []):
+            if max(c.w, c.h) >= 25 or any(t.expand(0.5).intersects(c) for t in taken) or \
+                    not any(p.expand(-0.5).contains_rect(c) for p in panels) or \
+                    any(s.rect.intersects(c) for s in spans if s.text.strip()):
+                continue
+            out.append({"id": f"p{self.page['index']}k{len(out)}", "kind": "image", "role": "icon",
+                        "bbox": c.expand(1.0).as_list(), "spans": []})
         return out
 
     def plain_rectangles(self, c: Rect, label_spans: list[Span], index: int) -> list[dict]:
@@ -1929,15 +2074,15 @@ class PageClassifier:
 
         n = self.page["index"]
         elements = [self.text_element(box, f"p{n}t{bi}") for bi, box in enumerate(boxes)]
-        holes = [(f"p{n}t{bi}", h) for bi, box in enumerate(boxes) for p in box for l in p.lines for h in l.holes]
+        holes = [(f"p{n}t{bi}", l, h) for bi, box in enumerate(boxes) for p in box for l in p.lines for h in l.holes]
         hole_pictures = []
-        for anchor, h in holes:
-            rect = union_all(s.rect for s in h)
+        for anchor, line, h in holes:
+            rect = line.hole_rect(h)
             # Radical signs and big-operator parts sit off the baseline, in lines of their own.
             h = h + [s for l in lines if l.reason == "math" for s in l.spans if s.rect.intersects(rect.expand(1))]
             rect = union_all([rect] + [s.rect for s in h] + [b for b in self.bars if b.expand(1).intersects(rect)])
             hole_pictures.append({"id": f"p{n}h{len(hole_pictures)}", "kind": "image", "role": "math",
-                                  "bbox": rect.expand(1.0).as_list(), "spans": [s.id for s in h],
+                                  "bbox": rect.expand(HOLE_PAD).as_list(), "spans": [s.id for s in h],
                                   "anchor": anchor})  # grouped with this text element
 
         text_spans = {sid for e in elements for sid in e["spans"]}
@@ -1945,6 +2090,7 @@ class PageClassifier:
         text_spans |= {sid for e in elements if e["kind"] == "table" for sid in e["spans"]}
         elements = self.math_pictures(lines, paragraphs, elements) + elements
         text_spans |= {sid for e in elements if e["kind"] == "text" for sid in e["spans"]}  # equation numbers
+        elements = self.specks_on_panels(spans, elements) + elements
         shapes = self.shapes(lines, elements)
         self.blocks(shapes)
         elements = shapes + elements   # shapes below pictures
@@ -2010,7 +2156,10 @@ def literal_list_numbers(slides: list[dict]) -> None:
     line it would sit on the text baseline, off the middle of the ball."""
     def numbered(p: dict) -> bool:
         b = p["bullet"]
-        return bool(b) and (b["kind"] == "number" or (b["kind"] == "image" and b["text"].isdigit()))
+        return bool(b) and (b["kind"] == "number" or (b["kind"] == "image" and bool(b["text"])))
+
+    def on_graphic(p: dict) -> bool:
+        return numbered(p) and (p["bullet"]["kind"] == "image" or bool(p["bullet"].get("patch")))
 
     def misnumbered(e: dict) -> bool:
         expected: dict[int, int] = {}
@@ -2021,7 +2170,11 @@ def literal_list_numbers(slides: list[dict]) -> None:
                 continue
             for deeper in [k for k in expected if k > p["level"]]:
                 del expected[deeper]
-            digits = re.sub(r"\D", "", p["bullet"]["text"])
+            label = p["bullet"]["text"]
+            digits = re.sub(r"\D", "", label)
+            # The preset numbers level 0 with digits, level 1 with letters, level 2 in roman.
+            if (p["level"] == 0) != bool(digits):
+                return True
             want = expected.get(p["level"], 1)
             if digits and int(digits) != want:
                 return True
@@ -2030,7 +2183,8 @@ def literal_list_numbers(slides: list[dict]) -> None:
 
     for slide in slides:
         texts = [e for e in slide["elements"] if e["kind"] == "text"]
-        if not any(misnumbered(e) for e in texts):
+        # Slides has no numbers on balls or boxes: those are always drawn.
+        if not any(misnumbered(e) or any(on_graphic(p) for p in e["paragraphs"]) for e in texts):
             continue
         # All numbers on the slide the same way, so the items still look alike.
         pictures = []
@@ -2038,7 +2192,7 @@ def literal_list_numbers(slides: list[dict]) -> None:
             b, label = p["bullet"], p["bullet"].get("label")
             if not label or not p["runs"]:
                 continue
-            if b["kind"] == "image" or b.get("patch"):
+            if on_graphic(p):
                 x0, y0, x1, y1 = b["bbox"]
                 pictures.append({"id": f"{e['id']}b{len(pictures)}", "kind": "image", "role": "icon",
                                  "bbox": [x0 - 0.5, y0 - 0.5, x1 + 0.5, y1 + 0.5], "spans": [], "anchor": e["id"],

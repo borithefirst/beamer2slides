@@ -10,6 +10,7 @@ from pathlib import Path
 from googleapiclient.errors import HttpError
 from googleapiclient.http import MediaIoBaseUpload
 
+from .classify import HOLE_PAD
 from .fonts import font_info, google_font
 from .google_auth import drive_service, slides_service
 from .gslides import EMU_PER_PT, emu, execute, pt
@@ -35,6 +36,18 @@ SOFT_BREAK = chr(11)  # vertical tab: a line break inside a paragraph
 SMALL_CAPS_LINE = 0.9  # a line of only smallCaps text is laid out as if 90% of its size
 
 FONT_FOR_FAMILY = {"sans": "Lato", "serif": "PT Serif", "mono": "Roboto Mono"}
+# Advance widths in Slides text (Lato and its fallback fonts), measured by tools/probe_symbols.py.
+SYMBOL_ADVANCE_EM = {
+    "=": 0.58, "+": 0.58, "−": 0.58, "<": 0.58, ">": 0.58, "≤": 0.58, "≥": 0.58, "×": 0.58, "·": 0.271,
+    "/": 0.313, "∑": 0.682, "∏": 0.682, "∫": 0.397, "∈": 0.984, "∉": 0.492, "⊂": 0.981, "⊆": 0.981,
+    "∪": 0.981, "∩": 0.717, "→": 0.998, "←": 0.998, "⇒": 0.981, "⇔": 0.981, "≈": 0.577, "≠": 0.577,
+    "±": 0.577, "∞": 0.682, "ℝ": 0.633, "ℕ": 0.65, "ℤ": 0.534, "ℚ": 0.65, "ℂ": 0.65, "α": 0.573,
+    "β": 0.57, "γ": 0.496, "δ": 0.552, "ε": 0.443, "θ": 0.552, "λ": 0.496, "μ": 0.573, "π": 0.615,
+    "σ": 0.612, "φ": 0.643, "ω": 0.777, "Δ": 0.664, "Σ": 0.615, "Ω": 0.742, "∂": 0.577, "∇": 0.981,
+    "′": 0.186, "∀": 0.981, "∃": 0.981, "∧": 0.981, "∨": 0.981, "⊥": 0.981, "∥": 0.981, "∘": 0.489,
+    "…": 0.724, " ": 0.19,
+}
+MATH_SPACE_EM = 0.278  # TeX's \thickmuskip (5 mu) around relations
 CMTT_ADVANCE_EM, ROBOTO_MONO_ADVANCE_EM = 0.525, 0.6
 
 BULLET_PRESETS = {
@@ -183,8 +196,9 @@ HOLE_FONT, HOLE_SPACE_EM = "Roboto Mono", 0.6  # monospaced: a space is exactly 
 
 
 def hole_run(run: dict, scale: float, fonts: FontMapper) -> dict:
-    """The gap under an inline formula picture: no-break spaces in a monospaced font, sized so
-    they are exactly as wide as the formula and no taller than the line."""
+    """The gap under an inline formula picture (and the word space after it): no-break spaces
+    in a monospaced font, sized so they are exactly as wide as the formula and no taller than
+    the line."""
     z = fonts(run, scale)[1]
     width = run["hole"] * scale
     n = max(1, math.ceil(width / (HOLE_SPACE_EM * z)))
@@ -384,9 +398,9 @@ def text_box_requests(el: dict, slide_id: str, object_id: str, scale: float, fon
                 style, fields = {"fontFamily": HOLE_FONT, "fontSize": pt(run["hole_size"]), "bold": False,
                                  "italic": False}, ["fontFamily", "fontSize", "bold", "italic"]
             style.update({"smallCaps": run["smallcaps"], "foregroundColor": rgb(run["color"]),
-                          "underline": bool(run.get("underline")),
+                          "underline": bool(run.get("underline")), "strikethrough": bool(run.get("strike")),
                           "baselineOffset": {"super": "SUPERSCRIPT", "sub": "SUBSCRIPT"}.get(run.get("script"), "NONE")})
-            fields = fields + ["smallCaps", "foregroundColor", "underline", "baselineOffset"]
+            fields = fields + ["smallCaps", "foregroundColor", "underline", "strikethrough", "baselineOffset"]
             if run.get("highlight"):
                 style["backgroundColor"] = rgb(run["highlight"])
                 fields.append("backgroundColor")
@@ -438,7 +452,7 @@ def number_box_requests(number: dict, slide_id: str, object_id: str, scale: floa
     style, fields = fonts.text_style(run, scale)
     size = fonts(run, scale)[1]
     cx, cy = number["center"][0] * scale, number["center"][1] * scale
-    w = number["height"] * scale + 2 * PAD_X + size
+    w = number["height"] * scale + 2 * PAD_X + len(number["text"]) * size  # never wraps "(iv)"
     h = max(number["height"] * scale, LINE_EM * size + 2)
     style["foregroundColor"] = rgb(number["color"])
     return [
@@ -1117,6 +1131,28 @@ def text_right_limit(el: dict, slide: dict) -> float | None:
     return limit if limit > x1 else None
 
 
+def space_shift(run: dict, em: float) -> float:
+    """What word spaces add to a formula gap's position in Slides. The substitute's size
+    calibration makes its glyphs wider and its spaces narrower than TeX's, evening out at word
+    ends; a formula starts after a space, so it lands one space deficit early. TeX also
+    stretches some spaces (after a colon, around math): Slides sets a plain space there."""
+    if google_font(run["font"]):
+        return 0.0  # the PDF's own font: its spaces too
+    words = sorted((b[6], b[6] + b[0]) for b in run.get("before", []) if len(b) >= 7)
+    if not words:
+        return 0.0
+    size = run["size"]
+    gaps = [b[0] - a[1] for a, b in zip(words, words[1:])] + [run["hole_x0"] - words[-1][1]]
+    spaces = [g for g in gaps if g > 0.15 * size]
+    if not spaces:
+        return 0.0
+    nominal = min(sorted(spaces)[len(spaces) // 2], 0.4 * size)
+    shift = sum(nominal - g for g in spaces)
+    if gaps[-1] > 0.15 * size:
+        shift += SYMBOL_ADVANCE_EM[" "] * em - nominal
+    return shift
+
+
 def formula_shifts(slide: dict, scale: float, fonts: FontMapper) -> dict[str, float]:
     """PDF-point x offsets for inline formula pictures, so each sits over the gap where Slides
     will put it: the words before it on its line come out a little narrower or wider."""
@@ -1131,10 +1167,21 @@ def formula_shifts(slide: dict, scale: float, fonts: FontMapper) -> dict[str, fl
             for run in p["runs"]:
                 if not run.get("hole"):
                     continue
-                shift = sum(w * (fonts.width_ratio(font, family, bold, italic) - 1)
-                            for w, font, family, bold, italic in run.get("before", []))
+                em = fonts(run, scale)[1] / scale  # the line's Slides font size, in PDF points
+                shift = HOLE_PAD  # the gap has room for the picture's padding on its left too
+                for w, font, family, bold, italic, *text in run.get("before", []):
+                    if family == "math" and text:
+                        # Math symbols come from Lato or Slides' fallback fonts, at their own widths.
+                        shift += sum(SYMBOL_ADVANCE_EM.get(ch, 0.55) for ch in text[0]) * em - w
+                    else:
+                        spaces = len(text[0]) - len(text[0].strip()) if text else 0
+                        # A math space inside the span (" 2," after ≥): TeX's thick space is wider.
+                        pdf_spaces = spaces * MATH_SPACE_EM * run["size"]
+                        shift += (w - pdf_spaces) * (fonts.width_ratio(font, family, bold, italic) - 1) + \
+                            spaces * SYMBOL_ADVANCE_EM[" "] * em - pdf_spaces
+                shift += space_shift(run, em)
                 pic = next((e for e in pictures if e["anchor"] == el["id"]
-                            and abs(e["bbox"][0] + 1 - run["hole_x0"]) < 0.6), None)
+                            and abs(e["bbox"][0] + HOLE_PAD - run["hole_x0"]) < 0.6), None)
                 if pic and abs(shift) >= 0.2:
                     out[pic["id"]] = shift
     return out
