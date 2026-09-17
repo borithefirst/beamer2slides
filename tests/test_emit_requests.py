@@ -241,7 +241,7 @@ def emitted() -> tuple[Emitted, ...]:
             for page in raw["pages"]:
                 page["notes"] = prepared.notes.get(page["index"])
             deck = classify(select_overlays(raw, "last"))
-        out.append(Emitted(str(pdf.relative_to(TESTS)).replace("\\", "/"), deck))
+        out.append(Emitted(str(pdf.relative_to(TESTS.parent)).replace("\\", "/"), deck))
     return tuple(out)
 
 
