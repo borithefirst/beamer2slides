@@ -132,8 +132,10 @@ deck; leftovers `b2s_mNNN` of an interrupted run are deleted at the next start).
   content batch: its contentUrls stop working once it's gone.
 - New slides: `createSlide` with the layout (title/subtitle placeholders mapped, the others deleted
   after a read), then emit's `slide_parts` under renamed ids. Updated slides: recreated units are
-  built the same way; their old objects are deleted, a group they were in is ungrouped and
-  regrouped with the same id, and the new objects are brought into the old z position (`restack`).
+  built the same way; their old objects are deleted, the groups they were in are ungrouped
+  (outermost first, since a group inside a group can't be ungrouped) and regrouped under the same
+  ids (innermost first), and the new objects are brought into the old z position (`restack`).
+  A group that would be left with one child disappears, its child taking its place.
   Placeholders are refilled in place.
 - Template shapes (native shadows, exact corner radii, diagram nodes and elbow connectors) can't
   be copied across decks: a live object with the same template key is duplicated if there is one,
@@ -154,8 +156,6 @@ per-slide `actions`) and `sync-report.md`.
 - diff3 inside tables and diagrams (a text edit there on both sides keeps the deck).
 - Layout texts and placeholder styles (`write_layout_texts`) aren't synced; nor are
   `fallback_pictures` rebuilds.
-- Nested groups made in the deck around converted objects: a unit recreated inside one stays
-  ungrouped, with a warning.
 - Z-order edits in the deck aren't detected; a recreated unit goes back to its old z position.
 
 ## Pull: deck edits back to the source

@@ -302,9 +302,15 @@ Sync test harness (opt-in, marker `sync`, deselected by default): `python -m pyt
 - Scenarios (`convert v1 → edits → sync vN → check → second sync writes nothing`): untouched, disjoint,
   same-element, diff3, conflict, deletions, slides, reorder-both, chain, concurrent (sync runs the
   command in `B2S_SYNC_BEFORE_WRITE` after planning), pull-wording (`pull --apply` → rebuild → sync
-  leaves the revision alone, overrides converged). Folders `out/sync-tests/<scenario>` of the main
-  checkout (decks rebuilt in place), fresh conversions `out/sync-tests/_fresh/<variant>`, 3 at a time.
-  Skipped while `beamer2slides sync`/`pull` don't exist.
+  leaves the revision alone, overrides converged), converged (the source says what the deck says:
+  nothing written), many-edits (one slide edited every way while the source rewrites it), groups (a
+  user group around a redrawn figure, a converter group taken apart, a deleted user group),
+  nested-group (a block inside a user group); `XFAIL` pins what sync can't do (table-words: no word
+  merge inside a table). Folders `out/sync-tests/<scenario>` of
+  the main checkout (decks rebuilt in place), fresh conversions `out/sync-tests/_fresh/<variant>`,
+  3 at a time; the whole suite takes about 15 min. Skipped while `beamer2slides sync`/`pull` don't exist.
+- Found by it: Google issues new `contentUrl`s for unchanged pictures (compare pixel signatures, not
+  URLs); a base must keep the source's slide order (else the deck's reorder is undone next time).
 
 ## Pitfalls found so far
 - PDFium (`pdf.py` handles these):

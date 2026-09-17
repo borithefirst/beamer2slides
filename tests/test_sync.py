@@ -837,6 +837,45 @@ def test_retitled_frame_and_right_limits_on_the_sync_talk(tmp_path):
     assert len(groups_made(grouped)) == 1
 
 
+def test_unit_rebuilt_inside_a_group_nested_in_a_user_group(tmp_path):
+    """A block (converter group) inside a group made in the deck: ungroup outermost first, regroup
+    innermost first under the same ids (the rebuilt block title used to stay outside, ungrouped)."""
+    from collections import defaultdict
+    from beamer2slides.sync import Sync, build_ours
+    v1 = SYNC_DECKS / "v1.pdf"
+    if not v1.exists():
+        pytest.skip("build the sync test talk first (tests/decks/sync/build.py)")
+    first = build_ours(v1, tmp_path / "v1", {"slides": []})
+    s = Sync.__new__(Sync)
+    s.ours, s.plan, s.scale, s.tok, s.warnings = first, first["plan"], first["plan"].scale, "1zz", []
+    s.urls = defaultdict(lambda: "https://example.com/staged.png")
+    j = next(k for k, o in enumerate(first["slides"]) if o["key"] == "policy")
+    base_slide_ = copy.deepcopy(first["slides"][j])
+    objects = {}
+    for e in base_slide_["elements"]:
+        oid = f"OLD_{e['key'].replace('/', '_')}"
+        e.update(main=oid, objects=[oid], readback={oid: readback([0, 0, 10, 10], "x")})
+        objects[oid] = readback([0, 0, 10, 10], "x")
+    block = ["OLD_shape_panel_0", "OLD_shape_panel_1", "OLD_text_body_0", "OLD_text_body_1"]
+    objects["BLK"] = {**readback([0, 0, 10, 10]), "kind": "elementGroup", "children": block, "parent_group": "USER"}
+    objects["USER"] = {**readback([0, 0, 10, 10]), "kind": "elementGroup", "children": ["BLK", "OLD_text_body_2"]}
+    for c in block:
+        objects[c]["parent_group"] = "BLK"
+    objects["OLD_text_body_2"]["parent_group"] = "USER"
+    s.base = {"slides": [base_slide_]}
+    plan = {"key": "policy", "base": 0, "ours": j, "objectId": "LIVE", "units": [
+        {"key": "text/body/0", "action": "recreate", "ours_members": ["text/body/0"], "base_members": ["text/body/0"], "overrides": {}}]}
+    w = {"plan": plan, "units": []}
+    reqs = s.update_slide(w, {"objects": objects, "notes": "", "notes_id": None}, {}, {})
+    assert [r["ungroupObjects"]["objectIds"] for r in reqs if "ungroupObjects" in r] == [["USER"], ["BLK"]]
+    groups = [r["groupObjects"] for r in reqs if "groupObjects" in r]
+    new_title = w["new_oid"][next(i for i, e in enumerate(first["slides"][j]["elements"]) if e["key"] == "text/body/0")]
+    assert [g["groupObjectId"] for g in groups] == ["BLK", "USER"]
+    assert new_title in groups[0]["childrenObjectIds"] and "OLD_text_body_0" not in groups[0]["childrenObjectIds"]
+    assert groups[1]["childrenObjectIds"] == ["BLK", "OLD_text_body_2"]
+    assert not s.warnings
+
+
 def test_conversion_is_stable():
     """Converting the same PDF twice gives the same keys and hashes (a no-op sync sends nothing)."""
     import tempfile

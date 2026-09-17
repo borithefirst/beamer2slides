@@ -453,6 +453,34 @@ def scenario_groups(run: Run):
               any_conflicts=True, mentions=("policy",), allow_ungrouped={ALGO})
 
 
+XFAIL = {}  # scenario -> why it can't pass yet (docs/sync.md, Not supported yet)
+
+
+@scenario
+def scenario_table_words(run: Run):
+    """Different cells of one table edited in the deck and in the source."""
+    run.convert(build("v1"))
+    exps = run.edit(E("replace_word", slide=RESULTS, text="5.1 s", old="5.1", new="5.2"))
+    pdf = build("tablecell")
+    run.check("tablecell", pdf, run.sync(pdf), exps)
+
+
+XFAIL["table-words"] = "no word merge inside tables: a text edit on both sides keeps the deck's table (a conflict)"
+
+
+@scenario
+def scenario_nested_group(run: Run):
+    """A user group around a block (a group in a group) whose title the source changes."""
+    run.convert(build("v1"))
+    exps = run.edit(E("group", slide=POLICY, targets=[{"text": "Both versions go into the report."}, {"text": "Deck edits win"}]))
+    pdf = build("blockedit")
+    report = run.sync(pdf)
+    run.check("blockedit", pdf, report, exps, drop=("group",), checks=[
+        {"check": "grouped", "slide": POLICY, "grouped": True,
+         "members": [{"text": "Both versions go into the report."}, {"text": "Deck edits come first"}]}])
+    run.problems += [f"report warns: {w}" for w in report.get("warnings", []) if "group" in w]
+
+
 @scenario
 def scenario_pull_wording(run: Run):
     """Deck wording edits pulled into the .tex, rebuilt and synced: the deck stays as it is and
@@ -509,7 +537,8 @@ def outcomes(request):
         return dict(zip(names, pool.map(run, names)))
 
 
-@pytest.mark.parametrize("name", list(SCENARIOS))
+@pytest.mark.parametrize("name", [pytest.param(n, marks=pytest.mark.xfail(reason=XFAIL[n], strict=True)) if n in XFAIL else n
+                                  for n in SCENARIOS])
 def test_scenario(name, outcomes):
     result = outcomes[name]
     if isinstance(result, pytest.skip.Exception):

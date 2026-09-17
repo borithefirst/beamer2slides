@@ -764,7 +764,15 @@ class Sync:
                     reqs.append(stand_in_request(stand, sid, key))
                     self.warnings.append(f"slide {o['key']}: no live {key[0]} to copy (shadow, exact corners): made a plain shape")
 
-        # Groups the old objects were in (blocks): ungrouped first, regrouped with the new ones.
+        # Groups the old objects were in (blocks, and groups the deck made around them): ungrouped
+        # first, outermost first (a group inside a group can't be ungrouped), and regrouped with the
+        # new objects under the same ids, innermost first.
+        def ancestors(g: str) -> list[str]:
+            chain, x = [], objects.get(g, {}).get("parent_group")
+            while x and x not in chain:
+                chain.append(x)
+                x = objects.get(x, {}).get("parent_group")
+            return chain
         regroup: dict[str, dict] = {}
         for u in p["units"]:
             if u["action"] not in ("recreate", "delete"):
@@ -775,12 +783,12 @@ class Sync:
             for r in roots:
                 g = objects[r].get("parent_group")
                 if g and g not in roots:
-                    if objects.get(g, {}).get("parent_group"):
-                        self.warnings.append(f"slide {o['key']}: {u['key']} was in a nested group; the new objects stay ungrouped")
-                        continue
-                    regroup.setdefault(g, {"remove": set(), "add": []})["remove"].add(r)
-                    regroup[g].setdefault("unit_of", {})[r] = u["key"]
-        reqs = [{"ungroupObjects": {"objectIds": [g]}} for g in regroup] + reqs
+                    regroup.setdefault(g, {"remove": set(), "unit_of": {}})["remove"].add(r)
+                    regroup[g]["unit_of"][r] = u["key"]
+                    for a in ancestors(g):
+                        regroup.setdefault(a, {"remove": set(), "unit_of": {}})
+        depth = {g: len(ancestors(g)) for g in regroup}
+        reqs = [{"ungroupObjects": {"objectIds": [g]}} for g in sorted(regroup, key=lambda g: depth[g])] + reqs
 
         # A unit whose group the deck took apart (its pictures and text still there) is rebuilt ungrouped.
         ungrouped = set()
@@ -805,17 +813,25 @@ class Sync:
                 i = index[u["key"]]
                 oids = created.get(i, [])
                 tops[u["key"]] = next((x for x in oids if x.endswith("_g") and x[:-2] == new_oid[i]), new_oid[i])
-        for g, info in regroup.items():
+        replaced: dict[str, str | None] = {}  # regrouped group -> what stands for it now (None: gone)
+        for g in sorted(regroup, key=lambda g: -depth[g]):
+            info = regroup[g]
             children = []
             for c in objects[g].get("children", []):
                 if c in info["remove"]:
                     ukey = info["unit_of"][c]
                     if ukey in tops and tops[ukey] not in children and tops[ukey] not in keep_ids:
                         children.append(tops[ukey])
+                elif c in replaced:
+                    if replaced[c]:
+                        children.append(replaced[c])
                 else:
                     children.append(c)
             if len(children) >= 2:
                 reqs.append({"groupObjects": {"groupObjectId": g, "childrenObjectIds": children}})
+                replaced[g] = g
+            else:
+                replaced[g] = children[0] if children else None
         # Moves: the deck object goes where the source moved the element.
         for u in p["units"]:
             if u["action"] == "move":
