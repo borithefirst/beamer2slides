@@ -35,7 +35,7 @@ slide background.
 - **Speaker notes** from `show notes` or `show notes on second screen`.
 - **Internal links**: table-of-contents entries jump to their slides.
 - Overlays: for non-handout PDFs the last step of each frame is kept (`--overlays all` keeps
-  every step).
+  every step; `sync` then keeps the same steps, so a deck made that way stays whole).
 
 ## Setup
 1. Python 3.12: `pip install beamer2slides`, or from a checkout `python -m venv .venv` then
