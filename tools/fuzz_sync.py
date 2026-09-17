@@ -841,7 +841,8 @@ class LiveRound:
         base = json.loads((self.out / "sync" / "base.json").read_text(encoding="utf-8"))
         # A group the person took apart (or a member they deleted) is theirs: the sync rebuilding
         # the unit ungrouped is the policy, not a broken deck.
-        loose = {_slide_title(spec) for spec in specs if spec["edit"] in ("ungroup", "delete_object")}
+        loose = {_slide_title(spec) for spec in specs
+                 if spec["edit"] in ("ungroup", "group", "delete_element", "delete_group", "duplicate")}
         loose.discard(None)
         return sc.integrity(sc.Model(pres_after), before=sc.Model(pres_before), base_ids=sc.ids_in(base),
                             allow_ungrouped=loose, allow_groups_changed=loose)

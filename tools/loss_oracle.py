@@ -44,6 +44,10 @@ merge policy of docs/sync.md says it is not the person's work. Concretely:
   Without `ours` every disappearance is a `word_lost`.
   The reverse also counts as the person's work: text the person *deleted* must not come back into
   that element unless the source says it again (`deletion_undone`).
+* **A picture the person put into a converter element** (the read-back's picture differing from the
+  base's, compared by `snapshot.signature`, never by URL) must still be on one of that element's
+  objects afterwards, unless the report lists the element under `conflicts`, `converged` or
+  `overrides`.
 * **Styling a person applied to a converter object** (the read-back's `text_style_hash` /
   `shape_style_hash` differing from the base's) must not come back as the converter's: after the
   sync at least one of that element's objects must still show the person's hash, unless the report
@@ -369,6 +373,39 @@ def word_findings(skey, el, was, now, before_words, after_words, after_el_words,
     return out
 
 
+def picture_findings(base: dict, before: dict, after: dict, rep: dict) -> list[dict]:
+    """A picture the person put into a converter element (by pixel signature, never by URL: Google
+    hands out new contentUrls for unchanged pictures), overwritten with the source's."""
+    out = []
+    before_by_id = {s["objectId"]: s for s in before["slides"]}
+    after_by_id = {s["objectId"]: s for s in after["slides"]}
+    for b in base["slides"]:
+        bs, a = before_by_id.get(b.get("objectId")), after_by_id.get(b.get("objectId"))
+        if bs is None or a is None:
+            continue
+        skey = b["key"]
+        for el in b["elements"]:
+            main = el.get("main")
+            was, now = (el.get("readback") or {}).get(main), bs["objects"].get(main)
+            if not main or was is None or now is None or same_image(was, now) is not False:
+                continue  # the person didn't put another picture there
+            objects = [a["objects"][o] for o in element_objects(skey, el["key"], el, a)]
+            states = [same_image(now, rb) for rb in objects]
+            if True in states or not objects:
+                continue  # their picture is still there (or the element is gone: another check)
+            keys = {el["key"], unit_key(el)}
+            if _at(rep["conflicts"], skey, keys) or _at(rep["converged"], skey, keys) or _at(rep["overrides"], skey, keys):
+                continue
+            if None in states:
+                out.append(finding("picture_unverified", "note", "no pixel signature: the picture bytes weren't compared",
+                                   slide=skey, element=el["key"], object=main))
+            else:
+                out.append(finding("picture_reverted", "loss",
+                                   "the picture the person put into this element is another one now, "
+                                   "with nothing in the report", slide=skey, element=el["key"], object=main))
+    return out
+
+
 def style_findings(base: dict, before: dict, after: dict, rep: dict) -> list[dict]:
     """Styling the person applied to a converter object, silently back to the converter's."""
     out = []
@@ -576,6 +613,7 @@ def check(base: dict, before: dict, after: dict, report: dict, ours: dict | None
     rep = normalise_report(report)
     out = (slide_findings(base, before, after, rep) + user_object_findings(base, before, after, rep)
            + text_findings(base, before, after, rep, ours) + style_findings(base, before, after, rep)
+           + picture_findings(base, before, after, rep)
            + content_findings(base, before, after, rep, ours) + report_findings(base, before, after, rep))
     allowed = set(allow or ())
     return [f for f in out if not ({f["kind"], f"{f['kind']}/{f['slide']}", f"{f['kind']}/{f['slide']}/{f['element']}"}

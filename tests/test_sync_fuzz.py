@@ -251,6 +251,23 @@ def test_element_objects_finds_created_and_tagged_objects():
     assert loss_oracle.element_objects(skey, ekey, base_el, read) == {"old", made, "adopted"}
 
 
+def test_catches_a_picture_the_person_chose_being_overwritten():
+    """Compared by pixel signature: Google hands out a new contentUrl for an unchanged picture."""
+    import fuzz_world as W
+    mine = {"contentHash": "m", "signature": W.picture_signature(b"person picture")}
+    theirs = {"contentHash": "c", "signature": W.picture_signature(b"source picture")}
+    base = {"slides": [{"key": "f1", "objectId": "s1", "elements": [
+        {"key": "image/figure/0", "main": "o", "objects": ["o"], "readback": {"o": {"image": theirs}}}]}]}
+    before = {"slides": [{"objectId": "s1", "objects": {"o": {"image": mine}}}]}
+    after = {"slides": [{"objectId": "s1", "objects": {"o": {"image": theirs}}}]}
+    empty = loss_oracle.normalise_report({})
+    assert [f["kind"] for f in loss_oracle.picture_findings(base, before, after, empty)] == ["picture_reverted"]
+    kept = {"slides": [{"objectId": "s1", "objects": {"o": {"image": mine}}}]}
+    assert loss_oracle.picture_findings(base, before, kept, empty) == []
+    said = loss_oracle.normalise_report({"conflicts": [{"slide": "f1", "element": "image/figure/0", "field": "image"}]})
+    assert loss_oracle.picture_findings(base, before, after, said) == []
+
+
 def test_catches_styling_put_back_the_way_the_converter_had_it():
     base = {"slides": [{"key": "f1", "objectId": "s1", "elements": [
         {"key": "text/body/0", "main": "o", "objects": ["o"], "readback": {"o": {"text_style_hash": "converter"}}}]}]}
