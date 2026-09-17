@@ -45,6 +45,19 @@ a per-slide background picture.
   bibliography icon) and `\includegraphics` labels become pictures anchored to their item.
   Short labels ending where a neighbour's hanging label ends get its tab (`label_tabs`).
 - `image`: figure regions (TikZ, plots, raster images, plus their labels) cropped as pictures.
+  A region that is one `\includegraphics` and nothing else (`classify.bare_image`, element key
+  `image` = the raw image id) keeps the image's own box instead of the 1 pt margin a drawing
+  gets, and `render.image_file` writes the embedded image itself, not a render of the page
+  (element key `picture`): `raw` = the stream as stored, the author's JPEG byte for byte, when
+  it is plain DCTDecode that Pillow decodes exactly like PDFium; else `decoded` = PDFium's own
+  pixels as a PNG at the image's native size (a palette or CMYK JPEG converted, ≤ 4096 px).
+  Anything see-through (soft mask, `\includegraphics` under `opacity`), turned, mirrored,
+  clipped, exotic (< 8 bpp, unknown colour space) or labelled stays a page crop, and
+  `render._looks_like` lays the file on the page without the image and compares, so a decode
+  PDFium reads differently can never reach the deck. Google stores the picture byte for byte up
+  to ~2046 px on the long side, so `pull` gets the author's file back (`tools/probe_pdf_images.py`
+  prints the decision table for a PDF, `tools/lossless_images_proof.py` proves it on a live deck).
+  Test decks: `07_images`, `23_raster_images` (one case per frame, `tests/test_raster_images.py`).
 - `table`: text framed by equal-width horizontal rules (`\hline`/booktabs), with optional
   vertical and partial rules (→ per-cell `borders`) and merged cells (`merges`: chunks
   crossing columns, rows halfway between rows). Cell lineSpacing is tightened so rows keep
@@ -355,6 +368,15 @@ Sync test harness (opt-in, marker `sync`, deselected by default): `python -m pyt
     (metropolis under pdflatex without cm-super) comes back as U+0088 (`classify.TYPE3_SYMBOLS`).
   - Page labels can't be rewritten: after `notes.prepare` deletes note pages, the kept pages'
     labels are passed to `extract(pdf, labels)`.
+  - Image objects (`Page.embedded_image`): `FPDFImageObj_GetImageDataRaw` is the stream as stored
+    (for DCTDecode the author's JPEG file, sha1 equal), `GetImageDataDecoded` after the filters,
+    `GetBitmap` PDFium's own pixels at the image's native size — but **without its soft mask**,
+    which `FPDFPageObj_HasTransparency` doesn't report either (that one only sees a constant
+    alpha or a blend mode). The only signal for a mask is `GetRenderedBitmap`, whose alpha is
+    exactly 255 everywhere for an opaque image; it applies matrix, mask and clip but comes back
+    at about page resolution (a 2400 px photo renders 138 px wide), so it is a detector, never a
+    source of pixels. An image's matrix in page space is `a > 0, b = c = 0, d < 0` when it is
+    drawn upright: the y flip is the norm, `d > 0` or `a < 0` is a mirror, `b`/`c` a rotation.
 - Switching objects off (`FPDFPageObj_SetIsActive`) needs no content regeneration and is
   undone after each render, so crops and backgrounds share one open page.
 - Ball bullets are patched out of the PNG (themes draw them with soft masks shared with shadows).
