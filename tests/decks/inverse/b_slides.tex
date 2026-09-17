@@ -1,0 +1,50 @@
+% Inverse loop fixture: a.tex with a frame added, one deleted and two swapped.
+\documentclass{beamer}
+\setbeamertemplate{navigation symbols}{}
+\graphicspath{{img/}}
+\title{Inverse Conversion}
+\author{Test Author}
+\date{17 September 2026}
+
+\begin{document}
+
+\begin{frame}[label=title]
+  \titlepage
+\end{frame}
+
+\begin{frame}[label=motivation]{Why convert back}
+  \begin{itemize}
+    \item Decks get edited after the conversion
+    \item The source should follow the deck
+      \begin{itemize}
+        \item without losing \textbf{semantic} markup
+        \item and without rewriting untouched frames
+      \end{itemize}
+    \item Every edit is checked by compiling again
+  \end{itemize}
+\end{frame}
+
+\begin{frame}[label=results]{Results}
+  \begin{enumerate}
+    \item Text edits converge in one round
+    \item Moves need a second round
+    \item Lists keep their items
+  \end{enumerate}
+  \note{Mention the iteration counts.}
+\end{frame}
+
+\begin{frame}[label=method]{Method}
+  We compile the candidate, classify the PDF and compare it with the
+  target deck, word by word and box by box.
+
+  Residuals turn into \emph{source edits} until nothing is left.
+\end{frame}
+
+\begin{frame}[label=limits]{Limits}
+  \begin{itemize}
+    \item Formulas are not rewritten
+    \item Theme decorations stay as they are
+  \end{itemize}
+\end{frame}
+
+\end{document}

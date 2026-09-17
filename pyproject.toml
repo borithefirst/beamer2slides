@@ -22,5 +22,6 @@ where = ["src"]
 
 [tool.pytest.ini_options]
 markers = ["slides: converts decks on real Google Slides and measures the thumbnails (opt-in: python -m pytest -m slides)",
-           "sync: sync and pull scenarios with simulated deck edits on real Google Slides (opt-in: python -m pytest -m sync)"]
-addopts = "-m \"not slides and not sync\""
+           "sync: sync and pull scenarios with simulated deck edits on real Google Slides (opt-in: python -m pytest -m sync)",
+           "inverse: pull's compile loop on source pairs and synthetic deck edits (opt-in: python -m pytest -m inverse)"]
+addopts = "-m \"not slides and not sync and not inverse\""

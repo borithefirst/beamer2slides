@@ -4,6 +4,7 @@ __pycache__/
 tests/decks/out/
 tests/decks/sync/out/
 tests/themes/out/
+tests/decks/inverse/out/
 out/
 # Google credentials never go in git
 credentials*.json

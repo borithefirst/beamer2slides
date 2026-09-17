@@ -263,6 +263,17 @@ red; `--crops all|failures|none`). It measures:
 Picture ink is the picture file itself (alpha, or pixels unlike the page around the box) placed
 into its box, so text ink is the rest; the page colour comes from a ring around the picture.
 
+Pull back to the source (`docs/sync.md`, "Pull"): `python -m beamer2slides pull --deck <url|id|out>
+--tex main.tex [--apply]` reads the deck only (`deck_ir.py`: live deck → deck.json-shaped IR through
+emit's text box model and FontMapper) and loops compile → classify → `compare.py` residuals →
+translators (`inverse.py`; `texmap.py` maps pages to frames by SyncTeX and words to source spans by
+printed text) until the source's conversion matches; `edits.md`/`edits.json`/`pull.patch` in
+`<out>/pull` hand unresolved residuals (with frame file:lines) to an AI. `converge --target deck.json`
+is the offline twin. Tests: `tests/test_inverse.py` (offline: texmap, compare, planned edits on
+`tests/decks/inverse/a.tex` vs `a.deck.json`, deck_ir via `tests/slides_sim.py`); opt-in
+`python -m pytest -m inverse` (compile loop on the `b_*.tex` pairs and synthetic edits,
+iterations in `tests/decks/inverse/out/results.json`).
+
 Opt-in suite (real Google Slides, ~95 s): `python -m pytest -m slides` (the default run deselects
 the `slides` marker, pyproject.toml). It converts the stress decks (19–22, 25, 13, demo) 3 at a
 time into `out/slides-tests/<deck>` of the main checkout (fixed folders: the same decks are
