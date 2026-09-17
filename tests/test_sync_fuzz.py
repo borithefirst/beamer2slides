@@ -6,6 +6,10 @@ edits it the way a person would, changes the source the way an author would, pla
 and hands the two read-backs plus the report to `tools/loss_oracle.py`. A round is clean when the
 oracle finds nothing.
 
+Each round also checks that the sync settles: with the base the sync recorded, syncing the same
+source again must write nothing, or the next sync would rewrite units - which is where a person's
+work gets lost.
+
 The second half proves the oracle is not vacuous: a clean round is taken apart again with a loss
 injected on purpose (a user object dropped, a person's word swallowed, a slide silently deleted, a
 report claiming work it didn't do) and the oracle has to catch every one of them.
@@ -34,8 +38,9 @@ from beamer2slides import snapshot  # noqa: E402
 ROUNDS = int(os.environ.get("B2S_FUZZ_ROUNDS", "40"))
 # Seeds that once failed, kept as regressions: 252/430 merge's move shortcut moved nothing,
 # 0/20 the harness and the report's per-unit keys, 3312/3799 two ways the oracle accused a
-# blameless sync (a word the source put in another element, an ambiguous reported swap).
-REGRESSIONS = (0, 20, 252, 430, 3312, 3799)
+# blameless sync (a word the source put in another element, an ambiguous reported swap),
+# 45/60/108/177 the base kept the slides the deck deleted, so a second sync brought them back.
+REGRESSIONS = (0, 20, 45, 60, 108, 177, 252, 430, 3312, 3799)
 
 
 # ---------------------------------------------------------------- the fuzz itself
@@ -47,6 +52,18 @@ def test_offline_round_loses_nothing(seed):
         small = fuzz_sync.shrink_offline(result)
         pytest.fail(f"seed {seed} lost something\n{loss_oracle.describe(small['failures'])}\n"
                     f"  deck:   {'; '.join(small['deck'])}\n  source: {'; '.join(small['source'])}")
+
+
+def test_the_round_notices_a_base_that_would_not_settle(tmp_path):
+    """The settle check with a base broken on purpose: one that has forgotten a slide makes the next
+    sync create it again, and the round has to say so."""
+    result = fuzz_sync.offline_round(3, source_ops=["reword"], deck_ops=["add_text_box", "reword"], work=tmp_path)
+    st = result["state"]
+    assert fuzz_sync._settled(st["doc"], st["next_base"], st["after"], tmp_path) == []
+    forgetful = copy.deepcopy(st["next_base"])
+    forgetful["slides"] = forgetful["slides"][1:]
+    found = fuzz_sync._settled(st["doc"], forgetful, st["after"], tmp_path)
+    assert [f["kind"] for f in found] == ["second_sync_writes"] and found[0]["severity"] == "report"
 
 
 def test_the_rounds_really_exercise_sync():

@@ -482,11 +482,38 @@ def _sync_step(seed: int, step: int, doc: dict, base: dict, live: dict, tmp: Pat
     after = W.apply_plan(base, ours, live, mplan, tok)
     report = mplan["report"]
     findings = loss_oracle.check(base, live, after, report, ours)
+    next_base = W.rebase(base, ours, after, mplan, tok) if rebase else None
+    findings += _settled(doc2, next_base, after, tmp, "move_slide" in source_ops)
     return {"seed": seed, "step": step, "source_ops": list(source_ops), "deck_ops": list(deck_ops),
             "source": applied_src, "deck": applied_deck, "findings": findings,
             "failures": loss_oracle.failures(findings), "doc": doc2,
             "state": {"base": base, "before": live, "after": after, "report": report, "ours": ours,
-                      "next_base": W.rebase(base, ours, after, mplan, tok) if rebase else None}}
+                      "next_base": next_base, "doc": doc2, "work": tmp}}
+
+
+def _settled(doc: dict, next_base: dict | None, after: dict, tmp: Path, reordered: bool = False) -> list[dict]:
+    """Syncing the same source again must write nothing. The base a sync leaves behind is what the
+    next one merges against, so a base that doesn't describe the deck it just wrote would have the
+    next sync rewrite those units - and a rewrite is where a person's work gets lost.
+
+    `reordered`: the source moved a frame this round. A crossing reorder of frames without labels is
+    what docs/sync.md lists under "Not supported yet" (`identity.align_slides` keeps the order), and
+    it leaves the source's frame paired with another slide, so the property can't hold. The finding
+    is still recorded, as a note rather than a failure."""
+    if next_base is None:
+        return []
+    again = merge.plan_merge(next_base, W.build_ours(doc, next_base, tmp), after)
+    if not merge.has_writes(again, [s["objectId"] for s in after["slides"]]):
+        return []
+    busy = [f"{p['key']}: {p['action']}" + (f" {[u['key'] for u in p['units'] if u['action'] != 'keep']}"
+                                            if p["action"] == "update" else "")
+            for p in again["slides"]
+            if p["action"] in ("create", "delete") or (p["action"] == "update" and (
+                any(u["action"] in ("create", "recreate", "delete", "move") for u in p["units"])
+                or p.get("background") or p.get("notes") is not None))]
+    return [loss_oracle.finding("second_sync_writes", "note" if reordered else "report",
+                                "the same source synced again would write: " + ("; ".join(busy) or "another slide order"),
+                                slide=(busy[0].split(":")[0] if busy else "order"))]
 
 
 def _draw(rng: random.Random, deck_ops, source_ops):
@@ -512,7 +539,9 @@ def offline_chain(seed: int, chain: int = 1, ops=None, work: Path | None = None)
         for step in range(chain):
             want = (ops[step] if ops and step < len(ops) else None) or {}
             deck_ops, source_ops = _draw(rng, want.get("deck"), want.get("source"))
-            record = _sync_step(seed, step, doc, base, live, tmp, deck_ops, source_ops, rebase=step + 1 < chain)
+            # Every step rebases: the next step needs that base, and the last step's base is what
+            # the "a second sync writes nothing" check judges.
+            record = _sync_step(seed, step, doc, base, live, tmp, deck_ops, source_ops, rebase=True)
             steps.append(record)
             doc, live = record.pop("doc"), record["state"]["after"]
             base = record["state"]["next_base"] or base

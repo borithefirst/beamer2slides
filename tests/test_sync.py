@@ -731,6 +731,24 @@ def test_letterbox_fix_stretches_to_the_box():
     assert fix["scaleY"] == pytest.approx(1) and fix["translateY"] == pytest.approx(0, abs=1)
 
 
+@pytest.mark.xfail(strict=True, reason="sync.base_order leaves out the slides the deck deleted, so they land at the "
+                                       "end of the new base and the next conversion can no longer align an unlabelled "
+                                       "frame with them: the deleted slide is created again")
+def test_a_slide_the_deck_deleted_keeps_its_place_in_the_new_base():
+    """Found by the offline fuzz (`second_sync_writes`, seeds 45, 60, 108, 177 of the default run):
+    the person deletes a converter slide whose frame has no label and the source still has it. The
+    sync is right to leave it deleted, but it records that slide's base entry last (`new_base` keys
+    it `gone:<key>`, which `base_order` never returns). The base is converter output, so the next
+    conversion pairs frames with it by `identity.align_slides`, an order-keeping alignment for
+    unlabelled frames: the frame no longer matches, gets a fresh key, and the next sync creates the
+    slide the person deleted. Fix: order the `gone` plans with the rest, by their `ours` index."""
+    from beamer2slides.sync import base_order
+    plans = [{"key": "deleted_by_the_person", "action": "gone", "ours": 0, "base": 0, "objectId": None},
+             {"key": "kept", "action": "update", "ours": 1, "base": 1, "objectId": "b2s_s001"}]
+    by_plan = {id(plans[1]): {"sid": "b2s_s001"}}
+    assert base_order({"slides": plans}, by_plan, ["b2s_s001"]) == ["gone:deleted_by_the_person", "b2s_s001"]
+
+
 @pytest.mark.xfail(strict=True, reason="sync.tag_requests tags a diagram's main object, which is the group "
                                        "emit.diagram_requests creates under that id; the API refuses "
                                        "updatePageElementAltText on a group and rejects the whole batch")

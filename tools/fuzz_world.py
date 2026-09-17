@@ -384,7 +384,10 @@ def rebase(base, ours, after, mplan, tok="2zz") -> dict:
         if p["action"] == "delete":
             continue
         if p["action"] in ("keep_removed", "gone"):
-            entries[p.get("objectId") or f"gone:{p['key']}"] = base["slides"][p["base"]]
+            sid = p.get("objectId") or f"gone:{p['key']}"
+            entries[sid] = base["slides"][p["base"]]
+            if p["action"] == "gone":
+                sids[id(p)] = sid  # it keeps its place in the source's order (see the ordering below)
             continue
         o = ours["slides"][p["ours"]]
         sid = f"b2s_{h6(p['key'])}_{tok}" if p["action"] == "create" else p["objectId"]
@@ -448,7 +451,12 @@ def rebase(base, ours, after, mplan, tok="2zz") -> dict:
                     entry["notes"] = b.get("notes")
         entry["elements"] = elements
         entries[sid] = entry
-    order = [sids[id(p)] for p in sorted((p for p in mplan["slides"] if p["action"] in ("update", "create")),
+    # The base is converter output, so it is written in the source's order. A slide the deck deleted
+    # while the source still has it ("gone") keeps its place here, or the next conversion can no
+    # longer align an unlabelled frame with it and syncs the deleted slide back in. sync.base_order
+    # leaves those out, which is the open bug pinned by
+    # tests/test_sync.py::test_a_slide_the_deck_deleted_keeps_its_place_in_the_new_base (xfail).
+    order = [sids[id(p)] for p in sorted((p for p in mplan["slides"] if p["action"] in ("update", "create", "gone")),
                                          key=lambda p: p["ours"])]
     for k, sid in enumerate([s["objectId"] for s in after["slides"]]):
         if sid in order:
