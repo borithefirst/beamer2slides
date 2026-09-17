@@ -690,7 +690,9 @@ def build_pptx(page_w: float, page_h: float, keys: list[tuple], pages: list[dict
     if abs(ratio - 1) > 1e-3:  # the default template's placeholders are laid out for 4:3
         for page in [prs.slide_master, *prs.slide_layouts]:
             for shape in page.placeholders:
-                if shape.top is not None and shape.height is not None:
+                # A layout placeholder without its own position inherits the master's, rescaled
+                # already (setting its top and height would scale it twice and write x and width 0).
+                if shape._element.spPr.find(f"{{{NS_A}}}xfrm") is not None and shape.height is not None:
                     shape.top, shape.height = Emu(round(shape.top * ratio)), Emu(round(shape.height * ratio))
     master = prs.slide_master
     _set_background(master.part, master.element.find(f"{{{NS_P}}}cSld"), master_fill)
@@ -2062,8 +2064,8 @@ def plan_offline(deck: dict, placeholder_size: tuple[float, float] = (612.0, 90.
     """What emit would send for a classified deck, without Google: the imported slides are made
     up as the .pptx brings them (layout placeholders, pictures, template shapes) and hole
     pictures keep their predicted places. {"plan": DeckPlan, "pictures": {page: [(element, .pptx
-    box)]}, "copies": phase 1 requests, "measure": measure_holes' scratch slide requests,
-    "slides": [(slide id, page, parts, element ids)]}."""
+    box)]}, "copies": phase 1 requests, "page_elements" and "speaker_notes": the copied slides,
+    "measure": measure_holes' scratch slide requests, "slides": [(slide id, page, parts, element ids)]}."""
     plan = DeckPlan({**deck, "slides": [{**s, "elements": merge_blocks(s["elements"])} for s in deck["slides"]]})
 
     def size(w: float, h: float) -> dict:
@@ -2083,10 +2085,11 @@ def plan_offline(deck: dict, placeholder_size: tuple[float, float] = (612.0, 90.
         ids = request["duplicateObject"]["objectIds"]
         page_elements[ids[source]] = [{"objectId": ids.get(e["objectId"], f"{e['objectId']}_copy"), "size": e["size"]}
                                       for e in els]
+    speaker_notes = {slide_id: f"{slide_id}_notes" for slide_id in page_elements}
     slides = []
     for slide in plan.deck["slides"]:
-        slide_id = f"b2s_s{slide['page']:03}"
-        parts, element_ids = plan.slide_parts(slide, page_elements, {slide_id: f"{slide_id}_notes"}, {}, template_sizes)
-        slides.append((slide_id, slide["page"], parts, element_ids))
+        parts, element_ids = plan.slide_parts(slide, page_elements, speaker_notes, {}, template_sizes)
+        slides.append((f"b2s_s{slide['page']:03}", slide["page"], parts, element_ids))
     return {"plan": plan, "pictures": {s["page"]: plan.pictures(s) for s in plan.deck["slides"]}, "copies": copies,
+            "page_elements": page_elements, "speaker_notes": speaker_notes,
             "measure": hole_jobs(plan.deck, plan.scale, plan.fonts, plan.placed, plan.page_slide)[0], "slides": slides}
