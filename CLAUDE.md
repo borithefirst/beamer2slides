@@ -164,6 +164,12 @@ a per-slide background picture.
   background picture. A background with nothing left becomes a plain background colour.
 - Theme robustness: `tests/themes/sweep.py` compiles a realistic talk with 28 beamer themes
   and classifies them locally (no Google calls).
+- Offline request tests (`tests/test_emit_requests.py`, ~5 s for all built decks): `emit.plan_offline`
+  plans what `build_deck` sends (`DeckPlan`: .pptx picture boxes, phase 1 copies, each slide's parts;
+  `hole_jobs`: measure_holes' scratch slides) against a made-up imported presentation, and the tests
+  replay it: object ids, groups, anchored pictures grouped with their text, numbers centred on balls,
+  hole widths, bullet styling order, text ranges and texts, page bounds, predicted shifts < 15 pt.
+  Unit tests there cover the placement helpers. `build_deck` only adds Google's answers and batching.
 - Line building: words don't join across a column gutter (`PageClassifier.gutter`), lines up to
   1.45 em apart continue a paragraph, centred lines TeX balanced keep their breaks as soft
   breaks (chr 11), and rule-less tables whose cells wrap like prose aren't tables.
@@ -252,6 +258,9 @@ black = both.
   edit text files with the editor tools, not a PowerShell read/replace/write.
 - Shape shadows, autofit and text insets are read-only in the API. A .pptx import keeps shadows
   (and duplicateObject, fill and transform changes keep them) but not spAutoFit.
+- python-pptx: setting top/height on a layout placeholder that inherits its position writes x and
+  width 0 and scales the (already rescaled) master position again: only rescale placeholders with
+  their own `a:xfrm`.
 - python-pptx autoshapes refer to the theme's effect style, which has a shadow: always give an
   explicit `<a:effectLst/>`.
 - Text inside a shape with a shadow gets a shadow too: body text stays in separate text boxes.
