@@ -4,7 +4,9 @@ from pathlib import Path
 
 import pymupdf
 
-TEXT_FLAGS = pymupdf.TEXT_PRESERVE_LIGATURES | pymupdf.TEXT_PRESERVE_WHITESPACE | pymupdf.TEXT_MEDIABOX_CLIP
+LIGATURES = str.maketrans({"ﬀ": "ff", "ﬁ": "fi", "ﬂ": "fl", "ﬃ": "ffi", "ﬄ": "ffl",
+                           "ﬅ": "st", "ﬆ": "st"})
+TEXT_FLAGS =pymupdf.TEXT_PRESERVE_LIGATURES | pymupdf.TEXT_PRESERVE_WHITESPACE | pymupdf.TEXT_MEDIABOX_CLIP
 
 
 def _r(values, nd=2):
@@ -101,7 +103,9 @@ def extract_page(page: pymupdf.Page, defaults: dict | None = None) -> dict:
                 bbox = pymupdf.Rect(s["bbox"])
                 alternates = sum(bbox.contains(pymupdf.Point((r.x0 + r.x1) / 2, (r.y0 + r.y1) / 2)) for r in small_caps)
                 spans.append({
-                    "id": f"p{n}s{len(spans)}", "text": s["text"], "font": s["font"],
+                    # Ligature code points (xelatex/lualatex text layers) as plain letters, so the
+                    # text stays searchable and spell-checkable in Slides.
+                    "id": f"p{n}s{len(spans)}", "text": s["text"].translate(LIGATURES), "font": s["font"],
                     "size": round(s["size"], 3), "color": f"#{s['color']:06x}",
                     "origin": _r(s["origin"]), "bbox": _r(s["bbox"]), "dir": _r(line["dir"], 3),
                     "smallcaps": alternates >= 2 and alternates >= 0.7 * sum(ch.islower() for ch in s["text"]),
