@@ -19,9 +19,10 @@ MATH_PREFIXES = (
     "EURM", "EURB", "RSFS", "STMARY", "WASY", "LASY", "LATINMODERNMATH", "STIXMATH",
     "STIXTWOMATH", "XITSMATH", "CAMBRIAMATH", "FIRAMATH", "NEWCMMATH",
 )  # plus any name containing MATH
-# Symbol fonts whose glyphs are pictures, not letters (ccicons, fontawesome, pifont, marvosym, ...)
+# Symbol fonts whose glyphs are pictures, not letters (ccicons, fontawesome, pifont, marvosym, ...;
+# LaTeX's picture-mode line and circle pieces: \cancel strokes, \circle)
 ICON_FONT_RE = re.compile(r"CCICONS|FONTAWESOME|DINGBAT|ZAPF|MARVOSYM|WEBDINGS|WINGDINGS|ACADEMICONS|BBDING|"
-                          r"^PZDR|UTFSYM|OCTICONS|MATERIALICONS")
+                          r"^PZDR|UTFSYM|OCTICONS|MATERIALICONS|^L(INE|CIRCLE)W?10$")
 
 # Computer Modern Type 1 names: CM<variant><size>
 CM_VARIANTS = {

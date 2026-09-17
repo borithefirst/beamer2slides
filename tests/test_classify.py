@@ -429,3 +429,71 @@ def test_theme_sweep_floors(theme, floor):
     assert all("unsure" not in {l["reason"] for l in s["left_in_background"]} for s in d["slides"])
     tables = [e for s in d["slides"] for e in s["elements"] if e["kind"] == "table"]
     assert len(tables) == 1 and len(tables[0]["cells"]) == 4
+
+
+# marks edge cases
+
+def marked(p: dict, mark: str) -> list[str]:
+    return [r["text"].strip() for r in p["runs"] if r.get(mark)]
+
+
+def holes(p: dict) -> list[float]:
+    return [r["hole"] for r in p["runs"] if r.get("hole")]
+
+
+def test_soul_marks_and_wide_frame():
+    slide = deck("19_labels_on_graphics")["slides"][8]
+    soul, frames = texts(slide)[1]["paragraphs"][:2]
+    # soul draws a box or rule per word piece, overlapping: one highlight, strike and underline each
+    assert marked(soul, "highlight") == ["highlighted words,"]
+    assert marked(soul, "strike") == ["soul strike"] and marked(soul, "underline") == ["soul underline"]
+    # \framebox[2.5cm] is wider than its words: still one hole with them
+    assert len(holes(frames)) == 3 and "wide" not in paragraph_text(frames)
+    assert not [e for e in slide["elements"] if e["kind"] == "image" and not e.get("anchor") and e["role"] == "math"]
+
+
+def test_hole_ends_at_its_graphic():
+    body = texts(deck("19_labels_on_graphics")["slides"][7])[1]["paragraphs"]
+    # the gap after a circled number counts from the circle, not from the digit inside it
+    assert abs(holes(body[0])[0] - 17.6) < 0.2
+
+
+def test_marks_across_line_breaks():
+    paras = texts(deck("20_marks_edge_cases")["slides"][0])[1]["paragraphs"]
+    assert marked(paras[0], "highlight") == ["the highlighted part starts near the end of the first line and carries on"]
+    assert marked(paras[1], "underline") == ["underline begins close to the right margin and runs over the break"]
+    assert marked(paras[2], "highlight") == ["bold", "inside", "it"] and marked(paras[2], "strike") == ["no"]
+
+
+def test_cancel_strokes_are_holes():
+    paras = texts(deck("20_marks_edge_cases")["slides"][1])[1]["paragraphs"]
+    assert [len(holes(p)) for p in paras] == [2, 2, 0]
+    assert not any(ch in paragraph_text(p) for p in paras for ch in "✭❤❙")  # picture-mode line glyphs
+    assert marked(paras[2], "strike") == ["old", "wrong"]
+
+
+def test_boxes_next_to_punctuation_and_links():
+    paras = texts(deck("20_marks_edge_cases")["slides"][2])[1]["paragraphs"]
+    assert [len(holes(p)) for p in paras] == [1, 1, 2, 0]
+    assert paragraph_text(paras[2]).replace("\xa0", "").startswith("Two words ()")
+    link = [r for r in paras[3]["runs"] if r.get("highlight")]
+    assert [r["text"] for r in link] == ["in a box"] and link[0]["link"] == "https://example.com"
+
+
+def test_braces_join_their_formula():
+    slide = deck("20_marks_edge_cases")["slides"][3]
+    paras = [p for e in texts(slide) if e["role"] == "body" for p in e["paragraphs"]]
+    assert [len(holes(p)) for p in paras] == [1, 1, 1]
+    assert [round(p["lines"][0]["baseline"]) for p in paras[:2]] == [99, 140], "the words' baselines, not the braces'"
+    alts = [e["alt"] for e in slide["elements"] if e["kind"] == "image"]
+    assert "total" in alts[0] and "both" in alts[1]
+
+
+def test_framed_paragraphs_are_shapes_with_wrapped_text():
+    slide = deck("20_marks_edge_cases")["slides"][4]
+    d = [e for e in slide["elements"] if e["kind"] == "diagram"][0]
+    assert not d["lines"], "the four sides of each frame are one rectangle"
+    styles = sorted((n["fill"] or "", n["stroke"]) for n in d["nodes"])
+    assert styles == [("", "#000000"), ("#e6e6ff", "#0000ff")]
+    boxes = [n["text"] for n in d["nodes"]]
+    assert all(len(b) == 1 and len(b[0]["paragraphs"]) == 1 and b[0]["paragraphs"][0]["align"] == "left" for b in boxes)

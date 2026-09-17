@@ -52,15 +52,24 @@ a per-slide background picture.
   (template bentConnector3 with adj 0 or 100000), so edges follow moved nodes.
   Card text (`card_text`: several sizes or lines in a node, e.g. a number over a caption) becomes
   text boxes on the PDF baselines, split where Slides can't set two paragraphs that close.
+  `closed_frames`: four stroked lines closing a rectangle (`\fbox{\parbox}`, `\fcolorbox` around a
+  minipage) are one rectangle node, merged with the fill inside; its justified lines stay one
+  left-aligned wrapped paragraph.
 - `shape`: opaque filled panels such as beamer blocks, not touching the page edge, with
   nothing left in the background on top; verified against the rendered colour. Also
   figure clusters of plain filled rectangles (`plain_rectangles`, role `rule`).
 - Text decorations (`text_decorations`): a thin rule tightly under words → run `underline`,
   a rule through the x-height → run `strike` (ulem draws one piece per word: pieces are merged),
-  a filled box tightly around words on one line → run `highlight` (backgroundColor).
+  a filled box tightly around words on one line → run `highlight` (backgroundColor). soul's
+  `\hl`/`\st`/`\ul` draw overlapping pieces per word and wrap across lines: pieces are merged too;
+  a wrapped underline's next line of text doesn't count as words under a fraction bar.
 - Words on small graphics (`graphic_holes`: `\circled`, keycaps, `\fbox`, badges, dashed boxes,
   `\textcircled`'s overlapping glyphs) become holes like inline formulas, so text and graphic
-  move together; `Line.hole_pads` widens a hole to the graphic. Small graphics on a native
+  move together; `Line.hole_pads` widens a hole to the graphic (a closed frame may be wider than
+  its words: `\framebox[2.5cm]`; the space after a hole counts from the graphic's end). `\cancel`
+  strokes are LINE10 glyphs (icon font → graphic → hole). `join_braces`: an `\underbrace` /
+  `\overbrace` glyph line and its label join the prose line, so the formula hole takes them.
+  Small graphics on a native
   panel (the QED box) become pictures (`specks_on_panels`), or the panel would hide them.
 - Accents PDFium reports as separate chars (`ACCENTS`: ¯ ˆ ˜ …) become combining marks on
   their letter (X̄), also when the accent landed in the previous span.

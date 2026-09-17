@@ -1,0 +1,84 @@
+\documentclass[aspectratio=169]{beamer}
+% Edge cases of text marks and frames: decorations that wrap, cross out, carry links or
+% surround whole paragraphs. Text and graphic must still line up in Slides.
+\usetheme{Madrid}
+\usepackage{amssymb}
+\usepackage[normalem]{ulem}
+\usepackage{soul}
+\usepackage{cancel}
+\usepackage{tikz}
+\hypersetup{colorlinks=false, pdfborder={0 0 1}}
+\newcommand{\circled}[1]{\tikz[baseline=(c.base)]\node[circle,draw,inner sep=0.5pt,font=\tiny](c){#1};}
+\title{Marks edge cases}
+\author{Test}
+\date{}
+
+\begin{document}
+
+\begin{frame}{Marks across line breaks}
+  This paragraph is long enough to wrap, and \hl{the highlighted part starts near the end of
+  the first line and carries on} into the second line of the paragraph.
+
+  Here the sentence is long enough so that the \ul{underline begins close to the right margin
+  and runs over the break} onto the next line of text before the sentence ends.
+
+  A highlight with \hl{bold \textbf{inside} it} and a short \sout{no} struck word.
+\end{frame}
+
+\begin{frame}{Crossed out}
+  We \cancel{remove} one word and \xcancel{two words} here, then more words.
+
+  The term $\cancel{x^2}$ cancels, and $\bcancel{y}$ too, in a sentence.
+
+  An \st{old} value and a \sout{wrong} guess, then the right one.
+\end{frame}
+
+\begin{frame}{Boxes and punctuation}
+  A \colorbox{blue}{\color{white}white on blue} box inside a sentence of words.
+
+  A {\setlength{\fboxrule}{2pt}\fcolorbox{red}{white}{thick frame}} with more text after.
+
+  Two words (\fbox{in a box}), and then \fbox{another pair}.
+
+  A link \colorbox{yellow!40}{\href{https://example.com}{in a box}} and \href{https://example.com}{a plain link}.
+\end{frame}
+
+\begin{frame}{Braces and boxed math}
+  The sum $\underbrace{a+b}_{\text{total}}$ has a label below, as words go on.
+
+  The value $\overbrace{x+y}^{\text{both}}$ has one above it, then text follows.
+
+  We get $\boxed{E=mc^2}$ in prose and continue the sentence after the box.
+\end{frame}
+
+\begin{frame}{Framed paragraphs}
+  Text before the framed paragraph.
+
+  \fbox{\parbox{7cm}{A paragraph inside a frame that wraps over two lines of text
+  because it is long enough.}}
+
+  \fcolorbox{blue}{blue!10}{\begin{minipage}{6cm}A minipage with a coloured frame and a
+  second line of text.\end{minipage}}
+
+  Text after the framed paragraphs.
+\end{frame}
+
+\begin{frame}{Footnote marks}
+  A circled mark\textsuperscript{\circled{1}} after a word, and another one\textsuperscript{\circled{2}} here.
+
+  A footnote in a coloured box\textsuperscript{\colorbox{orange}{\color{white}1}} in the middle of a line.
+
+  A real footnote\footnote{The footnote text.} and a boxed mark{\fboxsep=1pt\fbox{\tiny 2}} after words.
+\end{frame}
+
+\begin{frame}{Link borders}
+  Visit \href{https://example.com}{the example site} or \hyperlink{target}{jump ahead} for more.
+
+  Links in running text keep their border boxes in the PDF viewer.
+\end{frame}
+
+\begin{frame}[label=target]{Target}
+  The jump target.
+\end{frame}
+
+\end{document}

@@ -199,7 +199,9 @@ class Line:
     @property
     def main(self) -> Span:
         top = max(s.size for s in self.spans)
-        return max((s for s in self.spans if s.size >= 0.9 * top), key=lambda s: len(s.text.strip()))
+        # (not a big-operator or brace glyph: it sits off the baseline)
+        return max((s for s in self.spans if s.size >= 0.9 * top),
+                   key=lambda s: (not s.font.upper().startswith("CMEX"), len(s.text.strip())))
 
     @property
     def baseline(self) -> float:
@@ -406,7 +408,10 @@ def card_text(node: Rect, rows: list[list[Span]]) -> dict | None:
              "size": max(s.size for s in row)} for row in rows]
     sizes = [r["size"] for r in info]
     top, bottom = rows[0][0].rect.y0, max(s.rect.y1 for s in rows[-1])
-    centred = all(abs((r["x0"] + r["x1"]) / 2 - node.cx) <= 2 for r in info)
+    # (lines of a justified paragraph start together and end apart, even when nearly centred)
+    flush_left = lambda ls: len(ls) > 1 and all(abs(l["x0"] - ls[0]["x0"]) <= 0.5 for l in ls) and \
+        any(abs(l["x1"] - ls[0]["x1"]) > 2 for l in ls)
+    centred = all(abs((r["x0"] + r["x1"]) / 2 - node.cx) <= 2 for r in info) and not flush_left(info)
     if max(sizes) <= 1.1 * min(sizes) and centred and abs((top + bottom) / 2 - node.cy) <= 0.15 * node.h:
         return None
     paragraphs: list[list[int]] = []
@@ -423,7 +428,7 @@ def card_text(node: Rect, rows: list[list[Span]]) -> dict | None:
     boxes: list[list[dict]] = []
     for idx in paragraphs:
         lines = [info[i] for i in idx]
-        on_centre = all(abs((l["x0"] + l["x1"]) / 2 - node.cx) <= 2 for l in lines)
+        on_centre = all(abs((l["x0"] + l["x1"]) / 2 - node.cx) <= 2 for l in lines) and not flush_left(lines)
         left = not on_centre and (len(lines) == 1 or all(abs(l["x0"] - lines[0]["x0"]) <= 1 for l in lines))
         runs: list[dict] = []
         for i in idx:
@@ -512,14 +517,29 @@ class PageClassifier:
         flat = [s for s in spans if s.horizontal and s.text.strip()]
         drawings = [(d, Rect.of(d["bbox"])) for d in self.page["drawings"]]
         is_rule = lambda d, r: r.h <= 1.2 and ((d["type"] == "f" and d["items"] == "re") or (d["type"] == "s" and d["items"] == "l"))
-        # ulem draws a rule per word and per space: pieces touching end to end are one rule.
-        candidates: list[tuple[list[dict], Rect]] = [([d], r) for d, r in drawings if not is_rule(d, r)]
-        for d, r in sorted(((d, r) for d, r in drawings if is_rule(d, r)), key=lambda x: (round(x[1].cy), x[1].x0)):
-            last = next((c for c in reversed(candidates) if is_rule(c[0][0], c[1])), None)
-            if last and last[0][0]["type"] == d["type"] and abs(last[1].cy - r.cy) <= 0.2 and -0.1 <= r.x0 - last[1].x1 <= 1:
+        # ulem draws a rule per word and per space, soul a rule or box per word piece: pieces
+        # touching or overlapping end to end are one rule or box.
+        is_box = lambda d, r: d["type"] == "f" and d["items"] == "re" and d.get("fill") and not is_rule(d, r)
+        candidates: list[tuple[list[dict], Rect]] = [([d], r) for d, r in drawings if not is_rule(d, r) and not is_box(d, r)]
+        pieces = sorted(((d, r) for d, r in drawings if is_rule(d, r) or is_box(d, r)), key=lambda x: (round(x[1].cy), x[1].x0))
+        for d, r in pieces:
+            last = next((c for c in reversed(candidates) if is_rule(c[0][0], c[1]) == is_rule(d, r)), None)
+            if last and last[0][0]["type"] == d["type"] and abs(last[1].cy - r.cy) <= 0.2 and -0.6 <= r.x0 - last[1].x1 <= 1 \
+                    and (is_rule(d, r) or (abs(last[1].h - r.h) <= 0.2 and last[0][0]["fill"] == d["fill"] and r.x0 < last[1].x1)):
                 candidates[candidates.index(last)] = (last[0] + [d], last[1].union(r))
             else:
                 candidates.append(([d], r))
+
+        def run_of(s: Span) -> Rect:
+            """The words joined to s on its row."""
+            row = sorted((o for o in flat if abs(o.baseline - s.baseline) <= 0.1 * s.size), key=lambda o: o.rect.x0)
+            j0 = j1 = row.index(s)
+            while j0 > 0 and row[j0].rect.x0 - row[j0 - 1].rect.x1 <= 0.6 * s.size:
+                j0 -= 1
+            while j1 < len(row) - 1 and row[j1 + 1].rect.x0 - row[j1].rect.x1 <= 0.6 * s.size:
+                j1 += 1
+            return Rect(row[j0].rect.x0, s.rect.y0, row[j1].rect.x1, s.rect.y1)
+
         for group, r in candidates:
             d = group[0]
             if self.is_decoration(r) or r.w < 2 or r.w * r.h >= 0.95 * self.W * self.H:
@@ -538,8 +558,11 @@ class PageClassifier:
                 size = max(s.size for s in words)
                 gaps = [b.rect.x0 - a.rect.x1 for a, b in zip(words, words[1:])]
                 covered = sum(s.rect.w for s in words)
+                # (a rule over words below it: an overline, a fraction bar; not the next line of
+                # text under a wrapped underline, whose words run on past the rule)
                 below = not strike and any(s.rect.x0 < r.x1 and r.x0 < s.rect.x1 and s.baseline > r.cy and s.rect.y0 < r.cy + 0.25 * size
-                                           for s in flat)
+                                           and (s.baseline - r.cy < 0.75 * size or r.expand(size).contains(run_of(s).x0, r.cy)
+                                                and r.expand(size).contains(run_of(s).x1, r.cy)) for s in flat)
                 if below or covered < 0.8 * r.w or any(g > 0.6 * size for g in gaps) or \
                         (strike and max(s.baseline for s in words) - min(s.baseline for s in words) > 0.1 * size) or \
                         abs(words[0].rect.x0 - r.x0) > 0.3 * size or abs(words[-1].rect.x1 - r.x1) > 0.3 * size:
@@ -550,14 +573,17 @@ class PageClassifier:
                     else:
                         s.underline = True
             elif d["type"] == "f" and ops == "re" and d.get("fill") and d.get("fill_opacity", 1.0) >= 0.99:
-                inside = [s for s in flat if r.contains_rect(s.rect, tol=0.5)]
+                # (soul's \hl ends before punctuation that follows in the same span: "words,")
+                punct = lambda s: 0.3 * s.size if s.text.rstrip()[-1:] in ",.;:!?)" and s.text.rstrip()[-2:-1].isalnum() else 0.0
+                inside = [s for s in flat if r.contains_rect(Rect(s.rect.x0, s.rect.y0, max(min(s.rect.x1, r.x1), s.rect.x1 - punct(s)),
+                                                                   s.rect.y1), tol=0.5)]
                 if not inside or any(s.rect.intersects(r) and s not in inside for s in flat):
                     continue
                 size = max(s.size for s in inside)
                 if not 0.9 * size <= r.h <= 2.2 * size or len({round(s.baseline) for s in inside}) != 1:
                     continue
                 if sum(s.rect.w for s in inside) < 0.6 * r.w or \
-                        any(o is not d and ro.expand(2).intersects(r) and not r.contains_rect(ro, tol=0)
+                        any(o not in group and ro.expand(1).intersects(r) and not r.contains_rect(ro, tol=0)
                             for o, ro in drawings if ro.w * ro.h < 0.95 * self.W * self.H):
                     continue  # part of a figure (a filled TikZ node with lines attached)
                 for s in inside:
@@ -770,6 +796,42 @@ class PageClassifier:
                     break
         return out
 
+    @staticmethod
+    def join_braces(lines: list[Line]) -> list[Line]:
+        """\\underbrace / \\overbrace in a line of prose: the brace (big-operator glyphs, a line
+        of its own just below or above) and its small label join the line, so the formula
+        becomes one hole with them."""
+        cmex = lambda s: s.font.upper().startswith("CMEX")
+        words = lambda l: sum(len(s.text.strip()) >= 2 and s.text.strip().isalpha() and s.info.family not in ("math", "icon")
+                              for s in l.spans)
+        taken: set[int] = set()
+        for host in lines:
+            if words(host) < 3 or not all(s.horizontal for s in host.spans):
+                continue
+            size = host.size
+            for brace in lines:
+                if id(brace) in taken or brace is host or not all(cmex(s) for s in brace.spans) or \
+                        brace.rect.w < 0.8 * size or brace.rect.h > 1.2 * size or \
+                        not (host.rect.x0 - 1 <= brace.rect.x0 and brace.rect.x1 <= host.rect.x1 + 1):
+                    continue
+                shift = brace.baseline - host.baseline
+                if not (0 <= shift <= 0.8 * size or -1.2 * size <= shift < 0):
+                    continue
+                # (over or under a formula of the line, not a big operator below words)
+                maths = [s for s in host.spans if s.info.family == "math" or (s.info.italic and len(s.text.strip()) <= 2)
+                         or all(ch in MATH_OPERATORS or ch in "()[]" for ch in s.text.strip())]
+                if sum(max(0.0, min(s.rect.x1, brace.rect.x1) - max(s.rect.x0, brace.rect.x0)) for s in maths) < 0.7 * brace.rect.w:
+                    continue
+                labels = [l for l in lines if id(l) not in taken and l is not host and l is not brace
+                          and all(s.size <= 0.85 * size and s.horizontal for s in l.spans) and len(l.text) <= 20
+                          and brace.rect.x0 - 0.5 * size <= l.rect.x0 and l.rect.x1 <= brace.rect.x1 + 0.5 * size
+                          and l.rect.intersects(brace.rect.expand(0.5 * size))
+                          and (l.baseline > brace.baseline if shift >= 0 else l.baseline < brace.baseline)]
+                for l in [brace] + labels[:1]:
+                    host.spans = sorted(host.spans + l.spans, key=lambda s: s.rect.x0)
+                    taken.add(id(l))
+        return [l for l in lines if id(l) not in taken]
+
     # -- line reasons -----------------------------------------------------------
 
     def inside_figure_share(self, line: Line) -> float:
@@ -941,7 +1003,9 @@ class PageClassifier:
             if g.h > 2.2 * size or not line.baseline - size <= g.cy <= line.baseline + 0.4 * size:
                 continue
             touched = [s for s in spans if min(s.rect.x1, g.x1) - max(s.rect.x0, g.x0) > 0.3 * s.rect.w]
-            if not touched or g.w > sum(s.rect.w for s in touched) + 2 * size:
+            # (a frame closed around its words may be wider: \framebox[2.5cm])
+            framed = touched and g.contains_rect(union_all(s.rect for s in touched), tol=0.5) and g.w <= 0.5 * self.W
+            if not touched or (g.w > sum(s.rect.w for s in touched) + 2 * size and not framed):
                 continue  # nothing on it, or a rule or frame reaching well past the words
             if touched == spans[:1]:
                 continue  # a label on a box at the line start: a list number (detect_bullet)
@@ -1228,6 +1292,7 @@ class PageClassifier:
     def runs(par: Paragraph, indent: str = "", soft_breaks: bool = False) -> list[dict]:
         runs: list[dict] = []
         prev: Span | None = None
+        hole_x1 = 0.0
         for li, line in enumerate(par.lines):
             order = reading_order(line)
             accent = ""  # an accent at the end of a span, for the letter under it in the next one
@@ -1239,9 +1304,9 @@ class PageClassifier:
                                  "color": main.color, "link": main.link, "script": None,
                                  "underline": False, "highlight": None})
                     continue
-                if span.info.family == "icon":
-                    continue  # symbol-font glyphs stay in the background picture
                 hole = next((h for h in line.holes if span in h), None)
+                if span.info.family == "icon" and hole is None:
+                    continue  # symbol-font glyphs stay in the background picture
                 if hole is not None:
                     if span is not min(hole, key=lambda s: s.rect.x0):
                         continue
@@ -1266,7 +1331,7 @@ class PageClassifier:
                                  # (the picture is cropped with HOLE_PAD on both sides: room for that too)
                                  "highlight": None, "hole": round(x1 - x0 + 2 * HOLE_PAD, 2), "hole_x0": round(x0, 2),
                                  "before": before})
-                    prev = max(hole, key=lambda s: s.rect.x1)
+                    prev, hole_x1 = max(hole, key=lambda s: s.rect.x1), x1
                     continue
                 text = span.text
                 if text.strip() in ACCENTS and prev is not None and runs and not runs[-1].get("hole") and \
@@ -1296,7 +1361,8 @@ class PageClassifier:
                     elif span is line.tab:
                         sep = "\t"
                     else:
-                        gap = span.rect.x0 - prev.rect.x1
+                        # (after a hole, from the end of its graphic: a frame wider than its words)
+                        gap = span.rect.x0 - (hole_x1 if runs[-1].get("hole") else prev.rect.x1)
                         sep = " " if gap > 0.15 * line.size else ""
                         if gap >= 1.0 * line.size:
                             # \quad and wider (\and between authors): em spaces keep the gap
@@ -1304,7 +1370,7 @@ class PageClassifier:
                     if si and sep == " " and runs[-1].get("hole"):
                         # The space after a formula becomes part of its gap: TeX's space there
                         # is wider than a Slides space would be.
-                        runs[-1]["hole"] = round(runs[-1]["hole"] + span.rect.x0 - prev.rect.x1, 2)
+                        runs[-1]["hole"] = round(runs[-1]["hole"] + gap, 2)
                         sep = ""
                         text = text.lstrip()
                     if sep and not runs[-1]["text"].endswith(" ") and not text.startswith(" "):
@@ -1528,6 +1594,39 @@ class PageClassifier:
                                "radius": 0.0, "drawing": d["id"], "spans": []})
         return out
 
+    @staticmethod
+    def closed_frames(nodes: list[dict], lines: list[dict]) -> None:
+        """Four stroked lines closing a rectangle (\\fbox and \\fcolorbox draw their frame side by
+        side) become one rectangle node; a filled rectangle right inside the frame (the
+        \\fcolorbox background) takes it as its outline."""
+        extent = lambda ln, k: sorted((ln["from"][k], ln["to"][k]))
+        horizontal = [l for l in lines if "via" not in l and abs(l["from"][1] - l["to"][1]) < 0.05]
+        vertical = [l for l in lines if "via" not in l and abs(l["from"][0] - l["to"][0]) < 0.05]
+        near = lambda a, b, tol: all(abs(p - q) <= tol for p, q in zip(a, b))
+        for top in horizontal:
+            for bottom in horizontal:
+                y0, y1, tol = top["from"][1], bottom["from"][1], top["width"] + 0.5
+                if top not in lines or bottom not in lines or y1 - y0 <= 3 or bottom["stroke"] != top["stroke"] \
+                        or not near(extent(bottom, 0), extent(top, 0), tol):
+                    continue
+                x0, x1 = extent(top, 0)
+                sides = [v for v in vertical if v in lines and v["stroke"] == top["stroke"] and near(extent(v, 1), (y0, y1), tol)]
+                left = next((v for v in sides if abs(v["from"][0] - x0) <= tol), None)
+                right = next((v for v in sides if abs(v["from"][0] - x1) <= tol), None)
+                if left is None or right is None or left is right:
+                    continue
+                rect = Rect(left["from"][0], y0, right["from"][0], y1)
+                for ln in (top, bottom, left, right):
+                    lines.remove(ln)
+                inner = next((n for n in nodes if n["shape"] == "RECTANGLE" and n["stroke"] is None and
+                              rect.expand(tol).contains_rect(n["rect"]) and n["rect"].w >= rect.w - 2 * tol
+                              and n["rect"].h >= rect.h - 2 * tol), None)
+                if inner:
+                    inner.update(rect=rect, stroke=top["stroke"], width=top["width"])
+                else:
+                    nodes.append({"rect": rect, "shape": "RECTANGLE", "spans": [], "fill": None,
+                                  "stroke": top["stroke"], "width": top["width"]})
+
     def diagram_from(self, c: Rect, label_spans: list[Span], index: int) -> dict | None:
         """A figure cluster made only of simple nodes (rectangles, rounded rectangles, ellipses)
         with their text inside, straight lines and arrow tips: rebuilt from native Slides
@@ -1577,6 +1676,7 @@ class PageClassifier:
                 tips.append((r, style, points))
             else:
                 return None
+        self.closed_frames(nodes, lines)
         if not nodes:
             return None
         for tip, style, points in tips:
@@ -2064,7 +2164,7 @@ class PageClassifier:
         spans = self.spans()
         self.text_decorations(spans)
         self.analyse_graphics()
-        lines = self.build_lines(spans)
+        lines = self.join_braces(self.build_lines(spans))
         self.assign_reasons(lines)
         plain_tables = self.plain_tables(lines)
         body_lines = [l for l in lines if l.reason is None and abs(l.size - self.body) < 1]
