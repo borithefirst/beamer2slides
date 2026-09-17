@@ -3,6 +3,7 @@ created, recorded right after the deck was written, in `<out>/sync/base.json` an
 
 import io
 import json
+import os
 import re
 from pathlib import Path
 
@@ -530,10 +531,42 @@ def local_path(out: Path) -> Path:
 
 
 def save_local(base: dict, out: Path) -> Path:
+    """Written to a temporary file and moved into place: a process killed while the base is being
+    written leaves the previous one, never half of a file (a truncated base is no base at all)."""
     path = local_path(out)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(base, indent=1, ensure_ascii=False), encoding="utf-8")
+    tmp = path.with_name(path.name + ".writing")
+    tmp.write_text(json.dumps(base, indent=1, ensure_ascii=False), encoding="utf-8")
+    os.replace(tmp, path)
     return path
+
+
+def base_problem(data, pid: str | None) -> str | None:
+    """Why `data` cannot be used as the base of presentation `pid` (None: it can)."""
+    if not isinstance(data, dict):
+        return "not a JSON object"
+    version = data.get("version")
+    if not isinstance(version, int):
+        return "no schema version"
+    if version > VERSION:
+        return f"schema version {version} is newer than this beamer2slides (up to {VERSION})"
+    if not isinstance(data.get("slides"), list):
+        return "no slides"
+    if pid and data.get("presentationId") != pid:
+        return f"it belongs to presentation {data.get('presentationId')}"
+    return None
+
+
+def read_local(out: Path | None, pid: str | None) -> tuple[dict | None, str | None]:
+    """(base, why not) of the local cache: a missing, truncated or foreign file is no base."""
+    if out is None or not local_path(out).exists():
+        return None, None
+    try:
+        data = json.loads(local_path(out).read_text(encoding="utf-8"))
+    except (OSError, ValueError) as e:
+        return None, f"{local_path(out)} could not be read ({type(e).__name__}: {e})"
+    problem = base_problem(data, pid)
+    return (None, f"{local_path(out)}: {problem}") if problem else (data, None)
 
 
 def save_drive(drive, base: dict, title: str | None = None) -> str:
@@ -574,17 +607,60 @@ def load_drive(drive, pid: str) -> dict | None:
         return None
 
 
-def load_base(pid: str, out: Path | None, drive=None) -> tuple[dict | None, str]:
-    """(base, where it came from): Drive is authoritative, the local copy a cache."""
-    if drive is not None:
-        base = load_drive(drive, pid)
-        if base and base.get("presentationId") == pid:
-            return base, "drive"
-    if out is not None and local_path(out).exists():
-        base = json.loads(local_path(out).read_text(encoding="utf-8"))
-        if base.get("presentationId") == pid:
-            return base, "local"
+def load_base(pid: str, out: Path | None, drive=None, problems: list[str] | None = None) -> tuple[dict | None, str]:
+    """(base, where it came from): Drive is authoritative, the local copy a cache - except when the
+    local one is newer, which is what a sync whose Drive upload failed leaves behind. A base that is
+    truncated, from another deck or from a newer schema is not used at all; `problems` collects why
+    (the caller reports them: a silently ignored base would sync against nothing and rewrite the
+    whole deck)."""
+    problems = problems if problems is not None else []
+    remote = load_drive(drive, pid) if drive is not None else None
+    if remote is not None:
+        problem = base_problem(remote, pid)
+        if problem:
+            problems.append(f"the base stored in Drive was ignored: {problem}")
+            remote = None
+    local, why = read_local(out, pid)
+    if why:
+        problems.append(f"the local base was ignored: {why}")
+    if remote is not None and local is not None and local.get("generation", 0) > remote.get("generation", 0):
+        problems.append(f"the base in Drive is older than the local one (generation {remote.get('generation', 0)} vs "
+                        f"{local.get('generation', 0)}): syncing from the local one and storing it in Drive again")
+        return local, "local"
+    if remote is not None:
+        return remote, "drive"
+    if local is not None:
+        return local, "local"
     return None, "none"
+
+
+def store_base(base: dict, out: Path, drive=None, label: str = "base") -> str | None:
+    """Store the base where the next sync will look for it: locally first (atomically), then in
+    Drive. Returns why Drive could not take it (None: it did). The caller decides what to do about
+    a base that only reached the local folder - sync keeps the objects it would have deleted."""
+    from .faults import fail_at
+
+    fail_at(f"{label}:save")
+    save_local(base, out)
+    if drive is None:
+        return "no Drive service"
+    fail_at(f"{label}:drive")
+    try:
+        save_drive(drive, base)
+    except (HttpError, OSError) as e:
+        return f"{type(e).__name__}: {e}"
+    return None
+
+
+def base_matches(base: dict, theirs: dict) -> bool:
+    """Whether the base describes this live deck at all. A base whose slides are all gone means the
+    deck was copied or rebuilt behind our back: syncing would report every element as deleted in the
+    deck and keep nothing."""
+    known = [b.get("objectId") for b in base.get("slides", []) if b.get("objectId")]
+    if not known:
+        return True
+    live = {s["objectId"] for s in theirs.get("slides", [])}
+    return any(sid in live for sid in known)
 
 
 def snapshot_after_convert(deck: dict, out: Path, state: dict, pdf: Path) -> dict:
