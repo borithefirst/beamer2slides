@@ -68,6 +68,8 @@ a per-slide background picture.
   `plain_tables`: rule-less tabulars (≥3 rows, same cell count, short cells) → borderless tables.
 - `literal_list_numbers`: when Slides would number a list wrongly (TOC split into boxes),
   every number on the slide becomes literal text with a tab (Slides can't set a start number).
+  A number drawn on a ball or box instead becomes its own text box centred on the ball picture
+  (`number` on the image element, `emit.number_box_requests`), grouped with the item text.
 - Grouping in emit: blocks (`block_groups`: shapes with the same `block` plus content), formula
   pictures with their text, progress bars with their track (`rule_groups`). Title page:
   `subtitle_element` → SUBTITLE placeholder.

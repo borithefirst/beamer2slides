@@ -331,9 +331,13 @@ def test_metric_compatible_fonts():
 
 def test_toc_split_into_boxes_keeps_its_numbers():
     d = load(THEMES / "Warsaw" / "talk.pdf")
-    paras = [p for e in texts(d["slides"][1]) for p in e["paragraphs"] if p["tab_x0"]]
-    assert [paragraph_text(p) for p in paras] == ["1\tIntroduction", "2\tMethod", "3\tConclusion"]
+    paras = [p for e in texts(d["slides"][1]) if e["role"] != "title" for p in e["paragraphs"]]
+    assert [paragraph_text(p) for p in paras] == ["Introduction", "Method", "Conclusion"]
     assert all(p["bullet"] is None for p in paras), "Slides would number each one-item list 1."
+    # Warsaw's numbers sit on balls: each goes on its ball picture, centred there in Slides.
+    balls = [e for e in d["slides"][1]["elements"] if e.get("number")]
+    assert [b["number"]["text"] for b in balls] == ["1", "2", "3"]
+    assert all(b["kind"] == "image" and b["anchor"] for b in balls)
 
 
 def test_blocks_pair_title_bar_and_body_with_shadow():

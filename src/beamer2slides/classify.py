@@ -318,7 +318,7 @@ def label_of(spans: list[Span]) -> dict | None:
     if not spans:
         return None
     s = min(spans, key=lambda s: s.rect.x0)
-    return {"x0": round(s.rect.x0, 2), "font": s.font, "family": s.info.family, "size": round(s.size, 2),
+    return {"x0": round(s.rect.x0, 2), "baseline": round(s.baseline, 2), "font": s.font, "family": s.info.family, "size": round(s.size, 2),
             "bold": s.info.bold, "italic": s.info.italic, "color": s.color}
 
 
@@ -2004,8 +2004,10 @@ class PageClassifier:
 def literal_list_numbers(slides: list[dict]) -> None:
     """Slides numbers each list from 1, and the API cannot set a start number. A numbered
     item whose number Slides would get wrong (a table of contents split into one box per
-    section, a list continued after a paragraph) keeps its number as literal text with a tab;
-    a ball or box under the number becomes a picture grouped with the text, so it moves along."""
+    section, a list continued after a paragraph) keeps its number as literal text with a tab.
+    A ball or box under the number becomes a picture grouped with the text, so it moves along,
+    and the number goes on the picture (`number`) as its own centred text box: on the item's
+    line it would sit on the text baseline, off the middle of the ball."""
     def numbered(p: dict) -> bool:
         b = p["bullet"]
         return bool(b) and (b["kind"] == "number" or (b["kind"] == "image" and b["text"].isdigit()))
@@ -2039,7 +2041,11 @@ def literal_list_numbers(slides: list[dict]) -> None:
             if b["kind"] == "image" or b.get("patch"):
                 x0, y0, x1, y1 = b["bbox"]
                 pictures.append({"id": f"{e['id']}b{len(pictures)}", "kind": "image", "role": "icon",
-                                 "bbox": [x0 - 0.5, y0 - 0.5, x1 + 0.5, y1 + 0.5], "spans": [], "anchor": e["id"]})
+                                 "bbox": [x0 - 0.5, y0 - 0.5, x1 + 0.5, y1 + 0.5], "spans": [], "anchor": e["id"],
+                                 "number": {"text": b["text"], "center": [(x0 + x1) / 2, (y0 + y1) / 2],
+                                            "height": y1 - y0, **label}})
+                p["bullet"] = None
+                continue
             p["runs"].insert(0, {
                 "text": b["text"] + "\t", "font": label["font"], "family": label["family"], "size": label["size"],
                 "bold": label["bold"], "italic": label["italic"], "smallcaps": False, "color": label["color"],

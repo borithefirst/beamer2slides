@@ -430,6 +430,34 @@ def text_box_requests(el: dict, slide_id: str, object_id: str, scale: float, fon
     return reqs
 
 
+def number_box_requests(number: dict, slide_id: str, object_id: str, scale: float, fonts: FontMapper) -> list[dict]:
+    """A literal list number centred on its ball picture (classify.literal_list_numbers): a
+    box around the ball's centre with centred text and contentAlignment MIDDLE. Lato digits
+    are 0.72 em tall, so a baseline 0.362 em below the middle puts them in the middle too."""
+    run = {**number, "smallcaps": False}
+    style, fields = fonts.text_style(run, scale)
+    size = fonts(run, scale)[1]
+    cx, cy = number["center"][0] * scale, number["center"][1] * scale
+    w = number["height"] * scale + 2 * PAD_X + size
+    h = max(number["height"] * scale, LINE_EM * size + 2)
+    style["foregroundColor"] = rgb(number["color"])
+    return [
+        {"createShape": {"objectId": object_id, "shapeType": "TEXT_BOX", "elementProperties": {
+            "pageObjectId": slide_id, "size": {"width": emu(w), "height": emu(h)},
+            "transform": {"scaleX": 1, "scaleY": 1, "unit": "EMU",
+                          "translateX": round((cx - w / 2) * EMU_PER_PT), "translateY": round((cy - h / 2) * EMU_PER_PT)}}}},
+        {"updateShapeProperties": {"objectId": object_id, "fields": "contentAlignment,autofit.autofitType",
+                                   "shapeProperties": {"contentAlignment": "MIDDLE", "autofit": {"autofitType": "NONE"}}}},
+        {"insertText": {"objectId": object_id, "text": number["text"], "insertionIndex": 0}},
+        {"updateTextStyle": {"objectId": object_id, "style": style, "fields": ",".join(fields + ["foregroundColor"]),
+                             "textRange": {"type": "ALL"}}},
+        {"updateParagraphStyle": {"objectId": object_id, "textRange": {"type": "ALL"},
+                                  "style": {"alignment": "CENTER", "lineSpacing": 100, "spaceAbove": pt(0), "spaceBelow": pt(0),
+                                            "indentStart": pt(0), "indentFirstLine": pt(0)},
+                                  "fields": "alignment,lineSpacing,spaceAbove,spaceBelow,indentStart,indentFirstLine"}},
+    ]
+
+
 def merge_blocks(elements: list[dict]) -> list[dict]:
     """A block body (see classify.blocks) reaches up under its title bar, with the outline
     of the whole block: resizing the block as a group can then never open a gap between
@@ -1482,6 +1510,8 @@ def build_deck(slides, drive, deck: dict, out: Path, title: str, existing: str |
                 # The picture came with the slide: move it to its place in the z-order.
                 oid = f"{slide_id}_f{i}"
                 reqs = [{"updatePageElementsZOrder": {"pageElementObjectIds": [oid], "operation": "BRING_TO_FRONT"}}]
+                if el.get("number"):
+                    reqs += number_box_requests(el["number"], slide_id, f"{oid}n", scale, fonts)
             else:
                 oid = f"{slide_id}_t{i}"
                 placeholder = None
@@ -1503,7 +1533,7 @@ def build_deck(slides, drive, deck: dict, out: Path, title: str, existing: str |
         anchored: dict[str, list[str]] = {}
         for el, oid in zip(slide["elements"], element_ids):
             if el.get("anchor") in by_id and by_id[el["anchor"]] not in (title_oid, subtitle_oid):
-                anchored.setdefault(by_id[el["anchor"]], []).append(oid)
+                anchored.setdefault(by_id[el["anchor"]], []).extend([oid, f"{oid}n"] if el.get("number") else [oid])
         grouped = set()
         for text_oid, pictures in anchored.items():
             extra.append({"groupObjects": {"groupObjectId": f"{text_oid}_g", "childrenObjectIds": [text_oid] + pictures}})
