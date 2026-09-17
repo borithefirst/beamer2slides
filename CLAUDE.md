@@ -216,6 +216,30 @@ python -m beamer2slides fidelity deck.pdf   # thumbnails vs PDF: fidelity.json, 
 Outputs go to `out/<pdf stem>/`. In the diff PNGs, red = only in PDF, blue = only in Slides,
 black = both.
 
+Alignment on Google's renderer (`tools/alignment.py out/<deck>`, after `fidelity`): reads the
+Slides element boxes with `presentations.get` (cached in slides_elements.json) and compares each
+thumbnail with the PDF rendered on the same pixel grid, in PDF pt. Writes alignment.json, a table,
+and evidence crops `alignment/NNN-item.png` (PDF above, Slides below, measured boxes and edges in
+red; `--crops all|failures|none`). It measures:
+- hole pictures (anchored math/icon): ink gaps left and right of the picture on its line, Slides
+  minus PDF (≤ 1.5 pt), and overlap (text ink touching the picture ink or cut at its opaque box);
+- numbers on balls: number-coloured ink centroid minus the ball box centre, Slides minus PDF (≤ 1 pt);
+- bullets: ink box and colour in the bullet's cell, ΔE (≤ 15) and size ratio (within 30%; heights
+  only for ➢, which stands in for ▶); a translucent highlight over a bullet is unblended first;
+- overlay marks: word edge minus where the (stretched) picture meets it, Slides minus PDF (≤ 2 pt).
+Picture ink is the picture file itself (alpha, or pixels unlike the page around the box) placed
+into its box, so text ink is the rest; the page colour comes from a ring around the picture.
+
+Opt-in suite (real Google Slides, ~95 s): `python -m pytest -m slides` (the default run deselects
+the `slides` marker, pyproject.toml). It converts the stress decks (19–22, 25, 13, demo) 3 at a
+time into `out/slides-tests/<deck>` of the main checkout (fixed folders: the same decks are
+rebuilt), runs `fidelity --refresh` and the measurement, and fails on items over the thresholds
+unless `tests/slides_baseline.json` lists them under `known_failures` (with a verdict), or when
+an error grows more than 0.75 over its baseline. `B2S_UPDATE_BASELINE=1` rewrites the baseline
+(new failures come in marked UNVERIFIED), `B2S_SLIDES_REUSE=1` measures the existing folders
+again without converting. Skipped with a message when the token needs a browser consent.
+Measurements repeat to 0.01 across rebuilds (Slides renders deterministically).
+
 ## Pitfalls found so far
 - PDFium (`pdf.py` handles these):
   - Soft-mask contents are not page objects. Beamer's block shadow is a black rectangle under
