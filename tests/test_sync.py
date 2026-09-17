@@ -1,0 +1,569 @@
+"""Offline tests of sync (docs/sync.md): identity, deck edit detection, the merge rules, diff3,
+slide planning, and the request helpers. No Google calls."""
+
+import copy
+from pathlib import Path
+
+import pytest
+
+from beamer2slides import identity, merge
+from beamer2slides.extract import frame_labels
+from beamer2slides.sync import letterbox_fix, rename
+
+DECKS = Path(__file__).resolve().parent / "decks" / "out"
+
+
+# ---------------------------------------------------------------- helpers
+
+def run(text, **kw):
+    return {"text": text, "font": "CMSS10", "family": "sans", "size": 10.0, "bold": False, "italic": False,
+            "smallcaps": False, "color": "#000000", "link": None, "script": None, "underline": False, "highlight": None, **kw}
+
+
+def text_ir(text, bbox, eid="p0t1", role="body", **kw):
+    return {"id": eid, "kind": "text", "role": role, "bbox": list(bbox), "panel": None, "code": False, "spans": [],
+            "strokes": [], "paragraphs": [{
+                "align": "left", "level": 0, "bullet": None, "size": 10.0, "text_x0": bbox[0], "tab_x0": None,
+                "lines": [{"baseline": bbox[1] + 8 + 12 * k, "x0": bbox[0], "x1": bbox[2]}], "wrap_limit": None,
+                "runs": [run(line, **kw)]} for k, line in enumerate(text.split("\n"))]}
+
+
+def shape_ir(bbox, eid="p0s0", fill="#dddddd"):
+    return {"id": eid, "kind": "shape", "role": "panel", "bbox": list(bbox), "shape": "RECTANGLE", "fill": fill, "flip": False,
+            "radius": 0.0}
+
+
+def readback(box, text=None, kind="shape", parent=None, title=None, style="s0", shape="h0", image=None, styles=None):
+    x0, y0, x1, y1 = box
+    out = {"kind": kind, "transform": [1.0, 0.0, 0.0, 1.0, x0, y0], "size": [x1 - x0, y1 - y0], "box": list(box),
+           "parent_group": parent, "z": 0, "title": title, "description": None, "text": text,
+           "text_styles": styles if styles is not None else [{"fontFamily": "Lato", "fontSize": 18.0}],
+           "paragraph_styles": [{"alignment": "START"}], "text_style_hash": style, "shape_style": {"fill": {"color": "#dddddd", "alpha": 1.0}},
+           "shape_style_hash": shape}
+    if image:
+        out["image"] = {"contentHash": image}
+    return out
+
+
+def entry(key, ir, oid=None, anchor=None):
+    """A base element: IR hashes plus a read-back matching what the converter wrote (2x scale)."""
+    h, fields = identity.ir_fields(ir, None, anchor)
+    el = {"key": key, "id": ir["id"], "kind": ir["kind"], "role": ir.get("role"), "ir_hash": h, "fields": fields,
+          "fingerprint": identity.fingerprint(ir, None, anchor), "anchor": anchor, "ir": ir}
+    if oid:
+        box = [2 * v for v in ir["bbox"]]
+        text = merge.predicted_text(ir) if ir["kind"] == "text" else None
+        el.update(objects=[oid], main=oid, readback={oid: readback(box, text)})
+    return el
+
+
+def ours_entry(key, ir, anchor=None):
+    return {k: v for k, v in entry(key, ir, None, anchor).items()}
+
+
+def base_slide(key, sid, elements, label=None, title=""):
+    return {"key": key, "label": label, "title": title, "page": 0, "text": " ".join(e["fingerprint"]["text"] for e in elements),
+            "layout": "TITLE_ONLY", "background": "color:#ffffff", "notes": "", "objectId": sid, "layoutObjectId": "L",
+            "background_readback": {"state": "INHERIT"}, "notes_readback": "", "groups": [],
+            "order": [e["main"] for e in elements if "main" in e], "elements": elements}
+
+
+def live(slide):
+    """The live slide exactly as the base recorded it."""
+    return {"objectId": slide["objectId"], "layoutObjectId": "L", "background": slide["background_readback"], "notes": "",
+            "notes_id": f"{slide['objectId']}_notes", "order": list(slide["order"]),
+            "objects": {oid: copy.deepcopy(rb) for e in slide["elements"] for oid, rb in e["readback"].items()}}
+
+
+def ours_of(slide):
+    return {**{k: v for k, v in slide.items() if k not in ("objectId", "layoutObjectId", "background_readback",
+                                                           "notes_readback", "groups", "order")},
+            "elements": [{k: v for k, v in e.items() if k not in ("objects", "main", "readback")} for e in slide["elements"]]}
+
+
+def three_slides():
+    slides = []
+    for n, name in enumerate(["intro", "results", "end"]):
+        sid = f"b2s_s{n:03}"
+        els = [entry("text/title/0", text_ir(name.title(), (10, 10, 100, 24), f"p{n}t0", "title"), f"{sid}_t0"),
+               entry("text/body/0", text_ir(f"First point of {name}\nSecond point of {name}", (20, 60, 200, 90), f"p{n}t1"), f"{sid}_t1")]
+        slides.append(base_slide(name, sid, els, label=name, title=name.title()))
+    return {"version": 1, "generation": 0, "presentationId": "P", "master_background": None, "slides": slides}
+
+
+def triple(base):
+    ours = {"slides": [ours_of(s) for s in base["slides"]], "pairs": {j: j for j in range(len(base["slides"]))}}
+    theirs = {"revisionId": "r", "slides": [live(s) for s in base["slides"]]}
+    return ours, theirs
+
+
+def unit(mplan, slide, key):
+    return next(u for p in mplan["slides"] if p["key"] == slide for u in p.get("units", []) if u["key"] == key)
+
+
+# ---------------------------------------------------------------- identity
+
+def test_frame_labels_from_named_destinations():
+    dests = [("Doc-Start", 0), ("Navigation1", 0), ("Navigation3", 2), ("last", 2), ("last<1>", 2), ("page.3", 2),
+             ("steps", 3), ("steps<1>", 3), ("steps<2>", 4), ("steps<3>", 5), ("gone<1>", -1), ("gone", -1)]
+    assert frame_labels(dests) == {2: "last", 3: "steps", 4: "steps", 5: "steps"}
+
+
+def info(title, text, label=None, page=0):
+    return {"label": label, "title": title, "text": text, "page": page}
+
+
+def test_inserted_frame_shifts_no_keys():
+    base = [info("Intro", "why we do this"), info("Results", "numbers went up a lot"), info("End", "thanks for listening")]
+    keys = identity.slide_keys(base)
+    assert keys == ["title:intro#1", "title:results#1", "title:end#1"]
+    ours = [base[0], info("Method", "how we measured the numbers"), base[1], base[2]]
+    got, pairs = identity.inherit_slide_keys(base, keys, ours)
+    assert pairs == {0: 0, 2: 1, 3: 2}
+    assert got == ["title:intro#1", "title:method#1", "title:results#1", "title:end#1"]
+
+
+def test_renamed_title_keeps_key():
+    base = [info("Intro", "why we do this and what it costs"), info("Results", "numbers went up a lot this year")]
+    keys = identity.slide_keys(base)
+    ours = [base[0], info("Findings", "numbers went up a lot this year")]
+    got, pairs = identity.inherit_slide_keys(base, keys, ours)
+    assert pairs == {0: 0, 1: 1} and got[1] == "title:results#1"
+
+
+def test_repeated_titles_get_occurrences():
+    keys = identity.slide_keys([info("Example", "a"), info("Example", "b"), info("", "c", page=2)])
+    assert keys == ["title:example#1", "title:example#2", "page:3"]
+
+
+def test_labelled_frames_match_wherever_they_moved():
+    base = [info("A", "alpha text here", "a"), info("B", "beta text here", "b"), info("C", "gamma text here", "c")]
+    keys = identity.slide_keys(base)
+    assert keys == ["a", "b", "c"]
+    ours = [info("C renamed", "completely different words", "c"), base[0], base[1]]
+    got, pairs = identity.inherit_slide_keys(base, keys, ours)
+    assert pairs == {0: 2, 1: 0, 2: 1} and got == ["c", "a", "b"]
+
+
+def test_labelled_and_unlabelled_mixed():
+    base = [info("A", "alpha words here", "a"), info("Plain", "some plain words"), info("B", "beta words here", "b")]
+    keys = identity.slide_keys(base)
+    ours = [info("B", "beta words here", "b"), info("Plain", "some plain words, edited"), info("New", "brand new", "new")]
+    got, pairs = identity.inherit_slide_keys(base, keys, ours)
+    assert pairs == {0: 2, 1: 1}
+    assert got == ["b", "title:plain#1", "new"]
+    # two different labels never pair up, however similar the frames are
+    got, pairs = identity.inherit_slide_keys([info("X", "same", "x")], ["x"], [info("X", "same", "y")])
+    assert pairs == {} and got == ["y"]
+
+
+def test_element_keys_follow_content():
+    els = [text_ir("Title", (10, 10, 100, 24), "p0t0", "title"), text_ir("First paragraph of text", (20, 60, 200, 70), "p0t1"),
+           text_ir("Second paragraph of text", (20, 80, 200, 90), "p0t2")]
+    keys, fps = identity.slide_element_keys(els, None)
+    assert keys == ["text/title/0", "text/body/0", "text/body/1"]
+    base = [{"key": k, "kind": e["kind"], "role": e["role"], "fingerprint": f} for k, e, f in zip(keys, els, fps)]
+    # a paragraph inserted before the others: they keep their keys, the new one gets a fresh ordinal
+    ours = [els[0], text_ir("A brand new opening remark", (20, 45, 200, 55), "p0t1"),
+            {**els[1], "id": "p0t2"}, {**els[2], "id": "p0t3"}]
+    got, _ = identity.slide_element_keys(ours, None, base)
+    assert got == ["text/title/0", "text/body/2", "text/body/0", "text/body/1"]
+
+
+def test_anchored_elements_take_their_anchors_key():
+    text = text_ir("A formula here and more words", (20, 60, 200, 70), "p0t1")
+    pic = {"id": "p0h0", "kind": "image", "role": "math", "bbox": [80, 60, 100, 70], "anchor": "p0t1"}
+    keys, fps = identity.slide_element_keys([text, pic], None)
+    assert keys == ["text/body/0", "image/math/0"] and fps[1]["anchor"] == "text/body/0"
+
+
+def test_ir_hash_ignores_ids_and_page_numbers():
+    a = text_ir("Go to results", (20, 60, 200, 70), "p3t1", link="#page=7")
+    b = {**text_ir("Go to results", (20, 60, 200, 70), "p4t1", link="#page=8"), "spans": ["p4s1", "p4s2"]}
+    ha, _ = identity.ir_fields(a, None, None, lambda page: "results")
+    hb, _ = identity.ir_fields(b, None, None, lambda page: "results")
+    assert ha == hb
+    hc, _ = identity.ir_fields(b, None, None, lambda page: "method")
+    assert hc != ha
+
+
+def test_source_changes_by_field():
+    old = entry("text/body/0", text_ir("Authors keep writing", (20, 60, 120, 70)))
+    reworded = entry("text/body/0", text_ir("Authors and their AI keep writing", (20, 60, 160, 70)))
+    moved = entry("text/body/0", text_ir("Authors keep writing", (20, 90, 120, 100)))
+    red = entry("text/body/0", text_ir("Authors keep writing", (20, 60, 120, 70), color="#ff0000"))
+    assert identity.source_changes(old, old) == set()
+    assert identity.source_changes(old, reworded) == {"text", "size"}
+    assert identity.source_changes(old, moved) == {"position"}
+    assert identity.source_changes(old, red) == {"style"}
+
+
+# ---------------------------------------------------------------- deck edits
+
+def test_object_changes():
+    b = readback([10, 10, 110, 30], "Hello\n")
+    assert merge.object_changes(b, copy.deepcopy(b)) == set()
+    moved = {**b, "box": [20, 10, 120, 30], "transform": [1, 0, 0, 1, 20, 10]}
+    assert merge.object_changes(b, moved) == {"geometry"}
+    assert merge.object_changes(b, {**b, "box": [10.03, 10, 110.03, 30]}) == set()  # read-back noise
+    assert merge.object_changes(b, {**b, "text": "Hello world\n"}) == {"text"}
+    assert merge.object_changes(b, {**b, "text_style_hash": "s1"}) == {"text_style"}
+    assert merge.object_changes(b, {**b, "shape_style_hash": "h1"}) == {"shape_style"}
+    assert merge.object_changes(b, {**b, "parent_group": "g"}) == {"group"}
+
+
+def test_deck_edits_and_user_objects():
+    base = three_slides()
+    s = base["slides"][0]
+    theirs = live(s)
+    assert merge.deck_edits(s["elements"][1], theirs) == {}
+    del theirs["objects"]["b2s_s000_t1"]
+    theirs["objects"]["copy"] = readback([0, 0, 5, 5], "x", title="b2s:intro/text/title/0")
+    theirs["objects"]["mine"] = readback([0, 0, 5, 5], "y")
+    assert merge.deck_edits(s["elements"][1], theirs) == {"deleted": ["b2s_s000_t1"]}
+    assert merge.user_objects(s, theirs) == [{"objectId": "copy", "copy_of": "intro/text/title/0"},
+                                            {"objectId": "mine", "copy_of": None}]
+
+
+def test_uniform_style_changes():
+    base = [{"fontFamily": "Lato", "fontSize": 18.0}, {"fontFamily": "Lato", "fontSize": 18.0, "bold": True}]
+    red = [{**s, "foregroundColor": "#cc0000"} for s in base]
+    assert merge.uniform_changes(base, base) == {}
+    assert merge.uniform_changes(base, red) == {"foregroundColor": "#cc0000"}
+    one_word = base + [{"fontFamily": "Lato", "fontSize": 18.0, "italic": True}]
+    assert merge.uniform_changes(base, one_word) is None
+
+
+# ---------------------------------------------------------------- diff3 and text edits
+
+def test_diff3_clean_merges():
+    base = "Colleagues polish the slides in Google Slides"
+    assert merge.diff3(base, base, base) == (base, [])
+    assert merge.diff3(base, "Colleagues refine the slides in Google Slides", "Designers polish the slides in Google Slides") == \
+        ("Designers refine the slides in Google Slides", [])
+    assert merge.diff3(base, "Colleagues polish the slides in Slides", base)[0] == "Colleagues polish the slides in Slides"
+    # the same change on both sides is no conflict
+    same = "Colleagues polish all the slides in Google Slides"
+    assert merge.diff3(base, same, same) == (same, [])
+    # paragraphs apart
+    merged, clashes = merge.diff3("One\nTwo\nThree\n", "One more\nTwo\nThree\n", "One\nTwo\nThree!\n")
+    assert merged == "One more\nTwo\nThree!\n" and not clashes
+
+
+def test_diff3_conflicts_keep_theirs():
+    base = "Colleagues polish the slides"
+    merged, clashes = merge.diff3(base, "Teammates polish the slides", "Designers polish the slides")
+    assert merged == "Designers polish the slides"
+    assert clashes == [{"base": "Colleagues", "ours": "Teammates", "theirs": "Designers"}]
+    # insertions at the same place differ
+    merged, clashes = merge.diff3("a b", "a x b", "a y b")
+    assert clashes and merged == "a y b"
+
+
+def apply_text_requests(text: str, reqs: list[dict]) -> str:
+    units = list(text)  # (ASCII in these tests: UTF-16 indices are character indices)
+    for r in reqs:
+        if "deleteText" in r:
+            rng = r["deleteText"]["textRange"]
+            del units[rng["startIndex"]:rng["endIndex"]]
+        else:
+            i = r["insertText"]["insertionIndex"]
+            units[i:i] = list(r["insertText"]["text"])
+    return "".join(units)
+
+
+@pytest.mark.parametrize("current,target", [
+    ("Authors keep writing\nThe end\n", "Authors and their AI keep writing\nThe end\n"),
+    ("Designers polish the slides\n", "Teammates polish all slides\n"),
+    ("One\nTwo\nThree\n", "One\nThree\n"),
+    ("abc\n", "abc\n"),
+])
+def test_text_edit_requests(current, target):
+    assert apply_text_requests(current, merge.text_edit_requests("t", current, target)) == target
+
+
+def test_text_edit_requests_count_utf16():
+    reqs = merge.text_edit_requests("t", "\U0001d465 is x\n", "\U0001d465 is y\n")
+    assert reqs[0]["deleteText"]["textRange"] == {"type": "FIXED_RANGE", "startIndex": 6, "endIndex": 7}
+
+
+# ---------------------------------------------------------------- merge rules
+
+def test_no_changes_plans_no_writes():
+    base = three_slides()
+    ours, theirs = triple(base)
+    mplan = merge.plan_merge(base, ours, theirs)
+    assert all(u["action"] == "keep" for p in mplan["slides"] for u in p["units"])
+    assert not merge.has_writes(mplan, [s["objectId"] for s in theirs["slides"]])
+    assert mplan["report"]["applied"] == [] and mplan["report"]["conflicts"] == []
+
+
+def edit_text(slide, oid, text):
+    slide["objects"][oid]["text"] = text
+
+
+def test_source_change_applied_when_deck_untouched():
+    base = three_slides()
+    ours, theirs = triple(base)
+    ours["slides"][0]["elements"][1] = ours_entry("text/body/0", text_ir("First point of intro, reworded\nSecond point of intro",
+                                                                         (20, 60, 230, 90), "p0t1"))
+    mplan = merge.plan_merge(base, ours, theirs)
+    u = unit(mplan, "intro", "text/body/0")
+    assert u["action"] == "recreate" and u["overrides"] == {}
+    assert merge.has_writes(mplan, [s["objectId"] for s in theirs["slides"]])
+
+
+def test_deck_edit_kept_when_source_unchanged():
+    base = three_slides()
+    ours, theirs = triple(base)
+    edit_text(theirs["slides"][1], "b2s_s001_t1", "Something else entirely\n")
+    mplan = merge.plan_merge(base, ours, theirs)
+    assert unit(mplan, "results", "text/body/0")["action"] == "keep"
+    assert mplan["report"]["overrides"] == [{"slide": "results", "element": "text/body/0", "fields": ["text"]}]
+    assert not merge.has_writes(mplan, [s["objectId"] for s in theirs["slides"]])
+
+
+def test_source_text_and_deck_geometry_recreate_at_deck_place():
+    base = three_slides()
+    ours, theirs = triple(base)
+    ours["slides"][0]["elements"][1] = ours_entry("text/body/0", text_ir("First point of intro\nSecond point, changed",
+                                                                         (20, 60, 200, 90), "p0t1"))
+    obj = theirs["slides"][0]["objects"]["b2s_s000_t1"]
+    obj["box"] = [v + 30 for v in obj["box"]]
+    obj["transform"][4] += 30
+    obj["transform"][5] += 30
+    u = unit(merge.plan_merge(base, ours, theirs), "intro", "text/body/0")
+    assert u["action"] == "recreate" and u["overrides"] == {"geometry": {"mode": "delta"}}
+
+
+def test_both_moved_deck_position_wins():
+    base = three_slides()
+    ours, theirs = triple(base)
+    ours["slides"][0]["elements"][1] = ours_entry("text/body/0", text_ir("First point of intro\nSecond point, changed",
+                                                                         (20, 100, 200, 130), "p0t1"))
+    obj = theirs["slides"][0]["objects"]["b2s_s000_t1"]
+    obj["box"] = [v + 30 for v in obj["box"]]
+    mplan = merge.plan_merge(base, ours, theirs)
+    assert unit(mplan, "intro", "text/body/0")["overrides"] == {"geometry": {"mode": "theirs"}}
+    assert [c["field"] for c in mplan["report"]["conflicts"]] == ["geometry"]
+
+
+def test_both_text_clean_diff3():
+    base = three_slides()
+    ours, theirs = triple(base)
+    ours["slides"][0]["elements"][1] = ours_entry("text/body/0", text_ir("First point of intro\nSecond point of the intro",
+                                                                         (20, 60, 200, 90), "p0t1"))
+    edit_text(theirs["slides"][0], "b2s_s000_t1", "First idea of intro\nSecond point of intro\n")
+    mplan = merge.plan_merge(base, ours, theirs)
+    u = unit(mplan, "intro", "text/body/0")
+    assert u["action"] == "recreate" and set(u["overrides"]) == {"text"}
+    assert not mplan["report"]["conflicts"]
+
+
+def test_both_text_overlapping_is_a_conflict():
+    base = three_slides()
+    ours, theirs = triple(base)
+    ours["slides"][0]["elements"][1] = ours_entry("text/body/0", text_ir("Main point of intro\nSecond point of intro",
+                                                                         (20, 60, 200, 90), "p0t1"))
+    edit_text(theirs["slides"][0], "b2s_s000_t1", "Best point of intro\nSecond point of intro\n")
+    mplan = merge.plan_merge(base, ours, theirs)
+    assert unit(mplan, "intro", "text/body/0")["action"] == "keep"
+    (c,) = mplan["report"]["conflicts"]
+    assert c["field"] == "text" and c["resolution"] == "deck kept" and "Best point" in c["theirs"]
+
+
+def test_same_text_on_both_sides_converges():
+    base = three_slides()
+    ours, theirs = triple(base)
+    ours["slides"][0]["elements"][1] = ours_entry("text/body/0", text_ir("Main point of intro\nSecond point of intro",
+                                                                         (20, 60, 200, 90), "p0t1"))
+    edit_text(theirs["slides"][0], "b2s_s000_t1", "Main point of intro\nSecond point of intro\n")
+    mplan = merge.plan_merge(base, ours, theirs)
+    assert mplan["report"]["converged"] == [{"slide": "intro", "element": "text/body/0", "field": "text"}]
+
+
+def test_changed_in_source_deleted_in_deck():
+    base = three_slides()
+    ours, theirs = triple(base)
+    ours["slides"][2]["elements"][1] = ours_entry("text/body/0", text_ir("Other words", (20, 60, 200, 90), "p2t1"))
+    del theirs["slides"][2]["objects"]["b2s_s002_t1"]
+    mplan = merge.plan_merge(base, ours, theirs)
+    assert unit(mplan, "end", "text/body/0")["action"] == "keep"
+    assert mplan["report"]["conflicts"][0]["resolution"] == "kept deleted"
+
+
+def test_removed_in_source():
+    base = three_slides()
+    ours, theirs = triple(base)
+    del ours["slides"][2]["elements"][1]
+    assert unit(merge.plan_merge(base, ours, theirs), "end", "text/body/0")["action"] == "delete"
+    edit_text(theirs["slides"][2], "b2s_s002_t1", "Edited in the deck\n")
+    mplan = merge.plan_merge(base, ours, theirs)
+    assert unit(mplan, "end", "text/body/0")["action"] == "keep"
+    assert mplan["report"]["conflicts"][0]["field"] == "removed"
+
+
+def test_removed_text_living_on_in_a_conflict_is_kept():
+    base = three_slides()
+    extra = entry("text/body/1", text_ir("A closing remark", (20, 120, 200, 130), "p0t2"), "b2s_s000_t2")
+    base["slides"][0]["elements"].append(extra)
+    base["slides"][0]["order"].append("b2s_s000_t2")
+    ours, theirs = triple(base)
+    # the source joins the remark into the list and rewords the first point; the deck rewords it too
+    ours["slides"][0]["elements"][1] = ours_entry("text/body/0", text_ir(
+        "Main point of intro\nSecond point of intro\nA closing remark", (20, 60, 200, 130), "p0t1"))
+    del ours["slides"][0]["elements"][2]
+    edit_text(theirs["slides"][0], "b2s_s000_t1", "Best point of intro\nSecond point of intro\n")
+    mplan = merge.plan_merge(base, ours, theirs)
+    assert unit(mplan, "intro", "text/body/1")["action"] == "keep"
+    assert not merge.has_writes(mplan, [s["objectId"] for s in theirs["slides"]])
+
+
+def test_added_in_source_and_moved_only_in_source():
+    base = three_slides()
+    ours, theirs = triple(base)
+    ours["slides"][1]["elements"].append(ours_entry("text/body/1", text_ir("New remark", (20, 120, 200, 130), "p1t2")))
+    mplan = merge.plan_merge(base, ours, theirs)
+    assert unit(mplan, "results", "text/body/1")["action"] == "create"
+    # moved in the source, text edited in the deck: the deck object moves
+    ours, theirs = triple(base)
+    ours["slides"][1]["elements"][1] = ours_entry("text/body/0", text_ir("First point of results\nSecond point of results",
+                                                                         (20, 80, 200, 110), "p1t1"))
+    edit_text(theirs["slides"][1], "b2s_s001_t1", "First point, as the deck says\nSecond point of results\n")
+    u = unit(merge.plan_merge(base, ours, theirs), "results", "text/body/0")
+    assert u["action"] == "move" and u["delta"] == [0, 20]
+
+
+def test_image_replaced_in_deck_is_kept():
+    base = three_slides()
+    pic = {"id": "p1f0", "kind": "image", "role": "figure", "bbox": [200, 60, 300, 160], "file": None}
+    el = entry("image/figure/0", pic, "b2s_s001_f2")
+    el["readback"]["b2s_s001_f2"] = readback([400, 120, 600, 320], kind="image", image="aaa")
+    base["slides"][1]["elements"].append(el)
+    ours, theirs = triple(base)
+    ours["slides"][1]["elements"][2] = ours_entry("image/figure/0", {**pic, "bbox": [200, 60, 320, 160]})
+    theirs["slides"][1]["objects"]["b2s_s001_f2"]["image"] = {"contentHash": "bbb"}
+    mplan = merge.plan_merge(base, ours, theirs)
+    assert unit(mplan, "results", "image/figure/0")["action"] == "keep"
+    assert mplan["report"]["conflicts"][0]["field"] == "image"
+
+
+# ---------------------------------------------------------------- slides
+
+def test_slide_added_deleted_and_reordered():
+    base = three_slides()
+    ours, theirs = triple(base)
+    live_ids = [s["objectId"] for s in theirs["slides"]]
+    # a new frame after intro
+    new = ours_of(base_slide("method", None, [entry("text/title/0", text_ir("Method", (10, 10, 100, 24), "p1t0", "title"))], "method"))
+    ours2 = {"slides": [ours["slides"][0], new, ours["slides"][1], ours["slides"][2]], "pairs": {0: 0, 2: 1, 3: 2}}
+    mplan = merge.plan_merge(base, ours2, theirs)
+    assert mplan["order"] == ["b2s_s000", "new:method", "b2s_s001", "b2s_s002"]
+    assert mplan["report"]["slides"]["created"] == ["method"]
+    # results removed from the source, untouched in the deck: deleted
+    ours3 = {"slides": [ours["slides"][0], ours["slides"][2]], "pairs": {0: 0, 1: 2}}
+    mplan = merge.plan_merge(base, ours3, theirs)
+    assert [p["action"] for p in mplan["slides"] if p["key"] == "results"] == ["delete"]
+    assert mplan["order"] == ["b2s_s000", "b2s_s002"]
+    # ... but kept after its predecessor when the deck added something to it
+    theirs["slides"][1]["objects"]["user_box"] = readback([0, 0, 50, 20], "note")
+    mplan = merge.plan_merge(base, ours3, theirs)
+    assert [p["action"] for p in mplan["slides"] if p["key"] == "results"] == ["keep_removed"]
+    assert mplan["order"] == live_ids
+    # the source swaps results and end
+    ours, theirs = triple(base)
+    ours4 = {"slides": [ours["slides"][0], ours["slides"][2], ours["slides"][1]], "pairs": {0: 0, 1: 2, 2: 1}}
+    mplan = merge.plan_merge(base, ours4, theirs)
+    assert mplan["order"] == ["b2s_s000", "b2s_s002", "b2s_s001"]
+    assert merge.has_writes(mplan, live_ids)
+    # ... not applied when the deck reordered slides itself
+    theirs["slides"] = [theirs["slides"][1], theirs["slides"][0], theirs["slides"][2]]
+    mplan = merge.plan_merge(base, ours4, theirs)
+    assert mplan["order"] == ["b2s_s001", "b2s_s000", "b2s_s002"]
+
+
+def test_user_added_slide_stays_after_its_predecessor():
+    base = three_slides()
+    ours, theirs = triple(base)
+    theirs["slides"].insert(2, {"objectId": "user_slide", "layoutObjectId": "L", "background": {"state": "INHERIT"},
+                                "notes": "", "notes_id": None, "order": [], "objects": {}})
+    new = ours_of(base_slide("method", None, [entry("text/title/0", text_ir("Method", (10, 10, 100, 24), "p1t0", "title"))], "method"))
+    ours2 = {"slides": [new] + ours["slides"], "pairs": {1: 0, 2: 1, 3: 2}}
+    mplan = merge.plan_merge(base, ours2, theirs)
+    assert mplan["order"] == ["new:method", "b2s_s000", "b2s_s001", "user_slide", "b2s_s002"]
+    assert mplan["report"]["slides"]["user_added"] == [{"objectId": "user_slide", "copy_of": None}]
+
+
+def test_notes_follow_text_rules():
+    base = three_slides()
+    ours, theirs = triple(base)
+    ours["slides"][0]["notes"] = "Say hello"
+    mplan = merge.plan_merge(base, ours, theirs)
+    assert mplan["slides"][0]["notes"] == "Say hello"
+    theirs["slides"][0]["notes"] = "Please say hello"
+    ours["slides"][0]["notes"] = "Say hello to everyone"
+    mplan = merge.plan_merge(base, ours, theirs)
+    assert "notes" not in mplan["slides"][0]  # both wrote into empty notes: a conflict, the deck's kept
+    assert [c["field"] for c in mplan["report"]["conflicts"]] == ["notes"]
+    ours["slides"][0]["notes"] = ""
+    mplan = merge.plan_merge(base, ours, theirs)
+    assert "notes" not in mplan["slides"][0]
+    assert {"slide": "intro", "element": None, "fields": ["notes"]} in mplan["report"]["overrides"]
+
+
+# ---------------------------------------------------------------- request helpers
+
+def test_rename_object_ids():
+    reqs = [{"createShape": {"objectId": "b2s_s003_t1", "elementProperties": {"pageObjectId": "b2s_s003"}}},
+            {"groupObjects": {"groupObjectId": "b2s_s003_t1_g", "childrenObjectIds": ["b2s_s003_t1", "b2s_s003_f12", "b2s_s003_f1n"]}},
+            {"duplicateObject": {"objectId": "b2s_s003_k0", "objectIds": {"b2s_s003_k0": "b2s_s003_s0"}}}]
+    mapping = sorted({"b2s_s003_t1": "NEW_T", "b2s_s003_f1": "NEW_F", "b2s_s003_k0": "TPL", "b2s_s003": "LIVE",
+                      "b2s_s003_s0": "NEW_S"}.items(), key=lambda kv: -len(kv[0]))
+    out = rename(reqs, mapping)
+    assert out[0]["createShape"] == {"objectId": "NEW_T", "elementProperties": {"pageObjectId": "LIVE"}}
+    assert out[1]["groupObjects"] == {"groupObjectId": "NEW_T_g", "childrenObjectIds": ["NEW_T", "LIVE_f12", "NEW_Fn"]}
+    assert out[2]["duplicateObject"] == {"objectId": "TPL", "objectIds": {"TPL": "NEW_S"}}
+
+
+def test_letterbox_fix_stretches_to_the_box():
+    fix = letterbox_fix("i", [100, 50, 400, 150], (800, 600))["updatePageElementTransform"]["transform"]
+    # createImage puts a 4:3 picture into a 300 x 100 box as 133.33 x 100 centred at x = 183.33
+    fx0, fx1 = 183.3333, 316.6667
+    assert fix["scaleX"] * fx0 + fix["translateX"] / 12700 == pytest.approx(100, abs=0.01)
+    assert fix["scaleX"] * fx1 + fix["translateX"] / 12700 == pytest.approx(400, abs=0.01)
+    assert fix["scaleY"] == pytest.approx(1) and fix["translateY"] == pytest.approx(0, abs=1)
+
+
+def test_element_objects_from_emit_plan():
+    from beamer2slides.emit import element_objects, plan_offline
+    from beamer2slides.checks import convert_locally
+    pdf = DECKS / "13_inline_math.pdf"
+    if not pdf.exists():
+        pytest.skip("build the test decks first (tests/decks/build.py)")
+    planned = plan_offline(convert_locally(pdf).deck)
+    for slide_id, page, parts, element_ids in planned["slides"]:
+        objects, groups = element_objects(parts, element_ids)
+        flat = [o for oids in objects for o in oids] + groups
+        assert len(flat) == len(set(flat)), slide_id
+        assert [oids[0] for oids in objects] == element_ids
+        slide = next(s for s in planned["plan"].deck["slides"] if s["page"] == page)
+        for el, oids in zip(slide["elements"], objects):
+            anchored = [e for e in slide["elements"] if e.get("anchor") == el["id"]]
+            if anchored and el["role"] != "title":
+                assert f"{oids[0]}_g" in oids
+
+
+def test_conversion_is_stable():
+    """Converting the same PDF twice gives the same keys and hashes (a no-op sync sends nothing)."""
+    import tempfile
+    from beamer2slides.sync import build_ours
+    pdf = DECKS / "sync_smoke_v1.pdf"
+    if not pdf.exists():
+        pytest.skip("build the test decks first (tests/decks/build.py sync_smoke_v1)")
+    with tempfile.TemporaryDirectory() as a, tempfile.TemporaryDirectory() as b:
+        first = build_ours(pdf, Path(a), {"slides": []})
+        base = {"slides": first["slides"]}
+        second = build_ours(pdf, Path(b), base)
+    assert second["pairs"] == {j: j for j in range(len(first["slides"]))}
+    assert [(s["key"], [(e["key"], e["ir_hash"]) for e in s["elements"]]) for s in second["slides"]] == \
+        [(s["key"], [(e["key"], e["ir_hash"]) for e in s["elements"]]) for s in first["slides"]]

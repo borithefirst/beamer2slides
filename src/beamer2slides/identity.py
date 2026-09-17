@@ -191,21 +191,20 @@ def element_similarity(a: dict, b: dict) -> float:
 
 def match_elements(base: list[dict], ours: list[dict], reserved: set[str] = frozenset()) -> list[str]:
     """Keys for ours elements ({"kind", "role", "fingerprint"}), given base elements ({"key",
-    "kind", "role", "fingerprint"}): the default key when its base element is similar, else the
-    most similar base element's key, else a fresh ordinal. `reserved` keys are taken already."""
+    "kind", "role", "fingerprint"}): most similar pairs first (the key an element would get anyway
+    counts slightly more and needs KEY_MATCH, others ELEMENT_MATCH), else a fresh ordinal.
+    `reserved` keys are taken already."""
     by_key = {b["key"]: b for b in base if b["key"] not in reserved}
     keys: list[str | None] = [None] * len(ours)
     used: set[str] = set(reserved)
-    for j, (o, key) in enumerate(zip(ours, default_keys(ours))):
-        b = by_key.get(key)
-        if b and element_similarity(o, b) >= KEY_MATCH:
-            keys[j] = key
-            used.add(key)
-    candidates = sorted(((element_similarity(o, b), j, b["key"]) for j, o in enumerate(ours) if keys[j] is None
-                         for b in by_key.values() if b["key"] not in used), key=lambda c: (-c[0], c[1], c[2]))
-    for s, j, key in candidates:
-        if s < ELEMENT_MATCH:
-            break
+    defaults = default_keys(ours)
+    candidates = []
+    for j, o in enumerate(ours):
+        for b in by_key.values():
+            s = element_similarity(o, b)
+            if s >= (KEY_MATCH if b["key"] == defaults[j] else ELEMENT_MATCH):
+                candidates.append((s + (0.05 if b["key"] == defaults[j] else 0.0), j, b["key"]))
+    for s, j, key in sorted(candidates, key=lambda c: (-c[0], c[1], c[2])):
         if keys[j] is None and key not in used:
             keys[j] = key
             used.add(key)

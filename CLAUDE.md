@@ -238,6 +238,17 @@ python -m beamer2slides fidelity deck.pdf   # thumbnails vs PDF: fidelity.json, 
 Outputs go to `out/<pdf stem>/`. In the diff PNGs, red = only in PDF, blue = only in Slides,
 black = both.
 
+Sync (docs/sync.md): `python -m beamer2slides sync new.pdf --deck <url|id|out folder> [--dry-run]`
+merges source changes into the edited deck (three-way: base = converter output recorded by
+`convert` in `<out>/sync/base.json` and in Drive via `appProperties.b2sBase`; deck edits win,
+conflicts reported in `<out>/sync/sync-report.{json,md}`). Slide keys come from frame labels
+(PDF named destinations, `extract.frame_labels`), else title/occurrence plus alignment; objects
+carry `b2s:<slide>/<element>` alt-text titles. `identity.py` keys, `snapshot.py` read-back and
+base, `merge.py` pure planning (offline tests `tests/test_sync.py`), `sync.py` writes with
+`requiredRevisionId` (re-plans on a mismatch), pictures through a deleted-after-use staging deck.
+Pitfalls: `createImage` letterboxes (sync stretches it back); staging contentUrls die with the
+staging file; `createSlide` doesn't instantiate every layout placeholder.
+
 Alignment on Google's renderer (`tools/alignment.py out/<deck>`, after `fidelity`): reads the
 Slides element boxes with `presentations.get` (cached in slides_elements.json) and compares each
 thumbnail with the PDF rendered on the same pixel grid, in PDF pt. Writes alignment.json, a table,

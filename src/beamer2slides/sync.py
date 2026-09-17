@@ -8,9 +8,11 @@ requests (emit's builders under fresh object ids), writes them with requiredRevi
 records the new base."""
 
 import json
+import os
 import random
 import re
 import string
+import subprocess
 import time
 from pathlib import Path
 
@@ -261,6 +263,9 @@ class Sync:
             result = {"attempts": attempt, "plan": mplan, "work": work, "theirs": theirs}
             if self.dry_run or not work["writes"]:
                 return result
+            hook = os.environ.pop("B2S_SYNC_BEFORE_WRITE", None)  # (tests: someone edits the deck now)
+            if hook:
+                subprocess.run(hook, shell=True, check=False)
             staging = self.stage(work)
             scratch = []
             try:
@@ -285,7 +290,6 @@ class Sync:
     def prepare(self, mplan: dict, pres: dict, theirs: dict) -> dict:
         """What to write, per slide: units to (re)create with their requests' inputs, deletions,
         moves, backgrounds, notes; pictures needed from the staging deck."""
-        live = {s["objectId"]: s for s in theirs["slides"]}
         ours_slides = self.plan.deck["slides"]
         new_ids = {p["key"]: f"b2s_{h6(p['key'])}_{self.tok}" for p in mplan["slides"] if p["action"] == "create"}
         # Internal links: PDF page -> live slide (existing, or created now).
@@ -296,44 +300,28 @@ class Sync:
             for page in range(kept[-1][0] + 1):
                 page_slide[page] = next(sid for pg, sid in kept if pg >= page)
         self.plan.page_slide = page_slide
-        work = {"slides": [], "pictures": {}, "writes": False, "new_ids": new_ids, "page_slide": page_slide}
+        master = self.base.get("master_background")
+        work = {"slides": [], "pictures": {}, "new_ids": new_ids, "page_slide": page_slide,
+                "writes": merge.has_writes(mplan, [s["objectId"] for s in theirs["slides"]])}
         for p in mplan["slides"]:
-            w = {"plan": p, "units": [], "delete_units": [], "moves": []}
+            w = {"plan": p, "units": []}
             if p["action"] == "create":
                 w["sid"] = new_ids[p["key"]]
                 w["units"] = list(range(len(ours_slides[p["ours"]]["elements"])))
-                work["writes"] = True
-            elif p["action"] == "delete":
-                work["writes"] = True
             elif p["action"] == "update":
                 w["sid"] = p["objectId"]
-                o = self.ours["slides"][p["ours"]]
-                index = {e["key"]: k for k, e in enumerate(o["elements"])}
-                for u in p["units"]:
-                    if u["action"] in ("create", "recreate"):
-                        w["units"] += [index[k] for k in u["ours_members"]]
-                        work["writes"] = True
-                    elif u["action"] in ("delete", "move"):
-                        work["writes"] = True
-                if p.get("background") or p.get("notes") is not None:
-                    work["writes"] = True
+                index = {e["key"]: k for k, e in enumerate(self.ours["slides"][p["ours"]]["elements"])}
+                w["units"] = [index[k] for u in p["units"] if u["action"] in ("create", "recreate") for k in u["ours_members"]]
             if w["units"]:
                 slide = ours_slides[p["ours"]]
                 for i in w["units"]:
-                    el = slide["elements"][i]
-                    if el["kind"] == "image":
-                        work["pictures"][str(self.ours["out"] / el["file"])] = None
-            if p.get("background", "").startswith("png:") and p["background"] != self.base.get("master_background") \
-                    or (p["action"] == "create" and self.ours["slides"][p["ours"]]["background"].startswith("png:")
-                        and self.ours["slides"][p["ours"]]["background"] != self.base.get("master_background")):
+                    if slide["elements"][i]["kind"] == "image":
+                        work["pictures"][str(self.ours["out"] / slide["elements"][i]["file"])] = None
+            background = p.get("background") or (self.ours["slides"][p["ours"]]["background"] if p["action"] == "create" else "")
+            if background.startswith("png:") and background != master:
                 work["pictures"][str(self.ours["out"] / ours_slides[p["ours"]]["background"])] = "background"
             work["slides"].append(w)
-        current = [s["objectId"] for s in theirs["slides"]]
-        final = [new_ids.get(x[4:], x) if x.startswith("new:") else x for x in mplan["order"]]
-        if [s for s in current if s in final] != [s for s in final if s in current] or \
-                any(p["action"] == "delete" for p in mplan["slides"]):
-            work["writes"] = True
-        work["order"] = final
+        work["order"] = [new_ids.get(x[4:], x) if x.startswith("new:") else x for x in mplan["order"]]
         return work
 
     # ---- pictures
@@ -938,8 +926,11 @@ def write_reports(out: Path, info: dict) -> tuple[Path, Path]:
     folder.mkdir(parents=True, exist_ok=True)
     stem = "sync-report" if not info.get("dry_run") else "sync-report-dry-run"
     jpath, mpath = folder / f"{stem}.json", folder / f"{stem}.md"
-    jpath.write_text(json.dumps(info, indent=1, ensure_ascii=False, default=str), encoding="utf-8")
     r = info["report"]
+    data = {k: v for k, v in info.items() if k != "report"}
+    data.update({k: v for k, v in r.items() if k != "slides"})
+    data.update({f"slides_{k}": v for k, v in r["slides"].items()})
+    jpath.write_text(json.dumps(data, indent=1, ensure_ascii=False, default=str), encoding="utf-8")
     lines = [f"# Sync report{' (dry run)' if info.get('dry_run') else ''}", "",
              f"- PDF: `{info['pdf']}`", f"- Deck: {info['url']}", f"- Base: {info['base_from']} (generation {info['generation']})",
              f"- Requests sent: {info['requests']}", ""]

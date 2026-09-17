@@ -485,6 +485,19 @@ def plan_slide(b: dict, o: dict, read: dict, report: dict, base: dict, j: int, i
     return plan
 
 
+def has_writes(mplan: dict, live_order: list[str]) -> bool:
+    """Whether a merge plan changes the live deck at all (a sync with no changes sends nothing)."""
+    for p in mplan["slides"]:
+        if p["action"] in ("create", "delete"):
+            return True
+        if p["action"] == "update" and (any(u["action"] in ("create", "recreate", "delete", "move") for u in p["units"])
+                                        or p.get("background") or p.get("notes") is not None):
+            return True
+    final = [x for x in mplan["order"] if not x.startswith("new:")]
+    current = [s for s in live_order if s in final]
+    return current != [s for s in final if s in current]
+
+
 def plan_order(base: dict, ours: dict, theirs: dict, plans: list[dict]) -> tuple[list[str], list[str]]:
     """Final slide order (live ids, "new:<key>" for slides to create) and the keys of slides
     the source moved. The source order is applied unless the deck reordered converter slides;
