@@ -170,6 +170,18 @@ a per-slide background picture.
   replay it: object ids, groups, anchored pictures grouped with their text, numbers centred on balls,
   hole widths, bullet styling order, text ranges and texts, page bounds, predicted shifts < 15 pt.
   Unit tests there cover the placement helpers. `build_deck` only adds Google's answers and batching.
+- Invariants (`checks.py`, `tests/test_invariants.py`, ~40 s over all test decks and theme talks,
+  no Google calls): `convert_locally` extracts, classifies and renders with pictures kept in memory,
+  then `stray_ink` (no background ink within 2.5 pt of native line boxes, bullets and anchored
+  pictures, unless under an opaque shape or unanchored picture, on a raster image, or running on
+  10 pt past the words: page structure), `stray_labels` (no small drawing/image/glyph left at
+  x-height left of a bullet-less paragraph), `lost_ink` (PDF page vs background with shapes painted:
+  every difference lies on native glyphs, bullets, pictures, tables, diagrams, strokes or shape
+  rims/strips/shadows), `structure` (hole runs vs pictures after `emit.fit_holes`, number pictures
+  on balls, overlay anchor/marks, decoration strokes, shape bullets, ids and references) and
+  `junk_text` (private-use, U+FFFD, picture-font ❤❙✭, control chars, lone combining marks).
+  Known problems go in `tests/invariants_allow.json` (deck, page, check, element/bbox, reason);
+  stale entries fail. Each check was verified by breaking its mechanism on purpose.
 - Line building: words don't join across a column gutter (`PageClassifier.gutter`), lines up to
   1.45 em apart continue a paragraph, centred lines TeX balanced keep their breaks as soft
   breaks (chr 11), and rule-less tables whose cells wrap like prose aren't tables.
@@ -254,6 +266,8 @@ Measurements repeat to 0.01 across rebuilds (Slides renders deterministically).
     `FPDF_GetPageBoundingBox` instead. `FPDFPageObj_GetIsActive` takes an out pointer.
   - Math fonts from xdvipdfmx carry their bounding box as ascent/descent (CMEX: −2.96 em);
     those get 0.8/−0.2. CMYK colours convert slightly differently from MuPDF (#fff101 yellow).
+  - Type 3 (bitmap) fonts have no base name (`Type3`) and return glyph codes: a TS1 `\textbullet`
+    (metropolis under pdflatex without cm-super) comes back as U+0088 (`classify.TYPE3_SYMBOLS`).
   - Page labels can't be rewritten: after `notes.prepare` deletes note pages, the kept pages'
     labels are passed to `extract(pdf, labels)`.
 - Switching objects off (`FPDFPageObj_SetIsActive`) needs no content regeneration and is
