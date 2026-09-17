@@ -287,7 +287,11 @@
 \def\gdg@overlays{}
 \newcommand\gdg@overlay[1]{\g@addto@macro\gdg@overlays{#1}\ignorespaces}
 \setbeamertemplate{background}{%
-  \begingroup\gdg@overlays\endgroup\global\let\gdg@overlays\@empty}
+  \begingroup
+    \ifgdg@code\gdg@darkcolours\else\ifgdg@dark\gdg@darkcolours\fi\fi
+    \gdgbodysize\usebeamercolor[fg]{normal text}\gdg@textsetup
+    \gdg@overlays
+  \endgroup\global\let\gdg@overlays\@empty}
 
 % ---------------------------------------------------------------- shapes
 % All outlines are 2.25 pt black, like the template's shapes.

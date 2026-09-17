@@ -885,7 +885,8 @@ def diagram_requests(el: dict, slide_id: str, object_id: str, scale: float, font
         oid = node_oids[j]
         x0, y0, x1, y1 = (v * scale for v in node["bbox"])
         text = "\n".join("".join(r["text"] for r in runs).strip() for runs in node["paragraphs"])
-        inside = bool(node["shape"]) and label_inside(node) and template is not None
+        card = node.get("text")  # a card's text: a text box on the PDF baselines (classify.card_text)
+        inside = not card and bool(node["shape"]) and label_inside(node) and template is not None
         props = None if node["shape"] is None else {"contentAlignment": "MIDDLE", "autofit": {"autofitType": "NONE"},
                  "shapeBackgroundFill": ({"solidFill": {"color": rgb(node["fill"])["opaqueColor"]}} if node["fill"]
                                          else {"propertyState": "NOT_RENDERED"}),
@@ -916,7 +917,12 @@ def diagram_requests(el: dict, slide_id: str, object_id: str, scale: float, font
                                   "translateX": round(x0 * EMU_PER_PT), "translateY": round(y0 * EMU_PER_PT)}}}})
             reqs.append({"updateShapeProperties": {"objectId": oid, "shapeProperties": props, "fields": ",".join(fields)}})
             members.append(oid)
-        if text:
+        if card:
+            for k, box in enumerate(card):
+                label = f"{object_id}_x{j}" + (f"_{k}" if k else "")
+                reqs += text_box_requests(box, slide_id, label, scale, fonts)
+                members.append(label)
+        elif text:
             if not inside:
                 # A label wider than the node's text rectangle would wrap inside the shape: it
                 # gets its own wider text box, centred on the node and grouped with it.
@@ -955,7 +961,7 @@ def diagram_requests(el: dict, slide_id: str, object_id: str, scale: float, font
             reqs.append({"updateParagraphStyle": {
                 "objectId": target, "textRange": {"type": "ALL"}, "fields": "alignment,lineSpacing,spaceAbove,spaceBelow",
                 "style": {"alignment": "CENTER", "lineSpacing": 100, "spaceAbove": pt(0), "spaceBelow": pt(0)}}})
-        if len(members) == 2:  # a node with its label outside: they move together
+        if len(members) >= 2:  # a node with its label (or card texts) outside: they move together
             reqs.append({"groupObjects": {"groupObjectId": f"{object_id}_g{j}", "childrenObjectIds": members}})
             members = [f"{object_id}_g{j}"]
         children += members

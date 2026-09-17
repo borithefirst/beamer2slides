@@ -329,12 +329,81 @@ def math_content(line: "Line") -> list[Span]:
     return [s for s in line.content if s.rect.x0 >= line.tab.rect.x0 - 0.1]
 
 
+# Relative glyph widths (Helvetica, per mille) to share a span's width out among its words.
+_WIDTHS = dict(zip("abcdefghijklmnopqrstuvwxyz", (556, 556, 500, 556, 556, 278, 556, 556, 222, 222, 500, 222, 833,
+                                                  556, 556, 556, 556, 333, 500, 278, 556, 500, 722, 500, 500, 500)))
+_WIDTHS.update(zip("ABCDEFGHIJKLMNOPQRSTUVWXYZ", (667, 667, 722, 722, 667, 611, 778, 722, 278, 500, 667, 556, 833,
+                                                  722, 778, 667, 778, 722, 667, 611, 722, 667, 944, 667, 667, 611)))
+_WIDTHS.update({" ": 278, ".": 278, ",": 278, ":": 278, ";": 278, "'": 191, "’": 222, "-": 333, "(": 333, ")": 333,
+                "!": 278, "|": 260, "/": 278})
+
+
 def first_word_width(span: Span) -> float:
     """Width of a span's first word: a span can hold one word or a whole line of them."""
     text = span.text.strip()
     if not text:
         return span.rect.w
-    return span.rect.w * len(text.split()[0]) / len(text)
+    weight = lambda t: sum(_WIDTHS.get(c, 556) for c in t)
+    return span.rect.w * weight(text.split()[0]) / weight(text)
+
+
+def card_text(node: Rect, rows: list[list[Span]]) -> dict | None:
+    """The text on a node that is more than a centred label (a card: a big number over a
+    caption, a heading over wrapped body copy) as a text element placed on its baselines, or
+    None for a simple label (one size, centred on the node)."""
+    if not rows:
+        return None
+    rows = [sorted(row, key=lambda s: s.rect.x0) for row in rows]
+    info = [{"x0": row[0].rect.x0, "x1": row[-1].rect.x1, "baseline": row[0].baseline,
+             "size": max(s.size for s in row)} for row in rows]
+    sizes = [r["size"] for r in info]
+    top, bottom = rows[0][0].rect.y0, max(s.rect.y1 for s in rows[-1])
+    centred = all(abs((r["x0"] + r["x1"]) / 2 - node.cx) <= 2 for r in info)
+    if max(sizes) <= 1.1 * min(sizes) and centred and abs((top + bottom) / 2 - node.cy) <= 0.15 * node.h:
+        return None
+    paragraphs: list[list[int]] = []
+    for i, r in enumerate(info):
+        if paragraphs:
+            p = info[paragraphs[-1][-1]]
+            same_size = abs(p["size"] - r["size"]) <= 0.05 * r["size"]
+            pitch = r["baseline"] - p["baseline"]
+            aligned = abs(p["x0"] - r["x0"]) <= 1 or abs((p["x0"] + p["x1"] - r["x0"] - r["x1"]) / 2) <= 1.5
+            if same_size and aligned and 0.9 * r["size"] <= pitch <= 1.6 * r["size"]:
+                paragraphs[-1].append(i)
+                continue
+        paragraphs.append([i])
+    boxes: list[list[dict]] = []
+    for idx in paragraphs:
+        lines = [info[i] for i in idx]
+        on_centre = all(abs((l["x0"] + l["x1"]) / 2 - node.cx) <= 2 for l in lines)
+        left = not on_centre and (len(lines) == 1 or all(abs(l["x0"] - lines[0]["x0"]) <= 1 for l in lines))
+        runs: list[dict] = []
+        for i in idx:
+            row_runs = span_runs(rows[i])
+            if runs and row_runs:
+                # a centred caption keeps its breaks (see text_element.unbalanced)
+                runs[-1] = {**runs[-1], "text": runs[-1]["text"].rstrip() + (" " if left else chr(11))}
+            runs += row_runs
+        par = {
+            "align": "left" if left else "center", "level": 0, "bullet": None, "size": round(lines[0]["size"], 2),
+            "text_x0": round(min(l["x0"] for l in lines), 2), "tab_x0": None,
+            "lines": [{"baseline": round(l["baseline"], 2), "x0": round(l["x0"], 2), "x1": round(l["x1"], 2)} for l in lines],
+            "wrap_limit": round(min(l["x0"] for l in lines) + min(
+                a["x1"] - a["x0"] + 0.25 * a["size"] + first_word_width(rows[i + 1][0])
+                for a, i in zip(lines[:-1], idx[:-1])), 2) if len(lines) > 1 and left else None,
+            "runs": runs,
+        }
+        if boxes:
+            prev = boxes[-1][-1]
+            # Slides puts the next paragraph at least this far below (line box of the previous
+            # line, ascent of the next): a caption tucked closer under a big number is its own box.
+            if par["lines"][0]["baseline"] - prev["lines"][-1]["baseline"] < 0.232 * prev["size"] + 0.968 * par["size"] - 0.5:
+                boxes.append([par])
+                continue
+            boxes[-1].append(par)
+        else:
+            boxes.append([par])
+    return [{"paragraphs": b} for b in boxes]
 
 
 def is_mono(spans: list[Span]) -> bool:
@@ -551,13 +620,31 @@ class PageClassifier:
                 gap = max(0.0, b.rect.x0 - a.rect.x1, a.rect.x0 - b.rect.x1)
                 # (text colour changes with the panel; a dark number on a light box across the
                 # edge still belongs to its line)
-                if same_row and gap <= 2.0 * big and (panel[i] == panel[j] or a.color == b.color):
+                if same_row and gap <= 2.0 * big and (panel[i] == panel[j] or a.color == b.color) \
+                        and not (gap > 0.8 * big and self.gutter(spans, a, b, big)):
                     parent[find(i)] = find(j)
         groups: dict[int, list[Span]] = {}
         for i, s in enumerate(spans):
             groups.setdefault(find(i), []).append(s)
         lines = sorted((Line(g) for g in groups.values()), key=lambda l: (l.baseline, l.rect.x0))
         return self.join_line_labels(lines)
+
+    @staticmethod
+    def gutter(spans: list[Span], a: Span, b: Span, size: float) -> bool:
+        """The gap between two words on one baseline is the gutter between columns: no text
+        just above or below crosses it, and other lines there have words on both sides."""
+        left, right = (a, b) if a.rect.x0 < b.rect.x0 else (b, a)
+        if len(left.text.strip()) < 6:
+            return False  # a label or number before its text (a TOC entry, a list label)
+        mid = (left.rect.x1 + right.rect.x0) / 2
+        y0, y1 = min(a.rect.y0, b.rect.y0) - 4 * size, max(a.rect.y1, b.rect.y1) + 4 * size
+        band = [s for s in spans if s is not a and s is not b and s.rect.y1 > y0 and s.rect.y0 < y1
+                and s.size <= 1.5 * size]  # (a frame title above spans all columns)
+        if any(s.rect.x0 < mid < s.rect.x1 for s in band):
+            return False
+        rows_left = {round(s.baseline) for s in band if s.rect.x1 <= mid}
+        rows_right = {round(s.baseline) for s in band if s.rect.x0 >= mid}
+        return len(rows_left & rows_right) >= 1
 
     @staticmethod
     def join_line_labels(lines: list[Line]) -> list[Line]:
@@ -590,8 +677,8 @@ class PageClassifier:
         def splits(line: Line) -> dict[int, Span]:
             spans = line.spans
             if len(spans) < 2 or not all(s.horizontal for s in spans) or spans[0].text.strip() in BULLET_GLYPHS \
-                    or ENUM_RE.match(spans[0].text.strip()):
-                return {}
+                    or ENUM_RE.match(spans[0].text.strip()) or is_mono(spans):
+                return {}  # (code lines up in columns by itself)
             width = line.rect.w
             return {k: spans[k] for k in range(1, len(spans))
                     if spans[k].rect.x0 - spans[k - 1].rect.x1 >= 0.2 * line.size
@@ -901,7 +988,7 @@ class PageClassifier:
         if is_mono(line.content) or is_mono(last.content):
             return None  # code: every line is its own paragraph
         pitch = line.baseline - last.baseline
-        if not 0 < pitch <= 1.35 * par.size:
+        if not 0 < pitch <= 1.45 * par.size:  # (Google themes use line spacing 1.15: 1.38 em)
             return None
         if self.panel_of(line.rect) != self.panel_of(par.rect):
             return None
@@ -1033,7 +1120,7 @@ class PageClassifier:
     # -- output -----------------------------------------------------------------
 
     @staticmethod
-    def runs(par: Paragraph, indent: str = "") -> list[dict]:
+    def runs(par: Paragraph, indent: str = "", soft_breaks: bool = False) -> list[dict]:
         runs: list[dict] = []
         prev: Span | None = None
         for li, line in enumerate(par.lines):
@@ -1079,7 +1166,7 @@ class PageClassifier:
                         if len(tail) >= 2 and tail.endswith("-") and tail[-2].isalpha() and text[:1].islower():
                             runs[-1]["text"] = tail[:-1]  # TeX hyphenation at a line break
                             sep = ""
-                        elif par.role == "title":
+                        elif par.role == "title" or soft_breaks:
                             sep = chr(11)  # titles keep their line breaks (a soft break in Slides)
                         else:
                             sep = " "
@@ -1187,7 +1274,18 @@ class PageClassifier:
         label_spans = [s for l in lines if l.reason in ("figure", "rotated") for s in l.spans]
         if not self.regions:
             return []
-        text_rects = [Rect.of(e["bbox"]) for e in text_elements]
+        def ink_rect(e: dict) -> Rect:
+            # Big text without descenders (a statistic: "92%") ends at its baseline, not a
+            # quarter em below it where a card under it may start.
+            r = Rect.of(e["bbox"])
+            last = e["paragraphs"][-1] if e.get("paragraphs") else None
+            if last and last["lines"]:
+                text = "".join(run["text"] for run in last["runs"])
+                depth = 0.25 if any(c in "gjpqyQ,;()[]{}|/@$_" for c in text) else 0.05
+                r = Rect(r.x0, r.y0, r.x1, min(r.y1, last["lines"][-1]["baseline"] + depth * last["size"]))
+            return r
+
+        text_rects = [ink_rect(e) for e in text_elements]
         out = []
         # Tables first, from their rules: clustering could merge a table with a picture beside it.
         for group in self.table_rules:
@@ -1386,6 +1484,7 @@ class PageClassifier:
                 "width": n["width"], "paragraphs": [span_runs(sorted(row, key=lambda s: s.rect.x0)) for row in rows],
                 "baselines": [round(row[0].baseline, 2) for row in rows],
                 "label_w": round(max((max(s.rect.x1 for s in row) - min(s.rect.x0 for s in row) for row in rows), default=0.0), 2),
+                "text": card_text(n["rect"], rows) if n["shape"] else None,
             })
         return {"id": f"p{self.page['index']}dg{index}", "kind": "diagram", "role": "figure",
                 "bbox": c.expand(1.0).as_list(), "nodes": out_nodes, "lines": lines,
@@ -1779,6 +1878,16 @@ class PageClassifier:
     def text_element(self, box: list[Paragraph], element_id: str) -> dict:
         rect = union_all([p.rect for p in box] + [Rect.of(p.bullet["bbox"]) for p in box if p.bullet])
         code = all(is_mono(p.spans) for p in box)
+
+        def unbalanced(p: Paragraph) -> bool:
+            """Centred (or right-aligned) lines broken where a greedy wrap would not break, or
+            nearly would (TeX balances them, or they were broken by hand): no box width
+            reproduces the breaks reliably, so they become soft breaks."""
+            if p.align == "left" or len(p.lines) < 2 or not all(l.content for l in p.lines):
+                return False
+            widest = max(l.x1 - l.x0 for l in p.lines)
+            return any(a.x1 - a.x0 + 0.2 * p.size + first_word_width(b.content[0]) <= widest + 0.5 * p.size
+                       for a, b in zip(p.lines, p.lines[1:]))
         return {
             "id": element_id, "kind": "text", "role": box[0].role, "bbox": rect.as_list(),
             "panel": self.panel_of(rect),
@@ -1791,10 +1900,10 @@ class PageClassifier:
                 # Right edge a wrapped line could grow to before TeX would have pulled up the
                 # next line's first word: a text box narrower than this wraps the same way.
                 # (as a width from the paragraph's left edge, so centred lines count too)
-                "wrap_limit": round(min(l.x0 for l in p.lines) + min(a.x1 - a.x0 + 0.33 * p.size + first_word_width(b.content[0])
+                "wrap_limit": round(min(l.x0 for l in p.lines) + min(a.x1 - a.x0 + 0.25 * p.size + first_word_width(b.content[0])
                                                                      for a, b in zip(p.lines, p.lines[1:])), 2)
                               if len(p.lines) > 1 and all(l.content for l in p.lines) else None,
-                "runs": self.runs(p, code_indent(p, rect.x0) if code else ""),
+                "runs": self.runs(p, code_indent(p, rect.x0) if code else "", soft_breaks=unbalanced(p)),
             } for p in box],
             "code": code,
             "spans": [s.id for p in box for s in p.spans if s.info.family != "icon"
