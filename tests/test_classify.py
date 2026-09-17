@@ -280,6 +280,13 @@ def test_metric_compatible_fonts():
     assert {("Arial", 400, False), ("Arial", 700, False), ("Arial", 400, True)} <= fonts
 
 
+def test_toc_split_into_boxes_keeps_its_numbers():
+    d = load(THEMES / "Warsaw" / "talk.pdf")
+    paras = [p for e in texts(d["slides"][1]) for p in e["paragraphs"] if p["tab_x0"]]
+    assert [paragraph_text(p) for p in paras] == ["1\tIntroduction", "2\tMethod", "3\tConclusion"]
+    assert all(p["bullet"] is None for p in paras), "Slides would number each one-item list 1."
+
+
 # Minimum native text share per theme for the realistic talk (tests/themes/content.tex).
 THEME_FLOORS = {
     "default": 0.95, "Madrid": 0.9, "Warsaw": 0.75, "Berkeley": 0.75, "Bergen": 0.95,

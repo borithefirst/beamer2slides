@@ -284,6 +284,15 @@ def span_runs(spans: list[Span]) -> list[dict]:
     return runs
 
 
+def label_of(spans: list[Span]) -> dict | None:
+    """Where and how a list number is drawn, to write it as literal text if Slides can't number it."""
+    if not spans:
+        return None
+    s = min(spans, key=lambda s: s.rect.x0)
+    return {"x0": round(s.rect.x0, 2), "font": s.font, "family": s.info.family, "size": round(s.size, 2),
+            "bold": s.info.bold, "italic": s.info.italic, "color": s.color}
+
+
 def math_content(line: "Line") -> list[Span]:
     """The spans math analysis looks at: a hanging label before a tab ("a)" on a ball) is not math."""
     if line.tab is None:
@@ -580,7 +589,8 @@ class PageClassifier:
                 return
             if gap >= 0.25 * line.size and (token in BULLET_GLYPHS or ENUM_RE.match(token)) and not on_ball:
                 kind = "glyph" if token in BULLET_GLYPHS else "number"
-                line.bullet = {"kind": kind, "text": token, "color": first.color, "bbox": first.rect.as_list()}
+                line.bullet = {"kind": kind, "text": token, "color": first.color, "bbox": first.rect.as_list(),
+                               "label": label_of([first])}
                 line.bullet_spans = [first]
                 return
             # Numbers drawn on a small box or circle (e.g. Bergen's enumerate): the box is
@@ -589,7 +599,7 @@ class PageClassifier:
                 for g in self.graphics:
                     if g.w <= 1.6 * line.size and g.h <= 1.6 * line.size and g.contains(first.rect.cx, first.rect.cy):
                         line.bullet = {"kind": "number", "text": token, "color": first.color,
-                                       "bbox": g.as_list(), "patch": True}
+                                       "bbox": g.as_list(), "patch": True, "label": label_of([first])}
                         line.bullet_spans = [first]
                         return
         # Image bullets (ball themes): a small image just left of the text, level with its
@@ -611,7 +621,8 @@ class PageClassifier:
                     # label native text, with a tab to the item text.
                     line.tab = min(rest, key=lambda s: s.rect.x0)
                     return
-                line.bullet = {"kind": "image", "image": im["id"], "text": token, "bbox": ir.as_list()}
+                line.bullet = {"kind": "image", "image": im["id"], "text": token, "bbox": ir.as_list(),
+                               "label": label_of(on_image)}
                 line.bullet_spans = on_image
                 return
         # Vector bullets (shaded balls, squares drawn as paths): a small, roughly square
@@ -1633,6 +1644,47 @@ class PageClassifier:
         }
 
 
+def literal_list_numbers(slides: list[dict]) -> None:
+    """Slides numbers each list from 1, and the API cannot set a start number. A numbered
+    item whose number Slides would get wrong (a table of contents split into one box per
+    section, a list continued after a paragraph) keeps its number as literal text with a tab;
+    a ball under the number then simply stays in the background."""
+    def numbered(p: dict) -> bool:
+        b = p["bullet"]
+        return bool(b) and (b["kind"] == "number" or (b["kind"] == "image" and b["text"].isdigit()))
+
+    def misnumbered(e: dict) -> bool:
+        expected: dict[int, int] = {}
+        for p in e["paragraphs"]:
+            if not numbered(p):
+                if not p["bullet"]:
+                    expected.clear()  # the next list in Slides starts again at 1
+                continue
+            for deeper in [k for k in expected if k > p["level"]]:
+                del expected[deeper]
+            digits = re.sub(r"\D", "", p["bullet"]["text"])
+            want = expected.get(p["level"], 1)
+            if digits and int(digits) != want:
+                return True
+            expected[p["level"]] = want + 1
+        return False
+
+    for slide in slides:
+        texts = [e for e in slide["elements"] if e["kind"] == "text"]
+        if not any(misnumbered(e) for e in texts):
+            continue
+        # All numbers on the slide the same way, so the items still look alike.
+        for p in (p for e in texts for p in e["paragraphs"] if numbered(p)):
+            b, label = p["bullet"], p["bullet"].get("label")
+            if not label or not p["runs"]:
+                continue
+            p["runs"].insert(0, {
+                "text": b["text"] + "\t", "font": label["font"], "family": label["family"], "size": label["size"],
+                "bold": label["bold"], "italic": label["italic"], "smallcaps": False, "color": label["color"],
+                "link": None, "script": None, "underline": False, "highlight": None})
+            p["tab_x0"], p["text_x0"], p["bullet"] = p["text_x0"], label["x0"], None
+
+
 def mark_title_page(slides: list[dict], doc_title: str) -> None:
     """On the title page, the box showing the document title (from the PDF metadata, which
     beamer fills as "Title - Subtitle") becomes the slide's title."""
@@ -1715,6 +1767,7 @@ def classify_page(page: dict, body: float) -> dict:
 def classify(raw: dict) -> dict:
     body = body_size(raw)
     slides = [classify_page(page, body) for page in raw["pages"]]
+    literal_list_numbers(slides)
     mark_title_page(slides, raw["source"].get("title", ""))
     mark_big_headings(slides, body)
     layout_texts = promote_theme_text(slides)
