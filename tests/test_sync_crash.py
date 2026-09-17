@@ -382,6 +382,32 @@ def test_a_slide_an_interrupted_sync_created_is_swept_only_when_it_is_created_ag
     assert sync.plan_recovery(recovery_base(), theirs, ["intro"])["sweep_slides"] == []
 
 
+def test_a_base_that_may_be_behind_the_deck_sweeps_nothing_on_a_guess():
+    """Two checkouts, one deck: when the base in Drive cannot be read, sync works from the folder's
+    copy, which may be older than the deck (snapshot.stale_base_warning). Objects of a later
+    generation are then not leftovers of a dead run but, just as likely, the finished work of the
+    other checkout's sync - so only what this base itself names is swept. Healing still happens:
+    it takes an object over instead of deleting it."""
+    theirs = live({"OLD1": readback(), "b2s_aaaaaa_bbbbbb_2ab": readback("b2s:intro/text/body/0")})
+    assert sync.plan_recovery(recovery_base(), theirs, ["intro"], trust_generation=False)["sweep"] == []
+    named = recovery_base(cleanup=["b2s_aaaaaa_bbbbbb_2ab"])  # this base's own dead run named it
+    assert sync.plan_recovery(named, theirs, ["intro"], trust_generation=False)["sweep"] == \
+        ["b2s_aaaaaa_bbbbbb_2ab"]
+    gone = live({"b2s_aaaaaa_bbbbbb_2ab": readback("b2s:intro/text/body/0", text="new")})  # OLD1 deleted
+    assert sync.plan_recovery(recovery_base(), gone, ["intro"], trust_generation=False)["heal"]
+
+
+def test_a_slide_is_swept_on_a_guess_only_when_the_base_is_the_deck_s_own():
+    sid = f"b2s_{sync.h6('extra')}_2ab"
+    theirs = {"slides": [{"objectId": "S1", "objects": {"OLD1": readback()}, "order": ["OLD1"], "notes": "",
+                          "background": {}, "layoutObjectId": "L1"},
+                         {"objectId": sid, "objects": {}, "order": [], "notes": "", "background": {},
+                          "layoutObjectId": "L1"}]}
+    keys = ["intro", "extra"]
+    assert sync.plan_recovery(recovery_base(), theirs, keys)["sweep_slides"] == [sid]
+    assert sync.plan_recovery(recovery_base(), theirs, keys, trust_generation=False)["sweep_slides"] == []
+
+
 def test_the_text_an_interrupted_sync_overwrote_in_a_placeholder_comes_back_for_the_merge():
     saved = {"OLD1": {"text": "the person's title\n", "text_styles": [], "paragraph_styles": [],
                       "text_style_hash": "edited"}}

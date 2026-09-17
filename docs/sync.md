@@ -235,6 +235,12 @@ uninterrupted one would have. What makes that true:
   own objects for that element are all still alive - i.e. it is a second copy of something the deck
   already has. A person's object can never match: their ids are Slides' own or the converter's.
   Each run re-rolls its id token, so a second run never collides with the dead one's ids.
+  The generation half of that rule needs a base that really is the deck's own. When the deck names a
+  base in Drive that cannot be read (`stale_base_warning`, "Two checkouts" above), the folder's copy
+  may simply be older than the deck, and a later generation then means nothing: those objects are as
+  likely the finished work of the other checkout's sync. Sync is told so (`trust_generation`) and
+  sweeps only what that base itself names. Healing is unaffected - taking an object over cannot be
+  made wrong by a base that is behind.
 - **An element whose objects an interrupted run already deleted is healed**, not reported as
   deleted: its replacement is still on the slide, tagged `b2s:<slide>/<element>`, and the base takes
   it over. If that run converted a different PDF, the element's hashes are set to `interrupted` so

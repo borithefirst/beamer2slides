@@ -65,7 +65,7 @@ def sync_generation(oid: str) -> int | None:
     return int(m.group(1)) if m else None
 
 
-def plan_recovery(base: dict, theirs: dict, ours_keys=()) -> dict:
+def plan_recovery(base: dict, theirs: dict, ours_keys=(), trust_generation: bool = True) -> dict:
     """What an earlier sync that died halfway left in the deck (docs/sync.md, "If a sync dies").
 
     `theirs`: snapshot.read_presentation of the live deck. Returns
@@ -83,7 +83,13 @@ def plan_recovery(base: dict, theirs: dict, ours_keys=()) -> dict:
       in the deck and keep nothing. The element takes the object over.
     - **restore**: objects an interrupted sync rewrote in place (title placeholders): the person's
       version was recorded in `pending.in_place` before the write and is put back into the read-back
-      the merge compares against, so their edit is re-applied instead of quietly adopted."""
+      the merge compares against, so their edit is re-applied instead of quietly adopted.
+
+    `trust_generation` is False when this base may be behind the deck (the deck names a base in
+    Drive that cannot be read, `snapshot.stale_base_warning`, docs/sync.md "Two checkouts"). A
+    later generation then says nothing - the objects may be the finished work of a sync from the
+    other checkout - so only what this base itself names is swept. Healing still happens: it takes
+    an object over instead of deleting it, which a base that is behind cannot make wrong."""
     gen = base.get("generation", 0)
     pending = base.get("pending") or {}
     named = set(base.get("cleanup") or [])
@@ -145,6 +151,9 @@ def plan_recovery(base: dict, theirs: dict, ours_keys=()) -> dict:
         return False
 
     sweep = [oid for oid in sweep if not inside_a_doomed_group(oid)]
+    if not trust_generation:
+        sweep = [oid for oid in sweep if oid in named]
+        sweep_slides = [sid for sid in sweep_slides if sid in named_slides]
     restore = {oid: rb for oid, rb in ((k, v) for k, v in (pending.get("in_place") or {}).items())}
     return {"sweep": sweep, "sweep_slides": sweep_slides, "heal": heal, "restore": restore}
 
@@ -485,10 +494,11 @@ def matrix_request(oid: str, m: list[float]) -> dict:
 
 class Sync:
     def __init__(self, slides, drive, pid: str, base: dict, ours: dict, out: Path, dry_run: bool = False,
-                 measure: bool = True):
+                 measure: bool = True, trust_generation: bool = True):
         self.slides, self.drive, self.pid = slides, drive, pid
         self.base, self.ours, self.out = base, ours, out
         self.dry_run, self.measure = dry_run, measure
+        self.trust_generation = trust_generation  # may this base's generation decide what is a leftover?
         self.plan = ours["plan"]
         self.scale = self.plan.scale
         self.tok = self.token()
@@ -609,7 +619,8 @@ class Sync:
         merge to re-apply. The deletions are the first thing this sync writes, and they only ever
         remove an object the deck holds a second time."""
         read = snapshot.read_presentation(pres)
-        rec = plan_recovery(self.base, read, [s["key"] for s in self.ours["slides"]])
+        rec = plan_recovery(self.base, read, [s["key"] for s in self.ours["slides"]],
+                            getattr(self, "trust_generation", True))
         self.recovery = rec
         # A run that died left its staging deck in Drive. Its id is in `pending.staging` so a person
         # can find it; sync doesn't delete it, because an id read from a file could name anything -
@@ -1650,14 +1661,16 @@ def sync(pdf: Path, deck: str, out: Path | None = None, dry_run: bool = False, o
     if base is None:
         raise SystemExit("\n".join([f"no sync base for presentation {pid}: convert the deck with this version first",
                                     *problems]))
-    warnings = problems + [w for w in [snapshot.stale_base_warning(where, drive, pid)] if w]
+    stale = snapshot.stale_base_warning(where, drive, pid)
+    warnings = problems + ([stale] if stale else [])
     overlays, mismatch = overlay_mode(overlays, base.get("overlays"))
     warnings += [mismatch] if mismatch else []
     for w in warnings:
         print(f"warning: {w}")
     ours = build_ours(pdf, out / "sync" / "ours", base, overlays)
     refreshed = snapshot.refresh_pictures(base, ours, out)
-    s = Sync(slides, drive, pid, base, ours, out, dry_run, measure)
+    # A base that may be behind the deck never decides on its own that an object is a leftover.
+    s = Sync(slides, drive, pid, base, ours, out, dry_run, measure, trust_generation=stale is None)
     result = s.run()
     report = result["plan"]["report"]
     report["warnings"] += s.warnings + warnings

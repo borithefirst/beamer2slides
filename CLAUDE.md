@@ -314,7 +314,8 @@ Fault injection for the tests: `B2S_FAIL_AT=<point>[:n]` / `!point` (`faults.py`
 tests in `tests/test_sync_crash.py` (offline, plus one live kill per point under the `sync` marker).
 Bases are Drive-first: the folder copy is a cache, an older one only makes sync do less (deck edits
 win), and a Drive base that can't be read is said out loud (`snapshot.stale_base_warning`, offline
-tests `tests/test_base_storage.py`). The base also records the overlay mode `convert` used, and
+tests `tests/test_base_storage.py`) - and makes sync sweep only leftovers that base itself names
+(`plan_recovery(trust_generation=False)`: a later generation may be the other checkout's finished work). The base also records the overlay mode `convert` used, and
 sync keeps it unless `--overlays` says otherwise (`sync.overlay_mode`), or a deck converted with
 `--overlays all` would lose its in-between steps. `pull --apply` and `pull --out DIR` keep every
 file they replace (`inverse.keep_backup`: `.bak`, `.bak2`, …, pictures included).
