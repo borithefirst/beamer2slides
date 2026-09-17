@@ -376,11 +376,19 @@ def groups(model: Model) -> dict[str, list[tuple[str, frozenset]]]:
     return out
 
 
+def is_formula_picture(e: Element) -> bool:
+    """A picture that belongs to a text (inline formula, icon, numbered ball): emit's alt text
+    title, or the sync tag of an image/math or image/icon element."""
+    tag = e.obj.get("title") or ""
+    return e.kind == "image" and (tag in ("Formula", "Icon") or bool(re.search(r"/image/(math|icon)/\d+$", tag)))
+
+
 def integrity(model: Model, before: Model | None = None, base_ids: set[str] | None = None,
-              allow_groups_changed: set[str] = frozenset()) -> list[str]:
+              allow_groups_changed: set[str] = frozenset(), allow_ungrouped: set[str] = frozenset()) -> list[str]:
     """Duplicates (same kind, text and box twice on a slide), orphans (sync objects the base
     doesn't know, empty text boxes of ours, formula pictures out of their text's group, empty
-    groups) and groups of `before` whose members all survived but no longer form a group."""
+    groups) and groups of `before` whose members all survived but no longer form a group.
+    `allow_ungrouped`: slide titles where formula pictures may stand alone (ungrouped on purpose)."""
     problems = []
     for s in model.slides:
         name = f"slide {s.index + 1} ({s.title})"
@@ -399,8 +407,7 @@ def integrity(model: Model, before: Model | None = None, base_ids: set[str] | No
             if e.kind == "shape" and e.id.startswith("b2s_") and not e.text and \
                     e.obj["shape"].get("shapeType") == "TEXT_BOX" and "placeholder" not in e.obj["shape"]:
                 problems.append(f"{name}: empty text box {e.id}")
-            tag = e.obj.get("title") or ""
-            if e.kind == "image" and (tag in ("Formula", "Icon") or re.search(r"/image/(math|icon)/", tag)):
+            if is_formula_picture(e) and s.title not in allow_ungrouped:
                 if e.parent is None or not any(c.parent == e.parent and c.kind == "shape" for c in s.elements):
                     problems.append(f"{name}: formula picture {e.id} is not grouped with its text")
     if before is not None:

@@ -133,15 +133,13 @@ def api_colour(hex_or_theme: str | None) -> dict | None:
     return rgb(hex_or_theme)["opaqueColor"]
 
 
-def style_override_requests(oid: str, change: dict) -> list[dict]:
-    """Uniform text style changes the deck made (merge.uniform_changes), over all of the text."""
-    reqs = []
-    runs, paras = change.get("runs") or {}, change.get("paragraphs") or {}
+def api_text_style(runs: dict) -> tuple[dict, list[str]]:
+    """A normalised run style (snapshot._text_style attributes) as an API TextStyle and its fields."""
     style, fields = {}, []
     for k, v in runs.items():
         if k in ("fontFamily", "weight"):
-            if "weight" in runs or "weight" in change.get("runs", {}):
-                style["weightedFontFamily"] = {"fontFamily": runs.get("fontFamily"), "weight": runs.get("weight", 400)}
+            if "weight" in runs:
+                style["weightedFontFamily"] = {"fontFamily": runs.get("fontFamily"), "weight": runs.get("weight") or 400}
                 fields.append("weightedFontFamily")
             else:
                 style["fontFamily"] = v
@@ -157,9 +155,19 @@ def style_override_requests(oid: str, change: dict) -> list[dict]:
         else:
             style[k] = v
             fields.append(k)
+    return style, list(dict.fromkeys(fields))
+
+
+def style_override_requests(oid: str, change: dict, cells: list[dict] | None = None) -> list[dict]:
+    """Uniform text style changes the deck made (merge.uniform_changes), over all of the text
+    (`cells`: the cellLocations of a table, whose text is styled cell by cell)."""
+    reqs = []
+    runs, paras = change.get("runs") or {}, change.get("paragraphs") or {}
+    where = [{"objectId": oid, "cellLocation": c} for c in cells] if cells is not None else [{"objectId": oid}]
+    style, fields = api_text_style(runs)
     if fields:
-        reqs.append({"updateTextStyle": {"objectId": oid, "textRange": {"type": "ALL"}, "style": style,
-                                         "fields": ",".join(dict.fromkeys(fields))}})
+        reqs += [{"updateTextStyle": {**w, "textRange": {"type": "ALL"}, "style": style, "fields": ",".join(fields)}}
+                 for w in where]
     pstyle, pfields = {}, []
     for k, v in paras.items():
         if k in ("alignment", "lineSpacing", "direction"):
@@ -169,8 +177,82 @@ def style_override_requests(oid: str, change: dict) -> list[dict]:
             pstyle[k] = pt(v)
             pfields.append(k)
     if pfields:
-        reqs.append({"updateParagraphStyle": {"objectId": oid, "textRange": {"type": "ALL"}, "style": pstyle,
-                                              "fields": ",".join(pfields)}})
+        reqs += [{"updateParagraphStyle": {**w, "textRange": {"type": "ALL"}, "style": pstyle, "fields": ",".join(pfields)}}
+                 for w in where]
+    return reqs
+
+
+def raw_objects(pres: dict) -> dict[str, dict]:
+    """objectId -> page element of a presentations.get (group children included)."""
+    out, stack = {}, [e for s in pres.get("slides", []) for e in s.get("pageElements", [])]
+    while stack:
+        e = stack.pop()
+        out[e["objectId"]] = e
+        stack += e.get("elementGroup", {}).get("children", [])
+    return out
+
+
+def deck_attributes(style: dict, base_styles: list[dict]) -> dict:
+    """The attributes the deck set on a run: how its style differs from the closest style the
+    converter wrote into that object ({} if it is one of them)."""
+    if not base_styles or style in base_styles:
+        return {}
+    closest = min(base_styles, key=lambda b: sum(1 for k in set(b) | set(style) if b.get(k) != style.get(k)))
+    attrs = {k: v for k, v in style.items() if closest.get(k) != v and k != "link"}
+    if "weight" in attrs or "fontFamily" in attrs:
+        attrs.update({k: style[k] for k in ("fontFamily", "weight") if k in style})
+    return attrs
+
+
+def text_containers(old: dict, new: dict) -> list[tuple[dict | None, dict | None, dict | None]]:
+    """(cellLocation, old text, new text) of two page elements holding text: a shape, or the cells
+    of two tables of the same shape."""
+    if "shape" in old and "shape" in new:
+        return [(None, old["shape"].get("text"), new["shape"].get("text"))]
+    if "table" in old and "table" in new:
+        orows, nrows = old["table"].get("tableRows", []), new["table"].get("tableRows", [])
+        if len(orows) != len(nrows) or any(len(a.get("tableCells", [])) != len(b.get("tableCells", [])) for a, b in zip(orows, nrows)):
+            return []
+        return [({"rowIndex": r, "columnIndex": c}, oc.get("text"), nc.get("text"))
+                for r, (orow, nrow) in enumerate(zip(orows, nrows))
+                for c, (oc, nc) in enumerate(zip(orow.get("tableCells", []), nrow.get("tableCells", [])))]
+    return []
+
+
+def _utf16_offsets(text: str) -> list[int]:
+    offsets = [0]
+    for ch in text:
+        offsets.append(offsets[-1] + (2 if ord(ch) > 0xFFFF else 1))
+    return offsets
+
+
+def style_range_requests(oid: str, old: dict, new: dict, base_styles: list[dict], merged: str | None = None) -> list[dict]:
+    """The deck's run style edits of `old` (the live object before sync) re-applied to the same
+    words in `new` (its recreation; `merged`: the text it will hold after the text override)."""
+    from bisect import bisect_left
+    from difflib import SequenceMatcher
+
+    reqs = []
+    for loc, old_text, new_text in text_containers(old, new):
+        before = snapshot.read_text(old_text)[0]
+        after = merged if merged is not None and loc is None else snapshot.read_text(new_text)[0]
+        b_off, a_off = _utf16_offsets(before), _utf16_offsets(after)
+        blocks = SequenceMatcher(None, before, after, autojunk=False).get_matching_blocks()
+        for te in (old_text or {}).get("textElements", []):
+            run = te.get("textRun")
+            if not run or not run.get("content", "").strip("\n"):
+                continue
+            style, fields = api_text_style(deck_attributes(snapshot._text_style(run.get("style", {})), base_styles))
+            if not fields:
+                continue
+            trailing = len(run["content"]) - len(run["content"].rstrip("\n"))  # (paragraph ends keep their style)
+            start, end = bisect_left(b_off, te.get("startIndex", 0)), bisect_left(b_off, te.get("endIndex", 0) - trailing)
+            for i, j, n in blocks:
+                lo, hi = max(start, i), min(end, i + n)
+                if hi > lo:
+                    reqs.append({"updateTextStyle": {"objectId": oid, **({"cellLocation": loc} if loc else {}), "textRange": {
+                        "type": "FIXED_RANGE", "startIndex": a_off[j + lo - i], "endIndex": a_off[j + hi - i]},
+                        "style": style, "fields": ",".join(fields)}})
     return reqs
 
 
@@ -258,6 +340,7 @@ class Sync:
                 pres = self.read()
             pres = {**pres, "slides": [s for s in pres.get("slides", []) if not SCRATCH.fullmatch(s["objectId"])]}
             theirs = snapshot.read_presentation(pres)
+            self.sign_changed(theirs, pres)
             mplan = merge.plan_merge(self.base, self.ours, theirs)
             work = self.prepare(mplan, pres, theirs)
             result = {"attempts": attempt, "plan": mplan, "work": work, "theirs": theirs}
@@ -286,6 +369,23 @@ class Sync:
             result["revisionId"] = rev
             return result
         raise RuntimeError(f"the deck kept changing while syncing ({MAX_ATTEMPTS} attempts)")
+
+    def sign_changed(self, theirs: dict, pres: dict) -> None:
+        """Pixel signatures of the live pictures whose contentUrl differs from the base's (Google
+        issues new URLs for unchanged pictures, so only the pixels tell a replaced one)."""
+        images = {oid: rb["image"] for s in self.base["slides"] for e in s["elements"]
+                  for oid, rb in e.get("readback", {}).items() if "image" in rb}
+        backgrounds = {s.get("objectId"): s.get("background_readback") or {} for s in self.base["slides"]}
+        objects, slides = set(), set()
+        for s in theirs["slides"]:
+            for oid, rb in s["objects"].items():
+                if "image" in rb and oid in images and images[oid].get("contentHash") != rb["image"].get("contentHash"):
+                    objects.add(oid)
+            bg, old = s.get("background") or {}, backgrounds.get(s["objectId"], {})
+            if "picture" in bg and "picture" in old and old["picture"] != bg["picture"]:
+                slides.add(s["objectId"])
+        if objects or slides:
+            snapshot.sign_pictures(theirs, pres, objects, slides)
 
     def prepare(self, mplan: dict, pres: dict, theirs: dict) -> dict:
         """What to write, per slide: units to (re)create with their requests' inputs, deletions,
@@ -451,7 +551,8 @@ class Sync:
         # A title with no live placeholder to go into becomes a text box.
         elements = [dict(e) for e in slide["elements"]]
         title_idx = title_element(slide)
-        if title_idx is not None and title_idx not in in_place:
+        demoted = title_idx is not None and title_idx not in in_place
+        if demoted:
             elements[title_idx]["role"] = "body"
         slide_copy = {**slide, "elements": elements}
         title_idx = title_element(slide_copy)
@@ -463,6 +564,17 @@ class Sync:
         keys = self.plan.keys
         sizes = [(templates[k]["w"], templates[k]["h"]) if k in templates else (STAND_IN, STAND_IN) for k in keys]
         parts, element_ids = self.plan.slide_parts(slide_copy, page_elements, {}, moves, sizes)
+        if demoted and not new_slide:
+            # The other elements as on a slide with its title (a title demoted to body text
+            # would widen their right limits, emit.text_right_limit): a stand-in placeholder size.
+            orig_title = title_element(slide)
+            orig_sub = subtitle_element(slide, orig_title)
+            stand = [{"objectId": f"{vsid}_t{i}", "size": {"width": emu(STAND_IN), "height": emu(STAND_IN)}}
+                     for i in (orig_title, orig_sub) if i is not None and i not in in_place]
+            full, _ = self.plan.slide_parts(slide, {vsid: page_elements[vsid] + stand}, {}, moves, sizes)
+            demoted_idx = {i for i in (orig_title, orig_sub) if i is not None and i not in in_place}
+            parts = [full[0]] + [parts[1 + i] if i in demoted_idx else full[1 + i] for i in range(len(element_ids))] + \
+                parts[1 + len(element_ids):]
         mapping = {}
         new_oid = {}
         for i, (vid, e) in enumerate(zip(element_ids, o["elements"])):
@@ -603,6 +715,22 @@ class Sync:
                 main = base_el.get("main") if base_el else None
                 if main and main in objects and objects[main].get("placeholder"):
                     in_place[i] = {"id": main, "size": objects[main]["size"], "text": (objects[main].get("text") or "").strip()}
+        # A new title element (the source's title changed beyond recognition) goes into the
+        # placeholder of the title element it replaces.
+        from .emit import title_element
+        title_idx = title_element(slide)
+        if title_idx is not None and title_idx not in in_place and \
+                any(title_idx == index[mk] for u in recreated for mk in u["ours_members"]):
+            taken = {v["id"] for v in in_place.values()}
+            for u in p["units"]:
+                if u["action"] not in ("delete", "recreate"):
+                    continue
+                main = next((m.get("main") for m in bunits.get(u["key"], [])[:1]), None)
+                if main and main in objects and main not in taken and \
+                        objects[main].get("placeholder") in ("TITLE", "CENTERED_TITLE"):
+                    in_place[title_idx] = {"id": main, "size": objects[main]["size"],
+                                           "text": (objects[main].get("text") or "").strip()}
+                    break
 
         # Template shapes: duplicate a live object with the same key on this slide, else a stand-in.
         needed = {k for u in recreated for mk in u["ours_members"] for k in element_template_keys(slide["elements"][index[mk]], self.scale)}
@@ -716,7 +844,8 @@ class Sync:
     # ---- after the content: z-order, notes of new slides, base, deck overrides
 
     def finish(self, work: dict, mplan: dict, theirs: dict, pres: dict, rev: str) -> str:
-        now = snapshot.read_presentation(self.read())
+        raw = self.read()
+        now = snapshot.read_presentation(raw)
         live = {s["objectId"]: s for s in now["slides"]}
         before = {s["objectId"]: s for s in theirs["slides"]}
         reqs = []
@@ -733,9 +862,14 @@ class Sync:
                 reqs += self.restack(w, before[p["objectId"]], live[p["objectId"]])
         if reqs:
             rev = self.send("order", reqs, rev)
-            now = snapshot.read_presentation(self.read())
-        self.created = now  # read-back of objects as the converter created them
-        overrides = self.override_requests(work, theirs, now)
+            raw = self.read()
+            now = snapshot.read_presentation(raw)
+        # read-back of objects as the converter created them, with the new pictures' signatures
+        created = {x for w in work["slides"] for oids in (w.get("objects") or {}).values() for x in oids}
+        repainted = {w.get("sid") for w in work["slides"] if w["plan"]["action"] == "create" or w["plan"].get("background")}
+        snapshot.sign_pictures(now, raw, created, repainted)
+        self.created = now
+        overrides = self.override_requests(work, theirs, now, raw_objects(pres), raw_objects(raw))
         if overrides:
             rev = self.send("overrides", overrides, rev)
         self.final_revision = rev
@@ -781,8 +915,11 @@ class Sync:
             k += 1
         return [{"updatePageElementsZOrder": {"pageElementObjectIds": [x], "operation": "BRING_TO_FRONT"}} for x in desired[k:]]
 
-    def override_requests(self, work: dict, theirs: dict, now: dict) -> list[dict]:
-        """Deck edits re-applied to recreated elements: geometry, merged text, styles."""
+    def override_requests(self, work: dict, theirs: dict, now: dict, raw_before: dict | None = None,
+                          raw_now: dict | None = None) -> list[dict]:
+        """Deck edits re-applied to recreated elements: geometry, merged text, styles. raw_before /
+        raw_now: objectId -> page element of the deck before sync and now (for run styles)."""
+        raw_before, raw_now = raw_before or {}, raw_now or {}
         before = {s["objectId"]: s for s in theirs["slides"]}
         after = {s["objectId"]: s for s in now["slides"]}
         reqs = []
@@ -803,6 +940,7 @@ class Sync:
                 top = w["tops"].get(u["key"], main)
                 anchor = bunits[u["key"]][0]
                 old_main = anchor["main"]
+                final_text = None
                 if "text" in ov and main in n_read["objects"]:
                     current = n_read["objects"][main].get("text") or ""
                     merged, clashes = merge.diff3(ov["text"]["base"], current, ov["text"]["theirs"])
@@ -812,8 +950,20 @@ class Sync:
                         if not merged.endswith("\n"):
                             merged += "\n"
                         reqs += merge.text_edit_requests(main, current, merged)
+                        final_text = merged
                 if "text_style" in ov:
-                    reqs += style_override_requests(main, ov["text_style"])
+                    new_raw = raw_now.get(main, {})
+                    cells = None
+                    if "table" in new_raw:
+                        cells = [{"rowIndex": r, "columnIndex": c} for r, row in enumerate(new_raw["table"].get("tableRows", []))
+                                 for c, _ in enumerate(row.get("tableCells", []))]
+                    reqs += style_override_requests(main, ov["text_style"], cells)
+                    if ov["text_style"].get("ranges"):
+                        base_styles = anchor.get("readback", {}).get(old_main, {}).get("text_styles", [])
+                        if old_main in raw_before and new_raw:
+                            reqs += style_range_requests(main, raw_before[old_main], new_raw, base_styles, final_text)
+                        else:
+                            self.warnings.append(f"slide {p['key']}: {u['key']}: the deck's word styles could not be re-applied")
                 if "shape_style" in ov and ov["shape_style"]:
                     reqs += shape_style_requests(main, ov["shape_style"])
                 if "geometry" in ov and top in n_read["objects"]:
@@ -898,8 +1048,8 @@ class Sync:
                         entry["notes"] = b.get("notes")
             entry["elements"] = elements
             entries[sid] = entry
-        order = [s["objectId"] for s in self.created["slides"]]
-        slides = [entries.pop(sid) for sid in order if sid in entries] + list(entries.values())
+        slides = [entries.pop(sid) for sid in base_order(mplan, by_plan, [s["objectId"] for s in self.created["slides"]])
+                  if sid in entries] + list(entries.values())
         return {**self.base, "generation": self.base.get("generation", 0) + 1, "revisionId": self.final_revision,
                 "source": snapshot.source_info(self.ours["source"]), "slides": slides}
 
@@ -907,6 +1057,20 @@ class Sync:
         objects = (read or {}).get("objects", {})
         return {**e, "objects": oids, "main": oids[0] if oids else None,
                 "readback": {oid: objects[oid] for oid in oids if oid in objects}}
+
+
+def base_order(mplan: dict, by_plan: dict, live: list[str]) -> list[str]:
+    """Slide ids of the new base in the source's order (the base is converter output: a slide
+    order the deck chose must keep differing from it, or the next sync would undo it). Slides kept
+    though the source removed them stay after their live predecessor."""
+    order = [by_plan[id(p)]["sid"] for p in sorted((p for p in mplan["slides"] if p["action"] in ("update", "create")),
+                                                   key=lambda p: p["ours"])]
+    for k, sid in enumerate(live):
+        if sid in order:
+            continue
+        prev = next((live[q] for q in range(k - 1, -1, -1) if live[q] in order), None)
+        order.insert(order.index(prev) + 1 if prev else 0, sid)
+    return order
 
 
 def stand_in_request(oid: str, sid: str, key: tuple) -> dict:

@@ -332,8 +332,10 @@ def scenario_slides(run: Run):
         E("move_slide", slide=CONCL, after=ALGO),
         E("duplicate_slide", slide=MERGING, new_title="Merging text (copy)"))
     pdf = build("slides")
+    # The deck reordered slides, so its order stays (the source's swap of Results and Merge policy
+    # isn't applied); the new frame follows its source predecessor, Merge policy.
     order = [TITLE, "Why decks and sources diverge", ALGO, "Takeaways", MERGING, "Merging text (copy)", CONV,
-             "Reviewer questions", RESULTS, POLICY, "Pulling edits back", VERSIONS]
+             "Reviewer questions", POLICY, "Pulling edits back", RESULTS, VERSIONS]
     run.check("slides", pdf, run.sync(pdf), exps, drop=("move_slide",), order=order,
               checks=[{"check": "slide_count", "slide": IDENTITY, "count": 0}])
 
@@ -479,7 +481,7 @@ def test_checker_controls():
             problems += [f"clean: {p}" for p in sc.alignment_compare(fresh_folder, model, fresh, run.deck.pid, titles, run.out / "check")]
 
         merging = model.one(MERGING)
-        formula = next(e for e in merging.elements if e.kind == "image" and e.obj.get("title") == "Formula")
+        formula = next(e for e in merging.elements if e.kind == "image" and sc.is_formula_picture(e))
         text = next(e for e in model.one(CONCL).elements if "Deck edits survive" in e.text)
         diagram = next(e for e in model.one(VERSIONS).elements if e.kind == "group")
         run.deck.batch([
@@ -531,7 +533,7 @@ def test_edit_catalogue():
             expectations.append(exp)
         model = run.deck.read()
         problems += [f"at the end: {p}" for p in sc.check_all(model, [c for e in expectations for c in e["checks"]])]
-        problems += sc.integrity(model)
+        problems += sc.integrity(model, allow_ungrouped={e["args"]["slide"] for e in expectations if e["edit"] == "ungroup"})
         from deck_edits import EDITS
         problems += [f"edit kind not in the catalogue: {k}" for k in set(EDITS) - {e["edit"] for e in expectations}]
     finally:

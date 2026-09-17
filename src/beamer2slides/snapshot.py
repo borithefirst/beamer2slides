@@ -147,7 +147,113 @@ def shape_style(e: dict) -> dict:
 
 
 def image_hash(url: str | None) -> str | None:
+    """A hash of a contentUrl. Google hands out new contentUrls for the same picture now and then,
+    so equal hashes mean the same picture but different ones don't mean a replaced picture: see
+    `signature` / `same_picture`."""
     return identity.sha1(re.split(r"[=?]", url, maxsplit=1)[0])[:16] if url else None
+
+
+SIGNATURE_SIZE = 32
+SIGNATURE_DIFFERENCE = 0.3  # ink-normalised difference below which two signatures are the same picture
+
+
+def signature(data: bytes) -> str | None:
+    """A small fingerprint of a picture's pixels ("<w>x<h>:<32x32 grey levels hex>"), stable across
+    Google's re-encodings and new contentUrls."""
+    from PIL import Image
+    try:
+        with Image.open(io.BytesIO(data)) as img:
+            rgba = img.convert("RGBA")
+    except Exception:  # noqa: BLE001 (not a picture)
+        return None
+    white = Image.new("RGBA", rgba.size, (255, 255, 255, 255))
+    grey = Image.alpha_composite(white, rgba).convert("L").resize((SIGNATURE_SIZE, SIGNATURE_SIZE), Image.BOX)
+    return f"{rgba.size[0]}x{rgba.size[1]}:{grey.tobytes().hex()}"
+
+
+def signatures_match(a: str | None, b: str | None) -> bool | None:
+    """Whether two signatures show the same picture (None: one is missing)."""
+    if not a or not b:
+        return None
+    (size_a, pixels_a), (size_b, pixels_b) = a.split(":", 1), b.split(":", 1)
+    ra, rb = (int(w) / max(1, int(h)) for w, _, h in (size_a.partition("x"), size_b.partition("x")))
+    if abs(ra - rb) > 0.05 * max(ra, rb):
+        return False
+    pa, pb = bytes.fromhex(pixels_a), bytes.fromhex(pixels_b)
+    diff = sum(abs(x - y) for x, y in zip(pa, pb))
+    ink = max(sum(255 - x for x in pa), sum(255 - x for x in pb), 255 * 2)
+    return diff / ink < SIGNATURE_DIFFERENCE
+
+
+def same_picture(a: dict | None, b: dict | None) -> bool:
+    """Image read-backs ({"contentHash", "signature"?}) or picture backgrounds ({"picture", "signature"?}):
+    the same picture if the URL hash is the same, or else the pixel signatures match."""
+    a, b = a or {}, b or {}
+    ha, hb = a.get("contentHash", a.get("picture")), b.get("contentHash", b.get("picture"))
+    if ha == hb:
+        return True
+    return bool(signatures_match(a.get("signature"), b.get("signature")))
+
+
+def same_background(a: dict | None, b: dict | None) -> bool:
+    if a is None or b is None:
+        return a == b
+    if "picture" in a and "picture" in b:
+        return same_picture(a, b)
+    return a == b
+
+
+def _download(url: str) -> bytes | None:
+    import time
+    import urllib.request
+    for attempt in range(3):
+        try:
+            with urllib.request.urlopen(url, timeout=60) as r:
+                return r.read()
+        except OSError:
+            if attempt == 2:
+                return None
+            time.sleep(1 + attempt)
+    return None
+
+
+def picture_urls(pres: dict) -> tuple[dict[str, str], dict[str, str]]:
+    """(image objectId -> contentUrl, slide objectId -> background picture contentUrl) of a presentations.get."""
+    images, backgrounds = {}, {}
+    for s in pres.get("slides", []):
+        fill = s.get("pageProperties", {}).get("pageBackgroundFill", {})
+        if fill.get("stretchedPictureFill", {}).get("contentUrl"):
+            backgrounds[s["objectId"]] = fill["stretchedPictureFill"]["contentUrl"]
+        stack = list(s.get("pageElements", []))
+        while stack:
+            e = stack.pop()
+            if e.get("image", {}).get("contentUrl"):
+                images[e["objectId"]] = e["image"]["contentUrl"]
+            stack += e.get("elementGroup", {}).get("children", [])
+    return images, backgrounds
+
+
+def sign_pictures(read: dict, pres: dict, objects=None, slides=None, workers: int = 8) -> int:
+    """Adds pixel signatures to the image read-backs and picture backgrounds of `read`
+    (read_presentation of `pres`); `objects` / `slides`: only these ids (None: all). Returns how
+    many pictures were downloaded."""
+    from concurrent.futures import ThreadPoolExecutor
+    images, backgrounds = picture_urls(pres)
+    jobs = []
+    for s in read["slides"]:
+        bg = s.get("background") or {}
+        if "picture" in bg and s["objectId"] in backgrounds and (slides is None or s["objectId"] in slides):
+            jobs.append((bg, backgrounds[s["objectId"]]))
+        for oid, rb in s["objects"].items():
+            if "image" in rb and oid in images and (objects is None or oid in objects):
+                jobs.append((rb["image"], images[oid]))
+    if not jobs:
+        return 0
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        for (target, _), data in zip(jobs, pool.map(lambda j: _download(j[1]), jobs)):
+            if data:
+                target["signature"] = signature(data)
+    return len(jobs)
 
 
 def readback(e: dict, parent: list[float], parent_group: str | None, z: int) -> dict:
@@ -291,13 +397,16 @@ def attach_readback(entry: dict, slide_read: dict | None, objects: list[list[str
         el["readback"] = {oid: found[oid] for oid in oids if oid in found}
 
 
-def build_base(deck: dict, out: Path, pres: dict, state: dict, pdf: Path, generation: int = 0) -> dict:
-    """The base after `convert`: `state` is emit's (slides with element object ids)."""
+def build_base(deck: dict, out: Path, pres: dict, state: dict, pdf: Path, generation: int = 0, sign: bool = False) -> dict:
+    """The base after `convert`: `state` is emit's (slides with element object ids); `sign`:
+    download the pictures for their signatures."""
     infos = [identity.slide_info(s) for s in deck["slides"]]
     keys = identity.slide_keys(infos)
     ekeys, fps = zip(*[identity.slide_element_keys(s["elements"], out) for s in deck["slides"]]) if deck["slides"] else ((), ())
     entries = slide_entries(deck, out, keys, list(ekeys), list(fps))
     read = read_presentation(pres)
+    if sign:
+        sign_pictures(read, pres)
     by_id = {s["objectId"]: s for s in read["slides"]}
     for entry, s in zip(entries, state["slides"]):
         attach_readback(entry, by_id.get(s["objectId"]), s.get("objects") or [[o] for o in s["elements"]], s.get("groups", []))
@@ -428,7 +537,8 @@ def snapshot_after_convert(deck: dict, out: Path, state: dict, pdf: Path) -> dic
     pres = execute(slides.presentations().get(presentationId=pid))
     base = build_base(deck, out, pres, state, pdf)
     if write_tags(slides, pid, tag_requests(base)):
-        base = build_base(deck, out, execute(slides.presentations().get(presentationId=pid)), state, pdf)
+        pres = execute(slides.presentations().get(presentationId=pid))
+    base = build_base(deck, out, pres, state, pdf, sign=True)
     save_local(base, out)
     try:
         save_drive(drive, base)

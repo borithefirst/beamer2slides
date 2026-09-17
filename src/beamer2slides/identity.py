@@ -21,6 +21,7 @@ STYLE_KEYS = {"font", "family", "size", "bold", "italic", "smallcaps", "color", 
               "level", "script", "underline", "strike", "highlight", "link", "opacity", "shadow", "radius", "code",
               "flip", "weight", "arrow_from", "arrow_to", "rotation"}
 ID_LIKE = re.compile(r"p\d+([a-z]+\d+.*)")
+UNIQUE_ROLES = ("title", "footer")  # one per slide: matched by role and place whatever their words
 
 
 def sha1(data: bytes | str) -> str:
@@ -181,7 +182,10 @@ def element_similarity(a: dict, b: dict) -> float:
     role = 1.0 if a.get("role") == b.get("role") else 0.0
     if fa["text"] or fb["text"]:
         ratio = SequenceMatcher(None, fa["text"], fb["text"], autojunk=False).ratio()
-        return 0.6 * ratio + 0.3 * geom + 0.1 * role
+        score = 0.6 * ratio + 0.3 * geom + 0.1 * role
+        if role and a.get("role") in UNIQUE_ROLES:  # a renamed title is still the slide's title
+            score = max(score, 0.5 + 0.3 * geom + 0.2 * ratio)
+        return score
     if a["kind"] == "image":
         same = 1.0 if fa["image_sha1"] and fa["image_sha1"] == fb["image_sha1"] else 0.0
         anchor = 1.0 if fa.get("anchor") == fb.get("anchor") else 0.0

@@ -553,6 +553,201 @@ def test_element_objects_from_emit_plan():
                 assert f"{oids[0]}_g" in oids
 
 
+# ---------------------------------------------------------------- found by the live suite (tests/test_sync_live.py)
+
+def picture(size, text, fmt="PNG", scale=1):
+    """A tight formula-like picture: `text` drawn at 4x and scaled down to `size`."""
+    import io
+    from PIL import Image, ImageDraw
+    big = Image.new("RGB", (size[0] // 4 * scale, size[1] // 4), "white")
+    ImageDraw.Draw(big).text((1, 1), text, fill="black")
+    img = big.resize(size, Image.LANCZOS)
+    buf = io.BytesIO()
+    img.save(buf, fmt, **({"quality": 75} if fmt == "JPEG" else {}))
+    return buf.getvalue()
+
+
+def test_pictures_compare_by_pixels_not_content_urls():
+    """Google hands out new contentUrls for unchanged pictures: a changed URL hash alone is no
+    'replaced in the deck' (it blocked source changes of every slide with a picture)."""
+    from beamer2slides import snapshot
+    formula = picture((240, 56), "x = a + b")
+    reencoded = picture((240, 56), "x = a + b", "JPEG")
+    other = picture((240, 56), "y - c / d")
+    stretched = picture((480, 56), "x = a + b", scale=2)
+    sig = snapshot.signature
+    assert snapshot.signatures_match(sig(formula), sig(reencoded))
+    assert not snapshot.signatures_match(sig(formula), sig(other))
+    assert not snapshot.signatures_match(sig(formula), sig(stretched))
+    b = readback([10, 10, 70, 30], kind="image", image="aaa")
+    b["image"]["signature"] = sig(formula)
+    same = copy.deepcopy(b)
+    same["image"] = {"contentHash": "bbb", "signature": sig(reencoded)}
+    assert merge.object_changes(b, same) == set()
+    replaced = copy.deepcopy(b)
+    replaced["image"] = {"contentHash": "ccc", "signature": sig(other)}
+    assert merge.object_changes(b, replaced) == {"image"}
+    unsigned = copy.deepcopy(b)
+    unsigned["image"] = {"contentHash": "ddd"}
+    assert merge.object_changes(b, unsigned) == {"image"}  # (can't tell: counts as replaced)
+    # backgrounds too
+    base = three_slides()
+    s = base["slides"][0]
+    s["background_readback"] = {"picture": "p1", "signature": sig(formula)}
+    read = live(s)
+    read["background"] = {"picture": "p2", "signature": sig(reencoded)}
+    assert not merge.background_edited(s, read) and not merge.slide_touched(s, read)
+    read["background"] = {"picture": "p3", "signature": sig(other)}
+    assert merge.background_edited(s, read)
+
+
+def test_new_base_keeps_the_source_slide_order():
+    """The base is converter output: after a sync that kept the deck's slide order, the base
+    still lists the source order, or the next sync would move the slides back."""
+    from beamer2slides.sync import base_order
+    plans = [{"key": "a", "action": "update", "ours": 0}, {"key": "b", "action": "update", "ours": 1},
+             {"key": "c", "action": "create", "ours": 2}, {"key": "gone", "action": "keep_removed", "ours": None}]
+    works = [{"plan": plans[0], "sid": "A"}, {"plan": plans[1], "sid": "B"}, {"plan": plans[2], "sid": "C"},
+             {"plan": plans[3]}]
+    by_plan = {id(w["plan"]): w for w in works}
+    # the deck has B before A, and a kept slide G and a user slide U after B
+    order = base_order({"slides": plans}, by_plan, ["B", "G", "U", "A", "C"])
+    assert [x for x in order if x in "ABC"] == ["A", "B", "C"]
+    assert order.index("G") < order.index("U")
+    # a second plan on that base: the deck's order still counts as a deck reorder and stays
+    base = three_slides()
+    ours, theirs = triple(base)
+    theirs["slides"] = [theirs["slides"][2], theirs["slides"][0], theirs["slides"][1]]
+    mplan = merge.plan_merge(base, ours, theirs)
+    assert mplan["order"] == ["b2s_s002", "b2s_s000", "b2s_s001"] and not mplan["report"]["slides"]["moved"]
+    assert not merge.has_writes(mplan, [s["objectId"] for s in theirs["slides"]])
+
+
+def test_renamed_title_keeps_its_key():
+    """A retitled frame's title inherits the title key (it was deleted and recreated as a plain text
+    box above the placeholder's place)."""
+    base = [{"key": "text/title/0", "kind": "text", "role": "title", "fingerprint": identity.fingerprint(
+                text_ir("Conclusions", (10, 10, 100, 24), "p9t0", "title"))},
+            {"key": "text/body/0", "kind": "text", "role": "body", "fingerprint": identity.fingerprint(
+                text_ir("Deck edits survive every sync", (20, 60, 200, 70), "p9t1"))}]
+    ours = [text_ir("Takeaways", (10, 10, 90, 24), "p9t0", "title"), text_ir("Deck edits survive every sync", (20, 60, 200, 70), "p9t1")]
+    keys, _ = identity.slide_element_keys(ours, None, base)
+    assert keys == ["text/title/0", "text/body/0"]
+    # (the slide's one title, wherever it went)
+    ours = [text_ir("Takeaways", (300, 150, 380, 164), "p9t0", "title"), ours[1]]
+    assert identity.slide_element_keys(ours, None, base)[0] == ["text/title/0", "text/body/0"]
+
+
+def test_deleted_slide_whose_frame_counter_changed_is_no_conflict():
+    base = three_slides()
+    for n, s in enumerate(base["slides"]):
+        foot = entry("text/footer/0", text_ir(f"{n + 1} / 3", (300, 190, 320, 196), f"p{n}t2", "footer"), f"b2s_s{n:03}_t2")
+        s["elements"].append(foot)
+    ours, theirs = triple(base)
+    del theirs["slides"][2]
+    ours["slides"][2]["elements"][2] = ours_entry("text/footer/0", text_ir("4 / 4", (300, 190, 320, 196), "p3t2", "footer"))
+    assert merge.plan_merge(base, ours, theirs)["report"]["conflicts"] == []
+    ours["slides"][2]["elements"][1] = ours_entry("text/body/0", text_ir("Changed words", (20, 60, 200, 90), "p2t1"))
+    assert [c["field"] for c in merge.plan_merge(base, ours, theirs)["report"]["conflicts"]] == ["slide"]
+
+
+def test_words_restyled_in_the_deck_survive_a_source_text_change():
+    """One bolded word (a non-uniform style edit) and a reworded source: recreate and re-apply the
+    deck's run styles to the same words, instead of dropping the source change as a conflict."""
+    base = three_slides()
+    ours, theirs = triple(base)
+    ours["slides"][0]["elements"][1] = ours_entry("text/body/0", text_ir("First point of intro, reworded\nSecond point of intro",
+                                                                         (20, 60, 230, 90), "p0t1"))
+    obj = theirs["slides"][0]["objects"]["b2s_s000_t1"]
+    obj["text_styles"] = obj["text_styles"] + [{"fontFamily": "Lato", "fontSize": 18.0, "bold": True}]
+    obj["text_style_hash"] = "bold word"
+    mplan = merge.plan_merge(base, ours, theirs)
+    u = unit(mplan, "intro", "text/body/0")
+    assert u["action"] == "recreate" and u["overrides"]["text_style"]["ranges"]
+    assert not mplan["report"]["conflicts"]
+    # a table: always by ranges (cell by cell)
+    cells = lambda rows: [[[run(c)] for c in row] for row in rows]  # noqa: E731
+    table = {"id": "p1b0", "kind": "table", "role": "table", "bbox": [20, 100, 200, 160],
+             "cells": cells([["Scenario", "Time"], ["Disjoint", "3.9 s"]])}
+    base = three_slides()
+    el = entry("table/table/0", table, "b2s_s001_tab2")
+    base["slides"][1]["elements"].append(el)
+    ours, theirs = triple(base)
+    ours["slides"][1]["elements"][2] = ours_entry("table/table/0", {**table, "cells": cells([["Scenario", "Time"], ["Disjoint", "4.7 s"]])})
+    obj = theirs["slides"][1]["objects"]["b2s_s001_tab2"]
+    obj.update(kind="table", text_styles=obj["text_styles"] + [{"fontFamily": "Lato", "fontSize": 18.0, "bold": True}],
+               text_style_hash="bold cell word")
+    u = unit(merge.plan_merge(base, ours, theirs), "results", "table/table/0")
+    assert u["action"] == "recreate" and u["overrides"]["text_style"]["ranges"]
+
+
+def raw_shape(oid, runs):
+    """A page element as presentations.get returns it: runs = [(text, style)]."""
+    elements, i = [], 0
+    for text, style in runs:
+        elements.append({"startIndex": i, "endIndex": i + len(text), "textRun": {"content": text, "style": style}})
+        i += len(text)
+    return {"objectId": oid, "shape": {"text": {"textElements": elements}}}
+
+
+def test_style_range_requests_follow_the_words():
+    from beamer2slides.sync import deck_attributes, style_range_requests
+    plain = {"fontFamily": "Lato", "fontSize": {"magnitude": 18, "unit": "PT"}}
+    bold = {**plain, "bold": True}
+    base_styles = [{"fontFamily": "Lato", "fontSize": 18.0}]
+    assert deck_attributes({"fontFamily": "Lato", "fontSize": 18.0}, base_styles) == {}
+    assert deck_attributes({"fontFamily": "Lato", "fontSize": 18.0, "bold": True}, base_styles) == {"bold": True}
+    old = raw_shape("old", [("Written by an ", plain), ("AI", bold), (" assistant\n", plain)])
+    new = raw_shape("new", [("Now written by an AI assistant and converted\n", plain)])
+    (r,) = style_range_requests("new", old, new, base_styles)
+    rng = r["updateTextStyle"]["textRange"]
+    assert "Now written by an AI assistant and converted\n"[rng["startIndex"]:rng["endIndex"]] == "AI"
+    assert r["updateTextStyle"]["style"] == {"bold": True} and r["updateTextStyle"]["fields"] == "bold"
+    # a word the source deleted takes its style along; text after the text override counts
+    assert style_range_requests("new", old, raw_shape("new", [("Written by an assistant\n", plain)]), base_styles) == []
+    (r,) = style_range_requests("new", old, new, base_styles, merged="Written by an AI helper\n")
+    assert r["updateTextStyle"]["textRange"]["startIndex"] == 14
+    # table cells, by cellLocation
+    cell = lambda runs: {"text": raw_shape("x", runs)["shape"]["text"]}  # noqa: E731
+    old_t = {"objectId": "t", "table": {"tableRows": [{"tableCells": [cell([("Disjoint\n", bold)]), cell([("3.9 s\n", plain)])]}]}}
+    new_t = {"objectId": "t", "table": {"tableRows": [{"tableCells": [cell([("Disjoint\n", plain)]), cell([("4.7 s\n", plain)])]}]}}
+    (r,) = style_range_requests("t", old_t, new_t, base_styles)
+    assert r["updateTextStyle"]["cellLocation"] == {"rowIndex": 0, "columnIndex": 0}
+    assert r["updateTextStyle"]["textRange"] == {"type": "FIXED_RANGE", "startIndex": 0, "endIndex": 8}
+
+
+SYNC_DECKS = Path(__file__).resolve().parent / "decks" / "sync" / "out"
+
+
+def test_retitled_frame_and_right_limits_on_the_sync_talk(tmp_path):
+    """On the sync test talk (tests/decks/sync): the unlabelled frame retitled Takeaways keeps its
+    title key, and an element recreated on a slide whose title isn't rewritten gets the same box
+    as in a fresh conversion (a title demoted to body text widened text_right_limit)."""
+    from beamer2slides.sync import Sync, build_ours
+    v1, untitled = SYNC_DECKS / "v1.pdf", SYNC_DECKS / "untitled.pdf"
+    if not (v1.exists() and untitled.exists()):
+        pytest.skip("build the sync test talk first (tests/decks/sync/build.py, or pytest -m sync -k variants)")
+    first = build_ours(v1, tmp_path / "v1", {"slides": []})
+    second = build_ours(untitled, tmp_path / "untitled", {"slides": first["slides"]})
+    last = second["slides"][-1]
+    assert last["key"] == first["slides"][-1]["key"]
+    assert [e["key"] for e in last["elements"] if e["role"] == "title"] == ["text/title/0"]
+
+    s = Sync.__new__(Sync)
+    s.ours, s.plan, s.scale, s.tok, s.urls, s.warnings = first, first["plan"], first["plan"].scale, "1zz", {}, []
+    j = next(k for k, o in enumerate(first["slides"]) if o["key"] == "steps")
+    elements = first["plan"].deck["slides"][j]["elements"]
+    body = next(i for i, e in enumerate(elements) if e.get("role") == "body" and e["kind"] == "text")
+    title = next(i for i, e in enumerate(elements) if e.get("role") == "title")
+
+    def body_box(in_place):
+        reqs, _, new_oid, _ = s.slide_requests({"plan": {"ours": j}, "units": [body]}, "LIVE", in_place, {}, {}, False)
+        shape = next(r["createShape"] for r in reqs if r.get("createShape", {}).get("objectId") == new_oid[body])
+        return shape["elementProperties"]["size"]["width"]["magnitude"]
+    placeholder = {title: {"id": "LIVE_title", "size": [680.0, 36.0], "text": "The sync algorithm"}}
+    assert body_box({}) == body_box(placeholder)
+
+
 def test_conversion_is_stable():
     """Converting the same PDF twice gives the same keys and hashes (a no-op sync sends nothing)."""
     import tempfile

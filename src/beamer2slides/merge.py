@@ -7,7 +7,7 @@ inherited: snapshot.slide_entries) and theirs (snapshot.read_presentation of the
 import re
 from difflib import SequenceMatcher
 
-from . import identity
+from . import identity, snapshot
 
 GEOMETRY_TOLERANCE = 0.05  # pt
 SCALE_TOLERANCE = 1e-3
@@ -132,7 +132,7 @@ def object_changes(b: dict, t: dict) -> set[str]:
         out.add("text_style")
     if b.get("shape_style_hash") != t.get("shape_style_hash"):
         out.add("shape_style")
-    if (b.get("image") or {}).get("contentHash") != (t.get("image") or {}).get("contentHash"):
+    if ("image" in b or "image" in t) and not snapshot.same_picture(b.get("image"), t.get("image")):
         out.add("image")
     if b.get("parent_group") != t.get("parent_group"):
         out.add("group")
@@ -328,9 +328,15 @@ def plan_unit(skey: str, ukey: str, base_members: list[dict] | None, ours_member
     if "text_style" in edited and not keep:
         runs = uniform_changes(base_rb.get("text_styles", []), theirs_rb.get("text_styles", []))
         paras = uniform_changes(base_rb.get("paragraph_styles", []), theirs_rb.get("paragraph_styles", []))
-        if runs is None or paras is None or set(edits["text_style"]) != {main}:
+        if paras is None or set(edits["text_style"]) != {main} or anchor["kind"] not in ("text", "table"):
             conflict("text_style", "style", sorted(src), "restyled in the deck")
             keep = True
+        elif runs is None or anchor["kind"] == "table":
+            # Some words restyled (or a table): the deck's run styles go onto the same words of the
+            # new text (sync.style_range_requests).
+            overrides["text_style"] = {"runs": {}, "paragraphs": paras, "ranges": True}
+            if "style" in src:
+                conflict("text_style", "style", "restyled in the source", "restyled in the deck", "deck style re-applied")
         else:
             overrides["text_style"] = {"runs": runs, "paragraphs": paras}
             if "style" in src:
@@ -384,8 +390,11 @@ def plan_merge(base: dict, ours: dict, theirs: dict) -> dict:
             plans.append({"key": o["key"], "action": "create", "ours": j, "base": None, "objectId": None})
             continue
         if read is None:
-            changed = any(identity.source_changes(e, oe) for e in b["elements"] for oe in o["elements"] if e["key"] == oe["key"]) \
-                or {e["key"] for e in b["elements"]} != {e["key"] for e in o["elements"]}
+            # (frame counters change whenever a frame is added before: not worth a conflict)
+            content = lambda els: [e for e in els if e.get("role") != "footer"]  # noqa: E731
+            changed = any(identity.source_changes(e, oe) for e in content(b["elements"]) for oe in content(o["elements"])
+                          if e["key"] == oe["key"]) \
+                or {e["key"] for e in content(b["elements"])} != {e["key"] for e in content(o["elements"])}
             if changed:
                 report["conflicts"].append({"slide": o["key"], "element": None, "field": "slide", "base": "slide",
                                             "ours": "changed", "theirs": "deleted", "resolution": "kept deleted"})
@@ -419,6 +428,11 @@ def plan_merge(base: dict, ours: dict, theirs: dict) -> dict:
     return {"slides": plans, "order": order, "report": report}
 
 
+def background_edited(b: dict, read: dict) -> bool:
+    """The deck changed a base slide's background (a picture compares by its pixels: contentUrls change)."""
+    return b.get("background_readback") is not None and not snapshot.same_background(b["background_readback"], read.get("background"))
+
+
 def slide_touched(b: dict, read: dict) -> list[str]:
     """Why a slide counts as edited in the deck (empty: untouched)."""
     why = []
@@ -428,7 +442,7 @@ def slide_touched(b: dict, read: dict) -> list[str]:
         why.append("objects added")
     if b.get("notes_readback", "") != read.get("notes", ""):
         why.append("notes edited")
-    if b.get("background_readback") is not None and b["background_readback"] != read.get("background"):
+    if background_edited(b, read):
         why.append("background changed")
     return why
 
@@ -457,13 +471,13 @@ def plan_slide(b: dict, o: dict, read: dict, report: dict, base: dict, j: int, i
     plan = {"key": skey, "action": "update", "ours": j, "base": i, "objectId": b["objectId"], "units": unit_plans}
     # Background: the source's picture or colour unless the deck changed it.
     if b.get("background") != o.get("background"):
-        if b.get("background_readback") is not None and b["background_readback"] != read.get("background"):
+        if background_edited(b, read):
             report["conflicts"].append({"slide": skey, "element": None, "field": "background", "base": b.get("background"),
                                         "ours": o.get("background"), "theirs": read.get("background"), "resolution": "deck kept"})
         else:
             plan["background"] = o["background"]
             report["applied"].append({"slide": skey, "element": None, "fields": ["background"]})
-    elif b.get("background_readback") is not None and b["background_readback"] != read.get("background"):
+    elif background_edited(b, read):
         report["overrides"].append({"slide": skey, "element": None, "fields": ["background"]})
     # Speaker notes: text rules.
     bn, on, tn = b.get("notes") or "", o.get("notes") or "", read.get("notes") or ""
