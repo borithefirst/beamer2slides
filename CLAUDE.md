@@ -45,6 +45,8 @@ a per-slide background picture.
   padding-free template node, otherwise node and label form a sub-group; line ends on a node's
   connection site are connected (`connection`), and `|-`/`-|` paths become one elbow connector
   (template bentConnector3 with adj 0 or 100000), so edges follow moved nodes.
+  Card text (`card_text`: several sizes or lines in a node, e.g. a number over a caption) becomes
+  text boxes on the PDF baselines, split where Slides can't set two paragraphs that close.
 - `shape`: opaque filled panels such as beamer blocks, not touching the page edge, with
   nothing left in the background on top; verified against the rendered colour. Also
   figure clusters of plain filled rectangles (`plain_rectangles`, role `rule`).
@@ -105,6 +107,12 @@ a per-slide background picture.
   background picture. A background with nothing left becomes a plain background colour.
 - Theme robustness: `tests/themes/sweep.py` compiles a realistic talk with 28 beamer themes
   and classifies them locally (no Google calls).
+- Line building: words don't join across a column gutter (`PageClassifier.gutter`), lines up to
+  1.45 em apart continue a paragraph, centred lines TeX balanced keep their breaks as soft
+  breaks (chr 11), and rule-less tables whose cells wrap like prose aren't tables.
+- Google theme (`themes/google`, README there): a beamer theme reproducing the GDG 2024 speaker
+  template in Google Sans Flex, written for AI authors; sizes in `\gpt` so the theme's baselines
+  follow Slides' text model (first baseline 6.48 + 0.968 em, pitch 1.2 em × line spacing).
 - Slides API image insertion needs a public URL: upload to Drive, share by link,
   insert, then revoke.
 
@@ -167,7 +175,8 @@ black = both.
 - Bullet colour/size can't be set independently (see docs/calibration.md).
 - Page labels can come back as raw `<FEFF...>` hex strings; `extract._label` decodes them.
 - PowerShell 5.1 mangles double quotes inside native-command arguments: keep them out of
-  git commit messages passed via here-strings.
+  git commit messages passed via here-strings. `Get-Content -Raw` reads BOM-less UTF-8 as ANSI:
+  edit text files with the editor tools, not a PowerShell read/replace/write.
 - Shape shadows, autofit and text insets are read-only in the API. A .pptx import keeps shadows
   (and duplicateObject, fill and transform changes keep them) but not spAutoFit.
 - python-pptx autoshapes refer to the theme's effect style, which has a shadow: always give an
