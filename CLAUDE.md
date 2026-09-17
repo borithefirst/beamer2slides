@@ -69,8 +69,8 @@ a per-slide background picture.
   its words: `\framebox[2.5cm]`; the space after a hole counts from the graphic's end). `\cancel`
   strokes are LINE10 glyphs (icon font → graphic → hole). `join_braces`: an `\underbrace` /
   `\overbrace` glyph line and its label join the prose line, so the formula hole takes them.
-  Small graphics on a native
-  panel (the QED box) become pictures (`specks_on_panels`), or the panel would hide them.
+  Small graphics on a native panel (the QED box) become pictures (`specks_on_panels`), or the
+  panel would hide them.
 - Accents PDFium reports as separate chars (`ACCENTS`: ¯ ˆ ˜ …) become combining marks on
   their letter (X̄), also when the accent landed in the previous span.
 - `formula_shifts` predicts the picture offset from Slides' symbol advances
@@ -89,8 +89,6 @@ a per-slide background picture.
   every number on the slide becomes literal text with a tab (Slides can't set a start number).
   Labels on balls, circles and squares (numbers or letters) always become the ball picture with
   a centred text box on it (`number`, `emit.number_box_requests`), grouped with the item text.
-  A number drawn on a ball or box instead becomes its own text box centred on the ball picture
-  (`number` on the image element, `emit.number_box_requests`), grouped with the item text.
 - Grouping in emit: blocks (`block_groups`: shapes with the same `block` plus content), formula
   pictures with their text, progress bars with their track (`rule_groups`). Title page:
   `subtitle_element` → SUBTITLE placeholder.
