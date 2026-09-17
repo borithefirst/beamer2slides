@@ -138,15 +138,19 @@ three Slides-specific spots (`merge.predicted_text`, `IR_STYLE_TO_API`,
 
 ## Risks, in the order they should be retired
 
-1. **The Docs API is not enabled on GCP project `beamer2slides`** — `documents.get`
-   returns 403. This blocks everything in the read-back and anchor design. It is one
-   click in the console, plus adding `https://www.googleapis.com/auth/documents` to
-   `google_auth.SCOPES` and re-consenting.
+1. **The Docs API must be enabled on GCP project `beamer2slides`** — until it is,
+   `documents.get` returns 403 and everything in the read-back and anchor design is
+   blocked. One click at
+   <https://console.cloud.google.com/apis/library/docs.googleapis.com>.
+   Whether the narrow `drive.file` scope already reaches `documents.get` for a doc this
+   app created is checked by stage 0 of `tools/probe_docs_api.py`; if it does, we never
+   ask for the `documents` scope, which reaches *every* Doc the user owns.
 2. **Named-range survival is undocumented.** Google documents that ranges track edits,
    can split, and are not copied. It does *not* document whether a range dies when all
    its text is deleted, whether there is a count cap, or what a Drive copy of the
-   document does to them. Probe this before designing the identity scheme on top of it —
-   it is the single load-bearing assumption.
+   document does to them. `tools/probe_docs_api.py` measures exactly these (stages 1-6,
+   results in `out/docs-probe/anchors.json`). It is the single load-bearing assumption
+   of the identity scheme, so retire it before designing on top of it.
 3. **Images on the sync path.** Import via HTML is fine (measured, lossless). But
    `insertInlineImage` takes a **URI only** — no byte upload, same wall as Slides'
    `createImage` — so inserting an image into an *existing* doc needs the staging-file

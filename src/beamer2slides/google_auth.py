@@ -52,6 +52,8 @@ SCOPES = [
     "https://www.googleapis.com/auth/presentations",
     # Only files this app creates or opens, not the user's whole Drive.
     "https://www.googleapis.com/auth/drive.file",
+    # No "documents" scope: that one reaches every Doc the user has, while
+    # drive.file already covers the ones this app created (docs/google-docs.md).
 ]
 
 
@@ -99,3 +101,8 @@ def slides_service(creds: Credentials | None = None):
 def drive_service(creds: Credentials | None = None):
     """Service objects are not thread-safe: build one per thread, sharing `creds`."""
     return build("drive", "v3", credentials=creds or credentials(), cache_discovery=False)
+
+
+def docs_service(creds: Credentials | None = None):
+    """The Docs API must be enabled in the Cloud project; see docs/google-docs.md."""
+    return build("docs", "v1", credentials=creds or credentials(), cache_discovery=False)
