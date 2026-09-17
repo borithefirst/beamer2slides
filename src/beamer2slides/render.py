@@ -173,6 +173,7 @@ def render_backgrounds(pdf: Path, raw: dict, deck: dict, out: Path) -> list[Path
                     bullets.append([x0 - 0.5, y0 - 0.5, x1 + 0.5, y1 + 0.5])
         if bullets:
             patch_rects(path, bullets, BACKGROUND_WIDTH_PX / slide["size"][0])
+        paint_out_block_pictures(path, slide, BACKGROUND_WIDTH_PX / slide["size"][0])
         slide["background"] = str(path.relative_to(out)).replace("\\", "/")
         slide["background_color"] = uniform_color(path)
     return paths
@@ -199,6 +200,55 @@ def render_pages(pdf: Path, out_dir: Path, width_px: int, prefix: str, pages: li
         page.get_pixmap(matrix=pymupdf.Matrix(zoom, zoom), alpha=False).save(path)
         paths.append(path)
     return paths
+
+
+def paint_out_block_pictures(png: Path, slide: dict, px_per_pt: float) -> None:
+    """Blocks whose title bar and body both became shapes lose their theme pictures from the
+    background: the gradient strip between the two (emit lays the body under the title bar)
+    and the shadow pieces (emit gives the body a native drop shadow). They are painted with
+    the page colour around the block, which only works on a flat page: elsewhere the shadow
+    stays in the background and the body gets none."""
+    shapes = [e for e in slide["elements"] if e["kind"] == "shape"]
+    kept = {e["block"] for e in shapes if e.get("block") is not None and "title_bar" not in e} & \
+           {e["block"] for e in shapes if e.get("title_bar")}
+    for el in shapes:
+        if el.get("block") is not None and el["block"] not in kept:  # one half was not verified
+            for key in ("block", "title_bar", "strips"):
+                el.pop(key, None)
+    pix = pymupdf.Pixmap(str(png))
+    img = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width, pix.n).copy()
+    changed = False
+    for el in shapes:
+        rects = [r for r in el.get("strips", [])] + (el["shadow"]["pieces"] if el.get("shadow") else [])
+        if not rects:
+            continue
+        x0, y0, x1, y1 = el["bbox"]
+        if el.get("title_bar"):
+            y0 = el["title_bar"][1]
+        area = pymupdf.Rect(x0, y0, x1, y1)
+        for r in rects:
+            area |= pymupdf.Rect(r)
+        a0, b0 = max(0, int(area.x0 * px_per_pt) - 2), max(0, int(area.y0 * px_per_pt) - 2)
+        a1, b1 = min(pix.width, int(np.ceil(area.x1 * px_per_pt)) + 2), min(pix.height, int(np.ceil(area.y1 * px_per_pt)) + 2)
+        r = 4
+        ring = np.concatenate([
+            img[max(0, b0 - r):b0, max(0, a0 - r):a1 + r].reshape(-1, pix.n),
+            img[b1:b1 + r, max(0, a0 - r):a1 + r].reshape(-1, pix.n),
+            img[b0:b1, max(0, a0 - r):a0].reshape(-1, pix.n),
+            img[b0:b1, a1:a1 + r].reshape(-1, pix.n),
+        ]).astype(int)
+        color = np.median(ring, axis=0)
+        flat = len(ring) and (np.abs(ring - color).max(axis=1) <= 6).mean() >= 0.97
+        if not flat:
+            el.pop("shadow", None)  # keep the background's shadow; the strip is under the shapes anyway
+            continue
+        for rx0, ry0, rx1, ry1 in rects:
+            c0, d0 = max(0, int(np.floor(rx0 * px_per_pt)) - 1), max(0, int(np.floor(ry0 * px_per_pt)) - 1)
+            c1, d1 = int(np.ceil(rx1 * px_per_pt)) + 1, int(np.ceil(ry1 * px_per_pt)) + 1
+            img[d0:d1, c0:c1] = color.astype(np.uint8)
+        changed = True
+    if changed:
+        pymupdf.Pixmap(pix.colorspace, pix.width, pix.height, img.tobytes(), pix.alpha).save(png)
 
 
 def patch_rects(png: Path, rects_pt: list[list[float]], px_per_pt: float) -> None:

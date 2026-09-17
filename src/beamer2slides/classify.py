@@ -9,6 +9,7 @@ Pipeline per page:
 Every span ends up in exactly one text element or in `left_in_background`.
 """
 
+import math
 import re
 import statistics
 import unicodedata
@@ -1597,6 +1598,53 @@ class PageClassifier:
                         "radius": max(p["corners"].values(), default=0.0), "drawing": p["id"], "spans": []})
         return out
 
+    def blocks(self, shapes: list[dict]) -> None:
+        """Beamer blocks: a title bar panel directly above a body panel of the same width get a
+        common `block` number; the body gets the title bar's box (`title_bar`), and emit lays
+        it under the whole block so that no gap can open between the two when the block is
+        resized. Theme pictures that belong to the block are listed for the render stage to
+        paint out of the background: the gradient strip between title bar and body (`strips`)
+        and the soft shadow pieces right of and below the block (`shadow`, which emit turns
+        into a native drop shadow)."""
+        k = 0
+        for head in sorted(shapes, key=lambda s: s["bbox"][1]):
+            for body in shapes:
+                if body is head or "block" in body or "block" in head:
+                    continue
+                hx0, hy0, hx1, hy1 = head["bbox"]
+                bx0, by0, bx1, by1 = body["bbox"]
+                # Title page boxes overlap the two parts by a few points.
+                if abs(hx0 - bx0) <= 1.5 and abs(hx1 - bx1) <= 1.5 and by0 - hy1 <= 3.5 and by0 >= max(hy0 + 1, hy1 - 4):
+                    head["block"] = body["block"] = k
+                    body["title_bar"] = head["bbox"]
+                    body["strips"] = [im["bbox"] for im in self.page["images"]
+                                      if im["bbox"][3] - im["bbox"][1] <= 6 and hy1 - 3 <= (im["bbox"][1] + im["bbox"][3]) / 2 <= by0 + 3
+                                      and im["bbox"][2] - im["bbox"][0] >= 0.9 * (bx1 - bx0)
+                                      and im["bbox"][0] >= bx0 - 2 and im["bbox"][2] <= bx1 + 2]
+                    k += 1
+                    break
+        for el in shapes:
+            if el.get("block") is not None and "title_bar" not in el:
+                continue  # title bars: the body carries the block's shadow
+            x0, y0, x1, y1 = el["bbox"]
+            if el.get("title_bar"):
+                y0 = el["title_bar"][1]
+            outer = Rect(x0 - 1.5, y0 - 1.5, x1 + 8, y1 + 8)
+            inner = Rect(x0 + 1, y0 + 1, x1 - 1, y1 - 1)
+            pieces = [Rect.of(im["bbox"]) for im in self.page["images"]
+                      if outer.contains_rect(Rect.of(im["bbox"]), tol=0) and not inner.contains_rect(Rect.of(im["bbox"]), tol=0)
+                      and im["bbox"] not in el.get("strips", [])]
+            right = [r.x1 - x1 for r in pieces if r.x1 > x1 + 2]
+            below = [r.y1 - y1 for r in pieces if r.y1 > y1 + 2]
+            under = Rect(x0 + 2, y1 + 0.5, x1 + 2, y1 + 3)  # a shadow never falls onto another panel
+            if right and below and all(r.x0 >= x0 - 1.5 and r.y0 >= y0 - 1.5 for r in pieces) \
+                    and not any(o is not el and Rect.of(o["bbox"]).intersects(under)
+                                and not outer.contains_rect(Rect.of(o["bbox"]))  # the shadow's own black geometry
+                                for o in shapes):
+                # Image boxes are rounded outwards to whole points: 4.07 ... 4.51 for a 4 pt shadow.
+                el["shadow"] = {"size": float(max(1, math.floor(min(max(right), max(below)) + 0.25))),
+                                "pieces": [r.as_list() for r in pieces]}
+
     def plain_tables(self, lines: list[Line]) -> list[dict]:
         """Tabulars without rules, used to align short texts in columns: three or more rows at a
         regular pitch whose cells, separated by wide gaps, keep to the same columns. They
@@ -1730,7 +1778,9 @@ class PageClassifier:
         text_spans |= {sid for e in elements if e["kind"] == "table" for sid in e["spans"]}
         elements = self.math_pictures(lines, paragraphs, elements) + elements
         text_spans |= {sid for e in elements if e["kind"] == "text" for sid in e["spans"]}  # equation numbers
-        elements = self.shapes(lines, elements) + elements   # shapes below pictures
+        shapes = self.shapes(lines, elements)
+        self.blocks(shapes)
+        elements = shapes + elements   # shapes below pictures
 
         used = {sid for e in elements for sid in e["spans"]}
         paragraph_reason = {id(l): p.reason for p in paragraphs for l in p.lines}

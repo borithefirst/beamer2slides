@@ -35,6 +35,7 @@ DESCENT_EM = LINE_EM - ASCENT_EM
 PAD_X = 6.7          # box edge -> text start
 BULLET_GAP = 1.9     # bullet glyph's right edge sits this far before indentFirstLine
 PPTX_TITLE_DY = 3.9  # title placeholders of pptx-imported decks have a smaller top inset
+MIDDLE_BASELINE_EM = ASCENT_EM - LINE_EM / 2  # contentAlignment MIDDLE: baseline below the box middle (tools/probe_middle.py: 0.362)
 SOFT_BREAK = chr(11)  # vertical tab: a line break inside a paragraph
 SMALL_CAPS_LINE = 0.9  # a line of only smallCaps text is laid out as if 90% of its size
 
@@ -254,7 +255,12 @@ def _vertical_pass(paras, baselines, sizes, estimate):
 
 
 def text_box_requests(el: dict, slide_id: str, object_id: str, scale: float, fonts: FontMapper,
-                      placeholder: dict | None = None, page_slide: dict[int, str] | None = None) -> list[dict]:
+                      placeholder: dict | None = None, page_slide: dict[int, str] | None = None,
+                      bar: list[float] | None = None, right_limit: float | None = None) -> list[dict]:
+    """A text box for a text element. With `bar` (the PDF box of a block's title bar that this
+    one-line text sits on) the box fills the bar and centres its text vertically, so the
+    title stays in the middle of the bar when the block is resized. `right_limit` (PDF x) is
+    how far a box of unwrapped left-aligned text may extend."""
     paras = [{**p, "runs": [hole_run(r, scale, fonts) if r.get("hole") else r for r in p["runs"]]}
              for p in el["paragraphs"]]
     # A line is as tall as its largest run; small caps runs count at their reduced size.
@@ -294,6 +300,16 @@ def text_box_requests(el: dict, slide_id: str, object_id: str, scale: float, fon
     y = first_baseline - (BASELINE_A + ASCENT_EM * sizes[0] + extra_above(ratios[0], sizes[0]))
     w = inner_w + 2 * PAD_X + slack
     h = last_baseline - y + DESCENT_EM * sizes[-1] + extra_below(ratios[-1], sizes[-1]) + 4
+    if right_limit and not multiline and aligns == {"left"} and not placeholder:
+        # Room up to the block edge or the next element: text typed later wraps where a user
+        # expects, not a few points after the converted words.
+        w = max(w, right_limit * scale - x)
+    middle = bool(bar) and not placeholder and len(paras) == 1 and len(paras[0]["lines"]) == 1 and ratios[0] == 1
+    if middle:
+        h = (bar[3] - bar[1]) * scale
+        y = first_baseline - MIDDLE_BASELINE_EM * sizes[0] - h / 2
+        if aligns == {"left"}:
+            w = max(w, (bar[2] - 1) * scale - x)  # to the bar's end: the title wraps with the block
 
     if placeholder:
         # An existing layout placeholder (the slide title): its size is fixed at creation, so
@@ -317,8 +333,11 @@ def text_box_requests(el: dict, slide_id: str, object_id: str, scale: float, fon
                               "translateX": round(x * EMU_PER_PT), "translateY": round(y * EMU_PER_PT)},
             },
         }}]
+        if middle:
+            reqs.append({"updateShapeProperties": {"objectId": object_id, "fields": "contentAlignment",
+                                                   "shapeProperties": {"contentAlignment": "MIDDLE"}}})
 
-    texts = ["".join(r["text"] for r in p["runs"]) for p in paras]
+    texts =["".join(r["text"] for r in p["runs"]) for p in paras]
     tabbed = "\n".join(("\t" * p["level"] if p["bullet"] else "") + t for p, t in zip(paras, texts))
     reqs.append({"insertText": {"objectId": object_id, "text": tabbed, "insertionIndex": 0}})
 
@@ -414,14 +433,114 @@ def text_box_requests(el: dict, slide_id: str, object_id: str, scale: float, fon
     return reqs
 
 
-def shape_requests(el: dict, slide_id: str, object_id: str, scale: float) -> list[dict]:
+def merge_blocks(elements: list[dict]) -> list[dict]:
+    """A block body (see classify.blocks) reaches up under its title bar, with the outline
+    of the whole block: resizing the block as a group can then never open a gap between
+    the two, and the body's shadow falls behind the whole block."""
+    heads = {e["block"]: e for e in elements if e["kind"] == "shape" and e.get("block") is not None and not e.get("title_bar")}
+    out = []
+    for el in elements:
+        head = heads.get(el.get("block")) if el.get("title_bar") else None
+        if head is None:
+            out.append(el)
+            continue
+        top = el["title_bar"][1]
+        top_round = head["shape"] == "ROUND_RECTANGLE" or (head["shape"] == "ROUND_2_SAME_RECTANGLE" and not head["flip"])
+        bottom_round = el["shape"] == "ROUND_RECTANGLE" or (el["shape"] == "ROUND_2_SAME_RECTANGLE" and el["flip"])
+        shape, flip = {(True, True): ("ROUND_RECTANGLE", False), (False, False): ("RECTANGLE", False),
+                       (True, False): ("ROUND_2_SAME_RECTANGLE", False),
+                       (False, True): ("ROUND_2_SAME_RECTANGLE", True)}[(top_round, bottom_round)]
+        out.append({**el, "bbox": [el["bbox"][0], top, el["bbox"][2], el["bbox"][3]], "shape": shape, "flip": flip,
+                    "radius": max(el["radius"], head["radius"])})
+    # Creation order is z-order: title bars go above every body (shapes come first, then the rest).
+    bar = lambda e: e["kind"] == "shape" and e.get("block") is not None and not e.get("title_bar")
+    return sorted(out, key=lambda e: 0 if e["kind"] == "shape" and not bar(e) else 1 if bar(e) else 2)
+
+
+# Native drop shadows, calibrated against beamer's block shadow (tools/calibrate_shadow.py):
+# distance and blur per point of the shadow's width in the PDF, at 45°.
+SHADOW_DISTANCE = 0.75
+SHADOW_BLUR = 1.0
+SHADOW_ALPHA = 0.5
+TEMPLATE_PRESETS = {"ROUND_RECTANGLE": "roundRect", "ROUND_2_SAME_RECTANGLE": "round2SameRect", "RECTANGLE": "rect"}
+TEMPLATE_LAYOUTS = {"TITLE": 0, "TITLE_ONLY": 5, "BLANK": 6}  # python-pptx default template layout indexes
+
+
+def template_key(el: dict, scale: float) -> tuple | None:
+    """Shapes the API can't make exactly: rounded corners of a given radius (the API only
+    creates the default rounding) and drop shadows (read-only in the API). They are
+    duplicated from template shapes that come with the imported .pptx."""
+    if el["kind"] != "shape" or (el["shape"] == "RECTANGLE" and not el.get("shadow")):
+        return None
+    x0, y0, x1, y1 = el["bbox"]
+    adj = 0.0
+    if el["shape"] != "RECTANGLE":
+        adj = min(0.5, round(el.get("radius", 0.0) / max(min(x1 - x0, y1 - y0), 0.01), 2))
+    shadow = round(2 * el["shadow"]["size"] * scale) / 2 if el.get("shadow") else None
+    return el["shape"], adj, shadow
+
+
+def build_pptx(page_w: float, page_h: float, keys: list[tuple], layouts: list[str]) -> io.BytesIO:
+    """The deck's starting point: an empty .pptx with the PDF's page size (presentations.create
+    ignores pageSize) and one template slide per layout holding the template shapes."""
+    from lxml import etree
+    from pptx import Presentation
+    from pptx.enum.shapes import MSO_SHAPE
+    from pptx.util import Emu, Pt
+
+    prs = Presentation()
+    height = SLIDE_W * page_h / page_w
+    ratio = height / (prs.slide_height / EMU_PER_PT)
+    prs.slide_width, prs.slide_height = Emu(round(SLIDE_W * EMU_PER_PT)), Emu(round(height * EMU_PER_PT))
+    if abs(ratio - 1) > 1e-3:  # the default template's placeholders are laid out for 4:3
+        for page in [prs.slide_master, *prs.slide_layouts]:
+            for shape in page.placeholders:
+                if shape.top is not None and shape.height is not None:
+                    shape.top, shape.height = Emu(round(shape.top * ratio)), Emu(round(shape.height * ratio))
+    kinds = {"ROUND_RECTANGLE": MSO_SHAPE.ROUNDED_RECTANGLE, "ROUND_2_SAME_RECTANGLE": MSO_SHAPE.ROUND_2_SAME_RECTANGLE,
+             "RECTANGLE": MSO_SHAPE.RECTANGLE}
+    a = "http://schemas.openxmlformats.org/drawingml/2006/main"
+    for layout in layouts:
+        slide = prs.slides.add_slide(prs.slide_layouts[TEMPLATE_LAYOUTS[layout]])
+        for i, (kind, adj, shadow) in enumerate(keys):
+            shape = slide.shapes.add_shape(kinds[kind], Pt(10 + i % 10 * 20), Pt(10 + i // 10 * 20), Pt(100), Pt(100))
+            if kind != "RECTANGLE":
+                shape.adjustments[0] = adj
+                if kind == "ROUND_2_SAME_RECTANGLE":
+                    shape.adjustments[1] = 0.0
+            shape.fill.solid()
+            shape.line.fill.background()
+            # python-pptx shapes refer to the theme's effect style, which has a shadow: always
+            # give an explicit (possibly empty) effect list.
+            effects = (f'<a:outerShdw blurRad="{round(SHADOW_BLUR * shadow * EMU_PER_PT)}" '
+                       f'dist="{round(SHADOW_DISTANCE * shadow * EMU_PER_PT)}" dir="2700000" algn="tl" rotWithShape="0">'
+                       f'<a:srgbClr val="000000"><a:alpha val="{round(SHADOW_ALPHA * 100000)}"/></a:srgbClr>'
+                       f'</a:outerShdw>') if shadow else ""
+            shape.element.spPr.append(etree.fromstring(f'<a:effectLst xmlns:a="{a}">{effects}</a:effectLst>'))
+    buf = io.BytesIO()
+    prs.save(buf)
+    buf.seek(0)
+    return buf
+
+
+def shape_requests(el: dict, slide_id: str, object_id: str, scale: float, template: dict | None = None) -> list[dict]:
+    """A filled shape without outline. With a template ({"id", "w", "h"}: a template shape
+    on this slide and its size in pt) the shape is a duplicate of it, else a new shape."""
     x0, y0, x1, y1 = (v * scale for v in el["bbox"])
     # ROUND_2_SAME_RECTANGLE rounds the top corners; for bottom corners flip both axes
     # (a 180° rotation), which moves the origin to the opposite corner.
     flip = -1 if el["flip"] else 1
     tx, ty = (x1, y1) if el["flip"] else (x0, y0)
-    return [
-        {"createShape": {
+    if template:
+        reqs = [
+            {"duplicateObject": {"objectId": template["id"], "objectIds": {template["id"]: object_id}}},
+            {"updatePageElementTransform": {"objectId": object_id, "applyMode": "ABSOLUTE", "transform": {
+                "scaleX": flip * (x1 - x0) / template["w"], "scaleY": flip * (y1 - y0) / template["h"], "unit": "EMU",
+                "translateX": round(tx * EMU_PER_PT), "translateY": round(ty * EMU_PER_PT)}}},
+            {"updatePageElementsZOrder": {"pageElementObjectIds": [object_id], "operation": "BRING_TO_FRONT"}},
+        ]
+    else:
+        reqs = [{"createShape": {
             "objectId": object_id, "shapeType": el["shape"],
             "elementProperties": {
                 "pageObjectId": slide_id,
@@ -429,7 +548,8 @@ def shape_requests(el: dict, slide_id: str, object_id: str, scale: float) -> lis
                 "transform": {"scaleX": flip, "scaleY": flip, "unit": "EMU",
                               "translateX": round(tx * EMU_PER_PT), "translateY": round(ty * EMU_PER_PT)},
             },
-        }},
+        }}]
+    return reqs + [
         {"updateShapeProperties": {
             "objectId": object_id,
             "shapeProperties": {"shapeBackgroundFill": {"solidFill": {"color": rgb(el["fill"])["opaqueColor"]}},
@@ -739,21 +859,17 @@ def diagram_requests(el: dict, slide_id: str, object_id: str, scale: float, font
 
 
 def block_groups(elements: list[dict], object_ids: list[str], title_oid: str | None) -> list[list[str]]:
-    """Object ids per block: panel shapes stacked on top of each other with the same width
-    (title bar and body), plus the text, pictures and tables lying on them."""
-    shapes = [(el, oid) for el, oid in zip(elements, object_ids) if el["kind"] == "shape" and el.get("role") == "panel"]
-    blocks: list[list] = []  # [x0, y0, x1, y1, [oids]]
-    for el, oid in sorted(shapes, key=lambda s: s[0]["bbox"][1]):
-        x0, y0, x1, y1 = el["bbox"]
-        for b in blocks:
-            if abs(b[0] - x0) <= 1.5 and abs(b[2] - x1) <= 1.5 and -1.5 <= y0 - b[3] <= 3.5:
-                b[3] = max(b[3], y1)
-                b[4].append(oid)
-                break
-        else:
-            blocks.append([x0, y0, x1, y1, [oid]])
+    """Object ids per block: its panel shapes (title bar and body, see classify.blocks), plus
+    the text, pictures and tables lying on them."""
+    blocks: dict[int, list] = {}  # block -> [x0, y0, x1, y1, [oids]]
+    for el, oid in zip(elements, object_ids):
+        if el["kind"] == "shape" and el.get("block") is not None:
+            x0, y0, x1, y1 = el["bbox"]
+            b = blocks.setdefault(el["block"], [x0, y0, x1, y1, []])
+            b[:4] = [min(b[0], x0), min(b[1], y0), max(b[2], x1), max(b[3], y1)]
+            b[4].append(oid)
     out = []
-    for x0, y0, x1, y1, members in blocks:
+    for x0, y0, x1, y1, members in blocks.values():
         if len(members) < 2:
             continue  # a lone panel is not recognisably a block
         for el, oid in zip(elements, object_ids):
@@ -764,6 +880,33 @@ def block_groups(elements: list[dict], object_ids: list[str], title_oid: str | N
                     members.append(oid)
         out.append(members)
     return out
+
+
+def text_right_limit(el: dict, slide: dict) -> float | None:
+    """How far right (PDF x) a text element's box may reach: inside a panel (a block body),
+    as far from the panel's right edge as the text is from its left edge; elsewhere the
+    mirrored left margin of the page, stopping short of anything to the right on the same
+    lines (the other column, a picture)."""
+    if el.get("role") not in ("body", None) or not el["paragraphs"]:
+        return None
+    x0, y0, x1, y1 = el["bbox"]
+    cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
+    panels = [e["bbox"] for e in slide["elements"] if e["kind"] == "shape" and e.get("role") == "panel"
+              and e["bbox"][0] <= cx <= e["bbox"][2] and e["bbox"][1] <= cy <= e["bbox"][3]]
+    if panels:
+        px0, _, px1, _ = min(panels, key=lambda b: (b[2] - b[0]) * (b[3] - b[1]))
+        limit = px1 - max(x0 - px0, 2.0)
+    else:
+        margin = min(e["bbox"][0] for e in slide["elements"] if e["kind"] == "text" and e.get("role") in ("body", None))
+        limit = slide["size"][0] - margin
+        size = el["paragraphs"][0]["size"]
+        for o in slide["elements"]:
+            if o is el or o["kind"] == "shape":
+                continue
+            ox0, oy0, ox1, oy1 = o["bbox"]
+            if ox0 >= x1 - 1 and oy0 < y1 and oy1 > y0:
+                limit = min(limit, ox0 - size)
+    return limit if limit > x1 else None
 
 
 def formula_shifts(slide: dict, scale: float, fonts: FontMapper) -> dict[str, float]:
@@ -825,27 +968,21 @@ def image_request(el: dict, slide_id: str, object_id: str, scale: float, url: st
 
 # ---------------------------------------------------------------- presentation + assets
 
-def create_presentation(slides, drive, title: str, page_w: float, page_h: float) -> dict:
-    ratio = page_h / page_w
-    if abs(ratio - 9 / 16) < 0.003:
-        pres = execute(slides.presentations().create(body={"title": title}))
+def import_presentation(slides, drive, title: str, page_w: float, page_h: float, pptx: io.BytesIO,
+                        existing: str | None) -> dict:
+    """A new deck from the .pptx, or an existing one (same URL) with its content replaced by it."""
+    media = MediaIoBaseUpload(pptx, mimetype=PPTX_MIME)
+    if existing:
+        execute(drive.files().update(fileId=existing, media_body=media, fields="id"))
+        pid = existing
     else:
-        # presentations.create ignores pageSize, but Drive keeps the size of an imported .pptx.
-        from pptx import Presentation
-        from pptx.util import Emu
-        prs = Presentation()
-        prs.slide_width = Emu(round(SLIDE_W * EMU_PER_PT))
-        prs.slide_height = Emu(round(SLIDE_W * ratio * EMU_PER_PT))
-        buf = io.BytesIO()
-        prs.save(buf)
-        buf.seek(0)
-        f = execute(drive.files().create(
+        pid = execute(drive.files().create(
             body={"name": title, "mimeType": "application/vnd.google-apps.presentation"},
-            media_body=MediaIoBaseUpload(buf, mimetype=PPTX_MIME), fields="id"))
-        pres = execute(slides.presentations().get(presentationId=f["id"]))
+            media_body=media, fields="id"))["id"]
+    pres = execute(slides.presentations().get(presentationId=pid))
     got = pres["pageSize"]["height"]["magnitude"] / pres["pageSize"]["width"]["magnitude"]
-    if abs(got - ratio) > 0.003:
-        raise RuntimeError(f"page aspect {got:.4f} != PDF aspect {ratio:.4f}")
+    if abs(got - page_h / page_w) > 0.003:
+        raise RuntimeError(f"page aspect {got:.4f} != PDF aspect {page_h / page_w:.4f}")
     return pres
 
 
@@ -976,18 +1113,17 @@ def batch_with_image_retry(slides, pid: str, reqs: list[dict], attempts: int = 4
 
 # ---------------------------------------------------------------- main entry
 
-def existing_presentation(slides, out: Path, page_w: float, page_h: float) -> dict | None:
-    """The deck from a previous run of this output folder, if it still exists with the right shape."""
+def existing_presentation(drive, out: Path) -> str | None:
+    """The deck from a previous run of this output folder, if it still exists (not trashed)."""
     state_file = out / "emit.json"
     if not state_file.exists():
         return None
     pid = json.loads(state_file.read_text(encoding="utf-8"))["presentationId"]
     try:
-        pres = execute(slides.presentations().get(presentationId=pid))
+        f = execute(drive.files().get(fileId=pid, fields="id,trashed,mimeType"))
     except HttpError:
         return None
-    got = pres["pageSize"]["height"]["magnitude"] / pres["pageSize"]["width"]["magnitude"]
-    return pres if abs(got - page_h / page_w) < 0.003 else None
+    return pid if not f.get("trashed") and f.get("mimeType") == "application/vnd.google-apps.presentation" else None
 
 
 def emit(deck: dict, out: Path, title: str, new_deck: bool = False, keep_assets: bool = False) -> dict:
@@ -995,13 +1131,39 @@ def emit(deck: dict, out: Path, title: str, new_deck: bool = False, keep_assets:
     page_w, page_h = deck["slides"][0]["size"]
     scale = SLIDE_W / page_w
     fonts = FontMapper()
+    deck = {**deck, "slides": [{**s, "elements": merge_blocks(s["elements"])} for s in deck["slides"]]}
 
-    pres = None if new_deck else existing_presentation(slides, out, page_w, page_h)
-    if pres:
-        print(f"updating existing deck {pres['presentationId']}")
-    else:
-        pres = create_presentation(slides, drive, title, page_w, page_h)
+    def slide_layout(slide: dict) -> tuple[str, str | None]:
+        """The title page uses the TITLE layout (centered title), frames with a title TITLE_ONLY."""
+        if title_element(slide) is None:
+            return "BLANK", None
+        return ("TITLE", "CENTERED_TITLE") if slide.get("title_page") else ("TITLE_ONLY", "TITLE")
+
+    # Every run starts from an imported .pptx: it sets the page size and brings template
+    # shapes (shadows, exact corner radii) on one template slide per layout. Slides needing
+    # templates are duplicates of their layout's template slide; the templates go at the end.
+    keys = list(dict.fromkeys(k for s in deck["slides"] for e in s["elements"] if (k := template_key(e, scale))))
+    uses_templates = {s["page"]: any(template_key(e, scale) for e in s["elements"]) for s in deck["slides"]}
+    layouts = [l for l in TEMPLATE_LAYOUTS if any(uses_templates[s["page"]] and slide_layout(s)[0] == l
+                                                  for s in deck["slides"])]
+    existing = None if new_deck else existing_presentation(drive, out)
+    if existing:
+        print(f"updating existing deck {existing}")
+    pres = import_presentation(slides, drive, title, page_w, page_h, build_pptx(page_w, page_h, keys, layouts), existing)
     pid = pres["presentationId"]
+    templates = {}
+    for layout, tpl_slide in zip(layouts, pres.get("slides", [])):
+        els = tpl_slide.get("pageElements", [])
+        shapes = [e for e in els if "placeholder" not in e.get("shape", {})]
+        if len(shapes) != len(keys):
+            raise RuntimeError(f"template slide {layout}: {len(shapes)} shapes imported, expected {len(keys)}")
+        templates[layout] = {
+            "id": tpl_slide["objectId"], "shapes": [e["objectId"] for e in shapes],
+            "placeholders": {e["shape"]["placeholder"]["type"]: e["objectId"] for e in els if "placeholder" in e.get("shape", {})},
+            "sizes": [(e["size"]["width"]["magnitude"] / (EMU_PER_PT if e["size"]["width"]["unit"] == "EMU" else 1),
+                       e["size"]["height"]["magnitude"] / (EMU_PER_PT if e["size"]["height"]["unit"] == "EMU" else 1))
+                      for e in shapes],
+        }
     folder = asset_folder(drive, "beamer2slides assets")
 
     state = {"presentationId": pid, "url": f"https://docs.google.com/presentation/d/{pid}/edit",
@@ -1032,12 +1194,6 @@ def emit(deck: dict, out: Path, title: str, new_deck: bool = False, keep_assets:
                 urls[f] = f"https://drive.google.com/uc?export=view&id={file_id}"
         time.sleep(5)  # a fresh "anyone with the link" permission takes a moment to apply
 
-        old = [s["objectId"] for s in pres.get("slides", [])]
-        if any(oid.startswith("b2s_s") for oid in old):
-            # Rebuilding in place: remove our slides first so their object IDs can be reused.
-            execute(slides.presentations().batchUpdate(presentationId=pid, body={"requests": [
-                {"deleteObject": {"objectId": oid}} for oid in old if oid.startswith("b2s_s")]}))
-            old = [oid for oid in old if not oid.startswith("b2s_s")]
         def fill(key: tuple) -> dict:
             if key[0] == "color":
                 return {"solidFill": {"color": rgb(key[1])["opaqueColor"]}}
@@ -1054,26 +1210,33 @@ def emit(deck: dict, out: Path, title: str, new_deck: bool = False, keep_assets:
             n = slide["page"]  # PDF page index; slides may skip pages (overlays)
             slide_id = f"b2s_s{n:03}"
             title_idx = title_element(slide)
-            # The title page uses the TITLE layout (centered title), frames with a title TITLE_ONLY.
-            layout, placeholder = ("TITLE", "CENTERED_TITLE") if slide.get("title_page") else ("TITLE_ONLY", "TITLE")
-            create = {"objectId": slide_id, "insertionIndex": position,
-                      "slideLayoutReference": {"predefinedLayout": layout if title_idx is not None else "BLANK"}}
-            if title_idx is not None:
-                create["placeholderIdMappings"] = [{"layoutPlaceholder": {"type": placeholder, "index": 0},
-                                                    "objectId": f"{slide_id}_t{title_idx}"}]
-                sub_idx = subtitle_element(slide, title_idx)
-                if sub_idx is not None:  # authors, institute, date: the title slide's subtitle
-                    create["placeholderIdMappings"].append({"layoutPlaceholder": {"type": "SUBTITLE", "index": 0},
-                                                            "objectId": f"{slide_id}_t{sub_idx}"})
-            reqs.append({"createSlide": create})
+            layout, placeholder = slide_layout(slide)
+            sub_idx = subtitle_element(slide, title_idx) if title_idx is not None else None
+            if uses_templates[n]:
+                tpl = templates[layout]
+                ids = {tpl["id"]: slide_id, **{oid: f"{slide_id}_k{j}" for j, oid in enumerate(tpl["shapes"])}}
+                if title_idx is not None:
+                    ids[tpl["placeholders"][placeholder]] = f"{slide_id}_t{title_idx}"
+                if sub_idx is not None and "SUBTITLE" in tpl["placeholders"]:
+                    ids[tpl["placeholders"]["SUBTITLE"]] = f"{slide_id}_t{sub_idx}"
+                reqs.append({"duplicateObject": {"objectId": tpl["id"], "objectIds": ids}})
+                reqs.append({"updateSlidesPosition": {"slideObjectIds": [slide_id], "insertionIndex": position}})
+            else:
+                create = {"objectId": slide_id, "insertionIndex": position,
+                          "slideLayoutReference": {"predefinedLayout": layout}}
+                if title_idx is not None:
+                    create["placeholderIdMappings"] = [{"layoutPlaceholder": {"type": placeholder, "index": 0},
+                                                        "objectId": f"{slide_id}_t{title_idx}"}]
+                    if sub_idx is not None:  # authors, institute, date: the title slide's subtitle
+                        create["placeholderIdMappings"].append({"layoutPlaceholder": {"type": "SUBTITLE", "index": 0},
+                                                                "objectId": f"{slide_id}_t{sub_idx}"})
+                reqs.append({"createSlide": create})
             if bg_key[n] != shared:
                 reqs.append({"updatePageProperties": {"objectId": slide_id, "fields": "pageBackgroundFill",
                                                       "pageProperties": {"pageBackgroundFill": fill(bg_key[n])}}})
-        reqs += [{"deleteObject": {"objectId": oid}} for oid in old]
         batch_with_image_retry(slides, pid, reqs)
         write_layout_texts(slides, pid, deck.get("layout_texts", []), scale, fonts)
-        style_layout_placeholders(slides, pid, deck, scale, fonts,
-                                  0.0 if abs(page_h / page_w - 9 / 16) < 0.003 else PPTX_TITLE_DY)
+        style_layout_placeholders(slides, pid, deck, scale, fonts, PPTX_TITLE_DY)
 
         # Placeholder sizes (needed to resize them) and any extra layout placeholders.
         created = execute(slides.presentations().get(
@@ -1082,7 +1245,7 @@ def emit(deck: dict, out: Path, title: str, new_deck: bool = False, keep_assets:
         page_elements = {s["objectId"]: s.get("pageElements", []) for s in created["slides"]}
         speaker_notes = {s["objectId"]: s.get("slideProperties", {}).get("notesPage", {})
                          .get("notesProperties", {}).get("speakerNotesObjectId") for s in created["slides"]}
-        placeholder_dy = 0.0 if abs(page_h / page_w - 9 / 16) < 0.003 else PPTX_TITLE_DY
+        placeholder_dy = PPTX_TITLE_DY
         # Internal link targets: PDF page -> slide. A skipped overlay step maps to the kept
         # (last) step of its frame, which comes right after it.
         kept = sorted(s["page"] for s in deck["slides"])
@@ -1144,16 +1307,25 @@ def emit(deck: dict, out: Path, title: str, new_deck: bool = False, keep_assets:
             subtitle_oid = f"{slide_id}_t{sub_idx}" if sub_idx is not None else None
             parts: list[tuple[dict | None, list[dict]]] = [(None, [
                 {"deleteObject": {"objectId": e["objectId"]}}
-                for e in page_elements.get(slide_id, []) if e["objectId"] not in (title_oid, subtitle_oid)])]
+                for e in page_elements.get(slide_id, [])
+                if e["objectId"] not in (title_oid, subtitle_oid) and not e["objectId"].startswith(f"{slide_id}_k")])]
             element_ids = []
             shifts = formula_shifts(slide, scale, fonts)
+            title_bars = [e for e in slide["elements"] if e["kind"] == "shape" and e.get("block") is not None
+                          and not e.get("title_bar")]
             for i, el in enumerate(slide["elements"]):  # shapes, then pictures, then text on top
                 if el["id"] in shifts:
                     el = {**el, "bbox": [el["bbox"][0] + shifts[el["id"]], el["bbox"][1],
                                          el["bbox"][2] + shifts[el["id"]], el["bbox"][3]]}
                 if el["kind"] == "shape":
                     oid = f"{slide_id}_s{i}"
-                    reqs = shape_requests(el, slide_id, oid, scale)
+                    key = template_key(el, scale)
+                    template = None
+                    if key:
+                        j = keys.index(key)
+                        w, h = next(iter(templates.values()))["sizes"][j]
+                        template = {"id": f"{slide_id}_k{j}", "w": w, "h": h}
+                    reqs = shape_requests(el, slide_id, oid, scale, template)
                 elif el["kind"] == "table":
                     oid = f"{slide_id}_tab{i}"
                     reqs = table_requests(el, slide_id, oid, scale, fonts)
@@ -1173,10 +1345,15 @@ def emit(deck: dict, out: Path, title: str, new_deck: bool = False, keep_assets:
                         size = next(e["size"] for e in page_elements[slide_id] if e["objectId"] == oid)
                         placeholder = {"base_w": size["width"]["magnitude"] / EMU_PER_PT,
                                        "base_h": size["height"]["magnitude"] / EMU_PER_PT, "dy": placeholder_dy}
-                    reqs = text_box_requests(el, slide_id, oid, scale, fonts, placeholder, page_slide)
+                    cx, cy = (el["bbox"][0] + el["bbox"][2]) / 2, (el["bbox"][1] + el["bbox"][3]) / 2
+                    bar = next((b["bbox"] for b in title_bars if b["bbox"][0] <= cx <= b["bbox"][2]
+                                and b["bbox"][1] <= cy <= b["bbox"][3]), None)
+                    reqs = text_box_requests(el, slide_id, oid, scale, fonts, placeholder, page_slide, bar,
+                                             text_right_limit(el, slide))
                 parts.append((el, reqs))
                 element_ids.append(oid)
-            extra = []
+            # The slide's copies of the template shapes have been duplicated from: remove them.
+            extra = [{"deleteObject": {"objectId": f"{slide_id}_k{j}"}} for j in range(len(keys)) if uses_templates[n]]
             # Inline formula pictures move with their text: group them (placeholders can't be grouped).
             by_id = {el["id"]: oid for el, oid in zip(slide["elements"], element_ids)}
             anchored: dict[str, list[str]] = {}
@@ -1212,6 +1389,9 @@ def emit(deck: dict, out: Path, title: str, new_deck: bool = False, keep_assets:
                   f"{kinds.count('shape')} shapes, {kinds.count('table')} tables")
         if pending:
             send(pending)
+        if templates:
+            execute(slides.presentations().batchUpdate(presentationId=pid, body={"requests": [
+                {"deleteObject": {"objectId": t["id"]}} for t in templates.values()]}))
     finally:
         creds = credentials()
         local = threading.local()

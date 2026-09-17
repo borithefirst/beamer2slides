@@ -335,6 +335,34 @@ def test_toc_split_into_boxes_keeps_its_numbers():
     assert all(p["bullet"] is None for p in paras), "Slides would number each one-item list 1."
 
 
+def test_blocks_pair_title_bar_and_body_with_shadow():
+    slide = deck("04_theme_blocks")["slides"][1]  # Madrid: standard, alert and example block
+    shapes = [e for e in slide["elements"] if e["kind"] == "shape"]
+    bodies = [e for e in shapes if e.get("title_bar")]
+    bars = [e for e in shapes if e.get("block") is not None and not e.get("title_bar")]
+    assert len(bodies) == len(bars) == 3
+    assert {b["block"] for b in bodies} == {b["block"] for b in bars} == {0, 1, 2}
+    for body in bodies:
+        assert body["shadow"]["size"] == 4.0 and len(body["shadow"]["pieces"]) == 5
+        assert len(body["strips"]) == 1, "the gradient strip between title bar and body"
+    assert not any(b.get("shadow") for b in bars)
+
+
+@pytest.mark.parametrize("theme,shadow", [("Berlin", False), ("Copenhagen", False), ("Warsaw", True)])
+def test_theme_blocks(theme, shadow):
+    d = load(THEMES / theme / "talk.pdf")
+    slide = next(s for s in d["slides"] if any("Key idea" in paragraph_text(p) for e in texts(s) for p in e["paragraphs"]))
+    bodies = [e for e in slide["elements"] if e["kind"] == "shape" and e.get("title_bar")]
+    assert len(bodies) == 1
+    assert bool(bodies[0].get("shadow")) == shadow
+
+
+def test_title_page_box_overlapping_parts_is_one_block():
+    slide = deck("04_theme_blocks")["slides"][0]
+    bodies = [e for e in slide["elements"] if e["kind"] == "shape" and e.get("title_bar")]
+    assert len(bodies) == 1 and bodies[0]["shadow"]["size"] == 4.0
+
+
 # Minimum native text share per theme for the realistic talk (tests/themes/content.tex).
 THEME_FLOORS = {
     "default": 0.95, "Madrid": 0.9, "Warsaw": 0.75, "Berkeley": 0.75, "Bergen": 0.95,

@@ -79,7 +79,8 @@ def measure(pdf: Path, out: Path, refresh: bool = False) -> dict:
     for slide, emitted in zip(deck["slides"], state["slides"]):
         n = slide["page"]
         thumb_path = fdir / f"slides-{n + 1:03}.png"
-        if refresh or not thumb_path.exists():
+        # Saved thumbnails are reused unless the deck was emitted again since.
+        if refresh or not thumb_path.exists() or thumb_path.stat().st_mtime < (out / "emit.json").stat().st_mtime:
             slides = slides or slides_service()
             save_thumbnail(slides, state["presentationId"], emitted["objectId"], thumb_path)
         thumb = rgb_array(pymupdf.Pixmap(str(thumb_path)))
