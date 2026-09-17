@@ -160,6 +160,15 @@ def test_custom_item_labels_stay_literal():
     assert paras == ["–\tDash item", "+\tPlus item", "✓\tCheck item"]
 
 
+def test_lettered_labels_and_title_breaks():
+    slide = deck("14_misc")["slides"][0]
+    paras = [paragraph_text(p) for e in texts(slide) for p in e["paragraphs"]]
+    assert paras[0] == "A rather long frame title that does not fit on a single line" + chr(11) + "of the slide"
+    assert "a)\tFirst lettered item" in paras and "b)\tSecond lettered item" in paras
+    icons = [e for e in slide["elements"] if e.get("role") == "icon"]
+    assert len(icons) == 2  # the balls under the letters
+
+
 def test_icon_font_glyphs_are_pictures():
     slide = deck("12_metropolis_talk")["slides"][4]
     assert kinds(slide).count("image") == 1  # \ccbysa
