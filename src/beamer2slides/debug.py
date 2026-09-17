@@ -105,7 +105,7 @@ def render_debug(pdf: Path, deck: dict, out_dir: Path, zoom: float = 3.0) -> lis
                 continue
             page.rect((x0 - 1, y0 - 1, x1 + 1, y1 + 1), color=NATIVE, width=0.7)
             for par in el["paragraphs"]:
-                for line in par["lines"]:
+                for line in ([] if el.get("rotation") else par["lines"]):  # (turned text: lines in its own frame)
                     page.line((line["x0"], line["baseline"]), (line["x1"], line["baseline"]), color=NATIVE, width=0.3)
                 if par["bullet"]:
                     page.rect(par["bullet"]["bbox"], color=NATIVE, width=0.3)

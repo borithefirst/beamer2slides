@@ -1,0 +1,147 @@
+\documentclass[aspectratio=169]{beamer}
+% Graphics drawn over or pointing at words (tikzmark arrows, braces, emphasis ellipses,
+% callouts, labels on pictures): the words become native text in other font widths, so each
+% frame checks that graphic and words still line up in Slides.
+\usetheme{Madrid}
+\usepackage{amsmath}
+\usepackage{tikz}
+\usetikzlibrary{tikzmark,decorations.pathreplacing,decorations.pathmorphing,shapes.callouts,shapes.geometric,calc,fit}
+\graphicspath{{img/}}
+\title{Overlays on text}
+\author{Test}
+\date{}
+
+\begin{document}
+
+\begin{frame}{Arrows between words}
+  A \tikzmarknode{src}{source} word on the first line of a paragraph that runs on for a while,
+  long enough to wrap onto a second line and then a third one, where the
+  \tikzmarknode{dst}{target} word waits for the arrow.
+  \begin{tikzpicture}[remember picture, overlay]
+    \draw[->, blue, thick] (src.south) to[out=-90, in=90] (dst.north);
+  \end{tikzpicture}
+
+  \vspace{1.5em}
+  The \tikzmarknode{rate}{learning rate} controls the step:
+  \[ \tikzmarknode{eq}{\theta_{t+1} = \theta_t - \eta \nabla L(\theta_t)} \]
+  \begin{tikzpicture}[remember picture, overlay]
+    \draw[->, red, thick] (rate.south) to[bend right=30] ([xshift=-4pt]eq.west);
+  \end{tikzpicture}
+\end{frame}
+
+\begin{frame}{Braces under words}
+  Gradient descent \tikzmarknode{b1}{updates every parameter} after each batch.
+  \begin{tikzpicture}[remember picture, overlay]
+    \draw[decorate, decoration={brace, mirror, amplitude=4pt}, thick, teal]
+      ([yshift=-3pt]b1.south west) -- ([yshift=-3pt]b1.south east)
+      node[midway, below=5pt, text=teal, font=\small] {one step};
+  \end{tikzpicture}
+
+  \vspace{2.5em}
+  \tikzmarknode{b2}{Momentum} keeps a running average of past gradients and \tikzmarknode{b3}{damps oscillations}.
+  \begin{tikzpicture}[remember picture, overlay]
+    \draw[decorate, decoration={brace, amplitude=4pt}, thick, orange]
+      ([yshift=2pt]b3.north west) -- ([yshift=2pt]b3.north east)
+      node[midway, above=5pt, text=orange, font=\small] {the point};
+  \end{tikzpicture}
+\end{frame}
+
+\begin{frame}{Emphasis ellipses}
+  Stochastic methods estimate the gradient from a small batch, which makes each step cheap
+  but \tikzmarknode{noisy}{noisy}; averaging over many steps recovers the true descent
+  direction in expectation.
+  \begin{tikzpicture}[remember picture, overlay]
+    \draw[red, thick] (noisy.center) ellipse [x radius=0.75cm, y radius=0.3cm];
+  \end{tikzpicture}
+
+  \vspace{1em}
+  Only the \tikzmarknode{last}{last layer} is fine-tuned, the rest stays frozen.
+  \begin{tikzpicture}[remember picture, overlay]
+    \node[draw=blue, thick, rounded corners=4pt, inner sep=2pt, fit=(last)] {};
+  \end{tikzpicture}
+\end{frame}
+
+\begin{frame}{Highlighted items}
+  \begin{itemize}
+    \item \tikzmark{h1}Warm up the learning rate
+    \item Decay it with a cosine schedule\tikzmark{h2}
+    \item Clip gradients above a threshold
+    \item Evaluate every epoch
+  \end{itemize}
+  \begin{tikzpicture}[remember picture, overlay]
+    \fill[yellow, opacity=0.35, rounded corners=3pt]
+      ([xshift=-16pt, yshift=10pt]pic cs:h1) rectangle ([xshift=6pt, yshift=-4pt]pic cs:h2);
+  \end{tikzpicture}
+\end{frame}
+
+\begin{frame}{Labels on a picture}
+  \begin{tikzpicture}[remember picture, overlay]
+    \node[anchor=north west, inner sep=0] (ph) at ([xshift=1.2cm, yshift=-2.2cm]current page.north west)
+      {\includegraphics[width=6cm]{photo.jpg}};
+    \node[fill=white, font=\small, inner sep=2pt] at ([xshift=1.5cm, yshift=-1cm]ph.north west) {Sky};
+    \node[fill=white, font=\small, inner sep=2pt] at ([xshift=-1.5cm, yshift=1cm]ph.south east) {Ground};
+    \draw[white, very thick, ->] ([xshift=3.2cm, yshift=-0.8cm]ph.north west) -- ++(0.8, -0.8);
+  \end{tikzpicture}
+  \begin{columns}
+    \column{0.45\textwidth}
+    \column{0.5\textwidth}
+    \begin{itemize}
+      \item The photo carries two labels
+      \item An arrow points at the horizon
+    \end{itemize}
+  \end{columns}
+\end{frame}
+
+\begin{frame}{Callouts}
+  \begin{itemize}
+    \item Batch normalisation
+    \item \tikzmarknode{drop}{Dropout} between dense layers
+    \item Weight decay
+  \end{itemize}
+  \begin{tikzpicture}[remember picture, overlay]
+    \node[rectangle callout, draw=red, fill=red!10, font=\small, align=left,
+          callout absolute pointer={(drop.east)}]
+      at ([xshift=4cm, yshift=0.6cm]drop.east) {Turn off\\at test time};
+  \end{tikzpicture}
+\end{frame}
+
+\begin{frame}{Marks on alerted words}
+  The loss is \tikzmarknode{al}{\alert{not convex}}, so the start point matters.
+  \begin{tikzpicture}[remember picture, overlay]
+    \draw[red, thick] (al.south west) -- (al.south east);
+  \end{tikzpicture}
+
+  \vspace{1em}
+  We \tikzmarknode{st}{\alert{always}} normalise the inputs first.
+  \begin{tikzpicture}[remember picture, overlay]
+    \draw[black, thick] (st.west) -- (st.east);
+  \end{tikzpicture}
+
+  \vspace{1em}
+  Use a \tikzmarknode{sq}{\alert{validation split}} to pick the schedule.
+  \begin{tikzpicture}[remember picture, overlay]
+    \draw[red, thick, decorate, decoration={snake, amplitude=0.6pt, segment length=4pt}]
+      ([yshift=-1pt]sq.south west) -- ([yshift=-1pt]sq.south east);
+  \end{tikzpicture}
+\end{frame}
+
+\begin{frame}{Rotated labels and inline nodes}
+  \begin{columns}[c]
+    \column{0.08\textwidth}
+    \rotatebox{90}{\small Accuracy (\%)}
+    \column{0.4\textwidth}
+    \begin{tabular}{lr}
+      \hline
+      Model & Score \\
+      \hline
+      Baseline & 71.2 \\
+      Ours & 78.9 \\
+      \hline
+    \end{tabular}
+    \column{0.5\textwidth}
+    The method is \tikz[baseline=(n.base)]\node[fill=green!60!black, text=white, rounded corners=2pt, inner sep=2pt](n){fast};
+    and \tikz[baseline=(m.base)]\node[fill=blue!70, text=white, inner sep=2pt](m){simple}; to implement.
+  \end{columns}
+\end{frame}
+
+\end{document}

@@ -335,13 +335,19 @@ def text_box_requests(el: dict, slide_id: str, object_id: str, scale: float, fon
                                                            "autofit": {"autofitType": "NONE"}}}},
         ]
     else:
+        transform = {"scaleX": 1, "scaleY": 1, "unit": "EMU",
+                     "translateX": round(x * EMU_PER_PT), "translateY": round(y * EMU_PER_PT)}
+        if el.get("rotation"):
+            # Laid out in the text's own frame (classify.rotated_texts): turn the box onto the page.
+            turn = 1 if el["rotation"] > 0 else -1
+            transform = {"scaleX": 0, "scaleY": 0, "shearX": -turn, "shearY": turn, "unit": "EMU",
+                         "translateX": round(-turn * y * EMU_PER_PT), "translateY": round(turn * x * EMU_PER_PT)}
         reqs = [{"createShape": {
             "objectId": object_id, "shapeType": "TEXT_BOX",
             "elementProperties": {
                 "pageObjectId": slide_id,
                 "size": {"width": emu(w), "height": emu(h)},
-                "transform": {"scaleX": 1, "scaleY": 1, "unit": "EMU",
-                              "translateX": round(x * EMU_PER_PT), "translateY": round(y * EMU_PER_PT)},
+                "transform": transform,
             },
         }}]
         if middle:
@@ -655,9 +661,10 @@ def shape_requests(el: dict, slide_id: str, object_id: str, scale: float, templa
     return reqs + [
         {"updateShapeProperties": {
             "objectId": object_id,
-            "shapeProperties": {"shapeBackgroundFill": {"solidFill": {"color": rgb(el["fill"])["opaqueColor"]}},
+            "shapeProperties": {"shapeBackgroundFill": {"solidFill": {"color": rgb(el["fill"])["opaqueColor"],
+                                                                      "alpha": el.get("opacity", 1.0)}},
                                 "outline": {"propertyState": "NOT_RENDERED"}},
-            "fields": "shapeBackgroundFill.solidFill.color,outline.propertyState",
+            "fields": "shapeBackgroundFill.solidFill.color,shapeBackgroundFill.solidFill.alpha,outline.propertyState",
         }},
     ]
 
@@ -1108,7 +1115,7 @@ def text_right_limit(el: dict, slide: dict) -> float | None:
     as far from the panel's right edge as the text is from its left edge; elsewhere the
     mirrored left margin of the page, stopping short of anything to the right on the same
     lines (the other column, a picture)."""
-    if el.get("role") not in ("body", "title", None) or not el["paragraphs"]:
+    if el.get("role") not in ("body", "title", None) or not el["paragraphs"] or el.get("rotation"):
         return None
     x0, y0, x1, y1 = el["bbox"]
     cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
@@ -1118,7 +1125,8 @@ def text_right_limit(el: dict, slide: dict) -> float | None:
         px0, _, px1, _ = min(panels, key=lambda b: (b[2] - b[0]) * (b[3] - b[1]))
         limit = px1 - max(x0 - px0, 2.0)
     else:
-        margin = min((e["bbox"][0] for e in slide["elements"] if e["kind"] == "text" and e.get("role") in ("body", None)),
+        margin = min((e["bbox"][0] for e in slide["elements"] if e["kind"] == "text" and e.get("role") in ("body", None)
+                      and not e.get("rotation")),
                      default=x0)
         limit = slide["size"][0] - margin
         size = el["paragraphs"][0]["size"]
@@ -1184,6 +1192,37 @@ def formula_shifts(slide: dict, scale: float, fonts: FontMapper) -> dict[str, fl
                             and abs(e["bbox"][0] + HOLE_PAD - run["hole_x0"]) < 0.6), None)
                 if pic and abs(shift) >= 0.2:
                     out[pic["id"]] = shift
+    return out
+
+
+OVERLAY_STRETCH = 0.1  # how much a graphic between words may widen or narrow with them
+
+
+def overlay_boxes(slide: dict, scale: float, fonts: FontMapper) -> dict[str, tuple[float, float]]:
+    """PDF x extents for graphics drawn over or at words (classify.overlay: arrows, braces,
+    callouts), following where Slides sets those words. Each mark (a word edge the graphic
+    meets) is predicted like a formula gap starting there (formula_shifts); the picture moves
+    with the marks, and stretches between marks far apart (a brace under a phrase)."""
+    out = {}
+    for el in slide["elements"]:
+        if not el.get("marks"):
+            continue
+        drifts = []
+        for m in el["marks"]:
+            run = {"text": " ", "font": m["font"], "family": m["family"], "size": m["size"], "bold": m["bold"],
+                   "italic": m["italic"], "hole": 1.0, "hole_x0": m["hole_x0"], "before": m["before"]}
+            probe = {"elements": [{"kind": "text", "id": "mark", "paragraphs": [{"align": "left", "runs": [run]}]},
+                                  {"kind": "image", "id": "gap", "anchor": "mark",
+                                   "bbox": [m["hole_x0"] - HOLE_PAD, 0, m["hole_x0"], 0]}]}
+            # (the gap's picture starts HOLE_PAD before the gap; shifts under 0.2 pt are not reported)
+            drifts.append((m["x"], formula_shifts(probe, scale, fonts).get("gap", HOLE_PAD) - HOLE_PAD + m.get("pads", 0)))
+        xs = [x for x, _ in drifts]
+        mx, md = sum(xs) / len(xs), sum(d for _, d in drifts) / len(drifts)
+        spread = sum((x - mx) ** 2 for x in xs)
+        slope = sum((x - mx) * (d - md) for x, d in drifts) / spread if max(xs) - min(xs) >= 10 else 0.0
+        slope = max(-OVERLAY_STRETCH, min(OVERLAY_STRETCH, slope))
+        x0, _, x1, _ = el["bbox"]
+        out[el["id"]] = (x0 + md + slope * (x0 - mx), x1 + md + slope * (x1 - mx))
     return out
 
 
@@ -1410,9 +1449,13 @@ def build_deck(slides, drive, deck: dict, out: Path, title: str, existing: str |
     keys = list(dict.fromkeys(k for s in deck["slides"] for e in s["elements"] for k in element_template_keys(e, scale)))
     uses_templates = {s["page"]: any(element_template_keys(e, scale) for e in s["elements"]) for s in deck["slides"]}
     shifts = {s["page"]: formula_shifts(s, scale, fonts) for s in deck["slides"]}
+    overlays = {s["page"]: overlay_boxes(s, scale, fonts) for s in deck["slides"]}
 
     def placed(el: dict, n: int) -> dict:
-        """Inline formula pictures sit over the gap Slides leaves for them (formula_shifts)."""
+        """Inline formula pictures sit over the gap Slides leaves for them (formula_shifts),
+        graphics drawn at words over those words (overlay_boxes)."""
+        if el["id"] in overlays[n]:
+            return {**el, "bbox": [overlays[n][el["id"]][0], el["bbox"][1], overlays[n][el["id"]][1], el["bbox"][3]]}
         dx = shifts[n].get(el["id"])
         return el if dx is None else {**el, "bbox": [el["bbox"][0] + dx, el["bbox"][1], el["bbox"][2] + dx, el["bbox"][3]]}
 

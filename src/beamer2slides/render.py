@@ -17,7 +17,7 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 
-from .pdf import OBJ_IMAGE, OBJ_PATH, OBJ_SHADING, Char, Document, Page, _addr
+from .pdf import OBJ_FORM, OBJ_IMAGE, OBJ_PATH, OBJ_SHADING, Char, Document, Page, _addr
 
 BACKGROUND_WIDTH_PX = 2000
 FIGURE_PX_PER_PT = 8.0     # ~ 4 px per Slides point on a 4:3 deck: sharp on high-DPI screens
@@ -139,6 +139,16 @@ def _band(bbox: list[float], baseline: float, size: float) -> Box:
     return x0 + 0.2, baseline - 0.45 * size, x1 - 0.2, baseline - 0.2 * size
 
 
+def _span_band(span: dict) -> Box:
+    """_band for a raw span, also for text turned by 90° (the x-height lies beside its baseline)."""
+    dx, dy = span["dir"]
+    if abs(dx) > 0.01 or abs(dy) < 0.99:
+        return _band(span["bbox"], span["origin"][1], span["size"])
+    _, y0, _, y1 = span["bbox"]
+    x, up, size = span["origin"][0], dy < 0, span["size"]
+    return (x - 0.45 * size, y0 + 0.2, x - 0.2 * size, y1 - 0.2) if up else (x + 0.2 * size, y0 + 0.2, x + 0.45 * size, y1 - 0.2)
+
+
 def crop_figure(eraser: Eraser, bbox: list[float], raw_images: list[dict], path: Path) -> list[int]:
     x0, y0, x1, y1 = bbox
     width, height = x1 - x0, y1 - y0
@@ -150,6 +160,32 @@ def crop_figure(eraser: Eraser, bbox: list[float], raw_images: list[dict], path:
             zoom = max(zoom, im["px"][0] / (ix1 - ix0))
     zoom = min(zoom, FIGURE_MAX_PX / max(width, height))
     img = eraser.render(zoom, tuple(bbox))
+    save_png(img, path)
+    return [img.shape[1], img.shape[0]]
+
+
+def crop_overlay(eraser: Eraser, fig: dict, labels: list[dict], path: Path) -> list[int]:
+    """A graphic drawn over text (classify.overlay): only its own drawings and labels, on a
+    transparent ground, so neither the page nor text left in the background under it comes
+    along. They leave the background right away: no other crop shows them either."""
+    page = eraser.page
+    objects = [d["object"] for d in page.drawings()]  # in the order extract numbered them
+    paths = {_addr(objects[int(i.rsplit("d", 1)[1])].handle) for i in fig["drawings"]}
+    bands = [_span_band(s) for s in labels]
+    hit = lambda ch: any(_intersects(ch.box, b) for b in bands)
+    texts = {key for key, chars in eraser.chars.items() if any(map(hit, chars))}
+    off = [po for key, po in eraser.objects.items() if key not in paths | texts and po.type != OBJ_FORM]
+    x0, y0, x1, y1 = fig["bbox"]
+    zoom = min(FIGURE_PX_PER_PT if max(x1 - x0, y1 - y0) > 60 else SMALL_FIGURE_PX_PER_PT,
+               FIGURE_MAX_PX / max(x1 - x0, y1 - y0))
+    page.set_active(off, False)
+    try:
+        img = page.render(zoom, tuple(fig["bbox"]), transparent=True)
+    finally:
+        page.set_active(off, True)
+    for key in paths:
+        eraser._remove(key)
+    eraser.remove_chars(hit)
     save_png(img, path)
     return [img.shape[1], img.shape[0]]
 
@@ -207,7 +243,9 @@ def verify_and_remove_shapes(original: Page, eraser: Eraser, slide: dict, raw_pa
         probe = _probe(el)
         # Rules drawn on top of this one (a progress bar on its track) hide its colour there.
         above = [e["bbox"] for e in slide["elements"][i + 1:] if e["kind"] == "shape" and e.get("role") == "rule"]
-        if probe[2] <= probe[0] or probe[3] <= probe[1] or _fill_fraction(original, probe, el["fill"], avoid + above) < 0.9:
+        # (a translucent highlight shows its colour mixed with the page: not a shadow's black box)
+        if probe[2] <= probe[0] or probe[3] <= probe[1] or \
+                (not el.get("opacity") and _fill_fraction(original, probe, el["fill"], avoid + above) < 0.9):
             continue
         keep.append(el)
     slide["elements"] = keep
@@ -245,18 +283,23 @@ def render_backgrounds(pdf: Path, raw: dict, deck: dict, out: Path) -> list[Path
         texts = [e for e in slide["elements"] if e["kind"] == "text"]
         figures = [e for e in slide["elements"] if e["kind"] == "image"]
 
-        bands = [_band(s["bbox"], s["origin"][1], s["size"])
+        bands = [_span_band(s)
                  for s in (spans[sid] for sid in [sid for el in texts for sid in el["spans"]] + slide.get("on_layout", []))]
         if bands:
             eraser.remove_chars(lambda ch: any(_intersects(ch.box, b) for b in bands))
         for x0, y0, x1, y1 in (st for el in texts for st in el.get("strokes", [])):
             eraser.remove_paths_inside((x0 - 1.5, y0 - 1.5, x1 + 1.5, y1 + 1.5))  # bars of fractions converted to text
 
-        for fig in figures:
+        # Graphics drawn over text first: the other crops must not show them.
+        for fig in sorted(figures, key=lambda f: not f.get("overlay")):
             path = out / "figures" / f"{fig['id']}.png"
-            fig["px"] = crop_figure(eraser, fig["bbox"], raw_pages[slide["page"]]["images"], path)
+            if fig.get("overlay"):
+                fig["px"] = crop_overlay(eraser, fig, [spans[sid] for sid in fig["spans"]], path)
+            else:
+                fig["px"] = crop_figure(eraser, fig["bbox"], raw_pages[slide["page"]]["images"], path)
             fig["file"] = str(path.relative_to(out)).replace("\\", "/")
         # Native tables leave the background the same way pictures do (text and rules), without a crop.
+        figures = [f for f in figures if not f.get("overlay")]
         figures += [e for e in slide["elements"] if e["kind"] in ("table", "diagram")]
         if figures:
             boxes = [tuple(fig["bbox"]) for fig in figures]
@@ -352,7 +395,7 @@ def paint_out_leftovers(img: np.ndarray, slide: dict, px_per_pt: float) -> None:
                 area = [min(area[0], r[0]), min(area[1], r[1]), max(area[2], r[2]), max(area[3], r[3])]
             jobs.append((area, rects, el))
     for el in slide["elements"]:
-        if el["kind"] == "image":
+        if el["kind"] == "image" and not el.get("overlay"):  # (an overlay's box holds the page under it)
             jobs.append((el["bbox"], [el["bbox"]], el))
     # Other elements and everything about to be painted don't count as the page around an area.
     ignore = np.zeros(img.shape[:2], bool)

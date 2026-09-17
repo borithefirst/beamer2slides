@@ -71,6 +71,15 @@ a per-slide background picture.
   `\overbrace` glyph line and its label join the prose line, so the formula hole takes them.
   Small graphics on a native panel (the QED box) become pictures (`specks_on_panels`), or the
   panel would hide them.
+- Graphics drawn over or at native words (`classify.overlay`: tikzmark arrows, braces, callouts,
+  emphasis ellipses) become transparent pictures of only their own drawings and labels
+  (`overlay`, `render.crop_overlay`), anchored to the text. Their `marks` (word edges they meet,
+  with the words before, holes and em-space gaps closed up) are predicted like formula gaps;
+  `emit.overlay_boxes` moves the picture by the mean drift and stretches it by the slope (±10%).
+  A translucent fill over text (`opacity` < 1) becomes a `highlight` shape with fill alpha,
+  anchored to that text. Text turned ±90° (`rotated_texts`) becomes a text box laid out in its
+  own frame and turned by the transform. Path bounds use the curve's extremes, not its control
+  points (`pdf._curve_extremes`). Test deck: `22_overlays_on_text`.
 - Accents PDFium reports as separate chars (`ACCENTS`: ¯ ˆ ˜ …) become combining marks on
   their letter (X̄), also when the accent landed in the previous span.
 - `formula_shifts` predicts the picture offset from Slides' symbol advances
