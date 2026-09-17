@@ -789,6 +789,19 @@ def formula_shifts(slide: dict, scale: float, fonts: FontMapper) -> dict[str, fl
     return out
 
 
+def subtitle_element(slide: dict, title_idx: int) -> int | None:
+    """On the title page, the biggest plain text box below the title (authors, institute,
+    date) goes into the TITLE layout's subtitle placeholder."""
+    if not slide.get("title_page"):
+        return None
+    title_bottom = slide["elements"][title_idx]["bbox"][3]
+    below = [(sum(len(r["text"]) for p in e["paragraphs"] for r in p["runs"]), i)
+             for i, e in enumerate(slide["elements"])
+             if e["kind"] == "text" and e["role"] == "body" and e["bbox"][1] > title_bottom
+             and not any(p["bullet"] for p in e["paragraphs"])]
+    return max(below)[1] if below else None
+
+
 def title_element(slide: dict) -> int | None:
     """Index of the element that becomes the slide's title placeholder."""
     for i, el in enumerate(slide["elements"]):
@@ -1048,6 +1061,10 @@ def emit(deck: dict, out: Path, title: str, new_deck: bool = False, keep_assets:
             if title_idx is not None:
                 create["placeholderIdMappings"] = [{"layoutPlaceholder": {"type": placeholder, "index": 0},
                                                     "objectId": f"{slide_id}_t{title_idx}"}]
+                sub_idx = subtitle_element(slide, title_idx)
+                if sub_idx is not None:  # authors, institute, date: the title slide's subtitle
+                    create["placeholderIdMappings"].append({"layoutPlaceholder": {"type": "SUBTITLE", "index": 0},
+                                                            "objectId": f"{slide_id}_t{sub_idx}"})
             reqs.append({"createSlide": create})
             if bg_key[n] != shared:
                 reqs.append({"updatePageProperties": {"objectId": slide_id, "fields": "pageBackgroundFill",
@@ -1123,9 +1140,11 @@ def emit(deck: dict, out: Path, title: str, new_deck: bool = False, keep_assets:
             slide_id = f"b2s_s{n:03}"
             title_idx = title_element(slide)
             title_oid = f"{slide_id}_t{title_idx}" if title_idx is not None else None
+            sub_idx = subtitle_element(slide, title_idx) if title_idx is not None else None
+            subtitle_oid = f"{slide_id}_t{sub_idx}" if sub_idx is not None else None
             parts: list[tuple[dict | None, list[dict]]] = [(None, [
                 {"deleteObject": {"objectId": e["objectId"]}}
-                for e in page_elements.get(slide_id, []) if e["objectId"] != title_oid])]
+                for e in page_elements.get(slide_id, []) if e["objectId"] not in (title_oid, subtitle_oid)])]
             element_ids = []
             shifts = formula_shifts(slide, scale, fonts)
             for i, el in enumerate(slide["elements"]):  # shapes, then pictures, then text on top
@@ -1150,7 +1169,7 @@ def emit(deck: dict, out: Path, title: str, new_deck: bool = False, keep_assets:
                 else:
                     oid = f"{slide_id}_t{i}"
                     placeholder = None
-                    if oid == title_oid:
+                    if oid in (title_oid, subtitle_oid):
                         size = next(e["size"] for e in page_elements[slide_id] if e["objectId"] == oid)
                         placeholder = {"base_w": size["width"]["magnitude"] / EMU_PER_PT,
                                        "base_h": size["height"]["magnitude"] / EMU_PER_PT, "dy": placeholder_dy}
@@ -1162,7 +1181,7 @@ def emit(deck: dict, out: Path, title: str, new_deck: bool = False, keep_assets:
             by_id = {el["id"]: oid for el, oid in zip(slide["elements"], element_ids)}
             anchored: dict[str, list[str]] = {}
             for el, oid in zip(slide["elements"], element_ids):
-                if el.get("anchor") in by_id and by_id[el["anchor"]] != title_oid:
+                if el.get("anchor") in by_id and by_id[el["anchor"]] not in (title_oid, subtitle_oid):
                     anchored.setdefault(by_id[el["anchor"]], []).append(oid)
             grouped = set()
             for text_oid, pictures in anchored.items():
@@ -1177,7 +1196,7 @@ def emit(deck: dict, out: Path, title: str, new_deck: bool = False, keep_assets:
                 extra.append({"insertText": {"objectId": speaker_notes[slide_id], "text": slide["notes"]}})
             if title_oid and len(slide["elements"]) > 1:
                 # The placeholder was created with the slide, below everything added since.
-                extra.append({"updatePageElementsZOrder": {"pageElementObjectIds": [title_oid],
+                extra.append({"updatePageElementsZOrder": {"pageElementObjectIds": [o for o in (title_oid, subtitle_oid) if o],
                                                            "operation": "BRING_TO_FRONT"}})
             parts += [(None, [r]) for r in extra]
             size = sum(len(rs) for _, rs in parts)
