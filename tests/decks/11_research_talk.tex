@@ -85,6 +85,20 @@ def convert(pdf):
   \end{itemize}
 \end{frame}
 
+\begin{frame}{Flowchart}
+  \centering
+  \begin{tikzpicture}[node distance=1.2cm and 2cm, every node/.style={font=\small}]
+    \node[draw, rounded corners, fill=blue!10] (start) {Start};
+    \node[draw, diamond, aspect=2, fill=yellow!20, below=of start] (dec) {Valid?};
+    \node[draw, fill=green!15, right=of dec] (ok) {Convert};
+    \node[draw, fill=red!15, below=of dec] (no) {Reject};
+    \draw[->] (start) -- (dec);
+    \draw[->] (dec) -- node[above] {yes} (ok);
+    \draw[->] (dec) -- node[right] {no} (no);
+    \draw[->] (ok) |- (start);
+  \end{tikzpicture}
+\end{frame}
+
 \begin{frame}{Footnotes and colored words}
   \begin{itemize}
     \item Some \textcolor{red}{red} and \textcolor{blue}{blue} words

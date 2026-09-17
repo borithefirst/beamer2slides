@@ -295,6 +295,23 @@ def span_runs(spans: list[Span]) -> list[dict]:
     return runs
 
 
+def polygon_shape(points: list, r: "Rect") -> str | None:
+    """Slides shape for a closed polygon path: a diamond touching the middle of each side of its
+    bounding box, or a triangle with its apex centred on the top or bottom side."""
+    tol = 0.08 * max(r.w, r.h)
+    def near(p, x, y):
+        return abs(p[0] - x) <= tol and abs(p[1] - y) <= tol
+    corners = {(round(p[0], 1), round(p[1], 1)) for p in points}
+    mids = [(r.cx, r.y0), (r.x1, r.cy), (r.cx, r.y1), (r.x0, r.cy)]
+    if len(corners) == 4 and all(any(near(p, *m) for p in corners) for m in mids):
+        return "DIAMOND"
+    if len(corners) == 3:
+        if any(near(p, r.cx, r.y0) for p in corners) and any(near(p, r.x0, r.y1) for p in corners) \
+                and any(near(p, r.x1, r.y1) for p in corners):
+            return "TRIANGLE"
+    return None
+
+
 def label_of(spans: list[Span]) -> dict | None:
     """Where and how a list number is drawn, to write it as literal text if Slides can't number it."""
     if not spans:
@@ -1239,14 +1256,18 @@ class PageClassifier:
             ops = "".join(op for op, _ in path)
             shape = {"re": "RECTANGLE", "lclclclc": "ROUND_RECTANGLE", "clclclcl": "ROUND_RECTANGLE",
                      "cccc": "ELLIPSE"}.get(ops)
+            points = [p for _, pts in path for p in pts]
+            if shape is None and max(r.w, r.h) > 6 and ops in ("llll", "lll") and "f" in d["type"] + "f":
+                shape = polygon_shape(points, r)  # decision diamonds, triangles
             if shape and r.w > 3 and r.h > 3:
                 nodes.append({"rect": r, "shape": shape, "spans": [],
                               "fill": d["fill"] if "f" in d["type"] else None,
                               "stroke": d["stroke"] if "s" in d["type"] else None, "width": d["width"]})
-            elif d["type"] == "s" and ops == "l":
-                (x1, y1), (x2, y2) = path[0][1]
-                lines.append({"from": [x1, y1], "to": [x2, y2], "stroke": d["stroke"] or "#000000",
-                              "width": d["width"] or 0.4, "arrow_from": None, "arrow_to": None})
+            elif d["type"] == "s" and set(ops) == {"l"} and max(r.w, r.h) > 6:
+                # Straight lines and orthogonal connectors (|- and -|): one Slides line per segment.
+                for _, ((x1, y1), (x2, y2)) in path:
+                    lines.append({"from": [x1, y1], "to": [x2, y2], "stroke": d["stroke"] or "#000000",
+                                  "width": d["width"] or 0.4, "arrow_from": None, "arrow_to": None})
             elif max(r.w, r.h) <= 6 and set(ops) <= {"c", "l"}:
                 # Arrow heads are small separate paths: stroked (->), filled triangles (latex)
                 # or filled concave quadrilaterals (stealth).

@@ -119,7 +119,7 @@ def test_simple_tikz_diagram_becomes_native():
 
 
 def test_underline_and_colorbox_become_text_styles():
-    slide = deck("11_research_talk")["slides"][5]
+    slide = deck("11_research_talk")["slides"][6]
     runs = [r for e in texts(slide) for p in e["paragraphs"] for r in p["runs"]]
     assert [r["text"] for r in runs if r["underline"]] == ["underlined"]
     assert [(r["text"], r["highlight"]) for r in runs if r["highlight"]] == [("Highlighted", "#fff200")]
@@ -135,6 +135,14 @@ def test_diagram_with_circles_edge_labels_and_stealth_tips():
     assert [l["arrow_to"] for l in d["lines"]] == ["STEALTH_ARROW"] * 2
     # the lines reach the circle/rectangle outlines, where the tips end
     assert [round(l["to"][0]) for l in d["lines"]] == [164, 247]
+
+
+def test_flowchart_with_diamond_and_orthogonal_edge():
+    slide = deck("11_research_talk")["slides"][5]
+    d = [e for e in slide["elements"] if e["kind"] == "diagram"][0]
+    assert [n["shape"] for n in d["nodes"] if n["shape"]] == ["ROUND_RECTANGLE", "DIAMOND", "RECTANGLE", "RECTANGLE"]
+    assert len(d["lines"]) == 5  # three edges plus the two segments of the |- connector
+    assert sum(1 for l in d["lines"] if l["arrow_to"]) == 4
 
 
 def test_algorithm_line_numbers_use_tabs():
