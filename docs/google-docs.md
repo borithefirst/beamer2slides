@@ -153,6 +153,27 @@ The Docs API is now enabled on project `beamer2slides`, and named ranges hold up
 | Stale `requiredRevisionId` | rejected with 400 — the `sync.py` plan / send / re-plan pattern ports directly |
 | Paragraph break inside an anchor | did **not** split it (one range, grown by one). Google documents splitting as possible, so still treat `NamedRange.ranges` as the list it is — but it is rarer than the docs imply |
 
+### Under a human editor
+
+The table above went through the API. The Docs editor is a different code path, so the
+same anchors were driven by hand in Chrome (`tools/probe_docs_ui.py create`, edit, then
+`read`). Every result matched the API path, and two went further:
+
+| Edit made in the editor | Anchor |
+|---|---|
+| typing inside an anchored paragraph | grows to contain it, as through the API |
+| pasting a copy of an anchored paragraph | the copy is **anonymous** — the anchor stays on the original. This is Google's documented "copied content does not carry the range", confirmed in the real editor |
+| deleting all the anchored text | disappears, as through the API |
+| **Ctrl+Z after that delete** | **comes back, at its exact original span.** Undo restores named ranges, not just text — an accidental delete cannot silently orphan an anchor |
+| a *pending* suggested deletion (Suggesting mode) | survives, and `documents.get` **at its default view mode does not show the suggestion at all** — the document reads as if every pending suggestion had been rejected |
+
+That last row matters for the merge: a reviewer's un-accepted suggestions cannot be
+mistaken for committed edits. To see them deliberately, read with
+`suggestionsViewMode=SUGGESTIONS_INLINE` (the ids sit on the `textRun`, not on the
+`ParagraphElement` around it); `PREVIEW_SUGGESTIONS_ACCEPTED` shows the document as it
+would be if accepted, and in that view the anchor on a suggested-for-deletion paragraph
+is already gone.
+
 **The one bad result, and it shapes the architecture:** a `files.update` rebuild in
 place **destroys every named range** (23 before, 0 after). So the trick the Slides
 pipeline uses for `convert` — re-upload and let Drive re-convert, keeping the URL — is
@@ -172,11 +193,9 @@ as it already does on the Slides side:
    export is the durable, byte-exact picture route**.
 2. **Lists in the read-back.** `listId` is opaque and output-only; whether Docs forks or
    reuses one when a user splits a list in the UI is undocumented.
-3. **Anchors under a *human* editor.** Everything above was measured through the API.
-   Cut-and-paste, "paste without formatting", suggestion mode and undo in the Docs UI
-   are a different code path, and Google's one documented warning — that content copied
-   *within* a document does not carry its range — lives there. Worth one manual pass
-   over a real doc before the identity scheme is finalised.
+3. **Anchors under a human editor** — retired, see "Under a human editor" above. What
+   is still unmeasured there: dragging a selection to a new place, "paste without
+   formatting", and a second person editing concurrently.
 
 ## Alternatives considered
 
