@@ -557,6 +557,44 @@ def test_pptx_pictures_sit_at_their_boxes(tmp_path):
     assert pic._element.nvPicPr.cNvPr.get("descr") == "x^2"
 
 
+def test_theme_decoration_keeps_what_backgrounds_share():
+    """A header bar on every frame (one frame with a highlighted word in it, one without the bar):
+    the decoration is the bar without the pixels where frames differ; the bare frame doesn't show it."""
+    from beamer2slides.render import page_ground, theme_decoration
+    white = np.array([255, 255, 255])
+    frame = np.full((60, 80, 3), 255, np.uint8)
+    frame[:10] = (51, 51, 179)
+    highlight = frame.copy()
+    highlight[4:6, 10:20] = (255, 200, 0)
+    bare = np.full((60, 80, 3), 255, np.uint8)
+    assert (page_ground(frame) == white).all()
+    picture, inside, exact = theme_decoration([frame, highlight, bare], white)
+    assert inside == [True, True, False] and not exact
+    assert (picture[:10, :, 3] == 255).sum() == 800 - 20 and (picture[10:, :, 3] == 0).all()
+    assert (picture[4:6, 10:20, 3] == 0).all() and tuple(picture[0, 0]) == (51, 51, 179, 255)
+    assert theme_decoration([frame, frame], white)[2], "a frame that is ground plus decoration can inherit"
+    assert theme_decoration([bare, bare], white)[0] is None
+
+
+def test_pptx_layouts_carry_the_theme(tmp_path):
+    """Decorations at the bottom of the layouts; a _V1 page layout is a copy with its own decoration."""
+    from PIL import Image
+    from pptx import Presentation
+    for name in ("main", "title", "variant"):
+        Image.new("RGBA", (8, 6), (0, 0, 255, 255)).save(tmp_path / f"{name}.png")
+    pages = [{"layout": "TITLE_ONLY", "fill": None, "templates": False, "pictures": []},
+             {"layout": "TITLE_ONLY_V1", "fill": None, "templates": False, "pictures": []},
+             {"layout": "BLANK_V1", "fill": None, "templates": False, "pictures": []}]
+    decorations = {"*": tmp_path / "main.png", "TITLE": tmp_path / "title.png", "*_V1": tmp_path / "variant.png"}
+    prs = Presentation(emit.build_pptx(720.0, 405.0, [], pages, {"color": "#ffffff"}, decorations))
+    pictures = {l.name: [s for s in l.shapes if s.shape_type == 13] for l in prs.slide_layouts}
+    assert len(prs.slide_layouts) == 13 and all(len(p) == 1 for p in pictures.values())
+    assert [s.slide_layout.name for s in prs.slides] == ["Title Only", "Title Only (theme 2)", "Blank (theme 2)"]
+    layout = prs.slides[1].slide_layout
+    assert layout.shapes[0].shape_type == 13 and any("Title" in p.name for p in layout.placeholders), "decoration first, title placeholder kept"
+    assert (layout.shapes[0].width, layout.shapes[0].height) == (prs.slide_width, prs.slide_height)
+
+
 # ---------------------------------------------------------------- numeric helpers
 
 SCALE = SLIDE_W / 453.54

@@ -99,15 +99,17 @@ class Eraser:
         return [d["rect"] for d in self.page.drawings()
                 if d["type"] in ("f", "fs") and _addr(d["object"].handle) not in self.removed]
 
-    def render(self, zoom: float, clip: Box | None = None) -> np.ndarray:
+    def render(self, zoom: float, clip: Box | None = None, transparent: bool = False, hide: list = ()) -> np.ndarray:
+        """The page without what was removed (and without the objects in `hide`)."""
         page = self.page
         handles = lambda keys: [self.objects[k] for k in keys]
-        page.set_active(handles(self.removed), False)
+        off = handles(self.removed) + list(hide)
+        page.set_active(off, False)
         try:
-            img = page.render(zoom, clip)
+            img = page.render(zoom, clip, transparent)
             if self.partial:
                 page.set_active(handles(self.partial), False)
-                without = page.render(zoom, clip)
+                without = page.render(zoom, clip, transparent)
                 page.set_active(handles(self.partial), True)
                 x0, y0 = clip[:2] if clip else (0.0, 0.0)
                 ox, oy = np.floor(x0 * zoom + 0.001), np.floor(y0 * zoom + 0.001)
@@ -129,7 +131,7 @@ class Eraser:
                 img[mask] = without[mask]
             return img
         finally:
-            page.set_active(handles(self.removed), True)
+            page.set_active(off, True)
 
 
 def _band(bbox: list[float], baseline: float, size: float) -> Box:
@@ -149,7 +151,8 @@ def _span_band(span: dict) -> Box:
     return (x - 0.45 * size, y0 + 0.2, x - 0.2 * size, y1 - 0.2) if up else (x + 0.2 * size, y0 + 0.2, x + 0.45 * size, y1 - 0.2)
 
 
-def crop_figure(eraser: Eraser, bbox: list[float], raw_images: list[dict], path: Path) -> list[int]:
+def crop_figure(eraser: Eraser, bbox: list[float], raw_images: list[dict], path: Path,
+                transparent: bool = False) -> list[int]:
     x0, y0, x1, y1 = bbox
     width, height = x1 - x0, y1 - y0
     zoom = FIGURE_PX_PER_PT if max(width, height) > 60 else SMALL_FIGURE_PX_PER_PT
@@ -160,8 +163,70 @@ def crop_figure(eraser: Eraser, bbox: list[float], raw_images: list[dict], path:
             zoom = max(zoom, im["px"][0] / (ix1 - ix0))
     zoom = min(zoom, FIGURE_MAX_PX / max(width, height))
     img = eraser.render(zoom, tuple(bbox))
+    if transparent:
+        img = clear_ground(eraser, bbox, zoom, img)
     save_png(img, path)
     return [img.shape[1], img.shape[0]]
+
+
+GROUND_FLAT = 6        # levels: the page under a picture counts as one colour
+GROUND_MATCH = 16      # levels: the transparent crop laid on that colour shows the opaque crop
+
+
+def clear_ground(eraser: Eraser, bbox: list[float], zoom: float, opaque: np.ndarray) -> np.ndarray:
+    """A picture anchored to text (inline formula, icon, number ball) on a transparent ground, so it
+    shows the slide under it when the background colour changes or it is moved onto a shape.
+    What stays in the background (paths reaching out of the box as render_backgrounds leaves them,
+    images and shadings not inside it) is left out. Kept only where the page under the picture is
+    flat and the result laid on that colour shows the opaque crop; else the opaque crop."""
+    page = eraser.page
+    ground = [po for key, po in eraser.objects.items() if key not in eraser.removed and (
+        (po.type == OBJ_PATH and not _inside(page.bounds(po), _grow(bbox, 5))) or
+        (po.type in (OBJ_IMAGE, OBJ_SHADING) and not _inside(page.bounds(po), _grow(bbox, 0.5))))]
+    rgba = eraser.render(zoom, tuple(bbox), transparent=True, hide=ground)
+    if rgba.shape[:2] != opaque.shape[:2]:
+        return opaque
+    clear = rgba[..., 3] == 0
+    if clear.sum() < 20:
+        return opaque
+    page_px = opaque[clear].astype(int)
+    colour = np.median(page_px, axis=0)
+    if (np.abs(page_px - colour).max(axis=1) > GROUND_FLAT).mean() > 0.002:
+        return opaque
+    rgba = unblend_rim(rgba, clear, colour, max(1, round(GROUND_RIM * zoom)))
+    alpha = rgba[..., 3:].astype(float) / 255
+    laid = rgba[..., :3] * alpha + colour * (1 - alpha)
+    if (np.abs(laid - opaque).max(axis=2) > GROUND_MATCH).mean() > 0.002:
+        return opaque
+    return rgba
+
+
+GROUND_RIM = 0.5  # pt
+
+
+def unblend_rim(rgba: np.ndarray, clear: np.ndarray, ground: np.ndarray, width: int) -> np.ndarray:
+    """Opaque pixels near the transparent ground that fade into the page colour (a ball's shading
+    ends in it, and clips have no soft edge on a transparent bitmap) become that much transparent
+    (colour to alpha), so no light fringe shows on another background."""
+    near = clear.copy()
+    for _ in range(width):
+        grown = near.copy()
+        grown[1:] |= near[:-1]
+        grown[:-1] |= near[1:]
+        grown[:, 1:] |= near[:, :-1]
+        grown[:, :-1] |= near[:, 1:]
+        near = grown
+    rim = near & (rgba[..., 3] == 255)
+    if not rim.any():
+        return rgba
+    px = rgba[rim][:, :3].astype(float)
+    up = np.where(px > ground, (px - ground) / np.maximum(255 - ground, 1), 0)
+    down = np.where(px < ground, (ground - px) / np.maximum(ground, 1), 0)
+    a = np.clip(np.maximum(up, down).max(axis=1), 0, 1)[:, None]
+    ink = np.where(a > 0, ground + (px - ground) / np.maximum(a, 1e-6), 0)
+    out = rgba.copy()
+    out[rim] = np.concatenate([np.clip(np.rint(ink), 0, 255), np.rint(a * 255)], axis=1).astype(np.uint8)
+    return out
 
 
 def crop_overlay(eraser: Eraser, fig: dict, labels: list[dict], path: Path) -> list[int]:
@@ -301,7 +366,8 @@ def render_backgrounds(pdf: Path, raw: dict, deck: dict, out: Path) -> list[Path
             if fig.get("overlay"):
                 fig["px"] = crop_overlay(eraser, fig, [spans[sid] for sid in fig["spans"]], path)
             else:
-                fig["px"] = crop_figure(eraser, fig["bbox"], raw_pages[slide["page"]]["images"], path)
+                fig["px"] = crop_figure(eraser, fig["bbox"], raw_pages[slide["page"]]["images"], path,
+                                        transparent=bool(fig.get("anchor")))
             fig["file"] = str(path.relative_to(out)).replace("\\", "/")
         # Native tables leave the background the same way pictures do (text and rules), without a crop.
         figures = [f for f in figures if not f.get("overlay")]
@@ -343,6 +409,45 @@ def render_backgrounds(pdf: Path, raw: dict, deck: dict, out: Path) -> list[Path
     doc.close()
     original.close()
     return paths
+
+
+DECORATION_MIN = 0.002    # share of the page: less is no theme decoration
+DECORATION_AGREE = 0.9    # share of the decoration a background must show to be decorated alike
+DECORATION_TOLERANCE = 2  # levels
+
+
+def page_ground(img: np.ndarray) -> np.ndarray:
+    """The most common colour of a background (the page ground)."""
+    px = img[::4, ::4].reshape(-1, 3).astype(np.int64)
+    packed = (px[:, 0] << 16) | (px[:, 1] << 8) | px[:, 2]
+    values, counts = np.unique(packed, return_counts=True)
+    v = values[counts.argmax()]
+    return np.array([(v >> 16) & 255, (v >> 8) & 255, v & 255])
+
+
+def theme_decoration(images, ground: np.ndarray) -> tuple[np.ndarray | None, list[bool], bool]:
+    """The theme decoration a layout can carry for backgrounds that share it (`images`: distinct
+    backgrounds, the most used first): an RGBA picture of the first one, opaque where it differs
+    from the ground and every background taking it shows the same pixels, transparent elsewhere.
+    Drawn over those backgrounds it changes nothing, and over another ground colour it keeps the
+    bars and lines. Returns (picture or None, per image whether it shows the decoration, whether
+    the first image is exactly the ground plus the picture)."""
+    images = iter(images)
+    first = next(images)
+    ref = first.astype(np.int16)
+    mask = np.abs(ref - ground).max(axis=2) > DECORATION_TOLERANCE
+    total = int(mask.sum())
+    if total < DECORATION_MIN * mask.size:
+        return None, [False] * (1 + sum(1 for _ in images)), False
+    inside = [True]
+    for img in images:
+        same = np.abs(img.astype(np.int16) - ref).max(axis=2) <= DECORATION_TOLERANCE if img.shape == ref.shape else None
+        ok = same is not None and (same & mask).sum() >= DECORATION_AGREE * mask.sum()
+        inside.append(bool(ok))
+        if ok:
+            mask &= same
+    # (binary alpha: over a background showing the same pixels, any soft edge would change them)
+    return np.dstack([first, np.where(mask, 255, 0).astype(np.uint8)]), inside, int(mask.sum()) == total
 
 
 def uniform_color(img: np.ndarray, tolerance: int = 3) -> str | None:

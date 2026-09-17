@@ -38,14 +38,18 @@ slide background.
   every step).
 
 ## Setup
-1. Python 3.12: `python -m venv .venv` then `.venv\Scripts\pip install -e . pytest`
+1. Python 3.12: `pip install beamer2slides`, or from a checkout `python -m venv .venv` then
+   `.venv\Scripts\pip install -e . pytest`. No TeX needed: the input is the compiled PDF.
 2. A Google Cloud project with the Slides and Drive APIs enabled and an OAuth client of type
-   *Desktop app*. Save its JSON as `client_secret.json` in this folder (git-ignored).
-   The first run opens a browser for consent and caches `token.json` (git-ignored).
+   *Desktop app*. Save its JSON as `client_secret.json` in this folder (git-ignored) or, for an
+   installed beamer2slides, in `%APPDATA%\beamer2slides` / `~/.config/beamer2slides`.
+   The first run opens a browser for consent and caches `token.json` beside it.
+
+See `docs/install.md` for the credential search order and the scopes asked for.
 
 ## Usage
 ```
-python -m beamer2slides convert talk.pdf           # builds the deck, prints its URL
+beamer2slides convert talk.pdf                     # or python -m beamer2slides convert talk.pdf
 python -m beamer2slides classify talk.pdf          # local only: see decisions in out/talk/debug/
 python -m beamer2slides fidelity talk.pdf          # compare Google's rendering with the PDF
 ```
