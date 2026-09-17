@@ -43,7 +43,10 @@ VARIANTS = {"v1": [], **{f: [f] for f in FLAGS}, "mixed": MIXED,
             "same-element": ["reword", "blockedit", "figure", "formula", "tablecell"],
             "conflict": ["reword", "blockedit"],
             "deletions": ["deleteframe", "tablecell", "removebullet"],
-            "slides": ["addframe", "reorder", "untitled"]}
+            "slides": ["addframe", "reorder", "untitled"],
+            "converged": ["reword", "tablecell"],
+            "many-edits": ["retitle", "reword", "addbullet", "removebullet", "notes"],
+            "groups": ["figure", "blockedit", "numbers"]}
 
 MOTIVATION = {"contains": "Later the source changes again"}  # (no scenario edits these words)
 CHECKS = {

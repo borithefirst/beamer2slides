@@ -11,6 +11,7 @@ from . import identity, snapshot
 
 GEOMETRY_TOLERANCE = 0.05  # pt
 SCALE_TOLERANCE = 1e-3
+CONVERGED_PLACE = 2.0  # pt: a deck move the source now reproduces this closely counts as converged
 EDIT_FIELDS = ("geometry", "text", "text_style", "shape_style", "image")
 TOKEN = re.compile(r"\w+|\s+|[^\w\s]")
 
@@ -147,7 +148,10 @@ def deck_edits(base_el: dict, slide_read: dict | None) -> dict[str, list[str]]:
     for oid, b in base_el.get("readback", {}).items():
         t = objects.get(oid)
         if t is None:
-            edits.setdefault("deleted" if oid == base_el.get("main") else "part_deleted", []).append(oid)
+            if oid == f"{base_el.get('main')}_g" and base_el.get("main") in objects:
+                edits.setdefault("group", []).append(oid)  # its group taken apart, the objects still there
+            else:
+                edits.setdefault("deleted" if oid == base_el.get("main") else "part_deleted", []).append(oid)
             continue
         for field in object_changes(b, t):
             edits.setdefault(field, []).append(oid)
@@ -241,10 +245,67 @@ def collapse_holes(text: str) -> str:
     return re.sub("\u00a0+", "\u00a0", text)
 
 
+IR_STYLE_TO_API = {"strike": "strikethrough", "smallcaps": "smallCaps", "script": "baselineOffset", "color": "foregroundColor",
+                   "highlight": "backgroundColor", "size": "fontSize", "font": "fontFamily", "family": "fontFamily",
+                   "code": "fontFamily", "align": "alignment", "level": "bullet"}
+
+
+def source_style_keys(base_el: dict, ours_el: dict) -> set[str]:
+    """Style attributes (API names) whose values differ between two versions of an element's IR."""
+    a, b = set(), set()
+    identity._styles(identity.normalise_ir(base_el.get("ir") or {}), a)
+    identity._styles(identity.normalise_ir(ours_el.get("ir") or {}), b)
+    return {IR_STYLE_TO_API.get(k, k) for k, _ in a ^ b}
+
+
+def deck_style_keys(base_rb: dict, theirs_rb: dict) -> set[str]:
+    """Text style attributes the deck changed somewhere in an object."""
+    out = set()
+    for field in ("text_styles", "paragraph_styles"):
+        a = {(k, repr(v)) for s in base_rb.get(field, []) for k, v in s.items()}
+        b = {(k, repr(v)) for s in theirs_rb.get(field, []) for k, v in s.items()}
+        out |= {k for k, _ in a ^ b}
+    return out
+
+
+def converged_fields(anchor: dict, first: dict, base_by: dict, ours_by: dict, edits: dict, theirs_rb: dict,
+                     scale: float | None) -> dict | None:
+    """Source fields the deck already shows: {"source": {text, size, position}, "deck": {text, geometry}}
+    (None if none). Only for a unit whose other members the source left alone."""
+    main = anchor.get("main")
+    if not main or not theirs_rb or anchor["key"] != first["key"] or set(base_by) != set(ours_by) or \
+            any(identity.source_changes(base_by[k], ours_by[k]) for k in base_by if k != anchor["key"]):
+        return None
+    source, deck = set(), set()
+    if "text" in edits and set(edits["text"]) == {main}:
+        live = theirs_rb.get("text") or ""
+        if anchor["kind"] == "text":
+            same = collapse_holes(live) == collapse_holes(predicted_text(first["ir"]))
+        elif anchor["kind"] == "table":
+            same = [[" ".join(c.split()) for c in row.split("\t")] for row in live.split("\n")] == \
+                [[" ".join(c.split()) for c in row.split("\t")] for row in identity.plain_text(first["ir"]).split("\n")]
+        else:
+            same = False
+        if same:
+            source |= {"text", "size"}
+            deck.add("text")
+    if "geometry" in edits and set(edits["geometry"]) == {main} and scale:
+        base_rb = anchor.get("readback", {}).get(main, {})
+        bb, ob = anchor["fingerprint"]["bbox"], first["fingerprint"]["bbox"]
+        box = base_rb.get("box") or [0.0, 0.0]
+        want = [box[0] + (ob[0] - bb[0]) * scale, box[1] + (ob[1] - bb[1]) * scale]
+        if base_rb.get("box") and max(abs(a - b) for a, b in zip(want, theirs_rb["box"][:2])) <= CONVERGED_PLACE and \
+                all(abs(x - y) <= SCALE_TOLERANCE for x, y in zip(base_rb["transform"][:4], theirs_rb["transform"][:4])):
+            source.add("position")
+            deck.add("geometry")
+    return {"source": source, "deck": deck} if deck else None
+
+
 def plan_unit(skey: str, ukey: str, base_members: list[dict] | None, ours_members: list[dict] | None,
-              slide_read: dict | None, report: dict) -> dict:
-    """The action for one element unit: keep, recreate (with deck overrides), create, delete or
-    move; conflicts and overrides go to `report`."""
+              slide_read: dict | None, report: dict, scale: float | None = None) -> dict:
+    """The action for one element unit: keep, recreate (with deck overrides), create, delete,
+    move or adopt (the deck already shows the source's change); conflicts and overrides go to
+    `report`. `scale`: deck pt per PDF pt."""
     where = {"slide": skey, "element": ukey}
     if base_members is None:
         report["applied"].append({**where, "fields": ["added"]})
@@ -295,6 +356,16 @@ def plan_unit(skey: str, ukey: str, base_members: list[dict] | None, ours_member
     main = anchor.get("main")
     base_rb = anchor.get("readback", {}).get(main, {})
     theirs_rb = (slide_read or {}).get("objects", {}).get(main, {})
+    same = converged_fields(anchor, first, base_by, ours_by, edits, theirs_rb, scale)
+    if same and src <= same["source"]:
+        # The deck already shows what the source now says (e.g. deck edits pulled into the source):
+        # nothing to write; the base takes the deck's version of those fields.
+        for field in same["deck"]:
+            report["converged"].append({**where, "field": field, **({"value": theirs_rb.get("text")} if field == "text" else {})})
+        rest = edited - same["deck"]
+        if rest:
+            report["overrides"].append({**where, "fields": sorted(rest)})
+        return {**action, "action": "adopt", "adopt": sorted(same["deck"])}
     if "position" in src and src <= {"position", "size"} and "geometry" not in edited:
         # Only the place changed in the source: move the edited deck object there.
         bb, ob = anchor["fingerprint"]["bbox"], first["fingerprint"]["bbox"]
@@ -324,10 +395,12 @@ def plan_unit(skey: str, ukey: str, base_members: list[dict] | None, ours_member
             else:
                 overrides["text"] = {"base": base_rb.get("text") or "", "theirs": theirs_rb.get("text") or ""}
                 if merged == o:
-                    report["converged"].append({**where, "field": "text"})
+                    report["converged"].append({**where, "field": "text", "value": theirs_rb.get("text")})
     if "text_style" in edited and not keep:
         runs = uniform_changes(base_rb.get("text_styles", []), theirs_rb.get("text_styles", []))
         paras = uniform_changes(base_rb.get("paragraph_styles", []), theirs_rb.get("paragraph_styles", []))
+        # (a source "style" change can be list levels or sizes; only the same attributes clash)
+        clash = "style" in src and source_style_keys(anchor, first) & deck_style_keys(base_rb, theirs_rb)
         if paras is None or set(edits["text_style"]) != {main} or anchor["kind"] not in ("text", "table"):
             conflict("text_style", "style", sorted(src), "restyled in the deck")
             keep = True
@@ -335,11 +408,11 @@ def plan_unit(skey: str, ukey: str, base_members: list[dict] | None, ours_member
             # Some words restyled (or a table): the deck's run styles go onto the same words of the
             # new text (sync.style_range_requests).
             overrides["text_style"] = {"runs": {}, "paragraphs": paras, "ranges": True}
-            if "style" in src:
+            if clash:
                 conflict("text_style", "style", "restyled in the source", "restyled in the deck", "deck style re-applied")
         else:
             overrides["text_style"] = {"runs": runs, "paragraphs": paras}
-            if "style" in src:
+            if clash:
                 conflict("text_style", "style", "restyled in the source", "restyled in the deck", "deck style re-applied")
     if "shape_style" in edited and not keep:
         if anchor["kind"] != "shape" or set(edits["shape_style"]) != {main}:
@@ -447,12 +520,21 @@ def slide_touched(b: dict, read: dict) -> list[str]:
     return why
 
 
+def deck_scale(base: dict) -> float | None:
+    """Deck pt per PDF pt."""
+    if base.get("scale"):
+        return base["scale"]
+    if base.get("deck_page_size") and base.get("page_size"):
+        return base["deck_page_size"][0] / base["page_size"][0]
+    return None
+
+
 def plan_slide(b: dict, o: dict, read: dict, report: dict, base: dict, j: int, i: int) -> dict:
     skey = o["key"]
     bu, ou = units(b["elements"]), units(o["elements"])
     unit_plans = []
     for ukey in list(ou) + [k for k in bu if k not in ou]:
-        unit_plans.append({**plan_unit(skey, ukey, bu.get(ukey), ou.get(ukey), read, report),
+        unit_plans.append({**plan_unit(skey, ukey, bu.get(ukey), ou.get(ukey), read, report, deck_scale(base)),
                            "base_members": [m["key"] for m in bu.get(ukey, [])],
                            "ours_members": [m["key"] for m in ou.get(ukey, [])]})
     # A unit the source removed may live on inside another one (paragraphs joined): if that one

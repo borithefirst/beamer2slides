@@ -211,6 +211,20 @@ def delete_element(deck: LiveDeck, slide, target: dict) -> dict:
     return expectation("delete_element", {"slide": slide, "target": target}, [slide], [check])
 
 
+def delete_group(deck: LiveDeck, slide, target: dict) -> dict:
+    """Click an element (which selects its outermost group) and delete: the whole group goes."""
+    s = deck.model.one(slide)
+    el = deck.model.element(s, target)
+    if el.parent is None:
+        raise CheckError(f"{target} is not in a group")
+    top = next(e for e in s.elements if e.id == el.top)
+    gone = [c for c in s.elements if c.groups[:1] == (top.id,) and c.kind != "group"]
+    deck.batch([{"deleteObject": {"objectId": top.id}}])
+    checks = [{"check": "text", "slide": slide, "text": c.text[:60], "count": 0} for c in gone if c.kind in ("shape", "table") and c.text]
+    checks += [{"check": "image", "slide": slide, "near": [round(v, 1) for v in c.center], "count": 0} for c in gone if c.kind == "image"]
+    return expectation("delete_group", {"slide": slide, "target": target}, [slide], checks)
+
+
 def _props(page_id: str, box: list[float]) -> dict:
     x, y, w, h = box
     return {"pageObjectId": page_id, "size": {"width": {"magnitude": w * EMU_PER_PT, "unit": "EMU"},
@@ -393,7 +407,7 @@ def set_background(deck: LiveDeck, slide, color: str) -> dict:
 
 
 EDITS = {f.__name__: f for f in (replace_word, append_sentence, delete_paragraph, bold, recolour, resize_font, move,
-                                 resize, delete_element, add_text_box, add_shape, add_image, duplicate, group, ungroup,
+                                 resize, delete_element, delete_group, add_text_box, add_shape, add_image, duplicate, group, ungroup,
                                  add_slide, duplicate_slide, delete_slide, move_slide, set_notes, set_background)}
 
 
@@ -435,6 +449,7 @@ def catalogue(donor_url: str | None) -> list[dict]:
         ("duplicate", dict(slide=results, target={"text": "Same element"}, dx=0, dy=110)),
         ("group", dict(slide=policy, targets=[{"text": "Both versions go into the report."}, {"text": "Deck edits win"}])),
         ("ungroup", dict(slide=algo, target={"text": "Read the base snapshot"})),
+        ("delete_group", dict(slide=versions, target={"text": "Merged"})),
         ("add_slide", dict(after=versions, title="Reviewer questions", body="What happens to comments?")),
         ("duplicate_slide", dict(slide=concl, new_title="Conclusions (short)")),
         ("move_slide", dict(slide=policy, after=results)),

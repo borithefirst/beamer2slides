@@ -159,11 +159,15 @@ class Run:
     def check(self, variant: str, pdf: Path, report: dict, expectations: list[dict], *, drop: tuple[str, ...] = (),
               checks: list[dict] = (), skip_source: tuple[str, ...] = (), order: list | None = None,
               conflicts: list[list[str]] = (), any_conflicts: bool = False, mentions: tuple[str, ...] = (),
+              converged: list[list[str]] = (), no_writes_since: str | None = None, allow_ungrouped: set[str] = frozenset(),
               idempotent: bool = True) -> None:
         """Everything a sync must leave behind. `drop`: edits whose own checks the source legitimately
         changed (the merged outcome is in `checks`); `skip_source`: source checks on texts the deck
         overrides; `order`: the slide titles in order (default: the variant's); `conflicts`: entries
-        the report must list (else none, unless `any_conflicts`); `mentions`: words the report must hold."""
+        the report must list (else none, unless `any_conflicts`); `mentions`: words the report must hold;
+        `converged`: converged entries the report must list; `no_writes_since`: the revision the sync
+        must have left alone (and listed no changes); `allow_ungrouped`: slides whose formula pictures
+        the deck ungrouped on purpose."""
         import sync_check as sc
         flags = sync_build.VARIANTS[variant]
         model = self.deck.read()
@@ -172,10 +176,16 @@ class Run:
         order = order or sync_build.titles(flags)
         all_checks = kept + list(checks) + source + [{"check": "slides", "order": order}]
         self.problems += [f"after sync to {variant}: {p}" for p in sc.check_all(model, all_checks)]
-        self.problems += sc.check_report(report, conflicts=conflicts, no_conflicts=not conflicts and not any_conflicts)
+        self.problems += sc.check_report(report, conflicts=conflicts, converged=converged,
+                                         no_conflicts=not conflicts and not any_conflicts)
         text = json.dumps(report, ensure_ascii=False).lower()
         self.problems += [f"report doesn't mention {m!r}" for m in mentions if m.lower() not in text]
-        self.problems += sc.integrity(model, before=self.before, base_ids=self.base_ids())
+        if no_writes_since is not None:
+            if sc.changes(report):
+                self.problems.append(f"sync to {variant} lists {sc.changes(report)} changes, expected none")
+            if model.revision != no_writes_since:
+                self.problems.append(f"sync to {variant} changed the presentation revision")
+        self.problems += sc.integrity(model, before=self.before, base_ids=self.base_ids(), allow_ungrouped=allow_ungrouped)
 
         # Slides nobody edited in the deck: like a fresh conversion of the same source.
         edited = {s.id for e in expectations for sel in e["slides"] for s in model.find(sel)}
@@ -388,6 +398,59 @@ def scenario_concurrent(run: Run):
     if not exp_file.exists():
         pytest.skip("sync doesn't run the B2S_SYNC_BEFORE_WRITE hook")
     run.check("tablecell", pdf, report, exps + json.loads(exp_file.read_text(encoding="utf-8")))
+
+
+@scenario
+def scenario_converged(run: Run):
+    """The source now says what the deck says (as after a pull into the .tex): the deck edits
+    converge, the report says so, and sync writes nothing (a bullet and a table cell)."""
+    run.convert(build("v1"))
+    exps = run.edit(E("replace_word", slide=WHY, text="by an author and converted once", old="author", new="AI assistant"),
+                    E("replace_word", slide=RESULTS, text="3.9 s", old="3.9", new="4.7"))
+    pdf = build("converged")
+    revision = run.revision()
+    run.check("converged", pdf, run.sync(pdf), exps, converged=[["AI assistant"], ["4.7"]], no_writes_since=revision)
+
+
+@scenario
+def scenario_many_edits(run: Run):
+    """One slide edited every way in the deck (words, word styles, a move, added objects, notes,
+    background) while the source retitles it, rewords, adds and removes bullets and changes its notes."""
+    run.convert(build("v1"))
+    exps = run.edit(
+        E("replace_word", slide=WHY, text="People polish the converted deck by hand", old="polish", new="refine"),
+        E("bold", slide=WHY, word="typos", context="fixing typos and wording"),
+        E("recolour", slide=WHY, word="Later", context="Later the source changes again", color="#c00000"),
+        E("move", slide=WHY, target={"text": "Later the source changes again"}, dx=0, dy=15),
+        E("add_text_box", slide=WHY, text="Ask the audience first", box=[470, 300, 220, 30]),
+        E("add_shape", slide=WHY, shape_type="STAR_5", box=[640, 60, 40, 40], color="#ffc000"),
+        E("set_background", slide=WHY, color="#eef5ff"),
+        E("set_notes", slide=WHY, text="Keep this slide short."))
+    pdf = build("many-edits")
+    run.check("many-edits", pdf, run.sync(pdf), exps, skip_source=("show of hands",),
+              conflicts=[["Keep this slide short", "show of hands"]])
+
+
+@scenario
+def scenario_groups(run: Run):
+    """Groups in the deck around changed elements: a user group holding a figure the source
+    redraws, a converter group taken apart (steps the source renumbers), and a user group deleted
+    with the block the source edits."""
+    run.convert(build("v1"))
+    exps = run.edit(
+        E("group", slide=CONV, targets=[{"image": "largest"}, {"text": "Conflicts disappear once"}]),
+        E("ungroup", slide=ALGO, target={"text": "Read the base snapshot"}),
+        E("group", slide=POLICY, targets=[{"text": "Both versions go into the report."}, {"text": "Deck edits win"}]),
+        E("delete_group", slide=POLICY, target={"text": "Deck edits win"}))
+    pdf = build("groups")
+    run.check("groups", pdf, run.sync(pdf), exps, drop=("group", "ungroup"),
+              skip_source=("Deck edits come first", "kept aside and listed"),
+              checks=[{"check": "grouped", "slide": CONV, "members": [{"image": "largest"}, {"text": "Conflicts disappear once"}],
+                       "grouped": True},
+                      {"check": "grouped", "slide": ALGO, "members": [{"text": "Read the base snapshot"}, {"image_near": [35.0, 147.7]}],
+                       "grouped": False},
+                      {"check": "text", "slide": POLICY, "text": "Deck edits come first", "count": 0}],
+              any_conflicts=True, mentions=("policy",), allow_ungrouped={ALGO})
 
 
 @scenario

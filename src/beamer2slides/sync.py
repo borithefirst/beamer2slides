@@ -7,6 +7,7 @@ the converter wrote last time (snapshot). merge.plan_merge decides; this module 
 requests (emit's builders under fresh object ids), writes them with requiredRevisionId and
 records the new base."""
 
+import copy
 import json
 import os
 import random
@@ -345,6 +346,7 @@ class Sync:
             work = self.prepare(mplan, pres, theirs)
             result = {"attempts": attempt, "plan": mplan, "work": work, "theirs": theirs}
             if self.dry_run or not work["writes"]:
+                self.created, self.final_revision = theirs, theirs["revisionId"]  # (a base that only adopts deck fields)
                 return result
             hook = os.environ.pop("B2S_SYNC_BEFORE_WRITE", None)  # (tests: someone edits the deck now)
             if hook:
@@ -536,10 +538,12 @@ class Sync:
         return reqs
 
     def slide_requests(self, w: dict, sid: str, in_place: dict[int, dict], templates: dict[tuple, dict],
-                       moves: dict, new_slide: bool) -> tuple[list[dict], dict[int, list[str]], dict[int, str], list[dict]]:
+                       moves: dict, new_slide: bool, ungrouped: set[int] = frozenset()
+                       ) -> tuple[list[dict], dict[int, list[str]], dict[int, str], list[dict]]:
         """emit's requests for the chosen elements of an ours slide, under live object ids.
         in_place: element index -> {"id", "size"} of a live placeholder it goes into; templates:
-        template key -> {"id", "w", "h", "text"} of a live object (or stand-in) to duplicate.
+        template key -> {"id", "w", "h", "text"} of a live object (or stand-in) to duplicate;
+        ungrouped: element indices whose own group (with anchored pictures) isn't made.
         Returns (requests, element index -> objects created, element index -> new object id,
         extras: the slide-level requests (groups, z-order) for a new slide)."""
         from .emit import title_element, subtitle_element
@@ -624,6 +628,8 @@ class Sync:
                     gid = r["groupObjects"]["groupObjectId"]
                     owner = next((i for i, v in new_oid.items() if gid == f"{v}_g"), None)
                     if owner is not None and owner in chosen:
+                        if owner in ungrouped:
+                            continue  # (the deck took this unit's group apart: it stays so)
                         reqs.append(r)
                         objects[owner].append(gid)
                         continue
@@ -776,8 +782,15 @@ class Sync:
                     regroup[g].setdefault("unit_of", {})[r] = u["key"]
         reqs = [{"ungroupObjects": {"objectIds": [g]}} for g in regroup] + reqs
 
+        # A unit whose group the deck took apart (its pictures and text still there) is rebuilt ungrouped.
+        ungrouped = set()
+        for u in recreated:
+            anchor = (bunits.get(u["key"]) or [{}])[0]
+            gid = next((x for x in anchor.get("objects", []) if x == f"{anchor.get('main')}_g"), None)
+            if u["action"] == "recreate" and u["key"] in index and gid and gid not in objects and anchor.get("main") in objects:
+                ungrouped.add(index[u["key"]])
         rs, created, new_oid, _ = self.slide_requests({**w, "units": [index[mk] for u in recreated for mk in u["ours_members"]]},
-                                                      sid, in_place, templates, moves, False)
+                                                      sid, in_place, templates, moves, False, ungrouped)
         reqs += rs
         w["objects"], w["new_oid"], w["in_place"] = created, new_oid, in_place
         # Old objects out (a placeholder refilled in place stays).
@@ -1027,6 +1040,19 @@ class Sync:
                             rb = {oid: {**v, **{k: read["objects"][oid][k] for k in ("box", "transform")}}
                                   if read and oid in read["objects"] else v for oid, v in old["readback"].items()}
                             elements.append({**m, "objects": old["objects"], "main": old["main"], "readback": rb})
+                    elif a == "adopt":
+                        # the source now says what the deck shows: ours IR, the deck's version of those fields
+                        fields = {"text": ("text",), "geometry": ("box", "transform", "size")}
+                        for m in ounits[u["key"]]:
+                            old = next((x for x in bunits[u["key"]] if x["key"] == m["key"]), None)
+                            if old is None:
+                                continue
+                            rb = copy.deepcopy(old["readback"])
+                            live_obj = (read or {}).get("objects", {}).get(old.get("main"))
+                            if live_obj and old.get("main") in rb:
+                                for f in u.get("adopt", []):
+                                    rb[old["main"]].update({k: live_obj[k] for k in fields.get(f, ()) if k in live_obj})
+                            elements.append({**m, "objects": old["objects"], "main": old["main"], "readback": rb})
                     elif a in ("keep",):
                         elements += bunits.get(u["key"], [])
                     # delete / none: gone
@@ -1143,7 +1169,8 @@ def sync(pdf: Path, deck: str, out: Path | None = None, dry_run: bool = False, o
                          "units": [{k: u[k] for k in ("key", "action", "source", "deck") if k in u} for u in p.get("units", [])
                                    if u["action"] not in ("keep", "none") or u.get("deck")]}
                         for p in result["plan"]["slides"]]}
-    if not dry_run and result["work"]["writes"]:
+    adopted = any(u["action"] == "adopt" for p in result["plan"]["slides"] for u in p.get("units", []))
+    if not dry_run and (result["work"]["writes"] or adopted):
         new = s.new_base(result)
         snapshot.save_local(new, out)
         try:

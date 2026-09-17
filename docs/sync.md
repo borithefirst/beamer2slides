@@ -41,7 +41,9 @@ storage), `merge.py` (pure planning and diff3), `sync.py` (requests and the writ
   `image/figure/0`, `image/math/1`), plus a **fingerprint**: plain text, PDF bbox, image sha1 of its
   crop, anchor element key. Ours elements inherit the key of the base element they match: most
   similar pairs first (0.6 text ratio + 0.3 geometry + 0.1 role; the key it would get anyway needs
-  0.5 and counts 0.05 more, another key 0.35); unmatched elements get fresh ordinals. Anchored
+  0.5 and counts 0.05 more, another key 0.35); unmatched elements get fresh ordinals. Titles and
+  footers (one per slide) score at least 0.5 + 0.3 geometry + 0.2 text ratio with each other, so a
+  renamed title keeps its key and goes back into its placeholder. Anchored
   elements (formula pictures, overlays, number balls) are matched after their anchors.
 - **Units**: an element and the elements anchored to it are planned together (they share a group).
 - **Deck objects**: the base records, per element, every object id created for it (main object
@@ -66,7 +68,7 @@ storage), `merge.py` (pure planning and diff3), `sync.py` (requests and the writ
                        readback: {objectId: {kind, transform (absolute), size, box, parent_group, z,
                                              title, description, placeholder?, text, text_styles,
                                              paragraph_styles, text_style_hash, shape_style,
-                                             shape_style_hash, image: {contentHash, sourceUrl}?,
+                                             shape_style_hash, image: {contentHash, sourceUrl, signature}?,
                                              children?, table?}}}]}]}
 ```
 `ir_hash` hashes the element's IR without ids, spans and files, with `#page=N` links as slide keys
@@ -74,10 +76,14 @@ and floats to 0.01; `fields` hash its parts (position = top-left to 0.5 pt, size
 values, plain text, image), so a reworded line changes `text` and `size`, not `position`. Read-back
 values are normalised (EMU→pt rounded to 0.01, scale to 1e-4, colours to hex or `theme:NAME`, group
 children composed to absolute transforms, image hash = contentUrl path) so an untouched object
-compares equal. Storage: locally in `<out>/sync/base.json`, and in Drive as a JSON file created by
+compares equal. Google issues new contentUrls for unchanged pictures now and then, so pictures and
+picture backgrounds also carry a pixel `signature` (`<w>x<h>:` + 32 × 32 grey levels, downloaded when
+the base is recorded and, at sync, only for live pictures whose URL hash differs): a picture counts
+as replaced when its signature differs (ink-normalised difference ≥ 0.3 or another aspect ratio).
+The base lists slides in the source's order, not the deck's, so a deck reorder stays a deck edit. Storage: locally in `<out>/sync/base.json`, and in Drive as a JSON file created by
 the app (`drive.file` scope) whose id is kept in the presentation file's `appProperties.b2sBase`;
 Drive is authoritative (anyone with the deck can sync), the local copy is a cache and fallback.
-The base is replaced only when a sync wrote something (`generation` + 1).
+The base is replaced only when a sync wrote something or adopted converged deck fields (`generation` + 1).
 
 ## Deck edits detected (per object, per field)
 geometry (box within 0.05 pt, scale within 1e-3), text content, text style, shape fill/outline,
@@ -92,8 +98,10 @@ Z-order changes are not detected.
 | changed | unchanged | recreate the unit's objects from ours (same place in z-order and grouping) |
 | position/size only | text or style, not geometry | `move`: shift the deck's objects by the source delta |
 | changed | geometry | recreate, then re-apply the deck's transform change (`delta`: theirs · base⁻¹); if the source moved it too, the deck's position wins and it's a conflict |
-| changed | text style / shape style | recreate, re-apply the deck's change if it was uniform over all runs/paragraphs, else keep the deck |
-| text changed | text changed | word-level diff3; clean → recreate and write the merged text; overlapping → keep the deck, conflict; same result → converged |
+| changed | text style / shape style | recreate, re-apply the deck's change: uniform over all runs → over all the text; some words (or a table) → the deck's run attributes onto the same words of the new text (character alignment, `sync.style_range_requests`); non-uniform paragraph styles → keep the deck, conflict. A conflict is reported only when the source changed the same style attributes |
+| text changed | text changed | word-level diff3; clean → recreate and write the merged text; overlapping → keep the deck, conflict |
+| text / position changed | the deck shows exactly that (same text; a move the source now reproduces within 2 pt) | `adopt`: nothing written, reported as converged; the base takes ours IR and the deck's version of those fields (e.g. after `pull`) |
+| changed | group taken apart (the unit's `_g` group gone) | recreate without that group |
 | changed | image replaced | keep the deck, conflict |
 | changed | deleted (all or part) | keep deleted, conflict |
 | deleted | unchanged | delete its objects |
@@ -105,6 +113,7 @@ A unit removed from the source is kept when its words went into a unit kept in c
 joined two paragraphs), so no text is lost. Slides: new frames are created at the aligned
 position; frames removed from the source are deleted if the deck didn't touch them (no edits, no
 user objects, same notes and background), else kept after their base predecessor and reported;
+a frame the deck deleted stays deleted (a conflict if the source changed more than its frame counter);
 the source order is applied only if the deck didn't reorder slides itself; user-added slides stay
 after their live predecessor. Notes follow the text rules (diff3 against the notes read back);
 a background the source changed is rewritten unless the deck changed it too (conflict).

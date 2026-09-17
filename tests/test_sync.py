@@ -225,6 +225,26 @@ def test_deck_edits_and_user_objects():
                                             {"objectId": "mine", "copy_of": None}]
 
 
+def test_ungrouped_unit_is_a_group_edit_not_a_part_deletion():
+    """Ungrouping a formula's group in Slides removes the `_g` object: a group edit (the unit is
+    rebuilt ungrouped), not a part deletion (which kept the whole unit as a conflict)."""
+    base = three_slides()
+    el = base["slides"][0]["elements"][1]
+    el["objects"].append("b2s_s000_t1_g")
+    el["readback"]["b2s_s000_t1_g"] = {**readback([20, 60, 200, 90]), "kind": "elementGroup"}
+    el["readback"]["b2s_s000_t1"]["parent_group"] = "b2s_s000_t1_g"
+    theirs = live(base["slides"][0])
+    del theirs["objects"]["b2s_s000_t1_g"]
+    theirs["objects"]["b2s_s000_t1"]["parent_group"] = None
+    assert {k: sorted(v) for k, v in merge.deck_edits(el, theirs).items()} == {"group": ["b2s_s000_t1", "b2s_s000_t1_g"]}
+    ours, live_deck = triple(base)
+    live_deck["slides"][0] = theirs
+    ours["slides"][0]["elements"][1] = ours_entry("text/body/0", text_ir("First point of intro, reworded\nSecond point of intro",
+                                                                         (20, 60, 230, 90), "p0t1"))
+    u = unit(merge.plan_merge(base, ours, live_deck), "intro", "text/body/0")
+    assert u["action"] == "recreate"
+
+
 def test_uniform_style_changes():
     base = [{"fontFamily": "Lato", "fontSize": 18.0}, {"fontFamily": "Lato", "fontSize": 18.0, "bold": True}]
     red = [{**s, "foregroundColor": "#cc0000"} for s in base]
@@ -379,7 +399,11 @@ def test_same_text_on_both_sides_converges():
                                                                          (20, 60, 200, 90), "p0t1"))
     edit_text(theirs["slides"][0], "b2s_s000_t1", "Main point of intro\nSecond point of intro\n")
     mplan = merge.plan_merge(base, ours, theirs)
-    assert mplan["report"]["converged"] == [{"slide": "intro", "element": "text/body/0", "field": "text"}]
+    assert mplan["report"]["converged"] == [{"slide": "intro", "element": "text/body/0", "field": "text",
+                                             "value": "Main point of intro\nSecond point of intro\n"}]
+    # (nothing to write: the deck already shows it; the base adopts the deck's text)
+    assert unit(mplan, "intro", "text/body/0")["action"] == "adopt"
+    assert not mplan["report"]["applied"] and not merge.has_writes(mplan, [s["objectId"] for s in theirs["slides"]])
 
 
 def test_changed_in_source_deleted_in_deck():
@@ -681,6 +705,47 @@ def test_words_restyled_in_the_deck_survive_a_source_text_change():
     assert u["action"] == "recreate" and u["overrides"]["text_style"]["ranges"]
 
 
+def test_source_style_change_elsewhere_is_no_style_conflict():
+    """A bullet removed in the source changes the IR's style set (list levels) while the deck
+    bolded a word: no conflict, the bold is re-applied."""
+    base = three_slides()
+    ours, theirs = triple(base)
+    ir = text_ir("First point of intro, reworded\nSecond point of intro", (20, 60, 230, 90), "p0t1")
+    ir["paragraphs"][1]["level"] = 1
+    ours["slides"][0]["elements"][1] = ours_entry("text/body/0", ir)
+    obj = theirs["slides"][0]["objects"]["b2s_s000_t1"]
+    obj["text_styles"] = obj["text_styles"] + [{"fontFamily": "Lato", "fontSize": 18.0, "bold": True}]
+    obj["text_style_hash"] = "bold word"
+    mplan = merge.plan_merge(base, ours, theirs)
+    assert unit(mplan, "intro", "text/body/0")["action"] == "recreate" and not mplan["report"]["conflicts"]
+    # the source made the text bold too: reported
+    ours["slides"][0]["elements"][1] = ours_entry("text/body/0", text_ir("First point of intro, reworded\nSecond point of intro",
+                                                                         (20, 60, 230, 90), "p0t1", bold=True))
+    mplan = merge.plan_merge(base, ours, theirs)
+    assert [c["resolution"] for c in mplan["report"]["conflicts"]] == ["deck style re-applied"]
+
+
+def test_deck_move_the_source_reproduces_converges():
+    """A deck move written into the source (pull: a \\vspace) gives the same place: adopted, no write."""
+    base = three_slides()
+    base["scale"] = 2.0
+    ours, theirs = triple(base)
+    ours["slides"][2]["elements"][1] = ours_entry("text/body/0", text_ir("First point of end\nSecond point of end",
+                                                                         (20, 75, 200, 105), "p2t1"))
+    obj = theirs["slides"][2]["objects"]["b2s_s002_t1"]
+    obj["box"] = [obj["box"][0], obj["box"][1] + 30.8, obj["box"][2], obj["box"][3] + 30.8]
+    obj["transform"][5] += 30.8
+    mplan = merge.plan_merge(base, ours, theirs)
+    u = unit(mplan, "end", "text/body/0")
+    assert u["action"] == "adopt" and u["adopt"] == ["geometry"]
+    assert mplan["report"]["converged"] == [{"slide": "end", "element": "text/body/0", "field": "geometry"}]
+    assert not mplan["report"]["conflicts"] and not merge.has_writes(mplan, [s["objectId"] for s in theirs["slides"]])
+    # 5 pt off: both moved, the deck's place kept
+    obj["box"][1] += 5
+    obj["transform"][5] += 5
+    assert unit(merge.plan_merge(base, ours, theirs), "end", "text/body/0")["action"] == "recreate"
+
+
 def raw_shape(oid, runs):
     """A page element as presentations.get returns it: runs = [(text, style)]."""
     elements, i = [], 0
@@ -746,6 +811,30 @@ def test_retitled_frame_and_right_limits_on_the_sync_talk(tmp_path):
         return shape["elementProperties"]["size"]["width"]["magnitude"]
     placeholder = {title: {"id": "LIVE_title", "size": [680.0, 36.0], "text": "The sync algorithm"}}
     assert body_box({}) == body_box(placeholder)
+
+    # A unit whose group the deck took apart is rebuilt without its group.
+    base_slide_ = copy.deepcopy(first["slides"][j])
+    read = {"objects": {}, "notes": "", "notes_id": None}
+    for e in base_slide_["elements"]:
+        oid = f"OLD_{e['key'].replace('/', '_')}"
+        e.update(main=oid, objects=[oid, f"{oid}_g"] if e["key"] == "text/body/0" else [oid])
+        e["readback"] = {oid: readback([0, 0, 10, 10], "x")}
+        read["objects"][oid] = readback([0, 0, 10, 10], "x", parent=None)
+    s.base = {"slides": [base_slide_]}
+    from collections import defaultdict
+    s.urls = defaultdict(lambda: "https://example.com/staged.png")  # (the staging deck's picture URLs)
+    members = [e["key"] for e in first["slides"][j]["elements"] if e["key"] == "text/body/0" or e.get("anchor") == "text/body/0"]
+    plan = {"key": "steps", "base": 0, "ours": j, "objectId": "LIVE", "units": [
+        {"key": "text/body/0", "action": "recreate", "ours_members": members, "base_members": members, "overrides": {}}]}
+
+    def groups_made(live_objects):
+        reqs = s.update_slide({"plan": plan, "units": []}, {**read, "objects": live_objects}, {}, {})
+        return [r["groupObjects"]["groupObjectId"] for r in reqs if "groupObjects" in r]
+    body_oid = "OLD_text_body_0"
+    assert len(groups_made(read["objects"])) == 0  # the deck ungrouped it
+    grouped = {k: {**v, "parent_group": f"{body_oid}_g" if k != f"{body_oid}_g" else None} for k, v in read["objects"].items()}
+    grouped[f"{body_oid}_g"] = {**readback([0, 0, 10, 10]), "kind": "elementGroup"}
+    assert len(groups_made(grouped)) == 1
 
 
 def test_conversion_is_stable():
