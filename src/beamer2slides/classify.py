@@ -978,6 +978,11 @@ class PageClassifier:
             members = [s for s in spans if box.contains_rect(s.rect)]
             if not members or any(b.intersects(box) for b in blocked):
                 continue  # only a stray bar, or tangled with native content: leave it in the background
+            if len(members) == 1 and EQ_NUMBER_RE.match(members[0].text.strip()) and members[0].info.family != "math":
+                # An equation number beside its equation is plain text.
+                par = Paragraph([Line(members)], align="right")
+                out.append(self.text_element([par], f"p{self.page['index']}eq{len(out)}"))
+                continue
             out.append({"id": f"p{self.page['index']}m{len(out)}", "kind": "image", "role": "math",
                         "bbox": box.as_list(), "spans": [s.id for s in members]})
         return out
@@ -1411,6 +1416,29 @@ class PageClassifier:
                         "radius": max(p["corners"].values(), default=0.0), "drawing": p["id"], "spans": []})
         return out
 
+    def text_element(self, box: list[Paragraph], element_id: str) -> dict:
+        rect = union_all([p.rect for p in box] + [Rect.of(p.bullet["bbox"]) for p in box if p.bullet])
+        code = all(is_mono(p.spans) for p in box)
+        return {
+            "id": element_id, "kind": "text", "role": box[0].role, "bbox": rect.as_list(),
+            "panel": self.panel_of(rect),
+            "paragraphs": [{
+                "align": p.align, "level": p.level, "bullet": p.bullet, "size": round(p.size, 2),
+                "text_x0": round(p.x0, 2),
+                "tab_x0": round(p.first.tab.rect.x0, 2) if p.first.tab else None,
+                "lines": [{"baseline": round(l.baseline, 2), "x0": round(l.x0, 2), "x1": round(l.x1, 2)}
+                          for l in p.lines],
+                "runs": self.runs(p, code_indent(p, rect.x0) if code else ""),
+            } for p in box],
+            "code": code,
+            "spans": [s.id for p in box for s in p.spans if s.info.family != "icon"],
+            # Fraction bars now written as text, underlines and highlight boxes now text
+            # styles: they leave the background with the glyphs.
+            "strokes": [f[0].as_list() for p in box for l in p.lines for f in l.fractions] +
+                       list({tuple(r.as_list()): r.as_list() for p in box for s in p.spans
+                             for r in self.decor_rects.get(s.id, [])}.values()),
+        }
+
     def classify(self) -> dict:
         spans = self.spans()
         self.text_decorations(spans)
@@ -1423,34 +1451,13 @@ class PageClassifier:
         boxes = self.build_boxes(paragraphs)
 
         n = self.page["index"]
-        elements = []
-        for bi, box in enumerate(boxes):
-            rect = union_all([p.rect for p in box] + [Rect.of(p.bullet["bbox"]) for p in box if p.bullet])
-            code = all(is_mono(p.spans) for p in box)
-            elements.append({
-                "id": f"p{n}t{bi}", "kind": "text", "role": box[0].role, "bbox": rect.as_list(),
-                "panel": self.panel_of(rect),
-                "paragraphs": [{
-                    "align": p.align, "level": p.level, "bullet": p.bullet, "size": round(p.size, 2),
-                    "text_x0": round(p.x0, 2),
-                    "tab_x0": round(p.first.tab.rect.x0, 2) if p.first.tab else None,
-                    "lines": [{"baseline": round(l.baseline, 2), "x0": round(l.x0, 2), "x1": round(l.x1, 2)}
-                              for l in p.lines],
-                    "runs": self.runs(p, code_indent(p, rect.x0) if code else ""),
-                } for p in box],
-                "code": code,
-                "spans": [s.id for p in box for s in p.spans if s.info.family != "icon"],
-                # Fraction bars now written as text, underlines and highlight boxes now text
-                # styles: they leave the background with the glyphs.
-                "strokes": [f[0].as_list() for p in box for l in p.lines for f in l.fractions] +
-                           list({tuple(r.as_list()): r.as_list() for p in box for s in p.spans
-                                 for r in self.decor_rects.get(s.id, [])}.values()),
-            })
+        elements = [self.text_element(box, f"p{n}t{bi}") for bi, box in enumerate(boxes)]
 
         text_spans = {sid for e in elements for sid in e["spans"]}
         elements = self.figures(lines, elements) + self.icons(elements) + elements  # pictures below text
         text_spans |= {sid for e in elements if e["kind"] == "table" for sid in e["spans"]}
         elements = self.math_pictures(lines, paragraphs, elements) + elements
+        text_spans |= {sid for e in elements if e["kind"] == "text" for sid in e["spans"]}  # equation numbers
         elements = self.shapes(lines, elements) + elements   # shapes below pictures
 
         used = {sid for e in elements for sid in e["spans"]}

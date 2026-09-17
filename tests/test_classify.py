@@ -69,7 +69,9 @@ def test_inline_math_becomes_text_display_math_pictures():
     assert any(r["text"].strip() == "ℝ" for r in runs)
     assert any(r["script"] == "super" and r["text"].strip() == "2" for r in runs)
     assert any(r["script"] == "sub" for r in runs)
-    assert kinds(d["slides"][1]).count("image") >= 3  # display equations as pictures
+    assert kinds(d["slides"][1]).count("image") >= 2  # display equations as pictures
+    numbers = [paragraph_text(p) for e in texts(d["slides"][1]) for p in e["paragraphs"]]
+    assert "(1)" in numbers and "(2)" in numbers  # their equation numbers as text
     assert not any(l["reason"] == "math" for s in d["slides"] for l in s["left_in_background"])
 
 
