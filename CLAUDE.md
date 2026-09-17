@@ -355,9 +355,12 @@ Sync test harness (opt-in, marker `sync`, deselected by default): `python -m pyt
   `XFAIL` pins what sync can't do (table-words: no word
   merge inside a table). Folders `out/sync-tests/<scenario>` of
   the main checkout (decks rebuilt in place), fresh conversions `out/sync-tests/_fresh/<variant>`,
-  3 at a time; the whole suite takes about 15 min. Skipped while `beamer2slides sync`/`pull` don't exist.
+  3 at a time; the whole suite takes about 17 min. Skipped while `beamer2slides sync`/`pull` don't exist.
+  Delete `out/sync-tests/_fresh` after a converter change, or the scenarios compare their decks with
+  conversions made by the previous one.
 - Found by it: Google issues new `contentUrl`s for unchanged pictures (compare pixel signatures, not
-  URLs); a base must keep the source's slide order (else the deck's reorder is undone next time).
+  URLs); a base must keep the source's slide order (else the deck's reorder is undone next time);
+  a slide sync creates must inherit the master background, not copy it (the theme sits there now).
 
 ## Pitfalls found so far
 - PDFium (`pdf.py` handles these):

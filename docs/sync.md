@@ -117,6 +117,9 @@ A picture whose file the converter now writes differently but that puts the same
 it where it is transparent - the ground the older picture painted in) is not a source change: the
 base takes the new hash and is saved, and the deck keeps its object, instead of every formula,
 icon and ball being rewritten the first time a deck converted before that change is synced.
+A picture that really is another one is still rewritten: a figure that is one `\includegraphics`
+now keeps the image's own box and the author's own bytes, so on the first sync of a deck converted
+before that it changes box and picture - one correct update, not a conflict.
 
 A unit removed from the source is kept when its words went into a unit kept in conflict (classify
 joined two paragraphs), so no text is lost. Slides: new frames are created at the aligned
