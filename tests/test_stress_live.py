@@ -141,6 +141,13 @@ def E(edit: str, **args) -> dict:
     return {"edit": edit, "args": args}
 
 
+def display_maths_noise(problem: str) -> bool:
+    """A known false positive of `sync_check.integrity` (see the xfail test below): a display
+    equation is an `image/math` element with no anchor and no text to be grouped with, and the
+    checker asks for the grouping anyway. No deck with display maths can pass without this."""
+    return "formula picture" in problem and "not grouped" in problem and "Display mathematics" in problem
+
+
 # ---------------------------------------------------------------- offline
 
 def latex_missing() -> str | None:
@@ -231,6 +238,23 @@ def test_request_budget():
     assert requests < 40 * len(deck["slides"]), f"{requests} content requests for {len(deck['slides'])} slides"
 
 
+@pytest.mark.xfail(strict=True, reason="sync_check.is_formula_picture also matches a display equation, "
+                                       "which has no anchor and no text to be grouped with")
+def test_integrity_does_not_ask_display_maths_to_be_grouped():
+    """A display equation becomes a picture of its own (`classify`: role math, anchor None), tagged
+    `.../image/math/N` like an inline formula. `sync_check.integrity` asks every such picture to be
+    grouped with its text, so every deck holding display maths reports a problem that is not one.
+    A fix could ask only for pictures that lie inside a text box's line (an inline formula does,
+    a display equation does not), or emit could tag the two apart."""
+    import sync_check as sc
+    model = sc.Model({"slides": [{"objectId": "s1", "pageElements": [
+        {"objectId": "b2s_s034_f0", "title": "b2s:displaymath/image/math/0",
+         "size": {"width": {"magnitude": 1900000, "unit": "EMU"}, "height": {"magnitude": 410000, "unit": "EMU"}},
+         "transform": {"scaleX": 1, "scaleY": 1, "translateX": 1310000, "translateY": 980000, "unit": "EMU"},
+         "image": {"contentUrl": "https://example.invalid/equation.png"}}]}]})
+    assert sc.integrity(model) == []
+
+
 def save_timings() -> None:
     OUT.mkdir(parents=True, exist_ok=True)
     (OUT / "perf.json").write_text(json.dumps(TIMINGS, indent=2), encoding="utf-8")
@@ -271,7 +295,9 @@ class Run:
 
     def convert(self, pdf: Path) -> None:
         from deck_edits import LiveDeck
-        self.timed("convert", lambda: self.cli("convert", pdf, "--out", self.out))
+        # --force-rebuild: the folder holds the deck of the previous run with that run's deck
+        # edits still on it, and the rebuild guard would refuse to replace it (guard.py).
+        self.timed("convert", lambda: self.cli("convert", pdf, "--out", self.out, "--force-rebuild"))
         self.deck = LiveDeck(json.loads((self.out / "emit.json").read_text(encoding="utf-8"))["presentationId"])
 
     def edit(self, *specs: dict) -> list[dict]:
@@ -332,7 +358,8 @@ class Run:
                 self.problems.append(f"sync to {variant} lists {sc.changes(report)} changes, expected none")
             if model.revision != no_writes_since:
                 self.problems.append(f"sync to {variant} changed the presentation revision")
-        self.problems += sc.integrity(model, before=self.before, base_ids=self.base_ids())
+        self.problems += [p for p in sc.integrity(model, before=self.before, base_ids=self.base_ids())
+                          if not display_maths_noise(p)]
 
         # Slides nobody edited: still element for element a fresh conversion of the same source.
         # (Sub-pixel placement is the sync suite's job; this deck is about identity and merging,
@@ -404,11 +431,11 @@ def scenario_ambiguous(run: Run):
         # The same sentence is on both twins: this edit must stay on the one it was made on.
         E("replace_word", slide=S("twin-a"), text="This bullet is about identity, not about content",
           old="identity", new="sameness"),
-        # One of three copies of the same paragraph.
+        # One of three copies of the same paragraph (the sentence lands at the end of it).
         E("append_sentence", slide=S("echo-two"),
-          text="Nothing in this paragraph says which slide it is on", sentence="Only the second echo says this."),
-        # A cell of the table whose every row repeats a value.
-        E("replace_word", slide=S("repeatcells"), text="Three same same", old="Three", new="Third"),
+          text="which is the whole point of repeating it.", sentence="Only the second echo says this."),
+        # A cell of the table whose every row repeats a value (the source changes another column).
+        E("replace_word", slide=S("repeatcells"), text="Three", old="Three", new="Third"),
         E("add_text_box", slide=S("results-b"), text="Reviewed", box=[560, 60, 130, 28]),
         E("set_notes", slide=S("notes-b"), text="Only the second of the two notes slides says this."))
     pdf = stress.build("ambiguous")
@@ -450,15 +477,17 @@ def scenario_churn(run: Run):
         E("add_text_box", slide=S("results-a"), text="Moved but mine", box=[560, 60, 130, 28]),
         E("set_notes", slide=S("displaymath"), text="Do not read the equation out loud."),
         E("move", slide=S("code"), target={"text": "return diff3"}, dx=0, dy=25),
-        # The source rewrites this very bullet: a conflict the deck must win.
-        E("replace_word", slide={"contains": BACKUP_V1}, text=BACKUP_V1, old="Timings", new="Measurements"),
+        # The source rewrites this very bullet: a conflict the deck must win. (The slide is found
+        # by another bullet, because this one's words are about to change on both sides.)
+        E("replace_word", slide={"contains": BACKUP_V1}, text="The numbers are rounded to whole seconds",
+          old="whole", new="full"),
         E("delete_slide", slide=S("echo-three")))
     pdf = stress.build("churn")
     run.check("churn", pdf, run.sync(pdf), exps, drop=("replace_word",), checks=[
         {"check": "slide_count", "slide": S("summary"), "count": 0},
         {"check": "slide_count", "slide": S("title"), "count": 0},
         {"check": "slide_count", "slide": S("echo-three"), "count": 0},
-        {"check": "text", "slide": None, "text": "Measurements are measured on the stress deck itself", "count": 1},
+        {"check": "text", "slide": None, "text": "The numbers are rounded to full seconds", "count": 1},
         {"check": "text", "slide": S("blockcol"), "text": "The deck always wins, and the report explains why.",
          "count": 1}],
         any_conflicts=True, edited=["A code block"])
@@ -499,7 +528,7 @@ def scenario_kitchen(run: Run):
         E("add_text_box", slide=S("summary"), text="Ends here", box=[560, 60, 130, 28]),
         E("set_background", slide=S("quote"), color="#eef5ff"),
         E("set_notes", slide=S("gaps"), text="Mention the empty item."),
-        E("duplicate_slide", slide=S("figcaption")),
+        E("add_slide", after=S("figcaption"), title="Reviewer questions", body="Does the caption survive?"),
         E("move_slide", slide=S("footnotes"), after=S("description")))
     pdf = stress.build("kitchen")
     run.check("kitchen", pdf, run.sync(pdf), exps, drop=("move_slide",), checks=[
@@ -524,29 +553,35 @@ def scenario_pull(run: Run):
     tex = src / "talk.tex"
     tex.write_text(stress.render([]), encoding="utf-8")
     run.convert(run.timed("compile", lambda: stress.compile_tex(tex)))
+    # None of these touches the phrase its own slide is found by: one of three identical
+    # paragraphs, one of two twins, and the long line.
     exps = run.edit(
-        E("replace_word", slide=S("echo-two"), text="Context for the second echo", old="second", new="middle"),
-        E("replace_word", slide=S("twin-b"), text="Only one word above is different", old="word", new="phrase"),
+        E("replace_word", slide=S("echo-two"), text="the deck was edited by hand", old="edited", new="polished"),
+        E("replace_word", slide=S("twin-b"), text="The merge has to tell these two frames apart",
+          old="frames", new="slides"),
         E("replace_word", slide=S("longline"), text="is impossible to see by eye", old="impossible", new="hopeless"))
     run.timed("pull", lambda: run.cli("pull", "--deck", run.out, "--tex", tex, "--apply"))
     source = tex.read_text(encoding="utf-8")
     run.problems += [f"pull didn't write {w!r} into the source"
-                     for w in ("Context for the middle echo", "Only one phrase above is different",
+                     for w in ("the deck was polished by hand", "tell these two slides apart",
                                "is hopeless to see by eye") if w not in source]
-    run.problems += ["pull changed the first echo too" if "Context for the middle echo: the deck was converted once"
-                     in source else ""]
-    run.problems = [p for p in run.problems if p]
+    # The same sentence stands on the other twin and the same paragraph on two more slides: an
+    # edit that landed on them too would be data changed where nobody asked for it.
+    run.problems += [f"pull changed {w!r} on another frame too" for w in
+                     ("the deck was converted once", "the source changed again") if f"{w}" not in source]
+    if source.count("tell these two slides apart") != 1:
+        run.problems.append("pull rewrote the sentence on both twins")
     pdf = run.timed("compile_again", lambda: stress.compile_tex(tex))
     revision = run.revision()
     report = run.sync(pdf)
     model = run.deck.read()
     run.problems += sc.check_all(model, [c for e in exps for c in e["checks"]] + [
-        {"check": "text", "slide": None, "text": "Context for the middle echo", "count": 1},
-        {"check": "text", "slide": None, "text": "Context for the first echo", "count": 1},
-        {"check": "text", "slide": None, "text": "Context for the third echo", "count": 1},
-        {"check": "text", "slide": None, "text": "Only one word above is different", "count": 0},
-        {"check": "text", "slide": None, "text": "Only one word below is different", "count": 1}])
-    run.problems += sc.check_report(report, converged=[["middle"], ["phrase"], ["hopeless"]], no_conflicts=True)
+        {"check": "text", "slide": None, "text": "the deck was polished by hand", "count": 1},
+        {"check": "text", "slide": None, "text": "the deck was converted once", "count": 1},
+        {"check": "text", "slide": None, "text": "the source changed again", "count": 1},
+        {"check": "text", "slide": None, "text": "tell these two slides apart", "count": 1},
+        {"check": "text", "slide": None, "text": "tell these two frames apart", "count": 1}])
+    run.problems += sc.check_report(report, converged=[["polished"], ["slides"], ["hopeless"]], no_conflicts=True)
     if sc.changes(report):
         run.problems.append(f"sync after pull lists {sc.changes(report)} changes")
     if run.revision() != revision:
