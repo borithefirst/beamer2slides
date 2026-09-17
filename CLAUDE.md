@@ -51,6 +51,13 @@ a per-slide background picture.
   Emit fills it with no-break spaces in Roboto Mono (a space is exactly 0.6 em), sized to the
   width, and shifts the picture by the predicted width error of the words before it
   (`formula_shifts`). Lines with fewer than two real words stay one display picture.
+- Tables also take cell `fills` (filled rects inside a ruled table; their edges give column
+  bounds) and simple math in cells (`span_runs` handles math fonts and scripts).
+  `plain_tables`: rule-less tabulars (≥3 rows, same cell count, short cells) → borderless tables.
+- `literal_list_numbers`: when Slides would number a list wrongly (TOC split into boxes),
+  every number on the slide becomes literal text with a tab (Slides can't set a start number).
+- Grouping in emit: blocks (`block_groups`: stacked panel shapes plus content), formula
+  pictures with their text. Title page: `subtitle_element` → SUBTITLE placeholder.
 - Equation numbers beside display equations, icon-font glyphs (pictures) and OpenType
   small caps (`extract.small_caps_spans`, via glyph ids) are handled too.
 - Hanging labels (`Line.tab`, paragraph `tab_x0`): algorithmic line numbers, description

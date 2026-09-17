@@ -18,9 +18,13 @@ slide background.
   (roots, sums, stacked scripts) are small pictures placed over a gap in the still-editable
   text and grouped with it.
 - **Underlines and `\colorbox` highlights** as text styles.
-- **Slide titles** in real title placeholders, so they show in Slides' outline and navigation.
+- **Slide titles** in real title placeholders, so they show in Slides' outline and navigation;
+  the title page uses the title and subtitle placeholders.
+- **Blocks** grouped with their text, formulas grouped with their paragraph, and pictures with
+  alt text (the text they show).
 - **Tables** from ruled tabulars (booktabs, `\hline`, vertical rules, `\cline`) as native Slides
-  tables, including `\multicolumn`/`\multirow` merged cells.
+  tables, including `\multicolumn`/`\multirow` merged cells, `\rowcolor`/`\cellcolor` shading and
+  simple math in cells. Tabulars without any rules become borderless tables.
 - **Diagrams**: simple TikZ pictures (rectangles, rounded rectangles, circles, straight arrows,
   node and edge labels) as grouped native shapes, lines and text.
 - **Pictures** for other figures, plots, raster images and display equations, each movable.
