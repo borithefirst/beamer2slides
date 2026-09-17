@@ -284,6 +284,13 @@ def span_runs(spans: list[Span]) -> list[dict]:
     return runs
 
 
+def math_content(line: "Line") -> list[Span]:
+    """The spans math analysis looks at: a hanging label before a tab ("a)" on a ball) is not math."""
+    if line.tab is None:
+        return line.content
+    return [s for s in line.content if s.rect.x0 >= line.tab.rect.x0 - 0.1]
+
+
 def is_mono(spans: list[Span]) -> bool:
     return bool(spans) and all(s.info.family == "mono" for s in spans)
 
@@ -564,12 +571,14 @@ class PageClassifier:
             first, nxt = spans[0], spans[1]
             gap = nxt.rect.x0 - first.rect.x1
             token = first.text.strip()
-            if gap >= 0.25 * line.size and (token in LABEL_GLYPHS - PRESET_GLYPHS) and len(spans) >= 2:
+            on_ball = any(ir.contains(first.rect.cx, first.rect.cy) for _, ir in self.small_images)
+            lettered = ENUM_RE.match(token) and not any(ch.isdigit() for ch in token)  # a) (b) iv.
+            if gap >= 0.25 * line.size and ((token in LABEL_GLYPHS - PRESET_GLYPHS) or lettered) and not on_ball:
                 # \item[--], \item[\checkmark]: Slides has no such bullet preset. The glyph stays
                 # literal text, and a tab reaches the item text (hanging indent).
                 line.tab = nxt
                 return
-            if gap >= 0.25 * line.size and (token in BULLET_GLYPHS or ENUM_RE.match(token)):
+            if gap >= 0.25 * line.size and (token in BULLET_GLYPHS or ENUM_RE.match(token)) and not on_ball:
                 kind = "glyph" if token in BULLET_GLYPHS else "number"
                 line.bullet = {"kind": kind, "text": token, "color": first.color, "bbox": first.rect.as_list()}
                 line.bullet_spans = [first]
@@ -597,6 +606,11 @@ class PageClassifier:
             if ir.x1 <= x0 + 0.5 and x0 - ir.x1 <= 1.5 * line.size and \
                     line.baseline - 0.9 * line.size <= ir.cy <= line.baseline + 0.1 * line.size:
                 token = "".join(s.text.strip() for s in on_image)
+                if token and not token.isdigit():
+                    # A lettered ball ("a)"): no Slides preset. The ball stays a picture, its
+                    # label native text, with a tab to the item text.
+                    line.tab = min(rest, key=lambda s: s.rect.x0)
+                    return
                 line.bullet = {"kind": "image", "image": im["id"], "text": token, "bbox": ir.as_list()}
                 line.bullet_spans = on_image
                 return
@@ -642,7 +656,7 @@ class PageClassifier:
     def formula_holes(self, line: Line, fractions: list) -> list[list[Span]]:
         """Complex formulas inside a line of prose, as groups of spans; [] if there are none or
         if the line is not mostly prose (a display equation stays one picture)."""
-        spans = sorted(line.content, key=lambda s: s.rect.x0)
+        spans = sorted(math_content(line), key=lambda s: s.rect.x0)
         size = line.size
         bars = [b for b in self.bars if b.expand(1).intersects(line.rect)]
         simple_bars = [f[0] for f in fractions]
@@ -694,7 +708,7 @@ class PageClassifier:
     def math_kind(self, line: Line) -> str | None:
         """None for plain text, 'inline' for math that Slides text can carry (symbols,
         single-level sub/superscripts), 'complex' for anything that must stay a picture."""
-        spans = line.content
+        spans = math_content(line)
         line_bars = [b for b in self.bars if b.expand(1).intersects(line.rect)]  # fractions, radicals
         fractions = [f for f in (self.simple_fraction(line, b) for b in line_bars) if f]
         if len(fractions) == len(line_bars):
@@ -988,6 +1002,8 @@ class PageClassifier:
                         if len(tail) >= 2 and tail.endswith("-") and tail[-2].isalpha() and text[:1].islower():
                             runs[-1]["text"] = tail[:-1]  # TeX hyphenation at a line break
                             sep = ""
+                        elif par.role == "title":
+                            sep = chr(11)  # titles keep their line breaks (a soft break in Slides)
                         else:
                             sep = " "
                     elif span is line.tab:
@@ -1138,7 +1154,8 @@ class PageClassifier:
                   for e in text_elements for p in e["paragraphs"] for l in p["lines"]]
 
         def beside_text(r: Rect) -> bool:
-            return any(0 <= s.x0 - r.x1 <= 15 and s.y0 < r.y1 and r.y0 < s.y1 for s in starts)
+            # right of the icon, or starting on it (a label drawn on a ball)
+            return any(-r.w <= s.x0 - r.x1 <= 15 and s.y0 < r.y1 and r.y0 < s.y1 for s in starts)
 
         rects = [ir for im, ir in self.small_images
                  if im["id"] not in bullets and max(ir.w, ir.h) <= 20 and min(ir.w, ir.h) >= 3

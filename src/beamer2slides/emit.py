@@ -35,6 +35,7 @@ DESCENT_EM = LINE_EM - ASCENT_EM
 PAD_X = 6.7          # box edge -> text start
 BULLET_GAP = 1.9     # bullet glyph's right edge sits this far before indentFirstLine
 PPTX_TITLE_DY = 3.9  # title placeholders of pptx-imported decks have a smaller top inset
+SOFT_BREAK = chr(11)  # vertical tab: a line break inside a paragraph
 SMALL_CAPS_LINE = 0.9  # a line of only smallCaps text is laid out as if 90% of its size
 
 FONT_FOR_FAMILY = {"sans": "Lato", "serif": "PT Serif", "mono": "Roboto Mono"}
@@ -231,7 +232,8 @@ def text_box_requests(el: dict, slide_id: str, object_id: str, scale: float, fon
     ratios, space_above = vertical_layout(paras, baselines, sizes)
 
     inner_w = (right_pdf - left_pdf) * scale
-    multiline = any(len(p["lines"]) > 1 for p in paras)
+    # Titles carry their line breaks as soft breaks (SOFT_BREAK) and need no tight width.
+    multiline = any(len(p["lines"]) > 1 and not any(SOFT_BREAK in r["text"] for r in p["runs"]) for p in paras)
     # Wrapped paragraphs need a tight width to break where TeX did; single lines get room
     # so that a slightly wider font never wraps them.
     slack = 2 + 0.01 * inner_w if multiline else max(0.15 * inner_w, 2 * max(sizes))
