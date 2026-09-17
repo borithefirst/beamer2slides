@@ -49,6 +49,30 @@ BULLET_PRESETS = {
 }
 
 
+# Width per em of Computer Modern's optical sizes relative to the 10 pt cut, from the glyph
+# advances of the Type 1 fonts (cmss8.pfb ... cmss17.pfb) over a sample sentence. EC and
+# Latin Modern share these metrics.
+DESIGN_WIDTH = {
+    "sans": {8: 1.0623, 9: 1.0273, 10: 1.0, 12: 0.9753, 17: 0.9377},
+    "serif": {5: 1.3758, 6: 1.2291, 7: 1.1424, 8: 1.0629, 9: 1.0277, 10: 1.0, 12: 0.9786, 17: 0.9136},
+    "mono": {8: 1.0114, 9: 1.0, 10: 1.0, 12: 0.979},
+}
+
+
+def design_width(table: dict[int, float], design: float) -> float:
+    keys = sorted(table)
+    if design <= keys[0]:
+        return table[keys[0]]
+    if design >= keys[-1]:
+        return table[keys[-1]]
+    hi = next(k for k in keys if k >= design)
+    lo = max(k for k in keys if k <= design)
+    if hi == lo:
+        return table[lo]
+    t = (design - lo) / (hi - lo)
+    return table[lo] + t * (table[hi] - table[lo])
+
+
 class FontMapper:
     """TeX font + size -> Slides font family + size with calibrated width correction."""
 
@@ -91,12 +115,16 @@ class FontMapper:
             return google[0], round(run["size"] * scale, 1)
         info = font_info(run["font"])
         family = FONT_FOR_FAMILY.get(run["family"], "Lato")
+        design = info.design_size or 10
         if run["family"] == "mono":
-            factor = ROBOTO_MONO_ADVANCE_EM / CMTT_ADVANCE_EM
+            factor = ROBOTO_MONO_ADVANCE_EM / (CMTT_ADVANCE_EM * design_width(DESIGN_WIDTH["mono"], design))
         else:
             text, title = self.factors.get(run["family"], self.factors["sans"])
-            # CM's 12pt+ design sizes (titles) are relatively narrower than the 10pt text cut.
-            factor = title if (info.design_size or 10) >= 11.5 else text
+            if run["family"] != "serif" and 11.5 <= design < 14:
+                factor = title  # calibrated directly on CMSS12 titles
+            else:
+                # Other optical sizes: CM's small cuts are wider per em, its large ones narrower.
+                factor = text / design_width(DESIGN_WIDTH.get(run["family"], DESIGN_WIDTH["sans"]), design)
             # Bold and italic substitutes run 4-8% narrower than CM's; correct half of that, so
             # widths come closer without emphasised words looking visibly larger.
             style = self.style.get(run["family"], self.style["sans"])

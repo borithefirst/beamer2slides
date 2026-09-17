@@ -83,6 +83,14 @@ The remaining columns are relative to the font's own `text` ratio, after that co
   After correction, Lato is narrower or equal in every category except titles.
 - "Source Sans Pro" is an alias of "Source Sans 3". No family fell back to Arial.
 
+### Optical sizes (`emit.DESIGN_WIDTH`)
+CM's small design sizes are wider per em than the 10 pt cut, and its large ones narrower.
+Glyph advances of the Type 1 fonts over a sample sentence, relative to the 10 pt cut:
+cmss8 1.062, cmss9 1.027, cmss12 0.975, cmss17 0.938; cmr5 1.376 … cmr17 0.914; cmtt8 1.011.
+The size correction divides by these ratios, except for sans 12 pt, which keeps its directly
+calibrated title factor (the ratio predicts 1.046 against the measured 1.058). Measured effect:
+`\tiny` text (CMSS8 at 6 pt) went from 0.917 to 0.981 of the PDF width, `\Huge` (CMSS17) from 1.034 to 1.004.
+
 ## 2b. Serif: width vs CM Roman (`--family serif`, `calibration/fonts_serif.json`)
 Reference: CMR10 at 10.91 pt, CMBX10, CMTI10, CMR12 (titles).
 
