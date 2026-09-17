@@ -251,6 +251,19 @@ def test_element_objects_finds_created_and_tagged_objects():
     assert loss_oracle.element_objects(skey, ekey, base_el, read) == {"old", made, "adopted"}
 
 
+def test_catches_styling_put_back_the_way_the_converter_had_it():
+    base = {"slides": [{"key": "f1", "objectId": "s1", "elements": [
+        {"key": "text/body/0", "main": "o", "objects": ["o"], "readback": {"o": {"text_style_hash": "converter"}}}]}]}
+    before = {"slides": [{"objectId": "s1", "objects": {"o": {"text_style_hash": "person"}}}]}
+    after = {"slides": [{"objectId": "s1", "objects": {"o": {"text_style_hash": "converter"}}}]}
+    empty = loss_oracle.normalise_report({})
+    assert [f["kind"] for f in loss_oracle.style_findings(base, before, after, empty)] == ["style_reverted"]
+    kept = {"slides": [{"objectId": "s1", "objects": {"o": {"text_style_hash": "person"}}}]}
+    assert loss_oracle.style_findings(base, before, kept, empty) == []
+    said = loss_oracle.normalise_report({"overrides": [{"slide": "f1", "element": "text/body/0", "fields": ["text_style"]}]})
+    assert loss_oracle.style_findings(base, before, after, said) == []
+
+
 def test_a_reported_swap_does_not_accuse_the_slides_between_it():
     """Two slides swapping puts a third at the same index with other neighbours: the order is
     accounted for when taking the reported moves out of both orders leaves the same sequence."""

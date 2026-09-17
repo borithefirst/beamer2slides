@@ -44,6 +44,10 @@ merge policy of docs/sync.md says it is not the person's work. Concretely:
   Without `ours` every disappearance is a `word_lost`.
   The reverse also counts as the person's work: text the person *deleted* must not come back into
   that element unless the source says it again (`deletion_undone`).
+* **Styling a person applied to a converter object** (the read-back's `text_style_hash` /
+  `shape_style_hash` differing from the base's) must not come back as the converter's: after the
+  sync at least one of that element's objects must still show the person's hash, unless the report
+  lists the element under `overrides`, `conflicts` or `converged`.
 * **Speaker notes and slide backgrounds** follow the same rules, per slide.
 * **Slides**: a slide present before must be present after unless the report lists it under
   `slides_deleted` *and* the base plus the live read-back show nobody had touched it
@@ -365,6 +369,39 @@ def word_findings(skey, el, was, now, before_words, after_words, after_el_words,
     return out
 
 
+def style_findings(base: dict, before: dict, after: dict, rep: dict) -> list[dict]:
+    """Styling the person applied to a converter object, silently back to the converter's."""
+    out = []
+    before_by_id = {s["objectId"]: s for s in before["slides"]}
+    after_by_id = {s["objectId"]: s for s in after["slides"]}
+    for b in base["slides"]:
+        bs, a = before_by_id.get(b.get("objectId")), after_by_id.get(b.get("objectId"))
+        if bs is None or a is None:
+            continue
+        skey = b["key"]
+        for el in b["elements"]:
+            main = el.get("main")
+            was, now = (el.get("readback") or {}).get(main), bs["objects"].get(main)
+            if not main or was is None or now is None:
+                continue
+            objects = [a["objects"][o] for o in element_objects(skey, el["key"], el, a)]
+            if not objects:
+                continue  # gone: the other checks judge that
+            for field in ("text_style_hash", "shape_style_hash"):
+                converter, person = was.get(field), now.get(field)
+                if converter is None or person == converter or not any(rb.get(field) == converter for rb in objects):
+                    continue  # the person didn't restyle it, or the converter's styling isn't back
+                if any(rb.get(field) == person for rb in objects):
+                    continue  # their styling is still on one of the element's objects
+                keys = {el["key"], unit_key(el)}
+                if _at(rep["overrides"], skey, keys) or _at(rep["conflicts"], skey, keys) or _at(rep["converged"], skey, keys):
+                    continue
+                out.append(finding("style_reverted", "undo",
+                                   f"{field} is the converter's again: the person's styling is gone with nothing in the report",
+                                   slide=skey, element=el["key"], object=main))
+    return out
+
+
 def notes_findings(skey, b, bs, a, conflicts) -> list[dict]:
     out = []
     was, now, then = b.get("notes_readback") or "", bs.get("notes") or "", a.get("notes") or ""
@@ -538,8 +575,8 @@ def check(base: dict, before: dict, after: dict, report: dict, ours: dict | None
     `allow`: finding kinds, or "<kind>/<slide>" or "<kind>/<slide>/<element>", to ignore."""
     rep = normalise_report(report)
     out = (slide_findings(base, before, after, rep) + user_object_findings(base, before, after, rep)
-           + text_findings(base, before, after, rep, ours) + content_findings(base, before, after, rep, ours)
-           + report_findings(base, before, after, rep))
+           + text_findings(base, before, after, rep, ours) + style_findings(base, before, after, rep)
+           + content_findings(base, before, after, rep, ours) + report_findings(base, before, after, rep))
     allowed = set(allow or ())
     return [f for f in out if not ({f["kind"], f"{f['kind']}/{f['slide']}", f"{f['kind']}/{f['slide']}/{f['element']}"}
                                    & allowed)]
