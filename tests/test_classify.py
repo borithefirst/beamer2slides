@@ -429,3 +429,64 @@ def test_theme_sweep_floors(theme, floor):
     assert all("unsure" not in {l["reason"] for l in s["left_in_background"]} for s in d["slides"])
     tables = [e for s in d["slides"] for e in s["elements"] if e["kind"] == "table"]
     assert len(tables) == 1 and len(tables[0]["cells"]) == 4
+
+
+# overlays on text
+
+
+def test_curve_bounds_skip_control_points():
+    from beamer2slides.pdf import _curve_extremes
+    # A flat S-curve whose control points reach 40 pt up and down: the curve itself stays within ±12.
+    pts = _curve_extremes((0, 0), (10, 40), (20, -40), (30, 0))
+    ys = [y for _, y in pts]
+    assert (30, 0) in pts and 10 < max(ys) < 12 and -12 < min(ys) < -10
+
+
+def test_cuts_words():
+    from types import SimpleNamespace
+    from beamer2slides.classify import PageClassifier, Rect
+    word = SimpleNamespace(rect=Rect(100, 10, 140, 20))
+    assert PageClassifier.cuts_words(Rect(90, 5, 120, 25), [word]), "an ellipse reaching into the word"
+    assert not PageClassifier.cuts_words(Rect(98, 8, 142, 22), [word]), "a box set around the word"
+
+
+def test_overlays_follow_their_words():
+    d = deck("22_overlays_on_text")
+    overlays = {s["page"]: [e for e in s["elements"] if e.get("overlay")] for s in d["slides"]}
+    # Arrows, braces, the emphasis ellipse and the callout: transparent pictures of their own drawings
+    # and labels, anchored to the text they point at, with marks where they meet its words.
+    assert [len(overlays[p]) for p in (0, 1, 2, 5)] == [2, 2, 1, 1]
+    for p in (0, 1, 2, 5):
+        for o in overlays[p]:
+            assert o["anchor"] and o["marks"] and o["drawings"], (p, o["id"])
+    assert [len(o["spans"]) for o in overlays[1]] == [2, 2], "each brace keeps its label"
+    callout = d["slides"][5]
+    assert len(callout["elements"][0]["spans"]) == 5 and len(texts(callout)[1]["paragraphs"]) == 3, \
+        "the callout text goes with the callout, the list stays native"
+    assert not overlays[4], "labels on a photo stay part of the photo"
+    assert all(not s["left_in_background"] for s in d["slides"])
+
+
+def test_translucent_highlight_and_rotated_label():
+    d = deck("22_overlays_on_text")
+    shapes = [e for e in d["slides"][3]["elements"] if e["kind"] == "shape"]
+    assert len(shapes) == 1 and shapes[0]["role"] == "highlight" and 0.3 < shapes[0]["opacity"] < 0.4
+    assert shapes[0]["anchor"] == texts(d["slides"][3])[1]["id"]
+    assert len(texts(d["slides"][3])[1]["paragraphs"]) == 4, "a highlight behind items doesn't split the list"
+    rotated = [e for e in texts(d["slides"][7]) if e.get("rotation")]
+    assert len(rotated) == 1 and rotated[0]["rotation"] == -90
+    assert paragraph_text(rotated[0]["paragraphs"][0]) == "Accuracy (%)"
+    assert any(e["kind"] == "table" for e in d["slides"][7]["elements"])
+
+
+def test_annotation_arrow_moves_with_its_word():
+    from beamer2slides import emit
+    d = deck("19_labels_on_graphics")
+    arrow = next(e for e in d["slides"][11]["elements"] if e.get("overlay"))
+    assert [m["x"] for m in arrow["marks"]] == pytest.approx([32.46, 77.26], abs=0.5), "both ends of important"
+    # A mark after holes on its line: the holes are closed up, or emit would read them as word spaces.
+    frame = next(e for e in d["slides"][8]["elements"] if e.get("overlay"))
+    mark = frame["marks"][0]
+    assert mark["x"] - mark["hole_x0"] > 50 and mark["pads"] == 2 * 2 * 1.0
+    x0, x1 = emit.overlay_boxes(d["slides"][8], emit.SLIDE_W / 453.54, emit.FontMapper())[frame["id"]]
+    assert abs(x0 - frame["bbox"][0]) < 5 and abs((x1 - x0) - (frame["bbox"][2] - frame["bbox"][0])) < 5

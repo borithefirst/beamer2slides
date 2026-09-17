@@ -368,7 +368,16 @@ class Page:
         return po.parent.matrix if po.parent else self.to_page
 
     def bounds(self, po: PageObject) -> tuple[float, float, float, float]:
-        """An object's bounding box in page space (stroke widths included)."""
+        """An object's bounding box in page space (stroke widths included). A path's box
+        bounds its curves, not their control points."""
+        if po.type == OBJ_PATH:
+            path = _trace(self._segments(po), filled=True)
+            width = ctypes.c_float()
+            if path and R.FPDFPageObj_GetStrokeWidth(po.handle, width):
+                a, b, c, d, _, _ = po.matrix
+                half = width.value * math.sqrt(abs(a * d - b * c)) / 2
+                x0, y0, x1, y1 = path[1]
+                return x0 - half, y0 - half, x1 + half, y1 + half
         l, b, r, t = (ctypes.c_float() for _ in range(4))
         if not R.FPDFPageObj_GetBounds(po.handle, l, b, r, t):
             return 0.0, 0.0, 0.0, 0.0
@@ -453,16 +462,18 @@ class Page:
 
     # ------------------------------------------------------------------ rendering
 
-    def render(self, zoom: float, clip: tuple[float, float, float, float] | None = None) -> np.ndarray:
+    def render(self, zoom: float, clip: tuple[float, float, float, float] | None = None,
+               transparent: bool = False) -> np.ndarray:
         """RGB pixels (uint8, h x w x 3) of the page or of a clip rectangle, `zoom` pixels per
-        point, on white. Pixel bounds round outwards."""
+        point, on white; RGBA on a transparent ground if `transparent`. Pixel bounds round
+        outwards."""
         x0, y0, x1, y1 = clip if clip is not None else self.rect
         ix0, iy0 = math.floor(x0 * zoom + 0.001), math.floor(y0 * zoom + 0.001)
         ix1, iy1 = math.ceil(x1 * zoom - 0.001), math.ceil(y1 * zoom - 0.001)
         w, h = max(1, ix1 - ix0), max(1, iy1 - iy0)
-        bitmap = R.FPDFBitmap_Create(w, h, 0)
+        bitmap = R.FPDFBitmap_Create(w, h, 1 if transparent else 0)
         try:
-            R.FPDFBitmap_FillRect(bitmap, 0, 0, w, h, 0xFFFFFFFF)
+            R.FPDFBitmap_FillRect(bitmap, 0, 0, w, h, 0x00000000 if transparent else 0xFFFFFFFF)
             matrix = R.FS_MATRIX(zoom, 0, 0, zoom, -ix0, -iy0)
             clipping = R.FS_RECTF(0, 0, w, h)
             R.FPDF_RenderPageBitmapWithMatrix(bitmap, self.raw, matrix, clipping, R.FPDF_ANNOT)
@@ -470,6 +481,8 @@ class Page:
             buf = R.FPDFBitmap_GetBuffer(bitmap)
             data = np.ctypeslib.as_array(ctypes.cast(buf, ctypes.POINTER(ctypes.c_ubyte)), shape=(h * stride,))
             bgrx = data.reshape(h, stride)[:, :w * 4].reshape(h, w, 4)
+            if transparent:
+                return bgrx[..., [2, 1, 0, 3]].copy()
             return bgrx[..., 2::-1].copy()
         finally:
             R.FPDFBitmap_Destroy(bitmap)
@@ -524,6 +537,27 @@ def _commands(segments) -> list[tuple]:
     return out
 
 
+def _curve_extremes(p0, p1, p2, p3) -> list[tuple[float, float]]:
+    """The points bounding a cubic Bézier curve: its ends and where it turns in x or y. (Its
+    control points can lie far outside: a curved arrow's reach up into the frame title.)"""
+    out = [p3]
+    for k in (0, 1):
+        a = -p0[k] + 3 * p1[k] - 3 * p2[k] + p3[k]
+        b = 2 * (p0[k] - 2 * p1[k] + p2[k])
+        c = p1[k] - p0[k]
+        if abs(a) < 1e-9:
+            roots = [-c / b] if abs(b) > 1e-9 else []
+        else:
+            disc = b * b - 4 * a * c
+            roots = [(-b + s * math.sqrt(disc)) / (2 * a) for s in (1, -1)] if disc >= 0 else []
+        for t in roots:
+            if 0 < t < 1:
+                u = 1 - t
+                out.append(tuple(u ** 3 * p0[i] + 3 * u * u * t * p1[i] + 3 * u * t * t * p2[i] + t ** 3 * p3[i]
+                                 for i in (0, 1)))
+    return out
+
+
 def _trace(segments, filled: bool):
     """Path items and the bounding box of their points, for one way of painting the path."""
     items: list[tuple] = []
@@ -553,7 +587,7 @@ def _trace(segments, filled: bool):
                 lines = 0
         elif cmd[0] == "c":
             lines = 0
-            for q in cmd[1:]:
+            for q in _curve_extremes(last, *cmd[1:]):
                 include(q)
             items.append(("c", last, *cmd[1:]))
             last = cmd[3]

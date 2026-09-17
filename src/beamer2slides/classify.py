@@ -488,6 +488,7 @@ class PageClassifier:
         self.bars: list[Rect] = []
         self.small_images: list[tuple[dict, Rect]] = []
         self.leftovers: list[dict] = []
+        self._raw_spans = {s["id"]: s for s in page["spans"]}
 
     # -- graphics -------------------------------------------------------------
 
@@ -573,6 +574,8 @@ class PageClassifier:
         graphics = []
         rules: dict[tuple[int, int], list[Rect]] = {}
         self.decorations: list[Rect] = []
+        self.graphic_drawings: dict[str, Rect] = {}  # drawing id -> box, for the drawings among the graphics
+        bar_ids: list[tuple[str, Rect]] = []
         for d in self.page["drawings"]:
             if d["id"] in self.decor_ids:
                 continue
@@ -592,8 +595,10 @@ class PageClassifier:
                     and (s["font"].split("+")[-1].upper().startswith("CMEX") or "√" in s["text"])
                     for s in self.page["spans"])):
                 self.bars.append(r)  # fraction bars, radical overbars (long ones start at their radical sign)
+                bar_ids.append((d["id"], r))
             else:
                 graphics.append(r)
+                self.graphic_drawings[d["id"]] = r
                 stroke_rule = d["type"] == "s" and r.h <= 1.0 and set(d["items"]) <= {"l"}
                 fill_rule = fill_only and r.h <= 1.5 and r.w >= 20  # booktabs rules are thin filled boxes
                 if stroke_rule or fill_rule:
@@ -609,6 +614,7 @@ class PageClassifier:
         touching = [b for b in self.bars if any(b.expand(1.5).intersects(g) for g in graphics)]
         self.bars = [b for b in self.bars if b not in touching]
         graphics += touching
+        self.graphic_drawings.update((i, r) for i, r in bar_ids if any(r is t for t in touching))
         for im in self.page["images"]:
             r = Rect.of(im["bbox"])
             if min(r.w, r.h) < SMALL_IMAGE_PT:
@@ -631,10 +637,11 @@ class PageClassifier:
         return any(d.contains(r.cx, r.cy) for d in self.decorations + edge_panels)
 
     def panel_of(self, r: Rect) -> int | None:
-        """Innermost panel containing the rect's centre."""
+        """Innermost panel containing the rect's centre. A translucent fill is a highlight laid
+        over text, not a container."""
         best = None
         for i, p in enumerate(self.panels):
-            if p["bbox"].contains(r.cx, r.cy) and (best is None or p["bbox"].w * p["bbox"].h <
+            if p["bbox"].contains(r.cx, r.cy) and p["opacity"] >= 0.99 and (best is None or p["bbox"].w * p["bbox"].h <
                                                     self.panels[best]["bbox"].w * self.panels[best]["bbox"].h):
                 best = i
         return best
@@ -779,6 +786,13 @@ class PageClassifier:
         inside = sum(len(s.text.strip()) for s in line.spans
                      if any(reg.expand(1).contains(s.rect.cx, s.rect.cy) for reg in self.regions))
         return inside / total
+
+    def prose_under_graphic(self, line: Line) -> bool:
+        """A line of prose that a graphic is drawn over (a tikzmark arrow crossing it, a
+        callout's pointer), not a label inside a figure: words reach out of every figure region."""
+        words = [s for s in line.spans if sum(ch.isalpha() for ch in s.text) >= 2]
+        outside = [s for s in words if not any(reg.expand(1).contains(s.rect.cx, s.rect.cy) for reg in self.regions)]
+        return len(words) >= 2 and len(outside) >= 1
 
     def detect_bullet(self, line: Line) -> None:
         spans = line.spans
@@ -945,6 +959,8 @@ class PageClassifier:
                 continue  # nothing on it, or a rule or frame reaching well past the words
             if touched == spans[:1]:
                 continue  # a label on a box at the line start: a list number (detect_bullet)
+            if self.cuts_words(g, spans):
+                continue  # drawn over the line, not set in it (see overlay)
             groups.append((touched, g))
         # Glyphs set on top of each other on one baseline (\textcircled: a circle glyph over a
         # letter) would come apart as text.
@@ -960,6 +976,14 @@ class PageClassifier:
         line.hole_pads = [g for _, g in groups]
         line.add_holes([t for t, _ in groups])
         return True
+
+    @staticmethod
+    def cuts_words(g: Rect, spans: list[Span]) -> bool:
+        """A graphic reaching into a word's letters: drawn over the text with TikZ's overlay
+        (an emphasis ellipse wider than its word), where a box set in the line (\\fbox, a
+        circled number) keeps clear of its neighbours."""
+        return any(0.15 * s.rect.w < min(s.rect.x1, g.x1) - max(s.rect.x0, g.x0) < 0.85 * s.rect.w
+                   and g.y0 < s.rect.y1 and s.rect.y0 < g.y1 for s in spans)
 
     def math_kind(self, line: Line) -> str | None:
         """None for plain text, 'inline' for math that Slides text can carry (symbols,
@@ -1012,7 +1036,7 @@ class PageClassifier:
                 line.reason = "rotated"
             elif self.graphic_holes(line):
                 pass  # prose with boxed or circled words
-            elif self.inside_figure_share(line) >= 0.5:
+            elif self.inside_figure_share(line) >= 0.5 and not self.prose_under_graphic(line):
                 line.reason = "figure"
             elif line.size <= 0.7 * self.body and (line.rect.y1 <= 0.13 * self.H or line.rect.y0 >= 0.87 * self.H):
                 line.reason = "theme"
@@ -1366,7 +1390,7 @@ class PageClassifier:
             return []
         # Collisions are checked against the actual text lines, not text box outlines: a math
         # item inside a bullet list lies within the list's box but touches none of its lines.
-        blocked = [Rect.of(e["bbox"]) for e in elements if e["kind"] != "text"]
+        blocked = [Rect.of(e["bbox"]) for e in elements if e["kind"] != "text" and not e.get("overlay")]
         for e in elements:
             if e["kind"] == "text":
                 for p in e["paragraphs"]:
@@ -1412,6 +1436,8 @@ class PageClassifier:
             return r
 
         text_rects = [ink_rect(e) for e in text_elements]
+        self.bullet_boxes = [Rect.of(p["bullet"]["bbox"]).expand(1) for e in text_elements for p in e["paragraphs"]
+                             if p["bullet"] and p["bullet"].get("bbox")]
         out = []
         # Tables first, from their rules: clustering could merge a table with a picture beside it.
         for group in self.table_rules:
@@ -1434,7 +1460,14 @@ class PageClassifier:
                 continue  # navigation dots and ornaments in the header/footer band
             if not any(r.intersects(c.expand(0.1)) for r in regions):
                 continue  # only stray rotated text, no graphics
-            if any(t.intersects(c) for t in text_rects):
+            if any(h.expand(0.5).contains_rect(c) for h in self.hole_boxes):
+                continue  # the graphic of a hole (a frame around words): in that picture already
+            over_text = any(t.intersects(c) for t in text_rects)
+            overlay = self.overlay(c, label_spans, lines, len(out), over_text)
+            if overlay:
+                out.append(overlay)
+                continue
+            if over_text:
                 continue
             table = self.table_from(c, label_spans, text_rects, len(out))
             if table:
@@ -1452,6 +1485,103 @@ class PageClassifier:
             out.append({"id": f"p{self.page['index']}f{len(out)}", "kind": "image", "role": "figure",
                         "bbox": c.expand(1.0).as_list(), "spans": spans})
         return out
+
+    def overlay(self, c: Rect, label_spans: list[Span], lines: list[Line], index: int, over_text: bool) -> dict | None:
+        """A figure cluster drawn over native text or right at its words (a tikzmark arrow, a
+        brace under a phrase, an emphasis ellipse, a callout): a picture of only its own
+        drawings and labels on a transparent ground (`drawings`), grouped with the text it
+        meets (`anchor`). `marks` are the word edges it meets, with what precedes them on their
+        line, so that emit moves and stretches it with the words Slides sets at other widths."""
+        box = c.expand(1)
+        # (not the frames of holes, nor bullets drawn on the page: those are pictures of their own)
+        taken = [h.expand(0.5) for h in self.hole_boxes] + self.bullet_boxes
+        drawings = [d for d in self.page["drawings"] if d["id"] in self.graphic_drawings
+                    and box.contains_rect(self.graphic_drawings[d["id"]])
+                    and not any(t.contains_rect(self.graphic_drawings[d["id"]]) for t in taken)]
+        if not drawings or any(box.intersects(Rect.of(im["bbox"])) for im in self.page["images"]):
+            return None
+        words = [(s, l) for l in lines if id(l) in self.line_owner for s in l.content
+                 if s.text.strip() and s.info.family != "icon" and not any(s in h for h in l.holes)]
+        if not over_text and any(box.contains_rect(s.rect) and s not in label_spans for l in lines
+                                 if id(l) not in self.line_owner for s in l.spans):
+            return None  # math set inside a figure: one picture of everything in its box
+
+        def points(d: dict) -> list:
+            out = []
+            for op, pts in d.get("path") or []:
+                if op == "re":
+                    (x0, y0), (x1, y1) = pts
+                    out += [(x0, y0), (x1, y0), (x1, y1), (x0, y1)]
+                else:
+                    out += [pts[0], pts[-1]] if op == "c" else pts
+            return out
+
+        def near(s: Span, x: float, y: float) -> bool:
+            return s.rect.x0 - 0.1 * s.size <= x <= s.rect.x1 + 0.1 * s.size and \
+                s.rect.y0 - 0.35 * s.size <= y <= s.rect.y1 + 0.35 * s.size
+
+        # The words its line ends, corners and tips touch; else those it is drawn across.
+        ends = [p for d in drawings for p in points(d)]
+        met = [(s, l) for s, l in words if any(near(s, x, y) for x, y in ends)]
+        if not met and over_text:
+            met = [(s, l) for s, l in words if any(s.rect.intersects(self.graphic_drawings[d["id"]]) for d in drawings)]
+        if not over_text:
+            # Beside text, it points at words of prose; a line of widely spaced words next to a
+            # figure is its axis labels.
+            spaced = lambda l: any(b.rect.x0 - a.rect.x1 >= l.size for a, b in zip(l.content, l.content[1:]))
+            met = [(s, l) for s, l in met if not spaced(l)]
+            if not met:
+                return None
+        labels = [s for s in label_spans if c.expand(0.5).contains_rect(s.rect)]
+        el = {"id": f"p{self.page['index']}f{index}", "kind": "image", "role": "figure", "overlay": True,
+              "bbox": union_all([self.graphic_drawings[d["id"]] for d in drawings] + [s.rect for s in labels]).expand(1.0).as_list(),
+              "spans": [s.id for s in labels], "drawings": [d["id"] for d in drawings]}
+        if met:
+            anchor = Counter(self.line_owner[id(l)][0] for _, l in met).most_common(1)[0][0]
+            el["anchor"] = anchor
+            el["marks"] = [self.mark(l, x) for s, l in dict.fromkeys(met) if self.line_owner[id(l)] == (anchor, "left")
+                           for x in (s.rect.x0, s.rect.x1)]
+        return el
+
+    def trim_overlays(self, elements: list[dict]) -> None:
+        """Drawings of an overlay that lie within a formula picture (a highlight behind a line
+        that became one picture) belong to that picture: the overlay gives them up."""
+        boxes = [Rect.of(e["bbox"]) for e in elements if e["kind"] == "image" and e.get("role") == "math"]
+        by_id = self.spans_by_id
+        for el in elements:
+            if not el.get("overlay"):
+                continue
+            el["drawings"] = [i for i in el["drawings"] if not any(b.contains_rect(self.graphic_drawings[i]) for b in boxes)]
+            if el["drawings"]:
+                el["bbox"] = union_all([self.graphic_drawings[i] for i in el["drawings"]] +
+                                       [by_id[i].rect for i in el["spans"]]).expand(1.0).as_list()
+
+    @staticmethod
+    def mark(line: Line, x: float) -> dict:
+        """Where a graphic meets a line of text at `x`: the line's style and the words before x,
+        as a formula hole run carries them (emit.formula_shifts predicts where x lands in Slides)."""
+        main = line.main
+        words = [s for s in line.content if s.rect.x1 <= x + 0.5 and s.info.family != "icon"
+                 and not any(s in h for h in line.holes)]
+        # Holes and em-space gaps before x keep their width in Slides: close them up, or
+        # formula_shifts would read each as one huge word space.
+        cuts, holes = [], [line.hole_rect(h) for h in line.holes]
+        for r in holes:
+            if r.x1 <= x + 0.5:
+                cuts.append((r.x0, min([s.rect.x0 for s in words if s.rect.x0 >= r.x1 - 0.5] + [x]) - r.x0))
+        stops = sorted([(s.rect.x0, s.rect.x1) for s in words] + [(x, x)])
+        for (_, a), (b, _) in zip(stops, stops[1:]):
+            if b - a >= line.size and not any(a - 0.5 <= r.x0 < b for r in holes):
+                cuts.append((a, max(1, round((b - a - 0.33 * line.size) / line.size)) * line.size))  # (as runs() writes it)
+        def closed(v):
+            return v - sum(w for c, w in cuts if c < v - 0.5)
+        before = [[round(s.rect.w, 2), s.font, s.info.family, s.info.bold, s.info.italic,
+                   math_text(s.font, s.text)[0] if s.info.family == "math" else s.text, round(closed(s.rect.x0), 2)]
+                  for s in words]
+        # (a hole's gap in Slides is HOLE_PAD wider on each side)
+        pads = 2 * HOLE_PAD * sum(r.x1 <= x + 0.5 for r in holes)
+        return {"x": round(x, 2), "hole_x0": round(closed(x), 2), "pads": pads, "font": main.font, "family": main.info.family, "size": round(line.size, 2),
+                "bold": main.info.bold, "italic": main.info.italic, "before": before}
 
     def icons(self, text_elements: list[dict]) -> list[dict]:
         """Small raster images next to text that are not bullets (bibliography icons, inline
@@ -1855,7 +1985,8 @@ class PageClassifier:
         shape). The render stage additionally checks the panel really shows its fill colour."""
         used = {sid for e in elements for sid in e["spans"]}
         leftovers = [s.rect for l in lines for s in l.spans if s.id not in used]
-        figures = [Rect.of(e["bbox"]) for e in elements if e["kind"] in ("image", "table", "diagram")]
+        figures = [Rect.of(e["bbox"]) for e in elements if e["kind"] in ("image", "table", "diagram") and not e.get("overlay")]
+        figures += [self.graphic_drawings[i] for e in elements for i in e.get("drawings", [])]
         figures += [Rect.of(p["bullet"]["bbox"]) for e in elements if e["kind"] == "text"
                     for p in e["paragraphs"] if p["bullet"] and p["bullet"].get("patch")]
         loose = [g for g in self.graphics if not any(f.expand(0.5).contains_rect(g) for f in figures)]
@@ -1864,11 +1995,15 @@ class PageClassifier:
         out = []
         for p in sorted(self.panels, key=lambda p: -p["bbox"].w * p["bbox"].h):
             r = p["bbox"]
-            if p["image"] or not p["fill"] or p["opacity"] < 0.99:
+            # A translucent fill over text (a highlight behind list items) is a translucent
+            # shape under the text it covers, grouped with it.
+            covered = Counter(self.line_owner[id(l)][0] for l in lines if id(l) in self.line_owner and l.rect.intersects(r))
+            if p["image"] or not p["fill"] or (p["opacity"] < 0.99 and not covered):
                 continue
             if r.x0 <= 1 or r.y0 <= 1 or r.x1 >= self.W - 1 or r.y1 >= self.H - 1:
                 continue
-            if any(Rect.of(e["bbox"]).expand(0.5).contains_rect(r) for e in elements if e["kind"] in ("image", "table", "diagram")):
+            if any(Rect.of(e["bbox"]).expand(0.5).contains_rect(r) for e in elements
+                   if e["kind"] in ("image", "table", "diagram") and not e.get("overlay")):
                 continue  # already part of a picture
             inner = r.expand(-0.5)
             if any(inner.intersects(x) for x in leftovers):
@@ -1889,6 +2024,8 @@ class PageClassifier:
             out.append({"id": f"p{self.page['index']}s{len(out)}", "kind": "shape", "role": "panel",
                         "bbox": r.as_list(), "fill": p["fill"], "shape": kind, "flip": flip,
                         "radius": max(p["corners"].values(), default=0.0), "drawing": p["id"], "spans": []})
+            if p["opacity"] < 0.99:
+                out[-1].update(role="highlight", opacity=round(p["opacity"], 3), anchor=covered.most_common(1)[0][0])
         return out
 
     def blocks(self, shapes: list[dict]) -> None:
@@ -1902,7 +2039,7 @@ class PageClassifier:
         k = 0
         for head in sorted(shapes, key=lambda s: s["bbox"][1]):
             for body in shapes:
-                if body is head or "block" in body or "block" in head:
+                if body is head or "block" in body or "block" in head or "opacity" in body or "opacity" in head:
                     continue
                 hx0, hy0, hx1, hy1 = head["bbox"]
                 bx0, by0, bx1, by1 = body["bbox"]
@@ -2020,6 +2157,40 @@ class PageClassifier:
             })
         return tables
 
+    def rotated_texts(self, lines: list[Line], used: set[str]) -> list[dict]:
+        """Text turned by 90° (\\rotatebox{90}, a label beside a table) that no figure took:
+        native text boxes turned the same way (`rotation`: -90 reads upwards, 90 downwards).
+        Their paragraphs are laid out in the text's own frame (x along the reading direction,
+        y across it), which emit turns back onto the page."""
+        spans = sorted((s for l in lines if l.reason == "rotated" for s in l.spans
+                        if s.id not in used and s.text.strip() and abs(self.page_dir(s)[0]) < 0.01),
+                       key=lambda s: (self.page_dir(s)[1], round(s.rect.cx), -s.baseline * self.page_dir(s)[1]))
+        rows: list[list[Span]] = []
+        for s in spans:
+            last = rows[-1][-1] if rows else None
+            if last and self.page_dir(last) == self.page_dir(s) and abs(last.rect.cx - s.rect.cx) <= 0.3 * s.size and \
+                    abs(last.size - s.size) <= 0.5 and min(abs(last.rect.y0 - s.rect.y1), abs(s.rect.y0 - last.rect.y1)) <= 2 * s.size:
+                rows[-1].append(s)
+            else:
+                rows.append([s])
+        out = []
+        for row in rows:
+            up = self.page_dir(row[0])[1] < 0
+            # page -> text frame: reading upwards, x = -y and y = x; downwards, x = y and y = -x
+            turned = [replace(s, rect=Rect(-s.rect.y1, s.rect.x0, -s.rect.y0, s.rect.x1) if up else
+                              Rect(s.rect.y0, -s.rect.x1, s.rect.y1, -s.rect.x0),
+                              baseline=self.page_origin(s)[0] * (1 if up else -1), horizontal=True) for s in row]
+            el = self.text_element([Paragraph([Line(turned)])], f"p{self.page['index']}rt{len(out)}")
+            out.append({**el, "bbox": union_all(s.rect for s in row).as_list(), "panel": self.panel_of(union_all(s.rect for s in row)),
+                        "rotation": -90 if up else 90})
+        return out
+
+    def page_dir(self, s: Span) -> tuple[float, float]:
+        return tuple(self._raw_spans[s.id]["dir"])
+
+    def page_origin(self, s: Span) -> tuple[float, float]:
+        return tuple(self._raw_spans[s.id]["origin"])
+
     def text_element(self, box: list[Paragraph], element_id: str) -> dict:
         rect = union_all([p.rect for p in box] + [Rect.of(p.bullet["bbox"]) for p in box if p.bullet])
         code = all(is_mono(p.spans) for p in box)
@@ -2062,6 +2233,7 @@ class PageClassifier:
 
     def classify(self) -> dict:
         spans = self.spans()
+        self.spans_by_id = {s.id: s for s in spans}
         self.text_decorations(spans)
         self.analyse_graphics()
         lines = self.build_lines(spans)
@@ -2074,6 +2246,7 @@ class PageClassifier:
 
         n = self.page["index"]
         elements = [self.text_element(box, f"p{n}t{bi}") for bi, box in enumerate(boxes)]
+        self.line_owner = {id(l): (f"p{n}t{bi}", p.align) for bi, box in enumerate(boxes) for p in box for l in p.lines}
         holes = [(f"p{n}t{bi}", l, h) for bi, box in enumerate(boxes) for p in box for l in p.lines for h in l.holes]
         hole_pictures = []
         for anchor, line, h in holes:
@@ -2086,10 +2259,14 @@ class PageClassifier:
                                   "anchor": anchor})  # grouped with this text element
 
         text_spans = {sid for e in elements for sid in e["spans"]}
+        self.hole_boxes = [Rect.of(h["bbox"]) for h in hole_pictures]
         elements = self.figures(lines, elements) + self.icons(elements) + hole_pictures + plain_tables + elements  # pictures below text
+        elements += self.rotated_texts(lines, {sid for e in elements for sid in e["spans"]})
         text_spans |= {sid for e in elements if e["kind"] == "table" for sid in e["spans"]}
         elements = self.math_pictures(lines, paragraphs, elements) + elements
-        text_spans |= {sid for e in elements if e["kind"] == "text" for sid in e["spans"]}  # equation numbers
+        self.trim_overlays(elements)
+        elements = [e for e in elements if not e.get("overlay") or e["drawings"]]
+        text_spans |={sid for e in elements if e["kind"] == "text" for sid in e["spans"]}  # equation numbers
         elements = self.specks_on_panels(spans, elements) + elements
         shapes = self.shapes(lines, elements)
         self.blocks(shapes)
