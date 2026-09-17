@@ -264,6 +264,22 @@ a per-slide background picture.
   template's placeholders are rescaled for 16:9).
 - Re-running `convert` on the same output folder rebuilds the previous deck in place
   (same URL, content replaced by `files.update`). Use `--new-deck` to force a new one.
+- **A rebuild never destroys deck edits** (`guard.py`, docs/sync.md "Never lose deck edits"):
+  before replacing a deck's content, convert compares the live deck with the sync base and refuses
+  (exit non-zero, nothing written) when someone edited it in Slides, when there is no base to check
+  against, or when the folder's deck came from another PDF; the message names what was edited (up to
+  3 examples) and offers `sync`, `--new-deck` or `--force-rebuild`. "Edited" is `merge.deck_edits` /
+  `user_objects` / `background_edited` / notes / slides added, deleted, reordered - the same notion
+  sync uses; a new revisionId, a reissued `contentUrl` (pixel signatures decide), a thumbnail export
+  and leftover `b2s_mNNN` scratch slides are not edits. `--new-deck`, a trashed/deleted deck
+  (`guard.previous_deck`: live|trashed|gone|other) and sync's staging deck can't hit the wrong deck.
+  Before any destructive write (forced rebuild, sync's first write) the revisionId, modifiedTime and
+  finding go to `<out>/backups/backups.json` (rebuilds also into emit.json `previous`, syncs into
+  sync-report.json `recovery`) and `--backup auto|none|file|drive|both` keeps a .pptx export and/or a
+  Drive copy. **Measured** (`tools/probe_revision_history.py`): every Drive revision of a Slides file
+  exports its *current* content, so `files.update` leaves nothing the API can fetch back - the .pptx
+  backup is the only way back (`tools/deck_backup.py list|export|restore`). Tests: `tests/test_guard.py`
+  (offline), `tools/rebuild_guard_proof.py` (live, `out/agent-guard/`).
 
 ## Usage
 ```

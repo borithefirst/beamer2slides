@@ -364,7 +364,11 @@ def test_record_appends_and_restore_hint_reads(tmp_path):
     log = json.loads((out / "backups" / "backups.json").read_text(encoding="utf-8"))
     assert [e["revisionId"] for e in log] == ["rev7", "rev8"]
     hint = "\n".join(guard.restore_hint(entry))
-    assert "rev7" in hint and "x.pptx" in hint and "Version history" in hint
+    # The .pptx backup is the way back, and the hint says exactly how (Drive's version history
+    # gives the deck's current content back for every revision, docs/sync.md).
+    assert "rev7" in hint and "x.pptx" in hint and "deck_backup.py restore" in hint
+    bare = "\n".join(guard.restore_hint({"presentationId": "P1", "revisionId": "rev7"}))
+    assert "no backup file was kept" in bare and "version history" in bare
 
 
 # ---------------------------------------------------------------- emit's decision
