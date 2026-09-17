@@ -16,7 +16,9 @@ HOLE_MARK = "□"  # an inline formula picture's place in fingerprint text
 SLIDE_MATCH = 0.6     # least similarity of two unlabelled slides to be the same frame
 KEY_MATCH = 0.5       # least similarity for an element keeping the key it would get anyway
 ELEMENT_MATCH = 0.35  # least similarity for an element inheriting another key
-DROP_KEYS = {"id", "spans", "file", "px", "drawings", "drawing"}
+# Render output, not source: "picture" says how a bare image reached its file (raw stream or
+# PDFium's pixels); the bytes themselves are hashed by image_sha1.
+DROP_KEYS = {"id", "spans", "file", "px", "picture", "drawings", "drawing"}
 STYLE_KEYS = {"font", "family", "size", "bold", "italic", "smallcaps", "color", "fill", "stroke", "shape", "align",
               "level", "script", "underline", "strike", "highlight", "link", "opacity", "shadow", "radius", "code",
               "flip", "weight", "arrow_from", "arrow_to", "rotation"}

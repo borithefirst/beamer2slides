@@ -185,6 +185,9 @@ def test_ir_hash_ignores_ids_and_page_numbers():
     assert ha == hb
     hc, _ = identity.ir_fields(b, None, None, lambda page: "method")
     assert hc != ha
+    # render output (how a bare image reached its file, its pixel size) is no source change either
+    img = {"id": "p1i0", "kind": "image", "role": "figure", "bbox": [10, 10, 60, 40], "file": "figures/p1i0.png"}
+    assert identity.ir_fields(img)[0] == identity.ir_fields({**img, "picture": "raw", "px": [800, 480]})[0]
 
 
 def test_source_changes_by_field():
