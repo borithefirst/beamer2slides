@@ -727,6 +727,34 @@ def diagram_requests(el: dict, slide_id: str, object_id: str, scale: float, font
     return reqs
 
 
+def block_groups(elements: list[dict], object_ids: list[str], title_oid: str | None) -> list[list[str]]:
+    """Object ids per block: panel shapes stacked on top of each other with the same width
+    (title bar and body), plus the text, pictures and tables lying on them."""
+    shapes = [(el, oid) for el, oid in zip(elements, object_ids) if el["kind"] == "shape" and el.get("role") == "panel"]
+    blocks: list[list] = []  # [x0, y0, x1, y1, [oids]]
+    for el, oid in sorted(shapes, key=lambda s: s[0]["bbox"][1]):
+        x0, y0, x1, y1 = el["bbox"]
+        for b in blocks:
+            if abs(b[0] - x0) <= 1.5 and abs(b[2] - x1) <= 1.5 and -1.5 <= y0 - b[3] <= 3.5:
+                b[3] = max(b[3], y1)
+                b[4].append(oid)
+                break
+        else:
+            blocks.append([x0, y0, x1, y1, [oid]])
+    out = []
+    for x0, y0, x1, y1, members in blocks:
+        if len(members) < 2:
+            continue  # a lone panel is not recognisably a block
+        for el, oid in zip(elements, object_ids):
+            if el["kind"] in ("text", "image", "table") and oid != title_oid and not el.get("anchor"):
+                ex0, ey0, ex1, ey1 = el["bbox"]
+                cx, cy = (ex0 + ex1) / 2, (ey0 + ey1) / 2
+                if x0 <= cx <= x1 and y0 <= cy <= y1:
+                    members.append(oid)
+        out.append(members)
+    return out
+
+
 def formula_shifts(slide: dict, scale: float, fonts: FontMapper) -> dict[str, float]:
     """PDF-point x offsets for inline formula pictures, so each sits over the gap where Slides
     will put it: the words before it on its line come out a little narrower or wider."""
@@ -1125,8 +1153,15 @@ def emit(deck: dict, out: Path, title: str, new_deck: bool = False, keep_assets:
             for el, oid in zip(slide["elements"], element_ids):
                 if el.get("anchor") in by_id and by_id[el["anchor"]] != title_oid:
                     anchored.setdefault(by_id[el["anchor"]], []).append(oid)
+            grouped = set()
             for text_oid, pictures in anchored.items():
                 extra.append({"groupObjects": {"groupObjectId": f"{text_oid}_g", "childrenObjectIds": [text_oid] + pictures}})
+                grouped |= {text_oid, *pictures}
+            # A beamer block (title bar and body shapes plus everything on them) moves as one.
+            for bi, members in enumerate(block_groups(slide["elements"], element_ids, title_oid)):
+                children = [f"{m}_g" if m in anchored else m for m in members if m not in grouped or m in anchored]
+                if len(children) >= 2:
+                    extra.append({"groupObjects": {"groupObjectId": f"{slide_id}_blk{bi}", "childrenObjectIds": children}})
             if slide.get("notes") and speaker_notes.get(slide_id):
                 extra.append({"insertText": {"objectId": speaker_notes[slide_id], "text": slide["notes"]}})
             if title_oid and len(slide["elements"]) > 1:
