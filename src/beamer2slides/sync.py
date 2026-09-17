@@ -613,7 +613,7 @@ class Sync:
         current = [s["objectId"] for s in theirs["slides"] if s["objectId"] not in
                    {w["plan"]["objectId"] for w in work["slides"] if w["plan"]["action"] == "delete"}]
         current += [w["sid"] for w in work["slides"] if w["plan"]["action"] == "create"]
-        final = [s for s in work["order"] if s in current]
+        final = [s for s in dict.fromkeys(work["order"]) if s in current]  # (an id can't be in two places)
         for i, sid in enumerate(final):
             if current[i] != sid:
                 reqs.append({"updateSlidesPosition": {"slideObjectIds": [sid], "insertionIndex": i}})

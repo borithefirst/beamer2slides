@@ -300,6 +300,12 @@ base, `merge.py` pure planning (offline tests `tests/test_sync.py`), `sync.py` w
 `requiredRevisionId` (re-plans on a mismatch), pictures through a deleted-after-use staging deck.
 Pitfalls: `createImage` letterboxes (sync stretches it back); staging contentUrls die with the
 staging file; `createSlide` doesn't instantiate every layout placeholder.
+Bases are Drive-first: the folder copy is a cache, an older one only makes sync do less (deck edits
+win), and a Drive base that can't be read is said out loud (`snapshot.stale_base_warning`, offline
+tests `tests/test_base_storage.py`). The base also records the overlay mode `convert` used, and
+sync keeps it unless `--overlays` says otherwise (`sync.overlay_mode`), or a deck converted with
+`--overlays all` would lose its in-between steps. `pull --apply` and `pull --out DIR` keep every
+file they replace (`inverse.keep_backup`: `.bak`, `.bak2`, …, pictures included).
 
 Alignment on Google's renderer (`tools/alignment.py out/<deck>`, after `fidelity`): reads the
 Slides element boxes with `presentations.get` (cached in slides_elements.json) and compares each

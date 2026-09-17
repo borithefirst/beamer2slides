@@ -40,6 +40,12 @@ storage), `merge.py` (pure planning and diff3), `sync.py` (requests and the writ
   gets `~k`. Base and ours slides pair by label first; the rest by an order-keeping alignment of
   word similarity (+0.5 for the same title, at least 0.6; two different labels never pair), so an
   inserted or renamed frame doesn't shift keys. Unpaired ours slides get fresh keys.
+  One label can name several slides - `--overlays all` gives a slide per step of a labelled frame,
+  and a source may reuse a label - and then the n-th slide of that label pairs with the n-th in the
+  base (`identity.align_slides`). Pairing them all with one base slide used to leave its siblings
+  unpaired, i.e. read as slides the source had dropped: syncing an `--overlays all` deck against
+  its own unchanged PDF planned to delete a step (and then crashed on the slide order). Found live
+  on 2026-09-18, pinned in `tests/test_identity_labels.py`.
   AI authors are told to label every frame (themes/google README, docs).
 - **Element key** within a slide: `kind/role/ordinal` (e.g. `text/title/0`, `text/body/2`,
   `image/figure/0`, `image/math/1`), plus a **fingerprint**: plain text, PDF bbox, image sha1 of its
