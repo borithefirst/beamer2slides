@@ -856,7 +856,8 @@ class PageClassifier:
                 fraction_part = len(txt) <= 6 and any(
                     b.x0 - 1 <= line.rect.cx <= b.x1 + 1 and min(abs(line.rect.y1 - b.y0), abs(line.rect.y0 - b.y1)) <= 0.6 * line.size
                     and any(m.rect.expand(line.size).intersects(b) for m in maths)
-                    and not any(len(o.text.split()) >= 3 and o.rect.y0 - 1 <= b.y0 <= o.rect.y1 + 1 for o in lines)
+                    and not any(o.reason != "math" and len(o.text.split()) >= 3 and o.rect.y0 - 1 <= b.y0 <= o.rect.y1 + 1
+                                for o in lines)
                     for b in self.bars)
                 small = line.size < 0.9 * self.body or all(s.info.italic for s in line.content)
                 eqno = EQ_NUMBER_RE.match(txt) and any(abs(m.baseline - line.baseline) <= 3 for m in maths)

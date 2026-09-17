@@ -358,6 +358,18 @@ def test_theme_blocks(theme, shadow):
     assert bool(bodies[0].get("shadow")) == shadow
 
 
+def test_blocks_side_by_side_math_and_lists():
+    d = deck("18_blocks_resize")
+    side = [e for e in d["slides"][0]["elements"] if e["kind"] == "shape" and e.get("title_bar")]
+    assert len(side) == 2 and all(e["shadow"]["size"] == 4.0 for e in side)
+    maths = [e for e in d["slides"][1]["elements"] if e["kind"] == "image" and e["role"] == "math"]
+    assert len(maths) == 1, "the display equation, its limits and its fraction are one picture"
+    assert not [e for e in texts(d["slides"][1]) if paragraph_text(e["paragraphs"][0]).strip() in ("0", "1", "3")]
+    assert len([e for e in d["slides"][1]["elements"] if e["kind"] == "shape" and e.get("title_bar")]) == 2
+    numbered = [p for e in texts(d["slides"][2]) for p in e["paragraphs"] if p["bullet"]]
+    assert [p["bullet"]["kind"] for p in numbered] == ["image", "image"], "the last ball grazes the shadow corner"
+
+
 def test_title_page_box_overlapping_parts_is_one_block():
     slide = deck("04_theme_blocks")["slides"][0]
     bodies = [e for e in slide["elements"] if e["kind"] == "shape" and e.get("title_bar")]
