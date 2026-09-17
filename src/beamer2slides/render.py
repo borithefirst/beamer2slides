@@ -274,16 +274,17 @@ def render_backgrounds(pdf: Path, raw: dict, deck: dict, out: Path) -> list[Path
         path = out / "backgrounds" / f"bg-{slide['page'] + 1:03}.png"
         img = eraser.render(zoom)
 
+        px_per_pt = BACKGROUND_WIDTH_PX / slide["size"][0]
         bullets = []
         for el in slide["elements"]:
             for p in el.get("paragraphs", []):
                 b = p["bullet"]
                 if b and b["kind"] == "image":
                     bullets.append(images[b["image"]]["bbox"])
+                    b.setdefault("color", ink_colour(img, b["bbox"], px_per_pt))  # the Slides bullet's colour
                 elif b and b.get("patch"):  # number drawn on a vector box
                     x0, y0, x1, y1 = b["bbox"]
                     bullets.append([x0 - 0.5, y0 - 0.5, x1 + 0.5, y1 + 0.5])
-        px_per_pt = BACKGROUND_WIDTH_PX / slide["size"][0]
         if bullets:
             patch_rects(img, bullets, px_per_pt)
         paint_out_leftovers(img, slide, px_per_pt)
@@ -372,6 +373,22 @@ def paint_out_leftovers(img: np.ndarray, slide: dict, px_per_pt: float) -> None:
             c0, d0 = max(0, int(np.floor(rx0 * px_per_pt)) - 1), max(0, int(np.floor(ry0 * px_per_pt)) - 1)
             c1, d1 = int(np.ceil(rx1 * px_per_pt)) + 1, int(np.ceil(ry1 * px_per_pt)) + 1
             img[d0:d1, c0:c1] = colour.astype(np.uint8)
+
+
+def ink_colour(img: np.ndarray, rect_pt: list[float], px_per_pt: float) -> str | None:
+    """Typical colour of what is drawn in a small area (a shaded ball bullet): the median of
+    the pixels that differ from the page around it."""
+    x0, y0, x1, y1 = rect_pt
+    a0, b0 = max(0, int(np.floor(x0 * px_per_pt))), max(0, int(np.floor(y0 * px_per_pt)))
+    a1, b1 = int(np.ceil(x1 * px_per_pt)), int(np.ceil(y1 * px_per_pt))
+    area = img[b0:b1, a0:a1, :3].reshape(-1, 3).astype(int)
+    ring = np.concatenate([img[max(0, b0 - 3):b0, a0:a1, :3].reshape(-1, 3), img[b1:b1 + 3, a0:a1, :3].reshape(-1, 3)]).astype(int)
+    if not len(area) or not len(ring):
+        return None
+    ink = area[np.abs(area - np.median(ring, axis=0)).sum(axis=1) > 60]
+    if len(ink) < 0.2 * len(area):
+        return None
+    return "#" + "".join(f"{int(v):02x}" for v in np.median(ink, axis=0))
 
 
 def patch_rects(img: np.ndarray, rects_pt: list[list[float]], px_per_pt: float) -> None:

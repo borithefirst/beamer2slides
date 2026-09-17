@@ -51,11 +51,26 @@ MATH_SPACE_EM = 0.278  # TeX's \thickmuskip (5 mu) around relations
 CMTT_ADVANCE_EM, ROBOTO_MONO_ADVANCE_EM = 0.525, 0.6
 
 BULLET_PRESETS = {
-    "arrow": "BULLET_ARROW3D_CIRCLE_SQUARE",  # ➢ is the closest preset glyph to beamer's ▶
-    "disc": "BULLET_DISC_CIRCLE_SQUARE",
     "number": "NUMBERED_DIGIT_ALPHA_ROMAN",
     "number_parens": "NUMBERED_DIGIT_ALPHA_ROMAN_PARENS",
 }
+# A preset's three glyphs are those of nesting levels 0, 1, 2; deeper levels repeat ● ○ ■
+# whatever the preset. A bullet shape is a preset plus the level showing it (bullet_level).
+# Ink height and the gap between ink and indentFirstLine are per em of the bullet's size
+# (tools/probe_bullets.py).
+BULLET_SHAPES = {  # shape: (preset, level, ink height em, gap em)
+    "disc": ("BULLET_DISC_CIRCLE_SQUARE", 0, 0.413, 0.08),
+    "circle": ("BULLET_DISC_CIRCLE_SQUARE", 1, 0.43, 0.08),
+    "square": ("BULLET_DISC_CIRCLE_SQUARE", 2, 0.45, 0.07),
+    "open_square": ("BULLET_CHECKBOX", 0, 0.69, 0.155),  # ❏
+    "triangle": ("BULLET_ARROW3D_CIRCLE_SQUARE", 0, 0.525, 0.07),  # ➢: presets have no ▶
+    "star": ("BULLET_STAR_CIRCLE_SQUARE", 0, 0.81, 0.07),
+    "diamond": ("BULLET_DIAMOND_CIRCLE_SQUARE", 0, 0.81, 0.08),
+    "open_diamond": ("BULLET_DIAMONDX_HOLLOWDIAMOND_SQUARE", 1, 0.87, 0.06),
+}
+GLYPH_SHAPES = {**dict.fromkeys("▶►▸‣", "triangle"), **dict.fromkeys("•●", "disc"), **dict.fromkeys("◦○", "circle"),
+                **dict.fromkeys("■▪", "square"), "□": "open_square", **dict.fromkeys("★⋆", "star"),
+                **dict.fromkeys("◆♦", "diamond"), **dict.fromkeys("◇⋄", "open_diamond")}
 
 
 # Width per em of Computer Modern's optical sizes relative to the 10 pt cut, from the glyph
@@ -143,13 +158,51 @@ class FontMapper:
         return family, round(run["size"] * scale / factor, 1)
 
 
-def bullet_preset(bullet: dict) -> str:
+def bullet_shape(bullet: dict) -> str | None:
+    """The BULLET_SHAPES entry for a bullet; None for numbers."""
     text = bullet.get("text", "")
     if bullet["kind"] == "number" or (bullet["kind"] == "image" and text.isdigit()):
-        return BULLET_PRESETS["number_parens" if ")" in text else "number"]
-    if bullet["kind"] == "glyph" and text in "▶►▸‣":
-        return BULLET_PRESETS["arrow"]
-    return BULLET_PRESETS["disc"]
+        return None
+    if bullet["kind"] == "glyph":
+        return GLYPH_SHAPES.get(text, "disc")
+    return bullet.get("shape") if bullet.get("shape") in BULLET_SHAPES else "disc"
+
+
+def bullet_preset(bullet: dict) -> str:
+    shape = bullet_shape(bullet)
+    if shape is None:
+        return BULLET_PRESETS["number_parens" if ")" in bullet.get("text", "") else "number"]
+    return BULLET_SHAPES[shape][0]
+
+
+def bullet_level(bullet: dict, level: int) -> int:
+    """Slides nesting level: numbers count by depth (1., a., i.), glyphs pick their shape.
+    ● ○ ■ keep the depth (they repeat every 3 levels); other glyphs exist at one level only.
+    (Indents are set explicitly, so the level only decides the glyph and what Tab does.)"""
+    shape = bullet_shape(bullet)
+    if shape is None:
+        return level
+    preset, first = BULLET_SHAPES[shape][:2]
+    return 3 * min(level, 2) + first if preset == "BULLET_DISC_CIRCLE_SQUARE" else first
+
+
+def bullet_size(bullet: dict, size: float, scale: float) -> float:
+    """Font size giving the bullet its PDF height (at most the text's: a larger bullet would
+    push the line down). Glyph and number boxes are font boxes: their size is the font's."""
+    shape = bullet_shape(bullet)
+    if bullet["kind"] in ("glyph", "number") or shape is None:
+        label = bullet.get("label") or {}
+        return round(min(size, label.get("size", size / scale) * scale), 1)
+    height = (bullet["bbox"][3] - bullet["bbox"][1]) * scale
+    return round(max(0.3 * size, min(size, height / BULLET_SHAPES[shape][2])), 1)
+
+
+def bullet_gap(bullet: dict, size: float) -> float:
+    """Distance from the bullet box's right edge to indentFirstLine."""
+    shape = bullet_shape(bullet)
+    if bullet["kind"] in ("glyph", "number") or shape is None:
+        return BULLET_GAP
+    return BULLET_SHAPES[shape][3] * size
 
 
 def rgb(hex_color: str) -> dict:
@@ -349,15 +402,10 @@ def text_box_requests(el: dict, slide_id: str, object_id: str, scale: float, fon
                                                    "shapeProperties": {"contentAlignment": "MIDDLE"}}})
 
     texts =["".join(r["text"] for r in p["runs"]) for p in paras]
-    tabbed = "\n".join(("\t" * p["level"] if p["bullet"] else "") + t for p, t in zip(paras, texts))
-    reqs.append({"insertText": {"objectId": object_id, "text": tabbed, "insertionIndex": 0}})
-
     # Bullets: contiguous ranges with the same preset. createParagraphBullets consumes the
-    # leading tabs (they set the nesting level), so ranges are applied last-to-first.
-    starts_tabbed, pos = [], 0
-    for p, t in zip(paras, texts):
-        starts_tabbed.append(pos)
-        pos += (p["level"] if p["bullet"] else 0) + len(t) + 1
+    # leading tabs and sets nesting levels relative to the range's shallowest paragraph, so a
+    # range whose levels start above 0 begins with a dummy paragraph, deleted right after.
+    levels = [bullet_level(p["bullet"], p["level"]) if p["bullet"] else 0 for p in paras]
     ranges = []
     for i, p in enumerate(paras):
         preset = bullet_preset(p["bullet"]) if p["bullet"] else None
@@ -365,28 +413,48 @@ def text_box_requests(el: dict, slide_id: str, object_id: str, scale: float, fon
             ranges[-1][1] = i
         elif preset:
             ranges.append([i, i, preset])
-    # A bullet keeps the text style it was created with unless its whole paragraph later
-    # shares one style (mixed paragraphs, e.g. with inline math, never update it). So give
-    # every paragraph its base family and size before the bullets exist.
-    for p, start, size in zip(paras, starts_tabbed, base_sizes):
+    dummies = {first for first, last, _ in ranges if min(levels[first:last + 1]) > 0}
+    starts_tabbed, parts, pos = [], [], 0
+    for i, (p, t) in enumerate(zip(paras, texts)):
+        if i in dummies:
+            parts.append("-")
+            pos += 2
+        starts_tabbed.append(pos)
+        parts.append("\t" * levels[i] + t)
+        pos += levels[i] + len(t) + 1
+    reqs.append({"insertText": {"objectId": object_id, "text": "\n".join(parts), "insertionIndex": 0}})
+    # A bullet keeps the text style it was created with, unless a later style request covers
+    # its whole paragraph. So every paragraph first gets its base family and size, bulleted
+    # ones the bullet's size and colour, and the runs are styled below in parts.
+    for i, (p, start, level, size) in enumerate(zip(paras, starts_tabbed, levels, base_sizes)):
         family = fonts(p["runs"][0], scale)[0] if p["runs"] else "Lato"
-        length = (p["level"] if p["bullet"] else 0) + len("".join(r["text"] for r in p["runs"]))
+        length = level + len("".join(r["text"] for r in p["runs"]))
+        style = {"fontFamily": family, "fontSize": pt(size)}
+        if p["bullet"]:
+            style["fontSize"] = pt(bullet_size(p["bullet"], size, scale))
+            color = p["bullet"].get("color") or (p["runs"][0]["color"] if p["runs"] else None)
+            if color:
+                style["foregroundColor"] = rgb(color)
         if length:
             reqs.append({"updateTextStyle": {
-                "objectId": object_id, "fields": "fontFamily,fontSize",
-                "style": {"fontFamily": family, "fontSize": pt(size)},
-                "textRange": {"type": "FIXED_RANGE", "startIndex": start, "endIndex": start + length},
+                "objectId": object_id, "fields": ",".join(style), "style": style,
+                "textRange": {"type": "FIXED_RANGE", "startIndex": start - (2 if i in dummies else 0),
+                              "endIndex": start + length},
             }})
     for first, last, preset in reversed(ranges):
-        end = starts_tabbed[last] + (paras[last]["level"]) + len(texts[last])
+        start = starts_tabbed[first] - (2 if first in dummies else 0)
+        end = starts_tabbed[last] + levels[last] + len(texts[last])
         reqs.append({"createParagraphBullets": {
             "objectId": object_id, "bulletPreset": preset,
-            "textRange": {"type": "FIXED_RANGE", "startIndex": starts_tabbed[first], "endIndex": end},
+            "textRange": {"type": "FIXED_RANGE", "startIndex": start, "endIndex": end},
         }})
+        if first in dummies:
+            reqs.append({"deleteText": {"objectId": object_id,
+                                        "textRange": {"type": "FIXED_RANGE", "startIndex": start, "endIndex": start + 2}}})
 
     # From here on indices refer to the final text, without tabs.
     pos = 0
-    for p, t, ratio, above in zip(paras, texts, ratios, space_above):
+    for p, t, ratio, above, base in zip(paras, texts, ratios, space_above, base_sizes):
         p_start, p_end = pos, pos + len(t)
         pos = p_end + 1
         start = p_start
@@ -413,18 +481,23 @@ def text_box_requests(el: dict, slide_id: str, object_id: str, scale: float, fon
             elif run["link"]:
                 style["link"] = {"url": run["link"]}
                 fields += ",link"
-            reqs.append({"updateTextStyle": {
-                "objectId": object_id, "style": style, "fields": fields,
-                "textRange": {"type": "FIXED_RANGE", "startIndex": start, "endIndex": start + len(run["text"])},
-            }})
-            start += len(run["text"])
+            end = start + len(run["text"])
+            # (one request over the whole paragraph would restyle its bullet too)
+            cuts = [start, end - 1, end] if p["bullet"] and start == p_start and end == p_end and end - start > 1 else [start, end]
+            for c0, c1 in zip(cuts, cuts[1:]):
+                reqs.append({"updateTextStyle": {
+                    "objectId": object_id, "style": style, "fields": fields,
+                    "textRange": {"type": "FIXED_RANGE", "startIndex": c0, "endIndex": c1},
+                }})
+            start = end
 
         # Code lines carry their indentation as leading spaces already.
         # Centred and right-aligned paragraphs place themselves: an indent would only offset them.
         text_indent = 0.0 if el.get("code") or p["align"] != "left" else (p["text_x0"] - left_pdf) * scale
         if p["bullet"]:
-            # Slides ends the bullet glyph BULLET_GAP before indentFirstLine, whatever the glyph.
-            first_indent = (p["bullet"]["bbox"][2] - left_pdf) * scale + BULLET_GAP
+            # Slides ends the bullet glyph a little before indentFirstLine.
+            first_indent = (p["bullet"]["bbox"][2] - left_pdf) * scale + \
+                bullet_gap(p["bullet"], bullet_size(p["bullet"], base, scale))
         elif p.get("tab_x0") and not el.get("code"):
             # "label<TAB>content": a tab after the hanging label jumps to indentStart.
             first_indent, text_indent = text_indent, (p["tab_x0"] - left_pdf) * scale

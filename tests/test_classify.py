@@ -429,3 +429,88 @@ def test_theme_sweep_floors(theme, floor):
     assert all("unsure" not in {l["reason"] for l in s["left_in_background"]} for s in d["slides"])
     tables = [e for s in d["slides"] for e in s["elements"] if e["kind"] == "table"]
     assert len(tables) == 1 and len(tables[0]["cells"]) == 4
+
+
+# bullet shapes
+
+def bullets(slide: dict) -> list[dict]:
+    return [p["bullet"] for e in texts(slide) for p in e["paragraphs"] if p["bullet"]]
+
+
+def test_outline_squares_keep_shape_and_colour():
+    slide = deck("19_labels_on_graphics")["slides"][5]
+    assert [(b["kind"], b["shape"], b["color"]) for b in bullets(slide)] == [("shape", "square", "#3333b3")] * 2
+
+
+def test_itemize_templates_keep_shape_and_colour():
+    d = deck("21_bullet_shapes")
+    assert {(b["kind"], b["text"], b["color"]) for b in bullets(d["slides"][0])} == {("glyph", "▶", "#3333b3")}
+    assert {(b["kind"], b["text"], b["color"]) for b in bullets(d["slides"][1])} == {("glyph", "•", "#ff0000")}
+    squares = bullets(d["slides"][2])
+    assert len(squares) == 4 and {(b["shape"], b["color"]) for b in squares} == {("square", "#008000")}
+    assert [b["kind"] for b in bullets(d["slides"][3])] == ["image"] * 4
+
+
+def test_custom_item_labels():
+    slide = deck("21_bullet_shapes")["slides"][4]
+    assert not slide["left_in_background"], "star and diamond items are not figure labels"
+    icons = [e for e in slide["elements"] if e["kind"] == "image" and e["role"] == "icon"]
+    assert len(icons) == 3 and all(e.get("anchor") for e in icons), "dingbats and the picture move with their item"
+    paras = {paragraph_text(p): p for e in texts(slide) for p in e["paragraphs"]}
+    assert paras["A pointing hand"]["tab_x0"] is None and paras["A pointing hand"]["text_x0"] > 30
+    assert paras["⋆\tA blue star"]["tab_x0"]
+
+
+def test_roman_numbers_on_circles_and_label_tabs():
+    d = deck("21_bullet_shapes")
+    assert ball_labels(d["slides"][5]) == ["i", "ii", "iii", "iv"]
+    paras = [paragraph_text(p) for e in texts(d["slides"][8]) for p in e["paragraphs"]]
+    assert "Later\tShown from the second step" in paras, "a description item after an unlabelled one"
+    q = next(p for e in texts(deck("19_labels_on_graphics")["slides"][4]) for p in e["paragraphs"]
+             if paragraph_text(p).startswith("Q:"))
+    assert q["tab_x0"] and paragraph_text(q) == "Q:\tA question label"
+
+
+def test_outline_entries_ending_together_stay_apart():
+    slide = deck("21_bullet_shapes")["slides"][10]
+    paras = [paragraph_text(p) for e in texts(slide) if e["role"] == "body" for p in e["paragraphs"]]
+    assert paras[-3:] == ["Outline", "Balls", "Circles"]
+
+
+def test_bibliography_icons_are_pictures_not_bullets():
+    slide = load(THEMES / "default" / "talk.pdf")["slides"][7]
+    assert not bullets(slide)
+    icons = [e for e in slide["elements"] if e["kind"] == "image" and e["role"] == "icon"]
+    assert len(icons) == 2 and all(e.get("anchor") for e in icons)
+
+
+def test_bullet_glyph_levels_and_sizes():
+    from beamer2slides.emit import BULLET_SHAPES, bullet_level, bullet_preset, bullet_size
+
+    square = {"kind": "shape", "shape": "square", "bbox": [0, 0, 4.85, 4.85]}
+    triangle = {"kind": "glyph", "text": "▶", "bbox": [0, 0, 8, 11], "label": {"size": 10.91}}
+    assert bullet_preset(square) == "BULLET_DISC_CIRCLE_SQUARE" and [bullet_level(square, k) for k in range(3)] == [2, 5, 8]
+    assert bullet_preset(triangle) == "BULLET_ARROW3D_CIRCLE_SQUARE" and bullet_level(triangle, 2) == 0
+    assert bullet_level({"kind": "number", "text": "a."}, 1) == 1
+    assert bullet_size(square, 17.0, 1.5) == round(4.85 * 1.5 / BULLET_SHAPES["square"][2], 1)
+    assert bullet_size({**square, "bbox": [0, 0, 20, 20]}, 17.0, 1.5) == 17.0, "never larger than the text"
+
+
+def test_bullet_requests_keep_bullet_style():
+    from beamer2slides.emit import FontMapper, text_box_requests
+
+    run = {"text": "First part", "font": "CMSS10", "family": "sans", "size": 10.91, "bold": False, "italic": False,
+           "smallcaps": False, "color": "#000000", "link": None, "script": None}
+    para = {"align": "left", "level": 1, "size": 10.91, "text_x0": 35.15, "tab_x0": None, "wrap_limit": None,
+            "bullet": {"kind": "shape", "shape": "square", "color": "#3333b3", "bbox": [25.46, 92.78, 30.3, 97.63]},
+            "lines": [{"baseline": 97.63, "x0": 35.15, "x1": 77.65}], "runs": [run]}
+    el = {"id": "t", "kind": "text", "role": "body", "paragraphs": [para, {**para, "runs": [{**run, "text": "Second"}]}]}
+    reqs = text_box_requests(el, "s", "b", 1.5, FontMapper())
+    assert reqs[1]["insertText"]["text"] == "-\n" + "\t" * 5 + "First part\n" + "\t" * 5 + "Second"
+    kinds_ = [next(iter(r)) for r in reqs]
+    assert kinds_.index("createParagraphBullets") + 1 == kinds_.index("deleteText"), "the dummy goes right after"
+    assert reqs[kinds_.index("deleteText")]["deleteText"]["textRange"] == {"type": "FIXED_RANGE", "startIndex": 0, "endIndex": 2}
+    before = reqs[2]["updateTextStyle"]["style"]
+    assert before["foregroundColor"]["opaqueColor"]["rgbColor"]["blue"] > 0.6
+    styled = [r["updateTextStyle"]["textRange"] for r in reqs[kinds_.index("deleteText"):] if "updateTextStyle" in r]
+    assert all((t["startIndex"], t["endIndex"]) not in ((0, 10), (11, 17)) for t in styled), "no request covers a whole item"

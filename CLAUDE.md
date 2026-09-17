@@ -37,6 +37,13 @@ a per-slide background picture.
   math as runs with sub/superscripts, links (external URLs and `#page=N` internal links →
   Slides page links), code blocks. Frame titles, the title page title and big lone headings
   use the layout's TITLE placeholder (role `title`).
+- Bullet shapes (`emit.BULLET_SHAPES`, `tools/probe_bullets.py`): bullets keep their PDF colour
+  and height (ball colour sampled in render, `ink_colour`; vector bullets' shape from their path,
+  `classify.bullet_shape`). The glyph is a preset plus a nesting level (`emit.bullet_level`: ● ○ ■
+  repeat below level 3, other glyphs exist at one level only); ranges starting deeper than level 0
+  get a dummy first paragraph. Icon-font labels (`\ding`), unrecognised vector bullets (the
+  bibliography icon) and `\includegraphics` labels become pictures anchored to their item.
+  Short labels ending where a neighbour's hanging label ends get its tab (`label_tabs`).
 - `image`: figure regions (TikZ, plots, raster images, plus their labels) cropped as pictures.
 - `table`: text framed by equal-width horizontal rules (`\hline`/booktabs), with optional
   vertical and partial rules (→ per-cell `borders`) and merged cells (`merges`: chunks
@@ -196,9 +203,9 @@ black = both.
   undone after each render, so crops and backgrounds share one open page.
 - Ball bullets are patched out of the PNG (themes draw them with soft masks shared with shadows).
 - Slides ignores spaceAbove/spaceBelow between bulleted list items (see docs/calibration.md).
-- A bullet keeps the text style from when it was created, unless its whole paragraph later
-  gets one uniform style. Set each paragraph's base family and size *before*
-  createParagraphBullets, or mixed-style paragraphs get oversized 18 pt default bullets.
+- A bullet keeps the text style from when it was created, unless one later style request covers
+  its whole paragraph. Set each paragraph's family, size and colour *before*
+  createParagraphBullets, or bullets get oversized 18 pt default bullets.
 - Inline math: `classify.math_kind` sends lines with fractions, radicals, big operators,
   stacked or second-level scripts, or formula-like density to the background. Everything else becomes runs
   with `script` super/sub and Unicode symbols (MSBM → ℝ).
@@ -209,7 +216,9 @@ black = both.
   not settable); empty cells count with the default font unless given a styled space.
 - Layout pages reject `pageBackgroundFill.propertyState = INHERIT`; set the fill explicitly.
 - Pixel checks on hairline shapes need a high zoom (`render._fill_fraction`).
-- Bullet colour/size can't be set independently (see docs/calibration.md).
+- Bullet colour/size can be set independently only through creation order: style the paragraph
+  like the bullet, create bullets, then style the text in two or more requests (a single request
+  over the whole paragraph restyles its bullet too). See docs/calibration.md.
 - Page labels can come back as raw `<FEFF...>` hex strings; `extract._label` decodes them.
 - PowerShell 5.1 mangles double quotes inside native-command arguments: keep them out of
   git commit messages passed via here-strings. `Get-Content -Raw` reads BOM-less UTF-8 as ANSI:

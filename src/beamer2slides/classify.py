@@ -370,6 +370,26 @@ def label_of(spans: list[Span]) -> dict | None:
             "bold": s.info.bold, "italic": s.info.italic, "color": s.color}
 
 
+def bullet_shape(d: dict | None) -> dict:
+    """Shape and colour of a bullet drawn as a path (emit picks the Slides glyph): a filled
+    rectangle is a square, curves are a disc (a circle when only stroked), three corners a
+    triangle."""
+    if not d:
+        return {}
+    filled = d["type"] in ("f", "fs") and d.get("fill")
+    ops = set(d["items"])
+    points = {(round(x, 1), round(y, 1)) for op, pts in d.get("path", []) for x, y in pts}
+    if ops <= {"r", "e", "q", "u"}:
+        shape = "square" if filled else "open_square"
+    elif "c" in ops:
+        shape = "disc" if filled else "circle"
+    elif ops == {"l"} and len(points) == 3:
+        shape = "triangle"
+    else:
+        return {}
+    return {"shape": shape, "color": d["fill"] if filled else d.get("stroke") or "#000000"}
+
+
 def math_content(line: "Line") -> list[Span]:
     """The spans math analysis looks at: a hanging label before a tab ("a)" on a ball) is not math."""
     if line.tab is None:
@@ -488,6 +508,7 @@ class PageClassifier:
         self.bars: list[Rect] = []
         self.small_images: list[tuple[dict, Rect]] = []
         self.leftovers: list[dict] = []
+        self.icon_bullets: list[Rect] = []  # item labels that became pictures
 
     # -- graphics -------------------------------------------------------------
 
@@ -573,6 +594,7 @@ class PageClassifier:
         graphics = []
         rules: dict[tuple[int, int], list[Rect]] = {}
         self.decorations: list[Rect] = []
+        self.graphic_paths: dict[tuple, dict] = {}  # graphic box -> its drawing
         for d in self.page["drawings"]:
             if d["id"] in self.decor_ids:
                 continue
@@ -594,7 +616,8 @@ class PageClassifier:
                 self.bars.append(r)  # fraction bars, radical overbars (long ones start at their radical sign)
             else:
                 graphics.append(r)
-                stroke_rule = d["type"] == "s" and r.h <= 1.0 and set(d["items"]) <= {"l"}
+                self.graphic_paths.setdefault(tuple(r.as_list()), d)
+                stroke_rule =d["type"] == "s" and r.h <= 1.0 and set(d["items"]) <= {"l"}
                 fill_rule = fill_only and r.h <= 1.5 and r.w >= 20  # booktabs rules are thin filled boxes
                 if stroke_rule or fill_rule:
                     rules.setdefault((round(r.x0), round(r.x1)), []).append({
@@ -752,10 +775,14 @@ class PageClassifier:
                     if spans[k].rect.x0 - spans[k - 1].rect.x1 >= 0.2 * line.size
                     and spans[k - 1].rect.x1 - spans[0].rect.x0 <= 0.45 * width}
 
-        for a, b in zip(out, out[1:]):
+        # (an item without a label may sit between two labelled ones)
+        for k, i in [(k, i) for k in (1, 2) for i in range(len(out) - k)]:
+            a, b = out[i], out[i + k]
             if a.tab is not None and b.tab is not None:
                 continue
-            if abs(a.size - b.size) > 0.5 or not 0 < b.baseline - a.baseline <= 2.5 * a.size:
+            if abs(a.size - b.size) > 0.5 or not 0 < b.baseline - a.baseline <= 2.5 * k * a.size:
+                continue
+            if k == 2 and out[i + 1].tab is not None:
                 continue
             if abs(a.spans[0].rect.x0 - b.spans[0].rect.x0) <= 0.6:
                 continue  # labels start together: ordinary text already lines up the same way
@@ -789,7 +816,13 @@ class PageClassifier:
             gap = nxt.rect.x0 - first.rect.x1
             token = first.text.strip()
             on_ball = any(ir.contains(first.rect.cx, first.rect.cy) for _, ir in self.small_images)
-            lettered = ENUM_RE.match(token) and not any(ch.isdigit() for ch in token)  # a) (b) iv.
+            if first.info.family == "icon" and gap >= 0.25 * line.size and max(first.rect.w, first.rect.h) <= 1.6 * line.size:
+                # \item[\ding{43}]: no Slides glyph, and the font's glyph stays in the background.
+                # classify turns it into a picture grouped with the item text.
+                line.bullet = {"kind": "icon", "text": "", "bbox": first.rect.as_list(), "spans": [first.id]}
+                line.bullet_spans, line.tab = [first], None
+                return
+            lettered =ENUM_RE.match(token) and not any(ch.isdigit() for ch in token)  # a) (b) iv.
             if gap >= 0.25 * line.size and ((token in LABEL_GLYPHS - PRESET_GLYPHS) or lettered) and not on_ball:
                 # \item[--], \item[\checkmark]: Slides has no such bullet preset. The glyph stays
                 # literal text, and a tab reaches the item text (hanging indent).
@@ -803,7 +836,7 @@ class PageClassifier:
                 return
             # Numbers drawn on a small box or circle (e.g. Bergen's enumerate): the box is
             # patched out of the background and replaced by a native numbered bullet.
-            if gap >= 0.25 * line.size and re.fullmatch(r"[0-9]{1,2}|[a-zA-Z]", token):
+            if gap >= 0.25 * line.size and re.fullmatch(r"[0-9]{1,3}|[a-zA-Z]|[ivxl]{1,5}|[IVXL]{1,5}", token):
                 for g in self.graphics:
                     if g.w <= 1.6 * line.size and g.h <= 1.6 * line.size and g.contains(first.rect.cx, first.rect.cy):
                         line.bullet = {"kind": "number", "text": token, "color": first.color,
@@ -815,7 +848,7 @@ class PageClassifier:
         for im, ir in self.small_images:
             # A block shadow's corner piece may just graze a ball at the bottom of a block.
             if not 0.8 <= ir.w / max(ir.h, 0.01) <= 1.25 or \
-                    any(o is not im and max(orr.w, orr.h) <= 20 and overlap(orr, ir) > 0.2 * ir.w * ir.h
+                    any(o is not im and max(orr.w, orr.h) <= 20 and (overlap(orr, ir) > 0.2 * ir.w * ir.h or ir.contains_rect(orr))
                         for o, orr in self.small_images):
                 continue  # icons (beamer's bibliography article, composite images): kept as pictures
             on_image = [s for s in spans if ir.expand(0.5).contains(s.rect.cx, s.rect.cy)]
@@ -838,8 +871,31 @@ class PageClassifier:
             if 0.25 * line.size <= g.w <= 1.3 * line.size and 0.25 * line.size <= g.h <= 1.6 * line.size \
                     and g.x1 <= x0 + 0.5 and x0 - g.x1 <= 1.5 * line.size \
                     and line.baseline - 0.9 * line.size <= g.cy <= line.baseline + 0.1 * line.size:
-                line.bullet = {"kind": "shape", "text": "", "bbox": g.as_list(), "patch": True}
+                shape = bullet_shape(self.graphic_paths.get(tuple(g.as_list())))
+                if shape:
+                    line.bullet = {"kind": "shape", "text": "", "bbox": g.as_list(), "patch": True, **shape}
+                else:  # no Slides glyph looks like it (beamer's bibliography icon): a picture
+                    icon = union_all([g] + [ir for _, ir in self.small_images if ir.intersects(g)])
+                    line.bullet = {"kind": "icon", "text": "", "bbox": icon.as_list(), "spans": []}
                 return
+
+    @staticmethod
+    def label_tabs(lines: list[Line]) -> None:
+        """Any short label (\\item[\\textbf{Q:}]) ending where a neighbouring item's hanging label
+        ends, with its text starting where that item's text does, hangs the same way."""
+        tabbed = [l for l in lines if l.tab is not None and l.reason is None]
+        for line in lines:
+            if line.reason is not None or line.tab is not None or line.bullet or len(line.spans) < 2:
+                continue
+            label, text = line.spans[0], line.spans[1]
+            if len(label.text.strip()) > 6 or text.rect.x0 - label.rect.x1 < 0.25 * line.size:
+                continue
+            for other in tabbed:
+                before = [s for s in other.spans if s.rect.x1 <= other.tab.rect.x0]
+                if before and abs(other.baseline - line.baseline) <= 5 * line.size and abs(other.size - line.size) <= 0.5 \
+                        and abs(other.tab.rect.x0 - text.rect.x0) <= 0.6 and abs(before[-1].rect.x1 - label.rect.x1) <= 0.6:
+                    line.tab = text
+                    break
 
     def continues_prose(self, line: Line) -> bool:
         """A short all-math line that is really the wrapped end of a text line above it
@@ -1023,6 +1079,7 @@ class PageClassifier:
         for line in lines:
             if line.reason is None:
                 self.detect_bullet(line)
+        self.label_tabs(lines)
 
         # Short labels next to figures (axis ticks, axis labels) belong to the figure.
         regions = list(self.regions)
@@ -1030,7 +1087,7 @@ class PageClassifier:
         while changed:
             changed = False
             for line in lines:
-                if line.reason is None and not line.bullet and len(line.text.replace(" ", "")) <= 12 and \
+                if line.reason is None and not line.bullet and line.tab is None and len(line.text.replace(" ", "")) <= 12 and \
                         line.size <= 1.15 * self.body and \
                         any(reg.distance(line.rect) <= 0.8 * line.size for reg in regions):
                     line.reason = "figure"
@@ -1117,8 +1174,8 @@ class PageClassifier:
             return "left"
         if center and par.align in ("left", "center") and len(par.lines) == 1 or par.align == "center" and center:
             return "center"
-        if right:
-            return "right"
+        if right and (len(par.lines) > 1 or not par.bullet and line.main.color == last.main.color):
+            return "right"  # (a TOC section and its first subsection may end together by chance)
         return None
 
     def single_line_align(self, line: Line, margin: float) -> str:
@@ -1466,6 +1523,7 @@ class PageClassifier:
 
         rects = [ir for im, ir in self.small_images
                  if im["id"] not in bullets and max(ir.w, ir.h) <= 20 and min(ir.w, ir.h) >= 3
+                 and not any(b.contains_rect(ir) for b in self.icon_bullets)
                  and 0.15 * self.H < ir.cy < 0.88 * self.H and not self.on_edge_artwork(ir)
                  and not any(p["bbox"].expand(1).intersects(ir) for p in self.panels)]  # block shadow pieces
         rects = [c for c in cluster_rects(rects, gap=0.0) if beside_text(c)]
@@ -1473,6 +1531,11 @@ class PageClassifier:
         for c in rects:
             out.append({"id": f"p{self.page['index']}ic{len(out)}", "kind": "image", "role": "icon",
                         "bbox": c.expand(0.5).as_list(), "spans": []})
+            # A picture as an item label (\item[\includegraphics...]) moves with its item.
+            item = next((e["id"] for e in text_elements for p in e["paragraphs"] for l in p["lines"][:1]
+                         if 0 <= l["x0"] - c.x1 <= 1.5 * p["size"] and l["baseline"] - p["size"] < c.cy < l["baseline"]), None)
+            if item:
+                out[-1]["anchor"] = item
         return out
 
     def specks_on_panels(self, spans: list[Span], elements: list[dict]) -> list[dict]:
@@ -2084,6 +2147,15 @@ class PageClassifier:
             hole_pictures.append({"id": f"p{n}h{len(hole_pictures)}", "kind": "image", "role": "math",
                                   "bbox": rect.expand(HOLE_PAD).as_list(), "spans": [s.id for s in h],
                                   "anchor": anchor})  # grouped with this text element
+        self.icon_bullets = [Rect.of(p["bullet"]["bbox"]) for e in elements for p in e["paragraphs"]
+                             if p["bullet"] and p["bullet"]["kind"] == "icon"]
+        for e in elements:  # icon bullets: pictures grouped with their item
+            for p in e["paragraphs"]:
+                if p["bullet"] and p["bullet"]["kind"] == "icon":
+                    hole_pictures.append({"id": f"p{n}u{len(hole_pictures)}", "kind": "image", "role": "icon",
+                                          "bbox": Rect.of(p["bullet"]["bbox"]).expand(0.5).as_list(),
+                                          "spans": p["bullet"]["spans"], "anchor": e["id"]})
+                    p["bullet"] = None
 
         text_spans = {sid for e in elements for sid in e["spans"]}
         elements = self.figures(lines, elements) + self.icons(elements) + hole_pictures + plain_tables + elements  # pictures below text
