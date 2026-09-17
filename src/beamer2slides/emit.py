@@ -458,12 +458,16 @@ def fit_columns(bounds: list[float], cols: list[dict], scale: float) -> list[flo
     Slides cell padding, with a little room for the substitute font. Tables typeset with
     @{} have text touching the frame, which would otherwise wrap in Slides."""
     pad = TABLE_CELL_PAD / scale
-    room = [0.04 * (c["x1"] - c["x0"]) + 1 / scale for c in cols]
+    # Text grows away from its alignment edge: room on the right of left-aligned columns, on
+    # the left of right-aligned ones, half on each side of centred ones.
+    room = [0.08 * (c["x1"] - c["x0"]) + 1 / scale for c in cols]
+    right = [r if c["align"] == "left" else r / 2 if c["align"] == "center" else 0.0 for c, r in zip(cols, room)]
+    left = [r if c["align"] == "right" else r / 2 if c["align"] == "center" else 0.0 for c, r in zip(cols, room)]
     out = list(bounds)
-    out[0] = min(out[0], cols[0]["x0"] - pad)
-    out[-1] = max(out[-1], cols[-1]["x1"] + pad + room[-1])
+    out[0] = min(out[0], cols[0]["x0"] - pad - left[0])
+    out[-1] = max(out[-1], cols[-1]["x1"] + pad + right[-1])
     for i in range(1, len(cols)):
-        lo, hi = cols[i - 1]["x1"] + pad + room[i - 1], cols[i]["x0"] - pad
+        lo, hi = cols[i - 1]["x1"] + pad + right[i - 1], cols[i]["x0"] - pad - left[i]
         out[i] = min(max(out[i], lo), hi) if lo <= hi else (lo + hi) / 2
     return out
 
@@ -611,11 +615,12 @@ def table_requests(el: dict, slide_id: str, object_id: str, scale: float, fonts:
                 if not piece:
                     continue
                 style, fields = fonts.text_style(run, scale)
-                style.update({"smallCaps": run["smallcaps"], "foregroundColor": rgb(run["color"])})
+                style.update({"smallCaps": run["smallcaps"], "foregroundColor": rgb(run["color"]),
+                              "baselineOffset": {"super": "SUPERSCRIPT", "sub": "SUBSCRIPT"}.get(run.get("script"), "NONE")})
                 reqs.append({"updateTextStyle": {
                     "objectId": object_id, "cellLocation": loc,
                     "textRange": {"type": "FIXED_RANGE", "startIndex": start, "endIndex": min(len(text), start + len(piece))},
-                    "style": style, "fields": ",".join(fields + ["smallCaps", "foregroundColor"])}})
+                    "style": style, "fields": ",".join(fields + ["smallCaps", "foregroundColor", "baselineOffset"])}})
                 start += len(piece)
             col = cols[c]
             align = col["align"]

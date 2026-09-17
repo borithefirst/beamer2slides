@@ -238,7 +238,7 @@ def math_text(font: str, text: str) -> tuple[str, bool]:
     if name.startswith("MSBM"):  # \mathbb
         return "".join(DOUBLE_STRUCK.get(c, chr(0x1D538 + ord(c) - 65) if "A" <= c <= "Z" else c)
                        for c in text), False
-    out, italic = [], name.startswith("CMMI")
+    out, italic = [], name.startswith("CMMI") and any(c.isalpha() for c in text)
     for c in text:
         uname = unicodedata.name(c, "")
         if uname.startswith("MATHEMATICAL ITALIC "):  # OpenType math fonts: 𝑥 -> x, italic
@@ -269,15 +269,25 @@ def reading_order(line: "Line") -> list[tuple]:
 
 
 def span_runs(spans: list[Span]) -> list[dict]:
-    """Runs for a short piece of text given as spans in reading order (cells, node labels)."""
+    """Runs for a short piece of text given as spans in reading order (cells, node labels).
+    Simple math works as in text lines: symbols from math fonts, sub/superscripts."""
     runs: list[dict] = []
+    main = max(spans, key=lambda s: s.size) if spans else None
+    base_family = next((s.info.family for s in spans if s.info.family not in ("math", "icon")), "sans")
     for i, s in enumerate(spans):
         text = s.text
         if i and s.rect.x0 - spans[i - 1].rect.x1 > 0.15 * s.size and not text.startswith(" "):
             text = " " + text
-        style = {"font": s.font, "family": s.info.family, "size": round(s.size, 2), "bold": s.info.bold,
-                 "italic": s.info.italic, "smallcaps": s.info.smallcaps, "color": s.color,
-                 "link": s.link, "script": None, "underline": s.underline, "highlight": s.highlight}
+        family, italic, script = s.info.family, s.info.italic, None
+        if family == "math":
+            family = base_family
+            text, italic = math_text(s.font, text)
+        if s.size < 0.85 * main.size:
+            shift = s.baseline - main.baseline
+            script = "super" if shift < -0.12 * main.size else "sub" if shift > 0.12 * main.size else None
+        style = {"font": s.font, "family": family, "size": round(main.size if script else s.size, 2),
+                 "bold": s.info.bold, "italic": italic, "smallcaps": s.info.smallcaps, "color": s.color,
+                 "link": s.link, "script": script, "underline": s.underline, "highlight": s.highlight}
         if runs and all(runs[-1][k] == v for k, v in style.items()):
             runs[-1]["text"] += text
         else:
@@ -1336,7 +1346,8 @@ class PageClassifier:
         if vertical:
             frame = union_all([frame] + [v["rect"] for v in vertical])
         spans = sorted((s for s in label_spans if box.contains_rect(s.rect)), key=lambda s: s.baseline)
-        if not spans or any(s.info.family == "math" or not s.horizontal for s in spans):
+        if not spans or any(not s.horizontal or s.font.upper().startswith("CMEX") or "�" in s.text for s in spans) or \
+                any(box.contains_rect(b) for b in self.bars):  # big operators, fractions: keep the picture
             return None
         size = max(s.size for s in spans)
 
@@ -1344,7 +1355,8 @@ class PageClassifier:
         # spanning both of them.
         rows: list[list[Span]] = []
         for s in spans:
-            if rows and abs(s.baseline - rows[-1][0].baseline) <= 0.5 * s.size:
+            anchor = max(rows[-1], key=lambda x: x.size) if rows else None  # the row's normal-size text
+            if rows and abs(s.baseline - anchor.baseline) <= 0.5 * max(s.size, anchor.size):
                 rows[-1].append(s)
             else:
                 rows.append([s])
@@ -1451,7 +1463,7 @@ class PageClassifier:
             col_info.append({"x0": round(x0, 2), "x1": round(x1, 2), "align": align})
         rows = grid_rows
 
-        baselines = [statistics.fmean(s.baseline for s in row if s.size >= 0.9 * size) for row in rows]
+        baselines = [statistics.fmean(s.baseline for s in row if s.size >= 0.9 * max(x.size for x in row)) for row in rows]
 
         # Borders: rules across the whole table stay row rules; partial rules (\cline,
         # \cmidrule) and vertical rules become the borders of the cells they run along.

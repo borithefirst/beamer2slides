@@ -218,6 +218,17 @@ def test_shaded_table_cells_become_fills():
     assert (1, 0) not in fills  # white rows stay unfilled
 
 
+def test_simple_math_in_table_cells():
+    slide = deck("16_colored_table")["slides"][1]
+    table = [e for e in slide["elements"] if e["kind"] == "table"]
+    assert len(table) == 1, "inline math in cells keeps the table native"
+    cells = [[paragraph_text({"runs": c}) for c in row] for row in table[0]["cells"]]
+    assert cells[1:] == [["α", "0.5", "±0.01"], ["λmax", "10−3", "±2 × 10−4"]]
+    scripts = [("".join(r["text"] for r in c if r["script"]), {r["script"] for r in c if r["script"]})
+               for c in table[0]["cells"][2]]
+    assert scripts == [("max", {"sub"}), ("−3", {"super"}), ("−4", {"super"})]
+
+
 def test_tabular_without_rules_is_a_borderless_table():
     slide = deck("15_plain_tabular")["slides"][0]
     tables = [e for e in slide["elements"] if e["kind"] == "table"]
