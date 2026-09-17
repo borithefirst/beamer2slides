@@ -238,7 +238,7 @@ def _vertical_pass(paras, baselines, sizes, estimate):
         if has_next:
             natural = pitch_between(z, r, sizes[i + 1], next_r)
             if not list_link:
-                gap = baselines[i + 1][0] - last - natural
+                gap = baselines[i + 1][0] - last - pitch_between(z, r, sizes[i + 1], 1.0)
                 nxt = paras[i + 1]
                 free = len(baselines[i + 1]) == 1 and not (nxt["bullet"] and i + 2 < len(paras) and paras[i + 2]["bullet"])
                 if gap < -PX_PT and free:
