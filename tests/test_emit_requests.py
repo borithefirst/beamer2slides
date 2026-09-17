@@ -15,8 +15,8 @@ import pytest
 from beamer2slides import emit
 from beamer2slides.classify import HOLE_PAD, classify
 from beamer2slides.emit import (EMU_PER_PT, HOLE_FONT, HOLE_SPACE_EM, SLIDE_W, FontMapper, find_marks, fit_holes,
-                                formula_shifts, hole_jobs, hole_offset, hole_run, mark_alpha, number_box_requests,
-                                overlay_boxes, pick_gap, slide_holes, space_shift)
+                                formula_shifts, hole_offset, hole_run, mark_alpha, number_box_requests,
+                                measure_jobs, overlay_boxes, pick_gap, slide_holes, space_shift)
 from beamer2slides.extract import extract, select_overlays
 from beamer2slides.notes import prepare
 
@@ -105,7 +105,7 @@ class Emitted:
                 self.texts[e["objectId"]] = ""
             self.create(self.result["speaker_notes"][slide_id], slide_id, "import")
         for r in self.result["measure"]:
-            self.apply(r, "measure_holes")
+            self.apply(r, "measure_places")
         for slide_id, page, parts, _ in self.result["slides"]:
             for el, reqs in parts:
                 where = f"{slide_id} {el['id'] if el else ''}".strip()
@@ -417,6 +417,31 @@ def test_predicted_pictures_stay_near_their_pdf_place(decks):
     assert not found, report(found)
 
 
+def test_overlay_marks_highlight_their_words_on_the_scratch_slide(decks):
+    """Every mark of an overlay lies on a word found in its anchor's text box (measure_places
+    highlights it): a right edge's word is the last word before it."""
+    found = []
+    for d in decks:
+        plan = d.plan
+        _, jobs = measure_jobs(plan.deck, plan.scale, plan.fonts, plan.placed, plan.page_slide)
+        for sid, page, _, overlays in jobs:
+            texts = {e["id"]: e for e in d.slides[page]["elements"] if e["kind"] == "text"}
+            for o in overlays:
+                pic = o["pic"]
+                text = "\n".join(emit.slides_texts(texts[pic["anchor"]], plan.scale, plan.fonts))
+                where = f"{d.name} page {page + 1} {pic['id']}"
+                marks = [i for w in o["words"] for i, _ in w["marks"]]
+                if sorted(marks) != list(range(len(pic["marks"]))):
+                    found.append(f"{where}: marks {sorted(marks)} of {len(pic['marks'])} on words")
+                for w in o["words"]:
+                    for i, side in w["marks"]:
+                        word = pic["marks"][i]["before"][-1][5] if side else None
+                        got = text[w["range"][0]:w["range"][1]]
+                        if side and " ".join(word.split()) != " ".join(got.split()):
+                            found.append(f"{where}: mark {i} ends {word!r}, highlighted {got!r}")
+    assert not found, report(found)
+
+
 def test_bullets_are_styled_before_they_are_created(decks):
     """A bullet keeps the style its paragraph had when it was created (CLAUDE.md pitfall): family,
     size and colour first, bullets next, then runs in parts that never cover a whole item."""
@@ -665,10 +690,72 @@ def test_a_braced_formula_is_measured_on_its_text_line(label):
     slide = {"page": 0, "size": [453.54, 255.12], "elements": [
         {"id": "p0h0", "kind": "image", "anchor": "p0t0", "bbox": pic_box},
         {"id": "p0t0", "kind": "text", "role": "body", "bbox": [10.91, 60.0, 200.0, 160.0], "paragraphs": [para]}]}
-    _, jobs = hole_jobs({"slides": [slide]}, SCALE, FONTS, lambda el, n: el, {0: "b2s_s000"})
+    _, jobs = measure_jobs({"slides": [slide]}, SCALE, FONTS, lambda el, n: el, {0: "b2s_s000"})
     (found,), = [job[2] for job in jobs]
     assert found["cy"] == pytest.approx((line_at - 0.35 * size) * SCALE)
     middle = (pic_box[1] + pic_box[3]) / 2 * SCALE
     assert abs(round((middle - found["cy"]) / found["pitch"])) == 1, "the picture's middle is a line away"
     mark = (found["x0"] + 2.0, found["cy"] - 6.0, found["x0"] + 2.0 + found["width"], found["cy"] + 6.0)
     assert pick_gap([mark], found["x0"], found["cy"], found["width"], found["pitch"]) == pytest.approx((2.0, 0.0))
+
+
+def braced_phrase() -> dict:
+    """'Gradient descent updates every parameter after each batch.' with a brace under
+    'updates every parameter' (marks at both edges of 'updates' and 'parameter', as classify.mark writes them)."""
+    words = [("Gradient", 10.91, 38.9), ("descent", 53.4, 33.91), ("updates", 91.03, 35.39), ("every", 130.05, 23.47),
+             ("parameter", 157.16, 45.52), ("after", 206.3, 22.0)]
+    marks = []
+    for k in (2, 4):
+        before = [[w, "CMSS10", "sans", False, False, t, x0] for t, x0, w in words[:k + 1]]
+        for x, b in ((words[k][1], before[:-1]), (words[k][1] + words[k][2], before)):
+            marks.append({"x": x, "hole_x0": x, "pads": 0.0, "font": "CMSS10", "family": "sans", "size": 10.91,
+                          "bold": False, "italic": False, "before": b})
+    para = {"align": "left", "bullet": None, "level": 0, "size": 10.91, "text_x0": 10.91, "tab_x0": None, "wrap_limit": 300.0,
+            "runs": [run_of(" ".join(t for t, _, _ in words) + " each batch.")],
+            "lines": [{"baseline": 106.13, "x0": 10.91, "x1": 283.62}]}
+    return {"page": 0, "size": [453.54, 255.12], "elements": [
+        {"id": "p0t0", "kind": "text", "role": "body", "bbox": [10.91, 98.0, 283.62, 109.0], "paragraphs": [para]},
+        {"id": "p0f0", "kind": "image", "overlay": True, "anchor": "p0t0", "bbox": [89.83, 110.44, 203.99, 129.32], "marks": marks}]}
+
+
+def test_overlay_words_are_highlighted_and_the_brace_fits_them():
+    slide = braced_phrase()
+    reqs, jobs = measure_jobs({"slides": [slide]}, SCALE, FONTS, lambda el, n: el, {0: "b2s_s000"})
+    (_, _, _, (o,)), = jobs
+    text = emit.slides_texts(slide["elements"][0], SCALE, FONTS)[0]
+    assert [text[slice(*w["range"])] for w in o["words"]] == ["updates", "parameter"]
+    assert len({w["colour"] for w in o["words"]}) == 2, "words on one line get different colours"
+    highlights = [r["updateTextStyle"] for r in reqs if "backgroundColor" in r.get("updateTextStyle", {}).get("style", {})]
+    assert [(h["textRange"]["startIndex"], h["textRange"]["endIndex"]) for h in highlights] == [w["range"] for w in o["words"]]
+    # Slides sets 'updates' 3 pt (PDF) further right and 3 pt wider, 'parameter' 16 pt further: stretched 12%.
+    drift = {91.03: 3.0, 126.42: 6.0, 157.16: 12.0, 202.68: 16.0}
+    x = lambda v: (v + drift[v]) * SCALE
+    marks = {w["colour"]: [(x(a), 160.0, x(b), 172.0), (x(a) + 200, 160.0, x(b) + 200, 172.0)]
+             for w, (a, b) in zip(o["words"], [(91.03, 126.42), (157.16, 202.68)])}
+    (dx, dy, sx), table = emit.overlay_move(o, marks, SCALE)
+    b0, b1 = emit.fit_overlay(slide["elements"][1]["bbox"], list(drift.items()), emit.OVERLAY_STRETCH_MEASURED)
+    x0, _, x1, _ = slide["elements"][1]["bbox"]
+    assert dx == pytest.approx((b0 - x0) * SCALE) and dy == 0.0 and sx == pytest.approx((b1 - b0) / (x1 - x0))
+    assert sx > 1 + emit.OVERLAY_STRETCH, "measured words stretch a brace further than predicted ones may"
+    assert [m[2] for m in table] == pytest.approx(list(drift.values()), abs=0.01)
+    assert emit.overlay_move(o, {c: [] for c in marks}, SCALE)[0] is None, "no word found: the prediction stays"
+
+
+def test_measured_overlay_move_keeps_the_left_edge_under_a_relative_scale(decks):
+    """measure_places' (dx, dy, scaleX): the RELATIVE transform scales about the page origin, so
+    its translation makes the picture's left edge move by dx and its width scale by scaleX."""
+    d = next((d for d in decks if any(e.get("marks") for s in d.slides.values() for e in s["elements"])), None)
+    if d is None:
+        pytest.skip("no deck with overlays built")
+    slide = next(s for s in d.plan.deck["slides"] if any(e.get("marks") for e in s["elements"]))
+    i, pic = next((i, e) for i, e in enumerate(slide["elements"]) if e.get("marks"))
+    x0, _, x1, _ = next(box for e, box in d.result["pictures"][slide["page"]] if e["id"] == pic["id"])
+    templates = [(100.0, 100.0)] * len(d.plan.keys)
+    parts, _ = d.plan.slide_parts(slide, d.result["page_elements"], d.result["speaker_notes"],
+                                  {pic["id"]: (4.0, 0.0, 1.2)}, templates)
+    oid = f"b2s_s{slide['page']:03}_f{i}"
+    t, = [r["updatePageElementTransform"] for _, reqs in parts for r in reqs
+          if r.get("updatePageElementTransform", {}).get("objectId") == oid]
+    assert t["applyMode"] == "RELATIVE"
+    moved = [t["transform"]["scaleX"] * v + t["transform"]["translateX"] / EMU_PER_PT for v in (x0, x1)]
+    assert moved == pytest.approx([x0 + 4.0, x0 + 4.0 + 1.2 * (x1 - x0)], abs=0.01)
