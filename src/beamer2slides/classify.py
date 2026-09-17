@@ -493,6 +493,8 @@ class PageClassifier:
                 i = parent[i]
             return i
 
+        # Words on different panels are different texts (Bergen's label column beside the body).
+        panel = [self.panel_of(s.rect) for s in spans]
         for i in range(n):
             a = spans[i]
             for j in range(i + 1, n):
@@ -501,7 +503,9 @@ class PageClassifier:
                 same_row = abs(a.baseline - b.baseline) <= 0.5 * big and \
                     min(a.rect.y1, b.rect.y1) > max(a.rect.y0, b.rect.y0)
                 gap = max(0.0, b.rect.x0 - a.rect.x1, a.rect.x0 - b.rect.x1)
-                if same_row and gap <= 2.0 * big:
+                # (text colour changes with the panel; a dark number on a light box across the
+                # edge still belongs to its line)
+                if same_row and gap <= 2.0 * big and (panel[i] == panel[j] or a.color == b.color):
                     parent[find(i)] = find(j)
         groups: dict[int, list[Span]] = {}
         for i, s in enumerate(spans):
