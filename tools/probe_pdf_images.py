@@ -25,7 +25,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
-from beamer2slides.pdf import OBJ_IMAGE, Document  # noqa: E402
+from beamer2slides.pdf import JPEG_MAGIC, OBJ_IMAGE, PNG_MAGIC, Document  # noqa: E402
 from beamer2slides.render import image_file  # noqa: E402
 
 
@@ -34,9 +34,9 @@ def sha1(data: bytes) -> str:
 
 
 def magic(data: bytes) -> str:
-    if data[:3] == b"\xff\xd8\xff":
+    if data[:3] == JPEG_MAGIC:
         return "JPEG"
-    if data[:8] == b"\x89PNG\r\n\x1a\n":
+    if data[:8] == PNG_MAGIC:
         return "PNG"
     return data[:4].hex() if data else "-"
 

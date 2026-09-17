@@ -167,7 +167,7 @@ class EmbeddedImage:
     DCTDecode."""
 
     px: tuple[int, int]                 # the image's own pixel size
-    box: tuple[float, float, float, float]   # where it is drawn, page space
+    box: tuple[float, float, float, float]   # what shows of it, page space (as Page.images gives it)
     matrix: tuple                       # unit square -> page space
     filters: list[str]
     colorspace: str
@@ -509,8 +509,7 @@ class Page:
             if box[2] <= box[0] or box[3] <= box[1]:
                 box = full
             R.FPDFImageObj_GetImagePixelSize(po.handle, w, h)
-            out.append({"bbox": box, "width": w.value, "height": h.value, "object": po,
-                        "clipped": box != full})
+            out.append({"bbox": box, "width": w.value, "height": h.value, "object": po})
         return out
 
     def embedded_image(self, po: PageObject) -> EmbeddedImage | None:
@@ -547,7 +546,7 @@ class Page:
         # image renders alpha 255 everywhere, even at its rim.
         drawn = self.rendered_image(po)
         return EmbeddedImage(
-            px=(w.value, h.value), box=full, matrix=po.matrix, filters=filters,
+            px=(w.value, h.value), box=box, matrix=po.matrix, filters=filters,
             colorspace=COLOR_SPACES.get(meta.colorspace, str(meta.colorspace)),
             bpp=meta.bits_per_pixel, dpi=(meta.horizontal_dpi, meta.vertical_dpi),
             raw=_buffer(R.FPDFImageObj_GetImageDataRaw, po.handle),
