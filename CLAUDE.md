@@ -56,8 +56,25 @@ a per-slide background picture.
   `plain_tables`: rule-less tabulars (≥3 rows, same cell count, short cells) → borderless tables.
 - `literal_list_numbers`: when Slides would number a list wrongly (TOC split into boxes),
   every number on the slide becomes literal text with a tab (Slides can't set a start number).
-- Grouping in emit: blocks (`block_groups`: stacked panel shapes plus content), formula
-  pictures with their text. Title page: `subtitle_element` → SUBTITLE placeholder.
+- Grouping in emit: blocks (`block_groups`: shapes with the same `block` plus content), formula
+  pictures with their text, progress bars with their track (`rule_groups`). Title page:
+  `subtitle_element` → SUBTITLE placeholder.
+- Blocks built to survive resizing (`classify.blocks`, `emit.merge_blocks`): the body reaches up
+  under the title bar with the whole block's outline (a group resize never opens a gap), title
+  bars are created after bodies (z-order), block titles fill their bar with contentAlignment
+  MIDDLE (baseline = middle + 0.362 em, `tools/probe_middle.py`), and the body carries a native
+  drop shadow. The gradient strip and shadow pieces are painted out of the background.
+- Template shapes: every deck starts from an imported .pptx (`build_pptx`, also for 16:9; rebuilds
+  replace the content through `files.update`, keeping the URL) with one template slide per
+  layout. Slides needing templates are `duplicateObject` copies of their layout's template slide;
+  shapes are duplicated from the templates and restyled. This gives what the API can't set:
+  drop shadows (calibrated against beamer: `tools/calibrate_shadow.py`, distance 0.75 and blur
+  1.0 × shadow width, alpha 0.5) and exact corner radii (`adj`). Template slides are deleted at the end.
+- Nothing stays behind when elements move (`tools/leftovers.py` checks it locally): pictures and
+  block decorations are painted out of the background where the page around them is flat;
+  numbered balls under literal TOC numbers become pictures grouped with their text.
+- One-line left-aligned text boxes reach to the block edge or the next element
+  (`text_right_limit`), so text typed later wraps where a user expects.
 - Equation numbers beside display equations, icon-font glyphs (pictures) and OpenType
   small caps (`extract.small_caps_spans`, via glyph ids) are handled too.
 - Hanging labels (`Line.tab`, paragraph `tab_x0`): algorithmic line numbers, description
@@ -111,9 +128,10 @@ a per-slide background picture.
 - Emit robustness: a rejected batch is retried slide by slide, then element by element; an
   element the API refuses becomes a picture of the original page region (`fallback_picture`).
   A page whose classification raises becomes a full background picture (`classify_page`).
-- 4:3 decks: upload a blank python-pptx deck with Drive conversion (the page size is kept).
+- Decks are uploaded python-pptx files with Drive conversion (the page size is kept; the default
+  template's placeholders are rescaled for 16:9).
 - Re-running `convert` on the same output folder rebuilds the previous deck in place
-  (same URL). Use `--new-deck` to force a new one.
+  (same URL, content replaced by `files.update`). Use `--new-deck` to force a new one.
 
 ## Usage
 ```
@@ -145,6 +163,16 @@ black = both.
 - Page labels can come back as raw `<FEFF...>` hex strings; `extract._label` decodes them.
 - PowerShell 5.1 mangles double quotes inside native-command arguments: keep them out of
   git commit messages passed via here-strings.
+- Shape shadows, autofit and text insets are read-only in the API. A .pptx import keeps shadows
+  (and duplicateObject, fill and transform changes keep them) but not spAutoFit.
+- python-pptx autoshapes refer to the theme's effect style, which has a shadow: always give an
+  explicit `<a:effectLst/>`.
+- Text inside a shape with a shadow gets a shadow too: body text stays in separate text boxes.
+- Resizing a group scales every child (title bars get taller; fonts don't scale). Slides'
+  thumbnail renderer draws shadows of children of a scaled group at the unscaled size.
+- Beamer draws block shadows as black rectangles under a soft mask; removing the panels above
+  them without redacting them too leaves solid black bars in the background.
+- `fidelity` reuses saved thumbnails unless the deck was emitted again (or `--refresh`).
 
 ## Environment
 - Windows, PowerShell. Python 3.12 venv in `.venv` (`.venv\Scripts\python.exe`).
