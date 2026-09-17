@@ -45,6 +45,14 @@ a per-slide background picture.
   figure clusters of plain filled rectangles (`plain_rectangles`, role `rule`).
 - Text decorations (`text_decorations`): a thin rule tightly under words → run `underline`,
   a filled box tightly around words on one line → run `highlight` (backgroundColor).
+- Inline formula holes (`formula_holes`, `Line.holes`): in a line of prose, complex math
+  segments (bars, CMEX, stacked or second-level scripts) become image elements (role `math`,
+  `anchor` = text element id, grouped with it). The text keeps a run with `hole` = width.
+  Emit fills it with no-break spaces in Roboto Mono (a space is exactly 0.6 em), sized to the
+  width, and shifts the picture by the predicted width error of the words before it
+  (`formula_shifts`). Lines with fewer than two real words stay one display picture.
+- Equation numbers beside display equations, icon-font glyphs (pictures) and OpenType
+  small caps (`extract.small_caps_spans`, via glyph ids) are handled too.
 - Hanging labels (`Line.tab`, paragraph `tab_x0`): algorithmic line numbers, description
   items and item labels without a Slides preset are written `label<TAB>text` with
   indentFirstLine at the label and indentStart at the text (Slides tabs jump to indentStart).

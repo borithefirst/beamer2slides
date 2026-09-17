@@ -665,15 +665,15 @@ class PageClassifier:
             else:
                 segments.append([s])
         segments = [seg for seg in segments if seg]
-        prose = sum(len(s.text.strip()) for s in spans if not any(s in seg for seg in segments))
-        if prose < 8:
-            return []
+        words = [s.text.strip() for s in spans if not any(s in seg for seg in segments)]
+        if sum(sum(ch.isalpha() for ch in w) >= 2 for w in words) < 2 and sum(map(len, words)) < 8:
+            return []  # hardly any words ("f(x) = √x if x ≥ 0"): a display equation, one picture
 
         def complex_segment(seg: list[Span]) -> bool:
             rect = union_all(s.rect for s in seg)
             if any(s.font.upper().startswith("CMEX") or "�" in s.text for s in seg):
                 return True
-            if any(b.intersects(rect.expand(0.5)) and not any(abs(b.x0 - sb.x0) < 0.1 and abs(b.y0 - sb.y0) < 0.1
+            if any(b.expand(1).intersects(rect) and not any(abs(b.x0 - sb.x0) < 0.1 and abs(b.y0 - sb.y0) < 0.1
                                                               for sb in simple_bars) for b in bars):
                 return True
             scripts = [s for s in seg if script_of(s, line) and id(s) not in in_fraction]
@@ -967,10 +967,16 @@ class PageClassifier:
                         if (si == 0 or gap > 0.15 * line.size) and not runs[-1]["text"].endswith(" "):
                             runs[-1]["text"] += " "
                     main = line.main
+                    # What precedes the formula on its line, for emit to predict where Slides
+                    # will actually leave the gap (substitute fonts are not exactly as wide).
+                    before = [[round(s.rect.w, 2), s.font, s.info.family, s.info.bold, s.info.italic]
+                              for s in line.content if s.rect.x1 <= x0 + 0.5 and s.info.family != "icon"
+                              and not any(s in h for h in line.holes)]
                     runs.append({"text": " ", "font": main.font, "family": main.info.family,
                                  "size": round(line.size, 2), "bold": False, "italic": False, "smallcaps": False,
                                  "color": main.color, "link": None, "script": None, "underline": False,
-                                 "highlight": None, "hole": round(x1 - x0, 2)})
+                                 "highlight": None, "hole": round(x1 - x0, 2), "hole_x0": round(x0, 2),
+                                 "before": before})
                     prev = max(hole, key=lambda s: s.rect.x1)
                     continue
                 text = span.text

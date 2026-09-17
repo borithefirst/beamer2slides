@@ -14,7 +14,9 @@ slide background.
 - **Bullet and numbered lists** with nesting (glyph, ball, drawn and icon bullets). Description
   lists, algorithm line numbers and custom item labels (`\item[--]`) use a hanging label with a
   tab, so the text lines up exactly.
-- **Inline math** as text: `x ∈ ℝ`, `x²`, `aᵢ`, simple fractions `ᵃ⁄ᵦ`.
+- **Inline math** as text: `x ∈ ℝ`, `x²`, `aᵢ`, simple fractions `ᵃ⁄ᵦ`. Complex inline formulas
+  (roots, sums, stacked scripts) are small pictures placed over a gap in the still-editable
+  text and grouped with it.
 - **Underlines and `\colorbox` highlights** as text styles.
 - **Slide titles** in real title placeholders, so they show in Slides' outline and navigation.
 - **Tables** from ruled tabulars (booktabs, `\hline`, vertical rules, `\cline`) as native Slides

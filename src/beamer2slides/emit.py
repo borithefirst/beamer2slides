@@ -71,6 +71,18 @@ class FontMapper:
         return ({"fontFamily": family, "fontSize": pt(size), "bold": run["bold"], "italic": run["italic"]},
                 ["fontFamily", "fontSize", "bold", "italic"])
 
+    def width_ratio(self, font: str, family: str, bold: bool, italic: bool) -> float:
+        """Expected Slides width / PDF width of a run after the size correction: bold and
+        italic are only half corrected (see __call__)."""
+        if google_font(font) or family not in self.style:
+            return 1.0
+        ratio = 1.0
+        for key, on in (("bold", bold), ("italic", italic)):
+            if on:
+                rel = self.style[family][key]
+                ratio *= rel / (1 + (rel - 1) / 2)
+        return ratio
+
     def __call__(self, run: dict, scale: float) -> tuple[str, float]:
         google = google_font(run["font"])
         if google:  # same font in Slides: no width correction
@@ -663,6 +675,29 @@ def diagram_requests(el: dict, slide_id: str, object_id: str, scale: float, font
     return reqs
 
 
+def formula_shifts(slide: dict, scale: float, fonts: FontMapper) -> dict[str, float]:
+    """PDF-point x offsets for inline formula pictures, so each sits over the gap where Slides
+    will put it: the words before it on its line come out a little narrower or wider."""
+    pictures = [e for e in slide["elements"] if e["kind"] == "image" and e.get("anchor")]
+    out = {}
+    for el in slide["elements"]:
+        if el["kind"] != "text":
+            continue
+        for p in el["paragraphs"]:
+            if p["align"] != "left":
+                continue
+            for run in p["runs"]:
+                if not run.get("hole"):
+                    continue
+                shift = sum(w * (fonts.width_ratio(font, family, bold, italic) - 1)
+                            for w, font, family, bold, italic in run.get("before", []))
+                pic = next((e for e in pictures if e["anchor"] == el["id"]
+                            and abs(e["bbox"][0] + 1 - run["hole_x0"]) < 0.6), None)
+                if pic and abs(shift) >= 0.2:
+                    out[pic["id"]] = shift
+    return out
+
+
 def title_element(slide: dict) -> int | None:
     """Index of the element that becomes the slide's title placeholder."""
     for i, el in enumerate(slide["elements"]):
@@ -941,7 +976,11 @@ def emit(deck: dict, out: Path, title: str, new_deck: bool = False) -> dict:
             reqs = [{"deleteObject": {"objectId": e["objectId"]}}
                     for e in page_elements.get(slide_id, []) if e["objectId"] != title_oid]
             element_ids = []
+            shifts = formula_shifts(slide, scale, fonts)
             for i, el in enumerate(slide["elements"]):  # shapes, then pictures, then text on top
+                if el["id"] in shifts:
+                    el = {**el, "bbox": [el["bbox"][0] + shifts[el["id"]], el["bbox"][1],
+                                         el["bbox"][2] + shifts[el["id"]], el["bbox"][3]]}
                 if el["kind"] == "shape":
                     oid = f"{slide_id}_s{i}"
                     reqs += shape_requests(el, slide_id, oid, scale)
