@@ -1668,9 +1668,26 @@ def mark_big_headings(slides: list[dict], body: float) -> None:
             texts[i]["role"] = "title"
 
 
+def classify_page(page: dict, body: float) -> dict:
+    """One page's slide; a page the classifier trips over stays a picture as a whole."""
+    try:
+        return PageClassifier(page, body).classify()
+    except Exception as e:  # never lose a whole deck to one odd page
+        print(f"warning: page {page['index'] + 1}: classification failed ({type(e).__name__}: {e}); "
+              f"kept as a picture")
+        spans = page["spans"]
+        return {
+            "page": page["index"], "frame": page["label"], "size": page["size"], "notes": page.get("notes"),
+            "elements": [], "theme_texts": [], "panels": [], "figure_regions": [],
+            "left_in_background": [{"reason": "error", "spans": [s["id"] for s in spans],
+                                    "bboxes": [s["bbox"] for s in spans]}] if spans else [],
+            "stats": {"chars": sum(len(s["text"].strip()) for s in spans), "chars_native": 0},
+        }
+
+
 def classify(raw: dict) -> dict:
     body = body_size(raw)
-    slides = [PageClassifier(page, body).classify() for page in raw["pages"]]
+    slides = [classify_page(page, body) for page in raw["pages"]]
     mark_title_page(slides, raw["source"].get("title", ""))
     mark_big_headings(slides, body)
     layout_texts = promote_theme_text(slides)
