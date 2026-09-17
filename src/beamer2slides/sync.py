@@ -403,10 +403,13 @@ class Sync:
         """Finds the live object that already shows a picture the source now draws, for
         merge.plan_unit. After a pull the source has an `\\includegraphics` for a picture the
         person put into the deck (or put over a figure), so the new conversion offers a picture the
-        deck already has: the same bytes (pull saves the deck's own picture), else the same look
-        (inverse.same_look: 64x64 grey, correlation >= 0.98, aspect within 2%) and boxes overlapping
-        over most of their area. Its object is kept with the person's crop, rotation and outline
-        instead of being duplicated."""
+        deck already has: the same bytes (pull saves the deck's own picture), else the same picture
+        (`inverse.same_look` for the same file at another resolution, and pull's own
+        `compare.picture_differs` because the converter renders the region again rather than keeping
+        the file: the deck's picture and that crop correlate 0.94, too little for same_look) and
+        boxes overlapping over most of their area. Its object is kept with the person's crop,
+        rotation and outline instead of being duplicated."""
+        from .compare import TOL, picture_differs, picture_hash
         from .inverse import picture_look, same_look
 
         images, _ = snapshot.picture_urls(pres)
@@ -415,8 +418,11 @@ class Sync:
         folder = self.ours["out"] / "deck-pictures"
         deck, mine, taken = {}, {}, set()
 
+        def fingerprints(path: Path):
+            return identity.sha1(path.read_bytes()), picture_look(path), picture_hash(path)
+
         def deck_picture(oid: str):
-            """(sha1, look) of a live picture, downloaded once."""
+            """(sha1, look, thumbnail) of a live picture, downloaded once."""
             if oid not in deck:
                 deck[oid] = None
                 data = snapshot._download(images[oid]) if oid in images else None
@@ -424,17 +430,23 @@ class Sync:
                     folder.mkdir(parents=True, exist_ok=True)
                     path = folder / f"{oid}.img"
                     path.write_bytes(data)
-                    deck[oid] = (identity.sha1(data), picture_look(path))
+                    deck[oid] = fingerprints(path)
             return deck[oid]
 
         def our_picture(path: Path):
             if path not in mine:
-                mine[path] = (identity.sha1(path.read_bytes()), picture_look(path)) if path.exists() else None
+                mine[path] = fingerprints(path) if path.exists() else None
             return mine[path]
 
         def same(ours, oid: str) -> bool:
             got = deck_picture(oid)
-            return bool(got and (got[0] == ours[0] or same_look(ours[1], got[1])))
+            if not got:
+                return False
+            if got[0] == ours[0]:
+                return True
+            if same_look(ours[1], got[1]):
+                return True
+            return ours[2] is not None and got[2] is not None and not picture_differs(ours[2], got[2], TOL["phash"])
 
         def adopt(skey: str, ours_members: list[dict], read: dict, oid: str | None = None):
             if len(ours_members or ()) != 1 or ours_members[0]["kind"] != "image":

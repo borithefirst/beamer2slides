@@ -1027,19 +1027,26 @@ def test_the_adopter_matches_by_bytes_and_by_look(tmp_path, monkeypatch):
     from PIL import Image
     with Image.open(ours_out / "figures" / "f1.png") as img:
         img.resize((120, 40), Image.LANCZOS).save(scaled / "figures" / "f1.png")
+    crop = _picture_files(tmp_path / "crop", transparent=False)  # (the converter renders the region again)
+    with Image.open(ours_out / "figures" / "f1.png") as img:
+        padded = Image.new("RGB", (66, 24), "white")
+        padded.paste(img, (3, 2))
+        padded.resize((132, 48), Image.LANCZOS).save(crop / "figures" / "f1.png")
     other = _picture_files(tmp_path / "other", transparent=False, mark=(2, 2, 58, 18))
-    files = {"u_same": ours_out, "u_look": scaled, "u_other": other}
+    files = {"u_same": ours_out, "u_look": scaled, "u_crop": crop, "u_other": other}
     monkeypatch.setattr(snapshot, "_download", lambda url: (files[url] / "figures" / "f1.png").read_bytes())
     pres = {"slides": [{"objectId": "S", "pageElements": [{"objectId": oid, "image": {"contentUrl": url}}
                                                           for oid, url in [("SAME", "u_same"), ("LOOK", "u_look"),
+                                                                           ("CROP", "u_crop"),
                                                                            ("OTHER", "u_other"), ("COPY", "u_same"),
                                                                            ("INGROUP", "u_same"), ("B2S", "u_same")]]}]}
     s = Sync.__new__(Sync)
     s.ours, s.scale = {"out": ours_out}, 2.0
     s.base = {"slides": [{"key": "intro", "objectId": "S", "groups": [],
                           "elements": [{"key": "image/figure/0", "objects": ["B2S"]}]}]}
-    boxes = {"SAME": [40, 120, 160, 160], "LOOK": [44, 124, 164, 164], "OTHER": [40, 120, 160, 160],
-             "COPY": [40, 120, 160, 160], "INGROUP": [40, 120, 160, 160], "B2S": [40, 120, 160, 160]}
+    boxes = {"SAME": [40, 120, 160, 160], "LOOK": [44, 124, 164, 164], "CROP": [38, 118, 162, 162],
+             "OTHER": [40, 120, 160, 160], "COPY": [40, 120, 160, 160], "INGROUP": [40, 120, 160, 160],
+             "B2S": [40, 120, 160, 160]}
     read = {"objects": {oid: readback(box, kind="image", image=oid) for oid, box in boxes.items()}}
     read["objects"]["COPY"]["title"] = "b2s:intro/image/figure/0"
     read["objects"]["INGROUP"]["parent_group"] = "G"
@@ -1048,6 +1055,11 @@ def test_the_adopter_matches_by_bytes_and_by_look(tmp_path, monkeypatch):
     # the same bytes win; the same look at another resolution is taken too, a different picture isn't
     assert s.picture_adopter(pres)("intro", [el], read) == "SAME"
     del read["objects"]["SAME"]
+    # the crop the converter rendered again correlates too little for same_look (0.94 live)
+    from beamer2slides.inverse import picture_look, same_look
+    assert not same_look(picture_look(ours_out / "figures" / "f1.png"), picture_look(crop / "figures" / "f1.png"))
+    assert s.picture_adopter(pres)("intro", [el], read) == "CROP"  # (the closest box of the two that match)
+    del read["objects"]["CROP"]
     assert s.picture_adopter(pres)("intro", [el], read) == "LOOK"
     for oid in ("LOOK", "COPY", "INGROUP", "B2S"):
         del read["objects"][oid]
