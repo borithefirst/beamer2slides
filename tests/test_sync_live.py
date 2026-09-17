@@ -510,14 +510,11 @@ XFAIL = {}  # scenario -> why it can't pass yet (docs/sync.md, Not supported yet
 
 @scenario
 def scenario_table_words(run: Run):
-    """Different cells of one table edited in the deck and in the source."""
+    """Different cells of one table edited in the deck and in the source (merge.table_merge)."""
     run.convert(build("v1"))
     exps = run.edit(E("replace_word", slide=RESULTS, text="5.1 s", old="5.1", new="5.2"))
     pdf = build("tablecell")
     run.check("tablecell", pdf, run.sync(pdf), exps)
-
-
-XFAIL["table-words"] = "no word merge inside tables: a text edit on both sides keeps the deck's table (a conflict)"
 
 
 @scenario

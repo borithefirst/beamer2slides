@@ -1073,7 +1073,20 @@ class Sync:
                 anchor = bunits[u["key"]][0]
                 old_main = anchor["main"]
                 final_text = None
-                if "text" in ov and main in n_read["objects"]:
+                if "text" in ov and ov["text"].get("table") and main in n_read["objects"]:
+                    new_rb = n_read["objects"][main]
+                    cells = merge.table_merge(ov["text"]["base"], new_rb.get("text") or "", ov["text"]["theirs"],
+                                              new_rb.get("table"), ov["text"]["dims"])
+                    current = merge.table_grid(new_rb.get("text"), new_rb.get("table"))
+                    if cells is None or current is None:
+                        self.warnings.append(f"slide {p['key']}: {u['key']}: deck cell edits clash with the new table; not re-applied")
+                    else:
+                        for r, (crow, mrow) in enumerate(zip(current, cells[0])):
+                            for c, (now_cell, want) in enumerate(zip(crow, mrow)):
+                                if want != now_cell:  # the cell text ends in a newline Slides keeps
+                                    reqs += merge.text_edit_requests(main, now_cell + "\n", want + "\n",
+                                                                     {"rowIndex": r, "columnIndex": c})
+                elif "text" in ov and main in n_read["objects"]:
                     current = n_read["objects"][main].get("text") or ""
                     merged, clashes = merge.diff3(ov["text"]["base"], current, ov["text"]["theirs"])
                     if clashes:

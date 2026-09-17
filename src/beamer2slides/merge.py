@@ -97,9 +97,11 @@ def utf16_len(text: str) -> int:
     return len(text.encode("utf-16-le")) // 2
 
 
-def text_edit_requests(object_id: str, current: str, target: str) -> list[dict]:
+def text_edit_requests(object_id: str, current: str, target: str, cell: dict | None = None) -> list[dict]:
     """deleteText / insertText turning an object's text `current` into `target` (UTF-16 indices,
-    applied back to front so earlier indices stay valid)."""
+    applied back to front so earlier indices stay valid). `cell`: {"rowIndex", "columnIndex"} of a
+    table cell instead of the object's own text."""
+    where = {"cellLocation": cell} if cell else {}
     a, b = tokens(current), tokens(target)
     ops = SequenceMatcher(None, a, b, autojunk=False).get_opcodes()
     offsets = [0]
@@ -111,11 +113,11 @@ def text_edit_requests(object_id: str, current: str, target: str) -> list[dict]:
             continue
         start, end = offsets[i1], offsets[i2]
         if end > start:
-            reqs.append({"deleteText": {"objectId": object_id, "textRange": {
+            reqs.append({"deleteText": {"objectId": object_id, **where, "textRange": {
                 "type": "FIXED_RANGE", "startIndex": start, "endIndex": end}}})
         insert = "".join(b[j1:j2])
         if insert:
-            reqs.append({"insertText": {"objectId": object_id, "insertionIndex": start, "text": insert}})
+            reqs.append({"insertText": {"objectId": object_id, **where, "insertionIndex": start, "text": insert}})
     return reqs
 
 
@@ -243,6 +245,38 @@ def predicted_text(el: dict) -> str:
 def collapse_holes(text: str) -> str:
     """Hole runs (no-break spaces sized to a formula) as one no-break space: their count follows the formula width."""
     return re.sub("\u00a0+", "\u00a0", text)
+
+
+def table_grid(text: str | None, dims: list | None) -> list[list[str]] | None:
+    """A table read-back's cells (rows split at newlines, cells at tabs), or None when they don't
+    make `dims` rows x columns: a cell holding a line break is ambiguous in that text."""
+    rows = [row.split("\t") for row in (text or "").split("\n")]
+    if not dims or len(rows) != dims[0] or any(len(row) != dims[1] for row in rows):
+        return None
+    return rows
+
+
+def table_merge(base_text: str | None, ours_text: str, theirs_text: str | None,
+                dims: list | None, theirs_dims: list | None) -> tuple[list[list[str]], bool] | None:
+    """Word-level diff3 per cell: the merged cells and whether they are already what the source
+    says. None when the two sides changed the same cell, or the tables don't line up (a row or
+    column added on either side) - then the whole table is a conflict."""
+    b = table_grid(base_text, dims)
+    o = table_grid(ours_text, dims)
+    t = table_grid(theirs_text, theirs_dims)
+    if not b or not o or not t or theirs_dims != dims:
+        return None
+    out, converged = [], True
+    for brow, orow, trow in zip(b, o, t):
+        row = []
+        for bc, oc, tc in zip(brow, orow, trow):
+            merged, clashes = diff3(bc, oc, tc)
+            if clashes:
+                return None
+            row.append(merged)
+            converged = converged and merged == oc
+        out.append(row)
+    return out, converged
 
 
 IR_STYLE_TO_API = {"strike": "strikethrough", "smallcaps": "smallCaps", "script": "baselineOffset", "color": "foregroundColor",
@@ -397,7 +431,18 @@ def plan_unit(skey: str, ukey: str, base_members: list[dict] | None, ours_member
         conflict("image", "picture", sorted(src), "replaced in the deck")
         keep = True
     if "text" in edited and not keep:
-        if anchor["kind"] != "text" or set(edits["text"]) != {main}:
+        if anchor["kind"] == "table" and set(edits["text"]) == {main}:
+            cells = table_merge(base_rb.get("text"), identity.plain_text(first["ir"]), theirs_rb.get("text"),
+                                base_rb.get("table"), theirs_rb.get("table"))
+            if cells is None:
+                conflict("text", anchor["fingerprint"]["text"], first["fingerprint"]["text"], theirs_rb.get("text"))
+                keep = True
+            else:
+                overrides["text"] = {"table": True, "base": base_rb.get("text") or "", "theirs": theirs_rb.get("text") or "",
+                                     "dims": base_rb.get("table")}
+                if cells[1]:
+                    report["converged"].append({**where, "field": "text", "value": theirs_rb.get("text")})
+        elif anchor["kind"] != "text" or set(edits["text"]) != {main}:
             conflict("text", anchor["fingerprint"]["text"], first["fingerprint"]["text"], theirs_rb.get("text"))
             keep = True
         else:

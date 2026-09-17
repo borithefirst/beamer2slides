@@ -99,7 +99,7 @@ Z-order changes are not detected.
 | position/size only | text or style, not geometry | `move`: shift the deck's objects by the source delta |
 | changed | geometry | recreate, then re-apply the deck's transform change (`delta`: theirs · base⁻¹); if the source moved it too, the deck's position wins and it's a conflict |
 | changed | text style / shape style | recreate, re-apply the deck's change: uniform over all runs → over all the text; some words (or a table) → the deck's run attributes onto the same words of the new text (character alignment, `sync.style_range_requests`); non-uniform paragraph styles → keep the deck, conflict. A conflict is reported only when the source changed the same style attributes |
-| text changed | text changed | word-level diff3; clean → recreate and write the merged text; overlapping → keep the deck, conflict |
+| text changed | text changed | word-level diff3; clean → recreate and write the merged text; overlapping → keep the deck, conflict. In a table the diff3 runs per cell (`merge.table_merge`, applied with `cellLocation`); a row or column added on either side, or a cell holding a line break, makes the whole table a conflict |
 | text / position changed | the deck shows exactly that (same text; a move the source now reproduces within 2 pt) | `adopt`: nothing written, reported as converged; the base takes ours IR and the deck's version of those fields (e.g. after `pull`) |
 | picture file changed, same picture | anything | no change: the base takes the new hash (`snapshot.refresh_pictures`, reported as converged) |
 | added: a picture | the deck already shows that picture (after a pull) | `adopt_object`: the person's object becomes the element's, nothing written (`sync.picture_adopter`) |
@@ -168,7 +168,8 @@ per-slide `actions`) and `sync-report.md`.
 
 ## Not supported yet
 - Crossing reorders of unlabelled frames (the alignment keeps order; label frames).
-- diff3 inside tables and diagrams (a text edit there on both sides keeps the deck).
+- diff3 inside diagrams (a text edit there on both sides keeps the deck); tables merge per cell,
+  but a row or column added in the deck keeps the deck's table.
 - Layout texts and placeholder styles (`write_layout_texts`) aren't synced; nor are
   `fallback_pictures` rebuilds.
 - Z-order edits in the deck aren't detected; a recreated unit goes back to its old z position.

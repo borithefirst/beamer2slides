@@ -409,6 +409,104 @@ def test_same_text_on_both_sides_converges():
     assert not mplan["report"]["applied"] and not merge.has_writes(mplan, [s["objectId"] for s in theirs["slides"]])
 
 
+def table_ir(rows, bbox=(20, 60, 200, 120), eid="p1tab0"):
+    return {"id": eid, "kind": "table", "role": "table", "bbox": list(bbox), "frame": list(bbox), "size": 10.0,
+            "row_baselines": [bbox[1] + 12 * k for k in range(len(rows))], "row_heights": [12.0] * len(rows),
+            "columns": [{"x0": bbox[0] + 60 * c, "x1": bbox[0] + 60 * (c + 1), "align": "left"} for c in range(len(rows[0]))],
+            "bounds": list(bbox), "cells": [[[run(cell)] for cell in row] for row in rows], "merges": [], "rules": [],
+            "borders": [], "fills": [], "spans": []}
+
+
+def table_slides(rows):
+    """three_slides with a table on the results slide (element key table/table/0)."""
+    base = three_slides()
+    el = entry("table/table/0", table_ir(rows), "b2s_s001_tab0")
+    rb = el["readback"]["b2s_s001_tab0"]
+    rb["kind"], rb["table"] = "table", [len(rows), len(rows[0])]
+    rb["text"] = identity.plain_text(el["ir"])
+    base["slides"][1]["elements"].append(el)
+    base["slides"][1]["order"].append("b2s_s001_tab0")
+    return base
+
+
+ROWS = [["Scenario", "Kept", "Time"], ["Disjoint", "100%", "3.9 s"], ["Conflicts", "92%", "6.0 s"]]
+
+
+def test_table_cells_edited_on_both_sides_merge():
+    base = table_slides(ROWS)
+    ours, theirs = triple(base)
+    changed = [r[:] for r in ROWS]
+    changed[1][1] = "98%"  # the source says another number
+    ours["slides"][1]["elements"][2] = ours_entry("table/table/0", table_ir(changed))
+    edit_text(theirs["slides"][1], "b2s_s001_tab0", "Scenario\tKept\tTime\nDisjoint\t100%\t3.9 s\nConflicts\t92%\t6.2 s")
+    mplan = merge.plan_merge(base, ours, theirs)
+    u = unit(mplan, "results", "table/table/0")
+    assert u["action"] == "recreate" and set(u["overrides"]) == {"text"}
+    assert u["overrides"]["text"]["table"] and u["overrides"]["text"]["dims"] == [3, 3]
+    assert not mplan["report"]["conflicts"]
+    # the deck's cell wins where it was edited, the source's where it was
+    cells, converged = merge.table_merge(u["overrides"]["text"]["base"], identity.plain_text(table_ir(changed)),
+                                         u["overrides"]["text"]["theirs"], [3, 3], [3, 3])
+    assert [cells[1][1], cells[2][2]] == ["98%", "6.2 s"] and not converged
+
+
+def test_the_same_cell_edited_on_both_sides_is_a_conflict():
+    base = table_slides(ROWS)
+    ours, theirs = triple(base)
+    changed = [r[:] for r in ROWS]
+    changed[2][0] = "Clashes"  # the same word the deck renamed, to something else
+    ours["slides"][1]["elements"][2] = ours_entry("table/table/0", table_ir(changed))
+    edit_text(theirs["slides"][1], "b2s_s001_tab0", "Scenario\tKept\tTime\nDisjoint\t100%\t3.9 s\nDisputes\t92%\t6.0 s")
+    mplan = merge.plan_merge(base, ours, theirs)
+    assert unit(mplan, "results", "table/table/0")["action"] == "keep"
+    (c,) = mplan["report"]["conflicts"]
+    assert c["field"] == "text" and c["resolution"] == "deck kept"
+
+
+def test_a_row_added_in_the_deck_keeps_the_table():
+    base = table_slides(ROWS)
+    ours, theirs = triple(base)
+    changed = [r[:] for r in ROWS]
+    changed[1][1] = "98%"
+    ours["slides"][1]["elements"][2] = ours_entry("table/table/0", table_ir(changed))
+    obj = theirs["slides"][1]["objects"]["b2s_s001_tab0"]
+    obj["text"] += "\nExtra\t0%\t0.0 s"
+    obj["table"] = [4, 3]
+    mplan = merge.plan_merge(base, ours, theirs)
+    assert unit(mplan, "results", "table/table/0")["action"] == "keep"
+    assert [c["field"] for c in mplan["report"]["conflicts"]] == ["text"]
+
+
+def test_table_cells_the_deck_already_shows_converge():
+    base = table_slides(ROWS)
+    ours, theirs = triple(base)
+    changed = [r[:] for r in ROWS]
+    changed[1][1] = "98%"
+    ours["slides"][1]["elements"][2] = ours_entry("table/table/0", table_ir(changed))
+    edit_text(theirs["slides"][1], "b2s_s001_tab0", identity.plain_text(table_ir(changed)))
+    mplan = merge.plan_merge(base, ours, theirs)
+    assert unit(mplan, "results", "table/table/0")["action"] == "adopt"
+    assert [c["field"] for c in mplan["report"]["converged"]] == ["text"]
+    assert not merge.has_writes(mplan, [s["objectId"] for s in theirs["slides"]])
+
+
+def test_table_cell_edit_requests_carry_the_cell():
+    reqs = merge.text_edit_requests("tab", "6.0 s\n", "6.2 s\n", {"rowIndex": 2, "columnIndex": 2})
+    assert all(next(iter(r.values()))["cellLocation"] == {"rowIndex": 2, "columnIndex": 2} for r in reqs)
+    assert apply_text_requests("6.0 s\n", reqs) == "6.2 s\n"
+
+
+def test_words_of_one_cell_merge_like_prose():
+    b, o, t = "Conflicts\t92%\t6.0 s", "Conflicts\t92%\t6.0 seconds", "Conflicts\t94%\t6.0 s"
+    cells, converged = merge.table_merge(b, o, t, [1, 3], [1, 3])
+    assert cells == [["Conflicts", "94%", "6.0 seconds"]] and not converged
+
+
+def test_a_cell_with_a_line_break_is_not_merged():
+    assert merge.table_grid("a\tb\nc\td\te", [2, 2]) is None
+    assert merge.table_grid("a\tb\nc\td", [2, 2]) == [["a", "b"], ["c", "d"]]
+
+
 def test_changed_in_source_deleted_in_deck():
     base = three_slides()
     ours, theirs = triple(base)

@@ -351,9 +351,9 @@ Sync test harness (opt-in, marker `sync`, deselected by default): `python -m pyt
   user group around a redrawn figure, a converter group taken apart, a deleted user group),
   nested-group (a block inside a user group), repainted-pictures (the converter writes the picture
   files differently - the transparent ground anchored pictures got - and nothing is rewritten),
-  pull-picture (a picture added in the deck and pulled into the .tex is adopted, not duplicated);
-  `XFAIL` pins what sync can't do (table-words: no word
-  merge inside a table). Folders `out/sync-tests/<scenario>` of
+  pull-picture (a picture added in the deck and pulled into the .tex is adopted, not duplicated),
+  table-words (cells of one table edited on both sides merge per cell, `merge.table_merge`);
+  `XFAIL` pins what sync can't do. Folders `out/sync-tests/<scenario>` of
   the main checkout (decks rebuilt in place), fresh conversions `out/sync-tests/_fresh/<variant>`,
   3 at a time; the whole suite takes about 17 min. Skipped while `beamer2slides sync`/`pull` don't exist.
   Delete `out/sync-tests/_fresh` after a converter change, or the scenarios compare their decks with
