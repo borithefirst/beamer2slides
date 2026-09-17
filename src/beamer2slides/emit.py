@@ -10,6 +10,7 @@ from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
+import pymupdf
 from googleapiclient.errors import HttpError
 from googleapiclient.http import MediaFileUpload, MediaIoBaseUpload
 
@@ -842,6 +843,13 @@ def style_layout_placeholders(slides, pid: str, deck: dict, scale: float, fonts:
         execute(slides.presentations().batchUpdate(presentationId=pid, body={"requests": reqs}))
 
 
+def api_error(e: HttpError) -> str:
+    try:
+        return json.loads(e.content)["error"]["message"][:200]
+    except (ValueError, KeyError, TypeError):
+        return str(e)[:200]
+
+
 def batch_with_image_retry(slides, pid: str, reqs: list[dict], attempts: int = 4) -> None:
     for attempt in range(attempts):
         try:
@@ -966,15 +974,58 @@ def emit(deck: dict, out: Path, title: str, new_deck: bool = False) -> dict:
             target = next(k for k in kept if k >= page)
             page_slide[page] = f"b2s_s{target:03}"
 
-        # Phase 2: content, batched over slides.
-        pending: list[dict] = []
+        # Phase 2: content, batched over slides. Each slide's requests come in parts (one per
+        # element) so that a rejected batch can be narrowed down to the element at fault.
+        source_pdf = out / "slides.pdf" if (out / "slides.pdf").exists() else Path(deck["source"]["pdf"])
+
+        def fallback_picture(el: dict, page: int, slide_id: str) -> None:
+            """An element the API refused, as a picture cropped from the original page."""
+            path = out / "figures" / f"fallback-{el['id']}.png"
+            rect = pymupdf.Rect(el["bbox"]) + (-2, -2, 2, 2)
+            src = pymupdf.open(source_pdf)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            src[page].get_pixmap(matrix=pymupdf.Matrix(6, 6), clip=rect, alpha=False).save(path)
+            file_id, perm_id = upload_public_png(drive, path, folder)
+            uploaded.append((file_id, perm_id))
+            time.sleep(5)
+            picture = {**el, "bbox": [rect.x0, rect.y0, rect.x1, rect.y1]}
+            url = f"https://drive.google.com/uc?export=view&id={file_id}"
+            batch_with_image_retry(slides, pid, [image_request(picture, slide_id, f"{slide_id}_fb_{el['id']}", scale, url)])
+
+        def send(batch: list[tuple[str, int, list[tuple[dict | None, list[dict]]]]]) -> None:
+            reqs = [r for _, _, parts in batch for _, rs in parts for r in rs]
+            if not reqs:
+                return
+            try:
+                batch_with_image_retry(slides, pid, reqs)
+                return
+            except HttpError as e:
+                if len(batch) > 1:
+                    for item in batch:
+                        send([item])
+                    return
+                print(f"warning: {batch[0][0]}: batch rejected ({api_error(e)}); retrying element by element")
+            slide_id, page, parts = batch[0]
+            for el, rs in parts:
+                try:
+                    if rs:
+                        batch_with_image_retry(slides, pid, rs)
+                except HttpError as e:
+                    print(f"warning: {slide_id}: {el['kind'] + ' ' + el['id'] if el else 'request'} rejected "
+                          f"({api_error(e)})" + ("; using a picture of it instead" if el and el["kind"] != "image" else ""))
+                    if el and el["kind"] != "image":
+                        fallback_picture(el, page, slide_id)
+
+        pending: list[tuple[str, int, list]] = []
+        pending_size = 0
         for slide in deck["slides"]:
             n = slide["page"]
             slide_id = f"b2s_s{n:03}"
             title_idx = title_element(slide)
             title_oid = f"{slide_id}_t{title_idx}" if title_idx is not None else None
-            reqs = [{"deleteObject": {"objectId": e["objectId"]}}
-                    for e in page_elements.get(slide_id, []) if e["objectId"] != title_oid]
+            parts: list[tuple[dict | None, list[dict]]] = [(None, [
+                {"deleteObject": {"objectId": e["objectId"]}}
+                for e in page_elements.get(slide_id, []) if e["objectId"] != title_oid])]
             element_ids = []
             shifts = formula_shifts(slide, scale, fonts)
             for i, el in enumerate(slide["elements"]):  # shapes, then pictures, then text on top
@@ -983,16 +1034,16 @@ def emit(deck: dict, out: Path, title: str, new_deck: bool = False) -> dict:
                                          el["bbox"][2] + shifts[el["id"]], el["bbox"][3]]}
                 if el["kind"] == "shape":
                     oid = f"{slide_id}_s{i}"
-                    reqs += shape_requests(el, slide_id, oid, scale)
+                    reqs = shape_requests(el, slide_id, oid, scale)
                 elif el["kind"] == "table":
                     oid = f"{slide_id}_tab{i}"
-                    reqs += table_requests(el, slide_id, oid, scale, fonts)
+                    reqs = table_requests(el, slide_id, oid, scale, fonts)
                 elif el["kind"] == "diagram":
                     oid = f"{slide_id}_dg{i}"
-                    reqs += diagram_requests(el, slide_id, oid, scale, fonts)
+                    reqs = diagram_requests(el, slide_id, oid, scale, fonts)
                 elif el["kind"] == "image":
                     oid = f"{slide_id}_f{i}"
-                    reqs.append(image_request(el, slide_id, oid, scale, urls[el["file"]]))
+                    reqs = [image_request(el, slide_id, oid, scale, urls[el["file"]])]
                 else:
                     oid = f"{slide_id}_t{i}"
                     placeholder = None
@@ -1000,8 +1051,10 @@ def emit(deck: dict, out: Path, title: str, new_deck: bool = False) -> dict:
                         size = next(e["size"] for e in page_elements[slide_id] if e["objectId"] == oid)
                         placeholder = {"base_w": size["width"]["magnitude"] / EMU_PER_PT,
                                        "base_h": size["height"]["magnitude"] / EMU_PER_PT, "dy": placeholder_dy}
-                    reqs += text_box_requests(el, slide_id, oid, scale, fonts, placeholder, page_slide)
+                    reqs = text_box_requests(el, slide_id, oid, scale, fonts, placeholder, page_slide)
+                parts.append((el, reqs))
                 element_ids.append(oid)
+            extra = []
             # Inline formula pictures move with their text: group them (placeholders can't be grouped).
             by_id = {el["id"]: oid for el, oid in zip(slide["elements"], element_ids)}
             anchored: dict[str, list[str]] = {}
@@ -1009,24 +1062,27 @@ def emit(deck: dict, out: Path, title: str, new_deck: bool = False) -> dict:
                 if el.get("anchor") in by_id and by_id[el["anchor"]] != title_oid:
                     anchored.setdefault(by_id[el["anchor"]], []).append(oid)
             for text_oid, pictures in anchored.items():
-                reqs.append({"groupObjects": {"groupObjectId": f"{text_oid}_g", "childrenObjectIds": [text_oid] + pictures}})
+                extra.append({"groupObjects": {"groupObjectId": f"{text_oid}_g", "childrenObjectIds": [text_oid] + pictures}})
             if slide.get("notes") and speaker_notes.get(slide_id):
-                reqs.append({"insertText": {"objectId": speaker_notes[slide_id], "text": slide["notes"]}})
+                extra.append({"insertText": {"objectId": speaker_notes[slide_id], "text": slide["notes"]}})
             if title_oid and len(slide["elements"]) > 1:
                 # The placeholder was created with the slide, below everything added since.
-                reqs.append({"updatePageElementsZOrder": {"pageElementObjectIds": [title_oid],
-                                                          "operation": "BRING_TO_FRONT"}})
+                extra.append({"updatePageElementsZOrder": {"pageElementObjectIds": [title_oid],
+                                                           "operation": "BRING_TO_FRONT"}})
+            parts += [(None, [r]) for r in extra]
+            size = sum(len(rs) for _, rs in parts)
             # Several slides per round trip; a slide's requests are never split across batches.
-            if pending and len(pending) + len(reqs) > BATCH_MAX_REQUESTS:
-                batch_with_image_retry(slides, pid, pending)
-                pending = []
-            pending += reqs
+            if pending and pending_size + size > BATCH_MAX_REQUESTS:
+                send(pending)
+                pending, pending_size = [], 0
+            pending.append((slide_id, n, parts))
+            pending_size += size
             state["slides"].append({"page": n, "objectId": slide_id, "elements": element_ids})
             kinds = [el["kind"] for el in slide["elements"]]
             print(f"  slide {n + 1}: {kinds.count('text')} text boxes, {kinds.count('image')} pictures, "
                   f"{kinds.count('shape')} shapes, {kinds.count('table')} tables")
         if pending:
-            batch_with_image_retry(slides, pid, pending)
+            send(pending)
     finally:
         creds = credentials()
         local = threading.local()
