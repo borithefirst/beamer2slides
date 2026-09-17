@@ -13,7 +13,7 @@ import re
 import statistics
 import unicodedata
 from collections import Counter
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 from .fonts import FontInfo, font_info
 
@@ -456,6 +456,8 @@ class PageClassifier:
             dx, dy = s["dir"]
             span = Span(s["id"], s["text"], s["font"].split("+", 1)[-1], s["size"], s["color"], r,
                         s["origin"][1], abs(dy) < 0.01 and dx > 0, font_info(s["font"]))
+            if s.get("smallcaps"):  # OpenType small caps, found from glyph ids (extract.small_caps_spans)
+                span.info = replace(span.info, smallcaps=True)
             span.link = next((uri for lr, uri in links if lr.contains(r.cx, r.cy)), None)
             out.append(span)
         return out

@@ -60,9 +60,37 @@ def _label(page: pymupdf.Page) -> str:
     return label
 
 
-def extract_page(page: pymupdf.Page) -> dict:
+def glyph_defaults(doc: pymupdf.Document) -> dict[tuple[str, int], int]:
+    """(font, character) -> lowest glyph id used for it anywhere in the document."""
+    lowest: dict[tuple[str, int], int] = {}
+    for page in doc:
+        for sp in page.get_texttrace():
+            for ch in sp["chars"]:
+                key = (sp["font"], ch[0])
+                if ch[1] > 0 and (key not in lowest or ch[1] < lowest[key]):
+                    lowest[key] = ch[1]
+    return lowest
+
+
+def small_caps_spans(page: pymupdf.Page, defaults: dict[tuple[str, int], int]) -> list[pymupdf.Rect]:
+    """Areas set in OpenType small caps (fontspec \\textsc): lowercase letters drawn with an
+    alternate glyph, i.e. a higher glyph id than the same letter elsewhere in the same font.
+    The text layer only says 'metropolis', the page shows METROPOLIS in small capitals."""
+    out = []
+    for sp in page.get_texttrace():
+        lower = [ch for ch in sp["chars"] if chr(ch[0]).islower()]
+        if len(lower) < 2:
+            continue
+        alternate = [ch for ch in lower if ch[1] > defaults.get((sp["font"], ch[0]), ch[1])]
+        if len(alternate) >= 0.7 * len(lower):
+            out += [pymupdf.Rect(ch[3]) for ch in alternate]
+    return out
+
+
+def extract_page(page: pymupdf.Page, defaults: dict | None = None) -> dict:
     n = page.number
     spans = []
+    small_caps = small_caps_spans(page, defaults) if defaults else []
     for block in page.get_text("dict", flags=TEXT_FLAGS)["blocks"]:
         if block["type"] != 0:
             continue
@@ -70,10 +98,13 @@ def extract_page(page: pymupdf.Page) -> dict:
             for s in line["spans"]:
                 if not s["text"].strip():
                     continue
+                bbox = pymupdf.Rect(s["bbox"])
+                alternates = sum(bbox.contains(pymupdf.Point((r.x0 + r.x1) / 2, (r.y0 + r.y1) / 2)) for r in small_caps)
                 spans.append({
                     "id": f"p{n}s{len(spans)}", "text": s["text"], "font": s["font"],
                     "size": round(s["size"], 3), "color": f"#{s['color']:06x}",
                     "origin": _r(s["origin"]), "bbox": _r(s["bbox"]), "dir": _r(line["dir"], 3),
+                    "smallcaps": alternates >= 2 and alternates >= 0.7 * sum(ch.islower() for ch in s["text"]),
                 })
 
     images = [{
@@ -143,9 +174,10 @@ def select_overlays(raw: dict, mode: str) -> dict:
 
 def extract(pdf: Path) -> dict:
     doc = pymupdf.open(pdf)
+    defaults = glyph_defaults(doc)
     return {
         "version": 1,
         "source": {"pdf": str(pdf), "producer": doc.metadata.get("producer"), "pages": doc.page_count,
                    "title": doc.metadata.get("title") or ""},
-        "pages": [extract_page(page) for page in doc],
+        "pages": [extract_page(page, defaults) for page in doc],
     }

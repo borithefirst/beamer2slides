@@ -33,6 +33,7 @@ DESCENT_EM = LINE_EM - ASCENT_EM
 PAD_X = 6.7          # box edge -> text start
 BULLET_GAP = 1.9     # bullet glyph's right edge sits this far before indentFirstLine
 PPTX_TITLE_DY = 3.9  # title placeholders of pptx-imported decks have a smaller top inset
+SMALL_CAPS_LINE = 0.9  # a line of only smallCaps text is laid out as if 90% of its size
 
 FONT_FOR_FAMILY = {"sans": "Lato", "serif": "PT Serif", "mono": "Roboto Mono"}
 CMTT_ADVANCE_EM, ROBOTO_MONO_ADVANCE_EM = 0.525, 0.6
@@ -189,8 +190,10 @@ def vertical_layout(paras: list[dict], baselines: list[list[float]], sizes: list
 def text_box_requests(el: dict, slide_id: str, object_id: str, scale: float, fonts: FontMapper,
                       placeholder: dict | None = None, page_slide: dict[int, str] | None = None) -> list[dict]:
     paras = el["paragraphs"]
-    # A line is as tall as its largest run.
-    sizes = [max(fonts(r, scale)[1] for r in p["runs"]) if p["runs"] else p["size"] * scale for p in paras]
+    # A line is as tall as its largest run; small caps runs count at their reduced size.
+    base_sizes = [max(fonts(r, scale)[1] for r in p["runs"]) if p["runs"] else p["size"] * scale for p in paras]
+    sizes = [max(fonts(r, scale)[1] * (SMALL_CAPS_LINE if r.get("smallcaps") else 1) for r in p["runs"])
+             if p["runs"] else p["size"] * scale for p in paras]
 
     left_pdf = min(p["bullet"]["bbox"][0] if p["bullet"] else p["text_x0"] for p in paras)
     right_pdf = max(line["x1"] for p in paras for line in p["lines"])
@@ -258,7 +261,7 @@ def text_box_requests(el: dict, slide_id: str, object_id: str, scale: float, fon
     # A bullet keeps the text style it was created with unless its whole paragraph later
     # shares one style (mixed paragraphs, e.g. with inline math, never update it). So give
     # every paragraph its base family and size before the bullets exist.
-    for p, start, size in zip(paras, starts_tabbed, sizes):
+    for p, start, size in zip(paras, starts_tabbed, base_sizes):
         family = fonts(p["runs"][0], scale)[0] if p["runs"] else "Lato"
         length = (p["level"] if p["bullet"] else 0) + len("".join(r["text"] for r in p["runs"]))
         if length:
