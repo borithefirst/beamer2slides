@@ -185,11 +185,14 @@ hold for every sync, including the combinations nobody thought of.
   user-added slides never; taking the reported moves out of the order before and after must leave
   the same sequence; converter content the new conversion still has keeps an object; and the report
   is honest - every `applied` entry really changed something, every `converged` entry really changed
-  nothing. It runs offline from two snapshots: `python tools/loss_oracle.py <folder>`.
+  nothing. It runs offline from two snapshots: `python tools/loss_oracle.py <folder>`. The fuzz
+  harness writes them; a production sync writes `base.json` and the report but no read-backs yet, so
+  auditing a real sync means `sync.py` keeping `theirs` (before) and a final read (after) beside them.
 - **The fuzz** (`python tools/fuzz_sync.py offline --rounds N`, seeds replay: `--replay <seed>`)
   builds a synthetic deck, applies 2-8 random deck edits and 1-4 random source changes, plans the
   merge and applies the plan the way this document says sync does (`tools/fuzz_world.py`, the
-  reference applier), then runs the oracle. About 70 rounds a second, 6000 rounds clean today.
+  reference applier), then runs the oracle. About 50 rounds a second per core; today 10 000
+  single-step rounds, 4000 three-step chains, 1500 six-step and 600 ten-step chains ran clean.
   `live` does the same against real decks (convert v1 → random `deck_edits` → `sync <variant>` →
   oracle + `sync_check.integrity`), 3 at a time in `out/sync-fuzz/<seed>`, decks of passing rounds
   deleted; `--chain N` edits and syncs N times in a row. Every failure writes base, before, after,
