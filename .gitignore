@@ -2,6 +2,7 @@
 __pycache__/
 *.egg-info/
 tests/decks/out/
+tests/decks/sync/out/
 tests/themes/out/
 out/
 # Google credentials never go in git

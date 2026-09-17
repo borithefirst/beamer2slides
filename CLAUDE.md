@@ -262,6 +262,28 @@ an error grows more than 0.75 over its baseline. `B2S_UPDATE_BASELINE=1` rewrite
 again without converting. Skipped with a message when the token needs a browser consent.
 Measurements repeat to 0.01 across rebuilds (Slides renders deterministically).
 
+Sync test harness (opt-in, marker `sync`, deselected by default): `python -m pytest -m sync tests/test_sync_live.py`
+(`-k variants`: offline; `-k edit_catalogue`, `-k checker_controls`, `-k "scenario and <name>"`).
+- Source versions: `tests/decks/sync/talk.tex` (Madrid 16:9 talk with every element kind: title page,
+  nested bullets, number balls, formula hole + circled number, TikZ figure, block, table, diagram,
+  tikzmark arrow, notes, an unlabelled frame) with docstrip-like guards (`%<flag>`, `%<!flag>`,
+  `%<*flag>`…`%</flag>`). `tests/decks/sync/build.py [variant]` writes a plain .tex per variant into
+  `tests/decks/sync/out/` and compiles it with SyncTeX; `VARIANTS` (flag sets), `CHECKS` (what a synced
+  deck must show per flag), `titles`, `INTENDED` (the classification diff vs v1, tested offline).
+- `tools/deck_edits.py`: human-like Slides API edits found by content (text, style, geometry, objects,
+  groups, slides, notes, background); each returns an expectation `{edit, args, slides, checks}`.
+  `verified` applies one and reads it back (checks fail before, hold after).
+- `tools/sync_check.py`: evaluates checks on `presentations.get`, plus `integrity` (duplicates,
+  orphans against base.json ids, formula pictures out of their group, groups taken apart),
+  `check_report` (sync-report sections), `compare_fresh` / `thumbnail_diff` / `alignment_compare`
+  (untouched slides vs a fresh conversion of the same source).
+- Scenarios (`convert v1 → edits → sync vN → check → second sync writes nothing`): untouched, disjoint,
+  same-element, diff3, conflict, deletions, slides, reorder-both, chain, concurrent (sync runs the
+  command in `B2S_SYNC_BEFORE_WRITE` after planning), pull-wording (`pull --apply` → rebuild → sync
+  leaves the revision alone, overrides converged). Folders `out/sync-tests/<scenario>` of the main
+  checkout (decks rebuilt in place), fresh conversions `out/sync-tests/_fresh/<variant>`, 3 at a time.
+  Skipped while `beamer2slides sync`/`pull` don't exist.
+
 ## Pitfalls found so far
 - PDFium (`pdf.py` handles these):
   - Soft-mask contents are not page objects. Beamer's block shadow is a black rectangle under

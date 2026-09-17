@@ -21,5 +21,6 @@ build-backend = "setuptools.build_meta"
 where = ["src"]
 
 [tool.pytest.ini_options]
-markers = ["slides: converts decks on real Google Slides and measures the thumbnails (opt-in: python -m pytest -m slides)"]
-addopts = "-m \"not slides\""
+markers = ["slides: converts decks on real Google Slides and measures the thumbnails (opt-in: python -m pytest -m slides)",
+           "sync: sync and pull scenarios with simulated deck edits on real Google Slides (opt-in: python -m pytest -m sync)"]
+addopts = "-m \"not slides and not sync\""
