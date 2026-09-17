@@ -955,6 +955,111 @@ def test_the_ground_a_picture_dropped_must_be_flat(tmp_path):
     assert not same_picture_file(tmp_path / "busy.png", clear)
 
 
+def _image_entry(out: Path, key="image/figure/0", bbox=(20.0, 60.0, 80.0, 80.0), oid=None):
+    ir = {"id": "p0i9", "kind": "image", "role": "figure", "bbox": list(bbox), "file": "figures/f1.png", "alt": None}
+    h, fields = identity.ir_fields(ir, out)
+    el = {"key": key, "id": ir["id"], "kind": "image", "role": "figure", "ir_hash": h, "fields": fields,
+          "fingerprint": identity.fingerprint(ir, out), "anchor": None, "ir": ir}
+    if oid:
+        el.update(objects=[oid], main=oid, readback={oid: readback([2 * v for v in bbox], kind="image", image="c1")})
+    return el
+
+
+def test_a_picture_the_deck_already_shows_is_adopted_not_duplicated(tmp_path):
+    """After a pull the source draws a picture the person put into the deck: keep their object
+    (their crop, rotation and outline) instead of creating a second one next to it."""
+    ours_out = _picture_files(tmp_path / "ours", transparent=False)
+    base = three_slides()
+    slides = [ours_of(s) for s in base["slides"]]
+    slides[0]["elements"].append(_image_entry(ours_out))
+    ours = {"slides": slides, "pairs": {0: 0, 1: 1, 2: 2}, "out": ours_out}
+    theirs = {"revisionId": "r", "slides": [live(s) for s in base["slides"]]}
+    theirs["slides"][0]["objects"]["USERPIC"] = readback([40, 120, 160, 160], kind="image", image="c9")
+    live_ids = [s["objectId"] for s in theirs["slides"]]
+    plain = merge.plan_merge(base, ours, theirs)
+    assert unit(plain, "intro", "image/figure/0")["action"] == "create" and merge.has_writes(plain, live_ids)
+    assert [u["objectId"] for u in plain["report"]["user_objects"]] == ["USERPIC"]
+    asked = []
+
+    def adopt(skey, members, read, oid=None):
+        asked.append((skey, [m["key"] for m in members], oid))
+        return "USERPIC" if oid is None else None
+    mplan = merge.plan_merge(base, ours, theirs, adopt)
+    u = unit(mplan, "intro", "image/figure/0")
+    assert (u["action"], u["objectId"]) == ("adopt_object", "USERPIC")
+    assert not merge.has_writes(mplan, live_ids)
+    assert not mplan["report"]["user_objects"]  # (the object belongs to the source's element now)
+    assert [(c["element"], c["field"]) for c in mplan["report"]["converged"]] == [("image/figure/0", "image")]
+    assert asked == [("intro", ["image/figure/0"], None)]
+
+
+def test_the_deck_picture_the_source_now_draws_is_no_conflict(tmp_path):
+    """The person replaced a drawn figure with their own picture and pull put that picture in the
+    source: the deck's object is what the source draws now, so nothing is written or reported as
+    a conflict."""
+    deck_out = _picture_files(tmp_path / "deck", transparent=False)
+    ours_out = _picture_files(tmp_path / "ours", transparent=False, mark=(12, 4, 44, 16))
+    base = three_slides()
+    base["slides"][0]["elements"].append(_image_entry(deck_out, oid="b2s_s000_i0"))
+    slides = [ours_of(s) for s in base["slides"]]
+    slides[0]["elements"][-1] = _image_entry(ours_out)
+    ours = {"slides": slides, "pairs": {0: 0, 1: 1, 2: 2}, "out": ours_out}
+    theirs = {"revisionId": "r", "slides": [live(s) for s in base["slides"]]}
+    theirs["slides"][0]["objects"]["b2s_s000_i0"]["image"] = {"contentHash": "c2"}  # replaced in the deck
+    live_ids = [s["objectId"] for s in theirs["slides"]]
+    plain = merge.plan_merge(base, ours, theirs)
+    assert unit(plain, "intro", "image/figure/0")["action"] == "keep"
+    assert [c["field"] for c in plain["report"]["conflicts"]] == ["image"]
+    mplan = merge.plan_merge(base, ours, theirs, lambda skey, members, read, oid=None: oid)
+    u = unit(mplan, "intro", "image/figure/0")
+    assert (u["action"], u["adopt"]) == ("adopt", ["image"])
+    assert not mplan["report"]["conflicts"] and not merge.has_writes(mplan, live_ids)
+    assert [(c["element"], c["field"]) for c in mplan["report"]["converged"]] == [("image/figure/0", "image")]
+
+
+def test_the_adopter_matches_by_bytes_and_by_look(tmp_path, monkeypatch):
+    """sync.picture_adopter on a live slide: the same bytes or the same look in the right place,
+    and never a converter object, a copy or a picture inside a group."""
+    from beamer2slides import snapshot
+    from beamer2slides.sync import Sync, box_overlap
+    ours_out = _picture_files(tmp_path / "ours", transparent=False)
+    scaled = _picture_files(tmp_path / "scaled", transparent=False)  # (the same drawing at twice the size)
+    from PIL import Image
+    with Image.open(ours_out / "figures" / "f1.png") as img:
+        img.resize((120, 40), Image.LANCZOS).save(scaled / "figures" / "f1.png")
+    other = _picture_files(tmp_path / "other", transparent=False, mark=(2, 2, 58, 18))
+    files = {"u_same": ours_out, "u_look": scaled, "u_other": other}
+    monkeypatch.setattr(snapshot, "_download", lambda url: (files[url] / "figures" / "f1.png").read_bytes())
+    pres = {"slides": [{"objectId": "S", "pageElements": [{"objectId": oid, "image": {"contentUrl": url}}
+                                                          for oid, url in [("SAME", "u_same"), ("LOOK", "u_look"),
+                                                                           ("OTHER", "u_other"), ("COPY", "u_same"),
+                                                                           ("INGROUP", "u_same"), ("B2S", "u_same")]]}]}
+    s = Sync.__new__(Sync)
+    s.ours, s.scale = {"out": ours_out}, 2.0
+    s.base = {"slides": [{"key": "intro", "objectId": "S", "groups": [],
+                          "elements": [{"key": "image/figure/0", "objects": ["B2S"]}]}]}
+    boxes = {"SAME": [40, 120, 160, 160], "LOOK": [44, 124, 164, 164], "OTHER": [40, 120, 160, 160],
+             "COPY": [40, 120, 160, 160], "INGROUP": [40, 120, 160, 160], "B2S": [40, 120, 160, 160]}
+    read = {"objects": {oid: readback(box, kind="image", image=oid) for oid, box in boxes.items()}}
+    read["objects"]["COPY"]["title"] = "b2s:intro/image/figure/0"
+    read["objects"]["INGROUP"]["parent_group"] = "G"
+    el = _image_entry(ours_out)
+    assert box_overlap([20, 60, 80, 80], [20, 60, 80, 80]) == 1.0 and box_overlap([0, 0, 10, 10], [20, 20, 30, 30]) == 0.0
+    # the same bytes win; the same look at another resolution is taken too, a different picture isn't
+    assert s.picture_adopter(pres)("intro", [el], read) == "SAME"
+    del read["objects"]["SAME"]
+    assert s.picture_adopter(pres)("intro", [el], read) == "LOOK"
+    for oid in ("LOOK", "COPY", "INGROUP", "B2S"):
+        del read["objects"][oid]
+    assert s.picture_adopter(pres)("intro", [el], read) is None
+    # far from the element's box: not the same unit
+    read["objects"]["SAME"] = readback([400, 300, 520, 340], kind="image", image="c1")
+    assert s.picture_adopter(pres)("intro", [el], read) is None
+    # a picture the deck put in place of the element's own object is found by id
+    assert s.picture_adopter(pres)("intro", [el], read, "SAME") == "SAME"
+    assert s.picture_adopter(pres)("intro", [el], read, "OTHER") is None
+
+
 def test_a_new_slide_lands_on_the_layout_of_its_background(tmp_path):
     """The theme decoration now sits on the layouts, and backgrounds that don't show it got a copy
     of their layout without it. A new slide with a background picture of its own therefore goes on

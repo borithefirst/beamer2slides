@@ -25,6 +25,7 @@ from .paths import out_root
 
 MAX_ATTEMPTS = 3
 CHUNK = 450
+PICTURE_OVERLAP = 0.6  # of the larger box: a deck picture the source now draws sits where it does
 SCRATCH = re.compile(r"b2s_m\d{3}")  # emit.measure_jobs' scratch slides
 STAND_IN = 100.0  # pt: size of plain shapes standing in for template shapes
 
@@ -282,6 +283,15 @@ def shape_style_requests(oid: str, style: dict) -> list[dict]:
     return [{"updateShapeProperties": {"objectId": oid, "shapeProperties": props, "fields": ",".join(fields)}}] if fields else []
 
 
+def box_overlap(a: list[float] | None, b: list[float] | None) -> float:
+    """Area shared by two boxes, over the larger one's area (0 when either is empty)."""
+    if not a or not b:
+        return 0.0
+    ix = max(0.0, min(a[2], b[2]) - max(a[0], b[0])) * max(0.0, min(a[3], b[3]) - max(a[1], b[1]))
+    areas = [(x[2] - x[0]) * (x[3] - x[1]) for x in (a, b)]
+    return ix / max(areas) if max(areas) > 0 else 0.0
+
+
 def matrix_request(oid: str, m: list[float]) -> dict:
     return {"updatePageElementTransform": {"objectId": oid, "applyMode": "RELATIVE", "transform": {
         "scaleX": m[0], "shearX": m[1], "shearY": m[2], "scaleY": m[3], "unit": "EMU",
@@ -342,7 +352,7 @@ class Sync:
             pres = {**pres, "slides": [s for s in pres.get("slides", []) if not SCRATCH.fullmatch(s["objectId"])]}
             theirs = snapshot.read_presentation(pres)
             self.sign_changed(theirs, pres)
-            mplan = merge.plan_merge(self.base, self.ours, theirs)
+            mplan = merge.plan_merge(self.base, self.ours, theirs, self.picture_adopter(pres))
             work = self.prepare(mplan, pres, theirs)
             result = {"attempts": attempt, "plan": mplan, "work": work, "theirs": theirs}
             if self.dry_run or not work["writes"]:
@@ -388,6 +398,68 @@ class Sync:
                 slides.add(s["objectId"])
         if objects or slides:
             snapshot.sign_pictures(theirs, pres, objects, slides)
+
+    def picture_adopter(self, pres: dict):
+        """Finds the live object that already shows a picture the source now draws, for
+        merge.plan_unit. After a pull the source has an `\\includegraphics` for a picture the
+        person put into the deck (or put over a figure), so the new conversion offers a picture the
+        deck already has: the same bytes (pull saves the deck's own picture), else the same look
+        (inverse.same_look: 64x64 grey, correlation >= 0.98, aspect within 2%) and boxes overlapping
+        over most of their area. Its object is kept with the person's crop, rotation and outline
+        instead of being duplicated."""
+        from .inverse import picture_look, same_look
+
+        images, _ = snapshot.picture_urls(pres)
+        base_ids = {oid for s in self.base["slides"] for e in s["elements"] for oid in (e.get("objects") or [])}
+        scale = self.scale or merge.deck_scale(self.base) or 1.0
+        folder = self.ours["out"] / "deck-pictures"
+        deck, mine, taken = {}, {}, set()
+
+        def deck_picture(oid: str):
+            """(sha1, look) of a live picture, downloaded once."""
+            if oid not in deck:
+                deck[oid] = None
+                data = snapshot._download(images[oid]) if oid in images else None
+                if data:
+                    folder.mkdir(parents=True, exist_ok=True)
+                    path = folder / f"{oid}.img"
+                    path.write_bytes(data)
+                    deck[oid] = (identity.sha1(data), picture_look(path))
+            return deck[oid]
+
+        def our_picture(path: Path):
+            if path not in mine:
+                mine[path] = (identity.sha1(path.read_bytes()), picture_look(path)) if path.exists() else None
+            return mine[path]
+
+        def same(ours, oid: str) -> bool:
+            got = deck_picture(oid)
+            return bool(got and (got[0] == ours[0] or same_look(ours[1], got[1])))
+
+        def adopt(skey: str, ours_members: list[dict], read: dict, oid: str | None = None):
+            if len(ours_members or ()) != 1 or ours_members[0]["kind"] != "image":
+                return None
+            el = ours_members[0]
+            if not el.get("ir", {}).get("file"):
+                return None
+            ours = our_picture(self.ours["out"] / el["ir"]["file"])
+            if ours is None or ours[1] is None:
+                return None
+            if oid is not None:  # the deck replaced this element's own picture
+                return oid if same(ours, oid) else None
+            box = [v * scale for v in el["fingerprint"]["bbox"]]
+            best, score = None, PICTURE_OVERLAP
+            for cand, rb in read["objects"].items():
+                if "image" not in rb or cand in base_ids or cand in taken or rb.get("parent_group") \
+                        or (rb.get("title") or "").startswith(snapshot.TAG_PREFIX):
+                    continue
+                over = box_overlap(box, rb.get("box"))
+                if over >= score and same(ours, cand):
+                    best, score = cand, over
+            if best:
+                taken.add(best)
+            return best
+        return adopt
 
     def prepare(self, mplan: dict, pres: dict, theirs: dict) -> dict:
         """What to write, per slide: units to (re)create with their requests' inputs, deletions,
@@ -1073,9 +1145,15 @@ class Sync:
                             rb = {oid: {**v, **{k: read["objects"][oid][k] for k in ("box", "transform")}}
                                   if read and oid in read["objects"] else v for oid, v in old["readback"].items()}
                             elements.append({**m, "objects": old["objects"], "main": old["main"], "readback": rb})
+                    elif a == "adopt_object":
+                        # the deck's own object is what the source now draws (a picture pull put in the source)
+                        for mk in u["ours_members"]:
+                            oid = u["objectId"]
+                            elements.append(self._element(o["elements"][index[mk]], [oid], read))
                     elif a == "adopt":
                         # the source now says what the deck shows: ours IR, the deck's version of those fields
-                        fields = {"text": ("text",), "geometry": ("box", "transform", "size")}
+                        fields = {"text": ("text",), "geometry": ("box", "transform", "size"),
+                                  "image": ("image", "box", "transform", "size")}
                         for m in ounits[u["key"]]:
                             old = next((x for x in bunits[u["key"]] if x["key"] == m["key"]), None)
                             if old is None:
@@ -1204,7 +1282,7 @@ def sync(pdf: Path, deck: str, out: Path | None = None, dry_run: bool = False, o
                          "units": [{k: u[k] for k in ("key", "action", "source", "deck") if k in u} for u in p.get("units", [])
                                    if u["action"] not in ("keep", "none") or u.get("deck")]}
                         for p in result["plan"]["slides"]]}
-    adopted = any(u["action"] == "adopt" for p in result["plan"]["slides"] for u in p.get("units", []))
+    adopted = any(u["action"] in ("adopt", "adopt_object") for p in result["plan"]["slides"] for u in p.get("units", []))
     if not dry_run and (result["work"]["writes"] or adopted or refreshed):
         new = s.new_base(result)
         snapshot.save_local(new, out)

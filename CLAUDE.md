@@ -337,7 +337,8 @@ Sync test harness (opt-in, marker `sync`, deselected by default): `python -m pyt
   nothing written), many-edits (one slide edited every way while the source rewrites it), groups (a
   user group around a redrawn figure, a converter group taken apart, a deleted user group),
   nested-group (a block inside a user group), repainted-pictures (the converter writes the picture
-  files differently - the transparent ground anchored pictures got - and nothing is rewritten);
+  files differently - the transparent ground anchored pictures got - and nothing is rewritten),
+  pull-picture (a picture added in the deck and pulled into the .tex is adopted, not duplicated);
   `XFAIL` pins what sync can't do (table-words: no word
   merge inside a table). Folders `out/sync-tests/<scenario>` of
   the main checkout (decks rebuilt in place), fresh conversions `out/sync-tests/_fresh/<variant>`,

@@ -302,12 +302,19 @@ def converged_fields(anchor: dict, first: dict, base_by: dict, ours_by: dict, ed
 
 
 def plan_unit(skey: str, ukey: str, base_members: list[dict] | None, ours_members: list[dict] | None,
-              slide_read: dict | None, report: dict, scale: float | None = None) -> dict:
+              slide_read: dict | None, report: dict, scale: float | None = None, adopt=None) -> dict:
     """The action for one element unit: keep, recreate (with deck overrides), create, delete,
-    move or adopt (the deck already shows the source's change); conflicts and overrides go to
-    `report`. `scale`: deck pt per PDF pt."""
+    move, adopt (the deck already shows the source's change) or adopt_object (the deck's own
+    object is what the source now draws); conflicts and overrides go to `report`. `scale`: deck pt
+    per PDF pt. `adopt(skey, ours_members, slide_read, oid=None)`: the live object showing the same
+    picture as the unit's new one - a user object, or `oid` itself (sync.picture_adopter)."""
     where = {"slide": skey, "element": ukey}
     if base_members is None:
+        oid = adopt(skey, ours_members, slide_read) if adopt and slide_read else None
+        if oid:
+            # e.g. after a pull: the source draws a picture the person added to the deck.
+            report["converged"].append({**where, "field": "image", "how": "the deck already shows it"})
+            return {"key": ukey, "action": "adopt_object", "objectId": oid}
         report["applied"].append({**where, "fields": ["added"]})
         return {"key": ukey, "action": "create"}
     edits: dict[str, list[str]] = {}
@@ -380,6 +387,13 @@ def plan_unit(skey: str, ukey: str, base_members: list[dict] | None, ours_member
 
     keep = False
     if "image" in edited:
+        if adopt and slide_read and adopt(skey, ours_members, slide_read, main):
+            # The picture in the deck is the one the source now draws (a figure pull replaced).
+            report["converged"].append({**where, "field": "image", "how": "the deck's picture is what the source draws"})
+            rest = edited - {"image", "geometry"}
+            if rest:
+                report["overrides"].append({**where, "fields": sorted(rest)})
+            return {**action, "action": "adopt", "adopt": sorted(edited & {"image", "geometry"})}
         conflict("image", "picture", sorted(src), "replaced in the deck")
         keep = True
     if "text" in edited and not keep:
@@ -444,8 +458,9 @@ def empty_report() -> dict:
             "slides": {"created": [], "deleted": [], "moved": [], "kept": [], "user_added": []}, "warnings": []}
 
 
-def plan_merge(base: dict, ours: dict, theirs: dict) -> dict:
+def plan_merge(base: dict, ours: dict, theirs: dict, adopt=None) -> dict:
     """ours: {"slides": [slide entries with inherited keys], "pairs": {ours index: base index}}.
+    `adopt`: see plan_unit (a picture the deck already shows).
     Returns {"slides": [per slide plan], "order": [live slide ids or "new:<key>"], "report"}."""
     report = empty_report()
     live = {s["objectId"]: s for s in theirs["slides"]}
@@ -473,7 +488,7 @@ def plan_merge(base: dict, ours: dict, theirs: dict) -> dict:
                                             "ours": "changed", "theirs": "deleted", "resolution": "kept deleted"})
             plans.append({"key": o["key"], "action": "gone", "ours": j, "base": i, "objectId": None})
             continue
-        plans.append(plan_slide(b, o, read, report, base, j, i))
+        plans.append(plan_slide(b, o, read, report, base, j, i, adopt))
 
     for i, b in enumerate(base_slides):
         if i in matched_base:
@@ -529,12 +544,12 @@ def deck_scale(base: dict) -> float | None:
     return None
 
 
-def plan_slide(b: dict, o: dict, read: dict, report: dict, base: dict, j: int, i: int) -> dict:
+def plan_slide(b: dict, o: dict, read: dict, report: dict, base: dict, j: int, i: int, adopt=None) -> dict:
     skey = o["key"]
     bu, ou = units(b["elements"]), units(o["elements"])
     unit_plans = []
     for ukey in list(ou) + [k for k in bu if k not in ou]:
-        unit_plans.append({**plan_unit(skey, ukey, bu.get(ukey), ou.get(ukey), read, report, deck_scale(base)),
+        unit_plans.append({**plan_unit(skey, ukey, bu.get(ukey), ou.get(ukey), read, report, deck_scale(base), adopt),
                            "base_members": [m["key"] for m in bu.get(ukey, [])],
                            "ours_members": [m["key"] for m in ou.get(ukey, [])]})
     # A unit the source removed may live on inside another one (paragraphs joined): if that one
@@ -548,8 +563,10 @@ def plan_slide(b: dict, o: dict, read: dict, report: dict, base: dict, j: int, i
             report["applied"] = [a for a in report["applied"] if not (a["slide"] == skey and a["element"] == u["key"])]
             report["conflicts"].append({"slide": skey, "element": u["key"], "field": "removed", "base": words, "ours": None,
                                         "theirs": words, "resolution": "kept: its text moved into an element in conflict"})
+    adopted = {u["objectId"] for u in unit_plans if u["action"] == "adopt_object"}
     for u in user_objects(b, read):
-        report["user_objects"].append({"slide": skey, **u})
+        if u["objectId"] not in adopted:  # (an adopted object is the source's element now)
+            report["user_objects"].append({"slide": skey, **u})
     plan = {"key": skey, "action": "update", "ours": j, "base": i, "objectId": b["objectId"], "units": unit_plans}
     # Background: the source's picture or colour unless the deck changed it.
     if b.get("background") != o.get("background"):

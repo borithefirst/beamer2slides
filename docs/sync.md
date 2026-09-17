@@ -102,6 +102,8 @@ Z-order changes are not detected.
 | text changed | text changed | word-level diff3; clean → recreate and write the merged text; overlapping → keep the deck, conflict |
 | text / position changed | the deck shows exactly that (same text; a move the source now reproduces within 2 pt) | `adopt`: nothing written, reported as converged; the base takes ours IR and the deck's version of those fields (e.g. after `pull`) |
 | picture file changed, same picture | anything | no change: the base takes the new hash (`snapshot.refresh_pictures`, reported as converged) |
+| added: a picture | the deck already shows that picture (after a pull) | `adopt_object`: the person's object becomes the element's, nothing written (`sync.picture_adopter`) |
+| picture changed | image replaced with the picture the source now draws | `adopt`: the deck's picture and box stay, reported as converged instead of a conflict |
 | changed | group taken apart (the unit's `_g` group gone) | recreate without that group |
 | changed | image replaced | keep the deck, conflict |
 | changed | deleted (all or part) | keep deleted, conflict |
@@ -282,6 +284,11 @@ residuals (largest picture box error 1.9 pt); the photo is on disk as Google's 2
   of deleting the deck picture and creating a new one. A source figure that was commented out by pull
   (`% b2s pull: replaced by <file>`) disappears from the conversion: its base unit must be retired
   without deleting the deck object that replaced it.
+  Done (`sync.picture_adopter`, live scenario `pull-picture`): a new picture unit whose file has the
+  bytes or the look of an unmatched deck object overlapping its box is adopted (`adopt_object`), and a
+  deck object whose own picture was replaced by the one the source now draws converges instead of
+  conflicting. A figure only commented out is a unit the source removed, so its objects are deleted
+  unless the deck edited or deleted them - the object that replaced it is a different one.
 - **Convert should pass raster `\includegraphics` through losslessly.** Today a figure region is
   re-rendered from the page, so a 2046 px photo becomes a ~600 px crop and a pull afterwards can only
   recover that. PDFium gives the image object's own bitmap (`FPDFImageObj_GetImageDataDecoded` /

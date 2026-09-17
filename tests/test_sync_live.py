@@ -564,6 +564,44 @@ def scenario_pull_wording(run: Run):
         run.problems.append("sync after pull changed the presentation revision")
 
 
+@scenario
+def scenario_pull_picture(run: Run):
+    """A picture the person added to the deck, pulled into the .tex: the next sync keeps their
+    object (the source draws that picture now) instead of putting a second one next to it."""
+    if reason := cli_missing("pull"):
+        pytest.skip(reason)
+    import sync_check as sc
+    from deck_edits import donor_image_url
+    src = run.out / "src"
+    src.mkdir(exist_ok=True)
+    tex = src / "talk.tex"
+    tex.write_text(sync_build.render([]), encoding="utf-8")
+    run.convert(sync_build.compile_tex(tex))
+    donor = donor_image_url(run.deck.api, fresh_conversion("v1")[1].pres["presentationId"])
+    pictures_of = lambda model: {e.id for e in model.one(CONCL).elements if e.kind == "image"}
+    before = pictures_of(run.deck.read())
+    exps = run.edit(E("add_image", slide=CONCL, url=donor, box=[500, 270, 160, 100]))
+    after = pictures_of(run.deck.read())
+    added = after - before
+    run.cli("pull", "--deck", run.out, "--tex", tex, "--apply")
+    if "includegraphics" not in tex.read_text(encoding="utf-8"):
+        run.problems.append("pull didn't put the picture into the source")
+        return
+    report = run.sync(sync_build.compile_tex(tex))
+    model = run.deck.read()
+    run.problems += sc.check_all(model, [c for e in exps for c in e["checks"]])
+    run.problems += sc.check_report(report, converged=[["image"]], no_conflicts=True)
+    run.problems += sc.integrity(model, before=run.before, base_ids=run.base_ids())
+    pictures = pictures_of(model)
+    if len(pictures) != len(after):
+        run.problems.append(f"{len(after)} picture(s) on {CONCL} before the sync, {len(pictures)} after: "
+                            "the pulled picture was duplicated or deleted")
+    if not added <= pictures:
+        run.problems.append("sync replaced the picture the person added instead of adopting their object")
+    elif run.base_ids() is not None and not added <= run.base_ids():
+        run.problems.append("the new base doesn't own the adopted picture")
+
+
 @pytest.fixture(scope="module")
 def outcomes(request):
     """scenario -> problems (or the exception, or a skip reason) for the scenarios selected."""
