@@ -92,11 +92,66 @@ base, ours, theirs), converged overrides, slides created/deleted/moved, warnings
 unmeasured pictures).
 
 ## Pull: deck edits back to the source
-`beamer2slides pull --deck <url|id|out> [--tex main.tex] [--apply]` lists deck edits relative to
-the base (same detection) as `edits.json` / `edits.md`: slide key and title, element key, field,
-before → after (text as a word diff), and for text the source location found through SyncTeX
-(`-synctex=1` build; the element's PDF bbox → file:line range). `--apply` patches plain wording edits
-into the .tex when the old words are found uniquely in that range (LaTeX-aware matching: commands,
-braces, `~`, `--`, math left alone); everything else is left for the author, typically the AI, with
-enough context to do it. After the source is updated and reconverted, sync sees those fields as
-converged. Geometry-only edits usually stay deck overrides.
+```
+beamer2slides pull --deck <url|id|out folder> --tex main.tex [--apply | --out DIR] [--max-iter N] [--work DIR]
+beamer2slides converge --target deck.json --tex main.tex [same options]      # offline twin
+```
+Pull is an inverse problem solved by a loop, not a replay of recorded edits: it edits the source
+until the source's own conversion matches the deck. It only reads the deck (`presentations.get`
+and picture downloads), so the deck revision never changes; it needs no base snapshot.
+
+1. **Target** (`deck_ir.py`): the live deck as deck.json-shaped IR. Text boxes give paragraphs,
+   runs (bold, italic, colour, links, scripts; formula holes from Roboto Mono no-break spaces) and
+   bullets; sizes go back to PDF pt through FontMapper, positions through emit's text box model
+   (anchor = text start by alignment and first baseline, / scale), so a converted deck read back
+   equals classify's IR (tests/slides_sim.py replays emit's requests to check it offline; on a live
+   deck the unedited talk reads back with 0 residuals). Numbered balls (picture + number box) and
+   diagram groups (node shapes joined by lines) fold back into one element; pictures are
+   downloaded and hashed; notes, background colours and tables are read too. Slide keys come from
+   `b2s:<slide key>/<element key>` alt-text titles or a base's object map when present.
+2. **Loop** (`inverse.converge`): a working copy of the source tree (`<work>/loop/src`) is compiled
+   with the document's engine (`% !TEX program`, fontspec → lualatex; `-synctex=1`, reruns on
+   "Rerun"), then prepared, extracted and classified like `convert` (notes pages, last overlay step,
+   panels verified like render). SyncTeX maps pages to frames (`texmap.page_frames`; inside a frame
+   SyncTeX only names `\end{frame}`, so words are then located by printed text: `texmap.build_visible`
+   maps every printed character to its source span, math is opaque, `\input`/`\include` followed).
+3. **Compare** (`compare.py`): slides by key, then by title/text alignment (reorders detected);
+   paragraphs across the slide; residuals with tolerances (`TOL`: 2 pt positions, 3 pt sizes, 6%
+   font size, colour distance 24): slide missing/extra/order, notes, background, paragraph
+   missing/extra/order, text (word diff), style ranges, bullet kind and relative level, alignment,
+   element missing/extra, geometry (text anchors; picture, shape and table boxes), picture hash,
+   shape fill, table cells, diagram labels. Whole frame-title size/colour and title positions are
+   `theme` differences: reported, never written.
+4. **Translate** (`inverse.Planner`), keeping the diff minimal and semantic: slide edits first and
+   alone (new frame after its predecessor with title, lists, notes and `[label=key]`; frame deleted;
+   frame block moved), then words (replace/insert/delete in plain source spans, word by word across
+   commands), styles (`\textbf`, `\emph`, `\underline`, `\texttt`, `\textcolor` + `\definecolor`,
+   size switches; wrap, unwrap or split the enclosing group), lists rebuilt from their items' own
+   source (items added, deleted, reordered, relevelled), plain paragraphs inserted or deleted,
+   `\note{}`, `\setbeamercolor{background canvas}`, new text boxes and pictures as `textblock*`
+   (textpos, absolute page pt; picture files copied to `figures/b2s-<sha>`), and geometry last,
+   top first, deferred on slides whose content changes that round: textblocks shift by the error,
+   flow text moves vertically with `\par\vspace` (beamer centres frames: the gain is learned by
+   secant updates), otherwise it is cut into a textblock at the target with a spacer keeping its
+   flow room; pictures change width first.
+5. **Stop**: within tolerance, `--max-iter` (10), or no edit left. Edits of words, styles and notes,
+   new boxes and new slides are written once, added paragraphs twice, other residuals until they stop improving; repeated states stop the loop;
+   a round that breaks the build is replayed one edit at a time and the breaking edits dropped.
+
+Output in `--work` (default `<out folder>/pull`): `target.json`, `pull.patch`, `edits.json` and
+`edits.md` (iterations with open residuals by kind and geometry error, the patch, theme
+differences, and every unresolved residual with its reason, `file:line` range of its frame and the
+target values, for an AI author to finish). `--apply` writes the changed files in place (`.bak`
+backups) and copies new picture files; `--out DIR` writes the edited source tree there instead;
+neither leaves the source untouched. After the rebuilt PDF is synced, the pulled fields are
+converged overrides.
+
+Results: offline test bed (`python -m pytest -m inverse`, ~2 min) converges on 4 source pairs in one
+round each and on 10 synthetic edits of 01_basic in 1-3 rounds; live, the sync talk edited in Slides
+(reword, bold, 30 pt move, new red text box, new slide with bullets) converged in 3 rounds (~40 s)
+and the deck converted from the pulled source compares to the edited deck with 0 open residuals
+(text anchors within 2.1 pt), only the new slide's layout title differing (theme).
+
+Not translated yet (reported instead): tables, diagram labels, shape colours, paragraph alignment,
+frame title position and theme styles, edits inside math, rotated text, overlays beyond the last
+step (compile with `--handout` to pull a handout-style deck).

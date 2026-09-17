@@ -476,8 +476,11 @@ def compare_slide(c: dict, t: dict, ci: int, ti: int, tol: dict, add, comp: Comp
         pw = {**where, "element": cp.el["id"], "para": cp.pi, "target_element": tp.el["id"], "target_para": tp.pi}
         if cp.text != tp.text:
             add("text", **pw, cur=cp.text, tgt=tp.text, ops=word_diff(cp.text, tp.text))
+        titles = cp.el.get("role") == "title" and tp.el.get("role") == "title"
         for d in style_diffs(cp.p, tp.p, tol):
-            add("style", **pw, **d)
+            # a whole title's size or colour is the theme's (a slide added in Slides takes its layout's)
+            theme = titles and d["field"] in ("size", "color") and d["t1"] - d["t0"] >= 0.9 * len(tp.text)
+            add("style", **pw, **{**d, **({"within": True, "theme": True} if theme else {})})
         if bullet_sig(cp.p, cp.el) != bullet_sig(tp.p, tp.el):
             add("bullet", **pw, cur=bullet_sig(cp.p, cp.el), tgt=bullet_sig(tp.p, tp.el))
         if cp.p["align"] != tp.p["align"] and len(tp.text) > 0:
@@ -503,10 +506,13 @@ def compare_slide(c: dict, t: dict, ci: int, ti: int, tol: dict, add, comp: Comp
             continue  # its first paragraph is missing: placed once that is there
         (cx, cy), (tx, ty) = text_anchor_for(ce, first.pi), text_anchor(te)
         dx, dy = tx - cx, ty - cy
+        # frame titles sit where the theme puts them: a moved title is noted, not written back
+        theme = te.get("role") == "title" and ce.get("role") == "title"
         add("geometry", **where, element=ce["id"], target_element=te["id"], para=first.pi, dx=round(dx, 2),
             dy=round(dy, 2), cur=[round(cx, 2), round(cy, 2)], tgt=[round(tx, 2), round(ty, 2)],
-            align=anchor_align(te), within=abs(dx) <= tol["pos"] and abs(dy) <= tol["pos"],
-            wrap_width=te.get("wrap_width"), mixed=len({id(h.el) for h in hits}) > 1)
+            align=anchor_align(te), within=theme or (abs(dx) <= tol["pos"] and abs(dy) <= tol["pos"]),
+            wrap_width=te.get("wrap_width"), mixed=len({id(h.el) for h in hits}) > 1,
+            **({"theme": True} if theme and (abs(dx) > tol["pos"] or abs(dy) > tol["pos"]) else {}))
     for ce in c_elements:
         if not any(p.el is ce and k in t_of_c for k, p in enumerate(cps)) and any(p.el is ce for p in cps):
             add("element_extra", **where, element=ce["id"], el_kind="text", text=element_text(ce))

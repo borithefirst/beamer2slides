@@ -42,7 +42,7 @@ from pathlib import Path
 from .compare import (HOLE, TOL, Comparison, Para, char_styles, compare, grey16, norm_text, para_text, picture_hash,
                       residual_line, slide_paragraphs, slide_title, text_anchor)
 from .texmap import (OPAQUE, PARA, Frame, Item, ListEnv, Source, Visible, WordMap, build_visible, frame_visible,
-                     line_of, locate_words, mask_comments, match_group, page_frames, read_args, skip_space,
+                     line_of, locate_words, mask_comments, match_group, norm_word, page_frames, read_args, skip_space,
                      synctex_pages)
 
 MIKTEX_BIN = Path(os.environ.get("LOCALAPPDATA", "")) / "Programs" / "MiKTeX" / "miktex" / "bin" / "x64"
@@ -65,6 +65,7 @@ NAMED_COLOURS = {"#ff0000": "red", "#00ff00": "green", "#0000ff": "blue", "#0000
 RESHAPING = {"paragraph_missing", "paragraph_extra", "paragraph_order", "bullet", "element_missing", "element_extra",
              "image"}
 ADDITIVE = {"paragraph_missing", "element_missing", "slide_missing"}
+ONCE = {"text", "style", "notes", "element_missing", "slide_missing"}
 STYLE_CMDS = {
     "bold": (("textbf", "bfseries", "alert"), "textbf", "textmd"),
     "italic": (("emph", "textit", "itshape", "em", "textsl", "slshape"), "emph", "textup"),
@@ -677,6 +678,16 @@ class Planner:
                 self.fail({**r, "op": op}, "the words include a formula")
                 continue
             if op["op"] == "insert":
+                want = [norm_word(w) for w in op["tgt"].split()]
+                near = []
+                if c0 > 0 and loc.words.vis[c0 - 1] is not None:
+                    near.append([norm_word(w) for w in loc.visible.text[loc.words.vis[c0 - 1][1]:].split()[:len(want)]])
+                if c0 < len(cur_words) and loc.words.vis[c0] is not None:
+                    near.append([norm_word(w) for w in loc.visible.text[:loc.words.vis[c0][0]].split()[-len(want):]])
+                if want in near:
+                    self.fail({**r, "op": op}, "the words are already in the source: the conversion splits the "
+                                               "paragraph differently (box width, line breaks)")
+                    continue
                 if c0 > 0 and loc.words.vis[c0 - 1] is not None:
                     at = loc.visible.ends[loc.words.vis[c0 - 1][1] - 1]
                     self.edits.append(Edit(loc.file, at, at, " " + new, "text", signature(r) + (c0,)))
@@ -854,7 +865,6 @@ class Planner:
                 self.fail(r, "predecessor not found in the source")
                 return
             if aloc is None:
-                first = next(iter(locs.values()), None)
                 frame = self.cand.frames[si]
                 if frame is None:
                     self.fail(r, "the page comes from no frame")
@@ -872,11 +882,11 @@ class Planner:
                     return
                 self.insert_paragraph(aloc, None, tpara, r)
                 return
-        key = (aloc_file := (locs.get((r.get("element"), r.get("para"))) or locs.get(((r.get("after") or {}).get("element"), (r.get("after") or {}).get("para"))))).file, lst.start
-        if key in done:
+        where = loc if r["kind"] != "paragraph_missing" else aloc
+        if (where.file, lst.start) in done:
             return
-        done.add(key)
-        self.rebuild_list(si, ti, aloc_file.file, aloc_file.visible, lst, r)
+        done.add((where.file, lst.start))
+        self.rebuild_list(si, ti, where.file, where.visible, lst, r)
 
     def target_element_is_new(self, ts: dict, eid: str, si: int) -> bool:
         return any(x["kind"] == "element_missing" and x["target_element"] == eid and x["target_slide"] == self.c2t.get(si)
@@ -1504,6 +1514,9 @@ def body_style(deck: dict) -> dict:
     return {"size": size, "color": colour, "family": family, "bold": False, "italic": False}
 
 
+SIG_LEN = 9  # an Edit's signature is its residual's signature plus translator details
+
+
 def signature(r: dict) -> tuple:
     return (r["kind"], r.get("target_slide"), r.get("target_element"), r.get("target_para"), r.get("field"),
             r.get("t0"), r.get("slide") if r["kind"] in ("slide_extra",) else None,
@@ -1599,6 +1612,7 @@ class Result:
     files: dict[str, str]            # original path -> edited text
     patch: str
     work: Path
+    theme: list[dict] = field(default_factory=list)   # differences the theme owns (titles), not written back
 
 
 def picture_hashes(cand: Candidate, target: dict, comp_out: Path) -> dict:
@@ -1637,6 +1651,7 @@ def converge(tex: Path, target: dict, work: Path, max_iter: int = 10, handout: b
     iterations: list[dict] = []
     blocked: set = set()
     attempts: dict[tuple, list[float]] = {}
+    tried: dict[tuple, int] = {}   # residual signature -> rounds with an edit written for it
     last_values: dict = {}
     seen: dict[tuple, int] = {}
     unresolved: list[dict] = []
@@ -1672,7 +1687,8 @@ def converge(tex: Path, target: dict, work: Path, max_iter: int = 10, handout: b
                 if r["kind"] == "geometry" else 1.0
             hist = attempts.setdefault(sig, [])
             hist.append(mag)
-            if (r["kind"] in ADDITIVE and len(hist) >= 3) or \
+            # an edit that adds or rewrites words is tried once: repeating it would pile up text
+            if (r["kind"] in ONCE and tried.get(sig, 0) >= 1) or (r["kind"] in ADDITIVE and tried.get(sig, 0) >= 2) or \
                     (len(hist) >= 4 and (r["kind"] != "geometry" or hist[-1] >= 0.8 * hist[-3])):
                 blocked.add(sig)
                 unresolved.append({**r, "why": "not converging after repeated edits"})
@@ -1701,7 +1717,7 @@ def converge(tex: Path, target: dict, work: Path, max_iter: int = 10, handout: b
                 if pre:
                     ws.write(pre)
                 if ws.compile()[0] is None:
-                    blocked.add(e.signature)
+                    blocked.add(e.signature[:SIG_LEN])
                     unresolved.append({"kind": e.kind, "why": "the edit breaks compilation", "edit": e.text[:200],
                                        "signature": list(map(str, e.signature))})
                 else:
@@ -1712,6 +1728,9 @@ def converge(tex: Path, target: dict, work: Path, max_iter: int = 10, handout: b
             if pre:
                 ws.write(pre)
             log(f"    {len(applied) - len(good)} edit(s) broke the build and were dropped")
+            applied = good
+        for sig in {e.signature[:SIG_LEN] for e in applied}:
+            tried[sig] = tried.get(sig, 0) + 1
     open_res = comp.open() if comp else []
     files = {}
     patch = ""
@@ -1735,7 +1754,8 @@ def converge(tex: Path, target: dict, work: Path, max_iter: int = 10, handout: b
         if frame is not None:
             u["where"] = f"{(ws.root / frame.file.relative_to(ws.src)).as_posix()}:{frame.begin_line}-{frame.end_line}"
             u["frame_label"] = frame.label
-    return Result(not open_res, iterations, final_unresolved, open_res, files, patch, ws.work)
+    theme = [r for r in comp.residuals if r.get("theme")] if comp else []
+    return Result(not open_res, iterations, final_unresolved, open_res, files, patch, ws.work, theme)
 
 
 def restore(ws: Workspace, texts: dict[Path, str]) -> None:
@@ -1797,7 +1817,8 @@ def class_pt_option(source: Source) -> int:
 
 def report(result: Result, target: dict, cand_deck: dict | None = None) -> tuple[dict, str]:
     data = {"converged": result.converged, "iterations": result.iterations,
-            "unresolved": [clean(u) for u in result.unresolved], "changed_files": list(result.files)}
+            "unresolved": [clean(u) for u in result.unresolved], "theme": [clean(u) for u in result.theme],
+            "changed_files": list(result.files)}
     md = ["# Pull report", "", f"Converged: **{result.converged}** after {len(result.iterations) - 1} edit rounds.", ""]
     md.append("| iteration | open residuals | by kind | geometry error (pt) |")
     md.append("|---|---|---|---|")
@@ -1813,6 +1834,9 @@ def report(result: Result, target: dict, cand_deck: dict | None = None) -> tuple
             md.append(f"{head}: {residual_line(u)} — {u.get('why')}")
             if u.get("where"):
                 md.append(f"  - source: {u['where']}")
+    if result.theme:
+        md += ["", "## Theme differences (not written to the source)", ""]
+        md += [f"- {residual_line(u)}" for u in result.theme]
     if result.patch:
         md += ["", "## Patch", "", "```diff", result.patch.rstrip(), "```"]
     return data, "\n".join(md) + "\n"

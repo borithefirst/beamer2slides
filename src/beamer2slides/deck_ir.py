@@ -266,7 +266,7 @@ def text_element(pe: dict, m: list[float], resolver: StyleResolver, fonts: FontM
     out_paras[0]["lines"][0]["baseline"] = round(baseline / scale, 2)
     role = "title" if placeholder in ("TITLE", "CENTERED_TITLE") else "body"
     return {"kind": "text", "role": role, "bbox": [round(v / scale, 2) for v in (x0, y0, x1, y1)],
-            "anchor": [round(x / scale, 2), round(baseline / scale, 2)], "wrap_width": round((w - 2 * PAD_X) / scale, 2),
+            "anchor": [round(x / scale, 2), round(baseline / scale, 2)], "wrap_width": round((x1 - x0 - 2 * PAD_X) / scale, 2),
             "placeholder": placeholder, "paragraphs": out_paras}
 
 
