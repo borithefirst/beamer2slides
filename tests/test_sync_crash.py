@@ -635,7 +635,9 @@ class CrashRun:
 
     def convert(self, pdf):
         from deck_edits import LiveDeck
-        self.cli("convert", pdf, "--out", self.out)
+        # --force-rebuild: the case folder holds the previous run's deck with its edits still on it,
+        # and the rebuild guard (guard.py) would rightly refuse to replace that.
+        self.cli("convert", pdf, "--out", self.out, "--force-rebuild", "--backup", "none")
         self.deck = LiveDeck(json.loads((self.out / "emit.json").read_text(encoding="utf-8"))["presentationId"])
 
     def edit(self, specs):
