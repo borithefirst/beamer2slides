@@ -562,7 +562,7 @@ def test_replace_file_leaves_no_temporary_behind_when_the_write_fails(tmp_path):
     path = tmp_path / "a.tex"
     path.write_text("old\n", encoding="utf-8")
     with pytest.raises(OSError):
-        replace_file(path, tmp_path / "does-not-exist.png", backup=False)
+        replace_file(path, tmp_path / "does-not-exist.png")
     assert path.read_text(encoding="utf-8") == "old\n"
     assert [p.name for p in tmp_path.iterdir()] == ["a.tex"]
 

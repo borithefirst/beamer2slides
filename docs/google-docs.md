@@ -316,6 +316,40 @@ as it already does on the Slides side:
 - **every later push** — incremental `batchUpdate` edits computed by the merge, never a
   re-import. That is what `sync.py` already does; only `convert` ever rebuilds wholesale.
 
+## The loop, end to end: measured on a live document
+
+`src/beamer2slides/doc_ir.py` (IR ↔ canonical HTML ↔ `documents.get`) and
+`doc_merge.py` (three-way merge → `batchUpdate`) are written; `tools/docs_spike.py`
+drives them against a real document. The loop proved out in full:
+
+1. `push` converts the canonical HTML through Drive, reads the result back, gives it the
+   file's keys and plants one named range per block;
+2. a human edits in the browser — a word rewritten, a **person chip** inserted, a new
+   paragraph typed, a numbered list made with the toolbar;
+3. the source file is edited at the same time — a heading reworded, a word changed inside
+   a bold run, a word changed in a paragraph the document also edited, a block added, a
+   block deleted;
+4. `sync` merges the three sides, sends the edits with `requiredRevisionId`, then
+   **regenerates the canonical file from the document it just wrote**;
+5. `sync` again writes **0 requests**. File and document say the same thing.
+
+The chip survived every pass, the file gained it (`<span class="b2s-chip"
+data-chip="person" data-value="…">`), and the block whose text the source would have
+rewritten around it was left alone and reported. Four traps were found by running it,
+all of them now fixed and pinned by offline tests:
+
+| Trap | What happens | What the code does |
+|---|---|---|
+| **An imported list cannot say whether it is numbered** | every nesting level of a list Drive's HTML importer built reads back `glyphType: GLYPH_TYPE_UNSPECIFIED`, with no `glyphFormat` and no `glyphSymbol` — identically for `<ul>` and `<ol>`, though the editor renders them differently. A list the *editor* makes reads properly (`DECIMAL`/`%0.`, `ALPHA`, `ROMAN`, or a `glyphSymbol`) | `doc_ir._ordered` answers `None`, not `False`, and `doc_merge.restore_unreadable` takes the answer from the canonical file. The mirror image of a frozen run: the document wins on what the file cannot carry, the file wins on what the document cannot report. Block identity (`_match_shape`) ignores ordered-ness entirely, or every list item would lose its key on the first read-back |
+| **Inserted text inherits the style in front of it** | replacing a word at the start of a bold run or a link by deleting and then inserting at the hunk's start gives the new word the style of whatever preceded the hunk — the word falls out of the run | insert at the hunk's **end** first (inheriting from the last character it replaces), delete afterwards. `canonical` → `canonic` stays bold; without it, it does not |
+| **Text inserted at a list item's start joins the list** | a new paragraph written at the index where a bulleted paragraph begins comes out as another bullet of that list | every non-item block is written with `deleteParagraphBullets` before its paragraph style |
+| **An insert and an edit at the same index** | a block inserted at index *i* pushes the block that starts at *i* down the document, so that block's own edits — planned against the read — land inside the new text | back-to-front ordering breaks the tie the other way: at one index, a block's deletes and edits go before the insert that displaces it |
+
+Two limitations stand, and neither blocks the design: **style-only changes in the source
+are not written** to an existing block (only text edits and whole new blocks carry
+styling), and a list the human switches from bullets to numbers **cannot be seen**, so
+the file keeps saying what it said.
+
 ## Remaining risks
 
 1. **Images on the sync path.** Import via HTML is fine (measured, lossless). But
@@ -324,7 +358,8 @@ as it already does on the Slides side:
    trick `sync.stage` already uses. Read-back `contentUri`s live ~30 minutes; the **zip
    export is the durable, byte-exact picture route**.
 2. **Lists in the read-back.** `listId` is opaque and output-only; whether Docs forks or
-   reuses one when a user splits a list in the UI is undocumented.
+   reuses one when a user splits a list in the UI is undocumented. What an *imported*
+   list's glyphs read as is no longer a risk but a measurement — see the table above.
 3. **Anchors under a human editor** — retired, see "Under a human editor" above. What
    is still unmeasured there: dragging a selection to a new place, "paste without
    formatting", and a second person editing concurrently.
@@ -382,3 +417,13 @@ The anchor probes: named-range behaviour through the API, and under a human edit
 The chips probe: one labelled line per Docs-native object, read back through
 `documents.get` (with and without tabs) and through every export that could carry it.
 All five write to `out/docs-probe/`.
+
+```
+.venv\Scripts\python.exe tools\docs_spike.py push    # then edit the document by hand
+.venv\Scripts\python.exe tools\docs_spike.py sync    # and again: the second writes nothing
+```
+
+The whole loop on one small document (`out/docs-spike/`): `push` creates it and plants
+the anchors, `read` prints what the document says now, `sync` merges file and document
+three ways and rewrites the file from the result, `delete` removes it. `sync --dry-run`
+writes the planned requests to `out/docs-spike/requests.json` without sending them.

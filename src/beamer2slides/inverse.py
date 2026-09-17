@@ -417,8 +417,36 @@ def source_hashes(root: Path, src: Path) -> dict[str, str]:
     return out
 
 
-def copy_tree(src: Path, dst: Path) -> None:
+def backup_for(path: Path) -> Path:
+    """A backup name that takes nothing away: `<file>.bak`, then `<file>.bak2`, `.bak3`, ..."""
+    candidate, n = path.with_name(path.name + ".bak"), 2
+    while candidate.exists():
+        candidate = path.with_name(f"{path.name}.bak{n}")
+        n += 1
+    return candidate
+
+
+def keep_backup(path: Path, new: "Path | str") -> Path | None:
+    """Copy `path` aside before `new` replaces it (None: nothing to keep, or it holds that content
+    already). A second `pull --apply` must not write over the copy the first one made - that copy
+    is the author's own version, and the file itself is by then the first pull's work."""
+    if not path.exists():
+        return None
+    old = path.read_bytes()
+    fresh = new.read_bytes() if isinstance(new, Path) else new.encode("utf-8")
+    if old == fresh:
+        return None
+    bak = backup_for(path)
+    shutil.copy2(path, bak)
+    return bak
+
+
+def copy_tree(src: Path, dst: Path) -> list[Path]:
+    """Copies the source tree (build products and huge files left out). Returns the backups it made:
+    `dst` is normally a fresh folder, but `pull --out` may be pointed at a tree that holds files of
+    its own, and those are kept (`keep_backup`) instead of being written over."""
     dst = Path(dst).resolve()
+    backups = []
     for dirpath, dirnames, filenames in os.walk(src):
         dirnames[:] = [d for d in dirnames if d not in SKIP_DIRS and not d.startswith(".")
                        and (Path(dirpath) / d).resolve() != dst and dst not in (Path(dirpath) / d).resolve().parents
@@ -429,7 +457,11 @@ def copy_tree(src: Path, dst: Path) -> None:
             p = Path(dirpath) / name
             if p.suffix in BUILD_EXT or name.endswith(".synctex.gz") or p.stat().st_size > 50_000_000:
                 continue
+            bak = keep_backup(dst / rel / name, p)
+            if bak:
+                backups.append(bak)
             shutil.copy2(p, dst / rel / name)
+    return backups
 
 
 # ---------------------------------------------------------------- source structure helpers
@@ -2370,17 +2402,12 @@ def file_sha1(path: Path) -> str | None:
         return None
 
 
-def replace_file(path: Path, new: str | Path, backup: bool = True) -> None:
-    """Write `new` (text, or a file to copy) to `path` through a temporary file in the same folder,
-    with a `.bak` of what was there. A process killed at any moment leaves either the old file or
-    the new one, never half of one: everything is written under another name and moved into place,
-    and os.replace is atomic on Windows as it is on POSIX."""
+def replace_file(path: Path, new: str | Path) -> None:
+    """Write `new` (text, or a file to copy) to `path` through a temporary file in the same folder
+    (the copy of what was there is `keep_backup`'s job). A process killed at any moment leaves either
+    the old file or the new one, never half of one: everything is written under another name and
+    moved into place, and os.replace is atomic on Windows as it is on POSIX."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    if backup and path.exists():
-        bak = path.with_name(path.name + ".bak")
-        tmp_bak = path.with_name(path.name + ".bak.writing")
-        shutil.copy2(path, tmp_bak)
-        os.replace(tmp_bak, bak)
     tmp = path.with_name(path.name + ".b2s-writing")
     try:
         if isinstance(new, Path):
@@ -2403,31 +2430,37 @@ def unchanged_since_pull(path: Path, originals: dict[str, str]) -> bool:
 
 def write_outputs(result: Result, target: dict, tex: Path, work: Path, apply: bool, out: Path | None,
                   log=print) -> None:
-    """pull.patch, edits.json and edits.md in `work`; the edited files in place (with .bak backups)
-    when `apply`, or the edited source tree in `out`."""
+    """pull.patch, edits.json and edits.md in `work`; the edited files in place when `apply`, each
+    with a backup that never replaces an older one (`keep_backup`), or the edited source tree in
+    `out`."""
     data, md = report(result, target)
     (work / "pull.patch").write_text(result.patch, encoding="utf-8", newline="\n")
     (work / "edits.json").write_text(json.dumps(data, indent=1, ensure_ascii=False), encoding="utf-8")
     (work / "edits.md").write_text(md, encoding="utf-8")
     if out is not None:
         out = Path(out).resolve()
-        copy_tree(result.work / "src", out)
+        kept = copy_tree(result.work / "src", out)
         log(f"edited source tree -> {out}")
+        if kept:
+            log(f"  {len(kept)} file(s) that were already there kept as .bak (e.g. {kept[0].name})")
     elif apply:
         from .faults import fail_at
         skipped = []
         for path, new in result.files.items():
             path = Path(path)
-            if result.originals and not unchanged_since_pull(path, result.originals):
+            originals = getattr(result, "originals", None)
+            if originals and not unchanged_since_pull(path, originals):
                 # Someone wrote to this file while the pull was compiling: their version wins.
                 side = path.with_name(path.name + ".b2s-new")
-                replace_file(side, new, backup=False)
+                replace_file(side, new)
                 skipped.append(str(path))
                 log(f"  {path} changed since the pull started: left alone, its new version is {side}")
                 continue
             fail_at("pull:apply")
-            replace_file(path, new, backup=not isinstance(new, Path))
-            log(f"  wrote {path}")
+            path.parent.mkdir(parents=True, exist_ok=True)
+            bak = keep_backup(path, new)
+            replace_file(path, new)
+            log(f"  wrote {path}" + (f" (what was there is now {bak.name})" if bak else ""))
         if skipped:
             data["not_applied"] = skipped
             (work / "edits.json").write_text(json.dumps(data, indent=1, ensure_ascii=False), encoding="utf-8")

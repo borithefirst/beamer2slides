@@ -4,6 +4,10 @@ Context: an AI writes the talk as beamer, `convert` turns it into a Slides deck,
 deck, the AI (or a LaTeX user) edits the beamer again. `sync` brings the source changes into the
 live deck without destroying the deck edits; `pull` brings deck edits back towards the source.
 
+**Never lose deck edits** (`guard.py`): `convert` on an output folder that already has a deck
+replaces that deck's whole content, so it now checks first whether anyone edited it and refuses
+if they did — see [Never lose deck edits](#never-lose-deck-edits) at the end.
+
 ## Model: a three-way merge
 - **base**: what the converter produced last time, recorded right after it was written
   (the deck's IR plus Google's read-back of each object it created).
@@ -36,6 +40,12 @@ storage), `merge.py` (pure planning and diff3), `sync.py` (requests and the writ
   gets `~k`. Base and ours slides pair by label first; the rest by an order-keeping alignment of
   word similarity (+0.5 for the same title, at least 0.6; two different labels never pair), so an
   inserted or renamed frame doesn't shift keys. Unpaired ours slides get fresh keys.
+  One label can name several slides - `--overlays all` gives a slide per step of a labelled frame,
+  and a source may reuse a label - and then the n-th slide of that label pairs with the n-th in the
+  base (`identity.align_slides`). Pairing them all with one base slide used to leave its siblings
+  unpaired, i.e. read as slides the source had dropped: syncing an `--overlays all` deck against
+  its own unchanged PDF planned to delete a step (and then crashed on the slide order). Found live
+  on 2026-09-18, pinned in `tests/test_identity_labels.py`.
   AI authors are told to label every frame (themes/google README, docs).
 - **Element key** within a slide: `kind/role/ordinal` (e.g. `text/title/0`, `text/body/2`,
   `image/figure/0`, `image/math/1`), plus a **fingerprint**: plain text, PDF bbox, image sha1 of its
@@ -56,7 +66,7 @@ storage), `merge.py` (pure planning and diff3), `sync.py` (requests and the writ
 
 ## Base snapshot (`sync/base.json`, schema version 1)
 ```
-{version: 1, generation, presentationId, revisionId, source: {pdf, sha1}, scale,
+{version: 1, generation, presentationId, revisionId, source: {pdf, sha1}, overlays ("last"|"all"), scale,
  page_size (PDF pt), deck_page_size, master_background (key), master_readback,
  slides: [{key, label, title, page, text, layout, background ("color:#rrggbb" | "png:<sha1>"), notes,
            objectId, layoutObjectId, background_readback, notes_readback, groups: [objectId...],
@@ -86,6 +96,28 @@ Drive is authoritative (anyone with the deck can sync), the local copy is a cach
 The base is replaced only when a sync wrote something or adopted converged deck fields (`generation` + 1).
 Two crash-recovery keys live beside the slides: `pending` (a run has started writing) and `cleanup`
 (objects a finished run has still to delete) - see "If a sync or a pull dies".
+
+`overlays` is the overlay mode `convert` used. `sync` takes it from there unless `--overlays` says
+otherwise (`sync.overlay_mode`): a deck converted with `--overlays all` has a slide per step, and
+syncing the same source with `last` would leave the steps in between out of `ours`, where they read
+as slides the source dropped - sync would delete the ones nobody had edited. Asking for the other
+mode on purpose still works and is reported as a warning.
+
+### Two checkouts, one deck
+Because Drive holds the base, a second checkout (or a second person) syncing the same deck reads
+the base the first one wrote, not the deck as it was before. A cache from another deck is refused
+(`presentationId`), and with no base anywhere sync stops: "no sync base for presentation …".
+
+When the deck names a base file in Drive that cannot be read - a Drive cleanup deleted it, or
+`save_drive` failed and only warned - sync falls back to the folder's copy and says so
+(`snapshot.stale_base_warning`, also in the report's warnings), because that copy can be older
+than the deck. Measured on a live deck (2026-09-18): with the Drive base hidden and the local copy
+rolled back one generation, syncing the same source again **wrote nothing and lost nothing** (same
+10 slides, every line still there, the deck edit intact). The stale base only made sync see the
+element the previous sync had recreated as deleted in Slides, and it kept it deleted: base object
+ids that are no longer in the deck read as a deck deletion, and the deck wins. A stale base can
+make sync do less than it should, never lose what the deck holds. Offline tests:
+`tests/test_base_storage.py` (Drive over cache, refusals, the warning, save and repoint).
 
 ## Deck edits detected (per object, per field)
 geometry (box within 0.05 pt, scale within 1e-3), text content, text style, shape fill/outline,
@@ -183,9 +215,11 @@ uninterrupted one would have. What makes that true:
   is split.
 - **Pictures don't depend on the staging deck once they are in.** `createImage` copies the file into
   the live deck, so a picture keeps working when the staging deck is deleted after the content
-  batch; a run that dies before that leaves only that Drive file (its id is in the pending marker,
-  and the next sync deletes it), and an attempt that has to re-plan stages afresh, because the
-  contentUrls die with the file.
+  batch; a run that dies before that leaves only that Drive file, and an attempt that has to
+  re-plan stages afresh, because the contentUrls die with the file. Its id is in the pending marker
+  so a person can find it, but no sync deletes it: an id read from a file could name anything, and
+  the only Drive file sync ever deletes is the one that same process just created
+  (`tests/test_guard.py`).
 - **A pending marker is stored before the first write** (`Sync.mark_pending`): the base keeps its
   generation (it still describes the deck) and gains `pending` = this run's generation and id token,
   the revision it planned against, the source's sha1, the object ids it is about to create, the
@@ -218,9 +252,8 @@ uninterrupted one would have. What makes that true:
   ran) is never overwritten: the pull's version lands beside it as `<name>.b2s-new` and is listed in
   `edits.json` as `not_applied`.
 - What a killed sync **can** leave behind: scratch slides (`b2s_mNNN`, swept at the next start),
-  its staging deck if it died before the pending marker was stored (harmless, it is only a source of
-  picture URLs; one named in the marker is deleted by the next sync), and duplicate objects until
-  the next sync. No sync-report is written.
+  its staging deck (harmless: it is only a source of picture URLs, and it costs nothing in the
+  deck), and duplicate objects until the next sync. No sync-report is written.
 
 **Why the next run re-plans instead of resuming.** The pending marker could hold the planned
 requests and let a second run send the rest of them, but the deck is the truth and it may have moved
@@ -304,8 +337,11 @@ and picture downloads), so the deck revision never changes; it needs no base sna
 Output in `--work` (default `<out folder>/pull`): `target.json`, `pull.patch`, `edits.json` and
 `edits.md` (iterations with open residuals by kind and geometry error, the patch, theme
 differences, and every unresolved residual with its reason, `file:line` range of its frame and the
-target values, for an AI author to finish). `--apply` writes the changed files in place (`.bak`
-backups) and copies new picture files; `--out DIR` writes the edited source tree there instead;
+target values, for an AI author to finish). `--apply` writes the changed files in place, keeping
+what was there as `<file>.bak`, then `.bak2`, `.bak3` (`inverse.keep_backup`: a second `--apply`
+must not write over the author's own version, and a picture it replaces is kept too; a file that
+already holds what pull wants is left alone), and copies new picture files;
+`--out DIR` writes the edited source tree there instead;
 neither leaves the source untouched. After the rebuilt PDF is synced, the pulled fields are
 converged overrides.
 
@@ -383,3 +419,115 @@ residuals (largest picture box error 1.9 pt); the photo is on disk as Google's 2
 Not translated yet (reported instead): tables, diagram labels, shape colours, paragraph alignment,
 frame title position and theme styles, edits inside math, rotated text, overlays beyond the last
 step (compile with `--handout` to pull a handout-style deck).
+
+## Never lose deck edits
+
+`convert` on an output folder that already has a deck does **not** create a new presentation: it
+replaces that deck's whole content through `files.update`, so the URL stays and everything anyone
+did in Slides is gone. That is the only write in the tool that can destroy a deck, and it used to
+happen silently. `guard.py` now stands in front of it.
+
+### What convert does now
+
+Before any work (and again immediately before the write, in case someone typed in the deck while
+the PDF was being converted), `guard.check_rebuild` reads the live deck with `presentations.get`
+and compares it with the sync base (`<out>/sync/base.json`, or Drive `appProperties.b2sBase` -
+whichever `snapshot.load_base` finds; Drive wins). It refuses for three reasons:
+
+| reason | when | message says |
+|---|---|---|
+| `edited` | someone changed the deck since the converter wrote it | what was edited, with up to 3 examples |
+| `no-base` | there is no base, so the question cannot be answered | the base is written by `convert`; older decks have none |
+| `other-source` | the base says this folder's deck came from another PDF | rebuilding here would replace that deck with this PDF's slides |
+
+A refusal exits non-zero (`RebuildRefused` → `SystemExit`) and nothing is written. It looks like
+this (from `tools/rebuild_guard_proof.py`, a real run):
+
+```
+refusing to rebuild: this deck was edited in Google Slides after beamer2slides wrote it.
+  https://docs.google.com/presentation/d/11yU.../edit
+  1 slide edited: 1 text edit, 1 object added in Slides
+    - slide 2 "Why decks and sources diverge": text edited (text/body/0: "The source is HANDWRITTEN in by an auth…")
+    - slide 2 "Why decks and sources diverge": 1 object(s) added in Slides
+  A rebuild replaces the whole deck. What to do instead:
+    merge the PDF into the deck, keeping the edits:  python -m beamer2slides sync talk.pdf --deck out\talk
+    leave that deck alone and make a new one:        python -m beamer2slides convert talk.pdf --out out\talk --new-deck
+    rebuild anyway (the deck's content is replaced): python -m beamer2slides convert talk.pdf --out out\talk --force-rebuild
+  The deck is at revision 2Ymo8YWHlbj6kg; a forced rebuild keeps a backup first (--backup, docs/sync.md).
+```
+
+### What counts as an edit
+
+Exactly what sync would keep, through the same code: `merge.deck_edits` (geometry, text, text
+style, shape style, image, group, deleted, part_deleted), `merge.user_objects` (objects the
+converter never made), `merge.background_edited`, speaker notes, plus slides added, deleted or
+reordered. There is one notion of "edited" in the tool, not two.
+
+Deliberately **not** an edit:
+- a new `revisionId` - Google bumps it on its own (opening the deck is enough);
+- a new `contentUrl` for a picture nobody touched - Google reissues those; pixel signatures decide
+  (`guard.sign_changed`, the same rule as `sync.Sync.sign_changed`), and only pictures whose URL
+  hash changed are downloaded;
+- exporting a thumbnail (`fidelity`, `measure_places`);
+- `measure_places`' scratch slides `b2s_mNNN` left by an interrupted run - converter leftovers,
+  filtered out before the comparison.
+
+### Getting a deck back
+
+Before every destructive write the deck's `revisionId`, Drive `modifiedTime` and what was found
+are appended to `<out>/backups/backups.json` (and the rebuild's entry goes into `emit.json` as
+`previous`), and the same lines are printed. `--backup` decides what else is kept:
+
+| `--backup` | convert | sync |
+|---|---|---|
+| `auto` (default) | a `.pptx` export when the rebuild is forced, nothing when the deck was untouched | a `.pptx` export before the first write |
+| `none` | nothing | nothing |
+| `file` | `.pptx` in `<out>/backups` | the same |
+| `drive` | a Drive copy of the presentation (its own URL) | the same |
+| `both` | both | both |
+
+`tools/deck_backup.py` lists (`list`), exports (`export`) and restores (`restore --from FILE`, or
+from a revision). A restore creates a **new** presentation by default; `--in-place` writes the
+backup back over the deck.
+
+> **Measured, not guessed** (`tools/probe_revision_history.py`): for a Google-native presentation
+> Drive does keep a revision row per editing session, and `revisions.list` shows them - but every
+> revision's export link returns the file's **current** content, even with `revision=N` in the URL,
+> and `revisions.update(keepForever=True)` does not change that. So a `files.update` rebuild leaves
+> **nothing the API can fetch back**: version history is evidence, not a recovery path. The live
+> proof confirms it end to end - the export of the revision from before a forced rebuild does not
+> contain the word that was typed into the deck (`drive_history.holds_the_edit == false` in
+> `out/agent-guard/proof.json`), while the `.pptx` backup restored into a new deck still shows it.
+> Version history in the Slides UI ("File → Version history") may still show the old state to a
+> human; treat it as worth a try, never as a promise. **The `.pptx` backup is the way back.**
+
+### The other in-place writes
+
+- `--new-deck` creates a new presentation and prints `the previous deck is left as it is at <url>`:
+  it never touches the old one (proved live: the old deck's revision is unchanged afterwards).
+- A **trashed or deleted** previous deck is never resurrected or written to: `guard.previous_deck`
+  reports `live` / `trashed` / `gone` / `other` (not a presentation), and anything but `live` makes
+  convert create a new deck and say so.
+- A **stale output folder** (its deck was converted from another PDF) is the `other-source` refusal
+  above.
+- **Sync's staging deck** can never be the user's deck: `Sync.stage` uses the id `files.create`
+  just returned, and the only ids ever passed to `files().delete` in `sync.py` are that staging id
+  and the picture file it made (checked at runtime and statically in `tests/test_guard.py`).
+- **Sync's first write** is not a rebuild - it only rewrites what the source changed - but it is
+  still a write, so `record_sync_point` records the revision and takes a `.pptx` backup
+  (`--backup`), prints a `recovery:` block, and puts the entry into `<out>/sync/sync-report.json`
+  as `recovery`.
+
+### Tests
+
+- `tests/test_guard.py` (23 tests, no Google calls): fake read-backs in the style of
+  `tests/test_sync.py` cover every detection case above (including the reissued `contentUrl` and
+  the scratch slides), the three refusal reasons, `--force-rebuild`, the backup modes and the
+  export-refused → Drive-copy fallback, the recorded entry and its restore hint, `plan_rebuild`'s
+  paths (untouched, forced, refused, `--new-deck`, trashed, gone) and the staging-deck proof.
+- `python tools/rebuild_guard_proof.py` (live, ~2 min, fixed folders `out/agent-guard/<deck>`):
+  convert → convert again (no false alarm) → edit like a person (`tools/deck_edits.py`) → convert
+  refuses with exit code 1 and the deck's revision and edit are untouched → `--force-rebuild`
+  rebuilds and records the backup → the backup restores into a deck that still shows the edit →
+  Drive history recorded as evidence → `--new-deck` leaves the old deck alone → a trashed deck
+  reads back as trashed. Evidence in `out/agent-guard/proof.json` and `proof.log`.

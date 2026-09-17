@@ -264,6 +264,22 @@ a per-slide background picture.
   template's placeholders are rescaled for 16:9).
 - Re-running `convert` on the same output folder rebuilds the previous deck in place
   (same URL, content replaced by `files.update`). Use `--new-deck` to force a new one.
+- **A rebuild never destroys deck edits** (`guard.py`, docs/sync.md "Never lose deck edits"):
+  before replacing a deck's content, convert compares the live deck with the sync base and refuses
+  (exit non-zero, nothing written) when someone edited it in Slides, when there is no base to check
+  against, or when the folder's deck came from another PDF; the message names what was edited (up to
+  3 examples) and offers `sync`, `--new-deck` or `--force-rebuild`. "Edited" is `merge.deck_edits` /
+  `user_objects` / `background_edited` / notes / slides added, deleted, reordered - the same notion
+  sync uses; a new revisionId, a reissued `contentUrl` (pixel signatures decide), a thumbnail export
+  and leftover `b2s_mNNN` scratch slides are not edits. `--new-deck`, a trashed/deleted deck
+  (`guard.previous_deck`: live|trashed|gone|other) and sync's staging deck can't hit the wrong deck.
+  Before any destructive write (forced rebuild, sync's first write) the revisionId, modifiedTime and
+  finding go to `<out>/backups/backups.json` (rebuilds also into emit.json `previous`, syncs into
+  sync-report.json `recovery`) and `--backup auto|none|file|drive|both` keeps a .pptx export and/or a
+  Drive copy. **Measured** (`tools/probe_revision_history.py`): every Drive revision of a Slides file
+  exports its *current* content, so `files.update` leaves nothing the API can fetch back - the .pptx
+  backup is the only way back (`tools/deck_backup.py list|export|restore`). Tests: `tests/test_guard.py`
+  (offline), `tools/rebuild_guard_proof.py` (live, `out/agent-guard/`).
 
 ## Usage
 ```
@@ -292,6 +308,12 @@ validated (truncated/foreign/newer/stale-in-Drive), and `pull --apply` replaces 
 a temporary, keeping a `.bak` and never overwriting a source edited since the pull started.
 Fault injection for the tests: `B2S_FAIL_AT=<point>[:n]` / `!point` (`faults.py`, inert when unset),
 tests in `tests/test_sync_crash.py` (offline, plus one live kill per point under the `sync` marker).
+Bases are Drive-first: the folder copy is a cache, an older one only makes sync do less (deck edits
+win), and a Drive base that can't be read is said out loud (`snapshot.stale_base_warning`, offline
+tests `tests/test_base_storage.py`). The base also records the overlay mode `convert` used, and
+sync keeps it unless `--overlays` says otherwise (`sync.overlay_mode`), or a deck converted with
+`--overlays all` would lose its in-between steps. `pull --apply` and `pull --out DIR` keep every
+file they replace (`inverse.keep_backup`: `.bak`, `.bak2`, …, pictures included).
 
 Alignment on Google's renderer (`tools/alignment.py out/<deck>`, after `fidelity`): reads the
 Slides element boxes with `presentations.get` (cached in slides_elements.json) and compares each

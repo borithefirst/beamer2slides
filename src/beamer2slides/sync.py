@@ -611,12 +611,9 @@ class Sync:
         read = snapshot.read_presentation(pres)
         rec = plan_recovery(self.base, read, [s["key"] for s in self.ours["slides"]])
         self.recovery = rec
-        leftover = (self.base.get("pending") or {}).get("staging")
-        if leftover and not self.dry_run:  # the staging deck of a run that died: our own file
-            try:
-                execute(self.drive.files().delete(fileId=leftover))
-            except (HttpError, OSError):
-                pass  # already deleted, or gone from Drive: nothing to clean up
+        # A run that died left its staging deck in Drive. Its id is in `pending.staging` so a person
+        # can find it; sync doesn't delete it, because an id read from a file could name anything -
+        # only the file this process just created is ever deleted (tests/test_guard.py).
         if rec["heal"]:
             same = (self.base.get("pending") or {}).get("source", {}).get("sha1") == \
                 snapshot.source_info(self.ours["source"]).get("sha1")
@@ -939,7 +936,7 @@ class Sync:
         # Slide order: created slides were appended.
         current = [s["objectId"] for s in theirs["slides"] if s["objectId"] not in set(doomed_slides)]
         current += [w["sid"] for w in work["slides"] if w["plan"]["action"] == "create"]
-        final = [s for s in work["order"] if s in current]
+        final = [s for s in dict.fromkeys(work["order"]) if s in current]  # (an id can't be in two places)
         for i, sid in enumerate(final):
             if current[i] != sid:
                 reqs.append({"updateSlidesPosition": {"slideObjectIds": [sid], "insertionIndex": i}})
@@ -1626,7 +1623,21 @@ def write_reports(out: Path, info: dict) -> tuple[Path, Path]:
     return jpath, mpath
 
 
-def sync(pdf: Path, deck: str, out: Path | None = None, dry_run: bool = False, overlays: str = "last",
+def overlay_mode(asked: str | None, recorded: str | None) -> tuple[str, str | None]:
+    """(the overlay steps to convert the new source with, a warning). A deck converted with
+    `--overlays all` holds a slide per step; syncing the same source with `last` would leave the
+    steps in between out of `ours`, and sync would read them as slides the source dropped and
+    delete the ones nobody had edited. So the deck's own mode is the default, and asking for the
+    other one is allowed but said out loud."""
+    if asked is None:
+        return recorded or "last", None
+    if recorded and asked != recorded:
+        return asked, (f"this deck was converted with --overlays {recorded}, and you asked for {asked}: "
+                       f"slides of the other kind read as slides the source dropped")
+    return asked, None
+
+
+def sync(pdf: Path, deck: str, out: Path | None = None, dry_run: bool = False, overlays: str | None = None,
          measure: bool = True) -> dict:
     from .google_auth import drive_service, slides_service
 
@@ -1639,15 +1650,20 @@ def sync(pdf: Path, deck: str, out: Path | None = None, dry_run: bool = False, o
     if base is None:
         raise SystemExit("\n".join([f"no sync base for presentation {pid}: convert the deck with this version first",
                                     *problems]))
+    warnings = problems + [w for w in [snapshot.stale_base_warning(where, drive, pid)] if w]
+    overlays, mismatch = overlay_mode(overlays, base.get("overlays"))
+    warnings += [mismatch] if mismatch else []
+    for w in warnings:
+        print(f"warning: {w}")
     ours = build_ours(pdf, out / "sync" / "ours", base, overlays)
     refreshed = snapshot.refresh_pictures(base, ours, out)
     s = Sync(slides, drive, pid, base, ours, out, dry_run, measure)
     result = s.run()
     report = result["plan"]["report"]
-    report["warnings"] += problems + s.warnings
+    report["warnings"] += s.warnings + warnings
     report["converged"] += [{**r, "field": "image", "how": "the same picture, written differently"} for r in refreshed]
     info = {"pdf": str(pdf), "presentationId": pid, "url": f"https://docs.google.com/presentation/d/{pid}/edit",
-            "dry_run": dry_run, "base_from": where, "generation": base.get("generation", 0),
+            "dry_run": dry_run, "base_from": where, "generation": base.get("generation", 0), "overlays": overlays,
             "attempts": result["attempts"], "requests": s.sent, "seconds": round(time.monotonic() - started, 1),
             "report": report,
             "actions": [{"slide": p["key"], "action": p["action"],
@@ -1659,6 +1675,7 @@ def sync(pdf: Path, deck: str, out: Path | None = None, dry_run: bool = False, o
                      or base.get("pending") or base.get("cleanup"))
     if not dry_run and (result["work"]["writes"] or adopted or refreshed or recovered):
         new = s.new_base(result) if (result["work"]["writes"] or adopted or refreshed) else dict(base)
+        new["overlays"] = overlays  # (the steps the deck holds now)
         new.pop("pending", None)   # this run got to the end, so nothing is half done any more
         new.pop("cleanup", None)
         if s.cleanup_ids:
