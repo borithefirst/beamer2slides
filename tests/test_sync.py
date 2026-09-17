@@ -559,6 +559,42 @@ def test_added_in_source_and_moved_only_in_source():
     assert u["action"] == "move" and u["delta"] == [0, 20]
 
 
+def anchored_picture_base():
+    """`results` with an inline formula picture anchored to its body text."""
+    base = three_slides()
+    pic = {"id": "p1m0", "kind": "image", "role": "math", "bbox": [120, 62, 140, 74], "file": None}
+    base["slides"][1]["elements"].append(entry("image/math/0", pic, "b2s_s001_m0", anchor="text/body/0"))
+    return base, pic
+
+
+def test_member_moved_alone_is_recreated_not_moved():
+    """Found by the offline fuzz (tools/fuzz_sync.py, seeds 252 and 430): the source re-placed the
+    inline formula picture inside its line while the deck edited that paragraph. Sync writes a
+    `move` by moving the unit's top object, so a step that fits only one member cannot be written -
+    it used to become a move of [0, 0] the report still called applied (nothing moved, no conflict
+    raised). Such a unit is recreated instead."""
+    base, pic = anchored_picture_base()
+    ours, theirs = triple(base)
+    ours["slides"][1]["elements"][2] = ours_entry("image/math/0", {**pic, "bbox": [128, 62, 148, 74]}, "text/body/0")
+    edit_text(theirs["slides"][1], "b2s_s001_t1", "First point, as the deck says\nSecond point of results\n")
+    mplan = merge.plan_merge(base, ours, theirs)
+    u = unit(mplan, "results", "text/body/0")
+    assert u["action"] == "recreate" and "delta" not in u
+    assert not [a for a in mplan["report"]["applied"] if a.get("how") == "deck object moved"]
+
+
+def test_whole_unit_moved_still_moves_the_deck_objects():
+    """The counterpart: every member moved by the same step, so one move carries the unit."""
+    base, pic = anchored_picture_base()
+    ours, theirs = triple(base)
+    ours["slides"][1]["elements"][1] = ours_entry("text/body/0", text_ir("First point of results\nSecond point of results",
+                                                                         (20, 80, 200, 110), "p1t1"))
+    ours["slides"][1]["elements"][2] = ours_entry("image/math/0", {**pic, "bbox": [120, 82, 140, 94]}, "text/body/0")
+    edit_text(theirs["slides"][1], "b2s_s001_t1", "First point, as the deck says\nSecond point of results\n")
+    u = unit(merge.plan_merge(base, ours, theirs), "results", "text/body/0")
+    assert u["action"] == "move" and u["delta"] == [0, 20]
+
+
 def test_image_replaced_in_deck_is_kept():
     base = three_slides()
     pic = {"id": "p1f0", "kind": "image", "role": "figure", "bbox": [200, 60, 300, 160], "file": None}
