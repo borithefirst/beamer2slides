@@ -233,23 +233,8 @@ def _probe(el: dict) -> Box:
 def verify_and_remove_shapes(original: Page, eraser: Eraser, slide: dict, raw_page: dict) -> None:
     """Keep only shapes whose panel visibly shows its fill colour (beamer draws shadows as
     black rectangles under a soft mask), then remove those panels from the background."""
-    avoid = [s["bbox"] for s in raw_page["spans"]] + [i["bbox"] for i in raw_page["images"]] + \
-            [e["bbox"] for e in slide["elements"] if e["kind"] == "image"]
-    keep = []
-    for i, el in enumerate(slide["elements"]):
-        if el["kind"] != "shape":
-            keep.append(el)
-            continue
-        probe = _probe(el)
-        # Rules drawn on top of this one (a progress bar on its track) hide its colour there.
-        above = [e["bbox"] for e in slide["elements"][i + 1:] if e["kind"] == "shape" and e.get("role") == "rule"]
-        # (a translucent highlight shows its colour mixed with the page: not a shadow's black box)
-        if probe[2] <= probe[0] or probe[3] <= probe[1] or \
-                (not el.get("opacity") and _fill_fraction(original, probe, el["fill"], avoid + above) < 0.9):
-            continue
-        keep.append(el)
-    slide["elements"] = keep
-    remaining = [e for e in keep if e["kind"] == "shape"]
+    keep_visible_shapes(original, slide, raw_page)
+    remaining = [e for e in slide["elements"] if e["kind"] == "shape"]
     for margin in (1.5, 5.0):  # a stroked outline reaches past the panel; widen if a panel survived
         if not remaining:
             break
@@ -268,6 +253,26 @@ def verify_and_remove_shapes(original: Page, eraser: Eraser, slide: dict, raw_pa
         remaining = [el for el in remaining if any(all(abs(r[k] - el["bbox"][k]) < 0.5 for k in range(4)) for r in drawn)]
     if remaining:  # could not be removed: leave those panels in the background only
         slide["elements"] = [e for e in slide["elements"] if e not in remaining]
+
+
+def keep_visible_shapes(original: Page, slide: dict, raw_page: dict) -> None:
+    """Drop shape candidates whose fill doesn't show on the page."""
+    avoid = [s["bbox"] for s in raw_page["spans"]] + [i["bbox"] for i in raw_page["images"]] + \
+            [e["bbox"] for e in slide["elements"] if e["kind"] == "image"]
+    keep = []
+    for i, el in enumerate(slide["elements"]):
+        if el["kind"] != "shape":
+            keep.append(el)
+            continue
+        probe = _probe(el)
+        # Rules drawn on top of this one (a progress bar on its track) hide its colour there.
+        above = [e["bbox"] for e in slide["elements"][i + 1:] if e["kind"] == "shape" and e.get("role") == "rule"]
+        # (a translucent highlight shows its colour mixed with the page: not a shadow's black box)
+        if probe[2] <= probe[0] or probe[3] <= probe[1] or \
+                (not el.get("opacity") and _fill_fraction(original, probe, el["fill"], avoid + above) < 0.9):
+            continue
+        keep.append(el)
+    slide["elements"] = keep
 
 
 def render_backgrounds(pdf: Path, raw: dict, deck: dict, out: Path) -> list[Path]:

@@ -17,6 +17,7 @@ import unicodedata
 from dataclasses import dataclass, field
 
 from .classify import FRAME_COUNTER_RE
+from .emit import merge_blocks
 from .fonts import google_font
 
 TOL = {
@@ -511,7 +512,8 @@ def compare_slide(c: dict, t: dict, ci: int, ti: int, tol: dict, add, comp: Comp
             add("element_extra", **where, element=ce["id"], el_kind="text", text=element_text(ce))
 
     for kind in ("image", "shape", "table", "diagram"):
-        cc = [e for e in c["elements"] if e["kind"] == kind and e.get("role") not in IGNORED_ROLES]
+        c_els = merge_blocks(c["elements"]) if kind == "shape" else c["elements"]
+        cc = [e for e in c_els if e["kind"] == kind and e.get("role") not in IGNORED_ROLES]
         tt = [e for e in t["elements"] if e["kind"] == kind and e.get("role") not in IGNORED_ROLES]
         got = match_boxes(cc, tt, hashes)
         for a, b in got:
@@ -520,9 +522,15 @@ def compare_slide(c: dict, t: dict, ci: int, ti: int, tol: dict, add, comp: Comp
             cb, tb = ce["bbox"], te["bbox"]
             d = [round(y - x, 2) for x, y in zip(cb, tb)]
             dw, dh = d[2] - d[0], d[3] - d[1]
+            if kind == "table":  # Slides sets row heights (cell padding) and column widths: the corner counts
+                within = abs(d[0]) <= 1.5 * tol["pos"] and abs(d[1]) <= 1.5 * tol["pos"]
+            else:
+                within = abs(d[0]) <= tol["pos"] and abs(d[1]) <= tol["pos"] and abs(dw) <= tol["size"] and abs(dh) <= tol["size"]
             add("geometry", **where, element=ce["id"], target_element=te["id"], el_kind=kind, dx=d[0], dy=d[1],
-                dw=round(dw, 2), dh=round(dh, 2), cur=cb, tgt=tb,
-                within=abs(d[0]) <= tol["pos"] and abs(d[1]) <= tol["pos"] and abs(dw) <= tol["size"] and abs(dh) <= tol["size"])
+                dw=round(dw, 2), dh=round(dh, 2), cur=cb, tgt=tb, within=within)
+            if kind == "diagram" and diagram_text(ce) != diagram_text(te):
+                add("diagram", **where, element=ce["id"], target_element=te["id"], cur=diagram_text(ce),
+                    tgt=diagram_text(te))
             if kind == "image" and hashes:
                 h = hash_distance(hashes.get(id(ce)), hashes.get(id(te)))
                 if h is not None and h > tol["phash"]:
@@ -553,6 +561,13 @@ def table_text(el: dict) -> list[list[str]]:
     """Cell texts: classify's cells are lists of runs, deck_ir's rows plain strings."""
     rows = el.get("rows") or el.get("cells") or []
     return [[norm_text(c if isinstance(c, str) else "".join(run_text(r) for r in c)) for c in row] for row in rows]
+
+
+def diagram_text(el: dict) -> list[str]:
+    """Node and label texts of a diagram, sorted (Slides keeps no order between them)."""
+    texts = [norm_text(" ".join("".join(run_text(r) for r in runs) for runs in n.get("paragraphs") or []))
+             for n in el.get("nodes", [])]
+    return sorted(t for t in texts if t)
 
 
 def _previous_match(j: int, c_of_t: dict, cps: list[Para]) -> dict | None:

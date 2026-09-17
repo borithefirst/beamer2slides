@@ -346,6 +346,16 @@ class Workspace:
         kept_original = original_pages(pdf, prepared)
         selected = select_overlays(raw, "last")
         deck = classify(selected)
+        if any(e["kind"] == "shape" for s in deck["slides"] for e in s["elements"]):
+            from .pdf import Document
+            from .render import keep_visible_shapes
+            raw_pages = {p["index"]: p for p in selected["pages"]}
+            doc = Document(prepared.pdf)
+            try:  # as convert's render does: beamer's soft-masked shadow boxes aren't panels
+                for slide in deck["slides"]:
+                    keep_visible_shapes(doc[slide["page"]], slide, raw_pages[slide["page"]])
+            finally:
+                doc.close()
         sync = synctex_pages(self.build_dir / f"{self.main.stem}.synctex.gz")
         frames_by_page = page_frames(self.source, sync, [p["label"] for p in raw["pages"]], self.src)
         frames = []
@@ -1353,7 +1363,10 @@ class Planner:
         self.fail(r, "shape colours are not translated")
 
     def table(self, r: dict) -> None:
-        self.fail(r, "table cells are not translated")
+        self.fail(r, "table cells are not translated: edit the tabular cells")
+
+    def diagram(self, r: dict) -> None:
+        self.fail(r, "diagram labels are not translated: edit the node texts of the tikzpicture")
 
 
 def aligned_frame(text: str, frame: Frame) -> bool:

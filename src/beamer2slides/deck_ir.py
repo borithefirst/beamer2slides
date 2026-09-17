@@ -333,7 +333,10 @@ def deck_ir(pres: dict, pdf_size: list[float] | None = None, base: dict | None =
     for n, slide in enumerate(pres.get("slides", [])):
         elements = []
         tags = []
+        lines: dict[str, int] = {}
         for pe, m, group in flatten(slide.get("pageElements", [])):
+            if "line" in pe and group:
+                lines[group] = lines.get(group, 0) + 1
             tag = TAG_RE.match(pe.get("title") or "")
             key = (tag.group("slide"), tag.group("element")) if tag else object_keys.get(pe["objectId"]) or \
                 (object_keys.get(group) if group else None)
@@ -351,6 +354,7 @@ def deck_ir(pres: dict, pdf_size: list[float] | None = None, base: dict | None =
             if el["kind"] == "text" and el["key"] and "/footer/" in f"/{el['key']}/":
                 el["role"] = "footer"
             elements.append(el)
+        elements = fold_groups(elements, lines)
         color, picture = page_background(slide, pages, resolver.scheme)
         key = slide_keys.get(slide["objectId"]) or (max(set(tags), key=tags.count) if tags else None)
         slides.append({"page": n, "frame": str(n + 1), "size": [page_w, page_h], "objectId": slide["objectId"],
@@ -359,6 +363,43 @@ def deck_ir(pres: dict, pdf_size: list[float] | None = None, base: dict | None =
     return {"version": 1, "source": {"presentationId": pres.get("presentationId"), "title": pres.get("title"),
                                      "revisionId": pres.get("revisionId")},
             "page_size": [page_w, page_h], "scale": scale, "slides": slides}
+
+
+def fold_groups(elements: list[dict], lines: dict[str, int]) -> list[dict]:
+    """Groups emit builds from one IR element, read back as that element: a number text box
+    centred on a picture (a numbered ball) becomes the picture's `number`, and a group of node
+    shapes joined by lines becomes a `diagram` with its nodes (texts and fills)."""
+    drop: set[int] = set()
+    for img in (e for e in elements if e["kind"] == "image"):
+        x0, y0, x1, y1 = img["bbox"]
+        for k, t in enumerate(elements):
+            if t["kind"] != "text" or t.get("group") != img.get("group") or k in drop or len(t["paragraphs"]) != 1:
+                continue
+            text = "".join(r["text"] for r in t["paragraphs"][0]["runs"]).strip()
+            cx, cy = (t["bbox"][0] + t["bbox"][2]) / 2, (t["bbox"][1] + t["bbox"][3]) / 2
+            if 0 < len(text) <= 3 and x0 <= cx <= x1 and y0 <= cy <= y1:
+                img["number"] = {"text": text}
+                img["role"] = "icon"
+                drop.add(k)
+                break
+    out = [e for k, e in enumerate(elements) if k not in drop]
+    groups: dict[str, list[dict]] = {}
+    for e in out:
+        if e.get("group"):
+            groups.setdefault(e["group"], []).append(e)
+    for gid, members in groups.items():
+        nodes = [e for e in members if e["kind"] == "shape" or (e["kind"] == "text" and e.get("shape_type") not in (None, "TEXT_BOX"))]
+        if not lines.get(gid) or len(nodes) < 2 or any(e["kind"] == "image" for e in members):
+            continue
+        dg = {"kind": "diagram", "role": "figure", "group": gid, "id": gid, "object": gid, "key": None,
+              "bbox": [min(e["bbox"][0] for e in members), min(e["bbox"][1] for e in members),
+                       max(e["bbox"][2] for e in members), max(e["bbox"][3] for e in members)],
+              "nodes": [{"bbox": e["bbox"], "fill": e.get("fill"), "shape": e.get("shape_type") or e.get("shape"),
+                         "paragraphs": [p["runs"] for p in e.get("paragraphs", [])]} for e in members]}
+        first = out.index(members[0])
+        out = [e for e in out if e.get("group") != gid]
+        out.insert(min(first, len(out)), dg)
+    return out
 
 
 def element_of(pe: dict, m: list[float], resolver: StyleResolver, fonts: FontMapper, scale: float, page_w: float,
@@ -375,6 +416,7 @@ def element_of(pe: dict, m: list[float], resolver: StyleResolver, fonts: FontMap
         fill_hex = rgb_hex(fill.get("solidFill", {}).get("color"), resolver.scheme) \
             if fill.get("propertyState", "RENDERED") == "RENDERED" and "solidFill" in fill else None
         if el is not None:
+            el["shape_type"] = shape.get("shapeType")
             if fill_hex and shape.get("shapeType") != "TEXT_BOX":
                 el["fill"] = fill_hex
             return el
