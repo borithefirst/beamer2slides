@@ -269,10 +269,18 @@ emit's text box model and FontMapper) and loops compile → classify → `compar
 translators (`inverse.py`; `texmap.py` maps pages to frames by SyncTeX and words to source spans by
 printed text) until the source's conversion matches; `edits.md`/`edits.json`/`pull.patch` in
 `<out>/pull` hand unresolved residuals (with frame file:lines) to an AI. `converge --target deck.json`
-is the offline twin. Tests: `tests/test_inverse.py` (offline: texmap, compare, planned edits on
-`tests/decks/inverse/a.tex` vs `a.deck.json`, deck_ir via `tests/slides_sim.py`); opt-in
-`python -m pytest -m inverse` (compile loop on the `b_*.tex` pairs and synthetic edits,
-iterations in `tests/decks/inverse/out/results.json`).
+is the offline twin. Pictures come back from `contentUrl` (the stored file byte for byte, capped by
+Google at ~2046 px on the long side; crop, rotation, transparency and outline stay properties,
+brightness/contrast/recolour are baked — `tools/probe_images.py`) and are written as LaTeX options:
+`trim=…,clip`, `angle=`, `\reflectbox`, a tikz node with `text opacity`/`draw`, a transparency group
+for a tikzpicture, colour edits baked into the file; names `figures/<slug>-<sha8>.<ext>`, reusing an
+identical or same-looking file already in the tree. A deck picture over a figure the source draws
+replaces it, with the environment commented out under `% b2s pull: replaced by <file>`; formula/icon
+pictures in text lines are only reported. Tests: `tests/test_inverse.py` and `tests/test_pull_images.py`
+(offline: texmap, compare, planned edits on `tests/decks/inverse/a.tex` vs `a.deck.json`, deck_ir via
+`tests/slides_sim.py`, picture options, naming, figure replacement); opt-in `python -m pytest -m inverse`
+(compile loop on the `b_*.tex` pairs, synthetic edits and picture edits, iterations in
+`tests/decks/inverse/out/results.json`).
 
 Opt-in suite (real Google Slides, ~95 s): `python -m pytest -m slides` (the default run deselects
 the `slides` marker, pyproject.toml). It converts the stress decks (19–22, 25, 13, demo) 3 at a

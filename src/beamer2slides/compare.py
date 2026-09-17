@@ -370,25 +370,72 @@ def match_boxes(cur: list[dict], tgt: list[dict], hashes: dict | None = None) ->
     return out
 
 
-def hash_distance(a: list[int] | None, b: list[int] | None) -> float | None:
+def hash_grey(h) -> list[int] | None:
+    return h.grey if isinstance(h, PicHash) else h
+
+
+def hash_coverage(h) -> float:
+    return h.coverage if isinstance(h, PicHash) else 1.0
+
+
+def hash_distance(a, b) -> float | None:
+    a, b = hash_grey(a), hash_grey(b)
     if not a or not b or len(a) != len(b):
         return None
     return sum(abs(x - y) for x, y in zip(a, b)) / (255 * len(a))
 
 
-def picture_hash(path) -> list[int] | None:
-    """16x16 grey thumbnail (on white) as a flat list: survives Google's re-encoding."""
+def picture_differs(a, b, tol: float) -> bool:
+    """Two pictures that don't show the same thing. The mean difference of the thumbnails misses a
+    replaced figure on white (a curve for bars: 0.11), so opaque pictures with some contrast must
+    also correlate. Transparent ones (formula and overlay pictures: the page shows through) are
+    judged by the mean alone."""
+    d = hash_distance(a, b)
+    if d is None:
+        return False
+    if d > tol:
+        return True
+    x, y = hash_grey(a), hash_grey(b)
+    if d <= 0.03 or min(hash_coverage(a), hash_coverage(b)) < 0.5:
+        return False
+    mx, my = sum(x) / len(x), sum(y) / len(y)
+    vx = sum((v - mx) ** 2 for v in x) / len(x)
+    vy = sum((v - my) ** 2 for v in y) / len(y)
+    if min(vx, vy) < 36:
+        return False
+    cov = sum((u - mx) * (v - my) for u, v in zip(x, y)) / len(x)
+    return cov / math.sqrt(vx * vy) < 0.75
+
+
+@dataclass
+class PicHash:
+    """A 16x16 grey thumbnail (on white) and how much of the picture is opaque."""
+    grey: list[int]
+    coverage: float = 1.0
+
+
+def picture_hash(path):
+    """Thumbnail of a picture file: survives Google's re-encoding."""
     try:
         from PIL import Image
         img = Image.open(path)
-        if img.mode in ("RGBA", "LA", "P"):
-            img = img.convert("RGBA")
-            ground = Image.new("RGBA", img.size, (255, 255, 255, 255))
-            ground.alpha_composite(img)
-            img = ground
-        return grey16(img)
-    except (OSError, ValueError):
+        img.seek(0)
+        return pic_hash(img)
+    except (OSError, ValueError, EOFError):
         return None
+
+
+def pic_hash(img) -> PicHash:
+    coverage = 1.0
+    if img.mode in ("RGBA", "LA", "P"):
+        from PIL import Image
+        img = img.convert("RGBA")
+        small = img.getchannel("A").resize((16, 16), Image.BILINEAR)
+        coverage = sum(1 for v in small.getdata() if v > 128) / 256
+        ground = Image.new("RGBA", img.size, (255, 255, 255, 255))
+        ground.alpha_composite(img)
+        img = ground
+    return PicHash(grey16(img), coverage)
 
 
 def grey16(img) -> list[int]:
@@ -605,11 +652,9 @@ def compare_slide(c: dict, t: dict, ci: int, ti: int, tol: dict, add, comp: Comp
             if kind == "diagram" and diagram_text(ce) != diagram_text(te):
                 add("diagram", **where, element=ce["id"], target_element=te["id"], cur=diagram_text(ce),
                     tgt=diagram_text(te))
-            if kind == "image" and hashes:
-                h = hash_distance(hashes.get(id(ce)), hashes.get(id(te)))
-                if h is not None and h > tol["phash"]:
-                    add("image", **where, element=ce["id"], target_element=te["id"], distance=round(h, 3),
-                        file=te.get("file"))
+            if kind == "image" and hashes and picture_differs(hashes.get(id(ce)), hashes.get(id(te)), tol["phash"]):
+                add("image", **where, element=ce["id"], target_element=te["id"],
+                    distance=round(hash_distance(hashes.get(id(ce)), hashes.get(id(te))), 3), file=te.get("file"))
             if kind == "shape" and colour_distance(ce.get("fill"), te.get("fill")) > tol["color"]:
                 add("shape", **where, element=ce["id"], target_element=te["id"], cur=ce.get("fill"), tgt=te.get("fill"))
             if kind == "table":
@@ -627,7 +672,7 @@ def compare_slide(c: dict, t: dict, ci: int, ti: int, tol: dict, add, comp: Comp
         tm = [e for e in t["elements"] if e["kind"] == "image" and e.get("role") in ("math", "icon")]
         for a, b in match_boxes(cm, tm, hashes):
             h = hash_distance(hashes.get(id(cm[a])), hashes.get(id(tm[b])))
-            if h is not None and h > tol["inline_phash"]:
+            if h is not None and h > tol["inline_phash"]:  # the mean alone: they are transparent
                 add("image", **where, element=cm[a]["id"], target_element=tm[b]["id"], distance=round(h, 3),
                     role=cm[a]["role"], file=tm[b].get("file"))
 

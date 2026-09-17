@@ -39,8 +39,8 @@ import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from .compare import (HOLE, TOL, Comparison, Para, char_styles, compare, grey16, norm_text, para_text, picture_hash,
-                      residual_line, slide_paragraphs, slide_title, text_anchor)
+from .compare import (HOLE, TOL, Comparison, Para, PicHash, char_styles, compare, grey16, norm_text, para_text,
+                      picture_hash, residual_line, slide_paragraphs, slide_title, text_anchor)
 from .texmap import (OPAQUE, PARA, Frame, Item, ListEnv, Source, Visible, WordMap, build_visible, frame_visible,
                      line_of, locate_words, mask_comments, match_group, norm_word, page_frames, read_args, skip_space,
                      synctex_pages)
@@ -1580,10 +1580,10 @@ class Planner:
             return
         text = self.cand.masked(frame.file)
         orig = self.cand.source.text(frame.file)
-        from .compare import hash_distance, picture_hash
-        d = hash_distance(self.hashes.get(id(el)), picture_hash(te["file"])) \
-            if el["kind"] == "image" and te.get("file") else None
-        same = d is not None and d <= TOL["phash"]
+        from .compare import hash_distance, picture_differs, picture_hash
+        raw = picture_hash(te["file"]) if el["kind"] == "image" and te.get("file") else None
+        same = raw is not None and hash_distance(self.hashes.get(id(el)), raw) is not None \
+            and not picture_differs(self.hashes.get(id(el)), raw, TOL["phash"])
         if same and not picture_edits(te):
             self.fail(r, "the picture looks the same as the source's; nothing to write")
             return
@@ -2111,8 +2111,9 @@ def picture_hashes(cand: Candidate, target: dict, comp_out: Path) -> dict:
         return hashes
     for e in tgt_images:
         if e.get("file") and Path(e["file"]).exists():
+            plain = picture_hash(e["file"])
             shown = displayed_picture(e) if picture_edits(e) else None  # as Slides shows it: crop, turn, opacity
-            hashes[id(e)] = grey16(shown) if shown is not None else picture_hash(e["file"])
+            hashes[id(e)] = PicHash(grey16(shown), plain.coverage if plain else 1.0) if shown is not None else plain
     from .pdf import Document
     from PIL import Image
     doc = Document(cand.pdf)
