@@ -46,7 +46,9 @@ python -m beamer2slides classify talk.pdf          # local only: see decisions i
 python -m beamer2slides fidelity talk.pdf          # compare Google's rendering with the PDF
 ```
 Outputs go to `out/<pdf name>/`. Re-running `convert` on the same PDF updates the same
-Google Slides deck (`--new-deck` creates a new one).
+Google Slides deck (`--new-deck` creates a new one). Pictures are uploaded to a Drive folder
+"beamer2slides assets" just long enough for Slides to copy them, then moved to the trash
+(`--keep-assets` keeps them). `python tools/drive_usage.py` lists what the tool has in Drive.
 
 In the debug images, green boxes are text, blue are pictures, purple tables and orange shapes.
 Shaded text stays in the background (red math, blue figure, grey theme).

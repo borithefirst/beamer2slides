@@ -99,7 +99,11 @@ a per-slide background picture.
 
 - Background images: Drive "beamer2slides assets" folder, shared by link only while the
   batch runs (`uc?export=view&id=` URL; a fresh permission needs a few seconds before
-  Slides can fetch it). They are set as the slide's `pageBackgroundFill`.
+  Slides can fetch it). They are set as the slide's `pageBackgroundFill`. After insertion the
+  uploads are moved to the trash (Slides keeps its own copy), unless `--keep-assets`.
+- Emit robustness: a rejected batch is retried slide by slide, then element by element; an
+  element the API refuses becomes a picture of the original page region (`fallback_picture`).
+  A page whose classification raises becomes a full background picture (`classify_page`).
 - 4:3 decks: upload a blank python-pptx deck with Drive conversion (the page size is kept).
 - Re-running `convert` on the same output folder rebuilds the previous deck in place
   (same URL). Use `--new-deck` to force a new one.
