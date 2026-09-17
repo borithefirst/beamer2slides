@@ -116,7 +116,9 @@ class Run:
 
     def convert(self, pdf: Path) -> None:
         from deck_edits import LiveDeck
-        self.cli("convert", pdf, "--out", self.out)
+        # --force-rebuild: a scenario folder holds the deck of the previous run, with that run's
+        # deck edits still on it, and the rebuild guard would refuse to replace it (guard.py).
+        self.cli("convert", pdf, "--out", self.out, "--force-rebuild")
         self.deck = LiveDeck(json.loads((self.out / "emit.json").read_text(encoding="utf-8"))["presentationId"])
 
     def edit(self, *specs: dict) -> list[dict]:
