@@ -19,7 +19,7 @@ from pathlib import Path
 
 from googleapiclient.errors import HttpError
 
-from . import identity, merge, snapshot
+from . import faults, identity, merge, snapshot
 from .gslides import EMU_PER_PT, emu, execute, pt
 from .paths import out_root
 
@@ -28,6 +28,10 @@ CHUNK = 450
 PICTURE_OVERLAP = 0.6  # of the larger box: a deck picture the source now draws sits where it does
 SCRATCH = re.compile(r"b2s_m\d{3}")  # emit.measure_jobs' scratch slides
 STAND_IN = 100.0  # pt: size of plain shapes standing in for template shapes
+# Object ids sync gives what it creates: b2s_<h6 slide>[_<h6 element>|_k<n>]_<generation><2 letters>
+# plus emit's own suffixes (_g, n, _n0). Nothing a person can make in Slides looks like this.
+SYNC_ID = re.compile(r"b2s_[0-9a-f]{6}(?:_(?:[0-9a-f]{6}|k\d+))?_(\d+)[a-z]{2}[a-z0-9_]*")
+IN_PLACE_FIELDS = ("text", "text_styles", "paragraph_styles", "text_style_hash")
 
 
 class RevisionMismatch(Exception):
@@ -51,6 +55,155 @@ def resolve_deck(arg: str) -> tuple[str, Path | None]:
 
 def h6(text: str) -> str:
     return identity.sha1(text)[:6]
+
+
+# ------------------------------------------------- recovering from an interrupted earlier sync
+
+def sync_generation(oid: str) -> int | None:
+    """The generation of the sync that made this object id (None: not made by a sync)."""
+    m = SYNC_ID.fullmatch(oid or "")
+    return int(m.group(1)) if m else None
+
+
+def plan_recovery(base: dict, theirs: dict, ours_keys=()) -> dict:
+    """What an earlier sync that died halfway left in the deck (docs/sync.md, "If a sync dies").
+
+    `theirs`: snapshot.read_presentation of the live deck. Returns
+    `{"sweep", "sweep_slides", "heal", "restore"}`.
+
+    - **sweep**: objects (and slides) to delete. They were created by a sync of a later generation
+      than this base - only our own code makes such ids - and the base's own objects for that
+      element are all still there, so they are duplicates of something the deck already has. The
+      base's `cleanup` list (written with a new base, before the old objects were deleted) and the
+      `pending` block (written before the first write) name them; the id is the fallback for a deck
+      whose base was lost or is behind.
+    - **heal**: an element whose own objects are gone but whose replacement is on the slide, tagged
+      with its key. A sync of an older beamer2slides deleted before the new base was stored, so the
+      base doesn't know this object; without healing the merge would report the element as deleted
+      in the deck and keep nothing. The element takes the object over.
+    - **restore**: objects an interrupted sync rewrote in place (title placeholders): the person's
+      version was recorded in `pending.in_place` before the write and is put back into the read-back
+      the merge compares against, so their edit is re-applied instead of quietly adopted."""
+    gen = base.get("generation", 0)
+    pending = base.get("pending") or {}
+    named = set(base.get("cleanup") or [])
+    for ids in (pending.get("objects") or {}).values():
+        named.update(ids)
+    named_slides = set(pending.get("slides") or []) | {x for x in (base.get("cleanup") or [])}
+    base_objects: set[str] = set()
+    alive: dict[tuple[str, str], bool] = {}
+    live = {oid for s in theirs["slides"] for oid in s["objects"]}
+    for b in base["slides"]:
+        for el in b["elements"]:
+            oids = [o for o in (el.get("objects") or []) if o]
+            base_objects.update(oids)
+            alive[(b["key"], el["key"])] = bool(oids) and all(o in live for o in oids)
+        base_objects.update(b.get("groups") or [])
+    base_slides = {b.get("objectId") for b in base["slides"] if b.get("objectId")}
+    wanted = {h6(k) for k in ours_keys}
+
+    sweep, sweep_slides, heal = [], [], []
+    for s in theirs["slides"]:
+        sid = s["objectId"]
+        if sid not in base_slides:
+            g = sync_generation(sid)
+            if sid in named_slides or (g is not None and g > gen and sid[4:10] in wanted):
+                sweep_slides.append(sid)
+                continue
+        mine, here = [], []
+        for oid, rb in s["objects"].items():
+            if oid in base_objects:
+                continue
+            g = sync_generation(oid)
+            if oid not in named and (g is None or g <= gen):
+                continue  # a person's object, or one of this base's own generation
+            title = rb.get("title") or ""
+            key = title[len(snapshot.TAG_PREFIX):] if title.startswith(snapshot.TAG_PREFIX) else ""
+            skey, _, ekey = key.partition("/")  # the element key has slashes of its own
+            if key and ekey and not alive.get((skey, ekey), True):
+                here.append({"slide": skey, "element": ekey, "objectId": oid})
+            else:
+                mine.append(oid)
+        healed = [h["objectId"] for h in here]
+        # A healed element's own group, number box and anchored pictures carry no tag of their own.
+        sweep += [oid for oid in mine if not any(oid.startswith(m) for m in healed)]
+        for h in here:
+            h["objects"] = [h["objectId"]] + [oid for oid in mine if oid != h["objectId"] and oid.startswith(h["objectId"])]
+        heal += here
+    # Slides deletes a group's children with the group, so naming them as well would make it refuse
+    # the whole batch ("The object ... could not be found") and nothing at all would be swept.
+    parent = {oid: rb.get("parent_group") for s in theirs["slides"] for oid, rb in s["objects"].items()}
+    doomed = set(sweep)
+
+    def inside_a_doomed_group(oid: str) -> bool:
+        seen, p = set(), parent.get(oid)
+        while p and p not in seen:
+            if p in doomed:
+                return True
+            seen.add(p)
+            p = parent.get(p)
+        return False
+
+    sweep = [oid for oid in sweep if not inside_a_doomed_group(oid)]
+    restore = {oid: rb for oid, rb in ((k, v) for k, v in (pending.get("in_place") or {}).items())}
+    return {"sweep": sweep, "sweep_slides": sweep_slides, "heal": heal, "restore": restore}
+
+
+def heal_base(base: dict, heal: list[dict], theirs: dict, same_source: bool) -> list[str]:
+    """Give the base elements in `heal` the objects an interrupted sync made for them, with their
+    live read-back (so the merge sees the converter's own work, not a deck edit). When that sync
+    converted another PDF than the one being synced now, what those objects show is unknown: the
+    element's hashes are cleared so the source is written over them again."""
+    by_key = {(b["key"], el["key"]): el for b in base["slides"] for el in b["elements"]}
+    objects = {oid: rb for s in theirs["slides"] for oid, rb in s["objects"].items()}
+    done = []
+    for h in heal:
+        el = by_key.get((h["slide"], h["element"]))
+        if el is None:
+            continue
+        oids = h.get("objects") or [h["objectId"]]
+        el["objects"] = oids
+        el["main"] = oids[0]
+        el["readback"] = {oid: objects[oid] for oid in oids if oid in objects}
+        if not same_source:
+            el["ir_hash"] = "interrupted"
+            el["fields"] = {k: "interrupted" for k in el.get("fields", {})}
+        done.append(f"{h['slide']}/{h['element']}")
+    return done
+
+
+def restore_in_place(theirs: dict, saved: dict) -> list[str]:
+    """Put the text an interrupted sync overwrote in a placeholder back into the read-back (see
+    plan_recovery): the merge then re-applies the person's edit to the recreated element."""
+    back = []
+    for s in theirs["slides"]:
+        for oid, rb in list(s["objects"].items()):
+            old = saved.get(oid)
+            if old and (old.get("text") or "") != (rb.get("text") or ""):
+                s["objects"][oid] = {**rb, **{k: old[k] for k in IN_PLACE_FIELDS if k in old}}
+                back.append(oid)
+    return back
+
+
+def drop_objects(pres: dict, objects, slides) -> dict:
+    """A presentations.get without these page elements and slides (leftovers of an interrupted
+    sync): everything downstream then plans as if they had never been created."""
+    objects, slides = set(objects), set(slides)
+
+    def keep(elements):
+        out = []
+        for e in elements:
+            if e["objectId"] in objects:
+                continue
+            if "elementGroup" in e:
+                children = keep(e["elementGroup"].get("children", []))
+                if not children:
+                    continue
+                e = {**e, "elementGroup": {**e["elementGroup"], "children": children}}
+            out.append(e)
+        return out
+    return {**pres, "slides": [{**s, "pageElements": keep(s.get("pageElements", []))}
+                               for s in pres.get("slides", []) if s["objectId"] not in slides]}
 
 
 # ---------------------------------------------------------------- ours
@@ -292,6 +445,36 @@ def box_overlap(a: list[float] | None, b: list[float] | None) -> float:
     return ix / max(areas) if max(areas) > 0 else 0.0
 
 
+BREAK = {"__b2s_break__": True}  # where a batch may be cut: between slides
+
+
+def batches(reqs: list[dict], size: int = CHUNK) -> list[list[dict]]:
+    """The requests split into batches of at most `size`, cut only where `main_requests` allows it
+    (between slides), so a sync that dies between two batches leaves whole slides behind. One slide
+    with more than `size` requests is the only thing that is ever split."""
+    size = faults.batch_size(size)
+    blocks: list[list[dict]] = []
+    current: list[dict] = []
+    for r in reqs:
+        if r == BREAK:
+            if current:
+                blocks.append(current)
+                current = []
+        else:
+            current.append(r)
+    if current:
+        blocks.append(current)
+    out: list[list[dict]] = []
+    for block in blocks:
+        if len(block) > size:
+            out += [block[i:i + size] for i in range(0, len(block), size)]
+        elif out and len(out[-1]) + len(block) <= size:
+            out[-1] += block
+        else:
+            out.append(list(block))
+    return out
+
+
 def matrix_request(oid: str, m: list[float]) -> dict:
     return {"updatePageElementTransform": {"objectId": oid, "applyMode": "RELATIVE", "transform": {
         "scaleX": m[0], "shearX": m[1], "shearY": m[2], "scaleY": m[3], "unit": "EMU",
@@ -308,10 +491,25 @@ class Sync:
         self.dry_run, self.measure = dry_run, measure
         self.plan = ours["plan"]
         self.scale = self.plan.scale
-        self.tok = f"{base.get('generation', 0) + 1}{''.join(random.choices(string.ascii_lowercase, k=2))}"
+        self.tok = self.token()
         self.sent: dict[str, int] = {}
         self.warnings: list[str] = []
         self.urls: dict[str, str] = {}  # picture file (str) -> contentUrl from the staging deck
+        self.recovery: dict = {}        # what an interrupted earlier sync left (plan_recovery)
+        self.cleanup_ids: list[str] = []      # old objects and slides, deleted after everything else
+        self.cleanup_requests: list[dict] = []
+        self.in_place_readback: dict[str, dict] = {}  # objects rewritten in place, before the write
+        self.final_revision: str | None = None
+
+    def token(self) -> str:
+        """The two letters that make this sync's object ids unique. Never the token of a sync that
+        was interrupted (its objects may still be in the deck, and an id can only exist once)."""
+        used = {(self.base.get("pending") or {}).get("token")}
+        for _ in range(20):
+            tok = f"{self.base.get('generation', 0) + 1}{''.join(random.choices(string.ascii_lowercase, k=2))}"
+            if tok not in used:
+                return tok
+        return tok
 
     # ---- reading and writing
 
@@ -321,22 +519,26 @@ class Sync:
     def revision(self) -> str:
         return execute(self.slides.presentations().get(presentationId=self.pid, fields="revisionId"))["revisionId"]
 
-    def send(self, phase: str, reqs: list[dict], rev: str) -> str:
-        """Batches with requiredRevisionId, chained through the revisions they return."""
-        for i in range(0, len(reqs), CHUNK):
-            chunk = reqs[i:i + CHUNK]
+    def send(self, phase: str, reqs: list[dict], rev: str | None) -> str:
+        """Batches with requiredRevisionId, chained through the revisions they return. A batch is
+        cut at a slide boundary where it can (`batches`), so a run that dies between two batches
+        leaves whole slides written, never half of one."""
+        for n, chunk in enumerate(batches(reqs)):
             try:
-                res = execute(self.slides.presentations().batchUpdate(presentationId=self.pid, body={
-                    "requests": chunk, "writeControl": {"requiredRevisionId": rev}}))
+                body = {"requests": chunk}
+                if rev:
+                    body["writeControl"] = {"requiredRevisionId": rev}
+                res = execute(self.slides.presentations().batchUpdate(presentationId=self.pid, body=body))
             except HttpError as e:
                 from .emit import api_error
                 message = api_error(e)
-                if e.resp.status == 400 and "revision" in message.lower() and i == 0:
+                if e.resp.status == 400 and "revision" in message.lower() and n == 0:
                     raise RevisionMismatch(message)
                 raise RuntimeError(f"sync {phase}: batch refused ({message})") from e
             rev = res.get("writeControl", {}).get("requiredRevisionId") or self.revision()
             self.sent[phase] = self.sent.get(phase, 0) + len(chunk)
-        return rev
+            faults.fail_at(phase)
+        return rev or self.revision()
 
     # ---- planning
 
@@ -350,7 +552,16 @@ class Sync:
                 self.delete_scratch(leftovers)
                 pres = self.read()
             pres = {**pres, "slides": [s for s in pres.get("slides", []) if not SCRATCH.fullmatch(s["objectId"])]}
+            if attempt == 1 and not snapshot.base_matches(self.base, snapshot.read_presentation(pres)):
+                raise SystemExit(
+                    f"the sync base (generation {self.base.get('generation', 0)}) describes none of the slides in "
+                    f"presentation {self.pid}: it belongs to another copy of this deck, or the deck was rebuilt "
+                    f"outside sync. Syncing would report every element as deleted. Convert the PDF again "
+                    f"(python -m beamer2slides convert) to start a new base, or point --deck at the right deck.")
+            pres = self.recover(pres, attempt)
             theirs = snapshot.read_presentation(pres)
+            if self.recovery.get("restore"):
+                restore_in_place(theirs, self.recovery["restore"])
             self.sign_changed(theirs, pres)
             mplan = merge.plan_merge(self.base, self.ours, theirs, self.picture_adopter(pres))
             work = self.prepare(mplan, pres, theirs)
@@ -361,13 +572,21 @@ class Sync:
             hook = os.environ.pop("B2S_SYNC_BEFORE_WRITE", None)  # (tests: someone edits the deck now)
             if hook:
                 subprocess.run(hook, shell=True, check=False)
-            staging = self.stage(work)
-            scratch = []
+            self.staging = staging = self.stage(work)  # noted in the pending marker: a run that
+            scratch = []                                # dies leaves it for the next one to delete
             try:
                 if self.revision() != theirs["revisionId"]:
                     continue  # edited while we planned: plan again
+                faults.fail_at("plan")
                 moves, scratch = self.measure_places(work, theirs)
-                rev = self.send("content", self.main_requests(work, theirs, pres, moves, scratch), self.revision())
+                faults.fail_at("measure")
+                content, cleanup = self.main_requests(work, theirs, pres, moves, scratch)
+                self.cleanup_requests = cleanup
+                # What this sync is about to create, recorded before the first write: a run that
+                # dies leaves its objects behind, and the next one knows they are its own.
+                self.mark_pending(work, theirs)
+                faults.fail_at("journal")
+                rev = self.send("content", content, self.revision())
                 scratch = []
             except RevisionMismatch:
                 continue
@@ -376,11 +595,111 @@ class Sync:
                     self.delete_scratch(scratch)
                 if staging:  # (its pictures are only needed until the live deck has them)
                     execute(self.drive.files().delete(fileId=staging))
+                    self.staging = None
                     self.urls.clear()
             rev = self.finish(work, mplan, theirs, pres, rev)
             result["revisionId"] = rev
             return result
         raise RuntimeError(f"the deck kept changing while syncing ({MAX_ATTEMPTS} attempts)")
+
+    def recover(self, pres: dict, attempt: int) -> dict:
+        """Undo what an earlier sync that died halfway left behind, before anything is planned
+        (plan_recovery): its leftover objects are deleted, an element whose objects it deleted takes
+        over the ones it created, and a placeholder it rewrote gets the person's text back for the
+        merge to re-apply. The deletions are the first thing this sync writes, and they only ever
+        remove an object the deck holds a second time."""
+        read = snapshot.read_presentation(pres)
+        rec = plan_recovery(self.base, read, [s["key"] for s in self.ours["slides"]])
+        self.recovery = rec
+        # A run that died left its staging deck in Drive. Its id is in `pending.staging` so a person
+        # can find it; sync doesn't delete it, because an id read from a file could name anything -
+        # only the file this process just created is ever deleted (tests/test_guard.py).
+        if rec["heal"]:
+            same = (self.base.get("pending") or {}).get("source", {}).get("sha1") == \
+                snapshot.source_info(self.ours["source"]).get("sha1")
+            healed = heal_base(self.base, rec["heal"], read, same)
+            if healed and attempt == 1:
+                self.warnings.append(f"an earlier sync was interrupted after it had replaced {len(healed)} element(s) "
+                                     f"({', '.join(healed[:3])}{'...' if len(healed) > 3 else ''}): the deck's objects "
+                                     f"were taken over" + ("" if same else " and are written over from the source"))
+        if rec["sweep"] or rec["sweep_slides"]:
+            if self.dry_run:
+                self.warnings.append(f"an earlier sync left {len(rec['sweep'])} object(s) and "
+                                     f"{len(rec['sweep_slides'])} slide(s) behind; a real sync would delete them")
+            else:
+                gone = self.delete_leftovers(rec["sweep"] + rec["sweep_slides"])
+                if gone and attempt == 1:
+                    self.warnings.append(f"deleted {len(gone)} leftover object(s)/slide(s) of an interrupted sync")
+                # Only what is really gone may be planned away: anything still in the deck has to
+                # stay in the picture, or the merge would create it a second time.
+                rec["sweep"] = [oid for oid in rec["sweep"] if oid in gone]
+                rec["sweep_slides"] = [sid for sid in rec["sweep_slides"] if sid in gone]
+            pres = drop_objects(pres, rec["sweep"], rec["sweep_slides"])
+        return pres
+
+    def delete_leftovers(self, ids: list[str]) -> set[str]:
+        """Delete what an interrupted sync left behind and say what is really gone. One batch; if
+        Google refuses it, one request at a time, so a single id it no longer knows (deleting a
+        group takes its children with it) doesn't save every other leftover from being swept."""
+        if not ids:
+            return set()
+        reqs = [{"deleteObject": {"objectId": oid}} for oid in ids]
+        try:
+            execute(self.slides.presentations().batchUpdate(presentationId=self.pid, body={"requests": reqs}))
+            return set(ids)
+        except HttpError as first:
+            gone = set()
+            for oid in ids:
+                try:
+                    execute(self.slides.presentations().batchUpdate(
+                        presentationId=self.pid, body={"requests": [{"deleteObject": {"objectId": oid}}]}))
+                except HttpError as e:
+                    if "could not be found" not in str(e):
+                        continue  # still in the deck: the merge has to keep seeing it
+                gone.add(oid)
+            if len(gone) < len(ids):
+                self.warnings.append(f"could not delete {len(ids) - len(gone)} leftover object(s) of an "
+                                     f"interrupted sync: {first}")
+            return gone
+
+    def mark_pending(self, work: dict, theirs: dict) -> None:
+        """Store the base with a `pending` block before the first write: the generation and token of
+        this run, the objects it is about to create and the read-back of the objects it rewrites in
+        place. The base itself is unchanged, so a run that dies leaves a valid base of the old
+        generation plus a note of what it started. Only a run that gets to the end removes it."""
+        objects: dict[str, list[str]] = {}
+        slides: list[str] = []
+        for w in work["slides"]:
+            p = w["plan"]
+            if p["action"] not in ("create", "update") or p.get("ours") is None:
+                continue
+            o = self.ours["slides"][p["ours"]]
+            if p["action"] == "create" and w.get("sid"):
+                slides.append(w["sid"])
+            for i, oids in (w.get("objects") or {}).items():
+                objects[f"{o['key']}/{o['elements'][i]['key']}"] = list(oids)
+            if w.get("groups"):
+                objects[f"{o['key']}/~groups"] = list(w["groups"])
+        self.base["pending"] = {
+            "generation": self.base.get("generation", 0) + 1, "token": self.tok,
+            "revisionId": theirs.get("revisionId"), "started": time.strftime("%Y-%m-%dT%H:%M:%S"),
+            "source": snapshot.source_info(self.ours["source"]), "objects": objects, "slides": slides,
+            "in_place": self.in_place_readback, "staging": getattr(self, "staging", None)}
+        why = snapshot.store_base(self.base, self.out, self.drive, label="pending")
+        if why:
+            self.warnings.append(f"could not note the started sync in Drive ({why}); noted locally only")
+
+    def run_cleanup(self, rev: str | None) -> str | None:
+        """The last phase: the objects and slides this sync replaced are deleted only now, once
+        their replacements are written, the deck's own edits are back on them and a base that no
+        longer mentions them is stored. A run that dies before this leaves the old objects in the
+        deck, which is what lets the next sync do the whole merge again."""
+        if not self.cleanup_requests:
+            return rev
+        try:
+            return self.send("cleanup", self.cleanup_requests, rev)
+        except RevisionMismatch:  # someone edited the deck meanwhile; the objects are stale either way
+            return self.send("cleanup", self.cleanup_requests, None)
 
     def sign_changed(self, theirs: dict, pres: dict) -> None:
         """Pixel signatures of the live pictures whose contentUrl differs from the base's (Google
@@ -594,24 +913,28 @@ class Sync:
 
     # ---- content
 
-    def main_requests(self, work: dict, theirs: dict, pres: dict, moves: dict, scratch: list[str]) -> list[dict]:
+    def main_requests(self, work: dict, theirs: dict, pres: dict, moves: dict, scratch: list[str]
+                      ) -> tuple[list[dict], list[dict]]:
+        """(content, cleanup). Nothing in `content` destroys anything a person could have edited:
+        it creates the new objects, refills placeholders and puts the slides in order. Every
+        deletion - the objects a recreated unit replaces, the slides the source removed, the plain
+        stand-in shapes - goes into `cleanup`, which is sent after the deck's own edits are back on
+        the new objects and a base that no longer mentions the old ones is stored."""
         live = {s["objectId"]: s for s in theirs["slides"]}
         layouts = {l.get("layoutProperties", {}).get("name"): l for l in pres.get("layouts", [])}
         reqs: list[dict] = []
-        late: list[dict] = []
+        doomed_slides: list[str] = []
         for w in work["slides"]:
             p = w["plan"]
             if p["action"] == "delete":
-                late.append({"deleteObject": {"objectId": p["objectId"]}})
+                doomed_slides.append(p["objectId"])
             elif p["action"] == "create":
-                reqs += self.new_slide(w, layouts, moves, pres)
+                reqs += self.new_slide(w, layouts, moves, pres) + [BREAK]
             elif p["action"] == "update":
-                reqs += self.update_slide(w, live[p["objectId"]], moves, pres)
-        reqs += late
-        reqs += [{"deleteObject": {"objectId": s}} for s in scratch]
+                reqs += self.update_slide(w, live[p["objectId"]], moves, pres) + [BREAK]
+        reqs += [{"deleteObject": {"objectId": s}} for s in scratch]  # (sync's own scratch slides)
         # Slide order: created slides were appended.
-        current = [s["objectId"] for s in theirs["slides"] if s["objectId"] not in
-                   {w["plan"]["objectId"] for w in work["slides"] if w["plan"]["action"] == "delete"}]
+        current = [s["objectId"] for s in theirs["slides"] if s["objectId"] not in set(doomed_slides)]
         current += [w["sid"] for w in work["slides"] if w["plan"]["action"] == "create"]
         final = [s for s in dict.fromkeys(work["order"]) if s in current]  # (an id can't be in two places)
         for i, sid in enumerate(final):
@@ -619,7 +942,9 @@ class Sync:
                 reqs.append({"updateSlidesPosition": {"slideObjectIds": [sid], "insertionIndex": i}})
                 current.remove(sid)
                 current.insert(i, sid)
-        return reqs
+        self.cleanup_ids = list(dict.fromkeys([*getattr(self, "cleanup_ids", ()), *doomed_slides]))
+        cleanup = [{"deleteObject": {"objectId": oid}} for oid in self.cleanup_ids]
+        return reqs, cleanup
 
     def slide_requests(self, w: dict, sid: str, in_place: dict[int, dict], templates: dict[tuple, dict],
                        moves: dict, new_slide: bool, ungrouped: set[int] = frozenset()
@@ -792,7 +1117,7 @@ class Sync:
         rs, objects, new_oid, extras = self.slide_requests(w, sid, in_place, templates, moves, True)
         reqs += [r for r in rs if "createImage" in r]  # (a picture's other requests follow in element order)
         reqs += [r for r in rs if "createImage" not in r] + extras
-        w["objects"], w["new_oid"], w["in_place"], w["tops"] = objects, new_oid, in_place, {}
+        w["objects"], w["new_oid"], w["in_place"], w["tops"], w["doomed"] = objects, new_oid, in_place, {}, set()
         w["groups"] = [r["groupObjects"]["groupObjectId"] for r in extras if "groupObjects" in r]
         reqs += self.tag_requests(o, objects, new_oid, in_place)
         return reqs
@@ -902,11 +1227,22 @@ class Sync:
                                                       sid, in_place, templates, moves, False, ungrouped)
         reqs += rs
         w["objects"], w["new_oid"], w["in_place"] = created, new_oid, in_place
-        # Old objects out (a placeholder refilled in place stays).
+        # Old objects out - in the cleanup phase, once their replacements are written and the
+        # deck's own edits are back on them (a placeholder refilled in place stays).
         keep_ids = {v["id"] for v in in_place.values()}
-        for _, roots in roots_removed:
-            reqs += [{"deleteObject": {"objectId": r}} for r in roots if r not in keep_ids]
-        reqs += [{"deleteObject": {"objectId": s}} for s in stand_ins]
+        doomed = [r for _, roots in roots_removed for r in roots if r not in keep_ids]
+        w["doomed"] = set(doomed) | {c for r in doomed for c in merge._descendants(r, read)}
+        # (getattr: the offline tests drive this method on a bare Sync object)
+        self.cleanup_ids = [*getattr(self, "cleanup_ids", ()), *doomed, *stand_ins]
+        # The text of a placeholder this sync overwrites: recorded so an interrupted run can be
+        # told what the person had there (plan_recovery / restore_in_place).
+        saved = getattr(self, "in_place_readback", None)
+        if saved is None:
+            saved = self.in_place_readback = {}
+        for v in in_place.values():
+            rb = objects.get(v["id"])
+            if rb:
+                saved[v["id"]] = {k: rb[k] for k in IN_PLACE_FIELDS if k in rb}
         # Regroup: the unit's new top object takes its old root's place among the children.
         tops = {}
         for u in recreated:
@@ -1009,12 +1345,14 @@ class Sync:
 
     def restack(self, w: dict, before: dict, now: dict) -> list[dict]:
         """BRING_TO_FRONT so recreated elements take their old place in the z-order and new
-        ones follow their predecessor in the source."""
+        ones follow their predecessor in the source. The objects the cleanup phase will delete are
+        left out: they are still on the slide, under their replacements, until then."""
         p = w["plan"]
+        doomed = w.get("doomed") or set()
         b = self.base["slides"][p["base"]]
         o = self.ours["slides"][p["ours"]]
         bunits = merge.units(b["elements"])
-        top_now = set(now["order"])
+        top_now = {oid for oid in now["order"] if oid not in doomed}
         replace, added = {}, []
         for u in p["units"]:
             if u["action"] == "recreate":
@@ -1041,9 +1379,10 @@ class Sync:
                     pos = desired.index(prev) + 1
                     break
             desired.insert(pos, new)
-        desired += [x for x in now["order"] if x not in desired]
+        desired += [x for x in now["order"] if x not in desired and x not in doomed]
+        order_now = [x for x in now["order"] if x not in doomed]
         k = 0
-        while k < len(desired) and k < len(now["order"]) and desired[k] == now["order"][k]:
+        while k < len(desired) and k < len(order_now) and desired[k] == order_now[k]:
             k += 1
         return [{"updatePageElementsZOrder": {"pageElementObjectIds": [x], "operation": "BRING_TO_FRONT"}} for x in desired[k:]]
 
@@ -1196,8 +1535,9 @@ class Sync:
                     # delete / none: gone
                 bg_conflict = b.get("background") != o.get("background") and not p.get("background")
                 notes_kept = (b.get("notes") or "") != (o.get("notes") or "") and p.get("notes") is None
+                doomed = w.get("doomed") or set()
                 entry.update(objectId=sid, layoutObjectId=b.get("layoutObjectId"), groups=b.get("groups", []),
-                             order=read["order"] if read else b.get("order", []))
+                             order=[x for x in read["order"] if x not in doomed] if read else b.get("order", []))
                 if p.get("background"):
                     entry["background_readback"] = read["background"] if read else None
                 else:
@@ -1305,10 +1645,12 @@ def sync(pdf: Path, deck: str, out: Path | None = None, dry_run: bool = False, o
     pid, folder = resolve_deck(deck)
     out = out or folder or out_root() / pdf.stem
     slides, drive = slides_service(), drive_service()
-    base, where = snapshot.load_base(pid, folder or out, drive)
+    problems: list[str] = []
+    base, where = snapshot.load_base(pid, folder or out, drive, problems)
     if base is None:
-        raise SystemExit(f"no sync base for presentation {pid}: convert the deck with this version first")
-    warnings = [w for w in [snapshot.stale_base_warning(where, drive, pid)] if w]
+        raise SystemExit("\n".join([f"no sync base for presentation {pid}: convert the deck with this version first",
+                                    *problems]))
+    warnings = problems + [w for w in [snapshot.stale_base_warning(where, drive, pid)] if w]
     overlays, mismatch = overlay_mode(overlays, base.get("overlays"))
     warnings += [mismatch] if mismatch else []
     for w in warnings:
@@ -1329,14 +1671,32 @@ def sync(pdf: Path, deck: str, out: Path | None = None, dry_run: bool = False, o
                                    if u["action"] not in ("keep", "none") or u.get("deck")]}
                         for p in result["plan"]["slides"]]}
     adopted = any(u["action"] in ("adopt", "adopt_object") for p in result["plan"]["slides"] for u in p.get("units", []))
-    if not dry_run and (result["work"]["writes"] or adopted or refreshed):
-        new = s.new_base(result)
+    recovered = bool(s.recovery.get("sweep") or s.recovery.get("sweep_slides") or s.recovery.get("heal")
+                     or base.get("pending") or base.get("cleanup"))
+    if not dry_run and (result["work"]["writes"] or adopted or refreshed or recovered):
+        new = s.new_base(result) if (result["work"]["writes"] or adopted or refreshed) else dict(base)
         new["overlays"] = overlays  # (the steps the deck holds now)
-        snapshot.save_local(new, out)
-        try:
-            snapshot.save_drive(drive, new)
-        except HttpError as e:
-            report["warnings"].append(f"could not store the new base in Drive ({e}); kept locally")
+        new.pop("pending", None)   # this run got to the end, so nothing is half done any more
+        new.pop("cleanup", None)
+        if s.cleanup_ids:
+            # Stored before the old objects are deleted: whatever happens next, the base that the
+            # next sync finds either still points at them or knows they have to go.
+            new["cleanup"] = list(s.cleanup_ids)
+        why = snapshot.store_base(new, out, drive)
+        if why:
+            report["warnings"].append(
+                f"could not store the new base in Drive ({why}); kept locally. The {len(s.cleanup_ids)} object(s) this "
+                f"sync replaced are left in the deck: deleting them while the base another machine would read still "
+                f"points at them could lose deck edits. The next sync removes them.")
+        elif s.cleanup_ids:
+            try:
+                s.run_cleanup(s.final_revision)
+            except (RuntimeError, HttpError) as e:  # they stay in the base's `cleanup` list
+                report["warnings"].append(f"the objects this sync replaced could not be deleted ({e}); "
+                                          f"the next sync removes them")
+            else:
+                new.pop("cleanup", None)
+                snapshot.store_base(new, out, drive)
         info["generation"] = new["generation"]
     elif not dry_run and where == "drive":
         snapshot.save_local(base, out)  # (refresh the cache)
