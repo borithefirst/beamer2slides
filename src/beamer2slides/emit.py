@@ -300,7 +300,7 @@ def text_box_requests(el: dict, slide_id: str, object_id: str, scale: float, fon
     y = first_baseline - (BASELINE_A + ASCENT_EM * sizes[0] + extra_above(ratios[0], sizes[0]))
     w = inner_w + 2 * PAD_X + slack
     h = last_baseline - y + DESCENT_EM * sizes[-1] + extra_below(ratios[-1], sizes[-1]) + 4
-    if right_limit and not multiline and aligns == {"left"} and not placeholder:
+    if right_limit and not multiline and aligns == {"left"} and not any(SOFT_BREAK in r["text"] for p in paras for r in p["runs"]):
         # Room up to the block edge or the next element: text typed later wraps where a user
         # expects, not a few points after the converted words.
         w = max(w, right_limit * scale - x)
@@ -1015,7 +1015,7 @@ def text_right_limit(el: dict, slide: dict) -> float | None:
     as far from the panel's right edge as the text is from its left edge; elsewhere the
     mirrored left margin of the page, stopping short of anything to the right on the same
     lines (the other column, a picture)."""
-    if el.get("role") not in ("body", None) or not el["paragraphs"]:
+    if el.get("role") not in ("body", "title", None) or not el["paragraphs"]:
         return None
     x0, y0, x1, y1 = el["bbox"]
     cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
