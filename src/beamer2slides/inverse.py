@@ -277,6 +277,7 @@ class Workspace:
             shutil.rmtree(self.src)
         if not self.src.exists():
             copy_tree(self.root, self.src)
+        self.originals = source_hashes(self.root, self.src)
         self.build_dir.mkdir(parents=True, exist_ok=True)
         self.main = self.src / self.original.name
         self.handout = handout
@@ -398,6 +399,22 @@ def error_excerpt(log: str) -> str:
         if ln.startswith("!") or re.match(r"^.*:\d+: ", ln):
             return "\n".join(lines[i:i + 6])
     return "\n".join(lines[-12:])
+
+
+def source_hashes(root: Path, src: Path) -> dict[str, str]:
+    """sha1 of every file the working copy was made from, keyed by its path in the real tree.
+    `pull --apply` compares them before it writes: a file the person edited while the loop was
+    compiling is never overwritten (docs/sync.md, "If a sync or a pull dies")."""
+    out: dict[str, str] = {}
+    for dirpath, _dirnames, filenames in os.walk(src):
+        rel = Path(dirpath).relative_to(src)
+        for name in filenames:
+            p = root / rel / name
+            try:
+                out[str(p)] = hashlib.sha1(p.read_bytes()).hexdigest()
+            except OSError:
+                pass
+    return out
 
 
 def copy_tree(src: Path, dst: Path) -> None:
@@ -2100,6 +2117,7 @@ class Result:
     work: Path
     theme: list[dict] = field(default_factory=list)   # differences the theme owns (titles), not written back
     notes: list[str] = field(default_factory=list)    # pictures: reused files, baked edits, converted formats, replaced figures
+    originals: dict[str, str] = field(default_factory=dict)  # source path -> sha1 when the loop copied it (apply checks it)
 
 
 def picture_hashes(cand: Candidate, target: dict, comp_out: Path) -> dict:
@@ -2249,7 +2267,8 @@ def converge(tex: Path, target: dict, work: Path, max_iter: int = 10, handout: b
     theme = [r for r in comp.residuals if r.get("theme")] if comp else []
     used = lambda n: (m := re.match(r"(\S+\.(png|jpg|pdf)): ", n)) is None or m.group(1) in patch
     notes = list(dict.fromkeys(n for n in ctx.notes if used(n)))
-    return Result(not open_res, iterations, final_unresolved, open_res, files, patch, ws.work, theme, notes)
+    return Result(not open_res, iterations, final_unresolved, open_res, files, patch, ws.work, theme, notes,
+                  ws.originals)
 
 
 def restore(ws: Workspace, texts: dict[Path, str]) -> None:
@@ -2344,6 +2363,44 @@ def clean(r: dict) -> dict:
 
 # ---------------------------------------------------------------- commands
 
+def file_sha1(path: Path) -> str | None:
+    try:
+        return hashlib.sha1(path.read_bytes()).hexdigest()
+    except OSError:
+        return None
+
+
+def replace_file(path: Path, new: str | Path, backup: bool = True) -> None:
+    """Write `new` (text, or a file to copy) to `path` through a temporary file in the same folder,
+    with a `.bak` of what was there. A process killed at any moment leaves either the old file or
+    the new one, never half of one: everything is written under another name and moved into place,
+    and os.replace is atomic on Windows as it is on POSIX."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if backup and path.exists():
+        bak = path.with_name(path.name + ".bak")
+        tmp_bak = path.with_name(path.name + ".bak.writing")
+        shutil.copy2(path, tmp_bak)
+        os.replace(tmp_bak, bak)
+    tmp = path.with_name(path.name + ".b2s-writing")
+    try:
+        if isinstance(new, Path):
+            shutil.copy2(new, tmp)
+        else:
+            tmp.write_text(new, encoding="utf-8", newline="")
+        os.replace(tmp, path)
+    finally:
+        if tmp.exists():
+            tmp.unlink()
+
+
+def unchanged_since_pull(path: Path, originals: dict[str, str]) -> bool:
+    """Whether the file on disk is still the one the loop started from (a new file must still be
+    absent). A file edited meanwhile is left alone: the pull's version goes next to it."""
+    was = originals.get(str(path))
+    now = file_sha1(path)
+    return now == was if was is not None else now is None
+
+
 def write_outputs(result: Result, target: dict, tex: Path, work: Path, apply: bool, out: Path | None,
                   log=print) -> None:
     """pull.patch, edits.json and edits.md in `work`; the edited files in place (with .bak backups)
@@ -2357,16 +2414,23 @@ def write_outputs(result: Result, target: dict, tex: Path, work: Path, apply: bo
         copy_tree(result.work / "src", out)
         log(f"edited source tree -> {out}")
     elif apply:
+        from .faults import fail_at
+        skipped = []
         for path, new in result.files.items():
             path = Path(path)
-            path.parent.mkdir(parents=True, exist_ok=True)
-            if isinstance(new, Path):
-                shutil.copy2(new, path)
-            else:
-                if path.exists():
-                    shutil.copy2(path, path.with_name(path.name + ".bak"))
-                path.write_text(new, encoding="utf-8", newline="")
+            if result.originals and not unchanged_since_pull(path, result.originals):
+                # Someone wrote to this file while the pull was compiling: their version wins.
+                side = path.with_name(path.name + ".b2s-new")
+                replace_file(side, new, backup=False)
+                skipped.append(str(path))
+                log(f"  {path} changed since the pull started: left alone, its new version is {side}")
+                continue
+            fail_at("pull:apply")
+            replace_file(path, new, backup=not isinstance(new, Path))
             log(f"  wrote {path}")
+        if skipped:
+            data["not_applied"] = skipped
+            (work / "edits.json").write_text(json.dumps(data, indent=1, ensure_ascii=False), encoding="utf-8")
     state = "converged" if result.converged else f"{len(result.unresolved)} residual(s) left"
     log(f"{state} after {len(result.iterations) - 1} edit round(s); {len(result.files)} file(s) changed; "
         f"report {work / 'edits.md'}")
