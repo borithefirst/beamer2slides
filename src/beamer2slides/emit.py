@@ -4,9 +4,11 @@ import hashlib
 import io
 import json
 import math
+import time
 from collections import Counter
 from pathlib import Path
 
+import numpy as np
 from googleapiclient.errors import HttpError
 from googleapiclient.http import MediaIoBaseUpload
 
@@ -318,11 +320,14 @@ def _vertical_pass(paras, baselines, sizes, estimate):
 
 def text_box_requests(el: dict, slide_id: str, object_id: str, scale: float, fonts: FontMapper,
                       placeholder: dict | None = None, page_slide: dict[int, str] | None = None,
-                      bar: list[float] | None = None, right_limit: float | None = None) -> list[dict]:
+                      bar: list[float] | None = None, right_limit: float | None = None,
+                      marks: list[str] | None = None) -> list[dict]:
     """A text box for a text element. With `bar` (the PDF box of a block's title bar that this
     one-line text sits on) the box fills the bar and centres its text vertically, so the
     title stays in the middle of the bar when the block is resized. `right_limit` (PDF x) is
-    how far a box of unwrapped left-aligned text may extend."""
+    how far a box of unwrapped left-aligned text may extend. `marks` highlights the hole runs,
+    one colour each (measure_holes)."""
+    marks = list(marks or [])
     paras = [{**p, "runs": [hole_run(r, scale, fonts) if r.get("hole") else r for r in p["runs"]]}
              for p in el["paragraphs"]]
     # A line is as tall as its largest run; small caps runs count at their reduced size.
@@ -478,7 +483,10 @@ def text_box_requests(el: dict, slide_id: str, object_id: str, scale: float, fon
             if run.get("highlight"):
                 style["backgroundColor"] = rgb(run["highlight"])
                 fields.append("backgroundColor")
-            fields = ",".join(fields)
+            if run.get("hole_size") and marks:
+                style["backgroundColor"] = rgb(marks.pop(0))
+                fields.append("backgroundColor")
+            fields = ",".join(dict.fromkeys(fields))
             if run["link"] and run["link"].startswith("#page="):
                 target = page_slide.get(int(run["link"][6:])) if page_slide else None
                 if target:
@@ -1212,59 +1220,139 @@ def text_right_limit(el: dict, slide: dict) -> float | None:
     return limit if limit > x1 else None
 
 
-def space_shift(run: dict, em: float) -> float:
+def earlier_holes(p: dict, run: dict) -> list[tuple[float, float]]:
+    """(x0, width) of the holes before `run` on its line (PDF pt)."""
+    words = [b[6] for b in run.get("before", []) if len(b) >= 7]
+    if not words:
+        return []
+    i = next(k for k, r in enumerate(p["runs"]) if r is run)
+    return [(r["hole_x0"], r["hole"]) for r in p["runs"][:i]
+            if r.get("hole") and min(words) <= r["hole_x0"] < run["hole_x0"]]
+
+
+def space_shift(run: dict, em: float, holes: list[tuple[float, float]] = ()) -> float:
     """What word spaces add to a formula gap's position in Slides. The substitute's size
     calibration makes its glyphs wider and its spaces narrower than TeX's, evening out at word
     ends; a formula starts after a space, so it lands one space deficit early. TeX also
-    stretches some spaces (after a colon, around math): Slides sets a plain space there."""
+    stretches some spaces (after a colon, around math): Slides sets a plain space there.
+    A gap holding an earlier hole (`holes`) becomes a space and that hole's no-break spaces."""
     if google_font(run["font"]):
         return 0.0  # the PDF's own font: its spaces too
     words = sorted((b[6], b[6] + b[0]) for b in run.get("before", []) if len(b) >= 7)
     if not words:
         return 0.0
-    size = run["size"]
-    gaps = [b[0] - a[1] for a, b in zip(words, words[1:])] + [run["hole_x0"] - words[-1][1]]
-    spaces = [g for g in gaps if g > 0.15 * size]
-    if not spaces:
-        return 0.0
-    nominal = min(sorted(spaces)[len(spaces) // 2], 0.4 * size)
-    shift = sum(nominal - g for g in spaces)
-    if gaps[-1] > 0.15 * size:
-        shift += SYMBOL_ADVANCE_EM[" "] * em - nominal
+    size, space = run["size"], SYMBOL_ADVANCE_EM[" "] * em
+    ends = [(a[1], b[0]) for a, b in zip(words, words[1:])] + [(words[-1][1], run["hole_x0"])]
+    shift, gaps = 0.0, []
+    for a, b in ends:
+        inside = [w for x, w in holes if a - 0.5 <= x < b]
+        shift += sum(space + w for w in inside) - (b - a) if inside else 0.0
+        gaps.append(None if inside else b - a)
+    spaces = [g for g in gaps if g is not None and g > 0.15 * size]
+    nominal = min(sorted(spaces)[len(spaces) // 2], 0.4 * size) if spaces else 0.0
+    shift += sum(nominal - g for g in spaces)
+    if gaps[-1] is None:
+        shift += space  # (the gap's own PDF space went with the hole before)
+    elif gaps[-1] > 0.15 * size:
+        shift += space - nominal
     return shift
+
+
+def slide_holes(slide: dict) -> list[tuple[dict, dict, dict, dict | None]]:
+    """(text element, paragraph, hole run, its picture) for every hole on a slide, in text order.
+    A picture covers most of its hole (it usually starts where the hole does, but a radical's
+    sign can reach further left) on one of the paragraph's lines; holes on two lines can have
+    the same x: each takes the nearest picture not taken yet."""
+    pictures = [e for e in slide["elements"] if e["kind"] == "image" and e.get("anchor")]
+    out, taken = [], set()
+    for el in slide["elements"]:
+        if el["kind"] != "text":
+            continue
+        for p in el["paragraphs"]:
+            for run in p["runs"]:
+                if not run.get("hole"):
+                    continue
+                a, b = run["hole_x0"] - HOLE_PAD, run["hole_x0"] - HOLE_PAD + run["hole"]
+                near = [e for e in pictures if e["anchor"] == el["id"] and e["id"] not in taken
+                        and min(b, e["bbox"][2]) - max(a, e["bbox"][0]) > 0.5 * min(b - a, e["bbox"][2] - e["bbox"][0])]
+                pic = min(near, default=None, key=lambda e: (min(
+                    abs((e["bbox"][1] + e["bbox"][3]) / 2 - line["baseline"] + 0.35 * run["size"]) for line in p["lines"]) // 4,
+                    abs(e["bbox"][0] + HOLE_PAD - run["hole_x0"])))
+                if pic:
+                    taken.add(pic["id"])
+                out.append((el, p, run, pic))
+    return out
+
+
+def hole_neighbours(p: dict, run: dict) -> tuple[float | None, float | None]:
+    """PDF x where the word before a hole ends, if a space separates them (Slides has a word
+    space there too), and where the word after it starts, if nothing separates them in the
+    text (the hole reaches up to it)."""
+    i = next(k for k, r in enumerate(p["runs"]) if r is run)
+    words = [b[6] + b[0] for b in run.get("before", []) if len(b) >= 7]
+    prev_end = None
+    if i > 0 and p["runs"][i - 1]["text"].endswith(" ") and words and \
+            not any(x >= max(words) for x, _ in earlier_holes(p, run)):
+        prev_end = max(words)
+    nxt = p["runs"][i + 1]["text"] if i + 1 < len(p["runs"]) else ""
+    return prev_end, (run.get("next_x0") if not nxt[:1].isspace() else None)
+
+
+def fit_holes(slide: dict, scale: float, fonts: FontMapper) -> dict:
+    """The slide with each hole as wide as the PDF's room between the words around it, less the
+    Slides word space before it, so the words after it keep their place. Never narrower than
+    the picture."""
+    widths = {}
+    for _, p, run, pic in slide_holes(slide):
+        prev_end, next_x0 = hole_neighbours(p, run)
+        if pic is None or next_x0 is None:
+            continue
+        start = prev_end + SYMBOL_ADVANCE_EM[" "] * fonts(run, scale)[1] / scale if prev_end is not None else pic["bbox"][0]
+        widths[id(run)] = round(max(pic["bbox"][2] - pic["bbox"][0], next_x0 - start), 2)
+    if not widths:
+        return slide
+    return {**slide, "elements": [
+        {**el, "paragraphs": [{**p, "runs": [{**r, "hole": widths[id(r)]} if id(r) in widths else r for r in p["runs"]]}
+                              for p in el["paragraphs"]]} if el["kind"] == "text" else el
+        for el in slide["elements"]]}
+
+
+def hole_offset(p: dict, run: dict, pic: dict, scale: float, z: float) -> float:
+    """Where a picture sits in its gap (slide pt from the gap's start): the Slides word space
+    before the gap and the gap's room after the picture are shared in the PDF's proportion."""
+    prev_end, next_x0 = hole_neighbours(p, run)
+    if prev_end is None:
+        return 0.0
+    x0, _, x1, _ = pic["bbox"]
+    room = max(0.0, run["hole"] - (x1 - x0)) * scale
+    left = max(0.0, x0 - prev_end) * scale
+    right = max(0.0, next_x0 - x1) * scale if next_x0 is not None else room
+    space = SYMBOL_ADVANCE_EM[" "] * z
+    return (space + room) * left / (left + right) - space if left + right > 0 else 0.0
 
 
 def formula_shifts(slide: dict, scale: float, fonts: FontMapper) -> dict[str, float]:
     """PDF-point x offsets for inline formula pictures, so each sits over the gap where Slides
     will put it: the words before it on its line come out a little narrower or wider."""
-    pictures = [e for e in slide["elements"] if e["kind"] == "image" and e.get("anchor")]
     out = {}
-    for el in slide["elements"]:
-        if el["kind"] != "text":
+    for el, p, run, pic in slide_holes(slide):
+        if p["align"] != "left" or pic is None:
             continue
-        for p in el["paragraphs"]:
-            if p["align"] != "left":
-                continue
-            for run in p["runs"]:
-                if not run.get("hole"):
-                    continue
-                em = fonts(run, scale)[1] / scale  # the line's Slides font size, in PDF points
-                shift = HOLE_PAD  # the gap has room for the picture's padding on its left too
-                for w, font, family, bold, italic, *text in run.get("before", []):
-                    if family == "math" and text:
-                        # Math symbols come from Lato or Slides' fallback fonts, at their own widths.
-                        shift += sum(SYMBOL_ADVANCE_EM.get(ch, 0.55) for ch in text[0]) * em - w
-                    else:
-                        spaces = len(text[0]) - len(text[0].strip()) if text else 0
-                        # A math space inside the span (" 2," after ≥): TeX's thick space is wider.
-                        pdf_spaces = spaces * MATH_SPACE_EM * run["size"]
-                        shift += (w - pdf_spaces) * (fonts.width_ratio(font, family, bold, italic) - 1) + \
-                            spaces * SYMBOL_ADVANCE_EM[" "] * em - pdf_spaces
-                shift += space_shift(run, em)
-                pic = next((e for e in pictures if e["anchor"] == el["id"]
-                            and abs(e["bbox"][0] + HOLE_PAD - run["hole_x0"]) < 0.6), None)
-                if pic and abs(shift) >= 0.2:
-                    out[pic["id"]] = shift
+        em = fonts(run, scale)[1] / scale  # the line's Slides font size, in PDF points
+        shift = HOLE_PAD  # the gap has room for the picture's padding on its left too
+        for w, font, family, bold, italic, *text in run.get("before", []):
+            if family == "math" and text:
+                # Math symbols come from Lato or Slides' fallback fonts, at their own widths.
+                shift += sum(SYMBOL_ADVANCE_EM.get(ch, 0.55) for ch in text[0]) * em - w
+            else:
+                spaces = len(text[0]) - len(text[0].strip()) if text else 0
+                # A math space inside the span (" 2," after ≥): TeX's thick space is wider.
+                pdf_spaces = spaces * MATH_SPACE_EM * run["size"]
+                shift += (w - pdf_spaces) * (fonts.width_ratio(font, family, bold, italic) - 1) + \
+                    spaces * SYMBOL_ADVANCE_EM[" "] * em - pdf_spaces
+        shift += space_shift(run, em, earlier_holes(p, run)) + hole_offset(p, run, pic, scale, em * scale) / scale
+        if abs(shift) >= 0.2:
+            out[pic["id"]] = shift
     return out
 
 
@@ -1284,7 +1372,8 @@ def overlay_boxes(slide: dict, scale: float, fonts: FontMapper) -> dict[str, tup
         for m in el["marks"]:
             run = {"text": " ", "font": m["font"], "family": m["family"], "size": m["size"], "bold": m["bold"],
                    "italic": m["italic"], "hole": 1.0, "hole_x0": m["hole_x0"], "before": m["before"]}
-            probe = {"elements": [{"kind": "text", "id": "mark", "paragraphs": [{"align": "left", "runs": [run]}]},
+            probe = {"elements": [{"kind": "text", "id": "mark", "paragraphs": [
+                {"align": "left", "runs": [run], "lines": [{"baseline": 0.35 * m["size"]}]}]},
                                   {"kind": "image", "id": "gap", "anchor": "mark",
                                    "bbox": [m["hole_x0"] - HOLE_PAD, 0, m["hole_x0"], 0]}]}
             # (the gap's picture starts HOLE_PAD before the gap; shifts under 0.2 pt are not reported)
@@ -1297,6 +1386,182 @@ def overlay_boxes(slide: dict, scale: float, fonts: FontMapper) -> dict[str, tup
         x0, _, x1, _ = el["bbox"]
         out[el["id"]] = (x0 + md + slope * (x0 - mx), x1 + md + slope * (x1 - mx))
     return out
+
+
+# ---------------------------------------------------------------- measured hole positions
+#
+# The prediction above is off by several points now and then (fallback fonts, kerning, wraps).
+# So each slide with holes gets a scratch copy of its text boxes on a white slide, every hole
+# run highlighted in a mark colour and all text black; Google's thumbnail of it shows where
+# the gaps really are, and the pictures are moved there before they are grouped.
+
+HOLE_MARKS = ["#ff00ff", "#00ffff", "#ffff00", "#00ff00"]  # 0/255 channels only (mark_alpha)
+MARK_CORE = 0.9  # a pixel at least this much covered by a mark is inside it
+
+
+def mark_alpha(img: np.ndarray, color: str) -> np.ndarray:
+    """How much of each pixel of an RGB thumbnail a highlight in `color` covers (white page).
+    Dark glyph pixels have the colour's full channels low too: they count as uncovered."""
+    c = [int(color.lstrip("#")[i:i + 2], 16) for i in (0, 2, 4)]
+    img = img.astype(np.float32)
+    full = np.min([img[..., i] for i in range(3) if c[i] == 255], axis=0)
+    alpha = np.mean([(255 - img[..., i]) / 255 for i in range(3) if c[i] == 0], axis=0)
+    return np.where(full >= 200, np.clip(alpha, 0.0, 1.0), 0.0)
+
+
+def _runs(mask: np.ndarray) -> list[tuple[int, int]]:
+    """Index ranges [a, b] of consecutive True values."""
+    idx = np.flatnonzero(mask)
+    if idx.size == 0:
+        return []
+    cuts = np.flatnonzero(np.diff(idx) > 1)
+    return [(int(g[0]), int(g[-1])) for g in np.split(idx, cuts + 1)]
+
+
+def _edges(profile: np.ndarray, a: int, b: int) -> tuple[float, float]:
+    """Sub-pixel extent of a covered range [a, b]: partly covered neighbours add their share."""
+    lo = a - (profile[a - 1] if a > 0 else 0.0)
+    hi = b + 1 + (profile[b + 1] if b + 1 < profile.size else 0.0)
+    return float(lo), float(hi)
+
+
+def find_marks(alpha: np.ndarray, px_per_pt: float) -> list[tuple[float, float, float, float]]:
+    """Highlighted rectangles (x0, y0, x1, y1 in pt) in a mark_alpha map. A glyph lying over a
+    highlight hides it only in some rows, so columns count as covered if any row of the band is."""
+    out = []
+    core = alpha >= MARK_CORE
+    for r0, r1 in _runs(core.sum(axis=1) >= 3):
+        cols = alpha[r0:r1 + 1].max(axis=0)
+        for c0, c1 in _runs(cols >= MARK_CORE):
+            if c1 - c0 < 2:
+                continue
+            rows = alpha[:, c0:c1 + 1].max(axis=1)
+            x0, x1 = _edges(cols, c0, c1)
+            y0, y1 = _edges(rows, r0, r1)
+            out.append((x0 / px_per_pt, y0 / px_per_pt, x1 / px_per_pt, y1 / px_per_pt))
+    return out
+
+
+def pick_gap(marks: list[tuple[float, float, float, float]], x0: float, cy: float, width: float,
+             pitch: float) -> tuple[float, float] | None:
+    """(dx, dy) from the predicted gap start `x0` and line middle `cy` (slide pt) to the mark as
+    wide as the hole that lies nearest; dy is whole line pitches (a line Slides wrapped
+    differently), 0 on the predicted line."""
+    fits = [m for m in marks if abs((m[2] - m[0]) - width) <= max(1.5, 0.12 * width)]
+    if not fits:
+        return None
+    m = min(fits, key=lambda m: abs(m[0] - x0) + abs((m[1] + m[3]) / 2 - cy))
+    lines = round(((m[1] + m[3]) / 2 - cy) / pitch)
+    return m[0] - x0, lines * pitch
+
+
+def ink_end(img: np.ndarray, px_per_pt: float, y0: float, y1: float, x0: float, x1: float) -> float | None:
+    """Right end (pt) of the dark text pixels between rows y0..y1 and columns x0..x1 (pt)."""
+    h, w = img.shape[:2]
+    a, b = max(0, int(x0 * px_per_pt)), min(w, int(math.ceil(x1 * px_per_pt)))
+    band = img[max(0, int(y0 * px_per_pt)):min(h, int(math.ceil(y1 * px_per_pt))), a:b]
+    cols = np.flatnonzero((band.max(axis=2) < 110).any(axis=0)) if band.size else []
+    return (a + cols[-1] + 1) / px_per_pt if len(cols) else None
+
+
+def title_bar_under(el: dict, slide: dict) -> list[float] | None:
+    """The PDF box of the block title bar a text element sits on, if any."""
+    cx, cy = (el["bbox"][0] + el["bbox"][2]) / 2, (el["bbox"][1] + el["bbox"][3]) / 2
+    return next((e["bbox"] for e in slide["elements"] if e["kind"] == "shape" and e.get("block") is not None
+                 and not e.get("title_bar") and e["bbox"][0] <= cx <= e["bbox"][2]
+                 and e["bbox"][1] <= cy <= e["bbox"][3]), None)
+
+
+def measure_holes(slides, pid: str, deck: dict, scale: float, fonts: FontMapper, placed, page_slide: dict,
+                  out: Path) -> tuple[dict[str, tuple[float, float]], list[str]]:
+    """Moves (dx, dy in slide pt) for hole pictures, measured on scratch slides (see above), and
+    the scratch slides to delete. Holes that can't be found keep their predicted place."""
+    from concurrent.futures import ThreadPoolExecutor
+    from PIL import Image
+    from .google_auth import credentials, slides_service
+    from .gslides import save_thumbnail
+
+    started = time.monotonic()
+    reqs, jobs = [], []  # jobs: (scratch slide id, page, [hole to find])
+    for slide in deck["slides"]:
+        holes = [h for h in slide_holes(slide) if h[3] is not None]
+        if not holes:
+            continue
+        n = slide["page"]
+        sid = f"b2s_m{n:03}"
+        reqs += [{"createSlide": {"objectId": sid, "slideLayoutReference": {"predefinedLayout": "BLANK"}}},
+                 {"updatePageProperties": {"objectId": sid, "fields": "pageBackgroundFill.solidFill.color",
+                                           "pageProperties": {"pageBackgroundFill": {"solidFill": {
+                                               "color": {"rgbColor": {"red": 1, "green": 1, "blue": 1}}}}}}}]
+        found = []
+        for i, el in enumerate(slide["elements"]):
+            mine = [h for h in holes if h[0] is el]
+            if not mine:
+                continue
+            colours = [HOLE_MARKS[(len(found) + k) % len(HOLE_MARKS)] for k in range(len(mine))]
+            oid = f"{sid}_t{i}"
+            reqs += text_box_requests(el, sid, oid, scale, fonts, None, page_slide, title_bar_under(el, slide),
+                                      text_right_limit(el, slide), colours)
+            reqs.append({"updateTextStyle": {"objectId": oid, "textRange": {"type": "ALL"}, "fields": "foregroundColor",
+                                             "style": {"foregroundColor": rgb("#000000")}}})
+            for (_, p, run, pic), colour in zip(mine, colours):
+                x0, y0, _, y1 = placed(pic, n)["bbox"]
+                z = fonts(run, scale)[1]
+                bl = [line["baseline"] for line in p["lines"]]
+                pitch = (bl[-1] - bl[0]) / (len(bl) - 1) * scale if len(bl) > 1 else LINE_EM * z
+                prev_end, next_x0 = hole_neighbours(p, run)
+                found.append({"pic": pic, "x0": x0 * scale - hole_offset(p, run, pic, scale, z),  # expected gap start
+                              "cy": (y0 + y1) / 2 * scale, "width": run["hole"] * scale, "pitch": pitch, "colour": colour,
+                              # last on its PDF line: a hole Slides lets hang past the box edge isn't drawn
+                              "hang": None if run.get("next_x0") is not None else
+                              (SYMBOL_ADVANCE_EM[" "] * z if prev_end is not None else 0.0,
+                               el["bbox"][0] * scale - PAD_X, el["bbox"][2] * scale + 2 * PAD_X)})
+        jobs.append((sid, n, found))
+    if not jobs:
+        return {}, []
+    try:
+        batch(slides, pid, reqs)
+    except HttpError as e:
+        print(f"warning: could not measure the formula gaps ({api_error(e)}); keeping the predicted places")
+        return {}, []  # (a refused batch created nothing)
+
+    creds = credentials()
+
+    def measure(job):
+        sid, n, found = job
+        path = out / "holes" / f"marks-{n + 1:03}.png"
+        try:
+            save_thumbnail(slides_service(creds), pid, sid, path)
+        except (HttpError, OSError) as e:
+            print(f"warning: slide {n + 1}: no thumbnail to measure the formula gaps ({e})")
+            return {}
+        img = np.asarray(Image.open(path).convert("RGB"))
+        px_per_pt = img.shape[1] / SLIDE_W
+        marks = {c: find_marks(mark_alpha(img, c), px_per_pt) for c in {f["colour"] for f in found}}
+        moves = {}
+        for f in found:
+            move = pick_gap(marks[f["colour"]], f["x0"], f["cy"], f["width"], f["pitch"])
+            if move is None and f["hang"]:
+                space, left, right = f["hang"]
+                end = ink_end(img, px_per_pt, f["cy"] - 0.2 * f["pitch"], f["cy"] + 0.2 * f["pitch"], left, right)
+                if end is not None and abs(end + space - f["x0"]) < 0.5 * f["width"] + 10:
+                    move = (end + space - f["x0"], 0.0)
+            if move is None:
+                print(f"warning: slide {n + 1}: gap of {f['pic']['id']} not found; keeping its predicted place")
+            elif abs(move[0]) >= 0.2 or move[1]:
+                moves[f["pic"]["id"]] = move
+        return moves
+
+    moves = {}
+    with ThreadPoolExecutor(max_workers=6) as pool:
+        for result in pool.map(measure, jobs):
+            moves.update(result)
+    (out / "holes" / "moves.json").write_text(json.dumps({k: [round(v, 2) for v in m] for k, m in moves.items()},
+                                                         indent=1), encoding="utf-8")
+    n_holes = sum(len(found) for _, _, found in jobs)
+    print(f"  formula gaps: {n_holes} measured on {len(jobs)} slides, {len(moves)} pictures moved "
+          f"({time.monotonic() - started:.1f} s)")
+    return moves, [sid for sid, _, _ in jobs]
 
 
 def subtitle_element(slide: dict, title_idx: int) -> int | None:
@@ -1487,31 +1752,34 @@ def fallback_pictures(deck: dict, refused: list[tuple[int, str]], out: Path) -> 
     return {**deck, "slides": new_slides}
 
 
-def emit(deck: dict, out: Path, title: str, new_deck: bool = False) -> dict:
+def emit(deck: dict, out: Path, title: str, new_deck: bool = False, measure: bool = True) -> dict:
     slides, drive = slides_service(), drive_service()
     deck = {**deck, "slides": [{**s, "elements": merge_blocks(s["elements"])} for s in deck["slides"]]}
     existing = None if new_deck else existing_presentation(drive, out)
     if existing:
         print(f"updating existing deck {existing}")
-    state, refused = build_deck(slides, drive, deck, out, title, existing)
+    state, refused = build_deck(slides, drive, deck, out, title, existing, measure)
     if refused:
         # A picture can only come with the imported .pptx (the API inserts images from public
         # URLs only), so the deck is built once more with the refused elements as pictures.
         print(f"rebuilding the deck with {len(refused)} refused element(s) as pictures")
         state, again = build_deck(slides, drive, fallback_pictures(deck, refused, out), out, title,
-                                  state["presentationId"])
+                                  state["presentationId"], measure)
         for page, eid in again:
             print(f"warning: slide {page + 1}: {eid} was refused again and is missing")
     (out / "emit.json").write_text(json.dumps(state, indent=1), encoding="utf-8")
     return state
 
 
-def build_deck(slides, drive, deck: dict, out: Path, title: str, existing: str | None) -> tuple[dict, list[tuple[int, str]]]:
+def build_deck(slides, drive, deck: dict, out: Path, title: str, existing: str | None,
+               measure: bool = True) -> tuple[dict, list[tuple[int, str]]]:
     """Import the .pptx and fill in the content. Returns the state for emit.json and the
-    elements the API refused ((PDF page, element id))."""
+    elements the API refused ((PDF page, element id)). `measure`: hole pictures go where a
+    thumbnail shows their gaps (measure_holes), not only where formula_shifts predicts them."""
     page_w, page_h = deck["slides"][0]["size"]
     scale = SLIDE_W / page_w
     fonts = FontMapper()
+    deck = {**deck, "slides": [fit_holes(s, scale, fonts) for s in deck["slides"]]}
 
     def slide_layout(slide: dict) -> tuple[str, str | None]:
         """The title page uses the TITLE layout (centered title), frames with a title TITLE_ONLY."""
@@ -1604,6 +1872,7 @@ def build_deck(slides, drive, deck: dict, out: Path, title: str, existing: str |
     for page in range(kept[-1] + 1):
         target = next(k for k in kept if k >= page)
         page_slide[page] = f"b2s_s{target:03}"
+    moves, scratch = measure_holes(slides, pid, deck, scale, fonts, placed, page_slide, out) if measure else ({}, [])
 
     # Phase 2: content, batched over slides. Each slide's requests come in parts (one per
     # element) so that a rejected batch can be narrowed down to the element at fault.
@@ -1654,8 +1923,6 @@ def build_deck(slides, drive, deck: dict, out: Path, title: str, existing: str |
             for e in page_elements.get(slide_id, [])
             if e["objectId"] not in (title_oid, subtitle_oid) and not e["objectId"].startswith(ours)])]
         element_ids = []
-        title_bars = [e for e in slide["elements"] if e["kind"] == "shape" and e.get("block") is not None
-                      and not e.get("title_bar")]
         for i, el in enumerate(slide["elements"]):  # shapes, then pictures, then text on top
             el = placed(el, n)
             if el["kind"] == "shape":
@@ -1673,6 +1940,11 @@ def build_deck(slides, drive, deck: dict, out: Path, title: str, existing: str |
                 # The picture came with the slide: move it to its place in the z-order.
                 oid = f"{slide_id}_f{i}"
                 reqs = [{"updatePageElementsZOrder": {"pageElementObjectIds": [oid], "operation": "BRING_TO_FRONT"}}]
+                if el["id"] in moves:  # to the gap measured for it (measure_holes)
+                    dx, dy = moves[el["id"]]
+                    reqs.insert(0, {"updatePageElementTransform": {"objectId": oid, "applyMode": "RELATIVE", "transform": {
+                        "scaleX": 1, "scaleY": 1, "unit": "EMU",
+                        "translateX": round(dx * EMU_PER_PT), "translateY": round(dy * EMU_PER_PT)}}})
                 if el.get("number"):
                     reqs += number_box_requests(el["number"], slide_id, f"{oid}n", scale, fonts)
             else:
@@ -1682,11 +1954,8 @@ def build_deck(slides, drive, deck: dict, out: Path, title: str, existing: str |
                     size = next(e["size"] for e in page_elements[slide_id] if e["objectId"] == oid)
                     placeholder = {"base_w": size["width"]["magnitude"] / EMU_PER_PT,
                                    "base_h": size["height"]["magnitude"] / EMU_PER_PT, "dy": placeholder_dy}
-                cx, cy = (el["bbox"][0] + el["bbox"][2]) / 2, (el["bbox"][1] + el["bbox"][3]) / 2
-                bar = next((b["bbox"] for b in title_bars if b["bbox"][0] <= cx <= b["bbox"][2]
-                            and b["bbox"][1] <= cy <= b["bbox"][3]), None)
-                reqs = text_box_requests(el, slide_id, oid, scale, fonts, placeholder, page_slide, bar,
-                                         text_right_limit(el, slide))
+                reqs = text_box_requests(el, slide_id, oid, scale, fonts, placeholder, page_slide,
+                                         title_bar_under(el, slide), text_right_limit(el, slide))
             parts.append((el, reqs))
             element_ids.append(oid)
         # The slide's copies of the template shapes have been duplicated from: remove them.
@@ -1732,5 +2001,5 @@ def build_deck(slides, drive, deck: dict, out: Path, title: str, existing: str |
               f"{kinds.count('shape')} shapes, {kinds.count('table')} tables")
     if pending:
         send(pending)
-    batch(slides, pid, [{"deleteObject": {"objectId": s["objectId"]}} for s in sources])
+    batch(slides, pid, [{"deleteObject": {"objectId": oid}} for oid in [s["objectId"] for s in sources] + scratch])
     return state, refused

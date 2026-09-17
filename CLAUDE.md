@@ -89,9 +89,20 @@ a per-slide background picture.
   points (`pdf._curve_extremes`). Test deck: `22_overlays_on_text`.
 - Accents PDFium reports as separate chars (`ACCENTS`: ¯ ˆ ˜ …) become combining marks on
   their letter (X̄), also when the accent landed in the previous span.
-- `formula_shifts` predicts the picture offset from Slides' symbol advances
+- Hole pictures are placed by measurement (`emit.measure_holes`, ~2 s per deck): scratch slides
+  get copies of the text boxes with holes, every hole run highlighted in a mark colour and all
+  text black; one thumbnail each (in parallel) shows the real gaps (`find_marks`, sub-pixel;
+  `pick_gap` also follows a hole Slides wrapped onto another line), a hole hanging past the box
+  edge at a line end is found from the ink before it (`ink_end`), and pictures get a RELATIVE
+  transform before grouping; scratch slides are deleted with the sources. Debug output:
+  `out/.../holes/marks-NNN.png`, `moves.json`. `--predict-holes` skips it. `fit_holes` sizes a
+  hole to the PDF room up to the next word (`next_x0`) less a Slides space, and `hole_offset`
+  shares the spaces left and right of the picture in the PDF's proportion.
+- `formula_shifts` (the fallback prediction) uses Slides' symbol advances
   (`emit.SYMBOL_ADVANCE_EM`, measured by `tools/probe_symbols.py`) and TeX's stretched spaces
-  (`space_shift`); holes get `HOLE_PAD` (1 pt) each side so the picture never touches a word.
+  (`space_shift`; a gap holding an earlier hole counts as a space plus that hole); holes get
+  `HOLE_PAD` (1 pt) each side so the picture never touches a word. The `text_overlap` score
+  can drop slightly when pictures follow Slides' words rather than the PDF positions.
 - Inline formula holes (`formula_holes`, `Line.holes`): in a line of prose, complex math
   segments (bars, CMEX, stacked or second-level scripts) become image elements (role `math`,
   `anchor` = text element id, grouped with it). The text keeps a run with `hole` = width.
