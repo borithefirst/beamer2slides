@@ -1,4 +1,4 @@
-.venv/
+﻿.venv/
 __pycache__/
 *.egg-info/
 tests/decks/out/
@@ -9,3 +9,5 @@ credentials*.json
 client_secret*.json
 token*.json
 themes/google/fonts/src/
+examples/*/*
+!examples/*/*.tex

@@ -42,7 +42,9 @@ def _note_header(page: Page, spans: list[dict], area: Box) -> float | None:
             continue
         header = (x0 + 0.6 * width, y0, x1, r[3])
         inside = _spans_in(spans, area)
-        sizes = sorted(s["size"] for s in inside)
+        # Text size of the note itself: the frame thumbnail can hold more words than a short note.
+        body = [s for s in inside if not _contains(header, s["bbox"])] or inside
+        sizes = sorted(s["size"] for s in body)
         if not sizes:
             return None
         tiny = [s for s in inside if s["size"] < 0.45 * sizes[len(sizes) // 2] and _contains(header, s["bbox"])]
