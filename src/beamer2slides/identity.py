@@ -96,12 +96,21 @@ def slide_similarity(a: dict, b: dict) -> float:
 
 def align_slides(base: list[dict], ours: list[dict]) -> dict[int, int]:
     """ours index -> base index. Labelled frames pair by label wherever they moved; the others by
-    an order-keeping alignment on (title, text) similarity, so an inserted frame shifts nothing."""
+    an order-keeping alignment on (title, text) similarity, so an inserted frame shifts nothing.
+
+    A label can name several slides - every overlay step of a frame carries the frame's label, so
+    `--overlays all` gives one per step - and then the n-th slide of that label pairs with the
+    n-th in the base. Pairing them all with one base slide would leave its siblings unpaired, and
+    an unpaired base slide is one the source dropped: the deck would lose a step per sync."""
     pairs: dict[int, int] = {}
-    base_labels = {b["label"]: i for i, b in enumerate(base) if b.get("label")}
+    base_labels: dict[str, list[int]] = {}
+    for i, b in enumerate(base):
+        if b.get("label"):
+            base_labels.setdefault(b["label"], []).append(i)
     for j, o in enumerate(ours):
-        if o.get("label") and o["label"] in base_labels:
-            pairs[j] = base_labels[o["label"]]
+        free = base_labels.get(o.get("label") or "")
+        if free:
+            pairs[j] = free.pop(0)
     # Unpaired slides: a labelled one can still match an unlabelled one (a label added or removed).
     bs = [i for i in range(len(base)) if i not in pairs.values()]
     os_ = [j for j in range(len(ours)) if j not in pairs]

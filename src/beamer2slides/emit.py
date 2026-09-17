@@ -2036,15 +2036,9 @@ def batch(slides, pid: str, reqs: list[dict]) -> None:
 
 def existing_presentation(drive, out: Path) -> str | None:
     """The deck from a previous run of this output folder, if it still exists (not trashed)."""
-    state_file = out / "emit.json"
-    if not state_file.exists():
-        return None
-    pid = json.loads(state_file.read_text(encoding="utf-8"))["presentationId"]
-    try:
-        f = execute(drive.files().get(fileId=pid, fields="id,trashed,mimeType"))
-    except HttpError:
-        return None
-    return pid if not f.get("trashed") and f.get("mimeType") == "application/vnd.google-apps.presentation" else None
+    from .guard import previous_deck
+    previous = previous_deck(drive, out)
+    return previous["presentationId"] if previous and previous["state"] == "live" else None
 
 
 def size_pt(element: dict) -> tuple[float, float]:
@@ -2076,12 +2070,72 @@ def fallback_pictures(deck: dict, refused: list[tuple[int, str]], out: Path) -> 
     return {**deck, "slides": new_slides}
 
 
-def emit(deck: dict, out: Path, title: str, new_deck: bool = False, measure: bool = True) -> dict:
+def preflight_rebuild(out: Path, source_pdf: Path | None, new_deck: bool = False, force_rebuild: bool = False) -> None:
+    """The guard's question (guard.check_rebuild) before the conversion work starts, so a refusal
+    comes in a second instead of after extract, classify and render. `emit` asks again - and backs
+    the deck up - immediately before the write, in case the deck is edited in between."""
+    from . import guard
+    from .google_auth import drive_service, slides_service
+
+    if new_deck or force_rebuild or not (out / "emit.json").exists():
+        return
+    drive = drive_service()
+    previous = guard.previous_deck(drive, out)
+    if previous and previous["state"] == "live":
+        guard.check_rebuild(slides_service(), drive, previous["presentationId"], out, source_pdf, False)
+
+
+def plan_rebuild(slides, drive, out: Path, new_deck: bool, force_rebuild: bool, backup: str,
+                 source_pdf: Path | None) -> tuple[str | None, dict | None]:
+    """Decide what happens to the deck this output folder already has: rebuild it in place (the id
+    is returned), or leave it alone and make a new one. Nothing destructive happens before this:
+    `guard.check_rebuild` raises `guard.RebuildRefused` when the deck was edited in Slides, and a
+    forced rebuild keeps a backup and records the deck's revision first
+    (`<out>/backups/backups.json`, printed too). The second value goes into emit.json as
+    "previous"."""
+    from . import guard
+
+    previous = guard.previous_deck(drive, out)
+    if previous is None:
+        return None, None
+    pid, url = previous["presentationId"], guard.deck_url(previous["presentationId"])
+    if previous["state"] != "live":
+        where = {"trashed": "is in the Drive trash", "gone": "is gone (deleted, or not this app's file any more)",
+                 "other": "is not a presentation any more"}[previous["state"]]
+        print(f"the deck of the previous run ({pid}) {where}: making a new one, that deck is left as it is")
+        return None, {"presentationId": pid, "state": previous["state"], "action": "new deck", "url": url}
+    if new_deck:
+        print(f"--new-deck: the previous deck is left as it is at {url}\n"
+              f"  (this folder tracks the new deck from now on; the old one is only reachable by that link)")
+        return None, {"presentationId": pid, "state": "kept", "action": "new deck", "url": url}
+    found = guard.check_rebuild(slides, drive, pid, out, source_pdf, force_rebuild)
+    mode = backup if backup != "auto" else ("file" if found["reason"] else "none")
+    entry = {"presentationId": pid, "url": url, "action": "rebuilt in place", "revisionId": found.get("revisionId"),
+             "modifiedTime": previous.get("modifiedTime"), "out": str(out),  # Drive's clock, and where to restore from
+             "checked": found.get("checked"), "reason": found.get("reason") or "no deck edits",
+             "summary": guard.summary_line(found) if found.get("edited") else "no deck edits",
+             "examples": found.get("examples", []), "base_from": found.get("base_from")}
+    if found["reason"]:
+        print(f"WARNING: rebuilding a deck that {'was edited in Slides' if found['reason'] == 'edited' else found['reason']} "
+              f"(--force-rebuild): {entry['summary']}")
+    entry["backup"] = guard.backup_deck(drive, pid, out, mode, entry["reason"])
+    guard.record(out, entry)
+    print(f"updating existing deck {pid} (revision {found.get('revisionId')})")
+    for line in guard.restore_hint(entry) if found["reason"] else []:
+        print(line)
+    return pid, entry
+
+
+def emit(deck: dict, out: Path, title: str, new_deck: bool = False, measure: bool = True,
+         force_rebuild: bool = False, backup: str = "auto", source_pdf: Path | None = None) -> dict:
+    """Build the deck. An output folder that already has a deck is rebuilt in place unless
+    `new_deck`; that replaces the deck's whole content, so `guard.check_rebuild` refuses when
+    the deck was edited in Slides (`force_rebuild` goes ahead, after a backup)."""
+    from . import guard
+
     slides, drive = slides_service(), drive_service()
     deck = {**deck, "slides": [{**s, "elements": merge_blocks(s["elements"])} for s in deck["slides"]]}
-    existing = None if new_deck else existing_presentation(drive, out)
-    if existing:
-        print(f"updating existing deck {existing}")
+    existing, previous_entry = plan_rebuild(slides, drive, out, new_deck, force_rebuild, backup, source_pdf)
     state, refused = build_deck(slides, drive, deck, out, title, existing, measure)
     if refused:
         # A picture can only come with the imported .pptx (the API inserts images from public
@@ -2091,6 +2145,8 @@ def emit(deck: dict, out: Path, title: str, new_deck: bool = False, measure: boo
                                   state["presentationId"], measure)
         for page, eid in again:
             print(f"warning: slide {page + 1}: {eid} was refused again and is missing")
+    if previous_entry:
+        state["previous"] = previous_entry  # what this run replaced, and how to get it back
     (out / "emit.json").write_text(json.dumps({k: v for k, v in state.items() if k != "deck"}, indent=1), encoding="utf-8")
     return state
 
