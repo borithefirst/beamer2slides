@@ -452,6 +452,7 @@ def batches(reqs: list[dict], size: int = CHUNK) -> list[list[dict]]:
     """The requests split into batches of at most `size`, cut only where `main_requests` allows it
     (between slides), so a sync that dies between two batches leaves whole slides behind. One slide
     with more than `size` requests is the only thing that is ever split."""
+    size = faults.batch_size(size)
     blocks: list[list[dict]] = []
     current: list[dict] = []
     for r in reqs:

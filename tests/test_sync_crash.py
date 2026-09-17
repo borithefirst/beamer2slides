@@ -22,10 +22,12 @@ SYNC_DECKS = Path(__file__).resolve().parent / "decks" / "sync" / "out"
 
 @pytest.fixture(autouse=True)
 def _clean_hook():
-    os.environ.pop(faults.ENV, None)
+    for var in (faults.ENV, faults.SIZE):
+        os.environ.pop(var, None)
     faults.reset()
     yield
-    os.environ.pop(faults.ENV, None)
+    for var in (faults.ENV, faults.SIZE):
+        os.environ.pop(var, None)
     faults.reset()
 
 
@@ -57,6 +59,17 @@ def test_the_fault_hook_counts_occurrences():
     with pytest.raises(faults.InjectedFailure):
         faults.fail_at("content")
     faults.fail_at("content")  # (only that one occurrence)
+
+
+def test_the_batch_size_is_the_library_s_unless_the_variable_says_otherwise():
+    assert faults.SIZE not in os.environ
+    assert faults.batch_size(400) == 400
+    os.environ[faults.SIZE] = "40"
+    assert faults.batch_size(400) == 40
+    assert len(sync.batches([{"a": 1}] * 90)) == 3
+    os.environ[faults.SIZE] = "not a number"
+    assert faults.batch_size(400) == 400
+    del os.environ[faults.SIZE]
 
 
 def test_the_fault_hook_takes_several_points_and_keeps_colons_in_names():
@@ -661,7 +674,9 @@ def run_case(point: str, live, control) -> list[str]:
         exps = run.edit(crash_edits(live))
         before = run.revision()
         pdf = live.build("mixed")
-        died = run.sync(pdf, env={"B2S_FAIL_AT": f"!{point}"}, check=False)
+        # A small batch size makes every phase take several batches, so a kill in one of them
+        # really lands between two writes of that phase.
+        died = run.sync(pdf, env={"B2S_FAIL_AT": f"!{point}", "B2S_BATCH_SIZE": "40"}, check=False)
         if died.returncode == 0:
             if point in MUST_DIE:
                 return [f"the sync never reached {point}: nothing was killed"]

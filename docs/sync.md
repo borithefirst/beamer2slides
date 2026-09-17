@@ -181,6 +181,11 @@ uninterrupted one would have. What makes that true:
 - **Batches are cut at slide boundaries** (`sync.batches`, `BREAK` marks): a death between two
   batches leaves whole slides, never half an element. Only a single slide larger than 400 requests
   is split.
+- **Pictures don't depend on the staging deck once they are in.** `createImage` copies the file into
+  the live deck, so a picture keeps working when the staging deck is deleted after the content
+  batch; a run that dies before that leaves only that Drive file (its id is in the pending marker,
+  and the next sync deletes it), and an attempt that has to re-plan stages afresh, because the
+  contentUrls die with the file.
 - **A pending marker is stored before the first write** (`Sync.mark_pending`): the base keeps its
   generation (it still describes the deck) and gains `pending` = this run's generation and id token,
   the revision it planned against, the source's sha1, the object ids it is about to create, the
@@ -229,7 +234,8 @@ duplicate and written again from the old base, and the deck ends up where it wou
 Fault injection for the tests (`faults.py`): `B2S_FAIL_AT=<point>[:<n>]`, comma-separated, `!point`
 to leave the process at once with `os._exit` (no `finally`, no cleanup). Points: `plan`, `journal`,
 `measure`, `content`, `order`, `overrides`, `base:save`, `base:drive`, `cleanup`, and `pull:apply`.
-Unset, `fail_at` is one `os.environ.get` and a return. `tests/test_sync_crash.py` has the offline
+Unset, `fail_at` is one `os.environ.get` and a return; `B2S_BATCH_SIZE` (same rule) lowers the write
+batch size so a phase really takes several batches. `tests/test_sync_crash.py` has the offline
 tests (write order, base validation, recovery, pull's atomic apply) and, under the `sync` marker,
 one case per point that really kills a sync of a real deck and checks with `tools/sync_check.py`
 that the deck edits are all still there and the deck converges.

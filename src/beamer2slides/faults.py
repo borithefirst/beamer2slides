@@ -23,12 +23,16 @@ Points, in the order a sync reaches them:
     base:drive  the new base is stored locally, not yet in Drive
     cleanup     after each batch of the final phase (the old objects' deletion)
 `pull --apply` has `pull:apply` (raised before each file is replaced).
+
+`B2S_BATCH_SIZE` (also only read when set) lowers the write batch size, so a phase takes several
+batches and a kill in it lands between two writes.
 """
 
 import os
 import threading
 
 ENV = "B2S_FAIL_AT"
+SIZE = "B2S_BATCH_SIZE"  # the write batch size, so a test can force several batches per phase
 
 _counts: dict[str, int] = {}
 _lock = threading.Lock()
@@ -71,6 +75,15 @@ def fail_at(point: str) -> None:
         print(message, flush=True)
         os._exit(70)
     raise InjectedFailure(message)
+
+
+def batch_size(default: int) -> int:
+    """`default`, unless B2S_BATCH_SIZE says otherwise: the crash tests make the write phases take
+    several batches, so a kill can land between two of them."""
+    try:
+        return max(1, int(os.environ.get(SIZE) or default))
+    except ValueError:
+        return default
 
 
 def reset() -> None:
