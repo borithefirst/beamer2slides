@@ -778,7 +778,7 @@ class Sync:
             mappings.append({"layoutPlaceholder": {"type": ph["type"], "index": ph.get("index", 0)}, "objectId": oid})
         reqs = [{"createSlide": {"objectId": sid, "slideLayoutReference": {"layoutId": layout["objectId"]},
                                  "placeholderIdMappings": mappings}}]
-        reqs += self.background_requests(sid, o["background"], slide, pres)
+        reqs += self.background_requests(sid, o["background"], slide, pres, created=True)
         templates = {}
         if self.plan.uses_templates[slide["page"]]:
             for j, key in enumerate(self.plan.keys):
@@ -951,9 +951,11 @@ class Sync:
         w["tops"] = tops
         return reqs
 
-    def background_requests(self, sid: str, key: str, slide: dict, pres: dict) -> list[dict]:
+    def background_requests(self, sid: str, key: str, slide: dict, pres: dict, created: bool = False) -> list[dict]:
         master = self.base.get("master_background")
         if key == master:
+            if created:
+                return []  # emit leaves these slides inheriting the master, and a new slide already does
             fill = pres["masters"][0].get("pageProperties", {}).get("pageBackgroundFill", {})
             if "stretchedPictureFill" in fill:
                 return [{"updatePageProperties": {"objectId": sid, "fields": "pageBackgroundFill.stretchedPictureFill.contentUrl",

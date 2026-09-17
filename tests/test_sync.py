@@ -1072,6 +1072,29 @@ def test_the_adopter_matches_by_bytes_and_by_look(tmp_path, monkeypatch):
     assert s.picture_adopter(pres)("intro", [el], read, "OTHER") is None
 
 
+def test_a_new_slide_inherits_the_master_background(tmp_path):
+    """emit leaves the slides with the shared background inheriting the master (now often a plain
+    ground colour, with the theme decoration on the layouts), so a slide sync creates must inherit
+    it too: an explicit fill of its own differs from a fresh conversion and stops following the
+    deck's theme."""
+    from beamer2slides.sync import Sync
+    s = Sync.__new__(Sync)
+    s.base = {"master_background": "color:#ffffff"}
+    s.ours = {"out": tmp_path}
+    s.urls = {str(tmp_path / "backgrounds" / "bg-3.png"): "https://content/3"}
+    pres = {"masters": [{"pageProperties": {"pageBackgroundFill": {
+        "solidFill": {"color": {"rgbColor": {"red": 1, "green": 1, "blue": 1}}}}}}]}
+    assert s.background_requests("S", "color:#ffffff", {}, pres, created=True) == []
+    kept = s.background_requests("S", "color:#ffffff", {}, pres)  # an edited slide goes back to it
+    assert kept[0]["updatePageProperties"]["fields"] == "pageBackgroundFill.solidFill.color"
+    own = s.background_requests("S", "color:#102030", {}, pres, created=True)
+    assert own[0]["updatePageProperties"]["pageProperties"]["pageBackgroundFill"]["solidFill"]["color"] == \
+        {"rgbColor": {"red": 16 / 255, "green": 32 / 255, "blue": 48 / 255}}
+    picture = s.background_requests("S", "png:abc", {"background": "backgrounds/bg-3.png"}, pres, created=True)
+    assert picture[0]["updatePageProperties"]["pageProperties"]["pageBackgroundFill"] == \
+        {"stretchedPictureFill": {"contentUrl": "https://content/3"}}
+
+
 def test_a_new_slide_lands_on_the_layout_of_its_background(tmp_path):
     """The theme decoration now sits on the layouts, and backgrounds that don't show it got a copy
     of their layout without it. A new slide with a background picture of its own therefore goes on
