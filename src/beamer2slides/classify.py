@@ -1540,15 +1540,16 @@ class PageClassifier:
 
         n = self.page["index"]
         elements = [self.text_element(box, f"p{n}t{bi}") for bi, box in enumerate(boxes)]
-        holes = [h for box in boxes for p in box for l in p.lines for h in l.holes]
+        holes = [(f"p{n}t{bi}", h) for bi, box in enumerate(boxes) for p in box for l in p.lines for h in l.holes]
         hole_pictures = []
-        for h in holes:
+        for anchor, h in holes:
             rect = union_all(s.rect for s in h)
             # Radical signs and big-operator parts sit off the baseline, in lines of their own.
             h = h + [s for l in lines if l.reason == "math" for s in l.spans if s.rect.intersects(rect.expand(1))]
             rect = union_all([rect] + [s.rect for s in h] + [b for b in self.bars if b.expand(1).intersects(rect)])
             hole_pictures.append({"id": f"p{n}h{len(hole_pictures)}", "kind": "image", "role": "math",
-                                  "bbox": rect.expand(1.0).as_list(), "spans": [s.id for s in h], "hole": True})
+                                  "bbox": rect.expand(1.0).as_list(), "spans": [s.id for s in h],
+                                  "anchor": anchor})  # grouped with this text element
 
         text_spans = {sid for e in elements for sid in e["spans"]}
         elements = self.figures(lines, elements) + self.icons(elements) + hole_pictures + elements  # pictures below text

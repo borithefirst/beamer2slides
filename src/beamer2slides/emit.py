@@ -963,6 +963,14 @@ def emit(deck: dict, out: Path, title: str, new_deck: bool = False) -> dict:
                                        "base_h": size["height"]["magnitude"] / EMU_PER_PT, "dy": placeholder_dy}
                     reqs += text_box_requests(el, slide_id, oid, scale, fonts, placeholder, page_slide)
                 element_ids.append(oid)
+            # Inline formula pictures move with their text: group them (placeholders can't be grouped).
+            by_id = {el["id"]: oid for el, oid in zip(slide["elements"], element_ids)}
+            anchored: dict[str, list[str]] = {}
+            for el, oid in zip(slide["elements"], element_ids):
+                if el.get("anchor") in by_id and by_id[el["anchor"]] != title_oid:
+                    anchored.setdefault(by_id[el["anchor"]], []).append(oid)
+            for text_oid, pictures in anchored.items():
+                reqs.append({"groupObjects": {"groupObjectId": f"{text_oid}_g", "childrenObjectIds": [text_oid] + pictures}})
             if slide.get("notes") and speaker_notes.get(slide_id):
                 reqs.append({"insertText": {"objectId": speaker_notes[slide_id], "text": slide["notes"]}})
             if title_oid and len(slide["elements"]) > 1:
