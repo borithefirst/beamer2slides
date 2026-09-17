@@ -315,6 +315,32 @@ def test_catches_a_picture_the_person_chose_being_overwritten():
     assert loss_oracle.picture_findings(base, before, after, said) == []
 
 
+def test_catches_an_element_put_back_at_the_converters_box():
+    """The person moved the element, the source moved it too, and the sync left it at the box the
+    base recorded. `deck_placement` says where the rewritten element belongs - the conversion's new
+    box with the person's step on it - so the box it *would* have had is no excuse for any other."""
+    base = {"slides": [{"key": "f1", "objectId": "s1", "elements": [
+        {"key": "text/body/0", "main": "o", "objects": ["o"], "fingerprint": {"bbox": [10, 10, 60, 30]},
+         "readback": {"o": {"box": [20, 20, 120, 60], "transform": [2, 0, 0, 2, 20, 20]}}},
+        {"key": "text/title/0", "main": "t", "objects": ["t"], "fingerprint": {"bbox": [10, 5, 110, 15]},
+         "readback": {"t": {"box": [20, 10, 220, 30], "transform": [2, 0, 0, 2, 20, 10]}}},
+        {"key": "image/figure/0", "main": "f", "objects": ["f"], "fingerprint": {"bbox": [70, 40, 120, 90]},
+         "readback": {"f": {"box": [140, 80, 240, 180], "transform": [2, 0, 0, 2, 140, 80]}}}]}]}
+    moved = {"box": [30, 0, 130, 40], "transform": [2, 0, 0, 2, 30, 0]}   # the person moved it (+10, -20)
+    before = {"slides": [{"objectId": "s1", "objects": {"o": moved}}]}
+    after = {"slides": [{"objectId": "s1", "objects": {"o": dict(base["slides"][0]["elements"][0]["readback"]["o"])}}]}
+    empty = loss_oracle.normalise_report({})
+    assert loss_oracle.deck_placement(base) == (2.0, 0.0, 0.0)
+    # The source left the element where it was: the base's box is the converter's, plainly a revert.
+    still = {"slides": [{"key": "f1", "elements": [{"key": "text/body/0", "fingerprint": {"bbox": [10, 10, 60, 30]}}]}]}
+    assert [f["kind"] for f in loss_oracle.geometry_findings(base, before, after, empty, still)] == ["geometry_reverted"]
+    # The source moved it to where the person's step lands it on the old box: nothing was reverted.
+    there = {"slides": [{"key": "f1", "elements": [{"key": "text/body/0", "fingerprint": {"bbox": [5, 20, 55, 40]}}]}]}
+    assert loss_oracle.geometry_findings(base, before, after, empty, there) == []
+    # ... but the person's step still has to be on top of it.
+    assert [f["kind"] for f in loss_oracle.geometry_findings(base, before, after, empty, None)] == ["geometry_reverted"]
+
+
 def test_catches_styling_put_back_the_way_the_converter_had_it():
     base = {"slides": [{"key": "f1", "objectId": "s1", "elements": [
         {"key": "text/body/0", "main": "o", "objects": ["o"], "readback": {"o": {"text_style_hash": "converter"}}}]}]}

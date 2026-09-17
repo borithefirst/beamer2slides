@@ -13,7 +13,9 @@ Two modes, the same oracle:
 
 Both modes chain (`--chain N`: edits -> sync -> edits -> sync ...). Offline, each sync starts from
 the base the previous one wrote (`fuzz_world.rebase`), so a sync undoing what the last one merged,
-or a base that forgot the person's version, shows up as a finding in the next step.
+or a base that forgot the person's version, shows up as a finding in the next step. Every offline
+round also checks that the sync *settles*: with that base, syncing the same source again must write
+nothing (`_settled`), or the next sync would rewrite units nobody asked it to touch.
 
 A failing round writes everything needed to reproduce it into its folder (seed, the edits, the
 variant, the deck url, both read-backs, the base, the report) and is then *shrunk*: the same round
@@ -460,11 +462,15 @@ DECK_OPS = {f.__name__[5:]: f for f in (deck_reword, deck_append, deck_delete_pa
 # ---------------------------------------------------------------- offline rounds
 
 def _sync_step(seed: int, step: int, doc: dict, base: dict, live: dict, tmp: Path,
-               deck_ops: list[str], source_ops: list[str], rebase: bool) -> dict:
+               deck_ops: list[str], source_ops: list[str], rebase: bool, reordered: bool = False) -> dict:
     """One edit + sync: the person edits the deck, the author changes the source, merge plans, the
-    reference applier writes the plan and the oracle judges what the person is left with."""
+    reference applier writes the plan and the oracle judges what the person is left with.
+    `reordered`: an earlier step of the chain moved a frame in the source (see `_settled`)."""
     applied_deck = []
     for k, name in enumerate(deck_ops):
+        if not live["slides"]:
+            applied_deck.append(f"{name}: (no slides left)")  # a chain that deleted the whole deck
+            continue
         done = DECK_OPS[name](random.Random(seed * 1009 + 101 * step + k), base, live)
         applied_deck.append(f"{name}: {done}" if done else f"{name}: (not applicable)")
     for s in live["slides"]:
@@ -483,7 +489,7 @@ def _sync_step(seed: int, step: int, doc: dict, base: dict, live: dict, tmp: Pat
     report = mplan["report"]
     findings = loss_oracle.check(base, live, after, report, ours)
     next_base = W.rebase(base, ours, after, mplan, tok) if rebase else None
-    findings += _settled(doc2, next_base, after, tmp, "move_slide" in source_ops)
+    findings += _settled(doc2, next_base, after, tmp, reordered or "move_slide" in source_ops)
     return {"seed": seed, "step": step, "source_ops": list(source_ops), "deck_ops": list(deck_ops),
             "source": applied_src, "deck": applied_deck, "findings": findings,
             "failures": loss_oracle.failures(findings), "doc": doc2,
@@ -536,12 +542,15 @@ def offline_chain(seed: int, chain: int = 1, ops=None, work: Path | None = None)
         base = W.build_base(doc, tmp)
         live = W.live_of(base)
         steps = []
+        reordered = False  # a frame moved in the source, in this step or an earlier one
         for step in range(chain):
             want = (ops[step] if ops and step < len(ops) else None) or {}
             deck_ops, source_ops = _draw(rng, want.get("deck"), want.get("source"))
             # Every step rebases: the next step needs that base, and the last step's base is what
             # the "a second sync writes nothing" check judges.
-            record = _sync_step(seed, step, doc, base, live, tmp, deck_ops, source_ops, rebase=True)
+            record = _sync_step(seed, step, doc, base, live, tmp, deck_ops, source_ops, rebase=True,
+                                reordered=reordered)
+            reordered = reordered or "move_slide" in source_ops
             steps.append(record)
             doc, live = record.pop("doc"), record["state"]["after"]
             base = record["state"]["next_base"] or base
@@ -759,6 +768,23 @@ def random_spec(model, rng, donor=None):
     return {"edit": "set_background", "args": {"slide": sel, "color": rng.choice(["#fff2cc", "#eaf1dd"])}}
 
 
+# Failures whose cause is already known and pinned by a test, so a live round that hits one says
+# what it is instead of leaving a reviewer with a stack trace.
+KNOWN_CAUSES = (
+    ("updatePageElementAltText: The operation is not allowed on group",
+     "known: sync.tag_requests alt-texts a diagram's main object, which is the group "
+     "emit.diagram_requests creates (tests/test_sync.py::test_sync_does_not_alt_text_a_diagram_group)"),
+)
+
+
+def known_cause(log: Path) -> str | None:
+    try:
+        text = log.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    return next((why for sign, why in KNOWN_CAUSES if sign in text), None)
+
+
 class LiveRound:
     def __init__(self, seed: int, out: Path, chain: int, keep_decks: bool):
         self.seed, self.out, self.chain, self.keep = seed, out, chain, keep_decks
@@ -905,7 +931,9 @@ def live_round(seed: int, out_root: Path, chain: int, keep_decks: bool, specs=No
             r.record["deck"] = "(deleted: the round passed)"
         return r.record
     except Exception as e:  # noqa: BLE001
-        r.record["problems"] = [f"{type(e).__name__}: {e}"]
+        r.log.flush()
+        why = known_cause(r.out / "fuzz.log")
+        r.record["problems"] = [f"{type(e).__name__}: {e}" + (f" [{why}]" if why else "")]
         (r.out / "round.json").write_text(json.dumps(r.record, indent=1, ensure_ascii=False, default=str), encoding="utf-8")
         return r.record
     finally:

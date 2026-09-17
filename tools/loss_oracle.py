@@ -47,7 +47,9 @@ merge policy of docs/sync.md says it is not the person's work. Concretely:
   that element unless the source says it again (`deletion_undone`).
 * **A converter element the person moved or resized** must not be back at the base's box: a sync
   that rewrites the unit re-applies the deck's transform, so afterwards it stands where the person
-  put it, or - when the source moved it too - where that leaves it.
+  put it, or - when the source moved it too - at the conversion's new box with the person's move on
+  top of it (`deck_placement` works that box out from `ours`; the old box can fall on it by
+  coincidence, and then nothing was reverted).
 * **A picture the person put into a converter element** (the read-back's picture differing from the
   base's, compared by `snapshot.signature`, never by URL) must still be on one of that element's
   objects afterwards.
@@ -380,12 +382,54 @@ def word_findings(skey, el, was, now, before_words, after_words, after_el_words,
     return out
 
 
-def geometry_findings(base: dict, before: dict, after: dict, rep: dict) -> list[dict]:
+def deck_placement(base: dict) -> tuple[float, float, float] | None:
+    """How a conversion's coordinates (`fingerprint.bbox`) land in the deck: `x_deck = s*x + tx`.
+    Read off the base itself - every element the converter wrote stands at its own bbox - as the
+    median over all of them, so the few boxes a person has since moved don't move the estimate.
+    (1, 0, 0 in a real deck; the fuzz world uses a different scale on purpose, so that a confusion
+    between the two coordinate systems cannot pass unnoticed.)"""
+    scales, xs, ys = [], [], []
+    for s in base["slides"]:
+        for el in s.get("elements", []):
+            bb = (el.get("fingerprint") or {}).get("bbox")
+            box = ((el.get("readback") or {}).get(el.get("main")) or {}).get("box")
+            if not bb or not box or bb[2] - bb[0] < 1 or bb[3] - bb[1] < 1:
+                continue
+            scales.append(((box[2] - box[0]) / (bb[2] - bb[0]) + (box[3] - box[1]) / (bb[3] - bb[1])) / 2)
+    if len(scales) < 3:
+        return None
+    s = sorted(scales)[len(scales) // 2]
+    for sl in base["slides"]:
+        for el in sl.get("elements", []):
+            bb = (el.get("fingerprint") or {}).get("bbox")
+            box = ((el.get("readback") or {}).get(el.get("main")) or {}).get("box")
+            if bb and box:
+                xs.append(box[0] - s * bb[0])
+                ys.append(box[1] - s * bb[1])
+    return s, sorted(xs)[len(xs) // 2], sorted(ys)[len(ys) // 2]
+
+
+def _fresh_box(place, bbox) -> list[float] | None:
+    if not place or not bbox:
+        return None
+    s, tx, ty = place
+    return [s * bbox[0] + tx, s * bbox[1] + ty, s * bbox[2] + tx, s * bbox[3] + ty]
+
+
+def geometry_findings(base: dict, before: dict, after: dict, rep: dict, ours: dict | None = None) -> list[dict]:
     """A converter element the person moved or resized, back where the converter had put it. A sync
     that writes the unit re-applies the deck's transform (docs/sync.md: `overrides["geometry"]`), so
     the box afterwards is the person's or, when the source moved it too, somewhere else - never the
-    base's again."""
+    base's again.
+
+    "Somewhere else" has to be taken literally: when the source moved the element as well, the
+    rewritten element lands at the conversion's new box *plus* the step the person moved it by, and
+    that can fall exactly on the base's old box by coincidence. With `ours` the oracle works that
+    place out (`deck_placement`) and lets the element stand there; without it, such a round reads as
+    a revert."""
     out = []
+    place = deck_placement(base)
+    ours_by_key = _ours_by_key(base, ours)
     before_by_id = {s["objectId"]: s for s in before["slides"]}
     after_by_id = {s["objectId"]: s for s in after["slides"]}
     for b in base["slides"]:
@@ -404,6 +448,14 @@ def geometry_findings(base: dict, before: dict, after: dict, rep: dict) -> list[
             keys = {el["key"], unit_key(el)}
             if _at(rep["conflicts"], skey, keys) or _at(rep["converged"], skey, keys):
                 continue
+            fresh = _fresh_box(place, ((ours_by_key.get(skey, {}).get(el["key"]) or {})
+                                       .get("fingerprint") or {}).get("bbox"))
+            if fresh is not None:
+                step = [n - w for n, w in zip(now["box"], was["box"])]
+                moved = [f + d for f, d in zip(fresh, step)]
+                if any(all(abs(x - y) <= GEOMETRY_TOLERANCE for x, y in zip(moved, rb.get("box", ())))
+                       for rb in objects):
+                    continue  # the conversion's new box, moved the way the person moved it
             out.append(finding("geometry_reverted", "undo",
                                f"back at the converter's box {was.get('box')}, the person had it at {now.get('box')}",
                                slide=skey, element=el["key"], object=main))
@@ -669,7 +721,7 @@ def check(base: dict, before: dict, after: dict, report: dict, ours: dict | None
     rep = normalise_report(report)
     out = (slide_findings(base, before, after, rep) + user_object_findings(base, before, after, rep)
            + text_findings(base, before, after, rep, ours) + style_findings(base, before, after, rep)
-           + picture_findings(base, before, after, rep) + geometry_findings(base, before, after, rep)
+           + picture_findings(base, before, after, rep) + geometry_findings(base, before, after, rep, ours)
            + content_findings(base, before, after, rep, ours) + user_slide_findings(base, before, after)
            + report_findings(base, before, after, rep))
     allowed = set(allow or ())

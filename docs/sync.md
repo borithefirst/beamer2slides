@@ -177,7 +177,11 @@ hold for every sync, including the combinations nobody thought of.
   - the only allowances are Slides' own, a one-child group disappearing and a child losing a
   converter group that is gone); a word the person typed is still readable somewhere on that slide
   or is reproduced verbatim in a `conflicts` entry; a word the person deleted doesn't come back into
-  that element; notes and backgrounds likewise; slides only vanish when reported *and* untouched,
+  that element; an element the person moved stands afterwards where they put it, or - when the source
+  moved it too - at the conversion's new box with the person's step on top of it (`deck_placement`
+  works that box out, so the base's old box is never mistaken for it); its picture and its styling
+  are the person's unless a conflict says otherwise; notes and backgrounds likewise (on a slide the
+  person added, word for word); slides only vanish when reported *and* untouched,
   user-added slides never; taking the reported moves out of the order before and after must leave
   the same sequence; converter content the new conversion still has keeps an object; and the report
   is honest - every `applied` entry really changed something, every `converged` entry really changed
