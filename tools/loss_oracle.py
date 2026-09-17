@@ -26,8 +26,9 @@ merge policy of docs/sync.md says it is not the person's work. Concretely:
   changing one: the sync never has a reason to touch an object it did not create. Two allowances,
   both forced by the Slides API rather than by policy: a *group* may disappear when the sync
   removed its converter children and at most one child is left (Slides drops a one-child group),
-  and a child may lose its parent group when that group was a converter group that no longer
-  exists.
+  and a child may lose its parent group when that group is gone - a group that no longer exists
+  cannot hold anything, and whether it was allowed to go is judged by the rule above. Being put
+  *into* a group, or moved from one group into another that is still there, is never allowed.
 * **A person's words inside a converter object** are the token runs that the live text has and the
   base read-back does not (`merge.tokens` + the diff hunks the merge itself uses). Every word of
   such a run must, after the sync, still be readable *somewhere on that slide* - it need not be in
@@ -49,13 +50,16 @@ merge policy of docs/sync.md says it is not the person's work. Concretely:
   put it, or - when the source moved it too - where that leaves it.
 * **A picture the person put into a converter element** (the read-back's picture differing from the
   base's, compared by `snapshot.signature`, never by URL) must still be on one of that element's
-  objects afterwards, unless the report lists the element under `conflicts`, `converged` or
-  `overrides`.
+  objects afterwards.
 * **Styling a person applied to a converter object** (the read-back's `text_style_hash` /
   `shape_style_hash` differing from the base's) must not come back as the converter's: after the
-  sync at least one of that element's objects must still show the person's hash, unless the report
-  lists the element under `overrides`, `conflicts` or `converged`.
-* **Speaker notes and slide backgrounds** follow the same rules, per slide.
+  sync at least one of that element's objects must still show the person's hash.
+  These three are excused by a `conflicts` or a `converged` entry for the element, and by nothing
+  else - in particular not by `overrides`, which *claims* the deck's version was kept: a sync that
+  reverts what it lists as an override is exactly the silent loss this oracle looks for.
+* **Speaker notes and slide backgrounds** follow the same rules, per slide. On a slide the person
+  added themselves the base has nothing to merge against, so the notes and the background must come
+  through the sync word for word.
 * **Slides**: a slide present before must be present after unless the report lists it under
   `slides_deleted` *and* the base plus the live read-back show nobody had touched it
   (`merge.slide_touched`). A slide the base never saw (the person added it) may never disappear,
@@ -272,7 +276,6 @@ def user_object_findings(base: dict, before: dict, after: dict, rep: dict) -> li
             users = [{"objectId": oid} for oid in bs["objects"]]
         else:
             users = merge.user_objects(b, bs)
-        converter = set(b and _base_ids(b) or ())
         for u in users:
             oid = u["objectId"]
             rb, now = bs["objects"][oid], a["objects"].get(oid)
@@ -295,11 +298,12 @@ def user_object_findings(base: dict, before: dict, after: dict, rep: dict) -> li
             elif same is None:
                 out.append(finding("user_image_unverified", "note", "no pixel signature: the picture bytes weren't compared",
                                    slide=skey, object=oid))
-            if rb.get("parent_group") != now.get("parent_group"):
-                old = rb.get("parent_group")
-                if not (old in converter and old not in a["objects"]):
-                    out.append(finding("user_object_regrouped", "undo",
-                                       f"parent group {old} became {now.get('parent_group')}", slide=skey, object=oid))
+            old, new = rb.get("parent_group"), now.get("parent_group")
+            if old != new and (new is not None or old in a["objects"]):
+                # A group that is gone can't hold anything; that it went is judged above, where a
+                # group left with one child is Slides' doing and a group with more is a loss.
+                out.append(finding("user_object_regrouped", "undo",
+                                   f"parent group {old} became {new}", slide=skey, object=oid))
     return out
 
 
@@ -483,6 +487,25 @@ def notes_findings(skey, b, bs, a, conflicts) -> list[dict]:
     return out
 
 
+def user_slide_findings(base: dict, before: dict, after: dict) -> list[dict]:
+    """The notes and background of a slide the person added themselves: the base never saw that
+    slide, so nothing the sync does to it can be called a merge - it must come through untouched."""
+    theirs = {s["objectId"] for s in base["slides"] if s.get("objectId")}
+    after_by_id = {s["objectId"]: s for s in after["slides"]}
+    out = []
+    for bs in before["slides"]:
+        a = after_by_id.get(bs["objectId"])
+        if bs["objectId"] in theirs or a is None:
+            continue  # a converter slide, or one that vanished: the slide checks judge that
+        for w in sorted(words(bs.get("notes") or "") - words(a.get("notes") or "")):
+            out.append(finding("notes_word_lost", "loss", f"{w!r} of the speaker notes on a slide the person added is gone",
+                               slide=bs["objectId"]))
+        if not snapshot.same_background(bs.get("background"), a.get("background")):
+            out.append(finding("background_lost", "loss", f"the background of a slide the person added "
+                               f"({bs.get('background')}) became {a.get('background')}", slide=bs["objectId"]))
+    return out
+
+
 def background_findings(skey, b, bs, a) -> list[dict]:
     if b.get("background_readback") is None:
         return []
@@ -647,7 +670,8 @@ def check(base: dict, before: dict, after: dict, report: dict, ours: dict | None
     out = (slide_findings(base, before, after, rep) + user_object_findings(base, before, after, rep)
            + text_findings(base, before, after, rep, ours) + style_findings(base, before, after, rep)
            + picture_findings(base, before, after, rep) + geometry_findings(base, before, after, rep)
-           + content_findings(base, before, after, rep, ours) + report_findings(base, before, after, rep))
+           + content_findings(base, before, after, rep, ours) + user_slide_findings(base, before, after)
+           + report_findings(base, before, after, rep))
     allowed = set(allow or ())
     return [f for f in out if not ({f["kind"], f"{f['kind']}/{f['slide']}", f"{f['kind']}/{f['slide']}/{f['element']}"}
                                    & allowed)]

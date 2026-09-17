@@ -133,6 +133,21 @@ def test_catches_a_user_object_put_back_where_it_was(clean):
     assert "user_object_moved" in kinds(checked(clean, after=after))
 
 
+def test_catches_a_user_object_taken_out_of_a_group_that_is_still_there(clean):
+    """The person's object leaving a group is their work undone - unless the group itself is gone,
+    which Slides does on its own once a group is down to one child."""
+    sid, oid = user_object(clean)
+    after = copy.deepcopy(clean["after"])
+    objects = slide_of(after, sid)["objects"]
+    objects["user_group"] = {"kind": "elementGroup", "children": [oid, "something_else"], "box": [0, 0, 10, 10],
+                             "transform": [1, 0, 0, 1, 0, 0], "parent_group": None}
+    objects[oid]["parent_group"] = "user_group"
+    assert "user_object_regrouped" in kinds(checked(clean, after=after))
+    before = copy.deepcopy(clean["before"])
+    slide_of(before, sid)["objects"][oid]["parent_group"] = "gone_group"  # the group Slides dropped
+    assert "user_object_regrouped" not in kinds(checked(clean, before=before))
+
+
 def test_catches_a_swallowed_word(clean):
     """The person's word is nowhere on the slide afterwards and no conflict mentions it."""
     sid, oid, word = typed_word(clean)
@@ -218,6 +233,21 @@ def test_catches_notes_and_a_background_the_person_set_being_overwritten(clean):
     slide_of(after, sid)["background"] = {"state": "RENDERED", "solid": "#ffffff"}
     found = kinds(checked(clean, before=before, after=after))
     assert "notes_word_lost" in found and "background_lost" in found
+
+
+def test_catches_the_notes_of_a_slide_the_person_added_being_dropped():
+    """A slide the base never saw has nothing to merge against: its notes and its background must
+    come through untouched, whatever the report says."""
+    base = {"slides": [{"key": "f1", "objectId": "s1", "elements": []}]}
+    before = {"slides": [{"objectId": "s1", "objects": {}}, {"objectId": "mine", "objects": {},
+                                                            "notes": "ask about the budget", "background": {"solid": "#102030"}}]}
+    after = copy.deepcopy(before)
+    after["slides"][1]["notes"] = ""
+    found = [f["kind"] for f in loss_oracle.user_slide_findings(base, before, after)]
+    assert set(found) == {"notes_word_lost"} and len(found) == 4  # one per word of the note
+    after["slides"][1]["background"] = {"solid": "#ffffff"}
+    assert "background_lost" in [f["kind"] for f in loss_oracle.user_slide_findings(base, before, after)]
+    assert loss_oracle.user_slide_findings(base, before, before) == []
 
 
 # ---------------------------------------------------------------- oracle units
