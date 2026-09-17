@@ -136,28 +136,47 @@ three Slides-specific spots (`merge.predicted_text`, `IR_STYLE_TO_API`,
 `deck_ir.py` need Docs twins of the same shape. `extract`, `classify`, `render`,
 `emit`, `fidelity`, `pdf`, `fonts`, `calibration` are not needed at all.
 
-## Risks, in the order they should be retired
+## Anchors: measured
 
-1. **The Docs API must be enabled on GCP project `beamer2slides`** — until it is,
-   `documents.get` returns 403 and everything in the read-back and anchor design is
-   blocked. One click at
-   <https://console.cloud.google.com/apis/library/docs.googleapis.com>.
-   Whether the narrow `drive.file` scope already reaches `documents.get` for a doc this
-   app created is checked by stage 0 of `tools/probe_docs_api.py`; if it does, we never
-   ask for the `documents` scope, which reaches *every* Doc the user owns.
-2. **Named-range survival is undocumented.** Google documents that ranges track edits,
-   can split, and are not copied. It does *not* document whether a range dies when all
-   its text is deleted, whether there is a count cap, or what a Drive copy of the
-   document does to them. `tools/probe_docs_api.py` measures exactly these (stages 1-6,
-   results in `out/docs-probe/anchors.json`). It is the single load-bearing assumption
-   of the identity scheme, so retire it before designing on top of it.
-3. **Images on the sync path.** Import via HTML is fine (measured, lossless). But
+The Docs API is now enabled on project `beamer2slides`, and named ranges hold up.
+`tools/probe_docs_api.py` measures the behaviour Google leaves undocumented; results in
+`out/docs-probe/anchors.json`.
+
+| Question | Measured |
+|---|---|
+| Scope needed | **`drive.file` is enough** for `documents.get` on a doc this app created — we never ask for `documents`, which would reach every Doc the user owns |
+| Text typed inside an anchor | the range grows to contain it |
+| Text typed at an anchor's first index | falls *outside*: ranges are half-open `[start, end)`, so an anchor can't swallow what precedes it |
+| User deletes all the anchored text | **the range disappears** — a missing anchor means deleted content, which is exactly the signal `merge.plan_unit` wants |
+| Drive copy of the document | keeps every anchor |
+| Count cap | none found; 403 ranges planted on a 4-paragraph document without complaint |
+| Stale `requiredRevisionId` | rejected with 400 — the `sync.py` plan / send / re-plan pattern ports directly |
+| Paragraph break inside an anchor | did **not** split it (one range, grown by one). Google documents splitting as possible, so still treat `NamedRange.ranges` as the list it is — but it is rarer than the docs imply |
+
+**The one bad result, and it shapes the architecture:** a `files.update` rebuild in
+place **destroys every named range** (23 before, 0 after). So the trick the Slides
+pipeline uses for `convert` — re-upload and let Drive re-convert, keeping the URL — is
+unavailable once a document is anchored and being edited. The push path splits exactly
+as it already does on the Slides side:
+
+- **first publish** — import the canonical HTML, then plant anchors in one `batchUpdate`;
+- **every later push** — incremental `batchUpdate` edits computed by the merge, never a
+  re-import. That is what `sync.py` already does; only `convert` ever rebuilds wholesale.
+
+## Remaining risks
+
+1. **Images on the sync path.** Import via HTML is fine (measured, lossless). But
    `insertInlineImage` takes a **URI only** — no byte upload, same wall as Slides'
    `createImage` — so inserting an image into an *existing* doc needs the staging-file
    trick `sync.stage` already uses. Read-back `contentUri`s live ~30 minutes; the **zip
    export is the durable, byte-exact picture route**.
-4. **Lists in the read-back.** `listId` is opaque and output-only; whether Docs forks or
+2. **Lists in the read-back.** `listId` is opaque and output-only; whether Docs forks or
    reuses one when a user splits a list in the UI is undocumented.
+3. **Anchors under a *human* editor.** Everything above was measured through the API.
+   Cut-and-paste, "paste without formatting", suggestion mode and undo in the Docs UI
+   are a different code path, and Google's one documented warning — that content copied
+   *within* a document does not carry its range — lives there. Worth one manual pass
+   over a real doc before the identity scheme is finalised.
 
 ## Alternatives considered
 

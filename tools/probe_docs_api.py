@@ -189,7 +189,18 @@ def main() -> int:
             print(f"  refused after {total} ranges: {err.resp.status} {(err.reason or '')[:120]}")
             results["cap"] = total
 
-        print("\n=== stage 6: revision control ===")
+        print("\n=== stage 6: can a user edit split one anchor into several? ===")
+        doc = docs.documents().get(documentId=doc_id).execute()
+        before = ranges_of(docs, doc_id)["b2s:delta"]
+        middle, _ = find(doc, "fourth")
+        batch(docs, doc_id, [{"insertText": {"location": {"index": middle}, "text": "\n"}}])
+        after_split = ranges_of(docs, doc_id)["b2s:delta"]
+        print(f"  pressing Return inside b2s:delta: {before} -> {after_split}")
+        print("     -> one range spanning the break." if len(after_split) == 1 else
+              "     -> SPLIT; NamedRange.ranges is a list for this reason.")
+        results["paragraph_break_inside"] = after_split
+
+        print("\n=== stage 7: revision control ===")
         doc = docs.documents().get(documentId=doc_id).execute()
         stale = doc["revisionId"]
         batch(docs, doc_id, [{"insertText": {"location": {"index": 1}, "text": "Z"}}])
@@ -205,6 +216,20 @@ def main() -> int:
                   f"{(err.reason or '')[:90]}")
             print("     -> the sync.py plan/send/re-plan pattern ports directly")
             results["required_revision"] = "rejected"
+
+        # Last, because it replaces the whole document: the Slides pipeline rebuilds a
+        # deck in place with files.update, keeping the URL. If that wipes the anchors,
+        # the push path cannot be a re-import — it has to be incremental batchUpdates.
+        print("\n=== stage 8: does a files.update rebuild keep the anchors? ===")
+        had = len(ranges_of(docs, doc_id))
+        media = MediaIoBaseUpload(io.BytesIO(SOURCE.encode("utf-8")), mimetype="text/html")
+        drive.files().update(fileId=doc_id, media_body=media).execute()
+        kept = ranges_of(docs, doc_id)
+        print(f"  {had} ranges before the re-import, {len(kept)} after")
+        print("     -> a rebuild in place keeps its anchors." if kept else
+              "     -> a rebuild in place DESTROYS every anchor, so the push path is"
+              "\n        incremental batchUpdate edits, not re-import (or re-plant after).")
+        results["survive_files_update"] = len(kept)
     finally:
         (OUT / "anchors.json").write_text(json.dumps(results, indent=1), encoding="utf-8")
         print(f"\nwrote {OUT / 'anchors.json'}")
