@@ -3,6 +3,7 @@
 import hashlib
 import io
 import json
+import math
 import threading
 import time
 from collections import Counter
@@ -140,6 +141,18 @@ def solve_increasing(f, target: float, lo: float = 0.5, hi: float = 3.0) -> floa
     return (lo + hi) / 2
 
 
+HOLE_FONT, HOLE_SPACE_EM = "Roboto Mono", 0.6  # monospaced: a space is exactly 0.6 em
+
+
+def hole_run(run: dict, scale: float, fonts: FontMapper) -> dict:
+    """The gap under an inline formula picture: no-break spaces in a monospaced font, sized so
+    they are exactly as wide as the formula and no taller than the line."""
+    z = fonts(run, scale)[1]
+    width = run["hole"] * scale
+    n = max(1, math.ceil(width / (HOLE_SPACE_EM * z)))
+    return {**run, "text": " " * n, "hole_size": round(width / (HOLE_SPACE_EM * n), 2)}
+
+
 def vertical_layout(paras: list[dict], baselines: list[list[float]], sizes: list[float]):
     """lineSpacing ratio and spaceAbove per paragraph so Slides baselines land on the PDF's.
 
@@ -189,7 +202,8 @@ def vertical_layout(paras: list[dict], baselines: list[list[float]], sizes: list
 
 def text_box_requests(el: dict, slide_id: str, object_id: str, scale: float, fonts: FontMapper,
                       placeholder: dict | None = None, page_slide: dict[int, str] | None = None) -> list[dict]:
-    paras = el["paragraphs"]
+    paras = [{**p, "runs": [hole_run(r, scale, fonts) if r.get("hole") else r for r in p["runs"]]}
+             for p in el["paragraphs"]]
     # A line is as tall as its largest run; small caps runs count at their reduced size.
     base_sizes = [max(fonts(r, scale)[1] for r in p["runs"]) if p["runs"] else p["size"] * scale for p in paras]
     sizes = [max(fonts(r, scale)[1] * (SMALL_CAPS_LINE if r.get("smallcaps") else 1) for r in p["runs"])
@@ -287,6 +301,9 @@ def text_box_requests(el: dict, slide_id: str, object_id: str, scale: float, fon
             if not run["text"]:
                 continue
             style, fields = fonts.text_style(run, scale)
+            if run.get("hole_size"):
+                style, fields = {"fontFamily": HOLE_FONT, "fontSize": pt(run["hole_size"]), "bold": False,
+                                 "italic": False}, ["fontFamily", "fontSize", "bold", "italic"]
             style.update({"smallCaps": run["smallcaps"], "foregroundColor": rgb(run["color"]),
                           "underline": bool(run.get("underline")),
                           "baselineOffset": {"super": "SUPERSCRIPT", "sub": "SUBSCRIPT"}.get(run.get("script"), "NONE")})

@@ -75,6 +75,18 @@ def test_inline_math_becomes_text_display_math_pictures():
     assert not any(l["reason"] == "math" for s in d["slides"] for l in s["left_in_background"])
 
 
+def test_complex_inline_formulas_leave_holes_in_text():
+    slide = deck("13_inline_math")["slides"][0]
+    items = [p for e in texts(slide) for p in e["paragraphs"] if p["bullet"]]
+    assert len(items) == 4, "items with formulas stay in the list"
+    holes = [r for p in items for r in p["runs"] if r.get("hole")]
+    assert len(holes) == 2 and all(r["hole"] > 50 for r in holes)
+    assert paragraph_text(items[0]).startswith("The norm ") and paragraph_text(items[0]).endswith("is always nonnegative.")
+    pictures = [e for e in slide["elements"] if e["kind"] == "image"]
+    assert len(pictures) == 2 and all(e["role"] == "math" for e in pictures)
+    assert not slide["left_in_background"], "the radical sign travels with its formula"
+
+
 def test_simple_inline_fraction_becomes_text():
     slide = deck("02_math")["slides"][0]
     lists = [e for e in texts(slide) if any(p["bullet"] for p in e["paragraphs"])]

@@ -140,6 +140,7 @@ class Line:
     inline_math: bool = False
     fractions: list = field(default_factory=list)  # (bar, numerator spans, denominator spans)
     tab: Span | None = None  # content after a line label ("4:") starts here, reached by a tab
+    holes: list = field(default_factory=list)  # complex inline formulas: pictures over gaps in the text
 
     def __post_init__(self):
         self.spans.sort(key=lambda s: s.rect.x0)
@@ -396,8 +397,11 @@ class PageClassifier:
                 self.panels.append({"bbox": r, "fill": d["fill"], "id": d["id"],
                                     "rounded": "c" in d["items"], "corners": d.get("corners", {}),
                                     "opacity": d.get("fill_opacity", 1.0), "image": False})
-            elif d["type"] == "s" and r.h <= 1.0 and r.w <= 3 * self.body and set(d["items"]) <= {"l"}:
-                self.bars.append(r)  # fraction bars, radical overbars
+            elif d["type"] == "s" and r.h <= 1.0 and set(d["items"]) <= {"l"} and (r.w <= 3 * self.body or any(
+                    abs(s["bbox"][2] - r.x0) <= 1 and s["bbox"][1] - 1 <= r.y0 <= s["bbox"][3]
+                    and (s["font"].split("+")[-1].upper().startswith("CMEX") or "√" in s["text"])
+                    for s in self.page["spans"])):
+                self.bars.append(r)  # fraction bars, radical overbars (long ones start at their radical sign)
             else:
                 graphics.append(r)
                 stroke_rule = d["type"] == "s" and r.h <= 1.0 and set(d["items"]) <= {"l"}
@@ -635,6 +639,58 @@ class PageClassifier:
         by_x = lambda group: sorted(group, key=lambda s: s.rect.x0)
         return bar, by_x(above), by_x(below)
 
+    def formula_holes(self, line: Line, fractions: list) -> list[list[Span]]:
+        """Complex formulas inside a line of prose, as groups of spans; [] if there are none or
+        if the line is not mostly prose (a display equation stays one picture)."""
+        spans = sorted(line.content, key=lambda s: s.rect.x0)
+        size = line.size
+        bars = [b for b in self.bars if b.expand(1).intersects(line.rect)]
+        simple_bars = [f[0] for f in fractions]
+        in_fraction = {id(s) for f in fractions for s in f[1] + f[2]}
+
+        def mathish(s: Span) -> bool:
+            t = s.text.strip()
+            return (s.info.family == "math" or bool(script_of(s, line)) or s.font.upper().startswith("CMEX")
+                    or "�" in s.text or (s.info.italic and len(t) <= 2)
+                    or any(b.expand(0.5).intersects(s.rect) and s.rect.cy > b.cy for b in bars)
+                    or (bool(t) and all(ch in MATH_OPERATORS or ch in "()[]{}|∥,.;:'ˆ˜¯^0123456789" for ch in t)))
+
+        segments: list[list[Span]] = []
+        for s in spans:
+            if not mathish(s):
+                segments.append([])
+                continue
+            if segments and segments[-1]:
+                segments[-1].append(s)
+            else:
+                segments.append([s])
+        segments = [seg for seg in segments if seg]
+        prose = sum(len(s.text.strip()) for s in spans if not any(s in seg for seg in segments))
+        if prose < 8:
+            return []
+
+        def complex_segment(seg: list[Span]) -> bool:
+            rect = union_all(s.rect for s in seg)
+            if any(s.font.upper().startswith("CMEX") or "�" in s.text for s in seg):
+                return True
+            if any(b.intersects(rect.expand(0.5)) and not any(abs(b.x0 - sb.x0) < 0.1 and abs(b.y0 - sb.y0) < 0.1
+                                                              for sb in simple_bars) for b in bars):
+                return True
+            scripts = [s for s in seg if script_of(s, line) and id(s) not in in_fraction]
+            if any(s.size < 0.6 * size or abs(s.baseline - line.baseline) > 0.6 * size for s in scripts):
+                return True
+            return any(a is not b and script_of(a, line) != script_of(b, line)
+                       and a.rect.x0 < b.rect.x1 - 0.5 and b.rect.x0 < a.rect.x1 - 0.5 for a in scripts for b in scripts)
+
+        holes = []
+        for seg in segments:
+            if complex_segment(seg):
+                # Trailing punctuation is prose again.
+                while len(seg) > 1 and seg[-1].text.strip() in (",", ".", ";", ":"):
+                    seg = seg[:-1]
+                holes.append(seg)
+        return holes
+
     def math_kind(self, line: Line) -> str | None:
         """None for plain text, 'inline' for math that Slides text can carry (symbols,
         single-level sub/superscripts), 'complex' for anything that must stay a picture."""
@@ -656,6 +712,14 @@ class PageClassifier:
 
         if not (math_font or scripts or bars or fractions or formula_like or "�" in line.text):
             return None
+        holes = self.formula_holes(line, fractions)
+        if holes:
+            # Prose with a few complex formulas: the words stay text, each formula becomes a
+            # picture placed over a gap left in the text.
+            line.holes = holes
+            hole_ids = {id(s) for h in holes for s in h}
+            line.fractions = [f for f in fractions if not any(id(s) in hole_ids for s in f[1] + f[2])]
+            return "inline"
         if bars or "�" in line.text:
             return "complex"
         if formula_like and not self.continues_prose(line):
@@ -892,6 +956,23 @@ class PageClassifier:
                     continue
                 if span.info.family == "icon":
                     continue  # symbol-font glyphs stay in the background picture
+                hole = next((h for h in line.holes if span in h), None)
+                if hole is not None:
+                    if span is not min(hole, key=lambda s: s.rect.x0):
+                        continue
+                    # A gap as wide as the formula; emit fills it with no-break spaces.
+                    x0, x1 = min(s.rect.x0 for s in hole), max(s.rect.x1 for s in hole)
+                    if prev is not None and runs:
+                        gap = x0 - prev.rect.x1
+                        if (si == 0 or gap > 0.15 * line.size) and not runs[-1]["text"].endswith(" "):
+                            runs[-1]["text"] += " "
+                    main = line.main
+                    runs.append({"text": " ", "font": main.font, "family": main.info.family,
+                                 "size": round(line.size, 2), "bold": False, "italic": False, "smallcaps": False,
+                                 "color": main.color, "link": None, "script": None, "underline": False,
+                                 "highlight": None, "hole": round(x1 - x0, 2)})
+                    prev = max(hole, key=lambda s: s.rect.x1)
+                    continue
                 text = span.text
                 if forced == "sub":  # denominator: follows the slash directly
                     pass
@@ -907,9 +988,15 @@ class PageClassifier:
                         sep = "\t"
                     else:
                         sep = " " if span.rect.x0 - prev.rect.x1 > 0.15 * line.size else ""
+                    if si and sep == " " and runs[-1].get("hole"):
+                        # The space after a formula becomes part of its gap: TeX's space there
+                        # is wider than a Slides space would be.
+                        runs[-1]["hole"] = round(runs[-1]["hole"] + span.rect.x0 - prev.rect.x1, 2)
+                        sep = ""
+                        text = text.lstrip()
                     if sep and not runs[-1]["text"].endswith(" ") and not text.startswith(" "):
-                        if runs[-1]["script"]:
-                            text = sep + text  # keep the space out of the raised/lowered run
+                        if runs[-1]["script"] or runs[-1].get("hole"):
+                            text = sep + text  # keep the space out of the raised/lowered run and the gap
                         else:
                             runs[-1]["text"] += sep
                 script = forced or script_of(span, line)
@@ -931,7 +1018,7 @@ class PageClassifier:
                         (style["underline"], style["highlight"]) and (runs[-1]["underline"] or runs[-1]["highlight"]):
                     runs[-1]["text"] = runs[-1]["text"][:-1]  # an underline or highlight ends at the word
                     text = " " + text
-                if runs and all(runs[-1][k] == v for k, v in style.items()):
+                if runs and not runs[-1].get("hole") and all(runs[-1].get(k) == v for k, v in style.items()):
                     runs[-1]["text"] += text
                 else:
                     runs.append({"text": text, **style})
@@ -1431,7 +1518,8 @@ class PageClassifier:
                 "runs": self.runs(p, code_indent(p, rect.x0) if code else ""),
             } for p in box],
             "code": code,
-            "spans": [s.id for p in box for s in p.spans if s.info.family != "icon"],
+            "spans": [s.id for p in box for s in p.spans if s.info.family != "icon"
+                      and not any(s in h for l in p.lines for h in l.holes)],
             # Fraction bars now written as text, underlines and highlight boxes now text
             # styles: they leave the background with the glyphs.
             "strokes": [f[0].as_list() for p in box for l in p.lines for f in l.fractions] +
@@ -1452,9 +1540,18 @@ class PageClassifier:
 
         n = self.page["index"]
         elements = [self.text_element(box, f"p{n}t{bi}") for bi, box in enumerate(boxes)]
+        holes = [h for box in boxes for p in box for l in p.lines for h in l.holes]
+        hole_pictures = []
+        for h in holes:
+            rect = union_all(s.rect for s in h)
+            # Radical signs and big-operator parts sit off the baseline, in lines of their own.
+            h = h + [s for l in lines if l.reason == "math" for s in l.spans if s.rect.intersects(rect.expand(1))]
+            rect = union_all([rect] + [s.rect for s in h] + [b for b in self.bars if b.expand(1).intersects(rect)])
+            hole_pictures.append({"id": f"p{n}h{len(hole_pictures)}", "kind": "image", "role": "math",
+                                  "bbox": rect.expand(1.0).as_list(), "spans": [s.id for s in h], "hole": True})
 
         text_spans = {sid for e in elements for sid in e["spans"]}
-        elements = self.figures(lines, elements) + self.icons(elements) + elements  # pictures below text
+        elements = self.figures(lines, elements) + self.icons(elements) + hole_pictures + elements  # pictures below text
         text_spans |= {sid for e in elements if e["kind"] == "table" for sid in e["spans"]}
         elements = self.math_pictures(lines, paragraphs, elements) + elements
         text_spans |= {sid for e in elements if e["kind"] == "text" for sid in e["spans"]}  # equation numbers

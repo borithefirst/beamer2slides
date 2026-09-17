@@ -16,6 +16,7 @@ import pymupdf
 
 BACKGROUND_WIDTH_PX = 2000
 FIGURE_PX_PER_PT = 6.0     # ~ 3 px per Slides point on a 4:3 deck
+SMALL_FIGURE_PX_PER_PT = 12.0  # inline formulas and other small pictures: crisper text
 FIGURE_MAX_PX = 3000
 
 
@@ -28,7 +29,7 @@ def _band(bbox: list[float], baseline: float, size: float) -> pymupdf.Rect:
 
 def crop_figure(page: pymupdf.Page, bbox: list[float], raw_images: list[dict], path: Path) -> list[int]:
     rect = pymupdf.Rect(bbox)
-    zoom = FIGURE_PX_PER_PT
+    zoom = FIGURE_PX_PER_PT if max(rect.width, rect.height) > 60 else SMALL_FIGURE_PX_PER_PT
     # A raster image filling the figure keeps its native resolution (up to the cap).
     for im in raw_images:
         ir = pymupdf.Rect(im["bbox"])

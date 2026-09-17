@@ -1,0 +1,22 @@
+% Complex inline math inside prose: the words should stay text, only the formulas pictures.
+\documentclass{beamer}
+\usepackage{amsmath,amssymb}
+
+\begin{document}
+
+\begin{frame}{Complex formulas inside bullets}
+  \begin{itemize}
+    \item The norm $\|x\| = \sqrt{x_1^2 + x_2^2}$ is always nonnegative.
+    \item We minimize $\sum_{i=1}^n (y_i - \hat y_i)^2$ over all parameters.
+    \item A plain item without any math.
+    \item The ratio $\frac{\partial f}{\partial x}$ measures the change.
+  \end{itemize}
+\end{frame}
+
+\begin{frame}{A paragraph with a formula}
+  Recall that for independent samples the variance of the mean is
+  $\operatorname{Var}(\bar X) = \frac{\sigma^2}{n}$, which shrinks as the number of
+  samples grows. This is why averaging helps.
+\end{frame}
+
+\end{document}
