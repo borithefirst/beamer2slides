@@ -16,6 +16,9 @@ import re
 import unicodedata
 from dataclasses import dataclass, field
 
+from .classify import FRAME_COUNTER_RE
+from .fonts import google_font
+
 TOL = {
     "pos": 2.0,          # PDF pt: text anchors, picture edges
     "size": 3.0,         # PDF pt: picture width and height
@@ -201,11 +204,33 @@ class Para:
         return self.el["paragraphs"][self.pi]
 
 
+def counts_as_text(el: dict) -> bool:
+    """Text elements that are compared: not footers (frame counters "3 / 9" included, which a live
+    deck without keys can't tell apart), formulas or overlays."""
+    if el["kind"] != "text" or el.get("role") in IGNORED_ROLES:
+        return False
+    return not FRAME_COUNTER_RE.match(norm_text(element_text(el)))
+
+
+def reading_order(slide: dict) -> list[int]:
+    """Text element indices, title first, then top to bottom and left to right (a live deck lists
+    its elements in z-order)."""
+    idx = [i for i, e in enumerate(slide["elements"]) if counts_as_text(e) and e.get("paragraphs")]
+
+    def key(i: int):
+        e = slide["elements"][i]
+        try:
+            x, y = text_anchor(e)
+        except (KeyError, IndexError, TypeError, ValueError):
+            x, y = e["bbox"][0], e["bbox"][1]
+        return (e.get("role") != "title", round((y or 0) / 4), x or 0)
+    return sorted(idx, key=key)
+
+
 def slide_paragraphs(slide: dict) -> list[Para]:
     out = []
-    for ei, el in enumerate(slide["elements"]):
-        if el["kind"] != "text" or el.get("role") in IGNORED_ROLES:
-            continue
+    for ei in reading_order(slide):
+        el = slide["elements"][ei]
         for pi, p in enumerate(el["paragraphs"]):
             text = norm_text(para_text(p))
             if text.replace(HOLE, "").strip():
@@ -243,9 +268,11 @@ def char_styles(p: dict) -> tuple[str, list[dict]]:
     text, styles = "", []
     for r in p["runs"]:
         t = run_text(r)
-        st = {"bold": bool(r.get("bold")), "italic": bool(r.get("italic")), "underline": bool(r.get("underline")),
+        google = google_font(r.get("font") or "")  # emit writes a Google font's own weight and slant
+        st = {"bold": bool(r.get("bold")) or bool(google and google[1] >= 600),
+              "italic": bool(r.get("italic")) or bool(google and google[2]), "underline": bool(r.get("underline")),
               "color": (r.get("color") or "#000000").lower(), "size": r.get("size") or p.get("size"),
-              "mono": r.get("family") == "mono", "link": r.get("link")}
+              "mono": r.get("family") == "mono", "link": r.get("link"), "script": bool(r.get("script"))}
         text += t
         styles += [st] * len(t)
     return text, styles
@@ -258,16 +285,23 @@ def style_diffs(cp: dict, tp: dict, tol: dict) -> list[dict]:
     tt, ts = char_styles(tp)
     sm = difflib.SequenceMatcher(None, ct, tt, autojunk=False)
     out = []
+
+    def off(k: int, fld: str, a: int, b: int) -> bool:
+        c, t = cs[a + k], ts[b + k]
+        if tt[b + k] == HOLE or (fld == "size" and (c["script"] or t["script"])):
+            return False
+        return differs(fld, c[fld], t[fld], tol)
+
     for a, b, n in sm.get_matching_blocks():
         for fld in STYLE_FIELDS:
             k = 0
             while k < n:
                 c, t = cs[a + k], ts[b + k]
-                if not differs(fld, c[fld], t[fld], tol) or tt[b + k].isspace():
+                if not off(k, fld, a, b) or tt[b + k].isspace():
                     k += 1
                     continue
                 start = k
-                while k < n and (differs(fld, cs[a + k][fld], ts[b + k][fld], tol) or tt[b + k].isspace()):
+                while k < n and (off(k, fld, a, b) or tt[b + k].isspace()):
                     k += 1
                 end = k
                 while end > start and tt[b + end - 1].isspace():
@@ -294,12 +328,15 @@ def word_diff(a: str, b: str) -> list[dict]:
     return ops
 
 
-def bullet_sig(p: dict) -> tuple:
+def bullet_sig(p: dict, el: dict | None = None) -> tuple:
+    """(bullet or number or None, level). Levels count from the element's shallowest bullet: Slides
+    has no absolute level (classify gives a lone picture-bullet list level 1)."""
     b = p.get("bullet")
     if not b:
-        return (None, p.get("level", 0) if p.get("tab_x0") is None else 0)
+        return (None, 0)
+    base = min((q.get("level", 0) for q in (el or {}).get("paragraphs", []) if q.get("bullet")), default=0)
     return ("number" if b.get("kind") == "number" or str(b.get("text", "")).rstrip(".)").isdigit() else "bullet",
-            p.get("level", 0))
+            p.get("level", 0) - base)
 
 
 # ---------------------------------------------------------------- pictures and shapes
@@ -434,15 +471,15 @@ def compare_slide(c: dict, t: dict, ci: int, ti: int, tol: dict, add, comp: Comp
             add("text", **pw, cur=cp.text, tgt=tp.text, ops=word_diff(cp.text, tp.text))
         for d in style_diffs(cp.p, tp.p, tol):
             add("style", **pw, **d)
-        if bullet_sig(cp.p) != bullet_sig(tp.p):
-            add("bullet", **pw, cur=bullet_sig(cp.p), tgt=bullet_sig(tp.p))
+        if bullet_sig(cp.p, cp.el) != bullet_sig(tp.p, tp.el):
+            add("bullet", **pw, cur=bullet_sig(cp.p, cp.el), tgt=bullet_sig(tp.p, tp.el))
         if cp.p["align"] != tp.p["align"] and len(tp.text) > 0:
             add("align", **pw, cur=cp.p["align"], tgt=tp.p["align"],
                 within=len(tp.p.get("lines", [])) <= 1 and "center" not in (cp.p["align"], tp.p["align"]))
 
     # elements: a target text element corresponds to the current element holding most of its paragraphs
-    t_elements = [e for e in t["elements"] if e["kind"] == "text" and e.get("role") not in IGNORED_ROLES]
-    c_elements = [e for e in c["elements"] if e["kind"] == "text" and e.get("role") not in IGNORED_ROLES]
+    t_elements = [e for e in t["elements"] if counts_as_text(e)]
+    c_elements = [e for e in c["elements"] if counts_as_text(e)]
     for te in t_elements:
         mine = [j for j, tp in enumerate(tps) if tp.el is te]
         if not mine:

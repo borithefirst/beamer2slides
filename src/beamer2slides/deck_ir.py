@@ -203,11 +203,14 @@ def text_paragraphs(pe: dict, text: dict, resolver: StyleResolver, fonts: FontMa
         if "\t" in text and not p["bullet"]:
             p["tab_x0"] = p["indent_start"]
     paragraphs = [p for p in paragraphs if p["runs"] or p is not paragraphs[-1]]
-    # bullet levels: ranks of (indentStart, nesting level) among bulleted paragraphs
-    keys = sorted({(round(p["indent_start"] / 3), p["nesting"]) for p in paragraphs if p["bullet"]})
+    # bullet levels as classify counts them: clusters (2 pt apart) of the bullets' left edges
+    levels: list[float] = []
+    for x in sorted({p["indent_first"] / scale for p in paragraphs if p["bullet"]}):
+        if not levels or x - levels[-1] > 2:
+            levels.append(x)
     for p in paragraphs:
         if p["bullet"]:
-            p["level"] = keys.index((round(p["indent_start"] / 3), p["nesting"]))
+            p["level"] = min(range(len(levels)), key=lambda i: abs(levels[i] - p["indent_first"] / scale))
     return paragraphs
 
 
