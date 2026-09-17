@@ -42,8 +42,8 @@ merge policy of docs/sync.md says it is not the person's work. Concretely:
   Whether the source rewrote the same region is decided with `ours`: the person's hunk and the
   source's hunk over the same base tokens clash (`merge._clash`), exactly the test the merge uses.
   Without `ours` every disappearance is a `word_lost`.
-  The reverse also counts as the person's work: text the person *deleted* must not come back
-  unless the source says it again (`deletion_undone`).
+  The reverse also counts as the person's work: text the person *deleted* must not come back into
+  that element unless the source says it again (`deletion_undone`).
 * **Speaker notes and slide backgrounds** follow the same rules, per slide.
 * **Slides**: a slide present before must be present after unless the report lists it under
   `slides_deleted` *and* the base plus the live read-back show nobody had touched it
@@ -206,6 +206,9 @@ def order_findings(base: dict, before: dict, after: dict, rep: dict) -> list[dic
     a = [sid for sid in after_ids if sid in set(b)]
     if a == b:
         return []
+    reported = set(rep["slides_moved"])
+    if [s for s in b if key_of.get(s) not in reported] == [s for s in a if key_of.get(s) not in reported]:
+        return []  # taking the reported moves out leaves the same order: nothing else moved
     moved = set(a) - set(_lcs(b, a))
     before_prev = {sid: (b[i - 1] if i else None) for i, sid in enumerate(b)}
     after_prev = {sid: (a[i - 1] if i else None) for i, sid in enumerate(a)}
@@ -317,14 +320,16 @@ def text_findings(base: dict, before: dict, after: dict, rep: dict, ours: dict |
             was, now = el.get("readback", {}).get(main), bs["objects"].get(main)
             if not main or was is None or now is None:
                 continue
-            out += word_findings(skey, el, was, now, before_words, after_words, conflicts,
+            here = words("\n".join((a["objects"].get(o) or {}).get("text") or ""
+                                   for o in element_objects(skey, el["key"], el, a)))
+            out += word_findings(skey, el, was, now, before_words, after_words, here, conflicts,
                                  (ours_by_key.get(skey) or {}).get(el["key"]))
         out += notes_findings(skey, b, bs, a, conflicts)
         out += background_findings(skey, b, bs, a)
     return out
 
 
-def word_findings(skey, el, was, now, before_words, after_words, conflicts, ours_el) -> list[dict]:
+def word_findings(skey, el, was, now, before_words, after_words, after_el_words, conflicts, ours_el) -> list[dict]:
     """The person's words in one converter object: gone without a trace, or overwritten silently."""
     out = []
     base_tokens = merge.tokens(was.get("text") or "")
@@ -349,7 +354,9 @@ def word_findings(skey, el, was, now, before_words, after_words, conflicts, ours
                                    slide=skey, element=el["key"], object=el.get("main")))
         removed = words("".join(base_tokens[hunk[0]:hunk[1]]))
         for w in sorted(removed - before_words):
-            if w not in after_words or _mentions(conflicts, w):
+            # back in *this* element: the same word turning up in another element on the slide (the
+            # source retitled the frame with it) is the source's word, not the person's deletion.
+            if w not in after_el_words or _mentions(conflicts, w):
                 continue
             if ours_el and w in words(_ours_text(ours_el)):
                 continue  # the source says it again: an applied source change, not an undo

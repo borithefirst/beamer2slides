@@ -32,8 +32,10 @@ from beamer2slides import snapshot  # noqa: E402
 
 # Rounds of the default run; every seed is a different deck, edit set and source change.
 ROUNDS = int(os.environ.get("B2S_FUZZ_ROUNDS", "40"))
-# Seeds that once failed, kept as regressions (252/430: merge's move shortcut moved nothing).
-REGRESSIONS = (0, 20, 252, 430)
+# Seeds that once failed, kept as regressions: 252/430 merge's move shortcut moved nothing,
+# 0/20 the harness and the report's per-unit keys, 3312/3799 two ways the oracle accused a
+# blameless sync (a word the source put in another element, an ambiguous reported swap).
+REGRESSIONS = (0, 20, 252, 430, 3312, 3799)
 
 
 # ---------------------------------------------------------------- the fuzz itself
@@ -247,6 +249,28 @@ def test_element_objects_finds_created_and_tagged_objects():
                         "adopted": {"title": snapshot.tag(skey, ekey)}, "other": {"title": "b2s:results/text/body/1"}}}
     base_el = {"objects": ["old"]}
     assert loss_oracle.element_objects(skey, ekey, base_el, read) == {"old", made, "adopted"}
+
+
+def test_a_reported_swap_does_not_accuse_the_slides_between_it():
+    """Two slides swapping puts a third at the same index with other neighbours: the order is
+    accounted for when taking the reported moves out of both orders leaves the same sequence."""
+    base = {"slides": [{"key": f"k{i}", "objectId": f"s{i}", "elements": []} for i in range(5)]}
+    read = lambda order: {"slides": [{"objectId": s, "objects": {}} for s in order]}  # noqa: E731
+    before, after = read(["s0", "s1", "s2", "s3", "s4"]), read(["s0", "s3", "s2", "s1", "s4"])
+    assert loss_oracle.order_findings(base, before, after, loss_oracle.normalise_report(
+        {"slides": {"moved": ["k1", "k3"]}})) == []
+    half = loss_oracle.order_findings(base, before, after, loss_oracle.normalise_report({"slides": {"moved": ["k1"]}}))
+    assert [f["kind"] for f in half] == ["slide_moved_unreported"]
+
+
+def test_a_word_the_source_put_in_another_element_is_no_undone_deletion():
+    el, was, now = {"key": "text/body/1", "main": "o"}, {"text": "the author wrote this"}, {"text": "the wrote this"}
+    args = dict(before_words=loss_oracle.words(now["text"]), after_words={"the", "wrote", "this", "author", "retitled"},
+                conflicts=[], ours_el=None)
+    # 'author' is back on the slide, but in the retitled frame title, not where the person deleted it
+    assert loss_oracle.word_findings("f4", el, was, now, after_el_words={"the", "wrote", "this"}, **args) == []
+    back = loss_oracle.word_findings("f4", el, was, now, after_el_words={"the", "author", "wrote", "this"}, **args)
+    assert [f["kind"] for f in back] == ["deletion_undone"]
 
 
 def test_failures_are_the_severities_that_matter():
