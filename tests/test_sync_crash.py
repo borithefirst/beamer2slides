@@ -336,6 +336,29 @@ def test_a_healed_element_of_another_source_version_is_written_over_again():
     assert set(el["fields"].values()) == {"interrupted"}
 
 
+def test_a_swept_group_takes_its_children_with_it():
+    """Slides deletes a group's children with the group: naming them too makes Google refuse the
+    whole batch (`Invalid requests[n].deleteObject: The object could not be found`), and then
+    nothing at all is swept."""
+    gid = "b2s_aaaaaa_bbbbbb_2ab_g"
+    theirs = live({"OLD1": readback(),
+                   gid: readback(None, kind="elementGroup"),
+                   "b2s_aaaaaa_bbbbbb_2ab": readback("b2s:intro/text/body/0", parent_group=gid),
+                   "b2s_aaaaaa_cccccc_2ab": readback("b2s:intro/image/figure/0", parent_group=gid)})
+    assert sync.plan_recovery(recovery_base(), theirs, ["intro"])["sweep"] == [gid]
+
+
+def test_objects_on_a_swept_slide_are_not_named_again():
+    sid = f"b2s_{sync.h6('extra')}_2ab"
+    theirs = {"slides": [{"objectId": "S1", "objects": {"OLD1": readback()}, "order": ["OLD1"], "notes": "",
+                          "background": {}, "layoutObjectId": "L1"},
+                         {"objectId": sid, "notes": "", "background": {}, "layoutObjectId": "L1",
+                          "objects": {"b2s_aaaaaa_bbbbbb_2ab": readback("b2s:extra/text/body/0")},
+                          "order": ["b2s_aaaaaa_bbbbbb_2ab"]}]}
+    rec = sync.plan_recovery(recovery_base(), theirs, ["intro", "extra"])
+    assert rec["sweep_slides"] == [sid] and rec["sweep"] == []
+
+
 def test_a_slide_an_interrupted_sync_created_is_swept_only_when_it_is_created_again():
     sid = f"b2s_{sync.h6('extra')}_2ab"
     theirs = {"slides": [{"objectId": "S1", "objects": {"OLD1": readback()}, "order": ["OLD1"], "notes": "",
@@ -362,6 +385,60 @@ def test_an_untouched_placeholder_is_left_as_it_is():
     saved = {"OLD1": {"text": "x", "text_style_hash": "s0"}}
     theirs = live({"OLD1": readback(text="x")})
     assert sync.restore_in_place(theirs, saved) == []
+
+
+class FakeSlidesApi:
+    """A Slides service that refuses a batch naming an object it doesn't know (as Google does)."""
+
+    def __init__(self, missing=()):
+        self.missing, self.deleted, self.batches = set(missing), [], []
+
+    def presentations(self):
+        return self
+
+    def batchUpdate(self, presentationId=None, body=None):
+        return _Call(self, [r["deleteObject"]["objectId"] for r in body["requests"]])
+
+
+class _Call:
+    def __init__(self, api, ids):
+        self.api, self.ids = api, ids
+
+    def execute(self):
+        self.api.batches.append(list(self.ids))
+        bad = [i for i in self.ids if i in self.api.missing]
+        if bad:
+            raise http_error(f"Invalid requests[0].deleteObject: The object ({bad[0]}) could not be found.")
+        self.api.deleted += self.ids
+        return {}
+
+
+def http_error(message: str, status: int = 400):
+    from googleapiclient.errors import HttpError
+    resp = type("Resp", (), {"status": status, "reason": "Bad Request"})()
+    return HttpError(resp, json.dumps({"error": {"code": status, "message": message}}).encode())
+
+
+def test_one_leftover_google_no_longer_knows_does_not_save_the_others():
+    api = FakeSlidesApi(missing={"B"})  # B went with its group
+    s = bare_sync(slides=api, pid="P1")
+    assert s.delete_leftovers(["A", "B", "C"]) == {"A", "B", "C"}
+    assert api.deleted == ["A", "C"]
+    assert api.batches == [["A", "B", "C"], ["A"], ["B"], ["C"]]
+    assert s.warnings == []
+
+
+def test_a_leftover_that_could_not_be_deleted_is_not_planned_away():
+    api = FakeSlidesApi()
+    api.batchUpdate = lambda presentationId=None, body=None: _Refusing()
+    s = bare_sync(slides=api, pid="P1")
+    assert s.delete_leftovers(["A"]) == set()
+    assert s.warnings and "could not delete 1 leftover" in s.warnings[0]
+
+
+class _Refusing:
+    def execute(self):
+        raise http_error("The caller does not have permission", 403)
 
 
 def test_dropping_leftovers_hides_them_from_everything_downstream():

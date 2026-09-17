@@ -130,6 +130,21 @@ def plan_recovery(base: dict, theirs: dict, ours_keys=()) -> dict:
         for h in here:
             h["objects"] = [h["objectId"]] + [oid for oid in mine if oid != h["objectId"] and oid.startswith(h["objectId"])]
         heal += here
+    # Slides deletes a group's children with the group, so naming them as well would make it refuse
+    # the whole batch ("The object ... could not be found") and nothing at all would be swept.
+    parent = {oid: rb.get("parent_group") for s in theirs["slides"] for oid, rb in s["objects"].items()}
+    doomed = set(sweep)
+
+    def inside_a_doomed_group(oid: str) -> bool:
+        seen, p = set(), parent.get(oid)
+        while p and p not in seen:
+            if p in doomed:
+                return True
+            seen.add(p)
+            p = parent.get(p)
+        return False
+
+    sweep = [oid for oid in sweep if not inside_a_doomed_group(oid)]
     restore = {oid: rb for oid, rb in ((k, v) for k, v in (pending.get("in_place") or {}).items())}
     return {"sweep": sweep, "sweep_slides": sweep_slides, "heal": heal, "restore": restore}
 
@@ -614,15 +629,40 @@ class Sync:
                 self.warnings.append(f"an earlier sync left {len(rec['sweep'])} object(s) and "
                                      f"{len(rec['sweep_slides'])} slide(s) behind; a real sync would delete them")
             else:
-                reqs = [{"deleteObject": {"objectId": oid}} for oid in rec["sweep"] + rec["sweep_slides"]]
-                try:
-                    execute(self.slides.presentations().batchUpdate(presentationId=self.pid, body={"requests": reqs}))
-                    if attempt == 1:
-                        self.warnings.append(f"deleted {len(reqs)} leftover object(s)/slide(s) of an interrupted sync")
-                except HttpError as e:
-                    self.warnings.append(f"could not delete the leftovers of an interrupted sync: {e}")
+                gone = self.delete_leftovers(rec["sweep"] + rec["sweep_slides"])
+                if gone and attempt == 1:
+                    self.warnings.append(f"deleted {len(gone)} leftover object(s)/slide(s) of an interrupted sync")
+                # Only what is really gone may be planned away: anything still in the deck has to
+                # stay in the picture, or the merge would create it a second time.
+                rec["sweep"] = [oid for oid in rec["sweep"] if oid in gone]
+                rec["sweep_slides"] = [sid for sid in rec["sweep_slides"] if sid in gone]
             pres = drop_objects(pres, rec["sweep"], rec["sweep_slides"])
         return pres
+
+    def delete_leftovers(self, ids: list[str]) -> set[str]:
+        """Delete what an interrupted sync left behind and say what is really gone. One batch; if
+        Google refuses it, one request at a time, so a single id it no longer knows (deleting a
+        group takes its children with it) doesn't save every other leftover from being swept."""
+        if not ids:
+            return set()
+        reqs = [{"deleteObject": {"objectId": oid}} for oid in ids]
+        try:
+            execute(self.slides.presentations().batchUpdate(presentationId=self.pid, body={"requests": reqs}))
+            return set(ids)
+        except HttpError as first:
+            gone = set()
+            for oid in ids:
+                try:
+                    execute(self.slides.presentations().batchUpdate(
+                        presentationId=self.pid, body={"requests": [{"deleteObject": {"objectId": oid}}]}))
+                except HttpError as e:
+                    if "could not be found" not in str(e):
+                        continue  # still in the deck: the merge has to keep seeing it
+                gone.add(oid)
+            if len(gone) < len(ids):
+                self.warnings.append(f"could not delete {len(ids) - len(gone)} leftover object(s) of an "
+                                     f"interrupted sync: {first}")
+            return gone
 
     def mark_pending(self, work: dict, theirs: dict) -> None:
         """Store the base with a `pending` block before the first write: the generation and token of
