@@ -85,6 +85,33 @@ def test_a_picture_it_replaces_is_kept_too(apply_to, tmp_path):
     assert (tmp_path / "figures" / "plot-1234abcd.png.bak").read_bytes() == b"the author's plot"
 
 
+def test_out_dir_keeps_files_that_were_already_there(tmp_path):
+    """`--out` is meant for a fresh folder, but pointing it at a tree of one's own must not
+    silently write over it."""
+    src, dst = tmp_path / "work-src", tmp_path / "elsewhere"
+    (src / "figures").mkdir(parents=True)
+    (src / "talk.tex").write_text("pulled\n", encoding="utf-8", newline="")
+    (src / "figures" / "plot.png").write_bytes(b"pulled picture")
+    (dst / "figures").mkdir(parents=True)
+    (dst / "talk.tex").write_text("someone else's talk\n", encoding="utf-8", newline="")
+    (dst / "figures" / "plot.png").write_bytes(b"someone else's picture")
+
+    kept = inverse.copy_tree(src, dst)
+
+    assert {p.name for p in kept} == {"talk.tex.bak", "plot.png.bak"}
+    assert (dst / "talk.tex").read_text(encoding="utf-8") == "pulled\n"
+    assert (dst / "talk.tex.bak").read_text(encoding="utf-8") == "someone else's talk\n"
+    assert (dst / "figures" / "plot.png.bak").read_bytes() == b"someone else's picture"
+
+
+def test_out_dir_that_is_empty_makes_no_backups(tmp_path):
+    src, dst = tmp_path / "work-src", tmp_path / "fresh"
+    src.mkdir()
+    (src / "talk.tex").write_text("pulled\n", encoding="utf-8", newline="")
+    assert inverse.copy_tree(src, dst) == []
+    assert not list(dst.glob("**/*.bak*"))
+
+
 def test_a_new_file_needs_no_backup(apply_to, tmp_path):
     new = tmp_path / "figures" / "new-00000000.png"
     src = tmp_path / "src.png"

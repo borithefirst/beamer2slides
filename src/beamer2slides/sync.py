@@ -1283,7 +1283,21 @@ def write_reports(out: Path, info: dict) -> tuple[Path, Path]:
     return jpath, mpath
 
 
-def sync(pdf: Path, deck: str, out: Path | None = None, dry_run: bool = False, overlays: str = "last",
+def overlay_mode(asked: str | None, recorded: str | None) -> tuple[str, str | None]:
+    """(the overlay steps to convert the new source with, a warning). A deck converted with
+    `--overlays all` holds a slide per step; syncing the same source with `last` would leave the
+    steps in between out of `ours`, and sync would read them as slides the source dropped and
+    delete the ones nobody had edited. So the deck's own mode is the default, and asking for the
+    other one is allowed but said out loud."""
+    if asked is None:
+        return recorded or "last", None
+    if recorded and asked != recorded:
+        return asked, (f"this deck was converted with --overlays {recorded}, and you asked for {asked}: "
+                       f"slides of the other kind read as slides the source dropped")
+    return asked, None
+
+
+def sync(pdf: Path, deck: str, out: Path | None = None, dry_run: bool = False, overlays: str | None = None,
          measure: bool = True) -> dict:
     from .google_auth import drive_service, slides_service
 
@@ -1294,18 +1308,20 @@ def sync(pdf: Path, deck: str, out: Path | None = None, dry_run: bool = False, o
     base, where = snapshot.load_base(pid, folder or out, drive)
     if base is None:
         raise SystemExit(f"no sync base for presentation {pid}: convert the deck with this version first")
-    stale = snapshot.stale_base_warning(where, drive, pid)
-    if stale:
-        print(f"warning: {stale}")
+    warnings = [w for w in [snapshot.stale_base_warning(where, drive, pid)] if w]
+    overlays, mismatch = overlay_mode(overlays, base.get("overlays"))
+    warnings += [mismatch] if mismatch else []
+    for w in warnings:
+        print(f"warning: {w}")
     ours = build_ours(pdf, out / "sync" / "ours", base, overlays)
     refreshed = snapshot.refresh_pictures(base, ours, out)
     s = Sync(slides, drive, pid, base, ours, out, dry_run, measure)
     result = s.run()
     report = result["plan"]["report"]
-    report["warnings"] += s.warnings + ([stale] if stale else [])
+    report["warnings"] += s.warnings + warnings
     report["converged"] += [{**r, "field": "image", "how": "the same picture, written differently"} for r in refreshed]
     info = {"pdf": str(pdf), "presentationId": pid, "url": f"https://docs.google.com/presentation/d/{pid}/edit",
-            "dry_run": dry_run, "base_from": where, "generation": base.get("generation", 0),
+            "dry_run": dry_run, "base_from": where, "generation": base.get("generation", 0), "overlays": overlays,
             "attempts": result["attempts"], "requests": s.sent, "seconds": round(time.monotonic() - started, 1),
             "report": report,
             "actions": [{"slide": p["key"], "action": p["action"],
@@ -1315,6 +1331,7 @@ def sync(pdf: Path, deck: str, out: Path | None = None, dry_run: bool = False, o
     adopted = any(u["action"] in ("adopt", "adopt_object") for p in result["plan"]["slides"] for u in p.get("units", []))
     if not dry_run and (result["work"]["writes"] or adopted or refreshed):
         new = s.new_base(result)
+        new["overlays"] = overlays  # (the steps the deck holds now)
         snapshot.save_local(new, out)
         try:
             snapshot.save_drive(drive, new)

@@ -456,9 +456,11 @@ def attach_readback(entry: dict, slide_read: dict | None, objects: list[list[str
         el["readback"] = {oid: found[oid] for oid in oids if oid in found}
 
 
-def build_base(deck: dict, out: Path, pres: dict, state: dict, pdf: Path, generation: int = 0, sign: bool = False) -> dict:
+def build_base(deck: dict, out: Path, pres: dict, state: dict, pdf: Path, generation: int = 0, sign: bool = False,
+               overlays: str = "last") -> dict:
     """The base after `convert`: `state` is emit's (slides with element object ids); `sign`:
-    download the pictures for their signatures."""
+    download the pictures for their signatures; `overlays`: which overlay steps the deck was made
+    from, so a later sync uses the same ones (a sync with fewer would delete the deck's slides)."""
     infos = [identity.slide_info(s) for s in deck["slides"]]
     keys = identity.slide_keys(infos)
     ekeys, fps = zip(*[identity.slide_element_keys(s["elements"], out) for s in deck["slides"]]) if deck["slides"] else ((), ())
@@ -470,7 +472,8 @@ def build_base(deck: dict, out: Path, pres: dict, state: dict, pdf: Path, genera
     for entry, s in zip(entries, state["slides"]):
         attach_readback(entry, by_id.get(s["objectId"]), s.get("objects") or [[o] for o in s["elements"]], s.get("groups", []))
     return {"version": VERSION, "generation": generation, "presentationId": read["presentationId"],
-            "revisionId": read["revisionId"], "source": source_info(pdf), "scale": state.get("scale"),
+            "revisionId": read["revisionId"], "source": source_info(pdf), "overlays": overlays,
+            "scale": state.get("scale"),
             "page_size": deck["slides"][0]["size"] if deck["slides"] else None, "deck_page_size": read["page_size"],
             "master_background": master_key(deck, out), "master_readback": read["master_background"],
             "slides": entries}
@@ -609,17 +612,17 @@ def load_base(pid: str, out: Path | None, drive=None) -> tuple[dict | None, str]
     return None, "none"
 
 
-def snapshot_after_convert(deck: dict, out: Path, state: dict, pdf: Path) -> dict:
+def snapshot_after_convert(deck: dict, out: Path, state: dict, pdf: Path, overlays: str = "last") -> dict:
     """Tag the new deck's objects and record the base (convert's last step)."""
     from .google_auth import drive_service, slides_service
 
     slides, drive = slides_service(), drive_service()
     pid = state["presentationId"]
     pres = execute(slides.presentations().get(presentationId=pid))
-    base = build_base(deck, out, pres, state, pdf)
+    base = build_base(deck, out, pres, state, pdf, overlays=overlays)
     if write_tags(slides, pid, tag_requests(base)):
         pres = execute(slides.presentations().get(presentationId=pid))
-    base = build_base(deck, out, pres, state, pdf, sign=True)
+    base = build_base(deck, out, pres, state, pdf, sign=True, overlays=overlays)
     save_local(base, out)
     try:
         save_drive(drive, base)

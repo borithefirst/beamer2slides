@@ -400,8 +400,36 @@ def error_excerpt(log: str) -> str:
     return "\n".join(lines[-12:])
 
 
-def copy_tree(src: Path, dst: Path) -> None:
+def backup_for(path: Path) -> Path:
+    """A backup name that takes nothing away: `<file>.bak`, then `<file>.bak2`, `.bak3`, ..."""
+    candidate, n = path.with_name(path.name + ".bak"), 2
+    while candidate.exists():
+        candidate = path.with_name(f"{path.name}.bak{n}")
+        n += 1
+    return candidate
+
+
+def keep_backup(path: Path, new: "Path | str") -> Path | None:
+    """Copy `path` aside before `new` replaces it (None: nothing to keep, or it holds that content
+    already). A second `pull --apply` must not write over the copy the first one made - that copy
+    is the author's own version, and the file itself is by then the first pull's work."""
+    if not path.exists():
+        return None
+    old = path.read_bytes()
+    fresh = new.read_bytes() if isinstance(new, Path) else new.encode("utf-8")
+    if old == fresh:
+        return None
+    bak = backup_for(path)
+    shutil.copy2(path, bak)
+    return bak
+
+
+def copy_tree(src: Path, dst: Path) -> list[Path]:
+    """Copies the source tree (build products and huge files left out). Returns the backups it made:
+    `dst` is normally a fresh folder, but `pull --out` may be pointed at a tree that holds files of
+    its own, and those are kept (`keep_backup`) instead of being written over."""
     dst = Path(dst).resolve()
+    backups = []
     for dirpath, dirnames, filenames in os.walk(src):
         dirnames[:] = [d for d in dirnames if d not in SKIP_DIRS and not d.startswith(".")
                        and (Path(dirpath) / d).resolve() != dst and dst not in (Path(dirpath) / d).resolve().parents
@@ -412,7 +440,11 @@ def copy_tree(src: Path, dst: Path) -> None:
             p = Path(dirpath) / name
             if p.suffix in BUILD_EXT or name.endswith(".synctex.gz") or p.stat().st_size > 50_000_000:
                 continue
+            bak = keep_backup(dst / rel / name, p)
+            if bak:
+                backups.append(bak)
             shutil.copy2(p, dst / rel / name)
+    return backups
 
 
 # ---------------------------------------------------------------- source structure helpers
@@ -2344,30 +2376,6 @@ def clean(r: dict) -> dict:
 
 # ---------------------------------------------------------------- commands
 
-def backup_for(path: Path) -> Path:
-    """A backup name that takes nothing away: `<file>.bak`, then `<file>.bak2`, `.bak3`, ..."""
-    candidate, n = path.with_name(path.name + ".bak"), 2
-    while candidate.exists():
-        candidate = path.with_name(f"{path.name}.bak{n}")
-        n += 1
-    return candidate
-
-
-def keep_backup(path: Path, new: "Path | str") -> Path | None:
-    """Copy `path` aside before `new` replaces it (None: nothing to keep, or it holds that content
-    already). A second `pull --apply` must not write over the copy the first one made - that copy
-    is the author's own version, and the file itself is by then the first pull's work."""
-    if not path.exists():
-        return None
-    old = path.read_bytes()
-    fresh = new.read_bytes() if isinstance(new, Path) else new.encode("utf-8")
-    if old == fresh:
-        return None
-    bak = backup_for(path)
-    shutil.copy2(path, bak)
-    return bak
-
-
 def write_outputs(result: Result, target: dict, tex: Path, work: Path, apply: bool, out: Path | None,
                   log=print) -> None:
     """pull.patch, edits.json and edits.md in `work`; the edited files in place when `apply`, each
@@ -2379,8 +2387,10 @@ def write_outputs(result: Result, target: dict, tex: Path, work: Path, apply: bo
     (work / "edits.md").write_text(md, encoding="utf-8")
     if out is not None:
         out = Path(out).resolve()
-        copy_tree(result.work / "src", out)
+        kept = copy_tree(result.work / "src", out)
         log(f"edited source tree -> {out}")
+        if kept:
+            log(f"  {len(kept)} file(s) that were already there kept as .bak (e.g. {kept[0].name})")
     elif apply:
         for path, new in result.files.items():
             path = Path(path)

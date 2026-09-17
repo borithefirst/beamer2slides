@@ -70,7 +70,7 @@ def cmd_convert(pdf: Path, out: Path, title: str | None, new_deck: bool, overlay
     print(f"Google Slides: {state['url']}")
     from .snapshot import snapshot_after_convert
     try:
-        base = snapshot_after_convert(state["deck"], out, state, source)
+        base = snapshot_after_convert(state["deck"], out, state, source, overlays)
         print(f"sync base: {len(base['slides'])} slides recorded ({out / 'sync' / 'base.json'})")
     except Exception as e:  # the deck is complete; only a later sync needs the base
         print(f"warning: could not record the sync base ({type(e).__name__}: {e})")
@@ -154,7 +154,8 @@ def main() -> None:
     c.add_argument("--deck", required=True, help="presentation URL or id, or the output folder of its convert")
     c.add_argument("--out", type=Path, help="where the new conversion, base and reports go (default: the deck's folder)")
     c.add_argument("--dry-run", action="store_true", help="plan and report without writing to the deck")
-    c.add_argument("--overlays", choices=["last", "all"], default="last")
+    c.add_argument("--overlays", choices=["last", "all"], default=None,
+                   help="which overlay steps to keep (default: the ones the deck was converted with)")
     c.add_argument("--predict-places", dest="predict_places", action="store_true")
     c.add_argument("--backup", choices=list(BACKUP_MODES), default="auto",
                    help="keep a way back before sync's first write: auto = file (a .pptx in <out>/backups), "

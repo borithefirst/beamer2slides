@@ -156,6 +156,44 @@ def test_the_local_copy_round_trips(tmp_path):
     assert json.loads(path.read_text(encoding="utf-8"))["generation"] == 8
 
 
+# ---------------------------------------------------------------- the overlay steps the deck holds
+
+
+def test_sync_keeps_the_overlay_steps_the_deck_was_made_from():
+    """`convert --overlays all` then a plain `sync` used to drop every step in between."""
+    from beamer2slides.sync import overlay_mode
+    assert overlay_mode(None, "all") == ("all", None)
+    assert overlay_mode(None, "last") == ("last", None)
+
+
+def test_a_base_without_the_field_means_the_default():
+    """Bases recorded before this was written down."""
+    from beamer2slides.sync import overlay_mode
+    assert overlay_mode(None, None) == ("last", None)
+
+
+def test_asking_for_the_other_steps_is_allowed_but_said_out_loud():
+    from beamer2slides.sync import overlay_mode
+    mode, warning = overlay_mode("last", "all")
+    assert mode == "last" and "read as slides the source dropped" in warning
+
+
+def test_asking_for_the_steps_the_deck_has_is_quiet():
+    from beamer2slides.sync import overlay_mode
+    assert overlay_mode("all", "all") == ("all", None)
+
+
+def test_convert_records_the_mode_in_the_base(monkeypatch, tmp_path):
+    """build_base writes it, so the next sync can read it."""
+    from beamer2slides import snapshot as snap
+    monkeypatch.setattr(snap, "read_presentation", lambda pres: {"presentationId": PID, "revisionId": "r1",
+                                                                 "page_size": [720, 405], "layouts": {},
+                                                                 "master_background": None, "slides": []})
+    built = snap.build_base({"slides": []}, tmp_path, {"presentationId": PID}, {"slides": []},
+                            tmp_path / "talk.pdf", overlays="all")
+    assert built["overlays"] == "all"
+
+
 # ---------------------------------------------------------------- the warning about a stale cache
 
 

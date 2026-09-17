@@ -60,7 +60,7 @@ storage), `merge.py` (pure planning and diff3), `sync.py` (requests and the writ
 
 ## Base snapshot (`sync/base.json`, schema version 1)
 ```
-{version: 1, generation, presentationId, revisionId, source: {pdf, sha1}, scale,
+{version: 1, generation, presentationId, revisionId, source: {pdf, sha1}, overlays ("last"|"all"), scale,
  page_size (PDF pt), deck_page_size, master_background (key), master_readback,
  slides: [{key, label, title, page, text, layout, background ("color:#rrggbb" | "png:<sha1>"), notes,
            objectId, layoutObjectId, background_readback, notes_readback, groups: [objectId...],
@@ -88,6 +88,12 @@ The base lists slides in the source's order, not the deck's, so a deck reorder s
 the app (`drive.file` scope) whose id is kept in the presentation file's `appProperties.b2sBase`;
 Drive is authoritative (anyone with the deck can sync), the local copy is a cache and fallback.
 The base is replaced only when a sync wrote something or adopted converged deck fields (`generation` + 1).
+
+`overlays` is the overlay mode `convert` used. `sync` takes it from there unless `--overlays` says
+otherwise (`sync.overlay_mode`): a deck converted with `--overlays all` has a slide per step, and
+syncing the same source with `last` would leave the steps in between out of `ours`, where they read
+as slides the source dropped - sync would delete the ones nobody had edited. Asking for the other
+mode on purpose still works and is reported as a warning.
 
 ### Two checkouts, one deck
 Because Drive holds the base, a second checkout (or a second person) syncing the same deck reads
