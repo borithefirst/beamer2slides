@@ -882,6 +882,22 @@ def block_groups(elements: list[dict], object_ids: list[str], title_oid: str | N
     return out
 
 
+def rule_groups(elements: list[dict], object_ids: list[str]) -> list[list[str]]:
+    """Rules lying on one another (a progress bar on its track) move as one."""
+    rules = [(el["bbox"], oid) for el, oid in zip(elements, object_ids) if el["kind"] == "shape" and el.get("role") == "rule"]
+    out: list[list] = []  # [bbox, [oids]]
+    for (x0, y0, x1, y1), oid in rules:
+        for g in out:
+            gx0, gy0, gx1, gy1 = g[0]
+            if x0 < gx1 and gx0 < x1 and y0 < gy1 and gy0 < y1:
+                g[0] = [min(x0, gx0), min(y0, gy0), max(x1, gx1), max(y1, gy1)]
+                g[1].append(oid)
+                break
+        else:
+            out.append([[x0, y0, x1, y1], [oid]])
+    return [g[1] for g in out if len(g[1]) >= 2]
+
+
 def text_right_limit(el: dict, slide: dict) -> float | None:
     """How far right (PDF x) a text element's box may reach: inside a panel (a block body),
     as far from the panel's right edge as the text is from its left edge; elsewhere the
@@ -1369,6 +1385,8 @@ def emit(deck: dict, out: Path, title: str, new_deck: bool = False, keep_assets:
                 children = [f"{m}_g" if m in anchored else m for m in members if m not in grouped or m in anchored]
                 if len(children) >= 2:
                     extra.append({"groupObjects": {"groupObjectId": f"{slide_id}_blk{bi}", "childrenObjectIds": children}})
+            for ri, members in enumerate(rule_groups(slide["elements"], element_ids)):
+                extra.append({"groupObjects": {"groupObjectId": f"{slide_id}_rules{ri}", "childrenObjectIds": members}})
             if slide.get("notes") and speaker_notes.get(slide_id):
                 extra.append({"insertText": {"objectId": speaker_notes[slide_id], "text": slide["notes"]}})
             if title_oid and len(slide["elements"]) > 1:

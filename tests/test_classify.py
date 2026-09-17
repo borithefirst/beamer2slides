@@ -188,7 +188,7 @@ def test_metropolis_progress_bar_is_a_shape():
     slide = deck("12_metropolis_talk")["slides"][5]
     assert kinds(slide).count("image") == 0
     bars = [e for e in slide["elements"] if e["kind"] == "shape"]
-    assert len(bars) == 1 and bars[0]["fill"] == "#eb811b"
+    assert [b["fill"] for b in bars] == ["#d6c6b7", "#eb811b"], "the track below the bar"
 
 
 def test_madrid_blocks_tables_and_footer():

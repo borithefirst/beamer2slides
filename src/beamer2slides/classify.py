@@ -1243,6 +1243,17 @@ class PageClassifier:
             out.append({"id": f"p{self.page['index']}r{index + len(out)}", "kind": "shape", "role": "rule",
                         "bbox": r.as_list(), "fill": d["fill"], "shape": "RECTANGLE", "flip": False,
                         "radius": 0.0, "drawing": d["id"], "spans": []})
+        # The track of a progress bar runs across the page like a decoration hairline: it goes
+        # along (below the bar) when it has exactly the bar's height and contains it.
+        for d in self.page["drawings"]:
+            r = Rect.of(d["bbox"])
+            if d["type"] == "f" and d["fill"] and d.get("fill_opacity", 1.0) >= 0.99 and d["id"] not in self.decor_ids \
+                    and r.x0 > 1 and r.x1 < self.W - 1 and all(o["drawing"] != d["id"] for o in out) \
+                    and any(abs(r.y0 - o["bbox"][1]) < 0.1 and abs(r.y1 - o["bbox"][3]) < 0.1
+                            and r.x0 <= o["bbox"][0] + 0.1 and r.x1 >= o["bbox"][2] - 0.1 for o in out):
+                out.insert(0, {"id": f"p{self.page['index']}r{index + len(out)}", "kind": "shape", "role": "rule",
+                               "bbox": r.as_list(), "fill": d["fill"], "shape": "RECTANGLE", "flip": False,
+                               "radius": 0.0, "drawing": d["id"], "spans": []})
         return out
 
     def diagram_from(self, c: Rect, label_spans: list[Span], index: int) -> dict | None:
@@ -1838,7 +1849,7 @@ def literal_list_numbers(slides: list[dict]) -> None:
     """Slides numbers each list from 1, and the API cannot set a start number. A numbered
     item whose number Slides would get wrong (a table of contents split into one box per
     section, a list continued after a paragraph) keeps its number as literal text with a tab;
-    a ball under the number then simply stays in the background."""
+    a ball or box under the number becomes a picture grouped with the text, so it moves along."""
     def numbered(p: dict) -> bool:
         b = p["bullet"]
         return bool(b) and (b["kind"] == "number" or (b["kind"] == "image" and b["text"].isdigit()))
@@ -1864,15 +1875,23 @@ def literal_list_numbers(slides: list[dict]) -> None:
         if not any(misnumbered(e) for e in texts):
             continue
         # All numbers on the slide the same way, so the items still look alike.
-        for p in (p for e in texts for p in e["paragraphs"] if numbered(p)):
+        pictures = []
+        for e, p in ((e, p) for e in texts for p in e["paragraphs"] if numbered(p)):
             b, label = p["bullet"], p["bullet"].get("label")
             if not label or not p["runs"]:
                 continue
+            if b["kind"] == "image" or b.get("patch"):
+                x0, y0, x1, y1 = b["bbox"]
+                pictures.append({"id": f"{e['id']}b{len(pictures)}", "kind": "image", "role": "icon",
+                                 "bbox": [x0 - 0.5, y0 - 0.5, x1 + 0.5, y1 + 0.5], "spans": [], "anchor": e["id"]})
             p["runs"].insert(0, {
                 "text": b["text"] + "\t", "font": label["font"], "family": label["family"], "size": label["size"],
                 "bold": label["bold"], "italic": label["italic"], "smallcaps": False, "color": label["color"],
                 "link": None, "script": None, "underline": False, "highlight": None})
             p["tab_x0"], p["text_x0"], p["bullet"] = p["text_x0"], label["x0"], None
+        if pictures:  # below the text
+            first_text = next(i for i, e in enumerate(slide["elements"]) if e["kind"] == "text")
+            slide["elements"][first_text:first_text] = pictures
 
 
 def mark_title_page(slides: list[dict], doc_title: str) -> None:

@@ -1,6 +1,6 @@
 """Unit tests for the request builders in emit (local only, no Google API)."""
 
-from beamer2slides.emit import (MIDDLE_BASELINE_EM, block_groups, merge_blocks, template_key,
+from beamer2slides.emit import (MIDDLE_BASELINE_EM, block_groups, merge_blocks, rule_groups, template_key,
                                 text_right_limit)
 
 
@@ -41,6 +41,13 @@ def test_block_group_holds_both_shapes_and_their_text():
     elements = merge_blocks([BODY, BAR]) + [text([10.9, 74, 80, 84]), text([10.9, 90, 150, 100]), text([10, 200, 50, 210])]
     ids = ["body", "bar", "title", "content", "outside"]
     assert block_groups(elements, ids, None) == [["body", "bar", "title", "content"]]
+
+
+def test_progress_bar_and_track_group():
+    track = shape([71.83, 140.8, 291.01, 141.19], shape="RECTANGLE", role="rule")
+    bar = shape([71.83, 140.8, 203.34, 141.19], shape="RECTANGLE", role="rule")
+    other = shape([10, 200, 50, 202], shape="RECTANGLE", role="rule")
+    assert rule_groups([track, bar, other], ["t", "b", "o"]) == [["t", "b"]]
 
 
 def test_text_right_limit():
