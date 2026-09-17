@@ -360,6 +360,32 @@ def unit_shift(base_by: dict, ours_by: dict) -> tuple[float, float] | None:
     return None if max(abs(dx), abs(dy)) <= MOVE_TOLERANCE else (dx, dy)
 
 
+def geometry_writable(members: list[dict], slide_read: dict | None) -> bool:
+    """Whether the deck's move of this unit can be put back onto a rewritten unit.
+
+    Sync re-applies it by transforming the unit's *top* object (`sync.override_requests`), so the
+    person's edit only survives when every object of the unit went along with that top. A formula
+    picture dragged out of its line inside the group, or a group member nudged on its own, moved
+    by itself: recreating the unit would put it back where the converter had it while the report
+    says the deck's geometry was kept. Such a unit is kept as the deck has it instead."""
+    objects = (slide_read or {}).get("objects", {})
+    top = unit_top(members, slide_read) if objects else None
+    base_top = next((m["readback"][top] for m in members if top in m.get("readback", {})), None)
+    if not top or not base_top or top not in objects:
+        return True  # nothing to judge it by: leave the old behaviour
+    step = snapshot.compose(objects[top]["transform"], snapshot.invert(base_top["transform"]))
+    for m in members:
+        for oid, b in (m.get("readback") or {}).items():
+            live = objects.get(oid)
+            if live is None:
+                continue  # a part the person deleted: handled before this ("part_deleted")
+            want = snapshot.compose(step, b["transform"])
+            if any(abs(x - y) > SCALE_TOLERANCE for x, y in zip(want[:4], live["transform"][:4])) or \
+                    any(abs(x - y) > GEOMETRY_TOLERANCE for x, y in zip(want[4:], live["transform"][4:])):
+                return False
+    return True
+
+
 def plan_unit(skey: str, ukey: str, base_members: list[dict] | None, ours_members: list[dict] | None,
               slide_read: dict | None, report: dict, scale: float | None = None, adopt=None) -> dict:
     """The action for one element unit: keep, recreate (with deck overrides), create, delete,
@@ -509,6 +535,11 @@ def plan_unit(skey: str, ukey: str, base_members: list[dict] | None, ours_member
             overrides["shape_style"] = theirs_rb.get("shape_style")
             if "style" in src:
                 conflict("shape_style", "style", "restyled in the source", "restyled in the deck", "deck style re-applied")
+    if "geometry" in edited and not keep and not geometry_writable(base_members, slide_read):
+        # The person moved something inside the unit; a rewritten unit can't be put back that way.
+        conflict("geometry", anchor["fingerprint"]["bbox"], first["fingerprint"]["bbox"], theirs_rb.get("box"),
+                 "deck kept (the deck moved a part of the element on its own)")
+        keep = True
     if "geometry" in edited and not keep:
         both = "position" in src
         overrides["geometry"] = {"mode": "theirs" if both else "delta"}

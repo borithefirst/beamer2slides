@@ -277,7 +277,11 @@ def test_catches_styling_put_back_the_way_the_converter_had_it():
     assert [f["kind"] for f in loss_oracle.style_findings(base, before, after, empty)] == ["style_reverted"]
     kept = {"slides": [{"objectId": "s1", "objects": {"o": {"text_style_hash": "person"}}}]}
     assert loss_oracle.style_findings(base, before, kept, empty) == []
-    said = loss_oracle.normalise_report({"overrides": [{"slide": "f1", "element": "text/body/0", "fields": ["text_style"]}]})
+    # An `overrides` entry claims the deck's styling was kept, so it excuses nothing: only a
+    # conflict (the report saying the styling gave way) accounts for the loss.
+    claimed = loss_oracle.normalise_report({"overrides": [{"slide": "f1", "element": "text/body/0", "fields": ["text_style"]}]})
+    assert [f["kind"] for f in loss_oracle.style_findings(base, before, after, claimed)] == ["style_reverted"]
+    said = loss_oracle.normalise_report({"conflicts": [{"slide": "f1", "element": "text/body/0", "field": "text_style"}]})
     assert loss_oracle.style_findings(base, before, after, said) == []
 
 

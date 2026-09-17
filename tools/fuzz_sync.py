@@ -737,6 +737,7 @@ class LiveRound:
         self.log = open(self.out / "fuzz.log", "w", encoding="utf-8")
         self.problems: list[str] = []
         self.record: dict = {"seed": seed, "steps": []}
+        self.loose: set[str] = set()  # slides whose groups the person took apart, in any step so far
 
     def cli(self, *args, check=True):
         self.log.write(f"\n$ beamer2slides {' '.join(map(str, args))}\n")
@@ -840,12 +841,14 @@ class LiveRound:
         import sync_check as sc
         base = json.loads((self.out / "sync" / "base.json").read_text(encoding="utf-8"))
         # A group the person took apart (or a member they deleted) is theirs: the sync rebuilding
-        # the unit ungrouped is the policy, not a broken deck.
-        loose = {_slide_title(spec) for spec in specs
-                 if spec["edit"] in ("ungroup", "group", "delete_element", "delete_group", "duplicate")}
-        loose.discard(None)
+        # the unit ungrouped is the policy, not a broken deck. It stays theirs for the rest of the
+        # chain - a later step must not be accused of the group step 0 dissolved - so the slides
+        # add up over the steps.
+        self.loose |= {_slide_title(spec) for spec in specs
+                       if spec["edit"] in ("ungroup", "group", "delete_element", "delete_group", "duplicate")}
+        self.loose.discard(None)
         return sc.integrity(sc.Model(pres_after), before=sc.Model(pres_before), base_ids=sc.ids_in(base),
-                            allow_ungrouped=loose, allow_groups_changed=loose)
+                            allow_ungrouped=self.loose, allow_groups_changed=self.loose)
 
     def drop_deck(self):
         from beamer2slides import snapshot

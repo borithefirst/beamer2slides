@@ -266,16 +266,7 @@ def new_object(skey, o_el, base_el, live, overrides, tok):
         else:
             text = merge.diff3(merge.collapse_holes(ov["base"]), merge.collapse_holes(text),
                                merge.collapse_holes(ov["theirs"]))[0]
-    ovg = (overrides or {}).get("geometry")
     main = base_el.get("main") if base_el else None
-    if ovg and main and main in live["objects"]:
-        theirs_box = live["objects"][main]["box"]
-        if ovg["mode"] == "theirs":
-            box = [theirs_box[0], theirs_box[1], theirs_box[0] + box[2] - box[0], theirs_box[1] + box[3] - box[1]]
-        else:
-            base_box = base_el["readback"][main]["box"]
-            dx, dy = theirs_box[0] - base_box[0], theirs_box[1] - base_box[1]
-            box = [box[0] + dx, box[1] + dy, box[2] + dx, box[3] + dy]
     parent = live["objects"].get(main, {}).get("parent_group") if main else None
     if parent not in live["objects"]:
         parent = None
@@ -336,6 +327,9 @@ def apply_plan(base, ours, theirs, mplan, tok="2zz") -> dict:
 def _update_slide(base, ours, live, p, tok):
     b, o = base["slides"][p["base"]], ours["slides"][p["ours"]]
     bu, ou = merge.units(b["elements"]), merge.units(o["elements"])
+    # The deck's own version of the objects, read before anything is deleted: that is what the
+    # overrides (the deck's box, its styling) are re-applied from.
+    theirs = {"objects": dict(live["objects"])}
     for u in p["units"]:
         action = u["action"]
         members = bu.get(u["key"], [])
@@ -364,11 +358,14 @@ def _update_slide(base, ours, live, p, tok):
                         live["objects"].pop(oid, None)
         overrides = u.get("overrides") or {}
         base_by = {m["key"]: m for m in members}
+        made = []
         for m in ou.get(u["key"], []):
-            oid, rb = new_object(o["key"], m, base_by.get(m["key"]), live, overrides if m["key"] == u["key"] else None, tok)
+            oid, rb = new_object(o["key"], m, base_by.get(m["key"]), theirs, overrides if m["key"] == u["key"] else None, tok)
             parent = parents.get(m["key"])
             rb["parent_group"] = parent if parent in live["objects"] else None
             live["objects"][oid] = rb
+            made.append((m, rb))
+        _place_unit(u, members, theirs, made, base_by)
     if p.get("background"):
         live["background"] = {"color": p["background"].split(":", 1)[1]}
     if p.get("notes") is not None:
@@ -472,6 +469,29 @@ def _rebased_element(el: dict, oids: list[str], read: dict) -> dict:
         mine = mine + [group]
     return {**el, "objects": mine, "main": mine[0] if mine else None,
             "readback": {oid: copy.deepcopy(objects[oid]) for oid in mine}}
+
+
+def _place_unit(u, members, theirs, made, base_by):
+    """Re-apply the deck's move or resize to a rewritten unit. Sync transforms the unit's *top*
+    object, so the anchored pictures go along with their text; the step comes from the old top's
+    base and live read-backs (`delta`), or puts the new unit where the deck's object stands."""
+    ov = (u.get("overrides") or {}).get("geometry")
+    if not ov or not made:
+        return
+    anchor = base_by.get(u["key"]) or (members[0] if members else None)
+    old_top = (merge.unit_top(members, theirs) if members else None) or (anchor or {}).get("main")
+    base_rb = next((m["readback"][old_top] for m in members if old_top in m.get("readback", {})), None)
+    theirs_rb = theirs["objects"].get(old_top)
+    if not base_rb or not theirs_rb:
+        return
+    if ov["mode"] == "delta":
+        dx, dy = theirs_rb["box"][0] - base_rb["box"][0], theirs_rb["box"][1] - base_rb["box"][1]
+    else:  # "theirs": both sides moved it, the deck's place wins
+        ref = next((rb for m, rb in made if m["key"] == u["key"]), made[0][1])
+        dx, dy = theirs_rb["box"][0] - ref["box"][0], theirs_rb["box"][1] - ref["box"][1]
+    for _, rb in made:
+        rb["box"] = [rb["box"][0] + dx, rb["box"][1] + dy, rb["box"][2] + dx, rb["box"][3] + dy]
+        rb["transform"] = rb["transform"][:4] + [rb["transform"][4] + dx, rb["transform"][5] + dy]
 
 
 def _drop_lonely_groups(live):

@@ -595,6 +595,42 @@ def test_whole_unit_moved_still_moves_the_deck_objects():
     assert u["action"] == "move" and u["delta"] == [0, 20]
 
 
+def move_object(slide, oid, dx, dy):
+    rb = slide["objects"][oid]
+    rb["box"] = [rb["box"][0] + dx, rb["box"][1] + dy, rb["box"][2] + dx, rb["box"][3] + dy]
+    rb["transform"] = rb["transform"][:4] + [rb["transform"][4] + dx, rb["transform"][5] + dy]
+
+
+def test_picture_the_deck_moved_inside_its_unit_is_kept_not_recreated():
+    """Found by the offline fuzz (tools/fuzz_sync.py, seed 720): the person dragged the formula
+    picture inside its line while the source reworded that paragraph. Sync re-applies a geometry
+    override by transforming the unit's *top* object, so a member that moved on its own would land
+    back at the converter's box - silently, since the report listed the geometry as an override.
+    The unit is kept as the deck has it, and the clash is reported."""
+    base, pic = anchored_picture_base()
+    ours, theirs = triple(base)
+    ours["slides"][1]["elements"][1] = ours_entry("text/body/0", text_ir("First point reworded\nSecond point of results",
+                                                                         (20, 60, 200, 90), "p1t1"))
+    move_object(theirs["slides"][1], "b2s_s001_m0", 0, 40)
+    mplan = merge.plan_merge(base, ours, theirs)
+    assert unit(mplan, "results", "text/body/0")["action"] == "keep"
+    clash, = [c for c in mplan["report"]["conflicts"] if c["field"] == "geometry"]
+    assert clash["element"] == "text/body/0" and "on its own" in clash["resolution"]
+
+
+def test_unit_the_deck_moved_as_a_whole_is_still_recreated():
+    """The counterpart: the person moved every object of the unit by the same step (they moved the
+    group), so the top's transform carries the whole unit and the source's rewording goes in."""
+    base, pic = anchored_picture_base()
+    ours, theirs = triple(base)
+    ours["slides"][1]["elements"][1] = ours_entry("text/body/0", text_ir("First point reworded\nSecond point of results",
+                                                                         (20, 60, 200, 90), "p1t1"))
+    for oid in ("b2s_s001_t1", "b2s_s001_m0"):
+        move_object(theirs["slides"][1], oid, 0, 40)
+    u = unit(merge.plan_merge(base, ours, theirs), "results", "text/body/0")
+    assert u["action"] == "recreate" and u["overrides"]["geometry"] == {"mode": "delta"}
+
+
 def test_image_replaced_in_deck_is_kept():
     base = three_slides()
     pic = {"id": "p1f0", "kind": "image", "role": "figure", "bbox": [200, 60, 300, 160], "file": None}
@@ -693,6 +729,27 @@ def test_letterbox_fix_stretches_to_the_box():
     assert fix["scaleX"] * fx0 + fix["translateX"] / 12700 == pytest.approx(100, abs=0.01)
     assert fix["scaleX"] * fx1 + fix["translateX"] / 12700 == pytest.approx(400, abs=0.01)
     assert fix["scaleY"] == pytest.approx(1) and fix["translateY"] == pytest.approx(0, abs=1)
+
+
+@pytest.mark.xfail(strict=True, reason="sync.tag_requests tags a diagram's main object, which is the group "
+                                       "emit.diagram_requests creates under that id; the API refuses "
+                                       "updatePageElementAltText on a group and rejects the whole batch")
+def test_sync_does_not_alt_text_a_diagram_group():
+    """Found by the live fuzz (tools/fuzz_sync.py, seed 202): a sync that rewrites a slide with a
+    diagram dies with 'The operation is not allowed on group (b2s_..._<tok>)'. A diagram element's
+    main object *is* a group (emit.diagram_requests groups its parts under the element's object id),
+    and sync.tag_requests (sync.py) sends an alt-text title for every element it wrote.
+    snapshot.tag_requests already skips elementGroup read-backs; sync must skip them too (or send
+    the tags in their own batch, like snapshot.write_tags, which tolerates refusals)."""
+    from types import SimpleNamespace
+
+    from beamer2slides.sync import Syncer
+    o = {"key": "figures", "elements": [{"key": "diagram/figure/0"}]}
+    stub = SimpleNamespace(plan=SimpleNamespace(deck={"slides": [{"elements": [{"kind": "diagram", "id": "p0d0"}]}]}),
+                           ours={"slides": [o]})
+    oid = "b2s_abcdef_012345_t0k"  # the group emit creates for the diagram, with its nodes and lines inside
+    reqs = Syncer.tag_requests(stub, o, {0: [oid, f"{oid}_n0", f"{oid}_l0"]}, {0: oid}, {})
+    assert [r for r in reqs if r["updatePageElementAltText"]["objectId"] == oid] == []
 
 
 def test_element_objects_from_emit_plan():

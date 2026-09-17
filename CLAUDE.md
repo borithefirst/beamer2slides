@@ -362,6 +362,24 @@ Sync test harness (opt-in, marker `sync`, deselected by default): `python -m pyt
   URLs); a base must keep the source's slide order (else the deck's reorder is undone next time);
   a slide sync creates must inherit the master background, not copy it (the theme sits there now).
 
+Sync fuzzing (docs/sync.md, "Proving nothing is lost"): `tools/loss_oracle.py` judges one sync from
+the read-backs before and after, the base, the report and the new conversion - did anything a person
+put in the deck disappear without being accounted for? (Its docstring defines that; no Google call.)
+`tools/fuzz_sync.py offline --rounds N` fuzzes `merge.plan_merge` against synthetic decks through a
+reference applier (`tools/fuzz_world.py`), ~70 rounds/s with a shrinker; `live` runs the same against
+real decks (`out/sync-fuzz/<seed>`, 3 at a time, passing rounds' decks deleted, `--chain N` for
+edit→sync→edit→sync). `tests/test_sync_fuzz.py`: fixed offline seeds in the default run plus tests
+that the oracle catches losses injected on purpose; the live campaign is marked `sync`.
+Found by it: `merge.plan_unit`'s `move` shortcut took the delta from the unit's anchor while the
+source may have moved only an anchored member, so a re-placed inline formula became a move of
+[0, 0] that the report still called applied (`merge.unit_shift` now requires one step for the whole
+unit, else the unit is recreated). Also: a geometry override was promised for a unit whose parts the
+person had moved apart, although sync re-applies it by transforming the unit's top object, so the
+dragged picture went back to the converter's box (`merge.geometry_writable` keeps such a unit and
+reports a conflict); and `sync.tag_requests` alt-texts a diagram's main object, which is the group
+emit builds under that id - the API refuses it and rejects the whole batch, so a sync that rewrites
+a diagram slide dies (open, xfail `tests/test_sync.py::test_sync_does_not_alt_text_a_diagram_group`).
+
 ## Pitfalls found so far
 - PDFium (`pdf.py` handles these):
   - Soft-mask contents are not page objects. Beamer's block shadow is a black rectangle under
