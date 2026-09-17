@@ -1558,6 +1558,10 @@ class PageClassifier:
                 "tab_x0": round(p.first.tab.rect.x0, 2) if p.first.tab else None,
                 "lines": [{"baseline": round(l.baseline, 2), "x0": round(l.x0, 2), "x1": round(l.x1, 2)}
                           for l in p.lines],
+                # Right edge a wrapped line could grow to before TeX would have pulled up the
+                # next line's first word: a text box narrower than this wraps the same way.
+                "wrap_limit": round(min(a.x1 + 0.33 * p.size + b.content[0].rect.w for a, b in zip(p.lines, p.lines[1:])), 2)
+                              if len(p.lines) > 1 and all(l.content for l in p.lines) else None,
                 "runs": self.runs(p, code_indent(p, rect.x0) if code else ""),
             } for p in box],
             "code": code,

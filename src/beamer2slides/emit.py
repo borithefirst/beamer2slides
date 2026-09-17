@@ -262,9 +262,18 @@ def text_box_requests(el: dict, slide_id: str, object_id: str, scale: float, fon
     inner_w = (right_pdf - left_pdf) * scale
     # Titles carry their line breaks as soft breaks (SOFT_BREAK) and need no tight width.
     multiline = any(len(p["lines"]) > 1 and not any(SOFT_BREAK in r["text"] for r in p["runs"]) for p in paras)
-    # Wrapped paragraphs need a tight width to break where TeX did; single lines get room
-    # so that a slightly wider font never wraps them.
-    slack = 2 + 0.01 * inner_w if multiline else max(0.15 * inner_w, 2 * max(sizes))
+    # Wrapped paragraphs need a width that breaks where TeX did: wide enough for the longest
+    # line, narrower than where the next line's first word would fit. The middle of that range
+    # tolerates the substitute font being a little wider or narrower. Single lines get room so
+    # that a slightly wider font never wraps them.
+    limits = [p["wrap_limit"] for p in paras if p.get("wrap_limit") and not any(SOFT_BREAK in r["text"] for r in p["runs"])]
+    room = (min(limits) - right_pdf) * scale if limits else 0.0
+    if not multiline:
+        slack = max(0.15 * inner_w, 2 * max(sizes))
+    elif room > 4:
+        slack = room / 2
+    else:
+        slack = 2 + 0.01 * inner_w
     x = left_pdf * scale - PAD_X
     aligns = {p["align"] for p in paras}
     if aligns == {"center"}:
