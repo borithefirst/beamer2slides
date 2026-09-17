@@ -1,0 +1,104 @@
+% !engine = lualatex
+% A talk written the way an AI author would use the gdg theme: plain beamer structure plus
+% the theme's layout commands. Used to test the theme through beamer2slides.
+\documentclass[aspectratio=169]{beamer}
+\usetheme[accent=blue, sectionpages]{gdg}
+
+\title{Shipping \textbf{on-device} AI}
+\subtitle{What we learned moving a summariser from the cloud to the phone}
+\groupname{Google Developer Group}
+\location{Zurich}
+
+\begin{document}
+
+\begin{frame}[plain]
+  \titlepage
+\end{frame}
+
+\begin{frame}{Why move to the device?}
+  \begin{itemize}
+    \item Latency: no round trip, answers start in under 100 ms
+    \item Privacy: messages never leave the phone
+    \item Cost: inference is free once the model is downloaded
+    \item Offline: works on the train, in the mountains, anywhere
+  \end{itemize}
+\end{frame}
+
+\section{The model}
+
+\begin{frame}{Three constraints shaped the model}
+  \begin{columns}[T]
+    \begin{column}{192\gpt}
+      \subhead{Size}
+      The model ships inside the app bundle, so it has to stay under 300 MB after
+      quantisation.
+    \end{column}
+    \begin{column}{192\gpt}
+      \subhead{Memory}
+      Peak RAM must leave room for the rest of the app on a four-year-old mid-range phone.
+    \end{column}
+    \begin{column}{192\gpt}
+      \subhead{Quality}
+      Summaries are rated side by side with the cloud model by human raters.
+    \end{column}
+  \end{columns}
+\end{frame}
+
+\begin{frame}[split]{Quantisation}
+  Four-bit weights cut the download by three quarters.
+
+  Quality dropped less than we feared: raters preferred the cloud summary in only a few
+  more cases than before.
+  \statcard[gblue-pastel]{4×}{smaller download with 4-bit weights}
+\end{frame}
+
+\begin{frame}
+  \numbers
+    {\keyfigure{280 MB}{Model size after quantisation, down from 1.1 GB.}}
+    {\keyfigure{38 tokens/s}{Decoding speed on a mid-range phone from 2022.}}
+    {\keyfigure{92\%}{Summaries rated as good as the cloud model's.}}
+    {\keyfigure{0}{Messages sent to a server to produce a summary.}}
+    {\keyfigure{3 weeks}{From first prototype to the internal dogfood release.}}
+    {\keyfigure{2 teams}{Android and ML infrastructure, working in one repository.}}
+\end{frame}
+
+\section{The app}
+
+\begin{frame}[fragile,code]
+\begin{code}[language=Java, emph={Summarizer,Options,Result}]
+Summarizer.kt
+
+val summarizer = Summarizer.create(context, Options(maxTokens = 128))
+val result: Result = summarizer.summarize(thread.messages)
+if (result.isSuccess) {
+    // Show the summary above the conversation
+    showSummary(result.text)
+}
+\end{code}
+\end{frame}
+
+\begin{frame}[split]{Rollout}
+  We shipped to 1\% of users first and watched crash rates and battery drain.
+  \smallstat[ggreen-pastel]{452.2}{44.4}{0\%}{more crashes}
+  \smallstat[gblue]{367.1}{202.5}{1.4\%}{battery per day}
+\end{frame}
+
+\begin{frame}
+  \bignumber[gyellow]{92\%}{of summaries rated as good as the cloud model's}
+\end{frame}
+
+\begin{frame}[split]{What we learned}
+  Measure quality with people, not only with benchmarks.
+  \sidecard[ggreen-pastel]{Next steps}{Personalised summaries, more languages, and a smaller
+    model for older phones.}
+\end{frame}
+
+\begin{frame}[dark]{Thank you}
+  Questions? Find the code samples and slides on the event page.
+\end{frame}
+
+\begin{frame}
+  \quoteslide[gblue][gyellow-pastel]{The best \textbf{latency} is no network at all.}{- Our team}
+\end{frame}
+
+\end{document}

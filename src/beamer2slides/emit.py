@@ -268,7 +268,9 @@ def text_box_requests(el: dict, slide_id: str, object_id: str, scale: float, fon
     sizes = [max(fonts(r, scale)[1] * (SMALL_CAPS_LINE if r.get("smallcaps") else 1) for r in p["runs"])
              if p["runs"] else p["size"] * scale for p in paras]
 
-    left_pdf = min(p["bullet"]["bbox"][0] if p["bullet"] else p["text_x0"] for p in paras)
+    # (a centred or right-aligned paragraph's longest line can start left of its first line)
+    left_pdf = min(p["bullet"]["bbox"][0] if p["bullet"] else
+                   min([p["text_x0"]] + ([l["x0"] for l in p["lines"]] if p["align"] != "left" else [])) for p in paras)
     right_pdf = max(line["x1"] for p in paras for line in p["lines"])
     first_baseline = paras[0]["lines"][0]["baseline"] * scale
     last_baseline = paras[-1]["lines"][-1]["baseline"] * scale
@@ -1025,7 +1027,8 @@ def text_right_limit(el: dict, slide: dict) -> float | None:
         px0, _, px1, _ = min(panels, key=lambda b: (b[2] - b[0]) * (b[3] - b[1]))
         limit = px1 - max(x0 - px0, 2.0)
     else:
-        margin = min(e["bbox"][0] for e in slide["elements"] if e["kind"] == "text" and e.get("role") in ("body", None))
+        margin = min((e["bbox"][0] for e in slide["elements"] if e["kind"] == "text" and e.get("role") in ("body", None)),
+                     default=x0)
         limit = slide["size"][0] - margin
         size = el["paragraphs"][0]["size"]
         for o in slide["elements"]:

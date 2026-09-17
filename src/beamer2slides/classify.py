@@ -329,6 +329,14 @@ def math_content(line: "Line") -> list[Span]:
     return [s for s in line.content if s.rect.x0 >= line.tab.rect.x0 - 0.1]
 
 
+def first_word_width(span: Span) -> float:
+    """Width of a span's first word: a span can hold one word or a whole line of them."""
+    text = span.text.strip()
+    if not text:
+        return span.rect.w
+    return span.rect.w * len(text.split()[0]) / len(text)
+
+
 def is_mono(spans: list[Span]) -> bool:
     return bool(spans) and all(s.info.family == "mono" for s in spans)
 
@@ -534,6 +542,10 @@ class PageClassifier:
             for j in range(i + 1, n):
                 b = spans[j]
                 big = max(a.size, b.size)
+                if big > 2.5 * min(a.size, b.size):
+                    # very different sizes (a big statistic beside body copy): only words that
+                    # share a baseline and nearly touch are one line
+                    big = min(a.size, b.size)
                 same_row = abs(a.baseline - b.baseline) <= 0.5 * big and \
                     min(a.rect.y1, b.rect.y1) > max(a.rect.y0, b.rect.y0)
                 gap = max(0.0, b.rect.x0 - a.rect.x1, a.rect.x0 - b.rect.x1)
@@ -592,6 +604,8 @@ class PageClassifier:
                 continue
             if abs(a.spans[0].rect.x0 - b.spans[0].rect.x0) <= 0.6:
                 continue  # labels start together: ordinary text already lines up the same way
+            if abs(a.rect.cx - b.rect.cx) <= 0.6:
+                continue  # centred lines (a quote): word edges line up only by chance
             sa, sb = splits(a), splits(b)
             for ka, span_a in sa.items():
                 kb = next((k for k, s in sb.items() if abs(s.rect.x0 - span_a.rect.x0) <= 0.6
@@ -1727,6 +1741,13 @@ class PageClassifier:
             columns = [[min(extent(r[1][c])[0] for r in group), max(extent(r[1][c])[1] for r in group)] for c in range(k)]
             if any(a[1] + 0.5 * size > b[0] for a, b in zip(columns, columns[1:])):
                 continue  # cells of neighbouring columns overlap: not a grid
+
+            def wraps(upper: list[Span], lower: list[Span]) -> bool:
+                """A sentence running on from one row to the next in the same column."""
+                a, b = " ".join(s.text for s in upper).strip(), " ".join(s.text for s in lower).strip()
+                return len(a.split()) >= 3 and b[:1].islower() and (a[-1:].isalnum() or a[-1:] == ",")
+            if sum(any(wraps(a[1][c], b[1][c]) for a, b in zip(group, group[1:])) for c in range(k)) >= min(2, k):
+                continue  # columns of wrapped prose side by side, not a table
             col_info = []
             for c, (x0, x1) in enumerate(columns):
                 chunks = [r[1][c] for r in group]
@@ -1769,7 +1790,9 @@ class PageClassifier:
                           for l in p.lines],
                 # Right edge a wrapped line could grow to before TeX would have pulled up the
                 # next line's first word: a text box narrower than this wraps the same way.
-                "wrap_limit": round(min(a.x1 + 0.33 * p.size + b.content[0].rect.w for a, b in zip(p.lines, p.lines[1:])), 2)
+                # (as a width from the paragraph's left edge, so centred lines count too)
+                "wrap_limit": round(min(l.x0 for l in p.lines) + min(a.x1 - a.x0 + 0.33 * p.size + first_word_width(b.content[0])
+                                                                     for a, b in zip(p.lines, p.lines[1:])), 2)
                               if len(p.lines) > 1 and all(l.content for l in p.lines) else None,
                 "runs": self.runs(p, code_indent(p, rect.x0) if code else ""),
             } for p in box],

@@ -1,4 +1,4 @@
-﻿% beamerthemegdg.sty -- the Google for Developers look of the public
+% beamerthemegdg.sty -- the Google for Developers look of the public
 % "GDG24 - PRO - Speaker Presentation Template" (Google Slides), rebuilt for beamer.
 %
 % Compile with LuaLaTeX, 16:9:  \documentclass[aspectratio=169]{beamer} \usetheme{gdg}
@@ -91,7 +91,8 @@
   UprightFont=*-Regular, ItalicFont=*-Italic, BoldFont=*-Bold, BoldItalicFont=*-BoldItalic,
   FontFace={mb}{n}{*-Medium}, FontFace={mb}{it}{*-MediumItalic},
   FontFace={sb}{n}{*-SemiBold}, FontFace={sb}{it}{*-SemiBoldItalic},
-  Ligatures=TeX]
+  Ligatures=TeX,
+  WordSpace={1,0,0}]% spaces never stretch in Slides (LaTeX's \raggedright lets them)
 \setmonofont{GoogleSansCode}[
   Path=\gdg@fontdir, Extension=.ttf,
   UprightFont=*-Regular, ItalicFont=*-Italic, BoldFont=*-Bold,
@@ -179,21 +180,30 @@
 % first body baseline sits one body \baselineskip (19.32) below the title box, after
 % beamer's \vskip0.25em (3.5).
 \newlength\gdg@frametop  \gdg@frametop=0pt  % page y of the frame's top (measured)
-\newlength\gdg@titlewidth  \gdg@titlewidth=480\gpt
+\newlength\gdg@titlewidth  \gdg@titlewidth=494.4\gpt
+% A title of several lines (or with a subtitle) pushes the body down, keeping the same
+% distance from its last baseline (a subtitle keeps 50 pt).
 \setbeamertemplate{frametitle}{%
   \ifgdg@split\gdg@splittitle\fi
   \ifgdg@code\gdg@darkcolours\else\ifgdg@dark\gdg@darkcolours\fi\fi
   \nointerlineskip
-  \vbox to \dimexpr\gdg@bodybaseline-\gdg@frametop-3.5\gpt-19.32\gpt\relax{%
+  \setbox\z@\vbox{%
     \hrule height 0pt\relax\prevdepth=0pt\relax
     \usebeamerfont{frametitle}\usebeamercolor[fg]{frametitle}%
     \vskip\dimexpr\gdg@titlebaseline-\gdg@frametop-\baselineskip\relax
     \hsize=\gdg@titlewidth
     \raggedright\insertframetitle\par
-    \ifx\insertframesubtitle\@empty\else
+    \ifx\insertframesubtitle\@empty
+      \global\dimen@i=\dimexpr\gdg@bodybaseline-\gdg@titlebaseline\relax
+    \else
       {\gdg@size{20}\semibold\insertframesubtitle\par}%
-    \fi
-    \vfil}%
+      \global\dimen@i=50\gpt
+    \fi}%
+  \dimen@=\dimexpr\gdg@bodybaseline-\gdg@frametop-22.82\gpt\relax
+  \ifdim\dimexpr\ht\z@+\dimen@i-22.82\gpt\relax>\dimen@
+    \dimen@=\dimexpr\ht\z@+\dimen@i-22.82\gpt\relax
+  \fi
+  \vbox to\dimen@{\unvbox\z@\vfil}%
   \nointerlineskip}
 \setbeamertemplate{frametitle continuation}{}
 
@@ -217,6 +227,8 @@
 \setbeamertemplate{itemize/enumerate body begin}{\setlength\itemsep{12\gpt}\setlength\parskip{0pt}}
 \setbeamertemplate{itemize/enumerate subbody begin}{\setlength\itemsep{6\gpt}}
 
+% Columns stay inside the text margins (like the template's column text boxes).
+\beamer@onlytextwidthtrue
 % Columns: [t] and [T] both align the columns' first baselines where a paragraph's first
 % baseline would be (the columns row is a paragraph, with \parskip above it).
 \def\gdg@colkey#1{\def\beamer@colmode{#1}\def\beamer@colalign{t}\def\beamer@colheadskip{}%
@@ -279,6 +291,8 @@
 
 % ---------------------------------------------------------------- shapes
 % All outlines are 2.25 pt black, like the template's shapes.
+% TikZ's align=... sets \spaceskip to 1/3 em; Slides uses the font's own space (0.225 em).
+\tikzset{every node/.append style={execute at begin node={\spaceskip\z@\xspaceskip\z@}}}
 \tikzset{
   gdg outline/.style={draw=black, line width=2.25\gpt},
   % Slides' default round rectangle: corner radius 1/6 of the shorter side.
@@ -332,11 +346,11 @@
       \node[anchor=base west, inner sep=0pt, font=\gdg@size{10.5}\medium, text=gaccent-text]
         at ([shift={(55.2,\ifx\gdg@groupname\@empty 64.6\else 77.9\fi)}]o) {\gdg@location};
     \fi
-    \node[anchor=base west, inner sep=0pt, text width=560\gpt, align=left,
+    \node[anchor=base west, inner sep=0pt, text width=500\gpt, align=left,
           font={\usebeamerfont{title}}, text=title.fg]
       at ([shift={(48.4,215.1)}]o) {#1};
     \ifx\relax#2\relax\else
-      \node[anchor=base west, inner sep=0pt, text width=560\gpt, align=left,
+      \node[anchor=base west, inner sep=0pt, text width=500\gpt, align=left,
             font={\usebeamerfont{subtitle}}, text=subtitle.fg]
         at ([shift={(48.4,350.4)}]o) {#2};
     \fi
