@@ -2,6 +2,7 @@
 
 import math
 import re
+import unicodedata
 from pathlib import Path
 
 from .pdf import Char, Document, Page
@@ -91,6 +92,11 @@ SAME_BASELINE = 0.05
 NEW_BASELINE = 0.8
 
 
+def combining_mark(c: str) -> bool:
+    """The character is nothing but combining marks (a macron, an acute): no width of its own."""
+    return bool(c) and all(unicodedata.combining(u) for u in c)
+
+
 def spans(page: Page) -> list[dict]:
     """Runs of glyphs on one line with the same font, size and colour, split at word gaps."""
     out = []
@@ -100,10 +106,13 @@ def spans(page: Page) -> list[dict]:
     def flush():
         if run and any(not ch.synthetic for ch in run):
             text = "".join(ch.c for ch in run)
-            bx0 = min(ch.box[0] for ch in run)
-            by0 = min(ch.box[1] for ch in run)
-            bx1 = max(ch.box[2] for ch in run)
-            by1 = max(ch.box[3] for ch in run)
+            # A combining mark sits over the letter before it; its own box (PDFium gives it one,
+            # advance included) would stretch the span over the space that follows.
+            boxed = [ch for ch in run if not combining_mark(ch.c)] or run
+            bx0 = min(ch.box[0] for ch in boxed)
+            by0 = min(ch.box[1] for ch in boxed)
+            bx1 = max(ch.box[2] for ch in boxed)
+            by1 = max(ch.box[3] for ch in boxed)
             first = run[0]
             out.append({"text": text, "font": first.font, "size": first.size, "color": first.color,
                         "alpha": first.alpha, "origin": first.origin, "bbox": (bx0, by0, bx1, by1),
@@ -138,7 +147,10 @@ def spans(page: Page) -> list[dict]:
         if space:
             run.append(space)
         run.append(ch)
-        prev = ch
+        # A combining mark is drawn over the letter before it, so the pen stays where that letter
+        # left it: lualatex sets \={x} as x plus U+0304, and PDFium gives the mark an advance of
+        # its own. Counted, it eats the word space that follows ("x̄and").
+        prev = prev if prev is not None and combining_mark(ch.c) else ch
     flush()
     return out
 
