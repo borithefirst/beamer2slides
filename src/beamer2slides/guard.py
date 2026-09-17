@@ -377,6 +377,53 @@ def record(out: Path, entry: dict) -> Path:
     return path
 
 
+def read_log(out: Path) -> list[dict]:
+    path = backup_dir(out) / "backups.json"
+    try:
+        log = json.loads(path.read_text(encoding="utf-8"))
+        return log if isinstance(log, list) else []
+    except (OSError, ValueError):
+        return []
+
+
+def backup_files(entries: list[dict]) -> list[tuple[Path, dict]]:
+    """The .pptx files the log says this program wrote, in the order they were written. Nothing
+    else in the folder is ever a candidate for deletion: a file someone put there is theirs."""
+    found = []
+    for e in entries:
+        name = (e.get("backup") or {}).get("file")
+        if name and Path(name).exists():
+            found.append((Path(name), e))
+    return found
+
+
+def prune_backups(out: Path, keep: int = 10, older_than_days: float | None = None,
+                  delete: bool = False) -> dict:
+    """Which backup files of this output folder are past what it keeps, and delete them when asked.
+
+    Every sync writes a .pptx of the deck before its first write, so a folder synced often grows
+    without end. The newest `keep` are kept, and with `older_than_days` so is everything younger
+    than that. The log entry of a deleted file stays, with `backup.deleted`: what the deck was, and
+    when, is worth keeping as evidence even when the way back is not."""
+    entries = read_log(out)
+    files = backup_files(entries)
+    doomed = files[:-keep] if keep else list(files)
+    if older_than_days is not None:
+        cutoff = time.time() - older_than_days * 86400
+        doomed = [(p, e) for p, e in doomed if p.stat().st_mtime < cutoff]
+    result = {"files": len(files), "bytes": sum(p.stat().st_size for p, _ in files),
+              "doomed": [{"file": str(p), "bytes": p.stat().st_size, "entry": e} for p, e in doomed],
+              "freed": sum(p.stat().st_size for p, _ in doomed), "deleted": False}
+    if delete and doomed:
+        for p, e in doomed:
+            p.unlink()
+            e.setdefault("backup", {})["deleted"] = time.strftime("%Y-%m-%d %H:%M:%S")
+        (backup_dir(out) / "backups.json").write_text(json.dumps(entries, indent=1, ensure_ascii=False),
+                                                      encoding="utf-8")
+        result["deleted"] = True
+    return result
+
+
 def restore_hint(entry: dict, what: str = "rebuild") -> list[str]:
     """What to print (and to put in a report) so the person can get the old deck back.
 

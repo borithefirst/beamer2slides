@@ -5,7 +5,9 @@ and the proof that sync's staging deck can never be the user's own deck. No Goog
 import copy
 import io
 import json
+import os
 import re
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -353,6 +355,43 @@ def test_a_refused_export_falls_back_to_a_drive_copy(tmp_path):
     result = guard.backup_deck(drive, "P1", tmp_path / "talk", "file")
     assert "file" not in result and result["drive"]["presentationId"] == "COPY1"
     assert result["warnings"] and "10 MB" in result["warnings"][0]
+
+
+def a_backup(out: Path, name: str, age_days: float = 0.0, size: int = 1000) -> dict:
+    path = guard.backup_dir(out) / name
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(b"P" * size)
+    when = time.time() - age_days * 86400
+    os.utime(path, (when, when))
+    return {"presentationId": "P1", "action": "synced", "revisionId": name, "checked": name,
+            "backup": {"mode": "file", "file": str(path), "warnings": []}}
+
+
+def test_prune_keeps_the_newest_backups_and_only_touches_its_own_files(tmp_path):
+    out = tmp_path / "talk"
+    log = [a_backup(out, f"{n:02}.pptx") for n in range(5)]
+    stranger = guard.backup_dir(out) / "someone-elses.pptx"
+    stranger.write_bytes(b"not ours")
+    (guard.backup_dir(out) / "backups.json").write_text(json.dumps(log), encoding="utf-8")
+    dry = guard.prune_backups(out, keep=2)
+    assert dry["files"] == 5 and [Path(d["file"]).name for d in dry["doomed"]] == ["00.pptx", "01.pptx", "02.pptx"]
+    assert dry["deleted"] is False and all(p.exists() for p in guard.backup_dir(out).glob("*.pptx"))
+    done = guard.prune_backups(out, keep=2, delete=True)
+    assert done["deleted"] and done["freed"] == 3000
+    assert sorted(p.name for p in guard.backup_dir(out).glob("*.pptx")) == \
+        ["03.pptx", "04.pptx", "someone-elses.pptx"], "a file this program did not write is never deleted"
+    kept = json.loads((guard.backup_dir(out) / "backups.json").read_text(encoding="utf-8"))
+    assert len(kept) == 5, "the record of what the deck was stays, even when its file is gone"
+    assert [bool(e["backup"].get("deleted")) for e in kept] == [True, True, True, False, False]
+    assert guard.prune_backups(out, keep=2)["doomed"] == []  # nothing left to prune
+
+
+def test_prune_can_be_asked_to_keep_everything_recent(tmp_path):
+    out = tmp_path / "talk"
+    log = [a_backup(out, "old.pptx", age_days=30), a_backup(out, "new.pptx", age_days=1)]
+    (guard.backup_dir(out) / "backups.json").write_text(json.dumps(log), encoding="utf-8")
+    r = guard.prune_backups(out, keep=0, older_than_days=7)
+    assert [Path(d["file"]).name for d in r["doomed"]] == ["old.pptx"]
 
 
 def test_a_backup_neither_kind_of_which_worked_is_no_way_back(tmp_path):

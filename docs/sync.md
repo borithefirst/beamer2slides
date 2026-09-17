@@ -500,6 +500,12 @@ are appended to `<out>/backups/backups.json` (and the rebuild's entry goes into 
 from a revision). A restore creates a **new** presentation by default; `--in-place` writes the
 backup back over the deck, so every link to it keeps working.
 
+Every sync writes one, so a folder synced often grows without end (the live suites left 110 files,
+53 MB in one night). `prune --deck <out> [--keep 10] [--older-than-days N]` says what it would
+delete and deletes nothing without `--yes`; it only ever touches files `backups.json` says this
+program wrote, and the log entry of a deleted file stays with `backup.deleted` - what the deck was,
+and when, is evidence worth keeping even when the way back is not (`guard.prune_backups`).
+
 **A backup that did not happen stops the rebuild** (`guard.demand_way_back`). Drive can refuse both
 kinds: the `.pptx` export over 10 MB, the copy when the Drive is full or over quota; `backup_deck`
 only collected warnings, and the forced rebuild then went ahead and replaced a deck nothing could
