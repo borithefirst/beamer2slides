@@ -268,6 +268,13 @@ def test_overlay_steps_collapse_to_frames():
     assert len(everything["slides"]) == 6
 
 
+def test_transparent_covered_text_is_faded():
+    d = load(DECKS / "17_transparent_overlays.pdf", overlays="all")
+    colors = [{paragraph_text(p): p["runs"][0]["color"] for e in texts(s) for p in e["paragraphs"]} for s in d["slides"]]
+    faded, shown = colors[0]["Second point, faded until step two"], colors[1]["Second point, faded until step two"]
+    assert shown == "#000000" and faded != "#000000" and int(faded[1:3], 16) > 0xc0
+
+
 def test_short_paragraphs_are_not_merged():
     slide = load(DECKS / "05_overlays_notes.pdf")["slides"][1]
     paras = [paragraph_text(p) for e in texts(slide) for p in e["paragraphs"]]

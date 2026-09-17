@@ -502,7 +502,13 @@ class PageClassifier:
         for s in self.page["spans"]:
             r = Rect.of(s["bbox"])
             dx, dy = s["dir"]
-            span = Span(s["id"], s["text"], s["font"].split("+", 1)[-1], s["size"], s["color"], r,
+            color = s["color"]
+            if s.get("alpha", 255) < 250:
+                # Semi-transparent text (\setbeamercovered{transparent}): Slides text has no
+                # opacity, so show the colour it takes over a white page.
+                a = s["alpha"] / 255
+                color = "#" + "".join(f"{round(int(color[i:i + 2], 16) * a + 255 * (1 - a)):02x}" for i in (1, 3, 5))
+            span = Span(s["id"], s["text"], s["font"].split("+", 1)[-1], s["size"], color, r,
                         s["origin"][1], abs(dy) < 0.01 and dx > 0, font_info(s["font"]))
             if s.get("smallcaps"):  # OpenType small caps, found from glyph ids (extract.small_caps_spans)
                 span.info = replace(span.info, smallcaps=True)

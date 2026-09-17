@@ -106,7 +106,7 @@ def extract_page(page: pymupdf.Page, defaults: dict | None = None) -> dict:
                     # Ligature code points (xelatex/lualatex text layers) as plain letters, so the
                     # text stays searchable and spell-checkable in Slides.
                     "id": f"p{n}s{len(spans)}", "text": s["text"].translate(LIGATURES), "font": s["font"],
-                    "size": round(s["size"], 3), "color": f"#{s['color']:06x}",
+                    "size": round(s["size"], 3), "color": f"#{s['color']:06x}", "alpha": s.get("alpha", 255),
                     "origin": _r(s["origin"]), "bbox": _r(s["bbox"]), "dir": _r(line["dir"], 3),
                     "smallcaps": alternates >= 2 and alternates >= 0.7 * sum(ch.islower() for ch in s["text"]),
                 })
