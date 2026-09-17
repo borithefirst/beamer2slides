@@ -27,6 +27,9 @@ EM_SPACE = chr(0x2003)
 FRAME_COUNTER_RE =re.compile(r"^\d{1,4}( ?/ ?\d{1,4})?$")
 EQ_NUMBER_RE = re.compile(r"^\(\d+(\.\d+)*[a-z]?\)$")
 MATH_OPERATORS = set("=+−<>≤≥×·/∑∏∫∈∉⊂⊆∪∩→←⇒⇔≈≠±∞")
+# Lone glyphs of bitmap (Type 3) text companion fonts come back as their TS1 code, a control
+# character: \textbullet (metropolis' itemize item under pdflatex without cm-super).
+TYPE3_SYMBOLS = {"\x88": "•"}
 SMALL_IMAGE_PT = 12
 HOLE_PAD = 1.0  # pt of page around an inline formula picture (antialiasing, italic overhang)
 
@@ -710,7 +713,8 @@ class PageClassifier:
                 # opacity, so show the colour it takes over a white page.
                 a = s["alpha"] / 255
                 color = "#" + "".join(f"{round(int(color[i:i + 2], 16) * a + 255 * (1 - a)):02x}" for i in (1, 3, 5))
-            span = Span(s["id"], s["text"], s["font"].split("+", 1)[-1], s["size"], color, r,
+            text = TYPE3_SYMBOLS.get(s["text"], s["text"]) if s["font"] == "Type3" else s["text"]
+            span = Span(s["id"], text, s["font"].split("+", 1)[-1], s["size"], color, r,
                         s["origin"][1], abs(dy) < 0.01 and dx > 0, font_info(s["font"]))
             if s.get("smallcaps"):  # OpenType small caps, found from glyph ids (extract.small_caps_spans)
                 span.info = replace(span.info, smallcaps=True)
@@ -941,11 +945,11 @@ class PageClassifier:
                 line.bullet_spans = on_image
                 return
         # Vector bullets (shaded balls, squares drawn as paths): a small, roughly square
-        # graphic just left of the text at x-height.
+        # graphic just left of the text at x-height (Bergen hangs subitem squares 1.8 em out).
         x0 = min(s.rect.x0 for s in spans)
         for g in self.graphics:
             if 0.25 * line.size <= g.w <= 1.3 * line.size and 0.25 * line.size <= g.h <= 1.6 * line.size \
-                    and g.x1 <= x0 + 0.5 and x0 - g.x1 <= 1.5 * line.size \
+                    and g.x1 <= x0 + 0.5 and x0 - g.x1 <= 2.0 * line.size \
                     and line.baseline - 0.9 * line.size <= g.cy <= line.baseline + 0.1 * line.size:
                 shape = bullet_shape(self.graphic_paths.get(tuple(g.as_list())))
                 if shape:
