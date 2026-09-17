@@ -260,6 +260,10 @@ uninterrupted one would have. What makes that true:
 - What a killed sync **can** leave behind: scratch slides (`b2s_mNNN`, swept at the next start),
   its staging deck (harmless: it is only a source of picture URLs, and it costs nothing in the
   deck), and duplicate objects until the next sync. No sync-report is written.
+  `python tools/drive_usage.py` lists the leftover staging decks among the app's Drive files (they
+  carry the name sync gives them and, since 2026-09-18, an `appProperties.b2sStaging` marker naming
+  the deck they were staging for), and `--delete-staging` deletes those over 12 h old - a person
+  saying yes to what sync will not do from a file's word.
 
 **Why the next run re-plans instead of resuming.** The pending marker could hold the planned
 requests and let a second run send the rest of them, but the deck is the truth and it may have moved

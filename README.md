@@ -61,8 +61,10 @@ deck with `--new-deck`, or rebuild anyway with `--force-rebuild`, which keeps a 
 `python tools/deck_backup.py list|export|restore` manages the backups).
 Pictures and backgrounds travel inside a
 .pptx that Drive imports as the deck's starting point: nothing is ever shared by public link,
-so it works where link sharing is blocked. The only files the tool creates in Drive are the
-decks themselves (`python tools/drive_usage.py` lists them).
+so it works where link sharing is blocked. The only files the tool creates in Drive are the decks
+themselves, backup copies you asked for, and a temporary staging deck per sync that it deletes
+again — unless the sync was killed halfway, and then nothing deletes it for you.
+`python tools/drive_usage.py` lists all three, and `--delete-staging` clears the leftovers.
 
 In the debug images, green boxes are text, blue are pictures, purple tables and orange shapes.
 Shaded text stays in the background (red math, blue figure, grey theme).

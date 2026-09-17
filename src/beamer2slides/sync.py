@@ -863,8 +863,11 @@ class Sync:
         for f in backgrounds:
             pages.append({"layout": "BLANK", "fill": {"picture": Path(f)}, "templates": False, "pictures": []})
         pptx = build_pptx(page_w, page_h, [], pages, {"color": "#ffffff"})
+        # The marker outlives a killed sync: nothing deletes a staging deck from a file's word, so
+        # `tools/drive_usage.py` needs to be able to say which files are certainly leftovers.
         fid = execute(self.drive.files().create(body={"name": "beamer2slides sync staging (temporary)",
-                                                      "mimeType": "application/vnd.google-apps.presentation"},
+                                                      "mimeType": "application/vnd.google-apps.presentation",
+                                                      "appProperties": {"b2sStaging": self.pid}},
                                                 media_body=MediaIoBaseUpload(pptx, mimetype=PPTX_MIME), fields="id"))["id"]
         try:
             staged = execute(self.slides.presentations().get(presentationId=fid))
