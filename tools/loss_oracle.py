@@ -78,7 +78,7 @@ Findings are dicts `{kind, severity, slide, element, object, detail}`. `severity
 person's or the source's content is gone), "undo" (an edit was reverted), "report" (the report is
 not honest) or "note" (could not be verified, e.g. picture bytes without signatures).
 
-    python tools/loss_oracle.py <run folder>     # base.json, before.json, after.json, report.json
+    python tools/loss_oracle.py <folder>   # reads base(-before).json, before.json, after.json, (sync-)report.json and ours.json, there or in its sync/
 """
 
 import json
@@ -687,9 +687,19 @@ def describe(findings: list[dict]) -> str:
                      + (f" ({f['object']})" if f.get("object") else "") + f": {f['detail']}" for f in findings)
 
 
+NAMES = {"base": ("base-before", "base"), "before": ("before",), "after": ("after",),
+         "report": ("report", "sync-report"), "ours": ("ours",)}
+
+
 def _load(folder: Path, name: str):
-    path = folder / f"{name}.json"
-    return json.loads(path.read_text(encoding="utf-8")) if path.exists() else None
+    """One snapshot, in a fuzz run folder or in a deck's `<out>/sync` (`sync-report.json`, and the
+    base before the sync under `base-before.json`: `base.json` there is the one the sync wrote)."""
+    for where in (folder, folder / "sync"):
+        for stem in NAMES[name]:
+            path = where / f"{stem}.json"
+            if path.exists():
+                return json.loads(path.read_text(encoding="utf-8"))
+    return None
 
 
 def main() -> int:
@@ -697,6 +707,11 @@ def main() -> int:
         print(__doc__.strip().splitlines()[-1].strip())
         return 2
     folder = Path(sys.argv[1])
+    missing = [n for n in ("base", "before", "after") if _load(folder, n) is None]
+    if missing:
+        print(f"{folder}: no {', '.join(m + '.json' for m in missing)} to judge (a sync records the "
+              f"read-backs only when it is run by tools/fuzz_sync.py)")
+        return 2
     found = check(_load(folder, "base"), _load(folder, "before"), _load(folder, "after"),
                   _load(folder, "report"), _load(folder, "ours"))
     print(describe(found) if found else "nothing lost")
