@@ -11,6 +11,10 @@ It converts a deck, then:
   4. recovers: the .pptx backup goes back into a new presentation that still shows the edits
      (Drive's version history is only recorded as evidence: it gives the deck's current content
      back for every revision, see tools/probe_revision_history.py);
+  4b. recovers at the same URL (`restore --in-place`) and compares the deck with what it showed
+     before the rebuild, word for word, notes included: nothing may be missing;
+  4c. syncs the recovered deck against the same source, because a recovery that can't be worked
+     with afterwards is only half a way back: the recovered edits must still be there;
   5. --new-deck leaves the old deck alone, and a trashed deck is never resurrected.
 The new decks this makes (the restored copy, the --new-deck one) are trashed again at the end.
 Evidence: <out>/proof.json, and every command's output in <out>/proof.log.
@@ -66,6 +70,22 @@ def deck_text(slides, pid: str) -> str:
     return " ".join(s.all_text for s in sc.read(pid).slides)
 
 
+def lost_words(before, after) -> dict:
+    """Words the deck showed before and doesn't show any more, per slide (a multiset difference:
+    a word written twice and shown once is a loss too). Slides are compared by position, and a
+    missing slide loses all of its words, so this counts every way the content can shrink."""
+    from collections import Counter
+    lost = {}
+    for i, slide in enumerate(before.slides):
+        had = Counter((slide.all_text + " " + slide.notes).split())
+        now = Counter((after.slides[i].all_text + " " + after.slides[i].notes).split()) \
+            if i < len(after.slides) else Counter()
+        gone = had - now
+        if gone:
+            lost[str(i)] = sorted(gone.elements())[:20]
+    return lost
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--pdf", type=Path, default=ROOT / "tests" / "decks" / "sync" / "out" / "v1.pdf")
@@ -101,7 +121,7 @@ def main() -> int:
         deck_edits.replace_word(deck, {"index": 1}, phrase, word, "HANDWRITTEN")
         deck_edits.add_text_box(deck, {"index": 1}, "a box the person added", [400, 330, 220, 40])
         edited_revision = revision(slides, pid)
-        edited_text = deck_text(slides, pid)
+        edited_model = sc.read(pid)                       # what the person's deck showed, word for word
         notes["edits"] = {"slide": deck.model.slides[1].title, "phrase": phrase, "word": word,
                           "revision": edited_revision}
         refused = cli(log, "convert", args.pdf, "--out", out)
@@ -164,6 +184,51 @@ def main() -> int:
             notes["drive_history"] = {"returncode": done.returncode, "exported": path.exists(),
                                       "holds_the_edit": holds,
                                       "note": "a revision's export gives the deck's current content"}
+
+        # 4b. the way back people actually want: the same URL, holding what it held before the
+        # rebuild. `restore --in-place` uploads the backup over the deck, so every link, embed and
+        # bookmark keeps working. What came back is compared word for word with what was lost.
+        recovered = None
+        if entry and Path(entry["backup"].get("file", "")).exists():
+            done = tool(log, "deck_backup.py", "restore", "--deck", out, "--from", entry["backup"]["file"],
+                        "--in-place")
+            recovered = sc.read(pid)
+            lost = lost_words(edited_model, recovered)
+            notes["restore_in_place"] = {
+                "returncode": done.returncode, "presentationId": pid,
+                "slides": [len(edited_model.slides), len(recovered.slides)],
+                "holds_the_edit": "HANDWRITTEN" in " ".join(s.all_text for s in recovered.slides),
+                "lost_words": lost}
+            if done.returncode:
+                problems.append("restoring the backup into the deck itself failed")
+            if len(recovered.slides) != len(edited_model.slides):
+                problems.append(f"the deck restored in place has {len(recovered.slides)} slides, "
+                                f"not the {len(edited_model.slides)} it had")
+            if lost:
+                problems.append(f"the deck restored in place lost words on {len(lost)} slide(s): "
+                                f"{json.dumps(lost, ensure_ascii=False)[:300]}")
+
+        # 4c. recovery is not a dead end: the recovered deck goes back into the normal workflow.
+        # Its content is older than the base the forced rebuild left behind, so sync sees the
+        # recovered edits as deck edits - and deck edits win, so nothing of them may go again.
+        if recovered is not None:
+            synced = cli(log, "sync", args.pdf, "--deck", out)
+            after = sc.read(pid)
+            report = json.loads((out / "sync" / "sync-report.json").read_text(encoding="utf-8"))
+            notes["sync_after_recovery"] = {
+                "returncode": synced.returncode, "changes": sc.changes(report),
+                "conflicts": len(sc.section(report, "conflicts")),
+                "slides": len(after.slides),
+                "holds_the_edit": "HANDWRITTEN" in " ".join(s.all_text for s in after.slides),
+                "lost_words": lost_words(recovered, after),
+                "integrity": sc.integrity(after)}
+            if synced.returncode:
+                problems.append("syncing the recovered deck failed")
+            elif not notes["sync_after_recovery"]["holds_the_edit"]:
+                problems.append("the sync after the recovery undid the recovered edit")
+            elif notes["sync_after_recovery"]["lost_words"]:
+                problems.append("the sync after the recovery lost words: "
+                                f"{json.dumps(notes['sync_after_recovery']['lost_words'], ensure_ascii=False)[:300]}")
 
         # 5. --new-deck leaves the old deck alone; a trashed deck is never written to again.
         before, state_file = revision(slides, pid), (out / "emit.json").read_text(encoding="utf-8")

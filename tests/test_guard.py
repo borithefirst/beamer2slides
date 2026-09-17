@@ -242,7 +242,7 @@ class FakeFiles:
 
     def copy(self, fileId, body=None, fields=None):
         self.drive.calls.append(("copy", fileId))
-        return Request({"id": "COPY1", "name": body["name"]})
+        return Request(self.drive.copy_error or {"id": "COPY1", "name": body["name"]})
 
     def create(self, body=None, media_body=None, fields=None):
         self.drive.calls.append(("create", body.get("name")))
@@ -258,10 +258,10 @@ class FakeFiles:
 
 
 class FakeDrive:
-    def __init__(self, file=None, export=b"PPTX"):
+    def __init__(self, file=None, export=b"PPTX", copy_error=None):
         self.file = file or {"id": "P1", "name": "Talk", "trashed": False,
                              "mimeType": "application/vnd.google-apps.presentation"}
-        self.export, self.calls = export, []
+        self.export, self.copy_error, self.calls = export, copy_error, []
 
     def files(self):
         return FakeFiles(self)
@@ -355,6 +355,26 @@ def test_a_refused_export_falls_back_to_a_drive_copy(tmp_path):
     assert result["warnings"] and "10 MB" in result["warnings"][0]
 
 
+def test_a_backup_neither_kind_of_which_worked_is_no_way_back(tmp_path):
+    """Both refused: the .pptx export (over 10 MB) and the Drive copy (a full Drive)."""
+    drive = FakeDrive(export=http_error(403, "exportSizeLimitExceeded"),
+                      copy_error=http_error(403, "storageQuotaExceeded"))
+    result = guard.backup_deck(drive, "P1", tmp_path / "talk", "file")
+    assert "file" not in result and "drive" not in result and len(result["warnings"]) == 2
+    assert not guard.way_back_kept(result)
+
+
+def test_way_back_kept_needs_a_file_with_something_in_it(tmp_path):
+    empty = tmp_path / "empty.pptx"
+    empty.write_bytes(b"")
+    assert not guard.way_back_kept({"warnings": []})
+    assert not guard.way_back_kept({"file": str(tmp_path / "never-written.pptx")})
+    assert not guard.way_back_kept({"file": str(empty)}), "an empty file restores nothing"
+    empty.write_bytes(b"PPTX")
+    assert guard.way_back_kept({"file": str(empty)})
+    assert guard.way_back_kept({"drive": {"presentationId": "COPY1"}})
+
+
 def test_record_appends_and_restore_hint_reads(tmp_path):
     out = tmp_path / "talk"
     entry = {"presentationId": "P1", "revisionId": "rev7", "action": "rebuilt in place",
@@ -409,6 +429,46 @@ def test_plan_rebuild_refuses_without_force(tmp_path):
     with pytest.raises(guard.RebuildRefused):
         plan_rebuild(FakeSlides(live), drive, out, False, False, "auto", Path("talk.pdf"))
     assert ("export", "P1") not in drive.calls and ("update", "P1") not in drive.calls
+
+
+def test_a_forced_rebuild_whose_backup_failed_is_refused(tmp_path):
+    """The offer that makes `--force-rebuild` acceptable is the backup. When Drive refuses both
+    the export and the copy, the deck must stay as it is: nothing else can bring it back."""
+    from beamer2slides.emit import plan_rebuild
+    base, live = edited(lambda p: set_text(find(p, "b2s_s000_t1"), "my own words"))
+    out = out_with_base(tmp_path, base)
+    drive = FakeDrive(export=http_error(403, "exportSizeLimitExceeded"),
+                      copy_error=http_error(403, "storageQuotaExceeded"))
+    with pytest.raises(guard.RebuildRefused) as refused:
+        plan_rebuild(FakeSlides(live), drive, out, False, True, "auto", Path("talk.pdf"))
+    message = str(refused.value)
+    assert "refusing to rebuild" in message and "backup" in message
+    assert "storageQuotaExceeded" in message and "--backup none" in message
+    assert refused.value.survey["reason"] == "backup-failed"
+    assert ("update", "P1") not in drive.calls
+    # the failed attempt is in the log: what was tried, and that the deck is still the old one
+    logged = json.loads((out / "backups" / "backups.json").read_text(encoding="utf-8"))[-1]
+    assert logged["revisionId"] == "rev2" and logged["backup"]["warnings"]
+
+
+def test_a_drive_copy_is_way_back_enough_for_a_forced_rebuild(tmp_path):
+    from beamer2slides.emit import plan_rebuild
+    base, live = edited(lambda p: set_text(find(p, "b2s_s000_t1"), "my own words"))
+    out = out_with_base(tmp_path, base)
+    drive = FakeDrive(export=http_error(403, "exportSizeLimitExceeded"))
+    pid, entry = plan_rebuild(FakeSlides(live), drive, out, False, True, "auto", Path("talk.pdf"))
+    assert pid == "P1" and entry["backup"]["drive"]["presentationId"] == "COPY1"
+
+
+def test_backup_none_says_out_loud_that_the_deck_may_go(tmp_path):
+    """`--backup none` is the way to ask for a rebuild without a way back, so it is not refused."""
+    from beamer2slides.emit import plan_rebuild
+    base, live = edited(lambda p: set_text(find(p, "b2s_s000_t1"), "my own words"))
+    out = out_with_base(tmp_path, base)
+    drive = FakeDrive(export=http_error(403, "exportSizeLimitExceeded"),
+                      copy_error=http_error(403, "storageQuotaExceeded"))
+    pid, entry = plan_rebuild(FakeSlides(live), drive, out, False, True, "none", Path("talk.pdf"))
+    assert pid == "P1" and entry["backup"] == {"mode": "none", "warnings": []}
 
 
 def test_new_deck_leaves_the_old_one_alone(tmp_path, capsys):

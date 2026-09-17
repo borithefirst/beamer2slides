@@ -319,6 +319,42 @@ def backup_deck(drive, pid: str, out: Path, mode: str, note: str = "", fallback:
     return result
 
 
+def way_back_kept(backup: dict) -> bool:
+    """Whether this backup can actually be put back: a .pptx file that is there and not empty, or
+    a Drive copy. `backup_deck` only warns when Drive refuses the export or the copy."""
+    if backup.get("drive"):
+        return True
+    path = Path(backup["file"]) if backup.get("file") else None
+    return bool(path and path.exists() and path.stat().st_size > 0)
+
+
+def demand_way_back(pid: str, out: Path, pdf: Path | str | None, entry: dict, mode: str) -> None:
+    """Refuse a forced rebuild whose backup did not happen.
+
+    A forced rebuild replaces the content of a deck someone edited, and the offer that makes that
+    acceptable is the backup. When it could not be kept - the export refused (over 10 MB), the
+    Drive copy refused (quota, a full Drive), no room on disk - the rebuild must not happen either:
+    nothing else brings that content back, because every Drive revision of a Slides file exports
+    the file's *current* content (docs/sync.md, tools/probe_revision_history.py).
+    `--backup none` is how one says out loud that the deck may go."""
+    backup = entry.get("backup") or {}
+    if mode in ("none", None) or way_back_kept(backup):
+        return
+    lines = ["refusing to rebuild: the backup that makes a forced rebuild safe could not be kept, "
+             "and a rebuild replaces the whole deck.",
+             f"  {deck_url(pid)}"]
+    lines += [f"  {w}" for w in backup.get("warnings", [])] or ["  no backup file was written"]
+    lines.append("  What to do instead:")
+    if entry.get("reason") == "edited":
+        lines.append(f"    merge the PDF into the deck, keeping the edits:  {command_line('sync', pdf, out)}")
+    lines.append(f"    leave that deck alone and make a new one:        {command_line('convert', pdf, out, ' --new-deck')}")
+    lines.append(f"    try the other backup:                            "
+                 f"{command_line('convert', pdf, out, ' --force-rebuild --backup drive')}")
+    lines.append(f"    rebuild with no way back (says it out loud):     "
+                 f"{command_line('convert', pdf, out, ' --force-rebuild --backup none')}")
+    raise RebuildRefused("\n".join(lines), dict(entry, reason="backup-failed"))
+
+
 def api_message(e: HttpError) -> str:
     try:
         return json.loads(e.content)["error"]["message"][:200]

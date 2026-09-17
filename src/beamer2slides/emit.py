@@ -2091,8 +2091,9 @@ def plan_rebuild(slides, drive, out: Path, new_deck: bool, force_rebuild: bool, 
     is returned), or leave it alone and make a new one. Nothing destructive happens before this:
     `guard.check_rebuild` raises `guard.RebuildRefused` when the deck was edited in Slides, and a
     forced rebuild keeps a backup and records the deck's revision first
-    (`<out>/backups/backups.json`, printed too). The second value goes into emit.json as
-    "previous"."""
+    (`<out>/backups/backups.json`, printed too) - and is refused in turn when that backup could
+    not be kept (`guard.demand_way_back`), because then nothing could bring the deck back. The
+    second value goes into emit.json as "previous"."""
     from . import guard
 
     previous = guard.previous_deck(drive, out)
@@ -2119,7 +2120,9 @@ def plan_rebuild(slides, drive, out: Path, new_deck: bool, force_rebuild: bool, 
         print(f"WARNING: rebuilding a deck that {'was edited in Slides' if found['reason'] == 'edited' else found['reason']} "
               f"(--force-rebuild): {entry['summary']}")
     entry["backup"] = guard.backup_deck(drive, pid, out, mode, entry["reason"])
-    guard.record(out, entry)
+    guard.record(out, entry)  # the attempt belongs in the log even when it failed, and what follows
+    if found["reason"]:
+        guard.demand_way_back(pid, out, source_pdf, entry, mode)  # no backup, no forced rebuild
     print(f"updating existing deck {pid} (revision {found.get('revisionId')})")
     for line in guard.restore_hint(entry) if found["reason"] else []:
         print(line)
