@@ -7,7 +7,7 @@ from functools import lru_cache
 
 @dataclass(frozen=True)
 class FontInfo:
-    family: str  # sans | serif | mono | math
+    family: str  # sans | serif | mono | math | icon
     bold: bool = False
     italic: bool = False
     smallcaps: bool = False
@@ -19,6 +19,9 @@ MATH_PREFIXES = (
     "EURM", "EURB", "RSFS", "STMARY", "WASY", "LASY", "LATINMODERNMATH", "STIXMATH",
     "STIXTWOMATH", "XITSMATH", "CAMBRIAMATH", "FIRAMATH", "NEWCMMATH",
 )  # plus any name containing MATH
+# Symbol fonts whose glyphs are pictures, not letters (ccicons, fontawesome, pifont, marvosym, ...)
+ICON_FONT_RE = re.compile(r"CCICONS|FONTAWESOME|DINGBAT|ZAPF|MARVOSYM|WEBDINGS|WINGDINGS|ACADEMICONS|BBDING|"
+                          r"^PZDR|UTFSYM|OCTICONS|MATERIALICONS")
 
 # Computer Modern Type 1 names: CM<variant><size>
 CM_VARIANTS = {
@@ -111,6 +114,8 @@ def google_font(name: str) -> tuple[str, int, bool] | None:
 def font_info(name: str) -> FontInfo:
     base = name.split("+", 1)[-1]
     key = re.sub(r"[^A-Z0-9]", "", base.upper())
+    if ICON_FONT_RE.search(key):
+        return FontInfo("icon")
     if key.startswith(MATH_PREFIXES) or "MATH" in key:
         return FontInfo("math")
 

@@ -426,6 +426,8 @@ class PageClassifier:
                                     "corners": {}, "opacity": 1.0, "image": True})
             else:
                 graphics.append(r)
+        # Glyphs of symbol fonts (Creative Commons badges, FontAwesome) are artwork.
+        graphics += [Rect.of(s["bbox"]) for s in self.page["spans"] if font_info(s["font"]).family == "icon"]
         self.graphics = graphics
         self.regions = cluster_rects(graphics, gap=3.0) if graphics else []
 
@@ -886,6 +888,8 @@ class PageClassifier:
                                  "color": main.color, "link": main.link, "script": None,
                                  "underline": False, "highlight": None})
                     continue
+                if span.info.family == "icon":
+                    continue  # symbol-font glyphs stay in the background picture
                 text = span.text
                 if forced == "sub":  # denominator: follows the slash directly
                     pass
@@ -1433,7 +1437,7 @@ class PageClassifier:
                     "runs": self.runs(p, code_indent(p, rect.x0) if code else ""),
                 } for p in box],
                 "code": code,
-                "spans": [s.id for p in box for s in p.spans],
+                "spans": [s.id for p in box for s in p.spans if s.info.family != "icon"],
                 # Fraction bars now written as text, underlines and highlight boxes now text
                 # styles: they leave the background with the glyphs.
                 "strokes": [f[0].as_list() for p in box for l in p.lines for f in l.fractions] +

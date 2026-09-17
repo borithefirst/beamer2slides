@@ -146,6 +146,13 @@ def test_custom_item_labels_stay_literal():
     assert paras == ["–\tDash item", "+\tPlus item", "✓\tCheck item"]
 
 
+def test_icon_font_glyphs_are_pictures():
+    slide = deck("12_metropolis_talk")["slides"][4]
+    assert kinds(slide).count("image") == 1  # \ccbysa
+    text = "".join(paragraph_text(p) for e in texts(slide) for p in e["paragraphs"])
+    assert "cba" not in text
+
+
 def test_metropolis_progress_bar_is_a_shape():
     slide = deck("12_metropolis_talk")["slides"][5]
     assert kinds(slide).count("image") == 0
