@@ -194,12 +194,17 @@ hold for every sync, including the combinations nobody thought of.
 - `tests/test_sync_fuzz.py` runs fixed offline seeds in the default suite (a second) and proves the
   oracle catches losses injected on purpose; the live campaign is marked `sync`
   (`B2S_FUZZ_LIVE_ROUNDS`, `B2S_FUZZ_ROUNDS`).
+- Each round also checks that the sync **settles**: replanning against the base the round recorded,
+  with the same source, must write nothing - a base that doesn't describe the deck it just wrote
+  makes the next sync rewrite units, and a rewrite is where work gets lost.
 - Found by it so far: the `move` shortcut took its step from the unit's anchor although the source
   may have re-placed only an anchored member (`merge.unit_shift`); a geometry override was promised
   for a unit whose parts the person had moved apart, which sync cannot write
-  (`merge.geometry_writable`); and sync sends an alt-text title for a diagram's main object, which
-  is the group `emit.diagram_requests` builds - the API refuses that and rejects the whole batch
-  (`tests/test_sync.py::test_sync_does_not_alt_text_a_diagram_group`, xfail, still open).
+  (`merge.geometry_writable`); sync sends an alt-text title for a diagram's main object, which is
+  the group `emit.diagram_requests` builds - the API refuses that and rejects the whole batch; and
+  `sync.base_order` leaves out the slides the deck deleted, so their base entries land last and the
+  frames after them in the source lose their keys on the next conversion. The last two are open,
+  pinned as xfail tests in `tests/test_sync.py`.
 
 ## Not supported yet
 - Crossing reorders of unlabelled frames (the alignment keeps order; label frames).

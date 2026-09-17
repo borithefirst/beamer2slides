@@ -731,17 +731,29 @@ def test_letterbox_fix_stretches_to_the_box():
     assert fix["scaleY"] == pytest.approx(1) and fix["translateY"] == pytest.approx(0, abs=1)
 
 
+def test_a_base_out_of_the_sources_order_loses_the_frames_after_it():
+    """Why the new base has to stay in the source's order: frames without a label are paired with
+    the base by an order-keeping alignment, so a base entry moved to the end takes the identity of
+    the frames that followed it with it - they look new, and the next sync creates them again."""
+    source = [info("Why decks diverge", "decks and sources drift apart over time"),
+              info("The sync algorithm", "base ours theirs three way merge of the deck"),
+              info("Conclusions", "thanks for listening and for the questions")]
+    keys = identity.slide_keys(source)
+    moved = [source[0], source[2], source[1]]  # the middle frame's entry recorded last
+    got, _ = identity.inherit_slide_keys(moved, [keys[0], keys[2], keys[1]], source)
+    assert got[:2] == keys[:2] and got[2] == "title:conclusions#2" != keys[2]
+
+
 @pytest.mark.xfail(strict=True, reason="sync.base_order leaves out the slides the deck deleted, so they land at the "
-                                       "end of the new base and the next conversion can no longer align an unlabelled "
-                                       "frame with them: the deleted slide is created again")
+                                       "end of the new base, and the frames after them in the source can no longer be "
+                                       "aligned with it: the next sync creates them again")
 def test_a_slide_the_deck_deleted_keeps_its_place_in_the_new_base():
     """Found by the offline fuzz (`second_sync_writes`, seeds 45, 60, 108, 177 of the default run):
     the person deletes a converter slide whose frame has no label and the source still has it. The
     sync is right to leave it deleted, but it records that slide's base entry last (`new_base` keys
-    it `gone:<key>`, which `base_order` never returns). The base is converter output, so the next
-    conversion pairs frames with it by `identity.align_slides`, an order-keeping alignment for
-    unlabelled frames: the frame no longer matches, gets a fresh key, and the next sync creates the
-    slide the person deleted. Fix: order the `gone` plans with the rest, by their `ours` index."""
+    it `gone:<key>`, which `base_order` never returns). The base is converter output, and the next
+    conversion pairs frames with it by `identity.align_slides` - see the test above for what a base
+    out of order costs. Fix: order the `gone` plans with the rest, by their `ours` index."""
     from beamer2slides.sync import base_order
     plans = [{"key": "deleted_by_the_person", "action": "gone", "ours": 0, "base": 0, "objectId": None},
              {"key": "kept", "action": "update", "ours": 1, "base": 1, "objectId": "b2s_s001"}]

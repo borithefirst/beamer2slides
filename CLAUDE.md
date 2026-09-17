@@ -378,7 +378,10 @@ person had moved apart, although sync re-applies it by transforming the unit's t
 dragged picture went back to the converter's box (`merge.geometry_writable` keeps such a unit and
 reports a conflict); and `sync.tag_requests` alt-texts a diagram's main object, which is the group
 emit builds under that id - the API refuses it and rejects the whole batch, so a sync that rewrites
-a diagram slide dies (open, xfail `tests/test_sync.py::test_sync_does_not_alt_text_a_diagram_group`).
+a diagram slide dies (open, xfail `tests/test_sync.py::test_sync_does_not_alt_text_a_diagram_group`);
+and `sync.base_order` leaves out the slides the deck deleted, so their base entries land at the end
+and the frames after them in the source lose their keys next time (open, xfail
+`test_a_slide_the_deck_deleted_keeps_its_place_in_the_new_base`).
 
 ## Pitfalls found so far
 - PDFium (`pdf.py` handles these):
