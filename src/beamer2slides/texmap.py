@@ -286,6 +286,10 @@ def synctex_pages(path: Path) -> list[SyncPage]:
     inputs: dict[str, str] = {}
     unit, mag = 1.0, 1.0
     pages: list[SyncPage] = []
+    # A sheet is `{n` ... `}n`. lualatex writes box resources (\saveboxresource: transparency
+    # groups, shadings - beamer block shadows produce them) the same way, but closes them with
+    # `}0`: counted as pages, every page after the first would be mapped to the wrong frame.
+    stack: list[tuple[str, SyncPage]] = []
     page = None
     for ln in lines:
         if ln.startswith("Input:"):
@@ -297,9 +301,19 @@ def synctex_pages(path: Path) -> list[SyncPage]:
             mag = float(ln[14:] or 1000) / 1000
         elif ln.startswith("{"):
             page = SyncPage()
-            pages.append(page)
+            stack.append((ln[1:].strip(), page))
         elif ln.startswith("}"):
-            page = None
+            if stack:
+                number, closed = stack.pop()
+                page = stack[-1][1] if stack else None
+                if ln[1:].strip() == number:   # a real sheet, in shipout order
+                    pages.append(closed)
+                elif page is not None:         # a box resource drawn on the page around it
+                    for key, n in closed.votes.items():
+                        page.votes[key] = page.votes.get(key, 0) + n
+                    page.boxes += closed.boxes
+            else:
+                page = None
         elif page is not None:
             m = SYNC_RECORD_RE.match(ln)
             if not m:
