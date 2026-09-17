@@ -342,7 +342,8 @@ def text_box_requests(el: dict, slide_id: str, object_id: str, scale: float, fon
             start += len(run["text"])
 
         # Code lines carry their indentation as leading spaces already.
-        text_indent = 0.0 if el.get("code") else (p["text_x0"] - left_pdf) * scale
+        # Centred and right-aligned paragraphs place themselves: an indent would only offset them.
+        text_indent = 0.0 if el.get("code") or p["align"] != "left" else (p["text_x0"] - left_pdf) * scale
         if p["bullet"]:
             # Slides ends the bullet glyph BULLET_GAP before indentFirstLine, whatever the glyph.
             first_indent = (p["bullet"]["bbox"][2] - left_pdf) * scale + BULLET_GAP
