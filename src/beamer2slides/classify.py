@@ -1282,10 +1282,18 @@ class PageClassifier:
                               "fill": d["fill"] if "f" in d["type"] else None,
                               "stroke": d["stroke"] if "s" in d["type"] else None, "width": d["width"]})
             elif d["type"] == "s" and set(ops) == {"l"} and max(r.w, r.h) > 6:
-                # Straight lines and orthogonal connectors (|- and -|): one Slides line per segment.
-                for _, ((x1, y1), (x2, y2)) in path:
-                    lines.append({"from": [x1, y1], "to": [x2, y2], "stroke": d["stroke"] or "#000000",
-                                  "width": d["width"] or 0.4, "arrow_from": None, "arrow_to": None})
+                segments = [(tuple(a), tuple(b)) for _, (a, b) in path]
+                style = {"stroke": d["stroke"] or "#000000", "width": d["width"] or 0.4, "arrow_from": None, "arrow_to": None}
+                (p0, p1), (p1b, p2) = segments if len(segments) == 2 else ((None, None), (None, None))
+                if p0 and math.dist(p1, p1b) < 0.05 and (abs(p0[0] - p1[0]) < 0.05) != (abs(p0[1] - p1[1]) < 0.05) \
+                        and (abs(p1[0] - p2[0]) < 0.05) != (abs(p1[1] - p2[1]) < 0.05) \
+                        and (abs(p0[0] - p1[0]) < 0.05) != (abs(p1[0] - p2[0]) < 0.05):
+                    # An orthogonal connector (|- or -|): one elbow line, vertical or horizontal first.
+                    lines.append({"from": list(p0), "via": list(p1), "to": list(p2),
+                                  "bend": "vh" if abs(p0[0] - p1[0]) < 0.05 else "hv", **style})
+                else:  # straight lines, and other polylines one segment at a time
+                    for (x1, y1), (x2, y2) in segments:
+                        lines.append({"from": [x1, y1], "to": [x2, y2], **style})
             elif max(r.w, r.h) <= 6 and set(ops) <= {"c", "l"}:
                 # Arrow heads are small separate paths: stroked (->), filled triangles (latex)
                 # or filled concave quadrilaterals (stealth).
@@ -1308,7 +1316,7 @@ class PageClassifier:
             if style != "OPEN_ARROW":
                 # TikZ stops the line where a filled head begins; Slides draws the head at the
                 # line's end, so extend the line to the tip.
-                other = ln["to" if end == "from" else "from"]
+                other = ln.get("via") or ln["to" if end == "from" else "from"]
                 ux, uy = ln[end][0] - other[0], ln[end][1] - other[1]
                 length = (ux * ux + uy * uy) ** 0.5 or 1.0
                 ux, uy = ux / length, uy / length
@@ -1348,6 +1356,7 @@ class PageClassifier:
                 "bbox": n["rect"].as_list(), "shape": n["shape"], "fill": n["fill"], "stroke": n["stroke"],
                 "width": n["width"], "paragraphs": [span_runs(sorted(row, key=lambda s: s.rect.x0)) for row in rows],
                 "baselines": [round(row[0].baseline, 2) for row in rows],
+                "label_w": round(max((max(s.rect.x1 for s in row) - min(s.rect.x0 for s in row) for row in rows), default=0.0), 2),
             })
         return {"id": f"p{self.page['index']}dg{index}", "kind": "diagram", "role": "figure",
                 "bbox": c.expand(1.0).as_list(), "nodes": out_nodes, "lines": lines,

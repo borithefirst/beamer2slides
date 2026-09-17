@@ -141,7 +141,8 @@ def test_flowchart_with_diamond_and_orthogonal_edge():
     slide = deck("11_research_talk")["slides"][5]
     d = [e for e in slide["elements"] if e["kind"] == "diagram"][0]
     assert [n["shape"] for n in d["nodes"] if n["shape"]] == ["ROUND_RECTANGLE", "DIAMOND", "RECTANGLE", "RECTANGLE"]
-    assert len(d["lines"]) == 5  # three edges plus the two segments of the |- connector
+    assert len(d["lines"]) == 4  # three edges plus the |- connector
+    assert [l.get("bend") for l in d["lines"]] == [None, None, None, "vh"], "one elbow line, vertical first"
     assert sum(1 for l in d["lines"] if l["arrow_to"]) == 4
 
 

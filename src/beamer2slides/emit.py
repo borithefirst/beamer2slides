@@ -485,7 +485,7 @@ def build_pptx(page_w: float, page_h: float, keys: list[tuple], layouts: list[st
     ignores pageSize) and one template slide per layout holding the template shapes."""
     from lxml import etree
     from pptx import Presentation
-    from pptx.enum.shapes import MSO_SHAPE
+    from pptx.enum.shapes import MSO_CONNECTOR, MSO_SHAPE
     from pptx.util import Emu, Pt
 
     prs = Presentation()
@@ -498,18 +498,34 @@ def build_pptx(page_w: float, page_h: float, keys: list[tuple], layouts: list[st
                 if shape.top is not None and shape.height is not None:
                     shape.top, shape.height = Emu(round(shape.top * ratio)), Emu(round(shape.height * ratio))
     kinds = {"ROUND_RECTANGLE": MSO_SHAPE.ROUNDED_RECTANGLE, "ROUND_2_SAME_RECTANGLE": MSO_SHAPE.ROUND_2_SAME_RECTANGLE,
-             "RECTANGLE": MSO_SHAPE.RECTANGLE}
+             "RECTANGLE": MSO_SHAPE.RECTANGLE, "ELLIPSE": MSO_SHAPE.OVAL, "DIAMOND": MSO_SHAPE.DIAMOND,
+             "TRIANGLE": MSO_SHAPE.ISOSCELES_TRIANGLE}
     a = "http://schemas.openxmlformats.org/drawingml/2006/main"
     for layout in layouts:
         slide = prs.slides.add_slide(prs.slide_layouts[TEMPLATE_LAYOUTS[layout]])
         for i, (kind, adj, shadow) in enumerate(keys):
+            if kind == "BENT_CONNECTOR":
+                line = slide.shapes.add_connector(MSO_CONNECTOR.ELBOW, Pt(10), Pt(10), Pt(110), Pt(110))
+                geometry = line._element.spPr.find(f"{{{a}}}prstGeom")
+                geometry.set("prst", "bentConnector3")
+                for old in geometry.findall(f"{{{a}}}avLst"):
+                    geometry.remove(old)
+                geometry.append(etree.fromstring(
+                    f'<a:avLst xmlns:a="{a}"><a:gd name="adj1" fmla="val {round(adj * 100000)}"/></a:avLst>'))
+                line._element.spPr.append(etree.fromstring(f'<a:effectLst xmlns:a="{a}"/>'))
+                continue
             shape = slide.shapes.add_shape(kinds[kind], Pt(10 + i % 10 * 20), Pt(10 + i // 10 * 20), Pt(100), Pt(100))
-            if kind != "RECTANGLE":
+            if adj is not None and kind in ("ROUND_RECTANGLE", "ROUND_2_SAME_RECTANGLE"):
                 shape.adjustments[0] = adj
                 if kind == "ROUND_2_SAME_RECTANGLE":
                     shape.adjustments[1] = 0.0
             shape.fill.solid()
             shape.line.fill.background()
+            # No text padding (the API can't set it): a diagram label fits a node as tight as TikZ's.
+            body_pr = shape.text_frame._txBody.find(f"{{{a}}}bodyPr")
+            for side in ("lIns", "tIns", "rIns", "bIns"):
+                body_pr.set(side, "0")
+            body_pr.set("anchor", "ctr")
             # python-pptx shapes refer to the theme's effect style, which has a shadow: always
             # give an explicit (possibly empty) effect list.
             effects = (f'<a:outerShdw blurRad="{round(SHADOW_BLUR * shadow * EMU_PER_PT)}" '
@@ -759,45 +775,122 @@ def table_requests(el: dict, slide_id: str, object_id: str, scale: float, fonts:
     return reqs
 
 
+# Share of a preset shape's width its text may use: Slides lays text out in the shape's .pptx
+# text rectangle (an ellipse's is its inscribed square, a diamond's half its width).
+TEXT_RECT_WIDTH = {"RECTANGLE": 1.0, "ROUND_RECTANGLE": 0.9, "ELLIPSE": 0.707, "DIAMOND": 0.5}
+# Connection sites of preset shapes in their .pptx order (fractions of the box): a line connected
+# to a site follows the shape when it is moved in Slides.
+CONNECTION_SITES = {
+    "RECTANGLE": [(0.5, 0), (0, 0.5), (0.5, 1), (1, 0.5)],
+    "ROUND_RECTANGLE": [(0.5, 0), (0, 0.5), (0.5, 1), (1, 0.5)],
+    "DIAMOND": [(0.5, 0), (0, 0.5), (0.5, 1), (1, 0.5)],
+    "ELLIPSE": [(0.5, 0), (0.1464, 0.1464), (0, 0.5), (0.1464, 0.8536), (0.5, 1), (0.8536, 0.8536), (1, 0.5), (0.8536, 0.1464)],
+    "TRIANGLE": [(0.5, 0), (0.25, 0.5), (0, 1), (0.5, 1), (1, 1), (0.75, 0.5)],
+}
+LABEL_ROOM = 1.08  # the substitute font may run this much wider
+
+
+def label_inside(node: dict) -> bool:
+    """A node's label goes into the node shape itself (it then moves and resizes with it) when
+    it fits the shape's text rectangle without wrapping."""
+    x0, _, x1, _ = node["bbox"]
+    text = "".join(r["text"] for runs in node["paragraphs"] for r in runs).strip()
+    return bool(text) and node["shape"] in TEXT_RECT_WIDTH and \
+        node.get("label_w", 0.0) * LABEL_ROOM <= (x1 - x0) * TEXT_RECT_WIDTH[node["shape"]] - 0.5
+
+
+def node_template_key(node: dict) -> tuple:
+    return node["shape"], None, None
+
+
+def bend_template_key(line: dict) -> tuple:
+    """An elbow connector (bentConnector3) turning at its start (|-, adj 0) or its end (-|)."""
+    return "BENT_CONNECTOR", 0.0 if line["bend"] == "vh" else 1.0, None
+
+
+def element_template_keys(el: dict, scale: float) -> list[tuple]:
+    if el["kind"] == "diagram":
+        return [node_template_key(n) for n in el["nodes"] if n["shape"] and label_inside(n)] + \
+               [bend_template_key(ln) for ln in el["lines"] if ln.get("bend")]
+    key = template_key(el, scale)
+    return [key] if key else []
+
+
+def connection(point: list[float], nodes: list[dict], oids: list[str]) -> dict | None:
+    """The node connection site a line end sits on (PDF pt, within 1.5 pt), if any."""
+    best = None
+    for node, oid in zip(nodes, oids):
+        if not node["shape"] or node["shape"] not in CONNECTION_SITES:
+            continue
+        x0, y0, x1, y1 = node["bbox"]
+        for index, (fx, fy) in enumerate(CONNECTION_SITES[node["shape"]]):
+            d = math.hypot(point[0] - (x0 + fx * (x1 - x0)), point[1] - (y0 + fy * (y1 - y0)))
+            if d <= 1.5 and (best is None or d < best[0]):
+                best = (d, {"connectedObjectId": oid, "connectionSiteIndex": index})
+    return best[1] if best else None
+
+
 def arrow_style(arrow) -> str:
     if not arrow:
         return "NONE"
     return arrow if isinstance(arrow, str) else "OPEN_ARROW"
 
 
-def diagram_requests(el: dict, slide_id: str, object_id: str, scale: float, fonts: FontMapper) -> list[dict]:
-    """Nodes become shapes with their label inside, edges become lines with arrow heads; the
-    parts are grouped so the diagram moves as one piece but stays editable."""
+def diagram_requests(el: dict, slide_id: str, object_id: str, scale: float, fonts: FontMapper,
+                     template=None) -> list[dict]:
+    """Nodes become shapes, edges become lines with arrow heads; the parts are grouped so the
+    diagram moves as one piece but stays editable. A label that fits goes inside its node (a
+    template shape without text padding, see label_inside); one that doesn't gets a text box
+    grouped with its node. Line ends on a node's connection site are connected to it, so edges
+    follow nodes moved in Slides. `template(key)` gives this slide's template shape for a key."""
     reqs: list[dict] = []
     children: list[str] = []
+    node_oids = [f"{object_id}_n{j}" for j in range(len(el["nodes"]))]
+    segments = []  # (object id, from, to, line): elbows without a template fall back to two lines
     for j, ln in enumerate(el["lines"]):
-        oid = f"{object_id}_l{j}"
-        (x1, y1), (x2, y2) = ln["from"], ln["to"]
+        if ln.get("bend") and template is None:
+            segments += [(f"{object_id}_l{j}", ln["from"], ln["via"], {**ln, "arrow_to": None}),
+                         (f"{object_id}_l{j}b", ln["via"], ln["to"], {**ln, "arrow_from": None})]
+        else:
+            segments.append((f"{object_id}_l{j}", ln["from"], ln["to"], ln))
+    for oid, (x1, y1), (x2, y2), ln in segments:
         dx, dy = (x2 - x1) * scale, (y2 - y1) * scale
-        reqs += [
-            {"createLine": {"objectId": oid, "lineCategory": "STRAIGHT", "elementProperties": {
+        if ln.get("bend") and template is not None:
+            tpl = template(bend_template_key(ln))
+            reqs += [
+                {"duplicateObject": {"objectId": tpl["id"], "objectIds": {tpl["id"]: oid}}},
+                # Like a straight line: from the transform origin along +size, flipped by negative scales.
+                {"updatePageElementTransform": {"objectId": oid, "applyMode": "ABSOLUTE", "transform": {
+                    "scaleX": dx / tpl["w"], "scaleY": dy / tpl["h"], "unit": "EMU",
+                    "translateX": round(x1 * scale * EMU_PER_PT), "translateY": round(y1 * scale * EMU_PER_PT)}}},
+                {"updatePageElementsZOrder": {"pageElementObjectIds": [oid], "operation": "BRING_TO_FRONT"}},
+            ]
+        else:
+            reqs.append({"createLine": {"objectId": oid, "lineCategory": "STRAIGHT", "elementProperties": {
                 "pageObjectId": slide_id,
                 "size": {"width": emu(abs(dx)), "height": emu(abs(dy))},
                 # The line runs from the transform origin along +size, flipped by negative scales.
                 "transform": {"scaleX": -1 if dx < 0 else 1, "scaleY": -1 if dy < 0 else 1, "unit": "EMU",
-                              "translateX": round(x1 * scale * EMU_PER_PT), "translateY": round(y1 * scale * EMU_PER_PT)}}}},
-            {"updateLineProperties": {"objectId": oid, "fields": "lineFill.solidFill.color,weight,startArrow,endArrow",
-                                      "lineProperties": {
-                                          "lineFill": {"solidFill": {"color": rgb(ln["stroke"])["opaqueColor"]}},
-                                          "weight": pt(round(max(0.5, ln["width"] * scale), 2)),
-                                          "startArrow": arrow_style(ln["arrow_from"]),
-                                          "endArrow": arrow_style(ln["arrow_to"])}}},
-        ]
+                              "translateX": round(x1 * scale * EMU_PER_PT), "translateY": round(y1 * scale * EMU_PER_PT)}}}})
+        reqs.append({"updateLineProperties": {"objectId": oid, "fields": "lineFill.solidFill.color,weight,startArrow,endArrow",
+                                              "lineProperties": {
+                                                  "lineFill": {"solidFill": {"color": rgb(ln["stroke"])["opaqueColor"]}},
+                                                  "weight": pt(round(max(0.5, ln["width"] * scale), 2)),
+                                                  "startArrow": arrow_style(ln["arrow_from"]),
+                                                  "endArrow": arrow_style(ln["arrow_to"])}}})
         children.append(oid)
     for j, node in enumerate(el["nodes"]):
-        oid = f"{object_id}_n{j}"
+        oid = node_oids[j]
         x0, y0, x1, y1 = (v * scale for v in node["bbox"])
+        text = "\n".join("".join(r["text"] for r in runs).strip() for runs in node["paragraphs"])
+        inside = bool(node["shape"]) and label_inside(node) and template is not None
         props = None if node["shape"] is None else {"contentAlignment": "MIDDLE", "autofit": {"autofitType": "NONE"},
                  "shapeBackgroundFill": ({"solidFill": {"color": rgb(node["fill"])["opaqueColor"]}} if node["fill"]
                                          else {"propertyState": "NOT_RENDERED"}),
                  "outline": ({"outlineFill": {"solidFill": {"color": rgb(node["stroke"])["opaqueColor"]}},
                               "weight": pt(round(max(0.5, (node["width"] or 0.4) * scale), 2))}
                              if node["stroke"] else {"propertyState": "NOT_RENDERED"})}
+        members = []
         if props:  # free labels (edge labels, captions) have no shape, only the text box below
             fields = ["contentAlignment", "autofit.autofitType", "shapeBackgroundFill"]
             fields += ["outline.outlineFill.solidFill.color", "outline.weight"] if node["stroke"] else ["outline.propertyState"]
@@ -805,33 +898,40 @@ def diagram_requests(el: dict, slide_id: str, object_id: str, scale: float, font
                 fields[fields.index("shapeBackgroundFill")] = "shapeBackgroundFill.propertyState"
             else:
                 fields[fields.index("shapeBackgroundFill")] = "shapeBackgroundFill.solidFill.color"
-            reqs += [
-                {"createShape": {"objectId": oid, "shapeType": node["shape"], "elementProperties": {
+            if inside:
+                tpl = template(node_template_key(node))
+                reqs += [
+                    {"duplicateObject": {"objectId": tpl["id"], "objectIds": {tpl["id"]: oid}}},
+                    {"updatePageElementTransform": {"objectId": oid, "applyMode": "ABSOLUTE", "transform": {
+                        "scaleX": (x1 - x0) / tpl["w"], "scaleY": (y1 - y0) / tpl["h"], "unit": "EMU",
+                        "translateX": round(x0 * EMU_PER_PT), "translateY": round(y0 * EMU_PER_PT)}}},
+                    {"updatePageElementsZOrder": {"pageElementObjectIds": [oid], "operation": "BRING_TO_FRONT"}},
+                ]
+            else:
+                reqs.append({"createShape": {"objectId": oid, "shapeType": node["shape"], "elementProperties": {
                     "pageObjectId": slide_id, "size": {"width": emu(x1 - x0), "height": emu(y1 - y0)},
                     "transform": {"scaleX": 1, "scaleY": 1, "unit": "EMU",
-                                  "translateX": round(x0 * EMU_PER_PT), "translateY": round(y0 * EMU_PER_PT)}}}},
-                {"updateShapeProperties": {"objectId": oid, "shapeProperties": props, "fields": ",".join(fields)}},
-            ]
-            children.append(oid)
-        text = "\n".join("".join(r["text"] for r in runs).strip() for runs in node["paragraphs"])
+                                  "translateX": round(x0 * EMU_PER_PT), "translateY": round(y0 * EMU_PER_PT)}}}})
+            reqs.append({"updateShapeProperties": {"objectId": oid, "shapeProperties": props, "fields": ",".join(fields)}})
+            members.append(oid)
         if text:
-            # TikZ nodes hug their text, but Slides shapes keep ~7 pt of inner padding the API can't
-            # change, so the label would wrap inside the shape. It gets its own wider text box,
-            # centred on the node and grouped with it.
-            label = f"{object_id}_x{j}"
-            cx, w = (x0 + x1) / 2, (x1 - x0) + 2 * PAD_X + 40
-            reqs += [
-                {"createShape": {"objectId": label, "shapeType": "TEXT_BOX", "elementProperties": {
-                    "pageObjectId": slide_id, "size": {"width": emu(w), "height": emu(y1 - y0)},
-                    "transform": {"scaleX": 1, "scaleY": 1, "unit": "EMU",
-                                  "translateX": round((cx - w / 2) * EMU_PER_PT), "translateY": round(y0 * EMU_PER_PT)}}}},
-                {"updateShapeProperties": {"objectId": label, "fields": "contentAlignment,autofit.autofitType",
-                                           "shapeProperties": {"contentAlignment": "MIDDLE",
-                                                               "autofit": {"autofitType": "NONE"}}}},
-            ]
-            children.append(label)
-            oid = label
-            reqs.append({"insertText": {"objectId": oid, "text": text}})
+            if not inside:
+                # A label wider than the node's text rectangle would wrap inside the shape: it
+                # gets its own wider text box, centred on the node and grouped with it.
+                label = f"{object_id}_x{j}"
+                cx, w = (x0 + x1) / 2, (x1 - x0) + 2 * PAD_X + 40
+                reqs += [
+                    {"createShape": {"objectId": label, "shapeType": "TEXT_BOX", "elementProperties": {
+                        "pageObjectId": slide_id, "size": {"width": emu(w), "height": emu(y1 - y0)},
+                        "transform": {"scaleX": 1, "scaleY": 1, "unit": "EMU",
+                                      "translateX": round((cx - w / 2) * EMU_PER_PT), "translateY": round(y0 * EMU_PER_PT)}}}},
+                    {"updateShapeProperties": {"objectId": label, "fields": "contentAlignment,autofit.autofitType",
+                                               "shapeProperties": {"contentAlignment": "MIDDLE",
+                                                                   "autofit": {"autofitType": "NONE"}}}},
+                ]
+                members.append(label)
+            target = oid if inside else label
+            reqs.append({"insertText": {"objectId": target, "text": text}})
             start = 0
             for runs in node["paragraphs"]:
                 line_text = "".join(r["text"] for r in runs).strip()
@@ -845,14 +945,25 @@ def diagram_requests(el: dict, slide_id: str, object_id: str, scale: float, font
                     style, sfields = fonts.text_style(run, scale)
                     style["foregroundColor"] = rgb(run["color"])
                     reqs.append({"updateTextStyle": {
-                        "objectId": oid, "style": style, "fields": ",".join(sfields + ["foregroundColor"]),
+                        "objectId": target, "style": style, "fields": ",".join(sfields + ["foregroundColor"]),
                         "textRange": {"type": "FIXED_RANGE", "startIndex": start + offset,
                                       "endIndex": min(start + len(line_text), start + offset + len(piece))}}})
                     offset += len(piece)
                 start += len(line_text) + 1
             reqs.append({"updateParagraphStyle": {
-                "objectId": oid, "textRange": {"type": "ALL"}, "fields": "alignment,lineSpacing,spaceAbove,spaceBelow",
+                "objectId": target, "textRange": {"type": "ALL"}, "fields": "alignment,lineSpacing,spaceAbove,spaceBelow",
                 "style": {"alignment": "CENTER", "lineSpacing": 100, "spaceAbove": pt(0), "spaceBelow": pt(0)}}})
+        if len(members) == 2:  # a node with its label outside: they move together
+            reqs.append({"groupObjects": {"groupObjectId": f"{object_id}_g{j}", "childrenObjectIds": members}})
+            members = [f"{object_id}_g{j}"]
+        children += members
+    # Edges follow the nodes they start or end on.
+    for oid, start, end, ln in segments:
+        ends = {"startConnection": connection(start, el["nodes"], node_oids) if start == ln["from"] else None,
+                "endConnection": connection(end, el["nodes"], node_oids) if end == ln["to"] else None}
+        ends = {k: v for k, v in ends.items() if v}
+        if ends:
+            reqs.append({"updateLineProperties": {"objectId": oid, "fields": ",".join(ends), "lineProperties": ends}})
     if len(children) >= 2:
         reqs.append({"groupObjects": {"groupObjectId": object_id, "childrenObjectIds": children}})
     return reqs
@@ -1158,8 +1269,8 @@ def emit(deck: dict, out: Path, title: str, new_deck: bool = False, keep_assets:
     # Every run starts from an imported .pptx: it sets the page size and brings template
     # shapes (shadows, exact corner radii) on one template slide per layout. Slides needing
     # templates are duplicates of their layout's template slide; the templates go at the end.
-    keys = list(dict.fromkeys(k for s in deck["slides"] for e in s["elements"] if (k := template_key(e, scale))))
-    uses_templates = {s["page"]: any(template_key(e, scale) for e in s["elements"]) for s in deck["slides"]}
+    keys = list(dict.fromkeys(k for s in deck["slides"] for e in s["elements"] for k in element_template_keys(e, scale)))
+    uses_templates = {s["page"]: any(element_template_keys(e, scale) for e in s["elements"]) for s in deck["slides"]}
     layouts = [l for l in TEMPLATE_LAYOUTS if any(uses_templates[s["page"]] and slide_layout(s)[0] == l
                                                   for s in deck["slides"])]
     existing = None if new_deck else existing_presentation(drive, out)
@@ -1312,6 +1423,12 @@ def emit(deck: dict, out: Path, title: str, new_deck: bool = False, keep_assets:
                     if el and el["kind"] != "image":
                         fallback_picture(el, page, slide_id)
 
+        def template_on_slide(slide_id: str, key: tuple) -> dict:
+            """The slide's copy of a template shape ({"id", "w", "h"}: its unscaled size in pt)."""
+            j = keys.index(key)
+            w, h = next(iter(templates.values()))["sizes"][j]
+            return {"id": f"{slide_id}_k{j}", "w": w, "h": h}
+
         pending: list[tuple[str, int, list]] = []
         pending_size = 0
         for slide in deck["slides"]:
@@ -1336,18 +1453,14 @@ def emit(deck: dict, out: Path, title: str, new_deck: bool = False, keep_assets:
                 if el["kind"] == "shape":
                     oid = f"{slide_id}_s{i}"
                     key = template_key(el, scale)
-                    template = None
-                    if key:
-                        j = keys.index(key)
-                        w, h = next(iter(templates.values()))["sizes"][j]
-                        template = {"id": f"{slide_id}_k{j}", "w": w, "h": h}
-                    reqs = shape_requests(el, slide_id, oid, scale, template)
+                    reqs = shape_requests(el, slide_id, oid, scale, template_on_slide(slide_id, key) if key else None)
                 elif el["kind"] == "table":
                     oid = f"{slide_id}_tab{i}"
                     reqs = table_requests(el, slide_id, oid, scale, fonts)
                 elif el["kind"] == "diagram":
                     oid = f"{slide_id}_dg{i}"
-                    reqs = diagram_requests(el, slide_id, oid, scale, fonts)
+                    reqs = diagram_requests(el, slide_id, oid, scale, fonts,
+                                            (lambda key, s=slide_id: template_on_slide(s, key)) if templates else None)
                 elif el["kind"] == "image":
                     oid = f"{slide_id}_f{i}"
                     reqs = [image_request(el, slide_id, oid, scale, urls[el["file"]])]

@@ -1,7 +1,7 @@
 """Unit tests for the request builders in emit (local only, no Google API)."""
 
-from beamer2slides.emit import (MIDDLE_BASELINE_EM, block_groups, merge_blocks, rule_groups, template_key,
-                                text_right_limit)
+from beamer2slides.emit import (MIDDLE_BASELINE_EM, block_groups, connection, label_inside, merge_blocks,
+                                rule_groups, template_key, text_right_limit)
 
 
 def shape(bbox, shape="ROUND_2_SAME_RECTANGLE", flip=False, **extra):
@@ -59,6 +59,27 @@ def test_text_right_limit():
     two_columns = {"size": [362.83, 272.13], "elements": [left, right]}
     assert text_right_limit(left, two_columns) == 190 - 11.0, "stops before the other column"
     assert text_right_limit(right, two_columns) == 362.83 - 20, "the page's text margin, mirrored"
+
+
+def node(bbox, shape="RECTANGLE", label_w=30.0, text="Start"):
+    return {"bbox": bbox, "shape": shape, "label_w": label_w,
+            "paragraphs": [[{"text": text}]] if text else []}
+
+
+def test_labels_go_inside_nodes_that_fit_them():
+    assert label_inside(node([0, 0, 40, 15]))
+    assert not label_inside(node([0, 0, 40, 40], "ELLIPSE")), "an ellipse's text rectangle is its inscribed square"
+    assert label_inside(node([0, 0, 40, 40], "ELLIPSE", label_w=8, text="A"))
+    assert not label_inside(node([0, 0, 60, 30], "TRIANGLE")), "a triangle's text sits in its lower half"
+    assert not label_inside(node([0, 0, 40, 15], text=""))
+
+
+def test_edges_connect_to_node_sites():
+    nodes = [node([10, 10, 50, 30]), node([100, 0, 140, 40], "ELLIPSE"), {"bbox": [60, 5, 90, 12], "shape": None}]
+    oids = ["a", "b", "label"]
+    assert connection([50, 20], nodes, oids) == {"connectedObjectId": "a", "connectionSiteIndex": 3}
+    assert connection([100.5, 20], nodes, oids) == {"connectedObjectId": "b", "connectionSiteIndex": 2}
+    assert connection([75, 20], nodes, oids) is None
 
 
 def test_middle_alignment_model():

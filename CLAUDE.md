@@ -40,6 +40,11 @@ a per-slide background picture.
 - `diagram` (`classify.diagram_from`): figure clusters of only rectangle/rounded/ellipse nodes,
   straight lines and small arrow tips (open, filled, stealth) → shapes, lines and text boxes
   (node labels and free edge labels), grouped. Lines with filled tips are extended to the tip.
+  Diagrams stay intact when edited: a label that fits the node's text rectangle (`label_inside`;
+  Slides uses the .pptx text rectangle, an ellipse's is its inscribed square) goes inside a
+  padding-free template node, otherwise node and label form a sub-group; line ends on a node's
+  connection site are connected (`connection`), and `|-`/`-|` paths become one elbow connector
+  (template bentConnector3 with adj 0 or 100000), so edges follow moved nodes.
 - `shape`: opaque filled panels such as beamer blocks, not touching the page edge, with
   nothing left in the background on top; verified against the rendered colour. Also
   figure clusters of plain filled rectangles (`plain_rectangles`, role `rule`).
