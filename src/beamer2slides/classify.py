@@ -611,7 +611,7 @@ class PageClassifier:
         # x-height. Numbered balls draw the digit as a small text span on top of the image.
         for im, ir in self.small_images:
             if not 0.8 <= ir.w / max(ir.h, 0.01) <= 1.25 or \
-                    any(o is not im and orr.intersects(ir) for o, orr in self.small_images):
+                    any(o is not im and orr.intersects(ir) and max(orr.w, orr.h) <= 20 for o, orr in self.small_images):
                 continue  # icons (beamer's bibliography article, composite images): kept as pictures
             on_image = [s for s in spans if ir.expand(0.5).contains(s.rect.cx, s.rect.cy)]
             rest = [s for s in spans if s not in on_image]

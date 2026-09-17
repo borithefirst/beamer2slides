@@ -186,6 +186,8 @@ def test_metropolis_progress_bar_is_a_shape():
 def test_madrid_blocks_tables_and_footer():
     d = deck("04_theme_blocks")
     assert kinds(d["slides"][1]).count("shape") >= 6  # block title bars and bodies
+    balls = [p["bullet"]["kind"] for e in texts(d["slides"][1]) for p in e["paragraphs"] if p["bullet"]]
+    assert balls == ["image", "image"], "a ball touching the block shadow is still a bullet"
     table = [e for e in d["slides"][3]["elements"] if e["kind"] == "table"]
     assert len(table) == 1
     cells = [[paragraph_text({"runs": c}) for c in row] for row in table[0]["cells"]]
