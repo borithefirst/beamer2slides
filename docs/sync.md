@@ -4,6 +4,10 @@ Context: an AI writes the talk as beamer, `convert` turns it into a Slides deck,
 deck, the AI (or a LaTeX user) edits the beamer again. `sync` brings the source changes into the
 live deck without destroying the deck edits; `pull` brings deck edits back towards the source.
 
+**Never lose deck edits** (`guard.py`): `convert` on an output folder that already has a deck
+replaces that deck's whole content, so it now checks first whether anyone edited it and refuses
+if they did — see [Never lose deck edits](#never-lose-deck-edits) at the end.
+
 ## Model: a three-way merge
 - **base**: what the converter produced last time, recorded right after it was written
   (the deck's IR plus Google's read-back of each object it created).
@@ -303,3 +307,115 @@ residuals (largest picture box error 1.9 pt); the photo is on disk as Google's 2
 Not translated yet (reported instead): tables, diagram labels, shape colours, paragraph alignment,
 frame title position and theme styles, edits inside math, rotated text, overlays beyond the last
 step (compile with `--handout` to pull a handout-style deck).
+
+## Never lose deck edits
+
+`convert` on an output folder that already has a deck does **not** create a new presentation: it
+replaces that deck's whole content through `files.update`, so the URL stays and everything anyone
+did in Slides is gone. That is the only write in the tool that can destroy a deck, and it used to
+happen silently. `guard.py` now stands in front of it.
+
+### What convert does now
+
+Before any work (and again immediately before the write, in case someone typed in the deck while
+the PDF was being converted), `guard.check_rebuild` reads the live deck with `presentations.get`
+and compares it with the sync base (`<out>/sync/base.json`, or Drive `appProperties.b2sBase` -
+whichever `snapshot.load_base` finds; Drive wins). It refuses for three reasons:
+
+| reason | when | message says |
+|---|---|---|
+| `edited` | someone changed the deck since the converter wrote it | what was edited, with up to 3 examples |
+| `no-base` | there is no base, so the question cannot be answered | the base is written by `convert`; older decks have none |
+| `other-source` | the base says this folder's deck came from another PDF | rebuilding here would replace that deck with this PDF's slides |
+
+A refusal exits non-zero (`RebuildRefused` → `SystemExit`) and nothing is written. It looks like
+this (from `tools/rebuild_guard_proof.py`, a real run):
+
+```
+refusing to rebuild: this deck was edited in Google Slides after beamer2slides wrote it.
+  https://docs.google.com/presentation/d/11yU.../edit
+  1 slide edited: 1 text edit, 1 object added in Slides
+    - slide 2 "Why decks and sources diverge": text edited (text/body/0: "The source is HANDWRITTEN in by an auth…")
+    - slide 2 "Why decks and sources diverge": 1 object(s) added in Slides
+  A rebuild replaces the whole deck. What to do instead:
+    merge the PDF into the deck, keeping the edits:  python -m beamer2slides sync talk.pdf --deck out\talk
+    leave that deck alone and make a new one:        python -m beamer2slides convert talk.pdf --out out\talk --new-deck
+    rebuild anyway (the deck's content is replaced): python -m beamer2slides convert talk.pdf --out out\talk --force-rebuild
+  The deck is at revision 2Ymo8YWHlbj6kg; a forced rebuild keeps a backup first (--backup, docs/sync.md).
+```
+
+### What counts as an edit
+
+Exactly what sync would keep, through the same code: `merge.deck_edits` (geometry, text, text
+style, shape style, image, group, deleted, part_deleted), `merge.user_objects` (objects the
+converter never made), `merge.background_edited`, speaker notes, plus slides added, deleted or
+reordered. There is one notion of "edited" in the tool, not two.
+
+Deliberately **not** an edit:
+- a new `revisionId` - Google bumps it on its own (opening the deck is enough);
+- a new `contentUrl` for a picture nobody touched - Google reissues those; pixel signatures decide
+  (`guard.sign_changed`, the same rule as `sync.Sync.sign_changed`), and only pictures whose URL
+  hash changed are downloaded;
+- exporting a thumbnail (`fidelity`, `measure_places`);
+- `measure_places`' scratch slides `b2s_mNNN` left by an interrupted run - converter leftovers,
+  filtered out before the comparison.
+
+### Getting a deck back
+
+Before every destructive write the deck's `revisionId`, Drive `modifiedTime` and what was found
+are appended to `<out>/backups/backups.json` (and the rebuild's entry goes into `emit.json` as
+`previous`), and the same lines are printed. `--backup` decides what else is kept:
+
+| `--backup` | convert | sync |
+|---|---|---|
+| `auto` (default) | a `.pptx` export when the rebuild is forced, nothing when the deck was untouched | a `.pptx` export before the first write |
+| `none` | nothing | nothing |
+| `file` | `.pptx` in `<out>/backups` | the same |
+| `drive` | a Drive copy of the presentation (its own URL) | the same |
+| `both` | both | both |
+
+`tools/deck_backup.py` lists (`list`), exports (`export`) and restores (`restore --from FILE`, or
+from a revision). A restore creates a **new** presentation by default; `--in-place` writes the
+backup back over the deck.
+
+> **Measured, not guessed** (`tools/probe_revision_history.py`): for a Google-native presentation
+> Drive does keep a revision row per editing session, and `revisions.list` shows them - but every
+> revision's export link returns the file's **current** content, even with `revision=N` in the URL,
+> and `revisions.update(keepForever=True)` does not change that. So a `files.update` rebuild leaves
+> **nothing the API can fetch back**: version history is evidence, not a recovery path. The live
+> proof confirms it end to end - the export of the revision from before a forced rebuild does not
+> contain the word that was typed into the deck (`drive_history.holds_the_edit == false` in
+> `out/agent-guard/proof.json`), while the `.pptx` backup restored into a new deck still shows it.
+> Version history in the Slides UI ("File → Version history") may still show the old state to a
+> human; treat it as worth a try, never as a promise. **The `.pptx` backup is the way back.**
+
+### The other in-place writes
+
+- `--new-deck` creates a new presentation and prints `the previous deck is left as it is at <url>`:
+  it never touches the old one (proved live: the old deck's revision is unchanged afterwards).
+- A **trashed or deleted** previous deck is never resurrected or written to: `guard.previous_deck`
+  reports `live` / `trashed` / `gone` / `other` (not a presentation), and anything but `live` makes
+  convert create a new deck and say so.
+- A **stale output folder** (its deck was converted from another PDF) is the `other-source` refusal
+  above.
+- **Sync's staging deck** can never be the user's deck: `Sync.stage` uses the id `files.create`
+  just returned, and the only ids ever passed to `files().delete` in `sync.py` are that staging id
+  and the picture file it made (checked at runtime and statically in `tests/test_guard.py`).
+- **Sync's first write** is not a rebuild - it only rewrites what the source changed - but it is
+  still a write, so `record_sync_point` records the revision and takes a `.pptx` backup
+  (`--backup`), prints a `recovery:` block, and puts the entry into `<out>/sync/sync-report.json`
+  as `recovery`.
+
+### Tests
+
+- `tests/test_guard.py` (23 tests, no Google calls): fake read-backs in the style of
+  `tests/test_sync.py` cover every detection case above (including the reissued `contentUrl` and
+  the scratch slides), the three refusal reasons, `--force-rebuild`, the backup modes and the
+  export-refused → Drive-copy fallback, the recorded entry and its restore hint, `plan_rebuild`'s
+  paths (untouched, forced, refused, `--new-deck`, trashed, gone) and the staging-deck proof.
+- `python tools/rebuild_guard_proof.py` (live, ~2 min, fixed folders `out/agent-guard/<deck>`):
+  convert → convert again (no false alarm) → edit like a person (`tools/deck_edits.py`) → convert
+  refuses with exit code 1 and the deck's revision and edit are untouched → `--force-rebuild`
+  rebuilds and records the backup → the backup restores into a deck that still shows the edit →
+  Drive history recorded as evidence → `--new-deck` leaves the old deck alone → a trashed deck
+  reads back as trashed. Evidence in `out/agent-guard/proof.json` and `proof.log`.

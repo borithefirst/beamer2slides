@@ -54,7 +54,12 @@ python -m beamer2slides classify talk.pdf          # local only: see decisions i
 python -m beamer2slides fidelity talk.pdf          # compare Google's rendering with the PDF
 ```
 Outputs go to `out/<pdf name>/`. Re-running `convert` on the same PDF updates the same
-Google Slides deck (`--new-deck` creates a new one). Pictures and backgrounds travel inside a
+Google Slides deck — but if anyone edited that deck in Slides, convert stops and says so instead of
+replacing it: either merge the new PDF into the deck with `sync` (keeping the edits), make a new
+deck with `--new-deck`, or rebuild anyway with `--force-rebuild`, which keeps a `.pptx` backup in
+`out/<pdf name>/backups` first (`docs/sync.md`, "Never lose deck edits";
+`python tools/deck_backup.py list|export|restore` manages the backups).
+Pictures and backgrounds travel inside a
 .pptx that Drive imports as the deck's starting point: nothing is ever shared by public link,
 so it works where link sharing is blocked. The only files the tool creates in Drive are the
 decks themselves (`python tools/drive_usage.py` lists them).
