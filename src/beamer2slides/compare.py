@@ -26,6 +26,7 @@ TOL = {
     "font": 0.06,        # relative font size
     "color": 24,         # summed RGB channel difference (0..765)
     "phash": 0.15,       # mean abs difference of 16x16 grey thumbnails (0..1)
+    "inline_phash": 0.3,  # the same for formula/icon pictures (transparent, on coloured panels)
 }
 IGNORED_ROLES = {"footer", "math", "icon", "overlay", "highlight"}
 NORMALISE = str.maketrans({"\u00a0": " ", "\u2009": " ", "\u202f": " ", "\t": " ", "\x0b": " ", "“": '"', "”": '"',
@@ -396,6 +397,73 @@ def grey16(img) -> list[int]:
     return [small.getpixel((x, y)) for y in range(16) for x in range(16)]
 
 
+PICTURE_EDITS = ("crop", "rotation", "flip", "opacity", "brightness", "contrast", "recolor")
+
+
+def adjusted_picture(img, el: dict):
+    """Brightness, contrast and recolour of a Slides picture applied to its pixels (RGBA). Slides'
+    own formulas aren't documented: contrast scales around mid grey (1 + c, or 1 / (1 - c) above 0),
+    brightness adds, recolour maps luminance onto the gradient of its stops."""
+    import numpy as np
+    from PIL import Image
+    arr = np.asarray(img.convert("RGBA"), np.float32) / 255
+    rgb, alpha = arr[..., :3], arr[..., 3:]
+    c, b = el.get("contrast") or 0.0, el.get("brightness") or 0.0
+    if c or b:
+        k = 1 / max(1e-3, 1 - c) if c > 0 else 1 + c
+        rgb = (rgb - 0.5) * k + 0.5 + b
+    stops = sorted((el.get("recolor") or {}).get("stops") or [], key=lambda s: s["position"])
+    if stops:
+        lum = np.clip(rgb @ np.array([0.299, 0.587, 0.114], np.float32), 0, 1)
+        pos = np.array([s["position"] for s in stops], np.float32)
+        cols = np.array([[int(s["color"][i:i + 2], 16) / 255 for i in (1, 3, 5)] for s in stops], np.float32)
+        rgb = np.stack([np.interp(lum, pos, cols[:, ch]) for ch in range(3)], -1)
+    elif (el.get("recolor") or {}).get("name") == "GRAYSCALE":
+        lum = rgb @ np.array([0.299, 0.587, 0.114], np.float32)
+        rgb = np.repeat(lum[..., None], 3, -1)
+    out = np.concatenate([np.clip(rgb, 0, 1), alpha], -1)
+    return Image.fromarray((out * 255 + 0.5).astype(np.uint8), "RGBA")
+
+
+def cropped_picture(img, crop: dict | None):
+    if not crop:
+        return img
+    w, h = img.size
+    box = (round(crop["l"] * w), round(crop["t"] * h), round((1 - crop["r"]) * w), round((1 - crop["b"]) * h))
+    if box[2] - box[0] < 1 or box[3] - box[1] < 1:
+        return img
+    return img.crop(box)
+
+
+def displayed_picture(el: dict):
+    """A deck picture as Slides shows it inside its axis-aligned box, on white: crop, adjustments,
+    transparency, mirroring and rotation applied to its file. None without a readable file."""
+    from PIL import Image, ImageOps
+    try:
+        img = Image.open(el["file"])
+        img.seek(0)
+        img = img.convert("RGBA")
+    except (OSError, ValueError, KeyError, EOFError):
+        return None
+    img = cropped_picture(img, el.get("crop"))
+    if any(el.get(k) for k in ("brightness", "contrast", "recolor")):
+        img = adjusted_picture(img, el)
+    box = el.get("box") or el["bbox"]
+    w, h = max(1, box[2] - box[0]), max(1, box[3] - box[1])
+    size = (max(8, round(4 * w)), max(8, round(4 * h)))  # 4 px per pt, like the candidate's crop
+    img = img.resize(size, Image.BILINEAR)
+    if el.get("opacity") is not None and el["opacity"] < 1:
+        a = img.getchannel("A").point(lambda v: round(v * el["opacity"]))
+        img.putalpha(a)
+    if el.get("flip"):
+        img = ImageOps.mirror(img)
+    if el.get("rotation"):
+        img = img.rotate(-el["rotation"], resample=Image.BILINEAR, expand=True)
+    ground = Image.new("RGBA", img.size, (255, 255, 255, 255))
+    ground.alpha_composite(img)
+    return ground.convert("RGB")
+
+
 # ---------------------------------------------------------------- compare
 
 @dataclass
@@ -554,6 +622,14 @@ def compare_slide(c: dict, t: dict, ci: int, ti: int, tol: dict, add, comp: Comp
         for a, ce in enumerate(cc):
             if a not in {x for x, _ in got}:
                 add("element_extra", **where, element=ce["id"], el_kind=kind, bbox=ce["bbox"])
+    if hashes:  # formula and icon pictures in text lines: a replaced one is reported (never written)
+        cm = [e for e in c["elements"] if e["kind"] == "image" and e.get("role") in ("math", "icon")]
+        tm = [e for e in t["elements"] if e["kind"] == "image" and e.get("role") in ("math", "icon")]
+        for a, b in match_boxes(cm, tm, hashes):
+            h = hash_distance(hashes.get(id(cm[a])), hashes.get(id(tm[b])))
+            if h is not None and h > tol["inline_phash"]:
+                add("image", **where, element=cm[a]["id"], target_element=tm[b]["id"], distance=round(h, 3),
+                    role=cm[a]["role"], file=tm[b].get("file"))
 
 
 def text_anchor_for(el: dict, pi: int) -> tuple[float, float]:
@@ -603,6 +679,8 @@ def residual_line(r: dict) -> str:
         return f"{where}: {k} '{r.get('title', '')}'"
     if k in ("element_missing", "element_extra"):
         return f"{where}: {k} {r.get('el_kind')} '{str(r.get('text', r.get('bbox', '')))[:60]}'"
+    if k == "image":
+        return f"{where} {r['target_element']}: {r.get('role') or 'picture'} replaced (distance {r.get('distance')})"
     return f"{where}: {k} {r.get('cur')!r} -> {r.get('tgt')!r}"
 
 

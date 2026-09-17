@@ -13,6 +13,7 @@ snapshot's object map, else none (compare aligns slides by title and text).
 
 import hashlib
 import json
+import math
 import re
 import urllib.request
 from pathlib import Path
@@ -431,18 +432,23 @@ def element_of(pe: dict, m: list[float], resolver: StyleResolver, fonts: FontMap
                 "fill": fill_hex, "outline": stroke}
     if "image" in pe:
         el = {"kind": "image", "role": "figure", "bbox": bbox, "alt": pe.get("description")}
+        el.update(picture_props(pe, m, w, h, scale, resolver.scheme))
         url = pe["image"].get("contentUrl")
+        source = pe["image"].get("sourceUrl")
+        if source and "googleusercontent.com" not in source:
+            el["source_url"] = source  # inserted by URL: maybe a bigger original than Google keeps
         if url and fetch and images is not None:
             try:
+                # contentUrl (=s2048) gives the stored picture byte for byte, as the .pptx export does;
+                # crop, transparency, rotation and outline are not baked into it (tools/probe_images.py)
                 data = fetch(url)
                 sha = hashlib.sha1(data).hexdigest()
-                ext = ".png" if data[:4] == b"\x89PNG" else ".jpg" if data[:2] == b"\xff\xd8" else ".gif" \
-                    if data[:3] == b"GIF" else ".img"
+                fmt = image_format(data)
                 images.mkdir(parents=True, exist_ok=True)
-                path = images / f"{sha[:16]}{ext}"
+                path = images / f"{sha[:16]}.{FORMAT_EXT.get(fmt, 'img')}"
                 if not path.exists():
                     path.write_bytes(data)
-                el.update({"file": str(path), "sha1": sha})
+                el.update({"file": str(path), "sha1": sha, "format": fmt})
             except OSError as e:
                 el["error"] = str(e)[:120]
         return el
@@ -459,6 +465,75 @@ def element_of(pe: dict, m: list[float], resolver: StyleResolver, fonts: FontMap
     if "line" in pe:
         return None
     return None
+
+
+FORMAT_EXT = {"png": "png", "jpeg": "jpg", "gif": "gif", "webp": "webp", "bmp": "bmp", "tiff": "tif", "svg": "svg",
+              "emf": "emf", "wmf": "wmf", "pdf": "pdf"}
+
+
+def image_format(data: bytes) -> str:
+    if data[:4] == b"\x89PNG":
+        return "png"
+    if data[:2] == b"\xff\xd8":
+        return "jpeg"
+    if data[:3] == b"GIF":
+        return "gif"
+    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return "webp"
+    if data[:2] == b"BM":
+        return "bmp"
+    if data[:4] in (b"II*\x00", b"MM\x00*"):
+        return "tiff"
+    if data[:5] == b"%PDF-":
+        return "pdf"
+    if data[40:44] == b" EMF":
+        return "emf"
+    if data[:4] == b"\xd7\xcd\xc6\x9a":
+        return "wmf"
+    if b"<svg" in data[:1000]:
+        return "svg"
+    return "unknown"
+
+
+def picture_props(pe: dict, m: list[float], w: float, h: float, scale: float, scheme: dict) -> dict:
+    """What Slides keeps as properties of a picture, in PDF pt: `box` (the unrotated frame around
+    the centre), `rotation` (degrees clockwise), `flip` (mirrored), `crop` (fractions cut off the
+    picture file), `opacity`, `brightness`/`contrast` (-1..1), `recolor` (gradient stops) and
+    `outline` (colour, weight). Only what differs from an untouched picture is set."""
+    a, b, _, d, e, _ = m
+    cx, cy = m[0] * w / 2 + m[1] * h / 2 + m[2], m[3] * w / 2 + m[4] * h / 2 + m[5]
+    bw, bh = math.hypot(a, d) * w, math.hypot(b, e) * h
+    out: dict = {"box": [round(v / scale, 2) for v in (cx - bw / 2, cy - bh / 2, cx + bw / 2, cy + bh / 2)]}
+    rot = math.degrees(math.atan2(d, a))
+    if a * e - b * d < 0:  # R(rot)·flip(y) = R(rot + 180)·flip(x)
+        out["flip"] = True
+        rot += 180
+    rot = (rot + 180) % 360 - 180
+    if abs(rot) > 0.05:
+        out["rotation"] = round(rot, 2)
+    ip = pe.get("image", {}).get("imageProperties", {})
+    crop = ip.get("cropProperties") or {}
+    c = {k: round(crop.get(f"{name}Offset", 0.0), 5) for k, name in (("l", "left"), ("t", "top"), ("r", "right"), ("b", "bottom"))}
+    if any(abs(v) > 1e-4 for v in c.values()):
+        out["crop"] = c
+    if crop.get("angle"):
+        out["crop_angle"] = round(math.degrees(crop["angle"]), 2)
+    if ip.get("transparency"):
+        out["opacity"] = round(1 - ip["transparency"], 4)
+    for key in ("brightness", "contrast"):
+        if ip.get(key):
+            out[key] = round(ip[key], 4)
+    recolor = ip.get("recolor")
+    if recolor:
+        out["recolor"] = {"name": recolor.get("name"), "stops": [
+            {"color": rgb_hex(s.get("color"), scheme) or "#000000", "alpha": s.get("alpha", 1.0),
+             "position": s.get("position", 0.0)} for s in recolor.get("recolorStops", [])]}
+    outline = ip.get("outline") or {}
+    if outline and outline.get("propertyState", "RENDERED") == "RENDERED":
+        colour = rgb_hex(outline.get("outlineFill", {}).get("solidFill", {}).get("color"), scheme)
+        out["outline"] = {"color": colour or "#000000", "weight": round(dim(outline.get("weight")) / scale, 3),
+                          "dash": outline.get("dashStyle", "SOLID")}
+    return out
 
 
 def fetch_url(url: str) -> bytes:

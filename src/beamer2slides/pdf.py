@@ -427,8 +427,17 @@ class Page:
             a, b, c, d, e, f = po.matrix
             xs = [e, a + e, c + e, a + c + e]
             ys = [f, b + f, d + f, b + d + f]
+            full = box = (min(xs), min(ys), max(xs), max(ys))
+            node = po
+            while node is not None:  # \includegraphics[trim, clip]: only the clipped part shows
+                clip = self._clip_box(node)
+                if clip:
+                    box = (max(box[0], clip[0]), max(box[1], clip[1]), min(box[2], clip[2]), min(box[3], clip[3]))
+                node = node.parent
+            if box[2] <= box[0] or box[3] <= box[1]:
+                box = full
             R.FPDFImageObj_GetImagePixelSize(po.handle, w, h)
-            out.append({"bbox": (min(xs), min(ys), max(xs), max(ys)), "width": w.value, "height": h.value, "object": po})
+            out.append({"bbox": box, "width": w.value, "height": h.value, "object": po})
         return out
 
     def links(self) -> list[dict]:

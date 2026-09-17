@@ -167,7 +167,10 @@ class Context:
     colours: dict[str, str] = field(default_factory=dict)   # \definecolor names to add
     packages: set[str] = field(default_factory=set)          # preamble lines to add
     pt_option: int = 11
-    files: dict[str, Path] = field(default_factory=dict)     # picture copies: source path -> path in the work tree
+    files: dict[str, Path] = field(default_factory=dict)     # new picture files: key -> path in the work tree
+    notes: list[str] = field(default_factory=list)           # what the report must say about pictures
+    pictures: dict = field(default_factory=dict)             # (deck file, edits) -> Picture
+    index: list[dict] | None = None                          # picture files of the source tree
 
 
 @dataclass
@@ -499,14 +502,284 @@ def plain_source(text: str) -> bool:
     return not re.search(r"[\\{}$]", stripped)
 
 
+# ---------------------------------------------------------------- pictures
+
+TIKZ = r"\usepackage{tikz}"
+LATEX_PICTURES = (".png", ".jpg", ".jpeg", ".pdf")
+FIGURE_ENV_RE = re.compile(r"\\begin\s*\{(tikzpicture|pgfpicture)\}")
+WRAPPERS = [  # (text right before the wrapped command, what closes it)
+    (re.compile(r"\\reflectbox\s*\{\s*$"), "}"),
+    (re.compile(r"\\rotatebox\s*(\[[^\]]*\])?\s*\{[^{}]*\}\s*\{\s*$"), "}"),
+    (re.compile(r"\\(resizebox|scalebox)\*?\s*\{[^{}]*\}(\s*\{[^{}]*\})?\s*(\[[^\]]*\])?\s*\{\s*$"), "}"),
+    (re.compile(r"\\tikz\s*\\node\s*\[[^\]]*\]\s*\{\s*$"), "};"),
+]
+
+
+@dataclass
+class Picture:
+    rel: str                          # as written in \includegraphics (relative to the main file)
+    path: Path
+    natural: tuple[float, float]      # natural size in bp: what trim counts in
+
+
+@dataclass
+class PictureSource:
+    """Where a picture of a slide comes from: an \\includegraphics or a tikzpicture/pgfpicture,
+    with the wrappers pull writes around it (\\rotatebox, \\reflectbox, \\tikz\\node) or a
+    \\resizebox/\\scalebox."""
+    kind: str                         # "graphics" or "env"
+    start: int                        # span with its wrappers
+    end: int
+    inner: tuple[int, int]            # the command or the environment alone
+    block: tuple[int, int] | None     # the textblock* around it
+    xy: tuple[float, float] | None    # that textblock's position
+    overlay: bool = False             # tikzpicture[overlay]
+
+
+def picture_slug(alt: str | None) -> str:
+    import unicodedata
+    text = unicodedata.normalize("NFKD", alt or "").encode("ascii", "ignore").decode().lower()
+    if text.startswith("b2s"):  # the converter's own ids and tags
+        return "picture"
+    return "-".join(re.findall(r"[a-z0-9]+", text))[:40].strip("-") or "picture"
+
+
+def natural_size(path: Path) -> tuple[float, float]:
+    """The size graphicx gives a file before scaling: pixels at the file's resolution (72 dpi
+    without one), a PDF's first page."""
+    if path.suffix.lower() == ".pdf":
+        import pypdfium2 as pdfium
+        doc = pdfium.PdfDocument(str(path))
+        try:
+            return tuple(doc[0].get_size())
+        finally:
+            doc.close()
+    from PIL import Image
+    with Image.open(path) as img:
+        w, h = img.size
+        dpi = img.info.get("dpi")
+    if dpi and dpi[0] and dpi[1] and float(dpi[0]) > 1:
+        return w * 72 / float(dpi[0]), h * 72 / float(dpi[1])
+    return float(w), float(h)
+
+
+def picture_look(path: Path):
+    """(aspect ratio, 64x64 grey array, pixel count) of a raster file or a one-page PDF; None if unreadable."""
+    import numpy as np
+    from PIL import Image
+    try:
+        if path.suffix.lower() == ".pdf":
+            import pypdfium2 as pdfium
+            doc = pdfium.PdfDocument(str(path))
+            try:
+                if len(doc) != 1:
+                    return None
+                w, h = doc[0].get_size()
+                img = doc[0].render(scale=256 / max(w, h)).to_pil()
+                pixels = float("inf")  # vector: better than any raster
+            finally:
+                doc.close()
+        else:
+            img = Image.open(path)
+            img.seek(0)
+            pixels = img.size[0] * img.size[1]
+        rgba = img.convert("RGBA")
+        ground = Image.new("RGBA", rgba.size, (255, 255, 255, 255))
+        ground.alpha_composite(rgba)
+        grey = np.asarray(ground.convert("L").resize((64, 64), Image.BILINEAR), np.float32) / 255
+        return rgba.size[0] / rgba.size[1], grey, pixels
+    except Exception:  # noqa: BLE001 - any unreadable file is just not a candidate
+        return None
+
+
+def same_look(a, b) -> bool:
+    """Two pictures that are the same image at another resolution or encoding."""
+    import numpy as np
+    if a is None or b is None or abs(math.log(a[0] / b[0])) > 0.02:
+        return False
+    x, y = a[1].ravel(), b[1].ravel()
+    if float(np.abs(x - y).mean()) > 0.04:
+        return False
+    if x.std() < 0.02 or y.std() < 0.02:
+        return float(np.abs(x - y).mean()) < 0.01
+    return float(np.corrcoef(x, y)[0, 1]) >= 0.98
+
+
+def picture_index(root: Path) -> list[dict]:
+    """Picture files of a source tree LaTeX can include: {path, sha1, look (lazy)}."""
+    out = []
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [d for d in dirnames if d not in SKIP_DIRS and not d.startswith(".")]
+        for name in filenames:
+            p = Path(dirpath) / name
+            if p.suffix.lower() in LATEX_PICTURES and p.stat().st_size <= 50_000_000:
+                out.append({"path": p, "sha1": hashlib.sha1(p.read_bytes()).hexdigest(), "look": None})
+    return out
+
+
+def find_picture(index: list[dict], sha: str, look) -> dict | None:
+    """The same picture in the source tree: identical bytes, else the best-resolution file that
+    looks the same (a PDF before any raster)."""
+    exact = next((e for e in index if e["sha1"] == sha), None)
+    if exact or look is None:
+        return exact
+    found = []
+    for e in index:
+        if e["look"] is None:
+            e["look"] = picture_look(e["path"]) or False
+        if e["look"] and same_look(look, e["look"]):
+            found.append(e)
+    return max(found, key=lambda e: e["look"][2]) if found else None
+
+
+def picture_edits(te: dict) -> bool:
+    return any(te.get(k) for k in ("crop", "rotation", "flip", "opacity", "outline", "brightness", "contrast", "recolor"))
+
+
+def picture_latex(te: dict, pic: Picture, ctx: "Context", size: list[str] | None = None) -> str:
+    """\\includegraphics for a deck picture with its Slides edits as LaTeX: crop -> trim/clip (in the
+    file's natural bp), rotation -> angle (Slides turns clockwise about the centre; the rotated box
+    is placed by its bounding box, so no origin is needed), mirroring -> \\reflectbox, transparency
+    and outline -> a \\tikz node (text opacity, draw), turned as a whole by \\rotatebox."""
+    x0, y0, x1, y1 = te.get("box") or te["bbox"]
+    opts = []
+    crop = te.get("crop")
+    if crop:
+        nw, nh = pic.natural
+        trim = (crop["l"] * nw, crop["b"] * nh, crop["r"] * nw, crop["t"] * nh)
+        opts += ["trim=" + " ".join(f"{max(0.0, v):.2f}" for v in trim), "clip"]
+    opts += size or [f"width={x1 - x0:.1f}pt", f"height={y1 - y0:.1f}pt"]
+    angle = round(-(te.get("rotation") or 0.0), 2)
+    node = []
+    if te.get("opacity") is not None and te["opacity"] < 0.995:
+        node.append(f"text opacity={te['opacity']:.2f}")
+    outline = te.get("outline")
+    if outline:
+        node += [f"draw={colour_name(outline['color'], ctx.colours)}", f"line width={outline['weight']:.2f}pt"]
+        if outline.get("dash", "SOLID") != "SOLID":
+            node.append("dotted" if "DOT" in outline["dash"] and "DASH" not in outline["dash"] else "dashed")
+    wrapped = bool(node or te.get("flip"))
+    if angle and not wrapped:
+        opts.append(f"angle={angle:g}")
+    cmd = f"\\includegraphics[{','.join(opts)}]{{{pic.rel}}}"
+    if te.get("flip"):
+        cmd = f"\\reflectbox{{{cmd}}}"
+    if node:
+        ctx.packages.add(TIKZ)
+        cmd = f"\\tikz\\node[inner sep=0pt,{','.join(node)}]{{{cmd}}};"
+    if angle and wrapped:
+        cmd = f"\\rotatebox{{{angle:g}}}{{{cmd}}}"
+    return cmd
+
+
+def picture_block(te: dict, pic: Picture, ctx: "Context", ind: str) -> str:
+    """A picture at its deck position: a textblock* at the top-left of its bounding box."""
+    x0, y0, x1, y1 = te["bbox"]
+    pad = te["outline"]["weight"] / 2 if te.get("outline") and not te.get("rotation") else 0.0
+    return (f"{ind}\\begin{{textblock*}}{{{x1 - x0 + 2 * pad:.1f}pt}}({x0 - pad:.1f}pt,{y0 - pad:.1f}pt)\n"
+            f"{ind}  {picture_latex(te, pic, ctx)}\n{ind}\\end{{textblock*}}\n")
+
+
+def wrapper_span(text: str, a: int, b: int) -> tuple[int, int]:
+    """[a, b) widened to the wrappers directly around it."""
+    while True:
+        head = text[max(0, a - 300):a]
+        for pat, close in WRAPPERS:
+            m = pat.search(head)
+            if not m:
+                continue
+            j = skip_space(text, b)
+            if not text.startswith("}", j):
+                continue
+            nb = j + 1
+            if close == "};":
+                k = skip_space(text, nb)
+                if not text.startswith(";", k):
+                    continue
+                nb = k + 1
+            a, b = a - (len(head) - m.start()), nb
+            break
+        else:
+            return a, b
+
+
+def picture_sources(text: str, frame: Frame) -> list[PictureSource]:
+    """Pictures a frame's source draws, in source order: outermost tikzpicture/pgfpicture
+    environments and the \\includegraphics outside them."""
+    lo, hi = frame.body, frame.body_end
+    envs = []
+    for m in FIGURE_ENV_RE.finditer(text, lo, hi):
+        if any(a <= m.start() < b for a, b, _ in envs):
+            continue
+        name = re.escape(m.group(1))
+        depth, pos, end = 1, m.end(), None
+        for t in re.finditer(r"\\(begin|end)\s*\{" + name + r"\}", text[m.end():hi]):
+            depth += 1 if t.group(1) == "begin" else -1
+            if depth == 0:
+                end = m.end() + t.end()
+                break
+        if end is None:
+            continue
+        args, _ = read_args(text, m.end(), "o")
+        overlay = bool(args[0] and re.search(r"(^|,)\s*overlay\s*(,|$)", text[args[0][1]:args[0][2]]))
+        envs.append((m.start(), end, overlay))
+    blocks = [(float(m.group("x")), float(m.group("y")), m.start(), text.find("\\end{textblock*}", m.end()))
+              for m in TEXTBLOCK_RE.finditer(text, lo, hi)]
+    items = [("env", a, b, ov) for a, b, ov in envs]
+    for m in re.finditer(r"\\includegraphics\b", text[:hi]):
+        if m.start() < lo or any(a <= m.start() < b for a, b, _ in envs):
+            continue
+        items.append(("graphics", m.start(), read_args(text, m.end(), "<som")[1], False))
+    out = []
+    for kind, a, b, ov in items:
+        s, e = wrapper_span(text, a, b)
+        block = next(((x, y, bs, be + len("\\end{textblock*}")) for x, y, bs, be in blocks if bs < a and be >= b), None)
+        out.append(PictureSource(kind, s, e, (a, b), block[2:] if block else None, block[:2] if block else None, ov))
+    return sorted(out, key=lambda p: p.start)
+
+
+def reading_order(els: list[dict]) -> list[dict]:
+    """Elements column by column (boxes overlapping horizontally share a column), top to bottom:
+    the order a beamer source writes them in."""
+    cols: list[dict] = []
+    for e in sorted(els, key=lambda e: e["bbox"][0]):
+        x0, x1 = e["bbox"][0], e["bbox"][2]
+        for col in cols:
+            if min(col["x1"], x1) - max(col["x0"], x0) > 0.3 * min(col["x1"] - col["x0"], x1 - x0):
+                col["els"].append(e)
+                col["x0"], col["x1"] = min(col["x0"], x0), max(col["x1"], x1)
+                break
+        else:
+            cols.append({"x0": x0, "x1": x1, "els": [e]})
+    return [e for col in cols for e in sorted(col["els"], key=lambda e: e["bbox"][1])]
+
+
+def overlap_share(a: list[float], b: list[float]) -> float:
+    w = min(a[2], b[2]) - max(a[0], b[0])
+    h = min(a[3], b[3]) - max(a[1], b[1])
+    if w <= 0 or h <= 0:
+        return 0.0
+    return w * h / max(1e-6, min((a[2] - a[0]) * (a[3] - a[1]), (b[2] - b[0]) * (b[3] - b[1])))
+
+
+def commented_out(orig: str, a: int, b: int, ind: str, note: str) -> str:
+    """Lines [a, b) as comments under a `% b2s pull:` note."""
+    lines = orig[a:b].rstrip("\n").split("\n")
+    return f"{ind}% b2s pull: {note}\n" + "".join(
+        f"{l[:len(l) - len(l.lstrip())]}% {l.lstrip()}\n" if l.strip() else "%\n" for l in lines)
+
+
 # ---------------------------------------------------------------- the planner
 
 class Planner:
     def __init__(self, cand: Candidate, comp: Comparison, target: dict, ctx: Context, ws: Workspace,
-                 blocked: set, last_values: dict):
+                 blocked: set, last_values: dict, hashes: dict | None = None):
         self.cand, self.comp, self.target, self.ctx, self.ws = cand, comp, target, ctx, ws
         self.blocked = blocked
         self.last = last_values
+        self.hashes = hashes or {}
+        self.replacing: dict[tuple, str] = {}   # (slide, target element) -> current element it replaces
+        self.replaced: set[tuple] = set()       # (slide, current element) taken by a replacement
         self.edits: list[Edit] = []
         self.unresolved: list[dict] = []
         self.shifted: set[int] = set()  # slides whose flow got a \vspace this round
@@ -536,6 +809,7 @@ class Planner:
             return self.edits, self.unresolved
         # A slide whose content changes size this round (items, boxes, a resized picture) is
         # measured again before anything on it is moved.
+        self.pair_replacements(res)
         reshaping = {r["slide"] for r in res if r["kind"] in RESHAPING or
                      (r["kind"] == "geometry" and (abs(r.get("dw", 0)) > TOL["size"] or abs(r.get("dh", 0)) > TOL["size"]))}
         res = [r for r in res if not (r["kind"] == "geometry" and r["slide"] in reshaping and
@@ -1114,78 +1388,279 @@ class Planner:
             self.ctx.packages.add(TEXTPOS)
             self.edit(frame.file, pos, pos, textblock_latex(te, self.level_style, self.ctx, ind, aligned_frame(text, frame)) + "\n", r)
         elif te["kind"] == "image":
-            path = te.get("file")
-            if not path or not Path(path).exists():
+            ref = self.replacing.get((r["slide"], te["id"]))
+            if ref is not None:
+                self.replace_picture(r, frame, self.element(self.cur_slides[r["slide"]], ref), te)
+                return
+            pic = self.picture(te)
+            if pic is None:
                 self.fail(r, "the picture file is not available")
                 return
-            rel = self.picture_file(Path(path))
-            x0, y0, x1, y1 = te["bbox"]
             self.ctx.packages.add(TEXTPOS)
-            self.edit(frame.file, pos, pos,
-                      f"{ind}\\begin{{textblock*}}{{{x1 - x0:.1f}pt}}({x0:.1f}pt,{y0:.1f}pt)\n"
-                      f"{ind}  \\includegraphics[width={x1 - x0:.1f}pt,height={y1 - y0:.1f}pt]{{{rel}}}\n"
-                      f"{ind}\\end{{textblock*}}\n", r)
+            self.edit(frame.file, pos, pos, picture_block(te, pic, self.ctx, ind), r)
         else:
             self.fail(r, f"new {te['kind']} elements are not translated")
 
-    def picture_file(self, path: Path) -> str:
+    # -- pictures
+    def pair_replacements(self, res: list[dict]) -> None:
+        """A new deck picture over a converted figure (picture or diagram) the deck no longer has
+        replaces that figure's source."""
+        extras = [r for r in res if r["kind"] == "element_extra" and r.get("el_kind") in ("image", "diagram")]
+        for r in res:
+            if r["kind"] != "element_missing" or r.get("el_kind") != "image":
+                continue
+            te = self.element(self.tgt_slides[r["target_slide"]], r["target_element"])
+            best = max(((overlap_share(te["bbox"], x["bbox"]), x) for x in extras if x["slide"] == r["slide"]
+                        and (x["slide"], x["element"]) not in self.replaced), key=lambda p: p[0], default=(0, None))
+            if best[0] >= 0.6:
+                self.replacing[(r["slide"], te["id"])] = best[1]["element"]
+                self.replaced.add((r["slide"], best[1]["element"]))
+
+    def picture(self, te: dict) -> Picture | None:
+        """The file for a deck picture in the source tree: the same picture already there (identical
+        bytes, else the best file that looks the same), else the deck's bytes as they are
+        (`figures/<alt text slug>-<sha8>.<ext>`). Brightness, contrast and recolour are baked into
+        a PNG; GIF, WEBP and other formats become PNG (first frame)."""
+        from PIL import Image
+        from .compare import adjusted_picture
+        from .deck_ir import image_format
+        path = Path(te.get("file") or "")
+        if not te.get("file") or not path.exists():
+            return None
+        bake = {k: te[k] for k in ("brightness", "contrast", "recolor") if te.get(k)}
+        key = (str(path), json.dumps(bake, sort_keys=True), te.get("alt"))
+        if key in self.ctx.pictures:
+            return self.ctx.pictures[key]
+        if self.ctx.index is None:
+            self.ctx.index = picture_index(self.ws.src)
         data = path.read_bytes()
-        name = f"b2s-{hashlib.sha1(data).hexdigest()[:10]}{path.suffix.lower() if path.suffix.lower() in ('.png', '.jpg', '.jpeg', '.pdf') else '.png'}"
-        dest = self.ws.src / "figures" / name
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        if not dest.exists():
-            if path.suffix.lower() in (".png", ".jpg", ".jpeg", ".pdf"):
-                shutil.copy2(path, dest)
+        fmt = image_format(data)
+        look = picture_look(path)
+        best = find_picture(self.ctx.index, hashlib.sha1(data).hexdigest(), look)
+        if best is None and te.get("source_url"):
+            data, fmt, look = self.source_url_bytes(te, data, fmt, look)
+        pic = None
+        if best is not None and (not bake or best["path"].suffix.lower() != ".pdf"):
+            if best["sha1"] != hashlib.sha1(data).hexdigest():
+                self.ctx.notes.append(f"{best['path'].relative_to(self.ws.src).as_posix()}: the deck's picture "
+                                      f"{path.name} is the same image; the source file is kept (its resolution)")
+            if not bake:
+                pic = Picture(best["path"].relative_to(self.ws.src).as_posix(), best["path"], natural_size(best["path"]))
             else:
-                from PIL import Image
-                Image.open(path).save(dest)
-        rel = dest.relative_to(self.ws.src).as_posix()
-        self.ctx.files[str(path)] = dest
-        return rel
+                data, fmt = best["path"].read_bytes(), image_format(best["path"].read_bytes())
+        if pic is None:
+            ext = {"png": ".png", "jpeg": ".jpg"}.get(fmt)
+            note = None
+            if bake or ext is None:
+                if fmt in ("svg", "emf", "wmf", "unknown"):
+                    self.ctx.notes.append(f"{path.name}: {fmt} pictures can't be included by LaTeX; export it as PNG or PDF")
+                    return None
+                import io
+                img = Image.open(io.BytesIO(data))
+                frames = getattr(img, "n_frames", 1)
+                img.seek(0)
+                img = img.convert("RGBA")
+                if bake:
+                    img = adjusted_picture(img, bake)
+                    note = f"{', '.join(bake)} baked into the file (LaTeX has no option for {'them' if len(bake) > 1 else 'it'})"
+                if fmt not in ("png", "jpeg"):
+                    note = (note + "; " if note else "") + f"{fmt.upper()} converted to PNG" + \
+                        (f" (first frame of {frames}: LaTeX shows no animation)" if frames > 1 else "")
+                buf = io.BytesIO()
+                img.save(buf, "PNG")
+                data, ext = buf.getvalue(), ".png"
+            sha = hashlib.sha1(data).hexdigest()
+            dest = self.ws.src / "figures" / f"{picture_slug(te.get('alt'))}-{sha[:8]}{ext}"
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            if not dest.exists():
+                dest.write_bytes(data)
+                self.ctx.index.append({"path": dest, "sha1": sha, "look": None})
+            self.ctx.files[str(dest)] = dest
+            if note:
+                self.ctx.notes.append(f"{dest.relative_to(self.ws.src).as_posix()}: {note}")
+            pic = Picture(dest.relative_to(self.ws.src).as_posix(), dest, natural_size(dest))
+        self.ctx.pictures[key] = pic
+        return pic
+
+    def source_url_bytes(self, te: dict, data: bytes, fmt: str, look):
+        """A picture inserted by URL: the original there when it is the same image with more pixels
+        than Google kept (it stores at most about 2046 px on the long side)."""
+        import io
+        from PIL import Image
+        from .deck_ir import fetch_url, image_format
+        try:
+            got = fetch_url(te["source_url"])
+            img = Image.open(io.BytesIO(got))
+            cur = Image.open(io.BytesIO(data))
+            tmp = self.ws.work / "source-url.bin"
+            tmp.write_bytes(got)
+            if img.size[0] * img.size[1] > cur.size[0] * cur.size[1] and same_look(look, picture_look(tmp)):
+                self.ctx.notes.append(f"{te['source_url']}: the original of an inserted picture, at {img.size[0]}x{img.size[1]}")
+                return got, image_format(got), picture_look(tmp)
+        except Exception:  # noqa: BLE001 - the deck's bytes are good enough
+            pass
+        return data, fmt, look
+
+    def current_picture(self, text: str, src: PictureSource) -> Picture | None:
+        """The file an \\includegraphics names, as a Picture."""
+        args, _ = read_args(text, src.inner[0] + len("\\includegraphics"), "<som")
+        if not args[3]:
+            return None
+        rel = text[args[3][1]:args[3][2]].strip()
+        base = (self.ws.src / rel)
+        for p in [base] + [base.with_name(base.name + e) for e in LATEX_PICTURES]:
+            if p.is_file():
+                return Picture(rel, p, natural_size(p))
+        return None
+
+    def picture_source(self, ci: int, frame: Frame, el: dict) -> PictureSource | None:
+        """The source of a picture (or diagram) of a slide: the textblock at its corner, else the
+        source in the same place of the frame's order of pictures."""
+        text = self.cand.masked(frame.file)
+        srcs = picture_sources(text, frame)
+        if not srcs:
+            return None
+        els = [e for e in self.cur_slides[ci]["elements"]
+               if (e["kind"] == "image" and e.get("role") not in ("math", "icon", "highlight")) or e["kind"] == "diagram"]
+        near = lambda s, e: s.xy is not None and abs(s.xy[0] - e["bbox"][0]) + abs(s.xy[1] - e["bbox"][1]) <= 12
+        placed = [s for s in srcs if s.xy is not None]
+        hit = min(placed, key=lambda s: abs(s.xy[0] - el["bbox"][0]) + abs(s.xy[1] - el["bbox"][1]), default=None)
+        if hit is not None and near(hit, el):
+            return hit
+        free_srcs = [s for s in srcs if not any(near(s, e) for e in els)]
+        free_els = [e for e in reading_order(els) if not any(near(s, e) for s in placed)]
+        if el not in free_els:
+            return None
+        k = free_els.index(el)
+        return free_srcs[k] if k < len(free_srcs) else None
+
+    def graphics_command(self, ci: int, frame: Frame, el: dict) -> tuple[int, int, tuple[int, int] | None] | None:
+        """(start, end, enclosing textblock span or None) of the \\includegraphics showing a picture."""
+        src = self.picture_source(ci, frame, el)
+        if src is None or src.kind != "graphics":
+            return None
+        return src.inner[0], src.inner[1], src.block
 
     def element_extra(self, r: dict) -> None:
         if r["kind"] == "element_extra" and r.get("kind") == "element_extra" and r.get("text") is not None:
             return  # text: paragraph_extra residuals delete the words
+        if (r["slide"], r["element"]) in self.replaced:
+            return  # a new picture replaces it (element_missing)
         frame = self.cand.frames[r["slide"]]
         el = self.element(self.cur_slides[r["slide"]], r["element"])
-        if frame is None or el is None or el["kind"] != "image":
+        if frame is None or el is None or el["kind"] not in ("image", "diagram"):
             self.fail(r, "only pictures are deleted as elements")
             return
-        g = self.graphics_command(frame, el)
-        if g is None:
-            self.fail(r, "\\includegraphics not found")
+        src = self.picture_source(r["slide"], frame, el)
+        if src is None:
+            self.fail(r, "the picture's source was not found in the frame")
             return
         text = self.cand.masked(frame.file)
-        a, b, block = g
-        if block:
-            a, b = line_span(text, *block)
-        else:
-            a, b = line_span(text, a, b)
+        if src.kind == "env":  # a figure drawn by the source: kept as a comment
+            a, b = line_span(text, src.start, src.end)
+            if (a, b) == (src.start, src.end):
+                self.fail(r, "the figure shares its lines with other source")
+                return
+            orig = self.cand.source.text(frame.file)
+            self.edit(frame.file, a, b, commented_out(orig, a, b, indent_at(text, src.start), "deleted in the deck"), r)
+            return
+        a, b = line_span(text, *src.block) if src.block else line_span(text, src.start, src.end)
         self.edit(frame.file, a, b, "", r)
 
-    def graphics_command(self, frame: Frame, el: dict) -> tuple[int, int, tuple[int, int] | None] | None:
-        """(start, end, enclosing textblock span or None) of the \\includegraphics showing a picture:
-        the one whose textblock box is nearest, else the only / order-matched one in the frame."""
+    def replace_picture(self, r: dict, frame: Frame, el: dict | None, te: dict) -> None:
+        """The deck shows `te` where the source draws `el`: a replaced picture gets the new file (and
+        the deck's edits as options); a figure the source draws (tikzpicture, pgfplots) is commented
+        out under a `% b2s pull: replaced by <file>` note, the picture in its place. When the deck's
+        picture is the one the source makes, only its edits change: options for an
+        \\includegraphics, \\rotatebox or a transparency group for a tikzpicture."""
+        ci = r["slide"]
+        src = self.picture_source(ci, frame, el) if el is not None else None
+        if src is None:
+            self.fail(r, "the replaced picture's source was not found in the frame")
+            return
         text = self.cand.masked(frame.file)
-        found = [(m.start(), read_args(text, m.end(), "<som")[1]) for m in
-                 re.finditer(r"\\includegraphics\b", text[:frame.body_end]) if m.start() >= frame.body]
-        if not found:
-            return None
-        blocks = [(m, m.start(), text.find("\\end{textblock*}", m.end())) for m in TEXTBLOCK_RE.finditer(text, frame.body, frame.body_end)]
-        best, best_d = None, None
-        pics = [e for e in self.cur_slides[self.cand.frames.index(frame)]["elements"] if e["kind"] == "image"] \
-            if frame in self.cand.frames else []
-        for k, (a, b) in enumerate(found):
-            block = next(((s, e + len("\\end{textblock*}")) for m, s, e in blocks if s < a < e), None)
-            if block:
-                m = next(m for m, s, e in blocks if s == block[0])
-                d = abs(float(m.group("x")) - el["bbox"][0]) + abs(float(m.group("y")) - el["bbox"][1])
+        orig = self.cand.source.text(frame.file)
+        from .compare import hash_distance, picture_hash
+        d = hash_distance(self.hashes.get(id(el)), picture_hash(te["file"])) \
+            if el["kind"] == "image" and te.get("file") else None
+        same = d is not None and d <= TOL["phash"]
+        if same and not picture_edits(te):
+            self.fail(r, "the picture looks the same as the source's; nothing to write")
+            return
+        if src.kind == "graphics":
+            pic = self.current_picture(text, src) if same else self.picture(te)
+            if pic is None:
+                self.fail(r, "the picture file is not available")
+                return
+            size = None
+            m = re.match(r"\\includegraphics\s*(<[^>]*>)?\s*(\[([^\]]*)\])?", text[src.inner[0]:src.inner[1]])
+            old = [o.strip() for o in (m.group(3) or "").split(",") if re.match(r"\s*(width|height|scale|keepaspectratio)\b", o)]
+            box = te.get("box") or te["bbox"]
+            if old and not te.get("rotation") and not te.get("crop") and \
+                    abs((box[2] - box[0]) - (el["bbox"][2] - el["bbox"][0])) <= TOL["size"] and \
+                    abs((box[3] - box[1]) - (el["bbox"][3] - el["bbox"][1])) <= TOL["size"]:
+                size = old  # the source's own size (\textwidth fractions) still fits
+            self.edit(frame.file, src.start, src.end, picture_latex(te, pic, self.ctx, size), r)
+            return
+        if same and not any(te.get(k) for k in ("crop", "outline", "brightness", "contrast", "recolor")) \
+                and text[src.inner[0]:src.inner[1]].lstrip().startswith("\\begin{tikzpicture}"):
+            self.edit(frame.file, src.start, src.end, self.tikz_edits(orig, text, src, te), r)
+            return
+        pic = self.picture(te)
+        if pic is None:
+            self.fail(r, "the picture file is not available")
+            return
+        ind = indent_at(text, src.inner[0])
+        a, b = line_span(text, src.start, src.end)
+        lead = "" if (a, b) != (src.start, src.end) else "\n"
+        note = f"replaced by {pic.rel}"
+        if src.overlay or src.block:
+            self.ctx.packages.add(TEXTPOS)
+            new = lead + commented_out(orig, a, b, ind, note)
+            if src.block:
+                self.edit(frame.file, a, b, new, r)
+                self.edits.append(Edit(frame.file, src.block[1], src.block[1], "\n" + picture_block(te, pic, self.ctx, ind),
+                                       r["kind"], signature(r) + ("block",)))
             else:
-                order = pics.index(el) if el in pics else 0
-                d = 50.0 + 10 * abs(order - k)
-            if best_d is None or d < best_d:
-                best, best_d = (a, b, block), d
-        return best
+                pos = frame_insert_point(self.cand, frame)
+                self.edit(frame.file, a, b, new, r)
+                self.edits.append(Edit(frame.file, pos, pos, picture_block(te, pic, self.ctx, ind), r["kind"],
+                                       signature(r) + ("block",)))
+        else:
+            self.edit(frame.file, a, b, lead + commented_out(orig, a, b, ind, note) + f"{ind}{picture_latex(te, pic, self.ctx)}\n", r)
+        self.ctx.notes.append(f"{(self.ws.root / frame.file.relative_to(self.ws.src)).as_posix()}:{line_of(text, src.inner[0])}: "
+                              f"the {'figure' if el['kind'] == 'image' else 'diagram'} was replaced in the deck by "
+                              f"{pic.rel}; the original is kept as a comment")
+
+    def tikz_edits(self, orig: str, text: str, src: PictureSource, te: dict) -> str:
+        """A tikzpicture turned (\\rotatebox, \\reflectbox) and made translucent (a transparency group
+        inside it) like its picture in the deck; earlier such edits are replaced."""
+        a, b = src.inner
+        env = orig[a:b]
+        _, head = read_args(text, a + text[a:b].index("}") + 1, "o")
+        head -= a
+        tail = env.rindex("\\end")
+        body = env[head:tail]
+        m = re.match(r"\s*\\begin\{scope\}\[transparency group,opacity=[\d.]+\]\n?(?P<inner>.*?)\s*\\end\{scope\}\s*$", body, re.S)
+        if m:
+            body = "\n" + m.group("inner") + "\n"
+        ind = indent_at(text, a)
+        if te.get("opacity") is not None and te["opacity"] < 0.995:
+            body = f"\n{ind}  \\begin{{scope}}[transparency group,opacity={te['opacity']:.2f}]" + body.rstrip() + \
+                f"\n{ind}  \\end{{scope}}\n{ind}"
+        out = env[:head] + body + env[tail:]
+        # wrappers written by an earlier round go; others (\resizebox) stay around
+        prefix, suffix, ours = orig[src.start:a], orig[b:src.end], 0
+        while (w := re.search(r"\\(rotatebox\s*\{[^{}]*\}|reflectbox)\s*\{\s*$", prefix)):
+            prefix, ours = prefix[:w.start()], ours + 1
+        for _ in range(ours):
+            suffix = suffix.lstrip()[1:]
+        if te.get("flip"):
+            out = f"\\reflectbox{{{out}}}"
+        angle = round(-(te.get("rotation") or 0.0), 2)
+        if angle:
+            out = f"\\rotatebox{{{angle:g}}}{{{out}}}"
+        return prefix + out + suffix
 
     def geometry(self, r: dict) -> None:
         ci = r["slide"]
@@ -1302,13 +1777,28 @@ class Planner:
         return True
 
     def picture_geometry(self, r: dict, frame: Frame, el: dict, te: dict) -> None:
-        g = self.graphics_command(frame, el)
-        if g is None:
-            self.fail(r, "\\includegraphics not found")
+        src = self.picture_source(r["slide"], frame, el)
+        if src is None or src.kind != "graphics":
+            self.fail(r, "\\includegraphics not found" if src is None else "figures drawn by the source are not moved")
             return
         text = self.cand.masked(frame.file)
-        a, b, block = g
-        tw, th = te["bbox"][2] - te["bbox"][0], te["bbox"][3] - te["bbox"][1]
+        if picture_edits(te) and src.block is not None:
+            # a turned, cropped or translucent picture: rewritten whole at its place
+            pic = self.current_picture(text, src)
+            if pic is None:
+                self.fail(r, "the picture file is not available")
+                return
+            m = TEXTBLOCK_RE.match(text, src.block[0])
+            pad = te["outline"]["weight"] / 2 if te.get("outline") and not te.get("rotation") else 0.0
+            x, y = float(m.group("x")) + r["dx"], float(m.group("y")) + r["dy"]
+            self.edit(frame.file, src.block[0], src.block[0] + len(m.group(0)),
+                      f"\\begin{{textblock*}}{{{te['bbox'][2] - te['bbox'][0] + 2 * pad:.1f}pt}}({x:.1f}pt,{y:.1f}pt)", r)
+            self.edits.append(Edit(frame.file, src.start, src.end, picture_latex(te, pic, self.ctx), "geometry",
+                                   signature(r) + ("size",)))
+            return
+        a, b, block = src.inner[0], src.inner[1], src.block
+        box = te.get("box") or te["bbox"]
+        tw, th = box[2] - box[0], box[3] - box[1]
         cw, ch = el["bbox"][2] - el["bbox"][0], el["bbox"][3] - el["bbox"][1]
         opts_m = re.match(r"\\includegraphics\s*(\[[^\]]*\])?", text[a:b])
         opts = opts_m.group(1) or ""
@@ -1350,21 +1840,17 @@ class Planner:
                                f"{ind}  {pic}\n{ind}\\end{{textblock*}}\n", "geometry", signature(r) + ("block",)))
 
     def image(self, r: dict) -> None:
+        if r.get("role") in ("math", "icon"):
+            self.fail(r, "a formula or icon picture inside a text line was replaced in the deck: it is not "
+                         "written back (it would turn math into a picture); change the source by hand")
+            return
         frame = self.cand.frames[r["slide"]]
         el = self.element(self.cur_slides[r["slide"]], r["element"])
-        path = r.get("file")
-        if frame is None or not path or not Path(path).exists():
+        te = self.element(self.tgt_slides[r["target_slide"]], r["target_element"])
+        if frame is None or not te.get("file") or not Path(te["file"]).exists():
             self.fail(r, "replacement picture not available")
             return
-        g = self.graphics_command(frame, el)
-        if g is None:
-            self.fail(r, "\\includegraphics not found")
-            return
-        text = self.cand.masked(frame.file)
-        a, b, _ = g
-        args, end = read_args(text, a + len("\\includegraphics"), "<som")
-        rel = self.picture_file(Path(path))
-        self.edit(frame.file, args[3][1], args[3][2], rel, r)
+        self.replace_picture(r, frame, el, te)
 
     def align(self, r: dict) -> None:
         self.fail(r, "paragraph alignment is not translated")
@@ -1613,17 +2099,20 @@ class Result:
     patch: str
     work: Path
     theme: list[dict] = field(default_factory=list)   # differences the theme owns (titles), not written back
+    notes: list[str] = field(default_factory=list)    # pictures: reused files, baked edits, converted formats, replaced figures
 
 
 def picture_hashes(cand: Candidate, target: dict, comp_out: Path) -> dict:
     """Hashes of the pictures on both sides (current ones cropped from the candidate PDF)."""
+    from .compare import displayed_picture
     hashes = {}
     tgt_images = [e for s in target["slides"] for e in s["elements"] if e["kind"] == "image"]
     if not tgt_images:
         return hashes
     for e in tgt_images:
         if e.get("file") and Path(e["file"]).exists():
-            hashes[id(e)] = picture_hash(e["file"])
+            shown = displayed_picture(e) if picture_edits(e) else None  # as Slides shows it: crop, turn, opacity
+            hashes[id(e)] = grey16(shown) if shown is not None else picture_hash(e["file"])
     from .pdf import Document
     from PIL import Image
     doc = Document(cand.pdf)
@@ -1662,7 +2151,8 @@ def converge(tex: Path, target: dict, work: Path, max_iter: int = 10, handout: b
         if isinstance(built, str):
             raise RuntimeError(f"the source does not compile:\n{built}")
         cand = built
-        comp = compare(cand.deck, target, tol, picture_hashes(cand, target, work))
+        hashes = picture_hashes(cand, target, work)
+        comp = compare(cand.deck, target, tol, hashes)
         open_res = comp.open()
         summary = comp.summary()
         iterations.append({"iteration": it, "open": len(open_res), "by_kind": summary,
@@ -1692,7 +2182,7 @@ def converge(tex: Path, target: dict, work: Path, max_iter: int = 10, handout: b
                     (len(hist) >= 4 and (r["kind"] != "geometry" or hist[-1] >= 0.8 * hist[-3])):
                 blocked.add(sig)
                 unresolved.append({**r, "why": "not converging after repeated edits"})
-        planner = Planner(cand, comp, target, ctx, ws, blocked, last_values)
+        planner = Planner(cand, comp, target, ctx, ws, blocked, last_values, hashes)
         edits, failed = planner.plan()
         for f in failed:
             blocked.add(signature(f))
@@ -1743,9 +2233,10 @@ def converge(tex: Path, target: dict, work: Path, max_iter: int = 10, handout: b
             files[str(orig)] = new
             patch += "".join(difflib.unified_diff(old.splitlines(True), new.splitlines(True),
                                                   f"a/{rel.as_posix()}", f"b/{rel.as_posix()}"))
-    for src_path, dest in ctx.files.items():
+    sources = "".join(ws.source.text(p) for p in ws.source.order)
+    for dest in ctx.files.values():
         rel = dest.relative_to(ws.src)
-        if not (ws.root / rel).exists():
+        if not (ws.root / rel).exists() and rel.as_posix() in sources:
             files[str(ws.root / rel)] = dest  # binary: copied on apply
     final_unresolved = dedupe_unresolved(unresolved, open_res)
     for u in final_unresolved:
@@ -1755,7 +2246,9 @@ def converge(tex: Path, target: dict, work: Path, max_iter: int = 10, handout: b
             u["where"] = f"{(ws.root / frame.file.relative_to(ws.src)).as_posix()}:{frame.begin_line}-{frame.end_line}"
             u["frame_label"] = frame.label
     theme = [r for r in comp.residuals if r.get("theme")] if comp else []
-    return Result(not open_res, iterations, final_unresolved, open_res, files, patch, ws.work, theme)
+    used = lambda n: (m := re.match(r"(\S+\.(png|jpg|pdf)): ", n)) is None or m.group(1) in patch
+    notes = list(dict.fromkeys(n for n in ctx.notes if used(n)))
+    return Result(not open_res, iterations, final_unresolved, open_res, files, patch, ws.work, theme, notes)
 
 
 def restore(ws: Workspace, texts: dict[Path, str]) -> None:
@@ -1818,7 +2311,7 @@ def class_pt_option(source: Source) -> int:
 def report(result: Result, target: dict, cand_deck: dict | None = None) -> tuple[dict, str]:
     data = {"converged": result.converged, "iterations": result.iterations,
             "unresolved": [clean(u) for u in result.unresolved], "theme": [clean(u) for u in result.theme],
-            "changed_files": list(result.files)}
+            "changed_files": list(result.files), "pictures": result.notes}
     md = ["# Pull report", "", f"Converged: **{result.converged}** after {len(result.iterations) - 1} edit rounds.", ""]
     md.append("| iteration | open residuals | by kind | geometry error (pt) |")
     md.append("|---|---|---|---|")
@@ -1834,6 +2327,8 @@ def report(result: Result, target: dict, cand_deck: dict | None = None) -> tuple
             md.append(f"{head}: {residual_line(u)} — {u.get('why')}")
             if u.get("where"):
                 md.append(f"  - source: {u['where']}")
+    if result.notes:
+        md += ["", "## Pictures", ""] + [f"- {n}" for n in result.notes]
     if result.theme:
         md += ["", "## Theme differences (not written to the source)", ""]
         md += [f"- {residual_line(u)}" for u in result.theme]
