@@ -278,8 +278,12 @@ a per-slide background picture.
   sync-report.json `recovery`) and `--backup auto|none|file|drive|both` keeps a .pptx export and/or a
   Drive copy. **Measured** (`tools/probe_revision_history.py`): every Drive revision of a Slides file
   exports its *current* content, so `files.update` leaves nothing the API can fetch back - the .pptx
-  backup is the only way back (`tools/deck_backup.py list|export|restore`). Tests: `tests/test_guard.py`
-  (offline), `tools/rebuild_guard_proof.py` (live, `out/agent-guard/`).
+  backup is the only way back (`tools/deck_backup.py list|export|restore`). A backup Drive refused
+  (export over 10 MB, copy over quota) stops the forced rebuild too (`guard.demand_way_back`):
+  `--backup none` is how one asks for a rebuild with no way back. Tests: `tests/test_guard.py`
+  (offline), `tools/rebuild_guard_proof.py` (live, `out/agent-guard/`) - which also proves the way
+  back end to end: `restore --in-place` brings the deck back at its own URL with no word lost
+  (slide text and speaker notes compared), and a sync of the recovered deck writes nothing.
 
 ## Usage
 ```

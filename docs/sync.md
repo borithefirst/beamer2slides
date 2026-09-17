@@ -488,7 +488,15 @@ are appended to `<out>/backups/backups.json` (and the rebuild's entry goes into 
 
 `tools/deck_backup.py` lists (`list`), exports (`export`) and restores (`restore --from FILE`, or
 from a revision). A restore creates a **new** presentation by default; `--in-place` writes the
-backup back over the deck.
+backup back over the deck, so every link to it keeps working.
+
+**A backup that did not happen stops the rebuild** (`guard.demand_way_back`). Drive can refuse both
+kinds: the `.pptx` export over 10 MB, the copy when the Drive is full or over quota; `backup_deck`
+only collected warnings, and the forced rebuild then went ahead and replaced a deck nothing could
+bring back. Now the attempt is recorded in `backups.json` and the rebuild is refused with the
+warnings, `--new-deck`, `sync`, `--backup drive` and `--backup none` - which is how one says out
+loud that this deck may go. `--backup none` and an unforced rebuild of an untouched deck are not
+affected (there is nothing to lose).
 
 > **Measured, not guessed** (`tools/probe_revision_history.py`): for a Google-native presentation
 > Drive does keep a revision row per editing session, and `revisions.list` shows them - but every
@@ -520,14 +528,23 @@ backup back over the deck.
 
 ### Tests
 
-- `tests/test_guard.py` (23 tests, no Google calls): fake read-backs in the style of
+- `tests/test_guard.py` (28 tests, no Google calls): fake read-backs in the style of
   `tests/test_sync.py` cover every detection case above (including the reissued `contentUrl` and
   the scratch slides), the three refusal reasons, `--force-rebuild`, the backup modes and the
-  export-refused → Drive-copy fallback, the recorded entry and its restore hint, `plan_rebuild`'s
+  export-refused → Drive-copy fallback, the rebuild refused when neither kind of backup worked
+  (and allowed under `--backup none`), the recorded entry and its restore hint, `plan_rebuild`'s
   paths (untouched, forced, refused, `--new-deck`, trashed, gone) and the staging-deck proof.
 - `python tools/rebuild_guard_proof.py` (live, ~2 min, fixed folders `out/agent-guard/<deck>`):
   convert → convert again (no false alarm) → edit like a person (`tools/deck_edits.py`) → convert
   refuses with exit code 1 and the deck's revision and edit are untouched → `--force-rebuild`
   rebuilds and records the backup → the backup restores into a deck that still shows the edit →
-  Drive history recorded as evidence → `--new-deck` leaves the old deck alone → a trashed deck
-  reads back as trashed. Evidence in `out/agent-guard/proof.json` and `proof.log`.
+  Drive history recorded as evidence → **`restore --in-place`**, whose result is compared with the
+  deck from before the rebuild word for word, speaker notes included (`lost_words`) → **a sync of
+  the recovered deck**, because a recovery one cannot work with afterwards is only half a way back
+  → `--new-deck` leaves the old deck alone → a trashed deck reads back as trashed. Evidence in
+  `out/agent-guard/proof.json` and `proof.log`.
+
+  Measured on 2026-09-18: the deck came back at its own URL with all 10 slides and **no word
+  lost**, and the sync that followed wrote nothing at all (0 changes, 0 conflicts, integrity
+  clean) - the object identity in the deck survives the `.pptx` round trip, so a recovered deck is
+  an ordinary deck again.
