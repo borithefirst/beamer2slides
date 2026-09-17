@@ -167,7 +167,7 @@ def main() -> None:
         else:
             c.add_argument("--target", required=True, type=Path, help="deck.json-shaped target IR")
         c.add_argument("--tex", required=True, type=Path)
-        c.add_argument("--apply", action="store_true", help="patch the source in place (.bak backups)")
+        c.add_argument("--apply", action="store_true", help="patch the source in place (what was there is kept as <file>.bak, .bak2, ...)")
         c.add_argument("--out", type=Path, help="write the edited source tree here instead")
         c.add_argument("--work", type=Path, help="loop folder and reports (default: <deck folder>/pull)")
         c.add_argument("--max-iter", type=int, default=10)

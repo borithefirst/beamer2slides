@@ -244,8 +244,11 @@ and picture downloads), so the deck revision never changes; it needs no base sna
 Output in `--work` (default `<out folder>/pull`): `target.json`, `pull.patch`, `edits.json` and
 `edits.md` (iterations with open residuals by kind and geometry error, the patch, theme
 differences, and every unresolved residual with its reason, `file:line` range of its frame and the
-target values, for an AI author to finish). `--apply` writes the changed files in place (`.bak`
-backups) and copies new picture files; `--out DIR` writes the edited source tree there instead;
+target values, for an AI author to finish). `--apply` writes the changed files in place, keeping
+what was there as `<file>.bak`, then `.bak2`, `.bak3` (`inverse.keep_backup`: a second `--apply`
+must not write over the author's own version, and a picture it replaces is kept too; a file that
+already holds what pull wants is left alone), and copies new picture files;
+`--out DIR` writes the edited source tree there instead;
 neither leaves the source untouched. After the rebuilt PDF is synced, the pulled fields are
 converged overrides.
 

@@ -2344,10 +2344,35 @@ def clean(r: dict) -> dict:
 
 # ---------------------------------------------------------------- commands
 
+def backup_for(path: Path) -> Path:
+    """A backup name that takes nothing away: `<file>.bak`, then `<file>.bak2`, `.bak3`, ..."""
+    candidate, n = path.with_name(path.name + ".bak"), 2
+    while candidate.exists():
+        candidate = path.with_name(f"{path.name}.bak{n}")
+        n += 1
+    return candidate
+
+
+def keep_backup(path: Path, new: "Path | str") -> Path | None:
+    """Copy `path` aside before `new` replaces it (None: nothing to keep, or it holds that content
+    already). A second `pull --apply` must not write over the copy the first one made - that copy
+    is the author's own version, and the file itself is by then the first pull's work."""
+    if not path.exists():
+        return None
+    old = path.read_bytes()
+    fresh = new.read_bytes() if isinstance(new, Path) else new.encode("utf-8")
+    if old == fresh:
+        return None
+    bak = backup_for(path)
+    shutil.copy2(path, bak)
+    return bak
+
+
 def write_outputs(result: Result, target: dict, tex: Path, work: Path, apply: bool, out: Path | None,
                   log=print) -> None:
-    """pull.patch, edits.json and edits.md in `work`; the edited files in place (with .bak backups)
-    when `apply`, or the edited source tree in `out`."""
+    """pull.patch, edits.json and edits.md in `work`; the edited files in place when `apply`, each
+    with a backup that never replaces an older one (`keep_backup`), or the edited source tree in
+    `out`."""
     data, md = report(result, target)
     (work / "pull.patch").write_text(result.patch, encoding="utf-8", newline="\n")
     (work / "edits.json").write_text(json.dumps(data, indent=1, ensure_ascii=False), encoding="utf-8")
@@ -2360,13 +2385,12 @@ def write_outputs(result: Result, target: dict, tex: Path, work: Path, apply: bo
         for path, new in result.files.items():
             path = Path(path)
             path.parent.mkdir(parents=True, exist_ok=True)
+            bak = keep_backup(path, new)
             if isinstance(new, Path):
                 shutil.copy2(new, path)
             else:
-                if path.exists():
-                    shutil.copy2(path, path.with_name(path.name + ".bak"))
                 path.write_text(new, encoding="utf-8", newline="")
-            log(f"  wrote {path}")
+            log(f"  wrote {path}" + (f" (what was there is now {bak.name})" if bak else ""))
     state = "converged" if result.converged else f"{len(result.unresolved)} residual(s) left"
     log(f"{state} after {len(result.iterations) - 1} edit round(s); {len(result.files)} file(s) changed; "
         f"report {work / 'edits.md'}")
