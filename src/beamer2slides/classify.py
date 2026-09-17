@@ -930,6 +930,17 @@ class PageClassifier:
                 else:
                     runs.append({"text": text, **style})
                 prev = span
+        # A word space at the edge of inline code belongs to the surrounding text: in a
+        # monospaced font it would be twice as wide.
+        for a, b in zip(runs, runs[1:]):
+            if b["family"] == "mono" and a["family"] != "mono" and b["text"].startswith(" ") and not a["script"]:
+                a["text"] += " "
+                b["text"] = b["text"][1:]
+            elif a["family"] == "mono" and b["family"] != "mono" and a["text"].endswith(" ") and not b["script"]:
+                a["text"] = a["text"][:-1]
+                b["text"] = " " + b["text"]
+        if not indent:
+            runs = [r for r in runs if r["text"]]
         if runs:
             runs[0]["text"] = indent + runs[0]["text"].lstrip()
             runs[-1]["text"] = runs[-1]["text"].rstrip()
@@ -1277,7 +1288,13 @@ class PageClassifier:
                 placed[c0].append(ch)
         col_info = []
         for (x0, x1), chunks in zip(columns, placed):
-            if all(abs(ch[0].rect.x0 - x0) <= 1 for ch in chunks):
+            left = all(abs(ch[0].rect.x0 - x0) <= 1 for ch in chunks)
+            right = all(abs(ch[-1].rect.x1 - x1) <= 1 for ch in chunks)
+            digits = sum(c.isdigit() for ch in chunks for s in ch for c in s.text)
+            letters = sum(c.isalpha() for ch in chunks for s in ch for c in s.text)
+            if left and right and digits > letters:
+                align = "right"  # equally wide numbers: right-aligned, like a number column
+            elif left:
                 align = "left"
             elif all(abs(ch[-1].rect.x1 - x1) <= 1 for ch in chunks):
                 align = "right"

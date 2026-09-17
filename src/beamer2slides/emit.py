@@ -366,6 +366,24 @@ def table_line_spacing(pitch: float, z: float) -> float:
     return min(1.0, max(TABLE_MIN_SPACING, (pitch - TABLE_ROW_PAD) / (TABLE_ROW_EM * z)))
 
 
+TABLE_CELL_PAD = 7.2  # cell padding left and right
+
+
+def fit_columns(bounds: list[float], cols: list[dict], scale: float) -> list[float]:
+    """Column boundaries (PDF pt) moved just enough that every column's text fits inside the
+    Slides cell padding, with a little room for the substitute font. Tables typeset with
+    @{} have text touching the frame, which would otherwise wrap in Slides."""
+    pad = TABLE_CELL_PAD / scale
+    room = [0.04 * (c["x1"] - c["x0"]) + 1 / scale for c in cols]
+    out = list(bounds)
+    out[0] = min(out[0], cols[0]["x0"] - pad)
+    out[-1] = max(out[-1], cols[-1]["x1"] + pad + room[-1])
+    for i in range(1, len(cols)):
+        lo, hi = cols[i - 1]["x1"] + pad + room[i - 1], cols[i]["x0"] - pad
+        out[i] = min(max(out[i], lo), hi) if lo <= hi else (lo + hi) / 2
+    return out
+
+
 def table_rows(el: dict, z: float, scale: float) -> tuple[float, list[float], list[float]]:
     """Table top, row heights and per-row lineSpacing (Slides pt).
 
@@ -417,12 +435,13 @@ def table_requests(el: dict, slide_id: str, object_id: str, scale: float, fonts:
     cols = el["columns"]
     fx0, _, fx1, _ = el["frame"]
     bounds = el.get("bounds") or [fx0] + [(a["x1"] + b["x0"]) / 2 for a, b in zip(cols, cols[1:])] + [fx1]
+    bounds = fit_columns(bounds, cols, scale)
     widths = [max(TABLE_MIN_COLUMN_PT, (b - a) * scale) for a, b in zip(bounds, bounds[1:])]
     first_run = next((r for row in el["cells"] for cell in row for r in cell), None)
     z = fonts(first_run, scale)[1] if first_run else el["size"] * scale
     n_rows, n_cols = len(el["cells"]), len(cols)
     y, heights, row_ratio = table_rows(el, z, scale)
-    x = fx0 * scale
+    x = bounds[0] * scale
 
     reqs: list[dict] = [
         {"createTable": {"objectId": object_id, "rows": n_rows, "columns": n_cols, "elementProperties": {
