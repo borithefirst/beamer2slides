@@ -1510,8 +1510,12 @@ def measure_holes(slides, pid: str, deck: dict, scale: float, fonts: FontMapper,
                 bl = [line["baseline"] for line in p["lines"]]
                 pitch = (bl[-1] - bl[0]) / (len(bl) - 1) * scale if len(bl) > 1 else LINE_EM * z
                 prev_end, next_x0 = hole_neighbours(p, run)
+                # The middle of the hole's text line, not of the picture: a brace's label below
+                # or above the formula would put that a line off.
+                line = min(p["lines"], key=lambda l: (not y0 - 0.5 <= l["baseline"] <= y1 + 0.5,
+                                                      abs((y0 + y1) / 2 - l["baseline"] + 0.35 * run["size"])))
                 found.append({"pic": pic, "x0": x0 * scale - hole_offset(p, run, pic, scale, z),  # expected gap start
-                              "cy": (y0 + y1) / 2 * scale, "width": run["hole"] * scale, "pitch": pitch, "colour": colour,
+                              "cy": (line["baseline"] - 0.35 * run["size"]) * scale, "width": run["hole"] * scale, "pitch": pitch, "colour": colour,
                               # last on its PDF line: a hole Slides lets hang past the box edge isn't drawn
                               "hang": None if run.get("next_x0") is not None else
                               (SYMBOL_ADVANCE_EM[" "] * z if prev_end is not None else 0.0,
