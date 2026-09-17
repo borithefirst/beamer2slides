@@ -37,12 +37,18 @@ Model used by `emit.vertical_layout`, for a line of size z with lineSpacing r:
   rounding adds up: a 15-entry TOC drifted by 5 pt. `emit.vertical_layout` therefore predicts
   where Slides will put each line and aims every next paragraph at the original position
   from there.
-- **Bullet glyphs** (arrow, diamond, disc alike) end ≈ 1.9 pt before `indentFirstLine`.
-  Text starts at `indentStart`.
-- **Bullet colour and size cannot be set on their own.** A bullet takes a text style
-  only when the whole paragraph has that style. Styling the first character or the
-  paragraph's newline has no effect, and the list's `bulletStyle` is read-only. Beamer's
-  coloured bullets on black text therefore come out black.
+- **Bullet glyphs** end a little before `indentFirstLine`: ≈ 1.9 pt at body sizes, or
+  0.06–0.08 em of the bullet's own size (❏ 0.155 em). Text starts at `indentStart`.
+- **Bullet colour and size** (`tools/probe_bullets.py`): a bullet keeps the style its
+  paragraph had when `createParagraphBullets` ran, until a later `updateTextStyle` request
+  covers the whole paragraph. So emit styles each bulleted paragraph in the bullet's colour
+  and size first, creates the bullets, then styles the text in at least two requests.
+  Styling only the first character or the newline has no effect, and `bulletStyle` is
+  read-only. A bullet larger than its text pushes the line down.
+- **Glyph choice**: a preset's own three glyphs are those of nesting levels 0–2; levels 3–8
+  repeat ● ○ ■ whatever the preset. `createParagraphBullets` counts levels from the
+  shallowest paragraph in its range, so a range starting deeper gets a dummy first paragraph.
+  Ink heights per em: ● 0.41, ○ 0.43, ■ 0.45 (on the baseline), ➢ 0.525, ★ ◆ 0.81, ◇ 0.87.
 - Presets have no filled right-pointing triangle (`LEFTTRIANGLE` is ◀). `ARROW3D` (➢) is the
   closest to beamer's ▶.
 
