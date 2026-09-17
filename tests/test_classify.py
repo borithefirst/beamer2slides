@@ -208,6 +208,16 @@ def test_grid_table_with_merged_cells():
     assert {(b["row"], b["col"]) for b in table["borders"] if b["position"] == "TOP"} == {(1, 1), (1, 2)}  # \cline{2-3}
 
 
+def test_shaded_table_cells_become_fills():
+    slide = deck("16_colored_table")["slides"][0]
+    assert kinds(slide).count("diagram") == 0 and kinds(slide).count("table") == 1
+    table = [e for e in slide["elements"] if e["kind"] == "table"][0]
+    fills = {(f["row"], f["col"]): f["color"] for f in table["fills"]}
+    assert fills[(0, 0)] == fills[(0, 2)] == "#ccccff"  # \rowcolor header
+    assert fills[(2, 1)] == "#bfffbf" and fills[(2, 0)] == "#ececec"  # \cellcolor inside a zebra row
+    assert (1, 0) not in fills  # white rows stay unfilled
+
+
 def test_tabular_without_rules_is_a_borderless_table():
     slide = deck("15_plain_tabular")["slides"][0]
     tables = [e for e in slide["elements"] if e["kind"] == "table"]

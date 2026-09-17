@@ -1,0 +1,23 @@
+% Tables with shaded rows and cells (colortbl): shading should become cell fills.
+\documentclass[xcolor=table]{beamer}
+\usepackage{booktabs}
+
+\begin{document}
+
+\begin{frame}{Zebra table}
+  \centering
+  \rowcolors{2}{gray!15}{white}
+  \begin{tabular}{lrr}
+    \toprule
+    \rowcolor{blue!20}
+    Method & Accuracy & Time \\
+    \midrule
+    Baseline & 71.2 & 3.1 \\
+    Ours & \cellcolor{green!25}89.4 & 2.7 \\
+    Oracle & 95.0 & 9.9 \\
+    Random & 50.0 & 0.1 \\
+    \bottomrule
+  \end{tabular}
+\end{frame}
+
+\end{document}

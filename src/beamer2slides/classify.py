@@ -1317,7 +1317,7 @@ class PageClassifier:
             return None
         # Every drawing must be a horizontal or vertical rule (\hline, \cline, |, booktabs);
         # cell shading and anything else keep the table a picture.
-        horizontal, vertical = [], []
+        horizontal, vertical, fills = [], [], []
         for d in self.page["drawings"]:
             r = Rect.of(d["bbox"])
             if d["id"] in self.decor_ids or not box.contains_rect(r) or r.w * r.h >= 0.95 * self.W * self.H:
@@ -1329,6 +1329,8 @@ class PageClassifier:
                 horizontal.append({"rect": r, "color": color, "weight": r.h if fill else (d["width"] or 0.4)})
             elif (stroke and r.w <= 1.0) or (fill and r.w <= 1.5 and r.h >= 3):
                 vertical.append({"rect": r, "color": color, "weight": r.w if fill else (d["width"] or 0.4)})
+            elif fill and d.get("fill_opacity", 1.0) >= 0.99:
+                fills.append({"rect": r, "color": d["fill"]})  # \rowcolor, \cellcolor
             else:
                 return None
         if vertical:
@@ -1398,9 +1400,14 @@ class PageClassifier:
                 columns.append([x0, x1])
         if not columns:
             return None
+        if any(f["rect"].x0 < frame.x0 - 1.5 or f["rect"].x1 > frame.x1 + 1.5 for f in fills):
+            return None  # shading beyond the table: a coloured box around it
         bounds = [frame.x0]
+        # Cell shading starts exactly at TeX's column edges.
+        fill_edges = sorted({round(f["rect"].x0, 2) for f in fills})
         for a, b in zip(columns, columns[1:]):
-            rule = [v["rect"].cx for v in vertical if a[1] - 1 <= v["rect"].cx <= b[0] + 1]
+            rule = [v["rect"].cx for v in vertical if a[1] - 1 <= v["rect"].cx <= b[0] + 1] or \
+                [x for x in fill_edges if a[1] - 1 <= x <= b[0] + 1]
             bounds.append(rule[0] if rule else (a[1] + b[0]) / 2)
         bounds.append(frame.x1)
 
@@ -1498,6 +1505,11 @@ class PageClassifier:
                        "color": r["color"], "weight": round(r["weight"], 2), "y": round(r["rect"].cy, 2)}
                       for r in rules for k in [row_boundary(r["rect"].cy)]],
             "borders": borders,
+            # Shading per cell: the rows whose baseline and the columns whose middle it covers.
+            "fills": [{"row": rr, "col": cc, "color": f["color"]}
+                      for f in fills if f["color"].lower() != "#ffffff"
+                      for rr, b in enumerate(baselines) if f["rect"].y0 <= b <= f["rect"].y1
+                      for cc in range(n_cols) if f["rect"].x0 <= (bounds[cc] + bounds[cc + 1]) / 2 <= f["rect"].x1],
             "spans": [s.id for s in spans],
         }
 

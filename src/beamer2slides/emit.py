@@ -564,6 +564,12 @@ def table_requests(el: dict, slide_id: str, object_id: str, scale: float, fonts:
                 "tableBorderFill": {"solidFill": {"color": rgb(b["color"])["opaqueColor"], "alpha": 1}},
                 "weight": pt(round(max(0.5, b["weight"] * scale), 2))},
             "fields": "tableBorderFill.solidFill.color,tableBorderFill.solidFill.alpha,weight"}})
+    for f in el.get("fills", []):
+        reqs.append({"updateTableCellProperties": {
+            "objectId": object_id, "tableRange": {"location": {"rowIndex": f["row"], "columnIndex": f["col"]},
+                                                  "rowSpan": 1, "columnSpan": 1},
+            "tableCellProperties": {"tableCellBackgroundFill": {"solidFill": {"color": rgb(f["color"])["opaqueColor"]}}},
+            "fields": "tableCellBackgroundFill.solidFill.color"}})
     merged = {(m["row"], m["col"]): m for m in el.get("merges", [])}
     for m in merged.values():
         reqs.append({"mergeTableCells": {"objectId": object_id, "tableRange": {
