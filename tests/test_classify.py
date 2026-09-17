@@ -596,6 +596,36 @@ def test_roman_numbers_on_circles_and_label_tabs():
     assert q["tab_x0"] and paragraph_text(q) == "Q:\tA question label"
 
 
+def words_line(words: list[tuple[str, float, float]], baseline: float, size: float = 10.909):
+    """A classify Line of word spans ((text, x0, x1), CMSS10) on one baseline."""
+    from beamer2slides.classify import Line, Rect, Span
+    from beamer2slides.fonts import font_info
+    return Line([Span(f"s{x0:.0f}-{baseline:.0f}", t, "CMSS10", size, "#000000",
+                      Rect(x0, baseline - 0.78 * size, x1, baseline + 0.22 * size), baseline, True, font_info("CMSS10"))
+                 for t, x0, x1 in words])
+
+
+def test_paragraph_under_a_list_is_no_description_item():
+    """sync_smoke wording: "Reviewers" ends where "keeps" of the paragraph under the list ends, and
+    "polish" starts with "both" (word spaces, not a label gap): no tabs, so the paragraph stays apart."""
+    from beamer2slides.classify import PageClassifier
+    item = words_line([("Reviewers", 32.73, 76.96), ("polish", 80.61, 107.0), ("the", 110.63, 125.04),
+                       ("slides", 128.67, 152.69), ("in", 156.34, 164.56), ("Google", 168.2, 199.57), ("Slides", 203.2, 229.1)], 123.38)
+    between = words_line([("Nobody", 32.73, 68.26), ("wants", 71.89, 98.02), ("to", 101.65, 111.04), ("redo", 114.69, 134.33),
+                          ("their", 137.97, 158.69), ("edits", 162.33, 183.51), ("by", 187.16, 197.51), ("hand", 201.14, 223.27)], 139.92)
+    para = words_line([("A", 10.91, 18.17), ("merge", 21.81, 49.33), ("keeps", 52.97, 77.49), ("both", 81.12, 102.08),
+                       ("sides", 105.71, 127.13), ("of", 130.78, 139.56), ("the", 143.19, 157.6), ("work.", 161.24, 185.61)], 167.37)
+    lines = PageClassifier.join_line_labels([item, between, para])
+    PageClassifier.label_tabs(lines)
+    assert [l.tab for l in lines] == [None, None, None]
+    # A description list (01_basic): labels ending together, \labelsep before the text.
+    term = words_line([("Term", 61.28, 85.02), ("Its", 90.47, 101.61), ("definition", 105.25, 147.41)], 100)
+    longer = words_line([("Longer", 29.19, 60.19), ("term", 63.83, 84.99), ("Another", 90.45, 126.93),
+                         ("definition", 130.57, 172.73)], 115)
+    lines = PageClassifier.join_line_labels([term, longer])
+    assert [l.tab.text for l in lines] == ["Its", "Another"]
+
+
 def test_outline_entries_ending_together_stay_apart():
     slide = deck("21_bullet_shapes")["slides"][10]
     paras = [paragraph_text(p) for e in texts(slide) if e["role"] == "body" for p in e["paragraphs"]]

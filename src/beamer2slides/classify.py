@@ -23,6 +23,7 @@ PRESET_GLYPHS = set("▶►▸‣•●")  # glyphs with a close Slides bullet p
 LABEL_GLYPHS = BULLET_GLYPHS | set("+✗✘→⇒—♦◆⋄")
 ENUM_RE = re.compile(r"^(\(?\d{1,2}[.)]|\(?[a-z][.)]|\([a-z]\)|\(?[ivx]{1,4}[.)])$")
 LINE_LABEL_RE = re.compile(r"^(\d{1,3}:|\[\d{1,3}\])$")
+LABEL_SEP_EM = 0.4  # gap after a description label (beamer: 0.5 em; word spaces are about 0.33 em)
 EM_SPACE = chr(0x2003)
 FRAME_COUNTER_RE =re.compile(r"^\d{1,4}( ?/ ?\d{1,4})?$")
 EQ_NUMBER_RE = re.compile(r"^\(\d+(\.\d+)*[a-z]?\)$")
@@ -808,8 +809,10 @@ class PageClassifier:
                     or ENUM_RE.match(spans[0].text.strip()) or is_mono(spans):
                 return {}  # (code lines up in columns by itself)
             width = line.rect.w
+            # The label is set off by \labelsep (0.5 em), wider than a word space: prose lines whose
+            # word edges line up by chance (a paragraph under a list) don't pair.
             return {k: spans[k] for k in range(1, len(spans))
-                    if spans[k].rect.x0 - spans[k - 1].rect.x1 >= 0.2 * line.size
+                    if spans[k].rect.x0 - spans[k - 1].rect.x1 >= LABEL_SEP_EM * line.size
                     and spans[k - 1].rect.x1 - spans[0].rect.x0 <= 0.45 * width}
 
         # (an item without a label may sit between two labelled ones)
@@ -968,7 +971,7 @@ class PageClassifier:
             if line.reason is not None or line.tab is not None or line.bullet or len(line.spans) < 2:
                 continue
             label, text = line.spans[0], line.spans[1]
-            if len(label.text.strip()) > 6 or text.rect.x0 - label.rect.x1 < 0.25 * line.size:
+            if len(label.text.strip()) > 6 or text.rect.x0 - label.rect.x1 < LABEL_SEP_EM * line.size:
                 continue
             for other in tabbed:
                 before = [s for s in other.spans if s.rect.x1 <= other.tab.rect.x0]
