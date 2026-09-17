@@ -1616,9 +1616,31 @@ class PageClassifier:
                 out += bars
                 continue
             spans = [s.id for s in label_spans if c.expand(0.5).contains_rect(s.rect)]
-            out.append({"id": f"p{self.page['index']}f{len(out)}", "kind": "image", "role": "figure",
-                        "bbox": c.expand(1.0).as_list(), "spans": spans})
+            el = {"id": f"p{self.page['index']}f{len(out)}", "kind": "image", "role": "figure",
+                  "bbox": c.expand(1.0).as_list(), "spans": spans}
+            bare = None if spans else self.bare_image(c)
+            if bare is not None:
+                # One `\includegraphics` and nothing else: the picture is the image itself, on
+                # its own box (the margin around a drawing is for strokes reaching out of it,
+                # which an image has none of). render.image_file may then write the author's
+                # file instead of a render of the page.
+                el["bbox"], el["image"] = list(bare["bbox"]), bare["id"]
+            out.append(el)
         return out
+
+    def bare_image(self, c: Rect) -> dict | None:
+        """The raster image a figure region consists of, if it consists of nothing else: one
+        graphic, one image covering it, no text drawn in the region."""
+        members = [g for g in self.graphics if c.expand(0.5).contains_rect(g)]
+        images = [im for im in self.page["images"] if Rect.of(im["bbox"]).intersects(c.expand(0.5))]
+        if len(members) != 1 or len(images) != 1:
+            return None
+        r = Rect.of(images[0]["bbox"])
+        if not (r.contains_rect(members[0]) and members[0].contains_rect(r)):
+            return None
+        if any(Rect.of(s["bbox"]).intersects(c.expand(0.5)) for s in self.page["spans"]):
+            return None
+        return images[0]
 
     def overlay(self, c: Rect, label_spans: list[Span], lines: list[Line], index: int, over_text: bool) -> dict | None:
         """A figure cluster drawn over native text or right at its words (a tikzmark arrow, a

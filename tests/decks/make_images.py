@@ -3,7 +3,7 @@
 from pathlib import Path
 
 import numpy as np
-from PIL import Image
+from PIL import Image  # noqa: F401  (used by FILES)
 
 OUT = Path(__file__).resolve().parent / "img"
 
@@ -38,10 +38,42 @@ def plot(w=800, h=600) -> np.ndarray:
     return img
 
 
+def badge(w=600, h=400) -> np.ndarray:
+    """Flat shapes on a transparent ground: behaves like a logo (RGBA PNG)."""
+    y, x = np.mgrid[0:h, 0:w]
+    img = np.zeros((h, w, 4), np.uint8)
+    disc = (x - w / 2) ** 2 / (w / 2.4) ** 2 + (y - h / 2) ** 2 / (h / 2.4) ** 2 <= 1
+    img[disc] = (36, 110, 185, 255)
+    ring = np.abs(np.hypot((x - w / 2) / (w / 6), (y - h / 2) / (h / 6)) - 1) < 0.12
+    img[ring & disc] = (250, 214, 70, 255)
+    return img
+
+
+def rgb(arr: np.ndarray) -> "Image.Image":
+    return Image.fromarray(np.clip(arr, 0, 255).astype(np.uint8))
+
+
+# Cases for the lossless `\includegraphics` route (deck 23_raster_images): a high-resolution
+# photo, the same photo as a CMYK JPEG (whose PDF stream carries a decode array), a logo with
+# an alpha channel, a greyscale and an indexed-palette PNG.
+FILES = {
+    "photo.jpg": lambda p: save_rgb(photo(), p),
+    "plot.png": lambda p: save_rgb(plot(), p),
+    "photo_big.jpg": lambda p: rgb(photo(2400, 1600)).save(p, quality=80),
+    "photo_cmyk.jpg": lambda p: rgb(photo(600, 400)).convert("CMYK").save(p, quality=80),
+    "logo.png": lambda p: Image.fromarray(badge()).save(p),
+    "plot_gray.png": lambda p: rgb(plot()).convert("L").save(p),
+    "plot_indexed.png": lambda p: rgb(plot()).convert("P", palette=Image.ADAPTIVE, colors=16).save(p),
+}
+
+
 def main() -> None:
     OUT.mkdir(exist_ok=True)
-    save_rgb(photo(), OUT / "photo.jpg")
-    save_rgb(plot(), OUT / "plot.png")
+    # Files already there are kept: the decks in tests/decks/out were compiled with those very
+    # bytes, and a Pillow of another version would write different ones.
+    for name, write in FILES.items():
+        if not (OUT / name).exists():
+            write(OUT / name)
     print("written:", sorted(p.name for p in OUT.iterdir()))
 
 

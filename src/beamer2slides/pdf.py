@@ -26,6 +26,13 @@ OBJ_TEXT, OBJ_PATH, OBJ_IMAGE, OBJ_SHADING, OBJ_FORM = 1, 2, 3, 4, 5
 SEG_LINE, SEG_BEZIER, SEG_MOVE = 0, 1, 2
 LIGATURES = {"ff": "ﬀ", "fi": "ﬁ", "fl": "ﬂ", "ffi": "ﬃ", "ffl": "ﬄ", "st": "ﬆ"}
 
+# FPDF_COLORSPACE_*
+COLOR_SPACES = {0: "unknown", 1: "DeviceGray", 2: "DeviceRGB", 3: "DeviceCMYK", 4: "CalGray",
+                5: "CalRGB", 6: "Lab", 7: "ICCBased", 8: "Separation", 9: "DeviceN",
+                10: "Indexed", 11: "Pattern"}
+JPEG_MAGIC = b"\xff\xd8\xff"
+PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
+
 
 def _addr(handle) -> int:
     return ctypes.cast(handle, ctypes.c_void_p).value or 0
@@ -114,6 +121,71 @@ def _rgba(getter, obj) -> tuple[int, int, int, int] | None:
     if not getter(obj, r, g, b, a):
         return None
     return r.value, g.value, b.value, a.value
+
+
+def _bitmap_array(bitmap) -> np.ndarray | None:
+    """A PDFium bitmap as RGB or RGBA pixels (uint8, h x w x 3/4). Unknown formats give None."""
+    if not bitmap:
+        return None
+    fmt = R.FPDFBitmap_GetFormat(bitmap)
+    w, h = R.FPDFBitmap_GetWidth(bitmap), R.FPDFBitmap_GetHeight(bitmap)
+    stride = R.FPDFBitmap_GetStride(bitmap)
+    if w <= 0 or h <= 0 or stride <= 0:
+        return None
+    buf = R.FPDFBitmap_GetBuffer(bitmap)
+    data = np.ctypeslib.as_array(ctypes.cast(buf, ctypes.POINTER(ctypes.c_ubyte)), shape=(h * stride,))
+    rows = data.reshape(h, stride)
+    if fmt == R.FPDFBitmap_Gray:
+        return np.repeat(rows[:, :w, None], 3, axis=2).copy()
+    if fmt == R.FPDFBitmap_BGR:
+        return rows[:, :w * 3].reshape(h, w, 3)[..., ::-1].copy()
+    if fmt in (R.FPDFBitmap_BGRA, R.FPDFBitmap_BGRx):
+        px = rows[:, :w * 4].reshape(h, w, 4)
+        return px[..., [2, 1, 0, 3]].copy() if fmt == R.FPDFBitmap_BGRA else px[..., 2::-1].copy()
+    return None
+
+
+def _buffer(getter, *args) -> bytes:
+    """A PDFium byte getter called twice: once for the length, once for the data."""
+    n = getter(*args, None, 0)
+    if not n:
+        return b""
+    buf = ctypes.create_string_buffer(n)
+    n = getter(*args, ctypes.cast(buf, ctypes.POINTER(ctypes.c_ubyte)), n)
+    return buf.raw[:n]
+
+
+@dataclass
+class EmbeddedImage:
+    """One image XObject as it is drawn on a page: its own file data and pixels, plus what
+    decides whether that data may stand in for a render of the page (see render.image_file).
+
+    `pixels` is PDFium's own decode of the image (its pixel grid, top row first, colour space
+    converted, but *without* the image's soft mask); `rendered` applies the object's matrix,
+    mask, alpha and clip, at the size PDFium picks (about page resolution), and is what says
+    whether anything is see-through. `raw` is the stream as stored: the author's JPEG file for
+    DCTDecode."""
+
+    px: tuple[int, int]                 # the image's own pixel size
+    box: tuple[float, float, float, float]   # what shows of it, page space (as Page.images gives it)
+    matrix: tuple                       # unit square -> page space
+    filters: list[str]
+    colorspace: str
+    bpp: int
+    dpi: tuple[float, float]
+    raw: bytes
+    decoded_size: int
+    clipped: bool                       # a clip path cuts the drawn box
+    upright: bool                       # axis aligned and not mirrored (a y flip is the PDF norm)
+    blended: bool                       # drawn with a constant alpha or a blend mode
+    transparent: bool                   # anything see-through: a soft mask, a stencil mask, `blended`
+    pixels: np.ndarray | None = None
+    rendered: np.ndarray | None = None
+
+    @property
+    def jpeg(self) -> bytes:
+        """The embedded stream when it is a plain JPEG file (DCTDecode and nothing else)."""
+        return self.raw if self.filters == ["DCTDecode"] and self.raw[:3] == JPEG_MAGIC else b""
 
 
 @dataclass
@@ -439,6 +511,70 @@ class Page:
             R.FPDFImageObj_GetImagePixelSize(po.handle, w, h)
             out.append({"bbox": box, "width": w.value, "height": h.value, "object": po})
         return out
+
+    def embedded_image(self, po: PageObject) -> EmbeddedImage | None:
+        """Everything PDFium knows about one image object (None for anything else)."""
+        if po.type != OBJ_IMAGE:
+            return None
+        w, h = ctypes.c_ulong(), ctypes.c_ulong()
+        R.FPDFImageObj_GetImagePixelSize(po.handle, w, h)
+        meta = R.FPDF_IMAGEOBJ_METADATA()
+        R.FPDFImageObj_GetImageMetadata(po.handle, self.raw, meta)
+        filters = []
+        for i in range(R.FPDFImageObj_GetImageFilterCount(po.handle)):
+            size = R.FPDFImageObj_GetImageFilter(po.handle, i, None, 0)
+            buf = ctypes.create_string_buffer(size)
+            R.FPDFImageObj_GetImageFilter(po.handle, i, buf, size)
+            filters.append(buf.raw[:max(0, size - 1)].decode("ascii", "replace"))
+        a, b, c, d, e, f = po.matrix
+        xs, ys = [e, a + e, c + e, a + c + e], [f, b + f, d + f, b + d + f]
+        full = (min(xs), min(ys), max(xs), max(ys))
+        box = full
+        node = po
+        while node is not None:
+            clip = self._clip_box(node)
+            if clip:
+                box = (max(box[0], clip[0]), max(box[1], clip[1]), min(box[2], clip[2]), min(box[3], clip[3]))
+            node = node.parent
+        # In page space (y down) an upright image has a > 0 and d < 0: PDF's unit square starts
+        # at the image's bottom left, so its rows run the other way. b/c turn it, a < 0 mirrors
+        # it left to right, d > 0 top to bottom.
+        upright = abs(b) < 1e-6 * max(1.0, abs(a)) and abs(c) < 1e-6 * max(1.0, abs(d)) and a > 0 and d < 0
+        img = self._image_pixels(po)
+        # A soft mask is not in `pixels` (FPDFImageObj_GetBitmap leaves it out) and not in
+        # FPDFPageObj_HasTransparency either; the rasterisation is what shows it. An opaque
+        # image renders alpha 255 everywhere, even at its rim.
+        drawn = self.rendered_image(po)
+        return EmbeddedImage(
+            px=(w.value, h.value), box=box, matrix=po.matrix, filters=filters,
+            colorspace=COLOR_SPACES.get(meta.colorspace, str(meta.colorspace)),
+            bpp=meta.bits_per_pixel, dpi=(meta.horizontal_dpi, meta.vertical_dpi),
+            raw=_buffer(R.FPDFImageObj_GetImageDataRaw, po.handle),
+            decoded_size=R.FPDFImageObj_GetImageDataDecoded(po.handle, None, 0),
+            clipped=any(abs(box[k] - full[k]) > 0.01 for k in range(4)),
+            upright=upright, blended=bool(R.FPDFPageObj_HasTransparency(po.handle)),
+            transparent=drawn is None or drawn.shape[2] == 4 and bool((drawn[..., 3] < 255).any()),
+            pixels=img, rendered=drawn)
+
+    def _image_pixels(self, po: PageObject) -> np.ndarray | None:
+        bitmap = R.FPDFImageObj_GetBitmap(po.handle)
+        try:
+            return _bitmap_array(bitmap)
+        finally:
+            if bitmap:
+                R.FPDFBitmap_Destroy(bitmap)
+
+    def rendered_image(self, po: PageObject) -> np.ndarray | None:
+        """The image object rasterised by PDFium with its matrix, mask and colour space applied:
+        upright, in page orientation, on a transparent ground where a mask makes it see-through."""
+        if po.type != OBJ_IMAGE:
+            return None
+        bitmap = R.FPDFImageObj_GetRenderedBitmap(self.doc.pdf.raw, self.raw, po.handle)
+        try:
+            return _bitmap_array(bitmap)
+        finally:
+            if bitmap:
+                R.FPDFBitmap_Destroy(bitmap)
 
     def links(self) -> list[dict]:
         pdf = self.doc.pdf.raw

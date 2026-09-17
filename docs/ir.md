@@ -60,7 +60,9 @@ One slide per page, holding native elements plus what was left behind and why.
           ],
           "spans": ["p0s0", "p0s1"] },                // raw spans consumed, removed from background
 
-        { "kind": "image", "id": "e1", "bbox": [...], "file": "img/p0-xref12.png", "images": ["p0i2"] },
+        { "kind": "image", "id": "e1", "bbox": [...], "file": "img/p0-xref12.png", "images": ["p0i2"],
+          "image": "p0i2",                          // the region is one \includegraphics (classify.bare_image)
+          "picture": "raw" },                       // added by render: raw | decoded (the image's own file), absent = a page crop
 
         { "kind": "shape", "id": "e2", "shape": "round_rect", "bbox": [...],
           "fill": "#262686", "outline": null, "drawings": ["p0d3"] }
