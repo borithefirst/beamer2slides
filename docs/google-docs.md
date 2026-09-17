@@ -146,6 +146,65 @@ HTML for structure and the bulk of the styling, then one `batchUpdate` for page 
 headers/footers, footnotes, page and section breaks, checklists, small caps and
 paragraph decoration — and the named-range anchors, which go in the same batch.
 
+## Reading what we cannot write: chips and the rest
+
+`tools/probe_docs_chips.py` makes a document with one labelled line per Docs-native
+object, which a human (here, browser automation driving the real editor) then fills in.
+Everything below was inserted by hand and read back three ways. **How well an object
+reads back has nothing to do with how exotic it looks**, and the API and the exports
+disagree in both directions.
+
+| object in the editor | `documents.get` | HTML export | Markdown export |
+|---|---|---|---|
+| date chip | **`dateElement`**: `timestamp` (ISO 8601 UTC), `locale`, `dateFormat`, `timeFormat`, `displayText` | plain `<span>Sep 25, 2026</span>` | plain text |
+| person chip | **`person`**: `personId`, `email`, `name` | `<a href="mailto:…">Name</a>` | `[Name](mailto:…)` |
+| file chip | **`richLink`**: `uri`, `title`, `mimeType` | `<a href="google.com/url?q=…">` (wrapped) | `[title](uri)` |
+| place (Maps) chip | **`richLink`**, same shape, no `mimeType` | wrapped `<a>` | `[title](uri)` |
+| footnote | `footnoteReference` + a `footnotes` map | `<sup><a href="#ftnt1">` + a div | `[^1]` |
+| equation | **`equation {}` — empty** | `<img src="data:image/png;base64,…">` | **`${x}^{2\ +\ \sqrt{y}}$`** |
+| dropdown chip | **an element with only `startIndex`/`endIndex`** | `<span>Not Started</span>` | plain text |
+| placeholder chip | **`` inside an ordinary `textRun`** | `<span>Person</span>` | plain text |
+| watermark | **nothing** but a `` in the default header | absent | absent |
+| comment | **nothing** (comments are a Drive API concept) | `<sup><a href="#cmnt1">[a]</a></sup>` + its text at the end | absent |
+| table of contents | `tableOfContents.content`, with `link.heading` per entry | generated `<p>`s | plain text |
+| emoji | an ordinary character in a `textRun` | `&#128640;` | the character |
+
+`dateElement` is the headline: it is **not** in the reference's `ParagraphElement` union,
+yet it carries the chip's full semantics — the underlying instant, not just the rendered
+words. A date chip can therefore be round-tripped exactly, even though nothing in the API
+can create one.
+
+Four traps follow:
+
+* **`equation {}` is empty.** Thirteen index units wide, no content, no id. The formula
+  exists only in the Markdown export (as LaTeX) or the HTML export (as a base64 PNG). So
+  **the Markdown export carries information `documents.get` does not**, and an IR that
+  wants to keep equations has to read both.
+* **A dropdown chip is an anonymous element** — one index unit, no content key of any
+  kind. You can see *that* something is there and nothing else. Its displayed value shows
+  up only in an export.
+* **``** is Docs' "an object sits here" sentinel inside plain text — a placeholder
+  chip, and the watermark inside the default header, read as that one private-use
+  character. `checks.junk_text` already flags private-use characters in the Slides
+  pipeline; here they are load-bearing and must not be stripped.
+* **Comments are invisible to the Docs API** and visible in the HTML export. Reading them
+  properly means `drive.comments.list`, which `drive.file` already covers.
+
+### Document tabs
+
+Tabs are the one structural feature that changes the shape of a read, and the default is
+silent data loss:
+
+* `documents.get` **without** `includeTabsContent` returns only the first tab's `body`,
+  with no `tabs` key and no sign that the others exist.
+* **with** the flag, `body` disappears entirely and `tabs` takes its place — a list of
+  `{tabProperties: {tabId, title, index, parentTabId}, documentTab: {body, …}, childTabs}`,
+  nested one level deep in the probe (`Tab 2` → `Tab 3`).
+* Drive's html / txt / md exports concatenate **every** tab, with no marker between them.
+
+So the reader must always pass `includeTabsContent=True` and handle the `tabs` shape, and
+every write has to name its tab. Anchors, named ranges and index arithmetic are per tab.
+
 ## The round trip does not close on its own
 
 Feeding Google's own HTML export back into Google's HTML importer **destroys every
@@ -269,6 +328,10 @@ as it already does on the Slides side:
 3. **Anchors under a human editor** — retired, see "Under a human editor" above. What
    is still unmeasured there: dragging a selection to a new place, "paste without
    formatting", and a second person editing concurrently.
+4. **Tabs on the write path.** They were read, never written: whether `batchUpdate` can
+   address a tab other than the first, and what an HTML import does to a document that
+   already has several, are both unmeasured. Until then, treat a multi-tab document as
+   read-only beyond its first tab.
 
 ## Alternatives considered
 
@@ -284,7 +347,9 @@ architecture.
 **Markdown** is now importable *and* editable natively (a `.md` in Drive opens in Docs
 without converting), which would remove the round trip entirely. But its subset drops
 colours, highlights and alignment, and the Markdown export proved unstable across
-documents in the probe. Too lossy to be canonical here.
+documents in the probe. Too lossy to be canonical here — but it is the **only** place an
+equation's LaTeX survives a read, so the reader should fetch it as a side-channel even
+though the canonical file stays HTML.
 
 ## Reproducing the measurements
 
@@ -309,4 +374,11 @@ built per case; then tries every page-setup dialect in its own document, and eve
 ```
 
 The anchor probes: named-range behaviour through the API, and under a human editor.
-All four write to `out/docs-probe/`.
+
+```
+.venv\Scripts\python.exe tools\probe_docs_chips.py create   # then insert the chips, then `read`
+```
+
+The chips probe: one labelled line per Docs-native object, read back through
+`documents.get` (with and without tabs) and through every export that could carry it.
+All five write to `out/docs-probe/`.
