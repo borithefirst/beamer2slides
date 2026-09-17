@@ -22,7 +22,8 @@ PRESET_GLYPHS = set("▶►▸‣•●")  # glyphs with a close Slides bullet p
 LABEL_GLYPHS = BULLET_GLYPHS | set("+✗✘→⇒—♦◆⋄")
 ENUM_RE = re.compile(r"^(\(?\d{1,2}[.)]|\(?[a-z][.)]|\([a-z]\)|\(?[ivx]{1,4}[.)])$")
 LINE_LABEL_RE = re.compile(r"^(\d{1,3}:|\[\d{1,3}\])$")
-FRAME_COUNTER_RE = re.compile(r"^\d{1,4}( ?/ ?\d{1,4})?$")
+EM_SPACE = chr(0x2003)
+FRAME_COUNTER_RE =re.compile(r"^\d{1,4}( ?/ ?\d{1,4})?$")
 EQ_NUMBER_RE = re.compile(r"^\(\d+(\.\d+)*[a-z]?\)$")
 MATH_OPERATORS = set("=+−<>≤≥×·/∑∏∫∈∉⊂⊆∪∩→←⇒⇔≈≠±∞")
 SMALL_IMAGE_PT = 12
@@ -1020,7 +1021,11 @@ class PageClassifier:
                     elif span is line.tab:
                         sep = "\t"
                     else:
-                        sep = " " if span.rect.x0 - prev.rect.x1 > 0.15 * line.size else ""
+                        gap = span.rect.x0 - prev.rect.x1
+                        sep = " " if gap > 0.15 * line.size else ""
+                        if gap >= 1.0 * line.size:
+                            # \quad and wider (\and between authors): em spaces keep the gap
+                            sep += EM_SPACE * max(1, round((gap - 0.33 * line.size) / line.size))
                     if si and sep == " " and runs[-1].get("hole"):
                         # The space after a formula becomes part of its gap: TeX's space there
                         # is wider than a Slides space would be.
