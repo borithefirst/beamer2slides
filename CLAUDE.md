@@ -344,8 +344,15 @@ scratch). Both verdicts are conflicts in the report (`field: label`); a renamed 
 content still recognises is a warning. The title counts by degree (`_title_alike`): a source that
 retitles every frame while moving a label ("Moving labels" -> "Moving labels v2") makes a yes-or-no
 "same title?" say no to every pair at once. Measured by `tools/fuzz_labels.py` against a tagged
-truth: over 3000 rounds, misidentified frames 14.68% -> 1.09% when the invariant is broken, 0 false
+truth: over 3000 rounds, misidentified frames 14.68% -> 1.04% when the invariant is broken, 0 false
 alarms in 1524 sound rounds, nothing ever worse than before (fixed seeds in `tests/test_sync_fuzz.py`).
+What the order-keeping alignment leaves over is picked up twice more (`tests/test_frame_moves.py`):
+by content, when one leftover frame explains one leftover slide and no other comes close
+(`identity.cross_pairs`, `CROSS_SURE`/`CROSS_MARGIN`) - that is a frame the source moved across
+another - and then by place (`identity.gap_pairs`, `GAP_SURE`): one slide and one frame alone
+between two neighbours that paired, the ends of the talk counting as neighbours, sharing some of
+their words - an unlabelled frame the source retitled. Sound rounds went 0.06% -> 0.00% with them:
+with the labels kept, no frame of 6809 ends up on another frame's slide.
 `fuzz_sync` moves/renames/drops labels too; that found `sync.new_base` freezing a `gone` slide's
 entry at the moment of deletion (its label/title/words now follow the source, its key and place stay)
 and a renamed label costing a slide its identity (`align_slides.pairable` lets the content fix it
@@ -444,7 +451,10 @@ renamed at once, ten frames reversed, twins swapped, a frame inserted between tw
 ones, `kitchen` combining most of it) against decks edited every way at once; the order is checked
 against the frames' labels, not their titles, and every slide nobody edited must still equal a
 fresh conversion, thumbnail included. It is where the moved-label check and the order merge were
-made to work; `-k "variants or selectors or budget"` is its offline part.
+made to work; `-k "variants or pairs or selectors or budget"` is its offline part, which includes
+the pairing itself against the truth `stress.frames` knows (every variant's frames paired with v1's
+frame for frame by `identity.label_moves` + `align_slides`, a frame the variant adds paired with
+nothing) - 19 variants in under a second, no Google.
 
 Sync fuzzing (docs/sync.md, "Proving nothing is lost"): `tools/loss_oracle.py` judges one sync from
 the read-backs before and after, the base, the report and the new conversion - did anything a person

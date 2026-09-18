@@ -1,4 +1,4 @@
-"""Identity for sync: slide keys, element keys, fingerprints and IR hashes (docs/sync.md).
+﻿"""Identity for sync: slide keys, element keys, fingerprints and IR hashes (docs/sync.md).
 
 Slides are keyed by their beamer frame label, else `title:<normalised title>#<occurrence>`,
 else `page:<n>`. Elements within a slide are keyed `kind/role/ordinal`. A new conversion (ours)
@@ -19,6 +19,7 @@ LABEL_MOVED = 1.0     # a slide elsewhere this alike may be the frame the label 
 LABEL_MARGIN = 0.5    # ... but only if it beats the label's own pairing by this much
 CROSS_SURE = 1.15     # a slide this alike, left over by the order-keeping pass, is that frame moved
 CROSS_MARGIN = 0.4    # ... unless another leftover comes this close to explaining it too
+GAP_SURE = 0.45       # the only leftover between two paired frames needs this much of the same words
 KEY_MATCH = 0.5       # least similarity for an element keeping the key it would get anyway
 ELEMENT_MATCH = 0.35  # least similarity for an element inheriting another key
 # Render output, not source: "picture" says how a bare image reached its file (raw stream or
@@ -255,6 +256,7 @@ def align_slides(base: list[dict], ours: list[dict], moves: list[dict] | None = 
         else:
             b += 1
     pairs.update(cross_pairs(base, ours, pairs, pairable))
+    pairs.update(gap_pairs(base, ours, pairs, pairable))
     return pairs
 
 
@@ -286,6 +288,38 @@ def cross_pairs(base: list[dict], ours: list[dict], pairs: dict[int, int], paira
         if max(rivals, default=0.0) > score - CROSS_MARGIN:
             continue
         out[j] = i
+    return out
+
+
+def gap_pairs(base: list[dict], ours: list[dict], pairs: dict[int, int], pairable) -> dict[int, int]:
+    """One slide left over between two frames that paired, one frame left over between the same
+    two, and some of the same words: the place is evidence the words alone don't have.
+
+    An unlabelled frame that was retitled keeps neither its title nor a label, and half its words
+    are no longer enough for the alignment (`SLIDE_MATCH`) or for `cross_pairs`, which has to be
+    sure of itself because it may pair across the whole talk. Here there is nothing to be unsure
+    between: both neighbours are pinned, on both sides, and the gap they leave holds exactly one
+    slide and exactly one frame. What it cannot be is a frame deleted and another written in its
+    place, and that is what `GAP_SURE` is for - some of the words have to be the same words."""
+    free_base = [i for i in range(len(base)) if i not in set(pairs.values())]
+    free_ours = [j for j in range(len(ours)) if j not in pairs]
+    if not free_base or not free_ours:
+        return {}
+    # The ends count as gaps too: the talk before the first frame that paired and after the last
+    # one are bounded by the start and the end of both sides, which pin a slide just as well.
+    anchors = [(-1, -1), *sorted(pairs.items()), (len(ours), len(base))]   # (ours, base), in ours order
+    out: dict[int, int] = {}
+    for k in range(len(anchors) - 1):
+        (jl, il), (jr, ir) = anchors[k], anchors[k + 1]
+        if ir <= il:                                                  # the two crossed: no gap to speak of
+            continue
+        here = [j for j in free_ours if jl < j < jr]
+        there = [i for i in free_base if il < i < ir]
+        if len(here) != 1 or len(there) != 1:
+            continue
+        j, i = here[0], there[0]
+        if pairable(i, j) and _evidence(base[i], ours[j]) >= GAP_SURE:
+            out[j] = i
     return out
 
 

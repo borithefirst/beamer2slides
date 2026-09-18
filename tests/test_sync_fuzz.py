@@ -59,11 +59,12 @@ def test_a_broken_label_invariant_sends_far_fewer_slides_to_the_wrong_frame(tmp_
     a truth the synthetic source knows (every frame is tagged, so a pairing is right or wrong).
 
     The campaign at 3000 rounds, which is where the thresholds were set: with the labels sound the
-    check never once spoke, and with one broken it took misidentified frames from 14.68% to 1.09%
-    - and of the rounds still wrong, 36 of 39 were reported as a conflict. The 100 seeds here are
-    enough to fail if any of that stops being true; on them the check leaves exactly one frame
-    wrong, a label pasted onto a frame added in the same version while its own frame was deleted,
-    which nothing in either PDF can tell from a frame written from scratch."""
+    check never once spoke and not one frame of 1524 rounds lost its slide, and with one broken it
+    took misidentified frames from 14.68% to 1.04% - and of the rounds still wrong, 35 of 37 were
+    reported as a conflict. The 100 seeds here are enough to fail if any of that stops being true;
+    on them the check leaves exactly one frame wrong, a label pasted onto a frame added in the same
+    version while its own frame was deleted, which nothing in either PDF can tell from a frame
+    written from scratch."""
     sys.path.insert(0, str(ROOT / "tools"))
     import fuzz_labels
 
@@ -72,7 +73,8 @@ def test_a_broken_label_invariant_sends_far_fewer_slides_to_the_wrong_frame(tmp_
     broken = [r for r in rounds if r["broke"] and not r["reordered"]]
     assert len(sound) > 30 and len(broken) > 30  # the harness really does break labels, and not always
     assert [r["said"] for r in sound] == ["quiet"] * len(sound)  # never a word about a sound source
-    assert sum(r["wrong"]["now"] for r in sound) == sum(r["wrong"]["before"] for r in sound)
+    assert sum(r["wrong"]["now"] for r in rounds if not r["broke"]) == 0, \
+        "a source that kept its labels lost a frame's slide anyway"
     was, now = (sum(r["wrong"][k] for r in broken) for k in ("before", "now"))
     assert now * 5 < was, f"the check is not earning its place: {was} -> {now}"
     wrong = [r for r in broken if r["wrong"]["now"]]

@@ -46,6 +46,13 @@ PDF destination name. No spaces, no braces, no accents, no `=` or `,`.
 **8. Do not rename `\label{}`, `\ref{}` or citation keys as a way of doing any of this.** Frame
 labels are `[label=...]` in the frame's option list; that is the only thing this system reads.
 
+**9. Reorder frames freely - with rule 1 kept.** A labelled frame is recognised wherever it lands.
+Frames without labels are matched by an order-keeping alignment, so two of them changing places is
+the one case the content has to settle on its own; it does when they say clearly different things,
+and when they don't (three frames called "Results" over the same table) both come back as new
+slides and their deck edits stay on the old ones. Move the frame and its label together, and never
+swap two frames by swapping their labels - that is rule 2, and it reads as two frames rewritten.
+
 ---
 
 ## Repairing a source that broke them

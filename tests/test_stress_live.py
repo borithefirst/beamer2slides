@@ -1,7 +1,7 @@
 """Opt-in: sync and pull on the 48-frame stress deck (marker `sync`, deselected by default).
 
   python -m pytest -m sync tests/test_stress_live.py
-  python -m pytest -m sync tests/test_stress_live.py -k "variants or selectors or budget"   # offline
+  python -m pytest -m sync tests/test_stress_live.py -k "variants or pairs or selectors or budget"  # offline
   python -m pytest -m sync tests/test_stress_live.py -k "scenario and ambiguous"
 
 `tests/decks/stress/talk.tex` is built to be ambiguous: three frames titled Results, two frames
@@ -201,6 +201,37 @@ def test_exempt_variants_still_build_and_classify(variant):
         pytest.skip(reason)
     slides = stress.summary(classified(variant))
     assert len(slides) == len(stress.names(stress.VARIANTS[variant]))
+
+
+@pytest.mark.parametrize("variant", [v for v in stress.VARIANTS if v != "v1"])
+def test_every_variant_pairs_with_v1_frame_for_frame(variant):
+    """Identity itself, against a truth this deck knows: `stress.frames` says which frame of the
+    variant is which frame of v1, whatever the source did to it. So the pairing `sync` would use
+    (`identity.label_moves` + `align_slides`, on the real classified PDFs, no Google) can be asked
+    to be exactly right - on twins one word apart, three frames called Results, an unlabelled frame
+    carried across nine others, every title renamed at once, a label moved to the next frame.
+
+    A frame the variant adds must pair with nothing: reading it as one of v1's frames would write
+    it over that slide. This is the cheap offline half of what the live scenarios below check."""
+    if reason := latex_missing():
+        pytest.skip(reason)
+    from beamer2slides import identity
+
+    def infos(name):
+        deck = json.loads((classified(name) / "deck.json").read_text(encoding="utf-8"))
+        return [identity.slide_info(s) for s in deck["slides"]]
+
+    base, ours = infos("v1"), infos(variant)
+    base_names, names = stress.names([]), stress.names(stress.VARIANTS[variant])
+    assert len(ours) == len(names), f"{len(ours)} slides for {len(names)} frames"
+    pairs = identity.align_slides(base, ours, identity.label_moves(base, ours))
+    wrong = []
+    for j, name in enumerate(names):
+        want = base_names.index(name) if name in base_names else None
+        if pairs.get(j) != want:
+            got = base_names[pairs[j]] if j in pairs else None
+            wrong.append(f"frame {name} read as {got}, wanted {name if want is not None else 'a new frame'}")
+    assert not wrong, "\n".join(wrong)
 
 
 def test_selectors_are_unique():

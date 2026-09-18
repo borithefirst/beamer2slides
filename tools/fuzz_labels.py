@@ -14,7 +14,7 @@ invariant (a label moved onto another frame, renamed, or dropped) and compares t
 against the truth:
 
     order       neither check: follow the label, and pair the rest in order alone
-    before      the leftovers of that order paired by content too (identity.cross_pairs)
+    before      the leftovers of that order picked up too (identity.cross_pairs, identity.gap_pairs)
     now         the same with the moved-label check as well (what sync does)
 
 and counts what the check said about each round: `moved` (the content decided), `unsure` (the
@@ -27,6 +27,11 @@ of losing its identity: the alignment keeps the order, so one of the two falls o
 what measured that: 5.53% -> 0.00% of the frames in sound rounds with a move), and what is left in
 these rows is the honest remainder - frames that moved and say too little to be told apart, which
 come back as new slides.
+
+The other leftover is a frame nothing moved whose title the source replaced: no label, half its
+words new, and both passes above too careful to claim it. `identity.gap_pairs` pairs it when it is
+the only slide and the only frame between two neighbours that paired - which took the rounds with
+sound labels from 0.06% to 0.00%, i.e. every frame of 1524 rounds on its own slide.
 """
 
 import argparse
@@ -57,13 +62,14 @@ def _infos(base):
 
 @contextlib.contextmanager
 def _order_only():
-    """The alignment without `identity.cross_pairs`: what the order-keeping pass alone can pair."""
-    sure = identity.CROSS_SURE
-    identity.CROSS_SURE = float("inf")
+    """The alignment without the leftover passes (`identity.cross_pairs`, `identity.gap_pairs`):
+    what the labels and the order-keeping alignment pair between them."""
+    sure, gap = identity.CROSS_SURE, identity.GAP_SURE
+    identity.CROSS_SURE = identity.GAP_SURE = float("inf")
     try:
         yield
     finally:
-        identity.CROSS_SURE = sure
+        identity.CROSS_SURE, identity.GAP_SURE = sure, gap
 
 
 def _wrong(pairs, ours_truth, base_truth) -> int:

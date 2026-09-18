@@ -43,7 +43,12 @@ storage), `merge.py` (pure planning and diff3), `sync.py` (requests and the writ
   content alone (`identity.cross_pairs`), which is how a frame the source moved across another
   keeps its slide: the best explanation has to be good on its own (`CROSS_SURE`) and no other
   leftover may come within `CROSS_MARGIN` of it, on either side, so frames that say much the same
-  pair nothing and stay with the order. Unpaired ours slides get fresh keys.
+  pair nothing and stay with the order. What is still over is finally paired by its place
+  (`identity.gap_pairs`): one slide and one frame alone between two neighbours that paired - the
+  ends of the talk counting as neighbours - are the same frame if they still share some words
+  (`GAP_SURE`), which is what saves an unlabelled frame whose title the source replaced, while a
+  frame deleted and another written where it stood share the place and not the words, and stay
+  apart. Unpaired ours slides get fresh keys.
   One label can name several slides - `--overlays all` gives a slide per step of a labelled frame,
   and a source may reuse a label - and then the n-th slide of that label pairs with the n-th in the
   base (`identity.align_slides`). Pairing them all with one base slide used to leave its siblings
@@ -342,25 +347,30 @@ misidentified frames, by what is switched on (the campaign's three columns):
 
 | | `order` | `before` | `now` |
 |---|---|---|---|
-| labels sound | 0.06% | 0.06% | 0.06% |
+| labels sound | 0.06% | **0.00%** | 0.00% |
 | labels sound, a frame moved | 5.53% | **0.00%** | 0.00% |
-| labels broken | 14.68% | 14.68% | **1.09%** |
+| labels broken | 14.68% | 14.64% | **1.04%** |
 | labels broken, a frame moved | 19.15% | 11.35% | **1.18%** |
 
-`order` follows the labels and pairs the rest by the order-keeping alignment alone; `before` pairs
-that alignment's leftovers by content too (`identity.cross_pairs`); `now` adds the moved-label
-check, which is what sync does. The two checks cover different halves: the leftovers pass is what
-a moved frame needs and does nothing for a moved label, and the reverse.
+`order` follows the labels and pairs the rest by the order-keeping alignment alone; `before` picks
+that alignment's leftovers up by content and by place too (`identity.cross_pairs`,
+`identity.gap_pairs`); `now` adds the moved-label check, which is what sync does. They cover
+different halves: the leftover passes are what a moved or retitled frame needs and do nothing for a
+moved label, and the reverse. **With the labels sound, not one frame of 1524 rounds - 6809 frames -
+ends up on another frame's slide.** `GAP_SURE` earns its own place in that: pairing every lone
+leftover regardless of its words puts 2 of them back (and 3 more in the broken rounds).
 
 The check never spoke once in 1524 rounds whose labels nobody touched, and no round came out worse
-than before it existed. Of the broken rounds still wrong without a reorder, 36 of 39 were reported
-as a conflict and 3 passed in silence (a label pasted onto a frame added in the same version whose
+than before it existed. Of the broken rounds still wrong without a reorder, 35 of 36 were reported
+as a conflict and 1 passed in silence (a label pasted onto a frame added in the same version whose
 own frame was deleted, a frame renamed and retitled and reworded at once - nothing left to
 recognise them by; they become new slides, and the old ones are kept with their edits). Fixed seeds
 run in the default suite
 (`tests/test_sync_fuzz.py::test_a_broken_label_invariant_sends_far_fewer_slides_to_the_wrong_frame`,
-and `::test_a_frame_the_source_moved_across_another_keeps_its_slide` for the rows with a move -
+which also asks the sound rounds for not one frame wrong, and
+`::test_a_frame_the_source_moved_across_another_keeps_its_slide` for the rows with a move -
 switching `cross_pairs` off puts 9 frames of its 19 reordered rounds back on the wrong slide).
+The passes themselves: `tests/test_frame_moves.py`.
 
 `tools/fuzz_sync.py` also moves, renames and drops labels as source edits now. That found two
 things: a slide the deck deleted while the source keeps it (`gone`) kept a base entry frozen at the
@@ -430,8 +440,10 @@ hold for every sync, including the combinations nobody thought of.
 
 ## Not supported yet
 - Crossing reorders of unlabelled frames whose words don't tell them apart: the alignment keeps the
-  order and `cross_pairs` refuses to guess between two leftovers that explain each other equally
-  well, so both come back as new frames. Label them (`beamer2slides label`), and it is a non-issue.
+  order, `cross_pairs` refuses to guess between two leftovers that explain each other equally well,
+  and `gap_pairs` only speaks where one slide and one frame are alone between two paired
+  neighbours, so both come back as new frames. Label them (`beamer2slides label`), and it is a
+  non-issue.
 - diff3 inside diagrams (a text edit there on both sides keeps the deck); tables merge per cell,
   but a row or column added in the deck keeps the deck's table.
 - Layout texts and placeholder styles (`write_layout_texts`) aren't synced; nor are

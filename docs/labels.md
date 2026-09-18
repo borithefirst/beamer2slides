@@ -37,6 +37,13 @@ frames stay put. It gets less reliable exactly where decks get interesting: repe
 ("Results" three times), frames reordered, a frame inserted between two that look alike, a title
 rewritten in the same commit that moves the frame.
 
+What the order leaves over is picked up by the content (`identity.cross_pairs`: a frame that moved
+still says what it says) and by the place (`identity.gap_pairs`: the only slide and the only frame
+between two neighbours that paired), which covers a good deal of that - measurably, `docs/sync.md`
+has the numbers. Neither will guess: two frames that changed places and say much the same thing
+come back as new slides, because the alternative is writing one frame's words onto the other's
+slide, under somebody's edits.
+
 So: **give every frame a label of its own, and never change one.**
 
 ## Keeping that true
