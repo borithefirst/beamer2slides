@@ -77,6 +77,10 @@ VARIANTS = {"v1": [], **{f: [f] for f in FLAGS}, "kitchen": KITCHEN,
             # sources of the scenarios in tests/test_stress_live.py
             "ambiguous": ["swaptwins", "insertframe", "everyrow"],
             "identity": ["movelabel", "nolabel", "retitleall", "recast"],
+            # the limit itself: the unlabelled frame retitled, half rewritten *and* carried across
+            # nine others in one version. Nothing can follow it - the report has to say so instead
+            # (`identity.near_misses`, tests/test_stress_live.py).
+            "recastmoved": ["recast", "reorder10"],
             "churn": ["reorder10", "dropends", "rewritebullets", "rewriteblock"],
             "pictures": ["swappicture", "notesedit"]}
 

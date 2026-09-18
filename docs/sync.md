@@ -379,7 +379,10 @@ much of the same thing. Over 2000 chained revisions (`tools/fuzz_labels.py --cha
 times, 3 of them about frames the pairing really did lose - and of the 4 lost frames whose slide was
 still free to be named, the fourth has not one word in common with it, so there is nothing to say.
 `NEAR_TELL` sits at 0.35: the tally is the same anywhere from 0.3 to 0.5, below that it is noise
-only, and above it the stress deck's own recast frame (0.448) would fall out.
+only, and above it the stress deck's own recast frame (0.448) would fall out. That frame is also the
+live proof: the `recastmoved` variant retitles it, rewrites half of it and carries it across nine
+others at once, and the report names it and the slide it left behind
+(`tests/test_stress_live.py::test_the_one_frame_nothing_can_follow_is_named_in_the_report`).
 
 The check never spoke once in 1524 rounds whose labels nobody touched, and no round came out worse
 than before it existed. Of the broken rounds still wrong without a reorder, 35 of 36 were reported

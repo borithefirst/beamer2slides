@@ -453,7 +453,9 @@ table whose every row says the same, identical notes, astral characters and soft
 variants change the source drastically and ambiguously (labels moved and dropped, every title
 renamed at once, ten frames reversed, twins swapped, a frame inserted between two near-identical
 ones, the unlabelled frame retitled and half rewritten - `recast`, which is `identity.gap_pairs`
-live: without it that sync creates a second slide and the old one keeps the person's edits -
+live: without it that sync creates a second slide and the old one keeps the person's edits;
+`recastmoved` does the same to it *and* carries it across nine frames, which nothing can follow, so
+that one is the live proof of `identity.near_misses` naming what it could not pair -
 `kitchen` combining most of it) against decks edited every way at once; the order is checked
 against the frames' labels, not their titles, and every slide nobody edited must still equal a
 fresh conversion, thumbnail included. It is where the moved-label check and the order merge were

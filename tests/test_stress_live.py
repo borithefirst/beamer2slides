@@ -203,7 +203,7 @@ def test_exempt_variants_still_build_and_classify(variant):
     assert len(slides) == len(stress.names(stress.VARIANTS[variant]))
 
 
-@pytest.mark.parametrize("variant", [v for v in stress.VARIANTS if v != "v1"])
+@pytest.mark.parametrize("variant", [v for v in stress.VARIANTS if v not in ("v1", "recastmoved")])
 def test_every_variant_pairs_with_v1_frame_for_frame(variant):
     """Identity itself, against a truth this deck knows: `stress.frames` says which frame of the
     variant is which frame of v1, whatever the source did to it. So the pairing `sync` would use
@@ -232,6 +232,32 @@ def test_every_variant_pairs_with_v1_frame_for_frame(variant):
             got = base_names[pairs[j]] if j in pairs else None
             wrong.append(f"frame {name} read as {got}, wanted {name if want is not None else 'a new frame'}")
     assert not wrong, "\n".join(wrong)
+
+
+def test_the_one_frame_nothing_can_follow_is_named_in_the_report():
+    """`recastmoved`, the exception to the test above and the reason it has one: the frame with no
+    label gets another title, half its words rewritten *and* a ride across nine other frames, all in
+    one version. No label, not enough words, no gap to stand in - so it pairs with nothing, which is
+    the right answer (the deck keeps the old slide with its edits and gains a new one beside it) and
+    a silent one. `identity.near_misses` is what makes it audible, and this is that on a real deck's
+    real words rather than a synthetic one's."""
+    if reason := latex_missing():
+        pytest.skip(reason)
+    from beamer2slides import identity
+
+    def infos(name):
+        deck = json.loads((classified(name) / "deck.json").read_text(encoding="utf-8"))
+        return [identity.slide_info(s) for s in deck["slides"]]
+
+    base, ours = infos("v1"), infos("recastmoved")
+    base_names, names = stress.names([]), stress.names(stress.VARIANTS["recastmoved"])
+    j, i = names.index("#27"), base_names.index("#27")
+    pairs = identity.align_slides(base, ours, identity.label_moves(base, ours))
+    assert j not in pairs, "the passes now follow this frame; the report below is no longer the story"
+    assert [(m["ours"], m["base"]) for m in identity.near_misses(base, ours, pairs) if m["ours"] == j] == [(j, i)]
+    # And every other frame of this variant still lands exactly where it belongs.
+    assert [name for k, name in enumerate(names) if k != j
+            and pairs.get(k) != (base_names.index(name) if name in base_names else None)] == []
 
 
 def test_selectors_are_unique():
