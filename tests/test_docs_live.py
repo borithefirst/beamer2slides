@@ -303,6 +303,21 @@ def test_a_reader_typing_mid_sync_makes_it_read_again(paper):
     paper.settled()
 
 
+def test_an_open_comment_in_the_document_is_named_in_the_report(paper):
+    """A comment lives in Drive, not in the document's content, so nothing the merge
+    reads can see one. The sync reads them separately and says they are there."""
+    from beamer2slides.google_auth import credentials, drive_service
+    drive_service(credentials()).comments().create(
+        fileId=paper.ident, fields="id",
+        body={"content": "is this number still right?"}).execute()
+    info = paper.sync()
+    assert any("is this number still right?" in line for line in info["comments"]), \
+        info["comments"]
+    assert "## Open comments in the document" in \
+        Path(info["report"]).read_text(encoding="utf-8")
+    paper.settled()
+
+
 def test_the_cli_reaches_the_same_plan(paper):
     done = subprocess.run([sys.executable, "-m", "beamer2slides", "docs", "sync",
                            str(paper.path), "--dry-run"],

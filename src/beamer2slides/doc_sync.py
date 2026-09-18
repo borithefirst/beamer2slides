@@ -115,6 +115,34 @@ def read_document(docs, ident: str, *sources: dict) -> tuple[dict, dict]:
     return doc, ir
 
 
+def open_comments(drive, ident: str) -> list[str]:
+    """The comments on the document nobody has resolved, for the report.
+
+    A comment is a question somebody asked about a passage, and a sync that rewrites
+    that passage answers it by accident — the merge has no idea one is there, because
+    a comment lives in Drive and not in the document's content at all. So they are
+    read (`drive.file` reaches the documents this tool made) and said out loud.
+    Nothing here writes or resolves one: that is the reader's to do, in the browser.
+    """
+    try:
+        found = drive.comments().list(
+            fileId=ident, includeDeleted=False, pageSize=100,
+            fields="comments(content,resolved,author/displayName,"
+                   "quotedFileContent/value,replies/content)").execute().get("comments", [])
+    except HttpError as err:
+        return [f"the document's comments could not be read ({err.resp.status})"]
+    out = []
+    for comment in found:
+        if comment.get("resolved"):
+            continue
+        about = (comment.get("quotedFileContent") or {}).get("value", "")
+        replies = len(comment.get("replies", []))
+        out.append(f"{comment.get('author', {}).get('displayName', 'somebody')} "
+                   f"on {about[:40]!r}: {comment.get('content', '')[:80]!r}"
+                   + (f", and {replies} repl{'y' if replies == 1 else 'ies'}" if replies else ""))
+    return out
+
+
 def limits(ours: dict, doc: dict) -> list[str]:
     """What this sync cannot carry, said out loud rather than dropped in silence."""
     out = list(ours.get("unsupported", []))
@@ -199,6 +227,7 @@ def write_report(path: Path, info: dict) -> Path:
                           [f"`{c['key']}`: the source said {c['ours']!r}, "
                            f"the document says {c['theirs']!r}" for c in info["conflicts"]]),
                          ("Left alone", info["notes"]),
+                         ("Open comments in the document", info.get("comments", [])),
                          ("Written from the source", info["applied"]),
                          ("Kept from the document", info["kept"])):
         if items:
@@ -274,7 +303,7 @@ def sync(path: Path, document: str | None = None, dry_run: bool = False,
         raise SystemExit(f"{path} does not say which document it belongs to.\n"
                          f"  Pass --doc <url or id>, or `docs push {path.name}` to make one.")
     creds = credentials()
-    docs = docs_service(creds)
+    docs, drive = docs_service(creds), drive_service(creds)
     base = load_base(path, ident)
     doc, theirs = read_document(docs, ident, ours, base or {"blocks": []})
     if base is None:
@@ -287,9 +316,11 @@ def sync(path: Path, document: str | None = None, dry_run: bool = False,
         return {"document": ident, "url": url(ident), "dry_run": dry_run,
                 "requests": len(result["requests"]), "conflicts": result["conflicts"],
                 "notes": limits(ours, doc) + result["notes"],
-                "applied": [t["note"] for t in shaped] + applied, "kept": kept} | (extra or {})
+                "applied": [t["note"] for t in shaped] + applied, "kept": kept,
+                "comments": asked} | (extra or {})
 
     shaped: list[dict] = []
+    asked = open_comments(drive, ident)
     if dry_run:
         info = report({"plan": result["structure"] + result["requests"],
                        "requests": len(result["structure"]) + len(result["requests"])})

@@ -62,6 +62,55 @@ def test_only_the_first_tab_is_synced_and_the_others_are_named():
     assert doc_sync.limits({"blocks": []}, {"tabs": [doc["tabs"][0]]}) == []
 
 
+class _Drive:
+    """Drive's comments endpoint, or the error it raises instead."""
+
+    def __init__(self, payload=None, error=None):
+        self.payload, self.error, self.asked = payload, error, None
+
+    def comments(self):
+        return self
+
+    def list(self, **kwargs):
+        self.asked = kwargs
+        return self
+
+    def execute(self):
+        if self.error:
+            raise self.error
+        return self.payload
+
+
+def test_the_open_comments_are_read_and_the_resolved_ones_left_out():
+    """A comment is a question about a passage, and the merge cannot see one: it lives
+    in Drive, not in the document's content. So the report says they are there."""
+    drive = _Drive({"comments": [
+        {"content": "is this still true?", "author": {"displayName": "Ada"},
+         "quotedFileContent": {"value": "The closing paragraph."},
+         "replies": [{"content": "checking"}]},
+        {"content": "fixed", "author": {"displayName": "Ada"}, "resolved": True}]})
+    assert doc_sync.open_comments(drive, "id") == [
+        "Ada on 'The closing paragraph.': 'is this still true?', and 1 reply"]
+    assert drive.asked["fileId"] == "id" and drive.asked["includeDeleted"] is False
+
+
+def test_comments_that_cannot_be_read_are_said_not_raised():
+    from googleapiclient.errors import HttpError
+    error = HttpError(type("R", (), {"status": 403, "reason": "no"})(), b"{}")
+    assert doc_sync.open_comments(_Drive(error=error), "id") == [
+        "the document's comments could not be read (403)"]
+
+
+def test_the_report_has_a_section_for_the_open_comments(tmp_path):
+    path = tmp_path / "doc.html"
+    report = doc_sync.write_report(path, {
+        "url": "u", "requests": 0, "dry_run": True, "conflicts": [], "notes": [],
+        "applied": [], "kept": [], "comments": ["Ada on 'a passage': 'why?'"]})
+    text = report.read_text(encoding="utf-8")
+    assert "## Open comments in the document" in text
+    assert "- Ada on 'a passage': 'why?'" in text
+
+
 def test_the_report_says_what_each_side_contributed():
     applied, kept = doc_sync._summary({"blocks": [
         {"key": "p:new", "kind": "paragraph", "origin": "added by the source",

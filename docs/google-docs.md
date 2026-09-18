@@ -373,6 +373,14 @@ python -m beamer2slides docs sync doc.html [--doc <url|id>] [--dry-run]
   and re-plans, three attempts (`B2S_DOCS_BEFORE_WRITE` runs a command right before the
   first write, which is how that path is tested).
 
+Every sync also reads the document's **open comments** (`doc_sync.open_comments`, Drive's
+comments API, which `drive.file` reaches for the documents this tool made) and names them
+in the report, with who asked, the passage they hang on and how many replies there are.
+A comment lives in Drive and not in the document's content, so nothing the merge reads
+can see one — and a sync that rewrites the passage a comment hangs on answers it by
+accident. Nothing here writes or resolves one: that is the reader's to do, in the
+browser. A read that fails (a scope, a share) is reported too, never raised.
+
 State lives beside the file, in `.b2s/`: `<stem>.base.json` is what both sides agreed
 on at the end of the last sync, and `<stem>.sync-report.{json,md}` says what each side
 contributed, what conflicted (the document wins) and what was left alone. Without a
@@ -542,15 +550,15 @@ All five write to `out/docs-probe/`.
 .venv\Scripts\python.exe -m pytest -m docs tests\test_docs_live.py
 ```
 
-The whole loop on real documents, about 85 s: a push whose import reads back as what the
+The whole loop on real documents, about two minutes: a push whose import reads back as what the
 file said, both sides editing (a table cell each, a block added, a list item rewritten),
 a block appended at the very end, a section the source moved to the end of the document
 (the reader's words, the styling and the block's key all ride along — and the paragraph
 it left behind stood in front of a table, which is where that delete was found), the same
 words rewritten on both sides (the document wins, and the conflict is reported), a table
 the source added *and* a row it added to another one while a reader was typing in that
-same table, and a reader typing between the plan and the write (the sync reads again and
-keeps their words). Every test ends by syncing once more and
+same table, an open comment named in the report, and a reader typing between the plan and
+the write (the sync reads again and keeps their words). Every test ends by syncing once more and
 finding **0 requests**, and each one deletes its document afterwards. Files stay in
 `out/docs-tests/`. To drive one by hand instead:
 

@@ -625,11 +625,15 @@ keys, named ranges), `doc_merge.py` (pure planning), `doc_sync.py` (the commands
   paragraph it leaves is swallowed), or, in front of another table, at the paragraph mark
   before it. A grid both sides changed, and one that is not whole rows or columns, are still
   reported; so is a restyle of words the document rewrote.
+- Every sync names the document's **open comments** in its report (`doc_sync.open_comments`,
+  Drive's comments API under `drive.file`): a comment lives in Drive, not in the document's
+  content, so nothing the merge reads can see one - and a sync that rewrites the passage it
+  hangs on answers it by accident. Never written or resolved from here.
 - What the file cannot carry is reported too (`doc_sync.limits`): an `<img>` (the dialect has no
   picture - `insertInlineImage` takes a URI, so it would need a staging file like Slides' sync;
   an image already in the document is a frozen run and survives untouched), and the tabs past
   the first one, which are read but never written.
-- Live suite (opt-in, marker `docs`, ~85 s): `python -m pytest -m docs tests/test_docs_live.py`
+- Live suite (opt-in, marker `docs`, ~2 min): `python -m pytest -m docs tests/test_docs_live.py`
   pushes a document per test, edits both sides, syncs, checks a second sync writes nothing, and
   deletes the document. Offline: `tests/test_doc_ir.py`, `test_doc_merge.py`, `test_doc_sync.py`.
 

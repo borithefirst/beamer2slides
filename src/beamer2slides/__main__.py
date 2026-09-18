@@ -190,6 +190,8 @@ def cmd_docs(args) -> None:
               f"the document says {clash['theirs']!r} (the document wins)")
     for note in info["notes"]:
         print(f"  note: {note}")
+    for comment in info.get("comments", []):
+        print(f"  open comment: {comment}")
     print(f"docs sync{' (dry run)' if args.dry_run else ''}: {len(info['applied'])} block(s) from "
           f"the source, {len(info['kept'])} kept from the document, "
           f"{len(info['conflicts'])} conflict(s), {info['requests']} request(s)")
