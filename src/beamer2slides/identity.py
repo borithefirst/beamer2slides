@@ -19,7 +19,7 @@ LABEL_MOVED = 1.0     # a slide elsewhere this alike may be the frame the label 
 LABEL_MARGIN = 0.5    # ... but only if it beats the label's own pairing by this much
 CROSS_SURE = 1.15     # a slide this alike, left over by the order-keeping pass, is that frame moved
 CROSS_MARGIN = 0.4    # ... unless another leftover comes this close to explaining it too
-GAP_SURE = 0.45       # the only leftover between two paired frames needs this much of the same words
+GAP_SURE = 0.3        # the only leftover between two paired frames needs this much of the same words
 KEY_MATCH = 0.5       # least similarity for an element keeping the key it would get anyway
 ELEMENT_MATCH = 0.35  # least similarity for an element inheriting another key
 # Render output, not source: "picture" says how a bare image reached its file (raw stream or
@@ -300,7 +300,12 @@ def gap_pairs(base: list[dict], ours: list[dict], pairs: dict[int, int], pairabl
     sure of itself because it may pair across the whole talk. Here there is nothing to be unsure
     between: both neighbours are pinned, on both sides, and the gap they leave holds exactly one
     slide and exactly one frame. What it cannot be is a frame deleted and another written in its
-    place, and that is what `GAP_SURE` is for - some of the words have to be the same words."""
+    place, and that is what `GAP_SURE` is for - some of the words have to be the same words.
+
+    Where that line sits is measured, not guessed (`tools/fuzz_labels.py`): anything from 0.2 to
+    0.45 gives the same tally, under 0.2 the pass starts fusing frames that have nothing to do with
+    each other, and the stress deck's own retitled-and-half-rewritten frame scores 0.45 - so the
+    value sits in the middle of what the campaign allows rather than at the edge of it."""
     free_base = [i for i in range(len(base)) if i not in set(pairs.values())]
     free_ours = [j for j in range(len(ours)) if j not in pairs]
     if not free_base or not free_ours:

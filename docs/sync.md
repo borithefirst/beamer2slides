@@ -358,7 +358,10 @@ that alignment's leftovers up by content and by place too (`identity.cross_pairs
 different halves: the leftover passes are what a moved or retitled frame needs and do nothing for a
 moved label, and the reverse. **With the labels sound, not one frame of 1524 rounds - 6809 frames -
 ends up on another frame's slide.** `GAP_SURE` earns its own place in that: pairing every lone
-leftover regardless of its words puts 2 of them back (and 3 more in the broken rounds).
+leftover regardless of its words puts 2 of them back (and 3 more in the broken rounds). The
+campaign gives the same tally anywhere from 0.2 to 0.45 and degrades below 0.2, so the threshold
+sits in the middle of that - the stress deck's own retitled-and-half-rewritten frame scores 0.45,
+which is how close to the edge a real frame comes.
 
 The check never spoke once in 1524 rounds whose labels nobody touched, and no round came out worse
 than before it existed. Of the broken rounds still wrong without a reorder, 35 of 36 were reported

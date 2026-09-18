@@ -63,6 +63,7 @@ FLAGS = {
     "everyrow": "change a cell in every row of the twenty-row table",
     "swappicture": "replace one of two identical pictures",
     "notesedit": "change the notes one of two identical-notes frames",
+    "recast": "retitle the unlabelled frame and rewrite half of what it says",
     "fourthree": "build the deck 4:3 instead of 16:9",
 }
 
@@ -75,7 +76,7 @@ KITCHEN = ["swaptwins", "insertframe", "movelabel", "retitleall", "reorder10", "
 VARIANTS = {"v1": [], **{f: [f] for f in FLAGS}, "kitchen": KITCHEN,
             # sources of the scenarios in tests/test_stress_live.py
             "ambiguous": ["swaptwins", "insertframe", "everyrow"],
-            "identity": ["movelabel", "nolabel", "retitleall"],
+            "identity": ["movelabel", "nolabel", "retitleall", "recast"],
             "churn": ["reorder10", "dropends", "rewritebullets", "rewriteblock"],
             "pictures": ["swappicture", "notesedit"]}
 
@@ -85,6 +86,7 @@ TWENTY = {"contains": "Twenty rows, one verdict"}   # the table itself is a pict
 REPEAT = {"contains": "Geometry"}
 TWINPICS = {"contains": "The same file twice"}
 NOTES_A = {"contains": "A slide whose speaker notes are shared"}
+NOLABEL = {"contains": "no label at all"}       # the frame `recast` retitles and half rewrites
 BLOCKCOL = {"contains": "A block that lives in a column"}
 AGENDA = {"contains": "Characters that break naive indexing"}
 SUMMARY = {"contains": "Labels decide identity"}
@@ -162,6 +164,8 @@ def frames(flags: list[str]) -> list[tuple[str, str | None, str | None]]:
         out = [(n, None if lab == "mobile" else "mobile" if lab == "arriving" else lab, t) for n, lab, t in out]
     if "nolabel" in flags:
         out = [(n, None if lab == "vanishing" else lab, t) for n, lab, t in out]
+    if "recast" in flags:  # the frame with no label: another title and half its words rewritten
+        out = [(n, lab, "The third table of numbers" if n == "#27" else t) for n, lab, t in out]
     if "retitleall" in flags:
         out = [(n, lab, t and f"{t} v2") for n, lab, t in out]
     return out
@@ -210,6 +214,10 @@ CHECKS = {
                     {"check": "fresh", "slide": TWINPICS}],
     "notesedit": [{"check": "notes", "slide": NOTES_A,
                    "text": "Slow right down here; give the audience a moment to catch up."}],
+    "recast": [{"check": "text", "slide": NOLABEL, "count": 1,
+                "text": "another title and rewritten the rest of what it says about itself."},
+               {"check": "text", "slide": None, "count": 0,
+                "text": "so only its content can identify it"}],
 }
 
 
@@ -244,6 +252,10 @@ INTENDED = {  # classification_diff(v1, variant) items per flag
                 [f"repeatcells: text- {v}" for v in []] + ["repeatcells: text+ moved"],
     "swappicture": ["twinpics: pictures 2 -> 2 changed"],
     "notesedit": ["notes-a: notes -> Slow right down here; give the audience a moment to catch up."],
+    "recast": ["#27: title -> The third table of numbers",
+               "#27: text- This third slide called Results has no label at all, so only its content can identify it.",
+               "#27: text+ This third slide called Results has no label at all, and the source has now given it "
+               "another title and rewritten the rest of what it says about itself."],
     "fourthree": [],
 }
 # 4:3 is a page size, not an edit: every paragraph rewraps, so its classification diff is not
@@ -259,6 +271,11 @@ def intended_diff(flags: list[str]) -> set[str]:
     if {"swaptwins", "reorder10"} & set(flags):
         out = {d for d in out if not d.startswith("order ")}
         out.add("order " + " / ".join(n for n in names(flags) if n != "between"))
+    if "recast" in flags and "retitleall" in flags:
+        # Both rename the unlabelled frame's title, and `recast` writes over what `retitleall` did.
+        out.discard("#27: title -> Results v2")
+        out.discard("#27: title -> The third table of numbers")
+        out.add("#27: title -> The third table of numbers v2")
     return out
 
 

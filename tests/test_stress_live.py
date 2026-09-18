@@ -507,7 +507,12 @@ def scenario_identity(run: Run):
     `mobile` moving onto the next frame is reported as a conflict and the content decides instead
     (docs/sync.md, "When a label moved"): the bold stays on the frame whose sentence the person
     emboldened, and the frame that lost the label does not come back beside itself. `vanishing`
-    losing its label outright is only a warning - the words still recognise that frame."""
+    losing its label outright is only a warning - the words still recognise that frame.
+
+    The third frame called Results has no label to lose: the source gives it another title and
+    rewrites half of what it says, which leaves the words too thin for the alignment. It keeps its
+    slide - and the person's red word on it - because it is the only slide and the only frame
+    between two neighbours that paired (`identity.gap_pairs`)."""
     run.convert(stress.build("v1"))
     exps = run.edit(
         E("bold", slide=S("mobile"), word="moves", context="The label on this frame moves"),
@@ -520,7 +525,10 @@ def scenario_identity(run: Run):
         {"check": "title", "slide": S("agenda"), "text": "Agenda v2"},
         {"check": "title", "slide": S("mobile"), "text": "Moving labels v2"},
         {"check": "title", "slide": S("vanishing"), "text": "Disappearing label v2"},
-        {"check": "text", "slide": S("vanishing"), "text": "so its identity falls back to its title", "count": 1}],
+        {"check": "text", "slide": S("vanishing"), "text": "so its identity falls back to its title", "count": 1},
+        # The recast frame: another title, half its words new, and the person's red word still on it.
+        {"check": "title", "slide": S("#27"), "text": "The third table of numbers v2"},
+        {"check": "slide_count", "slide": S("#27"), "count": 1}],
         conflicts=[["label", "mobile", "Arriving labels v2", "identity taken from the content"]],
         edited=["Characters outside the BMP"])
 

@@ -448,7 +448,9 @@ untitled frames, twins one word apart, one paragraph on three slides, the same p
 table whose every row says the same, identical notes, astral characters and soft hyphens. Its
 variants change the source drastically and ambiguously (labels moved and dropped, every title
 renamed at once, ten frames reversed, twins swapped, a frame inserted between two near-identical
-ones, `kitchen` combining most of it) against decks edited every way at once; the order is checked
+ones, the unlabelled frame retitled and half rewritten - `recast`, which is `identity.gap_pairs`
+live: without it that sync creates a second slide and the old one keeps the person's edits -
+`kitchen` combining most of it) against decks edited every way at once; the order is checked
 against the frames' labels, not their titles, and every slide nobody edited must still equal a
 fresh conversion, thumbnail included. It is where the moved-label check and the order merge were
 made to work; `-k "variants or pairs or selectors or budget"` is its offline part, which includes
