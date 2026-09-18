@@ -699,7 +699,7 @@ def plan_merge(base: dict, ours: dict, theirs: dict, adopt=None) -> dict:
         # (a slide duplicated in Slides carries the tags of the original's objects)
         copies = {rb["title"][4:].rsplit("/", 3)[0] for rb in s["objects"].values() if (rb.get("title") or "").startswith("b2s:")}
         report["slides"]["user_added"].append({"objectId": s["objectId"], "copy_of": sorted(copies) or None})
-    order, moved = plan_order(base, ours, theirs, plans)
+    order, moved = plan_order(base, ours, theirs, plans, report)
     report["slides"]["moved"] = moved
     return {"slides": plans, "order": order, "report": report}
 
@@ -799,48 +799,59 @@ def has_writes(mplan: dict, live_order: list[str]) -> bool:
     return current != [s for s in final if s in current]
 
 
-def plan_order(base: dict, ours: dict, theirs: dict, plans: list[dict]) -> tuple[list[str], list[str]]:
+def _out_of_place(was: list, now: list) -> list:
+    """The items of `now` that are not in the longest run `was` and `now` agree on - the ones
+    somebody picked up and put down elsewhere, rather than the ones that drifted because those did."""
+    keep = set()
+    for a, b, n in SequenceMatcher(None, was, now, autojunk=False).get_matching_blocks():
+        keep.update(now[b:b + n])
+    return [x for x in now if x not in keep]
+
+
+def plan_order(base: dict, ours: dict, theirs: dict, plans: list[dict],
+               report: dict | None = None) -> tuple[list[str], list[str]]:
     """Final slide order (live ids, "new:<key>" for slides to create) and the keys of slides
-    the source moved. The source order is applied unless the deck reordered converter slides;
-    kept slides the source removed stay after their base predecessor, user-added slides after
-    their live predecessor."""
+    the source moved. The source's order is the ground; a slide the deck itself picked up goes
+    back where the deck put it (deck edits win, and a person who drags one slide does not mean to
+    freeze the other forty). Kept slides the source removed stay after their base predecessor,
+    user-added slides after their live predecessor."""
     live_order = [s["objectId"] for s in theirs["slides"]]
     base_by_id = {b.get("objectId"): b for b in base["slides"]}
     deleted = {p["objectId"] for p in plans if p["action"] == "delete"}
     existing = [sid for sid in live_order if sid in base_by_id and sid not in deleted]
     base_rank = {b.get("objectId"): k for k, b in enumerate(base["slides"])}
-    deck_reordered = [base_rank[s] for s in existing] != sorted(base_rank[s] for s in existing)
+    was = sorted(existing, key=lambda sid: base_rank[sid])
 
     by_ours = {p["ours"]: p for p in plans if p.get("ours") is not None and p["action"] in ("update", "create")}
-    source = [by_ours[j]["objectId"] or f"new:{by_ours[j]['key']}" for j in sorted(by_ours)]
-    if deck_reordered:
-        order = [sid for sid in live_order if sid not in deleted]
-        # new slides after the live position of their ours predecessor
-        for j in sorted(by_ours):
-            p = by_ours[j]
-            if p["action"] != "create":
-                continue
-            prev = next((by_ours[k]["objectId"] for k in range(j - 1, -1, -1) if k in by_ours and by_ours[k]["objectId"]), None)
-            pos = order.index(prev) + 1 if prev in order else 0
-            order.insert(pos, f"new:{p['key']}")
-        moved = []
-    else:
-        order = list(source)
-        # converter slides kept though the source removed them: after their base predecessor
-        for p in plans:
-            if p["action"] != "keep_removed":
-                continue
-            k = base_rank[p["objectId"]]
-            prev = next((base["slides"][q]["objectId"] for q in range(k - 1, -1, -1)
-                         if base["slides"][q].get("objectId") in order), None)
-            order.insert(order.index(prev) + 1 if prev else 0, p["objectId"])
-        # user-added slides (and converter slides not otherwise placed): after their live predecessor
-        for k, sid in enumerate(live_order):
-            if sid in order or sid in deleted:
-                continue
-            prev = next((live_order[q] for q in range(k - 1, -1, -1) if live_order[q] in order), None)
-            order.insert(order.index(prev) + 1 if prev else 0, sid)
-        before = [s for s in live_order if s in order]
-        after = [s for s in order if s in before]
-        moved = [base_by_id[s]["key"] for s, t in zip(before, after) if s != t and s in base_by_id] if before != after else []
+    order = [by_ours[j]["objectId"] or f"new:{by_ours[j]['key']}" for j in sorted(by_ours)]
+    source_moved = set(_out_of_place(was, [sid for sid in order if sid in base_rank and sid in existing]))
+    # converter slides kept though the source removed them: after their base predecessor
+    for p in plans:
+        if p["action"] != "keep_removed":
+            continue
+        k = base_rank[p["objectId"]]
+        prev = next((base["slides"][q]["objectId"] for q in range(k - 1, -1, -1)
+                     if base["slides"][q].get("objectId") in order), None)
+        order.insert(order.index(prev) + 1 if prev else 0, p["objectId"])
+    # slides the deck moved: out of their base order there, so back beside what they follow now
+    for sid in _out_of_place(was, existing):
+        if sid not in order:
+            continue
+        order.remove(sid)
+        k = live_order.index(sid)
+        prev = next((live_order[q] for q in range(k - 1, -1, -1) if live_order[q] in order), None)
+        order.insert(order.index(prev) + 1 if prev else 0, sid)
+        if report is not None and sid in source_moved:
+            report["warnings"].append(
+                f"slide {base_by_id[sid]['key']}: both the source and the deck moved this slide; "
+                f"it stays where the deck put it.")
+    # user-added slides (and converter slides not otherwise placed): after their live predecessor
+    for k, sid in enumerate(live_order):
+        if sid in order or sid in deleted:
+            continue
+        prev = next((live_order[q] for q in range(k - 1, -1, -1) if live_order[q] in order), None)
+        order.insert(order.index(prev) + 1 if prev else 0, sid)
+    before = [s for s in live_order if s in order]
+    after = [s for s in order if s in before]
+    moved = [base_by_id[s]["key"] for s, t in zip(before, after) if s != t and s in base_by_id] if before != after else []
     return order, moved

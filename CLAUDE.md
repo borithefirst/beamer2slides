@@ -348,7 +348,14 @@ alarms in 1524 sound rounds, nothing ever worse than before (fixed seeds in `tes
 `fuzz_sync` moves/renames/drops labels too; that found `sync.new_base` freezing a `gone` slide's
 entry at the moment of deletion (its label/title/words now follow the source, its key and place stay)
 and a renamed label costing a slide its identity (`align_slides.pairable` lets the content fix it
-when neither side knows the other's label).
+when neither side knows the other's label), and a slide the source dropped but the deck's edits kept
+alive still claiming its label in the base, so the frame that carries that label now paired with the
+dead entry (`sync.new_base` clears it: a label belongs to the source).
+
+Slide order is merged, not all-or-nothing (`merge.plan_order`): the source's order is the ground and
+a slide the deck itself picked up (out of its base order there, `_out_of_place`) goes back beside
+what it follows in the deck; both sides moving the same slide is the deck's, with a warning. One
+slide dragged in Slides used to freeze the source's order for good.
 
 Alignment on Google's renderer (`tools/alignment.py out/<deck>`, after `fidelity`): reads the
 Slides element boxes with `presentations.get` (cached in slides_elements.json) and compares each

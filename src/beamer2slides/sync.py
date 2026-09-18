@@ -1506,7 +1506,10 @@ class Sync:
                 entries[f"gone:{p['key']}"] = {**b, **{k: o.get(k) for k in ("label", "title", "text", "page")}}
                 continue
             if p["action"] == "keep_removed":
-                entries[p["objectId"] or f"gone:{p['key']}"] = self.base["slides"][p["base"]]
+                # The source dropped this frame and the deck's own edits keep the slide alive. Its
+                # label goes with the frame: the source may put it on another frame tomorrow, and a
+                # slide the source no longer describes must not hold a live label hostage.
+                entries[p["objectId"] or f"gone:{p['key']}"] = {**self.base["slides"][p["base"]], "label": None}
                 continue
             o = self.ours["slides"][p["ours"]]
             sid = w["sid"]

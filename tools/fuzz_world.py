@@ -390,7 +390,8 @@ def rebase(base, ours, after, mplan, tok="2zz") -> dict:
             continue
         if p["action"] in ("keep_removed", "gone"):
             sid = p.get("objectId") or f"gone:{p['key']}"
-            entries[sid] = base["slides"][p["base"]]
+            # a frame the source dropped keeps no label: it may be on another frame tomorrow
+            entries[sid] = {**base["slides"][p["base"]], "label": None}
             if p["action"] == "gone":
                 sids[id(p)] = sid  # it keeps its place in the source's order (see the ordering below)
                 o = ours["slides"][p["ours"]]  # ... and says what the source says (sync.new_base)

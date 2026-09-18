@@ -82,8 +82,12 @@ def ours_of(slide):
 
 
 def three_slides():
+    return many_slides(["intro", "results", "end"])
+
+
+def many_slides(names):
     slides = []
-    for n, name in enumerate(["intro", "results", "end"]):
+    for n, name in enumerate(names):
         sid = f"b2s_s{n:03}"
         els = [entry("text/title/0", text_ir(name.title(), (10, 10, 100, 24), f"p{n}t0", "title"), f"{sid}_t0"),
                entry("text/body/0", text_ir(f"First point of {name}\nSecond point of {name}", (20, 60, 200, 90), f"p{n}t1"), f"{sid}_t1")]
@@ -719,10 +723,29 @@ def test_slide_added_deleted_and_reordered():
     mplan = merge.plan_merge(base, ours4, theirs)
     assert mplan["order"] == ["b2s_s000", "b2s_s002", "b2s_s001"]
     assert merge.has_writes(mplan, live_ids)
-    # ... not applied when the deck reordered slides itself
+    # ... the deck's own move of intro wins over the swap it disagrees with
     theirs["slides"] = [theirs["slides"][1], theirs["slides"][0], theirs["slides"][2]]
     mplan = merge.plan_merge(base, ours4, theirs)
     assert mplan["order"] == ["b2s_s001", "b2s_s000", "b2s_s002"]
+
+
+def test_a_slide_the_deck_moved_does_not_freeze_the_rest_of_the_order():
+    """One slide dragged in Slides is no instruction to leave the other four where they are: the
+    source's order is applied around it, and the dragged slide keeps the place the deck gave it."""
+    base = many_slides(["a", "b", "c", "d", "e"])
+    ours, theirs = triple(base)
+    ids = [s["objectId"] for s in base["slides"]]
+    theirs["slides"] = [theirs["slides"][i] for i in (0, 4, 1, 2, 3)]       # the deck pulls e up after a
+    ours2 = {"slides": [ours["slides"][i] for i in (0, 1, 3, 2, 4)],        # the source swaps c and d
+             "pairs": {0: 0, 1: 1, 2: 3, 3: 2, 4: 4}}
+    mplan = merge.plan_merge(base, ours2, theirs)
+    assert mplan["order"] == [ids[0], ids[4], ids[1], ids[3], ids[2]]
+    assert not [w for w in mplan["report"]["warnings"] if "moved" in w]
+    # ... and when both moved the same slide, the deck's place wins and the report says so
+    ours3 = {"slides": [ours["slides"][i] for i in (0, 1, 2, 4, 3)], "pairs": {0: 0, 1: 1, 2: 2, 3: 4, 4: 3}}
+    mplan = merge.plan_merge(base, ours3, theirs)
+    assert mplan["order"] == [ids[0], ids[4], ids[1], ids[2], ids[3]]
+    assert [w for w in mplan["report"]["warnings"] if "both the source and the deck moved" in w]
 
 
 def test_user_added_slide_stays_after_its_predecessor():
@@ -929,6 +952,30 @@ def test_new_base_keeps_the_source_slide_order():
     mplan = merge.plan_merge(base, ours, theirs)
     assert mplan["order"] == ["b2s_s002", "b2s_s000", "b2s_s001"] and not mplan["report"]["slides"]["moved"]
     assert not merge.has_writes(mplan, [s["objectId"] for s in theirs["slides"]])
+
+
+def test_a_slide_the_source_dropped_keeps_no_label_in_the_new_base():
+    """Found by the offline fuzz (`second_sync_writes`, seed 2218): the source moves label `f0`
+    onto another frame and drops the frame that had it, whose slide the deck had edited - so it
+    stays, and its base entry used to keep saying `label: f0`. The next conversion's `f0` then
+    pairs with that dead entry instead of the frame that carries the label now, and sync rewrites
+    the wrong slide. A label belongs to the source; an entry the source no longer describes has
+    none."""
+    from beamer2slides.sync import Sync
+    base = three_slides()
+    s = Sync.__new__(Sync)
+    s.warnings, s.base, s.final_revision = [], base, "r2"
+    s.ours = {"slides": [], "source": Path("talk.pdf")}
+    s.created = {"slides": []}
+    plans = [{"key": "intro", "action": "keep_removed", "ours": None, "base": 0, "objectId": "b2s_s000"}]
+    result = {"plan": {"slides": plans}, "theirs": {"slides": [{"objectId": "b2s_s000"}]},
+              "work": {"slides": [{"plan": plans[0], "sid": "b2s_s000"}]}}
+    written = s.new_base(result)
+    assert [b["key"] for b in written["slides"]] == ["intro"]
+    assert written["slides"][0]["label"] is None and base["slides"][0]["label"] == "intro"
+    # ... and the pairing that used to go wrong now finds the frame that carries the label
+    ours = [{"label": "intro", "title": "Elsewhere", "text": "another frame entirely"}]
+    assert identity.label_pairs(written["slides"], ours) == {}
 
 
 def test_renamed_title_keeps_its_key():

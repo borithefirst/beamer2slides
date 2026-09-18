@@ -166,8 +166,10 @@ joined two paragraphs), so no text is lost. Slides: new frames are created at th
 position; frames removed from the source are deleted if the deck didn't touch them (no edits, no
 user objects, same notes and background), else kept after their base predecessor and reported;
 a frame the deck deleted stays deleted (a conflict if the source changed more than its frame counter);
-the source order is applied only if the deck didn't reorder slides itself; user-added slides stay
-after their live predecessor. Notes follow the text rules (diff3 against the notes read back);
+the source's order is applied, except that a slide the deck itself picked up (out of its base order
+there, `merge._out_of_place`) goes back beside what it follows in the deck, and when both sides
+moved the same slide the deck's place wins and the report says so - one slide dragged in Slides is
+no instruction to freeze the other forty; user-added slides stay after their live predecessor. Notes follow the text rules (diff3 against the notes read back);
 a background the source changed is rewritten unless the deck changed it too (conflict).
 Recreated units with holes or overlays are re-measured (`measure_places` scratch slides in the live
 deck; leftovers `b2s_mNNN` of an interrupted run are deleted at the next start).

@@ -124,11 +124,16 @@ def backup(flags: list[str]) -> dict:
     return {"contains": BACKUP_V2 if "rewritebullets" in flags else BACKUP_V1}
 
 
-def order_check(flags: list[str], gone: tuple[str, ...] = ()) -> dict:
+def order_check(flags: list[str], gone: tuple[str, ...] = (), dragged: tuple[tuple[str, str], ...] = ()) -> dict:
     """The slides of this variant in source order, named by phrases, not by titles. `gone`: frames
     the scenario deleted in the deck - the source still has them and deck edits win, so they are
-    not there to be in any order."""
-    return {"check": "slides", "order": [S(n) for n in stress.names(flags) if n in SEL and n not in gone]}
+    not there to be in any order. `dragged`: (frame, the frame it was dropped behind) - the deck
+    moved this one, so it stands where the deck put it while the rest follow the source."""
+    names = [n for n in stress.names(flags) if n in SEL and n not in gone]
+    for name, after in dragged:
+        names.remove(name)
+        names.insert(names.index(after) + 1, name)
+    return {"check": "slides", "order": [S(n) for n in names]}
 
 
 # Unique titles of frames no scenario edits: what an untouched slide is compared with.
@@ -339,10 +344,18 @@ class Run:
         base = next((p for p in (self.out / "sync" / "base.json", self.out / "base.json") if p.exists()), None)
         return ids_in(json.loads(base.read_text(encoding="utf-8"))) if base else None
 
+    def integrity(self, model) -> list[str]:
+        """What the checker says about the deck's structure, minus the one thing it says about
+        every deck with display maths (`display_maths_noise`)."""
+        import sync_check as sc
+        return [p for p in sc.integrity(model, before=self.before, base_ids=self.base_ids())
+                if not display_maths_noise(p)]
+
     def check(self, variant: str, pdf: Path, report: dict, expectations: list[dict], *, drop: tuple[str, ...] = (),
               checks: list[dict] = (), conflicts: list[list[str]] = (), any_conflicts: bool = False,
               converged: list[list[str]] = (), no_writes_since: str | None = None, edited: list[str] = (),
-              gone: tuple[str, ...] = (), overridden: tuple[str, ...] = (), idempotent: bool = True) -> None:
+              gone: tuple[str, ...] = (), overridden: tuple[str, ...] = (),
+              dragged: tuple[tuple[str, str], ...] = (), idempotent: bool = True) -> None:
         """Everything a sync of this deck must leave behind: the deck edits (minus `drop`, whose
         own checks the source legitimately changed), the source's own checks, the slide order of
         the variant, the report, integrity, and untouched slides against a fresh conversion.
@@ -350,14 +363,14 @@ class Run:
 
         The source's checks say what a deck *nobody edited* would show. Where this scenario edited
         the same thing the source did, the deck wins and the source's check cannot hold: `gone`
-        names frames deleted in the deck, `overridden` the texts the deck kept instead. Both are
-        the scenario declaring which side of a conflict it arranged."""
+        names frames deleted in the deck, `dragged` frames moved there, `overridden` the texts the
+        deck kept instead. All three are the scenario declaring which side of a conflict it arranged."""
         import sync_check as sc
         flags = stress.VARIANTS[variant]
         model = self.deck.read()
         kept = [c for e in expectations if e["edit"] not in drop for c in e["checks"]]
         source_checks = [c for c in stress.checks(flags) if c.get("text") not in overridden]
-        all_checks = kept + list(checks) + source_checks + [order_check(flags, gone)]
+        all_checks = kept + list(checks) + source_checks + [order_check(flags, gone, dragged)]
         self.problems += [f"after sync to {variant}: {p}" for p in sc.check_all(model, all_checks)]
         self.problems += sc.check_report(report, conflicts=conflicts, converged=converged,
                                          no_conflicts=not conflicts and not any_conflicts)
@@ -366,8 +379,7 @@ class Run:
                 self.problems.append(f"sync to {variant} lists {sc.changes(report)} changes, expected none")
             if model.revision != no_writes_since:
                 self.problems.append(f"sync to {variant} changed the presentation revision")
-        self.problems += [p for p in sc.integrity(model, before=self.before, base_ids=self.base_ids())
-                          if not display_maths_noise(p)]
+        self.problems += self.integrity(model)
 
         # Slides nobody edited: still element for element a fresh conversion of the same source.
         # (Sub-pixel placement is the sync suite's job; this deck is about identity and merging,
@@ -548,12 +560,19 @@ def scenario_kitchen(run: Run):
         E("add_slide", after=S("figcaption"), title="Reviewer questions", body="Does the caption survive?"),
         E("move_slide", slide=S("footnotes"), after=S("description")))
     pdf = stress.build("kitchen")
-    run.check("kitchen", pdf, run.sync(pdf), exps, drop=("move_slide",), checks=[
+    run.check("kitchen", pdf, run.sync(pdf), exps, checks=[
         {"check": "title", "slide": S("summary"), "text": "Takeaways v2"},
         {"check": "text", "slide": None, "text": "A frame added exactly where identity is hardest", "count": 1},
         {"check": "text", "slide": S("twin-b"), "text": "This bullet is about sameness, not about wording", "count": 0},
         {"check": "text", "slide": S("twin-b"), "text": "This bullet is about identity, not about wording", "count": 1}],
-        edited=["A figure with a caption v2", "Footnotes and small print v2"])
+        # The moved label is the same conflict `identity` declares. The deck dragged `footnotes`
+        # behind `description`, so that one slide stands where the deck put it and the eleven the
+        # source moved (the twins, the ten reversed) still follow the source.
+        conflicts=[["label", "mobile", "Arriving labels v2", "identity taken from the content"]],
+        dragged=(("footnotes", "description"),),
+        # "One very long line" carries the deck's bold: it cannot be element for element, let alone
+        # pixel for pixel, what a fresh conversion of the source makes of that frame.
+        edited=["A figure with a caption v2", "Footnotes and small print v2", "One very long line v2"])
 
 
 @scenario
@@ -603,7 +622,7 @@ def scenario_pull(run: Run):
         run.problems.append(f"sync after pull lists {sc.changes(report)} changes")
     if run.revision() != revision:
         run.problems.append("sync after pull changed the presentation revision")
-    run.problems += sc.integrity(model, before=run.before, base_ids=run.base_ids())
+    run.problems += run.integrity(model)
 
 
 XFAIL = {}  # scenario -> why it cannot pass yet
