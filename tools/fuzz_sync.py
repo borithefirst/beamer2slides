@@ -1161,6 +1161,15 @@ class LiveRound:
                   if spec["edit"] in ("ungroup", "group", "delete_element", "delete_group", "duplicate")}
         titles.discard(None)
         self.loose |= titles | {s.id for s in sc.Model(pres_before).slides if s.title in titles}
+        # Ctrl+D on a slide copies it as the person left it, so the copy of a slide whose group they
+        # took apart is ungrouped by their hand too, and the excuse written for the original has to
+        # follow it (live seed 900, step 4: they ungrouped a figure on "Why decks and sources
+        # divergeed" and then duplicated that very slide twice; "Copy 807" - a slide sync never
+        # writes a request to - was accused of it at every step after). The copy is named by the
+        # title the edit gave it, which is the person's, not the source's.
+        self.loose |= {spec["args"].get("new_title") for spec in specs
+                       if spec["edit"] == "duplicate_slide" and _slide_title(spec) in self.loose}
+        self.loose.discard(None)
         return sc.integrity(sc.Model(pres_after), before=sc.Model(pres_before), base_ids=sc.ids_in(base),
                             allow_ungrouped=self.loose, allow_groups_changed=self.loose)
 
