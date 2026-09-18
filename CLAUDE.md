@@ -583,6 +583,10 @@ keys, named ranges), `doc_merge.py` (pure planning), `doc_sync.py` (the commands
 - Tables merge cell by cell, where identity is the cell's **place**. A table the source added,
   a grid that differs between the sides, and a restyle of words the document rewrote are
   reported, not written.
+- What the file cannot carry is reported too (`doc_sync.limits`): an `<img>` (the dialect has no
+  picture - `insertInlineImage` takes a URI, so it would need a staging file like Slides' sync;
+  an image already in the document is a frozen run and survives untouched), and the tabs past
+  the first one, which are read but never written.
 - Live suite (opt-in, marker `docs`, ~70 s): `python -m pytest -m docs tests/test_docs_live.py`
   pushes a document per test, edits both sides, syncs, checks a second sync writes nothing, and
   deletes the document. Offline: `tests/test_doc_ir.py`, `test_doc_merge.py`, `test_doc_sync.py`.

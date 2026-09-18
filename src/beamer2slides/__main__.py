@@ -179,6 +179,8 @@ def cmd_docs(args) -> None:
     from .doc_sync import push, sync
     if args.docs_command == "push":
         info = push(args.file, args.name, args.new_doc)
+        for note in info["notes"]:
+            print(f"  note: {note}")
         print(f"{args.file}: {info['blocks']} blocks, {info['anchored']} of them anchored")
         print(f"Google Docs: {info['url']}")
         return

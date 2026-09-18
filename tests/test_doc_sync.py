@@ -6,7 +6,7 @@ identifiers and the summary a person reads afterwards.
 
 import json
 
-from beamer2slides import doc_sync
+from beamer2slides import doc_merge, doc_sync
 
 from test_doc_merge import live, para, table
 
@@ -40,6 +40,26 @@ def test_the_report_keeps_its_name_beside_a_file_called_doc_html(tmp_path):
     assert report.name == "doc.sync-report.md"
     assert json.loads((tmp_path / ".b2s" / "doc.sync-report.json").read_text("utf-8"))["requests"] == 2
     assert "a note" in report.read_text(encoding="utf-8")
+
+
+def test_a_picture_in_the_file_is_reported_not_dropped():
+    """Nothing here can put a picture into a document, so the file saying so is news."""
+    from beamer2slides import doc_ir
+    ir = doc_ir.from_html("<html><body><p>before</p>"
+                          "<p><img src='figures/plot.png'></p><p>after</p></body></html>")
+    assert [doc_merge.block_text(b) for b in ir["blocks"]] == ["before", "", "after"]
+    assert len(ir["unsupported"]) == 1 and "figures/plot.png" in ir["unsupported"][0]
+    assert doc_sync.limits(ir, {}) == ir["unsupported"]
+
+
+def test_only_the_first_tab_is_synced_and_the_others_are_named():
+    doc = {"tabs": [{"tabProperties": {"tabId": "t.0", "title": "The chapter"}},
+                    {"tabProperties": {"tabId": "t.1", "title": "Notes"},
+                     "childTabs": [{"tabProperties": {"tabId": "t.2", "title": "Older notes"}}]}]}
+    notes = doc_sync.limits({"blocks": []}, doc)
+    assert notes == ["the document has 3 tabs; only the first one is synced "
+                     "(left alone: Notes, Older notes)"]
+    assert doc_sync.limits({"blocks": []}, {"tabs": [doc["tabs"][0]]}) == []
 
 
 def test_the_report_says_what_each_side_contributed():

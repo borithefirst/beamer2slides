@@ -175,6 +175,15 @@ def _body_of(doc: dict, tab_id: str | None) -> tuple[list, str | None]:
     return [], tab_id
 
 
+def tabs_of(doc: dict) -> list:
+    """Every tab of a document read with `includeTabsContent`, child tabs included.
+
+    Only one of them is ever synced: `batchUpdate` was measured against the first tab
+    only, so a document with more is read, and reported, but not written past it.
+    """
+    return _flatten_tabs(doc.get("tabs", []))
+
+
 def _flatten_tabs(tabs: list) -> list:
     out = []
     for tab in tabs:
@@ -464,6 +473,15 @@ class _Reader(HTMLParser):
             if align:
                 block["align"] = align
             self._open(block | _key_of(attr))
+        elif tag == "img":
+            # The dialect has no picture. A document's own images read back as frozen
+            # runs and are never touched, but nothing here can put one *into* a
+            # document: `insertInlineImage` takes a URI, not bytes, so a picture would
+            # need the staging file `sync.stage` builds on the Slides side
+            # (docs/google-docs.md). Say so instead of dropping it in silence.
+            self.ir.setdefault("unsupported", []).append(
+                f"<img src={attr.get('src', '')!r}>: the canonical file cannot carry a "
+                f"picture into a document — insert it in the document instead")
         elif tag == "table":
             self.table = {"kind": "table", "rows": []} | _key_of(attr)
         elif tag == "tr":

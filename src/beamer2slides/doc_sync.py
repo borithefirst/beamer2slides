@@ -115,6 +115,17 @@ def read_document(docs, ident: str, *sources: dict) -> tuple[dict, dict]:
     return doc, ir
 
 
+def limits(ours: dict, doc: dict) -> list[str]:
+    """What this sync cannot carry, said out loud rather than dropped in silence."""
+    out = list(ours.get("unsupported", []))
+    tabs = doc_ir.tabs_of(doc)
+    if len(tabs) > 1:
+        names = ", ".join(t.get("tabProperties", {}).get("title", "?") for t in tabs[1:])
+        out.append(f"the document has {len(tabs)} tabs; only the first one is synced "
+                   f"(left alone: {names})")
+    return out
+
+
 # ---------------------------------------------------------------- writing
 
 def send(docs, ident: str, requests: list[dict], revision: str | None = None) -> None:
@@ -237,7 +248,7 @@ def push(path: Path, name: str | None = None, new_doc: bool = False) -> dict:
         media_body=MediaIoBaseUpload(io.BytesIO(html.encode("utf-8")), mimetype="text/html"),
         fields="id").execute()["id"]
 
-    _, live = read_document(docs, ident)
+    doc, live = read_document(docs, ident)
     # The importer builds what HTML can say; give what came back the file's keys, and
     # the ordered-ness the import threw away.
     doc_merge.inherit_keys(source, live)
@@ -245,7 +256,8 @@ def push(path: Path, name: str | None = None, new_doc: bool = False) -> dict:
     plant_ranges(docs, ident, live)
     live = settle(docs, ident, path, source, source)
     return {"document": ident, "url": url(ident), "blocks": len(live["blocks"]),
-            "anchored": sum(1 for b in live["blocks"] if b.get("rangeId"))}
+            "anchored": sum(1 for b in live["blocks"] if b.get("rangeId")),
+            "notes": limits(source, doc)}
 
 
 def sync(path: Path, document: str | None = None, dry_run: bool = False,
@@ -267,7 +279,7 @@ def sync(path: Path, document: str | None = None, dry_run: bool = False,
     applied, kept = _summary(result)
     info = {"document": ident, "url": url(ident), "dry_run": dry_run,
             "requests": len(result["requests"]), "conflicts": result["conflicts"],
-            "notes": result["notes"], "applied": applied, "kept": kept}
+            "notes": limits(ours, doc) + result["notes"], "applied": applied, "kept": kept}
     if dry_run:
         info["plan"] = result["requests"]
         info["report"] = str(write_report(path, info))
@@ -292,9 +304,10 @@ def sync(path: Path, document: str | None = None, dry_run: bool = False,
                   f"({attempt}/{ATTEMPTS - 1})")
             doc, theirs = read_document(docs, ident, ours, base)
             revision = doc.get("revisionId")
-            result = doc_merge.plan(base, read_file(path), theirs)
+            ours = read_file(path)  # (the file may have been committed to in the meantime)
+            result = doc_merge.plan(base, ours, theirs)
             info |= {"requests": len(result["requests"]), "conflicts": result["conflicts"],
-                     "notes": result["notes"], "replanned": attempt}
+                     "notes": limits(ours, doc) + result["notes"], "replanned": attempt}
             info["applied"], info["kept"] = _summary(result)
 
     live = settle(docs, ident, path, ours, base)

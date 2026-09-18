@@ -401,7 +401,10 @@ a removal are listed in `doc_merge.MANAGED`), and whole new blocks with their st
    `insertInlineImage` takes a **URI only** — no byte upload, same wall as Slides'
    `createImage` — so inserting an image into an *existing* doc needs the staging-file
    trick `sync.stage` already uses. Read-back `contentUri`s live ~30 minutes; the **zip
-   export is the durable, byte-exact picture route**.
+   export is the durable, byte-exact picture route**. Until then the dialect has no
+   picture: an image *in the document* reads back as a frozen run and is never touched,
+   and an `<img>` in the canonical file is **reported by `push` and `sync`**
+   (`doc_sync.limits`) rather than dropped in silence.
 2. **Lists in the read-back.** `listId` is opaque and output-only; whether Docs forks or
    reuses one when a user splits a list in the UI is undocumented. What an *imported*
    list's glyphs read as is no longer a risk but a measurement — see the table above.
@@ -410,8 +413,9 @@ a removal are listed in `doc_merge.MANAGED`), and whole new blocks with their st
    formatting", and a second person editing concurrently.
 4. **Tabs on the write path.** They were read, never written: whether `batchUpdate` can
    address a tab other than the first, and what an HTML import does to a document that
-   already has several, are both unmeasured. Until then, treat a multi-tab document as
-   read-only beyond its first tab.
+   already has several, are both unmeasured. Until then, a multi-tab document is
+   read-only beyond its first tab, and every sync of one says so in its report, naming
+   the tabs it left alone.
 
 ## Alternatives considered
 
