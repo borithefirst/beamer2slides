@@ -321,6 +321,35 @@ def test_a_cell_the_source_edited_is_written():
     assert insert[0]["location"]["index"] == GRID["blocks"][1]["rows"][0][1][0]["span"][1] - 1
 
 
+def test_a_block_added_in_front_of_a_table_goes_after_the_paragraph_before_it():
+    """Measured: nothing can be inserted at a table's own index."""
+    ours = live([GRID["blocks"][0], para("p:new", "a new line"), *GRID["blocks"][1:]])
+    result = doc_merge.plan(GRID, ours, live(GRID["blocks"]))
+    insert = [r["insertText"] for r in result["requests"] if "insertText" in r]
+    assert insert == [{"location": {"index": GRID["blocks"][1]["span"][0] - 1},
+                       "text": "\na new line"}]
+
+
+def test_a_body_that_starts_with_a_table_writes_in_front_of_it_into_its_lead():
+    """A tab's first table has an empty paragraph in front of it that cannot go:
+    it is not a block, and the first block written before the table is typed into it."""
+    grid = live([para(None, ""), table("t:grid", [["a", "b"]]), para(None, "")])
+    doc = {"body": {"content": [
+        {"startIndex": b["span"][0], "endIndex": b["span"][1],
+         **({"table": {"tableRows": [{"tableCells": [{"content": []}]}]}} if b["kind"] == "table"
+            else {"paragraph": {"elements": [{"startIndex": b["span"][0], "endIndex": b["span"][1],
+                                              "textRun": {"content": "\n"}}]}})}
+        for b in grid["blocks"]]}}
+    read = doc_ir.from_document(doc)
+    assert [b["kind"] for b in read["blocks"]] == ["table"]
+    assert read["lead"] == [1, 2] and read["trailer"] == grid["blocks"][2]["span"]
+    theirs = {"blocks": [grid["blocks"][1]], "lead": [1, 2]}
+    ours = {"blocks": [para("p:one", "one"), para("p:two", "two"), grid["blocks"][1]]}
+    result = doc_merge.plan({"blocks": [grid["blocks"][1]]}, ours, theirs)
+    assert [r["insertText"] for r in result["requests"] if "insertText" in r] == [
+        {"location": {"index": 1}, "text": "\ntwo"}, {"location": {"index": 1}, "text": "one"}]
+
+
 def test_two_cells_of_one_table_edited_on_both_sides_merge():
     ours = live([b for b in GRID["blocks"]])
     ours["blocks"][1]["rows"][0][0][0]["runs"] = [{"text": "a ONE", "width": 5}]
@@ -1073,3 +1102,82 @@ def test_keys_are_inherited_when_the_words_changed():
         {"kind": "paragraph", "runs": [{"text": "charlie five six"}]}]}
     doc_merge.inherit_keys(BASE, ours)
     assert [b["key"] for b in ours["blocks"]] == ["p:alpha", "p:bravo", "p:charlie"]
+
+
+# ---------------------------------------------------------------- tabs
+
+def tab(ident, title, *words, **rest):
+    return {"tab": ident, "title": title, "blocks": [para(f"p:{w}", w) for w in words]} | rest
+
+
+def tabbed(*tabs):
+    return {"title": "t", "blocks": [para("p:front", "front")], "tabs": list(tabs)}
+
+
+def test_a_tab_request_carries_its_tab_in_every_location_and_range():
+    requests = [{"insertText": {"location": {"index": 3}, "text": "x"}},
+                {"deleteContentRange": {"range": {"startIndex": 1, "endIndex": 2}}},
+                {"insertTable": {"rows": 1, "columns": 2, "endOfSegmentLocation": {}}},
+                {"insertTableRow": {"tableCellLocation": {"tableStartLocation": {"index": 7},
+                                                          "rowIndex": 0, "columnIndex": 0}}}]
+    assert doc_merge.on_tab(requests, None) is requests
+    sent = doc_merge.on_tab(requests, "t.5")
+    assert sent[0]["insertText"]["location"] == {"index": 3, "tabId": "t.5"}
+    assert sent[1]["deleteContentRange"]["range"]["tabId"] == "t.5"
+    assert sent[2]["insertTable"]["endOfSegmentLocation"] == {"tabId": "t.5"}
+    cell = sent[3]["insertTableRow"]["tableCellLocation"]
+    assert cell["tableStartLocation"] == {"index": 7, "tabId": "t.5"} and "tabId" not in cell
+    assert "tabId" not in requests[0]["insertText"]["location"]      # the plan is untouched
+
+
+def test_tabs_pair_by_id_and_the_source_can_add_rename_and_delete_them():
+    base = tabbed(tab("t.1", "Notes", "a"), tab("t.2", "Old", "b"), tab("t.3", "Busy", "c"))
+    ours = tabbed(tab("t.1", "Notes, renamed", "a", "more"), tab(None, "Appendix", "z"))
+    theirs = tabbed(tab("t.1", "Notes", "a"), tab("t.2", "Old", "b"),
+                    tab("t.3", "Busy", "c", "reader's"), tab("t.4", "Reader's own", "r"))
+    out = doc_merge.pair_tabs(base, ours, theirs)
+    assert [(t, mine["title"], was["title"]) for t, mine, was in out["pairs"]] == [
+        ("t.1", "Notes, renamed", "Notes")]
+    assert [p["title"] for p in out["create"]] == ["Appendix"]
+    assert out["requests"] == [
+        {"updateDocumentTabProperties": {"tabProperties": {"tabId": "t.1",
+                                                           "title": "Notes, renamed"},
+                                         "fields": "title"}},
+        {"deleteTab": {"tabId": "t.2"}}]
+    # t.3: deleted in the source, written in by the reader — theirs. t.4: theirs, and read.
+    assert any("'Busy'" in n and "kept" in n for n in out["notes"])
+
+
+def test_a_tab_both_sides_renamed_keeps_the_document_title():
+    base = tabbed(tab("t.1", "Notes", "a"))
+    out = doc_merge.pair_tabs(base, tabbed(tab("t.1", "Mine", "a")),
+                              tabbed(tab("t.1", "Theirs", "a")))
+    assert out["requests"] == [] and "renamed on both sides" in out["notes"][0]
+
+
+def test_a_tab_the_reader_deleted_stays_deleted_and_a_source_edit_to_it_is_said():
+    base = tabbed(tab("t.1", "Notes", "a"))
+    out = doc_merge.pair_tabs(base, tabbed(tab("t.1", "Notes", "a", "b")), tabbed())
+    assert out["pairs"] == [] and out["create"] == [] and out["requests"] == []
+    assert "deleted in the document" in out["notes"][0]
+    quiet = doc_merge.pair_tabs(base, tabbed(tab("t.1", "Notes", "a")), tabbed())
+    assert quiet["notes"] == []
+
+
+def test_a_new_tab_left_empty_by_a_sync_that_died_is_taken_not_made_twice():
+    ours = tabbed(tab(None, "Appendix", "z"))
+    out = doc_merge.pair_tabs(tabbed(), ours, tabbed(tab("t.7", "Appendix")))
+    assert out["create"] == [] and out["pairs"][0][0] == "t.7"
+    busy = doc_merge.pair_tabs(tabbed(), tabbed(tab(None, "Appendix", "z")),
+                               tabbed(tab("t.7", "Appendix", "reader's")))
+    assert [p["title"] for p in busy["create"]] == ["Appendix"]
+
+
+def test_a_parent_tab_the_source_deleted_is_kept_while_a_child_is_still_wanted():
+    base = tabbed(tab("t.1", "Parent", "a"), tab("t.2", "Child", "b", parent="t.1"))
+    ours = tabbed(tab("t.2", "Child", "b", parent="t.1"))
+    theirs = tabbed(tab("t.1", "Parent", "a"), tab("t.2", "Child", "b", parent="t.1"))
+    out = doc_merge.pair_tabs(base, ours, theirs)
+    assert out["requests"] == [] and "keeps tabs inside it" in out["notes"][0]
+    assert doc_merge.add_tab_request({"title": "New", "parent": "t.1"}, {"t.1"}) == {
+        "addDocumentTab": {"tabProperties": {"title": "New", "parentTabId": "t.1"}}}

@@ -205,6 +205,35 @@ silent data loss:
 So the reader must always pass `includeTabsContent=True` and handle the `tabs` shape, and
 every write has to name its tab. Anchors, named ranges and index arithmetic are per tab.
 
+Measured on the write side: `addDocumentTab {tabProperties: {title}}` answers with the new
+`tabId`; `insertText`, `deleteContentRange`, `updateParagraphStyle`, `createNamedRange` and
+`insertTable` all take a `tabId` in their location or range (and `endOfSegmentLocation`
+takes one of its own), and a request without one goes to the first tab. A named range made
+that way appears under its tab's `documentTab.namedRanges` only. So the sync handles tabs
+like this:
+
+- **In the file**, the first tab is the body and every other tab is a
+  `<section data-tab="t.…" title="…" [data-parent="t.…"]>` after it; a section without
+  `data-tab` is a tab the source asks for. Child tabs are flattened, in the document's order,
+  and name their parent.
+- **Tab by tab** (`doc_sync._write_tabs`): each tab is its own three-way plan, its own
+  structure pass and its own batch, with every location and range stamped with its `tabId`
+  (`doc_merge.on_tab`). Keys are unique per tab, as named ranges are.
+- **The tabs themselves** follow the three-way rule one level up (`doc_merge.pair_tabs`),
+  with the tab id as identity: a tab the source added is created (`addDocumentTab`, under
+  its parent if it has one) and written like any tab whose base is empty; one it renamed is
+  renamed (`updateDocumentTabProperties`) unless the reader renamed it too; one it deleted
+  goes (`deleteTab`) only if the document left it exactly as the base has it and keeps no
+  wanted tab inside it. A tab the reader added is theirs and is read into the file; one
+  the reader deleted stays deleted, with a note if the source had changed it. A tab created
+  by a sync that died before it wrote anything is found by its title, not made twice.
+- **A tab just added is one empty paragraph**, and its first table cannot be the first thing
+  in its body: `insertTable` there leaves an empty paragraph in front of the table that no
+  request can delete (measured). Both are hidden from the IR the way the trailer after a
+  final table is (`doc_ir._hide_trailer`: `trailer`, and `lead` in front of a first table),
+  and the first block written there goes *into* them. The order of the tabs is the
+  document's; a source that reorders its sections does not reorder the tabs.
+
 ## The round trip does not close on its own
 
 Feeding Google's own HTML export back into Google's HTML importer **destroys every
@@ -350,6 +379,7 @@ all of them now fixed and pinned by offline tests:
 | **The newline in front of a table cannot be deleted** | one of the deletes the API refuses outright ("Invalid deletion range"), and a refused request throws out the whole batch — so a source that deletes or moves the paragraph directly above a table used to kill the sync | that block gives up the paragraph mark of the block *before* it instead of its own (`doc_merge._delete_range`). Docs merges the two the way the Delete key does, keeping the first one's style — measured — and the table still has a paragraph in front of it. A run of deleted blocks passes the borrowing leftwards so no two ranges ask for the same mark; with nothing in front to borrow from (the document's first block, or a paragraph between two tables) the words go and the empty paragraph stays, which is what Docs wants between two tables anyway |
 | **The body's last newline cannot be deleted either** | a source that deletes the document's last paragraph asked for a range ending past the body's own mark — refused, measured, and the batch with it | the last block borrows the mark in front of it the same way (`_delete_range(ends=True)`), and at one index a delete goes before an append, since the borrowed mark is where an append after it is planned |
 | **A table that ends the body has an empty paragraph after it** | a document ends on a paragraph, so an import or an `insertTable` at the end leaves one — with the bullet or heading of the paragraph it was split from — and the delete of the mark in front of it is refused | `doc_ir._hide_trailer` leaves it out of the IR (a `<p></p>` would be imported again, and a table appended at the end would never converge), keeps its span as `trailer`, and the first block appended after the table is written *into* it; `doc_merge.tidy_requests` makes it a plain paragraph again |
+| **Nothing can be written at a table's own index** | `insertText` at a table's start index is refused (measured), so a block the source added directly in front of a table killed the batch | the block goes after the paragraph before the table instead — `\ntext` at that paragraph's mark, before that paragraph's own edits (`doc_merge.requests`). A body that starts with a table has an undeletable empty paragraph in front of it (`lead`), and the first block written there is typed into it |
 
 A list the reader switches from bullets to numbers used to be invisible (the first row);
 since `bullet_requests` it is seen like any other change of kind, and the document wins
@@ -524,11 +554,8 @@ a removal are listed in `doc_merge.MANAGED`), and whole new blocks with their st
 3. **Anchors under a human editor** — retired, see "Under a human editor" above. What
    is still unmeasured there: dragging a selection to a new place, "paste without
    formatting", and a second person editing concurrently.
-4. **Tabs on the write path.** They were read, never written: whether `batchUpdate` can
-   address a tab other than the first, and what an HTML import does to a document that
-   already has several, are both unmeasured. Until then, a multi-tab document is
-   read-only beyond its first tab, and every sync of one says so in its report, naming
-   the tabs it left alone.
+4. **Tabs** — retired, see "Document tabs" above. Still open: the order of the tabs is
+   never written (the document's stands), and the first tab's title is not carried.
 
 ## Alternatives considered
 

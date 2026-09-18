@@ -182,13 +182,14 @@ def tidy_requests(live: dict) -> list[dict]:
     bullets for the lists it cannot describe, and a plain paragraph after a final
     table that took over a list item's glyph or a heading's style."""
     out = bullet_requests(live)
-    if live.get("trailer_kind"):
-        start, end = live["trailer"]
-        span = {"startIndex": start, "endIndex": end}
-        out += [{"deleteParagraphBullets": {"range": span}},
-                {"updateParagraphStyle": {"range": span, "fields": "namedStyleType,alignment",
-                                          "paragraphStyle": {"namedStyleType": "NORMAL_TEXT",
-                                                             "alignment": "START"}}}]
+    for part in ("trailer", "lead"):
+        if live.get(f"{part}_kind"):
+            start, end = live[part]
+            span = {"startIndex": start, "endIndex": end}
+            out += [{"deleteParagraphBullets": {"range": span}},
+                    {"updateParagraphStyle": {"range": span, "fields": "namedStyleType,alignment",
+                                              "paragraphStyle": {"namedStyleType": "NORMAL_TEXT",
+                                                                 "alignment": "START"}}}]
     return out
 
 
@@ -955,6 +956,12 @@ def requests(theirs: dict, merged: list[dict]) -> list[dict]:
         tail = trailer[0]
     first = min((p for p, b in enumerate(merged)
                  if _written_here(b) and _insert_index(merged, p) is None), default=None)
+    # A body that begins with a table begins with the empty paragraph in front of it
+    # (`doc_ir._hide_trailer`): the first block written before that table goes into it.
+    lead = theirs.get("lead")
+    lead_first = min((p for p, b in enumerate(merged) if _written_here(b) and lead
+                      and (_anchor(merged, p) or {}).get("span", [None])[0] == lead[1]),
+                     default=None)
     # Back to front here too: two blocks added at one index both insert there, and
     # what is written last ends up in front, so the later block is planned first.
     for position in range(len(merged) - 1, -1, -1):
@@ -962,7 +969,19 @@ def requests(theirs: dict, merged: list[dict]) -> list[dict]:
         if not _written_here(block):
             continue
         at = _insert_index(merged, position)
-        if at is not None:
+        anchor = _anchor(merged, position)
+        if anchor is not None and anchor.get("kind") == "table":
+            # Nothing can be written at a table's own index (measured: refused), so a
+            # block in front of one goes after the paragraph before it — "\ntext" at
+            # that paragraph's mark, ahead of the paragraph's own edits there.
+            at -= 1
+            if position == lead_first:
+                plans.append((at, APPEND, _content_requests(at, block)
+                              + _style_requests(at, block)))
+            else:
+                plans.append((at, APPEND, _content_requests(at, block, before="\n")
+                              + _style_requests(at + 1, block)))
+        elif at is not None:
             plans.append((at, BEFORE, _content_requests(at, block, after="\n")
                           + _style_requests(at, block)))
         elif trailer and position == first:
@@ -1171,9 +1190,15 @@ def _insert_index(merged: list[dict], position: int) -> int | None:
     A block that is being moved is no anchor: the span it still has is the place it
     is about to be deleted from, which says nothing about where the new one goes.
     """
+    anchor = _anchor(merged, position)
+    return anchor["span"][0] if anchor else None
+
+
+def _anchor(merged: list[dict], position: int) -> dict | None:
+    """The block `_insert_index` writes in front of."""
     for block in merged[position + 1:]:
         if block.get("span") and not block.get("moved"):
-            return block["span"][0]
+            return block
     return None
 
 
@@ -1193,3 +1218,99 @@ def plan(base: dict, ours: dict, theirs: dict) -> dict:
     result["structure"], result["shaped"] = structure(theirs, result["blocks"])
     result["requests"] = requests(theirs, result["blocks"])
     return result
+
+
+# ---------------------------------------------------------------- tabs
+
+def on_tab(requests: list[dict], tab: str | None) -> list[dict]:
+    """The requests aimed at one tab: `tabId` in every location and range.
+
+    A request without one goes to the first tab (measured), so the first tab's are
+    sent as they are and every other tab's are stamped: an `index` is a Location,
+    a `startIndex` a Range, and `endOfSegmentLocation` names no index at all.
+    """
+    if not tab:
+        return requests
+
+    def stamp(value, key=None):
+        if isinstance(value, list):
+            return [stamp(v) for v in value]
+        if not isinstance(value, dict):
+            return value
+        out = {k: stamp(v, k) for k, v in value.items()}
+        if "index" in value or "startIndex" in value or key == "endOfSegmentLocation":
+            out["tabId"] = tab
+        return out
+
+    return [stamp(r) for r in requests]
+
+
+def pair_tabs(base: dict, ours: dict, theirs: dict) -> dict:
+    """Which tab of the file is which tab of the document, and what happens to tabs.
+
+    The same three-way rule as for blocks, one level up, with the tab id as identity:
+    a tab the source added is created (`create`, written by the sync like any tab
+    whose base is empty), one it deleted goes if the document left it as it was, one
+    it renamed is renamed if the document kept the old title — and where the document
+    also moved, the document wins, with a note. A tab the reader added is theirs and is
+    simply read into the file; one the reader deleted stays deleted.
+
+    `pairs` is `(tab id, our tab, base tab)` for every tab past the first that is
+    written; `requests` the tab edits that go before any text, `applied` and `notes`
+    what the report says about them.
+    """
+    live = {p["tab"]: p for p in theirs.get("tabs", []) if p.get("tab")}
+    was = {p["tab"]: p for p in base.get("tabs", []) if p.get("tab")}
+    ours_ids = {p.get("tab") for p in ours.get("tabs", [])}
+    out: dict = {"pairs": [], "create": [], "requests": [], "applied": [], "notes": []}
+    taken: set = set()
+    for part in ours.get("tabs", []):
+        tab, name = part.get("tab"), part.get("title", "")
+        if tab in live:
+            taken.add(tab)
+            old, now = was.get(tab, {}), live[tab]
+            if name != now.get("title", "") and name:
+                if now.get("title", "") == old.get("title", now.get("title", "")):
+                    out["requests"].append({"updateDocumentTabProperties": {
+                        "tabProperties": {"tabId": tab, "title": name}, "fields": "title"}})
+                    out["applied"].append(f"tab {now.get('title')!r} renamed {name!r}")
+                elif name != old.get("title"):
+                    out["notes"].append(f"tab {now.get('title')!r}: renamed on both sides — "
+                                        f"the document's title is kept, not {name!r}")
+            out["pairs"].append((tab, part, old or {"blocks": []}))
+        elif tab in was:
+            if doc_ir.blocks_html(part["blocks"]) != doc_ir.blocks_html(was[tab]["blocks"]):
+                out["notes"].append(f"tab {name!r} was deleted in the document; the source's "
+                                    f"changes to it are not written")
+        else:
+            # A tab of that title nobody knew of and nothing is in: the one a sync that
+            # died after creating it left behind. Anything else would be a second tab.
+            same = [t for t, p in live.items() if t not in was and t not in taken
+                    and p.get("title") == name and not p["blocks"]]
+            if same:
+                taken.add(same[0])
+                part["tab"] = same[0]
+                out["pairs"].append((same[0], part, {"blocks": []}))
+            else:
+                out["create"].append(part)
+    for tab, old in was.items():
+        if tab in ours_ids or tab not in live:
+            continue
+        now, name = live[tab], old.get("title", "")
+        children = [p for p in live.values() if p.get("parent") == tab and p["tab"] in ours_ids]
+        if (doc_ir.blocks_html(now["blocks"]) != doc_ir.blocks_html(old["blocks"])
+                or now.get("title") != old.get("title") or children):
+            out["notes"].append(f"tab {name!r} was deleted in the source, but the document "
+                                f"changed it (or keeps tabs inside it) — kept")
+        else:
+            out["requests"].append({"deleteTab": {"tabId": tab}})
+            out["applied"].append(f"tab {name!r} deleted")
+    return out
+
+
+def add_tab_request(part: dict, parents: dict) -> dict:
+    """`addDocumentTab` for a tab the source added, under its parent if that exists."""
+    props = {"title": part.get("title") or "Tab"}
+    if part.get("parent") in parents:
+        props["parentTabId"] = part["parent"]
+    return {"addDocumentTab": {"tabProperties": props}}

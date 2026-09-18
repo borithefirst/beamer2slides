@@ -187,12 +187,24 @@ def _hide_trailer(ir: dict) -> None:
     `doc_merge.tidy_requests` makes it a plain paragraph again.
     """
     blocks = ir["blocks"]
-    if (len(blocks) >= 2 and blocks[-2]["kind"] == "table"
+    # A body with nothing in it — a tab just added — is one empty paragraph, and that
+    # one is a trailer too: what is written there goes *into* it.
+    if (blocks and (len(blocks) == 1 or blocks[-2]["kind"] == "table")
             and blocks[-1]["kind"] in ("paragraph", "item", "heading") and not blocks[-1]["runs"]):
         last = blocks.pop()
         ir["trailer"] = last["span"]
         if last["kind"] != "paragraph" or last.get("align"):
             ir["trailer_kind"] = last["kind"]
+    # Its mirror image: a table cannot be the first thing in a body, so one that is has
+    # an empty paragraph in front of it that no request can delete either (measured: a
+    # tab's first table, made by `insertTable`, always does). That one is the `lead`,
+    # and the first block written in front of the table goes into it.
+    if (len(blocks) >= 2 and blocks[1]["kind"] == "table"
+            and blocks[0]["kind"] in ("paragraph", "item", "heading") and not blocks[0]["runs"]):
+        first = blocks.pop(0)
+        ir["lead"] = first["span"]
+        if first["kind"] != "paragraph" or first.get("align"):
+            ir["lead_kind"] = first["kind"]
 
 
 def _body_of(doc: dict, tab_id: str | None) -> tuple[list, str | None]:
@@ -206,12 +218,24 @@ def _body_of(doc: dict, tab_id: str | None) -> tuple[list, str | None]:
 
 
 def tabs_of(doc: dict) -> list:
-    """Every tab of a document read with `includeTabsContent`, child tabs included.
-
-    Only one of them is ever synced: `batchUpdate` was measured against the first tab
-    only, so a document with more is read, and reported, but not written past it.
-    """
+    """Every tab of a document read with `includeTabsContent`, child tabs included,
+    in the order the document shows them."""
     return _flatten_tabs(doc.get("tabs", []))
+
+
+def parts(ir: dict) -> list[dict]:
+    """The IR's tabs, each an IR of its own: the first tab is the IR itself (its
+    blocks are the file's body), the others are `ir["tabs"]` — `<section>`s in the
+    file, each with its `tab` id, `title` and, for a child tab, `parent`."""
+    return [ir] + list(ir.get("tabs", []))
+
+
+def tab_part(ir: dict | None, tab: str | None) -> dict | None:
+    """The tab of `ir` with that id, past the first; None when it has none."""
+    for part in (ir or {}).get("tabs", []):
+        if tab and part.get("tab") == tab:
+            return part
+    return None
 
 
 def _flatten_tabs(tabs: list) -> list:
@@ -363,8 +387,20 @@ def to_html(ir: dict) -> str:
         lines.append(f"<title>{escape(ir['title'])}</title>")
     lines += ["</head>", "<body>"]
     lines += _blocks_html(ir["blocks"], depth=0)
+    for part in ir.get("tabs", []):
+        # The tabs past the first. `data-tab` is the document's id for one; a section
+        # without it is a tab the source asks for and the next sync creates.
+        attrs = "".join(f' {name}="{escape(part[key], quote=True)}"'
+                        for name, key in (("data-tab", "tab"), ("title", "title"),
+                                          ("data-parent", "parent")) if part.get(key))
+        lines += [f"<section{attrs}>"] + _blocks_html(part["blocks"], depth=1) + ["</section>"]
     lines += ["</body>", "</html>", ""]
     return "\n".join(lines)
+
+
+def blocks_html(blocks: list[dict]) -> str:
+    """The blocks as the file writes them: what two reads of a tab are compared by."""
+    return "\n".join(_blocks_html(blocks, 0))
 
 
 def _blocks_html(blocks: list[dict], depth: int) -> list[str]:
@@ -496,6 +532,7 @@ class _Reader(HTMLParser):
         self.cell: list[dict] | None = None  # blocks of the table cell being read
         self.row: list | None = None
         self.table: dict | None = None
+        self.target: list[dict] = self.ir["blocks"]  # the blocks of the tab being read
 
     # -- helpers
 
@@ -509,7 +546,7 @@ class _Reader(HTMLParser):
         if self.cell is not None:
             self.cell.append(block)
         else:
-            self.ir["blocks"].append(block)
+            self.target.append(block)
 
     def _open(self, block: dict) -> None:
         self.block = block
@@ -529,6 +566,15 @@ class _Reader(HTMLParser):
                 self.ir["document"] = attr["content"]
         elif tag == "title":
             self.in_title = True
+        elif tag == "section":
+            self._close()
+            part = {"title": attr.get("title") or "", "blocks": []}
+            if attr.get("data-tab"):
+                part["tab"] = attr["data-tab"]
+            if attr.get("data-parent"):
+                part["parent"] = attr["data-parent"]
+            self.ir.setdefault("tabs", []).append(part)
+            self.target = part["blocks"]
         elif tag in ("ul", "ol"):
             self.lists.append(tag == "ol")
         elif tag == "li":
@@ -592,6 +638,9 @@ class _Reader(HTMLParser):
     def handle_endtag(self, tag: str) -> None:
         if tag == "title":
             self.in_title = False
+        elif tag == "section":
+            self._close()
+            self.target = self.ir["blocks"]
         elif tag in ("ul", "ol"):
             if self.lists:
                 self.lists.pop()
@@ -683,6 +732,8 @@ def key_blocks(ir: dict) -> dict:
     the words are. A block that already has one keeps it, because that key came from
     the canonical file or from a named range, and both outrank a guess from the text.
     """
+    for part in ir.get("tabs", []):
+        key_blocks(part)  # a named range belongs to its tab: keys are unique per tab
     # Keys already in hand reserve their occurrence number, so a new block never
     # takes a name a keyed one is using.
     seen: dict[str, int] = {}

@@ -6,7 +6,7 @@ identifiers and the summary a person reads afterwards.
 
 import json
 
-from beamer2slides import doc_merge, doc_sync
+from beamer2slides import doc_ir, doc_merge, doc_sync
 
 from test_doc_merge import live, para, table
 
@@ -54,7 +54,7 @@ def test_a_picture_file_is_digested_and_a_missing_one_is_reported(tmp_path):
     assert plot["sha"] == doc_sync.digest(b"pixels") and not plot.get("missing")
     assert gone["missing"] and "figures/gone.png" in ir["unsupported"][0]
     assert "sha" not in remote and not remote.get("missing")      # a URL: Google fetches it
-    assert doc_sync.limits(ir, {}) == ir["unsupported"]
+    assert doc_sync.limits(ir) == ir["unsupported"]
     # What push hands the importer: the bytes, not a path it could not follow.
     sent = doc_sync.embedded(path, ir)
     assert sent["blocks"][1]["runs"][0]["src"].startswith("data:image/png;base64,")
@@ -138,14 +138,41 @@ def test_pictures_are_staged_once_and_the_staging_document_goes(tmp_path):
     assert google.deleted == ["staging"]
 
 
-def test_only_the_first_tab_is_synced_and_the_others_are_named():
-    doc = {"tabs": [{"tabProperties": {"tabId": "t.0", "title": "The chapter"}},
-                    {"tabProperties": {"tabId": "t.1", "title": "Notes"},
-                     "childTabs": [{"tabProperties": {"tabId": "t.2", "title": "Older notes"}}]}]}
-    notes = doc_sync.limits({"blocks": []}, doc)
-    assert notes == ["the document has 3 tabs; only the first one is synced "
-                     "(left alone: Notes, Older notes)"]
-    assert doc_sync.limits({"blocks": []}, {"tabs": [doc["tabs"][0]]}) == []
+def _tab(tab, title, words, ranges=None, children=()):
+    body = [{"startIndex": 1, "endIndex": 2 + len(words), "paragraph": {"elements": [
+        {"startIndex": 1, "endIndex": 2 + len(words), "textRun": {"content": words + "\n"}}]}}]
+    return {"tabProperties": {"tabId": tab, "title": title},
+            "documentTab": {"body": {"content": body}, "namedRanges": ranges or {}},
+            "childTabs": list(children)}
+
+
+def test_every_tab_is_read_with_its_own_keys_and_written_to_the_file():
+    ranges = {"b2s:paragraph:notes": {"namedRanges": [{"namedRangeId": "r", "ranges": [
+        {"startIndex": 1, "endIndex": 5, "tabId": "t.1"}]}]}}
+    child = _tab("t.2", "Older notes", "old") | {"tabProperties": {
+        "tabId": "t.2", "title": "Older notes", "parentTabId": "t.1"}}
+    doc = {"title": "D", "tabs": [_tab("t.0", "Tab 1", "chapter"),
+                                  _tab("t.1", "Notes", "notes", ranges, [child])]}
+    ir = doc_sync.document_ir(doc, "d")
+    assert [b["runs"][0]["text"] for b in ir["blocks"]] == ["chapter"]
+    notes, older = ir["tabs"]
+    assert (notes["tab"], notes["title"], notes["blocks"][0]["key"]) == ("t.1", "Notes",
+                                                                        "paragraph:notes")
+    assert (older["tab"], older["title"], older["parent"]) == ("t.2", "Older notes", "t.1")
+    html = doc_ir.to_html(doc_ir.key_blocks(ir))
+    assert '<section data-tab="t.2" title="Older notes" data-parent="t.1">' in html
+    again = doc_ir.from_html(html)
+    assert [(p.get("tab"), p.get("title")) for p in doc_ir.parts(again)[1:]] == [
+        ("t.1", "Notes"), ("t.2", "Older notes")]
+    assert again["blocks"][0]["key"] == ir["blocks"][0]["key"]
+    assert again["tabs"][0]["blocks"][0]["key"] == "paragraph:notes"
+    assert doc_ir.to_html(again | {"document": "d"}) == html
+
+
+def test_a_tab_just_added_is_empty_and_what_is_written_there_goes_into_it():
+    doc = {"tabs": [_tab("t.0", "Tab 1", "chapter"), _tab("t.9", "New", "")]}
+    part = doc_ir.parts(doc_sync.document_ir(doc, "d"))[1]
+    assert part["blocks"] == [] and part["trailer"] == [1, 2]
 
 
 class _Drive:

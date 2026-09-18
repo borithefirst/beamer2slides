@@ -109,7 +109,7 @@ def read_file(path: Path) -> dict:
     if not path.is_file():
         raise SystemExit(f"{path}: no such file (this command reads the canonical HTML)")
     ir = doc_ir.key_blocks(doc_ir.from_html(path.read_text(encoding="utf-8")))
-    for run in doc_merge._image_runs(ir["blocks"]):
+    for run in _pictures(ir):
         local = picture_file(path, run.get("src", ""))
         if local is None:
             continue
@@ -121,6 +121,11 @@ def read_file(path: Path) -> dict:
                 f"<img src={run['src']!r}>: no such file beside {path.name} — "
                 f"the picture is left as the document has it")
     return ir
+
+
+def _pictures(ir: dict) -> list[dict]:
+    """Every picture run of every tab."""
+    return [run for part in doc_ir.parts(ir) for run in doc_merge._image_runs(part["blocks"])]
 
 
 def picture_file(path: Path, src: str) -> Path | None:
@@ -146,7 +151,7 @@ def embedded(path: Path, ir: dict) -> dict:
     the picture's description and title. A relative `src` would mean nothing to it.
     """
     out = json.loads(json.dumps(ir))
-    for run in doc_merge._image_runs(out["blocks"]):
+    for run in _pictures(out):
         local = picture_file(path, run.get("src", ""))
         if local is not None and local.is_file():
             run["src"] = data_uri(local)
@@ -158,20 +163,52 @@ def write_file(path: Path, ir: dict, document: str) -> None:
 
 
 def read_document(docs, ident: str, *sources: dict) -> tuple[dict, dict]:
-    """The document, and the IR of its first tab, with what a read cannot say filled in.
+    """The document, and its IR — every tab — with what a read cannot say filled in.
 
     Keys come from the named ranges; a list's ordered-ness comes from `sources` — the
     canonical file and the base — because an imported list never reports its own
     (`doc_merge.restore_unreadable`).
     """
-    doc = docs.documents().get(documentId=ident, includeTabsContent=True).execute()
-    ir = doc_ir.from_document(doc)
-    doc_ir.apply_keys(ir, doc_ir.named_ranges_of(doc, ir.get("tab")))
-    doc_merge.restore_unreadable(ir, *sources)
+    doc = _get(docs, ident)
     ours, base = (list(sources) + [None, None])[:2]
-    doc_merge.restore_pictures(ir, base, ours)
+    return doc, document_ir(doc, ident, ours, base)
+
+
+def _get(docs, ident: str) -> dict:
+    return docs.documents().get(documentId=ident, includeTabsContent=True).execute()
+
+
+def document_ir(doc: dict, ident: str, ours: dict | None = None,
+                base: dict | None = None) -> dict:
+    """The first tab is the IR; the others go under `tabs` (`doc_ir.parts`), each
+    filled in from the file's and the base's tab with the same id."""
+    ir = _part_of(doc, None, ours, base)
+    extra = [_part_of(doc, tab.get("tabProperties", {}).get("tabId"), ours, base)
+             for tab in doc_ir.tabs_of(doc)[1:]]
+    if extra:
+        ir["tabs"] = extra
     ir["document"] = ident
-    return doc, ir
+    return ir
+
+
+def _part_of(doc: dict, tab: str | None, ours: dict | None, base: dict | None) -> dict:
+    """One tab's IR (None: the first). `ours` and `base` are whole IRs: the tab of
+    theirs with the same id is what fills this one in."""
+    if tab:
+        ours, base = doc_ir.tab_part(ours, tab), doc_ir.tab_part(base, tab)
+    part = doc_ir.from_document(doc, tab)
+    doc_ir.apply_keys(part, doc_ir.named_ranges_of(doc, part.get("tab")))
+    doc_merge.restore_unreadable(part, *[s for s in (ours, base) if s])
+    doc_merge.restore_pictures(part, base, ours)
+    if tab:
+        part.pop("title", None)
+        for each in doc_ir.tabs_of(doc):
+            props = each.get("tabProperties", {})
+            if props.get("tabId") == tab:
+                part["title"] = props.get("title", "")
+                if props.get("parentTabId"):
+                    part["parent"] = props["parentTabId"]
+    return part
 
 
 def open_comments(drive, ident: str) -> list[str]:
@@ -202,26 +239,26 @@ def open_comments(drive, ident: str) -> list[str]:
     return out
 
 
-def limits(ours: dict, doc: dict) -> list[str]:
+def limits(ours: dict) -> list[str]:
     """What this sync cannot carry, said out loud rather than dropped in silence."""
-    out = list(ours.get("unsupported", []))
-    tabs = doc_ir.tabs_of(doc)
-    if len(tabs) > 1:
-        names = ", ".join(t.get("tabProperties", {}).get("title", "?") for t in tabs[1:])
-        out.append(f"the document has {len(tabs)} tabs; only the first one is synced "
-                   f"(left alone: {names})")
-    return out
+    return list(ours.get("unsupported", []))
+
+
+def stamp_of(ir: dict, part: dict) -> str | None:
+    """The `tabId` a tab's requests carry: none for the first tab, which is where a
+    request without one goes (`doc_merge.on_tab`)."""
+    return None if part is ir else part.get("tab")
 
 
 # ---------------------------------------------------------------- writing
 
-def send(docs, ident: str, requests: list[dict], revision: str | None = None) -> None:
+def send(docs, ident: str, requests: list[dict], revision: str | None = None) -> dict:
     body: dict = {"requests": requests}
     if revision:
         # The plan is indices into the document as it was read. Anyone who typed since
         # has moved them, so the write is refused rather than landing in the wrong place.
         body["writeControl"] = {"requiredRevisionId": revision}
-    docs.documents().batchUpdate(documentId=ident, body=body).execute()
+    return docs.documents().batchUpdate(documentId=ident, body=body).execute() or {}
 
 
 def moved_on(error: HttpError) -> bool:
@@ -302,7 +339,7 @@ def fetch_pictures(path: Path, live: dict) -> int:
     picture — which is what makes a reader's picture something git can keep.
     """
     done = 0
-    for run in doc_merge._image_runs(live["blocks"]):
+    for run in _pictures(live):
         if run.get("src") or not run.get("uri") or not run.get("value"):
             continue
         try:
@@ -322,13 +359,13 @@ def fetch_pictures(path: Path, live: dict) -> int:
     return done
 
 
-def plant_ranges(docs, ident: str, ir: dict) -> int:
-    """Name every keyed block the document does not name yet.
+def plant_ranges(docs, ident: str, ir: dict, tab: str | None = None) -> int:
+    """Name every keyed block of one tab the document does not name yet.
 
     One batch, and on a refusal one request at a time, so a range the API will not
     take names itself in the output instead of costing the rest their anchors.
     """
-    requests = doc_ir.name_requests(ir)
+    requests = doc_merge.on_tab(doc_ir.name_requests(ir), tab)
     if not requests:
         return 0
     try:
@@ -348,20 +385,29 @@ def plant_ranges(docs, ident: str, ir: dict) -> int:
 
 
 def settle(docs, ident: str, path: Path, ours: dict, base: dict,
-           planned: list[dict] | None = None) -> dict:
+           planned: dict | None = None) -> dict:
     """After a write: read the document, anchor what is new, and let that read be both
-    the new base and the new canonical file. File, document and base agree from here."""
+    the new base and the new canonical file. File, document and base agree from here.
+
+    `planned` is what each tab was written as, by its stamp (None: the first tab)."""
+    planned = planned or {}
     _, live = read_document(docs, ident, ours, base)
-    if planned:
-        doc_merge.adopt_keys(live, planned)
-    doc_ir.key_blocks(live)
-    tidy = doc_merge.tidy_requests(live)
+    tidy, named = [], 0
+    for part in doc_ir.parts(live):
+        stamp = stamp_of(live, part)
+        if planned.get(stamp):
+            doc_merge.adopt_keys(part, planned[stamp])
+        doc_ir.key_blocks(part)
+        tidy += doc_merge.on_tab(doc_merge.tidy_requests(part), stamp)
     if tidy:
         send(docs, ident, tidy)
-    if plant_ranges(docs, ident, live) or tidy:
+    for part in doc_ir.parts(live):
+        named += plant_ranges(docs, ident, part, stamp_of(live, part))
+    if named or tidy:
         _, live = read_document(docs, ident, ours, base)
-    if planned:
-        doc_merge.place_pictures(live, planned)
+    for part in doc_ir.parts(live):
+        if planned.get(stamp_of(live, part)):
+            doc_merge.place_pictures(part, planned[stamp_of(live, part)])
     fetch_pictures(path, live)
     write_file(path, live, ident)
     save_base(path, live)
@@ -382,7 +428,8 @@ def write_report(path: Path, info: dict) -> Path:
              f"{time.strftime('%Y-%m-%d %H:%M:%S')} — {info['requests']} request(s) "
              f"{'planned' if info['dry_run'] else 'written'}", ""]
     for title, items in (("Conflicts (the document won)",
-                          [f"`{c['key']}`: the source said {c['ours']!r}, "
+                          [(f"[{c['tab']}] " if c.get("tab") is not None else "")
+                           + f"`{c['key']}`: the source said {c['ours']!r}, "
                            f"the document says {c['theirs']!r}" for c in info["conflicts"]]),
                          ("Left alone", info["notes"]),
                          ("Open comments in the document", info.get("comments", [])),
@@ -434,7 +481,9 @@ def push(path: Path, name: str | None = None, new_doc: bool = False) -> dict:
                          f"  Use `docs sync` to write to it, or --new-doc for a second one.")
     creds = credentials()
     drive, docs = drive_service(creds), docs_service(creds)
-    html = doc_ir.to_html(embedded(path, source) | {"document": None})
+    first = embedded(path, source) | {"document": None}
+    first.pop("tabs", None)  # the importer makes one tab of whatever it is given
+    html = doc_ir.to_html(first)
     ident = drive.files().create(
         body={"name": name or source.get("title") or path.stem, "mimeType": DOC_MIME},
         media_body=MediaIoBaseUpload(io.BytesIO(html.encode("utf-8")), mimetype="text/html"),
@@ -446,10 +495,16 @@ def push(path: Path, name: str | None = None, new_doc: bool = False) -> dict:
     doc_merge.inherit_keys(source, live)
     doc_merge.restore_unreadable(live, source)
     plant_ranges(docs, ident, live)
-    live = settle(docs, ident, path, source, source, source["blocks"])
-    return {"document": ident, "url": url(ident), "blocks": len(live["blocks"]),
-            "anchored": sum(1 for b in live["blocks"] if b.get("rangeId")),
-            "notes": limits(source, doc)}
+    # The other tabs are written the way a sync writes a tab the source added.
+    tabs = doc_merge.pair_tabs({"blocks": []}, source, live)
+    written = _write_tabs(drive, docs, ident, path, source, {"blocks": []}, live, tabs,
+                          first=False)
+    planned = {None: source["blocks"]} | {w["stamp"]: w["result"]["blocks"] for w in written}
+    live = settle(docs, ident, path, source, source, planned)
+    blocks = [b for part in doc_ir.parts(live) for b in part["blocks"]]
+    return {"document": ident, "url": url(ident), "blocks": len(blocks),
+            "anchored": sum(1 for b in blocks if b.get("rangeId")),
+            "tabs": len(doc_ir.parts(live)), "notes": limits(source)}
 
 
 def sync(path: Path, document: str | None = None, dry_run: bool = False,
@@ -466,81 +521,169 @@ def sync(path: Path, document: str | None = None, dry_run: bool = False,
     doc, theirs = read_document(docs, ident, ours, base or {"blocks": []})
     if base is None:
         base = _no_base(path, ours, theirs, assume_base)
-
-    result = doc_merge.plan(base, ours, theirs)
-
-    def report(extra: dict | None = None) -> dict:
-        applied, kept = _summary(result)
-        return {"document": ident, "url": url(ident), "dry_run": dry_run,
-                "requests": len(result["requests"]), "conflicts": result["conflicts"],
-                "notes": limits(ours, doc) + result["notes"],
-                "applied": [t["note"] for t in shaped] + applied, "kept": kept,
-                "comments": asked} | (extra or {})
-
-    shaped: list[dict] = []
+    tabs = doc_merge.pair_tabs(base, ours, theirs)
     asked = open_comments(drive, ident)
+
     if dry_run:
-        info = report({"plan": result["structure"] + result["requests"],
-                       "requests": len(result["structure"]) + len(result["requests"])})
-        info["applied"] = [t["note"] for t in result["shaped"]] + info["applied"]
+        planned = [{"stamp": None, "label": None, "result": doc_merge.plan(base, ours, theirs)}]
+        for tab, mine, was in tabs["pairs"]:
+            planned.append({"stamp": tab, "label": mine.get("title", ""),
+                            "result": doc_merge.plan(was, mine, doc_ir.tab_part(theirs, tab))})
+        for mine in tabs["create"]:
+            # What a tab just added reads as: nothing, and the paragraph it keeps.
+            planned.append({"stamp": "new", "label": mine.get("title", ""), "result":
+                            doc_merge.plan({"blocks": []}, mine, {"blocks": [], "trailer": [1, 2]})})
+        for each in planned:
+            each["shaped"] = each["result"]["shaped"]
+        info = _report(ident, True, ours, tabs, planned, asked)
+        info["plan"] = tabs["requests"] + [
+            r for each in planned for r in doc_merge.on_tab(
+                each["result"]["structure"] + each["result"]["requests"], each["stamp"])]
+        info["requests"] = len(info["plan"]) + len(tabs["create"])
         info["report"] = str(write_report(path, info))
         return info
 
     hook = os.environ.pop("B2S_DOCS_BEFORE_WRITE", None)  # (tests: someone types now)
     if hook:
         subprocess.run(hook, shell=True, check=False)
-    doc, theirs, base, result, shaped = _write_structure(
-        docs, ident, path, ours, base, doc, theirs, result)
-    info = report()
-    attempt, revision = 0, doc.get("revisionId")
-    stager = Stager(drive, docs, path)
-    try:
-        while True:
-            try:
-                if result["requests"]:
-                    send(docs, ident, stager.resolve(result["requests"]), revision)
-                break
-            except HttpError as err:
-                attempt += 1
-                if not moved_on(err) or attempt >= ATTEMPTS:
-                    raise
-                # Somebody typed between the read and the write. Read again and re-plan:
-                # their words are now part of `theirs`, so the merge keeps them.
-                print(f"  the document changed while this sync was planned; reading it again "
-                      f"({attempt}/{ATTEMPTS - 1})")
-                doc, theirs = read_document(docs, ident, ours, base)
-                ours = read_file(path)  # (the file may have been committed to meanwhile)
-                result = doc_merge.plan(base, ours, theirs)
-                doc, theirs, base, result, more = _write_structure(
-                    docs, ident, path, ours, base, doc, theirs, result)
-                shaped += more
-                revision = doc.get("revisionId")
-                info = report({"replanned": attempt})
-    finally:
-        # The pictures are in the document now, copied: the staging file can go.
-        stager.close()
-
-    live = settle(docs, ident, path, ours, base, result["blocks"])
-    info["blocks"] = len(live["blocks"])
+    written = _write_tabs(drive, docs, ident, path, ours, base, theirs, tabs, doc=doc)
+    info = _report(ident, False, ours, tabs, written, asked)
+    live = settle(docs, ident, path, ours, base,
+                  {each["stamp"]: each["result"]["blocks"] for each in written})
+    info["blocks"] = sum(len(part["blocks"]) for part in doc_ir.parts(live))
     info["report"] = str(write_report(path, info))
     return info
 
 
-def _write_structure(docs, ident: str, path: Path, ours: dict, base: dict,
-                     doc: dict, theirs: dict, result: dict) -> tuple:
+def _report(ident: str, dry_run: bool, ours: dict, tabs: dict, written: list[dict],
+            asked: list[str]) -> dict:
+    """The report of a sync, every tab in it; what happened past the first tab is
+    said with the tab's title in front."""
+    info = {"document": ident, "url": url(ident), "dry_run": dry_run, "requests": 0,
+            "conflicts": [], "notes": limits(ours) + tabs["notes"],
+            "applied": list(tabs["applied"]), "kept": [], "comments": asked}
+    for each in written:
+        result, label = each["result"], each["label"]
+        say = (lambda line, label=label: f"[{label}] {line}") if label is not None else str
+        info["requests"] += len(result["requests"])
+        info["conflicts"] += [c | {"tab": label} if label is not None else c
+                              for c in result["conflicts"]]
+        info["notes"] += [say(n) for n in result["notes"]]
+        applied, kept = _summary(result)
+        info["applied"] += [say(t["note"]) for t in each["shaped"]] + [say(a) for a in applied]
+        info["kept"] += [say(k) for k in kept]
+        if each.get("attempts"):
+            info["replanned"] = max(info.get("replanned", 0), each["attempts"])
+    return info
+
+
+def _write_tabs(drive, docs, ident: str, path: Path, ours: dict, base: dict, theirs: dict,
+                tabs: dict, first: bool = True, doc: dict | None = None) -> list[dict]:
+    """Write every tab: the tab edits (`doc_merge.pair_tabs`) first, then each tab's
+    words, the first tab first. A tab is its own plan and its own batch — its indices
+    are its own — so the others wait for nothing it does.
+
+    `doc` is the read the sync began with: tabs are planned against it until something
+    has been written, so a reader who typed since is caught by the revision check and
+    the tab is planned again, rather than slipping in unnoticed between two reads."""
+    if tabs["requests"] or tabs["create"]:
+        doc = None
+    if tabs["requests"]:
+        send(docs, ident, tabs["requests"])
+    pairs = list(tabs["pairs"])
+    known = {p.get("tab") for p in doc_ir.parts(theirs)} - {None}
+    made: dict = {}
+    for part in tabs["create"]:
+        # One at a time: a child tab needs the id its parent was just given.
+        parent = made.get(part.get("parent"), part.get("parent"))
+        reply = send(docs, ident, [doc_merge.add_tab_request(
+            part | {"parent": parent}, known | set(made.values()))])
+        tab = reply["replies"][0]["addDocumentTab"]["tabProperties"]["tabId"]
+        if part.get("tab"):
+            made[part["tab"]] = tab
+        part["tab"] = tab
+        if part.get("parent") in made:
+            part["parent"] = made[part["parent"]]
+        pairs.append((tab, part, {"blocks": []}))
+    stager = Stager(drive, docs, path)
+    written = []
+    try:
+        for tab, mine, was in ([(None, ours, base)] if first else []) + pairs:
+            done = _sync_part(docs, ident, path, stager, tab, ours, base, mine, was, doc)
+            written.append(done)
+            if done["result"]["requests"] or done["shaped"] or done["attempts"]:
+                doc = None  # the document has moved on from that read
+    finally:
+        # The pictures are in the document now, copied: the staging file can go.
+        stager.close()
+    return written
+
+
+def _sync_part(docs, ident: str, path: Path, stager: Stager, tab: str | None,
+               ours: dict, base: dict, mine: dict, was: dict, doc: dict | None = None) -> dict:
+    """Plan one tab against the document and write it.
+
+    `tab` is None for the first tab, whose requests go without a `tabId`; `mine` and
+    `was` are the file's and the base's version of the tab, `ours` and `base` the
+    whole of them (what a read fills the tab in from). `doc` is a read still current,
+    if there is one; otherwise the document is read now.
+    """
+    if doc is None:
+        doc, theirs = read_part(docs, ident, tab, ours, base)
+    else:
+        theirs = _part_of(doc, tab, ours, base)
+    result = doc_merge.plan(was, mine, theirs)
+    doc, theirs, was, result, shaped = _write_structure(
+        docs, ident, tab, ours, base, mine, was, doc, theirs, result)
+    attempt, revision = 0, doc.get("revisionId")
+    while True:
+        try:
+            if result["requests"]:
+                send(docs, ident, stager.resolve(doc_merge.on_tab(result["requests"], tab)),
+                     revision)
+            break
+        except HttpError as err:
+            attempt += 1
+            if not moved_on(err) or attempt >= ATTEMPTS:
+                raise
+            # Somebody typed between the read and the write. Read again and re-plan:
+            # their words are now part of `theirs`, so the merge keeps them.
+            print(f"  the document changed while this sync was planned; reading it again "
+                  f"({attempt}/{ATTEMPTS - 1})")
+            if tab is None:
+                mine = read_file(path)  # (the file may have been committed to meanwhile)
+            doc, theirs = read_part(docs, ident, tab, ours, base)
+            result = doc_merge.plan(was, mine, theirs)
+            doc, theirs, was, result, more = _write_structure(
+                docs, ident, tab, ours, base, mine, was, doc, theirs, result)
+            shaped += more
+            revision = doc.get("revisionId")
+    return {"stamp": tab, "label": mine.get("title", "") if tab else None,
+            "result": result, "shaped": shaped, "attempts": attempt}
+
+
+def read_part(docs, ident: str, tab: str | None, ours: dict | None,
+              base: dict | None) -> tuple[dict, dict]:
+    """The document, and the IR of one tab of it (None: the first)."""
+    doc = _get(docs, ident)
+    return doc, _part_of(doc, tab, ours, base)
+
+
+def _write_structure(docs, ident: str, tab: str | None, ours: dict, base: dict,
+                     mine: dict, was: dict, doc: dict, theirs: dict, result: dict) -> tuple:
     """Write what the grid needs before the words, and plan the words again.
 
     A table the source added and rows or columns it changed cannot go in the batch
     that writes the text: `insertTable` and its kin move every index below them, and
     the cells they create do not exist until they have been sent. So they go first,
-    on their own; the document is read again; a table that was just built is given the
+    on their own; the tab is read again; a table that was just built is given the
     file's key and anchored, or the next plan would not recognise it and would build
     it a second time; the base takes those tables as the document now reports them —
     that grid is no longer a difference between the sides — and the words are planned
     against what the document says now.
 
-    Returns the document, its IR, the base, the new plan and what was written, in
-    words for the report. A batch that leaves work over (two tables added at one
+    Returns the document, the tab's IR, its base, the new plan and what was written,
+    in words for the report. A batch that leaves work over (two tables added at one
     index, which one send cannot place) comes round again.
     """
     shaped: list[dict] = []
@@ -548,22 +691,22 @@ def _write_structure(docs, ident: str, path: Path, ours: dict, base: dict,
         if not result["structure"]:
             break
         try:
-            send(docs, ident, result["structure"], doc.get("revisionId"))
+            send(docs, ident, doc_merge.on_tab(result["structure"], tab), doc.get("revisionId"))
         except HttpError as err:
             if not moved_on(err):
                 raise
             print("  the document changed while the table edits were planned; reading it again")
-            doc, theirs = read_document(docs, ident, ours, base)
-            result = doc_merge.plan(base, ours, theirs)
+            doc, theirs = read_part(docs, ident, tab, ours, base)
+            result = doc_merge.plan(was, mine, theirs)
             continue
         shaped += result["shaped"]
-        doc, theirs = read_document(docs, ident, ours, base)
+        doc, theirs = read_part(docs, ident, tab, ours, base)
         if doc_merge.anchor_tables(theirs, result["shaped"]):
-            plant_ranges(docs, ident, theirs)
-            doc, theirs = read_document(docs, ident, ours, base)
-        base = doc_merge.rebase_tables(base, theirs, result["shaped"])
-        result = doc_merge.plan(base, ours, theirs)
-    return doc, theirs, base, result, shaped
+            plant_ranges(docs, ident, theirs, tab)
+            doc, theirs = read_part(docs, ident, tab, ours, base)
+        was = doc_merge.rebase_tables(was, theirs, result["shaped"])
+        result = doc_merge.plan(was, mine, theirs)
+    return doc, theirs, was, result, shaped
 
 
 def _no_base(path: Path, ours: dict, theirs: dict, assume: str | None) -> dict:

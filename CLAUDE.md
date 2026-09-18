@@ -656,9 +656,18 @@ keys, named ranges), `doc_merge.py` (pure planning), `doc_sync.py` (the commands
   a reader inserted is saved to `<stem>.media/` (`fetch_pictures`). `insertPerson`/`insertDate`
   make those chips (rich links refused); a block whose chips the source changed and the document
   did not touch is written again (`rewrite`), never when it holds an equation-like chip.
+- Tabs: the first tab is the file's body, every other one a `<section data-tab title
+  [data-parent]>` (`doc_ir.parts`; no `data-tab` = a tab the source asks for). Each tab is its
+  own plan and batch, every location/range stamped with its `tabId` (`doc_merge.on_tab`; none
+  = the first tab), keys unique per tab. Tabs themselves merge three ways by id
+  (`doc_merge.pair_tabs`: `addDocumentTab`, `updateDocumentTabProperties`, `deleteTab` only for
+  a tab the document left as the base has it). A new tab's lone empty paragraph and the
+  undeletable one in front of a body's first table are hidden like the trailer (`trailer`,
+  `lead`) and written into; nothing can be inserted at a table's own index (measured), so a
+  block in front of a table goes in as `\ntext` at the previous paragraph's mark.
 - What the file cannot carry is reported too (`doc_sync.limits`): a picture file that is not
-  there, and the tabs past the first one, which are read but never written.
-- Live suite (opt-in, marker `docs`, ~2 min): `python -m pytest -m docs tests/test_docs_live.py`
+  there.
+- Live suite (opt-in, marker `docs`, ~5 min): `python -m pytest -m docs tests/test_docs_live.py`
   pushes a document per test, edits both sides, syncs, checks a second sync writes nothing, and
   deletes the document. Offline: `tests/test_doc_ir.py`, `test_doc_merge.py`, `test_doc_sync.py`.
 

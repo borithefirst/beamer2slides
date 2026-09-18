@@ -474,3 +474,85 @@ def test_the_cli_reaches_the_same_plan(paper):
                           env=ENV, cwd=ROOT, capture_output=True, text=True)
     assert done.returncode == 0, done.stderr
     assert "0 request(s)" in done.stdout
+
+
+def tabs(paper) -> list[tuple[str, str]]:
+    """The document's tabs past the first, as (title, words)."""
+    from beamer2slides import doc_ir
+    from beamer2slides.google_auth import credentials, docs_service
+    _, ir = paper.sync_module.read_document(docs_service(credentials()), paper.ident)
+    return [(part["title"], " / ".join(
+        "".join(r["text"] for r in b.get("runs", [])) or b["kind"] for b in part["blocks"]))
+        for part in doc_ir.parts(ir)[1:]]
+
+
+APPENDIX = """<section title="Appendix">
+<p>An appendix line.</p>
+<ul>
+ <li>point a</li>
+ <li>point b</li>
+</ul>
+<table><tr><td><p>x</p></td><td><p>y</p></td></tr></table>
+<p>after the table</p>
+</section>
+<section title="Scratch">
+<p>scratch words</p>
+</section>
+</body>"""
+
+
+def test_tabs_the_source_adds_renames_edits_and_deletes(paper):
+    """Every tab is synced like the first: its own plan, its requests stamped with its
+    `tabId`, created, renamed or deleted by the three-way rule one level up."""
+    paper.edit("</body>", APPENDIX)
+    info = paper.sync()
+    assert not info["notes"], info["notes"]
+    assert tabs(paper) == [("Appendix", "An appendix line. / point a / point b / table / "
+                                        "after the table"),
+                           ("Scratch", "scratch words")]
+    text = paper.text
+    assert text.count("<section data-tab=") == 2 and "<ul>" in text.split("Appendix")[1]
+    paper.settled()
+
+    # The source rewrites a line, renames the tab and drops the other one; a reader
+    # types into the appendix meanwhile.
+    from beamer2slides.google_auth import credentials, docs_service
+    from beamer2slides import doc_ir
+    docs = docs_service(credentials())
+    _, ir = paper.sync_module.read_document(docs, paper.ident)
+    appendix = next(p for p in doc_ir.parts(ir) if p.get("title") == "Appendix")
+    point = next(b for b in appendix["blocks"] if b.get("runs") and
+                 b["runs"][0]["text"] == "point a")
+    paper.sync_module.send(docs, paper.ident, [{"insertText": {"location": {
+        "index": point["span"][1] - 1, "tabId": appendix["tab"]}, "text": " (reader)"}}])
+    paper.edit("An appendix line.", "An appendix line, revised.")
+    paper.edit('title="Appendix"', 'title="Appendix A"')
+    text = paper.text
+    start = text.index("<section", text.index('title="Scratch"') - 40)
+    paper.path.write_text(text[:start] + text[text.index("</section>", start) + 11:],
+                          encoding="utf-8")
+    info = paper.sync()
+    assert info["conflicts"] == [], info["conflicts"]
+    assert tabs(paper) == [("Appendix A", "An appendix line, revised. / point a (reader) / "
+                                          "point b / table / after the table")]
+    assert "Scratch" not in paper.text and "point a (reader)" in paper.text
+    paper.settled()
+
+
+def test_a_file_with_tabs_is_pushed_with_them(google, request):
+    from beamer2slides import doc_sync
+    from beamer2slides.google_auth import credentials, drive_service
+    path = OUT / f"{request.node.name}.html"
+    path.write_text("<html><body><p>front</p>" + APPENDIX.replace("</body>", "")
+                    + "</body></html>", encoding="utf-8")
+    doc_sync.base_path(path).unlink(missing_ok=True)
+    info = doc_sync.push(path, name=f"b2s docs test: {request.node.name}")
+    try:
+        paper = Paper(path, info["document"])
+        assert info["tabs"] == 3 and info["anchored"] == info["blocks"]
+        assert tabs(paper) == [("Appendix", "An appendix line. / point a / point b / table / "
+                                            "after the table"),
+                               ("Scratch", "scratch words")]
+        paper.settled()
+    finally:
+        drive_service(credentials()).files().delete(fileId=info["document"]).execute()
