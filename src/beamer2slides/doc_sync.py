@@ -24,12 +24,16 @@ change here.
 
 from __future__ import annotations
 
+import base64
+import hashlib
 import io
 import json
+import mimetypes
 import os
 import re
 import subprocess
 import time
+import urllib.request
 from pathlib import Path
 
 from googleapiclient.errors import HttpError
@@ -73,9 +77,20 @@ def save_base(path: Path, base: dict) -> Path:
     file = base_path(path)
     file.parent.mkdir(parents=True, exist_ok=True)
     tmp = file.with_name(file.name + ".writing")
-    tmp.write_text(json.dumps(base, indent=1, ensure_ascii=False), encoding="utf-8")
+    # A picture's `uri` is a URL that dies within the hour: no use to the next sync.
+    tmp.write_text(json.dumps(_without(base, "uri"), indent=1, ensure_ascii=False),
+                   encoding="utf-8")
     os.replace(tmp, file)
     return file
+
+
+def _without(value, key: str):
+    """`value` with `key` taken out of every dict in it, however deep."""
+    if isinstance(value, dict):
+        return {k: _without(v, key) for k, v in value.items() if k != key}
+    if isinstance(value, list):
+        return [_without(v, key) for v in value]
+    return value
 
 
 def document_id(text: str) -> str:
@@ -93,7 +108,49 @@ def url(ident: str) -> str:
 def read_file(path: Path) -> dict:
     if not path.is_file():
         raise SystemExit(f"{path}: no such file (this command reads the canonical HTML)")
-    return doc_ir.key_blocks(doc_ir.from_html(path.read_text(encoding="utf-8")))
+    ir = doc_ir.key_blocks(doc_ir.from_html(path.read_text(encoding="utf-8")))
+    for run in doc_merge._image_runs(ir["blocks"]):
+        local = picture_file(path, run.get("src", ""))
+        if local is None:
+            continue
+        if local.is_file():
+            run["sha"] = digest(local.read_bytes())
+        else:
+            run["missing"] = True
+            ir.setdefault("unsupported", []).append(
+                f"<img src={run['src']!r}>: no such file beside {path.name} — "
+                f"the picture is left as the document has it")
+    return ir
+
+
+def picture_file(path: Path, src: str) -> Path | None:
+    """The file an `<img src>` names, beside the canonical file; None for a URL."""
+    if not src or re.match(r"^[a-z][a-z0-9+.-]*:", src, re.I):
+        return None
+    return path.parent / src
+
+
+def digest(data: bytes) -> str:
+    return hashlib.sha1(data).hexdigest()[:16]
+
+
+def data_uri(file: Path) -> str:
+    mime = mimetypes.guess_type(file.name)[0] or "image/png"
+    return f"data:{mime};base64,{base64.b64encode(file.read_bytes()).decode()}"
+
+
+def embedded(path: Path, ir: dict) -> dict:
+    """The file as the importer should see it: every picture's bytes inside it.
+
+    Measured: Drive's HTML import embeds a `data:` URI and keeps `alt` and `title` as
+    the picture's description and title. A relative `src` would mean nothing to it.
+    """
+    out = json.loads(json.dumps(ir))
+    for run in doc_merge._image_runs(out["blocks"]):
+        local = picture_file(path, run.get("src", ""))
+        if local is not None and local.is_file():
+            run["src"] = data_uri(local)
+    return out
 
 
 def write_file(path: Path, ir: dict, document: str) -> None:
@@ -111,6 +168,8 @@ def read_document(docs, ident: str, *sources: dict) -> tuple[dict, dict]:
     ir = doc_ir.from_document(doc)
     doc_ir.apply_keys(ir, doc_ir.named_ranges_of(doc, ir.get("tab")))
     doc_merge.restore_unreadable(ir, *sources)
+    ours, base = (list(sources) + [None, None])[:2]
+    doc_merge.restore_pictures(ir, base, ours)
     ir["document"] = ident
     return doc, ir
 
@@ -170,6 +229,99 @@ def moved_on(error: HttpError) -> bool:
     return error.resp.status in (400, 409) and "revision" in str(error).lower()
 
 
+class Stager:
+    """Pictures for `insertInlineImage`, which takes a URL and never bytes.
+
+    The Slides sync's staging deck, one dimension smaller: the pictures a batch needs
+    are imported as a document of their own (`data:` URIs, which Drive's HTML import
+    embeds), the `contentUri` Docs then gives each one is what the batch inserts, and
+    the staging document is deleted once the batch is in. Measured: a picture inserted
+    that way is copied into the document and still loads after the staging file is
+    gone. No link is ever made public, which is the rule on the Slides side too.
+    """
+
+    NAME = "beamer2slides docs staging (temporary)"
+
+    def __init__(self, drive, docs, path: Path):
+        self.drive, self.docs, self.path = drive, docs, path
+        self.urls: dict[str, str] = {}
+        self.files: list[str] = []
+
+    def resolve(self, requests: list[dict]) -> list[dict]:
+        """The requests with every staged picture's URL filled in."""
+        wanted = [r["insertInlineImage"]["uri"][len(doc_merge.STAGE):] for r in requests
+                  if r.get("insertInlineImage", {}).get("uri", "").startswith(doc_merge.STAGE)]
+        needed = sorted(set(wanted) - self.urls.keys())
+        if needed:
+            self._stage(needed)
+        out = []
+        for request in requests:
+            image = request.get("insertInlineImage")
+            if image and image["uri"].startswith(doc_merge.STAGE):
+                request = {"insertInlineImage": image | {
+                    "uri": self.urls[image["uri"][len(doc_merge.STAGE):]]}}
+            out.append(request)
+        return out
+
+    def _stage(self, sources: list[str]) -> None:
+        # Numbered paragraphs, so a picture the import could not take is missed by
+        # name rather than shifting every URL after it onto the wrong picture.
+        body = "".join(f'<p>{n}:<img src="{data_uri(self.path.parent / src)}"></p>'
+                       for n, src in enumerate(sources))
+        ident = self.drive.files().create(
+            body={"name": self.NAME, "mimeType": DOC_MIME, "appProperties": {"b2sStaging": "docs"}},
+            media_body=MediaIoBaseUpload(io.BytesIO(f"<html><body>{body}</body></html>".encode()),
+                                         mimetype="text/html"), fields="id").execute()["id"]
+        self.files.append(ident)
+        staged = doc_ir.from_document(
+            self.docs.documents().get(documentId=ident, includeTabsContent=True).execute())
+        for block in staged["blocks"]:
+            label = doc_ir.runs_text(block["runs"]).split(":")[0]
+            uris = [r.get("uri") for r in block["runs"] if r.get("chip") == "image"]
+            if label.isdigit() and int(label) < len(sources) and uris and uris[0]:
+                self.urls[sources[int(label)]] = uris[0]
+        missing = [s for s in sources if s not in self.urls]
+        if missing:
+            raise RuntimeError(f"the staging document brought no picture for {missing[:3]}")
+
+    def close(self) -> None:
+        for ident in self.files:
+            try:
+                self.drive.files().delete(fileId=ident).execute()
+            except HttpError as err:
+                print(f"  the staging document {ident} could not be deleted ({err.resp.status})")
+        self.files = []
+
+
+def fetch_pictures(path: Path, live: dict) -> int:
+    """Put the pictures a reader inserted into the document beside the canonical file.
+
+    Their `contentUri` lasts about half an hour and names nothing of ours, so a file
+    that pointed there would be broken by tomorrow. Each one is saved once, under its
+    object id, in `<stem>.media/`, and from then on the file carries it like any other
+    picture — which is what makes a reader's picture something git can keep.
+    """
+    done = 0
+    for run in doc_merge._image_runs(live["blocks"]):
+        if run.get("src") or not run.get("uri") or not run.get("value"):
+            continue
+        try:
+            with urllib.request.urlopen(run["uri"], timeout=60) as reply:
+                data, mime = reply.read(), reply.headers.get_content_type()
+        except OSError as err:
+            print(f"  the picture {run['value']} could not be fetched: {err}")
+            continue
+        suffix = mimetypes.guess_extension(mime) or ".png"
+        suffix = ".jpg" if suffix in (".jpe", ".jpeg") else suffix
+        folder = path.parent / f"{path.stem}.media"
+        folder.mkdir(parents=True, exist_ok=True)
+        name = re.sub(r"[^A-Za-z0-9_.-]", "_", run["value"]) + suffix
+        (folder / name).write_bytes(data)
+        run["src"], run["sha"] = f"{folder.name}/{name}", digest(data)
+        done += 1
+    return done
+
+
 def plant_ranges(docs, ident: str, ir: dict) -> int:
     """Name every keyed block the document does not name yet.
 
@@ -208,6 +360,9 @@ def settle(docs, ident: str, path: Path, ours: dict, base: dict,
         send(docs, ident, tidy)
     if plant_ranges(docs, ident, live) or tidy:
         _, live = read_document(docs, ident, ours, base)
+    if planned:
+        doc_merge.place_pictures(live, planned)
+    fetch_pictures(path, live)
     write_file(path, live, ident)
     save_base(path, live)
     return live
@@ -279,7 +434,7 @@ def push(path: Path, name: str | None = None, new_doc: bool = False) -> dict:
                          f"  Use `docs sync` to write to it, or --new-doc for a second one.")
     creds = credentials()
     drive, docs = drive_service(creds), docs_service(creds)
-    html = doc_ir.to_html(dict(source) | {"document": None})
+    html = doc_ir.to_html(embedded(path, source) | {"document": None})
     ident = drive.files().create(
         body={"name": name or source.get("title") or path.stem, "mimeType": DOC_MIME},
         media_body=MediaIoBaseUpload(io.BytesIO(html.encode("utf-8")), mimetype="text/html"),
@@ -291,7 +446,7 @@ def push(path: Path, name: str | None = None, new_doc: bool = False) -> dict:
     doc_merge.inherit_keys(source, live)
     doc_merge.restore_unreadable(live, source)
     plant_ranges(docs, ident, live)
-    live = settle(docs, ident, path, source, source)
+    live = settle(docs, ident, path, source, source, source["blocks"])
     return {"document": ident, "url": url(ident), "blocks": len(live["blocks"]),
             "anchored": sum(1 for b in live["blocks"] if b.get("rangeId")),
             "notes": limits(source, doc)}
@@ -338,27 +493,32 @@ def sync(path: Path, document: str | None = None, dry_run: bool = False,
         docs, ident, path, ours, base, doc, theirs, result)
     info = report()
     attempt, revision = 0, doc.get("revisionId")
-    while True:
-        try:
-            if result["requests"]:
-                send(docs, ident, result["requests"], revision)
-            break
-        except HttpError as err:
-            attempt += 1
-            if not moved_on(err) or attempt >= ATTEMPTS:
-                raise
-            # Somebody typed between the read and the write. Read again and re-plan:
-            # their words are now part of `theirs`, so the merge keeps them.
-            print(f"  the document changed while this sync was planned; reading it again "
-                  f"({attempt}/{ATTEMPTS - 1})")
-            doc, theirs = read_document(docs, ident, ours, base)
-            ours = read_file(path)  # (the file may have been committed to in the meantime)
-            result = doc_merge.plan(base, ours, theirs)
-            doc, theirs, base, result, more = _write_structure(
-                docs, ident, path, ours, base, doc, theirs, result)
-            shaped += more
-            revision = doc.get("revisionId")
-            info = report({"replanned": attempt})
+    stager = Stager(drive, docs, path)
+    try:
+        while True:
+            try:
+                if result["requests"]:
+                    send(docs, ident, stager.resolve(result["requests"]), revision)
+                break
+            except HttpError as err:
+                attempt += 1
+                if not moved_on(err) or attempt >= ATTEMPTS:
+                    raise
+                # Somebody typed between the read and the write. Read again and re-plan:
+                # their words are now part of `theirs`, so the merge keeps them.
+                print(f"  the document changed while this sync was planned; reading it again "
+                      f"({attempt}/{ATTEMPTS - 1})")
+                doc, theirs = read_document(docs, ident, ours, base)
+                ours = read_file(path)  # (the file may have been committed to meanwhile)
+                result = doc_merge.plan(base, ours, theirs)
+                doc, theirs, base, result, more = _write_structure(
+                    docs, ident, path, ours, base, doc, theirs, result)
+                shaped += more
+                revision = doc.get("revisionId")
+                info = report({"replanned": attempt})
+    finally:
+        # The pictures are in the document now, copied: the staging file can go.
+        stager.close()
 
     live = settle(docs, ident, path, ours, base, result["blocks"])
     info["blocks"] = len(live["blocks"])

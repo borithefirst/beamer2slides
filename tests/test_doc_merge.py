@@ -68,6 +68,11 @@ def applied(ir: dict, requests: list[dict]) -> list[str]:
             at = request["insertText"]["location"]["index"] - 1
             assert 0 <= at <= len(text), f"index {at + 1} is outside the document"
             text = text[:at] + request["insertText"]["text"] + text[at:]
+        elif any(k in request for k in ("insertInlineImage", "insertPerson", "insertDate")):
+            # A picture or a chip: one unit, which `block_text` shows as FROZEN.
+            at = next(iter(request.values()))["location"]["index"] - 1
+            assert 0 <= at < len(text), f"object index {at + 1} is not inside a paragraph"
+            text = text[:at] + doc_merge.FROZEN + text[at:]
         elif "deleteContentRange" in request:
             span = request["deleteContentRange"]["range"]
             # The body's last newline is its own: Google refuses a range that holds it.
@@ -177,15 +182,36 @@ def test_index_arithmetic_counts_a_chip_as_one_unit_not_its_words():
                                                                    "endIndex": 11}
 
 
-def test_a_source_that_would_rewrite_a_chip_is_refused():
+def test_a_source_that_would_rewrite_a_chip_the_document_also_edited_is_refused():
     base = live([chipped("due ", " please")])
     ours = live([{"kind": "paragraph", "key": "p:due",
                   "runs": [{"text": "due tomorrow please"}]}])
-    result = doc_merge.plan(base, ours, live(base["blocks"]))
+    theirs = live([chipped("due ", " please, really")])
+    result = doc_merge.plan(base, ours, theirs)
     assert result["requests"] == []
     assert "left alone" in result["notes"][0]
     assert doc_merge.frozen_of(result["blocks"][0]) == (("date", "Sep 25, 2026",
                                                         "2026-09-25T12:00:00Z"),)
+
+
+def test_a_chip_the_source_took_out_of_an_untouched_block_is_taken_out():
+    """The document left the block as both sides agreed, so the file's change is the
+    only one there is: the block is written again, without the chip."""
+    base = live([chipped("due ", " please")])
+    ours = live([{"kind": "paragraph", "key": "p:due",
+                  "runs": [{"text": "due tomorrow please"}]}])
+    result = doc_merge.plan(base, ours, live(base["blocks"]))
+    assert result["blocks"][0]["rewrite"] and not result["notes"]
+    assert applied(live(base["blocks"]), result["requests"]) == ["due tomorrow please"]
+
+
+def test_an_equation_is_never_deleted_to_write_a_block_again():
+    equation = {"chip": "equation", "frozen": True, "text": ""}
+    base = live([{"kind": "paragraph", "key": "p:eq", "runs": [{"text": "so "}, dict(equation)]}])
+    ours = live([{"kind": "paragraph", "key": "p:eq",
+                  "runs": [{"text": "so "}, dict(equation), dict(CHIP)]}])
+    result = doc_merge.plan(base, ours, live(base["blocks"]))
+    assert result["requests"] == [] and "no request can write" in result["notes"][0]
 
 
 # ---------------------------------------------------------------- styling
@@ -511,13 +537,129 @@ def test_a_new_table_lands_in_the_base_where_the_document_has_it():
     assert [b["key"] for b in rebased["blocks"]] == ["p:before", "t:new", "t:grid", "p:after"]
 
 
-def test_a_new_block_carrying_a_chip_is_reported_not_written():
+def test_a_new_block_carrying_an_equation_is_reported_not_written():
     ours = live([BASE["blocks"][0],
-                 {"kind": "paragraph", "key": "p:chip", "runs": [{"text": "due "}, dict(CHIP)]}]
+                 {"kind": "paragraph", "key": "p:chip", "runs": [
+                     {"text": "so "}, {"chip": "equation", "frozen": True, "text": ""}]}]
                 + BASE["blocks"][1:])
     result = doc_merge.plan(BASE, ours, live(BASE["blocks"]))
     assert result["requests"] == []
-    assert "no import can create one" in result["notes"][0]
+    assert "no request can create" in result["notes"][0]
+
+
+def test_a_new_block_carrying_a_date_or_a_person_is_written_with_them():
+    """Measured: insertDate and insertPerson make the chip; a rich link is refused."""
+    person = {"chip": "person", "frozen": True, "text": "Ada", "value": "ada@example.com"}
+    ours = live([BASE["blocks"][0],
+                 {"kind": "paragraph", "key": "p:chip", "runs": [
+                     {"text": "due "}, dict(CHIP), {"text": " ask "}, person]}]
+                + BASE["blocks"][1:])
+    result = doc_merge.plan(BASE, ours, live(BASE["blocks"]))
+    at = BASE["blocks"][1]["span"][0]
+    kinds = [next(iter(r)) for r in result["requests"]]
+    assert kinds[:3] == ["insertText", "insertPerson", "insertDate"]
+    assert result["requests"][0]["insertText"]["text"] == "due  ask \n"
+    # Back to front, each at its place in the words: the person after "due  ask ",
+    # then the date after "due ", which pushes the person one unit right.
+    assert result["requests"][1]["insertPerson"] == {
+        "location": {"index": at + 9}, "personProperties": {"email": "ada@example.com"}}
+    assert result["requests"][2]["insertDate"]["location"] == {"index": at + 4}
+    assert applied(live(BASE["blocks"]), result["requests"]) == texts(result)
+
+
+# ---------------------------------------------------------------- pictures
+
+def picture(src: str, **rest) -> dict:
+    return {"chip": "image", "frozen": True, "text": "", "src": src, **rest}
+
+
+def figure(key: str, *runs: dict) -> dict:
+    return {"kind": "paragraph", "key": key, "runs": [dict(r) for r in runs]}
+
+
+def test_a_picture_the_source_added_is_staged_and_inserted():
+    ours = live(BASE["blocks"][:1] + [figure("p:plot", picture("figures/plot.png", sha="s1",
+                                                               size=[60, 40]))]
+                + BASE["blocks"][1:])
+    result = doc_merge.plan(BASE, ours, live(BASE["blocks"]))
+    at = BASE["blocks"][1]["span"][0]
+    assert result["requests"][0] == {"insertText": {"location": {"index": at}, "text": "\n"}}
+    # The file's name stands in for a URL until `doc_sync.Stager` has one, and the
+    # size goes in points: 60 × 40 px is what the importer makes 45 × 30 pt.
+    assert result["requests"][1] == {"insertInlineImage": {
+        "location": {"index": at}, "uri": doc_merge.STAGE + "figures/plot.png",
+        "objectSize": {"width": {"magnitude": 45.0, "unit": "PT"},
+                       "height": {"magnitude": 30.0, "unit": "PT"}}}}
+    assert applied(live(BASE["blocks"]), result["requests"]) == texts(result)
+
+
+def test_a_picture_among_words_goes_where_the_words_put_it():
+    ours = live(BASE["blocks"] + [figure("p:inline", {"text": "see "}, picture("a.png", sha="a"),
+                                         {"text": " and "}, picture("b.png", sha="b"))])
+    result = doc_merge.plan(BASE, ours, live(BASE["blocks"]))
+    assert applied(live(BASE["blocks"]), result["requests"]) == texts(result)
+    assert texts(result)[-1] == f"see {doc_merge.FROZEN} and {doc_merge.FROZEN}"
+
+
+def test_a_picture_the_source_regenerated_is_replaced():
+    base = live([para("p:one", "one"), figure("p:plot", picture("plot.png", value="i.0", sha="old"))])
+    theirs = live(base["blocks"])
+    theirs["blocks"][1]["runs"][0]["uri"] = "https://lh7/old"
+    ours = live([para("p:one", "one"), figure("p:plot", picture("plot.png", value="i.0", sha="new"))])
+    result = doc_merge.plan(base, ours, theirs)
+    start, end = theirs["blocks"][1]["span"]
+    assert result["requests"][0] == {"deleteContentRange": {"range": {
+        "startIndex": start, "endIndex": end - 1}}}
+    assert result["requests"][1]["insertInlineImage"]["uri"] == doc_merge.STAGE + "plot.png"
+    assert applied(theirs, result["requests"]) == texts(result)
+
+
+def test_a_picture_the_source_only_renamed_is_no_change():
+    base = live([figure("p:plot", picture("old-name.png", value="i.0", sha="same"))])
+    ours = live([figure("p:plot", picture("new-name.png", value="i.0", sha="same"))])
+    theirs = live([figure("p:plot", {"chip": "image", "frozen": True, "text": "", "value": "i.0"})])
+    doc_merge.restore_pictures(theirs, base, ours)
+    assert theirs["blocks"][0]["runs"][0]["src"] == "new-name.png"   # the file follows the rename
+    assert doc_merge.plan(base, ours, theirs)["requests"] == []
+
+
+def test_a_picture_file_that_is_not_checked_out_is_no_change():
+    base = live([figure("p:plot", picture("plot.png", value="i.0", sha="s"))])
+    ours = live([figure("p:plot", picture("plot.png", value="i.0", missing=True))])
+    theirs = live(base["blocks"])
+    assert doc_merge.plan(base, ours, theirs)["requests"] == []
+
+
+def test_a_picture_the_reader_replaced_is_the_documents():
+    base = live([figure("p:plot", picture("plot.png", value="i.0", sha="s"))])
+    theirs = live([figure("p:plot", {"chip": "image", "frozen": True, "text": "", "value": "kix.9"})])
+    result = doc_merge.plan(base, live(base["blocks"]), theirs)
+    assert result["requests"] == []
+
+
+def test_a_moved_block_with_a_picture_is_written_from_the_documents_copy():
+    was = live([para("p:alpha", "alpha one"), para("p:bravo", "bravo two"),
+                para("p:charlie", "charlie three"),
+                figure("p:plot", {"text": "see "}, picture("plot.png", value="i.0", sha="s")),
+                para("p:echo", "echo five")])
+    theirs = live(was["blocks"])
+    theirs["blocks"][3]["runs"][1]["uri"] = "https://lh7/plot"
+    ours = live([was["blocks"][i] for i in (A, D, B, C, E)])
+    result = doc_merge.plan(was, ours, theirs)
+    images = [r["insertInlineImage"] for r in result["requests"] if "insertInlineImage" in r]
+    assert [i["uri"] for i in images] == ["https://lh7/plot"]    # no staging: Docs has it
+    assert applied(theirs, result["requests"]) == texts(result)
+
+
+def test_pictures_just_inserted_learn_their_files_by_place():
+    planned = [figure("p:plot", {"text": "a "}, picture("a.png", sha="1", alt="first"),
+                      picture("b.png", sha="2"))]
+    back = {"blocks": [figure("p:plot", {"text": "a "},
+                              {"chip": "image", "frozen": True, "text": "", "value": "kix.1"},
+                              {"chip": "image", "frozen": True, "text": "", "value": "kix.2"})]}
+    assert doc_merge.place_pictures(back, planned) == 2
+    runs = back["blocks"][0]["runs"]
+    assert (runs[1]["src"], runs[1]["alt"], runs[2]["src"]) == ("a.png", "first", "b.png")
 
 
 # ---------------------------------------------------------------- add, delete, order

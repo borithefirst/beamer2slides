@@ -70,6 +70,12 @@ RICH = {
             [[{"kind": "paragraph", "runs": [{"text": "c"}]}],
              [{"kind": "paragraph", "runs": [{"text": "d"}]}]],
         ]},
+        {"kind": "paragraph", "runs": [
+            {"chip": "image", "frozen": True, "text": "", "src": "figures/plot.png",
+             "alt": "a plot & its axes", "size": [60, 40], "value": "kix.abc"}]},
+        {"kind": "paragraph", "runs": [
+            {"text": "see "}, {"chip": "image", "frozen": True, "text": "", "src": "b.png"},
+            {"text": " here"}]},
         {"kind": "paragraph", "runs": [{"text": "The end."}]},
     ],
 }
@@ -103,12 +109,38 @@ def test_a_chip_keeps_its_value_through_the_file():
     assert 'data-chip="date"' in html and 'data-value="2026-09-25T12:00:00Z"' in html
     chips = [r for b in doc_ir.from_html(html)["blocks"]
              for r in b.get("runs", []) if r.get("frozen")]
-    assert [c["chip"] for c in chips] == ["date", "person"]
+    assert [c["chip"] for c in chips] == ["date", "person", "image", "image"]
     assert chips[0]["value"] == "2026-09-25T12:00:00Z"
     assert chips[1]["text"] == "Boris Arnoux"
 
 
+def test_a_picture_is_an_img_that_names_its_file_and_its_object():
+    html = doc_ir.to_html(RICH)
+    assert ('<p><img src="figures/plot.png" alt="a plot &amp; its axes" width="60" height="40" '
+            'data-object="kix.abc"></p>') in html.splitlines()
+    # One outside any paragraph is a paragraph of its own.
+    ir = doc_ir.from_html("<body><img src='x.png' width='30px' height='20'><p>after</p></body>")
+    assert ir["blocks"][0]["runs"] == [{"chip": "image", "frozen": True, "text": "",
+                                        "src": "x.png", "size": [30, 20]}]
+    assert doc_ir.key_blocks(ir)["blocks"][0]["key"] == "paragraph:x"
+
+
 # ---------------------------------------------------------------- live document
+
+def test_a_picture_in_the_document_reads_with_its_size_alt_and_url():
+    doc = {"body": {"content": [paragraph("x", 1, elements=[
+        {"startIndex": 1, "endIndex": 2, "inlineObjectElement": {"inlineObjectId": "kix.1"}},
+        {"startIndex": 2, "endIndex": 3, "textRun": {"content": "\n"}}])]},
+        "inlineObjects": {"kix.1": {"inlineObjectProperties": {"embeddedObject": {
+            "description": "the alt", "size": {"width": {"magnitude": 45, "unit": "PT"},
+                                               "height": {"magnitude": 30, "unit": "PT"}},
+            "imageProperties": {"contentUri": "https://lh7/x"}}}}}}
+    run = doc_ir.from_document(doc)["blocks"][0]["runs"][0]
+    assert run == {"chip": "image", "frozen": True, "text": "", "value": "kix.1", "width": 1,
+                   "size": [60, 40], "alt": "the alt", "uri": "https://lh7/x"}
+    # The URL dies within the hour and never reaches the file.
+    assert "lh7" not in doc_ir.to_html({"title": "", "blocks": [{"kind": "paragraph",
+                                                                  "runs": [run]}]})
 
 def paragraph(text, start, style=None, bullet=None, elements=None):
     end = start + len(text) + 1

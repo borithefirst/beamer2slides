@@ -57,8 +57,103 @@ def _match_text(block: dict) -> str:
 
 def frozen_of(block: dict) -> tuple:
     """What the frozen runs are, in order. Two blocks may only be merged if equal."""
-    return tuple((r["chip"], r.get("text", ""), r.get("value", ""))
-                 for r in block.get("runs", []) if r.get("frozen"))
+    return tuple(_frozen_id(r) for r in block.get("runs", []) if r.get("frozen"))
+
+
+def _frozen_id(run: dict) -> tuple:
+    """A frozen run's identity. A picture is its object *and* the file it shows — the
+    file's name and a digest of its bytes — so a figure the source regenerated under
+    the same name is a picture that changed."""
+    if run.get("chip") == "image":
+        # By its bytes where they are known, so a file the source only renamed is the
+        # same picture; by its name where they are not (a URL, a file not checked out).
+        return ("image", run.get("value", ""), run.get("sha") or run.get("src", ""))
+    return (run["chip"], run.get("text", ""), run.get("value", ""))
+
+
+def writable(run: dict) -> bool:
+    """Whether a request can create this frozen run (measured, docs/google-docs.md):
+    a picture from a file or a URL, a person chip from its email, a date chip from its
+    timestamp. A rich link is refused by the API; an equation, a dropdown, a footnote
+    and a table of contents have no request at all."""
+    if not run.get("frozen"):
+        return True
+    if run.get("chip") == "image":
+        return bool(run.get("uri") or (run.get("src") and not run.get("missing")))
+    return run.get("chip") in ("person", "date") and bool(run.get("value"))
+
+
+def _writable_block(block: dict) -> bool:
+    return all(writable(r) for r in block.get("runs", []))
+
+
+def restore_pictures(live: dict, base: dict | None, ours: dict | None = None) -> dict:
+    """Tell each picture in the document which file it shows, from the files that know.
+
+    The document knows a picture by its object id and nothing else of ours, so the
+    canonical file carries the id (`data-object`) and the base remembers it with the
+    file's name and digest. The base decides: it says what the picture was when both
+    sides last agreed, which is what makes a figure the source regenerated a change —
+    unless the file shows the same bytes under another name, which is a rename and
+    nothing to write. What the document cannot carry (an alt text on a picture a sync
+    inserted) is filled in the same way; the document's own wins wherever it has one.
+    """
+    was = {r["value"]: r for r in _image_runs((base or {}).get("blocks", [])) if r.get("value")}
+    now = {r["value"]: r for r in _image_runs((ours or {}).get("blocks", [])) if r.get("value")}
+    for run in _image_runs(live["blocks"]):
+        before, after = was.get(run.get("value")), now.get(run.get("value"))
+        if after is not None and (before is None or after.get("sha") == before.get("sha")):
+            _fill_picture(run, after)
+        _fill_picture(run, before)
+    return live
+
+
+def place_pictures(live: dict, planned: list[dict]) -> int:
+    """Pictures the sync just inserted, told their files by where they stand: a new
+    object id is unknown to every file, but it is the n-th picture of a block the
+    plan wrote, and so is the file it was made from."""
+    by_key = {b["key"]: b for b in planned if b.get("key")}
+    done = 0
+    for block in live["blocks"]:
+        wanted = by_key.get(block.get("key"))
+        if wanted is None:
+            continue
+        mine, theirs = list(_image_runs([wanted])), list(_image_runs([block]))
+        if len(mine) != len(theirs):
+            continue
+        for run, source in zip(theirs, mine):
+            if not run.get("src") and source.get("src"):
+                _fill_picture(run, source)
+                done += 1
+    return done
+
+
+def _unseen_pictures(ours: dict, base: dict) -> None:
+    """A picture file the checkout does not have says nothing about its bytes: take the
+    base's word for them, or every sync would see it change."""
+    was = {r["value"]: r for r in _image_runs(base["blocks"]) if r.get("value")}
+    for run in _image_runs(ours["blocks"]):
+        if run.get("missing") and not run.get("sha") and run.get("value") in was:
+            if was[run["value"]].get("sha"):
+                run["sha"] = was[run["value"]]["sha"]
+
+
+def _fill_picture(run: dict, source: dict | None) -> None:
+    if source is None:
+        return
+    for key in ("src", "sha", "alt", "title"):
+        if not run.get(key) and source.get(key):
+            run[key] = source[key]
+
+
+def _image_runs(blocks: list[dict]):
+    for block in blocks:
+        for row in block.get("rows", []):
+            for cell in row:
+                yield from _image_runs(cell)
+        for run in block.get("runs", []):
+            if run.get("chip") == "image":
+                yield run
 
 
 def restore_unreadable(live: dict, *sources: dict) -> dict:
@@ -128,10 +223,8 @@ def styles_of(block: dict) -> tuple:
     when somebody rewrites a word, which is the text merge's business. A mark applied
     to part of a run splits it, so the run count carries the boundaries.
     """
-    return tuple(("chip" if r.get("frozen") else "text",
-                  frozenset((k, v) for k, v in r.items()
-                            if k not in ("text", "width", "frozen", "chip", "value",
-                                         "format", "locale", "mime")))
+    return tuple(("chip", frozenset()) if r.get("frozen") else
+                 ("text", frozenset((k, v) for k, v in r.items() if k not in ("text", "width")))
                  for r in block.get("runs", []))
 
 
@@ -366,10 +459,11 @@ def _apply_source_moves(base: dict, ours: dict, theirs: dict, merged: list, note
     for key in _moved_keys(was, mine):
         block = placed[key]
         # A move is written as a delete and a fresh insert, so it can only carry what
-        # an insert can write: not a table's grid, and not a chip.
-        if block.get("kind") == "table" or FROZEN in block_text(block):
-            notes.append(f"{key}: the source moved it, but a block with a table or a chip in it "
-                         f"cannot be written from nothing — left where the document has it")
+        # an insert can write: not a table's grid, and not a chip no request creates.
+        if block.get("kind") == "table" or not _writable_block(block):
+            notes.append(f"{key}: the source moved it, but a block with a table or an "
+                         f"equation-like chip in it cannot be written from nothing — "
+                         f"left where the document has it")
             continue
         merged.remove(block)
         index = next(i for i, b in enumerate(ours["blocks"]) if b.get("key") == key)
@@ -396,7 +490,25 @@ def _merge_block(was: dict, mine: dict, live: dict, conflicts: list, notes: list
     out = dict(live)
     if live.get("kind") == "table":
         return _merge_table(was, mine, live, conflicts, notes)
-    if frozen_of(mine) != frozen_of(live):
+    # Only the source's own chip changes need a decision: one the document made (a
+    # picture a reader replaced, a chip inserted) is merged like its words, and the
+    # edits planned for the source's words never touch it.
+    if frozen_of(mine) != frozen_of(live) and frozen_of(mine) != frozen_of(was):
+        if (frozen_of(live) == frozen_of(was) and block_text(live) == block_text(was)
+                and styles_of(live) == styles_of(was)):
+            # The source added, removed or replaced a picture or a chip in a block the
+            # document left exactly as it was: the block is written again from the
+            # file, which is a merge, since the document has nothing of its own in it.
+            runs = _rewritten_runs(mine, live)
+            # Only when nothing is lost for good: the block is deleted before it is
+            # written, so an equation in it — which no request can make again — keeps
+            # the whole block as the document has it.
+            if _writable_block(live) and all(writable(r) for r in runs):
+                return out | {k: mine[k] for k in ("kind", "level", "ordered", "align")
+                              if k in mine} | {"runs": runs, "rewrite": True, "origin": "merged"}
+            notes.append(f"{key}: the source changed a chip or picture no request can write "
+                         f"— left alone")
+            return out | {"origin": "frozen content differs"}
         notes.append(f"{key}: the source would rewrite a chip or equation — left alone")
         return out | {"origin": "frozen content differs"}
     text, clashes = diff3(block_text(was), block_text(mine), block_text(live))
@@ -524,6 +636,23 @@ def _at(block: dict, row: int, cell: int, index: int) -> dict | None:
         return None
 
 
+def _rewritten_runs(mine: dict, live: dict) -> list[dict]:
+    """The file's runs, with every frozen run the document already has taken from the
+    document — it knows where that picture's pixels are, and what a chip says."""
+    have: dict[tuple, list] = {}
+    for run in live.get("runs", []):
+        if run.get("frozen"):
+            have.setdefault(_frozen_id(run), []).append(run)
+    out = []
+    for run in mine.get("runs", []):
+        if run.get("frozen"):
+            same = have.get(_frozen_id(run))
+            out.append(dict(same.pop(0)) if same else dict(run) | {"width": 1})
+        else:
+            out.append(dict(run) | {"width": doc_ir.utf16_len(run["text"])})
+    return out
+
+
 def _restyled(live: dict, mine: dict) -> list[dict]:
     """The source's runs, with the document's frozen runs put back where they were."""
     frozen = iter([r for r in live.get("runs", []) if r.get("frozen")])
@@ -616,9 +745,60 @@ def text_requests(live: dict, target: str) -> list[dict]:
     return out
 
 
+def _run_width(run: dict) -> int:
+    """How many index units a run holds: a chip or a picture is one."""
+    if "width" in run:
+        return run["width"]
+    return 1 if run.get("frozen") else doc_ir.utf16_len(run["text"])
+
+
 def _width(block: dict) -> int:
     """How many index units a block's text holds, the paragraph mark apart."""
-    return sum(run.get("width", doc_ir.utf16_len(run["text"])) for run in block.get("runs", []))
+    return sum(_run_width(run) for run in block.get("runs", []))
+
+
+# The `uri` of a picture that has to be staged first: `doc_sync.Stager` swaps it for a
+# URL Google can fetch before the batch is sent, which keeps this module pure.
+STAGE = "b2s-stage:"
+
+
+def _content_requests(at: int, block: dict, before: str = "", after: str = "") -> list[dict]:
+    """A block's words and objects written at `at`, as `before + words + after`.
+
+    The words go in as one piece with the objects left out, and the objects are then
+    inserted into it back to front, each at its offset in those words: a later object
+    is pushed right by the ones in front of it, which is exactly the one unit each of
+    them holds.
+    """
+    words, objects = "", []
+    for run in block.get("runs", []):
+        if run.get("frozen"):
+            objects.append((doc_ir.utf16_len(words), run))
+        else:
+            words += run["text"]
+    text = before + words + after
+    out = [{"insertText": {"location": {"index": at}, "text": text}}] if text else []
+    at += doc_ir.utf16_len(before)
+    for offset, run in reversed(objects):
+        out.append(_object_request(at + offset, run))
+    return out
+
+
+def _object_request(index: int, run: dict) -> dict:
+    location = {"index": index}
+    if run.get("chip") == "person":
+        return {"insertPerson": {"location": location, "personProperties": {"email": run["value"]}}}
+    if run.get("chip") == "date":
+        return {"insertDate": {"location": location,
+                               "dateElementProperties": {"timestamp": run["value"]}}}
+    src = run.get("src", "")
+    uri = run.get("uri") or (src if src.startswith(("https://", "http://")) else STAGE + src)
+    request = {"location": location, "uri": uri}
+    if run.get("size"):
+        width, height = run["size"]
+        request["objectSize"] = {"width": {"magnitude": width * doc_ir.PT_PER_PX, "unit": "PT"},
+                                 "height": {"magnitude": height * doc_ir.PT_PER_PX, "unit": "PT"}}
+    return {"insertInlineImage": request}
 
 
 def _paragraph_requests(start: int, end: int, block: dict, was_item: bool) -> list[dict]:
@@ -655,7 +835,7 @@ def _run_requests(start: int, block: dict, reset: bool = False) -> list[dict]:
     fonts = any(run.get("code") for run in block.get("runs", []))
     out, at = [], start
     for run in block.get("runs", []):
-        width = run.get("width", doc_ir.utf16_len(run["text"]))
+        width = _run_width(run)
         marks = _text_style(run)
         if width and not run.get("frozen") and (marks or reset):
             fields = sorted(set(marks) | (set(MANAGED + (("weightedFontFamily",) if fonts else ()))
@@ -673,11 +853,23 @@ def _bullets_last(paragraph: list[dict], runs: list[dict]) -> list[dict]:
     return [r for r in paragraph if "createParagraphBullets" not in r] + runs + made
 
 
-def _style_requests(start: int, block: dict) -> list[dict]:
+def _style_requests(start: int, block: dict, reset: bool = False) -> list[dict]:
     """Everything but the words, for a block written at `start` from nothing."""
     end = start + _width(block) + 1
     return _bullets_last(_paragraph_requests(start, end, block, was_item=True),
-                         _run_requests(start, block))
+                         _run_requests(start, block, reset))
+
+
+def _block_edits(live: dict, want: dict) -> list[dict]:
+    """What turns one block of the document into what the merge says, in place."""
+    if not want.get("rewrite"):
+        return text_requests(live, block_text(want)) + _restyle_requests(live, want)
+    # Written again from the file: everything but the paragraph mark goes, which keeps
+    # the block where it is (and a table after it happy), and the file's runs go in.
+    start, end = live["span"]
+    out = ([{"deleteContentRange": {"range": {"startIndex": start, "endIndex": end - 1}}}]
+           if end - 1 > start else [])
+    return out + _content_requests(start, want) + _style_requests(start, want, reset=True)
 
 
 def _restyle_requests(live: dict, want: dict) -> list[dict]:
@@ -746,7 +938,7 @@ def requests(theirs: dict, merged: list[dict]) -> list[dict]:
         if index in going or want is None or want.get("span") != live.get("span"):
             continue
         for one, other in _pairs(live, want):
-            edits = text_requests(one, block_text(other)) + _restyle_requests(one, other)
+            edits = _block_edits(one, other)
             if edits:
                 plans.append((one["span"][0], EDIT, edits))
 
@@ -769,29 +961,24 @@ def requests(theirs: dict, merged: list[dict]) -> list[dict]:
         block = merged[position]
         if not _written_here(block):
             continue
-        text = block_text(block)
         at = _insert_index(merged, position)
         if at is not None:
-            plans.append((at, BEFORE, [{"insertText": {"location": {"index": at},
-                                                       "text": text + "\n"}}]
+            plans.append((at, BEFORE, _content_requests(at, block, after="\n")
                           + _style_requests(at, block)))
         elif trailer and position == first:
-            plans.append((tail, APPEND, [{"insertText": {"location": {"index": tail},
-                                                         "text": text}}]
+            plans.append((tail, APPEND, _content_requests(tail, block)
                           + _style_requests(tail, block)))
         elif kept or trailer:
             # Nothing follows it, so it is appended after the document's last
             # paragraph — and the break goes in *first*, the words after it. The
             # body's final newline cannot be written past, so "text\n" at `tail`
             # would join the last paragraph and leave an empty one behind instead.
-            plans.append((tail, APPEND, [{"insertText": {"location": {"index": tail},
-                                                         "text": "\n" + text}}]
+            plans.append((tail, APPEND, _content_requests(tail, block, before="\n")
                           + _style_requests(tail + 1, block)))
         else:
             # Nothing of the document survives: write into the empty paragraph Docs
             # always keeps, and let the empty one end up at the bottom.
-            plans.append((tail, APPEND, [{"insertText": {"location": {"index": tail},
-                                                         "text": text + "\n"}}]
+            plans.append((tail, APPEND, _content_requests(tail, block, after="\n")
                           + _style_requests(tail, block)))
 
     out: list[dict] = []
@@ -810,7 +997,7 @@ def _written_here(block: dict) -> bool:
     moved — but not a table, which is a grid (`structure` builds it), and not a block
     with a chip no request can create (`plan` says so in its notes)."""
     return ((block.get("origin") == "added by the source" or bool(block.get("moved")))
-            and block.get("kind") != "table" and FROZEN not in block_text(block))
+            and block.get("kind") != "table" and _writable_block(block))
 
 
 def structure(theirs: dict, merged: list[dict]) -> tuple[list[dict], list[dict]]:
@@ -995,12 +1182,14 @@ def plan(base: dict, ours: dict, theirs: dict) -> dict:
     doc_ir.key_blocks(ours)
     restore_unreadable(base, ours)
     restore_unreadable(theirs, ours, base)
+    _unseen_pictures(ours, base)
     inherit_keys(base, ours)
     result = merge(base, ours, theirs)
     for block in result["blocks"]:
-        if block.get("origin") == "added by the source" and FROZEN in block_text(block):
-            result["notes"].append(f"{block.get('key')}: a new block with a chip in it cannot be "
-                                   f"written — no import can create one")
+        if block.get("origin") == "added by the source" and not _writable_block(block):
+            result["notes"].append(f"{block.get('key')}: a new block with a chip in it that no "
+                                   f"request can create (or a picture file that is not there) "
+                                   f"cannot be written")
     result["structure"], result["shaped"] = structure(theirs, result["blocks"])
     result["requests"] = requests(theirs, result["blocks"])
     return result

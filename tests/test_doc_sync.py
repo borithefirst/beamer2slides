@@ -42,14 +42,100 @@ def test_the_report_keeps_its_name_beside_a_file_called_doc_html(tmp_path):
     assert "a note" in report.read_text(encoding="utf-8")
 
 
-def test_a_picture_in_the_file_is_reported_not_dropped():
-    """Nothing here can put a picture into a document, so the file saying so is news."""
-    from beamer2slides import doc_ir
-    ir = doc_ir.from_html("<html><body><p>before</p>"
-                          "<p><img src='figures/plot.png'></p><p>after</p></body></html>")
-    assert [doc_merge.block_text(b) for b in ir["blocks"]] == ["before", "", "after"]
-    assert len(ir["unsupported"]) == 1 and "figures/plot.png" in ir["unsupported"][0]
+def test_a_picture_file_is_digested_and_a_missing_one_is_reported(tmp_path):
+    (tmp_path / "figures").mkdir()
+    (tmp_path / "figures" / "plot.png").write_bytes(b"pixels")
+    path = tmp_path / "doc.html"
+    path.write_text("<html><body><p>before</p><p><img src='figures/plot.png'></p>"
+                    "<p><img src='figures/gone.png'></p>"
+                    "<p><img src='https://example.com/x.png'></p></body></html>", encoding="utf-8")
+    ir = doc_sync.read_file(path)
+    plot, gone, remote = (b["runs"][0] for b in ir["blocks"][1:])
+    assert plot["sha"] == doc_sync.digest(b"pixels") and not plot.get("missing")
+    assert gone["missing"] and "figures/gone.png" in ir["unsupported"][0]
+    assert "sha" not in remote and not remote.get("missing")      # a URL: Google fetches it
     assert doc_sync.limits(ir, {}) == ir["unsupported"]
+    # What push hands the importer: the bytes, not a path it could not follow.
+    sent = doc_sync.embedded(path, ir)
+    assert sent["blocks"][1]["runs"][0]["src"].startswith("data:image/png;base64,")
+    assert ir["blocks"][1]["runs"][0]["src"] == "figures/plot.png"   # the file's own is untouched
+
+
+def test_a_base_forgets_the_urls_that_die_within_the_hour(tmp_path):
+    path = tmp_path / "doc.html"
+    doc_sync.save_base(path, {"document": "d", "blocks": [{"kind": "paragraph", "runs": [
+        {"chip": "image", "frozen": True, "text": "", "value": "i.0", "uri": "https://lh7/x"}]}]})
+    run = doc_sync.load_base(path, "d")["blocks"][0]["runs"][0]
+    assert run["value"] == "i.0" and "uri" not in run
+
+
+class _Staging:
+    """Drive and Docs as the stager sees them: an import, a read, a delete."""
+
+    def __init__(self):
+        self.created, self.deleted, self.html = [], [], ""
+
+    def files(self):
+        return self
+
+    def documents(self):
+        return self
+
+    def create(self, body, media_body, fields):
+        self.html = media_body._fd.getvalue().decode()
+        self.created.append(body)
+        return self
+
+    def delete(self, fileId):
+        self.deleted.append(fileId)
+        return self
+
+    def get(self, documentId, includeTabsContent):
+        self.got = documentId
+        return self
+
+    def execute(self):
+        if self.html and not self.created[-1].get("done"):
+            self.created[-1]["done"] = True
+            return {"id": "staging"}
+        if getattr(self, "got", None):
+            import re
+            content, at = [], 1
+            for label in re.findall(r"<p>(\d+):", self.html):
+                content.append({"startIndex": at, "endIndex": at + len(label) + 3, "paragraph": {
+                    "elements": [{"startIndex": at, "endIndex": at + len(label) + 1,
+                                  "textRun": {"content": label + ":"}},
+                                 {"startIndex": at + len(label) + 1, "endIndex": at + len(label) + 2,
+                                  "inlineObjectElement": {"inlineObjectId": f"i.{label}"}},
+                                 {"startIndex": at + len(label) + 2, "endIndex": at + len(label) + 3,
+                                  "textRun": {"content": "\n"}}]}})
+                at += len(label) + 3
+            objects = {f"i.{n}": {"inlineObjectProperties": {"embeddedObject": {
+                "imageProperties": {"contentUri": f"https://lh7/{n}"}}}}
+                for n in range(len(content))}
+            self.got = None
+            return {"body": {"content": content}, "inlineObjects": objects}
+        return {}
+
+
+def test_pictures_are_staged_once_and_the_staging_document_goes(tmp_path):
+    from beamer2slides import doc_merge
+    for name in ("a.png", "b.png"):
+        (tmp_path / name).write_bytes(name.encode())
+    google = _Staging()
+    stager = doc_sync.Stager(google, google, tmp_path / "doc.html")
+    requests = [{"insertInlineImage": {"location": {"index": 5}, "uri": doc_merge.STAGE + "b.png"}},
+                {"insertText": {"location": {"index": 1}, "text": "x"}},
+                {"insertInlineImage": {"location": {"index": 2}, "uri": doc_merge.STAGE + "a.png"}},
+                {"insertInlineImage": {"location": {"index": 1}, "uri": "https://example.com/c.png"}}]
+    sent = stager.resolve(requests)
+    assert [r["insertInlineImage"]["uri"] for r in sent if "insertInlineImage" in r] == [
+        "https://lh7/1", "https://lh7/0", "https://example.com/c.png"]
+    assert "data:image/png;base64," in google.html and len(google.created) == 1
+    stager.resolve(requests)                       # a re-plan stages nothing new
+    assert len(google.created) == 1
+    stager.close()
+    assert google.deleted == ["staging"]
 
 
 def test_only_the_first_tab_is_synced_and_the_others_are_named():

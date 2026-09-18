@@ -319,6 +319,111 @@ def test_a_table_at_the_very_end_and_the_paragraphs_after_it(paper):
     paper.settled()
 
 
+def png(path: Path, colour: tuple, size=(60, 40)) -> str:
+    """A picture file beside the canonical file; its `src` relative to it."""
+    from PIL import Image
+    path.parent.mkdir(parents=True, exist_ok=True)
+    Image.new("RGB", size, colour).save(path, "PNG")
+    return path.relative_to(OUT).as_posix()
+
+
+def objects(paper) -> dict:
+    """The pictures in the document: object id -> its first pixel, fetched."""
+    import io
+    import urllib.request
+    from PIL import Image
+    from beamer2slides import doc_merge
+    from beamer2slides.google_auth import credentials, docs_service
+    _, ir = paper.sync_module.read_document(docs_service(credentials()), paper.ident)
+    out = {}
+    for run in doc_merge._image_runs(ir["blocks"]):
+        with urllib.request.urlopen(run["uri"]) as reply:
+            out[run["value"]] = Image.open(io.BytesIO(reply.read())).convert("RGB").getpixel((5, 5))
+    return out
+
+
+def test_pictures_go_in_follow_the_source_and_come_back_from_the_reader(paper, request):
+    """`insertInlineImage` takes a URL, never bytes: the sync stages the file as a
+    document of its own, inserts from the URL Docs gives it, and deletes the staging
+    file. A picture the reader inserts comes back as a file beside the canonical one."""
+    import re
+    src = png(OUT / f"{request.node.name}-figures" / "square.png", (200, 30, 30))
+    paper.edit('<p id="paragraph:closing">',
+               f'<p id="paragraph:figure"><img src="{src}" alt="a red square" width="60" '
+               f'height="40"></p>\n<p id="paragraph:closing">')
+    info = paper.sync()
+    assert info["conflicts"] == [] and not info["notes"], info["notes"]
+    img = re.search(r'<img src="([^"]+)" alt="a red square" width="60" height="40" '
+                    r'data-object="([^"]+)">', paper.text)
+    assert img and img.group(1) == src, paper.text
+    assert list(objects(paper).values()) == [(200, 30, 30)]
+    paper.settled()
+
+    # The source regenerates the figure under the same name: the picture is replaced.
+    png(OUT / src, (30, 30, 200))
+    paper.sync()
+    assert list(objects(paper).values()) == [(30, 30, 200)]
+    assert f'src="{src}"' in paper.text and img.group(2) not in paper.text
+    paper.settled()
+
+    # A reader inserts a picture of their own; it lands beside the file.
+    from beamer2slides.google_auth import credentials, docs_service
+    docs = docs_service(credentials())
+    _, ir = paper.sync_module.read_document(docs, paper.ident)
+    uri = next(r["uri"] for b in ir["blocks"] for r in b.get("runs", []) if r.get("uri"))
+    closing = find(ir, "The closing paragraph")
+    paper.sync_module.send(docs, paper.ident, [{"insertInlineImage": {
+        "location": {"index": closing["span"][1] - 1}, "uri": uri}}])
+    paper.sync()
+    mine = re.search(r'The closing paragraph\.<img src="([^"]+)"', paper.text)
+    assert mine and (OUT / mine.group(1)).is_file(), paper.text
+    assert mine.group(1).startswith(f"{paper.path.stem}.media/")
+    paper.settled()
+
+    # And the source moves the figure: a move is a delete and a write, and the
+    # picture rides along from the document's own copy.
+    paper.moved("paragraph:figure")
+    paper.sync()
+    text = paper.text
+    assert text.index(f'src="{src}"') > text.index("the second point")
+    assert len(objects(paper)) == 2
+    paper.settled()
+
+
+def test_a_file_with_a_picture_is_pushed_with_it(google, request):
+    from beamer2slides import doc_sync
+    from beamer2slides.google_auth import credentials, drive_service
+    src = png(OUT / f"{request.node.name}-figures" / "plot.png", (20, 160, 20), (80, 50))
+    path = OUT / f"{request.node.name}.html"
+    path.write_text(f'<html><body><p>A figure:</p><p><img src="{src}" alt="green"></p>'
+                    f'<p>after it</p></body></html>', encoding="utf-8")
+    doc_sync.base_path(path).unlink(missing_ok=True)
+    info = doc_sync.push(path, name=f"b2s docs test: {request.node.name}")
+    try:
+        text = path.read_text(encoding="utf-8")
+        assert f'<img src="{src}" alt="green" width="80" height="50" data-object=' in text, text
+        paper = Paper(path, info["document"])
+        paper.settled()
+    finally:
+        drive_service(credentials()).files().delete(fileId=info["document"]).execute()
+
+
+def test_a_block_the_source_added_with_a_date_and_a_person_gets_them(paper):
+    """Measured: `insertDate` and `insertPerson` make the chips, so a new block that
+    carries them is written with them rather than reported."""
+    paper.edit('<p id="paragraph:closing">',
+               '<p id="paragraph:due">due <span class="b2s-chip" data-chip="date" '
+               'data-value="2026-10-01T12:00:00Z"></span>, ask <span class="b2s-chip" '
+               'data-chip="person" data-value="someone@example.com"></span></p>\n'
+               '<p id="paragraph:closing">')
+    info = paper.sync()
+    assert not info["notes"], info["notes"]
+    text = paper.text
+    assert 'data-chip="date" data-value="2026-10-01T12:00:00Z"' in text, text
+    assert 'data-chip="person" data-value="someone@example.com"' in text
+    paper.settled()
+
+
 def test_the_same_words_on_both_sides_conflict_and_the_document_wins(paper):
     paper.edit("The closing paragraph.", "The final paragraph.")
     paper.rewrote("The closing paragraph", "closing", "last")

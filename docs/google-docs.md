@@ -459,17 +459,52 @@ match rows on (every row is a column longer), and that, a cell holding two parag
 and a row out of step with the others are all reported instead — which is what every
 grid change got before.
 
+### Pictures, and the chips a request can make
+
+A picture in the canonical file is an `<img src alt width height data-object>`: `src` is
+a file beside the canonical one (or a URL), `width`/`height` are CSS pixels (measured: a
+60 × 40 px picture imports as 45 × 30 pt, `doc_ir.PT_PER_PX`), and `data-object` is the
+document's id for it. In the IR it is a frozen run — one index unit, never rewritten as
+text — that a sync can nevertheless *create*, which is the difference that matters.
+
+- **The document cannot say which file a picture came from.** `insertInlineImage`
+  records the staging URL as its `sourceUri`, and nothing can set a field of ours on it,
+  so the file carries the object id and the base remembers it with the file's name and
+  a digest of its bytes (`doc_merge.restore_pictures`). A figure the source regenerated
+  under the same name is therefore a *changed* picture, and one it only renamed is not.
+  Pictures a sync has just inserted have ids nobody knows yet; they learn their files by
+  place — the n-th picture of the block the plan wrote (`doc_merge.place_pictures`).
+- **Staging** (`doc_sync.Stager`): `insertInlineImage` takes a URL, never bytes — the
+  same wall as Slides' `createImage`. The pictures one batch needs are imported as a
+  document of their own, with `data:` URIs that Drive's HTML import embeds (measured,
+  `alt` and `title` kept), and each picture's `contentUri` there is what the batch
+  inserts. The staging document is deleted once the batch is in; measured, the inserted
+  picture is a copy and still loads afterwards. No link is ever made public. `push`
+  needs none of this: its import carries the pictures as `data:` URIs directly.
+- **Written:** a picture paragraph the source added; a picture the source added,
+  removed or replaced in a block the document left exactly as it was (the block is
+  written again from the file, `rewrite`); a block with a picture that the source moved
+  (from the document's own copy — its `contentUri` — so nothing is staged).
+- **A picture a reader inserts** comes back as a file: `doc_sync.fetch_pictures` saves
+  it once, under its object id, in `<stem>.media/`, because a `contentUri` dies within
+  the hour. From then on git keeps it like any other picture.
+- **Chips:** `insertPerson` (from the email) and `insertDate` (from the timestamp) make
+  those two chips, so a new block carrying them is written with them, and one that
+  holds them can be moved. `insertRichLink` is refused (measured); an equation, a
+  dropdown, a footnote and a table of contents have no request at all, and a block that
+  holds one is still never deleted to be written again.
+
 ### What the merge refuses to write
 
 Each of these is reported in the sync report, never guessed at:
 
 | Case | Why |
 |---|---|
-| a block whose frozen runs differ between the sides | a chip, an equation, a dropdown or a table of contents cannot be created by any write, so the text around one is left alone rather than rewritten without it |
+| a block whose frozen runs the source changed while the document also changed it — or one that holds a chip no request creates | an equation, a rich link, a dropdown or a table of contents cannot be written again once deleted, so the text around one is left alone rather than rewritten without it. Pictures, dates and people are written (above) |
 | a table whose **grid both sides changed** | the document's grid stands, as it does everywhere else. A grid only the source changed is written — see the structural pass above |
 | a grid change that is **not whole rows or columns** | rows and columns both changed at once, a cell holding two paragraphs, a row out of step with the others: cells merge by their place, and there would be nothing to match them on |
 | a source restyle of words the document rewrote | the marks would have to be matched onto words that are no longer there |
-| a **move of a block with a chip, an equation or a table in it** | a move is a delete and a write, and those cannot be written from nothing — the block stays where the document has it |
+| a **move of a block with an equation-like chip or a table in it** | a move is a delete and a write, and those cannot be written from nothing — the block stays where the document has it |
 | a **reorder both sides made** | the document's order stands whole; the file's is reported |
 
 Everything else is written: text on both sides, a block's kind, level and alignment,
@@ -478,14 +513,11 @@ a removal are listed in `doc_merge.MANAGED`), and whole new blocks with their st
 
 ## Remaining risks
 
-1. **Images on the sync path.** Import via HTML is fine (measured, lossless). But
-   `insertInlineImage` takes a **URI only** — no byte upload, same wall as Slides'
-   `createImage` — so inserting an image into an *existing* doc needs the staging-file
-   trick `sync.stage` already uses. Read-back `contentUri`s live ~30 minutes; the **zip
-   export is the durable, byte-exact picture route**. Until then the dialect has no
-   picture: an image *in the document* reads back as a frozen run and is never touched,
-   and an `<img>` in the canonical file is **reported by `push` and `sync`**
-   (`doc_sync.limits`) rather than dropped in silence.
+1. **Pictures** — retired, see "Pictures, and the chips a request can make" above. What
+   is still open: a picture's size or alt text the *source* changes is not written (no
+   request updates an inline object), and a picture a reader inserts comes back as the
+   `contentUri`'s bytes, which Google may have re-encoded; the zip export would be the
+   byte-exact route.
 2. **Lists in the read-back.** `listId` is opaque and output-only; whether Docs forks or
    reuses one when a user splits a list in the UI is undocumented. What an *imported*
    list's glyphs read as is no longer a risk but a measurement — see the table above.

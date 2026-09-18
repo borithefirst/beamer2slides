@@ -50,6 +50,11 @@ SLUG = re.compile(r"[^a-z0-9]+")
 KEY_PREFIX = "b2s:"
 # The `<meta>` that tells a canonical file which document it belongs to.
 DOCUMENT_META = "b2s-document"
+# An `<img width>` is CSS pixels, a document's picture size is points (measured: a
+# 60 × 40 px picture imports as 45 × 30 pt).
+PT_PER_PX = 0.75
+# Picture fields: what the canonical file says about one, and what only a sync keeps.
+PICTURE_ATTRS = ("src", "alt", "title")
 
 
 # ---------------------------------------------------------------- runs
@@ -157,9 +162,11 @@ def from_document(doc: dict, tab_id: str | None = None) -> dict:
     """
     body, tab = _body_of(doc, tab_id)
     ir = {"title": doc.get("title", ""), "tab": tab, "blocks": []}
-    lists = (doc.get("lists") if "lists" in doc else {}) or _tab_lists(doc, tab)
+    lists = (doc.get("lists") if "lists" in doc else {}) or _tab_part(doc, tab, "lists")
+    objects = (doc.get("inlineObjects") if "body" in doc else None) \
+        or _tab_part(doc, tab, "inlineObjects")
     for element in body:
-        block = _block_of(element, lists)
+        block = _block_of(element, lists, objects)
         if block:
             ir["blocks"].append(block)
     _hide_trailer(ir)
@@ -215,16 +222,37 @@ def _flatten_tabs(tabs: list) -> list:
     return out
 
 
-def _tab_lists(doc: dict, tab_id: str | None) -> dict:
+def _tab_part(doc: dict, tab_id: str | None, part: str) -> dict:
+    """A tab's `lists` or `inlineObjects`: they sit beside its body, not in it."""
     for tab in _flatten_tabs(doc.get("tabs", [])):
         if tab_id in (None, tab.get("tabProperties", {}).get("tabId")):
-            return tab.get("documentTab", {}).get("lists", {})
+            return tab.get("documentTab", {}).get(part, {}) or {}
     return {}
 
 
-def _block_of(element: dict, lists: dict) -> dict | None:
+def _picture(run: dict, objects: dict) -> dict:
+    """What the document says about a picture: its size, its alt text, and where its
+    pixels can be fetched for the next half hour (`uri`, never written to a file)."""
+    embedded = (objects.get(run.get("value"), {}).get("inlineObjectProperties", {})
+                .get("embeddedObject", {}))
+    size = embedded.get("size", {})
+    width = size.get("width", {}).get("magnitude")
+    height = size.get("height", {}).get("magnitude")
+    if width and height:
+        run["size"] = [round(width / PT_PER_PX), round(height / PT_PER_PX)]
+    for key, api in (("alt", "description"), ("title", "title")):
+        if embedded.get(api):
+            run[key] = embedded[api]
+    uri = embedded.get("imageProperties", {}).get("contentUri")
+    if uri:
+        run["uri"] = uri
+    return run
+
+
+def _block_of(element: dict, lists: dict, objects: dict | None = None) -> dict | None:
+    objects = objects or {}
     if "table" in element:
-        return _table_block(element, lists)
+        return _table_block(element, lists, objects)
     if "tableOfContents" in element:
         # Generated content: readable, never writable (no insertTableOfContents in v1).
         return {"kind": "toc", "frozen": True, "runs": [],
@@ -248,7 +276,8 @@ def _block_of(element: dict, lists: dict) -> dict | None:
             continue
         for key, kind in CHIPS.items():
             if key in el:
-                runs.append(_chip_run(kind, el[key]) | {"width": width})
+                run = _chip_run(kind, el[key]) | {"width": width}
+                runs.append(_picture(run, objects) if kind == "image" else run)
                 break
         else:
             # A dropdown chip: an element with a span and no content key at all.
@@ -303,12 +332,13 @@ def _ordered(lists: dict, list_id: str | None, level: int) -> bool | None:
     return None
 
 
-def _table_block(element: dict, lists: dict) -> dict:
+def _table_block(element: dict, lists: dict, objects: dict) -> dict:
     rows = []
     for row in element["table"].get("tableRows", []):
         cells = []
         for cell in row.get("tableCells", []):
-            blocks = [b for b in (_block_of(e, lists) for e in cell.get("content", [])) if b]
+            blocks = [b for b in (_block_of(e, lists, objects) for e in cell.get("content", []))
+                      if b]
             cells.append(blocks)
         rows.append(cells)
     return {"kind": "table", "rows": rows,
@@ -410,7 +440,25 @@ def _runs_html(runs: list[dict]) -> str:
     return "".join(_run_html(r) for r in runs)
 
 
+def _img_html(run: dict) -> str:
+    """A picture: where its file is, what it says, how big, and which object it is.
+
+    `data-object` is the document's name for it. The document cannot say which file a
+    picture came from — `insertInlineImage` records the staging URL, and nothing can
+    set a field of ours on it — so this attribute is what ties the two together the
+    next time round, the way `id=` does for a block.
+    """
+    attrs = "".join(f' {k}="{escape(str(run[k]), quote=True)}"' for k in PICTURE_ATTRS if run.get(k))
+    if run.get("size"):
+        attrs += ' width="%d" height="%d"' % tuple(run["size"])
+    if run.get("value"):
+        attrs += f' data-object="{escape(run["value"], quote=True)}"'
+    return f"<img{attrs}>"
+
+
 def _run_html(run: dict) -> str:
+    if run.get("chip") == "image":
+        return _img_html(run)
     if run.get("frozen"):
         attrs = "".join(f' data-{k}="{escape(str(run[k]), quote=True)}"'
                         for k in ("value", "format", "locale", "mime") if run.get(k))
@@ -498,14 +546,21 @@ class _Reader(HTMLParser):
                 block["align"] = align
             self._open(block | _key_of(attr))
         elif tag == "img":
-            # The dialect has no picture. A document's own images read back as frozen
-            # runs and are never touched, but nothing here can put one *into* a
-            # document: `insertInlineImage` takes a URI, not bytes, so a picture would
-            # need the staging file `sync.stage` builds on the Slides side
-            # (docs/google-docs.md). Say so instead of dropping it in silence.
-            self.ir.setdefault("unsupported", []).append(
-                f"<img src={attr.get('src', '')!r}>: the canonical file cannot carry a "
-                f"picture into a document — insert it in the document instead")
+            # A picture is a frozen run like a chip — one index unit, never rewritten
+            # as text — that a sync can nevertheless create (`doc_merge.writable`).
+            run = {"chip": "image", "frozen": True, "text": ""}
+            run |= {k: attr[k] for k in PICTURE_ATTRS if attr.get(k)}
+            if attr.get("data-object"):
+                run["value"] = attr["data-object"]
+            size = [_pixels(attr.get("width")), _pixels(attr.get("height"))]
+            if all(size):
+                run["size"] = size
+            if self.block is None:
+                # A picture on its own, outside any paragraph: it is one.
+                self._open({"kind": "paragraph", "runs": [run]})
+                self._close()
+            else:
+                self.block["runs"].append(run)
         elif tag == "table":
             self.table = {"kind": "table", "rows": []} | _key_of(attr)
         elif tag == "tr":
@@ -576,6 +631,11 @@ class _Reader(HTMLParser):
         if not text.strip() and not self.block["runs"]:
             return
         self.block["runs"].append({"text": text} | self._style())
+
+
+def _pixels(value: str | None) -> int | None:
+    match = re.match(r"\s*(\d+(?:\.\d+)?)\s*(px)?\s*$", value or "")
+    return round(float(match.group(1))) if match else None
 
 
 def _key_of(attr: dict) -> dict:
@@ -722,4 +782,11 @@ def _first_words(block: dict) -> str:
                     if runs_text(inner.get("runs", [])).strip():
                         return runs_text(inner["runs"])
         return ""
-    return runs_text(block.get("runs", []))
+    words = runs_text(block.get("runs", []))
+    if not words.strip():
+        # A paragraph that is a picture is named after the picture's file.
+        for run in block.get("runs", []):
+            if run.get("chip") == "image" and (run.get("src") or run.get("alt")):
+                name = run.get("src") or ""
+                return re.sub(r"\.\w+$", "", name.rsplit("/", 1)[-1]) if name else run["alt"]
+    return words

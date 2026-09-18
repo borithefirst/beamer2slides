@@ -615,8 +615,8 @@ keys, named ranges), `doc_merge.py` (pure planning), `doc_sync.py` (the commands
   put it. On top of that the blocks the *source* moved go back where the file has them - the
   complement of the longest common subsequence, so one moved section writes one block - and
   both sides reordering is the document's, with a note. The API has no move: it is a delete
-  and a write, so the merged text and styling ride along, a block with a chip or a table in
-  it is not moved at all, and `doc_merge.adopt_keys` gives the rewritten block its key back
+  and a write, so the merged text and styling ride along, a block holding a table or a chip
+  no request can create is not moved at all, and `doc_merge.adopt_keys` gives the rewritten block its key back
   (the delete took its named range with it) before the file is regenerated.
 - Tables merge cell by cell, where identity is the cell's **place**. A grid the source changed
   while the document did not is written, but not with the words: `insertTable` and the
@@ -635,10 +635,18 @@ keys, named ranges), `doc_merge.py` (pure planning), `doc_sync.py` (the commands
   Drive's comments API under `drive.file`): a comment lives in Drive, not in the document's
   content, so nothing the merge reads can see one - and a sync that rewrites the passage it
   hangs on answers it by accident. Never written or resolved from here.
-- What the file cannot carry is reported too (`doc_sync.limits`): an `<img>` (the dialect has no
-  picture - `insertInlineImage` takes a URI, so it would need a staging file like Slides' sync;
-  an image already in the document is a frozen run and survives untouched), and the tabs past
-  the first one, which are read but never written.
+- Pictures are `<img src alt width height data-object>` (px; `PT_PER_PX` 0.75): frozen runs a
+  sync can create. `insertInlineImage` takes a URL only, so `doc_sync.Stager` imports the batch's
+  pictures as a staging document (`data:` URIs, which Drive's HTML import embeds), inserts from
+  its `contentUri`s and deletes it (the inserted copy survives, measured); `push` embeds them as
+  `data:` URIs. The document cannot say which file a picture came from: the file carries the
+  object id, the base the name and byte digest (`restore_pictures`: a regenerated figure is a
+  change, a renamed one is not), new ones learn theirs by place (`place_pictures`), and a picture
+  a reader inserted is saved to `<stem>.media/` (`fetch_pictures`). `insertPerson`/`insertDate`
+  make those chips (rich links refused); a block whose chips the source changed and the document
+  did not touch is written again (`rewrite`), never when it holds an equation-like chip.
+- What the file cannot carry is reported too (`doc_sync.limits`): a picture file that is not
+  there, and the tabs past the first one, which are read but never written.
 - Live suite (opt-in, marker `docs`, ~2 min): `python -m pytest -m docs tests/test_docs_live.py`
   pushes a document per test, edits both sides, syncs, checks a second sync writes nothing, and
   deletes the document. Offline: `tests/test_doc_ir.py`, `test_doc_merge.py`, `test_doc_sync.py`.
