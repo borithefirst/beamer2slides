@@ -27,7 +27,11 @@ MAX_ATTEMPTS = 3
 CHUNK = 450
 PICTURE_OVERLAP = 0.6  # of the larger box: a deck picture the source now draws sits where it does
 SCRATCH = re.compile(r"b2s_m\d{3}")  # emit.measure_jobs' scratch slides
-STAND_IN = 100.0  # pt: size of plain shapes standing in for template shapes
+# pt: size of plain shapes standing in for template shapes. Exactly the 3,000,000 EMU Slides stores
+# every new shape at (it keeps the size asked for in the scale, not the size), because a copy of the
+# stand-in is scaled ABSOLUTE by (box / STAND_IN): at 100 pt the copy came out 2.36 times too big
+# (a block's title bar 1649 pt wide on a 720 pt page, found by the front page's sync demo).
+STAND_IN = 3_000_000 / 12700
 # Object ids sync gives what it creates: b2s_<h6 slide>[_<h6 element>|_k<n>]_<generation><2 letters>
 # plus emit's own suffixes (_g, n, _n0). Nothing a person can make in Slides looks like this.
 SYNC_ID = re.compile(r"b2s_[0-9a-f]{6}(?:_(?:[0-9a-f]{6}|k\d+))?_(\d+)[a-z]{2}[a-z0-9_]*")
@@ -1288,6 +1292,13 @@ class Sync:
                 else:
                     children.append(c)
             if len(children) >= 2:
+                # A group keeps its children's z-order, and the new members were created last, so
+                # on top: a block's recreated panels covered the body text the person had edited and
+                # sync kept (live, the front page's demo). Once grouped, a child can't be restacked
+                # (`restack` orders what is on the page), so the old order goes back now, while they
+                # are all still on the page.
+                reqs += [{"updatePageElementsZOrder": {"pageElementObjectIds": [c], "operation": "BRING_TO_FRONT"}}
+                         for c in children]
                 reqs.append({"groupObjects": {"groupObjectId": g, "childrenObjectIds": children}})
                 replaced[g] = g
             else:

@@ -1417,6 +1417,14 @@ def test_unit_rebuilt_inside_a_group_nested_in_a_user_group(tmp_path):
     assert new_title in groups[0]["childrenObjectIds"] and "OLD_text_body_0" not in groups[0]["childrenObjectIds"]
     assert groups[1]["childrenObjectIds"] == ["BLK", "OLD_text_body_2"]
     assert not s.warnings
+    # Each group's members are stacked in its old order before it is made: the rebuilt title was
+    # created last, so on top, and a group keeps the z-order its children had.
+    for gi, r in enumerate(reqs):
+        if "groupObjects" in r:
+            kids = r["groupObjects"]["childrenObjectIds"]
+            before = reqs[gi - len(kids):gi]
+            assert [x["updatePageElementsZOrder"]["pageElementObjectIds"][0] for x in before] == kids
+            assert all(x["updatePageElementsZOrder"]["operation"] == "BRING_TO_FRONT" for x in before)
 
 
 def _picture_files(folder: Path, transparent: bool, mark=(10, 5, 40, 15), ground=(255, 255, 255)):
@@ -1682,3 +1690,17 @@ def test_conversion_is_stable():
     assert second["pairs"] == {j: j for j in range(len(first["slides"]))}
     assert [(s["key"], [(e["key"], e["ir_hash"]) for e in s["elements"]]) for s in second["slides"]] == \
         [(s["key"], [(e["key"], e["ir_hash"]) for e in s["elements"]]) for s in first["slides"]]
+
+
+def test_a_stand_in_is_made_at_the_size_slides_keeps():
+    """Slides stores a new shape at 3,000,000 EMU whatever size is asked for, and keeps the asked
+    size in the scale; a copy of the stand-in is then scaled ABSOLUTE by box / STAND_IN, which is only
+    the box when the stand-in's own size is what Slides kept. At 100 pt the copy was 2.36 times too
+    big: a block's title bar came back 1649 pt wide on a 720 pt page (live, the front page's demo).
+    (tests/slides_sim.py neither normalises sizes nor copies objects, so only this sees it.)"""
+    from beamer2slides.sync import STAND_IN, stand_in_request
+    size = stand_in_request("b2s_x_k0_1aa", "s", ("ROUND_2_SAME_RECTANGLE",))["createShape"]["elementProperties"]["size"]
+    assert size["width"]["magnitude"] == size["height"]["magnitude"] == 3_000_000
+    assert size["width"].get("unit", "EMU") == "EMU"
+    box_w = 698.0
+    assert round(box_w / STAND_IN * 3_000_000 / 12700, 6) == box_w

@@ -699,6 +699,10 @@ keys, named ranges), `doc_merge.py` (pure planning), `doc_sync.py` (the commands
   The same length governs an `insertText` index and a `FIXED_RANGE` style range, so the styling of a
   box's last word stops one short of the text (`sync.style_range_requests` takes a run's trailing
   newlines off its range; `tests/slides_sim.py` refuses all three the way Google does).
+- Slides stores every shape it creates at 3,000,000 EMU and puts the size asked for into the
+  transform's scale, so an ABSOLUTE scale on a copy is relative to that, not to the size requested
+  (`sync.STAND_IN` is exactly that size). Children of a group can't be restacked: a group rebuilt
+  with new members gets its old child order back before `groupObjects` (`sync.update_slide`).
 - Shape shadows, autofit and text insets are read-only in the API. A .pptx import keeps shadows
   (and duplicateObject, fill and transform changes keep them) but not spAutoFit.
 - python-pptx: setting top/height on a layout placeholder that inherits its position writes x and
