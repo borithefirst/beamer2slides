@@ -320,6 +320,20 @@ sync keeps it unless `--overlays` says otherwise (`sync.overlay_mode`), or a dec
 `--overlays all` would lose its in-between steps. `pull --apply` and `pull --out DIR` keep every
 file they replace (`inverse.keep_backup`: `.bak`, `.bak2`, …, pictures included).
 
+Frame labels (`labels.py`, `docs/labels.md`): `\begin{frame}[label=x]` is the only piece of a slide's
+identity that survives compiling (beamer writes the PDF destination `x`, and `x<n>` per overlay step;
+`extract.frame_labels` reads them back and `identity` keys the slide by them), so a label per frame,
+never changed, is what makes sync reliable; without one a frame falls back to title, occurrence and
+alignment. `python -m beamer2slides label main.tex [--apply]` writes a label into every frame that
+has none, from its title, unique in the document, reading the source only (`texmap.Source`, follows
+`\input`, backups like `pull --apply`). Existing labels are never touched or renamed - each one is a
+promise to the deck converted from it - and duplicates are reported, never resolved: which of two
+frames a slide came from is a question only the author can answer. `convert --check-labels
+warn|error|off` (default warn) reports unlabelled frames and labels on more than one frame
+(`labels.survey`; overlay steps of a frame share its label and are consecutive, so they are not
+duplicates). `docs/ai-authoring.md` is the prompting guide for an AI that maintains the .tex: the
+invariants, how to repair a source that broke them, and what to do with a sync conflict.
+
 Alignment on Google's renderer (`tools/alignment.py out/<deck>`, after `fidelity`): reads the
 Slides element boxes with `presentations.get` (cached in slides_elements.json) and compares each
 thumbnail with the PDF rendered on the same pixel grid, in PDF pt. Writes alignment.json, a table,

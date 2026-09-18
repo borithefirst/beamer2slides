@@ -162,6 +162,11 @@ class Frame:
     title: str | None
     options: str
     fragile: bool
+    # Where a label would be written (labels.py): inside the existing option list, just before its
+    # closing bracket, or - when the frame has no options at all - where a whole `[...]` goes, after
+    # the overlay specification if there is one.
+    opts_end: int = -1
+    opts_at: int = -1
 
 
 class Source:
@@ -230,9 +235,11 @@ class Source:
             if tm:
                 k = match_group(masked, body + tm.end() - 1)
                 title = masked[body + tm.end():k - 1] if k > 0 else None
+        opts_end = args[1][2] if args[1] else -1
+        opts_at = (args[0][2] + 1) if args[0] else after_begin  # after the `<...>` overlay spec
         return Frame(len(self.frames), path, start, end, body, end_start, line_of(masked, start),
                      line_of(masked, end_start), label, visible_text(title) if title else None, opts,
-                     "fragile" in opts)
+                     "fragile" in opts, opts_end, opts_at)
 
     def frame_at(self, path: Path, line: int) -> Frame | None:
         for f in self.frames:

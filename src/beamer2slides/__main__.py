@@ -24,7 +24,20 @@ from .paths import out_root
 BACKUP_MODES = ("auto", "none", "file", "drive", "both")  # = guard.BACKUP_MODES (imported lazily)
 
 
-def cmd_classify(pdf: Path, out: Path, overlays: str = "last") -> tuple[Path, dict, dict]:
+def check_labels(deck: dict, mode: str) -> None:
+    """Say what the deck's frame labels cost a later sync (docs/labels.md). `error` refuses: a
+    person who asked for that would rather fix the source than convert a deck sync cannot follow."""
+    if mode == "off":
+        return
+    from . import identity, labels
+    found = labels.problems(labels.survey([identity.slide_info(s) for s in deck["slides"]]))
+    for line in found:
+        print(f"  labels: {line}")
+    if found and mode == "error":
+        raise SystemExit("--check-labels error: the frames above need labels of their own")
+
+
+def cmd_classify(pdf: Path, out: Path, overlays: str = "last", check: str = "off") -> tuple[Path, dict, dict]:
     out.mkdir(parents=True, exist_ok=True)
     prepared = prepare_notes(pdf, out)
     pdf = prepared.pdf
@@ -51,18 +64,20 @@ def cmd_classify(pdf: Path, out: Path, overlays: str = "last") -> tuple[Path, di
         print(f"  slide {slide['page'] + 1:>2}: {kinds.count('text')} text boxes, {kinds.count('image')} pictures,"
               f" {kinds.count('shape')} shape candidates, {kinds.count('table')} tables,"
               f" {kinds.count('diagram')} diagrams; background: {left or '-'}")
+    check_labels(deck, check)
     return pdf, raw, deck
 
 
 def cmd_convert(pdf: Path, out: Path, title: str | None, new_deck: bool, overlays: str, measure: bool = True,
-                force_rebuild: bool = False, backup: str = "auto") -> None:
+                force_rebuild: bool = False, backup: str = "auto", check: str = "off") -> None:
     from .emit import emit, preflight_rebuild
     from .render import render_backgrounds
 
     source = pdf
     # Whether this folder's deck may be replaced is decided before any work (and again in emit).
     preflight_rebuild(out, source, new_deck, force_rebuild)
-    pdf, raw, deck = cmd_classify(pdf, out, overlays)  # pdf: without note pages, if there were any
+    # (--check-labels error refuses here, before anything is written to Drive)
+    pdf, raw, deck = cmd_classify(pdf, out, overlays, check)  # pdf: without note pages, if there were any
     render_backgrounds(pdf, raw, deck, out)
     (out / "deck.json").write_text(json.dumps(deck, indent=1, ensure_ascii=False), encoding="utf-8")
     title = title or raw["source"]["title"] or source.stem
@@ -121,6 +136,42 @@ def add_recovery(note: dict, info: dict) -> None:
             pass
 
 
+def cmd_label(tex: Path, apply: bool) -> None:
+    """Write a label into every frame that has none. Existing labels are never touched: each one is
+    a promise to a deck that was converted from it (docs/labels.md)."""
+    from . import labels, texmap
+    from .inverse import keep_backup, replace_file
+    if not tex.is_file():
+        raise SystemExit(f"{tex}: no such file (this command reads the .tex, not the PDF)")
+    source = texmap.Source(tex)
+    if not source.frames:
+        raise SystemExit(f"{tex}: no \\begin{{frame}} found - is this the main file of a beamer document?")
+    edits = labels.plan(source)
+    have = sum(1 for f in source.frames if f.label)
+    print(f"{len(source.frames)} frame(s) in {tex}: {have} already labelled, {len(edits)} without")
+    for e in edits:
+        print(f"  {'writing' if apply else 'would write'} label={e['label']:<30} "
+              f"{e['file'].name}:{e['line']}  {e['title'] or '(untitled)'}")
+    seen: dict[str, str] = {}
+    for f in source.frames:
+        if f.label and f.label in seen:
+            print(f"  ! label={f.label} is on more than one frame ({seen[f.label]}, {f.file.name}:{f.begin_line}): "
+                  f"a sync cannot tell which of them a slide came from. Please give each its own.")
+        elif f.label:
+            seen[f.label] = f"{f.file.name}:{f.begin_line}"
+    if not edits:
+        print("every frame already carries a label of its own")
+        return
+    if not apply:
+        print(f"{len(edits)} frame(s) would be labelled. Add --apply to write them.")
+        return
+    for path, text in labels.apply(source, edits).items():
+        bak = keep_backup(path, text)
+        replace_file(path, text)
+        print(f"  {path}{f' (was kept as {bak.name})' if bak else ''}")
+    print(f"labelled {len(edits)} frame(s). Recompile, then convert or sync as usual.")
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(prog="beamer2slides")
     sub = ap.add_subparsers(dest="command", required=True)
@@ -147,6 +198,11 @@ def main() -> None:
             c.add_argument("--predict-places", "--predict-holes", dest="predict_places", action="store_true",
                            help="place inline formula and overlay pictures by prediction only, without measuring "
                                 "their gaps and words on scratch slides")
+        if name in ("classify", "convert"):
+            c.add_argument("--check-labels", choices=["off", "warn", "error"], default="warn",
+                           help="frames without a `label=` of their own, and labels on more than one frame, make "
+                                "a later sync unreliable (docs/labels.md): report them (default), refuse the "
+                                "conversion, or say nothing")
         if name == "fidelity":
             c.add_argument("--refresh", action="store_true", help="re-export slide thumbnails")
     c = sub.add_parser("sync", help="merge a changed PDF into the edited deck (docs/sync.md)")
@@ -174,7 +230,13 @@ def main() -> None:
         c.add_argument("--max-iter", type=int, default=10)
         c.add_argument("--handout", action="store_true", help="compile in handout mode (one page per frame)")
         c.add_argument("--engine", help="pdflatex, xelatex or lualatex (default: from the source)")
+    c = sub.add_parser("label", help="write a `label=` into every frame that has none (docs/labels.md)")
+    c.add_argument("tex", type=Path, help="the main .tex (its \\input files are labelled too)")
+    c.add_argument("--apply", action="store_true",
+                   help="edit the source in place (what was there is kept as <file>.bak, .bak2, ...)")
     args = ap.parse_args()
+    if args.command == "label":
+        return cmd_label(args.tex, args.apply)
     if args.command in ("pull", "converge"):
         from .inverse import cmd_converge, cmd_pull
         if args.command == "pull":
@@ -199,12 +261,12 @@ def main() -> None:
         return
     out = args.out or out_root() / args.pdf.stem
     if args.command == "classify":
-        cmd_classify(args.pdf, out, args.overlays)
+        cmd_classify(args.pdf, out, args.overlays, args.check_labels)
     elif args.command == "convert":
         from .guard import RebuildRefused
         try:
             cmd_convert(args.pdf, out, args.title, args.new_deck, args.overlays, not args.predict_places,
-                        args.force_rebuild, args.backup)
+                        args.force_rebuild, args.backup, args.check_labels)
         except RebuildRefused as refused:
             raise SystemExit(str(refused)) from None
     elif args.command == "fidelity":
