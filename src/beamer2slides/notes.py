@@ -12,9 +12,6 @@ from typing import NamedTuple
 
 from pathlib import Path
 
-import pypdfium2 as pdfium
-import pypdfium2.raw as R
-
 from .extract import spans as page_spans
 from .pdf import Document, Page
 
@@ -118,15 +115,8 @@ def _prepare(doc: Document, pdf: Path, out: Path) -> tuple:
                 text = _note_text(s, area, header)
                 if text:
                     notes[page.index] = text
-        edited = pdfium.PdfDocument(str(pdf))
-        for page in doc:  # keep the left half: the slide
-            raw = edited[page.index].raw
-            left, top = page.left, page.top
-            box = (left, top - page.height, left + page.width / 2, top)
-            R.FPDFPage_SetMediaBox(raw, *box)
-            R.FPDFPage_SetCropBox(raw, *box)
-        edited.save(str(path))
-        edited.close()
+        # keep the left half: the slide
+        path.write_bytes(doc.save(boxes={page.index: (0.0, 0.0, page.width / 2, page.height) for page in doc}))
         return path, notes, "second screen", None
 
     keep: list[int] = []
@@ -141,12 +131,7 @@ def _prepare(doc: Document, pdf: Path, out: Path) -> tuple:
             notes[keep[-1]] = (notes.get(keep[-1], "") + "\n" + text).strip()
     if len(keep) == len(doc):
         return pdf, {}, None, None
-    edited = pdfium.PdfDocument(str(pdf))
-    for index in reversed(range(len(doc))):
-        if index not in keep:
-            edited.del_page(index)
-    edited.save(str(path))
-    edited.close()
+    path.write_bytes(doc.save(pages=keep))
     # The saved page label tree still counts the deleted pages.
     labels = [doc.label(k) or str(k + 1) for k in keep]
     return path, {keep.index(k): v for k, v in notes.items()}, "note pages", labels

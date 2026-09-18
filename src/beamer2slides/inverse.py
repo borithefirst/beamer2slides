@@ -597,10 +597,10 @@ def natural_size(path: Path) -> tuple[float, float]:
     """The size graphicx gives a file before scaling: pixels at the file's resolution (72 dpi
     without one), a PDF's first page."""
     if path.suffix.lower() == ".pdf":
-        import pypdfium2 as pdfium
-        doc = pdfium.PdfDocument(str(path))
+        from .pdf import Document
+        doc = Document(path)
         try:
-            return tuple(doc[0].get_size())
+            return doc[0].width, doc[0].height
         finally:
             doc.close()
     from PIL import Image
@@ -618,13 +618,13 @@ def picture_look(path: Path):
     from PIL import Image
     try:
         if path.suffix.lower() == ".pdf":
-            import pypdfium2 as pdfium
-            doc = pdfium.PdfDocument(str(path))
+            from .pdf import Document
+            doc = Document(path)
             try:
                 if len(doc) != 1:
                     return None
-                w, h = doc[0].get_size()
-                img = doc[0].render(scale=256 / max(w, h)).to_pil()
+                w, h = doc[0].width, doc[0].height
+                img = Image.fromarray(doc[0].render(256 / max(w, h)))
                 pixels = float("inf")  # vector: better than any raster
             finally:
                 doc.close()

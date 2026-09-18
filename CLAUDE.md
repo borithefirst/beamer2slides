@@ -13,14 +13,26 @@ a per-slide background picture.
   colours. The `.tex` / SyncTeX may later be used as a hint for structure.
 - Pipeline stages communicate through a **JSON intermediate representation (IR)**
   so each stage is testable in isolation:
-  1. `extract`: PDF → raw spans / images / vector drawings (PDFium through pypdfium2, `pdf.py`)
+  1. `extract`: PDF → raw spans / images / vector drawings (the `pdf` package's backend: PDFium)
   2. `classify`: group spans into lines, paragraphs and lists; decide native vs. background
   3. `render`: background PNG per slide with the converted elements removed
      (page objects switched off, partly removed objects composited from a second render)
   4. `emit`: a python-pptx deck carrying all pictures, imported by Drive, then the Slides API
-- No PyMuPDF: PDF access is PDFium only. `pdf.py` wraps it (`notes.py` also uses pypdfium2 to
-  write slides.pdf); its text and path output reproduces what the MuPDF-based extraction gave (span splitting at word gaps, `re`/`qu`
-  path items, char boxes from font ascent/descent), so classify's thresholds still hold.
+- **The PDF library is a swappable backend** (`src/beamer2slides/pdf/`, docs/pdf-backend.md). Nothing
+  outside that package imports pypdfium2: the pipeline calls `pdf.Document(path)` and the methods of
+  `api.PdfDocument` / `api.PdfPage`, whose answers are plain data (dataclasses, dicts, tuples, bytes,
+  numpy arrays) with page objects named by **id** (their index in `objects()`), never a handle.
+  `api.py` is the contract and holds the conventions every backend shares (`char_box`, `trace` for path
+  items, `pixel_bounds`); `pdfium_backend.py` is the reference; `sandbox.py` runs any backend in a worker
+  process over `wire.py` frames (data only, no pickle; the worker is sent the PDF's bytes and needs no
+  files, `save` returns bytes). The caller picks: `pdf.set_backend` / `use_backend`, or
+  `$B2S_PDF_BACKEND` = `pdfium` | `sandbox[:<spec>]` | `package.module:attr`; `$B2S_PDF_SANDBOX_CMD` wraps
+  the worker in a jail or container. Conformance: `tests/test_pdf_backend.py` (every backend named in
+  `$B2S_TEST_PDF_BACKENDS`; the sandbox must equal PDFium value for value). Measured: the 48 test PDFs
+  give byte-identical raw.json, deck.json, backgrounds and figures in process and through the sandbox
+  (19 s vs 25 s). PDFium's text and path output reproduces what the MuPDF-based extraction gave (span
+  splitting at word gaps, `re`/`qu` path items, char boxes from font ascent/descent), so classify's
+  thresholds still hold.
 - No public links: pictures reach Slides inside the imported .pptx, never as shared Drive
   files (they break in protected Workspace domains).
 - **Fidelity is measured on Google's own renderer**, not a local preview: render the PDF page
@@ -106,7 +118,7 @@ a per-slide background picture.
   A translucent fill over text (`opacity` < 1) becomes a `highlight` shape with fill alpha,
   anchored to that text. Text turned ±90° (`rotated_texts`) becomes a text box laid out in its
   own frame and turned by the transform. Path bounds use the curve's extremes, not its control
-  points (`pdf._curve_extremes`). Test deck: `22_overlays_on_text`.
+  points (`pdf.api.curve_extremes`). Test deck: `22_overlays_on_text`.
 - Accents PDFium reports as separate chars (`ACCENTS`: ¯ ˆ ˜ …) become combining marks on
   their letter (X̄), also when the accent landed in the previous span.
 - Hole and overlay pictures are placed by measurement (`emit.measure_places`, ~2-3 s per deck):
@@ -692,7 +704,7 @@ keys, named ranges), `doc_merge.py` (pure planning), `doc_sync.py` (the commands
   deletes the document. Offline: `tests/test_doc_ir.py`, `test_doc_merge.py`, `test_doc_sync.py`.
 
 ## Pitfalls found so far
-- PDFium (`pdf.py` handles these):
+- PDFium (`pdf/pdfium_backend.py` handles these):
   - Soft-mask contents are not page objects. Beamer's block shadow is a black rectangle under
     a soft mask (`FPDFPageObj_HasTransparency` with an opaque fill); its visible pieces right
     of and below the panel are reported as shading images (`extract._shadow_pieces`).

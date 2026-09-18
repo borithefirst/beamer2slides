@@ -43,7 +43,7 @@ def doc():
 
 
 def image_objects(page):
-    return [po for po in page.objects() if po.type == OBJ_IMAGE]
+    return [po.id for po in page.objects() if po.type == OBJ_IMAGE]
 
 
 def test_routes(doc):

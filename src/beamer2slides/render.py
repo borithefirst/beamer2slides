@@ -18,7 +18,7 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 
-from .pdf import OBJ_FORM, OBJ_IMAGE, OBJ_PATH, OBJ_SHADING, Char, Document, Page, PageObject, _addr
+from .pdf import OBJ_FORM, OBJ_IMAGE, OBJ_PATH, OBJ_SHADING, Char, Document, Page
 
 BACKGROUND_WIDTH_PX = 2000
 FIGURE_PX_PER_PT = 8.0     # ~ 4 px per Slides point on a 4:3 deck: sharp on high-DPI screens
@@ -55,9 +55,10 @@ class Eraser:
 
     def __init__(self, page: Page):
         self.page = page
-        self.removed: set[int] = set()
+        self.removed: set[int] = set()            # object ids
         self.partial: dict[int, list[Box]] = {}   # object -> areas whose pixels come from the render without it
-        self.objects = {_addr(po.handle): po for po in page.objects()}
+        self.objects = {po.id: po for po in page.objects()}
+        self.bounds = page.object_bounds()        # by object id
         self.chars: dict[int, list[Char]] = {}    # text object -> its glyphs still drawn
         for ch in page.chars():
             if not ch.synthetic and ch.obj in self.objects:
@@ -80,7 +81,7 @@ class Eraser:
 
     def remove_paths_inside(self, area: Box) -> None:
         for key, po in self.objects.items():
-            if po.type == OBJ_PATH and key not in self.removed and _inside(self.page.bounds(po), area):
+            if po.type == OBJ_PATH and key not in self.removed and _inside(self.bounds[key], area):
                 self._remove(key)
 
     def remove_images_in(self, area: Box) -> None:
@@ -89,7 +90,7 @@ class Eraser:
         for key, po in self.objects.items():
             if po.type not in (OBJ_IMAGE, OBJ_SHADING) or key in self.removed:
                 continue
-            b = self.page.bounds(po)
+            b = self.bounds[key]
             if _inside(b, _grow(area, 0.5)):
                 self._remove(key)
             elif _intersects(b, area):
@@ -98,20 +99,19 @@ class Eraser:
 
     def filled_paths(self) -> list[Box]:
         return [d["rect"] for d in self.page.drawings()
-                if d["type"] in ("f", "fs") and _addr(d["object"].handle) not in self.removed]
+                if d["type"] in ("f", "fs") and d["object"] not in self.removed]
 
     def render(self, zoom: float, clip: Box | None = None, transparent: bool = False, hide: list = ()) -> np.ndarray:
-        """The page without what was removed (and without the objects in `hide`)."""
+        """The page without what was removed (and without the objects in `hide`, ids)."""
         page = self.page
-        handles = lambda keys: [self.objects[k] for k in keys]
-        off = handles(self.removed) + list(hide)
+        off = sorted(self.removed) + list(hide)
         page.set_active(off, False)
         try:
             img = page.render(zoom, clip, transparent)
             if self.partial:
-                page.set_active(handles(self.partial), False)
+                page.set_active(list(self.partial), False)
                 without = page.render(zoom, clip, transparent)
-                page.set_active(handles(self.partial), True)
+                page.set_active(list(self.partial), True)
                 x0, y0 = clip[:2] if clip else (0.0, 0.0)
                 ox, oy = np.floor(x0 * zoom + 0.001), np.floor(y0 * zoom + 0.001)
                 h, w = img.shape[:2]
@@ -163,7 +163,7 @@ IMAGE_CHECK_PX_PER_PT = 2.0  # the file is verified against the page at this sca
 IMAGE_CHECK_DIFF = 12      # levels of mean difference allowed there
 
 
-def image_file(page: Page, po: PageObject) -> tuple[bytes, str, tuple[int, int], str] | None:
+def image_file(page: Page, obj: int) -> tuple[bytes, str, tuple[int, int], str] | None:
     """The file to write for an image object drawn on its own, as (bytes, extension, pixel size,
     route), or None where only a render of the page will do.
 
@@ -177,7 +177,7 @@ def image_file(page: Page, po: PageObject) -> tuple[bytes, str, tuple[int, int],
     depth, and anything see-through (a soft or stencil mask is not in PDFium's pixels, and a
     constant alpha is not in them either). A y flip is how every PDF draws an image, not one of
     those."""
-    im = page.embedded_image(po)
+    im = page.embedded_image(obj)
     if im is None or not im.upright or im.clipped or im.transparent or im.blended or im.bpp < 8 \
             or im.px[0] < 1 or im.px[1] < 1 or im.colorspace in ("unknown", "Pattern"):
         return None
@@ -205,21 +205,22 @@ def _pillow_rgb(data: bytes) -> np.ndarray | None:
         return None
 
 
-def sole_image(page: Page, bbox: list[float]) -> PageObject | None:
-    """The image object a figure region consists of: it covers the region and nothing else is
-    drawn there (classify marks such regions, but the page decides)."""
+def sole_image(page: Page, bbox: list[float]) -> int | None:
+    """The id of the image object a figure region consists of: it covers the region and nothing
+    else is drawn there (classify marks such regions, but the page decides)."""
     found = None
+    objects = page.objects()
     for im in page.images():
         if not _intersects(im["bbox"], bbox):
             continue
-        if found is not None or im["object"].type != OBJ_IMAGE or \
+        if found is not None or objects[im["object"]].type != OBJ_IMAGE or \
                 any(abs(im["bbox"][k] - bbox[k]) > 0.5 for k in range(4)):
             return None
         found = im["object"]
     return found
 
 
-def _looks_like(data: bytes, page: Page, po: PageObject, bbox: list[float]) -> bool:
+def _looks_like(data: bytes, page: Page, obj: int, bbox: list[float]) -> bool:
     """Does the file, laid on the page without the image, show what the page shows there? The
     last check on PDFium's decode: a palette, colour space or mask read differently would come
     out as another picture."""
@@ -227,11 +228,11 @@ def _looks_like(data: bytes, page: Page, po: PageObject, bbox: list[float]) -> b
     h, w = want.shape[:2]
     if w < 2 or h < 2:
         return True
-    page.set_active([po], False)
+    page.set_active([obj], False)
     try:
         under = page.render(IMAGE_CHECK_PX_PER_PT, tuple(bbox)).astype(float)
     finally:
-        page.set_active([po], True)
+        page.set_active([obj], True)
     img = Image.open(io.BytesIO(data)).convert("RGBA").resize((w, h), Image.BILINEAR)
     px = np.array(img).astype(float)
     alpha = px[..., 3:] / 255
@@ -242,14 +243,14 @@ def _looks_like(data: bytes, page: Page, po: PageObject, bbox: list[float]) -> b
 def embedded_picture(eraser: Eraser, fig: dict, path: Path) -> Path | None:
     """The figure's picture written from the image object's own data (`image_file`), or None
     where the page has to be rendered after all. Sets `px` and `picture` on the element."""
-    po = sole_image(eraser.page, fig["bbox"])
-    if po is None:
+    obj = sole_image(eraser.page, fig["bbox"])
+    if obj is None:
         return None
-    chosen = image_file(eraser.page, po)
+    chosen = image_file(eraser.page, obj)
     if chosen is None:
         return None
     data, ext, px, route = chosen
-    if not _looks_like(data, eraser.page, po, fig["bbox"]):
+    if not _looks_like(data, eraser.page, obj, fig["bbox"]):
         return None
     path = path.with_suffix("." + ext)
     save_bytes(data, path)
@@ -290,10 +291,10 @@ def clear_ground(eraser: Eraser, bbox: list[float], zoom: float, opaque: np.ndar
     What stays in the background (paths reaching out of the box as render_backgrounds leaves them,
     images and shadings not inside it) is left out. Kept only where the page under the picture is
     flat and the result laid on that colour shows the opaque crop; else the opaque crop."""
-    page = eraser.page
-    ground = [po for key, po in eraser.objects.items() if key not in eraser.removed and (
-        (po.type == OBJ_PATH and not _inside(page.bounds(po), _grow(bbox, 5))) or
-        (po.type in (OBJ_IMAGE, OBJ_SHADING) and not _inside(page.bounds(po), _grow(bbox, 0.5))))]
+    bounds = eraser.bounds
+    ground = [key for key, po in eraser.objects.items() if key not in eraser.removed and (
+        (po.type == OBJ_PATH and not _inside(bounds[key], _grow(bbox, 5))) or
+        (po.type in (OBJ_IMAGE, OBJ_SHADING) and not _inside(bounds[key], _grow(bbox, 0.5))))]
     rgba = eraser.render(zoom, tuple(bbox), transparent=True, hide=ground)
     if rgba.shape[:2] != opaque.shape[:2]:
         return opaque
@@ -346,11 +347,11 @@ def crop_overlay(eraser: Eraser, fig: dict, labels: list[dict], path: Path) -> l
     along. They leave the background right away: no other crop shows them either."""
     page = eraser.page
     objects = [d["object"] for d in page.drawings()]  # in the order extract numbered them
-    paths = {_addr(objects[int(i.rsplit("d", 1)[1])].handle) for i in fig["drawings"]}
+    paths = {objects[int(i.rsplit("d", 1)[1])] for i in fig["drawings"]}
     bands = [_span_band(s) for s in labels]
     hit = lambda ch: any(_intersects(ch.box, b) for b in bands)
     texts = {key for key, chars in eraser.chars.items() if any(map(hit, chars))}
-    off = [po for key, po in eraser.objects.items() if key not in paths | texts and po.type != OBJ_FORM]
+    off = [key for key, po in eraser.objects.items() if key not in paths | texts and po.type != OBJ_FORM]
     x0, y0, x1, y1 = fig["bbox"]
     zoom = min(FIGURE_PX_PER_PT if max(x1 - x0, y1 - y0) > 60 else SMALL_FIGURE_PX_PER_PT,
                FIGURE_MAX_PX / max(x1 - x0, y1 - y0))

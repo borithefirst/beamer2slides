@@ -503,7 +503,7 @@ def test_framed_paragraphs_are_shapes_with_wrapped_text():
 
 
 def test_curve_bounds_skip_control_points():
-    from beamer2slides.pdf import _curve_extremes
+    from beamer2slides.pdf.api import curve_extremes as _curve_extremes
     # A flat S-curve whose control points reach 40 pt up and down: the curve itself stays within ±12.
     pts = _curve_extremes((0, 0), (10, 40), (20, -40), (30, 0))
     ys = [y for _, y in pts]

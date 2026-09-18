@@ -3,7 +3,7 @@
 Findings from running `tools/probe.py` on the test decks (MiKTeX 25.12, PyMuPDF 1.28.2).
 Each finding ends with what it means for the pipeline.
 
-Extraction now runs on PDFium (`pdf.py`), which reproduces the span, path and image output
+Extraction now runs on PDFium (`pdf/pdfium_backend.py`), which reproduces the span, path and image output
 described here; PDFium's own quirks are listed under Pitfalls in `CLAUDE.md`.
 
 ## Text

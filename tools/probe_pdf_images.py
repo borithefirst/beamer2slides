@@ -80,7 +80,7 @@ def main(argv=None) -> int:
                 for k, po in enumerate(page.objects()):
                     if po.type != OBJ_IMAGE:
                         continue
-                    im = page.embedded_image(po)
+                    im = page.embedded_image(po.id)
                     if im is None:
                         continue
                     a, b, c, d, e, f = im.matrix
@@ -98,11 +98,11 @@ def main(argv=None) -> int:
                     px = im.pixels
                     print(f"  bitmap   {'-' if px is None else f'{px.shape[1]} x {px.shape[0]} x {px.shape[2]}'}"
                           f"  blended={im.blended} transparent={im.transparent}")
-                    rendered = page.rendered_image(po)
+                    rendered = im.rendered
                     print(f"  rendered {'-' if rendered is None else f'{rendered.shape[1]} x {rendered.shape[0]} x {rendered.shape[2]}'}")
                     print(f"  raw==pdfium  {compare(pillow_pixels(im.raw), px)}")
                     print(f"  rendered==pdfium  {compare(rendered, px)}")
-                    chosen = image_file(page, po)
+                    chosen = image_file(page, po.id)
                     if chosen is None:
                         print("  verdict  page crop (nothing here may stand in for it)")
                     else:

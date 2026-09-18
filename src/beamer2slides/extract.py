@@ -5,7 +5,7 @@ import re
 import unicodedata
 from pathlib import Path
 
-from .pdf import Char, Document, Page
+from .pdf import NO_OBJECT, Char, Document, Page, char_box
 
 LIGATURES = str.maketrans({"ﬀ": "ff", "ﬁ": "fi", "ﬂ": "fl", "ﬃ": "ffi", "ﬄ": "ffl",
                            "ﬅ": "st", "ﬆ": "st"})
@@ -74,8 +74,7 @@ def _small_caps(page: Page, chars: list[Char]) -> bool:
     if len(lower) < 2:
         return False
     alternate = 0
-    for ch in lower:
-        default = page.glyph_width(ch.font_handle, ch.c, ch.size)
+    for ch, default in zip(lower, page.glyph_widths([(ch.font_id, ch.c, ch.size) for ch in lower])):
         if default and abs(ch.advance - default) > SMALL_CAPS_WIDTH * max(default, 0.01):
             alternate += 1
     return alternate >= 2 and alternate >= 0.7 * len(lower)
@@ -140,8 +139,8 @@ def spans(page: Page) -> list[dict]:
                     flush()
                 width = gap * size
                 space = Char(" ", ch.font, ch.size, ch.color, ch.alpha, (px, py),
-                             Page.char_box(px, py, ux, uy, width, ch.size, ch.ascent, ch.descent),
-                             ch.dir, 0, ch.font_handle, width, True, ch.ascent, ch.descent)
+                             char_box(px, py, ux, uy, width, ch.size, ch.ascent, ch.descent),
+                             ch.dir, NO_OBJECT, ch.font_id, width, True, ch.ascent, ch.descent)
             elif style:
                 flush()
         if space:
