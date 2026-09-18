@@ -629,8 +629,8 @@ keys, named ranges), `doc_merge.py` (pure planning), `doc_sync.py` (the commands
   put it. On top of that the blocks the *source* moved go back where the file has them - the
   complement of the longest common subsequence, so one moved section writes one block - and
   both sides reordering is the document's, with a note. The API has no move: it is a delete
-  and a write, so the merged text and styling ride along, a block holding a table or a chip
-  no request can create is not moved at all, and `doc_merge.adopt_keys` gives the rewritten block its key back
+  and a write, so the merged text and styling ride along, a block holding a chip no request
+  can create (or a table the document changed) is not moved at all, and `doc_merge.adopt_keys` gives the rewritten block its key back
   (the delete took its named range with it) before the file is regenerated.
 - Tables merge cell by cell, where identity is the cell's **place**. A grid the source changed
   while the document did not is written, but not with the words: `insertTable` and the
@@ -639,12 +639,21 @@ keys, named ranges), `doc_merge.py` (pure planning), `doc_sync.py` (the commands
   (`doc_merge.anchor_tables`), the base takes the new grid *and only the grid*
   (`rebase_tables`: taking the table as read would swallow the reader's words into the base),
   and the text is planned against the grid the document then has (`doc_sync._write_structure`).
-  Rows and columns are matched by their words and only the count they are out by is written, so
-  a row the source reworded is never deleted and rebuilt. `insertTable` splits the paragraph
+  Rows and columns merge three ways (`doc_merge._table_lines`): one shape on all sides is
+  matched by place; otherwise columns by their words (`_column_score`), rows by their cells in
+  matching columns, order kept (`_align`), each side against the base, then merged like blocks
+  (`_merged_lines`: the document's lines stay, the source's are added after their predecessor,
+  one it took away goes unless the document wrote in it). So both sides may regrid, and rows and
+  columns may change at once; `rebase_tables` leaves the matching in the base (`aligned`) for
+  the pass after. A cell whose paragraph counts differ merges as one text with its breaks in it
+  (`_merge_cell`, written against `_joined`). A table the source moved, which the document left
+  as the base has it, is deleted and built again blank where the file has it (`structure`).
+  Deleting one: its own span; with its `lead` when a body opens on it; with the mark in front
+  when it ends the body (measured: no stray trailer). `insertTable` splits the paragraph
   its index is in and needs one, so a table goes at the following block's start (and the empty
   paragraph it leaves is swallowed), or, in front of another table, at the paragraph mark
-  before it. A grid both sides changed, and one that is not whole rows or columns, are still
-  reported; so is a restyle of words the document rewrote.
+  before it. A ragged table (merged cells) whose grid changed is still reported; so is a
+  restyle of words the document rewrote.
 - Every sync names the document's **open comments** in its report (`doc_sync.open_comments`,
   Drive's comments API under `drive.file`): a comment lives in Drive, not in the document's
   content, so nothing the merge reads can see one - and a sync that rewrites the passage it

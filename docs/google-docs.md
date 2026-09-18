@@ -437,8 +437,14 @@ a write where the file puts it**, which has two consequences:
 - the text written is the *merged* text, so a word the reader changed in a block the
   source moved rides along with it, and so does its styling (it is rebuilt from the
   merged runs);
-- a block that cannot be written from nothing — one holding a chip or an equation, or a
-  table — is **not** moved; it stays where the document has it and the report says why.
+- a block that cannot be written from nothing — one holding an equation or another chip
+  no request makes — is **not** moved; it stays where the document has it and the report
+  says why.
+- a **table** is moved by the structural pass below: deleted where it stands and built
+  again, blank, where the file has it, its words written on the pass after, like a new
+  table's. Only a table whose cells the document left as the base has them, with no chip
+  in them, is moved that way — anything a reader wrote in it would be deleted with it —
+  and the rest stay put, reported.
 
 The delete takes the block's named range with it, so the read-back afterwards has no key
 for the block that moved. `doc_merge.adopt_keys` hands the plan's key back to it before
@@ -468,11 +474,42 @@ happen in between:
   document *reports* it would swallow into the base whatever a reader had typed in it,
   and the next plan would read those words as words the source had taken away. That is
   exactly what the live test caught.
-- **rows and columns are matched by their words, and only the count is written.** A row
-  whose words the source changed is a text edit, and text is merged afterwards cell by
-  cell, so a stretch that differs on both sides adds or removes at its end and leaves
-  the rest alone (`doc_merge._line_ops`). A row deleted and built again would throw away
-  whatever the document had put in it.
+- **the base says how its lines match.** The pass after a regrid would otherwise have to
+  match the rows and columns again from their words, one side of which it just made
+  blank; `rebase_tables` records the matching it already knows (`aligned`), and it is
+  used for as long as both grids are the size it expects.
+
+**Rows and columns merge three ways, like blocks** (`doc_merge._table_lines`). Tables of
+one shape on all three sides are matched by place, as a cell always was, so a row the
+source rewrote end to end is still that row. Otherwise the columns are matched first —
+by the words in them wherever they stand, since a row added shifts every cell below it
+(`_column_score`) — and then the rows, by their cells in the columns that matched
+(`_row_score`); both keep their order (`_align`, the highest total of pairs at least
+`ALIKE`, and the lines left between two pairs paired by place). Each side is matched
+against the base, and the two matchings merge (`_merged_lines`): a line the document
+added stays, a line the source added goes in after the line that precedes it in the
+file, and a line the source took away goes only if the document left it as the base had
+it — otherwise it stays, reported. So both sides may change the grid at once, and one
+source edit may change rows and columns together. The ops are written at the document's
+indices, rows before columns, each back to front, a delete before an insert at one index
+(`_op_order`); a merge that would leave none of the document's lines (the last row cannot
+be deleted) is reported instead.
+
+**A cell holds paragraphs, not a paragraph.** When the three sides agree on how many a
+cell has, they merge one by one; when they do not, the cell merges as one text with its
+paragraph breaks in it (`_merge_cell`), and is written against the live cell read the
+same way (`_joined`: the marks between its paragraphs are newlines, the cell's own last
+mark stays outside) — so a break the source added is an `insertText` of `"\n…"`, and one a
+reader added survives the source rewriting a word next to it.
+
+**Deleting a table**, measured: its own span `[start, end)` leaves the paragraphs on
+both sides of it as they were, and taking the mark in front of it along merges the
+paragraph before with the one after. The two paragraphs no request can delete are the
+exceptions (`doc_merge._delete_range`): a table the body opens on goes with its `lead`,
+from the lead's start — measured, `[1, end)` is accepted and leaves the paragraph after
+the table first (or, with nothing after it, the one empty paragraph a body keeps); a table the body ends on takes the mark in front of it instead of
+leaving its trailer behind as a stray empty paragraph — measured, `abc`, a table and the
+trailer become `abc` alone — unless a block is being written into that trailer.
 
 What `insertTable` does exactly, measured: it **splits the paragraph its index is in** —
 what was before the index stays a paragraph, then comes the table, then the rest — and
@@ -484,10 +521,6 @@ before it, and the empty half lands *between* the two tables, where Docs wants a
 paragraph anyway; and a table written after everything goes to the end of the segment,
 where Docs keeps a paragraph after it, because a document ends on one.
 
-One dimension at a time: when rows and columns both changed there is nothing left to
-match rows on (every row is a column longer), and that, a cell holding two paragraphs,
-and a row out of step with the others are all reported instead — which is what every
-grid change got before.
 
 ### Pictures, and the chips a request can make
 
@@ -531,10 +564,10 @@ Each of these is reported in the sync report, never guessed at:
 | Case | Why |
 |---|---|
 | a block whose frozen runs the source changed while the document also changed it — or one that holds a chip no request creates | an equation, a rich link, a dropdown or a table of contents cannot be written again once deleted, so the text around one is left alone rather than rewritten without it. Pictures, dates and people are written (above) |
-| a table whose **grid both sides changed** | the document's grid stands, as it does everywhere else. A grid only the source changed is written — see the structural pass above |
-| a grid change that is **not whole rows or columns** | rows and columns both changed at once, a cell holding two paragraphs, a row out of step with the others: cells merge by their place, and there would be nothing to match them on |
+| a table with a **row out of step with the others** (merged cells) whose grid changed | rows and columns are matched as whole lines; cells of a ragged table only merge by place, while the three grids agree |
+| a **row or column the source took away that the document wrote in** | kept, as a block the source dropped but the document edited is |
 | a source restyle of words the document rewrote | the marks would have to be matched onto words that are no longer there |
-| a **move of a block with an equation-like chip or a table in it** | a move is a delete and a write, and those cannot be written from nothing — the block stays where the document has it |
+| a **move of a block with an equation-like chip in it, or of a table the document changed** | a move is a delete and a write, and those cannot be written from nothing — the block stays where the document has it |
 | a **reorder both sides made** | the document's order stands whole; the file's is reported |
 
 Everything else is written: text on both sides, a block's kind, level and alignment,

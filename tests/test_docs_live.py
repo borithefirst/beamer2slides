@@ -273,6 +273,60 @@ def test_a_table_the_source_added_and_a_row_it_added_are_written(paper):
     paper.settled()
 
 
+def test_a_grid_both_sides_changed_and_a_cell_of_two_paragraphs(paper):
+    """The source adds a column, takes a row away and splits a cell in two; the reader
+    adds a row and writes in a header. Rows and columns are matched by their words,
+    so all of it stands."""
+    paper.edit("<td><p>Region</p></td><td><p>Sales</p></td></tr>",
+               "<td><p>Region</p></td><td><p>Sales</p></td><td><p>Target</p></td></tr>")
+    paper.edit("<td><p>North</p></td><td><p>1200</p></td></tr>",
+               "<td><p>North</p></td><td><p>1200</p><p>rising</p></td><td><p>1300</p></td></tr>")
+    paper.edit("<tr><td><p>South</p></td><td><p>870</p></td></tr>", "")
+
+    from beamer2slides.google_auth import credentials, docs_service
+    docs = docs_service(credentials())
+    _, ir = paper.sync_module.read_document(docs, paper.ident)
+    grid = next(b for b in ir["blocks"] if b["kind"] == "table")
+    paper.sync_module.send(docs, paper.ident, [{"insertTableRow": {"tableCellLocation": {
+        "tableStartLocation": {"index": grid["span"][0]}, "rowIndex": 2, "columnIndex": 0},
+        "insertBelow": True}}])
+    _, ir = paper.sync_module.read_document(docs, paper.ident)
+    grid = next(b for b in ir["blocks"] if b["kind"] == "table")
+    paper.sync_module.send(docs, paper.ident, [{"insertText": {
+        "location": {"index": grid["rows"][3][0][0]["span"][0]}, "text": "West"}}])
+    paper.typed("Sales", " (k)")
+
+    info = paper.sync()
+    assert info["conflicts"] == []
+    text = paper.text
+    assert "<td><p>Sales (k)</p></td><td><p>Target</p></td>" in text     # both headers
+    assert "<td><p>1200</p><p>rising</p></td><td><p>1300</p></td>" in text
+    assert "South" not in text                                          # the source's delete
+    assert "<td><p>West</p></td>" in text                               # the reader's row
+    paper.settled()
+
+
+def test_a_table_the_source_moved_is_built_again_where_the_file_has_it(paper):
+    """There is no move: the table is deleted and built again, blank, and its words
+    are written on the pass after. To the end of the body and back, where the empty
+    paragraph a final table keeps after itself has to go with it."""
+    paper.moved("table:numbers")
+    info = paper.sync()
+    assert any("moved where the source has it" in line for line in info["applied"]), \
+        info["applied"]
+    text = paper.text
+    assert text.index("<td><p>South</p></td>") > text.index("the second point")
+    assert '<table id="table:numbers">' in text and "<p></p>" not in text
+    paper.settled()
+
+    paper.moved("table:numbers", after="paragraph:opening")
+    paper.sync()
+    text = paper.text
+    assert text.index("<td><p>South</p></td>") < text.index("The closing paragraph")
+    assert "<p></p>" not in text and 'id="paragraph:empty"' not in text  # nothing left behind
+    paper.settled()
+
+
 def test_a_list_the_reader_numbered_is_numbered_in_the_file(paper):
     """An imported list cannot say whether it is numbered, so the push gives it bullets
     of the document's own — and from then on a reader's switch in the toolbar (the same

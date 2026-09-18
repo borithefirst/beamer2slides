@@ -471,22 +471,167 @@ def test_a_row_the_source_rewrote_is_not_deleted_and_written_again():
     assert result["structure"][0]["insertTableRow"]["tableCellLocation"]["rowIndex"] == 1
 
 
-def test_a_grid_the_document_also_changed_is_left_alone():
-    ours = live([GRID["blocks"][0], table("t:grid", [["a one", "b one", "c one"],
-                                                     ["a two", "b two", "c two"]]),
-                 GRID["blocks"][2]])
-    theirs = live([GRID["blocks"][0], table("t:grid", [["a one", "b one"]]),
-                   GRID["blocks"][2]])
+def grid_table(rows: list[list[str]], key: str = "t:grid") -> dict:
+    """The GRID document with its table replaced by one of these cells."""
+    return live([GRID["blocks"][0], table(key, rows), GRID["blocks"][2]])
+
+
+def kinds(requests: list[dict]) -> list[str]:
+    return [next(iter(r)) for r in requests]
+
+
+def test_a_grid_both_sides_changed_merges_rows_from_one_and_columns_from_the_other():
+    """The source added a column, the reader deleted a row: both stand."""
+    ours = grid_table([["a one", "b one", "c one"], ["a two", "b two", "c two"]])
+    theirs = grid_table([["a one", "b one"]])
     result = doc_merge.plan(GRID, ours, theirs)
-    assert result["structure"] == [] and result["requests"] == []
-    assert "rows and columns" in result["notes"][0]
+    assert result["structure"] == [{"insertTableColumn": {
+        "tableCellLocation": {"tableStartLocation": {"index": theirs["blocks"][1]["span"][0]},
+                              "rowIndex": 0, "columnIndex": 1}, "insertRight": True}}]
+    assert result["notes"] == []
 
 
-def test_rows_and_columns_changed_at_once_are_left_alone():
-    """Every row is a column longer, so there is nothing left to match rows on."""
+def test_rows_and_columns_changed_at_once_are_both_written():
+    """Rows are matched by their cells in the columns that match, so a row a column
+    longer is still the same row."""
     result = regrid([["a one", "b one", "c one"]])
-    assert result["structure"] == [] and result["requests"] == []
-    assert "rows and columns" in result["notes"][0]
+    at = GRID["blocks"][1]["span"][0]
+    assert result["structure"] == [
+        {"deleteTableRow": {"tableCellLocation": {"tableStartLocation": {"index": at},
+                                                  "rowIndex": 1, "columnIndex": 0}}},
+        {"insertTableColumn": {"tableCellLocation": {"tableStartLocation": {"index": at},
+                                                     "rowIndex": 0, "columnIndex": 1},
+                               "insertRight": True}}]
+
+
+def test_a_row_the_source_deleted_but_the_document_wrote_in_is_kept():
+    theirs = grid_table([["a one", "b one"], ["a two", "b TYPED"]])
+    result = doc_merge.plan(GRID, grid_table([["a one", "b one"]]), theirs)
+    assert result["structure"] == []
+    assert "took away a row, but the document wrote in it" in result["notes"][0]
+
+
+def test_a_row_the_document_added_stays_while_the_source_adds_a_column():
+    theirs = grid_table([["a one", "b one"], ["a two", "b two"], ["a doc", "b doc"]])
+    ours = grid_table([["a one", "b one", "c one"], ["a two", "b two", "c two"]])
+    result = doc_merge.plan(GRID, ours, theirs)
+    assert kinds(result["structure"]) == ["insertTableColumn"]
+    assert result["structure"][0]["insertTableColumn"]["tableCellLocation"]["columnIndex"] == 1
+
+    after = grid_table([["a one", "b one", ""], ["a two", "b two", ""],
+                        ["a doc", "b doc", ""]])
+    rebased = doc_merge.rebase_tables(GRID, after, result["shaped"])
+    # The reader's row is not in the base: nothing agreed on it.
+    assert doc_merge._grid(rebased["blocks"][1]) == (3, 3)
+    assert rebased["blocks"][1]["aligned"]["row_live"] == [(0, 0), (1, 1)]
+    again = doc_merge.plan(rebased, ours, after)
+    assert again["structure"] == [] and again["notes"] == []
+    assert [r["insertText"]["text"] for r in again["requests"]] == ["c two", "c one"]
+    assert [cell_text(again["blocks"][1], r, 2) for r in range(3)] == ["c one", "c two", ""]
+
+
+def test_a_column_and_a_row_the_source_added_get_their_words_on_the_next_pass():
+    ours = grid_table([["a one", "NEW", "b one"], ["a two", "NEW2", "b two"],
+                       ["a three", "x", "b three"]])
+    theirs = grid_table([["a one", "b one"], ["a two", "b TYPED"]])
+    result = doc_merge.plan(GRID, ours, theirs)
+    at = theirs["blocks"][1]["span"][0]
+    assert result["structure"] == [
+        {"insertTableRow": {"tableCellLocation": {"tableStartLocation": {"index": at},
+                                                  "rowIndex": 1, "columnIndex": 0},
+                            "insertBelow": True}},
+        {"insertTableColumn": {"tableCellLocation": {"tableStartLocation": {"index": at},
+                                                     "rowIndex": 0, "columnIndex": 0},
+                               "insertRight": True}}]
+
+    after = grid_table([["a one", "", "b one"], ["a two", "", "b TYPED"], ["", "", ""]])
+    rebased = doc_merge.rebase_tables(GRID, after, result["shaped"])
+    again = doc_merge.plan(rebased, ours, after)
+    assert again["structure"] == []
+    merged = again["blocks"][1]
+    assert [[doc_merge.block_text(c[0]) for c in row] for row in merged["rows"]] == [
+        ["a one", "NEW", "b one"], ["a two", "NEW2", "b TYPED"], ["a three", "x", "b three"]]
+    assert sorted(r["insertText"]["text"] for r in again["requests"]) == [
+        "NEW", "NEW2", "a three", "b three", "x"]
+
+
+def test_a_cell_the_source_split_into_two_paragraphs_is_written_with_the_break():
+    ours = grid_table([["a one", "b one"], ["a two", "b two"]])
+    ours["blocks"][1]["rows"][0][1] = [{"kind": "paragraph", "runs": [{"text": "b one"}]},
+                                       {"kind": "paragraph", "runs": [{"text": "b more"}]}]
+    theirs = grid_table([["a one", "b one"], ["a two", "b TYPED"]])
+    result = doc_merge.plan(GRID, ours, theirs)
+    assert result["structure"] == []
+    cell = theirs["blocks"][1]["rows"][0][1][0]
+    assert [r for r in result["requests"] if "insertText" in r] == [
+        {"insertText": {"location": {"index": cell["span"][1] - 1}, "text": "\nb more"}}]
+
+
+def test_a_cell_the_document_holds_two_paragraphs_in_merges_as_one_text():
+    """The reader pressed Enter in a cell and the source rewrote a word of it."""
+    ours = grid_table([["a ONE", "b one"], ["a two", "b two"]])
+    typed = table("t:grid", [["a one", "b one"], ["a two", "b two"]])
+    typed["rows"][0][0] = [{"kind": "paragraph", "runs": [{"text": "a one"}]},
+                           {"kind": "paragraph", "runs": [{"text": "a typed"}]}]
+    theirs = live([GRID["blocks"][0], typed, GRID["blocks"][2]])
+    result = doc_merge.plan(GRID, ours, theirs)
+    first = theirs["blocks"][1]["rows"][0][0][0]
+    inserts = [r["insertText"] for r in result["requests"] if "insertText" in r]
+    assert inserts == [{"location": {"index": first["span"][1] - 1}, "text": "ONE"}]
+    assert result["blocks"][1]["rows"][0][0][0]["joined"]
+    assert doc_merge.block_text(result["blocks"][1]["rows"][0][0][0]) == "a ONE\na typed"
+
+
+MOVE = live([para("p:one", "one"), para("p:two", "two"),
+             table("t:grid", [["a", "b"]]), para("p:three", "three")])
+
+
+def test_a_table_the_source_moved_is_deleted_and_built_again_where_the_file_has_it():
+    ours = live([MOVE["blocks"][2], MOVE["blocks"][0], MOVE["blocks"][1], MOVE["blocks"][3]])
+    result = doc_merge.plan(MOVE, ours, live(MOVE["blocks"]))
+    grid = MOVE["blocks"][2]["span"]
+    assert result["structure"] == [
+        {"deleteContentRange": {"range": {"startIndex": grid[0], "endIndex": grid[1]}}},
+        {"insertTable": {"rows": 1, "columns": 2, "location": {"index": 1}}}]
+    assert result["shaped"][0] | {"note": ""} == {"key": "t:grid", "after": None,
+                                                  "moved": True, "note": ""}
+
+    after = live([table(None, [["", ""]]), *MOVE["blocks"][:2], MOVE["blocks"][3]])
+    after["blocks"][0]["key"] = None
+    assert doc_merge.anchor_tables(after, result["shaped"]) == 1
+    rebased = doc_merge.rebase_tables(MOVE, after, result["shaped"])
+    assert [b["key"] for b in rebased["blocks"]] == ["t:grid", "p:one", "p:two", "p:three"]
+    again = doc_merge.plan(rebased, ours, after)
+    assert again["structure"] == []
+    assert sorted(r["insertText"]["text"] for r in again["requests"]) == ["a", "b"]
+
+
+def test_a_table_the_document_changed_is_not_moved():
+    ours = live([MOVE["blocks"][2], MOVE["blocks"][0], MOVE["blocks"][1], MOVE["blocks"][3]])
+    theirs = live([*MOVE["blocks"][:2], table("t:grid", [["a", "TYPED"]]), MOVE["blocks"][3]])
+    result = doc_merge.plan(MOVE, ours, theirs)
+    assert result["structure"] == []
+    assert any("document changed it" in n for n in result["notes"])
+
+
+def test_a_table_the_source_deleted_at_the_end_takes_the_empty_paragraph_after_it():
+    """Measured: the mark in front of the table and the table leave `abc\\n` and no
+    trailer; the table's own span alone would leave an empty paragraph behind."""
+    was = live([para("p:one", "one"), table("t:grid", [["a"]])])
+    was["trailer"] = [was["blocks"][1]["span"][1], was["blocks"][1]["span"][1] + 1]
+    theirs = live(was["blocks"]) | {"trailer": was["trailer"]}
+    result = doc_merge.plan(was, live([was["blocks"][0]]), theirs)
+    span = was["blocks"][1]["span"]
+    assert result["requests"] == [{"deleteContentRange": {"range": {
+        "startIndex": span[0] - 1, "endIndex": span[1]}}}]
+
+
+def test_a_table_the_source_deleted_at_the_start_takes_the_lead_with_it():
+    was = live([table("t:grid", [["a"]]), para("p:one", "one")], start=2)
+    theirs = live(was["blocks"], start=2) | {"lead": [1, 2]}
+    result = doc_merge.plan(was, live([was["blocks"][1]]), theirs)
+    assert result["requests"] == [{"deleteContentRange": {"range": {
+        "startIndex": 1, "endIndex": was["blocks"][0]["span"][1]}}}]
 
 
 def test_a_table_the_source_added_is_built_where_the_file_puts_it():

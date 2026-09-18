@@ -19,7 +19,9 @@ Two things are different from the Slides side, and both come from measurement
 
 from __future__ import annotations
 
+from collections import Counter
 from difflib import SequenceMatcher
+from typing import NamedTuple
 
 from . import doc_ir
 from .merge import diff3, tokens
@@ -326,17 +328,47 @@ def rebase_tables(base: dict, theirs: dict, shaped: list[dict]) -> dict:
         if index is None:
             continue
         at = next((i for i, b in enumerate(blocks) if b.get("key") == told["key"]), None)
-        if at is None:
+        if at is None or told.get("moved"):
+            # Built from nothing — a table the source added, or one it moved, which
+            # was deleted where it stood: the base has it where the document now does,
+            # and as blank as it is there.
+            if at is not None:
+                del blocks[at]
             blocks.insert(_place(theirs, blocks, index), theirs["blocks"][index])
+        elif told.get("lines"):
+            blocks[at] = _rebased_table(blocks[at], told["lines"], theirs["blocks"][index])
         elif told.get("ops"):
             blocks[at] = _regridded(blocks[at], told["ops"])
     return dict(base) | {"blocks": blocks}
 
 
+def _rebased_table(was: dict, lines: dict, now: dict) -> dict:
+    """The base's table on the grid that was just written, and how its lines match.
+
+    A row the source added is in it, blank; a row the document added is not, since
+    nothing agreed on it; the rest keep the base's words. `aligned` records which of
+    its lines is which line of the document's new grid and of the file, because
+    that is known here for certain and would only be guessed again from the words.
+    """
+    names = ("row", "column")
+    kept = {name: [line for line in lines[name] if not line.gone] for name in names}
+    agreed = {name: [line for line in kept[name] if line.was is not None or line.mine is not None]
+              for name in names}
+    rows = [[[dict(b) for b in (_cell(was, row.was, column.was) or _blank_cell())]
+             for column in agreed["column"]] for row in agreed["row"]]
+    aligned = {"live": _size(now.get("rows", [])), "mine": lines["mine"]}
+    for name in names:
+        where = {id(line): k for k, line in enumerate(kept[name])}
+        aligned[f"{name}_live"] = [(i, where[id(line)]) for i, line in enumerate(agreed[name])]
+        aligned[f"{name}_mine"] = [(i, line.mine) for i, line in enumerate(agreed[name])
+                                   if line.mine is not None]
+    return dict(was) | {"rows": rows, "aligned": aligned}
+
+
 def _regridded(was: dict, ops: list[tuple]) -> dict:
     """The base's table with the rows and columns that were just written in it."""
     rows = [list(row) for row in was.get("rows", [])]
-    for line, how, at in sorted(ops, key=lambda o: -o[2]):
+    for line, how, at in sorted(ops, key=_op_order):
         if line == "row":
             width = len(rows[0]) if rows else 0
             if how == "delete":
@@ -457,19 +489,39 @@ def _apply_source_moves(base: dict, ours: dict, theirs: dict, merged: list, note
     if live != was:
         notes.append("both sides moved blocks around — the document's order is kept")
         return
+    sides = {name: {b.get("key"): b for b in side["blocks"]}
+             for name, side in (("was", base), ("mine", ours), ("live", theirs))}
     for key in _moved_keys(was, mine):
         block = placed[key]
         # A move is written as a delete and a fresh insert, so it can only carry what
-        # an insert can write: not a table's grid, and not a chip no request creates.
-        if block.get("kind") == "table" or not _writable_block(block):
-            notes.append(f"{key}: the source moved it, but a block with a table or an "
-                         f"equation-like chip in it cannot be written from nothing — "
-                         f"left where the document has it")
+        # an insert can write: not a chip no request creates, and a table only when
+        # the document has nothing of its own in it — it is built again blank, and
+        # its words are the file's.
+        if block.get("kind") == "table":
+            if not _table_movable(sides["was"][key], sides["mine"][key], sides["live"][key]):
+                notes.append(f"{key}: the source moved the table, but the document changed "
+                             f"it or it holds a chip — left where the document has it")
+                continue
+            block["build"] = _size(sides["mine"][key]["rows"])
+        elif not _writable_block(block):
+            notes.append(f"{key}: the source moved it, but a block with an equation-like "
+                         f"chip in it cannot be written from nothing — left where the "
+                         f"document has it")
             continue
         merged.remove(block)
         index = next(i for i, b in enumerate(ours["blocks"]) if b.get("key") == key)
         merged.insert(_place(ours, merged, index), block)
         block["moved"] = True
+
+
+def _table_movable(was: dict, mine: dict, live: dict) -> bool:
+    """Whether a table can be deleted and built again from the file with nothing lost:
+    the document's cells say what the base's do, nothing in them is frozen, and the
+    file's grid is whole rows."""
+    cells = [b for row in live.get("rows", []) for cell in row for b in cell]
+    return (_size(mine.get("rows", [])) is not None
+            and _texts(was.get("rows", [])) == _texts(live.get("rows", []))
+            and not any(r.get("frozen") for b in cells for r in b.get("runs", [])))
 
 
 def _moved_keys(was: list[str], mine: list[str]) -> list[str]:
@@ -540,101 +592,283 @@ def _merge_block(was: dict, mine: dict, live: dict, conflicts: list, notes: list
 
 
 def _merge_table(was: dict, mine: dict, live: dict, conflicts: list, notes: list) -> dict:
-    """A table merges cell by cell; its grid is the document's.
+    """A table merges three ways twice: its rows and columns, then its cells.
 
-    Inside a table a block's identity is its place — row, column, and how far down the
-    cell — not a named range, because a cell's paragraph cannot be deleted or moved
-    without changing the grid. A source that changed the grid while the document left
-    it alone has its rows and columns written, in a batch of their own and before the
-    words (`structure`); where both sides changed it, the document's grid stands, as
-    everywhere else.
+    Inside a table a block has no named range: a cell is known by the row and column
+    it is in, and a row or a column by its words (`_table_lines`), so both sides may
+    add and take away rows and columns — one side rows, the other columns, or both at
+    once. Lines the document added stay, lines the source added are written, a line
+    the source took away goes unless the document wrote in it. Rows and columns are
+    written in a batch of their own, before any words (`structure`), and the cells are
+    merged on the pass after that, against the grid the document then has.
     """
     key = live.get("key") or "a table"
     out = dict(live)
-    if _grid(mine) != _grid(live) or _grid(was) != _grid(live):
-        if _grid(was) == _grid(live) and (ops := _grid_ops(mine, live)):
-            return out | {"origin": "the grid the source has", "regrid": ops}
-        notes.append(f"{key}: the table's rows and columns differ between the sides — left alone")
-        return out | {"origin": "table grid differs"}
-    rows = []
-    for r, row in enumerate(live.get("rows", [])):
+    if _hint(was, mine, live) is None and _grid(was) == _grid(mine) == _grid(live):
+        # One shape on all three sides: a cell is its place, so a row the source
+        # rewrote from end to end is still that row.
+        lines = [[(r, c, r, c, r, c) for c in range(len(row))]
+                 for r, row in enumerate(live.get("rows", []))]
+    else:
+        found = _table_lines(was, mine, live, notes, key)
+        if found is None:
+            notes.append(f"{key}: the table's rows and columns differ between the sides "
+                         f"— left alone")
+            return out | {"origin": "table grid differs"}
+        rows, columns = found
+        ops = _grid_ops(rows, "row") + _grid_ops(columns, "column")
+        if ops:
+            return out | {"origin": "the grid the source has", "regrid": ops,
+                          "lines": {"row": rows, "column": columns,
+                                    "mine": _size(mine.get("rows", []))}}
+        # No line is added or taken away, so the document's grid is the merged one,
+        # and every live cell is merged where it stands.
+        lines = [[(row.live, column.live, row.was, column.was, row.mine, column.mine)
+                  for column in columns] for row in rows]
+    merged = []
+    for row in lines:
         cells = []
-        for c, cell in enumerate(row):
-            merged = []
-            for i, block in enumerate(cell):
-                was_cell, my_cell = _at(was, r, c, i), _at(mine, r, c, i)
-                merged.append(dict(block) if was_cell is None or my_cell is None
-                              else _merge_block(was_cell, my_cell, block, conflicts, notes))
-            cells.append(merged)
-        rows.append(cells)
+        for r, c, wr, wc, mr, mc in row:
+            here = live["rows"][r][c]
+            then, want = _cell(was, wr, wc), _cell(mine, mr, mc)
+            cells.append([dict(b) for b in here] if then is None or want is None
+                         else _merge_cell(then, want, here, conflicts, notes, key))
+        merged.append(cells)
     # A table has no words of its own, so what its cells did is what it did: the
     # report and the write side both ask the table, not the blocks inside it.
-    inside = {b.get("origin") for row in rows for cell in row for b in cell}
-    return out | {"rows": rows} | ({"origin": "merged"} if "merged" in inside
-                                   else {"origin": "kept from the document"}
-                                   if "kept from the document" in inside else {})
+    inside = {b.get("origin") for row in merged for cell in row for b in cell}
+    return out | {"rows": merged} | ({"origin": "merged"} if "merged" in inside
+                                     else {"origin": "kept from the document"}
+                                     if "kept from the document" in inside else {})
 
 
-def _grid(block: dict) -> tuple:
-    """How many cells each row has, and how many blocks each cell holds."""
-    return tuple(tuple(len(cell) for cell in row) for row in block.get("rows", []))
+def _merge_cell(was: list, mine: list, live: list, conflicts: list, notes: list,
+                key: str) -> list[dict]:
+    """One cell, three ways: paragraph by paragraph while the three agree on how many
+    there are, and as one text with its paragraph breaks in it when they do not."""
+    if len(was) == len(mine) == len(live):
+        return [_merge_block(w, m, l, conflicts, notes) for w, m, l in zip(was, mine, live)]
+    then, want, now = (_cell_text(cell) for cell in (was, mine, live))
+    text, clashes = diff3(then, want, now)
+    for clash in clashes:
+        conflicts.append(dict(clash) | {"key": key})
+    if text == now:
+        return [dict(b) | ({"origin": "kept from the document"} if now != then else {})
+                for b in live]
+    # `_pairs` sets this against the live cell read as one block (`_joined`), so the
+    # breaks are written as the newlines they are.
+    return [{"kind": "paragraph", "joined": True, "runs": [{"text": text}], "origin": "merged"}]
 
 
-def _grid_ops(mine: dict, live: dict) -> list[tuple[str, str, int]] | None:
-    """How to turn the document's grid into the file's, as whole rows and columns.
+class _Line(NamedTuple):
+    """One row or column of the merged table: where it is in each side, if anywhere,
+    and whether it is about to be taken out of the document."""
+    was: int | None
+    live: int | None
+    mine: int | None
+    gone: bool = False
 
-    One dimension at a time: when the number of rows changed, the rows are matched by
-    their words, and when the number of columns changed, the columns are. Both at once
-    leaves nothing to match on — every row differs because every row is a column
-    longer — and so does a cell holding more than one paragraph or a row of its own
-    length. Those are reported instead, which is what this did with every grid change
-    before.
+
+ALIKE = 0.5    # least score for two rows (or columns) to be the same line
+BLANK = 0.6    # two lines with nothing written in them: alike, but less than equal
+
+
+def _table_lines(was: dict, mine: dict, live: dict, notes: list,
+                 key: str) -> tuple[list[_Line], list[_Line]] | None:
+    """The merged rows and columns of a table, or None when there is no telling.
+
+    The columns are matched by the words in them and the rows by their cells in those
+    columns, each side against the base, and the two matchings are merged
+    (`_merged_lines`). A base the grid was just written to says how its lines match
+    (`rebase_tables`), so the pass after a regrid does not guess them a second time.
     """
-    here, there = live.get("rows", []), mine.get("rows", [])
-    if not here or not there:
+    here, old, src = (b.get("rows", []) for b in (live, was, mine))
+    if not all(_size(rows) for rows in (here, old, src)):
+        return None                            # a row out of step with the others
+    now, then, want = (_texts(rows) for rows in (here, old, src))
+    hint = _hint(was, mine, live)
+    if hint:
+        live_columns, mine_columns = hint["column_live"], hint["column_mine"]
+        live_rows, mine_rows = hint["row_live"], hint["row_mine"]
+    else:
+        live_columns = _align(_columns(then), _columns(now), _column_score)
+        mine_columns = _align(_columns(then), _columns(want), _column_score)
+        live_rows = _align(then, now, _row_score(live_columns))
+        mine_rows = _align(then, want, _row_score(mine_columns))
+
+    def row_kept(w, l):
+        return _line_unchanged(then[w], now[l], live_columns, len(now[l]))
+
+    def column_kept(w, l):
+        return _line_unchanged([row[w] for row in then], [row[l] for row in now],
+                               live_rows, len(now))
+
+    rows = _merged_lines(len(now), len(want), live_rows, mine_rows, row_kept)
+    columns = _merged_lines(len(now[0]), len(want[0]), live_columns, mine_columns, column_kept)
+    if rows is None or columns is None:
         return None
-    if len({len(row) for row in here}) != 1 or len({len(row) for row in there}) != 1:
-        return None                        # a row out of step with the others
-    if any(len(cell) != 1 for row in here + there for cell in row):
-        return None                        # a cell with more than one paragraph in it
-    if len(here[0]) == len(there[0]):
-        return [("row", how, at) for how, at in
-                _line_ops([_line_text(row) for row in here], [_line_text(row) for row in there])]
-    if len(here) == len(there):
-        return [("column", how, at) for how, at in
-                _line_ops([_line_text(column) for column in zip(*here)],
-                          [_line_text(column) for column in zip(*there)])]
+    for name, merged in (("row", rows), ("column", columns)):
+        for line in merged:
+            if line.was is not None and line.mine is None and not line.gone:
+                notes.append(f"{key}: the source took away a {name}, but the document wrote "
+                             f"in it — kept")
+    return rows, columns
+
+
+def _hint(was: dict, mine: dict, live: dict) -> dict | None:
+    """How the base's lines match, when `rebase_tables` left that said for the grids
+    the two sides have now."""
+    hint = was.get("aligned")
+    if hint and hint["live"] == _size(live.get("rows", [])) \
+            and hint["mine"] == _size(mine.get("rows", [])):
+        return hint
     return None
 
 
-def _line_text(cells) -> tuple:
-    return tuple(block_text(cell[0]) for cell in cells)
+def _size(rows: list) -> tuple[int, int] | None:
+    """A grid's rows and columns, when every row has as many cells as the first."""
+    if not rows or not rows[0] or any(len(row) != len(rows[0]) for row in rows):
+        return None
+    return len(rows), len(rows[0])
 
 
-def _line_ops(here: list, there: list) -> list[tuple[str, int]]:
-    """Which rows (or columns) to add or take away, matched by their words.
+def _cell_text(cell: list[dict]) -> str:
+    return "\n".join(block_text(block) for block in cell)
 
-    Only the *count* a stretch is out by is written. A row whose words the source
-    changed is a text edit, and text is merged afterwards cell by cell, so a stretch
-    that differs on both sides adds or removes at its end and leaves the rest alone —
-    a row rewritten by the source is never deleted and written again, which would
-    throw away whatever the document put in it.
+
+def _texts(rows: list) -> list[list[str]]:
+    return [[_cell_text(cell) for cell in row] for row in rows]
+
+
+def _columns(texts: list[list[str]]) -> list[list[str]]:
+    return [list(column) for column in zip(*texts)]
+
+
+def _column_score(a: list[str], b: list[str]) -> float:
+    """How alike two columns are: the share of their words that both have, wherever
+    in the column — a row added or taken away shifts every cell below it."""
+    one, other = (Counter(t for t in side if t.strip()) for side in (a, b))
+    if not one and not other:
+        return BLANK
+    if not one or not other:
+        return 0.0
+    return sum((one & other).values()) / max(sum(one.values()), sum(other.values()))
+
+
+def _row_score(columns: list[tuple[int, int]]):
+    """How alike two rows are: the share of their cells, in the columns that match,
+    that say the same thing — cells nobody wrote in left out of the count."""
+    def score(a: list[str], b: list[str]) -> float:
+        cells = [(a[i], b[j]) for i, j in columns if a[i].strip() or b[j].strip()]
+        if not cells:
+            return BLANK
+        return sum(x == y for x, y in cells) / len(cells)
+    return score
+
+
+def _align(here: list, there: list, score) -> list[tuple[int, int]]:
+    """Which line of `here` is which line of `there`, keeping both orders.
+
+    The pairs that are at least ALIKE and add up to the most, and then, between two
+    such pairs, the lines left over paired by place: a row reworded from end to end
+    between two rows that kept their words is still that row.
     """
+    n, m = len(here), len(there)
+    alike = [[score(a, b) for b in there] for a in here]
+    best = [[0.0] * (m + 1) for _ in range(n + 1)]
+    for i in range(n - 1, -1, -1):
+        for j in range(m - 1, -1, -1):
+            take = best[i + 1][j + 1] + alike[i][j] if alike[i][j] >= ALIKE else -1.0
+            best[i][j] = max(take, best[i + 1][j], best[i][j + 1])
+    sure, i, j = [], 0, 0
+    while i < n and j < m:
+        if alike[i][j] >= ALIKE and best[i][j] == best[i + 1][j + 1] + alike[i][j]:
+            sure.append((i, j))
+            i, j = i + 1, j + 1
+        elif best[i][j] == best[i + 1][j]:
+            i += 1
+        else:
+            j += 1
     out = []
-    for op, i1, i2, j1, j2 in SequenceMatcher(None, here, there, autojunk=False).get_opcodes():
-        extra = (j2 - j1) - (i2 - i1)
-        if op == "equal" or extra == 0:
-            continue
-        out += ([("insert", i2)] * extra if extra > 0
-                else [("delete", at) for at in range(i2 + extra, i2)])
+    for (i0, j0), (i1, j1) in zip([(-1, -1)] + sure, sure + [(n, m)]):
+        out += [(i0 + 1 + k, j0 + 1 + k) for k in range(min(i1 - i0, j1 - j0) - 1)]
+        if i1 < n:
+            out.append((i1, j1))
     return out
 
 
-def _at(block: dict, row: int, cell: int, index: int) -> dict | None:
+def _line_unchanged(was: list[str], live: list[str], across: list[tuple[int, int]],
+                    width: int) -> bool:
+    """Whether the document left a row (or column) as the base has it: every cell the
+    two share says the same, and nothing is written in a cell the base did not have."""
+    matched = {l for _, l in across}
+    return (all(was[w] == live[l] for w, l in across)
+            and all(not live[l].strip() for l in range(width) if l not in matched))
+
+
+def _merged_lines(n_live: int, n_mine: int, live: list[tuple[int, int]],
+                  mine: list[tuple[int, int]], unchanged) -> list[_Line] | None:
+    """The rows (or columns) of the merged table, in the document's order.
+
+    Every line the document has is there: one the source took away is marked `gone`
+    when the document left it as it was, and kept otherwise. Lines the source added
+    go in after the line that precedes them in the file. A table the merge would
+    leave with no line of the document's is not a merge a grid request can write
+    (the last row cannot be deleted), and says so with None.
+    """
+    was_of = {l: w for w, l in live}
+    mine_of = dict(mine)
+    lines = []
+    for l in range(n_live):
+        w = was_of.get(l)
+        if w is None:
+            lines.append(_Line(None, l, None))
+        elif w in mine_of:
+            lines.append(_Line(w, l, mine_of[w]))
+        else:
+            lines.append(_Line(w, l, None, gone=unchanged(w, l)))
+    known = set(mine_of.values())
+    for m in range(n_mine):
+        if m in known:
+            continue
+        at = next((k + 1 for k in range(len(lines) - 1, -1, -1)
+                   if lines[k].mine is not None and lines[k].mine < m), 0)
+        lines.insert(at, _Line(None, None, m))
+    if n_live and all(line.gone for line in lines if line.live is not None):
+        return None
+    return lines
+
+
+def _grid_ops(lines: list[_Line], name: str) -> list[tuple[str, str, int]]:
+    """The rows (or columns) to delete and insert, at the document's indices: a line
+    goes in in front of the document's next line, whichever side that one is on."""
+    width = sum(line.live is not None for line in lines)
+    ops = []
+    for k, line in enumerate(lines):
+        if line.gone:
+            ops.append((name, "delete", line.live))
+        elif line.live is None:
+            ops.append((name, "insert", next((later.live for later in lines[k + 1:]
+                                             if later.live is not None), width)))
+    return ops
+
+
+def _kept(lines: list[_Line]) -> list[_Line]:
+    return [line for line in lines if not line.gone]
+
+
+def _cell(block: dict, row: int | None, column: int | None) -> list[dict] | None:
+    if row is None or column is None:
+        return None
     try:
-        return block["rows"][row][cell][index]
+        return block["rows"][row][column]
     except (KeyError, IndexError):
         return None
+
+
+def _grid(block: dict) -> tuple:
+    """How many cells each row has."""
+    return tuple(len(row) for row in block.get("rows", []))
 
 
 def _rewritten_runs(mine: dict, live: dict) -> list[dict]:
@@ -929,8 +1163,11 @@ def requests(theirs: dict, merged: list[dict]) -> list[dict]:
     # Whether the last block read is the body's last paragraph, whose mark is the
     # body's own: not when an empty paragraph after a final table was left out.
     ends = not theirs.get("trailer")
+    filled = any(_written_here(b) and _insert_index(merged, p) is None
+                 for p, b in enumerate(merged))
     for index in sorted(going):
-        start, end = _delete_range(theirs["blocks"], index, going, ends)
+        start, end = _delete_range(theirs["blocks"], index, going, ends, theirs.get("lead"),
+                                   filled)
         plans.append((start, DELETE, [{"deleteContentRange": {
             "range": {"startIndex": start, "endIndex": end}}}]))
 
@@ -1019,7 +1256,8 @@ def _written_here(block: dict) -> bool:
             and block.get("kind") != "table" and _writable_block(block))
 
 
-def structure(theirs: dict, merged: list[dict]) -> tuple[list[dict], list[dict]]:
+def structure(theirs: dict, merged: list[dict],
+              notes: list[str] | None = None) -> tuple[list[dict], list[dict]]:
     """The requests that change a table's shape, and what each of them does.
 
     A grid is not text. `insertTable`, `insertTableRow` and their deletes are the only
@@ -1030,14 +1268,39 @@ def structure(theirs: dict, merged: list[dict]) -> tuple[list[dict], list[dict]]
     (`doc_sync.sync`). Back to front, so the indices of the ones still to come hold.
     """
     plans: list[tuple[int, list[dict], dict]] = []
+    deletes: dict[str, tuple[int, int, list[dict]]] = {}
     for position, block in enumerate(merged):
         if block.get("kind") != "table":
             continue
         key = block.get("key")
-        if block.get("regrid"):
+        if block.get("moved"):
+            # A move is a delete and a table built again where the file has it, blank:
+            # its words are written on the next pass, like a new table's. Only a table
+            # the document left as the base has it gets here (`_apply_source_moves`),
+            # so nothing of the reader's is in what is deleted.
+            rows, columns = block["build"]
+            at, reqs = _new_table_requests(theirs, _insert_index(merged, position),
+                                           rows, columns)
+            if not reqs:
+                block["moved"] = False
+                if notes is not None:
+                    notes.append(f"{key}: the source moved it in front of the table the "
+                                 f"document opens on, where nothing can be written — left "
+                                 f"where the document has it")
+                continue
+            index = next(i for i, b in enumerate(theirs["blocks"])
+                         if b.get("span") == block.get("span"))
+            start, end = _delete_range(theirs["blocks"], index, {index},
+                                       not theirs.get("trailer"), theirs.get("lead"))
+            deletes[key] = (start, 0, [{"deleteContentRange": {
+                "range": {"startIndex": start, "endIndex": end}}}])
+            plans.append((at, reqs, {"key": key, "after": _after_key(merged, position),
+                                     "moved": True,
+                                     "note": f"`{key}`: moved where the source has it"}))
+        elif block.get("regrid"):
             what = ", ".join(f"{how}s a {line}" for line, how, _ in block["regrid"])
             plans.append((block["span"][0], _grid_requests(block["span"][0], block["regrid"]),
-                          {"key": key, "ops": block["regrid"],
+                          {"key": key, "ops": block["regrid"], "lines": block.get("lines"),
                            "note": f"`{key}`: {what} — the grid the source has"}))
         elif block.get("origin") == "added by the source":
             rows = len(block.get("rows", []))
@@ -1050,15 +1313,22 @@ def structure(theirs: dict, merged: list[dict]) -> tuple[list[dict], list[dict]]
                 plans.append((at, reqs, {"key": key, "after": _after_key(merged, position),
                                          "note": f"`{key}`: a table of {rows}×{columns} "
                                                  f"added by the source"}))
-    out: list[dict] = []
     shaped: list[dict] = []
+    steps: list[tuple[int, int, list[dict]]] = []
     seen: set[int] = set()
     for at, reqs, told in sorted(plans, key=lambda p: -p[0]):
         if at in seen:
             continue  # two tables added at one index: one send can place one of them
         seen.add(at)
-        out += reqs
         shaped.append(told)
+        steps.append((at, 1, reqs))
+        if told.get("moved"):
+            # Its delete only with its insert: a table deleted this round and built
+            # the next would read, in between, as a table the document deleted.
+            steps.append(deletes[told["key"]])
+    out: list[dict] = []
+    for _, _, reqs in sorted(steps, key=lambda p: (-p[0], p[1])):
+        out += reqs
     return out, shaped
 
 
@@ -1107,11 +1377,23 @@ def _new_table_requests(theirs: dict, at: int | None, rows: int,
     return at, out
 
 
+def _op_order(op: tuple) -> tuple:
+    """Rows before columns, each back to front, and at one index the delete first.
+
+    An insert is written beside the line in front of it (`_grid_requests`), so every
+    op leaves the lines in front of it where they were and the ones still to come
+    hold. The row ops need column 0 and the column ops row 0, and both are there as
+    long as the table keeps a line of the document's (`_merged_lines`).
+    """
+    line, how, index = op
+    return line != "row", -index, how != "delete"
+
+
 def _grid_requests(start: int, ops: list[tuple]) -> list[dict]:
     """Rows and columns added or taken away, back to front so the indices hold."""
     where = {"index": start}
     out = []
-    for line, how, index in sorted(ops, key=lambda o: -o[2]):
+    for line, how, index in sorted(ops, key=_op_order):
         row, column = (index, 0) if line == "row" else (0, index)
         cell = {"tableStartLocation": where, "rowIndex": row, "columnIndex": column}
         if how == "delete":
@@ -1136,7 +1418,8 @@ def _goes(live: dict, by_key: dict) -> bool:
 
 
 def _delete_range(blocks: list[dict], index: int, going: set[int],
-                  ends: bool = True) -> tuple[int, int]:
+                  ends: bool = True, lead: list | None = None,
+                  filled: bool = False) -> tuple[int, int]:
     """What to delete for block `index`, without touching a newline that must stay.
 
     "Deleting the newline character before a Table, TableOfContents or SectionBreak"
@@ -1148,9 +1431,25 @@ def _delete_range(blocks: list[dict], index: int, going: set[int],
     one, so no two ranges ever ask for the same mark. The body's last mark is the
     same kind of newline (measured: refused), so the last block does the same when
     `ends` says it is the body's last paragraph.
+
+    A table is deleted by its own span, which leaves the paragraphs on both sides of
+    it as they were (measured). Two paragraphs no request can delete come with one,
+    though: the empty `lead` in front of a table a body opens on, and the empty
+    trailer after one it ends on. The first goes with the table from its start; the
+    second stays, and the mark in front of the table goes instead — which, measured,
+    leaves the paragraph before the table as the body's last, and no empty one after.
+    Unless a block is being written into that trailer (`filled`): the two would then
+    be merged into one paragraph, so the table goes alone.
     """
     start, end = blocks[index]["span"]
-    if not _mark_is_taken(blocks, index, going, ends):
+    if blocks[index].get("kind") == "table":
+        if index == 0 and lead and lead[1] == start:
+            return lead[0], end
+        if (index == len(blocks) - 1 and not ends and not filled and index > 0
+                and blocks[index - 1].get("kind") != "table"):
+            return start - 1, end
+        return start, end
+    if not _mark_is_taken(blocks, index, going, ends, lead, filled):
         return start, end
     if index == 0 or blocks[index - 1].get("kind") == "table":
         # No mark to take: the block's words go and an empty paragraph stays in front
@@ -1159,7 +1458,8 @@ def _delete_range(blocks: list[dict], index: int, going: set[int],
     return start - 1, end - 1
 
 
-def _mark_is_taken(blocks: list[dict], index: int, going: set[int], ends: bool) -> bool:
+def _mark_is_taken(blocks: list[dict], index: int, going: set[int], ends: bool,
+                   lead: list | None = None, filled: bool = False) -> bool:
     """Whether this block's own paragraph mark must survive the delete — because a
     table follows it, because it ends the body, or because the deleted block that
     follows it takes this one's."""
@@ -1167,7 +1467,8 @@ def _mark_is_taken(blocks: list[dict], index: int, going: set[int], ends: bool) 
     if after >= len(blocks):
         return ends
     if after in going:
-        return _delete_range(blocks, after, going, ends)[0] < blocks[after]["span"][0]
+        return (_delete_range(blocks, after, going, ends, lead, filled)[0]
+                < blocks[after]["span"][0])
     return blocks[after].get("kind") == "table"
 
 
@@ -1177,10 +1478,28 @@ def _pairs(live: dict, want: dict):
     yield live, want
     for r, row in enumerate(live.get("rows", [])):
         for c, cell in enumerate(row):
-            for i, inner in enumerate(cell):
-                other = _at(want, r, c, i)
-                if other is not None and inner.get("span"):
-                    yield inner, other
+            other = _cell(want, r, c) or []
+            if other and other[0].get("joined"):
+                # The sides disagree on how many paragraphs the cell has: its text is
+                # merged as one, with the breaks in it, and written the same way.
+                if cell and all(inner.get("span") for inner in cell):
+                    yield _joined(cell), other[0]
+                continue
+            for inner, merged in zip(cell, other):
+                if inner.get("span"):
+                    yield inner, merged
+
+
+def _joined(cell: list[dict]) -> dict:
+    """A cell's paragraphs read as one block: the marks between them are newlines in
+    its text, one unit each, and the last one — the cell's own — stays outside."""
+    runs: list[dict] = []
+    for i, block in enumerate(cell):
+        if i:
+            runs.append({"text": "\n", "width": 1})
+        runs += block.get("runs", [])
+    return {"kind": "paragraph", "runs": runs,
+            "span": [cell[0]["span"][0], cell[-1]["span"][1]]}
 
 
 def _insert_index(merged: list[dict], position: int) -> int | None:
@@ -1215,7 +1534,7 @@ def plan(base: dict, ours: dict, theirs: dict) -> dict:
             result["notes"].append(f"{block.get('key')}: a new block with a chip in it that no "
                                    f"request can create (or a picture file that is not there) "
                                    f"cannot be written")
-    result["structure"], result["shaped"] = structure(theirs, result["blocks"])
+    result["structure"], result["shaped"] = structure(theirs, result["blocks"], result["notes"])
     result["requests"] = requests(theirs, result["blocks"])
     return result
 
