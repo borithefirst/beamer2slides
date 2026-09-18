@@ -370,21 +370,144 @@ def test_a_table_the_source_deleted_takes_the_newline_question_with_it():
                       "endIndex": was["blocks"][1]["span"][1]}]
 
 
-def test_a_table_whose_grid_the_source_changed_is_left_alone():
+def regrid(rows: list[list[str]]) -> dict:
+    """The plan for a source that gave the GRID table these rows and columns."""
+    ours = live([GRID["blocks"][0], table("t:grid", rows), GRID["blocks"][2]])
+    return doc_merge.plan(GRID, ours, live(GRID["blocks"]))
+
+
+def test_a_column_the_source_added_is_written_before_the_words():
+    result = regrid([["a one", "b one", "c one"], ["a two", "b two", "c two"]])
+    assert result["structure"] == [{"insertTableColumn": {
+        "tableCellLocation": {"tableStartLocation": {"index": GRID["blocks"][1]["span"][0]},
+                              "rowIndex": 0, "columnIndex": 1}, "insertRight": True}}]
+    # The words come on the pass after this one, against the grid the document
+    # will then have: there is no index here for a cell that does not exist yet.
+    assert result["requests"] == []
+    assert result["shaped"][0]["note"] == "`t:grid`: inserts a column — the grid the source has"
+
+
+def test_a_row_the_source_added_in_the_middle_goes_in_the_middle():
+    result = regrid([["a one", "b one"], ["a new", "b new"], ["a two", "b two"]])
+    assert result["structure"] == [{"insertTableRow": {
+        "tableCellLocation": {"tableStartLocation": {"index": GRID["blocks"][1]["span"][0]},
+                              "rowIndex": 0, "columnIndex": 0}, "insertBelow": True}}]
+
+
+def test_a_row_the_source_added_at_the_top_is_written_above_the_first():
+    result = regrid([["a new", "b new"], ["a one", "b one"], ["a two", "b two"]])
+    assert result["structure"][0]["insertTableRow"]["insertBelow"] is False
+    assert result["structure"][0]["insertTableRow"]["tableCellLocation"]["rowIndex"] == 0
+
+
+def test_a_row_the_source_deleted_is_deleted():
+    result = regrid([["a one", "b one"]])
+    assert result["structure"] == [{"deleteTableRow": {"tableCellLocation": {
+        "tableStartLocation": {"index": GRID["blocks"][1]["span"][0]},
+        "rowIndex": 1, "columnIndex": 0}}}]
+
+
+def test_a_row_the_source_rewrote_is_not_deleted_and_written_again():
+    """Only the count a stretch is out by is a grid edit; the words are merged after,
+    cell by cell, and a row deleted and rebuilt would lose what the document put in it."""
+    result = regrid([["a ONE", "b ONE"], ["a two", "b two"], ["a new", "b new"]])
+    assert [next(iter(r)) for r in result["structure"]] == ["insertTableRow"]
+    assert result["structure"][0]["insertTableRow"]["tableCellLocation"]["rowIndex"] == 1
+
+
+def test_a_grid_the_document_also_changed_is_left_alone():
     ours = live([GRID["blocks"][0], table("t:grid", [["a one", "b one", "c one"],
                                                      ["a two", "b two", "c two"]]),
                  GRID["blocks"][2]])
-    result = doc_merge.plan(GRID, ours, live(GRID["blocks"]))
-    assert result["requests"] == []
+    theirs = live([GRID["blocks"][0], table("t:grid", [["a one", "b one"]]),
+                   GRID["blocks"][2]])
+    result = doc_merge.plan(GRID, ours, theirs)
+    assert result["structure"] == [] and result["requests"] == []
     assert "rows and columns" in result["notes"][0]
 
 
-def test_a_table_the_source_added_is_reported_not_written():
-    ours = live([GRID["blocks"][0], GRID["blocks"][1],
-                 table("t:new", [["x"]]), GRID["blocks"][2]])
+def test_rows_and_columns_changed_at_once_are_left_alone():
+    """Every row is a column longer, so there is nothing left to match rows on."""
+    result = regrid([["a one", "b one", "c one"]])
+    assert result["structure"] == [] and result["requests"] == []
+    assert "rows and columns" in result["notes"][0]
+
+
+def test_a_table_the_source_added_is_built_where_the_file_puts_it():
+    was = live([para("p:one", "one"), para("p:two", "two")])
+    ours = live([was["blocks"][0], table("t:new", [["x", "y"]]), was["blocks"][1]])
+    result = doc_merge.plan(was, ours, live(was["blocks"]))
+    at = was["blocks"][1]["span"][0]
+    assert result["structure"] == [
+        {"insertTable": {"rows": 1, "columns": 2, "location": {"index": at}}},
+        # `insertTable` splits the paragraph it is written into, so an empty one is
+        # left in front of the table. The mark before it goes instead, which merges
+        # the two and leaves both blocks as the file has them.
+        {"deleteContentRange": {"range": {"startIndex": at - 1, "endIndex": at}}}]
+    assert result["shaped"] == [{"key": "t:new", "after": "p:one",
+                                 "note": "`t:new`: a table of 1×2 added by the source"}]
+
+
+def test_a_table_the_source_added_in_front_of_a_table_goes_at_the_mark_before_it():
+    """There is no paragraph at a table's own start index, and `insertTable` needs one.
+    The mark of the paragraph in front of it is the index next door that is inside one,
+    and the empty half it leaves lands between the two tables, where Docs wants it."""
+    ours = live([GRID["blocks"][0], table("t:new", [["x"]]), GRID["blocks"][1],
+                 GRID["blocks"][2]])
     result = doc_merge.plan(GRID, ours, live(GRID["blocks"]))
-    assert result["requests"] == []
-    assert "cannot be written" in result["notes"][0]
+    assert result["structure"] == [{"insertTable": {
+        "rows": 1, "columns": 1,
+        "location": {"index": GRID["blocks"][1]["span"][0] - 1}}}]
+
+
+def test_a_table_the_source_added_at_the_end_goes_to_the_end_of_the_segment():
+    ours = live(GRID["blocks"] + [table("t:new", [["x"], ["y"]])])
+    result = doc_merge.plan(GRID, ours, live(GRID["blocks"]))
+    assert result["structure"] == [{"insertTable": {"rows": 2, "columns": 1,
+                                                    "endOfSegmentLocation": {}}}]
+
+
+def test_a_table_the_document_built_is_found_by_what_it_follows():
+    """After the structural batch the new table carries no named range, and a read
+    cannot tell it from one a reader made. It is the keyless table after `p:before`."""
+    built = live([GRID["blocks"][0], table(None, [["", ""]]), GRID["blocks"][1],
+                  GRID["blocks"][2]])
+    built["blocks"][1]["key"] = None
+    assert doc_merge.anchor_tables(built, [{"key": "t:new", "after": "p:before",
+                                            "note": ""}]) == 1
+    assert built["blocks"][1]["key"] == "t:new"
+
+
+def test_the_base_takes_the_row_that_was_just_written_and_nothing_else():
+    """The new grid is no longer a difference between the sides: it is what this sync
+    wrote on the source's behalf, so the base says it too. Only the grid, though — the
+    reader's words in that table were never agreed on, and a base that swallowed them
+    would make the next plan read them as words the source had taken away."""
+    shaped = [{"key": "t:grid", "ops": [("row", "insert", 1)]}]
+    after = live([GRID["blocks"][0], table("t:grid", [["a one", "b one"], ["", ""],
+                                                      ["a two", "b TYPED"]]),
+                  GRID["blocks"][2]])
+    rebased = doc_merge.rebase_tables(GRID, after, shaped)
+    assert [b["key"] for b in rebased["blocks"]] == ["p:before", "t:grid", "p:after"]
+    assert doc_merge._grid(rebased["blocks"][1]) == doc_merge._grid(after["blocks"][1])
+    assert cell_text(rebased["blocks"][1], 1, 0) == ""        # the row that was made
+    assert cell_text(rebased["blocks"][1], 2, 1) == "b two"   # not what the reader typed
+
+    ours = live([GRID["blocks"][0], table("t:grid", [["a one", "b one"], ["a new", "b new"],
+                                                     ["a two", "b two"]]),
+                 GRID["blocks"][2]])
+    result = doc_merge.plan(rebased, ours, live(after["blocks"]))
+    assert result["structure"] == []
+    # The source's words go into the row that was just made, and the reader keeps theirs.
+    assert [r["insertText"]["text"] for r in result["requests"]] == ["b new", "a new"]
+    assert cell_text(result["blocks"][1], 2, 1) == "b TYPED"
+
+
+def test_a_new_table_lands_in_the_base_where_the_document_has_it():
+    after = live([GRID["blocks"][0], table("t:new", [["x"]]), GRID["blocks"][1],
+                  GRID["blocks"][2]])
+    rebased = doc_merge.rebase_tables(GRID, after, [{"key": "t:new"}])
+    assert [b["key"] for b in rebased["blocks"]] == ["p:before", "t:new", "t:grid", "p:after"]
 
 
 def test_a_new_block_carrying_a_chip_is_reported_not_written():

@@ -612,14 +612,24 @@ keys, named ranges), `doc_merge.py` (pure planning), `doc_sync.py` (the commands
   and a write, so the merged text and styling ride along, a block with a chip or a table in
   it is not moved at all, and `doc_merge.adopt_keys` gives the rewritten block its key back
   (the delete took its named range with it) before the file is regenerated.
-- Tables merge cell by cell, where identity is the cell's **place**. A table the source added,
-  a grid that differs between the sides, and a restyle of words the document rewrote are
-  reported, not written.
+- Tables merge cell by cell, where identity is the cell's **place**. A grid the source changed
+  while the document did not is written, but not with the words: `insertTable` and the
+  row/column requests move every index below them, so they go in a **batch of their own**
+  first, the document is read again, the new table is found by what it follows and anchored
+  (`doc_merge.anchor_tables`), the base takes the new grid *and only the grid*
+  (`rebase_tables`: taking the table as read would swallow the reader's words into the base),
+  and the text is planned against the grid the document then has (`doc_sync._write_structure`).
+  Rows and columns are matched by their words and only the count they are out by is written, so
+  a row the source reworded is never deleted and rebuilt. `insertTable` splits the paragraph
+  its index is in and needs one, so a table goes at the following block's start (and the empty
+  paragraph it leaves is swallowed), or, in front of another table, at the paragraph mark
+  before it. A grid both sides changed, and one that is not whole rows or columns, are still
+  reported; so is a restyle of words the document rewrote.
 - What the file cannot carry is reported too (`doc_sync.limits`): an `<img>` (the dialect has no
   picture - `insertInlineImage` takes a URI, so it would need a staging file like Slides' sync;
   an image already in the document is a frozen run and survives untouched), and the tabs past
   the first one, which are read but never written.
-- Live suite (opt-in, marker `docs`, ~75 s): `python -m pytest -m docs tests/test_docs_live.py`
+- Live suite (opt-in, marker `docs`, ~85 s): `python -m pytest -m docs tests/test_docs_live.py`
   pushes a document per test, edits both sides, syncs, checks a second sync writes nothing, and
   deletes the document. Offline: `tests/test_doc_ir.py`, `test_doc_merge.py`, `test_doc_sync.py`.
 

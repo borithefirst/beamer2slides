@@ -247,6 +247,33 @@ def test_a_section_the_source_moved_moves_in_the_document(paper):
     paper.settled()
 
 
+def test_a_table_the_source_added_and_a_row_it_added_are_written(paper):
+    """A grid is not text: it goes in a batch of its own, the document is read again,
+    and the words are written against the grid it then has. The reader's own edit to
+    the table that gained the row has to survive all of that."""
+    paper.edit('<table id="table:numbers">',
+               '<table id="table:costs"><tr><td><p>Item</p></td><td><p>Cost</p></td></tr>'
+               '<tr><td><p>Travel</p></td><td><p>340</p></td></tr></table>\n'
+               '<table id="table:numbers">')
+    paper.edit("<tr><td><p>South</p></td><td><p>870</p></td></tr>",
+               "<tr><td><p>South</p></td><td><p>870</p></td></tr>"
+               "<tr><td><p>East</p></td><td><p>510</p></td></tr>")
+    paper.typed("1200", " and steady")
+    info = paper.sync()
+    assert info["conflicts"] == []
+    assert any("added by the source" in line for line in info["applied"]), info["applied"]
+    assert any("inserts a row" in line for line in info["applied"]), info["applied"]
+
+    text = paper.text
+    assert "<td><p>Travel</p></td><td><p>340</p></td>" in text     # the table it built
+    assert "<td><p>East</p></td><td><p>510</p></td>" in text       # the row it added
+    assert "<td><p>1200 and steady</p></td>" in text               # what the reader typed
+    assert '<table id="table:costs">' in text                      # and it kept its id
+    # The empty paragraph `insertTable` leaves in front of itself is swallowed again.
+    assert "<p></p>" not in text and "The opening paragraph" in text
+    paper.settled()
+
+
 def test_the_same_words_on_both_sides_conflict_and_the_document_wins(paper):
     paper.edit("The closing paragraph.", "The final paragraph.")
     paper.rewrote("The closing paragraph", "closing", "last")

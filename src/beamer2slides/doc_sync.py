@@ -281,18 +281,28 @@ def sync(path: Path, document: str | None = None, dry_run: bool = False,
         base = _no_base(path, ours, theirs, assume_base)
 
     result = doc_merge.plan(base, ours, theirs)
-    applied, kept = _summary(result)
-    info = {"document": ident, "url": url(ident), "dry_run": dry_run,
-            "requests": len(result["requests"]), "conflicts": result["conflicts"],
-            "notes": limits(ours, doc) + result["notes"], "applied": applied, "kept": kept}
+
+    def report(extra: dict | None = None) -> dict:
+        applied, kept = _summary(result)
+        return {"document": ident, "url": url(ident), "dry_run": dry_run,
+                "requests": len(result["requests"]), "conflicts": result["conflicts"],
+                "notes": limits(ours, doc) + result["notes"],
+                "applied": [t["note"] for t in shaped] + applied, "kept": kept} | (extra or {})
+
+    shaped: list[dict] = []
     if dry_run:
-        info["plan"] = result["requests"]
+        info = report({"plan": result["structure"] + result["requests"],
+                       "requests": len(result["structure"]) + len(result["requests"])})
+        info["applied"] = [t["note"] for t in result["shaped"]] + info["applied"]
         info["report"] = str(write_report(path, info))
         return info
 
     hook = os.environ.pop("B2S_DOCS_BEFORE_WRITE", None)  # (tests: someone types now)
     if hook:
         subprocess.run(hook, shell=True, check=False)
+    doc, theirs, base, result, shaped = _write_structure(
+        docs, ident, path, ours, base, doc, theirs, result)
+    info = report()
     attempt, revision = 0, doc.get("revisionId")
     while True:
         try:
@@ -308,17 +318,58 @@ def sync(path: Path, document: str | None = None, dry_run: bool = False,
             print(f"  the document changed while this sync was planned; reading it again "
                   f"({attempt}/{ATTEMPTS - 1})")
             doc, theirs = read_document(docs, ident, ours, base)
-            revision = doc.get("revisionId")
             ours = read_file(path)  # (the file may have been committed to in the meantime)
             result = doc_merge.plan(base, ours, theirs)
-            info |= {"requests": len(result["requests"]), "conflicts": result["conflicts"],
-                     "notes": limits(ours, doc) + result["notes"], "replanned": attempt}
-            info["applied"], info["kept"] = _summary(result)
+            doc, theirs, base, result, more = _write_structure(
+                docs, ident, path, ours, base, doc, theirs, result)
+            shaped += more
+            revision = doc.get("revisionId")
+            info = report({"replanned": attempt})
 
     live = settle(docs, ident, path, ours, base, result["blocks"])
     info["blocks"] = len(live["blocks"])
     info["report"] = str(write_report(path, info))
     return info
+
+
+def _write_structure(docs, ident: str, path: Path, ours: dict, base: dict,
+                     doc: dict, theirs: dict, result: dict) -> tuple:
+    """Write what the grid needs before the words, and plan the words again.
+
+    A table the source added and rows or columns it changed cannot go in the batch
+    that writes the text: `insertTable` and its kin move every index below them, and
+    the cells they create do not exist until they have been sent. So they go first,
+    on their own; the document is read again; a table that was just built is given the
+    file's key and anchored, or the next plan would not recognise it and would build
+    it a second time; the base takes those tables as the document now reports them —
+    that grid is no longer a difference between the sides — and the words are planned
+    against what the document says now.
+
+    Returns the document, its IR, the base, the new plan and what was written, in
+    words for the report. A batch that leaves work over (two tables added at one
+    index, which one send cannot place) comes round again.
+    """
+    shaped: list[dict] = []
+    for _ in range(ATTEMPTS):
+        if not result["structure"]:
+            break
+        try:
+            send(docs, ident, result["structure"], doc.get("revisionId"))
+        except HttpError as err:
+            if not moved_on(err):
+                raise
+            print("  the document changed while the table edits were planned; reading it again")
+            doc, theirs = read_document(docs, ident, ours, base)
+            result = doc_merge.plan(base, ours, theirs)
+            continue
+        shaped += result["shaped"]
+        doc, theirs = read_document(docs, ident, ours, base)
+        if doc_merge.anchor_tables(theirs, result["shaped"]):
+            plant_ranges(docs, ident, theirs)
+            doc, theirs = read_document(docs, ident, ours, base)
+        base = doc_merge.rebase_tables(base, theirs, result["shaped"])
+        result = doc_merge.plan(base, ours, theirs)
+    return doc, theirs, base, result, shaped
 
 
 def _no_base(path: Path, ours: dict, theirs: dict, assume: str | None) -> dict:

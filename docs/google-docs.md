@@ -406,6 +406,49 @@ the file is regenerated (`doc_sync.settle`), or a paragraph nobody touched would
 renamed in the next diff — and a block the source added with an `id=` of its own would
 lose the name its author chose.
 
+### A grid is not text: the structural pass
+
+`insertTable`, `insertTableRow`, `insertTableColumn` and their deletes are the only way
+to change a table's shape, and none of them belongs in the batch that writes the words:
+every index below a grid that changes moves, and the cells a new table is made of do not
+exist until the request has been sent. So a sync that needs one of them sends **them
+first, on their own**, reads the document again, and plans the text against the grid it
+then has (`doc_merge.structure`, `doc_sync._write_structure`). Three things have to
+happen in between:
+
+- **the new table gets its key.** A table `insertTable` built carries no named range,
+  and a read cannot tell it from one a reader made in the browser, so it is found by
+  what it follows — the block the plan put it after, which the document already had
+  (`doc_merge.anchor_tables`) — given the file's key and anchored. Without that the next
+  plan would not recognise it and would build it a second time.
+- **the base takes the new grid, and only the grid.** That grid is no longer a
+  difference between the sides — this sync gave it to the document on the source's
+  behalf — so the base says it too, with the cells that were there keeping their words
+  and the ones just made empty (`doc_merge.rebase_tables`). Taking the table as the
+  document *reports* it would swallow into the base whatever a reader had typed in it,
+  and the next plan would read those words as words the source had taken away. That is
+  exactly what the live test caught.
+- **rows and columns are matched by their words, and only the count is written.** A row
+  whose words the source changed is a text edit, and text is merged afterwards cell by
+  cell, so a stretch that differs on both sides adds or removes at its end and leaves
+  the rest alone (`doc_merge._line_ops`). A row deleted and built again would throw away
+  whatever the document had put in it.
+
+What `insertTable` does exactly, measured: it **splits the paragraph its index is in** —
+what was before the index stays a paragraph, then comes the table, then the rest — and
+the index must be *inside a paragraph*, which a table's own start index is not. So a
+table written in front of an ordinary block goes at that block's start and the empty
+paragraph it leaves in front of itself is swallowed by deleting the mark of the block
+before it; a table written in front of another table goes at the mark of the paragraph
+before it, and the empty half lands *between* the two tables, where Docs wants a
+paragraph anyway; and a table written after everything goes to the end of the segment,
+where Docs keeps a paragraph after it, because a document ends on one.
+
+One dimension at a time: when rows and columns both changed there is nothing left to
+match rows on (every row is a column longer), and that, a cell holding two paragraphs,
+and a row out of step with the others are all reported instead — which is what every
+grid change got before.
+
 ### What the merge refuses to write
 
 Each of these is reported in the sync report, never guessed at:
@@ -413,8 +456,8 @@ Each of these is reported in the sync report, never guessed at:
 | Case | Why |
 |---|---|
 | a block whose frozen runs differ between the sides | a chip, an equation, a dropdown or a table of contents cannot be created by any write, so the text around one is left alone rather than rewritten without it |
-| a **table the source added** | `insertTable` builds a grid, not text; the merge writes text |
-| a table whose **grid** differs between the sides | adding a row or a column is a structural edit, and matching cells across it would be a guess. Cells merge by their place — row, column, how far down the cell — so the grid has to be the same on all three sides |
+| a table whose **grid both sides changed** | the document's grid stands, as it does everywhere else. A grid only the source changed is written — see the structural pass above |
+| a grid change that is **not whole rows or columns** | rows and columns both changed at once, a cell holding two paragraphs, a row out of step with the others: cells merge by their place, and there would be nothing to match them on |
 | a source restyle of words the document rewrote | the marks would have to be matched onto words that are no longer there |
 | a **move of a block with a chip, an equation or a table in it** | a move is a delete and a write, and those cannot be written from nothing — the block stays where the document has it |
 | a **reorder both sides made** | the document's order stands whole; the file's is reported |
@@ -499,14 +542,15 @@ All five write to `out/docs-probe/`.
 .venv\Scripts\python.exe -m pytest -m docs tests\test_docs_live.py
 ```
 
-The whole loop on real documents, about 75 s: a push whose import reads back as what the
+The whole loop on real documents, about 85 s: a push whose import reads back as what the
 file said, both sides editing (a table cell each, a block added, a list item rewritten),
 a block appended at the very end, a section the source moved to the end of the document
 (the reader's words, the styling and the block's key all ride along — and the paragraph
 it left behind stood in front of a table, which is where that delete was found), the same
-words rewritten on both sides (the document wins, and the conflict is reported), and a
-reader typing between the plan and the write (the sync reads again and keeps their
-words). Every test ends by syncing once more and
+words rewritten on both sides (the document wins, and the conflict is reported), a table
+the source added *and* a row it added to another one while a reader was typing in that
+same table, and a reader typing between the plan and the write (the sync reads again and
+keeps their words). Every test ends by syncing once more and
 finding **0 requests**, and each one deletes its document afterwards. Files stay in
 `out/docs-tests/`. To drive one by hand instead:
 
