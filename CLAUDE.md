@@ -536,6 +536,15 @@ It found the pairing bug above within 600 chained rounds. `_writable` checks a t
 sync writes them, one at a time (`_writable_cells`), and `fuzz_sync._retext` keeps `run_spans` on the
 words a deck edit leaves behind, as Slides does - stale spans had the campaign accusing
 `merge.styling_lost` of losing styling that was never where the spans said (seed 2194).
+A geometry override is one RELATIVE transform on the unit's *top* object, and the top is the group
+that carries its children - but a person who took that group apart leaves a recreation with no group
+to write on, and the anchored formula picture stayed at the converter's box while the report called
+the move applied (live seed 903 at chain depth 8). Each member of a group-less unit now takes the
+step itself (`sync.Sync._unit_oids`); the offline campaign is blind to this by construction, since
+`fuzz_world._place_unit` models the outcome (the whole unit moves) and not the mechanism, so the
+mechanism is pinned by `test_a_moved_unit_with_no_group_is_moved_member_by_member` and its
+counterpart with the group. The harness's own (seed 900): a slide the person duplicated after
+ungrouping something on it inherits the ungrouping, and the `integrity` excuse now follows the copy.
 
 ## Pitfalls found so far
 - PDFium (`pdf.py` handles these):

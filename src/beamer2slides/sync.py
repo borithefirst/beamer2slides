@@ -1293,12 +1293,7 @@ class Sync:
             else:
                 replaced[g] = children[0] if children else None
         # Moves: the deck object goes where the source moved the element.
-        for u in p["units"]:
-            if u["action"] == "move":
-                top = merge.unit_top(bunits[u["key"]], read)
-                if top:
-                    dx, dy = (v * self.scale for v in u["delta"])
-                    reqs.append(matrix_request(top, [1, 0, 0, 1, dx, dy]))
+        reqs += self.move_requests(p["units"], bunits, read, self.scale)
         reqs += self.tag_requests(o, created, new_oid, in_place)
         if p.get("background"):
             reqs += self.background_requests(sid, p["background"], slide, pres)
@@ -1409,6 +1404,33 @@ class Sync:
             k += 1
         return [{"updatePageElementsZOrder": {"pageElementObjectIds": [x], "operation": "BRING_TO_FRONT"}} for x in desired[k:]]
 
+    @staticmethod
+    def move_requests(units: list[dict], bunits: dict, read: dict, scale: float) -> list[dict]:
+        """The source's move written onto the deck's own objects. Every *root* of the unit takes the
+        step: normally that is the converter's group, which carries its children, but when the person
+        has taken the group apart the roots are the text box and each picture anchored to it, and
+        writing on the first of them alone would leave the others where the converter put them while
+        the report calls the move applied (`override_requests` had the same assumption, live fuzz seed
+        903). `merge.unit_shift` has already asked that one step fits every member of the unit, so the
+        same step is what each root wants."""
+        reqs = []
+        for u in units:
+            if u["action"] == "move":
+                dx, dy = (v * scale for v in u["delta"])
+                for oid in merge.unit_roots(bunits.get(u["key"], []), read):
+                    reqs.append(matrix_request(oid, [1, 0, 0, 1, dx, dy]))
+        return reqs
+
+    @staticmethod
+    def _unit_oids(w: dict, ounits: dict, ukey: str, index: dict) -> list[str]:
+        """The new objects of a recreated unit: its main object and the pictures anchored to it."""
+        oids = []
+        for m in ounits.get(ukey, []):
+            oid = w["new_oid"].get(index[m["key"]]) if m["key"] in index else None
+            if oid and oid not in oids:
+                oids.append(oid)
+        return oids
+
     def override_requests(self, work: dict, theirs: dict, now: dict, raw_before: dict | None = None,
                           raw_now: dict | None = None) -> list[dict]:
         """Deck edits re-applied to recreated elements: geometry, merged text, styles. raw_before /
@@ -1423,6 +1445,7 @@ class Sync:
                 continue
             b = self.base["slides"][p["base"]]
             bunits = merge.units(b["elements"])
+            ounits = merge.units(self.ours["slides"][p["ours"]]["elements"])
             index = {e["key"]: k for k, e in enumerate(self.ours["slides"][p["ours"]]["elements"])}
             t_read, n_read = before[p["objectId"]], after[p["objectId"]]
             for u in p["units"]:
@@ -1485,7 +1508,16 @@ class Sync:
                     else:
                         d = [1, 0, 0, 1, theirs_rb["box"][0] - new_rb["box"][0], theirs_rb["box"][1] - new_rb["box"][1]]
                     if any(abs(x - y) > 1e-4 for x, y in zip(d, [1, 0, 0, 1, 0, 0])):
-                        reqs.append(matrix_request(top, d))
+                        # A group carries its children, so one request on it moves the whole unit.
+                        # Without one - the person took this unit's group apart, and a recreation
+                        # does not put it back - `top` is the main object alone, and the unit's
+                        # anchored pictures need the step themselves or they stay at the
+                        # converter's boxes while the report says the person's move was kept
+                        # (live fuzz seed 903 at chain depth 8: a formula picture back 15 pt above
+                        # the line it belongs to). `merge.geometry_writable` has already asked that
+                        # one step fits every member, so the same step is what each of them wants.
+                        for oid in ([top] if top != main else self._unit_oids(w, ounits, u["key"], index)):
+                            reqs.append(matrix_request(oid, d))
         return reqs
 
     # ---- the new base

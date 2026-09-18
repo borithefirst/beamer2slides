@@ -153,7 +153,7 @@ Z-order changes are not detected.
 | unchanged | anything | keep the deck (edited fields reported as overrides) |
 | changed | unchanged | recreate the unit's objects from ours (same place in z-order and grouping) |
 | position/size only | text or style, not geometry | `move`: shift the deck's objects by the source delta - only when every member of the unit moved by the same step (`merge.unit_shift`), since sync moves the unit's top object; a formula picture the source re-placed inside its line is recreated instead |
-| changed | geometry | recreate, then re-apply the deck's transform change (`delta`: theirs · base⁻¹); if the source moved it too, the deck's position wins and it's a conflict. Only when the whole unit went with its top object (`merge.geometry_writable`): sync transforms the unit's top, so a member the person dragged on its own - a formula picture out of its line - would be put back where the converter had it, and such a unit is kept as the deck has it, with a conflict |
+| changed | geometry | recreate, then re-apply the deck's transform change (`delta`: theirs · base⁻¹); if the source moved it too, the deck's position wins and it's a conflict. Only when the whole unit went with its top object (`merge.geometry_writable`): sync transforms the unit's top, so a member the person dragged on its own - a formula picture out of its line - would be put back where the converter had it, and such a unit is kept as the deck has it, with a conflict. The top is the unit's group, which carries its children; when the person has taken that group apart, a recreation does not put it back, so the step is written on each member instead (`sync.Sync._unit_oids`) |
 | changed | text style / shape style | recreate, re-apply the deck's change: uniform over all runs → over all the text; some words (or a table) → the deck's run attributes onto the same words of the new text (character alignment, `sync.style_range_requests`); non-uniform paragraph styles → keep the deck, conflict - but a style list that only got *shorter* while the deck also edited the text is a paragraph the person deleted, not a restyle (`merge.uniform_changes`, `text_changed`): the converter gives every paragraph the line spacing of its own PDF pitch, so deleting one bullet used to make every later source change to that box a conflict the deck won. A conflict is reported when the source changed the same style attributes - and when a styled word is not in the new text at all (`merge.styling_lost`): the styling of words the source replaced ends there, and the report says so rather than promising it was kept |
 | text changed | text changed | word-level diff3; clean → recreate and write the merged text; overlapping → keep the deck, conflict. In a table the diff3 runs per cell (`merge.table_merge`, applied with `cellLocation`); a row or column added on either side, or a cell holding a line break, makes the whole table a conflict |
 | text / position changed | the deck shows exactly that (same text; a move the source now reproduces within 2 pt) | `adopt`: nothing written, reported as converged; the base takes ours IR and the deck's version of those fields (e.g. after `pull`) |
@@ -525,6 +525,21 @@ hold for every sync, including the combinations nobody thought of.
   Google would throw out. A table's cells are checked the same way, cell by cell as sync writes them
   (`_writable_cells`): a cell can't hit the final newline - its text is one line - but a request
   builder that writes the wrong cell text is caught in 10 rounds of 200.
+- Found by a live chained round (seed 903, at the eighth step): a geometry override is written as one
+  RELATIVE transform on the unit's *top* object, and the top is the unit's group, which carries its
+  children. The person had taken that group apart six steps earlier, and a recreation does not put it
+  back - so the top was the text box alone, and the formula picture anchored to it stayed at the
+  converter's box, 15 pt above the line it belongs to, while the report listed the move as an override
+  applied. The step is now written on each member of a unit that has no group (`sync.Sync._unit_oids`);
+  `merge.geometry_writable` has already asked that one step fits every member, so it is the step each
+  of them wants. Nothing offline could see it: the reference applier moves every object of the unit,
+  which is the outcome, not the mechanism - so the mechanism is pinned by an offline test of
+  `Sync.override_requests` instead (`test_a_moved_unit_with_no_group_is_moved_member_by_member` and
+  its counterpart with the group, each failing when the other's rule is written).
+- Found in the harness by a live chained round (seed 900): the person ungrouped a figure and then
+  pressed Ctrl+D on that slide, and the copy - a slide of theirs that sync never writes a request to -
+  was accused of the ungrouping at every step after. A copy is the slide as the person left it, so the
+  excuse now follows it to the title they gave the copy.
 - Found in the harness by the same campaign (seed 607): a round that ungroups a figure and then syncs
   a source that *retitles every frame* was accused of the group its own edit had dissolved. The
   excuse (`integrity(allow_ungrouped=...)`) named the slide by the title the edit used, and the sync

@@ -507,9 +507,13 @@ def _rebased_element(el: dict, oids: list[str], read: dict) -> dict:
 
 
 def _place_unit(u, members, theirs, made, base_by):
-    """Re-apply the deck's move or resize to a rewritten unit. Sync transforms the unit's *top*
-    object, so the anchored pictures go along with their text; the step comes from the old top's
-    base and live read-backs (`delta`), or puts the new unit where the deck's object stands."""
+    """Re-apply the deck's move or resize to a rewritten unit: the whole unit takes the step, its
+    anchored pictures with their text. The step comes from the old top's base and live read-backs
+    (`delta`), or puts the new unit where the deck's object stands. This is the outcome, not the
+    mechanism - sync writes one RELATIVE transform on the unit's group and, when the person has
+    taken that group apart, one per member - and modelling the outcome is why the offline campaign
+    could not see the step reaching only the top object (live seed 903,
+    `tests/test_sync.py::test_a_moved_unit_with_no_group_is_moved_member_by_member`)."""
     ov = (u.get("overrides") or {}).get("geometry")
     if not ov or not made:
         return

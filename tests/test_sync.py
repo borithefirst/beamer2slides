@@ -697,6 +697,71 @@ def test_unit_the_deck_moved_as_a_whole_is_still_recreated():
     assert u["action"] == "recreate" and u["overrides"]["geometry"] == {"mode": "delta"}
 
 
+def geometry_override_requests(tops):
+    """What `Sync.override_requests` writes for the unit of `test_unit_the_deck_moved_as_a_whole...`,
+    whose objects the deck moved 40 pt down and whose text the source reworded, once sync has
+    recreated it as `new_t1` (+ `new_m0`) with `tops` saying what its outermost object is."""
+    from beamer2slides.sync import Sync
+    base, pic = anchored_picture_base()
+    ours, theirs = triple(base)
+    ours["slides"][1]["elements"][1] = ours_entry("text/body/0", text_ir("First point reworded\nSecond point of results",
+                                                                         (20, 60, 200, 90), "p1t1"))
+    for oid in ("b2s_s001_t1", "b2s_s001_m0"):
+        move_object(theirs["slides"][1], oid, 0, 40)
+    mplan = merge.plan_merge(base, ours, theirs)
+    p = next(p for p in mplan["slides"] if p["key"] == "results")
+    assert unit(mplan, "results", "text/body/0")["overrides"] == {"geometry": {"mode": "delta"}}
+    sync = Sync.__new__(Sync)
+    sync.base, sync.ours, sync.warnings = base, ours, []
+    work = {"slides": [{"plan": p, "new_oid": {1: "new_t1", 2: "new_m0"}, "tops": dict(tops)}]}
+    now = {"slides": [{"objectId": "b2s_s001", "objects": {
+        oid: readback([40, 120, 400, 180]) for oid in ("new_t1", "new_m0", *tops.values())}}]}
+    return sync.override_requests(work, theirs, now)
+
+
+def test_a_moved_unit_with_no_group_is_moved_member_by_member():
+    """A geometry override is written as one RELATIVE transform on the unit's *top* object, which
+    for a group carries its children. When the person has taken the group apart, a recreation does
+    not put it back: the top is the main object alone, and the anchored picture needs the step
+    itself or it stays at the converter's box while the report says the move was kept (live fuzz
+    seed 903, chain depth 8: a formula picture 15 pt above the line it belongs to). `merge.
+    geometry_writable` has already asked that one step fits every member, so it fits each of them."""
+    from beamer2slides.sync import EMU_PER_PT
+    moves = {r["updatePageElementTransform"]["objectId"]: r["updatePageElementTransform"]["transform"]
+             for r in geometry_override_requests({})}
+    assert sorted(moves) == ["new_m0", "new_t1"]
+    assert all(t["translateY"] == round(40 * EMU_PER_PT) and t["translateX"] == 0 for t in moves.values())
+
+
+def test_the_source_move_of_a_group_less_unit_reaches_its_picture_too():
+    """The same rule on the other write path: a `move` (the source moved the unit, the deck edited
+    its text) is written onto the deck's own objects, and when the person has taken the unit's group
+    apart there is no one object that carries the rest."""
+    from beamer2slides.sync import EMU_PER_PT, Sync
+    base, pic = anchored_picture_base()
+    members = merge.units(base["slides"][1]["elements"])["text/body/0"]
+    units = [{"key": "text/body/0", "action": "move", "delta": [0, 20]}]
+    ungrouped = live(base["slides"][1])
+    grouped = copy.deepcopy(ungrouped)
+    grouped["objects"]["b2s_s001_t1_g"] = readback([40, 120, 400, 180])
+    for oid in ("b2s_s001_t1", "b2s_s001_m0"):
+        grouped["objects"][oid]["parent_group"] = "b2s_s001_t1_g"
+    members[0] = {**members[0], "objects": [*members[0]["objects"], "b2s_s001_t1_g"]}
+    bunits = {"text/body/0": members}
+    assert [r["updatePageElementTransform"]["objectId"] for r in Sync.move_requests(units, bunits, grouped, 2.0)] \
+        == ["b2s_s001_t1_g"]
+    reqs = Sync.move_requests(units, bunits, ungrouped, 2.0)
+    assert [r["updatePageElementTransform"]["objectId"] for r in reqs] == ["b2s_s001_t1", "b2s_s001_m0"]
+    assert all(r["updatePageElementTransform"]["transform"]["translateY"] == round(40 * EMU_PER_PT) for r in reqs)
+
+
+def test_a_moved_unit_that_still_has_its_group_is_moved_once():
+    """The counterpart, and why one request was ever enough: the group carries the picture, and a
+    second step on the picture would move it twice."""
+    reqs = geometry_override_requests({"text/body/0": "new_t1_g"})
+    assert [r["updatePageElementTransform"]["objectId"] for r in reqs] == ["new_t1_g"]
+
+
 def test_image_replaced_in_deck_is_kept():
     base = three_slides()
     pic = {"id": "p1f0", "kind": "image", "role": "figure", "bbox": [200, 60, 300, 160], "file": None}
