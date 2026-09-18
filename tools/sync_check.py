@@ -404,7 +404,11 @@ def integrity(model: Model, before: Model | None = None, base_ids: set[str] | No
     """Duplicates (same kind, text and box twice on a slide), orphans (sync objects the base
     doesn't know, empty text boxes of ours, formula pictures out of their text's group, empty
     groups) and groups of `before` whose members all survived but no longer form a group.
-    `allow_ungrouped`: slide titles where formula pictures may stand alone (ungrouped on purpose).
+    `allow_ungrouped` / `allow_groups_changed`: slides where a formula picture may stand alone or a
+    group may have come apart, because the person did it on purpose. A slide is named by its title
+    or by its objectId - by the id when the source may retitle it in the same step, which is how a
+    chained fuzz round accused a slide of the group its own `ungroup` edit had dissolved
+    (live seed 607, variant `retitle`).
     A picture standing between paragraphs rather than in a line of them is a display equation,
     which belongs to no text and is never asked for a group (`on_a_text_line`)."""
     problems = []
@@ -425,14 +429,15 @@ def integrity(model: Model, before: Model | None = None, base_ids: set[str] | No
             if e.kind == "shape" and e.id.startswith("b2s_") and not e.text and \
                     e.obj["shape"].get("shapeType") == "TEXT_BOX" and "placeholder" not in e.obj["shape"]:
                 problems.append(f"{name}: empty text box {e.id}")
-            if is_formula_picture(e) and s.title not in allow_ungrouped and on_a_text_line(s, e):
+            if is_formula_picture(e) and not ({s.title, s.id} & set(allow_ungrouped)) and on_a_text_line(s, e):
                 if e.parent is None or not any(c.parent == e.parent and c.kind == "shape" for c in s.elements):
                     problems.append(f"{name}: formula picture {e.id} is not grouped with its text")
     if before is not None:
         now = groups(model)
         members_now = {t: {c.descriptor() for c in s.elements} for s in model.slides for t in [s.title or f"#{s.index}"]}
+        sids = {s.title or f"#{s.index}": s.id for s in before.slides}
         for title, gs in groups(before).items():
-            if title in allow_groups_changed or title not in now:
+            if {title, sids.get(title)} & set(allow_groups_changed) or title not in now:
                 continue
             for gid, members in gs:
                 if members <= members_now[title] and not any(members <= m for _, m in now[title]):

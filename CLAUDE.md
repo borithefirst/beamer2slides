@@ -506,7 +506,16 @@ through the `bold_word` deck edit and `fuzz_world._styling_ends`, and taking the
 copy riding behind it - had merely passed (`loss_oracle.order_findings`). A third was the campaign's
 own: chained steps could drop the same picture on the same slide at the same box twice, which is a
 real duplicate made by the fuzzer, so `random_spec` now places an added picture or blank shape where
-no other one stands (`_free_box`).
+no other one stands (`_free_box`). And the one that killed a sync outright (seeds 608, 616): the
+newline a Slides text ends on cannot be deleted - the API reads it back but leaves it out of the
+length it will accept - so a deck edit that deleted a box's *last* paragraph made the merged text end
+early, the diff's last hunk ran to the end, and the overrides batch was refused whole
+(`merge.text_edit_requests` now keeps that newline out of the diff). Nothing offline could see it,
+because the reference applier merges text without ever building a request: `fuzz_sync._writable` now
+applies the requests sync would send under Slides' index rules and checks they write the merged text
+(the fix removed fails offline seed 399), and `tests/slides_sim.py` refuses such a delete like Google.
+`sync_check.integrity`'s `allow_ungrouped` / `allow_groups_changed` take a slide objectId as well as
+a title, because a sync may retitle the very slide the person ungrouped (seed 607).
 
 ## Pitfalls found so far
 - PDFium (`pdf.py` handles these):
@@ -563,6 +572,10 @@ no other one stands (`_free_box`).
 - PowerShell 5.1 mangles double quotes inside native-command arguments: keep them out of
   git commit messages passed via here-strings. `Get-Content -Raw` reads BOM-less UTF-8 as ANSI:
   edit text files with the editor tools, not a PowerShell read/replace/write.
+- The newline a shape's or cell's text ends on is Slides' own: `presentations.get` reads it back as
+  part of the text, but the length `deleteText` accepts is one *less* ("The end index (273) should
+  not be greater than the existing text length (272)"), and a refused request throws out the whole
+  batch. Keep it out of any diff (`merge.text_edit_requests`); an append goes before it, not after.
 - Shape shadows, autofit and text insets are read-only in the API. A .pptx import keeps shadows
   (and duplicateObject, fill and transform changes keep them) but not spAutoFit.
 - python-pptx: setting top/height on a layout placeholder that inherits its position writes x and

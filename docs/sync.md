@@ -480,6 +480,26 @@ hold for every sync, including the combinations nobody thought of.
   (`snapshot.read_text` now records run spans), and the offline campaign can now reach it too: a
   `bold_word` deck edit plus the reference applier's own opinion of what survives
   (`fuzz_world._styling_ends`). Taking the conflict back out fails 2 of 400 offline rounds.
+- Found by a live chained round (seeds 608 and 616), and the worst of them so far, because the sync
+  **died**: the person deleted the last paragraph of a text box, the source rewrote the same box, and
+  the merged text therefore ends one paragraph earlier than the box the converter had just recreated.
+  The last hunk of the diff then runs to the end of the text - and the newline a Slides text ends on
+  is the API's own: it reads it back as part of the text but counts the length without it, so
+  `deleteText` came back as *"The end index (273) should not be greater than the existing text
+  length (272)"* and the whole overrides batch was refused, with `RuntimeError: sync overrides: batch
+  refused`. `merge.text_edit_requests` now leaves that newline out of the diff on both sides, which
+  both keeps it where it is and puts an append before it instead of after.
+  The campaign could not have found this offline, because the reference applier merges the text
+  itself and never looks at a request: `fuzz_sync._writable` now applies the requests sync would
+  send, with Slides' rules about indices, and checks they write the merged text. Taking the fix back
+  out fails offline seed 399 of 400 with the same sentence the API said live. The strictness is in
+  `tests/slides_sim.py` and in `test_sync.py`'s applier too, so no offline replay can pass a batch
+  Google would throw out.
+- Found in the harness by the same campaign (seed 607): a round that ungroups a figure and then syncs
+  a source that *retitles every frame* was accused of the group its own edit had dissolved. The
+  excuse (`integrity(allow_ungrouped=...)`) named the slide by the title the edit used, and the sync
+  had just given that slide another one. A slide is now excused by its objectId as well - the one
+  name of a slide a sync cannot change.
 - Found in the oracle itself, by a live chained round (seed 303): the person duplicated a slide, the
   source moved the original, sync moved the copy along behind it - and the slide the pair passed was
   accused of having moved unreported. Which of two slides that change places "moved" has no single

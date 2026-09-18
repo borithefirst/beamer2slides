@@ -549,7 +549,7 @@ def _sync_step(seed: int, step: int, doc: dict, base: dict, live: dict, tmp: Pat
     tok = f"{step}zz"  # a token per run, like sync's
     after = W.apply_plan(base, ours, live, mplan, tok)
     report = mplan["report"]
-    findings = loss_oracle.check(base, live, after, report, ours)
+    findings = loss_oracle.check(base, live, after, report, ours) + _writable(ours, mplan)
     next_base = W.rebase(base, ours, after, mplan, tok) if rebase else None
     findings += _settled(doc2, next_base, after, tmp, reordered or "move_slide" in source_ops)
     return {"seed": seed, "step": step, "source_ops": list(source_ops), "deck_ops": list(deck_ops),
@@ -557,6 +557,65 @@ def _sync_step(seed: int, step: int, doc: dict, base: dict, live: dict, tmp: Pat
             "failures": loss_oracle.failures(findings), "doc": doc2,
             "state": {"base": base, "before": live, "after": after, "report": report, "ours": ours,
                       "next_base": next_base, "doc": doc2, "work": tmp}}
+
+
+def _apply_text_requests(current: str, reqs: list[dict]) -> str:
+    """Slides applying them, refusals included: the newline a shape's text ends on is the API's own
+    and is left out of the length it will accept, so a `deleteText` reaching the end is thrown out
+    and the batch with it (`merge.text_edit_requests`)."""
+    units = list(current)
+    for r in reqs:
+        length = len(units) - 1 if units and units[-1] == "\n" else len(units)
+        if "deleteText" in r:
+            rng = r["deleteText"]["textRange"]
+            if rng["endIndex"] > length:
+                raise ValueError(f"the end index ({rng['endIndex']}) should not be greater than "
+                                 f"the existing text length ({length})")
+            del units[rng["startIndex"]:rng["endIndex"]]
+        else:
+            i = r["insertText"]["insertionIndex"]
+            if i > length:
+                raise ValueError(f"the insertion index ({i}) is past the text ({length})")
+            units[i:i] = list(r["insertText"]["text"])
+    return "".join(units)
+
+
+def _writable(ours: dict, mplan: dict) -> list[dict]:
+    """Every text the deck keeps must be writable as requests. The plan says *what* the merged text
+    is; `sync.Sync.override_requests` turns it into deleteText / insertText against the element the
+    converter has just recreated, and that arithmetic has to obey rules the plan knows nothing
+    about. The reference applier merges the text itself and never looks at a request, so without
+    this the campaign proves a sync that cannot be written (live seeds 608 and 616: the deck had
+    deleted the last paragraph of a text box the source rewrote, the batch was refused and the sync
+    died with it)."""
+    out = []
+    for p in mplan["slides"]:
+        if p["action"] != "update" or p.get("ours") is None:
+            continue
+        els = {e["key"]: e for e in ours["slides"][p["ours"]]["elements"]}
+        for u in p["units"]:
+            ov = (u.get("overrides") or {}).get("text")
+            if u["action"] != "recreate" or not ov or ov.get("table") or u["key"] not in els:
+                continue
+            current = W.element_text(els[u["key"]]["ir"])
+            if current is None:
+                continue
+            current = current if current.endswith("\n") else current + "\n"   # as Slides reads it back
+            merged, _, safe = merge.text_merge(ov["base"], current, ov["theirs"])
+            if not safe:
+                continue
+            merged = merged if merged.endswith("\n") else merged + "\n"
+            try:
+                written = _apply_text_requests(current, merge.text_edit_requests("oid", current, merged))
+            except ValueError as e:
+                out.append(loss_oracle.finding("unwritable_text", "report", f"Slides refuses the edit: {e}",
+                                               slide=p["key"], element=u["key"]))
+                continue
+            if written != merged:
+                out.append(loss_oracle.finding("unwritable_text", "report",
+                                               f"the requests write {written!r}, not the merged {merged!r}",
+                                               slide=p["key"], element=u["key"]))
+    return out
 
 
 def _settled(doc: dict, next_base: dict | None, after: dict, tmp: Path, reordered: bool = False) -> list[dict]:
@@ -978,10 +1037,14 @@ class LiveRound:
         # A group the person took apart (or a member they deleted) is theirs: the sync rebuilding
         # the unit ungrouped is the policy, not a broken deck. It stays theirs for the rest of the
         # chain - a later step must not be accused of the group step 0 dissolved - so the slides
-        # add up over the steps.
-        self.loose |= {_slide_title(spec) for spec in specs
-                       if spec["edit"] in ("ungroup", "group", "delete_element", "delete_group", "duplicate")}
-        self.loose.discard(None)
+        # add up over the steps. The slide is remembered by its objectId as well as by the title the
+        # edit named it with, because the sync of this very step may retitle it: seed 607 ungrouped
+        # a figure on "Why decks and sources diverge" and synced `retitle`, which calls that frame
+        # "Why decks drift away from their source", and the excuse missed the slide it was written for.
+        titles = {_slide_title(spec) for spec in specs
+                  if spec["edit"] in ("ungroup", "group", "delete_element", "delete_group", "duplicate")}
+        titles.discard(None)
+        self.loose |= titles | {s.id for s in sc.Model(pres_before).slides if s.title in titles}
         return sc.integrity(sc.Model(pres_after), before=sc.Model(pres_before), base_ids=sc.ids_in(base),
                             allow_ungrouped=self.loose, allow_groups_changed=self.loose)
 

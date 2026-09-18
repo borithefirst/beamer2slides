@@ -379,6 +379,26 @@ def test_integrity_does_not_ask_display_maths_to_be_grouped():
     assert [p for p in sc.integrity(inline) if "not grouped with its text" in p]
 
 
+def test_integrity_excuses_a_slide_by_id_when_the_source_retitled_it():
+    """A person who takes a converter group apart owns that slide's grouping from then on, and the
+    caller says so by naming the slide in `allow_ungrouped`. Naming it by title alone is not enough
+    when the source retitles the frame in the same step - which is exactly what a chained fuzz round
+    did (live seed 607: `ungroup` on "Why decks and sources diverge", then a sync to the `retitle`
+    variant, which calls that frame something else), and the slide was accused of the very group its
+    own edit had dissolved. The objectId is the one name of a slide a sync cannot change."""
+    import sync_check as sc
+
+    model = sc.Model({"slides": [{"objectId": "b2s_s002", "pageElements": [
+        _page_element("b2s_s002_t1", "b2s:diverge/text/title/0", [40, 30, 600, 60],
+                      shape={"shapeType": "TEXT_BOX", "placeholder": {"type": "TITLE"},
+                             "text": {"textElements": [{"textRun": {"content": "Why decks drift away\n"}}]}}),
+        _text_box("b2s_s002_t0", "b2s:diverge/text/body/0", [60, 100, 660, 130], "The source says   this:\n"),
+        _picture("b2s_s002_f0", "b2s:diverge/image/math/0", [260, 106, 300, 124])]}]})
+    assert [p for p in sc.integrity(model) if "not grouped" in p]
+    assert sc.integrity(model, allow_ungrouped={"b2s_s002"}) == []
+    assert sc.integrity(model, allow_ungrouped={"Why decks drift away"}) == []   # the title still works
+
+
 def save_timings() -> None:
     OUT.mkdir(parents=True, exist_ok=True)
     (OUT / "perf.json").write_text(json.dumps(TIMINGS, indent=2), encoding="utf-8")

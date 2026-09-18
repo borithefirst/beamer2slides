@@ -138,8 +138,19 @@ def utf16_len(text: str) -> int:
 def text_edit_requests(object_id: str, current: str, target: str, cell: dict | None = None) -> list[dict]:
     """deleteText / insertText turning an object's text `current` into `target` (UTF-16 indices,
     applied back to front so earlier indices stay valid). `cell`: {"rowIndex", "columnIndex"} of a
-    table cell instead of the object's own text."""
+    table cell instead of the object's own text.
+
+    The newline every shape's and cell's text ends on is Slides' own and cannot be deleted: the API
+    reads it back as part of the text but counts the length without it, so a `deleteText` reaching
+    the end comes back as *"The end index (273) should not be greater than the existing text length
+    (272)"* and the whole batch is refused (live fuzz seeds 608 and 616: the deck's edit deleted the
+    last paragraph of a text box the source had also rewritten, so the merged text ends one
+    paragraph earlier and the diff's last hunk ran to the end). It is on both sides, so leaving it
+    out of the diff both keeps it where it is and puts an append before it rather than after."""
     where = {"cellLocation": cell} if cell else {}
+    if current.endswith("\n"):
+        current = current[:-1]
+        target = target[:-1] if target.endswith("\n") else target
     a, b = tokens(current), tokens(target)
     ops = SequenceMatcher(None, a, b, autojunk=False).get_opcodes()
     offsets = [0]

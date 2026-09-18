@@ -165,6 +165,12 @@ def apply(r: dict, elements: list[dict], objects: dict, notes: Text, slide_id: s
             text.insert(body.get("insertionIndex", 0), body["text"])
         elif name == "deleteText":
             a, b = text.ranges(body["textRange"])
+            if b > len(text.chars):
+                # Slides counts the text without the newline it ends on and refuses to delete it
+                # (`merge.text_edit_requests`); `chars` is exactly that length, so clipping the
+                # slice here would hide a batch the API throws out whole.
+                raise ValueError(f"Invalid deleteText: The end index ({b}) should not be greater "
+                                 f"than the existing text length ({len(text.chars)}).")
             text.remove(a, b)
         elif name == "updateTextStyle":
             a, b = text.ranges(body["textRange"])

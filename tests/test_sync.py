@@ -289,14 +289,24 @@ def test_diff3_conflicts_keep_theirs():
 
 
 def apply_text_requests(text: str, reqs: list[dict]) -> str:
+    """The requests applied the way Slides applies them - including its refusal to touch the
+    newline the text ends on, which it reads back but does not count in the length it will accept
+    (`merge.text_edit_requests`). An applier that quietly clips instead would have let a batch
+    through that the API refuses, and with it the whole sync."""
     units = list(text)  # (ASCII in these tests: UTF-16 indices are character indices)
+    length = len(units) - 1 if text.endswith("\n") else len(units)
     for r in reqs:
         if "deleteText" in r:
             rng = r["deleteText"]["textRange"]
+            assert rng["endIndex"] <= length, (
+                f"Invalid deleteText: the end index ({rng['endIndex']}) should not be greater "
+                f"than the existing text length ({length}).")
             del units[rng["startIndex"]:rng["endIndex"]]
         else:
             i = r["insertText"]["insertionIndex"]
+            assert i <= length, f"Invalid insertText: insertion index {i} past the text ({length})"
             units[i:i] = list(r["insertText"]["text"])
+        length = len(units) - 1 if units and units[-1] == "\n" else len(units)
     return "".join(units)
 
 
@@ -305,6 +315,12 @@ def apply_text_requests(text: str, reqs: list[dict]) -> str:
     ("Designers polish the slides\n", "Teammates polish all slides\n"),
     ("One\nTwo\nThree\n", "One\nThree\n"),
     ("abc\n", "abc\n"),
+    # the last paragraph is the one the deck deleted, so the diff's last hunk runs to the end
+    ("One\nTwo\nThree\n", "One\nTwo\n"),
+    ("One\nTwo\n", "One\n"),
+    ("The merge is clean.\nStep two writes it back.\n", "The merge is clean.\n"),
+    ("The end\n", "The end, rewritten\n"),   # and an append lands before that newline
+    ("The end\n", "\n"),
 ])
 def test_text_edit_requests(current, target):
     assert apply_text_requests(current, merge.text_edit_requests("t", current, target)) == target
