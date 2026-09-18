@@ -38,6 +38,17 @@ def _addr(handle) -> int:
     return ctypes.cast(handle, ctypes.c_void_p).value or 0
 
 
+def _join_surrogates(s: str) -> str:
+    """PDFium's text page is UTF-16: a character outside the BMP (an emoji, a mathematical
+    alphanumeric letter) comes back as its two surrogates, at one origin, so `chars` merges them
+    like a ligature. Join them into the character itself - lone surrogates cannot be encoded as
+    UTF-8 and would break every JSON file downstream."""
+    try:
+        return s.encode("utf-16-le", "surrogatepass").decode("utf-16-le")
+    except UnicodeDecodeError:  # a surrogate without its partner: no character at all
+        return "".join(chr(0xFFFD) if "\ud800" <= u <= "\udfff" else u for u in s)
+
+
 def _mul(m: tuple, n: tuple) -> tuple:
     """m then n (PDF row-vector convention: [a b c d e f])."""
     a, b, c, d, e, f = m
@@ -357,6 +368,9 @@ class Page:
                 continue
             out.append(Char(text, name, size, color, a.value, (ox, oy), box, (ux, uy), _addr(obj), font, advance,
                             ascent=ascent, descent=descent, exact_advance=exact))
+        for ch in out:
+            if any("\ud800" <= u <= "\udfff" for u in ch.c):
+                ch.c = _join_surrogates(ch.c)
         # PDFium's text page puts the objects of a line in reading order; keep content order
         # (a big operator's limits, accents), as the span rules expect.
         order = {_addr(po.handle): k for k, po in enumerate(self.objects())}
