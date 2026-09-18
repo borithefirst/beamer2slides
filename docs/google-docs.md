@@ -347,6 +347,7 @@ all of them now fixed and pinned by offline tests:
 | **An insert and an edit at the same index** | a block inserted at index *i* pushes the block that starts at *i* down the document, so that block's own edits — planned against the read — land inside the new text | back-to-front ordering breaks the tie the other way: at one index, a block's deletes and edits go before the insert that displaces it |
 | **The body's last newline cannot be written past** | a block appended after the document's last paragraph has no following block to insert before. Writing `text\n` at the last paragraph mark puts the words *inside* that paragraph and leaves the empty one it was meant to end | an append writes `\ntext` instead — the break first, the words after it — and it goes in *before* that paragraph's own edits, which end at the very index it was planned at |
 | **Two blocks added at one index come out backwards** | both insert at the same place, and what is written last ends up in front | the added blocks are planned back to front too, so the later one is written first |
+| **The newline in front of a table cannot be deleted** | one of the deletes the API refuses outright ("Invalid deletion range"), and a refused request throws out the whole batch — so a source that deletes or moves the paragraph directly above a table used to kill the sync | that block gives up the paragraph mark of the block *before* it instead of its own (`doc_merge._delete_range`). Docs merges the two the way the Delete key does, keeping the first one's style — measured — and the table still has a paragraph in front of it. A run of deleted blocks passes the borrowing leftwards so no two ranges ask for the same mark; with nothing in front to borrow from (the document's first block, or a paragraph between two tables) the words go and the empty paragraph stays, which is what Docs wants between two tables anyway |
 
 One limitation stands, and it does not block the design: a list the human switches from
 bullets to numbers **cannot be seen** (the same measurement as the first row), so the
@@ -380,6 +381,31 @@ rather than guessing; `--assume-base file` then treats every difference as the
 document's (nothing is written, the file is rewritten from the document) and
 `--assume-base document` treats every difference as the source's.
 
+### Order: a section the source moved
+
+The merged list follows the **document's** order — a reader who moved a paragraph in the
+browser keeps it where they put it. On top of that, the blocks the *source* moved are
+put back where the file has them: the common keys' order is compared base-to-file with
+`SequenceMatcher`, and only the complement of the longest common subsequence moves, so a
+file that moved one section writes one block, not the whole document. If the document
+reordered anything too, the document's order stands whole and the report says so — two
+orders cannot both be right, and the document is the side that wins.
+
+The API has no move. A move is therefore a **delete where the document has the block and
+a write where the file puts it**, which has two consequences:
+
+- the text written is the *merged* text, so a word the reader changed in a block the
+  source moved rides along with it, and so does its styling (it is rebuilt from the
+  merged runs);
+- a block that cannot be written from nothing — one holding a chip or an equation, or a
+  table — is **not** moved; it stays where the document has it and the report says why.
+
+The delete takes the block's named range with it, so the read-back afterwards has no key
+for the block that moved. `doc_merge.adopt_keys` hands the plan's key back to it before
+the file is regenerated (`doc_sync.settle`), or a paragraph nobody touched would be
+renamed in the next diff — and a block the source added with an `id=` of its own would
+lose the name its author chose.
+
 ### What the merge refuses to write
 
 Each of these is reported in the sync report, never guessed at:
@@ -390,6 +416,8 @@ Each of these is reported in the sync report, never guessed at:
 | a **table the source added** | `insertTable` builds a grid, not text; the merge writes text |
 | a table whose **grid** differs between the sides | adding a row or a column is a structural edit, and matching cells across it would be a guess. Cells merge by their place — row, column, how far down the cell — so the grid has to be the same on all three sides |
 | a source restyle of words the document rewrote | the marks would have to be matched onto words that are no longer there |
+| a **move of a block with a chip, an equation or a table in it** | a move is a delete and a write, and those cannot be written from nothing — the block stays where the document has it |
+| a **reorder both sides made** | the document's order stands whole; the file's is reported |
 
 Everything else is written: text on both sides, a block's kind, level and alignment,
 its bullets, the marks the source added *or took away* (the fields Docs needs named for
@@ -471,11 +499,14 @@ All five write to `out/docs-probe/`.
 .venv\Scripts\python.exe -m pytest -m docs tests\test_docs_live.py
 ```
 
-The whole loop on real documents, about 70 s: a push whose import reads back as what the
+The whole loop on real documents, about 75 s: a push whose import reads back as what the
 file said, both sides editing (a table cell each, a block added, a list item rewritten),
-a block appended at the very end, the same words rewritten on both sides (the document
-wins, and the conflict is reported), and a reader typing between the plan and the write
-(the sync reads again and keeps their words). Every test ends by syncing once more and
+a block appended at the very end, a section the source moved to the end of the document
+(the reader's words, the styling and the block's key all ride along — and the paragraph
+it left behind stood in front of a table, which is where that delete was found), the same
+words rewritten on both sides (the document wins, and the conflict is reported), and a
+reader typing between the plan and the write (the sync reads again and keeps their
+words). Every test ends by syncing once more and
 finding **0 requests**, and each one deletes its document afterwards. Files stay in
 `out/docs-tests/`. To drive one by hand instead:
 

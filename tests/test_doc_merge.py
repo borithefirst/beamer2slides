@@ -6,6 +6,8 @@ code unit, one for each chip however long its words look, and one for the
 paragraph mark at the end of every block.
 """
 
+import pytest
+
 from beamer2slides import doc_ir, doc_merge
 
 
@@ -49,6 +51,28 @@ def para(key: str, text: str, **rest) -> dict:
 
 def texts(result: dict) -> list[str]:
     return [doc_merge.block_text(b) for b in result["blocks"]]
+
+
+def applied(ir: dict, requests: list[dict]) -> list[str]:
+    """What the requests do to the document, run in order on its live indices.
+
+    Google's side of the bargain, in ten lines: one character per index unit, index 1
+    being the first of them, a paragraph mark after every block. Styling is left out —
+    what this catches is arithmetic, which is where every index bug lives. Tables have
+    an index space of their own and are not modelled here.
+    """
+    assert all(b["kind"] != "table" for b in ir["blocks"]), "no index model for tables here"
+    text = "".join(doc_merge.block_text(b) + "\n" for b in ir["blocks"])
+    for request in requests:
+        if "insertText" in request:
+            at = request["insertText"]["location"]["index"] - 1
+            assert 0 <= at <= len(text), f"index {at + 1} is outside the document"
+            text = text[:at] + request["insertText"]["text"] + text[at:]
+        elif "deleteContentRange" in request:
+            span = request["deleteContentRange"]["range"]
+            assert span["endIndex"] - 1 <= len(text), "delete past the end of the document"
+            text = text[:span["startIndex"] - 1] + text[span["endIndex"] - 1:]
+    return text.split("\n")[:-1]
 
 
 BASE = live([para("p:alpha", "alpha one two"), para("p:bravo", "bravo three four"),
@@ -292,6 +316,60 @@ def test_the_same_cell_edited_on_both_sides_conflicts_and_the_document_wins():
     assert result["requests"] == []
 
 
+def test_a_block_deleted_in_front_of_a_table_gives_up_the_mark_before_it():
+    """The API refuses a delete that takes the newline in front of a table with it,
+    and a refused request throws out the whole batch. Measured on a live document:
+    deleting the mark of the block *before* it instead leaves the table with a
+    paragraph in front of it, and that paragraph keeps its own style."""
+    was = live([para("p:title", "the title"), para("p:before", "before the table"),
+                table("t:grid", [["a one"]]), para("p:after", "after the table")])
+    ours = live([was["blocks"][0], was["blocks"][2], was["blocks"][3]])
+    result = doc_merge.plan(was, ours, live(was["blocks"]))
+    assert result["requests"] == [{"deleteContentRange": {"range": {
+        "startIndex": was["blocks"][1]["span"][0] - 1,
+        "endIndex": was["blocks"][1]["span"][1] - 1}}}]
+
+
+def test_two_blocks_deleted_in_front_of_a_table_do_not_want_one_mark_twice():
+    """The borrowing passes leftwards: adjacent ranges, none of them overlapping."""
+    was = live([para("p:title", "the title"), para("p:one", "one"), para("p:two", "two"),
+                table("t:grid", [["a one"]])])
+    result = doc_merge.plan(was, live([was["blocks"][0], was["blocks"][3]]),
+                            live(was["blocks"]))
+    spans = [r["deleteContentRange"]["range"] for r in result["requests"]]
+    assert spans == [{"startIndex": was["blocks"][2]["span"][0] - 1,
+                      "endIndex": was["blocks"][2]["span"][1] - 1},
+                     {"startIndex": was["blocks"][1]["span"][0] - 1,
+                      "endIndex": was["blocks"][1]["span"][1] - 1}]
+    assert spans[1]["endIndex"] == spans[0]["startIndex"]
+
+
+def test_a_block_deleted_between_two_tables_leaves_its_paragraph_behind():
+    """There is no mark to borrow — and Docs wants a paragraph between two tables
+    anyway, so the words go and the empty paragraph stays."""
+    was = live([table("t:one", [["a"]]), para("p:between", "between the tables"),
+                table("t:two", [["b"]])])
+    result = doc_merge.plan(was, live([was["blocks"][0], was["blocks"][2]]),
+                            live(was["blocks"]))
+    assert result["requests"] == [{"deleteContentRange": {"range": {
+        "startIndex": was["blocks"][1]["span"][0],
+        "endIndex": was["blocks"][1]["span"][1] - 1}}}]
+
+
+def test_a_table_the_source_deleted_takes_the_newline_question_with_it():
+    """The table goes first (the higher index), so by the time the paragraph in front
+    of it is deleted there is no table in front of which a newline must stay."""
+    was = live([para("p:title", "the title"), para("p:before", "before the table"),
+                table("t:grid", [["a one"]]), para("p:after", "after the table")])
+    result = doc_merge.plan(was, live([was["blocks"][0], was["blocks"][3]]),
+                            live(was["blocks"]))
+    spans = [r["deleteContentRange"]["range"] for r in result["requests"]]
+    assert spans == [{"startIndex": was["blocks"][2]["span"][0],
+                      "endIndex": was["blocks"][2]["span"][1]},
+                     {"startIndex": was["blocks"][1]["span"][0],
+                      "endIndex": was["blocks"][1]["span"][1]}]
+
+
 def test_a_table_whose_grid_the_source_changed_is_left_alone():
     ours = live([GRID["blocks"][0], table("t:grid", [["a one", "b one", "c one"],
                                                      ["a two", "b two", "c two"]]),
@@ -362,6 +440,7 @@ def test_a_block_appended_at_the_end_puts_its_paragraph_break_first():
     assert insert == {"location": {"index": tail}, "text": "\ndelta seven"}
     assert (result["requests"][2]["updateParagraphStyle"]["range"]
             == {"startIndex": tail + 1, "endIndex": tail + 1 + len("delta seven") + 1})
+    assert applied(live(BASE["blocks"]), result["requests"]) == texts(result)
 
 
 def test_two_blocks_appended_at_the_end_keep_their_order():
@@ -372,6 +451,7 @@ def test_two_blocks_appended_at_the_end_keep_their_order():
     # was written before it, so the later block is written first.
     assert [i["text"] for i in inserts] == ["\necho eight", "\ndelta seven"]
     assert {i["location"]["index"] for i in inserts} == {BASE["blocks"][-1]["span"][1] - 1}
+    assert applied(live(BASE["blocks"]), result["requests"]) == texts(result)
 
 
 def test_two_blocks_added_before_one_block_keep_their_order():
@@ -381,6 +461,7 @@ def test_two_blocks_added_before_one_block_keep_their_order():
     inserts = [r["insertText"] for r in result["requests"] if "insertText" in r]
     assert [i["text"] for i in inserts] == ["echo\n", "delta\n"]
     assert {i["location"]["index"] for i in inserts} == {BASE["blocks"][1]["span"][0]}
+    assert applied(live(BASE["blocks"]), result["requests"]) == texts(result)
 
 
 def test_an_append_is_written_before_the_edits_of_the_paragraph_it_follows():
@@ -393,6 +474,7 @@ def test_an_append_is_written_before_the_edits_of_the_paragraph_it_follows():
     assert result["requests"][0]["insertText"] == {"location": {"index": tail},
                                                    "text": "\ndelta seven"}
     assert [r["insertText"]["text"] for r in result["requests"] if "insertText" in r][1] == "SIX"
+    assert applied(live(BASE["blocks"]), result["requests"]) == texts(result)
 
 
 def test_a_block_appended_while_the_last_one_goes_lands_after_the_delete():
@@ -403,6 +485,7 @@ def test_a_block_appended_while_the_last_one_goes_lands_after_the_delete():
     assert next(iter(result["requests"][0])) == "deleteContentRange"
     assert result["requests"][1]["insertText"] == {
         "location": {"index": BASE["blocks"][1]["span"][1] - 1}, "text": "\ndelta seven"}
+    assert applied(live(BASE["blocks"]), result["requests"]) == texts(result)
 
 
 def test_a_block_the_source_deleted_is_deleted_in_the_document():
@@ -446,6 +529,159 @@ def test_edits_are_ordered_back_to_front_so_indices_stay_valid():
     touched = [next(iter(r.values()))["range"]["startIndex"] if "deleteContentRange" in r
                else r["insertText"]["location"]["index"] for r in result["requests"]]
     assert touched == sorted(touched, reverse=True)
+
+
+# ---------------------------------------------------------------- moves
+
+# Five, so that moving one block across two others is the only cheapest answer: with
+# four, swapping a neighbouring pair can be read as either of them having moved.
+FIVE = live([para("p:alpha", "alpha one"), para("p:bravo", "bravo two"),
+             para("p:charlie", "charlie three"), para("p:delta", "delta four"),
+             para("p:echo", "echo five")])
+A, B, C, D, E = range(5)
+
+
+def order(*places: int) -> dict:
+    return live([FIVE["blocks"][i] for i in places])
+
+
+def test_a_block_the_source_moved_up_is_moved_in_the_document():
+    result = doc_merge.plan(FIVE, order(A, D, B, C, E), live(FIVE["blocks"]))
+    assert texts(result) == ["alpha one", "delta four", "bravo two", "charlie three",
+                             "echo five"]
+    assert [b["key"] for b in result["blocks"] if b.get("moved")] == ["p:delta"]
+    kinds = [next(iter(r)) for r in result["requests"]]
+    # Deleted where it was first (the higher index), then written where it belongs.
+    assert kinds == ["deleteContentRange", "insertText", "deleteParagraphBullets",
+                     "updateParagraphStyle"]
+    assert result["requests"][0]["deleteContentRange"]["range"] == {
+        "startIndex": FIVE["blocks"][D]["span"][0], "endIndex": FIVE["blocks"][D]["span"][1]}
+    assert result["requests"][1]["insertText"] == {
+        "location": {"index": FIVE["blocks"][B]["span"][0]}, "text": "delta four\n"}
+
+
+def test_a_block_the_source_moved_down_is_written_before_it_is_deleted():
+    result = doc_merge.plan(FIVE, order(A, C, D, B, E), live(FIVE["blocks"]))
+    assert texts(result) == ["alpha one", "charlie three", "delta four", "bravo two",
+                             "echo five"]
+    kinds = [next(iter(r)) for r in result["requests"]]
+    assert kinds == ["insertText", "deleteParagraphBullets", "updateParagraphStyle",
+                     "deleteContentRange"]
+    assert result["requests"][0]["insertText"] == {
+        "location": {"index": FIVE["blocks"][E]["span"][0]}, "text": "bravo two\n"}
+
+
+def test_a_moved_block_carries_the_words_both_sides_changed():
+    ours = live([FIVE["blocks"][A], para("p:delta", "delta four SOURCE"),
+                 FIVE["blocks"][B], FIVE["blocks"][C], FIVE["blocks"][E]])
+    theirs = live([FIVE["blocks"][A], FIVE["blocks"][B], FIVE["blocks"][C],
+                   para("p:delta", "READER delta four"), FIVE["blocks"][E]])
+    result = doc_merge.plan(FIVE, ours, theirs)
+    assert texts(result)[1] == "READER delta four SOURCE"
+    assert [r["insertText"]["text"] for r in result["requests"] if "insertText" in r] == \
+        ["READER delta four SOURCE\n"]
+
+
+def test_a_moved_list_item_is_written_as_a_list_item():
+    was = live([para("p:alpha", "alpha one"), para("p:bravo", "bravo two"),
+                para("p:charlie", "charlie three"),
+                {"kind": "item", "level": 0, "ordered": True, "key": "item:step",
+                 "runs": [{"text": "step one"}]}, para("p:echo", "echo five")])
+    ours = live([was["blocks"][i] for i in (A, D, B, C, E)])
+    result = doc_merge.plan(was, ours, live(was["blocks"]))
+    kinds = [next(iter(r)) for r in result["requests"]]
+    assert kinds == ["deleteContentRange", "insertText", "updateParagraphStyle",
+                     "createParagraphBullets"]
+    assert (result["requests"][-1]["createParagraphBullets"]["bulletPreset"]
+            == "NUMBERED_DECIMAL_ALPHA_ROMAN")
+
+
+def test_a_reversal_moves_the_fewest_blocks_it_can():
+    result = doc_merge.plan(FIVE, order(E, D, C, B, A), live(FIVE["blocks"]))
+    assert texts(result) == ["echo five", "delta four", "charlie three", "bravo two",
+                             "alpha one"]
+    # One block of the five can stay where it is, and exactly one does.
+    assert len([b for b in result["blocks"] if b.get("moved")]) == 4
+    assert applied(live(FIVE["blocks"]), result["requests"]) == texts(result)
+
+
+@pytest.mark.parametrize("places", [(A, D, B, C, E), (A, C, D, B, E), (E, D, C, B, A),
+                                    (B, C, D, E, A), (A, B, E, C, D), (D, E, A, B, C)])
+def test_whatever_the_source_reordered_the_requests_say_the_same(places):
+    """The one that matters: run the plan against the document's own index space and
+    the document ends up saying exactly what the merge says it should."""
+    result = doc_merge.plan(FIVE, order(*places), live(FIVE["blocks"]))
+    assert texts(result) == [doc_merge.block_text(FIVE["blocks"][i]) for i in places]
+    assert applied(live(FIVE["blocks"]), result["requests"]) == texts(result)
+
+
+def test_the_requests_say_the_same_when_blocks_are_added_moved_and_deleted_at_once():
+    ours = live([FIVE["blocks"][A], para("p:new", "a new one"), FIVE["blocks"][D],
+                 FIVE["blocks"][B], para("p:last", "another new one")])
+    result = doc_merge.plan(FIVE, ours, live(FIVE["blocks"]))
+    assert texts(result) == ["alpha one", "a new one", "delta four", "bravo two",
+                             "another new one"]
+    assert applied(live(FIVE["blocks"]), result["requests"]) == texts(result)
+
+
+def test_both_sides_reordering_leaves_the_documents_order_alone():
+    theirs = order(B, A, C, D, E)
+    result = doc_merge.plan(FIVE, order(A, D, B, C, E), theirs)
+    assert texts(result) == ["bravo two", "alpha one", "charlie three", "delta four",
+                             "echo five"]
+    assert result["requests"] == []
+    assert "both sides moved blocks" in result["notes"][0]
+
+
+def test_a_block_the_document_moved_stays_where_the_document_put_it():
+    result = doc_merge.plan(FIVE, live(FIVE["blocks"]), order(A, D, B, C, E))
+    assert texts(result) == ["alpha one", "delta four", "bravo two", "charlie three",
+                             "echo five"]
+    assert result["requests"] == []
+
+
+def test_a_block_with_a_chip_in_it_is_not_moved():
+    was = live([para("p:alpha", "alpha one"), para("p:bravo", "bravo two"),
+                para("p:charlie", "charlie three"),
+                {"kind": "paragraph", "key": "p:chip", "runs": [
+                    {"text": "see "}, {"chip": "person", "frozen": True, "text": "Ada"}]},
+                para("p:echo", "echo five")])
+    ours = live([was["blocks"][i] for i in (A, D, B, C, E)])
+    result = doc_merge.plan(was, ours, live(was["blocks"]))
+    assert result["requests"] == []
+    assert "cannot be written from nothing" in result["notes"][0]
+
+
+def test_a_move_and_the_second_sync_that_writes_nothing():
+    """What `settle` leaves behind: the file, regenerated from the document."""
+    ours = order(A, D, B, C, E)
+    result = doc_merge.plan(FIVE, ours, live(FIVE["blocks"]))
+    settled = live([{k: v for k, v in b.items() if k not in ("span", "moved", "origin")}
+                    for b in result["blocks"]])
+    again = doc_merge.plan(settled, ours, live(settled["blocks"]))
+    assert again["requests"] == [] and again["notes"] == []
+
+
+def test_a_moved_block_keeps_its_key_after_the_write():
+    """The delete takes the named range with it, so the read-back has no key for the
+    block that moved. `settle` hands the plan back to it rather than naming it again
+    from its own words, or a paragraph nobody touched would be renamed in the diff."""
+    result = doc_merge.plan(FIVE, order(A, D, B, C, E), live(FIVE["blocks"]))
+    read_back = live([{k: v for k, v in b.items()
+                       if k not in ("span", "moved", "origin", "key")}
+                      if b.get("moved") else {k: v for k, v in b.items() if k != "span"}
+                      for b in result["blocks"]])
+    assert doc_merge.adopt_keys(read_back, result["blocks"]) == 1
+    assert [b["key"] for b in read_back["blocks"]] == [
+        "p:alpha", "p:delta", "p:bravo", "p:charlie", "p:echo"]
+
+
+def test_an_added_block_keeps_the_id_its_author_wrote():
+    ours = live(BASE["blocks"] + [para("p:the-note", "a paragraph with an id of its own")])
+    result = doc_merge.plan(BASE, ours, live(BASE["blocks"]))
+    read_back = live([para(None, doc_merge.block_text(b)) for b in result["blocks"]])
+    doc_merge.adopt_keys(read_back, result["blocks"])
+    assert read_back["blocks"][-1]["key"] == "p:the-note"
 
 
 def test_the_file_says_what_an_imported_list_cannot():

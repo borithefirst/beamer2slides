@@ -137,6 +137,30 @@ def inherit_keys(base: dict, ours: dict) -> dict:
     return ours
 
 
+def adopt_keys(live: dict, planned: list[dict]) -> int:
+    """Give a block written from nothing the key the merge meant it to have.
+
+    A move is a delete and an insert, and the delete takes the block's named range
+    with it, so the read-back after the write has no key for that block. Keyed from
+    its own words instead, it would lose the identity the canonical file carries —
+    the `id=` its author wrote — and the next diff would rename a paragraph nobody
+    touched. The same holds for a block the source added with an id of its own.
+    """
+    taken = {b["key"] for b in live["blocks"] if b.get("key")}
+    free: dict[tuple, list[str]] = {}
+    for block in planned:
+        if block.get("key") and block["key"] not in taken:
+            free.setdefault((_match_shape(block), block_text(block)), []).append(block["key"])
+    done = 0
+    for block in live["blocks"]:
+        if block.get("key"):
+            continue
+        if same := free.get((_match_shape(block), block_text(block))):
+            block["key"] = same.pop(0)
+            done += 1
+    return done
+
+
 # ---------------------------------------------------------------- merge
 
 def merge(base: dict, ours: dict, theirs: dict) -> dict:
@@ -177,18 +201,69 @@ def merge(base: dict, ours: dict, theirs: dict) -> dict:
         # Whatever span this block had is an index into a different document: drop it,
         # and let `origin` be what says this one has to be written from nothing.
         fresh = {k: v for k, v in block.items() if k != "span"}
-        merged.insert(_place(ours, theirs, merged, index),
-                      fresh | {"origin": "added by the source"})
+        merged.insert(_place(ours, merged, index), fresh | {"origin": "added by the source"})
+    _apply_source_moves(base, ours, theirs, merged, notes)
     return {"blocks": merged, "conflicts": conflicts, "notes": notes}
 
 
-def _place(ours: dict, theirs: dict, merged: list, index: int) -> int:
+def _place(ours: dict, merged: list, index: int) -> int:
     """Where a source-added block goes: after the merged block that precedes it in ours."""
     for before in reversed(ours["blocks"][:index]):
         at = next((i for i, b in enumerate(merged) if b.get("key") == before.get("key")), None)
         if at is not None:
             return at + 1
     return 0
+
+
+def _order_of(blocks: list[dict], keys: set) -> list[str]:
+    return [b["key"] for b in blocks if b.get("key") in keys]
+
+
+def _apply_source_moves(base: dict, ours: dict, theirs: dict, merged: list, notes: list) -> None:
+    """Put back where the file has them the blocks the *source* moved.
+
+    The merged order is the document's, because a reader who moved a paragraph meant
+    it. But a source that moves a section means it too, and nothing else would ever
+    say so — the file's order is otherwise only read, never written. So when the
+    file's order of the blocks all three sides know differs from the base's and the
+    document's does not, those blocks are moved to where the file has them. Where
+    both sides reordered, the document keeps its order, as everywhere else.
+    """
+    placed = {b["key"]: b for b in merged if b.get("key")}
+    common = placed.keys() & {b.get("key") for b in base["blocks"]} \
+        & {b.get("key") for b in ours["blocks"]} & {b.get("key") for b in theirs["blocks"]}
+    was, mine, live = (_order_of(side["blocks"], common) for side in (base, ours, theirs))
+    if mine == was:
+        return
+    if live != was:
+        notes.append("both sides moved blocks around — the document's order is kept")
+        return
+    for key in _moved_keys(was, mine):
+        block = placed[key]
+        # A move is written as a delete and a fresh insert, so it can only carry what
+        # an insert can write: not a table's grid, and not a chip.
+        if block.get("kind") == "table" or FROZEN in block_text(block):
+            notes.append(f"{key}: the source moved it, but a block with a table or a chip in it "
+                         f"cannot be written from nothing — left where the document has it")
+            continue
+        merged.remove(block)
+        index = next(i for i, b in enumerate(ours["blocks"]) if b.get("key") == key)
+        merged.insert(_place(ours, merged, index), block)
+        block["moved"] = True
+
+
+def _moved_keys(was: list[str], mine: list[str]) -> list[str]:
+    """The fewest blocks whose move turns one order into the other, in the file's order.
+
+    Whatever the longest run of blocks that kept their order is, stays; the rest are
+    what somebody moved. Taking it the other way round — moving everything that is
+    not where it was — would rewrite a whole document because its first paragraph
+    went to the end.
+    """
+    kept = {mine[j] for op, _, _, j1, j2 in
+            SequenceMatcher(None, was, mine, autojunk=False).get_opcodes()
+            if op == "equal" for j in range(j1, j2)}
+    return [key for key in mine if key not in kept]
 
 
 def _merge_block(was: dict, mine: dict, live: dict, conflicts: list, notes: list) -> dict:
@@ -474,13 +549,19 @@ def requests(theirs: dict, merged: list[dict]) -> list[dict]:
     by_key = {b["key"]: b for b in merged if b.get("key")}
     plans: list[tuple[int, int, list[dict]]] = []  # (index, order within, requests)
 
-    for live in theirs["blocks"]:
+    # Which of the document's blocks go: the ones the source deleted, and the ones it
+    # moved (a move is a delete here and a write further down). Their ranges are
+    # decided together, because a delete in front of a table borrows the mark of the
+    # block before it and two of them must not ask for the same one.
+    going = {i for i, live in enumerate(theirs["blocks"]) if _goes(live, by_key)}
+    for index in sorted(going):
+        start, end = _delete_range(theirs["blocks"], index, going)
+        plans.append((start, DELETE, [{"deleteContentRange": {
+            "range": {"startIndex": start, "endIndex": end}}}]))
+
+    for index, live in enumerate(theirs["blocks"]):
         want = by_key.get(live.get("key"))
-        if want is None and live.get("key") is not None:
-            plans.append((live["span"][0], DELETE, [{"deleteContentRange": {"range": {
-                "startIndex": live["span"][0], "endIndex": live["span"][1]}}}]))
-            continue
-        if want is None or want.get("span") != live.get("span"):
+        if index in going or want is None or want.get("span") != live.get("span"):
             continue
         for one, other in _pairs(live, want):
             edits = text_requests(one, block_text(other)) + _restyle_requests(one, other)
@@ -490,13 +571,16 @@ def requests(theirs: dict, merged: list[dict]) -> list[dict]:
     # The paragraph mark of the last block that survives this sync: where a block
     # with nothing after it is appended. Blocks the source deleted are past it, and
     # they are deleted first (higher indices come first), so it still holds then.
-    kept = [b for b in theirs["blocks"] if b.get("key") is None or b["key"] in by_key]
+    kept = [b for b in theirs["blocks"]
+            if b.get("key") is None or (b["key"] in by_key and not by_key[b["key"]].get("moved"))]
     tail = kept[-1]["span"][1] - 1 if kept else 1
     # Back to front here too: two blocks added at one index both insert there, and
     # what is written last ends up in front, so the later block is planned first.
     for position in range(len(merged) - 1, -1, -1):
         block = merged[position]
-        if block.get("origin") != "added by the source" or block.get("kind") == "table":
+        if block.get("origin") != "added by the source" and not block.get("moved"):
+            continue
+        if block.get("kind") == "table":
             continue  # a table is a grid, not text: nothing here can write one
         text = block_text(block)
         if FROZEN in text:
@@ -532,6 +616,47 @@ def requests(theirs: dict, merged: list[dict]) -> list[dict]:
     return out
 
 
+def _goes(live: dict, by_key: dict) -> bool:
+    """Whether this block of the document is deleted: the source dropped it, or the
+    source moved it and it is written again where the file puts it."""
+    want = by_key.get(live.get("key"))
+    if want is None:
+        return live.get("key") is not None
+    return bool(want.get("moved")) and want.get("span") == live.get("span")
+
+
+def _delete_range(blocks: list[dict], index: int, going: set[int]) -> tuple[int, int]:
+    """What to delete for block `index`, without touching the newline before a table.
+
+    "Deleting the newline character before a Table, TableOfContents or SectionBreak"
+    is one of the deletes the API refuses outright — and a refused request throws out
+    the whole batch — so a block that stands right in front of a table gives up the
+    *previous* block's paragraph mark instead of its own. Docs then merges the two the
+    way the Delete key does, keeping the first one's style, and the table still has a
+    paragraph in front of it. A run of deleted blocks passes that leftwards one by
+    one, so no two ranges ever ask for the same mark.
+    """
+    start, end = blocks[index]["span"]
+    if not _mark_is_taken(blocks, index, going):
+        return start, end
+    if index == 0 or blocks[index - 1].get("kind") == "table":
+        # No mark to take: the block's words go and an empty paragraph stays in front
+        # of the table. Docs wants one between two tables anyway.
+        return start, end - 1
+    return start - 1, end - 1
+
+
+def _mark_is_taken(blocks: list[dict], index: int, going: set[int]) -> bool:
+    """Whether this block's own paragraph mark must survive the delete — because a
+    table follows it, or because the deleted block that follows it takes this one's."""
+    after = index + 1
+    if after >= len(blocks):
+        return False
+    if after in going:
+        return _delete_range(blocks, after, going)[0] < blocks[after]["span"][0]
+    return blocks[after].get("kind") == "table"
+
+
 def _pairs(live: dict, want: dict):
     """(live block, merged block) for a block and, if it is a table, for every block
     in its cells — where identity is the cell's place, not a named range."""
@@ -546,9 +671,13 @@ def _pairs(live: dict, want: dict):
 
 def _insert_index(merged: list[dict], position: int) -> int | None:
     """Where a new block's text goes: at the start of the block that follows it,
-    or None when nothing follows and it is appended to the document instead."""
+    or None when nothing follows and it is appended to the document instead.
+
+    A block that is being moved is no anchor: the span it still has is the place it
+    is about to be deleted from, which says nothing about where the new one goes.
+    """
     for block in merged[position + 1:]:
-        if block.get("span"):
+        if block.get("span") and not block.get("moved"):
             return block["span"][0]
     return None
 

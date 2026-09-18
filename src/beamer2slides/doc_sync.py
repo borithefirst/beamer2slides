@@ -167,10 +167,13 @@ def plant_ranges(docs, ident: str, ir: dict) -> int:
     return done
 
 
-def settle(docs, ident: str, path: Path, ours: dict, base: dict) -> dict:
+def settle(docs, ident: str, path: Path, ours: dict, base: dict,
+           planned: list[dict] | None = None) -> dict:
     """After a write: read the document, anchor what is new, and let that read be both
     the new base and the new canonical file. File, document and base agree from here."""
     _, live = read_document(docs, ident, ours, base)
+    if planned:
+        doc_merge.adopt_keys(live, planned)
     doc_ir.key_blocks(live)
     if plant_ranges(docs, ident, live):
         _, live = read_document(docs, ident, ours, base)
@@ -218,7 +221,9 @@ def _summary(result: dict) -> tuple[list[str], list[str]]:
     for block in result["blocks"]:
         origin, key = block.get("origin"), block.get("key", "(unkeyed)")
         words = _words(block)
-        if origin == "added by the source":
+        if block.get("moved"):
+            applied.append(f"`{key}` moved to where the source has it: {words!r}")
+        elif origin == "added by the source":
             applied.append(f"`{key}` added: {words!r}")
         elif origin == "merged":
             applied.append(f"`{key}` rewritten: {words!r}")
@@ -310,7 +315,7 @@ def sync(path: Path, document: str | None = None, dry_run: bool = False,
                      "notes": limits(ours, doc) + result["notes"], "replanned": attempt}
             info["applied"], info["kept"] = _summary(result)
 
-    live = settle(docs, ident, path, ours, base)
+    live = settle(docs, ident, path, ours, base, result["blocks"])
     info["blocks"] = len(live["blocks"])
     info["report"] = str(write_report(path, info))
     return info

@@ -128,6 +128,21 @@ class Paper:
             {"insertText": {"location": {"index": end}, "text": new}},
             {"deleteContentRange": {"range": {"startIndex": at, "endIndex": end}}}])
 
+    def moved(self, key: str, after: str | None = None) -> None:
+        """What moving a section in the canonical file does.
+
+        `to_html` writes one block per line, so a reorder in the file is exactly this:
+        a line taken out and put back somewhere else. `after` names the block it should
+        follow; None puts it at the end of the body.
+        """
+        lines = self.text.split("\n")
+        which = next(i for i, line in enumerate(lines) if f'id="{key}"' in line)
+        line = lines.pop(which)
+        where = (next(i for i, l in enumerate(lines) if l == "</body>") if after is None
+                 else next(i for i, l in enumerate(lines) if f'id="{after}"' in l) + 1)
+        lines.insert(where, line)
+        self.path.write_text("\n".join(lines), encoding="utf-8")
+
     def sync(self, **kwargs) -> dict:
         return self.sync_module.sync(self.path, **kwargs)
 
@@ -206,6 +221,29 @@ def test_a_block_added_at_the_end_becomes_its_own_paragraph(paper):
     # Written the other way round, the words would have joined the last list item and
     # left the paragraph mark behind them as an empty block.
     assert '<p id="paragraph:empty"></p>' not in text
+    paper.settled()
+
+
+def test_a_section_the_source_moved_moves_in_the_document(paper):
+    """The API cannot move anything: a move is a delete where the document has the
+    block and a write where the file puts it. What rides along is what makes it a
+    move and not a rewrite — the reader's words, the styling, and the block's key."""
+    paper.typed("The opening paragraph", " Typed by a reader.")
+    paper.moved("paragraph:opening")                     # to the end of the body
+    info = paper.sync()
+    assert info["conflicts"] == []
+    assert any("moved to where the source has it" in line for line in info["applied"]), \
+        info["applied"]
+
+    text = paper.text
+    assert text.index("The opening paragraph") > text.index("the second point")
+    assert "Typed by a reader." in text                  # the reader's words rode along
+    assert "<b>bold words</b>" in text                   # and the styling with them
+    assert '<a href="https://example.com/">link</a>' in text
+    # Written after the last list item, it must not have become a third one — and it
+    # must still be the paragraph the file named, not a new one keyed from its words.
+    assert '<p id="paragraph:opening">' in text
+    assert "<li id=\"paragraph:opening\"" not in text
     paper.settled()
 
 

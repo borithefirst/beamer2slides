@@ -601,7 +601,17 @@ keys, named ranges), `doc_merge.py` (pure planning), `doc_sync.py` (the commands
   written at a bulleted paragraph's start joins that list (`deleteParagraphBullets` first);
   bullets are created last, after the run styling (the Slides trap again); a block appended
   after the last paragraph writes `\ntext`, not `text\n`, and before that paragraph's own
-  edits; blocks added at one index are planned back to front.
+  edits; blocks added at one index are planned back to front; and the newline in front of a
+  table cannot be deleted at all, so a block deleted there gives up the paragraph mark of the
+  block *before* it instead (`doc_merge._delete_range` - Docs merges the two keeping the
+  first one's style, and a run of deletes passes the borrowing leftwards).
+- The merged order is the **document's**: a reader who moved a paragraph keeps it where they
+  put it. On top of that the blocks the *source* moved go back where the file has them - the
+  complement of the longest common subsequence, so one moved section writes one block - and
+  both sides reordering is the document's, with a note. The API has no move: it is a delete
+  and a write, so the merged text and styling ride along, a block with a chip or a table in
+  it is not moved at all, and `doc_merge.adopt_keys` gives the rewritten block its key back
+  (the delete took its named range with it) before the file is regenerated.
 - Tables merge cell by cell, where identity is the cell's **place**. A table the source added,
   a grid that differs between the sides, and a restyle of words the document rewrote are
   reported, not written.
@@ -609,7 +619,7 @@ keys, named ranges), `doc_merge.py` (pure planning), `doc_sync.py` (the commands
   picture - `insertInlineImage` takes a URI, so it would need a staging file like Slides' sync;
   an image already in the document is a frozen run and survives untouched), and the tabs past
   the first one, which are read but never written.
-- Live suite (opt-in, marker `docs`, ~70 s): `python -m pytest -m docs tests/test_docs_live.py`
+- Live suite (opt-in, marker `docs`, ~75 s): `python -m pytest -m docs tests/test_docs_live.py`
   pushes a document per test, edits both sides, syncs, checks a second sync writes nothing, and
   deletes the document. Offline: `tests/test_doc_ir.py`, `test_doc_merge.py`, `test_doc_sync.py`.
 
