@@ -1,0 +1,9 @@
+# Only what the Dockerfile copies matters; keep the rest (and the Google credentials) out of the context.
+*
+!pyproject.toml
+!README.md
+!src/
+!examples/demo/demo.tex
+!tests/decks/*.tex
+!docs/media/
+**/__pycache__

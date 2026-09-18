@@ -115,6 +115,16 @@ again — unless the sync was killed halfway, and then nothing deletes it for yo
 In the debug images, green boxes are text, blue are pictures, purple tables and orange shapes.
 Shaded text stays in the background (red math, blue figure, grey theme).
 
+### Playground
+```
+python -m beamer2slides playground                 # http://127.0.0.1:7860
+docker build -t beamer2slides-playground . && docker run -p 7860:7860 beamer2slides-playground
+```
+A web page to type a talk (or pick an example, or upload a PDF), compile it and see every stage:
+what becomes native, what stays in the background, and the slide rebuilt from the IR over its
+background, text editable in place. The Google deck itself is shown from recorded runs, unless the
+server is yours and you turn it on. `docs/playground.md` has the details, including hosting it.
+
 ## How it works
 
 ![One slide through the four stages: extract, classify, render, emit](docs/media/stages.gif)

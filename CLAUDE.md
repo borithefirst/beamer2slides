@@ -576,6 +576,17 @@ Counting what the campaign reaches (`unit/*`, `override/*`, geometry modes) is h
 showed; `fuzz_world` also kept `children` on a group whose unit had been recreated, which only
 `parent_group` readers were saving it from.
 
+## Playground (docs/playground.md)
+`python -m beamer2slides playground` (`src/beamer2slides/playground/`: stdlib `http.server` + a static
+page): a talk typed, picked or uploaded runs through compile → extract + classify → render on one
+worker thread (the stages print; `redirect_stdout` is process-wide, so request logs go to stderr), and
+the page draws each slide from the job's deck.json (editable preview over the background, native
+boxes, background, debug, IR). Google only with `B2S_PLAYGROUND_GOOGLE=1` and a token; public hosts
+get the recorded runs from `docs/media`. Jobs in `$B2S_PLAYGROUND_JOBS/<port>` (swept at start: one
+folder per port, or a second server deletes the first one's jobs). `Dockerfile` = the deployment
+(TeX Live, uid 1000, port 7860, `openin_any=p`); not built on this machine (no Docker).
+Tests: `tests/test_playground.py` (offline, an uploaded test PDF through the HTTP API).
+
 ## Google Docs (docs/google-docs.md)
 The same bargain as the Slides sync, one dimension smaller: a **canonical HTML file** in git is
 what the source says, a Google Doc is what the reader says, and where both moved the document

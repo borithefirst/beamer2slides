@@ -30,7 +30,8 @@ build-backend = "setuptools.build_meta"
 where = ["src"]
 
 [tool.setuptools.package-data]
-beamer2slides = ["calibration/*.json"]  # the measured font substitutes emit needs
+beamer2slides = ["calibration/*.json",   # the measured font substitutes emit needs
+                 "playground/static/*"]  # the playground's page (docs/playground.md)
 
 [tool.pytest.ini_options]
 markers = ["slides: converts decks on real Google Slides and measures the thumbnails (opt-in: python -m pytest -m slides)",

@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>beamer2slides playground</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🧩</text></svg>">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Lato:ital,wght@0,400;0,700;1,400;1,700&family=PT+Serif:ital,wght@0,400;0,700;1,400;1,700&family=Roboto+Mono:wght@400;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header>
+  <h1>beamer2slides <span>playground</span></h1>
+  <p class="tag">A beamer talk in, an editable Google Slides deck out. Type or pick a talk, run it, and see what each stage decided.</p>
+  <nav>
+    <button class="tab on" data-tab="run">Try it</button>
+    <button class="tab" data-tab="gallery">Sync &amp; adopt (recorded)</button>
+    <a href="https://github.com/borithefirst/beamer2slides" target="_blank" rel="noopener">GitHub ↗</a>
+  </nav>
+</header>
+
+<main id="run" class="panel on">
+  <section class="source">
+    <div class="row">
+      <label>Example <select id="example"></select></label>
+      <span id="about" class="muted"></span>
+    </div>
+    <textarea id="tex" spellcheck="false" aria-label="beamer source"></textarea>
+    <div class="row">
+      <button id="go" class="primary">Compile &amp; convert</button>
+      <label class="file">or upload a PDF <input id="pdf" type="file" accept="application/pdf"></label>
+      <span id="status" class="status"></span>
+    </div>
+    <div id="notex" class="note" hidden>This server has no TeX distribution: upload a compiled beamer PDF, or run an example's PDF.</div>
+    <ol id="stages" class="stages">
+      <li data-s="compile">compile <b></b></li>
+      <li data-s="extract + classify">extract + classify <b></b></li>
+      <li data-s="render">render <b></b></li>
+      <li data-s="emit">emit <b></b></li>
+    </ol>
+    <details id="logbox"><summary>Log</summary><pre id="log"></pre></details>
+  </section>
+
+  <section class="result" id="result" hidden>
+    <div class="summary" id="summary"></div>
+    <div class="strip" id="strip"></div>
+    <div class="modes" role="tablist">
+      <button data-mode="rebuilt" class="on" title="The slide rebuilt from deck.json over its background: what the Slides deck will hold. Text is editable.">Editable preview</button>
+      <button data-mode="native" title="Every element that becomes a Slides object, coloured by kind">What becomes native</button>
+      <button data-mode="background" title="The background picture: what stays a picture">Background</button>
+      <button data-mode="debug" title="classify's own debug drawing">Classify debug</button>
+      <button data-mode="json" title="The slide in the intermediate representation">IR</button>
+    </div>
+    <div class="compare">
+      <figure><figcaption>PDF page</figcaption><div class="stage" id="left"></div></figure>
+      <figure><figcaption id="rightcap">Editable preview</figcaption><div class="stage" id="right"></div><pre id="json" hidden></pre></figure>
+    </div>
+    <div class="legend" id="legend"></div>
+    <div class="slides-out">
+      <button id="toslides" hidden class="primary">Create the Google Slides deck</button>
+      <span id="slidesnote" class="muted"></span>
+    </div>
+  </section>
+</main>
+
+<main id="gallery" class="panel">
+  <p class="muted">The Google side needs an account, so the playground shows it from recorded runs:
+    every picture below comes from a real conversion, sync or adopt (tools/readme_demos.py).</p>
+  <div id="gallerylist"></div>
+</main>
+
+<footer class="muted">Everything before the Google deck runs on this server: pdflatex, extract, classify, render. Jobs are kept for a while, then deleted.</footer>
+<script src="/static/app.js"></script>
+</body>
+</html>

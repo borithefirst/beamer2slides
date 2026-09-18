@@ -287,7 +287,13 @@ def main() -> None:
     c.add_argument("tex", type=Path, help="the main .tex (its \\input files are labelled too)")
     c.add_argument("--apply", action="store_true",
                    help="edit the source in place (what was there is kept as <file>.bak, .bak2, ...)")
+    c = sub.add_parser("playground", help="a web app that runs the pipeline on a talk typed or uploaded (docs/playground.md)")
+    c.add_argument("--host", default="127.0.0.1", help="0.0.0.0 to serve other machines (default: this one only)")
+    c.add_argument("--port", type=int, default=7860)
     args = ap.parse_args()
+    if args.command == "playground":
+        from .playground.server import serve
+        return serve(args.host, args.port)
     if args.command == "label":
         return cmd_label(args.tex, args.apply)
     if args.command == "docs":
