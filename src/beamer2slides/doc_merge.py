@@ -176,7 +176,34 @@ def restore_unreadable(live: dict, *sources: dict) -> dict:
         if block.get("kind") == "item" and block.get("ordered") is None:
             block["ordered"] = bool(known.get(block.get("key"), False))
             block["guessed"] = True   # `bullet_requests` makes the document say it itself
+    # An equation's LaTeX is what no `documents.get` says (only the export does, and
+    # only the settling read asks it: `doc_sync.equation_latex`), so a read's equation
+    # is blank where the file's and the base's hold its LaTeX, and would look changed.
+    # A block with as many equations as its namesake gets theirs, in order.
+    latex = {}
+    for source in reversed(sources):   # the base first: it is the last read
+        for block in source["blocks"]:
+            said = [r.get("text", "") for r in _equations(block)]
+            if block.get("key") and any(said):
+                latex.setdefault(block["key"], said)
+    for block in live["blocks"]:
+        runs, said = list(_equations(block)), latex.get(block.get("key"))
+        if said and len(said) == len(runs):
+            for run, text in zip(runs, said):
+                if not run.get("text"):
+                    run["text"] = text
     return live
+
+
+def _equations(block: dict):
+    """A block's equation runs in order, those in its table cells included."""
+    for run in block.get("runs", []):
+        if run.get("chip") == "equation":
+            yield run
+    for row in block.get("rows", []):
+        for cell in row:
+            for inner in cell:
+                yield from _equations(inner)
 
 
 def tidy_requests(live: dict) -> list[dict]:

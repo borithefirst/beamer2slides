@@ -471,6 +471,85 @@ def test_a_file_with_a_picture_is_pushed_with_it(google, request):
         drive_service(credentials()).files().delete(fileId=info["document"]).execute()
 
 
+OMML = ('xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/math" '
+        'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"')
+EQUATION_DOCX = f"""<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document {OMML}><w:body>
+<w:p><w:r><w:t xml:space="preserve">Inline </w:t></w:r>
+<m:oMath><m:r><m:t>E=m</m:t></m:r><m:sSup><m:e><m:r><m:t>c</m:t></m:r></m:e>\
+<m:sup><m:r><m:t>2</m:t></m:r></m:sup></m:sSup></m:oMath>
+<w:r><w:t xml:space="preserve"> costs $5 and </w:t></w:r>
+<m:oMath><m:f><m:num><m:r><m:t>a</m:t></m:r></m:num><m:den><m:r><m:t>b</m:t></m:r></m:den></m:f></m:oMath>
+<w:r><w:t xml:space="preserve"> ends it.</w:t></w:r></w:p>
+<w:p><w:r><w:t>The closing paragraph.</w:t></w:r></w:p>
+</w:body></w:document>"""
+
+
+def docx(body: str) -> bytes:
+    """A .docx of one document part: Drive's importer turns its OMML into equations,
+    which is the only way to make one — the Docs API has no request for it."""
+    import io
+    import zipfile
+    types = ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+             '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+             '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.'
+             'relationships+xml"/><Default Extension="xml" ContentType="application/xml"/>'
+             '<Override PartName="/word/document.xml" ContentType="application/vnd.'
+             'openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>')
+    rels = ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+            '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+            '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/'
+            '2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>')
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as z:
+        z.writestr("[Content_Types].xml", types)
+        z.writestr("_rels/.rels", rels)
+        z.writestr("word/document.xml", body)
+    return buf.getvalue()
+
+
+def test_an_equation_reaches_the_file_as_latex_and_survives_a_rewrite(google, request):
+    """The LaTeX comes from the Markdown export; a source rewrite of the words around
+    the equations keeps them, and the file keeps saying what they are."""
+    import io
+    from googleapiclient.http import MediaIoBaseUpload
+    from beamer2slides import doc_sync
+    from beamer2slides.google_auth import credentials, docs_service, drive_service
+    drive = drive_service(credentials())
+    ident = drive.files().create(
+        body={"name": f"b2s docs test: {request.node.name}", "mimeType": doc_sync.DOC_MIME},
+        media_body=MediaIoBaseUpload(io.BytesIO(docx(EQUATION_DOCX)), mimetype=(
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document")),
+        fields="id").execute()["id"]
+    try:
+        OUT.mkdir(parents=True, exist_ok=True)
+        path = OUT / f"{request.node.name}.html"
+        path.write_text("<html><body></body></html>", encoding="utf-8")
+        doc_sync.base_path(path).unlink(missing_ok=True)
+        doc_sync.sync(path, document=ident, assume_base="file")
+        paper = Paper(path, ident)
+        text = paper.text
+        assert 'data-chip="equation">E=m{c}^{2}</span>' in text, text
+        assert 'data-chip="equation">\\frac{a}{b}</span>' in text, text
+        paper.settled()
+        # The source rewrites the words between the equations; the reader, the last line.
+        paper.edit(" costs $5 and ", " costs $6 and ")
+        paper.rewrote("The closing paragraph", "closing", "last")
+        info = paper.sync()
+        assert info["conflicts"] == [], info["conflicts"]
+        doc, _ = doc_sync.read_document(docs_service(credentials()), ident)
+        elements = [e for tab in doc["tabs"] for c in tab["documentTab"]["body"]["content"]
+                    for e in c.get("paragraph", {}).get("elements", [])]
+        assert sum("equation" in e for e in elements) == 2
+        assert any("costs $6 and" in e.get("textRun", {}).get("content", "") for e in elements)
+        text = paper.text
+        assert 'data-chip="equation">E=m{c}^{2}</span>' in text, text
+        assert "The last paragraph." in text
+        paper.settled()
+    finally:
+        drive.files().delete(fileId=ident).execute()
+
+
 def test_a_block_the_source_added_with_a_date_and_a_person_gets_them(paper):
     """Measured: `insertDate` and `insertPerson` make the chips, so a new block that
     carries them is written with them rather than reported."""

@@ -385,13 +385,14 @@ def plant_ranges(docs, ident: str, ir: dict, tab: str | None = None) -> int:
 
 
 def settle(docs, ident: str, path: Path, ours: dict, base: dict,
-           planned: dict | None = None) -> dict:
+           planned: dict | None = None, drive=None) -> dict:
     """After a write: read the document, anchor what is new, and let that read be both
     the new base and the new canonical file. File, document and base agree from here.
 
-    `planned` is what each tab was written as, by its stamp (None: the first tab)."""
+    `planned` is what each tab was written as, by its stamp (None: the first tab).
+    With `drive`, the equations get their LaTeX (`equation_latex`)."""
     planned = planned or {}
-    _, live = read_document(docs, ident, ours, base)
+    doc, live = read_document(docs, ident, ours, base)
     tidy, named = [], 0
     for part in doc_ir.parts(live):
         stamp = stamp_of(live, part)
@@ -404,14 +405,37 @@ def settle(docs, ident: str, path: Path, ours: dict, base: dict,
     for part in doc_ir.parts(live):
         named += plant_ranges(docs, ident, part, stamp_of(live, part))
     if named or tidy:
-        _, live = read_document(docs, ident, ours, base)
+        doc, live = read_document(docs, ident, ours, base)
     for part in doc_ir.parts(live):
         if planned.get(stamp_of(live, part)):
             doc_merge.place_pictures(part, planned[stamp_of(live, part)])
+    if drive is not None:
+        equation_latex(drive, ident, doc, live)
     fetch_pictures(path, live)
     write_file(path, live, ident)
     save_base(path, live)
     return live
+
+
+def equation_latex(drive, ident: str, doc: dict, live: dict) -> int:
+    """Give each equation of `live` its LaTeX, which `documents.get` does not say at all
+    (an equation reads as `{}`) and the Markdown export does (`doc_ir.latex_of`).
+
+    Only on the read that becomes the file and the base: the planning reads leave it
+    out, and the merge does not mind, since a frozen run is compared with the base's
+    and both carry the same LaTeX. An export refused costs the file its LaTeX, no more.
+    """
+    spots = doc_ir.equation_spots(doc)
+    if not spots:
+        return 0
+    try:
+        markdown = drive.files().export(fileId=ident, mimeType="text/markdown").execute()
+    except HttpError as err:
+        print(f"  no LaTeX for the equations: the Markdown export was refused ({err.resp.status})")
+        return 0
+    if isinstance(markdown, bytes):
+        markdown = markdown.decode("utf-8")
+    return doc_ir.attach_latex(live, doc_ir.latex_of(spots, markdown))
 
 
 # ---------------------------------------------------------------- the report
@@ -500,7 +524,7 @@ def push(path: Path, name: str | None = None, new_doc: bool = False) -> dict:
     written = _write_tabs(drive, docs, ident, path, source, {"blocks": []}, live, tabs,
                           first=False)
     planned = {None: source["blocks"]} | {w["stamp"]: w["result"]["blocks"] for w in written}
-    live = settle(docs, ident, path, source, source, planned)
+    live = settle(docs, ident, path, source, source, planned, drive)
     blocks = [b for part in doc_ir.parts(live) for b in part["blocks"]]
     return {"document": ident, "url": url(ident), "blocks": len(blocks),
             "anchored": sum(1 for b in blocks if b.get("rangeId")),
@@ -549,7 +573,7 @@ def sync(path: Path, document: str | None = None, dry_run: bool = False,
     written = _write_tabs(drive, docs, ident, path, ours, base, theirs, tabs, doc=doc)
     info = _report(ident, False, ours, tabs, written, asked)
     live = settle(docs, ident, path, ours, base,
-                  {each["stamp"]: each["result"]["blocks"] for each in written})
+                  {each["stamp"]: each["result"]["blocks"] for each in written}, drive)
     info["blocks"] = sum(len(part["blocks"]) for part in doc_ir.parts(live))
     info["report"] = str(write_report(path, info))
     return info

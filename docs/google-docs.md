@@ -176,10 +176,11 @@ can create one.
 
 Four traps follow:
 
-* **`equation {}` is empty.** Thirteen index units wide, no content, no id. The formula
-  exists only in the Markdown export (as LaTeX) or the HTML export (as a base64 PNG). So
-  **the Markdown export carries information `documents.get` does not**, and an IR that
-  wants to keep equations has to read both.
+* **`equation {}` is empty.** Several index units wide (13 here; 10 and 7 for the
+  equations of an OMML import: the width follows the formula), no content, no id. The formula
+  exists only in the Markdown export (as LaTeX) or the HTML export (as a base64 PNG);
+  `text/plain` leaves it out. So **the Markdown export carries information `documents.get`
+  does not**, and a sync that keeps equations reads both (see "Equations" below).
 * **A dropdown chip is an anonymous element** — one index unit, no content key of any
   kind. You can see *that* something is there and nothing else. Its displayed value shows
   up only in an export.
@@ -557,6 +558,35 @@ text — that a sync can nevertheless *create*, which is the difference that mat
   dropdown, a footnote and a table of contents have no request at all, and a block that
   holds one is still never deleted to be written again.
 
+### Equations
+
+Read-only, and read through a side door. Nothing in the Docs API makes an equation
+(an OMML `.docx` import does, which is how the live test gets one), and `documents.get`
+reads one as `equation {}`. What it says is in Drive's Markdown export (`text/markdown`),
+measured on an OMML import with a second tab (the document of
+`tests/test_doc_ir.py::EQUATIONS` and its export, `EQUATIONS_MD`):
+
+- every tab is exported, each under a `# **Title**` heading once there is more than one;
+- an equation is `$…$`, a display equation alone on its line `$$…$$`;
+- **nothing escapes a dollar** — not one in the text (`costs $5`), not one in the
+  equation (`${x}_{1}+α_$$`) — while `_` becomes `\_` and a backslash doubles.
+
+So the dollars cannot say where an equation ends. The document can:
+`doc_ir.equation_spots` lists each equation with the words on either side of it in its
+paragraph (or the paragraph's edge, or the equation next to it), and `doc_ir.latex_of`
+looks for it in the export between those words — up to 24 characters of them, allowing
+any escape or bold/italic marker between their characters — in document order, taking
+the shortest LaTeX that fits. One it cannot place with certainty gets none, and shows
+empty in the file as it always did.
+
+Only the read that becomes the file and the base asks for the export
+(`doc_sync.equation_latex`, from `settle`): the LaTeX lands in the frozen run's text,
+`<span class="b2s-chip" data-chip="equation">E=m{c}^{2}</span>`. The planning reads
+don't, and `doc_merge.restore_unreadable` gives their blank equations the base's LaTeX
+back (a block with as many equations as its namesake, in order), so an equation never
+reads as changed and the words around it still merge. Editing the LaTeX in the file
+does nothing but get reported: it is a frozen run the source changed.
+
 ### What the merge refuses to write
 
 Each of these is reported in the sync report, never guessed at:
@@ -605,8 +635,8 @@ architecture.
 without converting), which would remove the round trip entirely. But its subset drops
 colours, highlights and alignment, and the Markdown export proved unstable across
 documents in the probe. Too lossy to be canonical here — but it is the **only** place an
-equation's LaTeX survives a read, so the reader should fetch it as a side-channel even
-though the canonical file stays HTML.
+equation's LaTeX survives a read, so the sync fetches it as a side-channel (see
+"Equations") though the canonical file stays HTML.
 
 ## Reproducing the measurements
 

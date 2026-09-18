@@ -1040,6 +1040,22 @@ def test_a_list_the_import_left_unreadable_gets_bullets_of_its_own():
     assert doc_merge.bullet_requests(doc_merge.restore_unreadable(readable)) == []
 
 
+def test_a_read_equation_takes_its_latex_from_the_base_and_the_merge_writes_nothing():
+    """`documents.get` says nothing of an equation; its LaTeX came from the export when
+    the base was read. Without it back, the block would read as changed."""
+    eq = {"text": "", "frozen": True, "chip": "equation", "width": 10}
+    theirs = live([{"kind": "paragraph", "key": "p:e", "runs": [{"text": "So "}, dict(eq)]}])
+    base = live([{"kind": "paragraph", "key": "p:e",
+                  "runs": [{"text": "So "}, dict(eq, text="E=m{c}^{2}")]}])
+    doc_merge.restore_unreadable(theirs, base, base)
+    assert theirs["blocks"][0]["runs"][1]["text"] == "E=m{c}^{2}"
+    assert doc_merge.plan(base, base, theirs)["requests"] == []
+    # A block that holds another number of equations than the base's is not guessed at.
+    other = live([{"kind": "paragraph", "key": "p:e", "runs": [dict(eq), dict(eq)]}])
+    doc_merge.restore_unreadable(other, base)
+    assert [r["text"] for r in other["blocks"][0]["runs"]] == ["", ""]
+
+
 def test_a_block_the_source_deleted_is_deleted_in_the_document():
     ours = live([BASE["blocks"][0], BASE["blocks"][2]])
     result = doc_merge.plan(BASE, ours, live(BASE["blocks"]))

@@ -238,6 +238,157 @@ def tab_part(ir: dict | None, tab: str | None) -> dict | None:
     return None
 
 
+# ---------------------------------------------------------------- equations
+
+# How much of the words beside an equation anchors it in the Markdown export.
+ANCHOR = 24
+# What the export puts between characters that the document's text does not have: an
+# escape, and the markers of bold, italic and strikethrough.
+_MARKUP = r"[\\*_~]*"
+# The start of a Markdown line, past whatever opens the block: a list marker, a
+# heading's hashes, a quote, a table cell's bar.
+_LINE_START = r"(?:^|(?<=\n))[ \t]*(?:(?:[*+-]|\d+\.|#+|>|\|)[ \t]*)*" + _MARKUP
+# The end of a paragraph's line: a hard break, a table cell's bar, or the end.
+_LINE_END = _MARKUP + r"[ \t]*(?:\\?\n|\||\Z)"
+
+
+def equation_spots(doc: dict) -> list[dict]:
+    """Every equation of a document read with `includeTabsContent`, in the order the
+    document shows them, with the words on either side of it in its paragraph.
+
+    `before` / `after` are `_beside`'s: the words up to the next thing that is not
+    text — another equation, a chip, or the paragraph's edge — and which of those it
+    is, since the Markdown export writes them differently (`latex_of`).
+    """
+    spots: list[dict] = []
+    for tab in _flatten_tabs(doc.get("tabs", [])):
+        tab_id = tab.get("tabProperties", {}).get("tabId")
+        body = tab.get("documentTab", {}).get("body", {}).get("content", [])
+        for paragraph in _paragraphs(body):
+            pieces = []
+            for el in paragraph.get("elements", []):
+                if "textRun" in el:
+                    pieces.append(("text", el["textRun"].get("content", "").rstrip("\n")))
+                elif "equation" in el:
+                    pieces.append(("equation", el.get("startIndex", 0)))
+                else:
+                    pieces.append(("object", None))
+            for i, (kind, start) in enumerate(pieces):
+                if kind != "equation":
+                    continue
+                spots.append({"tab": tab_id, "start": start,
+                              "before": _beside(pieces[:i][::-1], backwards=True),
+                              "after": _beside(pieces[i + 1:])})
+    return spots
+
+
+def _paragraphs(content: list):
+    for element in content:
+        if "paragraph" in element:
+            yield element["paragraph"]
+        for row in element.get("table", {}).get("tableRows", []):
+            for cell in row.get("tableCells", []):
+                yield from _paragraphs(cell.get("content", []))
+
+
+def _beside(pieces: list, backwards: bool = False) -> dict:
+    """The words next to an equation, walking away from it until something that is
+    not a word: {"text": ..., "then": "edge" | "equation" | "object"}. `backwards`
+    walks the pieces in front of it, nearest first."""
+    text, then = [], "edge"
+    for kind, value in pieces:
+        if kind != "text":
+            then = kind
+            break
+        text.append(value)
+    return {"text": "".join(text[::-1] if backwards else text), "then": then}
+
+
+def latex_of(spots: list[dict], markdown: str) -> dict[tuple, str]:
+    """Each equation's LaTeX from the document's Markdown export, by (tab, start).
+
+    The export writes an equation as `$…$` (or `$$…$$` on a line of its own) and
+    escapes neither a dollar in the text nor one in the equation (measured: `costs $5`
+    and `${x}_{1}+α_$$`), so the dollars alone cannot say where one ends. The words the
+    document puts on either side can: each equation is looked for between them, in
+    document order, and the shortest LaTeX that fits is taken. An equation that is not
+    found with certainty gets none — the file then shows it without its LaTeX, as it
+    did before.
+    """
+    found: dict[tuple, str] = {}
+    cursor, previous = 0, False
+    for spot in spots:
+        before, after = spot["before"], spot["after"]
+        if before["text"]:
+            prefix = _loose(before["text"][-ANCHOR:]) + _MARKUP + r"(?:\]\([^)\n]*\))?" + _MARKUP
+        elif before["then"] == "edge":
+            prefix = _LINE_START
+        elif before["then"] == "equation" and previous:
+            prefix = r"\G[ \t]*"
+        else:
+            prefix = None
+        if after["text"]:
+            suffix = _MARKUP + r"\[?" + _loose(after["text"][:ANCHOR])
+        elif after["then"] == "edge":
+            suffix = _LINE_END
+        elif after["then"] == "equation":
+            suffix = r"[ \t]*" + _MARKUP + r"\$"
+        else:
+            suffix = None
+        previous = False
+        if prefix is None and suffix is None:
+            continue
+        pattern = (prefix or "") + r"(\$\$?)(.+?)\1" + (f"(?={suffix})" if suffix else "")
+        if prefix == r"\G[ \t]*":
+            match = re.compile(pattern[2:]).match(markdown, cursor)
+        else:
+            match = re.compile(pattern, re.M).search(markdown, cursor)
+        if match is None:
+            continue
+        found[(spot["tab"], spot["start"])] = match.group(2)
+        cursor, previous = match.end(), True
+    return found
+
+
+def _loose(text: str) -> str:
+    """A pattern for `text` as the Markdown export writes it: any escape or style
+    marker allowed in front of each character, and white space as any white space."""
+    out, space = [], False
+    for char in text:
+        if char.isspace():
+            if not space:
+                out.append(r"\s+")
+            space = True
+            continue
+        space = False
+        out.append(_MARKUP + re.escape(char))
+    return "".join(out)
+
+
+def attach_latex(ir: dict, found: dict[tuple, str]) -> int:
+    """Write each equation's LaTeX into its frozen run's text, where `latex_of` found
+    it: the file then shows what the equation says, where it showed nothing."""
+    done = 0
+    for part in parts(ir):
+        tab = part.get("tab")
+        for block in _all_blocks(part["blocks"]):
+            at = block.get("span", [0])[0]
+            for run in block.get("runs", []):
+                if run.get("chip") == "equation" and (tab, at) in found:
+                    run["text"] = found[(tab, at)]
+                    done += 1
+                at += run.get("width", 1 if run.get("frozen") else utf16_len(run["text"]))
+    return done
+
+
+def _all_blocks(blocks: list):
+    for block in blocks:
+        yield block
+        for row in block.get("rows", []):
+            for cell in row:
+                yield from _all_blocks(cell)
+
+
 def _flatten_tabs(tabs: list) -> list:
     out = []
     for tab in tabs:

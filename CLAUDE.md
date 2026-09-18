@@ -612,6 +612,12 @@ keys, named ranges), `doc_merge.py` (pure planning), `doc_sync.py` (the commands
   (`doc_merge.restore_unreadable`) and `settle` then gives the list bullets of the
   document's own (`bullet_requests`: measured, they read back from then on, so a reader's
   switch to numbers is seen); block identity ignores ordered-ness entirely.
+- An equation (several index units, not one) reads as `equation {}`; its LaTeX is only in
+  Drive's Markdown export, which escapes no dollar anywhere. `settle` asks the export
+  (`doc_sync.equation_latex`), `doc_ir.latex_of` places each equation by the words the
+  document puts beside it, and the file shows the LaTeX in the chip; the planning reads get
+  the base's LaTeX back in `restore_unreadable`, so an equation never reads as changed.
+  Read-only: no request makes one (an OMML `.docx` import does, as the live test does).
 - A body that ends on a table ends on an empty paragraph no request can delete:
   `doc_ir._hide_trailer` leaves it out of the IR (`trailer` keeps its span, and the next
   block appended is written into it), and the body's last newline is as undeletable as the

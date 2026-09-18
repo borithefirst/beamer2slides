@@ -340,6 +340,74 @@ def test_the_named_ranges_of_a_tabbed_read_are_found_in_the_tab():
     assert ir["blocks"][0]["key"] == "heading:a-heading"
 
 
+def pieces_paragraph(start, *pieces):
+    """A paragraph of text runs (str) and equations (int: their width)."""
+    elements, at = [], start
+    for piece in pieces:
+        if isinstance(piece, int):
+            elements.append({"startIndex": at, "endIndex": at + piece, "equation": {}})
+            at += piece
+        else:
+            elements.append({"startIndex": at, "endIndex": at + len(piece),
+                             "textRun": {"content": piece, "textStyle": {}}})
+            at += len(piece)
+    return {"startIndex": start, "endIndex": at, "paragraph": {
+        "elements": elements, "paragraphStyle": {"namedStyleType": "NORMAL_TEXT"}}}
+
+
+# The document and its Markdown export as `probe_equation` measured them: an OMML
+# import, a second tab, and dollars in the text that nobody escapes.
+EQUATIONS = {"title": "eq", "tabs": [
+    {"tabProperties": {"tabId": "t.0", "title": "Tab 1"}, "documentTab": {"body": {"content": [
+        pieces_paragraph(1, "Inline ", 10, " and a fraction ", 7, " end.\n"),
+        pieces_paragraph(47, "It costs $5, not $6 or \\$ and _x_ ", 12, "\n"),
+        pieces_paragraph(94, 9, "\n"),
+        pieces_paragraph(104, "Second paragraph.\n")]}}},
+    {"tabProperties": {"tabId": "t.1", "title": "Two"}, "documentTab": {"body": {"content": [
+        pieces_paragraph(1, "In tab two: costs $7.\n")]}}}]}
+EQUATIONS_MD = (
+    "# **Tab 1**\n\n"
+    "Inline $E=m{c}^{2}$ and a fraction $\\frac{a}{b}$ end.  \n"
+    "It costs $5, not $6 or \\\\$ and \\_x\\_ ${x}_{1}+α_$$  \n"
+    "$$y=\\sqrt{z}$$  \n"
+    "Second paragraph.\n\n"
+    "# **Two**\n\n"
+    "In tab two: costs $7.\n")
+
+
+def test_each_equation_gets_its_latex_from_the_markdown_export():
+    spots = doc_ir.equation_spots(EQUATIONS)
+    assert [s["start"] for s in spots] == [8, 34, 81, 94]
+    found = doc_ir.latex_of(spots, EQUATIONS_MD)
+    assert found == {("t.0", 8): "E=m{c}^{2}", ("t.0", 34): "\\frac{a}{b}",
+                     ("t.0", 81): "{x}_{1}+α_$", ("t.0", 94): "y=\\sqrt{z}"}
+
+
+def test_an_equation_the_export_does_not_show_gets_no_latex():
+    spots = doc_ir.equation_spots(EQUATIONS)
+    assert doc_ir.latex_of(spots, "# **Tab 1**\n\nInline and a fraction end.\n") == {}
+
+
+def test_two_equations_side_by_side_are_found_one_after_the_other():
+    doc = {"title": "", "tabs": [{"tabProperties": {"tabId": "t.0"}, "documentTab": {
+        "body": {"content": [pieces_paragraph(1, "So ", 4, 5, " holds.\n")]}}}]}
+    found = doc_ir.latex_of(doc_ir.equation_spots(doc), "So $a$$b+c$ holds.\n")
+    assert found == {("t.0", 4): "a", ("t.0", 8): "b+c"}
+
+
+def test_the_latex_reaches_the_file_and_comes_back_from_it():
+    from beamer2slides import doc_sync
+    ir = doc_sync.document_ir(EQUATIONS, "ident")
+    found = doc_ir.latex_of(doc_ir.equation_spots(EQUATIONS), EQUATIONS_MD)
+    assert doc_ir.attach_latex(ir, found) == 4
+    html = doc_ir.to_html(ir)
+    assert 'data-chip="equation">E=m{c}^{2}</span>' in html
+    back = doc_ir.from_html(html)
+    runs = [r for b in back["blocks"] for r in b["runs"] if r.get("chip") == "equation"]
+    assert [r["text"] for r in runs] == ["E=m{c}^{2}", "\\frac{a}{b}", "{x}_{1}+α_$",
+                                         "y=\\sqrt{z}"]
+
+
 def test_repeated_text_gets_an_occurrence_suffix():
     ir = doc_ir.key_blocks({"title": "", "blocks": [
         {"kind": "paragraph", "runs": [{"text": "same"}]},
