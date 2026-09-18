@@ -2064,8 +2064,17 @@ def signature(r: dict) -> tuple:
 def paragraphs_latex(paragraphs: list[dict], style_for, ctx: Context, ind: str) -> str:
     lines, stack = [], []
     for p in paragraphs:
+        blank = bool(p["runs"]) and not any(r["text"].strip() for r in p["runs"])
         runs = runs_latex(p["runs"], style_for(p), ctx).strip()
-        if not runs:
+        if blank:
+            # A paragraph of nothing but spaces is a blank line someone left in a text box, and it
+            # takes a line of its own. Only a foreign deck has them (`deck_ir.text_paragraphs`
+            # keeps them for `adopt`; classify cannot see one, a PDF having only the gap it
+            # leaves), and TeX would drop a paragraph whose entire content is a space - so the
+            # line is a `\strut` at the size the person's Return left room for.
+            size = p["runs"][0].get("size")
+            runs = (size_switch(size, ctx.pt_option) if size else "") + "\\strut"
+        elif not runs:
             continue
         if p.get("bullet"):
             level = p.get("level", 0)

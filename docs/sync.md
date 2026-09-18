@@ -739,7 +739,13 @@ places, each because the conventions `pull` relies on are this converter's and n
   which a bounding box alone cannot tell from one drawn down and to the right: the endpoints are
   computed through the matrix and the arrow ends kept;
 - a **font is known by its name** (`family_of`): only the three fonts the converter itself writes were
-  mapped, so a deck typed in Space Mono read back as prose, with the wrong width factors as well.
+  mapped, so a deck typed in Space Mono read back as prose, with the wrong width factors as well;
+- a **blank line someone typed is kept** (`text_paragraphs(keep_blank=True)`). Of the 717 paragraphs
+  of the DevFest template 282 are blank, and dropping one pulls everything under it up by a line. A
+  PDF has no empty paragraph — only the gap one leaves — so classify never makes one and `pull`'s IR
+  must not either; each becomes a space in the style of the paragraph it stands above, which
+  `inverse.paragraphs_latex` writes as a `\strut` at that size. Trailing blanks push nothing down and
+  are dropped.
 
 **What the skeleton is** (`adopt.py`): a `\usetheme{default}` with navigation, headline, footline and
 frame title emptied — a foreign deck carries its own decoration in its elements, so anything beamer
@@ -753,6 +759,20 @@ style at its own place, because `inverse.runs_latex` writes a run's style only w
 a base and assumes the document sets that base: true of a source being refined, false of one written
 from nothing, and a deck-wide base would leave the crimson 9 pt instruction slides or the blue 26 pt
 section titles black.
+
+**The deck's own typefaces** (`adopt.font_preamble`, `font_family`): a foreign deck is written in the
+person's fonts, not the converter's three, and helvet in place of them is ink in the wrong shape on
+every slide that has words. Each family the deck names is looked for by name among the fonts on the
+machine — `$B2S_FONTS` when set (a folder of the deck's own fonts, and what the tests use so the
+answer does not depend on what happens to be installed), else the ones this repository ships under
+`themes/*/fonts` and then the OS font folders — and what is found is copied into `<tree>/fonts/` and
+declared with fontspec, which makes the loop compile with lualatex. A family is the one the deck asked
+for when its file names are the deck's font name with something after them **and** the file's own name
+reads as the same kind of typeface (`GoogleSansCode` begins with "Google Sans" too and is a monospace,
+so without that test a deck's prose would be set in its code face). What the machine has not got takes
+the nearest family of the same kind to one that *was* found, which is said out loud: the template's
+quote slides are Space Mono, on no machine here, and LaTeX's own typewriter is narrow enough to break
+every one of their lines in another place — 0.42 ink overlap against 0.68 for Google Sans Code.
 
 Absolute-first is a decision, not a shortcut: a foreign deck's geometry *is* boxes the person
 dragged, and every guess at flow text that misses costs the loop a `geometry` round to escalate back

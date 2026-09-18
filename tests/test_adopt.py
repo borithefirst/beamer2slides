@@ -9,10 +9,19 @@ alignment only the master states, and a connector - then the IR that comes back 
 import json
 from pathlib import Path
 
+import pytest
+
 from beamer2slides import adopt
 from beamer2slides.deck_ir import deck_ir, family_of
 
 EMU = 12700
+
+
+@pytest.fixture(autouse=True)
+def no_machine_fonts(monkeypatch, tmp_path):
+    """Whether this machine has Google Sans installed must not decide what the tests read: every
+    test names the fonts it has through `$B2S_FONTS` (`adopt.font_dirs`), and by default none."""
+    monkeypatch.setenv("B2S_FONTS", str(tmp_path / "no-fonts-here"))
 
 
 def pt(v: float) -> dict:
@@ -130,6 +139,45 @@ def test_a_connector_keeps_the_two_points_it_runs_between():
     assert line["outline"] == "#ea4335"
 
 
+def blank_line_deck() -> dict:
+    """A box whose person pressed Return twice: a blank line above the words and one between."""
+    pres = presentation()
+    box = text_shape("s0_b", "first", 60, 150, 300, 90)
+    tes = box["shape"]["text"]["textElements"]
+    style = dict(tes[1]["textRun"]["style"])
+    box["shape"]["text"]["textElements"] = [
+        {"paragraphMarker": {"style": {}}},                      # a blank line above the words
+        {"textRun": {"content": "\n", "style": style}},
+        {"paragraphMarker": {"style": {}}},
+        {"textRun": {"content": "first\n", "style": style}},
+        {"paragraphMarker": {"style": {}}},                      # and one between them
+        {"textRun": {"content": "\n", "style": style}},
+        {"paragraphMarker": {"style": {}}},
+        {"textRun": {"content": "second\n", "style": style}},
+        {"paragraphMarker": {"style": {}}},                      # trailing: pushes nothing down
+        {"textRun": {"content": "\n", "style": style}}]
+    pres["slides"][0]["pageElements"].append(box)
+    return pres
+
+
+def test_a_blank_line_someone_typed_is_a_line(tmp_path):
+    """Of the 717 paragraphs of the DevFest template, 282 are blank, and dropping one pulls
+    everything under it up by a line. A PDF has only the gap a blank line leaves, so classify never
+    makes one and `pull`'s IR must not either."""
+    ir = deck_ir(blank_line_deck(), foreign=True)
+    box = next(e for e in ir["slides"][0]["elements"] if e["kind"] == "text" and e["bbox"][1] > 80)
+    assert ["".join(r["text"] for r in p["runs"]) for p in box["paragraphs"]] == \
+        [" ", "first", " ", "second"], "the blank lines are kept, the trailing one is not"
+    text = adopt.bootstrap(ir, tmp_path / "tree" / "main.tex")
+    assert text.count("\\strut") == 2, "each blank line takes a line of its own"
+
+
+def test_pull_still_sees_no_blank_paragraph():
+    box = next(e for e in deck_ir(blank_line_deck())["slides"][0]["elements"]
+               if e["kind"] == "text" and e["bbox"][1] > 80)
+    assert ["".join(r["text"] for r in p["runs"]) for p in box["paragraphs"]] == ["first", "second"]
+
+
 def test_alignment_comes_from_the_placeholder_it_inherits():
     """The template centres its subtitle on the master and the slide says nothing at all. Reading
     only the slide made centred text left-aligned, which no later round can put right: the loop has
@@ -219,6 +267,60 @@ def test_a_picture_is_copied_into_the_tree(tmp_path):
     files = list((tmp_path / "tree" / "figures").glob("*.png"))
     assert files, "the picture is not beside the source"
     assert len(files) == 1, "the same picture on every slide is copied once"
+
+
+# ---------------------------------------------------------------- the typefaces it is written in
+
+def font_folder(tmp_path: Path, *names: str) -> Path:
+    """A folder of fonts by name only: nothing here compiles, and nothing here needs to."""
+    folder = tmp_path / "fontshelf"
+    folder.mkdir(exist_ok=True)
+    for n in names:
+        (folder / n).write_bytes(b"\x00\x01\x00\x00")
+    return folder
+
+
+def test_without_the_decks_typeface_the_source_says_helvet(tmp_path):
+    text = source_for(tmp_path)
+    assert "\\usepackage{helvet}" in text and "fontspec" not in text
+
+
+def test_the_deck_is_set_in_its_own_typeface_when_the_machine_has_it(tmp_path, monkeypatch):
+    """A foreign deck is written in the person's fonts, not the converter's three, and helvet in
+    place of them is ink in the wrong shape on every slide that has words."""
+    monkeypatch.setenv("B2S_FONTS", str(font_folder(
+        tmp_path, "GoogleSansFlex-Regular.ttf", "GoogleSansFlex-Bold.ttf", "GoogleSansFlex-Italic.ttf")))
+    text = source_for(tmp_path)
+    assert "\\usepackage{fontspec}" in text and "helvet" not in text
+    line = next(l for l in text.splitlines() if l.startswith("\\setsansfont"))
+    assert line.startswith("\\setsansfont{GoogleSansFlex}[Path=fonts/,Extension=.ttf,")
+    assert "UprightFont=*-Regular" in line and "BoldFont=*-Bold" in line
+    assert "BoldItalicFont" not in line, "a style the folder does not have is not promised"
+    assert (tmp_path / "tree" / "fonts" / "GoogleSansFlex-Regular.ttf").exists()
+
+
+def test_a_code_face_is_not_taken_for_the_prose_face(tmp_path, monkeypatch):
+    """`GoogleSansCode` begins with "Google Sans" too and is a monospace: without reading the file's
+    own name as a kind of typeface, the deck's prose would come back in its code face."""
+    monkeypatch.setenv("B2S_FONTS", str(font_folder(
+        tmp_path, "GoogleSansCode-Regular.ttf", "GoogleSansFlex-Regular.ttf")))
+    text = source_for(tmp_path)
+    assert "\\setsansfont{GoogleSansFlex}" in text
+    assert "\\setmonofont" not in text, "the deck has no monospaced words to set"
+
+
+def test_a_typeface_the_machine_lacks_takes_the_nearest_of_its_kind(tmp_path, monkeypatch):
+    """The DevFest template's quote slides are Space Mono, which is on no machine here, and LaTeX's
+    own typewriter is narrow enough to break every one of their lines somewhere else: 0.42 ink
+    overlap against 0.68 for Google Sans Code, which is at least the same kind of face as the rest
+    of the deck."""
+    pres = presentation()
+    pres["slides"][0]["pageElements"].append(
+        text_shape("s0_code", "print(1)", 100, 200, 300, 40, font="Space Mono"))
+    monkeypatch.setenv("B2S_FONTS", str(font_folder(
+        tmp_path, "GoogleSansFlex-Regular.ttf", "GoogleSansCode-Regular.ttf", "Cousine-Regular.ttf")))
+    text = adopt.bootstrap(deck_ir(pres, foreign=True), tmp_path / "tree" / "main.tex")
+    assert "\\setmonofont{GoogleSansCode}" in text, "the nearest kin of the face the deck is set in"
 
 
 def test_adopt_refuses_to_write_over_a_source(tmp_path):

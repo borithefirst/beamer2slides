@@ -180,7 +180,8 @@ def flatten(elements: list[dict], parent: list[float] | None = None, group: str 
             yield pe, m, group
 
 
-def text_paragraphs(pe: dict, text: dict, resolver: StyleResolver, fonts: FontMapper, scale: float) -> list[dict]:
+def text_paragraphs(pe: dict, text: dict, resolver: StyleResolver, fonts: FontMapper, scale: float,
+                    keep_blank: bool = False) -> list[dict]:
     base = {**DEFAULT_STYLE}
     parent = resolver.parent_style(pe)
     base.update({k: v for k, v in parent.items() if k in ("fontFamily", "bold", "italic")})
@@ -243,6 +244,23 @@ def text_paragraphs(pe: dict, text: dict, resolver: StyleResolver, fonts: FontMa
         if "\t" in text and not p["bullet"]:
             p["tab_x0"] = p["indent_start"]
     paragraphs = [p for p in paragraphs if p["runs"] or p is not paragraphs[-1]]
+    if keep_blank:
+        # A blank line a person left in a text box is vertical space they chose, and dropping it
+        # pulls everything under it up by a line - of the 717 paragraphs of the DevFest template,
+        # 282 are blank. A PDF has no empty paragraph, only the gap one leaves, so classify never
+        # makes one and `pull`'s IR must not either; a foreign deck is read from the deck itself,
+        # where the blank line is still there to be read. It becomes a space in the style of the
+        # paragraph it stands above, which is the size the person's Return left room for.
+        last = max((i for i, p in enumerate(paragraphs) if p["runs"]), default=-1)
+        del paragraphs[last + 1:]                       # trailing blanks push nothing down
+        below = None
+        for p in reversed(paragraphs):
+            if p["runs"]:
+                below = p["runs"][0]
+            elif below is not None:
+                p["runs"] = [{**below, "text": " ", "link": None, "underline": False,
+                              "strike": False, "highlight": None}]
+                p["size"] = below["size"]
     # bullet levels as classify counts them: clusters (2 pt apart) of the bullets' left edges
     levels: list[float] = []
     for x in sorted({p["indent_first"] / scale for p in paragraphs if p["bullet"]}):
@@ -266,9 +284,9 @@ def merge_runs(runs: list[dict]) -> list[dict]:
 
 
 def text_element(pe: dict, m: list[float], resolver: StyleResolver, fonts: FontMapper, scale: float,
-                 page_w: float) -> dict | None:
+                 page_w: float, foreign: bool = False) -> dict | None:
     shape = pe.get("shape", {})
-    paragraphs = text_paragraphs(pe, shape.get("text", {}), resolver, fonts, scale)
+    paragraphs = text_paragraphs(pe, shape.get("text", {}), resolver, fonts, scale, keep_blank=foreign)
     if not any(p["runs"] for p in paragraphs):
         return None
     w, h = dim(pe["size"]["width"]), dim(pe["size"]["height"])
@@ -515,7 +533,7 @@ def element_of(pe: dict, m: list[float], resolver: StyleResolver, fonts: FontMap
     bbox = [round(v / scale, 2) for v in box(m, w, h)]
     if "shape" in pe:
         shape = pe["shape"]
-        el = text_element(pe, m, resolver, fonts, scale, page_w) if shape.get("text") else None
+        el = text_element(pe, m, resolver, fonts, scale, page_w, foreign) if shape.get("text") else None
         props = shape.get("shapeProperties", {})
         fill = props.get("shapeBackgroundFill", {})
         fill_hex = rgb_hex(fill.get("solidFill", {}).get("color"), resolver.scheme) \

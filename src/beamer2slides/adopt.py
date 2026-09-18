@@ -19,6 +19,8 @@ wants it (it corrects textblocks by the measured error), the words, and the pict
 """
 
 import json
+import os
+import shutil
 from pathlib import Path
 
 from .inverse import (Context, TEXTPOS, body_style, colour_name, frame_latex, picture_block,
@@ -97,12 +99,134 @@ def base_lead(style: dict, ctx: Context) -> str:
     return "".join(out)
 
 
+# fontspec's key for a style, by the suffix a font file's name ends in.
+FONT_STYLES = {"regular": "UprightFont", "": "UprightFont", "bold": "BoldFont",
+               "italic": "ItalicFont", "oblique": "ItalicFont",
+               "bolditalic": "BoldItalicFont", "boldoblique": "BoldItalicFont"}
+
+
+def font_dirs() -> list[Path]:
+    """Where to look for the typefaces a deck names: the ones this repository ships with its themes,
+    then the machine's own - or only `$B2S_FONTS`, when it is set, which is how one points adopt at
+    a folder of the deck's own fonts (and how the tests get an answer that does not depend on what
+    this machine happens to have installed)."""
+    only = [Path(p.strip()) for p in os.environ.get("B2S_FONTS", "").split(os.pathsep) if p.strip()]
+    if only:
+        return [p for p in only if p.is_dir()]
+    out: list[Path] = []
+    themes = Path(__file__).resolve().parents[2] / "themes"
+    if themes.is_dir():                                 # not in an installed wheel
+        out += sorted(p for p in themes.glob("*/fonts") if p.is_dir())
+    if os.name == "nt":
+        out += [Path(os.environ.get("WINDIR", "C:\\Windows")) / "Fonts",
+                Path(os.environ.get("LOCALAPPDATA", ".")) / "Microsoft" / "Windows" / "Fonts"]
+    else:
+        out += [Path.home() / ".fonts", Path.home() / ".local" / "share" / "fonts",
+                Path.home() / "Library" / "Fonts", Path("/Library/Fonts"), Path("/usr/share/fonts")]
+    return [p for p in out if p.is_dir()]
+
+
+_FAMILIES: dict[tuple, dict[str, dict[str, Path]]] = {}
+
+
+def font_candidates() -> dict[str, dict[str, Path]]:
+    """Every family the folders offer, by the stem its files share, each keyed by fontspec's name
+    for the style. Read once per set of folders: they are large and the answer does not change."""
+    dirs = tuple(font_dirs())
+    if dirs not in _FAMILIES:
+        groups: dict[str, dict[str, Path]] = {}
+        for folder in dirs:
+            for f in sorted(list(folder.glob("*.tt[fc]")) + list(folder.glob("*.otf"))
+                            + list(folder.glob("*/*.tt[fc]")) + list(folder.glob("*/*.otf"))):
+                stem, _, suffix = f.stem.partition("-")
+                style = FONT_STYLES.get("".join(c for c in suffix.lower() if c.isalpha()))
+                if style is not None:
+                    groups.setdefault(stem, {}).setdefault(style, f)
+        _FAMILIES[dirs] = {k: v for k, v in groups.items() if "UprightFont" in v}
+    return _FAMILIES[dirs]
+
+
+def flatten(name: str) -> str:
+    return "".join(c for c in name.lower() if c.isalnum())
+
+
+def font_family(name: str, want: str, near: str = "") -> dict[str, Path]:
+    """The files of the family a deck font names, keyed by fontspec's style, or {}.
+
+    A family is the one the deck asked for when its stem is the deck's font name with something
+    after it (the deck says "Google Sans", the files are `GoogleSansFlex-*.ttf`) **and** its own
+    name reads as the same kind of typeface: `GoogleSansCode` begins with "Google Sans" too, and is
+    a monospace, so without that test a deck's prose would be set in its code face.
+
+    When the machine does not have it, the nearest family of the same kind to one that *was* found
+    (`near`) stands in, rather than LaTeX's own. That is not cosmetic: the DevFest template's quote
+    slides are Space Mono, which is on no machine here, and Latin Modern Mono is narrow enough to
+    break every one of their lines in another place - 0.42 ink overlap against 0.68 for Google Sans
+    Code, which at least is the same kind of face as the rest of the deck."""
+    from .deck_ir import family_of
+    flat, kin = flatten(name), flatten(near)
+    asked: tuple[int, str, dict] = (10 ** 6, "", {})
+    fallback: tuple[int, str, dict] = (0, "", {})
+    for stem, files in font_candidates().items():
+        low = flatten(stem)
+        if family_of(stem) != want:
+            continue
+        if flat and (low.startswith(flat) or flat.startswith(low)) and abs(len(low) - len(flat)) < asked[0]:
+            asked = (abs(len(low) - len(flat)), stem, files)
+        shared = len(os.path.commonprefix([low, kin])) if kin else 0
+        if shared > fallback[0]:
+            fallback = (shared, stem, files)
+    _, stem, files = asked if asked[2] else fallback
+    return {"stem": stem, **files} if files else {}
+
+
+def font_preamble(target: dict, tree: Path | None) -> list[str]:
+    """fontspec lines for the typefaces the deck is written in, and the files beside the source.
+
+    A foreign deck is written in the person's fonts, not the converter's three, and helvet in place
+    of them is ink in the wrong shape on every slide that has words (measured on the DevFest
+    template: 0.702 -> 0.720 ink overlap, the text-only slides moving most). What is not on this
+    machine keeps its substitute, which is what the loop reports as a style it cannot close."""
+    counts: dict = {}
+    for s in target["slides"]:
+        for e in s["elements"]:
+            for p in e.get("paragraphs", []):
+                for r in p["runs"]:
+                    k = (r.get("family") or "sans", r.get("font") or "")
+                    counts[k] = counts.get(k, 0) + len(r["text"])
+    wanted: dict[str, str] = {}
+    for (fam, font), _n in sorted(counts.items(), key=lambda kv: -kv[1]):
+        if font and fam not in wanted:
+            wanted[fam] = font
+    lines, found = [], ""
+    for fam, command in (("sans", "setsansfont"), ("serif", "setmainfont"), ("mono", "setmonofont")):
+        files = font_family(wanted[fam], fam, found) if fam in wanted else {}
+        if not files:
+            continue
+        stem = files.pop("stem")
+        found = found or stem                           # what the rest of the deck is set in
+        low, asked = flatten(stem), flatten(wanted[fam])
+        if not (low.startswith(asked) or asked.startswith(low)):
+            print(f"  {wanted[fam]}: not on this machine, set in {stem}")
+        opts = [f"{k}=*-{files[k].stem.partition('-')[2]}" if "-" in files[k].stem else f"{k}=*"
+                for k in ("UprightFont", "BoldFont", "ItalicFont", "BoldItalicFont") if k in files]
+        if tree is not None:
+            for f in files.values():
+                dest = tree / "fonts" / f.name
+                if not dest.exists():
+                    dest.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copyfile(f, dest)
+        where = "Path=fonts/," if tree is not None else \
+            "Path=" + next(iter(files.values())).parent.as_posix().rstrip("/") + "/,"
+        ext = next(iter(files.values())).suffix
+        lines.append(f"\\{command}{{{stem}}}[{where}Extension={ext},{','.join(opts)}]")
+    return ["\\usepackage{fontspec}"] + lines if lines else []
+
+
 def picture_of(el: dict, tree: Path | None):
     """The `Picture` for an element whose file the deck gave us, copied into the source tree so the
     tree stands on its own (the download sits in the work folder, which is scratch). None when the
     deck would not give the file: the loop then reports `element_missing`, which says so."""
-    import shutil
-
     from .inverse import Picture, natural_size, picture_slug
     path = Path(el["file"]) if el.get("file") else None
     if path is None or not path.exists():
@@ -207,19 +331,19 @@ def slide_latex(s: dict, style_for, ctx: Context, flow: bool, tree: Path | None 
     return text
 
 
-def preamble(target: dict, ctx: Context, flow: bool) -> str:
+def preamble(target: dict, ctx: Context, flow: bool, tree: Path | None = None) -> str:
     """A theme that draws nothing. A foreign deck carries its own decoration in its elements, so
     anything beamer adds by itself (navigation bar, headline, footline, frame title style) is ink
     the deck does not have, and every pixel of it is a residual the loop cannot remove."""
     opt = page_option(target["slides"][0].get("size") if target["slides"] else None)
+    fonts = font_preamble(target, tree)
     lines = [f"\\documentclass[{opt}]{{beamer}}" if opt else "\\documentclass{beamer}",
              "\\usetheme{default}",
              "\\setbeamertemplate{navigation symbols}{}",
              "\\setbeamertemplate{footline}{}",
              "\\setbeamertemplate{headline}{}",
              "\\setbeamercolor{background canvas}{bg=}",
-             "\\usepackage[T1]{fontenc}",
-             "\\usepackage{helvet}",
+             *(fonts or ["\\usepackage[T1]{fontenc}", "\\usepackage{helvet}"]),
              "\\renewcommand{\\familydefault}{\\sfdefault}"]
     if not flow:
         lines.append("\\setbeamertemplate{frametitle}{}")
@@ -248,7 +372,7 @@ def bootstrap(target: dict, tex: Path, flow: bool = False) -> str:
     tex.parent.mkdir(parents=True, exist_ok=True)
     deck_bg = background_colour(target)
     frames = [slide_latex(s, style_for, ctx, flow, tex.parent, deck_bg) for s in target["slides"]]
-    head = preamble(target, ctx, flow)
+    head = preamble(target, ctx, flow, tex.parent)
     extra = sorted(ctx.packages) + [f"\\definecolor{{{n}}}{{HTML}}{{{v}}}" for n, v in sorted(ctx.colours.items())]
     text = head + "\n" + "\n".join(extra) + "\n\n\\begin{document}\n\n" + "\n".join(frames) + "\n\\end{document}\n"
     tex.parent.mkdir(parents=True, exist_ok=True)
