@@ -264,6 +264,13 @@ uninterrupted one would have. What makes that true:
   carry the name sync gives them and, since 2026-09-18, an `appProperties.b2sStaging` marker naming
   the deck they were staging for), and `--delete-staging` deletes those over 12 h old - a person
   saying yes to what sync will not do from a file's word.
+- Test runs also leave whole decks behind, of folders long since thrown away.
+  `python tools/drive_usage.py --delete-orphans` lists the decks **no file under `--root`
+  (default `out`) names any more** and, with `--yes`, moves them to the Drive trash (restorable for
+  30 days). What counts as naming one is deliberately too generous - every id-shaped word in every
+  .json/.md/.txt under the roots - because a reference it invents keeps a deck and one it misses
+  loses one; a deck a Drive backup copy points at, a deck younger than `--older-than-hours`, and
+  every deck at all if any file under the roots cannot be read, are spared.
 
 **Why the next run re-plans instead of resuming.** The pending marker could hold the planned
 requests and let a second run send the rest of them, but the deck is the truth and it may have moved
