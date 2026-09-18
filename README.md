@@ -37,6 +37,17 @@ offsets) and feeds the correction tables.
 | `pull` | someone fixed a typo in Slides. Get it back into the `.tex`, as an edit a human would have made. |
 | `adopt` | you have a deck nobody ever converted — one a person built in Slides. Get a beamer source for it, and take it from there. |
 
+A real run of `sync` on the demo talk: a colleague made two words bold and green and left a note on
+the slide; meanwhile the talk was rewritten. After the sync the deck has both.
+
+![A deck edited in Slides, the rewritten talk, and the deck after sync with both sets of changes](docs/media/sync.png)
+
+And `adopt` on the same slide, read back from Google Slides as if nobody had ever converted it:
+every shape, box and word gets its own place in the new source, and the source compiles back to the
+slide.
+
+![A slide in Google Slides and the beamer source adopt wrote for it, compiled](docs/media/adopt.png)
+
 ## What you get
 - **Text boxes** with colours, bold/italic/small caps and links. Fonts that are Google fonts in
   the PDF (Fira Sans, Source Sans, Roboto, …) keep their family and weight. Helvetica, Times,
@@ -105,6 +116,9 @@ In the debug images, green boxes are text, blue are pictures, purple tables and 
 Shaded text stays in the background (red math, blue figure, grey theme).
 
 ## How it works
+
+![One slide through the four stages: extract, classify, render, emit](docs/media/stages.gif)
+
 `extract` (PDFium via pypdfium2) → `classify` (lines, paragraphs, lists, tables, figures, shapes) →
 `render` (background without converted content, picture crops) → `emit` (a .pptx with the
 pictures, imported by Drive, then filled through the Google Slides API).
