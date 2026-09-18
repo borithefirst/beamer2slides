@@ -8,9 +8,14 @@ Instances: Google Sans Flex at opsz 18, wdth 100 (within 0.5% of Slides' Google 
 tools/probe_google_sans.py), weights 400/500/600/700 upright and italic (slnt -10);
 Google Sans Code 400/500/700 and italic 400 (same advance widths as Google Sans Mono).
 
-Usage: python themes/google/fonts/build_fonts.py
+None of this is committed: the fonts are third-party binaries, so they are built here, on demand
+(`themes/google/make.ps1` runs this when a font is missing). The downloads are pinned by SHA-256,
+so a change upstream stops the build instead of quietly changing the theme's metrics.
+
+Usage: python themes/google/fonts/build_fonts.py   (needs fontTools: pip install -e .[dev])
 """
 
+import hashlib
 import urllib.request
 from pathlib import Path
 
@@ -28,6 +33,14 @@ DOWNLOADS = {
     "GoogleSansCode-Italic-VF.ttf": "googlesanscode/GoogleSansCode-Italic%5Bwght%5D.ttf",
     "OFL-GoogleSansCode.txt": "googlesanscode/OFL.txt",
 }
+SHA256 = {  # what the fonts were cut from and checked against (2026-09-18)
+    "GoogleSansFlex-VF.ttf": "c31a482fbecbf2e07e6890134d20078723aadf732c9b9c6c9a44f86f8265b6fe",
+    "OFL-GoogleSansFlex.txt": "fc13d69f63e36d284b6e383d4d1463d8ad404f0aa065e57cf961252d51063137",
+    "TRADEMARKS-GoogleSansFlex.md": "5cad381c0828db656f32a787a1eff76db3303c74ec4f94668ae9fc2873ffe42f",
+    "GoogleSansCode-VF.ttf": "c9649573afcd966f61096b1e9c3c3115e7b54315ca2adf9839c6f8b17d5f8e1f",
+    "GoogleSansCode-Italic-VF.ttf": "bdf116292f27aca16e2aefb5534042a25f244d3a9187a521ce97fc2117a4a844",
+    "OFL-GoogleSansCode.txt": "ff8f4fbc4f1a71c7d4c6481c48dc2b21c43f8dc15872536667fee45c15d20928",
+}
 WEIGHT_NAMES = {400: "Regular", 500: "Medium", 600: "SemiBold", 700: "Bold"}
 
 
@@ -37,6 +50,11 @@ def fetch() -> None:
         if not (SRC / name).exists():
             print("downloading", name)
             urllib.request.urlretrieve(RAW + path, SRC / name)
+        digest = hashlib.sha256((SRC / name).read_bytes()).hexdigest()
+        if digest != SHA256[name]:
+            (SRC / name).unlink()
+            raise SystemExit(f"{name}: upstream changed (sha256 {digest}); check the metrics "
+                             f"(tools/probe_google_sans.py) before updating SHA256 in {Path(__file__).name}")
 
 
 def rename(font: TTFont, family: str, weight: int, italic: bool) -> str:

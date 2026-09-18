@@ -12,6 +12,10 @@ credentials*.json
 client_secret*.json
 token*.json
 themes/google/fonts/src/
+# built by themes/google/fonts/build_fonts.py, never committed (third-party binaries)
+themes/google/fonts/*.ttf
+themes/google/fonts/OFL-*.txt
+themes/google/fonts/TRADEMARKS-*.md
 examples/*/*
 !examples/*/*.tex
 .claude/worktrees/

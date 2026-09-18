@@ -1,6 +1,6 @@
 [project]
 name = "beamer2slides"
-version = "0.0.1"
+version = "0.1.0"
 description = "Convert beamer PDFs into editable Google Slides decks"
 readme = "README.md"
 license = {text = "MIT"}
@@ -17,7 +17,8 @@ dependencies = [
 [project.optional-dependencies]
 # What the tests need beyond the package itself. pytest-xdist is what makes `-n auto` work;
 # the suite runs without it, one worker, about three times slower (tests/conftest.py).
-dev = ["pytest>=8", "pytest-xdist>=3"]
+dev = ["pytest>=8", "pytest-xdist>=3",
+       "fonttools>=4.40"]  # themes/google/fonts/build_fonts.py cuts the theme's fonts
 
 [project.scripts]
 beamer2slides = "beamer2slides.__main__:main"

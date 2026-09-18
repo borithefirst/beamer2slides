@@ -20,8 +20,10 @@ python -m beamer2slides convert out\gdg\gdg-talk.pdf
 - LuaLaTeX, 16:9: `\documentclass[aspectratio=169]{beamer}` + `\usetheme[...]{gdg}`.
 - `make.ps1` puts this folder on `TEXINPUTS`, so the theme and `fonts/` are found from anywhere,
   and runs two passes (the overlays use `remember picture`).
-- The fonts in `fonts/` are committed. `python themes/google/fonts/build_fonts.py` rebuilds them
-  from github.com/google/fonts (downloads go to the git-ignored `fonts/src/`).
+- The fonts are not committed (third-party binaries). `make.ps1` builds them the first time, or
+  run `python themes/google/fonts/build_fonts.py` (needs fontTools, `pip install -e .[dev]`): it
+  downloads the variable fonts from github.com/google/fonts into the git-ignored `fonts/src/`,
+  checks them against pinned SHA-256 sums, and cuts the static `.ttf` files the theme loads.
 
 ## Writing slides
 
@@ -84,7 +86,7 @@ Overlays are drawn behind the text and never move the text flow.
 
 ## Licences and trademarks
 - Google Sans Flex and Google Sans Code are under the SIL Open Font License 1.1
-  (`fonts/OFL-*.txt`); see `fonts/TRADEMARKS-GoogleSansFlex.md` for the name.
+  (`fonts/OFL-*.txt` once built); see `fonts/TRADEMARKS-GoogleSansFlex.md` for the name.
 - The theme reproduces the look of a publicly shared community template. Google, Google Developer
   Groups and their logos are trademarks of Google LLC; the theme ships no logos. Use it for GDG and
   Google-related talks within Google's brand guidelines.

@@ -230,6 +230,9 @@ a per-slide background picture.
 - Google theme (`themes/google`, README there): a beamer theme reproducing the GDG 2024 speaker
   template in Google Sans Flex, written for AI authors; sizes in `\gpt` so the theme's baselines
   follow Slides' text model (first baseline 6.48 + 0.968 em, pitch 1.2 em × line spacing).
+  Its fonts are not committed (no third-party binaries in the tree): `themes/google/fonts/build_fonts.py`
+  downloads the variable fonts from google/fonts, checks pinned SHA-256 sums and cuts the static
+  .ttf files; `make.ps1` runs it when a font is missing.
 
 ## Google side
 - GCP project `beamer2slides` (personal Gmail): Slides and Drive APIs enabled. The OAuth
