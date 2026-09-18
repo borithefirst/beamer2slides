@@ -100,22 +100,30 @@ def _paragraph_style(marker: dict) -> dict:
     return out
 
 
-def read_text(text: dict | None) -> tuple[str, list[dict], list[dict]]:
-    """(content, distinct run styles, distinct paragraph styles) of a shape's or cell's text."""
-    content, runs, paras = [], [], []
+def read_text(text: dict | None) -> tuple[str, list[dict], list[dict], list[list]]:
+    """(content, distinct run styles, distinct paragraph styles, run spans) of a shape's or cell's
+    text. A span is `[start, end, style]` in characters of the content, which is what says *which*
+    words a style is on - the distinct styles alone cannot (`merge.styling_lost`)."""
+    content, runs, paras, spans = [], [], [], []
+    at = 0
     for te in (text or {}).get("textElements", []):
         if "textRun" in te:
-            content.append(te["textRun"].get("content", ""))
+            piece = te["textRun"].get("content", "")
+            content.append(piece)
             s = _text_style(te["textRun"].get("style", {}))
-            if te["textRun"].get("content", "").strip("\n") and s not in runs:
-                runs.append(s)
+            if piece.strip("\n"):
+                spans.append([at, at + len(piece.rstrip("\n")), s])
+                if s not in runs:
+                    runs.append(s)
+            at += len(piece)
         elif "autoText" in te:
             content.append(te["autoText"].get("content", ""))
+            at += len(te["autoText"].get("content", ""))
         elif "paragraphMarker" in te:
             s = _paragraph_style(te["paragraphMarker"])
             if s not in paras:
                 paras.append(s)
-    return "".join(content), runs, paras
+    return "".join(content), runs, paras, spans
 
 
 def _fill(fill: dict | None) -> dict | None:
@@ -266,26 +274,30 @@ def readback(e: dict, parent: list[float], parent_group: str | None, z: int) -> 
            "transform": [round(v, 4) for v in m[:4]] + [round(v, 2) for v in m[4:]], "size": [round(w, 2), round(h, 2)],
            "box": box(m, w, h), "parent_group": parent_group, "z": z, "title": e.get("title"),
            "description": e.get("description")}
-    text, runs, paras = None, [], []
+    text, runs, paras, spans = None, [], [], []
     if "shape" in e:
-        text, runs, paras = read_text(e["shape"].get("text"))
+        text, runs, paras, spans = read_text(e["shape"].get("text"))
         if "placeholder" in e["shape"]:
             out["placeholder"] = e["shape"]["placeholder"].get("type")
     elif "table" in e:
-        rows = []
+        rows, at = [], 0
         for row in e["table"].get("tableRows", []):
             cells = []
             for cell in row.get("tableCells", []):
-                t, r, p = read_text(cell.get("text"))
+                t, r, p, s = read_text(cell.get("text"))
                 cells.append(t.rstrip("\n"))
-                runs += [s for s in r if s not in runs]
-                paras += [s for s in p if s not in paras]
+                runs += [x for x in r if x not in runs]
+                paras += [x for x in p if x not in paras]
+                # the cells are joined below, so the spans move with their cell into that text
+                spans += [[a + at, min(b + at, at + len(cells[-1])), st] for a, b, st in s if a < len(cells[-1])]
+                at += len(cells[-1]) + 1                       # the tab (or, after the last cell, the newline)
             rows.append("\t".join(cells))
         text = "\n".join(rows)
         out["table"] = [e["table"].get("rows"), e["table"].get("columns")]
     out["text"] = text
     out["text_styles"] = runs
     out["paragraph_styles"] = paras
+    out["run_spans"] = spans
     out["text_style_hash"] = identity.sha1(json.dumps([sorted(json.dumps(s, sort_keys=True) for s in runs),
                                                        sorted(json.dumps(s, sort_keys=True) for s in paras)]))[:12]
     style = shape_style(e)

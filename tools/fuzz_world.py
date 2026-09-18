@@ -15,6 +15,7 @@ Element IR is the converter's (classify) shape, cut down to what identity and me
 import copy
 import json
 import random
+import re
 from pathlib import Path
 
 from beamer2slides import identity, merge, snapshot, sync
@@ -123,7 +124,7 @@ def readback(kind, box, text=None, image=None, parent=None, title=None, z=0, tab
            "size": [round(box[2] - box[0], 2), round(box[3] - box[1], 2)], "box": [round(v, 2) for v in box],
            "parent_group": parent, "z": z, "title": title, "description": None, "text": text,
            "text_styles": [{"fontFamily": "Lato", "fontSize": 18.0}] if text is not None else [],
-           "paragraph_styles": [{"alignment": "START"}] if text is not None else [],
+           "paragraph_styles": [{"alignment": "START"}] if text is not None else [], "run_spans": [],
            "text_style_hash": "s0", "shape_style": {"fill": {"color": "#dddddd", "alpha": 1.0}},
            "shape_style_hash": "h0"}
     if image:
@@ -257,6 +258,23 @@ def h6(text):
     return identity.sha1(text)[:6]
 
 
+def _styling_ends(base_rb, live_rb, text) -> bool:
+    """Whether the deck's run styling has words to go back onto. `sync.style_range_requests` puts
+    each styled run onto the same words in the new text; a word the source replaced is not there,
+    and that run's styling simply ends. (`merge.styling_lost` decides the same thing in the planner;
+    this is the reference applier's own opinion of it, on purpose.)"""
+    base_styles = base_rb.get("text_styles") or []
+    words = set(re.findall(r"\w+", text or ""))
+    live_text = live_rb.get("text") or ""
+    for start, end, style in live_rb.get("run_spans") or []:
+        if style in base_styles:
+            continue                                  # the converter's own styling, not the person's
+        on = set(re.findall(r"\w+", live_text[start:end]))
+        if on and not (on & words):
+            return True
+    return False
+
+
 def new_object(skey, o_el, base_el, live, overrides, tok):
     """The object a correct sync creates for one ours element (docs/sync.md: ours content, with the
     deck's overrides re-applied)."""
@@ -285,9 +303,14 @@ def new_object(skey, o_el, base_el, live, overrides, tok):
     rb["title"] = snapshot.tag(skey, o_el["key"])
     styled(rb, ir)
     live_rb = live["objects"].get(main) if main else None
+    base_rb = (base_el or {}).get("readback", {}).get(main, {}) if main else {}
     if live_rb and (overrides or {}).get("text_style"):  # the deck's styling, re-applied
-        rb["text_style_hash"] = live_rb.get("text_style_hash")
-        rb["text_styles"] = copy.deepcopy(live_rb.get("text_styles"))
+        if (overrides["text_style"] or {}).get("ranges") and _styling_ends(base_rb, live_rb, rb.get("text")):
+            pass                       # the words it was on are gone: nothing to put the styling on
+        else:
+            rb["text_style_hash"] = live_rb.get("text_style_hash")
+            rb["text_styles"] = copy.deepcopy(live_rb.get("text_styles"))
+            rb["run_spans"] = copy.deepcopy(live_rb.get("run_spans") or [])
     if live_rb and (overrides or {}).get("shape_style"):
         rb["shape_style_hash"] = live_rb.get("shape_style_hash")
         rb["shape_style"] = copy.deepcopy(live_rb.get("shape_style"))

@@ -247,6 +247,10 @@ def build_ours(pdf: Path, work: Path, base: dict, overlays: str = "last") -> dic
         m["slide_is"] = infos[m["slide_is"]]["title"] if m["slide_is"] is not None else None
     weak: dict[int, str] = {}
     keys, pairs = identity.inherit_slide_keys(base_infos, [b["key"] for b in base["slides"]], infos, moves, weak)
+    near = identity.near_misses(base_infos, infos, pairs)
+    for m in near:  # as with the moves: the report reads better with the base's key than an index
+        m["slide"] = base["slides"][m["base"]]["key"]
+        m["title"] = infos[m["ours"]]["title"]
     ekeys, fps = [], []
     for j, slide in enumerate(deck["slides"]):
         matched = [{"key": e["key"], "kind": e["kind"], "role": e.get("role"), "fingerprint": e["fingerprint"]}
@@ -256,7 +260,7 @@ def build_ours(pdf: Path, work: Path, base: dict, overlays: str = "last") -> dic
         fps.append(f)
     entries = snapshot.slide_entries(deck, work, keys, ekeys, fps)
     return {"source": pdf, "pdf": prepared.pdf, "out": work, "plan": plan, "deck": deck, "slides": entries,
-            "pairs": pairs, "label_moves": moves, "weak_pairs": weak}
+            "pairs": pairs, "label_moves": moves, "weak_pairs": weak, "near_misses": near}
 
 
 # ---------------------------------------------------------------- requests
@@ -363,16 +367,7 @@ def raw_objects(pres: dict) -> dict[str, dict]:
     return out
 
 
-def deck_attributes(style: dict, base_styles: list[dict]) -> dict:
-    """The attributes the deck set on a run: how its style differs from the closest style the
-    converter wrote into that object ({} if it is one of them)."""
-    if not base_styles or style in base_styles:
-        return {}
-    closest = min(base_styles, key=lambda b: sum(1 for k in set(b) | set(style) if b.get(k) != style.get(k)))
-    attrs = {k: v for k, v in style.items() if closest.get(k) != v and k != "link"}
-    if "weight" in attrs or "fontFamily" in attrs:
-        attrs.update({k: style[k] for k in ("fontFamily", "weight") if k in style})
-    return attrs
+deck_attributes = merge.deck_attributes   # which attributes on a run are the person's (merge decides)
 
 
 def text_containers(old: dict, new: dict) -> list[tuple[dict | None, dict | None, dict | None]]:

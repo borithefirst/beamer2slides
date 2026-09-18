@@ -340,6 +340,48 @@ def deck_style_keys(base_rb: dict, theirs_rb: dict) -> set[str]:
     return out
 
 
+def deck_attributes(style: dict, base_styles: list[dict]) -> dict:
+    """The attributes the deck set on a run: how its style differs from the closest style the
+    converter wrote into that object ({} if it is one of them)."""
+    if not base_styles or style in base_styles:
+        return {}
+    closest = min(base_styles, key=lambda b: sum(1 for k in set(b) | set(style) if b.get(k) != style.get(k)))
+    attrs = {k: v for k, v in style.items() if closest.get(k) != v and k != "link"}
+    if "weight" in attrs or "fontFamily" in attrs:
+        attrs.update({k: style[k] for k in ("fontFamily", "weight") if k in style})
+    return attrs
+
+
+def styling_lost(base_rb: dict, theirs_rb: dict, merged: str | None) -> bool:
+    """Whether re-applying the deck's run styling to the merged text would leave some of it behind.
+
+    `sync.style_range_requests` puts the person's run styles back onto *the same words* of the text
+    sync is about to write. Words the source replaced are not there to put them back onto, and a
+    word bolded in the deck whose sentence the source has since rewritten is styling that simply
+    ends. Nothing can be done about that - the words it was on are gone - but the report has to say
+    so instead of promising the styling was kept."""
+    spans, before = theirs_rb.get("run_spans"), theirs_rb.get("text") or ""
+    if not spans or merged is None or merged == before:
+        return False
+    base_styles = base_rb.get("text_styles") or []
+    was, now = tokens(before), tokens(merged)
+    at, ends = 0, []
+    for t in was:
+        at += len(t)
+        ends.append(at)
+    kept = {k for i, _, n in SequenceMatcher(None, was, now, autojunk=False).get_matching_blocks()
+            for k in range(i, i + n)}
+    for start, end, style in spans:
+        if not deck_attributes(style, base_styles):
+            continue                                        # the converter's own styling, not the person's
+        # Word by word, not letter by letter: a bolded word the source deleted is gone even when
+        # some of its letters turn up elsewhere in the new sentence.
+        on = [k for k, e in enumerate(ends) if e - len(was[k]) < end and e > start and was[k].strip()]
+        if on and not any(k in kept for k in on):
+            return True
+    return False
+
+
 def converged_fields(anchor: dict, first: dict, base_by: dict, ours_by: dict, edits: dict, theirs_rb: dict,
                      scale: float | None) -> dict | None:
     """Source fields the deck already shows: {"source": {text, size, position}, "deck": {text, geometry}}
@@ -511,6 +553,9 @@ def plan_unit(skey: str, ukey: str, base_members: list[dict] | None, ours_member
         conflicts.append({**where, "field": field, "base": base_v, "ours": ours_v, "theirs": theirs_v, "resolution": resolution})
 
     keep = False
+    # What the object will say once this unit is written: the source's new text, or the merge of it
+    # with the deck's. `styling_lost` needs it to see whether the styled words are still in there.
+    written = collapse_holes(predicted_text(first["ir"])) if first.get("kind") == "text" else None
     if "image" in edited:
         if adopt and slide_read and adopt(skey, ours_members, slide_read, main):
             # The picture in the deck is the one the source now draws (a figure pull replaced).
@@ -550,6 +595,7 @@ def plan_unit(skey: str, ukey: str, base_members: list[dict] | None, ours_member
                 for c in clashes:
                     conflict("text", c["base"], c["ours"], c["theirs"])
                 overrides["text"] = {"base": base_rb.get("text") or "", "theirs": theirs_rb.get("text") or ""}
+                written = merged
                 if merged == o:
                     report["converged"].append({**where, "field": "text", "value": theirs_rb.get("text")})
     if "text_style" in edited and not keep:
@@ -564,6 +610,11 @@ def plan_unit(skey: str, ukey: str, base_members: list[dict] | None, ours_member
             # Some words restyled (or a table): the deck's run styles go onto the same words of the
             # new text (sync.style_range_requests).
             overrides["text_style"] = {"runs": {}, "paragraphs": paras, "ranges": True}
+            if styling_lost(base_rb, theirs_rb, written):
+                # ... and some of those words are not in the new text at all. The styling on them
+                # ends here, and saying nothing would make the report claim it was kept.
+                conflict("text_style", "style", "the words it was on were replaced", "restyled in the deck",
+                         "the styling of the replaced words is gone")
             if clash:
                 conflict("text_style", "style", "restyled in the source", "restyled in the deck", "deck style re-applied")
         else:
@@ -701,6 +752,22 @@ def plan_merge(base: dict, ours: dict, theirs: dict, adopt=None) -> dict:
         else:
             report["slides"]["deleted"].append(b["key"])
             plans.append({"key": b["key"], "action": "delete", "ours": None, "base": i, "objectId": b["objectId"]})
+
+    kept_keys = {k["slide"] for k in report["slides"]["kept"]}
+    for m in ours.get("near_misses") or []:
+        # `identity.near_misses`: nothing paired these two, and nothing should have - but they say
+        # too much of the same for the author not to be told the question came up. Either the source
+        # really did write a new frame beside a dropped one, and this is noise, or one frame was
+        # changed so far in one version that sync could not follow it.
+        if m["slide"] not in kept_keys and m["slide"] not in report["slides"]["deleted"]:
+            continue    # the slide is still in the deck for another reason: nothing to report
+        where = ("the deck keeps the old slide, with your edits on it, beside the new one"
+                 if m["slide"] in kept_keys else "the old slide was untouched, so it is gone")
+        report["warnings"].append(
+            f"slide {m['slide']}: the source has no frame this slide could be matched to, and the frame "
+            f"{m['title']!r} is new - but the two say much of the same thing. If they are one frame, it was "
+            f"retitled, reworded and moved too much in one version to be followed, and {where}. Give that "
+            f"frame a label (`beamer2slides label`) and this cannot happen to it again, see docs/labels.md.")
 
     base_ids = {b.get("objectId") for b in base_slides}
     for s in theirs["slides"]:

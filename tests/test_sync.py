@@ -748,6 +748,38 @@ def test_a_slide_the_deck_moved_does_not_freeze_the_rest_of_the_order():
     assert [w for w in mplan["report"]["warnings"] if "both the source and the deck moved" in w]
 
 
+def bolded(slide, oid, word):
+    """The person bolds one word of an object, the way `tools/deck_edits.py bold` does live."""
+    rb = slide["objects"][oid]
+    at = rb["text"].index(word)
+    plain = rb["text_styles"][0]
+    rb["text_styles"] = [plain, {**plain, "bold": True}]
+    rb["run_spans"] = [[0, at, plain], [at, at + len(word), {**plain, "bold": True}],
+                       [at + len(word), len(rb["text"].rstrip("\n")), plain]]
+    rb["text_style_hash"] = "bolded"
+
+
+def test_styling_on_words_the_source_replaced_is_a_conflict_not_a_promise():
+    """Live round 404, chained: the person bolded a word of a title and the source then rewrote that
+    title. `sync.style_range_requests` puts the deck's run styles back onto the same words, and the
+    words are gone - so the bold ends there, which nothing can help. What the report may not do is
+    promise the styling was kept, and it used to: an `overrides` entry and not a word more."""
+    base = many_slides(["intro"])
+    ours, theirs = triple(base)
+    ours["slides"][0]["elements"][1] = ours_entry("text/body/0", text_ir(
+        "A wholly different sentence about something else\nSecond point of intro", (20, 60, 200, 90), "p0t1"))
+    bolded(theirs["slides"][0], "b2s_s000_t1", "First")
+    report = merge.plan_merge(base, ours, theirs)["report"]
+    (c,) = [c for c in report["conflicts"] if c["field"] == "text_style"]
+    assert c["resolution"] == "the styling of the replaced words is gone"
+    # The word survives the rewrite: the styling lands on it again, and there is nothing to report.
+    ours["slides"][0]["elements"][1] = ours_entry("text/body/0", text_ir(
+        "First point of intro, reworded\nSecond point of intro", (20, 60, 200, 90), "p0t1"))
+    quiet = merge.plan_merge(base, ours, theirs)["report"]
+    assert not [c for c in quiet["conflicts"] if c["field"] == "text_style"]
+    assert [o for o in quiet["overrides"] if "text_style" in o["fields"]]
+
+
 def test_a_slide_matched_by_its_place_alone_is_said_out_loud():
     """`identity.gap_pairs` pairs an unlabelled frame the source retitled and half rewrote by the
     two neighbours around it. Nothing is at risk - the alternative was a second slide beside this

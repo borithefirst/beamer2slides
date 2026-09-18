@@ -32,6 +32,7 @@ import copy
 import json
 import os
 import random
+import re
 import shutil
 import subprocess
 import sys
@@ -362,6 +363,24 @@ def deck_restyle(rng, base, live):
     return f"bold {oid}"
 
 
+def deck_bold_word(rng, base, live):
+    """One word of a box bolded, which is what the `ranges` re-application is for: the style goes
+    back onto that same word - if the source has not replaced it in the meantime."""
+    options = [x for x in _converter_texts(base, live)
+               if x[2]["kind"] == "text" and len(re.findall(r"\w+", x[4].get("text") or "")) > 2]
+    if not options:
+        return None
+    b, s, el, oid, rb = rng.choice(options)
+    text = rb["text"]
+    start, end = rng.choice([(m.start(), m.end()) for m in re.finditer(r"\w+", text)])
+    plain = rb["text_styles"][0] if rb["text_styles"] else {"fontFamily": "Lato", "fontSize": 18.0}
+    bold = {**plain, "bold": True}
+    rb["text_styles"] = [plain, bold]
+    rb["run_spans"] = [[0, start, plain], [start, end, bold], [end, len(text.rstrip("\n")), plain]]
+    rb["text_style_hash"] = "s-word-bold"
+    return f"bold {text[start:end]!r} in {oid}"
+
+
 def _converter_objects(base, live):
     by_id = {s["objectId"]: s for s in live["slides"]}
     out = []
@@ -497,7 +516,7 @@ def deck_ungroup(rng, base, live):
 
 
 DECK_OPS = {f.__name__[5:]: f for f in (deck_reword, deck_append, deck_delete_paragraph, deck_edit_cell, deck_move,
-                                        deck_restyle, deck_delete_object, deck_replace_image, deck_add_text_box,
+                                        deck_restyle, deck_bold_word, deck_delete_object, deck_replace_image, deck_add_text_box,
                                         deck_add_image, deck_add_slide, deck_duplicate_slide, deck_delete_slide,
                                         deck_move_slide, deck_notes, deck_background, deck_group, deck_ungroup)}
 

@@ -147,7 +147,7 @@ Z-order changes are not detected.
 | changed | unchanged | recreate the unit's objects from ours (same place in z-order and grouping) |
 | position/size only | text or style, not geometry | `move`: shift the deck's objects by the source delta - only when every member of the unit moved by the same step (`merge.unit_shift`), since sync moves the unit's top object; a formula picture the source re-placed inside its line is recreated instead |
 | changed | geometry | recreate, then re-apply the deck's transform change (`delta`: theirs · base⁻¹); if the source moved it too, the deck's position wins and it's a conflict. Only when the whole unit went with its top object (`merge.geometry_writable`): sync transforms the unit's top, so a member the person dragged on its own - a formula picture out of its line - would be put back where the converter had it, and such a unit is kept as the deck has it, with a conflict |
-| changed | text style / shape style | recreate, re-apply the deck's change: uniform over all runs → over all the text; some words (or a table) → the deck's run attributes onto the same words of the new text (character alignment, `sync.style_range_requests`); non-uniform paragraph styles → keep the deck, conflict. A conflict is reported only when the source changed the same style attributes |
+| changed | text style / shape style | recreate, re-apply the deck's change: uniform over all runs → over all the text; some words (or a table) → the deck's run attributes onto the same words of the new text (character alignment, `sync.style_range_requests`); non-uniform paragraph styles → keep the deck, conflict. A conflict is reported when the source changed the same style attributes - and when a styled word is not in the new text at all (`merge.styling_lost`): the styling of words the source replaced ends there, and the report says so rather than promising it was kept |
 | text changed | text changed | word-level diff3; clean → recreate and write the merged text; overlapping → keep the deck, conflict. In a table the diff3 runs per cell (`merge.table_merge`, applied with `cellLocation`); a row or column added on either side, or a cell holding a line break, makes the whole table a conflict |
 | text / position changed | the deck shows exactly that (same text; a move the source now reproduces within 2 pt) | `adopt`: nothing written, reported as converged; the base takes ours IR and the deck's version of those fields (e.g. after `pull`) |
 | picture file changed, same picture | anything | no change: the base takes the new hash (`snapshot.refresh_pictures`, reported as converged) |
@@ -371,6 +371,16 @@ label by name, so an AI author reading it knows what to write and where (`merge.
 `sync.py`'s `weak_pairs`, offline test
 `tests/test_sync.py::test_a_slide_matched_by_its_place_alone_is_said_out_loud`).
 
+And where every pass refuses - a frame retitled, half rewritten *and* moved has neither a label, nor
+the words, nor a place - refusing is right (the deck keeps the old slide with its edits and gains a
+new one) but silent. `identity.near_misses` pairs the leftovers off one last time, purely to be
+reported: a slide the source seems to have dropped beside a frame it seems to have written, saying
+much of the same thing. Over 2000 chained revisions (`tools/fuzz_labels.py --chain 4`) it speaks 4
+times, 3 of them about frames the pairing really did lose - and of the 4 lost frames whose slide was
+still free to be named, the fourth has not one word in common with it, so there is nothing to say.
+`NEAR_TELL` sits at 0.35: the tally is the same anywhere from 0.3 to 0.5, below that it is noise
+only, and above it the stress deck's own recast frame (0.448) would fall out.
+
 The check never spoke once in 1524 rounds whose labels nobody touched, and no round came out worse
 than before it existed. Of the broken rounds still wrong without a reorder, 35 of 36 were reported
 as a conflict and 1 passed in silence (a label pasted onto a frame added in the same version whose
@@ -449,6 +459,14 @@ hold for every sync, including the combinations nobody thought of.
   `fuzz_world.rebase` now orders the base with `sync.base_order` itself rather than with a correct
   copy of it, so the campaign catches it again if it stops doing that: putting the old rule back
   fails 54 of 1500 rounds).
+- Found by a live chained round (seed 404): a person bolded a word of a frame title and the source
+  rewrote that title two versions later. The deck's run styling goes back onto *the same words*, and
+  those words were gone - so the bold ended, while the report promised an override. Nothing can save
+  styling whose words the source deleted; what was wrong is saying nothing, so `merge.styling_lost`
+  now makes it a conflict. Finding it needed the read-back to say *which* words a style is on
+  (`snapshot.read_text` now records run spans), and the offline campaign can now reach it too: a
+  `bold_word` deck edit plus the reference applier's own opinion of what survives
+  (`fuzz_world._styling_ends`). Taking the conflict back out fails 2 of 400 offline rounds.
 - Found in the oracle itself, by a live chained round (seed 303): the person duplicated a slide, the
   source moved the original, sync moved the copy along behind it - and the slide the pair passed was
   accused of having moved unreported. Which of two slides that change places "moved" has no single

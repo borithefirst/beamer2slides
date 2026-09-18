@@ -352,7 +352,11 @@ by content, when one leftover frame explains one leftover slide and no other com
 another - and then by place (`identity.gap_pairs`, `GAP_SURE`): one slide and one frame alone
 between two neighbours that paired, the ends of the talk counting as neighbours, sharing some of
 their words - an unlabelled frame the source retitled. Sound rounds went 0.06% -> 0.00% with them:
-with the labels kept, no frame of 6809 ends up on another frame's slide.
+with the labels kept, no frame of 6809 ends up on another frame's slide. What the passes still
+refuse (a frame retitled, reworded *and* moved, with no label) is now at least reported:
+`identity.near_misses` (`NEAR_TELL`) names the dropped slide and the new frame that say much of the
+same thing, and a frame paired by place alone gets a warning asking for a label (`weak_pairs`).
+`tools/fuzz_labels.py --chain N` measures both over revisions of already-revised sources.
 `fuzz_sync` moves/renames/drops labels too; that found `sync.new_base` freezing a `gone` slide's
 entry at the moment of deletion (its label/title/words now follow the source, its key and place stay)
 and a renamed label costing a slide its identity (`align_slides.pairable` lets the content fix it
@@ -480,6 +484,13 @@ and `sync.base_order` left out the slides the deck deleted although the source s
 their base entries landed at the end and the frames after them lost their keys next time and were
 created again (fixed: a `gone` slide keeps its place in the source's order; `fuzz_world.rebase`
 orders the base with `sync.base_order` itself, so the campaign fails again if it stops).
+Live chained rounds found two more: a word bolded in the deck whose sentence the source rewrote two
+versions later lost its styling while the report promised an override - nothing can save styling
+whose words are gone, so `merge.styling_lost` makes it a conflict (`snapshot.read_text` now records
+run spans, so the read-back says *which* words a style is on; the offline campaign reaches it
+through the `bold_word` deck edit and `fuzz_world._styling_ends`, and taking the conflict out fails
+2 of 400 rounds); and the oracle itself accused a slide that two others - a moved frame and the
+copy riding behind it - had merely passed (`loss_oracle.order_findings`).
 
 ## Pitfalls found so far
 - PDFium (`pdf.py` handles these):
