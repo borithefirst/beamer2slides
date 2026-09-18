@@ -46,7 +46,17 @@ PDF destination name. No spaces, no braces, no accents, no `=` or `,`.
 **8. Do not rename `\label{}`, `\ref{}` or citation keys as a way of doing any of this.** Frame
 labels are `[label=...]` in the frame's option list; that is the only thing this system reads.
 
-**9. Reorder frames freely - with rule 1 kept.** A labelled frame is recognised wherever it lands.
+**9. On an unlabelled frame, don't replace the title and rewrite the body in the same version.**
+
+That combination is the one edit that can cost a frame its identity: with no label, a new title and
+new words, nothing on either side says it is the same frame. Sync still gets it right when the
+frame stayed where it was and kept some of its sentences (it is then the only slide and the only
+frame between two neighbours it recognises), but a frame that also moved, or that kept nothing, is
+read as a new one - the old slide stays with whatever the person wrote on it, next to the new one.
+Give the frame a label (rule 1) and none of this applies; if you cannot, make the two changes in
+two versions, so the first one is always recognisable by what the second one has not touched yet.
+
+**10. Reorder frames freely - with rule 1 kept.** A labelled frame is recognised wherever it lands.
 Frames without labels are matched by an order-keeping alignment, so two of them changing places is
 the one case the content has to settle on its own; it does when they say clearly different things,
 and when they don't (three frames called "Results" over the same table) both come back as new
@@ -128,7 +138,8 @@ back on.
 
 ## Checklist before handing back a changed source
 
-- [ ] every `\begin{frame}` has a `label=` in its options
+- [ ] every `\begin{frame}` has a `label=` in its options (and if one still has none, it did not
+      get a new title and a new body in this same version - rule 9)
 - [ ] no label appears twice (`python -m beamer2slides label main.tex` says so)
 - [ ] no label that existed before has a different value now
 - [ ] new frames have labels that have never been used in this document
