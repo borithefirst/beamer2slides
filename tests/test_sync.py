@@ -800,17 +800,23 @@ def test_letterbox_fix_stretches_to_the_box():
     assert fix["scaleY"] == pytest.approx(1) and fix["translateY"] == pytest.approx(0, abs=1)
 
 
-def test_a_base_out_of_the_sources_order_loses_the_frames_after_it():
+def test_a_base_out_of_the_sources_order_costs_the_frames_after_it():
     """Why the new base has to stay in the source's order: frames without a label are paired with
-    the base by an order-keeping alignment, so a base entry moved to the end takes the identity of
-    the frames that followed it with it - they look new, and the next sync creates them again."""
+    the base by an order-keeping alignment, and an entry moved to the end falls out of that order.
+    What a frame says can still save it (`identity.cross_pairs` picks up what the order left over),
+    but only when it says something unmistakable. Frames that talk alike have nothing to be
+    recognised by and take each other's keys - and then the sync writes one onto the other."""
     source = [info("Why decks diverge", "decks and sources drift apart over time"),
               info("The sync algorithm", "base ours theirs three way merge of the deck"),
               info("Conclusions", "thanks for listening and for the questions")]
     keys = identity.slide_keys(source)
     moved = [source[0], source[2], source[1]]  # the middle frame's entry recorded last
     got, _ = identity.inherit_slide_keys(moved, [keys[0], keys[2], keys[1]], source)
-    assert got[:2] == keys[:2] and got[2] == "title:conclusions#2" != keys[2]
+    assert got == keys
+    alike = [info(f"Results {n}", "the table below repeats the measured numbers") for n in ("one", "two", "three")]
+    akeys = identity.slide_keys(alike)
+    got, _ = identity.inherit_slide_keys([alike[0], alike[2], alike[1]], [akeys[0], akeys[2], akeys[1]], alike)
+    assert got == [akeys[0], akeys[2], akeys[1]]
 
 
 def test_a_slide_the_deck_deleted_keeps_its_place_in_the_new_base():

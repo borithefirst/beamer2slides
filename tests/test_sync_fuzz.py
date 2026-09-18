@@ -82,6 +82,28 @@ def test_a_broken_label_invariant_sends_far_fewer_slides_to_the_wrong_frame(tmp_
     assert all(r["wrong"]["now"] <= r["wrong"]["before"] for r in rounds)  # never worse than before
 
 
+def test_a_frame_the_source_moved_across_another_keeps_its_slide(tmp_path):
+    """The other half of identity, on the same tagged truth: a frame that crossed another one.
+
+    The alignment keeps the order, so of two frames that swapped only one stays in the chain; the
+    other falls out and comes back as a new frame, and the slide it was made from is read as
+    dropped - nobody's words are deleted, but the source writes them onto the slide next door.
+    `identity.cross_pairs` pairs those leftovers when the content is unmistakable. Measured over
+    3000 rounds: 5.53% -> 0.00% of the frames in sound rounds that moved one, and 19.15% -> 1.18%
+    when a label was broken in the same round. The 300 seeds here hold that where it matters."""
+    sys.path.insert(0, str(ROOT / "tools"))
+    import fuzz_labels
+
+    rounds = [fuzz_labels.round_once(seed, 0.5, tmp_path) for seed in range(300)]
+    moved = [r for r in rounds if r["reordered"]]
+    assert len(moved) >= 15, "the harness stopped moving frames, so this proves nothing"
+    assert sum(r["wrong"]["order"] for r in moved) > 0, \
+        "the order-keeping pass alone gets these right: the leftovers pass is not earning its place"
+    assert sum(r["wrong"]["now"] for r in moved) == 0, \
+        f"frames lost their slide: {[(r['seed'], r['wrong'], r['ops']) for r in moved if r['wrong']['now']]}"
+    assert all(r["wrong"]["before"] <= r["wrong"]["order"] for r in rounds)  # never worse than the order alone
+
+
 def test_the_round_notices_a_base_that_would_not_settle(tmp_path):
     """The settle check with a base broken on purpose: one that has forgotten a slide makes the next
     sync create it again, and the round has to say so."""

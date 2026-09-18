@@ -17,6 +17,8 @@ SLIDE_MATCH = 0.6     # least similarity of two unlabelled slides to be the same
 LABEL_SURE = 1.2      # a label pairing this alike (same title, most of the words) needs no second opinion
 LABEL_MOVED = 1.0     # a slide elsewhere this alike may be the frame the label used to name
 LABEL_MARGIN = 0.5    # ... but only if it beats the label's own pairing by this much
+CROSS_SURE = 1.15     # a slide this alike, left over by the order-keeping pass, is that frame moved
+CROSS_MARGIN = 0.4    # ... unless another leftover comes this close to explaining it too
 KEY_MATCH = 0.5       # least similarity for an element keeping the key it would get anyway
 ELEMENT_MATCH = 0.35  # least similarity for an element inheriting another key
 # Render output, not source: "picture" says how a bare image reached its file (raw stream or
@@ -252,7 +254,39 @@ def align_slides(base: list[dict], ours: list[dict], moves: list[dict] | None = 
             a += 1
         else:
             b += 1
+    pairs.update(cross_pairs(base, ours, pairs, pairable))
     return pairs
+
+
+def cross_pairs(base: list[dict], ours: list[dict], pairs: dict[int, int], pairable) -> dict[int, int]:
+    """The leftovers of the order-keeping pass, paired where one frame explains one slide and
+    nothing else comes close.
+
+    The alignment keeps the order, so a frame the source moved across another can't be paired by
+    it: of the two, one keeps the chain and the other falls out - read as a new frame, while the
+    slide it was made from is read as deleted. Nobody loses a word that way (a deck-edited slide is
+    kept), but the person's edits end up on a slide beside the one the source now writes, which is
+    the same harm a label pointing at the wrong frame does.
+
+    So the slides left over are matched to the frames left over, by content alone and only when the
+    content is sure: the best explanation must be good on its own (`CROSS_SURE`, the same evidence
+    the moved-label check weighs) and no other leftover may come within `CROSS_MARGIN` of it, on
+    either side. A deck of frames that all say the same thing (the stress deck's three Results)
+    pairs nothing here and is left to the order, as before."""
+    free_base = [i for i in range(len(base)) if i not in set(pairs.values())]
+    free_ours = [j for j in range(len(ours)) if j not in pairs]
+    if not free_base or not free_ours:
+        return {}
+    scores = {(j, i): _evidence(base[i], ours[j]) for j in free_ours for i in free_base if pairable(i, j)}
+    out: dict[int, int] = {}
+    for (j, i), score in sorted(scores.items(), key=lambda kv: -kv[1]):
+        if score < CROSS_SURE or j in out or i in out.values():
+            continue
+        rivals = [s for (b, a), s in scores.items() if (b == j) != (a == i) and b not in out and a not in out.values()]
+        if max(rivals, default=0.0) > score - CROSS_MARGIN:
+            continue
+        out[j] = i
+    return out
 
 
 def inherit_slide_keys(base: list[dict], base_keys: list[str], ours: list[dict],

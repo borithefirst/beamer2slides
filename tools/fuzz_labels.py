@@ -1,4 +1,4 @@
-"""How often a moved label sends a slide's identity to the wrong frame, and how often the check
+﻿"""How often a moved label sends a slide's identity to the wrong frame, and how often the check
 that catches it cries wolf (`identity.label_moves`, docs/sync.md "When a label moved").
 
 The loss oracle cannot judge this: following a label onto the wrong frame deletes nothing and
@@ -13,19 +13,24 @@ Per round it makes a deck, applies a few plausible source edits, sometimes break
 invariant (a label moved onto another frame, renamed, or dropped) and compares two pairings
 against the truth:
 
-    before      follow the label, align the rest by content (identity.align_slides(moves=[]))
-    now         the same with the moved-label check (what sync does)
+    order       neither check: follow the label, and pair the rest in order alone
+    before      the leftovers of that order paired by content too (identity.cross_pairs)
+    now         the same with the moved-label check as well (what sync does)
 
 and counts what the check said about each round: `moved` (the content decided), `unsure` (the
 label was followed and the report asks), or nothing. A false alarm is an `unsure` or `moved` in a
 round whose labels nobody touched; a miss is a frame the `now` pairing still gets wrong.
 
-Rounds that moved a frame are counted apart: a crossing reorder of frames without labels is what
-docs/sync.md lists under "Not supported yet" (the alignment keeps the order), and those misses are
-not this check's to make good.
+Rounds that moved a frame are counted apart, because a frame that crossed another has a second way
+of losing its identity: the alignment keeps the order, so one of the two falls out of it.
+`identity.cross_pairs` picks such leftovers up when the content is unmistakable (this campaign is
+what measured that: 5.53% -> 0.00% of the frames in sound rounds with a move), and what is left in
+these rows is the honest remainder - frames that moved and say too little to be told apart, which
+come back as new slides.
 """
 
 import argparse
+import contextlib
 import copy
 import random
 import shutil
@@ -48,6 +53,17 @@ PLAIN_OPS = sorted(set(SOURCE_OPS) - set(LABEL_OPS))
 def _infos(base):
     return [{"label": b.get("label"), "title": b.get("title") or "", "text": b.get("text") or "", "page": b["page"]}
             for b in base["slides"]]
+
+
+@contextlib.contextmanager
+def _order_only():
+    """The alignment without `identity.cross_pairs`: what the order-keeping pass alone can pair."""
+    sure = identity.CROSS_SURE
+    identity.CROSS_SURE = float("inf")
+    try:
+        yield
+    finally:
+        identity.CROSS_SURE = sure
 
 
 def _wrong(pairs, ours_truth, base_truth) -> int:
@@ -91,7 +107,10 @@ def round_once(seed: int, label_chance: float, tmp: Path) -> dict:
 
     base_infos, infos = _infos(base), [W.slide_info(s) for s in doc2["slides"]]
     moves = identity.label_moves(base_infos, infos)
-    pairings = {"before": identity.align_slides(base_infos, infos, moves=[]),
+    with _order_only():
+        order = identity.align_slides(base_infos, infos, moves=[])
+    pairings = {"order": order,
+                "before": identity.align_slides(base_infos, infos, moves=[]),
                 "now": identity.align_slides(base_infos, infos, moves)}
     said = "moved" if any(m["verdict"] == "moved" for m in moves) else ("unsure" if moves else "quiet")
     return {"seed": seed, "broke": broke, "said": said, "ops": done,
@@ -135,7 +154,7 @@ def main() -> int:
         if not rounds:
             continue
         print(f"{group}: {rounds} rounds, {frames[f'{group}/frames']} frames")
-        for how in ("before", "now"):
+        for how in ("order", "before", "now"):
             w = frames[f"{group}/{how}"]
             print(f"  {how:6} misidentified {w:5} frames ({100 * w / max(1, frames[f'{group}/frames']):.2f}%)")
         print("  said " + ", ".join(f"{s} in {tally[f'{group}/said:{s}']}" for s in ("moved", "unsure", "quiet")))

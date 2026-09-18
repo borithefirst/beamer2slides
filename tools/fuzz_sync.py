@@ -545,10 +545,11 @@ def _settled(doc: dict, next_base: dict | None, after: dict, tmp: Path, reordere
     next one merges against, so a base that doesn't describe the deck it just wrote would have the
     next sync rewrite those units - and a rewrite is where a person's work gets lost.
 
-    `reordered`: the source moved a frame this round. A crossing reorder of frames without labels is
-    what docs/sync.md lists under "Not supported yet" (`identity.align_slides` keeps the order), and
-    it leaves the source's frame paired with another slide, so the property can't hold. The finding
-    is still recorded, as a note rather than a failure."""
+    `reordered`: the source moved a frame this round. The alignment keeps the order, so a frame that
+    crossed another falls out of it; `identity.cross_pairs` picks it up again when the content says
+    clearly which frame it is, but frames that say too little to be told apart are what docs/sync.md
+    lists under "Not supported yet", and there the source's frame stays paired with another slide,
+    so the property can't hold. The finding is still recorded, as a note rather than a failure."""
     if next_base is None:
         return []
     again = merge.plan_merge(next_base, W.build_ours(doc, next_base, tmp), after)
