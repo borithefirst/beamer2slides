@@ -346,6 +346,23 @@ def page_background(page: dict, resolver_pages: dict[str, dict], scheme: dict) -
     return None, None
 
 
+def stash_picture(url: str, fetch, images: Path) -> dict:
+    """Download a picture into `images`, sha1-named: {file, sha1, format}, or {error}."""
+    try:
+        # contentUrl (=s2048) gives the stored picture byte for byte, as the .pptx export does;
+        # crop, transparency, rotation and outline are not baked into it (tools/probe_images.py)
+        data = fetch(url)
+        sha = hashlib.sha1(data).hexdigest()
+        fmt = image_format(data)
+        images.mkdir(parents=True, exist_ok=True)
+        path = images / f"{sha[:16]}.{FORMAT_EXT.get(fmt, 'img')}"
+        if not path.exists():
+            path.write_bytes(data)
+        return {"file": str(path), "sha1": sha, "format": fmt}
+    except OSError as e:
+        return {"error": str(e)[:120]}
+
+
 def notes_text(slide: dict) -> str | None:
     props = slide.get("slideProperties", {})
     page = props.get("notesPage", {})
@@ -461,6 +478,11 @@ def deck_ir(pres: dict, pdf_size: list[float] | None = None, base: dict | None =
         slides.append({"page": n, "frame": str(n + 1), "size": [page_w, page_h], "objectId": slide["objectId"],
                        "key": key, "notes": notes_text(slide), "background_color": color,
                        "background_picture": picture, "elements": elements})
+        if foreign and picture and fetch and images is not None:
+            # adopt draws it (a stretched picture fill is the whole page); pull never does, the
+            # source it refines already draws whatever the converter baked into it
+            got = stash_picture(picture, fetch, images)
+            slides[-1]["background_file"] = got.get("file")
     return {"version": 1, "source": {"presentationId": pres.get("presentationId"), "title": pres.get("title"),
                                      "revisionId": pres.get("revisionId")},
             "page_size": [page_w, page_h], "scale": scale, "slides": slides}
@@ -568,19 +590,7 @@ def element_of(pe: dict, m: list[float], resolver: StyleResolver, fonts: FontMap
         if source and "googleusercontent.com" not in source:
             el["source_url"] = source  # inserted by URL: maybe a bigger original than Google keeps
         if url and fetch and images is not None:
-            try:
-                # contentUrl (=s2048) gives the stored picture byte for byte, as the .pptx export does;
-                # crop, transparency, rotation and outline are not baked into it (tools/probe_images.py)
-                data = fetch(url)
-                sha = hashlib.sha1(data).hexdigest()
-                fmt = image_format(data)
-                images.mkdir(parents=True, exist_ok=True)
-                path = images / f"{sha[:16]}.{FORMAT_EXT.get(fmt, 'img')}"
-                if not path.exists():
-                    path.write_bytes(data)
-                el.update({"file": str(path), "sha1": sha, "format": fmt})
-            except OSError as e:
-                el["error"] = str(e)[:120]
+            el.update(stash_picture(url, fetch, images))
         return el
     if "table" in pe:
         rows = []

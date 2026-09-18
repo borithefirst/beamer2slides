@@ -24,7 +24,7 @@ import shutil
 from pathlib import Path
 
 from .inverse import (Context, TEXTPOS, body_style, colour_name, frame_latex, picture_block,
-                      reading_order, textblock_latex)
+                      textblock_latex)
 
 # beamer's own page sizes, by the class option that asks for them (`deck_ir.BEAMER_SIZES`).
 ASPECTS = {(453.54, 255.12): "aspectratio=169", (453.54, 283.46): "aspectratio=1610",
@@ -299,7 +299,9 @@ def slide_latex(s: dict, style_for, ctx: Context, flow: bool, tree: Path | None 
     if flow:
         return frame_latex(s, style_for, ctx)
     out = ["\\begin{frame}[plain]"]
-    for el in reading_order(s["elements"]):
+    # The deck lists a page's elements in z-order, and a textblock written later is drawn on top:
+    # in reading order a block's body panel, starting 2 pt under its title, was painted over it.
+    for el in s["elements"]:
         if el.get("role") in ("math", "icon"):
             continue                                   # part of a text line, not an element of its own
         if el["kind"] == "shape":
@@ -321,6 +323,14 @@ def slide_latex(s: dict, style_for, ctx: Context, flow: bool, tree: Path | None 
         out.append("  \\note{" + "\n\n".join(latex_escape(p) for p in s["notes"].split("\n") if p.strip()) + "}")
     out.append("\\end{frame}")
     text = "\n".join(x for x in out if x.strip()) + "\n"
+    backdrop = picture_of({"file": s.get("background_file"), "alt": "background"}, tree) \
+        if s.get("background_file") else None
+    if backdrop is not None:
+        # A stretched picture fill is the whole page under everything else, which is beamer's
+        # background canvas; the colour under it no longer shows.
+        ctx.packages.add("\\usepackage{graphicx}")
+        return ("{\\setbeamertemplate{background canvas}{\\includegraphics[width=\\paperwidth,"
+                f"height=\\paperheight]{{{backdrop.rel}}}}}\n" + text + "}\n")
     if s.get("background_color") and s["background_color"] != deck_bg:
         # The colour this one slide sits on, in a group so it ends with the frame - the same shape
         # the loop's own `background` translator writes. A deck's decoration is often a picture with

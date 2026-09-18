@@ -269,6 +269,22 @@ def test_a_picture_is_copied_into_the_tree(tmp_path):
     assert len(files) == 1, "the same picture on every slide is copied once"
 
 
+def test_a_slide_on_a_picture_is_drawn_on_it(tmp_path):
+    """A converted deck keeps its theme in each slide's background picture, and so do templates
+    that were made from one: without it a white title lands on a white page."""
+    pres = presentation()
+    pres["slides"][1]["pageProperties"]["pageBackgroundFill"] = {
+        "stretchedPictureFill": {"contentUrl": "https://example.invalid/bars.png"}}
+    png = a_png(tmp_path / "bars.png")
+    ir = deck_ir(pres, foreign=True, fetch=lambda url: png.read_bytes(), images=tmp_path / "images")
+    assert ir["slides"][1]["background_file"] and "background_file" not in ir["slides"][0]
+    assert "background_file" not in deck_ir(pres)["slides"][1], "pull reads no backdrop"
+    text = adopt.bootstrap(ir, tmp_path / "tree" / "main.tex")
+    assert text.count("{\\setbeamertemplate{background canvas}{\\includegraphics[width=\\paperwidth,"
+                      "height=\\paperheight]{figures/") == 1
+    assert (tmp_path / "tree" / "figures").is_dir()
+
+
 # ---------------------------------------------------------------- the typefaces it is written in
 
 def font_folder(tmp_path: Path, *names: str) -> Path:
