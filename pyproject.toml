@@ -14,6 +14,11 @@ dependencies = [
     "google-auth-oauthlib>=1.2",
 ]
 
+[project.optional-dependencies]
+# What the tests need beyond the package itself. pytest-xdist is what makes `-n auto` work;
+# the suite runs without it, one worker, about three times slower (tests/conftest.py).
+dev = ["pytest>=8", "pytest-xdist>=3"]
+
 [project.scripts]
 beamer2slides = "beamer2slides.__main__:main"
 
@@ -30,5 +35,6 @@ beamer2slides = ["calibration/*.json"]  # the measured font substitutes emit nee
 [tool.pytest.ini_options]
 markers = ["slides: converts decks on real Google Slides and measures the thumbnails (opt-in: python -m pytest -m slides)",
            "sync: sync and pull scenarios with simulated deck edits on real Google Slides (opt-in: python -m pytest -m sync)",
-           "inverse: pull's compile loop on source pairs and synthetic deck edits (opt-in: python -m pytest -m inverse)"]
+           "inverse: pull's compile loop on source pairs and synthetic deck edits (opt-in: python -m pytest -m inverse)",
+           "xdist_group: which -n worker a test goes to (pytest-xdist's own; declared so the suite is quiet without it)"]
 addopts = "-m \"not slides and not sync and not inverse\""

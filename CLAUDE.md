@@ -632,6 +632,11 @@ showed; `fuzz_world` also kept `children` on a group whose unit had been recreat
 
 ## Environment
 - Windows, PowerShell. Python 3.12 venv in `.venv` (`.venv\Scripts\python.exe`).
+- **Run the offline suite with `python -m pytest -q -n 12 --dist loadgroup`**: 24 s instead of 66 s
+  (816 tests). Most of the serial time is `test_invariants` extracting, classifying and rendering 53
+  PDFs, ~0.5 s each, so that is what has to spread out. How the split works and why a file is the
+  unit by default: `tests/conftest.py`. `pip install -e .[dev]` brings pytest-xdist; without it the
+  flags are unavailable and everything still runs, serially.
 - MiKTeX (pdflatex / xelatex / lualatex) for the test decks, with on-demand package install.
 - Test decks: `tests/decks/*.tex`, built by `tests/decks/build.py` into `tests/decks/out/`
   (normal and `-handout` variants).

@@ -26,11 +26,17 @@ HERE = Path(__file__).resolve().parent
 PDFS = sorted(p for p in (HERE / "decks" / "out").glob("*.pdf") if not p.stem.endswith("-handout")) + \
        sorted((HERE / "themes" / "out").glob("*/talk.pdf"))
 ALLOW = json.loads((HERE / "invariants_allow.json").read_text(encoding="utf-8"))
-CASES = [(pdf, check) for pdf in PDFS for check in checks.CHECKS]  # grouped by PDF: one conversion each
 
 
 def name(pdf: Path) -> str:
     return pdf.parent.name if pdf.stem == "talk" else pdf.stem
+
+
+# Grouped by PDF: its five checks share one conversion (`rendered`), so they run in a row - and
+# under `pytest -n N --dist loadgroup` they stay on one worker, while the decks themselves spread
+# out. The conversions are most of this file's time, so that is where the suite parallelises.
+CASES = [pytest.param(pdf, check, id=f"{name(pdf)}-{check}", marks=pytest.mark.xdist_group(name(pdf)))
+         for pdf in PDFS for check in checks.CHECKS]
 
 
 _last: dict[Path, checks.Rendered] = {}  # the PDF being checked (all of them would not fit in memory)
@@ -50,7 +56,7 @@ def test_allowlist_entries_have_reasons():
 
 
 @pytest.mark.skipif(not PDFS, reason="no test PDFs built")
-@pytest.mark.parametrize("pdf,check", CASES, ids=[f"{name(p)}-{c}" for p, c in CASES])
+@pytest.mark.parametrize("pdf,check", CASES)
 def test_invariant(pdf, check):
     r = rendered(pdf)
     deck = name(pdf)
