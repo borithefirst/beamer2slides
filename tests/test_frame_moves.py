@@ -111,6 +111,20 @@ def test_two_frames_left_over_in_one_gap_are_left_alone():
     assert identity.gap_pairs(three_base, three_ours, {0: 0, 2: 2}, lambda i, j: True) == {1: 1}
 
 
+def test_two_leftovers_that_look_alike_are_reported_though_nothing_pairs_them():
+    """A frame retitled, half rewritten *and* moved: no label, too little left for the content, no
+    gap to stand in. Every pass refuses it, rightly - and `identity.near_misses` says out loud that
+    the question came up, because the author is the only one who can answer it."""
+    base = talk()
+    ours = [info("How the merge decides", METHOD_HALF), base[0], base[2], base[3]]   # moved to the front
+    pairs = identity.align_slides(base, ours)
+    assert 0 not in pairs                                                  # nothing claims it
+    assert [(m["ours"], m["base"]) for m in identity.near_misses(base, ours, pairs)] == [(0, 1)]
+    # A frame that really is new, beside a slide the source really did drop, says nothing.
+    other = [info("Funding", "this frame is about who paid for the work and nothing else"), base[0], base[2], base[3]]
+    assert identity.near_misses(base, other, identity.align_slides(base, other)) == []
+
+
 def test_the_leftovers_obey_the_labels_too():
     """Two labels that both exist on both sides belong to two frames that both exist, so the
     leftovers are no more free to pair across them than the alignment is (`align_slides.pairable`)."""

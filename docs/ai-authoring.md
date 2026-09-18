@@ -132,7 +132,15 @@ work onto another slide.
 
 A **warning** about a label (renamed, or gone) means the content recognised the frame anyway, so
 nothing was at risk - but put the label back to what it was, or the next edit has nothing to fall
-back on.
+back on. Two more warnings say the same thing about a frame with no label at all:
+
+- *"matched by where it stands, between the frames around it"* - the frame kept its slide, but only
+  its neighbours identified it. Give it a label (rule 1) before you touch it again.
+- *"the source has no frame this slide could be matched to, and the frame X is new - but the two say
+  much of the same thing"* - sync could not follow that frame at all and made a new slide for it,
+  and the old one is still in the deck. Read the two and decide: if they are one frame, say so in
+  your reply (a person may want to move the edits over) and give it a label now; if they are not,
+  there is nothing to do.
 
 ---
 

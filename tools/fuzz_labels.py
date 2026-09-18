@@ -82,47 +82,61 @@ def _wrong(pairs, ours_truth, base_truth) -> int:
     return wrong
 
 
-def round_once(seed: int, label_chance: float, tmp: Path) -> dict:
+def round_once(seed: int, label_chance: float, tmp: Path, chain: int = 1) -> list[dict]:
+    """One deck, `chain` revisions of it in a row. Each revision is measured against the one before
+    it - which is what sync does, and what a talk revised over a term looks like: the second version
+    is not edited from the pristine deck but from a source already reworded, reordered and retitled,
+    with titles that carry two rounds of amendments and frames whose text has drifted twice."""
     rng = random.Random(seed)
     doc = W.make_doc(rng, tmp)
     for i, s in enumerate(doc["slides"]):
         s["truth"] = f"t{i}"                      # what frame this really is, whatever its label
-    base = W.build_base(doc, tmp)
-    base_truth = [s["truth"] for s in doc["slides"]]
+    fresh = len(doc["slides"])
+    steps = []
+    for step in range(chain):
+        base = W.build_base(doc, tmp)
+        base_truth = [s["truth"] for s in doc["slides"]]
 
-    doc2 = copy.deepcopy(doc)
-    revision = rng.random() < 0.25   # the whole talk revised at once, every title amended
-    ops = [rng.choice(PLAIN_OPS) for _ in range(rng.randint(0, 3))]
-    broke = rng.random() < label_chance
-    if broke:
-        ops.insert(rng.randint(0, len(ops)), rng.choice(LABEL_OPS))
-    done = []
-    for k, name in enumerate(ops):
-        fn = SOURCE_OPS[name]
-        r = random.Random(seed * 7919 + k)
-        got = fn(r, doc2, tmp) if name == "repaint" else fn(r, doc2)
-        done.append(f"{name}: {got}")
-        if got is None and name in LABEL_OPS:
-            broke = False                          # nothing to move: the invariant still holds
-    if revision:
+        doc2 = copy.deepcopy(doc)
+        revision = rng.random() < 0.25   # the whole talk revised at once, every title amended
+        ops = [rng.choice(PLAIN_OPS) for _ in range(rng.randint(0, 3))]
+        broke = rng.random() < label_chance
+        if broke:
+            ops.insert(rng.randint(0, len(ops)), rng.choice(LABEL_OPS))
+        done = []
+        for k, name in enumerate(ops):
+            fn = SOURCE_OPS[name]
+            r = random.Random(seed * 7919 + 101 * step + k)
+            got = fn(r, doc2, tmp) if name == "repaint" else fn(r, doc2)
+            done.append(f"{name}: {got}")
+            if got is None and name in LABEL_OPS:
+                broke = False                      # nothing to move: the invariant still holds
+        if revision:
+            for s in doc2["slides"]:
+                s["title"] += " v2"
+                s["elements"][0]["paragraphs"] = [{**s["elements"][0]["paragraphs"][0], "runs": [W.run(s["title"])]}]
+            done.append("revision: every title amended")
+        ours_truth = [s.get("truth") for s in doc2["slides"]]
+
+        base_infos, infos = _infos(base), [W.slide_info(s) for s in doc2["slides"]]
+        moves = identity.label_moves(base_infos, infos)
+        with _order_only():
+            order = identity.align_slides(base_infos, infos, moves=[])
+        pairings = {"order": order,
+                    "before": identity.align_slides(base_infos, infos, moves=[]),
+                    "now": identity.align_slides(base_infos, infos, moves)}
+        said = "moved" if any(m["verdict"] == "moved" for m in moves) else ("unsure" if moves else "quiet")
+        steps.append({"seed": seed, "step": step, "broke": broke, "said": said, "ops": done,
+                      "reordered": any(line.startswith("move_slide") and not line.endswith("None") for line in done),
+                      "wrong": {k: _wrong(p, ours_truth, base_truth) for k, p in pairings.items()},
+                      "frames": len(ours_truth)})
+        # A frame the source wrote in this revision is a frame in its own right for the next one.
         for s in doc2["slides"]:
-            s["title"] += " v2"
-            s["elements"][0]["paragraphs"] = [{**s["elements"][0]["paragraphs"][0], "runs": [W.run(s["title"])]}]
-        done.append("revision: every title amended")
-    ours_truth = [s.get("truth") for s in doc2["slides"]]
-
-    base_infos, infos = _infos(base), [W.slide_info(s) for s in doc2["slides"]]
-    moves = identity.label_moves(base_infos, infos)
-    with _order_only():
-        order = identity.align_slides(base_infos, infos, moves=[])
-    pairings = {"order": order,
-                "before": identity.align_slides(base_infos, infos, moves=[]),
-                "now": identity.align_slides(base_infos, infos, moves)}
-    said = "moved" if any(m["verdict"] == "moved" for m in moves) else ("unsure" if moves else "quiet")
-    return {"seed": seed, "broke": broke, "said": said, "ops": done,
-            "reordered": any(line.startswith("move_slide") and not line.endswith("None") for line in done),
-            "wrong": {k: _wrong(p, ours_truth, base_truth) for k, p in pairings.items()},
-            "frames": len(ours_truth)}
+            if "truth" not in s:
+                s["truth"] = f"t{fresh}"
+                fresh += 1
+        doc = doc2
+    return steps
 
 
 def main() -> int:
@@ -131,6 +145,7 @@ def main() -> int:
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--label-chance", type=float, default=0.5, help="rounds that break the invariant")
     ap.add_argument("--show", type=int, default=5, help="worst rounds to print")
+    ap.add_argument("--chain", type=int, default=1, help="revisions per round, each measured against the last")
     args = ap.parse_args()
 
     tmp = Path(tempfile.mkdtemp(prefix="b2s-labels-"))
@@ -139,19 +154,19 @@ def main() -> int:
     worst = []
     try:
         for n in range(args.rounds):
-            r = round_once(args.seed + n, args.label_chance, tmp)
-            group = ("broken" if r["broke"] else "sound") + (", frame moved" if r["reordered"] else "")
-            tally[f"{group}/rounds"] += 1
-            tally[f"{group}/said:{r['said']}"] += 1
-            for how, w in r["wrong"].items():
-                frames[f"{group}/{how}"] += w
-            frames[f"{group}/frames"] += r["frames"]
-            if r["wrong"]["now"]:
-                tally[f"{group}/{'silent' if r['said'] == 'quiet' else 'said so'}"] += 1
-            if r["wrong"]["now"] > r["wrong"]["before"]:
-                tally[f"{group}/worse"] += 1
-            if r["wrong"]["now"] or (not r["broke"] and r["said"] != "quiet"):
-                worst.append(r)
+            for r in round_once(args.seed + n, args.label_chance, tmp, args.chain):
+                group = ("broken" if r["broke"] else "sound") + (", frame moved" if r["reordered"] else "")
+                tally[f"{group}/rounds"] += 1
+                tally[f"{group}/said:{r['said']}"] += 1
+                for how, w in r["wrong"].items():
+                    frames[f"{group}/{how}"] += w
+                frames[f"{group}/frames"] += r["frames"]
+                if r["wrong"]["now"]:
+                    tally[f"{group}/{'silent' if r['said'] == 'quiet' else 'said so'}"] += 1
+                if r["wrong"]["now"] > r["wrong"]["before"]:
+                    tally[f"{group}/worse"] += 1
+                if r["wrong"]["now"] or (not r["broke"] and r["said"] != "quiet"):
+                    worst.append(r)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -169,7 +184,7 @@ def main() -> int:
     if worst:
         print(f"\n{len(worst)} round(s) left wrong or noisy:")
         for r in worst[:args.show]:
-            print(f"  seed {r['seed']} broke={r['broke']} said={r['said']} wrong={r['wrong']}")
+            print(f"  seed {r['seed']} step {r['step']} broke={r['broke']} said={r['said']} wrong={r['wrong']}")
             for line in r["ops"]:
                 print(f"      {line}")
     return 0

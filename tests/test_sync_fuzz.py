@@ -68,7 +68,7 @@ def test_a_broken_label_invariant_sends_far_fewer_slides_to_the_wrong_frame(tmp_
     sys.path.insert(0, str(ROOT / "tools"))
     import fuzz_labels
 
-    rounds = [fuzz_labels.round_once(seed, 0.5, tmp_path) for seed in range(100)]
+    rounds = [r for seed in range(100) for r in fuzz_labels.round_once(seed, 0.5, tmp_path)]
     sound = [r for r in rounds if not r["broke"]]
     broken = [r for r in rounds if r["broke"] and not r["reordered"]]
     assert len(sound) > 30 and len(broken) > 30  # the harness really does break labels, and not always
@@ -96,7 +96,7 @@ def test_a_frame_the_source_moved_across_another_keeps_its_slide(tmp_path):
     sys.path.insert(0, str(ROOT / "tools"))
     import fuzz_labels
 
-    rounds = [fuzz_labels.round_once(seed, 0.5, tmp_path) for seed in range(300)]
+    rounds = [r for seed in range(300) for r in fuzz_labels.round_once(seed, 0.5, tmp_path)]
     moved = [r for r in rounds if r["reordered"]]
     assert len(moved) >= 15, "the harness stopped moving frames, so this proves nothing"
     assert sum(r["wrong"]["order"] for r in moved) > 0, \

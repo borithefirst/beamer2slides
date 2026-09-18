@@ -44,6 +44,8 @@ has the numbers. Neither will guess: two frames that changed places and say much
 come back as new slides, because the alternative is writing one frame's words onto the other's
 slide, under somebody's edits. And when the place is all that was left to go on, the report says so
 in a warning naming the slide: read it as "this one is down to its last hook, give it a label".
+When even that is gone - a frame retitled, reworded and moved in one version - the report names the
+two halves it could not join: the slide the deck still has, and the frame that came back as new.
 
 So: **give every frame a label of its own, and never change one.**
 

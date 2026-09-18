@@ -20,6 +20,7 @@ LABEL_MARGIN = 0.5    # ... but only if it beats the label's own pairing by this
 CROSS_SURE = 1.15     # a slide this alike, left over by the order-keeping pass, is that frame moved
 CROSS_MARGIN = 0.4    # ... unless another leftover comes this close to explaining it too
 GAP_SURE = 0.3        # the only leftover between two paired frames needs this much of the same words
+NEAR_TELL = 0.35      # leftovers this alike are worth a word in the report, though nothing pairs them
 KEY_MATCH = 0.5       # least similarity for an element keeping the key it would get anyway
 ELEMENT_MATCH = 0.35  # least similarity for an element inheriting another key
 # Render output, not source: "picture" says how a bare image reached its file (raw stream or
@@ -333,6 +334,34 @@ def gap_pairs(base: list[dict], ours: list[dict], pairs: dict[int, int], pairabl
         j, i = here[0], there[0]
         if pairable(i, j) and _evidence(base[i], ours[j]) >= GAP_SURE:
             out[j] = i
+    return out
+
+
+def near_misses(base: list[dict], ours: list[dict], pairs: dict[int, int]) -> list[dict]:
+    """A frame the source seems to have written and a slide it seems to have dropped that look like
+    each other - not enough for any pass above to pair them, enough that a person would ask.
+
+    Every pass here refuses to guess, and refusing leaves a deck with the old slide (the person's
+    edits still on it) beside a new one carrying the frame's new words. Nothing is lost, and that is
+    the point of refusing - but if the two really are one frame, the author is the only one who can
+    say so, and nobody told them the question was asked. So the leftovers on both sides are paired
+    off by content one last time, purely to be reported: `NEAR_TELL` is low on purpose, well under
+    every threshold that decides anything, because a warning that costs a sentence should fire
+    while the evidence is still weak. What it must not do is fire at a genuinely new frame beside a
+    genuinely dropped one, and that is measured (`tools/fuzz_labels.py --chain`): over 2000 chained
+    revisions it speaks 4 times, 3 of them about frames the pairing really did lose - and of the 4
+    lost frames whose slide was still free to be named, the fourth shares not one word with it, so
+    there is nothing to say. Anywhere from 0.3 to 0.5 gives that same tally; below 0.3 it is noise
+    only, and above it the stress deck's own retitled-and-half-rewritten frame (0.448) falls out."""
+    free_base = [i for i in range(len(base)) if i not in set(pairs.values())]
+    out = []
+    for j in range(len(ours)):
+        if j in pairs or not free_base:
+            continue
+        score, i = max((_evidence(base[i], ours[j]), i) for i in free_base)
+        if score >= NEAR_TELL:
+            out.append({"ours": j, "base": i, "evidence": round(score, 3)})
+            free_base.remove(i)     # one slide can only be one frame
     return out
 
 
