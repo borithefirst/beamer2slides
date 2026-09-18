@@ -711,6 +711,9 @@ keys, named ranges), `doc_merge.py` (pure planning), `doc_sync.py` (the commands
   - Shadings are page objects of their own (type 4), usually inside form XObjects; their box
     is the clip. Images and shadings are both `images` in raw.json.
   - A ligature glyph comes back as several characters at the same origin: merged into one.
+  - A hyphen ending a line (TeX's hyphenation, or an explicit hyphen followed by a word) comes back
+    from the text page as U+0002 (`FPDFText_IsHyphen`): the backend gives "-" back, so classify's
+    line join can drop it again (test frame "Hyphenation" in `14_misc`).
   - The text page reorders text objects on a line; chars are sorted back into content order
     (big operators' limits, accents).
   - pypdfium2's `get_cropbox` falls back to Letter when the box is inherited:

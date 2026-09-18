@@ -256,7 +256,9 @@ class Page:
             font = R.FPDFTextObj_GetFont(obj) if obj else None
             font_id, name, ascent, descent = self._font(font, tp, i, fonts, name_buf, flags)
             text = chr(u)
-            if u == 0 or R.FPDFText_HasUnicodeMapError(tp, i) and name != "Type3":
+            if R.FPDFText_IsHyphen(tp, i):
+                text = "-"  # a hyphen ending a line: the text page reports it as U+0002
+            elif u == 0 or R.FPDFText_HasUnicodeMapError(tp, i) and name != "Type3":
                 text = chr(0xFFFD)  # no Unicode for the glyph (TeX math extension fonts): not its character code
             R.FPDFText_GetCharOrigin(tp, i, x, y)
             R.FPDFText_GetLooseCharBox(tp, i, loose)

@@ -183,6 +183,17 @@ def test_lettered_labels_and_title_breaks():
     assert ball_labels(slide) == ["a)", "b)", "1", "2"]  # then an inner numbered list
 
 
+def test_words_hyphenated_at_line_ends_are_whole_again():
+    """A justified \\parbox narrower than the frame: the hyphens TeX added at line ends go (the
+    text page used to hand them over as U+0002, which the join never recognised), and the short
+    last line stays in its paragraph - the column's edge is where its lines end, not the frame's."""
+    slide = next(s for s in deck("14_misc")["slides"]
+                 if any(paragraph_text(p) == "Hyphenation" for e in texts(s) for p in e["paragraphs"]))
+    paras = [paragraph_text(p) for e in texts(slide) for p in e["paragraphs"] if "Justified" in paragraph_text(p)]
+    assert paras == ["Justified paragraphs hyphenate: extraordinarily incomprehensible characteristics of "
+                     "typesetting in narrow columns, demonstrably."]
+
+
 def test_icon_font_glyphs_are_pictures():
     slide = deck("12_metropolis_talk")["slides"][4]
     assert kinds(slide).count("image") == 1  # \ccbysa

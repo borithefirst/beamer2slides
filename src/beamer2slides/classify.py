@@ -1259,7 +1259,11 @@ class PageClassifier:
         if left:
             # TeX would have pulled the next word up if it fitted: then this is a new paragraph.
             col_right = max([l.x1 for l in par.lines] + [line.x1])
-            if not self.has_side_content(last, line):
+            edges = [l.x1 for l in par.lines]
+            # Lines already justified to one edge say where the column ends (a \parbox or
+            # minipage narrower than the frame, with nothing beside it).
+            justified = len(edges) >= 2 and max(edges) - min(edges) <= 1.5
+            if not self.has_side_content(last, line) and not justified:
                 # Full-width text: beamer's margins are symmetric, so the text block ends
                 # where the left margin mirrors. Short paragraphs never reach col_right.
                 col_right = max(col_right, self.W - self.text_margin)

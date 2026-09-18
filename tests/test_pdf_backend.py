@@ -96,6 +96,7 @@ def check_page(page):
         assert ch.box == pytest.approx(char_box(*ch.origin, *ch.dir, ch.advance, ch.size, ch.ascent, ch.descent))
         assert 0 <= ch.color <= 0xFFFFFF and ch.ascent > 0 >= ch.descent and not ch.synthetic
         assert not any("\ud800" <= u <= "\udfff" for u in ch.c)
+        assert not any(u < " " for u in ch.c), f"a control character {ch.c!r}"
     drawn = [ch.obj for ch in chars if ch.obj != NO_OBJECT]
     assert drawn == sorted(drawn), "characters in content order"
     single = [ch for ch in chars if len(ch.c) == 1][:50]
@@ -115,6 +116,27 @@ def check_page(page):
         assert page.embedded_image(text) is None
     for link in page.links():
         assert ("page" in link) != ("uri" in link) and len(link["bbox"]) == 4
+
+
+MISC = OUT / "14_misc.pdf"                # its "Hyphenation" frame breaks words at line ends
+
+
+@pytest.mark.skipif(not MISC.exists(), reason="no test PDFs built")
+def test_a_hyphen_ending_a_line_is_a_hyphen(backend):
+    """PDFium's text page marks a hyphen that ends a line and reports it as U+0002: the hyphen
+    the page shows must come back, not a control character in the middle of a word."""
+    doc = backend.open(MISC)
+    try:
+        page = next(p for p in doc if "".join(c.c for c in p.chars()).startswith("Hyphenation"))
+        chars = page.chars()
+        lines: dict[int, str] = {}
+        for ch in chars:
+            lines[round(ch.origin[1])] = lines.get(round(ch.origin[1]), "") + ch.c
+        broken = [s for s in lines.values() if s.endswith("-")]
+        assert len(broken) >= 3, lines
+        check_page(page)
+    finally:
+        doc.close()
 
 
 @built
