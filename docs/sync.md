@@ -48,7 +48,14 @@ storage), `merge.py` (pure planning and diff3), `sync.py` (requests and the writ
   ends of the talk counting as neighbours - are the same frame if they still share some words
   (`GAP_SURE`), which is what saves an unlabelled frame whose title the source replaced, while a
   frame deleted and another written where it stood share the place and not the words, and stay
-  apart. Unpaired ours slides get fresh keys.
+  apart. The two passes run one after the other, the second seeing only what the first left over,
+  and neither may take a slide that is already paired: one slide belongs to one frame. (Written as
+  one tuple of two calls they were handed the same leftovers and both claimed the same slide -
+  `cross_pairs` recognising a moved frame by its words, `gap_pairs` giving the frame that took its
+  place the same slide - and two frames came out carrying one key. Sync then wrote both frames onto
+  that one slide, the other slide's picture was gone and the report said no slide had been created.
+  Offline fuzz seed 5521, `tests/test_frame_moves.py::test_the_two_leftover_passes_cannot_both_claim_the_same_slide`.)
+  Unpaired ours slides get fresh keys.
   One label can name several slides - `--overlays all` gives a slide per step of a labelled frame,
   and a source may reuse a label - and then the n-th slide of that label pairs with the n-th in the
   base (`identity.align_slides`). Pairing them all with one base slide used to leave its siblings
@@ -455,6 +462,18 @@ hold for every sync, including the combinations nobody thought of.
 - `tests/test_sync_fuzz.py` runs fixed offline seeds in the default suite (a second) and proves the
   oracle catches losses injected on purpose; the live campaign is marked `sync`
   (`B2S_FUZZ_LIVE_ROUNDS`, `B2S_FUZZ_ROUNDS`).
+- **Both sides on the same text** is the shape every merge rule is about, and drawing each side's
+  target at random made it a rarity: 5 text overrides in 200 rounds, and never once a table. The
+  source op `collide` (drawn on top of the others, 2 rounds in 5) changes exactly what the person
+  has just changed - reword, append, drop a paragraph, rewrite a cell - which is what a real deck
+  looks like: the author revises the frame the reader was reading. That took it to 56 overrides and
+  10 tables in the same 200 rounds, and found the two-frames-one-key pairing bug in the first 600
+  chained rounds it ran.
+- The read-backs the campaign builds must be read-backs the API could hand back. A person's edit
+  moves the run styling with the words around it, so `fuzz_sync._retext` re-maps `run_spans`
+  whenever a deck edit changes a text; leaving them at their old indices had them covering letters
+  in the middle of words nobody styled, and the campaign then accused `merge.styling_lost` of
+  losing styling that was never where the spans said it was (seed 2194).
 - Each round also checks that the sync **settles**: replanning against the base the round recorded,
   with the same source, must write nothing - a base that doesn't describe the deck it just wrote
   makes the next sync rewrite units, and a rewrite is where work gets lost.
@@ -503,7 +522,9 @@ hold for every sync, including the combinations nobody thought of.
   send, with Slides' rules about indices, and checks they write the merged text. Taking the fix back
   out fails offline seed 399 of 400 with the same sentence the API said live. The strictness is in
   `tests/slides_sim.py` and in `test_sync.py`'s applier too, so no offline replay can pass a batch
-  Google would throw out.
+  Google would throw out. A table's cells are checked the same way, cell by cell as sync writes them
+  (`_writable_cells`): a cell can't hit the final newline - its text is one line - but a request
+  builder that writes the wrong cell text is caught in 10 rounds of 200.
 - Found in the harness by the same campaign (seed 607): a round that ungroups a figure and then syncs
   a source that *retitles every frame* was accused of the group its own edit had dissolved. The
   excuse (`integrity(allow_ungrouped=...)`) named the slide by the title the edit used, and the sync

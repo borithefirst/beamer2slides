@@ -40,6 +40,7 @@ import tempfile
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+from difflib import SequenceMatcher
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -258,6 +259,59 @@ def src_drop_label(rng, doc):
     return f"drop label {was!r}"
 
 
+def src_edit_cell(rng, doc):
+    options = [e for s in doc["slides"] for e in s["elements"] if e["kind"] == "table"]
+    if not options:
+        return None
+    el = rng.choice(options)
+    r, c = rng.randrange(len(el["cells"])), rng.randrange(len(el["cells"][0]))
+    el["cells"][r][c] = [W.run(rng.choice(W.WORDS) + "-ours")]
+    return f"rewrite cell {r},{c} of {el['id']}"
+
+
+def _deck_edited_ir_ids(base, live) -> list[str]:
+    """The ids of the source elements whose text the person has just changed in the deck."""
+    out = []
+    for b, s, el, oid, rb in _converter_texts(base, live):
+        if (rb.get("text") or "") != ((el.get("readback", {}).get(oid) or {}).get("text") or ""):
+            out.append(el["id"])
+    return out
+
+
+def src_collide(rng, doc, touched=()):
+    """Change exactly what the person has just changed in the deck. Two sides on the same text is
+    what every rule in `merge.plan_unit` is about, and drawing both sides' targets at random makes
+    it a rarity: 5 text overrides in 200 offline rounds before this, and never once a table, so the
+    campaign was barely exercising the merge it exists to test. A real deck is not random either -
+    the author revises the frame the reader was reading."""
+    ids = set(touched)
+    els = [e for s in doc["slides"] for e in s["elements"] if e["id"] in ids]
+    if not els:
+        return None
+    el = rng.choice(els)
+    if el["kind"] == "table":
+        r, c = rng.randrange(len(el["cells"])), rng.randrange(len(el["cells"][0]))
+        el["cells"][r][c] = [W.run(rng.choice(W.WORDS) + "-ours")]
+        return f"also rewrite cell {r},{c} of {el['id']}"
+    how = rng.choice(("reword", "append", "drop") if len(el["paragraphs"]) > 1 else ("reword", "append"))
+    if how == "drop":                     # (the shape live seeds 608/616 died on, from the other side)
+        el["paragraphs"].pop(rng.randrange(len(el["paragraphs"])))
+        el["bbox"][3] -= 12
+    elif how == "append":
+        p = copy.deepcopy(el["paragraphs"][-1])
+        p["runs"] = [W.run("and the source adds " + rng.choice(W.WORDS))]
+        el["paragraphs"].append(p)
+        el["bbox"][3] += 12
+    else:
+        p = rng.choice(el["paragraphs"])
+        words = p["runs"][0]["text"].split()
+        if not words:
+            return None
+        words[rng.randrange(len(words))] = rng.choice(W.WORDS) + "-ours"
+        p["runs"][0]["text"] = " ".join(words)
+    return f"also {how} {el['id']}"
+
+
 def _renumber(doc):
     for i, s in enumerate(doc["slides"]):
         s["page"] = i
@@ -267,7 +321,8 @@ SOURCE_OPS = {f.__name__[4:]: f for f in (src_reword, src_add_paragraph, src_rem
                                           src_resize_element, src_restyle, src_add_element, src_delete_element,
                                           src_add_slide, src_delete_slide, src_move_slide, src_retitle,
                                           src_amend_title, src_notes, src_background, src_repaint,
-                                          src_move_label, src_rename_label, src_drop_label)}
+                                          src_move_label, src_rename_label, src_drop_label,
+                                          src_edit_cell, src_collide)}
 
 
 # ---------------------------------------------------------------- deck edits (offline)
@@ -292,6 +347,27 @@ def _bump(rb, dx, dy):
     rb["transform"] = rb["transform"][:4] + [rb["transform"][4] + dx, rb["transform"][5] + dy]
 
 
+def _retext(rb, text):
+    """A read-back's text changed the way a person changes it in Slides: the run styling moves with
+    the words around the edit. Leaving `run_spans` at their old indices makes a read-back no API
+    could hand back - the spans then cover letters in the middle of words nobody styled - and the
+    campaign duly accused `merge.styling_lost` of losing styling that was never where the spans
+    said it was (offline seed 2194: bold on "picture", the deck rewording an earlier word, and the
+    stale span landing inside "colleague-theirs")."""
+    was, rb["text"] = rb.get("text") or "", text
+    if not rb.get("run_spans"):
+        return
+    at = {}                                  # old index -> new index, at the edit boundaries
+    for tag, i1, i2, j1, j2 in SequenceMatcher(None, was, text, autojunk=False).get_opcodes():
+        at[i1], at[i2] = j1, j2
+
+    def move(i):
+        k = max((x for x in at if x <= i), default=0)
+        return max(0, min(at.get(k, 0) + (i - k), len(text)))
+
+    rb["run_spans"] = [[move(s), move(e), style] for s, e, style in rb["run_spans"] if move(e) > move(s)]
+
+
 def deck_reword(rng, base, live):
     options = [x for x in _converter_texts(base, live) if x[2]["kind"] == "text"]
     if not options:
@@ -304,7 +380,7 @@ def deck_reword(rng, base, live):
     words = line.split()
     i = rng.randrange(len(words))
     words[i] = rng.choice(W.WORDS) + "-theirs"
-    rb["text"] = (rb["text"] or "").replace(line, " ".join(words), 1)
+    _retext(rb, (rb["text"] or "").replace(line, " ".join(words), 1))
     return f"reword {oid}"
 
 
@@ -313,7 +389,7 @@ def deck_append(rng, base, live):
     if not options:
         return None
     b, s, el, oid, rb = rng.choice(options)
-    rb["text"] = (rb["text"] or "").rstrip("\n") + " typed by a person.\n"
+    _retext(rb, (rb["text"] or "").rstrip("\n") + " typed by a person.\n")
     return f"append to {oid}"
 
 
@@ -325,7 +401,7 @@ def deck_delete_paragraph(rng, base, live):
     b, s, el, oid, rb = rng.choice(options)
     lines = [l for l in (rb["text"] or "").split("\n") if l.strip()]
     lines.pop(rng.randrange(len(lines)))
-    rb["text"] = "\n".join(lines) + "\n"
+    _retext(rb, "\n".join(lines) + "\n")
     return f"delete a paragraph of {oid}"
 
 
@@ -336,7 +412,7 @@ def deck_edit_cell(rng, base, live):
     b, s, el, oid, rb = rng.choice(options)
     rows = [r.split("\t") for r in rb["text"].split("\n")]
     rows[rng.randrange(len(rows))][rng.randrange(len(rows[0]))] = rng.choice(W.WORDS) + "-theirs"
-    rb["text"] = "\n".join("\t".join(r) for r in rows)
+    _retext(rb, "\n".join("\t".join(r) for r in rows))
     return f"edit a cell of {oid}"
 
 
@@ -539,10 +615,12 @@ def _sync_step(seed: int, step: int, doc: dict, base: dict, live: dict, tmp: Pat
         W._drop_lonely_groups(s)  # (Slides drops a group an edit left with one child)
     doc2 = copy.deepcopy(doc)
     applied_src = []
+    touched = _deck_edited_ir_ids(base, live)   # what the person just edited, for `collide`
     for k, name in enumerate(source_ops):
         fn = SOURCE_OPS[name]
         r = random.Random(seed * 2003 + 101 * step + k)
-        done = fn(r, doc2, tmp) if name == "repaint" else fn(r, doc2)
+        extra = {"repaint": (tmp,), "collide": (touched,)}.get(name, ())
+        done = fn(r, doc2, *extra)
         applied_src.append(f"{name}: {done}" if done else f"{name}: (not applicable)")
     ours = W.build_ours(doc2, base, tmp)
     mplan = merge.plan_merge(base, ours, live)
@@ -580,6 +658,38 @@ def _apply_text_requests(current: str, reqs: list[dict]) -> str:
     return "".join(units)
 
 
+def _writable_cells(skey: str, ekey: str, ir: dict, current: str, ov: dict) -> list[dict]:
+    """The same for a table: sync writes a cell at a time, each cell's text ending on the newline
+    Slides keeps (`sync.Sync.override_requests`), so every cell is its own little text with the
+    same arithmetic - and a cell emptied to nothing is exactly the shape that kills a batch."""
+    if ir.get("kind") != "table" or not ir.get("cells"):   # the source made it something else
+        return []
+    dims = [len(ir["cells"]), len(ir["cells"][0])]
+    cells = merge.table_merge(ov["base"], current, ov["theirs"], dims, ov.get("dims"))
+    grid = merge.table_grid(current, dims)
+    if cells is None or grid is None:
+        return []
+    out = []
+    for r, (crow, mrow) in enumerate(zip(grid, cells[0])):
+        for c, (now_cell, want) in enumerate(zip(crow, mrow)):
+            if want == now_cell:
+                continue
+            loc = {"rowIndex": r, "columnIndex": c}
+            try:
+                written = _apply_text_requests(
+                    now_cell + "\n", merge.text_edit_requests("oid", now_cell + "\n", want + "\n", loc))
+            except ValueError as e:
+                out.append(loss_oracle.finding("unwritable_text", "report",
+                                               f"Slides refuses the edit of cell {r},{c}: {e}",
+                                               slide=skey, element=ekey))
+                continue
+            if written != want + "\n":
+                out.append(loss_oracle.finding("unwritable_text", "report",
+                                               f"the requests write {written!r} into cell {r},{c}, "
+                                               f"not the merged {want + chr(10)!r}", slide=skey, element=ekey))
+    return out
+
+
 def _writable(ours: dict, mplan: dict) -> list[dict]:
     """Every text the deck keeps must be writable as requests. The plan says *what* the merged text
     is; `sync.Sync.override_requests` turns it into deleteText / insertText against the element the
@@ -595,10 +705,14 @@ def _writable(ours: dict, mplan: dict) -> list[dict]:
         els = {e["key"]: e for e in ours["slides"][p["ours"]]["elements"]}
         for u in p["units"]:
             ov = (u.get("overrides") or {}).get("text")
-            if u["action"] != "recreate" or not ov or ov.get("table") or u["key"] not in els:
+            if u["action"] != "recreate" or not ov or u["key"] not in els:
                 continue
-            current = W.element_text(els[u["key"]]["ir"])
+            ir = els[u["key"]]["ir"]
+            current = W.element_text(ir)
             if current is None:
+                continue
+            if ov.get("table"):
+                out += _writable_cells(p["key"], u["key"], ir, current, ov)
                 continue
             current = current if current.endswith("\n") else current + "\n"   # as Slides reads it back
             merged, _, safe = merge.text_merge(ov["base"], current, ov["theirs"])
@@ -649,6 +763,8 @@ def _draw(rng: random.Random, deck_ops, source_ops):
         deck_ops = [rng.choice(sorted(DECK_OPS)) for _ in range(rng.randint(MIN_EDITS, MAX_EDITS))]
     if source_ops is None:
         source_ops = [rng.choice(sorted(SOURCE_OPS)) for _ in range(rng.randint(1, 4))]
+        if rng.random() < 0.4:
+            source_ops.append("collide")   # worth more than any other draw (see `src_collide`)
     return list(deck_ops), list(source_ops)
 
 

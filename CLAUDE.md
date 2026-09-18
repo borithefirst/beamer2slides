@@ -357,8 +357,12 @@ by content, when one leftover frame explains one leftover slide and no other com
 (`identity.cross_pairs`, `CROSS_SURE`/`CROSS_MARGIN`) - that is a frame the source moved across
 another - and then by place (`identity.gap_pairs`, `GAP_SURE`): one slide and one frame alone
 between two neighbours that paired, the ends of the talk counting as neighbours, sharing some of
-their words - an unlabelled frame the source retitled. Sound rounds went 0.06% -> 0.00% with them:
-with the labels kept, no frame of 6809 ends up on another frame's slide. What the passes still
+their words - an unlabelled frame the source retitled. The two run one after the other, the second
+seeing only what the first left, and neither takes a slide already paired: one slide belongs to one
+frame. (Handed the same leftovers, both claimed the same slide when the source swapped two frames,
+and two frames came out carrying one key - sync then wrote both onto that slide, a picture was gone
+and the report said nothing was created. Offline fuzz seed 5521.) Sound rounds went 0.06% -> 0.00%
+with them: with the labels kept, no frame of 6809 ends up on another frame's slide. What the passes still
 refuse (a frame retitled, reworded *and* moved, with no label) is now at least reported:
 `identity.near_misses` (`NEAR_TELL`) names the dropped slide and the new frame that say much of the
 same thing, and a frame paired by place alone gets a warning asking for a label (`weak_pairs`).
@@ -522,6 +526,14 @@ applies the requests sync would send under Slides' index rules and checks they w
 (the fix removed fails offline seed 399), and `tests/slides_sim.py` refuses such a delete like Google.
 `sync_check.integrity`'s `allow_ungrouped` / `allow_groups_changed` take a slide objectId as well as
 a title, because a sync may retitle the very slide the person ungrouped (seed 607).
+Both sides editing the same text is what every merge rule is about, and drawing each side's target at
+random made it rare (5 text overrides in 200 rounds, never a table): the source op `collide` changes
+exactly what the person just changed - reword, append, drop a paragraph, rewrite a cell - which is
+what a real deck looks like, and it took that to 56 overrides and 10 tables in the same 200 rounds.
+It found the pairing bug above within 600 chained rounds. `_writable` checks a table's cells the way
+sync writes them, one at a time (`_writable_cells`), and `fuzz_sync._retext` keeps `run_spans` on the
+words a deck edit leaves behind, as Slides does - stale spans had the campaign accusing
+`merge.styling_lost` of losing styling that was never where the spans said (seed 2194).
 
 ## Pitfalls found so far
 - PDFium (`pdf.py` handles these):

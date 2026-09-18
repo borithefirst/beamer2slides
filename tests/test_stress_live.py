@@ -225,6 +225,9 @@ def test_every_variant_pairs_with_v1_frame_for_frame(variant):
             got = base_names[pairs[j]] if j in pairs else None
             wrong.append(f"frame {name} read as {got}, wanted {name if want is not None else 'a new frame'}")
     assert not wrong, "\n".join(wrong)
+    # One slide to one frame, whatever the passes believe: two frames sharing a base slide share
+    # its key, and a key is what sync writes by (`identity.align_slides`, offline fuzz seed 5521).
+    assert len(set(pairs.values())) == len(pairs), f"two frames of {variant} read as one slide"
 
     # And the other side of `near_misses`: a report that cries wolf is worse than a quiet one,
     # because an AI author would go labelling frames that were never in doubt. Every one of these

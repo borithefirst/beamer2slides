@@ -261,8 +261,19 @@ def align_slides(base: list[dict], ours: list[dict], moves: list[dict] | None = 
             a += 1
         else:
             b += 1
-    for how, found in (("content", cross_pairs(base, ours, pairs, pairable)),
-                       ("place", gap_pairs(base, ours, pairs, pairable))):
+    # One after the other, each seeing what the one before it took: written as one tuple, both
+    # passes were handed the *same* leftovers and could claim the same slide - and did (offline
+    # fuzz seed 5521: the source swapped two frames, `cross_pairs` recognised one of them by its
+    # words, `gap_pairs` gave the other the same base slide because it was the only one left
+    # between two paired neighbours). Two frames with one key is the one thing nothing downstream
+    # survives: sync wrote both frames onto that one slide, the other slide's picture was gone and
+    # the report said no slide had been created. The filter keeps the promise in the open - this
+    # mapping is one slide to one frame, whatever a pass believes.
+    for how, pass_ in (("content", cross_pairs), ("place", gap_pairs)):
+        found = {}
+        for j, i in pass_(base, ours, pairs, pairable).items():
+            if j not in pairs and i not in pairs.values() and i not in found.values():
+                found[j] = i
         pairs.update(found)
         if weak is not None:
             weak.update(dict.fromkeys(found, how))

@@ -111,6 +111,27 @@ def test_two_frames_left_over_in_one_gap_are_left_alone():
     assert identity.gap_pairs(three_base, three_ours, {0: 0, 2: 2}, lambda i, j: True) == {1: 1}
 
 
+def test_the_two_leftover_passes_cannot_both_claim_the_same_slide():
+    """The passes run one after the other, and the second one only gets what the first one left.
+
+    Here the source moved Method to the end and retitled and half-rewrote another frame in its
+    place. `cross_pairs` recognises the moved frame by its words; `gap_pairs`, looking at the same
+    leftovers, sees exactly one slide and one frame between two paired neighbours and pairs those
+    too - the same slide. Written as one tuple of two calls, both answers were merged and two
+    frames came out carrying one key. Nothing downstream survives that: sync wrote both frames onto
+    that one slide, the other slide's picture was gone, and the report said no slide was created
+    (offline fuzz seed 5521, where the source had swapped two frames).
+    """
+    base = talk()
+    ours = [base[0], info("How the merge decides", METHOD_HALF), base[2], base[1]]
+    # Each pass on its own, from the leftovers the order-keeping alignment hands them:
+    assert identity.cross_pairs(base, ours, {0: 0, 2: 2}, lambda i, j: True) == {3: 1}
+    assert identity.gap_pairs(base, ours, {0: 0, 2: 2}, lambda i, j: True) == {1: 1}
+    pairs = identity.align_slides(base, ours)
+    assert pairs == {0: 0, 2: 2, 3: 1}          # the content wins; the place has nothing left to take
+    assert len(set(pairs.values())) == len(pairs)
+
+
 def test_two_leftovers_that_look_alike_are_reported_though_nothing_pairs_them():
     """A frame retitled, half rewritten *and* moved: no label, too little left for the content, no
     gap to stand in. Every pass refuses it, rightly - and `identity.near_misses` says out loud that

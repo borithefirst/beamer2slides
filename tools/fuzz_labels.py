@@ -52,7 +52,11 @@ from beamer2slides import identity                           # noqa: E402
 from fuzz_sync import SOURCE_OPS                             # noqa: E402
 
 LABEL_OPS = ["move_label", "rename_label", "drop_label"]
-PLAIN_OPS = sorted(set(SOURCE_OPS) - set(LABEL_OPS))
+# `collide` needs a deck to collide with, and there is none here; `edit_cell` was added to the sync
+# campaign later. Both stay out on purpose: what this campaign measures are rates over a fixed mix
+# of source changes (CLAUDE.md, docs/labels.md), so a draw added to the mix would quietly restate
+# every number ever measured with it.
+PLAIN_OPS = sorted(set(SOURCE_OPS) - set(LABEL_OPS) - {"collide", "edit_cell"})
 
 
 def _infos(base):
