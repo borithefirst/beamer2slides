@@ -331,10 +331,13 @@ hold for every sync, including the combinations nobody thought of.
   may have re-placed only an anchored member (`merge.unit_shift`); a geometry override was promised
   for a unit whose parts the person had moved apart, which sync cannot write
   (`merge.geometry_writable`); sync sends an alt-text title for a diagram's main object, which is
-  the group `emit.diagram_requests` builds - the API refuses that and rejects the whole batch; and
-  `sync.base_order` leaves out the slides the deck deleted, so their base entries land last and the
-  frames after them in the source lose their keys on the next conversion. The last two are open,
-  pinned as xfail tests in `tests/test_sync.py`.
+  the group `emit.diagram_requests` builds - the API refuses that and rejects the whole batch (open,
+  pinned as an xfail test in `tests/test_sync.py`); and `sync.base_order` left out the slides the
+  deck deleted although the source still has them, so their base entries landed last and the frames
+  after them lost their keys on the next conversion, which created them again (fixed - and
+  `fuzz_world.rebase` now orders the base with `sync.base_order` itself rather than with a correct
+  copy of it, so the campaign catches it again if it stops doing that: putting the old rule back
+  fails 54 of 1500 rounds).
 
 ## Not supported yet
 - Crossing reorders of unlabelled frames (the alignment keeps order; label frames).

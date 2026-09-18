@@ -1580,9 +1580,15 @@ class Sync:
 def base_order(mplan: dict, by_plan: dict, live: list[str]) -> list[str]:
     """Slide ids of the new base in the source's order (the base is converter output: a slide
     order the deck chose must keep differing from it, or the next sync would undo it). Slides kept
-    though the source removed them stay after their live predecessor."""
-    order = [by_plan[id(p)]["sid"] for p in sorted((p for p in mplan["slides"] if p["action"] in ("update", "create")),
-                                                   key=lambda p: p["ours"])]
+    though the source removed them stay after their live predecessor.
+
+    A slide the person deleted while the source still has it (`gone`) has no live id, but it keeps
+    its place here: the next conversion pairs its frames with this base in order
+    (`identity.align_slides`), so an entry at the end takes the identity of every frame that
+    followed it - they look new and get created again."""
+    placed = (p for p in mplan["slides"] if p["action"] in ("update", "create", "gone"))
+    order = [f"gone:{p['key']}" if p["action"] == "gone" else by_plan[id(p)]["sid"]
+             for p in sorted(placed, key=lambda p: p["ours"])]
     for k, sid in enumerate(live):
         if sid in order:
             continue

@@ -414,9 +414,10 @@ dragged picture went back to the converter's box (`merge.geometry_writable` keep
 reports a conflict); and `sync.tag_requests` alt-texts a diagram's main object, which is the group
 emit builds under that id - the API refuses it and rejects the whole batch, so a sync that rewrites
 a diagram slide dies (open, xfail `tests/test_sync.py::test_sync_does_not_alt_text_a_diagram_group`);
-and `sync.base_order` leaves out the slides the deck deleted, so their base entries land at the end
-and the frames after them in the source lose their keys next time (open, xfail
-`test_a_slide_the_deck_deleted_keeps_its_place_in_the_new_base`).
+and `sync.base_order` left out the slides the deck deleted although the source still has them, so
+their base entries landed at the end and the frames after them lost their keys next time and were
+created again (fixed: a `gone` slide keeps its place in the source's order; `fuzz_world.rebase`
+orders the base with `sync.base_order` itself, so the campaign fails again if it stops).
 
 ## Pitfalls found so far
 - PDFium (`pdf.py` handles these):

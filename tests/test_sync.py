@@ -744,21 +744,35 @@ def test_a_base_out_of_the_sources_order_loses_the_frames_after_it():
     assert got[:2] == keys[:2] and got[2] == "title:conclusions#2" != keys[2]
 
 
-@pytest.mark.xfail(strict=True, reason="sync.base_order leaves out the slides the deck deleted, so they land at the "
-                                       "end of the new base, and the frames after them in the source can no longer be "
-                                       "aligned with it: the next sync creates them again")
 def test_a_slide_the_deck_deleted_keeps_its_place_in_the_new_base():
     """Found by the offline fuzz (`second_sync_writes`, seeds 45, 60, 108, 177 of the default run):
     the person deletes a converter slide whose frame has no label and the source still has it. The
-    sync is right to leave it deleted, but it records that slide's base entry last (`new_base` keys
-    it `gone:<key>`, which `base_order` never returns). The base is converter output, and the next
-    conversion pairs frames with it by `identity.align_slides` - see the test above for what a base
-    out of order costs. Fix: order the `gone` plans with the rest, by their `ours` index."""
+    sync is right to leave it deleted, but it used to record that slide's base entry last
+    (`new_base` keys it `gone:<key>`, which `base_order` did not return). The base is converter
+    output, and the next conversion pairs frames with it by `identity.align_slides` - see the test
+    above for what a base out of order costs."""
     from beamer2slides.sync import base_order
     plans = [{"key": "deleted_by_the_person", "action": "gone", "ours": 0, "base": 0, "objectId": None},
              {"key": "kept", "action": "update", "ours": 1, "base": 1, "objectId": "b2s_s001"}]
     by_plan = {id(plans[1]): {"sid": "b2s_s001"}}
     assert base_order({"slides": plans}, by_plan, ["b2s_s001"]) == ["gone:deleted_by_the_person", "b2s_s001"]
+
+
+def test_a_deleted_slide_in_the_base_does_not_displace_a_kept_one():
+    """The two ways a slide can be in the base without being in the deck must not fight. What the
+    next conversion aligns against is the entries the source still has, in the source's order: a
+    `gone` slide (the person deleted it, the source kept it) is one of those and belongs between
+    its source neighbours; a `keep_removed` one (the source dropped it, the deck edited it) is not,
+    and only has to be somewhere."""
+    from beamer2slides.sync import base_order
+    plans = [{"key": "one", "action": "update", "ours": 0, "base": 0, "objectId": "b2s_s000"},
+             {"key": "gone_one", "action": "gone", "ours": 1, "base": 1, "objectId": None},
+             {"key": "two", "action": "update", "ours": 2, "base": 2, "objectId": "b2s_s002"},
+             {"key": "kept_one", "action": "keep_removed", "ours": None, "base": 3, "objectId": "b2s_k003"}]
+    by_plan = {id(p): {"sid": p["objectId"]} for p in plans if p["objectId"]}
+    order = base_order({"slides": plans}, by_plan, ["b2s_s000", "b2s_k003", "b2s_s002"])
+    assert [x for x in order if x != "b2s_k003"] == ["b2s_s000", "gone:gone_one", "b2s_s002"]
+    assert "b2s_k003" in order
 
 
 @pytest.mark.xfail(strict=True, reason="sync.tag_requests tags a diagram's main object, which is the group "
