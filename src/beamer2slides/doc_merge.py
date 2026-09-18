@@ -572,17 +572,20 @@ def _merge_block(was: dict, mine: dict, live: dict, conflicts: list, notes: list
     if text != block_text(live):
         out["runs"] = _retext(live, text)
         out["origin"] = "merged"
-    # Styling is merged the same way the words are, one step coarser: the source's
-    # marks are taken when the source changed them and the document left the block
-    # alone. A document that touched the block at all keeps its own styling, because
-    # matching the source's marks onto words the document rewrote would be a guess.
+    # Styling is merged the same way the words are: the source's marks are taken when
+    # the source changed them and the document's styling is as the base has it. Where
+    # the words differ too, the marks follow the words — each word of the merged text
+    # the file also has takes the file's marks, the rest keep the document's.
     if styles_of(mine) != styles_of(was) and styles_of(live) == styles_of(was):
         if text == block_text(mine):
             out["runs"] = _restyled(live, mine)
-            out["restyle"] = True
-            out["origin"] = "merged"
         else:
-            notes.append(f"{key}: the source restyled words the document rewrote — styling left alone")
+            out["runs"], lost = _restyled_words(was, mine, live, text)
+            if lost:
+                notes.append(f"{key}: the source restyled words the document rewrote — "
+                             f"those keep the document's styling")
+        out["restyle"] = True
+        out["origin"] = "merged"
     if not out.get("origin") and (block_text(live) != block_text(was)
                                   or styles_of(live) != styles_of(was)):
         # Nothing to write: the document says this, and the merge agrees. It is said
@@ -899,6 +902,80 @@ def _restyled(live: dict, mine: dict) -> list[dict]:
         else:
             out.append(dict(run) | {"width": doc_ir.utf16_len(run["text"])})
     return out
+
+
+def _char_styles(block: dict) -> list:
+    """The styling of every character of `block_text`: a run's marks, or the frozen
+    run itself for the one character that stands for it."""
+    out: list = []
+    for run in block.get("runs", []):
+        if run.get("frozen"):
+            out.append(run)
+        else:
+            out += [{k: v for k, v in run.items() if k not in ("text", "width")}] * len(run["text"])
+    return out
+
+
+def _word_pairs(one: str, other: str):
+    """(i, j) for every character of `one` whose word is also in `other`, in order."""
+    a, b = tokens(one), tokens(other)
+    at_a, at_b = [0], [0]
+    for token in a:
+        at_a.append(at_a[-1] + len(token))
+    for token in b:
+        at_b.append(at_b[-1] + len(token))
+    for op, i1, i2, j1, j2 in SequenceMatcher(None, a, b, autojunk=False).get_opcodes():
+        if op == "equal":
+            for k in range(at_a[i2] - at_a[i1]):
+                yield at_a[i1] + k, at_b[j1] + k
+
+
+def _restyled_words(was: dict, mine: dict, live: dict, text: str) -> tuple[list[dict], bool]:
+    """Runs for merged `text` whose words both sides changed, and one side the marks.
+
+    Every character takes the document's styling where its word is the document's,
+    and then the file's where its word is the file's too, so a word the source made
+    bold is bold wherever the merge kept it. A character in a word neither side has
+    whole (the merge joined two edits inside one) takes the one before it, as Docs
+    gives a typed character. Frozen runs are always the document's own. The second
+    value says whether a word the source restyled is gone from the merge — the
+    document rewrote it, and its new words keep the document's styling.
+    """
+    styles: list = [None] * len(text)
+    live_styles, mine_styles = _char_styles(live), _char_styles(mine)
+    for i, j in _word_pairs(block_text(live), text):
+        styles[j] = live_styles[i]
+    kept = set()
+    for i, j in _word_pairs(block_text(mine), text):
+        kept.add(i)
+        if text[j] != FROZEN:
+            styles[j] = mine_styles[i]
+    was_styles = _char_styles(was)
+    lost = any(i not in kept and mine_styles[i] != was_styles[w]
+               for w, i in _word_pairs(block_text(was), block_text(mine))
+               if block_text(mine)[i] != FROZEN)
+    runs: list[dict] = []
+    frozen = iter([r for r in live.get("runs", []) if r.get("frozen")])
+    previous: dict = {}
+    for char, style in zip(text, styles):
+        if char == FROZEN:
+            # The merge adds or drops none the document does not have (`_merge_block`
+            # checks the source's), so they are the document's, in its order.
+            chip = next(frozen, None)
+            if chip is not None:
+                runs.append(dict(chip))
+            continue
+        style = previous if style is None or style.get("frozen") else style
+        previous = style
+        if runs and not runs[-1].get("frozen") and \
+                {k: v for k, v in runs[-1].items() if k not in ("text", "width")} == style:
+            runs[-1]["text"] += char
+        else:
+            runs.append(dict(style) | {"text": char})
+    for run in runs:
+        if not run.get("frozen"):
+            run["width"] = doc_ir.utf16_len(run["text"])
+    return runs, lost
 
 
 def _retext(live: dict, text: str) -> list[dict]:

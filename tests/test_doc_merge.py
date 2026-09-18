@@ -256,14 +256,45 @@ def test_styling_a_second_sync_writes_nothing():
     assert doc_merge.plan(theirs, ours, theirs)["requests"] == []
 
 
-def test_the_document_keeps_its_styling_when_it_rewrote_the_words():
+def styles_written(result: dict) -> list[tuple[int, int, dict]]:
+    return [(r["updateTextStyle"]["range"]["startIndex"], r["updateTextStyle"]["range"]["endIndex"],
+             r["updateTextStyle"]["textStyle"]) for r in result["requests"] if "updateTextStyle" in r]
+
+
+def test_a_word_the_source_restyled_is_styled_while_the_document_rewrote_another():
     base = live([styled("p:s", {"text": "one two three"})])
     ours = live([styled("p:s", {"text": "one "}, {"text": "two", "bold": True},
                         {"text": " three"})])
     theirs = live([styled("p:s", {"text": "one two THREE"})])
     result = doc_merge.plan(base, ours, theirs)
-    assert not [r for r in result["requests"] if "updateTextStyle" in r]
-    assert "styling left alone" in result["notes"][0]
+    at = theirs["blocks"][0]["span"][0]
+    assert [(s - at, e - at, style) for s, e, style in styles_written(result)] == [
+        (0, 4, {}), (4, 7, {"bold": True}), (7, 13, {})]
+    assert result["notes"] == []
+    runs = result["blocks"][0]["runs"]
+    assert [(r["text"], r.get("bold", False)) for r in runs] == [
+        ("one ", False), ("two", True), (" THREE", False)]
+
+
+def test_a_word_the_source_restyled_and_the_document_rewrote_is_the_documents():
+    base = live([styled("p:s", {"text": "one two three"})])
+    ours = live([styled("p:s", {"text": "one "}, {"text": "two", "bold": True},
+                        {"text": " three"})])
+    theirs = live([styled("p:s", {"text": "one TWO three"})])
+    result = doc_merge.plan(base, ours, theirs)
+    assert all(style == {} for _, _, style in styles_written(result))
+    assert "keep the document's styling" in result["notes"][0]
+
+
+def test_the_source_restyles_and_rewords_while_the_document_adds_words():
+    base = live([styled("p:s", {"text": "the plan is ready"})])
+    ours = live([styled("p:s", {"text": "the "}, {"text": "new plan", "italic": True},
+                        {"text": " is ready"})])
+    theirs = live([styled("p:s", {"text": "the plan is ready today"})])
+    result = doc_merge.plan(base, ours, theirs)
+    runs = result["blocks"][0]["runs"]
+    assert "".join(r["text"] for r in runs) == "the new plan is ready today"
+    assert [r["text"] for r in runs if r.get("italic")] == ["new plan"]
 
 
 def test_a_paragraph_the_source_turned_into_a_heading_is_written():

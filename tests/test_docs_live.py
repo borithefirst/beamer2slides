@@ -327,6 +327,16 @@ def test_a_table_the_source_moved_is_built_again_where_the_file_has_it(paper):
     paper.settled()
 
 
+def test_a_word_the_source_bolded_in_a_paragraph_the_reader_rewrote(paper):
+    """The marks follow the words: the source's on its words, the reader's on theirs."""
+    paper.edit("The closing paragraph.", "The <b>closing</b> paragraph.")
+    paper.rewrote("The closing", "paragraph", "passage")
+    info = paper.sync()
+    assert info["conflicts"] == []
+    assert "The <b>closing</b> passage." in paper.text
+    paper.settled()
+
+
 def test_a_list_the_reader_numbered_is_numbered_in_the_file(paper):
     """An imported list cannot say whether it is numbered, so the push gives it bullets
     of the document's own — and from then on a reader's switch in the toolbar (the same

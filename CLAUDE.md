@@ -652,8 +652,10 @@ keys, named ranges), `doc_merge.py` (pure planning), `doc_sync.py` (the commands
   when it ends the body (measured: no stray trailer). `insertTable` splits the paragraph
   its index is in and needs one, so a table goes at the following block's start (and the empty
   paragraph it leaves is swallowed), or, in front of another table, at the paragraph mark
-  before it. A ragged table (merged cells) whose grid changed is still reported; so is a
-  restyle of words the document rewrote.
+  before it. A ragged table (merged cells) whose grid changed is still reported.
+- Styling merges with the words: a source restyle in a block whose words both sides changed
+  is written word by word (`doc_merge._restyled_words`: the document's marks, then the file's
+  on every word the file also has); only a restyled word the document replaced is reported.
 - Every sync names the document's **open comments** in its report (`doc_sync.open_comments`,
   Drive's comments API under `drive.file`): a comment lives in Drive, not in the document's
   content, so nothing the merge reads can see one - and a sync that rewrites the passage it

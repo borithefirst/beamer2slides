@@ -566,7 +566,7 @@ Each of these is reported in the sync report, never guessed at:
 | a block whose frozen runs the source changed while the document also changed it — or one that holds a chip no request creates | an equation, a rich link, a dropdown or a table of contents cannot be written again once deleted, so the text around one is left alone rather than rewritten without it. Pictures, dates and people are written (above) |
 | a table with a **row out of step with the others** (merged cells) whose grid changed | rows and columns are matched as whole lines; cells of a ragged table only merge by place, while the three grids agree |
 | a **row or column the source took away that the document wrote in** | kept, as a block the source dropped but the document edited is |
-| a source restyle of words the document rewrote | the marks would have to be matched onto words that are no longer there |
+| a source restyle of the very words the document rewrote | the marks follow the words (`doc_merge._restyled_words`): every word of the merged text takes the document's styling, and the file's where the file has that word too — so a word the source bolded is bold while the reader rewrites the rest of the paragraph. Only a restyled word the document replaced has nothing to carry the marks: its new words keep the document's styling, and the report says so |
 | a **move of a block with an equation-like chip in it, or of a table the document changed** | a move is a delete and a write, and those cannot be written from nothing — the block stays where the document has it |
 | a **reorder both sides made** | the document's order stands whole; the file's is reported |
 
