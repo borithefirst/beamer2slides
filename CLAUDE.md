@@ -340,9 +340,11 @@ label pairs say the same thing and, if not, whether some other slide *nothing el
 explains them better: both directions -> `moved` (the content decides), one -> `unsure` (the label is
 followed; it may equally be a passage the author moved), neither -> silence (a frame rewritten from
 scratch). Both verdicts are conflicts in the report (`field: label`); a renamed or dropped label the
-content still recognises is a warning. Measured by `tools/fuzz_labels.py` against a tagged truth:
-over 3000 rounds, misidentified frames 14.99% -> 1.22% when the invariant is broken, 0 false alarms
-in 1561 sound rounds, nothing ever worse than before (fixed seeds in `tests/test_sync_fuzz.py`).
+content still recognises is a warning. The title counts by degree (`_title_alike`): a source that
+retitles every frame while moving a label ("Moving labels" -> "Moving labels v2") makes a yes-or-no
+"same title?" say no to every pair at once. Measured by `tools/fuzz_labels.py` against a tagged
+truth: over 3000 rounds, misidentified frames 14.68% -> 1.09% when the invariant is broken, 0 false
+alarms in 1524 sound rounds, nothing ever worse than before (fixed seeds in `tests/test_sync_fuzz.py`).
 `fuzz_sync` moves/renames/drops labels too; that found `sync.new_base` freezing a `gone` slide's
 entry at the moment of deletion (its label/title/words now follow the source, its key and place stay)
 and a renamed label costing a slide its identity (`align_slides.pairable` lets the content fix it

@@ -323,21 +323,27 @@ question with an answer and guessing it wrong is the one mistake here that quiet
 work. A label renamed or dropped where the content still recognises the frame is a **warning**: the
 slide kept its identity, but the source has one hook fewer for the next version.
 
+The title counts by degree, not as yes or no (`identity._title_alike`). The stress deck moves a
+label and retitles all 48 frames in the same version ("Moving labels" → "Moving labels v2"), and a
+yes-or-no "same title?" says no to every pair at once - which leaves the frame the label left no
+better an explanation than the one it landed on, and the check silent exactly where it is needed.
+
 `tools/fuzz_labels.py` measures it against a truth the synthetic source knows (every frame is
 tagged, so a pairing is right or wrong). 3000 rounds, half of them breaking the invariant on
-purpose, plausible source edits either way:
+purpose, plausible source edits either way (a quarter of them revising every title at once):
 
 | | misidentified frames, before | with the check |
 |---|---|---|
-| labels sound | 0.03% | 0.03% |
-| labels sound, a frame moved | 4.31% | 4.31% |
-| labels broken | 14.99% | **1.22%** |
-| labels broken, a frame moved | 20.54% | 11.39% |
+| labels sound | 0.06% | 0.06% |
+| labels sound, a frame moved | 5.53% | 5.53% |
+| labels broken | 14.68% | **1.09%** |
+| labels broken, a frame moved | 19.15% | 10.87% |
 
-The check never spoke once in 1561 rounds whose labels nobody touched, and no round came out worse
-than before it existed. Of the broken rounds still wrong without a reorder, 42 of 43 were reported
-as a conflict and one passed in silence (a frame renamed, retitled and reworded at once - nothing
-left to recognise it by; it becomes a new slide, and the old one is kept with its edits). The rows
+The check never spoke once in 1524 rounds whose labels nobody touched, and no round came out worse
+than before it existed. Of the broken rounds still wrong without a reorder, 36 of 39 were reported
+as a conflict and 3 passed in silence (a label pasted onto a frame added in the same version whose
+own frame was deleted, a frame renamed and retitled and reworded at once - nothing left to
+recognise them by; they become new slides, and the old ones are kept with their edits). The rows
 with a frame moved are the crossing-reorder limitation under "Not supported yet", which this check
 does not address. Fixed seeds run in the default suite
 (`tests/test_sync_fuzz.py::test_a_broken_label_invariant_sends_far_fewer_slides_to_the_wrong_frame`).

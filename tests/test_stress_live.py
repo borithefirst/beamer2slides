@@ -124,9 +124,11 @@ def backup(flags: list[str]) -> dict:
     return {"contains": BACKUP_V2 if "rewritebullets" in flags else BACKUP_V1}
 
 
-def order_check(flags: list[str]) -> dict:
-    """The slides of this variant in source order, named by phrases, not by titles."""
-    return {"check": "slides", "order": [S(n) for n in stress.names(flags) if n in SEL]}
+def order_check(flags: list[str], gone: tuple[str, ...] = ()) -> dict:
+    """The slides of this variant in source order, named by phrases, not by titles. `gone`: frames
+    the scenario deleted in the deck - the source still has them and deck edits win, so they are
+    not there to be in any order."""
+    return {"check": "slides", "order": [S(n) for n in stress.names(flags) if n in SEL and n not in gone]}
 
 
 # Unique titles of frames no scenario edits: what an untouched slide is compared with.
@@ -340,16 +342,22 @@ class Run:
     def check(self, variant: str, pdf: Path, report: dict, expectations: list[dict], *, drop: tuple[str, ...] = (),
               checks: list[dict] = (), conflicts: list[list[str]] = (), any_conflicts: bool = False,
               converged: list[list[str]] = (), no_writes_since: str | None = None, edited: list[str] = (),
-              idempotent: bool = True) -> None:
+              gone: tuple[str, ...] = (), overridden: tuple[str, ...] = (), idempotent: bool = True) -> None:
         """Everything a sync of this deck must leave behind: the deck edits (minus `drop`, whose
         own checks the source legitimately changed), the source's own checks, the slide order of
         the variant, the report, integrity, and untouched slides against a fresh conversion.
-        `edited`: unique titles this scenario touched, kept out of the fresh comparison."""
+        `edited`: unique titles this scenario touched, kept out of the fresh comparison.
+
+        The source's checks say what a deck *nobody edited* would show. Where this scenario edited
+        the same thing the source did, the deck wins and the source's check cannot hold: `gone`
+        names frames deleted in the deck, `overridden` the texts the deck kept instead. Both are
+        the scenario declaring which side of a conflict it arranged."""
         import sync_check as sc
         flags = stress.VARIANTS[variant]
         model = self.deck.read()
         kept = [c for e in expectations if e["edit"] not in drop for c in e["checks"]]
-        all_checks = kept + list(checks) + stress.checks(flags) + [order_check(flags)]
+        source_checks = [c for c in stress.checks(flags) if c.get("text") not in overridden]
+        all_checks = kept + list(checks) + source_checks + [order_check(flags, gone)]
         self.problems += [f"after sync to {variant}: {p}" for p in sc.check_all(model, all_checks)]
         self.problems += sc.check_report(report, conflicts=conflicts, converged=converged,
                                          no_conflicts=not conflicts and not any_conflicts)
@@ -450,7 +458,12 @@ def scenario_ambiguous(run: Run):
 @scenario
 def scenario_identity(run: Run):
     """Identity itself moves: a label moves to the next frame, another disappears, and every
-    title in the deck is renamed at once. Nothing the person did may follow the labels."""
+    title in the deck is renamed at once. Nothing the person did may follow the labels.
+
+    `mobile` moving onto the next frame is reported as a conflict and the content decides instead
+    (docs/sync.md, "When a label moved"): the bold stays on the frame whose sentence the person
+    emboldened, and the frame that lost the label does not come back beside itself. `vanishing`
+    losing its label outright is only a warning - the words still recognise that frame."""
     run.convert(stress.build("v1"))
     exps = run.edit(
         E("bold", slide=S("mobile"), word="moves", context="The label on this frame moves"),
@@ -464,6 +477,7 @@ def scenario_identity(run: Run):
         {"check": "title", "slide": S("mobile"), "text": "Moving labels v2"},
         {"check": "title", "slide": S("vanishing"), "text": "Disappearing label v2"},
         {"check": "text", "slide": S("vanishing"), "text": "so its identity falls back to its title", "count": 1}],
+        conflicts=[["label", "mobile", "Arriving labels v2", "identity taken from the content"]],
         edited=["Characters outside the BMP"])
 
 
@@ -490,7 +504,10 @@ def scenario_churn(run: Run):
         {"check": "text", "slide": None, "text": "The numbers are rounded to full seconds", "count": 1},
         {"check": "text", "slide": S("blockcol"), "text": "The deck always wins, and the report explains why.",
          "count": 1}],
-        any_conflicts=True, edited=["A code block"])
+        any_conflicts=True, edited=["A code block"],
+        # The deck deleted echo-three and rewrote the third backup bullet; both are arranged here
+        # so that the deck wins, so neither of the source's own checks for them can hold.
+        gone=("echo-three",), overridden=("Seconds are rounded, milliseconds are dropped",))
 
 
 @scenario

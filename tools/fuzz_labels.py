@@ -69,6 +69,7 @@ def round_once(seed: int, label_chance: float, tmp: Path) -> dict:
     base_truth = [s["truth"] for s in doc["slides"]]
 
     doc2 = copy.deepcopy(doc)
+    revision = rng.random() < 0.25   # the whole talk revised at once, every title amended
     ops = [rng.choice(PLAIN_OPS) for _ in range(rng.randint(0, 3))]
     broke = rng.random() < label_chance
     if broke:
@@ -81,6 +82,11 @@ def round_once(seed: int, label_chance: float, tmp: Path) -> dict:
         done.append(f"{name}: {got}")
         if got is None and name in LABEL_OPS:
             broke = False                          # nothing to move: the invariant still holds
+    if revision:
+        for s in doc2["slides"]:
+            s["title"] += " v2"
+            s["elements"][0]["paragraphs"] = [{**s["elements"][0]["paragraphs"][0], "runs": [W.run(s["title"])]}]
+        done.append("revision: every title amended")
     ours_truth = [s.get("truth") for s in doc2["slides"]]
 
     base_infos, infos = _infos(base), [W.slide_info(s) for s in doc2["slides"]]

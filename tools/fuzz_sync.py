@@ -192,6 +192,16 @@ def src_retitle(rng, doc):
     return f"retitle {title!r}"
 
 
+def src_amend_title(rng, doc):
+    """A title edited rather than replaced ("Results" -> "Results v2"), which is what a source does
+    when it revises a whole talk - and what tells a yes-or-no "same title?" nothing at all."""
+    s = rng.choice(doc["slides"])
+    title = f"{s['title']} {rng.choice(('v2', 'again', 'revisited'))}"
+    s["title"] = title
+    s["elements"][0]["paragraphs"] = [{**s["elements"][0]["paragraphs"][0], "runs": [W.run(title)]}]
+    return f"amend title to {title!r}"
+
+
 def src_notes(rng, doc):
     s = rng.choice(doc["slides"])
     s["notes"] = "source notes " + " ".join(rng.choice(W.WORDS) for _ in range(3))
@@ -254,9 +264,9 @@ def _renumber(doc):
 
 SOURCE_OPS = {f.__name__[4:]: f for f in (src_reword, src_add_paragraph, src_remove_paragraph, src_move_element,
                                           src_resize_element, src_restyle, src_add_element, src_delete_element,
-                                          src_add_slide, src_delete_slide, src_move_slide, src_retitle, src_notes,
-                                          src_background, src_repaint, src_move_label, src_rename_label,
-                                          src_drop_label)}
+                                          src_add_slide, src_delete_slide, src_move_slide, src_retitle,
+                                          src_amend_title, src_notes, src_background, src_repaint,
+                                          src_move_label, src_rename_label, src_drop_label)}
 
 
 # ---------------------------------------------------------------- deck edits (offline)

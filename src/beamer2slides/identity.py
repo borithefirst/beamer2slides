@@ -116,15 +116,28 @@ def label_pairs(base: list[dict], ours: list[dict]) -> dict[int, int]:
     return pairs
 
 
-def _evidence(a: dict, b: dict) -> float:
-    """`slide_similarity`, but only where there is something to be similar about. Two frames that
-    say almost nothing - a full-page picture, a section divider - are alike by default, and that
-    is no reason to believe one of them is the other."""
-    if norm_title(a["title"]) and norm_title(a["title"]) == norm_title(b["title"]):
-        return slide_similarity(a, b)
-    if min(len(a["text"].split()), len(b["text"].split())) < 4:
+def _title_alike(a: dict, b: dict) -> float:
+    """1 for the same title, less for one edited, 0 for another title. `slide_similarity` asks the
+    question as yes or no, which is right for an alignment; here it is not, because a source that
+    retitles every frame in the same breath as it moves a label ("Results" -> "Results v2") is
+    exactly the edit this has to see through."""
+    ta, tb = norm_title(a["title"]), norm_title(b["title"])
+    if not ta or not tb:
         return 0.0
-    return slide_similarity(a, b)
+    if ta == tb:
+        return 1.0
+    ratio = SequenceMatcher(None, ta.split(), tb.split(), autojunk=False).ratio()
+    return ratio if ratio >= 0.6 else 0.0
+
+
+def _evidence(a: dict, b: dict) -> float:
+    """How much two slides look like the same frame, where there is something to look at. Two
+    frames that say almost nothing - a full-page picture, a section divider - are alike by default,
+    and that is no reason to believe one of them is the other."""
+    alike = _title_alike(a, b)
+    if not alike and min(len(a["text"].split()), len(b["text"].split())) < 4:
+        return 0.0
+    return SequenceMatcher(None, a["text"].split(), b["text"].split(), autojunk=False).ratio() + 0.5 * alike
 
 
 def label_moves(base: list[dict], ours: list[dict]) -> list[dict]:
@@ -155,7 +168,7 @@ def label_moves(base: list[dict], ours: list[dict]) -> list[dict]:
     and guessing it wrong is the one mistake in this program that quietly loses somebody's work.
     """
     pairs = label_pairs(base, ours)
-    own = {j: slide_similarity(base[i], ours[j]) for j, i in pairs.items()}
+    own = {j: _evidence(base[i], ours[j]) for j, i in pairs.items()}
     doubt = sorted(j for j, s in own.items() if s < LABEL_SURE)
     if not doubt:
         return []

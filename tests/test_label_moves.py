@@ -52,6 +52,20 @@ def test_without_the_check_the_label_would_carry_the_slide_away():
     assert identity.label_pairs(base, ours) == {1: 0}
 
 
+def test_a_label_moves_while_every_title_in_the_deck_is_renamed():
+    """What the live stress deck does (tests/decks/stress, variant `identity`): the source moves a
+    label *and* retitles all 48 frames in the same version. A yes-or-no "same title?" says no to
+    every pair at once, and the frame the label left is then no better an explanation than the one
+    it landed on - so the title has to count by degree (`identity._title_alike`)."""
+    base = [info("Moving labels", f"Moving labels {MOVING}", "mobile"),
+            info("Arriving labels", f"Arriving labels {ARRIVING}", "arriving")]
+    ours = [info("Moving labels v2", f"Moving labels v2 {MOVING}"),
+            info("Arriving labels v2", f"Arriving labels v2 {ARRIVING}", "mobile")]
+    (m,) = identity.label_moves(base, ours)
+    assert m["verdict"] == "moved" and m["frame_is"] == 1 and m["slide_is"] == 0
+    assert identity.align_slides(base, ours) == {0: 0, 1: 1}
+
+
 def test_two_labels_swapped_between_frames_are_both_re_paired():
     """Neither pairing is settled, so each one's slides are free to be the other's partner - which
     is the only way a swap can be seen at all."""
