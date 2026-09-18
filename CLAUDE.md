@@ -761,3 +761,8 @@ keys, named ranges), `doc_merge.py` (pure planning), `doc_sync.py` (the commands
 - MiKTeX (pdflatex / xelatex / lualatex) for the test decks, with on-demand package install.
 - Test decks: `tests/decks/*.tex`, built by `tests/decks/build.py` into `tests/decks/out/`
   (normal and `-handout` variants).
+- Layout rules for Google's monorepo import (it stages sources in a content store and imports tests
+  as a package): `tests/` is a package and imports its helpers relatively; the harness tests use
+  (alignment, sync_check, deck_edits, loss_oracle, fuzz_*) lives in `beamer2slides.devtools`, with
+  `tools/<name>.py` kept as runpy shims; data is reached through `importlib.resources` or a module's
+  `__file__`, never through `src/` or a checkout path.

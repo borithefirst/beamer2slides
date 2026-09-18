@@ -16,7 +16,7 @@ from googleapiclient.errors import HttpError
 
 from beamer2slides import guard, snapshot
 
-SRC = Path(__file__).resolve().parents[1] / "src" / "beamer2slides"
+SRC = Path(guard.__file__).parent  # the package as imported, whatever layout it was staged in
 
 
 # ---------------------------------------------------------------- a presentation to look at

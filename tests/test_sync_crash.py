@@ -660,14 +660,14 @@ class CrashRun:
         return done
 
     def convert(self, pdf):
-        from deck_edits import LiveDeck
+        from beamer2slides.devtools.deck_edits import LiveDeck
         # --force-rebuild: the case folder holds the previous run's deck with its edits still on it,
         # and the rebuild guard (guard.py) would rightly refuse to replace that.
         self.cli("convert", pdf, "--out", self.out, "--force-rebuild", "--backup", "none")
         self.deck = LiveDeck(json.loads((self.out / "emit.json").read_text(encoding="utf-8"))["presentationId"])
 
     def edit(self, specs):
-        from deck_edits import verified
+        from beamer2slides.devtools.deck_edits import verified
         self.deck.read()
         out = []
         for spec in specs:
@@ -695,7 +695,7 @@ CRASH_OUT: Path
 
 def run_case(point: str, live, control) -> list[str]:
     """Convert, edit, kill a sync at `point`, sync again, and say what is wrong with the result."""
-    import sync_check as sc
+    from beamer2slides.devtools import sync_check as sc
     run = CrashRun(point, live)
     try:
         run.convert(live.build("v1"))
@@ -746,11 +746,9 @@ def run_case(point: str, live, control) -> list[str]:
 def crashes(request):
     """point -> problems (or the exception / skip), every selected case run once, 3 at a time."""
     global CRASH_OUT
-    import sys
     from concurrent.futures import ThreadPoolExecutor
-    sys.path.insert(0, str(Path(__file__).resolve().parent))
-    import test_sync_live as live
-    from test_slides_alignment import MAIN, google_unavailable
+    from . import test_sync_live as live
+    from .test_slides_alignment import MAIN, google_unavailable
 
     CRASH_OUT = Path(os.environ.get("B2S_SYNC_CRASH_OUT", MAIN / "out" / "sync-crash"))
     for reason in (live.cli_missing("sync"), live.pdflatex_missing(), google_unavailable()):
@@ -765,7 +763,7 @@ def crashes(request):
         control.convert(live.build("v1"))
         control.edit(crash_edits(live))
         control.sync(live.build("mixed"))
-        import sync_check as sc
+        from beamer2slides.devtools import sync_check as sc
         model = sc.read(control.deck.pid)
     finally:
         control.log.close()

@@ -8,7 +8,7 @@ import json
 
 from beamer2slides import doc_ir, doc_merge, doc_sync
 
-from test_doc_merge import live, para, table
+from .test_doc_merge import live, para, table
 
 
 def test_a_document_is_found_in_a_url_an_id_or_a_file():

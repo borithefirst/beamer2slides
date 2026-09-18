@@ -36,10 +36,8 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / "tools"))
-sys.path.insert(0, str(ROOT / "tests"))
 
-from test_slides_alignment import MAIN, google_unavailable  # noqa: E402
+from .test_slides_alignment import MAIN, google_unavailable
 
 _spec = importlib.util.spec_from_file_location("stress_build", ROOT / "tests" / "decks" / "stress" / "build.py")
 stress = importlib.util.module_from_spec(_spec)
@@ -368,7 +366,7 @@ def test_integrity_does_not_ask_display_maths_to_be_grouped():
     formula sits between the words of a line, so the text's box holds it top and bottom; a display
     equation stands on its own between paragraphs. Both halves are here, because the fix would be
     worthless if it also stopped asking for the inline one."""
-    import sync_check as sc
+    from beamer2slides.devtools import sync_check as sc
 
     display = sc.Model({"slides": [{"objectId": "s1", "pageElements": [
         _text_box("b2s_s034_t0", "b2s:displaymath/text/body/0", [60, 100, 660, 130], "The equation below:\n"),
@@ -389,7 +387,7 @@ def test_integrity_excuses_a_slide_by_id_when_the_source_retitled_it():
     did (live seed 607: `ungroup` on "Why decks and sources diverge", then a sync to the `retitle`
     variant, which calls that frame something else), and the slide was accused of the very group its
     own edit had dissolved. The objectId is the one name of a slide a sync cannot change."""
-    import sync_check as sc
+    from beamer2slides.devtools import sync_check as sc
 
     model = sc.Model({"slides": [{"objectId": "b2s_s002", "pageElements": [
         _page_element("b2s_s002_t1", "b2s:diverge/text/title/0", [40, 30, 600, 60],
@@ -441,14 +439,14 @@ class Run:
                 save_timings()
 
     def convert(self, pdf: Path) -> None:
-        from deck_edits import LiveDeck
+        from beamer2slides.devtools.deck_edits import LiveDeck
         # --force-rebuild: the folder holds the deck of the previous run with that run's deck
         # edits still on it, and the rebuild guard would refuse to replace it (guard.py).
         self.timed("convert", lambda: self.cli("convert", pdf, "--out", self.out, "--force-rebuild"))
         self.deck = LiveDeck(json.loads((self.out / "emit.json").read_text(encoding="utf-8"))["presentationId"])
 
     def edit(self, *specs: dict) -> list[dict]:
-        from deck_edits import verified
+        from beamer2slides.devtools.deck_edits import verified
         self.deck.read()
         out = []
         for spec in specs:
@@ -480,7 +478,7 @@ class Run:
         return execute(self.deck.api.presentations().get(presentationId=self.deck.pid, fields="revisionId"))["revisionId"]
 
     def base_ids(self) -> set[str] | None:
-        from sync_check import ids_in
+        from beamer2slides.devtools.sync_check import ids_in
         base = next((p for p in (self.out / "sync" / "base.json", self.out / "base.json") if p.exists()), None)
         return ids_in(json.loads(base.read_text(encoding="utf-8"))) if base else None
 
@@ -488,7 +486,7 @@ class Run:
         """What the checker says about the deck's structure - all of it. It used to have one
         sentence filtered out, the one it said about every deck with display maths; the checker
         now tells a display equation from an inline formula itself (`sync_check.on_a_text_line`)."""
-        import sync_check as sc
+        from beamer2slides.devtools import sync_check as sc
         return sc.integrity(model, before=self.before, base_ids=self.base_ids())
 
     def check(self, variant: str, pdf: Path, report: dict, expectations: list[dict], *, drop: tuple[str, ...] = (),
@@ -505,7 +503,7 @@ class Run:
         the same thing the source did, the deck wins and the source's check cannot hold: `gone`
         names frames deleted in the deck, `dragged` frames moved there, `overridden` the texts the
         deck kept instead. All three are the scenario declaring which side of a conflict it arranged."""
-        import sync_check as sc
+        from beamer2slides.devtools import sync_check as sc
         flags = stress.VARIANTS[variant]
         model = self.deck.read()
         kept = [c for e in expectations if e["edit"] not in drop for c in e["checks"]]
@@ -550,7 +548,7 @@ _fresh_guard = threading.Lock()
 
 def fresh_conversion(variant: str):
     """(folder, model) of a fresh conversion of a source version, converted once per session."""
-    import sync_check as sc
+    from beamer2slides.devtools import sync_check as sc
     with _fresh_guard:
         lock = _fresh_locks.setdefault(variant, threading.Lock())
     with lock:
@@ -764,7 +762,7 @@ def scenario_pull(run: Run):
     sync that follows must call them converged and write nothing."""
     if reason := cli_missing("pull"):
         pytest.skip(reason)
-    import sync_check as sc
+    from beamer2slides.devtools import sync_check as sc
     src = run.out / "src"
     src.mkdir(exist_ok=True)
     stress.write_figures(src / "figures")

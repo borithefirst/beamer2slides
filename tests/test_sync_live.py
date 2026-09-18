@@ -31,10 +31,8 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / "tools"))
-sys.path.insert(0, str(ROOT / "tests"))
 
-from test_slides_alignment import MAIN, google_unavailable  # noqa: E402
+from .test_slides_alignment import MAIN, google_unavailable
 
 _spec = importlib.util.spec_from_file_location("sync_build", ROOT / "tests" / "decks" / "sync" / "build.py")
 sync_build = importlib.util.module_from_spec(_spec)
@@ -115,14 +113,14 @@ class Run:
         return done
 
     def convert(self, pdf: Path) -> None:
-        from deck_edits import LiveDeck
+        from beamer2slides.devtools.deck_edits import LiveDeck
         # --force-rebuild: a scenario folder holds the deck of the previous run, with that run's
         # deck edits still on it, and the rebuild guard would refuse to replace it (guard.py).
         self.cli("convert", pdf, "--out", self.out, "--force-rebuild")
         self.deck = LiveDeck(json.loads((self.out / "emit.json").read_text(encoding="utf-8"))["presentationId"])
 
     def edit(self, *specs: dict) -> list[dict]:
-        from deck_edits import verified
+        from beamer2slides.devtools.deck_edits import verified
         self.deck.read()
         out = []
         for spec in specs:
@@ -154,7 +152,7 @@ class Run:
         return execute(self.deck.api.presentations().get(presentationId=self.deck.pid, fields="revisionId"))["revisionId"]
 
     def base_ids(self) -> set[str] | None:
-        from sync_check import ids_in
+        from beamer2slides.devtools.sync_check import ids_in
         base = next((p for p in (self.out / "sync" / "base.json", self.out / "base.json") if p.exists()), None)
         return ids_in(json.loads(base.read_text(encoding="utf-8"))) if base else None
 
@@ -170,7 +168,7 @@ class Run:
         `converged`: converged entries the report must list; `no_writes_since`: the revision the sync
         must have left alone (and listed no changes); `allow_ungrouped`: slides whose formula pictures
         the deck ungrouped on purpose."""
-        import sync_check as sc
+        from beamer2slides.devtools import sync_check as sc
         flags = sync_build.VARIANTS[variant]
         model = self.deck.read()
         kept = [c for e in expectations if e["edit"] not in drop for c in e["checks"]]
@@ -218,7 +216,7 @@ _fresh_guard = threading.Lock()
 
 def fresh_conversion(variant: str):
     """(folder, model) of a fresh conversion of a source version, converted once per session."""
-    import sync_check as sc
+    from beamer2slides.devtools import sync_check as sc
     with _fresh_guard:
         lock = _fresh_locks.setdefault(variant, threading.Lock())
     with lock:
@@ -343,7 +341,7 @@ def scenario_deletions(run: Run):
     deleted, a bullet the deck reworded."""
     run.convert(build("v1"))
     fresh = fresh_conversion("v1")[1]
-    from deck_edits import donor_image_url
+    from beamer2slides.devtools.deck_edits import donor_image_url
     exps = run.edit(
         E("add_image", slide=VERSIONS, url=donor_image_url(run.deck.api, fresh.pres["presentationId"]), box=[540, 250, 150, 100]),
         E("delete_element", slide=RESULTS, target={"text": "Same element"}),
@@ -585,7 +583,7 @@ def scenario_pull_wording(run: Run):
     pdf = sync_build.compile_tex(tex)
     revision = run.revision()
     report = run.sync(pdf)
-    import sync_check as sc
+    from beamer2slides.devtools import sync_check as sc
     run.problems += sc.check_all(run.deck.read(), [c for e in exps for c in e["checks"]])
     run.problems += sc.check_report(report, converged=[["mistakes"], ["sync report"]], no_conflicts=True)
     if sc.changes(report):
@@ -600,8 +598,8 @@ def scenario_pull_picture(run: Run):
     object (the source draws that picture now) instead of putting a second one next to it."""
     if reason := cli_missing("pull"):
         pytest.skip(reason)
-    import sync_check as sc
-    from deck_edits import donor_image_url
+    from beamer2slides.devtools import sync_check as sc
+    from beamer2slides.devtools.deck_edits import donor_image_url
     src = run.out / "src"
     src.mkdir(exist_ok=True)
     tex = src / "talk.tex"
@@ -676,8 +674,8 @@ def test_checker_controls():
     for reason in (pdflatex_missing(), google_unavailable()):
         if reason:
             pytest.skip(reason)
-    import sync_check as sc
-    from sync_check import EMU_PER_PT
+    from beamer2slides.devtools import sync_check as sc
+    from beamer2slides.devtools.sync_check import EMU_PER_PT
     run = Run("checker-controls")
     try:
         run.convert(build("v1"))
@@ -731,14 +729,14 @@ def test_edit_catalogue():
     for reason in (pdflatex_missing(), google_unavailable()):
         if reason:
             pytest.skip(reason)
-    import sync_check as sc
-    from deck_edits import catalogue, donor_image_url
+    from beamer2slides.devtools import sync_check as sc
+    from beamer2slides.devtools.deck_edits import catalogue, donor_image_url
     run = Run("edit-catalogue")
     try:
         run.convert(build("v1"))
         donor = donor_image_url(run.deck.api, fresh_conversion("v1")[1].pres["presentationId"])
         problems, expectations = [], []
-        from deck_edits import verified
+        from beamer2slides.devtools.deck_edits import verified
         for spec in catalogue(donor):
             exp, bad = verified(run.deck, spec)
             problems += bad
@@ -746,7 +744,7 @@ def test_edit_catalogue():
         model = run.deck.read()
         problems += [f"at the end: {p}" for p in sc.check_all(model, [c for e in expectations for c in e["checks"]])]
         problems += sc.integrity(model, allow_ungrouped={e["args"]["slide"] for e in expectations if e["edit"] == "ungroup"})
-        from deck_edits import EDITS
+        from beamer2slides.devtools.deck_edits import EDITS
         problems += [f"edit kind not in the catalogue: {k}" for k in set(EDITS) - {e["edit"] for e in expectations}]
     finally:
         run.log.close()

@@ -22,17 +22,15 @@ The live campaign (real decks, marker `sync`) is opt-in:
 import copy
 import os
 import re
-import sys
 from pathlib import Path
 
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / "tools"))
 
-import fuzz_sync  # noqa: E402
-import loss_oracle  # noqa: E402
-from beamer2slides import snapshot  # noqa: E402
+from beamer2slides.devtools import fuzz_sync
+from beamer2slides.devtools import loss_oracle
+from beamer2slides import snapshot
 
 # Rounds of the default run; every seed is a different deck, edit set and source change.
 ROUNDS = int(os.environ.get("B2S_FUZZ_ROUNDS", "40"))
@@ -65,8 +63,7 @@ def test_a_broken_label_invariant_sends_far_fewer_slides_to_the_wrong_frame(tmp_
     on them the check leaves exactly one frame wrong, a label pasted onto a frame added in the same
     version while its own frame was deleted, which nothing in either PDF can tell from a frame
     written from scratch."""
-    sys.path.insert(0, str(ROOT / "tools"))
-    import fuzz_labels
+    from beamer2slides.devtools import fuzz_labels
 
     rounds = [r for seed in range(100) for r in fuzz_labels.round_once(seed, 0.5, tmp_path)]
     sound = [r for r in rounds if not r["broke"]]
@@ -93,8 +90,7 @@ def test_a_frame_the_source_moved_across_another_keeps_its_slide(tmp_path):
     `identity.cross_pairs` pairs those leftovers when the content is unmistakable. Measured over
     3000 rounds: 5.53% -> 0.00% of the frames in sound rounds that moved one, and 19.15% -> 1.18%
     when a label was broken in the same round. The 300 seeds here hold that where it matters."""
-    sys.path.insert(0, str(ROOT / "tools"))
-    import fuzz_labels
+    from beamer2slides.devtools import fuzz_labels
 
     rounds = [r for seed in range(300) for r in fuzz_labels.round_once(seed, 0.5, tmp_path)]
     moved = [r for r in rounds if r["reordered"]]
@@ -352,7 +348,7 @@ def test_element_objects_finds_created_and_tagged_objects():
 
 def test_catches_a_picture_the_person_chose_being_overwritten():
     """Compared by pixel signature: Google hands out a new contentUrl for an unchanged picture."""
-    import fuzz_world as W
+    from beamer2slides.devtools import fuzz_world as W
     mine = {"contentHash": "m", "signature": W.picture_signature(b"person picture")}
     theirs = {"contentHash": "c", "signature": W.picture_signature(b"source picture")}
     base = {"slides": [{"key": "f1", "objectId": "s1", "elements": [

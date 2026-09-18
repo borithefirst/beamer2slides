@@ -37,9 +37,8 @@ MAIN = main_checkout()
 for var, name in (("B2S_TOKEN", "token.json"), ("B2S_CLIENT_SECRET", "client_secret.json")):
     if (MAIN / name).exists():
         os.environ.setdefault(var, str(MAIN / name))
-sys.path.insert(0, str(ROOT / "tools"))
 
-import alignment  # noqa: E402
+from beamer2slides.devtools import alignment
 
 pytestmark = pytest.mark.slides
 

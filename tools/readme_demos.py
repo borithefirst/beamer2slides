@@ -47,8 +47,8 @@ def pdflatex(tex: Path, runs: int = 2) -> None:
 
 def shot(name: str) -> None:
     """Thumbnail and read-back of the slide, as they are now."""
-    from deck_edits import LiveDeck
-    from sync_check import presentation_id
+    from beamer2slides.devtools.deck_edits import LiveDeck
+    from beamer2slides.devtools.sync_check import presentation_id
     from beamer2slides.gslides import save_thumbnail
     deck = LiveDeck(presentation_id(str(SYNC)))
     (SYNC / "shots").mkdir(parents=True, exist_ok=True)
@@ -66,8 +66,8 @@ def sync_step(step: str) -> None:
         beamer2slides("convert", src / "demo.pdf", "--out", SYNC, "--force-rebuild", "--backup", "none")
         shot("1-converted")
     elif step == "edit":
-        from deck_edits import LiveDeck, add_text_box, bold, recolour
-        from sync_check import presentation_id
+        from beamer2slides.devtools.deck_edits import LiveDeck, add_text_box, bold, recolour
+        from beamer2slides.devtools.sync_check import presentation_id
         deck = LiveDeck(presentation_id(str(SYNC)))
         recolour(deck, SLIDE, "Slides elements", "#188038", BODY)
         bold(deck, SLIDE, "Slides elements", BODY)
@@ -97,7 +97,7 @@ def adopt_slide() -> None:
         pid = presentation_id(str(ROOT / "out" / "demo"))
         cache.write_text(json.dumps(execute(slides_service().presentations().get(presentationId=pid))), encoding="utf-8")
     pres = json.loads(cache.read_text(encoding="utf-8"))
-    from sync_check import Model
+    from beamer2slides.devtools.sync_check import Model
     keep = Model(pres).one(SLIDE).index
     pres["slides"] = [pres["slides"][keep]]
     size = json.loads((ROOT / "out" / "demo" / "deck.json").read_text(encoding="utf-8"))["slides"][0]["size"]

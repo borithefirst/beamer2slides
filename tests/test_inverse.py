@@ -18,7 +18,7 @@ from pathlib import Path
 
 import pytest
 
-import inverse_edits as ed
+from . import inverse_edits as ed
 from beamer2slides.compare import HOLE, bullet_sig, compare, match_slides, style_diffs, word_diff
 from beamer2slides.inverse import (Candidate, Context, Planner, Workspace, balance_span, colour_name, enclosing_group,
                                    ensure_preamble, frame_latex, latex_escape, runs_latex, size_switch)
@@ -244,7 +244,7 @@ TEXT_KINDS = {"text", "style", "bullet", "align", "paragraph_order", "paragraph_
 
 @pytest.mark.parametrize("name", ["01_basic", "05_overlays_notes", "09_metropolis_fira", "10_helvet", "12_metropolis_talk"])
 def test_deck_ir_reads_back_what_emit_writes(name):
-    from slides_sim import simulate
+    from .slides_sim import simulate
     from beamer2slides.classify import classify
     from beamer2slides.deck_ir import deck_ir
     from beamer2slides.extract import extract, select_overlays
@@ -258,7 +258,7 @@ def test_deck_ir_reads_back_what_emit_writes(name):
 
 
 def test_deck_ir_sees_slides_edits():
-    from slides_sim import simulate
+    from .slides_sim import simulate
     from beamer2slides.classify import classify
     from beamer2slides.deck_ir import deck_ir
     from beamer2slides.extract import extract, select_overlays

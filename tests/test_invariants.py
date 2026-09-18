@@ -16,6 +16,7 @@ and/or bbox, reason); an entry that no longer matches anything fails too, so the
 """
 
 import json
+from importlib import resources
 from pathlib import Path
 
 import pytest
@@ -25,7 +26,9 @@ from beamer2slides import checks
 HERE = Path(__file__).resolve().parent
 PDFS = sorted(p for p in (HERE / "decks" / "out").glob("*.pdf") if not p.stem.endswith("-handout")) + \
        sorted((HERE / "themes" / "out").glob("*/talk.pdf"))
-ALLOW = json.loads((HERE / "invariants_allow.json").read_text(encoding="utf-8"))
+# Through the tests package, like emit's calibration: a build that stages the sources elsewhere
+# keeps the data beside the module, not beside __file__.
+ALLOW = json.loads((resources.files(__package__) / "invariants_allow.json").read_text(encoding="utf-8"))
 
 
 def name(pdf: Path) -> str:

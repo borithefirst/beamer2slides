@@ -222,8 +222,7 @@ def sync_story(folder: Path, out: Path, page: int) -> Path | None:
     `folder` is a converted out folder with `shots/2-edited.{png,json}` and `shots/3-synced.{png,json}`
     (thumbnail and presentations.get of the slide, before and after the sync) and the rewritten
     source's PDF in `src/`. The boxes come from the read-back, found by the words each edit touched."""
-    sys.path.insert(0, str(ROOT / "tools"))
-    from sync_check import Model
+    from beamer2slides.devtools.sync_check import Model
     shots = folder / "shots"
     if not all((shots / f"{n}.{x}").exists() for n in ("2-edited", "3-synced") for x in ("png", "json")):
         print(f"no sync shots in {shots}: sync.png not made")

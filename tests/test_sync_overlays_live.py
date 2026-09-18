@@ -16,8 +16,8 @@ import json
 
 import pytest
 
-from test_slides_alignment import google_unavailable  # noqa: E402
-from test_sync_live import OUT, Run, build, cli_missing, pdflatex_missing  # noqa: E402
+from .test_slides_alignment import google_unavailable
+from .test_sync_live import OUT, Run, build, cli_missing, pdflatex_missing
 
 pytestmark = pytest.mark.sync
 
@@ -32,7 +32,7 @@ def run():
             pytest.skip(reason)
     OUT.mkdir(parents=True, exist_ok=True)
     r = Run("overlays-all")
-    from deck_edits import LiveDeck
+    from beamer2slides.devtools.deck_edits import LiveDeck
     r.cli("convert", build("v1"), "--out", r.out, "--overlays", "all", "--force-rebuild")
     r.deck = LiveDeck(json.loads((r.out / "emit.json").read_text(encoding="utf-8"))["presentationId"])
     yield r
@@ -48,7 +48,7 @@ def test_the_deck_has_a_slide_per_step(run):
 
 
 def test_syncing_the_same_source_writes_nothing(run):
-    import sync_check as sc
+    from beamer2slides.devtools import sync_check as sc
     revision = run.revision()
     report = run.sync(build("v1"))
     assert report["overlays"] == "all", "sync must keep the steps the deck was converted with"
@@ -58,7 +58,7 @@ def test_syncing_the_same_source_writes_nothing(run):
 
 
 def test_a_source_change_lands_and_every_step_stays(run):
-    import sync_check as sc
+    from beamer2slides.devtools import sync_check as sc
     pdf = build("reword")
     report = run.sync(pdf)
     model = run.deck.read()
