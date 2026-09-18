@@ -102,12 +102,21 @@ def src_remove_paragraph(rng, doc):
 
 
 def src_move_element(rng, doc):
-    el = _pick(rng, [e for s in doc["slides"] for e in s["elements"] if e.get("role") != "title"])
-    if not el:
+    """A move takes what is anchored to the element: an inline formula picture is placed by the line
+    it sits in, so a source that moves the text moves the picture with it. Moving the text alone
+    meant `merge.unit_shift` could never find one step for the unit, and `move` - a write path of its
+    own (`sync.Sync.move_requests`) - came up twice in 800 offline steps. One move in four is still
+    of a single anchored member, which is the re-placed formula `unit_shift` exists to refuse."""
+    options = [(s, e) for s in doc["slides"] for e in s["elements"] if e.get("role") != "title"]
+    if not options:
         return None
+    s, el = rng.choice(options)
     dx, dy = rng.choice([-20, -8, 8, 20]), rng.choice([-16, -6, 6, 16])
-    el["bbox"] = [el["bbox"][0] + dx, el["bbox"][1] + dy, el["bbox"][2] + dx, el["bbox"][3] + dy]
-    return f"move {el['id']}"
+    anchored = [e for e in s["elements"] if e.get("anchor") == el["id"]]
+    moving = [rng.choice(anchored)] if anchored and rng.random() < 0.25 else [el] + anchored
+    for e in moving:
+        e["bbox"] = [e["bbox"][0] + dx, e["bbox"][1] + dy, e["bbox"][2] + dx, e["bbox"][3] + dy]
+    return f"move {' '.join(e['id'] for e in moving)}"
 
 
 def src_resize_element(rng, doc):
@@ -285,16 +294,25 @@ def src_collide(rng, doc, touched=()):
     campaign was barely exercising the merge it exists to test. A real deck is not random either -
     the author revises the frame the reader was reading."""
     ids = set(touched)
-    els = [e for s in doc["slides"] for e in s["elements"] if e["id"] in ids]
-    if not els:
+    options = [(s, e) for s in doc["slides"] for e in s["elements"] if e["id"] in ids]
+    if not options:
         return None
-    el = rng.choice(els)
+    s, el = rng.choice(options)
     if el["kind"] == "table":
         r, c = rng.randrange(len(el["cells"])), rng.randrange(len(el["cells"][0]))
         el["cells"][r][c] = [W.run(rng.choice(W.WORDS) + "-ours")]
         return f"also rewrite cell {r},{c} of {el['id']}"
-    how = rng.choice(("reword", "append", "drop") if len(el["paragraphs"]) > 1 else ("reword", "append"))
-    if how == "drop":                     # (the shape live seeds 608/616 died on, from the other side)
+    how = rng.choice(("reword", "append", "drop", "move") if len(el["paragraphs"]) > 1 else ("reword", "append", "move"))
+    if how == "move":
+        # The source moved the very box the person had just edited, and changed nothing else about
+        # it: the only shape that makes `merge.plan_unit` write a `move` (the source's place onto the
+        # deck's own objects, `sync.Sync.move_requests`). Both sides have to meet on one unit for it,
+        # so drawing the two targets apart made that write path come up 2 times in 800 offline steps
+        # - and it is the path live seed 903 broke.
+        dx, dy = rng.choice([-20, -8, 8, 20]), rng.choice([-16, -6, 6, 16])
+        for e in [el] + [x for x in s["elements"] if x.get("anchor") == el["id"]]:
+            e["bbox"] = [e["bbox"][0] + dx, e["bbox"][1] + dy, e["bbox"][2] + dx, e["bbox"][3] + dy]
+    elif how == "drop":                   # (the shape live seeds 608/616 died on, from the other side)
         el["paragraphs"].pop(rng.randrange(len(el["paragraphs"])))
         el["bbox"][3] -= 12
     elif how == "append":
