@@ -240,7 +240,12 @@ def build_ours(pdf: Path, work: Path, base: dict, overlays: str = "last") -> dic
     infos = [identity.slide_info(s) for s in deck["slides"]]
     base_infos = [{"label": b.get("label"), "title": b.get("title") or "", "text": b.get("text") or "", "page": b["page"]}
                   for b in base["slides"]]
-    keys, pairs = identity.inherit_slide_keys(base_infos, [b["key"] for b in base["slides"]], infos)
+    moves = identity.label_moves(base_infos, infos)
+    for m in moves:  # indices are no use to a reader of the report; the base's keys are
+        m["slide"] = base["slides"][m["base"]]["key"]
+        m["frame_is"] = base["slides"][m["frame_is"]]["key"] if m["frame_is"] is not None else None
+        m["slide_is"] = infos[m["slide_is"]]["title"] if m["slide_is"] is not None else None
+    keys, pairs = identity.inherit_slide_keys(base_infos, [b["key"] for b in base["slides"]], infos, moves)
     ekeys, fps = [], []
     for j, slide in enumerate(deck["slides"]):
         matched = [{"key": e["key"], "kind": e["kind"], "role": e.get("role"), "fingerprint": e["fingerprint"]}
@@ -249,7 +254,8 @@ def build_ours(pdf: Path, work: Path, base: dict, overlays: str = "last") -> dic
         ekeys.append(k)
         fps.append(f)
     entries = snapshot.slide_entries(deck, work, keys, ekeys, fps)
-    return {"source": pdf, "pdf": prepared.pdf, "out": work, "plan": plan, "deck": deck, "slides": entries, "pairs": pairs}
+    return {"source": pdf, "pdf": prepared.pdf, "out": work, "plan": plan, "deck": deck, "slides": entries,
+            "pairs": pairs, "label_moves": moves}
 
 
 # ---------------------------------------------------------------- requests
@@ -1491,7 +1497,15 @@ class Sync:
             w = by_plan[id(p)]
             if p["action"] in ("delete",):
                 continue
-            if p["action"] in ("keep_removed", "gone"):
+            if p["action"] == "gone":
+                # The deck deleted this slide while the source still has the frame. The entry holds
+                # the frame's key and its place in the order (`base_order`); what it says follows the
+                # source, or a frame whose label or title changed after the deletion stops looking
+                # like this entry and comes back as a new slide.
+                b, o = self.base["slides"][p["base"]], self.ours["slides"][p["ours"]]
+                entries[f"gone:{p['key']}"] = {**b, **{k: o.get(k) for k in ("label", "title", "text", "page")}}
+                continue
+            if p["action"] == "keep_removed":
                 entries[p["objectId"] or f"gone:{p['key']}"] = self.base["slides"][p["base"]]
                 continue
             o = self.ours["slides"][p["ours"]]

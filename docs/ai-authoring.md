@@ -94,9 +94,28 @@ source until its conversion matches the deck, and writes what it could not resol
 `<out>/pull/edits.md`, each item with the frame's `file:line`. Those leftovers are the ones worth
 your attention.
 
-A conflict about **identity** - a label that moved, a frame that cannot be matched - is different:
-do not guess. Report what you see and let a person say which frame is which. Everything else in
-this system is recoverable; a wrong identity silently moves somebody's work onto another slide.
+A conflict about **identity** is different. It looks like this:
+
+```
+- `mobile` / **label**, the label moved: identity taken from the content instead
+  - base:   the slide `mobile` says "Moving labels", which the source now has under "Arriving labels"
+  - ours:   the frame `mobile` now says "Arriving labels", which is what the slide `arriving` says
+```
+
+Sync is telling you that `[label=mobile]` is not on the frame this deck's slide was made from. It
+has already done the safe thing - either it went by the content (`the label moved`) or it followed
+the label and re-paired nothing (`either the label moved or that passage did`) - and it is asking
+you to put the source right so the next sync has nothing to work out.
+
+**Do not guess, and do not resolve it by moving the label again.** Open the `.tex`, find the two
+frames named in the conflict, and either put the label back on the frame whose words the deck's
+slide shows, or say in your reply that the two frames genuinely changed places and let a person
+confirm. Everything else in this system is recoverable; a wrong identity silently moves somebody's
+work onto another slide.
+
+A **warning** about a label (renamed, or gone) means the content recognised the frame anyway, so
+nothing was at risk - but put the label back to what it was, or the next edit has nothing to fall
+back on.
 
 ---
 

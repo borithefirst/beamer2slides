@@ -605,6 +605,38 @@ def empty_report() -> dict:
             "slides": {"created": [], "deleted": [], "moved": [], "kept": [], "user_added": []}, "warnings": []}
 
 
+def report_label_moves(moves: list[dict], report: dict) -> None:
+    r"""Conflicts for the labels `identity.label_moves` found somewhere else than it left them.
+
+    There is no resolution to offer here, which is the point: a three-way merge writes what it can
+    and hands back what it cannot, and which frame is which is exactly what it cannot. What sync
+    did with the slide is said plainly - either the content decided, or the label was followed
+    anyway - so whoever reads this knows what they are looking at before they go and fix the
+    `.tex` (docs/ai-authoring.md).
+    """
+    for m in moves:
+        moved = m["verdict"] == "moved"
+        ours_says = f"the frame `{m['label']}` now says \"{(m['ours_title'] or '').strip()}\""
+        if m.get("frame_is"):
+            ours_says += f", which is what the slide `{m['frame_is']}` says"
+        base_says = f"the slide `{m['label']}` says \"{(m['base_title'] or '').strip()}\""
+        if m.get("slide_is"):
+            base_says += f", which the source now has under \"{m['slide_is']}\""
+        report["conflicts"].append({
+            "slide": m.get("slide") or m["label"], "element": None, "field": "label",
+            "base": base_says, "ours": ours_says, "theirs": None,
+            "resolution": ("the label moved: identity taken from the content instead" if moved else
+                           "either the label moved or that passage did: followed the label, nothing re-paired"),
+        })
+        report["warnings"].append(
+            f"label `{m['label']}` is not on the frame this deck's slide was made from" + (
+                ". Deck edits belong to the words a person edited, so sync went by the content and not by the "
+                "label. Put the label back on its own frame" if moved else
+                ", or a passage moved between two frames - from the PDF alone the two look the same. Sync "
+                "followed the label. Check the `.tex`: if the label moved, put it back") +
+            ": docs/labels.md, \"If a label does change\".")
+
+
 def plan_merge(base: dict, ours: dict, theirs: dict, adopt=None) -> dict:
     """ours: {"slides": [slide entries with inherited keys], "pairs": {ours index: base index}}.
     `adopt`: see plan_unit (a picture the deck already shows).
@@ -615,10 +647,19 @@ def plan_merge(base: dict, ours: dict, theirs: dict, adopt=None) -> dict:
     pairs = {int(k): v for k, v in ours["pairs"].items()}
     matched_base = set(pairs.values())
     plans = []
+    report_label_moves(ours.get("label_moves") or [], report)
 
     for j, o in enumerate(ours["slides"]):
         i = pairs.get(j)
         b = base_slides[i] if i is not None else None
+        if b is not None and b.get("label") and o.get("label") != b.get("label"):
+            # The label is gone or different, and the content recognised the frame anyway. Nothing
+            # is at risk this time; the next version of the source has one hook fewer to hang on.
+            now = f"`{o['label']}`" if o.get("label") else "gone"
+            report["warnings"].append(
+                f"slide {b['key']}: the frame's label is {now} now, not `{b['label']}`; this slide was "
+                f"matched by what it says instead. A label is what makes a slide's identity survive "
+                f"an edit the content alone cannot explain - see docs/labels.md.")
         read = live.get(b["objectId"]) if b and b.get("objectId") else None
         if b is None:
             report["slides"]["created"].append(o["key"])

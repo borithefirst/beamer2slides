@@ -333,6 +333,20 @@ warn|error|off` (default warn) reports unlabelled frames and labels on more than
 (`labels.survey`; overlay steps of a frame share its label and are consecutive, so they are not
 duplicates). `docs/ai-authoring.md` is the prompting guide for an AI that maintains the .tex: the
 invariants, how to repair a source that broke them, and what to do with a sync conflict.
+A label that moved to another frame (docs/sync.md, "When a label moved"): nothing in the PDF says so,
+and following it writes one frame's text onto another frame's slide with the person's edits still on
+it - no loss, so the loss oracle can't see it. `identity.label_moves` asks whether the two slides a
+label pairs say the same thing and, if not, whether some other slide *nothing else accounts for*
+explains them better: both directions -> `moved` (the content decides), one -> `unsure` (the label is
+followed; it may equally be a passage the author moved), neither -> silence (a frame rewritten from
+scratch). Both verdicts are conflicts in the report (`field: label`); a renamed or dropped label the
+content still recognises is a warning. Measured by `tools/fuzz_labels.py` against a tagged truth:
+over 3000 rounds, misidentified frames 14.99% -> 1.22% when the invariant is broken, 0 false alarms
+in 1561 sound rounds, nothing ever worse than before (fixed seeds in `tests/test_sync_fuzz.py`).
+`fuzz_sync` moves/renames/drops labels too; that found `sync.new_base` freezing a `gone` slide's
+entry at the moment of deletion (its label/title/words now follow the source, its key and place stay)
+and a renamed label costing a slide its identity (`align_slides.pairable` lets the content fix it
+when neither side knows the other's label).
 
 Alignment on Google's renderer (`tools/alignment.py out/<deck>`, after `fidelity`): reads the
 Slides element boxes with `presentations.get` (cached in slides_elements.json) and compares each

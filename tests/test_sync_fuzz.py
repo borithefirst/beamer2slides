@@ -54,6 +54,30 @@ def test_offline_round_loses_nothing(seed):
                     f"  deck:   {'; '.join(small['deck'])}\n  source: {'; '.join(small['source'])}")
 
 
+def test_a_broken_label_invariant_sends_far_fewer_slides_to_the_wrong_frame(tmp_path):
+    """`tools/fuzz_labels.py` on fixed seeds: what the moved-label check is worth, measured against
+    a truth the synthetic source knows (every frame is tagged, so a pairing is right or wrong).
+
+    The campaign at 3000 rounds, which is where the thresholds were set: with the labels sound the
+    check never once spoke, and with one broken it took misidentified frames from 14.99% to 1.22%
+    - and of the rounds still wrong, 42 of 43 were reported as a conflict. The 100 seeds here are
+    enough to fail if any of that stops being true."""
+    sys.path.insert(0, str(ROOT / "tools"))
+    import fuzz_labels
+
+    rounds = [fuzz_labels.round_once(seed, 0.5, tmp_path) for seed in range(100)]
+    sound = [r for r in rounds if not r["broke"]]
+    broken = [r for r in rounds if r["broke"] and not r["reordered"]]
+    assert len(sound) > 30 and len(broken) > 30  # the harness really does break labels, and not always
+    assert [r["said"] for r in sound] == ["quiet"] * len(sound)  # never a word about a sound source
+    assert sum(r["wrong"]["now"] for r in sound) == sum(r["wrong"]["before"] for r in sound)
+    was, now = (sum(r["wrong"][k] for r in broken) for k in ("before", "now"))
+    assert now * 5 < was, f"the check is not earning its place: {was} -> {now}"
+    silent = [r for r in broken if r["wrong"]["now"] and r["said"] == "quiet"]
+    assert not silent, f"wrong and said nothing: {[(r['seed'], r['ops']) for r in silent]}"
+    assert all(r["wrong"]["now"] <= r["wrong"]["before"] for r in rounds)  # never worse than before
+
+
 def test_the_round_notices_a_base_that_would_not_settle(tmp_path):
     """The settle check with a base broken on purpose: one that has forgotten a slide makes the next
     sync create it again, and the round has to say so."""

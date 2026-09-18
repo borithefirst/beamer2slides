@@ -53,6 +53,24 @@ def test_keys_stay_distinct_when_a_label_repeats():
     assert keys == base_keys and pairs == {0: 0, 1: 1}
 
 
+def test_a_leftover_step_is_not_handed_to_another_frame():
+    """One frame lost a step, another gained one. The unpaired base step and the unpaired source
+    step are both labelled, and both labels exist on both sides - two frames that both exist, so
+    neither slide may be read as the other however alike the steps look (`align_slides.pairable`)."""
+    base = [frame("motivation", 0, 0), frame("motivation", 1, 1), info("later", "Later on", "a bullet", 2)]
+    ours = [frame("motivation", 0, 0), info("later", "Later on", "a bullet", 1),
+            info("later", "Later on", "a bullet a bullet", 2)]
+    pairs = identity.align_slides(base, ours)
+    assert pairs == {0: 0, 1: 2}  # base's second motivation step and ours' second `later` step stay apart
+
+
+def test_a_renamed_label_keeps_the_slide_it_named():
+    """Neither label is known on the other side, so nothing else can claim either slide and the
+    words decide - or a rename in the source would bring the deck's slide back beside itself."""
+    base = [info("intro", "Intro", "why we do this", 0)]
+    assert identity.align_slides(base, [info("introduction", "Intro", "why we do this", 0)]) == {0: 0}
+
+
 def test_labelled_frames_still_pair_wherever_they_moved():
     base = [info("intro", "Intro", "hello", 0), info("outro", "Outro", "bye", 1)]
     ours = [info("outro", "Outro", "bye", 0), info("intro", "Intro", "hello", 1)]

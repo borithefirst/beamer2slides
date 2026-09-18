@@ -215,6 +215,38 @@ def src_repaint(rng, doc, out=None):
     return f"redraw {el['id']}"
 
 
+def _labelled(doc):
+    return [s for s in doc["slides"] if s.get("label")]
+
+
+def src_move_label(rng, doc):
+    """A label pasted onto another frame: the invariant break `identity.label_moves` is about. When
+    the other frame had one of its own this is a swap, which is the hardest shape of it."""
+    if len(doc["slides"]) < 2 or not _labelled(doc):
+        return None
+    src = rng.choice(_labelled(doc))
+    dst = rng.choice([s for s in doc["slides"] if s is not src])
+    name = src["label"]
+    src["label"], dst["label"] = dst.get("label"), name
+    return f"move label {name!r} onto {dst['title']!r}"
+
+
+def src_rename_label(rng, doc):
+    if not _labelled(doc):
+        return None
+    s = rng.choice(_labelled(doc))
+    was, s["label"] = s["label"], f"{s['label']}-renamed"
+    return f"rename label {was!r}"
+
+
+def src_drop_label(rng, doc):
+    if not _labelled(doc):
+        return None
+    s = rng.choice(_labelled(doc))
+    was, s["label"] = s["label"], None
+    return f"drop label {was!r}"
+
+
 def _renumber(doc):
     for i, s in enumerate(doc["slides"]):
         s["page"] = i
@@ -223,7 +255,8 @@ def _renumber(doc):
 SOURCE_OPS = {f.__name__[4:]: f for f in (src_reword, src_add_paragraph, src_remove_paragraph, src_move_element,
                                           src_resize_element, src_restyle, src_add_element, src_delete_element,
                                           src_add_slide, src_delete_slide, src_move_slide, src_retitle, src_notes,
-                                          src_background, src_repaint)}
+                                          src_background, src_repaint, src_move_label, src_rename_label,
+                                          src_drop_label)}
 
 
 # ---------------------------------------------------------------- deck edits (offline)

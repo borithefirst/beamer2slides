@@ -221,7 +221,12 @@ def build_ours(doc, base, out: Path) -> dict:
     infos = [slide_info(s) for s in doc["slides"]]
     base_infos = [{"label": b.get("label"), "title": b.get("title") or "", "text": b.get("text") or "", "page": b["page"]}
                   for b in base["slides"]]
-    keys, pairs = identity.inherit_slide_keys(base_infos, [b["key"] for b in base["slides"]], infos)
+    moves = identity.label_moves(base_infos, infos)
+    for m in moves:
+        m["slide"] = base["slides"][m["base"]]["key"]
+        m["frame_is"] = base["slides"][m["frame_is"]]["key"] if m["frame_is"] is not None else None
+        m["slide_is"] = infos[m["slide_is"]]["title"] if m["slide_is"] is not None else None
+    keys, pairs = identity.inherit_slide_keys(base_infos, [b["key"] for b in base["slides"]], infos, moves)
     ekeys, fps = [], []
     for j, s in enumerate(doc["slides"]):
         matched = [{"key": e["key"], "kind": e["kind"], "role": e.get("role"), "fingerprint": e["fingerprint"]}
@@ -229,7 +234,7 @@ def build_ours(doc, base, out: Path) -> dict:
         k, f = identity.slide_element_keys(s["elements"], out, matched)
         ekeys.append(k)
         fps.append(f)
-    return {"slides": entries(doc, out, keys, ekeys, fps), "pairs": pairs, "out": out}
+    return {"slides": entries(doc, out, keys, ekeys, fps), "pairs": pairs, "out": out, "label_moves": moves}
 
 
 def live_of(base) -> dict:
@@ -388,6 +393,8 @@ def rebase(base, ours, after, mplan, tok="2zz") -> dict:
             entries[sid] = base["slides"][p["base"]]
             if p["action"] == "gone":
                 sids[id(p)] = sid  # it keeps its place in the source's order (see the ordering below)
+                o = ours["slides"][p["ours"]]  # ... and says what the source says (sync.new_base)
+                entries[sid] = {**entries[sid], **{k: o.get(k) for k in ("label", "title", "text", "page")}}
             continue
         o = ours["slides"][p["ours"]]
         sid = f"b2s_{h6(p['key'])}_{tok}" if p["action"] == "create" else p["objectId"]

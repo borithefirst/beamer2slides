@@ -46,7 +46,13 @@ storage), `merge.py` (pure planning and diff3), `sync.py` (requests and the writ
   unpaired, i.e. read as slides the source had dropped: syncing an `--overlays all` deck against
   its own unchanged PDF planned to delete a step (and then crashed on the slide order). Found live
   on 2026-09-18, pinned in `tests/test_identity_labels.py`.
-  AI authors are told to label every frame (themes/google README, docs).
+  "Two different labels never pair" holds only where both labels exist on both sides, which means
+  two frames that both exist; a label neither side knows on the other is a label *renamed*, and
+  then the words decide, or a rename would bring the deck's slide back beside itself
+  (`align_slides.pairable`). See "When a label moved" below.
+  `beamer2slides label` writes a label into every frame that has none and `convert --check-labels`
+  says what a PDF's missing or duplicated labels will cost a later sync (docs/labels.md); AI
+  authors are told to label every frame and never change one (docs/ai-authoring.md).
 - **Element key** within a slide: `kind/role/ordinal` (e.g. `text/title/0`, `text/body/2`,
   `image/figure/0`, `image/math/1`), plus a **fingerprint**: plain text, PDF bbox, image sha1 of its
   crop, anchor element key. Ours elements inherit the key of the base element they match: most
@@ -289,6 +295,59 @@ batch size so a phase really takes several batches. `tests/test_sync_crash.py` h
 tests (write order, base validation, recovery, pull's atomic apply) and, under the `sync` marker,
 one case per point that really kills a sync of a real deck and checks with `tools/sync_check.py`
 that the deck edits are all still there and the deck converges.
+
+## When a label moved
+A frame label is a promise: the frame carrying it is the frame the deck's slide was made from
+(docs/labels.md). Rename one, or paste `[label=intro]` onto the next frame, and nothing in the PDF
+says so - the destination `intro` is simply on another page. Following it writes one frame's text
+onto another frame's slide, and the person's edits, which sync keeps, end up beside sentences they
+were never about. The frame that lost the label comes back as a second copy of itself.
+
+This is not a loss - nothing is deleted, no words disappear - so the loss oracle cannot see it.
+`identity.label_moves` is the check that can, and it works the only way available: by asking
+whether the two slides a label pairs say the same thing, and if not, whether some *other* slide
+explains them better. It looks only among slides nothing else accounts for, so a frame settled by
+its own label can never be stolen.
+
+- **`moved`** - the source's labelled frame is recognisably some other base slide, *and* the base's
+  labelled slide is recognisably some other source frame. The label is ignored and the content
+  decides. That is also where the person's edits belong: they edited those words, not that label.
+- **`unsure`** - only one of the two. Either a label moved, or the author moved a passage from one
+  frame to another; from the PDF the two look the same. The label is followed and nothing is
+  re-paired.
+- **silence** - neither. A frame rewritten from scratch looks exactly like a label move from one
+  side, and that is a plausible edit, not a broken invariant.
+
+Both verdicts are **conflicts** in the report (`field: label`), because which frame is which is a
+question with an answer and guessing it wrong is the one mistake here that quietly moves somebody's
+work. A label renamed or dropped where the content still recognises the frame is a **warning**: the
+slide kept its identity, but the source has one hook fewer for the next version.
+
+`tools/fuzz_labels.py` measures it against a truth the synthetic source knows (every frame is
+tagged, so a pairing is right or wrong). 3000 rounds, half of them breaking the invariant on
+purpose, plausible source edits either way:
+
+| | misidentified frames, before | with the check |
+|---|---|---|
+| labels sound | 0.03% | 0.03% |
+| labels sound, a frame moved | 4.31% | 4.31% |
+| labels broken | 14.99% | **1.22%** |
+| labels broken, a frame moved | 20.54% | 11.39% |
+
+The check never spoke once in 1561 rounds whose labels nobody touched, and no round came out worse
+than before it existed. Of the broken rounds still wrong without a reorder, 42 of 43 were reported
+as a conflict and one passed in silence (a frame renamed, retitled and reworded at once - nothing
+left to recognise it by; it becomes a new slide, and the old one is kept with its edits). The rows
+with a frame moved are the crossing-reorder limitation under "Not supported yet", which this check
+does not address. Fixed seeds run in the default suite
+(`tests/test_sync_fuzz.py::test_a_broken_label_invariant_sends_far_fewer_slides_to_the_wrong_frame`).
+
+`tools/fuzz_sync.py` also moves, renames and drops labels as source edits now. That found two
+things: a slide the deck deleted while the source keeps it (`gone`) kept a base entry frozen at the
+moment of deletion, so renaming its label or title afterwards made it a new frame and it came back
+(`sync.new_base` now lets a `gone` entry's label, title and words follow the source while its key
+and its place stay); and a renamed label used to cost the slide its identity outright, which is
+what `align_slides.pairable` now allows the content to fix.
 
 ## Reports
 `sync-report.json` (top level: `applied`, `overrides`, `conflicts` with field, base, ours, theirs

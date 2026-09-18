@@ -152,9 +152,10 @@ def test_labelled_and_unlabelled_mixed():
     got, pairs = identity.inherit_slide_keys(base, keys, ours)
     assert pairs == {0: 2, 1: 1}
     assert got == ["b", "title:plain#1", "new"]
-    # two different labels never pair up, however similar the frames are
+    # A label neither side knows on the other is a label renamed, and then the words decide: the
+    # deck's slide keeps its identity instead of coming back beside itself (tests/test_label_moves.py).
     got, pairs = identity.inherit_slide_keys([info("X", "same", "x")], ["x"], [info("X", "same", "y")])
-    assert pairs == {} and got == ["y"]
+    assert pairs == {0: 0} and got == ["x"]
 
 
 def test_element_keys_follow_content():

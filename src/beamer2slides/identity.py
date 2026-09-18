@@ -14,6 +14,9 @@ from pathlib import Path
 
 HOLE_MARK = "□"  # an inline formula picture's place in fingerprint text
 SLIDE_MATCH = 0.6     # least similarity of two unlabelled slides to be the same frame
+LABEL_SURE = 1.2      # a label pairing this alike (same title, most of the words) needs no second opinion
+LABEL_MOVED = 1.0     # a slide elsewhere this alike may be the frame the label used to name
+LABEL_MARGIN = 0.5    # ... but only if it beats the label's own pairing by this much
 KEY_MATCH = 0.5       # least similarity for an element keeping the key it would get anyway
 ELEMENT_MATCH = 0.35  # least similarity for an element inheriting another key
 # Render output, not source: "picture" says how a bare image reached its file (raw stream or
@@ -94,9 +97,8 @@ def slide_similarity(a: dict, b: dict) -> float:
     return ratio + (0.5 if same_title else 0.0)
 
 
-def align_slides(base: list[dict], ours: list[dict]) -> dict[int, int]:
-    """ours index -> base index. Labelled frames pair by label wherever they moved; the others by
-    an order-keeping alignment on (title, text) similarity, so an inserted frame shifts nothing.
+def label_pairs(base: list[dict], ours: list[dict]) -> dict[int, int]:
+    """ours index -> base index by label alone.
 
     A label can name several slides - every overlay step of a frame carries the frame's label, so
     `--overlays all` gives one per step - and then the n-th slide of that label pairs with the
@@ -111,23 +113,126 @@ def align_slides(base: list[dict], ours: list[dict]) -> dict[int, int]:
         free = base_labels.get(o.get("label") or "")
         if free:
             pairs[j] = free.pop(0)
-    # Unpaired slides: a labelled one can still match an unlabelled one (a label added or removed).
+    return pairs
+
+
+def _evidence(a: dict, b: dict) -> float:
+    """`slide_similarity`, but only where there is something to be similar about. Two frames that
+    say almost nothing - a full-page picture, a section divider - are alike by default, and that
+    is no reason to believe one of them is the other."""
+    if norm_title(a["title"]) and norm_title(a["title"]) == norm_title(b["title"]):
+        return slide_similarity(a, b)
+    if min(len(a["text"].split()), len(b["text"].split())) < 4:
+        return 0.0
+    return slide_similarity(a, b)
+
+
+def label_moves(base: list[dict], ours: list[dict]) -> list[dict]:
+    r"""Labels that look as if they moved to another frame (docs/sync.md, "When a label moved").
+
+    A label is a promise: the frame that carries it is the frame the deck's slide was made from.
+    Rename one, or paste `[label=intro]` onto the next frame, and following it would carry a
+    person's edits onto a slide they never touched. Nothing in the PDF says this happened - the
+    label is simply somewhere else - so the only witness is the content on both sides.
+
+    For each label the base and the source share, the check asks whether the two slides say the
+    same thing. Short of `LABEL_SURE` they do not quite, and then it looks for a better
+    explanation among the slides nothing else accounts for: does the source's labelled frame look
+    like some *other* base slide (`frame_is`), and does the base's labelled slide look like some
+    *other* source frame (`slide_is`)? An explanation counts only if it is good on its own
+    (`LABEL_MOVED`) *and* better than the label's own pairing by `LABEL_MARGIN` - which is what
+    keeps an overlay step, a retitled frame or a frame edited hard from setting this off.
+
+    - both, clearly: `moved`. The label is ignored for pairing and the content decides, which is
+      also where the person's edits belong - they edited those words, not that label.
+    - one of the two: `unsure`. Something in the deck looks exactly like what this label used to
+      name - which is either a label that moved, or a passage the author moved from one frame to
+      another. Nothing is re-paired and the report asks.
+    - neither: silence. A frame whose text was rewritten from scratch looks exactly like this, and
+      that is a plausible edit, not a broken invariant.
+
+    Both verdicts are reported as conflicts: which frame is which is a question with an answer,
+    and guessing it wrong is the one mistake in this program that quietly loses somebody's work.
+    """
+    pairs = label_pairs(base, ours)
+    own = {j: slide_similarity(base[i], ours[j]) for j, i in pairs.items()}
+    doubt = sorted(j for j, s in own.items() if s < LABEL_SURE)
+    if not doubt:
+        return []
+    # A pairing in doubt settles nothing, so both of its slides are free to be somebody else's
+    # partner - which is what lets a pair of labels swapped between two frames be seen at all.
+    settled_base = {i for j, i in pairs.items() if j not in doubt}
+    settled_ours = {j for j in pairs if j not in doubt}
+    free_base = [i for i in range(len(base)) if i not in settled_base]
+    free_ours = [j for j in range(len(ours)) if j not in settled_ours]
+
+    def best(scored):
+        top = (0.0, None)
+        for score, k in scored:
+            if score > top[0]:
+                top = (score, k)
+        return top
+
+    found: dict[str, dict] = {}
+    for j in doubt:
+        i = pairs[j]
+        here, slide_is = best((_evidence(base[i], ours[k]), k) for k in free_ours if k != j)
+        there, frame_is = best((_evidence(base[k], ours[j]), k) for k in free_base if k != i)
+        strong = (here >= LABEL_MOVED and here - own[j] >= LABEL_MARGIN,
+                  there >= LABEL_MOVED and there - own[j] >= LABEL_MARGIN)
+        if not any(strong):
+            continue
+        label = ours[j]["label"]
+        found.setdefault(label, {
+            "label": label, "verdict": "moved" if all(strong) else "unsure", "ours": j, "base": i,
+            "similarity": round(own[j], 2), "base_title": base[i]["title"], "ours_title": ours[j]["title"],
+            "slide_is": slide_is if strong[0] else None, "slide_score": round(here, 2) if strong[0] else None,
+            "frame_is": frame_is if strong[1] else None, "frame_score": round(there, 2) if strong[1] else None,
+        })
+    return list(found.values())
+
+
+def align_slides(base: list[dict], ours: list[dict], moves: list[dict] | None = None) -> dict[int, int]:
+    """ours index -> base index. Labelled frames pair by label wherever they moved; the others by
+    an order-keeping alignment on (title, text) similarity, so an inserted frame shifts nothing.
+    A label the content says has moved to another frame (`label_moves`) is not followed: its two
+    slides go into the alignment with the rest."""
+    if moves is None:
+        moves = label_moves(base, ours)
+    dropped = {m["ours"] for m in moves if m["verdict"] == "moved"}
+    pairs = {j: i for j, i in label_pairs(base, ours).items() if j not in dropped}
+    freed = {m["base"] for m in moves if m["verdict"] == "moved"}
     bs = [i for i in range(len(base)) if i not in pairs.values()]
     os_ = [j for j in range(len(ours)) if j not in pairs]
     m, n = len(bs), len(os_)
+    theirs_labels = {o["label"] for o in ours if o.get("label")}
+    base_labels = {b["label"] for b in base if b.get("label")}
+
+    def pairable(i: int, j: int) -> bool:
+        """May an unpaired base slide and an unpaired source frame be the same frame? Two labels
+        that both exist on both sides belong to two frames that both exist, and pairing across
+        them would be reading one as the other. Everything else is allowed to go by the content:
+        a label added or removed, the two slides of a label this run found moved, and a label
+        renamed - each side's label unknown to the other, so nothing else can claim either slide
+        and the words are all there is to go on."""
+        bl, ol = base[i].get("label"), ours[j].get("label")
+        if not (bl and ol) or bl == ol or j in dropped or i in freed:
+            return True
+        return bl not in theirs_labels and ol not in base_labels
+
+    allow = [[pairable(bs[a], os_[b]) for b in range(n)] for a in range(m)]
     sim = [[slide_similarity(base[bs[a]], ours[os_[b]]) for b in range(n)] for a in range(m)]
     score = [[0.0] * (n + 1) for _ in range(m + 1)]
     for a in range(m - 1, -1, -1):
         for b in range(n - 1, -1, -1):
             best = max(score[a + 1][b], score[a][b + 1])
-            if sim[a][b] >= SLIDE_MATCH and not (base[bs[a]].get("label") and ours[os_[b]].get("label")):
+            if sim[a][b] >= SLIDE_MATCH and allow[a][b]:
                 best = max(best, sim[a][b] + score[a + 1][b + 1])
             score[a][b] = best
     a = b = 0
     while a < m and b < n:
         s = sim[a][b]
-        if s >= SLIDE_MATCH and not (base[bs[a]].get("label") and ours[os_[b]].get("label")) \
-                and abs(score[a][b] - (s + score[a + 1][b + 1])) < 1e-9:
+        if s >= SLIDE_MATCH and allow[a][b] and abs(score[a][b] - (s + score[a + 1][b + 1])) < 1e-9:
             pairs[os_[b]] = bs[a]
             a, b = a + 1, b + 1
         elif score[a + 1][b] >= score[a][b + 1]:
@@ -137,9 +242,10 @@ def align_slides(base: list[dict], ours: list[dict]) -> dict[int, int]:
     return pairs
 
 
-def inherit_slide_keys(base: list[dict], base_keys: list[str], ours: list[dict]) -> tuple[list[str], dict[int, int]]:
+def inherit_slide_keys(base: list[dict], base_keys: list[str], ours: list[dict],
+                       moves: list[dict] | None = None) -> tuple[list[str], dict[int, int]]:
     """Keys for ours slides (matched ones inherit the base key) and the match (ours -> base index)."""
-    pairs = align_slides(base, ours)
+    pairs = align_slides(base, ours, moves)
     taken = set(base_keys)
     keys = []
     for j, info in enumerate(ours):
