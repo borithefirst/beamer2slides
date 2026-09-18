@@ -363,6 +363,14 @@ campaign gives the same tally anywhere from 0.2 to 0.45 and degrades below 0.2, 
 sits in the middle of that - the stress deck's own retitled-and-half-rewritten frame scores 0.45,
 which is how close to the edge a real frame comes.
 
+A frame paired that way - by its place, with no label, because the source changed its title and most
+of what it says - is a **warning** in the report, for the same reason a dropped label is: nothing
+was at risk this time (the alternative was a second slide beside this one), but the frame is now
+down to its neighbours for identity, and one more edit takes those away too. The report asks for a
+label by name, so an AI author reading it knows what to write and where (`merge.plan_merge` from
+`sync.py`'s `weak_pairs`, offline test
+`tests/test_sync.py::test_a_slide_matched_by_its_place_alone_is_said_out_loud`).
+
 The check never spoke once in 1524 rounds whose labels nobody touched, and no round came out worse
 than before it existed. Of the broken rounds still wrong without a reorder, 35 of 36 were reported
 as a conflict and 1 passed in silence (a label pasted onto a frame added in the same version whose

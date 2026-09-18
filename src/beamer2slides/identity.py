@@ -208,11 +208,16 @@ def label_moves(base: list[dict], ours: list[dict]) -> list[dict]:
     return list(found.values())
 
 
-def align_slides(base: list[dict], ours: list[dict], moves: list[dict] | None = None) -> dict[int, int]:
+def align_slides(base: list[dict], ours: list[dict], moves: list[dict] | None = None,
+                 weak: dict[int, str] | None = None) -> dict[int, int]:
     """ours index -> base index. Labelled frames pair by label wherever they moved; the others by
     an order-keeping alignment on (title, text) similarity, so an inserted frame shifts nothing.
     A label the content says has moved to another frame (`label_moves`) is not followed: its two
-    slides go into the alignment with the rest."""
+    slides go into the alignment with the rest.
+
+    `weak`, if given, is filled with the pairings the two leftover passes made and how - "content"
+    (`cross_pairs`) or "place" (`gap_pairs`) - because they are inferences the alignment itself
+    could not draw, and a report that says so lets the author put a label there instead."""
     if moves is None:
         moves = label_moves(base, ours)
     dropped = {m["ours"] for m in moves if m["verdict"] == "moved"}
@@ -255,8 +260,11 @@ def align_slides(base: list[dict], ours: list[dict], moves: list[dict] | None = 
             a += 1
         else:
             b += 1
-    pairs.update(cross_pairs(base, ours, pairs, pairable))
-    pairs.update(gap_pairs(base, ours, pairs, pairable))
+    for how, found in (("content", cross_pairs(base, ours, pairs, pairable)),
+                       ("place", gap_pairs(base, ours, pairs, pairable))):
+        pairs.update(found)
+        if weak is not None:
+            weak.update(dict.fromkeys(found, how))
     return pairs
 
 
@@ -329,9 +337,11 @@ def gap_pairs(base: list[dict], ours: list[dict], pairs: dict[int, int], pairabl
 
 
 def inherit_slide_keys(base: list[dict], base_keys: list[str], ours: list[dict],
-                       moves: list[dict] | None = None) -> tuple[list[str], dict[int, int]]:
-    """Keys for ours slides (matched ones inherit the base key) and the match (ours -> base index)."""
-    pairs = align_slides(base, ours, moves)
+                       moves: list[dict] | None = None,
+                       weak: dict[int, str] | None = None) -> tuple[list[str], dict[int, int]]:
+    """Keys for ours slides (matched ones inherit the base key) and the match (ours -> base index).
+    `weak`: see `align_slides`."""
+    pairs = align_slides(base, ours, moves, weak)
     taken = set(base_keys)
     keys = []
     for j, info in enumerate(ours):

@@ -245,7 +245,8 @@ def build_ours(pdf: Path, work: Path, base: dict, overlays: str = "last") -> dic
         m["slide"] = base["slides"][m["base"]]["key"]
         m["frame_is"] = base["slides"][m["frame_is"]]["key"] if m["frame_is"] is not None else None
         m["slide_is"] = infos[m["slide_is"]]["title"] if m["slide_is"] is not None else None
-    keys, pairs = identity.inherit_slide_keys(base_infos, [b["key"] for b in base["slides"]], infos, moves)
+    weak: dict[int, str] = {}
+    keys, pairs = identity.inherit_slide_keys(base_infos, [b["key"] for b in base["slides"]], infos, moves, weak)
     ekeys, fps = [], []
     for j, slide in enumerate(deck["slides"]):
         matched = [{"key": e["key"], "kind": e["kind"], "role": e.get("role"), "fingerprint": e["fingerprint"]}
@@ -255,7 +256,7 @@ def build_ours(pdf: Path, work: Path, base: dict, overlays: str = "last") -> dic
         fps.append(f)
     entries = snapshot.slide_entries(deck, work, keys, ekeys, fps)
     return {"source": pdf, "pdf": prepared.pdf, "out": work, "plan": plan, "deck": deck, "slides": entries,
-            "pairs": pairs, "label_moves": moves}
+            "pairs": pairs, "label_moves": moves, "weak_pairs": weak}
 
 
 # ---------------------------------------------------------------- requests

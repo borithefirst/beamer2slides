@@ -748,6 +748,26 @@ def test_a_slide_the_deck_moved_does_not_freeze_the_rest_of_the_order():
     assert [w for w in mplan["report"]["warnings"] if "both the source and the deck moved" in w]
 
 
+def test_a_slide_matched_by_its_place_alone_is_said_out_loud():
+    """`identity.gap_pairs` pairs an unlabelled frame the source retitled and half rewrote by the
+    two neighbours around it. Nothing is at risk - the alternative was a second slide beside this
+    one - but it is an inference the words no longer support, so the report asks for a label. A
+    frame that still has its label is paired by the label and gets no such warning."""
+    base = many_slides(["a", "b", "c"])
+    base["slides"][1]["label"] = None
+    ours, theirs = triple(base)
+    ours["slides"][1]["label"] = None
+    ours["weak_pairs"] = {1: "place"}
+    warnings = merge.plan_merge(base, ours, theirs)["report"]["warnings"]
+    assert [w for w in warnings if w.startswith("slide b:") and "where it stands" in w]
+    ours["slides"][1]["label"] = "b"      # a frame that kept its label was not matched by place
+    assert not [w for w in merge.plan_merge(base, ours, theirs)["report"]["warnings"] if "where it stands" in w]
+    # The keys come over JSON in a real run, so the ours index arrives as a string.
+    ours["slides"][1]["label"] = None
+    ours["weak_pairs"] = {"1": "place"}
+    assert [w for w in merge.plan_merge(base, ours, theirs)["report"]["warnings"] if "where it stands" in w]
+
+
 def test_user_added_slide_stays_after_its_predecessor():
     base = three_slides()
     ours, theirs = triple(base)

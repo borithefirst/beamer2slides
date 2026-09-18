@@ -42,7 +42,8 @@ still says what it says) and by the place (`identity.gap_pairs`: the only slide 
 between two neighbours that paired), which covers a good deal of that - measurably, `docs/sync.md`
 has the numbers. Neither will guess: two frames that changed places and say much the same thing
 come back as new slides, because the alternative is writing one frame's words onto the other's
-slide, under somebody's edits.
+slide, under somebody's edits. And when the place is all that was left to go on, the report says so
+in a warning naming the slide: read it as "this one is down to its last hook, give it a label".
 
 So: **give every frame a label of its own, and never change one.**
 

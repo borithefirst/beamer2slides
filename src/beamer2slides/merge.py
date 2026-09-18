@@ -649,9 +649,19 @@ def plan_merge(base: dict, ours: dict, theirs: dict, adopt=None) -> dict:
     plans = []
     report_label_moves(ours.get("label_moves") or [], report)
 
+    weak = {int(k): v for k, v in (ours.get("weak_pairs") or {}).items()}
     for j, o in enumerate(ours["slides"]):
         i = pairs.get(j)
         b = base_slides[i] if i is not None else None
+        if b is not None and weak.get(j) == "place" and not o.get("label"):
+            # `identity.gap_pairs`: this frame has no label, and the source changed enough of it
+            # that only its place says which frame it is. Nothing was at risk - the alternative was
+            # a second slide beside this one - but the next version has one hook fewer to hang on.
+            report["warnings"].append(
+                f"slide {b['key']}: this frame has no label, and the source changed its title and much of what "
+                f"it says; it was matched by where it stands, between the frames around it. Move it too, or "
+                f"rewrite the rest of it, and there is nothing left to recognise it by - give it a label "
+                f"(`beamer2slides label`), see docs/labels.md.")
         if b is not None and b.get("label") and o.get("label") != b.get("label"):
             # The label is gone or different, and the content recognised the frame anyway. Nothing
             # is at risk this time; the next version of the source has one hook fewer to hang on.
