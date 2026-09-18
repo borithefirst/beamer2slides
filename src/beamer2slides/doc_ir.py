@@ -48,6 +48,8 @@ SLUG = re.compile(r"[^a-z0-9]+")
 # becomes the name of a named range over the paragraph. Docs moves those ranges with
 # the text and keeps them through the editor and undo (docs/google-docs.md).
 KEY_PREFIX = "b2s:"
+# The `<meta>` that tells a canonical file which document it belongs to.
+DOCUMENT_META = "b2s-document"
 
 
 # ---------------------------------------------------------------- runs
@@ -290,6 +292,10 @@ def to_html(ir: dict) -> str:
     can read them and `from_html` can put them back.
     """
     lines = ["<!DOCTYPE html>", "<html>", "<head>", '<meta charset="utf-8">']
+    if ir.get("document"):
+        # Which document this file is. The file is the project: told where it lives, it
+        # can be synced from any checkout without a folder of state beside it.
+        lines.append(f'<meta name="{DOCUMENT_META}" content="{escape(ir["document"], quote=True)}">')
     if ir.get("title"):
         lines.append(f"<title>{escape(ir['title'])}</title>")
     lines += ["</head>", "<body>"]
@@ -437,7 +443,10 @@ class _Reader(HTMLParser):
 
     def handle_starttag(self, tag: str, attrs: list) -> None:
         attr = dict(attrs)
-        if tag == "title":
+        if tag == "meta":
+            if attr.get("name") == DOCUMENT_META and attr.get("content"):
+                self.ir["document"] = attr["content"]
+        elif tag == "title":
             self.in_title = True
         elif tag in ("ul", "ol"):
             self.lists.append(tag == "ol")
@@ -627,6 +636,23 @@ def apply_keys(ir: dict, named_ranges: dict) -> dict:
     return ir
 
 
+def anchor_span(block: dict) -> list | None:
+    """The text range a block's named range is planted over.
+
+    A table's own span covers its rows and cells, which is not a run of text the API
+    will name, so the range goes into its first cell instead: the table is then the
+    block that *contains* the range, which is what `apply_keys` looks for.
+    """
+    if block["kind"] == "table":
+        for row in block.get("rows", []):
+            for cell in row:
+                for inner in cell:
+                    if inner.get("span"):
+                        return inner["span"]
+        return None
+    return block.get("span")
+
+
 def name_requests(ir: dict) -> list[dict]:
     """`createNamedRange` for every keyed block the document does not name yet.
 
@@ -636,9 +662,10 @@ def name_requests(ir: dict) -> list[dict]:
     """
     out = []
     for block in ir["blocks"]:
-        if not block.get("key") or block.get("rangeId") or not block.get("span"):
+        span = anchor_span(block) if block.get("key") and not block.get("rangeId") else None
+        if not span:
             continue
-        low, high = block["span"]
+        low, high = span
         out.append({"createNamedRange": {
             "name": KEY_PREFIX + block["key"],
             "range": {"startIndex": low, "endIndex": max(high - 1, low + 1)}}})

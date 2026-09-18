@@ -36,5 +36,6 @@ beamer2slides = ["calibration/*.json"]  # the measured font substitutes emit nee
 markers = ["slides: converts decks on real Google Slides and measures the thumbnails (opt-in: python -m pytest -m slides)",
            "sync: sync and pull scenarios with simulated deck edits on real Google Slides (opt-in: python -m pytest -m sync)",
            "inverse: pull's compile loop on source pairs and synthetic deck edits (opt-in: python -m pytest -m inverse)",
+           "docs: the Google Docs loop on a real document (opt-in: python -m pytest -m docs)",
            "xdist_group: which -n worker a test goes to (pytest-xdist's own; declared so the suite is quiet without it)"]
-addopts = "-m \"not slides and not sync and not inverse\""
+addopts = "-m \"not slides and not sync and not inverse and not docs\""

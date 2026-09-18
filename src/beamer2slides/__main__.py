@@ -8,6 +8,8 @@
       edit the source until its conversion matches the (edited) deck: WORK/pull.patch, edits.md/json
   python -m beamer2slides converge --target deck.json --tex main.tex [...]
       the same against a deck.json-shaped target, offline
+  python -m beamer2slides docs push|sync doc.html [--dry-run]
+      a Google Doc from a canonical HTML file, and the merge that keeps both in step
 """
 
 import argparse
@@ -172,6 +174,27 @@ def cmd_label(tex: Path, apply: bool) -> None:
     print(f"labelled {len(edits)} frame(s). Recompile, then convert or sync as usual.")
 
 
+def cmd_docs(args) -> None:
+    """Google Docs: the canonical HTML file and the document, kept in step (docs/google-docs.md)."""
+    from .doc_sync import push, sync
+    if args.docs_command == "push":
+        info = push(args.file, args.name, args.new_doc)
+        print(f"{args.file}: {info['blocks']} blocks, {info['anchored']} of them anchored")
+        print(f"Google Docs: {info['url']}")
+        return
+    info = sync(args.file, args.doc, args.dry_run, args.assume_base)
+    for clash in info["conflicts"]:
+        print(f"  conflict {clash['key']}: the source said {clash['ours']!r}, "
+              f"the document says {clash['theirs']!r} (the document wins)")
+    for note in info["notes"]:
+        print(f"  note: {note}")
+    print(f"docs sync{' (dry run)' if args.dry_run else ''}: {len(info['applied'])} block(s) from "
+          f"the source, {len(info['kept'])} kept from the document, "
+          f"{len(info['conflicts'])} conflict(s), {info['requests']} request(s)")
+    print(f"report: {info['report']}")
+    print(f"Google Docs: {info['url']}")
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(prog="beamer2slides")
     sub = ap.add_subparsers(dest="command", required=True)
@@ -231,6 +254,20 @@ def main() -> None:
         c.add_argument("--max-iter", type=int, default=10)
         c.add_argument("--handout", action="store_true", help="compile in handout mode (one page per frame)")
         c.add_argument("--engine", help="pdflatex, xelatex or lualatex (default: from the source)")
+    c = sub.add_parser("docs", help="a Google Doc from a canonical HTML file, and back (docs/google-docs.md)")
+    docs_sub = c.add_subparsers(dest="docs_command", required=True)
+    d = docs_sub.add_parser("push", help="create the document from the file and anchor its blocks")
+    d.add_argument("file", type=Path, help="the canonical HTML file (it is rewritten with the keys)")
+    d.add_argument("--name", help="the document's name in Drive (default: the file's <title>)")
+    d.add_argument("--new-doc", action="store_true",
+                   help="create a second document although the file already names one")
+    d = docs_sub.add_parser("sync", help="merge file and document three ways, then rewrite the file")
+    d.add_argument("file", type=Path)
+    d.add_argument("--doc", help="document URL or id (default: the <meta> in the file)")
+    d.add_argument("--dry-run", action="store_true", help="plan and report without writing")
+    d.add_argument("--assume-base", choices=["file", "document"],
+                   help="when the base of the last sync is missing: which side is right where "
+                        "they differ (file = write nothing, document = write the file out)")
     c = sub.add_parser("label", help="write a `label=` into every frame that has none (docs/labels.md)")
     c.add_argument("tex", type=Path, help="the main .tex (its \\input files are labelled too)")
     c.add_argument("--apply", action="store_true",
@@ -238,6 +275,8 @@ def main() -> None:
     args = ap.parse_args()
     if args.command == "label":
         return cmd_label(args.tex, args.apply)
+    if args.command == "docs":
+        return cmd_docs(args)
     if args.command in ("pull", "converge"):
         from .inverse import cmd_converge, cmd_pull
         if args.command == "pull":

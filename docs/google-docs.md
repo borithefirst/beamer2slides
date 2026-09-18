@@ -318,9 +318,10 @@ as it already does on the Slides side:
 
 ## The loop, end to end: measured on a live document
 
-`src/beamer2slides/doc_ir.py` (IR ↔ canonical HTML ↔ `documents.get`) and
-`doc_merge.py` (three-way merge → `batchUpdate`) are written; `tools/docs_spike.py`
-drives them against a real document. The loop proved out in full:
+`src/beamer2slides/doc_ir.py` (IR ↔ canonical HTML ↔ `documents.get`), `doc_merge.py`
+(three-way merge → `batchUpdate`) and `doc_sync.py` (the commands, the state and the
+report) are written, and `beamer2slides docs push|sync` drives them. The loop proved out
+in full:
 
 1. `push` converts the canonical HTML through Drive, reads the result back, gives it the
    file's keys and plants one named range per block;
@@ -344,11 +345,55 @@ all of them now fixed and pinned by offline tests:
 | **Inserted text inherits the style in front of it** | replacing a word at the start of a bold run or a link by deleting and then inserting at the hunk's start gives the new word the style of whatever preceded the hunk — the word falls out of the run | insert at the hunk's **end** first (inheriting from the last character it replaces), delete afterwards. `canonical` → `canonic` stays bold; without it, it does not |
 | **Text inserted at a list item's start joins the list** | a new paragraph written at the index where a bulleted paragraph begins comes out as another bullet of that list | every non-item block is written with `deleteParagraphBullets` before its paragraph style |
 | **An insert and an edit at the same index** | a block inserted at index *i* pushes the block that starts at *i* down the document, so that block's own edits — planned against the read — land inside the new text | back-to-front ordering breaks the tie the other way: at one index, a block's deletes and edits go before the insert that displaces it |
+| **The body's last newline cannot be written past** | a block appended after the document's last paragraph has no following block to insert before. Writing `text\n` at the last paragraph mark puts the words *inside* that paragraph and leaves the empty one it was meant to end | an append writes `\ntext` instead — the break first, the words after it — and it goes in *before* that paragraph's own edits, which end at the very index it was planned at |
+| **Two blocks added at one index come out backwards** | both insert at the same place, and what is written last ends up in front | the added blocks are planned back to front too, so the later one is written first |
 
-Two limitations stand, and neither blocks the design: **style-only changes in the source
-are not written** to an existing block (only text edits and whole new blocks carry
-styling), and a list the human switches from bullets to numbers **cannot be seen**, so
-the file keeps saying what it said.
+One limitation stands, and it does not block the design: a list the human switches from
+bullets to numbers **cannot be seen** (the same measurement as the first row), so the
+file keeps saying what it said. What the merge reports instead of writing is listed
+under "What the merge refuses to write" below.
+
+## The commands
+
+```
+python -m beamer2slides docs push doc.html [--name "In Drive"] [--new-doc]
+python -m beamer2slides docs sync doc.html [--doc <url|id>] [--dry-run]
+                                           [--assume-base file|document]
+```
+
+- **`push`** imports the file through Drive, reads the document back, gives it the
+  file's keys, plants one named range per block, and rewrites the file with those keys
+  and a `<meta name="b2s-document">` naming the document. From then on the file alone
+  says where it lives, and a push is never repeated: `--new-doc` is the only way to get
+  a second document out of one file.
+- **`sync`** merges base, file and document three ways, sends the edits with
+  `requiredRevisionId`, and **regenerates the file from the document it just wrote**.
+  A refusal on the revision — somebody typed between the read and the write — re-reads
+  and re-plans, three attempts (`B2S_DOCS_BEFORE_WRITE` runs a command right before the
+  first write, which is how that path is tested).
+
+State lives beside the file, in `.b2s/`: `<stem>.base.json` is what both sides agreed
+on at the end of the last sync, and `<stem>.sync-report.{json,md}` says what each side
+contributed, what conflicted (the document wins) and what was left alone. Without a
+base there is no way to tell a source change from a document change, and `sync` says so
+rather than guessing; `--assume-base file` then treats every difference as the
+document's (nothing is written, the file is rewritten from the document) and
+`--assume-base document` treats every difference as the source's.
+
+### What the merge refuses to write
+
+Each of these is reported in the sync report, never guessed at:
+
+| Case | Why |
+|---|---|
+| a block whose frozen runs differ between the sides | a chip, an equation, a dropdown or a table of contents cannot be created by any write, so the text around one is left alone rather than rewritten without it |
+| a **table the source added** | `insertTable` builds a grid, not text; the merge writes text |
+| a table whose **grid** differs between the sides | adding a row or a column is a structural edit, and matching cells across it would be a guess. Cells merge by their place — row, column, how far down the cell — so the grid has to be the same on all three sides |
+| a source restyle of words the document rewrote | the marks would have to be matched onto words that are no longer there |
+
+Everything else is written: text on both sides, a block's kind, level and alignment,
+its bullets, the marks the source added *or took away* (the fields Docs needs named for
+a removal are listed in `doc_merge.MANAGED`), and whole new blocks with their styling.
 
 ## Remaining risks
 
@@ -419,11 +464,18 @@ The chips probe: one labelled line per Docs-native object, read back through
 All five write to `out/docs-probe/`.
 
 ```
-.venv\Scripts\python.exe tools\docs_spike.py push    # then edit the document by hand
-.venv\Scripts\python.exe tools\docs_spike.py sync    # and again: the second writes nothing
+.venv\Scripts\python.exe -m pytest -m docs tests\test_docs_live.py
 ```
 
-The whole loop on one small document (`out/docs-spike/`): `push` creates it and plants
-the anchors, `read` prints what the document says now, `sync` merges file and document
-three ways and rewrites the file from the result, `delete` removes it. `sync --dry-run`
-writes the planned requests to `out/docs-spike/requests.json` without sending them.
+The whole loop on real documents, about 70 s: a push whose import reads back as what the
+file said, both sides editing (a table cell each, a block added, a list item rewritten),
+a block appended at the very end, the same words rewritten on both sides (the document
+wins, and the conflict is reported), and a reader typing between the plan and the write
+(the sync reads again and keeps their words). Every test ends by syncing once more and
+finding **0 requests**, and each one deletes its document afterwards. Files stay in
+`out/docs-tests/`. To drive one by hand instead:
+
+```
+.venv\Scripts\python.exe -m beamer2slides docs push out\docs-cli\doc.html
+.venv\Scripts\python.exe -m beamer2slides docs sync out\docs-cli\doc.html   # after editing either side
+```

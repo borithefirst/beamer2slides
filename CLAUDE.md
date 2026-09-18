@@ -554,6 +554,39 @@ Counting what the campaign reaches (`unit/*`, `override/*`, geometry modes) is h
 showed; `fuzz_world` also kept `children` on a group whose unit had been recreated, which only
 `parent_group` readers were saving it from.
 
+## Google Docs (docs/google-docs.md)
+The same bargain as the Slides sync, one dimension smaller: a **canonical HTML file** in git is
+what the source says, a Google Doc is what the reader says, and where both moved the document
+wins. `python -m beamer2slides docs push doc.html` imports the file through Drive, plants one
+**named range** `b2s:<key>` per block and rewrites the file with those keys and a
+`<meta name="b2s-document">`; `docs sync doc.html [--dry-run]` merges three ways, writes with
+`requiredRevisionId` (re-plans up to 3 times on a mismatch; `B2S_DOCS_BEFORE_WRITE` is the test
+hook) and then **regenerates the file from the document it just wrote**, so file, document and
+base agree and the next sync writes 0 requests. State beside the file: `.b2s/<stem>.base.json`
+and `.b2s/<stem>.sync-report.{json,md}`; without a base, sync stops and asks for
+`--assume-base file|document`. Modules: `doc_ir.py` (IR ↔ canonical HTML ↔ `documents.get`,
+keys, named ranges), `doc_merge.py` (pure planning), `doc_sync.py` (the commands).
+- A `files.update` rebuild **destroys every named range**, so after the first import only
+  incremental `batchUpdate` edits - there is no Docs equivalent of `convert`'s rebuild.
+- Indices are UTF-16 code units, and a chip is **one** unit however long its words look.
+- **Frozen runs** (chips, equations, dropdowns, TOC) are content no HTML import can create:
+  never rewritten, reported instead. The mirror image: a list's ordered-ness is content the
+  *document* cannot report (Drive's importer leaves every nesting level
+  `GLYPH_TYPE_UNSPECIFIED` for `<ul>` and `<ol>` alike), so the **file** wins there
+  (`doc_merge.restore_unreadable`), and block identity ignores ordered-ness entirely.
+- Write-side traps, each pinned by a test: inserted text inherits the style of the character
+  **in front of it** (a replacement goes in at the hunk's end, the delete after it); text
+  written at a bulleted paragraph's start joins that list (`deleteParagraphBullets` first);
+  bullets are created last, after the run styling (the Slides trap again); a block appended
+  after the last paragraph writes `\ntext`, not `text\n`, and before that paragraph's own
+  edits; blocks added at one index are planned back to front.
+- Tables merge cell by cell, where identity is the cell's **place**. A table the source added,
+  a grid that differs between the sides, and a restyle of words the document rewrote are
+  reported, not written.
+- Live suite (opt-in, marker `docs`, ~70 s): `python -m pytest -m docs tests/test_docs_live.py`
+  pushes a document per test, edits both sides, syncs, checks a second sync writes nothing, and
+  deletes the document. Offline: `tests/test_doc_ir.py`, `test_doc_merge.py`, `test_doc_sync.py`.
+
 ## Pitfalls found so far
 - PDFium (`pdf.py` handles these):
   - Soft-mask contents are not page objects. Beamer's block shadow is a black rectangle under

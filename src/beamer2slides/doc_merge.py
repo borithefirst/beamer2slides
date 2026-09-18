@@ -29,6 +29,13 @@ from .merge import diff3, tokens
 FROZEN = "￼"
 BLOCK_MATCH = 0.5  # least similarity for an unkeyed block to inherit a key
 BULLETS = {False: "BULLET_DISC_CIRCLE_SQUARE", True: "NUMBERED_DECIMAL_ALPHA_ROMAN"}
+# The textStyle fields this merge owns: named on a restyle whether or not the run
+# carries them, so that a mark the source took away is taken away in the document.
+MANAGED = ("backgroundColor", "bold", "foregroundColor", "italic", "link",
+           "strikethrough", "underline")
+# What is written first when two edits are planned at one and the same index
+# (`requests` says why each one sits where it does).
+APPEND, DELETE, EDIT, BEFORE = 0, 1, 2, 3
 
 
 # ---------------------------------------------------------------- block text
@@ -62,6 +69,20 @@ def restore_unreadable(live: dict, *sources: dict) -> dict:
         if block.get("kind") == "item" and block.get("ordered") is None:
             block["ordered"] = bool(known.get(block.get("key"), False))
     return live
+
+
+def styles_of(block: dict) -> tuple:
+    """A block's styling, run by run, without its words.
+
+    What changes when somebody marks a word bold or takes a colour away — and not
+    when somebody rewrites a word, which is the text merge's business. A mark applied
+    to part of a run splits it, so the run count carries the boundaries.
+    """
+    return tuple(("chip" if r.get("frozen") else "text",
+                  frozenset((k, v) for k, v in r.items()
+                            if k not in ("text", "width", "frozen", "chip", "value",
+                                         "format", "locale", "mime")))
+                 for r in block.get("runs", []))
 
 
 def _shape(block: dict) -> tuple:
@@ -171,8 +192,10 @@ def _place(ours: dict, theirs: dict, merged: list, index: int) -> int:
 
 
 def _merge_block(was: dict, mine: dict, live: dict, conflicts: list, notes: list) -> dict:
-    key = live["key"]
+    key = live.get("key") or "a table cell"
     out = dict(live)
+    if live.get("kind") == "table":
+        return _merge_table(was, mine, live, conflicts, notes)
     if frozen_of(mine) != frozen_of(live):
         notes.append(f"{key}: the source would rewrite a chip or equation — left alone")
         return out | {"origin": "frozen content differs"}
@@ -184,6 +207,79 @@ def _merge_block(was: dict, mine: dict, live: dict, conflicts: list, notes: list
     if text != block_text(live):
         out["runs"] = _retext(live, text)
         out["origin"] = "merged"
+    # Styling is merged the same way the words are, one step coarser: the source's
+    # marks are taken when the source changed them and the document left the block
+    # alone. A document that touched the block at all keeps its own styling, because
+    # matching the source's marks onto words the document rewrote would be a guess.
+    if styles_of(mine) != styles_of(was) and styles_of(live) == styles_of(was):
+        if text == block_text(mine):
+            out["runs"] = _restyled(live, mine)
+            out["restyle"] = True
+            out["origin"] = "merged"
+        else:
+            notes.append(f"{key}: the source restyled words the document rewrote — styling left alone")
+    if not out.get("origin") and (block_text(live) != block_text(was)
+                                  or styles_of(live) != styles_of(was)):
+        # Nothing to write: the document says this, and the merge agrees. It is said
+        # out loud all the same, so a sync report shows what the reader's side kept.
+        out["origin"] = "kept from the document"
+    return out
+
+
+def _merge_table(was: dict, mine: dict, live: dict, conflicts: list, notes: list) -> dict:
+    """A table merges cell by cell; its grid is the document's.
+
+    Inside a table a block's identity is its place — row, column, and how far down the
+    cell — not a named range, because a cell's paragraph cannot be deleted or moved
+    without changing the grid. A source that changed the grid is left alone: adding a
+    row or a column is a structural edit this merge does not attempt.
+    """
+    key = live.get("key") or "a table"
+    out = dict(live)
+    if _grid(mine) != _grid(live) or _grid(was) != _grid(live):
+        notes.append(f"{key}: the table's rows and columns differ between the sides — left alone")
+        return out | {"origin": "table grid differs"}
+    rows = []
+    for r, row in enumerate(live.get("rows", [])):
+        cells = []
+        for c, cell in enumerate(row):
+            merged = []
+            for i, block in enumerate(cell):
+                was_cell, my_cell = _at(was, r, c, i), _at(mine, r, c, i)
+                merged.append(dict(block) if was_cell is None or my_cell is None
+                              else _merge_block(was_cell, my_cell, block, conflicts, notes))
+            cells.append(merged)
+        rows.append(cells)
+    # A table has no words of its own, so what its cells did is what it did: the
+    # report and the write side both ask the table, not the blocks inside it.
+    inside = {b.get("origin") for row in rows for cell in row for b in cell}
+    return out | {"rows": rows} | ({"origin": "merged"} if "merged" in inside
+                                   else {"origin": "kept from the document"}
+                                   if "kept from the document" in inside else {})
+
+
+def _grid(block: dict) -> tuple:
+    """How many cells each row has, and how many blocks each cell holds."""
+    return tuple(tuple(len(cell) for cell in row) for row in block.get("rows", []))
+
+
+def _at(block: dict, row: int, cell: int, index: int) -> dict | None:
+    try:
+        return block["rows"][row][cell][index]
+    except (KeyError, IndexError):
+        return None
+
+
+def _restyled(live: dict, mine: dict) -> list[dict]:
+    """The source's runs, with the document's frozen runs put back where they were."""
+    frozen = iter([r for r in live.get("runs", []) if r.get("frozen")])
+    out = []
+    for run in mine.get("runs", []):
+        if run.get("frozen"):
+            kept = next(frozen, None)
+            out.append(dict(kept if kept is not None else run))
+        else:
+            out.append(dict(run) | {"width": doc_ir.utf16_len(run["text"])})
     return out
 
 
@@ -266,34 +362,24 @@ def text_requests(live: dict, target: str) -> list[dict]:
     return out
 
 
-def _style_requests(start: int, block: dict) -> list[dict]:
-    """Paragraph kind and run styling for a block written at `start`."""
-    text = block_text(block)
-    end = start + doc_ir.utf16_len(text) + 1
+def _width(block: dict) -> int:
+    """How many index units a block's text holds, the paragraph mark apart."""
+    return sum(run.get("width", doc_ir.utf16_len(run["text"])) for run in block.get("runs", []))
+
+
+def _paragraph_requests(start: int, end: int, block: dict, was_item: bool) -> list[dict]:
+    """The paragraph's kind, alignment and bullet, in the only order that works."""
     out: list[dict] = []
-    if block["kind"] != "item":
+    if block["kind"] != "item" and was_item:
         # Text inserted at the start of a list item joins that item, bullet and all;
-        # the paragraph this block was written into may well have been one.
-        out.append({"deleteParagraphBullets": {
-            "range": {"startIndex": start, "endIndex": end}}})
+        # and a block the source turned back into a paragraph must lose its glyph.
+        out.append({"deleteParagraphBullets": {"range": {"startIndex": start, "endIndex": end}}})
     style = {"namedStyleType": doc_ir.NAMED_STYLE[block.get("level", 0)
-                                                  if block["kind"] == "heading" else 0]}
-    fields = ["namedStyleType"]
-    if block.get("align"):
-        style["alignment"] = doc_ir.TO_ALIGNMENT[block["align"]]
-        fields.append("alignment")
+                                                  if block["kind"] == "heading" else 0],
+             "alignment": doc_ir.TO_ALIGNMENT[block.get("align") or "left"]}
     out.append({"updateParagraphStyle": {
         "range": {"startIndex": start, "endIndex": end}, "paragraphStyle": style,
-        "fields": ",".join(fields)}})
-    at = start
-    for run in block.get("runs", []):
-        width = doc_ir.utf16_len(run["text"])
-        marks = _text_style(run)
-        if marks and width:
-            out.append({"updateTextStyle": {
-                "range": {"startIndex": at, "endIndex": at + width},
-                "textStyle": marks, "fields": ",".join(sorted(marks))}})
-        at += width
+        "fields": "namedStyleType,alignment"}})
     if block["kind"] == "item":
         # Bullets last: a style request covering the whole paragraph would restyle
         # the glyph too, the same trap as the Slides pipeline's createParagraphBullets.
@@ -301,6 +387,58 @@ def _style_requests(start: int, block: dict) -> list[dict]:
             "range": {"startIndex": start, "endIndex": end},
             "bulletPreset": BULLETS[bool(block.get("ordered"))]}})
     return out
+
+
+def _run_requests(start: int, block: dict, reset: bool = False) -> list[dict]:
+    """`updateTextStyle` per run of a block laid out from `start`.
+
+    `reset` is for a block that already exists: the fields are named whether or not
+    the run carries them, so a mark the source took away is taken away in the
+    document too. The font is only named when one of the sides asks for the code
+    face — resetting `weightedFontFamily` on every sync would undo a font the
+    person chose in the document, which is not ours to touch.
+    """
+    fonts = any(run.get("code") for run in block.get("runs", []))
+    out, at = [], start
+    for run in block.get("runs", []):
+        width = run.get("width", doc_ir.utf16_len(run["text"]))
+        marks = _text_style(run)
+        if width and not run.get("frozen") and (marks or reset):
+            fields = sorted(set(marks) | (set(MANAGED + (("weightedFontFamily",) if fonts else ()))
+                                          if reset else set()))
+            out.append({"updateTextStyle": {
+                "range": {"startIndex": at, "endIndex": at + width},
+                "textStyle": marks, "fields": ",".join(fields)}})
+        at += width
+    return out
+
+
+def _bullets_last(paragraph: list[dict], runs: list[dict]) -> list[dict]:
+    """The run styling goes between the paragraph's style and its bullet, always."""
+    made = [r for r in paragraph if "createParagraphBullets" in r]
+    return [r for r in paragraph if "createParagraphBullets" not in r] + runs + made
+
+
+def _style_requests(start: int, block: dict) -> list[dict]:
+    """Everything but the words, for a block written at `start` from nothing."""
+    end = start + _width(block) + 1
+    return _bullets_last(_paragraph_requests(start, end, block, was_item=True),
+                         _run_requests(start, block))
+
+
+def _restyle_requests(live: dict, want: dict) -> list[dict]:
+    """What to write when the merge changed a block's styling rather than its words.
+
+    Planned against the block's own start and sent after that block's text edits —
+    which is why the two live in one plan: by then the block says what the merge
+    says, and the runs line up.
+    """
+    start = live["span"][0]
+    end = start + _width(want) + 1
+    paragraph = (_paragraph_requests(start, end, want, was_item=live.get("kind") == "item")
+                 if _shape(want) != _shape(live) else [])
+    runs = _run_requests(start, want, reset=True) if want.get("restyle") else []
+    return _bullets_last(paragraph, runs)
 
 
 def _text_style(run: dict) -> dict:
@@ -339,38 +477,80 @@ def requests(theirs: dict, merged: list[dict]) -> list[dict]:
     for live in theirs["blocks"]:
         want = by_key.get(live.get("key"))
         if want is None and live.get("key") is not None:
-            plans.append((live["span"][0], 0, [{"deleteContentRange": {"range": {
+            plans.append((live["span"][0], DELETE, [{"deleteContentRange": {"range": {
                 "startIndex": live["span"][0], "endIndex": live["span"][1]}}}]))
-        elif want is not None and want.get("span") == live.get("span"):
-            edits = text_requests(live, block_text(want))
-            if edits:
-                plans.append((live["span"][0], 1, edits))
-
-    tail = theirs["blocks"][-1]["span"][1] - 1 if theirs["blocks"] else 1
-    for position, block in enumerate(merged):
-        if block.get("origin") != "added by the source":
             continue
-        at = _insert_index(theirs, merged, position, tail)
+        if want is None or want.get("span") != live.get("span"):
+            continue
+        for one, other in _pairs(live, want):
+            edits = text_requests(one, block_text(other)) + _restyle_requests(one, other)
+            if edits:
+                plans.append((one["span"][0], EDIT, edits))
+
+    # The paragraph mark of the last block that survives this sync: where a block
+    # with nothing after it is appended. Blocks the source deleted are past it, and
+    # they are deleted first (higher indices come first), so it still holds then.
+    kept = [b for b in theirs["blocks"] if b.get("key") is None or b["key"] in by_key]
+    tail = kept[-1]["span"][1] - 1 if kept else 1
+    # Back to front here too: two blocks added at one index both insert there, and
+    # what is written last ends up in front, so the later block is planned first.
+    for position in range(len(merged) - 1, -1, -1):
+        block = merged[position]
+        if block.get("origin") != "added by the source" or block.get("kind") == "table":
+            continue  # a table is a grid, not text: nothing here can write one
         text = block_text(block)
-        plans.append((at, 2, [{"insertText": {"location": {"index": at}, "text": text + "\n"}}]
-                      + _style_requests(at, block)))
+        if FROZEN in text:
+            continue  # a chip cannot be written; `plan` says so in its notes
+        at = _insert_index(merged, position)
+        if at is not None:
+            plans.append((at, BEFORE, [{"insertText": {"location": {"index": at},
+                                                       "text": text + "\n"}}]
+                          + _style_requests(at, block)))
+        elif kept:
+            # Nothing follows it, so it is appended after the document's last
+            # paragraph — and the break goes in *first*, the words after it. The
+            # body's final newline cannot be written past, so "text\n" at `tail`
+            # would join the last paragraph and leave an empty one behind instead.
+            plans.append((tail, APPEND, [{"insertText": {"location": {"index": tail},
+                                                         "text": "\n" + text}}]
+                          + _style_requests(tail + 1, block)))
+        else:
+            # Nothing of the document survives: write into the empty paragraph Docs
+            # always keeps, and let the empty one end up at the bottom.
+            plans.append((tail, APPEND, [{"insertText": {"location": {"index": tail},
+                                                         "text": text + "\n"}}]
+                          + _style_requests(tail, block)))
 
     out: list[dict] = []
-    # Back to front, so an earlier edit never moves a later one's indices. At one
-    # index the order matters too: a block inserted there pushes the block that
-    # starts there down the document, so that block's own edits go first (order 1
-    # before order 2), and a delete of it goes first of all.
+    # Back to front, so an earlier edit never moves a later one's indices, and at one
+    # index by what the edits do there: a block appended at the last paragraph's mark
+    # must go in before that paragraph's own edits, which end where it begins; a block
+    # inserted before another pushes it down, so that block's edits go first, and a
+    # delete of it first of all.
     for _, _, reqs in sorted(plans, key=lambda p: (-p[0], p[1])):
         out += reqs
     return out
 
 
-def _insert_index(theirs: dict, merged: list[dict], position: int, tail: int) -> int:
-    """Where a new block's text goes: at the start of the block that follows it."""
+def _pairs(live: dict, want: dict):
+    """(live block, merged block) for a block and, if it is a table, for every block
+    in its cells — where identity is the cell's place, not a named range."""
+    yield live, want
+    for r, row in enumerate(live.get("rows", [])):
+        for c, cell in enumerate(row):
+            for i, inner in enumerate(cell):
+                other = _at(want, r, c, i)
+                if other is not None and inner.get("span"):
+                    yield inner, other
+
+
+def _insert_index(merged: list[dict], position: int) -> int | None:
+    """Where a new block's text goes: at the start of the block that follows it,
+    or None when nothing follows and it is appended to the document instead."""
     for block in merged[position + 1:]:
         if block.get("span"):
             return block["span"][0]
-    return tail
+    return None
 
 
 def plan(base: dict, ours: dict, theirs: dict) -> dict:
@@ -380,5 +560,14 @@ def plan(base: dict, ours: dict, theirs: dict) -> dict:
     restore_unreadable(theirs, ours, base)
     inherit_keys(base, ours)
     result = merge(base, ours, theirs)
+    for block in result["blocks"]:
+        if block.get("origin") != "added by the source":
+            continue
+        if block.get("kind") == "table":
+            result["notes"].append(f"{block.get('key')}: a table the source added cannot be "
+                                   f"written — add it in the document, then sync")
+        elif FROZEN in block_text(block):
+            result["notes"].append(f"{block.get('key')}: a new block with a chip in it cannot be "
+                                   f"written — no import can create one")
     result["requests"] = requests(theirs, result["blocks"])
     return result
