@@ -203,7 +203,10 @@ def settle(docs, ident: str, path: Path, ours: dict, base: dict,
     if planned:
         doc_merge.adopt_keys(live, planned)
     doc_ir.key_blocks(live)
-    if plant_ranges(docs, ident, live):
+    tidy = doc_merge.tidy_requests(live)
+    if tidy:
+        send(docs, ident, tidy)
+    if plant_ranges(docs, ident, live) or tidy:
         _, live = read_document(docs, ident, ours, base)
     write_file(path, live, ident)
     save_base(path, live)

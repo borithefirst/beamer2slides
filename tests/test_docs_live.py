@@ -274,6 +274,51 @@ def test_a_table_the_source_added_and_a_row_it_added_are_written(paper):
     paper.settled()
 
 
+def test_a_list_the_reader_numbered_is_numbered_in_the_file(paper):
+    """An imported list cannot say whether it is numbered, so the push gives it bullets
+    of the document's own — and from then on a reader's switch in the toolbar (the same
+    request the toolbar sends) is seen, where before the file silently won."""
+    from beamer2slides.google_auth import credentials, docs_service
+    docs = docs_service(credentials())
+    _, ir = paper.sync_module.read_document(docs, paper.ident)
+    first, second = find(ir, "the first point"), find(ir, "the second point")
+    paper.sync_module.send(docs, paper.ident, [{"createParagraphBullets": {
+        "range": {"startIndex": first["span"][0], "endIndex": second["span"][1]},
+        "bulletPreset": "NUMBERED_DECIMAL_ALPHA_ROMAN"}}])
+    info = paper.sync()
+    assert info["conflicts"] == []
+    text = paper.text
+    assert "<ol>" in text and "<ul>" not in text
+    assert '<li id="item:first">the first point</li>' in text
+    paper.settled()
+
+
+def test_a_table_at_the_very_end_and_the_paragraphs_after_it(paper):
+    """A body ends on a paragraph, so a table written last has an empty one after it
+    that no request can delete. It is no block: the file never shows it, the block the
+    source appends next is written into it, and deleting the body's last paragraph
+    takes the mark in front of it, because its own is the body's."""
+    paper.edit("</ul>", '</ul>\n<table id="table:last"><tr><td><p>x</p></td>'
+                        '<td><p>y</p></td></tr></table>')
+    paper.sync()
+    assert "<td><p>x</p></td><td><p>y</p></td>" in paper.text
+    assert "<p></p>" not in paper.text and 'id="paragraph:empty"' not in paper.text
+    paper.settled()
+
+    paper.edit("</table>\n</body>", '</table>\n<p id="paragraph:after">After the last table.</p>'
+                                    '\n<p id="paragraph:end">The end.</p>\n</body>')
+    paper.sync()
+    text = paper.text
+    assert text.index("After the last table.") < text.index("The end.")
+    assert "<p></p>" not in text and 'id="paragraph:empty"' not in text
+    paper.settled()
+
+    paper.edit('\n<p id="paragraph:end">The end.</p>', "")
+    paper.sync()
+    assert "The end." not in paper.text and "After the last table." in paper.text
+    paper.settled()
+
+
 def test_the_same_words_on_both_sides_conflict_and_the_document_wins(paper):
     paper.edit("The closing paragraph.", "The final paragraph.")
     paper.rewrote("The closing paragraph", "closing", "last")

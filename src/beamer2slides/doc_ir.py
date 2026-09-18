@@ -162,7 +162,30 @@ def from_document(doc: dict, tab_id: str | None = None) -> dict:
         block = _block_of(element, lists)
         if block:
             ir["blocks"].append(block)
+    _hide_trailer(ir)
     return ir
+
+
+def _hide_trailer(ir: dict) -> None:
+    """Leave out the empty paragraph a body keeps after a table that ends it.
+
+    A document must end on a paragraph, so a table written last — by an import or by
+    `insertTable` — always has an empty one after it that nobody asked for, and that
+    no request can delete (measured: the mark in front of it is refused). Read as a
+    block it would put a `<p></p>` into the canonical file that the next import makes
+    again, and a table appended at the end would never converge. Its span is kept as
+    `trailer`, because that is where a block appended after the table is written.
+    It is the other half of the paragraph the table was inserted into, so it can come
+    with that one's bullet or heading: `trailer_kind` says so, and
+    `doc_merge.tidy_requests` makes it a plain paragraph again.
+    """
+    blocks = ir["blocks"]
+    if (len(blocks) >= 2 and blocks[-2]["kind"] == "table"
+            and blocks[-1]["kind"] in ("paragraph", "item", "heading") and not blocks[-1]["runs"]):
+        last = blocks.pop()
+        ir["trailer"] = last["span"]
+        if last["kind"] != "paragraph" or last.get("align"):
+            ir["trailer_kind"] = last["kind"]
 
 
 def _body_of(doc: dict, tab_id: str | None) -> tuple[list, str | None]:
@@ -266,7 +289,8 @@ def _ordered(lists: dict, list_id: str | None, level: int) -> bool | None:
     `GLYPH_TYPE_UNSPECIFIED` with no glyphFormat and no glyphSymbol, for `<ol>` and
     `<ul>` alike, though the editor renders the two differently (measured on the
     spike document, docs/google-docs.md). So the answer is **None** — not False —
-    and the canonical file stays the only place that knows.
+    the canonical file fills it in, and `doc_merge.bullet_requests` gives the list
+    bullets of its own, which read back properly from then on.
     """
     levels = (lists.get(list_id, {}).get("listProperties", {}).get("nestingLevels", []))
     if level >= len(levels):

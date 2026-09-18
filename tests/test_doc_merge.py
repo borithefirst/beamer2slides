@@ -70,7 +70,8 @@ def applied(ir: dict, requests: list[dict]) -> list[str]:
             text = text[:at] + request["insertText"]["text"] + text[at:]
         elif "deleteContentRange" in request:
             span = request["deleteContentRange"]["range"]
-            assert span["endIndex"] - 1 <= len(text), "delete past the end of the document"
+            # The body's last newline is its own: Google refuses a range that holds it.
+            assert span["endIndex"] <= len(text), "delete of the body's final newline"
             text = text[:span["startIndex"] - 1] + text[span["endIndex"] - 1:]
     return text.split("\n")[:-1]
 
@@ -609,6 +610,87 @@ def test_a_block_appended_while_the_last_one_goes_lands_after_the_delete():
     assert result["requests"][1]["insertText"] == {
         "location": {"index": BASE["blocks"][1]["span"][1] - 1}, "text": "\ndelta seven"}
     assert applied(live(BASE["blocks"]), result["requests"]) == texts(result)
+
+
+def test_the_last_block_gives_up_the_mark_before_it_not_the_bodys_own():
+    """The body's last newline cannot be deleted (measured: refused, and the batch with
+    it), so the last paragraph goes with the mark of the one in front of it."""
+    ours = live(BASE["blocks"][:2])
+    result = doc_merge.plan(BASE, ours, live(BASE["blocks"]))
+    start, end = BASE["blocks"][2]["span"]
+    assert result["requests"] == [{"deleteContentRange": {"range": {
+        "startIndex": start - 1, "endIndex": end - 1}}}]
+    assert applied(live(BASE["blocks"]), result["requests"]) == texts(result)
+
+
+def test_the_last_two_blocks_pass_the_mark_leftwards():
+    ours = live(BASE["blocks"][:1])
+    result = doc_merge.plan(BASE, ours, live(BASE["blocks"]))
+    assert applied(live(BASE["blocks"]), result["requests"]) == ["alpha one two"]
+
+
+def test_a_block_after_a_final_table_is_written_into_the_paragraph_the_body_keeps():
+    """A body that ends on a table ends on an empty paragraph too, which the read
+    leaves out. The first block appended after the table fills it; the next ones
+    follow it, so no empty paragraph is left between the table and them."""
+    base = live([para("p:one", "one"), table("t:grid", [["a", "b"]])])
+    theirs = live(base["blocks"])
+    theirs["trailer"] = [theirs["blocks"][-1]["span"][1], theirs["blocks"][-1]["span"][1] + 1]
+    ours = live(base["blocks"] + [para("p:two", "two"), para("p:three", "three")])
+    result = doc_merge.plan(base, ours, theirs)
+    inserts = [r["insertText"] for r in result["requests"] if "insertText" in r]
+    at = theirs["trailer"][0]
+    assert inserts == [{"location": {"index": at}, "text": "\nthree"},
+                       {"location": {"index": at}, "text": "two"}]
+
+
+def test_the_empty_paragraph_after_a_final_table_is_not_a_block():
+    doc = {"body": {"content": [
+        {"startIndex": 1, "endIndex": 5, "paragraph": {"elements": [
+            {"startIndex": 1, "endIndex": 5, "textRun": {"content": "one\n"}}]}},
+        {"startIndex": 5, "endIndex": 12, "table": {"tableRows": [{"tableCells": [{"content": [
+            {"startIndex": 7, "endIndex": 9, "paragraph": {"elements": [
+                {"startIndex": 7, "endIndex": 9, "textRun": {"content": "a\n"}}]}}]}]}]}},
+        {"startIndex": 12, "endIndex": 13, "paragraph": {"elements": [
+            {"startIndex": 12, "endIndex": 13, "textRun": {"content": "\n"}}]}}]}}
+    ir = doc_ir.from_document(doc)
+    assert [b["kind"] for b in ir["blocks"]] == ["paragraph", "table"]
+    assert ir["trailer"] == [12, 13]
+    assert doc_merge.tidy_requests(ir) == []
+    # Inserted after a list item, the table leaves that item's glyph on the paragraph
+    # after it: still no block, but made a plain paragraph again.
+    doc["body"]["content"][-1]["paragraph"]["bullet"] = {"listId": "l"}
+    ir = doc_ir.from_document(doc)
+    assert ir["trailer_kind"] == "item"
+    assert [next(iter(r)) for r in doc_merge.tidy_requests(ir)] == [
+        "deleteParagraphBullets", "updateParagraphStyle"]
+    del doc["body"]["content"][-1]["paragraph"]["bullet"]
+    # One a reader typed into is a block like any other.
+    doc["body"]["content"][-1]["paragraph"]["elements"][0]["textRun"]["content"] = "typed\n"
+    assert [b["kind"] for b in doc_ir.from_document(doc)["blocks"]] == ["paragraph", "table",
+                                                                        "paragraph"]
+
+
+def test_a_list_the_import_left_unreadable_gets_bullets_of_its_own():
+    """Measured: createParagraphBullets over an imported list gives it real glyphs, so
+    it reads back as bulleted or numbered from then on — a toolbar switch included."""
+    theirs = live([para("p:top", "top"),
+                   {"kind": "item", "key": "i:a", "level": 0, "runs": [{"text": "a"}]},
+                   {"kind": "item", "key": "i:b", "level": 1, "runs": [{"text": "b"}]},
+                   {"kind": "item", "key": "i:c", "level": 0, "runs": [{"text": "c"}]},
+                   para("p:end", "end")])
+    ours = live([dict(b, ordered=b["key"] == "i:c") for b in theirs["blocks"]])
+    doc_merge.restore_unreadable(theirs, ours)
+    a, b, c = theirs["blocks"][1:4]
+    assert doc_merge.bullet_requests(theirs) == [
+        {"createParagraphBullets": {"range": {"startIndex": a["span"][0], "endIndex": b["span"][1]},
+                                    "bulletPreset": "BULLET_DISC_CIRCLE_SQUARE"}},
+        {"createParagraphBullets": {"range": {"startIndex": c["span"][0], "endIndex": c["span"][1]},
+                                    "bulletPreset": "NUMBERED_DECIMAL_ALPHA_ROMAN"}}]
+    # A list that reads properly is left alone.
+    readable = live([{k: v for k, v in b.items() if k != "guessed"} | {"ordered": False}
+                     for b in theirs["blocks"] if b["kind"] == "item"])
+    assert doc_merge.bullet_requests(doc_merge.restore_unreadable(readable)) == []
 
 
 def test_a_block_the_source_deleted_is_deleted_in_the_document():

@@ -592,10 +592,16 @@ keys, named ranges), `doc_merge.py` (pure planning), `doc_sync.py` (the commands
   incremental `batchUpdate` edits - there is no Docs equivalent of `convert`'s rebuild.
 - Indices are UTF-16 code units, and a chip is **one** unit however long its words look.
 - **Frozen runs** (chips, equations, dropdowns, TOC) are content no HTML import can create:
-  never rewritten, reported instead. The mirror image: a list's ordered-ness is content the
-  *document* cannot report (Drive's importer leaves every nesting level
-  `GLYPH_TYPE_UNSPECIFIED` for `<ul>` and `<ol>` alike), so the **file** wins there
-  (`doc_merge.restore_unreadable`), and block identity ignores ordered-ness entirely.
+  never rewritten, reported instead. The mirror image: a list's ordered-ness is content an
+  *imported* document cannot report (Drive's importer leaves every nesting level
+  `GLYPH_TYPE_UNSPECIFIED` for `<ul>` and `<ol>` alike), so the **file** fills it in
+  (`doc_merge.restore_unreadable`) and `settle` then gives the list bullets of the
+  document's own (`bullet_requests`: measured, they read back from then on, so a reader's
+  switch to numbers is seen); block identity ignores ordered-ness entirely.
+- A body that ends on a table ends on an empty paragraph no request can delete:
+  `doc_ir._hide_trailer` leaves it out of the IR (`trailer` keeps its span, and the next
+  block appended is written into it), and the body's last newline is as undeletable as the
+  one in front of a table, so the last block borrows the mark before it too.
 - Write-side traps, each pinned by a test: inserted text inherits the style of the character
   **in front of it** (a replacement goes in at the hunk's end, the delete after it); text
   written at a bulleted paragraph's start joins that list (`deleteParagraphBullets` first);

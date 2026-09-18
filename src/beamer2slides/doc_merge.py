@@ -35,7 +35,7 @@ MANAGED = ("backgroundColor", "bold", "foregroundColor", "italic", "link",
            "strikethrough", "underline")
 # What is written first when two edits are planned at one and the same index
 # (`requests` says why each one sits where it does).
-APPEND, DELETE, EDIT, BEFORE = 0, 1, 2, 3
+DELETE, APPEND, EDIT, BEFORE = 0, 1, 2, 3
 
 
 # ---------------------------------------------------------------- block text
@@ -78,7 +78,47 @@ def restore_unreadable(live: dict, *sources: dict) -> dict:
     for block in live["blocks"]:
         if block.get("kind") == "item" and block.get("ordered") is None:
             block["ordered"] = bool(known.get(block.get("key"), False))
+            block["guessed"] = True   # `bullet_requests` makes the document say it itself
     return live
+
+
+def tidy_requests(live: dict) -> list[dict]:
+    """What a sync writes after the merge so the document reads back as it looks:
+    bullets for the lists it cannot describe, and a plain paragraph after a final
+    table that took over a list item's glyph or a heading's style."""
+    out = bullet_requests(live)
+    if live.get("trailer_kind"):
+        start, end = live["trailer"]
+        span = {"startIndex": start, "endIndex": end}
+        out += [{"deleteParagraphBullets": {"range": span}},
+                {"updateParagraphStyle": {"range": span, "fields": "namedStyleType,alignment",
+                                          "paragraphStyle": {"namedStyleType": "NORMAL_TEXT",
+                                                             "alignment": "START"}}}]
+    return out
+
+
+def bullet_requests(live: dict) -> list[dict]:
+    """Bullets of the document's own for the lists it cannot describe.
+
+    Measured: `createParagraphBullets` over a list the importer built replaces its
+    unspecified glyphs with real ones — a `glyphSymbol` for bullets, a `glyphType`
+    for numbers — and keeps every item's nesting level. From then on the list reads
+    back as what it is, so a reader who switches it from bullets to numbers in the
+    toolbar is seen doing so, where before the file silently won. One request per run
+    of neighbouring items that agree on being numbered.
+    """
+    out, run = [], []
+    for block in live["blocks"] + [{"kind": "end"}]:
+        if (run and (block.get("kind") != "item" or not block.get("span")
+                     or block.get("ordered") != run[0].get("ordered"))):
+            if any(b.get("guessed") for b in run):
+                out.append({"createParagraphBullets": {
+                    "range": {"startIndex": run[0]["span"][0], "endIndex": run[-1]["span"][1]},
+                    "bulletPreset": BULLETS[bool(run[0].get("ordered"))]}})
+            run = []
+        if block.get("kind") == "item" and block.get("span"):
+            run.append(block)
+    return out
 
 
 def styles_of(block: dict) -> tuple:
@@ -693,8 +733,11 @@ def requests(theirs: dict, merged: list[dict]) -> list[dict]:
     # decided together, because a delete in front of a table borrows the mark of the
     # block before it and two of them must not ask for the same one.
     going = {i for i, live in enumerate(theirs["blocks"]) if _goes(live, by_key)}
+    # Whether the last block read is the body's last paragraph, whose mark is the
+    # body's own: not when an empty paragraph after a final table was left out.
+    ends = not theirs.get("trailer")
     for index in sorted(going):
-        start, end = _delete_range(theirs["blocks"], index, going)
+        start, end = _delete_range(theirs["blocks"], index, going, ends)
         plans.append((start, DELETE, [{"deleteContentRange": {
             "range": {"startIndex": start, "endIndex": end}}}]))
 
@@ -713,23 +756,30 @@ def requests(theirs: dict, merged: list[dict]) -> list[dict]:
     kept = [b for b in theirs["blocks"]
             if b.get("key") is None or (b["key"] in by_key and not by_key[b["key"]].get("moved"))]
     tail = kept[-1]["span"][1] - 1 if kept else 1
+    trailer = theirs.get("trailer")
+    if trailer:
+        # The body ends on a table and the empty paragraph after it: the first block
+        # appended is written *into* that paragraph, and the rest after it.
+        tail = trailer[0]
+    first = min((p for p, b in enumerate(merged)
+                 if _written_here(b) and _insert_index(merged, p) is None), default=None)
     # Back to front here too: two blocks added at one index both insert there, and
     # what is written last ends up in front, so the later block is planned first.
     for position in range(len(merged) - 1, -1, -1):
         block = merged[position]
-        if block.get("origin") != "added by the source" and not block.get("moved"):
+        if not _written_here(block):
             continue
-        if block.get("kind") == "table":
-            continue  # a table is a grid, not text: nothing here can write one
         text = block_text(block)
-        if FROZEN in text:
-            continue  # a chip cannot be written; `plan` says so in its notes
         at = _insert_index(merged, position)
         if at is not None:
             plans.append((at, BEFORE, [{"insertText": {"location": {"index": at},
                                                        "text": text + "\n"}}]
                           + _style_requests(at, block)))
-        elif kept:
+        elif trailer and position == first:
+            plans.append((tail, APPEND, [{"insertText": {"location": {"index": tail},
+                                                         "text": text}}]
+                          + _style_requests(tail, block)))
+        elif kept or trailer:
             # Nothing follows it, so it is appended after the document's last
             # paragraph — and the break goes in *first*, the words after it. The
             # body's final newline cannot be written past, so "text\n" at `tail`
@@ -753,6 +803,14 @@ def requests(theirs: dict, merged: list[dict]) -> list[dict]:
     for _, _, reqs in sorted(plans, key=lambda p: (-p[0], p[1])):
         out += reqs
     return out
+
+
+def _written_here(block: dict) -> bool:
+    """Whether `requests` writes this block from nothing: one the source added or
+    moved — but not a table, which is a grid (`structure` builds it), and not a block
+    with a chip no request can create (`plan` says so in its notes)."""
+    return ((block.get("origin") == "added by the source" or bool(block.get("moved")))
+            and block.get("kind") != "table" and FROZEN not in block_text(block))
 
 
 def structure(theirs: dict, merged: list[dict]) -> tuple[list[dict], list[dict]]:
@@ -871,8 +929,9 @@ def _goes(live: dict, by_key: dict) -> bool:
     return bool(want.get("moved")) and want.get("span") == live.get("span")
 
 
-def _delete_range(blocks: list[dict], index: int, going: set[int]) -> tuple[int, int]:
-    """What to delete for block `index`, without touching the newline before a table.
+def _delete_range(blocks: list[dict], index: int, going: set[int],
+                  ends: bool = True) -> tuple[int, int]:
+    """What to delete for block `index`, without touching a newline that must stay.
 
     "Deleting the newline character before a Table, TableOfContents or SectionBreak"
     is one of the deletes the API refuses outright — and a refused request throws out
@@ -880,10 +939,12 @@ def _delete_range(blocks: list[dict], index: int, going: set[int]) -> tuple[int,
     *previous* block's paragraph mark instead of its own. Docs then merges the two the
     way the Delete key does, keeping the first one's style, and the table still has a
     paragraph in front of it. A run of deleted blocks passes that leftwards one by
-    one, so no two ranges ever ask for the same mark.
+    one, so no two ranges ever ask for the same mark. The body's last mark is the
+    same kind of newline (measured: refused), so the last block does the same when
+    `ends` says it is the body's last paragraph.
     """
     start, end = blocks[index]["span"]
-    if not _mark_is_taken(blocks, index, going):
+    if not _mark_is_taken(blocks, index, going, ends):
         return start, end
     if index == 0 or blocks[index - 1].get("kind") == "table":
         # No mark to take: the block's words go and an empty paragraph stays in front
@@ -892,14 +953,15 @@ def _delete_range(blocks: list[dict], index: int, going: set[int]) -> tuple[int,
     return start - 1, end - 1
 
 
-def _mark_is_taken(blocks: list[dict], index: int, going: set[int]) -> bool:
+def _mark_is_taken(blocks: list[dict], index: int, going: set[int], ends: bool) -> bool:
     """Whether this block's own paragraph mark must survive the delete — because a
-    table follows it, or because the deleted block that follows it takes this one's."""
+    table follows it, because it ends the body, or because the deleted block that
+    follows it takes this one's."""
     after = index + 1
     if after >= len(blocks):
-        return False
+        return ends
     if after in going:
-        return _delete_range(blocks, after, going)[0] < blocks[after]["span"][0]
+        return _delete_range(blocks, after, going, ends)[0] < blocks[after]["span"][0]
     return blocks[after].get("kind") == "table"
 
 
