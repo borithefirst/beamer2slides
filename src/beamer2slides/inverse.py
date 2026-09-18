@@ -2088,7 +2088,10 @@ def paragraphs_latex(paragraphs: list[dict], style_for, ctx: Context, ind: str) 
     return "\n".join(lines)
 
 
-def textblock_latex(te: dict, style_for, ctx: Context, ind: str, reset: bool = False) -> str:
+def textblock_latex(te: dict, style_for, ctx: Context, ind: str, reset: bool = False, lead: str = "") -> str:
+    """`lead` is put at the top of the block, before the text: the switches that make the base style
+    `runs_latex` writes against actually true here (`adopt.base_lead`). The loop leaves it empty,
+    because in a source it is refining the surrounding document already sets that base."""
     x, y = text_anchor(te)
     size = max((r.get("size") or 10.0) for p in te["paragraphs"] for r in p["runs"])
     xs = [l["x1"] for p in te["paragraphs"] for l in p.get("lines", []) if l.get("x1")]
@@ -2098,6 +2101,8 @@ def textblock_latex(te: dict, style_for, ctx: Context, ind: str, reset: bool = F
     body = paragraphs_latex(te["paragraphs"], style_for, ctx, ind + "  ")
     if reset and align not in ({"center"}, {"right"}):
         body = f"{ind}  \\raggedright\n" + body
+    if lead:
+        body = f"{ind}  {lead}\n" + body
     return (f"{ind}\\begin{{textblock*}}{{{width:.1f}pt}}({bx:.1f}pt,{y - 0.75 * size:.1f}pt)\n"
             + body + f"\n{ind}\\end{{textblock*}}")
 

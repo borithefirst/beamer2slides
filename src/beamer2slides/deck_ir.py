@@ -23,6 +23,13 @@ from .emit import (ASCENT_EM, BASELINE_A, FONT_FOR_FAMILY, MIDDLE_BASELINE_EM, P
 from .gslides import EMU_PER_PT
 
 FAMILY_FOR_FONT = {v: k for k, v in FONT_FOR_FAMILY.items()}
+# Only the three fonts the converter itself writes are named above, and everything else used to come
+# back as `sans` - so a deck whose person typed in Space Mono read back as prose, and the size came
+# through the wrong width factors as well. A font is known by its name here, the way a reader knows
+# it: these words appear in the name of nearly every monospaced or serif family Slides offers.
+MONO_WORDS = ("mono", "code", "courier", "consol", "typewriter")
+SERIF_WORDS = ("serif", "times", "georgia", "garamond", "playfair", "slab", "libre baskerville",
+               "book", "crimson", "lora", "spectral", "cormorant", "eb garamond")
 TAG_RE = re.compile(r"^b2s:(?P<slide>[^/]*)/(?P<element>.+)$")
 BEAMER_SIZES = {(4, 3): (362.83, 272.13), (16, 9): (453.54, 255.12), (16, 10): (453.54, 283.46)}
 DEFAULT_STYLE = {"fontFamily": "Arial", "fontSize": 18.0, "bold": False, "italic": False, "color": "#000000"}
@@ -72,6 +79,18 @@ def design_for(size: float) -> int:
     return 8 if size < 8.5 else 9 if size < 9.5 else 10 if size < 11.5 else 12 if size < 17 else 17
 
 
+def family_of(font: str) -> str:
+    """Which of classify's three families a Slides font name belongs to."""
+    if font in FAMILY_FOR_FONT:
+        return FAMILY_FOR_FONT[font]
+    low = font.lower()
+    if any(w in low for w in MONO_WORDS):
+        return "mono"
+    if any(w in low for w in SERIF_WORDS):
+        return "serif"
+    return "sans"
+
+
 def pdf_size(fonts: FontMapper, family: str, slides_size: float, bold: bool, italic: bool, scale: float,
              font: str | None = None) -> tuple[float, str]:
     """Inverse of FontMapper: (PDF font size, a TeX font name that maps like it)."""
@@ -106,20 +125,39 @@ class StyleResolver:
             for c in master.get("pageProperties", {}).get("colorScheme", {}).get("colors", []):
                 self.scheme.setdefault(c["type"], rgb_hex({"rgbColor": c.get("color", {})}, {}))
 
-    def parent_style(self, pe: dict) -> dict:
-        chain = []
+    def chain(self, pe: dict) -> list[dict]:
+        """The placeholder's parents, nearest last (master, then layout)."""
+        out = []
         cur = pe
         for _ in range(4):
             parent = cur.get("shape", {}).get("placeholder", {}).get("parentObjectId")
             if not parent or parent not in self.by_id:
                 break
             cur = self.by_id[parent]
-            chain.append(cur)
+            out.append(cur)
+        return list(reversed(out))
+
+    def parent_style(self, pe: dict) -> dict:
         style: dict = {}
-        for el in reversed(chain):
+        for el in self.chain(pe):
             for te in el.get("shape", {}).get("text", {}).get("textElements", []):
                 if "textRun" in te:
                     style.update(te["textRun"].get("style", {}))
+                    break
+        return style
+
+    def parent_paragraph_style(self, pe: dict) -> dict:
+        """What a paragraph's own `paragraphMarker.style` leaves out, from the same parents.
+
+        A placeholder inherits how its paragraphs sit, not only how their letters look: the DevFest
+        template centres its subtitle on the master and every slide using it says nothing at all, so
+        reading only the slide makes centred text left-aligned - which no later round can put right,
+        because the loop has no translator for alignment at all."""
+        style: dict = {}
+        for el in self.chain(pe):
+            for te in el.get("shape", {}).get("text", {}).get("textElements", []):
+                if "paragraphMarker" in te:
+                    style.update(te["paragraphMarker"].get("style", {}))
                     break
         return style
 
@@ -152,12 +190,13 @@ def text_paragraphs(pe: dict, text: dict, resolver: StyleResolver, fonts: FontMa
         base["fontFamily"] = parent["weightedFontFamily"]["fontFamily"]
     if parent.get("foregroundColor"):
         base["color"] = rgb_hex(parent["foregroundColor"], resolver.scheme) or base["color"]
+    pbase = resolver.parent_paragraph_style(pe)
     paragraphs: list[dict] = []
     cur = None
     for te in text.get("textElements", []):
         if "paragraphMarker" in te:
             pm = te["paragraphMarker"]
-            st = pm.get("style", {})
+            st = {**pbase, **pm.get("style", {})}
             bullet = pm.get("bullet")
             cur = {"align": {"START": "left", "CENTER": "center", "END": "right", "JUSTIFIED": "left"}.get(
                        st.get("alignment", "START"), "left"),
@@ -186,7 +225,7 @@ def text_paragraphs(pe: dict, text: dict, resolver: StyleResolver, fonts: FontMa
             text_part = content.rstrip("\n") if content.endswith("\n") else content
             if not text_part:
                 continue
-            run = {"text": text_part, "font": font, "family": FAMILY_FOR_FONT.get(family, "sans"),
+            run = {"text": text_part, "font": font, "family": family_of(family),
                    "slides_font": family, "slides_size": size, "size": psize, "bold": bool(bold),
                    "italic": bool(italic), "smallcaps": bool(st.get("smallCaps")), "color": color,
                    "link": link.get("url") or (f"#slide={link['pageObjectId']}" if link.get("pageObjectId") else None),
@@ -314,11 +353,34 @@ def page_size_for(pres: dict, pdf_size: list[float] | None) -> tuple[float, floa
     return w / 2, h / 2, 2.0
 
 
+def inherited_chain(slide: dict, pages: dict[str, dict]) -> list[dict]:
+    """The master and then the layout a slide draws on top of, in that drawing order.
+
+    A deck a person built in Slides keeps most of its look here: of the 39 slides of the DevFest
+    template, the section-title slide carries one element of its own and draws six - the blue dotted
+    sheet, the white card, the bar, the dot - from its layout and master. A deck this repository
+    converted is the other way round (the source draws its theme and `emit.plan_theme` puts the
+    picture on the layouts), which is why `pull` must not see these: it would write the decoration
+    into the .tex that already draws it. `adopt` asks for them, `pull` does not."""
+    layout = pages.get(slide.get("slideProperties", {}).get("layoutObjectId") or "")
+    master = pages.get((layout or {}).get("layoutProperties", {}).get("masterObjectId") or "")
+    return [p for p in (master, layout) if p]
+
+
 def deck_ir(pres: dict, pdf_size: list[float] | None = None, base: dict | None = None,
-            fetch=None, images: Path | None = None) -> dict:
+            fetch=None, images: Path | None = None, foreign: bool = False) -> dict:
     """IR of a presentation. `pdf_size`: the PDF page size the deck came from (else beamer's
     default for the aspect). `base`: a sync snapshot (object ids -> keys). `fetch(url) -> bytes`
-    downloads pictures into `images` (sha1-named) when both are given."""
+    downloads pictures into `images` (sha1-named) when both are given.
+
+    `foreign`: read the deck as one nobody converted, which changes three things. Each slide is
+    also given what it draws from its layout and master (`inherited_chain`), because that is where
+    a deck a person built keeps most of its look. Groups are not folded (`fold_groups`), because
+    folding recognises *this converter's* conventions - a group of node shapes joined by lines is
+    one `diagram`, a short text on a picture is a number on a ball - and reading someone else's
+    grouping that way throws away what adopt needs to draw it: each node's outline, and the lines
+    themselves. And lines are kept, for the same reason: `pull` drops them because the source it is
+    refining already draws them, and a foreign deck's source does not exist yet."""
     page_w, page_h, scale = page_size_for(pres, pdf_size)
     fonts = FontMapper()
     resolver = StyleResolver(pres)
@@ -331,11 +393,11 @@ def deck_ir(pres: dict, pdf_size: list[float] | None = None, base: dict | None =
             for oid in e.get("objects", []):
                 object_keys[oid] = (s.get("key"), e.get("key"))
     slides = []
-    for n, slide in enumerate(pres.get("slides", [])):
-        elements = []
-        tags = []
+
+    def read_page(page: dict, tags: list) -> list[dict]:
+        out: list[dict] = []
         lines: dict[str, int] = {}
-        for pe, m, group in flatten(slide.get("pageElements", [])):
+        for pe, m, group in flatten(page.get("pageElements", [])):
             if "line" in pe and group:
                 lines[group] = lines.get(group, 0) + 1
             tag = TAG_RE.match(pe.get("title") or "")
@@ -343,7 +405,7 @@ def deck_ir(pres: dict, pdf_size: list[float] | None = None, base: dict | None =
                 (object_keys.get(group) if group else None)
             if key and key[0]:
                 tags.append(key[0])
-            el = element_of(pe, m, resolver, fonts, scale, page_w, fetch, images)
+            el = element_of(pe, m, resolver, fonts, scale, page_w, fetch, images, foreign)
             if el is None:
                 continue
             el.update({"id": pe["objectId"], "object": pe["objectId"], "group": group,
@@ -354,8 +416,28 @@ def deck_ir(pres: dict, pdf_size: list[float] | None = None, base: dict | None =
                 el["role"] = {"Formula": "math", "Icon": "icon"}[pe["title"]]
             if el["kind"] == "text" and el["key"] and "/footer/" in f"/{el['key']}/":
                 el["role"] = "footer"
-            elements.append(el)
-        elements = fold_groups(elements, lines)
+            out.append(el)
+        return out if foreign else fold_groups(out, lines)
+
+    for n, slide in enumerate(pres.get("slides", [])):
+        tags: list = []
+        under: list[dict] = []
+        if foreign:
+            for page in inherited_chain(slide, pages):
+                for el in read_page(page, []):
+                    # A placeholder on a layout is the slide's to fill - it holds the layout's prompt
+                    # text ("Click to edit"), or only the "\n" per list level an import leaves there -
+                    # and drawing it would print that over the slide's own words.
+                    if el.get("placeholder") or (el["kind"] == "text" and not el.get("paragraphs")):
+                        continue
+                    # `role` math/icon says "this picture belongs inside a line of text", which a
+                    # picture on a layout never is: it is the template's decoration, and the
+                    # heuristic that reads a picture beside one short paragraph as an icon
+                    # (`fold_groups`) would otherwise call the full-page backdrop one.
+                    role = "figure" if el["kind"] == "image" else el.get("role")
+                    under.append({**el, "role": role, "inherited": page["objectId"],
+                                  "id": f"{page['objectId']}~{el['id']}"})
+        elements = under + read_page(slide, tags)
         color, picture = page_background(slide, pages, resolver.scheme)
         key = slide_keys.get(slide["objectId"]) or (max(set(tags), key=tags.count) if tags else None)
         slides.append({"page": n, "frame": str(n + 1), "size": [page_w, page_h], "objectId": slide["objectId"],
@@ -403,8 +485,30 @@ def fold_groups(elements: list[dict], lines: dict[str, int]) -> list[dict]:
     return out
 
 
+def line_element(pe: dict, m: list[float], scale: float, scheme: dict) -> dict | None:
+    """A connector, as the two points it runs between. Slides stores a line as the unit segment
+    (0,0)-(w,h) under the element's transform, so a line drawn up and to the left comes back as a
+    box with a negative scale - which a bounding box alone cannot tell from one drawn down and to
+    the right. Only `adopt` asks for these (`deck_ir(foreign=True)`)."""
+    w, h = dim(pe.get("size", {}).get("width")), dim(pe.get("size", {}).get("height"))
+    props = pe["line"].get("lineProperties", {})
+    if props.get("lineFill", {}).get("solidFill") is None:
+        return None
+    x0, y0 = m[0] * 0 + m[1] * 0 + m[2], m[3] * 0 + m[4] * 0 + m[5]
+    x1, y1 = m[0] * w + m[1] * h + m[2], m[3] * w + m[4] * h + m[5]
+    ends = pe["line"].get("lineProperties", {})
+    return {"kind": "shape", "role": "line", "shape": "line",
+            "bbox": [round(v / scale, 2) for v in (min(x0, x1), min(y0, y1), max(x0, x1), max(y0, y1))],
+            "from": [round(x0 / scale, 2), round(y0 / scale, 2)],
+            "to": [round(x1 / scale, 2), round(y1 / scale, 2)],
+            "outline": rgb_hex(props["lineFill"]["solidFill"].get("color"), scheme),
+            "weight": round(dim(props.get("weight")) / scale, 2) or 1.0,
+            "arrow": ends.get("endArrow") not in (None, "NONE"),
+            "arrow_start": ends.get("startArrow") not in (None, "NONE"), "fill": None}
+
+
 def element_of(pe: dict, m: list[float], resolver: StyleResolver, fonts: FontMapper, scale: float, page_w: float,
-               fetch, images: Path | None) -> dict | None:
+               fetch, images: Path | None, foreign: bool = False) -> dict | None:
     if "size" not in pe and "line" not in pe:
         return None
     w, h = dim(pe.get("size", {}).get("width")), dim(pe.get("size", {}).get("height"))
@@ -420,6 +524,13 @@ def element_of(pe: dict, m: list[float], resolver: StyleResolver, fonts: FontMap
             el["shape_type"] = shape.get("shapeType")
             if fill_hex and shape.get("shapeType") != "TEXT_BOX":
                 el["fill"] = fill_hex
+            if foreign and shape.get("shapeType") not in (None, "TEXT_BOX"):
+                # A node with a label is one page element: without its outline here, adopt would
+                # write the words of a flow chart and none of the boxes around them.
+                line = props.get("outline", {})
+                el["outline_color"] = rgb_hex(line.get("outlineFill", {}).get("solidFill", {}).get("color"),
+                                              resolver.scheme) if line.get("propertyState", "RENDERED") == "RENDERED" else None
+                el["weight"] = round(dim(line.get("weight")) / scale, 2) or None
             return el
         if shape.get("shapeType") == "TEXT_BOX" or shape.get("placeholder"):
             return None
@@ -429,7 +540,8 @@ def element_of(pe: dict, m: list[float], resolver: StyleResolver, fonts: FontMap
         if not fill_hex and not stroke:
             return None
         return {"kind": "shape", "role": "panel", "bbox": bbox, "shape": shape.get("shapeType", "RECTANGLE").lower(),
-                "fill": fill_hex, "outline": stroke}
+                "fill": fill_hex, "outline": stroke,
+                "weight": round(dim(outline.get("weight")) / scale, 2) or None}
     if "image" in pe:
         el = {"kind": "image", "role": "figure", "bbox": bbox, "alt": pe.get("description")}
         el.update(picture_props(pe, m, w, h, scale, resolver.scheme))
@@ -463,7 +575,7 @@ def element_of(pe: dict, m: list[float], resolver: StyleResolver, fonts: FontMap
             rows.append(cells)
         return {"kind": "table", "role": "table", "bbox": bbox, "rows": rows}
     if "line" in pe:
-        return None
+        return line_element(pe, m, scale, resolver.scheme) if foreign else None
     return None
 
 
@@ -557,8 +669,9 @@ def presentation_id(ref: str) -> str:
 
 
 def read_deck(ref: str, images: Path | None = None, base: dict | None = None, pdf_size: list[float] | None = None,
-              slides=None) -> dict:
-    """Fetch a live deck and return its IR (pictures downloaded into `images`)."""
+              slides=None, foreign: bool = False) -> dict:
+    """Fetch a live deck and return its IR (pictures downloaded into `images`). `foreign`: read it as
+    a deck nobody converted (`deck_ir`) - what `adopt` asks for and `pull` does not."""
     from .google_auth import slides_service
     from .gslides import execute
     slides = slides or slides_service()
@@ -569,4 +682,5 @@ def read_deck(ref: str, images: Path | None = None, base: dict | None = None, pd
         pdf_size = json.loads((p / "deck.json").read_text(encoding="utf-8"))["slides"][0]["size"]
     if base is None and p.is_dir() and (p / "sync" / "base.json").exists():
         base = json.loads((p / "sync" / "base.json").read_text(encoding="utf-8"))
-    return deck_ir(pres, pdf_size or (base or {}).get("page_size"), base, fetch_url if images else None, images)
+    return deck_ir(pres, pdf_size or (base or {}).get("page_size"), base, fetch_url if images else None, images,
+                   foreign)

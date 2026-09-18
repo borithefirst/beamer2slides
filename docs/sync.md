@@ -710,6 +710,65 @@ Not translated yet (reported instead): tables, diagram labels, shape colours, pa
 frame title position and theme styles, edits inside math, rotated text, overlays beyond the last
 step (compile with `--handout` to pull a handout-style deck).
 
+## Adopt: a beamer source for a deck nobody converted
+```
+beamer2slides adopt --deck <url|id|deck.json> --tex main.tex [--flow] [--apply | --out DIR] [--max-iter N]
+```
+Pull refines a source until its conversion matches a deck, which needs a source to begin with. For a
+deck this repository produced that is the .tex it came from; for a **foreign** deck — one a person
+built in Slides — there is none, and the loop cannot make one: a document with no frames compiles to
+a PDF with **no pages** (PDFium: "Data format error"), and one empty frame per slide leaves
+`slide_missing` guessing which slide is which (measured: it oscillates and never converges). So
+`adopt.bootstrap` writes the skeleton and `pull`'s loop does the rest.
+
+**Reading a foreign deck** (`deck_ir(foreign=True)`) differs from reading a converted one in four
+places, each because the conventions `pull` relies on are this converter's and not a person's:
+- the slide is given what its **layout and master** draw (`inherited_chain`), because that is where a
+  deck a person built keeps most of its look — of the 39 slides of the DevFest template, the
+  section-title slide carries one element of its own and draws six from its layout and master. A
+  converted deck is the other way round (the source draws its theme, `emit.plan_theme` puts the
+  picture on the layouts), which is why `pull` must *not* see these: it would write into the .tex
+  decoration the .tex already draws. Layout placeholders are skipped (they hold the template's
+  prompt, which would print over the slide's own words) and inherited pictures are forced to role
+  `figure`, or `fold_groups`' icon heuristic reads a full-page backdrop as an icon in a text line;
+- groups are **not folded**: folding recognises *this* converter's conventions (node shapes joined by
+  lines are one `diagram`, a short text on a picture is a number on a ball), and reading someone
+  else's grouping that way throws away each node's outline and the lines themselves;
+- **lines are kept** (`line_element`). Slides stores a line as the unit segment (0,0)–(w,h) under the
+  element transform, so a line drawn up and to the left comes back as a box with a negative scale,
+  which a bounding box alone cannot tell from one drawn down and to the right: the endpoints are
+  computed through the matrix and the arrow ends kept;
+- a **font is known by its name** (`family_of`): only the three fonts the converter itself writes were
+  mapped, so a deck typed in Space Mono read back as prose, with the wrong width factors as well.
+
+**What the skeleton is** (`adopt.py`): a `\usetheme{default}` with navigation, headline, footline and
+frame title emptied — a foreign deck carries its own decoration in its elements, so anything beamer
+draws by itself is ink the deck does not have and a residual the loop cannot remove — and one
+`[plain]` frame per slide with a `textblock*` per element: text boxes, pictures copied into
+`figures/`, and shapes and connectors as tikz paths (a `\rule` can say neither the rounded outlined
+boxes both templates' flow charts are made of, nor an arrow). A frame whose slide sits on a colour
+other than the deck's is wrapped in a group setting `background canvas` — decoration is often a
+picture with transparency, so the colour under it is not a detail. Each text box gets its **own** base
+style at its own place, because `inverse.runs_latex` writes a run's style only where it differs from
+a base and assumes the document sets that base: true of a source being refined, false of one written
+from nothing, and a deck-wide base would leave the crimson 9 pt instruction slides or the blue 26 pt
+section titles black.
+
+Absolute-first is a decision, not a shortcut: a foreign deck's geometry *is* boxes the person
+dragged, and every guess at flow text that misses costs the loop a `geometry` round to escalate back
+into a textblock (`inverse.Planner.geometry`). `--flow` asks for the readable version (frame titles,
+`itemize` in the flow), which is worth it when the deck really is a talk laid out by a template.
+`adopt` refuses to write over an existing source: that is what `pull` is for.
+
+Fidelity is **ink overlap against the deck's own slide images**, not the loop's residual count — ten
+colour squares read back as one `diagram` score 10 `element_missing` while being pixel-perfect — and
+it is measured inside the deck's element boxes, so a backdrop that is not reproduced cannot hide
+everything else. On the 39-slide DevFest 2020 template the bootstrap alone reaches 0.70 (0.22 when it
+read only the slide's own elements), in a 34 s build.
+
+Tests: `tests/test_adopt.py` (offline, no TeX and no Google: a hand-built `presentations.get` answer
+shaped like those templates, the IR that comes back and the source written from it).
+
 ## Never lose deck edits
 
 `convert` on an output folder that already has a deck does **not** create a new presentation: it

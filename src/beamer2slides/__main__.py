@@ -256,6 +256,17 @@ def main() -> None:
         c.add_argument("--max-iter", type=int, default=10)
         c.add_argument("--handout", action="store_true", help="compile in handout mode (one page per frame)")
         c.add_argument("--engine", help="pdflatex, xelatex or lualatex (default: from the source)")
+    c = sub.add_parser("adopt", help="write a beamer source for a deck nobody converted, then converge it")
+    c.add_argument("--deck", required=True, help="deck URL, presentation id, or a deck.json-shaped target file")
+    c.add_argument("--tex", required=True, type=Path, help="the source to write (it must not exist yet)")
+    c.add_argument("--flow", action="store_true",
+                   help="write frame titles and body text in the flow instead of a textblock per element: "
+                        "readable beamer, further from the deck")
+    c.add_argument("--apply", action="store_true", help="keep what the loop edits (default: it is reported only)")
+    c.add_argument("--out", type=Path, help="write the edited source tree here instead")
+    c.add_argument("--work", type=Path, help="loop folder and reports (default: <tex folder>/out/adopt)")
+    c.add_argument("--max-iter", type=int, default=6)
+    c.add_argument("--engine", help="pdflatex, xelatex or lualatex (default: from the source)")
     c = sub.add_parser("docs", help="a Google Doc from a canonical HTML file, and back (docs/google-docs.md)")
     docs_sub = c.add_subparsers(dest="docs_command", required=True)
     d = docs_sub.add_parser("push", help="create the document from the file and anchor its blocks")
@@ -279,6 +290,12 @@ def main() -> None:
         return cmd_label(args.tex, args.apply)
     if args.command == "docs":
         return cmd_docs(args)
+    if args.command == "adopt":
+        from .adopt import cmd_adopt
+        target = Path(args.deck) if Path(args.deck).suffix == ".json" else None
+        cmd_adopt(args.deck, args.tex, args.work, args.apply, args.out, args.max_iter, args.engine,
+                  args.flow, target)
+        return
     if args.command in ("pull", "converge"):
         from .inverse import cmd_converge, cmd_pull
         if args.command == "pull":

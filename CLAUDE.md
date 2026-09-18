@@ -414,6 +414,28 @@ pictures in text lines are only reported. Tests: `tests/test_inverse.py` and `te
 (compile loop on the `b_*.tex` pairs, synthetic edits and picture edits, iterations in
 `tests/decks/inverse/out/results.json`).
 
+Adopt a deck nobody converted (`adopt.py`, docs/sync.md "Adopt"): `python -m beamer2slides adopt
+--deck <url|id|deck.json> --tex main.tex` writes the source `pull` never had, then converges it. Pull
+refines a source and a **foreign** deck - one a person built in Slides - has none; the loop cannot make
+one either (a document with no frames compiles to a PDF with no pages, and one empty frame per slide
+makes `slide_missing` oscillate). `deck_ir(foreign=True)` reads such a deck differently: the slide is
+given what its layout and master draw (`inherited_chain` - that is where a deck a person built keeps
+its look, while a converted deck's theme is drawn by its .tex, which is why `pull` must not see them),
+layout placeholders are skipped and inherited pictures forced to role `figure`; groups are not folded
+and lines are kept (`line_element`: Slides stores a line as the unit segment under the element
+transform, so only the endpoints say which way it points), because folding recognises *this*
+converter's conventions and would throw away the outlines and edges adopt must draw; and a font is
+known by its name (`family_of`), not only when the converter itself wrote it. The skeleton is a theme
+that draws nothing plus one `[plain]` frame per slide with a `textblock*` per element (tikz for
+shapes and connectors, pictures copied into `figures/`, a per-slide background colour under
+transparent decoration, each box carrying its own base style since `inverse.runs_latex` writes only
+what differs from one). Absolute-first is deliberate: a foreign deck's geometry is boxes a person
+dragged, and a wrong guess at flow costs the loop a `geometry` round; `--flow` asks for the readable
+version. Scored by ink overlap with the deck's own slide images inside its element boxes (residual
+counts misrepresent fidelity: ten pixel-perfect squares read back as one `diagram` = 10
+`element_missing`): the DevFest 2020 template's 39 slides reach 0.70 from the bootstrap alone, 0.22
+when only the slide's own elements were read. Tests: `tests/test_adopt.py` (offline).
+
 Opt-in suite (real Google Slides, ~95 s): `python -m pytest -m slides` (the default run deselects
 the `slides` marker, pyproject.toml). It converts the stress decks (19–22, 25, 13, demo) 3 at a
 time into `out/slides-tests/<deck>` of the main checkout (fixed folders: the same decks are
