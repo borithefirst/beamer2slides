@@ -1070,6 +1070,13 @@ class Sync:
         reqs = []
         for i, oids in objects.items():
             e, el = o["elements"][i], slide["elements"][i]
+            if el["kind"] == "diagram" and len(oids) > 1:
+                # A diagram's own object id *is* the group emit builds its nodes and lines under
+                # (emit.diagram_requests). The API refuses updatePageElementAltText on a group and
+                # rejects the whole batch with it, so a sync that rewrote a diagram slide died. It
+                # goes untagged, as it does in a converted deck (snapshot.tag_requests skips element
+                # groups too); the base names its objects itself, so nothing needs the tag.
+                continue
             r = {"objectId": new_oid[i], "title": snapshot.tag(o["key"], e["key"])}
             if el["kind"] == "image" and el.get("alt"):
                 r["description"] = el["alt"]

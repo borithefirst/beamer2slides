@@ -299,7 +299,8 @@ merges source changes into the edited deck (three-way: base = converter output r
 `convert` in `<out>/sync/base.json` and in Drive via `appProperties.b2sBase`; deck edits win,
 conflicts reported in `<out>/sync/sync-report.{json,md}`). Slide keys come from frame labels
 (PDF named destinations, `extract.frame_labels`), else title/occurrence plus alignment; objects
-carry `b2s:<slide>/<element>` alt-text titles. `identity.py` keys, `snapshot.py` read-back and
+carry `b2s:<slide>/<element>` alt-text titles (groups untagged: the API refuses alt text on them).
+`identity.py` keys, `snapshot.py` read-back and
 base, `merge.py` pure planning (offline tests `tests/test_sync.py`), `sync.py` writes with
 `requiredRevisionId` (re-plans on a mismatch), pictures through a deleted-after-use staging deck.
 Pitfalls: `createImage` letterboxes (sync stretches it back); staging contentUrls die with the
@@ -434,6 +435,17 @@ Sync test harness (opt-in, marker `sync`, deselected by default): `python -m pyt
   URLs); a base must keep the source's slide order (else the deck's reorder is undone next time);
   a slide sync creates must inherit the master background, not copy it (the theme sits there now).
 
+The ambiguous deck (`tests/test_stress_live.py`, marker `sync`, ~5.5 min): the same machinery on a
+48-frame talk built so that nothing can be identified by its title - three frames called Results,
+untitled frames, twins one word apart, one paragraph on three slides, the same picture twice, a
+table whose every row says the same, identical notes, astral characters and soft hyphens. Its
+variants change the source drastically and ambiguously (labels moved and dropped, every title
+renamed at once, ten frames reversed, twins swapped, a frame inserted between two near-identical
+ones, `kitchen` combining most of it) against decks edited every way at once; the order is checked
+against the frames' labels, not their titles, and every slide nobody edited must still equal a
+fresh conversion, thumbnail included. It is where the moved-label check and the order merge were
+made to work; `-k "variants or selectors or budget"` is its offline part.
+
 Sync fuzzing (docs/sync.md, "Proving nothing is lost"): `tools/loss_oracle.py` judges one sync from
 the read-backs before and after, the base, the report and the new conversion - did anything a person
 put in the deck disappear without being accounted for? (Its docstring defines that; no Google call.)
@@ -448,9 +460,10 @@ source may have moved only an anchored member, so a re-placed inline formula bec
 unit, else the unit is recreated). Also: a geometry override was promised for a unit whose parts the
 person had moved apart, although sync re-applies it by transforming the unit's top object, so the
 dragged picture went back to the converter's box (`merge.geometry_writable` keeps such a unit and
-reports a conflict); and `sync.tag_requests` alt-texts a diagram's main object, which is the group
-emit builds under that id - the API refuses it and rejects the whole batch, so a sync that rewrites
-a diagram slide dies (open, xfail `tests/test_sync.py::test_sync_does_not_alt_text_a_diagram_group`);
+reports a conflict); and `sync.tag_requests` alt-texted a diagram's main object, which is the group
+emit builds under that id - the API refuses that and rejected the whole batch, so a sync that
+rewrote a diagram slide died (fixed: the diagram goes untagged, as it does in a converted deck,
+`tests/test_sync.py::test_sync_does_not_alt_text_a_diagram_group`);
 and `sync.base_order` left out the slides the deck deleted although the source still has them, so
 their base entries landed at the end and the frames after them lost their keys next time and were
 created again (fixed: a `gone` slide keeps its place in the source's order; `fuzz_world.rebase`

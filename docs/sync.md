@@ -404,9 +404,12 @@ hold for every sync, including the combinations nobody thought of.
 - Found by it so far: the `move` shortcut took its step from the unit's anchor although the source
   may have re-placed only an anchored member (`merge.unit_shift`); a geometry override was promised
   for a unit whose parts the person had moved apart, which sync cannot write
-  (`merge.geometry_writable`); sync sends an alt-text title for a diagram's main object, which is
-  the group `emit.diagram_requests` builds - the API refuses that and rejects the whole batch (open,
-  pinned as an xfail test in `tests/test_sync.py`); and `sync.base_order` left out the slides the
+  (`merge.geometry_writable`); sync sent an alt-text title for a diagram's main object, which is
+  the group `emit.diagram_requests` builds - the API refuses that and rejected the whole batch, so a
+  sync that rewrote a diagram slide died (fixed: the diagram goes untagged, like every element group
+  in a converted deck); a slide the source dropped and the deck's edits kept alive went on claiming
+  its label in the base, so the frame carrying that label now paired with the dead entry
+  (`sync.new_base` clears it); and `sync.base_order` left out the slides the
   deck deleted although the source still has them, so their base entries landed last and the frames
   after them lost their keys on the next conversion, which created them again (fixed - and
   `fuzz_world.rebase` now orders the base with `sync.base_order` itself rather than with a correct

@@ -844,25 +844,24 @@ def test_a_deleted_slide_in_the_base_does_not_displace_a_kept_one():
     assert "b2s_k003" in order
 
 
-@pytest.mark.xfail(strict=True, reason="sync.tag_requests tags a diagram's main object, which is the group "
-                                       "emit.diagram_requests creates under that id; the API refuses "
-                                       "updatePageElementAltText on a group and rejects the whole batch")
 def test_sync_does_not_alt_text_a_diagram_group():
     """Found by the live fuzz (tools/fuzz_sync.py, seed 202): a sync that rewrites a slide with a
-    diagram dies with 'The operation is not allowed on group (b2s_..._<tok>)'. A diagram element's
+    diagram died with 'The operation is not allowed on group (b2s_..._<tok>)'. A diagram element's
     main object *is* a group (emit.diagram_requests groups its parts under the element's object id),
-    and sync.tag_requests (sync.py) sends an alt-text title for every element it wrote.
-    snapshot.tag_requests already skips elementGroup read-backs; sync must skip them too (or send
-    the tags in their own batch, like snapshot.write_tags, which tolerates refusals)."""
+    and sync.tag_requests sent an alt-text title for every element it wrote, which took the whole
+    batch down with it. snapshot.tag_requests skips element groups for the same reason; the other
+    elements on that slide are still tagged."""
     from types import SimpleNamespace
 
-    from beamer2slides.sync import Syncer
-    o = {"key": "figures", "elements": [{"key": "diagram/figure/0"}]}
-    stub = SimpleNamespace(plan=SimpleNamespace(deck={"slides": [{"elements": [{"kind": "diagram", "id": "p0d0"}]}]}),
-                           ours={"slides": [o]})
+    from beamer2slides.sync import Sync
+    o = {"key": "figures", "elements": [{"key": "diagram/figure/0"}, {"key": "text/body/0"}]}
+    stub = SimpleNamespace(plan=SimpleNamespace(deck={"slides": [{"elements": [
+        {"kind": "diagram", "id": "p0d0"}, {"kind": "text", "id": "p0t1"}]}]}), ours={"slides": [o]})
     oid = "b2s_abcdef_012345_t0k"  # the group emit creates for the diagram, with its nodes and lines inside
-    reqs = Syncer.tag_requests(stub, o, {0: [oid, f"{oid}_n0", f"{oid}_l0"]}, {0: oid}, {})
-    assert [r for r in reqs if r["updatePageElementAltText"]["objectId"] == oid] == []
+    text = "b2s_abcdef_012346_t0k"
+    reqs = Sync.tag_requests(stub, o, {0: [oid, f"{oid}_n0", f"{oid}_l0"], 1: [text]},
+                             {0: oid, 1: text}, {})
+    assert [r["updatePageElementAltText"]["objectId"] for r in reqs] == [text]
 
 
 def test_element_objects_from_emit_plan():

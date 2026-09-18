@@ -344,22 +344,29 @@ def scenario_slides(run: Run):
         E("move_slide", slide=CONCL, after=ALGO),
         E("duplicate_slide", slide=MERGING, new_title="Merging text (copy)"))
     pdf = build("slides")
-    # The deck reordered slides, so its order stays (the source's swap of Results and Merge policy
-    # isn't applied); the new frame follows its source predecessor, Merge policy.
+    # Conclusions stays where the deck dragged it and the source's swap of Results and Merge policy
+    # is applied around it; the new frame follows its source predecessor, Merge policy, and the two
+    # slides the deck added follow theirs.
     order = [TITLE, "Why decks and sources diverge", ALGO, "Takeaways", MERGING, "Merging text (copy)", CONV,
-             "Reviewer questions", POLICY, "Pulling edits back", RESULTS, VERSIONS]
+             "Reviewer questions", RESULTS, POLICY, "Pulling edits back", VERSIONS]
+    # (the move_slide expectation names the slide "Conclusions", which the source renames in this
+    # variant: the same claim is made below, by the title the frame has now)
     run.check("slides", pdf, run.sync(pdf), exps, drop=("move_slide",), order=order,
-              checks=[{"check": "slide_count", "slide": IDENTITY, "count": 0}])
+              checks=[{"check": "slide_count", "slide": IDENTITY, "count": 0},
+                      {"check": "slides", "order": [ALGO, "Takeaways"], "adjacent": True}])
 
 
 @scenario
 def scenario_reorder_both(run: Run):
-    """The deck moved a slide the source reorders too: the deck's order stays."""
+    """Both sides moved a slide, each a different one: the deck keeps the slide it dragged and the
+    source's swap is applied around it. (One slide moved in Slides is not a veto on the source's
+    order - see merge.plan_order.)"""
     run.convert(build("v1"))
-    exps = run.edit(E("move_slide", slide=POLICY, after=VERSIONS))
+    exps = run.edit(E("move_slide", slide=VERSIONS, after=WHY))
     pdf = build("reorder")
     run.check("reorder", pdf, run.sync(pdf), exps,
-              order=[TITLE, "Why decks and sources diverge", ALGO, MERGING, CONV, RESULTS, VERSIONS, POLICY, IDENTITY, CONCL])
+              order=[TITLE, "Why decks and sources diverge", VERSIONS, ALGO, MERGING, CONV, RESULTS, POLICY,
+                     IDENTITY, CONCL])
 
 
 @scenario

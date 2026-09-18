@@ -14,8 +14,9 @@ offline), and the order after a sync is checked against the labels of the varian
 A scenario is `convert v1 -> deck edits (tools/deck_edits.py) -> build a variant
 (tests/decks/stress/build.py) -> sync -> check (tools/sync_check.py)`. What it must show is always
 the same: every deck edit survived exactly once and on the slide it was made on, every source
-change landed, the slide order follows the source, no orphans or duplicates, untouched slides
-still equal a fresh conversion, and a second sync writes nothing.
+change landed, the slide order follows the source except where the deck moved a slide itself, no
+orphans or duplicates, untouched slides still equal a fresh conversion, and a second sync writes
+nothing.
 
 Folders: out/stress-tests/<scenario> of the main checkout (the same decks are rebuilt every run),
 fresh conversions out/stress-tests/_fresh/<variant>. Timings land in out/stress-tests/perf.json.
