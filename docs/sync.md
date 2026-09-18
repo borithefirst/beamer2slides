@@ -384,6 +384,16 @@ live proof: the `recastmoved` variant retitles it, rewrites half of it and carri
 others at once, and the report names it and the slide it left behind
 (`tests/test_stress_live.py::test_the_one_frame_nothing_can_follow_is_named_in_the_report`).
 
+Crying wolf is the worse failure of the two, because an AI author would go labelling frames that
+were never in doubt, so the silence is measured on the same deck. `strangers` (`insertframe` +
+`dropends`) is a frame the source added and two it dropped that have nothing to do with each other
+- the shape of a near miss without the substance - and it is, with `recastmoved`, the only one of
+the 22 variants where the pass can say anything at all: everywhere else either every frame pairs or
+no base slide is left over. It stays quiet, and the margin is wide: the loudest thing it could say
+is the inserted frame against the title page at 0.118, against 0.448 for the frame that really was
+lost (`test_every_variant_pairs_with_v1_frame_for_frame`, which fails on `strangers` as soon as
+`NEAR_TELL` drops far enough to reach that 0.118).
+
 The check never spoke once in 1524 rounds whose labels nobody touched, and no round came out worse
 than before it existed. Of the broken rounds still wrong without a reorder, 35 of 36 were reported
 as a conflict and 1 passed in silence (a label pasted onto a frame added in the same version whose

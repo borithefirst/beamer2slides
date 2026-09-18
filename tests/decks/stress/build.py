@@ -81,6 +81,10 @@ VARIANTS = {"v1": [], **{f: [f] for f in FLAGS}, "kitchen": KITCHEN,
             # nine others in one version. Nothing can follow it - the report has to say so instead
             # (`identity.near_misses`, tests/test_stress_live.py).
             "recastmoved": ["recast", "reorder10"],
+            # the other side of that: a frame the source added and two it dropped, which have
+            # nothing whatever to do with each other. Exactly the shape of a near miss, and the
+            # report must stay quiet about it (tests/test_stress_live.py).
+            "strangers": ["insertframe", "dropends"],
             "churn": ["reorder10", "dropends", "rewritebullets", "rewriteblock"],
             "pictures": ["swappicture", "notesedit"]}
 

@@ -780,6 +780,25 @@ def test_styling_on_words_the_source_replaced_is_a_conflict_not_a_promise():
     assert [o for o in quiet["overrides"] if "text_style" in o["fields"]]
 
 
+def test_the_two_halves_of_a_frame_nothing_could_follow_are_named():
+    """`identity.near_misses` hands the merge a slide the source seems to have dropped and a frame
+    it seems to have written that say much of the same thing. The report names both, and says which
+    of the two cases this is: the deck kept the old slide (the person had edits on it) or it went."""
+    base = many_slides(["a", "b"])
+    ours, theirs = triple(base)
+    ours["slides"][1] = {**ours["slides"][1], "key": "fresh"}          # the frame came back as new
+    ours["pairs"] = {0: 0}
+    ours["near_misses"] = [{"ours": 1, "base": 1, "evidence": 0.6, "slide": "b", "title": "B, recast"}]
+    edit_text(theirs["slides"][1], "b2s_s001_t1", "First point of b, and a sentence of my own\n")
+    kept = merge.plan_merge(base, ours, theirs)["report"]["warnings"]
+    assert [w for w in kept if w.startswith("slide b:") and "the deck keeps the old slide" in w
+            and "'B, recast'" in w]
+    # Nobody had touched that slide, so it is gone - worth saying, and a different sentence.
+    _, fresh = triple(base)
+    gone = merge.plan_merge(base, ours, fresh)["report"]["warnings"]
+    assert [w for w in gone if w.startswith("slide b:") and "it is gone" in w]
+
+
 def test_a_slide_matched_by_its_place_alone_is_said_out_loud():
     """`identity.gap_pairs` pairs an unlabelled frame the source retitled and half rewrote by the
     two neighbours around it. Nothing is at risk - the alternative was a second slide beside this

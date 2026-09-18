@@ -425,8 +425,12 @@ Sync test harness (opt-in, marker `sync`, deselected by default): `python -m pyt
   `verified` applies one and reads it back (checks fail before, hold after).
 - `tools/sync_check.py`: evaluates checks on `presentations.get`, plus `integrity` (duplicates,
   orphans against base.json ids, formula pictures out of their group, groups taken apart),
-  `check_report` (sync-report sections), `compare_fresh` / `thumbnail_diff` / `alignment_compare`
-  (untouched slides vs a fresh conversion of the same source).
+  `check_report` (sync-report sections, `warnings` among them), `compare_fresh` / `thumbnail_diff` /
+  `alignment_compare` (untouched slides vs a fresh conversion of the same source). An inline formula
+  and a display equation are both tagged `image/math/N`; only the first belongs to a text, and
+  `on_a_text_line` tells them apart by where the picture stands (inside a text's box top to bottom =
+  between its words). Measured over 139 math pictures: all 44 display equations out, 90 of 95 inline
+  ones in, the five it lets go being math beside a graphic rather than in prose.
 - Scenarios (`convert v1 → edits → sync vN → check → second sync writes nothing`): untouched, disjoint,
   same-element, diff3, conflict, deletions, slides, reorder-both, chain, concurrent (sync runs the
   command in `B2S_SYNC_BEFORE_WRITE` after planning), pull-wording (`pull --apply` → rebuild → sync
@@ -455,7 +459,8 @@ renamed at once, ten frames reversed, twins swapped, a frame inserted between tw
 ones, the unlabelled frame retitled and half rewritten - `recast`, which is `identity.gap_pairs`
 live: without it that sync creates a second slide and the old one keeps the person's edits;
 `recastmoved` does the same to it *and* carries it across nine frames, which nothing can follow, so
-that one is the live proof of `identity.near_misses` naming what it could not pair -
+that one is the live proof of `identity.near_misses` naming what it could not pair, while
+`strangers` is the proof of its silence - a frame added and two dropped with nothing in common -
 `kitchen` combining most of it) against decks edited every way at once; the order is checked
 against the frames' labels, not their titles, and every slide nobody edited must still equal a
 fresh conversion, thumbnail included. It is where the moved-label check and the order merge were

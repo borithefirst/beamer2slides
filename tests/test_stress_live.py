@@ -149,13 +149,6 @@ def E(edit: str, **args) -> dict:
     return {"edit": edit, "args": args}
 
 
-def display_maths_noise(problem: str) -> bool:
-    """A known false positive of `sync_check.integrity` (see the xfail test below): a display
-    equation is an `image/math` element with no anchor and no text to be grouped with, and the
-    checker asks for the grouping anyway. No deck with display maths can pass without this."""
-    return "formula picture" in problem and "not grouped" in problem and "Display mathematics" in problem
-
-
 # ---------------------------------------------------------------- offline
 
 def latex_missing() -> str | None:
@@ -233,6 +226,15 @@ def test_every_variant_pairs_with_v1_frame_for_frame(variant):
             wrong.append(f"frame {name} read as {got}, wanted {name if want is not None else 'a new frame'}")
     assert not wrong, "\n".join(wrong)
 
+    # And the other side of `near_misses`: a report that cries wolf is worse than a quiet one,
+    # because an AI author would go labelling frames that were never in doubt. Every one of these
+    # variants pairs frame for frame, so it has nothing to say. `strangers` is the one that can
+    # get this wrong - a frame the source added, two it dropped, and nothing in common between
+    # them - and the only variant besides `recastmoved` where a near miss is possible at all.
+    said = [(names[m["ours"]], base_names[m["base"]], m["evidence"])
+            for m in identity.near_misses(base, ours, pairs)]
+    assert not said, f"near_misses names {said} on a variant whose frames all pair"
+
 
 def test_the_one_frame_nothing_can_follow_is_named_in_the_report():
     """`recastmoved`, the exception to the test above and the reason it has one: the frame with no
@@ -303,21 +305,45 @@ def test_request_budget():
     assert requests < 40 * len(deck["slides"]), f"{requests} content requests for {len(deck['slides'])} slides"
 
 
-@pytest.mark.xfail(strict=True, reason="sync_check.is_formula_picture also matches a display equation, "
-                                       "which has no anchor and no text to be grouped with")
+def _page_element(oid: str, tag: str, box: list[float], **kind) -> dict:
+    """One `presentations.get` page element at an absolute box, in pt."""
+    x0, y0, x1, y1 = box
+    return {"objectId": oid, "title": tag, **kind,
+            "size": {"width": {"magnitude": x1 - x0, "unit": "PT"}, "height": {"magnitude": y1 - y0, "unit": "PT"}},
+            "transform": {"scaleX": 1, "scaleY": 1, "translateX": x0, "translateY": y0, "unit": "PT"}}
+
+
+def _text_box(oid: str, tag: str, box: list[float], text: str) -> dict:
+    return _page_element(oid, tag, box, shape={"shapeType": "TEXT_BOX", "text": {
+        "textElements": [{"textRun": {"content": text}}]}})
+
+
+def _picture(oid: str, tag: str, box: list[float]) -> dict:
+    return _page_element(oid, tag, box, image={"contentUrl": "https://example.invalid/equation.png"})
+
+
 def test_integrity_does_not_ask_display_maths_to_be_grouped():
     """A display equation becomes a picture of its own (`classify`: role math, anchor None), tagged
-    `.../image/math/N` like an inline formula. `sync_check.integrity` asks every such picture to be
-    grouped with its text, so every deck holding display maths reports a problem that is not one.
-    A fix could ask only for pictures that lie inside a text box's line (an inline formula does,
-    a display equation does not), or emit could tag the two apart."""
+    `.../image/math/N` exactly like an inline formula. The checker used to ask every such picture to
+    be grouped with its text, so every deck holding display maths reported a problem that was not
+    one - and `Run.integrity` had to filter that sentence out to see the real ones.
+
+    What tells them apart is where the picture stands (`sync_check.on_a_text_line`): an inline
+    formula sits between the words of a line, so the text's box holds it top and bottom; a display
+    equation stands on its own between paragraphs. Both halves are here, because the fix would be
+    worthless if it also stopped asking for the inline one."""
     import sync_check as sc
-    model = sc.Model({"slides": [{"objectId": "s1", "pageElements": [
-        {"objectId": "b2s_s034_f0", "title": "b2s:displaymath/image/math/0",
-         "size": {"width": {"magnitude": 1900000, "unit": "EMU"}, "height": {"magnitude": 410000, "unit": "EMU"}},
-         "transform": {"scaleX": 1, "scaleY": 1, "translateX": 1310000, "translateY": 980000, "unit": "EMU"},
-         "image": {"contentUrl": "https://example.invalid/equation.png"}}]}]})
-    assert sc.integrity(model) == []
+
+    display = sc.Model({"slides": [{"objectId": "s1", "pageElements": [
+        _text_box("b2s_s034_t0", "b2s:displaymath/text/body/0", [60, 100, 660, 130], "The equation below:\n"),
+        _picture("b2s_s034_f0", "b2s:displaymath/image/math/0", [260, 160, 460, 200])]}]})
+    assert sc.integrity(display) == []
+
+    # The same picture moved up onto the line of that text, and still not grouped with it.
+    inline = sc.Model({"slides": [{"objectId": "s1", "pageElements": [
+        _text_box("b2s_s034_t0", "b2s:displaymath/text/body/0", [60, 100, 660, 130], "The equation   here:\n"),
+        _picture("b2s_s034_f0", "b2s:displaymath/image/math/0", [260, 106, 300, 124])]}]})
+    assert [p for p in sc.integrity(inline) if "not grouped with its text" in p]
 
 
 def save_timings() -> None:
@@ -403,16 +429,16 @@ class Run:
         return ids_in(json.loads(base.read_text(encoding="utf-8"))) if base else None
 
     def integrity(self, model) -> list[str]:
-        """What the checker says about the deck's structure, minus the one thing it says about
-        every deck with display maths (`display_maths_noise`)."""
+        """What the checker says about the deck's structure - all of it. It used to have one
+        sentence filtered out, the one it said about every deck with display maths; the checker
+        now tells a display equation from an inline formula itself (`sync_check.on_a_text_line`)."""
         import sync_check as sc
-        return [p for p in sc.integrity(model, before=self.before, base_ids=self.base_ids())
-                if not display_maths_noise(p)]
+        return sc.integrity(model, before=self.before, base_ids=self.base_ids())
 
     def check(self, variant: str, pdf: Path, report: dict, expectations: list[dict], *, drop: tuple[str, ...] = (),
               checks: list[dict] = (), conflicts: list[list[str]] = (), any_conflicts: bool = False,
               converged: list[list[str]] = (), no_writes_since: str | None = None, edited: list[str] = (),
-              gone: tuple[str, ...] = (), overridden: tuple[str, ...] = (),
+              gone: tuple[str, ...] = (), overridden: tuple[str, ...] = (), warnings: list[list[str]] = (),
               dragged: tuple[tuple[str, str], ...] = (), idempotent: bool = True) -> None:
         """Everything a sync of this deck must leave behind: the deck edits (minus `drop`, whose
         own checks the source legitimately changed), the source's own checks, the slide order of
@@ -430,7 +456,7 @@ class Run:
         source_checks = [c for c in stress.checks(flags) if c.get("text") not in overridden]
         all_checks = kept + list(checks) + source_checks + [order_check(flags, gone, dragged)]
         self.problems += [f"after sync to {variant}: {p}" for p in sc.check_all(model, all_checks)]
-        self.problems += sc.check_report(report, conflicts=conflicts, converged=converged,
+        self.problems += sc.check_report(report, conflicts=conflicts, converged=converged, warnings=warnings,
                                          no_conflicts=not conflicts and not any_conflicts)
         if no_writes_since is not None:
             if sc.changes(report):
@@ -556,6 +582,40 @@ def scenario_identity(run: Run):
         {"check": "title", "slide": S("#27"), "text": "The third table of numbers v2"},
         {"check": "slide_count", "slide": S("#27"), "count": 1}],
         conflicts=[["label", "mobile", "Arriving labels v2", "identity taken from the content"]],
+        edited=["Characters outside the BMP"])
+
+
+@scenario
+def scenario_recast_moved(run: Run):
+    """The frame nothing can follow, end to end. The unlabelled third Results frame gets another
+    title, half its words rewritten *and* a ride across nine other frames, in one version - while
+    the person has coloured a word on its slide.
+
+    Sync does the only safe thing: it reads the frame as new, makes a slide for it, and leaves the
+    old slide alone with the person's red word on it. What it may not do is pass in silence, and
+    that is what this scenario is for: the report names the slide it could not match and the frame
+    that looks like it (`identity.near_misses`), so an AI author reading the report can put a label
+    on that frame and have a person move the edits over."""
+    run.convert(stress.build("v1"))
+    old = {"contains": "so only its content can identify it"}   # the sentence only the old slide has
+    new = {"contains": "the source has now given it"}           # and the one only the new slide has
+    exps = run.edit(
+        E("recolour", slide=old, word="Results", context="This third slide called Results", color="#c00000"),
+        E("add_text_box", slide=S("astral"), text="Mine, on a frame nothing touches", box=[540, 300, 150, 28]))
+    pdf = stress.build("recastmoved")
+    run.check("recastmoved", pdf, run.sync(pdf), exps, checks=[
+        # Both slides say "no label at all", so the source's own checks (which name the frame by
+        # that phrase) cannot tell them apart any more: `overridden` drops them and these take over.
+        {"check": "slide_count", "slide": old, "count": 1},
+        {"check": "slide_count", "slide": new, "count": 1},
+        {"check": "text", "slide": new, "count": 1,
+         "text": "another title and rewritten the rest of what it says about itself."}],
+        # The frame is in the deck twice now - the person's slide and the source's new one - so no
+        # single place in the order is the right one for it.
+        gone=("#27",),
+        overridden=("so only its content can identify it",
+                    "another title and rewritten the rest of what it says about itself."),
+        warnings=[["no frame this slide could be matched to", "The third table of numbers"]],
         edited=["Characters outside the BMP"])
 
 
