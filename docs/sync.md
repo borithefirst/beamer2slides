@@ -130,8 +130,8 @@ Z-order changes are not detected.
 |---|---|---|
 | unchanged | anything | keep the deck (edited fields reported as overrides) |
 | changed | unchanged | recreate the unit's objects from ours (same place in z-order and grouping) |
-| position/size only | text or style, not geometry | `move`: shift the deck's objects by the source delta |
-| changed | geometry | recreate, then re-apply the deck's transform change (`delta`: theirs · base⁻¹); if the source moved it too, the deck's position wins and it's a conflict |
+| position/size only | text or style, not geometry | `move`: shift the deck's objects by the source delta - only when every member of the unit moved by the same step (`merge.unit_shift`), since sync moves the unit's top object; a formula picture the source re-placed inside its line is recreated instead |
+| changed | geometry | recreate, then re-apply the deck's transform change (`delta`: theirs · base⁻¹); if the source moved it too, the deck's position wins and it's a conflict. Only when the whole unit went with its top object (`merge.geometry_writable`): sync transforms the unit's top, so a member the person dragged on its own - a formula picture out of its line - would be put back where the converter had it, and such a unit is kept as the deck has it, with a conflict |
 | changed | text style / shape style | recreate, re-apply the deck's change: uniform over all runs → over all the text; some words (or a table) → the deck's run attributes onto the same words of the new text (character alignment, `sync.style_range_requests`); non-uniform paragraph styles → keep the deck, conflict. A conflict is reported only when the source changed the same style attributes |
 | text changed | text changed | word-level diff3; clean → recreate and write the merged text; overlapping → keep the deck, conflict. In a table the diff3 runs per cell (`merge.table_merge`, applied with `cellLocation`); a row or column added on either side, or a cell holding a line break, makes the whole table a conflict |
 | text / position changed | the deck shows exactly that (same text; a move the source now reproduces within 2 pt) | `adopt`: nothing written, reported as converged; the base takes ours IR and the deck's version of those fields (e.g. after `pull`) |
@@ -288,6 +288,53 @@ that the deck edits are all still there and the deck converges.
 and resolution, `converged`, `user_objects`, `slides_created`, `slides_deleted`, `slides_moved`,
 `slides_kept`, `slides_user_added`, `warnings`, plus pdf, url, attempts, requests per phase and the
 per-slide `actions`) and `sync-report.md`.
+
+## Proving nothing is lost (fuzzing, `tools/loss_oracle.py` + `tools/fuzz_sync.py`)
+The live scenarios check hand-written expectations; the fuzz checks the one property that has to
+hold for every sync, including the combinations nobody thought of.
+
+- **The oracle** takes the read-back *before* a sync, the one *after*, the base, the report and the
+  new conversion (`ours`, so a word the source deliberately rewrote is not read as a word that
+  vanished), and asks whether anything a person put in the deck disappeared without being accounted
+  for. Its docstring defines "accounted for": user objects survive whole (text, picture, box, group
+  - the only allowances are Slides' own, a one-child group disappearing and a child losing a
+  converter group that is gone); a word the person typed is still readable somewhere on that slide
+  or is reproduced verbatim in a `conflicts` entry; a word the person deleted doesn't come back into
+  that element; an element the person moved stands afterwards where they put it, or - when the source
+  moved it too - at the conversion's new box with the person's step on top of it (`deck_placement`
+  works that box out, so the base's old box is never mistaken for it); its picture and its styling
+  are the person's unless a conflict says otherwise; notes and backgrounds likewise (on a slide the
+  person added, word for word); slides only vanish when reported *and* untouched,
+  user-added slides never; taking the reported moves out of the order before and after must leave
+  the same sequence; converter content the new conversion still has keeps an object; and the report
+  is honest - every `applied` entry really changed something, every `converged` entry really changed
+  nothing. It runs offline from two snapshots: `python tools/loss_oracle.py <folder>`. The fuzz
+  harness writes them; a production sync writes `base.json` and the report but no read-backs yet, so
+  auditing a real sync means `sync.py` keeping `theirs` (before) and a final read (after) beside them.
+- **The fuzz** (`python tools/fuzz_sync.py offline --rounds N`, seeds replay: `--replay <seed>`)
+  builds a synthetic deck, applies 2-8 random deck edits and 1-4 random source changes, plans the
+  merge and applies the plan the way this document says sync does (`tools/fuzz_world.py`, the
+  reference applier), then runs the oracle. About 50 rounds a second per core; today 10 000
+  single-step rounds, 4000 three-step chains, 1500 six-step and 600 ten-step chains ran clean.
+  `live` does the same against real decks (convert v1 → random `deck_edits` → `sync <variant>` →
+  oracle + `sync_check.integrity`), 3 at a time in `out/sync-fuzz/<seed>`, decks of passing rounds
+  deleted; `--chain N` edits and syncs N times in a row. Every failure writes base, before, after,
+  report, edits and findings into the run folder, and a shrinker drops edits one at a time until
+  the smallest failing combination is left.
+- `tests/test_sync_fuzz.py` runs fixed offline seeds in the default suite (a second) and proves the
+  oracle catches losses injected on purpose; the live campaign is marked `sync`
+  (`B2S_FUZZ_LIVE_ROUNDS`, `B2S_FUZZ_ROUNDS`).
+- Each round also checks that the sync **settles**: replanning against the base the round recorded,
+  with the same source, must write nothing - a base that doesn't describe the deck it just wrote
+  makes the next sync rewrite units, and a rewrite is where work gets lost.
+- Found by it so far: the `move` shortcut took its step from the unit's anchor although the source
+  may have re-placed only an anchored member (`merge.unit_shift`); a geometry override was promised
+  for a unit whose parts the person had moved apart, which sync cannot write
+  (`merge.geometry_writable`); sync sends an alt-text title for a diagram's main object, which is
+  the group `emit.diagram_requests` builds - the API refuses that and rejects the whole batch; and
+  `sync.base_order` leaves out the slides the deck deleted, so their base entries land last and the
+  frames after them in the source lose their keys on the next conversion. The last two are open,
+  pinned as xfail tests in `tests/test_sync.py`.
 
 ## Not supported yet
 - Crossing reorders of unlabelled frames (the alignment keeps order; label frames).

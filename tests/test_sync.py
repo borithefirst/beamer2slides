@@ -559,6 +559,78 @@ def test_added_in_source_and_moved_only_in_source():
     assert u["action"] == "move" and u["delta"] == [0, 20]
 
 
+def anchored_picture_base():
+    """`results` with an inline formula picture anchored to its body text."""
+    base = three_slides()
+    pic = {"id": "p1m0", "kind": "image", "role": "math", "bbox": [120, 62, 140, 74], "file": None}
+    base["slides"][1]["elements"].append(entry("image/math/0", pic, "b2s_s001_m0", anchor="text/body/0"))
+    return base, pic
+
+
+def test_member_moved_alone_is_recreated_not_moved():
+    """Found by the offline fuzz (tools/fuzz_sync.py, seeds 252 and 430): the source re-placed the
+    inline formula picture inside its line while the deck edited that paragraph. Sync writes a
+    `move` by moving the unit's top object, so a step that fits only one member cannot be written -
+    it used to become a move of [0, 0] the report still called applied (nothing moved, no conflict
+    raised). Such a unit is recreated instead."""
+    base, pic = anchored_picture_base()
+    ours, theirs = triple(base)
+    ours["slides"][1]["elements"][2] = ours_entry("image/math/0", {**pic, "bbox": [128, 62, 148, 74]}, "text/body/0")
+    edit_text(theirs["slides"][1], "b2s_s001_t1", "First point, as the deck says\nSecond point of results\n")
+    mplan = merge.plan_merge(base, ours, theirs)
+    u = unit(mplan, "results", "text/body/0")
+    assert u["action"] == "recreate" and "delta" not in u
+    assert not [a for a in mplan["report"]["applied"] if a.get("how") == "deck object moved"]
+
+
+def test_whole_unit_moved_still_moves_the_deck_objects():
+    """The counterpart: every member moved by the same step, so one move carries the unit."""
+    base, pic = anchored_picture_base()
+    ours, theirs = triple(base)
+    ours["slides"][1]["elements"][1] = ours_entry("text/body/0", text_ir("First point of results\nSecond point of results",
+                                                                         (20, 80, 200, 110), "p1t1"))
+    ours["slides"][1]["elements"][2] = ours_entry("image/math/0", {**pic, "bbox": [120, 82, 140, 94]}, "text/body/0")
+    edit_text(theirs["slides"][1], "b2s_s001_t1", "First point, as the deck says\nSecond point of results\n")
+    u = unit(merge.plan_merge(base, ours, theirs), "results", "text/body/0")
+    assert u["action"] == "move" and u["delta"] == [0, 20]
+
+
+def move_object(slide, oid, dx, dy):
+    rb = slide["objects"][oid]
+    rb["box"] = [rb["box"][0] + dx, rb["box"][1] + dy, rb["box"][2] + dx, rb["box"][3] + dy]
+    rb["transform"] = rb["transform"][:4] + [rb["transform"][4] + dx, rb["transform"][5] + dy]
+
+
+def test_picture_the_deck_moved_inside_its_unit_is_kept_not_recreated():
+    """Found by the offline fuzz (tools/fuzz_sync.py, seed 720): the person dragged the formula
+    picture inside its line while the source reworded that paragraph. Sync re-applies a geometry
+    override by transforming the unit's *top* object, so a member that moved on its own would land
+    back at the converter's box - silently, since the report listed the geometry as an override.
+    The unit is kept as the deck has it, and the clash is reported."""
+    base, pic = anchored_picture_base()
+    ours, theirs = triple(base)
+    ours["slides"][1]["elements"][1] = ours_entry("text/body/0", text_ir("First point reworded\nSecond point of results",
+                                                                         (20, 60, 200, 90), "p1t1"))
+    move_object(theirs["slides"][1], "b2s_s001_m0", 0, 40)
+    mplan = merge.plan_merge(base, ours, theirs)
+    assert unit(mplan, "results", "text/body/0")["action"] == "keep"
+    clash, = [c for c in mplan["report"]["conflicts"] if c["field"] == "geometry"]
+    assert clash["element"] == "text/body/0" and "on its own" in clash["resolution"]
+
+
+def test_unit_the_deck_moved_as_a_whole_is_still_recreated():
+    """The counterpart: the person moved every object of the unit by the same step (they moved the
+    group), so the top's transform carries the whole unit and the source's rewording goes in."""
+    base, pic = anchored_picture_base()
+    ours, theirs = triple(base)
+    ours["slides"][1]["elements"][1] = ours_entry("text/body/0", text_ir("First point reworded\nSecond point of results",
+                                                                         (20, 60, 200, 90), "p1t1"))
+    for oid in ("b2s_s001_t1", "b2s_s001_m0"):
+        move_object(theirs["slides"][1], oid, 0, 40)
+    u = unit(merge.plan_merge(base, ours, theirs), "results", "text/body/0")
+    assert u["action"] == "recreate" and u["overrides"]["geometry"] == {"mode": "delta"}
+
+
 def test_image_replaced_in_deck_is_kept():
     base = three_slides()
     pic = {"id": "p1f0", "kind": "image", "role": "figure", "bbox": [200, 60, 300, 160], "file": None}
@@ -657,6 +729,57 @@ def test_letterbox_fix_stretches_to_the_box():
     assert fix["scaleX"] * fx0 + fix["translateX"] / 12700 == pytest.approx(100, abs=0.01)
     assert fix["scaleX"] * fx1 + fix["translateX"] / 12700 == pytest.approx(400, abs=0.01)
     assert fix["scaleY"] == pytest.approx(1) and fix["translateY"] == pytest.approx(0, abs=1)
+
+
+def test_a_base_out_of_the_sources_order_loses_the_frames_after_it():
+    """Why the new base has to stay in the source's order: frames without a label are paired with
+    the base by an order-keeping alignment, so a base entry moved to the end takes the identity of
+    the frames that followed it with it - they look new, and the next sync creates them again."""
+    source = [info("Why decks diverge", "decks and sources drift apart over time"),
+              info("The sync algorithm", "base ours theirs three way merge of the deck"),
+              info("Conclusions", "thanks for listening and for the questions")]
+    keys = identity.slide_keys(source)
+    moved = [source[0], source[2], source[1]]  # the middle frame's entry recorded last
+    got, _ = identity.inherit_slide_keys(moved, [keys[0], keys[2], keys[1]], source)
+    assert got[:2] == keys[:2] and got[2] == "title:conclusions#2" != keys[2]
+
+
+@pytest.mark.xfail(strict=True, reason="sync.base_order leaves out the slides the deck deleted, so they land at the "
+                                       "end of the new base, and the frames after them in the source can no longer be "
+                                       "aligned with it: the next sync creates them again")
+def test_a_slide_the_deck_deleted_keeps_its_place_in_the_new_base():
+    """Found by the offline fuzz (`second_sync_writes`, seeds 45, 60, 108, 177 of the default run):
+    the person deletes a converter slide whose frame has no label and the source still has it. The
+    sync is right to leave it deleted, but it records that slide's base entry last (`new_base` keys
+    it `gone:<key>`, which `base_order` never returns). The base is converter output, and the next
+    conversion pairs frames with it by `identity.align_slides` - see the test above for what a base
+    out of order costs. Fix: order the `gone` plans with the rest, by their `ours` index."""
+    from beamer2slides.sync import base_order
+    plans = [{"key": "deleted_by_the_person", "action": "gone", "ours": 0, "base": 0, "objectId": None},
+             {"key": "kept", "action": "update", "ours": 1, "base": 1, "objectId": "b2s_s001"}]
+    by_plan = {id(plans[1]): {"sid": "b2s_s001"}}
+    assert base_order({"slides": plans}, by_plan, ["b2s_s001"]) == ["gone:deleted_by_the_person", "b2s_s001"]
+
+
+@pytest.mark.xfail(strict=True, reason="sync.tag_requests tags a diagram's main object, which is the group "
+                                       "emit.diagram_requests creates under that id; the API refuses "
+                                       "updatePageElementAltText on a group and rejects the whole batch")
+def test_sync_does_not_alt_text_a_diagram_group():
+    """Found by the live fuzz (tools/fuzz_sync.py, seed 202): a sync that rewrites a slide with a
+    diagram dies with 'The operation is not allowed on group (b2s_..._<tok>)'. A diagram element's
+    main object *is* a group (emit.diagram_requests groups its parts under the element's object id),
+    and sync.tag_requests (sync.py) sends an alt-text title for every element it wrote.
+    snapshot.tag_requests already skips elementGroup read-backs; sync must skip them too (or send
+    the tags in their own batch, like snapshot.write_tags, which tolerates refusals)."""
+    from types import SimpleNamespace
+
+    from beamer2slides.sync import Syncer
+    o = {"key": "figures", "elements": [{"key": "diagram/figure/0"}]}
+    stub = SimpleNamespace(plan=SimpleNamespace(deck={"slides": [{"elements": [{"kind": "diagram", "id": "p0d0"}]}]}),
+                           ours={"slides": [o]})
+    oid = "b2s_abcdef_012345_t0k"  # the group emit creates for the diagram, with its nodes and lines inside
+    reqs = Syncer.tag_requests(stub, o, {0: [oid, f"{oid}_n0", f"{oid}_l0"]}, {0: oid}, {})
+    assert [r for r in reqs if r["updatePageElementAltText"]["objectId"] == oid] == []
 
 
 def test_element_objects_from_emit_plan():

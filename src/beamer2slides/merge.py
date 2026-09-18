@@ -12,6 +12,7 @@ from . import identity, snapshot
 GEOMETRY_TOLERANCE = 0.05  # pt
 SCALE_TOLERANCE = 1e-3
 CONVERGED_PLACE = 2.0  # pt: a deck move the source now reproduces this closely counts as converged
+MOVE_TOLERANCE = 0.05  # pt: members within this of the same step moved together (PDF pt)
 EDIT_FIELDS = ("geometry", "text", "text_style", "shape_style", "image")
 TOKEN = re.compile(r"\w+|\s+|[^\w\s]")
 
@@ -335,6 +336,56 @@ def converged_fields(anchor: dict, first: dict, base_by: dict, ours_by: dict, ed
     return {"source": source, "deck": deck} if deck else None
 
 
+def unit_shift(base_by: dict, ours_by: dict) -> tuple[float, float] | None:
+    """The step by which the source moved the unit as a whole, None when it didn't move that way.
+
+    Sync writes a `move` by moving the unit's *top* object (the group, when the unit is grouped),
+    so one step has to fit every member. A unit whose members drifted apart - the source re-placed
+    an inline formula picture inside its line, or moved the paragraph while an anchored picture
+    stayed - can't be written that way and has to be recreated instead."""
+    if set(base_by) != set(ours_by) or not base_by:
+        return None
+    shifts = []
+    for key, base_el in base_by.items():
+        bb = (base_el.get("fingerprint") or {}).get("bbox")
+        ob = (ours_by[key].get("fingerprint") or {}).get("bbox")
+        if not bb or not ob:
+            return None
+        shifts.append((ob[0] - bb[0], ob[1] - bb[1]))
+    for i in (0, 1):
+        values = [s[i] for s in shifts]
+        if max(values) - min(values) > MOVE_TOLERANCE:
+            return None
+    dx, dy = shifts[0]  # the anchor's step; every member agrees with it
+    return None if max(abs(dx), abs(dy)) <= MOVE_TOLERANCE else (dx, dy)
+
+
+def geometry_writable(members: list[dict], slide_read: dict | None) -> bool:
+    """Whether the deck's move of this unit can be put back onto a rewritten unit.
+
+    Sync re-applies it by transforming the unit's *top* object (`sync.override_requests`), so the
+    person's edit only survives when every object of the unit went along with that top. A formula
+    picture dragged out of its line inside the group, or a group member nudged on its own, moved
+    by itself: recreating the unit would put it back where the converter had it while the report
+    says the deck's geometry was kept. Such a unit is kept as the deck has it instead."""
+    objects = (slide_read or {}).get("objects", {})
+    top = unit_top(members, slide_read) if objects else None
+    base_top = next((m["readback"][top] for m in members if top in m.get("readback", {})), None)
+    if not top or not base_top or top not in objects:
+        return True  # nothing to judge it by: leave the old behaviour
+    step = snapshot.compose(objects[top]["transform"], snapshot.invert(base_top["transform"]))
+    for m in members:
+        for oid, b in (m.get("readback") or {}).items():
+            live = objects.get(oid)
+            if live is None:
+                continue  # a part the person deleted: handled before this ("part_deleted")
+            want = snapshot.compose(step, b["transform"])
+            if any(abs(x - y) > SCALE_TOLERANCE for x, y in zip(want[:4], live["transform"][:4])) or \
+                    any(abs(x - y) > GEOMETRY_TOLERANCE for x, y in zip(want[4:], live["transform"][4:])):
+                return False
+    return True
+
+
 def plan_unit(skey: str, ukey: str, base_members: list[dict] | None, ours_members: list[dict] | None,
               slide_read: dict | None, report: dict, scale: float | None = None, adopt=None) -> dict:
     """The action for one element unit: keep, recreate (with deck overrides), create, delete,
@@ -407,12 +458,15 @@ def plan_unit(skey: str, ukey: str, base_members: list[dict] | None, ours_member
         if rest:
             report["overrides"].append({**where, "fields": sorted(rest)})
         return {**action, "action": "adopt", "adopt": sorted(same["deck"])}
-    if "position" in src and src <= {"position", "size"} and "geometry" not in edited:
-        # Only the place changed in the source: move the edited deck object there.
-        bb, ob = anchor["fingerprint"]["bbox"], first["fingerprint"]["bbox"]
+    shift = unit_shift(base_by, ours_by)
+    if "position" in src and src <= {"position", "size"} and "geometry" not in edited and shift:
+        # Only the place changed in the source, and the whole unit moved by the same step: move the
+        # edited deck objects there (sync moves the unit's top object). A member that moved on its
+        # own - a formula picture the source re-placed inside its line - can't be written that way,
+        # so that unit is recreated instead (`shift` is None).
         report["applied"].append({**where, "fields": ["position"], "how": "deck object moved"})
         report["overrides"].append({**where, "fields": sorted(edited)})
-        return {**action, "action": "move", "delta": [ob[0] - bb[0], ob[1] - bb[1]]}
+        return {**action, "action": "move", "delta": list(shift)}
     overrides: dict = {}
     conflicts = []
 
@@ -481,6 +535,11 @@ def plan_unit(skey: str, ukey: str, base_members: list[dict] | None, ours_member
             overrides["shape_style"] = theirs_rb.get("shape_style")
             if "style" in src:
                 conflict("shape_style", "style", "restyled in the source", "restyled in the deck", "deck style re-applied")
+    if "geometry" in edited and not keep and not geometry_writable(base_members, slide_read):
+        # The person moved something inside the unit; a rewritten unit can't be put back that way.
+        conflict("geometry", anchor["fingerprint"]["bbox"], first["fingerprint"]["bbox"], theirs_rb.get("box"),
+                 "deck kept (the deck moved a part of the element on its own)")
+        keep = True
     if "geometry" in edited and not keep:
         both = "position" in src
         overrides["geometry"] = {"mode": "theirs" if both else "delta"}
