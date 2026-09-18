@@ -1,0 +1,66 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 980 344" width="980" height="344"
+     font-family="'Google Sans', 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" role="img"
+     aria-label="talk.tex compiles to a PDF; extract, classify, render and emit turn it into a Google Slides deck; sync merges later source changes into the edited deck; pull writes the deck's edits back into the source; adopt starts a source from a deck nobody converted.">
+  <rect width="980" height="340" rx="14" fill="#ffffff"/>
+  <defs>
+    <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0 0 L10 5 L0 10 z" fill="#5f6368"/>
+    </marker>
+    <marker id="b" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0 0 L10 5 L0 10 z" fill="#1a73e8"/>
+    </marker>
+    <marker id="g" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0 0 L10 5 L0 10 z" fill="#188038"/>
+    </marker>
+  </defs>
+
+  <!-- the four stages, the part that is all local -->
+  <rect x="236" y="104" width="454" height="96" rx="12" fill="#f1f3f4" stroke="#dadce0"/>
+  <text x="463" y="93" text-anchor="middle" font-size="15" fill="#5f6368">no Google call, no network</text>
+  <g font-size="17" fill="#202124" text-anchor="middle">
+    <rect x="252" y="124" width="96" height="56" rx="9" fill="#ffffff" stroke="#9aa0a6"/>
+    <text x="300" y="148">extract</text><text x="300" y="167" font-size="12" fill="#5f6368">PDFium</text>
+    <rect x="362" y="124" width="96" height="56" rx="9" fill="#ffffff" stroke="#9aa0a6"/>
+    <text x="410" y="148">classify</text><text x="410" y="167" font-size="12" fill="#5f6368">what is what</text>
+    <rect x="472" y="124" width="96" height="56" rx="9" fill="#ffffff" stroke="#9aa0a6"/>
+    <text x="520" y="148">render</text><text x="520" y="167" font-size="12" fill="#5f6368">what is left</text>
+    <rect x="582" y="124" width="96" height="56" rx="9" fill="#ffffff" stroke="#9aa0a6"/>
+    <text x="630" y="148">emit</text><text x="630" y="167" font-size="12" fill="#5f6368">.pptx + API</text>
+  </g>
+  <g stroke="#5f6368" stroke-width="1.6" marker-end="url(#a)" fill="none">
+    <path d="M350 152 H358"/><path d="M460 152 H468"/><path d="M570 152 H578"/>
+  </g>
+
+  <!-- the two ends -->
+  <g text-anchor="middle">
+    <rect x="24" y="112" width="150" height="80" rx="11" fill="#ffffff" stroke="#3c4043" stroke-width="1.8"/>
+    <text x="99" y="146" font-size="19" fill="#202124">talk.pdf</text>
+    <text x="99" y="169" font-size="13" fill="#5f6368">compiled from beamer</text>
+
+    <rect x="756" y="112" width="200" height="80" rx="11" fill="#ffffff" stroke="#1a73e8" stroke-width="2"/>
+    <text x="856" y="146" font-size="19" fill="#174ea6">Google Slides</text>
+    <text x="856" y="169" font-size="13" fill="#5f6368">real text, shapes, tables</text>
+  </g>
+  <g stroke="#5f6368" stroke-width="1.8" marker-end="url(#a)" fill="none">
+    <path d="M176 152 H232"/><path d="M692 152 H752"/>
+  </g>
+
+  <!-- sync: a new PDF into a deck someone has been editing -->
+  <path d="M99 110 V56 H856 V108" fill="none" stroke="#188038" stroke-width="1.8"
+        marker-end="url(#g)" stroke-dasharray="7 5"/>
+  <text x="477" y="46" text-anchor="middle" font-size="16" fill="#188038">
+    <tspan font-weight="600">sync</tspan> — a rewritten talk into a deck people have been editing, edits kept
+  </text>
+
+  <!-- pull: the deck's edits back into the .tex -->
+  <path d="M856 196 V256 H99 V200" fill="none" stroke="#1a73e8" stroke-width="1.8" marker-end="url(#b)"/>
+  <text x="477" y="278" text-anchor="middle" font-size="16" fill="#174ea6">
+    <tspan font-weight="600">pull</tspan> — what the deck was changed to, written back into the .tex
+  </text>
+
+  <!-- adopt: a deck that was never ours to begin with -->
+  <text x="956" y="316" text-anchor="end" font-size="15" fill="#5f6368">
+    <tspan font-weight="600" fill="#b06000">adopt</tspan> — or begin from a deck nobody converted
+  </text>
+  <path d="M940 196 V304" fill="none" stroke="#b06000" stroke-width="1.6" stroke-dasharray="4 4"/>
+</svg>

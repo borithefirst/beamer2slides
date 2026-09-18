@@ -1,9 +1,41 @@
 # beamer2slides
 
-Turn a **beamer PDF** into an **editable Google Slides deck**. Text, lists, tables, pictures
-and block panels become native Slides elements. Only what cannot be rebuilt faithfully
-(display math, TikZ/pgfplots figures, theme decoration) becomes pictures or stays in the
-slide background.
+**Turn a beamer PDF into a Google Slides deck people can actually edit.** Not one picture per
+slide: real text boxes, real bullet lists, real tables, real shapes — in the same places, in
+matching fonts, to within a point or two.
+
+![The same slide as pdflatex printed it and as Google Slides renders it after conversion](docs/media/hero.png)
+
+Only what cannot be rebuilt faithfully — display math, TikZ/pgfplots figures, theme decoration —
+becomes a picture, and even those stay objects you can move rather than paint on the background.
+
+## Nothing is a screenshot
+
+Every box below is a separate Slides object: click it, retype it, recolour it, drag it. The TikZ
+pipeline became four rounded shapes with arrows between them; the beamer blocks became a title bar,
+a body panel and their text.
+
+![The converted slide with a box drawn around each native Slides element](docs/media/elements.png)
+
+## Fidelity is measured, not eyeballed
+
+Every slide is exported back through `presentations.pages.getThumbnail` — Google's own renderer,
+not a local preview — and compared with the PDF page on the same pixel grid, whole-slide and per
+text box. A calibration deck measures the font substitutes once (width ratios, first-baseline
+offsets) and feeds the correction tables.
+
+![A pixel diff of the PDF page against Google's rendering of the converted slide](docs/media/fidelity.png)
+
+## …and it goes both ways
+
+![talk.pdf through extract, classify, render and emit into Google Slides, with sync, pull and adopt closing the loop](docs/media/pipeline.svg)
+
+| | |
+|---|---|
+| `convert` | the PDF becomes a deck. Re-run it and the same deck is updated in place. |
+| `sync` | you rewrote the talk, other people have been editing the deck. Three-way merge; their edits win, conflicts are reported, nothing is lost — and that claim is [fuzzed against a loss oracle](docs/sync.md#proving-nothing-is-lost-fuzzing-toolsloss_oraclepy--toolsfuzz_syncpy). |
+| `pull` | someone fixed a typo in Slides. Get it back into the `.tex`, as an edit a human would have made. |
+| `adopt` | you have a deck nobody ever converted — one a person built in Slides. Get a beamer source for it, and take it from there. |
 
 ## What you get
 - **Text boxes** with colours, bold/italic/small caps and links. Fonts that are Google fonts in
@@ -52,6 +84,9 @@ See `docs/install.md` for the credential search order and the scopes asked for.
 beamer2slides convert talk.pdf                     # or python -m beamer2slides convert talk.pdf
 python -m beamer2slides classify talk.pdf          # local only: see decisions in out/talk/debug/
 python -m beamer2slides fidelity talk.pdf          # compare Google's rendering with the PDF
+python -m beamer2slides sync talk.pdf --deck <url> # a rewritten talk into an edited deck
+python -m beamer2slides pull --deck <url> --tex main.tex --apply   # the deck's edits back
+python -m beamer2slides adopt --deck <url> --tex new.tex           # a source for a foreign deck
 ```
 Outputs go to `out/<pdf name>/`. Re-running `convert` on the same PDF updates the same
 Google Slides deck — but if anyone edited that deck in Slides, convert stops and says so instead of
