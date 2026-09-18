@@ -53,7 +53,15 @@ def slug(title: str | None, taken: set[str], fallback: str = "frame") -> str:
 def survey(infos: list[dict]) -> dict:
     """What a converted deck's slides say about labels: the ones without, and the labels that name
     more than one frame. Overlay steps of one frame share its label and are not duplicates, so
-    slides are counted by frame (`page` is the frame's first page for every step of it)."""
+    slides are counted by frame (`page` is the frame's first page for every step of it).
+
+    A label written on two frames is *not* one of the duplicates found here, because it never
+    reaches the PDF twice: hyperref keeps the first destination of a name and drops the second, so
+    the second frame arrives with no label at all and shows up under `unlabelled`
+    (`tests/test_stress_live.py::test_a_label_written_twice_reaches_the_pdf_as_no_label_at_all`).
+    Only `plan` below, which reads the `.tex`, can see that case. What is left for `duplicates` is
+    a label whose slides are not one run, or whose steps do not agree on a title - which the PDF
+    can show and which nothing downstream expects."""
     frames: dict[object, dict] = {}
     for i, info in enumerate(infos):
         key = info.get("label") or ("#", i)
@@ -85,7 +93,9 @@ def problems(found: dict) -> list[str]:
         out.append(f"{len(found['unlabelled'])} of {found['frames']} frames have no label: {which}"
                    f"{', ...' if len(found['unlabelled']) > 3 else ''}. Their identity falls back to the title and "
                    f"the position, so a sync can lose track of them when frames are reordered or titles repeat. "
-                   f"`python -m beamer2slides label <main.tex> --apply` writes one into each.")
+                   f"`python -m beamer2slides label <main.tex> --apply` writes one into each - and says so if "
+                   f"one of them does carry a `label=` that another frame already uses, which the PDF keeps "
+                   f"only once, so from here the frame looks unlabelled.")
     for d in found["duplicates"]:
         out.append(f"label `{d['label']}` is on more than one frame ({'; '.join(d['titles'][:3])}): a sync cannot "
                    f"tell which of them a slide came from. Give each frame a label of its own.")

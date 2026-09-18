@@ -200,9 +200,10 @@ def main() -> None:
                                 "their gaps and words on scratch slides")
         if name in ("classify", "convert"):
             c.add_argument("--check-labels", choices=["off", "warn", "error"], default="warn",
-                           help="frames without a `label=` of their own, and labels on more than one frame, make "
-                                "a later sync unreliable (docs/labels.md): report them (default), refuse the "
-                                "conversion, or say nothing")
+                           help="frames whose identity a later sync cannot rely on (docs/labels.md): report them "
+                                "(default), refuse the conversion, or say nothing. A PDF shows a frame without a "
+                                "`label=` of its own; a label written on two frames reaches it only once, so the "
+                                "second frame is reported as unlabelled - `beamer2slides label` names it")
         if name == "fidelity":
             c.add_argument("--refresh", action="store_true", help="re-export slide thumbnails")
     c = sub.add_parser("sync", help="merge a changed PDF into the edited deck (docs/sync.md)")

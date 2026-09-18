@@ -31,6 +31,12 @@ is a different frame. Rewrite the title, the bullets, the whole body - the label
 **3. A new frame gets a new label.** Never one that any frame has ever had in this document,
 including labels of frames that were deleted. Derive it from the new frame's title.
 
+A label you use twice is the one mistake in this list that nothing downstream will catch for you.
+hyperref writes the first frame's destination and silently drops the second, so the PDF carries the
+name once: the second frame arrives with **no label at all**, and sync treats it as a frame you
+never labelled. `python -m beamer2slides label main.tex` reads the `.tex` and is the only thing that
+can see it - run it before you hand the source back (docs/labels.md).
+
 **4. Splitting a frame: the original keeps its label**, the new part gets a new one. Pick whichever
 half keeps most of the original's content to keep the old label - that is the frame the deck's
 slide corresponds to.

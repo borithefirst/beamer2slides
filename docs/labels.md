@@ -60,13 +60,20 @@ there is kept as `main.tex.bak` (then `.bak2`, ...), the same way `pull --apply`
 Duplicates are reported, never resolved. If two frames carry `label=results`, no program can know
 which of them the deck's slide came from; only the author can.
 
-`convert --check-labels warn|error|off` (default `warn`) says what the PDF it just converted will
-cost a later sync: how many frames have no label, and which labels are on more than one frame.
-`error` refuses the conversion before anything is written to Drive.
+**A label written twice is worse than a label never written, and `label` is the only thing that can
+see it.** hyperref keeps the first destination of a name and drops the second, so a PDF with
+`label=results` on two frames carries exactly one `results`, on the first of them - the second frame
+comes out of `extract.frame_labels` with no label at all and falls back to its title and position.
+Nothing downstream of the PDF can tell that apart from a frame the author never labelled, and
+nothing pretends to: `identity` never sees two slides sharing a label except the overlay steps of
+one frame, and `--check-labels` reports the second frame as *unlabelled*, with a line saying that a
+label another frame already uses is one of the ways a frame ends up there. Measured on the stress
+deck's `duplabel` variant (`tests/test_stress_live.py::test_a_label_written_twice_reaches_the_pdf_
+as_no_label_at_all`), which exists to catch the day a PDF writer stops dropping the duplicate.
 
-Two frames sharing a label, sitting next to each other, with the same title cannot be told from
-overlay steps of one frame in a PDF - that distinction exists only in the `.tex`, which is why
-`label` is the half of this that can be trusted.
+`convert --check-labels warn|error|off` (default `warn`) says what the PDF it just converted will
+cost a later sync: how many frames have no label, and which labels its slides do not line up with.
+`error` refuses the conversion before anything is written to Drive.
 
 ## If a label does change
 

@@ -493,8 +493,12 @@ def merge(base, ours, theirs):
   The label on this frame moves to the next one in one of the variants.
 \end{frame}
 
+% `duplabel` takes the label without the frame before it giving it up: one label, two frames.
+%<*!duplabel>
 %<!movelabel>\begin{frame}[label=arriving]{\T{Arriving labels}}
 %<movelabel>\begin{frame}[label=mobile]{\T{Arriving labels}}
+%</!duplabel>
+%<duplabel>\begin{frame}[label=mobile]{\T{Arriving labels}}
   This frame is where that label arrives.
 \end{frame}
 

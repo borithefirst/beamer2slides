@@ -53,6 +53,7 @@ FLAGS = {
     "swaptwins": "swap the two frames that differ by one word",
     "insertframe": "add a frame between the two near-identical ones",
     "movelabel": "move a label to the next frame",
+    "duplabel": "put one frame's label on a second frame as well",
     "nolabel": "a frame loses its label",
     "retitleall": "rename every title at once",
     "dropends": "delete the first and the last frame",
@@ -170,6 +171,10 @@ def frames(flags: list[str]) -> list[tuple[str, str | None, str | None]]:
         out = out[1:-1]
     if "movelabel" in flags:
         out = [(n, None if lab == "mobile" else "mobile" if lab == "arriving" else lab, t) for n, lab, t in out]
+    if "duplabel" in flags:
+        # `mobile` keeps its label and `arriving` takes it too. Nothing on either slide changes,
+        # so this is invisible in the deck and only the report can say it happened.
+        out = [(n, "mobile" if lab == "arriving" else lab, t) for n, lab, t in out]
     if "nolabel" in flags:
         out = [(n, None if lab == "vanishing" else lab, t) for n, lab, t in out]
     if "recast" in flags:  # the frame with no label: another title and half its words rewritten
@@ -192,6 +197,7 @@ def names(flags: list[str]) -> list[str]:
 CHECKS = {
     "swaptwins": [],      # an order change only (titles())
     "movelabel": [],      # identity only: nothing visible changes
+    "duplabel": [],       # same: the deck looks identical, the report does not
     "nolabel": [],
     "reorder10": [],
     "fourthree": [],
@@ -244,6 +250,7 @@ INTENDED = {  # classification_diff(v1, variant) items per flag
     "swaptwins": ["order twin-b / twin-a"],
     "insertframe": ["slide+ between"],
     "movelabel": [],
+    "duplabel": [],
     "nolabel": [],
     "fourthree": [],
     "whitespace": [],

@@ -262,6 +262,39 @@ def test_the_one_frame_nothing_can_follow_is_named_in_the_report():
             and pairs.get(k) != (base_names.index(name) if name in base_names else None)] == []
 
 
+def test_a_label_written_twice_reaches_the_pdf_as_no_label_at_all():
+    """`duplabel` writes `label=mobile` on the `arriving` frame as well, and changes nothing else.
+    What comes out is not two slides sharing a label: hyperref refuses the second destination, so
+    the PDF has one `mobile` (on the first frame) and no `arriving` at all, and the second frame
+    arrives *unlabelled*. Everything downstream of the PDF - `identity`, `sync`, `--check-labels` -
+    therefore cannot tell a label written twice from a label never written, and must not pretend
+    to: only `beamer2slides label`, which reads the `.tex`, can see it (docs/labels.md).
+
+    This is worth a test of its own because it is the one label mistake the pipeline cannot report
+    on its own terms, and because the day the PDF writer stops dropping the duplicate, every pass
+    that keys slides by label would suddenly be looking at two slides called `mobile`."""
+    if reason := latex_missing():
+        pytest.skip(reason)
+    from beamer2slides import identity, labels
+    from beamer2slides.pdf import Document
+
+    dests = Document(stress.build("duplabel")).named_dests()
+    assert sorted(n for n, _ in dests if n.startswith(("mobile", "arriving"))) == ["mobile", "mobile<1>"]
+
+    def infos(name):
+        deck = json.loads((classified(name) / "deck.json").read_text(encoding="utf-8"))
+        return [identity.slide_info(s) for s in deck["slides"]]
+
+    ours = infos("duplabel")
+    j = next(k for k, i in enumerate(ours) if i["title"] == "Arriving labels")
+    assert ours[j]["label"] is None and ours[j - 1]["label"] == "mobile"
+    # So the survey sees an unlabelled frame, not a duplicate - and says the one it can prove.
+    found = labels.survey(ours)
+    assert found["duplicates"] == []
+    assert [u["title"] for u in found["unlabelled"]] == ["Results", "Arriving labels"]
+    assert [u["title"] for u in labels.survey(infos("v1"))["unlabelled"]] == ["Results"]
+
+
 def test_selectors_are_unique():
     """Every phrase this file finds a slide by is on exactly one slide of v1 (and of the variants
     that add or change text). Without this the live scenarios would edit the wrong slide."""

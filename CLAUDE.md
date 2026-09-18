@@ -329,10 +329,16 @@ alignment. `python -m beamer2slides label main.tex [--apply]` writes a label int
 has none, from its title, unique in the document, reading the source only (`texmap.Source`, follows
 `\input`, backups like `pull --apply`). Existing labels are never touched or renamed - each one is a
 promise to the deck converted from it - and duplicates are reported, never resolved: which of two
-frames a slide came from is a question only the author can answer. `convert --check-labels
-warn|error|off` (default warn) reports unlabelled frames and labels on more than one frame
-(`labels.survey`; overlay steps of a frame share its label and are consecutive, so they are not
-duplicates). `docs/ai-authoring.md` is the prompting guide for an AI that maintains the .tex: the
+frames a slide came from is a question only the author can answer. **A label written twice never
+reaches the PDF twice**: hyperref keeps the first destination of a name and drops the second, so the
+second frame comes out unlabelled and nothing downstream of the PDF can tell that from a frame the
+author never labelled - `beamer2slides label`, which reads the `.tex`, is the only thing that can
+(stress variant `duplabel`, `test_a_label_written_twice_reaches_the_pdf_as_no_label_at_all`, which
+also guards against the day a PDF writer stops dropping it). `convert --check-labels warn|error|off`
+(default warn) therefore reports such a frame as unlabelled, and says so; `labels.survey`'s own
+`duplicates` are only what a PDF can show (a label whose slides are not one run, or whose steps
+disagree on a title), overlay steps being consecutive and alike.
+`docs/ai-authoring.md` is the prompting guide for an AI that maintains the .tex: the
 invariants, how to repair a source that broke them, and what to do with a sync conflict.
 A label that moved to another frame (docs/sync.md, "When a label moved"): nothing in the PDF says so,
 and following it writes one frame's text onto another frame's slide with the person's edits still on
@@ -497,7 +503,10 @@ whose words are gone, so `merge.styling_lost` makes it a conflict (`snapshot.rea
 run spans, so the read-back says *which* words a style is on; the offline campaign reaches it
 through the `bold_word` deck edit and `fuzz_world._styling_ends`, and taking the conflict out fails
 2 of 400 rounds); and the oracle itself accused a slide that two others - a moved frame and the
-copy riding behind it - had merely passed (`loss_oracle.order_findings`).
+copy riding behind it - had merely passed (`loss_oracle.order_findings`). A third was the campaign's
+own: chained steps could drop the same picture on the same slide at the same box twice, which is a
+real duplicate made by the fuzzer, so `random_spec` now places an added picture or blank shape where
+no other one stands (`_free_box`).
 
 ## Pitfalls found so far
 - PDFium (`pdf.py` handles these):

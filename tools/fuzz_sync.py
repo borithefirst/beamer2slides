@@ -731,6 +731,21 @@ def _lines(el):
     return [l.strip() for raw, _ in el.texts for l in raw.split("\n") if len(l.strip().split()) >= 3]
 
 
+def _free_box(rng, s, candidates, kind):
+    """One of `candidates` ([x, y, w, h], slide pt) with no element of that kind standing on it, or
+    None when they are all taken. Found by the live chain (seed 504): the same picture dropped on
+    the same slide at the same box in two steps is a real duplicate of the fuzzer's own making, and
+    both the checker (`integrity`) and the edit's own `count: 1` are right to say so. The campaign
+    is for what *sync* loses, so the edits have to stay distinguishable from each other."""
+    # What `integrity` calls a duplicate is (descriptor, alt text, box), and the descriptor of a
+    # picture or of a shape with nothing written in it is the same for all of them: those are the
+    # ones a second copy would collide with, not a text box that happens to stand there.
+    taken = [e.center for e in s.elements if e.kind == kind and not e.text]
+    free = [b for b in candidates
+            if not any(abs(c[0] - (b[0] + b[2] / 2)) < 30 and abs(c[1] - (b[1] + b[3] / 2)) < 30 for c in taken)]
+    return rng.choice(free) if free else None
+
+
 def random_spec(model, rng, donor=None):
     """One human-like edit spec for the live deck, found by content (tools/deck_edits.py kinds)."""
     slides = [s for s in model.slides if s.elements]
@@ -791,12 +806,13 @@ def random_spec(model, rng, donor=None):
         return {"edit": "add_text_box", "args": {"slide": sel, "text": f"fuzz note {rng.randrange(10 ** 6)}",
                                                  "box": [rng.choice([440, 470, 500]), rng.choice([40, 300, 330]), 200, 30]}}
     if kind == "add_shape":
-        return {"edit": "add_shape", "args": {"slide": sel, "shape_type": rng.choice(["STAR_5", "ELLIPSE", "CLOUD"]),
-                                              "box": [rng.choice([600, 640]), rng.choice([60, 300]), 44, 44],
-                                              "color": "#ffc000"}}
+        shape = rng.choice(["STAR_5", "ELLIPSE", "CLOUD"])
+        box = _free_box(rng, s, [[x, y, 44, 44] for x in (600, 640) for y in (60, 300)], "shape")
+        return None if box is None else {"edit": "add_shape", "args": {"slide": sel, "shape_type": shape,
+                                                                      "box": box, "color": "#ffc000"}}
     if kind == "add_image":
-        return {"edit": "add_image", "args": {"slide": sel, "url": donor,
-                                              "box": [rng.choice([500, 540]), rng.choice([250, 280]), 140, 90]}}
+        box = _free_box(rng, s, [[x, y, 140, 90] for x in (500, 540) for y in (250, 280)], "image")
+        return None if box is None else {"edit": "add_image", "args": {"slide": sel, "url": donor, "box": box}}
     if kind == "duplicate":
         return {"edit": "duplicate", "args": {"slide": sel, "target": {"text": rng.choice(_lines(rng.choice(texts)))},
                                               "dx": 0, "dy": rng.choice([90, 110])}}
