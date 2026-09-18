@@ -594,6 +594,9 @@ words a deck edit leaves behind, as Slides does - stale spans had the campaign a
   part of the text, but the length `deleteText` accepts is one *less* ("The end index (273) should
   not be greater than the existing text length (272)"), and a refused request throws out the whole
   batch. Keep it out of any diff (`merge.text_edit_requests`); an append goes before it, not after.
+  The same length governs an `insertText` index and a `FIXED_RANGE` style range, so the styling of a
+  box's last word stops one short of the text (`sync.style_range_requests` takes a run's trailing
+  newlines off its range; `tests/slides_sim.py` refuses all three the way Google does).
 - Shape shadows, autofit and text insets are read-only in the API. A .pptx import keeps shadows
   (and duplicateObject, fill and transform changes keep them) but not spAutoFit.
 - python-pptx: setting top/height on a layout placeholder that inherits its position writes x and

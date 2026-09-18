@@ -1240,6 +1240,25 @@ def test_style_range_requests_follow_the_words():
     assert r["updateTextStyle"]["textRange"] == {"type": "FIXED_RANGE", "startIndex": 0, "endIndex": 8}
 
 
+def test_a_style_on_the_last_word_stops_where_the_text_does():
+    """The styling of the *last* word of a box is where a range can run into the newline Slides
+    will not let anything touch (`merge.text_edit_requests`): the API measures a `FIXED_RANGE`
+    against the same length a delete is measured against, and a range one too long throws the whole
+    batch out. Nothing here may reach it - a run's trailing newlines come off its range, and the
+    text it is re-applied to ends on one - so the styling of the last word ends exactly at the
+    length the API accepts, and the newline keeps the style it already has."""
+    from beamer2slides.sync import style_range_requests
+    plain = {"fontFamily": "Lato", "fontSize": {"magnitude": 18, "unit": "PT"}}
+    bold = {**plain, "bold": True}
+    base_styles = [{"fontFamily": "Lato", "fontSize": 18.0}]
+    text = "Written by an assistant\n"
+    old = raw_shape("old", [("Written by an ", plain), ("assistant\n", bold)])
+    (r,) = style_range_requests("new", old, raw_shape("new", [(text, plain)]), base_styles)
+    rng = r["updateTextStyle"]["textRange"]
+    assert text[rng["startIndex"]:rng["endIndex"]] == "assistant"
+    assert rng["endIndex"] == len(text) - 1   # exactly the length `deleteText` would accept
+
+
 SYNC_DECKS = Path(__file__).resolve().parent / "decks" / "sync" / "out"
 
 

@@ -162,7 +162,11 @@ def apply(r: dict, elements: list[dict], objects: dict, notes: Text, slide_id: s
         if text is None:
             return
         if name == "insertText":
-            text.insert(body.get("insertionIndex", 0), body["text"])
+            i = body.get("insertionIndex", 0)
+            if i > len(text.chars):
+                raise ValueError(f"Invalid insertText: The insertion index ({i}) should not be greater "
+                                 f"than the existing text length ({len(text.chars)}).")
+            text.insert(i, body["text"])
         elif name == "deleteText":
             a, b = text.ranges(body["textRange"])
             if b > len(text.chars):
@@ -174,6 +178,14 @@ def apply(r: dict, elements: list[dict], objects: dict, notes: Text, slide_id: s
             text.remove(a, b)
         elif name == "updateTextStyle":
             a, b = text.ranges(body["textRange"])
+            if b > len(text.chars):
+                # A FIXED_RANGE is measured against the same length a delete is (see below), so
+                # clipping here would let through a request the API throws the batch out for.
+                # `sync.style_range_requests` keeps under it by construction - a run's trailing
+                # newlines are taken off its range, and the text it styles ends on one - and this
+                # is what says so if that ever stops being true.
+                raise ValueError(f"Invalid updateTextStyle: The end index ({b}) should not be greater "
+                                 f"than the existing text length ({len(text.chars)}).")
             fields = body["fields"].split(",")
             for k in range(a, min(b, len(text.chars))):
                 for f in fields:
