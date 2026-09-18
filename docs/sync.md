@@ -412,8 +412,9 @@ hold for every sync, including the combinations nobody thought of.
   works that box out, so the base's old box is never mistaken for it); its picture and its styling
   are the person's unless a conflict says otherwise; notes and backgrounds likewise (on a slide the
   person added, word for word); slides only vanish when reported *and* untouched,
-  user-added slides never; taking the reported moves out of the order before and after must leave
-  the same sequence; converter content the new conversion still has keeps an object; and the report
+  user-added slides never; taking the reported moves out of the order before and after - and
+  whatever travelled with them, a slide still following the same slide it followed - must leave the
+  same sequence; converter content the new conversion still has keeps an object; and the report
   is honest - every `applied` entry really changed something, every `converged` entry really changed
   nothing. It runs offline from two snapshots: `python tools/loss_oracle.py <folder>`. The fuzz
   harness writes them; a production sync writes `base.json` and the report but no read-backs yet, so
@@ -448,6 +449,13 @@ hold for every sync, including the combinations nobody thought of.
   `fuzz_world.rebase` now orders the base with `sync.base_order` itself rather than with a correct
   copy of it, so the campaign catches it again if it stops doing that: putting the old rule back
   fails 54 of 1500 rounds).
+- Found in the oracle itself, by a live chained round (seed 303): the person duplicated a slide, the
+  source moved the original, sync moved the copy along behind it - and the slide the pair passed was
+  accused of having moved unreported. Which of two slides that change places "moved" has no single
+  answer; the report is free to name the source's own move, as long as putting that back explains
+  the rest of the order, and now the copy riding along with it counts as put back too. A live round
+  also cannot be replayed onto the deck a failed run left in Drive (`convert` refuses to rebuild
+  over the round's own edits), so `LiveRound.clear_previous` drops that deck and folder first.
 
 ## Not supported yet
 - Crossing reorders of unlabelled frames whose words don't tell them apart: the alignment keeps the

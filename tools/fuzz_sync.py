@@ -863,6 +863,7 @@ class LiveRound:
         build = sync_build()
         rng = random.Random(self.seed)
         variants = [v for v in build.VARIANTS if v != "v1"]
+        self.clear_previous()
         self.cli("convert", build.build("v1"), "--out", self.out)
         self.deck = LiveDeck(json.loads((self.out / "emit.json").read_text(encoding="utf-8"))["presentationId"])
         self.record["deck"] = f"https://docs.google.com/presentation/d/{self.deck.pid}/edit"
@@ -949,19 +950,44 @@ class LiveRound:
         return sc.integrity(sc.Model(pres_after), before=sc.Model(pres_before), base_ids=sc.ids_in(base),
                             allow_ungrouped=self.loose, allow_groups_changed=self.loose)
 
-    def drop_deck(self):
+    def drop_deck(self, pid: str | None = None):
         from beamer2slides import snapshot
         from beamer2slides.google_auth import drive_service
         from beamer2slides.gslides import execute
         drive = drive_service()
+        pid = pid or self.deck.pid
         try:
-            info = execute(drive.files().get(fileId=self.deck.pid, fields="appProperties"))
+            info = execute(drive.files().get(fileId=pid, fields="appProperties"))
             fid = (info.get("appProperties") or {}).get(snapshot.BASE_PROPERTY)
             if fid:
                 execute(drive.files().delete(fileId=fid))
-            execute(drive.files().delete(fileId=self.deck.pid))
+            execute(drive.files().delete(fileId=pid))
         except Exception as e:  # noqa: BLE001
             self.log.write(f"could not delete the deck: {e}\n")
+
+    def clear_previous(self):
+        """A failing round keeps its folder, and the deck in Drive that goes with it. Running that
+        seed again - which is the first thing one does after a finding - would then convert onto a
+        deck this harness itself has edited, and `convert` rightly refuses to rebuild over somebody's
+        edits. So a round starts from nothing: the deck the last run of this seed made goes first,
+        then the folder it wrote (the log stays: it is open, and it is this run's)."""
+        emit = self.out / "emit.json"
+        if emit.exists():
+            pid = None
+            try:
+                pid = json.loads(emit.read_text(encoding="utf-8")).get("presentationId")
+            except Exception as e:  # noqa: BLE001
+                self.log.write(f"could not read the last run's deck id: {e}\n")
+            if pid:
+                self.log.write(f"dropping the deck the last run of this seed left behind: {pid}\n")
+                self.drop_deck(pid)
+        for p in self.out.iterdir():
+            if p.name == "fuzz.log":
+                continue
+            if p.is_dir():
+                shutil.rmtree(p, ignore_errors=True)
+            else:
+                p.unlink(missing_ok=True)
 
 
 def live_round(seed: int, out_root: Path, chain: int, keep_decks: bool, specs=None) -> dict:

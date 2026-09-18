@@ -422,6 +422,22 @@ def test_a_reported_swap_does_not_accuse_the_slides_between_it():
     assert [f["kind"] for f in half] == ["slide_moved_unreported"]
 
 
+def test_a_copy_travelling_with_the_slide_it_follows_accuses_nobody():
+    """Live round 303: the person duplicated a slide, the source moved the original, and sync moved
+    the copy along behind it. Which of two slides that changed places "moved" has no single answer,
+    so the report naming the source's own move has to be enough - the slide it passed did not move
+    by itself, and neither did the copy that rode along with it."""
+    base = {"slides": [{"key": f"k{i}", "objectId": f"s{i}", "elements": []} for i in range(4)]}
+    read = lambda order: {"slides": [{"objectId": s, "objects": {}} for s in order]}  # noqa: E731
+    # k2 moves up past k1; "u", the person's copy of k2, keeps sitting behind it.
+    before, after = read(["s0", "s1", "s2", "u", "s3"]), read(["s0", "s2", "u", "s1", "s3"])
+    rep = loss_oracle.normalise_report({"slides": {"moved": ["k2"]}})
+    assert loss_oracle.order_findings(base, before, after, rep) == []
+    # A copy that went somewhere of its own, behind a slide it never followed, is still caught.
+    away = read(["u", "s0", "s1", "s2", "s3"])
+    assert [f["kind"] for f in loss_oracle.order_findings(base, before, away, rep)] == ["user_slide_moved"]
+
+
 def test_a_word_the_source_put_in_another_element_is_no_undone_deletion():
     el, was, now = {"key": "text/body/1", "main": "o"}, {"text": "the author wrote this"}, {"text": "the wrote this"}
     args = dict(before_words=loss_oracle.words(now["text"]), after_words={"the", "wrote", "this", "author", "retitled"},

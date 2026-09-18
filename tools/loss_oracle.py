@@ -224,11 +224,23 @@ def order_findings(base: dict, before: dict, after: dict, rep: dict) -> list[dic
     if a == b:
         return []
     reported = set(rep["slides_moved"])
-    if [s for s in b if key_of.get(s) not in reported] == [s for s in a if key_of.get(s) not in reported]:
-        return []  # taking the reported moves out leaves the same order: nothing else moved
-    moved = set(a) - set(_lcs(b, a))
     before_prev = {sid: (b[i - 1] if i else None) for i, sid in enumerate(b)}
     after_prev = {sid: (a[i - 1] if i else None) for i, sid in enumerate(a)}
+    # Taking the reported moves out - and whatever travelled with them - has to leave the same
+    # order. A slide travelled with the one before it if it still follows the same slide (the copy
+    # a person made of a slide the source then moved keeps sitting behind its original). Which of
+    # two slides that swapped "moved" has no single answer, and the report is free to name either,
+    # as long as putting its choice back explains the rest of the order.
+    gone = {sid for sid in b if key_of.get(sid) in reported}
+    while True:
+        rode = {sid for sid in a if sid not in gone and after_prev[sid] in gone
+                and before_prev[sid] == after_prev[sid]}
+        if not rode:
+            break
+        gone |= rode
+    if [s for s in b if s not in gone] == [s for s in a if s not in gone]:
+        return []
+    moved = set(a) - set(_lcs(b, a))
     out = []
     for sid in a:
         # A slide that kept the slide it followed didn't move by itself: it went along with its
