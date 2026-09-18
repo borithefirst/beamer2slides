@@ -438,7 +438,13 @@ Sync test harness (opt-in, marker `sync`, deselected by default): `python -m pyt
   between its words). Measured over 139 math pictures: all 44 display equations out, 90 of 95 inline
   ones in, the five it lets go being math beside a graphic rather than in prose.
 - Scenarios (`convert v1 → edits → sync vN → check → second sync writes nothing`): untouched, disjoint,
-  same-element, diff3, conflict, deletions, slides, reorder-both, chain, concurrent (sync runs the
+  same-element, diff3, last-paragraph (the deck deletes a box's *last* paragraph and the source
+  rewrites the same box: the merged text ends a paragraph early, so the diff's last hunk reaches the
+  newline Slides will not let go of - that batch used to be refused and the sync died - and, found
+  by writing it, a deleted bullet took its own line spacing out of the read-back's distinct paragraph
+  styles, which `merge.uniform_changes` read as a restyle: the box was then kept as the deck had it
+  and every later source change to it was dropped),
+  conflict, deletions, slides, reorder-both, chain, concurrent (sync runs the
   command in `B2S_SYNC_BEFORE_WRITE` after planning), pull-wording (`pull --apply` → rebuild → sync
   leaves the revision alone, overrides converged), converged (the source says what the deck says:
   nothing written), many-edits (one slide edited every way while the source rewrites it), groups (a

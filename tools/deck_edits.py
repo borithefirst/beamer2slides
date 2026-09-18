@@ -333,13 +333,30 @@ def ungroup(deck: LiveDeck, slide, target: dict) -> dict:
 
 # ---------------------------------------------------------------- slides
 
+def _title_placeholder(s) -> tuple[str, int] | None:
+    """The slide's title placeholder as (type, index), or None. `createSlide` can only map a
+    placeholder the layout really has - it answers *"The placeholder (15_0_0) is not on the page"*
+    and refuses the whole batch otherwise - and a converted deck has layouts without a plain TITLE:
+    the title page's carries CENTERED_TITLE, and a "(no theme)" copy may carry neither."""
+    for e in s.elements:
+        ph = e.obj.get("shape", {}).get("placeholder", {}) if e.kind == "shape" else {}
+        if ph.get("type") in ("TITLE", "CENTERED_TITLE"):
+            return ph["type"], ph.get("index", 0)
+    return None
+
+
 def add_slide(deck: LiveDeck, after, title: str, body: str | None = None) -> dict:
-    """A new slide after `after`, on its layout, with a title (and a text box)."""
+    """A new slide after `after`, with a title (and a text box). It takes `after`'s layout when that
+    one offers a title placeholder to write in, else the layout of a slide that does - which is what
+    a person does too, and what keeps the slide findable by its title afterwards. Without it, every
+    such edit after the title page was refused by the API and silently dropped from the round."""
     s = deck.model.one(after)
+    host = s if _title_placeholder(s) else next((x for x in deck.model.slides if _title_placeholder(x)), s)
+    kind, index = _title_placeholder(host) or ("TITLE", 0)
     sid, tid = new_id(), new_id()
     reqs = [{"createSlide": {"objectId": sid, "insertionIndex": s.index + 1,
-                             "slideLayoutReference": {"layoutId": s.obj["slideProperties"]["layoutObjectId"]},
-                             "placeholderIdMappings": [{"layoutPlaceholder": {"type": "TITLE", "index": 0}, "objectId": tid}]}},
+                             "slideLayoutReference": {"layoutId": host.obj["slideProperties"]["layoutObjectId"]},
+                             "placeholderIdMappings": [{"layoutPlaceholder": {"type": kind, "index": index}, "objectId": tid}]}},
             {"insertText": {"objectId": tid, "text": title}}]
     if body:
         bid = new_id()
@@ -451,6 +468,11 @@ def catalogue(donor_url: str | None) -> list[dict]:
         ("ungroup", dict(slide=algo, target={"text": "Read the base snapshot"})),
         ("delete_group", dict(slide=versions, target={"text": "Merged"})),
         ("add_slide", dict(after=versions, title="Reviewer questions", body="What happens to comments?")),
+        # ...and once after the title page, whose layout has no plain TITLE placeholder: the API
+        # refuses a mapping for a placeholder the layout hasn't got, and the campaign lost every
+        # such edit to that (`_title_placeholder`).
+        ("add_slide", dict(after="Keeping Slides and Source in Sync", title="Agenda for today",
+                           body="Written on the title page's own layout")),
         ("duplicate_slide", dict(slide=concl, new_title="Conclusions (short)")),
         ("move_slide", dict(slide=policy, after=results)),
         ("delete_slide", dict(slide=identity)),

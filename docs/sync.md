@@ -147,7 +147,7 @@ Z-order changes are not detected.
 | changed | unchanged | recreate the unit's objects from ours (same place in z-order and grouping) |
 | position/size only | text or style, not geometry | `move`: shift the deck's objects by the source delta - only when every member of the unit moved by the same step (`merge.unit_shift`), since sync moves the unit's top object; a formula picture the source re-placed inside its line is recreated instead |
 | changed | geometry | recreate, then re-apply the deck's transform change (`delta`: theirs · base⁻¹); if the source moved it too, the deck's position wins and it's a conflict. Only when the whole unit went with its top object (`merge.geometry_writable`): sync transforms the unit's top, so a member the person dragged on its own - a formula picture out of its line - would be put back where the converter had it, and such a unit is kept as the deck has it, with a conflict |
-| changed | text style / shape style | recreate, re-apply the deck's change: uniform over all runs → over all the text; some words (or a table) → the deck's run attributes onto the same words of the new text (character alignment, `sync.style_range_requests`); non-uniform paragraph styles → keep the deck, conflict. A conflict is reported when the source changed the same style attributes - and when a styled word is not in the new text at all (`merge.styling_lost`): the styling of words the source replaced ends there, and the report says so rather than promising it was kept |
+| changed | text style / shape style | recreate, re-apply the deck's change: uniform over all runs → over all the text; some words (or a table) → the deck's run attributes onto the same words of the new text (character alignment, `sync.style_range_requests`); non-uniform paragraph styles → keep the deck, conflict - but a style list that only got *shorter* while the deck also edited the text is a paragraph the person deleted, not a restyle (`merge.uniform_changes`, `text_changed`): the converter gives every paragraph the line spacing of its own PDF pitch, so deleting one bullet used to make every later source change to that box a conflict the deck won. A conflict is reported when the source changed the same style attributes - and when a styled word is not in the new text at all (`merge.styling_lost`): the styling of words the source replaced ends there, and the report says so rather than promising it was kept |
 | text changed | text changed | word-level diff3; clean → recreate and write the merged text; overlapping → keep the deck, conflict. In a table the diff3 runs per cell (`merge.table_merge`, applied with `cellLocation`); a row or column added on either side, or a cell holding a line break, makes the whole table a conflict |
 | text / position changed | the deck shows exactly that (same text; a move the source now reproduces within 2 pt) | `adopt`: nothing written, reported as converged; the base takes ours IR and the deck's version of those fields (e.g. after `pull`) |
 | picture file changed, same picture | anything | no change: the base takes the new hash (`snapshot.refresh_pictures`, reported as converged) |
@@ -480,6 +480,15 @@ hold for every sync, including the combinations nobody thought of.
   (`snapshot.read_text` now records run spans), and the offline campaign can now reach it too: a
   `bold_word` deck edit plus the reference applier's own opinion of what survives
   (`fuzz_world._styling_ends`). Taking the conflict back out fails 2 of 400 offline rounds.
+- Found by the `last-paragraph` scenario written for the finding below, which is what a defect found
+  by fuzzing is worth: a deck edit that deletes one bullet takes that paragraph's line spacing out of
+  the read-back's *distinct* paragraph styles, and `merge.uniform_changes` read the shorter list as a
+  restyle it could not re-apply. The unit became a `text_style` conflict blaming a restyle nobody
+  made and the box was kept exactly as it stood - so every later source change to it was dropped, for
+  good. A style list that only got shorter while the deck also edited the text is now a paragraph
+  that is gone, not a style someone set (offline `test_a_bullet_the_deck_deleted_does_not_freeze_the_
+  box_against_the_source`; putting the old rule back turns the scenario's report into that conflict
+  again).
 - Found by a live chained round (seeds 608 and 616), and the worst of them so far, because the sync
   **died**: the person deleted the last paragraph of a text box, the source rewrote the same box, and
   the merged text therefore ends one paragraph earlier than the box the converter had just recreated.

@@ -796,6 +796,42 @@ def test_styling_on_words_the_source_replaced_is_a_conflict_not_a_promise():
     assert [o for o in quiet["overrides"] if "text_style" in o["fields"]]
 
 
+def test_a_bullet_the_deck_deleted_does_not_freeze_the_box_against_the_source():
+    """A read-back keeps the *distinct* paragraph styles of a text, and the converter gives every
+    paragraph the line spacing of its own PDF pitch - so deleting one bullet takes an entry out of
+    that list. `uniform_changes` read the shorter list as a change it could not re-apply (None), the
+    unit became a `text_style` conflict blaming a restyle nobody made, and the box was kept exactly
+    as it stood: every later source change to it was dropped, for good. Found by the live scenario
+    `last-paragraph`, where a reworded bullet never arrived."""
+    three = "First point of intro\nSecond point of intro\nThird point of intro"
+    styles = [{"alignment": "START", "lineSpacing": 116.3}, {"alignment": "START", "lineSpacing": 114.3},
+              {"alignment": "START", "lineSpacing": 100.0}]   # one per paragraph, as the converter writes them
+    base = many_slides(["intro"])
+    base["slides"][0]["elements"][1] = entry("text/body/0", text_ir(three, (20, 60, 200, 102), "p0t1"), "b2s_s000_t1")
+    base["slides"][0]["elements"][1]["readback"]["b2s_s000_t1"]["paragraph_styles"] = styles
+    ours, theirs = triple(base)
+    rb = theirs["slides"][0]["objects"]["b2s_s000_t1"]
+    rb["text"] = "First point of intro\nSecond point of intro\n"   # the person deleted the last bullet
+    rb["paragraph_styles"] = styles[:2]                            # and its line spacing went with it
+    rb["text_style_hash"] = "one paragraph fewer"
+    ours["slides"][0]["elements"][1] = ours_entry("text/body/0", text_ir(
+        three.replace("First point of intro", "First point of intro, reworded"), (20, 60, 200, 102), "p0t1"))
+    mplan = merge.plan_merge(base, ours, theirs)
+    assert not mplan["report"]["conflicts"]
+    u = unit(mplan, "intro", "text/body/0")
+    assert u["action"] == "recreate" and "text" in u["overrides"]
+    assert u["overrides"]["text_style"] == {"runs": {}, "paragraphs": {}}
+    # The deck's deletion stands and the source's rewording still lands.
+    merged, _, safe = merge.text_merge(u["overrides"]["text"]["base"],
+                                       three.replace("First point of intro", "First point of intro, reworded") + "\n",
+                                       u["overrides"]["text"]["theirs"])
+    assert safe and merged == "First point of intro, reworded\nSecond point of intro\n"
+    # A restyle proper still is one: a style the base never had is nothing a deletion can explain,
+    # and one centred paragraph among others is not something re-applying an attribute can give back.
+    rb["paragraph_styles"] = styles[:1] + [{"alignment": "CENTER", "lineSpacing": 114.3}]
+    assert [c for c in merge.plan_merge(base, ours, theirs)["report"]["conflicts"] if c["field"] == "text_style"]
+
+
 def test_the_two_halves_of_a_frame_nothing_could_follow_are_named():
     """`identity.near_misses` hands the merge a slide the source seems to have dropped and a frame
     it seems to have written that say much of the same thing. The report names both, and says which

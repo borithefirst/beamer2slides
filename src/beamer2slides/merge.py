@@ -224,15 +224,25 @@ def user_objects(base_slide: dict, slide_read: dict) -> list[dict]:
     return out
 
 
-def uniform_changes(base_styles: list[dict], theirs_styles: list[dict]) -> dict | None:
+def uniform_changes(base_styles: list[dict], theirs_styles: list[dict], text_changed: bool = False) -> dict | None:
     """Style attributes the deck set on all of an object's text ({} when nothing changed, None
-    when the change isn't uniform and so can't be re-applied to new text)."""
+    when the change isn't uniform and so can't be re-applied to new text).
+
+    A read-back holds the *distinct* styles of a text, so deleting a paragraph takes its style out of
+    the list - the converter gives every paragraph the line spacing of its own PDF pitch, so that
+    list nearly always shrinks. `text_changed` says the deck edited this text as well: a style that
+    is only missing is then the style of words that are gone, not something a person set, and there
+    is nothing to re-apply. Without that, deleting one bullet made every later source change to that
+    box a `text_style` conflict, and the box kept a wording the source had long moved on from
+    (scenario `last-paragraph`, and the shape is common: any deleted bullet does it)."""
     def canon(styles):
         return {repr(sorted(s.items())) for s in styles}
     if canon(base_styles) == canon(theirs_styles):
         return {}
     if not theirs_styles:
         return None
+    if text_changed and canon(theirs_styles) <= canon(base_styles):
+        return {}
     out = {}
     for key in {k for s in theirs_styles for k in s}:
         values = {repr(s.get(key)) for s in theirs_styles}
@@ -610,8 +620,9 @@ def plan_unit(skey: str, ukey: str, base_members: list[dict] | None, ours_member
                 if merged == o:
                     report["converged"].append({**where, "field": "text", "value": theirs_rb.get("text")})
     if "text_style" in edited and not keep:
-        runs = uniform_changes(base_rb.get("text_styles", []), theirs_rb.get("text_styles", []))
-        paras = uniform_changes(base_rb.get("paragraph_styles", []), theirs_rb.get("paragraph_styles", []))
+        cut = main in edits.get("text", ())  # the deck edited this text too (see `uniform_changes`)
+        runs = uniform_changes(base_rb.get("text_styles", []), theirs_rb.get("text_styles", []), cut)
+        paras = uniform_changes(base_rb.get("paragraph_styles", []), theirs_rb.get("paragraph_styles", []), cut)
         # (a source "style" change can be list levels or sizes; only the same attributes clash)
         clash = "style" in src and source_style_keys(anchor, first) & deck_style_keys(base_rb, theirs_rb)
         if paras is None or set(edits["text_style"]) != {main} or anchor["kind"] not in ("text", "table"):

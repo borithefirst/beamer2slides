@@ -301,6 +301,30 @@ def scenario_diff3(run: Run):
 
 
 @scenario
+def scenario_last_paragraph(run: Run):
+    """The deck deletes the *last* paragraph of a box, and the source rewrites the same box.
+
+    The merged text then ends a paragraph earlier than the box the converter has just recreated, so
+    the last hunk of the diff runs to the end of the text - and the newline a Slides text ends on is
+    the API's own: read back as part of the text, left out of the length it will accept, undeletable.
+    That batch used to be refused whole and the sync died on it (`RuntimeError: sync overrides: batch
+    refused`, live fuzz seeds 608 and 616). The shape is ordinary enough to belong in the suite, and
+    a sync that dies is worse than one that merges badly: it writes nothing and reports nothing."""
+    run.convert(build("v1"))
+    # (by title, not by `WHY`: the sentence that selector looks for is the paragraph being deleted)
+    motivation = {"title": "Why decks and sources diverge"}
+    exps = run.edit(E("delete_paragraph", slide=motivation, text="Later the source changes again"))
+    pdf = build("reword")
+    # (the source's own check for the reworded bullet looks the slide up by the sentence this
+    #  scenario deletes; the same check by title is in `checks` below)
+    run.check("reword", pdf, run.sync(pdf), exps, drop=("delete_paragraph",),
+              skip_source=("by an AI assistant and converted once",), checks=[
+        {"check": "text", "slide": motivation, "text": "Later the source changes again", "count": 0},
+        {"check": "text", "slide": motivation, "text": "by an AI assistant and converted once", "count": 1},
+        {"check": "text", "slide": motivation, "text": "adding their own slides", "count": 1}])
+
+
+@scenario
 def scenario_conflict(run: Run):
     """Both sides rewrite the same words: the deck wins, the report has both versions."""
     run.convert(build("v1"))
