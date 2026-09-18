@@ -28,6 +28,43 @@ def _hunks(base: list[str], other: list[str]) -> list[tuple[int, int, list[str]]
     return [(i1, i2, other[j1:j2]) for op, i1, i2, j1, j2 in sm.get_opcodes() if op != "equal"]
 
 
+def text_merge(base: str, ours: str, theirs: str) -> tuple[str, list[dict], bool]:
+    """Three-way merge of an element's text, one paragraph at a time. Returns the merged text, the
+    paragraphs both sides rewrote (kept as the deck's, whole), and whether the result is safe to
+    write.
+
+    A paragraph is a bullet or a line: the unit an edit belongs to. When the source rewrites three
+    bullets and the person changed one word in the third, the first two are the source's and the
+    third stays the deck's. Merging the box as one run of words instead lets a conflict in one
+    bullet decide the fate of all of them - and, where the conflicting words land inside a sentence
+    the source rewrote around them, produces a line neither side wrote ("Seconds are rounded,
+    milliseconds full dropped"). That is why a conflicting paragraph is taken whole and never
+    spliced.
+
+    Prose in one paragraph still merges word by word, and so does a box whose paragraphs cannot be
+    lined up (the source added or removed one). `safe` is False only when that word-level fallback
+    conflicts: the caller then keeps the deck's text and reports the conflict, as before."""
+    bp, op, tp = base.split("\n"), ours.split("\n"), theirs.split("\n")
+    if len(bp) < 2 or not len(bp) == len(op) == len(tp):
+        merged, clashes = diff3(base, ours, theirs)
+        return merged, clashes, not clashes
+    out: list[str] = []
+    conflicts: list[dict] = []
+    for b, o, t in zip(bp, op, tp):
+        if b == o or o == t:      # the source left it alone, or both arrived at the same words
+            out.append(t)
+        elif b == t:              # only the source changed it
+            out.append(o)
+        else:
+            merged, clashes = diff3(b, o, t)
+            if clashes:
+                out.append(t)
+                conflicts.append({"base": b, "ours": o, "theirs": t})
+            else:
+                out.append(merged)
+    return "\n".join(out), conflicts, True
+
+
 def _clash(a: tuple, b: tuple) -> bool:
     (a0, a1, _), (b0, b1, _) = a, b
     if a0 < b1 and b0 < a1:
@@ -501,11 +538,17 @@ def plan_unit(skey: str, ukey: str, base_members: list[dict] | None, ours_member
             keep = True
         else:
             b, o, t = (collapse_holes(x) for x in (base_rb.get("text") or "", predicted_text(first["ir"]), theirs_rb.get("text") or ""))
-            merged, clashes = diff3(b, o, t)
-            if clashes:
+            merged, clashes, safe = text_merge(b, o, t)
+            if not safe or (clashes and merged == t):
+                # Nothing of the source's survived the merge (or it cannot be written safely): the
+                # deck's text stands as it is, and there is nothing to write.
                 conflict("text", b, o, t)
                 keep = True
             else:
+                # Paragraphs both sides rewrote are conflicts of their own: the deck keeps them,
+                # and the rest of the box still takes what the source now says.
+                for c in clashes:
+                    conflict("text", c["base"], c["ours"], c["theirs"])
                 overrides["text"] = {"base": base_rb.get("text") or "", "theirs": theirs_rb.get("text") or ""}
                 if merged == o:
                     report["converged"].append({**where, "field": "text", "value": theirs_rb.get("text")})

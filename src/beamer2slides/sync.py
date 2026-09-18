@@ -1441,8 +1441,8 @@ class Sync:
                                                                      {"rowIndex": r, "columnIndex": c})
                 elif "text" in ov and main in n_read["objects"]:
                     current = n_read["objects"][main].get("text") or ""
-                    merged, clashes = merge.diff3(ov["text"]["base"], current, ov["text"]["theirs"])
-                    if clashes:
+                    merged, clashes, safe = merge.text_merge(ov["text"]["base"], current, ov["text"]["theirs"])
+                    if not safe:
                         self.warnings.append(f"slide {p['key']}: {u['key']}: deck text edits clash with the new text; not re-applied")
                     else:
                         if not merged.endswith("\n"):

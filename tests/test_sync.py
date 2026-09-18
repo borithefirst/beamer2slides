@@ -395,6 +395,51 @@ def test_both_text_overlapping_is_a_conflict():
     assert c["field"] == "text" and c["resolution"] == "deck kept" and "Best point" in c["theirs"]
 
 
+def test_a_conflict_in_one_bullet_does_not_cost_the_others():
+    """Found by the stress deck (churn): the source rewrote three bullets of a box while the person
+    had changed one word in the third. The box merged as one run of words, so the clash in the
+    third decided all three and the source's first two were dropped; sync then reported `deck kept`
+    and wrote nothing. Each paragraph is now merged on its own."""
+    base = three_slides()
+    ours, theirs = triple(base)
+    ours["slides"][0]["elements"][1] = ours_entry("text/body/0", text_ir(
+        "Every timing comes from this deck\nSeconds are rounded, milliseconds dropped", (20, 60, 200, 90), "p0t1"))
+    edit_text(theirs["slides"][0], "b2s_s000_t1",
+              "First point of intro\nThe numbers are rounded to full seconds\n")
+    mplan = merge.plan_merge(base, ours, theirs)
+    (c,) = mplan["report"]["conflicts"]
+    assert c["field"] == "text" and c["resolution"] == "deck kept"
+    # only the bullet both sides rewrote is the conflict, not the whole box
+    assert c["ours"] == "Seconds are rounded, milliseconds dropped"
+    assert c["theirs"] == "The numbers are rounded to full seconds"
+    # ... and the source's other bullet is written after all
+    assert unit(mplan, "intro", "text/body/0")["action"] == "recreate"
+
+
+def test_a_paragraph_both_sides_rewrote_is_taken_whole_from_the_deck():
+    """The word-level merge would put the person's word where the source's sentence has another
+    one. A paragraph both sides rewrote is the deck's, entire."""
+    merged, conflicts, safe = merge.text_merge(
+        "Timings are measured on the deck\nThe numbers are rounded to whole seconds\n",
+        "Every timing comes from this deck\nSeconds are rounded, milliseconds are dropped\n",
+        "Timings are measured on the deck\nThe numbers are rounded to full seconds\n")
+    assert safe and len(conflicts) == 1
+    assert merged == "Every timing comes from this deck\nThe numbers are rounded to full seconds\n"
+    # the word-level merge on its own writes a line neither side ever wrote
+    spliced, _ = merge.diff3("The numbers are rounded to whole seconds",
+                             "Seconds are rounded, milliseconds are dropped",
+                             "The numbers are rounded to full seconds")
+    assert spliced == "Seconds are rounded, milliseconds full dropped"
+
+
+def test_bullets_the_source_added_fall_back_to_the_word_level_merge():
+    """Paragraphs only line up when there are the same number of them; otherwise the old
+    whole-box merge decides, and a clash there still keeps the deck's text."""
+    args = ("one\ntwo\n", "one\nfirst\ntwo\n", "one\ntwo edited\n")
+    merged, conflicts, safe = merge.text_merge(*args)
+    assert (merged, conflicts) == merge.diff3(*args) and safe is (not conflicts)
+
+
 def test_same_text_on_both_sides_converges():
     base = three_slides()
     ours, theirs = triple(base)
