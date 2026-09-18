@@ -39,6 +39,7 @@ import sys
 import tempfile
 import threading
 import time
+from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from difflib import SequenceMatcher
 from pathlib import Path
@@ -645,7 +646,8 @@ def _sync_step(seed: int, step: int, doc: dict, base: dict, live: dict, tmp: Pat
     tok = f"{step}zz"  # a token per run, like sync's
     after = W.apply_plan(base, ours, live, mplan, tok)
     report = mplan["report"]
-    findings = loss_oracle.check(base, live, after, report, ours) + _writable(ours, mplan)
+    findings = (loss_oracle.check(base, live, after, report, ours) + _writable(ours, mplan)
+                + _movable(base, live, mplan))
     next_base = W.rebase(base, ours, after, mplan, tok) if rebase else None
     findings += _settled(doc2, next_base, after, tmp, reordered or "move_slide" in source_ops)
     return {"seed": seed, "step": step, "source_ops": list(source_ops), "deck_ops": list(deck_ops),
@@ -747,6 +749,48 @@ def _writable(ours: dict, mplan: dict) -> list[dict]:
                 out.append(loss_oracle.finding("unwritable_text", "report",
                                                f"the requests write {written!r}, not the merged {merged!r}",
                                                slide=p["key"], element=u["key"]))
+    return out
+
+
+def _movable(base: dict, live: dict, mplan: dict) -> list[dict]:
+    """A `move` is written as one RELATIVE transform per root of the unit, and a transform on a group
+    carries its children - so whether the step reaches every object of the unit is a question about
+    the request, not about the merge. The reference applier moves every member itself, which is the
+    outcome and not the mechanism, so without this the campaign cannot see a step that leaves an
+    anchored picture behind: exactly what a live chain had to find instead (seed 903, where the
+    person had taken the unit's group apart and the formula picture stayed at the converter's box).
+    Every object of the unit must take the step, and take it once - a group and its child both
+    moving would move the child twice."""
+    from beamer2slides.sync import EMU_PER_PT, Sync
+    out = []
+    slides = {s["objectId"]: s for s in live["slides"]}
+    for p in mplan["slides"]:
+        if p["action"] != "update" or p.get("base") is None or p.get("objectId") not in slides:
+            continue
+        read = slides[p["objectId"]]
+        bunits = merge.units(base["slides"][p["base"]]["elements"])
+        for u in p["units"]:
+            if u["action"] != "move":
+                continue
+            mine = [o for m in bunits.get(u["key"], []) for o in m.get("objects", []) if o in read["objects"]]
+            moved = Counter()
+            for r in Sync.move_requests([u], bunits, read, W.SCALE):
+                t = r["updatePageElementTransform"]["transform"]
+                oid = r["updatePageElementTransform"]["objectId"]
+                for x in [oid, *merge._descendants(oid, read)]:
+                    moved[x] += 1
+                want = [round(v * W.SCALE * EMU_PER_PT) for v in u["delta"]]
+                if [t["translateX"], t["translateY"]] != want:
+                    out.append(loss_oracle.finding(
+                        "unwritten_move", "report",
+                        f"{oid} is moved by {[t['translateX'], t['translateY']]}, not the planned {want}",
+                        slide=p["key"], element=u["key"]))
+            for oid in mine:
+                if moved[oid] != 1:
+                    out.append(loss_oracle.finding(
+                        "unwritten_move", "report",
+                        f"the requests move {oid} {moved[oid]} times, not once: the unit's step is "
+                        f"written on {sorted(set(moved))}", slide=p["key"], element=u["key"]))
     return out
 
 

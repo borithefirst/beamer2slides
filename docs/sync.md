@@ -535,7 +535,19 @@ hold for every sync, including the combinations nobody thought of.
   of them wants. Nothing offline could see it: the reference applier moves every object of the unit,
   which is the outcome, not the mechanism - so the mechanism is pinned by an offline test of
   `Sync.override_requests` instead (`test_a_moved_unit_with_no_group_is_moved_member_by_member` and
-  its counterpart with the group, each failing when the other's rule is written).
+  its counterpart with the group, each failing when the other's rule is written). The campaign asks
+  the same question of the other write path now: `fuzz_sync._movable` builds the requests a `move`
+  would send and checks that every object of the unit takes the step exactly once (a group and its
+  child both moving would move the child twice). Putting the old top-only move back fails 2 of 400
+  offline rounds at chain 4. Two draws had to change first, or a `move` was hardly ever planned: a
+  source that moves a text now moves the pictures its lines place, and `collide` can move the box
+  the person has just edited instead of rewording it - both sides meeting on one unit is the only
+  shape that makes `plan_unit` write a move at all, and it went from 2 such units in 800 chained
+  steps to 57. A group read-back still naming the children a recreation had deleted was found the
+  same way (`fuzz_world._drop_lonely_groups` refreshes them): everything else there reads
+  `parent_group`, so the stale list went unnoticed until something asked what one transform on that
+  group would carry - and `merge._descendants`, which sync itself asks, would have answered with the
+  dead.
 - Found in the harness by a live chained round (seed 900): the person ungrouped a figure and then
   pressed Ctrl+D on that slide, and the copy - a slide of theirs that sync never writes a request to -
   was accused of the ungrouping at every step after. A copy is the slide as the person left it, so the

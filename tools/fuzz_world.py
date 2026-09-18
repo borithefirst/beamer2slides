@@ -546,3 +546,11 @@ def _drop_lonely_groups(live):
                     live["objects"][c]["parent_group"] = rb.get("parent_group")
                 live["objects"].pop(oid)
                 changed = True
+    # A group says who its children are, and a unit rewritten under it has new ones: leaving the
+    # list naming the objects the recreation deleted makes a read-back no API could hand back, and
+    # `merge._descendants` - which sync itself asks what a group carries - then answers with the
+    # dead. Everything else here reads `parent_group`, which is why it went unnoticed until
+    # `fuzz_sync._movable` asked what one transform on a group would move.
+    for oid, rb in live["objects"].items():
+        if rb["kind"] == "elementGroup":
+            rb["children"] = [c for c, x in live["objects"].items() if x.get("parent_group") == oid]

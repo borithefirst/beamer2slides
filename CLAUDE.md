@@ -545,6 +545,14 @@ step itself (`sync.Sync._unit_oids`); the offline campaign is blind to this by c
 mechanism is pinned by `test_a_moved_unit_with_no_group_is_moved_member_by_member` and its
 counterpart with the group. The harness's own (seed 900): a slide the person duplicated after
 ungrouping something on it inherits the ungrouping, and the `integrity` excuse now follows the copy.
+The other write path - a `move`, the source's place written onto the deck's own objects - is checked
+offline now (`fuzz_sync._movable`: every object of the unit takes the step exactly once; the old
+top-only move fails 2 of 400 rounds at chain 4). It took two draws to reach it at all, since a move
+needs both sides on one unit: a source that moves a text moves the pictures its lines place, and
+`collide` can move the box the person just edited (2 `move` units per 800 chained steps -> 57).
+Counting what the campaign reaches (`unit/*`, `override/*`, geometry modes) is how the blind spot
+showed; `fuzz_world` also kept `children` on a group whose unit had been recreated, which only
+`parent_group` readers were saving it from.
 
 ## Pitfalls found so far
 - PDFium (`pdf.py` handles these):
