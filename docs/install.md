@@ -61,6 +61,6 @@ Two ways to ship this, not yet decided:
 ## Checking an install
 
 ```
-python -c "from beamer2slides import emit; print(emit.CALIBRATION.exists())"
+python -c "from beamer2slides import emit; print(emit.CALIBRATION.is_file())"
 beamer2slides classify talk.pdf     # local only, no Google calls
 ```

@@ -2,6 +2,7 @@
 
 import json
 import tomllib
+from importlib import resources
 from pathlib import Path
 
 from beamer2slides import emit, google_auth, paths
@@ -10,9 +11,11 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def test_calibration_ships_with_the_package():
-    assert emit.CALIBRATION.parent.parent.name == "beamer2slides"  # not the checkout's root
-    for path in (emit.CALIBRATION, emit.CALIBRATION.with_name("fonts_serif.json")):
-        assert path.exists() and json.loads(path.read_text(encoding="utf-8"))
+    # Reached through the package, so a wheel, a zip import and a build that stages the sources
+    # somewhere else all find it; the checkout's own layout never comes into it.
+    assert emit.CALIBRATION_DIR == resources.files("beamer2slides") / "calibration"
+    for path in (emit.CALIBRATION, emit.CALIBRATION_DIR / "fonts_serif.json"):
+        assert path.is_file() and json.loads(path.read_text(encoding="utf-8"))
 
 
 def test_the_wheel_declares_the_calibration_and_the_command():

@@ -248,7 +248,9 @@ a per-slide background picture.
   occasionally fail with SSL EOF; `gslides.save_thumbnail` retries.
 - Object IDs must be 5–50 characters.
 - **Font calibration** (`tools/calibrate.py`, results in `docs/calibration.md` and
-  `src/beamer2slides/calibration/fonts.json`, package data so a wheel carries it):
+  `src/beamer2slides/calibration/fonts.json`, package data so a wheel carries it, reached
+  through `importlib.resources` (`emit.CALIBRATION_DIR`) and never beside `__file__`, so a zip
+  import or a build that stages sources elsewhere finds it too):
   in API-created text boxes the first baseline sits at
   6.48 pt + 0.968 em and the line pitch is 1.19 em **for every font**. Default substitute
   for CM Sans is Lato at size / 1.020; titles (CMSS12) need their own factor (~1.035).

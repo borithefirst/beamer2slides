@@ -7,6 +7,7 @@ import math
 import re
 import time
 from collections import Counter
+from importlib import resources
 from pathlib import Path
 
 import numpy as np
@@ -18,7 +19,10 @@ from .fonts import font_info, google_font
 from .google_auth import drive_service, slides_service
 from .gslides import EMU_PER_PT, emu, execute, pt
 
-CALIBRATION = Path(__file__).resolve().parent / "calibration" / "fonts.json"  # ships with the package
+# Found through the package, never through the checkout: an installed wheel, a zip import and
+# a build that stages sources elsewhere all keep the data beside the module, not beside __file__.
+CALIBRATION_DIR = resources.files("beamer2slides") / "calibration"
+CALIBRATION = CALIBRATION_DIR / "fonts.json"
 SLIDE_W = 720.0
 BATCH_MAX_REQUESTS = 400  # slides are sent together until a batch reaches this size
 PPTX_MIME ="application/vnd.openxmlformats-officedocument.presentationml.presentation"
@@ -105,7 +109,7 @@ class FontMapper:
     def __init__(self):
         self.factors = {}  # family -> (running text factor, title factor)
         self.style = {}    # family -> {"bold": ratio, "italic": ratio} relative to running text
-        for family, path in (("sans", CALIBRATION), ("serif", CALIBRATION.with_name("fonts_serif.json"))):
+        for family, path in (("sans", CALIBRATION), ("serif", CALIBRATION_DIR / "fonts_serif.json")):
             cal = json.loads(path.read_text(encoding="utf-8"))["fonts"]
             ratios = cal[FONT_FOR_FAMILY[family]]["width_ratio"]
             self.factors[family] = (ratios["text_mean"], ratios["by_row"]["title"])
