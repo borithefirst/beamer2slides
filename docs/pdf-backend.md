@@ -11,6 +11,7 @@ worker process, or anything else that keeps the contract.
 | `pdfium_backend.py` | the reference implementation (pypdfium2); the only module that imports it |
 | `sandbox.py` | a backend that runs another backend in a worker process, and that worker (`python -m beamer2slides.pdf.sandbox`) |
 | `wire.py` | the worker's wire format: data only |
+| `pure/` | a PDF reader in pure Python that answers like PDFium, rendering excepted (docs/pdf-from-scratch.md) |
 | `__init__.py` | `Document(path)`, and choosing the backend |
 
 ## Choosing the backend
@@ -27,6 +28,7 @@ or, without touching code, `B2S_PDF_BACKEND`:
 | value | backend |
 |---|---|
 | `pdfium` (default) | PDFium in this process |
+| `pure` | the pure Python reader (docs/pdf-from-scratch.md): PDFium's answers, no rendering |
 | `sandbox` | PDFium in a worker process |
 | `sandbox:<spec>` | the backend `<spec>` in a worker process |
 | `package.module:attr` | `attr` is a backend object, or a factory returning one |

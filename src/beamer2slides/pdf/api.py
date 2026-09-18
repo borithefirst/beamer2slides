@@ -202,7 +202,8 @@ class PdfPage(Protocol):
     def render(self, zoom: float, clip: Box | None = None, transparent: bool = False) -> np.ndarray:
         """uint8 pixels of the page (or of `clip`, page space), `zoom` pixels per point, pixel
         bounds rounded outwards (`pixel_bounds`): h x w x 3 on white, or h x w x 4 on a
-        transparent ground if `transparent`. Annotations are drawn; inactive objects are not."""
+        transparent ground if `transparent`. Annotations are drawn; inactive objects are not.
+        A backend that cannot draw (`renders(backend)` is False) raises PdfError."""
 
 
 @runtime_checkable
@@ -242,6 +243,13 @@ class PdfBackend(Protocol):
         """A PDF file by path, or its bytes. Raises PdfError for anything unreadable."""
 
 
+def renders(backend) -> bool:
+    """Whether a backend draws pages. One that does not says so with `renders = False` (the pure
+    Python reader: extract and classify run on it; render, fidelity and the checks do not);
+    `render` then raises PdfError and `EmbeddedImage.pixels`/`rendered` are None."""
+    return bool(getattr(backend, "renders", True))
+
+
 # ---------------------------------------------------------------------- helpers every backend shares
 
 
@@ -253,6 +261,67 @@ def char_box(ox, oy, ux, uy, advance, size, ascent, descent) -> Box:
             xs.append(ox + ux * along + vx * up)
             ys.append(oy + uy * along + vy * up)
     return min(xs), min(ys), max(xs), max(ys)
+
+
+def cff_font_bbox(data: bytes) -> list[float] | None:
+    """FontBBox from the top DICT of a bare CFF font program (FontFile3/Type1C)."""
+    try:
+        pos = data[2]
+
+        def index(pos):  # -> (entries, position after the INDEX)
+            count = int.from_bytes(data[pos:pos + 2], "big")
+            if count == 0:
+                return [], pos + 2
+            size = data[pos + 2]
+            offsets = [int.from_bytes(data[pos + 3 + i * size:pos + 3 + (i + 1) * size], "big") for i in range(count + 1)]
+            base = pos + 2 + (count + 1) * size
+            return [data[base + offsets[i]:base + offsets[i + 1]] for i in range(count)], base + offsets[-1]
+
+        _, pos = index(pos)  # names
+        tops, _ = index(pos)
+        d, i, operands = tops[0], 0, []
+        while i < len(d):
+            b0 = d[i]
+            if b0 <= 21:  # operator
+                if b0 == 5:
+                    return operands[:4]
+                i += 2 if b0 == 12 else 1
+                operands = []
+            elif b0 == 28:
+                operands.append(int.from_bytes(d[i + 1:i + 3], "big", signed=True)); i += 3
+            elif b0 == 29:
+                operands.append(int.from_bytes(d[i + 1:i + 5], "big", signed=True)); i += 5
+            elif b0 == 30:  # real: nibbles up to 0xf
+                i += 1
+                while not (d[i] & 0x0F == 0x0F or d[i] >> 4 == 0x0F):
+                    i += 1
+                operands.append(0.0); i += 1
+            elif b0 <= 246:
+                operands.append(b0 - 139); i += 1
+            elif b0 <= 250:
+                operands.append((b0 - 247) * 256 + d[i + 1] + 108); i += 2
+            else:
+                operands.append(-(b0 - 251) * 256 - d[i + 1] - 108); i += 2
+        return [0, 0, 0, 0]  # not given: the default
+    except (IndexError, ValueError):
+        return None
+
+
+def font_metrics(ascent: float, descent: float, program: bytes) -> tuple[float, float]:
+    """A font's ascent and descent (em) as Char carries them, from what the font reports and its
+    program: the rules every backend applies the same way."""
+    bbox = cff_font_bbox(program) if program[:1] == b"\x01" else None
+    if bbox and abs(ascent - bbox[3] / 1000) < 1e-3 and abs(descent - bbox[1] / 1000) < 1e-3 \
+            and ascent - descent > 1.6:
+        # Metrics from the bounding box of a math font (xdvipdfmx: CMSY, CMEX) would give every
+        # glyph a box reaching far below the line; MuPDF uses its defaults there.
+        ascent, descent = 0.8, -0.2
+    if ascent < 1e-3:
+        ascent, descent = 0.9, -0.1
+    if ascent - descent < 1:
+        total = ascent - descent
+        ascent, descent = ascent / total, descent / total
+    return ascent, descent
 
 
 def pixel_bounds(zoom: float, box: Box) -> tuple[int, int, int, int]:

@@ -1,7 +1,9 @@
-"""The PDF backend contract (beamer2slides/pdf/api.py) and its two implementations.
+"""The PDF backend contract (beamer2slides/pdf/api.py) and its implementations.
 
-- Contract tests run against every backend in $B2S_TEST_PDF_BACKENDS (default: pdfium and
-  sandbox), so a new backend is checked by naming it there (a spec as for $B2S_PDF_BACKEND).
+- Contract tests run against every backend in $B2S_TEST_PDF_BACKENDS (default: pdfium, sandbox
+  and pure), so a new backend is checked by naming it there (a spec as for $B2S_PDF_BACKEND).
+  Rendering is checked on the backends that draw (`api.renders`). How close the pure Python
+  reader comes to PDFium is tests/test_pure_pdf.py's.
 - The sandbox must agree with PDFium on everything, value for value: it is PDFium, one process away.
 - The wire format and the worker are tested for what they refuse and how they fail.
 - The pipeline through the sandbox giving the very same files as in process was measured on all 48
@@ -33,7 +35,8 @@ BASIC = OUT / "01_basic.pdf"              # navigation links, named destinations
 PDFS = [BLOCKS, IMAGES, BASIC]
 built = pytest.mark.skipif(not all(p.exists() for p in PDFS), reason="no test PDFs built")
 
-SPECS = [s.strip() for s in os.environ.get("B2S_TEST_PDF_BACKENDS", "pdfium,sandbox").split(",") if s.strip()]
+SPECS = [s.strip() for s in os.environ.get("B2S_TEST_PDF_BACKENDS", "pdfium,sandbox,pure").split(",")
+         if s.strip()]
 _backends: dict[str, object] = {}
 
 
@@ -141,6 +144,11 @@ def test_a_hyphen_ending_a_line_is_a_hyphen(backend):
 
 @built
 def test_render_follows_pixel_bounds_and_active_objects(backend):
+    if not api.renders(backend):
+        doc = backend.open(BLOCKS)
+        with pytest.raises(PdfError):
+            doc[1].render(1.0)
+        return
     doc = backend.open(BLOCKS)
     try:
         page = doc[1]
@@ -179,8 +187,12 @@ def test_bytes_open_like_the_file_and_save_writes_new_files(backend, tmp_path):
         half = backend.open(doc.save(boxes={0: (0.0, 0.0, doc[0].width / 2, doc[0].height)}))
         try:
             assert half[0].width == pytest.approx(doc[0].width / 2) and half[1].width == pytest.approx(doc[1].width)
-            left = doc[0].render(1.0, (0.0, 0.0, doc[0].width / 2, doc[0].height))
-            assert np.abs(half[0].render(1.0).astype(int) - left.astype(int)).max() <= 1
+            if api.renders(backend):
+                left = doc[0].render(1.0, (0.0, 0.0, doc[0].width / 2, doc[0].height))
+                assert np.abs(half[0].render(1.0).astype(int) - left.astype(int)).max() <= 1
+            else:  # what the cut page still shows: the characters in its left half
+                inside = [c.c for c in doc[0].chars() if c.box[2] <= doc[0].width / 2 - 1]
+                assert set(inside) <= {c.c for c in half[0].chars()}
         finally:
             half.close()
     finally:
@@ -359,6 +371,8 @@ def test_the_backend_is_chosen_from_outside(tmp_path, monkeypatch):
     assert pdf.resolve("fakepdf:instance").name == "fake"   # an object
     assert pdf.resolve("pdfium").name == "pdfium"
     assert pdf.resolve("sandbox").name == "sandbox:pdfium"
+    assert pdf.resolve("pure").name == "pure" and not api.renders(pdf.resolve("pure"))
+    assert api.renders(pdf.resolve("pdfium"))
     with pytest.raises(ValueError):
         pdf.resolve("nonsense")
     with pytest.raises(TypeError):

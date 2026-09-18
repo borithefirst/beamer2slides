@@ -15,6 +15,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# The pure Python PDF backend (B2S_PDF_BACKEND=pure, docs/pdf-from-scratch.md) reads embedded font
+# programs and the Adobe Glyph List through fontTools.
+pure = ["fonttools>=4.40"]
 # What the tests need beyond the package itself. pytest-xdist is what makes `-n auto` work;
 # the suite runs without it, one worker, about three times slower (tests/conftest.py).
 dev = ["pytest>=8", "pytest-xdist>=3",

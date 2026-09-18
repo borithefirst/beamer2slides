@@ -1,0 +1,986 @@
+"""Content streams -> page objects, the way PDFium's CPDF_StreamContentParser builds them.
+
+What is kept is what the backend contract reports: each object's type, its own matrix (PDFium's:
+the text matrix with the text position, a path's CTM, an image's CTM, a form's CTM), its clip
+boxes, colours, alphas, line width, its bounding rectangle (CPDF_PageObject::GetRect), and per
+type the path points, the text items or the image/form stream. Coordinates are PDF user space of
+the *container* (the page, or the form the object is drawn in), y up, as in PDFium.
+
+The rules follow PDFium closely, quirks included (a clip is applied after the path that sets it
+is painted, `h` on a closed point only flags it, a TJ with no strings moves by its kerning without
+the horizontal scale, a Type 3 font always fills...), because the pipeline's thresholds were
+tuned on what PDFium reports."""
+
+from __future__ import annotations
+
+import math
+from dataclasses import dataclass, field
+
+from ..api import OBJ_FORM, OBJ_IMAGE, OBJ_PATH, OBJ_SHADING, OBJ_TEXT, mul
+from .colors import DEVICE, PATTERN, ColorSpace, load_colorspace
+from .fonts import Font, load_font
+from .syntax import InlineImage, Name, Stream, String, float32 as f32, operations
+
+IDENTITY = (1.0, 0.0, 0.0, 1.0, 0.0, 0.0)
+
+
+def f32m(m: tuple) -> tuple:
+    """A CFX_Matrix: six floats."""
+    return tuple(f32(v) for v in m)
+
+
+def f32p(p: tuple) -> tuple:
+    """A CFX_PointF."""
+    return f32(p[0]), f32(p[1])
+PT_MOVE, PT_LINE, PT_BEZIER = 2, 0, 1   # api.SEG_* values
+FILL_NONE, FILL_EVENODD, FILL_WINDING = 0, 1, 2   # FPDFPath_GetDrawMode
+MAX_FORM_LEVEL = 40
+WHITE = 0xFFFFFF
+
+
+def transform(m, x, y):
+    return m[0] * x + m[2] * y + m[4], m[1] * x + m[3] * y + m[5]
+
+
+def transform_rect(m, rect):
+    """CFX_Matrix::TransformRect of (left, bottom, right, top)."""
+    l, b, r, t = rect
+    pts = [transform(m, x, y) for x in (l, r) for y in (b, t)]
+    xs, ys = [p[0] for p in pts], [p[1] for p in pts]
+    return min(xs), min(ys), max(xs), max(ys)
+
+
+def intersect(a, b):
+    """CFX_FloatRect::Intersect: an empty result collapses to zero."""
+    l, bt, r, t = max(a[0], b[0]), max(a[1], b[1]), min(a[2], b[2]), min(a[3], b[3])
+    if l > r or bt > t:
+        return 0.0, 0.0, 0.0, 0.0
+    return l, bt, r, t
+
+
+def point_bbox(points):
+    xs = [p[0] for p in points]
+    ys = [p[1] for p in points]
+    return min(xs), min(ys), max(xs), max(ys)
+
+
+# ---------------------------------------------------------------------- page objects
+
+
+@dataclass(eq=False)
+class PObj:
+    type: int
+    matrix: tuple                  # PDFium's matrix for the object (identity for a shading)
+    parent: "PObj | None" = None
+    clips: list | None = None      # point bounding boxes of the clip paths, container space
+    fill: int | None = None        # 0xRRGGBB; None when the object has no colour state
+    stroke: int | None = None
+    fill_alpha: float = 1.0
+    stroke_alpha: float = 1.0
+    blend: str = "Normal"
+    soft_mask: bool = False
+    line_width: float = 1.0
+    line_cap: int = 0
+    line_join: int = 0
+    miter: float = 10.0
+    rect: tuple = (0.0, 0.0, 0.0, 0.0)   # GetRect, container space
+    # paths
+    points: list = field(default_factory=list)   # (x, y, PT_*, closes), path space
+    fill_type: int = FILL_NONE
+    stroked: bool = False
+    # text
+    font: Font | None = None
+    font_size: float = 0.0
+    items: list = field(default_factory=list)    # [code, x] per character (x in text space)
+    kernings: list = field(default_factory=list)  # TJ kerning after each character (0 inside a string)
+    text_mode: int = 0
+    char_space: float = 0.0
+    word_space: float = 0.0
+    original_rect: tuple = (0.0, 0.0, 0.0, 0.0)
+    # images and forms
+    stream: object = None          # Stream, or InlineImage
+    name: str = ""
+    children: list = field(default_factory=list)
+    group: bool = False            # a form with a transparency group (or an isolated one)
+    active: bool = True
+
+    @property
+    def has_transparency(self) -> bool:
+        """FPDFPageObj_HasTransparency."""
+        if self.blend != "Normal" or self.soft_mask or self.fill_alpha != 1.0:
+            return True
+        if self.type == OBJ_PATH and self.stroke_alpha != 1.0:
+            return True
+        return self.type == OBJ_FORM and self.group
+
+
+# ---------------------------------------------------------------------- graphics state
+
+
+@dataclass
+class State:
+    ctm: tuple = IDENTITY
+    clips: tuple = ()                  # point bboxes (container space), tuple so copies are cheap
+    fill_cs: ColorSpace = DEVICE["DeviceGray"]
+    fill_values: tuple = (0.0,)
+    fill_ref: int = 0
+    stroke_cs: ColorSpace = DEVICE["DeviceGray"]
+    stroke_values: tuple = (0.0,)
+    stroke_ref: int = 0
+    fill_alpha: float = 1.0
+    stroke_alpha: float = 1.0
+    blend: str = "Normal"
+    soft_mask: bool = False
+    line_width: float = 1.0
+    line_cap: int = 0
+    line_join: int = 0
+    miter: float = 10.0
+    font: Font | None = None
+    font_size: float = 0.0
+    char_space: float = 0.0
+    word_space: float = 0.0
+    horz_scale: float = 1.0
+    leading: float = 0.0
+    rise: float = 0.0
+    text_mode: int = 0
+    # text positioning (not saved by q/Q in PDFium's parser either: it lives on cur_states_,
+    # which q copies, so it is saved - kept here for the same effect)
+    text_matrix: tuple = IDENTITY
+    text_pos: tuple = (0.0, 0.0)
+    text_line_pos: tuple = (0.0, 0.0)
+
+    def copy(self) -> "State":
+        return State(**self.__dict__)
+
+
+def _num(v, default=0.0) -> float:
+    return float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) else default
+
+
+class Parser:
+    """One page's (or form's) content, appended to `objects` in painting order."""
+
+    def __init__(self, doc, page_resources: dict, objects: list, fonts: dict, colorspaces: dict):
+        self.doc = doc
+        self.page_resources = page_resources if isinstance(page_resources, dict) else {}
+        self.objects = objects
+        self.fonts = fonts
+        self.colorspaces = colorspaces
+        self.parsed: list = []          # streams being parsed (the recursion chain)
+
+    # ------------------------------------------------------------------ entry points
+
+    def parse_page(self, contents: bytes, bbox: tuple) -> None:
+        self._run(contents, self.page_resources, State(), bbox, None)
+
+    def _run(self, data: bytes, resources: dict, state: State, bbox: tuple, parent: PObj | None) -> None:
+        run = _Run(self, resources if isinstance(resources, dict) else self.page_resources, state, bbox, parent)
+        run.execute(data)
+
+    # ------------------------------------------------------------------ resources
+
+    def font(self, obj) -> Font | None:
+        d = self.doc.resolve(obj)
+        if not isinstance(d, dict):
+            return None
+        key = id(d)
+        if key not in self.fonts:
+            self.fonts[key] = load_font(self.doc, d)
+        return self.fonts[key]
+
+
+class _Run:
+    """The state of one content stream being executed."""
+
+    def __init__(self, parser: Parser, resources: dict, state: State, bbox: tuple, parent: PObj | None):
+        self.p = parser
+        self.doc = parser.doc
+        self.resources = resources
+        self.state = state
+        self.stack: list[State] = []
+        self.bbox = bbox
+        self.parent = parent
+        self.path: list = []
+        self.path_start = (0.0, 0.0)
+        self.path_current = (0.0, 0.0)
+        self.clip_type = FILL_NONE
+        self.last_image_name = None
+        self.last_image = None
+
+    # ------------------------------------------------------------------ resources
+
+    def resource(self, category: str, name) -> object:
+        """FindResourceObj: this stream's resources, then the page's."""
+        r = self.doc.resolve
+        for res in (self.resources, self.p.page_resources):
+            group = r(res.get(category)) if isinstance(res, dict) else None
+            if isinstance(group, dict) and name in group:
+                return r(group[name])
+        return None
+
+    def colorspace(self, name) -> ColorSpace | None:
+        name = str(name)
+        if name == "Pattern":
+            return PATTERN
+        if name in ("DeviceGray", "DeviceRGB", "DeviceCMYK", "G", "RGB", "CMYK"):
+            return load_colorspace(self.doc, Name(name), self.resources)
+        obj = self.resource("ColorSpace", name)
+        if obj is None:
+            return None
+        key = id(obj)
+        if key not in self.p.colorspaces:
+            self.p.colorspaces[key] = load_colorspace(self.doc, obj, None)
+        return self.p.colorspaces[key]
+
+    # ------------------------------------------------------------------ objects
+
+    def add(self, obj: PObj, color: bool, graph: bool) -> PObj:
+        """SetGraphicStates + AppendPageObject."""
+        s = self.state
+        obj.parent = self.parent
+        obj.clips = list(s.clips) if s.clips else None
+        obj.fill_alpha, obj.stroke_alpha = s.fill_alpha, s.stroke_alpha
+        obj.blend, obj.soft_mask = s.blend, s.soft_mask
+        if color:
+            obj.fill, obj.stroke = s.fill_ref, s.stroke_ref
+        if graph:
+            obj.line_width, obj.line_cap, obj.line_join, obj.miter = s.line_width, s.line_cap, s.line_join, s.miter
+        self.p.objects.append(obj)
+        if self.parent is not None:
+            self.parent.children.append(obj)
+        return obj
+
+    # ------------------------------------------------------------------ execution
+
+    def execute(self, data: bytes) -> None:
+        for op, args in operations(data):
+            handler = OPS.get(op)
+            if handler is None:
+                continue
+            try:
+                handler(self, args)
+            except (TypeError, ValueError, IndexError, ZeroDivisionError, OverflowError, KeyError):
+                continue  # malformed operands: PDFium reads zeros or skips; nothing is drawn wrongly
+
+    @staticmethod
+    def number(args, i: int) -> float:
+        """GetNumber(i): the i-th operand from the end, 0 when missing."""
+        return _num(args[-1 - i]) if i < len(args) else 0.0
+
+    def numbers(self, args, n: int) -> list[float]:
+        return [self.number(args, n - 1 - k) for k in range(n)]
+
+    # ---- graphics state
+    def op_q(self, args):
+        self.stack.append(self.state.copy())
+
+    def op_Q(self, args):
+        if self.stack:
+            self.state = self.stack.pop()
+
+    def op_cm(self, args):
+        m = tuple(self.numbers(args, 6))
+        self.state.ctm = f32m(mul(m, self.state.ctm))
+        self._text_matrix_changed()
+
+    def op_w(self, args):
+        self.state.line_width = self.number(args, 0)
+
+    def op_J(self, args):
+        self.state.line_cap = int(self.number(args, 0))
+
+    def op_j(self, args):
+        self.state.line_join = int(self.number(args, 0))
+
+    def op_M(self, args):
+        self.state.miter = self.number(args, 0)
+
+    def op_gs(self, args):
+        gs = self.resource("ExtGState", args[-1]) if args else None
+        if not isinstance(gs, dict):
+            return
+        r = self.doc.resolve
+        s = self.state
+        for key, value in gs.items():
+            value = r(value)
+            if key == "LW":
+                s.line_width = _num(value)
+            elif key == "LC":
+                s.line_cap = int(_num(value))
+            elif key == "LJ":
+                s.line_join = int(_num(value))
+            elif key == "ML":
+                s.miter = _num(value)
+            elif key == "Font" and isinstance(value, list) and len(value) >= 2:
+                s.font_size = _num(r(value[1]))
+                s.font = self.p.font(value[0])
+            elif key == "BM":
+                mode = r(value[0]) if isinstance(value, list) and value else value
+                s.blend = str(mode) if isinstance(mode, Name) and str(mode) != "Compatible" else "Normal"
+            elif key == "SMask":
+                s.soft_mask = isinstance(value, dict)
+            elif key == "CA":
+                s.stroke_alpha = min(1.0, max(0.0, _num(value, 1.0)))
+            elif key == "ca":
+                s.fill_alpha = min(1.0, max(0.0, _num(value, 1.0)))
+
+    # ---- colour
+    def _set_color(self, fill: bool, cs: ColorSpace | None, values: list[float]) -> None:
+        """CPDF_ColorState::SetColor."""
+        s = self.state
+        current = s.fill_cs if fill else s.stroke_cs
+        if cs is not None:
+            current = cs
+        if current.n > len(values):
+            if fill:
+                s.fill_cs = current
+            else:
+                s.stroke_cs = current
+            return
+        if current.is_pattern:
+            ref = None
+        else:
+            ref = current.colorref(values)
+        ref = WHITE if ref is None else ref
+        if fill:
+            s.fill_cs, s.fill_values, s.fill_ref = current, tuple(values), ref
+        else:
+            s.stroke_cs, s.stroke_values, s.stroke_ref = current, tuple(values), ref
+
+    def op_g(self, args):
+        self._set_color(True, DEVICE["DeviceGray"], self.numbers(args, 1))
+
+    def op_G(self, args):
+        self._set_color(False, DEVICE["DeviceGray"], self.numbers(args, 1))
+
+    def op_rg(self, args):
+        if len(args) == 3:
+            self._set_color(True, DEVICE["DeviceRGB"], self.numbers(args, 3))
+
+    def op_RG(self, args):
+        if len(args) == 3:
+            self._set_color(False, DEVICE["DeviceRGB"], self.numbers(args, 3))
+
+    def op_k(self, args):
+        if len(args) == 4:
+            self._set_color(True, DEVICE["DeviceCMYK"], self.numbers(args, 4))
+
+    def op_K(self, args):
+        if len(args) == 4:
+            self._set_color(False, DEVICE["DeviceCMYK"], self.numbers(args, 4))
+
+    def _set_space(self, fill: bool, args):
+        cs = self.colorspace(args[-1]) if args else None
+        if cs is None:
+            return
+        # CPDF_Color::SetColorSpace: the initial colour of the space; the colour reference stays
+        if fill:
+            self.state.fill_cs, self.state.fill_values = cs, tuple(cs.initial())
+        else:
+            self.state.stroke_cs, self.state.stroke_values = cs, tuple(cs.initial())
+
+    def op_cs(self, args):
+        self._set_space(True, args)
+
+    def op_CS(self, args):
+        self._set_space(False, args)
+
+    def _colors(self, args) -> list[float]:
+        n = min(len(args), 4)
+        return self.numbers(args, n)
+
+    def op_sc(self, args):
+        if args:
+            self._set_color(True, None, self._colors(args))
+
+    def op_SC(self, args):
+        if args:
+            self._set_color(False, None, self._colors(args))
+
+    def _set_pattern(self, fill: bool, args):
+        if not args:
+            return
+        if not isinstance(args[-1], Name):
+            self._set_color(fill, None, self._colors(args))
+            return
+        pattern = self.resource("Pattern", args[-1])
+        if pattern is None:
+            return
+        values = [_num(a) for a in args[:-1]][-4:]
+        s = self.state
+        cs = s.fill_cs if fill else s.stroke_cs
+        if not cs.is_pattern:
+            cs = PATTERN
+        ref = None
+        if cs.base is not None and len(values) >= cs.base.n:
+            ref = cs.base.colorref(values)
+        if ref is None:
+            d = pattern.dict if isinstance(pattern, Stream) else pattern
+            colored = isinstance(d, dict) and self.doc.resolve(d.get("PatternType")) == 1 \
+                and self.doc.resolve(d.get("PaintType")) == 1
+            ref = 0xBFBFBF if colored else WHITE
+        if fill:
+            s.fill_cs, s.fill_values, s.fill_ref = cs, tuple(values), ref
+        else:
+            s.stroke_cs, s.stroke_values, s.stroke_ref = cs, tuple(values), ref
+
+    def op_scn(self, args):
+        self._set_pattern(True, args)
+
+    def op_SCN(self, args):
+        self._set_pattern(False, args)
+
+    # ---- path construction
+    def _point(self, x, y, kind):
+        """AddPathPoint."""
+        pt = (x, y)
+        path = self.path
+        if kind == PT_MOVE and path and not path[-1][3] and path[-1][2] == PT_MOVE and self.path_current == pt:
+            return
+        self.path_current = pt
+        if kind == PT_MOVE:
+            self.path_start = pt
+            if path and path[-1][2] == PT_MOVE and not path[-1][3]:
+                path[-1] = (x, y, PT_MOVE, False)
+                return
+        elif not path:
+            return
+        path.append((x, y, kind, False))
+
+    def _point_close(self, x, y, kind):
+        self.path_current = (x, y)
+        if self.path:
+            self.path.append((x, y, kind, True))
+
+    def op_m(self, args):
+        if len(args) == 2:
+            self._point(self.number(args, 1), self.number(args, 0), PT_MOVE)
+
+    def op_l(self, args):
+        if len(args) == 2:
+            self._point(self.number(args, 1), self.number(args, 0), PT_LINE)
+
+    def op_c(self, args):
+        n = self.numbers(args, 6)
+        self._point(n[0], n[1], PT_BEZIER)
+        self._point(n[2], n[3], PT_BEZIER)
+        self._point(n[4], n[5], PT_BEZIER)
+
+    def op_v(self, args):
+        n = self.numbers(args, 4)
+        self._point(*self.path_current, PT_BEZIER)
+        self._point(n[0], n[1], PT_BEZIER)
+        self._point(n[2], n[3], PT_BEZIER)
+
+    def op_y(self, args):
+        n = self.numbers(args, 4)
+        self._point(n[0], n[1], PT_BEZIER)
+        self._point(n[2], n[3], PT_BEZIER)
+        self._point(n[2], n[3], PT_BEZIER)
+
+    def op_h(self, args):
+        if not self.path:
+            return
+        if self.path_start != self.path_current:
+            self._point_close(*self.path_start, PT_LINE)
+        else:
+            x, y, kind, _ = self.path[-1]
+            self.path[-1] = (x, y, kind, True)
+
+    def op_re(self, args):
+        x, y, w, h = self.numbers(args, 4)
+        right, top = f32(x + w), f32(y + h)
+        self._point(x, y, PT_MOVE)
+        self._point(right, y, PT_LINE)
+        self._point(right, top, PT_LINE)
+        self._point(x, top, PT_LINE)
+        self._point_close(x, y, PT_LINE)
+
+    def op_W(self, args):
+        self.clip_type = FILL_WINDING
+
+    def op_Wstar(self, args):
+        self.clip_type = FILL_EVENODD
+
+    # ---- path painting
+    def _paint(self, fill_type: int, stroke: bool, close: bool = False):
+        if close:
+            self.op_h([])
+        points, self.path = self.path, []
+        clip_type, self.clip_type = self.clip_type, FILL_NONE
+        if not points:
+            return
+        s = self.state
+        if len(points) == 1:
+            if clip_type != FILL_NONE:
+                s.clips = s.clips + ((0.0, 0.0, 0.0, 0.0),)  # AppendRect(0, 0, 0, 0), not transformed
+                return
+            x, y, kind, closes = points[0]
+            if kind != PT_MOVE or not closes or s.line_cap != 1:
+                return
+            points.append((x, y, PT_LINE, True))  # a round-capped move closed at once: a dot
+        if points[-1][2] == PT_MOVE and not points[-1][3]:
+            points.pop()
+        matrix = s.ctm
+        if stroke or fill_type != FILL_NONE:
+            obj = PObj(OBJ_PATH, matrix, points=points, fill_type=fill_type, stroked=stroke)
+            self.add(obj, True, True)
+            obj.rect = path_rect(obj)
+        if clip_type != FILL_NONE:
+            pts = [transform(matrix, x, y) for x, y, _, _ in points]
+            box = point_bbox(pts) if pts else (0.0, 0.0, 0.0, 0.0)
+            s.clips = s.clips + (box,)
+
+    def op_f(self, args):
+        self._paint(FILL_WINDING, False)
+
+    op_F = op_f
+
+    def op_fstar(self, args):
+        self._paint(FILL_EVENODD, False)
+
+    def op_S(self, args):
+        self._paint(FILL_NONE, True)
+
+    def op_s(self, args):
+        self._paint(FILL_NONE, True, close=True)
+
+    def op_B(self, args):
+        self._paint(FILL_WINDING, True)
+
+    def op_Bstar(self, args):
+        self._paint(FILL_EVENODD, True)
+
+    def op_b(self, args):
+        self._paint(FILL_WINDING, True, close=True)
+
+    def op_bstar(self, args):
+        self._paint(FILL_EVENODD, True, close=True)
+
+    def op_n(self, args):
+        self._paint(FILL_NONE, False)
+
+    # ---- text state
+    def _text_matrix_changed(self):
+        pass  # the text object's matrix is computed when it is made (OnChangeTextMatrix's result)
+
+    def op_BT(self, args):
+        s = self.state
+        s.text_matrix = IDENTITY
+        s.text_pos = s.text_line_pos = (0.0, 0.0)
+
+    def op_ET(self, args):
+        pass
+
+    def op_Tc(self, args):
+        self.state.char_space = self.number(args, 0)
+
+    def op_Tw(self, args):
+        self.state.word_space = self.number(args, 0)
+
+    def op_Tz(self, args):
+        if len(args) == 1:
+            self.state.horz_scale = self.number(args, 0) / 100
+
+    def op_TL(self, args):
+        self.state.leading = self.number(args, 0)
+
+    def op_Tr(self, args):
+        self.state.text_mode = int(self.number(args, 0))
+
+    def op_Ts(self, args):
+        self.state.rise = self.number(args, 0)
+
+    def op_Tf(self, args):
+        s = self.state
+        s.font_size = self.number(args, 0)
+        name = args[-2] if len(args) >= 2 else None
+        font_dict = self.resource("Font", name) if name is not None else None
+        s.font = self.p.font(font_dict) if font_dict is not None else None
+        if s.font is not None and s.font.is_type3:
+            s.font.check_metrics()
+
+    def op_Td(self, args):
+        s = self.state
+        x, y = self.number(args, 1), self.number(args, 0)
+        s.text_line_pos = (f32(s.text_line_pos[0] + x), f32(s.text_line_pos[1] + y))
+        s.text_pos = s.text_line_pos
+
+    def op_TD(self, args):
+        self.state.leading = -self.number(args, 0)
+        self.op_Td(args)
+
+    def op_Tm(self, args):
+        s = self.state
+        s.text_matrix = tuple(self.numbers(args, 6))
+        s.text_pos = s.text_line_pos = (0.0, 0.0)
+
+    def op_Tstar(self, args):
+        s = self.state
+        s.text_line_pos = (s.text_line_pos[0], f32(s.text_line_pos[1] - s.leading))
+        s.text_pos = s.text_line_pos
+
+    # ---- text showing
+    def op_Tj(self, args):
+        if args and isinstance(args[-1], (bytes, String)) and len(args[-1]):
+            self._add_text([bytes(args[-1])], 0.0, [])
+
+    def op_quote(self, args):
+        self.op_Tstar([])
+        self.op_Tj(args)
+
+    def op_dquote(self, args):
+        self.state.word_space = self.number(args, 2)
+        self.state.char_space = self.number(args, 1)
+        self.op_quote(args)
+
+    def op_TJ(self, args):
+        array = args[-1] if args and isinstance(args[-1], list) else None
+        if array is None:
+            return
+        s = self.state
+        if not any(isinstance(v, (bytes, String)) for v in array):
+            for v in array:
+                k = _num(v)
+                if k != 0:
+                    s.text_pos = (f32(s.text_pos[0] - k * s.font_size / 1000), s.text_pos[1])
+            return
+        strings, kernings, initial = [], [], 0.0
+        for v in array:
+            if isinstance(v, (bytes, String)):
+                if not len(v):
+                    continue
+                strings.append(bytes(v))
+                kernings.append(0.0)
+            elif isinstance(v, (int, float)) and not isinstance(v, bool):
+                if not strings:
+                    initial += v
+                else:
+                    kernings[-1] += v
+        self._add_text(strings, initial, kernings)
+
+    def _add_text(self, strings: list[bytes], initial: float, kernings: list[float]) -> None:
+        """AddTextObject."""
+        s = self.state
+        font = s.font
+        if font is None:
+            return
+        if initial != 0:
+            s.text_pos = (f32(s.text_pos[0] - initial * s.font_size / 1000 * s.horz_scale), s.text_pos[1])
+        if not strings:
+            return
+        mode = 0 if font.is_type3 else s.text_mode
+        # OnChangeTextMatrix: [Tz 0 0 1] x Tm x CTM (content_to_user is the identity here)
+        tm = f32m(mul(f32m(mul((s.horz_scale, 0.0, 0.0, 1.0, 0.0, 0.0), s.text_matrix)), s.ctm))
+        pos = f32p(transform(s.ctm, *f32p(transform(s.text_matrix, s.text_pos[0], f32(s.text_pos[1] + s.rise)))))
+        items: list = []
+        kerns: list = []
+        for k, string in enumerate(strings):
+            for code in font.codes(string):
+                items.append([code, 0.0])
+                kerns.append(0.0)
+            if k != len(strings) - 1 and kerns:
+                kerns[-1] = kernings[k]
+        if not items:
+            return
+        obj = PObj(OBJ_TEXT, (tm[0], tm[1], tm[2], tm[3], pos[0], pos[1]), font=font, font_size=s.font_size,
+                   items=items, kernings=kerns, text_mode=mode, char_space=s.char_space, word_space=s.word_space)
+        self.add(obj, True, True)
+        advance = text_positions(obj)
+        s.text_pos = (f32(s.text_pos[0] + advance * s.horz_scale), s.text_pos[1])
+        if kernings and kernings[-1] != 0:
+            s.text_pos = (f32(s.text_pos[0] - kernings[-1] * s.font_size / 1000 * s.horz_scale), s.text_pos[1])
+
+    # ---- XObjects, images, shadings
+    def op_Do(self, args):
+        if not args:
+            return
+        name = args[-1]
+        if name == self.last_image_name and self.last_image is not None:
+            self._image(self.last_image, name)
+            return
+        xobj = self.resource("XObject", name)
+        if not isinstance(xobj, Stream):
+            return
+        subtype = self.doc.resolve(xobj.get("Subtype"))
+        if subtype == "Form":
+            self._form(xobj, name)
+        elif subtype == "Image":
+            self._image(xobj, name)
+            self.last_image_name, self.last_image = name, xobj
+
+    def _image(self, stream, name):
+        d = stream.dict if isinstance(stream, Stream) else stream.dict
+        mask = bool(self.doc.resolve(d.get("ImageMask")))
+        obj = PObj(OBJ_IMAGE, self.state.ctm, stream=stream, name=str(name))
+        self.add(obj, mask, False)
+        if not mask:
+            obj.fill = obj.stroke = None
+        obj.rect = transform_rect(obj.matrix, (0.0, 0.0, 1.0, 1.0))
+
+    def op_BI(self, args):
+        if args and isinstance(args[0], InlineImage):
+            self._image(args[0], "")
+
+    def op_sh(self, args):
+        shading = self.resource("Shading", args[-1]) if args else None
+        d = shading.dict if isinstance(shading, Stream) else shading
+        if not isinstance(d, dict):
+            return
+        stype = self.doc.resolve(d.get("ShadingType"))
+        if not isinstance(stype, int) or not 1 <= stype <= 7:
+            return
+        if load_colorspace(self.doc, d.get("ColorSpace"), None) is None:
+            return  # CPDF_ShadingPattern::Load fails
+        obj = PObj(OBJ_SHADING, IDENTITY, stream=shading)
+        self.add(obj, False, False)
+        s = self.state
+        rect = self.bbox
+        if s.clips:
+            rect = s.clips[0]
+            for c in s.clips[1:]:
+                rect = intersect(rect, c)
+        obj.rect = rect
+
+    def _form(self, stream: Stream, name) -> None:
+        """AddForm: the form object first, its contents after it (pre-order), parsed with a
+        fresh CTM (/Matrix), its /BBox as the clip and only the general, graph, colour and text
+        states of the caller."""
+        r = self.doc.resolve
+        s = self.state
+        obj = PObj(OBJ_FORM, s.ctm, stream=stream, name=str(name))
+        group = r(stream.get("Group"))
+        obj.group = isinstance(group, dict) and (r(group.get("S")) == "Transparency" or bool(r(group.get("I"))))
+        self.add(obj, True, True)
+        data = self.doc.stream_data(stream)
+        chain = self.p.parsed
+        if len(chain) <= MAX_FORM_LEVEL and not any(x is stream for x in chain):
+            child = State(fill_cs=s.fill_cs, fill_values=s.fill_values, fill_ref=s.fill_ref,
+                          stroke_cs=s.stroke_cs, stroke_values=s.stroke_values, stroke_ref=s.stroke_ref,
+                          fill_alpha=s.fill_alpha, stroke_alpha=s.stroke_alpha, blend=s.blend,
+                          soft_mask=s.soft_mask, line_width=s.line_width, line_cap=s.line_cap,
+                          line_join=s.line_join, miter=s.miter, font=s.font, font_size=s.font_size,
+                          char_space=s.char_space, word_space=s.word_space, horz_scale=s.horz_scale,
+                          leading=s.leading, rise=s.rise, text_mode=s.text_mode)
+            m = r(stream.get("Matrix"))
+            fm = tuple(_num(r(v)) for v in m[:6]) if isinstance(m, list) and len(m) >= 6 else IDENTITY
+            child.ctm = fm
+            bbox = (0.0, 0.0, 0.0, 0.0)
+            b = r(stream.get("BBox"))
+            if isinstance(b, list) and len(b) >= 4:
+                v = [_num(r(x)) for x in b[:4]]
+                rect = (min(v[0], v[2]), min(v[1], v[3]), max(v[0], v[2]), max(v[1], v[3]))
+                pts = [transform(fm, x, y) for x, y in ((rect[0], rect[1]), (rect[2], rect[1]),
+                                                       (rect[2], rect[3]), (rect[0], rect[3]))]
+                child.clips = (point_bbox(pts),)
+                bbox = transform_rect(fm, rect)
+            if obj.group:
+                child.blend, child.stroke_alpha, child.fill_alpha, child.soft_mask = "Normal", 1.0, 1.0, False
+            res = r(stream.get("Resources"))
+            chain.append(stream)
+            try:
+                _Run(self.p, res if isinstance(res, dict) else self.resources, child, bbox, obj).execute(data)
+            finally:
+                chain.pop()
+        obj.rect = form_rect(obj)
+
+
+def _op_name(op: str) -> str:
+    return {"W*": "Wstar", "f*": "fstar", "B*": "Bstar", "b*": "bstar", "T*": "Tstar",
+            "'": "quote", '"': "dquote"}.get(op, op)
+
+
+OPS = {}
+for _op in ("q Q cm w J j M gs g G rg RG k K cs CS sc SC scn SCN m l c v y h re W W* f F f* S s B B* b b* n "
+            "BT ET Tc Tw Tz TL Tr Ts Tf Td TD Tm T* Tj ' \" TJ Do BI sh").split():
+    OPS[_op] = getattr(_Run, "op_" + _op_name(_op))
+
+
+# ---------------------------------------------------------------------- bounds
+
+
+def text_positions(obj: PObj) -> float:
+    """CPDF_TextObject::CalcPositionDataInternal: fills each item's x (text space, before the
+    horizontal scale), sets the original and page rectangles, returns the advance."""
+    font, size = obj.font, obj.font_size
+    cur = 0.0
+    min_x, max_x, min_y, max_y = 10000.0, -10000.0, 10000.0, -10000.0
+    cid = font.subtype == "Type0"
+    for item, kerning in zip(obj.items, obj.kernings):
+        code = item[0]
+        item[1] = cur
+        l, b, r, t = font.char_bbox(code)
+        min_y, max_y = min(min_y, min(t, b)), max(max_y, max(t, b))
+        left, right = cur + l * size / 1000, cur + r * size / 1000
+        min_x, max_x = min(min_x, left, right), max(max_x, left, right)
+        cur = f32(cur + f32(font.char_width(code) * size / 1000))
+        if code == 32 and (not cid or font.char_size(32) == 1):
+            cur = f32(cur + obj.word_space)
+        cur = f32(cur + obj.char_space)
+        if kerning:
+            cur = f32(cur - f32(kerning * size / 1000))
+    min_y, max_y = min_y * size / 1000, max_y * size / 1000
+    obj.original_rect = (min_x, min_y, max_x, max_y)
+    rect = transform_rect(obj.matrix, obj.original_rect)
+    if obj.text_mode in (1, 2, 5, 6):
+        h = obj.line_width / 2
+        rect = (rect[0] - h, rect[1] - h, rect[2] + h, rect[3] + h)
+    obj.rect = rect
+    return cur
+
+
+def path_rect(obj: PObj) -> tuple:
+    """CPDF_PathObject::CalcBoundingBox."""
+    width = obj.line_width
+    if obj.stroked and width != 0:
+        rect = stroke_bbox(obj.points, width)
+    elif obj.points:
+        rect = point_bbox(obj.points)
+    else:
+        rect = (0.0, 0.0, 0.0, 0.0)
+    rect = transform_rect(obj.matrix, rect)
+    if width == 0 and obj.stroked:
+        rect = (rect[0] - 0.5, rect[1] - 0.5, rect[2] + 0.5, rect[3] + 0.5)
+    return rect
+
+
+def form_rect(obj: PObj) -> tuple:
+    """CPDF_FormObject::CalcBoundingBox: the form matrix over the union of its children's
+    rectangles (only the direct children: theirs already include their own)."""
+    kids = [c for c in obj.children if c.parent is obj and c.active]
+    if not obj.children:
+        return transform_rect(obj.matrix, (0.0, 0.0, 0.0, 0.0))
+    if not kids:
+        big = 3.4028234663852886e38
+        return transform_rect(obj.matrix, (big, big, -big, -big))
+    l = min(c.rect[0] for c in kids)
+    b = min(c.rect[1] for c in kids)
+    r = max(c.rect[2] for c in kids)
+    t = max(c.rect[3] for c in kids)
+    return transform_rect(obj.matrix, (l, b, r, t))
+
+
+class _Rect:
+    __slots__ = ("l", "b", "r", "t")
+
+    def __init__(self):
+        self.l, self.b, self.r, self.t = 100000.0, 100000.0, -100000.0, -100000.0
+
+    def update(self, x, y):
+        self.l, self.r = min(self.l, x), max(self.r, x)
+        self.b, self.t = min(self.b, y), max(self.t, y)
+
+
+def _end_points(rect: _Rect, start, end, hw):
+    """UpdateLineEndPoints (cfx_path.cpp)."""
+    if start[0] == end[0]:
+        if start[1] == end[1]:
+            rect.update(end[0] + hw, end[1] + hw)
+            rect.update(end[0] - hw, end[1] - hw)
+            return
+        y = end[1] - hw if end[1] < start[1] else end[1] + hw
+        rect.update(end[0] + hw, y)
+        rect.update(end[0] - hw, y)
+        return
+    if start[1] == end[1]:
+        x = end[0] - hw if end[0] < start[0] else end[0] + hw
+        rect.update(x, end[1] + hw)
+        rect.update(x, end[1] - hw)
+        return
+    dx, dy = end[0] - start[0], end[1] - start[1]
+    ll = math.hypot(dx, dy)
+    mx, my = end[0] + hw * dx / ll, end[1] + hw * dy / ll
+    dx1, dy1 = hw * dy / ll, hw * dx / ll
+    rect.update(mx - dx1, my + dy1)
+    rect.update(mx + dx1, my - dy1)
+
+
+def _join_points(rect: _Rect, start, mid, end, hw):
+    """UpdateLineJoinPoints (cfx_path.cpp); the miter limit is not used there either."""
+    tw = 1.0 / 20
+    start_vert = abs(start[0] - mid[0]) < tw
+    end_vert = abs(mid[0] - end[0]) < tw
+    if start_vert and end_vert:
+        d = 1 if mid[1] > start[1] else -1
+        y = mid[1] + hw * d
+        rect.update(mid[0] + hw, y)
+        rect.update(mid[0] - hw, y)
+        return
+    start_k = start_c = end_k = end_c = start_dc = end_dc = 0.0
+    if not start_vert:
+        sx, sy = start[0] - mid[0], start[1] - mid[1]
+        start_k = (mid[1] - start[1]) / (mid[0] - start[0])
+        start_c = mid[1] - start_k * mid[0]
+        start_dc = abs(hw * math.hypot(sx, sy) / sx)
+    if not end_vert:
+        ex, ey = end[0] - mid[0], end[1] - mid[1]
+        end_k = ey / ex
+        end_c = mid[1] - end_k * mid[0]
+        end_dc = abs(hw * math.hypot(ex, ey) / ex)
+    if start_vert:
+        ox = start[0] + (hw if end[0] < start[0] else -hw)
+        if start[1] < end_k * start[0] + end_c:
+            oy = end_k * ox + end_c + end_dc
+        else:
+            oy = end_k * ox + end_c - end_dc
+        rect.update(ox, oy)
+        return
+    if end_vert:
+        ox = end[0] + (hw if start[0] < end[0] else -hw)
+        if end[1] < start_k * end[0] + start_c:
+            oy = start_k * ox + start_c + start_dc
+        else:
+            oy = start_k * ox + start_c - start_dc
+        rect.update(ox, oy)
+        return
+    if abs(start_k - end_k) < tw:
+        sd = 1 if mid[0] > start[0] else -1
+        ed = 1 if end[0] > mid[0] else -1
+        if sd == ed:
+            _end_points(rect, mid, end, hw)
+        else:
+            _end_points(rect, start, mid, hw)
+        return
+    so = start_c + (start_dc if end[1] < start_k * end[0] + start_c else -start_dc)
+    eo = end_c + (end_dc if start[1] < end_k * start[0] + end_c else -end_dc)
+    jx = (eo - so) / (start_k - end_k)
+    rect.update(jx, start_k * jx + so)
+
+
+def stroke_bbox(points: list, line_width: float) -> tuple:
+    """CFX_Path::GetBoundingBoxForStrokePath: half_width is the whole line width there."""
+    rect = _Rect()
+    hw = line_width
+    n = len(points)
+    i = 0
+    start = end = mid = 0
+    join = False
+    while i < n:
+        x, y, kind, closes = points[i]
+        if kind == PT_MOVE:
+            if i + 1 == n:
+                if closes:
+                    rect.update(x, y)
+                break
+            start, end, join = i + 1, i, False
+        else:
+            if kind == PT_BEZIER and not closes:
+                if i + 2 >= n:
+                    break
+                rect.update(points[i][0], points[i][1])
+                rect.update(points[i + 1][0], points[i + 1][1])
+                i += 2
+            if i + 1 == n or points[i + 1][2] == PT_MOVE:
+                start, end, join = i - 1, i, False
+            else:
+                start, mid, end, join = i - 1, i, i + 1, True
+        p = lambda k: (points[k][0], points[k][1])  # noqa: E731
+        try:
+            if join:
+                _join_points(rect, p(start), p(mid), p(end), hw)
+            else:
+                _end_points(rect, p(start), p(end), hw)
+        except ZeroDivisionError:
+            pass  # float division by zero gives inf/nan in C++: nothing sensible to add
+        i += 1
+    return rect.l, rect.b, rect.r, rect.t

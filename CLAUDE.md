@@ -26,13 +26,20 @@ a per-slide background picture.
   items, `pixel_bounds`); `pdfium_backend.py` is the reference; `sandbox.py` runs any backend in a worker
   process over `wire.py` frames (data only, no pickle; the worker is sent the PDF's bytes and needs no
   files, `save` returns bytes). The caller picks: `pdf.set_backend` / `use_backend`, or
-  `$B2S_PDF_BACKEND` = `pdfium` | `sandbox[:<spec>]` | `package.module:attr`; `$B2S_PDF_SANDBOX_CMD` wraps
+  `$B2S_PDF_BACKEND` = `pdfium` | `pure` | `sandbox[:<spec>]` | `package.module:attr`; `$B2S_PDF_SANDBOX_CMD` wraps
   the worker in a jail or container. Conformance: `tests/test_pdf_backend.py` (every backend named in
   `$B2S_TEST_PDF_BACKENDS`; the sandbox must equal PDFium value for value). Measured: the 48 test PDFs
   give byte-identical raw.json, deck.json, backgrounds and figures in process and through the sandbox
   (19 s vs 25 s). PDFium's text and path output reproduces what the MuPDF-based extraction gave (span
   splitting at word gaps, `re`/`qu` path items, char boxes from font ascent/descent), so classify's
   thresholds still hold.
+- **A PDF reader from scratch** (`pdf/pure/`, docs/pdf-from-scratch.md, extra `[pure]` = fontTools):
+  a pure Python port of the PDFium parts the pipeline reads (syntax, filters, xref/repair, colour
+  spaces, fonts, content stream, CPDF_TextPage with bidi), answering the contract *as PDFium does*,
+  quirks included (float32 numbers, U+0002 hyphens, FreeType's legacy AGL, Type 3 form boxes, image
+  metadata rules). It does not render (`renders = False`, `render` raises PdfError), so `classify`
+  runs on it and `convert` doesn't. Every call equals PDFium's on 4,373 pages (float32 noise aside),
+  and deck.json is identical on all 48 test decks; extract is 7× slower. `tests/test_pure_pdf.py`.
 - No public links: pictures reach Slides inside the imported .pptx, never as shared Drive
   files (they break in protected Workspace domains).
 - **Fidelity is measured on Google's own renderer**, not a local preview: render the PDF page

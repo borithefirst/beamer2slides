@@ -16,8 +16,8 @@ import pypdfium2 as pdfium
 import pypdfium2.raw as R
 
 from .api import (COLOR_SPACES, LIGATURES, NO_OBJECT, OBJ_FORM, OBJ_IMAGE, OBJ_PATH, OBJ_SHADING, Box, Char,
-                  EmbeddedImage, PageObject, PdfError, char_box, join_surrogates, mul, pixel_bounds,
-                  trace, transform_box)
+                  EmbeddedImage, PageObject, PdfError, char_box, font_metrics, join_surrogates, mul,
+                  pixel_bounds, trace, transform_box)
 
 
 def _addr(handle) -> int:
@@ -29,50 +29,6 @@ def _obj_matrix(obj) -> tuple:
     if not R.FPDFPageObj_GetMatrix(obj, m):
         return (1.0, 0.0, 0.0, 1.0, 0.0, 0.0)
     return (m.a, m.b, m.c, m.d, m.e, m.f)
-
-
-def _cff_font_bbox(data: bytes) -> list[float] | None:
-    """FontBBox from the top DICT of a bare CFF font program (FontFile3/Type1C)."""
-    try:
-        pos = data[2]
-
-        def index(pos):  # -> (entries, position after the INDEX)
-            count = int.from_bytes(data[pos:pos + 2], "big")
-            if count == 0:
-                return [], pos + 2
-            size = data[pos + 2]
-            offsets = [int.from_bytes(data[pos + 3 + i * size:pos + 3 + (i + 1) * size], "big") for i in range(count + 1)]
-            base = pos + 2 + (count + 1) * size
-            return [data[base + offsets[i]:base + offsets[i + 1]] for i in range(count)], base + offsets[-1]
-
-        _, pos = index(pos)  # names
-        tops, _ = index(pos)
-        d, i, operands = tops[0], 0, []
-        while i < len(d):
-            b0 = d[i]
-            if b0 <= 21:  # operator
-                if b0 == 5:
-                    return operands[:4]
-                i += 2 if b0 == 12 else 1
-                operands = []
-            elif b0 == 28:
-                operands.append(int.from_bytes(d[i + 1:i + 3], "big", signed=True)); i += 3
-            elif b0 == 29:
-                operands.append(int.from_bytes(d[i + 1:i + 5], "big", signed=True)); i += 5
-            elif b0 == 30:  # real: nibbles up to 0xf
-                i += 1
-                while not (d[i] & 0x0F == 0x0F or d[i] >> 4 == 0x0F):
-                    i += 1
-                operands.append(0.0); i += 1
-            elif b0 <= 246:
-                operands.append(b0 - 139); i += 1
-            elif b0 <= 250:
-                operands.append((b0 - 247) * 256 + d[i + 1] + 108); i += 2
-            else:
-                operands.append(-(b0 - 251) * 256 - d[i + 1] - 108); i += 2
-        return [0, 0, 0, 0]  # not given: the default
-    except (IndexError, ValueError):
-        return None
 
 
 def _font_program(font) -> bytes:
@@ -214,20 +170,7 @@ class Page:
             if font:
                 R.FPDFFont_GetAscent(font, ctypes.c_float(1.0), asc)
                 R.FPDFFont_GetDescent(font, ctypes.c_float(1.0), dsc)
-            ascent, descent = asc.value, dsc.value
-            program = _font_program(font) if font else b""
-            bbox = _cff_font_bbox(program) if program[:1] == b"\x01" else None
-            if bbox and abs(ascent - bbox[3] / 1000) < 1e-3 and abs(descent - bbox[1] / 1000) < 1e-3 \
-                    and ascent - descent > 1.6:
-                # Metrics from the bounding box of a math font (xdvipdfmx: CMSY, CMEX)
-                # would give every glyph a box reaching far below the line; MuPDF uses
-                # its defaults there.
-                ascent, descent = 0.8, -0.2
-            if ascent < 1e-3:
-                ascent, descent = 0.9, -0.1
-            if ascent - descent < 1:
-                total = ascent - descent
-                ascent, descent = ascent / total, descent / total
+            ascent, descent = font_metrics(asc.value, dsc.value, _font_program(font) if font else b"")
             font_id = -1
             if font:
                 font_id = len(self._fonts)
@@ -278,6 +221,8 @@ class Page:
                     width = ctypes.c_float()
                     if font and R.FPDFFont_GetGlyphWidth(font, u, ctypes.c_float(size), width) and width.value > 0:
                         advance, exact = width.value, False
+            # A character no text object draws (a space the text page put into a right-to-left
+            # run) has no colour of its own: it keeps the one before it (r, g, b, a are unchanged)
             R.FPDFText_GetFillColor(tp, i, r, g, b, a)
             color = (r.value << 16) | (g.value << 8) | b.value
             box = char_box(ox, oy, ux, uy, advance, size, ascent, descent)
@@ -305,7 +250,10 @@ class Page:
         w = ctypes.c_float()
         for font_id, c, size in requests:
             font = self._fonts[font_id] if isinstance(font_id, int) and 0 <= font_id < len(self._fonts) else None
-            ok = font and len(c) == 1 and R.FPDFFont_GetGlyphWidth(font, ord(c), ctypes.c_float(size), w)
+            # PDFium looks the character up as a wchar_t, 16 bits on Windows: a character past
+            # U+FFFF would be measured as another one (U+1D400 as U+D400), so it has no width here
+            ok = font and len(c) == 1 and ord(c) <= 0xFFFF and \
+                R.FPDFFont_GetGlyphWidth(font, ord(c), ctypes.c_float(size), w)
             out.append(w.value if ok else None)
         return out
 

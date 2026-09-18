@@ -6,8 +6,9 @@ from outside the library:
 
 - `set_backend(backend)` / `with use_backend(backend):` - any object with `open(source)`;
 - `$B2S_PDF_BACKEND`, read on first use: `pdfium` (the default, in this process), `sandbox`
-  (PDFium in a worker process, `sandbox.py`; `sandbox:<spec>` runs another backend there), or
-  `package.module:attribute` naming a backend object or a factory that returns one.
+  (PDFium in a worker process, `sandbox.py`; `sandbox:<spec>` runs another backend there), `pure`
+  (pure Python, `pure/`: no rendering, docs/pdf-from-scratch.md), or `package.module:attribute`
+  naming a backend object or a factory that returns one.
 """
 
 from __future__ import annotations
@@ -19,7 +20,7 @@ from pathlib import Path
 
 from .api import (COLOR_SPACES, JPEG_MAGIC, LIGATURES, NO_OBJECT, OBJ_FORM, OBJ_IMAGE, OBJ_PATH,  # noqa: F401
                   OBJ_SHADING, OBJ_TEXT, PNG_MAGIC, Box, Char, Drawing, EmbeddedImage, ImageInfo, Link,
-                  PageObject, PdfBackend, PdfDocument, PdfError, PdfPage, char_box)
+                  PageObject, PdfBackend, PdfDocument, PdfError, PdfPage, char_box, renders)
 
 Page = PdfPage  # for annotations
 
@@ -33,6 +34,9 @@ def resolve(spec: str | None) -> PdfBackend:
     if spec == "pdfium":
         from .pdfium_backend import PdfiumBackend
         return PdfiumBackend()
+    if spec == "pure":
+        from .pure.backend import PureBackend
+        return PureBackend()
     if spec == "sandbox" or spec.startswith("sandbox:"):
         from .sandbox import SandboxBackend
         return SandboxBackend(inner=spec.partition(":")[2] or "pdfium")
