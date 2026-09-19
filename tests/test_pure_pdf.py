@@ -11,6 +11,7 @@ import json
 import re
 from pathlib import Path
 
+import numpy as np
 import pytest
 
 from beamer2slides import pdf
@@ -71,7 +72,10 @@ def test_the_pure_reader_answers_what_pdfium_answers(path):
                     x, y = a.embedded_image(po.id), b.embedded_image(po.id)
                     close({k: getattr(x, k) for k in IMAGE_FIELDS}, {k: getattr(y, k) for k in IMAGE_FIELDS},
                           f"{where} image {po.id}")
-                    assert x.pixels is None and x.rendered is None, "the pure reader decodes no pixels"
+                    for k in ("pixels", "rendered"):
+                        p, q = getattr(x, k), getattr(y, k)
+                        assert (p is None) == (q is None) and (p is None or np.array_equal(p, q)), \
+                            f"{where} image {po.id} {k}"
     finally:
         ours.close()
         theirs.close()

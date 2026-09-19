@@ -353,8 +353,8 @@ class Page:
         return out
 
     def embedded_image(self, obj: int) -> EmbeddedImage | None:
-        """The stream and what its dictionary says; no pixels (this backend does not decode
-        images), so `render.image_file` falls back to a page crop - which it cannot render either."""
+        """The stream, what its dictionary says, and PDFium's two bitmaps (GetBitmap, GetRenderedBitmap)
+        where render_image ports what they need; else None, and `transparent` from the dictionaries."""
         o = self._obj(obj)
         po = self._objects[obj]
         if po.type != OBJ_IMAGE:
@@ -401,14 +401,83 @@ class Page:
             decoded = b""
         blended = o.has_transparency
         clipped = any(abs(box[k] - full[k]) > 0.01 for k in range(4))
-        # PDFium's backend reads this from the rasterised object's alpha, which a mask, a
-        # constant alpha, the corners of a turned image and a cutting clip all make < 255
-        see_through = (mask or r(d.get("SMask")) is not None or r(d.get("Mask")) is not None or blended
-                       or turned or clipped)
+        try:
+            pixels = self._image_pixels(o)
+        except PdfError:
+            pixels = None
+        # PDFium's backend reads this from the rasterised object's alpha (FPDFImageObj_GetRenderedBitmap)
+        try:
+            drawn = self._rendered_image(o)
+            see_through = drawn is None or bool((drawn[..., 3] < 255).any())
+        except PdfError:  # not drawable here yet: what makes that alpha < 255, as far as the dictionaries say
+            drawn = None
+            see_through = (mask or r(d.get("SMask")) is not None or r(d.get("Mask")) is not None or blended
+                           or turned or clipped)
         return EmbeddedImage(
             px=px, box=box, matrix=po.matrix, filters=filters, colorspace=family, bpp=bpp, dpi=dpi,
             raw=raw, decoded_size=len(decoded), clipped=clipped,
-            upright=upright, blended=blended, transparent=see_through, pixels=None, rendered=None)
+            upright=upright, blended=blended, transparent=see_through, pixels=pixels, rendered=drawn)
+
+    def _image_pixels(self, o) -> np.ndarray | None:
+        """FPDFImageObj_GetBitmap: CPDF_Image::LoadDIBBase (CPDF_DIB::Load with no resources, so a
+        named colour space doesn't load, and no mask) at the image's native size, a 1 bpp or palette
+        format converted to one without a palette. As pdfium_backend gives it: 8bppRgb as gray
+        repeated to RGB, kBgr as RGB, kBgra as RGBA. PdfError when the decoder is not ported."""
+        from . import decode_image as DI
+        try:
+            dib = DI.load(self.doc.pdf, o.stream, None, (0, 0), with_mask=False)
+        except DI.Unsupported as e:
+            raise PdfError(f"the pure reader cannot decode {e} yet")
+        if dib is None:
+            return None
+        if dib.fmt in ("mask1", "rgb1") and not (dib.fmt == "rgb1" and dib.palette):
+            gray = dib.rows * np.uint8(255)  # ConvertTo(k8bppRgb): set bits white
+        elif dib.fmt == "rgb8" and not dib.palette:
+            gray = dib.rows
+        elif dib.fmt in ("rgb1", "rgb8"):
+            pal = np.array(dib.palette, np.uint32)[dib.rows]  # ConvertTo(kBgr)
+            return np.stack([(pal >> 16) & 255, (pal >> 8) & 255, pal & 255], axis=-1).astype(np.uint8)
+        elif dib.fmt == "bgr":
+            return dib.rows[..., ::-1].copy()
+        else:
+            return dib.rows[..., [2, 1, 0, 3]].copy()
+        return np.repeat(gray[..., None], 3, axis=2)
+
+    def _rendered_image(self, o) -> np.ndarray | None:
+        """FPDFImageObj_GetRenderedBitmap: the image object alone through CPDF_ImageRenderer onto a
+        clear BGRA bitmap of ceil(hypot) of its own matrix's columns, flipped and moved to its
+        lowest corner, under its clip matched onto that bitmap; its ExtGState soft mask and blend
+        mode are not applied (no ProcessTransparency), its constant alpha is. RGBA, or None where
+        PDFium gives no bitmap. PdfError when the image needs what render_image does not port."""
+        from . import raster as R
+        from .render import Device, Status
+        from .render_image import draw, refusal
+        from .render_transparency import Context
+        pdf = self.doc.pdf
+        ctx = Context(pdf, pdf.resolve(self.dict.get("Resources")), self.doc._font_cache, False)
+        ctx.images = {}  # no page cache
+        why = refusal(o, ctx)
+        if why is not None:
+            raise PdfError(f"the pure reader cannot render {why} yet")
+        a, b, c, d, e, f = (float32(v) for v in o.matrix)
+        w = math.ceil(float32(math.hypot(a, c)))
+        h = math.ceil(float32(math.hypot(b, d)))
+        if w <= 0 or h <= 0:
+            return None
+        min_x, min_y = float32(e + min(a, c)), float32(f + min(b, d))
+        flip = (1.0, 0.0, 0.0, -1.0, 0.0, float(h))
+        m = (1.0, 0.0, 0.0, -1.0, float32(-min_x), float32(h + min_y))
+        dev = Device(w, h, True)
+        status = Status(dev, ctx=ctx)
+        if o.clip_paths or o.clip_texts:
+            l, bt, rt, t = R.transform_rect(o.matrix, (0.0, 0.0, 1.0, 1.0))
+            # CFX_Matrix::MatchRect((0, 0, w, h), the unit square's box), then the flip
+            ma = 1.0 if abs(float32(l - rt)) < 0.001 else float32(float32(-w) / float32(l - rt))
+            md = 1.0 if abs(float32(bt - t)) < 0.001 else float32(float32(-h) / float32(bt - t))
+            match = (ma, 0.0, 0.0, md, float32(-float32(l * ma)), float32(-float32(bt * md)))
+            status.process_clip(o.clip_paths, R.concat(match, flip), o.clip_texts)
+        draw(status, o, m)
+        return dev.bgra[..., [2, 1, 0, 3]].copy()
 
     # ------------------------------------------------------------------ links
 
