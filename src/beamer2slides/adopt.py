@@ -173,8 +173,12 @@ def font_family(name: str, want: str, near: str = "") -> dict[str, Path]:
             continue
         if flat and (low.startswith(flat) or flat.startswith(low)) and abs(len(low) - len(flat)) < asked[0]:
             asked = (abs(len(low) - len(flat)), stem, files)
-        shared = len(os.path.commonprefix([low, kin])) if kin else 0
-        if shared > fallback[0]:
+        # The nearest name of the same kind: to the family already found for the rest of the deck, or
+        # else to the one asked for ("Google Sans Text" -> GoogleSansFlex, not helvet). Four letters
+        # at least, so "Arial" does not take whatever else starts with "A".
+        shared = max(len(os.path.commonprefix([low, kin])) if kin else 0,
+                     len(os.path.commonprefix([low, flat])) if flat else 0)
+        if shared >= 4 and shared > fallback[0]:
             fallback = (shared, stem, files)
     _, stem, files = asked if asked[2] else fallback
     return {"stem": stem, **files} if files else {}
@@ -202,6 +206,16 @@ def font_preamble(target: dict, tree: Path | None) -> list[str]:
     for fam, command in (("sans", "setsansfont"), ("serif", "setmainfont"), ("mono", "setmonofont")):
         files = font_family(wanted[fam], fam, found) if fam in wanted else {}
         if not files:
+            # Always fontspec, so the source is lualatex and Unicode throughout (a deck's text is
+            # any script; pdflatex stops at the first letter it has no definition for): what the
+            # machine has no family for is set in TeX Gyre, the metric clones of Helvetica, Times
+            # and Courier that every TeX distribution carries. Sans is the document's family, so it
+            # is always declared; the others only when the deck has words in them.
+            if fam != "sans" and fam not in wanted:
+                continue
+            gyre = GYRE[fam]
+            lines.append(f"\\{command}{{{gyre}}}[Extension=.otf,UprightFont=*-regular,BoldFont=*-bold,"
+                         "ItalicFont=*-italic,BoldItalicFont=*-bolditalic]")
             continue
         stem = files.pop("stem")
         found = found or stem                           # what the rest of the deck is set in
@@ -220,7 +234,10 @@ def font_preamble(target: dict, tree: Path | None) -> list[str]:
             "Path=" + next(iter(files.values())).parent.as_posix().rstrip("/") + "/,"
         ext = next(iter(files.values())).suffix
         lines.append(f"\\{command}{{{stem}}}[{where}Extension={ext},{','.join(opts)}]")
-    return ["\\usepackage{fontspec}"] + lines if lines else []
+    return ["\\usepackage{fontspec}"] + lines
+
+
+GYRE = {"sans": "texgyreheros", "serif": "texgyretermes", "mono": "texgyrecursor"}
 
 
 def picture_of(el: dict, tree: Path | None):
@@ -228,16 +245,31 @@ def picture_of(el: dict, tree: Path | None):
     tree stands on its own (the download sits in the work folder, which is scratch). None when the
     deck would not give the file: the loop then reports `element_missing`, which says so."""
     from .inverse import Picture, natural_size, picture_slug
+    from .inverse import LATEX_PICTURES
     path = Path(el["file"]) if el.get("file") else None
     if path is None or not path.exists():
         return None
+    suffix = path.suffix.lower()
+    if suffix not in LATEX_PICTURES:
+        # GIF, WebP, BMP, TIFF: what graphicx cannot read becomes a PNG of its first frame, as
+        # `pull` does; SVG and the Windows metafiles Pillow cannot draw are left out and said so
+        if suffix in (".svg", ".emf", ".wmf", ".img"):
+            print(f"  {path.name}: {suffix[1:].upper()} pictures can't be included by LaTeX; left out")
+            return None
+        suffix = ".png"
     if tree is None:
         return Picture(path.name, path, natural_size(path))
-    rel = f"figures/{picture_slug(el.get('alt'))}-{(el.get('sha1') or path.stem)[:8]}{path.suffix}"
+    rel = f"figures/{picture_slug(el.get('alt'))}-{(el.get('sha1') or path.stem)[:8]}{suffix}"
     dest = tree / rel
     if not dest.exists():
         dest.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(path, dest)
+        if suffix == path.suffix.lower():
+            shutil.copyfile(path, dest)
+        else:
+            from PIL import Image
+            with Image.open(path) as img:
+                img.seek(0)
+                img.convert("RGBA").save(dest, "PNG")
     return Picture(rel, dest, natural_size(dest))
 
 
@@ -353,7 +385,7 @@ def preamble(target: dict, ctx: Context, flow: bool, tree: Path | None = None) -
              "\\setbeamertemplate{footline}{}",
              "\\setbeamertemplate{headline}{}",
              "\\setbeamercolor{background canvas}{bg=}",
-             *(fonts or ["\\usepackage[T1]{fontenc}", "\\usepackage{helvet}"]),
+             *fonts,
              "\\renewcommand{\\familydefault}{\\sfdefault}"]
     if not flow:
         lines.append("\\setbeamertemplate{frametitle}{}")
@@ -381,7 +413,10 @@ def bootstrap(target: dict, tex: Path, flow: bool = False) -> str:
     style_for = level_style(target)
     tex.parent.mkdir(parents=True, exist_ok=True)
     deck_bg = background_colour(target)
-    frames = [slide_latex(s, style_for, ctx, flow, tex.parent, deck_bg) for s in target["slides"]]
+    # "% slide N" says which deck slide a frame is, for a person reading the source and for tools
+    # that compile frames one at a time (devtools.adopt_bench finds the frames that break a build)
+    frames = [f"% slide {n}\n" + slide_latex(s, style_for, ctx, flow, tex.parent, deck_bg)
+              for n, s in enumerate(target["slides"], 1)]
     head = preamble(target, ctx, flow, tex.parent)
     extra = sorted(ctx.packages) + [f"\\definecolor{{{n}}}{{HTML}}{{{v}}}" for n, v in sorted(ctx.colours.items())]
     text = head + "\n" + "\n".join(extra) + "\n\n\\begin{document}\n\n" + "\n".join(frames) + "\n\\end{document}\n"

@@ -1,0 +1,423 @@
+[
+ {
+  "name": "devfest2020",
+  "id": "1DK13UrYa9MT9ckdBbUO39um-ecINY7j0iwQpT58nYe0",
+  "title": "DevFest 2020 - Speaker Presentation Template",
+  "features": [
+   "16:9",
+   "template",
+   "pictureBg",
+   "fonts"
+  ]
+ },
+ {
+  "name": "gdg24",
+  "id": "1RdShFEt1ITY2idXtZx9trfNd_6HJO3XIKuQoz5MtbuA",
+  "title": "GDG24 - PRO - Speaker Presentation Template",
+  "features": [
+   "16:9",
+   "template",
+   "fonts"
+  ]
+ },
+ {
+  "name": "cs161-tls",
+  "id": "12czWNMOEwebhY1f0WvIu6Nz_rdYhFFWzqEKVwNslUWo",
+  "title": "[CS161 SP25] Lecture 20: TLS",
+  "source": "https://docs.google.com/presentation/d/12czWNMOEwebhY1f0WvIu6Nz_rdYhFFWzqEKVwNslUWo/edit",
+  "slides": 48,
+  "features": [
+   "16:9",
+   "tables4",
+   "groups11",
+   "lines124",
+   "merged8",
+   "connectors15",
+   "arrows94",
+   "rotated78",
+   "cropped8"
+  ]
+ },
+ {
+  "name": "cs161-net",
+  "id": "1AOkNzPuBTAcAEjoYv6vZvA3CDCxZXEp6A2XBZOEBfbI",
+  "title": "[CS161 SP25] Lecture 17: Intro to Networking",
+  "source": "https://docs.google.com/presentation/d/1AOkNzPuBTAcAEjoYv6vZvA3CDCxZXEp6A2XBZOEBfbI/edit",
+  "slides": 61,
+  "features": [
+   "16:9",
+   "tables2",
+   "groups12",
+   "lines122",
+   "merged19",
+   "connectors87",
+   "arrows23",
+   "cropped45",
+   "image-heavy"
+  ]
+ },
+ {
+  "name": "journey-maps",
+  "id": "1D-FKF_ewlT83ro7RzTIeDNKWw6O6mIdChvNKbrz_Xrw",
+  "title": "Application Readiness & Customer Journey",
+  "source": "https://docs.google.com/presentation/d/1D-FKF_ewlT83ro7RzTIeDNKWw6O6mIdChvNKbrz_Xrw/edit",
+  "slides": 23,
+  "features": [
+   "16:9",
+   "tables3",
+   "lines141",
+   "connectors82",
+   "arrows22",
+   "rotated32"
+  ]
+ },
+ {
+  "name": "jeb-arch",
+  "id": "1kU_ko8e8WlUH4dkXZguJ0Ke2ZfwUZV4JV01D7cChgIc",
+  "title": "JEB High-Level Architecture Diagrams",
+  "source": "https://docs.google.com/presentation/d/1kU_ko8e8WlUH4dkXZguJ0Ke2ZfwUZV4JV01D7cChgIc/pub",
+  "slides": 7,
+  "features": [
+   "16:9",
+   "groups1",
+   "lines55",
+   "connectors38",
+   "arrows38",
+   "rotated3"
+  ]
+ },
+ {
+  "name": "solidity-survey",
+  "id": "16eAwMso-t8fJma-4sxUglD5Xkqrj7uO_aoIbFVwfojs",
+  "title": "[PUBLIC] Solidity Developer Survey Results 2024 Graphs",
+  "source": "https://docs.google.com/presentation/d/16eAwMso-t8fJma-4sxUglD5Xkqrj7uO_aoIbFVwfojs/edit",
+  "slides": 83,
+  "features": [
+   "16:9",
+   "tables1",
+   "sheetsCharts74",
+   "lines1",
+   "connectors1",
+   "arrows1",
+   "rotated1",
+   "cropped1"
+  ]
+ },
+ {
+  "name": "creandum-board",
+  "id": "1o39oJ8L-zebygrNjAbA6vkFmpVhyVnK2ArKidrGidT0",
+  "title": "Creandum Board Deck Template",
+  "source": "https://docs.google.com/presentation/d/1o39oJ8L-zebygrNjAbA6vkFmpVhyVnK2ArKidrGidT0/htmlpresent",
+  "slides": 36,
+  "features": [
+   "16:10",
+   "tables3",
+   "sheetsCharts3",
+   "lines16",
+   "merged7",
+   "arrows1",
+   "cropped1"
+  ]
+ },
+ {
+  "name": "drawing-workshop",
+  "id": "1zr4VCPgHlmcFWc21sLwYo1yySbPkIHZiDEeuKclqruk",
+  "title": "BestPrep Do More with Google Drawing Presentation",
+  "source": "https://docs.google.com/presentation/d/1zr4VCPgHlmcFWc21sLwYo1yySbPkIHZiDEeuKclqruk/htmlpresent",
+  "slides": 63,
+  "features": [
+   "4:3",
+   "video7",
+   "wordArt98",
+   "groups9",
+   "lines23",
+   "connectors2",
+   "arrows10",
+   "rotated32",
+   "cropped17",
+   "image-heavy",
+   "pictureBg",
+   "fonts12"
+  ]
+ },
+ {
+  "name": "comic-strips",
+  "id": "1TE74mFINjQYgefHR5OVdDmAM-K-8M4eFCXaDpud-bPA",
+  "title": "Creating Comic Strips with Google Presentations",
+  "source": "https://docs.google.com/presentation/d/1TE74mFINjQYgefHR5OVdDmAM-K-8M4eFCXaDpud-bPA/htmlpresent",
+  "slides": 17,
+  "features": [
+   "4:3",
+   "wordArt2",
+   "rotated3",
+   "pictureBg"
+  ]
+ },
+ {
+  "name": "intro-lecture",
+  "id": "1jxlUcCL5Gs5P7g78COl3lV4wSFytewj3sygSKfAPs68",
+  "title": "01 - Introduction",
+  "source": "https://docs.google.com/presentation/d/1jxlUcCL5Gs5P7g78COl3lV4wSFytewj3sygSKfAPs68/htmlpresent",
+  "slides": 34,
+  "features": [
+   "4:3",
+   "video1",
+   "groups4",
+   "lines42",
+   "connectors26",
+   "arrows10",
+   "cropped4",
+   "image-heavy",
+   "fonts4"
+  ]
+ },
+ {
+  "name": "drawings-basics",
+  "id": "1Li-g4XdOtzDruRgPqDThXaFy1yVPhSSlGK1W2GK_5wU",
+  "title": "Getting Funky with Google Drawings Basics",
+  "source": "https://docs.google.com/presentation/d/1Li-g4XdOtzDruRgPqDThXaFy1yVPhSSlGK1W2GK_5wU/htmlpresent",
+  "slides": 26,
+  "features": [
+   "16:9",
+   "video1",
+   "lines50",
+   "connectors24",
+   "arrows46",
+   "cropped12",
+   "image-heavy"
+  ]
+ },
+ {
+  "name": "supercharge-slides",
+  "id": "1wXyfoUA-N1HJ0Bdt5JuJn2rOoCp7khhJTuKFcbq_oCs",
+  "title": "Supercharge Google Slides",
+  "source": "https://docs.google.com/presentation/d/1wXyfoUA-N1HJ0Bdt5JuJn2rOoCp7khhJTuKFcbq_oCs/htmlpresent",
+  "slides": 34,
+  "features": [
+   "16:9",
+   "video3",
+   "groups32",
+   "lines14",
+   "connectors2",
+   "arrows11",
+   "cropped11",
+   "image-heavy"
+  ]
+ },
+ {
+  "name": "arabic-training",
+  "id": "1W8ECgcyZmMr7Ejn8N2QvcuQVMnM5el0qr0ZlzUI4--0",
+  "title": "الفصول الافتراضية",
+  "source": "https://docs.google.com/presentation/d/1W8ECgcyZmMr7Ejn8N2QvcuQVMnM5el0qr0ZlzUI4--0/htmlpresent",
+  "slides": 23,
+  "features": [
+   "4:3",
+   "tables1",
+   "lines2",
+   "arrows2",
+   "rotated2",
+   "pictureBg",
+   "RTL",
+   "fonts5"
+  ]
+ },
+ {
+  "name": "hebrew-lesson",
+  "id": "1XRAH_4wsCcRVK_cdyPECUZ-Q7CMzP0ASx6eYtGAJIv0",
+  "title": "מצגת מלווה שיעור-המסר בסיפור.pptx",
+  "source": "https://docs.google.com/presentation/d/1XRAH_4wsCcRVK_cdyPECUZ-Q7CMzP0ASx6eYtGAJIv0/htmlpresent",
+  "slides": 24,
+  "features": [
+   "4:3",
+   "tables13",
+   "RTL"
+  ]
+ },
+ {
+  "name": "jruby-ja",
+  "id": "1TjUdKO32qBNQxHx6ue5hiaO1MNtT-mYfb4E5nKogeDI",
+  "title": "JRubyにおけるInvokeDynamicの利用パターンと性能評価",
+  "source": "https://docs.google.com/presentation/d/1TjUdKO32qBNQxHx6ue5hiaO1MNtT-mYfb4E5nKogeDI/htmlpresent",
+  "slides": 20,
+  "features": [
+   "4:3",
+   "CJK"
+  ]
+ },
+ {
+  "name": "apps-edu-zh",
+  "id": "1q6gDR9FkSG9R6j3kcq75MaNVcnWlJQS-CATczq1sk-w",
+  "title": "Google Apps for Education Basic",
+  "source": "https://docs.google.com/presentation/d/1q6gDR9FkSG9R6j3kcq75MaNVcnWlJQS-CATczq1sk-w/htmlpresent",
+  "slides": 33,
+  "features": [
+   "16:9",
+   "cropped19",
+   "CJK"
+  ]
+ },
+ {
+  "name": "sc-dark-modern",
+  "id": "1h6I6_5LxBMErCpYYxY9VFqXgPpATPkIyoOt-00nBQPA",
+  "title": "Dark Modern Traumatic Brain Injury Slides",
+  "source": "https://www.slidescarnival.com/tag/dark",
+  "slides": 19,
+  "features": [
+   "16:9",
+   "tables3",
+   "groups27",
+   "lines54",
+   "rotated9",
+   "cropped7"
+  ]
+ },
+ {
+  "name": "sc-dark-minimal",
+  "id": "1du9EB7LPAQBkV8qb-HKT4JepUpbkQ5YX-ptaFipDVRw",
+  "title": "Dark Minimalist Presentation",
+  "source": "https://www.slidescarnival.com/tag/dark",
+  "slides": 21,
+  "features": [
+   "16:9",
+   "groups16",
+   "lines4"
+  ]
+ },
+ {
+  "name": "sc-aesthetic-school",
+  "id": "1xAQCPh7NFR0lSo7TMentTJO3vOiGdc9DrKB7HjkwV1c",
+  "title": "Pink and Green Aesthetic School Presentation Design",
+  "source": "https://www.slidescarnival.com/category/free-templates/google-slides-templates",
+  "slides": 31,
+  "features": [
+   "16:9",
+   "groups31",
+   "lines15",
+   "rotated21",
+   "cropped90",
+   "image-heavy"
+  ]
+ },
+ {
+  "name": "sc-memphis",
+  "id": "11BWPT1Vhuj5-psj67X2I4gs3p06KkzlxKHzkkR1YBLA",
+  "title": "Memphis Playful Education Having Fun While Learning Education Presentation",
+  "source": "https://www.slidescarnival.com/category/free-templates/google-slides-templates",
+  "slides": 20,
+  "features": [
+   "16:9",
+   "tables1",
+   "groups2503",
+   "rotated385",
+   "cropped1"
+  ]
+ },
+ {
+  "name": "sc-functions",
+  "id": "1tscW_drpuC4bpYExKe7n5YjDPxtv2ZGaYXKIg5-3g6o",
+  "title": "Functions Lesson for Middle School",
+  "source": "https://www.slidescarnival.com/category/free-templates/google-slides-templates",
+  "slides": 16,
+  "features": [
+   "16:9",
+   "tables4",
+   "groups73",
+   "lines85",
+   "arrows14",
+   "rotated54"
+  ]
+ },
+ {
+  "name": "sc-river-a4",
+  "id": "1rgQAweCZDefiF52B4_0G91Nb3qa8juok1fmi5H5GcZk",
+  "title": "River Systems Infographic",
+  "source": "https://www.slidescarnival.com/template/river-systems-infographic/341877",
+  "slides": 3,
+  "features": [
+   "custom(595x842)",
+   "groups17"
+  ]
+ },
+ {
+  "name": "poster-48x36",
+  "id": "1AVe1YJ6M6P6HaZutadfTMey-9KW-KVOTcoz2j1-aep0",
+  "title": "Poster Template-View",
+  "source": "https://docs.google.com/presentation/d/1AVe1YJ6M6P6HaZutadfTMey-9KW-KVOTcoz2j1-aep0/edit",
+  "slides": 1,
+  "features": [
+   "4:3",
+   "groups8",
+   "lines11",
+   "rotated2"
+  ]
+ },
+ {
+  "name": "instagram",
+  "id": "1yA9ICWoN5Pdod4y7__DxkiOVIhhlkD_aXorhWrnIqE4",
+  "title": "Instagram Template",
+  "source": "https://docs.google.com/presentation/d/1yA9ICWoN5Pdod4y7__DxkiOVIhhlkD_aXorhWrnIqE4/edit",
+  "slides": 2,
+  "features": [
+   "custom(481.5x691.5)",
+   "cropped1"
+  ]
+ },
+ {
+  "name": "ds-lecture",
+  "id": "1giEotyhugvqTx-Tylyoj0X0TUPYJz12XLVtsct7OiXE",
+  "title": "Data Structures: Lecture 1",
+  "source": "https://docs.google.com/presentation/d/1giEotyhugvqTx-Tylyoj0X0TUPYJz12XLVtsct7OiXE/htmlpresent",
+  "slides": 16,
+  "features": [
+   "4:3"
+  ]
+ },
+ {
+  "name": "ap-bio-stats",
+  "id": "1vozsg0WKhY-3jS5oBN1xI7UKP2QK-2EFadLIFsUvj5M",
+  "title": "AP Biology Statistics - shared",
+  "source": "https://docs.google.com/presentation/d/1vozsg0WKhY-3jS5oBN1xI7UKP2QK-2EFadLIFsUvj5M/htmlpresent",
+  "slides": 65,
+  "features": [
+   "16:9",
+   "groups16",
+   "lines90",
+   "connectors8",
+   "arrows36",
+   "rotated1",
+   "cropped10",
+   "fonts7"
+  ]
+ },
+ {
+  "name": "firebase-jam",
+  "id": "1FzjTvNiBdXOY-p8jrzq_DAmmbMss6OCWdbvju2u6PTA",
+  "title": "Firebase Study Jam",
+  "source": "https://docs.google.com/presentation/d/1FzjTvNiBdXOY-p8jrzq_DAmmbMss6OCWdbvju2u6PTA/edit",
+  "slides": 35,
+  "features": [
+   "16:9",
+   "groups50",
+   "lines7",
+   "connectors2",
+   "arrows1",
+   "rotated3",
+   "cropped11",
+   "image-heavy",
+   "pictureBg",
+   "fonts4"
+  ]
+ },
+ {
+  "name": "comps-analysis",
+  "id": "1yW_BtSW7kox_4tMhYzc-U8GAP5QhufaDhNZZcb6Nj50",
+  "title": "Comparable Companies Analysis",
+  "source": "https://docs.google.com/presentation/d/1yW_BtSW7kox_4tMhYzc-U8GAP5QhufaDhNZZcb6Nj50/htmlpresent",
+  "slides": 13,
+  "features": [
+   "4:3",
+   "tables7",
+   "pictureBg"
+  ]
+ }
+]

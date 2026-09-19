@@ -296,9 +296,13 @@ def font_folder(tmp_path: Path, *names: str) -> Path:
     return folder
 
 
-def test_without_the_decks_typeface_the_source_says_helvet(tmp_path):
+def test_without_the_decks_typeface_the_source_says_tex_gyre(tmp_path, monkeypatch):
+    """Always fontspec, so the source compiles with lualatex and any script: pdflatex stopped a
+    deck at its first IPA letter (U+0263). What the machine lacks is set in TeX Gyre Heros."""
+    monkeypatch.setenv("B2S_FONTS", str(font_folder(tmp_path)))
     text = source_for(tmp_path)
-    assert "\\usepackage{helvet}" in text and "fontspec" not in text
+    assert "\\usepackage{fontspec}" in text and "helvet" not in text
+    assert "\\setsansfont{texgyreheros}[Extension=.otf," in text
 
 
 def test_the_deck_is_set_in_its_own_typeface_when_the_machine_has_it(tmp_path, monkeypatch):

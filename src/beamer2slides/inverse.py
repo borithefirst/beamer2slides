@@ -139,7 +139,10 @@ def runs_latex(runs: list[dict], base: dict, ctx: "Context") -> str:
             if r.get("size") and base.get("size") and abs(r["size"] - base["size"]) > 0.06 * base["size"]:
                 core = f"{{{size_switch(r['size'], ctx.pt_option)} {core}}}"
             if r.get("link") and not str(r["link"]).startswith("#"):
-                core = f"\\href{{{r['link']}}}{{{core}}}"
+                # hyperref reads `#` and `%` itself only outside another command's argument: inside a
+                # frame (whose body is one) a bare `#` is a parameter number and stops the build
+                url = str(r["link"]).replace("\\", "/").replace("#", "\\#").replace("%", "\\%")
+                core = f"\\href{{{url}}}{{{core}}}"
         out.append(" " * lead + core + " " * trail)
     return "".join(out)
 
@@ -2076,8 +2079,12 @@ def paragraphs_latex(paragraphs: list[dict], style_for, ctx: Context, ind: str) 
             runs = (size_switch(size, ctx.pt_option) if size else "") + "\\strut"
         elif not runs:
             continue
+        if "".join(r["text"] for r in p["runs"]).startswith("\x0b"):
+            # a soft break (Shift+Enter) opening a paragraph: `\\` there has no line to end yet
+            runs = "\\leavevmode" + runs
         if p.get("bullet"):
-            level = p.get("level", 0)
+            # beamer nests itemize/enumerate three deep; Slides allows nine
+            level = min(p.get("level", 0), 2)
             env = "enumerate" if p["bullet"].get("kind") == "number" else "itemize"
             while len(stack) > level + 1:
                 lines.append(ind + "  " * (len(stack) - 1) + f"\\end{{{stack.pop()}}}")
