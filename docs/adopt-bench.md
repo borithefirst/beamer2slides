@@ -321,3 +321,42 @@ The two studies above together: boxes 0.9704 -> 0.9719, page 0.9703, pixels 0.98
 arabic-training (a box whose words cannot start outside it), which took the deck's median side from
 5.5 to 2.3 and gave it PowerPoint's 3.6 pt sides (0.941 -> 0.917). `pptx_insets` now drops side
 readings below 0; nothing else moved.
+## The single text boxes that lose most (`mv-a` -> `sb-final`)
+
+The worst text boxes outside tables (`mv-a` -> `sb-final`, 912 slides): boxes 0.9674 -> 0.9684, page
+0.9663 -> 0.9669, mean per deck 0.9488 -> 0.9494. Three mechanisms:
+- A middle- or bottom-aligned box stacks its last paragraph's spaceBelow under its last line
+  (`adopt.trailing_space`). intro-lecture's title "add(add(6, ...))" / "???" (10 pt below each) stood
+  5 pt low without it: intro-lecture 0.9736 -> 0.9837 (slide 30 +0.32), jeb-arch 0.9496 -> 0.9509.
+  gdg24's turned ELLIPSE stickers (10 pt below too) do not show it: their words stood within 0.8 pt of
+  the thumbnail's without it and 1.2-1.9 pt high with it, so ELLIPSE is left out.
+- `deck_thumbs.thumbnail_insets` reads a box whose words overflow it where they stand
+  (`deck_thumbs.text_rows`: 1.19 em x line spacing per paragraph, spilling as the alignment lets them).
+  gdg24's code listings (15 lines of 9.45 pt in a 63 pt middle-aligned box) show only indented lines
+  inside the box, so the ink started 23 pt in and the box kept its insets.
+- The measure is scaled as the words are (`adopt.measure`). IR sizes are page pt to 0.01, so gdg24's
+  15 pt code is set at 9.45 instead of 9.44875. Its 69-character line is 621.0 slide pt in a 621.0 pt
+  box, one line in Slides and two in TeX. With the box's insets both, gdg24 79 went +0.17 and 78
+  +0.09 (deck 0.9845 -> 0.9871), and cs161-tls 0.9892 -> 0.9924. A flat 0.06 pt slack instead cost
+  sc-dark-minimal 7 0.27: "About Us." (27.714 pt, set at 27.71) is 0.04 pt wider than its box in
+  Slides and fitted in TeX.
+
+Down: comic-strips 0.9805 -> 0.9790 (slides 11 -0.018, 8 -0.008). "However, I recommend using images in
+PNG" in Arial is 598.58 slide pt kerned (600.23 unkerned) against 598.6 of room. Slides wraps it; the
+measure now 0.05 pt wider fits it. That is 0.02 slide pt, below what the IR's 0.01 page pt edges can
+tell apart.
+
+Tried and dropped:
+- sc-dark-minimal 11's "Our Projects." (the worst box, 0.67): Slides wraps it and TeX does not. Its
+  first line's ink matches Inter at opsz 14 (Slides' Inter 4), and Inter 3.19 did not change the
+  break. Newline-as-space and the other break rules tested over the corpus's measured lines did not
+  wrap it either. Breaking on unkerned widths is the only rule that wraps it (and comic-strips 11), but
+  the corpus as a whole does not support it: other lines that Slides keeps would wrap.
+- Bodoni Moda as comps-analysis' stand-in is no closer than Libre Bodoni at 0.94. The deck's face has
+  a smaller cap height and is lighter, so the headings lose on glyph shape, not width.
+
+Left:
+- comps-analysis 10's sub-bullet wraps because its italic is condensed with the upright's measured
+  width; italic width is not measured on its own.
+- creandum-board 23's justified line is ~1 pt overfull in TeX where Slides wraps.
+- The Google Sans Mono vs Google Sans Code glyph offsets on gdg24 77-79.
