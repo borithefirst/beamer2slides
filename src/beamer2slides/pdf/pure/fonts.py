@@ -445,6 +445,18 @@ class CMap:
 # ---------------------------------------------------------------------- font programs
 
 
+def _ft_bbox(bbox):
+    """A Type 1 / CFF FontBBox as FreeType's face bbox: 16.16 fixed, mins floored (>> 16) and maxes
+    ceiled ((v + 0xFFFF) >> 16). FreeType also makes these faces' ascender yMax, descender yMin."""
+    if not bbox or len(bbox) < 4:
+        return None
+    try:
+        x0, y0, x1, y1 = (int(round(float(v) * 65536)) for v in bbox[:4])
+    except (TypeError, ValueError):
+        return None
+    return x0 >> 16, y0 >> 16, (x1 + 0xFFFF) >> 16, (y1 + 0xFFFF) >> 16
+
+
 class Program:
     """A font program read by fontTools: glyph names or ids -> unscaled control boxes."""
 
@@ -541,9 +553,9 @@ def load_type1(data: bytes) -> Program | None:
         enc = [_predefined_name(STANDARD, c) or NOTDEF for c in range(256)]
     elif isinstance(enc, list):
         enc = [str(n) if n else NOTDEF for n in enc] + [NOTDEF] * (256 - len(enc))
-    bbox = d.get("FontBBox")
+    bbox = _ft_bbox(d.get("FontBBox"))
     return Program("type1", charstrings, names, _upem_from_matrix(d.get("FontMatrix", [0.001, 0, 0, 0.001])),
-                   encoding=enc, bbox=tuple(bbox) if bbox else None)
+                   encoding=enc, bbox=bbox, ascender=bbox[3] if bbox else 0, descender=bbox[1] if bbox else 0)
 
 
 def load_cff(data: bytes) -> Program | None:
@@ -564,9 +576,9 @@ def load_cff(data: bytes) -> Program | None:
         elif isinstance(e, list):
             enc = [n or NOTDEF for n in e] + [NOTDEF] * (256 - len(e))
     matrix = getattr(top, "FontMatrix", [0.001, 0, 0, 0.001, 0, 0])
-    bbox = getattr(top, "FontBBox", None)
+    bbox = _ft_bbox(getattr(top, "FontBBox", None))
     return Program("cff", charstrings, order, _upem_from_matrix(matrix), encoding=enc, cid_keyed=cid_keyed,
-                   bbox=tuple(bbox) if bbox else None)
+                   bbox=bbox, ascender=bbox[3] if bbox else 0, descender=bbox[1] if bbox else 0)
 
 
 def load_truetype(data: bytes) -> Program | None:
@@ -769,9 +781,10 @@ class Font:
             if p is not None and p.bbox:
                 u = p.upem
                 l, b, rt, t = p.bbox
-                # PDFium flips the face bbox on purpose (see its comment): bottom <- top
-                self.font_bbox = (normalize_metric(l, u), normalize_metric(t, u), normalize_metric(rt, u),
-                                  normalize_metric(b, u))
+                # PDFium's "flip" is FX_RECT's: GetBBox's `top` is yMin and `bottom` yMax (y down),
+                # so font_bbox_.bottom <- top is yMin again: the box comes out the right way up
+                self.font_bbox = (normalize_metric(l, u), normalize_metric(b, u), normalize_metric(rt, u),
+                                  normalize_metric(t, u))
                 self.ascent = normalize_metric(p.ascender, u)
                 self.descent = normalize_metric(p.descender, u)
             elif p is None:
@@ -810,8 +823,9 @@ class Font:
         return self.to_unicode.reverse_lookup(u) if self.to_unicode else 0
 
     def glyph_width(self, u: int, size: float) -> float:
-        """FPDFFont_GetGlyphWidth (a float)."""
-        return float32(self.char_width(self.code_from_unicode(u)) * size / 1000.0)
+        """FPDFFont_GetGlyphWidth: `width * font_size / 1000.f` in C floats, the size a float too,
+        rounded after the product and again after the division."""
+        return float32(float32(self.char_width(self.code_from_unicode(u)) * float32(size)) / 1000.0)
 
     @property
     def is_type3(self) -> bool:

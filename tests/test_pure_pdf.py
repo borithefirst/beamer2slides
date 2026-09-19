@@ -664,6 +664,28 @@ def test_fonts_and_filters_resolve_as_pdfium_resolves_them(name):
             close(getattr(a, call)(), getattr(b, call)(), f"{name} {call}")
 
 
+def _chars_and_bounds(page):
+    chars = [{k: v for k, v in dataclasses.asdict(c).items() if k != "font_id"} for c in page.chars()]
+    return chars, page.object_bounds()
+
+
+@built
+def test_chars_and_object_boxes_are_pdfiums_to_the_last_bit():
+    """Not float32 noise: the same bits. PDFium computes text positions, char boxes, loose boxes,
+    glyph widths and matrix products in C floats, rounding after every product and every sum
+    (`w * size / 1000` twice, a CFX_Matrix product once per term), so the port does too; one rounding
+    in double was one ulp apart on a rotated axis label and after a TJ kern. With a font descriptor
+    missing its /FontBBox, CheckFontMetrics takes the program's box and, for Type 1 and CFF, FreeType's
+    ascender and descender (the box's yMax and yMin) - bfuzz seed 452, 66 pt apart before."""
+    for path in DECKS[:3] + [OUT / "03_figures.pdf"]:
+        data = path.read_bytes()
+        variants = {path.name: data, path.name + " without FontBBox": data.replace(b"/FontBBox", b"/FontBBoX")}
+        for name, variant in variants.items():
+            ref, pure = pdf.resolve("pdfium").open(variant), pdf.resolve("pure").open(variant)
+            for i in range(len(ref)):
+                assert _chars_and_bounds(pure[i]) == _chars_and_bounds(ref[i]), f"{name} page {i}"
+
+
 def test_content_operands_are_read_as_pdfiums_stream_parser_reads_them():
     from beamer2slides.pdf.pure.syntax import Name, operations
 

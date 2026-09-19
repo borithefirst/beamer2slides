@@ -48,8 +48,12 @@ Each of these was a diff against PDFium until it was ported:
   text matrix and position, TJ adjustments, text-page matrices, origins and char boxes, loose
   bounds and glyph widths. With plain doubles, 672 values across the test decks were off in the last
   rounded digit, and one of them swapped two blocks' order in `18_blocks_resize`. The reader rounds
-  where PDFium *stores* a float (`syntax.float32`, `content.f32m`), not after every operation.
-  Two values in the test decks' raw.json are still 0.01 apart.
+  where PDFium *stores* a float (`syntax.float32`, `content.f32m`), and where it *computes* in
+  floats it rounds after every product and sum as C does: `width * size / 1000` is two roundings,
+  a CFX_Matrix product, inverse or transform one per term (`textpage.concat32`, `apply32`,
+  `inverse32`, `transform_rect32`, `content.text_positions`, `Font.glyph_width`). One rounding in
+  double was one ulp apart after a TJ kern and on a rotated axis label; now chars and object boxes
+  are the same bits on every test deck (`test_chars_and_object_boxes_are_pdfiums_to_the_last_bit`).
 - **A line-end hyphen is U+0002** in FPDFText_GetUnicode. Both backends turn it back into "-".
 - **Glyph names use FreeType's psnames table**: the full legacy AGL (`fi` → U+FB01) plus the Zapf
   Dingbats names, not AGLFN (which has no `fi`, so the ligature's width came back 0).
@@ -127,6 +131,10 @@ Each of these was a diff against PDFium until it was ported:
     doesn't carry: those glyph boxes stay apart, as do the Foxit MM substitutes PDFium uses for an
     embedded program that doesn't parse. Outside Windows PDFium's font mapper differs anyway.
   - `char_width_` and `glyph_index_` are uint16: a /Widths entry of -1502 is 64034.
+  - A descriptor without /FontBBox (CheckFontMetrics) takes the program's box, the right way up:
+    the "deliberately flipped" in PDFium's comment is FX_RECT's y-down naming, so its `top` is yMin.
+    Ascent and descent then come from the face, and FreeType makes a Type 1 or CFF face's ascender
+    and descender its FontBBox yMax and yMin (floored and ceiled from 16.16), not 0 (bfuzz seed 452).
 - **Cross references** are CPDF_Parser's loading ported, not a reader that accepts good files
   (`document._XRef` is CPDF_CrossRefTable; `test_cross_references_are_read_as_pdfium_reads_them`).
   A regex reader that refused one damaged row made the fuzz's files unopenable where PDFium read them

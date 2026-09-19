@@ -994,8 +994,12 @@ for _op in ("q Q cm w J j M d gs g G rg RG k K cs CS sc SC scn SCN m l c v y h r
 
 def text_positions(obj: PObj) -> float:
     """CPDF_TextObject::CalcPositionDataInternal: fills each item's x (text space, before the
-    horizontal scale), sets the original and page rectangles, returns the advance."""
-    font, size = obj.font, obj.font_size
+    horizontal scale), sets the original and page rectangles, returns the advance. Every `a * size
+    / 1000` is C float arithmetic: rounded after the product and again after the division."""
+    font, size = obj.font, f32(obj.font_size)
+
+    def scaled(v):
+        return f32(f32(v * size) / 1000)
     cur = 0.0
     min_x, max_x, min_y, max_y = 10000.0, -10000.0, 10000.0, -10000.0
     cid = font.subtype == "Type0"
@@ -1004,15 +1008,15 @@ def text_positions(obj: PObj) -> float:
         item[1] = cur
         l, b, r, t = font.char_bbox(code)
         min_y, max_y = min(min_y, min(t, b)), max(max_y, max(t, b))
-        left, right = cur + l * size / 1000, cur + r * size / 1000
+        left, right = f32(cur + scaled(l)), f32(cur + scaled(r))
         min_x, max_x = min(min_x, left, right), max(max_x, left, right)
-        cur = f32(cur + f32(font.char_width(code) * size / 1000))
+        cur = f32(cur + scaled(font.char_width(code)))
         if code == 32 and (not cid or font.char_size(32) == 1):
             cur = f32(cur + obj.word_space)
         cur = f32(cur + obj.char_space)
         if kerning:
-            cur = f32(cur - f32(kerning * size / 1000))
-    min_y, max_y = min_y * size / 1000, max_y * size / 1000
+            cur = f32(cur - scaled(kerning))
+    min_y, max_y = scaled(min_y), scaled(max_y)
     obj.original_rect = (min_x, min_y, max_x, max_y)
     rect = transform_rect(obj.matrix, obj.original_rect)
     if obj.text_mode in (1, 2, 5, 6):

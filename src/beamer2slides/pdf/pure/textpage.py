@@ -103,6 +103,41 @@ def inverse(m):
     return d / i, b / j, c / j, a / i, (c * f - d * e) / i, (a * f - b * e) / j
 
 
+def concat32(m, n):
+    """CFX_Matrix::operator* in C floats (m and n float32 already)."""
+    a, b, c, d, e, f = m
+    A, B, C, D, E, F = n
+    return (f32(f32(a * A) + f32(b * C)), f32(f32(a * B) + f32(b * D)),
+            f32(f32(c * A) + f32(d * C)), f32(f32(c * B) + f32(d * D)),
+            f32(f32(f32(e * A) + f32(f * C)) + E), f32(f32(f32(e * B) + f32(f * D)) + F))
+
+
+def apply32(m, x, y):
+    """CFX_Matrix::Transform in C floats: every product and sum rounded."""
+    return (f32(f32(f32(m[0] * x) + f32(m[2] * y)) + m[4]),
+            f32(f32(f32(m[1] * x) + f32(m[3] * y)) + m[5]))
+
+
+def inverse32(m):
+    """CFX_Matrix::GetInverse in C floats."""
+    a, b, c, d, e, f = (f32(v) for v in m)
+    i = f32(f32(a * d) - f32(b * c))
+    if i == 0:
+        return IDENTITY
+    j = -i
+    return (f32(d / i), f32(b / j), f32(c / j), f32(a / i), f32(f32(f32(c * f) - f32(d * e)) / i),
+            f32(f32(f32(a * f) - f32(b * e)) / j))
+
+
+def transform_rect32(m, r):
+    """CFX_Matrix::TransformRect in C floats."""
+    m = tuple(f32(v) for v in m)
+    l, b, rt, t = r
+    pts = [apply32(m, x, y) for x, y in ((l, t), (l, b), (rt, t), (rt, b))]
+    xs, ys = [p[0] for p in pts], [p[1] for p in pts]
+    return min(xs), min(ys), max(xs), max(ys)
+
+
 def x_unit(m):
     a, b = m[0], m[1]
     return abs(a) if b == 0 else abs(b) if a == 0 else math.hypot(a, b)
@@ -290,10 +325,11 @@ def loose_bounds(ci: CharInfo):
         if ascent != descent:
             # CPDF_TextObject::GetCharWidth: the size is divided first, in float
             width = f32(font.char_width(ci.code) * f32(obj.font_size / 1000))
-            ox, oy = f32p(apply(f32m(inverse(ci.matrix)), *ci.origin))
-            box = transform_rect(ci.matrix, (ox, f32(oy + descent * size / 1000), f32(ox + width),
-                                             f32(oy + ascent * size / 1000)))
-            return union(tuple(f32(v) for v in box), ci.box)
+            ox, oy = apply32(inverse32(ci.matrix), *ci.origin)
+            size = f32(size)
+            box = transform_rect32(ci.matrix, (ox, f32(oy + f32(f32(descent * size) / 1000)), f32(ox + width),
+                                               f32(oy + f32(f32(ascent * size) / 1000))))
+            return union(box, ci.box)
     return ci.box
 
 
@@ -498,7 +534,7 @@ class TextPage:
             else:
                 self.line_rect = obj.rect
             self.prev_obj, self.prev_matrix = obj, form_matrix
-            self._items(obj, form_matrix, f32m(concat(text_matrix(obj), form_matrix)))
+            self._items(obj, form_matrix, concat32(f32m(text_matrix(obj)), f32m(form_matrix)))
 
     def _writing_mode(self, obj: PObj) -> int:
         n = len(obj.items)
@@ -699,7 +735,7 @@ class TextPage:
     def _items_in_order(self, obj: PObj, form_matrix, matrix, fsh: float, base_space: float) -> None:
         font = obj.font
         spacing = 0.0
-        size = obj.font_size / 1000
+        size = f32(f32(obj.font_size) / 1000)
         for i, (code, x) in enumerate(obj.items):
             if i > 0 and obj.kernings[i - 1] != 0:
                 text = self.temp_buf or self.buf
@@ -710,7 +746,7 @@ class TextPage:
                 threshold = space_threshold(font, fsh, code)
                 if threshold and spacing >= threshold:
                     self.temp_buf.append(0x20)
-                    ox, oy = f32p(apply(matrix, x, 0.0))
+                    ox, oy = apply32(matrix, x, 0.0)
                     self.temp.append(CharInfo(GENERATED, INVALID_CODE, 0x20, (ox, oy), (ox, oy, ox, oy),
                                               form_matrix, obj))
             spacing = 0.0
@@ -720,13 +756,14 @@ class TextPage:
                 units = [code & 0xFFFF]
                 ctype = NOT_UNICODE
             l, b, r, t = font.char_bbox(code)
-            box = [f32(l * size + x), f32(b * size), f32(r * size + x), f32(t * size)]
+            # C floats: `rect.left * font_size + origin.x` rounds after the product and the sum
+            box = [f32(f32(l * size) + x), f32(b * size), f32(f32(r * size) + x), f32(t * size)]
             if abs(box[3] - box[1]) < SIZE_EPSILON:
                 box[3] = f32(box[1] + size)
             if abs(box[2] - box[0]) < SIZE_EPSILON:
-                box[2] = f32(box[0] + font.char_width(code) * size)
-            box = tuple(f32(v) for v in transform_rect(matrix, box))
-            ci = CharInfo(ctype, code, 0, f32p(apply(matrix, x, 0.0)), box, matrix, obj)
+                box[2] = f32(box[0] + f32(font.char_width(code) * size))
+            box = transform_rect32(matrix, box)
+            ci = CharInfo(ctype, code, 0, apply32(matrix, x, 0.0), box, matrix, obj)
             if not units:
                 self.temp.append(ci)
                 self.temp_buf.append(0xFFFE)
