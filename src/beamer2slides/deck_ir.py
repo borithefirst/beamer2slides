@@ -23,7 +23,7 @@ from pathlib import Path
 from .emit import (ASCENT_EM, BASELINE_A, FONT_FOR_FAMILY, MIDDLE_BASELINE_EM, PAD_X, PPTX_TITLE_DY, SLIDE_W,
                    FontMapper, extra_above)
 from .deck_thumbs import (SNAP_PAGE, ink_widths, pptx_insets, side_gap, side_inset, thumbnail_cell_pad,
-                          thumbnail_insets, thumbnail_rows, thumbnail_weights, top_drift)
+                          thumbnail_cell_text, thumbnail_insets, thumbnail_rows, thumbnail_weights, top_drift)
 from .gslides import EMU_PER_PT
 
 FAMILY_FOR_FONT = {v: k for k, v in FONT_FOR_FAMILY.items()}
@@ -773,6 +773,7 @@ def deck_ir(pres: dict, pdf_size: list[float] | None = None, base: dict | None =
             thumbnail_insets(elements, thumb, px)
             thumbnail_rows(elements, thumb, px)
             thumbnail_cell_pad(elements, thumb, px)
+            thumbnail_cell_text(elements, thumb, px)
             thumbnail_weights(elements, thumb, px)
             ink_widths(elements, thumb, px)
             drifts += [(e, d) for e, d in ((e, top_drift(e, elements, thumb, px)) for e in elements)

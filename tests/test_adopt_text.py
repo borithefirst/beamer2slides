@@ -782,6 +782,43 @@ def test_powerpoint_insets_where_the_thumbnails_show_them():
     assert all(e["box"]["inset_x"] == 3.6 for e in (a, b, c, d)), "a deck imported whole (comps-analysis)"
 
 
+def test_a_deck_is_imported_whole_when_most_sane_readings_are_nearer_powerpoints_insets():
+    """arabic-training: Arial and Times read -3.7 and -4.0, Calibri's Arabic -2.3 (outside the hit
+    window, nearer -3.6 than 0 all the same), two lines misread by 8 pt. The deck came whole, so its
+    unmeasured boxes get the insets; a measured box outside the window keeps Slides'."""
+    from beamer2slides.deck_thumbs import pptx_insets
+
+    def box():
+        return {"kind": "text", "box": {"valign": "top", "scale": 2.0}, "anchor": [10.0, 20.0]}
+
+    read = [box() for _ in range(6)]
+    unmeasured = box()
+    pptx_insets([{"elements": read + [unmeasured]}], list(zip(read, [-2.28, -4.01, -3.71, -2.36, 7.99, -8.08])))
+    assert unmeasured["box"]["inset_y"] == 3.6
+    assert [("inset_y" in e["box"]) for e in read] == [False, True, True, False, False, False]
+    read = [box() for _ in range(4)]
+    unmeasured = box()
+    pptx_insets([{"elements": read + [unmeasured]}], list(zip(read, [-3.6, 0.1, 0.2, 9.0])))
+    assert "inset_y" not in unmeasured["box"], "one in three sane readings is a mixed deck"
+
+
+def test_a_bulleted_right_to_left_first_line_is_measured_by_its_baseline():
+    """arabic-training's lists: the bullet stands beside the words, the baseline still says where
+    the line is."""
+    import numpy as np
+
+    from beamer2slides.deck_thumbs import top_drift
+    px, scale, z = 4.0, 2.0, 12.0
+    el = {"kind": "text", "bbox": [50.0, 50.0, 250.0, 120.0], "anchor": [53.0, 65.0],
+          "box": {"valign": "top", "scale": scale},
+          "paragraphs": [{"bullet": {"glyph": "●"}, "runs": [{"text": "مرحبا بالعالم", "size": z}], "slides": {}}]}
+    im = np.full((600, 1200, 3), 250, dtype=np.int16)
+    B = int(round(63.2 * px))
+    for x in range(int(55 * px), int(200 * px), 12):
+        im[B - int(0.6 * z * px):B, x:x + 3] = 10
+    assert top_drift(el, [el], im, px) == pytest.approx((63.2 - 65.0) * scale, abs=0.6)
+
+
 def test_a_box_with_powerpoint_insets_starts_its_text_3_6_pt_higher():
     el = {"kind": "text", "bbox": [0, 0, 100, 50], "box": {"scale": 1.0, "valign": "top"},
           "paragraphs": [{"runs": [{"text": "Hi", "size": 10.0}], "slides": {}}]}
