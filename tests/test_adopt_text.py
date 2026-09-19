@@ -245,6 +245,129 @@ def test_ink_on_the_boxs_first_column_is_its_own_unless_it_goes_on_outside():
     assert read(48.0) is None
 
 
+def monospace_face(monkeypatch, lsb: float = 0.05, top: float = 0.7):
+    """The deck's own font at hand (`deck_thumbs.face_glyphs`): every glyph 0.6 em wide, ink from
+    `lsb` to 0.55 em across and from the baseline to `top` em up."""
+    from beamer2slides import deck_thumbs
+    monkeypatch.setattr(deck_thumbs, "face_glyphs",
+                        lambda font, bold=False, italic=False: lambda c: (0.6, lsb, 0.0, 0.55, top))
+
+
+def test_a_big_first_glyphs_own_bearing_does_not_hide_a_box_with_no_insets(monkeypatch):
+    """devfest2020's 65 pt "Use over" starts 4.5 pt into a box with no insets: more than half the
+    inset, which alone read as Slides' default. The deck's font says how far its first glyph stands in."""
+    import numpy as np
+
+    from beamer2slides.deck_thumbs import starting_bearing, thumbnail_insets
+    px, size, lsb = 4.0, 40.0, 0.12
+
+    def read():
+        el = {"kind": "text", "bbox": [50.0, 50.0, 300.0, 120.0], "anchor": [54.22, 90.0], "wrap_width": 241.5,
+              "paragraphs": [{"align": "left", "bullet": None,
+                              "runs": [{"text": "Use", "size": size, "font": "Space Mono"}],
+                              "slides": {"indent_first": 0, "indent_start": 0}}],
+              "box": {"valign": "middle", "scale": 720 / 453.54}}
+        im = np.full((int(300 * px), int(453.54 * px), 3), 240, dtype=np.int16)
+        im[int(62 * px):int(90 * px), int((50 + lsb * size) * px):int(150 * px)] = 20
+        thumbnail_insets([el], im, px)
+        return el
+    assert "insets" not in read()["box"], "no metrics: 4.8 pt in is Slides' inset"
+    monospace_face(monkeypatch, lsb=lsb)
+    assert starting_bearing(read()["paragraphs"]) == pytest.approx(lsb * size)
+    el = read()
+    assert el["box"]["insets"] == 0 and el["anchor"] == [round(54.22 - 6.7 / (720 / 453.54), 2), 90.0]
+
+
+def centred_title(valign: str = "top"):
+    return {"kind": "text", "bbox": [50.0, 50.0, 400.0, 100.0], "anchor": [0.0, 70.0], "wrap_width": 341.5,
+            "paragraphs": [{"align": "center", "bullet": None,
+                            "runs": [{"text": "Colors", "size": 20.0, "font": "Space Mono"}],
+                            "slides": {"indent_first": 0, "indent_start": 0, "line_spacing": 1.0}}],
+            "box": {"valign": valign, "scale": 1920 / 453.54}}
+
+
+def test_a_centred_box_with_no_insets_is_told_by_its_rows(monkeypatch):
+    """devfest2020's Space Mono headings are centred: no side edge to read, and "Colors" does not
+    reach a generic face's cap height. Their first line's glyph tops, from the deck's own font, stand
+    one top inset higher than Slides' default puts them."""
+    import numpy as np
+
+    from beamer2slides.adopt import snapped_line_box
+    from beamer2slides.deck_thumbs import inset_rows, thumbnail_insets
+    from beamer2slides.emit import BASELINE_A
+    monospace_face(monkeypatch)
+    px = 4.0
+    e = centred_title()
+    scale = e["box"]["scale"]
+    inset = BASELINE_A / scale
+    base = 50.0 + inset + snapped_line_box(20.0, 1.0, scale, False)[0]
+    default_top = base - 0.7 * 20.0
+
+    def thumb(top):
+        im = np.full((int(255 * px), int(453.54 * px), 3), 240, dtype=np.int16)
+        for k in range(6):          # six letters' stems
+            x = 191 + 12 * k
+            im[int(round(top * px)):int(round((top + 14) * px)), int(x * px):int((x + 2.5) * px)] = 20
+        return im
+
+    for top, told in ((default_top - inset, 0), (default_top, 1), (default_top - inset / 2, None)):
+        el = centred_title()
+        assert inset_rows(el, [el], el["paragraphs"], thumb(top), px) == told, top
+    el = centred_title()
+    thumbnail_insets([el], thumb(default_top - inset), px)
+    assert el["box"]["insets"] == 0
+    assert el["anchor"] == [0.0, round(70.0 - inset, 2)], "the baseline goes up by the top inset, not sideways"
+    el = centred_title()
+    thumbnail_insets([el], thumb(default_top), px)
+    assert "insets" not in el["box"]
+    el = centred_title("middle")
+    thumbnail_insets([el], thumb(default_top - inset), px)
+    assert "insets" not in el["box"], "a middle-aligned stack does not move with its insets"
+    el, picture = centred_title(), {"kind": "image", "bbox": [200.0, 40.0, 240.0, 70.0]}
+    thumbnail_insets([el, picture], thumb(default_top - inset), px)
+    assert "insets" not in el["box"], "a picture over the line's rows is ink too"
+
+
+def test_a_panel_under_a_box_that_runs_off_the_slide_still_counts_as_ground():
+    """devfest2020's "50%" box runs 800 pt past the slide's right edge; the panel it stands on ends
+    at the slide edge, and only has to hold the strip that is read."""
+    from beamer2slides.deck_thumbs import crossed
+    e = {"kind": "text", "bbox": [100.0, 50.0, 1000.0, 120.0]}
+    panel = {"kind": "shape", "bbox": [0.0, 0.0, 453.54, 255.12]}
+    assert not crossed(e, [panel, e], (99.0, 50.0, 110.0, 120.0))
+    assert crossed(e, [panel, e], (99.0, 50.0, 460.0, 120.0)), "past the panel is not its ground"
+    narrow = {"kind": "shape", "bbox": [90.0, 0.0, 105.0, 255.12]}
+    assert crossed(e, [narrow, e], (99.0, 50.0, 110.0, 120.0))
+
+
+def test_a_box_starting_left_of_the_slide_is_read_from_the_slides_edge():
+    """ap-bio-stats' full-width boxes start 1.9 pt left of the slide, where the thumbnail has no
+    pixels: the words' first ink column counts from the slide's edge, not from the box's."""
+    import numpy as np
+
+    from beamer2slides.deck_thumbs import thumbnail_insets
+    px = 4.0
+    el = {"kind": "text", "bbox": [-4.0, 50.0, 460.0, 100.0], "anchor": [2.7, 75.0], "wrap_width": 450.6,
+          "paragraphs": [{"align": "left", "bullet": None, "runs": [{"text": "Words", "size": 12.0}],
+                          "slides": {"indent_first": 0, "indent_start": 0}}],
+          "box": {"valign": "middle", "scale": 1.0}}
+    panel = {"kind": "shape", "bbox": [-10.0, -10.0, 500.0, 300.0]}
+    im = np.full((int(300 * px), int(453.54 * px), 3), 240, dtype=np.int16)
+    im[int(66 * px):int(75 * px), int(2.9 * px):int(60 * px)] = 20       # Slides' 6.7 pt inset, 0.2 pt bearing
+    thumbnail_insets([panel, el], im, px)
+    assert "insets" not in el["box"]
+
+
+def test_shaped_scripts_are_not_read_by_their_glyph_tops(monkeypatch):
+    """An Arabic letter's joined form is not the glyph its code point maps to: arabic-training's
+    lists read as inset-free from the cmap's heights, and lost 0.04 a slide."""
+    from beamer2slides.deck_thumbs import inset_rows
+    monospace_face(monkeypatch)
+    el = centred_title()
+    el["paragraphs"][0]["runs"][0]["text"] = "التطبيقات"
+    assert inset_rows(el, [el], el["paragraphs"], None, 4.0) is None
+
+
 def title_deck(style: dict) -> dict:
     """A title whose layout placeholder is bold Arial and whose one run says `style`."""
     layout_title = box("L_title", para("", runs=[("", {"bold": True, "fontFamily": "Arial", "fontSize": pt(28)})]),

@@ -7,6 +7,8 @@ their `box`; nothing here calls Google. Measurements and history: docs/adopt-ben
 
 from __future__ import annotations
 
+import unicodedata
+
 from .emit import BASELINE_A, PAD_X, PPTX_TITLE_DY
 
 
@@ -194,10 +196,16 @@ def thumbnail_insets(elements: list[dict], thumb, px: float) -> None:
         if e.get("kind") != "text" or box_ is None or "insets" in box_:
             continue
         paras = [p for p in e.get("paragraphs", []) if p.get("runs")]
-        if not paras or any(p.get("align", "left") != "left" or p.get("bullet") or p.get("direction") == "rtl"
-                            for p in paras):
+        if not paras or not any(r["text"].strip() for p in paras for r in p["runs"]):
             continue
-        if not any(r["text"].strip() for p in paras for r in p["runs"]):
+        if any(p.get("align", "left") != "left" or p.get("bullet") or p.get("direction") == "rtl" for p in paras):
+            # centred or bulleted words have no side edge to read, but their rows still show where the
+            # top (bottom) inset put them
+            if inset_rows(e, elements, paras, thumb, px) == 0:
+                scale = box_.get("scale") or 1.0
+                align = paras[0].get("align", "left")
+                dx = {"left": 1.0, "right": -1.0}.get(align, 0.0) * PAD_X / scale
+                _no_insets(e, dx, BASELINE_A / scale * _anchor_sign(box_))
             continue
         scale = box_.get("scale") or 1.0
         pad = PAD_X / scale
@@ -237,23 +245,227 @@ def thumbnail_insets(elements: list[dict], thumb, px: float) -> None:
             left = thumb[max(0, Y0):max(0, Y1), X0 - 3:X0]
             if ((np.abs(left - ground).max(axis=-1) > 80) & free[:len(left), None]).any():
                 continue
-        gap = (X0 + cols[0]) / px - (x0 + indent)
-        if gap >= pad / 2:
+        # (the crop starts at the slide's edge when the box starts left of it: ap-bio-stats' full-width
+        # boxes stand 1.9 pt off the slide)
+        gap = (max(0, X0) + cols[0]) / px - (x0 + indent)
+        # The first glyph's own bearing, where the deck's font is at hand: a big one alone can be
+        # more than half the inset (devfest2020's 65 pt "Use over" starts 4.5 pt in with no inset)
+        bearing = starting_bearing(paras)
+        if gap >= pad / 2 + bearing:
             continue
         dy = 0.0
-        if box_.get("valign", "top") == "top" and e.get("anchor"):
+        if box_.get("valign", "top") in ("top", "bottom") and e.get("anchor"):
             # a box may have no side insets and still its top one (creandum-board's labels): the
-            # first line's cap tops must stand where no top inset puts them too
-            dy = (BASELINE_A - (PPTX_TITLE_DY if e.get("placeholder") in
-                                ("TITLE", "CENTERED_TITLE", "SUBTITLE") else 0.0)) / scale
-            rows = np.nonzero(mark.sum(axis=1) >= 2)[0]
-            z = max(r.get("size") or 0 for r in paras[0]["runs"])
-            if not len(rows) or (Y0 + rows[0]) / px - (e["anchor"][1] - CAP_EM * z) > -dy / 2:
+            # first line's tops must stand where no top inset puts them too
+            rows = inset_rows(e, elements, paras, thumb, px)
+            if rows is None and box_.get("valign", "top") == "top":
+                dy = (BASELINE_A - (PPTX_TITLE_DY if e.get("placeholder") in
+                                    ("TITLE", "CENTERED_TITLE", "SUBTITLE") else 0.0)) / scale
+                rows = np.nonzero(mark.sum(axis=1) >= 2)[0]
+                z = max(r.get("size") or 0 for r in paras[0]["runs"])
+                if not len(rows) or (Y0 + rows[0]) / px - (e["anchor"][1] - CAP_EM * z) > -dy / 2:
+                    continue
+            elif rows is not None:
+                if rows != 0:
+                    continue
+                dy = BASELINE_A / scale * _anchor_sign(box_)
+        _no_insets(e, pad, dy)
+
+
+def _anchor_sign(box_: dict) -> float:
+    """Which way a box's first baseline moves when its insets go: up in a top-aligned box, down in a
+    bottom-aligned one, nowhere in a middle-aligned one."""
+    return {"top": 1.0, "bottom": -1.0}.get(box_.get("valign", "top"), 0.0)
+
+
+def _no_insets(e: dict, dx: float, dy: float) -> None:
+    pad = PAD_X / (e["box"].get("scale") or 1.0)
+    e["box"]["insets"] = 0
+    e["wrap_width"] = round(e.get("wrap_width", 0) + 2 * pad, 2)
+    if e.get("anchor"):
+        e["anchor"] = [round(e["anchor"][0] - dx, 2), round(e["anchor"][1] - dy, 2)]
+
+
+# ------------------------------------------------------------------------------------ glyph metrics
+
+_FACES: dict = {}
+
+
+def face_glyphs(font: str | None, bold: bool = False, italic: bool = False):
+    """A function char -> (advance, xMin, yMin, xMax, yMax) in em (None: no glyph, or no outline) for
+    a deck font found under its own name (on the machine or fetched, `adopt.font_family`), or None:
+    a stand-in's outlines say nothing of where Slides' glyphs stand. Cached per face."""
+    if not font:
+        return None
+    from .adopt import flatten
+    key = (flatten(font), bool(bold), bool(italic))
+    if key in _FACES:
+        return _FACES[key]
+    _FACES[key] = None
+    try:
+        from fontTools.pens.boundsPen import BoundsPen
+        from fontTools.ttLib import TTFont
+        from .adopt import font_family
+        from .deck_ir import family_of
+        files = font_family(font, family_of(font))
+        if not files:
+            return None
+        have = flatten(files.get("match") or "")
+        if not (have.startswith(key[0]) or key[0].startswith(have)) or files.get("FontIndex"):
+            return None
+        style = ("BoldItalicFont" if italic else "BoldFont") if bold else ("ItalicFont" if italic else "UprightFont")
+        f = TTFont(files.get(style) or files["UprightFont"], lazy=True)
+        cmap, glyphs, hmtx, upem = f.getBestCmap(), f.getGlyphSet(), f["hmtx"], f["head"].unitsPerEm
+    except Exception:                                   # noqa: BLE001 - no metrics is an answer
+        return None
+    seen: dict = {}
+
+    def glyph(c: str):
+        if c not in seen:
+            name = cmap.get(ord(c))
+            if name is None:
+                seen[c] = None
+            else:
+                pen = BoundsPen(glyphs)
+                glyphs[name].draw(pen)
+                b = pen.bounds
+                adv = hmtx[name][0] / upem
+                seen[c] = (adv, *(v / upem for v in b)) if b else (adv, None, None, None, None)
+        return seen[c]
+    _FACES[key] = glyph
+    return glyph
+
+
+def _chars(p: dict):
+    """(char, size, glyph metrics function) of a paragraph's text, in order."""
+    for r in p["runs"]:
+        g = face_glyphs(r.get("font"), bool(r.get("bold")), bool(r.get("italic")))
+        for c in r["text"]:
+            yield c, r.get("size") or 0.0, g
+
+
+def starting_bearing(paras: list[dict]) -> float:
+    """The smallest left side bearing (page pt) of the paragraphs' first glyphs, 0 when unknown."""
+    out = None
+    for p in paras:
+        for c, z, g in _chars(p):
+            if c.isspace():
                 continue
-        box_["insets"] = 0
-        e["wrap_width"] = round(e.get("wrap_width", 0) + 2 * pad, 2)
-        if e.get("anchor"):
-            e["anchor"] = [round(e["anchor"][0] - pad, 2), round(e["anchor"][1] - dy, 2)]
+            m = g(c) if g else None
+            if m is None or m[1] is None:
+                return 0.0
+            out = m[1] * z if out is None else min(out, m[1] * z)
+            break
+    return max(0.0, out or 0.0)
+
+
+def _lines(p: dict, width: float) -> list[list[tuple]] | None:
+    """A paragraph broken into lines greedily at spaces within `width` (page pt), each line its
+    (char, size, metrics) - None when a glyph's metrics are unknown."""
+    lines, line, x, last_space = [], [], 0.0, None
+    for c, z, g in _chars(p):
+        if c in "\x0b\n":
+            lines.append(line)
+            line, x, last_space = [], 0.0, None
+            continue
+        m = g(c) if g else None
+        if m is None:
+            return None
+        if c == " ":
+            last_space = len(line)
+        line.append((c, z, m))
+        x += m[0] * z
+        if x > width and last_space is not None and c != " ":
+            lines.append(line[:last_space])
+            line = line[last_space + 1:]
+            x = sum(q[2][0] * q[1] for q in line)
+            last_space = None
+    lines.append(line)
+    return lines
+
+
+INSET_TELL = 0.35           # of the inset: how near its ink edge must be to the no-inset prediction
+
+
+def inset_rows(e: dict, elements: list[dict], paras: list[dict], thumb, px: float) -> int | None:
+    """What the thumbnail's rows say of a top- or bottom-aligned box's top (bottom) inset: 0 when its
+    first line's ink tops (last line's ink bottoms) stand where no inset puts them, 1 where Slides'
+    own inset does, None when it cannot tell (no metrics for the deck's own font, other things in the
+    box, a middle-aligned box, a line a stand-in would break elsewhere). The glyphs' own heights say
+    where the ink stands (a centred title has no side edge to read, and "Colors" in Space Mono does
+    not reach the cap height of a generic face)."""
+    import numpy as np
+    from .adopt import WIDE_SPACING, line_box, para_size, snapped_line_box
+    box_ = e["box"]
+    valign = box_.get("valign", "top")
+    if valign not in ("top", "bottom") or not e.get("anchor") or box_.get("font_scale", 1) not in (1, None):
+        return None
+    scale = box_.get("scale") or 1.0
+    x0, y0, x1, y1 = e["bbox"]
+    width = max(1.0, x1 - x0 - 2 * PAD_X / scale)
+    p = paras[0] if valign == "top" else paras[-1]
+    if any((r.get("script") or r.get("highlight") or r.get("underline") or r.get("strike")) for r in p["runs"]):
+        return None
+    # Arabic and Hebrew are shaped: a letter's joined form is not the glyph its code point maps to, so
+    # the cmap's heights say nothing of the line's tops (arabic-training's lists read as inset-free)
+    if p.get("direction") == "rtl" or any(unicodedata.bidirectional(c) in ("R", "AL")
+                                           for r in p["runs"] for c in r["text"]):
+        return None
+    lines = _lines(p, width - ((p["slides"].get("indent_start") or 0) / scale))
+    if not lines:
+        return None
+    line = [q for q in (lines[0] if valign == "top" else lines[-1]) if q[2][2] is not None]
+    if not line:
+        return None
+    inset = BASELINE_A / scale
+    # the first (last) baseline where adopt.text_box_latex sets it under Slides' own insets
+    z, r = para_size(p), (p.get("slides") or {}).get("line_spacing") or 1.0
+    if valign == "top":
+        above = snapped_line_box(z, r, scale, bool(box_.get("snap")))[0]
+        space = 0.0 if box_.get("grows") else ((p.get("slides") or {}).get("space_above") or 0) / scale
+        base = y0 + inset + space + above
+        edge = min(base - q[2][4] * q[1] for q in line)
+    else:
+        below = line_box(z, 1.0 if r >= WIDE_SPACING else r)[1]
+        base = y1 - inset - below
+        edge = max(base - q[2][2] * q[1] for q in line)
+    # the rows the box's text covers, less rows other elements reach into
+    m = 0.5 * inset
+    top, bottom = (edge - inset - m, edge + m) if valign == "top" else (edge - m, edge + inset + m)
+    # sideways, only where the line's words stand, with or without the side insets: devfest2020's
+    # lists run 2 pt past the panel they stand on, which would count as crossing them
+    w = sum(q[2][0] * q[1] for q in line)
+    pad = PAD_X / scale
+    sl = p.get("slides") or {}
+    indent = max(sl.get("indent_start") or 0, sl.get("indent_first") or 0) / scale
+    align = p.get("align", "left")
+    if align == "center":
+        mid = (x0 + x1) / 2 + (indent - (sl.get("indent_end") or 0) / scale) / 2
+        band = (mid - w / 2 - pad, top, mid + w / 2 + pad, bottom)
+    elif align == "right":
+        band = (x1 - pad - w - pad, top, x1, bottom)
+    else:
+        band = (x0, top, x0 + pad + indent + w + pad, bottom)
+    band = (max(x0, band[0]), top, min(x1, band[2]), bottom)
+    x0, x1 = band[0], band[2]
+    if crossed(e, elements, band):
+        return None
+    X0, X1 = int(round(max(0.0, x0) * px)), int(round(min(x1, thumb.shape[1] / px) * px))
+    Y0, Y1 = int(round(top * px)), int(round(bottom * px))
+    if Y0 < 0 or Y1 > thumb.shape[0] or X1 - X0 < 4:
+        return None
+    crop = thumb[Y0:Y1, X0:X1]
+    ground = np.median(crop.reshape(-1, crop.shape[-1]), axis=0)
+    rows = np.nonzero((np.abs(crop - ground).max(axis=-1) > 80).sum(axis=1) >= 2)[0]
+    if not len(rows):
+        return None
+    seen = (Y0 + rows[0]) / px if valign == "top" else (Y0 + rows[-1] + 1) / px
+    shifted = edge - inset if valign == "top" else edge + inset
+    if abs(seen - shifted) <= INSET_TELL * inset:
+        return 0
+    if abs(seen - edge) <= INSET_TELL * inset:
+        return 1
+    return None
 
 
 def ink_widths(elements: list[dict], thumb, px: float) -> None:
@@ -365,8 +577,10 @@ def crossing(e: dict, elements: list[dict], strip: tuple, first: bool = False) -
         b = o.get("bbox")
         if not b or len(b) != 4 or b[2] <= strip[0] or b[0] >= strip[2] or b[3] <= strip[1] or b[1] >= strip[3]:
             continue
-        if (o.get("kind") == "shape" or below and o.get("kind") == "image") and b[0] < x0 - 2 and b[1] < y0 - 2 \
-                and b[2] > x1 + 2 and b[3] > strip[3]:
+        # (sideways it need only hold the strip: devfest2020's "50%" box runs 800 pt off the slide's
+        # right edge, and no panel under it reaches past that)
+        if (o.get("kind") == "shape" or below and o.get("kind") == "image") and b[0] < max(x0, strip[0]) - 1 \
+                and b[1] < y0 - 2 and b[2] > min(x1, strip[2]) + 1 and b[3] > strip[3]:
             continue
         found.append(o)
         if first:

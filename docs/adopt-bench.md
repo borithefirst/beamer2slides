@@ -234,3 +234,51 @@ The four branches above merged (`vb-a` -> `m3-a`, 912 slides): boxes 0.958 -> 0.
 comps-analysis 0.677 -> 0.767 (tables and sides together, more than either alone), apps-edu-zh 0.913 ->
 0.949, journey-maps 0.913 -> 0.942, ap-bio-stats 0.951 -> 0.976, creandum-board 0.946 -> 0.958. No deck
 down by more than 0.0003 (gdg24 slide 57 -0.014).
+
+## Insets read by glyph tops and bearings (`mv-a` -> `df-c2`)
+
+Text boxes with no insets, read from more of the thumbnails (`mv-a` -> `df-c2`, 912 slides: boxes 0.9674 ->
+0.9704, page 0.9688, pixels 0.9841, mean per deck 0.9488 -> 0.9527, no deck down). devfest2020's
+PowerPoint-made template sets most text boxes' insets to 0, which the API does not report, and
+`thumbnail_insets` found almost none of them, for four reasons. (1) A big first glyph's side bearing was
+more than half the inset: the deck's own font, where it is at hand under its own name
+(`deck_thumbs.face_glyphs`: fontTools bounds from the files `adopt.font_family` finds, never a stand-in's),
+now gives the first glyph's bearing (`starting_bearing`) to add to the gap. (2) Centred, right-aligned and
+bulleted boxes were skipped, having no side edge to read: `inset_rows` reads their rows instead. It sets the
+first line (the last, bottom-aligned) where `adopt.text_box_latex` would set it, as `snapped_line_box`,
+spaceAbove and the bottom depth give it, takes the ink top (bottom) of that line's glyphs from the font,
+and reads the first inked row of the band where the words stand. Within `INSET_TELL` 0.35 of the inset of
+the no-inset position it answers 0, near Slides' own 1, else nothing. (3) The test that lets a panel under
+a box count as ground wanted the panel to hold the box's whole width: devfest2020's "50%" runs 800 pt off
+the slide, its "Slide Formats" and "Icons & Assets" are full width, and its lists run 2 pt past their
+panel. It now wants the panel to hold only the strip being read, with a 1 pt margin (`crossing`). (4) The
+anchor-based prediction of the first baseline disagreed with what adopt draws for lists at lineSpacing
+1.4-1.5, where the thumbnail's rows fell between the two predictions. A box whose rows say 0 loses its
+top (bottom) inset as well as its side ones, and its anchor moves by BASELINE_A.
+
+devfest2020 0.903 -> 0.968: slide 2 "Colors" 0.81 -> 1.0, 8 "Slide Formats" 0.81 -> 1.0, 9 "Full screen
+slide" 0.72 -> 1.0, 11 "Item One" 0.52 -> 0.99, 13 "50%" 0.71 -> 0.94, 23 "Charts" 0.83 -> 1.0, 34 "Icons &
+Assets" 0.80 -> 1.0, 30 0.86 -> 1.0, 32 0.88 -> 1.0, 24 0.88 -> 0.98. poster-48x36 0.701 -> 0.749 (a .pptx
+import: its centred Arial headings are read by their rows now), gdg24 +0.0008, firebase-jam +0.0002.
+
+The first full run (`df-c1`) cost ap-bio-stats 0.003 and arabic-training 0.002, both fixed. ap-bio-stats'
+slide 27 lost 0.19 because its full-width box starts 1.9 pt left of the slide: the crop starts at the
+slide's edge, but the gap was counted from the box's, so Slides' own inset read as 1.9 pt too small (the
+old enclosure test had hidden this). arabic-training's right-to-left lists (8, 9) read as inset-free
+because Arabic is shaped: a joined letter is not the glyph its code point maps to, so the cmap's heights
+say nothing of the line's tops. Rows are not read for Arabic or Hebrew letters.
+
+Tried and dropped: taking every text box of devfest2020 as inset-free (0.964: slides 1, 3 and 33 went down,
+since some of its boxes keep Slides' insets); predicting the first baseline from the IR's anchor (the lists
+fell between the two predictions, so it was replaced by adopt's own line model).
+
+Left:
+- devfest2020 slide 10, numbered list, 0.51. The rows are right now, but the numbers and the words both
+  stand 7 IR pt (about 29 Slides pt, about indentFirstLine) left of the deck's. Deck: number at 55.2 and
+  words at 85.25, in a box at 57.4 with indentStart 85.4 and indentFirstLine 29 (Slides pt). Ours: 48.1
+  and 78.45. Slide 11's bulleted list, indentStart 36 and indentFirstLine 18, is right.
+- Slide 33's ROUND_RECTANGLE captions (0.78) have no outlines or shadows, and the text sits wrong in the
+  shape's text rectangle.
+- Slide 1's subtitle is kept at the default insets: its rows fall between the two predictions, 0.57 pt
+  high.
+- Slide 26's "Short Label" boxes stand on diagram shapes that cross the band, so they are not read.
