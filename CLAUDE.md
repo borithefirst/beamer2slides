@@ -513,8 +513,19 @@ deck up; pixels 0.913 -> 0.939), 11 frames that did not compile -> 0 (tags `abs`
 Text (tags `units` -> `text-b` -> `text-ins2`): boxes 0.818 -> 0.843 -> 0.852, page 0.814 -> 0.839 -> 0.848.
 Known gaps, by what they cost: text insets the API does not report where no autofit height gives
 them away, freeform shapes (5,791 in the corpus, drawn as their box; Google's .pptx
-export has their geometry), fills the API reads as empty (gradients: cs161's header bar,
-sc-memphis), dragged shape adjustments, and hebrew-lesson's table style colours.
+export has their geometry), and dragged shape adjustments.
+Fills the API cannot say (`deck_fills.py`, `tests/test_adopt_fills.py`): a gradient, picture or texture
+fill reads `shapeBackgroundFill: {}`, a .pptx table style's cell colour NOT_RENDERED, and every
+placeholder INHERIT chain in the corpus ends NOT_RENDERED too - so `deck_ir(foreign=True,
+thumbnails=n -> image)` reads them from the slide's own thumbnail (the bench passes the cached LARGE
+ones; live `adopt` does not fetch them yet, and without thumbnails nothing changes). Conservative, since a false fill paints over what lies
+under it: the box less a rim and less opaque elements above must be one flat colour (ink allowed only
+in boxes of texts above), not the page's or the colour all around it (`edges_show`, table cells vs
+the page outside the table), settled top down; a rectangle may read as a three-stop axis gradient
+(TikZ `left/middle/right color`: cs161's header bar). Measured (`units` -> `fills-d`): cs161-net
+page 0.734 -> 0.917, cs161-tls 0.647 -> 0.864, hebrew-lesson 0.310 -> 0.668 (paper backdrops and
+style-coloured cells). SlidesCarnival's 2,068 `{}` freeforms are squiggles whose box is not flat
+and stay unfilled: that is the freeform gap, not a fill one.
 
 Opt-in suite (real Google Slides, ~95 s): `python -m pytest -m slides` (the default run deselects
 the `slides` marker, pyproject.toml). It converts the stress decks (19–22, 25, 13, demo) 3 at a

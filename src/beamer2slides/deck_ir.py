@@ -654,7 +654,7 @@ def inherited_chain(slide: dict, pages: dict[str, dict]) -> list[dict]:
 
 
 def deck_ir(pres: dict, pdf_size: list[float] | None = None, base: dict | None = None,
-            fetch=None, images: Path | None = None, foreign: bool = False) -> dict:
+            fetch=None, images: Path | None = None, foreign: bool = False, thumbnails=None) -> dict:
     """IR of a presentation. `pdf_size`: the PDF page size the deck came from (else beamer's
     default for the aspect). `base`: a sync snapshot (object ids -> keys). `fetch(url) -> bytes`
     downloads pictures into `images` (sha1-named) when both are given.
@@ -666,7 +666,11 @@ def deck_ir(pres: dict, pdf_size: list[float] | None = None, base: dict | None =
     one `diagram`, a short text on a picture is a number on a ball - and reading someone else's
     grouping that way throws away what adopt needs to draw it: each node's outline, and the lines
     themselves. And lines are kept, for the same reason: `pull` drops them because the source it is
-    refining already draws them, and a foreign deck's source does not exist yet."""
+    refining already draws them, and a foreign deck's source does not exist yet.
+
+    `thumbnails(n)`: the picture Google renders of slide n (0-based; a path, PIL image or array, or
+    None), with which a foreign read fills in what the API leaves out of fills (`deck_fills`).
+    Without it those fills stay unknown, and shapes with nothing else to draw are left out."""
     page_w, page_h, scale = page_size_for(pres, pdf_size, foreign)
     fonts = FontMapper()
     resolver = StyleResolver(pres)
@@ -726,6 +730,14 @@ def deck_ir(pres: dict, pdf_size: list[float] | None = None, base: dict | None =
                                   "id": f"{page['objectId']}~{el['id']}"})
         elements = under + read_page(slide, tags)
         color, picture = page_background(slide, pages, resolver.scheme)
+        if foreign:
+            from . import deck_fills
+            thumb = thumbnails(n) if thumbnails else None
+            px = 0.0
+            if thumb is not None:
+                thumb = deck_fills.load(thumb)
+                px = thumb.shape[1] / page_w
+            elements = deck_fills.settle(elements, thumb, px, None if picture else color, bool(picture))
         key = slide_keys.get(slide["objectId"]) or (max(set(tags), key=tags.count) if tags else None)
         slides.append({"page": n, "frame": str(n + 1), "size": [page_w, page_h], "objectId": slide["objectId"],
                        "key": key, "notes": notes_text(slide), "background_color": color,
@@ -807,6 +819,13 @@ def line_element(pe: dict, m: list[float], scale: float, scheme: dict) -> dict |
                if props["lineFill"]["solidFill"].get("alpha", 1.0) < 1.0 else {})}
 
 
+def unread_fill(fill: dict | None) -> bool:
+    """A fill Slides draws that the API does not describe: `{}` with no `propertyState` (a gradient,
+    picture or texture fill - the API only has words for a solid one). `deck_fills` reads it back
+    from the slide's thumbnail when there is one."""
+    return fill is not None and fill.get("propertyState", "RENDERED") == "RENDERED" and "solidFill" not in fill
+
+
 def foreign_shape(pe: dict, m: list[float], w: float, h: float, bbox: list[float], fill_hex: str | None,
                   resolver: StyleResolver, fonts: FontMapper, scale: float, page_w: float) -> dict | None:
     """A shape of a deck nobody converted, as adopt draws it: its preset (`shape_type`; a freeform,
@@ -829,6 +848,8 @@ def foreign_shape(pe: dict, m: list[float], w: float, h: float, bbox: list[float
     if solid.get("alpha", 1.0) <= 0.004:
         fill_hex = None  # a fill at alpha 0 draws nothing (sc-memphis' rings: black at alpha 0)
     style: dict = {"fill": fill_hex}
+    if unread_fill(props.get("shapeBackgroundFill")) and not shape.get("placeholder"):
+        style["fill_unread"] = True      # drawn, but not as anything the API says: `deck_fills`
     if fill_hex and solid.get("alpha", 1.0) < 1.0:
         style["fill_alpha"] = round(solid["alpha"], 4)
     style.update(outline_props(props.get("outline", {}), scale, resolver.scheme))
@@ -843,7 +864,7 @@ def foreign_shape(pe: dict, m: list[float], w: float, h: float, bbox: list[float
         if not el["fill"]:
             del el["fill"]
         return el
-    if shape.get("placeholder") or not (style["fill"] or style["outline"]):
+    if shape.get("placeholder") or not (style["fill"] or style["outline"] or style.get("fill_unread")):
         return None
     return {"kind": "shape", "role": "panel", "bbox": bbox, "shape": kind.lower(), "shape_type": kind, **style}
 
@@ -1095,6 +1116,11 @@ def table_element(pe: dict, m: list[float], resolver: StyleResolver, fonts: Font
                                 "runs": [{k: v for k, v in r.items() if k not in ("slides_font", "slides_size")}
                                          for r in p["runs"]]}
                                for p in paras if p["runs"]]})
+            if not solid:
+                # A .pptx table style colours cells the API reports NOT_RENDERED (comps-analysis,
+                # creandum-board): the style is nowhere in the answer, so `deck_fills` asks the
+                # thumbnail, and a cell that is truly empty shows the page and stays unfilled.
+                cells_out[-1]["fill_unread"] = True
     el["table_cells"] = cells_out
     borders = []
     for direction, key in (("h", "horizontalBorderRows"), ("v", "verticalBorderRows")):

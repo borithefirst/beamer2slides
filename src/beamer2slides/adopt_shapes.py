@@ -404,7 +404,14 @@ def style_options(el: dict, ctx, stroke_only: bool = False) -> tuple[list[str], 
     """(fill options, stroke options) for an element: colours, opacities, weight and dashes."""
     fill, stroke = el.get("fill"), el.get("outline") or el.get("outline_color")
     fo, so = [], []
-    if fill and not stroke_only:
+    gradient = el.get("fill_gradient")
+    if gradient and not stroke_only:
+        # read off the thumbnail (`deck_fills`): an axis shading through three colours
+        a, b, c = (colour_name(x, ctx.colours) for x in gradient["colors"])
+        # (the middle colour last: setting an end colour resets it to the mean of the two)
+        first, last = ("left", "right") if gradient["axis"] == "x" else ("top", "bottom")
+        fo += [f"{first} color={a}", f"{last} color={c}", f"middle color={b}"]
+    elif fill and not stroke_only:
         fo.append(f"fill={colour_name(fill, ctx.colours)}")
         if el.get("fill_alpha") is not None and el["fill_alpha"] < 0.995:
             fo.append(f"fill opacity={el['fill_alpha']:.3f}")

@@ -102,7 +102,13 @@ def build_target(folder: Path, pres: dict | None = None, fetch=None) -> dict:
             data = fetch(url)
             known[url] = hashlib.sha1(data).hexdigest()
             return data
-    target = deck_ir(pres, fetch=get, images=folder / "images", foreign=True)
+    def thumbnail(n):
+        # the LARGE thumbnails `capture` saved: fills the API reads as empty come from them (live
+        # `adopt` does not fetch them yet, so its IR leaves those fills out as before)
+        path = folder / "slides" / f"{n + 1:03d}.png"
+        return path if path.exists() else None
+
+    target = deck_ir(pres, fetch=get, images=folder / "images", foreign=True, thumbnails=thumbnail)
     if fetch is not None:
         known_path.write_text(json.dumps(known, indent=0), encoding="utf-8")
     return target
