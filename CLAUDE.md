@@ -525,7 +525,7 @@ found by the family their name table gives (`font_candidates`: `ariblk.ttf` = Ar
 missing one takes a metric-compatible fetched stand-in (`adopt.SUBSTITUTES`: Arimo, Tinos, Cousine,
 Carlito, Archivo Black, Libre Bodoni...); CJK falls back to the Noto Sans JP/KR/SC/TC Slides draws
 with (`scripts.RENDERER_CJK`); a fixed left-aligned box whose thumbnail ink starts at its edge (and
-whose first ink row is above the inset line) has no insets (`deck_ir.thumbnail_insets`, bench only:
+whose first ink row is above the inset line) has no insets (`deck_ir.thumbnail_insets`, wherever thumbnails are read:
 gdg24 0.896 -> 0.900). Left: comps-analysis (0.336; its text sits ~4 pt high - insets the API does
 not report - and its Bodoni is narrower than any fetchable one), devfest2020's numbered lists (Slides
 places big numbers differently), jruby-ja (gradient backdrop; Japanese still sets wider), hebrew-lesson.
