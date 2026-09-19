@@ -10,8 +10,10 @@ out equal to PDFium's, not merely close. Each function names the PDFium code it 
 Drawn: paths (fill, stroke, dashes, constant alpha, fill-and-stroke with a translucent stroke
 through DrawFillStrokePath's knockout sub-bitmap), clip paths, forms, and transparency
 (ProcessTransparency: soft masks, transparency groups, group alpha, blend modes;
-`render_transparency.py`), axial and radial shadings and shading patterns (`render_shading.py`).
-Not yet: text, images, tiling patterns, transfer functions; a page holding any
+`render_transparency.py`), axial and radial shadings and shading patterns (`render_shading.py`),
+text (`render_text.py`), images at any angle with their own masks (`render_image.py`, decoded by
+`decode_image.py`).
+Not yet: tiling patterns, transfer functions; a page holding any
 of them raises PdfError (`unported`) rather than coming back drawn differently."""
 
 from __future__ import annotations
@@ -745,6 +747,9 @@ class Status:
         elif obj.type == OBJ_TEXT:
             from .render_text import process_text
             process_text(self, obj, matrix)
+        elif obj.type == OBJ_IMAGE:
+            from . import render_image
+            render_image.draw(self, obj, matrix)
 
     def process_path(self, obj, matrix) -> None:
         from . import render_shading
@@ -819,8 +824,13 @@ def unported(objects, ctx=None) -> str | None:
             why = text_unsupported(o)
             if why is not None:
                 return why
+        elif o.type == OBJ_IMAGE:
+            from .render_image import refusal as image_refusal
+            why = image_refusal(o, ctx)
+            if why is not None:
+                return why
         elif o.type not in (OBJ_PATH, OBJ_FORM, OBJ_SHADING):
-            return {OBJ_IMAGE: "images"}.get(o.type, "objects")
+            return "objects"
         if o.smask is not None or o.blend != "Normal" or o.transfer is not None:
             from .render_transparency import unsupported
             why = unsupported(o, ctx, unported)
