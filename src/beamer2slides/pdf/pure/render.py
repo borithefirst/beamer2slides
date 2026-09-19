@@ -8,9 +8,10 @@ integer arithmetic (AlphaMerge, AlphaUnion, the clip mask's gray8 blend), so tha
 out equal to PDFium's, not merely close. Each function names the PDFium code it stands for.
 
 Drawn: paths (fill, stroke, dashes, constant alpha, fill-and-stroke with a translucent stroke
-through DrawFillStrokePath's knockout sub-bitmap), clip paths, forms. Not yet: text, images,
-shadings, patterns, transparency groups, soft masks, blend modes, transfer functions; a page
-holding any of them raises PdfError (`unported`) rather than coming back drawn differently."""
+through DrawFillStrokePath's knockout sub-bitmap), clip paths, forms, and transparency
+(ProcessTransparency: soft masks, transparency groups, group alpha, blend modes;
+`render_transparency.py`). Not yet: text, images, shadings, patterns, transfer functions; a page holding any
+of them raises PdfError (`unported`) rather than coming back drawn differently."""
 
 from __future__ import annotations
 
@@ -661,24 +662,41 @@ def _available(m) -> bool:
 class Status:
     """CPDF_RenderStatus."""
 
-    def __init__(self, device: Device):
+    def __init__(self, device: Device, transparency=(False, False), in_group: bool = False,
+                 initial_alpha: float = 1.0, ctx=None, stop=None):
+        """`transparency` (group, isolated), `in_group` and `initial_alpha` (the fill alpha of
+        the form object whose contents this status draws) are what ProcessTransparency reads;
+        `ctx` is render_transparency.Context; `stop` the stop object (GetBackdrop's re-render
+        draws the page up to the object being blended)."""
         self.dev = device
         self.last_clip: tuple = ()
+        self.transparency, self.in_group = transparency, in_group
+        self.initial_alpha, self.ctx = initial_alpha, ctx
+        self.stop, self.stopped = stop, False
 
     def render_list(self, objs, matrix) -> None:
         """RenderObjectList."""
         l, t, r, b = self.dev.clip_box()
         cr = R.transform_rect(R.inverse(matrix), (float(l), float(t), float(r), float(b)))
         for obj in objs:
+            if obj is self.stop:
+                self.stopped = True
+                return
             if not obj.active:
                 continue
             rl, rb, rr, rt = obj.rect
             if rl > cr[2] or rr < cr[0] or rb > cr[3] or rt < cr[1]:
                 continue
             self.render_single(obj, matrix)
+            if self.stopped:
+                return
 
     def render_single(self, obj, matrix) -> None:
         self.process_clip(obj.clip_paths, matrix)
+        if obj.smask is not None or obj.blend != "Normal" or obj.type == OBJ_FORM:
+            from .render_transparency import process_transparency
+            if process_transparency(self, obj, matrix):
+                return
         self.process_no_clip(obj, matrix)
 
     def process_clip(self, clip_paths: tuple, matrix) -> None:
@@ -720,9 +738,11 @@ class Status:
 
     def process_form(self, obj, matrix) -> None:
         m = R.concat(obj.matrix, matrix)
-        status = Status(self.dev)
+        status = Status(self.dev, self.transparency, self.in_group, obj.fill_alpha, self.ctx,
+                        self.stop)
         self.dev.save()
         status.render_list(obj.children, m)
+        self.stopped = status.stopped
         self.dev.restore(False)
 
 
@@ -755,9 +775,10 @@ def page_matrix(box, rotation: int, fs):
     return R.concat(display_matrix(box, rotation), tuple(F(float(v)) for v in fs))
 
 
-def unported(objects) -> str | None:
+def unported(objects, ctx=None) -> str | None:
     """What an active object on the page needs that this module does not draw yet, if anything:
-    a page is drawn exactly or not at all (PdfError), never approximately."""
+    a page is drawn exactly or not at all (PdfError), never approximately. `ctx`
+    (render_transparency.Context) lets soft masks be looked into; without it they are refused."""
     for o in objects:
         p = o
         while p is not None and p.active:
@@ -766,13 +787,12 @@ def unported(objects) -> str | None:
             continue
         if o.type not in (OBJ_PATH, OBJ_FORM):
             return {OBJ_TEXT: "text", OBJ_IMAGE: "images", OBJ_SHADING: "shadings"}.get(o.type, "objects")
-        if o.smask is not None:
-            return "soft masks"
-        if o.blend != "Normal":
-            return "blend modes"
-        if o.transfer is not None:
-            return "transfer functions"
-        if o.type == OBJ_FORM and o.group:
+        if o.smask is not None or o.blend != "Normal" or o.transfer is not None:
+            from .render_transparency import unsupported
+            why = unsupported(o, ctx, unported)
+            if why is not None:
+                return why
+        if o.type == OBJ_FORM and o.group and ctx is None:
             return "transparency groups"
         if o.type == OBJ_PATH and o.pattern and (o.fill_type != FILL_NONE or o.stroked):
             return "patterns"
@@ -780,22 +800,27 @@ def unported(objects) -> str | None:
 
 
 def render_page(objects, box, rotation: int, fs, width: int, height: int,
-                transparent: bool) -> np.ndarray:
+                transparent: bool, ctx=None) -> np.ndarray:
     """FPDF_RenderPageBitmapWithMatrix onto a fresh bitmap (white, or clear when
-    `transparent`) with FS_MATRIX `fs` (api.render_matrix): the BGRA bytes."""
-    missing = unported(objects)
+    `transparent`) with FS_MATRIX `fs` (api.render_matrix): the BGRA bytes. `ctx`:
+    render_transparency.Context (the document, for soft masks and groups)."""
+    missing = unported(objects, ctx)
     if missing is not None:
         raise PdfError(f"the pure reader cannot render {missing} yet")
     dev = Device(width, height, transparent)
     if not transparent:
         dev.bgra[...] = 255
     matrix = page_matrix(box, rotation, fs)
+    top = [o for o in objects if o.parent is None]
+    if ctx is not None:
+        ctx.page_objects, ctx.page_matrix = top, matrix     # for GetBackdrop's re-render
     dev.save()
     dev.set_clip_rect((0, 0, width, height))
     # CPDF_ProgressiveRenderer: one layer, the page's top-level objects
     dev.save()
-    status = Status(dev)
-    status.render_list([o for o in objects if o.parent is None], matrix)
+    # the page's CPDF_Transparency: isolated always, a group when /Group /S /Transparency
+    status = Status(dev, (bool(ctx is not None and ctx.page_group), True), ctx=ctx)
+    status.render_list(top, matrix)
     dev.restore(False)
     dev.restore(False)
     return dev.bgra

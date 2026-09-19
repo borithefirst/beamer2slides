@@ -135,8 +135,8 @@ Each of these was a diff against PDFium until it was ported:
 
 ## What it does not do
 
-- **Rendering, mostly.** Option 3 below is under way (next section); until text, images, shadings and
-  soft masks draw, `render` raises PdfError on any page holding one, and `api.renders(backend)` is
+- **Rendering, mostly.** Option 3 below is under way (next section); until text, images and shadings
+  draw (beamer's soft masks hold shadings), `render` raises PdfError on any page holding one, and `api.renders(backend)` is
   False. The pipeline needs renders for backgrounds, crops, ball colours, `_looks_like` and fidelity,
   so `classify` runs on the reader but `convert` does not. `embedded_image` gives no `pixels` or `rendered`, so
   `render.image_file` can't prove a raw JPEG looks right and keeps the page crop instead.
@@ -187,8 +187,39 @@ random zooms on white and on clear bitmaps, each difference shrunk to the lines 
 tokens) that still cause it. When paths were done: 5,500 seeds of pages, 3,000 with forms, 300 of
 page geometry and 3,500 mutated, not one pixel apart; `tests/test_pure_pdf.py` keeps 40 seeds of
 each plus the shrunk pages that were once apart. `render_page` refuses (`unported`) what
-it does not draw yet: text, images, shadings, patterns, transparency groups, soft masks, blend modes,
-transfer functions.
+it does not draw yet: text, images, shadings, patterns, transfer functions.
+
+**Transparency** (`pure/render_transparency.py`) is CPDF_RenderStatus::ProcessTransparency and
+everything under it: soft masks (Luminosity and Alpha, /BC, /G drawn through its own Status with the
+mask group's colour space), transparency-group forms (isolated or not, /K read and ignored as PDFium
+does), constant alpha on groups, and every blend mode, separable or not (blend.cpp's formulas with
+`kColorSqrt`, and SetLum's ClipColor testing the stale maximum). Rules found on the way:
+- only `/Group << /S /Transparency >>` is a group; a /Group without /S is a plain form. A
+  non-isolated group with no mask, alpha or blend is drawn straight onto the device.
+- a sub-bitmap is the object's rect on the device, and a form's rect is the union of its
+  children's `GetRect` - stroke boxes from `CFX_Path::GetBoundingBoxForStrokePath` included,
+  computed in float32 (a `v` whose first control is the current point joins at a doubled point, and
+  only float32 rounding decides which side the miter lands; AGG clips to the bitmap, so a bitmap one
+  row taller rasterises the stroke differently).
+- CompositeDIBitmap: a blend onto an opaque (BGRx) device is **GetBackdrop** - the page drawn again,
+  up to the blended object, into a clear bitmap, blended there and laid on white (`render.Status`
+  takes a `stop` object for that); onto a BGRA device or into a non-isolated group it is
+  SetDIBitsWithBlend, the group's backdrop copied in with GetDIBits (which reads its backdrop piece at
+  0,0 whatever the rect: a PDFium quirk, ported). A blend over pixels nothing was drawn on is a copy:
+  the page's white is the caller's fill, not content.
+- **CPDF_ContentParser::CheckClip**: after a page's (or a form's) content is parsed, an object whose
+  only clip is a rectangle containing its box loses that clip. Only the render clip goes; the
+  extraction's clip boxes are PDFium's `GetClipPath` answers and keep it. It moves edge pixels when the
+  fill's edge lies on the /BBox's under a skewed `cm`, with or without groups.
+The oracle is `devtools/render_torture_transparency.py` (`python tools/render_torture_transparency.py
+SEED0 N [--page]`): render_torture's paths inside random forms and soft-mask groups nested in each
+other, `/SMask /None`, alphas and a `/BM` on a third of the painted groups, over a ground rect. 6,000
+seeds (3,000 with page geometry) are exact; the tests keep 40 of each and the shrunk cases.
+Refused, each with its reason: transfer functions (/TR, /TR2, and a soft mask's /TR - they need the
+function evaluator the shading port brings), a luminosity mask with a /BC whose group colour space is
+not DeviceGray, DeviceRGB or DeviceCMYK, masks nested 8 deep, and anything unported inside a mask's
+/G (the same `unported` check runs over it). Real decks are still refused as a whole: every
+beamer shadow and ball bullet is a soft mask whose /G holds a shading, so they wait for shadings.
 
 ## Risks
 
