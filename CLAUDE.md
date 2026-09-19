@@ -688,6 +688,13 @@ needs both sides on one unit: a source that moves a text moves the pictures its 
 Counting what the campaign reaches (`unit/*`, `override/*`, geometry modes) is how the blind spot
 showed; `fuzz_world` also kept `children` on a group whose unit had been recreated, which only
 `parent_group` readers were saving it from.
+Occlusion (`loss_oracle.occlusion_findings`, `text_hidden`): a text no opaque shape covered before a
+sync (paint order: page elements, a group's children inside it; opaque: solid fill at alpha 1) must not
+end up under a shape the sync created, unless the new conversion stacks that shape above it. A block
+rebuilt with its panels over the kept body text (dc8523a) deleted nothing, so nothing else saw it. The
+fuzz world has blocks and keeps z-order; `fuzz_sync._stacked` replays `Sync.regroups` /
+`Sync.regroup_requests` through Slides' rule that a group keeps its children's page order (`_zorder`):
+without the restack, 14 of 400 offline rounds fail.
 
 ## Playground (docs/playground.md)
 `python -m beamer2slides playground` (`src/beamer2slides/playground/`: stdlib `http.server` + a static
