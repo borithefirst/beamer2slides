@@ -47,10 +47,14 @@ a per-slide background picture.
   axial/radial shadings and shading patterns are ported too (`pure/render_shading.py`, oracle
   `tools/render_torture_shading.py`), and so is text in embedded Type 1 and CFF fonts (FreeType's CFF
   engine and smooth rasteriser ported, `pure/ftoutline.py`, `pure/ftgrays.py`, `pure/render_text.py`,
-  oracle `tools/render_torture_text.py`). Whole pages: 195 of the test decks' 231 render byte for byte
+  oracle `tools/render_torture_text.py`), and so are images (CPDF_DIB, Flate/RunLength/DCT with CMYK
+  JPEGs as libjpeg's raw bytes, stretch engine, CFX_ImageTransformer for any angle, own masks;
+  `pure/decode_image.py`, `pure/render_image.py`, oracle `tools/render_torture_image.py` levels 0-6,
+  17,000 seeds exact; the AGG driver drops an overprinted CMYK image's Darken, so overprint changes
+  nothing). Whole pages: 229 of the test decks' 241 render byte for byte
   as PDFium's, none apart (`test_whole_beamer_pages_render_as_pdfium_renders_them`);
-  a page with anything not ported yet (images, Type 3 or TrueType or non-embedded text, CalRGB/Lab/Indexed
-  shadings, transfer functions…) raises PdfError, so
+  a page with anything not ported yet (Type 3 or TrueType or non-embedded text, JPX/JBIG2/CCITT or
+  ICC-profiled images, CalRGB/Lab/Indexed shadings, transfer functions…) raises PdfError, so
   `renders = False`: `classify` runs on it and `convert` doesn't yet. Every call equals PDFium's on 4,373 pages
   (chars and object boxes to the last bit on the test decks),
   and deck.json is identical on all 48 test decks; extract is 7× slower. `tests/test_pure_pdf.py`.

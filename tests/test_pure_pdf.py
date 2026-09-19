@@ -112,11 +112,14 @@ def test_extract_and_classify_on_the_pure_reader_write_pdfiums_deck():
     assert apart <= 5
 
 
-@built
 def test_the_pure_reader_refuses_a_page_it_cannot_draw_exactly():
-    """Images are not drawn yet: the page raises instead of coming back without them."""
-    doc = pdf.resolve("pure").open(DECKS[1])
-    with pytest.raises(PdfError, match="cannot render images yet"):
+    """JPEG 2000 is not decoded: the page raises instead of coming back without the image."""
+    from beamer2slides.devtools.render_torture_image import pdf_bytes
+    image = (b"<< /Type /XObject /Subtype /Image /Width 2 /Height 2 /ColorSpace /DeviceRGB /BitsPerComponent 8"
+             b" /Filter /JPXDecode /Length 4 >>\nstream\njunk\nendstream")
+    data = pdf_bytes(b"q 100 0 0 80 20 20 cm /Im0 Do Q", [image], [(b"Im0", 1)])
+    doc = pdf.resolve("pure").open(data)
+    with pytest.raises(PdfError, match="JPXDecode"):
         doc[0].render(1.0)
 
 
@@ -124,7 +127,7 @@ def test_the_pure_reader_refuses_a_page_it_cannot_draw_exactly():
 def test_whole_beamer_pages_render_as_pdfium_renders_them():
     """Text, paths, forms, soft masks and shadings together: every page of the test decks that the
     reader does not refuse is PDFium's bitmap byte for byte (all four pages of 04_theme_blocks, the
-    first whole pages, when text and shadings met)."""
+    first whole pages, when text and shadings met). Every raster-image page is drawn: none refused."""
     import numpy as np
     drawn = 0
     for path in DECKS:
@@ -134,6 +137,7 @@ def test_whole_beamer_pages_render_as_pdfium_renders_them():
                 try:
                     ours = pure[i].render(1.37)
                 except PdfError:
+                    assert path.stem != "23_raster_images", f"{path.stem} page {i} refused"
                     continue
                 assert np.array_equal(ours, ref[i].render(1.37)), f"{path.stem} page {i}"
                 drawn += 1
@@ -347,6 +351,28 @@ def test_the_pure_renderer_survives_shading_torture_seeds():
     stats = run(0, 60, verbose=False)
     assert not stats["failed"], f"seeds apart (python tools/render_torture_shading.py SEED 1): {stats['failed']}"
     assert stats["drawn"] >= 50
+
+
+# Level-4 image pages that were once apart (run-length sizes, CMYK, decode arrays, masks), and
+# level-6 ones through CFX_ImageTransformer (bgr, bgra, 1-bit mask, masked) and CMYK JPEGs.
+IMAGE_SEEDS = [(4, s) for s in (144, 229, 230, 283, 325, 351, 788, 2626, 4459, 6130)] + \
+    [(6, s) for s in (0, 4, 13, 19, 50, 74, 118, 139, 196)]
+
+
+@pytest.mark.parametrize("level,seed", IMAGE_SEEDS)
+def test_the_pure_renderer_draws_image_torture_seeds_as_pdfium(level, seed):
+    from beamer2slides.devtools.render_torture_image import case, compare
+    n, _a, _b, d = compare(*case(seed, level))
+    assert n == 0, f"python tools/render_torture_image.py {seed} 1 --level {level}: {n if n is not None else d}"
+
+
+def test_the_pure_renderer_survives_image_torture_seeds():
+    """A slice of the random image pages (level 6: any angle, masks, every filter and colour
+    space the renderer draws): any pixel apart fails."""
+    from beamer2slides.devtools.render_torture_image import run
+    stats = run(0, 60, verbose=False, level=6)
+    assert not stats["failed"], f"seeds apart (python tools/render_torture_image.py SEED 1): {stats['failed']}"
+    assert stats["drawn"] >= 55
 
 
 @built

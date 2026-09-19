@@ -150,6 +150,7 @@ class PObj:
     # images and forms
     stream: object = None          # Stream, or InlineImage
     name: str = ""
+    resources: object = None       # an inline image's: its colour space is looked up there
     children: list = field(default_factory=list)
     group: bool = False            # a form with a transparency group (/Group /S /Transparency)
     active: bool = True
@@ -324,6 +325,21 @@ class _Run:
             self.p.colorspaces[key] = load_colorspace(self.doc, obj, None)
         return self.p.colorspaces[key]
 
+    def _inline_components(self, cs):
+        """Handle_BeginImage's colour space object for ReadInlineStream: a name other than the three
+        device ones is looked up in the resources (None: not there, and the data is then read as
+        one bit per pixel), and GetColorSpace(obj, nullptr) gives the component count, 3 when it
+        does not load."""
+        if isinstance(cs, Name) and str(cs) not in ("DeviceRGB", "DeviceGray", "DeviceCMYK"):
+            cs = self.resource("ColorSpace", cs)
+            if cs is None:
+                return None
+        try:
+            space = load_colorspace(self.doc, cs, None)
+        except Exception:  # noqa: BLE001 - a colour space that does not load
+            space = None
+        return space.n if space is not None else 3
+
     # ------------------------------------------------------------------ objects
 
     def add(self, obj: PObj, color: bool, graph: bool) -> PObj:
@@ -352,7 +368,7 @@ class _Run:
 
     def execute(self, data: bytes) -> None:
         fast = None  # ParsePathObject's params while in its fast path
-        for op, args in operations(data):
+        for op, args in operations(data, self._inline_components):
             if fast is not None:
                 raw = getattr(args, "raw", args)  # the fast path reads numbers, not the buffer
                 if op in PATH_FAST and all(_is_number(a) for a in raw):
@@ -906,7 +922,8 @@ class _Run:
     def _image(self, stream, name):
         d = stream.dict if isinstance(stream, Stream) else stream.dict
         mask = bool(self.doc.resolve(d.get("ImageMask")))
-        obj = PObj(OBJ_IMAGE, self.state.ctm, stream=stream, name=str(name))
+        obj = PObj(OBJ_IMAGE, self.state.ctm, stream=stream, name=str(name),
+                   resources=None if isinstance(stream, Stream) else self.resources)
         self.add(obj, mask, False)
         if not mask:
             obj.fill = obj.stroke = None

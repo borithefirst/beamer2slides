@@ -277,8 +277,8 @@ Each of these was a diff against PDFium until it was ported:
 
 ## What it does not do
 
-- **Rendering, mostly.** Option 3 below is under way (next section); until images, Type 3 and
-  TrueType text (and the shadings and colour spaces not ported yet) draw, `render` raises PdfError
+- **Rendering, mostly.** Option 3 below is under way (next section); until Type 3 and
+  TrueType text (and the shadings, image codecs and colour spaces not ported yet) draw, `render` raises PdfError
   on any page holding one, and `api.renders(backend)` is
   False. The pipeline needs renders for backgrounds, crops, ball colours, `_looks_like` and fidelity,
   so `classify` runs on the reader but `convert` does not. `embedded_image` gives no `pixels` or `rendered`, so
@@ -451,6 +451,48 @@ theme PDFs, 1,499 pages holding text render byte-identical and none differs (the
 for shadings, images, TrueType or Type 3). `tests/test_pure_pdf.py` keeps 80 seeds of two levels
 and the shrunk cases. Since `26_truetype_fonts` the harvest also holds CID TrueType (DejaVu) and
 simple CFF fonts (xelatex's Computer Modern): CFF renders exact (60 of 60 seeds), TrueType is refused.
+
+**Images** (`pure/decode_image.py` loads, `pure/render_image.py` draws) are CPDF_DIB and the decoders
+it creates, then CPDF_ImageRenderer down to the AGG driver. Loading is LoadColorInfo, the /Decode and
+colour-key arrays, LoadPalette and GetScanline/TranslateScanline24bpp over DeviceGray, DeviceRGB,
+DeviceCMYK, Indexed and ICCBased-through-its-alternate at 1 to 16 bits, from raw, Flate (PNG and
+TIFF predictors), RunLength, ASCIIHex/85 and DCT data, into PDFium's own formats (k1bppMask,
+k1bppRgb, k8bppRgb, kBgr, kBgra) with /SMask (and /Matte) or a /Mask stream beside them. Drawing is
+DrawMaskedImage/CalculateDrawImage for an image's own mask, CFX_ImageStretcher and CStretchEngine
+for upright and quarter-turned images (the weight tables and both passes, uint32 sums wrapping as
+C's do), CFX_ImageTransformer for any other angle or skew, and CFX_AggBitmapComposer's scanline
+compositor rows. Rules found on the way:
+- **A JPEG is libjpeg's bytes.** Pillow's libjpeg decodes with the same ISLOW IDCT and fancy
+  upsampling, so its pixels are PDFium's; a 4-component JPEG is kept as libjpeg's raw CMYK with no
+  Adobe inversion (Pillow's `CMYK;I` inverts every byte, so it is XORed back) and then goes through
+  the same Adobe CMYK table as every other CMYK colour.
+- **The transformer** takes GetClosestRect of the unit square (MatchFloatRange in float32) cut by the
+  device's clip box, stretches the image to the unit vectors' lengths (`ceil(hypotf)`) first, and
+  samples that through the inverted matrix in 8.8 fixed point (`roundf(x * 256)`, `+ 128` in float32,
+  the whole part saturated, the fraction taken with C's `%`), interpolating rows then columns with
+  `>> 8`. Its "normal" branch (|b|, |c| < 0.05) is reachable only with a or d zero, and draws nothing.
+- **Overprint changes nothing.** CPDF_ImageRenderer picks Darken for a CMYK image under fill
+  overprint with /OPM 0, but the AGG driver's StartDIBits drops the blend mode: the pixels are those
+  of a Normal draw (31 cases measured).
+- A constant alpha multiplies an image mask's colour as FXARGB_MUL_ALPHA with `roundf(alpha * 255)`,
+  a bitmap's alpha as `a * int(alpha * 255) / 255`; both then meet only the clip mask.
+The oracle is `devtools/render_torture_image.py` (`python tools/render_torture_image.py SEED0 N
+[--level 0..6]`): image XObjects and inline images of every format above, stencils, colour-key and
+stream masks, soft masks with mattes, /Interpolate and truncated data, drawn upright, flipped,
+scaled, quarter-turned, turned by any angle and skewed, under clips and constant alpha, at zooms 0.5
+to 3.1 on white and clear bitmaps; levels grow the generator a class at a time and keep their seeds.
+When images were done: level 4 (filters, masks, inline images) 7,000 seeds, level 5 (CMYK) 4,000 and
+level 6 (everything, the transformer and CMYK JPEGs) 6,000, not one pixel apart; about 0.25% refused,
+all "filters that decode to nothing". Every page of the test decks `07_images` and
+`23_raster_images` is exact, and across the 50 test PDFs 229 of 241 pages render byte for byte (the
+other 12 are refused for TrueType and Type 3 text). `tests/test_pure_pdf.py` keeps 60 seeds of level
+6, the level-4 seeds that were once apart and one of each transformer format. Refused, each with its
+reason: JPX, JBIG2 and CCITT data, ICC profiles lcms would open (only data that cannot be a profile
+falls back to the alternate), Default colour spaces, CalGray/CalRGB/Lab/Separation/DeviceN images,
+JPEG /ColorTransform 0 and JPEGs PDFium patches or scales, LZW and mid-chain predictors, a filter
+that fails or decodes to nothing, images inside soft masks, image blend modes, pattern-filled
+stencils, a soft mask under a soft mask, an 8-bit mask device, and inline images whose DCT or CCITT
+end the parser cannot find as PDFium does.
 
 ## Risks
 
