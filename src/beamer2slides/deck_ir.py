@@ -524,14 +524,24 @@ def notes_text(slide: dict) -> str | None:
     return None
 
 
-def page_size_for(pres: dict, pdf_size: list[float] | None) -> tuple[float, float, float]:
+# A foreign deck bigger than this many times beamer's page (a 48 x 36 in poster: 9.5) is not a slide
+# deck at beamer's scale: its 24 pt body text would be 2.5 pt, below what TeX's fixed skips and struts
+# are made for. Such a page keeps half the deck's size, like any page of a ratio beamer has no
+# option for; 1920 x 1080 (4.2) is still an ordinary 16:9 deck.
+MAX_BEAMER_SCALE = 5.0
+
+
+def page_size_for(pres: dict, pdf_size: list[float] | None, foreign: bool = False) -> tuple[float, float, float]:
+    """(page width, page height, scale) of the IR: the PDF page the deck came from, else beamer's
+    page of the deck's aspect, else half the deck's size (a ratio beamer has no option for: adopt
+    writes that page with `\\geometry`, `adopt.page_setup`)."""
     w = dim(pres["pageSize"]["width"])
     h = dim(pres["pageSize"]["height"])
     if pdf_size:
         return pdf_size[0], pdf_size[1], w / pdf_size[0]
     ratio = w / h
     for (a, b), size in BEAMER_SIZES.items():
-        if abs(ratio - a / b) < 0.01:
+        if abs(ratio - a / b) < 0.01 and not (foreign and w / size[0] > MAX_BEAMER_SCALE):
             return size[0], size[1], w / size[0]
     return w / 2, h / 2, 2.0
 
@@ -564,7 +574,7 @@ def deck_ir(pres: dict, pdf_size: list[float] | None = None, base: dict | None =
     grouping that way throws away what adopt needs to draw it: each node's outline, and the lines
     themselves. And lines are kept, for the same reason: `pull` drops them because the source it is
     refining already draws them, and a foreign deck's source does not exist yet."""
-    page_w, page_h, scale = page_size_for(pres, pdf_size)
+    page_w, page_h, scale = page_size_for(pres, pdf_size, foreign)
     fonts = FontMapper()
     resolver = StyleResolver(pres)
     pages = {p["objectId"]: p for p in pres.get("layouts", []) + pres.get("masters", [])}
@@ -788,6 +798,84 @@ def element_of(pe: dict, m: list[float], resolver: StyleResolver, fonts: FontMap
         return table_element(pe, m, resolver, fonts, scale, foreign)
     if "line" in pe:
         return line_element(pe, m, scale, resolver.scheme) if foreign else None
+    if foreign:
+        return media_element(pe, m, w, h, bbox, resolver, scale, fetch, images)
+    return None
+
+
+YOUTUBE_THUMB = "https://img.youtube.com/vi/{id}/hqdefault.jpg"
+
+
+def media_outline(props: dict, scale: float, scheme: dict) -> dict | None:
+    """A chart's or video's outline, in the shape `picture_props` gives a picture's."""
+    outline = (props or {}).get("outline") or {}
+    if not outline or outline.get("propertyState", "RENDERED") != "RENDERED":
+        return None
+    colour = rgb_hex(outline.get("outlineFill", {}).get("solidFill", {}).get("color"), scheme)
+    if colour is None:
+        return None
+    return {"color": colour, "weight": round(dim(outline.get("weight")) / scale, 3),
+            "dash": outline.get("dashStyle", "SOLID")}
+
+
+def media_element(pe: dict, m: list[float], w: float, h: float, bbox: list[float], resolver: StyleResolver,
+                  scale: float, fetch, images: Path | None) -> dict | None:
+    """What a person puts on a slide besides shapes, pictures and tables - only `adopt` reads these,
+    since nothing this converter writes is one of them.
+
+    - a linked Sheets chart is a picture: Slides keeps its rendering (`contentUrl`) like a picture's,
+      and the source has no way to redraw it from the spreadsheet (74 of solidity-survey's 83 slides
+      are one chart and its title);
+    - a video is the frame Slides shows before it plays, linked to where it plays: YouTube's own
+      thumbnail (`hqdefault`, 4:3 with the 16:9 frame letterboxed in it, as the player does), a
+      Drive video - whose poster frame no API gives - a dark placeholder with a play symbol;
+    - WordArt is its words, drawn stretched to the element's box as Slides draws them. Its fill and
+      outline are not in the API (only `renderedText` is), so it is set in the text colour."""
+    props: dict = picture_props({}, m, w, h, scale, resolver.scheme)
+    alt = pe.get("description") or pe.get("title")
+    if "sheetsChart" in pe:
+        chart = pe["sheetsChart"]
+        el = {"kind": "image", "role": "figure", "bbox": bbox, "alt": alt or "chart", **props,
+              "chart": {"spreadsheetId": chart.get("spreadsheetId"), "chartId": chart.get("chartId")}}
+        outline = media_outline(chart.get("sheetsChartProperties", {}).get("chartImageProperties"), scale,
+                                resolver.scheme)
+        if outline:
+            el["outline"] = outline
+        if chart.get("contentUrl") and fetch and images is not None:
+            el.update(stash_picture(chart["contentUrl"], fetch, images))
+        return el
+    if "video" in pe:
+        video = pe["video"]
+        source, vid = video.get("source"), video.get("id")
+        url = video.get("url") or (f"https://www.youtube.com/watch?v={vid}" if source == "YOUTUBE" and vid else None)
+        el = {"kind": "image", "role": "figure", "bbox": bbox, "alt": alt or "video", **props,
+              "video": {"source": source, "id": vid, "url": url,
+                        "start": video.get("videoProperties", {}).get("start"),
+                        "end": video.get("videoProperties", {}).get("end")}}
+        outline = media_outline(video.get("videoProperties"), scale, resolver.scheme)
+        if outline:
+            el["outline"] = outline
+        if source == "YOUTUBE" and vid and fetch and images is not None:
+            el.update(stash_picture(YOUTUBE_THUMB.format(id=vid), fetch, images))
+        return el
+    if "wordArt" in pe:
+        text = (pe["wordArt"].get("renderedText") or "").replace("\u000b", "\n").strip("\n")
+        if not text.strip():
+            return None
+        lines = [t for t in text.split("\n")] or [text]
+        bh = props["box"][3] - props["box"][1]
+        size = round(max(bh / len(lines) * 0.8, 1.0), 2)       # what it is stretched to decides nothing
+        run = {"text": "", "font": "", "family": "sans", "size": size, "bold": False, "italic": False,
+               "smallcaps": False, "color": "#000000", "link": None, "script": None, "underline": False,
+               "strike": False, "highlight": None}
+        paras = [{"align": "center", "level": 0, "bullet": None, "size": size, "text_x0": props["box"][0],
+                  "tab_x0": None, "lines": [{"baseline": None, "x0": props["box"][0], "x1": props["box"][2]}],
+                  "runs": [{**run, "text": t or " "}]} for t in lines]
+        return {"kind": "text", "role": "body", "bbox": bbox, "wordart": True, "shape_type": "WORD_ART",
+                "box": props["box"], **({"rotation": props["rotation"]} if "rotation" in props else {}),
+                "anchor": [round((props["box"][0] + props["box"][2]) / 2, 2), props["box"][3]],
+                "wrap_width": round(props["box"][2] - props["box"][0], 2), "placeholder": None,
+                "paragraphs": paras}
     return None
 
 
@@ -976,7 +1064,7 @@ def picture_props(pe: dict, m: list[float], w: float, h: float, scale: float, sc
     rot = (rot + 180) % 360 - 180
     if abs(rot) > 0.05:
         out["rotation"] = round(rot, 2)
-    ip = pe.get("image", {}).get("imageProperties", {})
+    ip = (pe.get("image") or {}).get("imageProperties", {})
     crop = ip.get("cropProperties") or {}
     c = {k: round(crop.get(f"{name}Offset", 0.0), 5) for k, name in (("l", "left"), ("t", "top"), ("r", "right"), ("b", "bottom"))}
     if any(abs(v) > 1e-4 for v in c.values()):

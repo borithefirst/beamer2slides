@@ -41,6 +41,19 @@ def page_option(size: list[float]) -> str:
     return ASPECTS[best]
 
 
+def page_setup(size: list[float] | None) -> tuple[str, str]:
+    """(class option, preamble line) for a page exactly `size` - the IR's page, whose aspect is the
+    deck's. beamer's own sizes are said with its class option; any other page (A4 portrait, a
+    phone-shaped story, a poster) with `\\geometry{papersize=...}`, which beamer takes after the
+    class: the nearest beamer ratio would draw a portrait deck on a landscape page, squeezed."""
+    if not size:
+        return "aspectratio=169", ""
+    for (w, h), opt in ASPECTS.items():
+        if abs(w - size[0]) < 0.5 and abs(h - size[1]) < 0.5:
+            return opt, ""
+    return "", f"\\geometry{{papersize={{{size[0]:.2f}pt,{size[1]:.2f}pt}}}}"
+
+
 def level_style(target: dict):
     """The base style new text takes at a list level, read off the target itself. The loop reads
     this off the candidate (`Planner.level_style`), which a bootstrap does not have yet."""
@@ -80,7 +93,13 @@ def element_style(el: dict) -> dict:
     if not counts:
         return {"size": None, "color": None, "family": "sans", "bold": False, "italic": False}
     size, colour, family, bold = max(counts, key=counts.get)
-    return {"size": size, "color": colour, "family": family, "bold": bold, "italic": False}
+    fonts: dict = {}
+    for p in el.get("paragraphs", []):
+        for r in p["runs"]:
+            if (r.get("family") or "sans") == family and r.get("font"):
+                fonts[r["font"]] = fonts.get(r["font"], 0) + len(r["text"])
+    return {"size": size, "color": colour, "family": family, "bold": bold, "italic": False,
+            "font": max(fonts, key=fonts.get) if fonts else None}
 
 
 def base_lead(style: dict, ctx: Context) -> str:
@@ -89,7 +108,10 @@ def base_lead(style: dict, ctx: Context) -> str:
     out = []
     if style.get("size"):
         out.append(size_switch(style["size"], ctx.pt_option))
-    if style.get("family") == "mono":
+    switch = getattr(ctx, "font_switches", {}).get(style.get("font") or "")
+    if switch:
+        out.append(switch)                  # the deck's second face of this kind (`font_preamble`)
+    elif style.get("family") == "mono":
         out.append("\\ttfamily")
     elif style.get("family") == "serif":
         out.append("\\rmfamily")
@@ -122,6 +144,9 @@ def font_dirs() -> list[Path]:
     themes = Path(__file__).resolve().parents[2] / "themes"
     if themes.is_dir():                                 # not in an installed wheel
         out += sorted(p for p in themes.glob("*/fonts") if p.is_dir())
+    if fetching():
+        from .fontfetch import cache_dir
+        out.append(cache_dir())                         # families fetched from google/fonts
     if os.name == "nt":
         out += [Path(os.environ.get("WINDIR", "C:\\Windows")) / "Fonts",
                 Path(os.environ.get("LOCALAPPDATA", ".")) / "Microsoft" / "Windows" / "Fonts"]
@@ -129,6 +154,14 @@ def font_dirs() -> list[Path]:
         out += [Path.home() / ".fonts", Path.home() / ".local" / "share" / "fonts",
                 Path.home() / "Library" / "Fonts", Path("/Library/Fonts"), Path("/usr/share/fonts")]
     return [p for p in out if p.is_dir()]
+
+
+def fetching() -> bool:
+    """Whether a family the machine lacks may be fetched from google/fonts (`fontfetch`): not while
+    `$B2S_FONTS` names the only folders to use - the tests' answer must not depend on the network -
+    nor with `$B2S_FONT_FETCH=0`."""
+    from .fontfetch import enabled
+    return enabled() and not os.environ.get("B2S_FONTS", "").strip()
 
 
 _FAMILIES: dict[tuple, dict[str, dict[str, Path]]] = {}
@@ -178,7 +211,20 @@ def font_family(name: str, want: str, near: str = "") -> dict[str, Path]:
     (`near`) stands in, rather than LaTeX's own. That is not cosmetic: the DevFest template's quote
     slides are Space Mono, which is on no machine here, and Latin Modern Mono is narrow enough to
     break every one of their lines in another place - 0.42 ink overlap against 0.68 for Google Sans
-    Code, which at least is the same kind of face as the rest of the deck."""
+    Code, which at least is the same kind of face as the rest of the deck.
+
+    Before settling for a stand-in, a family that is not on the machine under its own name is
+    fetched from google/fonts (`fontfetch.fetch_family`), where nearly every font Slides offers
+    lives: of the corpus's letters in fonts no machine here has, most are Open Sans, Montserrat,
+    Delius, Inter, Yanone Kaffeesatz, Alegreya, Work Sans..."""
+    if fetching() and name and not any(flatten(stem) == flatten(name) for stem in font_candidates()):
+        from .fontfetch import fetch_family
+        if fetch_family(name):
+            _FAMILIES.clear()                           # the cache folder has a new family in it
+    return _font_family(name, want, near)
+
+
+def _font_family(name: str, want: str, near: str = "") -> dict[str, Path]:
     from .deck_ir import family_of
     flat, kin = flatten(name), flatten(near)
     asked: tuple[int, str, dict] = (10 ** 6, "", {})
@@ -200,27 +246,79 @@ def font_family(name: str, want: str, near: str = "") -> dict[str, Path]:
     return {"stem": stem, **files} if files else {}
 
 
-def font_preamble(target: dict, tree: Path | None) -> list[str]:
+def font_files_latex(files: dict, tree: Path | None) -> str:
+    """fontspec's options for a family's files (`font_family`'s answer, without its stem), the files
+    copied into `<tree>/fonts/` with the licence that came with them."""
+    # Windows' own files have no dash and a name per style (arialbd.ttf beside arial.ttf)
+    upright = files["UprightFont"].stem
+    opts = [f"{k}=*-{files[k].stem.partition('-')[2]}" if "-" in files[k].stem else
+            f"{k}=*" if files[k].stem == upright else f"{k}={files[k].stem}"
+            for k in ("UprightFont", "BoldFont", "ItalicFont", "BoldItalicFont") if k in files]
+    if tree is not None:
+        first = next(iter(files.values()))
+        licence = first.parent / f"{first.stem.partition('-')[0]}-LICENSE.txt"
+        for f in list(files.values()) + ([licence] if licence.exists() else []):
+            dest = tree / "fonts" / f.name
+            if not dest.exists():
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(f, dest)
+    where = "Path=fonts/," if tree is not None else \
+        "Path=" + next(iter(files.values())).parent.as_posix().rstrip("/") + "/,"
+    ext = next(iter(files.values())).suffix
+    return f"{where}Extension={ext},{','.join(opts)}"
+
+
+# A deck's second, third... typeface of one kind gets a switch of its own when it sets this many
+# letters: a heading face and a body face (Montserrat over Open Sans) are both the deck's look.
+EXTRA_FONT_MIN = 40
+EXTRA_FONTS_MAX = 12
+
+
+def font_preamble(target: dict, tree: Path | None, ctx: Context | None = None) -> list[str]:
     """fontspec lines for the typefaces the deck is written in, and the files beside the source.
 
     A foreign deck is written in the person's fonts, not the converter's three, and helvet in place
     of them is ink in the wrong shape on every slide that has words (measured on the DevFest
     template: 0.702 -> 0.720 ink overlap, the text-only slides moving most). What is not on this
-    machine keeps its substitute, which is what the loop reports as a style it cannot close."""
+    machine keeps its substitute, which is what the loop reports as a style it cannot close.
+
+    The most used font of each kind is the document's (\\setsansfont, ...). Every other font the deck
+    uses enough of and that exists here gets a `\\newfontfamily` switch, recorded in
+    `ctx.font_switches` (deck font name -> command); `base_lead` puts it at the top of each text box
+    whose letters are mostly in that font. A deck has a heading face and a body face more often than
+    not (journey-maps: Montserrat titles over Open Sans text), and one family per kind set both in
+    whichever was used more."""
     counts: dict = {}
+    letters: dict[str, dict[str, int]] = {}
     for s in target["slides"]:
         for e in s["elements"]:
             for p in e.get("paragraphs", []):
                 for r in p["runs"]:
                     k = (r.get("family") or "sans", r.get("font") or "")
                     counts[k] = counts.get(k, 0) + len(r["text"])
-    wanted: dict[str, str] = {}
+                    seen = letters.setdefault(k[1], {})
+                    for c in r["text"]:
+                        if not c.isspace():
+                            seen[c] = seen.get(c, 0) + 1
+    ranked: dict[str, list[str]] = {}
     for (fam, font), _n in sorted(counts.items(), key=lambda kv: -kv[1]):
-        if font and fam not in wanted:
-            wanted[fam] = font
+        if font:
+            ranked.setdefault(fam, []).append(font)
+    wanted: dict[str, str] = {fam: fonts[0] for fam, fonts in ranked.items()}
     lines, found = [], ""
     for fam, command in (("sans", "setsansfont"), ("serif", "setmainfont"), ("mono", "setmonofont")):
-        files = font_family(wanted[fam], fam, found) if fam in wanted else {}
+        files: dict = {}
+        # The kind's most used font, unless it has glyphs for few of the letters set in it: the letters
+        # are then in a script Slides draws with a fallback of its own (hebrew-lesson's Hebrew typed
+        # "in" Noto Sans Symbols, jruby-ja's Japanese "in" Arial, 7%), and a frame whose words are all
+        # such letters embeds the font with no glyph, which lualatex refuses. The next font of the
+        # kind is tried, then the stand-in as before.
+        for font in ranked.get(fam, [])[:MAIN_CANDIDATES]:
+            files = font_family(font, fam, found)
+            if files and font_coverage(files["UprightFont"], letters.get(font, {})) >= MIN_MAIN_COVERAGE:
+                wanted[fam] = font
+                break
+            files = {}
         if not files:
             # Always fontspec, so the source is lualatex and Unicode throughout (a deck's text is
             # any script; pdflatex stops at the first letter it has no definition for): what the
@@ -238,23 +336,55 @@ def font_preamble(target: dict, tree: Path | None) -> list[str]:
         low, asked = flatten(stem), flatten(wanted[fam])
         if not (low.startswith(asked) or asked.startswith(low)):
             print(f"  {wanted[fam]}: not on this machine, set in {stem}")
-        opts = [f"{k}=*-{files[k].stem.partition('-')[2]}" if "-" in files[k].stem else
-                f"{k}=*" if files[k].stem == stem else f"{k}={files[k].stem}"
-                for k in ("UprightFont", "BoldFont", "ItalicFont", "BoldItalicFont") if k in files]
-        if tree is not None:
-            for f in files.values():
-                dest = tree / "fonts" / f.name
-                if not dest.exists():
-                    dest.parent.mkdir(parents=True, exist_ok=True)
-                    shutil.copyfile(f, dest)
-        where = "Path=fonts/," if tree is not None else \
-            "Path=" + next(iter(files.values())).parent.as_posix().rstrip("/") + "/,"
-        ext = next(iter(files.values())).suffix
-        lines.append(f"\\{command}{{{stem}}}[{where}Extension={ext},{','.join(opts)}]")
+        lines.append(f"\\{command}{{{stem}}}[{font_files_latex(files, tree)}]")
+    if ctx is not None:
+        switches: dict[str, str] = {}
+        main = set(wanted.values())
+        for (fam, font), n in sorted(counts.items(), key=lambda kv: -kv[1]):
+            if not font or font in main or font in switches or n < EXTRA_FONT_MIN or \
+                    len(switches) >= EXTRA_FONTS_MAX:
+                continue
+            files = font_family(font, fam)
+            if not files:
+                continue
+            stem = files.pop("stem")
+            low, asked = flatten(stem), flatten(font)
+            if not (low.startswith(asked) or asked.startswith(low)):
+                continue                                # a stand-in: the kind's main font already is one
+            if font_coverage(files["UprightFont"], letters.get(font, {})) < MIN_COVERAGE:
+                # Slides draws what the font lacks in a fallback of its own: Hebrew typed "in" Noto
+                # Sans Symbols, Japanese "in" Arial. Switching to the font would set nothing at all
+                # (and lualatex refuses a font it embeds with no glyph), so those boxes keep the
+                # document's font and whatever fallback the preamble gives it.
+                continue
+            command = "\\adoptfont" + "".join(chr(ord("A") + int(d)) for d in str(len(switches)))
+            switches[font] = command
+            lines.append(f"\\newfontfamily{command}{{{stem}}}[{font_files_latex(files, tree)}]")
+        ctx.font_switches = switches
     return ["\\usepackage{fontspec}"] + lines
 
 
 GYRE = {"sans": "texgyreheros", "serif": "texgyretermes", "mono": "texgyrecursor"}
+
+# A second face gets its switch only if it has glyphs for this share of the letters set in it; the
+# document's face for a kind is the first of its MAIN_CANDIDATES most used with at least half.
+MIN_COVERAGE = 0.9
+MIN_MAIN_COVERAGE = 0.5
+MAIN_CANDIDATES = 3
+
+
+def font_coverage(path: Path, letters: dict[str, int]) -> float:
+    """The share of `letters` (character -> count) the font file has a glyph for: 1.0 when it cannot
+    be told (no fontTools, a file fontTools cannot read)."""
+    total = sum(letters.values())
+    if not total:
+        return 1.0
+    try:
+        from fontTools.ttLib import TTFont
+        cmap = TTFont(path, lazy=True, fontNumber=0).getBestCmap() or {}
+    except Exception:                                   # noqa: BLE001 - ImportError, or any broken file
+        return 1.0
+    return sum(n for c, n in letters.items() if ord(c) in cmap) / total
 
 
 def picture_of(el: dict, tree: Path | None):
@@ -364,7 +494,13 @@ def run_tex(r: dict, base: dict, text: str, ctx: Context) -> str:
     if not core:
         return text_escape(text)
     fam, bfam = r.get("family") or "sans", base.get("family") or "sans"
-    if fam != bfam:
+    if (r.get("font") or "") != (base.get("font") or "") and \
+            (font_switch(r.get("font"), ctx) or font_switch(base.get("font"), ctx)):
+        # a run in another of the deck's typefaces: its own switch, or the kind's document face
+        cmd = font_switch(r.get("font"), ctx) or \
+            {"mono": "\\ttfamily", "serif": "\\rmfamily"}.get(fam, "\\sffamily")
+        core = f"{{{cmd} {core}}}"
+    elif fam != bfam:
         core = {"mono": "\\texttt", "serif": "\\textrm", "sans": "\\textsf"}[fam if fam in ("mono", "serif") else "sans"] + f"{{{core}}}"
     if bool(r.get("bold")) != bool(base.get("bold")):
         core = ("\\textbf" if r.get("bold") else "\\textmd") + f"{{{core}}}"
@@ -397,7 +533,16 @@ def paragraph_base(p: dict) -> dict:
              bool(r.get("bold")), bool(r.get("italic")))
         counts[k] = counts.get(k, 0) + len(r["text"])
     size, colour, family, bold, italic = max(counts, key=counts.get)
-    return {"size": size or 10.0, "color": colour, "family": family, "bold": bold, "italic": italic}
+    fonts: dict = {}
+    for r in p["runs"]:
+        fonts[r.get("font") or ""] = fonts.get(r.get("font") or "", 0) + len(r["text"])
+    return {"size": size or 10.0, "color": colour, "family": family, "bold": bold, "italic": italic,
+            "font": max(fonts, key=fonts.get) if fonts else ""}
+
+
+def font_switch(font: str, ctx: Context) -> str:
+    """The `\\newfontfamily` command `font_preamble` made for a deck's second typeface, or ''."""
+    return (getattr(ctx, "font_switches", None) or {}).get(font or "", "")
 
 
 def runs_tex(runs: list[dict], base: dict, ctx: Context, brk: str) -> str:
@@ -506,6 +651,7 @@ def text_box_latex(el: dict, ctx: Context, ind: str) -> str:
         base = paragraph_base(p)
         lead = f"\\slidesize{{{base['size']:.2f}}}"
         lead += {"mono": "\\ttfamily", "serif": "\\rmfamily"}.get(base["family"], "")
+        lead += font_switch(base.get("font"), ctx)
         lead += "\\bfseries" if base["bold"] else ""
         lead += "\\itshape" if base["italic"] else ""
         lead += f"\\color{{{colour_name(base['color'], ctx.colours)}}}" if base["color"] else ""
@@ -550,6 +696,98 @@ def text_box_latex(el: dict, ctx: Context, ind: str) -> str:
     out.append(f"{ind}  " + ("\\vss" if valign in ("middle", "top") else f"\\vskip{inset:.2f}pt") + "}")
     out.append(f"{ind}\\end{{textblock*}}")
     return "\n".join(out)
+
+
+def url_latex(url: str) -> str:
+    """A URL as `\\href`'s first argument takes it inside a frame body."""
+    return url.replace("\\", "/").replace("%", "\\%").replace("#", "\\#").replace("{", "%7B").replace("}", "%7D")
+
+
+def letterboxed(src: Path, w: float, h: float, dest: Path) -> Path:
+    """A video's poster frame as the player shows it in a `w` x `h` box: the frame itself (YouTube's
+    thumbnail carries a 16:9 video letterboxed into 4:3; the black bars are found and cut off) fitted
+    into the box, on black. A 4:3 box gives the thumbnail back as it was; a 16:9 box shows no bars."""
+    from PIL import Image
+    if dest.exists():
+        return dest
+    with Image.open(src) as img:
+        img = img.convert("RGB")
+        width, height = img.size
+        ink = img.convert("L").point(lambda v: 255 if v > 40 else 0).getbbox()   # rows that are not bars
+        if ink and ink[3] - ink[1] > height // 3:
+            img = img.crop((0, ink[1], width, ink[3]))
+        cw, ch = img.size
+        out_w = 960
+        out_h = max(1, round(out_w * h / max(w, 0.1)))
+        k = min(out_w / cw, out_h / ch)
+        frame = img.resize((max(1, round(cw * k)), max(1, round(ch * k))), Image.LANCZOS)
+        canvas = Image.new("RGB", (out_w, out_h), (0, 0, 0))
+        canvas.paste(frame, ((out_w - frame.width) // 2, (out_h - frame.height) // 2))
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        canvas.save(dest, "PNG")
+    return dest
+
+
+def video_block(el: dict, ctx: Context, ind: str, tree: Path | None) -> str:
+    """A video: the frame Slides shows before it plays, linked to where it plays. With no poster
+    frame to show (a Drive video: no API gives one) a dark panel with a play symbol stands in."""
+    video = el["video"]
+    x0, y0, x1, y1 = el.get("box") or el["bbox"]
+    w, h = max(x1 - x0, 0.1), max(y1 - y0, 0.1)
+    link = video.get("url")
+    body = None
+    if el.get("file") and Path(el["file"]).exists() and tree is not None:
+        dest = tree / "figures" / f"video-{flatten(video.get('id') or 'x')[:24]}-{round(w)}x{round(h)}.png"
+        try:
+            framed = letterboxed(Path(el["file"]), w, h, dest)
+        except OSError:
+            framed = None
+        if framed is not None:
+            from .inverse import Picture, natural_size
+            pic = Picture(framed.relative_to(tree).as_posix(), framed, natural_size(framed))
+            body = picture_block({**{k: v for k, v in el.items() if k != "crop"}}, pic, ctx, ind)
+    if body is None:
+        ctx.packages.add("\\usepackage{tikz}")
+        grey, white = colour_name("#212121", ctx.colours), colour_name("#ffffff", ctx.colours)
+        r = min(w, h) / 6
+        cx, cy = w / 2, -h / 2
+        tri = (f"({cx - r * 0.45:.1f}pt,{cy + r * 0.6:.1f}pt) -- ({cx + r * 0.65:.1f}pt,{cy:.1f}pt) -- "
+               f"({cx - r * 0.45:.1f}pt,{cy - r * 0.6:.1f}pt) -- cycle")
+        outline = el.get("outline")
+        draw = f",draw={colour_name(outline['color'], ctx.colours)},line width={outline['weight']:.2f}pt" \
+            if outline else ""
+        body = tikz_block(f"\\path[fill={grey}{draw}] (0pt,0pt) rectangle ({w:.1f}pt,{-h:.1f}pt);\n"
+                          f"{ind}    \\path[draw={white},line width={max(r / 8, 0.4):.2f}pt] ({cx:.1f}pt,{cy:.1f}pt) circle ({r:.1f}pt);\n"
+                          f"{ind}    \\path[fill={white}] {tri};", x0, y0, w, h, ind)
+    if not link:
+        return body
+    # the whole block's content is the link: the picture or the panel, clicked, plays the video
+    head, _, rest = body.partition("\n")
+    inner, _, tail = rest.rpartition(f"{ind}\\end{{textblock*}}")
+    return f"{head}\n{ind}  \\href{{{url_latex(link)}}}{{%\n{inner}{ind}  }}%\n{ind}\\end{{textblock*}}{tail}"
+
+
+def wordart_block(el: dict, ctx: Context, ind: str) -> str:
+    """WordArt: its words stretched to its box, as Slides draws them (Slides keeps no size for them,
+    only the box), turned with the element. Fill and outline are not in the API: the text colour."""
+    from .inverse import latex_escape
+    x0, y0, x1, y1 = el.get("box") or el["bbox"]
+    w, h = max(x1 - x0, 0.1), max(y1 - y0, 0.1)
+    lines = ["".join(r["text"] for r in p["runs"]) for p in el["paragraphs"]]
+    colour = next((r.get("color") for p in el["paragraphs"] for r in p["runs"] if r.get("color")), None)
+    text = latex_escape(lines[0]) if len(lines) == 1 else \
+        "\\begin{tabular}{@{}c@{}}" + "\\\\".join(latex_escape(t) for t in lines) + "\\end{tabular}"
+    ctx.packages.add("\\usepackage{graphicx}")
+    ctx.packages.add(TEXTPOS)
+    # bold: Slides draws WordArt with a heavy outline around the letters, so thin strokes read wrong
+    body = f"\\resizebox*{{{w:.1f}pt}}{{{h:.1f}pt}}{{\\bfseries {text}}}"
+    if colour:
+        body = f"\\textcolor{{{colour_name(colour, ctx.colours)}}}{{{body}}}"
+    if el.get("rotation"):
+        body = f"\\rotatebox[origin=c]{{{-el['rotation']:g}}}{{{body}}}"
+    bx0, by0, bx1, _ = el["bbox"]
+    return (f"{ind}\\begin{{textblock*}}{{{bx1 - bx0:.1f}pt}}({bx0:.1f}pt,{by0:.1f}pt)\n"
+            f"{ind}  \\noindent{body}\n{ind}\\end{{textblock*}}\n")
 
 
 def tikz_block(body: str, x0: float, y0: float, w: float, h: float, ind: str) -> str:
@@ -748,6 +986,11 @@ def slide_latex(s: dict, style_for, ctx: Context, flow: bool, tree: Path | None 
             out.append(shape_block(el, ctx, "  ").rstrip("\n"))
         elif el["kind"] == "table":
             out.append(table_block(el, ctx, "  "))
+        elif el["kind"] == "image" and el.get("video"):
+            ctx.packages.add(TEXTPOS)
+            out.append(video_block(el, ctx, "  ", tree).rstrip("\n"))
+        elif el["kind"] == "text" and el.get("wordart"):
+            out.append(wordart_block(el, ctx, "  ").rstrip("\n"))
         elif el["kind"] == "image":
             pic = picture_of(el, tree)
             if pic is not None:
@@ -788,10 +1031,11 @@ def preamble(target: dict, ctx: Context, flow: bool, tree: Path | None = None) -
     """A theme that draws nothing. A foreign deck carries its own decoration in its elements, so
     anything beamer adds by itself (navigation bar, headline, footline, frame title style) is ink
     the deck does not have, and every pixel of it is a residual the loop cannot remove."""
-    opt = page_option(target["slides"][0].get("size") if target["slides"] else None)
+    opt, paper = page_setup(target["slides"][0].get("size") if target["slides"] else target.get("page_size"))
     from .scripts import script_preamble
-    fonts = font_preamble(target, tree)
+    fonts = getattr(ctx, "font_lines", None) or font_preamble(target, tree, ctx)
     lines = [f"\\documentclass[{opt}]{{beamer}}" if opt else "\\documentclass{beamer}",
+             *([paper] if paper else []),
              "\\usetheme{default}",
              "\\setbeamertemplate{navigation symbols}{}",
              "\\setbeamertemplate{footline}{}",
@@ -828,6 +1072,8 @@ def bootstrap(target: dict, tex: Path, flow: bool = False) -> str:
     style_for = level_style(target)
     tex.parent.mkdir(parents=True, exist_ok=True)
     deck_bg = background_colour(target)
+    # the typefaces first: a text box whose letters are in the deck's second face switches to it
+    ctx.font_lines = font_preamble(target, tex.parent, ctx)
     # "% slide N" says which deck slide a frame is, for a person reading the source and for tools
     # that compile frames one at a time (devtools.adopt_bench finds the frames that break a build)
     frames = [f"% slide {n}\n" + slide_latex(s, style_for, ctx, flow, tex.parent, deck_bg)

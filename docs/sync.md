@@ -774,6 +774,34 @@ the nearest family of the same kind to one that *was* found, which is said out l
 quote slides are Space Mono, on no machine here, and LaTeX's own typewriter is narrow enough to break
 every one of their lines in another place — 0.42 ink overlap against 0.68 for Google Sans Code.
 
+Most fonts a person picks in Slides are Google Fonts, and those the machine lacks are **fetched from
+github.com/google/fonts** (`fontfetch.fetch_family`) into a user cache (`$B2S_FONT_CACHE`, else
+`%LOCALAPPDATA%\beamer2slides\fonts` / `~/.cache/beamer2slides/fonts`) before a stand-in is chosen:
+`METADATA.pb` says which file is which style, a variable font is cut into Regular/Bold/Italic/BoldItalic
+static instances with fontTools' instancer (wght 400/700, clamped; no bold below 600 is invented), and
+the licence travels into `<tree>/fonts/` with the files. A family google/fonts does not have (Consolas,
+Microsoft JhengHei) is remembered in `missing.json`; offline, without fontTools or with `$B2S_FONT_FETCH=0` nothing
+is fetched and adopt does what it did before, and it never fetches while `$B2S_FONTS` is set. Over the
+adopt corpus, the fonts no machine here had were led by Open Sans, Montserrat, Delius, Inter, Yanone
+Kaffeesatz, Alegreya and Work Sans (by letters). Every other font the deck sets 40 letters or more in
+gets a `\newfontfamily` switch of its own (`ctx.font_switches`), put at the top of each box mostly in
+that font: a heading face over a body face (Montserrat over Open Sans) is both the deck's look.
+
+**What else is on a slide.** A linked Sheets chart is the picture Slides keeps of it (`contentUrl`, role
+`figure`, with `chart` = spreadsheet and chart ids). A video is the frame the player shows, linked
+(`\href`) to where it plays: YouTube's `hqdefault` thumbnail with its letterbox bars cut and the frame
+fitted into the element's box on black (`adopt.letterboxed`); a Drive video, whose poster frame no API
+under `drive.file` gives, or a YouTube video whose thumbnail is gone, a dark panel with a play symbol.
+WordArt is its `renderedText` stretched to the box (`\resizebox*`), bold, turned with the element; its
+fill and outline are not in the API, so it is black.
+
+**The page** is the deck's own aspect: beamer's page for 16:9, 16:10 and 4:3 (1440x810 and 1920x1080 are
+ordinary 16:9), and any other page (A4 portrait, a phone-shaped story) is half the deck's size, written
+with `\geometry{papersize=...}` after the class (`adopt.page_setup`) instead of the nearest beamer ratio,
+which drew a portrait deck squeezed onto a landscape page. A foreign deck more than 5 times beamer's page
+(`deck_ir.MAX_BEAMER_SCALE`: a 48 x 36 in poster is 4:3) keeps half its size too, or its 24 pt text
+would be 2.5 pt.
+
 Absolute-first is a decision, not a shortcut: a foreign deck's geometry *is* boxes the person
 dragged, and every guess at flow text that misses costs the loop a `geometry` round to escalate back
 into a textblock (`inverse.Planner.geometry`). `--flow` asks for the readable version (frame titles,
@@ -787,7 +815,9 @@ everything else. On the 39-slide DevFest 2020 template the bootstrap alone reach
 read only the slide's own elements), in a 34 s build.
 
 Tests: `tests/test_adopt.py` (offline, no TeX and no Google: a hand-built `presentations.get` answer
-shaped like those templates, the IR that comes back and the source written from it).
+shaped like those templates, the IR that comes back and the source written from it) and
+`tests/test_adopt_media.py` (charts, videos, WordArt, page sizes, and font fetching against a fake
+google/fonts with fonts built by fontTools).
 
 ## Never lose deck edits
 

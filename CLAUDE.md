@@ -464,6 +464,11 @@ version. Scored by ink overlap with the deck's own slide images inside its eleme
 counts misrepresent fidelity: ten pixel-perfect squares read back as one `diagram` = 10
 `element_missing`): the DevFest 2020 template's 39 slides reach 0.70 from the bootstrap alone, 0.22
 when only the slide's own elements were read. Tests: `tests/test_adopt.py` (offline).
+Linked charts are their `contentUrl` picture, videos their poster frame (YouTube `hqdefault`,
+letterbox cut; Drive: a play panel) inside an `\href`, WordArt its `renderedText` in a `\resizebox*`;
+a page beamer has no ratio for is written with `\geometry{papersize}`; fonts the machine lacks are
+fetched from google/fonts into a user cache and variable ones cut into static instances
+(`fontfetch.py`, `$B2S_FONT_FETCH=0` / `$B2S_FONTS` turn it off). Tests: `tests/test_adopt_media.py`.
 
 Opt-in suite (real Google Slides, ~95 s): `python -m pytest -m slides` (the default run deselects
 the `slides` marker, pyproject.toml). It converts the stress decks (19–22, 25, 13, demo) 3 at a
