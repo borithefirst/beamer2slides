@@ -541,7 +541,20 @@ missing one takes a metric-compatible fetched stand-in (`adopt.SUBSTITUTES`: Ari
 Carlito, Archivo Black, Libre Bodoni...); CJK falls back to the Noto Sans JP/KR/SC/TC Slides draws
 with (`scripts.RENDERER_CJK`); a fixed left-aligned box whose thumbnail ink starts at its edge (and
 whose first ink row is above the inset line) has no insets (`deck_ir.thumbnail_insets`, wherever thumbnails are read:
-gdg24 0.896 -> 0.900). Left: comps-analysis (0.336; its text sits ~4 pt high - insets the API does
+gdg24 0.896 -> 0.900). Then (`g24-base` -> `g24-final`, boxes 0.924 -> 0.938, page 0.920 -> 0.934,
+pixels 0.976 -> 0.978, no deck down): "Google Sans Text" is Google Sans' variable font at opsz 17,
+not the opsz 18 display cut that stood in 3% narrower (`fontfetch.OPTICAL`, renamed instances);
+`thumbnail_insets` leaves out only the rows another element crosses instead of the whole box
+(gdg24's overlapping heading/caption boxes, code under a highlight bar) and takes ink on the box's
+first pixel column unless it goes on outside; and a run's `weightedFontFamily.weight` other than
+400/700 (`run["weight"]`) is set in an instance `fontfetch.weight_file` cuts from the fetched
+variable font, declared as `FontFace={w600}{n}{...}` and selected by `\fontseries{w600}`
+(`adopt.weight_faces`, `series`). gdg24 0.906 -> 0.985, creandum-board 0.867 -> 0.923,
+sc-dark-minimal 0.900 -> 0.955, journey-maps 0.864 -> 0.909, intro-lecture 0.937 -> 0.948,
+devfest2020 0.897 -> 0.903. Left in gdg24: code overflowing a middle-aligned box (slides 78-79), Google
+Sans Mono vs Code glyph offsets (77), centred boxes whose insets no ink edge shows (73), and captions
+whose first spaceAbove the deck does not apply when their text overflows (52-56; the rule is unsettled).
+Left: comps-analysis (0.336; its text sits ~4 pt high - insets the API does
 not report - and its Bodoni is narrower than any fetchable one), devfest2020's numbered lists (Slides
 places big numbers differently), jruby-ja (gradient backdrop; Japanese still sets wider), hebrew-lesson.
 Known gaps, by what they cost: text insets the API does not report where no autofit height gives

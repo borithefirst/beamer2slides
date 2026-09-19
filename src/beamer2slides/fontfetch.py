@@ -126,6 +126,13 @@ def cached(family: str) -> dict[str, Path]:
     return {s: folder / f"{stem}-{s}.ttf" for s in STYLES if (folder / f"{stem}-{s}.ttf").exists()}
 
 
+# Families Slides offers under a name of their own that google/fonts carries as an optical size of
+# another family's variable font: "Google Sans Text" is Google Sans at opsz 17 (the text cut, looser
+# and wider: gdg24's bold 50 pt "Statistics" sets 3.2% wider there, as the deck's thumbnail shows it,
+# than in the opsz 18 default that stood in for it). Folder name -> (family, axis location).
+OPTICAL = {"googlesanstext": ("Google Sans", {"opsz": 17.0})}
+
+
 def fetch_family(family: str, log=print) -> dict[str, Path] | None:
     """The family's static files by style name, fetched into the cache if they are not there yet;
     None when google/fonts has no such family or it cannot be fetched (no network, no fontTools)."""
@@ -135,6 +142,9 @@ def fetch_family(family: str, log=print) -> dict[str, Path] | None:
     if "Regular" in have:
         return have
     folder = folder_name(family)
+    base, axes = OPTICAL.get(folder, (None, {}))
+    if base is not None:
+        folder = folder_name(base)
     if not folder or folder in _missing():
         return None
     meta, lic = None, None
@@ -150,18 +160,22 @@ def fetch_family(family: str, log=print) -> dict[str, Path] | None:
         if meta is None or not meta["fonts"]:
             _remember_missing(folder)
             return None
-        out = _build(family, folder, lic, meta)
+        if base is not None and not any("[" in f["filename"] for f in meta["fonts"]):
+            return None                                 # no variable font to cut the optical size from
+        out = _build(family, folder, lic, meta, axes)
     except (OSError, ValueError, ImportError, KeyError) as e:     # offline, GitHub down, a broken font
         log(f"  {family}: could not fetch it from google/fonts ({type(e).__name__}: {str(e)[:80]})")
         return None
     if out:
-        log(f"  {family}: fetched from google/fonts ({lic}) into {cache_dir() / folder}")
+        log(f"  {family}: fetched from google/fonts ({lic}) into {cache_dir() / folder_name(family)}")
     return out or None
 
 
-def _build(family: str, folder: str, lic: str, meta: dict) -> dict[str, Path]:
-    dest = cache_dir() / folder
-    src = dest / "src"
+def _build(family: str, folder: str, lic: str, meta: dict, axes: dict | None = None) -> dict[str, Path]:
+    """The four static instances of `family` from google/fonts' `folder` (its own, or the family an
+    OPTICAL name is cut from, at the axis location `axes`), into the family's own cache folder."""
+    dest = cache_dir() / folder_name(family)
+    src = cache_dir() / folder / "src"
     stem = stem_name(family)
     downloaded: dict[str, Path] = {}
 
@@ -188,17 +202,23 @@ def _build(family: str, folder: str, lic: str, meta: dict) -> dict[str, Path]:
             from fontTools.ttLib import TTFont
             from fontTools.varLib import instancer
             vf = TTFont(download(variable[0]["filename"]))
-            axes = {a.axisTag: a for a in vf["fvar"].axes}
-            loc = {tag: a.defaultValue for tag, a in axes.items()}
-            if "wght" in axes:
-                w = axes["wght"]
+            have = {a.axisTag: a for a in vf["fvar"].axes}
+            loc = {tag: a.defaultValue for tag, a in have.items()}
+            for tag, value in (axes or {}).items():
+                if tag in have:
+                    loc[tag] = min(max(value, have[tag].minValue), have[tag].maxValue)
+            if "wght" in have:
+                w = have["wght"]
                 loc["wght"] = min(max(weight, w.minValue), w.maxValue)
                 if weight == 700 and w.maxValue < 600:
                     continue                                    # no bold in this family: fontspec fakes none
-            if italic and "ital" in axes:
-                loc["ital"] = axes["ital"].maxValue
+            if italic and "ital" in have:
+                loc["ital"] = have["ital"].maxValue
             font = instancer.instantiateVariableFont(vf, loc)
             font["OS/2"].usWeightClass = int(loc.get("wght", weight))
+            if axes:
+                rename(font, family, style)
+            dest.mkdir(parents=True, exist_ok=True)
             with tempfile.TemporaryDirectory(dir=dest) as tmp:
                 part = Path(tmp) / target.name
                 font.save(part)
@@ -210,3 +230,67 @@ def _build(family: str, folder: str, lic: str, meta: dict) -> dict[str, Path]:
             _write_atomic(target, download(best["filename"]).read_bytes())
         out[style] = target
     return out if "Regular" in out else {}
+
+
+def weight_file(upright: Path, weight: int, italic: bool = False) -> Path | None:
+    """A static instance at `weight` of a family this cache holds (`upright` is its Regular file),
+    cut from the variable font it was made from - Slides sets a weight per run (gdg24's headings are
+    Google Sans 600 and 500, journey-maps' text Montserrat 300 and 500) where fontspec's four styles
+    have only 400 and 700. None when the family is not a variable one fetched here, has no such
+    weight on its axis, or has no italic when one is asked for. Written beside the four styles as
+    `<Stem>-W<weight>[Italic].ttf`, which `adopt.font_candidates` does not read as a style."""
+    upright = Path(upright)
+    dest = upright.parent
+    try:
+        if dest.parent.resolve() != cache_dir().resolve():
+            return None
+    except OSError:
+        return None
+    stem = upright.stem.partition("-")[0]
+    target = dest / f"{stem}-W{weight}{'Italic' if italic else ''}.ttf"
+    if target.exists():
+        return target
+    base, axes = OPTICAL.get(dest.name, (None, {}))
+    src = cache_dir() / (folder_name(base) if base else dest.name) / "src"
+    variable = [f for f in sorted(src.glob("*[[]*].ttf")) if ("Italic" in f.name) == italic] if src.is_dir() else []
+    if not variable:
+        return None
+    try:
+        from fontTools.ttLib import TTFont
+        from fontTools.varLib import instancer
+        vf = TTFont(variable[0])
+        have = {a.axisTag: a for a in vf["fvar"].axes}
+        w = have.get("wght")
+        if w is None or not w.minValue <= weight <= w.maxValue:
+            return None
+        loc = {tag: a.defaultValue for tag, a in have.items()}
+        for tag, value in axes.items():
+            if tag in have:
+                loc[tag] = min(max(value, have[tag].minValue), have[tag].maxValue)
+        loc["wght"] = float(weight)
+        if italic and "ital" in have:
+            loc["ital"] = have["ital"].maxValue
+        font = instancer.instantiateVariableFont(vf, loc)
+        font["OS/2"].usWeightClass = int(weight)
+        with tempfile.TemporaryDirectory(dir=dest) as tmp:
+            part = Path(tmp) / target.name
+            font.save(part)
+            os.replace(part, target)
+    except (OSError, ValueError, ImportError, KeyError, AssertionError):
+        return None
+    return target
+
+
+def rename(font, family: str, style: str) -> None:
+    """Give an instance cut for an OPTICAL name that name in its own name table, which is what
+    `adopt.font_candidates` also reads: left as it was, Google Sans Text's files would call themselves
+    Google Sans and could be taken for the display cut."""
+    name = font["name"]
+    words = {"Regular": "Regular", "Bold": "Bold", "Italic": "Italic", "BoldItalic": "Bold Italic"}[style]
+    for rec in list(name.names):
+        if rec.nameID in (16, 17, 21, 22, 25):              # typographic names would still say the base
+            name.removeNames(nameID=rec.nameID)
+    for nid, value in ((1, family), (2, words), (4, f"{family} {words}"),
+                       (6, f"{stem_name(family)}-{style}")):
+        name.setName(value, nid, 3, 1, 0x409)
+        name.setName(value, nid, 1, 0, 0)

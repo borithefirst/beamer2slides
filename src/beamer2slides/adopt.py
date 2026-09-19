@@ -341,6 +341,54 @@ def font_files_latex(files: dict, tree: Path | None) -> str:
     return f"{where}Extension={exts.pop()},{','.join(opts)}"
 
 
+# A weight other than regular and bold gets a face of its own when it sets this many letters of a font.
+WEIGHT_MIN_LETTERS = 20
+
+
+def weight_faces(font: str, files: dict, used: dict, tree: Path | None, font_weights: dict) -> str:
+    """fontspec `FontFace` options for the weights a deck sets `font` in besides 400 and 700 (`used`:
+    (weight, italic) -> letters), each an instance `fontfetch.weight_file` cuts from the variable
+    font the family was fetched as, under the NFSS series `w<weight>` (`series`). Slides draws a
+    weight per run: gdg24's headings are Google Sans 600 ("This is a Headline." 2.4% narrower than
+    the bold that stood in for it) and 500, journey-maps' text Montserrat 300 and 500, sc-dark-minimal's
+    Inter 300. What cannot be cut (a family on the machine, a static one, a weight off its axis)
+    keeps `bold`'s rounding. The (weight, italic) pairs given faces go into `font_weights[font]`."""
+    upright = files.get("UprightFont")
+    if not upright or not used or any(f.suffix.lower() != ".ttf" for f in files.values() if isinstance(f, Path)):
+        return ""
+    from .fontfetch import weight_file
+    opts, got = [], set()
+    for (w, italic), n in sorted(used.items()):
+        if n < WEIGHT_MIN_LETTERS:
+            continue
+        path = weight_file(upright, w, italic)
+        if path is None:
+            continue
+        if tree is not None:
+            dest = tree / "fonts" / path.name
+            if not dest.exists():
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(path, dest)
+        opts.append(f"FontFace={{w{w}}}{{{'it' if italic else 'n'}}}{{Font={path.stem}}}")
+        got.add((w, italic))
+    if got:
+        font_weights.setdefault(font, set()).update(got)
+    return "".join("," + o for o in opts)
+
+
+def series(r: dict, ctx: Context) -> str:
+    """The NFSS series a run (or a base style) is set in: `w<weight>` where `weight_faces` gave its
+    font that weight, else bold or not."""
+    w = r.get("weight")
+    if w and (int(w), bool(r.get("italic"))) in (getattr(ctx, "font_weights", None) or {}).get(r.get("font") or "", ()):
+        return f"w{int(w)}"
+    return "b" if r.get("bold") else "m"
+
+
+def series_switch(s: str) -> str:
+    return {"b": "\\bfseries ", "m": "\\mdseries "}.get(s) or f"\\fontseries{{{s}}}\\selectfont "
+
+
 # A deck's second, third... typeface of one kind gets a switch of its own when it sets this many
 # letters: a heading face and a body face (Montserrat over Open Sans) are both the deck's look.
 EXTRA_FONT_MIN = 40
@@ -363,12 +411,17 @@ def font_preamble(target: dict, tree: Path | None, ctx: Context | None = None) -
     whichever was used more."""
     counts: dict = {}
     letters: dict[str, dict[str, int]] = {}
+    weights: dict[str, dict[tuple[int, bool], int]] = {}
     for s in target["slides"]:
         for e in s["elements"]:
             for p in e.get("paragraphs", []):
                 for r in p["runs"]:
                     k = (r.get("family") or "sans", r.get("font") or "")
                     counts[k] = counts.get(k, 0) + len(r["text"])
+                    if r.get("weight"):
+                        w = weights.setdefault(k[1], {})
+                        wk = (int(r["weight"]), bool(r.get("italic")))
+                        w[wk] = w.get(wk, 0) + len(r["text"].strip())
                     seen = letters.setdefault(k[1], {})
                     for c in r["text"]:
                         if not c.isspace():
@@ -379,6 +432,7 @@ def font_preamble(target: dict, tree: Path | None, ctx: Context | None = None) -
             ranked.setdefault(fam, []).append(font)
     wanted: dict[str, str] = {fam: fonts[0] for fam, fonts in ranked.items()}
     lines, found = [], ""
+    font_weights: dict[str, set[tuple[int, bool]]] = {}
     for fam, command in (("sans", "setsansfont"), ("serif", "setmainfont"), ("mono", "setmonofont")):
         files: dict = {}
         # The kind's most used font, unless it has glyphs for few of the letters set in it: the letters
@@ -407,10 +461,15 @@ def font_preamble(target: dict, tree: Path | None, ctx: Context | None = None) -
         stem, match = files.pop("stem"), files.pop("match")
         found = found or match                          # what the rest of the deck is set in
         low, asked = flatten(match), flatten(wanted[fam])
+        faces = ""
         if not (low.startswith(asked) or asked.startswith(low)):
             print(f"  {wanted[fam]}: not on this machine, set in {stem}")
-        lines.append(f"\\{command}{{{stem}}}[{font_files_latex(files, tree)}{stretch(wanted[fam], stem, files, target)}]")
+        else:
+            faces = weight_faces(wanted[fam], files, weights.get(wanted[fam], {}), tree, font_weights)
+        lines.append(f"\\{command}{{{stem}}}[{font_files_latex(files, tree)}{faces}"
+                     f"{stretch(wanted[fam], stem, files, target)}]")
     if ctx is not None:
+        ctx.font_weights = font_weights
         switches: dict[str, str] = {}
         main = set(wanted.values())
         for (fam, font), n in sorted(counts.items(), key=lambda kv: -kv[1]):
@@ -432,7 +491,9 @@ def font_preamble(target: dict, tree: Path | None, ctx: Context | None = None) -
                 continue
             command = "\\adoptfont" + "".join(chr(ord("A") + int(d)) for d in str(len(switches)))
             switches[font] = command
-            lines.append(f"\\newfontfamily{command}{{{stem}}}[{font_files_latex(files, tree)}{stretch(font, stem, files, target)}]")
+            faces = weight_faces(font, files, weights.get(font, {}), tree, font_weights)
+            lines.append(f"\\newfontfamily{command}{{{stem}}}[{font_files_latex(files, tree)}{faces}"
+                         f"{stretch(font, stem, files, target)}]")
         ctx.font_switches = switches
     return ["\\usepackage{fontspec}"] + lines
 
@@ -681,8 +742,12 @@ def run_tex(r: dict, base: dict, text: str, ctx: Context) -> str:
         core = f"{{{cmd} {core}}}"
     elif fam != bfam:
         core = {"mono": "\\texttt", "serif": "\\textrm", "sans": "\\textsf"}[fam if fam in ("mono", "serif") else "sans"] + f"{{{core}}}"
-    if bool(r.get("bold")) != bool(base.get("bold")):
-        core = ("\\textbf" if r.get("bold") else "\\textmd") + f"{{{core}}}"
+    sr, sb = series(r, ctx), series(base, ctx)
+    if sr != sb:
+        if sr in ("b", "m") and sb in ("b", "m"):
+            core = ("\\textbf" if sr == "b" else "\\textmd") + f"{{{core}}}"
+        else:
+            core = f"{{{series_switch(sr)}{core}}}"
     if bool(r.get("italic")) != bool(base.get("italic")):
         core = ("\\textit" if r.get("italic") else "\\textup") + f"{{{core}}}"
     if r.get("smallcaps"):
@@ -709,14 +774,17 @@ def paragraph_base(p: dict) -> dict:
     counts: dict = {}
     for r in p["runs"]:
         k = (round(r.get("size") or 0, 2), (r.get("color") or "").lower() or None, r.get("family") or "sans",
-             bool(r.get("bold")), bool(r.get("italic")))
+             bool(r.get("bold")), bool(r.get("italic")), r.get("weight"))
         counts[k] = counts.get(k, 0) + len(r["text"])
-    size, colour, family, bold, italic = max(counts, key=counts.get)
+    size, colour, family, bold, italic, weight = max(counts, key=counts.get)
     fonts: dict = {}
     for r in p["runs"]:
         fonts[r.get("font") or ""] = fonts.get(r.get("font") or "", 0) + len(r["text"])
-    return {"size": size or 10.0, "color": colour, "family": family, "bold": bold, "italic": italic,
-            "font": max(fonts, key=fonts.get) if fonts else ""}
+    out = {"size": size or 10.0, "color": colour, "family": family, "bold": bold, "italic": italic,
+           "font": max(fonts, key=fonts.get) if fonts else ""}
+    if weight:
+        out["weight"] = weight
+    return out
 
 
 def font_switch(font: str, ctx: Context) -> str:
@@ -891,7 +959,8 @@ def text_box_latex(el: dict, ctx: Context, ind: str) -> str:
         lead = f"\\slidesize{{{base['size']:.2f}}}"
         lead += {"mono": "\\ttfamily", "serif": "\\rmfamily"}.get(base["family"], "")
         lead += font_switch(base.get("font"), ctx)
-        lead += "\\bfseries" if base["bold"] else ""
+        weight = series(base, ctx)
+        lead += "" if weight == "m" else series_switch(weight)
         lead += "\\itshape" if base["italic"] else ""
         lead += f"\\color{{{colour_name(base['color'], ctx.colours)}}}" if base["color"] else ""
         brk = "\\unskip\\hfil\\break " if justified else "\\unskip\\break "

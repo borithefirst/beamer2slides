@@ -204,6 +204,46 @@ def test_the_thumbnail_tells_a_fixed_box_with_no_insets():
     thumbnail_insets([el, ground], *thumb(50.6, 54.2))
     assert "insets" not in el["box"], "a picture over the box hides what it would show"
 
+    # gdg24's stat grids: a caption box overlaps the heading box's lower rows. Those rows are not read,
+    # the rest still are - either way round.
+    def caption(ink_x):
+        im, px = thumb(50.6, 54.2)
+        im[int(88 * px):int(94 * px), int(ink_x * px):int((ink_x + 30) * px)] = 20
+        return im, px
+
+    cap = {"kind": "text", "bbox": [45.0, 85.0, 200.0, 110.0]}
+    el = element()
+    thumbnail_insets([el, cap], *caption(55.0))
+    assert el["box"].get("insets") == 0, "a box crossing the lower rows leaves the first line readable"
+    el = element()
+    im, px = caption(50.3)
+    im[int(54.2 * px):int(60.2 * px)] = 240
+    im[int(58.2 * px):int(64.2 * px), int(55 * px):int(95 * px)] = 20
+    thumbnail_insets([el, cap], im, px)
+    assert "insets" not in el["box"], "the caption's words at the edge are not this box's"
+
+
+def test_ink_on_the_boxs_first_column_is_its_own_unless_it_goes_on_outside():
+    """A glyph 0.13 pt inside the box edge rounds onto its first pixel column (gdg24's "Connect");
+    ink that runs on past the edge is something else's (a highlight bar under a code listing)."""
+    import numpy as np
+
+    from beamer2slides.deck_ir import thumbnail_insets
+    px = 4.0
+
+    def read(ink_from):
+        el = {"kind": "text", "bbox": [50.0, 50.0, 200.0, 100.0], "anchor": [54.22, 64.0], "wrap_width": 141.5,
+              "paragraphs": [{"align": "left", "bullet": None, "runs": [{"text": "Words", "size": 8.0}],
+                              "slides": {"indent_first": 0, "indent_start": 0}}],
+              "box": {"valign": "top", "scale": 720 / 453.54}}
+        im = np.full((int(300 * px), int(453.54 * px), 3), 240, dtype=np.int16)
+        im[int(54.2 * px):int(60.2 * px), int(ink_from * px):int(90 * px)] = 20
+        thumbnail_insets([el], im, px)
+        return el["box"].get("insets")
+
+    assert read(50.0) == 0
+    assert read(48.0) is None
+
 
 def test_list_items_collapse_their_spacing_and_other_paragraphs_do_not(tmp_path):
     """Between two list items COLLAPSE_LISTS drops spaceBelow; between two plain paragraphs it is

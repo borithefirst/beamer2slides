@@ -276,7 +276,8 @@ def base_style(pe: dict, resolver: StyleResolver, level: int) -> dict:
         base["fontSize"] = dim(parent["fontSize"])
     if parent.get("weightedFontFamily"):
         base["fontFamily"] = parent["weightedFontFamily"]["fontFamily"]
-        if parent["weightedFontFamily"].get("weight", 400) >= 600:
+        base["weight"] = parent["weightedFontFamily"].get("weight", 400)
+        if base["weight"] >= 600:
             base["bold"] = True
     if parent.get("foregroundColor"):
         base["color"] = rgb_hex(parent["foregroundColor"], resolver.scheme) or base["color"]
@@ -344,7 +345,10 @@ def text_paragraphs(pe: dict, text: dict, resolver: StyleResolver, fonts: FontMa
             family = (st.get("weightedFontFamily") or {}).get("fontFamily") or st.get("fontFamily") or base["fontFamily"]
             size = (dim(st.get("fontSize")) or base["fontSize"]) * font_scale
             bold = st.get("bold", base["bold"])
-            if (st.get("weightedFontFamily") or {}).get("weight", 400) >= 600:
+            weight = (st.get("weightedFontFamily") or {}).get("weight") or base.get("weight") or 400
+            if st.get("bold") is not None and "weightedFontFamily" not in st:
+                weight = 700 if st["bold"] else 400
+            if weight >= 600:
                 bold = True
             italic = st.get("italic", base["italic"])
             color = rgb_hex(st.get("foregroundColor"), resolver.scheme) or base["color"]
@@ -369,6 +373,10 @@ def text_paragraphs(pe: dict, text: dict, resolver: StyleResolver, fonts: FontMa
                    "script": {"SUPERSCRIPT": "super", "SUBSCRIPT": "sub"}.get(st.get("baselineOffset")),
                    "underline": bool(st.get("underline")), "strike": bool(st.get("strikethrough")),
                    "highlight": rgb_hex(st.get("backgroundColor"), resolver.scheme)}
+            if foreign and weight not in (400, 700):
+                # a weight between (or beyond) regular and bold, which `bold` can only round: adopt
+                # sets it in an instance of that weight where it can cut one (fontfetch.weight_file)
+                run["weight"] = int(weight)
             if family == "Roboto Mono" and text_part.strip("\u00a0") == "" and "\u00a0" in text_part:
                 run["hole"] = round(len(text_part) * 0.6 * size / scale, 2)
                 run["text"] = " "
@@ -436,9 +444,10 @@ def text_paragraphs(pe: dict, text: dict, resolver: StyleResolver, fonts: FontMa
 
 def merge_runs(runs: list[dict]) -> list[dict]:
     out = []
-    keys = ("font", "size", "bold", "italic", "color", "link", "script", "underline", "strike", "highlight", "smallcaps")
+    keys = ("font", "size", "bold", "italic", "color", "link", "script", "underline", "strike", "highlight", "smallcaps",
+            "weight")
     for r in runs:
-        if out and not r.get("hole") and not out[-1].get("hole") and all(out[-1][k] == r[k] for k in keys):
+        if out and not r.get("hole") and not out[-1].get("hole") and all(out[-1].get(k) == r.get(k) for k in keys):
             out[-1]["text"] += r["text"]
         else:
             out.append(dict(r))
@@ -475,9 +484,11 @@ def thumbnail_insets(elements: list[dict], thumb, px: float) -> None:
     insets at 0 (gdg24's stat grids, devfest2020's cards) says nothing of it to the API, and adopt set
     its words 6.7 pt right and 6.5 pt low, wrapping them elsewhere. Its thumbnail does say: in a
     left-aligned box, the words' ink starts at the box edge plus the paragraph's indent plus the left
-    inset, and a first glyph's side bearing is ~1 pt where the inset is PAD_X. Only boxes whose left
-    strip nothing else crosses are read (a picture or a shape's edge there is ink too), and only an
-    ink edge closer than half the inset counts: a big glyph's bearing can only keep the default."""
+    inset, and a first glyph's side bearing is ~1 pt where the inset is PAD_X. The rows of the left
+    strip that anything else crosses are not read (a picture, a shape's edge or another box's words
+    there are ink too), ink in the box's first column counts only when nothing lies just outside the
+    box, and only an ink edge closer than half the inset counts: a big glyph's bearing can only keep
+    the default."""
     if thumb is None or not px:
         return
     import numpy as np
@@ -497,18 +508,38 @@ def thumbnail_insets(elements: list[dict], thumb, px: float) -> None:
         indent = min(min(p["slides"].get("indent_first") or 0, p["slides"].get("indent_start") or 0)
                      for p in paras) / scale
         strip = (x0 - 1, y0, x0 + indent + pad + 2, y1)
-        if crossed(e, elements, strip):
-            continue
+        others = crossing(e, elements, strip)
         X0, X1 = int(round(x0 * px)), int(round(x1 * px))
         Y0, Y1 = int(round(y0 * px)), int(round(y1 * px))
         crop = thumb[max(0, Y0):max(0, Y1), max(0, X0):max(0, X1)]
         if crop.shape[0] < 4 or crop.shape[1] < 8:
             continue
-        ground = np.median(crop.reshape(-1, crop.shape[-1]), axis=0)
-        ink = (np.abs(crop - ground).max(axis=-1) > 80).sum(axis=0) >= 2
-        cols = np.nonzero(ink)[0]
-        if len(cols) < 3 or cols[0] == 0:
+        # What else reaches into the strip covers rows, not the box: gdg24's stat grids stack a heading
+        # box over a caption box whose tops overlap by 5 pt, and its code slides lay a highlight bar
+        # across the middle of the listing - none of those boxes was read. Their rows are left out; the
+        # rest still shows where this box's words start - and when that leaves the first line out, the
+        # top test below cannot pass.
+        free = np.ones(crop.shape[0], dtype=bool)
+        for o in others:
+            a = max(0, int(np.floor((o["bbox"][1] - 1) * px)) - max(0, Y0))
+            b = max(0, int(np.ceil((o["bbox"][3] + 1) * px)) - max(0, Y0))
+            free[a:b] = False
+        if free.sum() < 4:
             continue
+        ground = np.median(crop[free].reshape(-1, crop.shape[-1]), axis=0)
+        mark = (np.abs(crop - ground).max(axis=-1) > 80) & free[:, None]
+        ink = mark.sum(axis=0) >= 2
+        cols = np.nonzero(ink)[0]
+        if len(cols) < 3:
+            continue
+        if cols[0] == 0:
+            # Ink in the box's first pixel column is a glyph whose edge rounds onto the box edge (gdg24's
+            # "Connect", 0.13 pt in) unless it goes on outside the box, where no word of it can be.
+            if X0 < 3:
+                continue
+            left = thumb[max(0, Y0):max(0, Y1), X0 - 3:X0]
+            if ((np.abs(left - ground).max(axis=-1) > 80) & free[:len(left), None]).any():
+                continue
         gap = (X0 + cols[0]) / px - (x0 + indent)
         if gap >= pad / 2:
             continue
@@ -518,7 +549,7 @@ def thumbnail_insets(elements: list[dict], thumb, px: float) -> None:
             # first line's cap tops must stand where no top inset puts them too
             dy = (BASELINE_A - (PPTX_TITLE_DY if e.get("placeholder") in
                                 ("TITLE", "CENTERED_TITLE", "SUBTITLE") else 0.0)) / scale
-            rows = np.nonzero((np.abs(crop - ground).max(axis=-1) > 80).sum(axis=1) >= 2)[0]
+            rows = np.nonzero(mark.sum(axis=1) >= 2)[0]
             z = max(r.get("size") or 0 for r in paras[0]["runs"])
             if not len(rows) or (Y0 + rows[0]) / px - (e["anchor"][1] - CAP_EM * z) > -dy / 2:
                 continue
@@ -571,8 +602,14 @@ def crossed(e: dict, elements: list[dict], strip: tuple) -> bool:
     the box, from its top down past the strip, does not: a panel it stands on, or the full-slide
     picture of a template's layout (devfest2020 draws every slide's ground as one, and none of its
     boxes could be read)."""
+    return bool(crossing(e, elements, strip, first=True))
+
+
+def crossing(e: dict, elements: list[dict], strip: tuple, first: bool = False) -> list[dict]:
+    """The elements `crossed` asks about (only the first one with `first`)."""
     x0, y0, x1, y1 = e["bbox"]
     below = True
+    found = []
     for o in elements:
         if o is e:
             below = False
@@ -583,8 +620,10 @@ def crossed(e: dict, elements: list[dict], strip: tuple) -> bool:
         if (o.get("kind") == "shape" or below and o.get("kind") == "image") and b[0] < x0 - 2 and b[1] < y0 - 2 \
                 and b[2] > x1 + 2 and b[3] > strip[3]:
             continue
-        return True
-    return False
+        found.append(o)
+        if first:
+            break
+    return found
 
 
 CAP_EM = 0.72               # a Latin face's cap height, near enough to tell 6.5 pt of top inset
