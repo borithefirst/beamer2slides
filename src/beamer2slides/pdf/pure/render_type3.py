@@ -11,19 +11,21 @@ A glyph is drawn one of two ways, as PDFium decides per char:
   truncated. The bitmaps of one text object are put together in an 8-bit mask at the fill alpha
   and that mask set on the device at the fill colour, so a translucent text's alpha counts twice,
   as it does in PDFium; glyphs are set one by one instead once a char was drawn as a form.
-  A glyph that is not upright goes through CFX_ImageTransformer (`render_image.transform`).
-- Any other glyph is its objects, drawn by a render status of its own with rect antialiasing, in
-  the text's fill colour unless the glyph is coloured (d0) and the object sets a colour of its own
-  (GetFillArgb's Type 3 rule, render.Status.fill_argb). A translucent text draws each such glyph
-  into a bitmap of its own first, composited with SetDIBits.
+  A glyph that is not upright, or upright with a blank first or last row, goes through
+  TransformTo (CFX_ImageTransformer, `render_image.transform`; its kNormal branch for upright
+  bitmaps: the unit square's closest rect, the stretch size `a`/`d` rounded away from zero).
+- Any other glyph is its objects (paths, images, shadings, forms, Type 3 text), drawn by a render
+  status of its own with rect antialiasing, in the text's fill colour unless the glyph is coloured
+  (d0) and the object sets a colour of its own (GetFillArgb's Type 3 rule, render.Status.fill_argb;
+  image masks too). A translucent text draws each such glyph into a bitmap of its own first,
+  composited with SetDIBits. Text in a font whose glyph is being drawn draws nothing (PDFium's
+  recursion guard), and CPDF_Type3Font::LoadChar gives up at four levels of loading.
 
 Refused (`unsupported`, else PdfError while drawing), so that a page is drawn exactly or not at
 all: glyph procedures with a /Matrix, /BBox or /Group, named resources in a font without
-/Resources (PDFium then looks in whichever page last selected the font), images, shadings,
-transparency and text other than Type 3 inside glyphs drawn as forms, Type 3 fonts nested more
-than one level or inside their own glyphs, glyph images that are not image masks, pattern colours,
-upright glyph bitmaps whose first or last row is blank (TransformTo's upright case), and Type 3
-text drawn into a soft mask."""
+/Resources (PDFium then looks in whichever page last selected the font), transparency, text clips
+and text other than Type 3 inside glyphs drawn as forms, Type 3 fonts nested more than two levels,
+glyph images that are not image masks, pattern colours, and Type 3 text drawn into a soft mask."""
 
 from __future__ import annotations
 
@@ -64,7 +66,8 @@ class Char:
 
 def _fonts(doc) -> dict:
     """The fonts glyph procedures select (CPDF_DocPageData's font map: one font per dictionary)."""
-    return doc.__dict__.setdefault("_b2s_type3_fonts", {})
+    from .fonts import doc_fonts
+    return doc_fonts(doc)
 
 
 def load_char(font, code: int) -> Char | None:
@@ -174,9 +177,9 @@ def unsupported(obj, chain: tuple = ()) -> str | None:
         return "Type 3 text in a pattern colour"
     key = id(font.dict)
     if key in chain:
-        return "a Type 3 font drawn in its own glyphs"
-    if len(chain) >= 2:
-        return "Type 3 fonts nested more than one level"
+        return None                    # ProcessType3Text draws nothing: the font is being drawn
+    if len(chain) >= 3:
+        return "Type 3 fonts nested more than two levels"
     for code in sorted({c for c, _x in obj.items}):
         ch = load_char(font, code)
         if ch is None:
@@ -198,12 +201,12 @@ def _char_refusal(font, ch: Char, chain: tuple) -> str | None:
     except PdfError as e:
         return str(e).removeprefix("the pure reader cannot render ").removesuffix(" yet")
     for o in ch.every:
-        if o.type in (OBJ_IMAGE, OBJ_SHADING):
-            return "images and shadings in Type 3 glyphs drawn as forms"
         if o.smask is not None or o.blend != "Normal" or o.transfer is not None or o.soft_mask:
             return "transparency in Type 3 glyphs"
         if getattr(o, "clip_texts", None):
             return "text clips in Type 3 glyphs"
+        if o.type in (OBJ_IMAGE, OBJ_SHADING):
+            continue                   # drawn by the glyph's render status like any other
         if o.type == OBJ_FORM:
             if o.group or o.fill_alpha != 1.0:
                 return "transparency in Type 3 glyphs"
@@ -338,11 +341,26 @@ def _stretch_to(dib, dw: int, dh: int):
 def _transform_to(dib, m):
     """CFX_DIBBase::TransformTo (CFX_ImageTransformer with no clip): ((kind, pixels), left, top),
     or (None, 0, 0)."""
-    from .render_image import transform
+    from .render_image import closest_rect, stretch, transform
     a, b, c, d = m[:4]
-    if abs(b) < F(0.05) and abs(c) < F(0.05):
-        raise PdfError("the pure reader cannot render Type 3 glyph bitmaps with blank edge rows "
-                       "yet (CFX_ImageTransformer)")
+    quarter = abs(a) < F(abs(b) / 20) and abs(d) < F(abs(c) / 20) and abs(a) < 0.5 and abs(d) < 0.5
+    if not quarter and abs(b) < F(0.05) and abs(c) < F(0.05):
+        # kNormal: the stretcher at (ceil a, -ceil d), clipped to the unit square's closest rect
+        rl, rt, rr, rb = closest_rect(R.transform_rect(m, (0.0, 0.0, 1.0, 1.0)))
+        if rr <= rl or rb <= rt:
+            return None, 0, 0
+        wd = int(np.ceil(a)) if a > 0 else int(np.floor(a))
+        hd = -int(np.ceil(d)) if d > 0 else -int(np.floor(d))
+        if wd == 0 or hd == 0:
+            return None, 0, 0
+        if abs(wd) * abs(hd) > HUGE:
+            raise PdfError("the pure reader cannot render Type 3 glyphs this big yet")
+        clip = (0, 0, min(rr - rl, abs(wd)), min(rb - rt, abs(hd)))
+        got = stretch(dib, wd, hd, clip, False)
+        if got is None:
+            return None, 0, 0
+        block = got[0]
+        return ("mask8", block[..., 0].copy()), rl, rt
     got = transform(dib, m, ANYWHERE, False)
     if got is None:
         return None, 0, 0
