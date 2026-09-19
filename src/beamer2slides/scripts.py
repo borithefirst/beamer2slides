@@ -154,8 +154,9 @@ def faces() -> list[Face]:
                                     bool(os2.fsSelection & 1) if os2 else False))
                 except Exception:                               # noqa: BLE001
                     continue
-                finally:
-                    font.close()
+            # once, after every face: a collection's faces share one file, and closing the first
+            # left the others unreadable - MS PGothic (face 2 of msgothic.ttc) was on no list
+            fonts[0].close() if fonts else None
     _FACES[dirs] = out
     return out
 
@@ -287,7 +288,13 @@ def plan(target: dict) -> Plan:
             continue
         if g == "cjk" and _fetch(RENDERER_CJK[cjk]):
             _FACES.clear()
-        names = [n for n, _ in deck.most_common() if n] + FALLBACKS.get(cjk if g == "cjk" else g, FALLBACKS["other"])
+        own = [n for n, _ in deck.most_common() if n]
+        if g == "cjk":
+            # a CJK face Slides does not have draws nothing: its letters come from the renderer's
+            # Noto (apps-edu-zh's Microsoft JhengHei, `adopt.slides_lacks_cjk`)
+            from .adopt import slides_lacks_cjk
+            own = [n for n in own if not slides_lacks_cjk(n)]
+        names = own + FALLBACKS.get(cjk if g == "cjk" else g, FALLBACKS["other"])
         if g == "cjk":
             # the face Slides' renderer draws a CJK letter in when the deck's font has none (its
             # thumbnails show Noto's shapes, not Yu Gothic's or Microsoft YaHei's), ahead of the
@@ -383,8 +390,9 @@ def script_preamble(target: dict, tree: Path | None) -> list[str]:
     feats = ["Renderer=HarfBuzz"] if p.complex else []
     if p.chain:
         # Slides sets Japanese kana and brackets proportionally: `palt` (measured on jruby-ja, 0.469
-        # -> 0.478 ink overlap, lines ending where the deck's do)
-        extra = "+palt;" if p.cjk == "japanese" else ""
+        # -> 0.478 ink overlap, lines ending where the deck's do), and Chinese too (apps-edu-zh's
+        # Traditional Chinese: its full-width ：and 、 are drawn half wide)
+        extra = "+palt;" if p.cjk in ("japanese", "chinese-traditional", "chinese-simplified") else ""
         regular = ", ".join(f'"{font_spec(f, tree, mode, extra)}"' for f, _ in p.chain)
         bold = ", ".join(f'"{font_spec(b or f, tree, mode, extra)}"' for f, b in p.chain)
         lines.append(f"\\directlua{{luaotfload.add_fallback(\"b2sscripts\", {{{regular}}})}}")
