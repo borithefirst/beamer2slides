@@ -283,10 +283,9 @@ Each of these was a diff against PDFium until it was ported:
   False. The pipeline needs renders for backgrounds, crops, ball colours, `_looks_like` and fidelity,
   so `classify` runs on the reader but `convert` does not. `embedded_image` gives no `pixels` or `rendered`, so
   `render.image_file` can't prove a raw JPEG looks right and keeps the page crop instead.
-  Text in a substituted font is measured as PDFium measures it but not drawn: rendering it raises
-  PdfError (`ftoutline` has no face for a font without an embedded program), so the per-glyph
-  re-blend of an MM face to the /Widths advance that PDFium's outlines go through (AdjustMMParams
-  with a dest width) is not ported either.
+  Text in a substituted font is drawn when PDFium draws it with one of its Foxit faces (see
+  "Substituted text" below); a system TrueType substitute (GDI's Arial for Helvetica, Symbol,Bold,
+  Verdana...) raises PdfError until TrueType glyphs are ported.
 - Font substitution outside Windows (PDFium's fontconfig/`CFX_LinuxFontInfo` scan is not ported),
   and without the Foxit cache (older rules, see above); CID fonts' own substitution
   (CPDF_CIDFont's CJK charset and ordering rules) keeps the older behaviour too.
@@ -435,9 +434,8 @@ truncated): the first rendering under a key is the one reused. Rules found on th
   1 takes the CTM out of the text matrix and into the device matrix, so the pen is the user-space one.
 - **Clip modes (4..7) draw like 0..3**, and mode 3 draws nothing: the AGG device has no soft clip, so
   ProcessClipPath skips text clips altogether.
-Refused, each with its reason: Type 3 text (ProcessType3Text, not ported), fonts without an embedded
-Type 1 / CFF program (the standard 14 and every substituted font - PDFium draws a system font - and
-TrueType glyphs), a code whose glyph the font lacks (PDFium falls back to another font), vertical
+Refused, each with its reason: Type 3 text (ProcessType3Text, not ported), TrueType glyphs (embedded
+or a system substitute GDI picked), a code whose glyph the font lacks (PDFium falls back to another font), vertical
 writing, pattern colours, and text inside a soft mask (a mask device renders glyphs in
 FT_RENDER_MODE_NORMAL). The oracle is `devtools/render_torture_text.py` (`python
 tools/render_torture_text.py SEED0 N [--simple 0|1|2] [--kind type1|cid|...]`): the fonts are
@@ -451,6 +449,57 @@ theme PDFs, 1,499 pages holding text render byte-identical and none differs (the
 for shadings, images, TrueType or Type 3). `tests/test_pure_pdf.py` keeps 80 seeds of two levels
 and the shrunk cases. Since `26_truetype_fonts` the harvest also holds CID TrueType (DejaVu) and
 simple CFF fonts (xelatex's Computer Modern): CFF renders exact (60 of 60 seeds), TrueType is refused.
+
+**Substituted text** (a font with no program in the PDF) is drawn from the face `fontmapper.py`
+picked, through what CFX_Font does differently for a CFX_SubstFont. On Windows the base 14 and any
+installed name go to GDI's TrueType faces (refused, `render_text.truetype_face` is the one line that
+will hand them to the TrueType port), so what draws is PDFium's own Foxit faces: Symbol and
+ZapfDingbats (CFF, `ftoutline.Face.from_cff` over the cached bytes; "Chrome Symbol"/"Chrome
+Dingbats", weight and angle 0), and for a name nothing matches the multiple masters FoxitSansMM or,
+with the serif flag, FoxitSerifMM (weight × 4/5). Ported:
+- **The multiple master blend** (`ftoutline.Face.adjust_variation`, CFX_Font::AdjustVariationParams
+  over FreeType's T1_Get_MM_Var / T1_Set_MM_Design / t1_set_mm_blend, `/BlendDesignMap` read by
+  `type1.py`): before each glyph is loaded, axis 0 is set to the font's weight and axis 1 is solved
+  so the glyph's advance equals its /Widths width (`dest_width`, CPDF_CharPosList's
+  font_char_width_): the advance at the axis' minimum and maximum, then a C `long` interpolation;
+  with no width, axis 1's default. FT_MulDiv, the design map's piecewise interpolation *without* the
+  lower blend point added back, clamping at the ends and the product of (coord | 1 - coord) per design
+  are FreeType's to the bit.
+- **The blend is process-wide state.** PDFium's font mapper keeps each MM face for the life of the
+  process and FreeType keeps the blend on the face, so every glyph drawn moves it and every width
+  read without /Widths (LoadCharMetrics at parse time, GetCharBBox) is read *at the blend the last
+  glyph left* - in any document. The pure mapper also keeps one face per process, its metrics caches
+  are keyed by the blend (`Face.blend_key`), and it performs the same sequence of set-design calls
+  as long as it draws what PDFium draws. A page it refuses after PDFium drew it leaves the two
+  apart; `render_torture_subst.resync` puts both back (one glyph of each face at a /Widths width sets
+  both axes), and the tests that compare measurements call it first
+  (`test_a_generic_face_keeps_its_blend_between_documents`). The torture's first failures (seeds
+  38, 40, 41 before 43) were exactly this.
+- **The skew** (CFX_SubstFont's italic angle, only on the MM faces: a matched face gets angle 0):
+  `xy -= xx · skew / 100` in FT_Fixed with C truncation for bitmaps (the effective skew), the same
+  on the identity for paths (GetSkew), from PDFium's angle table.
+- **Synthetic bold** (FT_Outline_EmboldenXY, `ftoutline.embolden`, at GetEmboldenLevel's strength)
+  is ported but unreached on Windows: the MM faces carry weight in the blend and the CFF faces have
+  weight 0, so only GDI's TrueType faces would take it. Unverified.
+- **GetCharPosList's spacing heuristic** for a non-MM substitute under a name that is neither
+  standard nor the loaded family's (IsActualFontLoaded): a glyph whose /Widths width exceeds the
+  face's advance + 1 moves right by half the excess (`F((pdf - face) · size) / 2000`), a narrower
+  one is squeezed by the adjust matrix (pdf/face, 0, 0, 1) that GetEffectiveMatrix puts before the
+  char matrix; reached by "ZapfDingbats,Bold" with the symbolic flag.
+- **The glyph cache** (CFX_GlyphCache) belongs to the face and lives while a document's fonts hold
+  it (CFX_FontMgr keeps an ObservedPtr per face): one per face per document here, bitmaps keyed by
+  the matrix × 10000, dest width, weight and angle, paths by glyph, dest width, weight and angle. A
+  cache hit skips AdjustVariationParams, so the cache's lifetime is part of the blend's history.
+- `kFontWeightExtraBold` is 900 (a /FontWeight up to 900 is kept; the mapper had 800 and turned
+  900 into 400: torture seed 67).
+The oracle is `devtools/render_torture_subst.py` (`python tools/render_torture_subst.py SEED0 N
+[--pool unknown|symbol] [--simple 0|1|2]`): pages of `render_torture_text`'s groups over made-up
+simple fonts - random /BaseFont (unknown names, Symbol and ZapfDingbats variants, base 14 and
+installed names), /Subtype, /Flags, /FontWeight, /StemV, /ItalicAngle, /Widths that agree with
+nothing or are absent, /Encoding by name or /Differences - rendered by both with `resync` first.
+6,000 seeds with nothing apart (about 35% refused: GDI TrueType substitutes and codes needing a
+fallback font); `tests/test_pure_pdf.py` keeps 40 seeds and four shrunk cases. Needs the Foxit
+cache (`python -m beamer2slides.pdf.pure.foxit`); without it every such page is refused.
 
 ## Risks
 

@@ -652,9 +652,11 @@ class GenericProgram(Program):
         self.face = Face.from_type1(t1)
 
     def glyph_box(self, index: int):
-        """FT_Load_Glyph(FT_LOAD_NO_SCALE)'s metrics: the outline's control box (t1gload)."""
-        if index in self._boxes:
-            return self._boxes[index]
+        """FT_Load_Glyph(FT_LOAD_NO_SCALE)'s metrics: the outline's control box (t1gload), at the blend
+        the face has now (drawing text moves it: `ftoutline.Face.adjust_variation`)."""
+        key = (index, self.face.blend_key())
+        if key in self._boxes:
+            return self._boxes[key]
         box = None
         if 0 <= index < len(self.order):
             units = self.face.units(index)
@@ -663,7 +665,7 @@ class GenericProgram(Program):
                 ys = [y for pts, _tags in units for _x, y in pts]
                 l, b, r, t = (min(xs), min(ys), max(xs), max(ys)) if xs else (0, 0, 0, 0)
                 box = tuple(normalize_metric(v, 1000) for v in (l, b, r, t))
-        self._boxes[index] = box
+        self._boxes[key] = box
         return box
 
     def advance(self, index: int) -> int:
@@ -922,6 +924,7 @@ class Font:
         self.stem_v = 0
         self.font_weight: int | None = None
         self.subst_generic = False       # drawn with PDFium's multiple master face
+        self.subst = None                # fontmapper.SubstFont of a substituted face (drawing needs it)
         self.ascent = self.descent = 0
         self.font_bbox = (0, 0, 0, 0)   # l, b, r, t
         self.program_data = b""
@@ -1132,12 +1135,12 @@ class SimpleFont(Font):
         if _mapper_active():
             from . import fontmapper
             weight = self.font_weight_value()
-            if weight is None or not 100 <= weight <= 800:    # kFontWeightExtraLight .. ExtraBold
+            if weight is None or not 100 <= weight <= 900:    # kFontWeightExtraLight .. ExtraBold
                 weight = 400
             face = fontmapper.load_subst_face(self.base_name, self.subtype == "TrueType", self.flags & 0xFFFFFFFF,
                                               weight, self.italic_angle)
             if face is not None:
-                self.program, self.subst_generic = face.program, face.generic
+                self.program, self.subst_generic, self.subst = face.program, face.generic, face.subst
             return
         index = subst_font_index(self.base_name, self.subtype == "TrueType")
         if index is not None:

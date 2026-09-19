@@ -49,7 +49,7 @@ a per-slide background picture.
   engine and smooth rasteriser ported, `pure/ftoutline.py`, `pure/ftgrays.py`, `pure/render_text.py`,
   oracle `tools/render_torture_text.py`). Whole pages: 195 of the test decks' 231 render byte for byte
   as PDFium's, none apart (`test_whole_beamer_pages_render_as_pdfium_renders_them`);
-  a page with anything not ported yet (images, Type 3 or TrueType or non-embedded text, CalRGB/Lab/Indexed
+  a page with anything not ported yet (images, Type 3 or TrueType text, CalRGB/Lab/Indexed
   shadings, transfer functions…) raises PdfError, so
   `renders = False`: `classify` runs on it and `convert` doesn't yet. Every call equals PDFium's on 4,373 pages
   (chars and object boxes to the last bit on the test decks),
@@ -63,7 +63,11 @@ a per-slide background picture.
   blended, `pure/type1.py`) loaded from a user cache that `python -m beamer2slides.pdf.pure.foxit`
   fills from PDFium's sources with pinned SHA-256 (no binaries in the tree); without the cache, or
   outside Windows, the older rules stay and `test_substituted_fonts_are_measured_with_pdfiums_face`
-  skips. Substituted text measures as PDFium's but is not drawn yet.
+  skips. Substituted text in a Foxit face draws as PDFium's (`render_text._SubstFace`: Symbol and
+  ZapfDingbats CFF; FoxitSansMM/SerifMM blended per glyph to weight and /Widths width - process-wide
+  face state, as in PDFium - skewed by the italic angle; GetCharPosList's spacing heuristic; oracle
+  `tools/render_torture_subst.py`, made-up non-embedded fonts, 6,000 seeds exact); GDI's TrueType
+  substitutes (base 14 and installed names on Windows) are refused until TrueType glyphs draw.
 - No public links: pictures reach Slides inside the imported .pptx, never as shared Drive
   files (they break in protected Workspace domains).
 - **Fidelity is measured on Google's own renderer**, not a local preview: render the PDF page

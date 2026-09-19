@@ -86,6 +86,7 @@ class Type1Program:
         self.encoding: list[str] | None = None
         self.weight_vector: list[int] | None = None
         self.num_designs = 0
+        self.design_map: list[tuple[list[int], list[int]]] = []   # per axis: design points, blend points
         self.len_buildchar = 0
         self.font_bbox = (0, 0, 0, 0)          # 16.16, after the blend
         self.bbox = (0, 0, 0, 0)               # the face's, whole units
@@ -146,6 +147,15 @@ def parse(data: bytes) -> Type1Program:
         weights = [to_fixed(t) for t in _numbers(m.group(1))]
         if len(weights) == p.num_designs:
             p.weight_vector = weights
+    # parse_blend_design_map: per axis [[design blend] ...], designs T1_ToInt, blends T1_ToFixed
+    m = re.search(rb"/BlendDesignMap\s*\[(.*?\]\s*\])\s*\]\s*def", clear, re.S)
+    if m:
+        axes = re.findall(rb"\[((?:\s*\[[^\[\]]*\])+)\s*\]", m.group(1))
+        dmap = []
+        for axis in axes:
+            pts = [_numbers(pt) for pt in re.findall(rb"\[([^\[\]]*)\]", axis)]
+            dmap.append(([int(float(p[0])) for p in pts], [to_fixed(p[1]) for p in pts]))
+        p.design_map = dmap
     m = re.search(rb"/BuildCharArray\s+(\d+)\s+array", clear + private)
     if m:
         p.len_buildchar = int(m.group(1))

@@ -465,18 +465,119 @@ def test_the_pure_renderer_survives_text_torture_seeds(simple):
 
 
 def test_the_pure_renderer_refuses_text_it_cannot_draw_exactly_yet():
-    """Fonts not embedded (PDFium draws a system substitute) and Type 3 text are refused, not guessed."""
+    """Fonts PDFium draws with a system TrueType substitute (GDI's Arial for Helvetica) and Type 3
+    text are refused, not guessed."""
     from beamer2slides.devtools.render_torture_text import FontSpec, harvest, pdf_bytes
     from beamer2slides.pdf.pure.backend import PureBackend
     helvetica = FontSpec("standard", "type1", [b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>"], [65])
     page = PureBackend().open(pdf_bytes(b"BT /F0 12 Tf 10 10 Td (A) Tj ET", [helvetica]))[0]
-    with pytest.raises(PdfError, match="not embedded"):
+    with pytest.raises(PdfError, match="TrueType glyphs of a system substitute|Foxit|font mapper"):
         page.render(1.0)
     type3 = [s for s in harvest() if s.kind == "type3"]
     if type3:
         body = b"BT /F0 12 Tf 10 10 Td <%02x> Tj ET" % type3[0].codes[0]
         with pytest.raises(PdfError, match="Type 3"):
             PureBackend().open(pdf_bytes(body, type3[:1]))[0].render(1.0)
+
+
+def _needs_foxit():
+    import sys
+    from beamer2slides.pdf.pure import foxit
+    if sys.platform != "win32":
+        pytest.skip("PDFium maps fonts through GDI here; outside Windows it asks fontconfig, which is not ported")
+    if foxit.missing():
+        pytest.skip(f"the Foxit faces are not in {foxit.cache_dir()}: python -m beamer2slides.pdf.pure.foxit")
+
+
+def _subst_font(base, flags, extra=b"", desc=b""):
+    from beamer2slides.devtools.render_torture_text import FontSpec
+    return FontSpec(base.decode(), "unknown", [
+        b"<< /Type /Font /Subtype /Type1 /BaseFont /%s %s /FontDescriptor @1@ >>" % (base, extra),
+        b"<< /Type /FontDescriptor /FontName /%s /Flags %d /FontBBox [0 -200 1000 900] %s >>" % (base, flags, desc)], [65])
+
+
+_WIDTHS = b"/FirstChar 32 /LastChar 126 /Widths [%s]" % b" ".join(b"%d" % (200 + 37 * i % 700) for i in range(95))
+
+# (page content, fonts, zoom): text in fonts the PDF does not embed, drawn with PDFium's Foxit faces
+SUBST_TEXT_CASES = {
+    # FoxitSansMM at weight 900 (kFontWeightExtraBold is 900, not 800: seed 67 of the subst torture)
+    # skewed by the italic angle, each glyph blended to its /Widths width (AdjustVariationParams)
+    "sans_mm_black_italic": (b"BT /F0 40 Tf 10 60 Td (AMWgy) Tj ET",
+                             [_subst_font(b"Wibble-Black", 0, _WIDTHS, b"/ItalicAngle -12 /FontWeight 900")], 1.37),
+    # FoxitSerifMM (serif flag) at weight 300 * 4/5, no /Widths: the face's own advances, stroked too
+    "serif_mm_light_no_widths": (b"BT /F0 30 Tf 5 40 Td 2 Tr 0.5 w (Quartz fig) Tj ET",
+                                 [_subst_font(b"Serifish-Light", 34, b"", b"/FontWeight 300")], 2),
+    # Symbol and ZapfDingbats: Foxit's CFF faces as they are
+    "symbol_and_dingbats": (b"BT /F0 24 Tf 10 20 Td (abgpW) Tj /F1 24 Tf 10 80 Td (3456AZ) Tj ET",
+                            [_subst_font(b"Symbol", 4), _subst_font(b"ZapfDingbats", 4)], 1.37),
+    # a styled ZapfDingbats keeps Foxit's face under a name that is not standard: glyphs whose /Widths
+    # are wider move by half the excess, narrower ones are squeezed (the glyph spacing heuristic)
+    # (the face's builtin encoding has no glyph for these codes: glyphs by name)
+    "dingbats_spacing_heuristic": (b"BT /F0 30 Tf 5 60 Td (ABCDEF) Tj ET",
+                                   [_subst_font(b"ZapfDingbats,Bold", 4, _WIDTHS + b" /Encoding << /Differences "
+                                                b"[65 /a1 /a2 /a10 /a20 /a71 /a100] >>")], 1.37),
+}
+
+
+@pytest.mark.parametrize("name", SUBST_TEXT_CASES)
+def test_the_pure_renderer_draws_substituted_text_as_pdfium(name):
+    from beamer2slides.devtools.render_torture_subst import compare
+    _needs_foxit()
+    content, fonts, zoom = SUBST_TEXT_CASES[name]
+    n, a, _b, _d = compare(content, fonts, zoom, False)
+    assert (a[..., :3] < 128).any(), "the case draws nothing"
+    assert n == 0
+
+
+def test_the_pure_renderer_survives_substituted_text_torture_seeds():
+    """A slice of the random pages of made-up non-embedded fonts (devtools/render_torture_subst.py:
+    3,000 seeds when it was written, none apart). System TrueType substitutes and fallback fonts
+    are refused."""
+    from beamer2slides.devtools.render_torture_subst import case, compare
+    _needs_foxit()
+    apart, drawn = {}, 0
+    for seed in range(40):
+        try:
+            n = compare(*case(seed))[0]
+        except PdfError as e:
+            assert "TrueType" in str(e) or "fallback" in str(e), (seed, str(e))
+            continue
+        drawn += 1
+        if n:
+            apart[seed] = n
+    assert not apart, f"seeds apart (python tools/render_torture_subst.py SEED 1): {apart}"
+    assert drawn >= 20
+
+
+def test_a_generic_face_keeps_its_blend_between_documents():
+    """The multiple master face is PDFium's for the whole process, and so is its blend: a glyph
+    drawn at one /Widths width leaves the face there, and a later document's font without /Widths
+    measures its advances at that blend. The pure reader's face does the same."""
+    from beamer2slides.devtools.render_torture_subst import FontSpec, pdf_bytes, resync
+    from beamer2slides.pdf.pdfium_backend import PdfiumBackend
+    from beamer2slides.pdf.pure.backend import PureBackend
+    _needs_foxit()
+    wide = FontSpec("wide", "unknown", [b"<< /Type /Font /Subtype /Type1 /BaseFont /Wide /FirstChar 77 "
+                                        b"/LastChar 77 /Widths [1400] /FontDescriptor @1@ >>",
+                                        b"<< /Type /FontDescriptor /FontName /Wide /Flags 32 >>"], [77])
+    bare = FontSpec("bare", "unknown", [b"<< /Type /Font /Subtype /Type1 /BaseFont /Bare /FontDescriptor @1@ >>",
+                                        b"<< /Type /FontDescriptor /FontName /Bare /Flags 32 >>"], [77])
+    first = pdf_bytes(b"BT /F0 20 Tf 10 10 Td (M) Tj ET", [wide])
+    second = pdf_bytes(b"BT /F0 20 Tf 10 10 Td (MMMM) Tj ET", [bare])
+    bounds = []
+    for backend in (PdfiumBackend, PureBackend):
+        resync()
+        doc = backend().open(second)
+        before = doc[0].object_bounds()
+        doc.close()
+        doc = backend().open(first)
+        doc[0].render(1)
+        doc.close()
+        doc = backend().open(second)
+        bounds.append((before, doc[0].object_bounds()))
+        doc.close()
+    assert bounds[0] == bounds[1]
+    assert bounds[0][0] != bounds[0][1]                  # the blend moved the advances
 
 
 # ---------------------------------------------------------------------- PDFium's rules, one by one
@@ -992,6 +1093,10 @@ def test_substituted_fonts_are_measured_with_pdfiums_face(name):
     if foxit.missing():
         pytest.skip(f"the Foxit faces are not in {foxit.cache_dir()}: python -m beamer2slides.pdf.pure.foxit")
     data = SUBST_CASES[name]
+    # the generic faces' blend is process-wide: text drawn by an earlier test (or refused by the
+    # pure reader after PDFium drew it) moves it, and widths without /Widths are read at it
+    from beamer2slides.devtools.render_torture_subst import resync
+    resync()
     a, b = pdf.resolve("pure").open(data)[0], pdf.resolve("pdfium").open(data)[0]
     close([dataclasses.astuple(o) for o in a.objects()], [dataclasses.astuple(o) for o in b.objects()], name)
     close(a.object_bounds(), b.object_bounds(), f"{name} object_bounds")
