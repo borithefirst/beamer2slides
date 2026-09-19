@@ -981,7 +981,7 @@ def deck_ir(pres: dict, pdf_size: list[float] | None = None, base: dict | None =
             if thumb is not None:
                 thumb = deck_fills.load(thumb)
                 px = thumb.shape[1] / page_w
-            elements = deck_fills.settle(elements, thumb, px, None if picture else color, bool(picture))
+            elements = deck_fills.settle(elements, thumb, px, None if picture else color, bool(picture), images)
             thumbnail_insets(elements, thumb, px)
             ink_widths(elements, thumb, px)
             drifts += [(e, d) for e, d in ((e, top_drift(e, elements, thumb, px)) for e in elements)

@@ -89,6 +89,31 @@ def test_without_thumbnails_nothing_changes():
     assert all(c.get("fill_source") is None for c in els[1]["table_cells"])
 
 
+def test_a_picture_fill_becomes_the_thumbnails_picture_of_it(tmp_path):
+    """sc-memphis: a photo cut to a freeform comes back as `{}` and is no colour at all. With a folder
+    to write to it becomes the thumbnail's pixels in its box, letters of a text above painted out
+    (the text draws them) and the page round the photo transparent; without one it is dropped."""
+    from PIL import Image
+    rng = np.random.default_rng(1)
+    thumb = page()
+    thumb[100:200, 100:300] = rng.integers(0, 256, (100, 200, 3))          # the photo
+    thumb[140:150, 150:250] = [255, 225, 126]                               # yellow words on it
+    photo = {"kind": "shape", "role": "panel", "shape_type": "CUSTOM", "bbox": [90, 90, 310, 210],
+             "fill": None, "outline": None, "fill_unread": True, "id": "ph", "object": "ph", "group": None}
+    words = {"kind": "text", "role": "body", "bbox": [140, 130, 260, 160], "id": "t", "object": "t",
+             "paragraphs": [{"runs": [{"text": "Gallery", "color": "#ffe17e"}]}]}
+    assert deck_fills.settle([dict(photo), dict(words)], thumb, 1.0, "#ffffff") == [words]
+    got = deck_fills.settle([dict(photo), dict(words)], thumb, 1.0, "#ffffff", False, tmp_path)
+    assert [e["kind"] for e in got] == ["image", "text"]
+    pic = got[0]
+    assert pic["id"] == "ph" and pic["fill_source"] == "thumbnail" and pic["bbox"] == [90, 90, 310, 210]
+    im = np.asarray(Image.open(pic["file"]))
+    assert im.shape == (120, 220, 4)
+    assert im[5, 5, 3] == 0 and im[50, 50, 3] == 255                        # page out, photo in
+    yellow = (np.abs(im[50:60, 60:160, :3].astype(int) - [255, 225, 126]).max(axis=2) <= 14).mean()
+    assert yellow < 0.05                                                    # the words are painted out
+
+
 def test_a_placeholder_is_never_a_candidate():
     pe = shape("a", "RECTANGLE", 100, 100, 200, 100, UNREAD)
     pe["shape"]["placeholder"] = {"type": "BODY"}

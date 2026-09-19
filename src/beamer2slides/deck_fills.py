@@ -12,7 +12,10 @@ thumbnail of the slide, and `deck_ir(foreign=True, thumbnails=...)` asks it:
   in the thumbnail gets that colour (`fill_source: thumbnail`);
 - a rectangle whose rows or columns are each flat, changing smoothly from one side to the other, gets
   a `fill_gradient` (axis and three stops, which is what TikZ's axis shading takes);
-- anything else keeps no fill, and a shape with neither fill nor outline is dropped as before.
+- anything else - a photo cut to a freeform, a texture - is written, when the caller gives a folder,
+  as the thumbnail's own picture of the box (`thumbnail_picture`: letters of texts above painted out,
+  the page colour round it transparent); without a folder a shape with neither fill nor outline is
+  dropped as before.
 
 A false fill is worse than a missing one - it paints over whatever lies under the element - so the
 reading is conservative. Pixels under opaque elements drawn above (pictures, filled shapes, tables)
@@ -162,10 +165,13 @@ def read_region(a: np.ndarray, region: np.ndarray, allow: np.ndarray, gradient_o
     return None
 
 
-def settle(elements: list[dict], image, px: float, background: str | None, picture: bool = False) -> list[dict]:
+def settle(elements: list[dict], image, px: float, background: str | None, picture: bool = False,
+           pictures=None) -> list[dict]:
     """Give the slide's unread fills what its thumbnail shows (see the module docstring), and drop
     the shapes left with nothing to draw. `px`: thumbnail pixels per IR pt; `background`: the slide's
-    background colour, `picture`: it has a background picture instead."""
+    background colour, `picture`: it has a background picture instead. `pictures`: a folder where a
+    fill that is no colour at all (a photo cut to a freeform) is written as the thumbnail's picture
+    of it (`thumbnail_picture`); without one such shapes are dropped."""
     from . import deck_freeforms
     a = load(image)
     out = []
@@ -196,6 +202,14 @@ def settle(elements: list[dict], image, px: float, background: str | None, pictu
                 sample_cell(a, el, c, above, px, background, around)
         if el["kind"] == "shape" and unread and not el.get("fill") and not el.get("fill_gradient"):
             el["_unsaid"] = True           # drawn in the picture as nothing we can say: see deck_freeforms
+            if a is not None and pictures is not None and not el.get("trace"):
+                bottom = not picture and not any(overlaps(e, el) for e in elements[:k])
+                pic = thumbnail_picture(a, el, elements[k + 1:], px, background if bottom else None, pictures)
+                if pic is not None:
+                    if el.get("outline"):
+                        out.append({**el, "fill": None})   # its outline, drawn above the picture
+                    out.append(pic)
+                    continue
         if el["kind"] == "shape" and not el.get("fill") and not el.get("fill_gradient") and not el.get("outline"):
             continue                       # nothing to draw after all, as before this module
         out.append(el)
@@ -203,6 +217,101 @@ def settle(elements: list[dict], image, px: float, background: str | None, pictu
         el.pop("_traced", None)            # the traced pixels, kept only while settling
         el.pop("_unsaid", None)
     return out[::-1]
+
+
+PICTURE_MIN_PX = 12      # a thumbnail picture's box must be at least this many pixels each way
+
+def thumbnail_picture(a: np.ndarray, el: dict, above: list[dict], px: float, page: str | None, folder):
+    """A shape whose fill the thumbnail shows as neither one colour nor a ramp - a photo cut to a
+    freeform (sc-memphis' section slides: the girl, the wave, the ring), a texture - as the one
+    picture of it there is: the thumbnail's pixels in its box. The API gives no URL for a picture
+    fill, so this is what keeps the photo on the slide at all. Letters of texts drawn above it are
+    painted out (filled in from the pixels around them), or they would be printed twice, once in
+    the picture and once by their own text box a little apart; opaque elements above cover their
+    part anyway. `page`: the page colour when nothing but the page lies under the shape - pixels of
+    that colour are then made transparent, so the picture is the shape's own outline."""
+    import hashlib
+    from pathlib import Path
+    from PIL import Image
+    h, w = a.shape[:2]
+    a0, b0, a1, b1 = px_box(el["bbox"], px, w, h)
+    if a1 - a0 < PICTURE_MIN_PX or b1 - b0 < PICTURE_MIN_PX:
+        return None
+    sub = a[b0:b1, a0:a1].astype(np.float32)
+    letters = np.zeros(sub.shape[:2], dtype=bool)
+    for e in above:
+        if e["kind"] != "text" or not e.get("paragraphs"):
+            continue
+        c0, d0, c1, d1 = px_box(e["bbox"], px, w, h, -2 * MARGIN_PX)
+        if c1 <= a0 or c0 >= a1 or d1 <= b0 or d0 >= b1:
+            continue
+        box = (slice(max(0, d0 - b0), max(0, d1 - b0)), slice(max(0, c0 - a0), max(0, c1 - a0)))
+        part = sub[box]
+        if part.size == 0:
+            continue
+        ground = np.median(part.reshape(-1, 3), axis=0)
+        off = np.abs(part - ground).max(axis=2)
+        for p in e["paragraphs"]:
+            for r in p.get("runs", []):
+                c = rgb(r.get("color"))
+                if c is not None and r.get("text", "").strip() and np.abs(c - ground).max() > TOL:
+                    # a letter's pixel is nearer its colour than the ground's (antialiased rims are
+                    # taken by the dilation below)
+                    letters[box] |= (np.abs(part - c).max(axis=2) < off) & (off > TOL)
+    if letters.any():
+        from .deck_freeforms import dilate
+        letters = dilate(letters, 2)
+        sub = inpaint(sub, letters)
+    alpha = np.full(sub.shape[:2], 255, dtype=np.uint8)
+    ground = rgb(page)
+    if ground is not None:
+        alpha[np.abs(sub - ground).max(axis=2) <= TOL] = 0
+        if (alpha > 0).mean() < 0.02:
+            return None                    # nothing but the page: it shows nothing of its own
+    im = Image.fromarray(np.dstack([np.clip(sub + 0.5, 0, 255).astype(np.uint8), alpha]), "RGBA")
+    if ground is None:
+        im = im.convert("RGB")
+    import io
+    buf = io.BytesIO()
+    im.save(buf, "PNG", optimize=False)
+    data = buf.getvalue()
+    sha = hashlib.sha1(data).hexdigest()
+    folder = Path(folder)
+    folder.mkdir(parents=True, exist_ok=True)
+    path = folder / f"thumb-{sha[:16]}.png"
+    if not path.exists():
+        path.write_bytes(data)
+    keep = {k: el[k] for k in ("id", "object", "group", "key", "inherited") if k in el}
+    return {"kind": "image", "role": "figure", "alt": "picture fill", **keep,
+            "bbox": [a0 / px, b0 / px, a1 / px, b1 / px], "file": str(path), "sha1": sha, "format": "png",
+            "fill_source": "thumbnail"}
+
+
+def inpaint(sub: np.ndarray, hole: np.ndarray) -> np.ndarray:
+    """`sub` with the pixels `hole` filled in from their neighbours, ring by ring inwards."""
+    out = sub.copy()
+    todo = hole.copy()
+    for _ in range(64):
+        if not todo.any():
+            break
+        known = ~todo
+        acc = np.zeros_like(out)
+        cnt = np.zeros(out.shape[:2], dtype=np.float32)
+        for dy, dx in ((-1, 0), (1, 0), (0, -1), (0, 1), (-1, -1), (-1, 1), (1, -1), (1, 1)):
+            k = np.roll(np.roll(known, dy, 0), dx, 1)
+            v = np.roll(np.roll(out, dy, 0), dx, 1)
+            if dy == -1: k[-1, :] = False
+            if dy == 1: k[0, :] = False
+            if dx == -1: k[:, -1] = False
+            if dx == 1: k[:, 0] = False
+            acc += v * k[..., None]
+            cnt += k
+        fill = todo & (cnt > 0)
+        out[fill] = acc[fill] / cnt[fill][:, None]
+        todo &= ~fill
+    if todo.any() and (~hole).any():
+        out[todo] = np.median(sub[~hole], axis=0)
+    return out
 
 
 def masks(a: np.ndarray, box, above: list[dict], px: float, own_words: bool):
