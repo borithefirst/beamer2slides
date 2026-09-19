@@ -95,19 +95,19 @@ def weights(dest_len, dmin, dmax, src_len, smin, smax, bilinear):
 
 
 def _gather(src: np.ndarray, starts, table, axis_len: int):
-    """Sum_j w_j * src[..., start + j, :] over the weight table: (n, ...) uint64 sums mod 2^32.
+    """Sum_j w_j * src[..., start + j, :] over the weight table: (n, ...) uint32 sums, wrapping
+    as C's uint32 arithmetic does (numpy's uint32 products and sums wrap mod 2^32 the same way).
     `src` is (len, rest...) along the axis being resampled."""
     wc = table.shape[1]
     idx = np.clip(starts[:, None] + np.arange(wc)[None, :], 0, max(axis_len - 1, 0))
-    out = np.zeros((len(starts),) + src.shape[1:], np.uint64)
-    tab = table.astype(np.uint64)
+    out = np.zeros((len(starts),) + src.shape[1:], np.uint32)
+    tab = table.astype(np.uint32)
+    shape = (-1,) + (1,) * (src.ndim - 1)
     for k in range(wc):
         w = tab[:, k]
         if not w.any():
             continue
-        vals = src[idx[:, k]].astype(np.uint64)
-        wk = w.reshape((-1,) + (1,) * (src.ndim - 1))
-        out = (out + ((vals * wk) & M32)) & M32
+        out += src[idx[:, k]] * w.reshape(shape)
     return out
 
 
@@ -174,19 +174,18 @@ def stretch(dib, dest_w: int, dest_h: int, clip, bilinear_opt: bool):
     cols = np.moveaxis(band, 1, 0)                            # (sw, rows, ch)
     if has_alpha:
         idx = np.clip(hs[:, None] + np.arange(hw.shape[1])[None, :], 0, sw - 1)
-        acc = np.zeros((len(hs), band.shape[0], 4), np.uint64)
+        acc = np.zeros((len(hs), band.shape[0], 4), np.uint32)   # uint32: C's wrapping sums
         for k in range(hw.shape[1]):
-            w = hw[:, k].astype(np.uint64)
+            w = hw[:, k].astype(np.uint32)
             if not w.any():
                 continue
-            px = cols[idx[:, k]].astype(np.uint64)            # (n, rows, 4)
-            pw = ((w[:, None] * px[..., 3]) & M32) // 255
-            for c in range(3):
-                acc[..., c] = (acc[..., c] + ((pw * px[..., c]) & M32)) & M32
-            acc[..., 3] = (acc[..., 3] + pw) & M32
+            px = cols[idx[:, k]]                                  # (n, rows, 4)
+            pw = (w[:, None] * px[..., 3]) // 255
+            acc[..., :3] += pw[..., None] * px[..., :3]
+            acc[..., 3] += pw
         inter = np.zeros(acc.shape, np.uint8)
         inter[..., :3] = _pixel(acc[..., :3])
-        inter[..., 3] = _pixel((acc[..., 3] * 255) & M32)
+        inter[..., 3] = _pixel(acc[..., 3] * np.uint32(255))
     else:
         inter = _pixel(_gather(cols, hs, hw, sw))                # (n, rows, ch)
     inter = np.moveaxis(inter, 0, 1)                          # (rows, n, ch): the inter buffer
@@ -196,20 +195,19 @@ def stretch(dib, dest_w: int, dest_h: int, clip, bilinear_opt: bool):
         block = _pixel(_gather(inter, vs, vw, inter.shape[0]))
         return block, out_fmt, pal
     idx = np.clip(vs[:, None] + np.arange(vw.shape[1])[None, :], 0, inter.shape[0] - 1)
-    sums = np.zeros((len(vs), inter.shape[1], 4), np.uint64)
+    sums = np.zeros((len(vs), inter.shape[1], 4), np.uint32)
     for k in range(vw.shape[1]):
-        w = vw[:, k].astype(np.uint64)
+        w = vw[:, k].astype(np.uint32)
         if not w.any():
             continue
-        px = inter[idx[:, k]].astype(np.uint64)
-        sums = (sums + ((px * w[:, None, None]) & M32)) & M32
+        sums += inter[idx[:, k]] * w[:, None, None]
     block = np.zeros(sums.shape, np.uint8)
     line = np.zeros((inter.shape[1], 3), np.uint8)            # dest_scanline_: stale where a == 0
     for y in range(len(vs)):
         a = sums[y, :, 3]
         nz = a != 0
         if nz.any():
-            q = ((sums[y, :, :3][nz] * 255) & M32) // a[nz][:, None]
+            q = (sums[y, :, :3][nz] * np.uint32(255)) // a[nz][:, None]
             q = q.astype(np.int64)
             q = np.where(q >= 2147483648, q - 4294967296, q)
             line[nz] = np.clip(q, 0, 255).astype(np.uint8)
@@ -653,12 +651,37 @@ def get_dib(ctx, obj, dev):
         if dib is None or not set_max or (dib.w >= need[0] and dib.h >= need[1]):
             if hit[0] is obj.stream:
                 return dib
-    try:
-        dib = DI.load(ctx.doc, obj.stream, _resources(ctx, obj), need)
-    except DI.Unsupported as e:
-        raise PdfError(f"the pure reader cannot render {e} yet")
+    dib = _probed(ctx, obj, need)
+    if dib is _NOT_PROBED:
+        try:
+            dib = DI.load(ctx.doc, obj.stream, _resources(ctx, obj), need)
+        except DI.Unsupported as e:
+            raise PdfError(f"the pure reader cannot render {e} yet")
     cache[key] = (obj.stream, dib, need[0] != 0 and need[1] != 0)
     return dib
+
+
+_NOT_PROBED = object()
+
+
+def _probed(ctx, obj, need):
+    """The bitmap `refusal` loaded for this image (at no device size), when loading it for `need`
+    gives the same: the device size only picks a JPEG's scale, and only for a DCT image at least
+    twice the device's size both ways (decode_image._jpeg; masks load at no size either way)."""
+    probes = getattr(ctx, "image_probes", None)
+    got = probes.get(id(obj.stream)) if probes else None
+    if got is None or got[0] is not obj.stream or got[1] is not None or len(got) < 4:
+        return _NOT_PROBED
+    d = obj.stream.dict
+    r = ctx.doc.resolve
+    w, h = r(d.get("Width")), r(d.get("Height"))
+    if need[0] and need[1] and isinstance(w, int) and isinstance(h, int) and w >= 2 * need[0] and h >= 2 * need[1]:
+        # a DCTDecode anywhere in the chain is where decode_image.image_bytes goes to `_jpeg`
+        decoders = DI.FL.decoder_array(d, r)
+        if decoders is None or any(DI.FL.ABBREVIATIONS.get(n, n) == "DCTDecode" for n, _p in decoders):
+            return _NOT_PROBED
+    probes[id(obj.stream)] = got[:3]      # handed on: the page cache holds the bitmap now
+    return got[3]
 
 
 def _resources(ctx, obj):
@@ -685,6 +708,7 @@ def refusal(obj, ctx) -> str | None:
     if key not in probes:
         why = None
         stencil = False
+        dib = None
         try:
             dib = DI.load(ctx.doc, obj.stream, _resources(ctx, obj), (0, 0))
             stencil = dib is not None and dib.fmt == "mask1"
@@ -692,8 +716,9 @@ def refusal(obj, ctx) -> str | None:
                 why = "image masks with masks"
         except DI.Unsupported as e:
             why = str(e)
-        probes[key] = (obj.stream, why, stencil)
-    _, why, stencil = probes[key]
+        # the bitmap too, for `get_dib` to take instead of loading the image again (`_probed`)
+        probes[key] = (obj.stream, why, stencil, dib)
+    _, why, stencil = probes[key][:3]
     if why is None and stencil and obj.fill_pattern is not None:
         return "pattern-filled image masks"
     return why

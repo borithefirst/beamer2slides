@@ -643,12 +643,9 @@ def _upem_from_matrix(matrix) -> int:
 
 
 def load_type1(data: bytes) -> Program | None:
-    from fontTools import t1Lib
-    # T1Font wants a file; parse() only needs the data (cleartext + binary eexec part, as in FontFile)
-    font = t1Lib.T1Font.__new__(t1Lib.T1Font)
-    font.data, font.encoding = data, "ascii"
-    font.parse()
-    d = font.font
+    from . import type1
+    # t1Lib.T1Font.parse's dictionary (cleartext + binary eexec part, as in FontFile)
+    d = type1.fonttools_font(data)
     charstrings = d["CharStrings"]
     names = list(charstrings.keys())
     if NOTDEF in names:  # FreeType swaps .notdef with glyph 0 (t1load.c parse_charstrings)

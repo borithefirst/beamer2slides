@@ -15,25 +15,40 @@ from __future__ import annotations
 
 import copy
 import math
+import struct
 from dataclasses import dataclass, field
 
 from ..api import OBJ_FORM, OBJ_IMAGE, OBJ_PATH, OBJ_SHADING, OBJ_TEXT
 from .colors import DEVICE, PATTERN, ColorSpace, load_colorspace
 from .fonts import Font, load_font
 from .raster import concat, path_is_rect
-from .syntax import InlineImage, Name, Ref, Stream, String, float32 as f32, operations
+from .syntax import F32X2, F32X3, F32X4, F32X6, InlineImage, Name, Ref, Stream, String, float32 as f32, operations
 
 IDENTITY = (1.0, 0.0, 0.0, 1.0, 0.0, 0.0)
 
 
+# Several floats rounded in one pack/unpack (syntax.F32X*); `pack` refuses what `f32` makes an
+# infinity, and the one-at-a-time rounding answers instead.
+_p2, _u2 = F32X2.pack, F32X2.unpack
+_p3, _u3 = F32X3.pack, F32X3.unpack
+_p4, _u4 = F32X4.pack, F32X4.unpack
+_p6, _u6 = F32X6.pack, F32X6.unpack
+
+
 def f32m(m: tuple) -> tuple:
     """A CFX_Matrix: six floats."""
-    return tuple(f32(v) for v in m)
+    try:
+        return _u6(_p6(*m))
+    except (OverflowError, TypeError, struct.error):
+        return tuple(f32(v) for v in m)
 
 
 def f32p(p: tuple) -> tuple:
     """A CFX_PointF."""
-    return f32(p[0]), f32(p[1])
+    try:
+        return _u2(_p2(p[0], p[1]))
+    except (OverflowError, TypeError, struct.error):
+        return f32(p[0]), f32(p[1])
 PT_MOVE, PT_LINE, PT_BEZIER = 2, 0, 1   # api.SEG_* values
 FILL_NONE, FILL_EVENODD, FILL_WINDING = 0, 1, 2   # FPDFPath_GetDrawMode
 MAX_FORM_LEVEL = 40
@@ -78,7 +93,12 @@ def is_identity(m) -> bool:
 def transform32(m, x, y):
     """CFX_Matrix::Transform in float, one rounding per operation."""
     a, b, c, d, e, f = m
-    return f32(f32(f32(a * x) + f32(c * y)) + e), f32(f32(f32(b * x) + f32(d * y)) + f)
+    try:
+        ax, cy, bx, dy = _u4(_p4(a * x, c * y, b * x, d * y))
+        sx, sy = _u2(_p2(ax + cy, bx + dy))
+        return _u2(_p2(sx + e, sy + f))
+    except OverflowError:
+        return f32(f32(f32(a * x) + f32(c * y)) + e), f32(f32(f32(b * x) + f32(d * y)) + f)
 
 
 def rect_points(left, bottom, right, top) -> tuple:
@@ -1178,9 +1198,16 @@ def text_positions(obj: PObj) -> float:
             cur = f32(cur + scaled(font.vert_width(code)))
         else:
             min_y, max_y = min(min_y, min(t, b)), max(max_y, max(t, b))
-            left, right = f32(cur + scaled(l)), f32(cur + scaled(r))
+            w = font.char_width(code)
+            try:   # the three `cur + scaled(v)` below, rounded three at a time
+                sl, sr, sw = _u3(_p3(l * size, r * size, w * size))
+                sl, sr, sw = _u3(_p3(sl / 1000, sr / 1000, sw / 1000))
+                left, right, nxt = _u3(_p3(cur + sl, cur + sr, cur + sw))
+            except OverflowError:
+                left, right = f32(cur + scaled(l)), f32(cur + scaled(r))
+                nxt = f32(cur + scaled(w))
             min_x, max_x = min(min_x, left, right), max(max_x, left, right)
-            cur = f32(cur + scaled(font.char_width(code)))
+            cur = nxt
         if code == 32 and (not cid or font.char_size(32) == 1):
             cur = f32(cur + obj.word_space)
         cur = f32(cur + obj.char_space)

@@ -28,7 +28,7 @@ import math
 from . import unicode_data
 from .content import OBJ_FORM, OBJ_TEXT, PObj, f32m, f32p, item_origin
 from .navigation import pdf_decode_text
-from .syntax import Name, Ref, String, float32 as f32
+from .syntax import F32X2, F32X3, F32X4, F32X6, F32X8, Name, Ref, String, float32 as f32
 from .fonts import INVALID_CODE
 
 NORMAL, GENERATED, NOT_UNICODE, HYPHEN, PIECE, ACTUAL_TEXT = range(6)
@@ -107,13 +107,13 @@ def concat32(m, n):
             f32(f32(f32(e * A) + f32(f * C)) + E), f32(f32(f32(e * B) + f32(f * D)) + F))
 
 
-def apply32(m, x, y):
+def _apply32(m, x, y):
     """CFX_Matrix::Transform in C floats: every product and sum rounded."""
     return (f32(f32(f32(m[0] * x) + f32(m[2] * y)) + m[4]),
             f32(f32(f32(m[1] * x) + f32(m[3] * y)) + m[5]))
 
 
-def inverse32(m):
+def _inverse32(m):
     """CFX_Matrix::GetInverse in C floats."""
     a, b, c, d, e, f = (f32(v) for v in m)
     i = f32(f32(a * d) - f32(b * c))
@@ -124,12 +124,64 @@ def inverse32(m):
             f32(f32(f32(a * f) - f32(b * e)) / j))
 
 
-def transform_rect32(m, r):
+def _transform_rect32(m, r):
     """CFX_Matrix::TransformRect in C floats."""
     m = tuple(f32(v) for v in m)
     l, b, rt, t = r
-    pts = [apply32(m, x, y) for x, y in ((l, t), (l, b), (rt, t), (rt, b))]
+    pts = [_apply32(m, x, y) for x, y in ((l, t), (l, b), (rt, t), (rt, b))]
     xs, ys = [p[0] for p in pts], [p[1] for p in pts]
+    return min(xs), min(ys), max(xs), max(ys)
+
+
+# The same three, their float roundings done several at a time (`syntax.F32X*`: one pack/unpack
+# per step instead of one call per value). `pack` refuses what `f32` turns into an infinity, and
+# then the one-at-a-time versions above answer instead.
+_p2, _u2 = F32X2.pack, F32X2.unpack
+_p3, _u3 = F32X3.pack, F32X3.unpack
+_p4, _u4 = F32X4.pack, F32X4.unpack
+_p6, _u6 = F32X6.pack, F32X6.unpack
+_p8, _u8 = F32X8.pack, F32X8.unpack
+
+
+def apply32(m, x, y):
+    """CFX_Matrix::Transform in C floats: every product and sum rounded."""
+    try:
+        ax, cy, bx, dy = _u4(_p4(m[0] * x, m[2] * y, m[1] * x, m[3] * y))
+        sx, sy = _u2(_p2(ax + cy, bx + dy))
+        return _u2(_p2(sx + m[4], sy + m[5]))
+    except OverflowError:
+        return _apply32(m, x, y)
+
+
+def inverse32(m):
+    """CFX_Matrix::GetInverse in C floats."""
+    try:
+        a, b, c, d, e, f = _u6(_p6(*m))
+        ad, bc, cf, de, af, be = _u6(_p6(a * d, b * c, c * f, d * e, a * f, b * e))
+        i, g, h = _u3(_p3(ad - bc, cf - de, af - be))
+        if i == 0:
+            return IDENTITY
+        j = -i
+        return _u6(_p6(d / i, b / j, c / j, a / i, g / i, h / j))
+    except OverflowError:
+        return _inverse32(m)
+
+
+def transform_rect32(m, r):
+    """CFX_Matrix::TransformRect in C floats."""
+    try:
+        a, b, c, d, e, f = _u6(_p6(*m))
+        l, bt, rt, t = r
+        # the corners (l, t), (l, b), (r, t), (r, b), as `_apply32` takes them
+        p = _u8(_p8(a * l, c * t, a * l, c * bt, a * rt, c * t, a * rt, c * bt))
+        q = _u8(_p8(b * l, d * t, b * l, d * bt, b * rt, d * t, b * rt, d * bt))
+        x0, x1, x2, x3, y0, y1, y2, y3 = _u8(_p8(p[0] + p[1], p[2] + p[3], p[4] + p[5], p[6] + p[7],
+                                                 q[0] + q[1], q[2] + q[3], q[4] + q[5], q[6] + q[7]))
+        x0, x1, x2, x3, y0, y1, y2, y3 = _u8(_p8(x0 + e, x1 + e, x2 + e, x3 + e,
+                                                 y0 + f, y1 + f, y2 + f, y3 + f))
+    except OverflowError:
+        return _transform_rect32(m, r)
+    xs, ys = [x0, x1, x2, x3], [y0, y1, y2, y3]
     return min(xs), min(ys), max(xs), max(ys)
 
 
@@ -357,12 +409,34 @@ def loose_bounds(ci: CharInfo):
         if ascent != descent:
             # CPDF_TextObject::GetCharWidth: the size is divided first, in float
             width = f32(font.char_width(ci.code) * f32(obj.font_size / 1000))
-            ox, oy = apply32(inverse32(ci.matrix), *ci.origin)
+            ox, oy = apply32(_inverse_of(ci.matrix), *ci.origin)
             size = f32(size)
-            box = transform_rect32(ci.matrix, (ox, f32(oy + f32(f32(descent * size) / 1000)), f32(ox + width),
-                                               f32(oy + f32(f32(ascent * size) / 1000))))
+            try:
+                ds, asc = _u2(_p2(descent * size, ascent * size))
+                ds, asc = _u2(_p2(ds / 1000, asc / 1000))
+                bottom, right, top = _u3(_p3(oy + ds, ox + width, oy + asc))
+            except OverflowError:
+                bottom, right = f32(oy + f32(f32(descent * size) / 1000)), f32(ox + width)
+                top = f32(oy + f32(f32(ascent * size) / 1000))
+            box = transform_rect32(ci.matrix, (ox, bottom, right, top))
             return union(box, ci.box)
     return ci.box
+
+
+# The chars of one text object share its matrix (the very tuple), so its inverse is kept for the
+# next char. The entry holds the tuple itself, so an `is` match can't be a new tuple at an old
+# address, and it is replaced whole, so threads never see a matrix paired with another's inverse.
+_last_inverse = (None, None)
+
+
+def _inverse_of(m):
+    global _last_inverse
+    last = _last_inverse
+    if m is last[0] and type(m) is tuple:
+        return last[1]
+    inv = inverse32(m)
+    _last_inverse = (m, inv)
+    return inv
 
 
 def is_control(ci: CharInfo) -> bool:
@@ -856,7 +930,12 @@ class TextPage:
                 ctype = NOT_UNICODE
             l, b, r, t = font.char_bbox(code)
             # C floats: `rect.left * font_size + origin.x` rounds after the product and the sum
-            box = [f32(f32(l * size) + x), f32(f32(b * size) + y), f32(f32(r * size) + x), f32(f32(t * size) + y)]
+            try:
+                pl, pb, pr, pt = _u4(_p4(l * size, b * size, r * size, t * size))
+                box = list(_u4(_p4(pl + x, pb + y, pr + x, pt + y)))
+            except OverflowError:
+                box = [f32(f32(l * size) + x), f32(f32(b * size) + y), f32(f32(r * size) + x),
+                       f32(f32(t * size) + y)]
             if abs(box[3] - box[1]) < SIZE_EPSILON:
                 box[3] = f32(box[1] + size)
             if abs(box[2] - box[0]) < SIZE_EPSILON:

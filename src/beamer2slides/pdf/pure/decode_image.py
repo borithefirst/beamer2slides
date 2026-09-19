@@ -20,7 +20,7 @@ import zlib
 import numpy as np
 
 from . import filters as FL
-from .colors import adobe_cmyk_to_srgb
+from .colors import adobe_cmyk_to_srgb_array
 from .syntax import Name, Stream
 
 F32 = np.float32
@@ -111,10 +111,8 @@ def _cmyk_rgb_f(v: np.ndarray):
     channel clamped, rounded to a byte with the 0.49999997f offset, looked up, times 1/255.f."""
     c = np.clip(np.nan_to_num(v[..., :4].astype(F32), nan=F32(0)), F32(0), F32(1))
     q = (c * F32(255) + F32(0.49999997)).astype(np.int64)
-    flat = q.reshape(-1, 4)
-    keys, inv = np.unique(flat, axis=0, return_inverse=True)
-    table = np.array([adobe_cmyk_to_srgb(*(int(x) for x in k)) for k in keys], np.int64).reshape(-1, 3)
-    rgb = (table[np.asarray(inv).reshape(-1)].astype(F32) * F32(1.0 / 255.0)).reshape(q.shape[:-1] + (3,))
+    table = adobe_cmyk_to_srgb_array(q.reshape(-1, 4))
+    rgb = (table.astype(F32) * F32(1.0 / 255.0)).reshape(q.shape[:-1] + (3,))
     return rgb[..., 0], rgb[..., 1], rgb[..., 2], np.ones(q.shape[:-1], bool)
 
 
@@ -698,11 +696,8 @@ def _translate24(rows, cs, family, bpc, comps, w, h, default_decode, comp_min, c
                 elif bf == "DeviceRGB":
                     out[...] = src[..., ::-1]
                 elif bf == "DeviceCMYK":
-                    flat = src[..., :4].reshape(-1, 4)
-                    keys, inv = np.unique(flat, axis=0, return_inverse=True)
-                    table = np.array([adobe_cmyk_to_srgb(*(int(x) for x in k)) for k in keys],
-                                     np.uint8).reshape(-1, 3)
-                    out[...] = table[np.asarray(inv).reshape(-1)][:, ::-1].reshape(h, w, 3)
+                    rgb = adobe_cmyk_to_srgb_array(src[..., :4].reshape(-1, 4)).astype(np.uint8)
+                    out[...] = rgb[:, ::-1].reshape(h, w, 3)
                 else:
                     raise Unsupported(f"{bf} image lines")
                 return out
