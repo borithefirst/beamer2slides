@@ -75,6 +75,22 @@ Each of these was a diff against PDFium until it was ported:
   ascent, and with it every char box. The FontBBox is scaled in floats too: metropolis's bullet font
   has a matrix of 0.011, and `6 × 0.011 × 1000` is 66 in float32 but 65.9999996 in doubles, which
   floors to 65.
+- **Broken content syntax** is read as CPDF_StreamContentParser reads it, because what a parser makes
+  of junk decides what gets drawn (`syntax._StreamParser`, `operations`, found by
+  `render_torture --mutate`):
+  - *Numbers* (FX_Number): any word of digits, signs and dots is one. With a dot it is StringToFloat
+    (leading signs skipped, the longest valid prefix, straight to float32: `5..5` is 5); without,
+    an optional sign and the digits up to the first non-digit (`--5` is 0), 0 past uint32, and 0
+    past int32 with a sign.
+  - *Operands* (CPDF_StreamParser::ReadNextObject): a `[` inside a top-level array is nothing and
+    only its `[` is consumed, so its `]` closes the outer array; a keyword inside an array is
+    skipped; a dictionary with a key that is no name is nothing, read up to there; a stray `]` or
+    `>>` is an operand that is no object (it counts, and reads as 0).
+  - *The 16-slot operand ring*: past 16 operands, each new one advances the start and is written
+    into the new start slot - it overwrites the second oldest, and the oldest is read as the last.
+  - *The path fast path* (ParsePathObject), entered after an `m` with exactly two operands: path
+    operators take the first six numbers read, extras dropped, with no count check, so a missing
+    operand is whatever the previous operator left (zeros at first); anything else hands back.
 - **Page boxes**: the MediaBox falls back to Letter, and the crop box is intersected with it.
 - **A broken xref table** is rebuilt from the `n 0 obj` markers, as PDFium's repair does.
 
@@ -140,10 +156,12 @@ decided it:
 The oracle is `devtools/render_torture.py` (`python tools/render_torture.py SEED0 N [--forms]`):
 random pages of `cm`, clips, colours, line styles, dashes, constant alpha and paths painted every way,
 optionally inside nested forms with random /BBox and /Matrix (`--forms`) and on pages with media
-boxes off the origin, crop boxes, /Rotate and render clips (`--page`), rendered by both at random
-zooms on white and on clear bitmaps, each difference shrunk to the lines that still cause it. When
-paths were done: 5,500 seeds of pages, 3,000 with forms and 300 of page geometry, not one pixel apart; `tests/test_pure_pdf.py` keeps
-40 seeds of each plus the shrunk pages that were once apart. `render_page` refuses (`unported`) what
+boxes off the origin, crop boxes, /Rotate and render clips (`--page`), with junk tokens in every
+content stream (`--mutate`: odd numbers, stray operators, unbalanced `[ << >>`), rendered by both at
+random zooms on white and on clear bitmaps, each difference shrunk to the lines (and, mutated, the
+tokens) that still cause it. When paths were done: 5,500 seeds of pages, 3,000 with forms, 300 of
+page geometry and 3,500 mutated, not one pixel apart; `tests/test_pure_pdf.py` keeps 40 seeds of
+each plus the shrunk pages that were once apart. `render_page` refuses (`unported`) what
 it does not draw yet: text, images, shadings, patterns, transparency groups, soft masks, blend modes,
 transfer functions.
 

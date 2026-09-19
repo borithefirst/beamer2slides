@@ -2,12 +2,14 @@
 PDFium and by the pure reader, and any pixel that differs is a failure, shrunk to the lines that
 still make it differ. This is how the path renderer was made exact.
 
-    python tools/render_torture.py [seed0] [n] [--forms] [--out DIR]
+    python tools/render_torture.py [seed0] [n] [--forms] [--page] [--mutate] [--out DIR]
 
 A page is a few `q ... Q` groups: a random `cm`, clip paths (`W n`, `W* n`), fill and stroke
 colours, line width/cap/join/miter, dashes, constant alpha (/A0../A4: ca = CA), and one path of
 `m l c v y re h` painted with any operator. `--forms` adds up to three form XObjects with random
-/BBox and /Matrix, each calling the earlier ones. Failures are written to DIR as seedN.pdf (the
+/BBox and /Matrix, each calling the earlier ones. `--mutate` puts junk tokens into the content
+(odd numbers, stray operators, unbalanced `[ << >>`), where what PDFium's content parser makes of
+broken syntax decides the pixels. Failures are written to DIR as seedN.pdf (the
 shrunk page) and seedN.png (PDFium | pure | difference)."""
 
 from __future__ import annotations
@@ -165,13 +167,40 @@ def random_geometry(r: random.Random) -> dict:
     return {"media": media, "page_entries": entries, "clip": clip}
 
 
-def case(seed: int, forms: bool, page: bool = False) -> tuple[bytes, list, float, bool, dict]:
-    """The page (content, forms, zoom, transparent, geometry) seed `seed` stands for."""
+JUNK = [b"1e30", b"-1e30", b"3.4e38", b"1e-40", b"nan", b"inf", b"--5", b"5..5", b".", b"-", b"1e",
+        b"99999999999999999999", b"q", b"Q", b"Q Q Q", b"q q q q", b"h", b"W", b"W*", b"n", b"f", b"S", b"B*",
+        b"cm", b"re", b"c", b"l", b"m", b"w", b"d", b"[", b"]", b"[1 2", b"<<", b">>", b"(", b")", b"/Name",
+        b"%comment", b"\x00", b"-0", b"0 0 0 0 0 0 cm", b"1 0 0 0 0 0 cm", b"0 w", b"-3 w", b"[0 0] 0 d",
+        b"[-1 2] 0 d", b"[1e-9] 0 d", b"1e9 w", b"0 M", b"-1 j", b"7 J", b"/A9 gs", b"/X7 Do"]
+
+
+def mutate(r: random.Random, content: bytes) -> bytes:
+    """One to six token edits: junk inserted, a token replaced by junk, a token deleted."""
+    toks = content.split(b" ")
+    for _ in range(r.randint(1, 6)):
+        k, i = r.random(), r.randrange(len(toks) + 1)
+        if k < 0.4:
+            toks.insert(i, r.choice(JUNK))
+        elif k < 0.7 and toks:
+            toks[min(i, len(toks) - 1)] = r.choice(JUNK)
+        elif toks:
+            del toks[min(i, len(toks) - 1)]
+    return b" ".join(toks)
+
+
+def case(seed: int, forms: bool, page: bool = False, mutated: bool = False) -> tuple[bytes, list, float, bool, dict]:
+    """The page (content, forms, zoom, transparent, geometry) seed `seed` stands for. `mutated`:
+    the content streams get junk tokens (`mutate`), for the parser's handling of broken syntax."""
     r = random.Random(seed)
     fs = random_forms(r) if forms else []
     content = random_page(r, len(fs))
     zoom, transparent = r.choice([0.5, 1, 1.37, 2, 3.1]), r.random() < 0.3
-    return content, fs, zoom, transparent, random_geometry(r) if page else {}
+    geometry = random_geometry(r) if page else {}
+    if mutated:
+        m = random.Random(seed * 7919 + 1)
+        content = mutate(m, content)
+        fs = [(e, mutate(m, c)) for e, c in fs]
+    return content, fs, zoom, transparent, geometry
 
 
 def compare(content: bytes, zoom: float, transparent: bool, forms=(), geometry=None):
@@ -190,8 +219,9 @@ def compare(content: bytes, zoom: float, transparent: bool, forms=(), geometry=N
     return int((d > 0).sum()), a, b, d
 
 
-def shrink(content: bytes, zoom: float, transparent: bool, forms=(), geometry=None):
-    """Drop lines (the page's, then each form's) while the difference remains."""
+def shrink(content: bytes, zoom: float, transparent: bool, forms=(), geometry=None, words: bool = False):
+    """Drop lines (the page's, then each form's) while the difference remains; `words`: then
+    single tokens too (for mutated pages, where the culprit is one token in a line)."""
     forms = list(forms)
 
     def fails(c, fs):
@@ -200,24 +230,25 @@ def shrink(content: bytes, zoom: float, transparent: bool, forms=(), geometry=No
         except Exception:
             return False
 
-    def cut(text, test):
-        lines = text.split(b"\n")
+    def cut(text, test, sep=b"\n"):
+        lines = text.split(sep) if sep != b" " else text.split()
         changed = True
         while changed:
             changed = False
             for i in range(len(lines)):
-                if lines[i] in (b"q", b"Q"):
+                if sep == b"\n" and lines[i] in (b"q", b"Q"):
                     continue
                 trial = lines[:i] + lines[i + 1:]
-                if test(b"\n".join(trial)):
+                if test(sep.join(trial)):
                     lines, changed = trial, True
                     break
-        return b"\n".join(lines)
+        return sep.join(lines)
 
-    content = cut(content, lambda c: fails(c, forms))
-    for k in range(len(forms)):
-        entries = forms[k][0]
-        forms[k] = (entries, cut(forms[k][1], lambda c: fails(content, forms[:k] + [(entries, c)] + forms[k + 1:])))
+    for sep in (b"\n", b" ") if words else (b"\n",):
+        content = cut(content, lambda c: fails(c, forms), sep)
+        for k in range(len(forms)):
+            entries = forms[k][0]
+            forms[k] = (entries, cut(forms[k][1], lambda c: fails(content, forms[:k] + [(entries, c)] + forms[k + 1:]), sep))
     return content, forms
 
 
@@ -227,12 +258,13 @@ def main(argv=None) -> int:
     ap.add_argument("n", type=int, nargs="?", default=200)
     ap.add_argument("--forms", action="store_true")
     ap.add_argument("--page", action="store_true", help="random media/crop boxes, /Rotate and render clips")
+    ap.add_argument("--mutate", action="store_true", help="junk tokens in the content (broken syntax)")
     ap.add_argument("--out", default="out/render-torture")
     args = ap.parse_args(argv)
     out = Path(args.out)
     fails = 0
     for seed in range(args.seed0, args.seed0 + args.n):
-        content, forms, zoom, transparent, geometry = case(seed, args.forms, args.page)
+        content, forms, zoom, transparent, geometry = case(seed, args.forms, args.page, args.mutate)
         try:
             npx = compare(content, zoom, transparent, forms, geometry)[0]
         except Exception as e:
@@ -242,12 +274,12 @@ def main(argv=None) -> int:
         if not npx:
             continue
         fails += 1
-        small, sforms = shrink(content, zoom, transparent, forms, geometry)
+        small, sforms = shrink(content, zoom, transparent, forms, geometry, words=args.mutate)
         npx, a, b, d = compare(small, zoom, transparent, sforms, geometry)
         print(f"seed {seed} zoom {zoom} transparent {transparent} {geometry}: {npx} px, max {d.max()}")
         for k, (e, c) in enumerate(sforms):
-            print(f"-- X{k} {e.decode()}\n{c.decode()}")
-        print("-- page\n" + small.decode())
+            print(f"-- X{k} {e.decode()}\n{c.decode(errors='replace')}")
+        print("-- page\n" + small.decode(errors="replace"))
         out.mkdir(parents=True, exist_ok=True)
         from PIL import Image
         vis = np.concatenate([a[..., :3], b[..., :3], np.stack([np.where(d > 0, 255, 0)] * 3, -1)], 1)

@@ -198,7 +198,17 @@ class State:
 
 
 def _num(v, default=0.0) -> float:
-    return float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) else default
+    """GetNumber: an integer operand as a float (16777217 -> 16777216), a real as it is."""
+    if isinstance(v, float):
+        return v
+    return f32(float(v)) if isinstance(v, int) and not isinstance(v, bool) else default
+
+
+def _is_number(v) -> bool:
+    return isinstance(v, (int, float)) and not isinstance(v, bool)
+
+
+PATH_FAST = frozenset(("m", "l", "c", "v", "y", "h", "re"))
 
 
 class Parser:
@@ -301,7 +311,14 @@ class _Run:
     # ------------------------------------------------------------------ execution
 
     def execute(self, data: bytes) -> None:
+        fast = None  # ParsePathObject's params while in its fast path
         for op, args in operations(data):
+            if fast is not None:
+                raw = getattr(args, "raw", args)  # the fast path reads numbers, not the buffer
+                if op in PATH_FAST and all(_is_number(a) for a in raw):
+                    self._fast_path(op, raw, fast)
+                    continue
+                fast = None
             handler = OPS.get(op)
             if handler is None:
                 continue
@@ -309,6 +326,37 @@ class _Run:
                 handler(self, args)
             except (TypeError, ValueError, IndexError, ZeroDivisionError, OverflowError, KeyError):
                 continue  # malformed operands: PDFium reads zeros or skips; nothing is drawn wrongly
+            if op == "m" and len(args) == 2:
+                fast = [0.0] * 6
+
+    def _fast_path(self, op: str, args: list, params: list) -> None:
+        """CPDF_StreamContentParser::ParsePathObject, entered after a valid `m`: path operators
+        take the *first* numbers read (up to six; more are dropped), without counting them - a
+        missing one is whatever the previous operator left in `params` (zeros at first) - until
+        anything but a number or a path operator hands back to the normal parser."""
+        for k, a in enumerate(args[:6]):
+            params[k] = _num(a)
+        p = params
+        if op == "m":
+            self._point(p[0], p[1], PT_MOVE)
+        elif op == "l":
+            self._point(p[0], p[1], PT_LINE)
+        elif op == "c":
+            self._point(p[0], p[1], PT_BEZIER)
+            self._point(p[2], p[3], PT_BEZIER)
+            self._point(p[4], p[5], PT_BEZIER)
+        elif op == "v":
+            self._point(*self.path_current, PT_BEZIER)
+            self._point(p[0], p[1], PT_BEZIER)
+            self._point(p[2], p[3], PT_BEZIER)
+        elif op == "y":
+            self._point(p[0], p[1], PT_BEZIER)
+            self._point(p[2], p[3], PT_BEZIER)
+            self._point(p[2], p[3], PT_BEZIER)
+        elif op == "h":
+            self.op_h([])
+        else:  # re
+            self.op_re(p[:4])
 
     @staticmethod
     def number(args, i: int) -> float:

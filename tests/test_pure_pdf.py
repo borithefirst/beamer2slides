@@ -134,6 +134,23 @@ RENDER_CASES = {
     "form_matrix_float32": (b"/X0 Do", [(b"/BBox [-99999 -99999 99999 99999] /Matrix [0.0000 1.0000 0.0662 -1.0322 17.0277 32.5160]",
                                          b"-1.6336 1.0873 0.4387 -0.1223 39.137 121.943 cm\n20.000 w 0 J 0 j 1.00 M\n"
                                          b"206 148 m 181 103 61.8 3 2 124 c -17 70 38 14 v S")], 2, False),
+    # broken syntax, as CPDF_StreamContentParser reads it (found by render_torture --mutate).
+    # After a valid `m`, path operators take the first numbers, extras dropped, missing ones stale:
+    "fast_path_extra_numbers": (b"4 w 146 20 m 4.08 -13.8 29.29 l S", [], 1.37, False),
+    "fast_path_stale_params": (b"4 w 136 190 m 20 30 l c m s", [], 1.37, False),
+    # FX_Number: integers overflow to 0, any word of digits, signs and dots is a number
+    "integer_overflow": (b"4 w 10 10 m 99999999999999999999 100 l 150 -4294967297 l 2147483648 +2147483648 l S", [], 1.37, False),
+    "odd_numbers": (b"4 w 10 10 m --50 5..5 l -.5e3 100 l 100 . l S", [], 1.37, False),
+    # CPDF_StreamParser::ReadNextObject: a nested '[' is nothing, a keyword in an array is skipped,
+    # a dictionary with a non-name key is nothing, a stray '>>' is an operand that is no object
+    "nested_array_top_level": (b"4 w 10 10 m 100 100 l [1 [1e-9] 53.6138 re S 0 0 m 50 20 l S", [], 1.37, False),
+    "stray_dict_end": (b"4 w >> 0.215 0.812 RG 21.0000 81.7487 m 150 120 l S", [], 1.37, False),
+    "dict_bad_key": (b"4 w << l h 144.0000 90.1253 m 20 20 l S", [], 1.37, False),
+    "stray_dict_end_in_path": (b"4 w 10 10 m >> 104.1404 m 7.0000 y 150 150 l S", [], 1.37, False),
+    "array_keyword_inside": (b"4 w [ 3 x 5 ] 0 d 10 10 m 150 120 l S", [], 1.37, False),
+    # past 16 operands PDFium's ring buffer overwrites the second oldest, and reads the oldest last
+    "seventeen_operands": (b"1 2 3 4 5 6 7 8 9 10 11 12 13 20 20 150 150 re f", [], 1, False),
+    "twenty_operands": (b"4 w 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 170 20 20 150 150 re f", [], 1, False),
 }
 
 
@@ -144,22 +161,44 @@ def test_the_pure_renderer_draws_pdfiums_pixels(name):
     assert compare(content, zoom, transparent, forms)[0] == 0
 
 
-@pytest.mark.parametrize("forms,page", [(False, False), (True, False), (False, True)], ids=["pages", "forms", "geometry"])
-def test_the_pure_renderer_survives_torture_seeds(forms, page):
+@pytest.mark.parametrize("forms,page,mutated", [(False, False, False), (True, False, False), (False, True, False),
+                                                (True, True, True)], ids=["pages", "forms", "geometry", "mutated"])
+def test_the_pure_renderer_survives_torture_seeds(forms, page, mutated):
     """A slice of the random pages the renderer was made exact on (5,500 seeds of pages, 3,000
-    with forms, when it was written): any pixel apart fails."""
+    with forms, when it was written; 2,000 mutated): any pixel apart fails."""
     from beamer2slides.devtools.render_torture import case, compare
     apart = {}
     for seed in range(40):
-        content, fs, zoom, transparent, geometry = case(seed, forms, page)
+        content, fs, zoom, transparent, geometry = case(seed, forms, page, mutated)
         n = compare(content, zoom, transparent, fs, geometry)[0]
         if n:
             apart[seed] = n
-    flags = " --forms" * forms + " --page" * page
+    flags = " --forms" * forms + " --page" * page + " --mutate" * mutated
     assert not apart, f"seeds apart (python tools/render_torture.py SEED 1{flags}): {apart}"
 
 
 # ---------------------------------------------------------------------- PDFium's rules, one by one
+
+
+def test_content_operands_are_read_as_pdfiums_stream_parser_reads_them():
+    from beamer2slides.pdf.pure.syntax import Name, operations
+
+    def ops(data):
+        return [(op, list(args)) for op, args in operations(data)]
+
+    # a nested array at the top level is nothing: its ']' closes the outer one, the next is stray
+    assert ops(b"[1 [2] 3] x") == [("x", [[1, 2], 3, None])]
+    # a keyword inside an array is skipped
+    assert ops(b"[1 foo 2] d") == [("d", [[1, 2]])]
+    # a dictionary whose key is no name is nothing, and parsing goes on after the bad key
+    assert ops(b"<< 1 2 >> BDC") == [("BDC", [None, 2, None])]
+    assert ops(b"/P << /MCID 3 /A [1 [2]] >> BDC") == [("BDC", [Name("P"), {"MCID": 3, "A": [1, [2]]}])]
+    # FX_Number: signs and dots anywhere make a number; integers overflow to 0
+    # ("--5" has no dot: an integer, which the second '-' ends before any digit)
+    assert ops(b"--5 5..5 99999999999999999999 -2147483649 m") == [("m", [0, 5.0, 0, 0])]
+    assert ops(b"--.5 l") == [("l", [-0.5])]
+    # 17 operands: the 17th overwrites the second oldest and the oldest is read last
+    assert ops(b" ".join(b"%d" % i for i in range(1, 18)) + b" re")[0][1][-5:] == [13, 14, 15, 16, 1]
 
 
 def test_reals_are_c_floats():
