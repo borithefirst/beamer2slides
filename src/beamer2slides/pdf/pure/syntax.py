@@ -152,6 +152,12 @@ def float32(v: float) -> float:
         return float("inf") if v > 0 else float("-inf")
 
 
+# Several values rounded to float32 at once: `unpack(pack(a, b, ...))` is `float32` of each, in one
+# pair of C calls. `pack` raises OverflowError where `float32` gives an infinity, so a caller doing
+# this keeps a `float32` path to fall back on (the hot paths below: raster, textpage, content).
+F32X2, F32X4, F32X6 = struct.Struct("<2f"), struct.Struct("<4f"), struct.Struct("<6f")
+
+
 _REAL = re.compile(rb"-?(?:\d+\.?\d*|\.\d+)")
 _DOUBLE_BITS = struct.Struct("<Q")
 _DOUBLE = struct.Struct("<d")

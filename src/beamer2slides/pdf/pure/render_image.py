@@ -95,19 +95,19 @@ def weights(dest_len, dmin, dmax, src_len, smin, smax, bilinear):
 
 
 def _gather(src: np.ndarray, starts, table, axis_len: int):
-    """Sum_j w_j * src[..., start + j, :] over the weight table: (n, ...) uint64 sums mod 2^32.
+    """Sum_j w_j * src[..., start + j, :] over the weight table: (n, ...) uint32 sums, wrapping
+    as C's uint32 arithmetic does (numpy's uint32 products and sums wrap mod 2^32 the same way).
     `src` is (len, rest...) along the axis being resampled."""
     wc = table.shape[1]
     idx = np.clip(starts[:, None] + np.arange(wc)[None, :], 0, max(axis_len - 1, 0))
-    out = np.zeros((len(starts),) + src.shape[1:], np.uint64)
-    tab = table.astype(np.uint64)
+    out = np.zeros((len(starts),) + src.shape[1:], np.uint32)
+    tab = table.astype(np.uint32)
+    shape = (-1,) + (1,) * (src.ndim - 1)
     for k in range(wc):
         w = tab[:, k]
         if not w.any():
             continue
-        vals = src[idx[:, k]].astype(np.uint64)
-        wk = w.reshape((-1,) + (1,) * (src.ndim - 1))
-        out = (out + ((vals * wk) & M32)) & M32
+        out += src[idx[:, k]] * w.reshape(shape)
     return out
 
 
@@ -174,19 +174,18 @@ def stretch(dib, dest_w: int, dest_h: int, clip, bilinear_opt: bool):
     cols = np.moveaxis(band, 1, 0)                            # (sw, rows, ch)
     if has_alpha:
         idx = np.clip(hs[:, None] + np.arange(hw.shape[1])[None, :], 0, sw - 1)
-        acc = np.zeros((len(hs), band.shape[0], 4), np.uint64)
+        acc = np.zeros((len(hs), band.shape[0], 4), np.uint32)   # uint32: C's wrapping sums
         for k in range(hw.shape[1]):
-            w = hw[:, k].astype(np.uint64)
+            w = hw[:, k].astype(np.uint32)
             if not w.any():
                 continue
-            px = cols[idx[:, k]].astype(np.uint64)            # (n, rows, 4)
-            pw = ((w[:, None] * px[..., 3]) & M32) // 255
-            for c in range(3):
-                acc[..., c] = (acc[..., c] + ((pw * px[..., c]) & M32)) & M32
-            acc[..., 3] = (acc[..., 3] + pw) & M32
+            px = cols[idx[:, k]]                                  # (n, rows, 4)
+            pw = (w[:, None] * px[..., 3]) // 255
+            acc[..., :3] += pw[..., None] * px[..., :3]
+            acc[..., 3] += pw
         inter = np.zeros(acc.shape, np.uint8)
         inter[..., :3] = _pixel(acc[..., :3])
-        inter[..., 3] = _pixel((acc[..., 3] * 255) & M32)
+        inter[..., 3] = _pixel(acc[..., 3] * np.uint32(255))
     else:
         inter = _pixel(_gather(cols, hs, hw, sw))                # (n, rows, ch)
     inter = np.moveaxis(inter, 0, 1)                          # (rows, n, ch): the inter buffer
@@ -196,20 +195,19 @@ def stretch(dib, dest_w: int, dest_h: int, clip, bilinear_opt: bool):
         block = _pixel(_gather(inter, vs, vw, inter.shape[0]))
         return block, out_fmt, pal
     idx = np.clip(vs[:, None] + np.arange(vw.shape[1])[None, :], 0, inter.shape[0] - 1)
-    sums = np.zeros((len(vs), inter.shape[1], 4), np.uint64)
+    sums = np.zeros((len(vs), inter.shape[1], 4), np.uint32)
     for k in range(vw.shape[1]):
-        w = vw[:, k].astype(np.uint64)
+        w = vw[:, k].astype(np.uint32)
         if not w.any():
             continue
-        px = inter[idx[:, k]].astype(np.uint64)
-        sums = (sums + ((px * w[:, None, None]) & M32)) & M32
+        sums += inter[idx[:, k]] * w[:, None, None]
     block = np.zeros(sums.shape, np.uint8)
     line = np.zeros((inter.shape[1], 3), np.uint8)            # dest_scanline_: stale where a == 0
     for y in range(len(vs)):
         a = sums[y, :, 3]
         nz = a != 0
         if nz.any():
-            q = ((sums[y, :, :3][nz] * 255) & M32) // a[nz][:, None]
+            q = (sums[y, :, :3][nz] * np.uint32(255)) // a[nz][:, None]
             q = q.astype(np.int64)
             q = np.where(q >= 2147483648, q - 4294967296, q)
             line[nz] = np.clip(q, 0, 255).astype(np.uint8)
