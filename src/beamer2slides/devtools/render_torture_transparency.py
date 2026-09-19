@@ -21,6 +21,11 @@ import numpy as np
 from .render_torture import EXTGS, num, random_cm, random_geometry, random_path
 
 
+BLENDS = (b"Normal", b"Multiply", b"Screen", b"Overlay", b"Darken", b"Lighten", b"ColorDodge",
+          b"ColorBurn", b"HardLight", b"SoftLight", b"Difference", b"Exclusion", b"Hue",
+          b"Saturation", b"Color", b"Luminosity", b"Compatible")
+
+
 def pdf_bytes(page: bytes, items=(), media=(0, 0, 200, 150), page_entries: bytes = b"") -> bytes:
     """A one-page PDF. `items`: [(kind, entries, content, smask)] with kind "X" (a form, /X<k>)
     or "S" (a soft mask: its /G form; `smask` = b"/S /Luminosity /BC [...]" entries)."""
@@ -32,7 +37,8 @@ def pdf_bytes(page: bytes, items=(), media=(0, 0, 200, 150), page_entries: bytes
         xs = b" ".join(b"/X%d %d 0 R" % (k, ids[k]) for k in range(upto) if items[k][0] == "X")
         ss = b" ".join(b"/S%d << /SMask << /Type /Mask %s /G %d 0 R >> >>" % (k, items[k][3], ids[k])
                        for k in range(upto) if items[k][0] == "S")
-        gs = EXTGS[:-3] + b" /SN << /SMask /None >> " + ss + b" >>"
+        bm = b" ".join(b"/B%d << /BM /%s >>" % (k, m) for k, m in enumerate(BLENDS))
+        gs = EXTGS[:-3] + b" /SN << /SMask /None >> " + bm + b" " + ss + b" >>"
         return b"<< " + gs + b" /XObject << " + xs + b" >> >>"
 
     for k, (kind, entries, content, _) in enumerate(items):
@@ -74,6 +80,11 @@ def random_content(r: random.Random, items, upto: int) -> bytes:
     forms = [k for k in range(upto) if items[k][0] == "X"]
     masks = [k for k in range(upto) if items[k][0] == "S"]
     out = []
+    if r.random() < 0.5:
+        # something under what follows: a blend over nothing drawn (the page's white is the
+        # caller's fill, not content) is a plain copy
+        out.append(b"q\n%s\n%s %s %s %s re f\nQ" % (_colour(r), num(r, 0.3), num(r, 0.3),
+                                                   num(r), num(r)))
     for _ in range(r.randint(1, 5)):
         g = [b"q"]
         if r.random() < 0.3:
@@ -86,6 +97,8 @@ def random_content(r: random.Random, items, upto: int) -> bytes:
                 g.append(b"/SN gs")
         if r.random() < 0.3:
             g.append(b"/A%d gs" % r.randint(0, 4))
+        if r.random() < 0.35:
+            g.append(b"/B%d gs" % r.randrange(len(BLENDS)))
         if r.random() < 0.3:
             g.append(random_cm(r))
         g.append(_colour(r))

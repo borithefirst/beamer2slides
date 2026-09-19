@@ -663,26 +663,33 @@ class Status:
     """CPDF_RenderStatus."""
 
     def __init__(self, device: Device, transparency=(False, False), in_group: bool = False,
-                 initial_alpha: float = 1.0, ctx=None):
+                 initial_alpha: float = 1.0, ctx=None, stop=None):
         """`transparency` (group, isolated), `in_group` and `initial_alpha` (the fill alpha of
         the form object whose contents this status draws) are what ProcessTransparency reads;
-        `ctx` is render_transparency.Context."""
+        `ctx` is render_transparency.Context; `stop` the stop object (GetBackdrop's re-render
+        draws the page up to the object being blended)."""
         self.dev = device
         self.last_clip: tuple = ()
         self.transparency, self.in_group = transparency, in_group
         self.initial_alpha, self.ctx = initial_alpha, ctx
+        self.stop, self.stopped = stop, False
 
     def render_list(self, objs, matrix) -> None:
         """RenderObjectList."""
         l, t, r, b = self.dev.clip_box()
         cr = R.transform_rect(R.inverse(matrix), (float(l), float(t), float(r), float(b)))
         for obj in objs:
+            if obj is self.stop:
+                self.stopped = True
+                return
             if not obj.active:
                 continue
             rl, rb, rr, rt = obj.rect
             if rl > cr[2] or rr < cr[0] or rb > cr[3] or rt < cr[1]:
                 continue
             self.render_single(obj, matrix)
+            if self.stopped:
+                return
 
     def render_single(self, obj, matrix) -> None:
         self.process_clip(obj.clip_paths, matrix)
@@ -731,9 +738,11 @@ class Status:
 
     def process_form(self, obj, matrix) -> None:
         m = R.concat(obj.matrix, matrix)
-        status = Status(self.dev, self.transparency, self.in_group, obj.fill_alpha, self.ctx)
+        status = Status(self.dev, self.transparency, self.in_group, obj.fill_alpha, self.ctx,
+                        self.stop)
         self.dev.save()
         status.render_list(obj.children, m)
+        self.stopped = status.stopped
         self.dev.restore(False)
 
 
@@ -802,13 +811,16 @@ def render_page(objects, box, rotation: int, fs, width: int, height: int,
     if not transparent:
         dev.bgra[...] = 255
     matrix = page_matrix(box, rotation, fs)
+    top = [o for o in objects if o.parent is None]
+    if ctx is not None:
+        ctx.page_objects, ctx.page_matrix = top, matrix     # for GetBackdrop's re-render
     dev.save()
     dev.set_clip_rect((0, 0, width, height))
     # CPDF_ProgressiveRenderer: one layer, the page's top-level objects
     dev.save()
     # the page's CPDF_Transparency: isolated always, a group when /Group /S /Transparency
     status = Status(dev, (bool(ctx is not None and ctx.page_group), True), ctx=ctx)
-    status.render_list([o for o in objects if o.parent is None], matrix)
+    status.render_list(top, matrix)
     dev.restore(False)
     dev.restore(False)
     return dev.bgra

@@ -215,7 +215,9 @@ class Parser:
     # ------------------------------------------------------------------ entry points
 
     def parse_page(self, contents: bytes, bbox: tuple) -> None:
+        start = len(self.objects)
         self._run(contents, self.page_resources, State(), bbox, None)
+        check_clip([o for o in self.objects[start:] if o.parent is None])
 
     def _run(self, data: bytes, resources: dict, state: State, bbox: tuple, parent: PObj | None) -> None:
         run = _Run(self, resources if isinstance(resources, dict) else self.page_resources, state, bbox, parent)
@@ -863,6 +865,7 @@ class _Run:
                 _Run(self.p, res if isinstance(res, dict) else self.resources, child, bbox, obj).execute(data)
             finally:
                 chain.pop()
+            check_clip([c for c in obj.children if c.parent is obj])
         obj.rect = form_rect(obj)
 
 
@@ -923,6 +926,27 @@ def path_rect(obj: PObj) -> tuple:
     if width == 0 and obj.stroked:
         rect = (rect[0] - 0.5, rect[1] - 0.5, rect[2] + 0.5, rect[3] + 0.5)
     return rect
+
+
+def check_clip(objects) -> None:
+    """CPDF_ContentParser::CheckClip, run over one holder's objects (a page's top level, a form's
+    direct children) when its content is parsed: an object whose only clip path is a rectangle
+    containing the object's rectangle loses that clip. It changes pixels where the object's edge
+    lies on the clip's: an antialiased edge is then covered once, not twice. Only the clip the
+    renderer uses (`clip_paths`) is dropped; `clips`, which the extraction reads, is kept.
+    (A text clip would keep the clip too; the parser records none yet.)"""
+    for o in objects:
+        if not o.active or len(o.clip_paths) != 1 or o.type == OBJ_SHADING:
+            continue
+        pts = o.clip_paths[0][0]
+        if not path_is_rect(pts):
+            continue
+        (x0, y0), (x2, y2) = pts[0][:2], pts[2][:2]
+        l, r, b, t = min(x0, x2), max(x0, x2), min(y0, y2), max(y0, y2)
+        ol, ob, orr, ot = o.rect
+        ol, orr, ob, ot = min(ol, orr), max(ol, orr), min(ob, ot), max(ob, ot)
+        if ol >= l and orr <= r and ob >= b and ot <= t:
+            o.clip_paths = ()
 
 
 def form_rect(obj: PObj) -> tuple:
