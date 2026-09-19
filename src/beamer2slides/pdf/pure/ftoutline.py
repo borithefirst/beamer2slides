@@ -83,6 +83,11 @@ class Face:
     """One embedded Type 1 or CFF program, read again from the PDF's bytes (fontTools' parse keeps
     each charstring's bytecode; drawing one would replace it)."""
 
+    # a multiple master font's blend (PS_Blend): None for every other font
+    weight_vector: list[int] | None = None
+    num_designs = 0
+    len_buildchar = 0
+
     def __init__(self, font):
         prog = font.program
         if prog is None or not font.embedded:
@@ -96,11 +101,34 @@ class Face:
             self._load_type1(data)
         else:
             self._load_cff(data)
+        self._init_caches()
+
+    def _init_caches(self) -> None:
         self.upem = 1000
         self.x_scale = divfix(64 * 64, self.upem)      # FT_Set_Pixel_Sizes(64): DivFix(4096, upem)
         self._units: dict[int, object] = {}
+        self._advances: dict[int, int] = {}
         self._outlines: dict = {}
         self._paths: dict = {}
+
+    @classmethod
+    def from_type1(cls, t1) -> "Face":
+        """A face over a Type 1 program `type1.parse` read (FreeType's own loader, blend included):
+        PDFium's built-in multiple master faces."""
+        face = cls.__new__(cls)
+        face.order = t1.order
+        face.local = None
+        face.is_t1 = True
+        face.charstrings = t1.charstrings
+        face.subrs = t1.subrs
+        face.gsubrs = []
+        face.local_bias = face.global_bias = 0
+        face.weight_vector = t1.weight_vector
+        face.num_designs = t1.num_designs
+        face.len_buildchar = t1.len_buildchar
+        face.buildchar = [0] * t1.len_buildchar          # face->buildchar: one array for every glyph load
+        face._init_caches()
+        return face
 
     # -- loading
     def _load_type1(self, data: bytes) -> None:
@@ -180,11 +208,21 @@ class Face:
     def units(self, glyph: int):
         """The unscaled outline (whole font units, psobjs' builder) or None when the load fails."""
         if glyph not in self._units:
+            dec = Decoder(self)
             try:
-                self._units[glyph] = Decoder(self).load(self.charstring(glyph))
+                self._units[glyph] = dec.load(self.charstring(glyph))
+                self._advances[glyph] = dec.advance_x
             except GlyphError:
                 self._units[glyph] = None
         return self._units[glyph]
+
+    def advance(self, glyph: int) -> int | None:
+        """The glyph's unscaled horiAdvance, FIXED_TO_INT(builder.advance.x) (t1gload), or None when
+        the load fails."""
+        if self.units(glyph) is None:
+            return None
+        a = self._advances[glyph]
+        return i32((a + 0x8000 - (1 if a < 0 else 0)) & ~0xFFFF) >> 16    # FT_RoundFix, then >> 16
 
     def outline(self, glyph: int, matrix: tuple[int, int, int, int]):
         """FT_Load_Glyph under FT_Set_Transform(matrix = xx, xy, yx, yy): 26.6 contours
@@ -594,12 +632,14 @@ class Decoder:
         self.flex_state = 0
         self.num_flex_vectors = 0
         self.lsb_x = self.lsb_y = 0
+        self.advance_x = self.advance_y = 0              # builder.advance (hsbw / sbw)
         self.limit = INSTRUCTION_LIMIT
         # per-interp hint state lives here while that interp runs (see interp)
         self.mask_valid = False
         self.mask_new = False
         self.map_valid = False
         self.n_stems = 0
+        self.have_width = False
 
     def load(self, charstring: bytes):
         self.interp(charstring, False, 0, 0)
@@ -621,15 +661,17 @@ class Decoder:
         self.mask_new = False
 
     def interp(self, data: bytes, doing_seac: bool, cur_x: int, cur_y: int) -> None:
-        saved = (self.mask_valid, self.mask_new, self.map_valid, self.n_stems)
+        saved = (self.mask_valid, self.mask_new, self.map_valid, self.n_stems, self.have_width)
         self.mask_valid = self.mask_new = self.map_valid = False
         self.n_stems = 0
+        self.have_width = False                          # haveWidth, a local of each interp call
         try:
             self._interp(data, doing_seac, cur_x, cur_y)
         finally:
-            self.mask_valid, self.mask_new, self.map_valid, self.n_stems = saved
+            self.mask_valid, self.mask_new, self.map_valid, self.n_stems, self.have_width = saved
 
     def _stems(self, st: Stack) -> None:
+        self.have_width = True                           # cf2_doStems defines a width
         count = st.count()
         start = 1 if count & 1 else 0
         for i in range(start, count, 2):
@@ -683,6 +725,7 @@ class Decoder:
                 else:
                     self._stems(st)
             elif op == 4:                                         # vmoveto
+                self.have_width = True
                 cur_y = i32(cur_y + st.pop_fixed())
                 if not self.flex_state:
                     gp.move_to(cur_x, cur_y)
@@ -727,6 +770,7 @@ class Decoder:
             elif op == 9:                                         # closepath
                 if t1:
                     gp.close_open()
+                    self.have_width = True
             elif op in (10, 29):                                  # callsubr / callgsubr
                 if len(subr_stack) - 1 >= MAX_SUBR:
                     raise GlyphError("subroutine nesting")
@@ -759,8 +803,10 @@ class Decoder:
                         continue
             elif op == 13:                                        # hsbw
                 if t1:
-                    st.pop_fixed()                                # advance
+                    self.advance_x = st.pop_fixed()
+                    self.advance_y = 0
                     lsb = st.pop_fixed()
+                    self.have_width = True
                     self.lsb_x = i32(self.lsb_x + lsb)
                     if initial_map_ready:
                         cur_x = i32(cur_x + lsb)
@@ -801,11 +847,13 @@ class Decoder:
                         for _ in range((self.n_stems + 7) // 8):
                             buf.byte()
             elif op == 21:                                        # rmoveto
+                self.have_width = True
                 cur_y = i32(cur_y + st.pop_fixed())
                 cur_x = i32(cur_x + st.pop_fixed())
                 if not self.flex_state:
                     gp.move_to(cur_x, cur_y)
             elif op == 22:                                        # hmoveto
+                self.have_width = True
                 cur_x = i32(cur_x + st.pop_fixed())
                 if not self.flex_state:
                     gp.move_to(cur_x, cur_y)
@@ -968,14 +1016,20 @@ class Decoder:
                 raise GlyphError("nested seac")
             adx = i32(adx + self.lsb_x)
             base, accent = self.face.seac_glyph(bchar), self.face.seac_glyph(achar)
+            # the seac glyph's left bearing and advance, which the component loads overwrite
+            bearing, advance = (self.lsb_x, self.lsb_y), (self.advance_x, self.advance_y)
             self.interp(base, True, 0, 0)
+            if not self.have_width:                       # no (h)sbw of its own: the base glyph's
+                bearing, advance = (self.lsb_x, self.lsb_y), (self.advance_x, self.advance_y)
             self.lsb_x = self.lsb_y = 0
             self.interp(accent, True, i32(adx - asb), ady)
+            (self.lsb_x, self.lsb_y), (self.advance_x, self.advance_y) = bearing, advance
             return "exit", None
         if op2 == 7:                                      # sbw
             if t1:
-                st.pop_fixed()
-                st.pop_fixed()
+                self.advance_y = st.pop_fixed()
+                self.advance_x = st.pop_fixed()
+                self.have_width = True
                 lsb_y, lsb_x = st.pop_fixed(), st.pop_fixed()
                 self.lsb_x = i32(self.lsb_x + lsb_x)
                 self.lsb_y = i32(self.lsb_y + lsb_y)
@@ -1053,8 +1107,49 @@ class Decoder:
                 known = 1
             elif subr_no in (12, 13):
                 st.clear()
-            elif subr_no in (14, 15, 16, 17, 18, 19, 24, 25):
-                raise GlyphError("multiple master othersubr")   # no blend: Invalid_Glyph_Format
+            elif subr_no in (14, 15, 16, 17, 18):         # multiple masters: blend num_points values
+                wv = self.face.weight_vector
+                if wv is None:
+                    raise GlyphError("multiple master othersubr")   # no blend: Invalid_Glyph_Format
+                designs = self.face.num_designs
+                num_points = subr_no - 13 + (subr_no == 18)
+                if arg_cnt != num_points * designs:
+                    raise GlyphError("multiple master arguments")
+                # a0 + (a1-a0)*w1 + ... + (ak-a0)*wk, the deltas stored after the num_points bases
+                op_idx = count - arg_cnt
+                delta, values = op_idx + num_points, op_idx
+                for _ in range(num_points):
+                    tmp = st.get(values)
+                    for mm in range(1, designs):
+                        tmp = i32(tmp + mulfix(st.get(delta), wv[mm]))
+                        delta += 1
+                    st.set(values, tmp)
+                    values += 1
+                st.pop(arg_cnt - num_points)
+                known = num_points
+            elif subr_no == 19:                           # WeightVector into BuildCharArray[idx]
+                if arg_cnt != 1 or self.face.weight_vector is None:
+                    raise GlyphError("invalid othersubr")
+                idx = st.pop_int() & MASK32
+                n = self.face.len_buildchar
+                if n < self.face.num_designs or n - self.face.num_designs < idx:
+                    raise GlyphError("invalid othersubr")
+                self.face.buildchar[idx:idx + self.face.num_designs] = self.face.weight_vector
+            elif subr_no == 24:                           # BuildCharArray[idx] = val
+                if arg_cnt != 2 or self.face.weight_vector is None:
+                    raise GlyphError("invalid othersubr")
+                idx = st.pop_int() & MASK32
+                if idx >= self.face.len_buildchar:
+                    raise GlyphError("invalid othersubr")
+                self.face.buildchar[idx] = st.pop_fixed()
+            elif subr_no == 25:                           # push BuildCharArray[idx]
+                if arg_cnt != 1 or self.face.weight_vector is None:
+                    raise GlyphError("invalid othersubr")
+                idx = st.pop_int() & MASK32
+                if idx >= self.face.len_buildchar:
+                    raise GlyphError("invalid othersubr")
+                st.push_fixed(self.face.buildchar[idx])
+                known = 1
             elif subr_no in (20, 21, 22, 23):
                 if arg_cnt != 2:
                     raise GlyphError("othersubr arithmetic")

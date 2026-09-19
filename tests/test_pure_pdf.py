@@ -934,6 +934,74 @@ def test_fonts_and_filters_resolve_as_pdfium_resolves_them(name):
             close(getattr(a, call)(), getattr(b, call)(), f"{name} {call}")
 
 
+def _subst_case(name: bytes, subtype: bytes = b"TrueType", flags: int = 32, widths: bool = True,
+                bbox: bool = True, desc: bytes = b"", program: bytes | None = None, encoding: bytes = b"") -> bytes:
+    """A page of text in a font the file does not embed (or embeds broken): PDFium draws it with a
+    face its font mapper picks, and every box and advance comes from that face."""
+    ws = b" ".join(b"%d" % (400 + (i * 37) % 400) for i in range(32, 256))
+    font = (b"<< /Type /Font /Subtype /%s /BaseFont /%s %s /FontDescriptor 6 0 R" % (subtype, name, encoding)
+            + (b" /FirstChar 32 /LastChar 255 /Widths [%s]" % ws if widths else b"") + b" >>")
+    d = b"<< /Type /FontDescriptor /FontName /%s /Flags %d /ItalicAngle 0 /Ascent 750 /Descent -250 /CapHeight 700 %s" % (
+        name, flags, desc)
+    if bbox:
+        d += b" /FontBBox [-100 -250 1000 900]"
+    extra = {5: font}
+    if program is not None:
+        key = {b"TrueType": b"FontFile2", b"Type1": b"FontFile"}[subtype]
+        d += b" /%s 7 0 R" % key
+        extra[7] = b"<< /Length %d >>\nstream\n" % len(program) + program + b"\nendstream"
+    extra[6] = d + b" >>"
+    text = b"BT /F1 12 Tf 20 100 Td (Hello, World! Ag {}|~ fi) Tj 0 -20 Td (\\351\\374\\200\\225 1+2=3) Tj ET"
+    return _text_page(text, b"<< /Font << /F1 5 0 R >> >>", extra)
+
+
+SUBST_CASES = {}
+for _name, _sub, _flags in [(b"Georgia", b"TrueType", 32), (b"Calibri-Bold", b"TrueType", 32),
+                            (b"Verdana,Italic", b"TrueType", 96), (b"Wingdings", b"TrueType", 4),
+                            (b"CMSS8", b"Type1", 32), (b"CMSS8", b"Type1", 2 | 32), (b"CMSS8", b"Type1", 1 | 32),
+                            (b"CMSS8", b"Type1", 4), (b"CMSS8", b"Type1", 64 | 32), (b"CMSS8", b"Type1", 8 | 32),
+                            (b"CMSS8", b"Type1", 2 | 64 | 32)]:
+    for _w in (True, False):
+        for _b in (True, False):
+            SUBST_CASES[f"{_name.decode()}-{_sub.decode()}-f{_flags}-{'w' if _w else 'nw'}-{'b' if _b else 'nb'}"] = \
+                _subst_case(_name, _sub, _flags, _w, _b)
+for _desc in (b"/FontWeight 300", b"/FontWeight 700", b"/FontWeight 900", b"/FontWeight -5", b"/StemV 50",
+              b"/StemV 100", b"/StemV 200", b"/StemV 200 /FontWeight 300"):
+    for _name, _sub in [(b"CMSS8", b"Type1"), (b"Georgia", b"TrueType")]:
+        SUBST_CASES[f"{_name.decode()}-{_desc.decode()}"] = _subst_case(_name, _sub, 32, desc=_desc)
+# FontWeight/StemV count only when the descriptor has every metric (ExternAttr)
+SUBST_CASES["CMSS8-weight-without-capheight"] = _subst_case(b"CMSS8", b"Type1", 32, desc=b"/FontWeight 700").replace(
+    b"/CapHeight 700", b"")
+SUBST_CASES["Georgia-winansi"] = _subst_case(b"Georgia", encoding=b"/Encoding /WinAnsiEncoding")
+SUBST_CASES["CMSS8-macroman"] = _subst_case(b"CMSS8", b"Type1", encoding=b"/Encoding /MacRomanEncoding")
+# a program FreeType cannot open is dropped, and the font is substituted as if never embedded
+SUBST_CASES["damaged-truetype"] = _subst_case(b"ABCDEF+Georgia", program=b"\x00\x01\x00\x00junk" * 20)
+SUBST_CASES["damaged-type1"] = _subst_case(b"ABCDEF+CMSS8", b"Type1", program=b"%!PS-AdobeFont-1.0: junk" * 5)
+SUBST_CASES["damaged-type1-no-widths"] = _subst_case(b"CMSS8", b"Type1", widths=False, bbox=False, program=b"\x80\x01junk")
+
+
+@pytest.mark.parametrize("name", SUBST_CASES)
+def test_substituted_fonts_are_measured_with_pdfiums_face(name):
+    """CPDF_Font::LoadSubstFont -> CFX_FontMapper::FindSubstFace -> CFX_Win32FontInfo (GDI's own
+    choice of face) or the built-in Foxit faces, FoxitSerifMM/FoxitSansMM blended by weight and
+    width. Object boxes, char boxes and advances all come from the face picked."""
+    import sys
+    from beamer2slides.pdf.pure import foxit
+    if sys.platform != "win32":
+        pytest.skip("PDFium maps fonts through GDI here; outside Windows it asks fontconfig, which is not ported")
+    if foxit.missing():
+        pytest.skip(f"the Foxit faces are not in {foxit.cache_dir()}: python -m beamer2slides.pdf.pure.foxit")
+    data = SUBST_CASES[name]
+    a, b = pdf.resolve("pure").open(data)[0], pdf.resolve("pdfium").open(data)[0]
+    close([dataclasses.astuple(o) for o in a.objects()], [dataclasses.astuple(o) for o in b.objects()], name)
+    close(a.object_bounds(), b.object_bounds(), f"{name} object_bounds")
+    ca, cb = a.chars(), b.chars()
+    drop = lambda c: {k: v for k, v in dataclasses.asdict(c).items() if k != "font_id"}  # noqa: E731
+    close([drop(c) for c in ca], [drop(c) for c in cb], f"{name} chars")
+    queries = [(c.font_id, c.c, c.size) for c in ca if len(c.c) == 1]
+    close(a.glyph_widths(queries), b.glyph_widths(queries), f"{name} glyph_widths")
+
+
 def _chars_and_bounds(page):
     chars = [{k: v for k, v in dataclasses.asdict(c).items() if k != "font_id"} for c in page.chars()]
     return chars, page.object_bounds()
