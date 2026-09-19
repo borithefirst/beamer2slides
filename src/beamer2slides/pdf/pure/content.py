@@ -992,6 +992,11 @@ class _Run:
             rect = s.clips[0]
             for c in s.clips[1:]:
                 rect = intersect(rect, c)
+        if getattr(record, "type", 0) >= 4:
+            from .render_mesh import shading_bbox
+            from .render_shading import float_intersect
+            obj.mesh_box = shading_bbox(record, s.ctm)
+            rect = float_intersect(rect, obj.mesh_box)
         obj.rect = rect
 
     def _form(self, stream: Stream, name) -> None:

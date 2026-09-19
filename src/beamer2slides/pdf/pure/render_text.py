@@ -341,8 +341,9 @@ def _process_text(status, obj, matrix) -> None:
     base = mode & 3
     is_fill = base in (MODE_FILL, MODE_FILL_STROKE)
     is_stroke = base in (MODE_STROKE, MODE_FILL_STROKE)
-    stroke_argb = _argb(obj.stroke, obj.stroke_alpha) if is_stroke else 0
-    fill_argb = _argb(obj.fill, obj.fill_alpha) if is_fill else 0
+    tr = status.transfer(obj)
+    stroke_argb = _argb(obj.stroke, obj.stroke_alpha, tr) if is_stroke else 0
+    fill_argb = _argb(obj.fill, obj.fill_alpha, tr) if is_fill else 0
     text_matrix = tuple(obj.matrix)
     if not _available(text_matrix):
         return
