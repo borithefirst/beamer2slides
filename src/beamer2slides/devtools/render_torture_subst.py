@@ -109,8 +109,13 @@ def case(seed: int, simple: int = 2, pool: str = "any"):
     return b"\n".join(groups), fonts, zoom, transparent
 
 
+# The second width is never used and must differ from the first: a font whose widths are all one
+# number is marked FIXED_PITCH by CPDF_SimpleFont::LoadSubstFont, and an ANSI fixed-pitch name
+# CFX_MacFontInfo does not know is answered with Courier New - so on macOS the reset page drew in a
+# system font and reset nothing, while on Windows GDI refused the name and it reached the built-in
+# faces. Drawing stays on code 65, whose width sets the blend.
 _RESET_FONTS = [FontSpec(f"reset/{flags}", "unknown", [
-    b"<< /Type /Font /Subtype /Type1 /BaseFont /Reset%d /FirstChar 65 /LastChar 65 /Widths [640] "
+    b"<< /Type /Font /Subtype /Type1 /BaseFont /Reset%d /FirstChar 65 /LastChar 66 /Widths [640 500] "
     b"/FontDescriptor @1@ >>" % flags,
     b"<< /Type /FontDescriptor /FontName /Reset%d /Flags %d /FontBBox [0 0 1000 1000] >>" % (flags, flags)], [65])
     for flags in (32, 34)]
