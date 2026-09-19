@@ -504,8 +504,8 @@ stop from the text's edge (`adopt.tabbed_tex`, `\slidestab`); `tests/test_adopt_
 tikz grid with measured rows, merged cells, fills and border segments (`adopt.table_block`, cell
 insets inferred by `deck_ir.cell_pad`; `tests/test_adopt_tables.py`). Shapes are drawn in their preset
 (`adopt_shapes.py`: ~110 shapeTypes with OOXML default adjustments, turned/mirrored through the
-element's own `frame`, dashes, alpha, bent and curved connectors, arrow heads; freeforms as their box;
-`tests/test_adopt_shapes.py`). Scripts (`scripts.py`): luaotfload fallbacks for CJK and symbols,
+element's own `frame`, dashes, alpha, bent and curved connectors, arrow heads; freeforms traced from
+the thumbnail, else as their box; `tests/test_adopt_shapes.py`). Scripts (`scripts.py`): luaotfload fallbacks for CJK and symbols,
 babel `onchar=ids` for CJK line breaking and Hebrew/Arabic fonts, `bidi=basic` with RTL paragraphs
 in `otherlanguage` (`tests/test_adopt_scripts.py`).
 **Benchmark** (`tools/adopt_bench.py`, corpus of 29 public decks in `tests/decks/foreign/corpus.json`,
@@ -534,8 +534,8 @@ gdg24 0.896 -> 0.900). Left: comps-analysis (0.336; its text sits ~4 pt high - i
 not report - and its Bodoni is narrower than any fetchable one), devfest2020's numbered lists (Slides
 places big numbers differently), jruby-ja (gradient backdrop; Japanese still sets wider), hebrew-lesson.
 Known gaps, by what they cost: text insets the API does not report where no autofit height gives
-them away, freeform shapes (5,791 in the corpus, drawn as their box; Google's .pptx
-export has their geometry), and dragged shape adjustments.
+them away, the freeforms tracing refuses (below; Google's .pptx export has their geometry, and
+none is cached in the corpus), and dragged shape adjustments.
 Fills the API cannot say (`deck_fills.py`, `tests/test_adopt_fills.py`): a gradient, picture or texture
 fill reads `shapeBackgroundFill: {}`, a .pptx table style's cell colour NOT_RENDERED, and every
 placeholder INHERIT chain in the corpus ends NOT_RENDERED too - so `deck_ir(foreign=True,
@@ -549,6 +549,23 @@ the page outside the table), settled top down; a rectangle may read as a three-s
 page 0.734 -> 0.917, cs161-tls 0.647 -> 0.864, hebrew-lesson 0.310 -> 0.668 (paper backdrops and
 style-coloured cells). SlidesCarnival's 2,068 `{}` freeforms are squiggles whose box is not flat
 and stay unfilled: that is the freeform gap, not a fill one.
+Freeforms traced from the thumbnail (`deck_freeforms.py`, `tests/test_adopt_freeforms.py`): the API gives
+a freeform (shapeType CUSTOM or none, and lines with no line type) as a box only, so `deck_fills.settle`
+traces it in the same picture, top down: how much of its paint (fill, outline, or the one colour a
+`{}` fill shows over its ground) each pixel holds, cut at one half by marching squares, simplified
+(Douglas-Peucker 0.4 px) into rings in page pt that `adopt_shapes.traced_block` draws as one even-odd
+TikZ path - a vector outline, since the shapes are flat colour and a path stays editable where a
+cropped PNG would be a picture of a shape. Pixels under opaque elements above are the shape's where
+they continue it; holes are filled when letters above, a shape above nobody could read (`unsaid`),
+or ink no colour under the shape explains made them. Refused (the box stays as before) when the paint
+is ambiguous (a colour an element under it or text over it has too), translucent over an unknown
+ground, runs on outside the box (a squiggle tile over a wave), misses a side of the box, or fills the
+box (the preset rectangle says that better). Corpus slides: 1,573 of 3,322 freeforms traced (142 of
+them `{}` fills); most refusals are off-page (2,358) or `{}` pictures/textures (621). Measured against
+the same code without it, rerun the same day (`ff-base` -> `ff-d`, 912 slides): boxes 0.885 -> 0.890,
+page 0.880 -> 0.886, pixels 0.970 -> 0.971, no deck down (sc-dark-modern 0.739 -> 0.810, devfest2020
+0.827 -> 0.857, sc-dark-minimal 0.864 -> 0.884, sc-memphis 0.831 -> 0.846). `adopt_shapes.pt` wrote
+every length between -1 and 0 as positive until then (`"-0.67".replace("-0", "0")`).
 
 Opt-in suite (real Google Slides, ~95 s): `python -m pytest -m slides` (the default run deselects
 the `slides` marker, pyproject.toml). It converts the stress decks (19–22, 25, 13, demo) 3 at a

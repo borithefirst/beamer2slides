@@ -166,6 +166,7 @@ def settle(elements: list[dict], image, px: float, background: str | None, pictu
     """Give the slide's unread fills what its thumbnail shows (see the module docstring), and drop
     the shapes left with nothing to draw. `px`: thumbnail pixels per IR pt; `background`: the slide's
     background colour, `picture`: it has a background picture instead."""
+    from . import deck_freeforms
     a = load(image)
     out = []
     # top down: an element settled above another hides it from the looking, so what a squiggle
@@ -173,7 +174,13 @@ def settle(elements: list[dict], image, px: float, background: str | None, pictu
     for k in range(len(elements) - 1, -1, -1):
         el = elements[k]
         cells = [c for c in el.get("table_cells", []) if c.pop("fill_unread", False)]
+        # a freeform's geometry is not in the API either: traced from the same picture
+        # (`deck_freeforms`), after its fill is known
+        free = a is not None and deck_freeforms.freeform(el)
         if not el.get("fill_unread") and not cells:
+            if free:
+                bottom = not picture and not any(overlaps(e, el) for e in elements[:k])
+                deck_freeforms.trace(a, el, elements[k + 1:], elements[:k], px, background, bottom, False)
             out.append(el)
             continue
         unread = el.pop("fill_unread", False)
@@ -182,12 +189,19 @@ def settle(elements: list[dict], image, px: float, background: str | None, pictu
             if unread:
                 bottom = not picture and not any(overlaps(e, el) for e in elements[:k])
                 sample_element(a, el, above, px, background, bottom)
+                if free:
+                    deck_freeforms.trace(a, el, above, elements[:k], px, background, bottom, True)
             around = outside(a, el["bbox"], px) if cells else None
             for c in cells:
                 sample_cell(a, el, c, above, px, background, around)
+        if el["kind"] == "shape" and unread and not el.get("fill") and not el.get("fill_gradient"):
+            el["_unsaid"] = True           # drawn in the picture as nothing we can say: see deck_freeforms
         if el["kind"] == "shape" and not el.get("fill") and not el.get("fill_gradient") and not el.get("outline"):
             continue                       # nothing to draw after all, as before this module
         out.append(el)
+    for el in elements:
+        el.pop("_traced", None)            # the traced pixels, kept only while settling
+        el.pop("_unsaid", None)
     return out[::-1]
 
 
@@ -203,7 +217,14 @@ def masks(a: np.ndarray, box, above: list[dict], px: float, own_words: bool):
         c0, d0, c1, d1 = px_box(e["bbox"], px, w, h)
         if c1 <= a0 or c0 >= a1 or d1 <= b0 or d0 >= b1:
             continue
-        if opaque(e):
+        if e.get("_traced") is not None:
+            # a traced freeform hides its own ink, not its box
+            from .deck_freeforms import dilate, paste
+            ex, ey, m = e["_traced"]
+            cover = np.zeros_like(region)
+            paste(cover, (a0, b0), dilate(m, MARGIN_PX), (ex, ey))
+            region &= ~cover
+        elif opaque(e):
             # its own rim is antialiased against what is under it: leave a little more out
             c0, d0, c1, d1 = px_box(e["bbox"], px, w, h, -MARGIN_PX)
             region[max(0, d0 - b0):max(0, d1 - b0), max(0, c0 - a0):max(0, c1 - a0)] = False
