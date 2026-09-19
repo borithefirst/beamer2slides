@@ -47,6 +47,15 @@ def test_a_style_name_handed_to_a_macro_is_not_words():
     assert readability.visible(r"\slidepar[space=2.42]{title-lightyellow}{Item One}") == "Item One"
 
 
+def test_what_the_decks_own_sty_defines_reads_as_vocabulary_and_not_as_plumbing():
+    sty = (r"\newcommand\slidepicture[3][]{...}" "\n" r"\newenvironment{slidetable}{}{}" "\n"
+           r"\newcommand{\slidestrut}[2]{...}" "\n" r"\def\slides@k@color{black}")
+    v = readability.vocabulary(sty)
+    assert v == {"slidepicture", "slidetable"}, "a strut is plumbing whoever named it, and @ names are internal"
+    frame = "\\begin{document}\n\\begin{frame}\n  \\slidepicture{1,2,3,4}{a.png} words here\n\\end{frame}\n"
+    assert readability.measure(frame, v)["author"] > readability.measure(frame)["author"]
+
+
 def test_lines_every_frame_repeats_are_what_a_theme_should_say():
     frame = "\\begin{frame}\n  \\includegraphics[width=453.5bp]{figures/master-logo.png}\n  Words %d here\n\\end{frame}\n"
     tex = "\\begin{document}\n" + "".join(frame % k for k in range(4)) + "\\end{document}"

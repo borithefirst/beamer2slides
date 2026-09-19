@@ -11,7 +11,8 @@ geometric mean: 1.0 reads like a hand-written source.
 
 - `lines`: lines per frame body.
 - `numbers`: numeric literals (lengths, sizes, coordinates) per word of visible text.
-- `plumbing`: commands that are not an author's vocabulary (`AUTHOR`), per word.
+- `plumbing`: commands that are not an author's vocabulary (`AUTHOR`, plus what the tree's own .sty
+  files define: `vocabulary`), per word.
 - `bloat`: source characters per visible character.
 - `author`: the share of commands that are an author's vocabulary.
 - `repeat`: 1 - the share of body lines found in at least `REPEAT_FRAMES` frames - what a theme or a
@@ -105,7 +106,23 @@ def _key(line: str) -> str | None:
     return s
 
 
-def measure(tex: str) -> dict:
+DEFINED = re.compile(r"\\(?:newcommand|renewcommand|providecommand|DeclareDocumentCommand|def)\s*\\?"
+                     r"\{?\\([A-Za-z@]+)|\\(?:newenvironment|DeclareDocumentEnvironment)\s*\{([A-Za-z@*]+)\}")
+
+
+def vocabulary(*sources: str) -> set[str]:
+    """What a .sty beside main.tex defines: the deck's own vocabulary, which a person reads as they
+    read `\\includegraphics` - a name with arguments, documented where it is defined. Counting it as
+    the writer's plumbing had a source score *lower* for saying the same thing in one word."""
+    plumbing = [pat for name, pat in CONSTRUCTS if name in ("text plumbing", "style switch")]
+    # `\def\csname ...` names nothing: the primitives a definition is built out of are not vocabulary
+    names = {m[0] or m[1] for s in sources for m in DEFINED.findall(s)} - {
+        "csname", "endcsname", "expandafter", "noexpand", "relax", "empty", "space", "protect"}
+    # a name for a strut or a font switch is still plumbing, whoever defined it
+    return {n for n in names if not n.startswith("slides@") and not any(p.search("\\" + n) for p in plumbing)}
+
+
+def measure(tex: str, known: set[str] | None = None) -> dict:
     fs = frames(tex)
     if not fs:
         return {}
@@ -113,7 +130,7 @@ def measure(tex: str) -> dict:
     text_chars = sum(len(visible(f)) for f in fs)
     cmds = Counter(m for f in fs for m in CS.findall(f) if m[:1].isalpha() and m not in NEUTRAL)
     n_cmd = sum(cmds.values())
-    author = sum(n for c, n in cmds.items() if c in AUTHOR)
+    author = sum(n for c, n in cmds.items() if c in AUTHOR or (known and c in known))
     lines = [ln for f in fs for ln in f.strip("\n").split("\n")]
     seen = defaultdict(set)
     for k, f in enumerate(fs):
@@ -162,10 +179,16 @@ def tree_source(tree: Path) -> str:
     return main.read_text(encoding="utf-8", errors="replace") if main.exists() else ""
 
 
+def tree_vocabulary(tree: Path) -> set[str]:
+    """The names the tree's own .sty files define (slides.sty, the recovered beamer theme)."""
+    return vocabulary(*(p.read_text(encoding="utf-8", errors="replace") for p in sorted(tree.glob("*.sty"))))
+
+
 def report(corpus: Path, tag: str, verbose: bool = False) -> None:
     rows, lines_by = [], Counter()
     for d in sorted(p for p in corpus.iterdir() if (p / "runs" / tag / "tree").is_dir()):
-        m = measure(tree_source(d / "runs" / tag / "tree"))
+        tree = d / "runs" / tag / "tree"
+        m = measure(tree_source(tree), tree_vocabulary(tree))
         if not m:
             continue
         rows.append((d.name, m))

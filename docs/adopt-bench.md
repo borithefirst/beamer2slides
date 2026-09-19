@@ -688,3 +688,21 @@ Left:
 - `other` is 10%: `\begin{frame}` lines, notes, `\href`, `\resizebox` for WordArt;
 - a freeform's traced outline is a file, not fewer numbers;
 - structure (itemize, columns) is the text layer's, not this change's.
+
+## Lists, tables, pictures and shapes together (mt-a -> ls-a)
+
+Both agents merged: 912 slides score as at mt-a on every slide (boxes 0.9728, page 0.9714,
+pixels 0.9845). texmap knows one vocabulary (slidepar takes its style as an option, shapes take one,
+the slidetable rows and cells are named).
+
+The proxy now counts what the tree own .sty files define as author vocabulary (`vocabulary`,
+`tree_vocabulary`): a person reads `\slidepicture{x,y,w,h}{file}` as they read `\includegraphics`.
+Without it, a source scored *lower* for saying the same thing in one word (six picture decks did).
+A name the plumbing or style-switch patterns match (`\slidestrut`, `\slidesize`) stays plumbing, and
+`slides@` internals never count.
+
+On that scorer: m6-a 0.130 -> mt-a 0.366 -> ls-a 0.490
+(lines 0.09 -> 0.48, numbers 0.05 -> 0.12, plumbing 0.04 -> 0.76, bloat 0.33 -> 0.61,
+author 0.19 -> 0.92, repeat 0.61 -> 0.84).
+Frame body lines now: text 36%, shape 28%, picture 11%, other 10%, placement 9%, table 2%, plumbing 1%.
+Numbers per word (0.12) is the weakest component: shape paths hold most of them.
