@@ -91,6 +91,12 @@ Each of these was a diff against PDFium until it was ported:
   - *The path fast path* (ParsePathObject), entered after an `m` with exactly two operands: path
     operators take the first six numbers read, extras dropped, with no count check, so a missing
     operand is whatever the previous operator left (zeros at first); anything else hands back.
+- **Stroke bounds in float32** (CFX_Path::GetBoundingBoxForStrokePath, which gives a path's and so
+  a form's box): a join grows the rectangle on the side a point lies of a line, and a Bezier ending
+  on its own control point lies *on* that line, where only float32 rounding decides the side (67 pt
+  apart in one case). Every step rounds to float, a division by zero is ±inf or NaN as in C, and
+  UpdateRect keeps a NaN out as std::min/max do. Found by comparing extract calls on mutated torture
+  pages; `CFX_Matrix::TransformRect` is float32 too now.
 - **Page boxes**: the MediaBox falls back to Letter, and the crop box is intersected with it.
 - **A broken xref table** is rebuilt from the `n 0 obj` markers, as PDFium's repair does.
 

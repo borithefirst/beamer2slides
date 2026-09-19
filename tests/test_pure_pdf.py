@@ -180,6 +180,23 @@ def test_the_pure_renderer_survives_torture_seeds(forms, page, mutated):
 # ---------------------------------------------------------------------- PDFium's rules, one by one
 
 
+def test_mutated_pages_read_as_pdfium_reads_them():
+    """The torture pages with junk in them (render_torture --mutate), through the extract side of
+    the contract. 202, 244, 288, 442 and 462 were apart: a form's box is the union of its children's
+    stroke bounds, and those decide which side of a join grows by comparing a point with a line in
+    float32 - a Bezier ending on its own control point lies on that line (2,500 seeds since)."""
+    from beamer2slides.devtools.render_torture import case, pdf_bytes
+    for seed in [*range(30), 202, 244, 288, 442, 462]:
+        content, forms, _, _, geometry = case(seed, seed % 2 == 0, seed % 3 == 0, True)
+        g = {k: v for k, v in geometry.items() if k != "clip"}
+        data = pdf_bytes([content], forms=forms, **g)
+        a, b = pdf.resolve("pure").open(data)[0], pdf.resolve("pdfium").open(data)[0]
+        where = f"seed {seed}"
+        close([dataclasses.astuple(o) for o in a.objects()], [dataclasses.astuple(o) for o in b.objects()], where)
+        for call in ("object_bounds", "drawings", "images", "links", "chars"):
+            close(getattr(a, call)(), getattr(b, call)(), f"{where} {call}")
+
+
 def test_content_operands_are_read_as_pdfiums_stream_parser_reads_them():
     from beamer2slides.pdf.pure.syntax import Name, operations
 

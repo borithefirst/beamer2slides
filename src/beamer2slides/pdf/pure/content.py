@@ -44,11 +44,16 @@ def transform(m, x, y):
 
 
 def transform_rect(m, rect):
-    """CFX_Matrix::TransformRect of (left, bottom, right, top)."""
+    """CFX_Matrix::TransformRect of (left, bottom, right, top), in float: corners in its order,
+    std::min/max keeping the first of equals (and a NaN out, unless it comes first)."""
     l, b, r, t = rect
-    pts = [transform(m, x, y) for x in (l, r) for y in (b, t)]
-    xs, ys = [p[0] for p in pts], [p[1] for p in pts]
-    return min(xs), min(ys), max(xs), max(ys)
+    pts = [transform32(m, x, y) for x, y in ((l, t), (l, b), (r, t), (r, b))]
+    right = left = pts[0][0]
+    top = bottom = pts[0][1]
+    for x, y in pts[1:]:
+        right, left = (x if right < x else right), (x if x < left else left)
+        top, bottom = (y if top < y else top), (y if y < bottom else bottom)
+    return left, bottom, right, top
 
 
 def intersect(a, b):
@@ -968,7 +973,7 @@ def path_rect(obj: PObj) -> tuple:
         rect = (0.0, 0.0, 0.0, 0.0)
     rect = transform_rect(obj.matrix, rect)
     if width == 0 and obj.stroked:
-        rect = (rect[0] - 0.5, rect[1] - 0.5, rect[2] + 0.5, rect[3] + 0.5)
+        rect = (f32(rect[0] - 0.5), f32(rect[1] - 0.5), f32(rect[2] + 0.5), f32(rect[3] + 0.5))
     return rect
 
 
@@ -995,73 +1000,104 @@ class _Rect:
         self.l, self.b, self.r, self.t = 100000.0, 100000.0, -100000.0, -100000.0
 
     def update(self, x, y):
-        self.l, self.r = min(self.l, x), max(self.r, x)
-        self.b, self.t = min(self.b, y), max(self.t, y)
+        """CFX_FloatRect::UpdateRect: std::min/max, so a NaN never gets in."""
+        if x < self.l:
+            self.l = x
+        if self.r < x:
+            self.r = x
+        if y < self.b:
+            self.b = y
+        if self.t < y:
+            self.t = y
+
+
+def _div(a: float, b: float) -> float:
+    """A float division as C does it: by zero is ±inf, or NaN for 0/0."""
+    try:
+        return f32(a / b)
+    except ZeroDivisionError:
+        if a != a or a == 0:
+            return math.nan
+        return math.copysign(math.inf, a) * math.copysign(1.0, b)
+
+
+def _hypot(x: float, y: float) -> float:
+    return f32(math.hypot(x, y))
+
+
+# The stroke bounds below are CFX_Path's, in float and one rounding per operation: whether a point
+# lies above or below a line decides which side of a join the rectangle grows, and a point on
+# the line (a Bezier ending on its own control point) is decided by the last bit.
 
 
 def _end_points(rect: _Rect, start, end, hw):
     """UpdateLineEndPoints (cfx_path.cpp)."""
     if start[0] == end[0]:
         if start[1] == end[1]:
-            rect.update(end[0] + hw, end[1] + hw)
-            rect.update(end[0] - hw, end[1] - hw)
+            rect.update(f32(end[0] + hw), f32(end[1] + hw))
+            rect.update(f32(end[0] - hw), f32(end[1] - hw))
             return
-        y = end[1] - hw if end[1] < start[1] else end[1] + hw
-        rect.update(end[0] + hw, y)
-        rect.update(end[0] - hw, y)
+        y = f32(end[1] - hw) if end[1] < start[1] else f32(end[1] + hw)
+        rect.update(f32(end[0] + hw), y)
+        rect.update(f32(end[0] - hw), y)
         return
     if start[1] == end[1]:
-        x = end[0] - hw if end[0] < start[0] else end[0] + hw
-        rect.update(x, end[1] + hw)
-        rect.update(x, end[1] - hw)
+        x = f32(end[0] - hw) if end[0] < start[0] else f32(end[0] + hw)
+        rect.update(x, f32(end[1] + hw))
+        rect.update(x, f32(end[1] - hw))
         return
-    dx, dy = end[0] - start[0], end[1] - start[1]
-    ll = math.hypot(dx, dy)
-    mx, my = end[0] + hw * dx / ll, end[1] + hw * dy / ll
-    dx1, dy1 = hw * dy / ll, hw * dx / ll
-    rect.update(mx - dx1, my + dy1)
-    rect.update(mx + dx1, my - dy1)
+    dx, dy = f32(end[0] - start[0]), f32(end[1] - start[1])
+    ll = _hypot(dx, dy)
+    mx = f32(end[0] + _div(f32(hw * dx), ll))
+    my = f32(end[1] + _div(f32(hw * dy), ll))
+    dx1, dy1 = _div(f32(hw * dy), ll), _div(f32(hw * dx), ll)
+    rect.update(f32(mx - dx1), f32(my + dy1))
+    rect.update(f32(mx + dx1), f32(my - dy1))
 
 
 def _join_points(rect: _Rect, start, mid, end, hw):
     """UpdateLineJoinPoints (cfx_path.cpp); the miter limit is not used there either."""
-    tw = 1.0 / 20
-    start_vert = abs(start[0] - mid[0]) < tw
-    end_vert = abs(mid[0] - end[0]) < tw
+    tw = f32(1.0 / 20)
+    start_vert = abs(f32(start[0] - mid[0])) < tw
+    end_vert = abs(f32(mid[0] - end[0])) < tw
     if start_vert and end_vert:
         d = 1 if mid[1] > start[1] else -1
-        y = mid[1] + hw * d
-        rect.update(mid[0] + hw, y)
-        rect.update(mid[0] - hw, y)
+        y = f32(mid[1] + f32(hw * d))
+        rect.update(f32(mid[0] + hw), y)
+        rect.update(f32(mid[0] - hw), y)
         return
     start_k = start_c = end_k = end_c = start_dc = end_dc = 0.0
     if not start_vert:
-        sx, sy = start[0] - mid[0], start[1] - mid[1]
-        start_k = (mid[1] - start[1]) / (mid[0] - start[0])
-        start_c = mid[1] - start_k * mid[0]
-        start_dc = abs(hw * math.hypot(sx, sy) / sx)
+        sx, sy = f32(start[0] - mid[0]), f32(start[1] - mid[1])
+        start_k = _div(f32(mid[1] - start[1]), f32(mid[0] - start[0]))
+        start_c = f32(mid[1] - f32(start_k * mid[0]))
+        start_dc = abs(_div(f32(hw * _hypot(sx, sy)), sx))
     if not end_vert:
-        ex, ey = end[0] - mid[0], end[1] - mid[1]
-        end_k = ey / ex
-        end_c = mid[1] - end_k * mid[0]
-        end_dc = abs(hw * math.hypot(ex, ey) / ex)
+        ex, ey = f32(end[0] - mid[0]), f32(end[1] - mid[1])
+        end_k = _div(ey, ex)
+        end_c = f32(mid[1] - f32(end_k * mid[0]))
+        end_dc = abs(_div(f32(hw * _hypot(ex, ey)), ex))
+
+    def line(k, x, c):
+        return f32(f32(k * x) + c)
+
     if start_vert:
-        ox = start[0] + (hw if end[0] < start[0] else -hw)
-        if start[1] < end_k * start[0] + end_c:
-            oy = end_k * ox + end_c + end_dc
+        ox = f32(start[0] + hw) if end[0] < start[0] else f32(start[0] - hw)
+        if start[1] < line(end_k, start[0], end_c):
+            oy = f32(line(end_k, ox, end_c) + end_dc)
         else:
-            oy = end_k * ox + end_c - end_dc
+            oy = f32(line(end_k, ox, end_c) - end_dc)
         rect.update(ox, oy)
         return
     if end_vert:
-        ox = end[0] + (hw if start[0] < end[0] else -hw)
-        if end[1] < start_k * end[0] + start_c:
-            oy = start_k * ox + start_c + start_dc
+        ox = f32(end[0] + hw) if start[0] < end[0] else f32(end[0] - hw)
+        if end[1] < line(start_k, end[0], start_c):
+            oy = f32(line(start_k, ox, start_c) + start_dc)
         else:
-            oy = start_k * ox + start_c - start_dc
+            oy = f32(line(start_k, ox, start_c) - start_dc)
         rect.update(ox, oy)
         return
-    if abs(start_k - end_k) < tw:
+    if abs(f32(start_k - end_k)) < tw:
         sd = 1 if mid[0] > start[0] else -1
         ed = 1 if end[0] > mid[0] else -1
         if sd == ed:
@@ -1069,10 +1105,10 @@ def _join_points(rect: _Rect, start, mid, end, hw):
         else:
             _end_points(rect, start, mid, hw)
         return
-    so = start_c + (start_dc if end[1] < start_k * end[0] + start_c else -start_dc)
-    eo = end_c + (end_dc if start[1] < end_k * start[0] + end_c else -end_dc)
-    jx = (eo - so) / (start_k - end_k)
-    rect.update(jx, start_k * jx + so)
+    so = f32(start_c + start_dc) if end[1] < line(start_k, end[0], start_c) else f32(start_c - start_dc)
+    eo = f32(end_c + end_dc) if start[1] < line(end_k, start[0], end_c) else f32(end_c - end_dc)
+    jx = _div(f32(eo - so), f32(start_k - end_k))
+    rect.update(jx, line(start_k, jx, so))
 
 
 def stroke_bbox(points: list, line_width: float) -> tuple:
@@ -1103,12 +1139,9 @@ def stroke_bbox(points: list, line_width: float) -> tuple:
             else:
                 start, mid, end, join = i - 1, i, i + 1, True
         p = lambda k: (points[k][0], points[k][1])  # noqa: E731
-        try:
-            if join:
-                _join_points(rect, p(start), p(mid), p(end), hw)
-            else:
-                _end_points(rect, p(start), p(end), hw)
-        except ZeroDivisionError:
-            pass  # float division by zero gives inf/nan in C++: nothing sensible to add
+        if join:
+            _join_points(rect, p(start), p(mid), p(end), hw)
+        else:
+            _end_points(rect, p(start), p(end), hw)
         i += 1
     return rect.l, rect.b, rect.r, rect.t
