@@ -18,6 +18,7 @@ What the loop is left to do: the drift between where a textblock puts a baseline
 wants it (it corrects textblocks by the measured error), the words, and the pictures it can fetch.
 """
 
+import hashlib
 import json
 import os
 import re
@@ -341,10 +342,61 @@ def font_files_latex(files: dict, tree: Path | None) -> str:
     return f"{where}Extension={exts.pop()},{','.join(opts)}"
 
 
+# A weight other than regular and bold gets a face of its own when it sets this many letters of a font.
+WEIGHT_MIN_LETTERS = 20
+
+
+def weight_faces(font: str, files: dict, used: dict, tree: Path | None, font_weights: dict) -> str:
+    """fontspec `FontFace` options for the weights a deck sets `font` in besides 400 and 700 (`used`:
+    (weight, italic) -> letters), each an instance `fontfetch.weight_file` cuts from the variable
+    font the family was fetched as, under the NFSS series `w<weight>` (`series`). Slides draws a
+    weight per run: gdg24's headings are Google Sans 600 ("This is a Headline." 2.4% narrower than
+    the bold that stood in for it) and 500, journey-maps' text Montserrat 300 and 500, sc-dark-minimal's
+    Inter 300. What cannot be cut (a family on the machine, a static one, a weight off its axis)
+    keeps `bold`'s rounding. The (weight, italic) pairs given faces go into `font_weights[font]`."""
+    upright = files.get("UprightFont")
+    if not upright or not used or any(f.suffix.lower() != ".ttf" for f in files.values() if isinstance(f, Path)):
+        return ""
+    from .fontfetch import weight_file
+    opts, got = [], set()
+    for (w, italic), n in sorted(used.items()):
+        if n < WEIGHT_MIN_LETTERS:
+            continue
+        path = weight_file(upright, w, italic)
+        if path is None:
+            continue
+        if tree is not None:
+            dest = tree / "fonts" / path.name
+            if not dest.exists():
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(path, dest)
+        opts.append(f"FontFace={{w{w}}}{{{'it' if italic else 'n'}}}{{Font={path.stem}}}")
+        got.add((w, italic))
+    if got:
+        font_weights.setdefault(font, set()).update(got)
+    return "".join("," + o for o in opts)
+
+
+def series(r: dict, ctx: Context) -> str:
+    """The NFSS series a run (or a base style) is set in: `w<weight>` where `weight_faces` gave its
+    font that weight, else bold or not."""
+    w = r.get("weight")
+    if w and (int(w), bool(r.get("italic"))) in (getattr(ctx, "font_weights", None) or {}).get(r.get("font") or "", ()):
+        return f"w{int(w)}"
+    return "b" if r.get("bold") else "m"
+
+
+def series_switch(s: str) -> str:
+    return {"b": "\\bfseries ", "m": "\\mdseries "}.get(s) or f"\\fontseries{{{s}}}\\selectfont "
+
+
 # A deck's second, third... typeface of one kind gets a switch of its own when it sets this many
 # letters: a heading face and a body face (Montserrat over Open Sans) are both the deck's look.
+# Or covers as much of the page as that many letters at AREA_SIZE pt: sc-memphis' section numbers
+# are six digits in all, at 166 pt, and set in the body face they came out a third too small.
 EXTRA_FONT_MIN = 40
 EXTRA_FONTS_MAX = 12
+AREA_SIZE = 12.0
 
 
 def font_preamble(target: dict, tree: Path | None, ctx: Context | None = None) -> list[str]:
@@ -362,13 +414,20 @@ def font_preamble(target: dict, tree: Path | None, ctx: Context | None = None) -
     not (journey-maps: Montserrat titles over Open Sans text), and one family per kind set both in
     whichever was used more."""
     counts: dict = {}
+    area: dict = {}
     letters: dict[str, dict[str, int]] = {}
+    weights: dict[str, dict[tuple[int, bool], int]] = {}
     for s in target["slides"]:
         for e in s["elements"]:
             for p in e.get("paragraphs", []):
                 for r in p["runs"]:
                     k = (r.get("family") or "sans", r.get("font") or "")
                     counts[k] = counts.get(k, 0) + len(r["text"])
+                    area[k] = area.get(k, 0.0) + len(r["text"].strip()) * ((r.get("size") or 0) / AREA_SIZE) ** 2
+                    if r.get("weight"):
+                        w = weights.setdefault(k[1], {})
+                        wk = (int(r["weight"]), bool(r.get("italic")))
+                        w[wk] = w.get(wk, 0) + len(r["text"].strip())
                     seen = letters.setdefault(k[1], {})
                     for c in r["text"]:
                         if not c.isspace():
@@ -379,6 +438,7 @@ def font_preamble(target: dict, tree: Path | None, ctx: Context | None = None) -
             ranked.setdefault(fam, []).append(font)
     wanted: dict[str, str] = {fam: fonts[0] for fam, fonts in ranked.items()}
     lines, found = [], ""
+    font_weights: dict[str, set[tuple[int, bool]]] = {}
     for fam, command in (("sans", "setsansfont"), ("serif", "setmainfont"), ("mono", "setmonofont")):
         files: dict = {}
         # The kind's most used font, unless it has glyphs for few of the letters set in it: the letters
@@ -407,15 +467,20 @@ def font_preamble(target: dict, tree: Path | None, ctx: Context | None = None) -
         stem, match = files.pop("stem"), files.pop("match")
         found = found or match                          # what the rest of the deck is set in
         low, asked = flatten(match), flatten(wanted[fam])
+        faces = ""
         if not (low.startswith(asked) or asked.startswith(low)):
             print(f"  {wanted[fam]}: not on this machine, set in {stem}")
-        lines.append(f"\\{command}{{{stem}}}[{font_files_latex(files, tree)}]")
+        else:
+            faces = weight_faces(wanted[fam], files, weights.get(wanted[fam], {}), tree, font_weights)
+        lines.append(f"\\{command}{{{stem}}}[{font_files_latex(files, tree)}{faces}"
+                     f"{stretch(wanted[fam], stem, files, target)}]")
     if ctx is not None:
+        ctx.font_weights = font_weights
         switches: dict[str, str] = {}
         main = set(wanted.values())
         for (fam, font), n in sorted(counts.items(), key=lambda kv: -kv[1]):
-            if not font or font in main or font in switches or n < EXTRA_FONT_MIN or \
-                    len(switches) >= EXTRA_FONTS_MAX:
+            if not font or font in main or font in switches or len(switches) >= EXTRA_FONTS_MAX or \
+                    n < EXTRA_FONT_MIN and area.get((fam, font), 0.0) < EXTRA_FONT_MIN:
                 continue
             files = font_family(font, fam)
             if not files:
@@ -432,9 +497,97 @@ def font_preamble(target: dict, tree: Path | None, ctx: Context | None = None) -
                 continue
             command = "\\adoptfont" + "".join(chr(ord("A") + int(d)) for d in str(len(switches)))
             switches[font] = command
-            lines.append(f"\\newfontfamily{command}{{{stem}}}[{font_files_latex(files, tree)}]")
+            faces = weight_faces(font, files, weights.get(font, {}), tree, font_weights)
+            lines.append(f"\\newfontfamily{command}{{{stem}}}[{font_files_latex(files, tree)}{faces}"
+                         f"{stretch(font, stem, files, target)}]")
         ctx.font_switches = switches
     return ["\\usepackage{fontspec}"] + lines
+
+
+# A stand-in set within this share of the deck's widths is left alone; outside, it is condensed or
+# extended to them, never by more than WIDTH_LIMIT
+WIDTH_TOLERANCE = 0.02
+WIDTH_LIMIT = 0.15
+WIDTH_SPREAD = 0.04
+
+
+def font_widths(font: str, files: dict, target: dict) -> float | None:
+    """How much wider or narrower the deck's thumbnails show words in `font` than `files` set them
+    (the median of measured / predicted over its lone one-line boxes, `deck_ir.ink_widths`), or None
+    when that is within WIDTH_TOLERANCE, measured fewer than twice, or the measures disagree.
+
+    A stand-in has the deck font's name and not its widths: Libre Bodoni sets comps-analysis's
+    "Bodoni" titles 5% wider than Slides draws them, and each one wrapped a word onto a line of its
+    own. The prediction is the words' advances less the first glyph's left bearing and the last one's
+    right bearing, which is what a thumbnail's first and last ink columns show."""
+    try:
+        from fontTools.pens.boundsPen import BoundsPen
+        from fontTools.ttLib import TTFont
+    except ImportError:
+        return None
+    loaded: dict = {}
+    ratios = []
+    for s in target["slides"]:
+        for e in s["elements"]:
+            if not e.get("ink_width"):
+                continue
+            runs = next(p for p in e["paragraphs"] if p["runs"])["runs"]    # the line measured
+            r0 = next(r for r in runs if r["text"].strip())
+            if (r0.get("font") or "") != font:
+                continue
+            style = ("BoldItalicFont" if r0.get("italic") else "BoldFont") if r0.get("bold") else \
+                ("ItalicFont" if r0.get("italic") else "UprightFont")
+            path = files.get(style) or files["UprightFont"]
+            if path not in loaded:
+                try:
+                    f = TTFont(path, fontNumber=0, lazy=True)
+                    loaded[path] = (f, f.getBestCmap(), f.getGlyphSet(), f["hmtx"], f["head"].unitsPerEm)
+                except Exception:
+                    loaded[path] = None
+            if loaded[path] is None:
+                continue
+            f, cmap, glyphs, hmtx, upem = loaded[path]
+            text = "".join(r["text"] for r in runs).strip()
+            names = [cmap.get(ord(c)) for c in text]
+            if None in names:
+                continue
+
+            def bounds(g):
+                pen = BoundsPen(glyphs)
+                glyphs[g].draw(pen)
+                return pen.bounds
+            first, last = bounds(names[0]), bounds(names[-1])
+            if first is None or last is None:
+                continue
+            ink = sum(hmtx[g][0] for g in names) - first[0] - (hmtx[names[-1]][0] - last[2])
+            predicted = ink / upem * (r0.get("size") or 0)
+            # a word or two of small type says little; a line far shorter than its words is the
+            # first of several (comps-analysis's long titles, 0.6-0.8), which is not a width
+            if predicted > 20 and abs(e["ink_width"] / predicted - 1) <= WIDTH_LIMIT:
+                ratios.append(e["ink_width"] / predicted)
+    if len(ratios) < 2:
+        return None
+    ratios.sort()
+    mid = ratios[len(ratios) // 2] if len(ratios) % 2 else sum(ratios[len(ratios) // 2 - 1:len(ratios) // 2 + 1]) / 2
+    near = [r for r in ratios if abs(r - mid) <= WIDTH_SPREAD]
+    if len(near) < max(2, 0.6 * len(ratios)) or abs(mid - 1) <= WIDTH_TOLERANCE:
+        return None
+    return round(mid, 3)
+
+
+def stretch(font: str, stem: str, files: dict, target: dict) -> str:
+    """fontspec's FakeStretch for `font_widths`, or nothing. Only for a stand-in (`stem`, the files'
+    family, is not the deck's `font`): a deck's own font is set as Slides sets it, and what the
+    thumbnails show of it differs from its advances by its kerning alone - Pacifico's script
+    measured 3% narrow, and condensed by that it set sc-aesthetic-school's titles longer, not shorter."""
+    asked, have = flatten(font), flatten(stem)
+    if have.startswith(asked) or asked.startswith(have):
+        return ""
+    ratio = font_widths(font, files, target)
+    if ratio is None:
+        return ""
+    print(f"  {font}: set {ratio:.3f} wide to match the deck's slides")
+    return f",FakeStretch={ratio}"
 
 
 GYRE = {"sans": "texgyreheros", "serif": "texgyretermes", "mono": "texgyrecursor"}
@@ -477,20 +630,36 @@ def picture_of(el: dict, tree: Path | None):
             print(f"  {path.name}: {suffix[1:].upper()} pictures can't be included by LaTeX; left out")
             return None
         suffix = ".png"
-    if tree is None:
+    # Brightness, contrast and recolour are properties LaTeX has no option for: baked into the file
+    # (`compare.adjusted_picture`), as `pull` does - intro-lecture's title photos are dimmed to half
+    bake = {k: el[k] for k in ("brightness", "contrast", "recolor") if el.get(k)}
+    if bake and suffix not in (".png", ".jpg", ".jpeg"):
+        bake = {}
+    if tree is None and not bake:
         return Picture(path.name, path, natural_size(path))
-    rel = f"figures/{picture_slug(el.get('alt'))}-{(el.get('sha1') or path.stem)[:8]}{suffix}"
-    dest = tree / rel
+    tag = hashlib.sha1(json.dumps(bake, sort_keys=True).encode()).hexdigest()[:4] if bake else ""
+    rel = f"figures/{picture_slug(el.get('alt'))}-{(el.get('sha1') or path.stem)[:8]}{tag}{suffix}"
+    dest = (tree if tree is not None else path.parent) / rel
     if not dest.exists():
         dest.parent.mkdir(parents=True, exist_ok=True)
-        if suffix == path.suffix.lower():
+        if bake:
+            from PIL import Image
+            from .compare import adjusted_picture
+            with Image.open(path) as img:
+                img.seek(0)
+                out = adjusted_picture(img, bake)
+            if suffix == ".png":
+                out.save(dest, "PNG")
+            else:
+                out.convert("RGB").save(dest, "JPEG", quality=92)
+        elif suffix == path.suffix.lower():
             shutil.copyfile(path, dest)
         else:
             from PIL import Image
             with Image.open(path) as img:
                 img.seek(0)
                 img.convert("RGBA").save(dest, "PNG")
-    return Picture(rel, dest, natural_size(dest))
+    return Picture(rel if tree is not None else dest.name, dest, natural_size(dest))
 
 
 # ------------------------------------------------------------------------------------ text boxes
@@ -595,8 +764,12 @@ def run_tex(r: dict, base: dict, text: str, ctx: Context) -> str:
         core = f"{{{cmd} {core}}}"
     elif fam != bfam:
         core = {"mono": "\\texttt", "serif": "\\textrm", "sans": "\\textsf"}[fam if fam in ("mono", "serif") else "sans"] + f"{{{core}}}"
-    if bool(r.get("bold")) != bool(base.get("bold")):
-        core = ("\\textbf" if r.get("bold") else "\\textmd") + f"{{{core}}}"
+    sr, sb = series(r, ctx), series(base, ctx)
+    if sr != sb:
+        if sr in ("b", "m") and sb in ("b", "m"):
+            core = ("\\textbf" if sr == "b" else "\\textmd") + f"{{{core}}}"
+        else:
+            core = f"{{{series_switch(sr)}{core}}}"
     if bool(r.get("italic")) != bool(base.get("italic")):
         core = ("\\textit" if r.get("italic") else "\\textup") + f"{{{core}}}"
     if r.get("smallcaps"):
@@ -623,14 +796,17 @@ def paragraph_base(p: dict) -> dict:
     counts: dict = {}
     for r in p["runs"]:
         k = (round(r.get("size") or 0, 2), (r.get("color") or "").lower() or None, r.get("family") or "sans",
-             bool(r.get("bold")), bool(r.get("italic")))
+             bool(r.get("bold")), bool(r.get("italic")), r.get("weight"))
         counts[k] = counts.get(k, 0) + len(r["text"])
-    size, colour, family, bold, italic = max(counts, key=counts.get)
+    size, colour, family, bold, italic, weight = max(counts, key=counts.get)
     fonts: dict = {}
     for r in p["runs"]:
         fonts[r.get("font") or ""] = fonts.get(r.get("font") or "", 0) + len(r["text"])
-    return {"size": size or 10.0, "color": colour, "family": family, "bold": bold, "italic": italic,
-            "font": max(fonts, key=fonts.get) if fonts else ""}
+    out = {"size": size or 10.0, "color": colour, "family": family, "bold": bold, "italic": italic,
+           "font": max(fonts, key=fonts.get) if fonts else ""}
+    if weight:
+        out["weight"] = weight
+    return out
 
 
 def font_switch(font: str, ctx: Context) -> str:
@@ -746,6 +922,8 @@ def text_box_latex(el: dict, ctx: Context, ind: str) -> str:
     if box.get("inset_y") is not None and box.get("insets") != 0:
         # PowerPoint's own top and bottom insets, which a deck's thumbnails showed (deck_ir.pptx_insets)
         inset = (BASELINE_A - (SLIDES_INSET_Y - box["inset_y"])) / scale
+    if box.get("inset_x") is not None and box.get("insets") != 0:
+        pad = box["inset_x"] / scale                    # the same deck's side insets
     width, height = max(x1 - x0 - 2 * pad, 1.0), max(y1 - y0, 0.1)
     valign = box.get("valign", "top")
     paras = [p for p in el["paragraphs"] if p["runs"]]
@@ -803,7 +981,8 @@ def text_box_latex(el: dict, ctx: Context, ind: str) -> str:
         lead = f"\\slidesize{{{base['size']:.2f}}}"
         lead += {"mono": "\\ttfamily", "serif": "\\rmfamily"}.get(base["family"], "")
         lead += font_switch(base.get("font"), ctx)
-        lead += "\\bfseries" if base["bold"] else ""
+        weight = series(base, ctx)
+        lead += "" if weight == "m" else series_switch(weight)
         lead += "\\itshape" if base["italic"] else ""
         lead += f"\\color{{{colour_name(base['color'], ctx.colours)}}}" if base["color"] else ""
         brk = "\\unskip\\hfil\\break " if justified else "\\unskip\\break "
@@ -1057,6 +1236,21 @@ def table_segments(el: dict) -> list[tuple[tuple, list]]:
     return sorted(runs.items(), key=lambda kv: (kv[0][0], kv[0][1]))
 
 
+def cell_lead(base: dict, cell: dict, ctx: Context) -> str:
+    """A table cell's base style with its lines as far apart as Slides sets them (LINE_EM x
+    lineSpacing). The size switch alone spaced them by the class's leading: hebrew-lesson's cells
+    stood 14.0 pt apart where the thumbnail shows 14.45. Only the distance between lines: the strut
+    every cell line carries (`TABLE_MACROS`) stays the size switch's, since a one-line cell is as
+    tall as its row already says - a strut of the whole pitch grew comps-analysis's rows past the
+    deck's (0.429 -> 0.427), and Slides' text-box ascent (0.968 em) moved its lines down (0.405)."""
+    if not base.get("size"):
+        return base_lead(base, ctx)
+    z = base["size"]
+    r = next((p.get("line_spacing") for p in cell.get("paragraphs", []) if p.get("line_spacing")), 1.0)
+    pitch = sum(line_box(z, r))
+    return base_lead(base, ctx) + f"\\baselineskip={pitch:.2f}pt\\relax"
+
+
 def table_block(el: dict, ctx: Context, ind: str) -> str:
     """A table at its place and size: every cell's text set in a box as wide as its columns less
     Slides' insets, the rows grown until their cells fit (`TABLE_MACROS`), then one tikzpicture with
@@ -1095,7 +1289,7 @@ def table_block(el: dict, ctx: Context, ind: str) -> str:
         boxes[k] = len(boxes) + 1
         lines.append(f"{ind}  \\adoptcell{{{boxes[k]}}}{{{c['row']}}}{{{last_row}}}{{{width:.2f}pt}}{{{pady:.2f}pt}}"
                      f"{{{span:.2f}pt}}{{{shift:.2f}pt}}{{%")
-        lines.append(f"{ind}    \\raggedright{base_lead(base, ctx)}%")
+        lines.append(f"{ind}    \\raggedright{cell_lead(base, c, ctx)}%")
         lines.append(body + "}")
     lines.append(f"{ind}  \\adopttops{{{n_rows}}}")
     lines.append(f"{ind}  \\begin{{tikzpicture}}[baseline=(current bounding box.north),inner sep=0pt,outer sep=0pt]")

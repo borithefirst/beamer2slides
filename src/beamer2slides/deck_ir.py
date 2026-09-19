@@ -276,7 +276,8 @@ def base_style(pe: dict, resolver: StyleResolver, level: int) -> dict:
         base["fontSize"] = dim(parent["fontSize"])
     if parent.get("weightedFontFamily"):
         base["fontFamily"] = parent["weightedFontFamily"]["fontFamily"]
-        if parent["weightedFontFamily"].get("weight", 400) >= 600:
+        base["weight"] = parent["weightedFontFamily"].get("weight", 400)
+        if base["weight"] >= 600:
             base["bold"] = True
     if parent.get("foregroundColor"):
         base["color"] = rgb_hex(parent["foregroundColor"], resolver.scheme) or base["color"]
@@ -344,8 +345,13 @@ def text_paragraphs(pe: dict, text: dict, resolver: StyleResolver, fonts: FontMa
             family = (st.get("weightedFontFamily") or {}).get("fontFamily") or st.get("fontFamily") or base["fontFamily"]
             size = (dim(st.get("fontSize")) or base["fontSize"]) * font_scale
             bold = st.get("bold", base["bold"])
-            if (st.get("weightedFontFamily") or {}).get("weight", 400) >= 600:
+            weight = (st.get("weightedFontFamily") or {}).get("weight") or base.get("weight") or 400
+            if st.get("bold") is not None and "weightedFontFamily" not in st:
+                weight = 700 if st["bold"] else 400
+            if weight >= 600:
                 bold = True
+            unsure = foreign and base["bold"] and st.get("bold") is False and \
+                (st.get("weightedFontFamily") or {}).get("weight") == 400
             italic = st.get("italic", base["italic"])
             color = rgb_hex(st.get("foregroundColor"), resolver.scheme) or base["color"]
             if foreign:
@@ -369,9 +375,15 @@ def text_paragraphs(pe: dict, text: dict, resolver: StyleResolver, fonts: FontMa
                    "script": {"SUPERSCRIPT": "super", "SUBSCRIPT": "sub"}.get(st.get("baselineOffset")),
                    "underline": bool(st.get("underline")), "strike": bool(st.get("strikethrough")),
                    "highlight": rgb_hex(st.get("backgroundColor"), resolver.scheme)}
+            if foreign and weight not in (400, 700):
+                # a weight between (or beyond) regular and bold, which `bold` can only round: adopt
+                # sets it in an instance of that weight where it can cut one (fontfetch.weight_file)
+                run["weight"] = int(weight)
             if family == "Roboto Mono" and text_part.strip("\u00a0") == "" and "\u00a0" in text_part:
                 run["hole"] = round(len(text_part) * 0.6 * size / scale, 2)
                 run["text"] = " "
+            if unsure:
+                run["weight_unsure"] = True     # `thumbnail_weights` decides
             cur["runs"].append(run)
     for p in paragraphs:
         p["runs"] = merge_runs(p["runs"])
@@ -436,9 +448,11 @@ def text_paragraphs(pe: dict, text: dict, resolver: StyleResolver, fonts: FontMa
 
 def merge_runs(runs: list[dict]) -> list[dict]:
     out = []
-    keys = ("font", "size", "bold", "italic", "color", "link", "script", "underline", "strike", "highlight", "smallcaps")
+    keys = ("font", "size", "bold", "italic", "color", "link", "script", "underline", "strike", "highlight", "smallcaps",
+            "weight")
     for r in runs:
-        if out and not r.get("hole") and not out[-1].get("hole") and all(out[-1][k] == r[k] for k in keys):
+        if out and not r.get("hole") and not out[-1].get("hole") and all(out[-1].get(k) == r.get(k) for k in keys) \
+                and out[-1].get("weight_unsure") == r.get("weight_unsure"):
             out[-1]["text"] += r["text"]
         else:
             out.append(dict(r))
@@ -475,9 +489,11 @@ def thumbnail_insets(elements: list[dict], thumb, px: float) -> None:
     insets at 0 (gdg24's stat grids, devfest2020's cards) says nothing of it to the API, and adopt set
     its words 6.7 pt right and 6.5 pt low, wrapping them elsewhere. Its thumbnail does say: in a
     left-aligned box, the words' ink starts at the box edge plus the paragraph's indent plus the left
-    inset, and a first glyph's side bearing is ~1 pt where the inset is PAD_X. Only boxes whose left
-    strip nothing else crosses are read (a picture or a shape's edge there is ink too), and only an
-    ink edge closer than half the inset counts: a big glyph's bearing can only keep the default."""
+    inset, and a first glyph's side bearing is ~1 pt where the inset is PAD_X. The rows of the left
+    strip that anything else crosses are not read (a picture, a shape's edge or another box's words
+    there are ink too), ink in the box's first column counts only when nothing lies just outside the
+    box, and only an ink edge closer than half the inset counts: a big glyph's bearing can only keep
+    the default."""
     if thumb is None or not px:
         return
     import numpy as np
@@ -497,18 +513,38 @@ def thumbnail_insets(elements: list[dict], thumb, px: float) -> None:
         indent = min(min(p["slides"].get("indent_first") or 0, p["slides"].get("indent_start") or 0)
                      for p in paras) / scale
         strip = (x0 - 1, y0, x0 + indent + pad + 2, y1)
-        if crossed(e, elements, strip):
-            continue
+        others = crossing(e, elements, strip)
         X0, X1 = int(round(x0 * px)), int(round(x1 * px))
         Y0, Y1 = int(round(y0 * px)), int(round(y1 * px))
         crop = thumb[max(0, Y0):max(0, Y1), max(0, X0):max(0, X1)]
         if crop.shape[0] < 4 or crop.shape[1] < 8:
             continue
-        ground = np.median(crop.reshape(-1, crop.shape[-1]), axis=0)
-        ink = (np.abs(crop - ground).max(axis=-1) > 80).sum(axis=0) >= 2
-        cols = np.nonzero(ink)[0]
-        if len(cols) < 3 or cols[0] == 0:
+        # What else reaches into the strip covers rows, not the box: gdg24's stat grids stack a heading
+        # box over a caption box whose tops overlap by 5 pt, and its code slides lay a highlight bar
+        # across the middle of the listing - none of those boxes was read. Their rows are left out; the
+        # rest still shows where this box's words start - and when that leaves the first line out, the
+        # top test below cannot pass.
+        free = np.ones(crop.shape[0], dtype=bool)
+        for o in others:
+            a = max(0, int(np.floor((o["bbox"][1] - 1) * px)) - max(0, Y0))
+            b = max(0, int(np.ceil((o["bbox"][3] + 1) * px)) - max(0, Y0))
+            free[a:b] = False
+        if free.sum() < 4:
             continue
+        ground = np.median(crop[free].reshape(-1, crop.shape[-1]), axis=0)
+        mark = (np.abs(crop - ground).max(axis=-1) > 80) & free[:, None]
+        ink = mark.sum(axis=0) >= 2
+        cols = np.nonzero(ink)[0]
+        if len(cols) < 3:
+            continue
+        if cols[0] == 0:
+            # Ink in the box's first pixel column is a glyph whose edge rounds onto the box edge (gdg24's
+            # "Connect", 0.13 pt in) unless it goes on outside the box, where no word of it can be.
+            if X0 < 3:
+                continue
+            left = thumb[max(0, Y0):max(0, Y1), X0 - 3:X0]
+            if ((np.abs(left - ground).max(axis=-1) > 80) & free[:len(left), None]).any():
+                continue
         gap = (X0 + cols[0]) / px - (x0 + indent)
         if gap >= pad / 2:
             continue
@@ -518,7 +554,7 @@ def thumbnail_insets(elements: list[dict], thumb, px: float) -> None:
             # first line's cap tops must stand where no top inset puts them too
             dy = (BASELINE_A - (PPTX_TITLE_DY if e.get("placeholder") in
                                 ("TITLE", "CENTERED_TITLE", "SUBTITLE") else 0.0)) / scale
-            rows = np.nonzero((np.abs(crop - ground).max(axis=-1) > 80).sum(axis=1) >= 2)[0]
+            rows = np.nonzero(mark.sum(axis=1) >= 2)[0]
             z = max(r.get("size") or 0 for r in paras[0]["runs"])
             if not len(rows) or (Y0 + rows[0]) / px - (e["anchor"][1] - CAP_EM * z) > -dy / 2:
                 continue
@@ -528,12 +564,108 @@ def thumbnail_insets(elements: list[dict], thumb, px: float) -> None:
             e["anchor"] = [round(e["anchor"][0] - pad, 2), round(e["anchor"][1] - dy, 2)]
 
 
+def ink_widths(elements: list[dict], thumb, px: float) -> None:
+    """How wide the thumbnail shows the first line of each text box's first paragraph (`ink_width`,
+    page pt, first ink column to last): `adopt.font_widths` holds them against the stand-in a deck's
+    font is set in when this machine does not have it, for the paragraphs that fit on one line.
+    Only a paragraph in one font, size and style, left-aligned, with no bullet, whose line nothing
+    else crosses and whose words do not touch the box's sides."""
+    if thumb is None or not px:
+        return
+    import numpy as np
+    for e in elements:
+        box_ = e.get("box") if isinstance(e.get("box"), dict) else None
+        paras = [p for p in e.get("paragraphs", []) if p.get("runs")]
+        if e.get("kind") != "text" or box_ is None or not paras or not e.get("anchor"):
+            continue
+        p = paras[0]
+        runs = [r for r in p["runs"] if r["text"].strip()]
+        text = "".join(r["text"] for r in p["runs"])
+        if not runs or p.get("bullet") or p.get("align", "left") != "left" or p.get("direction") == "rtl" \
+                or any(c in text for c in "\x0b\n\t") or len(text.strip()) < 4 \
+                or len({(r.get("font"), bool(r.get("bold")), bool(r.get("italic")), r.get("size"),
+                         r.get("script")) for r in runs}) != 1:
+            continue
+        x0, y0, x1, y1 = e["bbox"]
+        z, base = runs[0].get("size") or 0, e["anchor"][1]
+        band = (x0, base - 0.85 * z, x1, base + 0.3 * z)
+        if z <= 0 or crossed(e, elements, band):
+            continue
+        X0, X1, Y0, Y1 = (int(round(v * px)) for v in (x0, x1, band[1], band[3]))
+        if X0 < 0 or Y0 < 0 or X1 > thumb.shape[1] or Y1 > thumb.shape[0] or Y1 - Y0 < 3 or X1 - X0 < 8:
+            continue
+        crop = thumb[Y0:Y1, X0:X1]
+        ground = np.median(crop.reshape(-1, crop.shape[-1]), axis=0)
+        cols = np.nonzero((np.abs(crop - ground).max(axis=-1) > 80).any(axis=0))[0]
+        if len(cols) < 3 or cols[0] <= 1 or cols[-1] >= crop.shape[1] - 2:
+            continue
+        e["ink_width"] = round((cols[-1] - cols[0] + 1) / px, 2)
+
+
+BOLD_STROKE_EM = 0.10       # mean stroke width (em) above which a thumbnail's letters are bold
+
+
+def stroke_em(e: dict, elements: list[dict], thumb, px: float) -> float | None:
+    """The mean stroke width of a text box's letters in its thumbnail, in em of its biggest run (None:
+    not readable: anything else reaches into the box, or too little ink). Twice the ink's area over
+    its outline: a stroke w wide and L long has area wL and an outline of 2L. Antialiasing thickens
+    small text, so it is only a tiebreak: the runs `thumbnail_weights` settles read 0.080-0.083 where
+    drawn regular and 0.116-0.142 where drawn bold (whole boxes the API calls bold read 0.09-0.16,
+    regular ones 0.05-0.13)."""
+    import numpy as np
+    runs = [r for p in e.get("paragraphs", []) for r in p.get("runs", []) if r["text"].strip()]
+    if thumb is None or not px or not runs or crossed(e, elements, tuple(e["bbox"])):
+        return None
+    z = max(r.get("size") or 0 for r in runs)
+    x0, y0, x1, y1 = (int(round(v * px)) for v in e["bbox"])
+    crop = thumb[max(0, y0):max(0, y1), max(0, x0):max(0, x1)]
+    if z <= 0 or crop.shape[0] < 4 or crop.shape[1] < 4:
+        return None
+    ground = np.median(crop.reshape(-1, crop.shape[-1]), axis=0)
+    contrast = np.abs(crop - ground).max(axis=-1)
+    ink = contrast > max(40.0, contrast.max() / 2)
+    area = int(ink.sum())
+    if area < 20:
+        return None
+    inner = ink.copy()
+    inner[1:, :] &= ink[:-1, :]
+    inner[:-1, :] &= ink[1:, :]
+    inner[:, 1:] &= ink[:, :-1]
+    inner[:, :-1] &= ink[:, 1:]
+    outline = area - int(inner.sum())
+    return float(2 * area / max(outline, 1) / px / z)
+
+
+def thumbnail_weights(elements: list[dict], thumb, px: float) -> None:
+    """Settle the runs whose weight the API does not say (`weight_unsure`): a run that only names a
+    font reads back as `bold: false` at weight 400 under a bold parent, and Slides draws some of those
+    bold (jruby-ja's Tahoma titles, drawings-basics' title slides, solidity-survey) and some regular
+    (drawings-basics' slides 9 and 11, identical in the API). The thumbnail's stroke width tells them
+    apart (`stroke_em`); unreadable, the API's word stands."""
+    for e in elements:
+        runs = [r for p in e.get("paragraphs", []) for r in p.get("runs", []) if r.get("weight_unsure")]
+        if not runs:
+            continue
+        w = stroke_em(e, elements, thumb, px)
+        for r in runs:
+            del r["weight_unsure"]
+            if w is not None and w > BOLD_STROKE_EM:
+                r["bold"] = True
+
+
 def crossed(e: dict, elements: list[dict], strip: tuple) -> bool:
     """Does anything but the box itself reach into `strip`, where its thumbnail is read? What lies under
-    the whole box does not: a panel it stands on, or the full-slide picture of a template's layout
-    (devfest2020 draws every slide's ground as one, and none of its boxes could be read)."""
+    the box, from its top down past the strip, does not: a panel it stands on, or the full-slide
+    picture of a template's layout (devfest2020 draws every slide's ground as one, and none of its
+    boxes could be read)."""
+    return bool(crossing(e, elements, strip, first=True))
+
+
+def crossing(e: dict, elements: list[dict], strip: tuple, first: bool = False) -> list[dict]:
+    """The elements `crossed` asks about (only the first one with `first`)."""
     x0, y0, x1, y1 = e["bbox"]
     below = True
+    found = []
     for o in elements:
         if o is e:
             below = False
@@ -542,10 +674,12 @@ def crossed(e: dict, elements: list[dict], strip: tuple) -> bool:
         if not b or len(b) != 4 or b[2] <= strip[0] or b[0] >= strip[2] or b[3] <= strip[1] or b[1] >= strip[3]:
             continue
         if (o.get("kind") == "shape" or below and o.get("kind") == "image") and b[0] < x0 - 2 and b[1] < y0 - 2 \
-                and b[2] > x1 + 2 and b[3] > max(y1, strip[3]) + 2:
+                and b[2] > x1 + 2 and b[3] > strip[3]:
             continue
-        return True
-    return False
+        found.append(o)
+        if first:
+            break
+    return found
 
 
 CAP_EM = 0.72               # a Latin face's cap height, near enough to tell 6.5 pt of top inset
@@ -568,14 +702,14 @@ def top_drift(e: dict, elements: list[dict], thumb, px: float) -> float | None:
         return None
     paras = [p for p in e.get("paragraphs", []) if p.get("runs")]
     first = "".join(r["text"] for r in paras[0]["runs"]).lstrip() if paras else ""
-    if not first or not (first[0].isupper() or first[0].isdigit()) or paras[0].get("bullet"):
+    if not first or paras[0].get("bullet"):
         return None
+    cap = KNOWN_CAPS.get(paras[0]["runs"][0].get("font") or "")
+    if cap is None or not (first[0].isupper() or first[0].isdigit()):
+        return baseline_drift(e, elements, paras, thumb, px)
     x0, y0, x1, y1 = e["bbox"]
     base = e["anchor"][1]
     if crossed(e, elements, (x0, y0 - 2, x1, base + 2)):
-        return None
-    cap = KNOWN_CAPS.get(paras[0]["runs"][0].get("font") or "")
-    if cap is None:
         return None
     z = max(r.get("size") or 0 for r in paras[0]["runs"])
     X0, X1, Y0, Y1 = (int(round(v * px)) for v in (x0, x1, y0, base + 1))
@@ -588,6 +722,58 @@ def top_drift(e: dict, elements: list[dict], thumb, px: float) -> float | None:
         return None
     scale = box_.get("scale") or 1.0
     return ((Y0 + rows[0]) / px - (base - cap * z)) * scale
+
+
+BASELINE_BAND = (0.95, 0.3)     # em above and below the predicted first baseline `baseline_drift` reads
+BASELINE_MIN_COLUMNS = 0.6      # em of inked columns a first line needs before its baseline is read
+BASELINE_DENSITY = 0.25         # the baseline: the lowest row inked this much of the line's densest one
+
+
+def baseline_drift(e: dict, elements: list[dict], paras: list[dict], thumb, px: float) -> float | None:
+    """`top_drift` for a first line in a script with no capitals: where the thumbnail shows its
+    baseline, less where Slides' default insets put it, in Slides pt. Hebrew and Arabic letters stand
+    on the baseline, and Book Antiqua's Hebrew is drawn by a fallback whose cap height nobody knows, so
+    the baseline is the lowest row still inked a quarter as densely as the line's densest (descenders
+    and commas are thin below it; a column median read bold Hebrew's top bars - ד ר ו are a bar on a
+    stem - and put a title's baseline 5 pt high). hebrew-lesson's text stood 3.6 pt low on every slide it was not
+    middle-aligned on, and not one of its boxes could be measured by its capitals. An underline or a
+    strike is a row inked across the whole line: such rows are cleared first. Only these scripts:
+    ideographs sit on an em box below the baseline, and a Latin line's column bottoms read other
+    things than its caps did (cs161-net's disagreed by 6 pt)."""
+    import numpy as np
+    from .scripts import script_of
+    runs = paras[0]["runs"]
+    first = next((c for r in runs for c in r["text"] if c.isalpha()), "")
+    if not first or script_of(first) not in ("hebrew", "arabic") or any(r.get("highlight") for r in runs):
+        return None
+    z = max(r.get("size") or 0 for r in runs)
+    if z <= 0:
+        return None
+    x0, y0, x1, y1 = e["bbox"]
+    base = e["anchor"][1]
+    top, bottom = base - BASELINE_BAND[0] * z, base + BASELINE_BAND[1] * z
+    if crossed(e, elements, (x0, min(y0, top) - 2, x1, bottom + 2)):
+        return None
+    X0, X1, Y0, Y1 = (int(round(v * px)) for v in (x0, x1, top, bottom))
+    crop = thumb[max(0, Y0):max(0, Y1), max(0, X0):max(0, X1)]
+    if crop.shape[0] < 4 or crop.shape[1] < 8:
+        return None
+    ground = np.median(crop.reshape(-1, crop.shape[-1]), axis=0)
+    ink = np.abs(crop - ground).max(axis=-1) > 80
+    cols = np.nonzero(ink.any(axis=0))[0]
+    if len(cols) < BASELINE_MIN_COLUMNS * z * px:
+        return None
+    rules = ink[:, cols[0]:cols[-1] + 1].mean(axis=1) > 0.7     # underlines and strikes
+    ink[rules] = False
+    cols = np.nonzero(ink.any(axis=0))[0]
+    if len(cols) < BASELINE_MIN_COLUMNS * z * px:
+        return None
+    density = ink[:, cols[0]:cols[-1] + 1].mean(axis=1)
+    rows = np.nonzero(density >= BASELINE_DENSITY * density.max())[0]
+    if rows[-1] >= ink.shape[0] - 1:                    # ink runs on out of the band: not one line
+        return None
+    seen = (max(0, Y0) + int(rows[-1]) + 1) / px
+    return float((seen - base) * (e["box"].get("scale") or 1.0))
 
 
 def pptx_insets(slides: list[dict], drifts: list[tuple[dict, float]]) -> None:
@@ -611,6 +797,12 @@ def pptx_insets(slides: list[dict], drifts: list[tuple[dict, float]]) -> None:
             if id(e) not in chosen and (id(e) in measured or not whole):
                 continue
             box_["inset_y"] = PPTX_INSET_Y
+            if whole:
+                # a deck imported whole keeps the .pptx's side insets too, 3.6 pt like the top ones:
+                # comps-analysis's text starts 3.1-3.8 pt left of Slides' 6.7 and wrapped every
+                # other line early (boxes 0.43 -> 0.66); ap-bio-stats' two lone boxes measured at
+                # -3.6 keep Slides' sides (their titles stand where 6.7 pt puts them)
+                box_["inset_x"] = PPTX_INSET_Y
             if e.get("anchor") and box_.get("valign", "top") in ("top", "bottom"):
                 dy = -want / (box_.get("scale") or 1.0) * (1 if box_.get("valign", "top") == "bottom" else -1)
                 e["anchor"] = [e["anchor"][0], round(e["anchor"][1] + dy, 2)]
@@ -897,8 +1089,10 @@ def deck_ir(pres: dict, pdf_size: list[float] | None = None, base: dict | None =
             if thumb is not None:
                 thumb = deck_fills.load(thumb)
                 px = thumb.shape[1] / page_w
-            elements = deck_fills.settle(elements, thumb, px, None if picture else color, bool(picture))
+            elements = deck_fills.settle(elements, thumb, px, None if picture else color, bool(picture), images)
             thumbnail_insets(elements, thumb, px)
+            thumbnail_weights(elements, thumb, px)
+            ink_widths(elements, thumb, px)
             drifts += [(e, d) for e, d in ((e, top_drift(e, elements, thumb, px)) for e in elements)
                        if d is not None]
         key = slide_keys.get(slide["objectId"]) or (max(set(tags), key=tags.count) if tags else None)
@@ -1277,8 +1471,11 @@ def table_element(pe: dict, m: list[float], resolver: StyleResolver, fonts: Font
                 "fill": rgb_hex(solid.get("color"), resolver.scheme) if solid else None,
                 "fill_alpha": round(solid.get("alpha", 1.0), 3) if solid else None,
                 "valign": VALIGN.get(props.get("contentAlignment"), "top"),
+                # a Hebrew cell is right to left like a Hebrew text box (hebrew-lesson's tables):
+                # set left to right, its lines ended on the wrong side of their full stops
                 "paragraphs": [{"align": p["align"], "level": p["level"], "bullet": p["bullet"], "size": p["size"],
                                 "line_spacing": p["line_spacing"],
+                                **({"direction": "rtl"} if p.get("direction") == "rtl" else {}),
                                 "runs": [{k: v for k, v in r.items() if k not in ("slides_font", "slides_size")}
                                          for r in p["runs"]]}
                                for p in paras if p["runs"]]})

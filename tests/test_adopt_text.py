@@ -204,6 +204,138 @@ def test_the_thumbnail_tells_a_fixed_box_with_no_insets():
     thumbnail_insets([el, ground], *thumb(50.6, 54.2))
     assert "insets" not in el["box"], "a picture over the box hides what it would show"
 
+    # gdg24's stat grids: a caption box overlaps the heading box's lower rows. Those rows are not read,
+    # the rest still are - either way round.
+    def caption(ink_x):
+        im, px = thumb(50.6, 54.2)
+        im[int(88 * px):int(94 * px), int(ink_x * px):int((ink_x + 30) * px)] = 20
+        return im, px
+
+    cap = {"kind": "text", "bbox": [45.0, 85.0, 200.0, 110.0]}
+    el = element()
+    thumbnail_insets([el, cap], *caption(55.0))
+    assert el["box"].get("insets") == 0, "a box crossing the lower rows leaves the first line readable"
+    el = element()
+    im, px = caption(50.3)
+    im[int(54.2 * px):int(60.2 * px)] = 240
+    im[int(58.2 * px):int(64.2 * px), int(55 * px):int(95 * px)] = 20
+    thumbnail_insets([el, cap], im, px)
+    assert "insets" not in el["box"], "the caption's words at the edge are not this box's"
+
+
+def test_ink_on_the_boxs_first_column_is_its_own_unless_it_goes_on_outside():
+    """A glyph 0.13 pt inside the box edge rounds onto its first pixel column (gdg24's "Connect");
+    ink that runs on past the edge is something else's (a highlight bar under a code listing)."""
+    import numpy as np
+
+    from beamer2slides.deck_ir import thumbnail_insets
+    px = 4.0
+
+    def read(ink_from):
+        el = {"kind": "text", "bbox": [50.0, 50.0, 200.0, 100.0], "anchor": [54.22, 64.0], "wrap_width": 141.5,
+              "paragraphs": [{"align": "left", "bullet": None, "runs": [{"text": "Words", "size": 8.0}],
+                              "slides": {"indent_first": 0, "indent_start": 0}}],
+              "box": {"valign": "top", "scale": 720 / 453.54}}
+        im = np.full((int(300 * px), int(453.54 * px), 3), 240, dtype=np.int16)
+        im[int(54.2 * px):int(60.2 * px), int(ink_from * px):int(90 * px)] = 20
+        thumbnail_insets([el], im, px)
+        return el["box"].get("insets")
+
+    assert read(50.0) == 0
+    assert read(48.0) is None
+
+
+def title_deck(style: dict) -> dict:
+    """A title whose layout placeholder is bold Arial and whose one run says `style`."""
+    layout_title = box("L_title", para("", runs=[("", {"bold": True, "fontFamily": "Arial", "fontSize": pt(28)})]),
+                       placeholder={"type": "TITLE"})
+    return deck(box("s_title", para("JRuby", runs=[("JRuby InvokeDynamic", style)]), h=60,
+                    placeholder={"type": "TITLE", "parentObjectId": "L_title"}),
+                layout_elements=[layout_title])
+
+
+def stroked(el: dict, stroke_em: float):
+    """A 1600 px wide thumbnail with letter-like bars `stroke_em` wide inside the element's box."""
+    import numpy as np
+    px = 1600 / 453.54
+    im = np.full((900, 1600, 3), 255, dtype=np.uint8)
+    z = max(r["size"] for p in el["paragraphs"] for r in p["runs"])
+    w = max(1, int(round(stroke_em * z * px)))
+    x0, y0, x1, y1 = (int(v * px) for v in el["bbox"])
+    top = y0 + (y1 - y0) // 4
+    for x in range(x0 + 10, x1 - 10, 3 * w):
+        im[top:top + int(0.7 * z * px), x:x + w] = 0
+    return im
+
+
+def test_a_run_that_only_names_its_font_takes_the_weight_its_thumbnail_shows():
+    """jruby-ja's Tahoma titles read `bold: false` at weight 400 under a bold layout title and are
+    drawn bold; drawings-basics has such titles drawn bold and others, identical in the API, drawn
+    regular. The thumbnail's stroke width settles it (deck_ir.thumbnail_weights)."""
+    named = {"bold": False, "fontFamily": "Tahoma", "weightedFontFamily": {"fontFamily": "Tahoma", "weight": 400}}
+    plain = text_of(deck_ir(title_deck(named), foreign=True), "s_title")
+    run = plain["paragraphs"][0]["runs"][0]
+    assert run["bold"] is False and "weight_unsure" not in run, "no thumbnail: the API's word"
+
+    def bold_with(style, stroke):
+        thumb = stroked(plain, stroke)
+        el = text_of(deck_ir(title_deck(style), foreign=True, thumbnails=lambda n: thumb), "s_title")
+        run = el["paragraphs"][0]["runs"][0]
+        assert "weight_unsure" not in run
+        return run["bold"]
+
+    assert bold_with(named, 0.15) is True
+    assert bold_with(named, 0.07) is False
+    # a `bold: false` with no weight beside it is the person's own: jruby-ja's numbered titles
+    assert bold_with({"bold": False}, 0.15) is False
+
+
+def test_the_stroke_width_of_a_thumbnail_in_em():
+    from beamer2slides.deck_ir import BOLD_STROKE_EM, stroke_em
+    el =text_of(deck_ir(title_deck({}), foreign=True), "s_title")
+    thin, thick = (stroke_em(el, [el], stroked(el, w).astype("int16"), 1600 / 453.54) for w in (0.07, 0.15))
+    assert thin == pytest.approx(0.07, abs=0.02) and thick == pytest.approx(0.15, abs=0.03)
+    assert thin < BOLD_STROKE_EM < thick
+    assert stroke_em(el, [el, {"kind": "image", "bbox": [0, 0, 400, 400]}],
+                     stroked(el, 0.15).astype("int16"), 1600 / 453.54) is None, "a picture over it is ink too"
+
+
+def test_a_hebrew_first_line_is_placed_by_its_baseline():
+    """Hebrew has no capitals for `top_drift` to read: hebrew-lesson's boxes sit 3.6 pt high (a
+    PowerPoint import's insets), which the row where the letters' ink thins out shows. Underlines are
+    cleared first; Latin and CJK first lines are left to the cap rule."""
+    import numpy as np
+
+    from beamer2slides.deck_ir import baseline_drift
+    px, scale, z = 4.0, 2.0, 12.0
+
+    def element(text):
+        return {"kind": "text", "bbox": [50.0, 50.0, 250.0, 120.0], "anchor": [53.0, 65.0],
+                "box": {"valign": "top", "scale": scale},
+                "paragraphs": [{"runs": [{"text": text, "size": z}], "slides": {}}]}
+
+    def thumb(baseline, underline=False, bold_tops=False):
+        im = np.full((600, 1200, 3), 250, dtype=np.int16)
+        B = int(round(baseline * px))
+        for x in range(int(55 * px), int(200 * px), 12):
+            im[B - int(0.6 * z * px):B, x:x + 3] = 10           # letter stems down to the baseline
+            if bold_tops:
+                im[B - int(0.6 * z * px):B - int(0.5 * z * px), x:x + 10] = 10
+        if underline:
+            im[B + 4:B + 6, int(55 * px):int(200 * px)] = 10
+        return im
+
+    el = element("שלום עולם")
+    paras = el["paragraphs"]
+    for shown in (61.4, 65.0):
+        for kw in ({}, {"underline": True}, {"bold_tops": True}):
+            got = baseline_drift(el, [el], paras, thumb(shown, **kw), px)
+            assert got == pytest.approx((shown - 65.0) * scale, abs=0.6), (shown, kw)
+    latin = element("Hello world")
+    assert baseline_drift(latin, [latin], latin["paragraphs"], thumb(61.4), px) is None
+    cjk = element("日本語")
+    assert baseline_drift(cjk, [cjk], cjk["paragraphs"], thumb(61.4), px) is None
+
 
 def test_list_items_collapse_their_spacing_and_other_paragraphs_do_not(tmp_path):
     """Between two list items COLLAPSE_LISTS drops spaceBelow; between two plain paragraphs it is
@@ -451,9 +583,11 @@ def test_powerpoint_insets_where_the_thumbnails_show_them():
     pptx_insets(slides, [(hit, -3.5), (miss, 0.2)])
     assert hit["box"]["inset_y"] == 3.6 and hit["anchor"] == [10.0, 18.2]
     assert "inset_y" not in miss["box"] and "inset_y" not in other["box"]
+    assert "inset_x" not in hit["box"], "a lone box keeps Slides' sides (ap-bio-stats)"
     a, b, c, d = box(), box(), box(), box("bottom")
     pptx_insets([{"elements": [a, b, c, d]}], [(a, -3.6), (b, -3.9), (c, -3.2)])
     assert d["box"]["inset_y"] == 3.6 and d["anchor"] == [10.0, 21.8]
+    assert all(e["box"]["inset_x"] == 3.6 for e in (a, b, c, d)), "a deck imported whole (comps-analysis)"
 
 
 def test_a_box_with_powerpoint_insets_starts_its_text_3_6_pt_higher():
@@ -462,6 +596,50 @@ def test_a_box_with_powerpoint_insets_starts_its_text_3_6_pt_higher():
     plain = adopt.text_box_latex(el, adopt.Context(), "")
     el["box"]["inset_y"] = 3.6
     assert "\\vskip6.48pt" in plain and "\\vskip2.88pt" in adopt.text_box_latex(el, adopt.Context(), "")
+    assert "\\begin{textblock*}{86.6pt}(6.7pt,0.0pt)" in plain
+    el["box"]["inset_x"] = 3.6
+    assert "\\begin{textblock*}{92.8pt}(3.6pt,0.0pt)" in adopt.text_box_latex(el, adopt.Context(), "")
+
+
+def test_the_thumbnails_measure_a_first_line_and_skip_what_crosses_it():
+    import numpy as np
+    from beamer2slides.deck_ir import ink_widths
+    px = 4.0
+    im = np.full((int(100 * px), int(200 * px), 3), 240, dtype=np.int16)
+    im[int(24 * px):int(30 * px), int(20 * px):int(80 * px)] = 20       # the first line's words
+    im[int(36 * px):int(42 * px), int(20 * px):int(150 * px)] = 20      # a longer second line
+
+    def element():
+        return {"kind": "text", "bbox": [10.0, 10.0, 190.0, 60.0], "anchor": [16.7, 30.0], "box": {"scale": 1.0},
+                "paragraphs": [{"align": "left", "bullet": None, "runs": [{"text": "Some words", "size": 8.0}]},
+                               {"align": "left", "bullet": None, "runs": [{"text": "More", "size": 8.0}]}]}
+    el = element()
+    ink_widths([el], im, px)
+    assert el["ink_width"] == pytest.approx(60.0, abs=0.3)
+    el = element()
+    ink_widths([el, {"kind": "image", "bbox": [100.0, 20.0, 120.0, 40.0]}], im, px)
+    assert "ink_width" not in el
+
+
+def test_a_stand_in_is_condensed_to_the_widths_the_thumbnails_show(tmp_path):
+    """comps-analysis's Bodoni is set in Libre Bodoni, 6% wider than Slides draws it: its titles
+    wrapped a word. The deck's own font is never touched (Pacifico's kerning read as 3% narrow)."""
+    from .test_adopt_media import tiny_font
+    path = tmp_path / "TinySans-Regular.ttf"
+    path.write_bytes(tiny_font("Tiny Sans"))
+    files = {"UprightFont": path}
+    # five "A"s at 10 pt: 3000 units of advance less the last one's 100 of right bearing = 29 pt of ink
+
+    def sample(width, text="AAAAA"):
+        return {"ink_width": width, "paragraphs": [{"runs": [{"text": text, "size": 10.0, "font": "Deck Serif"}]}]}
+    target = {"slides": [{"elements": [sample(26.1), sample(26.2), sample(15.0)]}]}
+    assert adopt.font_widths("Deck Serif", files, target) == pytest.approx(0.9, abs=0.005)
+    assert adopt.stretch("Deck Serif", "TinySans", files, target) == ",FakeStretch=0.902"
+    assert adopt.stretch("Tiny Sans", "TinySans", files, target) == "", "the deck's own font"
+    near = {"slides": [{"elements": [sample(28.8), sample(29.1)]}]}
+    assert adopt.font_widths("Deck Serif", files, near) is None, "within 2%"
+    lone = {"slides": [{"elements": [sample(26.1)]}]}
+    assert adopt.font_widths("Deck Serif", files, lone) is None, "one measure is not enough"
 
 
 def test_a_paragraph_of_two_sizes_is_spaced_line_by_line():

@@ -544,7 +544,20 @@ missing one takes a metric-compatible fetched stand-in (`adopt.SUBSTITUTES`: Ari
 Carlito, Archivo Black, Libre Bodoni...); CJK falls back to the Noto Sans JP/KR/SC/TC Slides draws
 with (`scripts.RENDERER_CJK`); a fixed left-aligned box whose thumbnail ink starts at its edge (and
 whose first ink row is above the inset line) has no insets (`deck_ir.thumbnail_insets`, wherever thumbnails are read:
-gdg24 0.896 -> 0.900). Left: comps-analysis (0.336; its text sits ~4 pt high - insets the API does
+gdg24 0.896 -> 0.900). Then (`g24-base` -> `g24-final`, boxes 0.924 -> 0.938, page 0.920 -> 0.934,
+pixels 0.976 -> 0.978, no deck down): "Google Sans Text" is Google Sans' variable font at opsz 17,
+not the opsz 18 display cut that stood in 3% narrower (`fontfetch.OPTICAL`, renamed instances);
+`thumbnail_insets` leaves out only the rows another element crosses instead of the whole box
+(gdg24's overlapping heading/caption boxes, code under a highlight bar) and takes ink on the box's
+first pixel column unless it goes on outside; and a run's `weightedFontFamily.weight` other than
+400/700 (`run["weight"]`) is set in an instance `fontfetch.weight_file` cuts from the fetched
+variable font, declared as `FontFace={w600}{n}{...}` and selected by `\fontseries{w600}`
+(`adopt.weight_faces`, `series`). gdg24 0.906 -> 0.985, creandum-board 0.867 -> 0.923,
+sc-dark-minimal 0.900 -> 0.955, journey-maps 0.864 -> 0.909, intro-lecture 0.937 -> 0.948,
+devfest2020 0.897 -> 0.903. Left in gdg24: code overflowing a middle-aligned box (slides 78-79), Google
+Sans Mono vs Code glyph offsets (77), centred boxes whose insets no ink edge shows (73), and captions
+whose first spaceAbove the deck does not apply when their text overflows (52-56; the rule is unsettled).
+Left: comps-analysis (0.336; its text sits ~4 pt high - insets the API does
 not report - and its Bodoni is narrower than any fetchable one), devfest2020's numbered lists (Slides
 places big numbers differently), jruby-ja (gradient backdrop; Japanese still sets wider), hebrew-lesson.
 Known gaps, by what they cost: text insets the API does not report where no autofit height gives
@@ -580,6 +593,40 @@ the same code without it, rerun the same day (`ff-base` -> `ff-d`, 912 slides): 
 page 0.880 -> 0.886, pixels 0.970 -> 0.971, no deck down (sc-dark-modern 0.739 -> 0.810, devfest2020
 0.827 -> 0.857, sc-dark-minimal 0.864 -> 0.884, sc-memphis 0.831 -> 0.846). `adopt_shapes.pt` wrote
 every length between -1 and 0 as positive until then (`"-0.67".replace("-0", "0")`).
+More from the thumbnails (`ffmain` -> `px-f`, 912 slides: boxes 0.923 -> 0.928, page 0.919 -> 0.924, no
+deck down): a box measured 3.6 pt high has PowerPoint's top/bottom insets (`deck_ir.top_drift`,
+`pptx_insets`, `KNOWN_CAPS` only: other faces' cap heights move the first ink as much), and a deck most
+of whose measured boxes have them is a .pptx import whose boxes all do, sides too (`box.inset_x` 3.6:
+comps-analysis 0.43 -> 0.66; ap-bio-stats' two lone ones keep Slides' sides); a paragraph of several
+sizes is spaced line by line (per-word struts, the next paragraph from the depth TeX recorded); a
+full-slide template picture under a box no longer hides its insets (`deck_ir.crossed`: devfest2020
+0.857 -> 0.897); and a stand-in font is condensed to the widths the thumbnails show
+(`deck_ir.ink_widths` measures each box's first line, `adopt.font_widths` holds it against the
+stand-in's advances less the end bearings, median of >= 2 within 4%, applied as fontspec
+`FakeStretch` when off by > 2%): comps-analysis's Libre Bodoni at 0.94, 0.66 -> 0.675. A deck's own
+font is never stretched: Arial measures 0.987-1.002, and Pacifico's 0.967 was its kerning.
+Picture fills (`g24-final` -> `tp-e`, 912 slides: boxes 0.938 -> 0.949, no deck down): a `{}` fill that
+is neither one colour nor a ramp - a photo cut to a freeform, a texture - carries no URL in the API and
+was dropped with its shape; `deck_fills.thumbnail_picture` now writes the thumbnail's pixels in its box
+as a picture, with the letters of texts above painted out (a pixel nearer the run's colour than the
+box's ground, dilated, filled in from around; a looser colour test flattened sc-memphis' whole pink
+band under its yellow words) and the page colour transparent when nothing else lies under it. A second
+face now also gets its switch when its letters cover the page (`adopt.AREA_SIZE`: sc-memphis' 166 pt
+section numbers were set in the body face). sc-memphis 0.847 -> 0.994, sc-dark-modern 0.827 -> 0.984,
+sc-functions 0.960 -> 0.985. What that costs: the picture is at thumbnail resolution (1600 px across
+the slide) and bakes in whatever lies under the shape.
+Hebrew and Japanese (`hj-head3` -> `hj-final2`, same day, 912 slides: boxes 0.930 -> 0.935, page
+0.926 -> 0.931, no deck down): `top_drift` reads a first line with no capitals by its baseline
+(`deck_ir.baseline_drift`: Hebrew/Arabic only, the lowest row inked a quarter as densely as the
+line's densest, underlines cleared), so hebrew-lesson's boxes join `pptx_insets` (its text stood
+3.6 pt low); table cells keep `direction: rtl`; a cell's lines are Slides' pitch apart
+(`adopt.cell_lead`: `\baselineskip` only - a full-pitch strut grew comps-analysis's rows). A run that
+only names its font reads back `bold: false`, weight 400, under a bold parent, and Slides draws some
+of those bold and some not with identical API data (jruby-ja's titles bold, drawings-basics' slides
+9 and 11 regular): `weight_unsure`, settled by the thumbnail's stroke width
+(`deck_ir.thumbnail_weights`, `stroke_em` > `BOLD_STROKE_EM` 0.10 em). hebrew-lesson 0.734 -> 0.879,
+jruby-ja 0.756 -> 0.796, sc-dark-modern 0.827 -> 0.831. jruby-ja's rest: mixed kana/Latin lines set
+1-2% wider, Tahoma Bold ~2.5% wider than Slides'.
 
 Opt-in suite (real Google Slides, ~95 s): `python -m pytest -m slides` (the default run deselects
 the `slides` marker, pyproject.toml). It converts the stress decks (19–22, 25, 13, demo) 3 at a

@@ -555,6 +555,11 @@ def shape_block(el: dict, ctx, ind: str) -> str:
     w, h = max(fr["size"][0], 0.01), max(fr["size"][1], 0.01)
     if kind in ("CUSTOM", "?", "FREEFORM"):
         paths = preset("ELLIPSE" if CUSTOM_AS == "ellipse" else "RECTANGLE", w, h)
+    elif kind == "PIE" and el.get("pie"):
+        # the angles the thumbnail shows (`deck_fills.pie_angles`), not the preset's default
+        start, sweep = el["pie"]
+        paths = [(ellipse(w / 2, h / 2, w / 2, h / 2), "fs")] if sweep >= 359.5 else \
+            [(f"{P(w / 2, h / 2)} -- {arc(w / 2, h / 2, w / 2, h / 2, start, sweep)} -- cycle", "fs")]
     else:
         paths = preset(kind, w, h) or preset("RECTANGLE", w, h)
     ctx.packages.add("\\usepackage{tikz}")
