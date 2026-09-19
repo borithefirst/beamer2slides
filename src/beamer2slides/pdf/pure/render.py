@@ -10,9 +10,12 @@ out equal to PDFium's, not merely close. Each function names the PDFium code it 
 Drawn: paths (fill, stroke, dashes, constant alpha, fill-and-stroke with a translucent stroke
 through DrawFillStrokePath's knockout sub-bitmap), clip paths, forms, and transparency
 (ProcessTransparency: soft masks, transparency groups, group alpha, blend modes;
-`render_transparency.py`), axial and radial shadings and shading patterns (`render_shading.py`).
-Not yet: text, images, tiling patterns, transfer functions; a page holding any
-of them raises PdfError (`unported`) rather than coming back drawn differently."""
+`render_transparency.py`), shadings of every type and shading patterns (`render_shading.py`,
+`render_mesh.py`), transfer functions on colours and soft masks (`transfer.py`), text
+(`render_text.py`), images at any angle with their own masks (`render_image.py`, decoded by
+`decode_image.py`).
+Not yet: tiling patterns, transfer functions on images; a page holding any of them raises
+PdfError (`unported`) rather than coming back drawn differently."""
 
 from __future__ import annotations
 
@@ -168,7 +171,8 @@ class Device:
 
     # ---- CFX_RenderDevice::DrawPath
     def draw_path(self, points, matrix, graph, fill_argb: int, stroke_argb: int, fill_type: int,
-                  stroke: bool, text_mode: bool = False) -> None:
+                  stroke: bool, text_mode: bool = False, full_cover: bool = False,
+                  rect_aa: bool = False) -> None:
         fill = fill_type != FILL_NONE
         fill_alpha = fill_argb >> 24 if fill else 0
         stroke_alpha = stroke_argb >> 24 if graph is not None else 0
@@ -180,7 +184,7 @@ class Device:
             line = [(p1[0], p1[1], PT_MOVE, False), (p2[0], p2[1], PT_LINE, False)]
             self.driver_draw_path(line, None, DEFAULT_GRAPH, 0, fill_argb, fill_type, False)
             return
-        if stroke_alpha == 0:
+        if stroke_alpha == 0 and not rect_aa:
             rf = R.path_get_rect(points, matrix)
             if rf is not None:
                 self.fill_rect(_adjusted_rect(rf), fill_argb)
@@ -203,7 +207,7 @@ class Device:
         if fill and fill_alpha and stroke_alpha < 0xFF and stroke:
             self.draw_fill_stroke(points, matrix, graph, fill_argb, stroke_argb, fill_type)
             return
-        self.driver_draw_path(points, matrix, graph, fill_argb, stroke_argb, fill_type, False)
+        self.driver_draw_path(points, matrix, graph, fill_argb, stroke_argb, fill_type, False, full_cover)
 
     def draw_fill_stroke(self, points, matrix, graph, fill_argb: int, stroke_argb: int,
                          fill_type: int) -> None:
@@ -274,11 +278,11 @@ class Device:
 
     # ---- CFX_AggDeviceDriver::DrawPath
     def driver_draw_path(self, points, matrix, graph, fill_argb: int, stroke_argb: int,
-                         fill_type: int, zero_area: bool) -> None:
+                         fill_type: int, zero_area: bool, full_cover: bool = False) -> None:
         if fill_type != FILL_NONE and fill_argb:
             rz = R.Rasterizer(self.w, self.h)
             rz.add_path(R.build_path(points, matrix))
-            self._render(rz.coverage(fill_type != FILL_WINDING), fill_argb)
+            self._render(rz.coverage(fill_type != FILL_WINDING), fill_argb, full_cover=full_cover)
         if graph is None or not stroke_argb >> 24:
             return
         width, cap, join, miter, dash, phase = graph
@@ -298,9 +302,10 @@ class Device:
         rz.add_path(verts)
         self._render(rz.coverage(False), stroke_argb, knockout=self.backdrop is not None)
 
-    def _render(self, cov, color: int, knockout: bool = False) -> None:
+    def _render(self, cov, color: int, knockout: bool = False, full_cover: bool = False) -> None:
         """RenderRasterizer: CFX_AggRenderer's CompositeSpanRGB / CompositeSpanARGB, or its
-        CompositeSpan over a backdrop for a knockout group."""
+        CompositeSpan over a backdrop for a knockout group. `full_cover` (mesh patches): every
+        covered pixel takes the colour's whole alpha."""
         if cov is None:
             return
         x0, y0, a = cov
@@ -323,7 +328,10 @@ class Device:
             self._knockout(dest, self.backdrop[dt:dt + h, dl:dl + w], cover,
                            alpha if m is None else alpha * m // 255, color)
             return
-        src = alpha * cover * m // 255 // 255 if m is not None else alpha * cover // 255
+        if full_cover:
+            src = np.where(cover > 0, alpha * m // 255 if m is not None else alpha, 0)
+        else:
+            src = alpha * cover * m // 255 // 255 if m is not None else alpha * cover // 255
         self._blend(dest, src, color, span=True)
 
     def _knockout(self, dest, backdrop, cover, src_alpha, color: int) -> None:
@@ -643,11 +651,15 @@ def zero_area_path(points, matrix, adjust: bool):
 # ---------------------------------------------------------------------- render status
 
 
-def _argb(ref, alpha: float) -> int:
-    """GetFillArgb / GetStrokeArgb: alpha * 255 truncated, with the colour reference."""
+def _argb(ref, alpha: float, transfer=None) -> int:
+    """GetFillArgb / GetStrokeArgb: alpha * 255 truncated, with the colour reference run through
+    the transfer function (transfer.Transfer) if there is one."""
     if ref is None:
         ref = 0
-    return (int(F(F(alpha) * 255.0)) << 24) | (ref & 0xFFFFFF)
+    ref &= 0xFFFFFF
+    if transfer is not None:
+        ref = transfer.translate(ref)
+    return (int(F(F(alpha) * 255.0)) << 24) | ref
 
 
 def _available(m) -> bool:
@@ -671,9 +683,37 @@ class Status:
         draws the page up to the object being blended)."""
         self.dev = device
         self.last_clip: tuple = ()
+        self.last_texts: tuple = ()
         self.transparency, self.in_group = transparency, in_group
         self.initial_alpha, self.ctx = initial_alpha, ctx
         self.stop, self.stopped = stop, False
+        # Type 3 glyph drawing (render_type3): the char being drawn, the text's fill colour,
+        # the fonts being drawn (ProcessType3Text's recursion guard), rect AA (options), and
+        # m_InitialStates' colours, which an object whose colour was never set falls back to.
+        self.type3_char, self.t3_fill, self.rect_aa = None, 0, False
+        self.type3_fonts: tuple = ()
+        self.initial_fill = self.initial_stroke = 0
+
+    def fill_argb(self, obj) -> int:
+        """GetFillArgb (with a Type 3 char: its fill unless the glyph is coloured)."""
+        if self.type3_char is not None and (not self.type3_char.colored or obj.fill is None):
+            return self.t3_fill
+        return _argb(self.initial_fill if obj.fill is None else obj.fill, obj.fill_alpha,
+                     self.transfer(obj))
+
+    def stroke_argb(self, obj) -> int:
+        """GetStrokeArgb."""
+        if self.type3_char is not None and (not self.type3_char.colored or obj.stroke is None):
+            return self.t3_fill
+        return _argb(self.initial_stroke if obj.stroke is None else obj.stroke,
+                     obj.stroke_alpha, self.transfer(obj))
+
+    def transfer(self, obj):
+        """The object's transfer function (transfer.Transfer) or None."""
+        if getattr(obj, "transfer", None) is None or self.ctx is None:
+            return None
+        from . import transfer
+        return transfer.of(self.ctx.doc, obj.transfer)
 
     def render_list(self, objs, matrix) -> None:
         """RenderObjectList."""
@@ -693,30 +733,45 @@ class Status:
                 return
 
     def render_single(self, obj, matrix) -> None:
-        self.process_clip(obj.clip_paths, matrix)
+        self.process_clip(obj.clip_paths, matrix, obj.clip_texts)
         if obj.smask is not None or obj.blend != "Normal" or obj.type == OBJ_FORM:
             from .render_transparency import process_transparency
             if process_transparency(self, obj, matrix):
                 return
         self.process_no_clip(obj, matrix)
 
-    def process_clip(self, clip_paths: tuple, matrix) -> None:
-        """ProcessClipPath (text clips need a soft-clip device: AGG has none, they are skipped)."""
+    def process_clip(self, clip_paths: tuple, matrix, clip_texts: tuple = ()) -> None:
+        """ProcessClipPath. The AGG device has soft clips (RenderCapSoftClip), so a clip's texts
+        count: each group's glyph outlines, in device space, are one winding clip."""
         dev = self.dev
-        if not clip_paths:
-            if self.last_clip:
+        if not clip_paths and not clip_texts:
+            if self.last_clip or self.last_texts:
                 dev.restore(True)
-                self.last_clip = ()
+                self.last_clip, self.last_texts = (), ()
             return
-        if clip_paths is self.last_clip:
+        if clip_paths is self.last_clip and clip_texts is self.last_texts:
             return
-        self.last_clip = clip_paths
+        self.last_clip, self.last_texts = clip_paths, clip_texts
         dev.restore(True)
         for points, fill_type in clip_paths:
             if not points:
                 dev.set_clip_fill(R.rect_path(-1.0, -1.0, 0.0, 0.0), None, False)
             else:
                 dev.set_clip_fill(points, matrix, fill_type != FILL_WINDING)
+        if not clip_texts:
+            return
+        from .render_text import clip_text_path
+        path = None
+        for text in clip_texts:
+            if text is not None:
+                if path is None:
+                    path = []
+                clip_text_path(text, matrix, path)
+                continue
+            if path is None:
+                continue
+            dev.set_clip_fill(path, None, False)
+            path = None
 
     def process_no_clip(self, obj, matrix) -> None:
         if obj.type == OBJ_PATH:
@@ -729,25 +784,33 @@ class Status:
         elif obj.type == OBJ_TEXT:
             from .render_text import process_text
             process_text(self, obj, matrix)
+        elif obj.type == OBJ_IMAGE:
+            from . import render_image
+            render_image.draw(self, obj, matrix)
 
     def process_path(self, obj, matrix) -> None:
         from . import render_shading
         fill_type, stroke = render_shading.path_pattern(self, obj, matrix)
         if fill_type == FILL_NONE and not stroke:
             return
-        fill_argb = _argb(obj.fill, obj.fill_alpha) if fill_type != FILL_NONE else 0
-        stroke_argb = _argb(obj.stroke, obj.stroke_alpha) if stroke else 0
+        fill_argb = self.fill_argb(obj) if fill_type != FILL_NONE else 0
+        stroke_argb = self.stroke_argb(obj) if stroke else 0
         pm = R.concat(obj.matrix, matrix)
         if not _available(pm):
             return
         graph = (F(obj.line_width), obj.line_cap, obj.line_join, F(obj.miter),
                  tuple(F(v) for v in obj.dash), F(obj.dash_phase))
-        self.dev.draw_path(obj.points, pm, graph, fill_argb, stroke_argb, fill_type, stroke)
+        self.dev.draw_path(obj.points, pm, graph, fill_argb, stroke_argb, fill_type, stroke,
+                           text_mode=self.type3_char is not None,
+                           rect_aa=self.rect_aa and fill_type != FILL_NONE)
 
     def process_form(self, obj, matrix) -> None:
         m = R.concat(obj.matrix, matrix)
         status = Status(self.dev, self.transparency, self.in_group, obj.fill_alpha, self.ctx,
                         self.stop)
+        status.rect_aa, status.type3_fonts = self.rect_aa, self.type3_fonts
+        status.initial_fill = self.initial_fill if obj.fill is None else obj.fill
+        status.initial_stroke = self.initial_stroke if obj.stroke is None else obj.stroke
         self.dev.save()
         status.render_list(obj.children, m)
         self.stopped = status.stopped
@@ -793,13 +856,23 @@ def unported(objects, ctx=None) -> str | None:
             p = p.parent
         if p is not None:
             continue
+        if o.clip_texts:
+            from .render_text import clip_unsupported
+            why = clip_unsupported(o.clip_texts)
+            if why is not None:
+                return why
         if o.type == OBJ_TEXT:
             from .render_text import unsupported as text_unsupported
             why = text_unsupported(o)
             if why is not None:
                 return why
+        elif o.type == OBJ_IMAGE:
+            from .render_image import refusal as image_refusal
+            why = image_refusal(o, ctx)
+            if why is not None:
+                return why
         elif o.type not in (OBJ_PATH, OBJ_FORM, OBJ_SHADING):
-            return {OBJ_IMAGE: "images"}.get(o.type, "objects")
+            return "objects"
         if o.smask is not None or o.blend != "Normal" or o.transfer is not None:
             from .render_transparency import unsupported
             why = unsupported(o, ctx, unported)

@@ -89,6 +89,31 @@ def test_without_thumbnails_nothing_changes():
     assert all(c.get("fill_source") is None for c in els[1]["table_cells"])
 
 
+def test_a_picture_fill_becomes_the_thumbnails_picture_of_it(tmp_path):
+    """sc-memphis: a photo cut to a freeform comes back as `{}` and is no colour at all. With a folder
+    to write to it becomes the thumbnail's pixels in its box, letters of a text above painted out
+    (the text draws them) and the page round the photo transparent; without one it is dropped."""
+    from PIL import Image
+    rng = np.random.default_rng(1)
+    thumb = page()
+    thumb[100:200, 100:300] = rng.integers(0, 256, (100, 200, 3))          # the photo
+    thumb[140:150, 150:250] = [255, 225, 126]                               # yellow words on it
+    photo = {"kind": "shape", "role": "panel", "shape_type": "CUSTOM", "bbox": [90, 90, 310, 210],
+             "fill": None, "outline": None, "fill_unread": True, "id": "ph", "object": "ph", "group": None}
+    words = {"kind": "text", "role": "body", "bbox": [140, 130, 260, 160], "id": "t", "object": "t",
+             "paragraphs": [{"runs": [{"text": "Gallery", "color": "#ffe17e"}]}]}
+    assert deck_fills.settle([dict(photo), dict(words)], thumb, 1.0, "#ffffff") == [words]
+    got = deck_fills.settle([dict(photo), dict(words)], thumb, 1.0, "#ffffff", False, tmp_path)
+    assert [e["kind"] for e in got] == ["image", "text"]
+    pic = got[0]
+    assert pic["id"] == "ph" and pic["fill_source"] == "thumbnail" and pic["bbox"] == [90, 90, 310, 210]
+    im = np.asarray(Image.open(pic["file"]))
+    assert im.shape == (120, 220, 4)
+    assert im[5, 5, 3] == 0 and im[50, 50, 3] == 255                        # page out, photo in
+    yellow = (np.abs(im[50:60, 60:160, :3].astype(int) - [255, 225, 126]).max(axis=2) <= 14).mean()
+    assert yellow < 0.05                                                    # the words are painted out
+
+
 def test_a_placeholder_is_never_a_candidate():
     pe = shape("a", "RECTANGLE", 100, 100, 200, 100, UNREAD)
     pe["shape"]["placeholder"] = {"type": "BODY"}
@@ -191,3 +216,39 @@ def test_read_region_tells_flat_gradient_and_neither():
     assert deck_fills.read_region(a, region, allow, False) is None
     a[:, ::7] = 255                          # stripes: neither
     assert deck_fills.read_region(a, region, allow, True) is None
+
+
+def test_a_pie_takes_the_angles_its_thumbnail_shows():
+    """intro-lecture's grading chart: five PIE shapes in one box, whose dragged angles the API does
+    not give - each was drawn as the preset's 270 degree slice. The colours around the centre say
+    them: a slice under another shows only its own part, and the smallest arc holding it is drawn."""
+    a = page()
+    yy, xx = np.mgrid[0:405, 0:720]
+    ang = np.degrees(np.arctan2(yy - 200, xx - 300)) % 360        # clockwise from +x, y down
+    disc = (xx - 300) ** 2 + (yy - 200) ** 2 <= 100 ** 2
+    a[disc & (ang < 90)] = [208, 224, 227]                          # top: 0-90
+    a[disc & (ang >= 90)] = [69, 129, 142]                          # under it: 90-360 shows
+    box = [200, 100, 400, 300]
+    under = {"kind": "shape", "shape_type": "PIE", "bbox": box, "fill": "#45818e", "id": "u", "object": "u"}
+    top = {"kind": "shape", "shape_type": "PIE", "bbox": box, "fill": "#d0e0e3", "id": "t", "object": "t"}
+    out = deck_fills.settle([under, top], a, 1.0, "#ffffff")
+    start, sweep = next(e for e in out if e["id"] == "t")["pie"]
+    assert min(start, 360 - start) < 1 and abs(sweep - 90) < 1.5
+    start, sweep = next(e for e in out if e["id"] == "u")["pie"]
+    assert abs(start - 90) < 1 and abs(sweep - 270) < 1.5
+    block = adopt_shapes.shape_block(next(e for e in out if e["id"] == "t"), Context(), "")
+    assert "end angle=-" in block and "270" not in block
+
+
+def test_a_drive_videos_poster_frame_is_read_off_the_thumbnail(tmp_path):
+    """No API gives a Drive video's poster frame (a play panel stood in); the slide's thumbnail shows it."""
+    a = np.random.default_rng(1).integers(0, 256, (405, 720, 3)).astype(np.int16)
+    video = {"kind": "image", "role": "figure", "bbox": [100, 100, 300, 220], "id": "v", "object": "v",
+             "video": {"source": "DRIVE", "id": "x", "url": None}}
+    tube = {**video, "id": "y", "file": "hq.jpg", "video": {"source": "YOUTUBE", "id": "y"}}
+    out = deck_fills.settle([video, tube], a, 1.0, "#ffffff", pictures=tmp_path)
+    v = next(e for e in out if e["id"] == "v")
+    assert v["poster"] == "thumbnail" and v["video"]["source"] == "DRIVE"
+    from PIL import Image
+    assert (np.asarray(Image.open(v["file"]).convert("RGB")) == a[100:220, 100:300]).all()
+    assert "poster" not in next(e for e in out if e["id"] == "y"), "YouTube's own thumbnail stays"

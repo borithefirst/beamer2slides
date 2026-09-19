@@ -169,6 +169,99 @@ def test_insets_follow_where_the_table_came_from_and_its_rows():
     assert cell_pad(table(heights=(9, 30, 30))) == pytest.approx((7.2, 7.2))
 
 
+def test_a_row_a_little_short_of_its_text_at_the_cap_keeps_the_cap():
+    """creandum-board: 22.0 pt rows of 7 pt text leave 6.8 pt a side, and Slides draws them 22.8 tall
+    with its own 7.2; less than a point short is a row Slides grew, not a smaller inset."""
+    assert cell_pad(table("i32", heights=(20, 20, 20)))[1] == pytest.approx(3.6)   # 2.8 would be the rows' room
+    assert cell_pad(table(heights=(28, 28, 28)))[1] == pytest.approx(7.2)          # 6.8
+    assert cell_pad(table(heights=(24, 24, 24)))[1] == pytest.approx(4.8)          # well short: the rows say it
+
+
+# ---------------------------------------------------------------- what the thumbnail says of a table
+
+PX = 2.0          # thumbnail pixels per IR pt
+
+
+def grid_element(heights=(10, 10, 10), widths=(40, 40), color="#000000") -> dict:
+    """A bare table element at (10, 10) with a border under every row and a left-aligned cell each."""
+    borders = [{"dir": "h", "row": r, "col": c, "color": color, "alpha": 1.0, "weight": 1.0, "dash": "SOLID"}
+               for r in range(len(heights) + 1) for c in range(len(widths))]
+    cells = [{"row": r, "col": c, "rowspan": 1, "colspan": 1,
+              "paragraphs": [{"align": "left", "runs": [{"text": "Word", "size": 10.0}]}]}
+             for r in range(len(heights)) for c in range(len(widths))]
+    return {"kind": "table", "bbox": [10, 10, 10 + sum(widths), 10 + sum(heights)], "row_heights": list(heights),
+            "col_widths": list(widths), "table_borders": borders, "table_cells": cells, "cell_pad": [5.8, 3.6]}
+
+
+def blank(h=100, w=120, colour=(255, 255, 255)):
+    import numpy as np
+    img = np.zeros((int(h * PX), int(w * PX), 3), dtype=np.int16)
+    img[:] = colour
+    return img
+
+
+def rule(img, y, x0=10, x1=90, colour=(0, 0, 0)):
+    img[int(y * PX):int(y * PX) + 2, int(x0 * PX):int(x1 * PX)] = colour
+
+
+def test_rows_are_as_tall_as_the_thumbnail_draws_them_and_held_there():
+    """Stored rows of 10 pt that Slides grew to 14 (an empty cell's line, a .pptx's insets): the
+    borders on the thumbnail say so, and `\\adoptfix` keeps TeX from growing them again."""
+    from beamer2slides.deck_thumbs import thumbnail_rows
+    el = grid_element()
+    img = blank()
+    for y in (10, 24, 38, 52):
+        rule(img, y)
+    thumbnail_rows([el], img, PX)
+    assert el["rows_fixed"] == [0, 1, 2]
+    assert el["row_heights"] == pytest.approx([14, 14, 14], abs=0.6)
+
+
+def test_measuring_stops_at_a_boundary_it_cannot_see():
+    from beamer2slides.deck_thumbs import thumbnail_rows
+    el = grid_element()
+    img = blank()
+    for y in (10, 24):                    # the rule under row 1 is not drawn: rows 1 and 2 could be anything
+        rule(img, y)
+    thumbnail_rows([el], img, PX)
+    assert el["rows_fixed"] == [0]
+    assert el["row_heights"][1:] == [10, 10]
+
+
+def test_a_step_between_two_fills_is_no_border():
+    """hebrew-lesson: a brown header over pale rows, white borders nobody sees. The step down to the
+    paler fill turns towards white but never comes back: no row is measured."""
+    from beamer2slides.deck_thumbs import thumbnail_rows
+    el = grid_element(color="#ffffff")
+    img = blank(colour=(250, 240, 235))
+    img[int(10 * PX):int(24 * PX), int(10 * PX):int(90 * PX)] = (120, 70, 40)
+    thumbnail_rows([el], img, PX)
+    assert "rows_fixed" not in el and el["row_heights"] == [10, 10, 10]
+
+
+def test_the_side_inset_is_where_the_cells_words_begin():
+    """comps-analysis' .pptx cells start their words 3 pt in where the guess said 5.8."""
+    from beamer2slides.deck_thumbs import thumbnail_cell_pad, thumbnail_rows
+    el = grid_element(heights=(14, 14, 14))
+    img = blank()
+    for y in (10, 24, 38, 52):
+        rule(img, y)
+    for r in range(3):
+        for c in range(2):
+            x = 10 + 40 * c + 3 + 0.6                   # the inset plus the first glyph's bearing
+            img[int((14 + 14 * r) * PX):int((20 + 14 * r) * PX), int(x * PX):int((x + 20) * PX)] = (0, 0, 0)
+    thumbnail_rows([el], img, PX)
+    thumbnail_cell_pad([el], img, PX)
+    assert el["cell_pad"][0] == pytest.approx(3.0, abs=0.5) and el["cell_pad"][1] == 3.6
+
+
+def test_measured_rows_are_written_fixed(tmp_path):
+    ir = deck_ir(deck(table()), foreign=True)
+    next(e for e in ir["slides"][0]["elements"] if e["kind"] == "table")["rows_fixed"] = [0, 1]
+    t = table_source(adopt.bootstrap(ir, tmp_path / "tree" / "main.tex"))
+    assert "\\adoptfix{0}" in t and "\\adoptfix{1}" in t and "\\adoptfix{2}" not in t
+
+
 def test_guess_lines_tells_one_line_from_several():
     assert guess_lines("+1 months\n", 200, 7) == 1
     assert guess_lines("Develop\x0bPMF & integration\n", 200, 12) == 2
@@ -232,7 +325,7 @@ def test_no_border_is_drawn_inside_a_merged_cell(tmp_path):
 
 def test_cells_sit_where_their_vertical_alignment_says(tmp_path):
     nodes = [l for l in table_source(source(tmp_path, table())).splitlines() if "\\node[" in l]
-    anchors = [l.split("anchor=")[1].split("]")[0] for l in nodes]
+    anchors = [l.split("anchor=")[1].split("]")[0].split(",")[0] for l in nodes]
     assert anchors.count("west") == 1 and anchors.count("south west") == 1
     assert anchors.count("north west") == 4
 
@@ -247,6 +340,31 @@ def test_segments_join_runs_of_one_style():
     assert [(k[2], spans) for k, spans in segs] == [("#000000", [(0, 2)]), ("#ff0000", [(2, 3)])]
 
 
+def test_a_right_to_left_cell_is_read_and_written_right_to_left(tmp_path):
+    """hebrew-lesson's cells: set left to right, a Hebrew line ended on the wrong side of its full stop."""
+    t = table()
+    head = t["table"]["tableRows"][1]["tableCells"][1]
+    head["text"]["textElements"][0]["paragraphMarker"]["style"]["direction"] = "RIGHT_TO_LEFT"
+    head["text"]["textElements"][1]["textRun"]["content"] = "שלום עולם.\n"
+    cells = {(c["row"], c["col"]): c for c in the_table(deck(t))["table_cells"]}
+    assert cells[1, 1]["paragraphs"][0]["direction"] == "rtl"
+    assert "direction" not in cells[1, 2]["paragraphs"][0]
+    text = source(tmp_path, t)
+    assert "\\babelprovide" in text and "hebrew" in text
+    assert "\\begin{otherlanguage}{hebrew}" in table_source(text)
+
+
+def test_cell_lines_are_as_far_apart_as_slides_sets_them(tmp_path):
+    """The size switch alone spaced a cell's lines by the class's leading (hebrew-lesson: 14.0 pt where
+    the thumbnail shows 14.45); `adopt.cell_lead` sets Slides' pitch, and leaves the one-line height
+    (the strut) to the size switch, since the row height says it already."""
+    import re
+    t = table_source(source(tmp_path, table()))
+    skips = {float(v) for v in re.findall(r"\\baselineskip=([\d.]+)pt", t)}
+    assert len(skips) == 1 and skips.pop() == pytest.approx(sum(adopt.line_box(12 / SCALE, 1.0)), abs=0.1)
+    assert "\\strutbox" not in t
+
+
 def test_a_cell_is_set_again_without_insets_when_its_rows_are_too_short(tmp_path):
     """creandum-board keeps "+1 months" on one line in a 40 pt column; the macro gets the full
     column width and the shift that keeps a centred paragraph centred."""
@@ -256,3 +374,98 @@ def test_a_cell_is_set_again_without_insets_when_its_rows_are_too_short(tmp_path
     assert f"{{{-7.2 / SCALE:.2f}pt}}" in header
     right = [l for l in t.splitlines() if "\\adoptcell{" in l and f"{{{-2 * 7.2 / SCALE:.2f}pt}}" in l]
     assert len(right) == 3, "the numbers are right-aligned"
+
+
+def test_a_one_word_cell_too_wide_for_its_insets_stays_on_its_line(tmp_path):
+    """creandum-board's P&L: "(1,234)" in a narrow column is one word Slides never breaks - wider than
+    the room inside the insets, it takes the cell's whole width, aligned as it says."""
+    t = table_source(source(tmp_path, table()))
+    ten = next(l for l in t.splitlines() if "\\hbox to\\linewidth" in l and "{10}" in l)
+    assert "\\ifdim\\wd0>\\linewidth" in ten and "\\hss\\box0\\fi" in ten, "right-aligned when it fits"
+    assert f"\\hbox to\\dimexpr\\linewidth+{2 * 7.2 / SCALE:.2f}pt{{\\hss\\box0}}" in ten
+
+
+def test_a_middle_aligned_cell_drops_by_its_own_line_box_and_no_other_does(tmp_path):
+    """Slides centres a cell's line box, whose ascent is 0.968 of 1.2 em, where TeX's strut is 0.7 of
+    1.0: creandum-board's middle cells stood 0.125 em high. Top and bottom ones are placed right."""
+    text = source(tmp_path, table())
+    assert "\\newcommand\\adoptdrop" in text
+    nodes = [l for l in table_source(text).splitlines() if "\\node[" in l]
+    dropped = [l for l in nodes if "yshift=-\\adoptdrop" in l]
+    assert len(dropped) == 1 and "anchor=west" in dropped[0]
+
+
+# ---------------------------------------------------------------- where the cells' lines stand
+
+def cell_thumb(el, inset, valign, z=10.0, fixed=3):
+    """A thumbnail of `grid_element` whose cells' lines stand where a Slides line box `inset` under
+    the row's top (over its bottom) puts them: letters 0.7 em tall on the baseline."""
+    from beamer2slides.emit import ASCENT_EM, LINE_EM
+    img = blank()
+    tops = [10.0]
+    for h in el["row_heights"]:
+        tops.append(tops[-1] + h)
+    for y in tops:
+        rule(img, y)
+    for c in el["table_cells"]:
+        c["valign"] = valign
+        base = tops[c["row"]] + inset + ASCENT_EM * z if valign == "top" \
+            else tops[c["row"] + 1] - inset - (LINE_EM - ASCENT_EM) * z
+        x = 10 + 40 * c["col"] + 4
+        for k in range(5):
+            img[int(round((base - 0.7 * z) * PX)):int(round(base * PX)), int((x + 5 * k) * PX):int((x + 5 * k + 2) * PX)] = 0
+    el["rows_fixed"] = list(range(fixed))
+    return img
+
+
+@pytest.mark.parametrize("valign", ["top", "bottom"])
+def test_the_thumbnail_says_how_far_in_a_cells_line_box_stands(valign):
+    """hebrew-lesson's cells show their baselines 1.45 pt + 0.968 em under the row's top where the
+    strut and the guessed inset put them 5 pt off; comps-analysis' bottom-aligned ones 1.0 pt + the
+    line box's descent over the row's bottom."""
+    from beamer2slides.deck_thumbs import thumbnail_cell_text
+    el = grid_element(heights=(24, 24, 24))
+    img = cell_thumb(el, 1.5, valign)
+    thumbnail_cell_text([el], img, PX)
+    assert el["cell_text_y"] == pytest.approx(1.5, abs=0.6)
+
+
+def test_cells_in_rows_the_thumbnail_could_not_place_say_nothing():
+    """With no row measured only the first row's top is known: two top-aligned cells are too few to
+    go by. With one measured, its bottom is known too, and its two bottom-aligned cells still too few."""
+    from beamer2slides.deck_thumbs import thumbnail_cell_text
+    el = grid_element(heights=(24, 24, 24))
+    img = cell_thumb(el, 1.5, "top", fixed=0)
+    thumbnail_cell_text([el], img, PX)
+    assert "cell_text_y" not in el
+    el = grid_element(heights=(24, 24, 24))
+    img = cell_thumb(el, 1.5, "bottom", fixed=1)
+    thumbnail_cell_text([el], img, PX)
+    assert "cell_text_y" not in el
+
+
+def test_a_cells_line_stands_the_measured_inset_plus_its_line_box():
+    from beamer2slides.emit import ASCENT_EM, LINE_EM
+    one = {"paragraphs": [{"runs": [{"text": "a", "size": 10.0}]}, {"runs": [{"text": "b", "size": 20.0}]}]}
+    assert adopt.cell_line_place(dict(one, valign="top"), 1.0) == pytest.approx(1.0 + ASCENT_EM * 10)
+    assert adopt.cell_line_place(dict(one, valign="bottom"), 1.0) == pytest.approx(1.0 + (LINE_EM - ASCENT_EM) * 20)
+    assert adopt.cell_line_place(dict(one, valign="middle"), 1.0) is None
+    assert adopt.cell_line_place({"valign": "top", "paragraphs": []}, 1.0) is None
+
+
+def test_a_measured_inset_places_a_cell_by_its_first_or_last_baseline(tmp_path):
+    """The box TeX builds for a cell is placed by its first baseline (`\\adoptht`, from its top to
+    there - its height reaches its last) or its last (`\\adoptdp`), not by the strut's edge."""
+    ir = deck_ir(deck(table()), foreign=True)
+    el = next(e for e in ir["slides"][0]["elements"] if e["kind"] == "table")
+    el["cell_text_y"] = 1.0
+    text = adopt.bootstrap(ir, tmp_path / "tree" / "main.tex")
+    assert "\\newcommand\\adoptht" in text and "\\newcommand\\adopt@first" in text
+    nodes = [l for l in table_source(text).splitlines() if "\\node[" in l]
+    tops = [l for l in nodes if "+\\adoptht{" in l]
+    bottoms = [l for l in nodes if "-\\adoptdp{" in l]
+    assert len(tops) == 4 and all("anchor=north west" in l for l in tops)
+    assert len(bottoms) == 1 and "anchor=south west" in bottoms[0]
+    z = 12 / SCALE
+    assert f"-{1.0 + adopt.line_box(z, 1.0)[0]:.2f}pt+\\adoptht" in tops[0]
+    assert sum("adoptdrop" in l for l in nodes) == 1, "a middle cell is placed as before"

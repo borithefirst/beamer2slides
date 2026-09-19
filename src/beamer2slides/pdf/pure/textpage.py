@@ -12,15 +12,15 @@ backwards with mirrored characters, as CloseTempLine does. Bidi classes, mirrors
 are PDFium's own tables (`unicode_data`), not Python's `unicodedata`: an old snapshot with Foxit's
 choices, thousands of code points apart from today's Unicode.
 
-Not ported: vertical writing (CID fonts with a -V CMap are laid out horizontally) and /ActualText
-marked content."""
+Vertical writing follows GetItemInfo's origins (down the line, less the W2/DW2 vertical origin)
+and GetLooseBounds' vertical square. Not ported: /ActualText marked content."""
 
 from __future__ import annotations
 
 import math
 
 from . import unicode_data
-from .content import OBJ_FORM, OBJ_TEXT, PObj, f32m, f32p
+from .content import OBJ_FORM, OBJ_TEXT, PObj, f32m, f32p, item_origin
 from .syntax import float32 as f32
 from .fonts import INVALID_CODE
 
@@ -305,6 +305,19 @@ def loose_bounds(ci: CharInfo):
     size = ci.font_size
     if obj is not None and abs(size) >= 0.0001 and ci.code != INVALID_CODE:
         font = obj.font
+        if font.vertical:
+            # a font-size square beside the page-space origin, whatever the matrix: offsets in
+            # double from float products, each edge rounded to float
+            vx, vy = font.vert_origin(ci.code)
+            size = f32(size)
+            offx = f32((vx - 500) * size) / 1000.0
+            offy = f32(vy * size) / 1000.0
+            height = f32(font.vert_width(ci.code) * size) / 1000.0
+            left = f32(ci.origin[0] + offx)
+            right = f32(left + size)
+            top = f32(ci.origin[1] + offy)
+            bottom = f32(top + height)
+            return union((left, bottom, right, top), ci.box)
         ascent, descent = font.ascent, font.descent
         fb = font.font_bbox
         if fb[3] > fb[1]:
@@ -529,8 +542,8 @@ class TextPage:
         if n <= 1:
             return self.textline_dir
         m = text_matrix(obj)
-        fx, fy = apply(m, obj.items[0][1], 0.0)
-        lx, ly = apply(m, obj.items[-1][1], 0.0)
+        fx, fy = apply(m, *item_origin(obj, obj.items[0]))
+        lx, ly = apply(m, *item_origin(obj, obj.items[-1]))
         dx, dy = abs(lx - fx), abs(ly - fy)
         if dx <= 0.0001 and dy <= 0.0001:
             return DIR_UNKNOWN
@@ -572,7 +585,8 @@ class TextPage:
         n = len(prev_obj.items)
         if n == 0:
             return H_NONE
-        prev_code, prev_x = prev_obj.items[-1]
+        prev_code = prev_obj.items[-1][0]
+        prev_x = item_origin(prev_obj, prev_obj.items[-1])[0]
         code = obj.items[0][0]
         this_rect, prev_rect = obj.rect, prev_obj.rect
         current = first_unicode(obj.font, code)
@@ -604,7 +618,7 @@ class TextPage:
                     ((py > threshold * 2 or py < threshold * -3) and (abs(py) >= 1 or abs(py) > abs(px))):
                 newline = True
                 if n > 1:
-                    first_x = prev_obj.items[0][1]
+                    first_x = item_origin(prev_obj, prev_obj.items[0])[0]
                     m = text_matrix(prev_obj)
                     d = self.display
                     if prev_x > first_x and d[0] > 0.9 and d[1] < 0.1 and d[2] < 0.1 and d[3] < -0.9 \
@@ -727,7 +741,9 @@ class TextPage:
         font = obj.font
         spacing = 0.0
         size = f32(f32(obj.font_size) / 1000)
-        for i, (code, x) in enumerate(obj.items):
+        for i, item in enumerate(obj.items):
+            code = item[0]
+            x, y = item_origin(obj, item)
             if i > 0 and obj.kernings[i - 1] != 0:
                 text = self.temp_buf or self.buf
                 if text and text[-1] != 0x20:
@@ -737,7 +753,7 @@ class TextPage:
                 threshold = space_threshold(font, fsh, code)
                 if threshold and spacing >= threshold:
                     self.temp_buf.append(0x20)
-                    ox, oy = apply32(matrix, x, 0.0)
+                    ox, oy = apply32(matrix, x, y)
                     self.temp.append(CharInfo(GENERATED, INVALID_CODE, 0x20, (ox, oy), (ox, oy, ox, oy),
                                               form_matrix, obj))
             spacing = 0.0
@@ -748,13 +764,15 @@ class TextPage:
                 ctype = NOT_UNICODE
             l, b, r, t = font.char_bbox(code)
             # C floats: `rect.left * font_size + origin.x` rounds after the product and the sum
-            box = [f32(f32(l * size) + x), f32(b * size), f32(f32(r * size) + x), f32(t * size)]
+            box = [f32(f32(l * size) + x), f32(f32(b * size) + y), f32(f32(r * size) + x), f32(f32(t * size) + y)]
             if abs(box[3] - box[1]) < SIZE_EPSILON:
                 box[3] = f32(box[1] + size)
             if abs(box[2] - box[0]) < SIZE_EPSILON:
-                box[2] = f32(box[0] + f32(font.char_width(code) * size))
+                # CPDF_TextObject::GetCharWidth: the vertical advance in vertical writing
+                w = font.vert_width(code) if font.vertical else font.char_width(code)
+                box[2] = f32(box[0] + f32(w * size))
             box = transform_rect32(matrix, box)
-            ci = CharInfo(ctype, code, 0, apply32(matrix, x, 0.0), box, matrix, obj)
+            ci = CharInfo(ctype, code, 0, apply32(matrix, x, y), box, matrix, obj)
             if not units:
                 self.temp.append(ci)
                 self.temp_buf.append(0xFFFE)

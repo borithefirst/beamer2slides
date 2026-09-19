@@ -112,11 +112,14 @@ def test_extract_and_classify_on_the_pure_reader_write_pdfiums_deck():
     assert apart <= 5
 
 
-@built
 def test_the_pure_reader_refuses_a_page_it_cannot_draw_exactly():
-    """Images are not drawn yet: the page raises instead of coming back without them."""
-    doc = pdf.resolve("pure").open(DECKS[1])
-    with pytest.raises(PdfError, match="cannot render images yet"):
+    """JPEG 2000 is not decoded: the page raises instead of coming back without the image."""
+    from beamer2slides.devtools.render_torture_image import pdf_bytes
+    image = (b"<< /Type /XObject /Subtype /Image /Width 2 /Height 2 /ColorSpace /DeviceRGB /BitsPerComponent 8"
+             b" /Filter /JPXDecode /Length 4 >>\nstream\njunk\nendstream")
+    data = pdf_bytes(b"q 100 0 0 80 20 20 cm /Im0 Do Q", [image], [(b"Im0", 1)])
+    doc = pdf.resolve("pure").open(data)
+    with pytest.raises(PdfError, match="JPXDecode"):
         doc[0].render(1.0)
 
 
@@ -124,7 +127,7 @@ def test_the_pure_reader_refuses_a_page_it_cannot_draw_exactly():
 def test_whole_beamer_pages_render_as_pdfium_renders_them():
     """Text, paths, forms, soft masks and shadings together: every page of the test decks that the
     reader does not refuse is PDFium's bitmap byte for byte (all four pages of 04_theme_blocks, the
-    first whole pages, when text and shadings met)."""
+    first whole pages, when text and shadings met). Every raster-image page is drawn: none refused."""
     import numpy as np
     drawn = 0
     for path in DECKS:
@@ -134,6 +137,7 @@ def test_whole_beamer_pages_render_as_pdfium_renders_them():
                 try:
                     ours = pure[i].render(1.37)
                 except PdfError:
+                    assert path.stem != "23_raster_images", f"{path.stem} page {i} refused"
                     continue
                 assert np.array_equal(ours, ref[i].render(1.37)), f"{path.stem} page {i}"
                 drawn += 1
@@ -265,15 +269,46 @@ def test_the_pure_renderer_survives_transparency_torture_seeds(page):
     assert not apart, f"seeds apart (python tools/render_torture_transparency.py SEED 1{flags}): {apart}"
 
 
-def test_the_pure_renderer_refuses_what_it_cannot_draw_exactly_yet():
-    """Transfer functions (/TR on the ExtGState or on a soft mask) are not ported: refused, not ignored."""
+def _render_with(backend: str, data: bytes, zoom: float = 1.37):
+    doc = pdf.resolve(backend).open(data)
+    try:
+        return doc[0].render(zoom)
+    finally:
+        doc.close()
+
+
+def test_the_pure_renderer_draws_soft_mask_transfer_functions():
+    """A soft mask's /TR maps its luminosity (LoadSMask's `transfers`), sampled as PDFium samples it."""
+    import numpy as np
+
     from beamer2slides.devtools.render_torture_transparency import pdf_bytes
-    from beamer2slides.pdf.pure.backend import PureBackend
-    mask = [("S", b"/BBox [0 0 200 150] /Group << /S /Transparency /CS /DeviceGray >>", b"0.5 g 0 0 100 100 re f",
-             b"/S /Luminosity /TR << /FunctionType 2 /Domain [0 1] /C0 [1] /C1 [0] /N 1 >>")]
-    page = PureBackend().open(pdf_bytes(b"q /S0 gs 0 0 1 rg 0 0 200 150 re f Q", mask))[0]
-    with pytest.raises(PdfError, match="transfer functions"):
-        page.render(1.0)
+    mask = [("S", b"/BBox [0 0 200 150] /Group << /S /Transparency /CS /DeviceGray >>",
+             b"0.5 g 0 0 100 100 re f 0.2 g 60 40 120 90 re f",
+             b"/S /Luminosity /TR << /FunctionType 2 /Domain [0 1] /C0 [1] /C1 [0] /N 1.6 >>")]
+    data = pdf_bytes(b"q /S0 gs 0 0 1 rg 0 0 200 150 re f Q", mask)
+    a, b = (_render_with(name, data) for name in ("pdfium", "pure"))
+    assert np.array_equal(a, b)
+    assert len({tuple(p) for p in a.reshape(-1, 4)}) >= 3
+
+
+def test_the_pure_renderer_draws_transfer_functions_as_pdfium_does():
+    """ExtGState /TR and /TR2 (TR2 wins, a name clears it) run fill and stroke colours through
+    CreateTransferFunc's tables - an array's first function lands on blue - and never shadings."""
+    import numpy as np
+
+    from beamer2slides.devtools.render_torture_shading import pdf_bytes
+    inv = b"<< /FunctionType 2 /Domain [0 1] /C0 [1] /C1 [0] /N 1 >>"
+    sq = b"<< /FunctionType 2 /Domain [0 1] /C0 [0.1] /C1 [0.9] /N 2 >>"
+    gs = (b" /T0 << /TR %s >> /T1 << /TR [%s %s 3 0 R] /TR2 [%s 2 0 R %s] >> /T2 << /TR %s /TR2 /Default >>"
+          % (inv, inv, sq, sq, inv, sq))
+    content = (b"q /T0 gs 0.2 0.5 0.9 rg 10 10 80 60 re f 0.7 G 4 w 20 90 m 180 20 l S Q"
+               b" q /T1 gs 0.9 0.3 0.1 rg 100 10 90 60 re f 0.3 0.1 0.7 0.2 k 30 80 60 60 re f Q"
+               b" q /T2 gs 0.1 0.8 0.4 rg 120 80 60 60 re f Q q /T0 gs 1 0 0 1 0 60 cm /S0 sh Q")
+    shading = b"<< /ShadingType 2 /ColorSpace /DeviceRGB /Coords [0 0 200 0] /Function 3 0 R >>"
+    data = pdf_bytes([content], _SHADING_OBJECTS, (_shading_resources({b"S0": shading}), gs))
+    a, b = (_render_with(name, data) for name in ("pdfium", "pure"))
+    assert np.array_equal(a, b)
+    assert len({tuple(p) for p in a.reshape(-1, 4)}) > 10
 
 
 # ---------------------------------------------------------------------- shadings
@@ -328,6 +363,22 @@ SHADING_CASES = {
                    b" /Function 3 0 R >> >>"}),
         2.0, False, [(b"/BBox [0 0 100 80] /Matrix [0.5 0.3 -0.2 1.1 40 20]",
                       b"/Pattern cs /P1 scn 0 0 100 80 re f")]),
+    # CIE-based spaces (cie.py): Lab with a Range, an Indexed palette over CalRGB (gamma, matrix),
+    # CalGray, and a function-based shading (type 1) in Lab
+    "lab_indexed_calrgb_calgray_and_type1": (
+        b"q 0 0 200 50 re W n /S0 sh Q q 0 50 200 50 re W n /S1 sh Q q 0 100 100 50 re W n /S2 sh Q"
+        b" q 100 100 100 50 re W n /S3 sh Q", _SHADING_OBJECTS, _shading_resources({
+            b"S0": b"<< /ShadingType 2 /ColorSpace [/Lab << /WhitePoint [0.9505 1 1.089] /Range [-60 80 -90 70] >>]"
+                   b" /Coords [0 0 200 0] /Function << /FunctionType 2 /Domain [0 1] /C0 [20 -60 50] /C1 [90 70 -80]"
+                   b" /N 1 >> >>",
+            b"S1": b"<< /ShadingType 2 /ColorSpace [/Indexed [/CalRGB << /WhitePoint [0.9505 1 1.089] /Gamma [1.8 2.2 1]"
+                   b" /Matrix [0.41 0.21 0.02 0.36 0.72 0.12 0.18 0.07 0.95] >>] 3 <ff0000 20c040 3060ff f0e010>]"
+                   b" /Coords [0 0 200 0] /Function << /FunctionType 2 /Domain [0 1] /C0 [0] /C1 [3] /N 1 >> >>",
+            b"S2": b"<< /ShadingType 3 /ColorSpace [/CalGray << /WhitePoint [0.9505 1 1.089] /Gamma 2.2 >>]"
+                   b" /Coords [50 125 0 50 125 40] /Function << /FunctionType 2 /Domain [0 1] /C0 [0.05] /C1 [0.95]"
+                   b" /N 1 >> /Extend [true true] >>",
+            b"S3": b"<< /ShadingType 1 /ColorSpace [/Lab << /WhitePoint [0.9505 1 1.089] >>] /Domain [0 1 0 1]"
+                   b" /Matrix [100 0 0 50 100 100] /Function 4 0 R >>"}), 1.37, False, ()),
 }
 
 
@@ -347,6 +398,53 @@ def test_the_pure_renderer_survives_shading_torture_seeds():
     stats = run(0, 60, verbose=False)
     assert not stats["failed"], f"seeds apart (python tools/render_torture_shading.py SEED 1): {stats['failed']}"
     assert stats["drawn"] >= 50
+
+
+# seeds that exercise a feature each: CalRGB/Lab over Coons (t6), Lab over tensor patches (t7),
+# lattice + Coons (t5, t6), free triangles + tensor (t4, t7), function-based over CIE (t1), and
+# /TR, /TR arrays and soft-mask /TR together
+_SHADING_SEEDS = [("cie", 5), ("cie", 48), ("mesh", 21), ("mesh", 35), ("mesh", 64), ("func", 22),
+                  ("transfer", 7), ("transfer", 100)]
+
+
+@pytest.mark.parametrize("mode, seed", _SHADING_SEEDS)
+def test_the_pure_renderer_draws_these_shading_torture_seeds(mode, seed):
+    from beamer2slides.devtools.render_torture_shading import run
+    stats = run(seed, 1, verbose=False, mode=mode)
+    assert stats["drawn"] == 1, stats
+
+
+@pytest.mark.parametrize("mode", ["cie", "func", "mesh", "transfer"])
+def test_the_pure_renderer_survives_new_shading_torture_modes(mode):
+    """CIE colour spaces, function-based and mesh shadings, transfer functions: a slice of the
+    random pages each mode was made exact on (1,200+ seeds per mode when it was written, none apart)."""
+    from beamer2slides.devtools.render_torture_shading import run
+    stats = run(0, 25, verbose=False, mode=mode)
+    assert not stats["failed"], (f"seeds apart (python tools/render_torture_shading.py SEED 1 --mode {mode}): "
+                                 f"{stats['failed']}")
+    assert stats["drawn"] >= 18
+
+
+# Level-4 image pages that were once apart (run-length sizes, CMYK, decode arrays, masks), and
+# level-6 ones through CFX_ImageTransformer (bgr, bgra, 1-bit mask, masked) and CMYK JPEGs.
+IMAGE_SEEDS = [(4, s) for s in (144, 229, 230, 283, 325, 351, 788, 2626, 4459, 6130)] + \
+    [(6, s) for s in (0, 4, 13, 19, 50, 74, 118, 139, 196)]
+
+
+@pytest.mark.parametrize("level,seed", IMAGE_SEEDS)
+def test_the_pure_renderer_draws_image_torture_seeds_as_pdfium(level, seed):
+    from beamer2slides.devtools.render_torture_image import case, compare
+    n, _a, _b, d = compare(*case(seed, level))
+    assert n == 0, f"python tools/render_torture_image.py {seed} 1 --level {level}: {n if n is not None else d}"
+
+
+def test_the_pure_renderer_survives_image_torture_seeds():
+    """A slice of the random image pages (level 6: any angle, masks, every filter and colour
+    space the renderer draws): any pixel apart fails."""
+    from beamer2slides.devtools.render_torture_image import run
+    stats = run(0, 60, verbose=False, level=6)
+    assert not stats["failed"], f"seeds apart (python tools/render_torture_image.py SEED 1): {stats['failed']}"
+    assert stats["drawn"] >= 55
 
 
 @built
@@ -380,9 +478,6 @@ _FAILS_VALIDATION = b"<< /ShadingType 2 /ColorSpace /DeviceRGB /Coords [0 0 200 
     # Validate fails (2 functions for 3 components): PDFium's Load returns false once and true on a
     # second call (shading_type_ is kept), so the second `sh` is drawn from a half-loaded pattern
     (_FAILS_VALIDATION, "fails validation"),
-    (b"<< /ShadingType 2 /ColorSpace [/Lab << /WhitePoint [0.95 1 1.09] >>] /Coords [0 0 200 0] /Function 3 0 R >>",
-     "Lab colour spaces"),
-    (b"<< /ShadingType 1 /ColorSpace /DeviceRGB /Function 4 0 R >>", "function-based and mesh shadings"),
 ])
 def test_the_pure_renderer_refuses_shadings_it_cannot_draw_exactly(shading, reason):
     from beamer2slides.devtools.render_torture_shading import pdf_bytes
@@ -455,7 +550,7 @@ def test_the_pure_renderer_survives_text_torture_seeds(simple):
         try:
             n = compare(content, fonts, zoom, transparent)[0]
         except PdfError:
-            refused += 1                     # Type 3 text: refused, never drawn wrong
+            refused += 1                     # anything not ported: refused, never drawn wrong
             continue
         if n:
             apart[seed] = n
@@ -552,19 +647,286 @@ def test_cff_in_an_otto_sfnt_draws_unhinted_as_pdfium_does():
         page.render(1.0)
 
 
-def test_the_pure_renderer_refuses_text_it_cannot_draw_exactly_yet():
-    """Fonts not embedded (PDFium draws a system substitute) and Type 3 text are refused, not guessed."""
-    from beamer2slides.devtools.render_torture_text import FontSpec, harvest, pdf_bytes
-    from beamer2slides.pdf.pure.backend import PureBackend
+def test_text_clips_clip_what_follows_them_as_in_pdfium():
+    """Tr 4..7: the texts a BT..ET shows in a clip mode join the clip path at ET (if the mode is
+    still a clip mode then), and the AGG device has soft clips, so ProcessClipPath clips everything
+    after them to their glyph outlines - one winding clip per BT..ET group, in device space. The
+    torture's clip pages (paths, images and text after the clip, q/Q, path clips, clips in clips):
+    of the first 400 seeds, 317 draw (images inside the clip included) and all equal PDFium's, 26 of the first 60 only because the
+    text clip was followed (without it they were up to 243,066 pixels apart)."""
+    from beamer2slides.devtools.render_torture_text import case, compare, harvest
+    specs = harvest()
+    if not specs:
+        pytest.skip("no fonts to harvest (build the test decks)")
+    apart = {}
+    for seed in range(40):
+        content, fonts, zoom, transparent = case(seed, "any", 3)
+        try:
+            n = compare(content, fonts, zoom, transparent)[0]
+        except PdfError:
+            continue                         # anything not ported: refused
+        if n:
+            apart[seed] = n
+    assert not apart, f"seeds apart (python tools/render_torture_text.py SEED 1 --simple 3): {apart}"
+    cff = [s for s in specs if s.kind in ("type1", "cff")][:1]
+    body = b"BT /F0 60 Tf 7 Tr 10 30 Td <%s> Tj ET 1 0 0 rg 0 0 200 150 re f" % (
+        b"%02x" % cff[0].codes[0] * 3)
+    n, a, b, _ = compare(body, cff, 1, False)
+    assert n == 0
+    red = (b[..., 0] == 255) & (b[..., 1] == 0)
+    assert 0 < red.sum() < red.size // 4           # the glyphs, not the page
+
+
+def test_vertical_writing_reads_and_draws_as_pdfium():
+    """Identity-V or an embedded CMap with /WMode (1, 2, <01>, 1.5... anything GetCode reads as
+    non-zero), /W2 (`c [w1 vx vy ...]`, `c1 c2 w1 vx vy`, a group cut short reads 0) and /DW2 on the
+    torture's CID fonts, mixed with horizontal ones (`case(..., 4)`). Chars, boxes, loose boxes and
+    object bounds are equal to the last bit on 300 seeds and 400 CFF pages draw byte for byte (17 of
+    the first 30 only because the vertical origins are followed). Seed 5 found that an embedded
+    CMap's char with no ToUnicode entry takes the Windows ANSI code page's character (PDFium's
+    GetUnicodeFromCharCode), seed 6 that FPDFFont_GetGlyphWidth answers the vertical advance."""
+    from beamer2slides.devtools.render_torture_text import case, compare, harvest, pdf_bytes
+    specs = harvest()
+    if not any(s.two_byte for s in specs):
+        pytest.skip("no 2-byte CID fonts to harvest (build the test decks)")
+    apart = []
+    for seed in [5, 6, *range(20)]:
+        content, fonts, _, _ = case(seed, "any", 4)
+        data = pdf_bytes(content, fonts)
+        ref, pure = pdf.resolve("pdfium").open(data), pdf.resolve("pure").open(data)
+        try:
+            if (_chars_and_bounds(pure[0]) != _chars_and_bounds(ref[0])
+                    or [dataclasses.astuple(o) for o in pure[0].objects()]
+                    != [dataclasses.astuple(o) for o in ref[0].objects()]):
+                apart.append(seed)
+        finally:
+            ref.close()
+            pure.close()
+    assert not apart, f"seeds apart (case(SEED, 'any', 4), chars/bounds/objects): {apart}"
+    for seed in range(25):
+        content, fonts, zoom, transparent = case(seed, "cid-cff", 4)
+        n = compare(content, fonts, zoom, transparent)[0]
+        assert n == 0, f"seed {seed} (python tools/render_torture_text.py {seed} 1 --simple 4 --kind cid-cff)"
+    # down the page: each glyph below the previous one, by W2's w1
+    cff = [s for s in specs if s.kind == "cid-cff" and s.two_byte][:1]
+    if cff:
+        from beamer2slides.devtools.render_torture_text import FontSpec
+        spec = cff[0]
+        head = spec.objects[0].replace(b"/Identity-H", b"/Identity-V")
+        k = int(re.search(rb"/DescendantFonts\s*\[\s*@(\d+)@", head).group(1))
+        objs = [head, *spec.objects[1:]]
+        objs[k] = objs[k].replace(b"<<", b"<</W2 [%d %d -500 250 800] /DW2 [900 -1200]" % (
+            spec.codes[0], spec.codes[0]), 1)
+        v = FontSpec("v", "cid-cff", objs, spec.codes, True)
+        body = b"BT /F0 20 Tf 50 120 Td <%04x%04x%04x> Tj ET" % (spec.codes[0], spec.codes[0], spec.codes[1])
+        doc = pdf.resolve("pure").open(pdf_bytes(body, [v]))
+        try:
+            ys = [c.origin[1] for c in doc[0].chars()]
+        finally:
+            doc.close()
+        assert len(ys) == 3 and ys[0] < ys[1] < ys[2]              # y down: top to bottom
+        assert ys[1] - ys[0] == pytest.approx(10)                 # w1 -500 at 20 pt
+        assert compare(body, [v], 2, False)[0] == 0
+
+
+def test_the_pure_renderer_draws_system_substitutes_and_type3_text():
+    """Fonts PDFium draws with a system TrueType substitute (GDI's Arial for Helvetica) are hinted
+    like embedded TrueType (`render_text.truetype_face`); the test decks' Type 3 fonts (pdflatex's
+    bitmap fonts) draw as PDFium's."""
+    from beamer2slides.devtools.render_torture_text import FontSpec, compare, harvest
+    _needs_foxit()
     helvetica = FontSpec("standard", "type1", [b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>"], [65])
-    page = PureBackend().open(pdf_bytes(b"BT /F0 12 Tf 10 10 Td (A) Tj ET", [helvetica]))[0]
-    with pytest.raises(PdfError, match="not embedded"):
-        page.render(1.0)
+    for zoom in (1.0, 3.1):
+        n, a, _, _ = compare(b"BT /F0 12 Tf 10 10 Td (Agyph 0,Q) Tj ET", [helvetica], zoom, False)
+        assert n == 0 and (a[..., :3] < 128).any()
     type3 = [s for s in harvest() if s.kind == "type3"]
     if type3:
-        body = b"BT /F0 12 Tf 10 10 Td <%02x> Tj ET" % type3[0].codes[0]
-        with pytest.raises(PdfError, match="Type 3"):
-            PureBackend().open(pdf_bytes(body, type3[:1]))[0].render(1.0)
+        body = b"BT /F0 12 Tf 10 10 Td <%s> Tj ET" % b"".join(b"%02x" % c for c in type3[0].codes[:6])
+        for zoom in (1.0, 2.0, 3.1):
+            assert compare(body, type3[:1], zoom, False)[0] == 0
+
+
+# ---------------------------------------------------------------------- Type 3 text
+
+
+def _type3_pdf(glyphs: dict, page: bytes, matrix=b"1 0 0 1 0 0", widths=None, fonts_in_glyphs=()):
+    """A page over made-up Type 3 fonts: `glyphs` {font name: [glyph procedures]}; the first font
+    is /T0 and every font's /Resources name the others as /N<i> (in order)."""
+    objects, procs = [], {}
+    names = list(glyphs)
+    for name in names:
+        procs[name] = []
+        for g in glyphs[name]:
+            objects.append(b"<< /Length %d >>\nstream\n" % len(g) + g + b"\nendstream")
+            procs[name].append(len(objects))
+    number = {name: len(objects) + 1 + k for k, name in enumerate(names)}
+    res = b""
+    if fonts_in_glyphs:
+        res = b" /Resources << /Font << %s >> >>" % b" ".join(
+            b"/N%d %d 0 R" % (i, number[n]) for i, n in enumerate(fonts_in_glyphs))
+    for k, name in enumerate(names):
+        p = procs[name]
+        w = (widths or {}).get(name, b" ".join(b"0.5" for _ in p))
+        fm = matrix if k == 0 else b"1 0 0 1 0 0"
+        objects.append(
+            b"<< /Type /Font /Subtype /Type3 /FontMatrix [%s] /FontBBox [0 0 1 1] /CharProcs << %s >> "
+            b"/Encoding << /Type /Encoding /Differences [0 %s] >> /FirstChar 0 /LastChar %d /Widths [%s]%s >>"
+            % (fm, b" ".join(b"/g%d %d 0 R" % (i, q) for i, q in enumerate(p)),
+               b" ".join(b"/g%d" % i for i in range(len(p))), len(p) - 1, w, res))
+    return page, objects, [(n.encode(), number[n]) for n in names]
+
+
+# (fonts, page, font matrix, widths, fonts named in glyphs): pages found apart once, shrunk
+TYPE3_CASES = {
+    # a /Widths entry of 0.5025 under FontMatrix 1 is 502.5 in floats and rounds to 503, not 502
+    "widths_rounded_in_floats": ({"T0": [b"0.2777 0 0 0 0 1 d1\nBT /N0 0.6518 Tf 0.0225 0.0237 Td <00> Tj ET"],
+                                  "T1": [b"0.7199 0 0 0 1 1 d1\n0.1895 0.5222 0.0914 -0.18 re f\n0.7165 0.0603 m "
+                                         b"0.4099 0.2271 l 0.2499 -0.0963 l 0.1702 0.5605 l h f"]},
+                                 b"BT /T0 19.6267 Tf 20 100 Td <00000000> Tj ET", b"1 0 0 1 0 0",
+                                 {"T0": b"0.5025"}, ("T1",)),
+    # CPDF_Type3Char::Transform adds the font matrix's translation to the glyph box unscaled, so a
+    # translucent glyph's bitmap (the box of what its procedure draws) ignores it
+    "glyph_box_ignores_the_font_matrix_translation": (
+        {"T0": [b"500 0 d0\n0 0 1 rg\n0 0 400 700 re f"]},
+        b"/A1 gs BT /T0 40 Tf 20 60 Td <000000> Tj ET", b"0.001 0 0 0.002 0.02 -0.1288", None, ()),
+    # an upright glyph image whose first or last row is blank goes through CFX_ImageTransformer's
+    # "normal" branch (the stretcher at ceil(a) x -ceil(d)), not StretchTo with AdjustBlue
+    "blank_edge_rows": ({"T0": [b"700 0 0 0 700 700 d1\nq 700 0 0 700 0 0 cm\nBI /IM true /W 8 /H 6 ID "
+                                b"\xff\x00\x81\x66\xff\xff\nEI\nQ"]},
+                        b"BT /T0 23.7 Tf 10.3 20.6 Td <0000> Tj ET 0 0 1 rg BT /T0 61 Tf 1 0 0 -1 60 140 Tm <00> Tj ET",
+                        b"0.001 0 0 0.001 0 0", None, ()),
+    # a font drawn inside its own glyph draws nothing there (the font is being drawn), and text in
+    # a colored (d0) glyph that sets no colour of its own takes the text's
+    "self_nesting_and_colours": ({"T0": [b"0.6 0 d0\n0 0 0.5 0.5 re f\nBT /N0 0.5 Tf 0.5 0.5 Td <00> Tj ET",
+                                         b"0.6 0 0 0 1 1 d1\n1 0 0 rg 0.1 0.1 0.8 0.8 re f"]},
+                                 b"0 0.5 0 rg BT /T0 50 Tf 20 40 Td <0001> Tj ET", b"1 0 0 1 0 0", None, ("T0",)),
+}
+
+
+@pytest.mark.parametrize("name", TYPE3_CASES)
+def test_the_pure_renderer_draws_pdfiums_type3_text(name):
+    from beamer2slides.devtools.render_torture_type3 import compare
+    glyphs, page, matrix, widths, inner = TYPE3_CASES[name]
+    content, objects, fonts = _type3_pdf(glyphs, page, matrix, widths, inner)
+    for zoom, transparent in ((1.0, False), (1.37, True), (3.1, False)):
+        n, _a, _b, d = compare(content, objects, fonts, zoom, transparent)
+        assert n == 0, (zoom, transparent, n if n is not None else d)
+
+
+def test_the_pure_renderer_survives_type3_torture_seeds():
+    """A slice of the random Type 3 pages (devtools/render_torture_type3.py: bitmap, path, colored,
+    form, image and shading glyphs, nested fonts, odd font matrices, Tr, alpha, clips): any pixel
+    apart fails. The fixed seeds were once apart: 12 (the char box took FontMatrix e, f times 1000),
+    248 (/Widths rounded in doubles), 241 and 583 (a zero /FontBBox read half built by a glyph that
+    selects its own font), 482 (that recursion never ended)."""
+    from beamer2slides.devtools.render_torture_type3 import case, compare, run
+    stats = run(0, 40, verbose=False)
+    assert not stats["failed"], f"seeds apart (python tools/render_torture_type3.py SEED 1): {stats['failed']}"
+    assert stats["drawn"] >= 36
+    apart = {s: n for s in (12, 241, 248, 482, 583) if (n := compare(*case(s))[0])}
+    assert not apart, f"seeds apart: {apart}"
+
+
+def _needs_foxit():
+    import sys
+    from beamer2slides.pdf.pure import foxit
+    if sys.platform != "win32":
+        pytest.skip("PDFium maps fonts through GDI here; outside Windows it asks fontconfig, which is not ported")
+    if foxit.missing():
+        pytest.skip(f"the Foxit faces are not in {foxit.cache_dir()}: python -m beamer2slides.pdf.pure.foxit")
+
+
+def _subst_font(base, flags, extra=b"", desc=b""):
+    from beamer2slides.devtools.render_torture_text import FontSpec
+    return FontSpec(base.decode(), "unknown", [
+        b"<< /Type /Font /Subtype /Type1 /BaseFont /%s %s /FontDescriptor @1@ >>" % (base, extra),
+        b"<< /Type /FontDescriptor /FontName /%s /Flags %d /FontBBox [0 -200 1000 900] %s >>" % (base, flags, desc)], [65])
+
+
+_WIDTHS = b"/FirstChar 32 /LastChar 126 /Widths [%s]" % b" ".join(b"%d" % (200 + 37 * i % 700) for i in range(95))
+
+# (page content, fonts, zoom): text in fonts the PDF does not embed, drawn with PDFium's Foxit faces
+SUBST_TEXT_CASES = {
+    # FoxitSansMM at weight 900 (kFontWeightExtraBold is 900, not 800: seed 67 of the subst torture)
+    # skewed by the italic angle, each glyph blended to its /Widths width (AdjustVariationParams)
+    "sans_mm_black_italic": (b"BT /F0 40 Tf 10 60 Td (AMWgy) Tj ET",
+                             [_subst_font(b"Wibble-Black", 0, _WIDTHS, b"/ItalicAngle -12 /FontWeight 900")], 1.37),
+    # FoxitSerifMM (serif flag) at weight 300 * 4/5, no /Widths: the face's own advances, stroked too
+    "serif_mm_light_no_widths": (b"BT /F0 30 Tf 5 40 Td 2 Tr 0.5 w (Quartz fig) Tj ET",
+                                 [_subst_font(b"Serifish-Light", 34, b"", b"/FontWeight 300")], 2),
+    # Symbol and ZapfDingbats: Foxit's CFF faces as they are
+    "symbol_and_dingbats": (b"BT /F0 24 Tf 10 20 Td (abgpW) Tj /F1 24 Tf 10 80 Td (3456AZ) Tj ET",
+                            [_subst_font(b"Symbol", 4), _subst_font(b"ZapfDingbats", 4)], 1.37),
+    # a styled ZapfDingbats keeps Foxit's face under a name that is not standard: glyphs whose /Widths
+    # are wider move by half the excess, narrower ones are squeezed (the glyph spacing heuristic)
+    # (the face's builtin encoding has no glyph for these codes: glyphs by name)
+    "dingbats_spacing_heuristic": (b"BT /F0 30 Tf 5 60 Td (ABCDEF) Tj ET",
+                                   [_subst_font(b"ZapfDingbats,Bold", 4, _WIDTHS + b" /Encoding << /Differences "
+                                                b"[65 /a1 /a2 /a10 /a20 /a71 /a100] >>")], 1.37),
+}
+
+
+@pytest.mark.parametrize("name", SUBST_TEXT_CASES)
+def test_the_pure_renderer_draws_substituted_text_as_pdfium(name):
+    from beamer2slides.devtools.render_torture_subst import compare
+    _needs_foxit()
+    content, fonts, zoom = SUBST_TEXT_CASES[name]
+    n, a, _b, _d = compare(content, fonts, zoom, False)
+    assert (a[..., :3] < 128).any(), "the case draws nothing"
+    assert n == 0
+
+
+def test_the_pure_renderer_survives_substituted_text_torture_seeds():
+    """A slice of the random pages of made-up non-embedded fonts (devtools/render_torture_subst.py:
+    3,000 seeds when it was written, none apart), and of GDI's TrueType faces (`--pool installed`):
+    seeds 18, 21 and 29 were apart until a font without a descriptor got flags 0 (PDFium's
+    m_Flags default) rather than nonsymbolic - its TrueType glyph map then takes the Mac cmap.
+    Fallback fonts are refused."""
+    from beamer2slides.devtools.render_torture_subst import case, compare
+    _needs_foxit()
+    apart, drawn = {}, 0
+    for seed, pool in [*((s, "any") for s in range(40)), *((s, "installed") for s in (18, 21, 29, *range(8)))]:
+        try:
+            n = compare(*case(seed, 2, pool))[0]
+        except PdfError as e:
+            assert "fallback" in str(e), (seed, pool, str(e))
+            continue
+        drawn += 1
+        if n:
+            apart[(seed, pool)] = n
+    assert not apart, f"seeds apart (python tools/render_torture_subst.py SEED 1 --pool POOL): {apart}"
+    assert drawn >= 30
+
+
+def test_a_generic_face_keeps_its_blend_between_documents():
+    """The multiple master face is PDFium's for the whole process, and so is its blend: a glyph
+    drawn at one /Widths width leaves the face there, and a later document's font without /Widths
+    measures its advances at that blend. The pure reader's face does the same."""
+    from beamer2slides.devtools.render_torture_subst import FontSpec, pdf_bytes, resync
+    from beamer2slides.pdf.pdfium_backend import PdfiumBackend
+    from beamer2slides.pdf.pure.backend import PureBackend
+    _needs_foxit()
+    wide = FontSpec("wide", "unknown", [b"<< /Type /Font /Subtype /Type1 /BaseFont /Wide /FirstChar 77 "
+                                        b"/LastChar 77 /Widths [1400] /FontDescriptor @1@ >>",
+                                        b"<< /Type /FontDescriptor /FontName /Wide /Flags 32 >>"], [77])
+    bare = FontSpec("bare", "unknown", [b"<< /Type /Font /Subtype /Type1 /BaseFont /Bare /FontDescriptor @1@ >>",
+                                        b"<< /Type /FontDescriptor /FontName /Bare /Flags 32 >>"], [77])
+    first = pdf_bytes(b"BT /F0 20 Tf 10 10 Td (M) Tj ET", [wide])
+    second = pdf_bytes(b"BT /F0 20 Tf 10 10 Td (MMMM) Tj ET", [bare])
+    bounds = []
+    for backend in (PdfiumBackend, PureBackend):
+        resync()
+        doc = backend().open(second)
+        before = doc[0].object_bounds()
+        doc.close()
+        doc = backend().open(first)
+        doc[0].render(1)
+        doc.close()
+        doc = backend().open(second)
+        bounds.append((before, doc[0].object_bounds()))
+        doc.close()
+    assert bounds[0] == bounds[1]
+    assert bounds[0][0] != bounds[0][1]                  # the blend moved the advances
 
 
 # ---------------------------------------------------------------------- PDFium's rules, one by one
@@ -1080,6 +1442,10 @@ def test_substituted_fonts_are_measured_with_pdfiums_face(name):
     if foxit.missing():
         pytest.skip(f"the Foxit faces are not in {foxit.cache_dir()}: python -m beamer2slides.pdf.pure.foxit")
     data = SUBST_CASES[name]
+    # the generic faces' blend is process-wide: text drawn by an earlier test (or refused by the
+    # pure reader after PDFium drew it) moves it, and widths without /Widths are read at it
+    from beamer2slides.devtools.render_torture_subst import resync
+    resync()
     a, b = pdf.resolve("pure").open(data)[0], pdf.resolve("pdfium").open(data)[0]
     close([dataclasses.astuple(o) for o in a.objects()], [dataclasses.astuple(o) for o in b.objects()], name)
     close(a.object_bounds(), b.object_bounds(), f"{name} object_bounds")
@@ -1168,6 +1534,18 @@ def test_text_torture_pages_extract_as_pdfium_to_the_last_bit():
             ref.close()
             pure.close()
     assert not apart, f"seeds apart (scratch: xtext.py SEED 1): {apart}"
+    # text clip pages (Tr 4..7 then paths, images, text): the text page ignores clips and modes
+    for seed in range(30):
+        content, fonts, _, _ = case(seed, "any", 3)
+        data = pdf_bytes(content, fonts)
+        ref, pure = pdf.resolve("pdfium").open(data), pdf.resolve("pure").open(data)
+        try:
+            assert _chars_and_bounds(pure[0]) == _chars_and_bounds(ref[0]), f"clip page seed {seed}"
+            assert ([dataclasses.astuple(o) for o in pure[0].objects()]
+                    == [dataclasses.astuple(o) for o in ref[0].objects()]), f"clip page seed {seed}"
+        finally:
+            ref.close()
+            pure.close()
     for kind in ["type3"]:
         for seed in range(20):
             content, fonts, _, _ = case(seed, kind)

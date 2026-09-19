@@ -29,7 +29,7 @@ import shutil
 import sys
 import time
 import traceback
-from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 import numpy as np
@@ -103,8 +103,8 @@ def build_target(folder: Path, pres: dict | None = None, fetch=None) -> dict:
             known[url] = hashlib.sha1(data).hexdigest()
             return data
     def thumbnail(n):
-        # the LARGE thumbnails `capture` saved: fills the API reads as empty come from them (live
-        # `adopt` does not fetch them yet, so its IR leaves those fills out as before)
+        # the LARGE thumbnails `capture` saved: fills the API reads as empty come from them, as live
+        # `adopt` reads them through `deck_ir.slide_thumbnails`
         path = folder / "slides" / f"{n + 1:03d}.png"
         return path if path.exists() else None
 
@@ -130,20 +130,62 @@ def page_ground(a: np.ndarray) -> np.ndarray:
     return np.broadcast_to(np.array([top >> 16, (top >> 8) & 255, top & 255], dtype=a.dtype), a.shape)
 
 
-def covered_mask(slide: dict, w: int, h: int) -> np.ndarray:
-    """The slide's element boxes, with room around them, on the reference's pixel grid. Scoring only
-    the whole page would let one unreproduced backdrop hide everything else; `page` reports that."""
-    m = np.zeros((h, w), dtype=bool)
+def element_boxes(slide: dict, w: int, h: int) -> list[tuple[int, tuple[int, int, int, int]]]:
+    """(element index, pixel box) of the slide's elements, with room around them, on the reference's
+    pixel grid; boxes wholly off the page left out."""
+    out = []
     px = w / slide["size"][0]
-    for el in slide["elements"]:
+    for k, el in enumerate(slide["elements"]):
         size = max((r.get("size") or 4) for p in el.get("paragraphs", []) for r in p["runs"]) \
             if el.get("paragraphs") and any(p["runs"] for p in el["paragraphs"]) else 4.0
         x0, y0, x1, y1 = el["bbox"]
         a0, b0 = max(0, int((x0 - size) * px)), max(0, int((y0 - size) * px))
         a1, b1 = min(w, int((x1 + 2 * size) * px)), min(h, int((y1 + size) * px))
         if a1 > a0 and b1 > b0:                        # a box off the page: a negative end would
-            m[b0:b1, a0:a1] = True                     # count from the far edge
+            out.append((k, (a0, b0, a1, b1)))          # count from the far edge
+    return out
+
+
+def covered_mask(slide: dict, w: int, h: int) -> np.ndarray:
+    """The slide's element boxes, with room around them. Scoring only the whole page would let one
+    unreproduced backdrop hide everything else; `page` reports that."""
+    m = np.zeros((h, w), dtype=bool)
+    for _, (a0, b0, a1, b1) in element_boxes(slide, w, h):
+        m[b0:b1, a0:a1] = True
     return m
+
+
+def element_losses(m_ref: np.ndarray, m_got: np.ndarray, slide: dict, top: int = 6) -> list[dict]:
+    """Where a slide's `boxes` score went: every pixel `overlap` counts against it (ink of the deck
+    with none of ours near it = `miss`, ours with none of the deck's near it = `extra`) is charged to
+    the smallest element box holding it, so an element's `loss` is exactly its share of 1 - boxes."""
+    from beamer2slides.fidelity import dilate
+    h, w = m_ref.shape
+    label = np.full((h, w), -1, dtype=np.int32)
+    boxes = element_boxes(slide, w, h)
+    for k, (a0, b0, a1, b1) in sorted(boxes, key=lambda kb: -(kb[1][2] - kb[1][0]) * (kb[1][3] - kb[1][1])):
+        label[b0:b1, a0:a1] = k                        # smaller boxes painted last: they win
+    inside = label >= 0
+    total = (m_ref & inside).sum() + (m_got & inside).sum()
+    if not total:
+        return []
+    miss = m_ref & inside & ~dilate(m_got & inside)
+    extra = m_got & inside & ~dilate(m_ref & inside)
+    n = len(slide["elements"])
+    lm = np.bincount(label[miss], minlength=n)[:n]
+    le = np.bincount(label[extra], minlength=n)[:n]
+    out = []
+    for k in np.argsort(-(lm + le))[:top]:
+        if lm[k] + le[k] == 0:
+            break
+        el = slide["elements"][k]
+        runs = [r for p in el.get("paragraphs", []) for r in p["runs"]]
+        out.append({"id": el.get("id"), "kind": el["kind"], "role": el.get("role"),
+                    "shape": el.get("shape_type"), "font": runs[0].get("font") if runs else None,
+                    "text": "".join(r["text"] for r in runs)[:40],
+                    "loss": round(float((lm[k] + le[k]) / total), 4),
+                    "miss": round(float(lm[k] / total), 4), "extra": round(float(le[k] / total), 4)})
+    return out
 
 
 def overlap(m_ref: np.ndarray, m_got: np.ndarray) -> float:
@@ -161,7 +203,8 @@ def score_page(ref: np.ndarray, got: np.ndarray, slide: dict) -> tuple[dict, np.
     covered = covered_mask(slide, w, h)
     scores = {"boxes": round(overlap(m_ref & covered, m_got & covered), 3),
               "page": round(overlap(m_ref, m_got), 3),
-              "pixels": round(1 - float(np.abs(ref - got).mean()) / 255, 3)}
+              "pixels": round(1 - float(np.abs(ref - got).mean()) / 255, 3),
+              "losses": element_losses(m_ref, m_got, slide)}
     d = np.full((h, w, 3), 255, dtype=np.uint8)
     d[m_ref & ~m_got] = (220, 40, 40)
     d[m_got & ~m_ref] = (30, 110, 230)
@@ -220,7 +263,7 @@ def load_target(folder: Path, slides: str | None, run: Path | None = None) -> di
 
 
 def run_one(name: str, iters: int = 0, flow: bool = False, slides: str | None = None,
-            tag: str | None = None) -> dict:
+            tag: str | None = None, cache: bool = True) -> dict:
     """Bootstrap (and optionally converge) one corpus deck and score it. Never raises: a crash or a
     compile error is the result, since finding those is half the point."""
     from beamer2slides import adopt
@@ -238,6 +281,14 @@ def run_one(name: str, iters: int = 0, flow: bool = False, slides: str | None = 
         tex = run / "tree" / "main.tex"
         adopt.bootstrap(target, tex, flow)
         res["bootstrap_s"] = round(time.perf_counter() - t0, 1)
+        key = cache_key(tex.parent, target)
+        hit = CORPUS / name / "cache" / key
+        if cache and not iters and (hit / "result.json").exists():
+            # the same source scored by the same scorer: its scores and sheets, no compile
+            res.update(json.loads((hit / "result.json").read_text(encoding="utf-8")), cached=True)
+            if (hit / "sheets").is_dir():
+                shutil.copytree(hit / "sheets", run / "sheets")
+            return finish(run, res, t0)
         ws = Workspace(tex, run / "work")
         pdf, err = ws.compile()
         if pdf is None:
@@ -261,6 +312,8 @@ def run_one(name: str, iters: int = 0, flow: bool = False, slides: str | None = 
         else:
             folder_view = folder
         res["bootstrap"] = score_pdf(pdf, folder_view, target, run / "sheets")
+        store(hit, run, {**{k: res[k] for k in ("bootstrap", "frame_errors") if k in res},
+                         "full_s": round(time.perf_counter() - t0, 1)})
         if iters:
             result = converge(tex, target, run / "loop", max_iter=iters, log=lambda *_: None)
             res["loop"] = {"iterations": result.iterations, "converged": result.converged,
@@ -272,6 +325,40 @@ def run_one(name: str, iters: int = 0, flow: bool = False, slides: str | None = 
         res["error"] = f"{type(exc).__name__}: {exc}"[:1500]
         res["traceback"] = traceback.format_exc()[-4000:]
     return finish(run, res, t0)
+
+
+CACHE_KEEP = 6          # results kept per deck, newest first
+
+
+def cache_key(tree: Path, target: dict) -> str:
+    """What a bootstrap score depends on: every file of the source tree, the IR the boxes come from,
+    and the scoring code. A change that leaves a deck's source alone then costs that deck no compile."""
+    import hashlib
+    h = hashlib.sha256()
+    for p in sorted(q for q in tree.rglob("*") if q.is_file()):
+        h.update(p.relative_to(tree).as_posix().encode() + b"\0" + hashlib.sha256(p.read_bytes()).digest())
+    h.update(json.dumps(target, sort_keys=True, default=str).encode())
+    from beamer2slides import fidelity
+    for code in (Path(__file__), Path(fidelity.__file__)):
+        h.update(code.read_bytes())
+    return h.hexdigest()[:24]
+
+
+def store(hit: Path, run: Path, result: dict) -> None:
+    try:
+        tmp = hit.with_name(hit.name + f".{os.getpid()}")
+        shutil.rmtree(tmp, ignore_errors=True)
+        tmp.mkdir(parents=True)
+        (tmp / "result.json").write_text(json.dumps(result), encoding="utf-8")
+        if (run / "sheets").is_dir():
+            shutil.copytree(run / "sheets", tmp / "sheets")
+        shutil.rmtree(hit, ignore_errors=True)
+        os.replace(tmp, hit)
+        old = sorted((p for p in hit.parent.iterdir() if p.is_dir()), key=lambda p: -p.stat().st_mtime)
+        for p in old[CACHE_KEEP:]:
+            shutil.rmtree(p, ignore_errors=True)
+    except OSError:
+        pass                                   # a cache that cannot be written only costs time
 
 
 SLIDE_MARK = re.compile(r"^% slide (\d+)\n", re.M)
@@ -340,6 +427,16 @@ def line(res: dict) -> str:
             f"boxes {b.get('boxes', 0):.3f} page {b.get('page', 0):.3f} pixels {b.get('pixels', 0):.3f}{tail}{broken}")
 
 
+def last_seconds(name: str) -> float:
+    """How long the deck's newest run took (0 when it never ran)."""
+    runs = [p / "result.json" for p in (CORPUS / name / "runs").glob("*")] if (CORPUS / name / "runs").is_dir() else []
+    runs = [p for p in runs if p.exists()]
+    if not runs:
+        return 0.0
+    res = json.loads(max(runs, key=lambda p: p.stat().st_mtime).read_text(encoding="utf-8"))
+    return float(res.get("full_s") or res.get("seconds") or 0)
+
+
 def decks() -> list[str]:
     return sorted(p.name for p in CORPUS.iterdir() if (p / "presentation.json").exists()) if CORPUS.is_dir() else []
 
@@ -362,6 +459,45 @@ def report(tag: str = "abs", worst: int = 3) -> None:
               f"page {mean['page']:.3f} pixels {mean['pixels']:.3f}")
 
 
+def losses(tag: str, top: int = 40) -> None:
+    """Where the corpus' `boxes` score goes, element by element (`element_losses`): each element's
+    loss as points of the corpus mean (its slide's share / all slides), the worst first, then summed
+    by deck, by kind and by font. `miss` = the deck's ink we lack, `extra` = ink of ours it lacks;
+    both at once is usually the same ink set in the wrong place."""
+    from collections import defaultdict
+    items, n = [], 0
+    for name in decks():
+        path = CORPUS / name / "runs" / tag / "result.json"
+        if not path.exists():
+            continue
+        res = json.loads(path.read_text(encoding="utf-8"))
+        n += res.get("n", 0) if res.get("bootstrap") else 0
+        for s in res.get("bootstrap") or []:
+            for e in s.get("losses", []):
+                items.append({**e, "deck": name, "slide": s["slide"]})
+    if not n:
+        print(f"no results with losses under tag {tag!r}")
+        return
+    pts = lambda v: 1000 * v / n                                         # noqa: E731 - thousandths
+    print(f"{n} slides; losses in thousandths of the corpus mean boxes score (1 = 0.001)\n")
+    print(f"{'pts':>6} {'miss':>5} {'extra':>5}  {'deck':<22} {'sl':>3}  {'kind':<14} {'font':<18} text")
+    for e in sorted(items, key=lambda e: -e["loss"])[:top]:
+        kind = e["kind"] + ("/" + e["shape"] if e.get("shape") else "")
+        print(f"{pts(e['loss']):6.2f} {pts(e['miss']):5.2f} {pts(e['extra']):5.2f}  {e['deck']:<22} "
+              f"{e['slide']:>3}  {kind[:14]:<14} {(e.get('font') or '')[:18]:<18} {e['text']!r}")
+    for title, keyf in (("deck", lambda e: e["deck"]),
+                        ("kind", lambda e: e["kind"] + ("/" + e["shape"] if e.get("shape") else "")),
+                        ("font", lambda e: e.get("font") or "-")):
+        agg = defaultdict(lambda: [0.0, 0.0, 0.0, 0])
+        for e in items:
+            a = agg[keyf(e)]
+            a[0] += e["loss"]; a[1] += e["miss"]; a[2] += e["extra"]; a[3] += 1   # noqa: E702
+        print(f"\nby {title}:")
+        for k, (lo, mi, ex, c) in sorted(agg.items(), key=lambda kv: -kv[1][0])[:15]:
+            print(f"  {pts(lo):6.2f}  miss {pts(mi):5.2f} extra {pts(ex):5.2f}  {c:5} elements  {k}")
+    print(f"\ntotal charged: {pts(sum(e['loss'] for e in items)):.1f} (top {6} elements per slide)")
+
+
 def main(argv=None) -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -380,8 +516,12 @@ def main(argv=None) -> None:
     r.add_argument("--slides", help="a-b, 1-based")
     r.add_argument("--jobs", type=int, default=4)
     r.add_argument("--tag")
+    r.add_argument("--no-cache", action="store_true", help="compile every deck, even one whose source is unchanged")
     p = sub.add_parser("report")
     p.add_argument("--tag", default="abs")
+    lo = sub.add_parser("losses", help="where the boxes score goes, by element, deck, kind and font")
+    lo.add_argument("--tag", default="abs")
+    lo.add_argument("--top", type=int, default=40)
     args = ap.parse_args(argv)
     if args.cmd == "capture":
         if args.manifest:
@@ -402,10 +542,22 @@ def main(argv=None) -> None:
             print(f"{name}: target.json rebuilt")
     elif args.cmd == "run":
         names = args.names or decks()
+        # the slowest decks first, or the last one started alone decides the wall clock
+        names = sorted(names, key=lambda n: -last_seconds(n))
+        done = []
         with ProcessPoolExecutor(max(1, min(args.jobs, len(names)))) as pool:
-            futs = [pool.submit(run_one, n, args.iter, args.flow, args.slides, args.tag) for n in names]
-            for f in futs:
-                print(line(f.result()), flush=True)
+            futs = [pool.submit(run_one, n, args.iter, args.flow, args.slides, args.tag, not args.no_cache) for n in names]
+            for f in as_completed(futs):
+                done.append(f.result())
+                print(line(done[-1]), flush=True)
+        ok = [r for r in done if r.get("bootstrap_mean")]
+        if ok:
+            n = sum(r["n"] for r in ok)
+            mean = {m: sum(r["bootstrap_mean"][m] * r["n"] for r in ok) / n for m in ("boxes", "page", "pixels")}
+            print(f"\n{len(ok)}/{len(done)} decks, {n} slides ({sum(1 for r in done if r.get('cached'))} cached): "
+                  f"boxes {mean['boxes']:.4f} page {mean['page']:.4f} pixels {mean['pixels']:.4f}")
+    elif args.cmd == "losses":
+        losses(args.tag, args.top)
     else:
         report(args.tag)
 

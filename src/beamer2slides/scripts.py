@@ -154,8 +154,9 @@ def faces() -> list[Face]:
                                     bool(os2.fsSelection & 1) if os2 else False))
                 except Exception:                               # noqa: BLE001
                     continue
-                finally:
-                    font.close()
+            # once, after every face: a collection's faces share one file, and closing the first
+            # left the others unreadable - MS PGothic (face 2 of msgothic.ttc) was on no list
+            fonts[0].close() if fonts else None
     _FACES[dirs] = out
     return out
 
@@ -194,6 +195,12 @@ def deck_text(target: dict):
                 for r in o["runs"]:
                     if isinstance(r, dict) and r.get("text"):
                         yield r["text"], r.get("font") or "", r.get("family") or "sans"
+                b = o.get("bullet")
+                if isinstance(b, dict) and b.get("text") and b["text"] not in "●○■" and o["runs"]:
+                    # a glyph bullet is set in its paragraph's face: supercharge-slides' ➔, which
+                    # Alegreya lacks, came out as its .notdef cross with no fallback to draw it
+                    r = o["runs"][0]
+                    yield b["text"], r.get("font") or "", r.get("family") or "sans"
             for k, v in o.items():
                 if k != "runs":
                     yield from walk(v)
@@ -239,6 +246,19 @@ def _pick(names: list[str], need: set[int]) -> Face | None:
     return best if best is not None and need & coverage(best) else None
 
 
+RENDERER_CJK = {"japanese": "Noto Sans JP", "korean": "Noto Sans KR", "chinese-traditional": "Noto Sans TC",
+                "chinese-simplified": "Noto Sans SC"}
+
+
+def _fetch(name: str) -> bool:
+    """Whether google/fonts gave a family not in the font folders before (`adopt.fetching` rules)."""
+    from .adopt import fetching
+    if not fetching() or find_face(name) is not None:
+        return False
+    from .fontfetch import fetch_family
+    return bool(fetch_family(name))
+
+
 def plan(target: dict) -> Plan:
     chars: dict[str, Counter] = {}
     fonts: dict[tuple, Counter] = {}                     # (group, family) -> deck font names
@@ -272,7 +292,20 @@ def plan(target: dict) -> Plan:
                 if face is not None:
                     fams[key] = _with_bold(face)
             continue
-        names = [n for n, _ in deck.most_common() if n] + FALLBACKS.get(cjk if g == "cjk" else g, FALLBACKS["other"])
+        if g == "cjk" and _fetch(RENDERER_CJK[cjk]):
+            _FACES.clear()
+        own = [n for n, _ in deck.most_common() if n]
+        if g == "cjk":
+            # a CJK face Slides does not have draws nothing: its letters come from the renderer's
+            # Noto (apps-edu-zh's Microsoft JhengHei, `adopt.slides_lacks_cjk`)
+            from .adopt import slides_lacks_cjk
+            own = [n for n in own if not slides_lacks_cjk(n)]
+        names = own + FALLBACKS.get(cjk if g == "cjk" else g, FALLBACKS["other"])
+        if g == "cjk":
+            # the face Slides' renderer draws a CJK letter in when the deck's font has none (its
+            # thumbnails show Noto's shapes, not Yu Gothic's or Microsoft YaHei's), ahead of the
+            # machine's own fallbacks
+            names.insert(len(names) - len(FALLBACKS[cjk]), RENDERER_CJK[cjk])
         if g == "other":
             # symbols come one by one from whichever font has each
             for n in names:
@@ -363,8 +396,9 @@ def script_preamble(target: dict, tree: Path | None) -> list[str]:
     feats = ["Renderer=HarfBuzz"] if p.complex else []
     if p.chain:
         # Slides sets Japanese kana and brackets proportionally: `palt` (measured on jruby-ja, 0.469
-        # -> 0.478 ink overlap, lines ending where the deck's do)
-        extra = "+palt;" if p.cjk == "japanese" else ""
+        # -> 0.478 ink overlap, lines ending where the deck's do), and Chinese too (apps-edu-zh's
+        # Traditional Chinese: its full-width ：and 、 are drawn half wide)
+        extra = "+palt;" if p.cjk in ("japanese", "chinese-traditional", "chinese-simplified") else ""
         regular = ", ".join(f'"{font_spec(f, tree, mode, extra)}"' for f, _ in p.chain)
         bold = ", ".join(f'"{font_spec(b or f, tree, mode, extra)}"' for f, b in p.chain)
         lines.append(f"\\directlua{{luaotfload.add_fallback(\"b2sscripts\", {{{regular}}})}}")

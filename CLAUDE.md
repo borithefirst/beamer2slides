@@ -45,15 +45,29 @@ a per-slide background picture.
   so do soft masks, transparency groups and every blend mode (`pure/render_transparency.py`, oracle
   `tools/render_torture_transparency.py`, 6,000 seeds; GetBackdrop, CheckClip, float32 stroke boxes);
   axial/radial shadings and shading patterns are ported too (`pure/render_shading.py`, oracle
-  `tools/render_torture_shading.py`), and so is text in embedded Type 1 and CFF fonts (FreeType's CFF
+  `tools/render_torture_shading.py`), so are function-based and mesh shadings (types 1, 4-7:
+  `pure/render_mesh.py`, DrawGouraud and the Coons/tensor PatchDrawer with full-cover fills),
+  CalRGB/CalGray/Lab/Indexed (`pure/cie.py`, PDFium's matrices and sRGB table) and transfer
+  functions (`pure/transfer.py`: /TR, /TR2 and a soft mask's /TR, CreateTransferFunc's quirks
+  included; torture `--mode cie|func|mesh|transfer`, 4,500 seeds, none apart), and so is text in embedded Type 1 and CFF fonts (FreeType's CFF
   engine and smooth rasteriser ported, `pure/ftoutline.py`, `pure/ftgrays.py`, `pure/render_text.py`,
-  oracle `tools/render_torture_text.py`), and so is embedded TrueType text (FreeType's glyf loader and
-  bytecode interpreter, v40, pedantic, 64 ppem: `pure/truetype.py`, `pure/ttinterp.py`; torture
-  `--kind cid-truetype` 600 seeds exact; tricky/variable fonts and glyphs hinted differently after
-  earlier loads refused). Whole pages: 233 of the test decks' 269 render byte for byte
+  oracle `tools/render_torture_text.py`), with text clips (Tr 4-7 clip what follows, `--simple 3`)
+  and vertical writing (Identity-V / /WMode, /W2 /DW2: origins, boxes and advances, `--simple 4`,
+  `content.item_origin`), and so are images (CPDF_DIB, Flate/RunLength/DCT with CMYK
+  JPEGs as libjpeg's raw bytes, stretch engine, CFX_ImageTransformer for any angle, own masks;
+  `pure/decode_image.py`, `pure/render_image.py`, oracle `tools/render_torture_image.py` levels 0-6,
+  17,000 seeds exact; the AGG driver drops an overprinted CMYK image's Darken, so overprint changes
+  nothing), and so is Type 3 text (`pure/render_type3.py`: ProcessType3Text, the glyph cache with
+  AdjustBlue, TransformTo, form glyphs of paths/images/shadings/nested Type 3 text; widths in floats,
+  LoadChar's depth-4 guard and the per-document font map; oracle `tools/render_torture_type3.py`,
+  6,400 seeds exact, 1% refused: glyph images that are not masks), and so is TrueType text,
+  embedded or a GDI system substitute (FreeType's glyf loader and bytecode interpreter, v40,
+  pedantic, 64 ppem: `pure/truetype.py`, `pure/ttinterp.py`; torture `--kind cid-truetype` 600
+  seeds exact; tricky/variable fonts and glyphs hinted differently after earlier loads refused).
+  Whole pages: all 269 of the test decks' pages render byte for byte
   as PDFium's, none apart (`test_whole_beamer_pages_render_as_pdfium_renders_them`);
-  a page with anything not ported yet (images, Type 3 or non-embedded text, CalRGB/Lab/Indexed
-  shadings, transfer functions…) raises PdfError, so
+  a page with anything not ported yet (JPX/JBIG2/CCITT or ICC-profiled images, tiling patterns,
+  ICCBased shadings, transfer functions on images…) raises PdfError, so
   `renders = False`: `classify` runs on it and `convert` doesn't yet. Every call equals PDFium's on 4,373 pages
   (chars and object boxes to the last bit on the test decks),
   and deck.json is identical on all 48 test decks; extract is 7× slower. `tests/test_pure_pdf.py`.
@@ -66,7 +80,14 @@ a per-slide background picture.
   blended, `pure/type1.py`) loaded from a user cache that `python -m beamer2slides.pdf.pure.foxit`
   fills from PDFium's sources with pinned SHA-256 (no binaries in the tree); without the cache, or
   outside Windows, the older rules stay and `test_substituted_fonts_are_measured_with_pdfiums_face`
-  skips. Substituted text measures as PDFium's but is not drawn yet.
+  skips. Substituted text in a Foxit face draws as PDFium's (`render_text._SubstFace`: Symbol and
+  ZapfDingbats CFF; FoxitSansMM/SerifMM blended per glyph to weight and /Widths width - process-wide
+  face state, as in PDFium - skewed by the italic angle; GetCharPosList's spacing heuristic; oracle
+  `tools/render_torture_subst.py`, made-up non-embedded fonts, 6,000 seeds exact); GDI's TrueType
+  substitutes (base 14 and installed names on Windows) draw through the TrueType port
+  (`render_text.truetype_face`, one shared face per program; `--pool installed`: 300 seeds, 251 drawn exact, 49 refused for fallback fonts). A font
+  with no descriptor has flags 0 (PDFium's m_Flags default), not nonsymbolic: a TrueType one then
+  maps codes through the Mac cmap (subst seeds 18, 21, 29).
 - No public links: pictures reach Slides inside the imported .pptx, never as shared Drive
   files (they break in protected Workspace domains).
 - **Fidelity is measured on Google's own renderer**, not a local preview: render the PDF page
@@ -503,36 +524,19 @@ stop from the text's edge (`adopt.tabbed_tex`, `\slidestab`); `tests/test_adopt_
 tikz grid with measured rows, merged cells, fills and border segments (`adopt.table_block`, cell
 insets inferred by `deck_ir.cell_pad`; `tests/test_adopt_tables.py`). Shapes are drawn in their preset
 (`adopt_shapes.py`: ~110 shapeTypes with OOXML default adjustments, turned/mirrored through the
-element's own `frame`, dashes, alpha, bent and curved connectors, arrow heads; freeforms as their box;
-`tests/test_adopt_shapes.py`). Scripts (`scripts.py`): luaotfload fallbacks for CJK and symbols,
+element's own `frame`, dashes, alpha, bent and curved connectors, arrow heads; freeforms traced from
+the thumbnail, else as their box; `tests/test_adopt_shapes.py`). Scripts (`scripts.py`): luaotfload fallbacks for CJK and symbols,
 babel `onchar=ids` for CJK line breaking and Hebrew/Arabic fonts, `bidi=basic` with RTL paragraphs
 in `otherlanguage` (`tests/test_adopt_scripts.py`).
-**Benchmark** (`tools/adopt_bench.py`, corpus of 29 public decks in `tests/decks/foreign/corpus.json`,
-cached in `out/adopt-corpus` or `$B2S_ADOPT_CORPUS`): `capture` reads a deck and its LARGE thumbnails
-(read-only, 429 back-off), `run [decks] --jobs N --tag T` bootstraps, compiles (a failing deck is
-split frame by frame to name the broken ones), scores every slide (`boxes` / `page` / `pixels`) and
-writes deck|source|diff sheets to `<corpus>/<deck>/runs/<tag>/sheets`; `report --tag T`.
-Measured (bootstrap only, 912 slides): boxes 0.593 -> 0.754 (mean per deck 0.565 -> 0.725, every
-deck up; pixels 0.913 -> 0.939), 11 frames that did not compile -> 0 (tags `abs` -> `merged`).
-Lengths in bp (`adopt.to_bp`: the IR is PDF points, TeX's pt is 72.27 to the inch) and see-through page
-backgrounds blended over white: 0.754 -> 0.818 (`units`). Text (tags `units` -> `text-b` -> `text-ins2`):
-boxes 0.818 -> 0.843 -> 0.852, page 0.814 -> 0.839 -> 0.848. With the fills below (`combined`): boxes
-0.885, page 0.881, pixels 0.970, no deck down.
-Known gaps, by what they cost: text insets the API does not report where no autofit height gives
-them away, freeform shapes (5,791 in the corpus, drawn as their box; Google's .pptx
-export has their geometry), and dragged shape adjustments.
-Fills the API cannot say (`deck_fills.py`, `tests/test_adopt_fills.py`): a gradient, picture or texture
-fill reads `shapeBackgroundFill: {}`, a .pptx table style's cell colour NOT_RENDERED, and every
-placeholder INHERIT chain in the corpus ends NOT_RENDERED too - so `deck_ir(foreign=True,
-thumbnails=n -> image)` reads them from the slide's own thumbnail (the bench passes the cached LARGE
-ones; live `adopt` does not fetch them yet, and without thumbnails nothing changes). Conservative, since a false fill paints over what lies
-under it: the box less a rim and less opaque elements above must be one flat colour (ink allowed only
-in boxes of texts above), not the page's or the colour all around it (`edges_show`, table cells vs
-the page outside the table), settled top down; a rectangle may read as a three-stop axis gradient
-(TikZ `left/middle/right color`: cs161's header bar). Measured (`units` -> `fills-d`): cs161-net
-page 0.734 -> 0.917, cs161-tls 0.647 -> 0.864, hebrew-lesson 0.310 -> 0.668 (paper backdrops and
-style-coloured cells). SlidesCarnival's 2,068 `{}` freeforms are squiggles whose box is not flat
-and stay unfilled: that is the freeform gap, not a fill one.
+**Benchmark** (`devtools/adopt_bench.py`, 29 public decks in `tests/decks/foreign/corpus.json`,
+cached in `out/adopt-corpus` or `$B2S_ADOPT_CORPUS`; **history, per-change numbers and what was tried:
+`docs/adopt-bench.md`** - new results go there, not here): `capture` reads a deck and its LARGE
+thumbnails (read-only), `run [decks] --jobs N --tag T` bootstraps, compiles and scores every slide
+(`boxes` / `page` / `pixels`, sheets in `<corpus>/<deck>/runs/<tag>/sheets`), cached per deck by
+source tree, IR and scorer (`--no-cache`); `report --tag T`; `losses --tag T` charges each lost pixel
+to the smallest element box holding it and ranks elements, decks, kinds and fonts. Fills, pictures,
+freeforms, pies and video posters the API does not give are read off the slide thumbnails
+(`deck_fills.py`, `deck_freeforms.py`, `deck_thumbs.py`: rows, cell and text insets, stand-in widths, weights). Now (`m6-a`, 912 slides): boxes 0.973, page 0.971, pixels 0.985, mean per deck 0.956.
 
 Opt-in suite (real Google Slides, ~95 s): `python -m pytest -m slides` (the default run deselects
 the `slides` marker, pyproject.toml). It converts the stress decks (19–22, 25, 13, demo) 3 at a

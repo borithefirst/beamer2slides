@@ -14,12 +14,16 @@ snapshot's object map, else none (compare aligns slides by title and text).
 import hashlib
 import json
 import math
+import os
 import re
+import time
 import urllib.request
 from pathlib import Path
 
 from .emit import (ASCENT_EM, BASELINE_A, FONT_FOR_FAMILY, MIDDLE_BASELINE_EM, PAD_X, PPTX_TITLE_DY, SLIDE_W,
                    FontMapper, extra_above)
+from .deck_thumbs import (SNAP_PAGE, ink_widths, pptx_insets, side_gap, side_inset, thumbnail_cell_pad,
+                          thumbnail_cell_text, thumbnail_insets, thumbnail_rows, thumbnail_weights, top_drift)
 from .gslides import EMU_PER_PT
 
 FAMILY_FOR_FONT = {v: k for k, v in FONT_FOR_FAMILY.items()}
@@ -27,9 +31,10 @@ FAMILY_FOR_FONT = {v: k for k, v in FONT_FOR_FAMILY.items()}
 # back as `sans` - so a deck whose person typed in Space Mono read back as prose, and the size came
 # through the wrong width factors as well. A font is known by its name here, the way a reader knows
 # it: these words appear in the name of nearly every monospaced or serif family Slides offers.
-MONO_WORDS = ("mono", "code", "courier", "consol", "typewriter")
+MONO_WORDS = ("mono", "code", "courier", "consol", "typewriter", "cousine")
 SERIF_WORDS = ("serif", "times", "georgia", "garamond", "playfair", "slab", "libre baskerville",
-               "book", "crimson", "lora", "spectral", "cormorant", "eb garamond")
+               "book", "crimson", "lora", "spectral", "cormorant", "eb garamond", "bodoni", "tinos",
+               "caladea", "gelasio", "cambria", "palatino", "antiqua", "merriweather")
 TAG_RE = re.compile(r"^b2s:(?P<slide>[^/]*)/(?P<element>.+)$")
 BEAMER_SIZES = {(4, 3): (362.83, 272.13), (16, 9): (453.54, 255.12), (16, 10): (453.54, 283.46)}
 DEFAULT_STYLE = {"fontFamily": "Arial", "fontSize": 18.0, "bold": False, "italic": False, "color": "#000000"}
@@ -273,7 +278,8 @@ def base_style(pe: dict, resolver: StyleResolver, level: int) -> dict:
         base["fontSize"] = dim(parent["fontSize"])
     if parent.get("weightedFontFamily"):
         base["fontFamily"] = parent["weightedFontFamily"]["fontFamily"]
-        if parent["weightedFontFamily"].get("weight", 400) >= 600:
+        base["weight"] = parent["weightedFontFamily"].get("weight", 400)
+        if base["weight"] >= 600:
             base["bold"] = True
     if parent.get("foregroundColor"):
         base["color"] = rgb_hex(parent["foregroundColor"], resolver.scheme) or base["color"]
@@ -282,11 +288,15 @@ def base_style(pe: dict, resolver: StyleResolver, level: int) -> dict:
 
 def text_paragraphs(pe: dict, text: dict, resolver: StyleResolver, fonts: FontMapper, scale: float,
                     keep_blank: bool = False, font_scale: float = 1.0, spacing_cut: float = 0.0,
-                    keep_trailing: bool = False) -> list[dict]:
+                    keep_trailing: bool = False, foreign: bool = False) -> list[dict]:
     """`font_scale` and `spacing_cut` are the box's autofit (`shrink text on overflow`, or a .pptx's
     normAutofit): Slides draws every run at `font_scale` times its size and takes `spacing_cut` off
     every paragraph's line spacing. The cs161 decks' titles say 28 pt and are drawn at 25.2: the
-    thumbnail's cap height is 18.0 pt, Arial's is 0.716 em."""
+    thumbnail's cap height is 18.0 pt, Arial's is 0.716 em.
+
+    `foreign`: every font is the person's own, Lato, PT Serif and Roboto Mono included - these are
+    the converter's stand-ins for Computer Modern only in a deck it wrote, and read as such, a deck
+    written in Roboto Mono (intro-lecture's code) came back as CMTT9 and was set in Courier."""
     bases: dict[int, dict] = {}
     paragraphs: list[dict] = []
     cur = None
@@ -337,11 +347,19 @@ def text_paragraphs(pe: dict, text: dict, resolver: StyleResolver, fonts: FontMa
             family = (st.get("weightedFontFamily") or {}).get("fontFamily") or st.get("fontFamily") or base["fontFamily"]
             size = (dim(st.get("fontSize")) or base["fontSize"]) * font_scale
             bold = st.get("bold", base["bold"])
-            if (st.get("weightedFontFamily") or {}).get("weight", 400) >= 600:
+            weight = (st.get("weightedFontFamily") or {}).get("weight") or base.get("weight") or 400
+            if st.get("bold") is not None and "weightedFontFamily" not in st:
+                weight = 700 if st["bold"] else 400
+            if weight >= 600:
                 bold = True
+            unsure = foreign and base["bold"] and st.get("bold") is False and \
+                (st.get("weightedFontFamily") or {}).get("weight") == 400
             italic = st.get("italic", base["italic"])
             color = rgb_hex(st.get("foregroundColor"), resolver.scheme) or base["color"]
-            psize, font = pdf_size(fonts, family, size, bold, italic, scale)
+            if foreign:
+                psize, font = round(size / scale, 2), family.replace(" ", "")
+            else:
+                psize, font = pdf_size(fonts, family, size, bold, italic, scale)
             link = st.get("link") or {}
             text_part = content.rstrip("\n") if content.endswith("\n") else content
             if not text_part:
@@ -359,9 +377,15 @@ def text_paragraphs(pe: dict, text: dict, resolver: StyleResolver, fonts: FontMa
                    "script": {"SUPERSCRIPT": "super", "SUBSCRIPT": "sub"}.get(st.get("baselineOffset")),
                    "underline": bool(st.get("underline")), "strike": bool(st.get("strikethrough")),
                    "highlight": rgb_hex(st.get("backgroundColor"), resolver.scheme)}
+            if foreign and weight not in (400, 700):
+                # a weight between (or beyond) regular and bold, which `bold` can only round: adopt
+                # sets it in an instance of that weight where it can cut one (fontfetch.weight_file)
+                run["weight"] = int(weight)
             if family == "Roboto Mono" and text_part.strip("\u00a0") == "" and "\u00a0" in text_part:
                 run["hole"] = round(len(text_part) * 0.6 * size / scale, 2)
                 run["text"] = " "
+            if unsure:
+                run["weight_unsure"] = True     # `thumbnail_weights` decides
             cur["runs"].append(run)
     for p in paragraphs:
         p["runs"] = merge_runs(p["runs"])
@@ -392,15 +416,14 @@ def text_paragraphs(pe: dict, text: dict, resolver: StyleResolver, fonts: FontMa
         for p in paragraphs[last + 1:]:
             p["runs"] = [dict(p.get("newline") or paragraphs[last]["runs"][-1], text=" ", link=None,
                               underline=False, strike=False, highlight=None)]
-    for p in paragraphs:
-        p.pop("newline", None)
     if keep_blank:
         # A blank line a person left in a text box is vertical space they chose, and dropping it
         # pulls everything under it up by a line - of the 717 paragraphs of the DevFest template,
         # 282 are blank. A PDF has no empty paragraph, only the gap one leaves, so classify never
         # makes one and `pull`'s IR must not either; a foreign deck is read from the deck itself,
-        # where the blank line is still there to be read. It becomes a space in the style of the
-        # paragraph it stands above, which is the size the person's Return left room for.
+        # where the blank line is still there to be read. It becomes a space in the style of its own
+        # newline, which is what Slides sizes it by (creandum-board's 8 pt spacers above 40 pt
+        # figures: 0.760 -> 0.845), else of the paragraph it stands above.
         if not trailing:
             last = max((i for i, p in enumerate(paragraphs) if p["runs"]), default=-1)
             del paragraphs[last + 1:]                   # under a top-aligned stack they push nothing down
@@ -409,9 +432,11 @@ def text_paragraphs(pe: dict, text: dict, resolver: StyleResolver, fonts: FontMa
             if p["runs"]:
                 below = p["runs"][0]
             elif below is not None:
-                p["runs"] = [{**below, "text": " ", "link": None, "underline": False,
+                p["runs"] = [{**(p.get("newline") or below), "text": " ", "link": None, "underline": False,
                               "strike": False, "highlight": None}]
-                p["size"] = below["size"]
+                p["size"] = p["runs"][0]["size"]
+    for p in paragraphs:
+        p.pop("newline", None)
     # bullet levels as classify counts them: clusters (2 pt apart) of the bullets' left edges
     levels: list[float] = []
     for x in sorted({p["indent_first"] / scale for p in paragraphs if p["bullet"]}):
@@ -425,9 +450,11 @@ def text_paragraphs(pe: dict, text: dict, resolver: StyleResolver, fonts: FontMa
 
 def merge_runs(runs: list[dict]) -> list[dict]:
     out = []
-    keys = ("font", "size", "bold", "italic", "color", "link", "script", "underline", "strike", "highlight", "smallcaps")
+    keys = ("font", "size", "bold", "italic", "color", "link", "script", "underline", "strike", "highlight", "smallcaps",
+            "weight")
     for r in runs:
-        if out and not r.get("hole") and not out[-1].get("hole") and all(out[-1][k] == r[k] for k in keys):
+        if out and not r.get("hole") and not out[-1].get("hole") and all(out[-1].get(k) == r.get(k) for k in keys) \
+                and out[-1].get("weight_unsure") == r.get("weight_unsure"):
             out[-1]["text"] += r["text"]
         else:
             out.append(dict(r))
@@ -457,6 +484,8 @@ def zero_insets(paragraphs: list[dict], height: float) -> bool:
     return need > 0 and height - need < ZERO_INSET_SLACK
 
 
+
+
 def imported(shape: dict) -> bool:
     """Was this text box made by a .pptx import? Drive's importer writes spacingMode NEVER_COLLAPSE on
     the paragraphs, Slides' own boxes say COLLAPSE_LISTS. Among the boxes that resize to fit their
@@ -484,7 +513,7 @@ def imports_lack_insets(pres: dict, resolver: StyleResolver, fonts: FontMapper, 
                 continue
             paragraphs = text_paragraphs(pe, shape.get("text", {}), resolver, fonts, scale, keep_blank=True,
                                          font_scale=autofit.get("fontScale") or 1.0,
-                                         spacing_cut=autofit.get("lineSpacingReduction") or 0.0)
+                                         spacing_cut=autofit.get("lineSpacingReduction") or 0.0, foreign=True)
             if not any(p["runs"] for p in paragraphs):
                 continue
             _, y0, _, y1 = box(m, dim(pe["size"]["width"]), dim(pe["size"]["height"]))
@@ -508,7 +537,7 @@ def text_element(pe: dict, m: list[float], resolver: StyleResolver, fonts: FontM
         (resolver.parent_shape_property(pe, "contentAlignment") if foreign else None) or "TOP"
     paragraphs = text_paragraphs(pe, shape.get("text", {}), resolver, fonts, scale, keep_blank=foreign,
                                  font_scale=font_scale, spacing_cut=spacing_cut,
-                                 keep_trailing=content in ("MIDDLE", "BOTTOM"))
+                                 keep_trailing=content in ("MIDDLE", "BOTTOM"), foreign=foreign)
     if not any(p["runs"] for p in paragraphs):
         return None
     w, h = dim(pe["size"]["width"]), dim(pe["size"]["height"])
@@ -559,7 +588,8 @@ def text_element(pe: dict, m: list[float], resolver: StyleResolver, fonts: FontM
             "placeholder": placeholder, "paragraphs": out_paras,
             "box": {"valign": {"MIDDLE": "middle", "BOTTOM": "bottom"}.get(content, "top"), "scale": scale,
                     "font_scale": font_scale, "grows": autofit.get("autofitType") == "SHAPE_AUTOFIT",
-                    **({"insets": 0} if bare else {})}}
+                    **({"insets": 0} if bare else {}),
+                    **({"snap": True} if foreign and page_w * scale <= SNAP_PAGE else {})}}
 
 
 def page_background(page: dict, resolver_pages: dict[str, dict], scheme: dict) -> tuple[str | None, str | None]:
@@ -684,6 +714,8 @@ def deck_ir(pres: dict, pdf_size: list[float] | None = None, base: dict | None =
             for oid in e.get("objects", []):
                 object_keys[oid] = (s.get("key"), e.get("key"))
     slides = []
+    drifts: list = []                 # (box, `top_drift`) of every measurable box, for `pptx_insets`
+    sides: list = []                  # `side_inset` of every box whose words' start edge could be read
 
     def read_page(page: dict, tags: list) -> list[dict]:
         out: list[dict] = []
@@ -737,7 +769,17 @@ def deck_ir(pres: dict, pdf_size: list[float] | None = None, base: dict | None =
             if thumb is not None:
                 thumb = deck_fills.load(thumb)
                 px = thumb.shape[1] / page_w
-            elements = deck_fills.settle(elements, thumb, px, None if picture else color, bool(picture))
+            elements = deck_fills.settle(elements, thumb, px, None if picture else color, bool(picture), images)
+            thumbnail_insets(elements, thumb, px)
+            thumbnail_rows(elements, thumb, px)
+            thumbnail_cell_pad(elements, thumb, px)
+            thumbnail_cell_text(elements, thumb, px)
+            thumbnail_weights(elements, thumb, px)
+            ink_widths(elements, thumb, px)
+            drifts += [(e, d) for e, d in ((e, top_drift(e, elements, thumb, px)) for e in elements)
+                       if d is not None]
+            sides += [side_inset(e, g) for e, g in ((e, side_gap(e, elements, thumb, px)) for e in elements)
+                      if g is not None]
         key = slide_keys.get(slide["objectId"]) or (max(set(tags), key=tags.count) if tags else None)
         slides.append({"page": n, "frame": str(n + 1), "size": [page_w, page_h], "objectId": slide["objectId"],
                        "key": key, "notes": notes_text(slide), "background_color": color,
@@ -747,6 +789,8 @@ def deck_ir(pres: dict, pdf_size: list[float] | None = None, base: dict | None =
             # source it refines already draws whatever the converter baked into it
             got = stash_picture(picture, fetch, images)
             slides[-1]["background_file"] = got.get("file")
+    if foreign:
+        pptx_insets(slides, drifts, sides)
     return {"version": 1, "source": {"presentationId": pres.get("presentationId"), "title": pres.get("title"),
                                      "revisionId": pres.get("revisionId")},
             "page_size": [page_w, page_h], "scale": scale, "slides": slides}
@@ -1054,6 +1098,11 @@ def cell_pad(pe: dict) -> tuple[float, float]:
         if z and spare >= 0:
             room.append(spare / 2)
     pad_y = min(cap, max(1.5, min(room))) if room else cap
+    if cap - pad_y < 1.0:
+        # A row a little short of its text at the cap is one Slides grew by what it lacked, not a
+        # sign of smaller insets: creandum-board's 22.0 pt rows of 7 pt text (6.8 pt to spare each
+        # side) are 22.8 on the thumbnail, 8.4 + 2 x 7.2.
+        pad_y = cap
     # Across it is a little more: journey-maps' header (rows say 2.5 pt) keeps "Channel" whole in
     # 46.9 pt but breaks "custom|ers" in 41.1 and "Succes|s" in 43.9, which puts the inset between
     # 3.7 and 5.7 pt; its first column's ink starts 4.9 pt in.
@@ -1104,15 +1153,19 @@ def table_element(pe: dict, m: list[float], resolver: StyleResolver, fonts: Font
             props = cell.get("tableCellProperties", {})
             fill = props.get("tableCellBackgroundFill", {})
             solid = fill.get("solidFill") if fill.get("propertyState", "RENDERED") == "RENDERED" else None
-            paras = text_paragraphs(pe, cell.get("text", {}), resolver, fonts, scale, keep_blank=True)
+            paras = text_paragraphs(pe, cell.get("text", {}), resolver, fonts, scale, keep_blank=True,
+                                    foreign=True)
             cells_out.append({
                 "row": loc.get("rowIndex", 0), "col": loc.get("columnIndex", 0),
                 "rowspan": cell.get("rowSpan", 1), "colspan": cell.get("columnSpan", 1),
                 "fill": rgb_hex(solid.get("color"), resolver.scheme) if solid else None,
                 "fill_alpha": round(solid.get("alpha", 1.0), 3) if solid else None,
                 "valign": VALIGN.get(props.get("contentAlignment"), "top"),
+                # a Hebrew cell is right to left like a Hebrew text box (hebrew-lesson's tables):
+                # set left to right, its lines ended on the wrong side of their full stops
                 "paragraphs": [{"align": p["align"], "level": p["level"], "bullet": p["bullet"], "size": p["size"],
                                 "line_spacing": p["line_spacing"],
+                                **({"direction": "rtl"} if p.get("direction") == "rtl" else {}),
                                 "runs": [{k: v for k, v in r.items() if k not in ("slides_font", "slides_size")}
                                          for r in p["runs"]]}
                                for p in paras if p["runs"]]})
@@ -1243,5 +1296,38 @@ def read_deck(ref: str, images: Path | None = None, base: dict | None = None, pd
         pdf_size = json.loads((p / "deck.json").read_text(encoding="utf-8"))["slides"][0]["size"]
     if base is None and p.is_dir() and (p / "sync" / "base.json").exists():
         base = json.loads((p / "sync" / "base.json").read_text(encoding="utf-8"))
+    # A foreign deck's gradients, table-style colours and the like are only in Google's own picture of
+    # each slide (deck_fills.py), so adopt reads those too, next to the pictures ($B2S_ADOPT_THUMBNAILS=0: not).
+    thumbnails = None
+    if foreign and images is not None and os.environ.get("B2S_ADOPT_THUMBNAILS", "1") != "0":
+        thumbnails = slide_thumbnails(pid, pres, Path(images).parent / "thumbnails")
     return deck_ir(pres, pdf_size or (base or {}).get("page_size"), base, fetch_url if images else None, images,
-                   foreign)
+                   foreign, thumbnails)
+
+
+def slide_thumbnails(pid: str, pres: dict, folder: Path):
+    """Save every slide's LARGE thumbnail into `folder` (3 at a time: Google allows 60 such reads a
+    minute, and a 429 waits) and return `deck_ir`'s `thumbnails` callback over them. A slide whose
+    thumbnail could not be read is None there: its unreported fills stay out, as without any."""
+    from concurrent.futures import ThreadPoolExecutor
+    from .google_auth import credentials, slides_service
+    from .gslides import save_thumbnail
+    creds = credentials()
+    folder.mkdir(parents=True, exist_ok=True)
+
+    def one(item):
+        i, s = item
+        path = folder / f"{i + 1:03d}.png"             # read again every time: the deck may have changed
+        for attempt in range(6):
+            try:
+                save_thumbnail(slides_service(creds), pid, s["objectId"], path)
+                return path
+            except Exception as exc:                                  # noqa: BLE001
+                if "429" not in str(exc) or attempt == 5:
+                    print(f"  slide {i + 1}: no thumbnail ({str(exc)[:80]})")
+                    return None
+                time.sleep(20 + 10 * attempt)
+
+    with ThreadPoolExecutor(3) as pool:
+        paths = list(pool.map(one, enumerate(pres.get("slides", []))))
+    return lambda n: paths[n] if 0 <= n < len(paths) else None

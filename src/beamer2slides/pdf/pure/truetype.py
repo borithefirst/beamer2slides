@@ -132,8 +132,8 @@ class _Fail(Exception):
 class TrueTypeFace:
     """An embedded glyf font at 64 ppem, with the ftoutline.Face interface render_text uses."""
 
-    def __init__(self, font):
-        prog = font.program
+    def __init__(self, font=None, program=None):
+        prog = program if program is not None else font.program
         face = prog.glyphs.face
         self.face = face
         for tag in (b"fvar", b"gvar", b"HVAR", b"VVAR", b"avar", b"CBLC", b"CBDT", b"sbix"):
@@ -517,19 +517,24 @@ class TrueTypeFace:
         self._outlines[key] = out
         return out
 
-    def path(self, glyph: int):
-        """LoadGlyphPath: FT_Set_Pixel_Sizes (a size reset: prep runs again before the next hinted
-        load), then an unhinted load."""
+    def unhinted(self, glyph: int, matrix: tuple[int, int, int, int] = (0x10000, 0, 0, 0x10000)):
+        """LoadGlyphPath's load: FT_Set_Pixel_Sizes (a size reset: prep runs again before the next
+        hinted load), FT_Set_Transform(matrix) (a substitute's skew), then an unhinted load."""
         self.cvt_ready = -1 if self.bytecode_ready == 0 else self.cvt_ready
-        if glyph in self._paths:
-            return self._paths[glyph]
         try:
-            got = self._load(glyph, False)
-            out = _contours(got, (0x10000, 0, 0, 0x10000))
+            return _contours(self._load(glyph, False), matrix)
         except _Fail:
-            out = None
+            return None
+
+    def path(self, glyph: int, matrix: tuple[int, int, int, int] = (0x10000, 0, 0, 0x10000)):
+        """CFX_Face::LoadGlyphPath: [(x, y, kind, close)] in em units, from the unhinted outline."""
+        key = (glyph, matrix)
+        if key in self._paths:
+            self.cvt_ready = -1 if self.bytecode_ready == 0 else self.cvt_ready
+            return self._paths[key]
+        out = self.unhinted(glyph, matrix)
         path = None if out is None else _glyph_path(out)
-        self._paths[glyph] = path
+        self._paths[key] = path
         return path
 
 

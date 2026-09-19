@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from ..api import OBJ_FORM
+from ..api import OBJ_FORM, OBJ_PATH, OBJ_SHADING, OBJ_TEXT
 from . import raster as R
 from .colors import load_colorspace
 from .raster import F
@@ -612,6 +612,10 @@ def load_smask(status, smask: dict, rect, smask_matrix):
         out = (px[..., 0] * 11 + px[..., 1] * 59 + px[..., 2] * 30) // 100
     else:
         out = px[..., 0]
+    from .transfer import smask_table
+    table = smask_table(doc, doc.resolve(smask.get("TR")))
+    if table is not None:
+        out = np.asarray(table, dtype=np.uint8)[out]
     return out.astype(np.uint8)
 
 
@@ -621,8 +625,20 @@ def load_smask(status, smask: dict, rect, smask_matrix):
 def unsupported(obj, ctx, check) -> str | None:
     """What `obj`'s transparency needs that is not ported, if anything; `check(objects, ctx)` is
     render.unported, run over a soft mask's contents."""
+    from . import transfer
+    from .render_shading import Unsupported
     if obj.transfer is not None:
-        return "transfer functions"
+        if ctx is None:
+            return "transfer functions"
+        try:
+            t = transfer.of(ctx.doc, obj.transfer)
+        except Unsupported as e:
+            return str(e)
+        if t is not None and not t.identity and obj.type not in (OBJ_PATH, OBJ_TEXT, OBJ_FORM, OBJ_SHADING):
+            return "transfer functions on images"
+        if (t is not None and not t.identity and obj.type == OBJ_TEXT
+                and getattr(getattr(obj, "font", None), "is_type3", False)):
+            return "transfer functions on Type 3 text"     # the glyphs' own colours: not checked
     if obj.smask is None:
         return None
     if ctx is None:
@@ -632,9 +648,10 @@ def unsupported(obj, ctx, check) -> str | None:
     if g is None:
         return None
     r = doc.resolve
-    tr = r(obj.smask.get("TR"))
-    if isinstance(tr, (dict, Stream)):
-        return "soft mask transfer functions"
+    try:
+        transfer.smask_table(doc, r(obj.smask.get("TR")))
+    except Unsupported as e:
+        return str(e)
     if lum and isinstance(r(obj.smask.get("BC")), list):
         group = r(g.get("Group"))
         cs_obj = r(group.get("CS")) if isinstance(group, dict) else None

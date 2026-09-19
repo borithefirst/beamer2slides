@@ -362,6 +362,91 @@ def test_adopt_sets_the_deck_in_a_fetched_family(monkeypatch, tmp_path):
     assert fonts == ["TinyFlex-Bold.ttf", "TinyFlex-LICENSE.txt", "TinyFlex-Regular.ttf"]
 
 
+def flex_font(name: str, axes: list[tuple]) -> bytes:
+    from fontTools.ttLib import TTFont
+    font = TTFont(io.BytesIO(tiny_font(name, variable=True)))
+    from fontTools.fontBuilder import FontBuilder
+    fb = FontBuilder(font=font)
+    fb.setupFvar(axes=axes, instances=[])
+    buf = io.BytesIO()
+    fb.save(buf)
+    return buf.getvalue()
+
+
+GOOGLE_SANS_META = """name: "Google Sans"
+fonts {
+  name: "Google Sans"
+  style: "normal"
+  weight: 400
+  filename: "GoogleSans[GRAD,opsz,wght].ttf"
+}
+"""
+
+
+def test_google_sans_text_is_google_sans_at_its_text_optical_size(monkeypatch):
+    """google/fonts has no Google Sans Text: it is Google Sans' opsz 17 (gdg24's 50 pt "Statistics" set
+    3.2% narrower in the opsz 18 default that stood in for it). Cut from Google Sans' variable font
+    into a family of its own, named so that it cannot be taken for the display cut."""
+    pytest.importorskip("fontTools")
+    from fontTools.ttLib import TTFont
+    hub = GitHub({"ofl/googlesans/METADATA.pb": GOOGLE_SANS_META.encode(),
+                  "ofl/googlesans/GoogleSans%5BGRAD%2Copsz%2Cwght%5D.ttf": flex_font(
+                      "Google Sans", [("opsz", 17, 18, 18, "Optical size"), ("wght", 400, 400, 700, "Weight")])})
+    monkeypatch.setattr(fontfetch, "get", hub)
+    got = fontfetch.fetch_family("Google Sans Text", log=lambda *_: None)
+    assert set(got) == {"Regular", "Bold"}
+    assert got["Regular"] == fontfetch.cache_dir() / "googlesanstext" / "GoogleSansText-Regular.ttf"
+    font = TTFont(got["Bold"])
+    assert "fvar" not in font and font["OS/2"].usWeightClass == 700
+    assert font["name"].getDebugName(1) == "Google Sans Text" and font["name"].getDebugName(16) is None
+    assert not any("googlesanstext" in u for u in hub.asked), "nothing is asked for under the name Slides uses"
+    # and the weights Slides sets per run are cut at the same optical size
+    w600 = fontfetch.weight_file(got["Regular"], 600)
+    assert w600 == got["Regular"].with_name("GoogleSansText-W600.ttf")
+    assert TTFont(w600)["OS/2"].usWeightClass == 600
+
+
+def test_a_weight_between_regular_and_bold_is_cut_when_the_family_is_variable(monkeypatch, tmp_path):
+    pytest.importorskip("fontTools")
+    from fontTools.ttLib import TTFont
+    hub = GitHub({"ofl/tinyflex/METADATA.pb": VARIABLE_META.encode(),
+                  "ofl/tinyflex/TinyFlex%5Bwght%5D.ttf": tiny_font("Tiny Flex", variable=True)})
+    monkeypatch.setattr(fontfetch, "get", hub)
+    regular = fontfetch.fetch_family("Tiny Flex", log=lambda *_: None)["Regular"]
+    for weight in (300, 500, 600):
+        path = fontfetch.weight_file(regular, weight)
+        assert path.name == f"TinyFlex-W{weight}.ttf" and TTFont(path)["OS/2"].usWeightClass == weight
+    assert fontfetch.weight_file(regular, 950) is None, "off the axis"
+    assert fontfetch.weight_file(regular, 600, italic=True) is None, "no italic to cut it from"
+    elsewhere = tmp_path / "shelf" / "TinyFlex-Regular.ttf"
+    elsewhere.parent.mkdir()
+    elsewhere.write_bytes(regular.read_bytes())
+    assert fontfetch.weight_file(elsewhere, 600) is None, "only families this cache fetched"
+
+
+def test_a_run_in_weight_600_is_set_in_its_own_face(monkeypatch, tmp_path):
+    """gdg24's headings are Google Sans 600, which fontspec's four styles do not have: bold stood in,
+    2.4% too wide. The weight gets a FontFace of its own and the box selects its series."""
+    pytest.importorskip("fontTools")
+    monkeypatch.delenv("B2S_FONTS")
+    monkeypatch.setattr(adopt, "font_dirs", lambda: [fontfetch.cache_dir()] if fontfetch.cache_dir().is_dir() else [])
+    hub = GitHub({"ofl/tinyflex/METADATA.pb": VARIABLE_META.encode(),
+                  "ofl/tinyflex/TinyFlex%5Bwght%5D.ttf": tiny_font("Tiny Flex", variable=True)})
+    monkeypatch.setattr(fontfetch, "get", hub)
+    head = text_shape("h", "This is a Headline in semibold", 10, 10, 400, 40, font="Tiny Flex")
+    body = text_shape("b", "Body words set in the regular weight, and one medium word", 10, 100, 400, 60,
+                      font="Tiny Flex")
+    head["shape"]["text"]["textElements"][1]["textRun"]["style"]["weightedFontFamily"] = {
+        "fontFamily": "Tiny Flex", "weight": 600}
+    ir = deck_ir(deck_with(head, body), foreign=True)
+    run = next(e for e in ir["slides"][0]["elements"] if e.get("id") == "h")["paragraphs"][0]["runs"][0]
+    assert run["weight"] == 600 and run["bold"], "600 is bold to anything that knows only two weights"
+    text = adopt.bootstrap(ir, tmp_path / "tree" / "main.tex")
+    assert ",FontFace={w600}{n}{Font=TinyFlex-W600}]" in text
+    assert "\\fontseries{w600}\\selectfont " in text and "\\bfseries" not in text
+    assert (tmp_path / "tree" / "fonts" / "TinyFlex-W600.ttf").exists()
+
+
 def test_a_decks_second_face_gets_a_switch_of_its_own(monkeypatch, tmp_path):
     """Montserrat titles over Open Sans text: both are the deck's look, not whichever has more letters."""
     shelf = tmp_path / "shelf"
@@ -379,6 +464,23 @@ def test_a_decks_second_face_gets_a_switch_of_its_own(monkeypatch, tmp_path):
     assert "\\adoptfontA" in title
     body = text[text.index("body text") - 200:text.index("body text")]
     assert "\\adoptfontA" not in body
+
+
+def test_a_face_of_few_but_huge_letters_gets_a_switch_too(monkeypatch, tmp_path):
+    """sc-memphis' section numbers: two digits a slide at 528 pt are its look as much as a paragraph;
+    the same two digits at body size are not."""
+    shelf = tmp_path / "shelf"
+    shelf.mkdir()
+    for stem in ("OpenSans", "Montserrat"):
+        for style in ("Regular", "Bold"):
+            (shelf / f"{stem}-{style}.ttf").write_bytes(b"\x00\x01\x00\x00")
+    monkeypatch.setenv("B2S_FONTS", str(shelf))
+    for size, switched in ((300.0, True), (20.0, False)):
+        ir = deck_ir(deck_with(text_shape("t0", "body text " * 20, 10, 10, 600, 100, font="Open Sans"),
+                               text_shape("t1", "03", 10, 120, 600, 300, font="Montserrat", size=size)),
+                     foreign=True)
+        text = adopt.bootstrap(ir, tmp_path / f"tree{size:.0f}" / "main.tex")
+        assert ("\\newfontfamily\\adoptfontA{Montserrat}" in text) == switched
 
 
 def test_a_face_without_the_letters_set_in_it_gets_no_switch(monkeypatch, tmp_path):
@@ -402,3 +504,20 @@ def test_a_face_without_the_letters_set_in_it_gets_no_switch(monkeypatch, tmp_pa
                              text_shape("t2", "AAAA", 10, 10, 600, 100, font="Open Sans")), foreign=True)
     text = adopt.bootstrap(only, tmp_path / "tree2" / "main.tex")
     assert "\\setsansfont{OpenSans}" in text and "NotoSansSymbols" not in text
+
+
+def test_a_dimmed_picture_is_baked_into_its_file(tmp_path):
+    """intro-lecture's title photos carry brightness -0.5 and -0.7, which LaTeX has no option for:
+    the file in the tree is the picture as Slides shows it - its colours scaled by 1 + b (measured on
+    the thumbnails), not moved by b, which would black out every pixel under half grey."""
+    from PIL import Image
+    src = tmp_path / "photo.png"
+    Image.new("RGB", (8, 8), (200, 100, 40)).save(src)
+    tree = tmp_path / "src"
+    dim = adopt.picture_of({"file": str(src), "alt": "Hall", "sha1": "ab" * 20, "brightness": -0.5}, tree)
+    plain = adopt.picture_of({"file": str(src), "alt": "Hall", "sha1": "ab" * 20}, tree)
+    assert dim.rel != plain.rel
+    assert Image.open(dim.path).convert("RGB").getpixel((3, 3)) == (100, 50, 20)
+    assert Image.open(plain.path).convert("RGB").getpixel((3, 3)) == (200, 100, 40)
+    bright = adopt.picture_of({"file": str(src), "alt": "Hall", "sha1": "ab" * 20, "brightness": 0.5}, tree)
+    assert Image.open(bright.path).convert("RGB").getpixel((3, 3)) == (255, 200, 80)

@@ -67,7 +67,9 @@ TURN_MACRO = r"""\makeatletter
 
 
 def pt(v: float) -> str:
-    return f"{v:.2f}".rstrip("0").rstrip(".").replace("-0", "0") if abs(v) >= 0.005 else "0"
+    # (a "-0.67".replace("-0", "0") here once turned every length between -1 and 0 positive)
+    s = f"{v:.2f}".rstrip("0").rstrip(".")
+    return "0" if s in ("", "-", "0", "-0") else s
 
 
 def P(x: float, y: float) -> str:
@@ -489,8 +491,35 @@ def freeform_line(el: dict) -> bool:
     return "category" in el and not el["category"] and not el.get("line_type")
 
 
+def traced_path(rings, x0: float, y0: float) -> str:
+    """Traced rings (page pt) as one TikZ path relative to the page point (x0, y0)."""
+    return " ".join(" -- ".join(P(x - x0, y - y0) for x, y in ring) + " -- cycle" for ring in rings)
+
+
+def traced_block(el: dict, ctx, ind: str) -> str:
+    """A freeform whose outline `deck_freeforms` traced from the slide's picture: one filled path
+    (even-odd: the rings of a letter-like shape nest), and where the deck outlines it in another
+    colour, that outline drawn just inside the traced edge (clipped to it, twice as wide), which is
+    where the picture shows it."""
+    tr = el["trace"]
+    ctx.packages.add("\\usepackage{tikz}")
+    x0, y0, x1, y1 = el["bbox"]
+    path = traced_path(tr["rings"], x0, y0)
+    opts = [f"fill={colour_name(tr['fill'], ctx.colours)}", "even odd rule"]
+    if tr.get("alpha") is not None and tr["alpha"] < 0.995:
+        opts.append(f"fill opacity={tr['alpha']:.3f}")
+    body = [f"\\path[{','.join(opts)}] {path};"]
+    if tr.get("stroke"):
+        body.append(f"\\begin{{scope}}[even odd rule]\\clip {path};")
+        body.append(f"\\path[draw={colour_name(tr['stroke'], ctx.colours)},line width={2 * (tr.get('weight') or 0.75):.2f}pt] {path};")
+        body.append("\\end{scope}")
+    return tikz_block(("\n" + ind + "    ").join(body), x0, y0, x1 - x0, y1 - y0, ind)
+
+
 def line_block(el: dict, ctx, ind: str) -> str:
     """A line or connector, with its heads, dashes and transparency."""
+    if el.get("trace"):
+        return traced_block(el, ctx, ind)
     stroke = el.get("outline")
     if not stroke or freeform_line(el):
         return ""
@@ -514,7 +543,10 @@ def line_block(el: dict, ctx, ind: str) -> str:
 
 def shape_block(el: dict, ctx, ind: str) -> str:
     """A shape in its preset's geometry, filled and outlined as the deck has it, turned and mirrored
-    by its transform. A freeform is drawn as `CUSTOM_AS` says (its geometry is not in the API)."""
+    by its transform. A freeform is drawn as `deck_freeforms` traced it from the slide's picture,
+    else as `CUSTOM_AS` says (its geometry is not in the API)."""
+    if el.get("trace"):
+        return traced_block(el, ctx, ind)
     fo, so = style_options(el, ctx)
     if not fo and not so:
         return ""
@@ -523,6 +555,11 @@ def shape_block(el: dict, ctx, ind: str) -> str:
     w, h = max(fr["size"][0], 0.01), max(fr["size"][1], 0.01)
     if kind in ("CUSTOM", "?", "FREEFORM"):
         paths = preset("ELLIPSE" if CUSTOM_AS == "ellipse" else "RECTANGLE", w, h)
+    elif kind == "PIE" and el.get("pie"):
+        # the angles the thumbnail shows (`deck_fills.pie_angles`), not the preset's default
+        start, sweep = el["pie"]
+        paths = [(ellipse(w / 2, h / 2, w / 2, h / 2), "fs")] if sweep >= 359.5 else \
+            [(f"{P(w / 2, h / 2)} -- {arc(w / 2, h / 2, w / 2, h / 2, start, sweep)} -- cycle", "fs")]
     else:
         paths = preset(kind, w, h) or preset("RECTANGLE", w, h)
     ctx.packages.add("\\usepackage{tikz}")

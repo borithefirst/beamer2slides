@@ -45,7 +45,7 @@ PITCH_FIXED = 1 << 0
 PITCH_ROMAN = 1 << 4
 PITCH_SCRIPT = 4 << 4
 
-WEIGHT_EXTRA_LIGHT, WEIGHT_NORMAL, WEIGHT_BOLD, WEIGHT_EXTRA_BOLD = 100, 400, 700, 800
+WEIGHT_EXTRA_LIGHT, WEIGHT_NORMAL, WEIGHT_BOLD, WEIGHT_EXTRA_BOLD = 100, 400, 700, 900
 
 # FX_Charset
 CHARSET_ANSI, CHARSET_DEFAULT, CHARSET_SYMBOL = 0, 1, 2
@@ -421,12 +421,111 @@ class Win32FontInfo:
 # ---------------------------------------------------------------------- CFX_FontMapper
 
 
+# CFX_SubstFont's tables (cfx_substfont.cpp)
+_WEIGHT_POW = (
+    0, 6, 12, 14, 16, 18, 22, 24, 28, 30, 32, 34, 36, 38, 40, 42, 44, 46, 48, 50, 52, 54, 56, 58, 60, 62, 64, 66,
+    68, 70, 70, 72, 72, 74, 74, 74, 76, 76, 76, 78, 78, 78, 80, 80, 80, 82, 82, 82, 84, 84, 84, 84, 86, 86, 86, 88,
+    88, 88, 88, 90, 90, 90, 90, 92, 92, 92, 92, 94, 94, 94, 94, 96, 96, 96, 96, 96, 98, 98, 98, 98, 100, 100, 100,
+    100, 100, 102, 102, 102, 102, 102, 104, 104, 104, 104, 104, 106, 106, 106, 106, 106)
+_WEIGHT_POW_11 = (
+    0, 4, 7, 8, 9, 10, 12, 13, 15, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37,
+    39, 39, 40, 40, 41, 41, 41, 42, 42, 42, 43, 43, 43, 44, 44, 44, 45, 45, 45, 46, 46, 46, 46, 43, 47, 47, 48, 48,
+    48, 48, 45, 50, 50, 50, 46, 51, 51, 51, 52, 52, 52, 52, 53, 53, 53, 53, 53, 54, 54, 54, 54, 55, 55, 55, 55, 55,
+    56, 56, 56, 56, 56, 57, 57, 57, 57, 57, 58, 58, 58, 58, 58)
+_WEIGHT_POW_SHIFT_JIS = (
+    0, 0, 2, 4, 6, 8, 10, 14, 16, 20, 22, 26, 28, 32, 34, 38, 42, 44, 48, 52, 56, 60, 64, 66, 70, 74, 78, 82, 86, 90,
+    96, 96, 96, 96, 98, 98, 98, 100, 100, 100, 100, 102, 102, 102, 102, 104, 104, 104, 104, 104, 106, 106, 106, 106,
+    106, 108, 108, 108, 108, 108, 110, 110, 110, 110, 110, 112, 112, 112, 112, 112, 112, 114, 114, 114, 114, 114, 114,
+    114, 116, 116, 116, 116, 116, 116, 116, 118, 118, 118, 118, 118, 118, 118, 120, 120, 120, 120, 120, 120, 120, 120)
+_ANGLE_SKEW = (0, -2, -3, -5, -7, -9, -11, -12, -14, -16, -18, -19, -21, -23, -25, -27, -29, -31, -32, -34, -36, -38,
+               -40, -42, -45, -47, -49, -51, -53, -55)
+CHARSET_SHIFT_JIS = 128
+
+
+def _cdiv(a: int, b: int) -> int:
+    """C integer division (truncates toward zero)."""
+    q = abs(a) // abs(b)
+    return q if (a >= 0) == (b >= 0) else -q
+
+
+def skew_from_angle(angle: int) -> int:
+    """GetSkewFromAngle."""
+    if angle > 0 or angle == -0x80000000 or -angle >= len(_ANGLE_SKEW):
+        return -58
+    return _ANGLE_SKEW[-angle]
+
+
+@dataclass
+class SubstFont:
+    """CFX_SubstFont: how PDFium varies a substitute face when it draws it."""
+    family: str = ""
+    charset: int = CHARSET_ANSI
+    weight: int = 0
+    italic_angle: int = 0
+    weight_cjk: int = 0
+    subst_cjk: bool = False
+    italic_cjk: bool = False
+    flag_mm: bool = False                  # IsBuiltInGenericFont: drawn with a multiple master face
+
+    def use_chrome_serif(self) -> None:
+        self.weight = _cdiv(self.weight * 4, 5)
+        self.family = "Chrome Serif"
+
+    def skew(self) -> int:
+        return skew_from_angle(self.italic_angle)
+
+    def effective_skew(self, is_cid: bool) -> int:
+        if self.subst_cjk and is_cid:
+            return skew_from_angle(-15 if self.italic_cjk else 0)
+        return self.skew()
+
+    def effective_weight(self, is_cid: bool) -> int:
+        return self.weight_cjk if self.subst_cjk and is_cid else self.weight
+
+    def embolden_level_for_render(self, is_cid: bool, xx: int, xy: int) -> int:
+        """GetEmboldenLevelForRender: the FT_Outline_Embolden strength, or -1 (no glyph)."""
+        if self.flag_mm:
+            return 0
+        weight = self.effective_weight(is_cid)
+        if weight <= 400:
+            return 0
+        index = _cdiv(weight - 400, 10)
+        if index >= len(_WEIGHT_POW_11):
+            return -1
+        level = (_WEIGHT_POW_SHIFT_JIS if self.charset == CHARSET_SHIFT_JIS else _WEIGHT_POW_11)[index]
+        v = _cdiv(level * (abs(xx) + abs(xy)), 36655)
+        return v if -0x80000000 <= v <= 0x7FFFFFFF else 0            # ValueOrDefault(0)
+
+    def embolden_level_for_load(self) -> int:
+        if self.flag_mm or self.weight <= 400:
+            return 0
+        index = min(_cdiv(self.weight - 400, 10), len(_WEIGHT_POW) - 1)
+        if self.charset == CHARSET_SHIFT_JIS:
+            return _cdiv(_WEIGHT_POW_SHIFT_JIS[index] * 65536, 36655)
+        return _WEIGHT_POW[index]
+
+    def configure_external(self, face_name: str, charset: int, weight: int, is_italic: bool, italic_angle: int,
+                           face_is_bold: bool, face_is_italic: bool) -> None:
+        """ConfigureExternalSubst."""
+        self.family = face_name
+        self.charset = charset
+        if weight != (WEIGHT_BOLD if face_is_bold else WEIGHT_NORMAL):
+            self.weight = weight
+        if is_italic and not face_is_italic:
+            if italic_angle == 0:
+                italic_angle = -12
+            elif abs(italic_angle) < 5:
+                italic_angle = 0
+            self.italic_angle = italic_angle
+
+
 @dataclass
 class _Face:
-    """What FindSubstFace hands back: the face (a fonts.Program) and whether it is PDFium's
-    generic multiple master face (CFX_SubstFont::IsBuiltInGenericFont)."""
+    """What FindSubstFace hands back: the face (a fonts.Program), whether it is PDFium's generic
+    multiple master face (CFX_SubstFont::IsBuiltInGenericFont), and the CFX_SubstFont it filled in."""
     program: object
     generic: bool = False
+    subst: SubstFont = field(default_factory=SubstFont)
 
 
 @dataclass
@@ -486,8 +585,10 @@ class FontMapper:
                 return family
         return ""
 
-    def use_internal_subst(self, base_font: int | None, pitch_family: int) -> _Face | None:
+    def use_internal_subst(self, base_font: int | None, pitch_family: int, weight: int = 0,
+                           italic_angle: int = 0, subst: SubstFont | None = None) -> _Face | None:
         from .fonts import load_cff, load_generic
+        subst = subst if subst is not None else SubstFont()
         if base_font is not None:
             if base_font not in self.standard_faces:
                 data = foxit.face_data(foxit.STANDARD[base_font])
@@ -495,20 +596,32 @@ class FontMapper:
                 if data is not None:
                     try:
                         prog = load_cff(data)
+                        prog.face_data = data             # what render_text draws the glyphs from
                     except Exception:  # noqa: BLE001
                         prog = None
                 self.standard_faces[base_font] = prog
             prog = self.standard_faces[base_font]
-            return _Face(prog) if prog is not None else None
-        name = foxit.GENERIC_SERIF if pitch_family & PITCH_ROMAN else foxit.GENERIC_SANS
+            return _Face(prog, subst=subst) if prog is not None else None
+        subst.flag_mm = True
+        subst.italic_angle = italic_angle
+        if weight:
+            subst.weight = weight
+        if pitch_family & PITCH_ROMAN:
+            subst.use_chrome_serif()
+            name = foxit.GENERIC_SERIF
+        else:
+            subst.family = "Chrome Sans"
+            name = foxit.GENERIC_SANS
         if name not in self.generic:
             data = foxit.face_data(name)
             self.generic[name] = load_generic(data) if data is not None else None
         prog = self.generic[name]
-        return _Face(prog, generic=True) if prog is not None else None
+        return _Face(prog, generic=True, subst=subst) if prog is not None else None
 
-    def use_external_subst(self, hfont, face_name: str, weight: int, italic: bool) -> _Face | None:
+    def use_external_subst(self, hfont, face_name: str, weight: int, italic: bool, italic_angle: int = 0,
+                           charset: int = CHARSET_ANSI, subst: SubstFont | None = None) -> _Face | None:
         from .fonts import load_truetype
+        subst = subst if subst is not None else SubstFont()
         info = self.font_info
         try:
             actual = info.get_face_name(hfont)          # the cache key is the face GDI gave
@@ -549,11 +662,18 @@ class FontMapper:
                 prog = self.face_map[key]
         finally:
             info.delete_font(hfont)
-        return _Face(prog) if prog is not None else None
+        if prog is None:
+            return None
+        # GetFaceName succeeds on Windows, so the family is GDI's face name, never the face's own
+        bold, italic_face = _face_style(prog)
+        subst.configure_external(face_name, charset, weight, italic, italic_angle, bold, italic_face)
+        return _Face(prog, subst=subst)
 
-    def find_subst_face(self, name: str, truetype: bool, flags: int, weight: int, italic_angle: int) -> _Face | None:
+    def find_subst_face(self, name: str, truetype: bool, flags: int, weight: int, italic_angle: int,
+                        subst: SubstFont | None = None) -> _Face | None:
         """CFX_FontMapper::FindSubstFace for code page kDefANSI (simple fonts)."""
         from .fonts import standard_font_index
+        subst = subst if subst is not None else SubstFont()
         if weight == 0:
             weight = WEIGHT_NORMAL
         if not flags & USE_EXTERN_ATTR:
@@ -561,9 +681,11 @@ class FontMapper:
             italic_angle = 0
         subst_name = get_subst_name(name, truetype)
         if subst_name == "Symbol" and not truetype:
-            return self.use_internal_subst(SYMBOL, 0)
+            subst.family, subst.charset = "Chrome Symbol", CHARSET_SYMBOL
+            return self.use_internal_subst(SYMBOL, 0, weight, italic_angle, subst)
         if subst_name == "ZapfDingbats":
-            return self.use_internal_subst(DINGBATS, 0)
+            subst.family, subst.charset = "Chrome Dingbats", CHARSET_SYMBOL
+            return self.use_internal_subst(DINGBATS, 0, weight, italic_angle, subst)
         style = ""
         has_comma = False
         pos = subst_name.find(",")
@@ -606,7 +728,7 @@ class FontMapper:
             base_font = None
         weight, n_style, style_available = state["weight"], state["style"], state["available"]
         if self.font_info is None:
-            return self.use_internal_subst(base_font, pitch_family)
+            return self.use_internal_subst(base_font, pitch_family, old_weight, italic_angle, subst)
         charset = CHARSET_SYMBOL if flags & STYLE_SYMBOLIC and base_font is None else CHARSET_ANSI
         is_cjk = charset in _CJK_CHARSETS
         is_italic = bool(n_style & STYLE_ITALIC)
@@ -639,16 +761,31 @@ class FontMapper:
                 family = CANONICAL[base_font]
         hfont = self.font_info.map_font(weight, is_italic, charset, pitch_family, family)
         if hfont:
-            return self.use_external_subst(hfont, subst_name, weight, is_italic)
+            return self.use_external_subst(hfont, subst_name, weight, is_italic, italic_angle, charset, subst)
         if match:
             hfont = self.font_info.get_font(match)
             if not hfont:
-                return self.use_internal_subst(base_font, pitch_family)
-            return self.use_external_subst(hfont, subst_name, weight, is_italic)
+                return self.use_internal_subst(base_font, pitch_family, old_weight, italic_angle, subst)
+            return self.use_external_subst(hfont, subst_name, weight, is_italic, italic_angle, charset, subst)
         if charset == CHARSET_SYMBOL:
-            return self.find_subst_face(family, truetype, flags & ~STYLE_SYMBOLIC, weight, italic_angle)
+            return self.find_subst_face(family, truetype, flags & ~STYLE_SYMBOLIC, weight, italic_angle, subst)
         # charset is ANSI here: the face_array search for other charsets is CJK only
-        return self.use_internal_subst(base_font, pitch_family)
+        return self.use_internal_subst(base_font, pitch_family, old_weight, italic_angle, subst)
+
+
+def _face_style(prog) -> tuple[bool, bool]:
+    """CFX_Face::IsBold / IsItalic of a system face: FreeType's style flags (sfnt_load_face) - OS/2's
+    fsSelection when the face has outlines and an OS/2 table (bit 9 or bit 0 italic, bit 5 bold),
+    else head's macStyle."""
+    face = getattr(prog, "sfnt_face", None)
+    if face is None:
+        return False, False
+    if face.has_outline and face.os2 is not None:
+        sel = face.os2["fsSelection"]
+        return bool(sel & 32), bool(sel & 512 or sel & 1)
+    head = face.table(b"head")
+    mac = int.from_bytes(face.data[head[0] + 44:head[0] + 46], "big") if head else 0
+    return bool(mac & 1), bool(mac & 2)
 
 
 def _ttc_index(data: bytes, offset: int) -> int:
