@@ -1489,6 +1489,19 @@ def test_substituted_fonts_are_measured_with_pdfiums_face(name):
     close(a.glyph_widths(queries), b.glyph_widths(queries), f"{name} glyph_widths")
 
 
+@pytest.mark.parametrize("name", [b"Courier-Bold", b"Times-Roman", b"Arial", b"Symbol", b"Foo"])
+@pytest.mark.parametrize("flags", [0, 2, 4, 6, 32, 36, 262150])
+def test_a_base14_fonts_encoding_follows_its_descriptors_flags(name, flags):
+    """CPDF_Type1Font::Load reads m_Flags from the descriptor before it picks the base encoding of a
+    base 14 name (aliases like Arial too), and only the nonsymbolic bit makes it Standard: a symbolic
+    Courier without /Encoding stays builtin and becomes WinAnsi (seed 81 of platform_check's
+    subst-extract read D5 as Otilde there, and the pure reader as Standard's nothing). Text only,
+    so it holds whatever face the platform substitutes."""
+    data = _subst_case(name, b"Type1", flags).replace(b"\\351\\374\\200\\225", b"\\325\\246\\370\\207\\177\\227\\265")
+    said = [[c.c for c in pdf.resolve(b).open(data)[0].chars()] for b in ("pure", "pdfium")]
+    assert said[0] == said[1]
+
+
 def _chars_and_bounds(page):
     chars = [{k: v for k, v in dataclasses.asdict(c).items() if k != "font_id"} for c in page.chars()]
     return chars, page.object_bounds()

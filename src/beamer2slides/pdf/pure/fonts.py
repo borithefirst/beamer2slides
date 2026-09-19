@@ -1092,7 +1092,10 @@ class SimpleFont(Font):
             self.base14 = standard_font_index(self.base_name)
             if self.base14 is not None:
                 self.base_name = BASE14[self.base14]
-                if not isinstance(desc, dict) and self.base14 >= BASE14_SYMBOL:
+                # m_Flags from the descriptor first: the base encoding below depends on it
+                if isinstance(desc, dict) and "Flags" in desc:
+                    self.flags = _int(r(desc.get("Flags")))
+                elif self.base14 >= BASE14_SYMBOL:
                     self.flags = FLAG_SYMBOLIC
                 if self.base14 < 4:   # Courier
                     self.widths = [600] * 256
@@ -1100,7 +1103,7 @@ class SimpleFont(Font):
                     self.base_encoding = SYMBOL
                 elif self.base14 == BASE14_DINGBATS:
                     self.base_encoding = ZAPF
-                elif not self.flags & FLAG_SYMBOLIC:
+                elif self.flags & FLAG_NONSYMBOLIC:     # FontStyleIsNonSymbolic
                     self.base_encoding = STANDARD
         self._descriptor(desc)
         mapped = _mapper_active()

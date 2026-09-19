@@ -1,0 +1,65 @@
+# The pure Python PDF reader against PDFium on Linux, macOS and Windows (docs/pdf-from-scratch.md,
+# "Other platforms"). PDFium's substitution for fonts a PDF doesn't embed is the platform's own, so
+# only a run on each platform says whether the port follows it there.
+name: pure-pdf
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths: ["src/beamer2slides/pdf/**", "src/beamer2slides/devtools/**", "tests/test_pure_pdf.py",
+            "tests/test_pdf_backend.py", "tests/decks/*.tex", ".github/**"]
+
+jobs:
+  decks:
+    # the test decks, compiled once with TeX Live and handed to every platform
+    runs-on: ubuntu-latest
+    container: texlive/texlive:latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build the test decks
+        run: |
+          command -v python3 || (apt-get update && apt-get install -y python3)
+          python3 tests/decks/build.py || true
+          ls tests/decks/out
+      - uses: actions/upload-artifact@v4
+        with:
+          name: decks
+          path: tests/decks/out/*.pdf
+
+  check:
+    needs: decks
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: decks
+          path: tests/decks/out
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install
+        run: |
+          python -m pip install -c .github/constraints.txt -e ".[dev,pure]"
+          python -m beamer2slides.pdf.pure.foxit
+      - name: Conformance (pure vs PDFium on the decks)
+        env:
+          B2S_TEST_PDF_BACKENDS: pdfium,pure
+        run: python -m pytest -q -n auto --dist loadgroup tests/test_pure_pdf.py tests/test_pdf_backend.py
+      - name: Oracles
+        if: always()
+        run: python -m beamer2slides.devtools.platform_check --out out/platform-check
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: platform-check-${{ matrix.os }}
+          path: out/platform-check
+      - name: Whole offline suite (informative)
+        if: always()
+        continue-on-error: true
+        run: python -m pytest -q -n auto --dist loadgroup

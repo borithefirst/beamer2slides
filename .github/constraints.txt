@@ -1,0 +1,8 @@
+# The versions the pure reader is checked against locally (docs/pdf-from-scratch.md): PDFium is the
+# oracle, so CI must run the same PDFium build, and Pillow's libjpeg decodes the JPEGs both compare.
+pypdfium2==5.13.0
+fonttools==4.65.0
+numpy==2.5.3
+pillow==12.3.0
+pytest==9.1.1
+pytest-xdist==3.8.0
