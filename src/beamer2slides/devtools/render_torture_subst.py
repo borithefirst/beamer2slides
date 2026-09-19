@@ -117,6 +117,9 @@ _RESET_FONTS = [FontSpec(f"reset/{flags}", "unknown", [
 _RESET = pdf_bytes(b"BT /F0 20 Tf 60 60 Td (A) Tj ET BT /F1 20 Tf 120 60 Td (A) Tj ET", _RESET_FONTS)
 
 
+LAST_BLENDS = ""          # where `compare`'s last run started from (`generic_blends`)
+
+
 def resync() -> None:
     """Put both backends' generic faces (FoxitSansMM, FoxitSerifMM) into one known blend. A face's
     blend is process-wide state that every glyph drawn moves and every width measured without /Widths
@@ -132,11 +135,29 @@ def resync() -> None:
             doc.close()
 
 
+def generic_blends() -> str:
+    """The blend each of PDFium's built-in multiple master faces stands at, as the pure reader holds
+    them. The blend is process-wide state that the width of a code with no /Widths reads
+    (CPDF_SimpleFont::LoadCharMetrics loads the glyph without setting the axes), so the two readers
+    only agree while they have moved it the same way: this says where they start from."""
+    try:
+        from ..pdf.pure import fontmapper
+        mapper = fontmapper._mapper
+        if mapper is None:
+            return "no mapper"
+        return " ".join(f"{name}={prog.face.blend_key() if prog is not None else None}"
+                        for name, prog in sorted(mapper.generic.items()))
+    except Exception as e:  # noqa: BLE001
+        return f"unknown: {type(e).__name__} {e}"
+
+
 def compare(content: bytes, fonts, zoom: float, transparent: bool):
     """(pixels that differ, PDFium's render, pure's render, per-pixel max difference)."""
+    global LAST_BLENDS
     from ..pdf.pdfium_backend import PdfiumBackend
     from ..pdf.pure.backend import PureBackend
     resync()
+    LAST_BLENDS = generic_blends()
     data = pdf_bytes(content, fonts)
     da, db = PdfiumBackend().open(data), PureBackend().open(data)
     try:
@@ -255,6 +276,43 @@ def _pure_glyph(content: bytes, fonts) -> str:
             doc.close()
     except Exception:  # noqa: BLE001
         return "?"
+
+
+def widths(content: bytes, fonts) -> list[str]:
+    """The advance each reader gives the page's characters. A code with no /Widths entry is measured
+    on the face itself, and PDFium loads that glyph without setting the multiple master axes
+    (CPDF_SimpleFont::LoadCharMetrics), so the answer is whatever blend the shared face stands at -
+    which is process-wide, and which the width then feeds back into (a substituted glyph is drawn at
+    its /Widths width). Two readers that have moved the blend differently disagree here first, and
+    everything else follows. Never raises: this is for the failure report."""
+    out: list[str] = []
+    try:
+        from ..pdf.pdfium_backend import PdfiumBackend
+        from ..pdf.pure.backend import PureBackend
+        data = pdf_bytes(content, fonts)
+        said = []
+        for backend in (PdfiumBackend(), PureBackend()):
+            doc = backend.open(data)
+            try:
+                page = doc[0]
+                keys: list[tuple[int, str]] = []
+                for char in page.chars():
+                    key = (char.font_id, char.c)
+                    if key not in keys and len(keys) < 8:
+                        keys.append(key)
+                said.append((keys, page.glyph_widths([(f, c, 1000.0) for f, c in keys])))
+            finally:
+                doc.close()
+        (keys, a), (other, b) = said
+        if keys != other:
+            out.append(f"   widths: the readers name different characters, {keys} and {other}")
+            return out
+        apart = [f"{t!r}@{f}: pdfium {x} pure {y}" for (f, t), x, y in zip(keys, a, b) if x != y]
+        out.append("   widths: " + ("; ".join(apart) if apart else
+                                    f"the same for all {len(keys)} characters"))
+    except Exception as e:  # noqa: BLE001
+        out.append(f"   (widths unknown: {type(e).__name__} {e})")
+    return out
 
 
 def anatomy(content: bytes, fonts) -> list[str]:
@@ -426,10 +484,10 @@ def main(argv=None) -> int:
         small = content if args.no_shrink else shrink(content, fonts, zoom, transparent)
         npx, a, b, d = compare(small, fonts, zoom, transparent)
         print(f"seed {seed} zoom {zoom} transparent {transparent} fonts {[f.name for f in fonts]}: "
-              f"{npx} px, max {d.max()}")
+              f"{npx} px, max {d.max()} from blends {LAST_BLENDS}")
         print(small.decode())
-        for line in (faces(small, fonts) + glyphs(small, fonts) + anatomy(small, fonts)
-                     + sweep(small, fonts, zoom, transparent)):
+        for line in (faces(small, fonts) + glyphs(small, fonts) + widths(small, fonts)
+                     + anatomy(small, fonts) + sweep(small, fonts, zoom, transparent)):
             print(line)
         out.mkdir(parents=True, exist_ok=True)
         from PIL import Image
