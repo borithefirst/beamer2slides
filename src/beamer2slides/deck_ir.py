@@ -534,6 +534,75 @@ def thumbnail_insets(elements: list[dict], thumb, px: float) -> None:
 
 
 CAP_EM = 0.72               # a Latin face's cap height, near enough to tell 6.5 pt of top inset
+PPTX_INSET_Y = 3.6          # Slides pt: PowerPoint's default top and bottom insets (0.05 in); Slides' are 7.2
+# Cap heights (em) of the faces `top_drift` may read: any other face's own cap height moves its first
+# ink by as much as the insets do (Calibri's 0.644 read as jeb-arch's boxes standing 2.8 pt high,
+# Google Sans as firebase-jam's 4.5, and giving them PowerPoint's insets cost 0.03 each).
+KNOWN_CAPS = {"Arial": 0.716, "Arimo": 0.716, "Helvetica": 0.717, "Liberation Sans": 0.716, "Roboto": 0.711}
+
+
+def top_drift(e: dict, elements: list[dict], thumb, px: float) -> float | None:
+    """Where the slide's thumbnail shows a top-aligned box's first capital, less where Slides' default
+    insets put it, in Slides pt (None: not measurable here). Only a box nothing else reaches into
+    above its first baseline, whose first word opens on a capital or digit (a lowercase start would
+    read an x-height as a cap)."""
+    import numpy as np
+    box_ = e.get("box") if isinstance(e.get("box"), dict) else None
+    if thumb is None or e.get("kind") != "text" or box_ is None or "insets" in box_ or not e.get("anchor") \
+            or box_.get("valign", "top") != "top" or e.get("placeholder") in ("TITLE", "CENTERED_TITLE", "SUBTITLE"):
+        return None
+    paras = [p for p in e.get("paragraphs", []) if p.get("runs")]
+    first = "".join(r["text"] for r in paras[0]["runs"]).lstrip() if paras else ""
+    if not first or not (first[0].isupper() or first[0].isdigit()) or paras[0].get("bullet"):
+        return None
+    x0, y0, x1, y1 = e["bbox"]
+    base = e["anchor"][1]
+    if any(o is not e and o.get("bbox") and len(o["bbox"]) == 4 and
+           not (o["bbox"][2] <= x0 or o["bbox"][0] >= x1 or o["bbox"][3] <= y0 - 2 or o["bbox"][1] >= base + 2) and
+           not (o.get("kind") == "shape" and o["bbox"][0] < x0 - 2 and o["bbox"][1] < y0 - 2
+                and o["bbox"][2] > x1 + 2 and o["bbox"][3] > base + 2)
+           for o in elements):
+        return None
+    cap = KNOWN_CAPS.get(paras[0]["runs"][0].get("font") or "")
+    if cap is None:
+        return None
+    z = max(r.get("size") or 0 for r in paras[0]["runs"])
+    X0, X1, Y0, Y1 = (int(round(v * px)) for v in (x0, x1, y0, base + 1))
+    crop = thumb[max(0, Y0):max(0, Y1), max(0, X0):max(0, X1)]
+    if z <= 0 or crop.shape[0] < 4 or crop.shape[1] < 8:
+        return None
+    ground = np.median(crop.reshape(-1, crop.shape[-1]), axis=0)
+    rows = np.nonzero((np.abs(crop - ground).max(axis=-1) > 80).sum(axis=1) >= 2)[0]
+    if not len(rows):
+        return None
+    scale = box_.get("scale") or 1.0
+    return ((Y0 + rows[0]) / px - (base - cap * z)) * scale
+
+
+def pptx_insets(slides: list[dict], drifts: list[tuple[dict, float]]) -> None:
+    """Boxes that stand PowerPoint's inset higher than Slides' insets would put them came from a .pptx
+    whose boxes kept PowerPoint's defaults (7.2 pt at the sides, 3.6 top and bottom), which the API does
+    not report: comps-analysis's text stood ~3.6 pt low on every slide. On the corpus a measured box
+    (`top_drift`) is off by 0 +- 1 pt or by -3.6 +- 1, nothing between, so a box measured at -3.6 gets
+    the insets; and when most of a deck's measured boxes (at least 3) do, so do its unmeasured ones -
+    gdg24 mixes both kinds and keeps Slides' insets where it could not be measured. Such boxes get
+    `box.inset_y`, and their anchors move by the difference."""
+    want = PPTX_INSET_Y - 7.2
+    hits = [e for e, d in drifts if abs(d - want) <= 1.2]
+    whole = len(drifts) >= 3 and len(hits) >= 0.6 * len(drifts)
+    measured = {id(e) for e, _ in drifts}
+    chosen = {id(e) for e in hits}
+    for s in slides:
+        for e in s["elements"]:
+            box_ = e.get("box") if isinstance(e.get("box"), dict) else None
+            if e.get("kind") != "text" or box_ is None or "insets" in box_:
+                continue
+            if id(e) not in chosen and (id(e) in measured or not whole):
+                continue
+            box_["inset_y"] = PPTX_INSET_Y
+            if e.get("anchor") and box_.get("valign", "top") in ("top", "bottom"):
+                dy = -want / (box_.get("scale") or 1.0) * (1 if box_.get("valign", "top") == "bottom" else -1)
+                e["anchor"] = [e["anchor"][0], round(e["anchor"][1] + dy, 2)]
 
 
 def imported(shape: dict) -> bool:
@@ -763,6 +832,7 @@ def deck_ir(pres: dict, pdf_size: list[float] | None = None, base: dict | None =
             for oid in e.get("objects", []):
                 object_keys[oid] = (s.get("key"), e.get("key"))
     slides = []
+    drifts: list = []                 # (box, `top_drift`) of every measurable box, for `pptx_insets`
 
     def read_page(page: dict, tags: list) -> list[dict]:
         out: list[dict] = []
@@ -818,6 +888,8 @@ def deck_ir(pres: dict, pdf_size: list[float] | None = None, base: dict | None =
                 px = thumb.shape[1] / page_w
             elements = deck_fills.settle(elements, thumb, px, None if picture else color, bool(picture))
             thumbnail_insets(elements, thumb, px)
+            drifts += [(e, d) for e, d in ((e, top_drift(e, elements, thumb, px)) for e in elements)
+                       if d is not None]
         key = slide_keys.get(slide["objectId"]) or (max(set(tags), key=tags.count) if tags else None)
         slides.append({"page": n, "frame": str(n + 1), "size": [page_w, page_h], "objectId": slide["objectId"],
                        "key": key, "notes": notes_text(slide), "background_color": color,
@@ -827,6 +899,8 @@ def deck_ir(pres: dict, pdf_size: list[float] | None = None, base: dict | None =
             # source it refines already draws whatever the converter baked into it
             got = stash_picture(picture, fetch, images)
             slides[-1]["background_file"] = got.get("file")
+    if foreign:
+        pptx_insets(slides, drifts)
     return {"version": 1, "source": {"presentationId": pres.get("presentationId"), "title": pres.get("title"),
                                      "revisionId": pres.get("revisionId")},
             "page_size": [page_w, page_h], "scale": scale, "slides": slides}

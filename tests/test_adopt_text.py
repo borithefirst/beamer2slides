@@ -429,3 +429,29 @@ def test_a_family_in_two_file_formats_names_every_file():
     opts = font_files_latex({"UprightFont": Path("c/cambria.ttc"), "BoldFont": Path("c/cambriab.ttf")}, None)
     assert "Extension" not in opts
     assert "UprightFont=cambria.ttc" in opts and "BoldFont=cambriab.ttf" in opts
+
+
+def test_powerpoint_insets_where_the_thumbnails_show_them():
+    """A measured box 3.6 pt high has PowerPoint's insets; a deck most of whose measured boxes do
+    lends them to its unmeasured ones, a mixed deck does not (deck_ir.pptx_insets)."""
+    from beamer2slides.deck_ir import pptx_insets
+
+    def box(valign="top"):
+        return {"kind": "text", "box": {"valign": valign, "scale": 2.0}, "anchor": [10.0, 20.0]}
+
+    hit, miss, other, low = box(), box(), box(), box("bottom")
+    slides = [{"elements": [hit, miss, other, low]}]
+    pptx_insets(slides, [(hit, -3.5), (miss, 0.2)])
+    assert hit["box"]["inset_y"] == 3.6 and hit["anchor"] == [10.0, 18.2]
+    assert "inset_y" not in miss["box"] and "inset_y" not in other["box"]
+    a, b, c, d = box(), box(), box(), box("bottom")
+    pptx_insets([{"elements": [a, b, c, d]}], [(a, -3.6), (b, -3.9), (c, -3.2)])
+    assert d["box"]["inset_y"] == 3.6 and d["anchor"] == [10.0, 21.8]
+
+
+def test_a_box_with_powerpoint_insets_starts_its_text_3_6_pt_higher():
+    el = {"kind": "text", "bbox": [0, 0, 100, 50], "box": {"scale": 1.0, "valign": "top"},
+          "paragraphs": [{"runs": [{"text": "Hi", "size": 10.0}], "slides": {}}]}
+    plain = adopt.text_box_latex(el, adopt.Context(), "")
+    el["box"]["inset_y"] = 3.6
+    assert "\\vskip6.48pt" in plain and "\\vskip2.88pt" in adopt.text_box_latex(el, adopt.Context(), "")

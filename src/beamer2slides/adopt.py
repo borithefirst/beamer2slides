@@ -719,6 +719,9 @@ def bullet_tex(p: dict, ctx: Context, scale: float, right: float) -> str:
     return f"\\llap{{{pic}\\hskip{-right:.2f}pt}}"
 
 
+SLIDES_INSET_Y = 7.2        # Slides pt: Slides' own top and bottom text insets, which BASELINE_A includes
+
+
 def text_box_latex(el: dict, ctx: Context, ind: str) -> str:
     """A text box laid out as Slides lays it out: the element's own box, the vertical alignment done
     by TeX (`\\vbox to` its height with the slack above, below or both), each paragraph at its own
@@ -729,6 +732,9 @@ def text_box_latex(el: dict, ctx: Context, ind: str) -> str:
     x0, y0, x1, y1 = el["bbox"]
     # a box with no insets (deck_ir.zero_insets) sets its text against its edges
     pad, inset = (0.0, 0.0) if box.get("insets") == 0 else (PAD_X / scale, BASELINE_A / scale)
+    if box.get("inset_y") is not None and box.get("insets") != 0:
+        # PowerPoint's own top and bottom insets, which a deck's thumbnails showed (deck_ir.pptx_insets)
+        inset = (BASELINE_A - (SLIDES_INSET_Y - box["inset_y"])) / scale
     width, height = max(x1 - x0 - 2 * pad, 1.0), max(y1 - y0, 0.1)
     valign = box.get("valign", "top")
     paras = [p for p in el["paragraphs"] if p["runs"]]
