@@ -561,3 +561,43 @@ The readability proxy no longer counts a style name handed to `\slidetext`/`\sli
 from `ref`. On that scorer: m6-a 0.130 -> mt-a 0.253 (lines 0.09 -> 0.38, numbers 0.05 -> 0.07,
 plumbing 0.04 -> 0.17, bloat 0.33 -> 0.38, author 0.19 -> 0.36, repeat 0.61 -> 0.84).
 Frame body lines now: text 23%, placement 22%, shape 21%, table 12%, picture 7%, plumbing 6%.
+
+
+## Lists and paragraph defaults (mt-a -> li-full)
+
+Slides lists are written as lists: a slidebox's bulleted paragraphs are `itemize` / `enumerate`
+(nested by list level), which `slides.sty` redefines inside a slidebox so every item is still a
+`\slidepar` with its bullet hung where Slides hangs it. What an item of a level looks like - style,
+indent, first-line shift, bullet (`mark=` a drawn dot/ring/square, or `label=` typed text in
+`labelstyle=`) and gap - is said once per deck, `\setslidelist{itemize}{2}{...}`, from the majority of
+the deck's items at that level (`adopt.deck_text_survey`); a list says what its own items share
+(`\begin{itemize}[gap=0.91]`), an item only what it alone differs in (`\item[style=tiny] words`).
+Numbered lists count: a glyph `3.`, `b)`, `iv.` becomes `label={\arabic*.}` etc. with `start=`, and a
+number the counter would not print stays a typed `label=`. The deck's usual paragraph style is
+`\setslidepar{style=...}`; a slidebox takes paragraph keys as defaults for its paragraphs
+(`\begin{slidebox}[style=body-bold,space=2.42]`), chosen where saying them once costs fewer keys.
+`\slidepar[options]{words}` takes its style as `style=`, and `space=` is now only what Slides adds
+beyond the two styles' line boxes (the macro works the step out from the previous style's pitch and
+ascent), so the same space between items of one list is said once or not at all. One-paragraph boxes
+keep `\slidetext` unchanged. Nothing went back to the old form: no deck or level needed it.
+
+Fidelity: all 912 slides score exactly as at mt-a - boxes, page, pixels and every element's loss equal
+to the scorer's precision on every slide of all 29 decks (boxes 0.9728, page 0.9714, pixels 0.9845).
+Found on the way: a list nested in a bold item came out bold (its items' styles only say what differs
+from the box's font), so a nested list first goes back to the box's font and colour.
+`tests/test_adopt_macros.py` compiles lists and defaults beside every paragraph spelled out and
+compares the pages pixel for pixel.
+
+Readability 0.253 -> 0.279 (lines 0.38 -> 0.36, numbers 0.07 -> 0.08, plumbing 0.17 -> 0.22, bloat
+0.38 -> 0.40, author 0.36 -> 0.46, repeat 0.84 -> 0.84). Every one of the corpus's 1,270 bullets
+(806 `\slidebullet`, 464 `\slidelabel` in frames at mt-a) is now an `\item`, 1,003 of them with no
+options; 574 lists, 46 `\setslidelist`, 29 `\setslidepar`, 286 slideboxes with defaults. The proxy
+counts the `\begin{itemize}` / `\end{itemize}` lines a list adds as lines per frame, which is why
+lines drops while the text reads more like beamer (cs161-tls 0.291 -> 0.327, supercharge-slides 0.334
+-> 0.397, ds-lecture 0.364 -> 0.545). The readability scorer's `STYLE_ARG` no longer reads the words
+of `\slidepar{words}` as a style name (it still drops the name in the older `\slidepar[..]{style}{words}`,
+so older runs score as before).
+
+Left: `lang=` on every RTL `\slidetext` (hebrew-lesson, arabic-training; a deck default for
+one-paragraph boxes would need `\slidetext` to take one); `prevdepth=` after a paragraph of mixed sizes;
+the per-deck gap and indent numbers themselves (Slides' measures, not beamer's).

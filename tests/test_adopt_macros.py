@@ -62,20 +62,23 @@ def test_a_frame_reads_as_boxes_styles_and_words(tmp_path):
     text, _ = written(tmp_path)
     frame = T.frame_of(text)
     assert "\\slidetext[middle]{" in frame and "{One middle paragraph}" in frame
-    assert "\\begin{slidebox}" in frame and "\\slidepar[" in frame
+    assert "\\begin{slidebox}" in frame and "\\begin{itemize}" in frame and "\\item " in frame
     assert "\\sliderect[" in frame and "\\slideellipse[" in frame
     for plumbing in ("\\vbox", "\\vskip", "\\prevdepth", "\\baselineskip", "\\leftskip", "\\llap", "textblock",
-                     "tikzpicture", "b2s"):
+                     "tikzpicture", "b2s", "\\slidebullet"):
         assert plumbing not in frame, plumbing
-    # every style a frame names is defined once in the preamble
-    used = set(re.findall(r"\\slide(?:par|text)(?:\[[^\]]*\])?(?:\{[^}]*\})?\{([\w-]+)\}\{", frame))
+    # every style the frames and the deck's defaults name is defined once in the preamble
+    used = set(re.findall(r"\\slidetext(?:\[[^\]]*\])?\{[^}]*\}\{([\w-]+)\}\{", frame))
+    used |= set(re.findall(r"(?<![\w])(?:label)?style=([\w-]+)", text[text.index("\\usepackage{slides}"):]))
     defined = re.findall(r"^\\slidestyle\{([\w-]+)\}", text, re.M)
     assert used and used <= set(defined) and len(defined) == len(set(defined))
+    marks = set(re.findall(r"mark=([\w-]+)", text))
+    assert marks and marks <= set(re.findall(r"^\\slidemark\{([\w-]+)\}", text, re.M))
 
 
 def test_words_ending_in_a_tie_keep_it_from_par():
     """\\par takes the last glue off a paragraph. Spelled out, a line end followed the words and \\par
-    took that; in `\\slidepar{style}{words}` nothing follows, so a closing space stands in for it
+    took that; in `\\slidepar{words}` nothing follows, so a closing space stands in for it
     (arabic-training's "Meeting~~~~~~" moved its line, comps-analysis' underlined "Pros ~ ~")."""
     def words_of(text):
         el = {"kind": "text", "bbox": [0, 0, 100, 40], "box": {"scale": 1.0, "valign": "top"},
@@ -135,15 +138,20 @@ def shapes_ir() -> list[dict]:
 
 
 def test_pull_reads_the_words_of_a_slidepar_and_nothing_else():
-    latex = ("\\begin{slidebox}[middle]{29.4,50.4,369.57,157.5}\n"
-             "  \\slidepar[indent=22.68]{large}{\\slidebullet{dot-red}{12.25}Goals}\n"
-             "  \\slidepar[space=1.04]{body-bold}{Confidentiality\\textmd{: read}\\slidebreak more}\n"
+    latex = ("\\setslidepar{style=body}\n"
+             "\\setslidelist{itemize}{1}{style=large,indent=22.68,mark=dot-red,gap=12.25}\n"
+             "\\begin{slidebox}[middle,style=body-bold]{29.4,50.4,369.57,157.5}\n"
+             "  \\slidepar[indent=22.68]{Lead}\n"
+             "  \\begin{itemize}[labelstyle=label-red]\n"
+             "    \\item[label={\\arabic*.},space=1.04] Goals\n"
+             "    \\item Confidentiality\\textmd{: read}\\slidebreak more\n"
+             "  \\end{itemize}\n"
              "\\end{slidebox}\n"
              "\\sliderect[fill=Blue]{10,10,20,20}\n"
              "\\slidetext[center]{67.2,63,243.57,37.8}{heading-blue}{Slide 2}\n")
     vis = build_visible(latex, 0, len(latex))
     words = vis.text.split()
-    assert words == ["Goals", "Confidentiality:", "read", "more", "Slide", "2"], words
+    assert words == ["Lead", "Goals", "Confidentiality:", "read", "more", "Slide", "2"], words
 
 
 # ---------------------------------------------------------------- compiled: short form = long form
@@ -174,8 +182,8 @@ def long_form(frame: str) -> str:
             words, j = group(frame, j)
             bo = [o for o in opts if o.split("=")[0] in box_keys]
             po = [o for o in opts if o.split("=")[0] not in box_keys]
-            out.append(f"\\begin{{slidebox}}[{','.join(bo)}]{{{geometry}}}\\slidepar[{','.join(po)}]"
-                       f"{{{style}}}{{{words}}}\\end{{slidebox}}")
+            out.append(f"\\begin{{slidebox}}[{','.join(bo)}]{{{geometry}}}\\slidepar[{','.join([f'style={style}'] + po)}]"
+                       f"{{{words}}}\\end{{slidebox}}")
         elif m[1] == "rect":
             x, y, w, h = geometry.split(",")
             out.append(f"\\slideshape{{{geometry}}}{{\\path[{','.join(opts)}] (0bp,0bp) -- ({w}bp,0bp) -- "
@@ -209,3 +217,86 @@ def test_the_short_forms_draw_what_their_long_forms_draw(tmp_path):
     short, spelled = (np.asarray(doc[k].render(3.0)) for k in (0, 1))
     assert (short < 250).any(), "the page has ink"
     assert short.shape == spelled.shape and (short == spelled).all()
+
+
+# the same box twice: its lists and defaults as adopt writes them, then every paragraph spelled out as
+# a `\slidepar` saying all its keys, with its bullet drawn in its words as the older form did
+LISTS_SHORT = r"""
+\begin{frame}[plain]
+  \begin{slidebox}[style=small,space=2]{42,20,180,300}
+    \slidepar{Lead paragraph}
+    \begin{itemize}[gap=0.91]
+      \item First item, long enough to wrap onto a second line of the box it is set in
+      \begin{itemize}
+        \item Deeper one
+        \item[mark=dot-red] Deeper two
+      \end{itemize}
+      \item[style=tiny,space=1] {}[Back] out
+    \end{itemize}
+    \slidepar[style=body,center]{Between}
+    \begin{enumerate}[start=3]
+      \item Third
+      \item[label={x)}] Odd
+      \item Fifth
+    \end{enumerate}
+  \end{slidebox}
+\end{frame}
+"""
+LISTS_LONG = r"""
+\begin{frame}[plain]
+  \begin{slidebox}{42,20,180,300}
+    \slidepar[style=small,space=2]{Lead paragraph}
+    \slidepar[style=body,indent=20,space=2]{\slidebullet{dot-red}{0.91}First item, long enough to wrap onto a second line of the box it is set in}
+    \slidepar[style=tiny,indent=40,first=3,space=2]{\slidebullet{ring-red}{0.7}Deeper one}
+    \slidepar[style=tiny,indent=40,first=3,space=2]{\slidebullet{dot-red}{0.7}Deeper two}
+    \slidepar[style=tiny,indent=20,space=1]{\slidebullet{dot-red}{0.91}[Back] out}
+    \slidepar[style=body,center,space=2]{Between}
+    \slidepar[style=small,indent=20,space=2]{\slidelabel{tiny}{3.}{2}Third}
+    \slidepar[style=small,indent=20,space=2]{\slidelabel{tiny}{x)}{2}Odd}
+    \slidepar[style=small,indent=20,space=2]{\slidelabel{tiny}{5.}{2}Fifth}
+  \end{slidebox}
+\end{frame}
+"""
+LEVELS = r"""
+\setslidepar{style=tiny}
+\setslidelist{itemize}{1}{style=body,indent=20,mark=dot-red,gap=1}
+\setslidelist{itemize}{2}{style=tiny,indent=40,first=3,mark=ring-red,gap=0.7}
+\setslidelist{enumerate}{1}{style=small,indent=20,labelstyle=tiny,label={\arabic*.},gap=2}
+"""
+
+
+@pytest.mark.skipif(not lualatex(), reason="lualatex not found")
+def test_lists_and_defaults_draw_what_each_paragraph_spelled_out_draws(tmp_path):
+    """Nested itemize, an enumerate starting at 3 with one typed label, a paragraph between lists,
+    box defaults (style, space), list options, level defaults (`\\setslidelist`) and the deck's
+    (`\\setslidepar`) against the same paragraphs each saying everything: pixel for pixel."""
+    text, _ = written(tmp_path)
+    head = text[:text.index("\\begin{document}")]
+    main = tmp_path / "tree" / "main.tex"
+    main.write_text(head + LEVELS + "\\begin{document}\n" + LISTS_SHORT + LISTS_LONG + "\\end{document}\n",
+                    encoding="utf-8")
+    r = subprocess.run([lualatex(), "-interaction=nonstopmode", "-halt-on-error", "main.tex"], cwd=main.parent,
+                       capture_output=True, text=True, errors="replace", env=tex_env(), timeout=300)
+    assert r.returncode == 0, r.stdout[-3000:]
+    from beamer2slides import pdf
+    doc = pdf.Document(main.with_suffix(".pdf"))
+    assert len(doc) == 2
+    short, spelled = (np.asarray(doc[k].render(3.0)) for k in (0, 1))
+    assert (short < 250).any(), "the page has ink"
+    assert short.shape == spelled.shape and (short == spelled).all()
+
+
+def test_an_enumerate_counts_and_types_only_the_numbers_it_cannot_count():
+    assert adopt.number_format("3.") == ("\\arabic*.", 3)
+    assert adopt.number_format("B)") == ("\\Alph*)", 2)
+    assert adopt.number_format("iv.") == ("\\roman*.", 4)
+    assert adopt.number_format("01.") is None and adopt.number_format("•") is None
+    bullet = lambda n: {"text": n, "size": 10.0, "kind": "number"}
+    el = T.prose(*({"runs": [T.words(w)], "bullet": bullet(n), "slides": {"indent_start": 18}}
+                   for n, w in (("2.", "Two"), ("3.", "Three"), ("7.", "Seven"))))
+    ctx = adopt.Context()
+    tex = adopt.text_box_latex(el, ctx, "")
+    assert "\\begin{enumerate}[start=2]" in tex, tex
+    assert "\\item Two" in tex and "\\item Three" in tex and "\\item[label={7.}] Seven" in tex, tex
+    level, = (ln for ln in adopt.level_definitions(ctx) if ln.startswith("\\setslidelist{enumerate}{1}"))
+    assert "label={\\arabic*.}" in level, "the level counts"

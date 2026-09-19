@@ -804,21 +804,40 @@ SLIDES_TEXT = r"""% --- Text boxes laid out as Google Slides lays them out -----
 %   page's left edge, y bp from its top, lines broken at w bp, in a box h bp tall. Options: middle,
 %   bottom (where the text stands in the box; top by default), inset= (bp above a top-aligned box's
 %   first line or under a bottom-aligned one's last: \setslideinset gives the default), tail= (bp
-%   stacked under a middle- or bottom-aligned box's last line: its last paragraph's space below).
+%   stacked under a middle- or bottom-aligned box's last line: its last paragraph's space below), and
+%   any of \slidepar's style=, left, center, right, justify, indent=, rindent=, first=, lang=, space=, which
+%   its paragraphs and list items then take unless they say otherwise.
 \newif\ifslides@top
 \newif\ifslides@mixed
+\newif\ifslides@open
+\newif\ifslides@item
 \def\slidesinset{0}
 \newcommand\setslideinset[1]{\def\slidesinset{#1}}
+% \setslidepar{options}: what every paragraph of the deck takes unless its box or itself says otherwise
+\def\slides@deckpar{}
+\newcommand\setslidepar[1]{\def\slides@deckpar{#1}}
+\def\slides@addto#1#2{\ifx#1\@empty\def#1{#2}\else\expandafter\def\expandafter#1\expandafter{#1,#2}\fi}
+\def\slides@keys#1{\expandafter\slides@keys@\expandafter{#1}}
+\def\slides@keys@#1{\setkeys{slidepar}{#1}}
 \def\slides@xywh#1,#2,#3,#4\@nil{\def\slides@x{#1}\def\slides@y{#2}\def\slides@w{#3}\def\slides@h{#4}}
 \define@key{slidebox}{top}[]{\def\slides@valign{t}}
 \define@key{slidebox}{middle}[]{\def\slides@valign{m}}
 \define@key{slidebox}{bottom}[]{\def\slides@valign{b}}
 \define@key{slidebox}{inset}{\def\slides@inset{#1}}
 \define@key{slidebox}{tail}{\def\slides@tail{#1}}
+\def\slides@boxkey#1{\define@key{slidebox}{#1}{\slides@addto\slides@boxpar{#1={##1}}}}
+\def\slides@boxflag#1{\define@key{slidebox}{#1}[]{\slides@addto\slides@boxpar{#1}}}
+\slides@boxkey{style}\slides@boxkey{indent}\slides@boxkey{rindent}\slides@boxkey{first}\slides@boxkey{lang}
+\slides@boxkey{space}
+\slides@boxflag{left}\slides@boxflag{center}\slides@boxflag{right}\slides@boxflag{justify}
 \newenvironment{slidebox}[2][]{%
-  \def\slides@valign{t}\let\slides@inset\slidesinset\let\slides@tail\@empty
+  \def\slides@valign{t}\let\slides@inset\slidesinset\let\slides@tail\@empty\let\slides@boxpar\@empty
   \setkeys{slidebox}{#1}\slides@xywh#2\@nil
-  \let\slides@end\@empty\slides@toptrue
+  \global\let\slides@end\@empty\global\slides@toptrue\global\slides@openfalse
+  \edef\slides@basefont{\noexpand\fontfamily{\f@family}\noexpand\fontseries{\f@series}%
+    \noexpand\fontshape{\f@shape}\noexpand\selectfont}\let\slides@basecolor\current@color
+  \let\itemize\slides@itemize\let\enditemize\slides@listend
+  \let\enumerate\slides@enumerate\let\endenumerate\slides@listend
   \edef\slides@block{\noexpand\begin{textblock*}{\slides@w bp}(\slides@x bp,\slides@y bp)}\slides@block
   \vbox to\slides@h bp\bgroup\slidesbox
   \if t\slides@valign\vskip\slides@inset bp\relax\else\vss\fi}{%
@@ -827,54 +846,109 @@ SLIDES_TEXT = r"""% --- Text boxes laid out as Google Slides lays them out -----
   \if b\slides@valign\vskip\slides@inset bp\relax\else\vss\fi
   \egroup\end{textblock*}}
 %
-% \slidepar[options]{style}{words}: a paragraph of a slidebox. Options: center, right, justify;
-%   indent=, rindent= (bp from the box's left and right edges), first= (bp the first line starts
-%   past indent), space= (bp between this paragraph and the one before, beyond their line boxes),
-%   lang= (the babel language of a right-to-left paragraph), mixed (words of several sizes, each
-%   carrying its line box: \slidestrut), prevdepth= (bp: where the paragraph after a mixed one
-%   takes its line from).
+% \slidepar[options]{words}: a paragraph of a slidebox. Options: style= (a \slidestyle), left, center,
+%   right, justify; indent=, rindent= (bp from the box's left and right edges), first= (bp the first
+%   line starts past indent), space= (bp between this paragraph and the one before beyond their line
+%   boxes, which the two styles' line boxes give: Slides' space above or below), lang= (the babel
+%   language of a right-to-left paragraph), mixed (words of several sizes, each carrying its line
+%   box: \slidestrut), prevdepth= (bp: where the paragraph after a mixed one takes its line from).
+\define@key{slidepar}{style}{\def\slides@style{#1}}
+\define@key{slidepar}{left}[]{\def\slides@align{left}}
 \define@key{slidepar}{center}[]{\def\slides@align{center}}
 \define@key{slidepar}{right}[]{\def\slides@align{right}}
 \define@key{slidepar}{justify}[]{\def\slides@align{justify}}
 \define@key{slidepar}{indent}{\def\slides@indent{#1}}
 \define@key{slidepar}{rindent}{\def\slides@rindent{#1}}
-\define@key{slidepar}{first}{\def\slides@first{#1}}
+\define@key{slidepar}{first}{\ifdim#1bp=\z@\let\slides@first\@empty\else\def\slides@first{#1}\fi}
 \define@key{slidepar}{space}{\def\slides@space{#1}}
 \define@key{slidepar}{prevdepth}{\def\slides@prevdepth{#1}}
 \define@key{slidepar}{mixed}[]{\slides@mixedtrue}
 \define@key{slidepar}{lang}{\def\slides@lang{#1}}
+% a list item's bullet: mark= (a \slidemark), or label= (typed, in labelstyle=; in an enumerate
+%   \arabic*, \alph*, \Alph*, \roman*, \Roman* stand for the item's number), gap= (bp between its
+%   right edge and the text); start= (an enumerate's first number)
+\define@key{slidepar}{mark}{\def\slides@mark{#1}\let\slides@label\@empty}
+\define@key{slidepar}{label}{\def\slides@label{#1}\let\slides@mark\@empty}
+\define@key{slidepar}{labelstyle}{\def\slides@labelstyle{#1}}
+\define@key{slidepar}{gap}{\def\slides@gap{#1}}
+\define@key{slidepar}{start}{\def\slides@start{#1}}
+\def\slides@reset{\def\slides@align{left}\def\slides@indent{0}\def\slides@rindent{0}\let\slides@first\@empty
+  \let\slides@space\@empty\let\slides@prevdepth\@empty\slides@mixedfalse\let\slides@lang\@empty
+  \let\slides@style\@empty\let\slides@mark\@empty\let\slides@label\@empty\let\slides@labelstyle\@empty
+  \def\slides@gap{0}}
 \def\slides@align@left{\def\slides@lfil{}\def\slides@rfil{ plus 1fil}\def\slides@pfil{}}
 \def\slides@align@center{\def\slides@lfil{ plus 1fil}\def\slides@rfil{ plus 1fil}\def\slides@pfil{}}
 \def\slides@align@right{\def\slides@lfil{ plus 1fil}\def\slides@rfil{}\def\slides@pfil{}}
 \def\slides@align@justify{\def\slides@lfil{}\def\slides@rfil{}\def\slides@pfil{ plus 1fil}}
-\newcommand\slidepar[2][]{%
-  \def\slides@align{left}\def\slides@indent{0}\def\slides@rindent{0}\let\slides@first\@empty
-  \let\slides@space\@empty\let\slides@prevdepth\@empty\slides@mixedfalse\let\slides@lang\@empty
-  \setkeys{slidepar}{#1}\slides@use{#2}\csname slides@align@\slides@align\endcsname
+\newcommand\slidepar[1][]{%
+  \slides@reset\slides@keys\slides@deckpar\slides@keys\slides@boxpar\setkeys{slidepar}{#1}%
+  \slides@parstart
+  \bgroup\aftergroup\slides@close\let\slides@next=}
+% (the words are a group, not an argument: they are read with the catcodes they are set in)
+\def\slides@parstart{\slides@use\slides@style\csname slides@align@\slides@align\endcsname
   \ifslides@top
     \ifx\slides@space\@empty\else\vskip\slides@space bp\relax\fi
   \else\ifx\slides@prevdepth\@empty
-    \ifx\slides@space\@empty\else\prevdepth=\dimexpr\prevdepth-\slides@space bp\relax\fi
+    \prevdepth=\dimexpr\prevdepth-(\slides@pbelow+\slides@ascent bp-\slides@pitch bp%
+      \ifx\slides@space\@empty\else+\slides@space bp\fi)\relax
   \else\prevdepth=\slides@prevdepth bp\relax\fi\fi
-  \slides@topfalse
+  \global\slides@topfalse
   \ifx\slides@lang\@empty\else
     \edef\slides@begin{\noexpand\begin{otherlanguage}{\slides@lang}}\expandafter\slides@begin\fi
   \bgroup\leftskip=\slides@indent bp\slides@lfil\relax\rightskip=\slides@rindent bp\slides@rfil\relax
   \parfillskip=0bp\slides@pfil\relax\ifslides@mixed\lineskiplimit=0bp\relax\fi
   \noindent\slides@lead\vrule width0bp height\slides@ascent bp depth0bp\relax
-  \ifx\slides@first\@empty\else\hskip\slides@first bp\relax\fi
-  \bgroup\aftergroup\slides@close\let\slides@next=}
-% (the words are a group, not an argument: they are read with the catcodes they are set in)
+  \ifx\slides@first\@empty\else\hskip\slides@first bp\relax\fi}
 \def\slides@close{\baselineskip=\slides@pitch bp\par\egroup
   \ifx\slides@lang\@empty\else\end{otherlanguage}\fi
-  \ifslides@mixed\let\slides@end\@empty
-  \else\edef\slides@end{\noexpand\vskip\noexpand\dimexpr\slides@depth bp-\noexpand\prevdepth\noexpand\relax}\fi
-  \slides@after}
+  \slides@noteend\slides@after}
+% what the next paragraph and the box's end take from this one: its line box under the baseline
+\def\slides@noteend{\ifslides@mixed\global\let\slides@end\@empty
+  \else\xdef\slides@end{\noexpand\vskip\noexpand\dimexpr\slides@depth bp-\noexpand\prevdepth\noexpand\relax}\fi
+  \xdef\slides@pbelow{\slides@pitch bp-\slides@ascent bp}}
 \let\slides@after\relax
+%
+% itemize and enumerate in a slidebox: \item[options] words, where each item is a \slidepar with a
+%   bullet. What an item of a list level looks like is said once for the deck,
+%   \setslidelist{itemize|enumerate}{level}{options}, a list may say what its own items differ in
+%   (\begin{itemize}[options]), and an item what it alone differs in.
+\newcount\slides@n
+\newcount\slides@level
+\newcommand\setslidelist[3]{\@namedef{slides@L@#1@#2}{#3}}
+\def\slides@itemize{\@ifnextchar[{\slides@list{itemize}}{\slides@list{itemize}[]}}
+\def\slides@enumerate{\@ifnextchar[{\slides@list{enumerate}}{\slides@list{enumerate}[]}}
+% (a list nested in an item starts from the box's own font and colour, not its item's)
+\def\slides@list#1[#2]{\slides@finish
+  \ifslides@item\slides@basefont\ifx\current@color\slides@basecolor\else
+    \let\current@color\slides@basecolor\set@color\fi\fi
+  \advance\slides@level\@ne\slides@itemfalse\let\item\slides@item
+  \def\slides@env{#1}\def\slides@envopts{#2}%
+  \def\slides@start{1}\setkeys{slidepar}{#2}\slides@n=\numexpr\slides@start-1\relax}
+\def\slides@listend{\ifslides@item\slides@itemclose\fi}
+\def\slides@item{\@ifnextchar[\slides@item@{\slides@item@[]}}
+\def\slides@item@[#1]{\ifslides@item\slides@itemclose\fi
+  \slides@itemtrue\advance\slides@n\@ne
+  \begingroup\slides@reset\slides@keys\slides@deckpar\slides@keys\slides@boxpar
+  \@ifundefined{slides@L@\slides@env @\the\slides@level}{}%
+    {\expandafter\slides@keys\csname slides@L@\slides@env @\the\slides@level\endcsname}%
+  \slides@keys\slides@envopts\setkeys{slidepar}{#1}%
+  \slides@parstart\global\slides@opentrue\slides@marker\ignorespaces}
+% an item's paragraph ends at the next \item, at \end of its list, or where a list nested in it begins
+\def\slides@finish{\ifslides@open\global\slides@openfalse\baselineskip=\slides@pitch bp\par\slides@noteend\fi}
+\def\slides@itemclose{\slides@finish\egroup\ifx\slides@lang\@empty\else\end{otherlanguage}\fi\endgroup}
+\def\slides@marker{\ifx\slides@mark\@empty\ifx\slides@label\@empty\else
+    \slidelabel{\slides@labelstyle}{\slides@labelbody}{\slides@gap}\fi
+  \else\slidebullet{\slides@mark}{\slides@gap}\fi}
+\def\slides@labelbody{\let\arabic\slides@arabic\let\alph\slides@alph\let\Alph\slides@Alph
+  \let\roman\slides@roman\let\Roman\slides@Roman\slides@label}
+\def\slides@arabic*{\number\slides@n}
+\def\slides@alph*{\@alph\slides@n}
+\def\slides@Alph*{\@Alph\slides@n}
+\def\slides@roman*{\@roman\slides@n}
+\def\slides@Roman*{\@Roman\slides@n}
 %
 % \slidetext[options]{x,y,w,h}{style}{words}: a slidebox holding one \slidepar, the options of both
 %   in one list.
-\def\slides@addto#1#2{\ifx#1\@empty\def#1{#2}\else\expandafter\def\expandafter#1\expandafter{#1,#2}\fi}
 \define@key{slidetext}{top}[]{\slides@addto\slides@bo{top}}
 \define@key{slidetext}{middle}[]{\slides@addto\slides@bo{middle}}
 \define@key{slidetext}{bottom}[]{\slides@addto\slides@bo{bottom}}
@@ -889,11 +963,11 @@ SLIDES_TEXT = r"""% --- Text boxes laid out as Google Slides lays them out -----
 \define@key{slidetext}{space}{\slides@addto\slides@po{space=#1}}
 \define@key{slidetext}{mixed}[]{\slides@addto\slides@po{mixed}}
 \define@key{slidetext}{lang}{\slides@addto\slides@po{lang=#1}}
-\newcommand\slidetext[3][]{\let\slides@bo\@empty\let\slides@po\@empty\setkeys{slidetext}{#1}%
+\newcommand\slidetext[3][]{\let\slides@bo\@empty\def\slides@po{style=#3}\setkeys{slidetext}{#1}%
   \edef\slides@go{\noexpand\begin{slidebox}[\slides@bo]{#2}%
     \noexpand\def\noexpand\slides@after{\noexpand\end{slidebox}}%
     \noexpand\slidepar[\slides@po]}%
-  \slides@go{#3}}
+  \slides@go}
 %
 % \slidelabel{style}{text}{gap}: a typed bullet (or number) in a style, ending gap bp before the
 %   text (negative: into it). \slidebullet{name}{gap}: a drawn one, named by \slidemark.
@@ -1194,6 +1268,7 @@ def text_style(ctx: Context, size: float, family: str = "", face: str = "", weig
     colour_tex = colour_name(colour, ctx.colours) if colour else ""
     key = (num(size), family, face, weight, italic, colour_tex, metrics)
     styles = ctx.__dict__.setdefault("text_styles", {})
+    ctx.__dict__["last_style_key"] = key            # what `box_parts` records: names are made per context
     if key in styles:
         return styles[key]
     body = getattr(ctx, "body_size", None) or size
@@ -1269,10 +1344,22 @@ def bullet_mark(ctx: Context, glyph: str, z: float, colour: str | None, code: st
 def bullet_tex(p: dict, ctx: Context, scale: float, right: float) -> str:
     """The bullet, its right edge `right` pt from where the line's text starts (negative: left of it):
     `\\slidebullet` for the ● ○ ■ Slides draws, `\\slidelabel` for a typed one."""
+    spec = bullet_spec(p, ctx, scale, right)
+    if spec is None:
+        return ""                               # a list paragraph whose level shows no glyph
+    if spec["mark"]:
+        return f"\\slidebullet{{{ctx.bullet_marks[spec['mark'][1]]}}}{{{spec['gap']}}}"
+    return f"\\slidelabel{{{ctx.text_styles[spec['labelstyle'][1]]}}}{{{spec['literal']}}}{{{spec['gap']}}}"
+
+
+def bullet_spec(p: dict, ctx: Context, scale: float, right: float) -> dict | None:
+    """What `bullet_tex` draws, as a list item's keys (`\\item`, `\\setslidelist`): `mark` a drawn
+    bullet ("M", its \\slidemark code), or `label` typed text in `labelstyle` ("S", the style's key);
+    `gap` bp from its right edge to the text; `literal` the typed text. None: no glyph."""
     b = p["bullet"]
     glyph = (b.get("text") or "").strip()
     if not glyph:
-        return ""                               # a list paragraph whose level shows no glyph
+        return None
     z = b.get("size") or para_size(p)
     colour = colour_name(b["color"], ctx.colours) if b.get("color") else None
     fill = f"fill={colour}" if colour else "fill"
@@ -1290,11 +1377,15 @@ def bullet_tex(p: dict, ctx: Context, scale: float, right: float) -> str:
                    f"({d / 2:.2f}pt,{d / 2:.2f}pt) circle[radius={(d - t) / 2:.2f}pt];")
         else:
             pic = f"\\tikz[baseline={-lift * z:.2f}pt]\\path[{fill}] (0pt,0pt) rectangle ({d:.2f}pt,{d:.2f}pt);"
-        return f"\\slidebullet{{{bullet_mark(ctx, glyph, z, b.get('color'), to_bp(pic))}}}{{{num(-right)}}}"
+        code = to_bp(pic)
+        bullet_mark(ctx, glyph, z, b.get("color"), code)
+        return {"mark": ("M", code), "label": "", "labelstyle": "", "gap": num(-right), "literal": ""}
     right -= GLYPH_GAP / scale
     family = b.get("font_family") if b.get("font_family") in ("mono", "serif") else ""
-    style = text_style(ctx, float(f"{z:.2f}"), family, "", "bold" if b.get("bold") else "", False, b.get("color"))
-    return f"\\slidelabel{{{style}}}{{{text_escape(glyph)}}}{{{num(-right)}}}"
+    text_style(ctx, float(f"{z:.2f}"), family, "", "bold" if b.get("bold") else "", False, b.get("color"))
+    literal = text_escape(glyph)
+    return {"mark": "", "label": literal, "labelstyle": ("S", ctx.last_style_key), "gap": num(-right),
+            "literal": literal}
 
 
 def box_insets(el: dict) -> tuple[float, float]:
@@ -1349,7 +1440,30 @@ def text_box_latex(el: dict, ctx: Context, ind: str) -> str:
     """A text box laid out as Slides lays it out: the element's own box, the vertical alignment done
     by TeX (`\\vbox to` its height with the slack above, below or both), each paragraph at its own
     size, pitch, spacing and indents, bullets drawn where Slides draws them. See the notes above.
-    Written as a `slidebox` of `\\slidepar`s (`SLIDES_TEXT`)."""
+    Written as a `slidebox` of `\\slidepar`s and lists (`SLIDES_TEXT`): `box_parts` works out what
+    each paragraph is, `box_source` says it with the deck's, the box's and the list's defaults."""
+    return box_source(box_parts(el, ctx), ctx, ind)
+
+
+# A paragraph's keys (`\slidepar`, `\item`, `slidebox` defaults, `\setslidepar`, `\setslidelist`) and
+# what each is when nothing says it: `style` has no default until the deck names one.
+PAR_KEYS = {"style": None, "align": "left", "indent": "0", "rindent": "0", "first": "0", "lang": "",
+            "space": "0"}
+# an item's bullet is one key here, ("M", a drawn mark's code) or ("L", typed label text), and says
+# `mark=` or `label=` (each of which clears the other); a drawn mark has no `labelstyle` (None:
+# whatever it inherits)
+ITEM_KEYS = {"bullet": "", "labelstyle": "", "gap": "0"}
+# what a list level says for its items (`\setslidelist`): a box's defaults never reach them there
+LEVEL_KEYS = ("style", "indent", "first", "labelstyle", "bullet", "gap")
+KEY_ORDER = ("style", "align", "indent", "rindent", "first", "lang", "labelstyle", "bullet", "gap", "space")
+
+
+def box_parts(el: dict, ctx: Context) -> dict:
+    """What `text_box_latex` writes, before it is said: the box's options and geometry, and per
+    paragraph its full keys (`keys`, styles as ("S", key) and drawn bullets as ("M", code), since
+    names are made per context), what only it says (`extra`: space=, prevdepth=, mixed), its words,
+    and for a list item its list (`item`: env, level, the number its glyph reads as). `single` is the
+    old one-paragraph form (`\\slidetext`), options in their order and the bullet in the words."""
     box = el.get("box") or {}
     scale = box.get("scale") or 720 / 453.54
     x0, y0, x1, y1 = el["bbox"]
@@ -1365,8 +1479,9 @@ def text_box_latex(el: dict, ctx: Context, ind: str) -> str:
     box_opts = [valign] if valign != "top" else []
     if valign != "middle" and f"{inset:.2f}" != getattr(ctx, "slide_inset", None):
         box_opts.append(f"inset={num(inset)}")
-    pars = []
+    recs = []
     prev = None
+    prev_metrics = None
     for p in paras:
         sl = p.get("slides") or {}
         z, r = para_size(p), sl.get("line_spacing") or 1.0
@@ -1383,14 +1498,14 @@ def text_box_latex(el: dict, ctx: Context, ind: str) -> str:
         end = (sl.get("indent_end") or 0) / scale
         glyph = p.get("bullet") and (p["bullet"].get("text") or "").strip()
         shift = max(0.0, first - left) if p.get("bullet") else first - left
-        opts = []
-        space = None
+        space = None            # (key, value) as the one-paragraph form writes it
+        target = 0.0            # the step \prevdepth takes (bp), where it is one
         if prev is None:
             # a box that grows to fit its text (SHAPE_AUTOFIT) draws its first line without the first
             # paragraph's spaceAbove: gdg24's body copy says 22 pt and starts 22 pt higher than
             # that, while ds-lecture's bodies (no autofit type) keep their master's 6 pt
             if sl.get("space_above") and not box.get("grows"):
-                space = f"space={num(sl['space_above'] / scale)}"
+                space = ("space", num(sl["space_above"] / scale))
         else:
             psl, pz, pr = prev.get("slides") or {}, para_size(prev), (prev.get("slides") or {}).get("line_spacing") or 1.0
             # between two list items each paragraph's own spacingMode says whether its side of the gap
@@ -1404,12 +1519,13 @@ def text_box_latex(el: dict, ctx: Context, ind: str) -> str:
             gap = max(below, above_) / scale
             if mixed_sizes(prev):
                 # its last line's depth is its own words' (their struts), which TeX has in \prevdepth
-                space = f"prevdepth={num(pitch - gap - above)}"
+                space = ("prevdepth", num(pitch - gap - above))
             else:
                 # \prevdepth less the space between the two line boxes (a negative space overlaps them)
                 k = pitch - snapped_line_box(pz, pr, scale, bool(box.get("snap")))[1] - gap - above
                 if num(k) != "0":
-                    space = f"space={num(-float(f'{k:.2f}'))}"
+                    target = -float(f"{k:.2f}")
+                    space = ("space", num(target))
         # LuaTeX's skips are logical: in a right-to-left paragraph \leftskip is at its start, the
         # right edge, where Slides measures indentStart from too - so only the alignment flips.
         rtl = p.get("direction") == "rtl"
@@ -1417,36 +1533,47 @@ def text_box_latex(el: dict, ctx: Context, ind: str) -> str:
         if rtl:
             align = {"left": "right", "right": "left"}.get(align, align)
         justified = bool(sl.get("justified")) and align == "left"
+        keys = dict(PAR_KEYS)
+        opts = []
         if justified:
             opts.append("justify")
+            keys["align"] = "justify"
         elif align in ("center", "right"):
             opts.append(align)
+            keys["align"] = align
         if num(left) != "0":
             opts.append(f"indent={num(left)}")
+            keys["indent"] = num(left)
         if num(end) != "0":
             opts.append(f"rindent={num(end)}")
+            keys["rindent"] = num(end)
         if shift and num(shift) != "0":
             opts.append(f"first={num(shift)}")
+            keys["first"] = num(shift)
         if space:
-            opts.append(space)
+            opts.append(f"{space[0]}={space[1]}")
         if mixed:
             opts.append("mixed")
         base = paragraph_base(p)
         weight = series(base, ctx)
         pr_ = sl.get("line_spacing") or 1.0
         last = line_box(z, 1.0 if pr_ >= WIDE_SPACING else pr_)[1]
+        metrics = (num(above), num(pitch), num(last))
         style = text_style(ctx, float(f"{base['size']:.2f}"),
                            base["family"] if base["family"] in ("mono", "serif") else "",
                            font_switch(base.get("font"), ctx),
                            {"m": "", "b": "bold"}.get(weight, weight), bool(base["italic"]), base["color"],
-                           (num(above), num(pitch), num(last)))
+                           metrics)
+        keys["style"] = ("S", ctx.last_style_key)
         brk = "\\slidefillbreak " if justified else "\\slidebreak "
         blank = not any(x["text"].strip() for x in p["runs"])
         ctx.line_struts = r if mixed else None
         body = "" if blank else runs_tex(p["runs"], base, ctx, brk)
         mark = ""
+        spec = None
         if glyph:
-            mark = bullet_tex(p, ctx, scale, first - left - shift)
+            spec = bullet_spec(p, ctx, scale, first - left - shift)
+            mark = bullet_tex(p, ctx, scale, first - left - shift) if spec else ""
         elif "\t" in "".join(x["text"] for x in p["runs"]) and first < left and not p.get("bullet"):
             # a hanging label (`label<TAB>text`): the tab jumps to indentStart
             label, rest, seen = [], [], False
@@ -1472,14 +1599,45 @@ def text_box_latex(el: dict, ctx: Context, ind: str) -> str:
         if rtl:
             from .scripts import rtl_language
             opts.append(f"lang={rtl_language(p)}")
+            keys["lang"] = rtl_language(p)
         words = mark + body
         if re.search(r"(~|\\ |\s|\\[A-Za-z@]+)\}*$", words):
             # \par takes the last glue off the paragraph: a space after words that end in a tie or a
             # control space (arabic-training's "Meeting~~~", comps-analysis' underlined "Pros ~ ~}")
             # is what it takes, as the line end after them did when each paragraph was spelled out
             words += " "
-        pars.append((opts, style, words))
-        prev = p
+        # Beyond the top, the step between two paragraphs is the macro's to work out from the two
+        # styles' line boxes (the one before ends pitch - ascent under its baseline, this one starts
+        # ascent above its own and is pitch from it); what is left is Slides' space between them.
+        # (a key like the others, which a box or list may say once; at the top it is the space above
+        # the first line, and after a mixed paragraph `prevdepth=` says it all)
+        extra = []
+        if space and space[0] == "prevdepth":
+            extra.append(f"prevdepth={space[1]}")
+            keys["space"] = None
+        elif prev is not None:
+            auto = float(prev_metrics[1]) - float(prev_metrics[0]) + float(metrics[0]) - float(metrics[1])
+            keys["space"] = num(target - auto)
+        elif space:
+            keys["space"] = space[1]
+        if mixed:
+            extra.append("mixed")
+        item = None
+        if spec is not None:
+            keys["bullet"] = spec["mark"] or ("L", spec["label"])
+            keys["labelstyle"] = None if spec["mark"] else spec["labelstyle"]
+            keys["gap"] = spec["gap"]
+            kind = "enumerate" if (p["bullet"].get("kind") == "number") else "itemize"
+            number = None
+            if kind == "enumerate":
+                parsed = number_format(glyph)
+                if parsed:
+                    keys["bullet"], number = ("L", parsed[0]), parsed[1]
+            item = {"env": kind, "level": int(p.get("level") or 0), "number": number, "literal": spec["literal"],
+                    "words": body}
+        recs.append({"keys": keys, "extra": extra, "words": words, "item": item,
+                     "single": (opts, style, words)})
+        prev, prev_metrics = p, metrics
     if prev is not None:
         # The space a wide lineSpacing adds under a line is not under the stack's last one: a middle-
         # aligned box centres the lines without it (sc-dark-modern's quotes at 170% sat 7 pt high,
@@ -1490,13 +1648,242 @@ def text_box_latex(el: dict, ctx: Context, ind: str) -> str:
         if num(tail) != "0":
             box_opts.append(f"tail={num(tail)}")
     geometry = ",".join((num(x0 + pad, 1), num(y0, 1), num(measure(width, paras, scale)), num(height, 1)))
+    return {"box_opts": box_opts, "geometry": geometry, "recs": recs}
+
+
+ROMAN = (("m", 1000), ("cm", 900), ("d", 500), ("cd", 400), ("c", 100), ("xc", 90), ("l", 50), ("xl", 40),
+         ("x", 10), ("ix", 9), ("v", 5), ("iv", 4), ("i", 1))
+
+
+def roman(n: int) -> str:
+    out = ""
+    for s, v in ROMAN:
+        while n >= v:
+            out, n = out + s, n - v
+    return out
+
+
+def number_format(glyph: str) -> tuple[str, int] | None:
+    """A numbered item's glyph as an enumerate label and the number it reads: "3." -> ("\\\\arabic*.",
+    3), "B)" -> ("\\\\Alph*)", 2), "iv." -> ("\\\\roman*.", 4). A single letter is a letter (Slides' ALPHA),
+    several a roman numeral where they spell one; None where no counter prints it (01., 27 letters)."""
+    m = re.fullmatch(r"(\(?)([0-9]+|[a-z]+|[A-Z]+)([.)]?)", glyph)
+    if not m:
+        return None
+    pre, tok, post = m.groups()
+    if tok.isdigit():
+        if len(tok) > 1 and tok.startswith("0"):
+            return None
+        return f"{pre}\\arabic*{post}", int(tok)
+    lower = tok.lower()
+    if len(tok) == 1:
+        return f"{pre}\\{'alph' if tok.islower() else 'Alph'}*{post}", ord(lower) - 96
+    for n in range(1, 400):
+        if roman(n) == lower:
+            return f"{pre}\\{'roman' if tok.islower() else 'Roman'}*{post}", n
+    return None
+
+
+def number_text(label: str, n: int) -> str | None:
+    """What an enumerate label prints for number `n`, or None when the label is typed text."""
+    m = re.fullmatch(r"(\(?)\\(arabic|alph|Alph|roman|Roman)\*([.)]?)", label)
+    if not m:
+        return None
+    kind = m[2]
+    if kind in ("alph", "Alph") and not 1 <= n <= 26:
+        return None
+    tok = {"arabic": str(n), "alph": chr(96 + n) if n > 0 else "", "Alph": chr(64 + n) if n > 0 else "",
+           "roman": roman(n), "Roman": roman(n).upper()}[kind]
+    return m[1] + tok + m[3]
+
+
+def key_text(k: str, v, ctx: Context) -> str:
+    """One key as the macros read it."""
+    if k == "align":
+        return v
+    if k == "bullet":
+        if not v:
+            return "label={}"
+        return f"mark={ctx.bullet_marks[v[1]]}" if v[0] == "M" else f"label={{{v[1]}}}"
+    if isinstance(v, tuple):
+        v = ctx.text_styles[v[1]]
+    return f"{k}={v}"
+
+
+def keys_text(keys: dict, ctx: Context) -> list[str]:
+    return [key_text(k, keys[k], ctx) for k in KEY_ORDER if k in keys and keys[k] is not None]
+
+
+def item_own(keys: dict, base: dict) -> dict:
+    """What a paragraph or item says for itself over what it inherits (`base`)."""
+    return {k: v for k, v in keys.items() if v is not None and base.get(k) != v}
+
+
+def majority(values: list):
+    """The most common value, the first seen winning a tie; None for none."""
+    counts: dict = {}
+    for v in values:
+        counts[v] = counts.get(v, 0) + 1
+    return max(counts, key=counts.get) if counts else None
+
+
+def choose_defaults(recs: list[dict], bases: list[dict], keys) -> dict:
+    """The defaults a box or a list says once for `recs`, each of which would otherwise inherit its
+    `bases` entry: per key the value most of them have, where saying it once and the exceptions
+    costs fewer keys than saying each exception to the inherited value."""
+    out = {}
+    for k in keys:
+        pairs = [(r[k], b.get(k)) for r, b in zip(recs, bases) if r.get(k) is not None]
+        if not pairs:
+            continue
+        v = majority([r for r, _ in pairs])
+        unset = sum(1 for r, b in pairs if r != b)
+        if 1 + sum(1 for r, _ in pairs if r != v) < unset:
+            out[k] = v
+    return out
+
+
+def level_keys(items: list[dict]) -> dict:
+    """A list level as most of its items are."""
+    return {k: majority([r[k] for r in items if r.get(k) is not None]) for k in LEVEL_KEYS}
+
+
+def deck_level(ctx: Context, env: str, depth: int, items: list[dict]) -> dict:
+    """What `\\setslidelist{env}{depth}` says: the deck's majority (`deck_text_survey`), or when no
+    survey was made, what most of these items say."""
+    levels = ctx.__dict__.setdefault("list_levels", {})
+    if (env, depth) not in levels:
+        levels[(env, depth)] = level_keys([r["keys"] for r in items])
+    return levels[(env, depth)]
+
+
+def level_definitions(ctx: Context) -> list[str]:
+    """`\\setslidepar` and `\\setslidelist` lines for the deck's paragraph and list-level defaults."""
+    out = []
+    if getattr(ctx, "deck_style", None):
+        out.append(f"\\setslidepar{{{key_text('style', ctx.deck_style, ctx)}}}")
+    for (env, depth), level in sorted((getattr(ctx, "list_levels", None) or {}).items(),
+                                      key=lambda kv: (kv[0][0] != "itemize", kv[0])):
+        said = {k: v for k, v in level.items()
+                if v is not None and (k == "style" or v != {**PAR_KEYS, **ITEM_KEYS}[k])}
+        out.append(f"\\setslidelist{{{env}}}{{{depth}}}{{{','.join(keys_text(said, ctx))}}}")
+    return out
+
+
+def deck_text_survey(target: dict, ctx: Context) -> None:
+    """The deck's paragraph style (`\\setslidepar`) and its list levels (`\\setslidelist`): what most
+    paragraphs of its multi-paragraph boxes, and most items of each level, are. Worked out on a copy
+    of the context, the real one naming the styles as the frames first use them."""
+    import copy
+    scratch = copy.deepcopy(ctx)
+    styles, levels = [], {}
+    for s in target.get("slides") or []:
+        for el in text_elements(s.get("elements") or []):
+            if el.get("kind") != "text" or el.get("wordart") or not el.get("bbox"):
+                continue
+            recs = box_parts(el, scratch)["recs"]
+            if len(recs) == 1 and recs[0]["item"] is None:
+                continue
+            for r in recs:
+                it = r["item"]
+                if it is None:
+                    styles.append(r["keys"]["style"])
+                else:
+                    levels.setdefault((it["env"], it["level"] + 1), []).append(r["keys"])
+    style = majority(styles)
+    if style is not None and styles.count(style) > 1:
+        ctx.deck_style = style
+    ctx.list_levels = {k: level_keys(v) for k, v in levels.items()}
+
+
+def box_source(parts: dict, ctx: Context, ind: str) -> str:
+    """`box_parts` said as briefly as the macros allow: one paragraph as `\\slidetext`; else a
+    slidebox whose options carry what most of its paragraphs share, `\\slidepar`s saying what they
+    alone say, and list items as `itemize` / `enumerate` whose level (`\\setslidelist`) and list
+    options say what their items share."""
+    recs, box_opts, geometry = parts["recs"], parts["box_opts"], parts["geometry"]
     brackets = (lambda o: f"[{','.join(o)}]" if o else "")
-    if len(pars) == 1:
+    if len(recs) == 1 and recs[0]["item"] is None:
         # one paragraph: the box and it on one line
-        opts, style, words = pars[0]
+        opts, style, words = recs[0]["single"]
         return f"{ind}\\slidetext{brackets(box_opts + opts)}{{{geometry}}}{{{style}}}{{{words}}}"
-    out = [f"{ind}\\begin{{slidebox}}{brackets(box_opts)}{{{geometry}}}"]
-    out += [f"{ind}  \\slidepar{brackets(opts)}{{{style}}}{{{words}}}" for opts, style, words in pars]
+    deck = {**PAR_KEYS, **ITEM_KEYS, "style": getattr(ctx, "deck_style", None)}
+    has_items = any(r["item"] for r in recs)
+    # the box's own defaults, for its paragraphs and its items alike: what a list level says
+    # (`\setslidelist`) is not the box's to say where it holds a list
+    box_keys = [k for k in PAR_KEYS if not (has_items and k in LEVEL_KEYS)]
+    box_layer = choose_defaults([r["keys"] for r in recs], [deck] * len(recs), box_keys)
+    inherited = {**deck, **box_layer}
+    out = [f"{ind}\\begin{{slidebox}}{brackets(box_opts + keys_text(box_layer, ctx))}{{{geometry}}}"]
+    # the lists: each item's run of list levels, opened and closed around it
+    stack: list[dict] = []          # {"env", "depth", "items": [rec], "lines": [...], "at": out index}
+    body: list = []                 # lines and list nodes in order
+
+    def close():
+        node = stack.pop()
+        (stack[-1]["body"] if stack else body).append(node)
+
+    for r in recs:
+        it = r["item"]
+        if it is None:
+            while stack:
+                close()
+            body.append(r)
+            continue
+        depth = it["level"] + 1
+        while stack and (stack[-1]["depth"] > depth or (stack[-1]["depth"] == depth and stack[-1]["env"] != it["env"])):
+            close()
+        while not stack or stack[-1]["depth"] < depth:
+            stack.append({"env": it["env"], "depth": (stack[-1]["depth"] + 1) if stack else 1, "body": []})
+        stack[-1]["body"].append(r)
+    while stack:
+        close()
+
+    def items_of(node):
+        return [x for x in node["body"] if isinstance(x, dict) and "keys" in x]
+
+    def write_par(r, pad):
+        own = {k: v for k, v in r["keys"].items() if k in PAR_KEYS and inherited.get(k) != v}
+        opts = keys_text(own, ctx) + r["extra"]
+        out.append(f"{pad}\\slidepar{brackets(opts)}{{{r['words']}}}")
+
+    def write_list(node, pad):
+        items = items_of(node)
+        level = deck_level(ctx, node["env"], node["depth"], items) if items else {}
+        base = {**inherited, **level}
+        env_opts = []
+        start = 1
+        if items:
+            env_layer = choose_defaults([r["keys"] for r in items], [base] * len(items), KEY_ORDER)
+            base = {**base, **env_layer}
+            if node["env"] == "enumerate":
+                first = items[0]
+                if first["keys"]["bullet"] == base["bullet"] and first["item"]["number"] is not None:
+                    start = first["item"]["number"]
+                for k, r in enumerate(items):
+                    # a number the counter would not print is typed as it reads
+                    bullet = r["keys"]["bullet"]
+                    if bullet and bullet[0] == "L" and bullet[1] != r["item"]["literal"] and \
+                            number_text(bullet[1], start + k) != r["item"]["literal"]:
+                        r["keys"]["bullet"] = ("L", r["item"]["literal"])
+            env_opts = keys_text(env_layer, ctx) + ([f"start={start}"] if start != 1 else [])
+        out.append(f"{pad}\\begin{{{node['env']}}}{brackets(env_opts)}")
+        for x in node["body"]:
+            if "keys" in x:
+                opts = keys_text(item_own(x["keys"], base), ctx) + x["extra"]
+                words = x["item"]["words"]
+                if words.startswith("["):
+                    words = "{}" + words           # not the item's options
+                out.append(f"{pad}  \\item{brackets(opts)}" + (f" {words}" if words else ""))
+            else:
+                write_list(x, pad + "  ")
+        out.append(f"{pad}\\end{{{node['env']}}}")
+
+    for x in body:
+        if "keys" in x:
+            write_par(x, ind + "  ")
+        else:
+            write_list(x, ind + "  ")
     out.append(f"{ind}\\end{{slidebox}}")
     return "\n".join(out)
 
@@ -2081,6 +2468,9 @@ def bootstrap(target: dict, tex: Path, flow: bool = False) -> str:
     deck_bg = background_colour(target)
     # the typefaces first: a text box whose letters are in the deck's second face switches to it
     ctx.font_lines = font_preamble(target, tex.parent, ctx)
+    if not flow:
+        # what most paragraphs and list items are, said once in the preamble
+        deck_text_survey(target, ctx)
     # "% slide N" says which deck slide a frame is, for a person reading the source and for tools
     # that compile frames one at a time (devtools.adopt_bench finds the frames that break a build)
     from . import inverse
@@ -2113,6 +2503,11 @@ def bootstrap(target: dict, tex: Path, flow: bool = False) -> str:
         extra += ["% the deck's text styles: size (bp), typeface, weight, colour, and the Slides line box of a",
                   "% paragraph in each (ascent above the first baseline, pitch, depth under the last line)"]
         extra += styles
+    if SLIDES_TEXT in ctx.packages:
+        levels = level_definitions(ctx)
+        if levels:
+            extra += ["% what a paragraph is unless it says otherwise, and each level of a list's items"]
+            extra += levels
     theme_file = None
     if theme:
         # the deck's masters and layouts, said once (`adopt_theme`): after the colours and styles it draws in

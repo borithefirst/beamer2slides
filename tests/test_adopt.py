@@ -172,7 +172,7 @@ def test_a_blank_line_someone_typed_is_a_line(tmp_path):
     assert ["".join(r["text"] for r in p["runs"]) for p in box["paragraphs"]] == \
         [" ", "first", " ", "second"], "the blank lines are kept, the trailing one is not"
     text = adopt.bootstrap(ir, tmp_path / "tree" / "main.tex")
-    blank = re.findall(r"\\slide(?:par|text)(?:\[[^\]]*\])?(?:\{[^}]*\})+\{\}$", text, re.M)
+    blank = re.findall(r"\\slide(?:par(?:\[[^\]]*\])?|text(?:\[[^\]]*\])?(?:\{[^}]*\})+)\{\}$", text, re.M)
     assert len(blank) == 2, "each blank line takes a line of its own"
 
 

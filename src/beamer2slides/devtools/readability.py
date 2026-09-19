@@ -47,7 +47,10 @@ NUM = re.compile(r"(?<![A-Za-z0-9])-?\d+(?:\.\d+)?")
 FRAME = re.compile(r"\\begin\{frame\}(.*?)\\end\{frame\}", re.S)
 REPEAT_FRAMES = 3
 # the style a macro is handed (`\slidetext[..]{x,y,w,h}{body-serif-white}{words}`) is a name, not words
-STYLE_ARG = re.compile(r"(\\slide(?:text|par)\b(?:\[[^\]\n]*\])?(?:\{[-\d.,\s]*\})?)\{[\w-]+\}")
+# (`\slidepar` takes its style as an option, `style=`, and its one argument is words; the older
+# `\slidepar[..]{style}{words}` still reads as it did, so older runs score the same)
+STYLE_ARG = re.compile(r"(\\slidetext\b(?:\[[^\]\n]*\])?(?:\{[-\d.,\s]*\})?)\{[\w-]+\}"
+                       r"|(\\slidepar\b(?:\[[^\]\n]*\])?)\{[\w-]+\}(?=\{)")
 # environments are structure both kinds of source have, and a macro that replaces one says no less
 NEUTRAL = frozenset({"begin", "end"})
 
@@ -75,7 +78,7 @@ def frames(tex: str) -> list[str]:
 def visible(body: str) -> str:
     """The words a reader sees, roughly: commands, options, lengths, style names and punctuation taken out."""
     s = re.sub(r"(?<!\\)%.*", "", body)
-    s = STYLE_ARG.sub(r"\1", s)
+    s = STYLE_ARG.sub(lambda m: m.group(1) or m.group(2), s)
     s = CS.sub(" ", s)
     s = re.sub(r"\[[^\]\n]*\]", " ", s)
     s = NUM.sub(" ", s)

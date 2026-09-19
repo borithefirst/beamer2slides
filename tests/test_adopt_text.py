@@ -157,13 +157,18 @@ def test_a_box_is_its_own_size_and_aligned_by_tex(tmp_path):
     assert "itemize" not in frame and "\\item" not in frame
 
 
-def test_list_items_are_drawn_with_slides_bullets_and_no_itemize(tmp_path):
-    """Beamer's blue triangles are ink the deck does not have, and itemize cannot nest past three
-    levels or hang a bullet where Slides does."""
+def test_list_items_are_itemize_drawn_with_slides_bullets(tmp_path):
+    """A list is itemize, but not beamer's: its blue triangles are ink the deck does not have, and it
+    cannot hang a bullet where Slides does. In a slidebox itemize and enumerate are slides.sty's
+    own, and what each level's items look like (bullet, style, indent, gap) is said once for the
+    deck (`\\setslidelist`), not on every item."""
     text = source(tmp_path, body_deck())
     frame = frame_of(text)
-    assert "itemize" not in frame and "\\item" not in frame
-    assert frame.count("\\slidebullet{") == 2
+    assert frame.count("\\begin{itemize}") == 2 and frame.count("\\item") == 2, "a nested list"
+    assert "\\slidebullet" not in frame and "mark=" not in frame, "the bullets are the levels'"
+    levels = re.findall(r"^\\setslidelist\{itemize\}\{(\d)\}\{(.*)\}$", text, re.M)
+    assert [n for n, _ in levels] == ["1", "2"]
+    assert all("mark=" in keys and "style=" in keys and "indent=" in keys for _, keys in levels)
     assert "\\definecolor{Red}{HTML}{CC0000}" in text
     assert "circle[radius=" in text and "draw=Red" in text and "fill=Red" in text
     assert "\\llap{\\csname slides@m@" in macros(tmp_path)
@@ -171,10 +176,10 @@ def test_list_items_are_drawn_with_slides_bullets_and_no_itemize(tmp_path):
 
 def test_a_bullet_is_followed_by_no_word_space(tmp_path):
     """The line end after a bullet's \\llap{...} was a space: every bulleted line of the corpus began
-    one word space right of Slides' (cs161-tls 0.869 -> 0.989)."""
-    frame = frame_of(source(tmp_path, body_deck()))
-    assert frame.count("\\slidebullet{") == 2
-    assert not re.search(r"\\slidebullet\{[^}]*\}\{[^}]*\}\s", frame), "the words follow the bullet"
+    one word space right of Slides' (cs161-tls 0.869 -> 0.989). An item draws its bullet and then
+    skips the spaces up to its words."""
+    source(tmp_path, body_deck())
+    assert "\\slides@marker\\ignorespaces}" in macros(tmp_path)
 
 
 def test_the_thumbnail_tells_a_fixed_box_with_no_insets():
@@ -533,9 +538,10 @@ def test_list_items_collapse_their_spacing_and_other_paragraphs_do_not(tmp_path)
     items = frame_of(source(tmp_path, body_deck()))
     plain = deck(box("s_p", para("One", style={"spaceBelow": pt(12), "spacingMode": "COLLAPSE_LISTS"})
                      + para("Two", style={"spaceBelow": pt(12), "spacingMode": "COLLAPSE_LISTS"})))
-    # `space=` on a paragraph after the first is the space between the two line boxes, \prevdepth less it
-    shifts = lambda text: [-float(k) for k in re.findall(r"\n\s*\\slidepar\[[^\]]*space=([-\d.]+)", text)]
-    (between_items,), (between_paras,) = shifts(items), shifts(frame_of(source(tmp_path / "b", plain)))
+    # `space=` on a paragraph after the first is the space between the two line boxes beyond what the
+    # two styles' line boxes give, \prevdepth less it; none said is none
+    shifts = lambda text: [-float(k) for k in re.findall(r"\n\s*\\(?:slidepar|item)\[[^\]]*space=([-\d.]+)", text)]
+    (between_items,), (between_paras,) = shifts(items) or [0.0], shifts(frame_of(source(tmp_path / "b", plain)))
     # the plain paragraphs step 12 pt (7.56 PDF pt) further; the items only differ by their sizes
     assert between_paras == pytest.approx(-12 / 1.5875, abs=0.01)
     assert between_items > -1.5
@@ -547,9 +553,9 @@ def test_a_box_that_grows_to_fit_drops_its_first_space_above(tmp_path):
     paras = para("One", style={"spaceAbove": pt(22)}) + para("Two", style={"spaceAbove": pt(22)})
     kept = frame_of(source(tmp_path, deck(box("s_a", paras))))
     grows = frame_of(source(tmp_path / "g", deck(box("s_a", paras, autofit={"autofitType": "SHAPE_AUTOFIT"}))))
-    assert "\\slidepar[space=13.86]{body}{One}" in kept and "\\slidepar{body}{One}" in grows
-    for frame in (kept, grows):
-        assert "\\slidepar[space=13.86]{body}{Two}" in frame, "the second one gets its 22 pt"
+    # both of `kept`'s paragraphs take the 22 pt, which their box says once for them
+    assert "\\begin{slidebox}[space=13.86]" in kept and "\\slidepar{One}" in kept and "\\slidepar{Two}" in kept
+    assert "\\slidepar{One}" in grows and "\\slidepar[space=13.86]{Two}" in grows, "the second one gets its 22 pt"
 
 
 def fitted(h: float, **props) -> dict:
@@ -700,7 +706,7 @@ def test_empty_lines_at_the_end_of_a_middle_aligned_box_are_height(tmp_path):
     scale = 720 / 453.54
     assert middle[1]["runs"][0]["text"] == " " and middle[1]["runs"][0]["size"] * scale == pytest.approx(24, rel=0.05)
     assert middle[1]["slides"]["line_spacing"] == pytest.approx(0.8)
-    assert re.search(r"\\slidepar(\[[^\]]*\])?\{[\w-]+\}\{\}\s*\n\s*\\end\{slidebox\}", frame_of(source(tmp_path, body("MIDDLE"))))
+    assert re.search(r"\\slidepar(\[[^\]]*\])?\{\}\s*\n\s*\\end\{slidebox\}", frame_of(source(tmp_path, body("MIDDLE"))))
 
 
 def test_an_empty_line_is_as_tall_as_its_own_newline():
@@ -958,7 +964,7 @@ def test_a_paragraph_of_two_sizes_is_spaced_line_by_line():
     tex = adopt.text_box_latex(el, ctx, "")
     styles = "\n".join(adopt.style_definitions(ctx))
     small, big = adopt.line_box(10.0, 1.0), adopt.line_box(20.0, 1.0)
-    first = re.search(r"\\slidepar\[mixed\]\{([\w-]+)\}", tex)
+    first = re.search(r"\\slidepar\[style=([\w-]+),mixed\]\{", tex)
     assert first, "a paragraph of several sizes is `mixed`: each word carries its line box"
     assert re.search(rf"\\slidestyle\{{{first[1]}\}}\{{[^}}]*pitch={adopt.num(sum(small))},", styles)
     assert f"\\slidestrut{{{adopt.num(small[0])}}}{{{adopt.num(small[1])}}}words" in tex
@@ -998,7 +1004,7 @@ def test_each_list_item_says_whether_its_side_of_the_gap_collapses():
             adopt.Context(), "")
     assert items("NEVER_COLLAPSE") != items("COLLAPSE_LISTS")
     assert "space=" not in items("COLLAPSE_LISTS"), "no space between the two line boxes"
-    assert "\\slidepar[space=3]" in items("NEVER_COLLAPSE")
+    assert "\\item[space=3]" in items("NEVER_COLLAPSE")
 
 
 def test_a_bulleted_line_with_tabs_stands_them_on_the_default_stops():

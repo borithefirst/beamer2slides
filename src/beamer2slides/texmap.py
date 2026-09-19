@@ -400,7 +400,7 @@ ARGS = {
     "usetheme": "om", "usecolortheme": "om", "usefonttheme": "om", "graphicspath": "m",
     "againframe": "<om", "circled": "M", "newline": "", "linebreak": "o", "hfill": "", "vfill": "",
     # adopt's vocabulary (adopt.SLIDES_TEXT, adopt_shapes.SHAPE_MACRO: slides.sty)
-    "slidepar": "omM", "slidetext": "ommM", "slidelabel": "mMm", "slidebullet": "mm", "slidestrut": "mm", "slidesize": "m",
+    "slidepar": "oM", "setslidepar": "m", "setslidelist": "mmm", "slidetext": "ommM", "slidelabel": "mMm", "slidebullet": "mm", "slidestrut": "mm", "slidesize": "m",
     "slidestyle": "mm", "slidemark": "mm", "setslideinset": "m", "slideshape": "mm", "sliderect": "om", "slideellipse": "om", "slidestab": "mM", "slidebreak": "", "slidefillbreak": "",
 }
 TEXT_MACROS = {"LaTeX": "LATEX", "TeX": "TEX", "ldots": "...", "dots": "...", "textellipsis": "...",
