@@ -881,7 +881,7 @@ class FontMapper:
                 if data is not None:
                     try:
                         prog = load_cff(data)
-                        prog.face_data = data             # what render_text draws the glyphs from
+                        prog.face_data = prog.platform_data = data   # what render_text draws the glyphs from
                     except Exception:  # noqa: BLE001
                         prog = None
                 self.standard_faces[base_font] = prog
@@ -900,6 +900,8 @@ class FontMapper:
         if name not in self.generic:
             data = foxit.face_data(name)
             self.generic[name] = load_generic(data) if data is not None else None
+            if self.generic[name] is not None:
+                self.generic[name].platform_data = data
         prog = self.generic[name]
         return _Face(prog, generic=True, subst=subst) if prog is not None else None
 
@@ -936,6 +938,8 @@ class FontMapper:
                     except Exception:  # noqa: BLE001 - a face FreeType would not open either
                         faces[index] = None
                 prog = faces[index]
+                if prog is not None:
+                    prog.platform_data = data                # CFX_Font's span: the whole collection
             else:
                 key = (face_name, weight, bool(italic))
                 if key not in self.face_map:
@@ -944,6 +948,7 @@ class FontMapper:
                         return None
                     try:
                         self.face_map[key] = load_truetype(data)
+                        self.face_map[key].platform_data = data
                     except Exception:  # noqa: BLE001
                         self.face_map[key] = None
                 prog = self.face_map[key]

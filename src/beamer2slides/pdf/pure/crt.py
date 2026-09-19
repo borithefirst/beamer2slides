@@ -54,6 +54,35 @@ def qsort(a: list, cmp) -> None:
     a[:] = [items[i] for i in idx]
 
 
+_cg = None
+
+
+def quartz_font(data: bytes | None) -> bool:
+    """Whether CQuartz2D::CreateFont makes a CGFont of these bytes (macOS only; False elsewhere and
+    for no bytes): CPDF_Type1Font::LoadGlyphMap takes its Apple-only `bCoreText` path when it does."""
+    global _cg
+    if sys.platform != "darwin" or not data:
+        return False
+    if _cg is None:
+        _cg = ctypes.CDLL("/System/Library/Frameworks/CoreGraphics.framework/CoreGraphics")
+        _cg.CGDataProviderCreateWithData.restype = ctypes.c_void_p
+        _cg.CGDataProviderCreateWithData.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_size_t,
+                                                     ctypes.c_void_p]
+        _cg.CGFontCreateWithDataProvider.restype = ctypes.c_void_p
+        _cg.CGFontCreateWithDataProvider.argtypes = [ctypes.c_void_p]
+        _cg.CGDataProviderRelease.argtypes = [ctypes.c_void_p]
+        _cg.CGFontRelease.argtypes = [ctypes.c_void_p]
+    buf = ctypes.create_string_buffer(bytes(data), len(data))
+    provider = _cg.CGDataProviderCreateWithData(None, buf, len(data), None)
+    if not provider:
+        return False
+    font = _cg.CGFontCreateWithDataProvider(provider)
+    _cg.CGDataProviderRelease(provider)
+    if font:
+        _cg.CGFontRelease(font)
+    return bool(font)
+
+
 # static_cast from float to an integer is undefined out of range, and the CPU decides what comes out:
 # x86's cvttss2si gives INT_MIN (the 64-bit form's low half, for uint32), arm64's fcvtzs/fcvtzu
 # saturate and turn NaN into 0 (pypdfium2's macOS wheel is arm64)
