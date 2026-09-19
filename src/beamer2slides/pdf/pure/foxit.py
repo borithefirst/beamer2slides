@@ -115,10 +115,14 @@ def _download(url: str) -> bytes:
             with urllib.request.urlopen(url, timeout=120) as r:
                 return r.read()
         except urllib.error.HTTPError as e:
-            if e.code != 429:
+            if e.code not in (429, 500, 502, 503, 504):   # rate limited, or the server out of sorts
                 raise
             time.sleep(10 * (attempt + 1))
-    raise RuntimeError(f"rate limited: {url}")
+        except (urllib.error.URLError, TimeoutError):
+            if attempt == 7:
+                raise
+            time.sleep(10 * (attempt + 1))
+    raise RuntimeError(f"refused eight times: {url}")
 
 
 def _source(name: str, local: Path | None) -> str:

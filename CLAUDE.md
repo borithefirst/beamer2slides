@@ -74,11 +74,20 @@ a per-slide background picture.
   content included; one torture shading refused), and on their first 10 pages every other call too -
   drawings, links, glyph widths, clipped/transparent/partial renders and `embedded_image` with
   PDFium's own bitmaps (GetBitmap, GetRenderedBitmap: `backend._image_pixels`, `_rendered_image`).
-  All measured on Windows: substitution follows PDFium's Windows mapper only (Linux's
-  CFX_LinuxFontInfo folder scan and CFX_MacFontInfo are not ported). `devtools/platform_check.py`
-  runs every oracle plus `subst_extract` (text in made-up non-embedded fonts, both backends) on
-  whatever OS it is on, and `.github/workflows/pure-pdf.yml` runs it on ubuntu/macos/windows with
-  pinned versions (`.github/constraints.txt`) and decks built once in a TeX Live container.
+  Measured on Windows; Linux and macOS answer as their own PDFium does too: substitution goes
+  through CFX_LinuxFontInfo / CFX_MacFontInfo's folder scan off Windows (`fontmapper.FolderFontInfo`,
+  `platform_font_info`: readdir order, first face of a name wins, a TTC face always loads as index
+  0), float->int casts are the CPU's (`crt.i32`/`u32`/`i32_array`: arm64 saturates, x86 gives
+  INT_MIN; the macOS wheel is arm64), a WideString holds code points where wchar_t is 32 bits
+  (`navigation.wide`: name trees compare them, an astral /ActualText char is skipped), FreeType's
+  sorts call the platform's own qsort (`crt.qsort` via ctypes: glibc's is stable), and a Type 1
+  font CoreGraphics accepts takes macOS PDFium's CoreText glyph map (`crt.quartz_font`).
+  `devtools/platform_check.py` runs every oracle plus `subst_extract` (text in made-up
+  non-embedded fonts, both backends) on whatever OS it is on, and `.github/workflows/pure-pdf.yml`
+  runs it on ubuntu/macos/windows with pinned versions (`.github/constraints.txt`) and decks built
+  once in a TeX Live container (`tests/decks/build.py` reruns until the .aux settles: TeX Live's
+  tikzmark needs a third pass); failing shading seeds leave their PDF and both renders in the
+  artifact.
   And deck.json is identical on all 48 test decks; extract is ~2.3× slower than PDFium, rendering
   ~7× (float32 rounding batched through `syntax.F32X*` structs with a scalar fallback on overflow,
   one regex per word in both lexers, psLib shortcuts for Type 1 programs). `tests/test_pure_pdf.py`.

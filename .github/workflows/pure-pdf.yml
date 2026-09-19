@@ -34,8 +34,17 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
+    env:
+      # the faces PDFium compiles in, fetched from its repository and kept between runs: without
+      # them every substituted font falls back and half the suite fails (the repository answers 503
+      # often enough to matter)
+      B2S_FOXIT_FONTS: ${{ github.workspace }}/.foxit-faces
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/.foxit-faces
+          key: foxit-${{ runner.os }}-${{ hashFiles('src/beamer2slides/pdf/pure/foxit.py') }}
       - uses: actions/download-artifact@v4
         with:
           name: decks
