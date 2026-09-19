@@ -171,7 +171,7 @@ def test_a_blank_line_someone_typed_is_a_line(tmp_path):
     assert ["".join(r["text"] for r in p["runs"]) for p in box["paragraphs"]] == \
         [" ", "first", " ", "second"], "the blank lines are kept, the trailing one is not"
     text = adopt.bootstrap(ir, tmp_path / "tree" / "main.tex")
-    assert text.count("\\strut") == 2, "each blank line takes a line of its own"
+    assert text.count("% blank line") == 2, "each blank line takes a line of its own"
 
 
 def test_pull_still_sees_no_blank_paragraph():

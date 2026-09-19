@@ -25,7 +25,7 @@ from pathlib import Path
 
 from .adopt_shapes import turned_text
 from .inverse import (Context, TEXTPOS, body_style, colour_name, frame_latex, paragraphs_latex,
-                      picture_block, textblock_latex)
+                      picture_block)
 
 # beamer's own page sizes, by the class option that asks for them (`deck_ir.BEAMER_SIZES`).
 ASPECTS = {(453.54, 255.12): "aspectratio=169", (453.54, 283.46): "aspectratio=1610",
@@ -106,6 +106,10 @@ FONT_STYLES = {"regular": "UprightFont", "": "UprightFont", "bold": "BoldFont",
                "bolditalic": "BoldItalicFont", "boldoblique": "BoldItalicFont"}
 
 
+WINDOWS_STYLES = {"bi": "BoldItalicFont", "bd": "BoldFont", "z": "BoldItalicFont", "b": "BoldFont",
+                  "i": "ItalicFont"}
+
+
 def font_dirs() -> list[Path]:
     """Where to look for the typefaces a deck names: the ones this repository ships with its themes,
     then the machine's own - or only `$B2S_FONTS`, when it is set, which is how one points adopt at
@@ -143,6 +147,17 @@ def font_candidates() -> dict[str, dict[str, Path]]:
                 style = FONT_STYLES.get("".join(c for c in suffix.lower() if c.isalpha()))
                 if style is not None:
                     groups.setdefault(stem, {}).setdefault(style, f)
+        # Windows names a family's styles by a short suffix and no dash: arial.ttf, arialbd.ttf,
+        # ariali.ttf, arialbi.ttf (georgiaz, verdanaz for bold italic). Read as families of their
+        # own, Arial had no bold, fontspec set every bold word in the regular face, and the cs161
+        # decks lost all their bold (slide 4's "Confidentiality").
+        for stem in sorted(groups, key=len, reverse=True):
+            for suffix, style in WINDOWS_STYLES.items():
+                root = stem[:-len(suffix)]
+                if stem.lower().endswith(suffix) and root in groups and root != stem \
+                        and set(groups[stem]) == {"UprightFont"}:
+                    groups[root].setdefault(style, groups.pop(stem)["UprightFont"])
+                    break
         _FAMILIES[dirs] = {k: v for k, v in groups.items() if "UprightFont" in v}
     return _FAMILIES[dirs]
 
@@ -223,7 +238,8 @@ def font_preamble(target: dict, tree: Path | None) -> list[str]:
         low, asked = flatten(stem), flatten(wanted[fam])
         if not (low.startswith(asked) or asked.startswith(low)):
             print(f"  {wanted[fam]}: not on this machine, set in {stem}")
-        opts = [f"{k}=*-{files[k].stem.partition('-')[2]}" if "-" in files[k].stem else f"{k}=*"
+        opts = [f"{k}=*-{files[k].stem.partition('-')[2]}" if "-" in files[k].stem else
+                f"{k}=*" if files[k].stem == stem else f"{k}={files[k].stem}"
                 for k in ("UprightFont", "BoldFont", "ItalicFont", "BoldItalicFont") if k in files]
         if tree is not None:
             for f in files.values():
@@ -272,6 +288,261 @@ def picture_of(el: dict, tree: Path | None):
                 img.seek(0)
                 img.convert("RGBA").save(dest, "PNG")
     return Picture(rel, dest, natural_size(dest))
+
+
+# ------------------------------------------------------------------------------------ text boxes
+#
+# Slides' text model, as emit calibrated it on Google's renderer (docs/calibration.md, Slides pt):
+# a line of size z is a box ASCENT_EM z above its baseline and LINE_EM z - ASCENT_EM z below it;
+# lineSpacing r >= 1 adds (r - 1) LINE_EM z under the line, r < 1 takes (1 - r) LINE_EM z away, three
+# quarters of it above (`emit.extra_above` / `extra_below`). Lines stack box on box, so the pitch
+# between two lines is the lower half of one plus the upper half of the next, and spaceBelow +
+# spaceAbove between paragraphs - except between two list items when the paragraph's spacingMode
+# collapses lists (the cs161 masters say COLLAPSE_LISTS and spaceBelow 12 pt, and the thumbnails
+# show no gap between items). The first line's box starts BASELINE_A below the box top, the text
+# PAD_X inside its left and right edges; a middle-aligned box centres the stack of line boxes (one
+# line: baseline 0.362 em below the middle, tools/probe_middle.py). Measured again on cs161-tls
+# slide 4's thumbnail: first baseline 122.2 pt for a box at 98.17 with 18 pt text (6.48 + 0.968 x 18
+# = 122.07), 19.35 pt between two 14 pt lines at 115% (1.2 x 14 x 1.15 = 19.32), text starting at
+# indentStart and the bullet glyph ending 0.08 em before indentFirstLine.
+#
+# TeX is made to follow it line by line rather than approximately: every line within a paragraph is
+# placed by \baselineskip = the Slides pitch (\lineskiplimit -\maxdimen, so glyph heights never push
+# a line down), and the step from one paragraph to the next is set through \prevdepth, which TeX
+# reads when it puts the next paragraph's first line (a strut as tall as the Slides line box above
+# its baseline) under the last one. Interword spaces are the font's own with no shrink and no
+# hyphenation, so a line holds what a browser's line holds and breaks fall where Slides breaks them.
+
+SLIDES_TEXT = (
+    "\\newcommand{\\slidesize}[1]{\\fontsize{#1}{#1}\\selectfont"
+    "\\spaceskip=\\fontdimen2\\font plus\\fontdimen3\\font\\relax}\n"
+    "\\newcommand{\\slidesbox}{\\parindent=0pt\\parskip=0pt\\lineskip=0pt\\lineskiplimit=-\\maxdimen"
+    "\\hyphenpenalty=10000\\exhyphenpenalty=50\\tolerance=9999\\emergencystretch=0pt\\frenchspacing"
+    "\\hbadness=10000\\hfuzz=\\maxdimen\\vbadness=10000\\vfuzz=\\maxdimen}")
+ULEM = "\\usepackage[normalem]{ulem}"
+TIKZ = "\\usepackage{tikz}"
+# Ink of Slides' own bullet glyphs per em of the bullet's size (emit.BULLET_SHAPES, measured with
+# tools/probe_bullets.py; the lift off the baseline from cs161-tls slide 4): (height, gap to
+# indentFirstLine, bottom above the baseline). Drawn rather than typed, because the deck's typeface
+# may not have ● ○ ■ at all and a missing glyph in lualatex is nothing on the page.
+BULLET_INK = {"●": (0.413, 0.08, 0.06), "○": (0.43, 0.08, 0.07), "■": (0.45, 0.07, 0.0)}
+RING_EM = 0.06              # ○'s stroke
+GLYPH_GAP = 1.9             # a typed bullet's box ends this far before indentFirstLine (emit.BULLET_GAP)
+
+
+def line_box(z: float, r: float) -> tuple[float, float]:
+    """(height above the baseline, depth below it) of a Slides line of size z at lineSpacing r."""
+    from .emit import ASCENT_EM, LINE_EM
+    if r >= 1:
+        return ASCENT_EM * z, (LINE_EM - ASCENT_EM) * z + (r - 1) * LINE_EM * z
+    return ASCENT_EM * z - (1 - r) * 0.75 * LINE_EM * z, (LINE_EM - ASCENT_EM) * z - (1 - r) * 0.25 * LINE_EM * z
+
+
+def para_size(p: dict) -> float:
+    return max((r.get("size") or 10.0) for r in p["runs"]) if p["runs"] else 10.0
+
+
+def text_escape(text: str) -> str:
+    """LaTeX for plain text as Slides shows it: runs of spaces are kept (Slides does not fold them)."""
+    from .inverse import latex_escape
+    out = latex_escape(text.replace("\t", " ").replace("\x0b", " "))
+    while "  " in out:
+        out = out.replace("  ", " \\ ")
+    return out
+
+
+def run_tex(r: dict, base: dict, text: str, ctx: Context) -> str:
+    """One run's text with the style it has over `base`, both ways: a box whose base is bold writes
+    `\\textmd` for its regular words, where `inverse.runs_latex` wrote nothing and left them bold."""
+    lead = len(text) - len(text.lstrip(" "))
+    trail = len(text) - len(text.rstrip(" "))
+    core = text_escape(text.strip(" "))
+    if not core:
+        return text_escape(text)
+    fam, bfam = r.get("family") or "sans", base.get("family") or "sans"
+    if fam != bfam:
+        core = {"mono": "\\texttt", "serif": "\\textrm", "sans": "\\textsf"}[fam if fam in ("mono", "serif") else "sans"] + f"{{{core}}}"
+    if bool(r.get("bold")) != bool(base.get("bold")):
+        core = ("\\textbf" if r.get("bold") else "\\textmd") + f"{{{core}}}"
+    if bool(r.get("italic")) != bool(base.get("italic")):
+        core = ("\\textit" if r.get("italic") else "\\textup") + f"{{{core}}}"
+    if r.get("smallcaps"):
+        core = f"\\textsc{{{core}}}"
+    if r.get("underline") or r.get("strike"):
+        ctx.packages.add(ULEM)
+        core = ("\\uline" if r.get("underline") else "\\sout") + f"{{{core}}}"
+    if r.get("script") == "super":
+        core = f"\\textsuperscript{{{core}}}"
+    elif r.get("script") == "sub":
+        core = f"\\textsubscript{{{core}}}"
+    if r.get("color") and (r["color"] or "").lower() != (base.get("color") or "").lower():
+        core = f"\\textcolor{{{colour_name(r['color'], ctx.colours)}}}{{{core}}}"
+    if r.get("size") and base.get("size") and abs(r["size"] - base["size"]) > 0.01:
+        core = f"{{\\slidesize{{{r['size']:.2f}}}{core}}}"
+    if r.get("link") and not str(r["link"]).startswith("#"):
+        url = str(r["link"]).replace("\\", "/").replace("#", "\\#").replace("%", "\\%")
+        core = f"\\href{{{url}}}{{{core}}}"
+    return " " * lead + core + " " * trail
+
+
+def paragraph_base(p: dict) -> dict:
+    """The style most of a paragraph's letters are in: set once at its start."""
+    counts: dict = {}
+    for r in p["runs"]:
+        k = (round(r.get("size") or 0, 2), (r.get("color") or "").lower() or None, r.get("family") or "sans",
+             bool(r.get("bold")), bool(r.get("italic")))
+        counts[k] = counts.get(k, 0) + len(r["text"])
+    size, colour, family, bold, italic = max(counts, key=counts.get)
+    return {"size": size or 10.0, "color": colour, "family": family, "bold": bold, "italic": italic}
+
+
+def runs_tex(runs: list[dict], base: dict, ctx: Context, brk: str) -> str:
+    """A paragraph's runs; a soft break (Shift+Enter, \\x0b) ends the line wherever it stands - inside
+    a bold word, at the paragraph's start - since the paragraph is already in horizontal mode
+    (`\\noindent`) and the break is written between the styled pieces, never inside one."""
+    out = []
+    for r in runs:
+        if r.get("hole"):
+            out.append(f"\\hskip{r['hole']:.2f}pt ")
+            continue
+        for k, piece in enumerate(r["text"].split("\x0b")):
+            if k:
+                out.append(brk)
+            if piece:
+                out.append(run_tex(r, base, piece, ctx))
+    text = "".join(out)
+    # TeX drops the spaces a paragraph opens with; Slides draws them
+    lead = len(text) - len(text.lstrip(" "))
+    return "\\ " * lead + text[lead:].rstrip(" ")
+
+
+def bullet_tex(p: dict, ctx: Context, scale: float, right: float) -> str:
+    """The bullet, its right edge `right` pt from where the line's text starts (negative: left of it)."""
+    b = p["bullet"]
+    glyph = (b.get("text") or "").strip()
+    if not glyph:
+        return ""                               # a list paragraph whose level shows no glyph
+    z = b.get("size") or para_size(p)
+    colour = colour_name(b["color"], ctx.colours) if b.get("color") else None
+    fill = f"fill={colour}" if colour else "fill"
+    if glyph in BULLET_INK:
+        ctx.packages.add(TIKZ)
+        height, gap, lift = BULLET_INK[glyph]
+        d = height * z
+        right -= gap * z
+        if glyph == "●":
+            pic = f"\\tikz[baseline={-lift * z:.2f}pt]\\path[{fill}] ({d / 2:.2f}pt,{d / 2:.2f}pt) circle[radius={d / 2:.2f}pt];"
+        elif glyph == "○":
+            t = RING_EM * z
+            draw = f"draw={colour}" if colour else "draw"
+            pic = (f"\\tikz[baseline={-lift * z:.2f}pt]\\path[{draw},line width={t:.2f}pt] "
+                   f"({d / 2:.2f}pt,{d / 2:.2f}pt) circle[radius={(d - t) / 2:.2f}pt];")
+        else:
+            pic = f"\\tikz[baseline={-lift * z:.2f}pt]\\path[{fill}] (0pt,0pt) rectangle ({d:.2f}pt,{d:.2f}pt);"
+    else:
+        right -= GLYPH_GAP / scale
+        style = {"mono": "\\ttfamily", "serif": "\\rmfamily"}.get(b.get("font_family"), "")
+        style += "\\bfseries" if b.get("bold") else ""
+        style += f"\\color{{{colour}}}" if colour else ""
+        pic = f"{{\\slidesize{{{z:.2f}}}{style}{text_escape(glyph)}}}"
+    return f"\\llap{{{pic}\\hskip{-right:.2f}pt}}"
+
+
+def text_box_latex(el: dict, ctx: Context, ind: str) -> str:
+    """A text box laid out as Slides lays it out: the element's own box, the vertical alignment done
+    by TeX (`\\vbox to` its height with the slack above, below or both), each paragraph at its own
+    size, pitch, spacing and indents, bullets drawn where Slides draws them. See the notes above."""
+    from .emit import BASELINE_A, PAD_X
+    box = el.get("box") or {}
+    scale = box.get("scale") or 720 / 453.54
+    x0, y0, x1, y1 = el["bbox"]
+    pad, inset = PAD_X / scale, BASELINE_A / scale
+    width, height = max(x1 - x0 - 2 * pad, 1.0), max(y1 - y0, 0.1)
+    valign = box.get("valign", "top")
+    paras = [p for p in el["paragraphs"] if p["runs"]]
+    ctx.packages.add(TEXTPOS)
+    ctx.packages.add(SLIDES_TEXT)
+    out = [f"{ind}\\begin{{textblock*}}{{{width:.1f}pt}}({x0 + pad:.1f}pt,{y0:.1f}pt)",
+           f"{ind}  \\vbox to {height:.1f}pt{{\\slidesbox",
+           f"{ind}  " + ("\\vss" if valign in ("middle", "bottom") else f"\\vskip{inset:.2f}pt")]
+    prev = None
+    for p in paras:
+        sl = p.get("slides") or {}
+        z, r = para_size(p), sl.get("line_spacing") or 1.0
+        above, below = line_box(z, r)
+        pitch = above + below
+        left, first = (sl.get("indent_start") or 0) / scale, (sl.get("indent_first") or 0) / scale
+        end = (sl.get("indent_end") or 0) / scale
+        glyph = p.get("bullet") and (p["bullet"].get("text") or "").strip()
+        shift = max(0.0, first - left) if p.get("bullet") else first - left
+        head = []
+        if prev is None:
+            if sl.get("space_above"):
+                head.append(f"\\vskip{sl['space_above'] / scale:.2f}pt")
+        else:
+            psl, pz, pr = prev.get("slides") or {}, para_size(prev), (prev.get("slides") or {}).get("line_spacing") or 1.0
+            gap = ((psl.get("space_below") or 0) + (sl.get("space_above") or 0)) / scale
+            if prev.get("bullet") and p.get("bullet") and sl.get("spacing_mode") != "NEVER_COLLAPSE":
+                gap = 0.0
+            k = pitch - line_box(pz, pr)[1] - gap - above
+            head.append(f"\\prevdepth=\\dimexpr\\prevdepth{k:+.2f}pt\\relax")
+        # LuaTeX's skips are logical: in a right-to-left paragraph \leftskip is at its start, the
+        # right edge, where Slides measures indentStart from too - so only the alignment flips.
+        rtl = p.get("direction") == "rtl"
+        align = p.get("align", "left")
+        if rtl:
+            align = {"left": "right", "right": "left"}.get(align, align)
+        justified = bool(sl.get("justified")) and align == "left"
+        lskip = f"{left:.2f}pt" + (" plus 1fil" if align in ("center", "right") else "")
+        rskip = f"{end:.2f}pt" + (" plus 1fil" if align in ("center", "left") and not justified else "")
+        fill = "0pt plus 1fil" if justified else "0pt"
+        base = paragraph_base(p)
+        lead = f"\\slidesize{{{base['size']:.2f}}}"
+        lead += {"mono": "\\ttfamily", "serif": "\\rmfamily"}.get(base["family"], "")
+        lead += "\\bfseries" if base["bold"] else ""
+        lead += "\\itshape" if base["italic"] else ""
+        lead += f"\\color{{{colour_name(base['color'], ctx.colours)}}}" if base["color"] else ""
+        brk = "\\unskip\\hfil\\break " if justified else "\\unskip\\break "
+        blank = not any(x["text"].strip() for x in p["runs"])
+        body = "" if blank else runs_tex(p["runs"], base, ctx, brk)
+        start = f"\\vrule width0pt height{above:.2f}pt depth0pt\\relax"
+        if shift:
+            start += f"\\hskip{shift:.2f}pt"
+        if glyph:
+            start += bullet_tex(p, ctx, scale, first - left - shift)
+        elif "\t" in "".join(x["text"] for x in p["runs"]) and first < left and not p.get("bullet"):
+            # a hanging label (`label<TAB>text`): the tab jumps to indentStart
+            label, rest, seen = [], [], False
+            for x in p["runs"]:
+                if seen or "\t" not in x["text"]:
+                    (rest if seen else label).append(x)
+                    continue
+                a, _, b = x["text"].partition("\t")
+                label.append({**x, "text": a})
+                rest.append({**x, "text": b})
+                seen = True
+            body = (f"\\hbox to{left - first:.2f}pt{{{runs_tex(label, base, ctx, brk)}\\hss}}"
+                    + runs_tex(rest, base, ctx, brk))
+        # a right-to-left paragraph is set in its language (scripts.py: babel's bidi, shaping)
+        lang_in, lang_out = "", ""
+        if rtl:
+            from .scripts import rtl_language
+            lang_in = f"\\begin{{otherlanguage}}{{{rtl_language(p)}}}"
+            lang_out = "\\end{otherlanguage}"
+        out.append(f"{ind}  " + "".join(head) + lang_in +
+                   f"{{\\leftskip={lskip}\\relax\\rightskip={rskip}\\relax\\parfillskip={fill}\\relax")
+        out.append(f"{ind}    \\noindent{lead}{start}" + ("% blank line" if blank else ""))
+        if body:
+            out.append(f"{ind}    {body}")
+        # the pitch last: \selectfont (in \slidesize) resets \baselineskip, and TeX reads it at \par
+        out.append(f"{ind}  \\baselineskip={pitch:.2f}pt\\par}}{lang_out}")
+        prev = p
+    if prev is not None:
+        last = line_box(para_size(prev), (prev.get("slides") or {}).get("line_spacing") or 1.0)[1]
+        out.append(f"{ind}  \\vskip\\dimexpr{last:.2f}pt-\\prevdepth\\relax")
+    out.append(f"{ind}  " + ("\\vss" if valign in ("middle", "top") else f"\\vskip{inset:.2f}pt") + "}")
+    out.append(f"{ind}\\end{{textblock*}}")
+    return "\n".join(out)
 
 
 def tikz_block(body: str, x0: float, y0: float, w: float, h: float, ind: str) -> str:
@@ -479,12 +750,10 @@ def slide_latex(s: dict, style_for, ctx: Context, flow: bool, tree: Path | None 
             ctx.packages.add(TEXTPOS)
             # A node of a flow chart is one element: its box, then its label on top.
             out.append(shape_block(el, ctx, "  ").rstrip("\n"))
-            base = element_style(el)
             # A turned text box: its words are written upright in the box it would have if it were
             # not turned, and that is then set turned about its centre (`adopt_shapes.turned_text`).
             upright = {**el, "bbox": el["frame"]["box"]} if el.get("frame") else el
-            out.append(turned_text(textblock_latex(upright, lambda _p, b=base: b, ctx, "  ", reset=True,
-                                                   lead=base_lead(base, ctx)), el, ctx))
+            out.append(turned_text(text_box_latex(upright, ctx, "  "), el, ctx))
     if s.get("notes"):
         from .inverse import latex_escape
         out.append("  \\note{" + "\n\n".join(latex_escape(p) for p in s["notes"].split("\n") if p.strip()) + "}")

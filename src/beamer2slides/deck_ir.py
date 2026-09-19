@@ -191,16 +191,33 @@ class StyleResolver:
             out.append(cur)
         return list(reversed(out))
 
-    def parent_style(self, pe: dict) -> dict:
+    @staticmethod
+    def _level_paragraph(el: dict, level: int) -> tuple[dict, dict]:
+        """(paragraph marker, first run style) of a parent placeholder's paragraph for list level
+        `level`: a BODY placeholder holds one empty paragraph per nesting level, each styled for
+        its level (the cs161 decks' master: 18 pt at level 0, 14 pt below it, and 12 pt below every
+        paragraph). Reading only the first one set every sub-item in the level-0 size, which broke
+        all their lines in other places."""
+        found: list[tuple[dict, dict]] = []
+        marker = None
+        for te in el.get("shape", {}).get("text", {}).get("textElements", []):
+            if "paragraphMarker" in te:
+                marker = te["paragraphMarker"]
+                found.append((marker, {}))
+            elif "textRun" in te and found and not found[-1][1]:
+                found[-1] = (found[-1][0], te["textRun"].get("style", {}) or {"_": None})
+        for pm, st in found:
+            if (pm.get("bullet") or {}).get("nestingLevel", 0) == level:
+                return pm, st
+        return found[0] if found else ({}, {})
+
+    def parent_style(self, pe: dict, level: int = 0) -> dict:
         style: dict = {}
         for el in self.chain(pe):
-            for te in el.get("shape", {}).get("text", {}).get("textElements", []):
-                if "textRun" in te:
-                    style.update(te["textRun"].get("style", {}))
-                    break
+            style.update({k: v for k, v in self._level_paragraph(el, level)[1].items() if k != "_"})
         return style
 
-    def parent_paragraph_style(self, pe: dict) -> dict:
+    def parent_paragraph_style(self, pe: dict, level: int = 0) -> dict:
         """What a paragraph's own `paragraphMarker.style` leaves out, from the same parents.
 
         A placeholder inherits how its paragraphs sit, not only how their letters look: the DevFest
@@ -209,11 +226,23 @@ class StyleResolver:
         because the loop has no translator for alignment at all."""
         style: dict = {}
         for el in self.chain(pe):
-            for te in el.get("shape", {}).get("text", {}).get("textElements", []):
-                if "paragraphMarker" in te:
-                    style.update(te["paragraphMarker"].get("style", {}))
-                    break
+            style.update(self._level_paragraph(el, level)[0].get("style", {}))
         return style
+
+    def parent_bullet_style(self, pe: dict, level: int = 0) -> dict:
+        """The text style the parents' lists give a bullet at `level` (colour, size, font)."""
+        style: dict = {}
+        for el in self.chain(pe):
+            for lst in el.get("shape", {}).get("text", {}).get("lists", {}).values():
+                style.update(lst.get("nestingLevel", {}).get(str(level), {}).get("bulletStyle", {}))
+        return style
+
+    def parent_shape_property(self, pe: dict, key: str):
+        """A shape property the element leaves out (`contentAlignment`, `autofit`), from its parents."""
+        value = None
+        for el in self.chain(pe):
+            value = el.get("shape", {}).get("shapeProperties", {}).get(key, value)
+        return value
 
 
 def walk_elements(elements: list[dict]):
@@ -234,35 +263,63 @@ def flatten(elements: list[dict], parent: list[float] | None = None, group: str 
             yield pe, m, group
 
 
-def text_paragraphs(pe: dict, text: dict, resolver: StyleResolver, fonts: FontMapper, scale: float,
-                    keep_blank: bool = False) -> list[dict]:
+def base_style(pe: dict, resolver: StyleResolver, level: int) -> dict:
+    """The text style a run of list level `level` has where it says nothing, from the parents."""
     base = {**DEFAULT_STYLE}
-    parent = resolver.parent_style(pe)
+    parent = resolver.parent_style(pe, level)
     base.update({k: v for k, v in parent.items() if k in ("fontFamily", "bold", "italic")})
     if parent.get("fontSize"):
         base["fontSize"] = dim(parent["fontSize"])
     if parent.get("weightedFontFamily"):
         base["fontFamily"] = parent["weightedFontFamily"]["fontFamily"]
+        if parent["weightedFontFamily"].get("weight", 400) >= 600:
+            base["bold"] = True
     if parent.get("foregroundColor"):
         base["color"] = rgb_hex(parent["foregroundColor"], resolver.scheme) or base["color"]
-    pbase = resolver.parent_paragraph_style(pe)
+    return base
+
+
+def text_paragraphs(pe: dict, text: dict, resolver: StyleResolver, fonts: FontMapper, scale: float,
+                    keep_blank: bool = False, font_scale: float = 1.0, spacing_cut: float = 0.0) -> list[dict]:
+    """`font_scale` and `spacing_cut` are the box's autofit (`shrink text on overflow`, or a .pptx's
+    normAutofit): Slides draws every run at `font_scale` times its size and takes `spacing_cut` off
+    every paragraph's line spacing. The cs161 decks' titles say 28 pt and are drawn at 25.2: the
+    thumbnail's cap height is 18.0 pt, Arial's is 0.716 em."""
+    bases: dict[int, dict] = {}
     paragraphs: list[dict] = []
     cur = None
+    lists = text.get("lists", {})
     for te in text.get("textElements", []):
         if "paragraphMarker" in te:
             pm = te["paragraphMarker"]
-            st = {**pbase, **pm.get("style", {})}
             bullet = pm.get("bullet")
+            nesting = bullet.get("nestingLevel", 0) if bullet else 0
+            base = bases.setdefault(nesting, base_style(pe, resolver, nesting))
+            st = {**resolver.parent_paragraph_style(pe, nesting), **pm.get("style", {})}
+            glyph = bullet.get("glyph", "") if bullet else ""
+            bstyle = {}
+            if bullet:
+                # what a bullet looks like: the parents' list level, the box's own list level, then
+                # the paragraph's own bullet style; what none of them says is the first run's
+                bstyle = {**resolver.parent_bullet_style(pe, nesting),
+                          **lists.get(bullet.get("listId", ""), {}).get("nestingLevel", {}).get(
+                              str(nesting), {}).get("bulletStyle", {}),
+                          **(bullet.get("bulletStyle") or {})}
             # `align` is where the lines sit on the page. START and END are the paragraph's own
             # start and end, so in a right-to-left paragraph (Hebrew, Arabic) START is flush right.
             rtl = st.get("direction") == "RIGHT_TO_LEFT"
             cur = {"align": {"START": "left", "CENTER": "center", "END": "right", "JUSTIFIED": "left"}.get(
                        st.get("alignment", "START"), "left"),
-                   "level": 0, "nesting": bullet.get("nestingLevel", 0) if bullet else 0,
-                   "bullet": ({"kind": "number" if re.search(r"\d|[a-z]\.|[ivx]+\.", bullet.get("glyph", "")) else "glyph",
-                               "text": bullet.get("glyph", "")} if bullet else None),
+                   "justified": st.get("alignment") == "JUSTIFIED",
+                   "level": 0, "nesting": nesting,
+                   "bullet": ({"kind": "number" if re.search(r"\d|[a-z]\.|[ivx]+\.", glyph) else "glyph",
+                               "text": glyph} if bullet else None),
+                   "bullet_style": bstyle,
                    "indent_start": dim(st.get("indentStart")), "indent_first": dim(st.get("indentFirstLine")),
-                   "line_spacing": (st.get("lineSpacing") or 100) / 100, "space_above": dim(st.get("spaceAbove")),
+                   "indent_end": dim(st.get("indentEnd")),
+                   "line_spacing": max(0.1, (st.get("lineSpacing") or 100) / 100 - spacing_cut),
+                   "space_above": dim(st.get("spaceAbove")), "space_below": dim(st.get("spaceBelow")),
+                   "spacing_mode": st.get("spacingMode"), "base": base,
                    "runs": [], "tab_x0": None}
             if rtl:
                 cur["direction"] = "rtl"
@@ -271,11 +328,12 @@ def text_paragraphs(pe: dict, text: dict, resolver: StyleResolver, fonts: FontMa
         elif "textRun" in te or "autoText" in te:
             if cur is None:
                 continue
+            base = cur["base"]
             tr = te.get("textRun") or te.get("autoText")
             content = tr.get("content", "")
             st = tr.get("style", {})
             family = (st.get("weightedFontFamily") or {}).get("fontFamily") or st.get("fontFamily") or base["fontFamily"]
-            size = dim(st.get("fontSize")) or base["fontSize"]
+            size = (dim(st.get("fontSize")) or base["fontSize"]) * font_scale
             bold = st.get("bold", base["bold"])
             if (st.get("weightedFontFamily") or {}).get("weight", 400) >= 600:
                 bold = True
@@ -300,6 +358,18 @@ def text_paragraphs(pe: dict, text: dict, resolver: StyleResolver, fonts: FontMa
     for p in paragraphs:
         p["runs"] = merge_runs(p["runs"])
         p["size"] = max((r["size"] for r in p["runs"]), default=0.0)
+        p.pop("base", None)
+        bstyle = p.pop("bullet_style")
+        if p["bullet"] and p["runs"]:
+            first = p["runs"][0]
+            bsize = dim(bstyle.get("fontSize")) * font_scale
+            family = (bstyle.get("weightedFontFamily") or {}).get("fontFamily") or bstyle.get("fontFamily")
+            p["bullet"].update({
+                "color": rgb_hex(bstyle.get("foregroundColor"), resolver.scheme) or first["color"],
+                "size": round(first["size"] * bsize / first["slides_size"], 2) if bsize and first["slides_size"]
+                else first["size"],
+                "font_family": family_of(family) if family else first["family"],
+                "bold": bool(bstyle.get("bold", first["bold"]))})
         text = "".join(r["text"] for r in p["runs"])
         if "\t" in text and not p["bullet"]:
             p["tab_x0"] = p["indent_start"]
@@ -346,7 +416,14 @@ def merge_runs(runs: list[dict]) -> list[dict]:
 def text_element(pe: dict, m: list[float], resolver: StyleResolver, fonts: FontMapper, scale: float,
                  page_w: float, foreign: bool = False) -> dict | None:
     shape = pe.get("shape", {})
-    paragraphs = text_paragraphs(pe, shape.get("text", {}), resolver, fonts, scale, keep_blank=foreign)
+    props = shape.get("shapeProperties", {})
+    # Read from the parents for a foreign deck only: emit's placeholders were calibrated against what
+    # the slide itself says (PPTX_TITLE_DY), and `pull` must keep reading them that way.
+    autofit = props.get("autofit") or (resolver.parent_shape_property(pe, "autofit") if foreign else None) or {}
+    font_scale = autofit.get("fontScale") or 1.0
+    spacing_cut = autofit.get("lineSpacingReduction") or 0.0
+    paragraphs = text_paragraphs(pe, shape.get("text", {}), resolver, fonts, scale, keep_blank=foreign,
+                                 font_scale=font_scale, spacing_cut=spacing_cut)
     if not any(p["runs"] for p in paragraphs):
         return None
     w, h = dim(pe["size"]["width"]), dim(pe["size"]["height"])
@@ -356,7 +433,10 @@ def text_element(pe: dict, m: list[float], resolver: StyleResolver, fonts: FontM
     z = max(r["slides_size"] for r in first["runs"])
     aligns = {p["align"] for p in paragraphs if p["runs"]}
     align = aligns.pop() if len(aligns) == 1 else "left"
-    content = shape.get("shapeProperties", {}).get("contentAlignment", "TOP")
+    # a placeholder sits where its layout says when it says nothing itself (title placeholders are
+    # often bottom-aligned there)
+    content = props.get("contentAlignment") or \
+        (resolver.parent_shape_property(pe, "contentAlignment") if foreign else None) or "TOP"
     if content == "MIDDLE":
         baseline = (y0 + y1) / 2 + MIDDLE_BASELINE_EM * z
     else:
@@ -380,13 +460,20 @@ def text_element(pe: dict, m: list[float], resolver: StyleResolver, fonts: FontM
             "runs": [{k: v for k, v in r.items() if k not in ("slides_font", "slides_size")} for r in p["runs"]],
             "slides": {"indent_start": p["indent_start"], "indent_first": p["indent_first"],
                        "line_spacing": p["line_spacing"], "space_above": p["space_above"],
+                       "space_below": p["space_below"], "indent_end": p["indent_end"],
+                       "spacing_mode": p["spacing_mode"], "justified": p["justified"],
                        "font": p["runs"][0]["slides_font"], "size": p["runs"][0]["slides_size"]},
         })
     out_paras[0]["lines"][0]["baseline"] = round(baseline / scale, 2)
     role = "title" if placeholder in ("TITLE", "CENTERED_TITLE") else "body"
+    # `box`: what adopt needs to lay the box out as Slides does (adopt.text_box_latex). The
+    # paragraphs' `slides` values are in Slides pt, so the scale that turns them into the IR's goes
+    # with them.
     return {"kind": "text", "role": role, "bbox": [round(v / scale, 2) for v in (x0, y0, x1, y1)],
             "anchor": [round(x / scale, 2), round(baseline / scale, 2)], "wrap_width": round((x1 - x0 - 2 * PAD_X) / scale, 2),
-            "placeholder": placeholder, "paragraphs": out_paras}
+            "placeholder": placeholder, "paragraphs": out_paras,
+            "box": {"valign": {"MIDDLE": "middle", "BOTTOM": "bottom"}.get(content, "top"), "scale": scale,
+                    "font_scale": font_scale}}
 
 
 def page_background(page: dict, resolver_pages: dict[str, dict], scheme: dict) -> tuple[str | None, str | None]:
