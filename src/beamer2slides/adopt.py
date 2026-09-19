@@ -477,7 +477,10 @@ def text_box_latex(el: dict, ctx: Context, ind: str) -> str:
         shift = max(0.0, first - left) if p.get("bullet") else first - left
         head = []
         if prev is None:
-            if sl.get("space_above"):
+            # a box that grows to fit its text (SHAPE_AUTOFIT) draws its first line without the first
+            # paragraph's spaceAbove: gdg24's body copy says 22 pt and starts 22 pt higher than
+            # that, while ds-lecture's bodies (no autofit type) keep their master's 6 pt
+            if sl.get("space_above") and not box.get("grows"):
                 head.append(f"\\vskip{sl['space_above'] / scale:.2f}pt")
         else:
             psl, pz, pr = prev.get("slides") or {}, para_size(prev), (prev.get("slides") or {}).get("line_spacing") or 1.0

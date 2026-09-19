@@ -166,6 +166,17 @@ def test_list_items_collapse_their_spacing_and_other_paragraphs_do_not(tmp_path)
     assert between_items > -1.5
 
 
+def test_a_box_that_grows_to_fit_drops_its_first_space_above(tmp_path):
+    """ds-lecture's bodies keep the 6 pt spaceAbove their master gives the first paragraph; gdg24's
+    body copy, in boxes that resize to fit their text, says 22 pt and starts 22 pt higher."""
+    paras = para("One", style={"spaceAbove": pt(22)}) + para("Two", style={"spaceAbove": pt(22)})
+    kept = frame_of(source(tmp_path, deck(box("s_a", paras))))
+    grows = frame_of(source(tmp_path / "g", deck(box("s_a", paras, autofit={"autofitType": "SHAPE_AUTOFIT"}))))
+    assert "\\vskip13.86pt" in kept and "\\vskip13.86pt" not in grows
+    for frame in (kept, grows):
+        assert "\\prevdepth=\\dimexpr\\prevdepth-13.86pt" in frame, "the second one gets its 22 pt"
+
+
 def test_a_box_whose_base_is_bold_writes_its_regular_words_regular(tmp_path):
     """`runs_latex` only ever wrote \\textbf, so under a bold base the regular words stayed bold."""
     d = deck(box("s_b", para("x", runs=[("Mostly bold words here", {"bold": True}), (" plain", {})])))

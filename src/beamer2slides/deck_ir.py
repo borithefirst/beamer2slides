@@ -473,7 +473,7 @@ def text_element(pe: dict, m: list[float], resolver: StyleResolver, fonts: FontM
             "anchor": [round(x / scale, 2), round(baseline / scale, 2)], "wrap_width": round((x1 - x0 - 2 * PAD_X) / scale, 2),
             "placeholder": placeholder, "paragraphs": out_paras,
             "box": {"valign": {"MIDDLE": "middle", "BOTTOM": "bottom"}.get(content, "top"), "scale": scale,
-                    "font_scale": font_scale}}
+                    "font_scale": font_scale, "grows": autofit.get("autofitType") == "SHAPE_AUTOFIT"}}
 
 
 def page_background(page: dict, resolver_pages: dict[str, dict], scheme: dict) -> tuple[str | None, str | None]:
