@@ -49,6 +49,12 @@ def _integer(value) -> int:
 _GAP = re.compile(rb"(?:[\x00\t\n\x0c\r ]+|%[^\r\n]*)*")
 _REGULAR = re.compile(rb"[^\x00\t\n\x0c\r ()<>\[\]{}/%]*")
 _NUMERIC = frozenset(b"0123456789+-.")
+# the gap, then one word: a name (1), a delimiter (2), a regular word of number characters
+# only (3) or any other regular word (4)
+_WORD = re.compile(rb"(?>(?:[\x00\t\n\x0c\r ]+|%[^\r\n]*)*)(?:"     # atomic: no word out of a comment
+                   rb"(/[^\x00\t\n\x0c\r ()<>\[\]{}/%]*)|(<<|>>|[()<>\[\]{}])"
+                   rb"|([0-9+.\-]+)(?![^\x00\t\n\x0c\r ()<>\[\]{}/%])"
+                   rb"|([^\x00\t\n\x0c\r ()<>\[\]{}/%]+))")
 
 
 class _Words:
@@ -58,28 +64,17 @@ class _Words:
         self.data, self.pos, self.last = data, pos, b""
 
     def next(self):
-        data = self.data
-        pos = _GAP.match(data, self.pos).end()
-        if pos >= len(data):
-            self.pos = pos
+        m = _WORD.match(self.data, self.pos)
+        if m is None:   # only a gap left
+            self.pos = _GAP.match(self.data, self.pos).end()
             return None
-        c = data[pos]
-        if c in b"()<>[]{}/":
-            if c == 0x2F:  # '/'
-                end = _REGULAR.match(data, pos + 1).end()
-            elif c in b"<>" and data[pos + 1:pos + 2] == bytes([c]):
-                end = pos + 2
-            else:
-                end = pos + 1
-            word, is_number = data[pos:end], False
-        else:
-            end = _REGULAR.match(data, pos).end()
-            word = data[pos:end]
-            is_number = all(ch in _NUMERIC for ch in word)
-        self.pos = end
-        word = word[:256]   # the word buffer holds 256 bytes
+        g = m.lastindex
+        word = m.group(g)
+        end = self.pos = m.end()
+        if len(word) > 256:
+            word = word[:256]   # the word buffer holds 256 bytes
         self.last = word    # m_WordBuffer: kept when a position is restored, and at the end
-        return word, is_number, end - len(word)
+        return word, g == 3, end - len(word)
 
 
 def _atoui(word: bytes) -> int:

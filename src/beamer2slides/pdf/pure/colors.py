@@ -7,7 +7,7 @@ import base64
 import math
 
 from .cmyk_table import TABLE
-from .syntax import Name, Stream
+from .syntax import F32X3, Name, Stream
 
 _CMYK = base64.b64decode("".join(TABLE))
 
@@ -135,8 +135,10 @@ class ColorSpace:
         rgb = self.rgb(v) if len(v) >= self.n else None
         if rgb is None:
             return None
-        r, g, b = (int(math.floor(_f32(_f32(_clamp(x)) * 255.0) + 0.5)) for x in rgb)
-        return (r << 16) | (g << 8) | b
+        a, b, c = rgb   # clamped to 0-1 first, so float32 cannot overflow
+        a, b, c = F32X3.unpack(F32X3.pack(min(1.0, max(0.0, a)), min(1.0, max(0.0, b)), min(1.0, max(0.0, c))))
+        a, b, c = F32X3.unpack(F32X3.pack(a * 255.0, b * 255.0, c * 255.0))
+        return (math.floor(a + 0.5) << 16) | (math.floor(b + 0.5) << 8) | math.floor(c + 0.5)
 
 
 DEVICE = {name: ColorSpace(name, n) for name, n in (("DeviceGray", 1), ("DeviceRGB", 3), ("DeviceCMYK", 4))}
