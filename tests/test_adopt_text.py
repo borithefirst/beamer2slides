@@ -159,6 +159,45 @@ def test_list_items_are_drawn_with_slides_bullets_and_no_itemize(tmp_path):
     assert "circle[radius=" in frame and "draw=b2sCC0000" in frame and "fill=b2sCC0000" in frame
 
 
+def test_a_bullet_is_followed_by_no_word_space(tmp_path):
+    """The line end after a bullet's \\llap{...} was a space: every bulleted line of the corpus began
+    one word space right of Slides' (cs161-tls 0.869 -> 0.989)."""
+    frame = frame_of(source(tmp_path, body_deck()))
+    assert frame.count("\\llap{") == 2
+    assert not re.search(r"\\llap\{.*\}\s*\n", frame), "each bullet line ends in %"
+
+
+def test_the_thumbnail_tells_a_fixed_box_with_no_insets():
+    """A box that does not resize to fit its text says nothing of its insets to the API; its
+    thumbnail does, by where the words' ink begins (gdg24's stat grids)."""
+    import numpy as np
+
+    from beamer2slides.deck_ir import thumbnail_insets
+    scale = 720 / 453.54
+
+    def element():
+        return {"kind": "text", "bbox": [50.0, 50.0, 200.0, 100.0], "anchor": [54.22, 64.0], "wrap_width": 141.5,
+                "paragraphs": [{"align": "left", "bullet": None, "runs": [{"text": "Words", "size": 8.0}],
+                                "slides": {"indent_first": 0, "indent_start": 0}}],
+                "box": {"valign": "top", "scale": scale}}
+
+    def thumb(ink_at, top):
+        """Words' ink from `ink_at` across and `top` down; default insets put the caps at 58.24."""
+        px = 4.0
+        im = np.full((int(300 * px), int(453.54 * px), 3), 240, dtype=np.int16)
+        x = int(ink_at * px)
+        im[int(top * px):int((top + 6) * px), x:x + int(40 * px)] = 20
+        return im, px
+
+    for ink_at, top, bare in ((50.6, 54.2, True), (55.0, 58.2, False), (50.6, 58.2, False)):
+        el = element()
+        thumbnail_insets([el], *thumb(ink_at, top))
+        assert (el["box"].get("insets") == 0) == bare, (ink_at, top)
+    el = element()
+    thumbnail_insets([el, {"kind": "image", "bbox": [45.0, 40.0, 60.0, 110.0]}], *thumb(50.6, 54.2))
+    assert "insets" not in el["box"], "a picture across the box's left strip is ink too"
+
+
 def test_list_items_collapse_their_spacing_and_other_paragraphs_do_not(tmp_path):
     """Between two list items COLLAPSE_LISTS drops spaceBelow; between two plain paragraphs it is
     the gap Slides leaves (12 pt / scale more than the plain pitch)."""
@@ -262,6 +301,28 @@ def test_empty_lines_at_the_end_of_a_middle_aligned_box_are_height(tmp_path):
     assert "% blank line" in frame_of(source(tmp_path, body("MIDDLE")))
 
 
+def test_an_empty_line_is_as_tall_as_its_own_newline():
+    """Slides sizes an empty paragraph by the style of its newline; taking the next paragraph's
+    size made creandum-board's 8 pt spacer lines above 40 pt figures 40 pt tall."""
+    d = deck(box("s_g", para("A", runs=[("A", {"fontSize": pt(18)})])
+                 + para("", runs=[("", {"fontSize": pt(8)})])
+                 + para("B", runs=[("B", {"fontSize": pt(40)})])))
+    paras = text_of(deck_ir(d, foreign=True), "s_g")["paragraphs"]
+    scale = 720 / 453.54
+    assert [round(p["runs"][0]["size"] * scale) for p in paras] == [18, 8, 40]
+
+
+def test_a_wide_line_spacing_adds_nothing_under_the_last_line(tmp_path):
+    """Under 115% the last line keeps its extra space (firebase-jam, ap-bio-stats' centred bodies);
+    from 150% up it is not in the stack (sc-dark-modern's 170% labels stood 7 pt high)."""
+    def ending(spacing):
+        d = deck(box("s_w", para("x", runs=[("Words", {"fontSize": pt(20)})], style={"lineSpacing": spacing}),
+                     contentAlignment="MIDDLE"))
+        return float(re.findall(r"\\vskip\\dimexpr([\d.]+)pt-\\prevdepth", frame_of(source(tmp_path / str(spacing), d)))[-1])
+    assert ending(115) > ending(100)
+    assert ending(150) == ending(170) == ending(100)
+
+
 def test_every_font_a_text_box_selects_spaces_its_words_with_its_own_space(tmp_path):
     """\\spaceskip was set once, by \\slidesize, from the font selected then: a paragraph whose
     typeface switch came after it (sc-dark-modern's Courier Prime) was spaced with the sans font's
@@ -308,6 +369,55 @@ def test_windows_font_files_are_one_family(tmp_path, monkeypatch):
     text = source(tmp_path, body_deck())
     line = next(l for l in text.splitlines() if l.startswith("\\setsansfont"))
     assert "UprightFont=*" in line and "BoldFont=arialbd" in line and "BoldItalicFont=arialbi" in line
+
+
+def test_a_foreign_deck_keeps_the_converters_own_fonts_by_name():
+    """Lato, PT Serif and Roboto Mono are the converter's stand-ins for Computer Modern only in a
+    deck it wrote: intro-lecture's code in Roboto Mono came back as CMTT9 and was set in Courier."""
+    d = deck(box("s_c", para("x", runs=[("code()", {"fontFamily": "Roboto Mono", "fontSize": pt(14)})])))
+    run = text_of(deck_ir(d, foreign=True), "s_c")["paragraphs"][0]["runs"][0]
+    assert run["font"] == "RobotoMono" and run["family"] == "mono"
+    assert run["size"] * 720 / 453.54 == pytest.approx(14, abs=0.01), "not FontMapper's Lato factor"
+    assert text_of(deck_ir(d), "s_c")["paragraphs"][0]["runs"][0]["font"].startswith("CMTT")
+
+
+def test_a_windows_font_is_found_by_the_family_its_file_names(tmp_path, monkeypatch):
+    """cour.ttf is Courier New and ariblk.ttf Arial Black, which only their name tables say:
+    comps-analysis's Courier New was set in Courier Prime, ap-bio-stats' Arial Black in Arial."""
+    from fontTools.fontBuilder import FontBuilder
+    from fontTools.pens.ttGlyphPen import TTGlyphPen
+
+    def ttf(path, family, weight=400):
+        fb = FontBuilder(1000, isTTF=True)
+        fb.setupGlyphOrder([".notdef", "a"])
+        fb.setupCharacterMap({ord("a"): "a"})
+        fb.setupGlyf({g: TTGlyphPen(None).glyph() for g in (".notdef", "a")})
+        fb.setupHorizontalMetrics({".notdef": (500, 0), "a": (600, 0)})
+        fb.setupHorizontalHeader(ascent=800, descent=-200)
+        fb.setupNameTable({"familyName": family, "styleName": "Regular"})
+        fb.setupOS2(usWeightClass=weight)
+        fb.setupPost()
+        fb.save(str(path))
+
+    shelf = tmp_path / "shelf"
+    shelf.mkdir()
+    ttf(shelf / "cour.ttf", "Courier New")
+    ttf(shelf / "courbd.ttf", "Courier New", 700)
+    ttf(shelf / "arial.ttf", "Arial")
+    ttf(shelf / "ariblk.ttf", "Arial Black", 900)
+    monkeypatch.setenv("B2S_FONTS", str(shelf))
+    adopt._FAMILIES.clear()
+    from beamer2slides import scripts
+    scripts._FACES.clear()
+    try:
+        mono = adopt.font_family("Courier New", "mono")
+        black = adopt.font_family("Arial Black", "sans")
+    finally:
+        adopt._FAMILIES.clear()
+        scripts._FACES.clear()
+    assert mono["stem"] == "cour" and mono["BoldFont"].name == "courbd.ttf"
+    assert black["stem"] == "ariblk", "not Arial, whose name it begins with"
+    assert adopt.flatten(black["match"]) == "arialblack"
 
 
 def test_a_family_in_two_file_formats_names_every_file():

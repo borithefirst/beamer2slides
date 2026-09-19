@@ -206,7 +206,25 @@ def font_candidates() -> dict[str, dict[str, Path]]:
                         and set(groups[stem]) == {"UprightFont"}:
                     groups[root].setdefault(style, groups.pop(stem)["UprightFont"])
                     break
-        _FAMILIES[dirs] = {k: v for k, v in groups.items() if "UprightFont" in v}
+        groups = {k: v for k, v in groups.items() if "UprightFont" in v}
+        # Windows' own files are named by abbreviation (cour.ttf is Courier New, ariblk.ttf Arial
+        # Black, pala.ttf Palatino Linotype): the family a deck names is only in the font's name
+        # table. Unknown by it, comps-analysis's Courier New was fetched as Courier Prime and
+        # ap-bio-stats' Arial Black was set in Arial. The group is also listed under each family
+        # name it gives itself that no file stem already spells (`_font_family` sets it in the
+        # group's own file stem, which is what fontspec's `*` expands to).
+        uprights = {v["UprightFont"]: v for v in groups.values()}
+        flat_stems = {flatten(k) for k in groups}
+        try:
+            from .scripts import faces
+            named = [f for f in faces() if f.index == 0 and f.path in uprights]
+        except ImportError:                             # no fontTools: file stems only
+            named = []
+        for face in named:
+            for fam in face.families:
+                if fam not in flat_stems:
+                    groups.setdefault(fam, uprights[face.path])
+        _FAMILIES[dirs] = groups
     return _FAMILIES[dirs]
 
 
@@ -232,11 +250,41 @@ def font_family(name: str, want: str, near: str = "") -> dict[str, Path]:
     fetched from google/fonts (`fontfetch.fetch_family`), where nearly every font Slides offers
     lives: of the corpus's letters in fonts no machine here has, most are Open Sans, Montserrat,
     Delius, Inter, Yanone Kaffeesatz, Alegreya, Work Sans..."""
-    if fetching() and name and not any(flatten(stem) == flatten(name) for stem in font_candidates()):
-        from .fontfetch import fetch_family
-        if fetch_family(name):
-            _FAMILIES.clear()                           # the cache folder has a new family in it
+    if name and not _have(name) and not _fetch(name):
+        for sub in SUBSTITUTES.get(flatten(name), []):
+            if _have(sub) or _fetch(sub):
+                got = _font_family(sub, want)
+                if got and flatten(got["match"]) == flatten(sub):
+                    return {**got, "match": name}       # the deck's font, in all but its files
     return _font_family(name, want, near)
+
+
+# Families drawn to the same metrics as a font the machine does not have and google/fonts does not
+# carry (the proprietary ones), tried after a fetch of the font itself: set in its stand-in, a line
+# breaks where the deck's does. Arimo, Tinos and Cousine are Arial, Times New Roman and Courier New
+# glyph for glyph in advance; Carlito and Caladea the same for Calibri and Cambria, Gelasio for
+# Georgia. The rest are the same design, not the same widths.
+SUBSTITUTES = {
+    "arial": ["Arimo"], "helvetica": ["Arimo"], "timesnewroman": ["Tinos"], "times": ["Tinos"],
+    "couriernew": ["Cousine"], "courier": ["Cousine"], "calibri": ["Carlito"], "cambria": ["Caladea"],
+    "georgia": ["Gelasio"], "arialblack": ["Archivo Black"], "bodoni": ["Libre Bodoni", "Bodoni Moda"],
+    "droidsans": ["Noto Sans"], "droidserif": ["Noto Serif"], "droidsansmono": ["Noto Sans Mono"],
+    "bookantiqua": ["Palatino Linotype"], "googlesansmono": ["Google Sans Code"],
+}
+
+
+def _have(name: str) -> bool:
+    return any(flatten(stem) == flatten(name) for stem in font_candidates())
+
+
+def _fetch(name: str) -> bool:
+    if not fetching():
+        return False
+    from .fontfetch import fetch_family
+    if fetch_family(name):
+        _FAMILIES.clear()                               # the cache folder has a new family in it
+        return True
+    return False
 
 
 def _font_family(name: str, want: str, near: str = "") -> dict[str, Path]:
@@ -258,7 +306,11 @@ def _font_family(name: str, want: str, near: str = "") -> dict[str, Path]:
         if shared >= 4 and shared > fallback[0]:
             fallback = (shared, stem, files)
     _, stem, files = asked if asked[2] else fallback
-    return {"stem": stem, **files} if files else {}
+    if not files:
+        return {}
+    # `stem` is what the family was found under (a name-table alias for cour.ttf is "couriernew"),
+    # `match` that, and the family name fontspec is given is the files' own stem
+    return {"stem": files["UprightFont"].stem.partition("-")[0], "match": stem, **files}
 
 
 def font_files_latex(files: dict, tree: Path | None) -> str:
@@ -352,9 +404,9 @@ def font_preamble(target: dict, tree: Path | None, ctx: Context | None = None) -
             lines.append(f"\\{command}{{{gyre}}}[Extension=.otf,UprightFont=*-regular,BoldFont=*-bold,"
                          "ItalicFont=*-italic,BoldItalicFont=*-bolditalic]")
             continue
-        stem = files.pop("stem")
-        found = found or stem                           # what the rest of the deck is set in
-        low, asked = flatten(stem), flatten(wanted[fam])
+        stem, match = files.pop("stem"), files.pop("match")
+        found = found or match                          # what the rest of the deck is set in
+        low, asked = flatten(match), flatten(wanted[fam])
         if not (low.startswith(asked) or asked.startswith(low)):
             print(f"  {wanted[fam]}: not on this machine, set in {stem}")
         lines.append(f"\\{command}{{{stem}}}[{font_files_latex(files, tree)}]")
@@ -368,8 +420,8 @@ def font_preamble(target: dict, tree: Path | None, ctx: Context | None = None) -
             files = font_family(font, fam)
             if not files:
                 continue
-            stem = files.pop("stem")
-            low, asked = flatten(stem), flatten(font)
+            stem, match = files.pop("stem"), files.pop("match")
+            low, asked = flatten(match), flatten(font)
             if not (low.startswith(asked) or asked.startswith(low)):
                 continue                                # a stand-in: the kind's main font already is one
             if font_coverage(files["UprightFont"], letters.get(font, {})) < MIN_COVERAGE:
@@ -487,6 +539,7 @@ TIKZ = "\\usepackage{tikz}"
 BULLET_INK = {"●": (0.413, 0.08, 0.06), "○": (0.43, 0.08, 0.07), "■": (0.45, 0.07, 0.0)}
 RING_EM = 0.06              # ○'s stroke
 GLYPH_GAP = 1.9             # a typed bullet's box ends this far before indentFirstLine (emit.BULLET_GAP)
+WIDE_SPACING = 1.25         # lineSpacing from which the last line's extra space is not in the stack
 
 
 def line_box(z: float, r: float) -> tuple[float, float]:
@@ -730,7 +783,7 @@ def text_box_latex(el: dict, ctx: Context, ind: str) -> str:
         body = "" if blank else runs_tex(p["runs"], base, ctx, brk)
         start = f"\\vrule width0pt height{above:.2f}pt depth0pt\\relax"
         if shift:
-            start += f"\\hskip{shift:.2f}pt"
+            start += f"\\hskip{shift:.2f}pt\\relax"
         if glyph:
             start += bullet_tex(p, ctx, scale, first - left - shift)
         elif "\t" in "".join(x["text"] for x in p["runs"]) and first < left and not p.get("bullet"):
@@ -757,14 +810,21 @@ def text_box_latex(el: dict, ctx: Context, ind: str) -> str:
             lang_out = "\\end{otherlanguage}"
         out.append(f"{ind}  " + "".join(head) + lang_in +
                    f"{{\\leftskip={lskip}\\relax\\rightskip={rskip}\\relax\\parfillskip={fill}\\relax")
-        out.append(f"{ind}    \\noindent{lead}{start}" + ("% blank line" if blank else ""))
+        # the `%`: a bullet's \llap{} ends in a brace, and the line end after it was a word space -
+        # every bulleted line of the corpus began one space (5 pt at 18 pt Arial) right of Slides'
+        out.append(f"{ind}    \\noindent{lead}{start}" + ("% blank line" if blank else "%"))
         if body:
             out.append(f"{ind}    {body}")
         # the pitch last: \selectfont (in \slidesize) resets \baselineskip, and TeX reads it at \par
         out.append(f"{ind}  \\baselineskip={pitch:.2f}pt\\par}}{lang_out}")
         prev = p
     if prev is not None:
-        last = line_box(para_size(prev), (prev.get("slides") or {}).get("line_spacing") or 1.0)[1]
+        # The space a wide lineSpacing adds under a line is not under the stack's last one: a middle-
+        # aligned box centres the lines without it (sc-dark-modern's quotes at 170% sat 7 pt high,
+        # sc-aesthetic-school's 150% numbers 14 pt). At 115% it is there all the same (firebase-jam,
+        # apps-edu-zh, ap-bio-stats: measured to the pixel both ways), hence the threshold.
+        pr = (prev.get("slides") or {}).get("line_spacing") or 1.0
+        last = line_box(para_size(prev), 1.0 if pr >= WIDE_SPACING else pr)[1]
         out.append(f"{ind}  \\vskip\\dimexpr{last:.2f}pt-\\prevdepth\\relax")
     out.append(f"{ind}  " + ("\\vss" if valign in ("middle", "top") else f"\\vskip{inset:.2f}pt") + "}")
     out.append(f"{ind}\\end{{textblock*}}")

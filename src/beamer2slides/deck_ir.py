@@ -29,9 +29,10 @@ FAMILY_FOR_FONT = {v: k for k, v in FONT_FOR_FAMILY.items()}
 # back as `sans` - so a deck whose person typed in Space Mono read back as prose, and the size came
 # through the wrong width factors as well. A font is known by its name here, the way a reader knows
 # it: these words appear in the name of nearly every monospaced or serif family Slides offers.
-MONO_WORDS = ("mono", "code", "courier", "consol", "typewriter")
+MONO_WORDS = ("mono", "code", "courier", "consol", "typewriter", "cousine")
 SERIF_WORDS = ("serif", "times", "georgia", "garamond", "playfair", "slab", "libre baskerville",
-               "book", "crimson", "lora", "spectral", "cormorant", "eb garamond")
+               "book", "crimson", "lora", "spectral", "cormorant", "eb garamond", "bodoni", "tinos",
+               "caladea", "gelasio", "cambria", "palatino", "antiqua", "merriweather")
 TAG_RE = re.compile(r"^b2s:(?P<slide>[^/]*)/(?P<element>.+)$")
 BEAMER_SIZES = {(4, 3): (362.83, 272.13), (16, 9): (453.54, 255.12), (16, 10): (453.54, 283.46)}
 DEFAULT_STYLE = {"fontFamily": "Arial", "fontSize": 18.0, "bold": False, "italic": False, "color": "#000000"}
@@ -284,11 +285,15 @@ def base_style(pe: dict, resolver: StyleResolver, level: int) -> dict:
 
 def text_paragraphs(pe: dict, text: dict, resolver: StyleResolver, fonts: FontMapper, scale: float,
                     keep_blank: bool = False, font_scale: float = 1.0, spacing_cut: float = 0.0,
-                    keep_trailing: bool = False) -> list[dict]:
+                    keep_trailing: bool = False, foreign: bool = False) -> list[dict]:
     """`font_scale` and `spacing_cut` are the box's autofit (`shrink text on overflow`, or a .pptx's
     normAutofit): Slides draws every run at `font_scale` times its size and takes `spacing_cut` off
     every paragraph's line spacing. The cs161 decks' titles say 28 pt and are drawn at 25.2: the
-    thumbnail's cap height is 18.0 pt, Arial's is 0.716 em."""
+    thumbnail's cap height is 18.0 pt, Arial's is 0.716 em.
+
+    `foreign`: every font is the person's own, Lato, PT Serif and Roboto Mono included - these are
+    the converter's stand-ins for Computer Modern only in a deck it wrote, and read as such, a deck
+    written in Roboto Mono (intro-lecture's code) came back as CMTT9 and was set in Courier."""
     bases: dict[int, dict] = {}
     paragraphs: list[dict] = []
     cur = None
@@ -343,7 +348,10 @@ def text_paragraphs(pe: dict, text: dict, resolver: StyleResolver, fonts: FontMa
                 bold = True
             italic = st.get("italic", base["italic"])
             color = rgb_hex(st.get("foregroundColor"), resolver.scheme) or base["color"]
-            psize, font = pdf_size(fonts, family, size, bold, italic, scale)
+            if foreign:
+                psize, font = round(size / scale, 2), family.replace(" ", "")
+            else:
+                psize, font = pdf_size(fonts, family, size, bold, italic, scale)
             link = st.get("link") or {}
             text_part = content.rstrip("\n") if content.endswith("\n") else content
             if not text_part:
@@ -394,15 +402,14 @@ def text_paragraphs(pe: dict, text: dict, resolver: StyleResolver, fonts: FontMa
         for p in paragraphs[last + 1:]:
             p["runs"] = [dict(p.get("newline") or paragraphs[last]["runs"][-1], text=" ", link=None,
                               underline=False, strike=False, highlight=None)]
-    for p in paragraphs:
-        p.pop("newline", None)
     if keep_blank:
         # A blank line a person left in a text box is vertical space they chose, and dropping it
         # pulls everything under it up by a line - of the 717 paragraphs of the DevFest template,
         # 282 are blank. A PDF has no empty paragraph, only the gap one leaves, so classify never
         # makes one and `pull`'s IR must not either; a foreign deck is read from the deck itself,
-        # where the blank line is still there to be read. It becomes a space in the style of the
-        # paragraph it stands above, which is the size the person's Return left room for.
+        # where the blank line is still there to be read. It becomes a space in the style of its own
+        # newline, which is what Slides sizes it by (creandum-board's 8 pt spacers above 40 pt
+        # figures: 0.760 -> 0.845), else of the paragraph it stands above.
         if not trailing:
             last = max((i for i, p in enumerate(paragraphs) if p["runs"]), default=-1)
             del paragraphs[last + 1:]                   # under a top-aligned stack they push nothing down
@@ -411,9 +418,11 @@ def text_paragraphs(pe: dict, text: dict, resolver: StyleResolver, fonts: FontMa
             if p["runs"]:
                 below = p["runs"][0]
             elif below is not None:
-                p["runs"] = [{**below, "text": " ", "link": None, "underline": False,
+                p["runs"] = [{**(p.get("newline") or below), "text": " ", "link": None, "underline": False,
                               "strike": False, "highlight": None}]
-                p["size"] = below["size"]
+                p["size"] = p["runs"][0]["size"]
+    for p in paragraphs:
+        p.pop("newline", None)
     # bullet levels as classify counts them: clusters (2 pt apart) of the bullets' left edges
     levels: list[float] = []
     for x in sorted({p["indent_first"] / scale for p in paragraphs if p["bullet"]}):
@@ -459,6 +468,74 @@ def zero_insets(paragraphs: list[dict], height: float) -> bool:
     return need > 0 and height - need < ZERO_INSET_SLACK
 
 
+def thumbnail_insets(elements: list[dict], thumb, px: float) -> None:
+    """Text boxes the slide's own thumbnail shows with no insets (`box.insets` = 0, anchor moved).
+
+    `zero_insets` needs a box that resizes to fit its text; a fixed box a template made with its
+    insets at 0 (gdg24's stat grids, devfest2020's cards) says nothing of it to the API, and adopt set
+    its words 6.7 pt right and 6.5 pt low, wrapping them elsewhere. Its thumbnail does say: in a
+    left-aligned box, the words' ink starts at the box edge plus the paragraph's indent plus the left
+    inset, and a first glyph's side bearing is ~1 pt where the inset is PAD_X. Only boxes whose left
+    strip nothing else crosses are read (a picture or a shape's edge there is ink too), and only an
+    ink edge closer than half the inset counts: a big glyph's bearing can only keep the default."""
+    if thumb is None or not px:
+        return
+    import numpy as np
+    for e in elements:
+        box_ = e.get("box") if isinstance(e.get("box"), dict) else None
+        if e.get("kind") != "text" or box_ is None or "insets" in box_:
+            continue
+        paras = [p for p in e.get("paragraphs", []) if p.get("runs")]
+        if not paras or any(p.get("align", "left") != "left" or p.get("bullet") or p.get("direction") == "rtl"
+                            for p in paras):
+            continue
+        if not any(r["text"].strip() for p in paras for r in p["runs"]):
+            continue
+        scale = box_.get("scale") or 1.0
+        pad = PAD_X / scale
+        x0, y0, x1, y1 = e["bbox"]
+        indent = min(min(p["slides"].get("indent_first") or 0, p["slides"].get("indent_start") or 0)
+                     for p in paras) / scale
+        strip = (x0 - 1, y0, x0 + indent + pad + 2, y1)
+        if any(o is not e and o.get("bbox") and len(o["bbox"]) == 4 and
+               not (o["bbox"][2] <= strip[0] or o["bbox"][0] >= strip[2] or o["bbox"][3] <= strip[1]
+                    or o["bbox"][1] >= strip[3]) and
+               not (o.get("kind") in ("shape",) and o["bbox"][0] < x0 - 2 and o["bbox"][1] < y0 - 2
+                    and o["bbox"][2] > x1 + 2 and o["bbox"][3] > y1 + 2)
+               for o in elements):
+            continue
+        X0, X1 = int(round(x0 * px)), int(round(x1 * px))
+        Y0, Y1 = int(round(y0 * px)), int(round(y1 * px))
+        crop = thumb[max(0, Y0):max(0, Y1), max(0, X0):max(0, X1)]
+        if crop.shape[0] < 4 or crop.shape[1] < 8:
+            continue
+        ground = np.median(crop.reshape(-1, crop.shape[-1]), axis=0)
+        ink = (np.abs(crop - ground).max(axis=-1) > 80).sum(axis=0) >= 2
+        cols = np.nonzero(ink)[0]
+        if len(cols) < 3 or cols[0] == 0:
+            continue
+        gap = (X0 + cols[0]) / px - (x0 + indent)
+        if gap >= pad / 2:
+            continue
+        dy = 0.0
+        if box_.get("valign", "top") == "top" and e.get("anchor"):
+            # a box may have no side insets and still its top one (creandum-board's labels): the
+            # first line's cap tops must stand where no top inset puts them too
+            dy = (BASELINE_A - (PPTX_TITLE_DY if e.get("placeholder") in
+                                ("TITLE", "CENTERED_TITLE", "SUBTITLE") else 0.0)) / scale
+            rows = np.nonzero((np.abs(crop - ground).max(axis=-1) > 80).sum(axis=1) >= 2)[0]
+            z = max(r.get("size") or 0 for r in paras[0]["runs"])
+            if not len(rows) or (Y0 + rows[0]) / px - (e["anchor"][1] - CAP_EM * z) > -dy / 2:
+                continue
+        box_["insets"] = 0
+        e["wrap_width"] = round(e.get("wrap_width", 0) + 2 * pad, 2)
+        if e.get("anchor"):
+            e["anchor"] = [round(e["anchor"][0] - pad, 2), round(e["anchor"][1] - dy, 2)]
+
+
+CAP_EM = 0.72               # a Latin face's cap height, near enough to tell 6.5 pt of top inset
+
+
 def imported(shape: dict) -> bool:
     """Was this text box made by a .pptx import? Drive's importer writes spacingMode NEVER_COLLAPSE on
     the paragraphs, Slides' own boxes say COLLAPSE_LISTS. Among the boxes that resize to fit their
@@ -486,7 +563,7 @@ def imports_lack_insets(pres: dict, resolver: StyleResolver, fonts: FontMapper, 
                 continue
             paragraphs = text_paragraphs(pe, shape.get("text", {}), resolver, fonts, scale, keep_blank=True,
                                          font_scale=autofit.get("fontScale") or 1.0,
-                                         spacing_cut=autofit.get("lineSpacingReduction") or 0.0)
+                                         spacing_cut=autofit.get("lineSpacingReduction") or 0.0, foreign=True)
             if not any(p["runs"] for p in paragraphs):
                 continue
             _, y0, _, y1 = box(m, dim(pe["size"]["width"]), dim(pe["size"]["height"]))
@@ -510,7 +587,7 @@ def text_element(pe: dict, m: list[float], resolver: StyleResolver, fonts: FontM
         (resolver.parent_shape_property(pe, "contentAlignment") if foreign else None) or "TOP"
     paragraphs = text_paragraphs(pe, shape.get("text", {}), resolver, fonts, scale, keep_blank=foreign,
                                  font_scale=font_scale, spacing_cut=spacing_cut,
-                                 keep_trailing=content in ("MIDDLE", "BOTTOM"))
+                                 keep_trailing=content in ("MIDDLE", "BOTTOM"), foreign=foreign)
     if not any(p["runs"] for p in paragraphs):
         return None
     w, h = dim(pe["size"]["width"]), dim(pe["size"]["height"])
@@ -740,6 +817,7 @@ def deck_ir(pres: dict, pdf_size: list[float] | None = None, base: dict | None =
                 thumb = deck_fills.load(thumb)
                 px = thumb.shape[1] / page_w
             elements = deck_fills.settle(elements, thumb, px, None if picture else color, bool(picture))
+            thumbnail_insets(elements, thumb, px)
         key = slide_keys.get(slide["objectId"]) or (max(set(tags), key=tags.count) if tags else None)
         slides.append({"page": n, "frame": str(n + 1), "size": [page_w, page_h], "objectId": slide["objectId"],
                        "key": key, "notes": notes_text(slide), "background_color": color,
@@ -1106,7 +1184,8 @@ def table_element(pe: dict, m: list[float], resolver: StyleResolver, fonts: Font
             props = cell.get("tableCellProperties", {})
             fill = props.get("tableCellBackgroundFill", {})
             solid = fill.get("solidFill") if fill.get("propertyState", "RENDERED") == "RENDERED" else None
-            paras = text_paragraphs(pe, cell.get("text", {}), resolver, fonts, scale, keep_blank=True)
+            paras = text_paragraphs(pe, cell.get("text", {}), resolver, fonts, scale, keep_blank=True,
+                                    foreign=True)
             cells_out.append({
                 "row": loc.get("rowIndex", 0), "col": loc.get("columnIndex", 0),
                 "rowspan": cell.get("rowSpan", 1), "colspan": cell.get("columnSpan", 1),
