@@ -188,7 +188,7 @@ def _describe(font, program_of) -> str:
     subst = font.subst
     asked = (f" subst {subst.family!r} weight {subst.weight} italic {subst.italic_angle}"
              if subst is not None else " no subst")
-    return f"{len(data)} bytes {hashlib.sha1(data).hexdigest()[:8] if data else '-'}{asked}"
+    return f"{font.base_name} {len(data)} bytes {hashlib.sha1(data).hexdigest()[:8] if data else '-'}{asked}"
 
 
 def glyphs(content: bytes, fonts) -> list[str]:
@@ -255,6 +255,51 @@ def _pure_glyph(content: bytes, fonts) -> str:
             doc.close()
     except Exception:  # noqa: BLE001
         return "?"
+
+
+def anatomy(content: bytes, fonts) -> list[str]:
+    """How the pure reader builds a substituted font's glyphs: the multiple master blend it lands on
+    for each code (`blend_key`, the axis coordinates), and the outline that comes out (how many
+    points, where they sum to). Two platforms that draw the same face differently say here which of
+    the three steps moved - the blend, the outline or the rasteriser - and that is not something the
+    render alone can tell. Never raises: this is for the failure report."""
+    out: list[str] = []
+    try:
+        from ..pdf.pure import render_text
+        from ..pdf.pure.backend import PureBackend
+        doc = PureBackend().open(pdf_bytes(content, fonts))
+        try:
+            page = doc[0]
+            page.chars()
+            for i, font in enumerate(page._fonts):
+                if getattr(font, "subst", None) is None:
+                    continue
+                face = render_text.subst_face(font)
+                if face is None or not hasattr(face, "blend_key"):
+                    continue
+                said = []
+                for code in sorted(_string_bytes(content))[:6]:
+                    glyph = font.glyphs[code]
+                    width = font.char_width(code)
+                    if font.subst.flag_mm:
+                        face.adjust_variation(glyph, width, font.subst.weight)
+                    outline = face.outline(glyph, (0x10000, 0, 0, 0x10000))
+                    points = [p for contour in (outline or []) for p in contour[0]]
+                    bitmap = render_text.render_glyph(face, glyph, (40.0, 0.0, 0.0, 40.0),
+                                                      font.subst, width)
+                    ink = (f"{bitmap[2]}x{bitmap[3]}@{bitmap[0]},{bitmap[1]} ink {int(bitmap[4].sum())}"
+                           if bitmap else "no bitmap")
+                    said.append(f"{code}->{glyph} w {width} blend {face.blend_key()} "
+                                f"pts {len(points)} sum {sum(p[0] for p in points)},"
+                                f"{sum(p[1] for p in points)} bmp {ink}")
+                if said:
+                    # the order here is the order the page draws in, not the /F numbers `glyphs` uses
+                    out.append(f"   font {i} {font.base_name} blend: " + "; ".join(said))
+        finally:
+            doc.close()
+    except Exception as e:  # noqa: BLE001
+        out.append(f"   (anatomy unknown: {type(e).__name__} {e})")
+    return out
 
 
 def sweep(content: bytes, fonts, zoom: float, transparent: bool) -> list[str]:
@@ -383,7 +428,8 @@ def main(argv=None) -> int:
         print(f"seed {seed} zoom {zoom} transparent {transparent} fonts {[f.name for f in fonts]}: "
               f"{npx} px, max {d.max()}")
         print(small.decode())
-        for line in faces(small, fonts) + glyphs(small, fonts) + sweep(small, fonts, zoom, transparent):
+        for line in (faces(small, fonts) + glyphs(small, fonts) + anatomy(small, fonts)
+                     + sweep(small, fonts, zoom, transparent)):
             print(line)
         out.mkdir(parents=True, exist_ok=True)
         from PIL import Image
