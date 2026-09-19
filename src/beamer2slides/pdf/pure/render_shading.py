@@ -1038,6 +1038,50 @@ class Record:
             raise Unsupported("function-based and mesh shadings")
         return True
 
+    def shade_load(self) -> bool:
+        """CPDF_ShadingPattern::Load as Handle_ShadeFill calls it, for the page object: the
+        dictionary, the functions, a colour space that is no Pattern space, a type from 1 to 7,
+        then Validate. Once the type was read, Load answers true without validating again, and
+        the document keeps the pattern: a shading that fails Validate is drawn from its second
+        `sh` on (measured on a mutated beamer ball)."""
+        if getattr(self, "_typed", False):
+            return True
+        a = self.a
+        sd = _Access.dict_of(self.obj)
+        if sd is None:
+            return False
+        funcs = []
+        f = a.r(sd.get("Function"))
+        if f is not None:
+            if isinstance(f, list):
+                funcs = [load_function(a, a.r(f[i]), set()) for i in range(min(len(f), 4))]
+            else:
+                funcs = [load_function(a, f, set())]
+        cs_obj = a.r(sd.get("ColorSpace"))
+        if cs_obj is None:
+            return False
+        try:
+            cs = get_colorspace(a, cs_obj)
+        except Unsupported:
+            # A colour space the renderer can't draw yet (CalRGB, Lab, ICCBased, Indexed): taken
+            # as loaded, so the page object is there and the render refuses in load(). Indexed
+            # fails Validate, so its first `sh` draws nothing, as in PDFium.
+            stype = a.integer_for(sd, "ShadingType")
+            if not 1 <= stype <= 7:
+                return False
+            self._typed = True
+            fam = cs_obj[0] if isinstance(cs_obj, list) and cs_obj else None
+            name = _Access.string(a.r(fam)) if fam is not None else ""
+            return not (name == "I" or name.startswith("Inde"))
+        if cs is None or cs.family == "Pattern":
+            return False
+        stype = a.integer_for(sd, "ShadingType")
+        if not 1 <= stype <= 7:
+            return False
+        self._typed = True
+        self.shading, self.dict, self.cs, self.funcs, self.type = self.obj, sd, cs, funcs, stype
+        return self._validate()
+
     def _validate(self) -> bool:
         if self.type >= 4 and not isinstance(self.shading, Stream):
             return False

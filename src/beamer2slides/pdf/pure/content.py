@@ -903,21 +903,20 @@ class _Run:
             self._image(args[0], "")
 
     def op_sh(self, args):
+        from .render_shading import find_shading
         shading = self.resource("Shading", args[-1]) if args else None
-        d = shading.dict if isinstance(shading, Stream) else shading
-        if not isinstance(d, dict):
+        if not isinstance(shading, (dict, Stream)):
             return
-        stype = self.doc.resolve(d.get("ShadingType"))
-        if not isinstance(stype, int) or not 1 <= stype <= 7:
+        s = self.state
+        # Handle_ShadeFill: nothing unless the pattern is a shading that loads; one that fails
+        # only Validate is drawn from its second `sh` on (the type is set by then)
+        record = find_shading(self.p, shading, s.parent_matrix)
+        if record.kind != "shading" or not record.shade_load():
             return
-        if load_colorspace(self.doc, d.get("ColorSpace"), None) is None:
-            return  # CPDF_ShadingPattern::Load fails
         obj = PObj(OBJ_SHADING, IDENTITY, stream=shading)
         self.add(obj, False, False)
-        s = self.state
-        from .render_shading import find_shading
         obj.shading_matrix = s.ctm
-        obj.shading_record = find_shading(self.p, shading, s.parent_matrix)
+        obj.shading_record = record
         rect = self.bbox
         if s.clips:
             rect = s.clips[0]

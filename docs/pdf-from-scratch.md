@@ -127,18 +127,40 @@ Each of these was a diff against PDFium until it was ported:
     doesn't carry: those glyph boxes stay apart, as do the Foxit MM substitutes PDFium uses for an
     embedded program that doesn't parse. Outside Windows PDFium's font mapper differs anyway.
   - `char_width_` and `glyph_index_` are uint16: a /Widths entry of -1502 is 64034.
+- **Cross references** are CPDF_Parser's loading ported, not a reader that accepts good files
+  (`document._XRef` is CPDF_CrossRefTable; `test_cross_references_are_read_as_pdfium_reads_them`).
+  A regex reader that refused one damaged row made the fuzz's files unopenable where PDFium read them
+  (seed 680). The rules:
+  - Positions count from the `%PDF` header, looked for in the first 1024 bytes. `startxref` is a
+    whole word found backwards within the last 4096 bytes, and its offset must be at least 9.
+  - Table rows are 20-byte records: `f` at byte 17 makes a free row (generation 0, which merges as
+    nothing), otherwise the offset is atoi64 (an offset of 0 must be ten digits) and the generation
+    StringToInt from byte 11, truncated to uint16.
+  - /Prev chains are walked from the newest section: newer entries win, and a table's trailer keeps
+    its own /XRefStm and /Prev.
+  - XRef streams: /Prev ≥ 0, 0 ≤ /Size ≤ kMaxXRefSize, /Index and /W as PDFium checks them, fields
+    wrapping at uint32, and a type-2 entry only when its archive number is at most the last object
+    number. kMaxObjectNumber is 24·2^20, not 2^20.
+  - Object streams must say `/Type /ObjStm` with an integer /N and /First, entry number 0 is no
+    object, and a failed stream is cached as failed.
   - *The table is believed* only if its lowest-numbered entry starts with that number, and only if
     the trailer's /Root is a reference to a catalog with at least one page; otherwise
     RebuildCrossRef scans the file word by word (strings skipped, so `9 0 obj` inside a string is
     nothing), reading each object with the strict parser and stepping over its stream, merging every
-    `trailer` and XRef stream dictionary, keeping the higher generation. It never looks for a catalog.
-  - *The page tree* (CPDF_Document::CountPages, TraversePDFPages, GetPageIndex): /Count is believed
-    when 0 < Count < 0xFFFFF, else the kids are counted (a visited set breaks cycles); a kid that is
-    no dictionary uses up a page, a node that is its own kid is skipped, a node without /Kids is a
-    page, and the traversal is stateful, so which dictionary page *i* is depends on the order pages
-    were asked for (`test_page_trees_are_walked_as_pdfium_walks_them`, three orders each). A page
-    loads when /Type is absent or resolves to /Page. PDFium opens a document with no pages;
-    pypdfium2's `PdfDocument` refuses it, so the contract does too.
+    `trailer` and XRef stream dictionary, keeping the higher generation. The rebuilt entries are
+    merged over the table read so far, and objects already parsed stay cached. It never looks for a
+    catalog.
+- **A shading that fails Validate is drawn from its second `sh`**: CPDF_ShadingPattern::Load sets
+  the shading type before validating, a second Load answers true without validating again, and the
+  document keeps the pattern. So the first `sh` makes no page object and every later one does
+  (bfuzz seed 437, `test_a_shading_that_fails_validation_is_dropped_at_its_first_sh_only`).
+- **The page tree** (CPDF_Document::CountPages, TraversePDFPages, GetPageIndex): /Count is believed
+  when 0 < Count < 0xFFFFF, else the kids are counted (a visited set breaks cycles); a kid that is
+  no dictionary uses up a page, a node that is its own kid is skipped, a node without /Kids is a
+  page, and the traversal is stateful, so which dictionary page *i* is depends on the order pages
+  were asked for (`test_page_trees_are_walked_as_pdfium_walks_them`, three orders each). A page
+  loads when /Type is absent or resolves to /Page. PDFium opens a document with no pages;
+  pypdfium2's `PdfDocument` refuses it, so the contract does too.
 
 ## Measured
 

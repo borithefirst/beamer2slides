@@ -349,10 +349,13 @@ def test_the_pure_renderer_draws_the_test_decks_shadings():
     assert seen
 
 
+_FAILS_VALIDATION = b"<< /ShadingType 2 /ColorSpace /DeviceRGB /Coords [0 0 200 0] /Function [3 0 R 3 0 R] >>"
+
+
 @pytest.mark.parametrize("shading, reason", [
     # Validate fails (2 functions for 3 components): PDFium's Load returns false once and true on a
-    # second call (shading_type_ is kept), so what is drawn depends on history
-    (b"<< /ShadingType 2 /ColorSpace /DeviceRGB /Coords [0 0 200 0] /Function [3 0 R 3 0 R] >>", "fails validation"),
+    # second call (shading_type_ is kept), so the second `sh` is drawn from a half-loaded pattern
+    (_FAILS_VALIDATION, "fails validation"),
     (b"<< /ShadingType 2 /ColorSpace [/Lab << /WhitePoint [0.95 1 1.09] >>] /Coords [0 0 200 0] /Function 3 0 R >>",
      "Lab colour spaces"),
     (b"<< /ShadingType 1 /ColorSpace /DeviceRGB /Function 4 0 R >>", "function-based and mesh shadings"),
@@ -360,9 +363,22 @@ def test_the_pure_renderer_draws_the_test_decks_shadings():
 def test_the_pure_renderer_refuses_shadings_it_cannot_draw_exactly(shading, reason):
     from beamer2slides.devtools.render_torture_shading import pdf_bytes
     from beamer2slides.pdf.pure.backend import PureBackend
-    data = pdf_bytes([b"/S0 sh"], _SHADING_OBJECTS, _shading_resources({b"S0": shading}))
+    data = pdf_bytes([b"/S0 sh /S0 sh"], _SHADING_OBJECTS, _shading_resources({b"S0": shading}))
     with pytest.raises(PdfError, match=reason):
         PureBackend().open(data)[0].render(1.0)
+
+
+def test_a_shading_that_fails_validation_is_dropped_at_its_first_sh_only():
+    """CPDF_ShadingPattern::Load sets the shading type before Validate, and the document keeps the
+    pattern: the first `sh` of a shading that fails Validate makes no page object, the second does
+    (found by the whole-file fuzz on a mutated beamer ball, seed 437)."""
+    from beamer2slides.devtools.render_torture_shading import pdf_bytes
+    from beamer2slides.pdf.api import OBJ_SHADING
+    for content, count in ((b"/S0 sh", 0), (b"/S0 sh /S0 sh", 1), (b"/S0 sh /S0 sh /S0 sh", 2)):
+        data = pdf_bytes([content], _SHADING_OBJECTS, _shading_resources({b"S0": _FAILS_VALIDATION}))
+        for name in ("pdfium", "pure"):
+            objs = pdf.resolve(name).open(data)[0].objects()
+            assert sum(o.type == OBJ_SHADING for o in objs) == count, (name, content)
 
 
 # ---------------------------------------------------------------------- PDFium's rules, one by one
@@ -522,6 +538,80 @@ def test_a_broken_file_is_rebuilt_as_pdfium_rebuilds_it():
         "name_then_comment": good.replace(b"/Type /Catalog /Pages", b"/Type /% x\n/Catalog /Pages"),
         "no_pages": good.replace(b"/Pages 2 0 R", b"/Pages 9 0 R").replace(b"0000000009 00000 n", b"0000000000 00000 n"),
         "no_trailer_root": good.replace(b"/Root 1 0 R", b"/Root 1"),
+    }
+    for name, data in cases.items():
+        order = range(3)
+        assert _pages_said("pure", data, order) == _pages_said("pdfium", data, order), name
+
+
+def _xref_stream_pdf(objs: dict, packed: dict, extra: dict | None = None, size: int | None = None) -> bytes:
+    """A PDF 1.5 file: `objs` as plain objects, `packed` (number -> body) in one object stream
+    (number 20), found through a cross-reference stream (number 21, W [1 4 2], uncompressed)."""
+    out, rows = bytearray(b"%PDF-1.5\n"), {}
+    for n, body in objs.items():
+        rows[n] = (1, len(out), 0)
+        out += b"%d 0 obj\n" % n + body + b"\nendobj\n"
+    parts, offs = [], []
+    for n, body in packed.items():
+        offs.append(sum(len(p) + 1 for p in parts))
+        parts.append(body)
+    head = b" ".join(b"%d %d" % (n, o) for n, o in zip(packed, offs)) + b" "
+    data = head + b" ".join(parts)
+    rows[20] = (1, len(out), 0)
+    out += (b"20 0 obj\n<< /Type /ObjStm /N %d /First %d /Length %d >>\nstream\n" % (len(packed), len(head), len(data))
+            + data + b"\nendstream\nendobj\n")
+    for i, n in enumerate(packed):
+        rows[n] = (2, 20, i)
+    for n, row in (extra or {}).items():
+        rows[n] = row
+    rows[21] = (1, len(out), 0)
+    size = size if size is not None else max(rows) + 1
+    table = b"".join(bytes([t]) + a.to_bytes(4, "big") + b.to_bytes(2, "big")
+                     for t, a, b in (rows.get(n, (0, 0, 0)) for n in range(size)))
+    xref = len(out)
+    out += (b"21 0 obj\n<< /Type /XRef /Size %d /W [1 4 2] /Root 1 0 R /Length %d >>\nstream\n" % (size, len(table))
+            + table + b"\nendstream\nendobj\nstartxref\n%d\n%%%%EOF\n" % xref)
+    return bytes(out)
+
+
+def test_cross_references_are_read_as_pdfium_reads_them():
+    """CPDF_Parser's cross-reference loading, ported rather than approximated: 20-byte table rows
+    (the generation read by StringToInt, `f` at byte 17 is all a free row needs), positions counted
+    from the `%PDF` header, `startxref` found as a whole word from the end, /Prev chains where the
+    newest entry wins, object streams (object number 0 in one is no object) and a rebuild when any
+    of it fails. The whole-file fuzz found the old reader refusing files PDFium opens (seed 680: one
+    damaged row made the table unbelieved, and the rebuild then lost the trailer)."""
+    tree = {1: _CAT, 2: b"<< /Type /Pages /Kids [3 0 R 4 0 R] /Count 2 >>", 3: _LEAF % 10, 4: _LEAF % 20}
+    good = _objects_pdf(tree)
+    row3 = b"%010d 00000 n" % good.index(b"3 0 obj")
+
+    def update(base: bytes, body: bytes, prev: int | None = None) -> bytes:
+        prev = base.rindex(b"xref\n") if prev is None else prev
+        at = len(base)
+        piece = base + b"3 0 obj\n" + body + b"\nendobj\n"
+        x = len(piece)
+        return piece + (b"xref\n3 1\n%010d 00000 n \ntrailer\n<< /Size 5 /Root 1 0 R /Prev %d >>\nstartxref\n%d\n%%%%EOF\n"
+                        % (at, prev, x))
+
+    cases = {
+        "header_offset": b"garbage before the header\n" + good,
+        "header_far": b"x" * 1100 + good,
+        "row_generation_junk": good.replace(row3, row3[:11] + b"0a0z0 n"),
+        "row_offset_junk": good.replace(row3, row3[:4] + b"z" + row3[5:]),
+        "row_free_by_f": good.replace(row3 + b" ", row3[:17] + b"f "),
+        "row_short_zero": good.replace(row3, b"0 " + b"0" * 9 + b" n"),
+        "startxref_not_a_word": good.replace(b"startxref", b"xstartxref"),
+        "startxref_small": good[:good.rindex(b"startxref")] + b"startxref\n5\n%%EOF\n",
+        "startxref_far": good + b" " * 5000,
+        "prev_chain": update(good, _LEAF % 30),
+        "prev_chain_twice": update(update(good, _LEAF % 30), _LEAF % 40),
+        "prev_wrong": update(good, _LEAF % 30, prev=7),
+        "prev_negative": update(good, _LEAF % 30, prev=-4),
+        "objstm": _xref_stream_pdf({1: _CAT, 2: tree[2]}, {3: tree[3], 4: tree[4]}),
+        "objstm_zero": _xref_stream_pdf({1: _CAT, 2: tree[2]}, {0: _LEAF % 50, 3: tree[3], 4: tree[4]}),
+        "objstm_newer_plain": _xref_stream_pdf({1: _CAT, 2: tree[2], 3: _LEAF % 70}, {3: tree[3], 4: tree[4]}),
+        "objstm_bad_archive": _xref_stream_pdf({1: _CAT, 2: tree[2]}, {3: tree[3], 4: tree[4]}, {4: (2, 99, 0)}),
+        "xref_size_small": _xref_stream_pdf({1: _CAT, 2: tree[2]}, {3: tree[3], 4: tree[4]}, size=3),
     }
     for name, data in cases.items():
         order = range(3)
