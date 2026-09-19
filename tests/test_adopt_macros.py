@@ -119,8 +119,9 @@ def test_a_rectangle_or_an_ellipse_is_one_line_only_when_the_macro_draws_the_sam
     ctx = adopt.Context()
     rect, turned, rounded, oval = (adopt_shapes.shape_block(e, ctx, "") for e in shapes_ir())
     assert rect.startswith("\\sliderect[") and "cycle" not in rect
-    assert turned.startswith("\\slideshape{") and "cm={" in turned
-    assert rounded.startswith("\\slideshape{") and "controls" in rounded
+    # a turned or rounded one too: TikZ turns and rounds the macro's path as it did the spelled one
+    assert turned.startswith("\\sliderect[") and "rotate=-30" in turned and "cm=" not in turned
+    assert rounded.startswith("\\sliderect[") and "rounded=" in rounded and "controls" not in rounded
     assert oval.startswith("\\slideellipse[")
     x, y, rx, ry = (float(v) for v in re.search(r"\{([^}]*)\}\s*$", oval)[1].split(","))
     assert abs(rx - 120 / 720 * 453.54 / 2) < 0.01 and abs(ry - 80 / 720 * 453.54 / 2) < 0.01
@@ -209,3 +210,117 @@ def test_the_short_forms_draw_what_their_long_forms_draw(tmp_path):
     short, spelled = (np.asarray(doc[k].render(3.0)) for k in (0, 1))
     assert (short < 250).any(), "the page has ink"
     assert short.shape == spelled.shape and (short == spelled).all()
+
+
+def compiled(main):
+    r = subprocess.run([lualatex(), "-interaction=nonstopmode", "-halt-on-error", main.name], cwd=main.parent,
+                       capture_output=True, text=True, errors="replace", env=tex_env(), timeout=300)
+    trouble = "\n".join(l for l in r.stdout.splitlines() if l.startswith(("!", "l.")))
+    assert r.returncode == 0, trouble or r.stdout[-3000:]
+    from beamer2slides import pdf
+    return pdf.Document(main.with_suffix(".pdf"))
+
+
+def with_frames(text: str, *bodies: str) -> str:
+    """`text` with its frames replaced by one plain frame per body."""
+    start, end = text.index("\\begin{frame}"), text.rindex("\\end{frame}") + len("\\end{frame}")
+    return text[:start] + "\n".join(f"\\begin{{frame}}[plain]\n{b}\n\\end{{frame}}" for b in bodies) + text[end:]
+
+
+def flat(items) -> list[float]:
+    return [v for it in items for p in it[1:] if isinstance(p, tuple) for v in p]
+
+
+@pytest.mark.skipif(not lualatex(), reason="lualatex not found")
+def test_line_rounded_turned_and_freeform_shapes_draw_the_paths_they_stand_for(tmp_path):
+    """`\\slideline`, `rounded=`, `rotate=`/`flip` and `\\slidefreeform` against the paths they stand
+    for, written out with no help from the macros: a line from its first point, TikZ's rounded corners
+    from where the top left corner's arc begins (a dash pattern runs from there), the mirror-then-turn
+    matrix about the box's centre as a `cm`, the traced rings filled even-odd."""
+    import math
+    text, sty = written(tmp_path)
+    # the sample deck has no traced shape, so its macros do not carry the freeform's
+    sty = sty.replace("\\endinput", adopt_shapes.FREEFORM_MACRO + "\n\\endinput")
+    (tmp_path / "tree" / "slides.sty").write_text(sty, encoding="utf-8")
+    ring ="(0bp,0bp) -- (60bp,0bp) -- (60bp,-50bp) -- (0bp,-50bp) -- cycle (15bp,-15bp) -- (45bp,-15bp) -- (30bp,-35bp) -- cycle"
+    (tmp_path / "tree" / "ring.tikz").write_text(ring, encoding="utf-8")
+    short = ("\\slideline[draw=red,line width=2bp]{140,70}{40,30}\n"
+             "\\sliderect[fill=blue,rounded=6]{40,90,80,40}\n"
+             "\\sliderect[fill=green,draw=black,rotate=30,flip]{160,90,80,40}\n"
+             "\\slidefreeform[fill=orange,opacity=0.5]{260,90,60,50}{ring.tikz}")
+    c, s = math.cos(math.radians(30)), math.sin(math.radians(30))
+    a, b, cc, d = -c, -s, -s, c                     # rotate(30) after xscale=-1: x' = a x + c y, y' = b x + d y
+    cx, cy = 40.0, -20.0
+    tx, ty = cx - (a * cx + cc * cy), cy - (b * cx + d * cy)
+    rect = "(0bp,0bp) -- (80bp,0bp) -- (80bp,-40bp) -- (0bp,-40bp) -- cycle"
+    round_rect = "(0bp,-6bp) -- (0bp,0bp) -- (80bp,0bp) -- (80bp,-40bp) -- (0bp,-40bp) -- (0bp,-6bp)"
+    spelled = ("\\slideshape{40,30,100,40}{\\path[draw=red,line width=2bp] (100bp,-40bp) -- (0bp,0bp);}\n"
+               f"\\slideshape{{40,90,80,40}}{{\\path[fill=blue,rounded corners=6bp] {round_rect};}}\n"
+               f"\\slideshape{{160,90,80,40}}{{\\path[fill=green,draw=black,cm={{{a:.6f},{b:.6f},{cc:.6f},{d:.6f},"
+               f"({tx:.6f}bp,{ty:.6f}bp)}}] {rect};}}\n"
+               f"\\slideshape{{260,90,60,50}}{{\\path[fill=orange,even odd rule,fill opacity=0.5] {ring};}}")
+    main = tmp_path / "tree" / "main.tex"
+    main.write_text(with_frames(text, short, spelled), encoding="utf-8")
+    doc = compiled(main)
+    got, want = (doc[k].drawings() for k in (0, 1))
+    got, want = ([x for x in dr if x["rect"][2] - x["rect"][0] < 400] for dr in (got, want))   # not the page
+    assert len(got) == len(want) == 4, "a line, a rounded fill, a turned filled outline, a freeform"
+    for x, y in zip(got, want):
+        assert (x["type"], x.get("fill"), x.get("color"), x.get("even_odd")) == \
+            (y["type"], y.get("fill"), y.get("color"), y.get("even_odd"))
+        assert flat(x["items"]) == pytest.approx(flat(y["items"]), abs=0.01), (x, y)
+    assert flat(got[0]["items"]) == pytest.approx([140, 70, 40, 30], abs=0.01), "from the first point to the second"
+    assert flat(got[1]["items"])[:2] == pytest.approx([40, 96], abs=0.01), \
+        "a rounded rectangle starts where the top left corner's arc begins, 6 bp down the left edge"
+    assert got[3]["fill_opacity"] == pytest.approx(0.5, abs=0.01) and got[3]["even_odd"]
+
+
+@pytest.mark.skipif(not lualatex(), reason="lualatex not found")
+def test_a_slidetable_puts_its_cells_fills_and_borders_where_the_deck_has_them(tmp_path):
+    """test_adopt_tables' table (a header over two columns, a first cell over two rows, a fill Slides
+    does not draw, a border inside a merge) compiled: every word, fill and rule where Slides has it."""
+    from beamer2slides.deck_ir import deck_ir as read
+    from . import test_adopt_tables as TT
+    scale = 720 / 453.54
+    heights = (30, 60, 30)                    # the middle row with room, so its cells' places show
+    text = adopt.bootstrap(read(TT.deck(TT.table(heights=heights)), foreign=True), tmp_path / "tree" / "main.tex")
+    doc = compiled(tmp_path / "tree" / "main.tex")
+    page = doc[0]
+    x0, y0 = round(50 / scale, 1), round(80 / scale, 1)
+    xs = [x0, x0 + 100 / scale, x0 + 160 / scale, x0 + 220 / scale]
+    ys = [y0, y0 + 30 / scale, y0 + 90 / scale, y0 + 120 / scale]
+    inset = float(re.search(r"inset=([\d.]+)", text)[1])
+    chars = page.chars()
+
+    def word(w):
+        s = "".join(ch.c for ch in chars)
+        i = s.index(w)
+        run = chars[i:i + len(w)]
+        return run[0].origin[0], run[-1].origin[0] + run[-1].advance, run[0].origin[1], run
+    left, _, _, _ = word("Name")
+    assert left == pytest.approx(xs[0] + inset, abs=0.1), "left-aligned at the inset"
+    a, b, _, _ = word("Quarter")
+    assert (a + b) / 2 == pytest.approx((xs[1] + xs[3]) / 2, abs=0.1), "centred over both columns"
+    _, right, base10, _ = word("10")
+    assert right == pytest.approx(xs[2] - inset, abs=0.1), "right-aligned at the inset"
+    _, _, base12, _ = word("12")
+    assert base12 > base10 + 18, "bottom-aligned sits at the foot of the same row"
+    assert ys[2] - base12 < 8, "a line box over the row's bottom, no further"
+    _, _, _, rev = word("Revenue")
+    top, bottom = min(ch.box[1] for ch in rev), max(ch.box[3] for ch in rev)
+    assert (top + bottom) / 2 == pytest.approx((ys[1] + ys[3]) / 2, abs=1.5), "in the middle of its two rows"
+    draws = page.drawings()
+
+    def filled(rgb):
+        return [dr for dr in draws if dr.get("fill") and all(abs(v * 255 - int(rgb[k:k + 2], 16)) < 1.5
+                                                             for v, k in zip(dr["fill"], (0, 2, 4)))]
+    (blue,), (green,) = filled("CCE5FF"), filled("00FF00")
+    assert blue["rect"] == pytest.approx((xs[0], ys[0], xs[1], ys[1]), abs=0.06)
+    assert green["rect"] == pytest.approx((xs[2], ys[2], xs[3], ys[3]), abs=0.06)
+    assert not filled("FFEEAA"), "a fill Slides does not draw is not drawn"
+    black = [dr for dr in draws if dr["type"] == "s" and dr.get("color") == (0.0, 0.0, 0.0)]
+    red = [dr for dr in draws if dr["type"] == "s" and dr.get("color") == (1.0, 0.0, 0.0)]
+    assert len(black) == 1 and black[0]["rect"] == pytest.approx((xs[0], ys[1], xs[3], ys[1]), abs=0.4)
+    assert red and all(dr["rect"][0] == pytest.approx(xs[1], abs=0.06) for dr in red)
+    assert min(dr["rect"][1] for dr in red) == pytest.approx(ys[0], abs=0.1)
+    assert max(dr["rect"][3] for dr in red) == pytest.approx(ys[3], abs=0.1), "down all three rows, dashed"

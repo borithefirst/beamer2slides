@@ -401,7 +401,10 @@ ARGS = {
     "againframe": "<om", "circled": "M", "newline": "", "linebreak": "o", "hfill": "", "vfill": "",
     # adopt's vocabulary (adopt.SLIDES_TEXT, adopt_shapes.SHAPE_MACRO: slides.sty)
     "slidepar": "omM", "slidetext": "ommM", "slidelabel": "mMm", "slidebullet": "mm", "slidestrut": "mm", "slidesize": "m",
-    "slidestyle": "mm", "slidemark": "mm", "setslideinset": "m", "slideshape": "mm", "sliderect": "om", "slideellipse": "om", "slidestab": "mM", "slidebreak": "", "slidefillbreak": "",
+    "slidestyle": "mm", "slidemark": "mm", "setslideinset": "m", "slideshape": "omm", "sliderect": "om", "slideellipse": "om", "slidestab": "mM", "slidebreak": "", "slidefillbreak": "",
+    "slideline": "omm", "slidefreeform": "omm", "slidepicture": "omm",
+    # a slidetable's rows and cells (adopt.TABLE_MACROS); the border commands after its last row print nothing
+    "row": "o", "cell": "oM", "multicell": "moM", "hborder": "mom", "vborder": "mom",
 }
 TEXT_MACROS = {"LaTeX": "LATEX", "TeX": "TEX", "ldots": "...", "dots": "...", "textellipsis": "...",
                "textbackslash": "\\", "textbullet": "•", "S": "§", "P": "¶", "copyright": "©",
@@ -418,7 +421,7 @@ ACCENT_MARKS = {"'": "\u0301", "`": "\u0300", "^": "\u0302", '"': "\u0308", "~":
 ESCAPES = {"&": "&", "%": "%", "$": "$", "#": "#", "_": "_", "{": "{", "}": "}"}
 # Environments whose mandatory arguments don't print; figures and code are opaque.
 ENV_ARGS = {"frame": "<o<", "minipage": "ooom", "column": "om", "columns": "o", "tabular": "om",
-            "tabularx": "mom", "textblock": "m(", "textblock*": "m(", "slidebox": "om", "overlayarea": "mm", "onlyenv": "<",
+            "tabularx": "mom", "textblock": "m(", "textblock*": "m(", "slidebox": "om", "slidetable": "omm", "overlayarea": "mm", "onlyenv": "<",
             "block": "<M", "alertblock": "<M", "exampleblock": "<M", "itemize": "<o", "enumerate": "<o",
             "description": "<o", "center": "", "flushleft": "", "flushright": "", "quote": "",
             "actionenv": "<", "visibleenv": "<", "uncoverenv": "<", "altenv": "<mmmm", "multicols": "m"}

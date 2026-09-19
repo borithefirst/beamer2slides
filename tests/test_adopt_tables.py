@@ -5,6 +5,8 @@ a merged header, cell fills (one with no `propertyState`, which Slides draws), b
 `horizontalBorderRows` / `verticalBorderRows` with colour, weight, dash and invisible ones.
 """
 
+import re
+
 import pytest
 
 from beamer2slides import adopt
@@ -256,10 +258,13 @@ def test_the_side_inset_is_where_the_cells_words_begin():
 
 
 def test_measured_rows_are_written_fixed(tmp_path):
+    """Most rows measured: `fixed` is the table's, and the one row TeX may still grow says `grow`."""
     ir = deck_ir(deck(table()), foreign=True)
     next(e for e in ir["slides"][0]["elements"] if e["kind"] == "table")["rows_fixed"] = [0, 1]
-    t = table_source(adopt.bootstrap(ir, tmp_path / "tree" / "main.tex"))
-    assert "\\adoptfix{0}" in t and "\\adoptfix{1}" in t and "\\adoptfix{2}" not in t
+    head, rows = table_rows(adopt.bootstrap(ir, tmp_path / "tree" / "main.tex"))
+    assert ", fixed," in head
+    assert [r.startswith("\\row[grow]") for r in rows] == [False, False, True]
+    assert "\\row[grow]" not in table_source(source(tmp_path / "unmeasured", table())), "none measured, none said"
 
 
 def test_guess_lines_tells_one_line_from_several():
@@ -280,59 +285,76 @@ def macros(tmp_path) -> str:
 
 
 def table_source(text: str) -> str:
-    start = text.index("\\adoptrow{0}")
-    return text[start:text.index("\\end{tikzpicture}", start)]
+    start = text.index("\\begin{slidetable}")
+    return text[start:text.index("\\end{slidetable}", start)]
+
+
+def table_rows(text: str) -> tuple[str, list[str]]:
+    """The `slidetable` header line and its rows, one string per row (a row may take several lines)."""
+    head, _, body = table_source(text).partition("\n")
+    rows = [r.strip() for r in body.split("\\\\") if r.strip() and not r.strip().startswith(("\\hborder", "\\vborder"))]
+    return head, [r for r in rows if not r.startswith(("\\hborder", "\\vborder"))]
+
+
+def cells_of(row: str) -> list[str]:
+    row = re.sub(r"^\\row\[[^\]]*\]\s*", "", row)
+    return [c.strip() for c in row.split("&")]
 
 
 def test_a_table_is_written_at_its_place_with_its_macros(tmp_path):
     text = source(tmp_path, table())
-    assert "\\newcommand\\adoptcell" in macros(tmp_path) and "\\usepackage{tikz}" in text
-    block = text[text.rindex("\\begin{textblock*}", 0, text.index("\\adoptrow{0}")):]
-    assert block.startswith(f"\\begin{{textblock*}}{{{220 / SCALE:.1f}pt}}({50 / SCALE:.1f}pt,{80 / SCALE:.1f}pt)")
-    assert "\\adopttops{3}" in text
+    assert "\\NewDocumentEnvironment { slidetable }" in macros(tmp_path) and "\\usepackage{tikz}" in text
+    assert "\\usepackage{slides}" in text and "slides@t@" not in table_source(text)
+    head, _ = table_rows(text)
+    # the corner, then the columns once, to the thousandth
+    corner, cols = re.search(r"\]\{([\d.,]+)\}\{([\d.,]+)\}$", head).groups()
+    assert corner == f"{50 / SCALE:.1f},{80 / SCALE:.1f}"
+    widths = [float(w) for w in cols.split(",")]
+    assert widths == pytest.approx([w / SCALE for w in (100, 60, 60)], abs=0.002)
 
 
 def test_every_row_is_a_minimum_and_every_cell_with_words_a_box(tmp_path):
-    t = table_source(source(tmp_path, table()))
-    assert t.count("\\adoptrow{") == 3
-    assert t.count("\\adoptcell{") == 6, "the empty filled cell has no box"
-    assert t.count("\\node[") == 6
+    """Three rows as in a tabular, each at least its stored height (the table's `h`, no row differs),
+    and a cell per grid place its merges leave: the empty filled one is `{}`."""
+    head, rows = table_rows(source(tmp_path, table()))
+    assert f"h={30 / SCALE:.1f}," in head and "fixed" not in head
+    assert len(rows) == 3 and not any(r.startswith("\\row[h=") for r in rows)
+    cells = [cells_of(r) for r in rows]
+    assert [len(c) for c in cells] == [2, 3, 2], "the header takes two columns, Revenue two rows"
+    assert cells[2] == ["20", "\\cell[fill=green]{}"]
+    assert sum(1 for row in cells for c in row if re.search(r"\w\}?$", c)) == 6
 
 
 def test_a_merged_cell_spans_its_rows_and_columns(tmp_path):
-    t = table_source(source(tmp_path, table()))
-    pad = 7.2 / SCALE
-    header = next(l for l in t.splitlines() if "\\adoptcell{" in l and "}{0}{0}{" in l
-                  and f"{120 / SCALE - 2 * pad:.2f}pt" in l)
-    assert header, "the header's text is as wide as its two columns less the insets"
-    assert any("\\adoptcell{" in l and "}{1}{2}{" in l for l in t.splitlines()), "rows 1-2 merged"
-    # single-row cells are set first, so a merged cell only adds what they left it short of
-    cells = [l for l in t.splitlines() if "\\adoptcell{" in l]
-    assert "}{1}{2}{" in cells[-1]
+    _, rows = table_rows(source(tmp_path, table()))
+    head, revenue, last = (cells_of(r) for r in rows)
+    assert re.fullmatch(r"\\multicell\{2\}\[[^\]]*\]\{Quarter\}", head[1]), "columns 1-2 merged"
+    assert re.fullmatch(r"\\multicell\{1\}\[[^\]]*rows=2[^\]]*\]\{Revenue\}", revenue[0]), "rows 1-2 merged"
+    assert last[0] == "20", "the row under it leaves its column out"
 
 
 def test_fills_are_drawn_and_not_rendered_ones_are_not(tmp_path):
     t = table_source(source(tmp_path, table()))
-    fills = [l for l in t.splitlines() if "\\fill[" in l]
-    assert len(fills) == 2
+    assert re.findall(r"fill=(\w+)", t) == ["PaleBlue", "green"]
 
 
 def test_no_border_is_drawn_inside_a_merged_cell(tmp_path):
+    """Each line is said once, whole: the rule under the header runs across its three cells (the piece
+    inside "Revenue" is gone), the dashed one left of column 1 down all three rows (the piece inside
+    the header is gone), and nothing else is drawn."""
     t = table_source(source(tmp_path, table()))
-    draws = [l for l in t.splitlines() if "\\draw[" in l]
-    # the rule under the header is one stroke of three segments; the one inside "Revenue" is gone
-    h = [l for l in draws if "line cap=rect" in l]
-    assert len(h) == 1 and f"({220 / SCALE:.1f}pt," in h[0]
-    # the dashed rule beside column 0 runs down all three rows; the one inside the header is gone
-    v = [l for l in draws if "dashed" in l]
-    assert len(v) == 1 and "\\adopty{0}" in v[0] and "\\adopty{3}" in v[0]
+    borders = re.findall(r"\\([hv])border\{(\d+)\}(\[[^\]]*\])?\{([^}]*)\}", t)
+    assert borders == [("h", "1", "", f"black,line width={1 / SCALE:.2f}pt"),
+                       ("v", "1", "", f"red,line width={2 / SCALE:.2f}pt,dashed,line cap=butt")]
+    assert "border=" not in t, "no border is the table's"
 
 
 def test_cells_sit_where_their_vertical_alignment_says(tmp_path):
-    nodes = [l for l in table_source(source(tmp_path, table())).splitlines() if "\\node[" in l]
-    anchors = [l.split("anchor=")[1].split("]")[0].split(",")[0] for l in nodes]
-    assert anchors.count("west") == 1 and anchors.count("south west") == 1
-    assert anchors.count("north west") == 4
+    head, rows = table_rows(source(tmp_path, table()))
+    assert "valign" not in head, "top is the default"
+    cells = [c for r in rows for c in cells_of(r)]
+    assert [c for c in cells if "valign=middle" in c] == [cells[2]] and "Revenue" in cells[2]
+    assert [c for c in cells if "valign=bottom" in c] == [cells[4]] and cells[4].endswith("{12}")
 
 
 def test_segments_join_runs_of_one_style():
@@ -356,48 +378,57 @@ def test_a_right_to_left_cell_is_read_and_written_right_to_left(tmp_path):
     assert "direction" not in cells[1, 2]["paragraphs"][0]
     text = source(tmp_path, t)
     assert "\\babelprovide" in text and "hebrew" in text
-    assert "\\begin{otherlanguage}{hebrew}" in table_source(text)
+    rtl = next(c for r in table_rows(text)[1] for c in cells_of(r) if "שלום" in c)
+    assert "lang=hebrew" in rtl and "otherlanguage" not in rtl, "the language is an option, not an environment"
+    assert "\\begin{otherlanguage}" in macros(tmp_path)
 
 
 def test_cell_lines_are_as_far_apart_as_slides_sets_them(tmp_path):
     """The size switch alone spaced a cell's lines by the class's leading (hebrew-lesson: 14.0 pt where
-    the thumbnail shows 14.45); `adopt.cell_lead` sets Slides' pitch, and leaves the one-line height
-    (the strut) to the size switch, since the row height says it already."""
-    import re
+    the thumbnail shows 14.45); `pitch` sets Slides' pitch, and leaves the one-line height (the strut)
+    to the size switch, since the row height says it already."""
     t = table_source(source(tmp_path, table()))
-    skips = {float(v) for v in re.findall(r"\\baselineskip=([\d.]+)pt", t)}
-    assert len(skips) == 1 and skips.pop() == pytest.approx(sum(adopt.line_box(12 / SCALE, 1.0)), abs=0.1)
+    pitches = {float(v) for v in re.findall(r"pitch=([\d.]+)", t)}
+    assert len(pitches) == 1 and pitches.pop() == pytest.approx(sum(adopt.line_box(12 / SCALE, 1.0)), abs=0.1)
+    assert "\\baselineskip" in macros(tmp_path) and "\\baselineskip" not in t
     assert "\\strutbox" not in t
 
 
 def test_a_cell_is_set_again_without_insets_when_its_rows_are_too_short(tmp_path):
-    """creandum-board keeps "+1 months" on one line in a 40 pt column; the macro gets the full
-    column width and the shift that keeps a centred paragraph centred."""
+    """creandum-board keeps "+1 months" on one line in a 40 pt column: the macro sets a cell again at
+    its full width, shifted back by the inset, when its rows are too short for it (`\\slides@t@grow`
+    gets both widths and both shifts); the source says nothing of it."""
     t = table_source(source(tmp_path, table()))
-    header = next(l for l in t.splitlines() if "\\adoptcell{" in l and "}{0}{0}{" in l
-                  and f"{{{120 / SCALE:.2f}pt}}" in l)
-    assert f"{{{-7.2 / SCALE:.2f}pt}}" in header
-    right = [l for l in t.splitlines() if "\\adoptcell{" in l and f"{{{-2 * 7.2 / SCALE:.2f}pt}}" in l]
-    assert len(right) == 3, "the numbers are right-aligned"
+    sty = macros(tmp_path)
+    assert "\\def\\slides@t@grow" in sty and "- \\slides@t@ix " in sty and "- \\slides@t@ixx " in sty
+    assert "inset=4.535" in t and "\\slides@t" not in t
+    assert "aligns={left,right,right}" in t, "the numbers are right-aligned, said once for their columns"
 
 
 def test_a_one_word_cell_too_wide_for_its_insets_stays_on_its_line(tmp_path):
     """creandum-board's P&L: "(1,234)" in a narrow column is one word Slides never breaks - wider than
-    the room inside the insets, it takes the cell's whole width, aligned as it says."""
+    the room inside the insets, it takes the cell's whole width, aligned as it says. TeX finds such a
+    word itself, so a one-word cell says nothing; one whose line has no break for another reason says
+    `wrap`."""
     t = table_source(source(tmp_path, table()))
-    ten = next(l for l in t.splitlines() if "\\hbox to\\linewidth" in l and "{10}" in l)
-    assert "\\ifdim\\wd0>\\linewidth" in ten and "\\hss\\box0\\fi" in ten, "right-aligned when it fits"
-    assert f"\\hbox to\\dimexpr\\linewidth+{2 * 7.2 / SCALE:.2f}pt{{\\hss\\box0}}" in ten
+    assert "wrap" not in t and "word" not in t
+    sty = macros(tmp_path)
+    assert "\\def\\slides@t@check" in sty and "\\def\\slides@t@word" in sty
+    ctx = adopt.Context()
+    boxed = {"row": 0, "col": 0, "rowspan": 1, "colspan": 1, "valign": "top",
+             "paragraphs": [{"align": "left", "runs": [{"text": "two words", "size": 10.0, "underline": True}]}]}
+    opts, body = adopt.table_cell(boxed, ctx, "", None)
+    assert opts["word"] is False and adopt.option_text("word", False) == "wrap"
 
 
 def test_a_middle_aligned_cell_drops_by_its_own_line_box_and_no_other_does(tmp_path):
     """Slides centres a cell's line box, whose ascent is 0.968 of 1.2 em, where TeX's strut is 0.7 of
     1.0: creandum-board's middle cells stood 0.125 em high. Top and bottom ones are placed right."""
     text = source(tmp_path, table())
-    assert "\\newcommand\\adoptdrop" in macros(tmp_path)
-    nodes = [l for l in table_source(text).splitlines() if "\\node[" in l]
-    dropped = [l for l in nodes if "yshift=-\\adoptdrop" in l]
-    assert len(dropped) == 1 and "anchor=west" in dropped[0]
+    sty = macros(tmp_path)
+    assert "\\def\\slides@t@drop" in sty and "yshift=-\\slides@t@drop" in sty
+    middle = [c for r in table_rows(text)[1] for c in cells_of(r) if "valign=middle" in c]
+    assert len(middle) == 1
 
 
 # ---------------------------------------------------------------- where the cells' lines stand
@@ -459,19 +490,22 @@ def test_a_cells_line_stands_the_measured_inset_plus_its_line_box():
 
 
 def test_a_measured_inset_places_a_cell_by_its_first_or_last_baseline(tmp_path):
-    """The box TeX builds for a cell is placed by its first baseline (`\\adoptht`, from its top to
-    there - its height reaches its last) or its last (`\\adoptdp`), not by the strut's edge."""
+    """The box TeX builds for a cell is placed by its first baseline (`\\slides@t@ht`, from its top to
+    there - its height reaches its last) or its last (`\\slides@t@dp`), not by the strut's edge: the
+    source says where that baseline stands, `baseline=`, once for the table's top cells and again for
+    a bottom one."""
     ir = deck_ir(deck(table()), foreign=True)
     el = next(e for e in ir["slides"][0]["elements"] if e["kind"] == "table")
     el["cell_text_y"] = 1.0
     text = adopt.bootstrap(ir, tmp_path / "tree" / "main.tex")
     sty = macros(tmp_path)
-    assert "\\newcommand\\adoptht" in sty and "\\newcommand\\adopt@first" in sty
-    nodes = [l for l in table_source(text).splitlines() if "\\node[" in l]
-    tops = [l for l in nodes if "+\\adoptht{" in l]
-    bottoms = [l for l in nodes if "-\\adoptdp{" in l]
-    assert len(tops) == 4 and all("anchor=north west" in l for l in tops)
-    assert len(bottoms) == 1 and "anchor=south west" in bottoms[0]
+    assert "\\def\\slides@t@ht" in sty and "\\def\\slides@t@dp" in sty and "\\def\\slides@t@first" in sty
+    head, rows = table_rows(text)
     z = 12 / SCALE
-    assert f"-{1.0 + adopt.line_box(z, 1.0)[0]:.2f}pt+\\adoptht" in tops[0]
-    assert sum("adoptdrop" in l for l in nodes) == 1, "a middle cell is placed as before"
+    assert f"baseline={1.0 + adopt.line_box(z, 1.0)[0]:.2f}" in head
+    cells = [c for r in rows for c in cells_of(r)]
+    bottom = [c for c in cells if "valign=bottom" in c]
+    last = adopt.cell_line_place({"valign": "bottom", "paragraphs": [{"runs": [{"size": z}]}]}, 1.0)
+    assert len(bottom) == 1 and f"baseline={last:.2f}" in bottom[0]
+    middle = [c for c in cells if "valign=middle" in c]
+    assert len(middle) == 1 and "baseline" not in middle[0], "a middle cell is placed as before"

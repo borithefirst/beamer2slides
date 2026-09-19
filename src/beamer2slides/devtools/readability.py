@@ -58,9 +58,10 @@ REFERENCE = ("tests/decks/*.tex", "tests/decks/sync/talk.tex")
 CONSTRUCTS = [
     ("text plumbing", re.compile(r"\\(leftskip|rightskip|prevdepth|baselineskip|vrule|llap|rlap|parfillskip|"
                                  r"slidesbox|vbox|vskip|vss|noindent|strut|hskip|kern|spaceskip|slidestrut)\b")),
-    ("table", re.compile(r"\\adopt(cell|row|fix|box|drop|y)\b")),
-    ("shape", re.compile(r"\\(path|draw|fill|node|useasboundingbox|shade|slideshape|sliderect|slideellipse)\b|tikzpicture")),
-    ("picture", re.compile(r"\\includegraphics\b")),
+    ("table", re.compile(r"\\adopt(cell|row|fix|box|drop|y)\b|\{slidetable\}|\\(row|cell|multicell|hborder|vborder)\b|&.*\\\\\s*$")),
+    ("shape", re.compile(r"\\(path|draw|fill|node|useasboundingbox|shade|slideshape|sliderect|slideellipse|"
+                         r"slideline|slidefreeform)\b|tikzpicture")),
+    ("picture", re.compile(r"\\(includegraphics|slidepicture)\b")),
     ("placement", re.compile(r"textblock|slidebox")),
     ("style switch", re.compile(r"\\(slidesize|color|fontseries|fontshape|selectfont|ttfamily|sffamily|rmfamily|"
                                 r"addfontfeature|fontspec|bfseries|itshape|slidesfont\w*)\b")),

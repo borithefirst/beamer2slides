@@ -82,7 +82,7 @@ def test_a_linked_chart_is_the_picture_slides_keeps_of_it(tmp_path):
     assert el["chart"] == {"spreadsheetId": "sheet", "chartId": 7}
     assert Path(el["file"]).exists() and el["outline"]["color"] == "#ff0000"
     text = adopt.bootstrap(ir, tmp_path / "tree" / "main.tex")
-    assert "\\includegraphics" in text
+    assert re.search(r"\\slidepicture\[outline=\w+,outline width=[\d.]+\]\{[\d.,]+\}\{figures/chart-\w+\.png\}", text)
     assert "sheetsChart" not in json.dumps(deck_ir(deck_with(chart))), "pull reads no chart"
     assert not own(deck_ir(deck_with(chart))), "pull still leaves charts alone"
 
