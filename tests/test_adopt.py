@@ -357,3 +357,27 @@ def test_adopt_refuses_to_write_over_a_source(tmp_path):
         assert "exists already" in str(exc)
     else:
         raise AssertionError("adopt overwrote a source that was already there")
+
+
+def test_lengths_are_written_in_pdf_points_and_the_deck_words_are_left_alone():
+    """The IR is in bp; TeX's pt is 72.27 to the inch, so written as pt every element came out 0.37%
+    too close to the page corner. A "12pt" typed on a slide is words, not a length."""
+    from beamer2slides import inverse
+    frame = ("\\begin{textblock*}{100.0pt}(10.5pt,20pt)\\hskip-3.00pt\\fontsize{12.0}{14.4}\\selectfont "
+             "\\vrule width0pt height9.00pt")
+    assert adopt.to_bp(frame) == ("\\begin{textblock*}{100.0bp}(10.5bp,20bp)\\hskip-3.00bp"
+                                  "\\fontsize{12.0bp}{14.4bp}\\selectfont \\vrule width0bp height9.00bp")
+    inverse.GUARD_UNITS = True
+    try:
+        words = adopt.text_escape("set in 12pt Arial")
+    finally:
+        inverse.GUARD_UNITS = False
+    assert adopt.to_bp(words) == words == "set in 12{}pt Arial"
+    assert inverse.latex_escape("12pt") == "12pt"             # pull's own sources are untouched
+
+
+def test_a_see_through_page_background_is_blended_over_white():
+    from beamer2slides.deck_ir import page_background
+    page = {"pageProperties": {"pageBackgroundFill": {"solidFill": {
+        "color": {"rgbColor": {"red": 0x4b / 255, "green": 0xac / 255, "blue": 0xc6 / 255}}, "alpha": 0.247}}}}
+    assert page_background(page, {}, {}) == ("#d3eaf1", None)

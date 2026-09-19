@@ -88,8 +88,14 @@ ESCAPE = {"\\": r"\textbackslash{}", "&": r"\&", "%": r"\%", "$": r"\$", "#": r"
           "\t": " "}
 
 
+# Set while adopt writes a source: its lengths are then rewritten from pt to bp afterwards
+# (`adopt.to_bp`), and a number followed by "pt" in the deck's own words must not be one of them.
+GUARD_UNITS = False
+
+
 def latex_escape(text: str) -> str:
-    return "".join(ESCAPE.get(c, c) for c in text)
+    out = "".join(ESCAPE.get(c, c) for c in text)
+    return re.sub(r"(\d)(?=pt)", r"\1{}", out) if GUARD_UNITS else out
 
 
 def colour_name(hex_colour: str, defined: dict[str, str]) -> str:

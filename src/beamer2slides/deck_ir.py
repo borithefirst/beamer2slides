@@ -483,7 +483,14 @@ def page_background(page: dict, resolver_pages: dict[str, dict], scheme: dict) -
         fill = cur.get("pageProperties", {}).get("pageBackgroundFill", {})
         if fill and fill.get("propertyState", "RENDERED") != "INHERIT":
             if "solidFill" in fill:
-                return rgb_hex(fill["solidFill"].get("color"), scheme), None
+                colour = rgb_hex(fill["solidFill"].get("color"), scheme)
+                alpha = fill["solidFill"].get("alpha", 1.0)
+                if colour and alpha < 1:
+                    # a see-through page background shows white under it (arabic-training's master
+                    # is #4bacc6 at alpha 0.247, which Slides draws as a pale #d3eaf1)
+                    colour = "#" + "".join(f"{round(255 - (255 - int(colour[i:i + 2], 16)) * alpha):02x}"
+                                           for i in (1, 3, 5))
+                return colour, None
             if "stretchedPictureFill" in fill:
                 return None, fill["stretchedPictureFill"].get("contentUrl")
             return None, None

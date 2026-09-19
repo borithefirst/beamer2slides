@@ -20,6 +20,7 @@ wants it (it corrects textblocks by the measured error), the words, and the pict
 
 import json
 import os
+import re
 import shutil
 from pathlib import Path
 
@@ -51,7 +52,21 @@ def page_setup(size: list[float] | None) -> tuple[str, str]:
     for (w, h), opt in ASPECTS.items():
         if abs(w - size[0]) < 0.5 and abs(h - size[1]) < 0.5:
             return opt, ""
-    return "", f"\\geometry{{papersize={{{size[0]:.2f}pt,{size[1]:.2f}pt}}}}"
+    return "", f"\\geometry{{papersize={{{size[0]:.2f}bp,{size[1]:.2f}bp}}}}"
+
+
+# The IR's lengths are PDF points (bp, 72 to the inch) and the writers below spell them TeX pt
+# (72.27): on beamer's 16:9 page, 160 mm = 453.54 bp, every element came out 0.37% too close to the
+# top-left corner - 1.7 pt at the right edge, and 40% of the ink of a text box there (page score
+# 0.750 -> 0.806 over the corpus). `to_bp` rewrites a written frame's lengths; the deck's own words
+# were escaped with `inverse.GUARD_UNITS` on, so a "12pt" typed on a slide reads 12{}pt and stays.
+LENGTH_PT = re.compile(r"(?<![\d.])(\d+(?:\.\d+)?)pt(?![A-Za-z])")
+FONTSIZE = re.compile(r"\\fontsize\{(\d+(?:\.\d+)?)\}\{(\d+(?:\.\d+)?)\}")
+
+
+def to_bp(text: str) -> str:
+    text = FONTSIZE.sub(r"\\fontsize{\1bp}{\2bp}", text)
+    return LENGTH_PT.sub(r"\1bp", text)
 
 
 def level_style(target: dict):
@@ -450,7 +465,7 @@ def picture_of(el: dict, tree: Path | None):
 # hyphenation, so a line holds what a browser's line holds and breaks fall where Slides breaks them.
 
 SLIDES_TEXT = (
-    "\\newcommand{\\slidesize}[1]{\\fontsize{#1}{#1}\\selectfont"
+    "\\newcommand{\\slidesize}[1]{\\fontsize{#1bp}{#1bp}\\selectfont"
     "\\spaceskip=\\fontdimen2\\font plus\\fontdimen3\\font\\relax}\n"
     "\\newcommand{\\slidesbox}{\\parindent=0pt\\parskip=0pt\\lineskip=0pt\\lineskiplimit=-\\maxdimen"
     "\\hyphenpenalty=10000\\exhyphenpenalty=50\\tolerance=9999\\emergencystretch=0pt\\frenchspacing"
@@ -1085,8 +1100,13 @@ def bootstrap(target: dict, tex: Path, flow: bool = False) -> str:
     ctx.font_lines = font_preamble(target, tex.parent, ctx)
     # "% slide N" says which deck slide a frame is, for a person reading the source and for tools
     # that compile frames one at a time (devtools.adopt_bench finds the frames that break a build)
-    frames = [f"% slide {n}\n" + slide_latex(s, style_for, ctx, flow, tex.parent, deck_bg)
-              for n, s in enumerate(target["slides"], 1)]
+    from . import inverse
+    inverse.GUARD_UNITS = True
+    try:
+        frames = [f"% slide {n}\n" + to_bp(slide_latex(s, style_for, ctx, flow, tex.parent, deck_bg))
+                  for n, s in enumerate(target["slides"], 1)]
+    finally:
+        inverse.GUARD_UNITS = False
     head = preamble(target, ctx, flow, tex.parent)
     extra = sorted(ctx.packages) + [f"\\definecolor{{{n}}}{{HTML}}{{{v}}}" for n, v in sorted(ctx.colours.items())]
     text = head + "\n" + "\n".join(extra) + "\n\n\\begin{document}\n\n" + "\n".join(frames) + "\n\\end{document}\n"

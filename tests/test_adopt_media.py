@@ -183,7 +183,7 @@ def test_a_page_beamer_has_no_option_for_is_that_page(tmp_path):
     pw, ph, scale = page_size_for(sized(595.3, 841.9), None, foreign=True)
     assert scale == 2.0 and abs(pw / ph - 595.3 / 841.9) < 1e-6
     opt, paper = adopt.page_setup([pw, ph])
-    assert opt == "" and paper == f"\\geometry{{papersize={{{pw:.2f}pt,{ph:.2f}pt}}}}"
+    assert opt == "" and paper == f"\\geometry{{papersize={{{pw:.2f}bp,{ph:.2f}bp}}}}"
     text = adopt.bootstrap(deck_ir(sized(595.3, 841.9), foreign=True), tmp_path / "tree" / "main.tex")
     assert "aspectratio" not in text
     assert paper in text and text.index("\\documentclass") < text.index(paper) < text.index("\\begin{document}")

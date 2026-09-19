@@ -135,7 +135,8 @@ def covered_mask(slide: dict, w: int, h: int) -> np.ndarray:
         x0, y0, x1, y1 = el["bbox"]
         a0, b0 = max(0, int((x0 - size) * px)), max(0, int((y0 - size) * px))
         a1, b1 = min(w, int((x1 + 2 * size) * px)), min(h, int((y1 + size) * px))
-        m[b0:b1, a0:a1] = True
+        if a1 > a0 and b1 > b0:                        # a box off the page: a negative end would
+            m[b0:b1, a0:a1] = True                     # count from the far edge
     return m
 
 

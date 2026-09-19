@@ -13,6 +13,12 @@ EMU = 12700
 
 
 @pytest.fixture(autouse=True)
+def lengths_as_written(monkeypatch):
+    """These tests read the writers' lengths; their rewriting into bp is test_adopt's
+    `test_lengths_are_written_in_pdf_points_and_the_deck_words_are_left_alone`."""
+    monkeypatch.setattr(adopt, "to_bp", lambda text: text)
+
+@pytest.fixture(autouse=True)
 def no_machine_fonts(monkeypatch, tmp_path):
     monkeypatch.setenv("B2S_FONTS", str(tmp_path / "no-fonts-here"))
 
