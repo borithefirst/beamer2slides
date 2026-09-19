@@ -360,3 +360,11 @@ Left:
   width; italic width is not measured on its own.
 - creandum-board 23's justified line is ~1 pt overfull in TeX where Slides wraps.
 - The Google Sans Mono vs Google Sans Code glyph offsets on gdg24 77-79.
+
+## All three merged (`m5-b` -> `m6-a`)
+
+With the single-box study on top: boxes 0.9719 -> 0.9728, page 0.9714, pixels 0.9845, mean per deck
+0.9557. The gains add up (intro-lecture +0.010, cs161-tls +0.003, gdg24 +0.003, jeb-arch +0.001);
+comic-strips -0.0015 is the study's known cost (a line 0.02 pt short of its box that Slides wraps).
+Left, by the loss report: jruby-ja (kana widths, gradient), comps-analysis' Bodoni glyph shapes,
+devfest2020's numbered lists, sc-dark-minimal 11's unexplained wrap.
