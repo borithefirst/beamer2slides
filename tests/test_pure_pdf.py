@@ -1666,6 +1666,25 @@ def test_the_c_runtimes_qsort_is_called_as_freetype_calls_it():
             assert a == b
 
 
+def test_a_calrgb_colour_that_goes_nan_is_what_the_platforms_pdfium_makes_of_it():
+    """A CalRGB component below zero with a fractional gamma is powf's NaN, and PDFium's
+    RGB_Conversion hands that to std::clamp, whose answer for a NaN is its compiler's: the x86-64
+    builds keep the NaN and the colour comes out black, the arm64 one saturates the red channel
+    (cie._srgb3). Measured on macOS: the shading torture seeds cie 8, mesh 47, transfer 57 and 76
+    differ from PDFium in nothing else."""
+    from beamer2slides.pdf.pure import cie, crt
+    buf = [0.4, 0.6382, -0.2]
+    assert cie.powf(buf[2], 1.8) != cie.powf(buf[2], 1.8)       # NaN: that is what starts it
+    out = cie.calrgb((1.0, 1.0, 1.0), (1.8, 1.8, 1.8), None, buf)
+    assert out == ((1.0, 0.0, 0.0) if crt.ARM else (0.0, 0.0, 0.0))
+    for arm, want in ((False, (0.0, 0.0, 0.0)), (True, (1.0, 0.0, 0.0))):
+        keep, cie._ARM = cie._ARM, arm
+        try:
+            assert cie.calrgb((1.0, 1.0, 1.0), (1.8, 1.8, 1.8), None, buf) == want
+        finally:
+            cie._ARM = keep
+
+
 def test_actual_text_reads_as_pdfium_reads_it():
     """/ActualText (devtools/marked_content_torture.py): an object in a marked-content sequence
     whose dictionary carries it gives that text, sliced over its rectangle, and the sequence's later

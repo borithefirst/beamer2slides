@@ -80,8 +80,10 @@ a per-slide background picture.
   0), float->int casts are the CPU's (`crt.i32`/`u32`/`i32_array`: arm64 saturates, x86 gives
   INT_MIN; the macOS wheel is arm64), a WideString holds code points where wchar_t is 32 bits
   (`navigation.wide`: name trees compare them, an astral /ActualText char is skipped), FreeType's
-  sorts call the platform's own qsort (`crt.qsort` via ctypes: glibc's is stable), and a Type 1
-  font CoreGraphics accepts takes macOS PDFium's CoreText glyph map (`crt.quartz_font`).
+  sorts call the platform's own qsort (`crt.qsort` via ctypes: glibc's is stable), a Type 1
+  font CoreGraphics accepts takes macOS PDFium's CoreText glyph map (`crt.quartz_font`), and a
+  CalRGB colour that powf turns into NaN comes out black on x86-64 but red in the arm64 build,
+  where std::clamp's inverted compare saturates the red channel (`cie._srgb3`).
   `devtools/platform_check.py` runs every oracle plus `subst_extract` (text in made-up
   non-embedded fonts, both backends) on whatever OS it is on, and `.github/workflows/pure-pdf.yml`
   runs it on ubuntu/macos/windows with pinned versions (`.github/constraints.txt`) and decks built

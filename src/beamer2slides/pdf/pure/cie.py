@@ -6,6 +6,7 @@ is the C runtime's (`crt.py`: the one PDFium links on each platform)."""
 
 from __future__ import annotations
 
+from .crt import ARM as _ARM
 from .crt import i32 as _i32
 from .syntax import float32 as F
 
@@ -61,6 +62,19 @@ def rgb_conversion(c: float) -> float:
     return F(_SAMPLES2[scale // 4 - 48] / 255.0)
 
 
+def _srgb3(r: float, g: float, b: float) -> tuple:
+    """RGB_Conversion for the three channels of one colour. A NaN - CalRGB's powf of a negative
+    component - reaches std::clamp, and what clamp makes of a NaN is its compiler's business: the
+    x86-64 builds keep the NaN (the cast to int then gives INT_MIN, max() takes that to 0 and the
+    colour comes out black), while in the arm64 build the red channel's compare is the inverted
+    one, `!(v <= 1)`, which a NaN answers true, so red saturates and the colour comes out pure red.
+    Measured against PDFium's arm64 macOS build: the shading torture seeds cie 8, mesh 47, transfer
+    57 and 76 then agree with it pixel for pixel."""
+    if _ARM and r != r:
+        return 1.0, rgb_conversion(g), rgb_conversion(b)
+    return rgb_conversion(r), rgb_conversion(g), rgb_conversion(b)
+
+
 def xyz_to_srgb(x: float, y: float, z: float) -> tuple:
     r = F(F(F(F(3.2410) * x) -F(F(1.5374) * y)) - F(F(0.4986) * z))
     g = F(F(F(F(-0.9692) * x) + F(F(1.8760) * y)) + F(F(0.0416) * z))
@@ -105,7 +119,7 @@ def xyz_to_srgb_whitepoint(x, y, z, xw, yw, zw) -> tuple:
     s = _transform(_inverse(_RGB_XYZ), (xw, yw, zw))
     m = _multiply(_RGB_XYZ, (s[0], 0.0, 0.0, 0.0, s[1], 0.0, 0.0, 0.0, s[2]))
     r, g, b = _transform(_inverse(m), (x, y, z))
-    return rgb_conversion(r), rgb_conversion(g), rgb_conversion(b)
+    return _srgb3(r, g, b)
 
 
 def calrgb(white: tuple, gamma: tuple | None, matrix: tuple | None, buf) -> tuple:
