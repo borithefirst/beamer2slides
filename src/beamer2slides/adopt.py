@@ -1234,7 +1234,9 @@ def shape_block(el: dict, ctx: Context, ind: str) -> str:
 # two letters, tried, also split the numbers of creandum-board's narrow columns where Slides keeps
 # them whole: the inset is a guess, and a word that sticks out costs less than a row that grows.)
 TABLE_MACROS = r"""\makeatletter
-\newcommand\adoptrow[2]{\expandafter\edef\csname adopt@row@#1\endcsname{\the\dimexpr#2\relax}}
+\newcommand\adoptrow[2]{\expandafter\edef\csname adopt@row@#1\endcsname{\the\dimexpr#2\relax}%
+  \expandafter\let\csname adopt@fix@#1\endcsname\relax}
+\newcommand\adoptfix[1]{\expandafter\def\csname adopt@fix@#1\endcsname{1}}% a row the thumbnail measured
 \newcommand\adoptsetcell[2]{\vbox{\hsize=#1\relax\linewidth\hsize\parindent\z@
     \hyphenpenalty\@M\exhyphenpenalty\@M\everypar{\strut}#2\ifhmode\strut\fi
     \xdef\adopt@lastdrop{\the\dimexpr(\ht\strutbox+\dp\strutbox)*1067/10000\relax}}}
@@ -1247,15 +1249,20 @@ TABLE_MACROS = r"""\makeatletter
   \loop\advance\dimen@\csname adopt@row@\the\@tempcnta\endcsname\relax
   \ifnum\@tempcnta<#3\relax\advance\@tempcnta\@ne\repeat
   \dimen@ii\dimexpr\ht\csname adopt@box@#1\endcsname+\dp\csname adopt@box@#1\endcsname+#5*2\relax
-  \ifdim\dimen@ii>\dimen@
+  % a measured row is what Slides laid out, to the pixel: text that fills it exactly is no sign of
+  % text set without insets
+  \expandafter\ifx\csname adopt@fix@#3\endcsname\relax\skip@\z@\else\skip@\p@\fi
+  \ifdim\dimen@ii>\dimexpr\dimen@+\skip@\relax
     \setbox\@tempboxa\adoptsetcell{#6}{#8}%
     \ifdim\dimexpr\ht\@tempboxa+\dp\@tempboxa\relax<\dimexpr\dimen@ii-#5*2\relax
       \global\setbox\csname adopt@box@#1\endcsname\hbox to #4{\kern#7\box\@tempboxa\hss}%
       \dimen@ii\dimexpr\ht\csname adopt@box@#1\endcsname+\dp\csname adopt@box@#1\endcsname+#5*2\relax
     \fi
   \fi
-  \ifdim\dimen@ii>\dimen@
-    \expandafter\edef\csname adopt@row@#3\endcsname{\the\dimexpr\csname adopt@row@#3\endcsname+\dimen@ii-\dimen@\relax}%
+  \expandafter\ifx\csname adopt@fix@#3\endcsname\relax
+    \ifdim\dimen@ii>\dimen@
+      \expandafter\edef\csname adopt@row@#3\endcsname{\the\dimexpr\csname adopt@row@#3\endcsname+\dimen@ii-\dimen@\relax}%
+    \fi
   \fi}
 \newcommand\adopttops[1]{% \adopty{k}: the top of row k, and \adopty{#1} the table's foot
   \dimen@\z@\@tempcnta\z@
@@ -1333,16 +1340,19 @@ def table_block(el: dict, ctx: Context, ind: str) -> str:
     x0, y0 = el["bbox"][0], el["bbox"][1]
     lines = [f"{ind}\\begin{{textblock*}}{{{xs[-1]:.1f}pt}}({x0:.1f}pt,{y0:.1f}pt)"]
     lines += [f"{ind}  \\adoptrow{{{r}}}{{{h:.2f}pt}}" for r, h in enumerate(heights)]
+    # rows the thumbnail showed (`deck_ir.thumbnail_rows`) keep their height whatever TeX makes of
+    # their text
+    lines += [f"{ind}  \\adoptfix{{{r}}}" for r in el.get("rows_fixed", []) if r < n_rows]
     cells = [c for c in el.get("table_cells", []) if c["row"] < n_rows and c["col"] < len(widths)]
     boxes: dict[int, int] = {}
     # rows that hold one cell grow first, so a merged cell only adds what they left it short of
     for k, c in sorted(enumerate(cells), key=lambda kc: (kc[1]["rowspan"], kc[0])):
-        if not c["paragraphs"]:
-            continue
         last_row = min(c["row"] + c["rowspan"], n_rows) - 1
         last_col = min(c["col"] + c["colspan"], len(widths))
         span = xs[last_col] - xs[c["col"]]
         width = max(span - 2 * padx, 1.0)
+        if not c["paragraphs"]:
+            continue
         # the insets let go of when the text would otherwise need more room than the stored row
         # height gives it (see TABLE_MACROS); the wider box keeps the paragraph's alignment
         shift = {"center": -padx, "right": -2 * padx}.get(c["paragraphs"][0].get("align"), 0.0)

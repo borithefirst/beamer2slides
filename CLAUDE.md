@@ -643,6 +643,24 @@ cs161-tls' `google.com` line). Line breaking was studied and needs nothing: Slid
 and breaks on the kerned width of a line at exactly the box's width, as TeX does here (of 579 boxes
 whose thumbnail lines can be counted, the rules tried - unkerned, a tolerance, pixel-rounded widths -
 gain at most one box); the breaks that still differ are fonts unlike Slides' own.
+Tables from their thumbnails (`cache-a` -> `tb-final`, 912 slides: boxes 0.956 -> 0.958, no deck down):
+a stored row height is a minimum Slides grows by what the API does not say (an empty cell's line in
+a size nobody reads back - solidity-survey's 15.75 pt rows draw 19.4, creandum-board's do not grow -
+a .pptx's insets, a word broken in a narrow column), so `deck_ir.thumbnail_rows` reads each row
+boundary whose borders cover half the table where the thumbnail draws it (the first pixel row
+where 85% of the sampled columns turn towards the border colour *and* come back within its
+thickness: a step between two fills is no line), top down until one is not found, and those rows
+get the measured height and no growth in TeX (`rows_fixed` -> `\adoptfix`, 1 pt of slack before a
+cell is set again without insets). `deck_ir.thumbnail_cell_pad` takes the side inset from where
+single-aligned cells' ink begins (median of >= 3, less 0.06 em bearing: comps-analysis 3 pt, not
+the 5.8 guessed, so "Implied Equity Value" stops wrapping), and `cell_pad` keeps the cap when the
+rows are less than a point short of it (creandum-board's 22.0 pt rows of 7 pt text draw 22.8 =
+8.4 + 2 x 7.2). comps-analysis 0.677 -> 0.722 (slide 10 0.335 -> 0.584, 7 0.458 -> 0.639),
+creandum-board 0.946 -> 0.958 (13: 0.599 -> 0.956), solidity-survey 29 0.596 -> 0.910, hebrew-lesson
+0.773 -> 0.779, journey-maps 15 0.826 -> 0.924. Tried and dropped: a 14 pt strut in empty cells
+(fixed solidity, broke creandum 13 and comps 9). Left: comps-10's "Adjusted" + nbsp header wraps
+the nbsp onto a line of its own in Slides; cells' vertical insets (comps' bottom-aligned text 2 pt
+low, hebrew's 5.4); tables whose borders are not visible (creandum 13, cs161-tls) stay guessed.
 Bench workflow: `run` caches each deck's scores by its source tree, IR and scorer
 (`<corpus>/<deck>/cache`, `--no-cache` to compile anyway), so a change recompiles only the decks
 whose source it changed, and starts the slowest decks first; `losses --tag T` charges every pixel the
