@@ -21,13 +21,21 @@ def flate(data: bytes) -> bytes:
     try:
         return zlib.decompress(data)
     except zlib.error:
-        # a damaged or truncated stream: keep what decodes
+        # a damaged or truncated stream: keep what decodes, up to the byte zlib stops at, as
+        # FlateUncompress does (inflate's output before its error is kept)
         d = zlib.decompressobj()
         out = bytearray()
         for i in range(0, len(data), 4096):
+            saved = d.copy()
             try:
                 out += d.decompress(data[i:i + 4096])
             except zlib.error:
+                d = saved
+                for k in range(i, min(i + 4096, len(data))):
+                    try:
+                        out += d.decompress(data[k:k + 1])
+                    except zlib.error:
+                        break
                 break
         if not out:
             try:  # raw deflate without the zlib header

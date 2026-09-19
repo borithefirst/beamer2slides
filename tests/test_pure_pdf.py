@@ -197,6 +197,41 @@ def test_mutated_pages_read_as_pdfium_reads_them():
             close(getattr(a, call)(), getattr(b, call)(), f"{where} {call}")
 
 
+def test_a_damaged_flate_stream_keeps_what_decoded_before_the_damage():
+    """FlateUncompress keeps inflate's output up to the byte it stops at (a flipped bit, a cut, junk
+    inserted); keeping only whole 4 KB chunks lost up to 4 KB of content: 40 pages of 60 apart."""
+    import random
+    import zlib
+
+    def one_page(stream):
+        objs = [b"<< /Type /Catalog /Pages 2 0 R >>", b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+                b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 150] /Contents 4 0 R >>",
+                b"<< /Length %d /Filter /FlateDecode >>\nstream\n" % len(stream) + stream + b"\nendstream"]
+        out, offsets = bytearray(b"%PDF-1.7\n"), []
+        for i, o in enumerate(objs):
+            offsets.append(len(out))
+            out += b"%d 0 obj\n" % (i + 1) + o + b"\nendobj\n"
+        xref = len(out)
+        out += b"xref\n0 5\n0000000000 65535 f \n" + b"".join(b"%010d 00000 n \n" % o for o in offsets)
+        return bytes(out + b"trailer\n<< /Size 5 /Root 1 0 R >>\nstartxref\n%d\n%%%%EOF\n" % xref)
+
+    r = random.Random(1)
+    compressed = zlib.compress(b"\n".join(b"%d %d m %d %d l S" % (r.randrange(200), r.randrange(150), r.randrange(200),
+                                                                   r.randrange(150)) for _ in range(3000)))
+    for trial in range(12):
+        damaged = bytearray(compressed)
+        k = r.randrange(2, len(damaged))
+        if trial % 3 == 0:
+            damaged[k] ^= 1 << r.randrange(8)
+        elif trial % 3 == 1:
+            del damaged[k:]
+        else:
+            damaged[k:k] = b">>"
+        data = one_page(bytes(damaged))
+        ours, theirs = pdf.resolve("pure").open(data)[0], pdf.resolve("pdfium").open(data)[0]
+        assert len(ours.objects()) == len(theirs.objects()), f"trial {trial}: damage at {k}"
+
+
 def test_content_operands_are_read_as_pdfiums_stream_parser_reads_them():
     from beamer2slides.pdf.pure.syntax import Name, operations
 

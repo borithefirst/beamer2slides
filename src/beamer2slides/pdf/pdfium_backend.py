@@ -92,7 +92,10 @@ class Page:
     def __init__(self, doc: "Document", index: int):
         self.doc = doc
         self.index = index
-        self.page = doc.pdf[index]
+        try:
+            self.page = doc.pdf[index]
+        except pdfium.PdfiumError as e:  # a /Kids entry that is no page: the contract's error
+            raise PdfError(f"page {index}: {e}") from e
         self.raw = self.page.raw
         box = R.FS_RECTF()  # the visible area: crop box within media box, inherited boxes included
         R.FPDF_GetPageBoundingBox(self.raw, box)
