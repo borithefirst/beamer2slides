@@ -42,6 +42,11 @@ def test_each_line_is_charged_to_what_wrote_it():
     assert readability.construct("      Latency fell by a third") == "text"
 
 
+def test_a_style_name_handed_to_a_macro_is_not_words():
+    assert readability.visible(r"\slidetext[center]{67.2,63,243.57,37.8}{body-serif-white}{own words}") == "own words"
+    assert readability.visible(r"\slidepar[space=2.42]{title-lightyellow}{Item One}") == "Item One"
+
+
 def test_lines_every_frame_repeats_are_what_a_theme_should_say():
     frame = "\\begin{frame}\n  \\includegraphics[width=453.5bp]{figures/master-logo.png}\n  Words %d here\n\\end{frame}\n"
     tex = "\\begin{document}\n" + "".join(frame % k for k in range(4)) + "\\end{document}"

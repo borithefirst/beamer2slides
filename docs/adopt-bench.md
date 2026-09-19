@@ -551,3 +551,13 @@ Left, outside this change:
 - pictures, still `textblock*` + `\includegraphics` (8% of lines);
 - tables (`\adopt...`, 11%);
 - structure (itemize, frametitle, masters and layouts as a theme), which is another change's work.
+
+## Theme and macro layer together (m6-a -> mt-a)
+
+Both merged: 912 slides score as at m6-a on every slide (boxes 0.9728, page 0.9714, pixels 0.9845).
+The theme file and main.tex share one colour naming (`adopt.rename_colours` runs over both).
+The readability proxy no longer counts a style name handed to `\slidetext`/`\slidepar` as words, nor
+`\begin`/`\end` as author vocabulary (an environment swapped for a macro says no less); HUMAN refreshed
+from `ref`. On that scorer: m6-a 0.130 -> mt-a 0.253 (lines 0.09 -> 0.38, numbers 0.05 -> 0.07,
+plumbing 0.04 -> 0.17, bloat 0.33 -> 0.38, author 0.19 -> 0.36, repeat 0.61 -> 0.84).
+Frame body lines now: text 23%, placement 22%, shape 21%, table 12%, picture 7%, plumbing 6%.

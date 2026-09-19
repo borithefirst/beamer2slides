@@ -46,9 +46,13 @@ CS = re.compile(r"\\([A-Za-z@]+|.)")
 NUM = re.compile(r"(?<![A-Za-z0-9])-?\d+(?:\.\d+)?")
 FRAME = re.compile(r"\\begin\{frame\}(.*?)\\end\{frame\}", re.S)
 REPEAT_FRAMES = 3
+# the style a macro is handed (`\slidetext[..]{x,y,w,h}{body-serif-white}{words}`) is a name, not words
+STYLE_ARG = re.compile(r"(\\slide(?:text|par)\b(?:\[[^\]\n]*\])?(?:\{[-\d.,\s]*\})?)\{[\w-]+\}")
+# environments are structure both kinds of source have, and a macro that replaces one says no less
+NEUTRAL = frozenset({"begin", "end"})
 
 # medians over REFERENCE (sources people wrote), `ref` recomputes them
-HUMAN = {"lines": 8.0, "numbers": 0.09, "plumbing": 0.03, "bloat": 1.9, "author": 0.87}
+HUMAN = {"lines": 8.4, "numbers": 0.088, "plumbing": 0.04, "bloat": 1.867, "author": 0.836}
 REFERENCE = ("tests/decks/*.tex", "tests/decks/sync/talk.tex")
 
 CONSTRUCTS = [
@@ -69,8 +73,9 @@ def frames(tex: str) -> list[str]:
 
 
 def visible(body: str) -> str:
-    """The words a reader sees, roughly: commands, options, lengths and punctuation taken out."""
+    """The words a reader sees, roughly: commands, options, lengths, style names and punctuation taken out."""
     s = re.sub(r"(?<!\\)%.*", "", body)
+    s = STYLE_ARG.sub(r"\1", s)
     s = CS.sub(" ", s)
     s = re.sub(r"\[[^\]\n]*\]", " ", s)
     s = NUM.sub(" ", s)
@@ -102,7 +107,7 @@ def measure(tex: str) -> dict:
         return {}
     words = sum(len(visible(f).split()) for f in fs)
     text_chars = sum(len(visible(f)) for f in fs)
-    cmds = Counter(m for f in fs for m in CS.findall(f) if m[:1].isalpha())
+    cmds = Counter(m for f in fs for m in CS.findall(f) if m[:1].isalpha() and m not in NEUTRAL)
     n_cmd = sum(cmds.values())
     author = sum(n for c, n in cmds.items() if c in AUTHOR)
     lines = [ln for f in fs for ln in f.strip("\n").split("\n")]
