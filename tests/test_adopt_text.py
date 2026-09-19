@@ -475,7 +475,7 @@ def test_a_box_whose_base_is_bold_writes_its_regular_words_regular(tmp_path):
     """`runs_latex` only ever wrote \\textbf, so under a bold base the regular words stayed bold."""
     d = deck(box("s_b", para("x", runs=[("Mostly bold words here", {"bold": True}), (" plain", {})])))
     frame = frame_of(source(tmp_path, d))
-    assert "\\bfseries" in frame and "\\textmd{plain}" in frame
+    assert "\\bfseries" in frame and "\\textmd{\\ plain}" in frame, "its space is a regular one too"
 
 
 def test_a_soft_break_anywhere_is_a_line_break_that_compiles(tmp_path):
@@ -655,3 +655,74 @@ def test_a_paragraph_of_two_sizes_is_spaced_line_by_line():
     assert f"height{big[0]:.2f}pt depth{big[1]:.2f}pt\\relax step:" in tex
     # the next paragraph is spaced from the depth TeX recorded, not from a guessed size
     assert f"\\prevdepth={sum(small) - small[0]:.2f}pt" in tex
+
+
+def prose(*paras: dict, scale: float = 1.0) -> dict:
+    return {"kind": "text", "bbox": [0, 0, 300, 200], "box": {"scale": scale, "valign": "top"},
+            "paragraphs": list(paras)}
+
+
+def words(text: str, size: float = 10.0, **run) -> dict:
+    return {"text": text, "size": size, "font": "Calibri", "family": "sans", "bold": False, "italic": False,
+            "color": None, **run}
+
+
+def test_the_gap_between_two_paragraphs_is_the_bigger_of_their_spaces():
+    """ap-bio-stats slide 52: 11 pt below one paragraph and 11 pt above the next stand them 11 pt apart
+    on the thumbnail, not 22."""
+    def gap(below, above):
+        return adopt.text_box_latex(prose({"runs": [words("One")], "slides": {"space_below": below}},
+                                          {"runs": [words("Two")], "slides": {"space_above": above}}),
+                                    adopt.Context(), "")
+    assert gap(11, 11) == gap(11, 0) == gap(0, 11) != gap(0, 0)
+
+
+def test_each_list_item_says_whether_its_side_of_the_gap_collapses():
+    """creandum-board: the first item is NEVER_COLLAPSE with 3 pt below, the next COLLAPSE_LISTS."""
+    def items(mode):
+        bullet = {"text": "●", "size": 10.0}
+        return adopt.text_box_latex(prose(
+            {"runs": [words("One")], "bullet": bullet, "slides": {"space_below": 3, "spacing_mode": mode}},
+            {"runs": [words("Two")], "bullet": bullet, "slides": {"spacing_mode": "COLLAPSE_LISTS"}}),
+            adopt.Context(), "")
+    assert items("NEVER_COLLAPSE") != items("COLLAPSE_LISTS")
+    assert "\\prevdepth=\\dimexpr\\prevdepth+0.00pt" in items("COLLAPSE_LISTS")
+    assert "\\prevdepth=\\dimexpr\\prevdepth-3.00pt" in items("NEVER_COLLAPSE")
+
+
+def test_a_bulleted_line_with_tabs_stands_them_on_the_default_stops():
+    """creandum-board's "DD/MM/YY XX am<TAB><TAB>Other important date" items."""
+    tex = adopt.text_box_latex(prose({"runs": [words("9 am\t\tBoard")], "bullet": {"text": "●", "size": 10.0},
+                                      "slides": {"indent_start": 18, "indent_first": 0}}), adopt.Context(), "")
+    assert tex.count("\\slidestab{36.00pt}") == 2 and "\\global\\slidesx=18.00pt" in tex
+
+
+def test_spaces_are_kept_however_many_and_as_wide_as_their_own_font():
+    """ap-bio-stats' literal "•  " bullets: an Arial run in a Calibri paragraph whose two spaces stand
+    the text off by two Arial spaces - folded into one Calibri space, every item's text came 2 pt short."""
+    ctx = adopt.Context()
+    ctx.font_switches = {"Arial": "\\adoptfontA"}
+    base = {"size": 10.0, "font": "Calibri", "family": "sans", "bold": False, "italic": False, "color": None}
+    tex = adopt.runs_tex([words("•  ", font="Arial"), words("Mathematically")], base, ctx, "\\break ")
+    assert tex == "{\\adoptfontA •\\ \\ }Mathematically"
+    # the same style on both sides of a run boundary: the two spaces are two, and none ends the paragraph
+    tex = adopt.runs_tex([words("a "), words(" b  ", color="#ff0000")], base, ctx, "\\break ")
+    assert tex.startswith("a \\") and tex.endswith("{b}")
+
+
+def test_a_superscript_does_not_raise_its_line_box():
+    """ap-bio-stats slide 4: the strut inside "E = mc²"'s superscript made its line 4 pt taller."""
+    el = prose({"runs": [words("Law ", size=20.0), words("E = mc"), words("2", script="super")], "slides": {}})
+    tex = adopt.text_box_latex(el, adopt.Context(), "")
+    sup = tex[tex.index("\\textsuperscript"):]
+    assert "\\vrule" not in sup.split("}")[0]
+    assert re.search(r"\\vrule width0pt height[\d.]+pt depth[\d.]+pt\\relax \\textsuperscript\{2\}", tex)
+
+
+def test_deck_ir_keeps_a_run_weight_other_than_regular_and_bold():
+    d = deck(box("s_w", para("x", runs=[("Semi", {"fontFamily": "Open Sans", "weightedFontFamily":
+                                                  {"fontFamily": "Open Sans", "weight": 600}}),
+                                         (" plain", {"fontFamily": "Open Sans"})])))
+    runs = text_of(deck_ir(d, foreign=True), "s_w")["paragraphs"][0]["runs"]
+    assert [r.get("weight") for r in runs] == [600, None]
+

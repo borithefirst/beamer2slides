@@ -624,6 +624,16 @@ of those bold and some not with identical API data (jruby-ja's titles bold, draw
 (`deck_ir.thumbnail_weights`, `stroke_em` > `BOLD_STROKE_EM` 0.10 em). hebrew-lesson 0.734 -> 0.879,
 jruby-ja 0.756 -> 0.796, sc-dark-modern 0.827 -> 0.831. jruby-ja's rest: mixed kana/Latin lines set
 1-2% wider, Tahoma Bold ~2.5% wider than Slides'.
+Text spacing (`ca-base` = bc373b9 -> `ca-final2`, same day; creandum-board 0.867 -> 0.946, ap-bio-stats
+0.925 -> 0.951 with the older weight and picture mechanisms): the gap between two paragraphs is the
+bigger of spaceBelow and the next spaceAbove, not their sum (ap-bio-stats slide 52 0.47 -> 0.90), per
+side for list items; spaces at a run's edges are kept however many and set in the run's own font
+inside its style (ap-bio's literal "•  " Arial bullets in Calibri text, slide 36 0.56 -> 0.94); a
+superscript's strut stands outside the script, or it raised its line box; a middle-aligned table cell
+drops by its own line box (`\adoptdrop`) and a one-word cell wider than its insets stays on its line;
+tabs in bulleted paragraphs. Tried and dropped: making the space where two faces meet the wider of
+the two (it read jruby-ja's bold title, which the IR calls regular, as a Courier space, and wrapped
+cs161-tls' `google.com` line).
 
 Opt-in suite (real Google Slides, ~95 s): `python -m pytest -m slides` (the default run deselects
 the `slides` marker, pyproject.toml). It converts the stress decks (19–22, 25, 13, demo) 3 at a

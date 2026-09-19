@@ -232,7 +232,7 @@ def test_no_border_is_drawn_inside_a_merged_cell(tmp_path):
 
 def test_cells_sit_where_their_vertical_alignment_says(tmp_path):
     nodes = [l for l in table_source(source(tmp_path, table())).splitlines() if "\\node[" in l]
-    anchors = [l.split("anchor=")[1].split("]")[0] for l in nodes]
+    anchors = [l.split("anchor=")[1].split("]")[0].split(",")[0] for l in nodes]
     assert anchors.count("west") == 1 and anchors.count("south west") == 1
     assert anchors.count("north west") == 4
 
@@ -281,3 +281,22 @@ def test_a_cell_is_set_again_without_insets_when_its_rows_are_too_short(tmp_path
     assert f"{{{-7.2 / SCALE:.2f}pt}}" in header
     right = [l for l in t.splitlines() if "\\adoptcell{" in l and f"{{{-2 * 7.2 / SCALE:.2f}pt}}" in l]
     assert len(right) == 3, "the numbers are right-aligned"
+
+
+def test_a_one_word_cell_too_wide_for_its_insets_stays_on_its_line(tmp_path):
+    """creandum-board's P&L: "(1,234)" in a narrow column is one word Slides never breaks - wider than
+    the room inside the insets, it takes the cell's whole width, aligned as it says."""
+    t = table_source(source(tmp_path, table()))
+    ten = next(l for l in t.splitlines() if "\\hbox to\\linewidth" in l and "{10}" in l)
+    assert "\\ifdim\\wd0>\\linewidth" in ten and "\\hss\\box0\\fi" in ten, "right-aligned when it fits"
+    assert f"\\hbox to\\dimexpr\\linewidth+{2 * 7.2 / SCALE:.2f}pt{{\\hss\\box0}}" in ten
+
+
+def test_a_middle_aligned_cell_drops_by_its_own_line_box_and_no_other_does(tmp_path):
+    """Slides centres a cell's line box, whose ascent is 0.968 of 1.2 em, where TeX's strut is 0.7 of
+    1.0: creandum-board's middle cells stood 0.125 em high. Top and bottom ones are placed right."""
+    text = source(tmp_path, table())
+    assert "\\newcommand\\adoptdrop" in text
+    nodes = [l for l in table_source(text).splitlines() if "\\node[" in l]
+    dropped = [l for l in nodes if "yshift=-\\adoptdrop" in l]
+    assert len(dropped) == 1 and "anchor=west" in dropped[0]

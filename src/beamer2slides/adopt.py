@@ -749,13 +749,31 @@ def run_tex(r: dict, base: dict, text: str, ctx: Context) -> str:
     core = text_escape(text.strip(" "))
     if not core:
         return text_escape(text)
+    # the spaces around the styled core are Slides' too, however many: ap-bio-stats' literal "•  "
+    # bullets stand their text two Arial spaces off, where one TeX space folded them into one
+    spaces = (lambda n: " " + "\\ " * (n - 1) if n else "")
     struts = getattr(ctx, "line_struts", None)
-    if struts is not None:
+    outer = ""
+    if struts is not None and r.get("script"):
+        # a raised strut would make its line as much taller: ap-bio-stats' "E = mc²" line stood 4 pt low
+        a, b = line_box(r.get("size") or base.get("size") or 10.0, struts)
+        outer = f"\\vrule width0pt height{a:.2f}pt depth{b:.2f}pt\\relax "
+    elif struts is not None:
         # a paragraph of several sizes: every word carries its own line box (text_box_latex)
         a, b = line_box(r.get("size") or base.get("size") or 10.0, struts)
         strut = f"\\vrule width0pt height{a:.2f}pt depth{b:.2f}pt\\relax "
         core = strut + (core if r.get("underline") or r.get("strike") else core.replace(" ", " " + strut))
     fam, bfam = r.get("family") or "sans", base.get("family") or "sans"
+    sr, sb = series(r, ctx), series(base, ctx)
+    if (lead or trail) and ((r.get("font") or "") != (base.get("font") or "") or fam != bfam
+                            or sr != sb or bool(r.get("italic")) != bool(base.get("italic"))
+                            or r.get("smallcaps") or r.get("script")
+                            or abs((r.get("size") or 0) - (base.get("size") or 0)) > 0.01):
+        # and they are as wide as the run's own font makes them: that bullet run is Arial in a Calibri
+        # paragraph, and its spaces set in Carlito put every item's text 2 pt short (slides 3-7, 24 and
+        # 35 gain too; only slide 1's "adopted in part by " before 6.3 pt text looks narrower)
+        core = "\\ " * lead + core + "\\ " * trail
+        lead = trail = 0
     if (r.get("font") or "") != (base.get("font") or "") and \
             (font_switch(r.get("font"), ctx) or font_switch(base.get("font"), ctx)):
         # a run in another of the deck's typefaces: its own switch, or the kind's document face
@@ -764,7 +782,6 @@ def run_tex(r: dict, base: dict, text: str, ctx: Context) -> str:
         core = f"{{{cmd} {core}}}"
     elif fam != bfam:
         core = {"mono": "\\texttt", "serif": "\\textrm", "sans": "\\textsf"}[fam if fam in ("mono", "serif") else "sans"] + f"{{{core}}}"
-    sr, sb = series(r, ctx), series(base, ctx)
     if sr != sb:
         if sr in ("b", "m") and sb in ("b", "m"):
             core = ("\\textbf" if sr == "b" else "\\textmd") + f"{{{core}}}"
@@ -788,7 +805,7 @@ def run_tex(r: dict, base: dict, text: str, ctx: Context) -> str:
     if r.get("link") and not str(r["link"]).startswith("#"):
         url = str(r["link"]).replace("\\", "/").replace("#", "\\#").replace("%", "\\%")
         core = f"\\href{{{url}}}{{{core}}}"
-    return " " * lead + core + " " * trail
+    return spaces(lead) + outer + core + spaces(trail)
 
 
 def paragraph_base(p: dict) -> dict:
@@ -819,19 +836,42 @@ def runs_tex(runs: list[dict], base: dict, ctx: Context, brk: str) -> str:
     a bold word, at the paragraph's start - since the paragraph is already in horizontal mode
     (`\\noindent`) and the break is written between the styled pieces, never inside one."""
     out = []
+    runs = list(runs)
+    while runs and not runs[-1].get("hole") and not runs[-1]["text"].strip(" "):
+        runs.pop()                          # a paragraph's trailing spaces show nowhere
+    if runs and not runs[-1].get("hole"):
+        runs[-1] = {**runs[-1], "text": runs[-1]["text"].rstrip(" ")}
+    items: list[list] = []
     for r in runs:
         if r.get("hole"):
-            out.append(f"\\hskip{r['hole']:.2f}pt ")
+            items.append(["hole", r])
             continue
         for k, piece in enumerate(r["text"].split("\x0b")):
             if k:
-                out.append(brk)
+                items.append(["brk"])
             if piece:
-                out.append(run_tex(r, base, piece, ctx))
+                items.append(["text", r, piece])
+    for item in items:
+        if item[0] == "hole":
+            out.append(f"\\hskip{item[1]['hole']:.2f}pt ")
+        elif item[0] == "brk":
+            out.append(brk)
+        else:
+            tex = run_tex(item[1], base, item[2], ctx)
+            if tex.startswith(" ") and out and out[-1].endswith(" ") and out[-1] != brk \
+                    and not out[-1].endswith("\\ "):
+                tex = "\\" + tex            # "a " + " b": two spaces, which TeX would fold into one
+            out.append(tex)
     text = "".join(out)
     # TeX drops the spaces a paragraph opens with; Slides draws them
     lead = len(text) - len(text.lstrip(" "))
-    return "\\ " * lead + text[lead:].rstrip(" ")
+    text = text[lead:]
+    while True:                             # nor does a paragraph end on a space, a kept one included
+        text = text.rstrip(" ")
+        if not (text.endswith("\\") and not text.endswith("\\\\")):
+            break
+        text = text[:-1]
+    return "\\ " * lead + text
 
 
 # Tab stops. The API reports none, and Slides' default ones stand every half inch from the text's left
@@ -958,9 +998,15 @@ def text_box_latex(el: dict, ctx: Context, ind: str) -> str:
                 head.append(f"\\vskip{sl['space_above'] / scale:.2f}pt")
         else:
             psl, pz, pr = prev.get("slides") or {}, para_size(prev), (prev.get("slides") or {}).get("line_spacing") or 1.0
-            gap = ((psl.get("space_below") or 0) + (sl.get("space_above") or 0)) / scale
-            if prev.get("bullet") and p.get("bullet") and sl.get("spacing_mode") != "NEVER_COLLAPSE":
-                gap = 0.0
+            # between two list items each paragraph's own spacingMode says whether its side of the gap
+            # collapses: creandum-board's first item (NEVER_COLLAPSE, 3 pt below) keeps its 3 pt above
+            # the next one (COLLAPSE_LISTS), measured 3.6 pt lower on the thumbnail than with no gap
+            listed = bool(prev.get("bullet") and p.get("bullet"))
+            below = 0 if listed and psl.get("spacing_mode") != "NEVER_COLLAPSE" else psl.get("space_below") or 0
+            above_ = 0 if listed and sl.get("spacing_mode") != "NEVER_COLLAPSE" else sl.get("space_above") or 0
+            # and the two sides overlap, the bigger one wins: ap-bio-stats' slide 52 (11 pt below, 11 pt
+            # above) stands its second paragraph 11 pt apart on the thumbnail, not 22
+            gap = max(below, above_) / scale
             if mixed_sizes(prev):
                 # its last line's depth is its own words' (their struts), which TeX has in \prevdepth
                 head.append(f"\\prevdepth={pitch - gap - above:.2f}pt\\relax")
@@ -1007,9 +1053,13 @@ def text_box_latex(el: dict, ctx: Context, ind: str) -> str:
                 seen = True
             body = (f"\\hbox to{left - first:.2f}pt{{{runs_tex(label, base, ctx, brk)}\\hss}}"
                     + runs_tex(rest, base, ctx, brk))
-        elif "\t" in "".join(x["text"] for x in p["runs"]) and not p.get("bullet") and not rtl \
-                and align == "left" and not blank:
-            body = tabbed_tex(p["runs"], base, ctx, brk, first, TAB_STOP / scale) or body
+        if "\t" in "".join(x["text"] for x in p["runs"]) and not rtl and align == "left" and not blank \
+                and (glyph or not p.get("bullet") and first >= left):
+            # a bulleted line's text starts at indentStart (or where the bullet pushed it), and its tabs
+            # count from the text edge like any other: creandum-board's "DD/MM/YY XX am<TAB><TAB>Other
+            # important date" items stand their second column at 180 pt, not one space after "am"
+            pen = max(left, first) if glyph else first
+            body = tabbed_tex(p["runs"], base, ctx, brk, pen, TAB_STOP / scale) or body
         ctx.line_struts = None
         # a right-to-left paragraph is set in its language (scripts.py: babel's bidi, shaping)
         lang_in, lang_out = "", ""
@@ -1170,6 +1220,15 @@ def shape_block(el: dict, ctx: Context, ind: str) -> str:
 # what Slides laid out, so a cell whose text would need more than its rows give it is set again
 # without the insets, and kept that way when that takes fewer lines.
 #
+# A line stands in its cell as in a Slides line box, 0.968 em of its 1.2 above the baseline (emit's
+# ASCENT_EM), not as in LaTeX's 70/30 strut: a middle-aligned cell's baseline is 0.368 em under the
+# middle, where the strut put creandum-board's P&L 1 pt high in every row. So the text is set with the
+# strut, which decides how rows grow (a Slides-shaped strut of its own grew comps-analysis' tight rows
+# under their underlined headings), and a middle-aligned cell's is drawn 10.67% of the strut lower
+# (`\adoptdrop`), where a Slides line box puts it. Top and bottom ones stay: their place depends on the
+# vertical inset, which is inferred (`deck_ir.cell_pad`), and comps-analysis' top-aligned cells sat
+# within 0.3 pt with the strut and 0.8 pt low with the drop.
+#
 # Slides never hyphenates, so neither does a cell. (It does break a word between two letters when
 # the word is wider than the cell; TeX lets it stick out instead, because a penalty between every
 # two letters, tried, also split the numbers of creandum-board's narrow columns where Slides keeps
@@ -1177,11 +1236,13 @@ def shape_block(el: dict, ctx: Context, ind: str) -> str:
 TABLE_MACROS = r"""\makeatletter
 \newcommand\adoptrow[2]{\expandafter\edef\csname adopt@row@#1\endcsname{\the\dimexpr#2\relax}}
 \newcommand\adoptsetcell[2]{\vbox{\hsize=#1\relax\linewidth\hsize\parindent\z@
-    \hyphenpenalty\@M\exhyphenpenalty\@M\everypar{\strut}#2\ifhmode\strut\fi}}
+    \hyphenpenalty\@M\exhyphenpenalty\@M\everypar{\strut}#2\ifhmode\strut\fi
+    \xdef\adopt@lastdrop{\the\dimexpr(\ht\strutbox+\dp\strutbox)*1067/10000\relax}}}
 \newcommand\adoptcell[8]{% box, first row, last row, text width, vertical inset (both),
   % width with no insets, its shift, content
   \expandafter\ifx\csname adopt@box@#1\endcsname\relax\expandafter\newbox\csname adopt@box@#1\endcsname\fi
   \global\setbox\csname adopt@box@#1\endcsname\adoptsetcell{#4}{#8}%
+  \expandafter\xdef\csname adopt@drop@#1\endcsname{\adopt@lastdrop}%
   \dimen@\z@\@tempcnta#2\relax
   \loop\advance\dimen@\csname adopt@row@\the\@tempcnta\endcsname\relax
   \ifnum\@tempcnta<#3\relax\advance\@tempcnta\@ne\repeat
@@ -1203,6 +1264,7 @@ TABLE_MACROS = r"""\makeatletter
     \advance\dimen@\csname adopt@row@\the\@tempcnta\endcsname\relax\advance\@tempcnta\@ne\repeat}
 \newcommand\adopty[1]{\csname adopt@y@#1\endcsname}
 \newcommand\adoptbox[1]{\copy\csname adopt@box@#1\endcsname}
+\newcommand\adoptdrop[1]{\csname adopt@drop@#1\endcsname}
 \makeatother"""
 
 DASHES = {"DOT": "dotted", "DASH": "dashed", "DASH_DOT": "dash dot", "LONG_DASH": "dashed",
@@ -1286,6 +1348,21 @@ def table_block(el: dict, ctx: Context, ind: str) -> str:
         shift = {"center": -padx, "right": -2 * padx}.get(c["paragraphs"][0].get("align"), 0.0)
         base = element_style(c)
         body = paragraphs_latex(c["paragraphs"], lambda _p, b=base: b, ctx, ind + "    ")
+        one = c["paragraphs"][0]
+        words = "".join(r["text"] for r in one["runs"]).strip()
+        if len(c["paragraphs"]) == 1 and not one.get("bullet") and not one.get("direction") \
+                and words and not any(ch.isspace() for ch in words):
+            # One word wider than the room the insets leave is set with no insets at all, in its
+            # alignment: creandum-board's P&L puts 25 pt numbers into 33 pt columns (18.6 pt inside
+            # the insets); the thumbnail shows the centred ones centred on the cell and a left-aligned
+            # one starting 1 pt from the cell's edge, where a paragraph left them all sticking out to
+            # the right from the left inset, 4 pt off in every one of its 200 cells.
+            from .inverse import runs_latex
+            lf, rf = {"center": ("\\hss", "\\hss"), "right": ("\\hss", "")}.get(one.get("align"), ("", "\\hss"))
+            word = runs_latex(one["runs"], base, ctx).strip()
+            body = (f"{ind}    \\noindent\\hbox to\\linewidth{{\\setbox0\\hbox{{{word}}}"
+                    f"\\ifdim\\wd0>\\linewidth\\kern-{padx:.2f}pt\\hbox to\\dimexpr\\linewidth+{2 * padx:.2f}pt"
+                    f"{{{lf}\\box0{rf}}}\\kern-{padx:.2f}pt\\else{lf}\\box0{rf}\\fi}}")
         boxes[k] = len(boxes) + 1
         lines.append(f"{ind}  \\adoptcell{{{boxes[k]}}}{{{c['row']}}}{{{last_row}}}{{{width:.2f}pt}}{{{pady:.2f}pt}}"
                      f"{{{span:.2f}pt}}{{{shift:.2f}pt}}{{%")
@@ -1323,7 +1400,8 @@ def table_block(el: dict, ctx: Context, ind: str) -> str:
             where, anchor = f"({x:.1f}pt,{{-\\adopty{{{r1}}}+{pady:.2f}pt}})", "south west"
         else:
             where, anchor = f"({x:.1f}pt,{{-\\adopty{{{c['row']}}}-{pady:.2f}pt}})", "north west"
-        lines.append(f"{ind}    \\node[anchor={anchor}] at {where} {{\\adoptbox{{{boxes[k]}}}}};")
+        drop = f",yshift=-\\adoptdrop{{{boxes[k]}}}" if c.get("valign") == "middle" else ""
+        lines.append(f"{ind}    \\node[anchor={anchor}{drop}] at {where} {{\\adoptbox{{{boxes[k]}}}}};")
     lines.append(f"{ind}  \\end{{tikzpicture}}")
     lines.append(f"{ind}\\end{{textblock*}}")
     return "\n".join(lines)
