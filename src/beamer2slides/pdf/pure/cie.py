@@ -2,11 +2,9 @@
 then XYZ to sRGB under the space's white point through PDFium's own 3x3 inverses), Lab (its
 piecewise curve and fixed D65 matrix) and the sRGB companding both end in (RGB_Conversion: a
 1024-step table, not a formula). Every operation is float32, in the order the C++ writes it; powf
-is the C runtime's (ucrtbase, the one PDFium links on Windows)."""
+is the C runtime's (`crt.py`: the one PDFium links on each platform)."""
 
 from __future__ import annotations
-
-import ctypes
 
 from .syntax import float32 as F
 
@@ -48,13 +46,8 @@ _powf_fn = None
 def powf(x: float, y: float) -> float:
     global _powf_fn
     if _powf_fn is None:
-        try:
-            fn = ctypes.CDLL("ucrtbase").powf
-            fn.restype, fn.argtypes = ctypes.c_float, [ctypes.c_float, ctypes.c_float]
-            _powf_fn = fn
-        except (OSError, AttributeError):     # not Windows: numpy's float32 pow stands in
-            import numpy as np
-            _powf_fn = lambda a, b: float(np.power(np.float32(a), np.float32(b)))  # noqa: E731
+        from .crt import float_fn
+        _powf_fn = float_fn("powf", 2)
     return float(_powf_fn(x, y))
 
 

@@ -1570,7 +1570,10 @@ def test_text_torture_pages_extract_as_pdfium_to_the_last_bit():
         pytest.skip("no fonts to harvest (build the test decks)")
     apart = []
     for seed in [0, 7, 20, 21, 28, 45, 51, *range(100, 130)]:
-        content, fonts, _, _ = case(seed, "any")
+        try:
+            content, fonts, _, _ = case(seed, "any")
+        except SystemExit as e:     # TeX Live's decks have no Type 3 fonts (cm-super is there)
+            pytest.skip(str(e))
         data = pdf_bytes(content, fonts)
         ref, pure = pdf.resolve("pdfium").open(data), pdf.resolve("pure").open(data)
         try:
