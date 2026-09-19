@@ -45,16 +45,23 @@ a per-slide background picture.
   so do soft masks, transparency groups and every blend mode (`pure/render_transparency.py`, oracle
   `tools/render_torture_transparency.py`, 6,000 seeds; GetBackdrop, CheckClip, float32 stroke boxes);
   axial/radial shadings and shading patterns are ported too (`pure/render_shading.py`, oracle
-  `tools/render_torture_shading.py`), and so is text in embedded Type 1 and CFF fonts (FreeType's CFF
+  `tools/render_torture_shading.py`), so are function-based and mesh shadings (types 1, 4-7:
+  `pure/render_mesh.py`, DrawGouraud and the Coons/tensor PatchDrawer with full-cover fills),
+  CalRGB/CalGray/Lab/Indexed (`pure/cie.py`, PDFium's matrices and sRGB table) and transfer
+  functions (`pure/transfer.py`: /TR, /TR2 and a soft mask's /TR, CreateTransferFunc's quirks
+  included; torture `--mode cie|func|mesh|transfer`, 4,500 seeds, none apart), and so is text in embedded Type 1 and CFF fonts (FreeType's CFF
   engine and smooth rasteriser ported, `pure/ftoutline.py`, `pure/ftgrays.py`, `pure/render_text.py`,
-  oracle `tools/render_torture_text.py`), and so are images (CPDF_DIB, Flate/RunLength/DCT with CMYK
+  oracle `tools/render_torture_text.py`), with text clips (Tr 4-7 clip what follows, `--simple 3`)
+  and vertical writing (Identity-V / /WMode, /W2 /DW2: origins, boxes and advances, `--simple 4`,
+  `content.item_origin`), and so are images (CPDF_DIB, Flate/RunLength/DCT with CMYK
   JPEGs as libjpeg's raw bytes, stretch engine, CFX_ImageTransformer for any angle, own masks;
   `pure/decode_image.py`, `pure/render_image.py`, oracle `tools/render_torture_image.py` levels 0-6,
   17,000 seeds exact; the AGG driver drops an overprinted CMYK image's Darken, so overprint changes
   nothing). Whole pages: 229 of the test decks' 241 render byte for byte
   as PDFium's, none apart (`test_whole_beamer_pages_render_as_pdfium_renders_them`);
-  a page with anything not ported yet (Type 3 or TrueType or non-embedded text, JPX/JBIG2/CCITT or
-  ICC-profiled images, CalRGB/Lab/Indexed shadings, transfer functions…) raises PdfError, so
+  a page with anything not ported yet (Type 3 or TrueType text, system-font substitutes,
+  JPX/JBIG2/CCITT or ICC-profiled images, tiling patterns, ICCBased shadings, transfer functions on
+  images…) raises PdfError, so
   `renders = False`: `classify` runs on it and `convert` doesn't yet. Every call equals PDFium's on 4,373 pages
   (chars and object boxes to the last bit on the test decks),
   and deck.json is identical on all 48 test decks; extract is 7× slower. `tests/test_pure_pdf.py`.
@@ -67,7 +74,11 @@ a per-slide background picture.
   blended, `pure/type1.py`) loaded from a user cache that `python -m beamer2slides.pdf.pure.foxit`
   fills from PDFium's sources with pinned SHA-256 (no binaries in the tree); without the cache, or
   outside Windows, the older rules stay and `test_substituted_fonts_are_measured_with_pdfiums_face`
-  skips. Substituted text measures as PDFium's but is not drawn yet.
+  skips. Substituted text in a Foxit face draws as PDFium's (`render_text._SubstFace`: Symbol and
+  ZapfDingbats CFF; FoxitSansMM/SerifMM blended per glyph to weight and /Widths width - process-wide
+  face state, as in PDFium - skewed by the italic angle; GetCharPosList's spacing heuristic; oracle
+  `tools/render_torture_subst.py`, made-up non-embedded fonts, 6,000 seeds exact); GDI's TrueType
+  substitutes (base 14 and installed names on Windows) are refused until TrueType glyphs draw.
 - No public links: pictures reach Slides inside the imported .pptx, never as shared Drive
   files (they break in protected Workspace domains).
 - **Fidelity is measured on Google's own renderer**, not a local preview: render the PDF page

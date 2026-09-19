@@ -123,7 +123,9 @@ class Face:
         face.subrs = t1.subrs
         face.gsubrs = []
         face.local_bias = face.global_bias = 0
-        face.weight_vector = t1.weight_vector
+        face.weight_vector = list(t1.weight_vector) if t1.weight_vector is not None else None
+        face.default_weight_vector = list(face.weight_vector) if face.weight_vector is not None else None
+        face.design_map = getattr(t1, "design_map", [])
         face.num_designs = t1.num_designs
         face.len_buildchar = t1.len_buildchar
         face.buildchar = [0] * t1.len_buildchar          # face->buildchar: one array for every glyph load
@@ -204,30 +206,128 @@ class Face:
             raise GlyphError(f"seac component {name}")
         return data
 
+    @classmethod
+    def from_cff(cls, data: bytes, order: list[str]) -> "Face":
+        """A face over a bare CFF program: PDFium's built-in standard faces (Foxit*.cff)."""
+        face = cls.__new__(cls)
+        face.order = order
+        face.local = None
+        face._load_cff(data)
+        face._init_caches()
+        return face
+
+    # -- multiple masters (t1load.c): the blend is state of the face, shared by every font drawn with it
+    def blend_key(self):
+        return None if self.weight_vector is None else tuple(self.weight_vector)
+
+    def mm_var(self) -> list[tuple[int, int, int]] | None:
+        """T1_Get_MM_Var: per axis (minimum, maximum, default), 16.16; None without a blend."""
+        if self.weight_vector is None or not self.design_map:
+            return None
+        w = self.default_weight_vector
+        n = len(self.design_map)
+        if n == 1:
+            coords = [w[1]]
+        elif n == 2:
+            coords = [w[3] + w[1], w[3] + w[2]]
+        else:
+            raise Unported(f"multiple master font with {n} axes")
+        out = []
+        for (designs, blends), ncv in zip(self.design_map, coords):
+            out.append((int_to_fixed(designs[0]), int_to_fixed(designs[-1]), _axis_unmap(designs, blends, ncv)))
+        return out
+
+    def set_mm_design(self, coords: list[int]) -> None:
+        """FT_Set_MM_Design_Coordinates = T1_Set_MM_Design, then t1_set_mm_blend."""
+        blends_out = []
+        for n, (designs, blends) in enumerate(self.design_map):
+            design = coords[n] if n < len(coords) else _cdiv(designs[-1] - designs[0], 2)
+            before = after = -1
+            the_blend = None
+            for p, p_design in enumerate(designs):
+                if design == p_design:
+                    the_blend = blends[p]
+                    break
+                if design < p_design:
+                    after = p
+                    break
+                before = p
+            if the_blend is None:
+                if before < 0:
+                    the_blend = blends[0]
+                elif after < 0:
+                    the_blend = blends[-1]
+                else:
+                    the_blend = muldiv(design - designs[before], blends[after] - blends[before],
+                                       designs[after] - designs[before])
+            blends_out.append(the_blend)
+        num_axis = len(self.design_map)
+        for n in range(self.num_designs):
+            result = 0x10000
+            for m in range(num_axis):
+                factor = blends_out[m]
+                if not n & (1 << m):
+                    factor = 0x10000 - factor
+                if factor <= 0:
+                    result = 0
+                    break
+                if factor >= 0x10000:
+                    continue
+                result = mulfix(result, factor)
+            self.weight_vector[n] = result
+
+    def adjust_variation(self, glyph: int, dest_width: int, weight: int) -> None:
+        """CFX_Face::AdjustVariationParams: the Weight axis at `weight`, the Width axis where the
+        glyph's advance comes closest to `dest_width` (linear between the axis ends)."""
+        var = self.mm_var()
+        if var is None:
+            return
+        c0 = _cdiv(var[0][2], 65536) if weight == 0 else weight
+        if dest_width == 0:
+            c1 = _cdiv(var[1][2], 65536)
+        else:
+            min_param, max_param = _cdiv(var[1][0], 65536), _cdiv(var[1][1], 65536)
+            self.set_mm_design([c0, min_param])
+            min_width = _cdiv(self._horiadvance(glyph) * 1000, self.upem)
+            self.set_mm_design([c0, max_param])
+            max_width = _cdiv(self._horiadvance(glyph) * 1000, self.upem)
+            if max_width == min_width:
+                return
+            c1 = i32(min_param + _cdiv(i32((max_param - min_param) * (dest_width - min_width)),
+                                       max_width - min_width))
+        self.set_mm_design([c0, c1])
+
+    def _horiadvance(self, glyph: int) -> int:
+        a = self.advance(glyph)
+        if a is None:
+            raise Unported("a multiple master glyph that fails to load")   # metrics of the glyph before
+        return a
+
     # -- the three products
     def units(self, glyph: int):
         """The unscaled outline (whole font units, psobjs' builder) or None when the load fails."""
-        if glyph not in self._units:
+        key = (glyph, self.blend_key())
+        if key not in self._units:
             dec = Decoder(self)
             try:
-                self._units[glyph] = dec.load(self.charstring(glyph))
-                self._advances[glyph] = dec.advance_x
+                self._units[key] = dec.load(self.charstring(glyph))
+                self._advances[key] = dec.advance_x
             except GlyphError:
-                self._units[glyph] = None
-        return self._units[glyph]
+                self._units[key] = None
+        return self._units[key]
 
     def advance(self, glyph: int) -> int | None:
         """The glyph's unscaled horiAdvance, FIXED_TO_INT(builder.advance.x) (t1gload), or None when
         the load fails."""
         if self.units(glyph) is None:
             return None
-        a = self._advances[glyph]
+        a = self._advances[(glyph, self.blend_key())]
         return i32((a + 0x8000 - (1 if a < 0 else 0)) & ~0xFFFF) >> 16    # FT_RoundFix, then >> 16
 
     def outline(self, glyph: int, matrix: tuple[int, int, int, int]):
         """FT_Load_Glyph under FT_Set_Transform(matrix = xx, xy, yx, yy): 26.6 contours
         [(points, tags)] as ftgrays takes them, or None."""
-        key = (glyph, matrix)
+        key = (glyph, matrix, self.blend_key())
         if key in self._outlines:
             return self._outlines[key]
         units = self.units(glyph)
@@ -247,14 +347,169 @@ class Face:
         self._outlines[key] = out
         return out
 
-    def path(self, glyph: int):
-        """CFX_Face::LoadGlyphPath: [(x, y, kind, close)] in em units (float32), or None."""
-        if glyph in self._paths:
-            return self._paths[glyph]
-        out = self.outline(glyph, (0x10000, 0, 0, 0x10000))
+    def path(self, glyph: int, matrix: tuple[int, int, int, int] = (0x10000, 0, 0, 0x10000)):
+        """CFX_Face::LoadGlyphPath: [(x, y, kind, close)] in em units (float32), or None. `matrix` is
+        the FT_Set_Transform a substitute's skew makes."""
+        key = (glyph, matrix, self.blend_key())
+        if key in self._paths:
+            return self._paths[key]
+        out = self.outline(glyph, matrix)
         path = None if out is None else _glyph_path(out)
-        self._paths[glyph] = path
+        self._paths[key] = path
         return path
+
+
+def _cdiv(a: int, b: int) -> int:
+    q = abs(a) // abs(b)
+    return q if (a >= 0) == (b >= 0) else -q
+
+
+# --------------------------------------------------------------- FT_Outline_Embolden (ftoutln.c)
+# Synthetic bold, which PDFium applies to a system substitute heavier than its face. Ported line by
+# line from FreeType, but PDFium never reaches it with the Foxit faces (their weight goes into the
+# multiple master blend instead), so no oracle has checked it yet.
+
+
+def _u32(v: int) -> int:
+    return v & MASK32
+
+
+def _msb(v: int) -> int:
+    return v.bit_length() - 1
+
+
+def vector_normlen(x_: int, y_: int) -> tuple[int, int, int]:
+    """FT_Vector_NormLen: (unit x, unit y in 16.16, length)."""
+    x_, y_ = i32(x_), i32(y_)
+    sx = sy = 1
+    x, y = x_, y_
+    if x < 0:
+        x, sx = _u32(-x), -1
+    if y < 0:
+        y, sy = _u32(-y), -1
+    if x == 0:
+        return x_, (sy * 0x10000 if y > 0 else y_), y
+    if y == 0:
+        return sx * 0x10000, y_, x
+    ln = x + (y >> 1) if x > y else y + (x >> 1)
+    ln = _u32(ln)
+    shift = 31 - _msb(ln)
+    shift -= 15 + (1 if ln >= (0xAAAAAAAA >> shift) else 0)
+    if shift > 0:
+        x, y = _u32(x << shift), _u32(y << shift)
+        ln = _u32(x + (y >> 1) if x > y else y + (x >> 1))
+    else:
+        x, y, ln = x >> -shift, y >> -shift, ln >> -shift
+    b = i32(0x10000 - i32(ln))
+    xs, ys = i32(x), i32(y)
+    while True:
+        u = _u32(xs + (i32(xs * b) >> 16))
+        v = _u32(ys + (i32(ys * b) >> 16))
+        z = _cdiv(-i32(u * u + v * v), 0x200)
+        z = _cdiv(i32(z * ((0x10000 + b) >> 8)), 0x10000)
+        b = i32(b + z)
+        if z <= 0:
+            break
+    vx = -u if sx < 0 else u
+    vy = -v if sy < 0 else v
+    ln = _u32(0x10000 + _cdiv(i32(u * x + v * y), 0x10000))
+    ln = (ln + (1 << (shift - 1))) >> shift if shift > 0 else _u32(ln << -shift)
+    return vx, vy, ln
+
+
+def _orientation(outline) -> int:
+    """FT_Outline_Get_Orientation (the FT_INT64 shoelace): 1 TrueType, 2 PostScript, 0 none."""
+    if not any(pts for pts, _ in outline):
+        return 1
+    area = 0
+    for pts, _tags in outline:
+        if not pts:
+            continue
+        px, py = pts[-1]
+        for cx, cy in pts:
+            area += (cy - py) * (cx + px)
+            px, py = cx, cy
+    return 2 if area > 0 else 1 if area < 0 else 0
+
+
+def embolden(outline, strength: int):
+    """FT_Outline_Embolden(outline, strength) on 26.6 contours [(points, tags)]: a new outline."""
+    xs = ys = _cdiv(strength, 2)
+    if xs == 0 and ys == 0:
+        return outline
+    orient = _orientation(outline)
+    if orient == 0:
+        return outline                      # Invalid_Argument, which PDFium ignores: left as it was
+    out = []
+    for pts, tags in outline:
+        points = [list(p) for p in pts]
+        first, last = 0, len(points) - 1
+        l_in = 0
+        in_x = in_y = anchor_x = anchor_y = 0
+        l_anchor = 0
+        i, j, k = last, first, -1
+        while j != i and i != k:
+            if j != k:
+                ox, oy, l_out = vector_normlen(points[j][0] - points[i][0], points[j][1] - points[i][1])
+                if l_out == 0:
+                    j = j + 1 if j < last else first
+                    continue
+            else:
+                ox, oy, l_out = anchor_x, anchor_y, l_anchor
+            if l_in != 0:
+                if k < 0:
+                    k, anchor_x, anchor_y, l_anchor = i, in_x, in_y, l_in
+                d = mulfix(in_x, ox) + mulfix(in_y, oy)
+                if d > -0xF000:
+                    d = d + 0x10000
+                    shx, shy = in_y + oy, in_x + ox
+                    if orient == 1:
+                        shx = -shx
+                    else:
+                        shy = -shy
+                    q = mulfix(ox, in_y) - mulfix(oy, in_x)
+                    if orient == 1:
+                        q = -q
+                    lm = min(l_in, l_out)
+                    shx = muldiv(shx, xs, d) if mulfix(xs, q) <= mulfix(lm, d) else muldiv(shx, lm, q)
+                    shy = muldiv(shy, ys, d) if mulfix(ys, q) <= mulfix(lm, d) else muldiv(shy, lm, q)
+                else:
+                    shx = shy = 0
+                while i != j:
+                    points[i][0] = i32(points[i][0] + xs + shx)
+                    points[i][1] = i32(points[i][1] + ys + shy)
+                    i = i + 1 if i < last else first
+            else:
+                i = j
+            in_x, in_y, l_in = ox, oy, l_out
+            j = j + 1 if j < last else first
+        out.append(([tuple(p) for p in points], tags))
+    return out
+
+
+def muldiv(a: int, b: int, c: int) -> int:
+    """FT_MulDiv: rounded a*b/c with the sign of the product, 32-bit FT_Long."""
+    s = 1
+    if a < 0:
+        a, s = -a, -s
+    if b < 0:
+        b, s = -b, -s
+    if c < 0:
+        c, s = -c, -s
+    d = (a * b + (c >> 1)) // c if c > 0 else 0x7FFFFFFF
+    d = i32(d)
+    return i32(-d) if s < 0 else d
+
+
+def _axis_unmap(designs: list[int], blends: list[int], ncv: int) -> int:
+    """mm_axis_unmap: the design coordinate (16.16) of a normalized one."""
+    if ncv <= blends[0]:
+        return int_to_fixed(designs[0])
+    for j in range(1, len(designs)):
+        if ncv <= blends[j]:
+            return int_to_fixed(designs[j - 1] + muldiv(ncv - blends[j - 1], designs[j] - designs[j - 1],
+                                                        blends[j] - blends[j - 1]))
+    return int_to_fixed(designs[-1])
 
 
 def _bias(n: int) -> int:

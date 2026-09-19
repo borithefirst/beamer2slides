@@ -174,6 +174,25 @@ def _to_int(word: bytes) -> int:
     return int(m.group(0)) if m else 0
 
 
+_CMAP_KEYWORDS = frozenset((b"begincidchar", b"begincidrange", b"endcidrange", b"endcidchar", b"/WMode",
+                            b"/Registry", b"/Ordering", b"/Supplement", b"begincodespacerange"))
+
+
+def _cmap_code(word: bytes) -> int:
+    """CPDF_CMapParser::GetCode: `<` then hex digits, else decimal digits, up to the first other
+    character; 0 on a uint32 overflow."""
+    num = 0
+    if word[:1] == b"<":
+        digits, base = re.match(rb"[0-9A-Fa-f]*", word[1:]).group(0), 16
+    else:
+        digits, base = re.match(rb"[0-9]*", word).group(0), 10
+    for c in digits:
+        num = num * base + int(chr(c), 16)
+        if num > 0xFFFFFFFF:
+            return 0
+    return num
+
+
 class ToUnicodeMap:
     """CPDF_ToUnicodeMap: code -> UTF-16 units. Entries are stored the way PDFium stores them
     (one unit, or 0xffff plus an index into the multi-unit strings), because duplicate codes
@@ -326,7 +345,7 @@ class CMap:
     Identity is read as Identity (none of the PDFs this pipeline sees use one)."""
 
     def __init__(self, name: str = "Identity-H", data: bytes | None = None):
-        self.vertical = name.endswith("-V")
+        self.vertical = name.endswith("V")     # CPDF_CMap(predefined name): its last letter
         self.spaces: list[tuple[int, int, int]] = [(2, 0, 0xFFFF)]   # (bytes, low, high)
         self.cids: dict[int, int] | None = None                    # None: identity
         self.ranges: list[tuple[int, int, int]] = []
@@ -340,8 +359,13 @@ class CMap:
         while i < len(words):
             w = words[i]
             i += 1
-            if w == b"/WMode" and i < len(words):
-                self.vertical = _to_int(words[i]) == 1
+            if w == b"/WMode":
+                # the next word that is not a keyword (usecmap changes nothing), as GetCode != 0
+                j = i
+                while j < len(words) and words[j] == b"usecmap":
+                    j += 1
+                if j < len(words) and words[j] not in _CMAP_KEYWORDS:
+                    self.vertical = _cmap_code(words[j]) != 0
             elif w == b"begincodespacerange":
                 while i + 1 < len(words) and words[i] != b"endcodespacerange":
                     lo, hi = words[i], words[i + 1]
@@ -652,9 +676,11 @@ class GenericProgram(Program):
         self.face = Face.from_type1(t1)
 
     def glyph_box(self, index: int):
-        """FT_Load_Glyph(FT_LOAD_NO_SCALE)'s metrics: the outline's control box (t1gload)."""
-        if index in self._boxes:
-            return self._boxes[index]
+        """FT_Load_Glyph(FT_LOAD_NO_SCALE)'s metrics: the outline's control box (t1gload), at the blend
+        the face has now (drawing text moves it: `ftoutline.Face.adjust_variation`)."""
+        key = (index, self.face.blend_key())
+        if key in self._boxes:
+            return self._boxes[key]
         box = None
         if 0 <= index < len(self.order):
             units = self.face.units(index)
@@ -663,7 +689,7 @@ class GenericProgram(Program):
                 ys = [y for pts, _tags in units for _x, y in pts]
                 l, b, r, t = (min(xs), min(ys), max(xs), max(ys)) if xs else (0, 0, 0, 0)
                 box = tuple(normalize_metric(v, 1000) for v in (l, b, r, t))
-        self._boxes[index] = box
+        self._boxes[key] = box
         return box
 
     def advance(self, index: int) -> int:
@@ -922,6 +948,7 @@ class Font:
         self.stem_v = 0
         self.font_weight: int | None = None
         self.subst_generic = False       # drawn with PDFium's multiple master face
+        self.subst = None                # fontmapper.SubstFont of a substituted face (drawing needs it)
         self.ascent = self.descent = 0
         self.font_bbox = (0, 0, 0, 0)   # l, b, r, t
         self.program_data = b""
@@ -1132,12 +1159,12 @@ class SimpleFont(Font):
         if _mapper_active():
             from . import fontmapper
             weight = self.font_weight_value()
-            if weight is None or not 100 <= weight <= 800:    # kFontWeightExtraLight .. ExtraBold
+            if weight is None or not 100 <= weight <= 900:    # kFontWeightExtraLight .. ExtraBold
                 weight = 400
             face = fontmapper.load_subst_face(self.base_name, self.subtype == "TrueType", self.flags & 0xFFFFFFFF,
                                               weight, self.italic_angle)
             if face is not None:
-                self.program, self.subst_generic = face.program, face.generic
+                self.program, self.subst_generic, self.subst = face.program, face.generic, face.subst
             return
         index = subst_font_index(self.base_name, self.subtype == "TrueType")
         if index is not None:
@@ -1587,6 +1614,62 @@ class Type3Font(SimpleFont):
         return Font.code_from_unicode(self, u)
 
 
+_ANSI: dict[int, int] = {}
+
+
+def _ansi_char(code: int) -> int:
+    """MultiByteToWideChar(CP_ACP) of one code (one byte under 256, else two) into a one-wchar
+    buffer: the character when exactly one comes out, else 0. Windows only (PDFium's #if)."""
+    if sys.platform != "win32" or code < 0:
+        return 0
+    if code not in _ANSI:
+        import ctypes
+        seq = bytes([code]) if code < 256 else bytes([(code // 256) & 0xFF, code % 256])
+        buf = ctypes.create_unicode_buffer(1)
+        n = ctypes.windll.kernel32.MultiByteToWideChar(0, 0, seq, len(seq), buf, 1)
+        _ANSI[code] = ord(buf[0]) if n == 1 else 0
+    return _ANSI[code]
+
+
+def _i16(v: int) -> int:
+    """static_cast<int16_t>."""
+    return ((int(v) + 0x8000) & 0xFFFF) - 0x8000
+
+
+def _load_metrics_array(items: list, n: int) -> list[int]:
+    """LoadMetricsArray (cpdf_cidfont.cpp), as the flat vector<int> it fills: `c [v...]` gives
+    one (c, c, n values) entry per n array items (0 past the end), `c1 c2 v...` one (c1, c2, n
+    values); an array not right after a lone code stops the whole parse."""
+    out: list[int] = []
+    status = cur = first = last = 0
+    for obj in items:
+        if obj is None:
+            continue
+        if isinstance(obj, list):
+            if status != 1:
+                return out
+            if first > 0x7FFFFFFF - len(obj):
+                status = 0
+                continue
+            for j in range(0, len(obj), n):
+                out += [first, first]
+                out += [_int(obj[j + k]) if j + k < len(obj) else 0 for k in range(n)]
+                first += 1
+            status = 0
+        elif status == 0:
+            first, status = _int(obj), 1
+        elif status == 1:
+            last, status, cur = _int(obj), 2, 0
+        else:
+            if not cur:
+                out += [first, last]
+            out.append(_int(obj))
+            cur += 1
+            if cur == n:
+                status = 0
+    return out
+
+
 class CIDFont(Font):
     """CPDF_CIDFont (Type0 with one descendant)."""
 
@@ -1623,6 +1706,58 @@ class CIDFont(Font):
         self.cid_to_gid = doc.stream_data(gid) if isinstance(gid, Stream) else None
         self._boxes: dict[int, tuple] = {}
         self._check_metrics()
+        # vertical metrics: default_vy_ 880, default_w1_ -1000 (int16), W2 as LowHighValXY
+        self.default_vy, self.default_w1 = 880, -1000
+        self.vert_metrics: list[tuple[int, int, int, int, int]] = []
+        self.vert_metrics_broken = False
+        if self.vertical:
+            w2 = r(desc_font.get("W2"))
+            if isinstance(w2, list):
+                items = [r(v) for v in w2]
+                items = [[r(u) for u in v] if isinstance(v, list) else v for v in items]
+                flat = _load_metrics_array(items, 3)
+                if len(flat) % 5:
+                    # reinterpret_span over a vector whose size is no multiple of the struct: a CHECK
+                    self.vert_metrics_broken = True
+                self.vert_metrics = [tuple(flat[k:k + 5]) for k in range(0, len(flat) - 4, 5)]
+            dw2 = r(desc_font.get("DW2"))
+            if isinstance(dw2, list):
+                self.default_vy = _i16(_int(r(dw2[0])) if len(dw2) > 0 else 0)
+                self.default_w1 = _i16(_int(r(dw2[1])) if len(dw2) > 1 else 0)
+
+    def _check_vert_metrics(self) -> None:
+        if self.vert_metrics_broken:
+            from ..api import PdfError
+            raise PdfError("a /W2 whose last entry is cut short (PDFium stops on a CHECK there)")
+
+    def vert_width(self, code: int) -> int:
+        """GetVertWidth(CIDFromCharCode(code)): W2's w1, else DW2's (int16)."""
+        self._check_vert_metrics()
+        cid = self.cmap.cid(code)
+        for lo, hi, val, _x, _y in self.vert_metrics:
+            if lo <= cid <= hi:
+                return _i16(val)
+        return self.default_w1
+
+    def vert_origin(self, code: int) -> tuple[int, int]:
+        """GetVertOrigin(cid): W2's (vx, vy), else (half the W width, DW2's vy), int16 each."""
+        self._check_vert_metrics()
+        cid = self.cmap.cid(code)
+        for lo, hi, _val, x, y in self.vert_metrics:
+            if lo <= cid <= hi:
+                return _i16(x), _i16(y)
+        width = self.default_width
+        for lo, hi, w in self.width_list:
+            if lo <= cid <= hi:
+                width = w
+                break
+        return _i16(int(width / 2)), self.default_vy
+
+    def glyph_width(self, u: int, size: float) -> float:
+        """FPDFFont_GetGlyphWidth: the vertical advance (W2's w1, usually negative) when vertical."""
+        if not self.vertical:
+            return super().glyph_width(u, size)
+        return float32(float32(self.vert_width(self.code_from_unicode(u)) * float32(size)) / 1000.0)
 
     def _metrics_array(self, items: list) -> None:
         """LoadMetricsArray with nElements 1: `c [w...]` and `c1 c2 w`."""
@@ -1683,7 +1818,14 @@ class CIDFont(Font):
         return rect
 
     def unicode(self, code: int) -> list[int]:
-        return super().unicode(code)
+        units = super().unicode(code)
+        if units or self._cmap_name is not None:
+            return units
+        # GetUnicodeFromCharCode for an embedded CMap (kUNKNOWN, no CID-to-Unicode map): on Windows
+        # FX_MultiByteToWideChar(kCharsetCodePages[kUNKNOWN] = CP_ACP) of the code's bytes, kept
+        # when they make one character; elsewhere no embedded map, so nothing
+        u = _ansi_char(code)
+        return [u] if u else []
 
     def code_from_unicode(self, u: int) -> int:
         """CPDF_CIDFont::CharCodeFromUnicode: the ToUnicode map reversed, else by the CMap's coding.

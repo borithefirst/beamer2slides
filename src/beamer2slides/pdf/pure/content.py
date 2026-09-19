@@ -13,6 +13,7 @@ tuned on what PDFium reports."""
 
 from __future__ import annotations
 
+import copy
 import math
 from dataclasses import dataclass, field
 
@@ -100,6 +101,18 @@ def append_clip(clip_paths: tuple, points: tuple, fill_type: int) -> tuple:
     return clip_paths + ((points, fill_type),)
 
 
+MAX_CLIP_TEXTS = 1024       # CPDF_ClipPath::AppendTexts' kMaxTextObjects
+
+
+def append_texts(clip_texts: tuple, texts: list) -> tuple:
+    """CPDF_ClipPath::AppendTexts: one BT..ET's clip-mode texts and a None closing the group
+    (ProcessClipPath clips once per group), unless the list would pass 1024 entries: then none
+    (the reference is made private all the same, which only a renderer comparing clips sees)."""
+    if len(clip_texts) + len(texts) <= MAX_CLIP_TEXTS:
+        return clip_texts + tuple(texts) + (None,)
+    return tuple(clip_texts)
+
+
 # ---------------------------------------------------------------------- page objects
 
 
@@ -110,7 +123,8 @@ class PObj:
     parent: "PObj | None" = None
     clips: list | None = None      # point bounding boxes of the clip paths, container space
     clip_paths: tuple = ()         # ((points, fill type), ...) in container space, float32 (render)
-    fill: int | None = None        # 0xRRGGBB; None when the object has no colour state
+    clip_texts: tuple = ()         # CPDF_ClipPath's text list: text PObj copies, None ends a group
+    fill: int | None = None       # 0xRRGGBB; None when the object has no colour state
     stroke: int | None = None
     fill_alpha: float = 1.0
     stroke_alpha: float = 1.0
@@ -173,6 +187,7 @@ class State:
     ctm: tuple = IDENTITY
     clips: tuple = ()                  # point bboxes (container space), tuple so copies are cheap
     clip_paths: tuple = ()             # CPDF_ClipPath's paths: ((points, fill type), ...)
+    clip_texts: tuple = ()             # and its texts (append_texts)
     fill_cs: ColorSpace = DEVICE["DeviceGray"]
     fill_values: tuple = (0.0,)
     fill_ref: int = 0
@@ -290,6 +305,7 @@ class _Run:
         self.clip_type = FILL_NONE
         self.last_image_name = None
         self.last_image = None
+        self.clip_text_list: list = []   # clip_text_list_: this stream's clip-mode texts since ET
 
     # ------------------------------------------------------------------ resources
 
@@ -352,6 +368,7 @@ class _Run:
         obj.parent = self.parent
         obj.clips = list(s.clips) if s.clips else None
         obj.clip_paths = s.clip_paths
+        obj.clip_texts = s.clip_texts
         obj.fill_alpha, obj.stroke_alpha = s.fill_alpha, s.stroke_alpha
         obj.blend, obj.soft_mask = s.blend, s.soft_mask
         obj.smask, obj.smask_matrix, obj.transfer = s.smask, s.smask_matrix, s.transfer
@@ -778,7 +795,14 @@ class _Run:
         s.text_pos = s.text_line_pos = (0.0, 0.0)
 
     def op_ET(self, args):
-        pass
+        """Handle_EndText: the clip-mode texts shown since the last ET join the clip path, if the
+        mode is still a clip mode now."""
+        if not self.clip_text_list:
+            return
+        s = self.state
+        if s.text_mode >= 4:
+            s.clip_texts = append_texts(s.clip_texts, self.clip_text_list)
+        self.clip_text_list = []
 
     def op_Tc(self, args):
         self.state.char_space = self.number(args, 0)
@@ -886,7 +910,7 @@ class _Run:
         if font is None:
             return
         if initial != 0:
-            s.text_pos = (f32(s.text_pos[0] - self._horizontal_size(initial)), s.text_pos[1])
+            self._kern(initial)
         if not strings:
             return
         # a Type 3 font is filled whatever Tr says (the stroke CTM, the clip list), but the object
@@ -912,9 +936,24 @@ class _Run:
             obj.text_ctm = (s.ctm[0], s.ctm[2], s.ctm[1], s.ctm[3])
         self.add(obj, True, True)
         advance = text_positions(obj)
-        s.text_pos = (f32(s.text_pos[0] + f32(advance * s.horz_scale)), s.text_pos[1])
+        if font.vertical:   # CalcPositionData: (0, advance), no Tz
+            s.text_pos = (s.text_pos[0], f32(s.text_pos[1] + advance))
+        else:
+            s.text_pos = (f32(s.text_pos[0] + f32(advance * s.horz_scale)), s.text_pos[1])
+        if mode >= 4:
+            # a clone: switching the object off later leaves the clip as it is
+            self.clip_text_list.append(copy.copy(obj))
         if kernings and kernings[-1] != 0:
-            s.text_pos = (f32(s.text_pos[0] - self._horizontal_size(kernings[-1])), s.text_pos[1])
+            self._kern(kernings[-1])
+
+    def _kern(self, kerning: float) -> None:
+        """AddTextObject's kerning before and after the strings: down the line (GetVerticalTextSize,
+        no Tz) in vertical writing, else along it."""
+        s = self.state
+        if s.font.vertical:
+            s.text_pos = (s.text_pos[0], f32(s.text_pos[1] - f32(f32(kerning * s.font_size) / 1000)))
+        else:
+            s.text_pos = (f32(s.text_pos[0] - self._horizontal_size(kerning)), s.text_pos[1])
 
     # ---- XObjects, images, shadings
     def op_Do(self, args):
@@ -968,6 +1007,11 @@ class _Run:
             rect = s.clips[0]
             for c in s.clips[1:]:
                 rect = intersect(rect, c)
+        if getattr(record, "type", 0) >= 4:
+            from .render_mesh import shading_bbox
+            from .render_shading import float_intersect
+            obj.mesh_box = shading_bbox(record, s.ctm)
+            rect = float_intersect(rect, obj.mesh_box)
         obj.rect = rect
 
     def _form(self, stream: Stream, name) -> None:
@@ -1039,6 +1083,17 @@ for _op in ("q Q cm w J j M d gs g G rg RG k K cs CS sc SC scn SCN m l c v y h r
 # ---------------------------------------------------------------------- bounds
 
 
+def item_origin(obj: PObj, item) -> tuple[float, float]:
+    """CPDF_TextObject::GetItemInfo's origin (text space): (x, 0), or in vertical writing
+    (0, y) less the font size times the char's vertical origin / 1000, in floats."""
+    font = obj.font
+    if not font.vertical:
+        return item[1], 0.0
+    vx, vy = font.vert_origin(item[0])
+    size = f32(obj.font_size)
+    return f32(0.0 - f32(f32(size * vx) / 1000)), f32(item[1] - f32(f32(size * vy) / 1000))
+
+
 def text_positions(obj: PObj) -> float:
     """CPDF_TextObject::CalcPositionDataInternal: fills each item's x (text space, before the
     horizontal scale), sets the original and page rectangles, returns the advance. Every `a * size
@@ -1050,20 +1105,33 @@ def text_positions(obj: PObj) -> float:
     cur = 0.0
     min_x, max_x, min_y, max_y = 10000.0, -10000.0, 10000.0, -10000.0
     cid = font.subtype == "Type0"
+    vertical = font.vertical
     for item, kerning in zip(obj.items, obj.kernings):
         code = item[0]
         item[1] = cur
         l, b, r, t = font.char_bbox(code)
-        min_y, max_y = min(min_y, min(t, b)), max(max_y, max(t, b))
-        left, right = f32(cur + scaled(l)), f32(cur + scaled(r))
-        min_x, max_x = min(min_x, left, right), max(max_x, left, right)
-        cur = f32(cur + scaled(font.char_width(code)))
+        if vertical:
+            # the box moved by minus the vertical origin (FX_RECT::Offset, in ints), x unscaled
+            vx, vy = font.vert_origin(code)
+            l, r, b, t = l - vx, r - vx, b - vy, t - vy
+            min_x, max_x = min(min_x, l, r), max(max_x, l, r)
+            top, bottom = f32(cur + scaled(t)), f32(cur + scaled(b))
+            min_y, max_y = min(min_y, top, bottom), max(max_y, top, bottom)
+            cur = f32(cur + scaled(font.vert_width(code)))
+        else:
+            min_y, max_y = min(min_y, min(t, b)), max(max_y, max(t, b))
+            left, right = f32(cur + scaled(l)), f32(cur + scaled(r))
+            min_x, max_x = min(min_x, left, right), max(max_x, left, right)
+            cur = f32(cur + scaled(font.char_width(code)))
         if code == 32 and (not cid or font.char_size(32) == 1):
             cur = f32(cur + obj.word_space)
         cur = f32(cur + obj.char_space)
         if kerning:
             cur = f32(cur - scaled(kerning))
-    min_y, max_y = scaled(min_y), scaled(max_y)
+    if vertical:
+        min_x, max_x = scaled(min_x), scaled(max_x)
+    else:
+        min_y, max_y = scaled(min_y), scaled(max_y)
     obj.original_rect = (min_x, min_y, max_x, max_y)
     rect = transform_rect(obj.matrix, obj.original_rect)
     if obj.text_mode in (1, 2, 5, 6):
@@ -1094,9 +1162,9 @@ def check_clip(objects) -> None:
     containing the object's rectangle loses that clip. It changes pixels where the object's edge
     lies on the clip's: an antialiased edge is then covered once, not twice. Only the clip the
     renderer uses (`clip_paths`) is dropped; `clips`, which the extraction reads, is kept.
-    (A text clip would keep the clip too; the parser records none yet.)"""
+    A clip with texts in it is kept whole."""
     for o in objects:
-        if not o.active or len(o.clip_paths) != 1 or o.type == OBJ_SHADING:
+        if not o.active or len(o.clip_paths) != 1 or o.clip_texts or o.type == OBJ_SHADING:
             continue
         pts = o.clip_paths[0][0]
         if not path_is_rect(pts):
