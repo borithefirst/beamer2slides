@@ -169,6 +169,20 @@ Each of these was a diff against PDFium until it was ported:
     first non-initial dot, and PDFium keeps it as a Windows `wchar_t` (`& 0xFFFF`). A Type 1 font's
     `.notdef` is swapped with glyph 0, not moved. A post or cmap table fontTools can't read no
     longer costs the whole program: its glyphs are read under a synthetic glyph order.
+    Opening the face is FreeType's too (`--directory`, which breaks the table directory, maxp, head,
+    hhea or loca, took 126 of 300 seeds apart): `sfnt.font_dir` is check_table_dir (an entry past
+    the file dropped, hmtx/vmtx cut to it, the first of two tags winning, a zero length missing),
+    `Face._open` is sfnt_load_face plus tt_face_init (head, maxp and hhea read from the stream past a
+    short table; a face FreeType refuses raises `FaceError`, and PDFium then substitutes the font), and
+    glyphs come from `Face.location` / `Face.metrics` (tt_face_get_location, tt_face_get_metrics),
+    not fontTools' glyf. Measured with `FPDFFont_GetIsEmbedded`: a glyf font without loca is
+    refused even when glyf is missing too (sfnt_load_face makes a face with no outlines and no
+    bitmaps scalable, so loca is loaded), and a short loca is read on to the next table or cuts the
+    glyph count, which then bounds `FT_Get_Name_Index` and `FT_Get_Glyph_Name` (the post names still
+    run to maxp's count). `--os2` adds an OS/2 table and a zero FontBBox, so the char boxes show the
+    face's ascender: USE_TYPO_METRICS, else hhea, else (both 0) typo, else win; an OS/2 that fails
+    any of tt_face_load_os2's frames or says version 0xFFFF counts as missing. 6,000 directory
+    seeds and 4,000 OS/2 seeds clean.
   - `char_width_` and `glyph_index_` are uint16: a /Widths entry of -1502 is 64034.
   - A descriptor without /FontBBox (CheckFontMetrics) takes the program's box, the right way up:
     the "deliberately flipped" in PDFium's comment is FX_RECT's y-down naming, so its `top` is yMin.

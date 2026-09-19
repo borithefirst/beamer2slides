@@ -647,20 +647,73 @@ class AdobeCMap:
 # ---------------------------------------------------------------------- the face
 
 
-def _tables(data: bytes, font_number: int = 0, offsets: dict | None = None) -> dict[bytes, bytes]:
-    """The table directory of one font (of a TTC); a table running past the file is cut.
-    `offsets` receives each table's offset in the file."""
+class FaceError(Exception):
+    """FT_Open_Face fails: PDFium drops the program and substitutes a font."""
+
+
+def _read(data: bytes, pos: int, n: int) -> bytes:
+    """FT_STREAM_READ / FT_FRAME_ENTER: all `n` bytes at `pos` or an error (never bounded by a
+    table's length, only by the stream's size)."""
+    if pos < 0 or pos + n > len(data):
+        raise FaceError(f"cannot read {n} bytes at {pos}")
+    return data[pos:pos + n]
+
+
+def font_dir(data: bytes, font_number: int = 0) -> list[tuple[bytes, int, int]]:
+    """tt_face_load_font_dir (sfnt/ttload.c): FreeType's (tag, offset, length) for one font of the
+    file, in directory order. check_table_dir first (not for OTTO): entries that can't be read end
+    the directory, an entry past the stream is ignored, and every `head` entry must be at least
+    0x36 bytes and some `head` must be there. Then an entry starting past the stream or running
+    past it is dropped (hmtx/vmtx are cut to a multiple of 4 instead) and of two entries with one
+    tag the first wins - a zero-length one included, which tt_face_lookup_table then calls missing."""
     base = 0
     if data[:4] == b"ttcf":
-        base = _u32(data, 12 + 4 * font_number)
-    n = _u16(data, base + 4)
-    out: dict[bytes, bytes] = {}
-    for k in range(n):
-        tag, _, offset, length = struct.unpack_from(">4sIII", data, base + 12 + 16 * k)
-        if length and tag not in out:
-            out[tag] = data[offset:offset + length]
-            if offsets is not None:
-                offsets[tag] = offset
+        head = _read(data, 0, 12)
+        if font_number >= _u32(head, 8):
+            raise FaceError("no such font in the collection")
+        base = _u32(_read(data, 12 + 4 * font_number, 4), 0)
+    head = _read(data, base, 12)
+    tag, num_tables = head[:4], _u16(head, 4)
+    size = len(data)
+    if tag != b"OTTO":
+        has_head, valid = False, 0
+        for nn in range(num_tables):
+            at = base + 12 + 16 * nn
+            if at + 16 > size:
+                num_tables = nn
+                break
+            t, _, offset, length = struct.unpack_from(">4sIII", data, at)
+            if offset > size:
+                continue
+            if length > size - offset and t not in (b"hmtx", b"vmtx"):
+                continue
+            valid += 1
+            if t == b"head":
+                has_head = True
+                if length < 0x36:
+                    raise FaceError("head too small")
+                _read(data, offset + 12, 4)             # the magic number, only traced
+        if not valid:
+            raise FaceError("no valid tables")
+        if not has_head:                                # no SING+META either: this port reads no bitmaps
+            raise FaceError("no head table")
+    elif not num_tables:
+        raise FaceError("no tables")
+    raw = _read(data, base + 12, 16 * num_tables)
+    out: list[tuple[bytes, int, int]] = []
+    for nn in range(num_tables):
+        t, _, offset, length = struct.unpack_from(">4sIII", raw, 16 * nn)
+        if offset > size:
+            continue
+        if length > size - offset:
+            if t not in (b"hmtx", b"vmtx"):
+                continue
+            length = (size - offset) & ~3
+        if any(e[0] == t for e in out):
+            continue
+        out.append((t, offset, length))
+    if not out:
+        raise FaceError("no valid tables")
     return out
 
 
@@ -674,22 +727,22 @@ class Face:
     when no (3, 1) or Apple Unicode subtable is, then the Adobe encoding charmap."""
 
     def __init__(self, data: bytes, cff: tuple | None = None, font_number: int = 0):
-        offsets: dict[bytes, int] = {}
-        tables = _tables(data, font_number, offsets)
-        self._post_end = len(data) - offsets.get(b"post", 0)     # bytes from `post` to the file's end
-        maxp = tables.get(b"maxp", b"")
-        self.num_glyphs = _u16(maxp, 4) if len(maxp) >= 6 else 0
-        post = tables.get(b"post", b"")
+        self.data = data
+        self.dir = font_dir(data, font_number)
+        self.format_tag = _read(data, _u32(data, 12 + 4 * font_number) if data[:4] == b"ttcf" else 0, 4)
+        self._open(data, cff is not None)
+        post = self.table(b"post")
+        self._post = data[post[0]:post[0] + post[1]] if post else b""
+        self._post_end = len(data) - post[0] if post else len(data)   # bytes from `post` to the file's end
         # tt_face_load_post reads its 32-byte header from the stream, not from the table: a shorter
         # table followed by other data still loads (and load_post_names then finds no names)
-        at = offsets.get(b"post")
-        self.post_format = _u32(data, at) if at is not None and at + 32 <= len(data) else None
-        self._post = post
+        self.post_format = _u32(data, post[0]) if post and post[0] + 32 <= len(data) else None
         self._cff_names = None
         # sfnt_load_face: FT_FACE_FLAG_GLYPH_NAMES when tt_face_load_post succeeded (formats 1, 2,
         # 2.5 and 3) and the format isn't 3
         self.has_glyph_names = self.post_format in (0x00010000, 0x00020000, 0x00025000)
-        self.charmaps: list = build_cmaps(tables.get(b"cmap", b""))
+        cmap = self.table(b"cmap")
+        self.charmaps: list = build_cmaps(data[cmap[0]:cmap[0] + cmap[1]] if cmap else b"")
         if not any(c.encoding in (UNICODE, MS_SYMBOL) for c in self.charmaps) and self.has_glyph_names:
             unicodes = PsUnicodes(self._post_names())
             if unicodes:            # else No_Unicode_Glyph_Name: no charmap
@@ -709,6 +762,188 @@ class Face:
         self.charmap = None
         self.select_unicode()       # FT_Open_Face: the Unicode charmap by default
 
+    # -- opening (sfnt_load_face, tt_face_init)
+    def table(self, tag: bytes) -> tuple[int, int] | None:
+        """tt_face_lookup_table: (offset, length) of the table, None when missing or empty."""
+        for t, offset, length in self.dir:
+            if t == tag and length:
+                return offset, length
+        return None
+
+    def _open(self, data: bytes, cff: bool) -> None:
+        """sfnt_load_face's checks, then tt_face_init's for a glyf font. Raises FaceError where
+        FT_Open_Face fails. Every read is from the stream at the table's offset: a table shorter
+        than its header is read on into whatever follows it."""
+        self.has_outline = any(self.table(t) for t in (b"glyf", b"CFF ", b"CFF2"))
+        if self.table(b"CBLC") or self.table(b"CBDT"):
+            self.has_outline = False
+        head = self.table(b"head")
+        if not head:
+            raise FaceError("head missing")
+        h = _read(data, head[0], 54)
+        self.units_per_em = _u16(h, 18)
+        self.head_bbox = tuple(_s16(h, 36 + 2 * k) for k in range(4))
+        self.index_to_loc_format = _s16(h, 50)
+        self.head_flags = _u16(h, 16)
+        if not 16 <= self.units_per_em <= 16384:
+            raise FaceError("units per em")
+        # tt_face_load_maxp: its error is ignored, numGlyphs stays 0 when the first 6 bytes fail
+        self.maxp: dict[str, int] = {"numGlyphs": 0}
+        maxp = self.table(b"maxp")
+        if maxp and maxp[0] + 6 <= len(data):
+            version = struct.unpack_from(">i", data, maxp[0])[0]
+            self.maxp = {"version": version, "numGlyphs": _u16(data, maxp[0] + 4)}
+            if version >= 0x10000 and maxp[0] + 32 <= len(data):
+                names = ("maxPoints maxContours maxCompositePoints maxCompositeContours maxZones "
+                         "maxTwilightPoints maxStorage maxFunctionDefs maxInstructionDefs maxStackElements "
+                         "maxSizeOfInstructions maxComponentElements maxComponentDepth").split()
+                self.maxp.update({n: _u16(data, maxp[0] + 6 + 2 * k) for k, n in enumerate(names)})
+                self.maxp["maxFunctionDefs"] = max(64, self.maxp["maxFunctionDefs"])
+                self.maxp["maxTwilightPoints"] = min(0xFFFF - 4, self.maxp["maxTwilightPoints"])
+        self.maxp_num_glyphs = self.num_glyphs = self.maxp["numGlyphs"]
+        # tt_face_load_hhea / hmtx: both needed ('true' Mac fonts may lack hhea: no outlines then)
+        self.hhea = None
+        hhea = self.table(b"hhea")
+        if hhea:
+            self.hhea = self._metrics_header(hhea[0])
+            if not self.table(b"hmtx"):
+                raise FaceError("hmtx missing")
+            self.hmtx = self.table(b"hmtx")
+        elif self.format_tag == b"true":
+            self.has_outline = False
+        else:
+            raise FaceError("hhea missing")
+        self.vhea = self.vmtx = None
+        vhea = self.table(b"vhea")
+        if vhea:
+            self.vhea = self._metrics_header(vhea[0])
+            self.vmtx = self.table(b"vmtx")
+        self.os2 = self._load_os2(data)
+        # sfnt_load_face's metrics: OS/2's typo metrics when USE_TYPO_METRICS says so, else hhea's,
+        # and when those are both 0 OS/2's typo metrics, else its win metrics
+        os2 = self.os2
+        if os2 and os2["fsSelection"] & 128:
+            self.ascender, self.descender = os2["sTypoAscender"], os2["sTypoDescender"]
+        else:
+            self.ascender = self.hhea["ascender"] if self.hhea else 0
+            self.descender = self.hhea["descender"] if self.hhea else 0
+            if not (self.ascender or self.descender) and os2:
+                if os2["sTypoAscender"] or os2["sTypoDescender"]:
+                    self.ascender, self.descender = os2["sTypoAscender"], os2["sTypoDescender"]
+                else:
+                    self.ascender = _s16(struct.pack(">H", os2["usWinAscent"]), 0)
+                    self.descender = -_s16(struct.pack(">H", os2["usWinDescent"]), 0)
+        self.num_locations, self.loca, self.glyf = 0, b"", (0, 0)
+        self.cvt = self.fpgm = self.prep = b""
+        if cff:
+            return
+        if self.format_tag not in (b"\0\1\0\0", b"\0\2\0\0", b"true"):
+            raise FaceError("not a TrueType font")
+        # tt_face_init loads loca only for a scalable face, and sfnt_load_face makes a face with
+        # neither outlines nor bitmaps scalable ("it has only empty glyphs then"): PDFium's FreeType
+        # refuses a glyf font without loca even when glyf is missing too, and draws empty glyphs when
+        # only glyf is (measured, FPDFFont_GetIsEmbedded on fonts with either table renamed). Bitmap
+        # tables aren't read here, so loca is loaded for every face
+        self._load_loca(data)
+        for name in ("cvt ", "fpgm", "prep"):
+            t = self.table(name.encode())
+            if t:
+                setattr(self, name.strip(), data[t[0]:t[0] + t[1]])
+
+    def _load_os2(self, data: bytes) -> dict[str, int] | None:
+        """tt_face_load_os2: a 78-byte frame, then 8 more bytes from version 1, 10 from 2, 4 from 5.
+        Any read that fails makes the table missing (FreeType's version 0xFFFF): None."""
+        t = self.table(b"OS/2")
+        if not t:
+            return None
+        pos = t[0]
+        if pos + 78 > len(data):
+            return None
+        version = _u16(data, pos)
+        extra = 8 if version >= 1 else 0
+        extra += 10 if version >= 2 else 0
+        extra += 4 if version >= 5 else 0
+        if pos + 78 + extra > len(data) or version == 0xFFFF:
+            return None             # a table that says 0xFFFF is as missing as one FreeType refused
+        return {"version": version, "fsType": _u16(data, pos + 8), "fsSelection": _u16(data, pos + 62),
+                "sTypoAscender": _s16(data, pos + 68), "sTypoDescender": _s16(data, pos + 70),
+                "sTypoLineGap": _s16(data, pos + 72), "usWinAscent": _u16(data, pos + 74),
+                "usWinDescent": _u16(data, pos + 76)}
+
+    def _metrics_header(self, at: int) -> dict[str, int]:
+        h = _read(self.data, at, 36)
+        return {"ascender": _s16(h, 4), "descender": _s16(h, 6), "line_gap": _s16(h, 8),
+                "advance_max": _u16(h, 10), "number_of_metrics": _u16(h, 34)}
+
+    def _load_loca(self, data: bytes) -> None:
+        """tt_face_load_loca (truetype/ttpload.c): a loca shorter than maxp asks for is read further
+        when the bytes up to the next table allow it, else the face has fewer glyphs; one longer
+        than 0x10000 entries is cut."""
+        self.glyf = self.table(b"glyf") or (0, 0)
+        loca = self.table(b"loca")
+        if not loca:
+            raise FaceError("loca missing")
+        pos, table_len = loca
+        shift = 2 if self.index_to_loc_format != 0 else 1
+        table_len = min(table_len, 0x10000 << shift)
+        self.num_locations = table_len >> shift
+        if self.num_locations < self.num_glyphs + 1:
+            new_len = (self.num_glyphs + 1) << shift
+            after = [o - pos for _, o, _ in self.dir if o - pos > 0]
+            dist = min(after) if after else len(data) - pos
+            if new_len <= dist:
+                self.num_locations, table_len = self.num_glyphs + 1, new_len
+            else:
+                self.num_glyphs = self.num_locations - 1 if self.num_locations else 0
+        self.loca = _read(data, pos, table_len)
+
+    def location(self, index: int) -> tuple[int, int]:
+        """tt_face_get_location: (offset in the file, size) of a glyph's glyf data; size 0 for an
+        empty glyph or broken location data."""
+        pos1 = pos2 = 0
+        n = self.num_locations
+        if index < n:
+            if self.index_to_loc_format != 0:
+                pos1 = pos2 = _u32(self.loca, 4 * index)
+                if 4 * index + 8 <= 4 * n:
+                    pos2 = _u32(self.loca, 4 * index + 4)
+            else:
+                pos1 = pos2 = _u16(self.loca, 2 * index)
+                if 2 * index + 4 <= 2 * n:
+                    pos2 = _u16(self.loca, 2 * index + 2)
+                pos1, pos2 = pos1 << 1, pos2 << 1
+        glyf_offset, glyf_len = self.glyf
+        if pos1 > glyf_len:
+            return 0, 0
+        if pos2 > glyf_len:
+            if index != n - 2:
+                return 0, 0
+            pos2 = glyf_len
+        # an unordered loca only bounds the size (and a missing glyf gives a wrong, non-zero one)
+        return glyf_offset + pos1, pos2 - pos1 if pos2 >= pos1 else glyf_len - pos1
+
+    def metrics(self, index: int, vertical: bool = False) -> tuple[int, int]:
+        """tt_face_get_metrics: (advance, side bearing) in font units."""
+        header, table = (self.vhea, self.vmtx) if vertical else (self.hhea, getattr(self, "hmtx", None))
+        if not header or not table:
+            return 0, 0
+        pos, size = table
+        end, k, data = pos + size, header["number_of_metrics"], self.data
+        if k == 0:
+            return 0, 0
+        if index < k:
+            pos += 4 * index
+            if pos + 4 > end or pos + 4 > len(data):
+                return 0, 0
+            return _u16(data, pos), _s16(data, pos + 2)
+        pos += 4 * (k - 1)
+        if pos + 2 > end or pos + 2 > len(data):
+            return 0, 0
+        advance = _u16(data, pos)
+        pos += 4 + 2 * (index - k)
+        bearing = _s16(data, pos) if pos + 2 <= end and pos + 2 <= len(data) else 0
+        return advance, bearing
+
     # -- glyph names (tt_face_get_ps_name, or the CFF charset)
     def glyph_names(self) -> list[str]:
         if getattr(self, "_glyph_names", None) is None:
@@ -716,12 +951,13 @@ class Face:
         return self._glyph_names
 
     def glyph_name(self, index: int) -> str:
-        """FT_Get_Glyph_Name: '' without glyph names or past the last glyph."""
+        """FT_Get_Glyph_Name: '' without glyph names or past the face's last glyph (the post names
+        run to maxp's count, the face may have fewer after the loca check)."""
         names = self.glyph_names() if self.has_glyph_names else []
-        return names[index] if 0 <= index < len(names) else ""
+        return names[index] if 0 <= index < min(len(names), self.num_glyphs) else ""
 
     def _post_names(self) -> list[str]:
-        n = self.num_glyphs
+        n = self.maxp_num_glyphs          # load_post_names counts maxp's glyphs, not the face's
         mac = psnames_data.MAC_NAMES
         names = [".notdef"] * n
         post, fmt = self._post, self.post_format
@@ -774,12 +1010,13 @@ class Face:
         return names
 
     def name_index(self, name: str) -> int:
-        """FT_Get_Name_Index (sfnt_get_name_index): the first glyph of that name, else 0."""
+        """FT_Get_Name_Index (sfnt_get_name_index): the first glyph of that name below the face's
+        glyph count, else 0."""
         if not self.has_glyph_names or name is None:
             return 0
         if getattr(self, "_name_first", None) is None:
             first: dict[str, int] = {}
-            for i, n in enumerate(self.glyph_names()):
+            for i, n in enumerate(self.glyph_names()[:self.num_glyphs]):
                 first.setdefault(n, i)
             self._name_first = first
         return self._name_first.get(name, 0)

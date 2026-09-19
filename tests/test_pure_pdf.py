@@ -1099,16 +1099,27 @@ def test_made_up_truetype_fonts_extract_as_pdfium_does():
     is not stable), 1611 (the last post name loaded runs on into the bytes after it, up to a 0),
     5456, 5529, 6002, 6625 (a read at the end of the file, even of no bytes, fails the whole name
     table) and 10006...11965 (a post table shorter than its header is read on from the stream: the
-    table length does not bound it)."""
+    table length does not bound it). With `directory` the sfnt's table directory, maxp, hhea or
+    loca is broken too, and 126 of the first 300 seeds were apart before FreeType's own open was
+    ported (sfnt.font_dir, Face._open, _load_loca: entries past the file dropped, the first of two
+    tags winning, maxp and hhea read from the stream past a short table, a short loca read on up
+    to the next table or the glyph count cut, a face FreeType refuses substituted; 1242, 3095 and
+    3126: a glyf font needs loca even with no glyf; 13299 and 15678: FT_Get_Name_Index stops at the
+    face's glyph count, not maxp's). With `os2` an OS/2 table and a 0 0 0 0 FontBBox show
+    sfnt_load_face's ascender in the char boxes (121, 133: an OS/2 saying version 0xFFFF is missing; 693: an ascent equal to the descent divided by 0 in
+    api.font_metrics, for both backends)."""
     from beamer2slides.devtools.truetype_torture import case, first_diff
     apart = []
-    for seed in [26, 42, 1611, 5456, 5529, 6002, 6625, 10006, 10074, 10116, 10559, 10725, 11231, 11369,
-                 11490, 11719, 11965, *range(60)]:
-        content, fonts, _ = case(seed)
+    seeds = [(s, False) for s in [26, 42, 1611, 5456, 5529, 6002, 6625, 10006, 10074, 10116, 10559, 10725,
+                                  11231, 11369, 11490, 11719, 11965, *range(60)]]
+    seeds += [(s, "directory") for s in [1242, 3095, 3126, 13299, 15678, *range(120)]]
+    seeds += [(s, "os2") for s in [121, 133, 693, *range(40)]]
+    for seed, mode in seeds:
+        content, fonts, _ = case(seed, mode == "directory", mode == "os2")
         d = first_diff(content, fonts)
         if d:
-            apart.append((seed, d[:200]))
-    assert not apart, f"seeds apart (python tools/truetype_torture.py SEED 1): {apart}"
+            apart.append((seed, mode, d[:200]))
+    assert not apart, f"seeds apart (python tools/truetype_torture.py SEED 1 [--directory|--os2]): {apart}"
 
 
 def test_the_ucrt_qsort_port_sorts():

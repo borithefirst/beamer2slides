@@ -221,7 +221,31 @@ def make_post(r, n, recipe):
     return data
 
 
-def make_font(r, recipe):
+def make_os2(tables, r, recipe):
+    """An OS/2 table of any version, maybe cut short, and hhea metrics maybe 0: sfnt_load_face's
+    ascender and descender (USE_TYPO_METRICS, then hhea, then typo, then win) - they are the char
+    boxes of a font whose FontBBox is 0 0 0 0 (--os2)."""
+    version = r.choice([0, 1, 2, 3, 4, 5, 6, 0xFFFF])
+    typo = r.choice([(0, 0), (0, -r.randint(1, 300)), (r.randint(1, 1200), -r.randint(0, 400))])
+    win = (r.choice([0, r.randint(1, 1500), 0xFFF0]), r.choice([0, r.randint(1, 500), 0x8001]))
+    selection = r.choice([0, 0x40, 0x80, 0xC0])
+    body = bytearray(100)
+    struct.pack_into(">H", body, 0, version)
+    struct.pack_into(">H", body, 62, selection)
+    struct.pack_into(">hhhHH", body, 68, typo[0], typo[1], r.randint(0, 200), *win)
+    length = r.choice([78, 86, 96, 100, r.randint(0, 100)])
+    tables[b"OS/2"] = bytes(body[:length])
+    hhea = bytearray(tables[b"hhea"])
+    zero = r.random() < 0.6
+    if zero:
+        struct.pack_into(">hh", hhea, 4, 0, 0)
+    elif r.random() < 0.3:
+        struct.pack_into(">hh", hhea, 4, 0, -r.randint(1, 300))
+    tables[b"hhea"] = bytes(hhea)
+    recipe.append(f"os2 v{version} len {length} sel {selection:#x} typo {typo} win {win} hhea0 {zero}")
+
+
+def make_font(r, recipe, os2=None):
     n = r.randint(3, 30)
     order = [".notdef"] + ["g%d" % i for i in range(1, n)]
     fb = FontBuilder(1000, isTTF=True)
@@ -249,6 +273,8 @@ def make_font(r, recipe):
     post = make_post(r, n, recipe)
     if post is not None:
         tables[b"post"] = post
+    if os2 is not None:
+        make_os2(tables, os2, recipe)
     layout = None
     if r.random() < 0.5:
         layout = list(tables)
@@ -270,8 +296,48 @@ def sfnt(tables, layout=None):
     return bytes(out) + blobs
 
 
-def pdf_font(r, recipe):
-    data = make_font(r, recipe)
+DIRECTORY = ["cut", "long", "maxp", "dup", "unsorted", "zero", "offset", "count", "head", "hhea", "loca"]
+
+
+def mutate_directory(data, r, recipe):
+    """Break the table directory or a table FreeType checks while opening the face (--directory)."""
+    d = bytearray(data)
+    n = struct.unpack_from(">H", d, 4)[0]
+    entries = [list(struct.unpack_from(">4sIII", d, 12 + 16 * k)) for k in range(n)]
+    at = {e[0]: k for k, e in enumerate(entries)}
+    kind = r.choice(DIRECTORY)
+    k = r.randrange(n)
+    if kind == "cut":
+        d = d[:r.randrange(12 + 16 * n, len(d))]
+    elif kind == "long":
+        entries[k][3] += r.choice([1, 3, 4, 100, len(d)])
+    elif kind == "maxp":
+        entries[at[b"maxp"]][3] = r.choice([0, 2, 4, 5, 6, 31])
+    elif kind == "dup":
+        j = r.randrange(n)
+        entries[k][0] = entries[j][0]
+    elif kind == "unsorted":
+        r.shuffle(entries)
+    elif kind == "zero":
+        entries[k][3] = 0
+    elif kind == "offset":
+        entries[k][2] = r.choice([len(d), len(d) + 4, 0xFFFFFFF0, entries[k][2] + 2])
+    elif kind == "count":
+        struct.pack_into(">H", d, 4, max(0, n + r.choice([-2, -1, 1, 2])))
+    elif kind in ("head", "hhea", "loca"):
+        tag = {"head": b"head", "hhea": b"hhea", "loca": b"loca"}[kind]
+        e = entries[at[tag]]
+        e[3] = r.randrange(0, e[3])
+    recipe.append(f"directory {kind} {entries[k][0]!r}")
+    for i, e in enumerate(entries):
+        struct.pack_into(">4sIII", d, 12 + 16 * i, *e)
+    return bytes(d)
+
+
+def pdf_font(r, recipe, directory=None, os2=None):
+    data = make_font(r, recipe, os2)
+    if directory is not None:
+        data = mutate_directory(data, directory, recipe)
     flags = r.choice([4, 32, 36, 0, 4 | 65536, 32 | 65536, 6, 34])
     enc = r.choice(["none", "none", "/WinAnsiEncoding", "/MacRomanEncoding", "/MacExpertEncoding", "dict", "dict"])
     if enc == "dict":
@@ -298,8 +364,9 @@ def pdf_font(r, recipe):
     recipe.append("subtype " + subtype)
     font = ("<< /Type /Font /Subtype /%s /BaseFont /ABCDEF+Torture %s %s /FontDescriptor @1@%s >>"
             % (subtype, "" if enc == "none" else "/Encoding " + enc, widths, " /ToUnicode @3@" if tu else "")).encode()
-    desc = (b"<< /Type /FontDescriptor /FontName /ABCDEF+Torture /Flags %d /FontBBox [-50 -250 1100 900] "
-            b"/ItalicAngle 0 /Ascent 800 /Descent -200 /CapHeight 700 /StemV 80 /FontFile2 @2@ >>" % flags)
+    desc = (b"<< /Type /FontDescriptor /FontName /ABCDEF+Torture /Flags %d /FontBBox [%s] "
+            b"/ItalicAngle 0 /Ascent 800 /Descent -200 /CapHeight 700 /StemV 80 /FontFile2 @2@ >>"
+            % (flags, b"0 0 0 0" if os2 is not None else b"-50 -250 1100 900"))
     ff = b"<< /Length %d /Length1 %d >>\nstream\n" % (len(data), len(data)) + data + b"\nendstream"
     objs = [font, desc, ff]
     if tu:
@@ -379,18 +446,23 @@ def shrink(cont, fonts):
     return b"\n".join(lines)
 
 
-def case(seed):
+def case(seed, directory=False, os2=False):
+    """`directory` breaks the sfnt's table directory too, `os2` adds an OS/2 table and a zero
+    FontBBox, each from a generator of its own, so the seeds without them keep making the fonts they
+    always made."""
     r = random.Random(seed)
     recipe = []
-    spec = pdf_font(r, recipe)
+    spec = pdf_font(r, recipe, random.Random(seed * 7919 + 1) if directory else None,
+                    random.Random(seed * 7919 + 2) if os2 else None)
     return content(r), [spec], recipe
 
 
 if __name__ == "__main__":
     seed0, n = int(sys.argv[1]), int(sys.argv[2])
+    directory, os2 = "--directory" in sys.argv, "--os2" in sys.argv
     bad = Counter()
     for seed in range(seed0, seed0 + n):
-        cont, fonts, recipe = case(seed)
+        cont, fonts, recipe = case(seed, directory, os2)
         try:
             d = first_diff(cont, fonts)
         except Exception as e:  # noqa: BLE001

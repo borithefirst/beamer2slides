@@ -318,7 +318,7 @@ def font_metrics(ascent: float, descent: float, program: bytes) -> tuple[float, 
         # Metrics from the bounding box of a math font (xdvipdfmx: CMSY, CMEX) would give every
         # glyph a box reaching far below the line; MuPDF uses its defaults there.
         ascent, descent = 0.8, -0.2
-    if ascent < 1e-3:
+    if ascent < 1e-3 or ascent == descent:     # (a font may say ascent = descent: no height at all)
         ascent, descent = 0.9, -0.1
     if ascent - descent < 1:
         total = ascent - descent

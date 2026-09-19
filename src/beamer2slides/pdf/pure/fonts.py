@@ -719,18 +719,62 @@ def load_truetype(data: bytes, font_number: int = 0) -> Program | None:
             eid = {"standard": 0, "expert": 1}.get(prog.encoding_kind, 2) if any(gids) else None
             prog.attach_face(data, (prog.order, prog.cid_keyed, eid, gids), font_number)
         return prog
+    try:
+        face = sfnt.Face(data, None, font_number)
+    except sfnt.FaceError:
+        return None                 # FT_Open_Face fails: PDFium substitutes the font
     # glyphs are known by index: fontTools would name them from `post`, which FreeType only reads
     # for FT_Get_Name_Index (sfnt.Face), and which may be broken where the outlines are fine
-    order = ["glyph%05d" % i for i in range(tt["maxp"].numGlyphs)]
-    tt.setGlyphOrder(order)
-    glyphs = tt.getGlyphSet()
-    head = tt["head"]
-    hhea = tt["hhea"] if "hhea" in tt else None
-    prog = Program("truetype", glyphs, order, head.unitsPerEm, bbox=(head.xMin, head.yMin, head.xMax, head.yMax),
-                   ascender=hhea.ascent if hhea else 0, descender=hhea.descent if hhea else 0, cmaps=_tt_cmaps(tt))
+    order = ["glyph%05d" % i for i in range(face.num_glyphs)]
+    prog = Program("truetype", _SfntGlyphs(face, order), order, face.units_per_em, bbox=face.head_bbox,
+                   ascender=face.ascender, descender=face.descender, cmaps=_tt_cmaps(tt))
     prog.sfnt = True
     prog.attach_face(data, None, font_number)
     return prog
+
+
+class _SfntGlyphs:
+    """A glyph set over the glyf data FreeType finds (sfnt.Face.location) and its hmtx metrics
+    (sfnt.Face.metrics), drawn by fontTools' glyf decoder."""
+
+    def __init__(self, face, order):
+        from fontTools.ttLib.tables._g_l_y_f import Glyph, table__g_l_y_f
+        self.face, self.order = face, order
+        self.index = {name: i for i, name in enumerate(order)}
+        self.glyf = table__g_l_y_f()
+        self.glyf.glyphOrder = order
+        self.glyf.glyphs = _LazyGlyphs(lambda name: Glyph(self._data(self.index[name])))
+        self.hmtx = _LazyGlyphs(lambda name: face.metrics(self.index[name]))
+
+    def _data(self, i):
+        offset, size = self.face.location(i)
+        return self.face.data[offset:offset + size]
+
+    def __getitem__(self, name):
+        return _SfntGlyph(self, name)
+
+
+class _LazyGlyphs(dict):
+    def __init__(self, make):
+        super().__init__()
+        self.make = make
+
+    def __missing__(self, key):
+        value = self[key] = self.make(key)
+        return value
+
+
+class _SfntGlyph:
+    def __init__(self, glyphs, name):
+        self.glyphs, self.name = glyphs, name
+        self.width, self.lsb = glyphs.hmtx[name]
+
+    def draw(self, pen):
+        """The outline moved so that its xMin sits at the hmtx left side bearing (the glyph's pp1 at
+        the origin), as fontTools' glyph set and FreeType's loader both place it."""
+        glyf = self.glyphs.glyf
+        glyph = glyf[self.name]
+        glyph.draw(pen, glyf, self.lsb - glyph.xMin if hasattr(glyph, "xMin") else 0)
 
 
 def _tt_cmaps(tt) -> dict:
