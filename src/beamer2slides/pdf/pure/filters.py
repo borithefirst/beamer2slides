@@ -8,6 +8,8 @@ import zlib
 
 import numpy as np
 
+from .syntax import Name, Stream
+
 IMAGE_CODECS = {"DCTDecode", "JPXDecode", "CCITTFaxDecode", "JBIG2Decode"}
 ABBREVIATIONS = {"AHx": "ASCIIHexDecode", "A85": "ASCII85Decode", "LZW": "LZWDecode", "Fl": "FlateDecode",
                  "RL": "RunLengthDecode", "CCF": "CCITTFaxDecode", "DCT": "DCTDecode"}
@@ -234,37 +236,71 @@ def _png_unfilter(compressed: bytes, raw: bytes, parms: dict) -> bytes | None:
         return None
 
 
-def filters_of(d: dict) -> tuple[list[str], list[dict]]:
-    names = d.get("Filter") or []
-    if not isinstance(names, list):
-        names = [names]
-    parms = d.get("DecodeParms") or d.get("DP") or []
-    if not isinstance(parms, list):
-        parms = [parms]
-    parms = [p if isinstance(p, dict) else {} for p in parms] + [{}] * (len(names) - len(parms))
-    return [ABBREVIATIONS.get(str(n), str(n)) for n in names], parms
+_PIPELINE = {"FlateDecode", "Fl", "LZWDecode", "LZW", "ASCII85Decode", "A85", "ASCIIHexDecode", "AHx",
+             "RunLengthDecode", "RL"}
+
+
+def _params_dict(p, resolve) -> dict:
+    """CPDF_Object::GetDict: a dictionary, or a stream's; anything else is none."""
+    p = resolve(p)
+    if isinstance(p, dict):
+        return p
+    return p.dict if isinstance(p, Stream) else {}
+
+
+def decoder_array(d: dict, resolve=lambda v: v) -> list[tuple[str, dict]] | None:
+    """GetDecoderArray: (filter name, parameters) pairs; None when /Filter is not a name or an
+    array of names (and, for several filters, only the last one may be something other than
+    Flate, LZW, ASCII85, ASCIIHex or RunLength: ValidateDecoderPipeline)."""
+    names = resolve(d.get("Filter"))
+    if names is None:
+        return []
+    params = resolve(d.get("DecodeParms"))
+    if isinstance(names, list):
+        names = [resolve(n) for n in names]
+        if not all(isinstance(n, Name) for n in names):
+            return None
+        if len(names) > 1 and any(str(n) not in _PIPELINE for n in names[:-1]):
+            return None
+        plist = params if isinstance(params, list) else None
+        return [(str(n), _params_dict(plist[i], resolve) if plist is not None and i < len(plist) else {})
+                for i, n in enumerate(names)]
+    if not isinstance(names, Name):
+        return None
+    return [(str(names), _params_dict(params, resolve) if params is not None else {})]
 
 
 def decode(data: bytes, d: dict, resolve=lambda v: v) -> tuple[bytes, str | None]:
-    """The stream's bytes through its filters, up to an image codec; (bytes, codec or None)."""
-    names, parms = filters_of(d)
-    for name, p in zip(names, parms):
-        p = {k: resolve(v) for k, v in p.items()}
-        if name in IMAGE_CODECS:
-            return data, name
-        if name == "FlateDecode":
-            raw = flate(data)
-            data = (_png_unfilter(data, raw, p) if (p.get("Predictor") or 1) >= 10 else None) or predict(raw, p)
-        elif name == "LZWDecode":
-            data = predict(lzw(data, p.get("EarlyChange", 1)), p)
-        elif name == "ASCII85Decode":
-            data = ascii85(data)
-        elif name == "ASCIIHexDecode":
-            data = ascii_hex(data)
-        elif name == "RunLengthDecode":
-            data = run_length(data)
-        elif name == "Crypt":
+    """CPDF_StreamAcc::LoadAllDataFiltered over PDF_DataDecode: the stream's bytes through its
+    filters, up to an image codec; (bytes, codec or None). Any name PDFium doesn't decode itself
+    counts as an image codec. The bytes as stored are what comes back when the filters can't be
+    read, a filter fails, or nothing was decoded before a codec (or the result is empty)."""
+    decoders = decoder_array(d, resolve)
+    if not decoders:
+        return data, None
+    out = b""
+    current = data
+    for name, p in decoders:
+        if name == "Crypt":
             continue
-        else:
-            raise FilterError(f"unknown filter {name}")
-    return data, None
+        name = ABBREVIATIONS.get(name, name)
+        p = {k: resolve(v) for k, v in p.items()}
+        try:
+            if name == "FlateDecode":
+                raw = flate(current)
+                current = (_png_unfilter(current, raw, p) if (p.get("Predictor") or 1) >= 10 else None) \
+                    or predict(raw, p)
+            elif name == "LZWDecode":
+                current = predict(lzw(current, p.get("EarlyChange", 1)), p)
+            elif name == "ASCII85Decode":
+                current = ascii85(current)
+            elif name == "ASCIIHexDecode":
+                current = ascii_hex(current)
+            elif name == "RunLengthDecode":
+                current = run_length(current)
+            else:
+                return (out or data), name
+        except Exception:  # noqa: BLE001 - PDFium's decoder gives up (FX_INVALID_OFFSET): the stored bytes
+            return data, None
+        out = current
+    return (out or data), None

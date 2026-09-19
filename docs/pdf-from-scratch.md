@@ -104,8 +104,29 @@ Each of these was a diff against PDFium until it was ported:
     lexer: words split at `()<>[]{}/%`, a name that is only `/` is a key that is dropped, a key that
     is no name is skipped, `endobj` ends an unclosed dictionary, nesting stops at 64, and a stream's
     /Length counts only as a number reached through at most one reference (none while that object
-    is itself being read) and only if `endstream` follows it; else the nearer of
+    is itself being read) and only if a word beginning with `endstream` follows it (a length of 0
+    is checked too: `/Length 0 R1` is a zero length with a stray word after it); else the nearer of
     `endstream`/`endobj` ends the data. An object whose header names another number is no object.
+  - *Stream filters* (CPDF_StreamAcc over PDF_DataDecode, `filters.decode`): the bytes as stored
+    come back when /Filter is not a name or an array of names, when a filter other than the last
+    is not Flate/LZW/A85/AHx/RL, when a decoder fails, or when nothing was decoded. Any name PDFium
+    doesn't decode itself counts as an image codec, so `/Filter /Foo` gives the stored bytes and a
+    content stream that reads as plain text still draws. /DecodeParms pairs an array with an array
+    of filters, a dictionary with a single name, and nothing else.
+- **Fonts that aren't there** (bfuzz, `test_fonts_and_filters_resolve_as_pdfium_resolves_them`):
+  - `Tf` naming no font, or a font that is no dictionary (a stream), is CPDF_Font::GetStockFont:
+    a Helvetica with no file; the size is set either way. The lookup is FindResourceHolder: a
+    form's own Font dictionary, and the page's only when the form has none of that category.
+  - A non-embedded base-14 font is loaded as CPDF_Type1Font does (canonical name through
+    kAltFontNames, Courier widths 600, symbolic flags without a descriptor, Symbol/Zapf/Standard
+    base encoding) and drawn with the face CFX_Win32FontInfo maps it to: Arial, Times New Roman,
+    Courier New from `%WINDIR%\Fonts`, read through the TrueType glyph-map branch of LoadGlyphMap
+    ((3,0) cmap with the F0/F1/F2 prefixes, else Unicode from the glyph name) and with bbox
+    left/right scaled by width / TrueType width in C integer division. Symbol, ZapfDingbats and
+    unknown names get PDFium's built-in Foxit faces, which are third-party binaries this tree
+    doesn't carry: those glyph boxes stay apart, as do the Foxit MM substitutes PDFium uses for an
+    embedded program that doesn't parse. Outside Windows PDFium's font mapper differs anyway.
+  - `char_width_` and `glyph_index_` are uint16: a /Widths entry of -1502 is 64034.
   - *The table is believed* only if its lowest-numbered entry starts with that number, and only if
     the trailer's /Root is a reference to a catalog with at least one page; otherwise
     RebuildCrossRef scans the file word by word (strings skipped, so `9 0 obj` inside a string is

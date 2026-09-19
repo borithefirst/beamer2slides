@@ -461,9 +461,10 @@ class PdfFile:
         length = _integer(length) if isinstance(length, (int, float)) and not isinstance(length, bool) else -1
         if length > 0 and start + length >= len(data):
             length = -1
-        if length > 0:
+        if length >= 0:
+            # a zero length is checked too; the word only has to begin with endstream (a memcmp)
             after = _Words(data, start + length).next()
-            if after is None or after[0] != b"endstream":
+            if after is None or after[0][:9] != b"endstream":
                 length = -1
         if length >= 0:
             end = start + length

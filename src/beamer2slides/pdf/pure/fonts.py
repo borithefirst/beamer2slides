@@ -20,7 +20,10 @@ from __future__ import annotations
 
 import io
 import math
+import os
 import re
+import sys
+from pathlib import Path
 from typing import Callable
 
 from .encodings import NAMES, UNICODES
@@ -40,6 +43,12 @@ FLAG_FIXED, FLAG_SYMBOLIC, FLAG_NONSYMBOLIC, FLAG_ITALIC, FLAG_ALLCAPS = 1, 4, 3
 NOTDEF = ".notdef"
 NO_GLYPH = None   # PDFium's 0xffff: no glyph at all (not even .notdef)
 INVALID_CODE = 0xFFFFFFFF  # CPDF_Font::kInvalidCharCode
+
+
+def _cdiv(a: int, b: int) -> int:
+    """C++ integer division (towards zero)."""
+    q = abs(a) // abs(b)
+    return q if (a < 0) == (b < 0) else -q
 
 
 def normalize_metric(value: float, upem: int) -> int:
@@ -448,6 +457,7 @@ class Program:
         self.bbox = bbox                  # font units (l, b, r, t)
         self.ascender, self.descender = ascender, descender
         self.cmaps = cmaps or {}          # TrueType: {(platform, encoding): {code: glyph name}}
+        self.sfnt = False                 # a TrueType/OpenType file (CFX_Font::IsTTFont)
         self._boxes: dict[int, tuple] = {}
 
     def name_index(self, name: str) -> int:
@@ -566,13 +576,16 @@ def load_truetype(data: bytes) -> Program | None:
         prog = load_cff(tt.getTableData("CFF "))
         if prog:
             prog.cmaps = _tt_cmaps(tt)
+            prog.sfnt = True
         return prog
     glyphs = tt.getGlyphSet()
     order = tt.getGlyphOrder()
     head = tt["head"]
     hhea = tt["hhea"] if "hhea" in tt else None
-    return Program("truetype", glyphs, order, head.unitsPerEm, bbox=(head.xMin, head.yMin, head.xMax, head.yMax),
+    prog = Program("truetype", glyphs, order, head.unitsPerEm, bbox=(head.xMin, head.yMin, head.xMax, head.yMax),
                    ascender=hhea.ascent if hhea else 0, descender=hhea.descent if hhea else 0, cmaps=_tt_cmaps(tt))
+    prog.sfnt = True
+    return prog
 
 
 def _tt_cmaps(tt) -> dict:
@@ -598,6 +611,104 @@ def load_program(stream: Stream | None, data: bytes, subtype_key: str) -> Progra
             return load_type1(data)
     except Exception:  # noqa: BLE001 - fontTools missing or a program it can't read
         return None
+    return None
+
+
+# ---------------------------------------------------------------------- the base 14 (CFX_StandardFont)
+
+BASE14 = ("Courier", "Courier-Bold", "Courier-BoldOblique", "Courier-Oblique",
+          "Helvetica", "Helvetica-Bold", "Helvetica-BoldOblique", "Helvetica-Oblique",
+          "Times-Roman", "Times-Bold", "Times-BoldItalic", "Times-Italic", "Symbol", "ZapfDingbats")
+BASE14_SYMBOL, BASE14_DINGBATS = 12, 13
+
+# kAltFontNames: every name PDFium knows a base 14 font by (FXSYS_stricmp: ASCII case ignored)
+_ALT_FONT_NAMES = {name.lower(): index for index, names in enumerate((
+    "Courier CourierNew CourierNewPSMT CourierStd",
+    "Courier,Bold Courier-Bold CourierBold CourierNew,Bold CourierNew-Bold CourierNewBold CourierNewPS-BoldMT "
+    "CourierStd-Bold",
+    "Courier,BoldItalic Courier-BoldOblique CourierBoldItalic CourierNew,BoldItalic CourierNew-BoldItalic "
+    "CourierNewBoldItalic CourierNewPS-BoldItalicMT CourierStd-BoldOblique",
+    "Courier,Italic Courier-Oblique CourierItalic CourierNew,Italic CourierNew-Italic CourierNewItalic "
+    "CourierNewPS-ItalicMT CourierStd-Oblique",
+    "Arial ArialMT Helvetica",
+    "Arial,Bold Arial-Bold Arial-BoldMT ArialBold ArialMT,Bold ArialRoundedMTBold Helvetica,Bold Helvetica-Bold "
+    "HelveticaBold",
+    "Arial,BoldItalic Arial-BoldItalic Arial-BoldItalicMT ArialBoldItalic ArialMT,BoldItalic Helvetica,BoldItalic "
+    "Helvetica-BoldItalic Helvetica-BoldOblique HelveticaBoldItalic",
+    "Arial,Italic Arial-Italic Arial-ItalicMT ArialItalic ArialMT,Italic Helvetica,Italic Helvetica-Italic "
+    "Helvetica-Oblique HelveticaItalic",
+    "Times-Roman TimesNewRoman TimesNewRomanPS TimesNewRomanPSMT",
+    "Times-Bold TimesBold TimesNewRoman,Bold TimesNewRoman-Bold TimesNewRomanBold TimesNewRomanPS-Bold "
+    "TimesNewRomanPS-BoldMT TimesNewRomanPSMT,Bold",
+    "Times-BoldItalic TimesBoldItalic TimesNewRoman,BoldItalic TimesNewRoman-BoldItalic TimesNewRomanBoldItalic "
+    "TimesNewRomanPS-BoldItalic TimesNewRomanPS-BoldItalicMT TimesNewRomanPSMT,BoldItalic",
+    "Times-Italic TimesItalic TimesNewRoman,Italic TimesNewRoman-Italic TimesNewRomanItalic TimesNewRomanPS-Italic "
+    "TimesNewRomanPS-ItalicMT TimesNewRomanPSMT,Italic",
+    "Symbol SymbolMT",
+    "ZapfDingbats",
+)) for name in names.split()}
+
+
+def _ascii_lower(s: str) -> str:
+    return "".join(chr(ord(c) + 32) if "A" <= c <= "Z" else c for c in s)
+
+
+def standard_font_index(name: str) -> int | None:
+    """CFX_StandardFont::GetStandardFontIndex."""
+    return _ALT_FONT_NAMES.get(_ascii_lower(name))
+
+
+def _without_subset_prefix(name: str) -> str:
+    """MaybeRemoveSubsettedFontPrefix: 'ABCDEF+Name' -> 'Name'."""
+    if len(name) > 7 and name[6] == "+" and all("A" <= c <= "Z" for c in name[:6]):
+        return name[7:]
+    return name
+
+
+def subst_font_index(name: str, truetype: bool) -> int | None:
+    """The base 14 font CFX_FontMapper::FindSubstFace settles on for a font with no program
+    (GetSubstName, then the family before a comma), or None for any other name."""
+    subst = name[1:] if truetype and name[:1] == "@" else name.replace(" ", "")
+    subst = _without_subset_prefix(subst)
+    index = standard_font_index(subst)
+    if index is None and "," in subst:
+        return None   # a family with a style PDFium parses (ParseStyles): not ported
+    return index
+
+
+# CFX_Win32FontInfo::MapFont (kBase14Substs): on Windows, GDI hands PDFium these system files for the
+# twelve fonts that are not Symbol or ZapfDingbats; those two always get PDFium's built-in Foxit faces,
+# which the pure reader does not carry (they would be third-party binaries in the tree).
+_WIN32_FACES = ("cour.ttf", "courbd.ttf", "courbi.ttf", "couri.ttf", "arial.ttf", "arialbd.ttf", "arialbi.ttf",
+                "ariali.ttf", "times.ttf", "timesbd.ttf", "timesbi.ttf", "timesi.ttf")
+_system_faces: dict[int, Program | None] = {}
+
+
+def system_face(index: int) -> Program | None:
+    """The face PDFium's system font info gives a base 14 font, None where there is none to read
+    (another platform, a Symbol or ZapfDingbats font, a file missing): such a font keeps no face."""
+    if index not in _system_faces:
+        program = None
+        if sys.platform == "win32" and index < len(_WIN32_FACES):
+            path = Path(os.environ.get("WINDIR", r"C:\Windows")) / "Fonts" / _WIN32_FACES[index]
+            try:
+                program = load_truetype(path.read_bytes())
+            except Exception:  # noqa: BLE001 - no such file, or fontTools missing
+                program = None
+        _system_faces[index] = program
+    return _system_faces[index]
+
+
+def unicode_charmap(p: Program) -> dict | None:
+    """FT_Select_Charmap(FT_ENCODING_UNICODE): a UCS-4 subtable from the end, else any Unicode one
+    from the end (FreeType's find_unicode_charmap)."""
+    keys = list(p.cmaps)
+    for key in reversed(keys):
+        if key in ((3, 10), (0, 4)):
+            return p.cmaps[key]
+    for key in reversed(keys):
+        if key[0] == 0 and key[1] != 5 or key in ((3, 1), (3, 10)):
+            return p.cmaps[key]
     return None
 
 
@@ -726,25 +837,44 @@ class SimpleFont(Font):
         r = self.doc.resolve
         d = self.dict
         desc = r(d.get("FontDescriptor"))
+        self.base14 = None
+        if self.subtype != "TrueType":
+            # CPDF_Type1Font::Load: a base 14 name takes its canonical name, flags and base encoding
+            self.base14 = standard_font_index(self.base_name)
+            if self.base14 is not None:
+                self.base_name = BASE14[self.base14]
+                if not isinstance(desc, dict) and self.base14 >= BASE14_SYMBOL:
+                    self.flags = FLAG_SYMBOLIC
+                if self.base14 < 4:   # Courier
+                    self.widths = [600] * 256
+                if self.base14 == BASE14_SYMBOL:
+                    self.base_encoding = SYMBOL
+                elif self.base14 == BASE14_DINGBATS:
+                    self.base_encoding = ZAPF
+                elif not self.flags & FLAG_SYMBOLIC:
+                    self.base_encoding = STANDARD
         self._descriptor(desc)
         # LoadCharWidths
         widths = r(d.get("Widths"))
         self.use_font_width = not isinstance(widths, list)
         if isinstance(widths, list):
+            # char_width_ is a uint16_t array: a negative width wraps, and 0xFFFF reads as "not loaded"
             if isinstance(desc, dict) and "MissingWidth" in desc:
-                self.widths = [_int(r(desc.get("MissingWidth")))] * 256
+                self.widths = [_int(r(desc.get("MissingWidth"))) & 0xFFFF] * 256
             start, end = _int(r(d.get("FirstChar"))), _int(r(d.get("LastChar")))
             if 0 <= start <= 255 and widths:
                 if end == 0 or end >= start + len(widths):
                     end = start + len(widths) - 1
                 end = min(end, 255)
                 for i in range(start, end + 1):
-                    self.widths[i] = _int(r(widths[i - start]))
+                    self.widths[i] = _int(r(widths[i - start])) & 0xFFFF
         if self.embedded and len(self.base_name) > 7 and self.base_name[6] == "+" and self.base_name[:6].isupper():
             self.base_name = self.base_name[7:]
+        elif not self.embedded:
+            self._subst_font()
         if not self.flags & FLAG_SYMBOLIC:
             self.base_encoding = STANDARD
-        self._pdf_encoding(self.embedded, self.subtype == "TrueType")
+        self._pdf_encoding(self.embedded, self.program is not None and self.program.sfnt)
         self._glyph_map()
         if self.program is not None and self.flags & FLAG_ALLCAPS:
             for lo, hi in ((0x61, 0x7A), (0xE0, 0xF6), (0xF8, 0xFD)):
@@ -758,6 +888,24 @@ class SimpleFont(Font):
                         if j in self._boxes:
                             self._boxes[i] = self._boxes[j]
         self._check_metrics()
+
+    # CPDF_FaceBasedSimpleFont::LoadSubstFont
+    def _subst_font(self) -> None:
+        if not self.use_font_width and not self.flags & FLAG_FIXED:
+            width = 0
+            for w in self.widths:
+                if w in (0, 0xFFFF):
+                    continue
+                if width == 0:
+                    width = w
+                elif width != w:
+                    break
+            else:
+                if width:
+                    self.flags |= FLAG_FIXED
+        index = subst_font_index(self.base_name, self.subtype == "TrueType")
+        if index is not None:
+            self.program = system_face(index)
 
     # CPDF_SimpleFont::LoadPDFEncoding
     def _pdf_encoding(self, embedded: bool, truetype: bool) -> None:
@@ -818,6 +966,10 @@ class SimpleFont(Font):
         if p is None:
             # no face: PDFium keeps no glyphs, and encoding_ stays empty
             return
+        if self.subtype != "TrueType" and not self.embedded and self.base14 not in (BASE14_SYMBOL, BASE14_DINGBATS) \
+                and p.sfnt:
+            self._substitute_glyph_map(p)
+            return
         if self.subtype == "TrueType" or p.kind == "truetype":
             self._truetype_glyph_map(p)
             return
@@ -848,6 +1000,32 @@ class SimpleFont(Font):
             else:
                 self.enc_unicode[code] = 0x20
                 self.glyphs[code] = NO_GLYPH
+
+    def _substitute_glyph_map(self, p: Program) -> None:
+        """CPDF_Type1Font::LoadGlyphMap for a font with no program drawn with a TrueType face."""
+        symbol = p.cmaps.get((3, 0))
+        if symbol is not None:   # UseTTCharmap(face, kWindowsSymbolCmapId)
+            found = False
+            for code in range(256):
+                for prefix in (0x0000, 0xF000, 0xF100, 0xF200):
+                    self.glyphs[code] = p.index.get(symbol.get(prefix + code), 0)
+                    if self.glyphs[code]:
+                        found = True
+                        break
+            if found:
+                return
+        cmap = unicode_charmap(p) or {}
+        if self.base_encoding == BUILTIN:
+            self.base_encoding = STANDARD
+        for code in range(256):
+            name = self.char_name(code)
+            if not name:
+                continue
+            self.enc_unicode[code] = unicode_from_adobe_name(name)
+            self.glyphs[code] = p.index.get(cmap.get(self.enc_unicode[code]), 0)
+            if self.glyphs[code] == 0 and name == NOTDEF:
+                self.enc_unicode[code] = 0x20
+                self.glyphs[code] = p.index.get(cmap.get(0x20), 0)
 
     @staticmethod
     def _unicode_index(p: Program, u: int) -> int:
@@ -904,11 +1082,15 @@ class SimpleFont(Font):
         box = self.program.glyph_box(g)
         if box is None:
             return
-        self._boxes[code] = box
         if self.use_font_width:
             tt = self.program.advance(g)
             if self.widths[code] == 0xFFFF:
-                self.widths[code] = tt
+                self.widths[code] = tt & 0xFFFF
+            elif tt and not self.embedded:
+                # a substitute face's box is stretched to the width the font says (C++ int division)
+                w = self.widths[code]
+                box = (_cdiv(box[0] * w, tt), box[1], _cdiv(box[2] * w, tt), box[3])
+        self._boxes[code] = box
 
     def char_width(self, code: int) -> int:
         if code > 0xFF:

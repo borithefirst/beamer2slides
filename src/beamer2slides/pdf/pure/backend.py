@@ -25,7 +25,7 @@ from .content import Parser, PObj
 from .render import render_page
 from .document import PdfFile, read, text_string, write_file
 from .filters import ABBREVIATIONS, decode
-from .syntax import InlineImage, Name, Stream, String
+from .syntax import InlineImage, Name, Stream, String, float32
 from .textpage import GENERATED, HYPHEN, NOT_UNICODE, TextPage
 
 _CS_ABBREVIATIONS = {"G": "DeviceGray", "RGB": "DeviceRGB", "CMYK": "DeviceCMYK", "I": "Indexed"}
@@ -154,7 +154,9 @@ class Page:
                 name = name[7:]
             if not font.base_name:
                 name = "Type3"
-            ascent, descent = font_metrics(font.ascent / 1000, font.descent / 1000, font.program_data or b"")
+            # FPDFFont_GetAscent/Descent compute in float: GetTypeAscent() * 1.0f / 1000.f
+            ascent, descent = font_metrics(float32(font.ascent / 1000), float32(font.descent / 1000),
+                                           font.program_data or b"")
             font_id = len(self._fonts)
             self._fonts.append(font)
             self._font_info[key] = (font_id, name, ascent, descent)
@@ -382,7 +384,7 @@ class Page:
                     else b"")
         try:  # FPDFImageObj_GetImageDataDecoded: through the filters, up to the image codec
             decoded, _ = decode(raw, d, r)
-        except Exception:  # noqa: BLE001 - a stream that does not decode gives nothing, as in PDFium
+        except Exception:  # noqa: BLE001 - defensive: decode itself gives the stored bytes when a filter fails
             decoded = b""
         blended = o.has_transparency
         clipped = any(abs(box[k] - full[k]) > 0.01 for k in range(4))

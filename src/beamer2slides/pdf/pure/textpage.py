@@ -288,7 +288,8 @@ def loose_bounds(ci: CharInfo):
         if fb[3] > fb[1]:
             ascent, descent = min(ascent, fb[3]), max(descent, fb[1])
         if ascent != descent:
-            width = f32(font.char_width(ci.code) * obj.font_size / 1000)
+            # CPDF_TextObject::GetCharWidth: the size is divided first, in float
+            width = f32(font.char_width(ci.code) * f32(obj.font_size / 1000))
             ox, oy = f32p(apply(f32m(inverse(ci.matrix)), *ci.origin))
             box = transform_rect(ci.matrix, (ox, f32(oy + descent * size / 1000), f32(ox + width),
                                              f32(oy + ascent * size / 1000)))

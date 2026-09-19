@@ -20,7 +20,7 @@ from ..api import OBJ_FORM, OBJ_IMAGE, OBJ_PATH, OBJ_SHADING, OBJ_TEXT
 from .colors import DEVICE, PATTERN, ColorSpace, load_colorspace
 from .fonts import Font, load_font
 from .raster import concat, path_is_rect
-from .syntax import InlineImage, Name, Stream, String, float32 as f32, operations
+from .syntax import InlineImage, Name, Ref, Stream, String, float32 as f32, operations
 
 IDENTITY = (1.0, 0.0, 0.0, 1.0, 0.0, 0.0)
 
@@ -249,6 +249,13 @@ class Parser:
             self.fonts[key] = load_font(self.doc, d)
         return self.fonts[key]
 
+    def stock_font(self) -> Font | None:
+        """CPDF_Font::GetStockFont(kDefaultAnsiFontName): a Type1 Helvetica with no file."""
+        if "stock" not in self.fonts:
+            self.fonts["stock"] = load_font(self.doc, {Name("Type"): Name("Font"), Name("Subtype"): Name("Type1"),
+                                                       Name("BaseFont"): Name("Helvetica")})
+        return self.fonts["stock"]
+
 
 class _Run:
     """The state of one content stream being executed."""
@@ -270,14 +277,27 @@ class _Run:
 
     # ------------------------------------------------------------------ resources
 
+    def _direct(self, value):
+        """CPDF_Object::GetDirect: one reference followed; one leading to another reference is nothing."""
+        if isinstance(value, Ref):
+            value = self.doc.get(value.num)
+            return None if isinstance(value, Ref) else value
+        return value
+
     def resource(self, category: str, name) -> object:
-        """FindResourceObj: this stream's resources, then the page's."""
-        r = self.doc.resolve
+        """FindResourceObj: the name in FindResourceHolder's dictionary for the category - this stream's
+        own when it has one (even without the name: the page's is not asked then), else the page's."""
+        holder = None
         for res in (self.resources, self.p.page_resources):
-            group = r(res.get(category)) if isinstance(res, dict) else None
-            if isinstance(group, dict) and name in group:
-                return r(group[name])
-        return None
+            if not isinstance(res, dict):
+                continue
+            group = self._direct(res.get(category))
+            holder = group.dict if isinstance(group, Stream) else group
+            if isinstance(holder, dict) or res is self.p.page_resources:
+                break
+        if not isinstance(holder, dict) or name is None:
+            return None
+        return self._direct(holder.get(str(name)))
 
     def colorspace(self, name) -> ColorSpace | None:
         name = str(name)
@@ -722,11 +742,15 @@ class _Run:
     def op_Tf(self, args):
         s = self.state
         s.font_size = self.number(args, 0)
+        # FindFont: no font dictionary under the name (a stream is none either) is the stock Helvetica;
+        # a dictionary no font loads from leaves the current font as it was.
         name = args[-2] if len(args) >= 2 else None
-        font_dict = self.resource("Font", name) if name is not None else None
-        s.font = self.p.font(font_dict) if font_dict is not None else None
-        if s.font is not None and s.font.is_type3:
-            s.font.check_metrics()
+        font_dict = self.resource("Font", name)
+        font = self.p.font(font_dict) if isinstance(font_dict, dict) else self.p.stock_font()
+        if font is not None:
+            s.font = font
+            if font.is_type3:
+                font.check_metrics()
 
     def op_Td(self, args):
         s = self.state

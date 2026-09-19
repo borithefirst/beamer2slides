@@ -416,6 +416,52 @@ def test_a_broken_file_is_rebuilt_as_pdfium_rebuilds_it():
         assert _pages_said("pure", data, order) == _pages_said("pdfium", data, order), name
 
 
+def _text_page(content: bytes, resources: bytes, extra: dict | None = None, stream_dict: bytes = b"") -> bytes:
+    body = b"<< /Length %d %s >>\nstream\n" % (len(content), stream_dict) + content + b"\nendstream"
+    objs = {1: _CAT, 2: b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+            3: b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 200] /Resources %s /Contents 4 0 R >>" % resources,
+            4: body, **(extra or {})}
+    return _objects_pdf(objs)
+
+
+_HELV = b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>"
+_BT = b"BT /F1 12 Tf 20 100 Td (Hello, World) Tj ET"
+FONT_AND_FILTER_CASES = {
+    # FindFont: a missing (or non-dictionary) font is the stock Helvetica, the size is set anyway
+    "missing_font": _text_page(b"BT /F9 12 Tf 20 100 Td (Hello) Tj ET", b"<< /Font << /F1 5 0 R >> >>", {5: _HELV}),
+    "stream_font": _text_page(_BT, b"<< /Font << /F1 5 0 R >> >>", {5: b"<< /Length 0 >>\nstream\n\nendstream"}),
+    # a form with a Font dictionary of its own does not look in the page's
+    "form_font_not_inherited": _text_page(
+        b"/X1 Do", b"<< /Font << /F1 5 0 R >> /XObject << /X1 6 0 R >> >>",
+        {5: _HELV, 6: b"<< /Subtype /Form /BBox [0 0 300 200] /Resources << /Font << /F2 5 0 R >> >> /Length %d >>\n"
+                      b"stream\n%s\nendstream" % (len(_BT), _BT)}),
+    # /Widths are uint16: -1502 is 64034
+    "negative_width": _text_page(_BT, b"<< /Font << /F1 5 0 R >> >>", {
+        5: b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /FirstChar 72 /LastChar 72 /Widths [-1502] >>"}),
+    # a filter PDFium does not decode is an image codec: the stored bytes; so is a /Filter that is no name
+    "unknown_filter": _text_page(_BT, b"<< /Font << /F1 5 0 R >> >>", {5: _HELV}, b"/Filter /Foo"),
+    "filter_not_a_name": _text_page(_BT, b"<< /Font << /F1 5 0 R >> >>", {5: _HELV}, b"/Filter 7"),
+    "failing_then_codec": _text_page(_BT, b"<< /Font << /F1 5 0 R >> >>", {5: _HELV}, b"/Filter [/DCTDecode /FlateDecode]"),
+    # a zero length is checked like any other: no endstream after it, the end is searched for
+    "zero_length_stray_word": _text_page(_BT, b"<< /Font << /F1 5 0 R >> >>", {5: _HELV}).replace(
+        b"/Length %d  >>" % len(_BT), b"/Length 0 R1 >>"),
+}
+
+
+@pytest.mark.parametrize("name", FONT_AND_FILTER_CASES)
+def test_fonts_and_filters_resolve_as_pdfium_resolves_them(name):
+    """Fonts that are missing, not inherited or carry impossible widths, and streams whose filters
+    PDFium won't decode. A non-embedded base-14 font is drawn with the system's Arial / Times New
+    Roman / Courier New (CFX_Win32FontInfo), so outside Windows only the object list is compared."""
+    import sys
+    data = FONT_AND_FILTER_CASES[name]
+    a, b = pdf.resolve("pure").open(data)[0], pdf.resolve("pdfium").open(data)[0]
+    close([dataclasses.astuple(o) for o in a.objects()], [dataclasses.astuple(o) for o in b.objects()], name)
+    if sys.platform == "win32":
+        for call in ("object_bounds", "chars"):
+            close(getattr(a, call)(), getattr(b, call)(), f"{name} {call}")
+
+
 def test_content_operands_are_read_as_pdfiums_stream_parser_reads_them():
     from beamer2slides.pdf.pure.syntax import Name, operations
 
