@@ -504,3 +504,20 @@ def test_a_face_without_the_letters_set_in_it_gets_no_switch(monkeypatch, tmp_pa
                              text_shape("t2", "AAAA", 10, 10, 600, 100, font="Open Sans")), foreign=True)
     text = adopt.bootstrap(only, tmp_path / "tree2" / "main.tex")
     assert "\\setsansfont{OpenSans}" in text and "NotoSansSymbols" not in text
+
+
+def test_a_dimmed_picture_is_baked_into_its_file(tmp_path):
+    """intro-lecture's title photos carry brightness -0.5 and -0.7, which LaTeX has no option for:
+    the file in the tree is the picture as Slides shows it - its colours scaled by 1 + b (measured on
+    the thumbnails), not moved by b, which would black out every pixel under half grey."""
+    from PIL import Image
+    src = tmp_path / "photo.png"
+    Image.new("RGB", (8, 8), (200, 100, 40)).save(src)
+    tree = tmp_path / "src"
+    dim = adopt.picture_of({"file": str(src), "alt": "Hall", "sha1": "ab" * 20, "brightness": -0.5}, tree)
+    plain = adopt.picture_of({"file": str(src), "alt": "Hall", "sha1": "ab" * 20}, tree)
+    assert dim.rel != plain.rel
+    assert Image.open(dim.path).convert("RGB").getpixel((3, 3)) == (100, 50, 20)
+    assert Image.open(plain.path).convert("RGB").getpixel((3, 3)) == (200, 100, 40)
+    bright = adopt.picture_of({"file": str(src), "alt": "Hall", "sha1": "ab" * 20, "brightness": 0.5}, tree)
+    assert Image.open(bright.path).convert("RGB").getpixel((3, 3)) == (255, 200, 80)

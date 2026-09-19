@@ -18,6 +18,7 @@ What the loop is left to do: the drift between where a textblock puts a baseline
 wants it (it corrects textblocks by the measured error), the words, and the pictures it can fetch.
 """
 
+import hashlib
 import json
 import os
 import re
@@ -629,20 +630,36 @@ def picture_of(el: dict, tree: Path | None):
             print(f"  {path.name}: {suffix[1:].upper()} pictures can't be included by LaTeX; left out")
             return None
         suffix = ".png"
-    if tree is None:
+    # Brightness, contrast and recolour are properties LaTeX has no option for: baked into the file
+    # (`compare.adjusted_picture`), as `pull` does - intro-lecture's title photos are dimmed to half
+    bake = {k: el[k] for k in ("brightness", "contrast", "recolor") if el.get(k)}
+    if bake and suffix not in (".png", ".jpg", ".jpeg"):
+        bake = {}
+    if tree is None and not bake:
         return Picture(path.name, path, natural_size(path))
-    rel = f"figures/{picture_slug(el.get('alt'))}-{(el.get('sha1') or path.stem)[:8]}{suffix}"
-    dest = tree / rel
+    tag = hashlib.sha1(json.dumps(bake, sort_keys=True).encode()).hexdigest()[:4] if bake else ""
+    rel = f"figures/{picture_slug(el.get('alt'))}-{(el.get('sha1') or path.stem)[:8]}{tag}{suffix}"
+    dest = (tree if tree is not None else path.parent) / rel
     if not dest.exists():
         dest.parent.mkdir(parents=True, exist_ok=True)
-        if suffix == path.suffix.lower():
+        if bake:
+            from PIL import Image
+            from .compare import adjusted_picture
+            with Image.open(path) as img:
+                img.seek(0)
+                out = adjusted_picture(img, bake)
+            if suffix == ".png":
+                out.save(dest, "PNG")
+            else:
+                out.convert("RGB").save(dest, "JPEG", quality=92)
+        elif suffix == path.suffix.lower():
             shutil.copyfile(path, dest)
         else:
             from PIL import Image
             with Image.open(path) as img:
                 img.seek(0)
                 img.convert("RGBA").save(dest, "PNG")
-    return Picture(rel, dest, natural_size(dest))
+    return Picture(rel if tree is not None else dest.name, dest, natural_size(dest))
 
 
 # ------------------------------------------------------------------------------------ text boxes

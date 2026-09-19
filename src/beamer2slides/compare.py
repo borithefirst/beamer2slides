@@ -449,16 +449,16 @@ PICTURE_EDITS = ("crop", "rotation", "flip", "opacity", "brightness", "contrast"
 
 def adjusted_picture(img, el: dict):
     """Brightness, contrast and recolour of a Slides picture applied to its pixels (RGBA). Slides'
-    own formulas aren't documented: contrast scales around mid grey (1 + c, or 1 / (1 - c) above 0),
-    brightness adds, recolour maps luminance onto the gradient of its stops."""
+    own formulas aren't documented. Recolour maps luminance onto the gradient of its stops; then
+    contrast scales around mid grey (1 + c, or 1 / (1 - c) above 0) and brightness scales the
+    colour: by 1 + b below 0, 1 / (1 - b) above (measured on the adopt corpus' thumbnails: -0.32,
+    -0.5 and -0.7 give 0.68, 0.49 and 0.30 x the file's values, 0.34 about 1.48 x, and ap-bio-stats'
+    CUSTOM ramp under 0.6 comes out 2.5 x the ramp's colours - an offset of b would black out a photo
+    at -0.5 that the deck shows dimmed)."""
     import numpy as np
     from PIL import Image
     arr = np.asarray(img.convert("RGBA"), np.float32) / 255
     rgb, alpha = arr[..., :3], arr[..., 3:]
-    c, b = el.get("contrast") or 0.0, el.get("brightness") or 0.0
-    if c or b:
-        k = 1 / max(1e-3, 1 - c) if c > 0 else 1 + c
-        rgb = (rgb - 0.5) * k + 0.5 + b
     stops = sorted((el.get("recolor") or {}).get("stops") or [], key=lambda s: s["position"])
     if stops:
         lum = np.clip(rgb @ np.array([0.299, 0.587, 0.114], np.float32), 0, 1)
@@ -468,6 +468,12 @@ def adjusted_picture(img, el: dict):
     elif (el.get("recolor") or {}).get("name") == "GRAYSCALE":
         lum = rgb @ np.array([0.299, 0.587, 0.114], np.float32)
         rgb = np.repeat(lum[..., None], 3, -1)
+    c, b = el.get("contrast") or 0.0, el.get("brightness") or 0.0
+    if c:
+        k = 1 / max(1e-3, 1 - c) if c > 0 else 1 + c
+        rgb = (rgb - 0.5) * k + 0.5
+    if b:
+        rgb = rgb * (1 + b if b < 0 else 1 / max(1e-3, 1 - b))
     out = np.concatenate([np.clip(rgb, 0, 1), alpha], -1)
     return Image.fromarray((out * 255 + 0.5).astype(np.uint8), "RGBA")
 

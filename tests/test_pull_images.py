@@ -193,7 +193,7 @@ def test_picture_file_names_reuse_and_formats(tmp_path):
     # brightness can't be an option: baked into a new file
     bright = p.picture({"file": str(new), "alt": "Lab bench", "brightness": 0.3})
     assert bright.rel != pic.rel and np.asarray(Image.open(bright.path).convert("L")).mean() > \
-        np.asarray(Image.open(new).convert("L")).mean() + 30
+        np.asarray(Image.open(new).convert("L")).mean() + 15
     assert any("brightness baked" in n for n in ctx.notes)
     assert p.picture({"file": str(deck_files / "missing.png")}) is None
 
