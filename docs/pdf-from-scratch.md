@@ -294,6 +294,10 @@ Each of these was a diff against PDFium until it was ported:
   (`crt`), the CPU's float-to-int casts, the width of a wchar_t (`navigation.wide`), the folder
   font scan off Windows (`fontmapper.FolderFontInfo`), what CoreGraphics makes of a Type 1 program
   (`crt.quartz_font`), and the red an arm64 build saturates a NaN CalRGB colour to (`cie._srgb3`).
+  One platform path the port is spared: macOS PDFium draws text through Core Graphics
+  (`CGContextShowGlyphsAtPositions`, not FreeType) whenever the device's bitmap has no alpha and
+  the font is not a medium-weight substitute - but only when the caller allows native text, and
+  the pipeline renders with `FPDF_NO_NATIVETEXT`, so that path never runs here.
 - `tests/test_pure_pdf.py` holds this in the default run: seven decks call for call, the pipeline on
   the same seven, plus one test per quirk. `tests/test_pdf_backend.py` runs the contract suite on
   `pure` too; its render and save checks know it cannot draw.
