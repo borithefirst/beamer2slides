@@ -174,6 +174,23 @@ def deck_fills_rgb(hexstr: str):
     return rgb(hexstr)
 
 
+def text_rows(e: dict, paras: list[dict], page_h: float) -> tuple[float, float]:
+    """The page rows (top, bottom, page pt) a text box's words can stand on: its box, or, when its
+    paragraphs need more height than it has even unwrapped (1.19 em x line spacing each), as far past
+    it as its alignment lets them overflow - down from the top, both ways from the middle, up from
+    the bottom. gdg24's code listings (15 lines of 9.45 pt in a 63 pt box, middle-aligned) show only
+    their indented middle lines inside the box; the lines that start at its edge stand above and below."""
+    y0, y1 = e["bbox"][1], e["bbox"][3]
+    need = sum(1.19 * max((r.get("size") or p.get("size") or 0) for r in p["runs"])
+               * ((p.get("slides") or {}).get("line_spacing") or 1.0) for p in paras)
+    over = need - (y1 - y0)
+    if over <= 0:
+        return y0, y1
+    valign = (e.get("box") or {}).get("valign", "top")
+    up = over if valign == "bottom" else over / 2 if valign == "middle" else 0.0
+    return max(0.0, y0 - up), min(page_h, y1 + over - up)
+
+
 def thumbnail_insets(elements: list[dict], thumb, px: float) -> None:
     """Text boxes the slide's own thumbnail shows with no insets (`box.insets` = 0, anchor moved).
 
@@ -202,6 +219,7 @@ def thumbnail_insets(elements: list[dict], thumb, px: float) -> None:
         scale = box_.get("scale") or 1.0
         pad = PAD_X / scale
         x0, y0, x1, y1 = e["bbox"]
+        y0, y1 = text_rows(e, paras, thumb.shape[0] / px)
         indent = min(min(p["slides"].get("indent_first") or 0, p["slides"].get("indent_start") or 0)
                      for p in paras) / scale
         strip = (x0 - 1, y0, x0 + indent + pad + 2, y1)

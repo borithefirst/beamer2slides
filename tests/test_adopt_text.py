@@ -245,6 +245,63 @@ def test_ink_on_the_boxs_first_column_is_its_own_unless_it_goes_on_outside():
     assert read(48.0) is None
 
 
+def test_an_overflowing_box_is_read_where_its_words_stand():
+    """gdg24's code listings hold more lines than their middle-aligned box: the lines that start at
+    the box's edge stand above and below it, and only the indented ones inside it."""
+    import numpy as np
+
+    from beamer2slides.deck_thumbs import text_rows, thumbnail_insets
+    px = 4.0
+
+    def element(lines):
+        paras = [{"align": "left", "bullet": None, "runs": [{"text": "x = 1", "size": 8.0}],
+                  "slides": {"indent_first": 0, "indent_start": 0, "line_spacing": 1.0}} for _ in range(lines)]
+        return {"kind": "text", "bbox": [50.0, 50.0, 200.0, 70.0], "wrap_width": 141.5, "paragraphs": paras,
+                "box": {"valign": "middle", "scale": 720 / 453.54}}
+
+    im = np.full((int(300 * px), int(453.54 * px), 3), 240, dtype=np.int16)
+    im[int(40 * px):int(46 * px), int(50.4 * px):int(90 * px)] = 20        # `def f():` over the box
+    im[int(55 * px):int(61 * px), int(70 * px):int(110 * px)] = 20         # its indented body in it
+    assert text_rows(element(1), element(1)["paragraphs"], 300) == (50.0, 70.0)
+    top, bottom = text_rows(element(4), element(4)["paragraphs"], 300)
+    assert round(top, 2) == 40.96 and round(bottom, 2) == 79.04, "4 x 9.52 pt, centred"
+    assert text_rows(element(10), element(10)["paragraphs"], 300)[0] < 40
+    el = element(10)
+    thumbnail_insets([el], im, px)
+    assert el["box"].get("insets") == 0
+    el = element(1)
+    thumbnail_insets([el], im, px)
+    assert "insets" not in el["box"], "a box its words fit reads its own rows only"
+
+
+def test_a_middle_aligned_box_stacks_its_last_paragraphs_space_below():
+    """intro-lecture's titles (10 pt below) stood 5 pt low without it; top-aligned boxes and gdg24's
+    turned stickers (ELLIPSE) show none of it."""
+    last = {"slides": {"space_below": 10.0}}
+    assert adopt.trailing_space(last, "middle") == 10.0 and adopt.trailing_space(last, "bottom") == 10.0
+    assert adopt.trailing_space(last, "top") == 0.0 and adopt.trailing_space(last, "middle", "ELLIPSE") == 0.0
+    el = {"kind": "text", "bbox": [0, 0, 100, 80], "box": {"scale": 2.0, "valign": "middle"},
+          "paragraphs": [{"runs": [{"text": "add(6, 7)", "size": 15.0}], "slides": {}},
+                         {"runs": [{"text": "???", "size": 24.0}], "slides": {"space_below": 10.0}}]}
+    text = adopt.text_box_latex(el, adopt.Context(), "")
+    assert re.search(r"-\\prevdepth\\relax\s*\\vskip5\.00pt", text), text
+    el["box"]["valign"] = "top"
+    assert "\\vskip5.00pt" not in adopt.text_box_latex(el, adopt.Context(), "")
+
+
+def test_a_line_as_wide_as_its_box_stays_on_one_line():
+    """The measure is scaled as the words are: sizes are written to 0.01 page pt, so gdg24's 15 pt
+    code (9.44875 page pt, set at 9.45) needs a measure 0.013% wider to keep its 621.0 pt line, and
+    sc-dark-minimal's 88 pt heading (27.714, set at 27.71) one that much narrower to wrap."""
+    scale = 720 / 453.54
+    code = [{"runs": [{"text": "x", "size": 9.45}], "slides": {"size": 15.0}}]
+    assert 69 * 0.6 * 9.45 <= adopt.measure(391.18, code, scale) < 391.26
+    heading = [{"runs": [{"text": "About Us.", "size": 27.71}], "slides": {"size": 87.99}}]
+    assert adopt.measure(129.13, heading, 3.1750231512104774) < 129.13
+    odd = [{"runs": [{"text": "x", "size": 12.0}], "slides": {"size": 30.0}}]
+    assert adopt.measure(100.0, odd, 2.0) == 100.0 + adopt.FIT_SLACK, "not a rounding: left alone"
+
+
 def title_deck(style: dict) -> dict:
     """A title whose layout placeholder is bold Arial and whose one run says `style`."""
     layout_title = box("L_title", para("", runs=[("", {"bold": True, "fontFamily": "Arial", "fontSize": pt(28)})]),
@@ -385,7 +442,8 @@ def test_a_box_with_no_insets_sets_its_text_against_its_edges(tmp_path):
     tight = frame_of(source(tmp_path, fitted(59)))
     roomy = frame_of(source(tmp_path / "r", fitted(72)))
     x = 100 / scale
-    assert f"\\begin{{textblock*}}{{{300 / scale:.1f}pt}}({x:.1f}pt," in tight
+    width = re.search(r"\\begin\{textblock\*\}\{([\d.]+)pt\}\(([\d.]+)pt,", tight)
+    assert abs(float(width[1]) - 300 / scale) < 0.06 and width[2] == f"{x:.1f}"
     assert "\\vskip0.00pt" in tight
     assert f"({x + 6.7 / scale:.1f}pt," in roomy and f"\\vskip{6.48 / scale:.2f}pt" in roomy
 
@@ -665,9 +723,9 @@ def test_a_box_with_powerpoint_insets_starts_its_text_3_6_pt_higher():
     plain = adopt.text_box_latex(el, adopt.Context(), "")
     el["box"]["inset_y"] = 3.6
     assert "\\vskip6.48pt" in plain and "\\vskip2.88pt" in adopt.text_box_latex(el, adopt.Context(), "")
-    assert "\\begin{textblock*}{86.6pt}(6.7pt,0.0pt)" in plain
+    assert "\\begin{textblock*}{86.61pt}(6.7pt,0.0pt)" in plain
     el["box"]["inset_x"] = 3.6
-    assert "\\begin{textblock*}{92.8pt}(3.6pt,0.0pt)" in adopt.text_box_latex(el, adopt.Context(), "")
+    assert "\\begin{textblock*}{92.81pt}(3.6pt,0.0pt)" in adopt.text_box_latex(el, adopt.Context(), "")
 
 
 def test_the_thumbnails_measure_a_first_line_and_skip_what_crosses_it():

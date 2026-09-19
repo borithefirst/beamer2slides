@@ -1024,6 +1024,36 @@ def bullet_tex(p: dict, ctx: Context, scale: float, right: float) -> str:
 
 
 SLIDES_INSET_Y = 7.2        # Slides pt: Slides' own top and bottom text insets, which BASELINE_A includes
+FIT_SLACK = 0.01            # page pt: the box's edges are read to 0.01 pt
+
+
+def measure(width: float, paras: list[dict], scale: float) -> float:
+    """The measure (page pt) a text box's lines are broken at: its width, scaled as its words are.
+    The IR gives sizes in page pt to 0.01, so TeX sets words up to 0.05% wider or narrower than Slides
+    does, and Slides keeps a line exactly as wide as its box on it: gdg24's code listing (69 characters
+    of 0.6 em at 15 pt = 621.0 slide pt in a 621.0 pt box, 9.44875 page pt written 9.45) broke one
+    more line in TeX than on the thumbnail, while sc-dark-minimal's "About Us." (27.714 pt written
+    27.71), 0.04 pt wider than its box in Slides, fitted once the measure was 0.06 pt wider."""
+    for p in paras:
+        true = ((p.get("slides") or {}).get("size") or 0) / scale
+        if true and p["runs"]:
+            ratio = para_size(p) / true
+            if abs(ratio - 1) < 0.002:
+                return width * ratio + FIT_SLACK
+            break
+    return width + FIT_SLACK
+
+
+def trailing_space(last: dict, valign: str, shape: str | None = None) -> float:
+    """The last paragraph's spaceBelow (slide pt) that a middle- or bottom-aligned box stacks under its
+    last line: Slides places the stack with it, so the lines stand that much (half of it, centred)
+    higher than their own height puts them. intro-lecture's "add(add(6, ...))" / "???" title (30 pt
+    and 48 pt, 10 pt below each) stood 5 pt low without it, jeb-arch's "Unit 1" labels 2-4 pt. A
+    top-aligned box shows none of it, and neither do gdg24's turned ELLIPSE stickers (10 pt below
+    too): their words stood within 0.8 pt of the thumbnail's without it and 1.2-1.9 pt high with it."""
+    if valign not in ("middle", "bottom") or shape == "ELLIPSE":
+        return 0.0
+    return float((last.get("slides") or {}).get("space_below") or 0.0)
 
 
 def text_box_latex(el: dict, ctx: Context, ind: str) -> str:
@@ -1046,7 +1076,7 @@ def text_box_latex(el: dict, ctx: Context, ind: str) -> str:
     paras = [p for p in el["paragraphs"] if p["runs"]]
     ctx.packages.add(TEXTPOS)
     ctx.packages.add(SLIDES_TEXT)
-    out = [f"{ind}\\begin{{textblock*}}{{{width:.1f}pt}}({x0 + pad:.1f}pt,{y0:.1f}pt)",
+    out = [f"{ind}\\begin{{textblock*}}{{{measure(width, paras, scale):.2f}pt}}({x0 + pad:.1f}pt,{y0:.1f}pt)",
            f"{ind}  \\vbox to {height:.1f}pt{{\\slidesbox",
            f"{ind}  " + ("\\vss" if valign in ("middle", "bottom") else f"\\vskip{inset:.2f}pt")]
     prev = None
@@ -1164,6 +1194,9 @@ def text_box_latex(el: dict, ctx: Context, ind: str) -> str:
         last = line_box(para_size(prev), 1.0 if pr >= WIDE_SPACING else pr)[1]
         if not mixed_sizes(prev):                      # else its words' struts already end it
             out.append(f"{ind}  \\vskip\\dimexpr{last:.2f}pt-\\prevdepth\\relax")
+        tail = trailing_space(prev, valign, el.get("shape_type")) / scale
+        if tail:
+            out.append(f"{ind}  \\vskip{tail:.2f}pt")
     out.append(f"{ind}  " + ("\\vss" if valign in ("middle", "top") else f"\\vskip{inset:.2f}pt") + "}")
     out.append(f"{ind}\\end{{textblock*}}")
     return "\n".join(out)
