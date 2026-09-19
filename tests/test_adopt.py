@@ -381,3 +381,23 @@ def test_a_see_through_page_background_is_blended_over_white():
     page = {"pageProperties": {"pageBackgroundFill": {"solidFill": {
         "color": {"rgbColor": {"red": 0x4b / 255, "green": 0xac / 255, "blue": 0xc6 / 255}}, "alpha": 0.247}}}}
     assert page_background(page, {}, {}) == ("#d3eaf1", None)
+
+
+def test_adopt_reads_every_slide_thumbnail_and_gives_up_on_one_quietly(monkeypatch, tmp_path):
+    """Fills the API cannot say come from Google's picture of the slide (deck_fills.py), so a live
+    adopt reads one per slide; a slide Google would not render leaves its fills out, nothing more."""
+    from beamer2slides import deck_ir as ir, google_auth, gslides
+
+    def save(_service, _pid, page, path):
+        if page == "bad":
+            raise RuntimeError("HttpError 500")
+        path.write_bytes(b"png")
+        return 1600, 900
+
+    monkeypatch.setattr(gslides, "save_thumbnail", save)
+    monkeypatch.setattr(google_auth, "credentials", lambda: None)
+    monkeypatch.setattr(google_auth, "slides_service", lambda creds=None: None)
+    pres = {"slides": [{"objectId": "a"}, {"objectId": "bad"}, {"objectId": "c"}]}
+    get = ir.slide_thumbnails("pid", pres, tmp_path / "thumbnails")
+    assert get(0) == tmp_path / "thumbnails" / "001.png" and get(1) is None
+    assert get(2).read_bytes() == b"png" and get(3) is None

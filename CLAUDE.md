@@ -522,7 +522,8 @@ Fills the API cannot say (`deck_fills.py`, `tests/test_adopt_fills.py`): a gradi
 fill reads `shapeBackgroundFill: {}`, a .pptx table style's cell colour NOT_RENDERED, and every
 placeholder INHERIT chain in the corpus ends NOT_RENDERED too - so `deck_ir(foreign=True,
 thumbnails=n -> image)` reads them from the slide's own thumbnail (the bench passes the cached LARGE
-ones; live `adopt` does not fetch them yet, and without thumbnails nothing changes). Conservative, since a false fill paints over what lies
+ones; live `adopt` reads one per slide, `deck_ir.slide_thumbnails`, 3 at a time into
+`<work>/thumbnails`, `$B2S_ADOPT_THUMBNAILS=0` skips it; without thumbnails nothing changes). Conservative, since a false fill paints over what lies
 under it: the box less a rim and less opaque elements above must be one flat colour (ink allowed only
 in boxes of texts above), not the page's or the colour all around it (`edges_show`, table cells vs
 the page outside the table), settled top down; a rectangle may read as a three-stop axis gradient

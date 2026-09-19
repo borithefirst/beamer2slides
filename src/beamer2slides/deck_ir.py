@@ -14,7 +14,9 @@ snapshot's object map, else none (compare aligns slides by title and text).
 import hashlib
 import json
 import math
+import os
 import re
+import time
 import urllib.request
 from pathlib import Path
 
@@ -1243,5 +1245,38 @@ def read_deck(ref: str, images: Path | None = None, base: dict | None = None, pd
         pdf_size = json.loads((p / "deck.json").read_text(encoding="utf-8"))["slides"][0]["size"]
     if base is None and p.is_dir() and (p / "sync" / "base.json").exists():
         base = json.loads((p / "sync" / "base.json").read_text(encoding="utf-8"))
+    # A foreign deck's gradients, table-style colours and the like are only in Google's own picture of
+    # each slide (deck_fills.py), so adopt reads those too, next to the pictures ($B2S_ADOPT_THUMBNAILS=0: not).
+    thumbnails = None
+    if foreign and images is not None and os.environ.get("B2S_ADOPT_THUMBNAILS", "1") != "0":
+        thumbnails = slide_thumbnails(pid, pres, Path(images).parent / "thumbnails")
     return deck_ir(pres, pdf_size or (base or {}).get("page_size"), base, fetch_url if images else None, images,
-                   foreign)
+                   foreign, thumbnails)
+
+
+def slide_thumbnails(pid: str, pres: dict, folder: Path):
+    """Save every slide's LARGE thumbnail into `folder` (3 at a time: Google allows 60 such reads a
+    minute, and a 429 waits) and return `deck_ir`'s `thumbnails` callback over them. A slide whose
+    thumbnail could not be read is None there: its unreported fills stay out, as without any."""
+    from concurrent.futures import ThreadPoolExecutor
+    from .google_auth import credentials, slides_service
+    from .gslides import save_thumbnail
+    creds = credentials()
+    folder.mkdir(parents=True, exist_ok=True)
+
+    def one(item):
+        i, s = item
+        path = folder / f"{i + 1:03d}.png"             # read again every time: the deck may have changed
+        for attempt in range(6):
+            try:
+                save_thumbnail(slides_service(creds), pid, s["objectId"], path)
+                return path
+            except Exception as exc:                                  # noqa: BLE001
+                if "429" not in str(exc) or attempt == 5:
+                    print(f"  slide {i + 1}: no thumbnail ({str(exc)[:80]})")
+                    return None
+                time.sleep(20 + 10 * attempt)
+
+    with ThreadPoolExecutor(3) as pool:
+        paths = list(pool.map(one, enumerate(pres.get("slides", []))))
+    return lambda n: paths[n] if 0 <= n < len(paths) else None
