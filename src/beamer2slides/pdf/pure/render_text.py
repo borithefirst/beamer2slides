@@ -19,10 +19,13 @@ per glyph to the font's weight and the glyph's /Widths width and skewed by the i
 GetCharPosList's spacing heuristic and a glyph cache per face and document.
 
 Refused (`unsupported`), so that a page is drawn exactly or not at all: Type 3 fonts, TrueType
-glyphs (embedded, or a system substitute GDI picked: `truetype_face`), codes whose glyph the font lacks (PDFium falls back to another font), vertical writing, pattern
-colours, render modes outside 0..7, and text drawn into a soft mask (a mask device renders glyphs
-in FT_RENDER_MODE_NORMAL). Text clip modes (4..7) are drawn like 0..3: the AGG device has no soft
-clip, so ProcessClipPath skips text clips altogether."""
+glyphs (embedded, or a system substitute GDI picked: `truetype_face`), codes whose glyph the font
+lacks (PDFium falls back to another font), pattern colours, render modes outside 0..7, and text
+drawn into a soft mask (a mask device renders glyphs in FT_RENDER_MODE_NORMAL). Text clip modes
+(4..7) draw like 0..3, and their glyph outlines become a clip (`clip_text_path`, called by
+render.Status.process_clip): the AGG device has soft clips, so ProcessClipPath follows a clip's
+texts, one winding clip per BT..ET group. Vertical writing only moves the origins (`_origin`,
+GetCharPosList): an embedded font's glyphs are drawn as they are."""
 
 from __future__ import annotations
 
@@ -131,6 +134,14 @@ def glyph_of(font, code: int) -> int:
     return -1 if g is None or g == 0xFFFF else g
 
 
+def _origin(obj, item) -> tuple[float, float]:
+    """GetCharPosList's origin: (x, 0), or in vertical writing (0, y) less the font size times the
+    char's vertical origin / 1000 (GetItemInfo's rule; embedded fonts have no CID transform)."""
+    from .content import item_origin
+    x, y = item_origin(obj, item)
+    return F(x), F(y)
+
+
 def unsupported(obj) -> str | None:
     """Why text object `obj` cannot be drawn exactly, or None."""
     mode = obj.text_mode
@@ -145,8 +156,14 @@ def unsupported(obj) -> str | None:
         return None
     if obj.pattern:
         return "text in a pattern colour"
-    if font.vertical:
-        return "vertical text"
+    return _outline_refusal(obj)
+
+
+def _outline_refusal(obj) -> str | None:
+    """Why the glyph outlines of text object `obj` cannot be had exactly, or None."""
+    font = obj.font
+    if not font.embedded and font.vertical:
+        return "vertical text in a substituted font (CID transform)"
     _, why = _face(font)
     if why is not None:
         return why
@@ -154,6 +171,29 @@ def unsupported(obj) -> str | None:
         if not _uses_font(font, glyph_of(font, code)):
             return "text needing a fallback font"
     return None
+
+
+def clip_unsupported(clip_texts: tuple) -> str | None:
+    """Why a clip's texts (content.append_texts) cannot be turned into a clip exactly, or None.
+    Only their outlines count: colours, patterns and soft masks play no part in a clip."""
+    seen = _CLIP_VERDICTS.get(id(clip_texts))
+    if seen is not None and seen[0] is clip_texts:
+        return seen[1]
+    why = None
+    for text in clip_texts:
+        if text is None or not text.items or text.font is None:
+            continue
+        why = _outline_refusal(text)
+        if why is not None:
+            why = f"a text clip: {why}"
+            break
+    if len(_CLIP_VERDICTS) > 4096:
+        _CLIP_VERDICTS.clear()
+    _CLIP_VERDICTS[id(clip_texts)] = (clip_texts, why)
+    return why
+
+
+_CLIP_VERDICTS: dict = {}
 
 
 def _uses_font(font, glyph: int) -> bool:
@@ -240,15 +280,19 @@ def _spacing_heuristic(font, face: _SubstFace) -> bool:
     return not base.startswith(family)                           # IsActualFontLoaded
 
 
-def char_pos_list(font, items, size: float, face=None) -> list:
-    """CPDF_Font::GetCharPosList for a horizontal simple font: (glyph, x, font_char_width, adjust)
-    per code; a substitute's glyphs are drawn at the /Widths width (dest_width) and, for a system
-    substitute, moved or narrowed where /Widths disagree with the face."""
+def char_pos_list(obj, face=None) -> list:
+    """CPDF_Font::GetCharPosList: (glyph, x, y, font_char_width, adjust) per item. The origin is
+    (x, 0), or in vertical writing (0, y) (`_origin`); a substitute's glyphs are drawn at their
+    /Widths width (dest_width) and, for a substitute that is not multiple master, moved or narrowed
+    where /Widths disagree with the face (horizontal simple fonts only)."""
+    font, size = obj.font, F(obj.font_size)
     subst = not font.embedded and font.subtype != "Type0"
-    heuristic = subst and face is not None and _spacing_heuristic(font, face)
+    heuristic = subst and face is not None and not font.vertical and _spacing_heuristic(font, face)
     out = []
-    for code, x in items:
-        glyph, x, adjust = glyph_of(font, code), F(x), None
+    for item in obj.items:
+        code = item[0]
+        glyph, adjust = glyph_of(font, code), None
+        x, y = _origin(obj, item)
         dest_width = font.char_width(code) if subst else 0
         if heuristic:
             pdf_w, font_w = font.char_width(code), face.glyph_width(glyph)
@@ -256,7 +300,7 @@ def char_pos_list(font, items, size: float, face=None) -> list:
                 x = F(x + F(F(F(float(pdf_w - font_w)) * size) / 2000.0))
             elif pdf_w and font_w and pdf_w < font_w:
                 adjust = (F(F(pdf_w) / F(font_w)), 0.0, 0.0, 1.0)
-        out.append((glyph, x, dest_width, adjust))
+        out.append((glyph, x, y, dest_width, adjust))
     return out
 
 
@@ -265,8 +309,9 @@ def _effective(adjust, m):
     return R.concat(IDENTITY if adjust is None else (*adjust, 0.0, 0.0), m)
 
 
-def _unpack(ch):
-    return ch[0], ch[1], (ch[2] if len(ch) > 2 else 0), (ch[3] if len(ch) > 3 else None)
+def _glyph_path(face, glyph: int, dest_width: int):
+    """CFX_Font::LoadGlyphPath: a substitute's path goes through its skew, blend and embolden."""
+    return face.path(glyph, dest_width) if isinstance(face, _SubstFace) else face.path(glyph)
 
 
 # ---------------------------------------------------------------------- ProcessText
@@ -304,7 +349,7 @@ def _process_text(status, obj, matrix) -> None:
     size = F(obj.font_size)
     if not font.embedded:
         face = _SubstFace(face, font)
-    chars = char_pos_list(font, obj.items, size, face if not font.embedded else None)
+    chars = char_pos_list(obj, face if not font.embedded else None)
     if is_stroke:
         device_matrix = matrix
         ctm = obj.text_ctm
@@ -333,12 +378,11 @@ def draw_text_path(dev, face, chars, size, text2user, user2device, graph, fill_a
     if not (fill_argb or stroke_argb):
         return
     fill_type = FILL_WINDING if fill_argb else FILL_NONE
-    for ch in chars:
-        glyph, x, dest_width, adjust = _unpack(ch)
-        path = face.path(glyph, dest_width) if isinstance(face, _SubstFace) else face.path(glyph)
+    for glyph, x, y, dest_width, adjust in chars:
+        path = _glyph_path(face, glyph, dest_width)
         if path is None:
             continue
-        m = _effective(adjust, (size, 0.0, 0.0, size, x, 0.0))     # GetEffectiveMatrix
+        m = _effective(adjust, (size, 0.0, 0.0, size, x, y))       # GetEffectiveMatrix
         m = R.concat(m, text2user)
         points = []
         for px, py, kind, close in path:
@@ -346,6 +390,35 @@ def draw_text_path(dev, face, chars, size, text2user, user2device, graph, fill_a
             points.append((tx, ty, _KINDS[kind], close))
         dev.draw_path(points, user2device, graph, fill_argb, stroke_argb, fill_type, stroke,
                       text_mode=True)
+
+
+def clip_text_path(obj, matrix, out: list) -> None:
+    """ProcessText with a clipping path: DrawTextPath appends each glyph's outline, through the
+    text matrix (the CTM is not taken out, whatever the mode) and then `matrix` (CFX_Path::Append
+    with the object-to-device matrix), to `out`, a device-space path."""
+    from .render import _available
+    if not obj.items:
+        return
+    text_matrix = tuple(obj.matrix)
+    if not _available(text_matrix):
+        return
+    font = obj.font
+    face, why = _face(font)
+    if face is None:
+        raise PdfError(f"the pure reader cannot render {why}")
+    size = F(obj.font_size)
+    if not font.embedded:
+        face = _SubstFace(face, font)
+    for glyph, x, y, dest_width, adjust in char_pos_list(obj, face if not font.embedded else None):
+        path = _glyph_path(face, glyph, dest_width)
+        if path is None:
+            continue
+        m = _effective(adjust, (size, 0.0, 0.0, size, x, y))          # GetEffectiveMatrix
+        m = R.concat(m, text_matrix)
+        for px, py, kind, close in path:
+            tx, ty = R.transform(m, px, py)
+            dx, dy = R.transform(matrix, tx, ty)
+            out.append((dx, dy, _KINDS[kind], close))
 
 
 # ---------------------------------------------------------------------- DrawNormalText
@@ -432,10 +505,9 @@ def draw_normal_text(dev, face, chars, size, text2device, fill_argb: int) -> Non
         draw_text_path(dev, face, chars, size, text2device, None, None, fill_argb, 0, False)
         return
     glyphs = []
-    for ch in chars:
-        glyph, x, dest_width, adjust = _unpack(ch)
-        matrix = _effective(adjust, char2device)
-        ox, oy = R.transform(text2device, x, 0.0)
+    for glyph, x, y, dest_width, adjust in chars:
+        matrix = _effective(adjust, char2device)              # GetEffectiveMatrix
+        ox, oy = R.transform(text2device, x, y)
         if isinstance(face, _SubstFace):
             bm = face.bitmap(glyph, matrix, dest_width)
         else:

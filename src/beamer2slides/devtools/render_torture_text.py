@@ -11,8 +11,11 @@ codes whose glyphs the subset kept are shown). Nothing is committed: no font bin
 
 A page is a few `BT ... ET` groups: a random `cm`, clip paths, colours, constant alpha, then text
 with random Tf size (tiny to huge), Tm (upright, scaled, skewed, turned, mirrored), Tz, Tc, Tw, Ts,
-TL / T* / ' / \", Tr 0..7, line width, TJ kerning. Failures are written to DIR as seedN.pdf (the
-shrunk page) and seedN.png (PDFium | pure | difference)."""
+TL / T* / ' / \", Tr 0..7, line width, TJ kerning. `--simple 3` makes text clip pages instead
+(`random_clip_page`: Tr 4..7 followed by paths, inline images and text inside the clip), and `--simple 4`
+vertical writing (`vertical_spec`: CID fonts on Identity-V or an embedded CMap with a random /WMode,
+random /W2 and /DW2, mixed with horizontal ones, clip pages among them). Failures
+are written to DIR as seedN.pdf (the shrunk page) and seedN.png (PDFium | pure | difference)."""
 
 from __future__ import annotations
 
@@ -364,13 +367,182 @@ def random_text(r: random.Random, fonts: list[FontSpec], simple: int) -> bytes:
     return b"\n".join(g)
 
 
+def _paint(r: random.Random) -> bytes:
+    """Something to see a clip by: a big rectangle, a curve or a stroke in a random colour."""
+    col = b"%.3f %.3f %.3f rg %.3f %.3f %.3f RG" % tuple(r.random() for _ in range(6))
+    q = r.random()
+    if q < 0.45:
+        body = b"%.2f %.2f %.2f %.2f re f" % (r.uniform(-20, 60), r.uniform(-20, 40),
+                                             r.uniform(100, 240), r.uniform(80, 180))
+    elif q < 0.75:
+        pts = [r.uniform(-20, 220) if i % 2 == 0 else r.uniform(-20, 170) for i in range(8)]
+        body = b"%.2f %.2f m %.2f %.2f %.2f %.2f %.2f %.2f c h %s" % (*pts, r.choice([b"f", b"f*", b"B"]))
+    else:
+        body = b"%.2f w %.2f %.2f m %.2f %.2f l S" % (r.uniform(0.5, 12), r.uniform(-10, 200),
+                                                     r.uniform(-10, 150), r.uniform(-10, 200), r.uniform(-10, 150))
+    return col + b" " + body
+
+
+def _image(r: random.Random) -> bytes:
+    """A small inline RGB image stretched over part of the page."""
+    w, h = r.randint(1, 4), r.randint(1, 4)
+    data = bytes(r.randrange(256) for _ in range(w * h * 3))
+    return (b"q %.2f 0 0 %.2f %.2f %.2f cm BI /W %d /H %d /CS /RGB /BPC 8 /F /AHx ID " %
+            (r.uniform(20, 200), r.uniform(20, 150), r.uniform(-10, 60), r.uniform(-10, 40), w, h)
+            + data.hex().encode() + b"> EI Q")
+
+
+def random_clip_text(r: random.Random, fonts: list[FontSpec]) -> bytes:
+    """A BT..ET group for the clip pages: Tr 4..7 most of the time (the mode at ET decides whether
+    the texts shown in clip modes clip), sometimes several shows under different modes."""
+    k = r.randrange(len(fonts))
+    spec = fonts[k]
+    g = [b"%.3f %.3f %.3f rg" % tuple(r.random() for _ in range(3)), b"BT"]
+    size = r.choice([r.uniform(4, 30), r.uniform(20, 90), r.choice([9, 11, 40, 120])])
+    g.append(b"/F%d %.3f Tf" % (k, size))
+    g.append(random_tm(r) if r.random() < 0.6 else b"%.3f %.3f Td" % (r.uniform(-10, 150), r.uniform(10, 130)))
+    if r.random() < 0.2:
+        g.append(b"%.2f Tz" % r.choice([50, 80, 150, r.uniform(20, 250)]))
+    if r.random() < 0.2:
+        g.append(b"%.3f Tc" % r.uniform(-1, 3))
+    if r.random() < 0.3:
+        g.append(b"%.3f w" % r.choice([0, 0.5, 1, 2.5]))
+    for _ in range(r.randint(1, 3)):
+        g.append(b"%d Tr" % (r.randint(4, 7) if r.random() < 0.8 else r.randint(0, 3)))
+        if r.random() < 0.7:
+            g.append(_string(r, spec, r.randint(1, 6)) + b" Tj")
+        else:
+            parts = []
+            for _ in range(r.randint(1, 3)):
+                parts.append(_string(r, spec, r.randint(1, 4)))
+                parts.append(b"%d" % r.randint(-500, 800))
+            g.append(b"[" + b" ".join(parts) + b"] TJ")
+    if r.random() < 0.2:
+        g.append(b"%d Tr" % r.randint(0, 7))                 # the mode at ET decides
+    g.append(b"ET")
+    return b"\n".join(g)
+
+
+def random_clip_page(r: random.Random, fonts: list[FontSpec]) -> bytes:
+    """Text clips (Tr 4..7) followed by what they clip: paths, images and more text, with q/Q
+    around some of it, path clips mixed in, and clips inside clips."""
+    g = [b"q"]
+    depth = 1
+    if r.random() < 0.25:
+        a, b, c, d = (r.uniform(-1.5, 1.5) for _ in range(4))
+        g.append(b"%.4f %.4f %.4f %.4f %.3f %.3f cm" % (a, b, c, d, r.uniform(-30, 120), r.uniform(-30, 100)))
+    for _ in range(r.randint(2, 7)):
+        q = r.random()
+        if q < 0.35:
+            g.append(random_clip_text(r, fonts))
+        elif q < 0.64:
+            g.append(_paint(r))
+        elif q < 0.68:
+            g.append(_image(r))
+        elif q < 0.78:
+            g.append(b"%.2f %.2f %.2f %.2f re W n" % (r.uniform(0, 150), r.uniform(0, 100),
+                                                     r.uniform(5, 150), r.uniform(5, 120)))
+        elif q < 0.88:
+            g.append(b"q")
+            depth += 1
+        elif depth > 1:
+            g.append(b"Q")
+            depth -= 1
+        else:
+            g.append(random_text(r, fonts, 2))
+        if r.random() < 0.5:
+            g.append(_paint(r))
+    g.append(_paint(r))
+    g.extend([b"Q"] * depth)
+    return b"\n".join(g)
+
+
+def _metric(r: random.Random, lo: int, hi: int) -> int:
+    """A W2/DW2 number: mostly in range, now and then 0, a real or one past int16."""
+    q = r.random()
+    if q < 0.05:
+        return 0
+    if q < 0.08:
+        return r.choice([40000, -40000, 32767, -32768])
+    return r.randint(lo, hi)
+
+
+def _w2(r: random.Random, codes: list) -> bytes:
+    """A random /W2: `c [w1 vx vy ...]` runs (sometimes a group short) and `c1 c2 w1 vx vy`."""
+    parts = []
+    for _ in range(r.randint(1, 4)):
+        c = r.choice(codes)
+        if r.random() < 0.5:
+            vals = []
+            for _ in range(r.randint(1, 3)):
+                vals += [_metric(r, -1400, 200), _metric(r, -200, 1200), _metric(r, -300, 1300)]
+            if r.random() < 0.15:
+                vals = vals[:-1]
+            parts.append(b"%d [%s]" % (c, b" ".join(b"%d" % v for v in vals)))
+        else:
+            c2 = c + r.randint(0, 40)
+            parts.append(b"%d %d %d %d %d" % (c, c2, _metric(r, -1400, 200), _metric(r, -200, 1200),
+                                              _metric(r, -300, 1300)))
+    if r.random() < 0.1:
+        parts.append(b"%d.7 [%d %d %d]" % (r.choice(codes), _metric(r, -1400, 0), 500, 880))
+    return b"[" + b" ".join(parts) + b"]"
+
+
+def vertical_spec(r: random.Random, spec: FontSpec) -> FontSpec:
+    """`spec` (a 2-byte CID font) in vertical writing: Identity-V, or an embedded Identity CMap
+    whose /WMode is 1 (or something odd), with a random /W2 and /DW2 on the descendant."""
+    objs = list(spec.objects)
+    head = objs[0]
+    q = r.random()
+    if q < 0.55:
+        enc = b"/Identity-V"
+    else:
+        wmode = r.choice([b"1", b"1", b"1", b"2", b"-1", b"0", b"<01>", b"1.5"])
+        cmap = (b"/CIDInit /ProcSet findresource begin 12 dict begin begincmap\n"
+                b"/CMapName /Torture-V def /CMapType 1 def /WMode " + wmode + b" def\n"
+                b"1 begincodespacerange <0000> <FFFF> endcodespacerange\n"
+                b"1 begincidrange <0000> <FFFF> 0 endcidrange\n"
+                b"endcmap CMapName currentdict /CMap defineresource pop end end")
+        objs.append(b"<< /Type /CMap /CMapName /Torture-V /WMode %s /Length %d >>\nstream\n"
+                    % (wmode, len(cmap)) + cmap + b"\nendstream")
+        enc = b"@%d@" % (len(objs) - 1)
+    head = re.sub(rb"/Encoding\s*/Identity-[HV]", b"/Encoding " + enc, head)
+    m = re.search(rb"/DescendantFonts\s*\[\s*@(\d+)@", head)
+    objs[0] = head
+    extra = b""
+    if r.random() < 0.8:
+        extra += b"/W2 " + _w2(r, spec.codes) + b"\n"
+    q = r.random()
+    if q < 0.6:
+        extra += b"/DW2 [%d %d]\n" % (_metric(r, -200, 1300), _metric(r, -1400, 200))
+    elif q < 0.7:
+        extra += b"/DW2 [%d]\n" % _metric(r, -200, 1300)
+    if m and extra:
+        k = int(m.group(1))
+        objs[k] = objs[k].replace(b"<<", b"<<" + extra, 1)
+    return FontSpec(spec.name + " (V)", spec.kind, objs, spec.codes, True, dict(spec.extra, vertical=True))
+
+
 def case(seed: int, kind: str = "any", simple: int = 2):
-    """(content, fonts, zoom, transparent) for seed `seed`."""
+    """(content, fonts, zoom, transparent) for seed `seed`. `simple` 3: text clip pages
+    (`random_clip_page`); 4: vertical writing (`vertical_spec`), mixed with horizontal fonts."""
     r = random.Random(seed)
     pool = [s for s in harvest() if kind == "any" or s.kind == kind or (kind == "cid" and s.kind.startswith("cid"))]
+    if simple == 4:
+        pool = [s for s in pool if s.two_byte]
     if not pool:
         raise SystemExit(f"no {kind} fonts found in {DECKS} (build the test decks first)")
     fonts = [r.choice(pool) for _ in range(r.randint(1, 3))]
+    if simple == 4:
+        fonts = [vertical_spec(r, f) if r.random() < 0.75 else f for f in fonts]
+        if r.random() < 0.3:
+            content = b"\n".join(random_clip_page(r, fonts) for _ in range(r.randint(1, 2)))
+        else:
+            content = b"\n".join(random_text(r, fonts, 2) for _ in range(r.randint(1, 4)))
+        return content, fonts, r.choice([0.5, 1, 1.37, 2, 3.1]), r.random() < 0.3
+    if simple == 3:
+        content = b"\n".join(random_clip_page(r, fonts) for _ in range(r.randint(1, 2)))
+        return content, fonts, r.choice([0.5, 1, 1.37, 2, 3.1]), r.random() < 0.3
     groups = [random_text(r, fonts, simple) for _ in range(r.randint(1, 1 if simple == 0 else 4))]
     zoom = 1 if simple == 0 else r.choice([0.5, 1, 1.37, 2, 3.1])
     transparent = False if simple == 0 else r.random() < 0.3
@@ -382,8 +554,13 @@ def compare(content: bytes, fonts, zoom: float, transparent: bool):
     from ..pdf.pdfium_backend import PdfiumBackend
     from ..pdf.pure.backend import PureBackend
     data = pdf_bytes(content, fonts)
-    a = PdfiumBackend().open(data)[0].render(zoom, transparent=transparent)
-    b = PureBackend().open(data)[0].render(zoom, transparent=transparent)
+    da, db = PdfiumBackend().open(data), PureBackend().open(data)
+    try:
+        a = da[0].render(zoom, transparent=transparent)
+        b = db[0].render(zoom, transparent=transparent)
+    finally:
+        da.close()
+        db.close()
     d = np.abs(a.astype(int) - b.astype(int)).max(axis=2)
     return int((d > 0).sum()), a, b, d
 

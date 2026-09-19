@@ -277,8 +277,8 @@ Each of these was a diff against PDFium until it was ported:
 
 ## What it does not do
 
-- **Rendering, mostly.** Option 3 below is under way (next section); until images, Type 3 and
-  TrueType text (and the shadings and colour spaces not ported yet) draw, `render` raises PdfError
+- **Rendering, mostly.** Option 3 below is under way (next section); until Type 3 and
+  TrueType text (and the shadings, image codecs and colour spaces not ported yet) draw, `render` raises PdfError
   on any page holding one, and `api.renders(backend)` is
   False. The pipeline needs renders for backgrounds, crops, ball colours, `_looks_like` and fidelity,
   so `classify` runs on the reader but `convert` does not. `embedded_image` gives no `pixels` or `rendered`, so
@@ -289,7 +289,7 @@ Each of these was a diff against PDFium until it was ported:
 - Font substitution outside Windows (PDFium's fontconfig/`CFX_LinuxFontInfo` scan is not ported),
   and without the Foxit cache (older rules, see above); CID fonts' own substitution
   (CPDF_CIDFont's CJK charset and ordering rules) keeps the older behaviour too.
-- Encrypted PDFs (LaTeX doesn't write them), vertical writing, ActualText, and JPX/JBIG2/CCITT
+- Encrypted PDFs (LaTeX doesn't write them), ActualText, and JPX/JBIG2/CCITT
   decoding (those streams pass through as raw).
 
 ## Rendering: the options
@@ -432,13 +432,48 @@ truncated): the first rendering under a key is the one reused. Rules found on th
   `Identity·(size, 0, 0, size, x, 0)·text2user`, filled non-zero, `text_mode` on (so its degenerate
   sub-paths skip DrawZeroAreaPath, the hairline pass a plain fill's get). A stroke under a `cm` whose a or d is not
   1 takes the CTM out of the text matrix and into the device matrix, so the pen is the user-space one.
-- **Clip modes (4..7) draw like 0..3**, and mode 3 draws nothing: the AGG device has no soft clip, so
-  ProcessClipPath skips text clips altogether.
+- **Clip modes (4..7) draw like 0..3, then clip**, and mode 3 draws nothing. The parser keeps a
+  clone of every text shown in a clip mode (Type 3 text counts as mode 0) and, at ET, appends them
+  to the clip path if the mode *at ET* is still a clip mode (CPDF_ClipPath::AppendTexts: a group
+  ends with a null entry, and a list that would pass 1,024 texts takes none); CheckClip leaves a
+  clip holding texts alone. The AGG device *has* soft clips (RenderCapSoftClip), so ProcessClipPath
+  follows them: per group, DrawTextPath appends each glyph outline through
+  `Identity·(size, 0, 0, size, x, 0)·textmatrix` and the object-to-device matrix (the CTM is never
+  taken out, whatever the mode) to one device-space path, and SetClip_PathFill clips to it,
+  non-zero. Clones, so switching the text object off leaves its clip. The text page, the object
+  list and the clip boxes (FPDFClipPath counts paths only) do not see text clips. The torture's
+  `--simple 3` pages (text clips followed by paths, inline images, more text, path clips, q/Q):
+  317 of the first 400 seeds draw and all are exact, the inline images inside the clip included
+  (the rest wait for TrueType or Type 3 text); 26 of the first 60 are up to 243,066 pixels apart when the text clip is ignored, which
+  the port used to do (no earlier torture page could show it: every BT group sat inside q..Q).
+  200 seeds extract equal (objects, bounds, chars).
+- **Vertical writing** (CID fonts only): a CMap is vertical when its predefined name ends in `V`
+  or an embedded one's /WMode reads non-zero through the CMap parser's GetCode (so `2`, `-1`,
+  `<01>` and `1.5` are vertical too). Then /W2 (LoadMetricsArray with n = 3, each value an int16,
+  a group cut short padded with 0) and /DW2 (default `[880 -1000]`, each element read alone)
+  give GetVertWidth (w1, the advance, down the page) and GetVertOrigin (vx, vy; without a W2 entry
+  `(int16(W width / 2), vy)`). A W2 whose flat size is not a multiple of 5 is a CHECK failure in
+  PDFium (reinterpret_span), so it is a PdfError here. What changes: TJ kernings and the advance
+  move the text position's y by `-(k·size/1000)` (no Tz; a TJ with no strings still moves x);
+  each item's origin is `(-size·vx/1000, pos - size·vy/1000)` in float32 (`content.item_origin`)
+  and every consumer takes it from there: CalcPositionData's box (the char rect offset by the
+  vertical origin in integers, then scaled), the text page's char origins and boxes (a zero-width
+  char falls back to the vertical width), GetLooseBounds (left, left + size, float top and bottom,
+  unrotated, then the matrix), the writing-mode guess, and FPDFFont_GetGlyphWidth (the vertical
+  advance). Drawing an *embedded* font changes nothing but the origins: the CID transform is only
+  for fonts PDFium substitutes, so glyph outlines and bitmaps are the horizontal ones. Found on
+  the way (not vertical at all): a char of an embedded CMap with no ToUnicode entry takes
+  PDFium's Windows answer, MultiByteToWideChar in the ANSI code page of the code's bytes
+  (`fonts._ansi_char`; `Þ`, not U+FFFD). The torture's `--simple 4` pages mix vertical and
+  horizontal CID fonts (Identity-V or an embedded CMap with a random /WMode, random /W2 and
+  /DW2, clip pages among them): 300 seeds extract equal (objects, bounds, chars), and with
+  `--kind cid-cff` all of the first 400 seeds draw and are exact;
+  17 of the first 30 are apart when the vertical origins are ignored.
 Refused, each with its reason: Type 3 text (ProcessType3Text, not ported), TrueType glyphs (embedded
-or a system substitute GDI picked), a code whose glyph the font lacks (PDFium falls back to another font), vertical
-writing, pattern colours, and text inside a soft mask (a mask device renders glyphs in
-FT_RENDER_MODE_NORMAL). The oracle is `devtools/render_torture_text.py` (`python
-tools/render_torture_text.py SEED0 N [--simple 0|1|2] [--kind type1|cid|...]`): the fonts are
+or a system substitute GDI picked), a code whose glyph the font lacks (PDFium falls back to another
+font), a /W2 PDFium would crash on, pattern colours, and text inside a soft mask (a mask device
+renders glyphs in FT_RENDER_MODE_NORMAL). The oracle is `devtools/render_torture_text.py` (`python
+tools/render_torture_text.py SEED0 N [--simple 0|1|2|3|4] [--kind type1|cid|...]`): the fonts are
 harvested from the built test decks at run time (no font binaries in the tree), only codes whose
 glyph has an outline, and a page is a few BT groups with random Tf sizes (0.5 to 120), Tm (upright,
 scaled, mirrored, turned, skewed), `cm`, clips, Tz/Tc/Tw/Ts/TL, Tr 0..7, TJ kernings, constant
@@ -500,6 +535,48 @@ nothing or are absent, /Encoding by name or /Differences - rendered by both with
 6,000 seeds with nothing apart (about 35% refused: GDI TrueType substitutes and codes needing a
 fallback font); `tests/test_pure_pdf.py` keeps 40 seeds and four shrunk cases. Needs the Foxit
 cache (`python -m beamer2slides.pdf.pure.foxit`); without it every such page is refused.
+
+**Images** (`pure/decode_image.py` loads, `pure/render_image.py` draws) are CPDF_DIB and the decoders
+it creates, then CPDF_ImageRenderer down to the AGG driver. Loading is LoadColorInfo, the /Decode and
+colour-key arrays, LoadPalette and GetScanline/TranslateScanline24bpp over DeviceGray, DeviceRGB,
+DeviceCMYK, Indexed and ICCBased-through-its-alternate at 1 to 16 bits, from raw, Flate (PNG and
+TIFF predictors), RunLength, ASCIIHex/85 and DCT data, into PDFium's own formats (k1bppMask,
+k1bppRgb, k8bppRgb, kBgr, kBgra) with /SMask (and /Matte) or a /Mask stream beside them. Drawing is
+DrawMaskedImage/CalculateDrawImage for an image's own mask, CFX_ImageStretcher and CStretchEngine
+for upright and quarter-turned images (the weight tables and both passes, uint32 sums wrapping as
+C's do), CFX_ImageTransformer for any other angle or skew, and CFX_AggBitmapComposer's scanline
+compositor rows. Rules found on the way:
+- **A JPEG is libjpeg's bytes.** Pillow's libjpeg decodes with the same ISLOW IDCT and fancy
+  upsampling, so its pixels are PDFium's; a 4-component JPEG is kept as libjpeg's raw CMYK with no
+  Adobe inversion (Pillow's `CMYK;I` inverts every byte, so it is XORed back) and then goes through
+  the same Adobe CMYK table as every other CMYK colour.
+- **The transformer** takes GetClosestRect of the unit square (MatchFloatRange in float32) cut by the
+  device's clip box, stretches the image to the unit vectors' lengths (`ceil(hypotf)`) first, and
+  samples that through the inverted matrix in 8.8 fixed point (`roundf(x * 256)`, `+ 128` in float32,
+  the whole part saturated, the fraction taken with C's `%`), interpolating rows then columns with
+  `>> 8`. Its "normal" branch (|b|, |c| < 0.05) is reachable only with a or d zero, and draws nothing.
+- **Overprint changes nothing.** CPDF_ImageRenderer picks Darken for a CMYK image under fill
+  overprint with /OPM 0, but the AGG driver's StartDIBits drops the blend mode: the pixels are those
+  of a Normal draw (31 cases measured).
+- A constant alpha multiplies an image mask's colour as FXARGB_MUL_ALPHA with `roundf(alpha * 255)`,
+  a bitmap's alpha as `a * int(alpha * 255) / 255`; both then meet only the clip mask.
+The oracle is `devtools/render_torture_image.py` (`python tools/render_torture_image.py SEED0 N
+[--level 0..6]`): image XObjects and inline images of every format above, stencils, colour-key and
+stream masks, soft masks with mattes, /Interpolate and truncated data, drawn upright, flipped,
+scaled, quarter-turned, turned by any angle and skewed, under clips and constant alpha, at zooms 0.5
+to 3.1 on white and clear bitmaps; levels grow the generator a class at a time and keep their seeds.
+When images were done: level 4 (filters, masks, inline images) 7,000 seeds, level 5 (CMYK) 4,000 and
+level 6 (everything, the transformer and CMYK JPEGs) 6,000, not one pixel apart; about 0.25% refused,
+all "filters that decode to nothing". Every page of the test decks `07_images` and
+`23_raster_images` is exact, and across the 50 test PDFs 229 of 241 pages render byte for byte (the
+other 12 are refused for TrueType and Type 3 text). `tests/test_pure_pdf.py` keeps 60 seeds of level
+6, the level-4 seeds that were once apart and one of each transformer format. Refused, each with its
+reason: JPX, JBIG2 and CCITT data, ICC profiles lcms would open (only data that cannot be a profile
+falls back to the alternate), Default colour spaces, CalGray/CalRGB/Lab/Separation/DeviceN images,
+JPEG /ColorTransform 0 and JPEGs PDFium patches or scales, LZW and mid-chain predictors, a filter
+that fails or decodes to nothing, images inside soft masks, image blend modes, pattern-filled
+stencils, a soft mask under a soft mask, an 8-bit mask device, and inline images whose DCT or CCITT
+end the parser cannot find as PDFium does.
 
 ## Risks
 
