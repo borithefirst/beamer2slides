@@ -42,7 +42,9 @@ a per-slide background picture.
   `CFX_Matrix` products included; oracle `tools/render_torture.py`, random pages vs PDFium, shrunk);
   so do soft masks, transparency groups and every blend mode (`pure/render_transparency.py`, oracle
   `tools/render_torture_transparency.py`, 6,000 seeds; GetBackdrop, CheckClip, float32 stroke boxes);
-  a page with anything not ported yet (text, images, shadings, transfer functions…) raises PdfError, so
+  axial/radial shadings and shading patterns are ported too (`pure/render_shading.py`, oracle
+  `tools/render_torture_shading.py`);
+  a page with anything not ported yet (text, images, CalRGB/Lab/Indexed shadings, transfer functions…) raises PdfError, so
   `renders = False`: `classify` runs on it and `convert` doesn't yet. Every call equals PDFium's on 4,373 pages (float32 noise aside),
   and deck.json is identical on all 48 test decks; extract is 7× slower. `tests/test_pure_pdf.py`.
 - No public links: pictures reach Slides inside the imported .pptx, never as shared Drive
