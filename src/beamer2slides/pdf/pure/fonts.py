@@ -26,6 +26,7 @@ import sys
 from pathlib import Path
 from typing import Callable
 
+from . import sfnt
 from .encodings import NAMES, UNICODES
 from .syntax import Name, Stream, String, float32, operations
 
@@ -80,56 +81,11 @@ def _num(v, default=0.0) -> float:
 
 # ---------------------------------------------------------------------- Adobe glyph names
 
-_AGL: dict[str, int] | None = None
-
-
-def _agl() -> dict[str, int]:
-    global _AGL
-    if _AGL is None:
-        try:  # FreeType's psnames table is the full (legacy) AGL, not AGLFN: fi, ff, dotlessj...
-            from fontTools.agl import LEGACY_AGL2UV
-            _AGL = {name: us[0] for name, us in LEGACY_AGL2UV.items() if len(us) == 1}
-        except ImportError:  # the names every Latin TeX font uses at least
-            _AGL = {}
-            for enc, names in ((STANDARD, NAMES[_NAME_TABLES[STANDARD]]),
-                               (WINANSI, NAMES[_NAME_TABLES[WINANSI]])):
-                for code, name in enumerate(names, 32):
-                    u = UNICODES[enc][code]
-                    if name and u:
-                        _AGL.setdefault(name, u)
-        # FreeType's list also carries the ITC Zapf Dingbats names (a1 ... a191): the
-        # ZapfDingbats encoding pairs each of them with its Unicode (pifont's \ding: a44 -> U+272D)
-        for code, name in enumerate(NAMES[_NAME_TABLES[ZAPF]], 32):
-            u = UNICODES[ZAPF][code]
-            if name and u:
-                _AGL.setdefault(name, u)
-    return _AGL
-
-
 def unicode_from_adobe_name(name: str) -> int:
-    """FreeType's ps_unicode_value (psnames) as PDFium calls it: uniXXXX, uXXXX[XX], then the
-    Adobe Glyph List for the name up to its first non-initial dot. 0 when unknown."""
-    if not name:
-        return 0
-
-    def hex_run(s: str, start: int, most: int) -> tuple[int, int]:
-        value, n = 0, 0
-        while n < most and start + n < len(s) and s[start + n] in "0123456789ABCDEFabcdef":
-            value = value * 16 + int(s[start + n], 16)
-            n += 1
-        return value, n
-
-    if name.startswith("uni"):
-        value, n = hex_run(name, 3, 4)
-        if n == 4 and (len(name) == 7 or name[7] == "."):
-            return value
-    if name.startswith("u"):
-        value, n = hex_run(name, 1, 6)
-        if n >= 4 and (len(name) == 1 + n or name[1 + n] == "."):
-            return value
-    dot = name.find(".", 1)
-    base = name if dot < 0 else name[:dot]
-    return _agl().get(base, 0)
+    """UnicodeFromAdobeName: FreeType's ps_unicode_value (psnames: uniXXXX and uXXXX[XX] in
+    upper-case hex, then its own glyph list up to the first non-initial dot), without the variant
+    bit and cut to Windows' 16-bit wchar_t. 0 when unknown."""
+    return sfnt.ps_unicode_value(name) & 0xFFFF if name else 0
 
 
 def _predefined_name(encoding: str, code: int) -> str | None:
@@ -467,18 +423,6 @@ class Charmap:
         self.pid, self.eid, self.encoding, self.lookup, self.format = pid, eid, encoding, lookup, format
 
 
-def sfnt_encoding(pid: int, eid: int) -> str:
-    """sfnt_find_encoding (sfobjs.c): an sfnt cmap subtable's FT_Encoding."""
-    if pid in (0, 2):                                    # Apple Unicode, ISO: any encoding id
-        return "unicode"
-    if pid == 1:
-        return "apple_roman" if eid == 0 else "none"
-    if pid == 3:
-        return {0: "ms_symbol", 1: "unicode", 10: "unicode", 2: "sjis", 3: "prc", 4: "big5", 5: "wansung",
-                6: "johab"}.get(eid, "none")
-    return "none"
-
-
 class Program:
     """A font program read by fontTools: glyph names or ids -> unscaled control boxes."""
 
@@ -502,9 +446,19 @@ class Program:
 
     def name_index(self, name: str) -> int:
         """FT_Get_Name_Index: 0 when the font has no glyph of that name (or no glyph names)."""
+        if self.sfnt_face is not None:
+            return self.sfnt_face.name_index(name)
         if not (self.glyph_names and self.ps_names):
             return 0
         return self.index.get(name, 0)
+
+    sfnt_face: sfnt.Face | None = None     # an sfnt program's FT_Face (charmaps, `post` names)
+
+    def attach_face(self, data: bytes, cff: tuple | None = None, font_number: int = 0) -> None:
+        """Take charmaps and glyph names from FreeType's reading of the sfnt, not fontTools'."""
+        self.sfnt_face = sfnt.Face(data, cff, font_number)
+        self.glyph_names = self.sfnt_face.has_glyph_names
+        self.ps_names = True
 
     # -- the face's charmaps, as FreeType lists and selects them. The selection is state of the face,
     #    and a face the font mapper caches is shared by every font drawn with it, as in PDFium.
@@ -516,48 +470,24 @@ class Program:
         return self._charmaps
 
     def _build_charmaps(self) -> list["Charmap"]:
-        if self.sfnt:
-            # tt_face_build_cmaps: one charmap per subtable FreeType has a class for, in file order
-            # (format 14 maps nothing: its char_index is 0); sfnt_load_face then synthesizes a Unicode
-            # charmap from the glyph names when no subtable is Unicode or MS Symbol
-            out = []
-            for pid, eid, fmt, table in self.cmap_list:
-                if fmt == 14:
-                    out.append(Charmap(pid, eid, sfnt_encoding(pid, eid), lambda code: 0, 14))
-                else:
-                    out.append(Charmap(pid, eid, sfnt_encoding(pid, eid),
-                                       lambda code, t=table: self.index.get(t.get(code), 0), fmt))
-            if not any(cm.encoding in ("unicode", "ms_symbol") for cm in out) and self.glyph_names \
-                    and self.ps_names:
-                by = self._unicode_table()
-                if by:
-                    out.append(Charmap(3, 1, "unicode", lambda code: by.get(code, 0)))
-            return out
+        if self.sfnt_face is not None:
+            # sfnt.Face: the validated subtables in file order, then the charmaps FreeType synthesizes
+            n = self.sfnt_face.num_glyphs
+            return [Charmap(c.platform, c.encoding_id, c.encoding,
+                            lambda code, c=c: c.char_index(code, n), c.format) for c in self.sfnt_face.charmaps]
         # Type 1 (T1_Face_Init) and CFF (cff_face_init): psnames' Unicode charmap, which exists when
         # some glyph name has a Unicode value (ps_unicodes_init fails otherwise), then the Adobe
         # encoding charmap - always for Type 1, for CFF only when the encoding maps some code
         out = []
-        by = self._unicode_table()
-        if by:
-            out.append(Charmap(3, 1, "unicode", lambda code: by.get(code, 0)))
+        unicodes = sfnt.PsUnicodes(self.order if not self.cid_keyed else [])
+        if unicodes:
+            out.append(Charmap(3, 1, "unicode", lambda code: unicodes.char_index(code & 0xFFFFFFFF)))
         if not self.cid_keyed and self.encoding is not None and \
                 (self.kind == "type1" or any(self.builtin_index(c) for c in range(256))):
             eid = {"standard": 0, "expert": 1, "custom": 2, "latin1": 3}[self.encoding_kind]
             enc = ("adobe_standard", "adobe_expert", "adobe_custom", "adobe_latin1")[eid]
             out.append(Charmap(7, eid, enc, self.builtin_index))
         return out
-
-    def _unicode_table(self) -> dict[int, int]:
-        """ps_unicodes: each Unicode value to the first glyph whose name maps to it."""
-        by = getattr(self, "_by_unicode", None)
-        if by is None:
-            by = {}
-            for i, n in enumerate(self.order):
-                v = unicode_from_adobe_name(n)
-                if v:
-                    by.setdefault(v, i)
-            self._by_unicode = by
-        return by
 
     def select_unicode(self) -> bool:
         """FT_Select_Charmap(FT_ENCODING_UNICODE) = find_unicode_charmap: a UCS-4 table from the end,
@@ -615,7 +545,7 @@ class Program:
         if cm is None or not 0 <= code <= 0xFFFFFFFF:
             return 0
         g = cm.lookup(code)
-        return g if 0 <= g < len(self.order) else 0
+        return g if 0 <= g < (self.sfnt_face.num_glyphs if self.sfnt_face is not None else len(self.order)) else 0
 
     def builtin_index(self, code: int) -> int:
         """The glyph the program's own encoding gives a code (FreeType's Type 1 charmap)."""
@@ -626,6 +556,8 @@ class Program:
 
     def glyph_name(self, index: int) -> str:
         """FT_Get_Glyph_Name: '' where the face has no names."""
+        if self.sfnt_face is not None:
+            return self.sfnt_face.glyph_name(index)
         if not (self.glyph_names and self.ps_names):
             return ""
         return self.order[index] if 0 <= index < len(self.order) else ""
@@ -689,9 +621,9 @@ def load_type1(data: bytes) -> Program | None:
     d = font.font
     charstrings = d["CharStrings"]
     names = list(charstrings.keys())
-    if NOTDEF in names:  # FreeType swaps .notdef into glyph 0
-        names.remove(NOTDEF)
-        names.insert(0, NOTDEF)
+    if NOTDEF in names:  # FreeType swaps .notdef with glyph 0 (t1load.c parse_charstrings)
+        i = names.index(NOTDEF)
+        names[0], names[i] = names[i], names[0]
     enc = d.get("Encoding")
     kind = "custom"
     if isinstance(enc, str) and enc == "StandardEncoding" or enc is None:
@@ -782,66 +714,34 @@ def load_truetype(data: bytes, font_number: int = 0) -> Program | None:
         prog = load_cff(tt.getTableData("CFF "))
         if prog:
             prog.cmaps = _tt_cmaps(tt)
-            prog.cmap_list = _tt_cmap_list(tt)
-            prog.glyph_names = _tt_glyph_names(tt)
             prog.sfnt = True
+            gids = [prog.builtin_index(c) for c in range(256)]
+            eid = {"standard": 0, "expert": 1}.get(prog.encoding_kind, 2) if any(gids) else None
+            prog.attach_face(data, (prog.order, prog.cid_keyed, eid, gids), font_number)
         return prog
+    # glyphs are known by index: fontTools would name them from `post`, which FreeType only reads
+    # for FT_Get_Name_Index (sfnt.Face), and which may be broken where the outlines are fine
+    order = ["glyph%05d" % i for i in range(tt["maxp"].numGlyphs)]
+    tt.setGlyphOrder(order)
     glyphs = tt.getGlyphSet()
-    order = tt.getGlyphOrder()
     head = tt["head"]
     hhea = tt["hhea"] if "hhea" in tt else None
     prog = Program("truetype", glyphs, order, head.unitsPerEm, bbox=(head.xMin, head.yMin, head.xMax, head.yMax),
                    ascender=hhea.ascent if hhea else 0, descender=hhea.descent if hhea else 0, cmaps=_tt_cmaps(tt))
-    prog.cmap_list = _tt_cmap_list(tt)
-    prog.glyph_names = _tt_glyph_names(tt)
-    prog.ps_names = _tt_ps_names(tt)
     prog.sfnt = True
+    prog.attach_face(data, None, font_number)
     return prog
 
 
 def _tt_cmaps(tt) -> dict:
     out = {}
-    if "cmap" in tt:
-        for sub in tt["cmap"].tables:
-            out.setdefault((sub.platformID, sub.platEncID), sub.cmap)
-    return out
-
-
-def _tt_cmap_list(tt) -> list:
-    """Every cmap subtable in file order, as FreeType lists the face's charmaps."""
-    if "cmap" not in tt:
-        return []
     try:
-        tables = tt["cmap"].tables
-    except Exception:  # noqa: BLE001 - a cmap fontTools cannot read: no charmaps
-        return []
-    out = []
-    for sub in tables:
-        fmt = getattr(sub, "format", 0)
-        if fmt not in (0, 2, 4, 6, 8, 10, 12, 13, 14):     # FreeType has no class for it: skipped
-            continue
-        out.append((sub.platformID, sub.platEncID, fmt, getattr(sub, "cmap", None) or {}))
+        if "cmap" in tt:
+            for sub in tt["cmap"].tables:
+                out.setdefault((sub.platformID, sub.platEncID), sub.cmap)
+    except Exception:  # noqa: BLE001 - a cmap fontTools cannot read; the charmaps are sfnt.Face's
+        pass
     return out
-
-
-def _tt_post_format(tt) -> bytes | None:
-    try:
-        raw = tt.reader["post"] if "post" in tt.reader else None
-    except Exception:  # noqa: BLE001
-        return None
-    return raw[:4] if raw is not None and len(raw) >= 4 else None
-
-
-def _tt_glyph_names(tt) -> bool:
-    """FT_HAS_GLYPH_NAMES of an sfnt face (sfnt_load_face): set unless the post table is format 3.0
-    (a face without a post table reads as format 0 and has the flag, with no name to find)."""
-    return _tt_post_format(tt) != b"\x00\x03\x00\x00"
-
-
-def _tt_ps_names(tt) -> bool:
-    """Whether FT_Get_Name_Index can find a name (tt_face_get_ps_name): post formats 1, 2 and 2.5
-    only. fontTools makes names up for the others, which FreeType does not see."""
-    return _tt_post_format(tt) in (b"\x00\x01\x00\x00", b"\x00\x02\x00\x00", b"\x00\x02\x80\x00")
 
 
 def load_program(stream: Stream | None, data: bytes, subtype_key: str) -> Program | None:

@@ -1092,6 +1092,35 @@ def test_text_torture_pages_extract_as_pdfium_to_the_last_bit():
                 pure.close()
 
 
+def test_made_up_truetype_fonts_extract_as_pdfium_does():
+    """Simple fonts with an embedded sfnt built per seed (devtools/truetype_torture.py): FreeType's
+    sfnt charmaps and post names as PDFium sees them through its LoadGlyphMaps. Each seed below was
+    apart: 26 and 42 (a name two glyphs share: ps_unicodes_init sorts with the UCRT's qsort, which
+    is not stable), 1611 (the last post name loaded runs on into the bytes after it, up to a 0),
+    5456, 5529, 6002, 6625 (a read at the end of the file, even of no bytes, fails the whole name
+    table) and 10006...11965 (a post table shorter than its header is read on from the stream: the
+    table length does not bound it)."""
+    from beamer2slides.devtools.truetype_torture import case, first_diff
+    apart = []
+    for seed in [26, 42, 1611, 5456, 5529, 6002, 6625, 10006, 10074, 10116, 10559, 10725, 11231, 11369,
+                 11490, 11719, 11965, *range(60)]:
+        content, fonts, _ = case(seed)
+        d = first_diff(content, fonts)
+        if d:
+            apart.append((seed, d[:200]))
+    assert not apart, f"seeds apart (python tools/truetype_torture.py SEED 1): {apart}"
+
+
+def test_the_ucrt_qsort_port_sorts():
+    from beamer2slides.pdf.pure.sfnt import msvc_qsort
+    import random
+    r = random.Random(3)
+    for n in [0, 1, 2, 7, 8, 9, 30, 200]:
+        a = [(r.randrange(5), i) for i in range(n)]
+        msvc_qsort(a, lambda x, y: x[0] > y[0], lambda x, y: x[0] == y[0])
+        assert [k for k, _ in a] == sorted(k for k, _ in a)
+
+
 @pytest.mark.parametrize("direction", ["", "R2L"])
 def test_right_to_left_text_is_ordered_as_pdfium_orders_it(direction):
     """TrueType subsets (26_truetype_fonts, xelatex) carry glyph ids with no Unicode, so the text page

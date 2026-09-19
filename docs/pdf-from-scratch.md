@@ -151,6 +151,24 @@ Each of these was a diff against PDFium until it was ported:
     left/right are scaled by width / TrueType width in C integer division. Without the Foxit cache
     (or outside Windows, where PDFium asks fontconfig and that is not ported) the older rules stay:
     system Arial/Times New Roman/Courier New for base-14, and boxes apart elsewhere.
+  - **Embedded sfnt fonts** (`pure/sfnt.py`, `pure/psnames_data.py`; oracle
+    `devtools/truetype_torture.py`, `python tools/truetype_torture.py SEED0 N`, 8,000 seeds clean,
+    `test_made_up_truetype_fonts_extract_as_pdfium_does`): the charmap list, glyph names and the
+    post table are FreeType's own (sfobjs.c, ttcmap.c, ttpost.c, cffobjs.c, psnames), not fontTools'
+    reading of them. FreeType's glyph list and its Mac names are generated from its sources by
+    `tools/freetype_psnames_data.py`. The quirks that separated the two:
+    the Unicode charmap synthesised from glyph names is sorted by the Windows UCRT's qsort, which
+    is not stable, so of two glyphs sharing a name the one it leaves first wins (`msvc_qsort`, a
+    port of qsort.cpp); the post header is read from the *stream* at the table's offset, so a post
+    table shorter than 32 bytes still loads when bytes follow it; format 2 turns its Pascal strings
+    into C strings in place, so the last name loaded runs on into the bytes after it up to a 0;
+    any read at the end of the file, even of no bytes, fails the whole name table; a count of 0 or
+    over maxp's gives no names. A CFF-in-OpenType face takes its names from the CFF charset (not
+    CID-keyed), adds its own Unicode charmap unless (3,1) or a platform-0 one exists, and an Adobe
+    encoding charmap when the encoding is not empty. A name's Unicode value is looked up up to its
+    first non-initial dot, and PDFium keeps it as a Windows `wchar_t` (`& 0xFFFF`). A Type 1 font's
+    `.notdef` is swapped with glyph 0, not moved. A post or cmap table fontTools can't read no
+    longer costs the whole program: its glyphs are read under a synthetic glyph order.
   - `char_width_` and `glyph_index_` are uint16: a /Widths entry of -1502 is 64034.
   - A descriptor without /FontBBox (CheckFontMetrics) takes the program's box, the right way up:
     the "deliberately flipped" in PDFium's comment is FX_RECT's y-down naming, so its `top` is yMin.
