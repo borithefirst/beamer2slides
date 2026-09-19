@@ -7,6 +7,7 @@ alignment only the master states, and a connector - then the IR that comes back 
 """
 
 import json
+import re
 from pathlib import Path
 
 import pytest
@@ -171,7 +172,8 @@ def test_a_blank_line_someone_typed_is_a_line(tmp_path):
     assert ["".join(r["text"] for r in p["runs"]) for p in box["paragraphs"]] == \
         [" ", "first", " ", "second"], "the blank lines are kept, the trailing one is not"
     text = adopt.bootstrap(ir, tmp_path / "tree" / "main.tex")
-    assert text.count("% blank line") == 2, "each blank line takes a line of its own"
+    blank = re.findall(r"\\slide(?:par|text)(?:\[[^\]]*\])?(?:\{[^}]*\})+\{\}$", text, re.M)
+    assert len(blank) == 2, "each blank line takes a line of its own"
 
 
 def test_pull_still_sees_no_blank_paragraph():
@@ -208,6 +210,17 @@ def target_with_pictures(tmp_path: Path) -> dict:
     return target
 
 
+def places(text: str) -> int:
+    """How many elements a piece of source places: pictures in textblocks, text boxes, shapes."""
+    return len(re.findall(r"\\begin\{textblock\*\}|\\begin\{slidebox\}|\\slidetext\b|\\slideshape\b|"
+                          r"\\sliderect\b|\\slideellipse\b", text))
+
+
+def placed(text: str) -> int:
+    """How many elements the frames of a main.tex place."""
+    return places(text.split("\\begin{document}")[1])
+
+
 def source_for(tmp_path: Path, target: dict | None = None) -> str:
     target = target if target is not None else target_with_pictures(tmp_path)
     return adopt.bootstrap(target, tmp_path / "tree" / "main.tex")
@@ -234,8 +247,8 @@ def test_every_element_keeps_its_own_place(tmp_path):
     assert "\\usepackage[absolute,overlay]{textpos}" in text
     # backdrop, card, connector and the subtitle placeholder: the layout's, so said once in its
     # template, and each frame names the layout and hands it its words
-    assert theme_of(tmp_path).count("\\begin{textblock*}") == 4
-    assert text.count("\\begin{textblock*}") == 0
+    assert places(theme_of(tmp_path)) == 4
+    assert placed(text) == 0
     assert text.count("\\begin{frame}[plain,layout=section") == 3
     assert "\\framesubtitle{Slide 0}" in text
 
@@ -245,7 +258,7 @@ def test_a_picture_the_deck_would_not_give_us_is_left_out(tmp_path):
     (The backdrop of the fixture has no file unless the test puts one there.)"""
     text = source_for(tmp_path, deck_ir(presentation(), foreign=True)) + theme_of(tmp_path)
     assert "figures/" not in text
-    assert text.count("\\begin{textblock*}") == 3
+    assert places(text) == 3
 
 
 def test_a_slide_that_sits_on_another_colour_says_so(tmp_path):
@@ -255,7 +268,8 @@ def test_a_slide_that_sits_on_another_colour_says_so(tmp_path):
     assert "\\definecolor{deckbg}{HTML}{F4CCCC}" in text            # what most of the deck sits on
     assert "\\setbeamercolor{background canvas}{bg=deckbg}" in text
     # and the one slide that does not says so in its options, which last until the next frame
-    assert text.count("background=b2s0005DF]") == 1
+    name = re.search(r"\\definecolor\{(\w+)\}\{HTML\}\{0005DF\}", text).group(1)
+    assert text.count(f"background={name}]") == 1
     assert "bg=deckbg}}" in theme_of(tmp_path), "the next frame starts from the deck's colour again"
 
 
@@ -270,8 +284,10 @@ def test_the_base_style_of_a_box_is_set_where_the_box_is(tmp_path):
     """`inverse.runs_latex` writes a run's style only where it differs from a base, which is true of
     a source being refined and false of one written from nothing: without this the crimson 9 pt
     instruction slides and the blue 26 pt section titles both come out black."""
-    text = source_for(tmp_path) + theme_of(tmp_path)
-    assert "\\color{" in text
+    text = source_for(tmp_path)
+    styles = re.findall(r"\\slidestyle\{[^}]*\}\{[^}]*\}", text)
+    assert any("color=" in s for s in styles)
+    assert "\\color{\\slides@k@color}" in (Path(tmp_path) / "tree" / "slides.sty").read_text(encoding="utf-8")
 
 
 def test_a_picture_is_copied_into_the_tree(tmp_path):

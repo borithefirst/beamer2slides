@@ -457,3 +457,97 @@ Left:
   slides, but they are build-up slides that copy the previous one's content, not decoration (beamer
   overlays would be the fix). In gdg24/sc-memphis they are text boxes.
 - Two layouts that draw the same (two "Title and body" in cs161-net) still get a template each.
+## A macro layer, style and colour names (`m6-a` -> `ma-final`)
+
+The first half of that plan, for text boxes and shapes only, with no change to structure. adopt now
+writes `slides.sty` beside main.tex (`\usepackage{slides}`), the vocabulary its frames are written in:
+
+- `slidebox` `[middle|bottom, inset=, tail=]{x,y,w,h}` holding `\slidepar[center|right|justify, indent=,
+  rindent=, first=, space=, prevdepth=, mixed, lang=]{style}{words}`, and `\slidetext[...]{x,y,w,h}{style}{words}`
+  for a box of one paragraph, which covers most boxes. Everything the spelled-out paragraph had (the
+  `\vbox to`, `\vss`, `\leftskip`/`\rightskip`/`\parfillskip`, the strut, `\baselineskip`, the
+  `\prevdepth` arithmetic, `otherlanguage`) is in the macros.
+- `\slidestyle{name}{size=, family=, face=, weight=, italic, color=, ascent=, pitch=, depth=}` in
+  main.tex's preamble. The name comes from what sets the style apart: its size next to the deck's
+  body size (title, heading, large, body, small, tiny), then typeface, weight, slant and colour
+  (`title-serif-white`, `body-mono-italic`, `label-darkred` for a bullet), with a size or number added
+  when two styles would share a name.
+- Colours get names a person would give them (`Blue`, `DarkGrey`, `NearBlack`, `LightYellow`, `Blue2`
+  for a second blue; the most used one takes the bare name), not `b2s4285F4`. `\setslideinset` sets the
+  deck's usual box inset once, so boxes that use it do not repeat it.
+- Drawn bullets are `\slidemark{dot-red}{<tikz>}` once and `\slidebullet{dot-red}{gap}` per line;
+  typed ones are `\slidelabel{style}{text}{gap}`; soft breaks are `\slidebreak`.
+- Shapes: `\slideshape{x,y,w,h}{paths}` on one line in place of textblock + tikzpicture + bounding box.
+  `\sliderect[opts]{x,y,w,h}` and `\slideellipse[opts]{x,y,rx,ry}` are used only when the path the
+  writer built is exactly the one the macro builds from those numbers. A zero `shift` is dropped.
+- Numbers lose padded zeros (`12.5`, not `12.50`), which are the same length to TeX. Nothing is rounded
+  beyond what was written before.
+
+texmap reads the words in a `\slidepar` / `\slidetext` and skips `\slideshape`, so pull still finds
+them. The readability constructs count the new macros as what they replace.
+
+**Fidelity unchanged, to the pixel.** `ma-final` has boxes 0.9728, page 0.9714, pixels 0.9845, with every
+slide's three scores equal to `m6-a`'s. All 912 compiled pages are pixel-identical to `m6-a`'s at 3x zoom.
+It took one fix to get there. `\par` removes the last glue of a paragraph. Spelled out, the line end
+after the words gave it a space to remove. `\slidepar{..}{words}` has nothing after the words, so a
+trailing tie was removed instead. That moved arabic-training 18's "Meeting~~~~~~" line and
+comps-analysis 13's underlined "Pros ~ ~" heading (-0.001). Words that end in glue now end in a space.
+Other equivalences the macros depend on:
+- the words are read as a group, not an argument, so their catcodes stay live;
+- a paragraph ending on a tab gets a trailing space, for the same reason;
+- a bounding box of a slightly different size moves no ink, because the picture hangs from its
+  top-left corner.
+
+`tests/test_adopt_macros.py` compiles the short forms beside their spelled-out forms and compares the
+pages.
+
+**Readability 0.134 -> 0.258** (29 decks, `readability report --tag ma-final`):
+
+| component | `m6-a` | `ma-final` |
+|---|---|---|
+| lines | 0.09 | 0.33 |
+| numbers | 0.05 | 0.07 |
+| plumbing | 0.03 | 0.14 |
+| bloat | 0.34 | 0.42 |
+| author | 0.33 | 0.48 |
+| repeat | 0.61 | 0.85 |
+
+Per frame, without the proxy's denominators:
+- lines 114.8 -> 31.9;
+- characters 8380 -> 4417;
+- numeric literals 434 -> 307;
+- commands 256 -> 65.
+
+main.tex totals 7.80 MB -> 4.24 MB, plus 14 kB of slides.sty per deck. Frame body lines by construct:
+- text plumbing 37,400 -> 1,727;
+- placement 25,974 -> 6,532;
+- shapes 23,936 -> 6,130;
+- text went from 6.1% to 25.8% of all lines. The words are unchanged; `\slidepar` lines count as text.
+
+**Where the proxy misleads.** It counts the words of the macro vocabulary as visible text: environment
+and style names (`body-serif-white` is three words), `hebrew`, `center`, `ellipse`, `radius`. That
+inflates the denominator of numbers, plumbing and bloat. Taking plumbing out shrank the "words" per
+frame from 160 to 93 while the deck's words stayed the same. So numbers per word barely moved (0.05 ->
+0.07) although there are 29% fewer numbers. `\begin`/`\end` count as author vocabulary, so a slidebox
+still scores as an author command while `\slidetext` does not. No numbers were tuned to the proxy.
+Numbers per frame and lines per frame are the honest measures.
+
+How it got there, on devfest2020, gdg24 and hebrew-lesson, each step pixel-identical to the base:
+
+| tag | readability | what it added |
+|---|---|---|
+| `ma-base` | 0.131 | none |
+| `ma-1` | 0.218 | the slidebox environment, styles and colour names |
+| `ma-2` | 0.213 | `\slidetext`, `\sliderect`, `\slidebreak` |
+| `ma-3` | 0.212 | `\slideellipse` |
+
+The last two made the source shorter and still lowered the score, for the proxy reasons above. They
+are kept.
+Numbers are not rounded beyond what the writers already printed. Only padded zeros go.
+
+Left, outside this change:
+- numbers, now 307 a frame: shape paths (sc-memphis' traced freeforms make it the worst deck, 0.091),
+  rounded rectangles, whose `.. controls` corners are not yet a macro, and table cells;
+- pictures, still `textblock*` + `\includegraphics` (8% of lines);
+- tables (`\adopt...`, 11%);
+- structure (itemize, frametitle, masters and layouts as a theme), which is another change's work.

@@ -748,14 +748,165 @@ def picture_of(el: dict, tree: Path | None):
 # \ttfamily after it took Fira Sans' 0.26 em spaces where Courier Prime's are 0.6 em (sc-dark-modern's
 # typewriter quotes came out 8% narrow and broke their lines elsewhere). Every font selection inside a
 # text box takes its own space again (LaTeX's selectfont hook).
-SLIDES_TEXT = (
-    "\\newif\\ifslidesspace\n"
-    "\\AddToHook{selectfont}{\\ifslidesspace\\spaceskip=\\fontdimen2\\font plus\\fontdimen3\\font\\relax\\fi}\n"
-    "\\newcommand{\\slidesize}[1]{\\fontsize{#1bp}{#1bp}\\selectfont"
-    "\\spaceskip=\\fontdimen2\\font plus\\fontdimen3\\font\\relax}\n"
-    "\\newcommand{\\slidesbox}{\\slidesspacetrue\\parindent=0pt\\parskip=0pt\\lineskip=0pt\\lineskiplimit=-\\maxdimen"
-    "\\hyphenpenalty=10000\\exhyphenpenalty=50\\tolerance=9999\\emergencystretch=0pt\\frenchspacing"
-    "\\hbadness=10000\\hfuzz=\\maxdimen\\vbadness=10000\\vfuzz=\\maxdimen}")
+#
+# The frames say this through a small vocabulary (`SLIDES_TEXT`, in the tree's slides.sty) rather than
+# spelling every skip out: `\begin{slidebox}[...]{x,y,w,h}` is the box, `\slidepar[...]{style}{words}`
+# a paragraph in a text style the preamble names once (`\slidestyle`), `\slidelabel` / `\slidebullet`
+# its bullet. Each macro expands to exactly the primitives this writer used to write out, in the same
+# order (the bench's pages are pixel-identical: docs/adopt-bench.md, "Readable sources"); only what
+# was a default (a zero indent, a zero step between paragraphs, the deck's usual inset) goes unsaid.
+SLIDES_TEXT = r"""% --- Text boxes laid out as Google Slides lays them out ------------------------------------
+% \slidesize{z}: z bp type on z bp lines, with the font's own interword space and no shrink.
+\newif\ifslidesspace
+\AddToHook{selectfont}{\ifslidesspace\spaceskip=\fontdimen2\font plus\fontdimen3\font\relax\fi}
+\newcommand{\slidesize}[1]{\fontsize{#1bp}{#1bp}\selectfont\spaceskip=\fontdimen2\font plus\fontdimen3\font\relax}
+\newcommand{\slidesbox}{\slidesspacetrue\parindent=0pt\parskip=0pt\lineskip=0pt\lineskiplimit=-\maxdimen\hyphenpenalty=10000\exhyphenpenalty=50\tolerance=9999\emergencystretch=0pt\frenchspacing\hbadness=10000\hfuzz=\maxdimen\vbadness=10000\vfuzz=\maxdimen}
+%
+% \slidestyle{name}{size=, family=mono|serif, face=\fontswitch, weight=bold|w<NNN>, italic, color=,
+%   ascent=, pitch=, depth=}: a text style. size in bp; ascent, pitch and depth are the Slides line
+%   box of a paragraph in it (its first line's height above the baseline, the distance between
+%   baselines, and what the box ends under its last line). A bullet's style needs no line box.
+\def\slides@mono{mono}\def\slides@serif{serif}\def\slides@bold{bold}
+\define@key{slidestyle}{size}{\def\slides@k@size{#1}}
+\define@key{slidestyle}{family}{\def\slides@k@family{#1}}
+\define@key{slidestyle}{face}{\def\slides@k@face{#1}}
+\define@key{slidestyle}{weight}{\def\slides@k@weight{#1}}
+\define@key{slidestyle}{italic}[]{\def\slides@k@italic{1}}
+\define@key{slidestyle}{color}{\def\slides@k@color{#1}}
+\define@key{slidestyle}{ascent}{\def\slides@k@ascent{#1}}
+\define@key{slidestyle}{pitch}{\def\slides@k@pitch{#1}}
+\define@key{slidestyle}{depth}{\def\slides@k@depth{#1}}
+\newcommand\slidestyle[2]{%
+  \let\slides@k@size\@empty\let\slides@k@family\@empty\let\slides@k@face\@empty
+  \let\slides@k@weight\@empty\let\slides@k@italic\@empty\let\slides@k@color\@empty
+  \let\slides@k@ascent\@empty\let\slides@k@pitch\@empty\let\slides@k@depth\@empty
+  \setkeys{slidestyle}{#2}%
+  \expandafter\edef\csname slides@s@#1\endcsname{%
+    \ifx\slides@k@size\@empty\else\noexpand\slidesize{\slides@k@size}\fi
+    \ifx\slides@k@family\slides@mono\noexpand\ttfamily\fi
+    \ifx\slides@k@family\slides@serif\noexpand\rmfamily\fi
+    \unexpanded\expandafter{\slides@k@face}%
+    \ifx\slides@k@weight\@empty\else\ifx\slides@k@weight\slides@bold\noexpand\bfseries
+      \else\noexpand\fontseries{\slides@k@weight}\noexpand\selectfont\fi\fi
+    \ifx\slides@k@italic\@empty\else\noexpand\itshape\fi
+    \ifx\slides@k@color\@empty\else\noexpand\color{\slides@k@color}\fi}%
+  \expandafter\let\csname slides@s@#1@ascent\endcsname\slides@k@ascent
+  \expandafter\let\csname slides@s@#1@pitch\endcsname\slides@k@pitch
+  \expandafter\let\csname slides@s@#1@depth\endcsname\slides@k@depth}
+\def\slides@use#1{\@ifundefined{slides@s@#1}{\PackageError{slides}{Unknown text style `#1'}%
+    {Define it with \string\slidestyle.}}{}%
+  \expandafter\let\expandafter\slides@lead\csname slides@s@#1\endcsname
+  \expandafter\let\expandafter\slides@ascent\csname slides@s@#1@ascent\endcsname
+  \expandafter\let\expandafter\slides@pitch\csname slides@s@#1@pitch\endcsname
+  \expandafter\let\expandafter\slides@depth\csname slides@s@#1@depth\endcsname}
+%
+% \begin{slidebox}[options]{x,y,w,h} ... \end{slidebox}: a text box whose text starts x bp from the
+%   page's left edge, y bp from its top, lines broken at w bp, in a box h bp tall. Options: middle,
+%   bottom (where the text stands in the box; top by default), inset= (bp above a top-aligned box's
+%   first line or under a bottom-aligned one's last: \setslideinset gives the default), tail= (bp
+%   stacked under a middle- or bottom-aligned box's last line: its last paragraph's space below).
+\newif\ifslides@top
+\newif\ifslides@mixed
+\def\slidesinset{0}
+\newcommand\setslideinset[1]{\def\slidesinset{#1}}
+\def\slides@xywh#1,#2,#3,#4\@nil{\def\slides@x{#1}\def\slides@y{#2}\def\slides@w{#3}\def\slides@h{#4}}
+\define@key{slidebox}{top}[]{\def\slides@valign{t}}
+\define@key{slidebox}{middle}[]{\def\slides@valign{m}}
+\define@key{slidebox}{bottom}[]{\def\slides@valign{b}}
+\define@key{slidebox}{inset}{\def\slides@inset{#1}}
+\define@key{slidebox}{tail}{\def\slides@tail{#1}}
+\newenvironment{slidebox}[2][]{%
+  \def\slides@valign{t}\let\slides@inset\slidesinset\let\slides@tail\@empty
+  \setkeys{slidebox}{#1}\slides@xywh#2\@nil
+  \let\slides@end\@empty\slides@toptrue
+  \edef\slides@block{\noexpand\begin{textblock*}{\slides@w bp}(\slides@x bp,\slides@y bp)}\slides@block
+  \vbox to\slides@h bp\bgroup\slidesbox
+  \if t\slides@valign\vskip\slides@inset bp\relax\else\vss\fi}{%
+  \slides@end
+  \ifx\slides@tail\@empty\else\vskip\slides@tail bp\relax\fi
+  \if b\slides@valign\vskip\slides@inset bp\relax\else\vss\fi
+  \egroup\end{textblock*}}
+%
+% \slidepar[options]{style}{words}: a paragraph of a slidebox. Options: center, right, justify;
+%   indent=, rindent= (bp from the box's left and right edges), first= (bp the first line starts
+%   past indent), space= (bp between this paragraph and the one before, beyond their line boxes),
+%   lang= (the babel language of a right-to-left paragraph), mixed (words of several sizes, each
+%   carrying its line box: \slidestrut), prevdepth= (bp: where the paragraph after a mixed one
+%   takes its line from).
+\define@key{slidepar}{center}[]{\def\slides@align{center}}
+\define@key{slidepar}{right}[]{\def\slides@align{right}}
+\define@key{slidepar}{justify}[]{\def\slides@align{justify}}
+\define@key{slidepar}{indent}{\def\slides@indent{#1}}
+\define@key{slidepar}{rindent}{\def\slides@rindent{#1}}
+\define@key{slidepar}{first}{\def\slides@first{#1}}
+\define@key{slidepar}{space}{\def\slides@space{#1}}
+\define@key{slidepar}{prevdepth}{\def\slides@prevdepth{#1}}
+\define@key{slidepar}{mixed}[]{\slides@mixedtrue}
+\define@key{slidepar}{lang}{\def\slides@lang{#1}}
+\def\slides@align@left{\def\slides@lfil{}\def\slides@rfil{ plus 1fil}\def\slides@pfil{}}
+\def\slides@align@center{\def\slides@lfil{ plus 1fil}\def\slides@rfil{ plus 1fil}\def\slides@pfil{}}
+\def\slides@align@right{\def\slides@lfil{ plus 1fil}\def\slides@rfil{}\def\slides@pfil{}}
+\def\slides@align@justify{\def\slides@lfil{}\def\slides@rfil{}\def\slides@pfil{ plus 1fil}}
+\newcommand\slidepar[2][]{%
+  \def\slides@align{left}\def\slides@indent{0}\def\slides@rindent{0}\let\slides@first\@empty
+  \let\slides@space\@empty\let\slides@prevdepth\@empty\slides@mixedfalse\let\slides@lang\@empty
+  \setkeys{slidepar}{#1}\slides@use{#2}\csname slides@align@\slides@align\endcsname
+  \ifslides@top
+    \ifx\slides@space\@empty\else\vskip\slides@space bp\relax\fi
+  \else\ifx\slides@prevdepth\@empty
+    \ifx\slides@space\@empty\else\prevdepth=\dimexpr\prevdepth-\slides@space bp\relax\fi
+  \else\prevdepth=\slides@prevdepth bp\relax\fi\fi
+  \slides@topfalse
+  \ifx\slides@lang\@empty\else
+    \edef\slides@begin{\noexpand\begin{otherlanguage}{\slides@lang}}\expandafter\slides@begin\fi
+  \bgroup\leftskip=\slides@indent bp\slides@lfil\relax\rightskip=\slides@rindent bp\slides@rfil\relax
+  \parfillskip=0bp\slides@pfil\relax\ifslides@mixed\lineskiplimit=0bp\relax\fi
+  \noindent\slides@lead\vrule width0bp height\slides@ascent bp depth0bp\relax
+  \ifx\slides@first\@empty\else\hskip\slides@first bp\relax\fi
+  \bgroup\aftergroup\slides@close\let\slides@next=}
+% (the words are a group, not an argument: they are read with the catcodes they are set in)
+\def\slides@close{\baselineskip=\slides@pitch bp\par\egroup
+  \ifx\slides@lang\@empty\else\end{otherlanguage}\fi
+  \ifslides@mixed\let\slides@end\@empty
+  \else\edef\slides@end{\noexpand\vskip\noexpand\dimexpr\slides@depth bp-\noexpand\prevdepth\noexpand\relax}\fi
+  \slides@after}
+\let\slides@after\relax
+%
+% \slidetext[options]{x,y,w,h}{style}{words}: a slidebox holding one \slidepar, the options of both
+%   in one list.
+\def\slides@addto#1#2{\ifx#1\@empty\def#1{#2}\else\expandafter\def\expandafter#1\expandafter{#1,#2}\fi}
+\define@key{slidetext}{top}[]{\slides@addto\slides@bo{top}}
+\define@key{slidetext}{middle}[]{\slides@addto\slides@bo{middle}}
+\define@key{slidetext}{bottom}[]{\slides@addto\slides@bo{bottom}}
+\define@key{slidetext}{inset}{\slides@addto\slides@bo{inset=#1}}
+\define@key{slidetext}{tail}{\slides@addto\slides@bo{tail=#1}}
+\define@key{slidetext}{center}[]{\slides@addto\slides@po{center}}
+\define@key{slidetext}{right}[]{\slides@addto\slides@po{right}}
+\define@key{slidetext}{justify}[]{\slides@addto\slides@po{justify}}
+\define@key{slidetext}{indent}{\slides@addto\slides@po{indent=#1}}
+\define@key{slidetext}{rindent}{\slides@addto\slides@po{rindent=#1}}
+\define@key{slidetext}{first}{\slides@addto\slides@po{first=#1}}
+\define@key{slidetext}{space}{\slides@addto\slides@po{space=#1}}
+\define@key{slidetext}{mixed}[]{\slides@addto\slides@po{mixed}}
+\define@key{slidetext}{lang}{\slides@addto\slides@po{lang=#1}}
+\newcommand\slidetext[3][]{\let\slides@bo\@empty\let\slides@po\@empty\setkeys{slidetext}{#1}%
+  \edef\slides@go{\noexpand\begin{slidebox}[\slides@bo]{#2}%
+    \noexpand\def\noexpand\slides@after{\noexpand\end{slidebox}}%
+    \noexpand\slidepar[\slides@po]}%
+  \slides@go{#3}}
+%
+% \slidelabel{style}{text}{gap}: a typed bullet (or number) in a style, ending gap bp before the
+%   text (negative: into it). \slidebullet{name}{gap}: a drawn one, named by \slidemark.
+%   \slidestrut{height}{depth}: a word's own line box in a paragraph of several sizes.
+\newcommand\slidelabel[3]{\expandafter\let\expandafter\slides@llead\csname slides@s@#1\endcsname
+  \llap{{\slides@llead #2}\hskip#3bp}}
+\newcommand\slidemark[2]{\expandafter\def\csname slides@m@#1\endcsname{#2}}
+\newcommand\slidebullet[2]{\llap{\csname slides@m@#1\endcsname\hskip#2bp}}
+\newcommand\slidestrut[2]{\vrule width0bp height#1bp depth#2bp\relax}
+% \slidebreak: a soft line break (Shift+Enter); \slidefillbreak: the same in a justified paragraph,
+%   whose broken line stays unjustified.
+\newcommand\slidebreak{\unskip\break}
+\newcommand\slidefillbreak{\unskip\hfil\break}"""
 ULEM = "\\usepackage[normalem]{ulem}"
 TIKZ = "\\usepackage{tikz}"
 # Ink of Slides' own bullet glyphs per em of the bullet's size (emit.BULLET_SHAPES, measured with
@@ -834,11 +985,11 @@ def run_tex(r: dict, base: dict, text: str, ctx: Context) -> str:
     if struts is not None and r.get("script"):
         # a raised strut would make its line as much taller: ap-bio-stats' "E = mc²" line stood 4 pt low
         a, b = line_box(r.get("size") or base.get("size") or 10.0, struts)
-        outer = f"\\vrule width0pt height{a:.2f}pt depth{b:.2f}pt\\relax "
+        outer = f"\\slidestrut{{{num(a)}}}{{{num(b)}}}"
     elif struts is not None:
         # a paragraph of several sizes: every word carries its own line box (text_box_latex)
         a, b = line_box(r.get("size") or base.get("size") or 10.0, struts)
-        strut = f"\\vrule width0pt height{a:.2f}pt depth{b:.2f}pt\\relax "
+        strut = f"\\slidestrut{{{num(a)}}}{{{num(b)}}}"
         core = strut + (core if r.get("underline") or r.get("strike") else core.replace(" ", " " + strut))
     fam, bfam = r.get("family") or "sans", base.get("family") or "sans"
     sr, sb = series(r, ctx), series(base, ctx)
@@ -878,7 +1029,7 @@ def run_tex(r: dict, base: dict, text: str, ctx: Context) -> str:
     if r.get("color") and (r["color"] or "").lower() != (base.get("color") or "").lower():
         core = f"\\textcolor{{{colour_name(r['color'], ctx.colours)}}}{{{core}}}"
     if r.get("size") and base.get("size") and abs(r["size"] - base["size"]) > 0.01:
-        core = f"{{\\slidesize{{{r['size']:.2f}}}{core}}}"
+        core = f"{{\\slidesize{{{num(r['size'])}}}{core}}}"
     if r.get("link") and not str(r["link"]).startswith("#"):
         url = str(r["link"]).replace("\\", "/").replace("#", "\\#").replace("%", "\\%")
         core = f"\\href{{{url}}}{{{core}}}"
@@ -987,12 +1138,137 @@ def tabbed_tex(runs: list[dict], base: dict, ctx: Context, brk: str, start: floa
         trail = len("".join(r["text"] for r in seg)) - len("".join(r["text"] for r in seg).rstrip(" "))
         spaces = "\\ " * trail                  # the spaces before a tab move the pen too
         out.append(f"\\slidestab{{{stop:.2f}pt}}{{{text}{spaces}}}")
-    out.append(runs_tex(segments[-1], base, ctx, brk) if segments[-1] else "")
+    # a paragraph ending on a tab keeps the tab's glue: a space after it is what \par takes away
+    out.append((runs_tex(segments[-1], base, ctx, brk) if segments[-1] else "") or " ")
     return "".join(out)
 
 
+def num(v: float, digits: int = 2) -> str:
+    """`v` to `digits` decimals without the zeros a fixed format pads it with: the same length to TeX
+    (12.50 and 12.5 are the same number of sp), fewer characters to read."""
+    s = f"{v:.{digits}f}".rstrip("0").rstrip(".")
+    return "0" if s in ("", "-", "-0") else s
+
+
+def colour_word(hex_colour: str) -> str:
+    """A name a person would give a colour (`Blue`, `LightGrey`, `DarkRed`): the hue, with Light or
+    Dark where the lightness says so; near-greys by their lightness."""
+    import colorsys
+    h = hex_colour.lstrip("#")
+    r, g, b = (int(h[i:i + 2], 16) / 255 for i in (0, 2, 4))
+    hue, light, sat = colorsys.rgb_to_hls(r, g, b)
+    if max(r, g, b) - min(r, g, b) < 0.08:
+        for top, word in ((0.15, "NearBlack"), (0.35, "DarkGrey"), (0.65, "Grey"), (0.9, "LightGrey")):
+            if light < top:
+                return word
+        return "OffWhite"
+    deg = hue * 360
+    for top, word in ((12, "Red"), (40, "Orange"), (65, "Yellow"), (90, "Lime"), (150, "Green"), (185, "Teal"),
+                      (200, "Cyan"), (255, "Blue"), (285, "Purple"), (320, "Magenta"), (345, "Pink"), (361, "Red")):
+        if deg < top:
+            break
+    if word in ("Orange", "Red") and light < 0.35:
+        word = "Brown" if word == "Orange" else "DarkRed"
+    elif word == "Red" and light > 0.75:
+        word = "Pink"
+    elif light > 0.8:
+        word = "Pale" + word
+    elif light > 0.65:
+        word = "Light" + word
+    elif light < 0.25:
+        word = "Dark" + word
+    return word
+
+
+SIZE_WORDS = ((2.0, "title"), (1.4, "heading"), (1.0001, "large"), (0.75, "small"), (0.0, "tiny"))
+WEIGHT_WORDS = {100: "thin", 200: "extralight", 300: "light", 400: "regular", 500: "medium", 600: "semibold",
+                700: "bold", 800: "extrabold", 900: "black"}
+
+
+def text_style(ctx: Context, size: float, family: str = "", face: str = "", weight: str = "",
+               italic: bool = False, colour: str | None = None, metrics: tuple | None = None) -> str:
+    """The name of a text style (`\\slidestyle` in the preamble), made on first use: its size next to
+    the deck's body size (title, heading, large, body, small, tiny), then what sets it apart - its
+    typeface, weight, slant and colour where that is not the deck's usual text colour. `metrics` is
+    the paragraph's line box (ascent, pitch, depth; bp strings), None for a bullet's style."""
+    colour_tex = colour_name(colour, ctx.colours) if colour else ""
+    key = (num(size), family, face, weight, italic, colour_tex, metrics)
+    styles = ctx.__dict__.setdefault("text_styles", {})
+    if key in styles:
+        return styles[key]
+    body = getattr(ctx, "body_size", None) or size
+    if abs(size - body) < 0.05:
+        words = ["body"]
+    else:
+        words = [next(w for top, w in SIZE_WORDS if size / body >= top)]
+    if face:
+        font = next((f for f, s in (getattr(ctx, "font_switches", None) or {}).items() if s == face), "")
+        words.append(re.sub(r"[^a-z0-9]", "", font.lower())[:16] or "face")
+    elif family in ("mono", "serif"):
+        words.append(family)
+    if weight:
+        words.append("bold" if weight == "bold" else WEIGHT_WORDS.get(int(weight[1:]), weight))
+    if italic:
+        words.append("italic")
+    if colour and colour.lower() != (getattr(ctx, "main_colour", None) or "").lower():
+        words.append(NAMED_WORDS.get(colour.lower()) or colour_word(colour).lower())
+    if metrics is None:
+        words[0] = "label"
+    name = "-".join(words)
+    taken = set(styles.values())
+    if name in taken:
+        name = f"{name}-{num(size, 1)}"
+    base, k = name, 2
+    while name in taken:
+        name, k = f"{base}-{k}", k + 1
+    styles[key] = name
+    return name
+
+
+NAMED_WORDS = {"#000000": "black", "#ffffff": "white"}
+
+
+def style_definitions(ctx: Context) -> list[str]:
+    """`\\slidestyle` lines for the styles the frames use, in the order they were first used."""
+    out = []
+    for (size, family, face, weight, italic, colour, metrics), name in (getattr(ctx, "text_styles", None) or {}).items():
+        keys = [f"size={size}"]
+        keys += [f"family={family}"] if family in ("mono", "serif") else []
+        keys += [f"face={face}"] if face else []
+        keys += [f"weight={weight}"] if weight else []
+        keys += ["italic"] if italic else []
+        keys += [f"color={colour}"] if colour else []
+        if metrics:
+            keys += [f"ascent={metrics[0]}", f"pitch={metrics[1]}", f"depth={metrics[2]}"]
+        out.append(f"\\slidestyle{{{name}}}{{{', '.join(keys)}}}")
+    for code, name in (getattr(ctx, "bullet_marks", None) or {}).items():
+        out.append(f"\\slidemark{{{name}}}{{{code}}}")
+    return out
+
+
+def bullet_mark(ctx: Context, glyph: str, z: float, colour: str | None, code: str) -> str:
+    """The name a drawn bullet (`\\slidemark`) goes by: dot, ring or square, its colour where that is
+    not the deck's usual text colour, its size when the deck draws it in more than one."""
+    marks = ctx.__dict__.setdefault("bullet_marks", {})
+    if code in marks:
+        return marks[code]
+    words = [{"●": "dot", "○": "ring", "■": "square"}[glyph]]
+    if colour and colour.lower() != (getattr(ctx, "main_colour", None) or "").lower():
+        words.append(NAMED_WORDS.get(colour.lower()) or colour_word(colour).lower())
+    name = "-".join(words)
+    taken = set(marks.values())
+    if name in taken:
+        name = f"{name}-{num(z, 1)}"
+    base, k = name, 2
+    while name in taken:
+        name, k = f"{base}-{k}", k + 1
+    marks[code] = name
+    return name
+
+
 def bullet_tex(p: dict, ctx: Context, scale: float, right: float) -> str:
-    """The bullet, its right edge `right` pt from where the line's text starts (negative: left of it)."""
+    """The bullet, its right edge `right` pt from where the line's text starts (negative: left of it):
+    `\\slidebullet` for the ● ○ ■ Slides draws, `\\slidelabel` for a typed one."""
     b = p["bullet"]
     glyph = (b.get("text") or "").strip()
     if not glyph:
@@ -1014,13 +1290,26 @@ def bullet_tex(p: dict, ctx: Context, scale: float, right: float) -> str:
                    f"({d / 2:.2f}pt,{d / 2:.2f}pt) circle[radius={(d - t) / 2:.2f}pt];")
         else:
             pic = f"\\tikz[baseline={-lift * z:.2f}pt]\\path[{fill}] (0pt,0pt) rectangle ({d:.2f}pt,{d:.2f}pt);"
-    else:
-        right -= GLYPH_GAP / scale
-        style = {"mono": "\\ttfamily", "serif": "\\rmfamily"}.get(b.get("font_family"), "")
-        style += "\\bfseries" if b.get("bold") else ""
-        style += f"\\color{{{colour}}}" if colour else ""
-        pic = f"{{\\slidesize{{{z:.2f}}}{style}{text_escape(glyph)}}}"
-    return f"\\llap{{{pic}\\hskip{-right:.2f}pt}}"
+        return f"\\slidebullet{{{bullet_mark(ctx, glyph, z, b.get('color'), to_bp(pic))}}}{{{num(-right)}}}"
+    right -= GLYPH_GAP / scale
+    family = b.get("font_family") if b.get("font_family") in ("mono", "serif") else ""
+    style = text_style(ctx, float(f"{z:.2f}"), family, "", "bold" if b.get("bold") else "", False, b.get("color"))
+    return f"\\slidelabel{{{style}}}{{{text_escape(glyph)}}}{{{num(-right)}}}"
+
+
+def box_insets(el: dict) -> tuple[float, float]:
+    """(side inset, top/bottom inset) of a text box, page pt: Slides' own, a PowerPoint deck's, or
+    none (`deck_ir.zero_insets`)."""
+    from .emit import BASELINE_A, PAD_X
+    box = el.get("box") or {}
+    scale = box.get("scale") or 720 / 453.54
+    pad, inset = (0.0, 0.0) if box.get("insets") == 0 else (PAD_X / scale, BASELINE_A / scale)
+    if box.get("inset_y") is not None and box.get("insets") != 0:
+        # PowerPoint's own top and bottom insets, which a deck's thumbnails showed (deck_ir.pptx_insets)
+        inset = (BASELINE_A - (SLIDES_INSET_Y - box["inset_y"])) / scale
+    if box.get("inset_x") is not None and box.get("insets") != 0:
+        pad = box["inset_x"] / scale                    # the same deck's side insets
+    return pad, inset
 
 
 SLIDES_INSET_Y = 7.2        # Slides pt: Slides' own top and bottom text insets, which BASELINE_A includes
@@ -1059,26 +1348,24 @@ def trailing_space(last: dict, valign: str, shape: str | None = None) -> float:
 def text_box_latex(el: dict, ctx: Context, ind: str) -> str:
     """A text box laid out as Slides lays it out: the element's own box, the vertical alignment done
     by TeX (`\\vbox to` its height with the slack above, below or both), each paragraph at its own
-    size, pitch, spacing and indents, bullets drawn where Slides draws them. See the notes above."""
-    from .emit import BASELINE_A, PAD_X
+    size, pitch, spacing and indents, bullets drawn where Slides draws them. See the notes above.
+    Written as a `slidebox` of `\\slidepar`s (`SLIDES_TEXT`)."""
     box = el.get("box") or {}
     scale = box.get("scale") or 720 / 453.54
     x0, y0, x1, y1 = el["bbox"]
     # a box with no insets (deck_ir.zero_insets) sets its text against its edges
-    pad, inset = (0.0, 0.0) if box.get("insets") == 0 else (PAD_X / scale, BASELINE_A / scale)
-    if box.get("inset_y") is not None and box.get("insets") != 0:
-        # PowerPoint's own top and bottom insets, which a deck's thumbnails showed (deck_ir.pptx_insets)
-        inset = (BASELINE_A - (SLIDES_INSET_Y - box["inset_y"])) / scale
-    if box.get("inset_x") is not None and box.get("insets") != 0:
-        pad = box["inset_x"] / scale                    # the same deck's side insets
+    pad, inset = box_insets(el)
     width, height = max(x1 - x0 - 2 * pad, 1.0), max(y1 - y0, 0.1)
     valign = box.get("valign", "top")
+    if valign not in ("middle", "bottom"):
+        valign = "top"
     paras = [p for p in el["paragraphs"] if p["runs"]]
     ctx.packages.add(TEXTPOS)
     ctx.packages.add(SLIDES_TEXT)
-    out = [f"{ind}\\begin{{textblock*}}{{{measure(width, paras, scale):.2f}pt}}({x0 + pad:.1f}pt,{y0:.1f}pt)",
-           f"{ind}  \\vbox to {height:.1f}pt{{\\slidesbox",
-           f"{ind}  " + ("\\vss" if valign in ("middle", "bottom") else f"\\vskip{inset:.2f}pt")]
+    box_opts = [valign] if valign != "top" else []
+    if valign != "middle" and f"{inset:.2f}" != getattr(ctx, "slide_inset", None):
+        box_opts.append(f"inset={num(inset)}")
+    pars = []
     prev = None
     for p in paras:
         sl = p.get("slides") or {}
@@ -1096,13 +1383,14 @@ def text_box_latex(el: dict, ctx: Context, ind: str) -> str:
         end = (sl.get("indent_end") or 0) / scale
         glyph = p.get("bullet") and (p["bullet"].get("text") or "").strip()
         shift = max(0.0, first - left) if p.get("bullet") else first - left
-        head = []
+        opts = []
+        space = None
         if prev is None:
             # a box that grows to fit its text (SHAPE_AUTOFIT) draws its first line without the first
             # paragraph's spaceAbove: gdg24's body copy says 22 pt and starts 22 pt higher than
             # that, while ds-lecture's bodies (no autofit type) keep their master's 6 pt
             if sl.get("space_above") and not box.get("grows"):
-                head.append(f"\\vskip{sl['space_above'] / scale:.2f}pt")
+                space = f"space={num(sl['space_above'] / scale)}"
         else:
             psl, pz, pr = prev.get("slides") or {}, para_size(prev), (prev.get("slides") or {}).get("line_spacing") or 1.0
             # between two list items each paragraph's own spacingMode says whether its side of the gap
@@ -1116,10 +1404,12 @@ def text_box_latex(el: dict, ctx: Context, ind: str) -> str:
             gap = max(below, above_) / scale
             if mixed_sizes(prev):
                 # its last line's depth is its own words' (their struts), which TeX has in \prevdepth
-                head.append(f"\\prevdepth={pitch - gap - above:.2f}pt\\relax")
+                space = f"prevdepth={num(pitch - gap - above)}"
             else:
+                # \prevdepth less the space between the two line boxes (a negative space overlaps them)
                 k = pitch - snapped_line_box(pz, pr, scale, bool(box.get("snap")))[1] - gap - above
-                head.append(f"\\prevdepth=\\dimexpr\\prevdepth{k:+.2f}pt\\relax")
+                if num(k) != "0":
+                    space = f"space={num(-float(f'{k:.2f}'))}"
         # LuaTeX's skips are logical: in a right-to-left paragraph \leftskip is at its start, the
         # right edge, where Slides measures indentStart from too - so only the alignment flips.
         rtl = p.get("direction") == "rtl"
@@ -1127,26 +1417,36 @@ def text_box_latex(el: dict, ctx: Context, ind: str) -> str:
         if rtl:
             align = {"left": "right", "right": "left"}.get(align, align)
         justified = bool(sl.get("justified")) and align == "left"
-        lskip = f"{left:.2f}pt" + (" plus 1fil" if align in ("center", "right") else "")
-        rskip = f"{end:.2f}pt" + (" plus 1fil" if align in ("center", "left") and not justified else "")
-        fill = "0pt plus 1fil" if justified else "0pt"
+        if justified:
+            opts.append("justify")
+        elif align in ("center", "right"):
+            opts.append(align)
+        if num(left) != "0":
+            opts.append(f"indent={num(left)}")
+        if num(end) != "0":
+            opts.append(f"rindent={num(end)}")
+        if shift and num(shift) != "0":
+            opts.append(f"first={num(shift)}")
+        if space:
+            opts.append(space)
+        if mixed:
+            opts.append("mixed")
         base = paragraph_base(p)
-        lead = f"\\slidesize{{{base['size']:.2f}}}"
-        lead += {"mono": "\\ttfamily", "serif": "\\rmfamily"}.get(base["family"], "")
-        lead += font_switch(base.get("font"), ctx)
         weight = series(base, ctx)
-        lead += "" if weight == "m" else series_switch(weight)
-        lead += "\\itshape" if base["italic"] else ""
-        lead += f"\\color{{{colour_name(base['color'], ctx.colours)}}}" if base["color"] else ""
-        brk = "\\unskip\\hfil\\break " if justified else "\\unskip\\break "
+        pr_ = sl.get("line_spacing") or 1.0
+        last = line_box(z, 1.0 if pr_ >= WIDE_SPACING else pr_)[1]
+        style = text_style(ctx, float(f"{base['size']:.2f}"),
+                           base["family"] if base["family"] in ("mono", "serif") else "",
+                           font_switch(base.get("font"), ctx),
+                           {"m": "", "b": "bold"}.get(weight, weight), bool(base["italic"]), base["color"],
+                           (num(above), num(pitch), num(last)))
+        brk = "\\slidefillbreak " if justified else "\\slidebreak "
         blank = not any(x["text"].strip() for x in p["runs"])
         ctx.line_struts = r if mixed else None
         body = "" if blank else runs_tex(p["runs"], base, ctx, brk)
-        start = f"\\vrule width0pt height{above:.2f}pt depth0pt\\relax"
-        if shift:
-            start += f"\\hskip{shift:.2f}pt\\relax"
+        mark = ""
         if glyph:
-            start += bullet_tex(p, ctx, scale, first - left - shift)
+            mark = bullet_tex(p, ctx, scale, first - left - shift)
         elif "\t" in "".join(x["text"] for x in p["runs"]) and first < left and not p.get("bullet"):
             # a hanging label (`label<TAB>text`): the tab jumps to indentStart
             label, rest, seen = [], [], False
@@ -1169,36 +1469,35 @@ def text_box_latex(el: dict, ctx: Context, ind: str) -> str:
             body = tabbed_tex(p["runs"], base, ctx, brk, pen, TAB_STOP / scale) or body
         ctx.line_struts = None
         # a right-to-left paragraph is set in its language (scripts.py: babel's bidi, shaping)
-        lang_in, lang_out = "", ""
         if rtl:
             from .scripts import rtl_language
-            lang_in = f"\\begin{{otherlanguage}}{{{rtl_language(p)}}}"
-            lang_out = "\\end{otherlanguage}"
-        out.append(f"{ind}  " + "".join(head) + lang_in +
-                   f"{{\\leftskip={lskip}\\relax\\rightskip={rskip}\\relax\\parfillskip={fill}\\relax"
-                   + ("\\lineskiplimit=0pt\\relax" if mixed else ""))
-        # the `%`: a bullet's \llap{} ends in a brace, and the line end after it was a word space -
-        # every bulleted line of the corpus began one space (5 pt at 18 pt Arial) right of Slides'
-        out.append(f"{ind}    \\noindent{lead}{start}" + ("% blank line" if blank else "%"))
-        if body:
-            out.append(f"{ind}    {body}")
-        # the pitch last: \selectfont (in \slidesize) resets \baselineskip, and TeX reads it at \par
-        out.append(f"{ind}  \\baselineskip={pitch:.2f}pt\\par}}{lang_out}")
+            opts.append(f"lang={rtl_language(p)}")
+        words = mark + body
+        if re.search(r"(~|\\ |\s|\\[A-Za-z@]+)\}*$", words):
+            # \par takes the last glue off the paragraph: a space after words that end in a tie or a
+            # control space (arabic-training's "Meeting~~~", comps-analysis' underlined "Pros ~ ~}")
+            # is what it takes, as the line end after them did when each paragraph was spelled out
+            words += " "
+        pars.append((opts, style, words))
         prev = p
     if prev is not None:
         # The space a wide lineSpacing adds under a line is not under the stack's last one: a middle-
         # aligned box centres the lines without it (sc-dark-modern's quotes at 170% sat 7 pt high,
         # sc-aesthetic-school's 150% numbers 14 pt). At 115% it is there all the same (firebase-jam,
-        # apps-edu-zh, ap-bio-stats: measured to the pixel both ways), hence the threshold.
-        pr = (prev.get("slides") or {}).get("line_spacing") or 1.0
-        last = line_box(para_size(prev), 1.0 if pr >= WIDE_SPACING else pr)[1]
-        if not mixed_sizes(prev):                      # else its words' struts already end it
-            out.append(f"{ind}  \\vskip\\dimexpr{last:.2f}pt-\\prevdepth\\relax")
+        # apps-edu-zh, ap-bio-stats: measured to the pixel both ways), hence the threshold: the
+        # style's depth, which `slidebox` ends the stack on (a mixed paragraph's words end it).
         tail = trailing_space(prev, valign, el.get("shape_type")) / scale
-        if tail:
-            out.append(f"{ind}  \\vskip{tail:.2f}pt")
-    out.append(f"{ind}  " + ("\\vss" if valign in ("middle", "top") else f"\\vskip{inset:.2f}pt") + "}")
-    out.append(f"{ind}\\end{{textblock*}}")
+        if num(tail) != "0":
+            box_opts.append(f"tail={num(tail)}")
+    geometry = ",".join((num(x0 + pad, 1), num(y0, 1), num(measure(width, paras, scale)), num(height, 1)))
+    brackets = (lambda o: f"[{','.join(o)}]" if o else "")
+    if len(pars) == 1:
+        # one paragraph: the box and it on one line
+        opts, style, words = pars[0]
+        return f"{ind}\\slidetext{brackets(box_opts + opts)}{{{geometry}}}{{{style}}}{{{words}}}"
+    out = [f"{ind}\\begin{{slidebox}}{brackets(box_opts)}{{{geometry}}}"]
+    out += [f"{ind}  \\slidepar{brackets(opts)}{{{style}}}{{{words}}}" for opts, style, words in pars]
+    out.append(f"{ind}\\end{{slidebox}}")
     return "\n".join(out)
 
 
@@ -1688,9 +1987,95 @@ def background_colour(target: dict) -> str | None:
     return max(counts, key=counts.get) if counts else None
 
 
+def text_elements(node):
+    """Every element of a deck (or slide, or group) that holds paragraphs, groups and tables' cells
+    looked into."""
+    if isinstance(node, dict):
+        if isinstance(node.get("paragraphs"), list):
+            yield node
+        for v in node.values():
+            if isinstance(v, (dict, list)):
+                yield from text_elements(v)
+    elif isinstance(node, list):
+        for v in node:
+            yield from text_elements(v)
+
+
+def deck_text_defaults(target: dict, ctx: Context) -> None:
+    """What most of a deck's text is (its size, its colour, its boxes' inset), so the names of text
+    styles are relative to it and the usual inset goes unsaid (`\\setslideinset`)."""
+    sizes: dict = {}
+    colours: dict = {}
+    insets: dict = {}
+    for el in text_elements(target.get("slides") or []):
+        for p in el["paragraphs"]:
+            if not p.get("runs"):
+                continue
+            n = sum(len(r.get("text") or "") for r in p["runs"])
+            base = paragraph_base(p)
+            k = float(f"{base['size']:.2f}")
+            sizes[k] = sizes.get(k, 0) + n
+            if base["color"]:
+                colours[base["color"]] = colours.get(base["color"], 0) + n
+        box = el.get("box") if isinstance(el.get("box"), dict) else None
+        if el.get("bbox") and box is not None and (box.get("valign") or "top") != "middle":
+            k = f"{box_insets(el)[1]:.2f}"
+            insets[k] = insets.get(k, 0) + 1
+    ctx.body_size = max(sizes, key=sizes.get) if sizes else None
+    ctx.main_colour = max(colours, key=colours.get) if colours else None
+    ctx.slide_inset = max(insets, key=insets.get) if insets else None
+
+
+def rename_colours(text: str, colours: dict[str, str]) -> str:
+    """The converter's `b2sRRGGBB` colours under names a person would give them (`Blue`, `DarkGrey`,
+    `Blue2` for a second blue), the most used colour of a name taking it bare."""
+    found = re.findall(r"(?<![A-Za-z0-9_])b2s([0-9A-F]{6})(?![A-Za-z0-9])", text)
+    uses: dict = {}
+    for h in found:
+        uses[h] = uses.get(h, 0) + 1
+    names: dict = {}
+    taken: set = set()
+    for h in sorted(uses, key=lambda h: (-uses[h], h)):
+        word, k = colour_word(h), 2
+        name = word
+        while name.lower() in taken:
+            name, k = f"{word}{k}", k + 1
+        taken.add(name.lower())
+        names[h] = name
+    return re.sub(r"(?<![A-Za-z0-9_])b2s([0-9A-F]{6})(?![A-Za-z0-9])", lambda m: names[m.group(1)], text)
+
+
+THEME_SPLIT = "\n%% b2s: theme file follows\n"
+
+SLIDES_STY_HEAD = r"""%% slides.sty - written by beamer2slides adopt, with main.tex.
+%% The vocabulary main.tex's frames are written in: Google Slides' text model (slidebox, \slidepar,
+%% \slidestyle), its tab stops, and the helpers of its shapes and tables. Nothing here is specific to
+%% this deck; the deck's styles and colours are named in main.tex's preamble.
+\NeedsTeXFormat{LaTeX2e}
+\ProvidesPackage{slides}
+\RequirePackage{keyval}
+"""
+
+
+def split_packages(packages) -> tuple[list[str], list[str]]:
+    """(the preamble's `\\usepackage` / `\\usetikzlibrary` lines, the macro blocks for slides.sty)."""
+    uses, macros = [], []
+    for p in sorted(packages):
+        (uses if p.lstrip().startswith(("\\usepackage", "\\usetikzlibrary")) else macros).append(p)
+    return uses, macros
+
+
+def sty_block(block: str) -> str:
+    """A macro block as a .sty holds it: no \\makeatletter / \\makeatother, @ being a letter there."""
+    lines = [ln for ln in block.split("\n") if ln.strip() not in ("\\makeatletter", "\\makeatother")]
+    return "\n".join(lines)
+
+
 def bootstrap(target: dict, tex: Path, flow: bool = False) -> str:
-    """Write `tex` (and return it): a compilable beamer source with a frame per deck slide."""
+    """Write `tex` (and return it): a compilable beamer source with a frame per deck slide, and the
+    `slides.sty` beside it that its frames' vocabulary comes from."""
     ctx = Context()
+    deck_text_defaults(target, ctx)
     style_for = level_style(target)
     tex.parent.mkdir(parents=True, exist_ok=True)
     deck_bg = background_colour(target)
@@ -1714,14 +2099,34 @@ def bootstrap(target: dict, tex: Path, flow: bool = False) -> str:
     finally:
         inverse.GUARD_UNITS = False
     head = preamble(target, ctx, flow, tex.parent)
-    extra = sorted(ctx.packages) + [f"\\definecolor{{{n}}}{{HTML}}{{{v}}}" for n, v in sorted(ctx.colours.items())]
+    uses, macros = split_packages(ctx.packages)
+    extra = list(uses)
+    if macros:
+        (tex.parent / "slides.sty").write_text(
+            SLIDES_STY_HEAD + "\n".join(sty_block(m) for m in macros) + "\n\\endinput\n", encoding="utf-8")
+        extra.append("\\usepackage{slides}")
+    extra += [f"\\definecolor{{{n}}}{{HTML}}{{{v}}}" for n, v in sorted(ctx.colours.items())]
+    styles = style_definitions(ctx)
+    if SLIDES_TEXT in ctx.packages and ctx.slide_inset and num(float(ctx.slide_inset)) != "0":
+        extra.append(f"\\setslideinset{{{num(float(ctx.slide_inset))}}}")
+    if styles:
+        extra += ["% the deck's text styles: size (bp), typeface, weight, colour, and the Slides line box of a",
+                  "% paragraph in each (ascent above the first baseline, pitch, depth under the last line)"]
+        extra += styles
+    theme_file = None
     if theme:
-        # the deck's masters and layouts, said once (`adopt_theme`): after the colours it draws in
+        # the deck's masters and layouts, said once (`adopt_theme`): after the colours and styles it draws in
         from .adopt_theme import theme_name
         name = theme_name(target)
-        (tex.parent / f"beamertheme{name}.sty").write_text(theme[0], encoding="utf-8")
+        theme_file = tex.parent / f"beamertheme{name}.sty"
         extra.append(f"\\usetheme{{{name}}}")
     text = head + "\n" + "\n".join(extra) + "\n\n\\begin{document}\n\n" + "\n".join(frames) + "\n\\end{document}\n"
+    if theme_file:
+        # one naming for both files: the theme draws in the same colours as the frames
+        text, sty = rename_colours(text + THEME_SPLIT + theme[0], ctx.colours).split(THEME_SPLIT)
+        theme_file.write_text(sty, encoding="utf-8")
+    else:
+        text = rename_colours(text, ctx.colours)
     tex.parent.mkdir(parents=True, exist_ok=True)
     tex.write_text(text, encoding="utf-8")
     return text

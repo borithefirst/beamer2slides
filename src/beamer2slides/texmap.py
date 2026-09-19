@@ -399,6 +399,9 @@ ARGS = {
     "column": "om", "item": "<o", "caption": "oM", "section": "soM", "subsection": "soM",
     "usetheme": "om", "usecolortheme": "om", "usefonttheme": "om", "graphicspath": "m",
     "againframe": "<om", "circled": "M", "newline": "", "linebreak": "o", "hfill": "", "vfill": "",
+    # adopt's vocabulary (adopt.SLIDES_TEXT, adopt_shapes.SHAPE_MACRO: slides.sty)
+    "slidepar": "omM", "slidetext": "ommM", "slidelabel": "mMm", "slidebullet": "mm", "slidestrut": "mm", "slidesize": "m",
+    "slidestyle": "mm", "slidemark": "mm", "setslideinset": "m", "slideshape": "mm", "sliderect": "om", "slideellipse": "om", "slidestab": "mM", "slidebreak": "", "slidefillbreak": "",
 }
 TEXT_MACROS = {"LaTeX": "LATEX", "TeX": "TEX", "ldots": "...", "dots": "...", "textellipsis": "...",
                "textbackslash": "\\", "textbullet": "•", "S": "§", "P": "¶", "copyright": "©",
@@ -407,15 +410,15 @@ TEXT_MACROS = {"LaTeX": "LATEX", "TeX": "TEX", "ldots": "...", "dots": "...", "t
                "o": "ø", "aa": "å", "l": "ł", "i": "ı", "euro": "€", "pounds": "£", "dag": "†",
                "ddag": "‡", "checkmark": OPAQUE, "today": OPAQUE, "insertframenumber": OPAQUE}
 OPAQUE_PARAS = {"titlepage", "maketitle", "tableofcontents", "bibliography", "printbibliography"}
-SPACE_CMDS = {",", ";", ":", " ", "quad", "qquad", "enspace", "thinspace", "enskip", "\\", "newline", "linebreak",
+SPACE_CMDS = {",", ";", ":", " ", "quad", "qquad", "enspace", "thinspace", "enskip", "\\", "newline", "linebreak", "slidebreak", "slidefillbreak",
               "hfill", "hspace", "cr"}
-PARA_CMDS = {"par", "vspace", "bigskip", "medskip", "smallskip", "vfill", "centering", "raggedright", "raggedleft"}
+PARA_CMDS = {"par", "slidepar", "slidetext", "vspace", "bigskip", "medskip", "smallskip", "vfill", "centering", "raggedright", "raggedleft"}
 ACCENT_MARKS = {"'": "\u0301", "`": "\u0300", "^": "\u0302", '"': "\u0308", "~": "\u0303", "=": "\u0304",
                 ".": "\u0307", "c": "\u0327", "v": "\u030c", "u": "\u0306", "H": "\u030b", "r": "\u030a"}
 ESCAPES = {"&": "&", "%": "%", "$": "$", "#": "#", "_": "_", "{": "{", "}": "}"}
 # Environments whose mandatory arguments don't print; figures and code are opaque.
 ENV_ARGS = {"frame": "<o<", "minipage": "ooom", "column": "om", "columns": "o", "tabular": "om",
-            "tabularx": "mom", "textblock": "m(", "textblock*": "m(", "overlayarea": "mm", "onlyenv": "<",
+            "tabularx": "mom", "textblock": "m(", "textblock*": "m(", "slidebox": "om", "overlayarea": "mm", "onlyenv": "<",
             "block": "<M", "alertblock": "<M", "exampleblock": "<M", "itemize": "<o", "enumerate": "<o",
             "description": "<o", "center": "", "flushleft": "", "flushright": "", "quote": "",
             "actionenv": "<", "visibleenv": "<", "uncoverenv": "<", "altenv": "<mmmm", "multicols": "m"}
@@ -550,7 +553,7 @@ def build_visible(s: str, start: int, end: int, title_frame: bool = False) -> Vi
                         v.add(PARA, i, k)
                     elif name in SPACE_CMDS:
                         v.add(" ", i, k)
-                    if name in ("ding", "ensuremath", "tikz", "ref", "eqref", "cite") and any(args):
+                    if name in ("ding", "ensuremath", "tikz", "slideshape", "ref", "eqref", "cite") and any(args):
                         v.add(OPAQUE, i, k)
                     heading = name in ("frametitle", "framesubtitle")
                     if heading:
@@ -563,7 +566,7 @@ def build_visible(s: str, start: int, end: int, title_frame: bool = False) -> Vi
                                 v.title, v.title_src = (t0, len(v.text)), (a[1], a[2])
                             else:
                                 walk(a[1], a[2])
-                    if heading:
+                    if heading or name in ("slidepar", "slidetext"):
                         v.add(PARA, k, k)
                     i = k
                 elif name in SPACE_CMDS:

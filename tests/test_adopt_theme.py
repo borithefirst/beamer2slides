@@ -213,7 +213,7 @@ def test_bootstrap_writes_the_theme_beside_the_source_and_uses_it(tmp_path):
     theme = sty.read_text(encoding="utf-8")
     assert "\\defbeamertemplate{background}{section}" in theme and theme.rstrip().endswith("\\mode<all>")
     frame = text[text.index("% slide 3"):]
-    assert "own words" in frame and frame.count("\\begin{textblock*}") == 1
+    assert "own words" in frame and frame.count("\\slidetext{") == 1
 
 
 def test_a_flow_source_has_no_theme(tmp_path):
