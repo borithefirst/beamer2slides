@@ -196,6 +196,13 @@ def test_a_soft_break_anywhere_is_a_line_break_that_compiles(tmp_path):
     assert "\\unskip\\break \\textmd{opening}bold\\unskip\\break word" in frame
 
 
+def test_straight_quotes_and_double_hyphens_stay_as_typed():
+    """fontspec's TeX ligatures curl a straight quote and join -- into an en dash; Slides shows
+    what was typed (ds-lecture's "objects")."""
+    assert adopt.text_escape('say "hi" it\'s `x` a--b---c') == (
+        "say \\symbol{34}hi\\symbol{34} it\\symbol{39}s \\symbol{96}x\\symbol{96} a-{}-b-{}-{}-c")
+
+
 def test_windows_font_files_are_one_family(tmp_path, monkeypatch):
     """arial.ttf, arialbd.ttf, ariali.ttf, arialbi.ttf: read as four families, Arial had no bold and
     every bold word of the cs161 decks came out regular."""

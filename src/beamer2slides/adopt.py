@@ -343,9 +343,13 @@ def para_size(p: dict) -> float:
 
 
 def text_escape(text: str) -> str:
-    """LaTeX for plain text as Slides shows it: runs of spaces are kept (Slides does not fold them)."""
+    """LaTeX for plain text as Slides shows it: runs of spaces are kept (Slides does not fold them),
+    and straight quotes, backquotes and double hyphens stay what they are - fontspec's TeX ligatures
+    would turn ds-lecture's "objects" into curly quotes and -- into an en dash."""
     from .inverse import latex_escape
     out = latex_escape(text.replace("\t", " ").replace("\x0b", " "))
+    out = out.replace('"', "\\symbol{34}").replace("'", "\\symbol{39}").replace("`", "\\symbol{96}")
+    out = out.replace("--", "-{}-").replace("--", "-{}-")
     while "  " in out:
         out = out.replace("  ", " \\ ")
     return out
