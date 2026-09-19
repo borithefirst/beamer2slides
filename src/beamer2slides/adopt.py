@@ -23,8 +23,8 @@ import os
 import shutil
 from pathlib import Path
 
-from .inverse import (Context, TEXTPOS, body_style, colour_name, frame_latex, picture_block,
-                      textblock_latex)
+from .inverse import (Context, TEXTPOS, body_style, colour_name, frame_latex, paragraphs_latex,
+                      picture_block, textblock_latex)
 
 # beamer's own page sizes, by the class option that asks for them (`deck_ir.BEAMER_SIZES`).
 ASPECTS = {(453.54, 255.12): "aspectratio=169", (453.54, 283.46): "aspectratio=1610",
@@ -324,6 +324,162 @@ def shape_block(el: dict, ctx: Context, ind: str) -> str:
     return tikz_block(body, x0, y0, w, h, ind)
 
 
+# What `table_block` writes calls these. A Slides row is a minimum height that grows until its
+# tallest cell fits, and only TeX knows how tall a cell's text comes out, so the table is measured
+# where it is drawn: every cell is set into a box first (`\adoptcell`, which grows the last row it
+# spans until the rows hold it), `\adopttops` then adds the rows up, and the tikzpicture after it
+# puts fills, borders and boxes at `\adopty{row}`.
+#
+# The insets are a guess, and Slides does not always wrap inside them: creandum-board's native
+# table (left inset 7.2 pt, measured on the thumbnail) keeps "+1 months", 35 pt of 7 pt Arial Bold,
+# on one line in a 40.2 pt column, and its row is stored 22.1 pt - one line. A stored row height is
+# what Slides laid out, so a cell whose text would need more than its rows give it is set again
+# without the insets, and kept that way when that takes fewer lines.
+#
+# Slides never hyphenates, so neither does a cell. (It does break a word between two letters when
+# the word is wider than the cell; TeX lets it stick out instead, because a penalty between every
+# two letters, tried, also split the numbers of creandum-board's narrow columns where Slides keeps
+# them whole: the inset is a guess, and a word that sticks out costs less than a row that grows.)
+TABLE_MACROS = r"""\makeatletter
+\newcommand\adoptrow[2]{\expandafter\edef\csname adopt@row@#1\endcsname{\the\dimexpr#2\relax}}
+\newcommand\adoptsetcell[2]{\vbox{\hsize=#1\relax\linewidth\hsize\parindent\z@
+    \hyphenpenalty\@M\exhyphenpenalty\@M\everypar{\strut}#2\ifhmode\strut\fi}}
+\newcommand\adoptcell[8]{% box, first row, last row, text width, vertical inset (both),
+  % width with no insets, its shift, content
+  \expandafter\ifx\csname adopt@box@#1\endcsname\relax\expandafter\newbox\csname adopt@box@#1\endcsname\fi
+  \global\setbox\csname adopt@box@#1\endcsname\adoptsetcell{#4}{#8}%
+  \dimen@\z@\@tempcnta#2\relax
+  \loop\advance\dimen@\csname adopt@row@\the\@tempcnta\endcsname\relax
+  \ifnum\@tempcnta<#3\relax\advance\@tempcnta\@ne\repeat
+  \dimen@ii\dimexpr\ht\csname adopt@box@#1\endcsname+\dp\csname adopt@box@#1\endcsname+#5*2\relax
+  \ifdim\dimen@ii>\dimen@
+    \setbox\@tempboxa\adoptsetcell{#6}{#8}%
+    \ifdim\dimexpr\ht\@tempboxa+\dp\@tempboxa\relax<\dimexpr\dimen@ii-#5*2\relax
+      \global\setbox\csname adopt@box@#1\endcsname\hbox to #4{\kern#7\box\@tempboxa\hss}%
+      \dimen@ii\dimexpr\ht\csname adopt@box@#1\endcsname+\dp\csname adopt@box@#1\endcsname+#5*2\relax
+    \fi
+  \fi
+  \ifdim\dimen@ii>\dimen@
+    \expandafter\edef\csname adopt@row@#3\endcsname{\the\dimexpr\csname adopt@row@#3\endcsname+\dimen@ii-\dimen@\relax}%
+  \fi}
+\newcommand\adopttops[1]{% \adopty{k}: the top of row k, and \adopty{#1} the table's foot
+  \dimen@\z@\@tempcnta\z@
+  \loop\expandafter\edef\csname adopt@y@\the\@tempcnta\endcsname{\the\dimen@}%
+  \ifnum\@tempcnta<#1\relax
+    \advance\dimen@\csname adopt@row@\the\@tempcnta\endcsname\relax\advance\@tempcnta\@ne\repeat}
+\newcommand\adopty[1]{\csname adopt@y@#1\endcsname}
+\newcommand\adoptbox[1]{\copy\csname adopt@box@#1\endcsname}
+\makeatother"""
+
+DASHES = {"DOT": "dotted", "DASH": "dashed", "DASH_DOT": "dash dot", "LONG_DASH": "dashed",
+          "LONG_DASH_DOT": "dash dot"}
+
+
+def table_segments(el: dict) -> list[tuple[tuple, list]]:
+    """The borders to draw, joined into runs: [((dir, line, style), [(from, to)])]. A segment
+    inside a merged cell is not a border (the API lists none there, but a pptx import may), and
+    touching segments of one style along one line become one stroke, so dots and dashes run on."""
+    n_rows, n_cols = len(el["row_heights"]), len(el["col_widths"])
+    inside_h, inside_v = set(), set()
+    for c in el.get("table_cells", []):
+        for r in range(c["row"] + 1, c["row"] + c["rowspan"]):
+            inside_h.update((r, k) for k in range(c["col"], c["col"] + c["colspan"]))
+        for k in range(c["col"] + 1, c["col"] + c["colspan"]):
+            inside_v.update((r, k) for r in range(c["row"], c["row"] + c["rowspan"]))
+    runs: dict[tuple, list] = {}
+    for b in el.get("table_borders", []):
+        if b["dir"] == "h" and (b["row"] > n_rows or b["col"] >= n_cols or (b["row"], b["col"]) in inside_h):
+            continue
+        if b["dir"] == "v" and (b["row"] >= n_rows or b["col"] > n_cols or (b["row"], b["col"]) in inside_v):
+            continue
+        line, at = (b["row"], b["col"]) if b["dir"] == "h" else (b["col"], b["row"])
+        key = (b["dir"], line, b["color"], b["alpha"], b["weight"], b["dash"])
+        spans = runs.setdefault(key, [])
+        if spans and spans[-1][1] == at:
+            spans[-1] = (spans[-1][0], at + 1)
+        else:
+            spans.append((at, at + 1))
+    return sorted(runs.items(), key=lambda kv: (kv[0][0], kv[0][1]))
+
+
+def table_block(el: dict, ctx: Context, ind: str) -> str:
+    """A table at its place and size: every cell's text set in a box as wide as its columns less
+    Slides' insets, the rows grown until their cells fit (`TABLE_MACROS`), then one tikzpicture with
+    the cell fills, the border segments and the boxes. A `tabular` would be the readable version,
+    but it cannot say what a Slides table says: a colour, weight and dash per border segment, a
+    row's minimum height, and text inset by Slides' own padding at an exact column width."""
+    widths, heights = el.get("col_widths") or [], el.get("row_heights") or []
+    if not widths or not heights:
+        return ""
+    ctx.packages.add("\\usepackage{tikz}")
+    ctx.packages.add(TEXTPOS)
+    ctx.packages.add(TABLE_MACROS)
+    padx, pady = el.get("cell_pad") or (4.5, 4.5)
+    xs = [0.0]
+    for w in widths:
+        xs.append(xs[-1] + w)
+    n_rows = len(heights)
+    x0, y0 = el["bbox"][0], el["bbox"][1]
+    lines = [f"{ind}\\begin{{textblock*}}{{{xs[-1]:.1f}pt}}({x0:.1f}pt,{y0:.1f}pt)"]
+    lines += [f"{ind}  \\adoptrow{{{r}}}{{{h:.2f}pt}}" for r, h in enumerate(heights)]
+    cells = [c for c in el.get("table_cells", []) if c["row"] < n_rows and c["col"] < len(widths)]
+    boxes: dict[int, int] = {}
+    # rows that hold one cell grow first, so a merged cell only adds what they left it short of
+    for k, c in sorted(enumerate(cells), key=lambda kc: (kc[1]["rowspan"], kc[0])):
+        if not c["paragraphs"]:
+            continue
+        last_row = min(c["row"] + c["rowspan"], n_rows) - 1
+        last_col = min(c["col"] + c["colspan"], len(widths))
+        span = xs[last_col] - xs[c["col"]]
+        width = max(span - 2 * padx, 1.0)
+        # the insets let go of when the text would otherwise need more room than the stored row
+        # height gives it (see TABLE_MACROS); the wider box keeps the paragraph's alignment
+        shift = {"center": -padx, "right": -2 * padx}.get(c["paragraphs"][0].get("align"), 0.0)
+        base = element_style(c)
+        body = paragraphs_latex(c["paragraphs"], lambda _p, b=base: b, ctx, ind + "    ")
+        boxes[k] = len(boxes) + 1
+        lines.append(f"{ind}  \\adoptcell{{{boxes[k]}}}{{{c['row']}}}{{{last_row}}}{{{width:.2f}pt}}{{{pady:.2f}pt}}"
+                     f"{{{span:.2f}pt}}{{{shift:.2f}pt}}{{%")
+        lines.append(f"{ind}    \\raggedright{base_lead(base, ctx)}%")
+        lines.append(body + "}")
+    lines.append(f"{ind}  \\adopttops{{{n_rows}}}")
+    lines.append(f"{ind}  \\begin{{tikzpicture}}[baseline=(current bounding box.north),inner sep=0pt,outer sep=0pt]")
+    lines.append(f"{ind}    \\path[use as bounding box] (0pt,0pt) rectangle ({xs[-1]:.1f}pt,{{-\\adopty{{{n_rows}}}}});")
+    for c in cells:
+        if c.get("fill"):
+            opacity = f",fill opacity={c['fill_alpha']:.2f}" if (c.get("fill_alpha") or 1) < 1 else ""
+            r1 = min(c["row"] + c["rowspan"], n_rows)
+            c1 = min(c["col"] + c["colspan"], len(widths))
+            lines.append(f"{ind}    \\fill[{colour_name(c['fill'], ctx.colours)}{opacity}] ({xs[c['col']]:.1f}pt,{{-\\adopty{{{c['row']}}}}})"
+                         f" rectangle ({xs[c1]:.1f}pt,{{-\\adopty{{{r1}}}}});")
+    for (direction, line, colour, alpha, weight, dash), spans in table_segments(el):
+        opts = [colour_name(colour or "#000000", ctx.colours), f"line width={weight:.2f}pt"]
+        opts.append(DASHES.get(dash, "line cap=rect"))
+        if alpha < 1:
+            opts.append(f"draw opacity={alpha:.2f}")
+        for a, b in spans:
+            if direction == "h":
+                path = f"({xs[a]:.1f}pt,{{-\\adopty{{{line}}}}}) -- ({xs[b]:.1f}pt,{{-\\adopty{{{line}}}}})"
+            else:
+                path = f"({xs[line]:.1f}pt,{{-\\adopty{{{a}}}}}) -- ({xs[line]:.1f}pt,{{-\\adopty{{{b}}}}})"
+            lines.append(f"{ind}    \\draw[{','.join(opts)}] {path};")
+    for k, c in enumerate(cells):
+        if k not in boxes:
+            continue
+        r1 = min(c["row"] + c["rowspan"], n_rows)
+        x = xs[c["col"]] + padx
+        if c.get("valign") == "middle":
+            where, anchor = f"({x:.1f}pt,{{-(\\adopty{{{c['row']}}}+\\adopty{{{r1}}})/2}})", "west"
+        elif c.get("valign") == "bottom":
+            where, anchor = f"({x:.1f}pt,{{-\\adopty{{{r1}}}+{pady:.2f}pt}})", "south west"
+        else:
+            where, anchor = f"({x:.1f}pt,{{-\\adopty{{{c['row']}}}-{pady:.2f}pt}})", "north west"
+        lines.append(f"{ind}    \\node[anchor={anchor}] at {where} {{\\adoptbox{{{boxes[k]}}}}};")
+    lines.append(f"{ind}  \\end{{tikzpicture}}")
+    lines.append(f"{ind}\\end{{textblock*}}")
+    return "\n".join(lines)
+
+
 def slide_latex(s: dict, style_for, ctx: Context, flow: bool, tree: Path | None = None,
                 deck_bg: str | None = None) -> str:
     """One deck slide as a frame. `flow` writes the readable version (`inverse.frame_latex`: a frame
@@ -338,6 +494,8 @@ def slide_latex(s: dict, style_for, ctx: Context, flow: bool, tree: Path | None 
             continue                                   # part of a text line, not an element of its own
         if el["kind"] == "shape":
             out.append(shape_block(el, ctx, "  ").rstrip("\n"))
+        elif el["kind"] == "table":
+            out.append(table_block(el, ctx, "  "))
         elif el["kind"] == "image":
             pic = picture_of(el, tree)
             if pic is not None:

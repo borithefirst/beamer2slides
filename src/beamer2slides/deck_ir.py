@@ -593,18 +593,151 @@ def element_of(pe: dict, m: list[float], resolver: StyleResolver, fonts: FontMap
             el.update(stash_picture(url, fetch, images))
         return el
     if "table" in pe:
-        rows = []
-        for row in pe["table"].get("tableRows", []):
-            cells = []
-            for cell in row.get("tableCells", []):
-                text = "".join(te.get("textRun", {}).get("content", "")
-                               for te in cell.get("text", {}).get("textElements", []))
-                cells.append(" ".join(text.split()))
-            rows.append(cells)
-        return {"kind": "table", "role": "table", "bbox": bbox, "rows": rows}
+        return table_element(pe, m, resolver, fonts, scale, foreign)
     if "line" in pe:
         return line_element(pe, m, scale, resolver.scheme) if foreign else None
     return None
+
+
+VALIGN = {"TOP": "top", "MIDDLE": "middle", "BOTTOM": "bottom"}
+SLIDES_ID = re.compile(r"^g[0-9a-f]+_\d+_\d+$")
+
+
+def guess_lines(text: str, width: float, size: float) -> int:
+    """How many lines `text` takes at `size` in `width` pt, by a rough 0.5 em per character with
+    greedy word wrapping: enough to tell one line from three, which is all `cell_pad` asks."""
+    lines = 0
+    for para in text.replace("\x0b", "\n").rstrip("\n").split("\n"):
+        at, lines = 0.0, lines + 1
+        for word in para.split():
+            w = 0.5 * size * len(word)
+            if at and at + 0.25 * size + w > width:
+                lines, at = lines + 1, w
+            else:
+                at += (0.25 * size if at else 0.0) + w
+    return max(lines, 1)
+
+
+def cell_pad(pe: dict) -> tuple[float, float]:
+    """A table's cell insets in Slides pt, (left and right, top and bottom), which the API neither
+    reports nor lets one set - so they are inferred.
+
+    A table made in Slides has 7.2 pt all round (CLAUDE.md, pitfalls). A table a .pptx brought keeps
+    the file's margins, and on the adopt corpus's thumbnails those render from 1 to 4 pt: a 16 pt row
+    of comps-analysis grows to 24 pt, where 7.2 pt insets would make it 33.6. Two things the API does
+    say narrow it down. Where the object came from: Slides names what it creates g<hex>_<n>_<n>, an
+    import keeps the file's ids (i32, p14_i11), and an import is at most 3.6 pt (0.05 in, the .pptx
+    default). And the row heights: a stored height is at least its text plus both insets unless the
+    row was set smaller than its text (which only Slides allows, growing it back), so the tightest row
+    that still holds its line bounds the inset from above - solidity-survey's g-named table, pasted
+    from an import, has 15.8 pt rows of 10 pt text and so insets of 1.9, not 7.2 (measured about 2).
+    """
+    native = bool(SLIDES_ID.match(pe.get("objectId") or ""))
+    cap = 7.2 if native else 3.6
+    widths = [dim(c.get("columnWidth")) for c in pe["table"].get("tableColumns", [])]
+    room = []
+    for row in pe["table"].get("tableRows", []):
+        z = 0.0
+        for cell in row.get("tableCells", []):
+            size, text = 0.0, ""
+            for te in cell.get("text", {}).get("textElements", []):
+                if "textRun" in te:
+                    text += te["textRun"].get("content", "")
+                    if te["textRun"].get("content", "").strip():
+                        size = max(size, dim(te["textRun"].get("style", {}).get("fontSize")))
+            z = max(z, size)
+            if native and size and cell.get("rowSpan", 1) == 1:
+                col = cell.get("location", {}).get("columnIndex", 0)
+                span = sum(widths[col:col + cell.get("columnSpan", 1)])
+                if dim(row.get("rowHeight")) < 1.2 * size * guess_lines(text, span - 2 * cap, size) - 1:
+                    # a row stored smaller than its text at Slides' own insets: someone dragged it
+                    # smaller and Slides grew it back, so the heights say nothing about the insets
+                    # (journey-maps 16 and 17: rows of 7.9 pt hold 12 pt text, a 15.2 pt header
+                    # three lines, and the thumbnails show 7.2 pt insets)
+                    return 7.2, 7.2
+        spare = dim(row.get("rowHeight")) - 1.2 * z
+        if z and spare >= 0:
+            room.append(spare / 2)
+    pad_y = min(cap, max(1.5, min(room))) if room else cap
+    # Across it is a little more: journey-maps' header (rows say 2.5 pt) keeps "Channel" whole in
+    # 46.9 pt but breaks "custom|ers" in 41.1 and "Succes|s" in 43.9, which puts the inset between
+    # 3.7 and 5.7 pt; its first column's ink starts 4.9 pt in.
+    return min(7.2, pad_y + 2.2), pad_y
+
+
+def table_element(pe: dict, m: list[float], resolver: StyleResolver, fonts: FontMapper, scale: float,
+                  foreign: bool = False) -> dict:
+    """A table: `rows` (each cell's plain text, what `pull` and sync compare) and its box.
+
+    The box is the grid's, not the element's: Slides reports every table's `size` as 3,000,000 EMU
+    square whatever it holds (all 42 tables of the adopt corpus), and the grid is the column widths
+    across and the row heights down - minimum heights, since Slides grows a row to fit its text.
+
+    `foreign` adds what `adopt` needs to draw it (`adopt.table_block`): `col_widths` and
+    `row_heights` in PDF pt, `table_cells` (only the head cell of a merged range is listed, at its
+    `location`; `rowspan`/`colspan`, `fill`, `fill_alpha`, `valign` and `paragraphs` read like a text
+    box's) and `table_borders`, the visible segments of the API's `horizontalBorderRows` (one per
+    column under row boundary `row`) and `verticalBorderRows` (one per row beside column boundary
+    `col`). A cell fill with no `propertyState` is drawn, as a shape's is."""
+    t = pe["table"]
+    rows = []
+    for row in t.get("tableRows", []):
+        cells = []
+        for cell in row.get("tableCells", []):
+            text = "".join(te.get("textRun", {}).get("content", "")
+                           for te in cell.get("text", {}).get("textElements", []))
+            cells.append(" ".join(text.split()))
+        rows.append(cells)
+    widths = [dim(c.get("columnWidth")) * m[0] for c in t.get("tableColumns", [])]
+    heights = [dim(r.get("rowHeight")) * m[4] for r in t.get("tableRows", [])]
+    x0, y0 = m[2], m[5]
+    if widths and heights:
+        bbox = [round(v / scale, 2) for v in (x0, y0, x0 + sum(widths), y0 + sum(heights))]
+    else:
+        w, h = dim(pe.get("size", {}).get("width")), dim(pe.get("size", {}).get("height"))
+        bbox = [round(v / scale, 2) for v in box(m, w, h)]
+    el = {"kind": "table", "role": "table", "bbox": bbox, "rows": rows}
+    if not foreign:
+        return el
+    el["cell_pad"] = [round(v / scale, 3) for v in cell_pad(pe)]
+    el["col_widths"] = [round(w / scale, 3) for w in widths]
+    el["row_heights"] = [round(h / scale, 3) for h in heights]
+    cells_out = []
+    for row in t.get("tableRows", []):
+        for cell in row.get("tableCells", []):
+            loc = cell.get("location", {})
+            props = cell.get("tableCellProperties", {})
+            fill = props.get("tableCellBackgroundFill", {})
+            solid = fill.get("solidFill") if fill.get("propertyState", "RENDERED") == "RENDERED" else None
+            paras = text_paragraphs(pe, cell.get("text", {}), resolver, fonts, scale, keep_blank=True)
+            cells_out.append({
+                "row": loc.get("rowIndex", 0), "col": loc.get("columnIndex", 0),
+                "rowspan": cell.get("rowSpan", 1), "colspan": cell.get("columnSpan", 1),
+                "fill": rgb_hex(solid.get("color"), resolver.scheme) if solid else None,
+                "fill_alpha": round(solid.get("alpha", 1.0), 3) if solid else None,
+                "valign": VALIGN.get(props.get("contentAlignment"), "top"),
+                "paragraphs": [{"align": p["align"], "level": p["level"], "bullet": p["bullet"], "size": p["size"],
+                                "line_spacing": p["line_spacing"],
+                                "runs": [{k: v for k, v in r.items() if k not in ("slides_font", "slides_size")}
+                                         for r in p["runs"]]}
+                               for p in paras if p["runs"]]})
+    el["table_cells"] = cells_out
+    borders = []
+    for direction, key in (("h", "horizontalBorderRows"), ("v", "verticalBorderRows")):
+        for i, brow in enumerate(t.get(key, [])):
+            for bc in brow.get("tableBorderCells", []):
+                loc = bc.get("location", {})
+                props = bc.get("tableBorderProperties", {})
+                solid = props.get("tableBorderFill", {}).get("solidFill")
+                weight = dim(props.get("weight"))
+                if not solid or solid.get("alpha", 1.0) <= 0 or weight <= 0:
+                    continue
+                borders.append({"dir": direction, "row": loc.get("rowIndex", i), "col": loc.get("columnIndex", 0),
+                                "color": rgb_hex(solid.get("color"), resolver.scheme),
+                                "alpha": round(solid.get("alpha", 1.0), 3),
+                                "weight": round(weight / scale, 3), "dash": props.get("dashStyle", "SOLID")})
+    el["table_borders"] = borders
+    return el
 
 
 FORMAT_EXT = {"png": "png", "jpeg": "jpg", "gif": "gif", "webp": "webp", "bmp": "bmp", "tiff": "tif", "svg": "svg",
