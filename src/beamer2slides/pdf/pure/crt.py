@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import ctypes
 import ctypes.util
+import platform
 import sys
 
 _lib = None
@@ -31,3 +32,41 @@ def float_fn(name: str, n: int):
     fn.restype = ctypes.c_float
     fn.argtypes = [ctypes.c_float] * n
     return fn
+
+
+# static_cast from float to an integer is undefined out of range, and the CPU decides what comes out:
+# x86's cvttss2si gives INT_MIN (the 64-bit form's low half, for uint32), arm64's fcvtzs/fcvtzu
+# saturate and turn NaN into 0 (pypdfium2's macOS wheel is arm64)
+ARM = platform.machine().lower() in ("arm64", "aarch64")
+INT_MIN, INT_MAX, U32 = -(1 << 31), (1 << 31) - 1, 0xFFFFFFFF
+
+
+def i32(v: float) -> int:
+    """static_cast<int32_t>(float)."""
+    if v != v:
+        return 0 if ARM else INT_MIN
+    if v >= 2147483648.0:
+        return INT_MAX if ARM else INT_MIN
+    if v < -2147483648.0:
+        return INT_MIN
+    return int(v)
+
+
+def u32(v: float) -> int:
+    """static_cast<uint32_t>(float)."""
+    if ARM:
+        return 0 if v != v or v <= 0.0 else U32 if v >= 4294967296.0 else int(v)
+    if v != v or v >= 9223372036854775808.0 or v < -9223372036854775808.0:
+        return 0
+    return int(v) & U32
+
+
+def i32_array(t):
+    """static_cast<int32_t> over a float numpy array (int64 result)."""
+    import numpy as np
+    with np.errstate(invalid="ignore"):
+        if ARM:
+            t = np.nan_to_num(np.asarray(t, np.float64), nan=0.0, posinf=INT_MAX, neginf=INT_MIN)
+            return np.clip(np.trunc(t), INT_MIN, INT_MAX).astype(np.int64)
+        bad = ~np.isfinite(t) | (t >= np.float32(2147483648.0)) | (t < np.float32(-2147483648.0))
+        return np.where(bad, INT_MIN, np.trunc(np.where(bad, 0, t))).astype(np.int64)

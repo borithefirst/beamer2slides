@@ -66,6 +66,17 @@ def font_folders() -> dict:
     return out
 
 
+def folder_faces() -> list[str]:
+    """The face names the pure reader's port of PDFium's folder font info found (none on Windows,
+    where GDI answers)."""
+    from ..pdf.pure import fontmapper
+    info = fontmapper.platform_font_info()
+    if not isinstance(info, fontmapper.FolderFontInfo):
+        return []
+    info.enum_font_list(fontmapper.FontMapper(None))
+    return list(info.font_list)
+
+
 def subst_extract(seed0: int, n: int, pool: str) -> dict:
     """Chars (font ids aside) and glyph widths of render_torture_subst's pages, both backends."""
     from .. import pdf
@@ -134,7 +145,7 @@ def main(argv=None) -> int:
     if args.only:
         checks = [c for c in checks if c[0] in args.only]
     summary = {"platform": platform.platform(), "python": sys.version, "pdfium": str(pv.PDFIUM_INFO),
-               "pypdfium2": str(pv.PYPDFIUM_INFO), "decks": decks, "fonts": font_folders(), "checks": []}
+               "pypdfium2": str(pv.PYPDFIUM_INFO), "decks": decks, "fonts": font_folders(), "faces": folder_faces(), "checks": []}
     failed = []
     for name, module, cargs in checks:
         r = run(name, module, cargs, out, args.timeout)

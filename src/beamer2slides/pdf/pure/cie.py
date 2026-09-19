@@ -6,6 +6,7 @@ is the C runtime's (`crt.py`: the one PDFium links on each platform)."""
 
 from __future__ import annotations
 
+from .crt import i32 as _i32
 from .syntax import float32 as F
 
 _SAMPLES1 = (
@@ -49,12 +50,6 @@ def powf(x: float, y: float) -> float:
         from .crt import float_fn
         _powf_fn = float_fn("powf", 2)
     return float(_powf_fn(x, y))
-
-
-def _i32(v: float) -> int:
-    if v != v or v >= 2147483648.0 or v < -2147483648.0:
-        return -(1 << 31)
-    return int(v)
 
 
 def rgb_conversion(c: float) -> float:

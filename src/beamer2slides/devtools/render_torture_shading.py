@@ -858,7 +858,7 @@ def main(argv=None) -> int:
     args = ap.parse_args(argv)
     stats = run(args.seed0, args.n, Path(args.out), not args.quiet, args.mode)
     print(f"{args.mode} seeds {args.seed0}..{args.seed0 + args.n - 1}: {stats['drawn']} exact, "
-          f"{len(stats['failed'])} failed, refused {stats['refused']}")
+          f"{len(stats['failed'])} failed {stats['failed']}, refused {stats['refused']}")
     return 1 if stats["failed"] else 0
 
 

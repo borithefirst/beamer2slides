@@ -28,7 +28,7 @@ import numpy as np
 from . import cie
 from . import raster as R
 from .colors import adobe_cmyk_to_srgb
-from .crt import float_fn
+from .crt import float_fn, i32, i32_array, u32  # noqa: F401 - i32 is imported from here too
 from .raster import F
 from .syntax import Name, Stream, String
 
@@ -48,20 +48,6 @@ class Unsupported(Exception):
 
 
 # ---------------------------------------------------------------------- C conversions
-
-
-def i32(v: float) -> int:
-    """static_cast<int32_t>(float) as x86 does it (cvttss2si)."""
-    if v != v or v >= 2147483648.0 or v < -2147483648.0:
-        return INT_MIN
-    return int(v)
-
-
-def u32(v: float) -> int:
-    """static_cast<uint32_t>(float) as clang does it on x64 (64-bit cvttss2si, low half)."""
-    if v != v or v >= 9223372036854775808.0 or v < -9223372036854775808.0:
-        return 0
-    return int(v) & U32
 
 
 def sat_int(v: float) -> int:
@@ -1239,9 +1225,7 @@ def _grid(final, w: int, h: int):
 
 def _index(s):
     """static_cast<int32_t>(s * 255) on an array."""
-    t = s * np.float32(255)
-    bad = ~np.isfinite(t) | (t >= np.float32(2147483648.0)) | (t < np.float32(-2147483648.0))
-    return np.where(bad, INT_MIN, np.trunc(np.where(bad, 0, t)).astype(np.int64))
+    return i32_array(s * np.float32(255))
 
 
 def _paint(bitmap, idx, steps, start_ext: bool, end_ext: bool, live=None):
