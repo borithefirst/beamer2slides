@@ -145,6 +145,7 @@ class PObj:
     text_mode: int = 0
     char_space: float = 0.0
     word_space: float = 0.0
+    text_ctm: tuple = (1.0, 0.0, 0.0, 1.0)   # CPDF_TextState's CTM: (a, c, b, d), stroke modes only
     original_rect: tuple = (0.0, 0.0, 0.0, 0.0)
     # images and forms
     stream: object = None          # Stream, or InlineImage
@@ -756,7 +757,7 @@ class _Run:
 
     def op_Tz(self, args):
         if len(args) == 1:
-            self.state.horz_scale = self.number(args, 0) / 100
+            self.state.horz_scale = f32(self.number(args, 0) / 100)
 
     def op_TL(self, args):
         self.state.leading = self.number(args, 0)
@@ -821,9 +822,9 @@ class _Run:
         s = self.state
         if not any(isinstance(v, (bytes, String)) for v in array):
             for v in array:
-                k = _num(v)
+                k = f32(_num(v))
                 if k != 0:
-                    s.text_pos = (f32(s.text_pos[0] - k * s.font_size / 1000), s.text_pos[1])
+                    s.text_pos = (f32(s.text_pos[0] - self._horizontal_size(k)), s.text_pos[1])
             return
         strings, kernings, initial = [], [], 0.0
         for v in array:
@@ -834,10 +835,15 @@ class _Run:
                 kernings.append(0.0)
             elif isinstance(v, (int, float)) and not isinstance(v, bool):
                 if not strings:
-                    initial += v
+                    initial = f32(initial + f32(v))
                 else:
-                    kernings[-1] += v
+                    kernings[-1] = f32(kernings[-1] + f32(v))
         self._add_text(strings, initial, kernings)
+
+    def _horizontal_size(self, kerning: float) -> float:
+        """GetHorizontalTextSize: kerning * font size / 1000 * Tz, in float."""
+        s = self.state
+        return f32(f32(f32(kerning * s.font_size) / 1000) * s.horz_scale)
 
     def _add_text(self, strings: list[bytes], initial: float, kernings: list[float]) -> None:
         """AddTextObject."""
@@ -846,13 +852,13 @@ class _Run:
         if font is None:
             return
         if initial != 0:
-            s.text_pos = (f32(s.text_pos[0] - initial * s.font_size / 1000 * s.horz_scale), s.text_pos[1])
+            s.text_pos = (f32(s.text_pos[0] - self._horizontal_size(initial)), s.text_pos[1])
         if not strings:
             return
         mode = 0 if font.is_type3 else s.text_mode
         # OnChangeTextMatrix: [Tz 0 0 1] x Tm x CTM (content_to_user is the identity here)
         tm = concat(concat((f32(s.horz_scale), 0.0, 0.0, 1.0, 0.0, 0.0), s.text_matrix), s.ctm)
-        pos = f32p(transform(s.ctm, *f32p(transform(s.text_matrix, s.text_pos[0], f32(s.text_pos[1] + s.rise)))))
+        pos = transform32(s.ctm, *transform32(s.text_matrix, s.text_pos[0], f32(s.text_pos[1] + s.rise)))
         items: list = []
         kerns: list = []
         for k, string in enumerate(strings):
@@ -865,11 +871,13 @@ class _Run:
             return
         obj = PObj(OBJ_TEXT, (tm[0], tm[1], tm[2], tm[3], pos[0], pos[1]), font=font, font_size=s.font_size,
                    items=items, kernings=kerns, text_mode=mode, char_space=s.char_space, word_space=s.word_space)
+        if mode in (1, 2, 5, 6):
+            obj.text_ctm = (s.ctm[0], s.ctm[2], s.ctm[1], s.ctm[3])
         self.add(obj, True, True)
         advance = text_positions(obj)
-        s.text_pos = (f32(s.text_pos[0] + advance * s.horz_scale), s.text_pos[1])
+        s.text_pos = (f32(s.text_pos[0] + f32(advance * s.horz_scale)), s.text_pos[1])
         if kernings and kernings[-1] != 0:
-            s.text_pos = (f32(s.text_pos[0] - kernings[-1] * s.font_size / 1000 * s.horz_scale), s.text_pos[1])
+            s.text_pos = (f32(s.text_pos[0] - self._horizontal_size(kernings[-1])), s.text_pos[1])
 
     # ---- XObjects, images, shadings
     def op_Do(self, args):

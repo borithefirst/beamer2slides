@@ -145,9 +145,20 @@ def test_a_hyphen_ending_a_line_is_a_hyphen(backend):
 @built
 def test_render_follows_pixel_bounds_and_active_objects(backend):
     if not api.renders(backend):
-        doc = backend.open(BLOCKS)
-        with pytest.raises(PdfError):
-            doc[1].render(1.0)
+        # a backend that cannot draw everything yet draws a page as PDFium does or refuses it
+        ref = pdf.resolve("pdfium")
+        for path in (BLOCKS, IMAGES):
+            doc, theirs = backend.open(path), ref.open(path)
+            try:
+                for i in range(min(len(doc), 3)):
+                    try:
+                        img = doc[i].render(1.0)
+                    except PdfError:
+                        continue
+                    assert np.array_equal(img, theirs[i].render(1.0)), f"{path.name} page {i}"
+            finally:
+                doc.close()
+                theirs.close()
         return
     doc = backend.open(BLOCKS)
     try:
