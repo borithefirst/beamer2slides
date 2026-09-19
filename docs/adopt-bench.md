@@ -368,3 +368,19 @@ With the single-box study on top: boxes 0.9719 -> 0.9728, page 0.9714, pixels 0.
 comic-strips -0.0015 is the study's known cost (a line 0.02 pt short of its box that Slides wraps).
 Left, by the loss report: jruby-ja (kana widths, gradient), comps-analysis' Bodoni glyph shapes,
 devfest2020's numbered lists, sc-dark-minimal 11's unexplained wrap.
+
+## Readability: the second score (`m6-a` baseline)
+
+Fidelity says the PDF looks like the deck; it says nothing of whether the source is one a person would
+keep. `devtools/readability.py` scores the frame bodies of any .tex against sources people wrote
+(`REFERENCE`: the test decks and the sync talk, medians from `readability ref`) - lines per frame,
+numbers and non-author commands per word, characters per visible character, the share of author
+commands, and the lines repeated on 3+ frames (what a theme or a macro should say once) - each as
+min(1, human/ours), geometric mean. It reads the trees a run leaves, so it needs no compile:
+`python -m beamer2slides.devtools.readability report --tag T [-v]`. Hand-written sources score
+0.6-1.0 (the test decks that are torture tests lowest: 16_colored_table 0.36); adopt at `m6-a`
+scores 0.134 (lines 0.09, numbers 0.05, plumbing 0.03, bloat 0.34, author 0.33, repeat 0.61).
+Frame body lines by construct: text plumbing 36%, `textblock` placement 25%, shapes 23% (traced
+freeforms: sc-memphis 922 lines a frame), words 6%. Plan: first what leaves the PDF unchanged (a
+macro layer and a recovered beamer theme for masters and layouts, gated on identical renders), then
+structure (itemize, frametitle, tabular), gated on fidelity per deck.
