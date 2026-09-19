@@ -280,7 +280,8 @@ def base_style(pe: dict, resolver: StyleResolver, level: int) -> dict:
 
 
 def text_paragraphs(pe: dict, text: dict, resolver: StyleResolver, fonts: FontMapper, scale: float,
-                    keep_blank: bool = False, font_scale: float = 1.0, spacing_cut: float = 0.0) -> list[dict]:
+                    keep_blank: bool = False, font_scale: float = 1.0, spacing_cut: float = 0.0,
+                    keep_trailing: bool = False) -> list[dict]:
     """`font_scale` and `spacing_cut` are the box's autofit (`shrink text on overflow`, or a .pptx's
     normAutofit): Slides draws every run at `font_scale` times its size and takes `spacing_cut` off
     every paragraph's line spacing. The cs161 decks' titles say 28 pt and are drawn at 25.2: the
@@ -343,6 +344,12 @@ def text_paragraphs(pe: dict, text: dict, resolver: StyleResolver, fonts: FontMa
             link = st.get("link") or {}
             text_part = content.rstrip("\n") if content.endswith("\n") else content
             if not text_part:
+                if not cur["runs"]:
+                    # an empty line's height is its own newline's style
+                    cur["newline"] = {"text": " ", "font": font, "family": family_of(family), "slides_font": family,
+                                      "slides_size": size, "size": psize, "bold": bool(bold),
+                                      "italic": bool(italic), "smallcaps": False, "color": color, "link": None,
+                                      "script": None, "underline": False, "strike": False, "highlight": None}
                 continue
             run = {"text": text_part, "font": font, "family": family_of(family),
                    "slides_font": family, "slides_size": size, "size": psize, "bold": bool(bold),
@@ -373,7 +380,19 @@ def text_paragraphs(pe: dict, text: dict, resolver: StyleResolver, fonts: FontMa
         text = "".join(r["text"] for r in p["runs"])
         if "\t" in text and not p["bullet"]:
             p["tab_x0"] = p["indent_start"]
-    paragraphs = [p for p in paragraphs if p["runs"] or p is not paragraphs[-1]]
+    trailing = keep_trailing and keep_blank and any(p["runs"] for p in paragraphs)
+    if not trailing:
+        paragraphs = [p for p in paragraphs if p["runs"] or p is not paragraphs[-1]]
+    if trailing:
+        # Under a middle- or bottom-aligned stack the empty lines a person left at the end are
+        # height all the same: ap-bio-stats' bodies end on an empty 24 pt line at 80% after 7 pt,
+        # and their text sits 15 pt higher than the stack without it would.
+        last = max(i for i, p in enumerate(paragraphs) if p["runs"])
+        for p in paragraphs[last + 1:]:
+            p["runs"] = [dict(p.get("newline") or paragraphs[last]["runs"][-1], text=" ", link=None,
+                              underline=False, strike=False, highlight=None)]
+    for p in paragraphs:
+        p.pop("newline", None)
     if keep_blank:
         # A blank line a person left in a text box is vertical space they chose, and dropping it
         # pulls everything under it up by a line - of the 717 paragraphs of the DevFest template,
@@ -381,8 +400,9 @@ def text_paragraphs(pe: dict, text: dict, resolver: StyleResolver, fonts: FontMa
         # makes one and `pull`'s IR must not either; a foreign deck is read from the deck itself,
         # where the blank line is still there to be read. It becomes a space in the style of the
         # paragraph it stands above, which is the size the person's Return left room for.
-        last = max((i for i, p in enumerate(paragraphs) if p["runs"]), default=-1)
-        del paragraphs[last + 1:]                       # trailing blanks push nothing down
+        if not trailing:
+            last = max((i for i, p in enumerate(paragraphs) if p["runs"]), default=-1)
+            del paragraphs[last + 1:]                   # under a top-aligned stack they push nothing down
         below = None
         for p in reversed(paragraphs):
             if p["runs"]:
@@ -413,6 +433,29 @@ def merge_runs(runs: list[dict]) -> list[dict]:
     return out
 
 
+ZERO_INSET_SLACK = 5.0      # Slides pt: less room than this beside the text of a box that fits it = no insets
+PITCH_EM = 1.19             # docs/calibration.md: the line pitch at lineSpacing 100, every font
+
+
+def zero_insets(paragraphs: list[dict], height: float) -> bool:
+    """Does a box that resizes to fit its text (SHAPE_AUTOFIT) have no insets? The API does not say
+    (insets are read-only and never reported), but such a box's stored height is its text's height
+    plus its top and bottom insets, and Slides' default ones leave 14.7 pt (median over 418 boxes of
+    the corpus measured on the thumbnails). Templates made in PowerPoint or Canva (the SlidesCarnival
+    decks, sc-memphis, parts of gdg24 and devfest2020) set every inset to 0: their text sits 6.5 pt
+    higher and 6.7 pt further left than Slides' defaults put it, and the box is as tall as its
+    lines. Counting each paragraph as one line gives the least height the text can need, so a box
+    that leaves less than ZERO_INSET_SLACK beside even that has no room for insets (484 boxes, 94%
+    of them moved like that on the thumbnails; the rest are boxes whose height went stale)."""
+    need = 0.0
+    for p in paragraphs:
+        if not p["runs"]:
+            continue
+        z = max(r["slides_size"] for r in p["runs"])
+        need += PITCH_EM * z * p["line_spacing"] + p["space_above"] + p["space_below"]
+    return need > 0 and height - need < ZERO_INSET_SLACK
+
+
 def text_element(pe: dict, m: list[float], resolver: StyleResolver, fonts: FontMapper, scale: float,
                  page_w: float, foreign: bool = False) -> dict | None:
     shape = pe.get("shape", {})
@@ -422,8 +465,13 @@ def text_element(pe: dict, m: list[float], resolver: StyleResolver, fonts: FontM
     autofit = props.get("autofit") or (resolver.parent_shape_property(pe, "autofit") if foreign else None) or {}
     font_scale = autofit.get("fontScale") or 1.0
     spacing_cut = autofit.get("lineSpacingReduction") or 0.0
+    # a placeholder sits where its layout says when it says nothing itself (title placeholders are
+    # often bottom-aligned there)
+    content = props.get("contentAlignment") or \
+        (resolver.parent_shape_property(pe, "contentAlignment") if foreign else None) or "TOP"
     paragraphs = text_paragraphs(pe, shape.get("text", {}), resolver, fonts, scale, keep_blank=foreign,
-                                 font_scale=font_scale, spacing_cut=spacing_cut)
+                                 font_scale=font_scale, spacing_cut=spacing_cut,
+                                 keep_trailing=content in ("MIDDLE", "BOTTOM"))
     if not any(p["runs"] for p in paragraphs):
         return None
     w, h = dim(pe["size"]["width"]), dim(pe["size"]["height"])
@@ -433,25 +481,24 @@ def text_element(pe: dict, m: list[float], resolver: StyleResolver, fonts: FontM
     z = max(r["slides_size"] for r in first["runs"])
     aligns = {p["align"] for p in paragraphs if p["runs"]}
     align = aligns.pop() if len(aligns) == 1 else "left"
-    # a placeholder sits where its layout says when it says nothing itself (title placeholders are
-    # often bottom-aligned there)
-    content = props.get("contentAlignment") or \
-        (resolver.parent_shape_property(pe, "contentAlignment") if foreign else None) or "TOP"
+    # only a foreign deck: the converter's own boxes are created by the API, with Slides' insets
+    bare = foreign and autofit.get("autofitType") == "SHAPE_AUTOFIT" and zero_insets(paragraphs, y1 - y0)
+    pad_x, top = (0.0, 0.0) if bare else (PAD_X, BASELINE_A)
     if content == "MIDDLE":
         baseline = (y0 + y1) / 2 + MIDDLE_BASELINE_EM * z
     else:
-        baseline = y0 + BASELINE_A + ASCENT_EM * z + extra_above(first["line_spacing"], z) + first["space_above"]
-        if placeholder in ("TITLE", "CENTERED_TITLE", "SUBTITLE"):
+        baseline = y0 + top + ASCENT_EM * z + extra_above(first["line_spacing"], z) + first["space_above"]
+        if placeholder in ("TITLE", "CENTERED_TITLE", "SUBTITLE") and not bare:
             baseline -= PPTX_TITLE_DY
     # emit puts the box PAD_X left of the text's (or bullet's) left edge; centred and right-aligned
     # boxes are widened symmetrically / to the left
-    x = {"left": x0 + PAD_X, "center": (x0 + x1) / 2, "right": x1 - PAD_X}[align]
-    lines_x1 = (x1 - PAD_X) / scale
+    x = {"left": x0 + pad_x, "center": (x0 + x1) / 2, "right": x1 - pad_x}[align]
+    lines_x1 = (x1 - pad_x) / scale
     out_paras = []
     for p in paragraphs:
         if not p["runs"]:
             continue
-        tx0 = (x0 + PAD_X + p["indent_start"]) / scale
+        tx0 = (x0 + pad_x + p["indent_start"]) / scale
         out_paras.append({
             "align": p["align"], "level": p["level"], "bullet": p["bullet"] and {**p["bullet"], "bbox": None},
             **({"direction": "rtl"} if p.get("direction") == "rtl" else {}),
@@ -470,10 +517,11 @@ def text_element(pe: dict, m: list[float], resolver: StyleResolver, fonts: FontM
     # paragraphs' `slides` values are in Slides pt, so the scale that turns them into the IR's goes
     # with them.
     return {"kind": "text", "role": role, "bbox": [round(v / scale, 2) for v in (x0, y0, x1, y1)],
-            "anchor": [round(x / scale, 2), round(baseline / scale, 2)], "wrap_width": round((x1 - x0 - 2 * PAD_X) / scale, 2),
+            "anchor": [round(x / scale, 2), round(baseline / scale, 2)], "wrap_width": round((x1 - x0 - 2 * pad_x) / scale, 2),
             "placeholder": placeholder, "paragraphs": out_paras,
             "box": {"valign": {"MIDDLE": "middle", "BOTTOM": "bottom"}.get(content, "top"), "scale": scale,
-                    "font_scale": font_scale, "grows": autofit.get("autofitType") == "SHAPE_AUTOFIT"}}
+                    "font_scale": font_scale, "grows": autofit.get("autofitType") == "SHAPE_AUTOFIT",
+                    **({"insets": 0} if bare else {})}}
 
 
 def page_background(page: dict, resolver_pages: dict[str, dict], scheme: dict) -> tuple[str | None, str | None]:

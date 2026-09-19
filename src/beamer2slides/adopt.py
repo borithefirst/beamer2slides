@@ -464,10 +464,18 @@ def picture_of(el: dict, tree: Path | None):
 # its baseline) under the last one. Interword spaces are the font's own with no shrink and no
 # hyphenation, so a line holds what a browser's line holds and breaks fall where Slides breaks them.
 
+#
+# The interword space is the font's own with no shrink - and it has to be *each* font's own:
+# \spaceskip set once by \slidesize stays what the font then selected said, so a paragraph set in
+# \ttfamily after it took Fira Sans' 0.26 em spaces where Courier Prime's are 0.6 em (sc-dark-modern's
+# typewriter quotes came out 8% narrow and broke their lines elsewhere). Every font selection inside a
+# text box takes its own space again (LaTeX's selectfont hook).
 SLIDES_TEXT = (
+    "\\newif\\ifslidesspace\n"
+    "\\AddToHook{selectfont}{\\ifslidesspace\\spaceskip=\\fontdimen2\\font plus\\fontdimen3\\font\\relax\\fi}\n"
     "\\newcommand{\\slidesize}[1]{\\fontsize{#1bp}{#1bp}\\selectfont"
     "\\spaceskip=\\fontdimen2\\font plus\\fontdimen3\\font\\relax}\n"
-    "\\newcommand{\\slidesbox}{\\parindent=0pt\\parskip=0pt\\lineskip=0pt\\lineskiplimit=-\\maxdimen"
+    "\\newcommand{\\slidesbox}{\\slidesspacetrue\\parindent=0pt\\parskip=0pt\\lineskip=0pt\\lineskiplimit=-\\maxdimen"
     "\\hyphenpenalty=10000\\exhyphenpenalty=50\\tolerance=9999\\emergencystretch=0pt\\frenchspacing"
     "\\hbadness=10000\\hfuzz=\\maxdimen\\vbadness=10000\\vfuzz=\\maxdimen}")
 ULEM = "\\usepackage[normalem]{ulem}"
@@ -626,7 +634,8 @@ def text_box_latex(el: dict, ctx: Context, ind: str) -> str:
     box = el.get("box") or {}
     scale = box.get("scale") or 720 / 453.54
     x0, y0, x1, y1 = el["bbox"]
-    pad, inset = PAD_X / scale, BASELINE_A / scale
+    # a box with no insets (deck_ir.zero_insets) sets its text against its edges
+    pad, inset = (0.0, 0.0) if box.get("insets") == 0 else (PAD_X / scale, BASELINE_A / scale)
     width, height = max(x1 - x0 - 2 * pad, 1.0), max(y1 - y0, 0.1)
     valign = box.get("valign", "top")
     paras = [p for p in el["paragraphs"] if p["runs"]]

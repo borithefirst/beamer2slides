@@ -487,8 +487,12 @@ fetched from google/fonts into a user cache and variable ones cut into static in
 (`fontfetch.py`, `$B2S_FONT_FETCH=0` / `$B2S_FONTS` turn it off). Tests: `tests/test_adopt_media.py`.
 Text boxes follow Slides' text model line by line (`adopt.text_box_latex`: `\vbox to` the box height
 for TOP/MIDDLE/BOTTOM, Slides' pitch per paragraph through `\prevdepth`, spaceAbove/Below with
-COLLAPSE_LISTS, indents, ● ○ ■ drawn at their measured size, no hyphenation or space shrink; autofit
-and per-list-level styles read in `deck_ir.text_paragraphs`; `tests/test_adopt_text.py`). Tables are a
+COLLAPSE_LISTS, indents, ● ○ ■ drawn at their measured size, no hyphenation or space shrink, each
+font's own interword space (a selectfont hook: `\spaceskip` set once kept the sans font's space in a
+`\ttfamily` paragraph); autofit and per-list-level styles read in `deck_ir.text_paragraphs`; empty
+lines ending a middle/bottom-aligned box kept, since they move the stack; a SHAPE_AUTOFIT box whose
+height leaves < 5 pt beside one line per paragraph has no insets (`deck_ir.zero_insets`: the API
+never reports insets; PowerPoint/Canva templates set them to 0); `tests/test_adopt_text.py`). Tables are a
 tikz grid with measured rows, merged cells, fills and border segments (`adopt.table_block`, cell
 insets inferred by `deck_ir.cell_pad`; `tests/test_adopt_tables.py`). Shapes are drawn in their preset
 (`adopt_shapes.py`: ~110 shapeTypes with OOXML default adjustments, turned/mirrored through the
@@ -503,8 +507,9 @@ split frame by frame to name the broken ones), scores every slide (`boxes` / `pa
 writes deck|source|diff sheets to `<corpus>/<deck>/runs/<tag>/sheets`; `report --tag T`.
 Measured (bootstrap only, 912 slides): boxes 0.593 -> 0.754 (mean per deck 0.565 -> 0.725, every
 deck up; pixels 0.913 -> 0.939), 11 frames that did not compile -> 0 (tags `abs` -> `merged`).
-Known gaps, by what they cost: text insets the API does not report (Canva/SlidesCarnival boxes sit
-4-6 pt low and right), freeform shapes (5,791 in the corpus, drawn as their box; Google's .pptx
+Text (tags `units` -> `text-b`): boxes 0.818 -> 0.843, page 0.814 -> 0.839.
+Known gaps, by what they cost: text insets the API does not report where no autofit height gives
+them away, freeform shapes (5,791 in the corpus, drawn as their box; Google's .pptx
 export has their geometry), fills the API reads as empty (gradients: cs161's header bar,
 sc-memphis), dragged shape adjustments, and hebrew-lesson's table style colours.
 

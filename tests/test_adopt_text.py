@@ -183,6 +183,61 @@ def test_a_box_that_grows_to_fit_drops_its_first_space_above(tmp_path):
         assert "\\prevdepth=\\dimexpr\\prevdepth-13.86pt" in frame, "the second one gets its 22 pt"
 
 
+def fitted(h: float, **props) -> dict:
+    """A box that resizes to fit two 24 pt lines (1.19 x 24 = 28.56 pt each), `h` pt tall."""
+    words = [("Two lines", {"fontFamily": "Arial", "fontSize": pt(24)})]
+    return deck(box("s_z", para("x", runs=words) + para("x", runs=words), x=100, y=100, w=300, h=h,
+                    autofit={"autofitType": "SHAPE_AUTOFIT"}, **props))
+
+
+def test_a_box_that_fits_its_text_with_no_room_to_spare_has_no_insets():
+    """sc-dark-minimal's boxes (a PowerPoint template) are exactly as tall as their lines: their
+    insets are 0, which the API never says, and Slides draws their text 6.5 pt higher and 6.7 pt
+    further left than default insets would."""
+    tight, roomy = deck_ir(fitted(59), foreign=True), deck_ir(fitted(72), foreign=True)
+    assert text_of(tight, "s_z")["box"]["insets"] == 0
+    assert "insets" not in text_of(roomy, "s_z")["box"], "57.1 pt of lines + 14.7 pt of default insets"
+    assert "insets" not in text_of(deck_ir(fitted(59)), "s_z")["box"], "pull reads the converter's boxes"
+    a, b = text_of(tight, "s_z"), text_of(roomy, "s_z")
+    assert a["anchor"][1] < b["anchor"][1] and a["anchor"][0] < b["anchor"][0]
+
+
+def test_a_box_with_no_insets_sets_its_text_against_its_edges(tmp_path):
+    scale = 720 / 453.54
+    tight = frame_of(source(tmp_path, fitted(59)))
+    roomy = frame_of(source(tmp_path / "r", fitted(72)))
+    x = 100 / scale
+    assert f"\\begin{{textblock*}}{{{300 / scale:.1f}pt}}({x:.1f}pt," in tight
+    assert "\\vskip0.00pt" in tight
+    assert f"({x + 6.7 / scale:.1f}pt," in roomy and f"\\vskip{6.48 / scale:.2f}pt" in roomy
+
+
+def test_empty_lines_at_the_end_of_a_middle_aligned_box_are_height(tmp_path):
+    """ap-bio-stats' bodies are centred and end on an empty 24 pt line at 80% after 7 pt: the text
+    stands 15 pt higher than without it. Under a top-aligned stack such a line changes nothing."""
+    def body(align):
+        return deck(box("s_e", para("Words", runs=[("Words", {"fontSize": pt(18)})])
+                        + para("", runs=[("", {"fontSize": pt(24)})],
+                               style={"lineSpacing": 80, "spaceAbove": pt(7)}),
+                        contentAlignment=align))
+    middle = text_of(deck_ir(body("MIDDLE"), foreign=True), "s_e")["paragraphs"]
+    top = text_of(deck_ir(body("TOP"), foreign=True), "s_e")["paragraphs"]
+    assert len(top) == 1 and len(middle) == 2
+    scale = 720 / 453.54
+    assert middle[1]["runs"][0]["text"] == " " and middle[1]["runs"][0]["size"] * scale == pytest.approx(24, rel=0.05)
+    assert middle[1]["slides"]["line_spacing"] == pytest.approx(0.8)
+    assert "% blank line" in frame_of(source(tmp_path, body("MIDDLE")))
+
+
+def test_every_font_a_text_box_selects_spaces_its_words_with_its_own_space(tmp_path):
+    """\\spaceskip was set once, by \\slidesize, from the font selected then: a paragraph whose
+    typeface switch came after it (sc-dark-modern's Courier Prime) was spaced with the sans font's
+    narrow space."""
+    text = source(tmp_path, body_deck())
+    assert "\\AddToHook{selectfont}{\\ifslidesspace\\spaceskip=\\fontdimen2\\font" in text
+    assert "\\slidesbox}{\\slidesspacetrue" in text
+
+
 def test_a_box_whose_base_is_bold_writes_its_regular_words_regular(tmp_path):
     """`runs_latex` only ever wrote \\textbf, so under a bold base the regular words stayed bold."""
     d = deck(box("s_b", para("x", runs=[("Mostly bold words here", {"bold": True}), (" plain", {})])))
