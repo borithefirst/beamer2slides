@@ -13,6 +13,7 @@ tuned on what PDFium reports."""
 
 from __future__ import annotations
 
+import copy
 import math
 from dataclasses import dataclass, field
 
@@ -100,6 +101,18 @@ def append_clip(clip_paths: tuple, points: tuple, fill_type: int) -> tuple:
     return clip_paths + ((points, fill_type),)
 
 
+MAX_CLIP_TEXTS = 1024       # CPDF_ClipPath::AppendTexts' kMaxTextObjects
+
+
+def append_texts(clip_texts: tuple, texts: list) -> tuple:
+    """CPDF_ClipPath::AppendTexts: one BT..ET's clip-mode texts and a None closing the group
+    (ProcessClipPath clips once per group), unless the list would pass 1024 entries: then none
+    (the reference is made private all the same, which only a renderer comparing clips sees)."""
+    if len(clip_texts) + len(texts) <= MAX_CLIP_TEXTS:
+        return clip_texts + tuple(texts) + (None,)
+    return tuple(clip_texts)
+
+
 # ---------------------------------------------------------------------- page objects
 
 
@@ -110,7 +123,8 @@ class PObj:
     parent: "PObj | None" = None
     clips: list | None = None      # point bounding boxes of the clip paths, container space
     clip_paths: tuple = ()         # ((points, fill type), ...) in container space, float32 (render)
-    fill: int | None = None        # 0xRRGGBB; None when the object has no colour state
+    clip_texts: tuple = ()         # CPDF_ClipPath's text list: text PObj copies, None ends a group
+    fill: int | None = None       # 0xRRGGBB; None when the object has no colour state
     stroke: int | None = None
     fill_alpha: float = 1.0
     stroke_alpha: float = 1.0
@@ -172,6 +186,7 @@ class State:
     ctm: tuple = IDENTITY
     clips: tuple = ()                  # point bboxes (container space), tuple so copies are cheap
     clip_paths: tuple = ()             # CPDF_ClipPath's paths: ((points, fill type), ...)
+    clip_texts: tuple = ()             # and its texts (append_texts)
     fill_cs: ColorSpace = DEVICE["DeviceGray"]
     fill_values: tuple = (0.0,)
     fill_ref: int = 0
@@ -285,6 +300,7 @@ class _Run:
         self.clip_type = FILL_NONE
         self.last_image_name = None
         self.last_image = None
+        self.clip_text_list: list = []   # clip_text_list_: this stream's clip-mode texts since ET
 
     # ------------------------------------------------------------------ resources
 
@@ -332,6 +348,7 @@ class _Run:
         obj.parent = self.parent
         obj.clips = list(s.clips) if s.clips else None
         obj.clip_paths = s.clip_paths
+        obj.clip_texts = s.clip_texts
         obj.fill_alpha, obj.stroke_alpha = s.fill_alpha, s.stroke_alpha
         obj.blend, obj.soft_mask = s.blend, s.soft_mask
         obj.smask, obj.smask_matrix, obj.transfer = s.smask, s.smask_matrix, s.transfer
@@ -747,7 +764,14 @@ class _Run:
         s.text_pos = s.text_line_pos = (0.0, 0.0)
 
     def op_ET(self, args):
-        pass
+        """Handle_EndText: the clip-mode texts shown since the last ET join the clip path, if the
+        mode is still a clip mode now."""
+        if not self.clip_text_list:
+            return
+        s = self.state
+        if s.text_mode >= 4:
+            s.clip_texts = append_texts(s.clip_texts, self.clip_text_list)
+        self.clip_text_list = []
 
     def op_Tc(self, args):
         self.state.char_space = self.number(args, 0)
@@ -882,6 +906,9 @@ class _Run:
         self.add(obj, True, True)
         advance = text_positions(obj)
         s.text_pos = (f32(s.text_pos[0] + f32(advance * s.horz_scale)), s.text_pos[1])
+        if mode >= 4:
+            # a clone: switching the object off later leaves the clip as it is
+            self.clip_text_list.append(copy.copy(obj))
         if kernings and kernings[-1] != 0:
             s.text_pos = (f32(s.text_pos[0] - self._horizontal_size(kernings[-1])), s.text_pos[1])
 
@@ -1061,9 +1088,9 @@ def check_clip(objects) -> None:
     containing the object's rectangle loses that clip. It changes pixels where the object's edge
     lies on the clip's: an antialiased edge is then covered once, not twice. Only the clip the
     renderer uses (`clip_paths`) is dropped; `clips`, which the extraction reads, is kept.
-    (A text clip would keep the clip too; the parser records none yet.)"""
+    A clip with texts in it is kept whole."""
     for o in objects:
-        if not o.active or len(o.clip_paths) != 1 or o.type == OBJ_SHADING:
+        if not o.active or len(o.clip_paths) != 1 or o.clip_texts or o.type == OBJ_SHADING:
             continue
         pts = o.clip_paths[0][0]
         if not path_is_rect(pts):

@@ -433,8 +433,21 @@ truncated): the first rendering under a key is the one reused. Rules found on th
   `Identity·(size, 0, 0, size, x, 0)·text2user`, filled non-zero, `text_mode` on (so its degenerate
   sub-paths skip DrawZeroAreaPath, the hairline pass a plain fill's get). A stroke under a `cm` whose a or d is not
   1 takes the CTM out of the text matrix and into the device matrix, so the pen is the user-space one.
-- **Clip modes (4..7) draw like 0..3**, and mode 3 draws nothing: the AGG device has no soft clip, so
-  ProcessClipPath skips text clips altogether.
+- **Clip modes (4..7) draw like 0..3, then clip**, and mode 3 draws nothing. The parser keeps a
+  clone of every text shown in a clip mode (Type 3 text counts as mode 0) and, at ET, appends them
+  to the clip path if the mode *at ET* is still a clip mode (CPDF_ClipPath::AppendTexts: a group
+  ends with a null entry, and a list that would pass 1,024 texts takes none); CheckClip leaves a
+  clip holding texts alone. The AGG device *has* soft clips (RenderCapSoftClip), so ProcessClipPath
+  follows them: per group, DrawTextPath appends each glyph outline through
+  `Identity·(size, 0, 0, size, x, 0)·textmatrix` and the object-to-device matrix (the CTM is never
+  taken out, whatever the mode) to one device-space path, and SetClip_PathFill clips to it,
+  non-zero. Clones, so switching the text object off leaves its clip. The text page, the object
+  list and the clip boxes (FPDFClipPath counts paths only) do not see text clips. The torture's
+  `--simple 3` pages (text clips followed by paths, inline images, more text, path clips, q/Q):
+  251 of the first 400 seeds draw and all are exact (the rest wait for images, TrueType or Type 3
+  text); 26 of the first 60 are up to 243,066 pixels apart when the text clip is ignored, which
+  the port used to do (no earlier torture page could show it: every BT group sat inside q..Q).
+  200 seeds extract equal (objects, bounds, chars).
 Refused, each with its reason: Type 3 text (ProcessType3Text, not ported), fonts without an embedded
 Type 1 / CFF program (the standard 14 and every substituted font - PDFium draws a system font - and
 TrueType glyphs), a code whose glyph the font lacks (PDFium falls back to another font), vertical

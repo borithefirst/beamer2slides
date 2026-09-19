@@ -464,6 +464,36 @@ def test_the_pure_renderer_survives_text_torture_seeds(simple):
     assert refused < 10
 
 
+def test_text_clips_clip_what_follows_them_as_in_pdfium():
+    """Tr 4..7: the texts a BT..ET shows in a clip mode join the clip path at ET (if the mode is
+    still a clip mode then), and the AGG device has soft clips, so ProcessClipPath clips everything
+    after them to their glyph outlines - one winding clip per BT..ET group, in device space. The
+    torture's clip pages (paths, images and text after the clip, q/Q, path clips, clips in clips):
+    of the first 400 seeds, 251 draw and all equal PDFium's, 26 of the first 60 only because the
+    text clip was followed (without it they were up to 243,066 pixels apart)."""
+    from beamer2slides.devtools.render_torture_text import case, compare, harvest
+    specs = harvest()
+    if not specs:
+        pytest.skip("no fonts to harvest (build the test decks)")
+    apart = {}
+    for seed in range(40):
+        content, fonts, zoom, transparent = case(seed, "any", 3)
+        try:
+            n = compare(content, fonts, zoom, transparent)[0]
+        except PdfError:
+            continue                         # images, TrueType or Type 3 text: refused
+        if n:
+            apart[seed] = n
+    assert not apart, f"seeds apart (python tools/render_torture_text.py SEED 1 --simple 3): {apart}"
+    cff = [s for s in specs if s.kind in ("type1", "cff")][:1]
+    body = b"BT /F0 60 Tf 7 Tr 10 30 Td <%s> Tj ET 1 0 0 rg 0 0 200 150 re f" % (
+        b"%02x" % cff[0].codes[0] * 3)
+    n, a, b, _ = compare(body, cff, 1, False)
+    assert n == 0
+    red = (b[..., 0] == 255) & (b[..., 1] == 0)
+    assert 0 < red.sum() < red.size // 4           # the glyphs, not the page
+
+
 def test_the_pure_renderer_refuses_text_it_cannot_draw_exactly_yet():
     """Fonts not embedded (PDFium draws a system substitute) and Type 3 text are refused, not guessed."""
     from beamer2slides.devtools.render_torture_text import FontSpec, harvest, pdf_bytes
@@ -1080,6 +1110,18 @@ def test_text_torture_pages_extract_as_pdfium_to_the_last_bit():
             ref.close()
             pure.close()
     assert not apart, f"seeds apart (scratch: xtext.py SEED 1): {apart}"
+    # text clip pages (Tr 4..7 then paths, images, text): the text page ignores clips and modes
+    for seed in range(30):
+        content, fonts, _, _ = case(seed, "any", 3)
+        data = pdf_bytes(content, fonts)
+        ref, pure = pdf.resolve("pdfium").open(data), pdf.resolve("pure").open(data)
+        try:
+            assert _chars_and_bounds(pure[0]) == _chars_and_bounds(ref[0]), f"clip page seed {seed}"
+            assert ([dataclasses.astuple(o) for o in pure[0].objects()]
+                    == [dataclasses.astuple(o) for o in ref[0].objects()]), f"clip page seed {seed}"
+        finally:
+            ref.close()
+            pure.close()
     for kind in ["type3"]:
         for seed in range(20):
             content, fonts, _, _ = case(seed, kind)
