@@ -434,6 +434,8 @@ class Page:
         group = pdf.resolve(self.dict.get("Group"))
         page_group = isinstance(group, dict) and str(pdf.resolve(group.get("S"))) == "Transparency"
         ctx = Context(pdf, pdf.resolve(self.dict.get("Resources")), self.doc._font_cache, page_group)
+        # CPDF_PageImageCache lives as long as the page: a JPEG decoded smaller stays so
+        ctx.images = self.__dict__.setdefault("_image_cache", {})
         bgra = render_page(self._parse(), self.box, self.rotation, fs, w, h, transparent, ctx)
         if transparent:
             return bgra[..., [2, 1, 0, 3]].copy()

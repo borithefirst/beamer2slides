@@ -150,6 +150,7 @@ class PObj:
     # images and forms
     stream: object = None          # Stream, or InlineImage
     name: str = ""
+    resources: object = None       # an inline image's: its colour space is looked up there
     children: list = field(default_factory=list)
     group: bool = False            # a form with a transparency group (/Group /S /Transparency)
     active: bool = True
@@ -906,7 +907,8 @@ class _Run:
     def _image(self, stream, name):
         d = stream.dict if isinstance(stream, Stream) else stream.dict
         mask = bool(self.doc.resolve(d.get("ImageMask")))
-        obj = PObj(OBJ_IMAGE, self.state.ctm, stream=stream, name=str(name))
+        obj = PObj(OBJ_IMAGE, self.state.ctm, stream=stream, name=str(name),
+                   resources=None if isinstance(stream, Stream) else self.resources)
         self.add(obj, mask, False)
         if not mask:
             obj.fill = obj.stroke = None
