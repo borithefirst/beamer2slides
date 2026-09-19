@@ -216,3 +216,25 @@ def test_read_region_tells_flat_gradient_and_neither():
     assert deck_fills.read_region(a, region, allow, False) is None
     a[:, ::7] = 255                          # stripes: neither
     assert deck_fills.read_region(a, region, allow, True) is None
+
+
+def test_a_pie_takes_the_angles_its_thumbnail_shows():
+    """intro-lecture's grading chart: five PIE shapes in one box, whose dragged angles the API does
+    not give - each was drawn as the preset's 270 degree slice. The colours around the centre say
+    them: a slice under another shows only its own part, and the smallest arc holding it is drawn."""
+    a = page()
+    yy, xx = np.mgrid[0:405, 0:720]
+    ang = np.degrees(np.arctan2(yy - 200, xx - 300)) % 360        # clockwise from +x, y down
+    disc = (xx - 300) ** 2 + (yy - 200) ** 2 <= 100 ** 2
+    a[disc & (ang < 90)] = [208, 224, 227]                          # top: 0-90
+    a[disc & (ang >= 90)] = [69, 129, 142]                          # under it: 90-360 shows
+    box = [200, 100, 400, 300]
+    under = {"kind": "shape", "shape_type": "PIE", "bbox": box, "fill": "#45818e", "id": "u", "object": "u"}
+    top = {"kind": "shape", "shape_type": "PIE", "bbox": box, "fill": "#d0e0e3", "id": "t", "object": "t"}
+    out = deck_fills.settle([under, top], a, 1.0, "#ffffff")
+    start, sweep = next(e for e in out if e["id"] == "t")["pie"]
+    assert min(start, 360 - start) < 1 and abs(sweep - 90) < 1.5
+    start, sweep = next(e for e in out if e["id"] == "u")["pie"]
+    assert abs(start - 90) < 1 and abs(sweep - 270) < 1.5
+    block = adopt_shapes.shape_block(next(e for e in out if e["id"] == "t"), Context(), "")
+    assert "end angle=-" in block and "270" not in block

@@ -179,6 +179,11 @@ def settle(elements: list[dict], image, px: float, background: str | None, pictu
     # tile under an unread wave shows is the wave's colour, never taken for the tile's own
     for k in range(len(elements) - 1, -1, -1):
         el = elements[k]
+        if a is not None and el["kind"] == "shape" and (el.get("shape_type") or "").upper() == "PIE" \
+                and not el.get("fill_unread"):
+            angles = pie_angles(a, el, elements[k + 1:], px)
+            if angles is not None:
+                el["pie"] = list(angles)
         cells = [c for c in el.get("table_cells", []) if c.pop("fill_unread", False)]
         # a freeform's geometry is not in the API either: traced from the same picture
         # (`deck_freeforms`), after its fill is known
@@ -217,6 +222,65 @@ def settle(elements: list[dict], image, px: float, background: str | None, pictu
         el.pop("_traced", None)            # the traced pixels, kept only while settling
         el.pop("_unsaid", None)
     return out[::-1]
+
+
+PIE_STEP = 0.25          # degrees between the rays a pie's angles are read on
+PIE_RADII = (0.3, 0.45, 0.6, 0.75, 0.9)   # where along each ray, in the radius
+PIE_STRAY = 2.0          # degrees of other colour allowed inside the arc read (letters, leader lines)
+
+
+def pie_angles(a: np.ndarray, el: dict, above: list[dict], px: float):
+    """The (start, sweep) a PIE shape is drawn with, in OOXML degrees (clockwise from +x, y down), read
+    from the thumbnail: the API gives a pie as its preset and box only, not the angles a person
+    dragged, and the preset's default is a 270 degree slice (intro-lecture's grading chart: five
+    slices in one box, each drawn as the same three quarters). Along rays from the centre, the
+    angles where the pie's own colour shows are its arc; where a colour of a shape above shows it may
+    lie underneath, and anything else says it is not there. The smallest arc holding every angle it
+    shows is what it draws - more is hidden anyway. None when unreadable: a turned or mirrored frame,
+    no own colour, a box too small, or other colours inside the arc (another shape under it)."""
+    fr = el.get("frame") or {}
+    if (fr.get("rotation") or 0) % 360 or fr.get("flip") or el.get("fill_gradient"):
+        return None
+    col = rgb(el.get("fill"))
+    if col is None or (el.get("fill_alpha") or 1.0) < 0.99:
+        return None
+    h, w = a.shape[:2]
+    x0, y0, x1, y1 = el["bbox"]
+    cx, cy, rx, ry = (x0 + x1) / 2 * px, (y0 + y1) / 2 * px, (x1 - x0) / 2 * px, (y1 - y0) / 2 * px
+    if rx < 8 or ry < 8:
+        return None
+    covers = [rgb(e.get("fill")) for e in above if e["kind"] == "shape" and e.get("fill") and overlaps(e, el)]
+    covers = [c for c in covers if c is not None and np.abs(c - col).max() > TOL]
+    theta = np.radians(np.arange(0.0, 360.0, PIE_STEP))
+    mine = np.zeros(len(theta), int)
+    other = np.zeros(len(theta), int)
+    for f in PIE_RADII:
+        xs = np.clip(np.round(cx + f * rx * np.cos(theta)).astype(int), 0, w - 1)
+        ys = np.clip(np.round(cy + f * ry * np.sin(theta)).astype(int), 0, h - 1)
+        p = a[ys, xs]
+        me = np.abs(p - col).max(axis=1) <= TOL
+        hidden = np.zeros(len(theta), bool)
+        for c in covers:
+            hidden |= np.abs(p - c).max(axis=1) <= TOL
+        mine += me
+        other += ~me & ~hidden
+    n = len(PIE_RADII)
+    shows = mine * 2 > n
+    absent = other * 2 > n
+    idx = np.nonzero(shows)[0]
+    if len(idx) < 4:
+        return None
+    if len(idx) == len(theta):
+        return (0.0, 360.0)
+    # the arc is the circle less its largest gap between angles the pie shows
+    gaps = np.diff(np.concatenate([idx, [idx[0] + len(theta)]]))
+    g = int(np.argmax(gaps))
+    first = idx[(g + 1) % len(idx)]
+    span = len(theta) - int(gaps[g]) + 1
+    inside = (np.arange(span) + first) % len(theta)
+    if absent[inside].sum() * PIE_STEP > PIE_STRAY:
+        return None
+    return (round(float(first * PIE_STEP), 2) % 360.0, round(span * PIE_STEP, 2))
 
 
 PICTURE_MIN_PX = 12      # a thumbnail picture's box must be at least this many pixels each way
