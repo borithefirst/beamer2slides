@@ -191,6 +191,72 @@ def _describe(font, program_of) -> str:
     return f"{len(data)} bytes {hashlib.sha1(data).hexdigest()[:8] if data else '-'}{asked}"
 
 
+def glyphs(content: bytes, fonts) -> list[str]:
+    """Which code of which font the two readers draw differently: every code the page's strings use is
+    drawn alone in each font and the renders compared, so the report names the glyph rather than the
+    page. The ink ratio says what kind of difference it is - a ratio near 1 is the same glyph a hair
+    apart, a small one is a glyph one side does not draw at all - and pure's glyph index for that code
+    is printed beside it, which is where a platform's glyph map shows. Never raises: this is for the
+    failure report."""
+    out = []
+    try:
+        codes = sorted({b for b in _string_bytes(content)})
+        for i in range(len(fonts)):
+            said = []
+            for code in codes:
+                one = b"BT /F%d 40 Tf 20 40 Td <%02x> Tj ET" % (i, code)
+                try:
+                    npx, a, b, _ = compare(one, fonts, 1, False)
+                except Exception:  # noqa: BLE001, S112
+                    continue
+                if npx:
+                    said.append(f"{code} ({chr(code) if 32 < code < 127 else '.'}) "
+                                f"{npx} px ink {_ink(b) / max(_ink(a), 1e-9):.3f} glyph {_pure_glyph(one, fonts)}")
+            if said:
+                out.append(f"   font {i} codes: " + "; ".join(said))
+        if not out:
+            out.append(f"   (no single code of the {len(codes)} used differs on its own)")
+    except Exception as e:  # noqa: BLE001
+        out.append(f"   (codes unknown: {type(e).__name__} {e})")
+    return out
+
+
+def _string_bytes(content: bytes) -> set:
+    """The bytes the content stream's strings show, hex and literal alike (escapes left as written:
+    this is a diagnostic, and a code too many only costs a render)."""
+    import re
+    seen = set()
+    for m in re.finditer(rb"<([0-9A-Fa-f\s]*)>|\(((?:\\.|[^()\\])*)\)", content, re.S):
+        if m.group(1) is not None:
+            hexes = re.sub(rb"\s", b"", m.group(1))
+            seen.update(bytes.fromhex(hexes.decode()[:len(hexes) // 2 * 2]))
+        else:
+            seen.update(m.group(2).replace(b"\\", b""))
+    return seen
+
+
+def _ink(image) -> float:
+    """How much the page is painted: the darkness of every pixel added up."""
+    return float(np.sum(255 - image[..., :3].mean(axis=2)))
+
+
+def _pure_glyph(content: bytes, fonts) -> str:
+    """The glyph index the pure reader maps that one code to, or '?'."""
+    try:
+        from ..pdf.pure.backend import PureBackend
+        doc = PureBackend().open(pdf_bytes(content, fonts))
+        try:
+            page = doc[0]
+            page.chars()
+            font = page._fonts[0]
+            code = bytes.fromhex(content.split(b"<")[1].split(b">")[0].decode())[0]
+            return str(font.glyphs[code])
+        finally:
+            doc.close()
+    except Exception:  # noqa: BLE001
+        return "?"
+
+
 def shrink(content: bytes, fonts, zoom: float, transparent: bool) -> bytes:
     """Drop lines while the difference remains."""
     def fails(c):
@@ -247,7 +313,7 @@ def main(argv=None) -> int:
         print(f"seed {seed} zoom {zoom} transparent {transparent} fonts {[f.name for f in fonts]}: "
               f"{npx} px, max {d.max()}")
         print(small.decode())
-        for line in faces(small, fonts):
+        for line in faces(small, fonts) + glyphs(small, fonts):
             print(line)
         out.mkdir(parents=True, exist_ok=True)
         from PIL import Image
