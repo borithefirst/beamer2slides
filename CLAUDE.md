@@ -527,6 +527,16 @@ version. Scored by ink overlap with the deck's own slide images inside its eleme
 counts misrepresent fidelity: ten pixel-perfect squares read back as one `diagram` = 10
 `element_missing`): the DevFest 2020 template's 39 slides reach 0.70 from the bootstrap alone, 0.22
 when only the slide's own elements were read. Tests: `tests/test_adopt.py` (offline).
+**The source is meant to be kept, not only compiled** (`devtools/readability.py`, `readability report
+--tag T`: lines, numbers, plumbing, bloat, author vocabulary and repetition per frame body, against the
+medians of sources people wrote; `docs/adopt-bench.md` holds the history). What it writes now says the
+deck's look once and its slides in a vocabulary: a `slides.sty` beside main.tex (`slidebox`,
+`\slidepar`, `\slidetext`, `\slidepicture`, `\sliderect`/`\slideline`/`\slideshape`, `slidetable`,
+named `\slidestyle` styles and colour names), the deck's masters and layouts recovered as a
+`beamertheme<Deck>.sty` (`adopt_theme.py`: a background template per layout, frames naming theirs and
+carrying a real `\frametitle`), and Slides lists as `itemize`/`enumerate` with each level set once
+(`\setslidelist`). Measured over the corpus: 0.130 -> 0.490 with every slide's fidelity unchanged
+(sources people wrote score 0.6-1.0); shape coordinates are what is left.
 Linked charts are their `contentUrl` picture, videos their poster frame (YouTube `hqdefault`,
 letterbox cut; Drive: a play panel) inside an `\href`, WordArt its `renderedText` in a `\resizebox*`;
 a page beamer has no ratio for is written with `\geometry{papersize}`; fonts the machine lacks are
