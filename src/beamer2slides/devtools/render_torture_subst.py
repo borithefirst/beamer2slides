@@ -257,6 +257,76 @@ def _pure_glyph(content: bytes, fonts) -> str:
         return "?"
 
 
+def sweep(content: bytes, fonts, zoom: float, transparent: bool) -> list[str]:
+    """What the substitution would have to say for pure to draw the page as PDFium draws it: each
+    font's weight, italic angle and multiple master blend are forced in turn and the page compared
+    again. A value that brings the difference down - to nothing, usually - names the field the two
+    readers disagree about, which the face digests cannot show (the same face blended differently is
+    the same bytes). This is how a platform whose substitution cannot be debugged from here is asked
+    the question. Never raises: this is for the failure report."""
+    out: list[str] = []
+    try:
+        from ..pdf.pdfium_backend import PdfiumBackend
+        from ..pdf.pure.backend import PureBackend
+        data = pdf_bytes(content, fonts)
+        resync()
+        doc = PdfiumBackend().open(data)
+        try:
+            want = doc[0].render(zoom, transparent=transparent).astype(int)
+        finally:
+            doc.close()
+
+        def pure(index: int, field: str, value) -> int:
+            resync()
+            doc = PureBackend().open(data)
+            try:
+                page = doc[0]
+                page.chars()                                  # fills page._fonts
+                if 0 <= index < len(page._fonts):
+                    subst = page._fonts[index].subst
+                    if subst is None:
+                        return -1
+                    setattr(subst, field, value)
+                got = page.render(zoom, transparent=transparent).astype(int)
+            finally:
+                doc.close()
+            return int((np.abs(want - got).max(axis=2) > 0).sum())
+
+        def best(index: int, field: str, values) -> tuple[int, object] | None:
+            """The value of that field that draws the page closest, or None where none beats the
+            substitution as it stands."""
+            got = None
+            for value in values:
+                try:
+                    npx = pure(index, field, value)
+                except Exception:  # noqa: BLE001, S112
+                    continue
+                if 0 <= npx < base and (got is None or npx < got[0]):
+                    got = (npx, value)
+            return got
+
+        base = pure(-1, "", None)                             # -1: nothing forced, the plain render
+        out.append(f"   sweep: as is {base} px")
+        for i in range(len(fonts)):
+            said = []
+            coarse = best(i, "weight", range(100, 1001, 100))
+            if coarse:                                        # then the ten weights around it
+                fine = best(i, "weight", range(max(coarse[1] - 90, 1), coarse[1] + 100, 10))
+                npx, value = min(filter(None, (coarse, fine)))
+                said.append(f"weight={value}: {npx} px")
+            for field, values in (("italic_angle", (0, -11, -12, -15)), ("flag_mm", (False,))):
+                got = best(i, field, values)
+                if got:
+                    said.append(f"{field}={got[1]}: {got[0]} px")
+            if said:
+                out.append(f"   font {i} better: " + "; ".join(said))
+        if len(out) == 1:
+            out.append("   (no weight, italic angle or blend of any font draws the page closer)")
+    except Exception as e:  # noqa: BLE001
+        out.append(f"   (sweep unknown: {type(e).__name__} {e})")
+    return out
+
+
 def shrink(content: bytes, fonts, zoom: float, transparent: bool) -> bytes:
     """Drop lines while the difference remains."""
     def fails(c):
@@ -313,7 +383,7 @@ def main(argv=None) -> int:
         print(f"seed {seed} zoom {zoom} transparent {transparent} fonts {[f.name for f in fonts]}: "
               f"{npx} px, max {d.max()}")
         print(small.decode())
-        for line in faces(small, fonts) + glyphs(small, fonts):
+        for line in faces(small, fonts) + glyphs(small, fonts) + sweep(small, fonts, zoom, transparent):
             print(line)
         out.mkdir(parents=True, exist_ok=True)
         from PIL import Image
