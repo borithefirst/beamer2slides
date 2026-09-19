@@ -308,8 +308,8 @@ def test_a_damaged_flate_stream_keeps_what_decoded_before_the_damage():
         assert len(ours.objects()) == len(theirs.objects()), f"trial {trial}: damage at {k}"
 
 
-def _objects_pdf(objs: dict, root: int = 1) -> bytes:
-    """A PDF of these object bodies with a correct cross-reference table."""
+def _objects_pdf(objs: dict, root: int = 1, trailer: bytes = b"") -> bytes:
+    """A PDF of these object bodies with a correct cross-reference table (`trailer`: more entries)."""
     out, offsets = bytearray(b"%PDF-1.4\n"), {}
     for n, body in objs.items():
         offsets[n] = len(out)
@@ -318,7 +318,8 @@ def _objects_pdf(objs: dict, root: int = 1) -> bytes:
     out += b"xref\n0 %d\n0000000000 65535 f \n" % size
     for n in range(1, size):
         out += b"%010d 00000 n \n" % offsets[n] if n in offsets else b"0000000000 65535 f \n"
-    return bytes(out + b"trailer\n<< /Size %d /Root %d 0 R >>\nstartxref\n%d\n%%%%EOF\n" % (size, root, xref))
+    return bytes(out + b"trailer\n<< /Size %d /Root %d 0 R %s>>\nstartxref\n%d\n%%%%EOF\n"
+                 % (size, root, trailer, xref))
 
 
 def _pages_said(backend, data, order):
@@ -328,13 +329,16 @@ def _pages_said(backend, data, order):
     except PdfError:
         return "refused"
     said = []
-    for i in order:
-        if i < len(doc):
-            try:
-                said.append((i, round(doc[i].width)))
-            except PdfError:
-                said.append((i, None))
-    return len(doc), said
+    try:
+        for i in order:
+            if i < len(doc):
+                try:
+                    said.append((i, round(doc[i].width)))
+                except PdfError:
+                    said.append((i, None))
+        return len(doc), said
+    finally:
+        doc.close()
 
 
 _CAT = b"<< /Type /Catalog /Pages 2 0 R >>"
@@ -397,6 +401,174 @@ def test_page_trees_are_walked_as_pdfium_walks_them(name):
         assert _pages_said("pure", data, order) == _pages_said("pdfium", data, order), list(order)
 
 
+def _nav_pdf(catalog=b"", annots=b"", objs=None, trailer=b"", last=False) -> bytes:
+    """Three pages; `annots` go on the first page (on the last one with `last`, so that a link's
+    destination is looked up before the pages it names were loaded)."""
+    extras = [b"", b"", b""]
+    extras[2 if last else 0] = b"/Annots [" + annots + b"]" if annots else b""
+    o = {1: b"<< /Type /Catalog /Pages 2 0 R " + catalog + b" >>",
+         2: b"<< /Type /Pages /Kids [3 0 R 4 0 R 5 0 R] /Count 3 >>"}
+    for i, extra in enumerate(extras):
+        o[3 + i] = b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 100] " + extra + b" >>"
+    o.update(objs or {})
+    return _objects_pdf(o, trailer=trailer)
+
+
+def _link(dest=b"", action=b"", rect=b"[10 20 30 40]", subtype=b"/Link") -> bytes:
+    return (b"<< /Subtype " + subtype + b" /Rect " + rect + (b" /Dest " + dest if dest else b"")
+            + (b" /A " + action if action else b"") + b" >>")
+
+
+def _stream(data: bytes, extra: bytes = b"") -> bytes:
+    return b"<< /Length %d %s >>\nstream\n%s\nendstream" % (len(data), extra, data)
+
+
+def _uri(uri: bytes) -> bytes:
+    return b"<< /S /URI /URI " + uri + b" >>"
+
+
+def _names(tree: bytes) -> bytes:
+    return b"/Names << /Dests " + tree + b" >>"
+
+
+_TREE_OBJS = {30: b"[3 0 R /Fit]", 31: b"[4 0 R /Fit]", 32: b"[5 0 R /Fit]"}
+NAVIGATION = {
+    # FPDFLink_GetAnnotRect: GetRectFor needs four numbers and normalises nothing; the rect's items
+    # are read raw (a reference counts 0), a boolean is 0, numbers are C floats
+    "rect_reversed": {"annots": _link(b"[3 0 R]", rect=b"[30 40 10 20]")},
+    "rect_three": {"annots": _link(b"[3 0 R]", rect=b"[1 2 3]")},
+    "rect_ref_item": {"annots": _link(b"[3 0 R]", rect=b"[10 0 R 2 3 4]"), "objs": {10: b"7.5"}},
+    "rect_ref": {"annots": _link(b"[3 0 R]", rect=b"10 0 R"), "objs": {10: b"[5 6 7 8]"}},
+    "rect_bool": {"annots": _link(b"[3 0 R]", rect=b"[true 2 3 4]")},
+    # FPDFLink_Enumerate: /Subtype read as a byte string (a string or a reference counts), a stream's
+    # dictionary is an annotation too
+    "subtype_string": {"annots": _link(b"[3 0 R]", subtype=b"(Link)")},
+    "subtype_ref": {"annots": _link(b"[3 0 R]", subtype=b"10 0 R"), "objs": {10: b"/Link"}},
+    "subtype_widget": {"annots": _link(b"[3 0 R]", subtype=b"/Widget")},
+    "annot_stream": {"annots": b"10 0 R", "objs": {10: _stream(b"x", b"/Subtype /Link /Rect [1 2 3 4] /Dest [4 0 R]")}},
+    # FPDFDest_GetDestPageIndex: a number is the index as is, a dictionary is found by object number
+    # (a direct one has number 0: the first page not loaded yet), anything else is -1
+    "dest_number": {"annots": _link(b"[5 /Fit]")},
+    "dest_negative": {"annots": _link(b"[-7 /Fit]")},
+    "dest_real": {"annots": _link(b"[1.7 /Fit]")},
+    "dest_uint": {"annots": _link(b"[4294967295 /Fit]")},
+    "dest_direct_page": {"annots": _link(b"[<< /Type /Page >> /Fit]")},
+    "dest_direct_page_late": {"annots": _link(b"[<< /Type /Page >> /Fit]"), "last": True},
+    "dest_untyped_page": {"annots": _link(b"[10 0 R]"), "objs": {10: b"<< /Parent 2 0 R >>"}},
+    "dest_pages_node": {"annots": _link(b"[2 0 R /Fit]")},
+    "dest_ref_to_ref": {"annots": _link(b"[10 0 R]"), "objs": {10: b"4 0 R"}},
+    "dest_stream": {"annots": _link(b"[10 0 R]"), "objs": {10: _stream(b"x", b"/Type /Page")}},
+    # an empty destination is still one: no URI fallback
+    "dest_empty": {"annots": _link(b"[]", _uri(b"(http://x)"))},
+    "dest_ref_array": {"annots": _link(b"10 0 R"), "objs": {10: b"[5 0 R /Fit]"}},
+    "dest_dict": {"annots": _link(b"<< /D [4 0 R] >>")},
+    # FPDFAction_GetType / GetDest: /Type, when there, must be /Action; only GoTo, GoToR and GoToE
+    # carry a destination; /S read raw
+    "action_goto": {"annots": _link(action=b"<< /S /GoTo /D [4 0 R] >>")},
+    "action_gotor": {"annots": _link(action=b"<< /S /GoToR /D [4 0 R] /F (x.pdf) >>")},
+    "action_launch": {"annots": _link(action=b"<< /S /Launch /D [4 0 R] >>")},
+    "action_bad_type": {"annots": _link(action=b"<< /Type /Foo /S /GoTo /D [4 0 R] >>")},
+    "action_string_s": {"annots": _link(action=b"<< /S (GoTo) /D [4 0 R] >>")},
+    "action_ref": {"annots": _link(action=b"10 0 R"), "objs": {10: b"<< /S /GoTo /D [5 0 R] >>"}},
+    "action_named": {"annots": _link(action=b"<< /S /GoTo /D (a) >>"), "catalog": _names(b"<< /Names [(a) 30 0 R] >>"),
+                     "objs": _TREE_OBJS},
+    # FPDFAction_GetURIPath: GetString of any object (numbers as FormatInteger / SkFloatToDecimal)
+    "uri_real": {"annots": _link(action=_uri(b"0.000012345"))},
+    "uri_uint": {"annots": _link(action=_uri(b"4294967295"))},
+    "uri_bool": {"annots": _link(action=_uri(b"true"))},
+    "uri_name": {"annots": _link(action=_uri(b"/abc"))},
+    "uri_ref": {"annots": _link(action=_uri(b"10 0 R")), "objs": {10: b"(http://ref)"}},
+    "uri_nul": {"annots": _link(action=_uri(b"(a\\000b)"))},
+    # ... and the catalog's /URI /Base goes in front when the URI has no ':' past its first byte
+    "uri_base": {"annots": _link(action=_uri(b"(a.html)")), "catalog": b"/URI << /Base (http://b/) >>"},
+    "uri_base_colon0": {"annots": _link(action=_uri(b"(:x)")), "catalog": b"/URI << /Base (http://b/) >>"},
+    "uri_base_scheme": {"annots": _link(action=_uri(b"(mailto:x)")), "catalog": b"/URI << /Base (http://b/) >>"},
+    "uri_base_name": {"annots": _link(action=_uri(b"(a)")), "catalog": b"/URI << /Base /http >>"},
+    "uri_base_stream": {"annots": _link(action=_uri(b"(a)")), "catalog": b"/URI << /Base 10 0 R >>",
+                        "objs": {10: _stream(b"http://s/")}},
+    "uri_base_ref": {"annots": _link(action=_uri(b"(a)")), "catalog": b"/URI << /Base 10 0 R >>",
+                     "objs": {10: b"(http://r/)"}},
+    # CPDF_NameTree: keys compared as UTF-16 units (Windows wchar_t), Limits padded and swapped in
+    # place, a null value ends the search, cycles cut by object number
+    "tree_unsorted": {"catalog": _names(b"<< /Names [(c) 32 0 R (a) 30 0 R (b) 31 0 R] >>"), "objs": _TREE_OBJS,
+                      "annots": _link(b"(b)") + _link(b"/c")},
+    "tree_limits_reversed": {"catalog": _names(b"<< /Kids [<< /Limits [(b) (a)] /Names [(a) 30 0 R (b) 31 0 R] >>] >>"),
+                             "objs": _TREE_OBJS, "annots": _link(b"(a)") + _link(b"(b)")},
+    "tree_limits_short": {"catalog": _names(b"<< /Kids [<< /Limits [(b)] /Names [(a) 30 0 R (b) 31 0 R] >>] >>"),
+                          "objs": _TREE_OBJS, "annots": _link(b"(a)") + _link(b"(b)")},
+    "tree_limits_wrong": {"catalog": _names(b"<< /Kids [<< /Limits [(x) (z)] /Names [(a) 30 0 R] >> "
+                                            b"<< /Names [(a) 32 0 R] >>] >>"), "objs": _TREE_OBJS,
+                          "annots": _link(b"(a)")},
+    "tree_null_first": {"catalog": _names(b"<< /Kids [<< /Names [(a) null] >> << /Names [(a) 30 0 R] >>] >>"),
+                        "objs": _TREE_OBJS, "annots": _link(b"(a)")},
+    "tree_cycle": {"catalog": _names(b"<< /Kids [10 0 R] >>"), "objs": {**_TREE_OBJS, 10: b"<< /Kids [10 0 R 11 0 R] >>",
+                   11: b"<< /Names [(c) 32 0 R] >>"}, "annots": _link(b"(c)")},
+    # names compare as UTF-16 code units (wchar_t on Windows): an astral name sorts below U+FF01
+    "tree_utf16_order": {"catalog": _names(b"<< /Kids [<< /Limits [<FEFFD83DDE00> <FEFFFF01>] "
+                                           b"/Names [<FEFFD83DDE00> 30 0 R <FEFFFF01> 31 0 R] >>] >>"),
+                         "objs": _TREE_OBJS, "annots": _link(b"<FEFFFF01>") + _link(b"<FEFFD83DDE00>")},
+    "tree_shared_kid": {"catalog": _names(b"<< /Kids [10 0 R 10 0 R] >>"),
+                        "objs": {**_TREE_OBJS, 10: b"<< /Names [(a) 30 0 R] >>"}},
+    "tree_names_and_kids": {"catalog": _names(b"<< /Names [(a) 30 0 R] /Kids [<< /Names [(c) 32 0 R] >>] >>"),
+                            "objs": _TREE_OBJS, "annots": _link(b"(c)")},
+    "tree_values": {"catalog": _names(b"<< /Names [(a) null (b) 10 0 R (c) << /D 31 0 R >> (d) /x (e) 11 0 R "
+                                      b"(f) 12 0 R] >>"),
+                    "objs": {**_TREE_OBJS, 10: b"[4 0 R]", 11: b"null", 12: b"10 0 R"}},
+    "tree_keys": {"catalog": _names(b"<< /Names [<FEFF00E9> 30 0 R /nm 31 0 R 5 32 0 R <EFBBBF41C3A9> 31 0 R "
+                                    b"<FEFF001B656E001B0041> 32 0 R (\\200\\237\\255) 30 0 R <FEFFD800> 31 0 R "
+                                    b"(a\\000) 30 0 R <FEFF00> 32 0 R] >>"), "objs": _TREE_OBJS},
+    # the old /Dests dictionary: entries in key order, a reference value skipped by FPDF_GetNamedDest
+    "old_dests": {"catalog": b"/Dests << /zeta [3 0 R] /Alpha [4 0 R] /ref 10 0 R /dict << /D [5 0 R] >> /num 5 >>",
+                  "objs": {10: b"[3 0 R]"}, "annots": _link(b"/ref") + _link(b"(zeta)")},
+    # CPDF_PageLabel: the lower bound in the number tree, St wrapping to int32, the styles' own limits
+    "labels_styles": {"catalog": b"/PageLabels << /Nums [0 << /S /r >> 1 << /S /D /St 5 >> 2 << /P (x-) /S /A >>] >>"},
+    "labels_roman_big": {"catalog": b"/PageLabels << /Nums [0 << /S /R /St 1003999 >>] >>"},
+    "labels_roman_negative": {"catalog": b"/PageLabels << /Nums [0 << /S /r /St -4 >>] >>"},
+    "labels_letters": {"catalog": b"/PageLabels << /Nums [0 << /S /a /St 26 >> 1 << /S /A /St 27 >> "
+                                  b"2 << /S /a /St 25974 >>] >>"},
+    "labels_letters_negative": {"catalog": b"/PageLabels << /Nums [0 << /S /a /St -5 >> 1 << /S /A /St -30 >>] >>"},
+    "labels_start_forms": {"catalog": b"/PageLabels << /Nums [0 << /S /D /St 2.9 >> 1 << /S /D /St 4294967295 >> "
+                                      b"2 << /S /D /St null >>] >>"},
+    "labels_style_forms": {"catalog": b"/PageLabels << /Nums [0 << /S (D) >> 1 << /S /Q /P (only) >> "
+                                      b"2 << /S null /P (p) >>] >>"},
+    "labels_prefix_forms": {"catalog": b"/PageLabels << /Nums [0 << /P /name >> 1 << /P <FEFF0041> /S /D >> "
+                                       b"2 << /P 10 0 R /S /r >>] >>", "objs": {10: b"11 0 R", 11: b"(ref)"}},
+    "labels_unsorted": {"catalog": b"/PageLabels << /Nums [2 << /S /r >> 0 << /S /D >>] >>"},
+    "labels_late_start": {"catalog": b"/PageLabels << /Nums [1 << /S /r >>] >>"},
+    "labels_values": {"catalog": b"/PageLabels << /Nums [0 null 1 10 0 R 2 11 0 R] >>",
+                      "objs": {10: b"<< /S /D /St 9 >>", 11: b"10 0 R"}},
+    "labels_kids": {"catalog": b"/PageLabels << /Kids [<< /Limits [0 0] /Nums [0 << /S /r >>] >> "
+                               b"<< /Limits [1 2] /Nums [1 << /S /D >> 2 << /S /a >>] >>] >>"},
+    "labels_stream": {"catalog": b"/PageLabels 10 0 R", "objs": {10: _stream(b"", b"/Nums [0 << /S /A >>]")}},
+    # FPDF_GetMetaText: /Info must be a reference to a dictionary; values decoded like PDF text
+    "info": {"trailer": b"/Info 10 0 R ", "objs": {10: b"<< /Title (Hello) /Producer <FEFF00480069D83DDE00> >>"}},
+    "info_pdfdoc": {"trailer": b"/Info 10 0 R ", "objs": {10: b"<< /Title (\\177\\237\\255\\200\\030\\240) >>"}},
+    "info_utf8": {"trailer": b"/Info 10 0 R ", "objs": {10: b"<< /Title <EFBBBF41C3A9F09F9880> >>"}},
+    "info_lone_surrogate": {"trailer": b"/Info 10 0 R ", "objs": {10: b"<< /Title <FEFFD800> >>"}},
+    "info_language": {"trailer": b"/Info 10 0 R ", "objs": {10: b"<< /Title <FEFF001B656E001B0041> >>"}},
+    "info_forms": {"trailer": b"/Info 10 0 R ", "objs": {10: b"<< /Title /Nm /Producer 11 0 R >>", 11: b"(ref)"}},
+    "info_direct": {"trailer": b"/Info << /Title (direct) >> "},
+    "info_ref_to_ref": {"trailer": b"/Info 11 0 R ", "objs": {10: b"<< /Title (x) >>", 11: b"10 0 R"}},
+}
+
+
+def _navigation_said(backend, data):
+    doc = pdf.resolve(backend).open(data)
+    try:
+        return {"links": [page.links() for page in doc], "named_dests": doc.named_dests(),
+                "labels": [doc.label(i) for i in range(len(doc))], "metadata": doc.metadata}
+    finally:
+        doc.close()
+
+
+@pytest.mark.parametrize("name", NAVIGATION)
+def test_links_destinations_labels_and_metadata_are_read_as_pdfium_reads_them(name):
+    """The document-level calls (pure/navigation.py): FPDFLink_*, FPDFAction_*, FPDFDest_GetDestPageIndex,
+    CPDF_NameTree, FPDF_GetNamedDest, CPDF_PageLabel and FPDF_GetMetaText, quirks included."""
+    data = _nav_pdf(**NAVIGATION[name])
+    close(_navigation_said("pure", data), _navigation_said("pdfium", data), name)
+
+
 def test_a_broken_file_is_rebuilt_as_pdfium_rebuilds_it():
     """RebuildCrossRef: a table whose first object is not where it says is not believed, the file is
     scanned word by word (strings skipped, so an `obj` in a string is none), damaged objects end
@@ -414,6 +586,164 @@ def test_a_broken_file_is_rebuilt_as_pdfium_rebuilds_it():
     for name, data in cases.items():
         order = range(3)
         assert _pages_said("pure", data, order) == _pages_said("pdfium", data, order), name
+
+
+_TWO_PAGES = {1: _CAT, 2: b"<< /Type /Pages /Kids [3 0 R 4 0 R] /Count 2 >>", 3: _LEAF % 10, 4: _LEAF % 20}
+
+
+def _entry(data: bytes, num: int, new: bytes) -> bytes:
+    """`data` with object num's 20-byte cross-reference entry replaced by `new` (as long)."""
+    table = data.rindex(b"\nxref\n")
+    at = data.index(b" f \n", table) + 4 + (num - 1) * 20
+    assert len(new) == 20
+    return data[:at] + new + data[at + 20:]
+
+
+def _obj(num: int, body: bytes, gen: int = 0) -> bytes:
+    return b"%d %d obj\n%s\nendobj\n" % (num, gen, body)
+
+
+def _stream(d: bytes, data: bytes) -> bytes:
+    return b"<< %s /Length %d >>\nstream\n%s\nendstream" % (d, len(data), data)
+
+
+def _objstm(members: dict, d: bytes = b"/Type /ObjStm /N %(n)d /First %(first)d", lead: bytes = b"") -> bytes:
+    """An object stream holding `members` (number -> body), uncompressed."""
+    bodies, header = b"", lead
+    for num, body in members.items():
+        header += b"%d %d " % (num, len(bodies))
+        bodies += body + b" "
+    return _stream(d % {b"n": len(members), b"first": len(header)}, header + bodies)
+
+
+def _xref_stream_pdf(objs: dict, packed: dict, w=(1, 2, 1), override=None, index=None,
+                     objstm: dict | None = None, size: int | None = None) -> bytes:
+    """A PDF whose cross-reference is a stream: `objs` as plain objects, `packed` in an object
+    stream (numbered after them, the stream last); `override` replaces entries (number -> (type,
+    field 2, field 3)), `index` is the /Index subsections (else one from 0)."""
+    out, entries = bytearray(b"%PDF-1.5\n"), {}
+    for num, body in objs.items():
+        entries[num] = (1, len(out), 0)
+        out += _obj(num, body)
+    archive = max(list(objs) + list(packed)) + 1
+    entries[archive] = (1, len(out), 0)
+    out += _obj(archive, _objstm(packed, **(objstm or {})))
+    for i, num in enumerate(packed):
+        entries[num] = (2, archive, i)
+    xref = archive + 1
+    entries[xref] = (1, len(out), 0)
+    entries.update(override or {})
+    index = index or [0, xref + 1]
+    numbers = [n for start, count in zip(index[::2], index[1::2]) for n in range(start, start + count)]
+    rows = b"".join(b"".join(v.to_bytes(width, "big") for v, width in zip(entries.get(n, (0, 0, 0)), w) if width)
+                    for n in numbers)
+    words = b"/W [%s] /Index [%s]" % (b" ".join(b"%d" % x for x in w), b" ".join(b"%d" % x for x in index))
+    out += _obj(xref, _stream(b"/Type /XRef /Size %d %s /Root 1 0 R" % (size or xref + 1, words), rows))
+    return bytes(out + b"startxref\n%d\n%%%%EOF\n" % entries[xref][1])
+
+
+def _updated(first: bytes, objs: dict, trailer: bytes = b"") -> bytes:
+    """An incremental update of `first` rewriting `objs` (number -> (generation, body)), its
+    table in one section per object and its trailer pointing back with /Prev."""
+    prev = int(first[first.rindex(b"startxref") + 10:].split()[0])
+    out, table = bytearray(first), b""
+    for num, (gen, body) in objs.items():
+        table += b"%d 1\n%010d %05d n \n" % (num, len(out), gen)
+        out += _obj(num, body, gen)
+    xref = len(out)
+    size = max(max(objs) + 1, 5)
+    return bytes(out + b"xref\n" + table + b"trailer\n<< /Size %d /Root 1 0 R /Prev %d %s>>\nstartxref\n%d\n%%%%EOF\n"
+                 % (size, prev, trailer, xref))
+
+
+def _rebuilt_pdf(*parts: bytes) -> bytes:
+    """Objects in file order and a trailer, with no table: only a rebuild reads it."""
+    return b"%PDF-1.4\n" + b"".join(parts) + b"trailer\n<< /Root 1 0 R >>\n%%EOF\n"
+
+
+_HIDDEN = _stream(b"", _obj(4, _LEAF % 20))   # object 4 written inside a stream's data
+
+
+def _xref_cases() -> dict:
+    good = _objects_pdf(_TWO_PAGES)
+    older = _objects_pdf({**_TWO_PAGES, 5: b"<< /Title (older) >>"}, trailer=b"/Info 5 0 R")
+    at = good.index(b"xref")   # the first table
+    updated = _updated(good, {4: (0, _LEAF % 30)})
+    hidden = _objects_pdf({1: _CAT, 2: _TWO_PAGES[2], 3: _LEAF % 10, 5: _HIDDEN})
+    into_stream = _entry(hidden, 4, b"%010d 00000 n \n" % hidden.index(b"4 0 obj"))
+    rows = good[good.index(b"xref"):good.index(b"trailer")]
+    packed = {3: _LEAF % 10, 4: _LEAF % 20}
+    tree = {1: _CAT, 2: _TWO_PAGES[2]}
+    plain = _xref_stream_pdf(_TWO_PAGES, {})
+    newer = _updated(older, {6: (0, b"<< /Title (newer) >>")}, trailer=b"/Info 6 0 R")
+    return {
+        # ParseAndAppendCrossRefSubsectionData: 20 bytes an entry, read blind. The offset is
+        # FXSYS_atoi64 of what the entry starts with (a letter ends it); only the first object
+        # placed is checked; an offset of 0 needs ten digits; byte 17 'f' frees the entry
+        "entry_offset_letters": _entry(good, 4, b"00000002f337 00000 n"[:18] + b" \n"),
+        "entry_offset_zero_letters": _entry(good, 4, b"0000000x00 00000 n \n"),
+        "entry_free_byte_17": _entry(good, 4, b"%010d 00000 f \n" % good.index(b"4 0 obj")),
+        "entry_lines_19_bytes": good.replace(rows, rows.replace(b" \n", b"\n")),
+        "entry_first_wrong": _entry(good, 1, b"%010d 00000 n \n" % good.index(b"2 0 obj")),
+        # the /Prev chain: the oldest table first, an entry of a lower generation than one known
+        # ignored; the newer trailer's keys over the older one's, which keeps what it alone has
+        "prev_lower_generation_ignored": _updated(_updated(good, {3: (5, _LEAF % 30)}), {3: (0, _LEAF % 40)}),
+        "prev_higher_generation_wins": _updated(_updated(good, {3: (0, _LEAF % 30)}), {3: (2, _LEAF % 40)}),
+        "prev_older_trailer_info": _updated(older, {4: (0, _LEAF % 30)}),
+        "prev_newer_trailer_info": newer,
+        "prev_loop": updated.replace(b"/Prev %d" % at, b"/Prev %d" % (updated.rindex(b"\nxref\n") + 1)),
+        "prev_to_nothing": updated.replace(b"/Prev %d" % at, b"/Prev 3"),
+        # cross-reference streams and object streams (CPDF_ObjectStream::Create and Init)
+        "stream_packed": _xref_stream_pdf(tree, packed),
+        "stream_type_3_ignored": _xref_stream_pdf(_TWO_PAGES, {}, override={4: (3, plain.index(b"4 0 obj"), 0)}),
+        "stream_archive_past_last": _xref_stream_pdf(tree, packed, override={4: (2, 99, 1)}),
+        # an archive is checked against the numbers known so far (/Size, then each subsection):
+        # here it comes in a later subsection
+        "stream_archive_later": _xref_stream_pdf({**tree, 3: _LEAF % 10}, {4: _LEAF % 20}, index=[0, 5, 5, 2],
+                                                 size=5),
+        "stream_archive_earlier": _xref_stream_pdf({**tree, 3: _LEAF % 10}, {4: _LEAF % 20}, index=[5, 2, 0, 5],
+                                                   size=5),
+        "stream_generation_past_16_bits": _xref_stream_pdf({**tree, 3: _LEAF % 10}, {4: _LEAF % 20}, w=(1, 2, 3),
+                                                           override={3: (1, 0, 0x10000)}),
+        "stream_two_widths": _xref_stream_pdf(tree, packed, w=(1, 2)),
+        "stream_no_type_field": _xref_stream_pdf({**tree, **packed}, {}, w=(0, 2, 1)),   # all type 1
+        "objstm_n_real": _xref_stream_pdf(tree, packed, objstm={"d": b"/Type /ObjStm /N %(n)d.0 /First %(first)d"}),
+        "objstm_no_type": _xref_stream_pdf(tree, packed, objstm={"d": b"/N %(n)d /First %(first)d"}),
+        "objstm_member_zero": _xref_stream_pdf(tree, packed, objstm={"lead": b"0 0 "}),
+        "objstm_n_short": _xref_stream_pdf(tree, packed, objstm={"d": b"/Type /ObjStm /N 1 /First %(first)d"}),
+        # RebuildCrossRef: each object added as a table adds it, the object stream's members
+        # after it; the table rebuilt goes over the one read, which keeps what the scan missed
+        "table_into_stream": into_stream,
+        "rebuild_over_table": _entry(into_stream, 2, b"%010d 00000 n \n" % hidden.index(b"3 0 obj")),
+        "rebuild_packed_then_plain": _rebuilt_pdf(_obj(1, _CAT), _obj(2, _TWO_PAGES[2]), _obj(5, _objstm(packed)),
+                                                  _obj(3, _LEAF % 30)),
+        "rebuild_plain_then_packed": _rebuilt_pdf(_obj(1, _CAT), _obj(2, _TWO_PAGES[2]), _obj(3, _LEAF % 30),
+                                                  _obj(5, _objstm(packed))),
+        # an object stream is never made a member of another one
+        "rebuild_objstm_in_objstm": _rebuilt_pdf(_obj(1, _CAT), _obj(2, _TWO_PAGES[2]), _obj(5, _objstm(packed)),
+                                                 _obj(6, _objstm({5: b"<< >>"}))),
+        "rebuild_higher_generation_first": _rebuilt_pdf(_obj(1, _CAT), _obj(2, _TWO_PAGES[2]), _obj(3, _LEAF % 10, 5),
+                                                        _obj(3, _LEAF % 30), _obj(4, _LEAF % 20)),
+    }
+
+
+def _xref_said(backend, data):
+    said = _pages_said(backend, data, range(3))
+    if said == "refused":
+        return said
+    doc = pdf.resolve(backend).open(data)
+    try:
+        return said, doc.metadata.get("title")
+    finally:
+        doc.close()
+
+
+@pytest.mark.parametrize("name", list(_xref_cases()))
+def test_cross_references_are_loaded_as_pdfium_loads_them(name):
+    """CPDF_Parser::LoadAllCrossRefTablesAndStreams, CPDF_CrossRefTable, RebuildCrossRef and
+    CPDF_ObjectStream as PDFium 7999 has them (document.py)."""
+    data = _xref_cases()[name]
+    assert _xref_said("pure", data) == _xref_said("pdfium", data)
 
 
 def test_content_operands_are_read_as_pdfiums_stream_parser_reads_them():

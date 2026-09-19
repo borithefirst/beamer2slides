@@ -23,9 +23,10 @@ from ..api import (COLOR_SPACES, LIGATURES, NO_OBJECT, OBJ_IMAGE, OBJ_PATH, OBJ_
                    pixel_bounds, render_matrix, trace, transform_box)
 from .content import Parser, PObj
 from .render import render_page
-from .document import PdfFile, read, text_string, write_file
+from . import navigation
+from .document import PdfFile, read, write_file
 from .filters import ABBREVIATIONS, decode
-from .syntax import InlineImage, Name, Stream, String
+from .syntax import InlineImage, Name, Stream
 from .textpage import GENERATED, HYPHEN, NOT_UNICODE, TextPage
 
 _CS_ABBREVIATIONS = {"G": "DeviceGray", "RGB": "DeviceRGB", "CMYK": "DeviceCMYK", "I": "Indexed"}
@@ -398,36 +399,14 @@ class Page:
     # ------------------------------------------------------------------ links
 
     def links(self) -> list[dict]:
-        """FPDFLink_Enumerate: /Link annotations with a /Rect; a destination (the link's own, or
-        a GoTo action's) or a URI action."""
-        pdf = self.doc.pdf
-        r = pdf.resolve
+        """The reference backend's loop over FPDFLink_Enumerate (navigation.links): a link's
+        /Rect as written (float32, not normalised) turned into page space."""
         out = []
-        annots = r(self.dict.get("Annots"))
-        for a in annots if isinstance(annots, list) else []:
-            a = r(a)
-            if not isinstance(a, dict) or str(r(a.get("Subtype"))) != "Link":
-                continue
-            rect = _rect(a.get("Rect"), r)
-            if rect is None:
-                continue
-            x0, y0 = self.point(rect[0], rect[3])
-            x1, y1 = self.point(rect[2], rect[1])
-            bbox = (min(x0, x1), min(y0, y1), max(x0, x1), max(y0, y1))
-            dest = r(a.get("Dest"))
-            action = r(a.get("A"))
-            kind = str(r(action.get("S"))) if isinstance(action, dict) else ""
-            if dest is None and kind == "GoTo":
-                dest = r(action.get("D"))
-            if dest is not None:
-                page = pdf.dest_page(dest)
-                if page >= 0:
-                    out.append({"bbox": bbox, "page": page})
-            elif kind == "URI":
-                uri = r(action.get("URI"))
-                uri = bytes(uri).decode("utf-8", "replace") if isinstance(uri, (bytes, String)) else ""
-                if uri:
-                    out.append({"bbox": bbox, "uri": uri})
+        for link in navigation.links(self.doc.pdf, self.dict):
+            left, bottom, right, top = link.pop("rect")
+            x0, y0 = self.point(left, top)
+            x1, y1 = self.point(right, bottom)
+            out.append({"bbox": (min(x0, x1), min(y0, y1), max(x0, x1), max(y0, y1)), **link})
         return out
 
     # ------------------------------------------------------------------ rendering
@@ -483,31 +462,19 @@ class Document:
 
     @property
     def metadata(self) -> dict:
-        info = self.pdf.info()
-        r = self.pdf.resolve
-
-        def text(key):
-            v = r(info.get(key))
-            return text_string(v) if v is not None else ""
-        return {"title": text("Title"), "producer": text("Producer")}
+        """FPDF_GetMetaText of /Title and /Producer."""
+        return {"title": navigation.meta_text(self.pdf, "Title"),
+                "producer": navigation.meta_text(self.pdf, "Producer")}
 
     def label(self, index: int) -> str:
-        if not hasattr(self, "_labels"):
-            self._labels = self.pdf.page_labels()
-        return self._labels[index]
+        """FPDF_GetPageLabel."""
+        label = navigation.page_label(self.pdf, index)
+        return "" if label is None else navigation.text(label)
 
     def named_dests(self) -> list[tuple[str, int]]:
-        out = []
-        r = self.pdf.resolve
-        for key, value in self.pdf.named_dests_raw():
-            dest = r(value)
-            if isinstance(dest, dict):
-                dest = r(dest.get("D"))
-            if not isinstance(dest, list):
-                continue
-            name = text_string(key) if isinstance(key, (bytes, String)) else str(key)
-            out.append((name, self.pdf.dest_page(dest)))
-        return out
+        """FPDF_CountNamedDests, FPDF_GetNamedDest and FPDFDest_GetDestPageIndex."""
+        return [(navigation.text(name).rstrip("\x00"), navigation.dest_page_index(self.pdf, dest))
+                for name, dest in navigation.named_dests(self.pdf)]
 
     def save(self, pages: Sequence[int] | None = None, boxes: dict[int, Box] | None = None) -> bytes:
         keep = list(range(len(self))) if pages is None else sorted({int(p) for p in pages})

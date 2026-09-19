@@ -1,15 +1,17 @@
-"""The file layer: cross-reference tables and streams, object streams, the page tree, page labels,
-named destinations, text strings, and writing a new file (ISO 32000-1, 7.5, 7.7, 12.3, 12.4.2)."""
+"""The file layer: cross-reference tables and streams, object streams, the page tree, text strings,
+and writing a new file (ISO 32000-1, 7.5, 7.7). Links, destinations, page labels and the document
+information are in navigation.py."""
 
 from __future__ import annotations
 
-import codecs
 import contextlib
 import re
 import sys
 from pathlib import Path
 
+from . import navigation
 from .filters import decode as decode_filters
+from .navigation import NOTHING, array_for, dict_at, integer_for, name_for, pdf_decode_text, text
 from .syntax import END, Lexer, Name, Op, PdfSyntaxError, Ref, Stream, String, _literal_string, _name, _number
 
 _STARTXREF = re.compile(rb"startxref[\x00\t\n\x0c\r ]+(\d+)")
@@ -95,6 +97,118 @@ def _atoui(word: bytes) -> int:
 
 _NOTHING = object()   # GetObjectBodyInternal's nullptr
 _HEX = frozenset(b"0123456789abcdefABCDEF")
+_HEADER_SIZE = 9            # kPDFHeaderSize
+_MAX_XREF_SIZE = 1048577    # kMaxXRefSize
+_ENTRY_SIZE = 20            # a cross-reference table entry, read blind
+
+
+def _str_to_int(data, at: int, bits: int, signed: bool) -> int:
+    """FXSYS_StrToInt over a NUL-terminated buffer from `at`: a sign, then digits up to the NUL or
+    anything else; past the type's range its maximum (its minimum when negative and signed), a
+    negative unsigned value wrapped."""
+    top = (1 << (bits - 1)) - 1 if signed else (1 << bits) - 1
+    n = len(data)
+    neg = at < n and data[at] == 0x2D
+    if at < n and data[at] in (0x2B, 0x2D):
+        at += 1
+    num = 0
+    while at < n and 0x30 <= data[at] <= 0x39:
+        val = data[at] - 0x30
+        if num > (top - val) // 10:
+            return -top - 1 if neg and signed else top
+        num = num * 10 + val
+        at += 1
+    if not neg:
+        return num
+    return -num if signed else (-num) & top
+
+
+def _string_to_int(view) -> int:
+    """StringToInt (int32): leading spaces, plus and minus signs skipped but the minus right in
+    front of the digits, then FXSYS_StrToInt's rule over the whole view."""
+    start = 0
+    while start < len(view) and view[start] in (0x20, 0x2B, 0x2D):
+        start += 1
+    if start and view[start - 1] == 0x2D:
+        start -= 1
+    return _str_to_int(bytes(view[start:]), 0, 32, True)
+
+
+def _var_int(field: bytes) -> int:
+    """GetVarInt: big-endian, in a uint32 (longer fields wrap)."""
+    num = 0
+    for b in field:
+        num = ((num << 8) | b) & 0xFFFFFFFF
+    return num
+
+
+def _direct_integer(d: dict | None, key: str) -> int:
+    """GetDirectIntegerFor: a number written in the dictionary itself, else 0."""
+    v = d.get(key) if d is not None else None
+    return _integer(v) if isinstance(v, (int, float)) and not isinstance(v, bool) else 0
+
+
+# CPDF_CrossRefTable over {number: [type, generation, position, is object stream]}
+
+def _info(objects: dict, num: int) -> list:
+    info = objects.get(num)
+    if info is None:
+        info = objects[num] = ["free", 0, 0, False]
+    return info
+
+
+def _add_normal(objects: dict, num: int, gen: int, is_objstm: bool, pos: int) -> None:
+    info = _info(objects, num)
+    if info[1] > gen:
+        return
+    info[0], info[1], info[2] = "n", gen, pos
+    info[3] = info[3] or is_objstm
+
+
+def _add_compressed(objects: dict, num: int, archive: int, index: int) -> None:
+    info = _info(objects, num)
+    if info[1] > 0 or info[3]:   # a newer generation, or a known object stream
+        return
+    info[0], info[1], info[2] = "c", 0, archive | index << 32
+    _info(objects, archive)[3] = True
+
+
+def _set_free(objects: dict, num: int, gen: int) -> None:
+    info = _info(objects, num)
+    info[0], info[1], info[2] = "free", gen, 0
+
+
+def _set_size(objects: dict, size: int) -> None:
+    """SetObjectMapSize: the numbers from `size` on dropped, `size - 1` always present."""
+    if size == 0:
+        objects.clear()
+        return
+    for num in [n for n in objects if n >= size]:
+        del objects[num]
+    _info(objects, size - 1)
+
+
+def _merge_up(current: list, top: list) -> list:
+    """CPDF_CrossRefTable::MergeUp: `top`'s entries over `current`'s (an object stream stays
+    one), `top`'s trailer keys over `current`'s but for /XRefStm and /Prev, which stay
+    `current`'s; the trailer's object number stays `current`'s."""
+    objects = dict(current[0])
+    for num, info in top[0].items():
+        old = objects.get(num)
+        info = list(info)
+        if old is not None and info[0] == "n" and old[0] == "n" and old[3]:
+            info[3] = True
+        objects[num] = info
+    trailer = current[1]
+    if top[1] is not None:
+        if trailer is None:
+            trailer = top[1]
+        else:
+            trailer = dict(trailer)
+            keep = {k: trailer.pop(k) for k in ("XRefStm", "Prev") if k in trailer}
+            trailer.update({k: v for k, v in top[1].items() if k not in ("XRefStm", "Prev")})
+            trailer.update(keep)
+    return [dict(sorted(objects.items())), trailer, current[2]]
 
 
 def _hex_body(data: bytes, pos: int) -> tuple[bytes, int]:
@@ -194,29 +308,14 @@ def _deep_recursion():
         sys.setrecursionlimit(limit)
 
 
-# PDFDocEncoding differs from Latin-1 in 0x18-0x1F and 0x80-0x9F
-_PDFDOC = {0x18: "˘", 0x19: "ˇ", 0x1A: "ˆ", 0x1B: "˙", 0x1C: "˝", 0x1D: "˛",
-           0x1E: "˚", 0x1F: "˜", 0x80: "•", 0x81: "†", 0x82: "‡", 0x83: "…",
-           0x84: "—", 0x85: "–", 0x86: "ƒ", 0x87: "⁄", 0x88: "‹", 0x89: "›",
-           0x8A: "−", 0x8B: "‰", 0x8C: "„", 0x8D: "“", 0x8E: "”", 0x8F: "‘",
-           0x90: "’", 0x91: "‚", 0x92: "™", 0x93: "ﬁ", 0x94: "ﬂ", 0x95: "Ł",
-           0x96: "Œ", 0x97: "Š", 0x98: "Ÿ", 0x99: "Ž", 0x9A: "ı", 0x9B: "ł",
-           0x9C: "œ", 0x9D: "š", 0x9E: "ž", 0xA0: "€"}
-
-
 def text_string(value) -> str:
-    """A PDF text string: UTF-16BE with a BOM, UTF-8 with a BOM, else PDFDocEncoding."""
+    """A PDF text string (or a name) as PDF_DecodeText reads it: UTF-16 with either byte order
+    mark, UTF-8 with its mark, else PDFDocEncoding; a lone surrogate becomes U+FFFD."""
     if isinstance(value, str):
-        return str(value)
+        value = str.__str__(value).encode("latin-1", "replace")
     if not isinstance(value, bytes):
         return ""
-    if value[:2] == codecs.BOM_UTF16_BE:
-        return value[2:].decode("utf-16-be", "replace")
-    if value[:2] == codecs.BOM_UTF16_LE:
-        return value[2:].decode("utf-16-le", "replace")
-    if value[:3] == codecs.BOM_UTF8:
-        return value[3:].decode("utf-8", "replace")
-    return "".join(_PDFDOC.get(b, chr(b)) for b in value)
+    return text(pdf_decode_text(value))
 
 
 class PdfFile:
@@ -224,23 +323,30 @@ class PdfFile:
         if not data.lstrip()[:5].startswith(b"%PDF") and b"%PDF" not in data[:1024]:
             raise PdfFileError("not a PDF file")
         self.data = data
-        self.offsets: dict[int, tuple] = {}    # num -> ("f", offset, gen) or ("s", objstm, index)
-        self.trailer: dict = {}
+        # CPDF_CrossRefTable: [objects, trailer or None, trailer object number]; objects maps a
+        # number to its ObjectInfo [type, generation, position, is object stream] with type
+        # "n" (normal), "c" (compressed: the position holds the union's archive number in its
+        # low 32 bits and the index above) or "free"
+        self._table: list = [{}, None, 0]
         self._cache: dict[int, object] = {}
-        self._objstm: dict[int, tuple[list, bytes, int]] = {}
+        self._objstm: dict[int, tuple | None] = {}   # CPDF_Parser::object_stream_map_
         self._page_list: list | None = None
         self._parsing: set[int] = set()
-        loaded = True
-        try:
-            self._read_xref()
-            if not self._verify_xref():
-                raise PdfFileError("the table's first object is not where it says")
-        except Exception:  # noqa: BLE001 - a broken table: rebuild it from the objects themselves
-            self.offsets, self.trailer, loaded = {}, {}, False
-        if not loaded or not self._root_ok():
-            # CPDF_Parser::StartParseInternal: the table rebuilt onto what was read, then a
-            # catalog is all it takes (a document with no pages opens)
-            self._reconstruct(dict(self.trailer))
+        self._nulls: set[int] = set()          # objects whose body is `null` (a CPDF_Null)
+        self._objnums: dict[int, int] = {}     # id(indirect dict/array/stream) -> its number
+        # CPDF_Parser::StartParseInternal: the tables the file says it has, else a table rebuilt
+        # from the objects themselves on top of what was read; then a catalog and a page, else
+        # (once) a rebuild, after which a catalog is all it takes
+        start = self._start_xref()
+        rebuilt = start < _HEADER_SIZE or not self._load_all(start)
+        if rebuilt:
+            self._rebuild()
+        if self.trailer is None:
+            raise PdfFileError("no trailer")
+        if not self._root_ok():
+            if rebuilt:
+                raise PdfFileError("no document catalog or no page")
+            self._rebuild()
             self._page_list = None
             if not self.catalog:
                 raise PdfFileError("no document catalog")
@@ -248,138 +354,270 @@ class PdfFile:
             raise PdfFileError("encrypted PDFs are not supported")
         self.page_count  # noqa: B018 - counted now, as CPDF_Document::LoadPages does
 
-    # ------------------------------------------------------------------ cross-reference
+    @property
+    def offsets(self) -> dict:
+        return self._table[0]
 
-    def _read_xref(self) -> None:
+    @property
+    def trailer(self) -> dict | None:
+        return self._table[1]
+
+    # ------------------------------------------------------------------ cross-reference
+    # CPDF_Parser's LoadAllCrossRefTablesAndStreams and CPDF_CrossRefTable, as they are: entries
+    # are 20 bytes read blind (an offset is FXSYS_atoi64 of whatever the entry starts with, the
+    # generation StringToInt of what follows byte 11), only the first placed object is checked,
+    # an older table is loaded first and a newer entry replaces it unless its generation is
+    # lower, a free entry in a table changes nothing, a stream never replaces what is known, and
+    # a trailer's /Size cuts off the numbers past it.
+
+    def _start_xref(self) -> int:
+        """ParseStartXRef: the offset after the last `startxref`, 0 when there is none."""
         tail = self.data[-4096:] if len(self.data) > 4096 else self.data
         found = list(_STARTXREF.finditer(tail))
         if not found:
-            raise PdfFileError("no startxref")
-        pos = int(found[-1].group(1))
-        seen = set()
-        while pos is not None and pos not in seen and 0 <= pos < len(self.data):
+            return 0
+        pos = _str_to_int(found[-1].group(1) + b"\0", 0, 64, True)
+        return pos if pos < len(self.data) else 0
+
+    def _load_all(self, xref_offset: int) -> bool:
+        """LoadAllCrossRefTablesAndStreams."""
+        ok, _, end = self._parse_table(xref_offset, False)
+        is_stream = not ok
+        if is_stream:
+            if self._load_xref_stream(xref_offset, True) is None:
+                return False
+        else:
+            trailer = self._load_trailer(end)
+            if trailer is None:
+                return False
+            self._table[1], self._table[2] = trailer, 0
+            size = _direct_integer(trailer, "Size")
+            if 0 < size <= _MAX_XREF_SIZE:
+                _set_size(self._table[0], size)
+        if is_stream:
+            xrefs, streams = [0], [xref_offset]
+        else:
+            xrefs, streams = [xref_offset], [_direct_integer(self.trailer, "XRefStm")]
+        if not self._find_all(xref_offset, xrefs, streams):
+            return False
+        if xrefs[0] > 0:
+            if not self._load_table(xrefs[0]) or not self._verify_xref():
+                return False
+        for xref, stream in zip(xrefs[1:], streams[1:]):
+            if stream > 0 and self._load_xref_stream(stream, False) is None:
+                return False
+            if xref > 0 and not self._load_table(xref):
+                return False
+        if is_stream:
+            self._objstm.clear()
+        return True
+
+    def _find_all(self, main: int, xrefs: list, streams: list) -> bool:
+        """FindAllCrossReferenceTablesAndStream: the /Prev chain, oldest first."""
+        seen = {main}
+        pos = _direct_integer(self.trailer, "Prev")
+        while pos > 0:
+            if pos in seen:
+                return False
             seen.add(pos)
-            lexer = Lexer(self.data, pos)
-            first = lexer.next()
-            if first == "xref" and type(first) is Op:
-                trailer = self._xref_table(lexer)
-            else:
-                trailer = self._xref_stream(pos)
-            for k, v in trailer.items():
-                self.trailer.setdefault(k, v)
-            if isinstance(trailer.get("XRefStm"), int):
-                try:
-                    self._xref_stream(trailer["XRefStm"])
-                except Exception:  # noqa: BLE001
-                    pass
-            prev = trailer.get("Prev")
-            pos = prev if isinstance(prev, int) else None
+            prev = self._load_xref_stream(pos, False)
+            if prev is not None:
+                xrefs.insert(0, 0)
+                streams.insert(0, pos)
+                pos = prev
+                continue
+            end = self._parse_table(pos, False)[2]
+            trailer = self._load_trailer(end)
+            if trailer is None:
+                return False
+            xrefs.insert(0, pos)
+            streams.insert(0, navigation.get_integer(self, trailer["XRefStm"]) if "XRefStm" in trailer else 0)
+            pos = _direct_integer(trailer, "Prev")
+            self._table = _merge_up([{}, trailer, 0], self._table)
+        return True
 
-    def _xref_table(self, lexer: Lexer) -> dict:
+    def _parse_table(self, pos: int, collect: bool):
+        """ParseCrossRefTable: (parsed, [(number, generation, offset or None when free)], where
+        reading stopped)."""
         data = self.data
+        scan = _Words(data, min(max(pos, 0), len(data)))
+        w = scan.next()
+        if w is None or w[0] != b"xref":
+            return False, None, scan.pos
+        entries: list = []
+        buf = bytearray(1024 * _ENTRY_SIZE + 1)
         while True:
-            save = lexer.pos
-            t = lexer.next()
-            if t == "trailer" and type(t) is Op:
-                with _deep_recursion():
-                    trailer = _body(_Words(data, lexer.pos), False, self._held_stream(data))
-                if not isinstance(trailer, dict):
-                    raise PdfFileError("no trailer dictionary")
-                return trailer
-            if not isinstance(t, int):
-                raise PdfFileError("bad xref table")
-            count = lexer.next()
-            # entries are 20 bytes each, but be lenient about their line ends
-            pos = lexer.pos
-            for k in range(count):
-                m = re.compile(rb"[\x00\t\n\x0c\r ]*(\d{1,10})[ ]+(\d{1,5})[ ]+([nf])").match(data, pos)
-                if not m:
-                    raise PdfFileError("bad xref entry")
-                pos = m.end()
-                num = t + k
-                if num not in self.offsets:
-                    if m.group(3) == b"n":
-                        self.offsets[num] = ("f", int(m.group(1)), int(m.group(2)))
-                    else:
-                        self.offsets[num] = ("free",)
-            lexer.pos = pos
-            del save
+            saved = scan.pos
+            w = scan.next()
+            if w is None:
+                return False, None, scan.pos
+            if not w[1]:
+                scan.pos = saved
+                break
+            start = _str_to_int(w[0] + b"\0", 0, 32, False)
+            if start > _MAX_OBJECT_NUMBER:
+                return False, None, scan.pos
+            w = scan.next()   # GetDirectNum
+            count = _str_to_int(w[0] + b"\0", 0, 32, False) if w is not None and w[1] else 0
+            scan.pos = _GAP.match(data, min(scan.pos, len(data))).end()   # ToNextWord
+            if not count:
+                continue
+            if not collect:
+                scan.pos += count * _ENTRY_SIZE
+                continue
+            if len(entries) + count > min(_MAX_XREF_SIZE, len(data) // _ENTRY_SIZE):
+                return False, None, scan.pos
+            left = count
+            while left:
+                block = min(left, 1024)
+                size = block * _ENTRY_SIZE
+                if scan.pos + size > len(data):   # ReadBlock
+                    return False, None, scan.pos
+                buf[:size] = data[scan.pos:scan.pos + size]
+                scan.pos += size
+                for i in range(block):
+                    at = i * _ENTRY_SIZE
+                    num = start + count - left + i
+                    if buf[at + 17] == 0x66:   # 'f'
+                        entries.append((num, 0, None))
+                        continue
+                    offset = _str_to_int(buf, at, 64, True)
+                    if offset == 0 and not all(0x30 <= c <= 0x39 for c in buf[at:at + 10]):
+                        return False, None, scan.pos
+                    entries.append((num, _string_to_int(buf[at + 11:]) & 0xFFFF, offset))
+                left -= block
+        return True, entries, scan.pos
 
-    def _xref_stream(self, pos: int) -> dict:
+    def _load_table(self, pos: int) -> bool:
+        """LoadCrossRefTable and MergeCrossRefObjectsData (a free entry's generation is never
+        read, so it is 0 and changes nothing)."""
+        ok, entries, _ = self._parse_table(pos, True)
+        if not ok:
+            return False
+        objects = self._table[0]
+        for num, gen, offset in entries:
+            if offset is not None and num <= _MAX_OBJECT_NUMBER:
+                _add_normal(objects, num, gen, False, offset)
+        return True
+
+    def _load_trailer(self, pos: int) -> dict | None:
+        """LoadTrailer: `trailer` and a dictionary."""
+        scan = _Words(self.data, min(max(pos, 0), len(self.data)))
+        w = scan.next()
+        if w is None or w[0] != b"trailer":
+            return None
         with _deep_recursion():
-            stream = self._indirect_at(pos)[0]
-        if not isinstance(stream, Stream):
-            raise PdfFileError("no xref stream")
+            trailer = _body(scan, False, self._held_stream(self.data))
+        return trailer if isinstance(trailer, dict) else None
+
+    def _load_xref_stream(self, pos: int, main: bool) -> int | None:
+        """LoadCrossRefStream: the stream's /Prev, or None when it is none."""
+        if not 0 <= pos < len(self.data):
+            return None
+        with _deep_recursion():
+            stream, num = self._indirect_at(pos, _NOTHING)
+        if not isinstance(stream, Stream) or not num:
+            return None
         d = stream.dict
-        data, _ = decode_filters(stream.raw, d)
-        w = d.get("W") or [1, 2, 1]
-        size = d.get("Size", 0)
-        index = d.get("Index") or [0, size]
-        step = sum(w)
-        at = 0
-
-        def field(chunk: bytes, default: int) -> int:
-            return int.from_bytes(chunk, "big") if chunk else default
-
-        for start, count in zip(index[::2], index[1::2]):
-            for k in range(count):
-                row = data[at:at + step]
-                at += step
-                if len(row) < step:
+        prev = navigation.integer_for(self, d, "Prev")
+        size = navigation.integer_for(self, d, "Size")
+        if prev < 0 or size < 0 or size > _MAX_XREF_SIZE:
+            return None
+        table = [{}, dict(d), num]
+        if main:
+            self._table = table
+            _set_size(table[0], size)
+        else:
+            self._table = _merge_up(table, self._table)
+        indices = []
+        index = navigation.array_for(self, d, "Index")
+        for i in range(len(index) // 2 if index is not None else 0):
+            first, count = index[2 * i], index[2 * i + 1]
+            if not navigation.is_number(first) or not navigation.is_number(count):
+                continue
+            first, count = navigation.get_integer(self, first), navigation.get_integer(self, count)
+            if first >= 0 and count > 0:
+                indices.append((first, count))
+        if not indices:
+            indices = [(0, size)]
+        w = navigation.array_for(self, d, "W")
+        widths = [navigation.get_integer(self, x) & 0xFFFFFFFF for x in w] if w is not None else []
+        total = sum(widths)
+        if len(widths) < 3 or total > 0xFFFFFFFF:
+            return None
+        data = self.stream_data(stream)   # LoadAllDataFiltered
+        seg = 0
+        for first, count in indices:
+            if seg + count > 0xFFFFFFFF or (seg + count) * total > min(0xFFFFFFFF, len(data)):
+                continue
+            if first + count > 0xFFFFFFFF:
+                continue
+            objects = self._table[0]
+            if min(first + count, _MAX_XREF_SIZE) > (self._last_number() + 1 if objects else 0):
+                _set_size(objects, min(first + count, _MAX_XREF_SIZE))
+            base = seg * total
+            last = self._last_number()   # the entries below never add a higher number
+            for i in range(count):
+                if first + i > _MAX_OBJECT_NUMBER:
                     break
-                a = field(row[:w[0]], 1)
-                b = field(row[w[0]:w[0] + w[1]], 0)
-                c = field(row[w[0] + w[1]:], 0)
-                n = start + k
-                if n in self.offsets:
-                    continue
-                if a == 1:
-                    self.offsets[n] = ("f", b, c)
-                elif a == 2:
-                    self.offsets[n] = ("s", b, c)
-                else:
-                    self.offsets[n] = ("free",)
-        return {k: v for k, v in d.items() if k not in ("Filter", "DecodeParms", "W", "Index", "Length", "Type")}
+                at = base + i * total
+                self._xref_stream_entry(data[at:at + total], widths, first + i, last)
+            seg += count
+        return prev
+
+    def _xref_stream_entry(self, entry: bytes, widths: list, num: int, last: int) -> None:
+        """ProcessCrossRefStreamEntry."""
+        objects = self._table[0]
+        w0, w1, w2 = widths[:3]
+        kind = _var_int(entry[:w0]) if w0 else 1
+        second, third = _var_int(entry[w0:w0 + w1]), _var_int(entry[w0 + w1:w0 + w1 + w2])
+        if kind == 0:
+            if third <= 0xFFFF:
+                _set_free(objects, num, third)
+        elif kind == 1:
+            if third <= 0xFFFF:
+                _add_normal(objects, num, third, False, second)
+        elif kind == 2:
+            if second <= last:   # IsValidObjectNumber
+                _add_compressed(objects, num, second, third)
 
     def _root_ok(self) -> bool:
         """CPDF_Document::TryInit: a catalog, and at least one page counted."""
         try:
+            self._page_list = None
             return bool(self.catalog) and self.page_count > 0
         except Exception:  # noqa: BLE001
             return False
 
     def _verify_xref(self) -> bool:
         """CPDF_Parser::VerifyCrossRefTable: the first object the table places (lowest number
-        with an offset) must start with its own number there."""
+        with a position, whatever its type) must start with its own number there."""
         for num in sorted(self.offsets):
-            entry = self.offsets[num]
-            if entry[0] != "f" or entry[1] <= 0:
+            pos = self.offsets[num][2]
+            if pos <= 0:
                 continue
-            scan = _Words(self.data, entry[1])
-            word = scan.next()
-            return word is not None and word[1] and _atoui(word[0]) == num
+            word = _Words(self.data, min(pos, len(self.data))).next()
+            return word is not None and word[1] and _str_to_int(word[0] + b"\0", 0, 32, False) == num
         return True
 
-    def _reconstruct(self, trailer: dict) -> None:
+    def _rebuild(self) -> None:
         """CPDF_Parser::RebuildCrossRef: the file read word by word from the start (strings and
         hex strings skipped whole, an unbalanced `(` swallowing the rest), every `n g obj` read
         as an object and stepped over, stream data included (so objects inside a stream that
-        parsed are not seen, and those after a broken header's stream data may be lost); a
-        higher generation kept over a later lower one, an object stream's members over
-        generation 0; the trailer merged in file order from each `trailer` dictionary and
-        cross-reference stream onto `trailer`. The catalog is only what a trailer's /Root
-        refers to: PDFium does not go looking for one."""
-        self.offsets, self._cache, self._objstm = {}, {}, {}
+        parsed are not seen, and those after a broken header's stream data may be lost); each
+        added as a table would add it (a lower generation than one known is ignored), an object
+        stream's members after it; each `trailer` dictionary and cross-reference stream merged
+        on in file order. The table built goes over what was read before, which it does not
+        replace. The catalog is only what a trailer's /Root refers to: PDFium does not go
+        looking for one."""
         data = self.data
-        compressed: set[int] = set()
-        archives: set[int] = set()
-        found = False
+        table: list = [{}, None, 0]
         scan = _Words(data, 0)
         numbers: list[tuple[int, int]] = []
         while (w := scan.next()) is not None:
             word, is_number, start = w
             if is_number:
-                numbers.append((_atoui(word), start))
+                numbers.append((_str_to_int(word + b"\0", 0, 32, False), start))
                 if len(numbers) > 2:
                     numbers.pop(0)
                 continue
@@ -390,41 +628,24 @@ class PdfFile:
             elif word == b"trailer":
                 t = _body(scan, False, self._rebuild_stream)
                 t = t.dict if isinstance(t, Stream) else t
-                if isinstance(t, dict):
-                    trailer.update(t)
-                    found = True
+                if t is not _NOTHING and t is not None:
+                    table = _merge_up(table, [{}, t if isinstance(t, dict) else None, 0])
             elif word == b"obj" and len(numbers) == 2:
                 (num, pos), (gen, _) = numbers
-                gen &= 0xFFFF
                 obj, scan.pos = self._object_at(pos)
-                if isinstance(obj, Stream) and obj.dict.get("Type") == "XRef":
-                    trailer.update(obj.dict)
-                    found = True
-                if num < _MAX_OBJECT_NUMBER:
-                    known = self.offsets.get(num)
-                    if not (known is not None and (known[0] == "f" and known[2] > gen
-                                                   or num in compressed and gen == 0)):
-                        self.offsets[num] = ("f", pos, gen)
-                        compressed.discard(num)
-                    if isinstance(obj, Stream) and obj.dict.get("Type") == "ObjStm":
-                        try:
-                            members = self._objstm_from(obj)[0]
-                        except Exception:  # noqa: BLE001
-                            members = []
-                        if members:
-                            archives.add(num)
-                        for i, n in enumerate(members):
-                            info = self.offsets.get(n)
-                            if n >= _MAX_OBJECT_NUMBER or n in archives or (
-                                    info is not None and info[0] == "f" and info[2] > 0):
-                                continue
-                            self.offsets[n] = ("s", num, i)
-                            compressed.add(n)
+                stream = obj if isinstance(obj, Stream) else None
+                if stream is not None and name_for(stream.dict, "Type") == b"XRef":
+                    table = _merge_up(table, [{}, dict(stream.dict), num])
+                if num <= _MAX_OBJECT_NUMBER:
+                    _add_normal(table[0], num, gen & 0xFFFF, False, pos)
+                    members = self._object_stream_from(stream)
+                    for i, (n, _) in enumerate(members[0] if members else ()):
+                        if n <= _MAX_OBJECT_NUMBER:
+                            _add_compressed(table[0], n, num, i)
             numbers.clear()
-        self._cache, self._objstm = {}, {}
-        if not found and not trailer or not self.offsets:
+        self._table = _merge_up(self._table, table)
+        if self.trailer is None or not self.offsets:
             raise PdfFileError("no trailer to rebuild the cross-reference table with")
-        self.trailer = trailer
 
     def _object_at(self, pos: int):
         """CPDF_SyntaxParser::GetIndirectObject as the rebuild calls it (no object holder, so
@@ -483,61 +704,117 @@ class PdfFile:
 
     # ------------------------------------------------------------------ objects
 
-    def _indirect_at(self, pos: int):
+    def _indirect_at(self, pos: int, nothing=None):
         """CPDF_SyntaxParser::GetIndirectObject (loose, with the document as holder): the
-        object after `n g obj` at pos with its number, or (None, None)."""
+        object after `n g obj` at pos with its number, or (nothing, None)."""
         scan = _Words(self.data, pos)
         words = [scan.next() for _ in range(3)]
         if None in words or not words[0][1] or not words[1][1] or words[2][0] != b"obj":
-            return None, None
+            return nothing, None
         obj = _body(scan, False, self._held_stream(self.data))
-        return (None if obj is _NOTHING else obj), _atoui(words[0][0])
+        return (nothing if obj is _NOTHING else obj), _atoui(words[0][0])
 
     def get(self, num: int):
+        """The indirect object `num`, None when there is none (or it is `null`: `indirect` tells
+        them apart)."""
         if num in self._cache:
             return self._cache[num]
         if num in self._parsing:
             return None
-        entry = self.offsets.get(num)
-        obj = None
+        # CPDF_Parser::ParseIndirectObject; the holder keeps what parsed, never a failure, so an
+        # object asked for while the table was being read is looked for again once it is read
+        entry = self.offsets.get(num) if num > 0 else None   # (a known number is a valid one)
+        obj = _NOTHING
         self._parsing.add(num)
         try:
             with _deep_recursion():
-                if entry and entry[0] == "f":
-                    obj, found = self._indirect_at(entry[1])
-                    if found != num:   # CPDF_Parser::ParseIndirectObjectAt: another object is none
-                        obj = None
-                elif entry and entry[0] == "s":
-                    nums, data, first = self._load_objstm(entry[1])
-                    if entry[2] < len(nums) and nums[entry[2]] == num:
-                        offsets = self._objstm[entry[1]][3]
-                        obj = _body(_Words(data, first + offsets[entry[2]]), False, self._held_stream(data))
-                        obj = None if obj is _NOTHING else obj
+                if entry is not None and entry[0] == "n" and entry[2] > 0:
+                    obj = self._parse_at(entry[2], num)
+                elif entry is not None and entry[0] == "c":
+                    objstm = self._object_stream(entry[2] & 0xFFFFFFFF)
+                    index = entry[2] >> 32
+                    if objstm is not None and index < len(objstm[0]) and objstm[0][index][0] == num:
+                        at = objstm[2] + objstm[0][index][1]   # ParseObjectAtOffset
+                        if at < len(objstm[1]):
+                            obj = _body(_Words(objstm[1], at), False, self._held_stream(objstm[1]))
         finally:
             self._parsing.discard(num)
+        if obj is _NOTHING:
+            return None
+        if obj is None:
+            self._nulls.add(num)
+        elif isinstance(obj, (dict, list, Stream)):
+            self._objnums[id(obj)] = num
         self._cache[num] = obj
         return obj
 
-    def _load_objstm(self, num: int):
-        if num not in self._objstm:
-            stream = self.get(num)
-            self._objstm[num] = self._objstm_from(stream) if isinstance(stream, Stream) else ([], b"", 0, [])
-        nums, data, first, _ = self._objstm[num]
-        return nums, data, first
+    def _last_number(self) -> int:
+        """GetLastObjNum: the table's highest number (IsValidObjectNumber: at most that)."""
+        return max(self.offsets, default=0)
 
-    def _objstm_from(self, stream: Stream) -> tuple[list, bytes, int, list]:
-        """An object stream's (numbers, decoded data, /First, offsets)."""
-        data, _ = decode_filters(stream.raw, stream.dict, self.resolve)
-        n, first = stream.get("N", 0), stream.get("First", 0)
-        lexer = Lexer(data)
-        nums, offsets = [], []
-        for _ in range(n if isinstance(n, int) else 0):
-            a, b = lexer.next(), lexer.next()
-            if not isinstance(a, int) or not isinstance(b, int):
+    def _parse_at(self, pos: int, num: int):
+        """ParseIndirectObjectAt: the object at pos if it is object `num`, else nothing."""
+        obj, found = self._indirect_at(min(pos, len(self.data)), _NOTHING)
+        return obj if found == num else _NOTHING
+
+    def _object_stream(self, num: int):
+        """CPDF_Parser::GetObjectStream: (members [(number, offset)], data, /First) of an object
+        stream the table knows as one, None when it is none; kept once parsed, even as none."""
+        if num in self._parsing:
+            return None
+        if num in self._objstm:
+            return self._objstm[num]
+        info = self.offsets.get(num)
+        if info is None or not info[3] or info[2] <= 0:
+            return None
+        self._parsing.add(num)
+        try:
+            obj = self._parse_at(info[2], num)
+        finally:
+            self._parsing.discard(num)
+        if obj is _NOTHING:
+            return None
+        self._objstm[num] = self._object_stream_from(obj if isinstance(obj, Stream) else None)
+        return self._objstm[num]
+
+    def _object_stream_from(self, stream: Stream | None):
+        """CPDF_ObjectStream::Create and Init: a direct /Type /ObjStm, an integer /N in
+        [0, kMaxObjectNumber] and an integer /First >= 0; then /N pairs read as GetDirectNum
+        does (anything but a number reads 0), stopping at the end of the data, a pair with
+        number 0 left out."""
+        if stream is None:
+            return None
+        d = stream.dict
+        n, first = d.get("N"), d.get("First")
+        if name_for(d, "Type") != b"ObjStm":
+            return None
+        if type(n) is not int or not 0 <= n <= _MAX_OBJECT_NUMBER or type(first) is not int or first < 0:
+            return None
+        data = self.stream_data(stream)
+        scan = _Words(data, 0)
+        members = []
+        for _ in range(n):
+            if scan.pos >= len(data):
                 break
-            nums.append(a)
-            offsets.append(b)
-        return nums, data, first, offsets
+            pair = []
+            for _ in range(2):
+                w = scan.next()
+                pair.append(_str_to_int(w[0] + b"\0", 0, 32, False) if w is not None and w[1] else 0)
+            if pair[0]:
+                members.append((pair[0], pair[1]))
+        return members, data, first
+
+    def indirect(self, num: int):
+        """GetOrParseIndirectObject: the object, None for a `null` one, navigation.NOTHING (nullptr)
+        when there is none."""
+        obj = self.get(num)
+        return NOTHING if obj is None and num not in self._nulls else obj
+
+    def objnum(self, obj) -> int:
+        """CPDF_Object::GetObjNum: an indirect object's number; 0 for anything held directly (an
+        array item, a dictionary value, a stream's dictionary)."""
+        num = self._objnums.get(id(obj))
+        return num if num is not None and self._cache.get(num) is obj else 0
 
     def resolve(self, value, depth: int = 0):
         while isinstance(value, Ref) and depth < 32:
@@ -742,36 +1019,35 @@ class PdfFile:
                 page[Name(k)] = value
         return (Ref(num, 0) if num else None), page
 
-    def page_index(self, ref) -> int:
-        """CPDF_Document::GetPageIndex for a reference; a number is the page number."""
-        if isinstance(ref, int) and not isinstance(ref, bool):  # a page number (remote-style destinations)
-            return ref if 0 <= ref < self.page_count else -1
-        if not isinstance(ref, Ref):
-            return -1
-        objnum = ref.num
+    def page_index(self, objnum: int) -> int:
+        """CPDF_Document::GetPageIndex: a page known by its object number, else found in the
+        tree (skipping the pages already known) and remembered when it is a /Page. Object
+        number 0 (a dictionary written in place) is the first page not loaded yet; a page
+        written directly in /Kids has a number of its own in PDFium, which nothing refers to."""
         count = self.page_count
         skip, skipped = 0, False
         for i, known in enumerate(self._page_list):
             num = known[0] if known is not None else 0
             if num == objnum:
                 return i
-            if not skipped and not num:
+            if not skipped and num == 0:
                 skip, skipped = i, True
         num, pages = self._pages_node()
         if pages is None:
             return -1
-        state = [skip, 0]
+        state = [skip, 0, {id(k[1]) for k in self._page_list if k is not None and k[0] is None}]
         with _deep_recursion():
             found = self._find_page_index(num, pages, state, objnum, 0)
         if not 0 <= found < count:
             return -1
-        obj = self.get(objnum)
-        if isinstance(obj, dict) and self.resolve(obj.get("Type")) == "Page":
+        obj = self.indirect(objnum) if objnum else NOTHING
+        if isinstance(obj, dict) and name_for(obj, "Type") == b"Page":   # IsValidPageObject
             self._page_list[found] = (objnum, obj)
         return found
 
     def _find_page_index(self, num: int, node: dict, state: list, objnum: int, level: int) -> int:
-        """CPDF_Document::FindPageIndex; state = [pages still to skip, index so far]."""
+        """CPDF_Document::FindPageIndex; state = [pages still to skip, index so far, the pages
+        written directly in /Kids that were loaded (they have a number now, not 0)]."""
         if "Kids" not in node:
             if objnum == num:
                 return state[1]
@@ -779,10 +1055,10 @@ class PdfFile:
                 state[0] -= 1
             state[1] += 1
             return -1
-        kids = self.resolve(node.get("Kids"))
-        if not isinstance(kids, list) or level >= _MAX_PAGE_LEVEL:
+        kids = array_for(self, node, "Kids")
+        if kids is None or level >= _MAX_PAGE_LEVEL:
             return -1
-        count = _integer(self.resolve(node.get("Count"))) & 0xFFFFFFFFFFFFFFFF  # a size_t
+        count = integer_for(self, node, "Count") & 0xFFFFFFFFFFFFFFFF  # an int stored in a size_t
         if count <= state[0]:
             state[0] -= count
             state[1] += count
@@ -791,113 +1067,15 @@ class PdfFile:
             for i, kid in enumerate(kids):
                 if isinstance(kid, Ref) and kid.num == objnum:
                     return state[1] + i
-        for kid in kids:
-            kid_num, kid = self._kid(kid) if isinstance(kid, Ref) else (0, _dict(kid))
+        for i in range(len(kids)):
+            kid = dict_at(self, kids, i)
             if kid is None or kid is node:
                 continue
+            kid_num = -1 if id(kid) in state[2] else self.objnum(kid)
             found = self._find_page_index(kid_num, kid, state, objnum, level + 1)
             if found >= 0:
                 return found
         return -1
-
-    def info(self) -> dict:
-        info = self.resolve(self.trailer.get("Info"))
-        return info if isinstance(info, dict) else {}
-
-    def _number_tree(self, node, out: list, depth: int = 0) -> None:
-        node = self.resolve(node)
-        if not isinstance(node, dict) or depth > 32:
-            return
-        nums = self.resolve(node.get("Nums"))
-        if isinstance(nums, list):
-            for k in range(0, len(nums) - 1, 2):
-                if isinstance(nums[k], int):
-                    out.append((nums[k], self.resolve(nums[k + 1])))
-        for kid in self.resolve(node.get("Kids")) or []:
-            self._number_tree(kid, out, depth + 1)
-
-    def name_tree(self, node, out: list, depth: int = 0) -> None:
-        node = self.resolve(node)
-        if not isinstance(node, dict) or depth > 32:
-            return
-        names = self.resolve(node.get("Names"))
-        if isinstance(names, list):
-            for k in range(0, len(names) - 1, 2):
-                out.append((names[k], names[k + 1]))
-        for kid in self.resolve(node.get("Kids")) or []:
-            self.name_tree(kid, out, depth + 1)
-
-    def page_labels(self) -> list[str]:
-        entries: list = []
-        self._number_tree(self.catalog.get("PageLabels"), entries)
-        if not entries:
-            return [""] * self.page_count
-        entries.sort(key=lambda e: e[0])
-        out = []
-        for i in range(self.page_count):
-            start, spec = None, None
-            for s, d in entries:
-                if s <= i:
-                    start, spec = s, d
-            if spec is None or not isinstance(spec, dict):
-                out.append("")
-                continue
-            n = i - start + (spec.get("St", 1) if isinstance(spec.get("St"), int) else 1)
-            style = spec.get("S")
-            prefix = text_string(self.resolve(spec.get("P"))) if spec.get("P") is not None else ""
-            out.append(prefix + _label_number(n, style))
-        return out
-
-    def dest_page(self, dest, depth: int = 0) -> int:
-        dest = self.resolve(dest)
-        if isinstance(dest, dict):
-            dest = self.resolve(dest.get("D"))
-        if isinstance(dest, (String, Name, bytes, str)) and depth < 4:
-            return self.dest_page(self.named_dest(dest), depth + 1)
-        if isinstance(dest, list) and dest:
-            return self.page_index(dest[0])
-        return -1
-
-    def named_dest(self, name):
-        if not hasattr(self, "_dest_map"):
-            self._dest_map = {}
-            for key, value in self.named_dests_raw():
-                self._dest_map.setdefault(bytes(key) if isinstance(key, bytes) else str(key).encode("latin-1"), value)
-        key = bytes(name) if isinstance(name, bytes) else str(name).encode("latin-1", "replace")
-        return self._dest_map.get(key)
-
-    def named_dests_raw(self) -> list[tuple]:
-        """(name, destination) from the Dests name tree, then from the catalog's Dests dictionary."""
-        out: list = []
-        names = self.resolve(self.catalog.get("Names"))
-        if isinstance(names, dict):
-            self.name_tree(names.get("Dests"), out)
-        dests = self.resolve(self.catalog.get("Dests"))
-        if isinstance(dests, dict):
-            out += [(Name(k), v) for k, v in dests.items()]
-        return out
-
-
-_ROMAN = [(1000, "m"), (900, "cm"), (500, "d"), (400, "cd"), (100, "c"), (90, "xc"), (50, "l"), (40, "xl"),
-          (10, "x"), (9, "ix"), (5, "v"), (4, "iv"), (1, "i")]
-
-
-def _label_number(n: int, style) -> str:
-    if style == "D":
-        return str(n)
-    if style in ("R", "r"):
-        out = ""
-        for v, s in _ROMAN:
-            while n >= v:
-                out += s
-                n -= v
-        return out.upper() if style == "R" else out
-    if style in ("A", "a"):
-        if n < 1:
-            return ""
-        letter = chr(ord("A") + (n - 1) % 26) * ((n - 1) // 26 + 1)
-        return letter if style == "A" else letter.lower()
-    return ""
 
 
 # ---------------------------------------------------------------------- writing
