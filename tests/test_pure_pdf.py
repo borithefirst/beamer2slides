@@ -77,6 +77,22 @@ def test_the_pure_reader_answers_what_pdfium_answers(path):
         theirs.close()
 
 
+@built
+def test_an_images_dpi_is_pdfiums_to_the_last_bit():
+    """FPDFImageObj_GetImageMetadata divides in floats by the object's GetRect: a double division by
+    the matrix differed in the last digits (14_misc's JPEG, found by the whole-disk sweep)."""
+    for path in DECKS:
+        ours, theirs = pdf.resolve("pure").open(path), pdf.resolve("pdfium").open(path)
+        try:
+            for a, b in zip(ours, theirs):
+                for po in a.objects():
+                    if po.type == OBJ_IMAGE:
+                        assert a.embedded_image(po.id).dpi == b.embedded_image(po.id).dpi, (path.stem, a.index)
+        finally:
+            ours.close()
+            theirs.close()
+
+
 def numbers_apart(a, b, where="") -> int:
     """How many numbers of two JSON trees differ (each by at most 0.01); anything else must be equal."""
     if isinstance(a, dict):

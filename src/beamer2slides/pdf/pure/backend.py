@@ -382,11 +382,11 @@ class Page:
         bits = 1 if mask else (bpc if isinstance(bpc, int) and bpc > 0 else 8) * n
         bpp = 1 if bits == 1 else 8 if bits <= 8 else 24
         px = self._pixel_size(o)
-        # FPDFImageObj_GetImageMetadata: pixels per inch of the unit square's bounding box under the
-        # image's own matrix (the form around it left out)
-        oa, ob, oc, od = o.matrix[:4]
-        wide, high = abs(oa) + abs(oc), abs(ob) + abs(od)
-        dpi = (px[0] * 72 / wide if wide else 0.0, px[1] * 72 / high if high else 0.0)
+        # FPDFImageObj_GetImageMetadata: pixels per inch of the object's GetRect (its container's
+        # space, the form around it left out), in floats: `px / width * 72`; 0 when either side is 0
+        wide, high = float32(o.rect[2] - o.rect[0]), float32(o.rect[3] - o.rect[1])
+        dpi = ((float32(float32(px[0] / wide) * 72), float32(float32(px[1] / high) * 72))
+               if wide and high else (0.0, 0.0))
         a, b, c, dd, _, _ = po.matrix
         full = self._unit_box(po)
         box = self._clipped(po, full)
