@@ -69,7 +69,8 @@ a per-slide background picture.
   a page with anything not ported yet (JPX/JBIG2/CCITT or ICC-profiled images, tiling patterns,
   ICCBased shadings, transfer functions on images…) raises PdfError, so
   `renders = False`: `classify` runs on it and `convert` doesn't yet. Every call equals PDFium's on 4,373 pages
-  (chars and object boxes to the last bit on the test decks),
+  (chars and object boxes to the last bit on the test decks; extraction also on 71,408 pages swept from
+  the 3,169 distinct PDFs on this machine, up to 60 each, /ActualText marked content included),
   and deck.json is identical on all 48 test decks; extract is 7× slower. `tests/test_pure_pdf.py`.
   Cross references (CPDF_Parser, rebuild included) and navigation (`pure/navigation.py`: links,
   actions, destinations, name trees, page labels, metadata) are ported rule for rule; the whole-file

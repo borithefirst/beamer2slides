@@ -216,6 +216,23 @@ Each of these was a diff against PDFium until it was ported:
   TeX distribution): its subsets have glyph ids with no Unicode, so the text page reads the codes
   themselves - Hebrew, Arabic, Syriac - and 78 of 100 torture pages were apart
   (`test_right_to_left_text_is_ordered_as_pdfium_orders_it`, with and without /R2L).
+- **/ActualText** (PreMarkedContent, ProcessMarkedContent): the content parser keeps PDFium's
+  marked-content stack (`content.MarkItem`: BMC, BDC with a dictionary written in the stream or named
+  in /Properties, which GetParam looks up again on every call; a BDC whose operand is neither opens
+  nothing, so its EMC closes the enclosing sequence; a form starts with an empty stack). A text
+  object whose marks carry an /ActualText *string* (GetStringFor: a reference does not count there,
+  though ProcessMarkedContent's GetUnicodeTextFor follows one) gives that text, one kActualText char
+  per UTF-16 unit with no char code, boxes slicing the object's rectangle in equal parts from the left
+  (from the right when the object's own glyphs run right to left), control chars as spaces, U+FFFD
+  and up dropped; the next object whose last mark has the very same dictionary gives nothing, and one
+  whose text is only unprintable is skipped whole. CloseTempLine keeps a right-to-left segment that
+  opens with such a char in its logical order. Found by the whole-disk sweep (every distinct PDF on
+  the machine, 71,408 pages): Word's export of an Arabic deck in the adopt corpus writes a ligature's
+  letters as /ActualText over glyphs whose ToUnicode says U+FFFD, and 1,474 of its pages were apart
+  (`test_actual_text_reads_as_pdfium_reads_it`, `tools/marked_content_torture.py`: 4,000 seeds equal;
+  with PreMarkedContent off 143 of 300 are apart). The same sweep found metropolis's bullet font:
+  CPDF_Type3Font::Load's FontBBox goes through ToFxRect, each corner truncated toward zero, not the
+  outer box (`test_a_type3_font_box_is_truncated_toward_zero`).
 - **Cross references** are CPDF_Parser's loading ported, not a reader that accepts good files
   (`document.PdfFile`, whose table is CPDF_CrossRefTable; `test_cross_references_are_read_as_pdfium_reads_them`
   and `test_cross_references_are_loaded_as_pdfium_loads_them`, one case per rule). A regex reader
