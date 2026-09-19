@@ -232,6 +232,104 @@ def test_a_damaged_flate_stream_keeps_what_decoded_before_the_damage():
         assert len(ours.objects()) == len(theirs.objects()), f"trial {trial}: damage at {k}"
 
 
+def _objects_pdf(objs: dict, root: int = 1) -> bytes:
+    """A PDF of these object bodies with a correct cross-reference table."""
+    out, offsets = bytearray(b"%PDF-1.4\n"), {}
+    for n, body in objs.items():
+        offsets[n] = len(out)
+        out += b"%d 0 obj\n" % n + body + b"\nendobj\n"
+    xref, size = len(out), max(objs) + 1
+    out += b"xref\n0 %d\n0000000000 65535 f \n" % size
+    for n in range(1, size):
+        out += b"%010d 00000 n \n" % offsets[n] if n in offsets else b"0000000000 65535 f \n"
+    return bytes(out + b"trailer\n<< /Size %d /Root %d 0 R >>\nstartxref\n%d\n%%%%EOF\n" % (size, root, xref))
+
+
+def _pages_said(backend, data, order):
+    """(page count, [(index, width or None when the page does not load)]), or the refusal."""
+    try:
+        doc = pdf.resolve(backend).open(data)
+    except PdfError:
+        return "refused"
+    said = []
+    for i in order:
+        if i < len(doc):
+            try:
+                said.append((i, round(doc[i].width)))
+            except PdfError:
+                said.append((i, None))
+    return len(doc), said
+
+
+_CAT = b"<< /Type /Catalog /Pages 2 0 R >>"
+_LEAF = b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 %d 100] >>"
+PAGE_TREES = {
+    # /Count is believed when 0 < Count < 0xFFFFF, else the kids are counted
+    "count_more": {1: _CAT, 2: b"<< /Type /Pages /Kids [3 0 R] /Count 3 >>", 3: _LEAF % 10},
+    "count_less": {1: _CAT, 2: b"<< /Type /Pages /Kids [3 0 R 4 0 R] /Count 1 >>", 3: _LEAF % 10, 4: _LEAF % 20},
+    "count_zero": {1: _CAT, 2: b"<< /Type /Pages /Kids [3 0 R 4 0 R] /Count 0 >>", 3: _LEAF % 10, 4: _LEAF % 20},
+    "count_real": {1: _CAT, 2: b"<< /Type /Pages /Kids [3 0 R] /Count 2.9 >>", 3: _LEAF % 10},
+    "count_ref": {1: _CAT, 2: b"<< /Type /Pages /Kids [3 0 R] /Count 4 0 R >>", 3: _LEAF % 10, 4: b"3"},
+    "count_string": {1: _CAT, 2: b"<< /Type /Pages /Kids [3 0 R 4 0 R] /Count (x) >>", 3: _LEAF % 10, 4: _LEAF % 20},
+    # a kid that is no dictionary uses up a page; a node that is its own kid is skipped
+    "number_kid": {1: _CAT, 2: b"<< /Type /Pages /Kids [5 3 0 R] /Count 2 >>", 3: _LEAF % 10},
+    "self_kid": {1: _CAT, 2: b"<< /Type /Pages /Kids [2 0 R 3 0 R] /Count 2 >>", 3: _LEAF % 10},
+    "mixed": {1: _CAT, 2: b"<< /Type /Pages /Kids [3 0 R 7 4 0 R 5 0 R] /Count 4 >>", 3: _LEAF % 10,
+              4: _LEAF % 20, 5: b"<< /Type /Pages /Kids [6 0 R] >>", 6: _LEAF % 30},
+    "nested_wrong_count": {1: _CAT, 2: b"<< /Type /Pages /Kids [5 0 R 4 0 R] /Count 2 >>",
+                           5: b"<< /Type /Pages /Kids [3 0 R] /Count 7 >>", 3: _LEAF % 10, 4: _LEAF % 20},
+    "dup_kid": {1: _CAT, 2: b"<< /Type /Pages /Kids [3 0 R 3 0 R] >>", 3: _LEAF % 10},
+    "cycle": {1: _CAT, 2: b"<< /Type /Pages /Kids [5 0 R 3 0 R] >>", 3: _LEAF % 10,
+              5: b"<< /Type /Pages /Kids [2 0 R 3 0 R] >>"},
+    # a node without /Kids is a page, whatever its /Count
+    "no_kids": {1: _CAT, 2: b"<< /Type /Pages /MediaBox [0 0 30 30] /Count 4 >>"},
+    "kids_not_array": {1: _CAT, 2: b"<< /Type /Pages /Kids 3 0 R /Count 1 >>", 3: _LEAF % 10},
+    # a page loads when /Type is absent or resolves to /Page
+    "no_type": {1: _CAT, 2: b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>", 3: b"<< /Parent 2 0 R /MediaBox [0 0 10 100] >>"},
+    "type_pages": {1: _CAT, 2: b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+                   3: b"<< /Type /Pages /Parent 2 0 R /MediaBox [0 0 10 100] >>"},
+    "type_string": {1: _CAT, 2: b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+                    3: b"<< /Type (Page) /Parent 2 0 R /MediaBox [0 0 10 100] >>"},
+    "type_null": {1: _CAT, 2: b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+                  3: b"<< /Type null /Parent 2 0 R /MediaBox [0 0 10 100] >>"},
+    "type_ref": {1: _CAT, 2: b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+                 3: b"<< /Type 4 0 R /Parent 2 0 R /MediaBox [0 0 10 100] >>", 4: b"/Page"},
+    "inherited_box": {1: _CAT, 2: b"<< /Type /Pages /Kids [4 0 R] /Count 1 >>",
+                      3: b"<< /Type /Pages /MediaBox [0 0 77 77] >>", 4: b"<< /Type /Page /Parent 3 0 R >>"},
+    "stream_kid": {1: _CAT, 2: b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+                   3: b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 10 100] /Length 0 >>\nstream\n\nendstream"},
+}
+
+
+@pytest.mark.parametrize("name", PAGE_TREES)
+def test_page_trees_are_walked_as_pdfium_walks_them(name):
+    """CPDF_Document's page count and TraversePDFPages: which dictionary is page i depends on /Count,
+    on kids that are no dictionaries, and on the order the pages were asked for (the traversal is
+    stateful and caches what it passed)."""
+    data = _objects_pdf(PAGE_TREES[name])
+    for order in (range(8), range(7, -1, -1), [1, 0, 2, 1, 3, 0]):
+        assert _pages_said("pure", data, order) == _pages_said("pdfium", data, order), list(order)
+
+
+def test_a_broken_file_is_rebuilt_as_pdfium_rebuilds_it():
+    """RebuildCrossRef: a table whose first object is not where it says is not believed, the file is
+    scanned word by word (strings skipped, so an `obj` in a string is none), damaged objects end
+    where CPDF_SyntaxParser ends them, and a catalog is all a rebuilt file needs."""
+    good = _objects_pdf({1: _CAT, 2: b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>", 3: _LEAF % 10,
+                         4: b"<< /S (9 0 obj << /Type /Catalog >> endobj) >>"})
+    cases = {
+        "first_offset_wrong": good.replace(b"0000000009 00000 n", b"0000000019 00000 n"),
+        "no_xref": good[:good.index(b"xref")] + b"trailer\n<< /Root 1 0 R >>\n%%EOF\n",
+        "damaged_dict": good.replace(b"/Count 1 >>", b"/Count 1 /Rect [1 0.9 360.ype/Link >>"),
+        "name_then_comment": good.replace(b"/Type /Catalog /Pages", b"/Type /% x\n/Catalog /Pages"),
+        "no_pages": good.replace(b"/Pages 2 0 R", b"/Pages 9 0 R").replace(b"0000000009 00000 n", b"0000000000 00000 n"),
+        "no_trailer_root": good.replace(b"/Root 1 0 R", b"/Root 1"),
+    }
+    for name, data in cases.items():
+        order = range(3)
+        assert _pages_said("pure", data, order) == _pages_said("pdfium", data, order), name
+
+
 def test_content_operands_are_read_as_pdfiums_stream_parser_reads_them():
     from beamer2slides.pdf.pure.syntax import Name, operations
 

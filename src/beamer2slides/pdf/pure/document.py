@@ -4,19 +4,194 @@ named destinations, text strings, and writing a new file (ISO 32000-1, 7.5, 7.7,
 from __future__ import annotations
 
 import codecs
+import contextlib
 import re
+import sys
 from pathlib import Path
 
 from .filters import decode as decode_filters
-from .syntax import END, Lexer, Name, Op, PdfSyntaxError, Ref, Stream, String, parse_object
+from .syntax import END, Lexer, Name, Op, PdfSyntaxError, Ref, Stream, String, _literal_string, _name, _number
 
-_OBJ_HEADER = re.compile(rb"(?<![0-9])(\d+)[\x00\t\n\x0c\r ]+(\d+)[\x00\t\n\x0c\r ]+obj\b")
 _STARTXREF = re.compile(rb"startxref[\x00\t\n\x0c\r ]+(\d+)")
 _INHERITED = ("Resources", "MediaBox", "CropBox", "Rotate")
+_PAGE_MAX = 0xFFFFF        # CPDF_Document::kPageMaxNum
+_MAX_PAGE_LEVEL = 1024     # kMaxPageLevel
+_MAX_OBJECT_NUMBER = 1048576  # kMaxObjectNumber
 
 
 class PdfFileError(Exception):
     pass
+
+
+def _dict(value) -> dict | None:
+    """GetDict: a dictionary, or a stream's dictionary."""
+    if isinstance(value, Stream):
+        return value.dict
+    return value if isinstance(value, dict) else None
+
+
+def _integer(value) -> int:
+    """CPDF_Object::GetInteger: numbers (reals truncated) and booleans, else 0."""
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        try:
+            return max(-2 ** 31, min(2 ** 31 - 1, int(value)))
+        except (OverflowError, ValueError):
+            return 0
+    return 0
+
+
+_GAP = re.compile(rb"(?:[\x00\t\n\x0c\r ]+|%[^\r\n]*)*")
+_REGULAR = re.compile(rb"[^\x00\t\n\x0c\r ()<>\[\]{}/%]*")
+_NUMERIC = frozenset(b"0123456789+-.")
+
+
+class _Words:
+    """CPDF_SyntaxParser::GetNextWord over file syntax: (word, is_number, start) or None."""
+
+    def __init__(self, data: bytes, pos: int):
+        self.data, self.pos, self.last = data, pos, b""
+
+    def next(self):
+        data = self.data
+        pos = _GAP.match(data, self.pos).end()
+        if pos >= len(data):
+            self.pos = pos
+            return None
+        c = data[pos]
+        if c in b"()<>[]{}/":
+            if c == 0x2F:  # '/'
+                end = _REGULAR.match(data, pos + 1).end()
+            elif c in b"<>" and data[pos + 1:pos + 2] == bytes([c]):
+                end = pos + 2
+            else:
+                end = pos + 1
+            word, is_number = data[pos:end], False
+        else:
+            end = _REGULAR.match(data, pos).end()
+            word = data[pos:end]
+            is_number = all(ch in _NUMERIC for ch in word)
+        self.pos = end
+        word = word[:256]   # the word buffer holds 256 bytes
+        self.last = word    # m_WordBuffer: kept when a position is restored, and at the end
+        return word, is_number, end - len(word)
+
+
+def _atoui(word: bytes) -> int:
+    """FXSYS_atoui: an optional sign and decimal digits; past 2^32 - 1 the maximum, a minus 0."""
+    i = 1 if word[:1] in (b"-", b"+") else 0
+    neg = word[:1] == b"-"
+    num = 0
+    while i < len(word) and 0x30 <= word[i] <= 0x39:
+        num = num * 10 + word[i] - 0x30
+        if num > 0xFFFFFFFF:
+            return 0 if neg else 0xFFFFFFFF
+        i += 1
+    return 0 if neg and num else num
+
+
+_NOTHING = object()   # GetObjectBodyInternal's nullptr
+_HEX = frozenset(b"0123456789abcdefABCDEF")
+
+
+def _hex_body(data: bytes, pos: int) -> tuple[bytes, int]:
+    """CPDF_SyntaxParser::ReadHexString: hex digits up to `>` (others skipped)."""
+    end = data.find(b">", pos)
+    end = len(data) if end < 0 else end
+    digits = bytes(c for c in data[pos:end] if c in _HEX)
+    if len(digits) % 2:
+        digits += b"0"
+    return bytes.fromhex(digits.decode("ascii")), min(end + 1, len(data))
+
+
+def _body(scan: _Words, strict: bool, stream_at, depth: int = 0):
+    """CPDF_SyntaxParser::GetObjectBodyInternal: one object, or _NOTHING (nullptr). Strict only
+    at the top: an array must end on `]`, and a dictionary value that is no object ends it.
+    `stream_at(dict, pos)` reads the stream after a dictionary: (Stream or _NOTHING, position)."""
+    if depth > 64:
+        return _NOTHING
+    data = scan.data
+    saved = scan.pos
+    w = scan.next()
+    if w is None:
+        return _NOTHING
+    word, is_number, _ = w
+    if is_number:
+        after = scan.pos
+        w2 = scan.next()
+        if w2 is not None and w2[1]:
+            w3 = scan.next()
+            if w3 is not None and w3[0] == b"R":
+                num = _atoui(word)
+                return Ref(num, _atoui(w2[0]) & 0xFFFF) if num else _NOTHING
+        scan.pos = after
+        return _number(word)
+    if word in (b"true", b"false"):
+        return word == b"true"
+    if word == b"null":
+        return None
+    if word == b"(":
+        value, scan.pos = _literal_string(data, scan.pos)
+        return String(value)
+    if word == b"<":
+        value, scan.pos = _hex_body(data, scan.pos)
+        s = String(value)
+        s.hex = True
+        return s
+    if word == b"[":
+        out = []
+        while (item := _body(scan, False, stream_at, depth + 1)) is not _NOTHING:
+            out.append(item)
+        return out if not strict or scan.last[:1] == b"]" else _NOTHING   # the word that ended it
+    if word[:1] == b"/":
+        return _name(word)
+    if word == b"<<":
+        d: dict = {}
+        while True:
+            w = scan.next()
+            if w is None:
+                return _NOTHING
+            inner = w[0]
+            if inner == b">>":
+                break
+            if inner == b"endobj":
+                scan.pos = w[2]
+                break
+            if inner[:1] != b"/":
+                continue
+            value = _body(scan, False, stream_at, depth + 1)
+            if value is _NOTHING:
+                if not strict:
+                    continue
+                nl = [p for p in (data.find(b"\n", scan.pos), data.find(b"\r", scan.pos)) if p >= 0]
+                scan.pos = min(nl) + 1 if nl else len(data)   # ToNextLine
+                return _NOTHING
+            if len(inner) > 1:
+                d[_name(inner)] = value
+        after = scan.pos
+        w = scan.next()
+        if w is None or w[0] != b"stream":
+            scan.pos = after
+            return d
+        stream, scan.pos = stream_at(d, scan.pos)
+        return stream
+    if word == b">>":
+        scan.pos = saved
+    return _NOTHING
+
+
+@contextlib.contextmanager
+def _deep_recursion():
+    """The page tree may be 1024 levels deep, as deep as PDFium follows it."""
+    limit = sys.getrecursionlimit()
+    sys.setrecursionlimit(max(limit, 4 * _MAX_PAGE_LEVEL + 200))
+    try:
+        yield
+    finally:
+        sys.setrecursionlimit(limit)
 
 
 # PDFDocEncoding differs from Latin-1 in 0x18-0x1F and 0x80-0x9F
@@ -53,15 +228,25 @@ class PdfFile:
         self.trailer: dict = {}
         self._cache: dict[int, object] = {}
         self._objstm: dict[int, tuple[list, bytes, int]] = {}
+        self._page_list: list | None = None
+        self._parsing: set[int] = set()
+        loaded = True
         try:
             self._read_xref()
+            if not self._verify_xref():
+                raise PdfFileError("the table's first object is not where it says")
         except Exception:  # noqa: BLE001 - a broken table: rebuild it from the objects themselves
-            self.offsets, self.trailer = {}, {}
-        if not self.trailer.get("Root") or not self._root_ok():
-            self._reconstruct()
+            self.offsets, self.trailer, loaded = {}, {}, False
+        if not loaded or not self._root_ok():
+            # CPDF_Parser::StartParseInternal: the table rebuilt onto what was read, then a
+            # catalog is all it takes (a document with no pages opens)
+            self._reconstruct(dict(self.trailer))
+            self._page_list = None
+            if not self.catalog:
+                raise PdfFileError("no document catalog")
         if self.trailer.get("Encrypt") is not None:
             raise PdfFileError("encrypted PDFs are not supported")
-        self.pages = self._pages()
+        self.page_count  # noqa: B018 - counted now, as CPDF_Document::LoadPages does
 
     # ------------------------------------------------------------------ cross-reference
 
@@ -96,7 +281,11 @@ class PdfFile:
             save = lexer.pos
             t = lexer.next()
             if t == "trailer" and type(t) is Op:
-                return parse_object(lexer)
+                with _deep_recursion():
+                    trailer = _body(_Words(data, lexer.pos), False, self._held_stream(data))
+                if not isinstance(trailer, dict):
+                    raise PdfFileError("no trailer dictionary")
+                return trailer
             if not isinstance(t, int):
                 raise PdfFileError("bad xref table")
             count = lexer.next()
@@ -117,11 +306,8 @@ class PdfFile:
             del save
 
     def _xref_stream(self, pos: int) -> dict:
-        lexer = Lexer(self.data, pos)
-        num, gen, kw = lexer.next(), lexer.next(), lexer.next()
-        if kw != "obj":
-            raise PdfFileError("no xref stream")
-        stream = self._stream_after(lexer)
+        with _deep_recursion():
+            stream = self._indirect_at(pos)[0]
         if not isinstance(stream, Stream):
             raise PdfFileError("no xref stream")
         d = stream.dict
@@ -156,133 +342,202 @@ class PdfFile:
         return {k: v for k, v in d.items() if k not in ("Filter", "DecodeParms", "W", "Index", "Length", "Type")}
 
     def _root_ok(self) -> bool:
+        """CPDF_Document::TryInit: a catalog, and at least one page counted."""
         try:
-            root = self.resolve(self.trailer.get("Root"))
-            return isinstance(root, dict) and isinstance(self.resolve(root.get("Pages")), dict)
+            return bool(self.catalog) and self.page_count > 0
         except Exception:  # noqa: BLE001
             return False
 
-    def _reconstruct(self) -> None:
-        """Every `n g obj` in the file, the last one of a number winning; the trailer from the
-        last trailer dictionary or cross-reference stream, else the catalog found."""
-        self.offsets, self._cache = {}, {}
-        for m in _OBJ_HEADER.finditer(self.data):
-            self.offsets[int(m.group(1))] = ("f", m.start(), int(m.group(2)))
-        trailer: dict = {}
-        for m in re.finditer(rb"trailer[\x00\t\n\x0c\r ]*<<", self.data):
-            try:
-                t = parse_object(Lexer(self.data, m.start() + 7))
+    def _verify_xref(self) -> bool:
+        """CPDF_Parser::VerifyCrossRefTable: the first object the table places (lowest number
+        with an offset) must start with its own number there."""
+        for num in sorted(self.offsets):
+            entry = self.offsets[num]
+            if entry[0] != "f" or entry[1] <= 0:
+                continue
+            scan = _Words(self.data, entry[1])
+            word = scan.next()
+            return word is not None and word[1] and _atoui(word[0]) == num
+        return True
+
+    def _reconstruct(self, trailer: dict) -> None:
+        """CPDF_Parser::RebuildCrossRef: the file read word by word from the start (strings and
+        hex strings skipped whole, an unbalanced `(` swallowing the rest), every `n g obj` read
+        as an object and stepped over, stream data included (so objects inside a stream that
+        parsed are not seen, and those after a broken header's stream data may be lost); a
+        higher generation kept over a later lower one, an object stream's members over
+        generation 0; the trailer merged in file order from each `trailer` dictionary and
+        cross-reference stream onto `trailer`. The catalog is only what a trailer's /Root
+        refers to: PDFium does not go looking for one."""
+        self.offsets, self._cache, self._objstm = {}, {}, {}
+        data = self.data
+        compressed: set[int] = set()
+        archives: set[int] = set()
+        found = False
+        scan = _Words(data, 0)
+        numbers: list[tuple[int, int]] = []
+        while (w := scan.next()) is not None:
+            word, is_number, start = w
+            if is_number:
+                numbers.append((_atoui(word), start))
+                if len(numbers) > 2:
+                    numbers.pop(0)
+                continue
+            if word == b"(":
+                scan.pos = _literal_string(data, scan.pos)[1]
+            elif word == b"<":
+                scan.pos = _hex_body(data, scan.pos)[1]
+            elif word == b"trailer":
+                t = _body(scan, False, self._rebuild_stream)
+                t = t.dict if isinstance(t, Stream) else t
                 if isinstance(t, dict):
                     trailer.update(t)
-            except Exception:  # noqa: BLE001
-                pass
-        if not trailer.get("Root"):
-            for num in list(self.offsets):
-                try:
-                    obj = self.get(num)
-                except Exception:  # noqa: BLE001
-                    continue
-                d = obj.dict if isinstance(obj, Stream) else obj
-                if isinstance(d, dict):
-                    if d.get("Type") == "Catalog":
-                        trailer["Root"] = Ref(num, 0)
-                    elif d.get("Type") == "XRef" and "Info" in d:
-                        trailer.setdefault("Info", d["Info"])
-                    # objects inside object streams
-                    if isinstance(obj, Stream) and d.get("Type") == "ObjStm":
-                        self._index_objstm(num)
-        if not trailer.get("Root"):
-            raise PdfFileError("no document catalog")
+                    found = True
+            elif word == b"obj" and len(numbers) == 2:
+                (num, pos), (gen, _) = numbers
+                gen &= 0xFFFF
+                obj, scan.pos = self._object_at(pos)
+                if isinstance(obj, Stream) and obj.dict.get("Type") == "XRef":
+                    trailer.update(obj.dict)
+                    found = True
+                if num < _MAX_OBJECT_NUMBER:
+                    known = self.offsets.get(num)
+                    if not (known is not None and (known[0] == "f" and known[2] > gen
+                                                   or num in compressed and gen == 0)):
+                        self.offsets[num] = ("f", pos, gen)
+                        compressed.discard(num)
+                    if isinstance(obj, Stream) and obj.dict.get("Type") == "ObjStm":
+                        try:
+                            members = self._objstm_from(obj)[0]
+                        except Exception:  # noqa: BLE001
+                            members = []
+                        if members:
+                            archives.add(num)
+                        for i, n in enumerate(members):
+                            info = self.offsets.get(n)
+                            if n >= _MAX_OBJECT_NUMBER or n in archives or (
+                                    info is not None and info[0] == "f" and info[2] > 0):
+                                continue
+                            self.offsets[n] = ("s", num, i)
+                            compressed.add(n)
+            numbers.clear()
+        self._cache, self._objstm = {}, {}
+        if not found and not trailer or not self.offsets:
+            raise PdfFileError("no trailer to rebuild the cross-reference table with")
         self.trailer = trailer
 
-    def _index_objstm(self, num: int) -> None:
-        nums, _, _ = self._load_objstm(num)
-        for i, n in enumerate(nums):
-            self.offsets.setdefault(n, ("s", num, i))
+    def _object_at(self, pos: int):
+        """CPDF_SyntaxParser::GetIndirectObject as the rebuild calls it (no object holder, so
+        an indirect /Length is unknown): the object and where reading stopped."""
+        scan = _Words(self.data, pos)
+        for _ in range(3):
+            scan.next()
+        obj = _body(scan, True, self._rebuild_stream)
+        return (None if obj is _NOTHING else obj), scan.pos
 
-    # ------------------------------------------------------------------ objects
+    def _rebuild_stream(self, d: dict, pos: int):
+        """CPDF_SyntaxParser::ReadStream with no object holder: (Stream or _NOTHING, position)."""
+        return self._read_stream(self.data, d, pos, False)
 
-    def _stream_after(self, lexer: Lexer):
-        """The object after `n g obj`: a stream when the dictionary is followed by `stream`."""
-        obj = parse_object(lexer)
-        save = lexer.pos
-        t = lexer.next()
-        if not (isinstance(obj, dict) and t == "stream" and type(t) is Op):
-            lexer.pos = save
-            return obj
-        data = self.data
-        start = lexer.pos
+    def _held_stream(self, data: bytes):
+        """ReadStream as an object read through the parser calls it: an indirect /Length counts."""
+        return lambda d, pos: self._read_stream(data, d, pos, True)
+
+    def _read_stream(self, data: bytes, d: dict, pos: int, held: bool):
+        """CPDF_SyntaxParser::ReadStream: (Stream or _NOTHING, position). /Length must be a
+        number, directly or (`held`) through one reference; an object whose /Length refers to
+        an object being parsed gets none (CPDF_Parser's m_ParsingObjNums)."""
+        obj = d
+        start = pos   # ToNextLine
+        while start < len(data) and data[start] not in b"\r\n":
+            start += 1
         if data[start:start + 2] == b"\r\n":
             start += 2
-        elif data[start:start + 1] in (b"\n", b"\r"):
+        elif start < len(data):
             start += 1
         length = obj.get("Length")
         if isinstance(length, Ref):
-            try:
-                length = self.get(length.num)
-            except Exception:  # noqa: BLE001
-                length = None
-        end = None
-        if isinstance(length, int) and length >= 0:
+            length = self.get(length.num) if held and length.num not in self._parsing else None
+        length = _integer(length) if isinstance(length, (int, float)) and not isinstance(length, bool) else -1
+        if length > 0 and start + length >= len(data):
+            length = -1
+        if length > 0:
+            after = _Words(data, start + length).next()
+            if after is None or after[0] != b"endstream":
+                length = -1
+        if length >= 0:
             end = start + length
-            tail = data[end:end + 30].lstrip()
-            if not tail.startswith(b"endstream"):
-                end = None
-        if end is None:
-            found = data.find(b"endstream", start)
-            end = found if found >= 0 else len(data)
-            while end > start and data[end - 1:end] in (b"\n", b"\r"):
+        else:
+            ends = [e for e in (data.find(b"endstream", start), data.find(b"endobj", start)) if e >= 0]
+            if not ends:
+                return _NOTHING, start
+            end = min(ends)
+            if data[end - 2:end] == b"\r\n" and end - 2 >= start:
+                end -= 2
+            elif data[end - 1:end] in (b"\r", b"\n") and end - 1 >= start:
                 end -= 1
-                if data[end - 1:end] == b"\r" and data[end:end + 1] == b"\n":
-                    continue
-                break
-        return Stream(obj, data[start:end])
+        after = _Words(data, end)
+        word = after.next()
+        stop = end if word is None or word[0] == b"endobj" else after.pos
+        return Stream(obj, data[start:end]), stop
+
+    # ------------------------------------------------------------------ objects
+
+    def _indirect_at(self, pos: int):
+        """CPDF_SyntaxParser::GetIndirectObject (loose, with the document as holder): the
+        object after `n g obj` at pos with its number, or (None, None)."""
+        scan = _Words(self.data, pos)
+        words = [scan.next() for _ in range(3)]
+        if None in words or not words[0][1] or not words[1][1] or words[2][0] != b"obj":
+            return None, None
+        obj = _body(scan, False, self._held_stream(self.data))
+        return (None if obj is _NOTHING else obj), _atoui(words[0][0])
 
     def get(self, num: int):
         if num in self._cache:
             return self._cache[num]
+        if num in self._parsing:
+            return None
         entry = self.offsets.get(num)
         obj = None
-        if entry and entry[0] == "f":
-            lexer = Lexer(self.data, entry[1])
-            n, g, kw = lexer.next(), lexer.next(), lexer.next()
-            if n == num and kw == "obj":
-                obj = self._stream_after(lexer)
-            else:  # a wrong offset: look for the object nearby, then anywhere
-                m = re.compile(rb"(?<![0-9])%d[\x00\t\n\x0c\r ]+%d[\x00\t\n\x0c\r ]+obj\b" % (num, entry[2])).search(self.data)
-                if m:
-                    lexer = Lexer(self.data, m.end())
-                    obj = self._stream_after(lexer)
-        elif entry and entry[0] == "s":
-            nums, data, first = self._load_objstm(entry[1])
-            if entry[2] < len(nums):
-                offsets = self._objstm[entry[1]][3]
-                lexer = Lexer(data, first + offsets[entry[2]])
-                obj = parse_object(lexer)
-        if type(obj) is Op:
-            obj = None
+        self._parsing.add(num)
+        try:
+            with _deep_recursion():
+                if entry and entry[0] == "f":
+                    obj, found = self._indirect_at(entry[1])
+                    if found != num:   # CPDF_Parser::ParseIndirectObjectAt: another object is none
+                        obj = None
+                elif entry and entry[0] == "s":
+                    nums, data, first = self._load_objstm(entry[1])
+                    if entry[2] < len(nums) and nums[entry[2]] == num:
+                        offsets = self._objstm[entry[1]][3]
+                        obj = _body(_Words(data, first + offsets[entry[2]]), False, self._held_stream(data))
+                        obj = None if obj is _NOTHING else obj
+        finally:
+            self._parsing.discard(num)
         self._cache[num] = obj
         return obj
 
     def _load_objstm(self, num: int):
         if num not in self._objstm:
             stream = self.get(num)
-            if not isinstance(stream, Stream):
-                self._objstm[num] = ([], b"", 0, [])
-            else:
-                data, _ = decode_filters(stream.raw, stream.dict, self.resolve)
-                n, first = stream.get("N", 0), stream.get("First", 0)
-                lexer = Lexer(data)
-                nums, offsets = [], []
-                for _ in range(n):
-                    a, b = lexer.next(), lexer.next()
-                    if not isinstance(a, int) or not isinstance(b, int):
-                        break
-                    nums.append(a)
-                    offsets.append(b)
-                self._objstm[num] = (nums, data, first, offsets)
+            self._objstm[num] = self._objstm_from(stream) if isinstance(stream, Stream) else ([], b"", 0, [])
         nums, data, first, _ = self._objstm[num]
         return nums, data, first
+
+    def _objstm_from(self, stream: Stream) -> tuple[list, bytes, int, list]:
+        """An object stream's (numbers, decoded data, /First, offsets)."""
+        data, _ = decode_filters(stream.raw, stream.dict, self.resolve)
+        n, first = stream.get("N", 0), stream.get("First", 0)
+        lexer = Lexer(data)
+        nums, offsets = [], []
+        for _ in range(n if isinstance(n, int) else 0):
+            a, b = lexer.next(), lexer.next()
+            if not isinstance(a, int) or not isinstance(b, int):
+                break
+            nums.append(a)
+            offsets.append(b)
+        return nums, data, first, offsets
 
     def resolve(self, value, depth: int = 0):
         while isinstance(value, Ref) and depth < 32:
@@ -304,47 +559,226 @@ class PdfFile:
 
     @property
     def catalog(self) -> dict:
-        root = self.resolve(self.trailer.get("Root"))
-        return root if isinstance(root, dict) else {}
+        """GetRoot: what the trailer's /Root refers to (a direct dictionary does not count)."""
+        root = self.trailer.get("Root")
+        return (_dict(self.resolve(root)) or {}) if isinstance(root, Ref) else {}
 
-    def _pages(self) -> list[tuple[Ref | None, dict]]:
-        """(reference, page dictionary with inherited attributes filled in) in page order."""
-        out: list[tuple[Ref | None, dict]] = []
-        seen: set = set()
+    # The page tree as CPDF_Document reads it. The page count is the root's /Count when it is
+    # sane (RetrievePageCount, CountPages), whatever the kids say; a page is found by a traversal
+    # that keeps its place between calls (GetMutablePageDictionary, TraversePDFPages), where a kid
+    # that is no dictionary uses up a page, a node with no /Kids array is a page, and a leaf
+    # found remembers its object number (m_PageList). So a /Count larger than the tree gives
+    # pages that don't load, one smaller hides the rest, and which pages load can depend on the
+    # order they are asked for. Inherited attributes come from the /Parent chain (GetPageAttr).
 
-        def walk(ref, node, inherited, depth):
-            if not isinstance(node, dict) or depth > 64:
-                return
-            key = ref if ref is not None else id(node)
-            if key in seen:
-                return
-            seen.add(key)
-            here = dict(inherited)
-            for k in _INHERITED:
-                if k in node:
-                    here[k] = node[k]
-            kids = self.resolve(node.get("Kids"))
-            if node.get("Type") == "Pages" or (isinstance(kids, list) and node.get("Type") != "Page"):
-                for kid in kids or []:
-                    walk(kid if isinstance(kid, Ref) else None, self.resolve(kid), here, depth + 1)
-            else:
-                page = dict(node)
-                for k in _INHERITED:
-                    if k not in page and k in here:
-                        page[k] = here[k]
-                out.append((ref, page))
-
+    def _pages_node(self) -> tuple[int, dict | None]:
         pages = self.catalog.get("Pages")
-        walk(pages if isinstance(pages, Ref) else None, self.resolve(pages), {}, 0)
-        return out
+        return (pages.num if isinstance(pages, Ref) else 0), _dict(self.resolve(pages))
+
+    def _count_pages(self) -> int:
+        _, pages = self._pages_node()
+        if pages is None:
+            return 0
+        if "Kids" not in pages:
+            return 1
+        with _deep_recursion():
+            return self._count_node(pages, [pages])
+
+    def _count_node(self, node: dict, visited: list) -> int:
+        count = _integer(self.resolve(node.get("Count")))
+        if 0 < count < _PAGE_MAX:
+            return count
+        kids = self.resolve(node.get("Kids"))
+        if not isinstance(kids, list):
+            return 0
+        count = 0
+        for kid in kids:
+            kid = _dict(self.resolve(kid))
+            if kid is None or any(kid is v for v in visited):
+                continue
+            if "Kids" in kid:
+                visited.append(kid)
+                count += self._count_node(kid, visited)
+                visited.pop()
+            else:
+                count += 1
+        node[Name("Count")] = count  # CountPages writes it back
+        return count
+
+    @property
+    def page_count(self) -> int:
+        if self._page_list is None:
+            self._page_list = [None] * self._count_pages()
+            self._traversal: list[list] = []   # [object number, node, next kid] per level
+            self._next_page = 0
+            self._max_level = False
+        return len(self._page_list)
+
+    def page_dict(self, index: int) -> tuple[int | None, dict] | None:
+        """(object number, page dictionary) of page `index`, or None where PDFium finds none.
+        The number is None for a page written directly in /Kids, 0 when it has none."""
+        if not 0 <= index < self.page_count:
+            return None
+        known = self._page_list[index]
+        if known is not None and known[0] != 0:
+            if known[0] is None:
+                return known
+            obj = self.get(known[0])
+            if isinstance(obj, dict):
+                return known[0], obj
+        num, pages = self._pages_node()
+        if pages is None:
+            return None
+        if not self._traversal:
+            self._traversal = [[num, pages, 0]]
+            self._next_page = 0
+            self._max_level = False
+        togo = [index - self._next_page + 1]
+        with _deep_recursion():
+            page = self._traverse(index, togo, 0)
+        self._next_page = index + 1
+        return page
+
+    def _kid(self, value) -> tuple[int | None, dict | None]:
+        """CPDF_Array::ConvertToIndirectObjectAt, then GetMutableDictAt."""
+        if isinstance(value, Ref):
+            obj = self.get(value.num)
+            if isinstance(obj, Stream):
+                return 0, obj.dict   # the stream's dictionary has no object number of its own
+            return value.num, obj if isinstance(obj, dict) else None
+        return None, _dict(value)
+
+    def _traverse(self, index: int, togo: list, level: int):
+        if togo[0] < 0 or self._max_level:
+            return None
+        entry = self._traversal[level]
+        node = entry[1]
+        kids = self.resolve(node.get("Kids"))
+        if not isinstance(kids, list):
+            self._traversal.pop()
+            if togo[0] != 1:
+                return None
+            self._page_list[index] = (entry[0], node)
+            return entry[0], node
+        if level >= _MAX_PAGE_LEVEL:
+            self._traversal.pop()
+            self._max_level = True
+            return None
+        page = None
+        for k in range(entry[2], len(kids)):
+            if togo[0] == 0:
+                break
+            num, kid = self._kid(kids[k])
+            if kid is None:
+                togo[0] -= 1
+                entry[2] += 1
+                continue
+            if kid is node:
+                entry[2] += 1
+                continue
+            if "Kids" not in kid:
+                self._page_list[index - togo[0] + 1] = (num, kid)
+                togo[0] -= 1
+                entry[2] += 1
+                if togo[0] == 0:
+                    page = (num, kid)
+                    break
+            else:
+                if len(self._traversal) == level + 1:
+                    self._traversal.append([num, kid, 0])
+                found = self._traverse(index, togo, level + 1)
+                if len(self._traversal) == level + 1:
+                    entry[2] += 1
+                if len(self._traversal) != level + 1 or togo[0] == 0 or self._max_level:
+                    page = found
+                    break
+        if entry[2] == len(kids):
+            self._traversal.pop()
+        return page
+
+    def page_attr(self, node: dict, key: str):
+        """CPDF_Page::GetPageAttr: the page's own value, else its parents'."""
+        seen: list = []
+        while node is not None and not any(node is v for v in seen):
+            if key in node:
+                value = self.resolve(node[key])
+                if value is not None:
+                    return value
+            seen.append(node)
+            node = _dict(self.resolve(node.get("Parent")))
+        return None
+
+    def inherited_page(self, index: int) -> tuple[Ref | None, dict] | None:
+        """(reference, page dictionary with the inherited attributes written in), or None."""
+        found = self.page_dict(index)
+        if found is None:
+            return None
+        num, node = found
+        page = dict(node)
+        for k in _INHERITED:
+            value = self.page_attr(node, k)
+            if value is None:
+                page.pop(k, None)
+            else:
+                page[Name(k)] = value
+        return (Ref(num, 0) if num else None), page
 
     def page_index(self, ref) -> int:
-        if not hasattr(self, "_page_numbers"):
-            self._page_numbers = {r.num: i for i, (r, _) in enumerate(self.pages) if r is not None}
-        if isinstance(ref, Ref):
-            return self._page_numbers.get(ref.num, -1)
+        """CPDF_Document::GetPageIndex for a reference; a number is the page number."""
         if isinstance(ref, int) and not isinstance(ref, bool):  # a page number (remote-style destinations)
-            return ref if 0 <= ref < len(self.pages) else -1
+            return ref if 0 <= ref < self.page_count else -1
+        if not isinstance(ref, Ref):
+            return -1
+        objnum = ref.num
+        count = self.page_count
+        skip, skipped = 0, False
+        for i, known in enumerate(self._page_list):
+            num = known[0] if known is not None else 0
+            if num == objnum:
+                return i
+            if not skipped and not num:
+                skip, skipped = i, True
+        num, pages = self._pages_node()
+        if pages is None:
+            return -1
+        state = [skip, 0]
+        with _deep_recursion():
+            found = self._find_page_index(num, pages, state, objnum, 0)
+        if not 0 <= found < count:
+            return -1
+        obj = self.get(objnum)
+        if isinstance(obj, dict) and self.resolve(obj.get("Type")) == "Page":
+            self._page_list[found] = (objnum, obj)
+        return found
+
+    def _find_page_index(self, num: int, node: dict, state: list, objnum: int, level: int) -> int:
+        """CPDF_Document::FindPageIndex; state = [pages still to skip, index so far]."""
+        if "Kids" not in node:
+            if objnum == num:
+                return state[1]
+            if state[0]:
+                state[0] -= 1
+            state[1] += 1
+            return -1
+        kids = self.resolve(node.get("Kids"))
+        if not isinstance(kids, list) or level >= _MAX_PAGE_LEVEL:
+            return -1
+        count = _integer(self.resolve(node.get("Count"))) & 0xFFFFFFFFFFFFFFFF  # a size_t
+        if count <= state[0]:
+            state[0] -= count
+            state[1] += count
+            return -1
+        if count and count == len(kids):
+            for i, kid in enumerate(kids):
+                if isinstance(kid, Ref) and kid.num == objnum:
+                    return state[1] + i
+        for kid in kids:
+            kid_num, kid = self._kid(kid) if isinstance(kid, Ref) else (0, _dict(kid))
+            if kid is None or kid is node:
+                continue
+            found = self._find_page_index(kid_num, kid, state, objnum, level + 1)
+            if found >= 0:
+                return found
         return -1
 
     def info(self) -> dict:
@@ -378,10 +812,10 @@ class PdfFile:
         entries: list = []
         self._number_tree(self.catalog.get("PageLabels"), entries)
         if not entries:
-            return [""] * len(self.pages)
+            return [""] * self.page_count
         entries.sort(key=lambda e: e[0])
         out = []
-        for i in range(len(self.pages)):
+        for i in range(self.page_count):
             start, spec = None, None
             for s, d in entries:
                 if s <= i:
@@ -494,9 +928,10 @@ def write_file(pdf: PdfFile, keep_pages: list[int], boxes: dict[int, tuple]) -> 
     """A new file with the pages `keep_pages` (in document order), media and crop box replaced
     for those in `boxes` (PDF user space rectangles). Every other object keeps its number; a
     reference to a page that was left out becomes null."""
-    kept = sorted(set(keep_pages))
-    page_refs = {pdf.pages[i][0].num for i in range(len(pdf.pages)) if pdf.pages[i][0] is not None}
-    kept_refs = {pdf.pages[i][0].num for i in kept if pdf.pages[i][0] is not None}
+    pages = [pdf.inherited_page(i) for i in range(pdf.page_count)]
+    kept = sorted(i for i in set(keep_pages) if pages[i] is not None)
+    page_refs = {p[0].num for p in pages if p is not None and p[0] is not None}
+    kept_refs = {pages[i][0].num for i in kept if pages[i][0] is not None}
     pages_num = max(pdf.offsets or {0: None}) + 1
     objects: dict[int, object] = {}
 
@@ -508,7 +943,7 @@ def write_file(pdf: PdfFile, keep_pages: list[int], boxes: dict[int, tuple]) -> 
     extra = pages_num + 1
     kids = []
     for i in kept:
-        ref, page = pdf.pages[i]
+        ref, page = pages[i]
         d = {k: v for k, v in page.items() if k != "Parent"}
         d["Parent"] = Ref(pages_num, 0)
         if i in boxes:

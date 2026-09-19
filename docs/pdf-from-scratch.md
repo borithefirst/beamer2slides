@@ -98,7 +98,26 @@ Each of these was a diff against PDFium until it was ported:
   UpdateRect keeps a NaN out as std::min/max do. Found by comparing extract calls on mutated torture
   pages; `CFX_Matrix::TransformRect` is float32 too now.
 - **Page boxes**: the MediaBox falls back to Letter, and the crop box is intersected with it.
-- **A broken xref table** is rebuilt from the `n 0 obj` markers, as PDFium's repair does.
+- **Damaged file structure** is read as CPDF_Parser reads it (found by mutating whole files outside
+  their streams and comparing, `tests/test_pure_pdf.py::test_a_broken_file_is_rebuilt_as_pdfium_rebuilds_it`):
+  - *Objects* are read by a port of CPDF_SyntaxParser (`document._body`, `_Words`), not the content
+    lexer: words split at `()<>[]{}/%`, a name that is only `/` is a key that is dropped, a key that
+    is no name is skipped, `endobj` ends an unclosed dictionary, nesting stops at 64, and a stream's
+    /Length counts only as a number reached through at most one reference (none while that object
+    is itself being read) and only if `endstream` follows it; else the nearer of
+    `endstream`/`endobj` ends the data. An object whose header names another number is no object.
+  - *The table is believed* only if its lowest-numbered entry starts with that number, and only if
+    the trailer's /Root is a reference to a catalog with at least one page; otherwise
+    RebuildCrossRef scans the file word by word (strings skipped, so `9 0 obj` inside a string is
+    nothing), reading each object with the strict parser and stepping over its stream, merging every
+    `trailer` and XRef stream dictionary, keeping the higher generation. It never looks for a catalog.
+  - *The page tree* (CPDF_Document::CountPages, TraversePDFPages, GetPageIndex): /Count is believed
+    when 0 < Count < 0xFFFFF, else the kids are counted (a visited set breaks cycles); a kid that is
+    no dictionary uses up a page, a node that is its own kid is skipped, a node without /Kids is a
+    page, and the traversal is stateful, so which dictionary page *i* is depends on the order pages
+    were asked for (`test_page_trees_are_walked_as_pdfium_walks_them`, three orders each). A page
+    loads when /Type is absent or resolves to /Page. PDFium opens a document with no pages;
+    pypdfium2's `PdfDocument` refuses it, so the contract does too.
 
 ## Measured
 

@@ -55,7 +55,11 @@ class Page:
         self.index = index
         pdf = doc.pdf
         r = pdf.resolve
-        self._ref, self.dict = pdf.pages[index]
+        found = pdf.inherited_page(index)
+        # FPDF_LoadPage: no dictionary where the tree says a page is, or one typed as no page
+        if found is None or ("Type" in found[1] and r(found[1]["Type"]) != "Page"):
+            raise PdfError(f"page {index}: no page dictionary")
+        self._ref, self.dict = found
         # CPDF_Page: the crop box within the media box (an empty one: the media box; none: Letter)
         media = _rect(self.dict.get("MediaBox"), r)
         if media is None or media[0] >= media[2] or media[1] >= media[3]:
@@ -443,16 +447,16 @@ class Document:
         self.path = None if isinstance(source, (bytes, bytearray)) else Path(source)
         try:
             self.pdf: PdfFile = read(source)
-            self.pdf.pages  # noqa: B018 - the page tree, read now so a broken file fails here
         except Exception as e:  # noqa: BLE001 - whatever the file does, the caller sees a PdfError
             raise PdfError(f"unreadable PDF: {e}") from e
-        if not self.pdf.pages:
+        if self.pdf.page_count < 1:
+            # PDFium opens it; the reference backend (pypdfium2's PdfDocument) refuses it
             raise PdfError("a PDF without pages")
         self._pages: dict[int, Page] = {}
         self._font_cache: dict = {}
 
     def __len__(self) -> int:
-        return len(self.pdf.pages)
+        return self.pdf.page_count
 
     def __getitem__(self, index: int) -> Page:
         if index < 0:
