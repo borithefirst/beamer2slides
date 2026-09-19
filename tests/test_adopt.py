@@ -213,6 +213,12 @@ def source_for(tmp_path: Path, target: dict | None = None) -> str:
     return adopt.bootstrap(target, tmp_path / "tree" / "main.tex")
 
 
+def theme_of(tmp_path: Path) -> str:
+    """The beamer theme the bootstrap wrote beside main.tex (adopt_theme.py): what the layout draws."""
+    (sty,) = (tmp_path / "tree").glob("beamertheme*.sty")
+    return sty.read_text(encoding="utf-8")
+
+
 def test_the_source_has_a_frame_per_slide_and_compiles_as_beamer(tmp_path):
     text = source_for(tmp_path)
     assert text.count("\\begin{frame}") == 3 and text.count("\\end{frame}") == 3
@@ -225,16 +231,21 @@ def test_every_element_keeps_its_own_place(tmp_path):
     bootstrap places each one; the loop would otherwise spend a round per element escalating flow
     text back into a textblock (`inverse.Planner.geometry`)."""
     text = source_for(tmp_path)
-    assert text.count("\\begin{textblock*}") == 3 * 4        # backdrop, card, connector, words
     assert "\\usepackage[absolute,overlay]{textpos}" in text
+    # backdrop, card, connector and the subtitle placeholder: the layout's, so said once in its
+    # template, and each frame names the layout and hands it its words
+    assert theme_of(tmp_path).count("\\begin{textblock*}") == 4
+    assert text.count("\\begin{textblock*}") == 0
+    assert text.count("\\begin{frame}[plain,layout=section") == 3
+    assert "\\framesubtitle{Slide 0}" in text
 
 
 def test_a_picture_the_deck_would_not_give_us_is_left_out(tmp_path):
     """Not drawn as an empty box: the loop then reports `element_missing`, which says what happened.
     (The backdrop of the fixture has no file unless the test puts one there.)"""
-    text = source_for(tmp_path, deck_ir(presentation(), foreign=True))
-    assert "includegraphics" not in text
-    assert text.count("\\begin{textblock*}") == 3 * 3
+    text = source_for(tmp_path, deck_ir(presentation(), foreign=True)) + theme_of(tmp_path)
+    assert "figures/" not in text
+    assert text.count("\\begin{textblock*}") == 3
 
 
 def test_a_slide_that_sits_on_another_colour_says_so(tmp_path):
@@ -243,12 +254,13 @@ def test_a_slide_that_sits_on_another_colour_says_so(tmp_path):
     text = source_for(tmp_path)
     assert "\\definecolor{deckbg}{HTML}{F4CCCC}" in text            # what most of the deck sits on
     assert "\\setbeamercolor{background canvas}{bg=deckbg}" in text
-    # and the one slide that does not, in a group so the colour ends with its frame
-    assert text.count("{\\setbeamercolor{background canvas}{bg=b2s0005DF}\n\\begin{frame}") == 1
+    # and the one slide that does not says so in its options, which last until the next frame
+    assert text.count("background=b2s0005DF]") == 1
+    assert "bg=deckbg}}" in theme_of(tmp_path), "the next frame starts from the deck's colour again"
 
 
 def test_a_node_is_drawn_with_its_outline_and_its_rounded_corners(tmp_path):
-    text = source_for(tmp_path)
+    text = source_for(tmp_path) + theme_of(tmp_path)
     # the corners are quarter circles of the preset's radius (adopt_shapes.rounded_poly)
     card = next(l for l in text.splitlines() if "controls" in l)
     assert "fill=" in card and "draw=" in card and "line width=" in card
@@ -258,14 +270,15 @@ def test_the_base_style_of_a_box_is_set_where_the_box_is(tmp_path):
     """`inverse.runs_latex` writes a run's style only where it differs from a base, which is true of
     a source being refined and false of one written from nothing: without this the crimson 9 pt
     instruction slides and the blue 26 pt section titles both come out black."""
-    text = source_for(tmp_path)
+    text = source_for(tmp_path) + theme_of(tmp_path)
     assert "\\color{" in text
 
 
 def test_a_picture_is_copied_into_the_tree(tmp_path):
     """The download sits in the work folder, which is scratch: a source tree that referred to it
     would stop compiling the moment that folder went."""
-    text = source_for(tmp_path)
+    source_for(tmp_path)
+    text = theme_of(tmp_path)
     assert "figures/" in text
     files = list((tmp_path / "tree" / "figures").glob("*.png"))
     assert files, "the picture is not beside the source"
@@ -283,8 +296,7 @@ def test_a_slide_on_a_picture_is_drawn_on_it(tmp_path):
     assert ir["slides"][1]["background_file"] and "background_file" not in ir["slides"][0]
     assert "background_file" not in deck_ir(pres)["slides"][1], "pull reads no backdrop"
     text = adopt.bootstrap(ir, tmp_path / "tree" / "main.tex")
-    assert text.count("{\\setbeamertemplate{background canvas}{\\includegraphics[width=\\paperwidth,"
-                      "height=\\paperheight]{figures/") == 1
+    assert text.count(",backdrop=figures/") == 1
     assert (tmp_path / "tree" / "figures").is_dir()
 
 

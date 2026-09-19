@@ -1571,45 +1571,63 @@ def table_block(el: dict, ctx: Context, ind: str) -> str:
     return "\n".join(lines)
 
 
+def element_latex(el: dict, ctx: Context, tree: Path | None = None, ind: str = "  ") -> str:
+    """What one IR element draws: its textblocks, "" when it draws nothing of its own."""
+    out = []
+    if el.get("role") in ("math", "icon"):
+        return ""                                      # part of a text line, not an element of its own
+    if el["kind"] == "shape":
+        out.append(shape_block(el, ctx, ind).rstrip("\n"))
+    elif el["kind"] == "table":
+        out.append(table_block(el, ctx, ind))
+    elif el["kind"] == "image" and el.get("video"):
+        ctx.packages.add(TEXTPOS)
+        out.append(video_block(el, ctx, ind, tree).rstrip("\n"))
+    elif el["kind"] == "text" and el.get("wordart"):
+        out.append(wordart_block(el, ctx, ind).rstrip("\n"))
+    elif el["kind"] == "image":
+        pic = picture_of(el, tree)
+        if pic is not None:
+            ctx.packages.add(TEXTPOS)
+            out.append(picture_block(el, pic, ctx, ind).rstrip("\n"))
+    elif el["kind"] == "text" and el.get("paragraphs"):
+        ctx.packages.add(TEXTPOS)
+        # A node of a flow chart is one element: its box, then its label on top.
+        out.append(shape_block(el, ctx, ind).rstrip("\n"))
+        # A turned text box: its words are written upright in the box it would have if it were
+        # not turned, and that is then set turned about its centre (`adopt_shapes.turned_text`).
+        upright = {**el, "bbox": el["frame"]["box"]} if el.get("frame") else el
+        out.append(turned_text(text_box_latex(upright, ctx, ind), el, ctx))
+    return "\n".join(x for x in out if x.strip())
+
+
 def slide_latex(s: dict, style_for, ctx: Context, flow: bool, tree: Path | None = None,
-                deck_bg: str | None = None) -> str:
+                deck_bg: str | None = None, pieces: list[str] | None = None, plan=None) -> str:
     """One deck slide as a frame. `flow` writes the readable version (`inverse.frame_latex`: a frame
-    title and body text in the flow); otherwise every element keeps its own place."""
+    title and body text in the flow); otherwise every element keeps its own place.
+
+    `pieces`: each element's `element_latex`, when the caller has them already. `plan`: what the
+    recovered theme draws for this slide (`adopt_theme.FramePlan`): its layout's decoration, title,
+    subtitle and number are left out of the frame, which names the layout instead."""
     if flow:
         return frame_latex(s, style_for, ctx)
-    out = ["\\begin{frame}[plain]"]
+    if pieces is None:
+        pieces = [element_latex(el, ctx, tree) for el in s["elements"]]
+    out = ["\\begin{frame}" + (plan.options() if plan else "[plain]")]
+    if plan:
+        out += plan.header()
     # The deck lists a page's elements in z-order, and a textblock written later is drawn on top:
     # in reading order a block's body panel, starting 2 pt under its title, was painted over it.
-    for el in s["elements"]:
-        if el.get("role") in ("math", "icon"):
-            continue                                   # part of a text line, not an element of its own
-        if el["kind"] == "shape":
-            out.append(shape_block(el, ctx, "  ").rstrip("\n"))
-        elif el["kind"] == "table":
-            out.append(table_block(el, ctx, "  "))
-        elif el["kind"] == "image" and el.get("video"):
-            ctx.packages.add(TEXTPOS)
-            out.append(video_block(el, ctx, "  ", tree).rstrip("\n"))
-        elif el["kind"] == "text" and el.get("wordart"):
-            out.append(wordart_block(el, ctx, "  ").rstrip("\n"))
-        elif el["kind"] == "image":
-            pic = picture_of(el, tree)
-            if pic is not None:
-                ctx.packages.add(TEXTPOS)
-                out.append(picture_block(el, pic, ctx, "  ").rstrip("\n"))
-        elif el["kind"] == "text" and el.get("paragraphs"):
-            ctx.packages.add(TEXTPOS)
-            # A node of a flow chart is one element: its box, then its label on top.
-            out.append(shape_block(el, ctx, "  ").rstrip("\n"))
-            # A turned text box: its words are written upright in the box it would have if it were
-            # not turned, and that is then set turned about its centre (`adopt_shapes.turned_text`).
-            upright = {**el, "bbox": el["frame"]["box"]} if el.get("frame") else el
-            out.append(turned_text(text_box_latex(upright, ctx, "  "), el, ctx))
+    for k, piece in enumerate(pieces):
+        if piece and not (plan and k in plan.drawn):
+            out.append(piece)
     if s.get("notes"):
         from .inverse import latex_escape
         out.append("  \\note{" + "\n\n".join(latex_escape(p) for p in s["notes"].split("\n") if p.strip()) + "}")
     out.append("\\end{frame}")
     text = "\n".join(x for x in out if x.strip()) + "\n"
+    if plan:
+        return text                    # the page's background is the frame's `layout`/`background`/`backdrop`
     backdrop = picture_of({"file": s.get("background_file"), "alt": "background"}, tree) \
         if s.get("background_file") else None
     if backdrop is not None:
@@ -1682,17 +1700,48 @@ def bootstrap(target: dict, tex: Path, flow: bool = False) -> str:
     # that compile frames one at a time (devtools.adopt_bench finds the frames that break a build)
     from . import inverse
     inverse.GUARD_UNITS = True
+    theme = None
     try:
-        frames = [f"% slide {n}\n" + to_bp(slide_latex(s, style_for, ctx, flow, tex.parent, deck_bg))
-                  for n, s in enumerate(target["slides"], 1)]
+        if flow:
+            frames = [f"% slide {n}\n" + to_bp(slide_latex(s, style_for, ctx, flow, tex.parent, deck_bg))
+                      for n, s in enumerate(target["slides"], 1)]
+        else:
+            pieces = [[to_bp(element_latex(el, ctx, tex.parent)) for el in s["elements"]] for s in target["slides"]]
+            theme = recovered_theme(target, pieces, ctx, tex.parent, deck_bg)
+            plans = theme[1] if theme else [None] * len(pieces)
+            frames = [f"% slide {n}\n" + to_bp(slide_latex(s, style_for, ctx, flow, tex.parent, deck_bg, p, plan))
+                      for n, (s, p, plan) in enumerate(zip(target["slides"], pieces, plans), 1)]
     finally:
         inverse.GUARD_UNITS = False
     head = preamble(target, ctx, flow, tex.parent)
     extra = sorted(ctx.packages) + [f"\\definecolor{{{n}}}{{HTML}}{{{v}}}" for n, v in sorted(ctx.colours.items())]
+    if theme:
+        # the deck's masters and layouts, said once (`adopt_theme`): after the colours it draws in
+        from .adopt_theme import theme_name
+        name = theme_name(target)
+        (tex.parent / f"beamertheme{name}.sty").write_text(theme[0], encoding="utf-8")
+        extra.append(f"\\usetheme{{{name}}}")
     text = head + "\n" + "\n".join(extra) + "\n\n\\begin{document}\n\n" + "\n".join(frames) + "\n\\end{document}\n"
     tex.parent.mkdir(parents=True, exist_ok=True)
     tex.write_text(text, encoding="utf-8")
     return text
+
+
+def recovered_theme(target: dict, pieces: list[list[str]], ctx: Context, tree: Path, deck_bg: str | None):
+    """(theme .sty, FramePlan per slide) from `adopt_theme.plan`, or None."""
+    import copy
+    from . import adopt_theme
+    scratch = copy.deepcopy(ctx)          # writing a placeholder again must leave the real context alone
+
+    def picture(file: str) -> str | None:
+        pic = picture_of({"file": file, "alt": "background"}, tree)
+        if pic is None:
+            return None
+        ctx.packages.add("\\usepackage{graphicx}")
+        return pic.rel
+
+    return adopt_theme.plan(target, pieces, lambda el: to_bp(element_latex(el, scratch, tree)),
+                            lambda c: colour_name(c, ctx.colours), picture, deck_bg)
 
 
 def cmd_adopt(deck: str, tex: Path, work: Path | None, apply: bool, out: Path | None, max_iter: int,

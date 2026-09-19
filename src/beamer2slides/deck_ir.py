@@ -784,16 +784,33 @@ def deck_ir(pres: dict, pdf_size: list[float] | None = None, base: dict | None =
         slides.append({"page": n, "frame": str(n + 1), "size": [page_w, page_h], "objectId": slide["objectId"],
                        "key": key, "notes": notes_text(slide), "background_color": color,
                        "background_picture": picture, "elements": elements})
+        if foreign:
+            slides[-1]["layout"] = slide.get("slideProperties", {}).get("layoutObjectId")
         if foreign and picture and fetch and images is not None:
             # adopt draws it (a stretched picture fill is the whole page); pull never does, the
             # source it refines already draws whatever the converter baked into it
             got = stash_picture(picture, fetch, images)
             slides[-1]["background_file"] = got.get("file")
+    out = {"version": 1, "source": {"presentationId": pres.get("presentationId"), "title": pres.get("title"),
+                                    "revisionId": pres.get("revisionId")},
+           "page_size": [page_w, page_h], "scale": scale, "slides": slides}
     if foreign:
         pptx_insets(slides, drifts, sides)
-    return {"version": 1, "source": {"presentationId": pres.get("presentationId"), "title": pres.get("title"),
-                                     "revisionId": pres.get("revisionId")},
-            "page_size": [page_w, page_h], "scale": scale, "slides": slides}
+        out["layouts"] = layouts_of(pres, pages, resolver.scheme)
+    return out
+
+
+def layouts_of(pres: dict, pages: dict[str, dict], scheme: dict) -> dict:
+    """The deck's layouts and masters by object id: display name, master, and the page background a
+    slide inherits from it (`page_background`) - what adopt's recovered theme names and draws."""
+    out = {}
+    for page in pres.get("layouts", []) + pres.get("masters", []):
+        props = page.get("layoutProperties") or page.get("masterProperties") or {}
+        colour, picture = page_background(page, pages, scheme)
+        out[page["objectId"]] = {"name": props.get("displayName") or props.get("name") or "",
+                                 "master": (page.get("layoutProperties") or {}).get("masterObjectId"),
+                                 "background_color": colour, "background_picture": picture}
+    return out
 
 
 def fold_groups(elements: list[dict], lines: dict[str, int]) -> list[dict]:

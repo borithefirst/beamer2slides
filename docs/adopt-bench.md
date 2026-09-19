@@ -384,3 +384,76 @@ Frame body lines by construct: text plumbing 36%, `textblock` placement 25%, sha
 freeforms: sc-memphis 922 lines a frame), words 6%. Plan: first what leaves the PDF unchanged (a
 macro layer and a recovered beamer theme for masters and layouts, gated on identical renders), then
 structure (itemize, frametitle, tabular), gated on fidelity per deck.
+
+## The deck's theme as a beamer theme (`m6-a` -> `th-final2`)
+
+`adopt_theme.py`: what the masters and layouts draw goes into a `beamertheme<Deck>.sty` beside main.tex
+(`\usetheme{<Deck>}` after the packages). `deck_ir(foreign=True)` now also records each slide's
+`layout` and the IR's `layouts` (display name, master, page colour or picture: `deck_ir.layouts_of`).
+- Each layout the slides use is a `background` template named after its display name
+  (`title-and-body`, a second one with the same name `title-and-body-2`). A frame picks it with
+  `\begin{frame}[plain,layout=title-and-body]`. What a master draws for several layouts is written
+  once, as `\defmaster` / `\drawmaster`.
+- The layout's page colour or picture comes with it. A slide with a page of its own says
+  `background=<colour>` or `backdrop=<file>`. That replaces the old `{\setbeamercolor ...` group
+  around the frame.
+- TITLE/CENTERED_TITLE, SUBTITLE and SLIDE_NUMBER placeholders become part of the template. The frame
+  says `\frametitle{...}` / `\framesubtitle{...}`, and the number is `\insertframenumber`.
+  - `nonumber` marks a slide of a numbered layout that shows no number.
+  - `\frametitle` works because beamer builds the `background` template in the output routine, where
+    `\beamer@frametitle` is still set.
+
+The rule is that the PDF does not change, so nothing is guessed:
+- A template is the exact LaTeX the elements were already written as. For each layout, the
+  most common variant of its inherited pieces wins. A slide whose pieces differ in any character keeps
+  them in its frame (one cs161-net "Title only" slide, whose gradient came out differently).
+- A placeholder's prefix and suffix are found by writing it again with marker words at both ends
+  (`slot_parts`). The slot is templated only when the real output is prefix + words + suffix, and the
+  words are one line with no `%`, `#` or unbalanced brace.
+- A number is templated only when it equals the frame's number.
+- The template draws under everything the frame draws (textpos ships frame blocks in the page's
+  foreground). So a title moves only when none of the slide's elements drawn before it touch its
+  box (1 pt margin).
+- Pieces with a raw `#` stay out (inside `\defbeamertemplate` it would be a parameter).
+- Placement: textpos in relative mode inside a `\vbox to 0pt` at the page corner lands exactly where
+  the absolute block did.
+- Frame options last until something resets them, and `env/frame/after` never fires, so
+  `env/frame/before` resets them.
+- `\setbeamercolor` inside a frame key runs a `\setkeys` of its own, which ended the frame's option
+  list (`keyval Error: nonumber undefined`). `\deck@keys` saves and restores `\KV@prefix` around it.
+
+Fidelity: all 912 slides score exactly as at `m6-a`, `boxes`, `page` and `pixels` alike (0 differ).
+
+Readability, `m6-a` -> `th-final2`:
+
+| | score | lines | numbers | plumbing | bloat | author | repeat |
+|---|---|---|---|---|---|---|---|
+| `m6-a` | 0.134 | 0.09 | 0.05 | 0.03 | 0.34 | 0.33 | 0.61 |
+| `th-final2` | 0.139 | 0.11 | 0.06 | 0.03 | 0.34 | 0.31 | 0.62 |
+
+- Frame body lines went from 104,736 to 96,133 (-8.2%). The theme files hold 3,689 lines in all.
+- 894 of 912 frames name a layout. 316 titles and 13 subtitles are `\frametitle` / `\framesubtitle`.
+- Largest cuts: cs161-net -1,881 lines (168 -> 137 a frame), cs161-tls -1,431, solidity-survey -711,
+  creandum-board -595, hebrew-lesson -566, devfest2020 -549, apps-edu-zh -497.
+- Per-deck scores: ds-lecture 0.140 -> 0.155, cs161-tls 0.142 -> 0.158, apps-edu-zh 0.153 -> 0.174,
+  comic-strips 0.156 -> 0.178, hebrew-lesson 0.159 -> 0.176.
+- gdg24, sc-memphis, sc-aesthetic-school, sc-dark-minimal, jeb-arch and poster-48x36 do not move.
+  Their slides inherit nothing and have no placeholders (.pptx and Canva imports): their theme is
+  pasted onto every slide as the slide's own elements.
+
+Where the proxy mis-scores this:
+- `author` drops (0.33 -> 0.31; devfest2020 0.33 -> 0.31, instagram 0.47 -> 0.28). The decoration
+  that left the frames was tikz `\path` and `\includegraphics`, which count as author vocabulary, so
+  the text plumbing that stays is a larger share.
+- `repeat` hardly moves (0.61 -> 0.62). Removing the repeated decoration also shrinks the denominator,
+  and the lines still repeated on 3+ frames are text-box plumbing (`\vskip4.08bp`, the `\leftskip`
+  lines), which is the text layer's job.
+- The theme file is not scored at all. That is intended: it is written once, not per frame.
+
+Left:
+- BODY placeholders stay in the frame (several paragraphs, not one stretch of words): they need the
+  text layer's named styles first.
+- Slide-owned elements repeated across slides. Surveyed: in cs161-net 44% of own lines repeat on 3+
+  slides, but they are build-up slides that copy the previous one's content, not decoration (beamer
+  overlays would be the fix). In gdg24/sc-memphis they are text boxes.
+- Two layouts that draw the same (two "Title and body" in cs161-net) still get a template each.
