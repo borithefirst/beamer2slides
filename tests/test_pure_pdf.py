@@ -861,10 +861,7 @@ def test_a_type3_font_box_is_truncated_toward_zero():
 
 
 def _needs_foxit():
-    import sys
     from beamer2slides.pdf.pure import foxit
-    if sys.platform != "win32":
-        pytest.skip("PDFium maps fonts through GDI here; outside Windows it asks fontconfig, which is not ported")
     if foxit.missing():
         pytest.skip(f"the Foxit faces are not in {foxit.cache_dir()}: python -m beamer2slides.pdf.pure.foxit")
 
@@ -1407,14 +1404,12 @@ FONT_AND_FILTER_CASES = {
 def test_fonts_and_filters_resolve_as_pdfium_resolves_them(name):
     """Fonts that are missing, not inherited or carry impossible widths, and streams whose filters
     PDFium won't decode. A non-embedded base-14 font is drawn with the system's Arial / Times New
-    Roman / Courier New (CFX_Win32FontInfo), so outside Windows only the object list is compared."""
-    import sys
+    Roman / Courier New (the platform's font info, `fontmapper`)."""
     data = FONT_AND_FILTER_CASES[name]
     a, b = pdf.resolve("pure").open(data)[0], pdf.resolve("pdfium").open(data)[0]
     close([dataclasses.astuple(o) for o in a.objects()], [dataclasses.astuple(o) for o in b.objects()], name)
-    if sys.platform == "win32":
-        for call in ("object_bounds", "chars"):
-            close(getattr(a, call)(), getattr(b, call)(), f"{name} {call}")
+    for call in ("object_bounds", "chars"):
+        close(getattr(a, call)(), getattr(b, call)(), f"{name} {call}")
 
 
 def _subst_case(name: bytes, subtype: bytes = b"TrueType", flags: int = 32, widths: bool = True,
@@ -1468,10 +1463,7 @@ def test_substituted_fonts_are_measured_with_pdfiums_face(name):
     """CPDF_Font::LoadSubstFont -> CFX_FontMapper::FindSubstFace -> CFX_Win32FontInfo (GDI's own
     choice of face) or the built-in Foxit faces, FoxitSerifMM/FoxitSansMM blended by weight and
     width. Object boxes, char boxes and advances all come from the face picked."""
-    import sys
     from beamer2slides.pdf.pure import foxit
-    if sys.platform != "win32":
-        pytest.skip("PDFium maps fonts through GDI here; outside Windows it asks fontconfig, which is not ported")
     if foxit.missing():
         pytest.skip(f"the Foxit faces are not in {foxit.cache_dir()}: python -m beamer2slides.pdf.pure.foxit")
     data = SUBST_CASES[name]
@@ -1654,10 +1646,7 @@ def test_actual_text_reads_as_pdfium_reads_it():
     arabic-training deck of the adopt corpus read a U+FFFD where Word wrote /ActualText for a
     ligature; with PreMarkedContent off 143 of 300 seeds are apart, with every /ActualText line
     reversed like glyphs (CloseTempLine keeps its logical order) 29."""
-    import sys
     from beamer2slides.devtools.marked_content_torture import first_diff
-    if sys.platform != "win32":
-        pytest.skip("Helvetica is drawn with GDI's Arial here; elsewhere PDFium asks fontconfig")
     apart = [(s, d) for s in (3, 30, 36, *range(60)) if (d := first_diff(s))]
     assert not apart, f"seeds apart (python tools/marked_content_torture.py SEED 1): {apart}"
 
