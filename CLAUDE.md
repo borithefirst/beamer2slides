@@ -89,7 +89,7 @@ a per-slide background picture.
   runs it on ubuntu/macos/windows with pinned versions (`.github/constraints.txt`) and decks built
   once in a TeX Live container (`tests/decks/build.py` reruns until the .aux settles: TeX Live's
   tikzmark needs a third pass); failing shading seeds leave their PDF and both renders in the
-  artifact.
+  artifact. All three platforms pass.
   And deck.json is identical on all 48 test decks; extract is ~2.3× slower than PDFium, rendering
   ~7× (float32 rounding batched through `syntax.F32X*` structs with a scalar fallback on overflow,
   one regex per word in both lexers, psLib shortcuts for Type 1 programs). `tests/test_pure_pdf.py`.
@@ -105,7 +105,11 @@ a per-slide background picture.
   skips. Substituted text in a Foxit face draws as PDFium's (`render_text._SubstFace`: Symbol and
   ZapfDingbats CFF; FoxitSansMM/SerifMM blended per glyph to weight and /Widths width - process-wide
   face state, as in PDFium - skewed by the italic angle; GetCharPosList's spacing heuristic; oracle
-  `tools/render_torture_subst.py`, made-up non-embedded fonts, 6,000 seeds exact); GDI's TrueType
+  `tools/render_torture_subst.py`, made-up non-embedded fonts, 6,000 seeds exact - a face's blend is
+  process-wide state that the width of a code with no /Widths reads (LoadCharMetrics loads the glyph
+  without setting the axes), so the torture puts both readers' faces at one blend between seeds with
+  a page whose fonts no platform's font folder can answer: a font whose widths are all one number is
+  FIXED_PITCH, which macOS answers with Courier New); GDI's TrueType
   substitutes (base 14 and installed names on Windows) draw through the TrueType port
   (`render_text.truetype_face`, one shared face per program; `--pool installed`: 300 seeds, 251 drawn exact, 49 refused for fallback fonts). A font
   with no descriptor has flags 0 (PDFium's m_Flags default), not nonsymbolic: a TrueType one then
