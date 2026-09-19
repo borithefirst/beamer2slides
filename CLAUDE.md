@@ -38,7 +38,8 @@ a per-slide background picture.
   spaces, fonts, content stream, CPDF_TextPage with bidi over PDFium's own Unicode tables,
   `tools/pdfium_unicode_data.py`), answering the contract *as PDFium does*,
   quirks included (float32 numbers, U+0002 hyphens, FreeType's legacy AGL, Type 3 form boxes, image
-  metadata rules). Rendering is being ported from PDFium's AGG renderer (`pure/raster.py`,
+  metadata rules; FreeType's sfnt charmaps and post names in `pure/sfnt.py`, its glyph list generated
+  by `tools/freetype_psnames_data.py`, oracle `tools/truetype_torture.py`: made-up embedded fonts). Rendering is being ported from PDFium's AGG renderer (`pure/raster.py`,
   `pure/render.py`): paths, clips and forms come out byte-identical (float32 after every operation,
   `CFX_Matrix` products included; oracle `tools/render_torture.py`, random pages vs PDFium, shrunk);
   so do soft masks, transparency groups and every blend mode (`pure/render_transparency.py`, oracle
@@ -510,7 +511,10 @@ split frame by frame to name the broken ones), scores every slide (`boxes` / `pa
 writes deck|source|diff sheets to `<corpus>/<deck>/runs/<tag>/sheets`; `report --tag T`.
 Measured (bootstrap only, 912 slides): boxes 0.593 -> 0.754 (mean per deck 0.565 -> 0.725, every
 deck up; pixels 0.913 -> 0.939), 11 frames that did not compile -> 0 (tags `abs` -> `merged`).
-Text (tags `units` -> `text-b` -> `text-ins2`): boxes 0.818 -> 0.843 -> 0.852, page 0.814 -> 0.839 -> 0.848.
+Lengths in bp (`adopt.to_bp`: the IR is PDF points, TeX's pt is 72.27 to the inch) and see-through page
+backgrounds blended over white: 0.754 -> 0.818 (`units`). Text (tags `units` -> `text-b` -> `text-ins2`):
+boxes 0.818 -> 0.843 -> 0.852, page 0.814 -> 0.839 -> 0.848. With the fills below (`combined`): boxes
+0.885, page 0.881, pixels 0.970, no deck down.
 Known gaps, by what they cost: text insets the API does not report where no autofit height gives
 them away, freeform shapes (5,791 in the corpus, drawn as their box; Google's .pptx
 export has their geometry), and dragged shape adjustments.
