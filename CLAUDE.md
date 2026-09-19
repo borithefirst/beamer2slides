@@ -492,7 +492,10 @@ font's own interword space (a selectfont hook: `\spaceskip` set once kept the sa
 `\ttfamily` paragraph); autofit and per-list-level styles read in `deck_ir.text_paragraphs`; empty
 lines ending a middle/bottom-aligned box kept, since they move the stack; a SHAPE_AUTOFIT box whose
 height leaves < 5 pt beside one line per paragraph has no insets (`deck_ir.zero_insets`: the API
-never reports insets; PowerPoint/Canva templates set them to 0); `tests/test_adopt_text.py`). Tables are a
+never reports insets; PowerPoint/Canva templates set them to 0), and so has every box a .pptx import
+made (NEVER_COLLAPSE) that resizes to fit its text, when enough of the deck's such boxes prove it
+(`deck_ir.imports_lack_insets`: gdg24's import kept Slides' insets); a tab jumps to the next 36 pt
+stop from the text's edge (`adopt.tabbed_tex`, `\slidestab`); `tests/test_adopt_text.py`). Tables are a
 tikz grid with measured rows, merged cells, fills and border segments (`adopt.table_block`, cell
 insets inferred by `deck_ir.cell_pad`; `tests/test_adopt_tables.py`). Shapes are drawn in their preset
 (`adopt_shapes.py`: ~110 shapeTypes with OOXML default adjustments, turned/mirrored through the
@@ -507,7 +510,7 @@ split frame by frame to name the broken ones), scores every slide (`boxes` / `pa
 writes deck|source|diff sheets to `<corpus>/<deck>/runs/<tag>/sheets`; `report --tag T`.
 Measured (bootstrap only, 912 slides): boxes 0.593 -> 0.754 (mean per deck 0.565 -> 0.725, every
 deck up; pixels 0.913 -> 0.939), 11 frames that did not compile -> 0 (tags `abs` -> `merged`).
-Text (tags `units` -> `text-b`): boxes 0.818 -> 0.843, page 0.814 -> 0.839.
+Text (tags `units` -> `text-b` -> `text-ins2`): boxes 0.818 -> 0.843 -> 0.852, page 0.814 -> 0.839 -> 0.848.
 Known gaps, by what they cost: text insets the API does not report where no autofit height gives
 them away, freeform shapes (5,791 in the corpus, drawn as their box; Google's .pptx
 export has their geometry), fills the API reads as empty (gradients: cs161's header bar,

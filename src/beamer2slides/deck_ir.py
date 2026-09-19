@@ -171,6 +171,7 @@ class StyleResolver:
 
     def __init__(self, pres: dict):
         self.by_id: dict[str, dict] = {}
+        self.bare_imports = False   # deck_ir sets it: `imports_lack_insets`
         for page in pres.get("layouts", []) + pres.get("masters", []):
             for pe in walk_elements(page.get("pageElements", [])):
                 self.by_id[pe["objectId"]] = pe
@@ -456,6 +457,42 @@ def zero_insets(paragraphs: list[dict], height: float) -> bool:
     return need > 0 and height - need < ZERO_INSET_SLACK
 
 
+def imported(shape: dict) -> bool:
+    """Was this text box made by a .pptx import? Drive's importer writes spacingMode NEVER_COLLAPSE on
+    the paragraphs, Slides' own boxes say COLLAPSE_LISTS. Among the boxes that resize to fit their
+    text and whose height does not give their insets away (wrapped lines), those an import made had
+    no insets 169 times in 186 on the corpus thumbnails, Slides' own ones had theirs 375 times in 376."""
+    for te in shape.get("text", {}).get("textElements", []):
+        if "paragraphMarker" in te:
+            return te["paragraphMarker"].get("style", {}).get("spacingMode") == "NEVER_COLLAPSE"
+    return False
+
+
+def imports_lack_insets(pres: dict, resolver: StyleResolver, fonts: FontMapper, scale: float) -> bool:
+    """Did the .pptx this deck was imported from set its text insets to 0? `imported` alone does not
+    say: gdg24's template came through an import too and kept Slides' insets (its 9 imported boxes
+    that grow with their text all sit where default insets put them). The deck's own boxes do: among
+    its imported boxes that resize to fit their text, those whose height leaves no room for insets
+    (`zero_insets`) prove the template's choice - 9 of 15 in cs161-net, 34 to 119 in each
+    SlidesCarnival deck, none of gdg24's 9. At least a quarter of them, and two."""
+    seen = proven = 0
+    for page in pres.get("slides", []) + pres.get("layouts", []) + pres.get("masters", []):
+        for pe, m, _ in flatten(page.get("pageElements", [])):
+            shape = pe.get("shape", {})
+            autofit = shape.get("shapeProperties", {}).get("autofit") or {}
+            if "size" not in pe or autofit.get("autofitType") != "SHAPE_AUTOFIT" or not imported(shape):
+                continue
+            paragraphs = text_paragraphs(pe, shape.get("text", {}), resolver, fonts, scale, keep_blank=True,
+                                         font_scale=autofit.get("fontScale") or 1.0,
+                                         spacing_cut=autofit.get("lineSpacingReduction") or 0.0)
+            if not any(p["runs"] for p in paragraphs):
+                continue
+            _, y0, _, y1 = box(m, dim(pe["size"]["width"]), dim(pe["size"]["height"]))
+            seen += 1
+            proven += zero_insets(paragraphs, y1 - y0)
+    return proven >= 2 and proven * 4 >= seen
+
+
 def text_element(pe: dict, m: list[float], resolver: StyleResolver, fonts: FontMapper, scale: float,
                  page_w: float, foreign: bool = False) -> dict | None:
     shape = pe.get("shape", {})
@@ -482,7 +519,8 @@ def text_element(pe: dict, m: list[float], resolver: StyleResolver, fonts: FontM
     aligns = {p["align"] for p in paragraphs if p["runs"]}
     align = aligns.pop() if len(aligns) == 1 else "left"
     # only a foreign deck: the converter's own boxes are created by the API, with Slides' insets
-    bare = foreign and autofit.get("autofitType") == "SHAPE_AUTOFIT" and zero_insets(paragraphs, y1 - y0)
+    bare = foreign and autofit.get("autofitType") == "SHAPE_AUTOFIT" and \
+        (zero_insets(paragraphs, y1 - y0) or (resolver.bare_imports and imported(shape)))
     pad_x, top = (0.0, 0.0) if bare else (PAD_X, BASELINE_A)
     if content == "MIDDLE":
         baseline = (y0 + y1) / 2 + MIDDLE_BASELINE_EM * z
@@ -632,6 +670,7 @@ def deck_ir(pres: dict, pdf_size: list[float] | None = None, base: dict | None =
     page_w, page_h, scale = page_size_for(pres, pdf_size, foreign)
     fonts = FontMapper()
     resolver = StyleResolver(pres)
+    resolver.bare_imports = foreign and imports_lack_insets(pres, resolver, fonts, scale)
     pages = {p["objectId"]: p for p in pres.get("layouts", []) + pres.get("masters", [])}
     object_keys, slide_keys = {}, {}
     for s in (base or {}).get("slides", []):

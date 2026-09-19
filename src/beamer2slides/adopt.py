@@ -594,6 +594,46 @@ def runs_tex(runs: list[dict], base: dict, ctx: Context, brk: str) -> str:
     return "\\ " * lead + text[lead:].rstrip(" ")
 
 
+# Tab stops. The API reports none, and Slides' default ones stand every half inch from the text's left
+# edge: creandum-board's agenda is "09:00<TAB><TAB>CEO Update<TAB>x7Board", its columns at 1 and 5 inches
+# on the thumbnail. A tab written as a space ran the three columns together. TeX does not know where
+# on a line it is, so the text before each tab is boxed and measured (\slidesx: the pen, from the box's
+# text edge) and the tab is the glue to the next multiple of the stop.
+TAB_STOP = 36.0             # Slides pt
+SLIDES_TABS = (
+    "\\newdimen\\slidesx\n"
+    "\\newcount\\slidestabn\n"
+    "\\newcommand\\slidestab[2]{\\setbox0\\hbox{#2}\\global\\advance\\slidesx\\wd0 \\unhbox0 "
+    "\\slidestabn=\\numexpr\\slidesx/\\dimexpr#1\\relax\\relax"
+    "\\ifdim\\slidestabn\\dimexpr#1\\relax>\\slidesx \\advance\\slidestabn-1 \\fi"
+    "\\advance\\slidestabn1 "
+    "\\hskip\\dimexpr\\slidestabn\\dimexpr#1\\relax-\\slidesx\\relax"
+    "\\global\\slidesx=\\slidestabn\\dimexpr#1\\relax}")
+
+
+def tabbed_tex(runs: list[dict], base: dict, ctx: Context, brk: str, start: float, stop: float) -> str | None:
+    """A paragraph with tabs set on Slides' default stops (`stop` pt apart, the pen `start` pt from the
+    text edge where the line begins), or None when a soft break would move the pen elsewhere."""
+    if any("\x0b" in r["text"] for r in runs):
+        return None
+    segments: list[list[dict]] = [[]]
+    for r in runs:
+        for k, piece in enumerate(r["text"].split("\t")):
+            if k:
+                segments.append([])
+            if piece:
+                segments[-1].append({**r, "text": piece})
+    ctx.packages.add(SLIDES_TABS)
+    out = [f"\\global\\slidesx={start:.2f}pt"]
+    for seg in segments[:-1]:
+        text = runs_tex(seg, base, ctx, brk) if seg else ""
+        trail = len("".join(r["text"] for r in seg)) - len("".join(r["text"] for r in seg).rstrip(" "))
+        spaces = "\\ " * trail                  # the spaces before a tab move the pen too
+        out.append(f"\\slidestab{{{stop:.2f}pt}}{{{text}{spaces}}}")
+    out.append(runs_tex(segments[-1], base, ctx, brk) if segments[-1] else "")
+    return "".join(out)
+
+
 def bullet_tex(p: dict, ctx: Context, scale: float, right: float) -> str:
     """The bullet, its right edge `right` pt from where the line's text starts (negative: left of it)."""
     b = p["bullet"]
@@ -706,6 +746,9 @@ def text_box_latex(el: dict, ctx: Context, ind: str) -> str:
                 seen = True
             body = (f"\\hbox to{left - first:.2f}pt{{{runs_tex(label, base, ctx, brk)}\\hss}}"
                     + runs_tex(rest, base, ctx, brk))
+        elif "\t" in "".join(x["text"] for x in p["runs"]) and not p.get("bullet") and not rtl \
+                and align == "left" and not blank:
+            body = tabbed_tex(p["runs"], base, ctx, brk, first, TAB_STOP / scale) or body
         # a right-to-left paragraph is set in its language (scripts.py: babel's bidi, shaping)
         lang_in, lang_out = "", ""
         if rtl:

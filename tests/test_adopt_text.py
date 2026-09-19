@@ -212,6 +212,39 @@ def test_a_box_with_no_insets_sets_its_text_against_its_edges(tmp_path):
     assert f"({x + 6.7 / scale:.1f}pt," in roomy and f"\\vskip{6.48 / scale:.2f}pt" in roomy
 
 
+def imported_box(oid: str, h: float, y: float) -> dict:
+    """What a .pptx import leaves: NEVER_COLLAPSE on every paragraph."""
+    words = [("Two lines", {"fontFamily": "Arial", "fontSize": pt(24)})]
+    style = {"spacingMode": "NEVER_COLLAPSE"}
+    return box(oid, para("x", runs=words, style=style) + para("x", runs=words, style=style),
+               x=100, y=y, w=300, h=h, autofit={"autofitType": "SHAPE_AUTOFIT"})
+
+
+def test_an_imported_box_has_no_insets_when_the_decks_imports_prove_it():
+    """A box whose lines wrap has room left over whatever its insets, so its height cannot tell.
+    The SlidesCarnival templates came through a .pptx import that set every inset to 0, and their
+    boxes that fit one line per paragraph prove it; gdg24 came through an import too and kept
+    Slides' insets, with no imported box to say otherwise."""
+    alone = deck_ir(deck(imported_box("s_w", 90, 100)), foreign=True)
+    assert "insets" not in text_of(alone, "s_w")["box"]
+    proven = deck_ir(deck(imported_box("s_w", 90, 100), imported_box("s_a", 58, 200),
+                          imported_box("s_b", 59, 280)), foreign=True)
+    assert all(text_of(proven, oid)["box"]["insets"] == 0 for oid in ("s_w", "s_a", "s_b"))
+
+
+def test_text_after_a_tab_starts_at_the_next_default_stop(tmp_path):
+    """creandum-board's tables of figures are words and tabs: Slides jumps to the next multiple of
+    36 pt from the text's edge, TeX's space did not move them at all."""
+    d = deck(box("s_t", para("x", runs=[("Revenue\t12\tup", {})])))
+    text = source(tmp_path, d)
+    frame = frame_of(text)
+    assert "\\newcommand\\slidestab" in text
+    assert frame.count("\\slidestab{22.68pt}") == 2, "36 pt of Slides is 22.68 pt of the page"
+    assert "\\global\\slidesx=0.00pt" in frame
+    broken = frame_of(source(tmp_path / "b", deck(box("s_t", para("x", runs=[("Revenue\t12\x0bup", {})])))))
+    assert "\\slidestab" not in broken, "a soft break restarts the line: no stop to count from"
+
+
 def test_empty_lines_at_the_end_of_a_middle_aligned_box_are_height(tmp_path):
     """ap-bio-stats' bodies are centred and end on an empty 24 pt line at 80% after 7 pt: the text
     stands 15 pt higher than without it. Under a top-aligned stack such a line changes nothing."""
