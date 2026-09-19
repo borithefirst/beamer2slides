@@ -264,8 +264,14 @@ def font_files_latex(files: dict, tree: Path | None) -> str:
                 shutil.copyfile(f, dest)
     where = "Path=fonts/," if tree is not None else \
         "Path=" + next(iter(files.values())).parent.as_posix().rstrip("/") + "/,"
-    ext = next(iter(files.values())).suffix
-    return f"{where}Extension={ext},{','.join(opts)}"
+    exts = {f.suffix for f in files.values()}
+    if len(exts) > 1:
+        # one family in two formats (Windows' cambria.ttc beside cambriab.ttf): every file by its
+        # full name, since fontspec's Extension is one for all
+        opts = [f"{k}={files[k].name}" for k in ("UprightFont", "BoldFont", "ItalicFont", "BoldItalicFont")
+                if k in files]
+        return f"{where}{','.join(opts)}"
+    return f"{where}Extension={exts.pop()},{','.join(opts)}"
 
 
 # A deck's second, third... typeface of one kind gets a switch of its own when it sets this many

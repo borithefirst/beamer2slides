@@ -469,6 +469,28 @@ letterbox cut; Drive: a play panel) inside an `\href`, WordArt its `renderedText
 a page beamer has no ratio for is written with `\geometry{papersize}`; fonts the machine lacks are
 fetched from google/fonts into a user cache and variable ones cut into static instances
 (`fontfetch.py`, `$B2S_FONT_FETCH=0` / `$B2S_FONTS` turn it off). Tests: `tests/test_adopt_media.py`.
+Text boxes follow Slides' text model line by line (`adopt.text_box_latex`: `\vbox to` the box height
+for TOP/MIDDLE/BOTTOM, Slides' pitch per paragraph through `\prevdepth`, spaceAbove/Below with
+COLLAPSE_LISTS, indents, ● ○ ■ drawn at their measured size, no hyphenation or space shrink; autofit
+and per-list-level styles read in `deck_ir.text_paragraphs`; `tests/test_adopt_text.py`). Tables are a
+tikz grid with measured rows, merged cells, fills and border segments (`adopt.table_block`, cell
+insets inferred by `deck_ir.cell_pad`; `tests/test_adopt_tables.py`). Shapes are drawn in their preset
+(`adopt_shapes.py`: ~110 shapeTypes with OOXML default adjustments, turned/mirrored through the
+element's own `frame`, dashes, alpha, bent and curved connectors, arrow heads; freeforms as their box;
+`tests/test_adopt_shapes.py`). Scripts (`scripts.py`): luaotfload fallbacks for CJK and symbols,
+babel `onchar=ids` for CJK line breaking and Hebrew/Arabic fonts, `bidi=basic` with RTL paragraphs
+in `otherlanguage` (`tests/test_adopt_scripts.py`).
+**Benchmark** (`tools/adopt_bench.py`, corpus of 29 public decks in `tests/decks/foreign/corpus.json`,
+cached in `out/adopt-corpus` or `$B2S_ADOPT_CORPUS`): `capture` reads a deck and its LARGE thumbnails
+(read-only, 429 back-off), `run [decks] --jobs N --tag T` bootstraps, compiles (a failing deck is
+split frame by frame to name the broken ones), scores every slide (`boxes` / `page` / `pixels`) and
+writes deck|source|diff sheets to `<corpus>/<deck>/runs/<tag>/sheets`; `report --tag T`.
+Measured (bootstrap only, 912 slides): boxes 0.593 -> 0.754 (mean per deck 0.565 -> 0.725, every
+deck up; pixels 0.913 -> 0.939), 11 frames that did not compile -> 0 (tags `abs` -> `merged`).
+Known gaps, by what they cost: text insets the API does not report (Canva/SlidesCarnival boxes sit
+4-6 pt low and right), freeform shapes (5,791 in the corpus, drawn as their box; Google's .pptx
+export has their geometry), fills the API reads as empty (gradients: cs161's header bar,
+sc-memphis), dragged shape adjustments, and hebrew-lesson's table style colours.
 
 Opt-in suite (real Google Slides, ~95 s): `python -m pytest -m slides` (the default run deselects
 the `slides` marker, pyproject.toml). It converts the stress decks (19–22, 25, 13, demo) 3 at a

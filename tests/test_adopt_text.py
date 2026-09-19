@@ -214,3 +214,14 @@ def test_windows_font_files_are_one_family(tmp_path, monkeypatch):
     text = source(tmp_path, body_deck())
     line = next(l for l in text.splitlines() if l.startswith("\\setsansfont"))
     assert "UprightFont=*" in line and "BoldFont=arialbd" in line and "BoldItalicFont=arialbi" in line
+
+
+def test_a_family_in_two_file_formats_names_every_file():
+    """Windows ships Cambria as cambria.ttc beside cambriab.ttf: one Extension for the family made
+    fontspec look for cambriab.ttc, and ap-bio-stats stopped compiling."""
+    from pathlib import Path
+
+    from beamer2slides.adopt import font_files_latex
+    opts = font_files_latex({"UprightFont": Path("c/cambria.ttc"), "BoldFont": Path("c/cambriab.ttf")}, None)
+    assert "Extension" not in opts
+    assert "UprightFont=cambria.ttc" in opts and "BoldFont=cambriab.ttf" in opts
