@@ -16,9 +16,10 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass, field
 
-from ..api import OBJ_FORM, OBJ_IMAGE, OBJ_PATH, OBJ_SHADING, OBJ_TEXT, mul
+from ..api import OBJ_FORM, OBJ_IMAGE, OBJ_PATH, OBJ_SHADING, OBJ_TEXT
 from .colors import DEVICE, PATTERN, ColorSpace, load_colorspace
 from .fonts import Font, load_font
+from .raster import concat, path_is_rect
 from .syntax import InlineImage, Name, Stream, String, float32 as f32, operations
 
 IDENTITY = (1.0, 0.0, 0.0, 1.0, 0.0, 0.0)
@@ -64,6 +65,36 @@ def point_bbox(points):
     return min(xs), min(ys), max(xs), max(ys)
 
 
+def is_identity(m) -> bool:
+    return tuple(m) == (1.0, 0.0, 0.0, 1.0, 0.0, 0.0)
+
+
+def transform32(m, x, y):
+    """CFX_Matrix::Transform in float, one rounding per operation."""
+    a, b, c, d, e, f = m
+    return f32(f32(f32(a * x) + f32(c * y)) + e), f32(f32(f32(b * x) + f32(d * y)) + f)
+
+
+def rect_points(left, bottom, right, top) -> tuple:
+    """CFX_Path::AppendRect."""
+    return ((left, bottom, PT_MOVE, False), (left, top, PT_LINE, False), (right, top, PT_LINE, False),
+            (right, bottom, PT_LINE, False), (left, bottom, PT_LINE, True))
+
+
+def append_clip(clip_paths: tuple, points: tuple, fill_type: int) -> tuple:
+    """CPDF_ClipPath::AppendPathWithAutoMerge: a new path inside the last one, when that one is
+    a rectangle, replaces it."""
+    if clip_paths:
+        old = clip_paths[-1][0]
+        if path_is_rect(old):
+            ox0, ox1 = sorted((old[0][0], old[2][0]))
+            oy0, oy1 = sorted((old[0][1], old[2][1]))
+            nx0, ny0, nx1, ny1 = point_bbox(points) if points else (0.0, 0.0, 0.0, 0.0)
+            if nx0 >= ox0 and nx1 <= ox1 and ny0 >= oy0 and ny1 <= oy1:
+                clip_paths = clip_paths[:-1]
+    return clip_paths + ((points, fill_type),)
+
+
 # ---------------------------------------------------------------------- page objects
 
 
@@ -73,6 +104,7 @@ class PObj:
     matrix: tuple                  # PDFium's matrix for the object (identity for a shading)
     parent: "PObj | None" = None
     clips: list | None = None      # point bounding boxes of the clip paths, container space
+    clip_paths: tuple = ()         # ((points, fill type), ...) in container space, float32 (render)
     fill: int | None = None        # 0xRRGGBB; None when the object has no colour state
     stroke: int | None = None
     fill_alpha: float = 1.0
@@ -83,6 +115,12 @@ class PObj:
     line_cap: int = 0
     line_join: int = 0
     miter: float = 10.0
+    dash: tuple = ()
+    dash_phase: float = 0.0
+    smask: dict | None = None      # the ExtGState's /SMask dictionary (render)
+    smask_matrix: tuple = IDENTITY  # the CTM when it was set
+    transfer: object = None        # /TR or /TR2 (not a name)
+    pattern: bool = False          # a pattern colour space for fill or stroke (render)
     rect: tuple = (0.0, 0.0, 0.0, 0.0)   # GetRect, container space
     # paths
     points: list = field(default_factory=list)   # (x, y, PT_*, closes), path space
@@ -121,6 +159,7 @@ class PObj:
 class State:
     ctm: tuple = IDENTITY
     clips: tuple = ()                  # point bboxes (container space), tuple so copies are cheap
+    clip_paths: tuple = ()             # CPDF_ClipPath's paths: ((points, fill type), ...)
     fill_cs: ColorSpace = DEVICE["DeviceGray"]
     fill_values: tuple = (0.0,)
     fill_ref: int = 0
@@ -135,6 +174,11 @@ class State:
     line_cap: int = 0
     line_join: int = 0
     miter: float = 10.0
+    dash: tuple = ()
+    dash_phase: float = 0.0
+    smask: dict | None = None
+    smask_matrix: tuple = IDENTITY
+    transfer: object = None
     font: Font | None = None
     font_size: float = 0.0
     char_space: float = 0.0
@@ -239,12 +283,16 @@ class _Run:
         s = self.state
         obj.parent = self.parent
         obj.clips = list(s.clips) if s.clips else None
+        obj.clip_paths = s.clip_paths
         obj.fill_alpha, obj.stroke_alpha = s.fill_alpha, s.stroke_alpha
         obj.blend, obj.soft_mask = s.blend, s.soft_mask
+        obj.smask, obj.smask_matrix, obj.transfer = s.smask, s.smask_matrix, s.transfer
         if color:
             obj.fill, obj.stroke = s.fill_ref, s.stroke_ref
+            obj.pattern = s.fill_cs.is_pattern or s.stroke_cs.is_pattern
         if graph:
             obj.line_width, obj.line_cap, obj.line_join, obj.miter = s.line_width, s.line_cap, s.line_join, s.miter
+            obj.dash, obj.dash_phase = s.dash, s.dash_phase
         self.p.objects.append(obj)
         if self.parent is not None:
             self.parent.children.append(obj)
@@ -280,7 +328,8 @@ class _Run:
 
     def op_cm(self, args):
         m = tuple(self.numbers(args, 6))
-        self.state.ctm = f32m(mul(m, self.state.ctm))
+        # CFX_Matrix::operator* in float: rounding after every step, not once at the end
+        self.state.ctm = concat(f32m(m), self.state.ctm)
         self._text_matrix_changed()
 
     def op_w(self, args):
@@ -294,6 +343,13 @@ class _Run:
 
     def op_M(self, args):
         self.state.miter = self.number(args, 0)
+
+    def op_d(self, args):
+        dash = args[-2] if len(args) >= 2 else None
+        if not isinstance(dash, list):
+            return
+        self.state.dash = tuple(_num(self.doc.resolve(v)) for v in dash)
+        self.state.dash_phase = self.number(args, 0)
 
     def op_gs(self, args):
         gs = self.resource("ExtGState", args[-1]) if args else None
@@ -319,6 +375,14 @@ class _Run:
                 s.blend = str(mode) if isinstance(mode, Name) and str(mode) != "Compatible" else "Normal"
             elif key == "SMask":
                 s.soft_mask = isinstance(value, dict)
+                s.smask = value if isinstance(value, dict) else None
+                if s.smask is not None:
+                    s.smask_matrix = s.ctm
+            elif key == "D" and isinstance(value, list) and value and isinstance(r(value[0]), list):
+                s.dash = tuple(_num(r(v)) for v in r(value[0]))
+                s.dash_phase = _num(r(value[1])) if len(value) > 1 else 0.0
+            elif key == "TR2" or key == "TR" and "TR2" not in gs:
+                s.transfer = None if isinstance(value, Name) else value
             elif key == "CA":
                 s.stroke_alpha = min(1.0, max(0.0, _num(value, 1.0)))
             elif key == "ca":
@@ -514,11 +578,14 @@ class _Run:
         if len(points) == 1:
             if clip_type != FILL_NONE:
                 s.clips = s.clips + ((0.0, 0.0, 0.0, 0.0),)  # AppendRect(0, 0, 0, 0), not transformed
+                s.clip_paths = append_clip(s.clip_paths, rect_points(0.0, 0.0, 0.0, 0.0), FILL_WINDING)
                 return
             x, y, kind, closes = points[0]
             if kind != PT_MOVE or not closes or s.line_cap != 1:
                 return
-            points.append((x, y, PT_LINE, True))  # a round-capped move closed at once: a dot
+            # a round-capped move closed at once: a dot, drawn from the point to itself
+            points[0] = (x, y, kind, False)
+            points.append((x, y, PT_LINE, True))
         if points[-1][2] == PT_MOVE and not points[-1][3]:
             points.pop()
         matrix = s.ctm
@@ -530,6 +597,9 @@ class _Run:
             pts = [transform(matrix, x, y) for x, y, _, _ in points]
             box = point_bbox(pts) if pts else (0.0, 0.0, 0.0, 0.0)
             s.clips = s.clips + (box,)
+            if not is_identity(matrix):
+                points = [(*transform32(matrix, x, y), k, c) for x, y, k, c in points]
+            s.clip_paths = append_clip(s.clip_paths, tuple(points), clip_type)
 
     def op_f(self, args):
         self._paint(FILL_WINDING, False)
@@ -555,7 +625,10 @@ class _Run:
         self._paint(FILL_WINDING, True, close=True)
 
     def op_bstar(self, args):
-        self._paint(FILL_EVENODD, True, close=True)
+        # Handle_CloseEOFillStrokePath: unlike b and s, a closing line to the start always
+        # (a lone `m` then paints a dot)
+        self._point_close(*self.path_start, PT_LINE)
+        self._paint(FILL_EVENODD, True)
 
     def op_n(self, args):
         self._paint(FILL_NONE, False)
@@ -671,7 +744,7 @@ class _Run:
             return
         mode = 0 if font.is_type3 else s.text_mode
         # OnChangeTextMatrix: [Tz 0 0 1] x Tm x CTM (content_to_user is the identity here)
-        tm = f32m(mul(f32m(mul((s.horz_scale, 0.0, 0.0, 1.0, 0.0, 0.0), s.text_matrix)), s.ctm))
+        tm = concat(concat((f32(s.horz_scale), 0.0, 0.0, 1.0, 0.0, 0.0), s.text_matrix), s.ctm)
         pos = f32p(transform(s.ctm, *f32p(transform(s.text_matrix, s.text_pos[0], f32(s.text_pos[1] + s.rise)))))
         items: list = []
         kerns: list = []
@@ -761,7 +834,9 @@ class _Run:
                           soft_mask=s.soft_mask, line_width=s.line_width, line_cap=s.line_cap,
                           line_join=s.line_join, miter=s.miter, font=s.font, font_size=s.font_size,
                           char_space=s.char_space, word_space=s.word_space, horz_scale=s.horz_scale,
-                          leading=s.leading, rise=s.rise, text_mode=s.text_mode)
+                          leading=s.leading, rise=s.rise, text_mode=s.text_mode,
+                          dash=s.dash, dash_phase=s.dash_phase, smask=s.smask,
+                          smask_matrix=s.smask_matrix, transfer=s.transfer)
             m = r(stream.get("Matrix"))
             fm = tuple(_num(r(v)) for v in m[:6]) if isinstance(m, list) and len(m) >= 6 else IDENTITY
             child.ctm = fm
@@ -773,9 +848,14 @@ class _Run:
                 pts = [transform(fm, x, y) for x, y in ((rect[0], rect[1]), (rect[2], rect[1]),
                                                        (rect[2], rect[3]), (rect[0], rect[3]))]
                 child.clips = (point_bbox(pts),)
+                # CPDF_Array::GetRect does not normalise: the clip starts at the first corner
+                # given, which decides the order the rasteriser walks its edges in
+                clip = tuple((*transform32(fm, x, y), k, c) for x, y, k, c in rect_points(*v))
+                child.clip_paths = append_clip((), clip, FILL_WINDING)
                 bbox = transform_rect(fm, rect)
             if obj.group:
                 child.blend, child.stroke_alpha, child.fill_alpha, child.soft_mask = "Normal", 1.0, 1.0, False
+                child.smask = None
             res = r(stream.get("Resources"))
             chain.append(stream)
             try:
@@ -791,7 +871,7 @@ def _op_name(op: str) -> str:
 
 
 OPS = {}
-for _op in ("q Q cm w J j M gs g G rg RG k K cs CS sc SC scn SCN m l c v y h re W W* f F f* S s B B* b b* n "
+for _op in ("q Q cm w J j M d gs g G rg RG k K cs CS sc SC scn SCN m l c v y h re W W* f F f* S s B B* b b* n "
             "BT ET Tc Tw Tz TL Tr Ts Tf Td TD Tm T* Tj ' \" TJ Do BI sh").split():
     OPS[_op] = getattr(_Run, "op_" + _op_name(_op))
 

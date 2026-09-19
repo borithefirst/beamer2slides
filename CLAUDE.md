@@ -37,8 +37,11 @@ a per-slide background picture.
   a pure Python port of the PDFium parts the pipeline reads (syntax, filters, xref/repair, colour
   spaces, fonts, content stream, CPDF_TextPage with bidi), answering the contract *as PDFium does*,
   quirks included (float32 numbers, U+0002 hyphens, FreeType's legacy AGL, Type 3 form boxes, image
-  metadata rules). It does not render (`renders = False`, `render` raises PdfError), so `classify`
-  runs on it and `convert` doesn't. Every call equals PDFium's on 4,373 pages (float32 noise aside),
+  metadata rules). Rendering is being ported from PDFium's AGG renderer (`pure/raster.py`,
+  `pure/render.py`): paths, clips and forms come out byte-identical (float32 after every operation,
+  `CFX_Matrix` products included; oracle `tools/render_torture.py`, random pages vs PDFium, shrunk);
+  a page with anything not ported yet (text, images, shadings, soft masks…) raises PdfError, so
+  `renders = False`: `classify` runs on it and `convert` doesn't yet. Every call equals PDFium's on 4,373 pages (float32 noise aside),
   and deck.json is identical on all 48 test decks; extract is 7× slower. `tests/test_pure_pdf.py`.
 - No public links: pictures reach Slides inside the imported .pptx, never as shared Drive
   files (they break in protected Workspace domains).

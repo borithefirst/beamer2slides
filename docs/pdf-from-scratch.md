@@ -94,9 +94,10 @@ Each of these was a diff against PDFium until it was ported:
 
 ## What it does not do
 
-- **Rendering.** `render` raises PdfError, and `api.renders(backend)` is False. The pipeline needs
-  renders for backgrounds, crops, ball colours, `_looks_like` and fidelity, so `classify` runs on the
-  reader but `convert` does not. `embedded_image` gives no `pixels` or `rendered`, so
+- **Rendering, mostly.** Option 3 below is under way (next section); until text, images, shadings and
+  soft masks draw, `render` raises PdfError on any page holding one, and `api.renders(backend)` is
+  False. The pipeline needs renders for backgrounds, crops, ball colours, `_looks_like` and fidelity,
+  so `classify` runs on the reader but `convert` does not. `embedded_image` gives no `pixels` or `rendered`, so
   `render.image_file` can't prove a raw JPEG looks right and keeps the page crop instead.
 - Encrypted PDFs (LaTeX doesn't write them), vertical writing, ActualText, and JPX/JBIG2/CCITT
   decoding (those streams pass through as raw).
@@ -117,6 +118,33 @@ What stands between the reader and a whole `convert`:
 3. **Port PDFium's rasteriser (AGG) itself.** The only way to get byte-identical backgrounds. That is
    a large port, and pure Python would be far too slow without numpy vectorisation of the scanline
    filler.
+
+## Rendering: the port (option 3)
+
+`pure/raster.py` is AGG's scanline rasteriser, stroker and dasher as PDFium configures them;
+`pure/render.py` is CPDF_RenderStatus and CFX_AggDeviceDriver above it: clip masks, the gray8 clip
+blend, AlphaMerge/AlphaUnion compositing into BGRx or BGRA, and DrawFillStrokePath (a translucent
+stroke over its fill is a knockout on a sub-bitmap). Equality means equal bytes, and three things
+decided it:
+
+- **Float32 everywhere PDFium has a float**, rounded after every operation, not once at the end:
+  `CFX_Matrix::operator*` computes `e*B + f*D + G` as float + float + float, and a matrix composed in
+  double then rounded differs in the last bit - enough to move one pixel's coverage by one level.
+  That goes for `cm` and the text matrix in the content parser too.
+- **Parser details only a renderer sees**: `b*` always closes to the path start (a lone `m` then
+  paints a round-capped dot, `b` and `s` do not); a form's /BBox clip keeps the corner order written,
+  since the rasteriser walks edges in that order.
+- **What is drawn at all**: a path whose stroke bounds overflow, or whose sub-bitmap would be empty,
+  draws nothing.
+
+The oracle is `devtools/render_torture.py` (`python tools/render_torture.py SEED0 N [--forms]`):
+random pages of `cm`, clips, colours, line styles, dashes, constant alpha and paths painted every way,
+optionally inside nested forms with random /BBox and /Matrix, rendered by both at random zooms on
+white and on clear bitmaps, each difference shrunk to the lines that still cause it. When paths were
+done: 5,500 seeds of pages and 500 with forms, not one pixel apart; `tests/test_pure_pdf.py` keeps
+40 seeds of each plus the shrunk pages that were once apart. `render_page` refuses (`unported`) what
+it does not draw yet: text, images, shadings, patterns, transparency groups, soft masks, blend modes,
+transfer functions.
 
 ## Risks
 

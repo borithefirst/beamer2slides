@@ -1,10 +1,11 @@
 """The pure Python backend: api.py's contract over syntax/document/content/fonts/textpage.
 
 It answers what `pdfium_backend` answers, call for call, from the same rules (each method names
-the PDFium calls it stands in for); `docs/pdf-from-scratch.md` has the measurements. It cannot
-render: `render` raises PdfError, and `embedded_image` gives the stream and its dictionary's
-facts but no pixels. So extract and classify run on it; render, fidelity and the checks need a
-backend that draws.
+the PDFium calls it stands in for); `docs/pdf-from-scratch.md` has the measurements. Rendering is
+being ported (render.py, raster.py: PDFium's AGG renderer, pixel for pixel): pages of paths, clips
+and forms draw exactly, anything else raises PdfError, so `renders` stays False until a beamer page
+draws; `embedded_image` gives the stream and its dictionary's facts but no pixels. So extract and
+classify run on it; render, fidelity and the checks need a backend that draws.
 
 Needs nothing but the standard library, numpy (the api's types) and - for glyph boxes read from
 embedded font programs - fontTools."""
@@ -18,9 +19,10 @@ from typing import Sequence
 import numpy as np
 
 from ..api import (COLOR_SPACES, LIGATURES, NO_OBJECT, OBJ_IMAGE, OBJ_PATH, OBJ_SHADING, Box, Char,
-                   EmbeddedImage, PageObject, PdfError, char_box, font_metrics, join_surrogates, mul, trace,
-                   transform_box)
+                   EmbeddedImage, PageObject, PdfError, char_box, font_metrics, join_surrogates, mul,
+                   pixel_bounds, trace, transform_box)
 from .content import Parser, PObj
+from .render import render_page
 from .document import PdfFile, read, text_string, write_file
 from .filters import ABBREVIATIONS, decode
 from .syntax import InlineImage, Name, Stream, String
@@ -422,7 +424,12 @@ class Page:
     # ------------------------------------------------------------------ rendering
 
     def render(self, zoom: float, clip: Box | None = None, transparent: bool = False) -> np.ndarray:
-        raise PdfError("the pure Python backend does not render pages")
+        """FPDF_RenderPageBitmapWithMatrix as pdfium_backend calls it (render.py)."""
+        ix0, iy0, w, h = pixel_bounds(zoom, clip if clip is not None else self.rect)
+        bgra = render_page(self._parse(), self.box, zoom, ix0, iy0, w, h, transparent)
+        if transparent:
+            return bgra[..., [2, 1, 0, 3]].copy()
+        return bgra[..., 2::-1].copy()
 
 
 class Document:

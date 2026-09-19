@@ -112,10 +112,50 @@ def test_extract_and_classify_on_the_pure_reader_write_pdfiums_deck():
 
 
 @built
-def test_the_pure_reader_does_not_render():
+def test_the_pure_reader_refuses_a_page_it_cannot_draw_exactly():
+    """Text, soft masks and shadings are not drawn yet: the page raises instead of coming back
+    without them."""
     doc = pdf.resolve("pure").open(DECKS[0])
-    with pytest.raises(PdfError, match="render"):
+    with pytest.raises(PdfError, match="cannot render .+ yet"):
         doc[0].render(1.0)
+
+
+# ---------------------------------------------------------------------- rendering (paths so far)
+
+# pages the torture harness (devtools/render_torture.py) found apart once, shrunk
+RENDER_CASES = {
+    # DrawFillStrokePath: a translucent stroke is a knockout over the fill, on a sub-bitmap
+    "fill_stroke_knockout": (b"q 0.2 0.5 0.8 rg 0.9 0.1 0.1 RG 8 w /A0 gs 20 20 m 180 40 l 100 130 l h B Q", [], 1.37, False),
+    "fill_stroke_knockout_clear": (b"q 0.2 0.5 0.8 rg 0.9 0.1 0.1 RG 8 w /A2 gs 20 20 m 180 40 l 100 130 l h b* Q", [], 2, True),
+    # b* closes to the path start even after a lone m: a round-capped dot
+    "bstar_dot": (b"q 1 J 12 w 0 0 1 RG /A0 gs 95.1502 58.3982 m b* Q", [], 1, False),
+    # a form's /BBox clip keeps its corner order, and cm composes in float32 step by step
+    "form_bbox_unnormalised": (b"/X0 Do", [(b"/BBox [150 140 10 5]", b"0.3 0.6 0.2 rg 0 0 200 150 re f")], 1.37, False),
+    "form_matrix_float32": (b"/X0 Do", [(b"/BBox [-99999 -99999 99999 99999] /Matrix [0.0000 1.0000 0.0662 -1.0322 17.0277 32.5160]",
+                                         b"-1.6336 1.0873 0.4387 -0.1223 39.137 121.943 cm\n20.000 w 0 J 0 j 1.00 M\n"
+                                         b"206 148 m 181 103 61.8 3 2 124 c -17 70 38 14 v S")], 2, False),
+}
+
+
+@pytest.mark.parametrize("name", RENDER_CASES)
+def test_the_pure_renderer_draws_pdfiums_pixels(name):
+    from beamer2slides.devtools.render_torture import compare
+    content, forms, zoom, transparent = RENDER_CASES[name]
+    assert compare(content, zoom, transparent, forms)[0] == 0
+
+
+@pytest.mark.parametrize("forms", [False, True], ids=["pages", "forms"])
+def test_the_pure_renderer_survives_torture_seeds(forms):
+    """A slice of the random pages the renderer was made exact on (5,500 seeds of pages, 500 with
+    forms, when it was written): any pixel apart fails."""
+    from beamer2slides.devtools.render_torture import case, compare
+    apart = {}
+    for seed in range(40):
+        content, fs, zoom, transparent = case(seed, forms)
+        n = compare(content, zoom, transparent, fs)[0]
+        if n:
+            apart[seed] = n
+    assert not apart, f"seeds apart (python tools/render_torture.py SEED 1{' --forms' if forms else ''}): {apart}"
 
 
 # ---------------------------------------------------------------------- PDFium's rules, one by one
