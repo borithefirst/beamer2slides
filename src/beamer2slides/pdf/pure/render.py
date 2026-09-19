@@ -10,7 +10,8 @@ out equal to PDFium's, not merely close. Each function names the PDFium code it 
 Drawn: paths (fill, stroke, dashes, constant alpha, fill-and-stroke with a translucent stroke
 through DrawFillStrokePath's knockout sub-bitmap), clip paths, forms, and transparency
 (ProcessTransparency: soft masks, transparency groups, group alpha, blend modes;
-`render_transparency.py`). Not yet: text, images, shadings, patterns, transfer functions; a page holding any
+`render_transparency.py`), axial and radial shadings and shading patterns (`render_shading.py`).
+Not yet: text, images, tiling patterns, transfer functions; a page holding any
 of them raises PdfError (`unported`) rather than coming back drawn differently."""
 
 from __future__ import annotations
@@ -722,9 +723,13 @@ class Status:
             self.process_path(obj, matrix)
         elif obj.type == OBJ_FORM:
             self.process_form(obj, matrix)
+        elif obj.type == OBJ_SHADING:
+            from . import render_shading
+            render_shading.process_shading(self, obj, matrix)
 
     def process_path(self, obj, matrix) -> None:
-        fill_type, stroke = obj.fill_type, obj.stroked
+        from . import render_shading
+        fill_type, stroke = render_shading.path_pattern(self, obj, matrix)
         if fill_type == FILL_NONE and not stroke:
             return
         fill_argb = _argb(obj.fill, obj.fill_alpha) if fill_type != FILL_NONE else 0
@@ -785,8 +790,8 @@ def unported(objects, ctx=None) -> str | None:
             p = p.parent
         if p is not None:
             continue
-        if o.type not in (OBJ_PATH, OBJ_FORM):
-            return {OBJ_TEXT: "text", OBJ_IMAGE: "images", OBJ_SHADING: "shadings"}.get(o.type, "objects")
+        if o.type not in (OBJ_PATH, OBJ_FORM, OBJ_SHADING):
+            return {OBJ_TEXT: "text", OBJ_IMAGE: "images"}.get(o.type, "objects")
         if o.smask is not None or o.blend != "Normal" or o.transfer is not None:
             from .render_transparency import unsupported
             why = unsupported(o, ctx, unported)
@@ -794,8 +799,11 @@ def unported(objects, ctx=None) -> str | None:
                 return why
         if o.type == OBJ_FORM and o.group and ctx is None:
             return "transparency groups"
-        if o.type == OBJ_PATH and o.pattern and (o.fill_type != FILL_NONE or o.stroked):
-            return "patterns"
+        if o.type in (OBJ_PATH, OBJ_SHADING):
+            from . import render_shading
+            reason = render_shading.refusal(o)
+            if reason is not None:
+                return reason
     return None
 
 

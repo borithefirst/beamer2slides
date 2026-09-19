@@ -156,8 +156,8 @@ Each of these was a diff against PDFium until it was ported:
 
 ## What it does not do
 
-- **Rendering, mostly.** Option 3 below is under way (next section); until text, images and shadings
-  draw (beamer's soft masks hold shadings), `render` raises PdfError on any page holding one, and `api.renders(backend)` is
+- **Rendering, mostly.** Option 3 below is under way (next section); until text and images
+  draw, `render` raises PdfError on any page holding one, and `api.renders(backend)` is
   False. The pipeline needs renders for backgrounds, crops, ball colours, `_looks_like` and fidelity,
   so `classify` runs on the reader but `convert` does not. `embedded_image` gives no `pixels` or `rendered`, so
   `render.image_file` can't prove a raw JPEG looks right and keeps the page crop instead.
@@ -208,7 +208,7 @@ random zooms on white and on clear bitmaps, each difference shrunk to the lines 
 tokens) that still cause it. When paths were done: 5,500 seeds of pages, 3,000 with forms, 300 of
 page geometry and 3,500 mutated, not one pixel apart; `tests/test_pure_pdf.py` keeps 40 seeds of
 each plus the shrunk pages that were once apart. `render_page` refuses (`unported`) what
-it does not draw yet: text, images, shadings, patterns, transfer functions.
+it does not draw yet: text, images, tiling patterns, transfer functions.
 
 **Transparency** (`pure/render_transparency.py`) is CPDF_RenderStatus::ProcessTransparency and
 everything under it: soft masks (Luminosity and Alpha, /BC, /G drawn through its own Status with the
@@ -239,8 +239,50 @@ seeds (3,000 with page geometry) are exact; the tests keep 40 of each and the sh
 Refused, each with its reason: transfer functions (/TR, /TR2, and a soft mask's /TR - they need the
 function evaluator the shading port brings), a luminosity mask with a /BC whose group colour space is
 not DeviceGray, DeviceRGB or DeviceCMYK, masks nested 8 deep, and anything unported inside a mask's
-/G (the same `unported` check runs over it). Real decks are still refused as a whole: every
-beamer shadow and ball bullet is a soft mask whose /G holds a shading, so they wait for shadings.
+/G (the same `unported` check runs over it).
+
+**Shadings** (`pure/render_shading.py`) are CPDF_RenderShading's axial (type 2) and radial (type 3)
+loops, painted by `sh` (ProcessShading) and as shading patterns filling or stroking a path
+(DrawShadingPattern: the path, or its stroke outline, becomes the clip), with the functions that
+colour them (CPDF_Function types 0, 2, 3 and 4, the PostScript calculator whole) and the colour
+spaces they feed (Device Gray/RGB/CMYK, CalGray, Separation, DeviceN). The content parser only
+records which pattern each colour side holds and the shading's CTM (`PObj.fill_pattern`,
+`stroke_pattern`, `shading_matrix`, `shading_record`); everything else happens at render time. Rules:
+- the colours are 256 steps computed once per draw, step i at `t0 + (t1 - t0) * i / 256` in float32,
+  each `ArgbEncode(alpha, roundf(r * 255), ...)`; a pixel's parameter becomes `static_cast<int>(s *
+  255)`, so a NaN (an axial shading of zero length) is INT_MIN and takes the start extension;
+- every pixel of a BGRA buffer the size of the clipped object is computed at (column, row), not at the
+  pixel centre, through the inverted matrix in float, then laid on the page with SetDIBits
+  (CompositeRow_Argb2Rgb/Argb2Argb under the clip mask), so alpha is `roundf(255 * ca)` where a path's
+  is truncated;
+- a radial shading is "decreasing" when its radius falls by more than the centres' distance
+  *truncated to an int*; the root picked, the swap when `a <= 0` and the negative-radius skip follow
+  the loop literally;
+- /Background is drawn for patterns only (an `sh` ignores it), with its colour truncated, not rounded;
+  /BBox is transformed by the shading's matrix and cuts the buffer;
+- a pattern's matrix is its /Matrix times the *parent matrix* - the page's identity, or inside a form
+  that form's /Matrix - never the CTM at `scn`: the object's own CTM comes in with mtObj2Device;
+- the functions are PDFium's to the bit: float32 per operation, `powf`/`sinf`/`atan2f`/... from the
+  C runtime (ucrtbase) through ctypes, a sampled function's bit reader returning 0 without moving past
+  the end, a Separation whose tint function has too few outputs used without it, PostScript's stack of
+  100 that ignores overflow and pops 0 when empty, `if` without a procedure ending the procedure.
+  PostScript numbers are read the way fast_float reads them (correctly rounded to float32), and only
+  plain decimals are accepted;
+- DeviceCMYK goes through the same Adobe table as the extraction, each component `(int)(c * 255 +
+  0.49999997)`.
+The oracle is `devtools/render_torture_shading.py` (`python tools/render_torture_shading.py SEED0 N`):
+random axial and radial shadings as `sh` and as patterns (fill and stroke, /Matrix, /Background,
+/BBox, forms and transparency groups around them), random functions of every type (sampled at every
+bit depth, stitched, PostScript programs) through every colour space above, clips, `cm`, alphas,
+white and clear bitmaps, and one seed in seven "wild" (short /Coords, bad domains, wrong function
+counts, CalRGB/Lab/Indexed). 12,000 seeds are exact and 8% refused; every test-deck page holding a
+shading (41 pages of 14 decks), with only paths, forms and shadings on, is exact at two zooms. The
+tests keep 60 seeds, the shrunk cases and one deck. Refused, each with its reason: function-based
+and mesh shadings (types 1, 4-7), tiling patterns, CalRGB/Lab/ICCBased/Indexed colour spaces, a
+PostScript word that is not a plain number, a pattern stroked through an all-zero matrix, a shading
+that fails validation (PDFium's Load keeps the type it read, so the *second* Load of the same
+object succeeds and draws: what is drawn depends on history), and a pattern object the page uses
+under two parent matrices (PDFium's document cache keeps the first while it lives).
 
 ## Risks
 
