@@ -339,11 +339,16 @@ def compare(content: bytes, objects, xobjects, zoom: float, transparent: bool):
     from ..pdf.pdfium_backend import PdfiumBackend
     from ..pdf.pure.backend import PureBackend
     data = pdf_bytes(content, objects, xobjects)
-    a = PdfiumBackend().open(data)[0].render(zoom, transparent=transparent)
+    docs = PdfiumBackend().open(data), PureBackend().open(data)
     try:
-        b = PureBackend().open(data)[0].render(zoom, transparent=transparent)
-    except PdfError as e:
-        return None, a, None, str(e)
+        a = docs[0][0].render(zoom, transparent=transparent)
+        try:
+            b = docs[1][0].render(zoom, transparent=transparent)
+        except PdfError as e:
+            return None, a, None, str(e)
+    finally:
+        for doc in docs:
+            doc.close()
     d = np.abs(a.astype(int) - b.astype(int)).max(axis=2)
     return int((d > 0).sum()), a, b, d
 
