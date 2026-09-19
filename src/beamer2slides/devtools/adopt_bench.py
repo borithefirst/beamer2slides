@@ -80,32 +80,36 @@ def capture(pid: str, name: str, refresh: bool = False) -> Path:
     return folder
 
 
-def write_target(folder: Path, pres: dict | None = None, fetch=None) -> dict:
-    """The IR adopt reads, from the cached presentation (pictures fetched only when `fetch` is given;
-    already downloaded ones are reused, the names are content hashes)."""
+def build_target(folder: Path, pres: dict | None = None, fetch=None) -> dict:
+    """The IR adopt reads, from the cached presentation. With `fetch` (capture) pictures are
+    downloaded and their URLs recorded in urls.json; without it (every run) they come from that
+    cache, and a URL capture never saw fails the way an expired one does in `adopt`."""
+    import hashlib
     from beamer2slides.deck_ir import deck_ir
     pres = pres or json.loads((folder / "presentation.json").read_text(encoding="utf-8"))
+    known_path = folder / "urls.json"
+    known = json.loads(known_path.read_text(encoding="utf-8")) if known_path.exists() else {}
     if fetch is None:
         cache = {p.stem: p for p in (folder / "images").glob("*")} if (folder / "images").is_dir() else {}
-        known = json.loads((folder / "urls.json").read_text(encoding="utf-8")) if (folder / "urls.json").exists() else {}
 
-        def fetch(url):                                   # offline: what capture downloaded
+        def get(url):
             sha = known.get(url)
             if sha and sha[:16] in cache:
                 return cache[sha[:16]].read_bytes()
             raise OSError("not captured")
     else:
-        urls: dict = {}
-        real = fetch
-
-        def fetch(url):
-            import hashlib
-            data = real(url)
-            urls[url] = hashlib.sha1(data).hexdigest()
+        def get(url):
+            data = fetch(url)
+            known[url] = hashlib.sha1(data).hexdigest()
             return data
-    target = deck_ir(pres, fetch=fetch, images=folder / "images", foreign=True)
-    if "urls" in locals():
-        (folder / "urls.json").write_text(json.dumps(urls, indent=0), encoding="utf-8")
+    target = deck_ir(pres, fetch=get, images=folder / "images", foreign=True)
+    if fetch is not None:
+        known_path.write_text(json.dumps(known, indent=0), encoding="utf-8")
+    return target
+
+
+def write_target(folder: Path, pres: dict | None = None, fetch=None) -> dict:
+    target = build_target(folder, pres, fetch)
     (folder / "target.json").write_text(json.dumps(target, indent=1), encoding="utf-8")
     return target
 
@@ -114,9 +118,10 @@ def write_target(folder: Path, pres: dict | None = None, fetch=None) -> dict:
 
 def page_ground(a: np.ndarray) -> np.ndarray:
     """The colour the page mostly is, as the background ink is measured against."""
-    flat = a.reshape(-1, a.shape[-1])
-    colours, counts = np.unique(flat, axis=0, return_counts=True)
-    return np.broadcast_to(colours[counts.argmax()], a.shape)
+    flat = a.reshape(-1, 3).astype(np.int32)
+    packed = (flat[:, 0] << 16) | (flat[:, 1] << 8) | flat[:, 2]   # np.unique(axis=0) took ~0.5 s a page
+    top = int(np.bincount(packed, minlength=1 << 24).argmax())
+    return np.broadcast_to(np.array([top >> 16, (top >> 8) & 255, top & 255], dtype=a.dtype), a.shape)
 
 
 def covered_mask(slide: dict, w: int, h: int) -> np.ndarray:
@@ -190,9 +195,15 @@ def score_pdf(pdf: Path, folder: Path, target: dict, sheets: Path | None) -> lis
 
 # ---------------------------------------------------------------------------------------------- run
 
-def load_target(folder: Path, slides: str | None) -> dict:
-    path = folder / "target.json"
-    target = json.loads(path.read_text(encoding="utf-8")) if path.exists() else write_target(folder)
+def load_target(folder: Path, slides: str | None, run: Path | None = None) -> dict:
+    """The IR as *this* code reads the cached presentation (so a deck_ir change shows in the run),
+    pictures from the capture's cache; written to the run folder, never over the corpus."""
+    if (folder / "presentation.json").exists():
+        target = build_target(folder)
+        if run is not None:
+            (run / "target.json").write_text(json.dumps(target, indent=1), encoding="utf-8")
+    else:
+        target = json.loads((folder / "target.json").read_text(encoding="utf-8"))
     if slides:
         a, _, b = slides.partition("-")
         lo, hi = int(a) - 1, int(b or a)
@@ -215,7 +226,7 @@ def run_one(name: str, iters: int = 0, flow: bool = False, slides: str | None = 
     res: dict = {"deck": name, "tag": tag, "iters": iters, "flow": flow, "slides": slides}
     t0 = time.perf_counter()
     try:
-        target = load_target(folder, slides)
+        target = load_target(folder, slides, run)
         res["n"] = len(target["slides"])
         tex = run / "tree" / "main.tex"
         adopt.bootstrap(target, tex, flow)
