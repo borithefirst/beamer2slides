@@ -171,7 +171,8 @@ class Device:
 
     # ---- CFX_RenderDevice::DrawPath
     def draw_path(self, points, matrix, graph, fill_argb: int, stroke_argb: int, fill_type: int,
-                  stroke: bool, text_mode: bool = False, full_cover: bool = False) -> None:
+                  stroke: bool, text_mode: bool = False, full_cover: bool = False,
+                  rect_aa: bool = False) -> None:
         fill = fill_type != FILL_NONE
         fill_alpha = fill_argb >> 24 if fill else 0
         stroke_alpha = stroke_argb >> 24 if graph is not None else 0
@@ -183,7 +184,7 @@ class Device:
             line = [(p1[0], p1[1], PT_MOVE, False), (p2[0], p2[1], PT_LINE, False)]
             self.driver_draw_path(line, None, DEFAULT_GRAPH, 0, fill_argb, fill_type, False)
             return
-        if stroke_alpha == 0:
+        if stroke_alpha == 0 and not rect_aa:
             rf = R.path_get_rect(points, matrix)
             if rf is not None:
                 self.fill_rect(_adjusted_rect(rf), fill_argb)
@@ -686,6 +687,26 @@ class Status:
         self.transparency, self.in_group = transparency, in_group
         self.initial_alpha, self.ctx = initial_alpha, ctx
         self.stop, self.stopped = stop, False
+        # Type 3 glyph drawing (render_type3): the char being drawn, the text's fill colour,
+        # the fonts being drawn (ProcessType3Text's recursion guard), rect AA (options), and
+        # m_InitialStates' colours, which an object whose colour was never set falls back to.
+        self.type3_char, self.t3_fill, self.rect_aa = None, 0, False
+        self.type3_fonts: tuple = ()
+        self.initial_fill = self.initial_stroke = 0
+
+    def fill_argb(self, obj) -> int:
+        """GetFillArgb (with a Type 3 char: its fill unless the glyph is coloured)."""
+        if self.type3_char is not None and (not self.type3_char.colored or obj.fill is None):
+            return self.t3_fill
+        return _argb(self.initial_fill if obj.fill is None else obj.fill, obj.fill_alpha,
+                     self.transfer(obj))
+
+    def stroke_argb(self, obj) -> int:
+        """GetStrokeArgb."""
+        if self.type3_char is not None and (not self.type3_char.colored or obj.stroke is None):
+            return self.t3_fill
+        return _argb(self.initial_stroke if obj.stroke is None else obj.stroke,
+                     obj.stroke_alpha, self.transfer(obj))
 
     def transfer(self, obj):
         """The object's transfer function (transfer.Transfer) or None."""
@@ -772,20 +793,24 @@ class Status:
         fill_type, stroke = render_shading.path_pattern(self, obj, matrix)
         if fill_type == FILL_NONE and not stroke:
             return
-        tr = self.transfer(obj)
-        fill_argb = _argb(obj.fill, obj.fill_alpha, tr) if fill_type != FILL_NONE else 0
-        stroke_argb = _argb(obj.stroke, obj.stroke_alpha, tr) if stroke else 0
+        fill_argb = self.fill_argb(obj) if fill_type != FILL_NONE else 0
+        stroke_argb = self.stroke_argb(obj) if stroke else 0
         pm = R.concat(obj.matrix, matrix)
         if not _available(pm):
             return
         graph = (F(obj.line_width), obj.line_cap, obj.line_join, F(obj.miter),
                  tuple(F(v) for v in obj.dash), F(obj.dash_phase))
-        self.dev.draw_path(obj.points, pm, graph, fill_argb, stroke_argb, fill_type, stroke)
+        self.dev.draw_path(obj.points, pm, graph, fill_argb, stroke_argb, fill_type, stroke,
+                           text_mode=self.type3_char is not None,
+                           rect_aa=self.rect_aa and fill_type != FILL_NONE)
 
     def process_form(self, obj, matrix) -> None:
         m = R.concat(obj.matrix, matrix)
         status = Status(self.dev, self.transparency, self.in_group, obj.fill_alpha, self.ctx,
                         self.stop)
+        status.rect_aa, status.type3_fonts = self.rect_aa, self.type3_fonts
+        status.initial_fill = self.initial_fill if obj.fill is None else obj.fill
+        status.initial_stroke = self.initial_stroke if obj.stroke is None else obj.stroke
         self.dev.save()
         status.render_list(obj.children, m)
         self.stopped = status.stopped

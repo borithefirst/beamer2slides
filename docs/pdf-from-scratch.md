@@ -277,7 +277,7 @@ Each of these was a diff against PDFium until it was ported:
 
 ## What it does not do
 
-- **Rendering, mostly.** Option 3 below is under way (next section); until Type 3 and
+- **Rendering, mostly.** Option 3 below is under way (next section); until
   TrueType text (and the shadings, image codecs and colour spaces not ported yet) draw, `render` raises PdfError
   on any page holding one, and `api.renders(backend)` is
   False. The pipeline needs renders for backgrounds, crops, ball colours, `_looks_like` and fidelity,
@@ -516,7 +516,7 @@ truncated): the first rendering under a key is the one reused. Rules found on th
   /DW2, clip pages among them): 300 seeds extract equal (objects, bounds, chars), and with
   `--kind cid-cff` all of the first 400 seeds draw and are exact;
   17 of the first 30 are apart when the vertical origins are ignored.
-Refused, each with its reason: Type 3 text (ProcessType3Text, not ported), TrueType glyphs (embedded
+Refused, each with its reason: TrueType glyphs (embedded
 or a system substitute GDI picked), a code whose glyph the font lacks (PDFium falls back to another
 font), a /W2 PDFium would crash on, pattern colours, and text inside a soft mask (a mask device
 renders glyphs in FT_RENDER_MODE_NORMAL). The oracle is `devtools/render_torture_text.py` (`python
@@ -601,7 +601,8 @@ compositor rows. Rules found on the way:
   device's clip box, stretches the image to the unit vectors' lengths (`ceil(hypotf)`) first, and
   samples that through the inverted matrix in 8.8 fixed point (`roundf(x * 256)`, `+ 128` in float32,
   the whole part saturated, the fraction taken with C's `%`), interpolating rows then columns with
-  `>> 8`. Its "normal" branch (|b|, |c| < 0.05) is reachable only with a or d zero, and draws nothing.
+  `>> 8`. Its "normal" branch (|b|, |c| < 0.05) is reachable from an image only with a or d zero, and
+  draws nothing; a Type 3 glyph bitmap reaches it upright (below).
 - **Overprint changes nothing.** CPDF_ImageRenderer picks Darken for a CMYK image under fill
   overprint with /OPM 0, but the AGG driver's StartDIBits drops the blend mode: the pixels are those
   of a Normal draw (31 cases measured).
@@ -615,8 +616,8 @@ to 3.1 on white and clear bitmaps; levels grow the generator a class at a time a
 When images were done: level 4 (filters, masks, inline images) 7,000 seeds, level 5 (CMYK) 4,000 and
 level 6 (everything, the transformer and CMYK JPEGs) 6,000, not one pixel apart; about 0.25% refused,
 all "filters that decode to nothing". Every page of the test decks `07_images` and
-`23_raster_images` is exact, and across the 50 test PDFs 229 of 241 pages render byte for byte (the
-other 12 are refused for TrueType and Type 3 text). `tests/test_pure_pdf.py` keeps 60 seeds of level
+`23_raster_images` is exact, and across the 50 test PDFs 229 of 241 pages rendered byte for byte (the
+other 12 were refused for TrueType and Type 3 text; 231 once Type 3 was ported, below). `tests/test_pure_pdf.py` keeps 60 seeds of level
 6, the level-4 seeds that were once apart and one of each transformer format. Refused, each with its
 reason: JPX, JBIG2 and CCITT data, ICC profiles lcms would open (only data that cannot be a profile
 falls back to the alternate), Default colour spaces, CalGray/CalRGB/Lab/Separation/DeviceN images,
@@ -624,6 +625,48 @@ JPEG /ColorTransform 0 and JPEGs PDFium patches or scales, LZW and mid-chain pre
 that fails or decodes to nothing, images inside soft masks, image blend modes, pattern-filled
 stencils, a soft mask under a soft mask, an 8-bit mask device, and inline images whose DCT or CCITT
 end the parser cannot find as PDFium does.
+
+**Type 3 text** (`pure/render_type3.py`) is ProcessType3Text over CPDF_Type3Font, CPDF_Type3Char,
+CPDF_Type3Cache and CPDF_Type3GlyphMap. A glyph whose procedure is a sole image mask in a d1 font is
+a bitmap: cached per matrix (key `roundf(v·10000)`), stretched between AdjustBlue's snapped lines
+when upright with ink on both edge rows, else through TransformTo, and the bitmaps of one text object
+are composited into an int32 mask and set at the fill colour (a translucent text's alpha counts
+twice, as in PDFium). Any other glyph is its objects - paths, images, shadings, forms and Type 3 text
+- drawn by a render status of its own with rect antialiasing; a translucent text draws each glyph
+into a bitmap over the objects' outer rect first and composites it with SetDIBits. Rules found on the
+way, each from a torture seed:
+- **Widths are floats.** /Widths go through `roundf(float(float(w·xs)·1000))`, d0/d1 values are
+  `float(v·1000)` and the char width is `int(float(width·xunit) + 0.5f)`: 0.5025 rounds to 502 in
+  doubles but 503 in floats (seed 248, a nested glyph a subpixel off).
+- **The char box adds FontMatrix e and f unscaled** (TransformRect over the ×1000 rect, then the raw
+  translation; seed 12, a translucent nested glyph cut by its box).
+- **TransformTo's kNormal branch** (|b|, |c| < 0.05, not a quarter turn) is reached by an upright glyph
+  bitmap whose first or last row is blank: the unit square's closest rect, the bitmap stretched to
+  `ceil(a)` / `floor(a)` by `-ceil(d)` / `-floor(d)` (rounded away from zero) and clipped to the
+  rect's size, placed at its left and top.
+- **Colours**: an image mask in a glyph takes GetFillArgb's Type 3 rule like a path (the text's fill
+  unless the glyph is d0 and sets its own), not the image's own fill.
+- **Recursion.** Text in a font whose glyph is being drawn draws nothing; CPDF_Type3Font::LoadChar
+  returns null at four levels of loading *before* looking in its cache, parses the form first and
+  looks again after (the parse may have loaded the char), and the fonts are the document's
+  (CPDF_DocPageData), so a font a glyph selects by name is the same object. CheckFontMetrics has no
+  guard: a zero /FontBBox is the union of the char boxes, written as it grows, and a glyph that
+  selects its own font while its char loads sees it half built (seeds 241, 583: advances 14.09 vs
+  9.06; seed 482 recursed forever before the document font map).
+The oracle is `devtools/render_torture_type3.py` (`python tools/render_torture_type3.py SEED0 N`):
+made-up Type 3 fonts with d0 and d1 glyphs of bitmaps, paths, coloured paths, forms, image masks,
+8-bit inline images and clipped shadings together, glyphs that show text in other Type 3 fonts or in
+their own, zero and non-zero /FontBBox, FontMatrix values mirrored, skewed, stretched and translated,
+drawn as BT groups under random Tm, Tz, Tc and Tr at zooms 0.5 to 3.1, opaque and translucent, on
+white and clear bitmaps. It compares objects and object bounds before pixels, and shrinks. 6,400
+seeds, none apart (73 refused: 72 bitmap glyphs whose image is not a mask, one glyph too big); across
+the 50 test PDFs 231 of 241 pages now render byte for byte (the 10 left are TrueType text).
+`tests/test_pure_pdf.py` keeps 40 seeds, the shrunk cases and the harvested font of `\textbullet`
+at three zooms. Refused, each with its reason: glyph procedures with a /Matrix, /BBox or /Group,
+named resources in a font without /Resources (PDFium then looks in whichever page last selected
+it), transparency, text clips and non-Type 3 text inside glyphs drawn as forms, fonts nested more
+than two levels, glyph images that are not image masks, pattern colours, transfer functions, and
+Type 3 text inside a soft mask.
 
 ## Risks
 

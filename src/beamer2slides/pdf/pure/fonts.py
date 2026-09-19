@@ -75,6 +75,12 @@ def _int(v, default=0) -> int:
     return default
 
 
+def doc_fonts(doc) -> dict:
+    """The document's fonts by dictionary (CPDF_DocPageData's font map: one font per dictionary,
+    shared by pages, forms and Type 3 glyph procedures)."""
+    return doc.__dict__.setdefault("_b2s_fonts", {})
+
+
 def _num(v, default=0.0) -> float:
     return float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) else default
 
@@ -1511,12 +1517,14 @@ class Type3Font(SimpleFont):
         widths = r(d.get("Widths"))
         if 0 <= start < 256 and isinstance(widths, list):
             for i in range(min(len(widths), 256 - start)):
-                self.widths[start + i] = round_half_away(_num(r(widths[i])) * xs * 1000)
+                # floats: 0.5025 * 1000 is 502.5 there (503), 502.4999 in doubles
+                self.widths[start + i] = round_half_away(float32(float32(float32(_num(r(widths[i]))) * xs) * 1000))
         procs = r(d.get("CharProcs"))
         self.procs = procs if isinstance(procs, dict) else {}
         if r(d.get("Encoding")) is not None:
             self._pdf_encoding(False, False)
         self._chars: dict[int, tuple[int, tuple] | None] = {}
+        self._loading = 0                  # m_CharLoadingDepth
         self.metrics_checked = False
 
     @property
@@ -1524,23 +1532,27 @@ class Type3Font(SimpleFont):
         return True
 
     def check_metrics(self) -> None:
-        """CheckType3FontMetrics, which PDFium runs when a content stream selects the font."""
-        if not self.metrics_checked:
+        """CheckType3FontMetrics, which PDFium runs whenever a content stream selects the font. Once
+        the box and the ascent or descent are set it does nothing; until then (a font whose glyphs
+        select it while its chars load) it runs again, loading chars one level deeper."""
+        if not self.metrics_checked or self.font_bbox == (0, 0, 0, 0) or (self.ascent == 0 and self.descent == 0):
             self.metrics_checked = True
             self._check_metrics()
 
     def _check_metrics(self) -> None:
         if self.font_bbox == (0, 0, 0, 0):
-            # CheckFontMetrics with no face: the union of the char boxes that have a width
-            union = None
+            # CheckFontMetrics with no face: the union of the char boxes that have a width, kept
+            # as it grows (a glyph that selects the font while its char loads sees it partial)
+            first = True
             for code in range(256):
                 l, b, rt, t = self.char_bbox(code)
                 if l == rt:
                     continue
-                union = [l, b, rt, t] if union is None else \
-                    [min(union[0], l), min(union[1], b), max(union[2], rt), max(union[3], t)]
-            if union:
-                self.font_bbox = tuple(union)
+                if first:
+                    self.font_bbox, first = (l, b, rt, t), False
+                else:
+                    u = self.font_bbox
+                    self.font_bbox = (min(u[0], l), min(u[1], b), max(u[2], rt), max(u[3], t))
         if self.ascent == 0 and self.descent == 0:
             l, b, rt, t = self.char_bbox(ord("A"))
             self.ascent = self.font_bbox[3] if b == t else t
@@ -1548,7 +1560,11 @@ class Type3Font(SimpleFont):
             self.descent = self.font_bbox[1] if b == t else b
 
     def _load_char(self, code: int):
-        """CPDF_Type3Font::LoadChar + CPDF_Type3Char: (width, bbox) or None."""
+        """CPDF_Type3Font::LoadChar + CPDF_Type3Char: (width, bbox) or None. The procedure is
+        parsed as a form, which may select fonts (this one too) and load their chars: past
+        kMaxType3FormLevel (4) loads deep, a char is nothing and is not kept."""
+        if self._loading >= 4:
+            return None
         if code in self._chars:
             return self._chars[code]
         result = None
@@ -1557,22 +1573,42 @@ class Type3Font(SimpleFont):
         if isinstance(stream, Stream):
             width, bbox = 0, (0, 0, 0, 0)
             data = self.doc.stream_data(stream)
+            form_box = None
+            if b"Tf" in data:
+                # parsing the form loads the chars of the fonts it selects, whatever the d1 box
+                self._loading += 1
+                try:
+                    form_box = self._form_box(data)
+                finally:
+                    self._loading -= 1
+                if code in self._chars:        # the recursion loaded it
+                    return self._chars[code]
             for op, args in operations(data):
                 if op in ("d0", "d1"):
-                    nums = [_num(a) for a in args]
+                    nums = [float32(_num(a)) for a in args]      # TextUnitToGlyphUnit: floats
                     if op == "d0" and len(nums) >= 2:
-                        width = round_half_away(nums[0] * 1000)
+                        width = round_half_away(float32(nums[0] * 1000))
                     elif op == "d1" and len(nums) >= 6:
-                        width = round_half_away(nums[0] * 1000)
-                        bbox = tuple(round_half_away(v * 1000) for v in nums[2:6])
+                        width = round_half_away(float32(nums[0] * 1000))
+                        bbox = tuple(round_half_away(float32(v * 1000)) for v in nums[2:6])
                     break
             a, b, c, d, e, f = self.matrix
-            xunit = abs(a) if b == 0 else abs(b) if a == 0 else math.hypot(a, b)
-            width = int(width * xunit + 0.5)
+            xunit = abs(a) if b == 0 else abs(b) if a == 0 else \
+                float32(math.sqrt(float32(float32(a * a) + float32(b * b))))
+            width = int(float32(float32(width * xunit) + 0.5))
             l, bt, rt, t = bbox
             if rt <= l or bt >= t:  # no box of its own: the glyph's form's (CalcBoundingBox)
-                l, bt, rt, t = (v * 1000 for v in self._form_box(data))
-            pts = [(a * x + c * y + e * 1000, b * x + d * y + f * 1000) for x in (l, rt) for y in (bt, t)]
+                if form_box is None:
+                    self._loading += 1
+                    try:
+                        form_box = self._form_box(data)
+                    finally:
+                        self._loading -= 1
+                l, bt, rt, t = (float32(v * 1000) for v in form_box)
+            # CPDF_Type3Char::Transform: the font matrix as it is, its translation (text space)
+            # added to the glyph-space box unscaled, in floats
+            pts = [(float32(float32(float32(a * x) + float32(c * y)) + e),
+                    float32(float32(float32(b * x) + float32(d * y)) + f)) for x in (l, rt) for y in (bt, t)]
             xs_, ys_ = [p[0] for p in pts], [p[1] for p in pts]
             result = (width, (round_half_away(min(xs_)), round_half_away(min(ys_)),
                               round_half_away(max(xs_)), round_half_away(max(ys_))))
@@ -1586,7 +1622,8 @@ class Type3Font(SimpleFont):
         objects: list = []
         res = self.doc.resolve(self.dict.get("Resources"))
         try:
-            Parser(self.doc, res if isinstance(res, dict) else {}, objects, {}, {}).parse_page(data, (0, 0, 0, 0))
+            Parser(self.doc, res if isinstance(res, dict) else {}, objects, doc_fonts(self.doc), {}).parse_page(
+                data, (0, 0, 0, 0))
         except RecursionError:
             pass
         rects = [o.rect for o in objects if o.parent is None]

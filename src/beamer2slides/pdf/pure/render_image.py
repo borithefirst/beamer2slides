@@ -567,7 +567,11 @@ def draw(status, obj, matrix) -> None:
     if dib is None:
         return
     alpha = F(obj.fill_alpha)
-    mask_argb = _argb(obj.fill, obj.fill_alpha) if dib.fmt == "mask1" else 0
+    mask_argb = 0
+    if dib.fmt == "mask1":
+        # GetFillArgb: in a Type 3 glyph the text's colour unless a d0 glyph set its own
+        typed3 = obj.fill is None or getattr(status, "type3_char", None) is not None
+        mask_argb = status.fill_argb(obj) if typed3 else _argb(obj.fill, obj.fill_alpha)
     if dib.mask is not None:
         draw_masked(dev, dib, alpha, m, rect)
         return
