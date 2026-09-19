@@ -1509,9 +1509,9 @@ class Type3Font(SimpleFont):
             v = [_num(r(x)) for x in bbox[:4]]
             # in floats, like PDFium: 6 * 0.011f * 1000 is 66 there, 65.9999996 in doubles
             box = tuple(float32(float32(v[k] * (xs, ys)[k % 2]) * 1000) for k in range(4))
-            # CFX_FloatRect::ToFxRect: outer integers
-            self.font_bbox = (math.floor(min(box[0], box[2])), math.floor(min(box[1], box[3])),
-                              math.ceil(max(box[0], box[2])), math.ceil(max(box[1], box[3])))
+            # CFX_FloatRect::ToFxRect: each corner as given, truncated toward zero (37 * 0.01204
+            # * 1000 = 445.48 is 445: metropolis's bullet font); nothing puts the corners in order
+            self.font_bbox = tuple(int(v) for v in box)
         self.widths = [0] * 256
         start = _int(r(d.get("FirstChar")))
         widths = r(d.get("Widths"))

@@ -168,6 +168,7 @@ class PObj:
     children: list = field(default_factory=list)
     group: bool = False            # a form with a transparency group (/Group /S /Transparency)
     active: bool = True
+    marks: tuple = ()              # CPDF_ContentMarks: the MarkItems open around the object, outermost first
 
     @property
     def has_transparency(self) -> bool:
@@ -177,6 +178,33 @@ class PObj:
         if self.type == OBJ_PATH and self.stroke_alpha != 1.0:
             return True
         return self.type == OBJ_FORM and self.group
+
+
+class MarkItem:
+    """CPDF_ContentMarkItem: BMC's (no parameters), BDC's with a dictionary written in the content
+    stream, or BDC's naming one in /Properties - which GetParam looks up again on every call."""
+
+    __slots__ = ("direct", "holder", "name", "doc")
+
+    def __init__(self, direct: dict | None = None, holder: dict | None = None, name: str = "", doc=None):
+        self.direct, self.holder, self.name, self.doc = direct, holder, name, doc
+
+    @staticmethod
+    def dict_for(doc, holder: dict, name: str) -> dict | None:
+        """CPDF_Dictionary::GetDictFor: one reference followed, a stream's dictionary."""
+        value = holder.get(name)
+        if isinstance(value, Ref):
+            value = doc.get(value.num)
+        if isinstance(value, Stream):
+            return value.dict
+        return value if isinstance(value, dict) else None
+
+    def param(self) -> dict | None:
+        if self.direct is not None:
+            return self.direct
+        if self.holder is not None:
+            return self.dict_for(self.doc, self.holder, self.name)
+        return None
 
 
 # ---------------------------------------------------------------------- graphics state
@@ -306,6 +334,7 @@ class _Run:
         self.last_image_name = None
         self.last_image = None
         self.clip_text_list: list = []   # clip_text_list_: this stream's clip-mode texts since ET
+        self.marks: list[tuple] = [()]   # content_marks_stack_, with its sentinel (a form starts afresh)
 
     # ------------------------------------------------------------------ resources
 
@@ -316,9 +345,8 @@ class _Run:
             return None if isinstance(value, Ref) else value
         return value
 
-    def resource(self, category: str, name) -> object:
-        """FindResourceObj: the name in FindResourceHolder's dictionary for the category - this stream's
-        own when it has one (even without the name: the page's is not asked then), else the page's."""
+    def resource_holder(self, category: str) -> dict | None:
+        """FindResourceHolder: this stream's dictionary for the category when it has one, else the page's."""
         holder = None
         for res in (self.resources, self.p.page_resources):
             if not isinstance(res, dict):
@@ -327,7 +355,13 @@ class _Run:
             holder = group.dict if isinstance(group, Stream) else group
             if isinstance(holder, dict) or res is self.p.page_resources:
                 break
-        if not isinstance(holder, dict) or name is None:
+        return holder if isinstance(holder, dict) else None
+
+    def resource(self, category: str, name) -> object:
+        """FindResourceObj: the name in FindResourceHolder's dictionary for the category - this stream's
+        own when it has one (even without the name: the page's is not asked then), else the page's."""
+        holder = self.resource_holder(category)
+        if holder is None or name is None:
             return None
         return self._direct(holder.get(str(name)))
 
@@ -372,6 +406,7 @@ class _Run:
         obj.fill_alpha, obj.stroke_alpha = s.fill_alpha, s.stroke_alpha
         obj.blend, obj.soft_mask = s.blend, s.soft_mask
         obj.smask, obj.smask_matrix, obj.transfer = s.smask, s.smask_matrix, s.transfer
+        obj.marks = self.marks[-1]
         if color:
             obj.fill = s.fill_ref if s.fill_set else None
             obj.stroke = s.stroke_ref if s.stroke_set else None
@@ -476,6 +511,29 @@ class _Run:
             return
         self.state.dash = tuple(_num(self.doc.resolve(v)) for v in dash)
         self.state.dash_phase = self.number(args, 0)
+
+    def op_BMC(self, args):
+        self.marks.append(self.marks[-1] + (MarkItem(),))
+
+    def op_BDC(self, args):
+        """Handle_BeginMarkedContent_Dictionary: a dictionary written here, or a name in the
+        /Properties resources; anything else (or a name not there) opens nothing, so the EMC that
+        follows closes the enclosing sequence."""
+        prop = args[-1] if args else None
+        if isinstance(prop, Name):
+            holder = self.resource_holder("Properties")
+            if holder is None or MarkItem.dict_for(self.doc, holder, str(prop)) is None:
+                return
+            item = MarkItem(holder=holder, name=str(prop), doc=self.doc)
+        elif isinstance(prop, dict):
+            item = MarkItem(direct=prop)
+        else:
+            return
+        self.marks.append(self.marks[-1] + (item,))
+
+    def op_EMC(self, args):
+        if len(self.marks) > 1:
+            self.marks.pop()
 
     def op_gs(self, args):
         gs = self.resource("ExtGState", args[-1]) if args else None
@@ -1076,7 +1134,7 @@ def _op_name(op: str) -> str:
 
 OPS = {}
 for _op in ("q Q cm w J j M d gs g G rg RG k K cs CS sc SC scn SCN m l c v y h re W W* f F f* S s B B* b b* n "
-            "BT ET Tc Tw Tz TL Tr Ts Tf Td TD Tm T* Tj ' \" TJ Do BI sh").split():
+            "BT ET Tc Tw Tz TL Tr Ts Tf Td TD Tm T* Tj ' \" TJ Do BI sh BMC BDC EMC").split():
     OPS[_op] = getattr(_Run, "op_" + _op_name(_op))
 
 

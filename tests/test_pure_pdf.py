@@ -738,6 +738,19 @@ def test_the_pure_renderer_survives_type3_torture_seeds():
     assert not apart, f"seeds apart: {apart}"
 
 
+def test_a_type3_font_box_is_truncated_toward_zero():
+    """CPDF_Type3Font::Load takes /FontBBox through the font matrix to glyph units and ToFxRect: each
+    corner truncated toward zero, not the rectangle's outer box (metropolis's bullet font: 37 x
+    0.01204 x 1000 = 445.48 is 445, not 446; -5 gives -60, not -61). The loose char boxes show it."""
+    from beamer2slides.devtools.render_torture_type3 import pdf_bytes
+    content, objects, fonts = _type3_pdf({"T0": [b"0 0 d0\n0 0 0.5 0.5 re f"]},
+                                         b"BT /T0 20 Tf 20 60 Td <0000> Tj ET", b"0.01204 0 0 0.01204 0 0")
+    objects = [o.replace(b"/FontBBox [0 0 1 1]", b"/FontBBox [-5 -5 36 37]") for o in objects]
+    data = pdf_bytes(content, objects, fonts)
+    a, b = pdf.resolve("pure").open(data)[0], pdf.resolve("pdfium").open(data)[0]
+    assert [dataclasses.astuple(c) for c in a.chars()] == [dataclasses.astuple(c) for c in b.chars()]
+
+
 def _needs_foxit():
     import sys
     from beamer2slides.pdf.pure import foxit
@@ -1505,6 +1518,21 @@ def test_the_ucrt_qsort_port_sorts():
         a = [(r.randrange(5), i) for i in range(n)]
         msvc_qsort(a, lambda x, y: x[0] > y[0], lambda x, y: x[0] == y[0])
         assert [k for k, _ in a] == sorted(k for k, _ in a)
+
+
+def test_actual_text_reads_as_pdfium_reads_it():
+    """/ActualText (devtools/marked_content_torture.py): an object in a marked-content sequence
+    whose dictionary carries it gives that text, sliced over its rectangle, and the sequence's later
+    objects give nothing (the same dictionary object: PreMarkedContent's kDone). Before the port, the
+    arabic-training deck of the adopt corpus read a U+FFFD where Word wrote /ActualText for a
+    ligature; with PreMarkedContent off 143 of 300 seeds are apart, with every /ActualText line
+    reversed like glyphs (CloseTempLine keeps its logical order) 29."""
+    import sys
+    from beamer2slides.devtools.marked_content_torture import first_diff
+    if sys.platform != "win32":
+        pytest.skip("Helvetica is drawn with GDI's Arial here; elsewhere PDFium asks fontconfig")
+    apart = [(s, d) for s in (3, 30, 36, *range(60)) if (d := first_diff(s))]
+    assert not apart, f"seeds apart (python tools/marked_content_torture.py SEED 1): {apart}"
 
 
 @pytest.mark.parametrize("direction", ["", "R2L"])
