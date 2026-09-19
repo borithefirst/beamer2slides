@@ -1376,6 +1376,11 @@ def _draw_pattern(status, obj, matrix, rec, stroke: bool) -> None:
                 if dev.clip is None:
                     from .render import Clip
                     dev.clip = Clip((0, 0, dev.w, dev.h))
+                if F(R.x_unit(pm) + R.y_unit(pm)) == 0.0:
+                    # RasterizeStroke's unit would be 1 / 0: a stroke of infinite width through a
+                    # matrix that maps everything to one point, NaN vertices in AGG
+                    from ..api import PdfError
+                    raise PdfError("the pure reader cannot render a pattern stroked through a matrix of zeros yet")
                 rz = R.Rasterizer(dev.w, dev.h)
                 rz.add_path(R.stroke_vertices(R.build_path(obj.points, None), pm, F(obj.line_width), obj.line_cap,
                                               obj.line_join, F(obj.miter), tuple(F(v) for v in obj.dash),

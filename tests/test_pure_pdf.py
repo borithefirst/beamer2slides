@@ -113,8 +113,7 @@ def test_extract_and_classify_on_the_pure_reader_write_pdfiums_deck():
 
 @built
 def test_the_pure_reader_refuses_a_page_it_cannot_draw_exactly():
-    """Text and shadings are not drawn yet (beamer's soft masks hold shadings): the page raises
-    instead of coming back without them."""
+    """Text is not drawn yet: the page raises instead of coming back without it."""
     doc = pdf.resolve("pure").open(DECKS[0])
     with pytest.raises(PdfError, match="cannot render .+ yet"):
         doc[0].render(1.0)
@@ -251,6 +250,119 @@ def test_the_pure_renderer_refuses_what_it_cannot_draw_exactly_yet():
     page = PureBackend().open(pdf_bytes(b"q /S0 gs 0 0 1 rg 0 0 200 150 re f Q", mask))[0]
     with pytest.raises(PdfError, match="transfer functions"):
         page.render(1.0)
+
+
+# ---------------------------------------------------------------------- shadings
+
+_TINT = b"<< /FunctionType 2 /Domain [0 1] /C0 [0.1] /C1 [1] /N 1.7 >>"
+_PS = b"{ dup 360 mul sin abs 1 index 3 exp 2 index 0.5 gt { 0.2 } { 0.9 } ifelse 4 -1 roll pop }"
+_SAMPLES = bytes(range(0, 256, 37)) * 3
+# (page content, objects, resources, zoom, transparent, forms): as render_torture_shading.pdf_bytes
+# takes them. Objects: 1 a sampled function, 2 a PostScript one, 3 a stitching of exponentials.
+_SHADING_OBJECTS = [
+    b"<< /FunctionType 0 /Domain [0 1] /Range [0 1 0 1 0 1] /Size [7] /BitsPerSample 8 /Decode [0 1 1 0 0.2 0.9]"
+    b" /Length %d >>\nstream\n" % len(_SAMPLES[:21]) + _SAMPLES[:21] + b"\nendstream",
+    b"<< /FunctionType 4 /Domain [0 1] /Range [0 1 0 1 0 1] /Length %d >>\nstream\n" % len(_PS) + _PS + b"\nendstream",
+    b"<< /FunctionType 3 /Domain [0 1] /Functions [<< /FunctionType 2 /Domain [0 1] /C0 [0 0.2 1 0] /C1 [1 0 0 0.3]"
+    b" /N 1 >> << /FunctionType 2 /Domain [0 1] /C0 [0 1 0 0] /C1 [0 0 0 1] /N 2 >>] /Bounds [0.4] /Encode [0 1 1 0] >>",
+    b"<< /FunctionType 4 /Domain [0 1 0 1] /Range [0 1 0 1 0 1] /Length 19 >>\nstream\n{ 2 copy add 2 div }\nendstream",
+]
+
+
+def _shading_resources(shadings: dict, patterns: dict | None = None) -> bytes:
+    out = b" /Shading << " + b" ".join(b"/%s %s" % kv for kv in shadings.items()) + b" >>"
+    if patterns:
+        out += b" /Pattern << " + b" ".join(b"/%s %s" % kv for kv in patterns.items()) + b" >>"
+    return out
+
+
+SHADING_CASES = {
+    # the radial Draw loop: a shrinking circle is `bDecreasing` only when the radius falls by more
+    # than the *truncated* distance between the centres (static_cast<int>(hypotf(dx, dy))): here
+    # 3.2 against 3.5, which is decreasing to PDFium and would not be with the distance kept whole
+    "radial_decreasing_by_the_truncated_distance": (
+        b"q 1 0 0 1 20 10 cm /S0 sh Q", _SHADING_OBJECTS, _shading_resources({
+            b"S0": b"<< /ShadingType 3 /ColorSpace /DeviceCMYK /Coords [80 60 13.2 83.5 60 10] /Extend [true true]"
+                   b" /Function 3 0 R >>"}), 3.1, False, ()),
+    # a sampled function (Decode, 7 samples) and a PostScript one (sin, exp, roll, ifelse) through
+    # a Separation and a DeviceN colour space, clipped, on a clear bitmap
+    "sampled_and_postscript_functions": (
+        b"q 20 20 160 110 re W n /S0 sh Q q 0.8 0 0.3 0.7 30 20 cm /S1 sh Q", _SHADING_OBJECTS, _shading_resources({
+            b"S0": b"<< /ShadingType 2 /ColorSpace [/Separation /Ink /DeviceRGB 1 0 R] /Coords [10 10 190 140]"
+                   b" /Function << /FunctionType 2 /Domain [0 1] /C0 [0] /C1 [1] /N 1 >> >>",
+            b"S1": b"<< /ShadingType 3 /ColorSpace [/DeviceN [/A] /DeviceRGB 2 0 R] /Coords [60 60 0 90 70 50]"
+                   b" /Domain [0.2 0.9] /Function %s /Extend [false true] >>" % _TINT}), 1.37, True, ()),
+    # shading patterns: a fill with /Matrix and /Background and a /BBox, a translucent stroke, and
+    # a pattern used inside a form, whose /Matrix is the pattern's parent matrix
+    "patterns_filled_stroked_and_in_forms": (
+        b"q /Pattern cs /P0 scn 10 10 180 130 re f Q q /A0 gs /Pattern CS /P1 SCN 9 w 1 J 20 120 m 180 30 l S Q"
+        b" q /X0 Do Q", _SHADING_OBJECTS, _shading_resources({}, {
+            b"P0": b"<< /PatternType 2 /Matrix [0.7 0.2 -0.3 0.9 20 5] /Shading << /ShadingType 2 /ColorSpace /DeviceGray"
+                   b" /Coords [0 0 120 0] /Function << /FunctionType 2 /Domain [0 1] /C0 [0.1] /C1 [0.9] /N 1 >>"
+                   b" /Background [0.4] /BBox [10 10 150 100] >> >>",
+            b"P1": b"<< /PatternType 2 /Shading << /ShadingType 3 /ColorSpace /DeviceCMYK /Coords [100 75 5 100 75 90]"
+                   b" /Function 3 0 R >> >>"}),
+        2.0, False, [(b"/BBox [0 0 100 80] /Matrix [0.5 0.3 -0.2 1.1 40 20]",
+                      b"/Pattern cs /P1 scn 0 0 100 80 re f")]),
+}
+
+
+@pytest.mark.parametrize("name", sorted(SHADING_CASES))
+def test_the_pure_renderer_draws_pdfiums_shadings(name):
+    from beamer2slides.devtools.render_torture_shading import compare
+    content, objects, resources, zoom, transparent, forms = SHADING_CASES[name]
+    n, a, _, _ = compare(content, objects, resources, zoom, transparent, forms)
+    assert n == 0
+    assert len({tuple(p) for p in a.reshape(-1, a.shape[2])}) > 10   # a gradient, not a blank page
+
+
+def test_the_pure_renderer_survives_shading_torture_seeds():
+    """A slice of the random shading pages the renderer was made exact on (12,000 seeds when it
+    was written, 8% of them refused): any pixel apart fails."""
+    from beamer2slides.devtools.render_torture_shading import run
+    stats = run(0, 60, verbose=False)
+    assert not stats["failed"], f"seeds apart (python tools/render_torture_shading.py SEED 1): {stats['failed']}"
+    assert stats["drawn"] >= 50
+
+
+@built
+def test_the_pure_renderer_draws_the_test_decks_shadings():
+    """Beamer's shadings (block title bars, balls, shadows: `sh` in forms under soft masks), with
+    only paths, forms and shadings left on: every page that holds one, pixel for pixel (41 pages of
+    14 decks when this was written; one deck here)."""
+    import numpy as np
+
+    from beamer2slides.pdf.api import OBJ_FORM, OBJ_PATH, OBJ_SHADING
+    data = DECKS[0].read_bytes()
+    ref, pure = pdf.resolve("pdfium").open(data), pdf.resolve("pure").open(data)
+    seen = 0
+    for i in range(len(ref)):
+        objs = ref[i].objects()
+        if not any(o.type == OBJ_SHADING for o in objs):
+            continue
+        off = [k for k, o in enumerate(objs) if o.type not in (OBJ_PATH, OBJ_FORM, OBJ_SHADING)]
+        for page in (ref[i], pure[i]):
+            page.set_active(off, False)
+        a, b = ref[i].render(1.37), pure[i].render(1.37)
+        assert np.array_equal(a, b), f"page {i}"
+        seen += 1
+    assert seen
+
+
+@pytest.mark.parametrize("shading, reason", [
+    # Validate fails (2 functions for 3 components): PDFium's Load returns false once and true on a
+    # second call (shading_type_ is kept), so what is drawn depends on history
+    (b"<< /ShadingType 2 /ColorSpace /DeviceRGB /Coords [0 0 200 0] /Function [3 0 R 3 0 R] >>", "fails validation"),
+    (b"<< /ShadingType 2 /ColorSpace [/Lab << /WhitePoint [0.95 1 1.09] >>] /Coords [0 0 200 0] /Function 3 0 R >>",
+     "Lab colour spaces"),
+    (b"<< /ShadingType 1 /ColorSpace /DeviceRGB /Function 4 0 R >>", "function-based and mesh shadings"),
+])
+def test_the_pure_renderer_refuses_shadings_it_cannot_draw_exactly(shading, reason):
+    from beamer2slides.devtools.render_torture_shading import pdf_bytes
+    from beamer2slides.pdf.pure.backend import PureBackend
+    data = pdf_bytes([b"/S0 sh"], _SHADING_OBJECTS, _shading_resources({b"S0": shading}))
+    with pytest.raises(PdfError, match=reason):
+        PureBackend().open(data)[0].render(1.0)
 
 
 # ---------------------------------------------------------------------- PDFium's rules, one by one

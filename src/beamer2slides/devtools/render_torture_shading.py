@@ -89,6 +89,9 @@ class Builder:
     # ---- numbers
     def f(self, lo=0.0, hi=1.0) -> bytes:
         r = self.r
+        if r.random() < 0.02:
+            return r.choice([b"0", b"-0", b"0.0000001", b"100000", b"-100000", b"340000000000000000000000000000000000000",
+                             b".5", b"-.0001", b"16777217", b"0.1", b"2", b"-3"])
         v = r.choice([r.uniform(lo, hi), r.uniform(lo, hi), round(r.uniform(lo, hi), 1), lo, hi,
                       r.uniform(lo - 0.5, hi + 0.5)])
         return (b"%.4f" % v).rstrip(b"0").rstrip(b".") if r.random() < 0.8 else b"%.5g" % v
@@ -117,7 +120,7 @@ class Builder:
             return self.add(body) if r.random() < 0.5 else body
         if kind == 3:
             k = r.randint(1, 4)
-            ds = [float(x) for x in dom[1:-1].split()]
+            ds = [float(x) for x in dom[1:-1].split()] + [0.0, 1.0]
             cuts = sorted(r.uniform(ds[0], ds[1]) for _ in range(k - 1))
             if r.random() < 0.2 and cuts:
                 cuts[0] = ds[0]
@@ -232,7 +235,20 @@ class Builder:
                 r0 = b"0"
             if r.random() < 0.1:
                 r0, r1 = r1, r0
+            if r.random() < 0.12:
+                # a shrinking circle whose radius falls by more than the whole part of the distance
+                # its centre moves, less than the distance: PDFium truncates the distance
+                cx, cy, dist, ang = r.uniform(20, 180), r.uniform(20, 130), r.uniform(1, 40), r.uniform(0, 6.3)
+                end = r.uniform(0, 30)
+                x0, y0, x1, y1 = (b"%.4f" % v for v in (cx, cy, cx + dist * np.cos(ang), cy + dist * np.sin(ang)))
+                r0, r1 = b"%.4f" % (end + r.uniform(np.floor(dist), dist)), b"%.4f" % end
             coords = [x0, y0, r0, x1, y1, r1]
+        wild = r.random() < 0.15
+        if wild and r.random() < 0.2:
+            coords = coords[:r.randrange(len(coords))]
+        if wild and r.random() < 0.1:
+            cs, n = r.choice([(b"[/Indexed /DeviceRGB 1 <FF000000FF00>]", 1), (b"[/Lab << /WhitePoint [0.95 1 1.09] >>]", 3),
+                              (b"[/CalRGB << /WhitePoint [0.95 1 1.09] >>]", 3), (b"/Pattern", 1)])
         body = b"<< /ShadingType %d /ColorSpace %s /Coords %s" % (stype, cs, self.arr(coords))
         if r.random() < 0.7:
             body += b" /Domain " + dom
@@ -240,15 +256,24 @@ class Builder:
             d0, d1 = 0, 1
         if r.random() < 0.7:
             body += b" /Extend [%s %s]" % (r.choice([b"true", b"false"]), r.choice([b"true", b"false"]))
+        elif wild and r.random() < 0.3:
+            body += r.choice([b" /Extend [true]", b" /Extend [1 1]", b" /Extend true"])
         fdom = b"[%g %g]" % (d0, d1) if r.random() < 0.8 else b"[0 1]"
-        if n > 1 and r.random() < 0.3:
-            body += b" /Function [%s]" % b" ".join(self.function(1, 1, fdom) for _ in range(n))
+        if wild and r.random() < 0.15:
+            fdom = r.choice([b"[1 0]", b"[0]", b"[0 0]", b"[0 1 0 1]"])
+        outs = n
+        if wild and r.random() < 0.1:
+            outs = r.choice([1, 2, 3, 4])
+        if outs > 1 and r.random() < 0.3:
+            body += b" /Function [%s]" % b" ".join(self.function(1, 1, fdom) for _ in range(outs))
         else:
-            body += b" /Function %s" % self.function(n, 0, fdom)
+            body += b" /Function %s" % self.function(outs, 0, fdom)
         if r.random() < 0.25:
-            body += b" /Background " + self.arr([self.f() for _ in range(n)])
+            k = n - 1 if wild and r.random() < 0.3 else n
+            body += b" /Background " + self.arr([self.f() for _ in range(k)])
         if r.random() < 0.25:
-            body += b" /BBox " + self.arr([self.f(-20, 220) for _ in range(4)])
+            k = 3 if wild and r.random() < 0.3 else 4
+            body += b" /BBox " + self.arr([self.f(-20, 220) for _ in range(k)])
         if r.random() < 0.2:
             body += b" /AntiAlias true"
         body += b" >>"
@@ -311,6 +336,9 @@ def case(seed: int):
         if r.random() < 0.7:
             m = [r.choice([1, 0, -1, r.uniform(-2, 2)]) for _ in range(4)] + [r.uniform(-60, 60), r.uniform(-60, 60)]
             entries += b" /Matrix [" + b" ".join(b"%.4f" % v for v in m) + b"]"
+        if r.random() < 0.25:
+            entries += r.choice([b" /Group << /S /Transparency >>", b" /Group << /S /Transparency /I true >>",
+                                 b" /Group << /S /Transparency /K true >>"])
         forms.append((entries, b"\n".join(random_group(r, b, k) for _ in range(r.randint(1, 3)))))
     content = b"\n".join(random_group(r, b, len(forms)) for _ in range(r.randint(1, 4)))
     return content, forms, b.objects, b.resources(), r.choice([0.5, 1, 1.37, 2, 3.1]), r.random() < 0.3

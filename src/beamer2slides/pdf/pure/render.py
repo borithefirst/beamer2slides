@@ -10,7 +10,8 @@ out equal to PDFium's, not merely close. Each function names the PDFium code it 
 Drawn: paths (fill, stroke, dashes, constant alpha, fill-and-stroke with a translucent stroke
 through DrawFillStrokePath's knockout sub-bitmap), clip paths, forms, and transparency
 (ProcessTransparency: soft masks, transparency groups, group alpha, blend modes;
-`render_transparency.py`). Not yet: text, images, shadings, patterns, transfer functions; a page holding any
+`render_transparency.py`), axial and radial shadings and shading patterns (`render_shading.py`).
+Not yet: text, images, tiling patterns, transfer functions; a page holding any
 of them raises PdfError (`unported`) rather than coming back drawn differently."""
 
 from __future__ import annotations
