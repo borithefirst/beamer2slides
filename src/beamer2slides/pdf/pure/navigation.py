@@ -21,13 +21,15 @@ CPDF_Reference. Those accessors are the point: each one resolves exactly as far 
   (CPDF_Null), and they differ: a null value in a name tree ends a search.
 
 Text is PDFium's WideString on Windows, where wchar_t holds one UTF-16 unit: a str of code units
-(lone surrogates kept), compared unit by unit (`WideString::Compare`).
+(lone surrogates kept), compared unit by unit (`WideString::Compare`). Where wchar_t is 32 bits
+the comparison sees code points instead (`wide`); the API gives UTF-16 back either way.
 """
 
 from __future__ import annotations
 
 import math
 import struct
+import sys
 
 from .syntax import Name, Ref, Stream, String
 
@@ -407,12 +409,33 @@ def _traversed_array(pdf, a: list, seen: set) -> bool:
                                            if isinstance(item, (dict, list, Stream)))
 
 
+WCHAR_32 = sys.platform != "win32"
+
+
+def wide(units: str) -> str:
+    """What a WideString holds (and Compare compares): the UTF-16 units where wchar_t is 16 bits
+    (Windows), code points elsewhere, where FromUTF16LE/BE fuse each surrogate pair (lone ones
+    are kept)."""
+    if not WCHAR_32 or not any("\ud800" <= c <= "\udbff" for c in units):
+        return units
+    out, i = [], 0
+    while i < len(units):
+        c = units[i]
+        if "\ud800" <= c <= "\udbff" and i + 1 < len(units) and "\udc00" <= units[i + 1] <= "\udfff":
+            out.append(chr(0x10000 + ((ord(c) - 0xD800) << 10) + (ord(units[i + 1]) - 0xDC00)))
+            i += 2
+        else:
+            out.append(c)
+            i += 1
+    return "".join(out)
+
+
 def _node_limits(pdf, limits: list) -> tuple[str, str]:
     """GetNodeLimits: pads /Limits to two empty strings and puts its ends in order, in place."""
     while len(limits) < 2:
         limits.append(String(b""))
     obj0, obj1 = limits[0], limits[1]
-    left, right = unicode_text(pdf, obj0), unicode_text(pdf, obj1)
+    left, right = wide(unicode_text(pdf, obj0)), wide(unicode_text(pdf, obj1))
     if left > right:
         left, right = right, left
         limits[0], limits[1] = obj1, obj0
@@ -429,13 +452,14 @@ def _search_by_name(pdf, node: dict, name: str, level: int, seen: set):
         names = None
     if limits is not None and _traversed_array(pdf, limits, seen):
         limits = None
+    name = wide(name)
     if limits is not None:
         left, right = _node_limits(pdf, limits)
         if name < left or name > right:
             return NOTHING
     if names is not None:
         for i in range(len(names) // 2):
-            value = unicode_text_at(pdf, names, 2 * i)
+            value = wide(unicode_text_at(pdf, names, 2 * i))
             if value > name:
                 break
             if value < name:

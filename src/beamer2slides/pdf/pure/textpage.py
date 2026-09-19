@@ -27,7 +27,7 @@ import math
 
 from . import unicode_data
 from .content import OBJ_FORM, OBJ_TEXT, PObj, f32m, f32p, item_origin
-from .navigation import pdf_decode_text
+from .navigation import pdf_decode_text as _decode_units, wide
 from .syntax import F32X2, F32X3, F32X4, F32X6, F32X8, Name, Ref, String, float32 as f32
 from .fonts import INVALID_CODE
 
@@ -38,6 +38,13 @@ TIE = 1e-6  # relative: well under float32's resolution
 DEFAULT_FONT_SIZE = 1.0
 IDENTITY = (1.0, 0.0, 0.0, 1.0, 0.0, 0.0)
 EMPTY = (0.0, 0.0, 0.0, 0.0)
+
+
+def pdf_decode_text(data: bytes) -> str:
+    """PDF_DecodeText as the WideString it makes: UTF-16 units where wchar_t is 16 bits, code
+    points elsewhere - so an astral /ActualText character is two wchar_t that pass the
+    `>= 0xFFFD` skip on Windows and one that doesn't on Linux and macOS."""
+    return wide(_decode_units(data))
 
 
 # ---------------------------------------------------------------------- CFX_BidiChar / CFX_BidiString

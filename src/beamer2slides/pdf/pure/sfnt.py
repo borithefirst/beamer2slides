@@ -22,6 +22,7 @@ does not follow, so this is a port of the FreeType PDFium pins (656cb777):
 from __future__ import annotations
 
 import struct
+import sys
 
 from . import psnames_data
 
@@ -587,9 +588,14 @@ class PsUnicodes:
                 maps.append((extra_u, extra[k]))
         # compare_uni_maps: by base value, a base glyph before its variants. Two glyphs with one
         # value compare equal, and which of them the search meets is up to ft_qsort = the C
-        # library's qsort, which on Windows is the UCRT's (not stable)
-        msvc_qsort(maps, lambda a, b: (a[0] & ~VARIANT_BIT, a[0]) > (b[0] & ~VARIANT_BIT, b[0]),
-                   lambda a, b: (a[0] & ~VARIANT_BIT, a[0]) == (b[0] & ~VARIANT_BIT, b[0]))
+        # library's qsort: on Windows the UCRT's (not stable, ported), elsewhere called for real
+        def key(m):
+            return m[0] & ~VARIANT_BIT, m[0]
+        if sys.platform == "win32":
+            msvc_qsort(maps, lambda a, b: key(a) > key(b), lambda a, b: key(a) == key(b))
+        else:
+            from .crt import qsort
+            qsort(maps, lambda a, b: (key(a) > key(b)) - (key(a) < key(b)))
         self.maps = maps
 
     def __bool__(self) -> bool:

@@ -34,6 +34,26 @@ def float_fn(name: str, n: int):
     return fn
 
 
+_CMP = ctypes.CFUNCTYPE(ctypes.c_int, ctypes.POINTER(ctypes.c_int), ctypes.POINTER(ctypes.c_int))
+
+
+def qsort(a: list, cmp) -> None:
+    """The C runtime's own qsort, in place (`cmp(x, y)` -> <0, 0, >0): which of two equal items comes
+    first is the library's (glibc's merge sort keeps their order, the BSD and UCRT quicksorts don't).
+    The C side sorts the indices of `a`, so it sees the same comparisons and makes the same moves."""
+    n = len(a)
+    if n < 2:
+        return
+    fn = lib().qsort
+    fn.restype = None
+    fn.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_size_t, _CMP]
+    idx = (ctypes.c_int * n)(*range(n))
+    items = list(a)
+    callback = _CMP(lambda p, q: max(-1, min(1, cmp(items[p[0]], items[q[0]]))))
+    fn(idx, n, ctypes.sizeof(ctypes.c_int), callback)
+    a[:] = [items[i] for i in idx]
+
+
 # static_cast from float to an integer is undefined out of range, and the CPU decides what comes out:
 # x86's cvttss2si gives INT_MIN (the 64-bit form's low half, for uint32), arm64's fcvtzs/fcvtzu
 # saturate and turn NaN into 0 (pypdfium2's macOS wheel is arm64)

@@ -15,6 +15,7 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 OUT = HERE / "out"
+RERUN = re.compile(r"Rerun to get|rerun LaTeX|Label\(s\) may have changed|may have changed\. Rerun", re.I)
 
 
 def engine_for(tex: Path) -> str:
@@ -34,13 +35,21 @@ def compile_deck(tex: Path, handout: bool) -> Path:
         f"-output-directory={OUT}",
         prefix + r"\input{" + tex.name + "}",
     ]
-    # Two passes so frame numbers and navigation are resolved.
-    for _ in range(2):
+    # At least two passes so frame numbers and navigation are resolved, then more while
+    # the log asks for one: TeX Live's tikzmark needs a third before `remember picture`
+    # drawings land on their marks (else deck 19's arrow stands at the end of its line).
+    # The .aux settling is the test, as in latexmk: tikzmark does not always say so.
+    log, aux = OUT / f"{jobname}.log", OUT / f"{jobname}.aux"
+    before = None
+    for n in range(5):
         result = subprocess.run(cmd, cwd=HERE, capture_output=True, text=True, errors="replace")
+        text = log.read_text(errors="replace") if log.exists() else result.stdout
         if result.returncode != 0:
-            log = OUT / f"{jobname}.log"
-            tail = log.read_text(errors="replace")[-3000:] if log.exists() else result.stdout[-3000:]
-            raise RuntimeError(f"{tex.name} ({'handout' if handout else 'normal'}) failed:\n{tail}")
+            raise RuntimeError(f"{tex.name} ({'handout' if handout else 'normal'}) failed:\n{text[-3000:]}")
+        after = aux.read_bytes() if aux.exists() else b""
+        if n >= 1 and after == before and not RERUN.search(text):
+            break
+        before = after
     return OUT / f"{jobname}.pdf"
 
 
