@@ -575,6 +575,8 @@ def test_the_side_a_boxs_words_start_on_says_whose_side_insets_an_import_kept():
     assert imported([6.1, 6.5, 7.3])["inset_y"] == PPTX_INSET_Y
     assert "inset_x" not in imported([6.1, 6.5, 7.3]), "Slides' own sides"
     assert imported([3.3, 3.5, 6.9])["inset_x"] == PPTX_INSET_Y, "comps-analysis: PowerPoint's"
+    # words never start outside their box: arabic-training's negative readings are other ink
+    assert "inset_x" not in imported([-3.14, -1.4, -0.95, 5.47, 5.47, 6.62]), "arabic-training"
     assert imported([])["inset_x"] == PPTX_INSET_Y, "nothing to go by: the import's"
 
 

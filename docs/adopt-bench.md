@@ -313,3 +313,11 @@ first line's height (multi-line cells drawn above the table, hebrew 7 -0.036); o
 (a width, not a placement); arabic-training's two Calibri Arabic boxes measured at -2.3 keep Slides'
 insets, and their last lines do match the deck, so what Slides does with them is not known; the
 Arabic first lines stand 0.5-1.7 pt apart from the deck, fallback glyphs taller than the line.
+
+## Both merged (`m4-a` -> `m5-b`)
+
+The two studies above together: boxes 0.9704 -> 0.9719, page 0.9703, pixels 0.9844, mean per deck
+0.9551. They met in one place: the devfest study's side readings added a -3.1 pt one for
+arabic-training (a box whose words cannot start outside it), which took the deck's median side from
+5.5 to 2.3 and gave it PowerPoint's 3.6 pt sides (0.941 -> 0.917). `pptx_insets` now drops side
+readings below 0; nothing else moved.

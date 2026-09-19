@@ -861,7 +861,10 @@ def pptx_insets(slides: list[dict], drifts: list[tuple[dict, float]], sides: lis
     votes = [d for d in sane if d < want / 2]
     whole = len(sane) >= 3 and len(votes) >= 0.6 * len(sane)
     # hebrew-lesson is imported whole too, and its right-to-left words start 3.2 pt further in than
-    # 3.6 pt of inset put them (every box read 5.4-7.4 pt, like Slides' own): its sides are Slides'
+    # 3.6 pt of inset put them (every box read 5.4-7.4 pt, like Slides' own): its sides are Slides'.
+    # Words cannot start outside their box, so a side read below 0 is something else's ink
+    # (arabic-training's -3.1, -1.4 and -0.95 took its median from 5.5 to 2.3: boxes -0.024)
+    sides = [x for x in sides if x > 0]
     narrow = not sides or statistics.median(sides) < SIDE_SPLIT
     measured = {id(e) for e, _ in drifts}
     chosen = {id(e) for e in hits}
