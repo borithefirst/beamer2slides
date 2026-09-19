@@ -26,8 +26,13 @@ MEDIA = (0, 0, 200, 150)
 
 def pdf_bytes(pages: list[bytes], objects: list[bytes], resources: bytes, forms=(), media=MEDIA) -> bytes:
     """`render_torture.pdf_bytes` with `objects` numbered 1.. in front (the resources refer to
-    them) and `resources` added to every resource dictionary."""
+    them) and `resources` added to every resource dictionary; `resources` may be a pair (entries,
+    ExtGState entries added to render_torture's)."""
     objs: list[bytes] = list(objects)
+    extgs = EXTGS
+    if isinstance(resources, tuple):
+        resources, more = resources
+        extgs = EXTGS[:-2] + more + b" >>"
 
     def add(b: bytes) -> int:
         objs.append(b)
@@ -35,11 +40,11 @@ def pdf_bytes(pages: list[bytes], objects: list[bytes], resources: bytes, forms=
 
     xids: list[int] = []
     for entries, content in forms:
-        sub = b"<< " + EXTGS + resources + b" /XObject << " + \
+        sub = b"<< " + extgs + resources + b" /XObject << " + \
             b" ".join(b"/X%d %d 0 R" % (j, x) for j, x in enumerate(xids)) + b" >> >>"
         xids.append(add(b"<< /Type /XObject /Subtype /Form /Resources %s %s /Length %d >>\nstream\n"
                         % (sub, entries, len(content)) + content + b"\nendstream"))
-    res = b"<< " + EXTGS + resources + b" /XObject << " + \
+    res = b"<< " + extgs + resources + b" /XObject << " + \
         b" ".join(b"/X%d %d 0 R" % (j, x) for j, x in enumerate(xids)) + b" >> >>"
     content_ids = [add(b"<< /Length %d >>\nstream\n" % len(c) + c + b"\nendstream") for c in pages]
     pages_obj = len(objs) + 1 + len(pages)
@@ -65,14 +70,33 @@ def pdf_bytes(pages: list[bytes], objects: list[bytes], resources: bytes, forms=
 # ---------------------------------------------------------------------- random objects
 
 
+class _Bits:
+    """A big-endian bit writer (mesh shading streams)."""
+
+    def __init__(self):
+        self.v, self.n = 0, 0
+
+    def put(self, value: int, bits: int) -> None:
+        self.v = (self.v << bits) | (value & ((1 << bits) - 1))
+        self.n += bits
+
+    def align(self) -> None:
+        self.put(0, -self.n % 8)
+
+    def bytes(self) -> bytes:
+        pad = -self.n % 8
+        return (self.v << pad).to_bytes((self.n + pad) // 8, "big")
+
+
 class Builder:
     """Indirect objects (functions, shadings, patterns) and the resource entries naming them."""
 
-    def __init__(self, r: random.Random):
-        self.r = r
+    def __init__(self, r: random.Random, mode: str = "classic"):
+        self.r, self.mode = r, mode
         self.objects: list[bytes] = []
         self.shadings: list[bytes] = []
         self.patterns: list[bytes] = []
+        self.extgs: list[bytes] = []
 
     def add(self, b: bytes) -> bytes:
         self.objects.append(b)
@@ -84,7 +108,74 @@ class Builder:
             out += b" /Shading << " + b" ".join(b"/Sh%d %s" % (i, s) for i, s in enumerate(self.shadings)) + b" >>"
         if self.patterns:
             out += b" /Pattern << " + b" ".join(b"/P%d %s" % (i, s) for i, s in enumerate(self.patterns)) + b" >>"
+        if self.extgs:
+            return out, b" " + b" ".join(b"/T%d %s" % (i, e) for i, e in enumerate(self.extgs))
         return out
+
+    # ---- transfer functions (transfer mode)
+    def transfer_value(self) -> bytes:
+        """A /TR or /TR2 value: a function, an array of three, a name, or something PDFium ignores."""
+        r = self.r
+        k = r.random()
+        if k < 0.45:
+            return self.function(r.choice([1, 1, 1, 1, 2, 3, 17]))
+        if k < 0.8:
+            fs = [self.function(r.choice([1, 1, 1, 2])) for _ in range(3)]
+            if r.random() < 0.1:
+                fs[r.randrange(3)] = b"/Identity"
+            if r.random() < 0.08:
+                fs = fs[:2]
+            if r.random() < 0.08:
+                fs.append(self.function(1))
+            return self.arr(fs)
+        return r.choice([b"/Identity", b"/Default", b"null", b"3", b"[/Identity /Identity /Identity]",
+                         b"<< /FunctionType 2 /Domain [0 1] /N 1 >>", b"<< /FunctionType 2 /Domain [0 1 0 1] /N 1 >>"])
+
+    def smask_group(self) -> bytes:
+        """A transparency group of plain fills for a soft mask."""
+        r = self.r
+        ops = []
+        t0 = b""
+        if r.random() < 0.3:
+            t0 = b" /t0 << /TR %s >>" % self.function(1)
+            ops.append(b"/t0 gs")
+        for _ in range(r.randint(1, 4)):
+            if r.random() < 0.3:
+                ops.append(b"/a%d gs" % r.randrange(2))
+            ops.append(r.choice([b"%.3f g" % r.random(), b"%.3f %.3f %.3f rg" % (r.random(), r.random(), r.random())]))
+            ops.append(b"%s %s %s %s re f" % (num(r), num(r), num(r), num(r)))
+        body = b"\n".join(ops)
+        cs = r.choice([b"", b" /CS /DeviceRGB", b" /CS /DeviceGray"])
+        return self.add(b"<< /Type /XObject /Subtype /Form /BBox [-50 -50 250 200] /Group << /S /Transparency%s >> "
+                        b"/Resources << /ExtGState << /a0 << /ca 0.3 >> /a1 << /ca 0.75 >>%s >> >> /Length %d >>\n"
+                        b"stream\n" % (cs, t0, len(body)) + body + b"\nendstream")
+
+    def new_transfer_gs(self) -> int:
+        r = self.r
+        if self.extgs and r.random() < 0.3:
+            return r.randrange(len(self.extgs))
+        k = r.random()
+        if k < 0.35:
+            e = b"/TR " + self.transfer_value()
+        elif k < 0.6:
+            e = b"/TR2 " + self.transfer_value()
+        elif k < 0.7:
+            e = b"/TR %s /TR2 %s" % (self.transfer_value(), self.transfer_value())
+        else:
+            lum = r.random() < 0.6
+            e = b"/SMask << /S /%s /G %s" % (b"Luminosity" if lum else b"Alpha", self.smask_group())
+            if lum and r.random() < 0.4:
+                e += b" /BC [%.3f %.3f %.3f]" % (r.random(), r.random(), r.random())
+            if r.random() < 0.8:
+                e += b" /TR " + (self.function(r.choice([1, 1, 1, 2])) if r.random() < 0.85
+                                 else r.choice([b"/Identity", b"[/Identity]", b"1"]))
+            e += b" >>"
+            if r.random() < 0.3:
+                e += b" /TR " + self.transfer_value()
+        if r.random() < 0.2:
+            e += b" /ca %.2f /CA %.2f" % (r.random(), r.random())
+        self.extgs.append(b"<< " + e + b" >>")
+        return len(self.extgs) - 1
 
     # ---- numbers
     def f(self, lo=0.0, hi=1.0) -> bytes:
@@ -173,6 +264,9 @@ class Builder:
     # ---- colour spaces: (object, component count)
     def colorspace(self) -> tuple[bytes, int]:
         r = self.r
+        self.cs_ranges = None
+        if self.mode != "classic" and r.random() < (0.8 if self.mode == "cie" else 0.4):
+            return self.cie_colorspace(0.3 if self.mode == "mesh" else 0.05)
         k = r.random()
         if k < 0.3:
             return b"/DeviceRGB", 3
@@ -190,6 +284,264 @@ class Builder:
         names = b"[" + b" ".join(b"/C%d" % i for i in range(m)) + b"]"
         fn = self.nfunction(m, n)
         return b"[/DeviceN %s %s %s]" % (names, base, fn), m
+
+    def cie_colorspace(self, indexed: float = 0.2) -> tuple[bytes, int]:
+        """CalRGB, CalGray, Lab, Indexed, or Separation/DeviceN over a CIE space; `cs_ranges` is set
+        to the components' ranges when they are not [0 1]."""
+        r = self.r
+        k = r.random()
+        if k < indexed:
+            base, n = r.choice([(b"/DeviceRGB", 3), (b"/DeviceRGB", 3), (b"/DeviceGray", 1), (b"/DeviceCMYK", 4),
+                                None, None]) or self._cie_base()
+            hival = r.choice([0, 1, 3, 7, 15, 255, r.randint(0, 40)])
+            if r.random() < 0.05:
+                hival = r.choice([-1, 256, 300])
+            size = (max(hival, 0) + 1) * n
+            if r.random() < 0.15:
+                size = r.randrange(size + 1)
+            table = bytes(r.randrange(256) for _ in range(size))
+            if r.random() < 0.5:
+                lookup = b"<" + table.hex().encode() + b">"
+            else:
+                lookup = self.add(b"<< /Length %d >>\nstream\n" % len(table) + table + b"\nendstream")
+            self.cs_ranges = [(0, max(hival, 0))]
+            return b"[/Indexed %s %d %s]" % (base, hival, lookup), 1
+        if k < indexed + 0.2 * (1 - indexed):
+            alt, n = self._cie_base()
+            ranges = self.cs_ranges
+            if r.random() < 0.6:
+                fn = self.scaled_function(ranges, b"[0 1]") if ranges else self.function(n, 1, b"[0 1]")
+                self.cs_ranges = None
+                return b"[/Separation /Spot %s %s]" % (alt, fn), 1
+            m = r.choice([1, 2, 3])
+            names = b"[" + b" ".join(b"/C%d" % i for i in range(m)) + b"]"
+            dom = b"[" + b" ".join([b"0 1"] * m) + b"]"
+            rng = b"[" + b" ".join(b"%g %g" % rg for rg in (ranges or [(0, 1)] * n)) + b"]"
+            size = r.choice([2, 3])
+            data = bytes(r.randrange(256) for _ in range(size ** m * n))
+            fn = self.add(b"<< /FunctionType 0 /Domain %s /Range %s /Size [%s] /BitsPerSample 8 /Length %d >>\nstream\n"
+                          % (dom, rng, b" ".join([b"%d" % size] * m), len(data)) + data + b"\nendstream")
+            self.cs_ranges = None
+            return b"[/DeviceN %s %s %s]" % (names, alt, fn), m
+        return self._cie_base()
+
+    def _white(self) -> bytes:
+        r = self.r
+        w = r.choice([b"[0.9505 1 1.089]", b"[0.9505 1 1.089]", b"[0.9642 1 0.8249]", b"[1 1 1]",
+                      b"[0.3127 1 0.329]", b"[2 1 0.5]"])
+        if r.random() < 0.05:
+            w = r.choice([b"[0.95 0.9 1.09]", b"[0 1 1]", b"[0.95 1]", b"[-1 1 1]"])
+        return w
+
+    def _cie_base(self) -> tuple[bytes, int]:
+        r = self.r
+        self.cs_ranges = None
+        k = r.random()
+        if k < 0.4:
+            d = b"/WhitePoint " + self._white()
+            if r.random() < 0.6:
+                g = r.choice([[b"1", b"1", b"1"], [b"2.2", b"2.2", b"2.2"], [b"1.8", b"1.8", b"1.8"],
+                              [self.f(0.3, 3) for _ in range(3)]])
+                d += b" /Gamma [" + b" ".join(g) + b"]"
+            if r.random() < 0.6:
+                m = r.choice([[b"0.4124", b"0.2126", b"0.0193", b"0.3576", b"0.7152", b"0.1192", b"0.1805",
+                               b"0.0722", b"0.9505"], [self.f(-0.2, 1) for _ in range(9)],
+                              [b"1", b"0", b"0", b"0", b"1", b"0", b"0", b"0", b"1"]])
+                d += b" /Matrix [" + b" ".join(m) + b"]"
+            if r.random() < 0.2:
+                d += b" /BlackPoint [0 0 0]"
+            return b"[/CalRGB << %s >>]" % d, 3
+        if k < 0.55:
+            d = b"/WhitePoint " + self._white()
+            if r.random() < 0.6:
+                d += b" /Gamma " + r.choice([b"1", b"2.2", self.f(0.3, 3)])
+            return b"[/CalGray << %s >>]" % d, 1
+        d = b"/WhitePoint " + self._white()
+        rng = (-100.0, 100.0, -100.0, 100.0)
+        if r.random() < 0.5:
+            rng = r.choice([(-128, 127, -128, 127), (-50, 50, -20, 80), (0, 0, -100, 100), (20, -20, 0, 50)])
+            d += b" /Range [%g %g %g %g]" % rng
+        self.cs_ranges = [(0, 100), (rng[0], rng[1]), (rng[2], rng[3])]
+        return b"[/Lab << %s >>]" % d, 3
+
+    def scaled_function(self, ranges, dom: bytes) -> bytes:
+        """A 1-in function whose outputs span `ranges` (Lab's L*a*b*, an Indexed space's indices)."""
+        r = self.r
+        n = len(ranges)
+        if r.random() < 0.6:
+            c0 = [self.f(lo, hi) for lo, hi in ranges]
+            c1 = [self.f(lo, hi) for lo, hi in ranges]
+            nn = r.choice([b"1", b"1", b"2", b"0.5"])
+            body = b"<< /FunctionType 2 /Domain %s /C0 %s /C1 %s /N %s >>" % (dom, self.arr(c0), self.arr(c1), nn)
+            return self.add(body) if r.random() < 0.5 else body
+        size = r.choice([2, 3, 5, 17])
+        data = bytes(r.randrange(256) for _ in range(size * n))
+        dec = b" ".join(b"%g %g" % rg for rg in ranges)
+        return self.add(b"<< /FunctionType 0 /Domain %s /Range [%s] /Decode [%s] /Size [%d] /BitsPerSample 8 "
+                        b"/Length %d >>\nstream\n" % (dom, dec, dec, size, len(data)) + data + b"\nendstream")
+
+    def function2(self, n: int, dom: bytes) -> bytes:
+        """A function of 2 inputs, n outputs (type 1 shadings)."""
+        r = self.r
+        k = r.random()
+        if k < 0.45:
+            size = [r.choice([1, 2, 3, 5, 9]) for _ in range(2)]
+            bps = r.choice([1, 4, 8, 8, 12, 16])
+            nbits = size[0] * size[1] * n * bps
+            data = bytes(r.randrange(256) for _ in range((nbits + 7) // 8))
+            extra = b""
+            if r.random() < 0.3:
+                extra += b" /Encode [0 %d %s %s]" % (size[0] - 1, self.f(0, size[1]), self.f(0, size[1]))
+            ranges = self.cs_ranges or [(0, 1)] * n
+            if len(ranges) != n:
+                ranges = [(0, 1)] * n
+            rng = b"[" + b" ".join(b"%g %g" % rg for rg in ranges) + b"]"
+            if r.random() < 0.3 and self.cs_ranges is None:
+                extra += b" /Decode " + self.arr([b"%s %s" % (self.f(), self.f()) for _ in range(n)])
+            elif self.cs_ranges is not None:
+                extra += b" /Decode " + rng
+            return self.add(b"<< /FunctionType 0 /Domain %s /Range %s /Size [%d %d] /BitsPerSample %d%s /Length %d >>"
+                            b"\nstream\n" % (dom, rng, size[0], size[1], bps, extra, len(data)) + data + b"\nendstream")
+        if k < 0.95:
+            # PostScript: stack x y; output j from both inputs, then the inputs rolled away
+            prog = []
+            scale = self.cs_ranges if self.cs_ranges and len(self.cs_ranges) == n else None
+            for j in range(n):
+                op = r.choice([b"add 0.5 mul", b"mul", b"sub abs", b"exch pop", b"pop",
+                               b"dup mul exch dup mul add sqrt", b"2 copy gt { pop } { exch pop } ifelse"])
+                prog.append(b"%d index %d index %s %s" % (1 + j, 1 + j, op, self.ps_expr() if r.random() < 0.5 else b""))
+                if scale:
+                    lo, hi = scale[j]
+                    prog.append(b"%g mul %g add" % (hi - lo, lo))
+            prog.append(b"%d %d roll pop pop" % (n + 2, n))
+            text = b"{ " + b" ".join(prog) + b" }"
+            rng = b" /Range [%s]" % b" ".join(b"%g %g" % rg for rg in (scale or [(0, 1)] * n))
+            if r.random() < 0.2:
+                rng = b""
+            return self.add(b"<< /FunctionType 4 /Domain %s%s /Length %d >>\nstream\n" % (dom, rng, len(text))
+                            + text + b"\nendstream")
+        return self.function(n, 1, dom)        # 1-in: fails Validate
+
+    def type1_shading(self, cs: bytes, n: int) -> bytes:
+        r = self.r
+        dom = r.choice([b"[0 1 0 1]", b"[0 1 0 1]", b"[-1 1 -1 1]", b"[0 2 0 0.5]", b"[0.25 0.75 0 1]", b"[1 0 0 1]"])
+        body = b"<< /ShadingType 1 /ColorSpace %s" % cs
+        if r.random() < 0.8:
+            body += b" /Domain " + dom
+        else:
+            dom = b"[0 1 0 1]"
+        if r.random() < 0.85:
+            sx, sy = r.uniform(20, 200), r.uniform(20, 150)
+            if r.random() < 0.3:
+                vals = [r.uniform(-150, 150) for _ in range(4)]
+            else:
+                vals = [sx, 0, 0, sy]
+            vals += [r.uniform(-30, 150), r.uniform(-30, 120)]
+            body += b" /Matrix [" + b" ".join(b"%.4f" % v for v in vals) + b"]"
+        if n > 1 and r.random() < 0.3:
+            ranges, self.cs_ranges = self.cs_ranges, None
+            fs = []
+            for j in range(n):
+                self.cs_ranges = [ranges[j]] if ranges else None
+                fs.append(self.function2(1, dom))
+            self.cs_ranges = ranges
+            body += b" /Function [%s]" % b" ".join(fs)
+        else:
+            body += b" /Function %s" % self.function2(n, dom)
+        return body
+
+    def mesh_shading(self, cs: bytes, n: int) -> tuple[bytes, bytes]:
+        """(dictionary entries, stream data) of a type 4-7 shading."""
+        r = self.r
+        stype = r.choice([4, 4, 5, 5, 6, 6, 7])
+        indexed = cs.startswith(b"[/Indexed")
+        funcs = r.random() < (0.05 if indexed else 0.4)
+        comps = 1 if funcs else n
+        bpc = r.choice([8, 8, 16, 16, 32, 24, 12, 4, 2, 1])
+        bpcomp = r.choice([8, 8, 16, 4, 12, 2, 1])
+        bpf = r.choice([8, 8, 2, 4])
+        x0, x1 = r.uniform(-60, 60), r.uniform(140, 260)
+        y0, y1 = r.uniform(-60, 40), r.uniform(110, 210)
+        if r.random() < 0.1:
+            x0, x1 = x1, x0
+        if funcs:
+            cr = [r.choice([(0, 1), (0, 1), (-1, 2), (1, 0), (0.25, 0.5)])]
+        elif self.cs_ranges and len(self.cs_ranges) == comps:
+            cr = list(self.cs_ranges)
+        else:
+            cr = [r.choice([(0, 1), (0, 1), (0, 1), (1, 0), (-0.5, 1.5)]) for _ in range(comps)]
+        decode = [x0, x1, y0, y1] + [v for rg in cr for v in rg]
+        w = _Bits()
+        cmax, kmax = (1 << bpc) - 1, (1 << bpcomp) - 1
+
+        def coord(x, y):
+            for v, lo, hi in ((x, x0, x1), (y, y0, y1)):
+                t = (v - lo) / (hi - lo) if hi != lo else 0
+                w.put(max(0, min(cmax, int(round(t * cmax)))), bpc)
+
+        def color():
+            for _ in range(comps):
+                w.put(r.randrange(kmax + 1), bpcomp)
+
+        def point(cx, cy, spread):
+            return cx + r.uniform(-spread, spread), cy + r.uniform(-spread, spread)
+        spread = r.choice([5, 20, 60, 150])
+        entries = b""
+        if stype == 4:
+            for i in range(r.randint(1, 6)):
+                flag = 0 if i == 0 or r.random() < 0.3 else r.choice([1, 2, 3])
+                cx, cy = r.uniform(0, 200), r.uniform(0, 150)
+                for j in range(3 if flag == 0 else 1):
+                    w.put(flag if j == 0 else r.randrange(4), bpf)
+                    coord(*point(cx, cy, spread))
+                    color()
+                    w.align()
+        elif stype == 5:
+            per_row, rows = r.randint(2, 5), r.randint(2, 4)
+            gx, gy = r.uniform(-20, 100), r.uniform(-20, 80)
+            sx, sy = r.uniform(10, 80), r.uniform(10, 60)
+            for i in range(rows):
+                for j in range(per_row):
+                    coord(*point(gx + j * sx, gy + i * sy, spread / 8))
+                    color()
+                    w.align()
+            if r.random() < 0.1:
+                per_row = r.choice([0, 1, -3, 7])
+            entries += b" /VerticesPerRow %d" % per_row
+        else:
+            count = 16 if stype == 7 else 12
+            order = [(0, 0), (0, 1), (0, 2), (0, 3), (1, 3), (2, 3), (3, 3), (3, 2), (3, 1), (3, 0), (2, 0), (1, 0),
+                     (1, 1), (1, 2), (2, 2), (2, 1)][:count]
+            for i in range(r.randint(1, 3)):
+                flag = 0 if i == 0 or r.random() < 0.4 else r.choice([1, 2, 3])
+                gx, gy = r.uniform(-20, 150), r.uniform(-20, 110)
+                sx, sy = r.uniform(5, 40), r.uniform(5, 30)
+                jit = r.choice([0, 1, 5, 20])
+                w.put(flag, bpf)
+                for (a, b) in order[4 if flag else 0:]:
+                    coord(*point(gx + b * sx, gy + a * sy, jit))
+                for _ in range(2 if flag else 4):
+                    color()
+        data = w.bytes()
+        if r.random() < 0.1:
+            data = data[:r.randrange(len(data) + 1)]
+        if r.random() < 0.05:
+            data += bytes(r.randrange(256) for _ in range(r.randint(1, 6)))
+        if r.random() < 0.05:
+            bpc = r.choice([0, 3, 64])
+        if r.random() < 0.03:
+            decode = decode[:-1]
+        entries = (b"/ShadingType %d /ColorSpace %s /BitsPerCoordinate %d /BitsPerComponent %d /BitsPerFlag %d"
+                   b" /Decode [%s]" % (stype, cs, bpc, bpcomp, bpf, b" ".join(b"%.4f" % v for v in decode))) + entries
+        if funcs:
+            fdom = b"[%g %g]" % cr[0]
+            if n > 1 and r.random() < 0.3:
+                entries += b" /Function [%s]" % b" ".join(self.function(1, 1, fdom) for _ in range(n))
+            elif self.cs_ranges and len(self.cs_ranges) == n and not indexed:
+                entries += b" /Function %s" % self.scaled_function(self.cs_ranges, fdom)
+            else:
+                entries += b" /Function %s" % self.function(n, 0, fdom)
+        return entries, data
 
     def nfunction(self, m: int, n: int) -> bytes:
         """A function of m inputs, n outputs (DeviceN's tint transform)."""
@@ -219,8 +571,14 @@ class Builder:
     # ---- shadings
     def shading(self, pattern: bool) -> bytes:
         r = self.r
+        if self.mode != "classic":
+            other = {"func": 0.85, "mesh": 0.9, "cie": 0.3}.get(self.mode, 0.0)
+            if r.random() < other:
+                return self.new_style_shading(pattern)
         stype = r.choice([2, 2, 3, 3, 3])
         cs, n = self.colorspace()
+        if self.cs_ranges is not None and not cs.startswith(b"[/Indexed") and r.random() < 0.8:
+            return self._scaled_axial(stype, cs, pattern)
         dom, d0, d1 = self.domain()
         if stype == 2:
             coords = [self.f(-40, 240) for _ in range(4)]
@@ -279,6 +637,43 @@ class Builder:
         body += b" >>"
         return self.add(body) if pattern or r.random() < 0.7 else body
 
+    def _extras(self, n: int) -> bytes:
+        r = self.r
+        body = b""
+        if r.random() < 0.2:
+            body += b" /Background " + self.arr([self.f() for _ in range(n)])
+        if r.random() < 0.2:
+            body += b" /BBox " + self.arr([self.f(-20, 220) for _ in range(4)])
+        return body
+
+    def _scaled_axial(self, stype: int, cs: bytes, pattern: bool) -> bytes:
+        """An axial or radial shading over Lab (functions spanning L*a*b*)."""
+        r = self.r
+        if stype == 2:
+            coords = [self.f(-40, 240) for _ in range(4)]
+        else:
+            coords = [self.f(-20, 220), self.f(-20, 220), self.f(0, 60), self.f(-20, 220), self.f(-20, 220),
+                      self.f(0, 120)]
+        body = b"<< /ShadingType %d /ColorSpace %s /Coords %s" % (stype, cs, self.arr(coords))
+        if r.random() < 0.6:
+            body += b" /Extend [%s %s]" % (r.choice([b"true", b"false"]), r.choice([b"true", b"false"]))
+        body += b" /Function %s" % self.scaled_function(self.cs_ranges, b"[0 1]") + self._extras(3) + b" >>"
+        return self.add(body) if pattern or r.random() < 0.7 else body
+
+    def new_style_shading(self, pattern: bool) -> bytes:
+        """A function-based (type 1) or mesh (4-7) shading."""
+        r = self.r
+        cs, n = self.colorspace()
+        mesh = self.mode == "mesh" or (self.mode == "cie" and r.random() < 0.7)
+        if not mesh:
+            body = self.type1_shading(cs, n) + self._extras(n) + b" >>"
+            return self.add(body) if pattern or r.random() < 0.7 else body
+        entries, data = self.mesh_shading(cs, n)
+        entries += self._extras(n)
+        if r.random() < 0.03:
+            return entries.join([b"<< ", b" >>"])        # a dictionary: never drawn
+        return self.add(b"<< %s /Length %d >>\nstream\n" % (entries, len(data)) + data + b"\nendstream")
+
     def new_shading(self) -> int:
         self.shadings.append(self.shading(False))
         return len(self.shadings) - 1
@@ -301,6 +696,20 @@ def random_group(r: random.Random, b: Builder, nforms: int) -> bytes:
         g.append(random_path(r) + r.choice([b" W n", b" W* n"]))
     if r.random() < 0.3:
         g.append(b"/A%d gs" % r.randint(0, 4))
+    if b.mode == "transfer":
+        if r.random() < 0.75:
+            g.append(b"/T%d gs" % b.new_transfer_gs())
+        if r.random() < 0.6:          # plain colours are what a transfer function changes
+            for _ in range(r.randint(1, 3)):
+                col = r.choice([b"%.3f %.3f %.3f" % (r.random(), r.random(), r.random()), b"%.3f" % r.random(),
+                                b"%.3f %.3f %.3f %.3f" % (r.random(), r.random(), r.random(), r.random())])
+                op = {3: (b"rg", b"RG"), 1: (b"g", b"G"), 4: (b"k", b"K")}[len(col.split())]
+                if r.random() < 0.3:
+                    g.append(b"%s %s %d w" % (col, op[1], r.randint(1, 6)))
+                    g.append(random_path(r) + b" " + r.choice([b"S", b"B", b"b*"]))
+                else:
+                    g.append(b"%s %s" % (col, op[0]))
+                    g.append(random_path(r) + b" " + r.choice([b"f", b"f*"]))
     k = r.random()
     if nforms and k < 0.2:
         g.append(b"/X%d Do" % r.randrange(nforms))
@@ -326,10 +735,14 @@ def random_group(r: random.Random, b: Builder, nforms: int) -> bytes:
     return b"\n".join(g)
 
 
-def case(seed: int):
-    """(content, forms, objects, resources, zoom, transparent) for `seed`."""
-    r = random.Random(seed)
-    b = Builder(r)
+MODES = ("classic", "cie", "func", "mesh", "transfer")
+
+
+def case(seed: int, mode: str = "classic"):
+    """(content, forms, objects, resources, zoom, transparent) for `seed`. `mode`: classic (axial and
+    radial), cie (CalRGB, CalGray, Lab, Indexed), func (type 1), mesh (types 4-7), transfer (/TR)."""
+    r = random.Random(seed if mode == "classic" else f"{mode}:{seed}")
+    b = Builder(r, mode)
     forms = []
     for k in range(r.choice([0, 0, 0, 1, 2])):
         entries = b"/BBox [%s %s %s %s]" % (num(r), num(r), num(r), num(r))
@@ -341,7 +754,10 @@ def case(seed: int):
                                  b" /Group << /S /Transparency /K true >>"])
         forms.append((entries, b"\n".join(random_group(r, b, k) for _ in range(r.randint(1, 3)))))
     content = b"\n".join(random_group(r, b, len(forms)) for _ in range(r.randint(1, 4)))
-    return content, forms, b.objects, b.resources(), r.choice([0.5, 1, 1.37, 2, 3.1]), r.random() < 0.3
+    zoom = r.choice([0.5, 1, 1.37, 2, 3.1])
+    if mode == "func":
+        zoom = min(zoom, 1.37)          # a Python function call per pixel
+    return content, forms, b.objects, b.resources(), zoom, r.random() < 0.3
 
 
 def compare(content: bytes, objects, resources, zoom: float, transparent: bool, forms=()):
@@ -351,11 +767,16 @@ def compare(content: bytes, objects, resources, zoom: float, transparent: bool, 
     from ..pdf.pdfium_backend import PdfiumBackend
     from ..pdf.pure.backend import PureBackend
     data = pdf_bytes([content], objects, resources, forms=forms)
-    a = PdfiumBackend().open(data)[0].render(zoom, transparent=transparent)
+    ref, pure = PdfiumBackend().open(data), PureBackend().open(data)
     try:
-        b = PureBackend().open(data)[0].render(zoom, transparent=transparent)
-    except PdfError as e:
-        return None, a, None, str(e)
+        a = ref[0].render(zoom, transparent=transparent)
+        try:
+            b = pure[0].render(zoom, transparent=transparent)
+        except PdfError as e:
+            return None, a, None, str(e)
+    finally:
+        ref.close()
+        pure.close()
     d = np.abs(a.astype(int) - b.astype(int)).max(axis=2)
     return int((d > 0).sum()), a, b, d
 
@@ -391,11 +812,11 @@ def shrink(content: bytes, objects, resources, zoom: float, transparent: bool, f
     return content, forms
 
 
-def run(seed0: int, n: int, out: Path | None = None, verbose: bool = True) -> dict:
+def run(seed0: int, n: int, out: Path | None = None, verbose: bool = True, mode: str = "classic") -> dict:
     """{'failed': [seeds], 'refused': {reason: count}, 'drawn': count}."""
     stats = {"failed": [], "refused": {}, "drawn": 0}
     for seed in range(seed0, seed0 + n):
-        content, forms, objects, resources, zoom, transparent = case(seed)
+        content, forms, objects, resources, zoom, transparent = case(seed, mode)
         try:
             npx, a, b, d = compare(content, objects, resources, zoom, transparent, forms)
         except Exception as e:
@@ -432,9 +853,11 @@ def main(argv=None) -> int:
     ap.add_argument("seed0", type=int, nargs="?", default=0)
     ap.add_argument("n", type=int, nargs="?", default=200)
     ap.add_argument("--out", default="out/render-torture-shading")
+    ap.add_argument("--mode", choices=MODES, default="classic")
+    ap.add_argument("--quiet", action="store_true", help="no shrinking, only the counts")
     args = ap.parse_args(argv)
-    stats = run(args.seed0, args.n, Path(args.out))
-    print(f"seeds {args.seed0}..{args.seed0 + args.n - 1}: {stats['drawn']} exact, "
+    stats = run(args.seed0, args.n, Path(args.out), not args.quiet, args.mode)
+    print(f"{args.mode} seeds {args.seed0}..{args.seed0 + args.n - 1}: {stats['drawn']} exact, "
           f"{len(stats['failed'])} failed, refused {stats['refused']}")
     return 1 if stats["failed"] else 0
 

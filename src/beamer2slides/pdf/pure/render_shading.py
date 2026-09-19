@@ -1,7 +1,8 @@
-"""Shadings as PDFium draws them: CPDF_RenderShading (axial and radial), the shading patterns
-paths are filled or stroked with (DrawShadingPattern), the functions they are coloured by
-(CPDF_Function types 0, 2, 3 and 4, the PostScript calculator included) and the colour spaces
-those feed (Device Gray/RGB/CMYK, CalGray, Separation, DeviceN), value for value.
+"""Shadings as PDFium draws them: CPDF_RenderShading (axial and radial here; function-based and
+the mesh types 4-7 in `render_mesh.py`), the shading patterns paths are filled or stroked with
+(DrawShadingPattern), the functions they are coloured by (CPDF_Function types 0, 2, 3 and 4, the
+PostScript calculator included) and the colour spaces those feed (Device Gray/RGB/CMYK, CalGray,
+CalRGB, Lab, Indexed, Separation, DeviceN; the CIE ones in `cie.py`), value for value.
 
 PDFium computes a shading's 256 colour steps once (GetShadingSteps), then every pixel of a BGRA
 buffer the size of the clipped object: the pixel's centre-less position (column, row) goes back
@@ -11,9 +12,8 @@ Argb2Argb under the clip mask). Everything here is float32 one C operation at a 
 int conversions are x86's (cvttss2si: INT_MIN for NaN and out of range), and the transcendental
 functions are the C runtime's own (ucrtbase, the one PDFium links on Windows).
 
-What is not drawn exactly is refused (`refusal`), never approximated: function-based and mesh
-shadings (types 1, 4-7), tiling patterns, CalRGB / Lab / ICCBased / Indexed colour spaces,
-PostScript functions with words that are not plain numbers or operators, and a shading whose
+What is not drawn exactly is refused (`refusal`), never approximated: tiling patterns, ICCBased
+colour spaces, PostScript functions with words that are not plain numbers or operators, and a shading whose
 validation fails with a valid type (PDFium's Load then succeeds on a second call only, so what is
 drawn depends on history)."""
 
@@ -25,6 +25,7 @@ from fractions import Fraction
 
 import numpy as np
 
+from . import cie
 from . import raster as R
 from .colors import adobe_cmyk_to_srgb
 from .raster import F
@@ -818,8 +819,15 @@ def _ps_operator(op: str, st: list) -> None:
 class ColorSpace:
     """CPDF_ColorSpace for what shadings read: family, component count, GetRGB."""
 
-    def __init__(self, family: str, n: int, base=None, func=None, none=False):
+    def __init__(self, family: str, n: int, base=None, func=None, none=False, params=None):
         self.family, self.n, self.base, self.func, self.none = family, n, base, func, none
+        self.params = params
+
+    def default_range(self, i: int) -> tuple:
+        """GetDefaultValue's (min, max) of component i."""
+        if self.family == "Lab":
+            return cie.lab_default(self.params, i)[1:]
+        return 0.0, 1.0
 
     @property
     def special(self) -> bool:
@@ -839,6 +847,20 @@ class ColorSpace:
             return tuple(F(v * k) for v in adobe_cmyk_to_srgb(*ints))
         if f == "CalGray":
             return buf[0], buf[0], buf[0]
+        if f == "CalRGB":
+            return cie.calrgb(*self.params, buf)
+        if f == "Lab":
+            return cie.lab(buf)
+        if f == "Indexed":
+            index = i32(buf[0])
+            lookup, hival, ranges = self.params
+            if index < 0 or index > hival:
+                return None
+            k = len(ranges)
+            if (index + 1) * k > len(lookup):
+                return None
+            comps = [F(lo + F(F(span * lookup[index * k + i]) / 255.0)) for i, (lo, span) in enumerate(ranges)]
+            return self.base.rgb(comps)
         if f == "Separation":
             if self.none:
                 return None
@@ -924,24 +946,78 @@ def _cs_load(a: _Access, obj, visited: set):
             return _separation(a, obj, visited)
         if key == b"Devi":
             return _devicen(a, obj, visited)
-        if key in (b"CalR", b"Lab\0", b"ICCB", b"Inde", b"I\0\0\0", b"Patt"):
+        if key == b"CalR":
+            return _calrgb(a, obj)
+        if key == b"Lab\0":
+            return _lab(a, obj)
+        if key in (b"Inde", b"I\0\0\0"):
+            return _indexed(a, obj, visited)
+        if key in (b"ICCB", b"Patt"):
             raise Unsupported(f"{family} colour spaces in shadings")
         return None
     finally:
         visited.discard(id(obj))
 
 
+def _white(a: _Access, d):
+    def floats():
+        wp = a.array_for(d, "WhitePoint")
+        return None if wp is None else [a.float_at(wp, i) for i in range(len(wp))]
+    return cie.white_point(floats)
+
+
 def _calgray(a: _Access, obj):
     d = _Access.dict_of(a.r(obj[1]))
-    if d is None:
-        return None
-    wp = a.array_for(d, "WhitePoint")
-    if wp is None or len(wp) != 3:
-        return None
-    w = [a.float_at(wp, i) for i in range(3)]
-    if not (w[0] > 0 and w[1] == 1.0 and w[2] > 0):
+    if d is None or _white(a, d) is None:
         return None
     return ColorSpace("CalGray", 1)
+
+
+def _calrgb(a: _Access, obj):
+    d = _Access.dict_of(a.r(obj[1]))
+    white = None if d is None else _white(a, d)
+    if white is None:
+        return None
+    g, m = a.array_for(d, "Gamma"), a.array_for(d, "Matrix")
+    gamma = None if g is None else tuple(a.float_at(g, i) for i in range(3))
+    matrix = None if m is None else tuple(a.float_at(m, i) for i in range(9))
+    return ColorSpace("CalRGB", 3, params=(white, gamma, matrix))
+
+
+def _lab(a: _Access, obj):
+    d = _Access.dict_of(a.r(obj[1]))
+    if d is None or _white(a, d) is None:
+        return None
+    r = a.array_for(d, "Range")
+    ranges = (-100.0, 100.0, -100.0, 100.0) if r is None else tuple(a.float_at(r, i) for i in range(4))
+    return ColorSpace("Lab", 3, params=ranges)
+
+
+def _indexed(a: _Access, obj, visited):
+    """CPDF_IndexedCS::v_Load."""
+    if len(obj) < 4:
+        return None
+    base_obj = a.r(obj[1])
+    if base_obj is obj:
+        return None
+    base = _cs_internal(a, base_obj, visited, set())
+    if base is None or base.family in ("Indexed", "Pattern"):
+        return None
+    ranges = []
+    for i in range(base.n):
+        lo, hi = base.default_range(i)
+        ranges.append((lo, F(hi - lo)))
+    hival = max(0, min(255, a.integer_at(obj, 2)))
+    table = a.r(obj[3])
+    if table is None:
+        return None
+    if isinstance(table, Stream):
+        lookup = bytes(a.doc.stream_data(table))
+    elif isinstance(table, (String, bytes)):
+        lookup = bytes(table)
+    else:
+        lookup = b""
+    return ColorSpace("Indexed", 1, base, params=(lookup, hival, ranges))
 
 
 def _separation(a: _Access, obj, visited):
@@ -1034,8 +1110,6 @@ class Record:
         self.cs, self.funcs, self.type = cs, funcs, stype
         if not self._validate():
             raise Unsupported("a shading that fails validation (PDFium draws it on a second Load only)")
-        if stype not in (2, 3):
-            raise Unsupported("function-based and mesh shadings")
         return True
 
     def shade_load(self) -> bool:
@@ -1063,16 +1137,15 @@ class Record:
         try:
             cs = get_colorspace(a, cs_obj)
         except Unsupported:
-            # A colour space the renderer can't draw yet (CalRGB, Lab, ICCBased, Indexed): taken
-            # as loaded, so the page object is there and the render refuses in load(). Indexed
-            # fails Validate, so its first `sh` draws nothing, as in PDFium.
+            # A colour space the renderer can't draw yet (ICCBased): taken as loaded, so the page
+            # object is there and the render refuses in load().
             stype = a.integer_for(sd, "ShadingType")
             if not 1 <= stype <= 7:
                 return False
             self._typed = True
             fam = cs_obj[0] if isinstance(cs_obj, list) and cs_obj else None
             name = _Access.string(a.r(fam)) if fam is not None else ""
-            return not (name == "I" or name.startswith("Inde"))
+            return not ((name == "I" or name.startswith("Inde")) and (stype <= 3 or funcs))
         if cs is None or cs.family == "Pattern":
             return False
         stype = a.integer_for(sd, "ShadingType")
@@ -1085,7 +1158,7 @@ class Record:
     def _validate(self) -> bool:
         if self.type >= 4 and not isinstance(self.shading, Stream):
             return False
-        if self.cs.family == "Indexed":
+        if self.cs.family == "Indexed" and (self.type <= 3 or self.funcs):
             return False
         n = self.cs.n
 
@@ -1289,6 +1362,12 @@ def draw(dev, rec: Record, matrix, clip_rect, alpha: int) -> None:
         _axial(bitmap, final, rec, alpha)
     elif rec.type == 3:
         _radial(bitmap, final, rec, alpha)
+    else:
+        from . import render_mesh as M
+        if rec.type == 1:
+            M.draw_function(bitmap, final, rec, alpha)
+        elif isinstance(rec.shading, Stream):
+            {4: M.draw_free, 5: M.draw_lattice}.get(rec.type, M.draw_patches)(bitmap, final, rec, alpha)
     set_dibits(dev, bitmap, l, t)
 
 
@@ -1359,7 +1438,8 @@ def shading_rect(obj) -> tuple:
     rect = _point_box(obj.clip_paths[0][0])
     for points, _ in obj.clip_paths[1:]:
         rect = float_intersect(rect, _point_box(points))
-    return rect
+    mesh = getattr(obj, "mesh_box", None)
+    return rect if mesh is None else float_intersect(rect, mesh)
 
 
 def path_rect(obj) -> tuple:

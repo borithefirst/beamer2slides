@@ -45,12 +45,16 @@ a per-slide background picture.
   so do soft masks, transparency groups and every blend mode (`pure/render_transparency.py`, oracle
   `tools/render_torture_transparency.py`, 6,000 seeds; GetBackdrop, CheckClip, float32 stroke boxes);
   axial/radial shadings and shading patterns are ported too (`pure/render_shading.py`, oracle
-  `tools/render_torture_shading.py`), and so is text in embedded Type 1 and CFF fonts (FreeType's CFF
+  `tools/render_torture_shading.py`), so are function-based and mesh shadings (types 1, 4-7:
+  `pure/render_mesh.py`, DrawGouraud and the Coons/tensor PatchDrawer with full-cover fills),
+  CalRGB/CalGray/Lab/Indexed (`pure/cie.py`, PDFium's matrices and sRGB table) and transfer
+  functions (`pure/transfer.py`: /TR, /TR2 and a soft mask's /TR, CreateTransferFunc's quirks
+  included; torture `--mode cie|func|mesh|transfer`, 4,500 seeds, none apart), and so is text in embedded Type 1 and CFF fonts (FreeType's CFF
   engine and smooth rasteriser ported, `pure/ftoutline.py`, `pure/ftgrays.py`, `pure/render_text.py`,
   oracle `tools/render_torture_text.py`). Whole pages: 195 of the test decks' 231 render byte for byte
   as PDFium's, none apart (`test_whole_beamer_pages_render_as_pdfium_renders_them`);
-  a page with anything not ported yet (images, Type 3 or TrueType or non-embedded text, CalRGB/Lab/Indexed
-  shadings, transfer functions…) raises PdfError, so
+  a page with anything not ported yet (images, Type 3 or TrueType or non-embedded text, tiling patterns,
+  ICCBased shadings…) raises PdfError, so
   `renders = False`: `classify` runs on it and `convert` doesn't yet. Every call equals PDFium's on 4,373 pages
   (chars and object boxes to the last bit on the test decks),
   and deck.json is identical on all 48 test decks; extract is 7× slower. `tests/test_pure_pdf.py`.

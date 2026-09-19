@@ -337,7 +337,7 @@ random zooms on white and on clear bitmaps, each difference shrunk to the lines 
 tokens) that still cause it. When paths were done: 5,500 seeds of pages, 3,000 with forms, 300 of
 page geometry and 3,500 mutated, not one pixel apart; `tests/test_pure_pdf.py` keeps 40 seeds of
 each plus the shrunk pages that were once apart. `render_page` refuses (`unported`) what
-it does not draw yet: text, images, tiling patterns, transfer functions.
+it does not draw yet: images, tiling patterns, some text.
 
 **Transparency** (`pure/render_transparency.py`) is CPDF_RenderStatus::ProcessTransparency and
 everything under it: soft masks (Luminosity and Alpha, /BC, /G drawn through its own Status with the
@@ -365,10 +365,31 @@ The oracle is `devtools/render_torture_transparency.py` (`python tools/render_to
 SEED0 N [--page]`): render_torture's paths inside random forms and soft-mask groups nested in each
 other, `/SMask /None`, alphas and a `/BM` on a third of the painted groups, over a ground rect. 6,000
 seeds (3,000 with page geometry) are exact; the tests keep 40 of each and the shrunk cases.
-Refused, each with its reason: transfer functions (/TR, /TR2, and a soft mask's /TR - they need the
-function evaluator the shading port brings), a luminosity mask with a /BC whose group colour space is
+Refused, each with its reason: a luminosity mask with a /BC whose group colour space is
 not DeviceGray, DeviceRGB or DeviceCMYK, masks nested 8 deep, and anything unported inside a mask's
 /G (the same `unported` check runs over it).
+
+**Transfer functions** (`pure/transfer.py`) are drawn now, with the shading port's function
+evaluator. The ExtGState's /TR2 wins over /TR and a name clears it (CPDF_AllStates);
+CPDF_DocRenderData::CreateTransferFunc samples the function at `float(v) / 255` into three 256-byte
+tables and GetFillArgb/GetStrokeArgb run the colour through them (TranslateColor) - paths and text,
+never shadings or shading patterns. Its quirks are ported:
+- the three functions of an array land in the tables in reverse, so the first one maps blue;
+- one `output[16]` serves every call, so a call that fails keeps the last one's value;
+- a function with more than 16 outputs gives the identity in an array, and the stale output alone;
+- the rounded sample is stored as its low byte (a negative one wraps).
+
+A soft mask's /TR (LoadSMask) is one function, and only when it is a dictionary or a stream. It is
+sampled at `i / 255` into a table that maps the luminosity or the alpha. Still refused: a
+non-identity transfer on an image (TranslateImage) or on Type 3 text, a mask function with no
+outputs, and one that would write past its output array. The oracle is the shading torture's
+`--mode transfer`:
+- /TR, /TR2 and both at once, as single functions or arrays of three (with /Identity, short and long
+  arrays among them);
+- soft masks carrying a /TR, and groups that set one inside;
+- over plain gray, RGB and CMYK fills and strokes, and over shadings.
+
+1,200 seeds are exact.
 
 **Shadings** (`pure/render_shading.py`) are CPDF_RenderShading's axial (type 2) and radial (type 3)
 loops, painted by `sh` (ProcessShading) and as shading patterns filling or stroking a path
@@ -399,15 +420,41 @@ records which pattern each colour side holds and the shading's CTM (`PObj.fill_p
   plain decimals are accepted;
 - DeviceCMYK goes through the same Adobe table as the extraction, each component `(int)(c * 255 +
   0.49999997)`.
-The oracle is `devtools/render_torture_shading.py` (`python tools/render_torture_shading.py SEED0 N`):
+- the CIE spaces (`pure/cie.py`) are PDFium's arithmetic, not colorimetry. CalRGB applies gamma and
+  matrix, then goes XYZ to sRGB under its white point through PDFium's own 3x3 inverses (all zeros
+  when |det| < FLT_EPSILON). Lab uses its piecewise curve and the fixed D65 matrix. Both end in
+  RGB_Conversion's 1024-step table, not the sRGB formula. Indexed looks its base colour up per step.
+- **function-based shadings** (type 1, `pure/render_mesh.py` DrawFuncShading) evaluate the function
+  at every pixel through the inverse of /Matrix times the device matrix. Pixels outside /Domain are
+  skipped. The results array is shared across pixels, as in C++.
+- **mesh shadings** (types 4-7, CPDF_MeshStream) read coordinates, colours and flags with the bit
+  widths PDFium accepts. 32-bit coordinates are scaled in double, the rest in float32. Vertices are
+  byte-aligned in types 4 and 5, patches are not. Types 4 and 5 are DrawGouraud: per row, the two
+  edge crossings, then the colour stepped across the span by float32 accumulation. Types 6 and 7 are
+  CPDF_PatchDrawer: Coons/tensor subdivision with its FX_SAFE_INT32 bi-interpolation, down to cells
+  drawn as 13-point bezier paths with *full cover* (every pixel the rasteriser touches is painted
+  opaque, `Device.draw_path(full_cover=True)`). The shading object's box is GetShadingBBox (every
+  mesh point, colours skipped) cut by the clip, so a mesh draws only where its points are.
+The oracle is `devtools/render_torture_shading.py` (`python tools/render_torture_shading.py SEED0 N
+[--mode classic|cie|func|mesh|transfer]`; classic is the original sequence of seeds):
 random axial and radial shadings as `sh` and as patterns (fill and stroke, /Matrix, /Background,
 /BBox, forms and transparency groups around them), random functions of every type (sampled at every
 bit depth, stitched, PostScript programs) through every colour space above, clips, `cm`, alphas,
 white and clear bitmaps, and one seed in seven "wild" (short /Coords, bad domains, wrong function
 counts, CalRGB/Lab/Indexed). 12,000 seeds are exact and 8% refused; every test-deck page holding a
 shading (41 pages of 14 decks), with only paths, forms and shadings on, is exact at two zooms. The
-tests keep 60 seeds, the shrunk cases and one deck. Refused, each with its reason: function-based
-and mesh shadings (types 1, 4-7), tiling patterns, CalRGB/Lab/ICCBased/Indexed colour spaces, a
+other modes each stress one of the gaps closed later:
+- `cie`: CalRGB with Gamma, Matrix and BlackPoint; CalGray; Lab with Range; Indexed, Separation and
+  DeviceN over them.
+- `func`: type 1 shadings with 2-in sampled and PostScript functions, including ones that fail
+  validation.
+- `mesh`: types 4-7 at every bit width, with flags carrying edges over, invalid bit widths, a short
+  /Decode, cut or padded streams, bad /VerticesPerRow and a dictionary instead of a stream.
+- `transfer`: described above.
+
+Not one pixel apart in 900 seeds of `cie`, 900 of `func`, 1,500 of `mesh` and 1,200 of `transfer`.
+The tests keep 60 classic seeds and 25 per mode, eight fixed seeds (one per feature), the shrunk
+cases and one deck. Refused, each with its reason: tiling patterns, ICCBased colour spaces, a
 PostScript word that is not a plain number, a pattern stroked through an all-zero matrix, a shading
 that fails validation (PDFium's Load keeps the type it read, so the *second* Load of the same
 object succeeds and draws: what is drawn depends on history), and a pattern object the page uses
