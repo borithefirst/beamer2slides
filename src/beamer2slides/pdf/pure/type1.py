@@ -297,10 +297,86 @@ _T1_CACHE: dict = {}
 _T1_CACHE_SIZE = 64
 
 
+# The bulk of a program is its charstrings and subroutines, `/name 123 RD <bytes> ND` and
+# `dup 5 123 RD <bytes> NP`: tokens and procedure calls the interpreter handles one Python call at a
+# time. `Interpreter.interpret` is psLib's loop with a shortcut for `123 RD` and for the `ND`/`NP`
+# after it: when the name resolves (now, through the dictionary stack, as psLib would resolve it) to
+# a procedure of plain names that resolve to the interpreter's own operators, among those below, the
+# shortcut pushes the integer and calls those operators in order - what `call_procedure` does, less
+# the tokenizing and the lookups. Anything else (other names, a redefined operator, inside `{ }`, a
+# comment in between) is read by psLib's own code.
+_WS = rb" \t\n\r\x0b\x0c"
+_END = rb"(?=[\[\](){}<>/%" + _WS + rb"]|\Z)"
+_READ = re.compile(rb"[" + _WS + rb"]*(\d+)[" + _WS + rb"]+(RD|-\|)" + _END)
+_STORE = re.compile(rb"[" + _WS + rb"]*(ND|\|-|NP|\|)" + _END)
+# operators that change no name's meaning, so resolving a procedure's names up front is resolving
+# them one by one; `def` and `put` may, and are allowed as the last item only
+_PLAIN_OPS = frozenset(("string", "currentfile", "exch", "readstring", "pop", "noaccess", "readonly",
+                        "executeonly"))
+_LAST_OPS = _PLAIN_OPS | {"def", "put"}
+# Every program carries the same PostScript (Adobe's OtherSubrs for flex and hint replacement),
+# mostly procedures. A `{ ... }` read at the top level only builds and pushes a procedure: what it
+# holds follows from its bytes alone (its tokens are pushed, not run, and it ends at its own `}`),
+# but for `[`, which pushes the interpreter's own mark. `_PROCS` keeps the procedure each such text
+# made, by the text, and a copy is pushed when the same bytes come again. The copies are fresh
+# objects: the program may change what it was handed (`executeonly`, `put`), never what is kept.
+_SKIP_WS = re.compile(rb"[" + _WS + rb"]*")
+_PROC_KEY = 48          # a text is looked up by its first bytes, then compared whole
+_PROC_MIN = 64          # shorter procedures are read as fast as they are looked up
+_PROCS: dict = {}
+_PROCS_MAX = 512
+_MARK = object()        # stands for the interpreter's mark inside a kept procedure
+
+
 def _interpreter_class():
     from fontTools.misc import psLib
+    from fontTools.misc.psOperators import ps_integer
+
+    plain = (psLib.ps_name, psLib.ps_literal, psLib.ps_integer, psLib.ps_real, psLib.ps_string)
+    fields = frozenset(("value", "type"))
+
+    def snapshot(obj, mark):
+        """A kept copy of a procedure just built, or None when it holds anything unexpected."""
+        if obj is mark:
+            return _MARK
+        cls = type(obj)
+        if obj.__dict__.keys() - fields:
+            return None
+        if cls is psLib.ps_procedure:
+            if type(obj.value) is not list:
+                return None
+            items = []
+            for item in obj.value:
+                kept = snapshot(item, mark)
+                if kept is None:
+                    return None
+                items.append(kept)
+            value = items
+        elif cls in plain and type(obj.value) in (str, int, float, bool):
+            value = obj.value
+        else:
+            return None
+        new = cls.__new__(cls)
+        new.__dict__.update(obj.__dict__)
+        new.value = value
+        return new
+
+    def fresh(kept, mark):
+        """New objects for a kept procedure, the interpreter's own mark put back."""
+        if kept is _MARK:
+            return mark
+        cls = type(kept)
+        new = cls.__new__(cls)
+        new.__dict__.update(kept.__dict__)
+        if cls is psLib.ps_procedure:
+            new.value = [fresh(item, mark) for item in kept.value]
+        return new
 
     class Interpreter(psLib.PSInterpreter):
+        def __init__(self, encoding="ascii"):
+            super().__init__(encoding)
+            self._own_ops = dict(self.dictstack[0])
+
         def ps_eexec(self):
             f = self.pop("filetype").value
             # PSTokenizer.starteexec with the fast cipher
@@ -309,6 +385,152 @@ def _interpreter_class():
             f.buf = decrypt(f.dirtybuf, EEXEC_KEY)
             f.len = len(f.buf)
             f.pos = 4
+
+        def _operators(self, name: str):
+            """The operator functions procedure `name` calls, or None when it is not that simple."""
+            dictstack = self.dictstack
+            for i in range(len(dictstack) - 1, -1, -1):
+                if name in dictstack[i]:
+                    proc = dictstack[i][name]
+                    break
+            else:
+                return None
+            if type(proc) is not psLib.ps_procedure or proc.literal or not proc.value:
+                return None
+            items = proc.value
+            out = []
+            last = len(items) - 1
+            for k, item in enumerate(items):
+                if type(item) is not psLib.ps_name or item.literal:
+                    return None
+                n = item.value
+                if n not in (_LAST_OPS if k == last else _PLAIN_OPS):
+                    return None
+                for j in range(len(dictstack) - 1, -1, -1):
+                    if n in dictstack[j]:
+                        op = dictstack[j][n]
+                        break
+                else:
+                    return None
+                if op is not self._own_ops.get(n):
+                    return None
+                out.append(op.function)
+            return out
+
+        def ps_for(self):
+            """`0 1 255 {1 index exch /.notdef put} for`, which opens every program's Encoding, as
+            the stores it makes: a procedure of that shape (its names resolving to our operators)
+            over an array, integers in its range; any other loop is psLib's own."""
+            stack = self.stack
+            if len(stack) >= 5 and type(stack[-1]) is psLib.ps_procedure and type(stack[-5]) is psLib.ps_array:
+                items = stack[-1].value
+                arr = stack[-5].value
+                bounds = [o.value for o in stack[-4:-1] if type(o) is psLib.ps_integer and type(o.value) is int]
+                if (len(bounds) == 3 and type(items) is list and len(items) == 5 and type(arr) is list
+                        and type(items[0]) is psLib.ps_integer and items[0].value == 1
+                        and type(items[3]) is psLib.ps_literal
+                        and all(type(items[k]) is psLib.ps_name and not items[k].literal
+                                and items[k].value == n for k, n in ((1, "index"), (2, "exch"), (4, "put")))
+                        and all(self._resolved(n) is self._own_ops.get(n) for n in ("index", "exch", "put"))):
+                    start, step, limit = bounds
+                    if step > 0 and 0 <= start and limit < len(arr):
+                        del stack[-4:]
+                        value = items[3]
+                        for i in range(start, limit + 1, step):
+                            arr[i] = value
+                        return
+            super().ps_for()
+
+        def _resolved(self, name):
+            dictstack = self.dictstack
+            for i in range(len(dictstack) - 1, -1, -1):
+                if name in dictstack[i]:
+                    return dictstack[i][name]
+            return None
+
+        def _shortcut(self, tokenizer) -> bool:
+            buf, pos = tokenizer.buf, tokenizer.pos
+            m = _READ.match(buf, pos)
+            if m is None:
+                return False
+            n = int(m.group(1))
+            if n > tokenizer.len:
+                return False
+            ops = self._operators(m.group(2).decode("ascii"))
+            if ops is None:
+                return False
+            tokenizer.pos = m.end()
+            self.stack.append(ps_integer(n))
+            for f in ops:
+                f()
+            m = _STORE.match(tokenizer.buf, tokenizer.pos)
+            if m is not None:
+                ops = self._operators(m.group(1).decode("ascii"))
+                if ops is not None:
+                    tokenizer.pos = m.end()
+                    for f in ops:
+                        f()
+            return True
+
+        def interpret(self, data, getattr=getattr):
+            """psLib.PSInterpreter.interpret, with `_shortcut` tried at the top level."""
+            tokenizer = self.tokenizer = psLib.PSTokenizer(data, self.encoding)
+            getnexttoken = tokenizer.getnexttoken
+            do_token = self.do_token
+            handle_object = self.handle_object
+            shortcut = self._shortcut
+            skip_ws = _SKIP_WS.match
+            recording = None    # (buffer, start) of a top-level `{` being read the long way
+            try:
+                while 1:
+                    if not self.proclevel:
+                        if recording is not None:
+                            buf, start = recording
+                            recording = None
+                            text = buf[start:tokenizer.pos]
+                            # no `(`: psLib's string pattern backtracks, and could read a string
+                            # differently when the bytes after the procedure differ; every other
+                            # token ends at its first delimiter, the procedure at its `}`
+                            if (buf is tokenizer.buf and self.stack and len(text) >= _PROC_MIN
+                                    and b"(" not in text):
+                                kept = snapshot(self.stack[-1], self.mark)
+                                if kept is not None and type(kept) is psLib.ps_procedure:
+                                    if len(_PROCS) >= _PROCS_MAX:
+                                        _PROCS.clear()
+                                    _PROCS.setdefault(text[:_PROC_KEY], []).append((text, kept))
+                        if shortcut(tokenizer):
+                            continue
+                        buf = tokenizer.buf
+                        start = skip_ws(buf, tokenizer.pos).end()
+                        if buf[start:start + 1] == b"{":
+                            hit = False
+                            for text, kept in _PROCS.get(buf[start:start + _PROC_KEY], ()):
+                                if buf.startswith(text, start):
+                                    hit = True
+                                    break
+                            if hit:
+                                self.stack.append(fresh(kept, self.mark))
+                                tokenizer.pos = start + len(text)
+                                continue
+                            recording = (buf, start)
+                    tokentype, token = getnexttoken()
+                    if not token:
+                        break
+                    if tokentype:
+                        handler = getattr(self, tokentype)
+                        object = handler(token)
+                    else:
+                        object = do_token(token)
+                    if object is not None:
+                        handle_object(object)
+                tokenizer.close()
+                self.tokenizer = None
+            except:  # noqa: E722 - psLib's own clause, re-raised
+                if self.tokenizer is not None:
+                    psLib.log.debug("ps error:\n- - - - - - -\n%s\n>>>\n%s\n- - - - - - -",
+                                    self.tokenizer.buf[self.tokenizer.pos - 50:self.tokenizer.pos],
+                                    self.tokenizer.buf[self.tokenizer.pos:self.tokenizer.pos + 50])
+                raise
 
     return Interpreter
 
