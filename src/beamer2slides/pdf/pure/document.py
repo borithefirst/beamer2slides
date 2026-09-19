@@ -582,9 +582,23 @@ class PdfFile:
         if "Kids" not in pages:
             return 1
         with _deep_recursion():
-            return self._count_node(pages, [pages])
+            count = self._count_node(pages, [pages])
+        return 0 if count is None else count
 
-    def _count_node(self, node: dict, visited: list) -> int:
+    @staticmethod
+    def _is_branch(node: dict) -> bool:
+        """GetNodeType: /Type /Pages or /Page decides; anything else (a reference included, since
+        GetNameFor reads only a direct name) is guessed from /Kids and written in, as PDFium
+        fixes its in-memory copy."""
+        kind = node.get("Type")
+        if isinstance(kind, Name) and kind in ("Pages", "Page"):
+            return kind == "Pages"
+        branch = "Kids" in node
+        node[Name("Type")] = Name("Pages" if branch else "Page")
+        return branch
+
+    def _count_node(self, node: dict, visited: list) -> int | None:
+        """CountPages: None when the tree holds too many pages."""
         count = _integer(self.resolve(node.get("Count")))
         if 0 < count < _PAGE_MAX:
             return count
@@ -596,12 +610,17 @@ class PdfFile:
             kid = _dict(self.resolve(kid))
             if kid is None or any(kid is v for v in visited):
                 continue
-            if "Kids" in kid:
+            if self._is_branch(kid):
                 visited.append(kid)
-                count += self._count_node(kid, visited)
+                inner = self._count_node(kid, visited)
                 visited.pop()
+                if inner is None:
+                    return None
+                count += inner
             else:
                 count += 1
+            if count >= _PAGE_MAX:
+                return None
         node[Name("Count")] = count  # CountPages writes it back
         return count
 
@@ -656,7 +675,7 @@ class PdfFile:
         kids = self.resolve(node.get("Kids"))
         if not isinstance(kids, list):
             self._traversal.pop()
-            if togo[0] != 1:
+            if togo[0] != 1 or self._is_branch(node):
                 return None
             self._page_list[index] = (entry[0], node)
             return entry[0], node

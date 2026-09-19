@@ -372,6 +372,16 @@ PAGE_TREES = {
                  3: b"<< /Type 4 0 R /Parent 2 0 R /MediaBox [0 0 10 100] >>", 4: b"/Page"},
     "inherited_box": {1: _CAT, 2: b"<< /Type /Pages /Kids [4 0 R] /Count 1 >>",
                       3: b"<< /Type /Pages /MediaBox [0 0 77 77] >>", 4: b"<< /Type /Page /Parent 3 0 R >>"},
+    # ... unless the kids were counted (no sane /Count): GetNodeType then writes /Type /Page into
+    # every leaf, and a root without /Kids is a page unless it says /Pages
+    "counted_foo": {1: _CAT, 2: b"<< /Type /Pages /Kids [3 0 R 4 0 R] >>",
+                    3: b"<< /Type /Foo /Parent 2 0 R /MediaBox [0 0 10 100] >>", 4: _LEAF % 20},
+    "counted_foo_believed": {1: _CAT, 2: b"<< /Type /Pages /Kids [3 0 R 4 0 R] /Count 2 >>",
+                             3: b"<< /Type /Foo /Parent 2 0 R /MediaBox [0 0 10 100] >>", 4: _LEAF % 20},
+    "counted_page_with_kids": {1: _CAT, 2: b"<< /Type /Pages /Kids [3 0 R 4 0 R] >>",
+                               3: b"<< /Type /Page /Kids [4 0 R] /MediaBox [0 0 10 100] >>", 4: _LEAF % 20},
+    "root_no_kids_foo": {1: _CAT, 2: b"<< /Type /Foo /MediaBox [0 0 30 30] >>"},
+    "root_no_kids_string": {1: _CAT, 2: b"<< /Type (x) /MediaBox [0 0 30 30] >>"},
     "stream_kid": {1: _CAT, 2: b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
                    3: b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 10 100] /Length 0 >>\nstream\n\nendstream"},
 }
