@@ -118,6 +118,25 @@ Each of these was a diff against PDFium until it was ported:
     were asked for (`test_page_trees_are_walked_as_pdfium_walks_them`, three orders each). A page
     loads when /Type is absent or resolves to /Page. PDFium opens a document with no pages;
     pypdfium2's `PdfDocument` refuses it, so the contract does too.
+  - *Cross references* are loaded as CPDF_Parser loads them (`document.PdfFile`,
+    `test_cross_references_are_loaded_as_pdfium_loads_them`, one case per rule). Table entries are
+    20 bytes read blind: the offset is the digits before the first non-digit (`00000002f3 00000 n`
+    is offset 2), byte 17 `f` means free, and only the first entry with a position is verified, so a
+    wrong offset elsewhere makes that object None rather than a rebuild. A newer section's entry
+    with a lower generation is ignored (AddNormal); the newest trailer wins, `/Prev` loops stop. In
+    an XRef stream type 3 is nothing, and an archive number past the segment's last object is
+    ignored. An object stream needs a direct `/Type /ObjStm` and integer `/N` and `/First` (`/N 2.0`
+    makes every member None); a member numbered 0 is skipped but counts towards N. A rebuild merges
+    over the table it replaces, so entries the scan cannot see survive, and a later `3 0 obj` beats
+    an object stream's member. A failed parse is never cached.
+- **Navigation** (`pure/navigation.py`: FPDFLink_*, FPDFAction_*, FPDFDest_GetDestPageIndex,
+  CPDF_NameTree, FPDF_GetNamedDest, CPDF_PageLabel, FPDF_GetMetaText), resolved one level at a time as
+  PDFium does. Name-tree limits are put in order before they are compared, and names compare as
+  UTF-16 code units (an astral name sorts below U+FF01). A URI action is joined to the catalog's
+  `/URI /Base`; only GoTo actions give a destination; a link's /Rect with fewer than four numbers is
+  no rect; letter labels wrap past 26 × n and label numbers wrap as int32; the Info dictionary must
+  be a reference. A probe of 332 handmade files and 400 mutated ones differs from PDFium in none;
+  the structure fuzzer (`--structure`, seeds 0-400) went from 93 differing files to 48, links 0.
 
 ## Measured
 
