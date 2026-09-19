@@ -34,6 +34,11 @@ def _int32(v: int) -> int:
     return v - (1 << 32) if v & 0x80000000 else v
 
 
+def _int64(v: int) -> int:
+    v &= 0xFFFFFFFFFFFFFFFF
+    return v - (1 << 64) if v & 0x8000000000000000 else v
+
+
 def _udiv_prep(d: int) -> int:
     """``FT_UDIVPREP``: 0xFFFFFFFF / d in 64-bit C division, used with the sign of the call site."""
     return 0xFFFFFFFF // abs(d) if d else 0
@@ -158,6 +163,48 @@ class _Raster:
     def line_to(self, x: int, y: int) -> None:
         self.render_line(x * 4, y * 4)
 
+    def conic_to(self, control, to) -> None:
+        """``gray_render_conic``, the FT_INT64 version: a DDA in 32.32 fixed point over 2^k
+        segments, k from the arc's deviation (each bisection divides it by 4 exactly)."""
+        p0x, p0y = self.x, self.y
+        p1x, p1y = control[0] * 4, control[1] * 4
+        p2x, p2y = to[0] * 4, to[1] * 4
+        if ((p0y >> PIXEL_BITS) >= self.max_ey and (p1y >> PIXEL_BITS) >= self.max_ey
+                and (p2y >> PIXEL_BITS) >= self.max_ey) or \
+                ((p0y >> PIXEL_BITS) < self.min_ey and (p1y >> PIXEL_BITS) < self.min_ey
+                 and (p2y >> PIXEL_BITS) < self.min_ey):
+            self.x, self.y = p2x, p2y
+            return
+        bx = _int32(p1x - p0x)
+        by = _int32(p1y - p0y)
+        ax = _int32(p2x - p1x - bx)
+        ay = _int32(p2y - p1y - by)
+        d = max(abs(ax), abs(ay))
+        if d <= ONE_PIXEL // 4:
+            self.render_line(p2x, p2y)
+            return
+        shift = 16
+        while True:
+            d >>= 2
+            shift -= 1
+            if d <= ONE_PIXEL // 4:
+                break
+        count = 0x10000 >> shift
+        rx = _int64(ax << (2 * shift))
+        ry = _int64(ay << (2 * shift))
+        qx = _int64(_int64(bx << (shift + 17)) + rx)
+        qy = _int64(_int64(by << (shift + 17)) + ry)
+        rx = _int64(rx * 2)
+        ry = _int64(ry * 2)
+        px = _int64(p0x << 32)
+        py = _int64(p0y << 32)
+        for _ in range(count):
+            px = _int64(px + qx)
+            py = _int64(py + qy)
+            qx = _int64(qx + rx)
+            qy = _int64(qy + ry)
+            self.render_line(_int32(px >> 32), _int32(py >> 32))
+
     def cubic_to(self, c1, c2, to) -> None:
         arc = [(to[0] * 4, to[1] * 4), (c2[0] * 4, c2[1] * 4), (c1[0] * 4, c1[1] * 4), (self.x, self.y)]
         max_ey, min_ey = self.max_ey, self.min_ey
@@ -227,37 +274,85 @@ def _coverage(area: int) -> int:
     return coverage & 0xFF
 
 
-def decompose(outline, raster: _Raster, dx: int = 0, dy: int = 0) -> None:
-    """``FT_Outline_Decompose`` for ON/CUBIC outlines, every point shifted by (dx, dy)."""
+def _half(v: int) -> int:
+    """C's ``v / 2`` on a 32-bit FT_Pos (truncating towards 0)."""
+    v = _int32(v)
+    return -((-v) // 2) if v < 0 else v // 2
+
+
+def outline_decompose(outline, move_to, line_to, conic_to, cubic_to) -> None:
+    """``FT_Outline_Decompose`` (base/ftoutln.c, shift 0 and delta 0) over ``[(points, tags)]``.
+    A contour starting on a conic control starts at its last point when that one is on the curve,
+    else halfway between the two; two conic controls in a row imply the on-curve point halfway.
+    Raises ValueError where FreeType returns Invalid_Outline."""
     for points, tags in outline:
         if not points:
             continue
-        if tags[0] != ON:
-            raise ValueError("invalid outline")      # FreeType: Invalid_Outline
-        sx, sy = points[0][0] + dx, points[0][1] + dy
-        raster.move_to(sx, sy)
-        i, n = 1, len(points)
+        n = len(points)
+        last = n - 1
+        limit = last
+        v_start = points[0]
+        v_last = points[last]
+        tag = tags[0]
+        if tag == CUBIC:
+            raise ValueError("invalid outline")      # a contour cannot start on a cubic control
+        i = 0
+        if tag == CONIC:
+            if tags[last] == ON:
+                v_start = v_last
+                limit -= 1
+            else:
+                v_start = (_half(v_start[0] + v_last[0]), _half(v_start[1] + v_last[1]))
+            i = -1
+        move_to(v_start)
         closed = False
-        while i < n:
-            if tags[i] == ON:
-                raster.line_to(points[i][0] + dx, points[i][1] + dy)
-                i += 1
-            elif tags[i] == CUBIC:
-                if i + 1 >= n or tags[i + 1] != CUBIC:
-                    raise ValueError("invalid outline")
-                c1 = (points[i][0] + dx, points[i][1] + dy)
-                c2 = (points[i + 1][0] + dx, points[i + 1][1] + dy)
-                if i + 2 < n:
-                    raster.cubic_to(c1, c2, (points[i + 2][0] + dx, points[i + 2][1] + dy))
-                    i += 3
-                else:
-                    raster.cubic_to(c1, c2, (sx, sy))
+        while i < limit:
+            i += 1
+            tag = tags[i]
+            if tag == ON:
+                line_to(points[i])
+                continue
+            if tag == CONIC:
+                control = points[i]
+                while True:
+                    if i < limit:
+                        i += 1
+                        vec = points[i]
+                        if tags[i] == ON:
+                            conic_to(control, vec)
+                            break
+                        if tags[i] != CONIC:
+                            raise ValueError("invalid outline")
+                        conic_to(control, (_half(control[0] + vec[0]), _half(control[1] + vec[1])))
+                        control = vec
+                        continue
+                    conic_to(control, v_start)
                     closed = True
                     break
-            else:
-                raise ValueError("conic outline")
+                if closed:
+                    break
+                continue
+            # cubic
+            if i + 1 > limit or tags[i + 1] != CUBIC:
+                raise ValueError("invalid outline")
+            i += 2
+            if i <= limit:
+                cubic_to(points[i - 2], points[i - 1], points[i])
+                continue
+            cubic_to(points[i - 2], points[i - 1], v_start)
+            closed = True
+            break
         if not closed:
-            raster.line_to(sx, sy)
+            line_to(v_start)
+
+
+def decompose(outline, raster: _Raster, dx: int = 0, dy: int = 0) -> None:
+    """``FT_Outline_Decompose`` into the rasterizer, every point shifted by (dx, dy) first
+    (FT_Outline_Translate)."""
+    if dx or dy:
+        outline = [([(x + dx, y + dy) for x, y in pts], tags) for pts, tags in outline]
+    outline_decompose(outline, lambda p: raster.move_to(*p), lambda p: raster.line_to(*p),
+                      raster.conic_to, raster.cubic_to)
 
 
 def cbox(outline):

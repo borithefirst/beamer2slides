@@ -3,7 +3,8 @@ CFX_RenderDevice::DrawNormalText / DrawTextPath on the AGG back end, value for v
 
 A glyph is drawn the way PDFium draws it on a display bitmap without FPDF_LCD_TEXT: FreeType
 renders it in FT_RENDER_MODE_LCD (`ftgrays.render_lcd`, the outline from `ftoutline`: Adobe's CFF
-engine, no hinting, under FT_Set_Transform), and DrawNormalTextHelper folds each pixel's three
+engine, no hinting, or for glyf fonts `truetype`: FreeType's loader and bytecode hinter at 64 ppem,
+under FT_Set_Transform), and DrawNormalTextHelper folds each pixel's three
 subpixel values into one coverage (their average, shifted by the origin's third of a pixel),
 gamma-adjusts it with kTextGammaAdjust and merges the fill colour into a copy of the pixels under
 the text (GetDIBits; zeros on a BGRA device), which SetDIBits then puts back through the clip.
@@ -14,8 +15,8 @@ Big text (|a| + |b| of the glyph matrix above 50 device pixels) and every stroke
 DrawTextPath: the glyph outlines (LoadGlyphPath) filled / stroked as paths by `render.Device`.
 
 Refused (`unsupported`), so that a page is drawn exactly or not at all: Type 3 fonts, fonts
-without an embedded Type 1 / CFF program (standard 14 and the other substituted fonts, TrueType),
-codes whose glyph the font lacks (PDFium falls back to another font), vertical writing, pattern
+without an embedded program (standard 14 and the other substituted fonts), what `truetype`
+refuses (tricky and variable fonts, hinting that depends on earlier loads...), codes whose glyph the font lacks (PDFium falls back to another font), vertical writing, pattern
 colours, render modes outside 0..7, and text drawn into a soft mask (a mask device renders glyphs
 in FT_RENDER_MODE_NORMAL). Text clip modes (4..7) are drawn like 0..3: the AGG device has no soft
 clip, so ProcessClipPath skips text clips altogether."""
