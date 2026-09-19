@@ -624,8 +624,14 @@ of those bold and some not with identical API data (jruby-ja's titles bold, draw
 (`deck_ir.thumbnail_weights`, `stroke_em` > `BOLD_STROKE_EM` 0.10 em). hebrew-lesson 0.734 -> 0.879,
 jruby-ja 0.756 -> 0.796, sc-dark-modern 0.827 -> 0.831. jruby-ja's rest: mixed kana/Latin lines set
 1-2% wider, Tahoma Bold ~2.5% wider than Slides'.
-Text spacing (`ca-base` = bc373b9 -> `ca-final2`, same day; creandum-board 0.867 -> 0.946, ap-bio-stats
-0.925 -> 0.951 with the older weight and picture mechanisms): the gap between two paragraphs is the
+Pictures, pies and text spacing (`tp-e` -> `cp-a`, 912 slides: boxes 0.949 -> 0.956, no deck down).
+A picture's brightness, contrast and recolour are baked into the file adopt writes
+(`compare.adjusted_picture`, recolour ramp first, then contrast, then Slides' measured brightness:
+x(1+b) below 0, x1/(1-b) above): drawings-basics 0.942 -> 0.971. A PIE shape's dragged angles, which
+the API does not give (the preset's 270 degrees drew), are read along rays from its centre in the
+thumbnail (`deck_fills.pie_angles`: the circle less its largest gap, colours of pies above count as
+hidden): intro-lecture 0.948 -> 0.974. And, from a study agent (`ca-base` = bc373b9 -> `ca-final2`;
+creandum-board 0.923 -> 0.946, ap-bio-stats 0.925 -> 0.951): the gap between two paragraphs is the
 bigger of spaceBelow and the next spaceAbove, not their sum (ap-bio-stats slide 52 0.47 -> 0.90), per
 side for list items; spaces at a run's edges are kept however many and set in the run's own font
 inside its style (ap-bio's literal "•  " Arial bullets in Calibri text, slide 36 0.56 -> 0.94); a
@@ -633,7 +639,15 @@ superscript's strut stands outside the script, or it raised its line box; a midd
 drops by its own line box (`\adoptdrop`) and a one-word cell wider than its insets stays on its line;
 tabs in bulleted paragraphs. Tried and dropped: making the space where two faces meet the wider of
 the two (it read jruby-ja's bold title, which the IR calls regular, as a Courier space, and wrapped
-cs161-tls' `google.com` line).
+cs161-tls' `google.com` line). Line breaking was studied and needs nothing: Slides draws text kerned
+and breaks on the kerned width of a line at exactly the box's width, as TeX does here (of 579 boxes
+whose thumbnail lines can be counted, the rules tried - unkerned, a tolerance, pixel-rounded widths -
+gain at most one box); the breaks that still differ are fonts unlike Slides' own.
+Bench workflow: `run` caches each deck's scores by its source tree, IR and scorer
+(`<corpus>/<deck>/cache`, `--no-cache` to compile anyway), so a change recompiles only the decks
+whose source it changed, and starts the slowest decks first; `losses --tag T` charges every pixel the
+`boxes` score counts against a slide to the smallest element box holding it and ranks elements,
+decks, kinds and fonts in thousandths of the corpus score (`element_losses`, `tests/test_adopt_bench.py`).
 
 Opt-in suite (real Google Slides, ~95 s): `python -m pytest -m slides` (the default run deselects
 the `slides` marker, pyproject.toml). It converts the stress decks (19–22, 25, 13, demo) 3 at a
