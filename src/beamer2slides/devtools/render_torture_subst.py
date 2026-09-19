@@ -114,7 +114,8 @@ _RESET_FONTS = [FontSpec(f"reset/{flags}", "unknown", [
     b"/FontDescriptor @1@ >>" % flags,
     b"<< /Type /FontDescriptor /FontName /Reset%d /Flags %d /FontBBox [0 0 1000 1000] >>" % (flags, flags)], [65])
     for flags in (32, 34)]
-_RESET = pdf_bytes(b"BT /F0 20 Tf 60 60 Td (A) Tj ET BT /F1 20 Tf 120 60 Td (A) Tj ET", _RESET_FONTS)
+_RESET_CONTENT = b"BT /F0 20 Tf 60 60 Td (A) Tj ET BT /F1 20 Tf 120 60 Td (A) Tj ET"
+_RESET = pdf_bytes(_RESET_CONTENT, _RESET_FONTS)
 
 
 LAST_BLENDS = ""          # where `compare`'s last run started from (`generic_blends`)
@@ -135,27 +136,47 @@ def resync() -> None:
             doc.close()
 
 
-def reset_faces() -> str:
-    """What the reset page's two fonts are substituted with, and where the blend stands before and
-    after drawing it. `resync` only resets the built-in multiple master faces if the reset page
-    reaches them: a platform whose system fonts answer for a made-up name draws something else, and
-    then every later page starts from wherever the last one left the blend."""
+def reset_faces() -> list[str]:
+    """Everything the reset page does, printed at the start of every run so that a platform where
+    `resync` resets nothing says so in its own log. Per font: what it is substituted with and which
+    face object it got; then every AdjustVariationParams the pure reader's render makes (the glyph,
+    the width asked for, the weight, the blend it lands on), the blend before and after, and the
+    pixels the two readers differ by on the reset page itself."""
+    from ..pdf.pure import ftoutline
     from ..pdf.pure.backend import PureBackend
     before = generic_blends()
-    said = []
-    doc = PureBackend().open(_RESET)
+    said, calls = [], []
+    real = ftoutline.Face.adjust_variation
+
+    def spy(self, glyph, dest_width, weight):
+        real(self, glyph, dest_width, weight)
+        calls.append(f"{id(self)} glyph {glyph} width {dest_width} weight {weight} -> {self.blend_key()}")
+
+    ftoutline.Face.adjust_variation = spy
     try:
-        page = doc[0]
-        page.chars()
-        for font in page._fonts:
-            subst = getattr(font, "subst", None)
-            said.append(f"{font.base_name}->{subst.family if subst else None}"
-                        f"{' generic' if getattr(font, 'subst_generic', False) else ''}"
-                        f" face {id(getattr(font, 'program', None))}")
-        page.render(1)
+        doc = PureBackend().open(_RESET)
+        try:
+            page = doc[0]
+            page.chars()
+            for font in page._fonts:
+                subst = getattr(font, "subst", None)
+                said.append(f"{font.base_name}->{subst.family if subst else None}"
+                            f"{' generic' if getattr(font, 'subst_generic', False) else ''}"
+                            f" face {id(getattr(font, 'program', None))}")
+            page.render(1)
+        finally:
+            doc.close()
     finally:
-        doc.close()
-    return f"{' '.join(said)}; before {before}; after {generic_blends()}"
+        ftoutline.Face.adjust_variation = real
+    out = [f"  reset page: {' '.join(said)}",
+           f"    before {before}",
+           f"    after  {generic_blends()}"]
+    out += [f"    adjust {c}" for c in calls] or ["    adjust: none - the reset resets nothing"]
+    try:
+        out.append(f"    the two readers differ by {compare(_RESET_CONTENT, _RESET_FONTS, 1, False)[0]} px on it")
+    except Exception as e:  # noqa: BLE001
+        out.append(f"    the two readers: unknown ({type(e).__name__} {e})")
+    return out
 
 
 def generic_blends() -> str:
@@ -488,6 +509,11 @@ def main(argv=None) -> int:
     out = Path(args.out)
     fails = refused = drawn = 0
     reasons: dict = {}
+    try:
+        for line in reset_faces():
+            print(line)
+    except Exception as e:  # noqa: BLE001
+        print(f"  reset page: unknown ({type(e).__name__} {e})")
     for seed in range(args.seed0, args.seed0 + args.n):
         content, fonts, zoom, transparent = case(seed, args.simple, args.pool)
         try:
@@ -517,11 +543,6 @@ def main(argv=None) -> int:
         vis = np.concatenate([a[..., :3], b[..., :3], np.stack([np.where(d > 0, 255, 0)] * 3, -1)], 1)
         Image.fromarray(vis.astype(np.uint8)).save(out / f"seed{seed}.png")
         (out / f"seed{seed}.pdf").write_bytes(pdf_bytes(small, fonts))
-    if fails:
-        try:
-            print("  reset page:", reset_faces())
-        except Exception as e:  # noqa: BLE001
-            print(f"  reset page: unknown ({type(e).__name__} {e})")
     for why, k in sorted(reasons.items(), key=lambda kv: -kv[1]):
         print(f"  refused {k}: {why}")
     print(f"seeds {args.seed0}..{args.seed0 + args.n - 1}: {drawn} drawn, {fails} failed, {refused} refused")
