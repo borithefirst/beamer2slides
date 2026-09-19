@@ -204,7 +204,7 @@ def test_an_unknown_preset_is_a_rectangle():
     assert adopt_shapes.preset("NOT_A_SHAPE", 10, 10) is None
     out = adopt_shapes.shape_block({"kind": "shape", "bbox": [0, 0, 10, 10], "shape_type": "NOT_A_SHAPE",
                                     "fill": "#ff0000"}, Context(), "")
-    assert "cycle" in out
+    assert out.strip() == "\\sliderect[fill=red]{0,0,10,10}", out
 
 
 def test_a_turned_shape_is_drawn_through_its_transform():
@@ -223,13 +223,13 @@ def test_transparency_and_dashes_become_tikz_options():
     fo, so = adopt_shapes.style_options({"fill": "#00ff00", "fill_alpha": 0.25, "outline": "#000000",
                                          "outline_alpha": 0.5, "weight": 2.0, "dash": "DASH"}, ctx)
     assert "fill opacity=0.250" in fo and "draw opacity=0.500" in so
-    assert "dash pattern=on 8pt off 6pt" in so and "line width=2.00pt" in so
+    assert "dash pattern=on 8pt off 6pt" in so and "line width=2pt" in so
 
 
 def test_a_freeform_is_drawn_as_its_box():
     out = adopt_shapes.shape_block({"kind": "shape", "bbox": [0, 0, 10, 10], "shape_type": "CUSTOM",
                                     "fill": "#ff0000"}, Context(), "")
-    assert "cycle" in out and "controls" not in out
+    assert "\\sliderect" in out and "controls" not in out
 
 
 # ---------------------------------------------------------------- turned text
@@ -247,8 +247,9 @@ def test_turned_words_are_written_upright_and_set_turned(tmp_path):
     ir = deck_ir(turned_text_deck(30), foreign=True)
     el = ir["slides"][0]["elements"][0]
     text = adopt.bootstrap(ir, tmp_path / "main.tex")
-    assert "\\adoptturned{-30.00}" in text and "\\newsavebox\\adopt@box" in text
-    width = float(text.split("\\begin{textblock*}{")[1].split("pt}")[0])
+    assert "\\adoptturned{-30.00}" in text
+    assert "\\newsavebox\\adopt@box" in (tmp_path / "slides.sty").read_text(encoding="utf-8")
+    width = float(text.split("\\slidetext{")[1].split("}")[0].split(",")[2])
     upright, across = el["frame"]["size"][0], el["bbox"][2] - el["bbox"][0]
     assert upright - 12 < width <= upright < across, "the upright width less the insets, not the bbox's"
     cx = (el["frame"]["box"][0] + el["frame"]["box"][2]) / 2

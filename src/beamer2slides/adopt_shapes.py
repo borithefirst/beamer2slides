@@ -419,7 +419,7 @@ def style_options(el: dict, ctx, stroke_only: bool = False) -> tuple[list[str], 
             fo.append(f"fill opacity={el['fill_alpha']:.3f}")
     if stroke:
         weight = el.get("weight") or 0.75
-        so += [f"draw={colour_name(stroke, ctx.colours)}", f"line width={weight:.2f}pt"]
+        so += [f"draw={colour_name(stroke, ctx.colours)}", f"line width={pt(weight)}pt"]
         if el.get("outline_alpha") is not None and el["outline_alpha"] < 0.995:
             so.append(f"draw opacity={el['outline_alpha']:.3f}")
         so += dash_option(el.get("dash"), weight)
@@ -443,20 +443,60 @@ def transform_option(fr: dict, x0: float, y0: float) -> str:
     ox, oy = fr["origin"]
     tx, ty = ox - x0, -(oy - y0)
     if abs(q0 - 1) < 1e-6 and abs(q3 - 1) < 1e-6 and abs(q1) < 1e-6 and abs(q2) < 1e-6:
-        return f"shift={{({pt(tx)}pt,{pt(ty)}pt)}}"
+        # an upright frame at the picture's own origin needs no transform at all
+        return "" if pt(tx) == "0" and pt(ty) == "0" else f"shift={{({pt(tx)}pt,{pt(ty)}pt)}}"
     return f"cm={{{q0:.5f},{-q2:.5f},{-q1:.5f},{q3:.5f},({pt(tx)}pt,{pt(ty)}pt)}}"
 
 
-def tikz_block(body: str, x0: float, y0: float, w: float, h: float, ind: str) -> str:
+def options(opts: list[str]) -> str:
+    """`[a,b]` for the non-empty options, '' for none."""
+    opts = [o for o in opts if o]
+    return f"[{','.join(opts)}]" if opts else ""
+
+
+# \slideshape{x,y,w,h}{paths}: a tikzpicture whose bounding box is the element's box, x bp from the
+# page's left edge and y bp from its top, w by h bp, with its origin at that box's top left corner
+# (y up, so the shape is drawn below it). Written into slides.sty.
+SHAPE_MACRO = r"""% --- Shapes -----------------------------------------------------------------------------------
+% \slideshape{x,y,w,h}{paths}: TikZ paths in a box x bp from the page's left edge and y bp from its
+%   top, w by h bp; the origin is the box's top left corner, y pointing up. Arrow heads and strokes may
+%   reach out of the box: they overlap, the box stays.
+\newcommand\slideshape[2]{\slides@xywh#1\@nil
+  \slides@shape{\slides@x bp}{\slides@y bp}{\slides@w bp}{\slides@h bp}{#2}}
+\def\slides@shape#1#2#3#4#5{%
+  \edef\slides@block{\noexpand\begin{textblock*}{#3}(#1,#2)}\slides@block
+  \begin{tikzpicture}[baseline=(current bounding box.north),inner sep=0pt,outer sep=0pt]
+  \edef\slides@bb{\noexpand\useasboundingbox (0bp,0bp) rectangle (#3,-#4);}\slides@bb
+  #5\end{tikzpicture}\end{textblock*}}
+% \sliderect[options]{x,y,w,h}: a rectangle filling that box, drawn with TikZ's path options
+%   (fill=, draw=, line width=...).
+\newcommand\sliderect[2][]{\slides@xywh#2\@nil
+  \edef\slides@rect{\noexpand\slideshape{#2}{\noexpand\path[#1] (0bp,0bp) -- (\slides@w bp,0bp)
+    -- (\slides@w bp,-\slides@h bp) -- (0bp,-\slides@h bp) -- cycle;}}\slides@rect}
+% \slideellipse[options]{x,y,rx,ry}: an ellipse of radii rx and ry bp whose box's top left corner is
+%   x bp from the page's left edge and y bp from its top.
+\newcommand\slideellipse[2][]{\slides@xywh#2\@nil
+  \edef\slides@rect{\noexpand\slides@shape{\slides@x bp}{\slides@y bp}%
+    {\the\dimexpr2\dimexpr\slides@w bp\relax\relax}{\the\dimexpr2\dimexpr\slides@h bp\relax\relax}%
+    {\noexpand\path[#1] (\slides@w bp,-\slides@h bp) ellipse [x radius=\slides@w bp, y radius=\slides@h bp];}}%
+  \slides@rect}
+\def\slides@xywh#1,#2,#3,#4\@nil{\def\slides@x{#1}\def\slides@y{#2}\def\slides@w{#3}\def\slides@h{#4}}"""
+
+
+def tikz_block(body: str, x0: float, y0: float, w: float, h: float, ind: str, ctx=None) -> str:
     """A tikzpicture whose bounding box is the element's box on the page, hanging from the top of
     its textblock, so that its origin is at page (x0, y0) whatever is drawn (arrow heads, a callout's
-    tail and strokes may reach out of the box: they overlap, the box stays)."""
-    return (f"{ind}\\begin{{textblock*}}{{{max(w, 0.1):.1f}pt}}({x0:.1f}pt,{y0:.1f}pt)\n"
-            f"{ind}  \\begin{{tikzpicture}}[baseline=(current bounding box.north),inner sep=0pt,outer sep=0pt]\n"
-            f"{ind}    \\useasboundingbox (0pt,0pt) rectangle ({max(w, 0.01):.2f}pt,{-max(h, 0.01):.2f}pt);\n"
-            f"{ind}    {body}\n"
-            f"{ind}  \\end{{tikzpicture}}\n"
-            f"{ind}\\end{{textblock*}}\n")
+    tail and strokes may reach out of the box: they overlap, the box stays): `\\slideshape`."""
+    if ctx is not None:
+        ctx.packages.add(SHAPE_MACRO)
+    box = ",".join((pt1(x0), pt1(y0), pt(max(w, 0.01)), pt(max(h, 0.01))))
+    return f"{ind}\\slideshape{{{box}}}{{{body}}}\n"
+
+
+def pt1(v: float) -> str:
+    """`pt` to one decimal."""
+    s = f"{v:.1f}".rstrip("0").rstrip(".")
+    return "0" if s in ("", "-", "0", "-0") else s
 
 
 def connector_path(el: dict, w: float, h: float) -> str:
@@ -513,7 +553,7 @@ def traced_block(el: dict, ctx, ind: str) -> str:
         body.append(f"\\begin{{scope}}[even odd rule]\\clip {path};")
         body.append(f"\\path[draw={colour_name(tr['stroke'], ctx.colours)},line width={2 * (tr.get('weight') or 0.75):.2f}pt] {path};")
         body.append("\\end{scope}")
-    return tikz_block(("\n" + ind + "    ").join(body), x0, y0, x1 - x0, y1 - y0, ind)
+    return tikz_block(" ".join(body), x0, y0, x1 - x0, y1 - y0, ind, ctx)
 
 
 def line_block(el: dict, ctx, ind: str) -> str:
@@ -534,11 +574,11 @@ def line_block(el: dict, ctx, ind: str) -> str:
     fr = el.get("frame")
     if fr and el.get("line_type") and "STRAIGHT" not in el["line_type"]:
         w, h = fr["size"]
-        body = f"\\path[{','.join(so)},{transform_option(fr, x0, y0)}] {connector_path(el, w, h)};"
+        body = f"\\path{options(so + [transform_option(fr, x0, y0)])} {connector_path(el, w, h)};"
     else:
         (ax, ay), (bx, by) = el["from"], el["to"]
         body = f"\\path[{','.join(so)}] {P(ax - x0, ay - y0)} -- {P(bx - x0, by - y0)};"
-    return tikz_block(body, x0, y0, x1 - x0, y1 - y0, ind)
+    return tikz_block(body, x0, y0, x1 - x0, y1 - y0, ind, ctx)
 
 
 def shape_block(el: dict, ctx, ind: str) -> str:
@@ -576,17 +616,31 @@ def shape_block(el: dict, ctx, ind: str) -> str:
             opts = so
         elif mode.startswith("shade"):
             if fo:                                       # the face in the fill, then lightened/darkened
-                body.append(f"\\path[{','.join(fo + [where])}] {path};")
+                body.append(f"\\path{options(fo + [where])} {path};")
                 opts = [f"fill={'white' if mode == 'shade+' else 'black'}", "fill opacity=0.2"]
             opts = opts + so
         if mode.endswith("-eo") and opts:
             opts.append("even odd rule")
         if not opts:
             continue
-        body.append(f"\\path[{','.join(opts + [where])}] {path};")
+        body.append(f"\\path{options(opts + [where])} {path};")
     if not body:
         return ""
-    return tikz_block(("\n" + ind + "    ").join(body), x0, y0, x1 - x0, y1 - y0, ind)
+    bw, bh = float(pt(max(x1 - x0, 0.01))), float(pt(max(y1 - y0, 0.01)))
+    if len(body) == 1 and len(paths) == 1 and not where and paths[0][0] == poly([(0, 0), (bw, 0), (bw, bh), (0, bh)]):
+        # a plain rectangle filling its box: \sliderect draws that very path from the box's numbers
+        ctx.packages.add(SHAPE_MACRO)
+        box = ",".join((pt1(x0), pt1(y0), pt(bw), pt(bh)))
+        return f"{ind}\\sliderect{options(opts)}{{{box}}}\n"
+    rx, ry = float(pt(w / 2)), float(pt(h / 2))
+    if len(body) == 1 and len(paths) == 1 and not where and rx >= 0.01 and ry >= 0.01 \
+            and paths[0][0] == ellipse(rx, ry, rx, ry):
+        # an ellipse in its box: \slideellipse draws that very path from the radii (the box it is
+        # given, twice them, is not the element's to the last 0.01 pt, and moves nothing: the picture
+        # hangs from its top left corner)
+        ctx.packages.add(SHAPE_MACRO)
+        return f"{ind}\\slideellipse{options(opts)}{{{pt1(x0)},{pt1(y0)},{pt(rx)},{pt(ry)}}}\n"
+    return tikz_block(" ".join(body), x0, y0, x1 - x0, y1 - y0, ind, ctx)
 
 
 def turned_text(latex: str, el: dict, ctx) -> str:

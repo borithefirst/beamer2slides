@@ -274,6 +274,11 @@ def source(tmp_path, *tables) -> str:
     return adopt.bootstrap(deck_ir(deck(*tables), foreign=True), tmp_path / "tree" / "main.tex")
 
 
+def macros(tmp_path) -> str:
+    """The macro layer `bootstrap` writes beside main.tex (slides.sty)."""
+    return (tmp_path / "tree" / "slides.sty").read_text(encoding="utf-8")
+
+
 def table_source(text: str) -> str:
     start = text.index("\\adoptrow{0}")
     return text[start:text.index("\\end{tikzpicture}", start)]
@@ -281,7 +286,7 @@ def table_source(text: str) -> str:
 
 def test_a_table_is_written_at_its_place_with_its_macros(tmp_path):
     text = source(tmp_path, table())
-    assert "\\newcommand\\adoptcell" in text and "\\usepackage{tikz}" in text
+    assert "\\newcommand\\adoptcell" in macros(tmp_path) and "\\usepackage{tikz}" in text
     block = text[text.rindex("\\begin{textblock*}", 0, text.index("\\adoptrow{0}")):]
     assert block.startswith(f"\\begin{{textblock*}}{{{220 / SCALE:.1f}pt}}({50 / SCALE:.1f}pt,{80 / SCALE:.1f}pt)")
     assert "\\adopttops{3}" in text
@@ -389,7 +394,7 @@ def test_a_middle_aligned_cell_drops_by_its_own_line_box_and_no_other_does(tmp_p
     """Slides centres a cell's line box, whose ascent is 0.968 of 1.2 em, where TeX's strut is 0.7 of
     1.0: creandum-board's middle cells stood 0.125 em high. Top and bottom ones are placed right."""
     text = source(tmp_path, table())
-    assert "\\newcommand\\adoptdrop" in text
+    assert "\\newcommand\\adoptdrop" in macros(tmp_path)
     nodes = [l for l in table_source(text).splitlines() if "\\node[" in l]
     dropped = [l for l in nodes if "yshift=-\\adoptdrop" in l]
     assert len(dropped) == 1 and "anchor=west" in dropped[0]
@@ -460,7 +465,8 @@ def test_a_measured_inset_places_a_cell_by_its_first_or_last_baseline(tmp_path):
     el = next(e for e in ir["slides"][0]["elements"] if e["kind"] == "table")
     el["cell_text_y"] = 1.0
     text = adopt.bootstrap(ir, tmp_path / "tree" / "main.tex")
-    assert "\\newcommand\\adoptht" in text and "\\newcommand\\adopt@first" in text
+    sty = macros(tmp_path)
+    assert "\\newcommand\\adoptht" in sty and "\\newcommand\\adopt@first" in sty
     nodes = [l for l in table_source(text).splitlines() if "\\node[" in l]
     tops = [l for l in nodes if "+\\adoptht{" in l]
     bottoms = [l for l in nodes if "-\\adoptdp{" in l]

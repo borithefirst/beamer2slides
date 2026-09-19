@@ -7,6 +7,7 @@ alignment only the master states, and a connector - then the IR that comes back 
 """
 
 import json
+import re
 from pathlib import Path
 
 import pytest
@@ -171,7 +172,8 @@ def test_a_blank_line_someone_typed_is_a_line(tmp_path):
     assert ["".join(r["text"] for r in p["runs"]) for p in box["paragraphs"]] == \
         [" ", "first", " ", "second"], "the blank lines are kept, the trailing one is not"
     text = adopt.bootstrap(ir, tmp_path / "tree" / "main.tex")
-    assert text.count("% blank line") == 2, "each blank line takes a line of its own"
+    blank = re.findall(r"\\slide(?:par|text)(?:\[[^\]]*\])?(?:\{[^}]*\})+\{\}$", text, re.M)
+    assert len(blank) == 2, "each blank line takes a line of its own"
 
 
 def test_pull_still_sees_no_blank_paragraph():
@@ -208,6 +210,12 @@ def target_with_pictures(tmp_path: Path) -> dict:
     return target
 
 
+def placed(text: str) -> int:
+    """How many elements the source places: pictures in textblocks, text boxes, shapes."""
+    return len(re.findall(r"\\begin\{textblock\*\}|\\begin\{slidebox\}|\\slidetext\b|\\slideshape\b|"
+                          r"\\sliderect\b|\\slideellipse\b", text.split("\\begin{document}")[1]))
+
+
 def source_for(tmp_path: Path, target: dict | None = None) -> str:
     target = target if target is not None else target_with_pictures(tmp_path)
     return adopt.bootstrap(target, tmp_path / "tree" / "main.tex")
@@ -225,7 +233,7 @@ def test_every_element_keeps_its_own_place(tmp_path):
     bootstrap places each one; the loop would otherwise spend a round per element escalating flow
     text back into a textblock (`inverse.Planner.geometry`)."""
     text = source_for(tmp_path)
-    assert text.count("\\begin{textblock*}") == 3 * 4        # backdrop, card, connector, words
+    assert placed(text) == 3 * 4                             # backdrop, card, connector, words
     assert "\\usepackage[absolute,overlay]{textpos}" in text
 
 
@@ -234,7 +242,7 @@ def test_a_picture_the_deck_would_not_give_us_is_left_out(tmp_path):
     (The backdrop of the fixture has no file unless the test puts one there.)"""
     text = source_for(tmp_path, deck_ir(presentation(), foreign=True))
     assert "includegraphics" not in text
-    assert text.count("\\begin{textblock*}") == 3 * 3
+    assert placed(text) == 3 * 3
 
 
 def test_a_slide_that_sits_on_another_colour_says_so(tmp_path):
@@ -244,7 +252,8 @@ def test_a_slide_that_sits_on_another_colour_says_so(tmp_path):
     assert "\\definecolor{deckbg}{HTML}{F4CCCC}" in text            # what most of the deck sits on
     assert "\\setbeamercolor{background canvas}{bg=deckbg}" in text
     # and the one slide that does not, in a group so the colour ends with its frame
-    assert text.count("{\\setbeamercolor{background canvas}{bg=b2s0005DF}\n\\begin{frame}") == 1
+    name = re.search(r"\\definecolor\{(\w+)\}\{HTML\}\{0005DF\}", text).group(1)
+    assert text.count("{\\setbeamercolor{background canvas}{bg=" + name + "}\n\\begin{frame}") == 1
 
 
 def test_a_node_is_drawn_with_its_outline_and_its_rounded_corners(tmp_path):
@@ -259,7 +268,9 @@ def test_the_base_style_of_a_box_is_set_where_the_box_is(tmp_path):
     a source being refined and false of one written from nothing: without this the crimson 9 pt
     instruction slides and the blue 26 pt section titles both come out black."""
     text = source_for(tmp_path)
-    assert "\\color{" in text
+    styles = re.findall(r"\\slidestyle\{[^}]*\}\{[^}]*\}", text)
+    assert any("color=" in s for s in styles)
+    assert "\\color{\\slides@k@color}" in (Path(tmp_path) / "tree" / "slides.sty").read_text(encoding="utf-8")
 
 
 def test_a_picture_is_copied_into_the_tree(tmp_path):

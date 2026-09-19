@@ -141,30 +141,40 @@ def frame_of(text: str) -> str:
     return text[text.index("\\begin{frame}"):text.index("\\end{frame}")]
 
 
+def macros(tmp_path) -> str:
+    """The macro layer `bootstrap` writes beside main.tex."""
+    return (tmp_path / "tree" / "slides.sty").read_text(encoding="utf-8")
+
+
 def test_a_box_is_its_own_size_and_aligned_by_tex(tmp_path):
     d = deck(box("s_m", para("Middle"), x=100, y=100, w=200, h=80, contentAlignment="MIDDLE"))
     frame = frame_of(source(tmp_path, d))
     height = 80 / 720 * 453.54
-    assert f"\\vbox to {height:.1f}pt{{\\slidesbox" in frame
-    assert frame.count("\\vss") == 2, "the slack goes above and below a middle-aligned stack"
+    assert re.search(rf"\\slidetext\[middle\]\{{[\d.]+,[\d.]+,[\d.]+,{height:.1f}\}}", frame), frame
+    sty = macros(tmp_path)
+    assert "\\vbox to\\slides@h bp" in sty
+    assert sty.count("\\else\\vss\\fi") == 2, "the slack goes above and below a middle-aligned stack"
     assert "itemize" not in frame and "\\item" not in frame
 
 
 def test_list_items_are_drawn_with_slides_bullets_and_no_itemize(tmp_path):
     """Beamer's blue triangles are ink the deck does not have, and itemize cannot nest past three
     levels or hang a bullet where Slides does."""
-    frame = frame_of(source(tmp_path, body_deck()))
+    text = source(tmp_path, body_deck())
+    frame = frame_of(text)
     assert "itemize" not in frame and "\\item" not in frame
-    assert frame.count("\\llap{\\tikz") == 2
-    assert "circle[radius=" in frame and "draw=b2sCC0000" in frame and "fill=b2sCC0000" in frame
+    assert frame.count("\\slidebullet{") == 2
+    assert "\\definecolor{Red}{HTML}{CC0000}" in text
+    assert "circle[radius=" in text and "draw=Red" in text and "fill=Red" in text
+    assert "\\llap{\\csname slides@m@" in macros(tmp_path)
 
 
 def test_a_bullet_is_followed_by_no_word_space(tmp_path):
     """The line end after a bullet's \\llap{...} was a space: every bulleted line of the corpus began
     one word space right of Slides' (cs161-tls 0.869 -> 0.989)."""
     frame = frame_of(source(tmp_path, body_deck()))
-    assert frame.count("\\llap{") == 2
-    assert not re.search(r"\\llap\{.*\}\s*\n", frame), "each bullet line ends in %"
+    assert frame.count("\\slidebullet{") == 2
+    assert not re.search(r"\\slidebullet\{[^}]*\}\{[^}]*\}\s", frame), "the words follow the bullet"
 
 
 def test_the_thumbnail_tells_a_fixed_box_with_no_insets():
@@ -407,9 +417,9 @@ def test_a_middle_aligned_box_stacks_its_last_paragraphs_space_below():
           "paragraphs": [{"runs": [{"text": "add(6, 7)", "size": 15.0}], "slides": {}},
                          {"runs": [{"text": "???", "size": 24.0}], "slides": {"space_below": 10.0}}]}
     text = adopt.text_box_latex(el, adopt.Context(), "")
-    assert re.search(r"-\\prevdepth\\relax\s*\\vskip5\.00pt", text), text
+    assert "\\begin{slidebox}[middle,tail=5]" in text, text
     el["box"]["valign"] = "top"
-    assert "\\vskip5.00pt" not in adopt.text_box_latex(el, adopt.Context(), "")
+    assert "tail=" not in adopt.text_box_latex(el, adopt.Context(), "")
 
 
 def test_a_line_as_wide_as_its_box_stays_on_one_line():
@@ -523,7 +533,8 @@ def test_list_items_collapse_their_spacing_and_other_paragraphs_do_not(tmp_path)
     items = frame_of(source(tmp_path, body_deck()))
     plain = deck(box("s_p", para("One", style={"spaceBelow": pt(12), "spacingMode": "COLLAPSE_LISTS"})
                      + para("Two", style={"spaceBelow": pt(12), "spacingMode": "COLLAPSE_LISTS"})))
-    shifts = lambda text: [float(k) for k in re.findall(r"\\prevdepth=\\dimexpr\\prevdepth([-+][\d.]+)pt", text)]
+    # `space=` on a paragraph after the first is the space between the two line boxes, \prevdepth less it
+    shifts = lambda text: [-float(k) for k in re.findall(r"\n\s*\\slidepar\[[^\]]*space=([-\d.]+)", text)]
     (between_items,), (between_paras,) = shifts(items), shifts(frame_of(source(tmp_path / "b", plain)))
     # the plain paragraphs step 12 pt (7.56 PDF pt) further; the items only differ by their sizes
     assert between_paras == pytest.approx(-12 / 1.5875, abs=0.01)
@@ -536,9 +547,9 @@ def test_a_box_that_grows_to_fit_drops_its_first_space_above(tmp_path):
     paras = para("One", style={"spaceAbove": pt(22)}) + para("Two", style={"spaceAbove": pt(22)})
     kept = frame_of(source(tmp_path, deck(box("s_a", paras))))
     grows = frame_of(source(tmp_path / "g", deck(box("s_a", paras, autofit={"autofitType": "SHAPE_AUTOFIT"}))))
-    assert "\\vskip13.86pt" in kept and "\\vskip13.86pt" not in grows
+    assert "\\slidepar[space=13.86]{body}{One}" in kept and "\\slidepar{body}{One}" in grows
     for frame in (kept, grows):
-        assert "\\prevdepth=\\dimexpr\\prevdepth-13.86pt" in frame, "the second one gets its 22 pt"
+        assert "\\slidepar[space=13.86]{body}{Two}" in frame, "the second one gets its 22 pt"
 
 
 def fitted(h: float, **props) -> dict:
@@ -562,13 +573,13 @@ def test_a_box_that_fits_its_text_with_no_room_to_spare_has_no_insets():
 
 def test_a_box_with_no_insets_sets_its_text_against_its_edges(tmp_path):
     scale = 720 / 453.54
-    tight = frame_of(source(tmp_path, fitted(59)))
-    roomy = frame_of(source(tmp_path / "r", fitted(72)))
+    tight_text, roomy_text = source(tmp_path, fitted(59)), source(tmp_path / "r", fitted(72))
+    tight, roomy = frame_of(tight_text), frame_of(roomy_text)
     x = 100 / scale
-    width = re.search(r"\\begin\{textblock\*\}\{([\d.]+)pt\}\(([\d.]+)pt,", tight)
-    assert abs(float(width[1]) - 300 / scale) < 0.06 and width[2] == f"{x:.1f}"
-    assert "\\vskip0.00pt" in tight
-    assert f"({x + 6.7 / scale:.1f}pt," in roomy and f"\\vskip{6.48 / scale:.2f}pt" in roomy
+    geometry = re.search(r"\\begin\{slidebox\}\{([\d.]+),[\d.]+,([\d.]+),", tight)
+    assert abs(float(geometry[2]) - 300 / scale) < 0.06 and geometry[1] == f"{x:.0f}"
+    assert "\\setslideinset" not in tight_text and "inset=" not in tight, "the default inset is 0"
+    assert f"{{{x + 6.7 / scale:.1f}," in roomy and f"\\setslideinset{{{6.48 / scale:.2f}}}" in roomy_text
 
 
 def imported_box(oid: str, h: float, y: float) -> dict:
@@ -668,7 +679,7 @@ def test_text_after_a_tab_starts_at_the_next_default_stop(tmp_path):
     d = deck(box("s_t", para("x", runs=[("Revenue\t12\tup", {})])))
     text = source(tmp_path, d)
     frame = frame_of(text)
-    assert "\\newcommand\\slidestab" in text
+    assert "\\newcommand\\slidestab" in macros(tmp_path) and "\\usepackage{slides}" in text
     assert frame.count("\\slidestab{22.68pt}") == 2, "36 pt of Slides is 22.68 pt of the page"
     assert "\\global\\slidesx=0.00pt" in frame
     broken = frame_of(source(tmp_path / "b", deck(box("s_t", para("x", runs=[("Revenue\t12\x0bup", {})])))))
@@ -689,7 +700,7 @@ def test_empty_lines_at_the_end_of_a_middle_aligned_box_are_height(tmp_path):
     scale = 720 / 453.54
     assert middle[1]["runs"][0]["text"] == " " and middle[1]["runs"][0]["size"] * scale == pytest.approx(24, rel=0.05)
     assert middle[1]["slides"]["line_spacing"] == pytest.approx(0.8)
-    assert "% blank line" in frame_of(source(tmp_path, body("MIDDLE")))
+    assert re.search(r"\\slidepar(\[[^\]]*\])?\{[\w-]+\}\{\}\s*\n\s*\\end\{slidebox\}", frame_of(source(tmp_path, body("MIDDLE"))))
 
 
 def test_an_empty_line_is_as_tall_as_its_own_newline():
@@ -709,7 +720,8 @@ def test_a_wide_line_spacing_adds_nothing_under_the_last_line(tmp_path):
     def ending(spacing):
         d = deck(box("s_w", para("x", runs=[("Words", {"fontSize": pt(20)})], style={"lineSpacing": spacing}),
                      contentAlignment="MIDDLE"))
-        return float(re.findall(r"\\vskip\\dimexpr([\d.]+)pt-\\prevdepth", frame_of(source(tmp_path / str(spacing), d)))[-1])
+        # the stack ends on the depth of its last paragraph's style
+        return float(re.findall(r"depth=([\d.]+)\}", source(tmp_path / str(spacing), d))[-1])
     assert ending(115) > ending(100)
     assert ending(150) == ending(170) == ending(100)
 
@@ -718,16 +730,20 @@ def test_every_font_a_text_box_selects_spaces_its_words_with_its_own_space(tmp_p
     """\\spaceskip was set once, by \\slidesize, from the font selected then: a paragraph whose
     typeface switch came after it (sc-dark-modern's Courier Prime) was spaced with the sans font's
     narrow space."""
-    text = source(tmp_path, body_deck())
-    assert "\\AddToHook{selectfont}{\\ifslidesspace\\spaceskip=\\fontdimen2\\font" in text
-    assert "\\slidesbox}{\\slidesspacetrue" in text
+    source(tmp_path, body_deck())
+    sty = macros(tmp_path)
+    assert "\\AddToHook{selectfont}{\\ifslidesspace\\spaceskip=\\fontdimen2\\font" in sty
+    assert "\\slidesbox}{\\slidesspacetrue" in sty
 
 
 def test_a_box_whose_base_is_bold_writes_its_regular_words_regular(tmp_path):
     """`runs_latex` only ever wrote \\textbf, so under a bold base the regular words stayed bold."""
     d = deck(box("s_b", para("x", runs=[("Mostly bold words here", {"bold": True}), (" plain", {})])))
-    frame = frame_of(source(tmp_path, d))
-    assert "\\bfseries" in frame and "\\textmd{\\ plain}" in frame, "its space is a regular one too"
+    text = source(tmp_path, d)
+    frame = frame_of(text)
+    style = re.search(r"\\slidetext\{[^}]*\}\{([\w-]+)\}", frame)[1]
+    assert re.search(rf"\\slidestyle\{{{style}\}}\{{[^}}]*weight=bold", text), "the box's base is bold"
+    assert "\\textmd{\\ plain}" in frame, "its space is a regular one too"
 
 
 def test_a_soft_break_anywhere_is_a_line_break_that_compiles(tmp_path):
@@ -737,9 +753,10 @@ def test_a_soft_break_anywhere_is_a_line_break_that_compiles(tmp_path):
                              style={"alignment": "CENTER"})))
     frame = frame_of(source(tmp_path, d))
     assert "\\\\" not in frame
-    assert frame.count("\\unskip\\break") == 2
+    assert frame.count("\\slidebreak") == 2
+    assert "\\newcommand\\slidebreak{\\unskip\\break}" in macros(tmp_path)
     # most of the words are bold, so bold is the box's base and the regular word says so
-    assert "\\unskip\\break \\textmd{opening}bold\\unskip\\break word" in frame
+    assert "\\slidebreak \\textmd{opening}bold\\slidebreak word" in frame
 
 
 def test_straight_quotes_and_double_hyphens_stay_as_typed():
@@ -884,10 +901,10 @@ def test_a_box_with_powerpoint_insets_starts_its_text_3_6_pt_higher():
           "paragraphs": [{"runs": [{"text": "Hi", "size": 10.0}], "slides": {}}]}
     plain = adopt.text_box_latex(el, adopt.Context(), "")
     el["box"]["inset_y"] = 3.6
-    assert "\\vskip6.48pt" in plain and "\\vskip2.88pt" in adopt.text_box_latex(el, adopt.Context(), "")
-    assert "\\begin{textblock*}{86.61pt}(6.7pt,0.0pt)" in plain
+    assert "inset=6.48" in plain and "inset=2.88" in adopt.text_box_latex(el, adopt.Context(), "")
+    assert "{6.7,0,86.61,50}" in plain
     el["box"]["inset_x"] = 3.6
-    assert "\\begin{textblock*}{92.81pt}(3.6pt,0.0pt)" in adopt.text_box_latex(el, adopt.Context(), "")
+    assert "{3.6,0,92.81,50}" in adopt.text_box_latex(el, adopt.Context(), "")
 
 
 def test_the_thumbnails_measure_a_first_line_and_skip_what_crosses_it():
@@ -937,13 +954,18 @@ def test_a_paragraph_of_two_sizes_is_spaced_line_by_line():
           "paragraphs": [{"runs": [{"text": "First step: ", "size": 20.0},
                                    {"text": "two words", "size": 10.0}], "slides": {}},
                          {"runs": [{"text": "Next", "size": 10.0}], "slides": {}}]}
-    tex = adopt.text_box_latex(el, adopt.Context(), "")
+    ctx = adopt.Context()
+    tex = adopt.text_box_latex(el, ctx, "")
+    styles = "\n".join(adopt.style_definitions(ctx))
     small, big = adopt.line_box(10.0, 1.0), adopt.line_box(20.0, 1.0)
-    assert f"\\baselineskip={sum(small):.2f}pt" in tex and "\\lineskiplimit=0pt" in tex
-    assert f"height{small[0]:.2f}pt depth{small[1]:.2f}pt\\relax words" in tex
-    assert f"height{big[0]:.2f}pt depth{big[1]:.2f}pt\\relax step:" in tex
+    first = re.search(r"\\slidepar\[mixed\]\{([\w-]+)\}", tex)
+    assert first, "a paragraph of several sizes is `mixed`: each word carries its line box"
+    assert re.search(rf"\\slidestyle\{{{first[1]}\}}\{{[^}}]*pitch={adopt.num(sum(small))},", styles)
+    assert f"\\slidestrut{{{adopt.num(small[0])}}}{{{adopt.num(small[1])}}}words" in tex
+    assert f"\\slidestrut{{{adopt.num(big[0])}}}{{{adopt.num(big[1])}}}step:" in tex
+    assert "\\lineskiplimit=0bp" in adopt.SLIDES_TEXT
     # the next paragraph is spaced from the depth TeX recorded, not from a guessed size
-    assert f"\\prevdepth={sum(small) - small[0]:.2f}pt" in tex
+    assert f"prevdepth={adopt.num(sum(small) - small[0])}" in tex
 
 
 def prose(*paras: dict, scale: float = 1.0) -> dict:
@@ -975,8 +997,8 @@ def test_each_list_item_says_whether_its_side_of_the_gap_collapses():
             {"runs": [words("Two")], "bullet": bullet, "slides": {"spacing_mode": "COLLAPSE_LISTS"}}),
             adopt.Context(), "")
     assert items("NEVER_COLLAPSE") != items("COLLAPSE_LISTS")
-    assert "\\prevdepth=\\dimexpr\\prevdepth+0.00pt" in items("COLLAPSE_LISTS")
-    assert "\\prevdepth=\\dimexpr\\prevdepth-3.00pt" in items("NEVER_COLLAPSE")
+    assert "space=" not in items("COLLAPSE_LISTS"), "no space between the two line boxes"
+    assert "\\slidepar[space=3]" in items("NEVER_COLLAPSE")
 
 
 def test_a_bulleted_line_with_tabs_stands_them_on_the_default_stops():
@@ -1004,8 +1026,8 @@ def test_a_superscript_does_not_raise_its_line_box():
     el = prose({"runs": [words("Law ", size=20.0), words("E = mc"), words("2", script="super")], "slides": {}})
     tex = adopt.text_box_latex(el, adopt.Context(), "")
     sup = tex[tex.index("\\textsuperscript"):]
-    assert "\\vrule" not in sup.split("}")[0]
-    assert re.search(r"\\vrule width0pt height[\d.]+pt depth[\d.]+pt\\relax \\textsuperscript\{2\}", tex)
+    assert "\\slidestrut" not in sup.split("}")[0]
+    assert re.search(r"\\slidestrut\{[\d.]+\}\{[\d.]+\}\\textsuperscript\{2\}", tex)
 
 
 def test_deck_ir_keeps_a_run_weight_other_than_regular_and_bold():

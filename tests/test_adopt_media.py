@@ -7,6 +7,7 @@ through a fake `fetch` or a patched `fontfetch.get`.
 
 import io
 import json
+import re
 import urllib.error
 from pathlib import Path
 
@@ -443,7 +444,10 @@ def test_a_run_in_weight_600_is_set_in_its_own_face(monkeypatch, tmp_path):
     assert run["weight"] == 600 and run["bold"], "600 is bold to anything that knows only two weights"
     text = adopt.bootstrap(ir, tmp_path / "tree" / "main.tex")
     assert ",FontFace={w600}{n}{Font=TinyFlex-W600}]" in text
-    assert "\\fontseries{w600}\\selectfont " in text and "\\bfseries" not in text
+    style = re.search(r"\\slidetext\{[^}]*\}\{([\w-]+)\}\{This is a Headline", text)[1]
+    assert re.search(rf"\\slidestyle\{{{style}\}}\{{[^}}]*weight=w600[,}}]", text), "its style selects series w600"
+    assert "\\bfseries" not in text and "weight=bold" not in text
+    assert "\\noexpand\\fontseries{\\slides@k@weight}\\noexpand\\selectfont" in (tmp_path / "tree" / "slides.sty").read_text(encoding="utf-8")
     assert (tmp_path / "tree" / "fonts" / "TinyFlex-W600.ttf").exists()
 
 
@@ -460,10 +464,14 @@ def test_a_decks_second_face_gets_a_switch_of_its_own(monkeypatch, tmp_path):
     text = adopt.bootstrap(ir, tmp_path / "tree" / "main.tex")
     assert "\\setsansfont{OpenSans}" in text
     assert "\\newfontfamily\\adoptfontA{Montserrat}" in text
-    title = text[text.index("A title") - 200:text.index("A title")]
-    assert "\\adoptfontA" in title
-    body = text[text.index("body text") - 200:text.index("body text")]
-    assert "\\adoptfontA" not in body
+
+    def face(words):
+        """The face option of the style the box holding `words` is set in."""
+        style = re.search(rf"\\slidetext\{{[^}}]*\}}\{{([\w-]+)\}}\{{{words}", text)[1]
+        keys = re.search(rf"\\slidestyle\{{{style}\}}\{{([^\n]*)\}}\n", text)[1]
+        return re.search(r"face=(\\\w+)", keys) and re.search(r"face=(\\\w+)", keys)[1]
+    assert face("A title") == "\\adoptfontA"
+    assert face("body text") is None
 
 
 def test_a_face_of_few_but_huge_letters_gets_a_switch_too(monkeypatch, tmp_path):
