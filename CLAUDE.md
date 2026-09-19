@@ -57,9 +57,12 @@ a per-slide background picture.
   JPEGs as libjpeg's raw bytes, stretch engine, CFX_ImageTransformer for any angle, own masks;
   `pure/decode_image.py`, `pure/render_image.py`, oracle `tools/render_torture_image.py` levels 0-6,
   17,000 seeds exact; the AGG driver drops an overprinted CMYK image's Darken, so overprint changes
-  nothing). Whole pages: 229 of the test decks' 241 render byte for byte
+  nothing), and so is Type 3 text (`pure/render_type3.py`: ProcessType3Text, the glyph cache with
+  AdjustBlue, TransformTo, form glyphs of paths/images/shadings/nested Type 3 text; widths in floats,
+  LoadChar's depth-4 guard and the per-document font map; oracle `tools/render_torture_type3.py`,
+  6,400 seeds exact, 1% refused: glyph images that are not masks). Whole pages: 231 of the test decks' 241 render byte for byte
   as PDFium's, none apart (`test_whole_beamer_pages_render_as_pdfium_renders_them`);
-  a page with anything not ported yet (Type 3 or TrueType text, system-font substitutes,
+  a page with anything not ported yet (TrueType text, system-font substitutes,
   JPX/JBIG2/CCITT or ICC-profiled images, tiling patterns, ICCBased shadings, transfer functions on
   images…) raises PdfError, so
   `renders = False`: `classify` runs on it and `convert` doesn't yet. Every call equals PDFium's on 4,373 pages

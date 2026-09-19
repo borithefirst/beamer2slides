@@ -453,7 +453,8 @@ class Document:
             # PDFium opens it; the reference backend (pypdfium2's PdfDocument) refuses it
             raise PdfError("a PDF without pages")
         self._pages: dict[int, Page] = {}
-        self._font_cache: dict = {}
+        from .fonts import doc_fonts
+        self._font_cache: dict = doc_fonts(self.pdf)
 
     def __len__(self) -> int:
         return self.pdf.page_count

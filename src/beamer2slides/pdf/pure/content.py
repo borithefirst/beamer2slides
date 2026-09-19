@@ -224,6 +224,10 @@ class State:
     fill_pattern: object = None
     stroke_pattern: object = None
     parent_matrix: tuple = IDENTITY
+    # whether the colour is set (CPDF_Color::IsNull): a Type 3 glyph starts without one, which
+    # the renderer replaces with the text's fill colour (render_type3)
+    fill_set: bool = True
+    stroke_set: bool = True
 
     def copy(self) -> "State":
         return State(**self.__dict__)
@@ -369,7 +373,8 @@ class _Run:
         obj.blend, obj.soft_mask = s.blend, s.soft_mask
         obj.smask, obj.smask_matrix, obj.transfer = s.smask, s.smask_matrix, s.transfer
         if color:
-            obj.fill, obj.stroke = s.fill_ref, s.stroke_ref
+            obj.fill = s.fill_ref if s.fill_set else None
+            obj.stroke = s.stroke_ref if s.stroke_set else None
             obj.pattern = s.fill_cs.is_pattern or s.stroke_cs.is_pattern
             obj.fill_pattern = s.fill_pattern if s.fill_cs.is_pattern else None
             obj.stroke_pattern = s.stroke_pattern if s.stroke_cs.is_pattern else None
@@ -513,6 +518,10 @@ class _Run:
     def _set_color(self, fill: bool, cs: ColorSpace | None, values: list[float]) -> None:
         """CPDF_ColorState::SetColor."""
         s = self.state
+        if fill:
+            s.fill_set = True
+        else:
+            s.stroke_set = True
         current = s.fill_cs if fill else s.stroke_cs
         if cs is not None:
             current = cs
@@ -566,9 +575,11 @@ class _Run:
         if fill:
             self.state.fill_cs, self.state.fill_values = cs, tuple(cs.initial())
             self.state.fill_pattern = False if cs.is_pattern else None
+            self.state.fill_set = True
         else:
             self.state.stroke_cs, self.state.stroke_values = cs, tuple(cs.initial())
             self.state.stroke_pattern = False if cs.is_pattern else None
+            self.state.stroke_set = True
 
     def op_cs(self, args):
         self._set_space(True, args)
@@ -583,10 +594,14 @@ class _Run:
     def op_sc(self, args):
         if args:
             self._set_color(True, None, self._colors(args))
+        else:
+            self.state.fill_set = True      # SetColor with no values: the colour is no longer null
 
     def op_SC(self, args):
         if args:
             self._set_color(False, None, self._colors(args))
+        else:
+            self.state.stroke_set = True
 
     def _set_pattern(self, fill: bool, args):
         if not args:
@@ -606,9 +621,9 @@ class _Run:
             # PDFium finds no pattern and leaves the colour as it was, which this parser does not
             record = side if side is not None else "?"
         if fill:
-            s.fill_pattern = record
+            s.fill_pattern, s.fill_set = record, True
         else:
-            s.stroke_pattern = record
+            s.stroke_pattern, s.stroke_set = record, True
         cs = s.fill_cs if fill else s.stroke_cs
         if not cs.is_pattern:
             cs = PATTERN
@@ -1022,7 +1037,8 @@ class _Run:
                           leading=s.leading, rise=s.rise, text_mode=s.text_mode,
                           dash=s.dash, dash_phase=s.dash_phase, smask=s.smask,
                           smask_matrix=s.smask_matrix, transfer=s.transfer,
-                          fill_pattern=s.fill_pattern, stroke_pattern=s.stroke_pattern)
+                          fill_pattern=s.fill_pattern, stroke_pattern=s.stroke_pattern,
+                          fill_set=s.fill_set, stroke_set=s.stroke_set)
             m = r(stream.get("Matrix"))
             fm = tuple(_num(r(v)) for v in m[:6]) if isinstance(m, list) and len(m) >= 6 else IDENTITY
             child.ctm = fm

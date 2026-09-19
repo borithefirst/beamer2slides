@@ -551,7 +551,7 @@ def test_the_pure_renderer_survives_text_torture_seeds(simple):
             n = compare(content, fonts, zoom, transparent)[0]
         except PdfError as e:
             if "TrueType" not in str(e):     # TrueType glyphs are not ported yet (26_truetype_fonts)
-                refused += 1                 # Type 3 text: refused, never drawn wrong
+                refused += 1                 # anything else not ported: refused, never drawn wrong
             continue
         if n:
             apart[seed] = n
@@ -576,7 +576,7 @@ def test_text_clips_clip_what_follows_them_as_in_pdfium():
         try:
             n = compare(content, fonts, zoom, transparent)[0]
         except PdfError:
-            continue                         # TrueType or Type 3 text: refused
+            continue                         # TrueType text: refused
         if n:
             apart[seed] = n
     assert not apart, f"seeds apart (python tools/render_torture_text.py SEED 1 --simple 3): {apart}"
@@ -642,9 +642,9 @@ def test_vertical_writing_reads_and_draws_as_pdfium():
 
 
 def test_the_pure_renderer_refuses_text_it_cannot_draw_exactly_yet():
-    """Fonts PDFium draws with a system TrueType substitute (GDI's Arial for Helvetica) and Type 3
-    text are refused, not guessed."""
-    from beamer2slides.devtools.render_torture_text import FontSpec, harvest, pdf_bytes
+    """Fonts PDFium draws with a system TrueType substitute (GDI's Arial for Helvetica) are refused,
+    not guessed; the test decks' Type 3 fonts (pdflatex's bitmap fonts) draw as PDFium's."""
+    from beamer2slides.devtools.render_torture_text import FontSpec, compare, harvest, pdf_bytes
     from beamer2slides.pdf.pure.backend import PureBackend
     helvetica = FontSpec("standard", "type1", [b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>"], [65])
     page = PureBackend().open(pdf_bytes(b"BT /F0 12 Tf 10 10 Td (A) Tj ET", [helvetica]))[0]
@@ -652,9 +652,90 @@ def test_the_pure_renderer_refuses_text_it_cannot_draw_exactly_yet():
         page.render(1.0)
     type3 = [s for s in harvest() if s.kind == "type3"]
     if type3:
-        body = b"BT /F0 12 Tf 10 10 Td <%02x> Tj ET" % type3[0].codes[0]
-        with pytest.raises(PdfError, match="Type 3"):
-            PureBackend().open(pdf_bytes(body, type3[:1]))[0].render(1.0)
+        body = b"BT /F0 12 Tf 10 10 Td <%s> Tj ET" % b"".join(b"%02x" % c for c in type3[0].codes[:6])
+        for zoom in (1.0, 2.0, 3.1):
+            assert compare(body, type3[:1], zoom, False)[0] == 0
+
+
+# ---------------------------------------------------------------------- Type 3 text
+
+
+def _type3_pdf(glyphs: dict, page: bytes, matrix=b"1 0 0 1 0 0", widths=None, fonts_in_glyphs=()):
+    """A page over made-up Type 3 fonts: `glyphs` {font name: [glyph procedures]}; the first font
+    is /T0 and every font's /Resources name the others as /N<i> (in order)."""
+    objects, procs = [], {}
+    names = list(glyphs)
+    for name in names:
+        procs[name] = []
+        for g in glyphs[name]:
+            objects.append(b"<< /Length %d >>\nstream\n" % len(g) + g + b"\nendstream")
+            procs[name].append(len(objects))
+    number = {name: len(objects) + 1 + k for k, name in enumerate(names)}
+    res = b""
+    if fonts_in_glyphs:
+        res = b" /Resources << /Font << %s >> >>" % b" ".join(
+            b"/N%d %d 0 R" % (i, number[n]) for i, n in enumerate(fonts_in_glyphs))
+    for k, name in enumerate(names):
+        p = procs[name]
+        w = (widths or {}).get(name, b" ".join(b"0.5" for _ in p))
+        fm = matrix if k == 0 else b"1 0 0 1 0 0"
+        objects.append(
+            b"<< /Type /Font /Subtype /Type3 /FontMatrix [%s] /FontBBox [0 0 1 1] /CharProcs << %s >> "
+            b"/Encoding << /Type /Encoding /Differences [0 %s] >> /FirstChar 0 /LastChar %d /Widths [%s]%s >>"
+            % (fm, b" ".join(b"/g%d %d 0 R" % (i, q) for i, q in enumerate(p)),
+               b" ".join(b"/g%d" % i for i in range(len(p))), len(p) - 1, w, res))
+    return page, objects, [(n.encode(), number[n]) for n in names]
+
+
+# (fonts, page, font matrix, widths, fonts named in glyphs): pages found apart once, shrunk
+TYPE3_CASES = {
+    # a /Widths entry of 0.5025 under FontMatrix 1 is 502.5 in floats and rounds to 503, not 502
+    "widths_rounded_in_floats": ({"T0": [b"0.2777 0 0 0 0 1 d1\nBT /N0 0.6518 Tf 0.0225 0.0237 Td <00> Tj ET"],
+                                  "T1": [b"0.7199 0 0 0 1 1 d1\n0.1895 0.5222 0.0914 -0.18 re f\n0.7165 0.0603 m "
+                                         b"0.4099 0.2271 l 0.2499 -0.0963 l 0.1702 0.5605 l h f"]},
+                                 b"BT /T0 19.6267 Tf 20 100 Td <00000000> Tj ET", b"1 0 0 1 0 0",
+                                 {"T0": b"0.5025"}, ("T1",)),
+    # CPDF_Type3Char::Transform adds the font matrix's translation to the glyph box unscaled, so a
+    # translucent glyph's bitmap (the box of what its procedure draws) ignores it
+    "glyph_box_ignores_the_font_matrix_translation": (
+        {"T0": [b"500 0 d0\n0 0 1 rg\n0 0 400 700 re f"]},
+        b"/A1 gs BT /T0 40 Tf 20 60 Td <000000> Tj ET", b"0.001 0 0 0.002 0.02 -0.1288", None, ()),
+    # an upright glyph image whose first or last row is blank goes through CFX_ImageTransformer's
+    # "normal" branch (the stretcher at ceil(a) x -ceil(d)), not StretchTo with AdjustBlue
+    "blank_edge_rows": ({"T0": [b"700 0 0 0 700 700 d1\nq 700 0 0 700 0 0 cm\nBI /IM true /W 8 /H 6 ID "
+                                b"\xff\x00\x81\x66\xff\xff\nEI\nQ"]},
+                        b"BT /T0 23.7 Tf 10.3 20.6 Td <0000> Tj ET 0 0 1 rg BT /T0 61 Tf 1 0 0 -1 60 140 Tm <00> Tj ET",
+                        b"0.001 0 0 0.001 0 0", None, ()),
+    # a font drawn inside its own glyph draws nothing there (the font is being drawn), and text in
+    # a colored (d0) glyph that sets no colour of its own takes the text's
+    "self_nesting_and_colours": ({"T0": [b"0.6 0 d0\n0 0 0.5 0.5 re f\nBT /N0 0.5 Tf 0.5 0.5 Td <00> Tj ET",
+                                         b"0.6 0 0 0 1 1 d1\n1 0 0 rg 0.1 0.1 0.8 0.8 re f"]},
+                                 b"0 0.5 0 rg BT /T0 50 Tf 20 40 Td <0001> Tj ET", b"1 0 0 1 0 0", None, ("T0",)),
+}
+
+
+@pytest.mark.parametrize("name", TYPE3_CASES)
+def test_the_pure_renderer_draws_pdfiums_type3_text(name):
+    from beamer2slides.devtools.render_torture_type3 import compare
+    glyphs, page, matrix, widths, inner = TYPE3_CASES[name]
+    content, objects, fonts = _type3_pdf(glyphs, page, matrix, widths, inner)
+    for zoom, transparent in ((1.0, False), (1.37, True), (3.1, False)):
+        n, _a, _b, d = compare(content, objects, fonts, zoom, transparent)
+        assert n == 0, (zoom, transparent, n if n is not None else d)
+
+
+def test_the_pure_renderer_survives_type3_torture_seeds():
+    """A slice of the random Type 3 pages (devtools/render_torture_type3.py: bitmap, path, colored,
+    form, image and shading glyphs, nested fonts, odd font matrices, Tr, alpha, clips): any pixel
+    apart fails. The fixed seeds were once apart: 12 (the char box took FontMatrix e, f times 1000),
+    248 (/Widths rounded in doubles), 241 and 583 (a zero /FontBBox read half built by a glyph that
+    selects its own font), 482 (that recursion never ended)."""
+    from beamer2slides.devtools.render_torture_type3 import case, compare, run
+    stats = run(0, 40, verbose=False)
+    assert not stats["failed"], f"seeds apart (python tools/render_torture_type3.py SEED 1): {stats['failed']}"
+    assert stats["drawn"] >= 36
+    apart = {s: n for s in (12, 241, 248, 482, 583) if (n := compare(*case(s))[0])}
+    assert not apart, f"seeds apart: {apart}"
 
 
 def _needs_foxit():
