@@ -976,69 +976,78 @@ class _Rect:
         self.b, self.t = min(self.b, y), max(self.t, y)
 
 
+def _hypotf(x, y):
+    return f32(math.hypot(x, y))
+
+
 def _end_points(rect: _Rect, start, end, hw):
-    """UpdateLineEndPoints (cfx_path.cpp)."""
+    """UpdateLineEndPoints (cfx_path.cpp), in float32 like every step there."""
     if start[0] == end[0]:
         if start[1] == end[1]:
-            rect.update(end[0] + hw, end[1] + hw)
-            rect.update(end[0] - hw, end[1] - hw)
+            rect.update(f32(end[0] + hw), f32(end[1] + hw))
+            rect.update(f32(end[0] - hw), f32(end[1] - hw))
             return
-        y = end[1] - hw if end[1] < start[1] else end[1] + hw
-        rect.update(end[0] + hw, y)
-        rect.update(end[0] - hw, y)
+        y = f32(end[1] - hw) if end[1] < start[1] else f32(end[1] + hw)
+        rect.update(f32(end[0] + hw), y)
+        rect.update(f32(end[0] - hw), y)
         return
     if start[1] == end[1]:
-        x = end[0] - hw if end[0] < start[0] else end[0] + hw
-        rect.update(x, end[1] + hw)
-        rect.update(x, end[1] - hw)
+        x = f32(end[0] - hw) if end[0] < start[0] else f32(end[0] + hw)
+        rect.update(x, f32(end[1] + hw))
+        rect.update(x, f32(end[1] - hw))
         return
-    dx, dy = end[0] - start[0], end[1] - start[1]
-    ll = math.hypot(dx, dy)
-    mx, my = end[0] + hw * dx / ll, end[1] + hw * dy / ll
-    dx1, dy1 = hw * dy / ll, hw * dx / ll
-    rect.update(mx - dx1, my + dy1)
-    rect.update(mx + dx1, my - dy1)
+    dx, dy = f32(end[0] - start[0]), f32(end[1] - start[1])
+    ll = _hypotf(dx, dy)
+    mx = f32(end[0] + f32(f32(hw * dx) / ll))
+    my = f32(end[1] + f32(f32(hw * dy) / ll))
+    dx1, dy1 = f32(f32(hw * dy) / ll), f32(f32(hw * dx) / ll)
+    rect.update(f32(mx - dx1), f32(my + dy1))
+    rect.update(f32(mx + dx1), f32(my - dy1))
 
 
 def _join_points(rect: _Rect, start, mid, end, hw):
-    """UpdateLineJoinPoints (cfx_path.cpp); the miter limit is not used there either."""
-    tw = 1.0 / 20
-    start_vert = abs(start[0] - mid[0]) < tw
-    end_vert = abs(mid[0] - end[0]) < tw
+    """UpdateLineJoinPoints (cfx_path.cpp); the miter limit is not used there either.
+
+    Float32 after every step: where the path doubles back on a point (a `v` whose first control
+    is the current point makes end == mid), which side of the line the miter goes to is decided
+    by a comparison of two equal numbers, and only float32 rounding decides it as PDFium does."""
+    tw = f32(1.0 / 20)
+    start_vert = abs(f32(start[0] - mid[0])) < tw
+    end_vert = abs(f32(mid[0] - end[0])) < tw
     if start_vert and end_vert:
         d = 1 if mid[1] > start[1] else -1
-        y = mid[1] + hw * d
-        rect.update(mid[0] + hw, y)
-        rect.update(mid[0] - hw, y)
+        y = f32(mid[1] + hw * d)
+        rect.update(f32(mid[0] + hw), y)
+        rect.update(f32(mid[0] - hw), y)
         return
     start_k = start_c = end_k = end_c = start_dc = end_dc = 0.0
     if not start_vert:
-        sx, sy = start[0] - mid[0], start[1] - mid[1]
-        start_k = (mid[1] - start[1]) / (mid[0] - start[0])
-        start_c = mid[1] - start_k * mid[0]
-        start_dc = abs(hw * math.hypot(sx, sy) / sx)
+        sx, sy = f32(start[0] - mid[0]), f32(start[1] - mid[1])
+        start_k = f32(f32(mid[1] - start[1]) / f32(mid[0] - start[0]))
+        start_c = f32(mid[1] - f32(start_k * mid[0]))
+        start_dc = abs(f32(f32(hw * _hypotf(sx, sy)) / sx))
     if not end_vert:
-        ex, ey = end[0] - mid[0], end[1] - mid[1]
-        end_k = ey / ex
-        end_c = mid[1] - end_k * mid[0]
-        end_dc = abs(hw * math.hypot(ex, ey) / ex)
+        ex, ey = f32(end[0] - mid[0]), f32(end[1] - mid[1])
+        end_k = f32(ey / ex)
+        end_c = f32(mid[1] - f32(end_k * mid[0]))
+        end_dc = abs(f32(f32(hw * _hypotf(ex, ey)) / ex))
     if start_vert:
-        ox = start[0] + (hw if end[0] < start[0] else -hw)
-        if start[1] < end_k * start[0] + end_c:
-            oy = end_k * ox + end_c + end_dc
+        ox = f32(start[0] + (hw if end[0] < start[0] else -hw))
+        if start[1] < f32(f32(end_k * start[0]) + end_c):
+            oy = f32(f32(f32(end_k * ox) + end_c) + end_dc)
         else:
-            oy = end_k * ox + end_c - end_dc
+            oy = f32(f32(f32(end_k * ox) + end_c) - end_dc)
         rect.update(ox, oy)
         return
     if end_vert:
-        ox = end[0] + (hw if start[0] < end[0] else -hw)
-        if end[1] < start_k * end[0] + start_c:
-            oy = start_k * ox + start_c + start_dc
+        ox = f32(end[0] + (hw if start[0] < end[0] else -hw))
+        if end[1] < f32(f32(start_k * end[0]) + start_c):
+            oy = f32(f32(f32(start_k * ox) + start_c) + start_dc)
         else:
-            oy = start_k * ox + start_c - start_dc
+            oy = f32(f32(f32(start_k * ox) + start_c) - start_dc)
         rect.update(ox, oy)
         return
-    if abs(start_k - end_k) < tw:
+    if abs(f32(start_k - end_k)) < tw:
         sd = 1 if mid[0] > start[0] else -1
         ed = 1 if end[0] > mid[0] else -1
         if sd == ed:
@@ -1046,10 +1055,12 @@ def _join_points(rect: _Rect, start, mid, end, hw):
         else:
             _end_points(rect, start, mid, hw)
         return
-    so = start_c + (start_dc if end[1] < start_k * end[0] + start_c else -start_dc)
-    eo = end_c + (end_dc if start[1] < end_k * start[0] + end_c else -end_dc)
-    jx = (eo - so) / (start_k - end_k)
-    rect.update(jx, start_k * jx + so)
+    below = end[1] < f32(f32(start_k * end[0]) + start_c)
+    so = f32(start_c + (start_dc if below else -start_dc))
+    below = start[1] < f32(f32(end_k * start[0]) + end_c)
+    eo = f32(end_c + (end_dc if below else -end_dc))
+    jx = f32(f32(eo - so) / f32(start_k - end_k))
+    rect.update(jx, f32(f32(start_k * jx) + so))
 
 
 def stroke_bbox(points: list, line_width: float) -> tuple:

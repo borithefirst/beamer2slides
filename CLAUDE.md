@@ -40,7 +40,9 @@ a per-slide background picture.
   metadata rules). Rendering is being ported from PDFium's AGG renderer (`pure/raster.py`,
   `pure/render.py`): paths, clips and forms come out byte-identical (float32 after every operation,
   `CFX_Matrix` products included; oracle `tools/render_torture.py`, random pages vs PDFium, shrunk);
-  a page with anything not ported yet (text, images, shadings, soft masks…) raises PdfError, so
+  so do soft masks, transparency groups and every blend mode (`pure/render_transparency.py`, oracle
+  `tools/render_torture_transparency.py`, 6,000 seeds; GetBackdrop, CheckClip, float32 stroke boxes);
+  a page with anything not ported yet (text, images, shadings, transfer functions…) raises PdfError, so
   `renders = False`: `classify` runs on it and `convert` doesn't yet. Every call equals PDFium's on 4,373 pages (float32 noise aside),
   and deck.json is identical on all 48 test decks; extract is 7× slower. `tests/test_pure_pdf.py`.
 - No public links: pictures reach Slides inside the imported .pptx, never as shared Drive

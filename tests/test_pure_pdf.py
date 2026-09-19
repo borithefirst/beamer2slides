@@ -113,8 +113,8 @@ def test_extract_and_classify_on_the_pure_reader_write_pdfiums_deck():
 
 @built
 def test_the_pure_reader_refuses_a_page_it_cannot_draw_exactly():
-    """Text, soft masks and shadings are not drawn yet: the page raises instead of coming back
-    without them."""
+    """Text and shadings are not drawn yet (beamer's soft masks hold shadings): the page raises
+    instead of coming back without them."""
     doc = pdf.resolve("pure").open(DECKS[0])
     with pytest.raises(PdfError, match="cannot render .+ yet"):
         doc[0].render(1.0)
@@ -157,6 +157,82 @@ def test_the_pure_renderer_survives_torture_seeds(forms, page):
             apart[seed] = n
     flags = " --forms" * forms + " --page" * page
     assert not apart, f"seeds apart (python tools/render_torture.py SEED 1{flags}): {apart}"
+
+
+# ---------------------------------------------------------------------- transparency
+
+_GROUND = b"q 0.9 0.6 0.1 rg 10 10 150 110 re f Q\n"
+# (page content, items, zoom, transparent): items as devtools/render_torture_transparency.pdf_bytes
+# takes them; /A0-/A4 are constant alphas 0.5 0.25 0.8 0 1, /B<k> the blend mode BLENDS[k]
+TRANSPARENCY_CASES = {
+    # CPDF_ContentParser::CheckClip: a form's /BBox that holds its fill drops the clip, which moves
+    # the fill's edge pixels where both edges coincide (torture seeds 172 and 241)
+    "check_clip": (b"q\n0.6381 -1.2322 0.0402 -1.8177 83.337 100.751 cm\n/X0 Do\nQ",
+                   [("X", b"/BBox [0 0 200 150]", b"q\n0.0000 42.3000 60.0000 90.2640 re f\nQ", b"")], 1, False),
+    "check_clip_group": (b"q\n1.0470 1.0474 -0.5703 -0.6611 48.129 2.196 cm\n/X0 Do\nQ",
+                         [("X", b"/BBox [0 0 200 150] /Group << /S /Transparency >>",
+                           b"q\n112.3008 51.2495 82.7500 41.3097 re f\nQ", b"")], 0.5, False),
+    "luminosity_mask": (_GROUND + b"q /S0 gs 0.1 0.5 0.2 rg 0 0 200 150 re f Q",
+                        [("S", b"/BBox [0 0 200 150] /Group << /S /Transparency /CS /DeviceRGB >>",
+                          b"0.8 0.3 0.1 rg 30 20 120 90 re f 1 g 60 40 m 170 60 l 90 140 l f",
+                          b"/S /Luminosity /BC [0.2 0.2 0.2]")], 1, False),
+    "alpha_mask": (_GROUND + b"q /S0 gs 0 0 1 rg 20 20 160 110 re f Q",
+                   [("S", b"/BBox [0 0 150 120] /Matrix [1 0 0.4 1 -10 0] /Group << /S /Transparency /CS /DeviceGray /I true >>",
+                     b"/A1 gs 0.5 g 40 30 90 60 re f", b"/S /Alpha")], 2, True),
+    "isolated_group_alpha": (_GROUND + b"q /A0 gs /X0 Do Q",
+                             [("X", b"/BBox [0 0 200 150] /Group << /S /Transparency /I true >>",
+                               b"0 0.6 0.3 rg 30 30 100 60 re f 0.8 0 0 rg 90 50 m 180 140 l 60 120 l f", b"")], 1.37, False),
+    # a non-isolated group starts from the device's pixels and blends into them
+    "non_isolated_group_blend": (_GROUND + b"/X0 Do",
+                                 [("X", b"/BBox [0 0 200 150] /Group << /S /Transparency >>",
+                                   b"q /B1 gs 0.2 0.3 0.9 rg 30 30 100 60 re f Q "
+                                   b"q /B10 gs /A2 gs 0.9 0.9 0.2 rg 70 50 90 80 re f Q", b"")], 1, False),
+    # a blend on an opaque page: GetBackdrop draws the page again up to the object
+    "page_blend_backdrop": (_GROUND + b"q /B7 gs 0.3 0.6 0.9 rg 40 30 120 90 re f Q q /B3 gs 0.5 g 8 w 20 20 m 180 130 l S Q",
+                            [], 1.37, False),
+    "page_blend_transparent": (_GROUND + b"q /B9 gs /A0 gs 0.3 0.6 0.9 rg 40 30 120 90 re f Q", [], 1, True),
+    "non_separable": (_GROUND + b"q /B12 gs 0.1 0.8 0.4 rg 20 20 70 100 re f Q q /B13 gs 0.9 0.1 0.6 rg 60 20 70 100 re f Q "
+                      b"q /B14 gs 0.2 0.2 0.9 rg 100 20 70 100 re f Q q /B15 gs 0.6 0.9 0.1 rg 140 20 50 100 re f Q", [], 1, False),
+    # the group's bitmap is the form's rect, the union of its children's stroke boxes: a `v` whose
+    # first control is the current point joins at a doubled point, and only float32 rounding
+    # decides which side the miter goes (torture seeds 797 and 2849)
+    "stroke_box_float32": (b"/X0 Do", [("X", b"/BBox [-5000 -5000 5000 5000] /Group << /S /Transparency /I true >>",
+                                       b"32.0000 198.0000 m -1422.6323 155.5000 80.5374 124.9622 101.1379 11.6032 c "
+                                       b"121.0000 76.5000 184.4316 78.0000 v S", b"")], 1.37, False),
+}
+
+
+@pytest.mark.parametrize("name", TRANSPARENCY_CASES)
+def test_the_pure_renderer_draws_pdfiums_transparency(name):
+    from beamer2slides.devtools.render_torture_transparency import compare
+    content, items, zoom, transparent = TRANSPARENCY_CASES[name]
+    assert compare(content, zoom, transparent, items)[0] == 0
+
+
+@pytest.mark.parametrize("page", [False, True], ids=["pages", "geometry"])
+def test_the_pure_renderer_survives_transparency_torture_seeds(page):
+    """A slice of the random pages with soft masks, groups, alphas and blend modes the renderer
+    was made exact on (6,000 seeds, half with page geometry, when it was written)."""
+    from beamer2slides.devtools.render_torture_transparency import case, compare
+    apart = {}
+    for seed in range(40):
+        content, items, zoom, transparent, geometry = case(seed, page)
+        n = compare(content, zoom, transparent, items, geometry)[0]
+        if n:
+            apart[seed] = n
+    flags = " --page" * page
+    assert not apart, f"seeds apart (python tools/render_torture_transparency.py SEED 1{flags}): {apart}"
+
+
+def test_the_pure_renderer_refuses_what_it_cannot_draw_exactly_yet():
+    """Transfer functions (/TR on the ExtGState or on a soft mask) are not ported: refused, not ignored."""
+    from beamer2slides.devtools.render_torture_transparency import pdf_bytes
+    from beamer2slides.pdf.pure.backend import PureBackend
+    mask = [("S", b"/BBox [0 0 200 150] /Group << /S /Transparency /CS /DeviceGray >>", b"0.5 g 0 0 100 100 re f",
+             b"/S /Luminosity /TR << /FunctionType 2 /Domain [0 1] /C0 [1] /C1 [0] /N 1 >>")]
+    page = PureBackend().open(pdf_bytes(b"q /S0 gs 0 0 1 rg 0 0 200 150 re f Q", mask))[0]
+    with pytest.raises(PdfError, match="transfer functions"):
+        page.render(1.0)
 
 
 # ---------------------------------------------------------------------- PDFium's rules, one by one
