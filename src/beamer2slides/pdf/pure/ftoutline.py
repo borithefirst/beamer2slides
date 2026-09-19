@@ -151,6 +151,9 @@ class Face:
 
     def _load_cff(self, data: bytes) -> None:
         from fontTools.cffLib import CFFFontSet
+        if data[:4] in (b"\x00\x01\x00\x00", b"true", b"ttcf"):
+            # CFF outlines under a TrueType tag: FreeType's drivers open it otherwise (measured apart)
+            raise Unported("CFF outlines in an sfnt not tagged OTTO")
         if data[:4] == b"OTTO":
             from fontTools.ttLib import TTFont
             data = TTFont(io.BytesIO(data), lazy=True).getTableData("CFF ")
@@ -523,51 +526,62 @@ MOVE, LINE, BEZIER = "M", "L", "C"
 
 
 def _glyph_path(outline):
-    """FT_Outline_Decompose into Outline_MoveTo/LineTo/CubicTo, then Outline_CheckEmptyContour
-    and ClosePath. Points are [x, y, kind, close] with x = (float)pos / 4096."""
+    """FT_Outline_Decompose into Outline_MoveTo/LineTo/ConicTo/CubicTo, then
+    Outline_CheckEmptyContour and ClosePath. Points are [x, y, kind, close] with
+    x = (float)pos / 4096. A conic becomes a cubic with controls cur + (ctrl - cur) * 2 / 3 and
+    ctrl + (to - ctrl) / 3, in C's truncating 32-bit FT_Pos arithmetic."""
+    from .ftgrays import outline_decompose
     from .raster import F
     pts: list[list] = []
+    cur = [0, 0]
 
-    def pt(v):
-        return F(F(v[0]) / 4096.0), F(F(v[1]) / 4096.0)
+    def pt(x, y):
+        return F(F(x) / 4096.0), F(F(y) / 4096.0)
 
     def close():
         if pts:
             pts[-1][3] = True
 
-    for points, tags in outline:
-        if not points:
-            continue
-        if tags[0] != ON:
-            return None                                   # Invalid_Outline: FT_Load_Glyph erred first
-        start = points[0]
+    def move_to(p):
         _check_empty(pts)
         close()
-        pts.append([*pt(start), MOVE, False])
-        i, n, closed = 1, len(points), False
-        while i < n:
-            if tags[i] == ON:
-                pts.append([*pt(points[i]), LINE, False])
-                i += 1
-                continue
-            if i + 1 >= n or tags[i + 1] != CUBIC:
-                return None
-            c1, c2 = points[i], points[i + 1]
-            to = points[i + 2] if i + 2 < n else start
-            pts.append([*pt(c1), BEZIER, False])
-            pts.append([*pt(c2), BEZIER, False])
-            pts.append([*pt(to), BEZIER, False])
-            if i + 2 >= n:
-                closed = True
-                break
-            i += 3
-        if not closed:
-            pts.append([*pt(start), LINE, False])
+        pts.append([*pt(*p), MOVE, False])
+        cur[:] = p
+
+    def line_to(p):
+        pts.append([*pt(*p), LINE, False])
+        cur[:] = p
+
+    def conic_to(c, p):
+        cx, cy = cur
+        pts.append([*pt(i32(cx + _cdiv(i32(i32(c[0] - cx) * 2), 3)),
+                        i32(cy + _cdiv(i32(i32(c[1] - cy) * 2), 3))), BEZIER, False])
+        pts.append([*pt(i32(c[0] + _cdiv(i32(p[0] - c[0]), 3)),
+                        i32(c[1] + _cdiv(i32(p[1] - c[1]), 3))), BEZIER, False])
+        pts.append([*pt(*p), BEZIER, False])
+        cur[:] = p
+
+    def cubic_to(c1, c2, p):
+        pts.append([*pt(*c1), BEZIER, False])
+        pts.append([*pt(*c2), BEZIER, False])
+        pts.append([*pt(*p), BEZIER, False])
+        cur[:] = p
+
+    try:
+        outline_decompose(outline, move_to, line_to, conic_to, cubic_to)
+    except ValueError:
+        return None                                       # Invalid_Outline: FT_Load_Glyph erred first
     if not pts:
         return None
     _check_empty(pts)
     close()
     return pts
+
+
+def _cdiv(a: int, b: int) -> int:
+    """C's integer division (truncating towards 0)."""
+    q = abs(a) // abs(b)
+    return q if (a < 0) == (b < 0) else -q
 
 
 def _check_empty(pts: list) -> None:
@@ -1542,6 +1556,11 @@ def face_of(font) -> Face:
     """The Face of a pure `fonts.Font`, made once per font object."""
     face = font.__dict__.get("_b2s_face")
     if face is None:
-        face = Face(font)
+        prog = font.program
+        if prog is not None and font.embedded and prog.kind == "truetype":
+            from .truetype import TrueTypeFace
+            face = TrueTypeFace(font)
+        else:
+            face = Face(font)
         font.__dict__["_b2s_face"] = face
     return face

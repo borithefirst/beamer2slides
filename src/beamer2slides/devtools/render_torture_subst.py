@@ -8,8 +8,8 @@ any pixel that differs is a failure, shrunk to the lines that still make it diff
 Every font is made up on the spot: a simple font dictionary (/Type1, /TrueType or /MMType1) with a
 random /BaseFont - names nothing on the machine carries (PDFium's generic FoxitSansMM / FoxitSerifMM
 then, blended at the requested weight and skewed by the italic angle), Symbol / ZapfDingbats and
-their variants (Foxit's CFF faces), and base-14 or installed names (GDI TrueType faces, which the
-pure renderer refuses until TrueType drawing lands) - random /Flags (fixed, serif, symbolic, italic,
+their variants (Foxit's CFF faces), and base-14 or installed names (GDI TrueType faces, drawn
+through `pure/truetype.py`'s hinter; `--pool installed` draws only those) - random /Flags (fixed, serif, symbolic, italic,
 force bold), a /FontDescriptor with random /FontWeight, /StemV and /ItalicAngle, /Widths that agree
 with nothing (or none), and /Encoding by name or /Differences. PDFium's Foxit faces must be in the
 user cache (`python -m beamer2slides.pdf.pure.foxit`), or every page is refused.
@@ -176,7 +176,7 @@ def main(argv=None) -> int:
     ap.add_argument("seed0", type=int, nargs="?", default=0)
     ap.add_argument("n", type=int, nargs="?", default=200)
     ap.add_argument("--simple", type=int, default=2)
-    ap.add_argument("--pool", default="any", choices=["any", "unknown", "symbol"])
+    ap.add_argument("--pool", default="any", choices=["any", "unknown", "symbol", "installed"])
     ap.add_argument("--out", default="out/render-torture-subst")
     ap.add_argument("--no-shrink", action="store_true")
     args = ap.parse_args(argv)

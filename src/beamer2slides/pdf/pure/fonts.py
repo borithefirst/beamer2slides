@@ -949,7 +949,7 @@ class Font:
         self.doc, self.dict = doc, d
         r = doc.resolve
         self.base_name = str(r(d.get("BaseFont")) or "")
-        self.flags = FLAG_NONSYMBOLIC
+        self.flags = 0
         self.italic_angle = 0
         self.stem_v = 0
         self.font_weight: int | None = None
