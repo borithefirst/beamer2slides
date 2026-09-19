@@ -42,6 +42,38 @@ def adobe_cmyk_to_srgb(c: int, m: int, y: int, k: int) -> tuple[int, int, int]:
     return tuple(max(v, 0) >> 8 for v in rgb)
 
 
+_CMYK_ARRAY = None
+
+
+def adobe_cmyk_to_srgb_array(q):
+    """`adobe_cmyk_to_srgb` over an (n, 4) integer array of 0-255 CMYK: (n, 3) int64, the same
+    integer arithmetic element by element."""
+    import numpy as np
+    global _CMYK_ARRAY
+    if _CMYK_ARRAY is None:
+        _CMYK_ARRAY = np.frombuffer(_CMYK, np.uint8).astype(np.int64).reshape(-1, 3)
+    table = _CMYK_ARRAY
+    fix = np.asarray(q, np.int64).reshape(-1, 4) << 8
+    idx = (fix + 4096) >> 13
+
+    def at(ix):
+        return table[729 * ix[:, 0] + 81 * ix[:, 1] + 9 * ix[:, 2] + ix[:, 3]]
+
+    start = at(idx)
+    rgb = start << 8
+    for axis in range(4):
+        other = fix[:, axis] >> 13
+        same = other == idx[:, axis]
+        other = np.where(same, np.where(other == 8, other - 1, other + 1), other)
+        moved = idx.copy()
+        moved[:, axis] = other
+        neighbour = at(moved)
+        rate = (fix[:, axis] - (idx[:, axis] << 13)) * (idx[:, axis] - other)
+        v = (start - neighbour) * rate[:, None]
+        rgb += np.where(v < 0, -((-v) // 32), v // 32)       # C division truncates towards zero
+    return np.maximum(rgb, 0) >> 8
+
+
 def _f32(v: float) -> float:
     import struct
     return struct.unpack("f", struct.pack("f", v))[0]

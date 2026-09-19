@@ -34,12 +34,71 @@ _SPACE = b" \t\r\n\x0c\x00"
 
 def decrypt(data: bytes, key: int) -> bytes:
     """t1_decrypt / the eexec cipher."""
+    if len(data) >= _VECTOR_MIN:
+        return decrypt_many([data], key)[0]
     out = bytearray(len(data))
     r = key
     for i, c in enumerate(data):
         out[i] = c ^ (r >> 8)
         r = ((c + r) * 52845 + 22719) & 0xFFFF
     return bytes(out)
+
+
+# The cipher's key runs r' = A·r + (A·c + B) mod 2^16, an affine recurrence in which every c is known
+# up front, so it has a closed form: with s_i = A^-i·r_i, s_(i+1) = s_i + A^-(i+1)·(A·c_i + B), so
+# s is a running sum and r_i = A^i·s_i. A is odd, hence invertible mod 2^16, and numpy's uint64
+# products and sums wrap mod 2^64, of which 2^16 is a factor: every low 16 bits are exact.
+_A, _B = 52845, 22719
+_A_INV = pow(_A, -1, 1 << 16)
+_VECTOR_MIN = 192
+_powers: tuple = (0, None, None)
+
+
+def _power_tables(n: int):
+    """(A^i, A^-(i+1)) mod 2^16 for i < n, as uint64."""
+    global _powers
+    if _powers[0] < n:
+        import numpy as np
+        size = max(n, 2 * _powers[0], 4096)
+        a = np.full(size, _A, np.uint64)
+        a[0] = 1
+        b = np.full(size, _A_INV, np.uint64)
+        _powers = (size, np.cumprod(a) & 0xFFFF, np.cumprod(b) & 0xFFFF)
+    return _powers[1], _powers[2]
+
+
+def decrypt_many(chunks: list, key: int) -> list[bytes]:
+    """`decrypt(chunk, key)` for every chunk, each from `key` again, in one numpy pass."""
+    import numpy as np
+    lengths = [len(c) for c in chunks]
+    n = sum(lengths)
+    if n == 0:
+        return [b"" for _ in chunks]
+    apow, ainv = _power_tables(n)
+    c = np.frombuffer(b"".join(chunks), np.uint8).astype(np.uint64)
+    t = (ainv[:n] * (c * _A + _B)) & 0xFFFF
+    total = np.empty(n + 1, np.uint64)            # total[i] = sum of t[k], k < i
+    total[0] = 0
+    np.cumsum(t, out=total[1:])
+    starts = np.cumsum([0] + lengths[:-1]).astype(np.int64)
+    first = np.repeat(starts, lengths)            # each byte's chunk start
+    # r_i = A^i·(A^-start·key + S_i - S_start), all mod 2^16
+    r = (apow[:n] * (_inv_pow(first, ainv) * key + total[:n] - total[first])) & 0xFFFF
+    plain = ((c ^ (r >> 8)) & 0xFF).astype(np.uint8).tobytes()
+    out, at = [], 0
+    for size in lengths:
+        out.append(plain[at:at + size])
+        at += size
+    return out
+
+
+def _inv_pow(first, ainv):
+    """A^-start for each start (A^-0 = 1)."""
+    import numpy as np
+    out = np.ones(len(first), np.uint64)
+    nz = first > 0
+    out[nz] = ainv[first[nz] - 1]
+    return out
 
 
 def to_fixed(token: bytes) -> int:
@@ -223,3 +282,105 @@ def parse(data: bytes) -> Type1Program:
         k = p.order.index(".notdef")
         p.order[0], p.order[k] = p.order[k], p.order[0]
     return p
+
+
+# ---------------------------------------------------------------- fontTools' reading, faster and shared
+#
+# The embedded Type 1 programs are read by fontTools (`t1Lib.T1Font.parse`: its PostScript interpreter,
+# then every charstring and subroutine decrypted). Most of that time is fontTools' eexec cipher, one
+# Python call per byte; `fonttools_font` runs the same interpreter with the cipher above and gives
+# the same dictionary. The parse is kept per program bytes (the extraction and the glyph loader read
+# the same program, and a talk's fonts come back in every PDF of the process); each call hands out
+# fresh charstring objects, since fontTools' drawing replaces a charstring's bytecode.
+
+_T1_CACHE: dict = {}
+_T1_CACHE_SIZE = 64
+
+
+def _interpreter_class():
+    from fontTools.misc import psLib
+
+    class Interpreter(psLib.PSInterpreter):
+        def ps_eexec(self):
+            f = self.pop("filetype").value
+            # PSTokenizer.starteexec with the fast cipher
+            f.pos = f.pos + 1
+            f.dirtybuf = f.buf[f.pos:]
+            f.buf = decrypt(f.dirtybuf, EEXEC_KEY)
+            f.len = len(f.buf)
+            f.pos = 4
+
+    return Interpreter
+
+
+_Interpreter = None
+
+
+def _suckfont(data: bytes, encoding: str = "ascii"):
+    """psLib.suckfont over the fast cipher."""
+    global _Interpreter
+    from fontTools.misc import psLib
+    if _Interpreter is None:
+        _Interpreter = _interpreter_class()
+    m = re.search(rb"/FontName\s+/([^ \t\n\r]+)\s+def", data)
+    font_name = m.group(1).decode() if m else None
+    interpreter = _Interpreter(encoding=encoding)
+    interpreter.interpret(b"/Helvetica 4 dict dup /Encoding StandardEncoding put definefont pop")
+    interpreter.interpret(data)
+    fontdir = interpreter.dictstack[0]["FontDirectory"].value
+    if font_name in fontdir:
+        rawfont = fontdir[font_name]
+    else:
+        names = list(fontdir.keys())
+        if len(names) > 1:
+            names.remove("Helvetica")
+        names.sort()
+        rawfont = fontdir[names[0]]
+    interpreter.close()
+    return psLib.unpack_item(rawfont)
+
+
+def _as_bytes(v) -> bytes:
+    return v if isinstance(v, bytes) else v.encode("latin-1")
+
+
+def _parsed(data: bytes):
+    """(font dict without CharStrings/Subrs, names, charstring bytes, subr bytes) as T1Font.parse
+    leaves them, from the cache."""
+    hit = _T1_CACHE.get(data)
+    if hit is not None:
+        return hit
+    font = _suckfont(data)
+    charstrings = font["CharStrings"]
+    len_iv = font["Private"].get("lenIV", 4)
+    assert len_iv >= 0
+    subrs = font["Private"]["Subrs"]
+    names = list(charstrings.keys())
+    plain = decrypt_many([_as_bytes(charstrings[n]) for n in names] + [_as_bytes(s) for s in subrs],
+                         CHARSTRING_KEY)
+    glyph_codes = [p[len_iv:] for p in plain[:len(names)]]
+    subr_codes = [p[len_iv:] for p in plain[len(names):]]
+    hit = (font, names, glyph_codes, subr_codes)
+    if len(_T1_CACHE) >= _T1_CACHE_SIZE:
+        _T1_CACHE.pop(next(iter(_T1_CACHE)))
+    _T1_CACHE[data] = hit
+    return hit
+
+
+def fonttools_font(data: bytes) -> dict:
+    """`T1Font.parse`'s `font` dictionary for a program: CharStrings and Private/Subrs hold fresh
+    T1CharString objects, the rest is shared and must not be changed."""
+    from fontTools.misc import psCharStrings
+    font, names, glyph_codes, subr_codes = _parsed(data)
+    subrs: list = []
+    subrs.extend(psCharStrings.T1CharString(code, subrs=subrs) for code in subr_codes)
+    out = dict(font)
+    out["Private"] = dict(font["Private"], Subrs=subrs)
+    out["CharStrings"] = {n: psCharStrings.T1CharString(code, subrs=subrs) for n, code in zip(names, glyph_codes)}
+    return out
+
+
+def fonttools_codes(data: bytes):
+    """(font dict, {glyph name: charstring bytecode}, [subr bytecode]) without charstring objects."""
+    font, names, glyph_codes, subr_codes = _parsed(data)
+    return font, dict(zip(names, glyph_codes)), list(subr_codes)

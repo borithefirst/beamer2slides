@@ -134,18 +134,12 @@ class Face:
 
     # -- loading
     def _load_type1(self, data: bytes) -> None:
-        from fontTools import t1Lib
-        t1 = t1Lib.T1Font.__new__(t1Lib.T1Font)
-        t1.data, t1.encoding = data, "ascii"
-        t1.parse()
-        d = t1.font
+        from . import type1
+        d, self.charstrings, self.subrs = type1.fonttools_codes(data)   # t1Lib.T1Font.parse's
         matrix = [float(v) for v in d.get("FontMatrix", [0.001, 0, 0, 0.001, 0, 0])]
         if matrix != [0.001, 0.0, 0.0, 0.001, 0.0, 0.0]:
             raise Unported(f"Type 1 FontMatrix {matrix}")
         self.is_t1 = True
-        self.charstrings = {n: cs.bytecode for n, cs in d["CharStrings"].items()}
-        priv = d.get("Private", {})
-        self.subrs = [getattr(s, "bytecode", None) for s in priv.get("Subrs", [])]
         self.gsubrs = []
         self.local_bias = self.global_bias = 0
 
