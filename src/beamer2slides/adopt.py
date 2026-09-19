@@ -1133,7 +1133,11 @@ def video_block(el: dict, ctx: Context, ind: str, tree: Path | None) -> str:
     if el.get("file") and Path(el["file"]).exists() and tree is not None:
         dest = tree / "figures" / f"video-{flatten(video.get('id') or 'x')[:24]}-{round(w)}x{round(h)}.png"
         try:
-            framed = letterboxed(Path(el["file"]), w, h, dest)
+            # a frame read off the slide's thumbnail is already as the player shows it
+            if el.get("poster") == "thumbnail":
+                dest.parent.mkdir(parents=True, exist_ok=True)
+            framed = Path(shutil.copyfile(el["file"], dest)) if el.get("poster") == "thumbnail" else \
+                letterboxed(Path(el["file"]), w, h, dest)
         except OSError:
             framed = None
         if framed is not None:

@@ -194,6 +194,12 @@ def deck_text(target: dict):
                 for r in o["runs"]:
                     if isinstance(r, dict) and r.get("text"):
                         yield r["text"], r.get("font") or "", r.get("family") or "sans"
+                b = o.get("bullet")
+                if isinstance(b, dict) and b.get("text") and b["text"] not in "●○■" and o["runs"]:
+                    # a glyph bullet is set in its paragraph's face: supercharge-slides' ➔, which
+                    # Alegreya lacks, came out as its .notdef cross with no fallback to draw it
+                    r = o["runs"][0]
+                    yield b["text"], r.get("font") or "", r.get("family") or "sans"
             for k, v in o.items():
                 if k != "runs":
                     yield from walk(v)

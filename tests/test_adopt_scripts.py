@@ -213,3 +213,13 @@ def test_the_adopted_preamble_puts_script_lines_before_the_fonts(font_folder, tm
     text = adopt.bootstrap(t, tmp_path / "main.tex")
     assert text.index("\\defaultfontfeatures") < text.index("\\setsansfont")
     assert text.index("{babel}") < text.index("\\usepackage{fontspec}")
+
+
+def test_a_glyph_bullet_is_text_its_face_must_draw():
+    """supercharge-slides' ➔ bullets, which Alegreya lacks, came out as its .notdef cross: a bullet
+    glyph counts among the deck's text, so a fallback is found for it (● ○ ■ are drawn, not set)."""
+    para = {"runs": [{"text": "Click", "font": "Alegreya", "family": "sans"}],
+            "bullet": {"kind": "glyph", "text": "\u2794"}}
+    dot = {**para, "bullet": {"kind": "glyph", "text": "\u25cf"}}
+    got = list(scripts.deck_text({"slides": [{"elements": [{"paragraphs": [para, dot]}]}]}))
+    assert ("\u2794", "Alegreya", "sans") in got and not any(t == "\u25cf" for t, _, _ in got)

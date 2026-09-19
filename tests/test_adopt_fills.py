@@ -238,3 +238,17 @@ def test_a_pie_takes_the_angles_its_thumbnail_shows():
     assert abs(start - 90) < 1 and abs(sweep - 270) < 1.5
     block = adopt_shapes.shape_block(next(e for e in out if e["id"] == "t"), Context(), "")
     assert "end angle=-" in block and "270" not in block
+
+
+def test_a_drive_videos_poster_frame_is_read_off_the_thumbnail(tmp_path):
+    """No API gives a Drive video's poster frame (a play panel stood in); the slide's thumbnail shows it."""
+    a = np.random.default_rng(1).integers(0, 256, (405, 720, 3)).astype(np.int16)
+    video = {"kind": "image", "role": "figure", "bbox": [100, 100, 300, 220], "id": "v", "object": "v",
+             "video": {"source": "DRIVE", "id": "x", "url": None}}
+    tube = {**video, "id": "y", "file": "hq.jpg", "video": {"source": "YOUTUBE", "id": "y"}}
+    out = deck_fills.settle([video, tube], a, 1.0, "#ffffff", pictures=tmp_path)
+    v = next(e for e in out if e["id"] == "v")
+    assert v["poster"] == "thumbnail" and v["video"]["source"] == "DRIVE"
+    from PIL import Image
+    assert (np.asarray(Image.open(v["file"]).convert("RGB")) == a[100:220, 100:300]).all()
+    assert "poster" not in next(e for e in out if e["id"] == "y"), "YouTube's own thumbnail stays"

@@ -643,6 +643,10 @@ cs161-tls' `google.com` line). Line breaking was studied and needs nothing: Slid
 and breaks on the kerned width of a line at exactly the box's width, as TeX does here (of 579 boxes
 whose thumbnail lines can be counted, the rules tried - unkerned, a tolerance, pixel-rounded widths -
 gain at most one box); the breaks that still differ are fonts unlike Slides' own.
+Then (`cache-a` -> `vb-a`, boxes 0.956 -> 0.958): a Drive video's poster frame, which no API gives,
+is read off the slide's thumbnail (`settle`, `poster: thumbnail`) instead of a play panel, and a glyph
+bullet counts as text for the fallback chain (`scripts.deck_text`: supercharge-slides' ➔, which Alegreya
+lacks, came out as its .notdef cross). supercharge-slides 0.958 -> 0.986, drawing-workshop 0.982 -> 0.990.
 Bench workflow: `run` caches each deck's scores by its source tree, IR and scorer
 (`<corpus>/<deck>/cache`, `--no-cache` to compile anyway), so a change recompiles only the decks
 whose source it changed, and starts the slowest decks first; `losses --tag T` charges every pixel the

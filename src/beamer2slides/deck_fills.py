@@ -184,6 +184,11 @@ def settle(elements: list[dict], image, px: float, background: str | None, pictu
             angles = pie_angles(a, el, elements[k + 1:], px)
             if angles is not None:
                 el["pie"] = list(angles)
+        if a is not None and pictures is not None and el.get("video") and not el.get("file"):
+            # a Drive video's poster frame, which no API gives, is on the slide's thumbnail
+            pic = thumbnail_picture(a, el, elements[k + 1:], px, None, pictures)
+            if pic is not None:
+                el.update(file=pic["file"], sha1=pic["sha1"], format="png", poster="thumbnail")
         cells = [c for c in el.get("table_cells", []) if c.pop("fill_unread", False)]
         # a freeform's geometry is not in the API either: traced from the same picture
         # (`deck_freeforms`), after its fill is known
