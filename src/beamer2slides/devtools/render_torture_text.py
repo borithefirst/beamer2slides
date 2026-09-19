@@ -397,12 +397,18 @@ def main(argv=None) -> int:
     ap.add_argument("--out", default="out/render-torture-text")
     ap.add_argument("--no-shrink", action="store_true")
     args = ap.parse_args(argv)
+    from ..pdf.api import PdfError
     out = Path(args.out)
-    fails = 0
+    fails = refused = 0
+    reasons: dict = {}
     for seed in range(args.seed0, args.seed0 + args.n):
         content, fonts, zoom, transparent = case(seed, args.kind, args.simple)
         try:
             npx = compare(content, fonts, zoom, transparent)[0]
+        except PdfError as e:
+            refused += 1                     # the pure reader refuses the page: never drawn wrong
+            reasons[str(e)] = reasons.get(str(e), 0) + 1
+            continue
         except Exception as e:  # noqa: BLE001
             print("seed", seed, "EXC", type(e).__name__, e)
             fails += 1
@@ -420,7 +426,9 @@ def main(argv=None) -> int:
         vis = np.concatenate([a[..., :3], b[..., :3], np.stack([np.where(d > 0, 255, 0)] * 3, -1)], 1)
         Image.fromarray(vis.astype(np.uint8)).save(out / f"seed{seed}.png")
         (out / f"seed{seed}.pdf").write_bytes(pdf_bytes(small, fonts))
-    print(f"seeds {args.seed0}..{args.seed0 + args.n - 1}: {fails} failed")
+    for why, k in sorted(reasons.items(), key=lambda kv: -kv[1]):
+        print(f"  refused {k}: {why}")
+    print(f"seeds {args.seed0}..{args.seed0 + args.n - 1}: {fails} failed, {refused} refused")
     return 1 if fails else 0
 
 

@@ -167,7 +167,7 @@ class Device:
 
     # ---- CFX_RenderDevice::DrawPath
     def draw_path(self, points, matrix, graph, fill_argb: int, stroke_argb: int, fill_type: int,
-                  stroke: bool) -> None:
+                  stroke: bool, text_mode: bool = False) -> None:
         fill = fill_type != FILL_NONE
         fill_alpha = fill_argb >> 24 if fill else 0
         stroke_alpha = stroke_argb >> 24 if graph is not None else 0
@@ -184,7 +184,7 @@ class Device:
             if rf is not None:
                 self.fill_rect(_adjusted_rect(rf), fill_argb)
                 return
-        if fill and stroke_alpha == 0 and not stroke:
+        if fill and stroke_alpha == 0 and not stroke and not text_mode:
             sub: list = []
             i, n = 0, len(points)
             while i < n:
@@ -722,6 +722,9 @@ class Status:
             self.process_path(obj, matrix)
         elif obj.type == OBJ_FORM:
             self.process_form(obj, matrix)
+        elif obj.type == OBJ_TEXT:
+            from .render_text import process_text
+            process_text(self, obj, matrix)
 
     def process_path(self, obj, matrix) -> None:
         fill_type, stroke = obj.fill_type, obj.stroked
@@ -785,8 +788,13 @@ def unported(objects, ctx=None) -> str | None:
             p = p.parent
         if p is not None:
             continue
-        if o.type not in (OBJ_PATH, OBJ_FORM):
-            return {OBJ_TEXT: "text", OBJ_IMAGE: "images", OBJ_SHADING: "shadings"}.get(o.type, "objects")
+        if o.type == OBJ_TEXT:
+            from .render_text import unsupported as text_unsupported
+            why = text_unsupported(o)
+            if why is not None:
+                return why
+        elif o.type not in (OBJ_PATH, OBJ_FORM):
+            return {OBJ_IMAGE: "images", OBJ_SHADING: "shadings"}.get(o.type, "objects")
         if o.smask is not None or o.blend != "Normal" or o.transfer is not None:
             from .render_transparency import unsupported
             why = unsupported(o, ctx, unported)
