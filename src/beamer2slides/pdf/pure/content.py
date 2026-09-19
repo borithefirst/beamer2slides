@@ -763,7 +763,10 @@ class _Run:
         self.state.leading = self.number(args, 0)
 
     def op_Tr(self, args):
-        self.state.text_mode = int(self.number(args, 0))
+        # SetTextRenderingModeFromInt: a mode outside 0..7 leaves the current one
+        mode = int(self.number(args, 0))
+        if 0 <= mode <= 7:
+            self.state.text_mode = mode
 
     def op_Ts(self, args):
         self.state.rise = self.number(args, 0)
@@ -855,6 +858,8 @@ class _Run:
             s.text_pos = (f32(s.text_pos[0] - self._horizontal_size(initial)), s.text_pos[1])
         if not strings:
             return
+        # a Type 3 font is filled whatever Tr says (the stroke CTM, the clip list), but the object
+        # keeps the text state's mode, and CalcPositionData inflates its box by it
         mode = 0 if font.is_type3 else s.text_mode
         # OnChangeTextMatrix: [Tz 0 0 1] x Tm x CTM (content_to_user is the identity here)
         tm = concat(concat((f32(s.horz_scale), 0.0, 0.0, 1.0, 0.0, 0.0), s.text_matrix), s.ctm)
@@ -870,7 +875,8 @@ class _Run:
         if not items:
             return
         obj = PObj(OBJ_TEXT, (tm[0], tm[1], tm[2], tm[3], pos[0], pos[1]), font=font, font_size=s.font_size,
-                   items=items, kernings=kerns, text_mode=mode, char_space=s.char_space, word_space=s.word_space)
+                   items=items, kernings=kerns, text_mode=s.text_mode, char_space=s.char_space,
+                   word_space=s.word_space)
         if mode in (1, 2, 5, 6):
             obj.text_ctm = (s.ctm[0], s.ctm[2], s.ctm[1], s.ctm[3])
         self.add(obj, True, True)
@@ -1028,8 +1034,8 @@ def text_positions(obj: PObj) -> float:
     obj.original_rect = (min_x, min_y, max_x, max_y)
     rect = transform_rect(obj.matrix, obj.original_rect)
     if obj.text_mode in (1, 2, 5, 6):
-        h = obj.line_width / 2
-        rect = (rect[0] - h, rect[1] - h, rect[2] + h, rect[3] + h)
+        h = f32(f32(obj.line_width) / 2)   # CFX_FloatRect::Inflate, in floats
+        rect = (f32(rect[0] - h), f32(rect[1] - h), f32(rect[2] + h), f32(rect[3] + h))
     obj.rect = rect
     return cur
 

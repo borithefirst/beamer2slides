@@ -145,6 +145,11 @@ Each of these was a diff against PDFium until it was ported:
     without exactly one descendant dictionary, fails to load and its text is stock Helvetica.
     Found by editing every font dictionary of a deck the same way
     (`test_font_dictionaries_edited_deck_wide_read_as_pdfium_reads_them`).
+  - A stroked text object (Tr 1, 2, 5, 6) has its box inflated by half the line width, in floats
+    (CFX_FloatRect::Inflate). A Type 3 text object keeps the real Tr for that: only its glyphs are
+    forced to fill. A Tr outside 0..7 is ignored (`SetTextRenderingModeFromInt`). Found by reading
+    the render torture's text pages instead of drawing them
+    (`test_text_torture_pages_extract_as_pdfium_to_the_last_bit`).
 - **Cross references** are CPDF_Parser's loading ported, not a reader that accepts good files
   (`document.PdfFile`, whose table is CPDF_CrossRefTable; `test_cross_references_are_read_as_pdfium_reads_them`
   and `test_cross_references_are_loaded_as_pdfium_loads_them`, one case per rule). A regex reader

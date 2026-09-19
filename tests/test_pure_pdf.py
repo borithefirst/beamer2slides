@@ -991,6 +991,38 @@ def test_font_dictionaries_edited_deck_wide_read_as_pdfium_reads_them(name):
         pure.close()
 
 
+def test_text_torture_pages_extract_as_pdfium_to_the_last_bit():
+    """The render torture's random text pages, read rather than drawn (objects, chars, boxes). Seeds
+    0, 7, 20, 21, 28, 45 and 51 were apart: a stroked text object's box is inflated by half the line
+    width in floats (CFX_FloatRect::Inflate), Type 3 text included - the object keeps the real Tr,
+    only its glyph drawing is forced to fill - and a Tr outside 0..7 leaves the mode as it was."""
+    from beamer2slides.devtools.render_torture_text import case, harvest, pdf_bytes
+    if not harvest():
+        pytest.skip("no fonts to harvest (build the test decks)")
+    apart = []
+    for seed in [0, 7, 20, 21, 28, 45, 51, *range(100, 130)]:
+        content, fonts, _, _ = case(seed, "any")
+        data = pdf_bytes(content, fonts)
+        ref, pure = pdf.resolve("pdfium").open(data), pdf.resolve("pure").open(data)
+        try:
+            if _chars_and_bounds(pure[0]) != _chars_and_bounds(ref[0]):
+                apart.append(seed)
+        finally:
+            ref.close()
+            pure.close()
+    assert not apart, f"seeds apart (scratch: xtext.py SEED 1): {apart}"
+    for kind in ["type3"]:
+        for seed in range(20):
+            content, fonts, _, _ = case(seed, kind)
+            data = pdf_bytes(content, fonts)
+            ref, pure = pdf.resolve("pdfium").open(data), pdf.resolve("pure").open(data)
+            try:
+                assert _chars_and_bounds(pure[0]) == _chars_and_bounds(ref[0]), f"{kind} seed {seed}"
+            finally:
+                ref.close()
+                pure.close()
+
+
 _TWO_PAGES ={1: _CAT, 2: b"<< /Type /Pages /Kids [3 0 R 4 0 R] /Count 2 >>", 3: _LEAF % 10, 4: _LEAF % 20}
 
 
