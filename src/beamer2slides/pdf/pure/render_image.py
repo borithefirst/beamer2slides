@@ -651,12 +651,37 @@ def get_dib(ctx, obj, dev):
         if dib is None or not set_max or (dib.w >= need[0] and dib.h >= need[1]):
             if hit[0] is obj.stream:
                 return dib
-    try:
-        dib = DI.load(ctx.doc, obj.stream, _resources(ctx, obj), need)
-    except DI.Unsupported as e:
-        raise PdfError(f"the pure reader cannot render {e} yet")
+    dib = _probed(ctx, obj, need)
+    if dib is _NOT_PROBED:
+        try:
+            dib = DI.load(ctx.doc, obj.stream, _resources(ctx, obj), need)
+        except DI.Unsupported as e:
+            raise PdfError(f"the pure reader cannot render {e} yet")
     cache[key] = (obj.stream, dib, need[0] != 0 and need[1] != 0)
     return dib
+
+
+_NOT_PROBED = object()
+
+
+def _probed(ctx, obj, need):
+    """The bitmap `refusal` loaded for this image (at no device size), when loading it for `need`
+    gives the same: the device size only picks a JPEG's scale, and only for a DCT image at least
+    twice the device's size both ways (decode_image._jpeg; masks load at no size either way)."""
+    probes = getattr(ctx, "image_probes", None)
+    got = probes.get(id(obj.stream)) if probes else None
+    if got is None or got[0] is not obj.stream or got[1] is not None or len(got) < 4:
+        return _NOT_PROBED
+    d = obj.stream.dict
+    r = ctx.doc.resolve
+    w, h = r(d.get("Width")), r(d.get("Height"))
+    if need[0] and need[1] and isinstance(w, int) and isinstance(h, int) and w >= 2 * need[0] and h >= 2 * need[1]:
+        # a DCTDecode anywhere in the chain is where decode_image.image_bytes goes to `_jpeg`
+        decoders = DI.FL.decoder_array(d, r)
+        if decoders is None or any(DI.FL.ABBREVIATIONS.get(n, n) == "DCTDecode" for n, _p in decoders):
+            return _NOT_PROBED
+    probes[id(obj.stream)] = got[:3]      # handed on: the page cache holds the bitmap now
+    return got[3]
 
 
 def _resources(ctx, obj):
@@ -683,6 +708,7 @@ def refusal(obj, ctx) -> str | None:
     if key not in probes:
         why = None
         stencil = False
+        dib = None
         try:
             dib = DI.load(ctx.doc, obj.stream, _resources(ctx, obj), (0, 0))
             stencil = dib is not None and dib.fmt == "mask1"
@@ -690,8 +716,9 @@ def refusal(obj, ctx) -> str | None:
                 why = "image masks with masks"
         except DI.Unsupported as e:
             why = str(e)
-        probes[key] = (obj.stream, why, stencil)
-    _, why, stencil = probes[key]
+        # the bitmap too, for `get_dib` to take instead of loading the image again (`_probed`)
+        probes[key] = (obj.stream, why, stencil, dib)
+    _, why, stencil = probes[key][:3]
     if why is None and stencil and obj.fill_pattern is not None:
         return "pattern-filled image masks"
     return why

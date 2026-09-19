@@ -46,31 +46,29 @@ _CMYK_ARRAY = None
 
 
 def adobe_cmyk_to_srgb_array(q):
-    """`adobe_cmyk_to_srgb` over an (n, 4) integer array of 0-255 CMYK: (n, 3) int64, the same
-    integer arithmetic element by element."""
+    """`adobe_cmyk_to_srgb` over an (n, 4) integer array of 0-255 CMYK: (n, 3) int32, the same
+    integer arithmetic element by element (in int32, which holds it: |rate| <= 4096, a table
+    difference <= 255)."""
     import numpy as np
     global _CMYK_ARRAY
     if _CMYK_ARRAY is None:
-        _CMYK_ARRAY = np.frombuffer(_CMYK, np.uint8).astype(np.int64).reshape(-1, 3)
+        _CMYK_ARRAY = np.frombuffer(_CMYK, np.uint8).astype(np.int32).reshape(-1, 3)
     table = _CMYK_ARRAY
-    fix = np.asarray(q, np.int64).reshape(-1, 4) << 8
+    fix = np.asarray(q).reshape(-1, 4).astype(np.int32) << 8
     idx = (fix + 4096) >> 13
-
-    def at(ix):
-        return table[729 * ix[:, 0] + 81 * ix[:, 1] + 9 * ix[:, 2] + ix[:, 3]]
-
-    start = at(idx)
+    base = 729 * idx[:, 0] + 81 * idx[:, 1] + 9 * idx[:, 2] + idx[:, 3]
+    start = table[base]
     rgb = start << 8
-    for axis in range(4):
-        other = fix[:, axis] >> 13
-        same = other == idx[:, axis]
-        other = np.where(same, np.where(other == 8, other - 1, other + 1), other)
-        moved = idx.copy()
-        moved[:, axis] = other
-        neighbour = at(moved)
-        rate = (fix[:, axis] - (idx[:, axis] << 13)) * (idx[:, axis] - other)
+    for axis, stride in enumerate((729, 81, 9, 1)):
+        f, i = fix[:, axis], idx[:, axis]
+        # the neighbour along this axis: `f >> 13` is i or i - 1; when it is i, one step away
+        other = f >> 13
+        other = np.where(other == i, np.where(other == 8, other - 1, other + 1), other)
+        step = other - i
+        neighbour = table[base + stride * step]
+        rate = (f - (i << 13)) * -step
         v = (start - neighbour) * rate[:, None]
-        rgb += np.where(v < 0, -((-v) // 32), v // 32)       # C division truncates towards zero
+        rgb += (v + ((v >> 31) & 31)) >> 5          # C division by 32, truncating towards zero
     return np.maximum(rgb, 0) >> 8
 
 
