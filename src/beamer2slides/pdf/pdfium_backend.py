@@ -544,11 +544,20 @@ class Document:
 
     @property
     def metadata(self) -> dict:
-        meta = self.pdf.get_metadata_dict()
-        return {"title": meta.get("Title") or "", "producer": meta.get("Producer") or ""}
+        # FPDF_GetMetaText itself: pypdfium2's get_metadata_dict reads six more keys and decodes
+        # strictly, so a lone surrogate in any of them (a UTF-16 /Author cut in half) raises
+        return {"title": self._utf16(R.FPDF_GetMetaText, b"Title\x00"),
+                "producer": self._utf16(R.FPDF_GetMetaText, b"Producer\x00")}
 
     def label(self, index: int) -> str:
-        return self.pdf.get_page_label(index)
+        return self._utf16(R.FPDF_GetPageLabel, index)
+
+    def _utf16(self, call, arg) -> str:
+        """A UTF-16LE answer with its terminator, errors replaced (pypdfium2 decodes strictly)."""
+        size = call(self.pdf.raw, arg, None, 0)
+        buf = ctypes.create_string_buffer(size)
+        call(self.pdf.raw, arg, buf, size)
+        return buf.raw[:max(0, size - 2)].decode("utf-16-le", "replace")
 
     def named_dests(self) -> list[tuple[str, int]]:
         out = []
