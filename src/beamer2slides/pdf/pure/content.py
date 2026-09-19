@@ -125,7 +125,8 @@ class PObj:
     smask: dict | None = None      # the ExtGState's /SMask dictionary (render)
     smask_matrix: tuple = IDENTITY  # the CTM when it was set
     transfer: object = None        # /TR or /TR2 (not a name)
-    pattern: bool = False          # a pattern colour space for fill or stroke (render)
+    overprint: bool = False        # fill overprint on with /OPM 0 (images: Darken for CMYK)
+    pattern: bool = False         # a pattern colour space for fill or stroke (render)
     # render_shading: the pattern each side paints with (None: no pattern colour; False: a pattern
     # colour space without a pattern), and a shading object's CTM and pattern record
     fill_pattern: object = None
@@ -192,6 +193,8 @@ class State:
     smask: dict | None = None
     smask_matrix: tuple = IDENTITY
     transfer: object = None
+    fill_op: bool = False
+    op_mode: int = 0
     font: Font | None = None
     font_size: float = 0.0
     char_space: float = 0.0
@@ -325,6 +328,21 @@ class _Run:
             self.p.colorspaces[key] = load_colorspace(self.doc, obj, None)
         return self.p.colorspaces[key]
 
+    def _inline_components(self, cs):
+        """Handle_BeginImage's colour space object for ReadInlineStream: a name other than the three
+        device ones is looked up in the resources (None: not there, and the data is then read as
+        one bit per pixel), and GetColorSpace(obj, nullptr) gives the component count, 3 when it
+        does not load."""
+        if isinstance(cs, Name) and str(cs) not in ("DeviceRGB", "DeviceGray", "DeviceCMYK"):
+            cs = self.resource("ColorSpace", cs)
+            if cs is None:
+                return None
+        try:
+            space = load_colorspace(self.doc, cs, None)
+        except Exception:  # noqa: BLE001 - a colour space that does not load
+            space = None
+        return space.n if space is not None else 3
+
     # ------------------------------------------------------------------ objects
 
     def add(self, obj: PObj, color: bool, graph: bool) -> PObj:
@@ -336,6 +354,7 @@ class _Run:
         obj.fill_alpha, obj.stroke_alpha = s.fill_alpha, s.stroke_alpha
         obj.blend, obj.soft_mask = s.blend, s.soft_mask
         obj.smask, obj.smask_matrix, obj.transfer = s.smask, s.smask_matrix, s.transfer
+        obj.overprint = s.fill_op and s.op_mode == 0
         if color:
             obj.fill, obj.stroke = s.fill_ref, s.stroke_ref
             obj.pattern = s.fill_cs.is_pattern or s.stroke_cs.is_pattern
@@ -353,7 +372,7 @@ class _Run:
 
     def execute(self, data: bytes) -> None:
         fast = None  # ParsePathObject's params while in its fast path
-        for op, args in operations(data):
+        for op, args in operations(data, self._inline_components):
             if fast is not None:
                 raw = getattr(args, "raw", args)  # the fast path reads numbers, not the buffer
                 if op in PATH_FAST and all(_is_number(a) for a in raw):
@@ -472,6 +491,13 @@ class _Run:
                 s.dash_phase = _num(r(value[1])) if len(value) > 1 else 0.0
             elif key == "TR2" or key == "TR" and "TR2" not in gs:
                 s.transfer = None if isinstance(value, Name) else value
+            elif key == "OP":
+                if "op" not in gs:
+                    s.fill_op = value is True
+            elif key == "op":
+                s.fill_op = value is True
+            elif key == "OPM":
+                s.op_mode = int(_num(value))
             elif key == "CA":
                 s.stroke_alpha = min(1.0, max(0.0, _num(value, 1.0)))
             elif key == "ca":
@@ -963,6 +989,7 @@ class _Run:
                           leading=s.leading, rise=s.rise, text_mode=s.text_mode,
                           dash=s.dash, dash_phase=s.dash_phase, smask=s.smask,
                           smask_matrix=s.smask_matrix, transfer=s.transfer,
+                          fill_op=s.fill_op, op_mode=s.op_mode,
                           fill_pattern=s.fill_pattern, stroke_pattern=s.stroke_pattern)
             m = r(stream.get("Matrix"))
             fm = tuple(_num(r(v)) for v in m[:6]) if isinstance(m, list) and len(m) >= 6 else IDENTITY

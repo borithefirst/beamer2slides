@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 import struct
+import zlib
 from fractions import Fraction
 from typing import Iterator, NamedTuple
 
@@ -312,6 +313,7 @@ def parse_object(lexer: Lexer, token=None):
 class InlineImage(NamedTuple):
     dict: dict
     data: bytes
+    exact: bool = True    # False: a codec whose end PDFium finds differently may have cut the data
 
 
 _INLINE_ABBREV = {"BPC": "BitsPerComponent", "CS": "ColorSpace", "D": "Decode", "DP": "DecodeParms",
@@ -463,7 +465,7 @@ def _ring(operands: list) -> list:
     return out
 
 
-def operations(data: bytes) -> Iterator[tuple[str, list]]:
+def operations(data: bytes, components=None) -> Iterator[tuple[str, list]]:
     """(operator, operands) of a content stream as CPDF_StreamContentParser::Parse reads it;
     BI...ID...EI comes as ("BI", [InlineImage]). An operand that is no object is None; after more
     than 16 operands the operator gets what PDFium's buffer holds (`_ring`)."""
@@ -480,7 +482,7 @@ def operations(data: bytes) -> Iterator[tuple[str, list]]:
             continue
         op = e[1]
         if op == "BI":
-            image = _begin_image(parser, data)
+            image = _begin_image(parser, data, components)
             if image is not None:
                 yield "BI", [image]
             operands = []
@@ -489,9 +491,12 @@ def operations(data: bytes) -> Iterator[tuple[str, list]]:
         operands = []
 
 
-def _begin_image(parser: _StreamParser, data: bytes):
+def _begin_image(parser: _StreamParser, data: bytes, components=None):
     """Handle_BeginImage: /Key value pairs up to ID (any other keyword abandons the image and
-    parsing goes on after BI), the data, then everything up to EI."""
+    parsing goes on after BI), the data (ReadInlineStream), then every element up to the keyword EI;
+    no EI before the end of the stream, or data that does not read, and there is no image.
+    `components(colour space object)` is the component count GetColorSpace gives for the image's
+    /ColorSpace (the name looked up in the resources first, as FindResourceObj does)."""
     save = parser.pos
     d = {}
     while True:
@@ -504,28 +509,211 @@ def _begin_image(parser: _StreamParser, data: bytes):
         value = parser.read_object(False, False, 0)
         if value is not _NOTHING:
             d[Name(_INLINE_ABBREV.get(e[1], e[1]))] = _inline_value(value)
-    start = parser.pos + 1  # one whitespace byte after ID
-    end = _inline_end(data, start, d)
-    parser.pos = min(end + 2, len(data))
-    return InlineImage(d, data[start:end])
+    parser.exact = True
+    got = _read_inline_stream(parser, data, d, components)
+    while True:
+        e = parser.element()
+        if e[0] == "end":
+            return None
+        if e[0] == "kw" and e[1] == "EI":
+            break
+    if got is None:
+        return None
+    return InlineImage(d, got, parser.exact)
 
 
-_EI = re.compile(rb"[\x00\t\n\x0c\r ]EI(?=[\x00\t\n\x0c\r ]|$)")
+_WHITESPACE = b"\x00\t\n\x0c\r "
 
 
-def _inline_end(data: bytes, start: int, d: dict) -> int:
-    """Where the inline image's data ends (the whitespace before EI)."""
-    if d.get("Filter") is None and not d.get("DecodeParms"):
-        # unfiltered: the size is known
-        w, h = d.get("Width", 0), d.get("Height", 0)
-        bpc = 1 if d.get("ImageMask") else d.get("BitsPerComponent", 8)
-        cs = d.get("ColorSpace", "DeviceGray")
-        comps = {"DeviceGray": 1, "DeviceRGB": 3, "DeviceCMYK": 4}.get(cs, 1) if not d.get("ImageMask") else 1
-        if isinstance(cs, list) and cs and cs[0] == "Indexed":
-            comps = 1
-        size = h * ((w * comps * bpc + 7) // 8)
-        m = _EI.search(data, start + size) if size else _EI.search(data, start)
-        if m and m.start() - (start + size) <= 2:
-            return m.start()
-    m = _EI.search(data, start)
-    return m.start() if m else len(data)
+def _int_value(v) -> int:
+    """CPDF_Object::GetInteger of a direct value."""
+    if isinstance(v, bool) or not isinstance(v, (int, float)):
+        return 0
+    if isinstance(v, float):
+        return int(v) if -2147483648.0 < v < 2147483648.0 else 0
+    return v
+
+
+def _device_components(cs) -> int | None:
+    """Without resources: the device spaces, nothing for another name, 3 for anything else."""
+    if isinstance(cs, Name):
+        return {"DeviceGray": 1, "DeviceRGB": 3, "DeviceCMYK": 4}.get(str(cs))
+    if isinstance(cs, list) and cs and cs[0] == "Indexed":
+        return 1
+    return 3
+
+
+def _read_inline_stream(parser: _StreamParser, data: bytes, d: dict, components) -> bytes | None:
+    """CPDF_StreamParser::ReadInlineStream: the data bytes, the parser left after them."""
+    pos = parser.pos
+    if pos >= len(data):
+        return None
+    if data[pos] in _WHITESPACE:
+        pos += 1
+        if pos >= len(data):
+            parser.pos = pos
+            return None
+    parser.pos = pos
+    decoder, params = "", None
+    filt = d.get("Filter")
+    if isinstance(filt, list):
+        decoder = str(filt[0]) if filt and isinstance(filt[0], (Name, String)) else ""
+        dp = d.get("DecodeParms")
+        params = dp[0] if isinstance(dp, list) and dp and isinstance(dp[0], dict) else None
+    elif filt is not None:
+        decoder = str(filt) if isinstance(filt, (Name, String)) else ""
+        dp = d.get("DecodeParms")
+        params = dp if isinstance(dp, dict) else None
+    width = _int_value(d.get("Width")) & 0xFFFFFFFF
+    height = _int_value(d.get("Height")) & 0xFFFFFFFF
+    bpc, comps = 1, 1
+    if "ColorSpace" in d:
+        n = (components or _device_components)(d["ColorSpace"])
+        if n is not None:
+            comps = n
+            bpc = _int_value(d.get("BitsPerComponent")) & 0xFFFFFFFF
+    bits = bpc * comps * width
+    if bits + 7 > 0xFFFFFFFF or bpc * comps > 0xFFFFFFFF:
+        return None
+    size = (bits + 7) // 8 * height
+    if size > 0xFFFFFFFF:
+        return None
+    if not decoder:
+        size = min(size, len(data) - pos)
+        parser.pos = pos + size
+        return data[pos:pos + size]
+    try:
+        used = _inline_consumed(data[pos:], decoder, params)
+    except _Inexact as e:
+        used, parser.exact = e.used, False
+    if used is None or used > 0x7FFFFFFF:
+        return None
+    # AutoRestorer: the elements after the codec's end, up to EI, belong to the data
+    parser.pos = pos + used
+    while True:
+        before = parser.pos
+        e = parser.element()
+        if e[0] == "end":
+            parser.pos = pos
+            return None
+        if e[0] == "kw" and e[1] == "EI":
+            break
+        used += parser.pos - before
+    parser.pos = pos + used
+    return data[pos:pos + used]
+
+
+def _inline_consumed(src: bytes, decoder: str, params) -> int | None:
+    """DecodeInlineStream: the bytes the first decoder reads (None = FX_INVALID_OFFSET)."""
+    if decoder == "FlateDecode":
+        z = zlib.decompressobj()
+        try:
+            z.decompress(src)
+        except zlib.error:
+            return _flate_error_consumed(src)
+        return len(src) - len(z.unused_data) if z.eof else len(src)
+    if decoder == "ASCII85Decode":
+        return _a85_consumed(src)
+    if decoder == "ASCIIHexDecode":
+        end = src.find(b">")
+        return end + 1 if end >= 0 else len(src)
+    if decoder == "RunLengthDecode":
+        i = 0
+        while i < len(src):
+            if src[i] == 128:
+                break
+            i += src[i] + 2 if src[i] < 128 else 2
+        return min(i + 1, len(src))
+    if decoder == "LZWDecode":
+        early = params.get("EarlyChange", 1) if isinstance(params, dict) else 1
+        return _lzw_consumed(src, 1 if _int_value(early) else 0)
+    if decoder in ("DCTDecode", "CCITTFaxDecode"):
+        # where libjpeg / the fax decoder stop is not ported: the end of the JPEG, and the
+        # image is marked inexact (`InlineImage.exact`), so that it is never drawn
+        end = src.find(b"\xff\xd9") if decoder == "DCTDecode" else -1
+        raise _Inexact(end + 2 if end >= 0 else 0)
+    return None
+
+
+class _Inexact(Exception):
+    def __init__(self, used: int):
+        self.used = used
+
+
+def _flate_error_consumed(src: bytes) -> int:
+    """zlib's total_in when inflate stops on damaged data: the byte it failed on counts."""
+    z = zlib.decompressobj()
+    for k in range(len(src)):
+        try:
+            z.decompress(src[k:k + 1])
+        except zlib.error:
+            return k + 1
+        if z.eof:
+            return k + 1
+    return len(src)
+
+
+def _lzw_consumed(src: bytes, early: int) -> int | None:
+    """CLZWDecoder::Decode's GetSrcSize, following only the code lengths (None: it fails)."""
+    nbits = len(src) * 8
+    pos, code_len, current, old, out = 0, 9, 0, None, 0
+    val = int.from_bytes(src, "big") if src else 0
+
+    def add():
+        nonlocal current, code_len
+        if current + early == 4094:
+            return
+        current += 1
+        if current + early == 512 - 258:
+            code_len = 10
+        elif current + early == 1024 - 258:
+            code_len = 11
+        elif current + early == 2048 - 258:
+            code_len = 12
+
+    while pos + code_len <= nbits:
+        code = (val >> (nbits - pos - code_len)) & ((1 << code_len) - 1)
+        pos += code_len
+        if code < 256:
+            out += 1
+            if old is not None:
+                add()
+            old = code
+            continue
+        if code == 256:
+            code_len, current, old = 9, 0, None
+            continue
+        if code == 257:
+            break
+        if old is None:
+            return None
+        out += 1
+        if old >= 258 and old - 258 >= current:
+            break
+        add()
+        old = code
+    return (pos + 7) // 8 if out else None
+
+
+def _a85_consumed(src: bytes) -> int:
+    if not src:
+        return 0
+    pos = 0
+    while pos < len(src):
+        ch = src[pos]
+        if ch != 0x7A and (ch < 0x21 or ch > 0x75) and ch not in b"\r\n \t":
+            break
+        pos += 1
+    if pos == 0:
+        return 0
+    pos = 0
+    while pos < len(src):
+        ch = src[pos]
+        pos += 1
+        if ch in b"\r\n \t" or ch == 0x7A:
+            continue
+        if ch < 0x21 or ch > 0x75:
+            break
+    if pos < len(src) and src[pos] == 0x3E:
+        pos += 1
+    return pos

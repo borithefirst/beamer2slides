@@ -307,13 +307,21 @@ def _kind(dev) -> str:
 def start_dibits(dev, dib, alpha: float, mask_argb: int, m, bilinear: bool) -> None:
     """CPDF_ImageRenderer::StartDIBBase -> CFX_AggDeviceDriver::StartDIBits ->
     CFX_AggImageRenderer: stretch (or turn a quarter), then compose through the clip."""
+    got = _block(dib, m, dev.clip_box(), bilinear)
+    if got is not None:
+        _compose_at(dev, got[0], got[1], got[2], got[3], alpha, mask_argb)
+
+
+def _block(dib, m, device_clip, bilinear):
+    """The image stretched (or turned a quarter) to the device pixels it covers inside
+    `device_clip`: (block, format, palette, box) or None."""
     if dib.bpp > 1 and dib.bpp // 8 * dib.w * dib.h > HUGE_IMAGE:
         bilinear = True
     a, b, c, d = m[:4]
     image_rect = outer(R.transform_rect(m, (0.0, 0.0, 1.0, 1.0)))
-    clip_box = fx_intersect(dev.clip_box(), image_rect)
+    clip_box = fx_intersect(device_clip, image_rect)
     if clip_box[2] <= clip_box[0] or clip_box[3] <= clip_box[1]:
-        return
+        return None
     iw, ih = image_rect[2] - image_rect[0], image_rect[3] - image_rect[1]
     off = (clip_box[0] - image_rect[0], clip_box[1] - image_rect[1],
            clip_box[2] - image_rect[0], clip_box[3] - image_rect[1])
@@ -327,7 +335,7 @@ def start_dibits(dev, dib, alpha: float, mask_argb: int, m, bilinear: bool) -> N
         bclip = (min(nl, nr), min(nt, nb), max(nl, nr), max(nt, nb))
         got = stretch(dib, ih, iw, bclip, bilinear)
         if got is None:
-            return
+            return None
         block, sfmt, pal = got
         block = np.swapaxes(block, 0, 1)
         if flip_x:
@@ -338,12 +346,12 @@ def start_dibits(dev, dib, alpha: float, mask_argb: int, m, bilinear: bool) -> N
         dw = -iw if a < 0 else iw
         dh = -ih if d > 0 else ih
         if dw == 0 or dh == 0:
-            return
+            return None
         got = stretch(dib, dw, dh, off, bilinear)
         if got is None:
-            return
+            return None
         block, sfmt, pal = got
-    _compose_at(dev, block, sfmt, pal, clip_box, alpha, mask_argb)
+    return block, sfmt, pal, clip_box
 
 
 def _compose_at(dev, block, sfmt, pal, box, alpha: float, mask_argb: int) -> None:
@@ -410,7 +418,10 @@ def draw_masked(dev, dib, alpha: float, m, rect) -> None:
     mask = np.zeros((h, w), np.int64)
     if got is not None:
         block, sfmt, pal, box = got
-        if sfmt == "rgb8":
+        if sfmt == "mask8":
+            # a stencil /Mask drawn in white (0xffffffff) onto black: its coverage
+            v = block[..., 0].astype(np.int64)
+        elif sfmt == "rgb8":
             v = block[..., 0].astype(np.int64)
             if pal is not None:
                 p = np.array(pal, np.int64)
@@ -439,25 +450,7 @@ def draw_masked(dev, dib, alpha: float, m, rect) -> None:
 def _stretch_for(dev, dib, m, bilinear):
     """The mask drawn onto CalculateDrawImage's 8bppRgb bitmap: (block, format, palette, box) in
     that bitmap, or None. Composited onto a zeroed gray bitmap without a clip, it is set as is."""
-    if dib.bpp > 1 and dib.bpp // 8 * dib.w * dib.h > HUGE_IMAGE:
-        bilinear = True
-    a, b, c, d = m[:4]
-    image_rect = outer(R.transform_rect(m, (0.0, 0.0, 1.0, 1.0)))
-    box = fx_intersect((0, 0, dev.w, dev.h), image_rect)
-    if box[2] <= box[0] or box[3] <= box[1]:
-        return None
-    if abs(b) >= 0.5 or a == 0 or abs(c) >= 0.5 or d == 0:
-        raise PdfError("the pure reader cannot render turned soft-masked images yet")
-    iw, ih = image_rect[2] - image_rect[0], image_rect[3] - image_rect[1]
-    dw = -iw if a < 0 else iw
-    dh = -ih if d > 0 else ih
-    if dw == 0 or dh == 0:
-        return None
-    off = (box[0] - image_rect[0], box[1] - image_rect[1], box[2] - image_rect[0], box[3] - image_rect[1])
-    got = stretch(dib, dw, dh, off, bilinear)
-    if got is None:
-        return None
-    return got + (box,)
+    return _block(dib, m, (0, 0, dev.w, dev.h), bilinear)
 
 
 # ---------------------------------------------------------------------- loading, refusing
@@ -499,6 +492,8 @@ def refusal(obj, ctx) -> str | None:
         return "images in soft masks"
     if obj.blend != "Normal":
         return "images with blend modes"
+    if not getattr(obj.stream, "exact", True):
+        return "inline images whose codec's end is not found as PDFium finds it (DCT, CCITT)"
     d = obj.stream.dict
     r = ctx.doc.resolve
     if obj.smask is not None and d.get("SMask") is not None:
@@ -519,4 +514,11 @@ def refusal(obj, ctx) -> str | None:
     _, why, stencil = probes[key]
     if why is None and stencil and obj.fill_pattern is not None:
         return "pattern-filled image masks"
+    if why is None and getattr(obj, "overprint", False) and not stencil:
+        try:
+            cs = DI.load_cs(ctx.doc, d.get("ColorSpace"), _resources(ctx, obj))
+        except DI.Unsupported:
+            cs = None
+        if cs is not None and cs.family in ("DeviceCMYK", "Separation", "DeviceN"):
+            return "overprinted CMYK images (drawn with Darken)"
     return why

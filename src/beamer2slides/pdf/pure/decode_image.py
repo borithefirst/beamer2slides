@@ -81,6 +81,8 @@ class CS:
         if f == "DeviceRGB":
             c = np.clip(v[..., :3], F32(0), F32(1))
             return c[..., 0], c[..., 1], c[..., 2], np.ones(c.shape[:-1], bool)
+        if f == "DeviceCMYK":
+            return _cmyk_rgb_f(v)
         if f == "ICCBased":
             if self.n == 1 and self.base.n > 1:
                 v = np.repeat(v[..., :1], self.base.n, axis=-1)
@@ -102,6 +104,18 @@ class CS:
             r, g, b, valid = self.base.rgb(comps)
             return r, g, b, valid & ok
         raise Unsupported(f"{f} image colours")
+
+
+def _cmyk_rgb_f(v: np.ndarray):
+    """CPDF_DeviceCS::GetRGB for CMYK without std conversion: AdobeCmykToStandardRgbF, each
+    channel clamped, rounded to a byte with the 0.49999997f offset, looked up, times 1/255.f."""
+    c = np.clip(np.nan_to_num(v[..., :4].astype(F32), nan=F32(0)), F32(0), F32(1))
+    q = (c * F32(255) + F32(0.49999997)).astype(np.int64)
+    flat = q.reshape(-1, 4)
+    keys, inv = np.unique(flat, axis=0, return_inverse=True)
+    table = np.array([adobe_cmyk_to_srgb(*(int(x) for x in k)) for k in keys], np.int64).reshape(-1, 3)
+    rgb = (table[np.asarray(inv).reshape(-1)].astype(F32) * F32(1.0 / 255.0)).reshape(q.shape[:-1] + (3,))
+    return rgb[..., 0], rgb[..., 1], rgb[..., 2], np.ones(q.shape[:-1], bool)
 
 
 GRAY, RGB, CMYK = CS("DeviceGray", 1, stock=True), CS("DeviceRGB", 3, stock=True), CS("DeviceCMYK", 4, stock=True)
@@ -156,8 +170,6 @@ def _load_array(doc, arr, depth) -> CS | None:
         base = _guarded(doc, arr[1], depth)
         if base is None or base.family in ("Indexed", "Pattern"):
             return None
-        if base.family == "DeviceCMYK" or (base.family == "ICCBased" and base.base.family == "DeviceCMYK"):
-            raise Unsupported("Indexed over CMYK")
         cs = CS("Indexed", 1, base)
         hi = r(arr[2])
         cs.max_index = max(0, min(255, int(hi))) if isinstance(hi, (int, float)) and not isinstance(hi, bool) else 0
@@ -384,6 +396,8 @@ def image_bytes(doc, d: dict, raw: bytes, bpc: int, comps: int, width: int, heig
             raise
         except Exception:  # noqa: BLE001
             raise Unsupported("a filter that fails")
+    if codec == "RunLengthDecode" and not _rl_dest_size_ok(data, bpc, comps, width, height):
+        return None
     if not data:
         raise Unsupported("filters that decode to nothing")
     pitch = pitch8(bpc, comps, width)
@@ -400,6 +414,25 @@ def image_bytes(doc, d: dict, raw: bytes, bpc: int, comps: int, width: int, heig
         return out, w, h, h, codec
     present = min(height, -(-len(data) // pitch)) if pitch else 0
     return _pad(data, pitch, height), width, height, present, codec
+
+
+def _rl_dest_size_ok(src: bytes, bpc: int, comps: int, width: int, height: int) -> bool:
+    """RLScanlineDecoder::CheckDestSize: the runs must promise at least the whole image (counted
+    from the run lengths, whether the data behind them is there or not), or the load fails."""
+    i, size = 0, 0
+    while i < len(src):
+        op = src[i]
+        if op < 128:
+            size += op + 1
+            i += op + 2
+        elif op > 128:
+            size += 257 - op
+            i += 2
+        else:
+            break
+        if size > 0xFFFFFFFF:
+            return False
+    return ((width * comps * bpc * height + 7) & 0xFFFFFFFF) // 8 <= size
 
 
 def _pad(data: bytes, pitch: int, height: int) -> bytes:
@@ -467,8 +500,6 @@ def load(doc, stream, resources, dev_size=(0, 0), is_mask=False) -> DIB | None:
     decode = _float_array(d.get("Decode"), r)
     default_decode = True
     if image_mask or d.get("ColorSpace") is None:
-        if is_mask:
-            raise Unsupported("a stencil as a soft mask")
         image_mask, bpc, comps = True, 1, 1
         default_decode = decode is None or not _get_int(decode, 0, r)
         family = None
@@ -548,8 +579,6 @@ def load(doc, stream, resources, dev_size=(0, 0), is_mask=False) -> DIB | None:
             if cols[0] != 0xFF000000 or cols[1] != 0xFFFFFFFF:
                 palette = cols
     elif bits <= 8 and not (bpc == 8 and default_decode and cs is GRAY):
-        if cmyk:
-            raise Unsupported("CMYK palettes")
         n = 1 << bits
         vals = np.zeros((n, max(comps, 1)), F32)
         for i in range(n):
@@ -629,8 +658,6 @@ def load(doc, stream, resources, dev_size=(0, 0), is_mask=False) -> DIB | None:
         matte = _float_array(smask.dict.get("Matte"), r)
         if matte is not None and len(matte) == comps and cs.n <= comps and cs.family != "Pattern":
             vals = np.array([[_get_float(matte, i, r) for i in range(comps)]], F32)
-            if cmyk:
-                raise Unsupported("a CMYK matte")
             pr, pg, pb, ok = cs.rgb(vals)
             if ok[0]:
                 dib.matte = argb(0, roundf(float(F32(pr[0]) * F32(255))), roundf(float(F32(pg[0]) * F32(255))),
@@ -644,7 +671,7 @@ def load(doc, stream, resources, dev_size=(0, 0), is_mask=False) -> DIB | None:
     if mstream is not None:
         mdib = load(doc, mstream, None, (0, 0), is_mask=True)
         if mdib is not None:
-            if mdib.fmt not in ("rgb1", "rgb8"):
+            if mdib.fmt not in ("rgb1", "rgb8", "mask1"):
                 raise Unsupported("soft masks that are not gray")
             dib.mask = mdib
     return dib
@@ -666,10 +693,11 @@ def _translate24(rows, cs, family, bpc, comps, w, h, default_decode, comp_min, c
                 elif bf == "DeviceRGB":
                     out[...] = src[..., ::-1]
                 elif bf == "DeviceCMYK":
-                    for y in range(h):
-                        for x in range(w):
-                            rr, gg, bb = adobe_cmyk_to_srgb(*(int(v) for v in src[y, x, :4]))
-                            out[y, x] = (bb, gg, rr)
+                    flat = src[..., :4].reshape(-1, 4)
+                    keys, inv = np.unique(flat, axis=0, return_inverse=True)
+                    table = np.array([adobe_cmyk_to_srgb(*(int(x) for x in k)) for k in keys],
+                                     np.uint8).reshape(-1, 3)
+                    out[...] = table[np.asarray(inv).reshape(-1)][:, ::-1].reshape(h, w, 3)
                 else:
                     raise Unsupported(f"{bf} image lines")
                 return out
@@ -686,8 +714,6 @@ def _translate24(rows, cs, family, bpc, comps, w, h, default_decode, comp_min, c
             s = np.minimum(_bits(rows, bpc, w * 3).reshape(h, w, 3), mx)
             out[...] = (s[..., ::-1] * 255 // mx).astype(np.uint8)
             return out
-    if cmyk:
-        raise Unsupported("CMYK through GetRGB")
     s = _bits(rows, bpc, w * comps).reshape(h, w, comps)
     vals = np.zeros((h, w, max(comps, cs.n)), F32)
     for c in range(comps):
