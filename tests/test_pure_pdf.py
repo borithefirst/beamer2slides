@@ -494,6 +494,64 @@ def test_text_clips_clip_what_follows_them_as_in_pdfium():
     assert 0 < red.sum() < red.size // 4           # the glyphs, not the page
 
 
+def test_vertical_writing_reads_and_draws_as_pdfium():
+    """Identity-V or an embedded CMap with /WMode (1, 2, <01>, 1.5... anything GetCode reads as
+    non-zero), /W2 (`c [w1 vx vy ...]`, `c1 c2 w1 vx vy`, a group cut short reads 0) and /DW2 on the
+    torture's CID fonts, mixed with horizontal ones (`case(..., 4)`). Chars, boxes, loose boxes and
+    object bounds are equal to the last bit on 300 seeds and 374 CFF pages draw byte for byte (17 of
+    the first 30 only because the vertical origins are followed). Seed 5 found that an embedded
+    CMap's char with no ToUnicode entry takes the Windows ANSI code page's character (PDFium's
+    GetUnicodeFromCharCode), seed 6 that FPDFFont_GetGlyphWidth answers the vertical advance."""
+    from beamer2slides.devtools.render_torture_text import case, compare, harvest, pdf_bytes
+    specs = harvest()
+    if not any(s.two_byte for s in specs):
+        pytest.skip("no 2-byte CID fonts to harvest (build the test decks)")
+    apart = []
+    for seed in [5, 6, *range(20)]:
+        content, fonts, _, _ = case(seed, "any", 4)
+        data = pdf_bytes(content, fonts)
+        ref, pure = pdf.resolve("pdfium").open(data), pdf.resolve("pure").open(data)
+        try:
+            if (_chars_and_bounds(pure[0]) != _chars_and_bounds(ref[0])
+                    or [dataclasses.astuple(o) for o in pure[0].objects()]
+                    != [dataclasses.astuple(o) for o in ref[0].objects()]):
+                apart.append(seed)
+        finally:
+            ref.close()
+            pure.close()
+    assert not apart, f"seeds apart (scratch: xclip.py SEED SEED+1 4): {apart}"
+    drawn = 0
+    for seed in range(25):
+        content, fonts, zoom, transparent = case(seed, "cid-cff", 4)
+        try:
+            n = compare(content, fonts, zoom, transparent)[0]
+        except PdfError:
+            continue                         # images: refused
+        drawn += 1
+        assert n == 0, f"seed {seed} (python tools/render_torture_text.py {seed} 1 --simple 4 --kind cid-cff)"
+    assert drawn >= 20
+    # down the page: each glyph below the previous one, by W2's w1
+    cff = [s for s in specs if s.kind == "cid-cff" and s.two_byte][:1]
+    if cff:
+        from beamer2slides.devtools.render_torture_text import FontSpec
+        spec = cff[0]
+        head = spec.objects[0].replace(b"/Identity-H", b"/Identity-V")
+        k = int(re.search(rb"/DescendantFonts\s*\[\s*@(\d+)@", head).group(1))
+        objs = [head, *spec.objects[1:]]
+        objs[k] = objs[k].replace(b"<<", b"<</W2 [%d %d -500 250 800] /DW2 [900 -1200]" % (
+            spec.codes[0], spec.codes[0]), 1)
+        v = FontSpec("v", "cid-cff", objs, spec.codes, True)
+        body = b"BT /F0 20 Tf 50 120 Td <%04x%04x%04x> Tj ET" % (spec.codes[0], spec.codes[0], spec.codes[1])
+        doc = pdf.resolve("pure").open(pdf_bytes(body, [v]))
+        try:
+            ys = [c.origin[1] for c in doc[0].chars()]
+        finally:
+            doc.close()
+        assert len(ys) == 3 and ys[0] < ys[1] < ys[2]              # y down: top to bottom
+        assert ys[1] - ys[0] == pytest.approx(10)                 # w1 -500 at 20 pt
+        assert compare(body, [v], 2, False)[0] == 0
+
+
 def test_the_pure_renderer_refuses_text_it_cannot_draw_exactly_yet():
     """Fonts not embedded (PDFium draws a system substitute) and Type 3 text are refused, not guessed."""
     from beamer2slides.devtools.render_torture_text import FontSpec, harvest, pdf_bytes

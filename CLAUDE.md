@@ -47,7 +47,9 @@ a per-slide background picture.
   axial/radial shadings and shading patterns are ported too (`pure/render_shading.py`, oracle
   `tools/render_torture_shading.py`), and so is text in embedded Type 1 and CFF fonts (FreeType's CFF
   engine and smooth rasteriser ported, `pure/ftoutline.py`, `pure/ftgrays.py`, `pure/render_text.py`,
-  oracle `tools/render_torture_text.py`). Whole pages: 195 of the test decks' 231 render byte for byte
+  oracle `tools/render_torture_text.py`), with text clips (Tr 4-7 clip what follows, `--simple 3`)
+  and vertical writing (Identity-V / /WMode, /W2 /DW2: origins, boxes and advances, `--simple 4`,
+  `content.item_origin`). Whole pages: 195 of the test decks' 231 render byte for byte
   as PDFium's, none apart (`test_whole_beamer_pages_render_as_pdfium_renders_them`);
   a page with anything not ported yet (images, Type 3 or TrueType or non-embedded text, CalRGB/Lab/Indexed
   shadings, transfer functions…) raises PdfError, so

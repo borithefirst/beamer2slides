@@ -879,7 +879,7 @@ class _Run:
         if font is None:
             return
         if initial != 0:
-            s.text_pos = (f32(s.text_pos[0] - self._horizontal_size(initial)), s.text_pos[1])
+            self._kern(initial)
         if not strings:
             return
         # a Type 3 font is filled whatever Tr says (the stroke CTM, the clip list), but the object
@@ -905,12 +905,24 @@ class _Run:
             obj.text_ctm = (s.ctm[0], s.ctm[2], s.ctm[1], s.ctm[3])
         self.add(obj, True, True)
         advance = text_positions(obj)
-        s.text_pos = (f32(s.text_pos[0] + f32(advance * s.horz_scale)), s.text_pos[1])
+        if font.vertical:   # CalcPositionData: (0, advance), no Tz
+            s.text_pos = (s.text_pos[0], f32(s.text_pos[1] + advance))
+        else:
+            s.text_pos = (f32(s.text_pos[0] + f32(advance * s.horz_scale)), s.text_pos[1])
         if mode >= 4:
             # a clone: switching the object off later leaves the clip as it is
             self.clip_text_list.append(copy.copy(obj))
         if kernings and kernings[-1] != 0:
-            s.text_pos = (f32(s.text_pos[0] - self._horizontal_size(kernings[-1])), s.text_pos[1])
+            self._kern(kernings[-1])
+
+    def _kern(self, kerning: float) -> None:
+        """AddTextObject's kerning before and after the strings: down the line (GetVerticalTextSize,
+        no Tz) in vertical writing, else along it."""
+        s = self.state
+        if s.font.vertical:
+            s.text_pos = (s.text_pos[0], f32(s.text_pos[1] - f32(f32(kerning * s.font_size) / 1000)))
+        else:
+            s.text_pos = (f32(s.text_pos[0] - self._horizontal_size(kerning)), s.text_pos[1])
 
     # ---- XObjects, images, shadings
     def op_Do(self, args):
@@ -1033,6 +1045,17 @@ for _op in ("q Q cm w J j M d gs g G rg RG k K cs CS sc SC scn SCN m l c v y h r
 # ---------------------------------------------------------------------- bounds
 
 
+def item_origin(obj: PObj, item) -> tuple[float, float]:
+    """CPDF_TextObject::GetItemInfo's origin (text space): (x, 0), or in vertical writing
+    (0, y) less the font size times the char's vertical origin / 1000, in floats."""
+    font = obj.font
+    if not font.vertical:
+        return item[1], 0.0
+    vx, vy = font.vert_origin(item[0])
+    size = f32(obj.font_size)
+    return f32(0.0 - f32(f32(size * vx) / 1000)), f32(item[1] - f32(f32(size * vy) / 1000))
+
+
 def text_positions(obj: PObj) -> float:
     """CPDF_TextObject::CalcPositionDataInternal: fills each item's x (text space, before the
     horizontal scale), sets the original and page rectangles, returns the advance. Every `a * size
@@ -1044,20 +1067,33 @@ def text_positions(obj: PObj) -> float:
     cur = 0.0
     min_x, max_x, min_y, max_y = 10000.0, -10000.0, 10000.0, -10000.0
     cid = font.subtype == "Type0"
+    vertical = font.vertical
     for item, kerning in zip(obj.items, obj.kernings):
         code = item[0]
         item[1] = cur
         l, b, r, t = font.char_bbox(code)
-        min_y, max_y = min(min_y, min(t, b)), max(max_y, max(t, b))
-        left, right = f32(cur + scaled(l)), f32(cur + scaled(r))
-        min_x, max_x = min(min_x, left, right), max(max_x, left, right)
-        cur = f32(cur + scaled(font.char_width(code)))
+        if vertical:
+            # the box moved by minus the vertical origin (FX_RECT::Offset, in ints), x unscaled
+            vx, vy = font.vert_origin(code)
+            l, r, b, t = l - vx, r - vx, b - vy, t - vy
+            min_x, max_x = min(min_x, l, r), max(max_x, l, r)
+            top, bottom = f32(cur + scaled(t)), f32(cur + scaled(b))
+            min_y, max_y = min(min_y, top, bottom), max(max_y, top, bottom)
+            cur = f32(cur + scaled(font.vert_width(code)))
+        else:
+            min_y, max_y = min(min_y, min(t, b)), max(max_y, max(t, b))
+            left, right = f32(cur + scaled(l)), f32(cur + scaled(r))
+            min_x, max_x = min(min_x, left, right), max(max_x, left, right)
+            cur = f32(cur + scaled(font.char_width(code)))
         if code == 32 and (not cid or font.char_size(32) == 1):
             cur = f32(cur + obj.word_space)
         cur = f32(cur + obj.char_space)
         if kerning:
             cur = f32(cur - scaled(kerning))
-    min_y, max_y = scaled(min_y), scaled(max_y)
+    if vertical:
+        min_x, max_x = scaled(min_x), scaled(max_x)
+    else:
+        min_y, max_y = scaled(min_y), scaled(max_y)
     obj.original_rect = (min_x, min_y, max_x, max_y)
     rect = transform_rect(obj.matrix, obj.original_rect)
     if obj.text_mode in (1, 2, 5, 6):

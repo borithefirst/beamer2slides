@@ -290,7 +290,7 @@ Each of these was a diff against PDFium until it was ported:
 - Font substitution outside Windows (PDFium's fontconfig/`CFX_LinuxFontInfo` scan is not ported),
   and without the Foxit cache (older rules, see above); CID fonts' own substitution
   (CPDF_CIDFont's CJK charset and ordering rules) keeps the older behaviour too.
-- Encrypted PDFs (LaTeX doesn't write them), vertical writing, ActualText, and JPX/JBIG2/CCITT
+- Encrypted PDFs (LaTeX doesn't write them), ActualText, and JPX/JBIG2/CCITT
   decoding (those streams pass through as raw).
 
 ## Rendering: the options
@@ -448,12 +448,34 @@ truncated): the first rendering under a key is the one reused. Rules found on th
   text); 26 of the first 60 are up to 243,066 pixels apart when the text clip is ignored, which
   the port used to do (no earlier torture page could show it: every BT group sat inside q..Q).
   200 seeds extract equal (objects, bounds, chars).
+- **Vertical writing** (CID fonts only): a CMap is vertical when its predefined name ends in `V`
+  or an embedded one's /WMode reads non-zero through the CMap parser's GetCode (so `2`, `-1`,
+  `<01>` and `1.5` are vertical too). Then /W2 (LoadMetricsArray with n = 3, each value an int16,
+  a group cut short padded with 0) and /DW2 (default `[880 -1000]`, each element read alone)
+  give GetVertWidth (w1, the advance, down the page) and GetVertOrigin (vx, vy; without a W2 entry
+  `(int16(W width / 2), vy)`). A W2 whose flat size is not a multiple of 5 is a CHECK failure in
+  PDFium (reinterpret_span), so it is a PdfError here. What changes: TJ kernings and the advance
+  move the text position's y by `-(k·size/1000)` (no Tz; a TJ with no strings still moves x);
+  each item's origin is `(-size·vx/1000, pos - size·vy/1000)` in float32 (`content.item_origin`)
+  and every consumer takes it from there: CalcPositionData's box (the char rect offset by the
+  vertical origin in integers, then scaled), the text page's char origins and boxes (a zero-width
+  char falls back to the vertical width), GetLooseBounds (left, left + size, float top and bottom,
+  unrotated, then the matrix), the writing-mode guess, and FPDFFont_GetGlyphWidth (the vertical
+  advance). Drawing an *embedded* font changes nothing but the origins: the CID transform is only
+  for fonts PDFium substitutes, so glyph outlines and bitmaps are the horizontal ones. Found on
+  the way (not vertical at all): a char of an embedded CMap with no ToUnicode entry takes
+  PDFium's Windows answer, MultiByteToWideChar in the ANSI code page of the code's bytes
+  (`fonts._ansi_char`; `Þ`, not U+FFFD). The torture's `--simple 4` pages mix vertical and
+  horizontal CID fonts (Identity-V or an embedded CMap with a random /WMode, random /W2 and
+  /DW2, clip pages among them): 300 seeds extract equal (objects, bounds, chars), and with
+  `--kind cid-cff` all 374 of the first 400 seeds that draw are exact (the rest hold images);
+  17 of the first 30 are apart when the vertical origins are ignored.
 Refused, each with its reason: Type 3 text (ProcessType3Text, not ported), fonts without an embedded
 Type 1 / CFF program (the standard 14 and every substituted font - PDFium draws a system font - and
-TrueType glyphs), a code whose glyph the font lacks (PDFium falls back to another font), vertical
-writing, pattern colours, and text inside a soft mask (a mask device renders glyphs in
+TrueType glyphs), a code whose glyph the font lacks (PDFium falls back to another font), a /W2 PDFium
+would crash on, pattern colours, and text inside a soft mask (a mask device renders glyphs in
 FT_RENDER_MODE_NORMAL). The oracle is `devtools/render_torture_text.py` (`python
-tools/render_torture_text.py SEED0 N [--simple 0|1|2] [--kind type1|cid|...]`): the fonts are
+tools/render_torture_text.py SEED0 N [--simple 0|1|2|3|4] [--kind type1|cid|...]`): the fonts are
 harvested from the built test decks at run time (no font binaries in the tree), only codes whose
 glyph has an outline, and a page is a few BT groups with random Tf sizes (0.5 to 120), Tm (upright,
 scaled, mirrored, turned, skewed), `cm`, clips, Tz/Tc/Tw/Ts/TL, Tr 0..7, TJ kernings, constant
