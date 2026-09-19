@@ -135,8 +135,8 @@ Each of these was a diff against PDFium until it was ported:
 
 ## What it does not do
 
-- **Rendering, mostly.** Option 3 below is under way (next section); until text, images and shadings
-  draw (beamer's soft masks hold shadings), `render` raises PdfError on any page holding one, and `api.renders(backend)` is
+- **Rendering, mostly.** Option 3 below is under way (next section); until images, shadings, Type 3
+  and TrueType text draw (beamer's soft masks hold shadings), `render` raises PdfError on any page holding one, and `api.renders(backend)` is
   False. The pipeline needs renders for backgrounds, crops, ball colours, `_looks_like` and fidelity,
   so `classify` runs on the reader but `convert` does not. `embedded_image` gives no `pixels` or `rendered`, so
   `render.image_file` can't prove a raw JPEG looks right and keeps the page crop instead.
@@ -220,6 +220,44 @@ function evaluator the shading port brings), a luminosity mask with a /BC whose 
 not DeviceGray, DeviceRGB or DeviceCMYK, masks nested 8 deep, and anything unported inside a mask's
 /G (the same `unported` check runs over it). Real decks are still refused as a whole: every
 beamer shadow and ball bullet is a soft mask whose /G holds a shading, so they wait for shadings.
+
+**Text** (`pure/render_text.py`, glyph outlines from `pure/ftoutline.py` - FreeType's port of Adobe's
+CFF engine, Type 1 charstrings included, unhinted - and coverage from `pure/ftgrays.py`, FreeType's
+smooth rasteriser) is ProcessText, DrawNormalText and DrawTextPath as a display bitmap without
+FPDF_LCD_TEXT gets them: the glyph is rendered in FT_RENDER_MODE_LCD under FT_Set_Transform, and
+DrawNormalTextHelper folds each pixel's three subpixels into one coverage (shifted by the origin's
+third of a pixel, the first column of a shifted glyph normalised apart), gamma-adjusts it
+(kTextGammaAdjust) and merges the colour into a copy of the pixels under the text (GetDIBits; zeros
+on a BGRA device), which SetDIBits puts back through the clip. The origin is floor(x) and round(y) of
+the transformed char position. Glyph bitmaps are cached under PDFium's key (the matrix × 10000,
+truncated): the first rendering under a key is the one reused. Rules found on the way:
+- **Positions are float32 op by op** in the content parser too: a char width is
+  `F(F(w·size)/1000)`, a TJ kerning `F(F(F(k·size)/1000)·Tz)` (a TJ holding no string scales by Tz
+  as well), TJ numbers accumulate in float, Tz is `F(n/100)`, and the object's origin is
+  `ctm.Transform(tm.Transform(x, y))` in float. One ulp in a char's x changed a glyph's coverage by
+  one level.
+- **The path route**: |a| + |b| of the glyph-to-device matrix above 50 pixels, and every stroked
+  mode (1, 2, 5, 6), draw the outlines (LoadGlyphPath) as paths: per glyph
+  `Identity·(size, 0, 0, size, x, 0)·text2user`, filled non-zero, `text_mode` on (so its degenerate
+  sub-paths skip DrawZeroAreaPath, the hairline pass a plain fill's get). A stroke under a `cm` whose a or d is not
+  1 takes the CTM out of the text matrix and into the device matrix, so the pen is the user-space one.
+- **Clip modes (4..7) draw like 0..3**, and mode 3 draws nothing: the AGG device has no soft clip, so
+  ProcessClipPath skips text clips altogether.
+Refused, each with its reason: Type 3 text (ProcessType3Text, not ported), fonts without an embedded
+Type 1 / CFF program (the standard 14 and every substituted font - PDFium draws a system font - and
+TrueType glyphs), a code whose glyph the font lacks (PDFium falls back to another font), vertical
+writing, pattern colours, and text inside a soft mask (a mask device renders glyphs in
+FT_RENDER_MODE_NORMAL). The oracle is `devtools/render_torture_text.py` (`python
+tools/render_torture_text.py SEED0 N [--simple 0|1|2] [--kind type1|cid|...]`): the fonts are
+harvested from the built test decks at run time (no font binaries in the tree), only codes whose
+glyph has an outline, and a page is a few BT groups with random Tf sizes (0.5 to 120), Tm (upright,
+scaled, mirrored, turned, skewed), `cm`, clips, Tz/Tc/Tw/Ts/TL, Tr 0..7, TJ kernings, constant
+alpha and line widths, rendered at zooms 0.5 to 3.1 on white and clear bitmaps. When text was done:
+1,200 seeds of everything, 400 Type 1 only, 300 CID-keyed CFF only, 200 without Tr/Tz/clips and 60
+one-glyph pages, not one pixel apart (59 refused, all Type 3); across the test, sync, stress and
+theme PDFs, 1,499 pages holding text render byte-identical and none differs (the rest are refused
+for shadings, images, TrueType or Type 3). `tests/test_pure_pdf.py` keeps 80 seeds of two levels
+and the shrunk cases.
 
 ## Risks
 

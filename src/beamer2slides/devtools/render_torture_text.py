@@ -186,6 +186,26 @@ def _codes(font) -> list:
     return codes
 
 
+def _inked(font, codes: list) -> list:
+    """The codes whose glyph has an outline: a subset font keeps a width for every code of its
+    encoding but a program only for the glyphs the document used, so most codes draw nothing."""
+    from ..pdf.pure import ftoutline
+    from ..pdf.pure.render_text import glyph_of
+    try:
+        face = ftoutline.face_of(font)
+    except Exception:  # noqa: BLE001
+        return codes                         # a font the port cannot draw: the page is refused anyway
+    out = []
+    for code in codes:
+        try:
+            g = glyph_of(font, code)
+            if g >= 0 and face.path(g):
+                out.append(code)
+        except Exception:  # noqa: BLE001
+            out.append(code)
+    return out or codes
+
+
 _HARVEST: list | None = None
 
 
@@ -215,6 +235,8 @@ def harvest(decks: Path = DECKS, limit_per_kind: int = 40) -> list[FontSpec]:
             try:
                 font = load_font(pdf, d)
                 codes = _codes(font) if font is not None else []
+                if codes and kind != "type3":
+                    codes = _inked(font, codes)
             except Exception:  # noqa: BLE001
                 continue
             if not codes:

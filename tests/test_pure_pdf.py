@@ -253,6 +253,77 @@ def test_the_pure_renderer_refuses_what_it_cannot_draw_exactly_yet():
         page.render(1.0)
 
 
+# ---------------------------------------------------------------------- text
+
+def _text_font(stem, base):
+    """A font the text torture harvests from the test decks (devtools/render_torture_text.py),
+    found by its deck and base name (the subset tag changes whenever the deck does)."""
+    from beamer2slides.devtools.render_torture_text import harvest
+    for spec in harvest():
+        if spec.name.startswith(stem + "/") and spec.name.endswith("+" + base):
+            return spec
+    pytest.skip(f"no {stem}/{base} font (build the test decks)")
+
+
+# (page content, fonts as (deck, base name), zoom, transparent): pages found apart once, shrunk
+TEXT_CASES = {
+    # a TJ with no string still scales its kerning by Tz: GetHorizontalTextSize
+    "tj_kerning_alone_under_tz": (b"BT /F0 20 Tf 50 Tz 10 60 Td [-800] TJ <2c2d> Tj [-1500] TJ <2e2f> Tj ET",
+                                  [("08_serif", "CMR10")], 1.37, False),
+    # stroked text under a skewed cm: the text object's position is ctm.Transform(tm.Transform(pos))
+    # in float32, op by op (torture seed 8; a double-precision position moved 57 pixels by one level)
+    "stroke_under_skewed_cm": (b"q\n0.6145 -1.2444 -0.7577 1.4974 1.410 53.443 cm\nBT\n/F0 13.891 Tf\n57.535 92.956 Td\n1 Tr\n"
+                               b"<01eb028c021b023300e7015702af00a1> Tj [<02dd0271027c> 132 <021b027c> -354 "
+                               b"<028c0195021b0195002c> -50] TJ\nET\nQ",
+                               [("09_metropolis_fira", "FiraSans-Bold-Identity-H")], 3.1, True),
+}
+
+
+@pytest.mark.parametrize("name", TEXT_CASES)
+def test_the_pure_renderer_draws_pdfiums_text(name):
+    from beamer2slides.devtools.render_torture_text import compare
+    content, fonts, zoom, transparent = TEXT_CASES[name]
+    assert compare(content, [_text_font(*f) for f in fonts], zoom, transparent)[0] == 0
+
+
+@pytest.mark.parametrize("simple", [1, 2], ids=["plain", "anything"])
+def test_the_pure_renderer_survives_text_torture_seeds(simple):
+    """A slice of the random text pages the renderer was made exact on (2,500 seeds when it was
+    written: Tm, cm, clips, Tz/Tc/Tw/Ts, Tr 0..7, alpha, zooms). Char widths rounded once instead
+    of after every float32 operation move a glyph by one ulp, which is enough to change coverage:
+    seeds 1, 27 and 61 fail then."""
+    from beamer2slides.devtools.render_torture_text import case, compare, harvest
+    if not harvest():
+        pytest.skip("no fonts to harvest (build the test decks)")
+    apart, refused = {}, 0
+    for seed in range(80):
+        content, fonts, zoom, transparent = case(seed, "any", simple)
+        try:
+            n = compare(content, fonts, zoom, transparent)[0]
+        except PdfError:
+            refused += 1                     # Type 3 text: refused, never drawn wrong
+            continue
+        if n:
+            apart[seed] = n
+    assert not apart, f"seeds apart (python tools/render_torture_text.py SEED 1 --simple {simple}): {apart}"
+    assert refused < 10
+
+
+def test_the_pure_renderer_refuses_text_it_cannot_draw_exactly_yet():
+    """Fonts not embedded (PDFium draws a system substitute) and Type 3 text are refused, not guessed."""
+    from beamer2slides.devtools.render_torture_text import FontSpec, harvest, pdf_bytes
+    from beamer2slides.pdf.pure.backend import PureBackend
+    helvetica = FontSpec("standard", "type1", [b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>"], [65])
+    page = PureBackend().open(pdf_bytes(b"BT /F0 12 Tf 10 10 Td (A) Tj ET", [helvetica]))[0]
+    with pytest.raises(PdfError, match="not embedded"):
+        page.render(1.0)
+    type3 = [s for s in harvest() if s.kind == "type3"]
+    if type3:
+        body = b"BT /F0 12 Tf 10 10 Td <%02x> Tj ET" % type3[0].codes[0]
+        with pytest.raises(PdfError, match="Type 3"):
+            PureBackend().open(pdf_bytes(body, type3[:1]))[0].render(1.0)
+
+
 # ---------------------------------------------------------------------- PDFium's rules, one by one
 
 
