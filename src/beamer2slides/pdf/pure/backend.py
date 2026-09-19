@@ -20,7 +20,7 @@ import numpy as np
 
 from ..api import (COLOR_SPACES, LIGATURES, NO_OBJECT, OBJ_IMAGE, OBJ_PATH, OBJ_SHADING, Box, Char,
                    EmbeddedImage, PageObject, PdfError, char_box, font_metrics, join_surrogates, mul,
-                   pixel_bounds, trace, transform_box)
+                   pixel_bounds, render_matrix, trace, transform_box)
 from .content import Parser, PObj
 from .render import render_page
 from .document import PdfFile, read, text_string, write_file
@@ -68,6 +68,11 @@ class Page:
             if box[0] > box[2] or box[1] > box[3]:
                 box = (0.0, 0.0, 0.0, 0.0)
         self.box = box
+        # CPDF_Page::GetPageRotation: C integer division and remainder
+        rot = r(self.dict.get("Rotate"))
+        rot = int(math.trunc(rot / 90)) if isinstance(rot, (int, float)) and math.isfinite(rot) else 0
+        rot = int(math.fmod(rot, 4))
+        self.rotation = rot + 4 if rot < 0 else rot
         left, bottom, right, top = box
         self.left, self.top = left, top
         self.width, self.height = right - left, top - bottom
@@ -426,7 +431,8 @@ class Page:
     def render(self, zoom: float, clip: Box | None = None, transparent: bool = False) -> np.ndarray:
         """FPDF_RenderPageBitmapWithMatrix as pdfium_backend calls it (render.py)."""
         ix0, iy0, w, h = pixel_bounds(zoom, clip if clip is not None else self.rect)
-        bgra = render_page(self._parse(), self.box, zoom, ix0, iy0, w, h, transparent)
+        fs = render_matrix(zoom, ix0, iy0, self.rotation, self.width, self.height)
+        bgra = render_page(self._parse(), self.box, self.rotation, fs, w, h, transparent)
         if transparent:
             return bgra[..., [2, 1, 0, 3]].copy()
         return bgra[..., 2::-1].copy()

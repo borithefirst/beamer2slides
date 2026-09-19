@@ -729,12 +729,30 @@ class Status:
 # ---------------------------------------------------------------------- page
 
 
-def page_matrix(box, zoom: float, ix0: int, iy0: int):
-    """GetDisplayMatrix (rotation 0) times FS_MATRIX(zoom, 0, 0, zoom, -ix0, -iy0)."""
+def display_matrix(box, rotation: int):
+    """CPDF_Page::GetDisplayMatrix: UpdateDimensions' page_matrix_ (turned by /Rotate, the page
+    size swapped on quarter turns) times the rect matrix of (0, 0, width, height), rotation 0."""
     left, bottom, right, top = (F(v) for v in box)
-    height = F(top - bottom)
-    display = (1.0, 0.0, 0.0, -1.0, F(-left), F(F(-bottom * -1.0) + height))
-    return R.concat(display, (F(zoom), 0.0, 0.0, F(zoom), F(float(-ix0)), F(float(-iy0))))
+    w, h = F(right - left), F(top - bottom)
+    if w == 0 or h == 0:
+        return (1.0, 0.0, 0.0, 1.0, 0.0, 0.0)
+    if rotation == 1:
+        w, h = h, w
+        pm = (0.0, -1.0, 1.0, 0.0, -bottom, right)
+    elif rotation == 2:
+        pm = (-1.0, 0.0, 0.0, -1.0, right, top)
+    elif rotation == 3:
+        w, h = h, w
+        pm = (0.0, 1.0, -1.0, 0.0, top, -left)
+    else:
+        pm = (1.0, 0.0, 0.0, 1.0, -left, -bottom)
+    # ((x2 - x0) / w, (y2 - y0) / w, (x1 - x0) / h, (y1 - y0) / h, x0, y0) with x0 = 0, y0 = h
+    return R.concat(pm, (F(w / w), 0.0, 0.0, F(-h / h), 0.0, h))
+
+
+def page_matrix(box, rotation: int, fs):
+    """FPDF_RenderPageBitmapWithMatrix: GetDisplayMatrix times the caller's FS_MATRIX (floats)."""
+    return R.concat(display_matrix(box, rotation), tuple(F(float(v)) for v in fs))
 
 
 def unported(objects) -> str | None:
@@ -761,17 +779,17 @@ def unported(objects) -> str | None:
     return None
 
 
-def render_page(objects, box, zoom: float, ix0: int, iy0: int, width: int, height: int,
+def render_page(objects, box, rotation: int, fs, width: int, height: int,
                 transparent: bool) -> np.ndarray:
     """FPDF_RenderPageBitmapWithMatrix onto a fresh bitmap (white, or clear when
-    `transparent`): the BGRA bytes."""
+    `transparent`) with FS_MATRIX `fs` (api.render_matrix): the BGRA bytes."""
     missing = unported(objects)
     if missing is not None:
         raise PdfError(f"the pure reader cannot render {missing} yet")
     dev = Device(width, height, transparent)
     if not transparent:
         dev.bgra[...] = 255
-    matrix = page_matrix(box, zoom, ix0, iy0)
+    matrix = page_matrix(box, rotation, fs)
     dev.save()
     dev.set_clip_rect((0, 0, width, height))
     # CPDF_ProgressiveRenderer: one layer, the page's top-level objects

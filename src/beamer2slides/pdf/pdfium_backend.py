@@ -17,7 +17,7 @@ import pypdfium2.raw as R
 
 from .api import (COLOR_SPACES, LIGATURES, NO_OBJECT, OBJ_FORM, OBJ_IMAGE, OBJ_PATH, OBJ_SHADING, Box, Char,
                   EmbeddedImage, PageObject, PdfError, char_box, font_metrics, join_surrogates, mul,
-                  pixel_bounds, trace, transform_box)
+                  pixel_bounds, render_matrix, trace, transform_box)
 
 
 def _addr(handle) -> int:
@@ -492,7 +492,9 @@ class Page:
         bitmap = R.FPDFBitmap_Create(w, h, 1 if transparent else 0)
         try:
             R.FPDFBitmap_FillRect(bitmap, 0, 0, w, h, 0x00000000 if transparent else 0xFFFFFFFF)
-            matrix = R.FS_MATRIX(zoom, 0, 0, zoom, -ix0, -iy0)
+            # /Rotate turns PDFium's display matrix, not our page space: undo it (api.render_matrix)
+            matrix = R.FS_MATRIX(*render_matrix(zoom, ix0, iy0, R.FPDFPage_GetRotation(self.raw),
+                                                self.width, self.height))
             clipping = R.FS_RECTF(0, 0, w, h)
             R.FPDF_RenderPageBitmapWithMatrix(bitmap, self.raw, matrix, clipping, R.FPDF_ANNOT)
             stride = R.FPDFBitmap_GetStride(bitmap)

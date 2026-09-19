@@ -11,7 +11,7 @@ worker process, or anything else that keeps the contract.
 | `pdfium_backend.py` | the reference implementation (pypdfium2); the only module that imports it |
 | `sandbox.py` | a backend that runs another backend in a worker process, and that worker (`python -m beamer2slides.pdf.sandbox`) |
 | `wire.py` | the worker's wire format: data only |
-| `pure/` | a PDF reader in pure Python that answers like PDFium, rendering excepted (docs/pdf-from-scratch.md) |
+| `pure/` | a PDF reader in pure Python that answers like PDFium; rendering being ported (docs/pdf-from-scratch.md) |
 | `__init__.py` | `Document(path)`, and choosing the backend |
 
 ## Choosing the backend
@@ -28,7 +28,7 @@ or, without touching code, `B2S_PDF_BACKEND`:
 | value | backend |
 |---|---|
 | `pdfium` (default) | PDFium in this process |
-| `pure` | the pure Python reader (docs/pdf-from-scratch.md): PDFium's answers, no rendering |
+| `pure` | the pure Python reader (docs/pdf-from-scratch.md): PDFium's answers; renders only pages of paths so far |
 | `sandbox` | PDFium in a worker process |
 | `sandbox:<spec>` | the backend `<spec>` in a worker process |
 | `package.module:attr` | `attr` is a backend object, or a factory returning one |
@@ -42,7 +42,10 @@ their form); `Char.obj`, drawings' and images' `object`, `set_active`, `embedded
 or give ids. No handle, pointer or library object crosses the boundary. That is what lets a
 backend live in another process, container or machine.
 
-Coordinates are PDF points from the top left corner of the crop box, y down. The methods:
+Coordinates are PDF points from the top left corner of the crop box, y down, and the page's
+/Rotate is never applied - not to geometry, and not to `render` either, which PDFium would turn
+(`api.render_matrix` hands it the matrix that undoes the turn; before it, a /Rotate 90 page came
+out turned in a bitmap of the unturned size, so crops missed their elements). The methods:
 
 - document: `len`, `[i]`, iteration, `metadata`, `label(i)`, `named_dests()`, `save(pages, boxes)
   -> bytes` (a new file with some pages, some cut to an area: `notes.py` writes slides.pdf with it),

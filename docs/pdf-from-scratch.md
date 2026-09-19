@@ -139,9 +139,10 @@ decided it:
 
 The oracle is `devtools/render_torture.py` (`python tools/render_torture.py SEED0 N [--forms]`):
 random pages of `cm`, clips, colours, line styles, dashes, constant alpha and paths painted every way,
-optionally inside nested forms with random /BBox and /Matrix, rendered by both at random zooms on
-white and on clear bitmaps, each difference shrunk to the lines that still cause it. When paths were
-done: 5,500 seeds of pages and 500 with forms, not one pixel apart; `tests/test_pure_pdf.py` keeps
+optionally inside nested forms with random /BBox and /Matrix (`--forms`) and on pages with media
+boxes off the origin, crop boxes, /Rotate and render clips (`--page`), rendered by both at random
+zooms on white and on clear bitmaps, each difference shrunk to the lines that still cause it. When
+paths were done: 5,500 seeds of pages, 3,000 with forms and 300 of page geometry, not one pixel apart; `tests/test_pure_pdf.py` keeps
 40 seeds of each plus the shrunk pages that were once apart. `render_page` refuses (`unported`) what
 it does not draw yet: text, images, shadings, patterns, transparency groups, soft masks, blend modes,
 transfer functions.

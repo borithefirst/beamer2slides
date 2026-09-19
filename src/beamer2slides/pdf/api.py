@@ -203,7 +203,9 @@ class PdfPage(Protocol):
         """uint8 pixels of the page (or of `clip`, page space), `zoom` pixels per point, pixel
         bounds rounded outwards (`pixel_bounds`): h x w x 3 on white, or h x w x 4 on a
         transparent ground if `transparent`. Annotations are drawn; inactive objects are not.
-        A backend that cannot draw (`renders(backend)` is False) raises PdfError."""
+        Page space is unrotated like every other call: /Rotate is not applied (`render_matrix`).
+        A backend that cannot draw (`renders(backend)` is False) raises PdfError; one that draws
+        only some pages raises it for the others."""
 
 
 @runtime_checkable
@@ -330,6 +332,24 @@ def pixel_bounds(zoom: float, box: Box) -> tuple[int, int, int, int]:
     ix0, iy0 = math.floor(x0 * zoom + 0.001), math.floor(y0 * zoom + 0.001)
     ix1, iy1 = math.ceil(x1 * zoom - 0.001), math.ceil(y1 * zoom - 0.001)
     return ix0, iy0, max(1, ix1 - ix0), max(1, iy1 - iy0)
+
+
+def render_matrix(zoom: float, ix0: int, iy0: int, rotation: int, width: float, height: float) -> Matrix:
+    """The FS_MATRIX for FPDF_RenderPageBitmapWithMatrix that draws the page in *our* page space
+    (y down, crop box origin, `rect`), `zoom` pixels per point, pixel (ix0, iy0) at the origin.
+    PDFium puts the page's display matrix first, and that one turns the page by /Rotate
+    (`rotation` = quarter turns, as FPDFPage_GetRotation), while every other call of the contract
+    speaks unrotated page space: this undoes the turn, so a render lines up with the geometry.
+    `width`/`height`: the unrotated page size. Computed in double; the backends hand the same
+    numbers to PDFium (the pure renderer then composes them as PDFium does, in float32)."""
+    z, w, h = zoom, width, height
+    if rotation == 1:   # display (u, v) = (y - bottom, x - left): ours = (v, h - u)
+        return 0.0, -z, z, 0.0, -ix0, z * h - iy0
+    if rotation == 2:   # (right - x, y - bottom): ours = (w - u, h - v)
+        return -z, 0.0, 0.0, -z, z * w - ix0, z * h - iy0
+    if rotation == 3:   # (top - y, right - x): ours = (w - v, u)
+        return 0.0, z, -z, 0.0, z * w - ix0, -iy0
+    return z, 0.0, 0.0, z, -ix0, -iy0
 
 
 def join_surrogates(s: str) -> str:

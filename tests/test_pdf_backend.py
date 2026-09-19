@@ -171,6 +171,29 @@ def test_render_follows_pixel_bounds_and_active_objects(backend):
         doc.close()
 
 
+@pytest.mark.parametrize("rotate", [0, 90, 180, 270, -90])
+def test_a_turned_page_renders_where_its_geometry_says(backend, rotate):
+    """/Rotate turns PDFium's display matrix, while objects, drawings and chars stay in unrotated
+    page space: a render must stay there too, or backgrounds and crops miss their elements (the
+    PDFium backend drew a /Rotate 90 page turned into a bitmap of the unturned size)."""
+    from beamer2slides.devtools.render_torture import pdf_bytes
+    data = pdf_bytes([b"1 0 0 rg 10 10 50 20 re f"], media=(5, 7, 205, 157), page_entries=b"/Rotate %d" % rotate)
+    doc = backend.open(data)
+    try:
+        page = doc[0]
+        assert page.rect == (0.0, 0.0, 200.0, 150.0)
+        (drawing,) = page.drawings()
+        if not api.renders(backend):
+            return
+        img = page.render(2.0)
+        assert img.shape == (300, 400, 3)
+        ys, xs = np.nonzero(img[..., 1] < 128)
+        x0, y0, x1, y1 = drawing["rect"]
+        assert (xs.min(), ys.min(), xs.max() + 1, ys.max() + 1) == (x0 * 2, y0 * 2, x1 * 2, y1 * 2)
+    finally:
+        doc.close()
+
+
 @built
 def test_bytes_open_like_the_file_and_save_writes_new_files(backend, tmp_path):
     doc = backend.open(BASIC)

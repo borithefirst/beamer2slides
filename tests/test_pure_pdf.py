@@ -144,18 +144,19 @@ def test_the_pure_renderer_draws_pdfiums_pixels(name):
     assert compare(content, zoom, transparent, forms)[0] == 0
 
 
-@pytest.mark.parametrize("forms", [False, True], ids=["pages", "forms"])
-def test_the_pure_renderer_survives_torture_seeds(forms):
-    """A slice of the random pages the renderer was made exact on (5,500 seeds of pages, 500 with
-    forms, when it was written): any pixel apart fails."""
+@pytest.mark.parametrize("forms,page", [(False, False), (True, False), (False, True)], ids=["pages", "forms", "geometry"])
+def test_the_pure_renderer_survives_torture_seeds(forms, page):
+    """A slice of the random pages the renderer was made exact on (5,500 seeds of pages, 3,000
+    with forms, when it was written): any pixel apart fails."""
     from beamer2slides.devtools.render_torture import case, compare
     apart = {}
     for seed in range(40):
-        content, fs, zoom, transparent = case(seed, forms)
-        n = compare(content, zoom, transparent, fs)[0]
+        content, fs, zoom, transparent, geometry = case(seed, forms, page)
+        n = compare(content, zoom, transparent, fs, geometry)[0]
         if n:
             apart[seed] = n
-    assert not apart, f"seeds apart (python tools/render_torture.py SEED 1{' --forms' if forms else ''}): {apart}"
+    flags = " --forms" * forms + " --page" * page
+    assert not apart, f"seeds apart (python tools/render_torture.py SEED 1{flags}): {apart}"
 
 
 # ---------------------------------------------------------------------- PDFium's rules, one by one

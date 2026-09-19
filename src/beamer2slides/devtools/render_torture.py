@@ -23,9 +23,10 @@ EXTGS = b"/ExtGState << " + b" ".join(
     b" /D0 << /D [[3 2] 1] >> /L0 << /LW 3 /LJ 1 /LC 2 >> >>"
 
 
-def pdf_bytes(pages: list[bytes], forms=(), media=(0, 0, 200, 150), extra_resources: bytes = b"") -> bytes:
+def pdf_bytes(pages: list[bytes], forms=(), media=(0, 0, 200, 150), extra_resources: bytes = b"",
+              page_entries: bytes = b"") -> bytes:
     """A PDF with one page per content stream. `forms`: [(dict entries, content)] as /X0, /X1, ...;
-    X<k> may call X<j> for j < k."""
+    X<k> may call X<j> for j < k. `page_entries` go into every page dictionary (/Rotate, /CropBox)."""
     objs: list[bytes] = []
 
     def add(b: bytes) -> int:
@@ -43,8 +44,8 @@ def pdf_bytes(pages: list[bytes], forms=(), media=(0, 0, 200, 150), extra_resour
     content_ids = [add(b"<< /Length %d >>\nstream\n" % len(c) + c + b"\nendstream") for c in pages]
     pages_obj = len(objs) + 1 + len(pages)
     box = b"[%s]" % b" ".join(b"%g" % v for v in media)
-    kids = [add(b"<< /Type /Page /Parent %d 0 R /MediaBox %s /Resources %s /Contents %d 0 R >>"
-                % (pages_obj, box, res, cid)) for cid in content_ids]
+    kids = [add(b"<< /Type /Page /Parent %d 0 R /MediaBox %s %s /Resources %s /Contents %d 0 R >>"
+                % (pages_obj, box, page_entries, res, cid)) for cid in content_ids]
     assert add(b"<< /Type /Pages /Kids [" + b" ".join(b"%d 0 R" % k for k in kids)
                + b"] /Count %d >>" % len(kids)) == pages_obj
     cat = add(b"<< /Type /Catalog /Pages %d 0 R >>" % pages_obj)
@@ -146,32 +147,56 @@ def random_page(r: random.Random, nforms: int = 0) -> bytes:
     return b"\n".join(out)
 
 
-def case(seed: int, forms: bool) -> tuple[bytes, list, float, bool]:
-    """The page (content, forms, zoom, transparent) seed `seed` stands for."""
+def random_geometry(r: random.Random) -> dict:
+    """Page geometry for `compare`: a media box off the origin, a crop box, /Rotate (also the odd
+    values PDFium folds: -90, 450, 45), and a clip rectangle for `render`."""
+    x0, y0 = r.choice([0, 0, r.uniform(-300, 300)]), r.choice([0, 0, r.uniform(-300, 300)])
+    media = (x0, y0, x0 + r.uniform(20, 300), y0 + r.uniform(20, 300))
+    entries = b""
+    if r.random() < 0.6:
+        entries += b"/Rotate %d " % r.choice([0, 90, 180, 270, -90, 450, 45, 360])
+    if r.random() < 0.3:
+        cx, cy = r.uniform(media[0] - 20, media[2]), r.uniform(media[1] - 20, media[3])
+        entries += b"/CropBox [%.3f %.3f %.3f %.3f]" % (cx, cy, cx + r.uniform(5, 250), cy + r.uniform(5, 250))
+    clip = None
+    if r.random() < 0.4:
+        cx, cy = r.uniform(-10, 150), r.uniform(-10, 150)
+        clip = (cx, cy, cx + r.uniform(1, 120), cy + r.uniform(1, 120))
+    return {"media": media, "page_entries": entries, "clip": clip}
+
+
+def case(seed: int, forms: bool, page: bool = False) -> tuple[bytes, list, float, bool, dict]:
+    """The page (content, forms, zoom, transparent, geometry) seed `seed` stands for."""
     r = random.Random(seed)
     fs = random_forms(r) if forms else []
     content = random_page(r, len(fs))
-    return content, fs, r.choice([0.5, 1, 1.37, 2, 3.1]), r.random() < 0.3
+    zoom, transparent = r.choice([0.5, 1, 1.37, 2, 3.1]), r.random() < 0.3
+    return content, fs, zoom, transparent, random_geometry(r) if page else {}
 
 
-def compare(content: bytes, zoom: float, transparent: bool, forms=()):
-    """(pixels that differ, PDFium's render, pure's render, per-pixel max difference)."""
+def compare(content: bytes, zoom: float, transparent: bool, forms=(), geometry=None):
+    """(pixels that differ, PDFium's render, pure's render, per-pixel max difference).
+    `geometry`: media, page_entries, clip (random_geometry)."""
     from ..pdf.pdfium_backend import PdfiumBackend
     from ..pdf.pure.backend import PureBackend
-    data = pdf_bytes([content], forms=forms)
-    a = PdfiumBackend().open(data)[0].render(zoom, transparent=transparent)
-    b = PureBackend().open(data)[0].render(zoom, transparent=transparent)
+    g = dict(geometry or {})
+    clip = g.pop("clip", None)
+    data = pdf_bytes([content], forms=forms, **g)
+    a = PdfiumBackend().open(data)[0].render(zoom, clip, transparent=transparent)
+    b = PureBackend().open(data)[0].render(zoom, clip, transparent=transparent)
+    if a.shape != b.shape:
+        raise AssertionError(f"shapes {a.shape} != {b.shape}")
     d = np.abs(a.astype(int) - b.astype(int)).max(axis=2)
     return int((d > 0).sum()), a, b, d
 
 
-def shrink(content: bytes, zoom: float, transparent: bool, forms=()):
+def shrink(content: bytes, zoom: float, transparent: bool, forms=(), geometry=None):
     """Drop lines (the page's, then each form's) while the difference remains."""
     forms = list(forms)
 
     def fails(c, fs):
         try:
-            return compare(c, zoom, transparent, fs)[0] > 0
+            return compare(c, zoom, transparent, fs, geometry)[0] > 0
         except Exception:
             return False
 
@@ -201,14 +226,15 @@ def main(argv=None) -> int:
     ap.add_argument("seed0", type=int, nargs="?", default=0)
     ap.add_argument("n", type=int, nargs="?", default=200)
     ap.add_argument("--forms", action="store_true")
+    ap.add_argument("--page", action="store_true", help="random media/crop boxes, /Rotate and render clips")
     ap.add_argument("--out", default="out/render-torture")
     args = ap.parse_args(argv)
     out = Path(args.out)
     fails = 0
     for seed in range(args.seed0, args.seed0 + args.n):
-        content, forms, zoom, transparent = case(seed, args.forms)
+        content, forms, zoom, transparent, geometry = case(seed, args.forms, args.page)
         try:
-            npx = compare(content, zoom, transparent, forms)[0]
+            npx = compare(content, zoom, transparent, forms, geometry)[0]
         except Exception as e:
             print("seed", seed, "EXC", type(e).__name__, e)
             fails += 1
@@ -216,9 +242,9 @@ def main(argv=None) -> int:
         if not npx:
             continue
         fails += 1
-        small, sforms = shrink(content, zoom, transparent, forms)
-        npx, a, b, d = compare(small, zoom, transparent, sforms)
-        print(f"seed {seed} zoom {zoom} transparent {transparent}: {npx} px, max {d.max()}")
+        small, sforms = shrink(content, zoom, transparent, forms, geometry)
+        npx, a, b, d = compare(small, zoom, transparent, sforms, geometry)
+        print(f"seed {seed} zoom {zoom} transparent {transparent} {geometry}: {npx} px, max {d.max()}")
         for k, (e, c) in enumerate(sforms):
             print(f"-- X{k} {e.decode()}\n{c.decode()}")
         print("-- page\n" + small.decode())
@@ -226,7 +252,8 @@ def main(argv=None) -> int:
         from PIL import Image
         vis = np.concatenate([a[..., :3], b[..., :3], np.stack([np.where(d > 0, 255, 0)] * 3, -1)], 1)
         Image.fromarray(vis.astype(np.uint8)).save(out / f"seed{seed}.png")
-        (out / f"seed{seed}.pdf").write_bytes(pdf_bytes([small], forms=sforms))
+        g = {k: v for k, v in geometry.items() if k != "clip"}
+        (out / f"seed{seed}.pdf").write_bytes(pdf_bytes([small], forms=sforms, **g))
     print(f"seeds {args.seed0}..{args.seed0 + args.n - 1}: {fails} failed")
     return 1 if fails else 0
 
