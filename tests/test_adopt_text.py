@@ -172,7 +172,7 @@ def test_the_thumbnail_tells_a_fixed_box_with_no_insets():
     thumbnail does, by where the words' ink begins (gdg24's stat grids)."""
     import numpy as np
 
-    from beamer2slides.deck_ir import thumbnail_insets
+    from beamer2slides.deck_thumbs import thumbnail_insets
     scale = 720 / 453.54
 
     def element():
@@ -228,7 +228,7 @@ def test_ink_on_the_boxs_first_column_is_its_own_unless_it_goes_on_outside():
     ink that runs on past the edge is something else's (a highlight bar under a code listing)."""
     import numpy as np
 
-    from beamer2slides.deck_ir import thumbnail_insets
+    from beamer2slides.deck_thumbs import thumbnail_insets
     px = 4.0
 
     def read(ink_from):
@@ -291,7 +291,7 @@ def test_a_run_that_only_names_its_font_takes_the_weight_its_thumbnail_shows():
 
 
 def test_the_stroke_width_of_a_thumbnail_in_em():
-    from beamer2slides.deck_ir import BOLD_STROKE_EM, stroke_em
+    from beamer2slides.deck_thumbs import BOLD_STROKE_EM, stroke_em
     el =text_of(deck_ir(title_deck({}), foreign=True), "s_title")
     thin, thick = (stroke_em(el, [el], stroked(el, w).astype("int16"), 1600 / 453.54) for w in (0.07, 0.15))
     assert thin == pytest.approx(0.07, abs=0.02) and thick == pytest.approx(0.15, abs=0.03)
@@ -306,7 +306,7 @@ def test_a_hebrew_first_line_is_placed_by_its_baseline():
     cleared first; Latin and CJK first lines are left to the cap rule."""
     import numpy as np
 
-    from beamer2slides.deck_ir import baseline_drift
+    from beamer2slides.deck_thumbs import baseline_drift
     px, scale, z = 4.0, 2.0, 12.0
 
     def element(text):
@@ -417,7 +417,7 @@ def test_the_side_a_boxs_words_start_on_says_whose_side_insets_an_import_kept():
     (the right one for right-to-left text) and `pptx_insets` takes the deck's median."""
     import numpy as np
 
-    from beamer2slides.deck_ir import PPTX_INSET_Y, pptx_insets, side_gap, side_inset
+    from beamer2slides.deck_thumbs import PPTX_INSET_Y, pptx_insets, side_gap, side_inset
     px, scale = 4.0, 2.0
 
     def element(rtl, oid="e"):
@@ -642,7 +642,7 @@ def test_a_family_in_two_file_formats_names_every_file():
 def test_powerpoint_insets_where_the_thumbnails_show_them():
     """A measured box 3.6 pt high has PowerPoint's insets; a deck most of whose measured boxes do
     lends them to its unmeasured ones, a mixed deck does not (deck_ir.pptx_insets)."""
-    from beamer2slides.deck_ir import pptx_insets
+    from beamer2slides.deck_thumbs import pptx_insets
 
     def box(valign="top"):
         return {"kind": "text", "box": {"valign": valign, "scale": 2.0}, "anchor": [10.0, 20.0]}
@@ -672,7 +672,7 @@ def test_a_box_with_powerpoint_insets_starts_its_text_3_6_pt_higher():
 
 def test_the_thumbnails_measure_a_first_line_and_skip_what_crosses_it():
     import numpy as np
-    from beamer2slides.deck_ir import ink_widths
+    from beamer2slides.deck_thumbs import ink_widths
     px = 4.0
     im = np.full((int(100 * px), int(200 * px), 3), 240, dtype=np.int16)
     im[int(24 * px):int(30 * px), int(20 * px):int(80 * px)] = 20       # the first line's words

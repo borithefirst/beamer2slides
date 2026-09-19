@@ -207,7 +207,7 @@ def rule(img, y, x0=10, x1=90, colour=(0, 0, 0)):
 def test_rows_are_as_tall_as_the_thumbnail_draws_them_and_held_there():
     """Stored rows of 10 pt that Slides grew to 14 (an empty cell's line, a .pptx's insets): the
     borders on the thumbnail say so, and `\\adoptfix` keeps TeX from growing them again."""
-    from beamer2slides.deck_ir import thumbnail_rows
+    from beamer2slides.deck_thumbs import thumbnail_rows
     el = grid_element()
     img = blank()
     for y in (10, 24, 38, 52):
@@ -218,7 +218,7 @@ def test_rows_are_as_tall_as_the_thumbnail_draws_them_and_held_there():
 
 
 def test_measuring_stops_at_a_boundary_it_cannot_see():
-    from beamer2slides.deck_ir import thumbnail_rows
+    from beamer2slides.deck_thumbs import thumbnail_rows
     el = grid_element()
     img = blank()
     for y in (10, 24):                    # the rule under row 1 is not drawn: rows 1 and 2 could be anything
@@ -231,7 +231,7 @@ def test_measuring_stops_at_a_boundary_it_cannot_see():
 def test_a_step_between_two_fills_is_no_border():
     """hebrew-lesson: a brown header over pale rows, white borders nobody sees. The step down to the
     paler fill turns towards white but never comes back: no row is measured."""
-    from beamer2slides.deck_ir import thumbnail_rows
+    from beamer2slides.deck_thumbs import thumbnail_rows
     el = grid_element(color="#ffffff")
     img = blank(colour=(250, 240, 235))
     img[int(10 * PX):int(24 * PX), int(10 * PX):int(90 * PX)] = (120, 70, 40)
@@ -241,7 +241,7 @@ def test_a_step_between_two_fills_is_no_border():
 
 def test_the_side_inset_is_where_the_cells_words_begin():
     """comps-analysis' .pptx cells start their words 3 pt in where the guess said 5.8."""
-    from beamer2slides.deck_ir import thumbnail_cell_pad, thumbnail_rows
+    from beamer2slides.deck_thumbs import thumbnail_cell_pad, thumbnail_rows
     el = grid_element(heights=(14, 14, 14))
     img = blank()
     for y in (10, 24, 38, 52):

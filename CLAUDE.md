@@ -530,7 +530,7 @@ thumbnails (read-only), `run [decks] --jobs N --tag T` bootstraps, compiles and 
 source tree, IR and scorer (`--no-cache`); `report --tag T`; `losses --tag T` charges each lost pixel
 to the smallest element box holding it and ranks elements, decks, kinds and fonts. Fills, pictures,
 freeforms, pies and video posters the API does not give are read off the slide thumbnails
-(`deck_fills.py`, `deck_freeforms.py`, `deck_ir.thumbnail_*`). Now (`m3-a`, 912 slides): boxes 0.967, page 0.966, pixels 0.984, mean per deck 0.949.
+(`deck_fills.py`, `deck_freeforms.py`, `deck_thumbs.py`: rows, cell and text insets, stand-in widths, weights). Now (`m3-a`, 912 slides): boxes 0.967, page 0.966, pixels 0.984, mean per deck 0.949.
 
 Opt-in suite (real Google Slides, ~95 s): `python -m pytest -m slides` (the default run deselects
 the `slides` marker, pyproject.toml). It converts the stress decks (19–22, 25, 13, demo) 3 at a
