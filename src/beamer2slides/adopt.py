@@ -216,15 +216,19 @@ def font_candidates() -> dict[str, dict[str, Path]]:
         # group's own file stem, which is what fontspec's `*` expands to).
         uprights = {v["UprightFont"]: v for v in groups.values()}
         flat_stems = {flatten(k) for k in groups}
+        # A collection's other faces are families of their own, set by their number in the file
+        # (`FontIndex`): "MS PGothic" is face 2 of msgothic.ttc, and apps-edu-zh's English lines in
+        # it were set in Arial, 5% wider than the proportional Gothic Slides draws them in.
         try:
             from .scripts import faces
-            named = [f for f in faces() if f.index == 0 and f.path in uprights]
+            named = sorted((f for f in faces() if f.path in uprights), key=lambda f: f.index)
         except ImportError:                             # no fontTools: file stems only
             named = []
         for face in named:
             for fam in face.families:
                 if fam not in flat_stems:
-                    groups.setdefault(fam, uprights[face.path])
+                    groups.setdefault(fam, uprights[face.path] if face.index == 0 else
+                                      {"UprightFont": face.path, "FontIndex": face.index})
         _FAMILIES[dirs] = groups
     return _FAMILIES[dirs]
 
@@ -250,7 +254,14 @@ def font_family(name: str, want: str, near: str = "") -> dict[str, Path]:
     Before settling for a stand-in, a family that is not on the machine under its own name is
     fetched from google/fonts (`fontfetch.fetch_family`), where nearly every font Slides offers
     lives: of the corpus's letters in fonts no machine here has, most are Open Sans, Montserrat,
-    Delius, Inter, Yanone Kaffeesatz, Alegreya, Work Sans..."""
+    Delius, Inter, Yanone Kaffeesatz, Alegreya, Work Sans...
+
+    A CJK face Slides does not have is not drawn in it at all (`slides_lacks_cjk`): its Latin is set
+    in Times New Roman, which is what the family is then given."""
+    if name and slides_lacks_cjk(name):
+        got = font_family(SLIDES_DEFAULT, "serif")
+        if got:
+            return {**got, "match": name}
     if name and not _have(name) and not _fetch(name):
         for sub in SUBSTITUTES.get(flatten(name), []):
             if _have(sub) or _fetch(sub):
@@ -272,6 +283,34 @@ SUBSTITUTES = {
     "droidsans": ["Noto Sans"], "droidserif": ["Noto Serif"], "droidsansmono": ["Noto Sans Mono"],
     "bookantiqua": ["Palatino Linotype"], "googlesansmono": ["Google Sans Code"],
 }
+
+
+# What Slides draws a CJK font in when it does not have it: apps-edu-zh's Microsoft JhengHei (a .pptx
+# import) shows Times New Roman's Latin and Noto Sans TC's ideographs with palt in the thumbnails -
+# its lines measured 0.995-1.021 of that model's widths, 0.885-0.944 of JhengHei's own. The CJK faces
+# Slides does have besides google/fonts' (MS PGothic's Latin is drawn as itself in the same deck).
+SLIDES_DEFAULT = "Times New Roman"
+SLIDES_CJK = {"mspgothic"}
+_LACKS: dict[str, bool] = {}
+
+
+def slides_lacks_cjk(name: str) -> bool:
+    """Whether `name` is a CJK font Slides cannot draw: not one of its own (`SLIDES_CJK`), not on
+    google/fonts (fetching must be on to tell), not a font `SUBSTITUTES` stands in for, and a face on
+    this machine that has ideographs. Only CJK faces: a Latin font Slides lacks is drawn otherwise
+    (intro-lecture's CMTT9 in a monospace)."""
+    flat = flatten(name or "")
+    if not flat or flat in SLIDES_CJK or flat in SUBSTITUTES or not fetching():
+        return False
+    if flat not in _LACKS:
+        from .deck_ir import family_of
+        from .fontfetch import _missing, fetch_family, folder_name
+        files = _font_family(name, family_of(name))
+        # google/fonts must have said no (a fetch that failed for want of a network says nothing)
+        _LACKS[flat] = bool(files) and flatten(files["match"]) == flat and \
+            font_coverage(files["UprightFont"], {"中": 1, "文": 1}, files.get("FontIndex") or 0, strict=True) == 1.0 \
+            and not fetch_family(name, log=lambda *a: None) and folder_name(name) in _missing()
+    return _LACKS[flat]
 
 
 def _have(name: str) -> bool:
@@ -317,6 +356,11 @@ def _font_family(name: str, want: str, near: str = "") -> dict[str, Path]:
 def font_files_latex(files: dict, tree: Path | None) -> str:
     """fontspec's options for a family's files (`font_family`'s answer, without its stem), the files
     copied into `<tree>/fonts/` with the licence that came with them."""
+    index = files.get("FontIndex")
+    if index:
+        # one face of a collection, the only one of its family (MS PGothic): no other styles
+        return font_files_latex({"UprightFont": files["UprightFont"]}, tree) + f",FontIndex={index}"
+    files = {k: v for k, v in files.items() if isinstance(v, Path)}
     # Windows' own files have no dash and a name per style (arialbd.ttf beside arial.ttf)
     upright = files["UprightFont"].stem
     opts = [f"{k}=*-{files[k].stem.partition('-')[2]}" if "-" in files[k].stem else
@@ -430,7 +474,7 @@ def font_preamble(target: dict, tree: Path | None, ctx: Context | None = None) -
                         w[wk] = w.get(wk, 0) + len(r["text"].strip())
                     seen = letters.setdefault(k[1], {})
                     for c in r["text"]:
-                        if not c.isspace():
+                        if not c.isspace() and not chain_letter(c):
                             seen[c] = seen.get(c, 0) + 1
     ranked: dict[str, list[str]] = {}
     for (fam, font), _n in sorted(counts.items(), key=lambda kv: -kv[1]):
@@ -448,7 +492,7 @@ def font_preamble(target: dict, tree: Path | None, ctx: Context | None = None) -
         # kind is tried, then the stand-in as before.
         for font in ranked.get(fam, [])[:MAIN_CANDIDATES]:
             files = font_family(font, fam, found)
-            if files and font_coverage(files["UprightFont"], letters.get(font, {})) >= MIN_MAIN_COVERAGE:
+            if files and font_coverage(files["UprightFont"], letters.get(font, {}), files.get("FontIndex") or 0) >= MIN_MAIN_COVERAGE:
                 wanted[fam] = font
                 break
             files = {}
@@ -489,7 +533,7 @@ def font_preamble(target: dict, tree: Path | None, ctx: Context | None = None) -
             low, asked = flatten(match), flatten(font)
             if not (low.startswith(asked) or asked.startswith(low)):
                 continue                                # a stand-in: the kind's main font already is one
-            if font_coverage(files["UprightFont"], letters.get(font, {})) < MIN_COVERAGE:
+            if font_coverage(files["UprightFont"], letters.get(font, {}), files.get("FontIndex") or 0) < MIN_COVERAGE:
                 # Slides draws what the font lacks in a fallback of its own: Hebrew typed "in" Noto
                 # Sans Symbols, Japanese "in" Arial. Switching to the font would set nothing at all
                 # (and lualatex refuses a font it embeds with no glyph), so those boxes keep the
@@ -540,7 +584,7 @@ def font_widths(font: str, files: dict, target: dict) -> float | None:
             path = files.get(style) or files["UprightFont"]
             if path not in loaded:
                 try:
-                    f = TTFont(path, fontNumber=0, lazy=True)
+                    f = TTFont(path, fontNumber=files.get("FontIndex") or 0, lazy=True)
                     loaded[path] = (f, f.getBestCmap(), f.getGlyphSet(), f["hmtx"], f["head"].unitsPerEm)
                 except Exception:
                     loaded[path] = None
@@ -581,8 +625,8 @@ def stretch(font: str, stem: str, files: dict, target: dict) -> str:
     thumbnails show of it differs from its advances by its kerning alone - Pacifico's script
     measured 3% narrow, and condensed by that it set sc-aesthetic-school's titles longer, not shorter."""
     asked, have = flatten(font), flatten(stem)
-    if have.startswith(asked) or asked.startswith(have):
-        return ""
+    if have.startswith(asked) or asked.startswith(have) or files.get("FontIndex"):
+        return ""                               # (a collection's face is found by its own name)
     ratio = font_widths(font, files, target)
     if ratio is None:
         return ""
@@ -599,17 +643,30 @@ MIN_MAIN_COVERAGE = 0.5
 MAIN_CANDIDATES = 3
 
 
-def font_coverage(path: Path, letters: dict[str, int]) -> float:
+def chain_letter(c: str) -> bool:
+    """Whether a letter comes from `scripts`' fallback chain whatever font sets it: CJK. Such letters
+    say nothing about the font they are typed in - jruby-ja's Arial runs are mostly Japanese, and
+    counting them sent its Arial title words to Tahoma, 4% wider (measured: `InvokeDynamic` in the
+    deck's thumbnails has Arial Bold's widths). A font whose own letters are all such ones still
+    compiles: the chain sets them and the font is embedded as it is."""
+    if os.environ.get("B2S_NO_SCRIPTS"):
+        return False
+    from .scripts import group_of, script_of
+    sc = script_of(c)
+    return sc is not None and group_of(sc) == "cjk"
+
+
+def font_coverage(path: Path, letters: dict[str, int], index: int = 0, strict: bool = False) -> float:
     """The share of `letters` (character -> count) the font file has a glyph for: 1.0 when it cannot
-    be told (no fontTools, a file fontTools cannot read)."""
+    be told (no fontTools, a file fontTools cannot read), 0.0 then if `strict`."""
     total = sum(letters.values())
     if not total:
         return 1.0
     try:
         from fontTools.ttLib import TTFont
-        cmap = TTFont(path, lazy=True, fontNumber=0).getBestCmap() or {}
+        cmap = TTFont(path, lazy=True, fontNumber=index).getBestCmap() or {}
     except Exception:                                   # noqa: BLE001 - ImportError, or any broken file
-        return 1.0
+        return 0.0 if strict else 1.0
     return sum(n for c, n in letters.items() if ord(c) in cmap) / total
 
 

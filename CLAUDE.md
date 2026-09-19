@@ -684,6 +684,18 @@ the data is), not at other spacings, and not on pages over `deck_ir.SNAP_PAGE` 9
 0.002, gdg24 0.002 at 14 pt). hebrew-lesson -> 0.903, comps-analysis 0.677 -> 0.722, ap-bio-stats
 0.951 -> 0.976, journey-maps 0.913 -> 0.938, ds-lecture +0.004, arabic-training 0.907 -> 0.908. Why
 Slides snaps some lines and not others is not known.
+CJK text (`cache-a` -> `cjk-final`, 912 slides: boxes 0.956 -> 0.958, mean per deck 0.9356 -> 0.9372, no
+deck down; jruby-ja 0.796 -> 0.806, apps-edu-zh 0.913 -> 0.949). CJK letters no longer count against
+the coverage of the font they are typed in (`adopt.chain_letter`: they come from the fallback chain
+whatever the run says), so jruby-ja's Arial is the main font again instead of Tahoma, 4% wider. Every
+face of a .ttc is found (`scripts.faces` closed the shared file after face 0; `font_candidates` names
+each face, fontspec `FontIndex=`): apps-edu-zh's MS PGothic is face 2 of msgothic.ttc. A CJK font Slides
+does not have (not on google/fonts, not `SLIDES_CJK`) is drawn by Slides as Times New Roman for its
+Latin and the renderer's Noto for its ideographs (`adopt.slides_lacks_cjk`: apps-edu-zh's Microsoft
+JhengHei, lines 0.995-1.021 of that model's widths against 0.885-0.944 of JhengHei's own), and Chinese
+gets `palt` like Japanese. Only CJK faces: intro-lecture's CMTT9, which Slides lacks too, is drawn in a
+monospace. Left: jruby-ja's kana are narrower than Noto Sans JP 2.004's palt and its ideographs ~4%
+smaller (another Noto/Source Han version, none on google/fonts matched), its gradient backdrop.
 Bench workflow: `run` caches each deck's scores by its source tree, IR and scorer
 (`<corpus>/<deck>/cache`, `--no-cache` to compile anyway), so a change recompiles only the decks
 whose source it changed, and starts the slowest decks first; `losses --tag T` charges every pixel the

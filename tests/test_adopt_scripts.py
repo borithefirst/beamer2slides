@@ -196,6 +196,72 @@ def test_the_decks_own_font_wins_when_it_covers_the_letters(font_folder):
     assert [f.families for f, _ in p.chain] == [("microsoftjhenghei",)]   # the traditional fallback
 
 
+def test_every_face_of_a_collection_is_found(font_folder):
+    """MS PGothic is face 2 of msgothic.ttc: closing the file after face 0 hid the others."""
+    from fontTools.ttLib import TTCollection, TTFont
+    paths = [make_font(font_folder, name, "abc") for name in ("MS Gothic", "MS PGothic")]
+    ttc = TTCollection()
+    ttc.fonts = [TTFont(p) for p in paths]
+    ttc.save(font_folder / "msgothic.ttc")
+    for p in paths:
+        p.unlink()
+    scripts._FACES.clear()
+    adopt._FAMILIES.clear()
+    assert scripts.find_face("MS PGothic").index == 1
+    files = adopt.font_family("MS PGothic", "sans")
+    assert files["FontIndex"] == 1
+    opts = adopt.font_files_latex({k: v for k, v in files.items() if k not in ("stem", "match")}, None)
+    assert opts.endswith("Extension=.ttc,UprightFont=*,FontIndex=1")
+    assert files["stem"] == "msgothic"
+
+
+def test_cjk_letters_do_not_count_against_the_font_they_are_typed_in(font_folder):
+    """jruby-ja's Arial runs are mostly Japanese, which Slides draws from its CJK fallback: Arial
+    still sets their Latin (it went to Tahoma, 4% wider)."""
+    make_font(font_folder, "Arial", "Rubyis")
+    make_font(font_folder, "Noto Sans JP", "日本語です")
+    adopt._FAMILIES.clear()
+    lines = adopt.font_preamble(target_with("Ruby is 日本語です日本語です日本語です"), None)
+    assert any(l.startswith("\\setsansfont{Arial}") for l in lines)
+
+
+@pytest.fixture
+def google_says_no(monkeypatch):
+    """Fetching on, and google/fonts has none of the fonts asked for."""
+    from beamer2slides import fontfetch
+    monkeypatch.setattr(adopt, "fetching", lambda: True)
+    monkeypatch.setattr(adopt, "_LACKS", {})
+    monkeypatch.setattr(fontfetch, "fetch_family", lambda name, log=print: None)
+    monkeypatch.setattr(fontfetch, "_missing", lambda: {"microsoftjhenghei", "mspgothic", "notosanstc"})
+
+
+def test_a_cjk_font_slides_lacks_is_drawn_in_times_and_the_renderers_noto(font_folder, google_says_no):
+    """apps-edu-zh's Microsoft JhengHei: Slides draws its Latin in Times New Roman and its ideographs
+    in Noto Sans TC, proportionally (palt)."""
+    make_font(font_folder, "Microsoft JhengHei", "這是中文Gogle")
+    make_font(font_folder, "Times New Roman", "Gogle")
+    make_font(font_folder, "Noto Sans TC", "這是中文")
+    adopt._FAMILIES.clear()
+    assert adopt.slides_lacks_cjk("Microsoft JhengHei")
+    files = adopt.font_family("Microsoft JhengHei", "sans")
+    assert files["UprightFont"].name == "TimesNewRoman-Regular.ttf" and files["match"] == "Microsoft JhengHei"
+    t = target_with("Google 這是中文", font="Microsoft JhengHei")
+    p = scripts.plan(t)
+    assert [f.families for f, _ in p.chain] == [("notosanstc",)]
+    chain = next(l for l in scripts.script_preamble(t, None) if "add_fallback(\"b2sscripts\"" in l)
+    assert "NotoSansTC-Regular.ttf]:mode=node;+palt;" in chain
+
+
+def test_a_cjk_font_slides_has_or_a_latin_one_is_drawn_as_itself(font_folder, google_says_no):
+    make_font(font_folder, "MS PGothic", "這是中文Gogle")
+    make_font(font_folder, "CMTT9", "Gogle")              # Slides draws it in a monospace, not Times
+    make_font(font_folder, "Times New Roman", "Gogle")
+    adopt._FAMILIES.clear()
+    assert not adopt.slides_lacks_cjk("MS PGothic")
+    assert not adopt.slides_lacks_cjk("CMTT9")
+    assert adopt.font_family("MS PGothic", "sans")["UprightFont"].name == "MSPGothic-Regular.ttf"
+
+
 def test_arabic_is_set_whole_in_a_font_of_its_own_with_harfbuzz(font_folder):
     """A glyph-by-glyph fallback shapes each letter alone: Arabic goes through babel's fonts."""
     make_font(font_folder, "Arial", "مرحبا ")
