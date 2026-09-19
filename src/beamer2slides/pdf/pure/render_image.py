@@ -2,12 +2,15 @@
 DrawMaskedImage and CalculateDrawImage for an image's own /SMask or /Mask stream), the AGG driver's
 CFX_AggImageRenderer (upright and quarter-turned images, flips included), CFX_ImageStretcher and
 CStretchEngine (its weight tables, the horizontal and vertical passes, uint32 sums that wrap as C's
-do), CFX_AggBitmapComposer and the CFX_ScanlineCompositor rows it ends in, value for value.
+do), CFX_ImageTransformer for any other angle or skew (the stretch to the unit vectors' lengths,
+then 8.8 fixed-point bilinear sampling through the inverse matrix), CFX_AggBitmapComposer and the
+CFX_ScanlineCompositor rows it ends in, value for value.
 
 The stretch engine works a row (or a column) at a time in PDFium; the passes here are the same sums
 over whole arrays, and compositing, being per pixel, is done on the whole stretched block at once.
-What is not ported (CFX_ImageTransformer for any other angle, an 8-bit mask device, blend modes on
-images, pattern-filled stencils) raises PdfError: an image comes out exactly or not at all."""
+The Darken blend CPDF_ImageRenderer picks for an overprinted CMYK image never reaches the pixels:
+the AGG driver's StartDIBits drops its blend mode. What is not ported (an 8-bit mask device, blend
+modes on images, pattern-filled stencils) raises PdfError: an image comes out exactly or not at all."""
 
 from __future__ import annotations
 
@@ -327,7 +330,7 @@ def _block(dib, m, device_clip, bilinear):
            clip_box[2] - image_rect[0], clip_box[3] - image_rect[1])
     if abs(b) >= 0.5 or a == 0 or abs(c) >= 0.5 or d == 0:
         if not (abs(a) < F(abs(b) / 20) and abs(d) < F(abs(c) / 20) and abs(a) < 0.5 and abs(d) < 0.5):
-            raise PdfError("the pure reader cannot render images at this angle yet (CFX_ImageTransformer)")
+            return transform(dib, m, clip_box, bilinear)
         flip_x, flip_y = c > 0, b < 0
         l, t, r, bt = off
         nl, nr = (ih - t, ih - bt) if flip_y else (t, bt)
@@ -354,11 +357,182 @@ def _block(dib, m, device_clip, bilinear):
     return block, sfmt, pal, clip_box
 
 
+# ---------------------------------------------------------------------- CFX_ImageTransformer
+
+
+def _i32(v: float) -> bool:
+    return v == v and -2147483648.0 <= v <= 2147483647.0
+
+
+def _match_range(f1: float, f2: float):
+    """MatchFloatRange (float32)."""
+    with np.errstate(invalid="ignore", over="ignore"):
+        length = F(float(np.ceil(F(f2 - f1))))
+        lo, hi = float(np.floor(f1)), float(np.ceil(f1))
+        e1 = F(F(f1 - lo) + abs(F(F(f2 - lo) - length)))
+        e2 = F(F(hi - f1) + abs(F(F(f2 - hi) - length)))
+        start = hi if e1 > e2 else lo
+        end = F(start + length)
+    if not (_i32(start) and _i32(end)):
+        return 0, 0
+    return int(start), int(end)
+
+
+def closest_rect(rect):
+    """CFX_FloatRect::GetClosestRect of (left, bottom, right, top) -> FX_RECT (l, t, r, b)."""
+    l, r = _match_range(rect[0], rect[2])
+    t, b = _match_range(rect[1], rect[3])
+    return min(l, r), min(t, b), max(l, r), max(t, b)
+
+
+def _valid(rect) -> bool:
+    """FX_RECT::Valid: width and height fit an int32."""
+    return -2147483648 <= rect[2] - rect[0] <= 2147483647 and -2147483648 <= rect[3] - rect[1] <= 2147483647
+
+
+def _fixed256(v: float) -> int:
+    from .render_shading import roundf
+    return roundf(F(v * 256.0))
+
+
+def _fix_split(val: np.ndarray):
+    """CFX_BilinearMatrix::Transform's integer part (saturated) and remainder (0..255)."""
+    with np.errstate(invalid="ignore", over="ignore"):
+        q = np.trunc(val / np.float32(256)).astype(np.float64)
+        whole = np.where(q != q, 0, np.clip(q, -2147483648.0, 2147483647.0)).astype(np.int64)
+        v = np.trunc(val.astype(np.float64))
+        ok = (v == v) & (v >= -2147483648.0) & (v <= 2147483647.0)
+        iv = np.where(ok, v, -2147483648.0).astype(np.int64)
+    res = np.fmod(iv, 256)
+    res = np.where(res < 0, res + 256, res)
+    return whole, res
+
+
+def transform(dib, m, clip_box, bilinear):
+    """CFX_ImageTransformer for an image neither upright nor a quarter turn: the image stretched
+    to its unit vectors' lengths, then sampled for every result pixel through the inverse matrix in
+    8.8 fixed point (BilinearInterpolate, whose weights are 255 - r and r). Returns (block, "T:bgra"
+    or "T:mask8", None, result box) or None."""
+    a, b, c, d, e, f = m
+    result_rect = closest_rect(R.transform_rect(m, (0.0, 0.0, 1.0, 1.0)))
+    result = fx_intersect(result_rect, clip_box)
+    if result[2] <= result[0] or result[3] <= result[1]:
+        return None
+    if abs(a) < F(abs(b) / 20) and abs(d) < F(abs(c) / 20) and abs(a) < 0.5 and abs(d) < 0.5:
+        raise PdfError("the pure reader cannot render this quarter turn yet (CFX_ImageTransformer)")
+    if abs(b) < F(0.05) and abs(c) < F(0.05):
+        # kNormal: reached only with a or d exactly 0, which stretches to nothing
+        wd = int(np.ceil(a)) if a > 0 else int(np.floor(a))
+        hd = -int(np.ceil(d)) if d > 0 else -int(np.floor(d))
+        if wd != 0 and hd != 0:
+            raise PdfError("the pure reader cannot render this nearly upright image yet (CFX_ImageTransformer)")
+        return None
+    sw = int(np.ceil(R._hypotf(a, b)))
+    if sw == 0:
+        return None
+    sh = int(np.ceil(R._hypotf(c, d)))
+    if sh == 0:
+        return None
+    s2d = R.concat((1.0, 0.0, 0.0, -1.0, 0.0, F(sh)),
+                   (F(a / sw), F(b / sw), F(c / sh), F(d / sh), e, f))
+    d2s = R.inverse(s2d)
+    rl, rt, rr, rb = result
+    sclip = outer(R.transform_rect(d2s, (float(rl), float(rt), float(rr), float(rb))))
+    if not _valid(sclip):
+        return None
+    sclip = fx_intersect(sclip, (0, 0, sw, sh))
+    if sclip[2] <= sclip[0] or sclip[3] <= sclip[1]:
+        return None
+    got = stretch(dib, sw, sh, sclip, bilinear)
+    if got is None:
+        raise PdfError("the pure reader cannot render an image the stretcher leaves blank yet")
+    src, sfmt, pal = got
+    r2s = R.concat((1.0, 0.0, 0.0, 1.0, F(rl), F(rt)), d2s)
+    r2s = r2s[:4] + (F(r2s[4] + float(-sclip[0])), F(r2s[5] + float(-sclip[1])))
+    fa, fb, fc, fd, fe, ff = (np.float32(_fixed256(v)) for v in r2s)
+    W, H = rr - rl, rb - rt
+    xs = np.arange(W, dtype=np.float32)[None, :]
+    ys = np.arange(H, dtype=np.float32)[:, None]
+    with np.errstate(invalid="ignore", over="ignore"):
+        vx = ((fa * xs + fc * ys) + fe) + np.float32(128)
+        vy = ((fb * xs + fd * ys) + ff) + np.float32(128)
+    col, rx = _fix_split(vx)
+    row, ry = _fix_split(vy)
+    cw, chh = sclip[2] - sclip[0], sclip[3] - sclip[1]
+    inside = (col >= 0) & (col <= cw) & (row >= 0) & (row <= chh)
+    cl = np.where(col == cw, col - 1, col)
+    rw = np.where(row == chh, row - 1, row)
+    cr = np.where(cl + 1 == cw, cl, cl + 1)
+    rr_ = np.where(rw + 1 == chh, rw, rw + 1)
+    cl, cr = np.clip(cl, 0, cw - 1), np.clip(cr, 0, cw - 1)
+    rw, rr_ = np.clip(rw, 0, chh - 1), np.clip(rr_, 0, chh - 1)
+    px = src.astype(np.int64)
+    irx, iry = (255 - rx)[..., None], (255 - ry)[..., None]
+    rx, ry = rx[..., None], ry[..., None]
+    r0 = ((px[rw, cl] * irx + px[rw, cr] * rx) >> 8) & 255
+    r1 = ((px[rr_, cl] * irx + px[rr_, cr] * rx) >> 8) & 255
+    val = ((r0 * iry + r1 * ry) >> 8) & 255
+    val = np.where(inside[..., None], val, 0)
+    if sfmt == "mask8":
+        return val.astype(np.uint8), "T:mask8", None, result
+    out = np.zeros((H, W, 4), np.uint8)
+    if sfmt == "rgb8":
+        idx = val[..., 0]
+        if pal is not None:
+            p = np.array((list(pal) + [0] * 256)[:256], np.int64)[idx]
+            out[...] = np.stack([p & 255, (p >> 8) & 255, (p >> 16) & 255, (p >> 24) & 255], -1)
+        else:
+            out[..., 0] = out[..., 1] = out[..., 2] = idx
+            out[..., 3] = 255
+    elif sfmt == "bgr":
+        out[..., :3] = val
+        out[..., 3] = 255
+    else:
+        out[...] = val
+    out[~inside] = 0
+    return out, "T:bgra", None, result
+
+
+def _compose_transformed(dev, dkind, block, sfmt, box, alpha: float, mask_argb: int) -> None:
+    """CFX_AggImageRenderer::Continue after a transform: CompositeMask with the alpha in the mask
+    colour, or MultiplyAlpha then CompositeBitmap; the clip region's mask as the clip scan."""
+    from .render_shading import roundf
+    l, t, r, b = box
+    clip = None
+    cl = dev.clip
+    if cl is not None and cl.mask is not None:
+        cb = cl.box
+        clip = cl.mask[t - cb[1]:b - cb[1], l - cb[0]:r - cb[0]].astype(np.int64)
+    if sfmt == "T:mask8":
+        if alpha != 1.0:
+            k = roundf(F(alpha * 255))
+            mask_argb = ((((mask_argb >> 24) * k // 255) & 255) << 24) | (mask_argb & 0xFFFFFF)
+        if (mask_argb >> 24) == 0:
+            return
+        fmt = "mask8"
+    else:
+        if alpha != 1.0:
+            k = int(F(alpha * 255))
+            block = block.copy()
+            block[..., 3] = (block[..., 3].astype(np.int64) * k // 255).astype(np.uint8)
+        fmt = "bgra"
+    wl, wt = max(l, dev.ox), max(t, dev.oy)
+    wr, wb = min(r, dev.ox + dev.bgra.shape[1]), min(b, dev.oy + dev.bgra.shape[0])
+    if wr <= wl or wb <= wt:
+        return
+    sub = (slice(wt - t, wb - t), slice(wl - l, wr - l))
+    dest = dev.bgra[wt - dev.oy:wb - dev.oy, wl - dev.ox:wr - dev.ox]
+    compose(dest, dkind, block[sub], fmt, None, clip[sub] if clip is not None else None, mask_argb)
+
+
 def _compose_at(dev, block, sfmt, pal, box, alpha: float, mask_argb: int) -> None:
     """CFX_AggBitmapComposer over `box` of the device (clip mask and constant alpha)."""
     dkind = _kind(dev)
     if dkind == "mask":
         raise PdfError("the pure reader cannot render images onto 8-bit masks yet")
+    if sfmt.startswith("T:"):
+        _compose_transformed(dev, dkind, block, sfmt, box, alpha, mask_argb)
+        return
     l, t, r, b = box
     clip = None
     cl = dev.clip
@@ -418,9 +592,13 @@ def draw_masked(dev, dib, alpha: float, m, rect) -> None:
     mask = np.zeros((h, w), np.int64)
     if got is not None:
         block, sfmt, pal, box = got
-        if sfmt == "mask8":
+        if sfmt in ("mask8", "T:mask8"):
             # a stencil /Mask drawn in white (0xffffffff) onto black: its coverage
             v = block[..., 0].astype(np.int64)
+        elif sfmt == "T:bgra":
+            # CompositeRowBgra2Gray onto zeros: AlphaMerge(0, gray, alpha)
+            px = block.astype(np.int64)
+            v = (px[..., 2] * 30 + px[..., 1] * 59 + px[..., 0] * 11) // 100 * px[..., 3] // 255
         elif sfmt == "rgb8":
             v = block[..., 0].astype(np.int64)
             if pal is not None:
@@ -514,11 +692,4 @@ def refusal(obj, ctx) -> str | None:
     _, why, stencil = probes[key]
     if why is None and stencil and obj.fill_pattern is not None:
         return "pattern-filled image masks"
-    if why is None and getattr(obj, "overprint", False) and not stencil:
-        try:
-            cs = DI.load_cs(ctx.doc, d.get("ColorSpace"), _resources(ctx, obj))
-        except DI.Unsupported:
-            cs = None
-        if cs is not None and cs.family in ("DeviceCMYK", "Separation", "DeviceN"):
-            return "overprinted CMYK images (drawn with Darken)"
     return why

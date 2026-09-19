@@ -11,9 +11,9 @@ Drawn: paths (fill, stroke, dashes, constant alpha, fill-and-stroke with a trans
 through DrawFillStrokePath's knockout sub-bitmap), clip paths, forms, and transparency
 (ProcessTransparency: soft masks, transparency groups, group alpha, blend modes;
 `render_transparency.py`), axial and radial shadings and shading patterns (`render_shading.py`),
-text (`render_text.py`), upright and quarter-turned images with their own masks
-(`render_image.py`, decoded by `decode_image.py`).
-Not yet: images at other angles, tiling patterns, transfer functions; a page holding any
+text (`render_text.py`), images at any angle with their own masks (`render_image.py`, decoded by
+`decode_image.py`).
+Not yet: tiling patterns, transfer functions; a page holding any
 of them raises PdfError (`unported`) rather than coming back drawn differently."""
 
 from __future__ import annotations

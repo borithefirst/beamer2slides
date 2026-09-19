@@ -3,18 +3,19 @@
 DeviceRGB, DeviceCMYK, Indexed and ICCBased (read through its alternate), stored raw or through
 Flate (with PNG and TIFF predictors), DCT, RunLength, ASCIIHex and ASCII85, with /Decode arrays,
 /ImageMask stencils, colour-key /Mask arrays, /Mask streams, /SMask (with /Matte) and /Interpolate,
-drawn upright, flipped, scaled up and down and turned by quarter turns, under clips and constant
+drawn upright, flipped, scaled up and down and turned by quarter turns or any angle, under clips and constant
 alpha. Each page is rendered by PDFium and by the pure reader; any pixel that differs is a failure,
 shrunk to the lines of the page that still make it differ. A page the pure reader refuses is
 counted, not failed, and listed with its reason.
 
-    python tools/render_torture_image.py [seed0] [n] [--level 0..5] [--out DIR]
+    python tools/render_torture_image.py [seed0] [n] [--level 0..6] [--out DIR]
 
 `--level` grows the generator one class of images at a time: 0 = one upright 8-bit RGB Flate
 image; 1 = scaled and flipped, several per page, on clear bitmaps too; 2 = quarter turns, skews,
 clips and constant alpha; 3 = every colour space and bit depth; 4 = filters, predictors, /Decode,
-masks, inline images, truncated data; 5 (the default) = everything, CMYK at every bit depth,
-Indexed over CMYK, CMYK mattes and fill overprint too (levels below keep their seeds).
+masks, inline images, truncated data; 5 = CMYK at every bit depth, Indexed over CMYK, CMYK mattes
+and fill overprint; 6 (the default) = everything, images turned by any angle and skewed
+(CFX_ImageTransformer) and CMYK JPEGs too (levels below keep their seeds).
 Failures go to DIR as seedN.pdf (the shrunk page) and seedN.png (PDFium | pure | difference)."""
 
 from __future__ import annotations
@@ -22,6 +23,7 @@ from __future__ import annotations
 import argparse
 import base64
 import io
+import math
 import random
 import zlib
 from pathlib import Path
@@ -114,7 +116,7 @@ def _png(rows: np.ndarray, bpp: int, r: random.Random) -> bytes:
 
 
 class Builder:
-    def __init__(self, r: random.Random, level: int = 5):
+    def __init__(self, r: random.Random, level: int = 6):
         self.r = r
         self.level = level
         self.objects: list[bytes] = []
@@ -150,7 +152,7 @@ class Builder:
         k = r.random()
         if jpeg_ok and k < 0.2:
             from PIL import Image
-            img = Image.frombytes("L" if comps == 1 else "RGB", (w, h), data[:pitch * h])
+            img = Image.frombytes({1: "L", 3: "RGB", 4: "CMYK"}[comps], (w, h), data[:pitch * h])
             buf = io.BytesIO()
             img.save(buf, "JPEG", quality=r.choice([30, 75, 95]), subsampling=r.choice([0, 1, 2]))
             return b"/Filter /DCTDecode", buf.getvalue()
@@ -224,7 +226,8 @@ class Builder:
         if comps == 4 and bpc != 8 and lv < 5:
             bpc = 8
         data = self.pixels(w, h, comps, bpc)
-        jpeg_ok = bpc == 8 and comps in (1, 3) and not indexed and len(data) == ((w * comps * 8 + 7) // 8) * h
+        jpeg_ok = (bpc == 8 and (comps in (1, 3) or comps == 4 and lv >= 6) and not indexed
+                   and len(data) == ((w * comps * 8 + 7) // 8) * h)
         filt, enc = self.encode(data, w, h, comps, bpc, jpeg_ok)
         if lv >= 4 and r.random() < 0.2:
             vals = []
@@ -275,10 +278,18 @@ class Builder:
         sy = r.choice([1, 1, -1]) * r.choice([r.uniform(2, 60), r.uniform(60, 140), r.uniform(0.3, 4)])
         tx, ty = r.uniform(-20, 190), r.uniform(-20, 140)
         k = r.random() if lv >= 2 else 0
-        if k < 0.6:
+        if k < (0.45 if lv >= 6 else 0.6):
             return (sx, 0, 0, sy, tx, ty)
-        if k < 0.9:
+        if k < (0.65 if lv >= 6 else 0.9):
             return (0, sy, sx, 0, tx, ty)
+        if lv >= 6 and r.random() < 0.6:
+            # any angle (CFX_ImageTransformer), now and then a hair off a quarter turn, maybe skewed
+            q = r.randint(0, 3) * 90
+            deg = q + r.choice([r.uniform(-2, 2), r.uniform(0, 360)])
+            t = math.radians(deg)
+            sk = r.choice([0, 0, r.uniform(-1, 1)])
+            cs, sn = math.cos(t), math.sin(t)
+            return (sx * cs, sx * sn, sy * (sk * cs - sn), sy * (sk * sn + cs), tx, ty)
         return (sx, r.uniform(-3, 3), r.uniform(-3, 3), sy, tx, ty)
 
     def draw(self) -> bytes:
@@ -310,7 +321,7 @@ class Builder:
         return b"\n".join(ops)
 
 
-def case(seed: int, level: int = 5):
+def case(seed: int, level: int = 6):
     """(content, objects, xobjects, zoom, transparent) for `seed`."""
     r = random.Random(seed)
     b = Builder(r, level)
@@ -358,7 +369,7 @@ def shrink(content: bytes, objects, xobjects, zoom: float, transparent: bool):
     return b"\n".join(lines)
 
 
-def run(seed0: int, n: int, out: Path | None = None, verbose: bool = True, level: int = 5) -> dict:
+def run(seed0: int, n: int, out: Path | None = None, verbose: bool = True, level: int = 6) -> dict:
     """{'failed': [seeds], 'refused': {reason: count}, 'drawn': count}."""
     stats = {"failed": [], "refused": {}, "drawn": 0}
     for seed in range(seed0, seed0 + n):
@@ -396,7 +407,7 @@ def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("seed0", type=int, nargs="?", default=0)
     ap.add_argument("n", type=int, nargs="?", default=200)
-    ap.add_argument("--level", type=int, default=5)
+    ap.add_argument("--level", type=int, default=6)
     ap.add_argument("--out", default="out/render-torture-image")
     ap.add_argument("-q", "--quiet", action="store_true", help="no shrinking, only the counts")
     args = ap.parse_args(argv)

@@ -316,7 +316,7 @@ def _jpeg(data: bytes, params: dict, r, width: int, height: int, comps: int, dev
         if img.format != "JPEG":
             raise Unsupported("a JPEG Pillow reads as something else")
         ncomp = len(img.layer)
-        if ncomp not in (1, 3) or img.mode not in ("L", "RGB"):
+        if (ncomp, img.mode) not in ((1, "L"), (3, "RGB"), (4, "CMYK")):
             raise Unsupported(f"{ncomp}-component JPEGs")
         if ncomp < comps:
             return None
@@ -343,7 +343,12 @@ def _jpeg(data: bytes, params: dict, r, width: int, height: int, comps: int, dev
             if img.size != want:
                 raise Unsupported("a JPEG scale Pillow does not give")
         img.load()
-        return img.tobytes(), img.size[0], img.size[1]
+        out = img.tobytes()
+        if ncomp == 4:
+            # libjpeg's CMYK as it comes (PDFium leaves Adobe's inverted polarity to /Decode);
+            # Pillow's "CMYK;I" unpacker inverts every byte, which undoes exactly
+            out = np.bitwise_xor(np.frombuffer(out, np.uint8), np.uint8(255)).tobytes()
+        return out, img.size[0], img.size[1]
     except Unsupported:
         raise
     except Exception as e:  # noqa: BLE001 - libjpeg errors: PDFium's own recovery is not ported
