@@ -360,3 +360,21 @@ def test_converge_synthetic_edits(name, basic_deck, tmp_path):
     record(f"synthetic:{name}", res, time.time() - t)
     assert res.converged, res.unresolved
     assert len(res.iterations) - 1 <= rounds
+
+
+EMPTY_OUTLINES = """Package rerunfilecheck Warning: File `main.out' has changed.
+(rerunfilecheck)                Rerun to get outlines right
+(rerunfilecheck)                or use package `bookmark'.
+
+Package rerunfilecheck Info: Checksums for `main.out':
+(rerunfilecheck)             Before: <no file>
+(rerunfilecheck)             After:  D41D8CD98F00B204E9800998ECF8427E;0.
+"""
+
+
+def test_an_outline_file_that_came_out_empty_asks_for_no_second_pass():
+    """Every deck with no sections got a second lualatex pass for bookmarks it does not have."""
+    from beamer2slides.inverse import needs_rerun
+    assert not needs_rerun(EMPTY_OUTLINES)
+    assert needs_rerun(EMPTY_OUTLINES.replace("D41D8CD98F00B204E9800998ECF8427E;0.", "0A1B2C;42."))
+    assert needs_rerun(EMPTY_OUTLINES + "LaTeX Warning: Label(s) may have changed. Rerun to get cross-references right.\n")

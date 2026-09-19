@@ -340,7 +340,7 @@ class Workspace:
             log = log_path.read_text(errors="replace") if log_path.exists() else r.stdout
             if r.returncode != 0:
                 return None, error_excerpt(log)
-            if not re.search(r"Rerun to get|may have changed\. Rerun|\(rerunfilecheck\)", log) or attempt == 2:
+            if not needs_rerun(log) or attempt == 2:
                 break
         return self.build_dir / f"{job}.pdf", ""
 
@@ -403,6 +403,25 @@ def original_pages(pdf: Path, prepared) -> list[int]:
         return keep
     finally:
         doc.close()
+
+
+# What rerunfilecheck reports for an auxiliary file that came out empty: the MD5 of nothing.
+EMPTY_AUX = "D41D8CD98F00B204E9800998ECF8427E;0."
+
+
+def needs_rerun(log: str) -> bool:
+    """Whether LaTeX asked for another pass. An outline file that went from none to empty is not a
+    reason: a deck with no sections has no bookmarks, and hyperref's "Rerun to get outlines right"
+    after the first pass of every such document doubled each compile (an adopted deck is all
+    `[plain]` frames; devfest2020's two passes took 28 s where one gives the same PDF)."""
+    for name in re.findall(r"Package rerunfilecheck Warning: File `([^']+)' has changed", log):
+        after = re.search(rf"Checksums for `{re.escape(name)}':\s*\n\(rerunfilecheck\)\s+Before:.*\n"
+                          r"\(rerunfilecheck\)\s+After:\s*(\S+)", log)
+        if not after or after.group(1) != EMPTY_AUX:
+            return True
+    # rerunfilecheck's own lines are settled above; anything else asking for a pass still counts
+    other = "\n".join(l for l in log.splitlines() if not l.startswith("(rerunfilecheck)"))
+    return bool(re.search(r"Rerun to get|may have changed\. Rerun", other))
 
 
 def error_excerpt(log: str) -> str:

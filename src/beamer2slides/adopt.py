@@ -1042,6 +1042,9 @@ def preamble(target: dict, ctx: Context, flow: bool, tree: Path | None = None) -
     fonts = getattr(ctx, "font_lines", None) or font_preamble(target, tree, ctx)
     lines = [f"\\documentclass[{opt}]{{beamer}}" if opt else "\\documentclass{beamer}",
              *([paper] if paper else []),
+             # A deck is mostly pictures, and LuaTeX re-encodes every PNG with transparency at zlib
+             # level 9: devfest2020's pass took 14.1 s, 8.4 s at level 1 (PDF 9.0 -> 12.7 MB).
+             "\\pdfvariable compresslevel=1",
              "\\usetheme{default}",
              "\\setbeamertemplate{navigation symbols}{}",
              "\\setbeamertemplate{footline}{}",
