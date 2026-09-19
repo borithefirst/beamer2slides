@@ -69,9 +69,17 @@ a per-slide background picture.
   a page with anything not ported yet (JPX/JBIG2/CCITT or ICC-profiled images, tiling patterns,
   ICCBased shadings, transfer functions on images…) raises PdfError, so
   `renders = False`: `classify` runs on it and `convert` doesn't yet. Every call equals PDFium's on 4,373 pages
-  (chars and object boxes to the last bit on the test decks; extraction also on 71,408 pages swept from
-  the 3,169 distinct PDFs on this machine, up to 60 each, /ActualText marked content included),
-  and deck.json is identical on all 48 test decks; extract is ~2.3× slower than PDFium, rendering
+  (chars and object boxes to the last bit on the test decks). Swept over the 3,198 distinct PDFs on this
+  machine: extraction and whole-page renders equal on 72,249 pages (up to 60 each, /ActualText marked
+  content included; one torture shading refused), and on their first 10 pages every other call too -
+  drawings, links, glyph widths, clipped/transparent/partial renders and `embedded_image` with
+  PDFium's own bitmaps (GetBitmap, GetRenderedBitmap: `backend._image_pixels`, `_rendered_image`).
+  All measured on Windows: substitution follows PDFium's Windows mapper only (Linux's
+  CFX_LinuxFontInfo folder scan and CFX_MacFontInfo are not ported). `devtools/platform_check.py`
+  runs every oracle plus `subst_extract` (text in made-up non-embedded fonts, both backends) on
+  whatever OS it is on, and `.github/workflows/pure-pdf.yml` runs it on ubuntu/macos/windows with
+  pinned versions (`.github/constraints.txt`) and decks built once in a TeX Live container.
+  And deck.json is identical on all 48 test decks; extract is ~2.3× slower than PDFium, rendering
   ~7× (float32 rounding batched through `syntax.F32X*` structs with a scalar fallback on overflow,
   one regex per word in both lexers, psLib shortcuts for Type 1 programs). `tests/test_pure_pdf.py`.
   Cross references (CPDF_Parser, rebuild included) and navigation (`pure/navigation.py`: links,
