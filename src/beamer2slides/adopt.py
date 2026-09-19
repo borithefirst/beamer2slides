@@ -719,6 +719,26 @@ def line_box(z: float, r: float) -> tuple[float, float]:
     return ASCENT_EM * z - (1 - r) * 0.75 * LINE_EM * z, (LINE_EM - ASCENT_EM) * z - (1 - r) * 0.25 * LINE_EM * z
 
 
+SNAP_FROM = 16.0            # Slides pt: single-spaced lines this big or bigger are a whole number of pixels apart
+
+
+def snapped_line_box(z: float, r: float, scale: float, snap_on: bool = True) -> tuple[float, float]:
+    """`line_box`, with the pitch of single-spaced lines on whole CSS pixels (`emit.snap`, in Slides pt:
+    the IR's are `scale` times smaller). The thumbnails show it at lineSpacing 100%: 24 pt lines 28.5 pt
+    apart, not 28.8 (34 boxes in 7 decks, hebrew-lesson's and arabic-training's right-to-left bodies
+    among them), 18 pt ones 21.75, 22 pt ones 26.25, 16 pt ones 19.5; the depth takes the difference.
+    Not below `SNAP_FROM` (gdg24's 14 pt Google Sans Text, journey-maps' 14 pt Montserrat, cs161-net's
+    8 pt Arial stand 1.2 em apart; Arial at 14 pt snaps, so the line is drawn where the data is), not on
+    pages wider than `deck_ir.SNAP_PAGE` (`snap_on`: the 1440 pt SlidesCarnival decks' 18 pt Inter
+    and 36 pt NTR lines are 1.2 em apart) and not at other spacings (gdg24's 14 pt at 115% stand
+    19.35 pt apart: unsnapped 19.32, snapped 19.5)."""
+    from .emit import snap
+    above, below = line_box(z, r)
+    if snap_on and r == 1 and z * scale >= SNAP_FROM:
+        below = snap((above + below) * scale) / scale - above
+    return above, below
+
+
 def para_size(p: dict) -> float:
     return max((r.get("size") or 10.0) for r in p["runs"]) if p["runs"] else 10.0
 
@@ -976,7 +996,7 @@ def text_box_latex(el: dict, ctx: Context, ind: str) -> str:
     for p in paras:
         sl = p.get("slides") or {}
         z, r = para_size(p), sl.get("line_spacing") or 1.0
-        above, below = line_box(z, r)
+        above, below = snapped_line_box(z, r, scale, bool(box.get("snap")))
         pitch = above + below
         # Slides spaces each line by the sizes on that line: comps-analysis's "First step:" at 26.7 pt
         # leads 21.3 pt words, and the line they wrap onto is 21.3 pt apart, where one \baselineskip
@@ -1011,7 +1031,7 @@ def text_box_latex(el: dict, ctx: Context, ind: str) -> str:
                 # its last line's depth is its own words' (their struts), which TeX has in \prevdepth
                 head.append(f"\\prevdepth={pitch - gap - above:.2f}pt\\relax")
             else:
-                k = pitch - line_box(pz, pr)[1] - gap - above
+                k = pitch - snapped_line_box(pz, pr, scale, bool(box.get("snap")))[1] - gap - above
                 head.append(f"\\prevdepth=\\dimexpr\\prevdepth{k:+.2f}pt\\relax")
         # LuaTeX's skips are logical: in a right-to-left paragraph \leftskip is at its start, the
         # right edge, where Slides measures indentStart from too - so only the alignment flips.
