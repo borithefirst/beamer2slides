@@ -126,6 +126,12 @@ class PObj:
     smask_matrix: tuple = IDENTITY  # the CTM when it was set
     transfer: object = None        # /TR or /TR2 (not a name)
     pattern: bool = False          # a pattern colour space for fill or stroke (render)
+    # render_shading: the pattern each side paints with (None: no pattern colour; False: a pattern
+    # colour space without a pattern), and a shading object's CTM and pattern record
+    fill_pattern: object = None
+    stroke_pattern: object = None
+    shading_matrix: tuple = IDENTITY
+    shading_record: object = None
     rect: tuple = (0.0, 0.0, 0.0, 0.0)   # GetRect, container space
     # paths
     points: list = field(default_factory=list)   # (x, y, PT_*, closes), path space
@@ -197,6 +203,10 @@ class State:
     text_matrix: tuple = IDENTITY
     text_pos: tuple = (0.0, 0.0)
     text_line_pos: tuple = (0.0, 0.0)
+    # render_shading: the colour state's patterns (see PObj) and the parser's parent matrix
+    fill_pattern: object = None
+    stroke_pattern: object = None
+    parent_matrix: tuple = IDENTITY
 
     def copy(self) -> "State":
         return State(**self.__dict__)
@@ -307,6 +317,8 @@ class _Run:
         if color:
             obj.fill, obj.stroke = s.fill_ref, s.stroke_ref
             obj.pattern = s.fill_cs.is_pattern or s.stroke_cs.is_pattern
+            obj.fill_pattern = s.fill_pattern if s.fill_cs.is_pattern else None
+            obj.stroke_pattern = s.stroke_pattern if s.stroke_cs.is_pattern else None
         if graph:
             obj.line_width, obj.line_cap, obj.line_join, obj.miter = s.line_width, s.line_cap, s.line_join, s.miter
             obj.dash, obj.dash_phase = s.dash, s.dash_phase
@@ -450,6 +462,10 @@ class _Run:
         current = s.fill_cs if fill else s.stroke_cs
         if cs is not None:
             current = cs
+            if fill:
+                s.fill_pattern = None
+            else:
+                s.stroke_pattern = None
         if current.n > len(values):
             if fill:
                 s.fill_cs = current
@@ -495,8 +511,10 @@ class _Run:
         # CPDF_Color::SetColorSpace: the initial colour of the space; the colour reference stays
         if fill:
             self.state.fill_cs, self.state.fill_values = cs, tuple(cs.initial())
+            self.state.fill_pattern = False if cs.is_pattern else None
         else:
             self.state.stroke_cs, self.state.stroke_values = cs, tuple(cs.initial())
+            self.state.stroke_pattern = False if cs.is_pattern else None
 
     def op_cs(self, args):
         self._set_space(True, args)
@@ -527,6 +545,16 @@ class _Run:
             return
         values = [_num(a) for a in args[:-1]][-4:]
         s = self.state
+        from .render_shading import find_pattern
+        record = find_pattern(self.p, pattern, s.parent_matrix)
+        side = s.fill_pattern if fill else s.stroke_pattern
+        if record is None:
+            # PDFium finds no pattern and leaves the colour as it was, which this parser does not
+            record = side if side is not None else "?"
+        if fill:
+            s.fill_pattern = record
+        else:
+            s.stroke_pattern = record
         cs = s.fill_cs if fill else s.stroke_cs
         if not cs.is_pattern:
             cs = PATTERN
@@ -863,6 +891,9 @@ class _Run:
         obj = PObj(OBJ_SHADING, IDENTITY, stream=shading)
         self.add(obj, False, False)
         s = self.state
+        from .render_shading import find_shading
+        obj.shading_matrix = s.ctm
+        obj.shading_record = find_shading(self.p, shading, s.parent_matrix)
         rect = self.bbox
         if s.clips:
             rect = s.clips[0]
@@ -892,10 +923,12 @@ class _Run:
                           char_space=s.char_space, word_space=s.word_space, horz_scale=s.horz_scale,
                           leading=s.leading, rise=s.rise, text_mode=s.text_mode,
                           dash=s.dash, dash_phase=s.dash_phase, smask=s.smask,
-                          smask_matrix=s.smask_matrix, transfer=s.transfer)
+                          smask_matrix=s.smask_matrix, transfer=s.transfer,
+                          fill_pattern=s.fill_pattern, stroke_pattern=s.stroke_pattern)
             m = r(stream.get("Matrix"))
             fm = tuple(_num(r(v)) for v in m[:6]) if isinstance(m, list) and len(m) >= 6 else IDENTITY
             child.ctm = fm
+            child.parent_matrix = fm
             bbox = (0.0, 0.0, 0.0, 0.0)
             b = r(stream.get("BBox"))
             if isinstance(b, list) and len(b) >= 4:
