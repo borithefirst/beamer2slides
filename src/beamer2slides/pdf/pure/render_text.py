@@ -90,7 +90,8 @@ def unsupported(obj) -> str | None:
     if not obj.items or font is None:
         return None
     if font.is_type3:
-        return "Type 3 text"
+        from . import render_type3
+        return None if mode == MODE_INVISIBLE else render_type3.unsupported(obj)
     if mode in (MODE_INVISIBLE, MODE_CLIP):
         return None
     if obj.pattern:
@@ -124,6 +125,11 @@ def _process_text(status, obj, matrix) -> None:
     if not obj.items:
         return
     mode = obj.text_mode
+    if obj.font is not None and obj.font.is_type3:     # every mode but 3 fills a Type 3 font
+        if mode != MODE_INVISIBLE:
+            from . import render_type3
+            render_type3.process_type3_text(status, obj, matrix)
+        return
     if mode in (MODE_INVISIBLE, MODE_CLIP):
         return
     if getattr(status.dev, "mask_format", False):
