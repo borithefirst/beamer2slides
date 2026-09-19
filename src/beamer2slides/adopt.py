@@ -554,6 +554,11 @@ def para_size(p: dict) -> float:
     return max((r.get("size") or 10.0) for r in p["runs"]) if p["runs"] else 10.0
 
 
+def mixed_sizes(p: dict) -> bool:
+    """Is the paragraph in several sizes (`text_box_latex` then spaces it line by line)?"""
+    return len({round(r.get("size") or 0, 2) for r in p["runs"] if r["text"].strip()}) > 1
+
+
 def text_escape(text: str) -> str:
     """LaTeX for plain text as Slides shows it: runs of spaces are kept (Slides does not fold them),
     and straight quotes, backquotes and double hyphens stay what they are - fontspec's TeX ligatures
@@ -575,6 +580,12 @@ def run_tex(r: dict, base: dict, text: str, ctx: Context) -> str:
     core = text_escape(text.strip(" "))
     if not core:
         return text_escape(text)
+    struts = getattr(ctx, "line_struts", None)
+    if struts is not None:
+        # a paragraph of several sizes: every word carries its own line box (text_box_latex)
+        a, b = line_box(r.get("size") or base.get("size") or 10.0, struts)
+        strut = f"\\vrule width0pt height{a:.2f}pt depth{b:.2f}pt\\relax "
+        core = strut + (core if r.get("underline") or r.get("strike") else core.replace(" ", " " + strut))
     fam, bfam = r.get("family") or "sans", base.get("family") or "sans"
     if (r.get("font") or "") != (base.get("font") or "") and \
             (font_switch(r.get("font"), ctx) or font_switch(base.get("font"), ctx)):
@@ -749,6 +760,13 @@ def text_box_latex(el: dict, ctx: Context, ind: str) -> str:
         z, r = para_size(p), sl.get("line_spacing") or 1.0
         above, below = line_box(z, r)
         pitch = above + below
+        # Slides spaces each line by the sizes on that line: comps-analysis's "First step:" at 26.7 pt
+        # leads 21.3 pt words, and the line they wrap onto is 21.3 pt apart, where one \baselineskip
+        # for the paragraph set it 26.7 pt apart. Such a paragraph's words carry their own line box
+        # (`run_tex`), the skip is its smallest size's, and a line with bigger words grows by them.
+        mixed = mixed_sizes(p)
+        if mixed:
+            pitch = sum(line_box(min(x.get("size") or z for x in p["runs"] if x["text"].strip()), r))
         left, first = (sl.get("indent_start") or 0) / scale, (sl.get("indent_first") or 0) / scale
         end = (sl.get("indent_end") or 0) / scale
         glyph = p.get("bullet") and (p["bullet"].get("text") or "").strip()
@@ -765,8 +783,12 @@ def text_box_latex(el: dict, ctx: Context, ind: str) -> str:
             gap = ((psl.get("space_below") or 0) + (sl.get("space_above") or 0)) / scale
             if prev.get("bullet") and p.get("bullet") and sl.get("spacing_mode") != "NEVER_COLLAPSE":
                 gap = 0.0
-            k = pitch - line_box(pz, pr)[1] - gap - above
-            head.append(f"\\prevdepth=\\dimexpr\\prevdepth{k:+.2f}pt\\relax")
+            if mixed_sizes(prev):
+                # its last line's depth is its own words' (their struts), which TeX has in \prevdepth
+                head.append(f"\\prevdepth={pitch - gap - above:.2f}pt\\relax")
+            else:
+                k = pitch - line_box(pz, pr)[1] - gap - above
+                head.append(f"\\prevdepth=\\dimexpr\\prevdepth{k:+.2f}pt\\relax")
         # LuaTeX's skips are logical: in a right-to-left paragraph \leftskip is at its start, the
         # right edge, where Slides measures indentStart from too - so only the alignment flips.
         rtl = p.get("direction") == "rtl"
@@ -786,6 +808,7 @@ def text_box_latex(el: dict, ctx: Context, ind: str) -> str:
         lead += f"\\color{{{colour_name(base['color'], ctx.colours)}}}" if base["color"] else ""
         brk = "\\unskip\\hfil\\break " if justified else "\\unskip\\break "
         blank = not any(x["text"].strip() for x in p["runs"])
+        ctx.line_struts = r if mixed else None
         body = "" if blank else runs_tex(p["runs"], base, ctx, brk)
         start = f"\\vrule width0pt height{above:.2f}pt depth0pt\\relax"
         if shift:
@@ -808,6 +831,7 @@ def text_box_latex(el: dict, ctx: Context, ind: str) -> str:
         elif "\t" in "".join(x["text"] for x in p["runs"]) and not p.get("bullet") and not rtl \
                 and align == "left" and not blank:
             body = tabbed_tex(p["runs"], base, ctx, brk, first, TAB_STOP / scale) or body
+        ctx.line_struts = None
         # a right-to-left paragraph is set in its language (scripts.py: babel's bidi, shaping)
         lang_in, lang_out = "", ""
         if rtl:
@@ -815,7 +839,8 @@ def text_box_latex(el: dict, ctx: Context, ind: str) -> str:
             lang_in = f"\\begin{{otherlanguage}}{{{rtl_language(p)}}}"
             lang_out = "\\end{otherlanguage}"
         out.append(f"{ind}  " + "".join(head) + lang_in +
-                   f"{{\\leftskip={lskip}\\relax\\rightskip={rskip}\\relax\\parfillskip={fill}\\relax")
+                   f"{{\\leftskip={lskip}\\relax\\rightskip={rskip}\\relax\\parfillskip={fill}\\relax"
+                   + ("\\lineskiplimit=0pt\\relax" if mixed else ""))
         # the `%`: a bullet's \llap{} ends in a brace, and the line end after it was a word space -
         # every bulleted line of the corpus began one space (5 pt at 18 pt Arial) right of Slides'
         out.append(f"{ind}    \\noindent{lead}{start}" + ("% blank line" if blank else "%"))
@@ -831,7 +856,8 @@ def text_box_latex(el: dict, ctx: Context, ind: str) -> str:
         # apps-edu-zh, ap-bio-stats: measured to the pixel both ways), hence the threshold.
         pr = (prev.get("slides") or {}).get("line_spacing") or 1.0
         last = line_box(para_size(prev), 1.0 if pr >= WIDE_SPACING else pr)[1]
-        out.append(f"{ind}  \\vskip\\dimexpr{last:.2f}pt-\\prevdepth\\relax")
+        if not mixed_sizes(prev):                      # else its words' struts already end it
+            out.append(f"{ind}  \\vskip\\dimexpr{last:.2f}pt-\\prevdepth\\relax")
     out.append(f"{ind}  " + ("\\vss" if valign in ("middle", "top") else f"\\vskip{inset:.2f}pt") + "}")
     out.append(f"{ind}\\end{{textblock*}}")
     return "\n".join(out)

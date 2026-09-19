@@ -455,3 +455,18 @@ def test_a_box_with_powerpoint_insets_starts_its_text_3_6_pt_higher():
     plain = adopt.text_box_latex(el, adopt.Context(), "")
     el["box"]["inset_y"] = 3.6
     assert "\\vskip6.48pt" in plain and "\\vskip2.88pt" in adopt.text_box_latex(el, adopt.Context(), "")
+
+
+def test_a_paragraph_of_two_sizes_is_spaced_line_by_line():
+    """comps-analysis: a 26.7 pt lead-in, 21.3 pt words; the line they wrap onto is 21.3 pt apart."""
+    el = {"kind": "text", "bbox": [0, 0, 100, 80], "box": {"scale": 1.0, "valign": "top"},
+          "paragraphs": [{"runs": [{"text": "First step: ", "size": 20.0},
+                                   {"text": "two words", "size": 10.0}], "slides": {}},
+                         {"runs": [{"text": "Next", "size": 10.0}], "slides": {}}]}
+    tex = adopt.text_box_latex(el, adopt.Context(), "")
+    small, big = adopt.line_box(10.0, 1.0), adopt.line_box(20.0, 1.0)
+    assert f"\\baselineskip={sum(small):.2f}pt" in tex and "\\lineskiplimit=0pt" in tex
+    assert f"height{small[0]:.2f}pt depth{small[1]:.2f}pt\\relax words" in tex
+    assert f"height{big[0]:.2f}pt depth{big[1]:.2f}pt\\relax step:" in tex
+    # the next paragraph is spaced from the depth TeX recorded, not from a guessed size
+    assert f"\\prevdepth={sum(small) - small[0]:.2f}pt" in tex
