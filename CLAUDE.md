@@ -54,7 +54,14 @@ a per-slide background picture.
   and deck.json is identical on all 48 test decks; extract is 7× slower. `tests/test_pure_pdf.py`.
   Cross references (CPDF_Parser, rebuild included) and navigation (`pure/navigation.py`: links,
   actions, destinations, name trees, page labels, metadata) are ported rule for rule; the whole-file
-  fuzz (`--structure`, seeds 0-500) differs from PDFium on 27 files, all text-object boxes.
+  fuzz (`--structure`, seeds 0-500) differs from PDFium on none (27 before font substitution was
+  ported). Substitution is PDFium's chain rule for rule (`pure/fontmapper.py`: LoadSubstFont,
+  FindSubstFace, CFX_Win32FontInfo through GDI's own CreateFont/GetTextFace; the TrueType and
+  Type 1 LoadGlyphMap over FreeType's charmap list), with PDFium's built-in Foxit faces (MM ones
+  blended, `pure/type1.py`) loaded from a user cache that `python -m beamer2slides.pdf.pure.foxit`
+  fills from PDFium's sources with pinned SHA-256 (no binaries in the tree); without the cache, or
+  outside Windows, the older rules stay and `test_substituted_fonts_are_measured_with_pdfiums_face`
+  skips. Substituted text measures as PDFium's but is not drawn yet.
 - No public links: pictures reach Slides inside the imported .pptx, never as shared Drive
   files (they break in protected Workspace domains).
 - **Fidelity is measured on Google's own renderer**, not a local preview: render the PDF page

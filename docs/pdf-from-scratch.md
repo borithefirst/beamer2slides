@@ -123,13 +123,34 @@ Each of these was a diff against PDFium until it was ported:
     form's own Font dictionary, and the page's only when the form has none of that category.
   - A non-embedded base-14 font is loaded as CPDF_Type1Font does (canonical name through
     kAltFontNames, Courier widths 600, symbolic flags without a descriptor, Symbol/Zapf/Standard
-    base encoding) and drawn with the face CFX_Win32FontInfo maps it to: Arial, Times New Roman,
-    Courier New from `%WINDIR%\Fonts`, read through the TrueType glyph-map branch of LoadGlyphMap
-    ((3,0) cmap with the F0/F1/F2 prefixes, else Unicode from the glyph name) and with bbox
-    left/right scaled by width / TrueType width in C integer division. Symbol, ZapfDingbats and
-    unknown names get PDFium's built-in Foxit faces, which are third-party binaries this tree
-    doesn't carry: those glyph boxes stay apart, as do the Foxit MM substitutes PDFium uses for an
-    embedded program that doesn't parse. Outside Windows PDFium's font mapper differs anyway.
+    base encoding).
+  - **Substituted fonts** (`pure/fontmapper.py`, `pure/foxit.py`, `pure/type1.py`;
+    `test_substituted_fonts_are_measured_with_pdfiums_face`, 66 handmade cases): any font without a
+    program - or whose program FreeType can't open, which LoadFontDescriptor purges, so it is
+    substituted as if never embedded - goes through PDFium's chain rule for rule:
+    CPDF_Font::LoadSubstFont (weight = /FontWeight, else from /StemV (×5 below 140, else ×4 + 140),
+    both counting only when ItalicAngle, Ascent, CapHeight and Descent are all present - the
+    ExternAttr flag - clamped to 100..800), CFX_Font::LoadSubstFace, CFX_FontMapper::FindSubstFace
+    (GetSubstName, ParseStyles, GetStyleType, TT_NormalizeName, the base-14 and "Arial,Bold"
+    style suffixes, symbolic/serif/fixed/script flags, MatchInstalledFonts, UseInternalSubst,
+    UseExternalSubst) and on Windows CFX_Win32FontInfo: EnumFontFamiliesEx for the installed list,
+    GDI's own `CreateFont` + `GetTextFace` for MapFont (so the face picked is Windows' choice, not
+    a guess), GetFontData for the bytes and GetTTCIndex for a collection. Where PDFium falls back
+    to its built-in faces (Symbol, Dingbats, FoxitSans/Serif and the multiple-master
+    FoxitSerifMM/FoxitSansMM for an unknown name), the port loads the same bytes from a user cache:
+    `python -m beamer2slides.pdf.pure.foxit` fetches PDFium's `core/fxge/fontdata/chromefontdata`
+    sources and keeps a face only if its SHA-256 matches the pinned sum - no third-party binary is
+    in the tree. The MM faces are Type 1 programs parsed by `type1.py` and blended by FreeType's
+    rules (WeightVector, the /BlendDesignPositions normalisation, blended charstrings).
+    The face is then read by the program's own LoadGlyphMap: CPDF_Type1Font's (Adobe/custom
+    charmaps, glyph names) or CPDF_TrueTypeFont's (DetermineEncoding, DetermineCharmapType,
+    SetGlyphIndicesFromFirstChar, GetGlyphIndexForMSSymbol, the (3,0) F0/F1/F2 prefixes, MacRoman
+    through PDF_FindCode), over FreeType's charmap list as FreeType builds it (sfnt_find_encoding,
+    the Unicode charmap synthesised from post names, format 14 unselectable, find_unicode_charmap's
+    preference order). Selecting a charmap changes the shared cached face, as in PDFium. Bbox
+    left/right are scaled by width / TrueType width in C integer division. Without the Foxit cache
+    (or outside Windows, where PDFium asks fontconfig and that is not ported) the older rules stay:
+    system Arial/Times New Roman/Courier New for base-14, and boxes apart elsewhere.
   - `char_width_` and `glyph_index_` are uint16: a /Widths entry of -1502 is 64034.
   - A descriptor without /FontBBox (CheckFontMetrics) takes the program's box, the right way up:
     the "deliberately flipped" in PDFium's comment is FX_RECT's y-down naming, so its `top` is yMin.
@@ -202,6 +223,13 @@ Each of these was a diff against PDFium until it was ported:
   False. The pipeline needs renders for backgrounds, crops, ball colours, `_looks_like` and fidelity,
   so `classify` runs on the reader but `convert` does not. `embedded_image` gives no `pixels` or `rendered`, so
   `render.image_file` can't prove a raw JPEG looks right and keeps the page crop instead.
+  Text in a substituted font is measured as PDFium measures it but not drawn: rendering it raises
+  PdfError (`ftoutline` has no face for a font without an embedded program), so the per-glyph
+  re-blend of an MM face to the /Widths advance that PDFium's outlines go through (AdjustMMParams
+  with a dest width) is not ported either.
+- Font substitution outside Windows (PDFium's fontconfig/`CFX_LinuxFontInfo` scan is not ported),
+  and without the Foxit cache (older rules, see above); CID fonts' own substitution
+  (CPDF_CIDFont's CJK charset and ordering rules) keeps the older behaviour too.
 - Encrypted PDFs (LaTeX doesn't write them), vertical writing, ActualText, and JPX/JBIG2/CCITT
   decoding (those streams pass through as raw).
 

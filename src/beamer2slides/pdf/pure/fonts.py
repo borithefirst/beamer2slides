@@ -40,6 +40,7 @@ _PREDEFINED = {"WinAnsiEncoding": WINANSI, "MacRomanEncoding": MACROMAN, "MacExp
                "PDFDocEncoding": PDFDOC}
 
 FLAG_FIXED, FLAG_SYMBOLIC, FLAG_NONSYMBOLIC, FLAG_ITALIC, FLAG_ALLCAPS = 1, 4, 32, 64, 65536
+FLAG_USE_EXTERN_ATTR = 0x80000   # kFontUseExternAttr: the descriptor's weight and angle are to be believed
 NOTDEF = ".notdef"
 NO_GLYPH = None   # PDFium's 0xffff: no glyph at all (not even .notdef)
 INVALID_CODE = 0xFFFFFFFF  # CPDF_Font::kInvalidCharCode
@@ -457,6 +458,27 @@ def _ft_bbox(bbox):
     return x0 >> 16, y0 >> 16, (x1 + 0xFFFF) >> 16, (y1 + 0xFFFF) >> 16
 
 
+class Charmap:
+    """One FT_CharMap: its ids, FreeType's encoding for them, and code -> glyph index."""
+
+    __slots__ = ("pid", "eid", "encoding", "lookup", "format")
+
+    def __init__(self, pid: int, eid: int, encoding: str, lookup: Callable[[int], int], format: int = 0):
+        self.pid, self.eid, self.encoding, self.lookup, self.format = pid, eid, encoding, lookup, format
+
+
+def sfnt_encoding(pid: int, eid: int) -> str:
+    """sfnt_find_encoding (sfobjs.c): an sfnt cmap subtable's FT_Encoding."""
+    if pid in (0, 2):                                    # Apple Unicode, ISO: any encoding id
+        return "unicode"
+    if pid == 1:
+        return "apple_roman" if eid == 0 else "none"
+    if pid == 3:
+        return {0: "ms_symbol", 1: "unicode", 10: "unicode", 2: "sjis", 3: "prc", 4: "big5", 5: "wansung",
+                6: "johab"}.get(eid, "none")
+    return "none"
+
+
 class Program:
     """A font program read by fontTools: glyph names or ids -> unscaled control boxes."""
 
@@ -469,12 +491,131 @@ class Program:
         self.bbox = bbox                  # font units (l, b, r, t)
         self.ascender, self.descender = ascender, descender
         self.cmaps = cmaps or {}          # TrueType: {(platform, encoding): {code: glyph name}}
+        self.cmap_list: list = []         # sfnt: [(platform, encoding, {code: glyph name})] in file order
         self.sfnt = False                 # a TrueType/OpenType file (CFX_Font::IsTTFont)
+        self.glyph_names = True           # FT_HAS_GLYPH_NAMES
+        self.ps_names = True              # names FT_Get_Name_Index can find (sfnt: post format 1/2/2.5)
+        self.encoding_kind = "standard"   # Type 1 / CFF: which FreeType encoding charmap the face gets
         self._boxes: dict[int, tuple] = {}
+        self._charmaps: list[Charmap] | None = None
+        self._charmap: Charmap | None = None
 
     def name_index(self, name: str) -> int:
-        """FT_Get_Name_Index: 0 when the font has no glyph of that name."""
+        """FT_Get_Name_Index: 0 when the font has no glyph of that name (or no glyph names)."""
+        if not (self.glyph_names and self.ps_names):
+            return 0
         return self.index.get(name, 0)
+
+    # -- the face's charmaps, as FreeType lists and selects them. The selection is state of the face,
+    #    and a face the font mapper caches is shared by every font drawn with it, as in PDFium.
+    def charmaps(self) -> list["Charmap"]:
+        if self._charmaps is None:
+            self._charmaps = self._build_charmaps()
+            self._charmap = None
+            self.select_unicode()                        # FT_Open_Face: find_unicode_charmap
+        return self._charmaps
+
+    def _build_charmaps(self) -> list["Charmap"]:
+        if self.sfnt:
+            # tt_face_build_cmaps: one charmap per subtable FreeType has a class for, in file order
+            # (format 14 maps nothing: its char_index is 0); sfnt_load_face then synthesizes a Unicode
+            # charmap from the glyph names when no subtable is Unicode or MS Symbol
+            out = []
+            for pid, eid, fmt, table in self.cmap_list:
+                if fmt == 14:
+                    out.append(Charmap(pid, eid, sfnt_encoding(pid, eid), lambda code: 0, 14))
+                else:
+                    out.append(Charmap(pid, eid, sfnt_encoding(pid, eid),
+                                       lambda code, t=table: self.index.get(t.get(code), 0), fmt))
+            if not any(cm.encoding in ("unicode", "ms_symbol") for cm in out) and self.glyph_names \
+                    and self.ps_names:
+                by = self._unicode_table()
+                if by:
+                    out.append(Charmap(3, 1, "unicode", lambda code: by.get(code, 0)))
+            return out
+        # Type 1 (T1_Face_Init) and CFF (cff_face_init): psnames' Unicode charmap, which exists when
+        # some glyph name has a Unicode value (ps_unicodes_init fails otherwise), then the Adobe
+        # encoding charmap - always for Type 1, for CFF only when the encoding maps some code
+        out = []
+        by = self._unicode_table()
+        if by:
+            out.append(Charmap(3, 1, "unicode", lambda code: by.get(code, 0)))
+        if not self.cid_keyed and self.encoding is not None and \
+                (self.kind == "type1" or any(self.builtin_index(c) for c in range(256))):
+            eid = {"standard": 0, "expert": 1, "custom": 2, "latin1": 3}[self.encoding_kind]
+            enc = ("adobe_standard", "adobe_expert", "adobe_custom", "adobe_latin1")[eid]
+            out.append(Charmap(7, eid, enc, self.builtin_index))
+        return out
+
+    def _unicode_table(self) -> dict[int, int]:
+        """ps_unicodes: each Unicode value to the first glyph whose name maps to it."""
+        by = getattr(self, "_by_unicode", None)
+        if by is None:
+            by = {}
+            for i, n in enumerate(self.order):
+                v = unicode_from_adobe_name(n)
+                if v:
+                    by.setdefault(v, i)
+            self._by_unicode = by
+        return by
+
+    def select_unicode(self) -> bool:
+        """FT_Select_Charmap(FT_ENCODING_UNICODE) = find_unicode_charmap: a UCS-4 table from the end,
+        else any Unicode one from the end."""
+        maps = self.charmaps() if self._charmaps is not None else []
+        for cm in reversed(maps):
+            if cm.encoding == "unicode" and ((cm.pid, cm.eid) in ((3, 10), (0, 4)) or
+                                             (cm.pid, cm.eid, cm.format) == (0, 6, 13)):
+                self._charmap = cm
+                return True
+        for cm in reversed(maps):
+            if cm.encoding == "unicode":
+                self._charmap = cm
+                return True
+        return False
+
+    def set_charmap(self, index: int) -> None:
+        """CFX_Face::SetCharMapByIndex = FT_Set_Charmap, which refuses a format 14 table."""
+        cm = self.charmaps()[index]
+        if cm.format != 14:
+            self._charmap = cm
+
+    def charmap_encoding(self, index: int) -> str:
+        return self.charmaps()[index].encoding
+
+    def use_tt_charmap(self, pid: int, eid: int) -> bool:
+        """CPDF_Font::UseTTCharmap."""
+        for i, cm in enumerate(self.charmaps()):
+            if (cm.pid, cm.eid) == (pid, eid):
+                self.set_charmap(i)
+                return True
+        return False
+
+    def use_tt_charmap_unicode(self) -> bool:
+        """CPDF_Font::UseTTCharmapUnicode."""
+        unicode_index, symbol = None, False
+        for i, cm in enumerate(self.charmaps()):
+            if (cm.pid, cm.eid) == (3, 1):
+                self.set_charmap(i)
+                return True
+            if (cm.pid, cm.eid) == (3, 0):
+                symbol = True
+                continue
+            if unicode_index is None and cm.encoding == "unicode":
+                unicode_index = i
+        if unicode_index is not None and not symbol:
+            self.set_charmap(unicode_index)
+            return True
+        return False
+
+    def char_index(self, code: int) -> int:
+        """FT_Get_Char_Index through the selected charmap (0 without one)."""
+        self.charmaps()
+        cm = self._charmap
+        if cm is None or not 0 <= code <= 0xFFFFFFFF:
+            return 0
+        g = cm.lookup(code)
+        return g if 0 <= g < len(self.order) else 0
 
     def builtin_index(self, code: int) -> int:
         """The glyph the program's own encoding gives a code (FreeType's Type 1 charmap)."""
@@ -484,6 +625,9 @@ class Program:
         return self.index.get(name, 0) if name and name != NOTDEF else 0
 
     def glyph_name(self, index: int) -> str:
+        """FT_Get_Glyph_Name: '' where the face has no names."""
+        if not (self.glyph_names and self.ps_names):
+            return ""
         return self.order[index] if 0 <= index < len(self.order) else ""
 
     def cid_index(self, cid: int) -> int:
@@ -549,13 +693,58 @@ def load_type1(data: bytes) -> Program | None:
         names.remove(NOTDEF)
         names.insert(0, NOTDEF)
     enc = d.get("Encoding")
+    kind = "custom"
     if isinstance(enc, str) and enc == "StandardEncoding" or enc is None:
         enc = [_predefined_name(STANDARD, c) or NOTDEF for c in range(256)]
+        kind = "standard"
     elif isinstance(enc, list):
         enc = [str(n) if n else NOTDEF for n in enc] + [NOTDEF] * (256 - len(enc))
     bbox = _ft_bbox(d.get("FontBBox"))
-    return Program("type1", charstrings, names, _upem_from_matrix(d.get("FontMatrix", [0.001, 0, 0, 0.001])),
+    prog = Program("type1", charstrings, names, _upem_from_matrix(d.get("FontMatrix", [0.001, 0, 0, 0.001])),
                    encoding=enc, bbox=bbox, ascender=bbox[3] if bbox else 0, descender=bbox[1] if bbox else 0)
+    prog.encoding_kind = kind
+    return prog
+
+
+class GenericProgram(Program):
+    """PDFium's built-in multiple master face (FoxitSansMM / FoxitSerifMM), read by `type1.py` and
+    loaded by `ftoutline.py`'s port of FreeType's glyph loader at the font's default blend: fontTools
+    cannot build these fonts (their PostScript blends the designs at run time)."""
+
+    def __init__(self, t1):
+        from .ftoutline import Face
+        enc = t1.encoding or [_predefined_name(STANDARD, c) or NOTDEF for c in range(256)]
+        super().__init__("type1", None, t1.order, 1000, encoding=enc, bbox=t1.bbox,
+                         ascender=t1.bbox[3], descender=t1.bbox[1])
+        self.encoding_kind = "custom" if t1.encoding else "standard"
+        self.face = Face.from_type1(t1)
+
+    def glyph_box(self, index: int):
+        """FT_Load_Glyph(FT_LOAD_NO_SCALE)'s metrics: the outline's control box (t1gload)."""
+        if index in self._boxes:
+            return self._boxes[index]
+        box = None
+        if 0 <= index < len(self.order):
+            units = self.face.units(index)
+            if units is not None:
+                xs = [x for pts, _tags in units for x, _y in pts]
+                ys = [y for pts, _tags in units for _x, y in pts]
+                l, b, r, t = (min(xs), min(ys), max(xs), max(ys)) if xs else (0, 0, 0, 0)
+                box = tuple(normalize_metric(v, 1000) for v in (l, b, r, t))
+        self._boxes[index] = box
+        return box
+
+    def advance(self, index: int) -> int:
+        a = self.face.advance(index) if 0 <= index < len(self.order) else None
+        return normalize_metric(a, 1000) if a else 0
+
+
+def load_generic(data: bytes) -> Program | None:
+    from . import type1
+    try:
+        return GenericProgram(type1.parse(data))
+    except Exception:  # noqa: BLE001 - a face that does not parse: none, as FreeType would refuse it
+        return None
 
 
 def load_cff(data: bytes) -> Program | None:
@@ -567,27 +756,34 @@ def load_cff(data: bytes) -> Program | None:
     order = list(top.charset)
     cid_keyed = hasattr(top, "ROS")
     enc = None
+    kind = "standard"
     if not cid_keyed:
         e = getattr(top, "Encoding", "StandardEncoding")
         if e == "StandardEncoding":
             enc = [_predefined_name(STANDARD, c) or NOTDEF for c in range(256)]
         elif e == "ExpertEncoding":
             enc = [_predefined_name(MACEXPERT, c) or NOTDEF for c in range(256)]
+            kind = "expert"
         elif isinstance(e, list):
             enc = [n or NOTDEF for n in e] + [NOTDEF] * (256 - len(e))
+            kind = "custom"
     matrix = getattr(top, "FontMatrix", [0.001, 0, 0, 0.001, 0, 0])
     bbox = _ft_bbox(getattr(top, "FontBBox", None))
-    return Program("cff", charstrings, order, _upem_from_matrix(matrix), encoding=enc, cid_keyed=cid_keyed,
+    prog = Program("cff", charstrings, order, _upem_from_matrix(matrix), encoding=enc, cid_keyed=cid_keyed,
                    bbox=bbox, ascender=bbox[3] if bbox else 0, descender=bbox[1] if bbox else 0)
+    prog.encoding_kind = kind
+    return prog
 
 
-def load_truetype(data: bytes) -> Program | None:
+def load_truetype(data: bytes, font_number: int = 0) -> Program | None:
     from fontTools.ttLib import TTFont
-    tt = TTFont(io.BytesIO(data), lazy=True, fontNumber=0)
+    tt = TTFont(io.BytesIO(data), lazy=True, fontNumber=font_number)
     if "CFF " in tt:
         prog = load_cff(tt.getTableData("CFF "))
         if prog:
             prog.cmaps = _tt_cmaps(tt)
+            prog.cmap_list = _tt_cmap_list(tt)
+            prog.glyph_names = _tt_glyph_names(tt)
             prog.sfnt = True
         return prog
     glyphs = tt.getGlyphSet()
@@ -596,6 +792,9 @@ def load_truetype(data: bytes) -> Program | None:
     hhea = tt["hhea"] if "hhea" in tt else None
     prog = Program("truetype", glyphs, order, head.unitsPerEm, bbox=(head.xMin, head.yMin, head.xMax, head.yMax),
                    ascender=hhea.ascent if hhea else 0, descender=hhea.descent if hhea else 0, cmaps=_tt_cmaps(tt))
+    prog.cmap_list = _tt_cmap_list(tt)
+    prog.glyph_names = _tt_glyph_names(tt)
+    prog.ps_names = _tt_ps_names(tt)
     prog.sfnt = True
     return prog
 
@@ -606,6 +805,43 @@ def _tt_cmaps(tt) -> dict:
         for sub in tt["cmap"].tables:
             out.setdefault((sub.platformID, sub.platEncID), sub.cmap)
     return out
+
+
+def _tt_cmap_list(tt) -> list:
+    """Every cmap subtable in file order, as FreeType lists the face's charmaps."""
+    if "cmap" not in tt:
+        return []
+    try:
+        tables = tt["cmap"].tables
+    except Exception:  # noqa: BLE001 - a cmap fontTools cannot read: no charmaps
+        return []
+    out = []
+    for sub in tables:
+        fmt = getattr(sub, "format", 0)
+        if fmt not in (0, 2, 4, 6, 8, 10, 12, 13, 14):     # FreeType has no class for it: skipped
+            continue
+        out.append((sub.platformID, sub.platEncID, fmt, getattr(sub, "cmap", None) or {}))
+    return out
+
+
+def _tt_post_format(tt) -> bytes | None:
+    try:
+        raw = tt.reader["post"] if "post" in tt.reader else None
+    except Exception:  # noqa: BLE001
+        return None
+    return raw[:4] if raw is not None and len(raw) >= 4 else None
+
+
+def _tt_glyph_names(tt) -> bool:
+    """FT_HAS_GLYPH_NAMES of an sfnt face (sfnt_load_face): set unless the post table is format 3.0
+    (a face without a post table reads as format 0 and has the flag, with no name to find)."""
+    return _tt_post_format(tt) != b"\x00\x03\x00\x00"
+
+
+def _tt_ps_names(tt) -> bool:
+    """Whether FT_Get_Name_Index can find a name (tt_face_get_ps_name): post formats 1, 2 and 2.5
+    only. fontTools makes names up for the others, which FreeType does not see."""
+    return _tt_post_format(tt) in (b"\x00\x01\x00\x00", b"\x00\x02\x00\x00", b"\x00\x02\x80\x00")
 
 
 def load_program(stream: Stream | None, data: bytes, subtype_key: str) -> Program | None:
@@ -711,17 +947,17 @@ def system_face(index: int) -> Program | None:
     return _system_faces[index]
 
 
-def unicode_charmap(p: Program) -> dict | None:
-    """FT_Select_Charmap(FT_ENCODING_UNICODE): a UCS-4 subtable from the end, else any Unicode one
-    from the end (FreeType's find_unicode_charmap)."""
-    keys = list(p.cmaps)
-    for key in reversed(keys):
-        if key in ((3, 10), (0, 4)):
-            return p.cmaps[key]
-    for key in reversed(keys):
-        if key[0] == 0 and key[1] != 5 or key in ((3, 1), (3, 10)):
-            return p.cmaps[key]
-    return None
+_MAPPER_ACTIVE: bool | None = None
+
+
+def _mapper_active() -> bool:
+    """Whether fonts without a program go through `fontmapper` (PDFium's Windows chain, with the
+    Foxit faces in the user cache); else the older rules above (`subst_font_index`, `system_face`)."""
+    global _MAPPER_ACTIVE
+    if _MAPPER_ACTIVE is None:
+        from . import fontmapper
+        _MAPPER_ACTIVE = fontmapper.active()
+    return _MAPPER_ACTIVE
 
 
 # ---------------------------------------------------------------------- fonts
@@ -739,6 +975,9 @@ class Font:
         self.base_name = str(r(d.get("BaseFont")) or "")
         self.flags = FLAG_NONSYMBOLIC
         self.italic_angle = 0
+        self.stem_v = 0
+        self.font_weight: int | None = None
+        self.subst_generic = False       # drawn with PDFium's multiple master face
         self.ascent = self.descent = 0
         self.font_bbox = (0, 0, 0, 0)   # l, b, r, t
         self.program_data = b""
@@ -750,6 +989,8 @@ class Font:
     # CPDF_Font::LoadFontDescriptor
     def _descriptor(self, desc) -> None:
         r = self.doc.resolve
+        if isinstance(desc, Stream):     # GetDictFor: a stream answers with its dictionary
+            desc = desc.dict
         if not isinstance(desc, dict):
             return
         self.flags = _int(r(desc.get("Flags")), FLAG_NONSYMBOLIC) if "Flags" in desc else FLAG_NONSYMBOLIC
@@ -757,15 +998,26 @@ class Font:
         if angle < 0:
             self.flags |= FLAG_ITALIC
             self.italic_angle = angle
+        if "StemV" in desc:
+            self.stem_v = _int(r(desc.get("StemV")))
+        valid_weight = False
+        if "FontWeight" in desc:
+            weight = _int(r(desc.get("FontWeight")))
+            valid_weight = weight > 0
+            if valid_weight:
+                self.font_weight = weight
         if "Ascent" in desc:
             self.ascent = _int(r(desc.get("Ascent")))
         if "Descent" in desc:
             self.descent = _int(r(desc.get("Descent")))
+        if all(k in desc for k in ("ItalicAngle", "Ascent", "CapHeight", "Descent")) and \
+                ("StemV" in desc or valid_weight):
+            self.flags |= FLAG_USE_EXTERN_ATTR
         if self.descent > 10:
             self.descent = -self.descent
         bbox = r(desc.get("FontBBox"))
-        if isinstance(bbox, list) and len(bbox) >= 4:
-            self.font_bbox = tuple(_int(r(v)) for v in bbox[:4])
+        if isinstance(bbox, list):       # GetIntegerAt: 0 past the end of a short array
+            self.font_bbox = tuple(_int(r(bbox[k])) if k < len(bbox) else 0 for k in range(4))
         for key in ("FontFile", "FontFile2", "FontFile3"):
             stream = r(desc.get(key))
             if isinstance(stream, Stream):
@@ -773,6 +1025,13 @@ class Font:
                 self.program_data = self.doc.stream_data(stream)
                 self.program = load_program(stream, self.program_data, key)
                 break
+
+    def font_weight_value(self) -> int | None:
+        """CPDF_Font::GetFontWeight: /FontWeight, else from /StemV (None when that overflows)."""
+        if self.font_weight is not None:
+            return self.font_weight
+        v = self.stem_v * 5 if self.stem_v < 140 else self.stem_v * 4 + 140
+        return v if -0x80000000 <= v <= 0x7FFFFFFF else None
 
     # CPDF_Font::CheckFontMetrics
     def _check_metrics(self) -> None:
@@ -851,6 +1110,8 @@ class SimpleFont(Font):
         r = self.doc.resolve
         d = self.dict
         desc = r(d.get("FontDescriptor"))
+        if isinstance(desc, Stream):     # GetDictFor: a stream answers with its dictionary
+            desc = desc.dict
         self.base14 = None
         if self.subtype != "TrueType":
             # CPDF_Type1Font::Load: a base 14 name takes its canonical name, flags and base encoding
@@ -868,6 +1129,11 @@ class SimpleFont(Font):
                 elif not self.flags & FLAG_SYMBOLIC:
                     self.base_encoding = STANDARD
         self._descriptor(desc)
+        mapped = _mapper_active()
+        if mapped and self.embedded and self.program is None:
+            # LoadFontDescriptor: a program FreeType cannot open is purged (MaybePurgeFontFileStreamAcc),
+            # and the font is then as good as one without a program
+            self.embedded = False
         # LoadCharWidths
         widths = r(d.get("Widths"))
         self.use_font_width = not isinstance(widths, list)
@@ -890,6 +1156,8 @@ class SimpleFont(Font):
             self.base_encoding = STANDARD
         self._pdf_encoding(self.embedded, self.program is not None and self.program.sfnt)
         self._glyph_map()
+        if mapped and self.program is None:
+            return          # LoadCommon: no face, no AllCaps and no CheckFontMetrics
         if self.program is not None and self.flags & FLAG_ALLCAPS:
             for lo, hi in ((0x61, 0x7A), (0xE0, 0xF6), (0xF8, 0xFD)):
                 for i in range(lo, hi + 1):
@@ -917,6 +1185,16 @@ class SimpleFont(Font):
             else:
                 if width:
                     self.flags |= FLAG_FIXED
+        if _mapper_active():
+            from . import fontmapper
+            weight = self.font_weight_value()
+            if weight is None or not 100 <= weight <= 800:    # kFontWeightExtraLight .. ExtraBold
+                weight = 400
+            face = fontmapper.load_subst_face(self.base_name, self.subtype == "TrueType", self.flags & 0xFFFFFFFF,
+                                              weight, self.italic_angle)
+            if face is not None:
+                self.program, self.subst_generic = face.program, face.generic
+            return
         index = subst_font_index(self.base_name, self.subtype == "TrueType")
         if index is not None:
             self.program = system_face(index)
@@ -961,32 +1239,76 @@ class SimpleFont(Font):
                     if 0 <= code < 256:
                         self.char_names[code] = str(item)
                     code += 1
-                elif isinstance(item, (int, float)) and not isinstance(item, bool):
-                    code = int(item)
+                elif item is not None:
+                    code = _int(item)       # GetInteger: 0 for anything that is not a number
 
-    def char_name(self, code: int) -> str | None:
-        """CPDF_Font::GetAdobeCharName."""
+    def char_name(self, code: int, encoding: str | None = None) -> str | None:
+        """CPDF_Font::GetAdobeCharName(base_encoding, char_names_, code); the font's own base
+        encoding unless another is given."""
+        if encoding is None:
+            encoding = self.base_encoding
         if not 0 <= code < 256:
             return None
         if self.char_names and self.char_names[code]:
             return self.char_names[code]
-        if self.base_encoding == BUILTIN:
+        if encoding == BUILTIN:
             return None
-        return _predefined_name(self.base_encoding, code)
+        return _predefined_name(encoding, code)
 
-    # CPDF_Type1Font::LoadGlyphMap (embedded fonts; TrueType approximated)
     def _glyph_map(self) -> None:
+        """LoadGlyphMap: CPDF_TrueTypeFont's for a /TrueType font, CPDF_Type1Font's for the rest,
+        whatever the program inside is. Both work on the face's charmaps (`Program.charmaps`), whose
+        selection is state of the face."""
         p = self.program
         if p is None:
             # no face: PDFium keeps no glyphs, and encoding_ stays empty
             return
-        if self.subtype != "TrueType" and not self.embedded and self.base14 not in (BASE14_SYMBOL, BASE14_DINGBATS) \
-                and p.sfnt:
-            self._substitute_glyph_map(p)
-            return
-        if self.subtype == "TrueType" or p.kind == "truetype":
+        if self.subtype == "TrueType":
             self._truetype_glyph_map(p)
+        else:
+            self._type1_glyph_map(p)
+
+    @staticmethod
+    def _ms_symbol_index(p: Program, code: int) -> int:
+        """GetGlyphIndexForMSSymbol: the code under the prefixes 00, F0, F1, F2."""
+        for prefix in (0x00, 0xF0, 0xF1, 0xF2):
+            g = p.char_index(((prefix * 256) + code) & 0xFFFF)
+            if g:
+                return g
+        return 0
+
+    # CPDF_Type1Font::LoadGlyphMap
+    def _type1_glyph_map(self, p: Program) -> None:
+        if not self.embedded and self.base14 not in (BASE14_SYMBOL, BASE14_DINGBATS) and p.sfnt:
+            if p.use_tt_charmap(3, 0):
+                got_one = False
+                for code in range(256):
+                    for prefix in (0x00, 0xF0, 0xF1, 0xF2):
+                        self.glyphs[code] = p.char_index(prefix * 256 + code)
+                        if self.glyphs[code]:
+                            got_one = True
+                            break
+                if got_one:
+                    return
+            p.select_unicode()
+            if self.base_encoding == BUILTIN:
+                self.base_encoding = STANDARD
+            for code in range(256):
+                name = self.char_name(code)
+                if not name:
+                    continue
+                self.enc_unicode[code] = unicode_from_adobe_name(name)
+                self.glyphs[code] = p.char_index(self.enc_unicode[code])
+                if self.glyphs[code] == 0 and name == NOTDEF:
+                    self.enc_unicode[code] = 0x20
+                    self.glyphs[code] = p.char_index(0x20)
             return
+        # UseType1Charmap
+        maps = p.charmaps()
+        if maps:
+            first_unicode = maps[0].encoding == "unicode"
+            if not (len(maps) == 1 and first_unicode):
+                p.set_charmap(1 if first_unicode else 0)
         if self.flags & FLAG_SYMBOLIC:
             for code in range(256):
                 name = self.char_name(code)
@@ -994,11 +1316,13 @@ class SimpleFont(Font):
                     self.enc_unicode[code] = unicode_from_adobe_name(name)
                     self.glyphs[code] = p.name_index(name)
                 else:
-                    g = p.builtin_index(code)
+                    g = p.char_index(code)
                     self.glyphs[code] = g
                     if g:
-                        self.enc_unicode[code] = unicode_from_adobe_name(p.glyph_name(g))
+                        gname = p.glyph_name(g)
+                        self.enc_unicode[code] = unicode_from_adobe_name(gname) if gname else 0
             return
+        unicode = p.select_unicode()
         for code in range(256):
             name = self.char_name(code)
             if not name:
@@ -1009,77 +1333,118 @@ class SimpleFont(Font):
             if g:
                 continue
             if name not in (NOTDEF, "space"):
-                # FreeType's synthesized Unicode charmap: the glyph whose name maps to that Unicode
-                self.glyphs[code] = self._unicode_index(p, self.enc_unicode[code])
+                self.glyphs[code] = p.char_index(self.enc_unicode[code] if unicode else code)
             else:
                 self.enc_unicode[code] = 0x20
                 self.glyphs[code] = NO_GLYPH
 
-    def _substitute_glyph_map(self, p: Program) -> None:
-        """CPDF_Type1Font::LoadGlyphMap for a font with no program drawn with a TrueType face."""
-        symbol = p.cmaps.get((3, 0))
-        if symbol is not None:   # UseTTCharmap(face, kWindowsSymbolCmapId)
-            found = False
-            for code in range(256):
-                for prefix in (0x0000, 0xF000, 0xF100, 0xF200):
-                    self.glyphs[code] = p.index.get(symbol.get(prefix + code), 0)
-                    if self.glyphs[code]:
-                        found = True
-                        break
-            if found:
-                return
-        cmap = unicode_charmap(p) or {}
-        if self.base_encoding == BUILTIN:
-            self.base_encoding = STANDARD
-        for code in range(256):
-            name = self.char_name(code)
-            if not name:
-                continue
-            self.enc_unicode[code] = unicode_from_adobe_name(name)
-            self.glyphs[code] = p.index.get(cmap.get(self.enc_unicode[code]), 0)
-            if self.glyphs[code] == 0 and name == NOTDEF:
-                self.enc_unicode[code] = 0x20
-                self.glyphs[code] = p.index.get(cmap.get(0x20), 0)
+    # CPDF_TrueTypeFont::DetermineEncoding
+    def _determine_encoding(self, p: Program) -> str:
+        if not self.embedded or not self.flags & FLAG_SYMBOLIC or self.base_encoding not in (WINANSI, MACROMAN):
+            return self.base_encoding
+        maps = p.charmaps()
+        if not maps:
+            return self.base_encoding
+        support_win = any(cm.pid in (0, 3) for cm in maps)
+        support_mac = any(cm.pid == 1 for cm in maps)
+        if self.base_encoding == WINANSI and not support_win:
+            return MACROMAN if support_mac else BUILTIN
+        if self.base_encoding == MACROMAN and not support_mac:
+            return WINANSI if support_win else BUILTIN
+        return self.base_encoding
 
-    @staticmethod
-    def _unicode_index(p: Program, u: int) -> int:
-        if not u:
-            return 0
-        if not hasattr(p, "_by_unicode"):
-            by: dict[int, int] = {}
-            for i, n in enumerate(p.order):
-                v = unicode_from_adobe_name(n)
-                if v:
-                    by.setdefault(v, i)
-            p._by_unicode = by
-        return p._by_unicode.get(u, 0)
+    # CPDF_TrueTypeFont::DetermineCharmapType
+    def _charmap_type(self, p: Program) -> str:
+        if p.use_tt_charmap_unicode():
+            return "ms_unicode"
+        order = ((1, 0), (3, 0)) if self.flags & FLAG_NONSYMBOLIC else ((3, 0), (1, 0))
+        for ids in order:
+            if p.use_tt_charmap(*ids):
+                return "mac_roman" if ids == (1, 0) else "ms_symbol"
+        return "other"
 
+    def _any_glyph(self) -> bool:
+        """HasAnyGlyphIndex: 0xffff counts as a glyph there."""
+        return any(g != 0 for g in self.glyphs)
+
+    # CPDF_TrueTypeFont::LoadGlyphMap
     def _truetype_glyph_map(self, p: Program) -> None:
-        """CPDF_TrueTypeFont::LoadGlyphMap, simplified: a (3,0) symbol cmap with the F000 prefixes,
-        else (3,1)/(1,0) by the encoding's Unicode, else the code itself."""
-        order_index = p.index
-        ms_symbol = p.cmaps.get((3, 0))
-        ms_unicode = p.cmaps.get((3, 1))
-        mac = p.cmaps.get((1, 0))
+        base = self._determine_encoding(p)
+        if (base in (WINANSI, MACROMAN) and not self.char_names) or self.flags & FLAG_NONSYMBOLIC:
+            if p.glyph_names and not p.charmaps():
+                # SetGlyphIndicesFromFirstChar
+                start = _int(self.doc.resolve(self.dict.get("FirstChar")))
+                if 0 <= start <= 255:
+                    for code in range(256):
+                        self.glyphs[code] = 0 if code < start else (code - start + 3) & 0xFFFF
+                return
+            kind = self._charmap_type(p)
+            to_unicode_key = "ToUnicode" in self.dict
+            mac_unicodes = UNICODES[MACROMAN]
+            for code in range(256):
+                name = self.char_name(code, base)
+                if not name:
+                    self.glyphs[code] = p.char_index(code) if self.embedded else NO_GLYPH
+                    continue
+                u = unicode_from_adobe_name(name)
+                self.enc_unicode[code] = u
+                if kind == "ms_symbol":
+                    self.glyphs[code] = self._ms_symbol_index(p, code)
+                elif u:
+                    if kind == "ms_unicode":
+                        self.glyphs[code] = p.char_index(u)
+                    elif kind == "mac_roman":
+                        u16 = u & 0xFFFF
+                        mac = next((i for i, v in enumerate(mac_unicodes) if v == u16), 0)   # PDF_FindCode
+                        self.glyphs[code] = p.name_index(name) if not mac else p.char_index(mac)
+                g = self.glyphs[code]
+                if g not in (0, NO_GLYPH):
+                    continue
+                if name == NOTDEF:
+                    self.glyphs[code] = p.char_index(32)
+                    continue
+                self.glyphs[code] = p.name_index(name)
+                if self.glyphs[code] or not to_unicode_key:
+                    continue
+                units = self.unicode(code)
+                if units:
+                    self.glyphs[code] = p.char_index(units[0])
+                    self.enc_unicode[code] = units[0]
+            return
+        if p.use_tt_charmap(3, 0):
+            for code in range(256):
+                self.glyphs[code] = self._ms_symbol_index(p, code)
+            if self._any_glyph():
+                if base != BUILTIN:
+                    for code in range(256):
+                        name = self.char_name(code, base)
+                        if name:
+                            self.enc_unicode[code] = unicode_from_adobe_name(name)
+                elif p.use_tt_charmap(1, 0):
+                    for code in range(256):
+                        self.enc_unicode[code] = UNICODES[MACROMAN][code]
+                return
+        if p.use_tt_charmap(1, 0):
+            for code in range(256):
+                self.glyphs[code] = p.char_index(code)
+                self.enc_unicode[code] = UNICODES[MACROMAN][code]
+            if self.embedded or self._any_glyph():
+                return
+        if p.select_unicode():
+            for code in range(256):
+                if self.embedded:
+                    self.enc_unicode[code] = code
+                else:
+                    name = self.char_name(code, BUILTIN)
+                    if name:
+                        self.enc_unicode[code] = unicode_from_adobe_name(name)
+                    elif base != BUILTIN:
+                        self.enc_unicode[code] = _predefined_unicode(base, code)
+                self.glyphs[code] = p.char_index(self.enc_unicode[code])
+            if self._any_glyph():
+                return
         for code in range(256):
-            name = self.char_name(code)
-            u = unicode_from_adobe_name(name) if name else 0
-            if not u and self.base_encoding != BUILTIN:
-                u = _predefined_unicode(self.base_encoding, code)
-            self.enc_unicode[code] = u
-            g = None
-            if ms_symbol is not None and (self.flags & FLAG_SYMBOLIC or not ms_unicode):
-                for prefix in (0x0000, 0xF000, 0xF100, 0xF200):
-                    g = ms_symbol.get(prefix + code)
-                    if g:
-                        break
-            elif ms_unicode is not None and u:
-                g = ms_unicode.get(u)
-            elif mac is not None:
-                g = mac.get(code)
-            if g is None and name:
-                g = name if name in order_index else None
-            self.glyphs[code] = order_index.get(g, 0) if g else 0
+            self.glyphs[code] = code
 
     # CPDF_FaceBasedSimpleFont::GetCharWidth / GetCharBBox / LoadCharMetrics
     def _load_metrics(self, code: int) -> None:
