@@ -391,8 +391,11 @@ def series_switch(s: str) -> str:
 
 # A deck's second, third... typeface of one kind gets a switch of its own when it sets this many
 # letters: a heading face and a body face (Montserrat over Open Sans) are both the deck's look.
+# Or covers as much of the page as that many letters at AREA_SIZE pt: sc-memphis' section numbers
+# are six digits in all, at 166 pt, and set in the body face they came out a third too small.
 EXTRA_FONT_MIN = 40
 EXTRA_FONTS_MAX = 12
+AREA_SIZE = 12.0
 
 
 def font_preamble(target: dict, tree: Path | None, ctx: Context | None = None) -> list[str]:
@@ -410,6 +413,7 @@ def font_preamble(target: dict, tree: Path | None, ctx: Context | None = None) -
     not (journey-maps: Montserrat titles over Open Sans text), and one family per kind set both in
     whichever was used more."""
     counts: dict = {}
+    area: dict = {}
     letters: dict[str, dict[str, int]] = {}
     weights: dict[str, dict[tuple[int, bool], int]] = {}
     for s in target["slides"]:
@@ -418,6 +422,7 @@ def font_preamble(target: dict, tree: Path | None, ctx: Context | None = None) -
                 for r in p["runs"]:
                     k = (r.get("family") or "sans", r.get("font") or "")
                     counts[k] = counts.get(k, 0) + len(r["text"])
+                    area[k] = area.get(k, 0.0) + len(r["text"].strip()) * ((r.get("size") or 0) / AREA_SIZE) ** 2
                     if r.get("weight"):
                         w = weights.setdefault(k[1], {})
                         wk = (int(r["weight"]), bool(r.get("italic")))
@@ -473,8 +478,8 @@ def font_preamble(target: dict, tree: Path | None, ctx: Context | None = None) -
         switches: dict[str, str] = {}
         main = set(wanted.values())
         for (fam, font), n in sorted(counts.items(), key=lambda kv: -kv[1]):
-            if not font or font in main or font in switches or n < EXTRA_FONT_MIN or \
-                    len(switches) >= EXTRA_FONTS_MAX:
+            if not font or font in main or font in switches or len(switches) >= EXTRA_FONTS_MAX or \
+                    n < EXTRA_FONT_MIN and area.get((fam, font), 0.0) < EXTRA_FONT_MIN:
                 continue
             files = font_family(font, fam)
             if not files:

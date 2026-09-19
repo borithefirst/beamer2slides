@@ -466,6 +466,23 @@ def test_a_decks_second_face_gets_a_switch_of_its_own(monkeypatch, tmp_path):
     assert "\\adoptfontA" not in body
 
 
+def test_a_face_of_few_but_huge_letters_gets_a_switch_too(monkeypatch, tmp_path):
+    """sc-memphis' section numbers: two digits a slide at 528 pt are its look as much as a paragraph;
+    the same two digits at body size are not."""
+    shelf = tmp_path / "shelf"
+    shelf.mkdir()
+    for stem in ("OpenSans", "Montserrat"):
+        for style in ("Regular", "Bold"):
+            (shelf / f"{stem}-{style}.ttf").write_bytes(b"\x00\x01\x00\x00")
+    monkeypatch.setenv("B2S_FONTS", str(shelf))
+    for size, switched in ((300.0, True), (20.0, False)):
+        ir = deck_ir(deck_with(text_shape("t0", "body text " * 20, 10, 10, 600, 100, font="Open Sans"),
+                               text_shape("t1", "03", 10, 120, 600, 300, font="Montserrat", size=size)),
+                     foreign=True)
+        text = adopt.bootstrap(ir, tmp_path / f"tree{size:.0f}" / "main.tex")
+        assert ("\\newfontfamily\\adoptfontA{Montserrat}" in text) == switched
+
+
 def test_a_face_without_the_letters_set_in_it_gets_no_switch(monkeypatch, tmp_path):
     """hebrew-lesson types Hebrew "in" Noto Sans Symbols and Slides draws it in a fallback; a switch
     to the font itself set nothing, and lualatex stops on a font embedded with no glyph."""

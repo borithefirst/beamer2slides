@@ -602,6 +602,16 @@ full-slide template picture under a box no longer hides its insets (`deck_ir.cro
 stand-in's advances less the end bearings, median of >= 2 within 4%, applied as fontspec
 `FakeStretch` when off by > 2%): comps-analysis's Libre Bodoni at 0.94, 0.66 -> 0.675. A deck's own
 font is never stretched: Arial measures 0.987-1.002, and Pacifico's 0.967 was its kerning.
+Picture fills (`g24-final` -> `tp-e`, 912 slides: boxes 0.938 -> 0.949, no deck down): a `{}` fill that
+is neither one colour nor a ramp - a photo cut to a freeform, a texture - carries no URL in the API and
+was dropped with its shape; `deck_fills.thumbnail_picture` now writes the thumbnail's pixels in its box
+as a picture, with the letters of texts above painted out (a pixel nearer the run's colour than the
+box's ground, dilated, filled in from around; a looser colour test flattened sc-memphis' whole pink
+band under its yellow words) and the page colour transparent when nothing else lies under it. A second
+face now also gets its switch when its letters cover the page (`adopt.AREA_SIZE`: sc-memphis' 166 pt
+section numbers were set in the body face). sc-memphis 0.847 -> 0.994, sc-dark-modern 0.827 -> 0.984,
+sc-functions 0.960 -> 0.985. What that costs: the picture is at thumbnail resolution (1600 px across
+the slide) and bakes in whatever lies under the shape.
 
 Opt-in suite (real Google Slides, ~95 s): `python -m pytest -m slides` (the default run deselects
 the `slides` marker, pyproject.toml). It converts the stress decks (19–22, 25, 13, demo) 3 at a
