@@ -350,6 +350,8 @@ def text_paragraphs(pe: dict, text: dict, resolver: StyleResolver, fonts: FontMa
                 weight = 700 if st["bold"] else 400
             if weight >= 600:
                 bold = True
+            unsure = foreign and base["bold"] and st.get("bold") is False and \
+                (st.get("weightedFontFamily") or {}).get("weight") == 400
             italic = st.get("italic", base["italic"])
             color = rgb_hex(st.get("foregroundColor"), resolver.scheme) or base["color"]
             if foreign:
@@ -380,6 +382,8 @@ def text_paragraphs(pe: dict, text: dict, resolver: StyleResolver, fonts: FontMa
             if family == "Roboto Mono" and text_part.strip("\u00a0") == "" and "\u00a0" in text_part:
                 run["hole"] = round(len(text_part) * 0.6 * size / scale, 2)
                 run["text"] = " "
+            if unsure:
+                run["weight_unsure"] = True     # `thumbnail_weights` decides
             cur["runs"].append(run)
     for p in paragraphs:
         p["runs"] = merge_runs(p["runs"])
@@ -447,7 +451,8 @@ def merge_runs(runs: list[dict]) -> list[dict]:
     keys = ("font", "size", "bold", "italic", "color", "link", "script", "underline", "strike", "highlight", "smallcaps",
             "weight")
     for r in runs:
-        if out and not r.get("hole") and not out[-1].get("hole") and all(out[-1].get(k) == r.get(k) for k in keys):
+        if out and not r.get("hole") and not out[-1].get("hole") and all(out[-1].get(k) == r.get(k) for k in keys) \
+                and out[-1].get("weight_unsure") == r.get("weight_unsure"):
             out[-1]["text"] += r["text"]
         else:
             out.append(dict(r))
@@ -597,6 +602,57 @@ def ink_widths(elements: list[dict], thumb, px: float) -> None:
         e["ink_width"] = round((cols[-1] - cols[0] + 1) / px, 2)
 
 
+BOLD_STROKE_EM = 0.10       # mean stroke width (em) above which a thumbnail's letters are bold
+
+
+def stroke_em(e: dict, elements: list[dict], thumb, px: float) -> float | None:
+    """The mean stroke width of a text box's letters in its thumbnail, in em of its biggest run (None:
+    not readable: anything else reaches into the box, or too little ink). Twice the ink's area over
+    its outline: a stroke w wide and L long has area wL and an outline of 2L. Antialiasing thickens
+    small text, so it is only a tiebreak: the runs `thumbnail_weights` settles read 0.080-0.083 where
+    drawn regular and 0.116-0.142 where drawn bold (whole boxes the API calls bold read 0.09-0.16,
+    regular ones 0.05-0.13)."""
+    import numpy as np
+    runs = [r for p in e.get("paragraphs", []) for r in p.get("runs", []) if r["text"].strip()]
+    if thumb is None or not px or not runs or crossed(e, elements, tuple(e["bbox"])):
+        return None
+    z = max(r.get("size") or 0 for r in runs)
+    x0, y0, x1, y1 = (int(round(v * px)) for v in e["bbox"])
+    crop = thumb[max(0, y0):max(0, y1), max(0, x0):max(0, x1)]
+    if z <= 0 or crop.shape[0] < 4 or crop.shape[1] < 4:
+        return None
+    ground = np.median(crop.reshape(-1, crop.shape[-1]), axis=0)
+    contrast = np.abs(crop - ground).max(axis=-1)
+    ink = contrast > max(40.0, contrast.max() / 2)
+    area = int(ink.sum())
+    if area < 20:
+        return None
+    inner = ink.copy()
+    inner[1:, :] &= ink[:-1, :]
+    inner[:-1, :] &= ink[1:, :]
+    inner[:, 1:] &= ink[:, :-1]
+    inner[:, :-1] &= ink[:, 1:]
+    outline = area - int(inner.sum())
+    return float(2 * area / max(outline, 1) / px / z)
+
+
+def thumbnail_weights(elements: list[dict], thumb, px: float) -> None:
+    """Settle the runs whose weight the API does not say (`weight_unsure`): a run that only names a
+    font reads back as `bold: false` at weight 400 under a bold parent, and Slides draws some of those
+    bold (jruby-ja's Tahoma titles, drawings-basics' title slides, solidity-survey) and some regular
+    (drawings-basics' slides 9 and 11, identical in the API). The thumbnail's stroke width tells them
+    apart (`stroke_em`); unreadable, the API's word stands."""
+    for e in elements:
+        runs = [r for p in e.get("paragraphs", []) for r in p.get("runs", []) if r.get("weight_unsure")]
+        if not runs:
+            continue
+        w = stroke_em(e, elements, thumb, px)
+        for r in runs:
+            del r["weight_unsure"]
+            if w is not None and w > BOLD_STROKE_EM:
+                r["bold"] = True
+
+
 def crossed(e: dict, elements: list[dict], strip: tuple) -> bool:
     """Does anything but the box itself reach into `strip`, where its thumbnail is read? What lies under
     the box, from its top down past the strip, does not: a panel it stands on, or the full-slide
@@ -646,14 +702,14 @@ def top_drift(e: dict, elements: list[dict], thumb, px: float) -> float | None:
         return None
     paras = [p for p in e.get("paragraphs", []) if p.get("runs")]
     first = "".join(r["text"] for r in paras[0]["runs"]).lstrip() if paras else ""
-    if not first or not (first[0].isupper() or first[0].isdigit()) or paras[0].get("bullet"):
+    if not first or paras[0].get("bullet"):
         return None
+    cap = KNOWN_CAPS.get(paras[0]["runs"][0].get("font") or "")
+    if cap is None or not (first[0].isupper() or first[0].isdigit()):
+        return baseline_drift(e, elements, paras, thumb, px)
     x0, y0, x1, y1 = e["bbox"]
     base = e["anchor"][1]
     if crossed(e, elements, (x0, y0 - 2, x1, base + 2)):
-        return None
-    cap = KNOWN_CAPS.get(paras[0]["runs"][0].get("font") or "")
-    if cap is None:
         return None
     z = max(r.get("size") or 0 for r in paras[0]["runs"])
     X0, X1, Y0, Y1 = (int(round(v * px)) for v in (x0, x1, y0, base + 1))
@@ -666,6 +722,58 @@ def top_drift(e: dict, elements: list[dict], thumb, px: float) -> float | None:
         return None
     scale = box_.get("scale") or 1.0
     return ((Y0 + rows[0]) / px - (base - cap * z)) * scale
+
+
+BASELINE_BAND = (0.95, 0.3)     # em above and below the predicted first baseline `baseline_drift` reads
+BASELINE_MIN_COLUMNS = 0.6      # em of inked columns a first line needs before its baseline is read
+BASELINE_DENSITY = 0.25         # the baseline: the lowest row inked this much of the line's densest one
+
+
+def baseline_drift(e: dict, elements: list[dict], paras: list[dict], thumb, px: float) -> float | None:
+    """`top_drift` for a first line in a script with no capitals: where the thumbnail shows its
+    baseline, less where Slides' default insets put it, in Slides pt. Hebrew and Arabic letters stand
+    on the baseline, and Book Antiqua's Hebrew is drawn by a fallback whose cap height nobody knows, so
+    the baseline is the lowest row still inked a quarter as densely as the line's densest (descenders
+    and commas are thin below it; a column median read bold Hebrew's top bars - ד ר ו are a bar on a
+    stem - and put a title's baseline 5 pt high). hebrew-lesson's text stood 3.6 pt low on every slide it was not
+    middle-aligned on, and not one of its boxes could be measured by its capitals. An underline or a
+    strike is a row inked across the whole line: such rows are cleared first. Only these scripts:
+    ideographs sit on an em box below the baseline, and a Latin line's column bottoms read other
+    things than its caps did (cs161-net's disagreed by 6 pt)."""
+    import numpy as np
+    from .scripts import script_of
+    runs = paras[0]["runs"]
+    first = next((c for r in runs for c in r["text"] if c.isalpha()), "")
+    if not first or script_of(first) not in ("hebrew", "arabic") or any(r.get("highlight") for r in runs):
+        return None
+    z = max(r.get("size") or 0 for r in runs)
+    if z <= 0:
+        return None
+    x0, y0, x1, y1 = e["bbox"]
+    base = e["anchor"][1]
+    top, bottom = base - BASELINE_BAND[0] * z, base + BASELINE_BAND[1] * z
+    if crossed(e, elements, (x0, min(y0, top) - 2, x1, bottom + 2)):
+        return None
+    X0, X1, Y0, Y1 = (int(round(v * px)) for v in (x0, x1, top, bottom))
+    crop = thumb[max(0, Y0):max(0, Y1), max(0, X0):max(0, X1)]
+    if crop.shape[0] < 4 or crop.shape[1] < 8:
+        return None
+    ground = np.median(crop.reshape(-1, crop.shape[-1]), axis=0)
+    ink = np.abs(crop - ground).max(axis=-1) > 80
+    cols = np.nonzero(ink.any(axis=0))[0]
+    if len(cols) < BASELINE_MIN_COLUMNS * z * px:
+        return None
+    rules = ink[:, cols[0]:cols[-1] + 1].mean(axis=1) > 0.7     # underlines and strikes
+    ink[rules] = False
+    cols = np.nonzero(ink.any(axis=0))[0]
+    if len(cols) < BASELINE_MIN_COLUMNS * z * px:
+        return None
+    density = ink[:, cols[0]:cols[-1] + 1].mean(axis=1)
+    rows = np.nonzero(density >= BASELINE_DENSITY * density.max())[0]
+    if rows[-1] >= ink.shape[0] - 1:                    # ink runs on out of the band: not one line
+        return None
+    seen = (max(0, Y0) + int(rows[-1]) + 1) / px
+    return float((seen - base) * (e["box"].get("scale") or 1.0))
 
 
 def pptx_insets(slides: list[dict], drifts: list[tuple[dict, float]]) -> None:
@@ -983,6 +1091,7 @@ def deck_ir(pres: dict, pdf_size: list[float] | None = None, base: dict | None =
                 px = thumb.shape[1] / page_w
             elements = deck_fills.settle(elements, thumb, px, None if picture else color, bool(picture), images)
             thumbnail_insets(elements, thumb, px)
+            thumbnail_weights(elements, thumb, px)
             ink_widths(elements, thumb, px)
             drifts += [(e, d) for e, d in ((e, top_drift(e, elements, thumb, px)) for e in elements)
                        if d is not None]
@@ -1362,8 +1471,11 @@ def table_element(pe: dict, m: list[float], resolver: StyleResolver, fonts: Font
                 "fill": rgb_hex(solid.get("color"), resolver.scheme) if solid else None,
                 "fill_alpha": round(solid.get("alpha", 1.0), 3) if solid else None,
                 "valign": VALIGN.get(props.get("contentAlignment"), "top"),
+                # a Hebrew cell is right to left like a Hebrew text box (hebrew-lesson's tables):
+                # set left to right, its lines ended on the wrong side of their full stops
                 "paragraphs": [{"align": p["align"], "level": p["level"], "bullet": p["bullet"], "size": p["size"],
                                 "line_spacing": p["line_spacing"],
+                                **({"direction": "rtl"} if p.get("direction") == "rtl" else {}),
                                 "runs": [{k: v for k, v in r.items() if k not in ("slides_font", "slides_size")}
                                          for r in p["runs"]]}
                                for p in paras if p["runs"]]})

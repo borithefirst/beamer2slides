@@ -247,6 +247,31 @@ def test_segments_join_runs_of_one_style():
     assert [(k[2], spans) for k, spans in segs] == [("#000000", [(0, 2)]), ("#ff0000", [(2, 3)])]
 
 
+def test_a_right_to_left_cell_is_read_and_written_right_to_left(tmp_path):
+    """hebrew-lesson's cells: set left to right, a Hebrew line ended on the wrong side of its full stop."""
+    t = table()
+    head = t["table"]["tableRows"][1]["tableCells"][1]
+    head["text"]["textElements"][0]["paragraphMarker"]["style"]["direction"] = "RIGHT_TO_LEFT"
+    head["text"]["textElements"][1]["textRun"]["content"] = "שלום עולם.\n"
+    cells = {(c["row"], c["col"]): c for c in the_table(deck(t))["table_cells"]}
+    assert cells[1, 1]["paragraphs"][0]["direction"] == "rtl"
+    assert "direction" not in cells[1, 2]["paragraphs"][0]
+    text = source(tmp_path, t)
+    assert "\\babelprovide" in text and "hebrew" in text
+    assert "\\begin{otherlanguage}{hebrew}" in table_source(text)
+
+
+def test_cell_lines_are_as_far_apart_as_slides_sets_them(tmp_path):
+    """The size switch alone spaced a cell's lines by the class's leading (hebrew-lesson: 14.0 pt where
+    the thumbnail shows 14.45); `adopt.cell_lead` sets Slides' pitch, and leaves the one-line height
+    (the strut) to the size switch, since the row height says it already."""
+    import re
+    t = table_source(source(tmp_path, table()))
+    skips = {float(v) for v in re.findall(r"\\baselineskip=([\d.]+)pt", t)}
+    assert len(skips) == 1 and skips.pop() == pytest.approx(sum(adopt.line_box(12 / SCALE, 1.0)), abs=0.1)
+    assert "\\strutbox" not in t
+
+
 def test_a_cell_is_set_again_without_insets_when_its_rows_are_too_short(tmp_path):
     """creandum-board keeps "+1 months" on one line in a 40 pt column; the macro gets the full
     column width and the shift that keeps a centred paragraph centred."""

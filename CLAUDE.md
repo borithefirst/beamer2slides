@@ -612,6 +612,18 @@ face now also gets its switch when its letters cover the page (`adopt.AREA_SIZE`
 section numbers were set in the body face). sc-memphis 0.847 -> 0.994, sc-dark-modern 0.827 -> 0.984,
 sc-functions 0.960 -> 0.985. What that costs: the picture is at thumbnail resolution (1600 px across
 the slide) and bakes in whatever lies under the shape.
+Hebrew and Japanese (`hj-head3` -> `hj-final2`, same day, 912 slides: boxes 0.930 -> 0.935, page
+0.926 -> 0.931, no deck down): `top_drift` reads a first line with no capitals by its baseline
+(`deck_ir.baseline_drift`: Hebrew/Arabic only, the lowest row inked a quarter as densely as the
+line's densest, underlines cleared), so hebrew-lesson's boxes join `pptx_insets` (its text stood
+3.6 pt low); table cells keep `direction: rtl`; a cell's lines are Slides' pitch apart
+(`adopt.cell_lead`: `\baselineskip` only - a full-pitch strut grew comps-analysis's rows). A run that
+only names its font reads back `bold: false`, weight 400, under a bold parent, and Slides draws some
+of those bold and some not with identical API data (jruby-ja's titles bold, drawings-basics' slides
+9 and 11 regular): `weight_unsure`, settled by the thumbnail's stroke width
+(`deck_ir.thumbnail_weights`, `stroke_em` > `BOLD_STROKE_EM` 0.10 em). hebrew-lesson 0.734 -> 0.879,
+jruby-ja 0.756 -> 0.796, sc-dark-modern 0.827 -> 0.831. jruby-ja's rest: mixed kana/Latin lines set
+1-2% wider, Tahoma Bold ~2.5% wider than Slides'.
 
 Opt-in suite (real Google Slides, ~95 s): `python -m pytest -m slides` (the default run deselects
 the `slides` marker, pyproject.toml). It converts the stress decks (19–22, 25, 13, demo) 3 at a

@@ -1219,6 +1219,21 @@ def table_segments(el: dict) -> list[tuple[tuple, list]]:
     return sorted(runs.items(), key=lambda kv: (kv[0][0], kv[0][1]))
 
 
+def cell_lead(base: dict, cell: dict, ctx: Context) -> str:
+    """A table cell's base style with its lines as far apart as Slides sets them (LINE_EM x
+    lineSpacing). The size switch alone spaced them by the class's leading: hebrew-lesson's cells
+    stood 14.0 pt apart where the thumbnail shows 14.45. Only the distance between lines: the strut
+    every cell line carries (`TABLE_MACROS`) stays the size switch's, since a one-line cell is as
+    tall as its row already says - a strut of the whole pitch grew comps-analysis's rows past the
+    deck's (0.429 -> 0.427), and Slides' text-box ascent (0.968 em) moved its lines down (0.405)."""
+    if not base.get("size"):
+        return base_lead(base, ctx)
+    z = base["size"]
+    r = next((p.get("line_spacing") for p in cell.get("paragraphs", []) if p.get("line_spacing")), 1.0)
+    pitch = sum(line_box(z, r))
+    return base_lead(base, ctx) + f"\\baselineskip={pitch:.2f}pt\\relax"
+
+
 def table_block(el: dict, ctx: Context, ind: str) -> str:
     """A table at its place and size: every cell's text set in a box as wide as its columns less
     Slides' insets, the rows grown until their cells fit (`TABLE_MACROS`), then one tikzpicture with
@@ -1257,7 +1272,7 @@ def table_block(el: dict, ctx: Context, ind: str) -> str:
         boxes[k] = len(boxes) + 1
         lines.append(f"{ind}  \\adoptcell{{{boxes[k]}}}{{{c['row']}}}{{{last_row}}}{{{width:.2f}pt}}{{{pady:.2f}pt}}"
                      f"{{{span:.2f}pt}}{{{shift:.2f}pt}}{{%")
-        lines.append(f"{ind}    \\raggedright{base_lead(base, ctx)}%")
+        lines.append(f"{ind}    \\raggedright{cell_lead(base, c, ctx)}%")
         lines.append(body + "}")
     lines.append(f"{ind}  \\adopttops{{{n_rows}}}")
     lines.append(f"{ind}  \\begin{{tikzpicture}}[baseline=(current bounding box.north),inner sep=0pt,outer sep=0pt]")

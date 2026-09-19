@@ -245,6 +245,98 @@ def test_ink_on_the_boxs_first_column_is_its_own_unless_it_goes_on_outside():
     assert read(48.0) is None
 
 
+def title_deck(style: dict) -> dict:
+    """A title whose layout placeholder is bold Arial and whose one run says `style`."""
+    layout_title = box("L_title", para("", runs=[("", {"bold": True, "fontFamily": "Arial", "fontSize": pt(28)})]),
+                       placeholder={"type": "TITLE"})
+    return deck(box("s_title", para("JRuby", runs=[("JRuby InvokeDynamic", style)]), h=60,
+                    placeholder={"type": "TITLE", "parentObjectId": "L_title"}),
+                layout_elements=[layout_title])
+
+
+def stroked(el: dict, stroke_em: float):
+    """A 1600 px wide thumbnail with letter-like bars `stroke_em` wide inside the element's box."""
+    import numpy as np
+    px = 1600 / 453.54
+    im = np.full((900, 1600, 3), 255, dtype=np.uint8)
+    z = max(r["size"] for p in el["paragraphs"] for r in p["runs"])
+    w = max(1, int(round(stroke_em * z * px)))
+    x0, y0, x1, y1 = (int(v * px) for v in el["bbox"])
+    top = y0 + (y1 - y0) // 4
+    for x in range(x0 + 10, x1 - 10, 3 * w):
+        im[top:top + int(0.7 * z * px), x:x + w] = 0
+    return im
+
+
+def test_a_run_that_only_names_its_font_takes_the_weight_its_thumbnail_shows():
+    """jruby-ja's Tahoma titles read `bold: false` at weight 400 under a bold layout title and are
+    drawn bold; drawings-basics has such titles drawn bold and others, identical in the API, drawn
+    regular. The thumbnail's stroke width settles it (deck_ir.thumbnail_weights)."""
+    named = {"bold": False, "fontFamily": "Tahoma", "weightedFontFamily": {"fontFamily": "Tahoma", "weight": 400}}
+    plain = text_of(deck_ir(title_deck(named), foreign=True), "s_title")
+    run = plain["paragraphs"][0]["runs"][0]
+    assert run["bold"] is False and "weight_unsure" not in run, "no thumbnail: the API's word"
+
+    def bold_with(style, stroke):
+        thumb = stroked(plain, stroke)
+        el = text_of(deck_ir(title_deck(style), foreign=True, thumbnails=lambda n: thumb), "s_title")
+        run = el["paragraphs"][0]["runs"][0]
+        assert "weight_unsure" not in run
+        return run["bold"]
+
+    assert bold_with(named, 0.15) is True
+    assert bold_with(named, 0.07) is False
+    # a `bold: false` with no weight beside it is the person's own: jruby-ja's numbered titles
+    assert bold_with({"bold": False}, 0.15) is False
+
+
+def test_the_stroke_width_of_a_thumbnail_in_em():
+    from beamer2slides.deck_ir import BOLD_STROKE_EM, stroke_em
+    el =text_of(deck_ir(title_deck({}), foreign=True), "s_title")
+    thin, thick = (stroke_em(el, [el], stroked(el, w).astype("int16"), 1600 / 453.54) for w in (0.07, 0.15))
+    assert thin == pytest.approx(0.07, abs=0.02) and thick == pytest.approx(0.15, abs=0.03)
+    assert thin < BOLD_STROKE_EM < thick
+    assert stroke_em(el, [el, {"kind": "image", "bbox": [0, 0, 400, 400]}],
+                     stroked(el, 0.15).astype("int16"), 1600 / 453.54) is None, "a picture over it is ink too"
+
+
+def test_a_hebrew_first_line_is_placed_by_its_baseline():
+    """Hebrew has no capitals for `top_drift` to read: hebrew-lesson's boxes sit 3.6 pt high (a
+    PowerPoint import's insets), which the row where the letters' ink thins out shows. Underlines are
+    cleared first; Latin and CJK first lines are left to the cap rule."""
+    import numpy as np
+
+    from beamer2slides.deck_ir import baseline_drift
+    px, scale, z = 4.0, 2.0, 12.0
+
+    def element(text):
+        return {"kind": "text", "bbox": [50.0, 50.0, 250.0, 120.0], "anchor": [53.0, 65.0],
+                "box": {"valign": "top", "scale": scale},
+                "paragraphs": [{"runs": [{"text": text, "size": z}], "slides": {}}]}
+
+    def thumb(baseline, underline=False, bold_tops=False):
+        im = np.full((600, 1200, 3), 250, dtype=np.int16)
+        B = int(round(baseline * px))
+        for x in range(int(55 * px), int(200 * px), 12):
+            im[B - int(0.6 * z * px):B, x:x + 3] = 10           # letter stems down to the baseline
+            if bold_tops:
+                im[B - int(0.6 * z * px):B - int(0.5 * z * px), x:x + 10] = 10
+        if underline:
+            im[B + 4:B + 6, int(55 * px):int(200 * px)] = 10
+        return im
+
+    el = element("שלום עולם")
+    paras = el["paragraphs"]
+    for shown in (61.4, 65.0):
+        for kw in ({}, {"underline": True}, {"bold_tops": True}):
+            got = baseline_drift(el, [el], paras, thumb(shown, **kw), px)
+            assert got == pytest.approx((shown - 65.0) * scale, abs=0.6), (shown, kw)
+    latin = element("Hello world")
+    assert baseline_drift(latin, [latin], latin["paragraphs"], thumb(61.4), px) is None
+    cjk = element("日本語")
+    assert baseline_drift(cjk, [cjk], cjk["paragraphs"], thumb(61.4), px) is None
+
+
 def test_list_items_collapse_their_spacing_and_other_paragraphs_do_not(tmp_path):
     """Between two list items COLLAPSE_LISTS drops spaceBelow; between two plain paragraphs it is
     the gap Slides leaves (12 pt / scale more than the plain pitch)."""
