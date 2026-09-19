@@ -135,6 +135,16 @@ Each of these was a diff against PDFium until it was ported:
     the "deliberately flipped" in PDFium's comment is FX_RECT's y-down naming, so its `top` is yMin.
     Ascent and descent then come from the face, and FreeType makes a Type 1 or CFF face's ascender
     and descender its FontBBox yMax and yMin (floored and ceiled from 16.16), not 0 (bfuzz seed 452).
+    A Type 3 font without /FontBBox has no face either: its box is the union of its char boxes.
+  - A non-symbolic Type 1 glyph missing by name is looked up through FreeType's Unicode charmap -
+    which FreeType only makes when some glyph name maps to Unicode. MSAM10's (`trianglerightsld`)
+    don't, so `SelectCharMap` fails, the builtin encoding stays selected and the *code* is looked up
+    in it (bfuzz seed 246: the ▶ bullet found, not .notdef).
+  - CID fonts: `CharCodeFromUnicode` (FPDFFont_GetGlyphWidth) answers 0 for an embedded CMap
+    (kUNKNOWN) and for Identity-H/V (kCID, no CID-to-Unicode map); a Type0 font with no /Encoding, or
+    without exactly one descendant dictionary, fails to load and its text is stock Helvetica.
+    Found by editing every font dictionary of a deck the same way
+    (`test_font_dictionaries_edited_deck_wide_read_as_pdfium_reads_them`).
 - **Cross references** are CPDF_Parser's loading ported, not a reader that accepts good files
   (`document.PdfFile`, whose table is CPDF_CrossRefTable; `test_cross_references_are_read_as_pdfium_reads_them`
   and `test_cross_references_are_loaded_as_pdfium_loads_them`, one case per rule). A regex reader

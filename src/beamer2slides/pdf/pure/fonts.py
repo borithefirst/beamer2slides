@@ -999,6 +999,10 @@ class SimpleFont(Font):
                     if g:
                         self.enc_unicode[code] = unicode_from_adobe_name(p.glyph_name(g))
             return
+        # SelectCharMap(kUnicode) fails when FreeType made no Unicode charmap, which it doesn't when
+        # no glyph name maps to Unicode (ps_unicodes_init: No_Unicode_Glyph_Name, as in MSAM10);
+        # the builtin encoding UseType1Charmap selected then stays, and codes are looked up in it
+        unicode_map = self._has_unicode_map(p)
         for code in range(256):
             name = self.char_name(code)
             if not name:
@@ -1010,7 +1014,8 @@ class SimpleFont(Font):
                 continue
             if name not in (NOTDEF, "space"):
                 # FreeType's synthesized Unicode charmap: the glyph whose name maps to that Unicode
-                self.glyphs[code] = self._unicode_index(p, self.enc_unicode[code])
+                self.glyphs[code] = (self._unicode_index(p, self.enc_unicode[code]) if unicode_map
+                                     else p.builtin_index(code))
             else:
                 self.enc_unicode[code] = 0x20
                 self.glyphs[code] = NO_GLYPH
@@ -1040,6 +1045,11 @@ class SimpleFont(Font):
             if self.glyphs[code] == 0 and name == NOTDEF:
                 self.enc_unicode[code] = 0x20
                 self.glyphs[code] = p.index.get(cmap.get(0x20), 0)
+
+    @classmethod
+    def _has_unicode_map(cls, p: Program) -> bool:
+        cls._unicode_index(p, 0x20)
+        return bool(p._by_unicode)
 
     @staticmethod
     def _unicode_index(p: Program, u: int) -> int:
@@ -1194,6 +1204,17 @@ class Type3Font(SimpleFont):
             self._check_metrics()
 
     def _check_metrics(self) -> None:
+        if self.font_bbox == (0, 0, 0, 0):
+            # CheckFontMetrics with no face: the union of the char boxes that have a width
+            union = None
+            for code in range(256):
+                l, b, rt, t = self.char_bbox(code)
+                if l == rt:
+                    continue
+                union = [l, b, rt, t] if union is None else \
+                    [min(union[0], l), min(union[1], b), max(union[2], rt), max(union[3], t)]
+            if union:
+                self.font_bbox = tuple(union)
         if self.ascent == 0 and self.descent == 0:
             l, b, rt, t = self.char_bbox(ord("A"))
             self.ascent = self.font_bbox[3] if b == t else t
@@ -1277,14 +1298,20 @@ class CIDFont(Font):
         r = doc.resolve
         fonts = r(d.get("DescendantFonts"))
         desc_font = r(fonts[0]) if isinstance(fonts, list) and len(fonts) == 1 else None
+        if isinstance(desc_font, Stream):
+            desc_font = desc_font.dict
         if not isinstance(desc_font, dict):
-            desc_font = {}
+            raise ValueError("CPDF_CIDFont::Load: no single descendant font")
         self.base_name = str(r(desc_font.get("BaseFont")) or "")
         enc = r(d.get("Encoding"))
+        if not isinstance(enc, (Name, Stream)):
+            raise ValueError("CPDF_CIDFont::Load: an /Encoding that is neither a name nor a stream")
         if isinstance(enc, Stream):
             self.cmap = CMap("", doc.stream_data(enc))
+            self._cmap_name = None
         else:
-            self.cmap = CMap(str(enc) if isinstance(enc, Name) else "Identity-H")
+            self._cmap_name = str(enc) if isinstance(enc, Name) else "Identity-H"
+            self.cmap = CMap(self._cmap_name)
         self.vertical = self.cmap.vertical
         self.cid_type0 = str(r(desc_font.get("Subtype")) or "") == "CIDFontType0"
         self._descriptor(r(desc_font.get("FontDescriptor")))
@@ -1360,9 +1387,15 @@ class CIDFont(Font):
         return super().unicode(code)
 
     def code_from_unicode(self, u: int) -> int:
+        """CPDF_CIDFont::CharCodeFromUnicode: the ToUnicode map reversed, else by the CMap's coding.
+        An embedded CMap is kUNKNOWN and Identity-H/V kCID with no CID-to-Unicode map loaded (the
+        Identity ordering has none, and the CJK maps are not ported): both answer 0. Only another
+        predefined CMap reaches the `unicode < 0x80` rule."""
         code = super().code_from_unicode(u)
         if code:
             return code
+        if self._cmap_name is None or self._cmap_name in ("Identity-H", "Identity-V"):
+            return 0
         return u if u < 0x80 else 0
 
 

@@ -8,6 +8,7 @@ reader rounds where PDFium stores a float, but not after every operation)."""
 
 import dataclasses
 import json
+import re
 from pathlib import Path
 
 import pytest
@@ -956,7 +957,41 @@ def test_chars_and_object_boxes_are_pdfiums_to_the_last_bit():
             finally:
                 ref.close()
                 pure.close()
-_TWO_PAGES = {1: _CAT, 2: b"<< /Type /Pages /Kids [3 0 R 4 0 R] /Count 2 >>", 3: _LEAF % 10, 4: _LEAF % 20}
+
+
+# Whole decks with every font dictionary edited the same way: each one reached a rule the port had
+# approximated. MSAM10 read as non-symbolic finds no glyph by name, and FreeType made it no Unicode
+# charmap (no glyph name maps to Unicode), so the code is looked up in its builtin encoding
+# (bfuzz seed 246); a CID font with no /ToUnicode answers FPDFFont_GetGlyphWidth with code 0
+# (Identity is kCID with no CID-to-Unicode map); a Type0 font without /Encoding fails to load, so
+# its text is stock Helvetica; a Type 3 font without /FontBBox takes the union of its char boxes.
+FONT_VARIANTS = {
+    "nonsymbolic": ("01_basic", lambda d: re.sub(rb"/Flags \d+", b"/Flags 32", d)),
+    "no_flags": ("01_basic", lambda d: d.replace(b"/Flags", b"/FlagX")),
+    "cid_no_tounicode": ("06_wide_lualatex", lambda d: d.replace(b"/ToUnicode", b"/ToUnicodX")),
+    "cid_no_encoding": ("06_wide_lualatex", lambda d: d.replace(b"/Encoding", b"/EncodinX")),
+    "cid_no_widths": ("06_wide_lualatex", lambda d: d.replace(b"/W [", b"/X [").replace(b"/DW", b"/DX")),
+    "type3_no_fontbbox": ("19_labels_on_graphics", lambda d: d.replace(b"/FontBBox", b"/FontBBoX")),
+}
+
+
+@pytest.mark.parametrize("name", FONT_VARIANTS)
+def test_font_dictionaries_edited_deck_wide_read_as_pdfium_reads_them(name):
+    deck, edit = FONT_VARIANTS[name]
+    path = OUT / f"{deck}.pdf"
+    if not path.exists():
+        pytest.skip("no test PDFs built")
+    data = edit(path.read_bytes())
+    ref, pure = pdf.resolve("pdfium").open(data), pdf.resolve("pure").open(data)
+    try:
+        for i in range(len(ref)):
+            assert _chars_and_bounds(pure[i]) == _chars_and_bounds(ref[i]), f"{name} page {i}"
+    finally:
+        ref.close()
+        pure.close()
+
+
+_TWO_PAGES ={1: _CAT, 2: b"<< /Type /Pages /Kids [3 0 R 4 0 R] /Count 2 >>", 3: _LEAF % 10, 4: _LEAF % 20}
 
 
 def _entry(data: bytes, num: int, new: bytes) -> bytes:
