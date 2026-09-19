@@ -577,6 +577,18 @@ the same code without it, rerun the same day (`ff-base` -> `ff-d`, 912 slides): 
 page 0.880 -> 0.886, pixels 0.970 -> 0.971, no deck down (sc-dark-modern 0.739 -> 0.810, devfest2020
 0.827 -> 0.857, sc-dark-minimal 0.864 -> 0.884, sc-memphis 0.831 -> 0.846). `adopt_shapes.pt` wrote
 every length between -1 and 0 as positive until then (`"-0.67".replace("-0", "0")`).
+More from the thumbnails (`ffmain` -> `px-f`, 912 slides: boxes 0.923 -> 0.928, page 0.919 -> 0.924, no
+deck down): a box measured 3.6 pt high has PowerPoint's top/bottom insets (`deck_ir.top_drift`,
+`pptx_insets`, `KNOWN_CAPS` only: other faces' cap heights move the first ink as much), and a deck most
+of whose measured boxes have them is a .pptx import whose boxes all do, sides too (`box.inset_x` 3.6:
+comps-analysis 0.43 -> 0.66; ap-bio-stats' two lone ones keep Slides' sides); a paragraph of several
+sizes is spaced line by line (per-word struts, the next paragraph from the depth TeX recorded); a
+full-slide template picture under a box no longer hides its insets (`deck_ir.crossed`: devfest2020
+0.857 -> 0.897); and a stand-in font is condensed to the widths the thumbnails show
+(`deck_ir.ink_widths` measures each box's first line, `adopt.font_widths` holds it against the
+stand-in's advances less the end bearings, median of >= 2 within 4%, applied as fontspec
+`FakeStretch` when off by > 2%): comps-analysis's Libre Bodoni at 0.94, 0.66 -> 0.675. A deck's own
+font is never stretched: Arial measures 0.987-1.002, and Pacifico's 0.967 was its kerning.
 
 Opt-in suite (real Google Slides, ~95 s): `python -m pytest -m slides` (the default run deselects
 the `slides` marker, pyproject.toml). It converts the stress decks (19–22, 25, 13, demo) 3 at a

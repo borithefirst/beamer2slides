@@ -409,7 +409,7 @@ def font_preamble(target: dict, tree: Path | None, ctx: Context | None = None) -
         low, asked = flatten(match), flatten(wanted[fam])
         if not (low.startswith(asked) or asked.startswith(low)):
             print(f"  {wanted[fam]}: not on this machine, set in {stem}")
-        lines.append(f"\\{command}{{{stem}}}[{font_files_latex(files, tree)}]")
+        lines.append(f"\\{command}{{{stem}}}[{font_files_latex(files, tree)}{stretch(wanted[fam], stem, files, target)}]")
     if ctx is not None:
         switches: dict[str, str] = {}
         main = set(wanted.values())
@@ -432,9 +432,95 @@ def font_preamble(target: dict, tree: Path | None, ctx: Context | None = None) -
                 continue
             command = "\\adoptfont" + "".join(chr(ord("A") + int(d)) for d in str(len(switches)))
             switches[font] = command
-            lines.append(f"\\newfontfamily{command}{{{stem}}}[{font_files_latex(files, tree)}]")
+            lines.append(f"\\newfontfamily{command}{{{stem}}}[{font_files_latex(files, tree)}{stretch(font, stem, files, target)}]")
         ctx.font_switches = switches
     return ["\\usepackage{fontspec}"] + lines
+
+
+# A stand-in set within this share of the deck's widths is left alone; outside, it is condensed or
+# extended to them, never by more than WIDTH_LIMIT
+WIDTH_TOLERANCE = 0.02
+WIDTH_LIMIT = 0.15
+WIDTH_SPREAD = 0.04
+
+
+def font_widths(font: str, files: dict, target: dict) -> float | None:
+    """How much wider or narrower the deck's thumbnails show words in `font` than `files` set them
+    (the median of measured / predicted over its lone one-line boxes, `deck_ir.ink_widths`), or None
+    when that is within WIDTH_TOLERANCE, measured fewer than twice, or the measures disagree.
+
+    A stand-in has the deck font's name and not its widths: Libre Bodoni sets comps-analysis's
+    "Bodoni" titles 5% wider than Slides draws them, and each one wrapped a word onto a line of its
+    own. The prediction is the words' advances less the first glyph's left bearing and the last one's
+    right bearing, which is what a thumbnail's first and last ink columns show."""
+    try:
+        from fontTools.pens.boundsPen import BoundsPen
+        from fontTools.ttLib import TTFont
+    except ImportError:
+        return None
+    loaded: dict = {}
+    ratios = []
+    for s in target["slides"]:
+        for e in s["elements"]:
+            if not e.get("ink_width"):
+                continue
+            runs = next(p for p in e["paragraphs"] if p["runs"])["runs"]    # the line measured
+            r0 = next(r for r in runs if r["text"].strip())
+            if (r0.get("font") or "") != font:
+                continue
+            style = ("BoldItalicFont" if r0.get("italic") else "BoldFont") if r0.get("bold") else \
+                ("ItalicFont" if r0.get("italic") else "UprightFont")
+            path = files.get(style) or files["UprightFont"]
+            if path not in loaded:
+                try:
+                    f = TTFont(path, fontNumber=0, lazy=True)
+                    loaded[path] = (f, f.getBestCmap(), f.getGlyphSet(), f["hmtx"], f["head"].unitsPerEm)
+                except Exception:
+                    loaded[path] = None
+            if loaded[path] is None:
+                continue
+            f, cmap, glyphs, hmtx, upem = loaded[path]
+            text = "".join(r["text"] for r in runs).strip()
+            names = [cmap.get(ord(c)) for c in text]
+            if None in names:
+                continue
+
+            def bounds(g):
+                pen = BoundsPen(glyphs)
+                glyphs[g].draw(pen)
+                return pen.bounds
+            first, last = bounds(names[0]), bounds(names[-1])
+            if first is None or last is None:
+                continue
+            ink = sum(hmtx[g][0] for g in names) - first[0] - (hmtx[names[-1]][0] - last[2])
+            predicted = ink / upem * (r0.get("size") or 0)
+            # a word or two of small type says little; a line far shorter than its words is the
+            # first of several (comps-analysis's long titles, 0.6-0.8), which is not a width
+            if predicted > 20 and abs(e["ink_width"] / predicted - 1) <= WIDTH_LIMIT:
+                ratios.append(e["ink_width"] / predicted)
+    if len(ratios) < 2:
+        return None
+    ratios.sort()
+    mid = ratios[len(ratios) // 2] if len(ratios) % 2 else sum(ratios[len(ratios) // 2 - 1:len(ratios) // 2 + 1]) / 2
+    near = [r for r in ratios if abs(r - mid) <= WIDTH_SPREAD]
+    if len(near) < max(2, 0.6 * len(ratios)) or abs(mid - 1) <= WIDTH_TOLERANCE:
+        return None
+    return round(mid, 3)
+
+
+def stretch(font: str, stem: str, files: dict, target: dict) -> str:
+    """fontspec's FakeStretch for `font_widths`, or nothing. Only for a stand-in (`stem`, the files'
+    family, is not the deck's `font`): a deck's own font is set as Slides sets it, and what the
+    thumbnails show of it differs from its advances by its kerning alone - Pacifico's script
+    measured 3% narrow, and condensed by that it set sc-aesthetic-school's titles longer, not shorter."""
+    asked, have = flatten(font), flatten(stem)
+    if have.startswith(asked) or asked.startswith(have):
+        return ""
+    ratio = font_widths(font, files, target)
+    if ratio is None:
+        return ""
+    print(f"  {font}: set {ratio:.3f} wide to match the deck's slides")
+    return f",FakeStretch={ratio}"
 
 
 GYRE = {"sans": "texgyreheros", "serif": "texgyretermes", "mono": "texgyrecursor"}
@@ -746,6 +832,8 @@ def text_box_latex(el: dict, ctx: Context, ind: str) -> str:
     if box.get("inset_y") is not None and box.get("insets") != 0:
         # PowerPoint's own top and bottom insets, which a deck's thumbnails showed (deck_ir.pptx_insets)
         inset = (BASELINE_A - (SLIDES_INSET_Y - box["inset_y"])) / scale
+    if box.get("inset_x") is not None and box.get("insets") != 0:
+        pad = box["inset_x"] / scale                    # the same deck's side insets
     width, height = max(x1 - x0 - 2 * pad, 1.0), max(y1 - y0, 0.1)
     valign = box.get("valign", "top")
     paras = [p for p in el["paragraphs"] if p["runs"]]

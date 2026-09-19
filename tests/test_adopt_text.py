@@ -451,9 +451,11 @@ def test_powerpoint_insets_where_the_thumbnails_show_them():
     pptx_insets(slides, [(hit, -3.5), (miss, 0.2)])
     assert hit["box"]["inset_y"] == 3.6 and hit["anchor"] == [10.0, 18.2]
     assert "inset_y" not in miss["box"] and "inset_y" not in other["box"]
+    assert "inset_x" not in hit["box"], "a lone box keeps Slides' sides (ap-bio-stats)"
     a, b, c, d = box(), box(), box(), box("bottom")
     pptx_insets([{"elements": [a, b, c, d]}], [(a, -3.6), (b, -3.9), (c, -3.2)])
     assert d["box"]["inset_y"] == 3.6 and d["anchor"] == [10.0, 21.8]
+    assert all(e["box"]["inset_x"] == 3.6 for e in (a, b, c, d)), "a deck imported whole (comps-analysis)"
 
 
 def test_a_box_with_powerpoint_insets_starts_its_text_3_6_pt_higher():
@@ -462,6 +464,50 @@ def test_a_box_with_powerpoint_insets_starts_its_text_3_6_pt_higher():
     plain = adopt.text_box_latex(el, adopt.Context(), "")
     el["box"]["inset_y"] = 3.6
     assert "\\vskip6.48pt" in plain and "\\vskip2.88pt" in adopt.text_box_latex(el, adopt.Context(), "")
+    assert "\\begin{textblock*}{86.6pt}(6.7pt,0.0pt)" in plain
+    el["box"]["inset_x"] = 3.6
+    assert "\\begin{textblock*}{92.8pt}(3.6pt,0.0pt)" in adopt.text_box_latex(el, adopt.Context(), "")
+
+
+def test_the_thumbnails_measure_a_first_line_and_skip_what_crosses_it():
+    import numpy as np
+    from beamer2slides.deck_ir import ink_widths
+    px = 4.0
+    im = np.full((int(100 * px), int(200 * px), 3), 240, dtype=np.int16)
+    im[int(24 * px):int(30 * px), int(20 * px):int(80 * px)] = 20       # the first line's words
+    im[int(36 * px):int(42 * px), int(20 * px):int(150 * px)] = 20      # a longer second line
+
+    def element():
+        return {"kind": "text", "bbox": [10.0, 10.0, 190.0, 60.0], "anchor": [16.7, 30.0], "box": {"scale": 1.0},
+                "paragraphs": [{"align": "left", "bullet": None, "runs": [{"text": "Some words", "size": 8.0}]},
+                               {"align": "left", "bullet": None, "runs": [{"text": "More", "size": 8.0}]}]}
+    el = element()
+    ink_widths([el], im, px)
+    assert el["ink_width"] == pytest.approx(60.0, abs=0.3)
+    el = element()
+    ink_widths([el, {"kind": "image", "bbox": [100.0, 20.0, 120.0, 40.0]}], im, px)
+    assert "ink_width" not in el
+
+
+def test_a_stand_in_is_condensed_to_the_widths_the_thumbnails_show(tmp_path):
+    """comps-analysis's Bodoni is set in Libre Bodoni, 6% wider than Slides draws it: its titles
+    wrapped a word. The deck's own font is never touched (Pacifico's kerning read as 3% narrow)."""
+    from .test_adopt_media import tiny_font
+    path = tmp_path / "TinySans-Regular.ttf"
+    path.write_bytes(tiny_font("Tiny Sans"))
+    files = {"UprightFont": path}
+    # five "A"s at 10 pt: 3000 units of advance less the last one's 100 of right bearing = 29 pt of ink
+
+    def sample(width, text="AAAAA"):
+        return {"ink_width": width, "paragraphs": [{"runs": [{"text": text, "size": 10.0, "font": "Deck Serif"}]}]}
+    target = {"slides": [{"elements": [sample(26.1), sample(26.2), sample(15.0)]}]}
+    assert adopt.font_widths("Deck Serif", files, target) == pytest.approx(0.9, abs=0.005)
+    assert adopt.stretch("Deck Serif", "TinySans", files, target) == ",FakeStretch=0.902"
+    assert adopt.stretch("Tiny Sans", "TinySans", files, target) == "", "the deck's own font"
+    near = {"slides": [{"elements": [sample(28.8), sample(29.1)]}]}
+    assert adopt.font_widths("Deck Serif", files, near) is None, "within 2%"
+    lone = {"slides": [{"elements": [sample(26.1)]}]}
+    assert adopt.font_widths("Deck Serif", files, lone) is None, "one measure is not enough"
 
 
 def test_a_paragraph_of_two_sizes_is_spaced_line_by_line():

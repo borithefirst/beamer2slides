@@ -528,10 +528,49 @@ def thumbnail_insets(elements: list[dict], thumb, px: float) -> None:
             e["anchor"] = [round(e["anchor"][0] - pad, 2), round(e["anchor"][1] - dy, 2)]
 
 
+def ink_widths(elements: list[dict], thumb, px: float) -> None:
+    """How wide the thumbnail shows the first line of each text box's first paragraph (`ink_width`,
+    page pt, first ink column to last): `adopt.font_widths` holds them against the stand-in a deck's
+    font is set in when this machine does not have it, for the paragraphs that fit on one line.
+    Only a paragraph in one font, size and style, left-aligned, with no bullet, whose line nothing
+    else crosses and whose words do not touch the box's sides."""
+    if thumb is None or not px:
+        return
+    import numpy as np
+    for e in elements:
+        box_ = e.get("box") if isinstance(e.get("box"), dict) else None
+        paras = [p for p in e.get("paragraphs", []) if p.get("runs")]
+        if e.get("kind") != "text" or box_ is None or not paras or not e.get("anchor"):
+            continue
+        p = paras[0]
+        runs = [r for r in p["runs"] if r["text"].strip()]
+        text = "".join(r["text"] for r in p["runs"])
+        if not runs or p.get("bullet") or p.get("align", "left") != "left" or p.get("direction") == "rtl" \
+                or any(c in text for c in "\x0b\n\t") or len(text.strip()) < 4 \
+                or len({(r.get("font"), bool(r.get("bold")), bool(r.get("italic")), r.get("size"),
+                         r.get("script")) for r in runs}) != 1:
+            continue
+        x0, y0, x1, y1 = e["bbox"]
+        z, base = runs[0].get("size") or 0, e["anchor"][1]
+        band = (x0, base - 0.85 * z, x1, base + 0.3 * z)
+        if z <= 0 or crossed(e, elements, band):
+            continue
+        X0, X1, Y0, Y1 = (int(round(v * px)) for v in (x0, x1, band[1], band[3]))
+        if X0 < 0 or Y0 < 0 or X1 > thumb.shape[1] or Y1 > thumb.shape[0] or Y1 - Y0 < 3 or X1 - X0 < 8:
+            continue
+        crop = thumb[Y0:Y1, X0:X1]
+        ground = np.median(crop.reshape(-1, crop.shape[-1]), axis=0)
+        cols = np.nonzero((np.abs(crop - ground).max(axis=-1) > 80).any(axis=0))[0]
+        if len(cols) < 3 or cols[0] <= 1 or cols[-1] >= crop.shape[1] - 2:
+            continue
+        e["ink_width"] = round((cols[-1] - cols[0] + 1) / px, 2)
+
+
 def crossed(e: dict, elements: list[dict], strip: tuple) -> bool:
     """Does anything but the box itself reach into `strip`, where its thumbnail is read? What lies under
-    the whole box does not: a panel it stands on, or the full-slide picture of a template's layout
-    (devfest2020 draws every slide's ground as one, and none of its boxes could be read)."""
+    the box, from its top down past the strip, does not: a panel it stands on, or the full-slide
+    picture of a template's layout (devfest2020 draws every slide's ground as one, and none of its
+    boxes could be read)."""
     x0, y0, x1, y1 = e["bbox"]
     below = True
     for o in elements:
@@ -542,7 +581,7 @@ def crossed(e: dict, elements: list[dict], strip: tuple) -> bool:
         if not b or len(b) != 4 or b[2] <= strip[0] or b[0] >= strip[2] or b[3] <= strip[1] or b[1] >= strip[3]:
             continue
         if (o.get("kind") == "shape" or below and o.get("kind") == "image") and b[0] < x0 - 2 and b[1] < y0 - 2 \
-                and b[2] > x1 + 2 and b[3] > max(y1, strip[3]) + 2:
+                and b[2] > x1 + 2 and b[3] > strip[3]:
             continue
         return True
     return False
@@ -611,6 +650,12 @@ def pptx_insets(slides: list[dict], drifts: list[tuple[dict, float]]) -> None:
             if id(e) not in chosen and (id(e) in measured or not whole):
                 continue
             box_["inset_y"] = PPTX_INSET_Y
+            if whole:
+                # a deck imported whole keeps the .pptx's side insets too, 3.6 pt like the top ones:
+                # comps-analysis's text starts 3.1-3.8 pt left of Slides' 6.7 and wrapped every
+                # other line early (boxes 0.43 -> 0.66); ap-bio-stats' two lone boxes measured at
+                # -3.6 keep Slides' sides (their titles stand where 6.7 pt puts them)
+                box_["inset_x"] = PPTX_INSET_Y
             if e.get("anchor") and box_.get("valign", "top") in ("top", "bottom"):
                 dy = -want / (box_.get("scale") or 1.0) * (1 if box_.get("valign", "top") == "bottom" else -1)
                 e["anchor"] = [e["anchor"][0], round(e["anchor"][1] + dy, 2)]
@@ -899,6 +944,7 @@ def deck_ir(pres: dict, pdf_size: list[float] | None = None, base: dict | None =
                 px = thumb.shape[1] / page_w
             elements = deck_fills.settle(elements, thumb, px, None if picture else color, bool(picture))
             thumbnail_insets(elements, thumb, px)
+            ink_widths(elements, thumb, px)
             drifts += [(e, d) for e, d in ((e, top_drift(e, elements, thumb, px)) for e in elements)
                        if d is not None]
         key = slide_keys.get(slide["objectId"]) or (max(set(tags), key=tags.count) if tags else None)
