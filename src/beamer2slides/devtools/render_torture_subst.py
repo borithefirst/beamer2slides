@@ -149,6 +149,48 @@ def compare(content: bytes, fonts, zoom: float, transparent: bool):
     return int((d > 0).sum()), a, b, d
 
 
+def faces(content: bytes, fonts) -> list[str]:
+    """Which face each side loaded for the page's fonts, as a line per font: the substitute is the
+    platform's choice (GDI on Windows, the folder scan elsewhere), so a seed that only fails on one
+    OS is usually two different faces, and the font program's size and digest say so without the
+    file. Never raises: this is for the failure report."""
+    out = []
+    try:
+        from ..pdf.pdfium_backend import PdfiumBackend, _font_program
+        from ..pdf.pure.backend import PureBackend
+        data = pdf_bytes(content, fonts)
+        said = []
+        for backend in (PdfiumBackend(), PureBackend()):
+            doc = backend.open(data)
+            try:
+                page = doc[0]
+                page.chars()                                  # fills page._fonts
+                said.append([_describe(f, _font_program) for f in page._fonts])
+            finally:
+                doc.close()
+        for i, (a, b) in enumerate(zip(*said)):
+            out.append(f"   font {i}: pdfium {a}")
+            out.append(f"           pure   {b}")
+    except Exception as e:  # noqa: BLE001
+        out.append(f"   (faces unknown: {type(e).__name__} {e})")
+    return out
+
+
+def _describe(font, program_of) -> str:
+    """A font handle (PDFium's) or a pure Font, as its face's size and digest plus what the
+    substitution asked for."""
+    import hashlib
+    if not hasattr(font, "subst"):                            # a PDFium font handle
+        data = program_of(font)
+        return f"{len(data)} bytes {hashlib.sha1(data).hexdigest()[:8] if data else '-'}"
+    program = getattr(font, "program", None)
+    data = getattr(program, "platform_data", None) or getattr(program, "face_data", None) or b""
+    subst = font.subst
+    asked = (f" subst {subst.family!r} weight {subst.weight} italic {subst.italic_angle}"
+             if subst is not None else " no subst")
+    return f"{len(data)} bytes {hashlib.sha1(data).hexdigest()[:8] if data else '-'}{asked}"
+
+
 def shrink(content: bytes, fonts, zoom: float, transparent: bool) -> bytes:
     """Drop lines while the difference remains."""
     def fails(c):
@@ -205,6 +247,8 @@ def main(argv=None) -> int:
         print(f"seed {seed} zoom {zoom} transparent {transparent} fonts {[f.name for f in fonts]}: "
               f"{npx} px, max {d.max()}")
         print(small.decode())
+        for line in faces(small, fonts):
+            print(line)
         out.mkdir(parents=True, exist_ok=True)
         from PIL import Image
         vis = np.concatenate([a[..., :3], b[..., :3], np.stack([np.where(d > 0, 255, 0)] * 3, -1)], 1)
