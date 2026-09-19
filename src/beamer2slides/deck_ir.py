@@ -62,6 +62,60 @@ def box(m: list[float], w: float, h: float) -> list[float]:
     return [min(xs), min(ys), max(xs), max(ys)]
 
 
+def frame(m: list[float], w: float, h: float, scale: float) -> dict:
+    """An element's own frame, in PDF pt: `size` (its displayed width and height, before rotation),
+    `origin` (where its (0,0) corner lands on the page), `matrix` (the transform's linear part with
+    the size taken out: a rotation, possibly mirrored or sheared), `rotation` (degrees clockwise),
+    `flip` (mirrored left to right, then turned by `rotation`) and `box` (the upright box about the
+    centre that the element would have if it were not turned).
+
+    `box(m, w, h)` - the bounding box - is where a turned element's ink is, but not its size: a text
+    box turned 30 degrees drawn in it is upright and too big. Only `adopt` asks for this."""
+    a, b, tx, d, e, ty = m
+    sx, sy = math.hypot(a, d), math.hypot(b, e)
+    if sx < 1e-9 and sy < 1e-9:
+        q = [1.0, 0.0, 0.0, 1.0]
+    elif sx < 1e-9:                         # a line stored with no width: its first axis is the second's normal
+        q = [e / sy, b / sy, -b / sy, e / sy]
+    elif sy < 1e-9:                         # ... or no height (most straight connectors)
+        q = [a / sx, -d / sx, d / sx, a / sx]
+    else:
+        q = [a / sx, b / sy, d / sx, e / sy]
+    W, H = sx * w, sy * h
+    if q[0] * q[3] - q[1] * q[2] >= 0:
+        rot, flip = math.degrees(math.atan2(q[2], q[0])), False
+    else:                                   # R(rot) . mirror(x): the first axis points the other way
+        rot, flip = math.degrees(math.atan2(-q[2], -q[0])), True
+    rot = (rot + 180) % 360 - 180
+    cx, cy = tx + q[0] * W / 2 + q[1] * H / 2, ty + q[2] * W / 2 + q[3] * H / 2
+    out = {"size": [round(W / scale, 3), round(H / scale, 3)], "origin": [round(tx / scale, 3), round(ty / scale, 3)],
+           "matrix": [round(v, 6) for v in q], "rotation": round(rot, 3), "flip": flip,
+           "box": [round(v / scale, 3) for v in (cx - W / 2, cy - H / 2, cx + W / 2, cy + H / 2)]}
+    if abs(q[0] * q[1] + q[2] * q[3]) > 1e-3:
+        out["shear"] = True
+    return out
+
+
+def turned(m: list[float]) -> bool:
+    """Anything but a plain scale and shift: rotated, mirrored or sheared."""
+    return abs(m[1]) > 1e-9 or abs(m[3]) > 1e-9 or m[0] < 0 or m[4] < 0
+
+
+def outline_props(outline: dict, scale: float, scheme: dict) -> dict:
+    """A shape's outline as adopt draws it: colour (None when not drawn), weight in PDF pt (Slides'
+    default 0.75 pt when the deck says nothing), alpha and dash style."""
+    fill = outline.get("outlineFill", {}).get("solidFill", {})
+    # an outline at alpha 0 is how Slides hides one without switching it off
+    drawn = outline.get("propertyState", "RENDERED") == "RENDERED" and bool(fill) and fill.get("alpha", 1.0) > 0.004
+    out = {"outline": rgb_hex(fill.get("color"), scheme) if drawn else None,
+           "weight": round((dim(outline.get("weight")) or 0.75) / scale, 3)}
+    if drawn and fill.get("alpha", 1.0) < 1.0:
+        out["outline_alpha"] = round(fill["alpha"], 4)
+    if drawn and outline.get("dashStyle", "SOLID") != "SOLID":
+        out["dash"] = outline["dashStyle"]
+    return out
+
+
 def rgb_hex(color: dict | None, scheme: dict[str, str]) -> str | None:
     if not color:
         return None
@@ -549,9 +603,58 @@ def line_element(pe: dict, m: list[float], scale: float, scheme: dict) -> dict |
             "from": [round(x0 / scale, 2), round(y0 / scale, 2)],
             "to": [round(x1 / scale, 2), round(y1 / scale, 2)],
             "outline": rgb_hex(props["lineFill"]["solidFill"].get("color"), scheme),
-            "weight": round(dim(props.get("weight")) / scale, 2) or 1.0,
+            "weight": round((dim(props.get("weight")) or 0.75) / scale, 3),
             "arrow": ends.get("endArrow") not in (None, "NONE"),
-            "arrow_start": ends.get("startArrow") not in (None, "NONE"), "fill": None}
+            "arrow_start": ends.get("startArrow") not in (None, "NONE"), "fill": None,
+            # what the heads are, how the connector runs (elbow and curved connectors are drawn in
+            # their own frame), its dashes and its transparency
+            "start_arrow": ends.get("startArrow", "NONE"), "end_arrow": ends.get("endArrow", "NONE"),
+            "line_type": pe["line"].get("lineType"), "category": pe["line"].get("lineCategory"),
+            "frame": frame(m, w, h, scale),
+            **({"dash": props["dashStyle"]} if props.get("dashStyle", "SOLID") != "SOLID" else {}),
+            **({"outline_alpha": round(props["lineFill"]["solidFill"]["alpha"], 4)}
+               if props["lineFill"]["solidFill"].get("alpha", 1.0) < 1.0 else {})}
+
+
+def foreign_shape(pe: dict, m: list[float], w: float, h: float, bbox: list[float], fill_hex: str | None,
+                  resolver: StyleResolver, fonts: FontMapper, scale: float, page_w: float) -> dict | None:
+    """A shape of a deck nobody converted, as adopt draws it: its preset (`shape_type`; a freeform,
+    which the API gives no geometry for, is CUSTOM), fill and outline with their transparency, dashes
+    and weight, and - when it is turned, mirrored or sheared - its own `frame`, which is what a turned
+    text box's words are laid out in (`bbox` stays the bounding box on the page, where the ink is).
+
+    A text box's own fill and outline are read too: `pull` leaves them out because the converter
+    never writes one, but a person's text box on a coloured panel is that panel."""
+    shape = pe["shape"]
+    props = shape.get("shapeProperties", {})
+    kind = shape.get("shapeType") or "CUSTOM"
+    upright = m
+    if turned(m):
+        # the words are laid out in the box the element would have if it were not turned
+        fr = frame(m, w, h, 1.0)
+        x0, y0 = fr["box"][:2]
+        upright = [fr["size"][0] / w if w else 1.0, 0.0, x0, 0.0, fr["size"][1] / h if h else 1.0, y0]
+    solid = props.get("shapeBackgroundFill", {}).get("solidFill", {})
+    if solid.get("alpha", 1.0) <= 0.004:
+        fill_hex = None  # a fill at alpha 0 draws nothing (sc-memphis' rings: black at alpha 0)
+    style: dict = {"fill": fill_hex}
+    if fill_hex and solid.get("alpha", 1.0) < 1.0:
+        style["fill_alpha"] = round(solid["alpha"], 4)
+    style.update(outline_props(props.get("outline", {}), scale, resolver.scheme))
+    if turned(m):
+        style["frame"] = frame(m, w, h, scale)
+    el = text_element(pe, upright, resolver, fonts, scale, page_w, True) if shape.get("text") else None
+    if el is not None:
+        # A node with a label is one page element: without its outline here, adopt would write the
+        # words of a flow chart and none of the boxes around them.
+        el.update({k: v for k, v in style.items() if k != "outline"}, shape_type=kind,
+                  outline_color=style["outline"], bbox=bbox)
+        if not el["fill"]:
+            del el["fill"]
+        return el
+    if shape.get("placeholder") or not (style["fill"] or style["outline"]):
+        return None
+    return {"kind": "shape", "role": "panel", "bbox": bbox, "shape": kind.lower(), "shape_type": kind, **style}
 
 
 def element_of(pe: dict, m: list[float], resolver: StyleResolver, fonts: FontMapper, scale: float, page_w: float,
@@ -562,22 +665,17 @@ def element_of(pe: dict, m: list[float], resolver: StyleResolver, fonts: FontMap
     bbox = [round(v / scale, 2) for v in box(m, w, h)]
     if "shape" in pe:
         shape = pe["shape"]
-        el = text_element(pe, m, resolver, fonts, scale, page_w, foreign) if shape.get("text") else None
         props = shape.get("shapeProperties", {})
         fill = props.get("shapeBackgroundFill", {})
         fill_hex = rgb_hex(fill.get("solidFill", {}).get("color"), resolver.scheme) \
             if fill.get("propertyState", "RENDERED") == "RENDERED" and "solidFill" in fill else None
+        if foreign:
+            return foreign_shape(pe, m, w, h, bbox, fill_hex, resolver, fonts, scale, page_w)
+        el = text_element(pe, m, resolver, fonts, scale, page_w, foreign) if shape.get("text") else None
         if el is not None:
             el["shape_type"] = shape.get("shapeType")
             if fill_hex and shape.get("shapeType") != "TEXT_BOX":
                 el["fill"] = fill_hex
-            if foreign and shape.get("shapeType") not in (None, "TEXT_BOX"):
-                # A node with a label is one page element: without its outline here, adopt would
-                # write the words of a flow chart and none of the boxes around them.
-                line = props.get("outline", {})
-                el["outline_color"] = rgb_hex(line.get("outlineFill", {}).get("solidFill", {}).get("color"),
-                                              resolver.scheme) if line.get("propertyState", "RENDERED") == "RENDERED" else None
-                el["weight"] = round(dim(line.get("weight")) / scale, 2) or None
             return el
         if shape.get("shapeType") == "TEXT_BOX" or shape.get("placeholder"):
             return None

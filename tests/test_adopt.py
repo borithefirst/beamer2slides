@@ -80,7 +80,9 @@ def presentation() -> dict:
                   shape("L1_card", "ROUND_RECTANGLE", 80, 60, 560, 280, fill="FFFFFF", outline="FBBC04"),
                   {"objectId": "L1_line", "size": {"width": pt(100), "height": pt(0)},
                    "transform": at(200, 350),
-                   "line": {"lineProperties": {"lineFill": solid("EA4335"), "weight": pt(3),
+                   # a line Slides drew says what kind it is; one that says nothing is a freeform
+                   "line": {"lineType": "STRAIGHT_CONNECTOR_1", "lineCategory": "STRAIGHT",
+                            "lineProperties": {"lineFill": solid("EA4335"), "weight": pt(3),
                                                "endArrow": "FILL_ARROW"}}}]}
     # two slides on the deck's own colour and one that sits on another, so "the deck's colour" is
     # the majority and not a coin toss between two.
@@ -247,7 +249,8 @@ def test_a_slide_that_sits_on_another_colour_says_so(tmp_path):
 
 def test_a_node_is_drawn_with_its_outline_and_its_rounded_corners(tmp_path):
     text = source_for(tmp_path)
-    card = next(l for l in text.splitlines() if "rounded corners" in l)
+    # the corners are quarter circles of the preset's radius (adopt_shapes.rounded_poly)
+    card = next(l for l in text.splitlines() if "controls" in l)
     assert "fill=" in card and "draw=" in card and "line width=" in card
 
 

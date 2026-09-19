@@ -23,6 +23,7 @@ import os
 import shutil
 from pathlib import Path
 
+from .adopt_shapes import turned_text
 from .inverse import (Context, TEXTPOS, body_style, colour_name, frame_latex, paragraphs_latex,
                       picture_block, textblock_latex)
 
@@ -273,9 +274,6 @@ def picture_of(el: dict, tree: Path | None):
     return Picture(rel, dest, natural_size(dest))
 
 
-ROUNDED = ("round", "pill", "flow_chart_terminator")
-
-
 def tikz_block(body: str, x0: float, y0: float, w: float, h: float, ind: str) -> str:
     """A tikzpicture at page coordinates, hanging from the top of its textblock the way a picture
     does: everything is drawn below the origin, so the picture has no height and the whole of it is
@@ -294,34 +292,10 @@ def shape_block(el: dict, ctx: Context, ind: str) -> str:
     flow charts of both templates are outlined boxes with rounded corners, and a rule can say
     neither. A shape with no fill and no outline draws nothing and is left out, so the ink is the
     deck's and nothing else."""
-    fill, stroke = el.get("fill"), el.get("outline") or el.get("outline_color")
-    if not fill and not stroke:
-        return ""
-    ctx.packages.add("\\usepackage{tikz}")
-    weight = el.get("weight") or 1.0
-    opts = []
-    if fill:
-        opts.append(f"fill={colour_name(fill, ctx.colours)}")
-    if stroke:
-        opts += [f"draw={colour_name(stroke, ctx.colours)}", f"line width={weight:.2f}pt"]
+    from . import adopt_shapes
     if el.get("role") == "line" and el.get("from") and el.get("to"):
-        (ax, ay), (bx, by) = el["from"], el["to"]
-        x0, y0 = min(ax, bx), min(ay, by)
-        tip = "->" if el.get("arrow") and not el.get("arrow_start") else \
-              "<-" if el.get("arrow_start") and not el.get("arrow") else \
-              "<->" if el.get("arrow_start") else "-"
-        body = (f"\\path[{tip},{','.join(o for o in opts if not o.startswith('fill'))}] "
-                f"({ax - x0:.1f}pt,{-(ay - y0):.1f}pt) -- ({bx - x0:.1f}pt,{-(by - y0):.1f}pt);")
-        return tikz_block(body, x0, y0, abs(bx - ax), abs(by - ay), ind)
-    x0, y0, x1, y1 = el["bbox"]
-    w, h = max(x1 - x0, 0.1), max(y1 - y0, 0.1)
-    shape = (el.get("shape") or el.get("shape_type") or "rectangle").lower()
-    if "ellipse" in shape or "oval" in shape:
-        body = f"\\path[{','.join(opts)}] ({w / 2:.1f}pt,{-h / 2:.1f}pt) ellipse ({w / 2:.1f}pt and {h / 2:.1f}pt);"
-    else:
-        radius = f",rounded corners={min(w, h) / 4:.1f}pt" if any(r in shape for r in ROUNDED) else ""
-        body = f"\\path[{','.join(opts)}{radius}] (0pt,0pt) rectangle ({w:.1f}pt,{-h:.1f}pt);"
-    return tikz_block(body, x0, y0, w, h, ind)
+        return adopt_shapes.line_block(el, ctx, ind)
+    return adopt_shapes.shape_block(el, ctx, ind)
 
 
 # What `table_block` writes calls these. A Slides row is a minimum height that grows until its
@@ -506,8 +480,11 @@ def slide_latex(s: dict, style_for, ctx: Context, flow: bool, tree: Path | None 
             # A node of a flow chart is one element: its box, then its label on top.
             out.append(shape_block(el, ctx, "  ").rstrip("\n"))
             base = element_style(el)
-            out.append(textblock_latex(el, lambda _p, b=base: b, ctx, "  ", reset=True,
-                                       lead=base_lead(base, ctx)))
+            # A turned text box: its words are written upright in the box it would have if it were
+            # not turned, and that is then set turned about its centre (`adopt_shapes.turned_text`).
+            upright = {**el, "bbox": el["frame"]["box"]} if el.get("frame") else el
+            out.append(turned_text(textblock_latex(upright, lambda _p, b=base: b, ctx, "  ", reset=True,
+                                                   lead=base_lead(base, ctx)), el, ctx))
     if s.get("notes"):
         from .inverse import latex_escape
         out.append("  \\note{" + "\n\n".join(latex_escape(p) for p in s["notes"].split("\n") if p.strip()) + "}")
