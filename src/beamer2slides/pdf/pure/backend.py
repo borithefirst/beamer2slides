@@ -432,7 +432,12 @@ class Page:
         """FPDF_RenderPageBitmapWithMatrix as pdfium_backend calls it (render.py)."""
         ix0, iy0, w, h = pixel_bounds(zoom, clip if clip is not None else self.rect)
         fs = render_matrix(zoom, ix0, iy0, self.rotation, self.width, self.height)
-        bgra = render_page(self._parse(), self.box, self.rotation, fs, w, h, transparent)
+        from .render_transparency import Context
+        pdf = self.doc.pdf
+        group = pdf.resolve(self.dict.get("Group"))
+        page_group = isinstance(group, dict) and str(pdf.resolve(group.get("S"))) == "Transparency"
+        ctx = Context(pdf, pdf.resolve(self.dict.get("Resources")), self.doc._font_cache, page_group)
+        bgra = render_page(self._parse(), self.box, self.rotation, fs, w, h, transparent, ctx)
         if transparent:
             return bgra[..., [2, 1, 0, 3]].copy()
         return bgra[..., 2::-1].copy()

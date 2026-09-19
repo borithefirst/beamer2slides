@@ -139,7 +139,7 @@ class PObj:
     stream: object = None          # Stream, or InlineImage
     name: str = ""
     children: list = field(default_factory=list)
-    group: bool = False            # a form with a transparency group (or an isolated one)
+    group: bool = False            # a form with a transparency group (/Group /S /Transparency)
     active: bool = True
 
     @property
@@ -823,7 +823,8 @@ class _Run:
         s = self.state
         obj = PObj(OBJ_FORM, s.ctm, stream=stream, name=str(name))
         group = r(stream.get("Group"))
-        obj.group = isinstance(group, dict) and (r(group.get("S")) == "Transparency" or bool(r(group.get("I"))))
+        # LoadTransparencyInfo: /I counts only in a /S /Transparency group
+        obj.group = isinstance(group, dict) and r(group.get("S")) == "Transparency"
         self.add(obj, True, True)
         data = self.doc.stream_data(stream)
         chain = self.p.parsed
