@@ -515,6 +515,20 @@ Lengths in bp (`adopt.to_bp`: the IR is PDF points, TeX's pt is 72.27 to the inc
 backgrounds blended over white: 0.754 -> 0.818 (`units`). Text (tags `units` -> `text-b` -> `text-ins2`):
 boxes 0.818 -> 0.843 -> 0.852, page 0.814 -> 0.839 -> 0.848. With the fills below (`combined`): boxes
 0.885, page 0.881, pixels 0.970, no deck down.
+Then (`combined` -> `weak-e6`: boxes 0.885 -> 0.915, page 0.881 -> 0.911, pixels 0.970 -> 0.975):
+a bullet's `\llap{}` line ended in a word space that pushed every bulleted line right by one space
+(`%` after it: cs161-tls 0.867 -> 0.989, ds-lecture 0.802 -> 0.964, comic-strips 0.908 -> 0.980);
+an empty paragraph is as tall as its own newline's style (creandum-board 0.760 -> 0.867) and a line
+spacing >= `WIDE_SPACING` adds nothing under the last line; foreign decks keep their fonts' real
+names and sizes (`text_paragraphs(foreign=True)`, not FontMapper's CM stand-ins); Windows fonts are
+found by the family their name table gives (`font_candidates`: `ariblk.ttf` = Arial Black), and a
+missing one takes a metric-compatible fetched stand-in (`adopt.SUBSTITUTES`: Arimo, Tinos, Cousine,
+Carlito, Archivo Black, Libre Bodoni...); CJK falls back to the Noto Sans JP/KR/SC/TC Slides draws
+with (`scripts.RENDERER_CJK`); a fixed left-aligned box whose thumbnail ink starts at its edge (and
+whose first ink row is above the inset line) has no insets (`deck_ir.thumbnail_insets`, bench only:
+gdg24 0.896 -> 0.900). Left: comps-analysis (0.336; its text sits ~4 pt high - insets the API does
+not report - and its Bodoni is narrower than any fetchable one), devfest2020's numbered lists (Slides
+places big numbers differently), jruby-ja (gradient backdrop; Japanese still sets wider), hebrew-lesson.
 Known gaps, by what they cost: text insets the API does not report where no autofit height gives
 them away, freeform shapes (5,791 in the corpus, drawn as their box; Google's .pptx
 export has their geometry), and dragged shape adjustments.
