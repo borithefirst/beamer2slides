@@ -52,6 +52,9 @@ a per-slide background picture.
   `renders = False`: `classify` runs on it and `convert` doesn't yet. Every call equals PDFium's on 4,373 pages
   (chars and object boxes to the last bit on the test decks),
   and deck.json is identical on all 48 test decks; extract is 7× slower. `tests/test_pure_pdf.py`.
+  Cross references (CPDF_Parser, rebuild included) and navigation (`pure/navigation.py`: links,
+  actions, destinations, name trees, page labels, metadata) are ported rule for rule; the whole-file
+  fuzz (`--structure`, seeds 0-500) differs from PDFium on 27 files, all text-object boxes.
 - No public links: pictures reach Slides inside the imported .pptx, never as shared Drive
   files (they break in protected Workspace domains).
 - **Fidelity is measured on Google's own renderer**, not a local preview: render the PDF page

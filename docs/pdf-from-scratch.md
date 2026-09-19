@@ -136,28 +136,30 @@ Each of these was a diff against PDFium until it was ported:
     Ascent and descent then come from the face, and FreeType makes a Type 1 or CFF face's ascender
     and descender its FontBBox yMax and yMin (floored and ceiled from 16.16), not 0 (bfuzz seed 452).
 - **Cross references** are CPDF_Parser's loading ported, not a reader that accepts good files
-  (`document._XRef` is CPDF_CrossRefTable; `test_cross_references_are_read_as_pdfium_reads_them`).
-  A regex reader that refused one damaged row made the fuzz's files unopenable where PDFium read them
-  (seed 680). The rules:
+  (`document.PdfFile`, whose table is CPDF_CrossRefTable; `test_cross_references_are_read_as_pdfium_reads_them`
+  and `test_cross_references_are_loaded_as_pdfium_loads_them`, one case per rule). A regex reader
+  that refused one damaged row made the fuzz's files unopenable where PDFium read them (seed 680).
+  Two ports were written side by side and merged; the rules:
   - Positions count from the `%PDF` header, looked for in the first 1024 bytes. `startxref` is a
     whole word found backwards within the last 4096 bytes, and its offset must be at least 9.
-  - Table rows are 20-byte records: `f` at byte 17 makes a free row (generation 0, which merges as
-    nothing), otherwise the offset is atoi64 (an offset of 0 must be ten digits) and the generation
-    StringToInt from byte 11, truncated to uint16.
-  - /Prev chains are walked from the newest section: newer entries win, and a table's trailer keeps
-    its own /XRefStm and /Prev.
-  - XRef streams: /Prev ≥ 0, 0 ≤ /Size ≤ kMaxXRefSize, /Index and /W as PDFium checks them, fields
-    wrapping at uint32, and a type-2 entry only when its archive number is at most the last object
-    number. kMaxObjectNumber is 24·2^20, not 2^20.
-  - Object streams must say `/Type /ObjStm` with an integer /N and /First, entry number 0 is no
-    object, and a failed stream is cached as failed.
-  - *The table is believed* only if its lowest-numbered entry starts with that number, and only if
-    the trailer's /Root is a reference to a catalog with at least one page; otherwise
-    RebuildCrossRef scans the file word by word (strings skipped, so `9 0 obj` inside a string is
-    nothing), reading each object with the strict parser and stepping over its stream, merging every
-    `trailer` and XRef stream dictionary, keeping the higher generation. The rebuilt entries are
-    merged over the table read so far, and objects already parsed stay cached. It never looks for a
-    catalog.
+  - Table entries are 20 bytes read blind: the offset is the digits before the first non-digit
+    (`00000002f3 00000 n` is offset 2, an offset of 0 must be ten digits), byte 17 `f` means free,
+    the generation is StringToInt from byte 11, and only the first entry with a position is
+    verified, so a wrong offset elsewhere makes that object None rather than a rebuild.
+  - /Prev chains: the oldest table is loaded first, a newer entry with a lower generation is
+    ignored (AddNormal), the newest trailer's keys go over the older ones', `/Prev` loops stop.
+  - XRef streams: type 3 is nothing, /Size, /Index and /W as PDFium checks them, and a type-2 entry
+    only when its archive number is at most the last object number known so far.
+    kMaxObjectNumber is 24·2^20, not 2^20.
+  - Object streams need a direct `/Type /ObjStm` and integer `/N` and `/First` (`/N 2.0` makes
+    every member None); a member numbered 0 is skipped but counts towards N.
+  - *The table is believed* only if the trailer's /Root is a reference to a catalog with at least
+    one page; otherwise RebuildCrossRef scans the file word by word (strings skipped, so `9 0 obj`
+    inside a string is nothing), reading each object with the strict parser and stepping over its
+    stream, merging every `trailer` and XRef stream dictionary, keeping the higher generation. The
+    rebuild merges over the table it replaces, so entries the scan cannot see survive, and a later
+    `3 0 obj` beats an object stream's member. It never looks for a catalog. A failed parse is
+    never cached.
 - **A shading that fails Validate is drawn from its second `sh`**: CPDF_ShadingPattern::Load sets
   the shading type before validating, a second Load answers true without validating again, and the
   document keeps the pattern. So the first `sh` makes no page object and every later one does
@@ -169,6 +171,14 @@ Each of these was a diff against PDFium until it was ported:
   were asked for (`test_page_trees_are_walked_as_pdfium_walks_them`, three orders each). A page
   loads when /Type is absent or resolves to /Page. PDFium opens a document with no pages;
   pypdfium2's `PdfDocument` refuses it, so the contract does too.
+- **Navigation** (`pure/navigation.py`: FPDFLink_*, FPDFAction_*, FPDFDest_GetDestPageIndex,
+  CPDF_NameTree, FPDF_GetNamedDest, CPDF_PageLabel, FPDF_GetMetaText), resolved one level at a time as
+  PDFium does. Name-tree limits are put in order before they are compared, and names compare as
+  UTF-16 code units (an astral name sorts below U+FF01). A URI action is joined to the catalog's
+  `/URI /Base`; only GoTo actions give a destination; a link's /Rect with fewer than four numbers is
+  no rect; letter labels wrap past 26 × n and label numbers wrap as int32; the Info dictionary must
+  be a reference. A probe of 332 handmade files and 400 mutated ones differs from PDFium in none;
+  the structure fuzzer (`--structure`, seeds 0-400) went from 93 differing files to 48, links 0.
 
 ## Measured
 
