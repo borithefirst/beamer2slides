@@ -482,6 +482,170 @@ def zero_insets(paragraphs: list[dict], height: float) -> bool:
     return need > 0 and height - need < ZERO_INSET_SLACK
 
 
+ROW_LINE_SHARE = 0.5     # a row boundary is read when its borders cover this share of the table's width
+ROW_LINE_HIT = 0.85      # ... and this share of the columns sampled along them shows the line
+
+
+def thumbnail_rows(elements: list[dict], thumb, px: float) -> None:
+    """Table rows as tall as the thumbnail draws them (`row_heights`), and held there (`rows_fixed`).
+
+    A stored row height is a minimum: Slides grows a row until its tallest cell fits, and what fits
+    depends on things the API does not say - the insets a .pptx brought, the line an empty cell still
+    holds in a size nobody can read back (solidity-survey's empty cells grow their 15.75 pt rows to
+    19.4, creandum-board's leave theirs alone), where a word too wide for its cell is broken. TeX's
+    guess at all of that set comps-analysis' header 11.6 pt short and cs161-tls' rows up to 19 pt
+    tall, moving every row under them. Where the thumbnail shows a row's top and bottom borders, the
+    row is as tall as they are apart: each boundary whose visible borders span at least
+    `ROW_LINE_SHARE` of the table is looked for from its stored place down, as the first pixel row
+    where `ROW_LINE_HIT` of the columns along those borders turn towards the border colour, and a row
+    between two found boundaries gets their distance (never less than stored) and no growth in TeX.
+    A boundary not found (no border, or one the colour of what it separates) ends the measuring: the
+    rows under it could have grown by any amount."""
+    if thumb is None or not px:
+        return
+    import numpy as np
+    H, W = thumb.shape[:2]
+    for e in elements:
+        heights, widths = e.get("row_heights"), e.get("col_widths")
+        if e.get("kind") != "table" or not heights or not widths:
+            continue
+        xs = [e["bbox"][0]]
+        for w in widths:
+            xs.append(xs[-1] + w)
+        by_row: dict[int, list] = {}
+        for b in e.get("table_borders", []):
+            if b["dir"] == "h" and b["col"] < len(widths) and (1.0 if b.get("alpha") is None else b["alpha"]) >= 0.5 and b.get("color"):
+                by_row.setdefault(b["row"], []).append(b)
+        new, fixed = list(heights), []
+        prev = e["bbox"][1]
+        for j in range(1, len(heights) + 1):
+            segs = by_row.get(j, [])
+            if sum(widths[b["col"]] for b in segs) < ROW_LINE_SHARE * (xs[-1] - xs[0]):
+                break
+            y = _find_row_line(thumb, px, segs, xs, prev + heights[j - 1], heights[j - 1], H, W)
+            if y is None:
+                break
+            if y - prev > heights[j - 1] + 0.4:
+                new[j - 1] = round(y - prev, 3)
+            fixed.append(j - 1)
+            prev = y
+        if fixed:
+            e["row_heights"] = new
+            e["rows_fixed"] = fixed
+
+
+CELL_BEARING_EM = 0.06   # a first or last glyph's side bearing, in em, where a cell's words' ink begins
+CELL_PAD_MIN = 3         # cells whose ink edge reads the side inset, at least
+
+
+def thumbnail_cell_pad(elements: list[dict], thumb, px: float) -> None:
+    """A table's side inset as its thumbnail shows it (`cell_pad[0]`).
+
+    `cell_pad` guesses it from the vertical inset, and a .pptx brings its own: comps-analysis' words
+    start 3 pt from their cells' left edges where the guess put them 5.8 in, wrapping "Implied Equity
+    Value" after "Implied"; hebrew-lesson's right-aligned lines end 7.2 pt from the right edge, where
+    the guess (4.8) ended them. A cell whose paragraphs are all left-aligned (right-aligned) gives the
+    distance from its left (right) edge to its first (last) ink column, less a glyph's side bearing;
+    the median of at least `CELL_PAD_MIN` such cells is the inset. Only rows whose top is known are
+    read: those `thumbnail_rows` measured and the one under them, whose stored height it fills at
+    least."""
+    if thumb is None or not px:
+        return
+    import numpy as np
+    H, W = thumb.shape[:2]
+    for e in elements:
+        heights, widths = e.get("row_heights"), e.get("col_widths")
+        if e.get("kind") != "table" or not heights or not widths or not e.get("cell_pad"):
+            continue
+        fixed = set(e.get("rows_fixed", []))
+        known = 0
+        while known < len(heights) and known in fixed:
+            known += 1
+        tops = [e["bbox"][1]]
+        for h in heights:
+            tops.append(tops[-1] + h)
+        xs = [e["bbox"][0]]
+        for w in widths:
+            xs.append(xs[-1] + w)
+        found = []
+        for c in e.get("table_cells", []):
+            paras = [p for p in c.get("paragraphs", []) if p.get("runs") and "".join(r["text"] for r in p["runs"]).strip()]
+            if not paras or c["rowspan"] != 1 or c["colspan"] != 1 or c["row"] > known:
+                continue
+            aligns = {p.get("align", "left") for p in paras}
+            if aligns not in ({"left"}, {"right"}) or any(p.get("bullet") or (p.get("level") or 0) for p in paras):
+                continue
+            side = aligns.pop()
+            text = "".join(r["text"] for r in paras[0]["runs"])
+            if side == "left" and text[:1].isspace() or side == "right" and text.rstrip("\n")[-1:].isspace():
+                continue                    # words pushed in by spaces say nothing of the inset
+            m = 1.5
+            X0, X1 = int(np.ceil((xs[c["col"]] + m) * px)), int(np.floor((xs[c["col"] + 1] - m) * px))
+            Y0, Y1 = int(np.ceil((tops[c["row"]] + m) * px)), int(np.floor((tops[c["row"] + 1] - m) * px))
+            if X1 - X0 < 6 or Y1 - Y0 < 4 or X1 > W or Y1 > H:
+                continue
+            crop = thumb[Y0:Y1, X0:X1]
+            ground = np.median(crop.reshape(-1, crop.shape[-1]), axis=0)
+            ink = ((np.abs(crop - ground).max(axis=-1) > 80).sum(axis=0) >= 2)
+            cols = np.nonzero(ink)[0]
+            if len(cols) < 3:
+                continue
+            size = max((r.get("size") or 0) for p in paras for r in p["runs"])
+            if side == "left":
+                gap = X0 / px + cols[0] / px - xs[c["col"]]
+            else:
+                gap = xs[c["col"] + 1] - (X0 + cols[-1] + 1) / px
+            found.append(gap - CELL_BEARING_EM * size)
+        if len(found) >= CELL_PAD_MIN:
+            e["cell_pad"] = [round(max(0.0, float(np.median(found))), 3), e["cell_pad"][1]]
+
+
+def _find_row_line(thumb, px: float, segs: list[dict], xs: list[float], expected: float, stored: float,
+                   H: int, W: int) -> float | None:
+    """Where a row boundary's border runs in the thumbnail, in IR pt (see `thumbnail_rows`)."""
+    import numpy as np
+    cols, colours = [], []
+    for b in segs:
+        a0, a1 = int(np.ceil(xs[b["col"]] * px)) + 3, int(np.floor(xs[b["col"] + 1] * px)) - 3
+        if a1 > a0:
+            cols.append(np.arange(max(0, a0), min(W, a1)))
+            colours.append(np.repeat(deck_fills_rgb(b["color"])[None, :], max(0, min(W, a1) - max(0, a0)), axis=0))
+    if not cols:
+        return None
+    cols_ = np.concatenate(cols)
+    want = np.concatenate(colours).astype(float)
+    if len(cols_) < 6:
+        return None
+    thick = max(int(np.ceil(max(b["weight"] for b in segs) * px)) + 2, 3)
+    y_from = max(thick + 2, int(np.floor((expected - 1.0) * px)))
+    y_to = min(H - thick - 3, int(np.ceil((expected + 3 * stored + 20) * px)))
+
+    def dist(y):
+        return np.abs(thumb[y, cols_].astype(float) - want).sum(axis=1)
+
+    for y in range(y_from, y_to):
+        above = dist(y - 2 - thick // 2)
+        here = dist(y)
+        if ((here < 0.5 * above) & (above > 45)).sum() < ROW_LINE_HIT * len(cols_):
+            continue
+        # the line ends within its own thickness, where what lies under it shows again: the step
+        # from one fill to a paler one (hebrew-lesson's brown header over its pink rows, white
+        # borders) is no line
+        for run in range(y, y + thick):
+            below = dist(run + 3)
+            mid = dist((y + run) // 2)
+            ok = (mid < 0.5 * np.minimum(above, below)) & (np.minimum(above, below) > 45)
+            if ok.sum() >= ROW_LINE_HIT * len(cols_):
+                return (y + run + 1) / 2 / px
+        return None
+    return None
+
+
+def deck_fills_rgb(hexstr: str):
+    from .deck_fills import rgb
+    return rgb(hexstr)
+
+
 def thumbnail_insets(elements: list[dict], thumb, px: float) -> None:
     """Text boxes the slide's own thumbnail shows with no insets (`box.insets` = 0, anchor moved).
 
@@ -1091,6 +1255,8 @@ def deck_ir(pres: dict, pdf_size: list[float] | None = None, base: dict | None =
                 px = thumb.shape[1] / page_w
             elements = deck_fills.settle(elements, thumb, px, None if picture else color, bool(picture), images)
             thumbnail_insets(elements, thumb, px)
+            thumbnail_rows(elements, thumb, px)
+            thumbnail_cell_pad(elements, thumb, px)
             thumbnail_weights(elements, thumb, px)
             ink_widths(elements, thumb, px)
             drifts += [(e, d) for e, d in ((e, top_drift(e, elements, thumb, px)) for e in elements)
@@ -1413,6 +1579,11 @@ def cell_pad(pe: dict) -> tuple[float, float]:
         if z and spare >= 0:
             room.append(spare / 2)
     pad_y = min(cap, max(1.5, min(room))) if room else cap
+    if cap - pad_y < 1.0:
+        # A row a little short of its text at the cap is one Slides grew by what it lacked, not a
+        # sign of smaller insets: creandum-board's 22.0 pt rows of 7 pt text (6.8 pt to spare each
+        # side) are 22.8 on the thumbnail, 8.4 + 2 x 7.2.
+        pad_y = cap
     # Across it is a little more: journey-maps' header (rows say 2.5 pt) keeps "Channel" whole in
     # 46.9 pt but breaks "custom|ers" in 41.1 and "Succes|s" in 43.9, which puts the inset between
     # 3.7 and 5.7 pt; its first column's ink starts 4.9 pt in.

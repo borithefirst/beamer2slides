@@ -169,6 +169,99 @@ def test_insets_follow_where_the_table_came_from_and_its_rows():
     assert cell_pad(table(heights=(9, 30, 30))) == pytest.approx((7.2, 7.2))
 
 
+def test_a_row_a_little_short_of_its_text_at_the_cap_keeps_the_cap():
+    """creandum-board: 22.0 pt rows of 7 pt text leave 6.8 pt a side, and Slides draws them 22.8 tall
+    with its own 7.2; less than a point short is a row Slides grew, not a smaller inset."""
+    assert cell_pad(table("i32", heights=(20, 20, 20)))[1] == pytest.approx(3.6)   # 2.8 would be the rows' room
+    assert cell_pad(table(heights=(28, 28, 28)))[1] == pytest.approx(7.2)          # 6.8
+    assert cell_pad(table(heights=(24, 24, 24)))[1] == pytest.approx(4.8)          # well short: the rows say it
+
+
+# ---------------------------------------------------------------- what the thumbnail says of a table
+
+PX = 2.0          # thumbnail pixels per IR pt
+
+
+def grid_element(heights=(10, 10, 10), widths=(40, 40), color="#000000") -> dict:
+    """A bare table element at (10, 10) with a border under every row and a left-aligned cell each."""
+    borders = [{"dir": "h", "row": r, "col": c, "color": color, "alpha": 1.0, "weight": 1.0, "dash": "SOLID"}
+               for r in range(len(heights) + 1) for c in range(len(widths))]
+    cells = [{"row": r, "col": c, "rowspan": 1, "colspan": 1,
+              "paragraphs": [{"align": "left", "runs": [{"text": "Word", "size": 10.0}]}]}
+             for r in range(len(heights)) for c in range(len(widths))]
+    return {"kind": "table", "bbox": [10, 10, 10 + sum(widths), 10 + sum(heights)], "row_heights": list(heights),
+            "col_widths": list(widths), "table_borders": borders, "table_cells": cells, "cell_pad": [5.8, 3.6]}
+
+
+def blank(h=100, w=120, colour=(255, 255, 255)):
+    import numpy as np
+    img = np.zeros((int(h * PX), int(w * PX), 3), dtype=np.int16)
+    img[:] = colour
+    return img
+
+
+def rule(img, y, x0=10, x1=90, colour=(0, 0, 0)):
+    img[int(y * PX):int(y * PX) + 2, int(x0 * PX):int(x1 * PX)] = colour
+
+
+def test_rows_are_as_tall_as_the_thumbnail_draws_them_and_held_there():
+    """Stored rows of 10 pt that Slides grew to 14 (an empty cell's line, a .pptx's insets): the
+    borders on the thumbnail say so, and `\\adoptfix` keeps TeX from growing them again."""
+    from beamer2slides.deck_ir import thumbnail_rows
+    el = grid_element()
+    img = blank()
+    for y in (10, 24, 38, 52):
+        rule(img, y)
+    thumbnail_rows([el], img, PX)
+    assert el["rows_fixed"] == [0, 1, 2]
+    assert el["row_heights"] == pytest.approx([14, 14, 14], abs=0.6)
+
+
+def test_measuring_stops_at_a_boundary_it_cannot_see():
+    from beamer2slides.deck_ir import thumbnail_rows
+    el = grid_element()
+    img = blank()
+    for y in (10, 24):                    # the rule under row 1 is not drawn: rows 1 and 2 could be anything
+        rule(img, y)
+    thumbnail_rows([el], img, PX)
+    assert el["rows_fixed"] == [0]
+    assert el["row_heights"][1:] == [10, 10]
+
+
+def test_a_step_between_two_fills_is_no_border():
+    """hebrew-lesson: a brown header over pale rows, white borders nobody sees. The step down to the
+    paler fill turns towards white but never comes back: no row is measured."""
+    from beamer2slides.deck_ir import thumbnail_rows
+    el = grid_element(color="#ffffff")
+    img = blank(colour=(250, 240, 235))
+    img[int(10 * PX):int(24 * PX), int(10 * PX):int(90 * PX)] = (120, 70, 40)
+    thumbnail_rows([el], img, PX)
+    assert "rows_fixed" not in el and el["row_heights"] == [10, 10, 10]
+
+
+def test_the_side_inset_is_where_the_cells_words_begin():
+    """comps-analysis' .pptx cells start their words 3 pt in where the guess said 5.8."""
+    from beamer2slides.deck_ir import thumbnail_cell_pad, thumbnail_rows
+    el = grid_element(heights=(14, 14, 14))
+    img = blank()
+    for y in (10, 24, 38, 52):
+        rule(img, y)
+    for r in range(3):
+        for c in range(2):
+            x = 10 + 40 * c + 3 + 0.6                   # the inset plus the first glyph's bearing
+            img[int((14 + 14 * r) * PX):int((20 + 14 * r) * PX), int(x * PX):int((x + 20) * PX)] = (0, 0, 0)
+    thumbnail_rows([el], img, PX)
+    thumbnail_cell_pad([el], img, PX)
+    assert el["cell_pad"][0] == pytest.approx(3.0, abs=0.5) and el["cell_pad"][1] == 3.6
+
+
+def test_measured_rows_are_written_fixed(tmp_path):
+    ir = deck_ir(deck(table()), foreign=True)
+    next(e for e in ir["slides"][0]["elements"] if e["kind"] == "table")["rows_fixed"] = [0, 1]
+    t = table_source(adopt.bootstrap(ir, tmp_path / "tree" / "main.tex"))
+    assert "\\adoptfix{0}" in t and "\\adoptfix{1}" in t and "\\adoptfix{2}" not in t
+
+
 def test_guess_lines_tells_one_line_from_several():
     assert guess_lines("+1 months\n", 200, 7) == 1
     assert guess_lines("Develop\x0bPMF & integration\n", 200, 12) == 2
