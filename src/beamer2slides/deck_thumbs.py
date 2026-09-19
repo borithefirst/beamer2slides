@@ -128,6 +128,92 @@ def thumbnail_cell_pad(elements: list[dict], thumb, px: float) -> None:
             e["cell_pad"] = [round(max(0.0, float(np.median(found))), 3), e["cell_pad"][1]]
 
 
+CELL_LINE_MIN_EM = 0.3   # a band of inked rows this tall (em) at least is a line, not a dot or an accent
+
+
+def thumbnail_cell_text(elements: list[dict], thumb, px: float) -> None:
+    """Where a table's thumbnail shows its cells' text, as the inset of a Slides line box
+    (`cell_text_y`, IR pt): a top-aligned cell's first baseline stands that far plus the line's ascent
+    (`emit.ASCENT_EM`) under its row's top, a bottom-aligned cell's last baseline that far plus the
+    line's descent over its row's bottom.
+
+    The vertical inset `cell_pad` guesses sizes rows but not the text in them: the cells are set with
+    LaTeX's strut, 0.84 em over the baseline where Slides' line box has 0.968, and the guess itself
+    is off - hebrew-lesson's cells (inset guessed 1.8 pt) show their baselines 1.45 pt + 0.968 em
+    under the row's top on every slide, comps-analysis' (guessed 0.7 and 1.6 in different tables)
+    1.0 pt + 0.968 em, top- and bottom-aligned alike. So each cell whose one paragraph is aligned to
+    its row's top or bottom, in rows whose top (bottom) `thumbnail_rows` found, gives that inset from
+    its first (last) line's baseline - the lowest row inked a quarter as densely as the line's
+    densest, as `baseline_drift` reads it, a line being a band of inked rows at least
+    `CELL_LINE_MIN_EM` tall - and the median of at least `CELL_PAD_MIN` of them is the table's."""
+    if thumb is None or not px:
+        return
+    import numpy as np
+    from .emit import ASCENT_EM, LINE_EM
+    H, W = thumb.shape[:2]
+    for e in elements:
+        heights, widths = e.get("row_heights"), e.get("col_widths")
+        if e.get("kind") != "table" or not heights or not widths:
+            continue
+        fixed = set(e.get("rows_fixed", []))
+        known = 0
+        while known < len(heights) and known in fixed:
+            known += 1
+        tops = [e["bbox"][1]]
+        for h in heights:
+            tops.append(tops[-1] + h)
+        xs = [e["bbox"][0]]
+        for w in widths:
+            xs.append(xs[-1] + w)
+        found = []
+        for c in e.get("table_cells", []):
+            va = c.get("valign")
+            paras = [p for p in c.get("paragraphs", []) if p.get("runs") and "".join(r["text"] for r in p["runs"]).strip()]
+            if va not in ("top", "bottom") or len(paras) != 1 or c["rowspan"] != 1 or c["row"] >= len(heights):
+                continue
+            if c["row"] > known or (va == "bottom" and c["row"] >= known):
+                continue                    # the row's top (bottom) is not where the thumbnail has it
+            if any(p.get("bullet") for p in paras) or any(r.get("highlight") for p in paras for r in p["runs"]):
+                continue
+            z = max((r.get("size") or 0) for r in paras[0]["runs"])
+            spacing = paras[0].get("line_spacing") or 1.0
+            if z <= 0:
+                continue
+            m = 1.0
+            X0 = int(np.ceil((xs[c["col"]] + m) * px))
+            X1 = int(np.floor((xs[min(c["col"] + c["colspan"], len(widths))] - m) * px))
+            Y0, Y1 = int(np.ceil((tops[c["row"]] + m) * px)), int(np.floor((tops[c["row"] + 1] - m) * px))
+            if X1 - X0 < 6 or Y1 - Y0 < 4 or X1 > W or Y1 > H or X0 < 0 or Y0 < 0:
+                continue
+            crop = thumb[Y0:Y1, X0:X1]
+            ground = np.median(crop.reshape(-1, crop.shape[-1]), axis=0)
+            ink = np.abs(crop - ground).max(axis=-1) > 80
+            cols = np.nonzero(ink.any(axis=0))[0]
+            if len(cols) < 6:
+                continue
+            ink[ink[:, cols[0]:cols[-1] + 1].mean(axis=1) > 0.7] = False      # underlines and strikes
+            inked = np.nonzero(ink.any(axis=1))[0]
+            if not len(inked):
+                continue
+            # bands of inked rows, split where a row has none: the lines
+            cuts = np.nonzero(np.diff(inked) > 1)[0]
+            bands = [b for b in np.split(inked, cuts + 1) if len(b) >= CELL_LINE_MIN_EM * z * px]
+            if not bands:
+                continue
+            band = bands[0] if va == "top" else bands[-1]
+            if band[0] == 0 or band[-1] == ink.shape[0] - 1:
+                continue                    # the line runs on out of what is read
+            density = ink[band[0]:band[-1] + 1].mean(axis=1)
+            rows = np.nonzero(density >= 0.25 * density.max())[0]
+            base = (Y0 + band[0] + rows[-1] + 1) / px
+            above = ASCENT_EM * z - (0 if spacing >= 1 else (1 - spacing) * 0.75 * LINE_EM * z)
+            below = (LINE_EM - ASCENT_EM) * z + (spacing - 1) * LINE_EM * z if spacing >= 1 \
+                else (LINE_EM - ASCENT_EM) * z - (1 - spacing) * 0.25 * LINE_EM * z
+            found.append(base - above - tops[c["row"]] if va == "top" else tops[c["row"] + 1] - base - below)
+        if len(found) >= CELL_PAD_MIN:
+            e["cell_text_y"] = round(float(np.median(found)), 3)
+
+
 def _find_row_line(thumb, px: float, segs: list[dict], xs: list[float], expected: float, stored: float,
                    H: int, W: int) -> float | None:
     """Where a row boundary's border runs in the thumbnail, in IR pt (see `thumbnail_rows`)."""
@@ -376,6 +462,7 @@ def crossing(e: dict, elements: list[dict], strip: tuple, first: bool = False) -
 
 CAP_EM = 0.72               # a Latin face's cap height, near enough to tell 6.5 pt of top inset
 PPTX_INSET_Y = 3.6          # Slides pt: PowerPoint's default top and bottom insets (0.05 in); Slides' are 7.2
+PPTX_SANE_DRIFT = 6.0       # Slides pt: a `top_drift` further off than this misread the line
 # Cap heights (em) of the faces `top_drift` may read: any other face's own cap height moves its first
 # ink by as much as the insets do (Calibri's 0.644 read as jeb-arch's boxes standing 2.8 pt high,
 # Google Sans as firebase-jam's 4.5, and giving them PowerPoint's insets cost 0.03 each).
@@ -394,8 +481,12 @@ def top_drift(e: dict, elements: list[dict], thumb, px: float) -> float | None:
         return None
     paras = [p for p in e.get("paragraphs", []) if p.get("runs")]
     first = "".join(r["text"] for r in paras[0]["runs"]).lstrip() if paras else ""
-    if not first or paras[0].get("bullet"):
+    if not first:
         return None
+    if paras[0].get("bullet"):
+        # a bullet's glyph sits beside the line, not over it; only a baseline says where the line is
+        # (arabic-training's bulleted Arial and Times boxes read -3.7 and -4.0)
+        return baseline_drift(e, elements, paras, thumb, px)
     cap = KNOWN_CAPS.get(paras[0]["runs"][0].get("font") or "")
     if cap is None or not (first[0].isupper() or first[0].isdigit()):
         return baseline_drift(e, elements, paras, thumb, px)
@@ -537,7 +628,8 @@ def pptx_insets(slides: list[dict], drifts: list[tuple[dict, float]], sides: lis
     whose boxes kept PowerPoint's defaults (7.2 pt at the sides, 3.6 top and bottom), which the API does
     not report: comps-analysis's text stood ~3.6 pt low on every slide. On the corpus a measured box
     (`top_drift`) is off by 0 +- 1 pt or by -3.6 +- 1, nothing between, so a box measured at -3.6 gets
-    the insets; and when most of a deck's measured boxes (at least 3) do, so do its unmeasured ones -
+    the insets; and when most of a deck's measured boxes (at least 3) stand nearer -3.6 than 0, so do
+    its unmeasured ones -
     gdg24 mixes both kinds and keeps Slides' insets where it could not be measured. Such boxes get
     `box.inset_y`, and their anchors move by the difference.
 
@@ -547,7 +639,13 @@ def pptx_insets(slides: list[dict], drifts: list[tuple[dict, float]], sides: lis
     import statistics
     want = PPTX_INSET_Y - 7.2
     hits = [e for e, d in drifts if abs(d - want) <= 1.2]
-    whole = len(drifts) >= 3 and len(hits) >= 0.6 * len(drifts)
+    # whether the deck came whole is a vote of its sane readings (a drift past 6 pt is a misread, not
+    # an inset) for the nearer of the two answers: arabic-training's Calibri Arabic reads -2.3 (its
+    # fallback's densest row stands a little under the baseline) beside Arial and Times at -3.7 and
+    # -4.0, and poster-48x36 reads -3.1 to -5.1; both gain (boxes +0.033, +0.011)
+    sane = [d for _, d in drifts if abs(d) <= PPTX_SANE_DRIFT]
+    votes = [d for d in sane if d < want / 2]
+    whole = len(sane) >= 3 and len(votes) >= 0.6 * len(sane)
     # hebrew-lesson is imported whole too, and its right-to-left words start 3.2 pt further in than
     # 3.6 pt of inset put them (every box read 5.4-7.4 pt, like Slides' own): its sides are Slides'
     narrow = not sides or statistics.median(sides) < SIDE_SPLIT

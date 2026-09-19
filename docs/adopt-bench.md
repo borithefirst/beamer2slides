@@ -234,3 +234,35 @@ The four branches above merged (`vb-a` -> `m3-a`, 912 slides): boxes 0.958 -> 0.
 comps-analysis 0.677 -> 0.767 (tables and sides together, more than either alone), apps-edu-zh 0.913 ->
 0.949, journey-maps 0.913 -> 0.942, ap-bio-stats 0.951 -> 0.976, creandum-board 0.946 -> 0.958. No deck
 down by more than 0.0003 (gdg24 slide 57 -0.014).
+
+## Cell baselines, a deck's vote on PowerPoint insets (`mv-a` -> `tc-all`)
+
+Cells' vertical placement and right-to-left boxes (`mv-a` -> `tc-all`, 912 slides: boxes 0.9674 -> 0.9689,
+mean per deck 0.9488 -> 0.9516, no deck down; arabic-training 0.908 -> 0.941, comps-analysis 0.767 ->
+0.790, poster-48x36 0.701 -> 0.712, hebrew-lesson 0.908 -> 0.917, journey-maps 0.942 -> 0.946).
+Measured on the thumbnails, a top-aligned cell's first baseline stands T + 0.968 em under its row's
+top and a bottom-aligned one's last baseline T + 0.232 em over its row's bottom, T one number per
+table: hebrew-lesson 1.45 pt (1.8 guessed), comps-analysis 1.0 in both of its kinds of table (0.7 and
+1.6 guessed). TeX anchored the cell's box by its strut, 0.84 em over the baseline, at row + `pady`,
+hence 5.4 pt and 2 pt off. `deck_thumbs.thumbnail_cell_text` reads T (`cell_text_y`) from cells
+with one paragraph in rows `thumbnail_rows` placed: the first (last) band of inked rows, and its
+baseline read as `baseline_drift` reads it, median of >= 3. `adopt.table_block` then places the box
+by that baseline: `\adoptht` is from the box's top to its first baseline and `\adoptdp` its depth.
+A vbox's height reaches its *last* baseline, and the colour whatsit at either end of a cell's box
+stops both a single `\vsplit to 0pt` (it splits off only the whatsit, and text sat 10 pt low: comps
+0.767 -> 0.636) and a `\lastbox` count, so `\adopt@first` splits pieces off the top until one holds
+a line. comps-analysis 6 +0.121, 7 and 12 +0.074; hebrew-lesson 11, 17 and 21 +0.038; residual cell
+error 0-0.45 pt. arabic-training's boxes, Latin ones included, all stood 3.6 pt low: PowerPoint
+insets that `pptx_insets` never gave it. Two of its four readings were Calibri Arabic at -2.3, just
+outside the -3.6 +- 1.2 window: the densest row of the fallback font's letters stands a little under the
+baseline. Its bulleted boxes, most of the deck, were not measured at all. Now a bulleted first
+line is measured by its baseline (Arial -3.7, Times -4.0; no other deck's readings change), and
+whether a deck came whole is a vote: of the readings within 6 pt (an 8 pt one misread the line), >= 60%
+must be nearer -3.6 than 0. The window still decides a measured box alone. That makes
+arabic-training whole (4 of 4), and poster-48x36 too (7 of 8, -3.1 to -5.1), which gains as well;
+no other deck changes (cs161-net's 96 readings are near -9, ap-bio-stats 3 of 51). Tried and dropped: a vbox's `\ht` as the
+first line's height (multi-line cells drawn above the table, hebrew 7 -0.036); one `\vsplit`; a
+`\lastbox` line count (see above). Left: hebrew-lesson 7's body cell wraps one line more than Slides
+(a width, not a placement); arabic-training's two Calibri Arabic boxes measured at -2.3 keep Slides'
+insets, and their last lines do match the deck, so what Slides does with them is not known; the
+Arabic first lines stand 0.5-1.7 pt apart from the deck, fallback glyphs taller than the line.

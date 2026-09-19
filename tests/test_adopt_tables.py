@@ -393,3 +393,79 @@ def test_a_middle_aligned_cell_drops_by_its_own_line_box_and_no_other_does(tmp_p
     nodes = [l for l in table_source(text).splitlines() if "\\node[" in l]
     dropped = [l for l in nodes if "yshift=-\\adoptdrop" in l]
     assert len(dropped) == 1 and "anchor=west" in dropped[0]
+
+
+# ---------------------------------------------------------------- where the cells' lines stand
+
+def cell_thumb(el, inset, valign, z=10.0, fixed=3):
+    """A thumbnail of `grid_element` whose cells' lines stand where a Slides line box `inset` under
+    the row's top (over its bottom) puts them: letters 0.7 em tall on the baseline."""
+    from beamer2slides.emit import ASCENT_EM, LINE_EM
+    img = blank()
+    tops = [10.0]
+    for h in el["row_heights"]:
+        tops.append(tops[-1] + h)
+    for y in tops:
+        rule(img, y)
+    for c in el["table_cells"]:
+        c["valign"] = valign
+        base = tops[c["row"]] + inset + ASCENT_EM * z if valign == "top" \
+            else tops[c["row"] + 1] - inset - (LINE_EM - ASCENT_EM) * z
+        x = 10 + 40 * c["col"] + 4
+        for k in range(5):
+            img[int(round((base - 0.7 * z) * PX)):int(round(base * PX)), int((x + 5 * k) * PX):int((x + 5 * k + 2) * PX)] = 0
+    el["rows_fixed"] = list(range(fixed))
+    return img
+
+
+@pytest.mark.parametrize("valign", ["top", "bottom"])
+def test_the_thumbnail_says_how_far_in_a_cells_line_box_stands(valign):
+    """hebrew-lesson's cells show their baselines 1.45 pt + 0.968 em under the row's top where the
+    strut and the guessed inset put them 5 pt off; comps-analysis' bottom-aligned ones 1.0 pt + the
+    line box's descent over the row's bottom."""
+    from beamer2slides.deck_thumbs import thumbnail_cell_text
+    el = grid_element(heights=(24, 24, 24))
+    img = cell_thumb(el, 1.5, valign)
+    thumbnail_cell_text([el], img, PX)
+    assert el["cell_text_y"] == pytest.approx(1.5, abs=0.6)
+
+
+def test_cells_in_rows_the_thumbnail_could_not_place_say_nothing():
+    """With no row measured only the first row's top is known: two top-aligned cells are too few to
+    go by. With one measured, its bottom is known too, and its two bottom-aligned cells still too few."""
+    from beamer2slides.deck_thumbs import thumbnail_cell_text
+    el = grid_element(heights=(24, 24, 24))
+    img = cell_thumb(el, 1.5, "top", fixed=0)
+    thumbnail_cell_text([el], img, PX)
+    assert "cell_text_y" not in el
+    el = grid_element(heights=(24, 24, 24))
+    img = cell_thumb(el, 1.5, "bottom", fixed=1)
+    thumbnail_cell_text([el], img, PX)
+    assert "cell_text_y" not in el
+
+
+def test_a_cells_line_stands_the_measured_inset_plus_its_line_box():
+    from beamer2slides.emit import ASCENT_EM, LINE_EM
+    one = {"paragraphs": [{"runs": [{"text": "a", "size": 10.0}]}, {"runs": [{"text": "b", "size": 20.0}]}]}
+    assert adopt.cell_line_place(dict(one, valign="top"), 1.0) == pytest.approx(1.0 + ASCENT_EM * 10)
+    assert adopt.cell_line_place(dict(one, valign="bottom"), 1.0) == pytest.approx(1.0 + (LINE_EM - ASCENT_EM) * 20)
+    assert adopt.cell_line_place(dict(one, valign="middle"), 1.0) is None
+    assert adopt.cell_line_place({"valign": "top", "paragraphs": []}, 1.0) is None
+
+
+def test_a_measured_inset_places_a_cell_by_its_first_or_last_baseline(tmp_path):
+    """The box TeX builds for a cell is placed by its first baseline (`\\adoptht`, from its top to
+    there - its height reaches its last) or its last (`\\adoptdp`), not by the strut's edge."""
+    ir = deck_ir(deck(table()), foreign=True)
+    el = next(e for e in ir["slides"][0]["elements"] if e["kind"] == "table")
+    el["cell_text_y"] = 1.0
+    text = adopt.bootstrap(ir, tmp_path / "tree" / "main.tex")
+    assert "\\newcommand\\adoptht" in text and "\\newcommand\\adopt@first" in text
+    nodes = [l for l in table_source(text).splitlines() if "\\node[" in l]
+    tops = [l for l in nodes if "+\\adoptht{" in l]
+    bottoms = [l for l in nodes if "-\\adoptdp{" in l]
+    assert len(tops) == 4 and all("anchor=north west" in l for l in tops)
+    assert len(bottoms) == 1 and "anchor=south west" in bottoms[0]
+    z = 12 / SCALE
+    assert f"-{1.0 + adopt.line_box(z, 1.0)[0]:.2f}pt+\\adoptht" in tops[0]
+    assert sum("adoptdrop" in l for l in nodes) == 1, "a middle cell is placed as before"

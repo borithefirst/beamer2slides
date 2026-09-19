@@ -1325,6 +1325,7 @@ TABLE_MACROS = r"""\makeatletter
   % width with no insets, its shift, content
   \expandafter\ifx\csname adopt@box@#1\endcsname\relax\expandafter\newbox\csname adopt@box@#1\endcsname\fi
   \global\setbox\csname adopt@box@#1\endcsname\adoptsetcell{#4}{#8}%
+  \expandafter\adopt@first\csname adopt@box@#1\endcsname
   \expandafter\xdef\csname adopt@drop@#1\endcsname{\adopt@lastdrop}%
   \dimen@\z@\@tempcnta#2\relax
   \loop\advance\dimen@\csname adopt@row@\the\@tempcnta\endcsname\relax
@@ -1336,6 +1337,7 @@ TABLE_MACROS = r"""\makeatletter
   \ifdim\dimen@ii>\dimexpr\dimen@+\skip@\relax
     \setbox\@tempboxa\adoptsetcell{#6}{#8}%
     \ifdim\dimexpr\ht\@tempboxa+\dp\@tempboxa\relax<\dimexpr\dimen@ii-#5*2\relax
+      \adopt@first\@tempboxa
       \global\setbox\csname adopt@box@#1\endcsname\hbox to #4{\kern#7\box\@tempboxa\hss}%
       \dimen@ii\dimexpr\ht\csname adopt@box@#1\endcsname+\dp\csname adopt@box@#1\endcsname+#5*2\relax
     \fi
@@ -1344,7 +1346,20 @@ TABLE_MACROS = r"""\makeatletter
     \ifdim\dimen@ii>\dimen@
       \expandafter\edef\csname adopt@row@#3\endcsname{\the\dimexpr\csname adopt@row@#3\endcsname+\dimen@ii-\dimen@\relax}%
     \fi
-  \fi}
+  \fi
+  \expandafter\let\csname adopt@ht@#1\endcsname\adopt@fht
+  \expandafter\xdef\csname adopt@dp@#1\endcsname{\the\dp\csname adopt@box@#1\endcsname}}
+\newbox\adopt@split
+\newcommand\adopt@first[1]{% from a vbox's top to its first baseline (its height reaches its last,
+  % and a colour's whatsit on either end keeps \lastbox from counting lines): pieces split off the
+  % top until one holds a line
+  {\setbox\adopt@split\copy#1\vbadness\@M\vfuzz\maxdimen\splittopskip\z@\splitmaxdepth\maxdimen
+   \dimen@\z@\@tempswatrue
+   \loop\setbox\z@\vsplit\adopt@split to\z@\setbox\z@\vbox{\unvbox\z@}%
+     \ifdim\ht\z@>\z@\@tempswafalse\advance\dimen@\ht\z@\else\advance\dimen@\dp\z@\fi
+     \ifvoid\adopt@split\@tempswafalse\fi
+   \if@tempswa\repeat
+   \xdef\adopt@fht{\the\dimen@}}}
 \newcommand\adopttops[1]{% \adopty{k}: the top of row k, and \adopty{#1} the table's foot
   \dimen@\z@\@tempcnta\z@
   \loop\expandafter\edef\csname adopt@y@\the\@tempcnta\endcsname{\the\dimen@}%
@@ -1353,6 +1368,8 @@ TABLE_MACROS = r"""\makeatletter
 \newcommand\adopty[1]{\csname adopt@y@#1\endcsname}
 \newcommand\adoptbox[1]{\copy\csname adopt@box@#1\endcsname}
 \newcommand\adoptdrop[1]{\csname adopt@drop@#1\endcsname}
+\newcommand\adoptht[1]{\csname adopt@ht@#1\endcsname}% the height of a cell's first line
+\newcommand\adoptdp[1]{\csname adopt@dp@#1\endcsname}% the depth of its last
 \makeatother"""
 
 DASHES = {"DOT": "dotted", "DASH": "dashed", "DASH_DOT": "dash dot", "LONG_DASH": "dashed",
@@ -1401,6 +1418,21 @@ def cell_lead(base: dict, cell: dict, ctx: Context) -> str:
     return base_lead(base, ctx) + f"\\baselineskip={pitch:.2f}pt\\relax"
 
 
+def cell_line_place(cell: dict, text_y: float) -> float | None:
+    """How far from its row's top (bottom) a top- (bottom-) aligned cell's first (last) baseline
+    stands: the table's measured text inset (`deck_thumbs.thumbnail_cell_text`) plus the ascent
+    (descent) of that line's Slides line box. None for a cell with no text or another alignment."""
+    paras = [p for p in cell.get("paragraphs", []) if p.get("runs")]
+    if not paras or cell.get("valign") not in ("top", "bottom"):
+        return None
+    p = paras[0] if cell.get("valign") == "top" else paras[-1]
+    z = max((r.get("size") or 0) for r in p["runs"]) or p.get("size") or 0
+    if not z:
+        return None
+    above, below = line_box(z, p.get("line_spacing") or 1.0)
+    return text_y + (above if cell.get("valign") == "top" else below)
+
+
 def table_block(el: dict, ctx: Context, ind: str) -> str:
     """A table at its place and size: every cell's text set in a box as wide as its columns less
     Slides' insets, the rows grown until their cells fit (`TABLE_MACROS`), then one tikzpicture with
@@ -1414,6 +1446,7 @@ def table_block(el: dict, ctx: Context, ind: str) -> str:
     ctx.packages.add(TEXTPOS)
     ctx.packages.add(TABLE_MACROS)
     padx, pady = el.get("cell_pad") or (4.5, 4.5)
+    text_y = el.get("cell_text_y")
     xs = [0.0]
     for w in widths:
         xs.append(xs[-1] + w)
@@ -1485,8 +1518,15 @@ def table_block(el: dict, ctx: Context, ind: str) -> str:
             continue
         r1 = min(c["row"] + c["rowspan"], n_rows)
         x = xs[c["col"]] + padx
+        line = cell_line_place(c, text_y) if text_y is not None else None
         if c.get("valign") == "middle":
             where, anchor = f"({x:.1f}pt,{{-(\\adopty{{{c['row']}}}+\\adopty{{{r1}}})/2}})", "west"
+        elif line is not None and c.get("valign") == "bottom":
+            # the last baseline where the thumbnail shows it (`deck_thumbs.thumbnail_cell_text`)
+            where, anchor = f"({x:.1f}pt,{{-\\adopty{{{r1}}}+{line:.2f}pt-\\adoptdp{{{boxes[k]}}}}})", "south west"
+        elif line is not None:
+            # the first baseline, likewise, whatever the strut made of the box's first line
+            where, anchor = f"({x:.1f}pt,{{-\\adopty{{{c['row']}}}-{line:.2f}pt+\\adoptht{{{boxes[k]}}}}})", "north west"
         elif c.get("valign") == "bottom":
             where, anchor = f"({x:.1f}pt,{{-\\adopty{{{r1}}}+{pady:.2f}pt}})", "south west"
         else:
