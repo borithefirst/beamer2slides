@@ -196,6 +196,13 @@ def test_the_thumbnail_tells_a_fixed_box_with_no_insets():
     el = element()
     thumbnail_insets([el, {"kind": "image", "bbox": [45.0, 40.0, 60.0, 110.0]}], *thumb(50.6, 54.2))
     assert "insets" not in el["box"], "a picture across the box's left strip is ink too"
+    el = element()
+    ground = {"kind": "image", "bbox": [0.0, 0.0, 453.54, 300.0]}
+    thumbnail_insets([ground, el], *thumb(50.6, 54.2))
+    assert el["box"].get("insets") == 0, "a template's full-slide picture under the box is its ground"
+    el = element()
+    thumbnail_insets([el, ground], *thumb(50.6, 54.2))
+    assert "insets" not in el["box"], "a picture over the box hides what it would show"
 
 
 def test_list_items_collapse_their_spacing_and_other_paragraphs_do_not(tmp_path):

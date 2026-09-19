@@ -497,12 +497,7 @@ def thumbnail_insets(elements: list[dict], thumb, px: float) -> None:
         indent = min(min(p["slides"].get("indent_first") or 0, p["slides"].get("indent_start") or 0)
                      for p in paras) / scale
         strip = (x0 - 1, y0, x0 + indent + pad + 2, y1)
-        if any(o is not e and o.get("bbox") and len(o["bbox"]) == 4 and
-               not (o["bbox"][2] <= strip[0] or o["bbox"][0] >= strip[2] or o["bbox"][3] <= strip[1]
-                    or o["bbox"][1] >= strip[3]) and
-               not (o.get("kind") in ("shape",) and o["bbox"][0] < x0 - 2 and o["bbox"][1] < y0 - 2
-                    and o["bbox"][2] > x1 + 2 and o["bbox"][3] > y1 + 2)
-               for o in elements):
+        if crossed(e, elements, strip):
             continue
         X0, X1 = int(round(x0 * px)), int(round(x1 * px))
         Y0, Y1 = int(round(y0 * px)), int(round(y1 * px))
@@ -533,6 +528,26 @@ def thumbnail_insets(elements: list[dict], thumb, px: float) -> None:
             e["anchor"] = [round(e["anchor"][0] - pad, 2), round(e["anchor"][1] - dy, 2)]
 
 
+def crossed(e: dict, elements: list[dict], strip: tuple) -> bool:
+    """Does anything but the box itself reach into `strip`, where its thumbnail is read? What lies under
+    the whole box does not: a panel it stands on, or the full-slide picture of a template's layout
+    (devfest2020 draws every slide's ground as one, and none of its boxes could be read)."""
+    x0, y0, x1, y1 = e["bbox"]
+    below = True
+    for o in elements:
+        if o is e:
+            below = False
+            continue
+        b = o.get("bbox")
+        if not b or len(b) != 4 or b[2] <= strip[0] or b[0] >= strip[2] or b[3] <= strip[1] or b[1] >= strip[3]:
+            continue
+        if (o.get("kind") == "shape" or below and o.get("kind") == "image") and b[0] < x0 - 2 and b[1] < y0 - 2 \
+                and b[2] > x1 + 2 and b[3] > max(y1, strip[3]) + 2:
+            continue
+        return True
+    return False
+
+
 CAP_EM = 0.72               # a Latin face's cap height, near enough to tell 6.5 pt of top inset
 PPTX_INSET_Y = 3.6          # Slides pt: PowerPoint's default top and bottom insets (0.05 in); Slides' are 7.2
 # Cap heights (em) of the faces `top_drift` may read: any other face's own cap height moves its first
@@ -557,11 +572,7 @@ def top_drift(e: dict, elements: list[dict], thumb, px: float) -> float | None:
         return None
     x0, y0, x1, y1 = e["bbox"]
     base = e["anchor"][1]
-    if any(o is not e and o.get("bbox") and len(o["bbox"]) == 4 and
-           not (o["bbox"][2] <= x0 or o["bbox"][0] >= x1 or o["bbox"][3] <= y0 - 2 or o["bbox"][1] >= base + 2) and
-           not (o.get("kind") == "shape" and o["bbox"][0] < x0 - 2 and o["bbox"][1] < y0 - 2
-                and o["bbox"][2] > x1 + 2 and o["bbox"][3] > base + 2)
-           for o in elements):
+    if crossed(e, elements, (x0, y0 - 2, x1, base + 2)):
         return None
     cap = KNOWN_CAPS.get(paras[0]["runs"][0].get("font") or "")
     if cap is None:
