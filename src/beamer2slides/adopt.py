@@ -536,6 +536,7 @@ def preamble(target: dict, ctx: Context, flow: bool, tree: Path | None = None) -
     anything beamer adds by itself (navigation bar, headline, footline, frame title style) is ink
     the deck does not have, and every pixel of it is a residual the loop cannot remove."""
     opt = page_option(target["slides"][0].get("size") if target["slides"] else None)
+    from .scripts import script_preamble
     fonts = font_preamble(target, tree)
     lines = [f"\\documentclass[{opt}]{{beamer}}" if opt else "\\documentclass{beamer}",
              "\\usetheme{default}",
@@ -543,6 +544,9 @@ def preamble(target: dict, ctx: Context, flow: bool, tree: Path | None = None) -
              "\\setbeamertemplate{footline}{}",
              "\\setbeamertemplate{headline}{}",
              "\\setbeamercolor{background canvas}{bg=}",
+             # languages, fallback fonts and shaping for scripts other than Latin: before the font
+             # lines, whose fonts then carry the fallback chain (scripts.py)
+             *script_preamble(target, tree),
              *fonts,
              "\\renewcommand{\\familydefault}{\\sfdefault}"]
     if not flow:

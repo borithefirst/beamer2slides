@@ -199,6 +199,9 @@ def text_paragraphs(pe: dict, text: dict, resolver: StyleResolver, fonts: FontMa
             pm = te["paragraphMarker"]
             st = {**pbase, **pm.get("style", {})}
             bullet = pm.get("bullet")
+            # `align` is where the lines sit on the page. START and END are the paragraph's own
+            # start and end, so in a right-to-left paragraph (Hebrew, Arabic) START is flush right.
+            rtl = st.get("direction") == "RIGHT_TO_LEFT"
             cur = {"align": {"START": "left", "CENTER": "center", "END": "right", "JUSTIFIED": "left"}.get(
                        st.get("alignment", "START"), "left"),
                    "level": 0, "nesting": bullet.get("nestingLevel", 0) if bullet else 0,
@@ -207,6 +210,9 @@ def text_paragraphs(pe: dict, text: dict, resolver: StyleResolver, fonts: FontMa
                    "indent_start": dim(st.get("indentStart")), "indent_first": dim(st.get("indentFirstLine")),
                    "line_spacing": (st.get("lineSpacing") or 100) / 100, "space_above": dim(st.get("spaceAbove")),
                    "runs": [], "tab_x0": None}
+            if rtl:
+                cur["direction"] = "rtl"
+                cur["align"] = {"left": "right", "right": "left"}.get(cur["align"], cur["align"])
             paragraphs.append(cur)
         elif "textRun" in te or "autoText" in te:
             if cur is None:
@@ -314,6 +320,7 @@ def text_element(pe: dict, m: list[float], resolver: StyleResolver, fonts: FontM
         tx0 = (x0 + PAD_X + p["indent_start"]) / scale
         out_paras.append({
             "align": p["align"], "level": p["level"], "bullet": p["bullet"] and {**p["bullet"], "bbox": None},
+            **({"direction": "rtl"} if p.get("direction") == "rtl" else {}),
             "size": p["size"], "text_x0": round(tx0, 2), "tab_x0": p["tab_x0"],
             "lines": [{"baseline": None, "x0": round(tx0, 2), "x1": round(lines_x1, 2)}],
             "runs": [{k: v for k, v in r.items() if k not in ("slides_font", "slides_size")} for r in p["runs"]],

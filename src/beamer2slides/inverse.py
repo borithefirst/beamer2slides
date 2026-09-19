@@ -115,6 +115,13 @@ def runs_latex(runs: list[dict], base: dict, ctx: "Context") -> str:
     for r in runs:
         if r.get("hole"):
             continue
+        if "\x0b" in r["text"]:
+            # A soft break (Shift+Enter) ends a line, which it cannot do inside the box a style puts
+            # its run in (`\underline{a\\ b}`: "Not allowed in LR mode"), so the run's style goes
+            # around each line's words and the break stands between them.
+            pieces = [runs_latex([{**r, "text": t}], base, ctx) if t else "" for t in r["text"].split("\x0b")]
+            out.append("\\\\ ".join(pieces))
+            continue
         text = latex_escape(r["text"])
         if not text:
             continue
@@ -144,7 +151,9 @@ def runs_latex(runs: list[dict], base: dict, ctx: "Context") -> str:
                 url = str(r["link"]).replace("\\", "/").replace("#", "\\#").replace("%", "\\%")
                 core = f"\\href{{{url}}}{{{core}}}"
         out.append(" " * lead + core + " " * trail)
-    return "".join(out)
+    # Two breaks in a row are an empty line, and a second `\\` with nothing on its line stops a
+    # ragged or centred paragraph ("There's no line here to end"): the line gets an empty box.
+    return re.sub(r"(?<=\\\\ )(\s*)(?=\\\\)", r"\1\\mbox{}", "".join(out))
 
 
 def compare_colour(a: str, b: str) -> bool:
@@ -2065,7 +2074,9 @@ def signature(r: dict) -> tuple:
 # ---------------------------------------------------------------- generated LaTeX
 
 def paragraphs_latex(paragraphs: list[dict], style_for, ctx: Context, ind: str) -> str:
-    lines, stack = [], []
+    from .scripts import align_switch, block_direction, block_rtl, paragraph_direction
+    lines, stack, items = [], [], []    # items: whether each open list has had an \item yet
+    rtl_block = block_rtl(paragraphs)
     for p in paragraphs:
         blank = bool(p["runs"]) and not any(r["text"].strip() for r in p["runs"])
         runs = runs_latex(p["runs"], style_for(p), ctx).strip()
@@ -2088,20 +2099,29 @@ def paragraphs_latex(paragraphs: list[dict], style_for, ctx: Context, ind: str) 
             env = "enumerate" if p["bullet"].get("kind") == "number" else "itemize"
             while len(stack) > level + 1:
                 lines.append(ind + "  " * (len(stack) - 1) + f"\\end{{{stack.pop()}}}")
+            del items[len(stack):]
             while len(stack) < level + 1:
+                if stack and not items[-1]:
+                    # a list opening deeper than its first item ("missing \item"): an empty item
+                    # holds it, and LaTeX sets a list that opens an item on that item's line
+                    lines.append(ind + "  " * len(stack) + "\\item[]")
+                    items[-1] = True
                 lines.append(ind + "  " * len(stack) + f"\\begin{{{env}}}")
                 stack.append(env)
+                items.append(False)
             lines.append(ind + "  " * len(stack) + f"\\item {runs}")
+            items[-1] = True
         else:
             while stack:
                 lines.append(ind + "  " * (len(stack) - 1) + f"\\end{{{stack.pop()}}}")
             if lines:
                 lines.append("")
-            align = {"center": "\\centering ", "right": "\\raggedleft "}.get(p.get("align"), "")
-            lines.append(ind + align + runs.replace("\t", " "))
+            # the switch and the language group follow the paragraph's direction (scripts.py)
+            line = align_switch(p) + runs.replace("\t", " ")
+            lines.append(ind + paragraph_direction(p, line, rtl_block))
     while stack:
         lines.append(ind + "  " * (len(stack) - 1) + f"\\end{{{stack.pop()}}}")
-    return "\n".join(lines)
+    return block_direction(paragraphs, "\n".join(lines), ind)
 
 
 def textblock_latex(te: dict, style_for, ctx: Context, ind: str, reset: bool = False, lead: str = "") -> str:
