@@ -216,6 +216,23 @@ Each of these was a diff against PDFium until it was ported:
   TeX distribution): its subsets have glyph ids with no Unicode, so the text page reads the codes
   themselves - Hebrew, Arabic, Syriac - and 78 of 100 torture pages were apart
   (`test_right_to_left_text_is_ordered_as_pdfium_orders_it`, with and without /R2L).
+- **/ActualText** (PreMarkedContent, ProcessMarkedContent): the content parser keeps PDFium's
+  marked-content stack (`content.MarkItem`: BMC, BDC with a dictionary written in the stream or named
+  in /Properties, which GetParam looks up again on every call; a BDC whose operand is neither opens
+  nothing, so its EMC closes the enclosing sequence; a form starts with an empty stack). A text
+  object whose marks carry an /ActualText *string* (GetStringFor: a reference does not count there,
+  though ProcessMarkedContent's GetUnicodeTextFor follows one) gives that text, one kActualText char
+  per UTF-16 unit with no char code, boxes slicing the object's rectangle in equal parts from the left
+  (from the right when the object's own glyphs run right to left), control chars as spaces, U+FFFD
+  and up dropped; the next object whose last mark has the very same dictionary gives nothing, and one
+  whose text is only unprintable is skipped whole. CloseTempLine keeps a right-to-left segment that
+  opens with such a char in its logical order. Found by the whole-disk sweep (every distinct PDF on
+  the machine, 71,408 pages): Word's export of an Arabic deck in the adopt corpus writes a ligature's
+  letters as /ActualText over glyphs whose ToUnicode says U+FFFD, and 1,474 of its pages were apart
+  (`test_actual_text_reads_as_pdfium_reads_it`, `tools/marked_content_torture.py`: 4,000 seeds equal;
+  with PreMarkedContent off 143 of 300 are apart). The same sweep found metropolis's bullet font:
+  CPDF_Type3Font::Load's FontBBox goes through ToFxRect, each corner truncated toward zero, not the
+  outer box (`test_a_type3_font_box_is_truncated_toward_zero`).
 - **Cross references** are CPDF_Parser's loading ported, not a reader that accepts good files
   (`document.PdfFile`, whose table is CPDF_CrossRefTable; `test_cross_references_are_read_as_pdfium_reads_them`
   and `test_cross_references_are_loaded_as_pdfium_loads_them`, one case per rule). A regex reader
@@ -278,7 +295,7 @@ Each of these was a diff against PDFium until it was ported:
 ## What it does not do
 
 - **Rendering, mostly.** Option 3 below is under way (next section); until
-  TrueType text (and the shadings, image codecs and colour spaces not ported yet) draw, `render` raises PdfError
+  the shadings, image codecs and colour spaces not ported yet draw, `render` raises PdfError
   on any page holding one, and `api.renders(backend)` is
   False. The pipeline needs renders for backgrounds, crops, ball colours, `_looks_like` and fidelity,
   so `classify` runs on the reader but `convert` does not. `embedded_image` gives no `pixels` or `rendered`, so
@@ -516,11 +533,11 @@ truncated): the first rendering under a key is the one reused. Rules found on th
   /DW2, clip pages among them): 300 seeds extract equal (objects, bounds, chars), and with
   `--kind cid-cff` all of the first 400 seeds draw and are exact;
   17 of the first 30 are apart when the vertical origins are ignored.
-Refused, each with its reason: TrueType glyphs (embedded
-or a system substitute GDI picked), a code whose glyph the font lacks (PDFium falls back to another
-font), a /W2 PDFium would crash on, pattern colours, and text inside a soft mask (a mask device
-renders glyphs in FT_RENDER_MODE_NORMAL). The oracle is `devtools/render_torture_text.py` (`python
-tools/render_torture_text.py SEED0 N [--simple 0|1|2|3|4] [--kind type1|cid|...]`): the fonts are
+Refused, each with its reason: what the TrueType port refuses (below), a code whose glyph the font
+lacks (PDFium falls back to another font), a /W2 PDFium would crash on, pattern colours, and text
+inside a soft mask (a mask device renders glyphs in FT_RENDER_MODE_NORMAL). The oracle is
+`devtools/render_torture_text.py` (`python tools/render_torture_text.py SEED0 N [--simple 0|1|2|3|4]
+[--kind type1|cid|...]`): the fonts are
 harvested from the built test decks at run time (no font binaries in the tree), only codes whose
 glyph has an outline, and a page is a few BT groups with random Tf sizes (0.5 to 120), Tm (upright,
 scaled, mirrored, turned, skewed), `cm`, clips, Tz/Tc/Tw/Ts/TL, Tr 0..7, TJ kernings, constant
@@ -530,12 +547,50 @@ one-glyph pages, not one pixel apart (59 refused, all Type 3); across the test, 
 theme PDFs, 1,499 pages holding text render byte-identical and none differs (the rest are refused
 for shadings, images, TrueType or Type 3). `tests/test_pure_pdf.py` keeps 80 seeds of two levels
 and the shrunk cases. Since `26_truetype_fonts` the harvest also holds CID TrueType (DejaVu) and
-simple CFF fonts (xelatex's Computer Modern): CFF renders exact (60 of 60 seeds), TrueType is refused.
+simple CFF fonts (xelatex's Computer Modern): CFF renders exact (60 of 60 seeds), and TrueType too
+since the port below.
+
+**TrueType glyphs** (`pure/truetype.py`, `pure/ttinterp.py`) are FreeType 2.14.3's glyf loader and
+bytecode interpreter as PDFium drives them. CFX_Face::RenderGlyph loads an sfnt glyph *hinted*
+(FT_LOAD_NO_BITMAP | FT_LOAD_PEDANTIC) at 64 ppem under FT_Set_Transform and, when that load fails,
+loads it again with FT_LOAD_NO_HINTING; LoadGlyphPath (the path route) loads it unhinted. So hinting
+matters for every glyph drawn as a bitmap, and forcing unhinted loads puts 13 of the first 30
+TrueType torture seeds apart.
+- **Loading** (ttgload.c): simple glyphs (flags, repeats, deltas), composites with their
+  ARGS_ARE_XY_VALUES / anchor points, scales and ROUND_XY_TO_GRID, recursion limits, the phantom
+  points from hmtx/vmtx (or the OS/2 / hhea fallback), and FreeType's error codes, each of which makes
+  PDFium's second, unhinted load. The outline comes out in 26.6 with its on/off-curve tags, so the
+  smooth rasteriser needed FreeType's conic path (`ftgrays.conic_to`, the FT_INT64 DDA) and
+  `ftoutline`'s decomposer its conic segments.
+- **The interpreter** (ttinterp.c): every instruction, v40 "minimal subpixel hinting" (backward
+  compatibility on unless prep signs the INSTCTRL waiver: no x moves, no y moves after both IUPs),
+  pedantic mode (every out-of-range reference is an error, and the glyph is then loaded unhinted),
+  32-bit FT_Long arithmetic as on Windows, 64 ppem square pixels (MPPEM 64, no CVT stretching).
+  fpgm runs once, prep once per size reset (LoadGlyphPath's FT_Set_Pixel_Sizes is one, so the next
+  hinted load runs prep again), then each glyph's own program, composites' included.
+- **State that outlives a load**: FreeType keeps the twilight zone between glyphs, and a glyph program
+  may write it. The loader keeps it as FreeType does; a load that starts from a twilight other than
+  prep's is run again from prep's, and if the two outlines differ the glyph is refused rather than
+  drawn in a way that depends on which glyphs came before.
+CFF outlines in an `OTTO` sfnt (/Subtype /OpenType) are not hinted: they go through the CFF engine
+unhinted and match PDFium exactly (measured on harvested CFF fonts wrapped per seed,
+`test_cff_in_an_otto_sfnt_draws_unhinted_as_pdfium_does`); the same CFF under a TrueType tag
+(0x00010000) comes out apart in PDFium and is refused (it used to crash fontTools).
+Refused (`Unported`), each with its reason: variable fonts (fvar/gvar), colour and bitmap-only fonts,
+**tricky fonts** (FreeType's name and checksum lists: it hints them even when asked not to), a prep
+that sets INSTCTRL bit 2 (the saved graphics state is reset on every load), glyphs flagged as
+overlapping (FreeType renders those with its overlap-aware rasteriser), component offsets scaled by
+the component's transform, opcodes FreeType leaves undefined but whose stack effect it still applies,
+and glyphs whose hinting depends on the twilight zone left by earlier loads. The oracle is the text
+torture with `--kind cid-truetype` (DejaVu subsets from `26_truetype_fonts`): 600 seeds exact, none
+refused; `tools/truetype_torture.py` (made-up fonts, plain, `--directory`, `--os2`) 200 seeds each
+clean; the tests keep five seeds and prove the hinter is used (unhinted loads put seed 1 apart).
 
 **Substituted text** (a font with no program in the PDF) is drawn from the face `fontmapper.py`
 picked, through what CFX_Font does differently for a CFX_SubstFont. On Windows the base 14 and any
-installed name go to GDI's TrueType faces (refused, `render_text.truetype_face` is the one line that
-will hand them to the TrueType port), so what draws is PDFium's own Foxit faces: Symbol and
+installed name go to GDI's TrueType faces (`render_text.truetype_face`: one `truetype.TrueTypeFace`
+per face program, shared by every font the mapper hands it to as the FT_Face is, hinted like an
+embedded font, its LoadGlyphPath outline unhinted); the rest is PDFium's own Foxit faces: Symbol and
 ZapfDingbats (CFF, `ftoutline.Face.from_cff` over the cached bytes; "Chrome Symbol"/"Chrome
 Dingbats", weight and angle 0), and for a name nothing matches the multiple masters FoxitSansMM or,
 with the serif flag, FoxitSerifMM (weight × 4/5). Ported:
@@ -561,8 +616,14 @@ with the serif flag, FoxitSerifMM (weight × 4/5). Ported:
   `xy -= xx · skew / 100` in FT_Fixed with C truncation for bitmaps (the effective skew), the same
   on the identity for paths (GetSkew), from PDFium's angle table.
 - **Synthetic bold** (FT_Outline_EmboldenXY, `ftoutline.embolden`, at GetEmboldenLevel's strength)
-  is ported but unreached on Windows: the MM faces carry weight in the blend and the CFF faces have
-  weight 0, so only GDI's TrueType faces would take it. Unverified.
+  is ported; the MM faces carry weight in the blend and the CFF faces have weight 0, so only GDI's
+  TrueType faces can take it. Its path route uses the *unhinted* outline (LoadGlyphPath never
+  hints), its bitmap route the hinted one.
+- **GDI's TrueType faces** draw since the TrueType port: `render_torture_subst.py --pool installed`
+  (base 14 and installed names only), 300 seeds, 251 drawn and exact, 49 refused for fallback fonts.
+  It found an extraction rule too: a font with no /FontDescriptor has flags 0 (PDFium's m_Flags
+  default), not nonsymbolic, so a TrueType one takes the Mac cmap branch of LoadGlyphMap (code 0x60
+  is `grave` there, `quoteleft` in the standard encoding the nonsymbolic branch used; seeds 18, 21, 29).
 - **GetCharPosList's spacing heuristic** for a non-MM substitute under a name that is neither
   standard nor the loaded family's (IsActualFontLoaded): a glyph whose /Widths width exceeds the
   face's advance + 1 moves right by half the excess (`F((pdf - face) · size) / 2000`), a narrower

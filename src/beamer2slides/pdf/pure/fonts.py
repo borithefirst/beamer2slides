@@ -643,12 +643,9 @@ def _upem_from_matrix(matrix) -> int:
 
 
 def load_type1(data: bytes) -> Program | None:
-    from fontTools import t1Lib
-    # T1Font wants a file; parse() only needs the data (cleartext + binary eexec part, as in FontFile)
-    font = t1Lib.T1Font.__new__(t1Lib.T1Font)
-    font.data, font.encoding = data, "ascii"
-    font.parse()
-    d = font.font
+    from . import type1
+    # t1Lib.T1Font.parse's dictionary (cleartext + binary eexec part, as in FontFile)
+    d = type1.fonttools_font(data)
     charstrings = d["CharStrings"]
     names = list(charstrings.keys())
     if NOTDEF in names:  # FreeType swaps .notdef with glyph 0 (t1load.c parse_charstrings)
@@ -949,7 +946,7 @@ class Font:
         self.doc, self.dict = doc, d
         r = doc.resolve
         self.base_name = str(r(d.get("BaseFont")) or "")
-        self.flags = FLAG_NONSYMBOLIC
+        self.flags = 0
         self.italic_angle = 0
         self.stem_v = 0
         self.font_weight: int | None = None
@@ -1509,9 +1506,9 @@ class Type3Font(SimpleFont):
             v = [_num(r(x)) for x in bbox[:4]]
             # in floats, like PDFium: 6 * 0.011f * 1000 is 66 there, 65.9999996 in doubles
             box = tuple(float32(float32(v[k] * (xs, ys)[k % 2]) * 1000) for k in range(4))
-            # CFX_FloatRect::ToFxRect: outer integers
-            self.font_bbox = (math.floor(min(box[0], box[2])), math.floor(min(box[1], box[3])),
-                              math.ceil(max(box[0], box[2])), math.ceil(max(box[1], box[3])))
+            # CFX_FloatRect::ToFxRect: each corner as given, truncated toward zero (37 * 0.01204
+            # * 1000 = 445.48 is 445: metropolis's bullet font); nothing puts the corners in order
+            self.font_bbox = tuple(int(v) for v in box)
         self.widths = [0] * 256
         start = _int(r(d.get("FirstChar")))
         widths = r(d.get("Widths"))

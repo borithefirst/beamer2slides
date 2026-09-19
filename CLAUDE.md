@@ -60,14 +60,20 @@ a per-slide background picture.
   nothing), and so is Type 3 text (`pure/render_type3.py`: ProcessType3Text, the glyph cache with
   AdjustBlue, TransformTo, form glyphs of paths/images/shadings/nested Type 3 text; widths in floats,
   LoadChar's depth-4 guard and the per-document font map; oracle `tools/render_torture_type3.py`,
-  6,400 seeds exact, 1% refused: glyph images that are not masks). Whole pages: 231 of the test decks' 241 render byte for byte
+  6,400 seeds exact, 1% refused: glyph images that are not masks), and so is TrueType text,
+  embedded or a GDI system substitute (FreeType's glyf loader and bytecode interpreter, v40,
+  pedantic, 64 ppem: `pure/truetype.py`, `pure/ttinterp.py`; torture `--kind cid-truetype` 600
+  seeds exact; tricky/variable fonts and glyphs hinted differently after earlier loads refused).
+  Whole pages: all 269 of the test decks' pages render byte for byte
   as PDFium's, none apart (`test_whole_beamer_pages_render_as_pdfium_renders_them`);
-  a page with anything not ported yet (TrueType text, system-font substitutes,
-  JPX/JBIG2/CCITT or ICC-profiled images, tiling patterns, ICCBased shadings, transfer functions on
-  images…) raises PdfError, so
+  a page with anything not ported yet (JPX/JBIG2/CCITT or ICC-profiled images, tiling patterns,
+  ICCBased shadings, transfer functions on images…) raises PdfError, so
   `renders = False`: `classify` runs on it and `convert` doesn't yet. Every call equals PDFium's on 4,373 pages
-  (chars and object boxes to the last bit on the test decks),
-  and deck.json is identical on all 48 test decks; extract is 7× slower. `tests/test_pure_pdf.py`.
+  (chars and object boxes to the last bit on the test decks; extraction also on 71,408 pages swept from
+  the 3,169 distinct PDFs on this machine, up to 60 each, /ActualText marked content included),
+  and deck.json is identical on all 48 test decks; extract is ~2.3× slower than PDFium, rendering
+  ~7× (float32 rounding batched through `syntax.F32X*` structs with a scalar fallback on overflow,
+  one regex per word in both lexers, psLib shortcuts for Type 1 programs). `tests/test_pure_pdf.py`.
   Cross references (CPDF_Parser, rebuild included) and navigation (`pure/navigation.py`: links,
   actions, destinations, name trees, page labels, metadata) are ported rule for rule; the whole-file
   fuzz (`--structure`, seeds 0-500) differs from PDFium on none (27 before font substitution was
@@ -81,7 +87,10 @@ a per-slide background picture.
   ZapfDingbats CFF; FoxitSansMM/SerifMM blended per glyph to weight and /Widths width - process-wide
   face state, as in PDFium - skewed by the italic angle; GetCharPosList's spacing heuristic; oracle
   `tools/render_torture_subst.py`, made-up non-embedded fonts, 6,000 seeds exact); GDI's TrueType
-  substitutes (base 14 and installed names on Windows) are refused until TrueType glyphs draw.
+  substitutes (base 14 and installed names on Windows) draw through the TrueType port
+  (`render_text.truetype_face`, one shared face per program; `--pool installed`: 300 seeds, 251 drawn exact, 49 refused for fallback fonts). A font
+  with no descriptor has flags 0 (PDFium's m_Flags default), not nonsymbolic: a TrueType one then
+  maps codes through the Mac cmap (subst seeds 18, 21, 29).
 - No public links: pictures reach Slides inside the imported .pptx, never as shared Drive
   files (they break in protected Workspace domains).
 - **Fidelity is measured on Google's own renderer**, not a local preview: render the PDF page

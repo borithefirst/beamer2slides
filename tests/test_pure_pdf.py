@@ -11,6 +11,7 @@ import json
 import re
 from pathlib import Path
 
+import numpy as np
 import pytest
 
 from beamer2slides import pdf
@@ -71,10 +72,29 @@ def test_the_pure_reader_answers_what_pdfium_answers(path):
                     x, y = a.embedded_image(po.id), b.embedded_image(po.id)
                     close({k: getattr(x, k) for k in IMAGE_FIELDS}, {k: getattr(y, k) for k in IMAGE_FIELDS},
                           f"{where} image {po.id}")
-                    assert x.pixels is None and x.rendered is None, "the pure reader decodes no pixels"
+                    for k in ("pixels", "rendered"):
+                        p, q = getattr(x, k), getattr(y, k)
+                        assert (p is None) == (q is None) and (p is None or np.array_equal(p, q)), \
+                            f"{where} image {po.id} {k}"
     finally:
         ours.close()
         theirs.close()
+
+
+@built
+def test_an_images_dpi_is_pdfiums_to_the_last_bit():
+    """FPDFImageObj_GetImageMetadata divides in floats by the object's GetRect: a double division by
+    the matrix differed in the last digits (14_misc's JPEG, found by the whole-disk sweep)."""
+    for path in DECKS:
+        ours, theirs = pdf.resolve("pure").open(path), pdf.resolve("pdfium").open(path)
+        try:
+            for a, b in zip(ours, theirs):
+                for po in a.objects():
+                    if po.type == OBJ_IMAGE:
+                        assert a.embedded_image(po.id).dpi == b.embedded_image(po.id).dpi, (path.stem, a.index)
+        finally:
+            ours.close()
+            theirs.close()
 
 
 def numbers_apart(a, b, where="") -> int:
@@ -549,14 +569,102 @@ def test_the_pure_renderer_survives_text_torture_seeds(simple):
         content, fonts, zoom, transparent = case(seed, "any", simple)
         try:
             n = compare(content, fonts, zoom, transparent)[0]
-        except PdfError as e:
-            if "TrueType" not in str(e):     # TrueType glyphs are not ported yet (26_truetype_fonts)
-                refused += 1                 # anything else not ported: refused, never drawn wrong
+        except PdfError:
+            refused += 1                     # anything not ported: refused, never drawn wrong
             continue
         if n:
             apart[seed] = n
     assert not apart, f"seeds apart (python tools/render_torture_text.py SEED 1 --simple {simple}): {apart}"
     assert refused < 10
+
+
+TRUETYPE_SEEDS = (1, 8, 11, 14, 16)
+
+
+def _truetype_seeds_apart():
+    from beamer2slides.devtools.render_torture_text import case, compare, harvest
+    if not any(s.kind == "cid-truetype" for s in harvest()):
+        pytest.skip("no embedded TrueType fonts to harvest (build 26_truetype_fonts)")
+    apart = {}
+    for seed in TRUETYPE_SEEDS:
+        n = compare(*case(seed, "cid-truetype", 2))[0]
+        if n:
+            apart[seed] = n
+    return apart
+
+
+def test_the_pure_renderer_hints_truetype_text_as_pdfium_does():
+    """Embedded TrueType text (26_truetype_fonts) is loaded hinted at 64 ppem by FreeType's bytecode
+    interpreter (pure/truetype.py, pure/ttinterp.py) and comes out byte for byte (600 seeds when it
+    was written)."""
+    apart = _truetype_seeds_apart()
+    assert not apart, f"seeds apart (python tools/render_torture_text.py SEED 1 --kind cid-truetype): {apart}"
+
+
+def test_truetype_seeds_need_the_hinter(monkeypatch):
+    """The same seeds drawn from unhinted outlines differ from PDFium: the hinter is really exercised."""
+    from beamer2slides.pdf.pure import truetype
+
+    def unhinted(self, gid):
+        try:
+            return self._load(gid, False)
+        except truetype._Fail:
+            return None
+    monkeypatch.setattr(truetype.TrueTypeFace, "_hinted_outline", unhinted)
+    assert 1 in _truetype_seeds_apart()
+
+
+def _sfnt_around_cff(spec, tag):
+    """`spec` (a simple Type1C font) with its CFF wrapped in an sfnt (/Subtype /OpenType) tagged `tag`."""
+    import io
+    import zlib
+    from fontTools.cffLib import CFFFontSet
+    from fontTools.fontBuilder import FontBuilder
+    from fontTools.ttLib import newTable
+    from beamer2slides.devtools.render_torture_text import FontSpec
+    objs = list(spec.objects)
+    i = next(k for k, o in enumerate(objs) if b"/Type1C" in o and b"stream" in o)
+    head, rest = objs[i].split(b"stream\n", 1)
+    data = rest.rsplit(b"\nendstream", 1)[0]
+    data = zlib.decompress(data) if b"FlateDecode" in head else data
+    cs = CFFFontSet()
+    cs.decompile(io.BytesIO(data), None)
+    order = cs[cs.fontNames[0]].getGlyphOrder()
+    fb = FontBuilder(1000, isTTF=False)
+    fb.setupGlyphOrder(order)
+    fb.setupCharacterMap({})
+    fb.font["CFF "] = t = newTable("CFF ")
+    t.decompile(data, fb.font)
+    fb.setupHorizontalMetrics({g: (500, 0) for g in order})
+    fb.setupHorizontalHeader(ascent=800, descent=-200)
+    fb.setupNameTable({"familyName": "Probe", "styleName": "Regular"})
+    fb.setupOS2()
+    fb.setupPost()
+    fb.setupMaxp()
+    fb.font.sfntVersion = tag
+    out = io.BytesIO()
+    fb.font.save(out)
+    new = out.getvalue()
+    objs[i] = b"<< /Subtype /OpenType /Length %d >>\nstream\n" % len(new) + new + b"\nendstream"
+    return FontSpec(spec.name, "otto", objs, spec.codes, spec.two_byte)
+
+
+def test_cff_in_an_otto_sfnt_draws_unhinted_as_pdfium_does():
+    """PDFium hints only glyf outlines: CFF wrapped in an OTTO sfnt draws exactly like the bare CFF
+    (20 seeds when measured). The same CFF under a TrueType tag (0x00010000) comes out apart in
+    PDFium, so it is refused rather than guessed."""
+    from beamer2slides.devtools.render_torture_text import case, compare, harvest
+    from beamer2slides.pdf.pure.backend import PureBackend
+    from beamer2slides.devtools.render_torture_text import pdf_bytes
+    if not any(s.kind == "cff" for s in harvest()):
+        pytest.skip("no simple CFF font to harvest (build 26_truetype_fonts)")
+    for seed in (0, 2, 4, 5):
+        content, fonts, zoom, transparent = case(seed, "cff", 1)
+        assert compare(content, [_sfnt_around_cff(f, "OTTO") for f in fonts], zoom, transparent)[0] == 0, seed
+    spec = _sfnt_around_cff(next(s for s in harvest() if s.kind == "cff"), "\x00\x01\x00\x00")
+    page = PureBackend().open(pdf_bytes(b"BT /F0 12 Tf 10 10 Td <%02x> Tj ET" % spec.codes[0], [spec]))[0]
+    with pytest.raises(PdfError, match="not tagged OTTO"):
+        page.render(1.0)
 
 
 def test_text_clips_clip_what_follows_them_as_in_pdfium():
@@ -576,7 +684,7 @@ def test_text_clips_clip_what_follows_them_as_in_pdfium():
         try:
             n = compare(content, fonts, zoom, transparent)[0]
         except PdfError:
-            continue                         # TrueType text: refused
+            continue                         # anything not ported: refused
         if n:
             apart[seed] = n
     assert not apart, f"seeds apart (python tools/render_torture_text.py SEED 1 --simple 3): {apart}"
@@ -641,15 +749,16 @@ def test_vertical_writing_reads_and_draws_as_pdfium():
         assert compare(body, [v], 2, False)[0] == 0
 
 
-def test_the_pure_renderer_refuses_text_it_cannot_draw_exactly_yet():
-    """Fonts PDFium draws with a system TrueType substitute (GDI's Arial for Helvetica) are refused,
-    not guessed; the test decks' Type 3 fonts (pdflatex's bitmap fonts) draw as PDFium's."""
-    from beamer2slides.devtools.render_torture_text import FontSpec, compare, harvest, pdf_bytes
-    from beamer2slides.pdf.pure.backend import PureBackend
+def test_the_pure_renderer_draws_system_substitutes_and_type3_text():
+    """Fonts PDFium draws with a system TrueType substitute (GDI's Arial for Helvetica) are hinted
+    like embedded TrueType (`render_text.truetype_face`); the test decks' Type 3 fonts (pdflatex's
+    bitmap fonts) draw as PDFium's."""
+    from beamer2slides.devtools.render_torture_text import FontSpec, compare, harvest
+    _needs_foxit()
     helvetica = FontSpec("standard", "type1", [b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>"], [65])
-    page = PureBackend().open(pdf_bytes(b"BT /F0 12 Tf 10 10 Td (A) Tj ET", [helvetica]))[0]
-    with pytest.raises(PdfError, match="TrueType glyphs of a system substitute|Foxit|font mapper"):
-        page.render(1.0)
+    for zoom in (1.0, 3.1):
+        n, a, _, _ = compare(b"BT /F0 12 Tf 10 10 Td (Agyph 0,Q) Tj ET", [helvetica], zoom, False)
+        assert n == 0 and (a[..., :3] < 128).any()
     type3 = [s for s in harvest() if s.kind == "type3"]
     if type3:
         body = b"BT /F0 12 Tf 10 10 Td <%s> Tj ET" % b"".join(b"%02x" % c for c in type3[0].codes[:6])
@@ -738,6 +847,19 @@ def test_the_pure_renderer_survives_type3_torture_seeds():
     assert not apart, f"seeds apart: {apart}"
 
 
+def test_a_type3_font_box_is_truncated_toward_zero():
+    """CPDF_Type3Font::Load takes /FontBBox through the font matrix to glyph units and ToFxRect: each
+    corner truncated toward zero, not the rectangle's outer box (metropolis's bullet font: 37 x
+    0.01204 x 1000 = 445.48 is 445, not 446; -5 gives -60, not -61). The loose char boxes show it."""
+    from beamer2slides.devtools.render_torture_type3 import pdf_bytes
+    content, objects, fonts = _type3_pdf({"T0": [b"0 0 d0\n0 0 0.5 0.5 re f"]},
+                                         b"BT /T0 20 Tf 20 60 Td <0000> Tj ET", b"0.01204 0 0 0.01204 0 0")
+    objects = [o.replace(b"/FontBBox [0 0 1 1]", b"/FontBBox [-5 -5 36 37]") for o in objects]
+    data = pdf_bytes(content, objects, fonts)
+    a, b = pdf.resolve("pure").open(data)[0], pdf.resolve("pdfium").open(data)[0]
+    assert [dataclasses.astuple(c) for c in a.chars()] == [dataclasses.astuple(c) for c in b.chars()]
+
+
 def _needs_foxit():
     import sys
     from beamer2slides.pdf.pure import foxit
@@ -789,22 +911,24 @@ def test_the_pure_renderer_draws_substituted_text_as_pdfium(name):
 
 def test_the_pure_renderer_survives_substituted_text_torture_seeds():
     """A slice of the random pages of made-up non-embedded fonts (devtools/render_torture_subst.py:
-    3,000 seeds when it was written, none apart). System TrueType substitutes and fallback fonts
-    are refused."""
+    3,000 seeds when it was written, none apart), and of GDI's TrueType faces (`--pool installed`):
+    seeds 18, 21 and 29 were apart until a font without a descriptor got flags 0 (PDFium's
+    m_Flags default) rather than nonsymbolic - its TrueType glyph map then takes the Mac cmap.
+    Fallback fonts are refused."""
     from beamer2slides.devtools.render_torture_subst import case, compare
     _needs_foxit()
     apart, drawn = {}, 0
-    for seed in range(40):
+    for seed, pool in [*((s, "any") for s in range(40)), *((s, "installed") for s in (18, 21, 29, *range(8)))]:
         try:
-            n = compare(*case(seed))[0]
+            n = compare(*case(seed, 2, pool))[0]
         except PdfError as e:
-            assert "TrueType" in str(e) or "fallback" in str(e), (seed, str(e))
+            assert "fallback" in str(e), (seed, pool, str(e))
             continue
         drawn += 1
         if n:
-            apart[seed] = n
-    assert not apart, f"seeds apart (python tools/render_torture_subst.py SEED 1): {apart}"
-    assert drawn >= 20
+            apart[(seed, pool)] = n
+    assert not apart, f"seeds apart (python tools/render_torture_subst.py SEED 1 --pool POOL): {apart}"
+    assert drawn >= 30
 
 
 def test_a_generic_face_keeps_its_blend_between_documents():
@@ -1505,6 +1629,21 @@ def test_the_ucrt_qsort_port_sorts():
         a = [(r.randrange(5), i) for i in range(n)]
         msvc_qsort(a, lambda x, y: x[0] > y[0], lambda x, y: x[0] == y[0])
         assert [k for k, _ in a] == sorted(k for k, _ in a)
+
+
+def test_actual_text_reads_as_pdfium_reads_it():
+    """/ActualText (devtools/marked_content_torture.py): an object in a marked-content sequence
+    whose dictionary carries it gives that text, sliced over its rectangle, and the sequence's later
+    objects give nothing (the same dictionary object: PreMarkedContent's kDone). Before the port, the
+    arabic-training deck of the adopt corpus read a U+FFFD where Word wrote /ActualText for a
+    ligature; with PreMarkedContent off 143 of 300 seeds are apart, with every /ActualText line
+    reversed like glyphs (CloseTempLine keeps its logical order) 29."""
+    import sys
+    from beamer2slides.devtools.marked_content_torture import first_diff
+    if sys.platform != "win32":
+        pytest.skip("Helvetica is drawn with GDI's Arial here; elsewhere PDFium asks fontconfig")
+    apart = [(s, d) for s in (3, 30, 36, *range(60)) if (d := first_diff(s))]
+    assert not apart, f"seeds apart (python tools/marked_content_torture.py SEED 1): {apart}"
 
 
 @pytest.mark.parametrize("direction", ["", "R2L"])

@@ -16,7 +16,10 @@ import math
 
 import numpy as np
 
+from .syntax import F32X2, F32X4, F32X6
 from .syntax import float32 as F
+
+_p2, _u2, _p4, _u4, _p6, _u6 = F32X2.pack, F32X2.unpack, F32X4.pack, F32X4.unpack, F32X6.pack, F32X6.unpack
 
 # path commands (agg_basics.h)
 STOP, MOVE_TO, LINE_TO, CURVE4 = 0, 1, 2, 4
@@ -62,16 +65,28 @@ def is_end_poly(c: int) -> bool:
 def transform(m, x, y):
     """CFX_Matrix::Transform, in float."""
     a, b, c, d, e, f = m
-    return F(F(F(a * x) + F(c * y)) + e), F(F(F(b * x) + F(d * y)) + f)
+    try:        # the same roundings, several per C call (syntax.F32X*)
+        p = _u4(_p4(a * x, c * y, b * x, d * y))
+        s = _u2(_p2(p[0] + p[1], p[2] + p[3]))
+        return _u2(_p2(s[0] + e, s[1] + f))
+    except OverflowError:
+        return F(F(F(a * x) + F(c * y)) + e), F(F(F(b * x) + F(d * y)) + f)
 
 
 def concat(m, n):
     """m * n (CFX_Matrix::operator*: m first, then n)."""
     a, b, c, d, e, f = m
     A, B, C, D, E, G = n
-    return (F(F(a * A) + F(b * C)), F(F(a * B) + F(b * D)),
-            F(F(c * A) + F(d * C)), F(F(c * B) + F(d * D)),
-            F(F(F(e * A) + F(f * C)) + E), F(F(F(e * B) + F(f * D)) + G))
+    try:
+        p = _u6(_p6(a * A, b * C, a * B, b * D, c * A, d * C))
+        q = _u6(_p6(c * B, d * D, e * A, f * C, e * B, f * D))
+        s = _u6(_p6(p[0] + p[1], p[2] + p[3], p[4] + p[5], q[0] + q[1], q[2] + q[3], q[4] + q[5]))
+        t = _u2(_p2(s[4] + E, s[5] + G))
+        return s[0], s[1], s[2], s[3], t[0], t[1]
+    except OverflowError:
+        return (F(F(a * A) + F(b * C)), F(F(a * B) + F(b * D)),
+                F(F(c * A) + F(d * C)), F(F(c * B) + F(d * D)),
+                F(F(F(e * A) + F(f * C)) + E), F(F(F(e * B) + F(f * D)) + G))
 
 
 def inverse(m):
@@ -280,9 +295,57 @@ def end_poly(out: list) -> None:
 def curve4(x1, y1, x2, y2, x3, y3, x4, y4) -> list:
     """curve4_div: the flattened points, start and end included."""
     pts = [(x1, y1)]
-    _bezier(pts, x1, y1, x2, y2, x3, y3, x4, y4, 0)
+    try:
+        _bezier_fast(pts, x1, y1, x2, y2, x3, y3, x4, y4, 0)
+    except OverflowError:
+        pts = [(x1, y1)]
+        _bezier(pts, x1, y1, x2, y2, x3, y3, x4, y4, 0)
     pts.append((x4, y4))
     return pts
+
+
+def _bezier_fast(pts, x1, y1, x2, y2, x3, y3, x4, y4, level):
+    """`_bezier` with its roundings done several per C call: the same operations on the same
+    values (raises OverflowError where `_bezier` would meet an infinity)."""
+    if level > 16:
+        return
+    a = _u6(_p6(x1 + x2, y1 + y2, x2 + x3, y2 + y3, x3 + x4, y3 + y4))
+    x12, y12, x23, y23, x34, y34 = _u6(_p6(a[0] / 2, a[1] / 2, a[2] / 2, a[3] / 2, a[4] / 2, a[5] / 2))
+    b = _u4(_p4(x12 + x23, y12 + y23, x23 + x34, y23 + y34))
+    x123, y123, x234, y234 = _u4(_p4(b[0] / 2, b[1] / 2, b[2] / 2, b[3] / 2))
+    c = _u4(_p4(x123 + x234, y123 + y234, x4 - x1, y4 - y1))
+    x1234, y1234 = _u2(_p2(c[0] / 2, c[1] / 2))
+    dx, dy = c[2], c[3]
+    e = _u4(_p4(x2 - x4, y2 - y4, x3 - x4, y3 - y4))
+    f = _u4(_p4(e[0] * dy, e[1] * dx, e[2] * dy, e[3] * dx))
+    d2, d3 = _u2(_p2(f[0] - f[1], f[2] - f[3]))
+    d2, d3 = abs(d2), abs(d3)
+    if d2 > EPS30:
+        if d3 > EPS30:
+            s = F(d2 + d3)
+            d = F(s * s)
+        else:
+            d = F(d2 * d2)
+        if d <= F(TOL_SQUARE * F(F(dx * dx) + F(dy * dy))):
+            pts.append((x23, y23))
+            return
+    elif d3 > EPS30:
+        d = F(d3 * d3)
+        if d <= F(TOL_SQUARE * F(F(dx * dx) + F(dy * dy))):
+            pts.append((x23, y23))
+            return
+    else:
+        g = _u4(_p4(x1 + x3, y1 + y3, x2 + x4, y2 + y4))
+        g = _u4(_p4(g[0] - x2, g[1] - y2, g[2] - x3, g[3] - y3))
+        g = _u4(_p4(g[0] - x2, g[1] - y2, g[2] - x3, g[3] - y3))
+        s = F(abs(g[0]) + abs(g[1]))
+        s = F(s + abs(g[2]))
+        s = F(s + abs(g[3]))
+        if s <= TOL_MANHATTAN:
+            pts.append((x1234, y1234))
+            return
+    _bezier_fast(pts, x1, y1, x12, y12, x123, y123, x1234, y1234, level + 1)
+    _bezier_fast(pts, x1234, y1234, x234, y234, x34, y34, x4, y4, level + 1)
 
 
 def _bezier(pts, x1, y1, x2, y2, x3, y3, x4, y4, level):

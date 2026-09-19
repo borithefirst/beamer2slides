@@ -152,6 +152,13 @@ def float32(v: float) -> float:
         return float("inf") if v > 0 else float("-inf")
 
 
+# Several values rounded to float32 at once: `unpack(pack(a, b, ...))` is `float32` of each, in one
+# pair of C calls. `pack` raises OverflowError where `float32` gives an infinity, so a caller doing
+# this keeps a `float32` path to fall back on (the hot paths below: raster, textpage, content).
+F32X2, F32X3, F32X4 = struct.Struct("<2f"), struct.Struct("<3f"), struct.Struct("<4f")
+F32X6, F32X8 = struct.Struct("<6f"), struct.Struct("<8f")
+
+
 _REAL = re.compile(rb"-?(?:\d+\.?\d*|\.\d+)")
 _DOUBLE_BITS = struct.Struct("<Q")
 _DOUBLE = struct.Struct("<d")
@@ -338,6 +345,14 @@ _WORD = re.compile(
     rb"(?:[\x00\t\n\x0c\r ]|%[^\r\n]*)*"
     rb"(/[^\x00\t\n\x0c\r ()<>\[\]{}/%]*|<<|>>|[()<>\[\]{}]|[^\x00\t\n\x0c\r ()<>\[\]{}/%]+)?")
 _NUMERIC = re.compile(rb"[0-9+\-.]+\Z")
+# `_WORD` when the word is a number (1), a name (2) or another regular word (3); no match for a
+# delimiter or the end, which `_StreamParser.element` handles
+_FAST = re.compile(
+    rb"(?>(?:[\x00\t\n\x0c\r ]|%[^\r\n]*)*)"
+    rb"(?:([0-9+\-.]+)(?![^\x00\t\n\x0c\r ()<>\[\]{}/%])|(/[^\x00\t\n\x0c\r ()<>\[\]{}/%]*)"
+    rb"|([^\x00\t\n\x0c\r ()<>\[\]{}/%]+))")
+_NUMBERS: dict = {}   # `_number` of a word: a pure function, and content streams repeat their numbers
+_NUMBERS_MAX = 1 << 16
 _MAX_WORD = 255      # kMaxWordLength: longer words are cut (the stream is still read to their end)
 _MAX_NESTING = 512   # kMaxNestedParsingLevel
 _NOTHING = object()  # ReadNextObject's nullptr (unlike a `null` object, never kept in an array)
@@ -471,8 +486,32 @@ def operations(data: bytes, components=None) -> Iterator[tuple[str, list]]:
     than 16 operands the operator gets what PDFium's buffer holds (`_ring`)."""
     parser = _StreamParser(data)
     operands: list = []
+    fast, numbers = _FAST.match, _NUMBERS
     while True:
-        e = parser.element()
+        # what `element` reads for a number, a name or a keyword, without the tuple
+        m = fast(data, parser.pos)
+        if m is not None and m.end() - m.start(m.lastindex) <= _MAX_WORD:   # a cut word: `element`
+            g = m.lastindex
+            w = m.group(g)
+            parser.pos = m.end()
+            parser.word = w
+            if g == 1:
+                v = numbers.get(w)
+                if v is None:
+                    if len(numbers) >= _NUMBERS_MAX:
+                        numbers.clear()
+                    v = numbers[w] = _number(w)
+                operands.append(v)
+                continue
+            if g == 2:
+                operands.append(_name(w))
+                continue
+            if w == b"true" or w == b"false" or w == b"null":
+                operands.append({b"true": True, b"false": False, b"null": None}[w])
+                continue
+            e = ("kw", w.decode("latin-1"))
+        else:
+            e = parser.element()
         kind = e[0]
         if kind == "end":
             return

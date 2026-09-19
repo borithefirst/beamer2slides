@@ -7,7 +7,7 @@ import base64
 import math
 
 from .cmyk_table import TABLE
-from .syntax import Name, Stream
+from .syntax import F32X3, Name, Stream
 
 _CMYK = base64.b64decode("".join(TABLE))
 
@@ -40,6 +40,36 @@ def adobe_cmyk_to_srgb(c: int, m: int, y: int, k: int) -> tuple[int, int, int]:
         for ch in range(3):
             rgb[ch] += div32((start[ch] - neighbour[ch]) * rate)
     return tuple(max(v, 0) >> 8 for v in rgb)
+
+
+_CMYK_ARRAY = None
+
+
+def adobe_cmyk_to_srgb_array(q):
+    """`adobe_cmyk_to_srgb` over an (n, 4) integer array of 0-255 CMYK: (n, 3) int32, the same
+    integer arithmetic element by element (in int32, which holds it: |rate| <= 4096, a table
+    difference <= 255)."""
+    import numpy as np
+    global _CMYK_ARRAY
+    if _CMYK_ARRAY is None:
+        _CMYK_ARRAY = np.frombuffer(_CMYK, np.uint8).astype(np.int32).reshape(-1, 3)
+    table = _CMYK_ARRAY
+    fix = np.asarray(q).reshape(-1, 4).astype(np.int32) << 8
+    idx = (fix + 4096) >> 13
+    base = 729 * idx[:, 0] + 81 * idx[:, 1] + 9 * idx[:, 2] + idx[:, 3]
+    start = table[base]
+    rgb = start << 8
+    for axis, stride in enumerate((729, 81, 9, 1)):
+        f, i = fix[:, axis], idx[:, axis]
+        # the neighbour along this axis: `f >> 13` is i or i - 1; when it is i, one step away
+        other = f >> 13
+        other = np.where(other == i, np.where(other == 8, other - 1, other + 1), other)
+        step = other - i
+        neighbour = table[base + stride * step]
+        rate = (f - (i << 13)) * -step
+        v = (start - neighbour) * rate[:, None]
+        rgb += (v + ((v >> 31) & 31)) >> 5          # C division by 32, truncating towards zero
+    return np.maximum(rgb, 0) >> 8
 
 
 def _f32(v: float) -> float:
@@ -105,8 +135,10 @@ class ColorSpace:
         rgb = self.rgb(v) if len(v) >= self.n else None
         if rgb is None:
             return None
-        r, g, b = (int(math.floor(_f32(_f32(_clamp(x)) * 255.0) + 0.5)) for x in rgb)
-        return (r << 16) | (g << 8) | b
+        a, b, c = rgb   # clamped to 0-1 first, so float32 cannot overflow
+        a, b, c = F32X3.unpack(F32X3.pack(min(1.0, max(0.0, a)), min(1.0, max(0.0, b)), min(1.0, max(0.0, c))))
+        a, b, c = F32X3.unpack(F32X3.pack(a * 255.0, b * 255.0, c * 255.0))
+        return (math.floor(a + 0.5) << 16) | (math.floor(b + 0.5) << 8) | math.floor(c + 0.5)
 
 
 DEVICE = {name: ColorSpace(name, n) for name, n in (("DeviceGray", 1), ("DeviceRGB", 3), ("DeviceCMYK", 4))}

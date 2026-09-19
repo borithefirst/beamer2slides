@@ -3,7 +3,8 @@ CFX_RenderDevice::DrawNormalText / DrawTextPath on the AGG back end, value for v
 
 A glyph is drawn the way PDFium draws it on a display bitmap without FPDF_LCD_TEXT: FreeType
 renders it in FT_RENDER_MODE_LCD (`ftgrays.render_lcd`, the outline from `ftoutline`: Adobe's CFF
-engine, no hinting, under FT_Set_Transform), and DrawNormalTextHelper folds each pixel's three
+engine, no hinting, or for glyf fonts `truetype`: FreeType's loader and bytecode hinter at 64 ppem,
+under FT_Set_Transform), and DrawNormalTextHelper folds each pixel's three
 subpixel values into one coverage (their average, shifted by the origin's third of a pixel),
 gamma-adjusts it with kTextGammaAdjust and merges the fill colour into a copy of the pixels under
 the text (GetDIBits; zeros on a BGRA device), which SetDIBits then puts back through the clip.
@@ -14,12 +15,13 @@ Big text (|a| + |b| of the glyph matrix above 50 device pixels) and every stroke
 DrawTextPath: the glyph outlines (LoadGlyphPath) filled / stroked as paths by `render.Device`.
 
 A font the PDF does not embed is drawn from the face PDFium's font mapper picked (`_SubstFace`):
-Foxit's Symbol / ZapfDingbats CFF faces, or the multiple master FoxitSansMM / FoxitSerifMM blended
-per glyph to the font's weight and the glyph's /Widths width and skewed by the italic angle, with
-GetCharPosList's spacing heuristic and a glyph cache per face and document.
+Foxit's Symbol / ZapfDingbats CFF faces, the multiple master FoxitSansMM / FoxitSerifMM blended
+per glyph to the font's weight and the glyph's /Widths width, or a system TrueType face GDI picked
+(`truetype_face`, hinted like an embedded one), skewed by the italic angle, with GetCharPosList's
+spacing heuristic and a glyph cache per face and document.
 
-Refused (`unsupported`), so that a page is drawn exactly or not at all: Type 3 fonts, TrueType
-glyphs (embedded, or a system substitute GDI picked: `truetype_face`), codes whose glyph the font
+Refused (`unsupported`), so that a page is drawn exactly or not at all: what `truetype` refuses
+(tricky and variable fonts, hinting that depends on earlier loads...), codes whose glyph the font
 lacks (PDFium falls back to another font), pattern colours, render modes outside 0..7, and text
 drawn into a soft mask (a mask device renders glyphs in FT_RENDER_MODE_NORMAL). Text clip modes
 (4..7) draw like 0..3, and their glyph outlines become a clip (`clip_text_path`, called by
@@ -101,8 +103,17 @@ def subst_face(font):
 
 
 def truetype_face(font):
-    """A system TrueType substitute (GDI's face): not ported yet."""
-    raise ftoutline.Unported("TrueType glyphs of a system substitute")
+    """A system TrueType substitute (GDI's face), drawn like an embedded TrueType font (`truetype`):
+    one face per face program, shared by every font the mapper hands it to, as CFX_FontMgr shares
+    the FT_Face (its size, hinting state and twilight zone included)."""
+    from .truetype import TrueTypeFace
+    prog = font.program
+    face = prog.__dict__.get("_b2s_draw_face")
+    if face is None:
+        if prog.kind != "truetype":
+            raise ftoutline.Unported("a system substitute with CFF outlines")
+        face = prog.__dict__["_b2s_draw_face"] = TrueTypeFace(program=prog)
+    return face
 
 
 class _SubstCache:
@@ -251,7 +262,9 @@ class _SubstFace:
             matrix = (0x10000, xy, 0, 0x10000)
             level = s.embolden_level_for_load()
             if level > 0:
-                outline = self.face.outline(glyph, matrix)
+                # LoadGlyphPath never hints: a TrueType face's path outline is its unhinted one
+                load = getattr(self.face, "unhinted", self.face.outline)
+                outline = load(glyph, matrix)
                 path = None if outline is None else \
                     ftoutline._glyph_path(ftoutline.embolden(outline, level))
             else:
