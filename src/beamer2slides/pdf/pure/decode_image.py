@@ -479,8 +479,8 @@ def _get_int(arr, i, r) -> int:
     return int(x)
 
 
-def load(doc, stream, resources, dev_size=(0, 0), is_mask=False) -> DIB | None:
-    """CPDF_DIB::Load (+ the mask, when the image has one)."""
+def load(doc, stream, resources, dev_size=(0, 0), is_mask=False, with_mask=True) -> DIB | None:
+    """CPDF_DIB::Load (+ the mask, when the image has one and `with_mask`)."""
     r = doc.resolve
     d = stream.dict
     raw = stream.raw if isinstance(stream, Stream) else stream.data
@@ -650,7 +650,7 @@ def load(doc, stream, resources, dev_size=(0, 0), is_mask=False) -> DIB | None:
             bgr[present:] = 0
             dib = DIB("bgr", bgr)
     dib.interpolate = bool(r(d.get("Interpolate")) is True)
-    if is_mask:
+    if is_mask or not with_mask:
         return dib
 
     # StartLoadMask

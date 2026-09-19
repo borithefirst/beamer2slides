@@ -13,7 +13,13 @@ are PDFium's own tables (`unicode_data`), not Python's `unicodedata`: an old sna
 choices, thousands of code points apart from today's Unicode.
 
 Vertical writing follows GetItemInfo's origins (down the line, less the W2/DW2 vertical origin)
-and GetLooseBounds' vertical square. Not ported: /ActualText marked content."""
+and GetLooseBounds' vertical square.
+
+/ActualText (PreMarkedContent, ProcessMarkedContent): a text object inside a marked-content
+sequence whose dictionary has an /ActualText string gives that text instead of its glyphs, one
+kActualText char per UTF-16 unit, boxes cutting the object's rectangle in equal slices (from the
+right when the object's own text runs right to left); the next objects of the same sequence give
+nothing. The string is already in logical order, so a right-to-left line does not reverse it."""
 
 from __future__ import annotations
 
@@ -21,10 +27,12 @@ import math
 
 from . import unicode_data
 from .content import OBJ_FORM, OBJ_TEXT, PObj, f32m, f32p, item_origin
-from .syntax import F32X2, F32X3, F32X4, F32X6, F32X8, float32 as f32
+from .navigation import pdf_decode_text
+from .syntax import F32X2, F32X3, F32X4, F32X6, F32X8, Name, Ref, String, float32 as f32
 from .fonts import INVALID_CODE
 
 NORMAL, GENERATED, NOT_UNICODE, HYPHEN, PIECE, ACTUAL_TEXT = range(6)
+MC_PASS, MC_DONE, MC_DELAY = range(3)   # MarkedContentState
 SIZE_EPSILON = 0.01
 TIE = 1e-6  # relative: well under float32's resolution
 DEFAULT_FONT_SIZE = 1.0
@@ -251,6 +259,30 @@ def first_unicode(font, code: int) -> int:
     """UnicodeFromCharCode's first unit, or the code itself when there is none."""
     u = unicode_of(font, code)
     return u[0] if u else code & 0xFFFF
+
+
+def is_right_to_left(obj: PObj) -> bool:
+    """IsRightToLeft: every item, a TJ kern too (its invalid code is U+FFFF as a 16-bit wchar_t);
+    Front() of the item's Unicode, the code when that is 0, and 0 left out."""
+    font = obj.font
+    firsts = [(unicode_of(font, code) or [0])[0] or code & 0xFFFF for code, _ in obj.items]
+    return bidi_segments([u for u in firsts if u])[1]
+
+
+def _isprint(c: int) -> bool:
+    return 0x20 <= c < 0x7F
+
+
+def unicode_text_for(d: dict, key: str, doc=None) -> str:
+    """CPDF_Dictionary::GetUnicodeTextFor: a string or a name decoded (one reference followed), else ''."""
+    value = d.get(key)
+    if isinstance(value, Ref):
+        value = doc.get(value.num) if doc is not None else None
+    if isinstance(value, String):
+        return pdf_decode_text(bytes(value))
+    if isinstance(value, Name):
+        return pdf_decode_text(str.__str__(value).encode("latin-1", "replace"))
+    return ""
 
 
 def normalize_threshold(v: float, t1: int, t2: int, t3: int) -> float:
@@ -598,6 +630,10 @@ class TextPage:
         for obj, form_matrix in self.text_objects:
             if abs(obj.rect[2] - obj.rect[0]) < SIZE_EPSILON:
                 continue
+            state = self._pre_marked(obj)
+            if state == MC_DONE:
+                self.prev_obj, self.prev_matrix = obj, form_matrix
+                continue
             if self.prev_obj is not None:
                 kind = self._insert_object(obj, form_matrix)
                 if kind == H_LINEBREAK:
@@ -609,7 +645,68 @@ class TextPage:
             else:
                 self.line_rect = obj.rect
             self.prev_obj, self.prev_matrix = obj, form_matrix
+            if state == MC_DELAY:
+                self._marked(obj, form_matrix)
+                continue
             self._items(obj, form_matrix, concat32(f32m(text_matrix(obj)), f32m(form_matrix)))
+
+    # ---- PreMarkedContent / ProcessMarkedContent
+    def _pre_marked(self, obj: PObj) -> int:
+        marks = obj.marks
+        if not marks:
+            return MC_PASS
+        actual, exists, d = "", False, None
+        for item in marks:
+            d = item.param()
+            if d is None:
+                continue
+            s = d.get("ActualText")   # GetStringFor: a string object itself, no reference
+            if isinstance(s, String):
+                exists = True
+                actual = pdf_decode_text(bytes(s))
+        if not exists:
+            return MC_PASS
+        prev = self.prev_obj
+        # the last item's parameters, the very same dictionary as the previous object's
+        if prev is not None and len(prev.marks) == len(marks) and prev.marks[-1].param() is d:
+            return MC_DONE
+        if not actual:
+            return MC_PASS
+        for ch in actual:
+            wc = ord(ch)
+            if 0x80 < wc < 0xFFFD or (wc <= 0x80 and _isprint(wc)):
+                return MC_DELAY
+        return MC_DONE
+
+    def _marked(self, obj: PObj, form_matrix) -> None:
+        actual = ""
+        for item in obj.marks:
+            d = item.param()
+            if d is not None:
+                actual = unicode_text_for(d, "ActualText", item.doc)
+        if not actual:
+            return
+        rtl = is_right_to_left(obj)
+        matrix = concat32(f32m(text_matrix(obj)), f32m(form_matrix))
+        l, b, r, t = (f32(v) for v in obj.rect)
+        n = len(actual)
+        if rtl:
+            l = f32(r - f32(f32(r - l) / n))
+            step = -f32(r - l)
+        else:
+            r = f32(l + f32(f32(r - l) / n))
+            step = f32(r - l)
+        origin = f32p(pos(obj))
+        for k, ch in enumerate(actual):
+            wc = ord(ch)
+            if wc <= 0x80 and not _isprint(wc):
+                wc = 0x20
+            if wc >= 0xFFFD:
+                continue
+            dx = f32(k * step)
+            box = (f32(l + dx), b, f32(r + dx), t)
+            self.temp_buf.append(wc)
+            self.temp.append(CharInfo(ACTUAL_TEXT, INVALID_CODE, wc, origin, box, matrix, obj))
 
     def _writing_mode(self, obj: PObj) -> int:
         n = len(obj.items)
@@ -798,13 +895,8 @@ class TextPage:
         elif cs < -0.001:
             base_space += distance(matrix, abs(cs))
 
-        # IsRightToLeft: a mirrored right-to-left object's characters are put back in order
-        mirrored = matrix[0] * matrix[3] - matrix[1] * matrix[2] < 0
-        if mirrored:
-            # every item, a TJ kern too (its invalid code is U+FFFF as a 16-bit wchar_t); Front()
-            # of the item's Unicode, the code when that is 0, and 0 left out
-            firsts = [(unicode_of(font, code) or [0])[0] or code & 0xFFFF for code, _ in obj.items]
-            mirrored = bidi_segments([u for u in firsts if u])[1]
+        # a mirrored right-to-left object's characters are put back in order
+        mirrored = matrix[0] * matrix[3] - matrix[1] * matrix[2] < 0 and is_right_to_left(obj)
         start_chars = len(self.temp)
         self._items_in_order(obj, form_matrix, matrix, fsh, base_space)
         if mirrored:  # SwapTempTextBuf
@@ -901,7 +993,12 @@ class TextPage:
         for start, count, direction in segments:
             if direction == BIDI_RIGHT or (direction == BIDI_NEUTRAL and current == BIDI_RIGHT):
                 current = BIDI_RIGHT
-                for m in range(start + count - 1, start - 1, -1):
+                # /ActualText is in logical order already: a segment opening with it goes forwards
+                if count and chars[start].type == ACTUAL_TEXT:
+                    order = range(start, start + count)
+                else:
+                    order = range(start + count - 1, start - 1, -1)
+                for m in order:
                     self._add_char_rtl(buf[m], chars[m])
             else:
                 if direction != BIDI_LEFT_WEAK:

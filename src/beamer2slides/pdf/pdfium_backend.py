@@ -5,7 +5,9 @@ what PDFium reports and how it is read are in CLAUDE.md ("Pitfalls found so far"
 
 from __future__ import annotations
 
+import atexit
 import ctypes
+import gc
 import io
 import math
 from pathlib import Path
@@ -18,6 +20,11 @@ import pypdfium2.raw as R
 from .api import (COLOR_SPACES, LIGATURES, NO_OBJECT, OBJ_FORM, OBJ_IMAGE, OBJ_PATH, OBJ_SHADING, Box, Char,
                   EmbeddedImage, PageObject, PdfError, char_box, font_metrics, join_surrogates, mul,
                   pixel_bounds, render_matrix, trace, transform_box)
+
+# Document._pages and Page.doc are a cycle: a document dropped without close() waits for the
+# garbage collector, which may not have run when pypdfium2's exit hook lists what is still open
+# ("The following objects are still open..."). Registered after pypdfium2's hook, so it runs first.
+atexit.register(gc.collect)
 
 
 def _addr(handle) -> int:

@@ -248,7 +248,8 @@ class PdfBackend(Protocol):
 def renders(backend) -> bool:
     """Whether a backend draws pages. One that does not says so with `renders = False` (the pure
     Python reader: extract and classify run on it; render, fidelity and the checks do not);
-    `render` then raises PdfError and `EmbeddedImage.pixels`/`rendered` are None."""
+    `render` then raises PdfError where it cannot draw, and `EmbeddedImage.pixels`/`rendered` may be
+    None."""
     return bool(getattr(backend, "renders", True))
 
 
