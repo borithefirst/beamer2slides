@@ -239,6 +239,19 @@ def _pick(names: list[str], need: set[int]) -> Face | None:
     return best if best is not None and need & coverage(best) else None
 
 
+RENDERER_CJK = {"japanese": "Noto Sans JP", "korean": "Noto Sans KR", "chinese-traditional": "Noto Sans TC",
+                "chinese-simplified": "Noto Sans SC"}
+
+
+def _fetch(name: str) -> bool:
+    """Whether google/fonts gave a family not in the font folders before (`adopt.fetching` rules)."""
+    from .adopt import fetching
+    if not fetching() or find_face(name) is not None:
+        return False
+    from .fontfetch import fetch_family
+    return bool(fetch_family(name))
+
+
 def plan(target: dict) -> Plan:
     chars: dict[str, Counter] = {}
     fonts: dict[tuple, Counter] = {}                     # (group, family) -> deck font names
@@ -272,7 +285,14 @@ def plan(target: dict) -> Plan:
                 if face is not None:
                     fams[key] = _with_bold(face)
             continue
+        if g == "cjk" and _fetch(RENDERER_CJK[cjk]):
+            _FACES.clear()
         names = [n for n, _ in deck.most_common() if n] + FALLBACKS.get(cjk if g == "cjk" else g, FALLBACKS["other"])
+        if g == "cjk":
+            # the face Slides' renderer draws a CJK letter in when the deck's font has none (its
+            # thumbnails show Noto's shapes, not Yu Gothic's or Microsoft YaHei's), ahead of the
+            # machine's own fallbacks
+            names.insert(len(names) - len(FALLBACKS[cjk]), RENDERER_CJK[cjk])
         if g == "other":
             # symbols come one by one from whichever font has each
             for n in names:

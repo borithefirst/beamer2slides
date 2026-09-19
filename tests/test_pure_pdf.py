@@ -112,11 +112,14 @@ def test_extract_and_classify_on_the_pure_reader_write_pdfiums_deck():
     assert apart <= 5
 
 
-@built
 def test_the_pure_reader_refuses_a_page_it_cannot_draw_exactly():
-    """Images are not drawn yet: the page raises instead of coming back without them."""
-    doc = pdf.resolve("pure").open(DECKS[1])
-    with pytest.raises(PdfError, match="cannot render images yet"):
+    """JPEG 2000 is not decoded: the page raises instead of coming back without the image."""
+    from beamer2slides.devtools.render_torture_image import pdf_bytes
+    image = (b"<< /Type /XObject /Subtype /Image /Width 2 /Height 2 /ColorSpace /DeviceRGB /BitsPerComponent 8"
+             b" /Filter /JPXDecode /Length 4 >>\nstream\njunk\nendstream")
+    data = pdf_bytes(b"q 100 0 0 80 20 20 cm /Im0 Do Q", [image], [(b"Im0", 1)])
+    doc = pdf.resolve("pure").open(data)
+    with pytest.raises(PdfError, match="JPXDecode"):
         doc[0].render(1.0)
 
 
@@ -124,7 +127,7 @@ def test_the_pure_reader_refuses_a_page_it_cannot_draw_exactly():
 def test_whole_beamer_pages_render_as_pdfium_renders_them():
     """Text, paths, forms, soft masks and shadings together: every page of the test decks that the
     reader does not refuse is PDFium's bitmap byte for byte (all four pages of 04_theme_blocks, the
-    first whole pages, when text and shadings met)."""
+    first whole pages, when text and shadings met). Every raster-image page is drawn: none refused."""
     import numpy as np
     drawn = 0
     for path in DECKS:
@@ -134,6 +137,7 @@ def test_whole_beamer_pages_render_as_pdfium_renders_them():
                 try:
                     ours = pure[i].render(1.37)
                 except PdfError:
+                    assert path.stem != "23_raster_images", f"{path.stem} page {i} refused"
                     continue
                 assert np.array_equal(ours, ref[i].render(1.37)), f"{path.stem} page {i}"
                 drawn += 1
@@ -421,6 +425,28 @@ def test_the_pure_renderer_survives_new_shading_torture_modes(mode):
     assert stats["drawn"] >= 18
 
 
+# Level-4 image pages that were once apart (run-length sizes, CMYK, decode arrays, masks), and
+# level-6 ones through CFX_ImageTransformer (bgr, bgra, 1-bit mask, masked) and CMYK JPEGs.
+IMAGE_SEEDS = [(4, s) for s in (144, 229, 230, 283, 325, 351, 788, 2626, 4459, 6130)] + \
+    [(6, s) for s in (0, 4, 13, 19, 50, 74, 118, 139, 196)]
+
+
+@pytest.mark.parametrize("level,seed", IMAGE_SEEDS)
+def test_the_pure_renderer_draws_image_torture_seeds_as_pdfium(level, seed):
+    from beamer2slides.devtools.render_torture_image import case, compare
+    n, _a, _b, d = compare(*case(seed, level))
+    assert n == 0, f"python tools/render_torture_image.py {seed} 1 --level {level}: {n if n is not None else d}"
+
+
+def test_the_pure_renderer_survives_image_torture_seeds():
+    """A slice of the random image pages (level 6: any angle, masks, every filter and colour
+    space the renderer draws): any pixel apart fails."""
+    from beamer2slides.devtools.render_torture_image import run
+    stats = run(0, 60, verbose=False, level=6)
+    assert not stats["failed"], f"seeds apart (python tools/render_torture_image.py SEED 1): {stats['failed']}"
+    assert stats["drawn"] >= 55
+
+
 @built
 def test_the_pure_renderer_draws_the_test_decks_shadings():
     """Beamer's shadings (block title bars, balls, shadows: `sh` in forms under soft masks), with
@@ -531,6 +557,88 @@ def test_the_pure_renderer_survives_text_torture_seeds(simple):
             apart[seed] = n
     assert not apart, f"seeds apart (python tools/render_torture_text.py SEED 1 --simple {simple}): {apart}"
     assert refused < 10
+
+
+def test_text_clips_clip_what_follows_them_as_in_pdfium():
+    """Tr 4..7: the texts a BT..ET shows in a clip mode join the clip path at ET (if the mode is
+    still a clip mode then), and the AGG device has soft clips, so ProcessClipPath clips everything
+    after them to their glyph outlines - one winding clip per BT..ET group, in device space. The
+    torture's clip pages (paths, images and text after the clip, q/Q, path clips, clips in clips):
+    of the first 400 seeds, 317 draw (images inside the clip included) and all equal PDFium's, 26 of the first 60 only because the
+    text clip was followed (without it they were up to 243,066 pixels apart)."""
+    from beamer2slides.devtools.render_torture_text import case, compare, harvest
+    specs = harvest()
+    if not specs:
+        pytest.skip("no fonts to harvest (build the test decks)")
+    apart = {}
+    for seed in range(40):
+        content, fonts, zoom, transparent = case(seed, "any", 3)
+        try:
+            n = compare(content, fonts, zoom, transparent)[0]
+        except PdfError:
+            continue                         # TrueType or Type 3 text: refused
+        if n:
+            apart[seed] = n
+    assert not apart, f"seeds apart (python tools/render_torture_text.py SEED 1 --simple 3): {apart}"
+    cff = [s for s in specs if s.kind in ("type1", "cff")][:1]
+    body = b"BT /F0 60 Tf 7 Tr 10 30 Td <%s> Tj ET 1 0 0 rg 0 0 200 150 re f" % (
+        b"%02x" % cff[0].codes[0] * 3)
+    n, a, b, _ = compare(body, cff, 1, False)
+    assert n == 0
+    red = (b[..., 0] == 255) & (b[..., 1] == 0)
+    assert 0 < red.sum() < red.size // 4           # the glyphs, not the page
+
+
+def test_vertical_writing_reads_and_draws_as_pdfium():
+    """Identity-V or an embedded CMap with /WMode (1, 2, <01>, 1.5... anything GetCode reads as
+    non-zero), /W2 (`c [w1 vx vy ...]`, `c1 c2 w1 vx vy`, a group cut short reads 0) and /DW2 on the
+    torture's CID fonts, mixed with horizontal ones (`case(..., 4)`). Chars, boxes, loose boxes and
+    object bounds are equal to the last bit on 300 seeds and 400 CFF pages draw byte for byte (17 of
+    the first 30 only because the vertical origins are followed). Seed 5 found that an embedded
+    CMap's char with no ToUnicode entry takes the Windows ANSI code page's character (PDFium's
+    GetUnicodeFromCharCode), seed 6 that FPDFFont_GetGlyphWidth answers the vertical advance."""
+    from beamer2slides.devtools.render_torture_text import case, compare, harvest, pdf_bytes
+    specs = harvest()
+    if not any(s.two_byte for s in specs):
+        pytest.skip("no 2-byte CID fonts to harvest (build the test decks)")
+    apart = []
+    for seed in [5, 6, *range(20)]:
+        content, fonts, _, _ = case(seed, "any", 4)
+        data = pdf_bytes(content, fonts)
+        ref, pure = pdf.resolve("pdfium").open(data), pdf.resolve("pure").open(data)
+        try:
+            if (_chars_and_bounds(pure[0]) != _chars_and_bounds(ref[0])
+                    or [dataclasses.astuple(o) for o in pure[0].objects()]
+                    != [dataclasses.astuple(o) for o in ref[0].objects()]):
+                apart.append(seed)
+        finally:
+            ref.close()
+            pure.close()
+    assert not apart, f"seeds apart (case(SEED, 'any', 4), chars/bounds/objects): {apart}"
+    for seed in range(25):
+        content, fonts, zoom, transparent = case(seed, "cid-cff", 4)
+        n = compare(content, fonts, zoom, transparent)[0]
+        assert n == 0, f"seed {seed} (python tools/render_torture_text.py {seed} 1 --simple 4 --kind cid-cff)"
+    # down the page: each glyph below the previous one, by W2's w1
+    cff = [s for s in specs if s.kind == "cid-cff" and s.two_byte][:1]
+    if cff:
+        from beamer2slides.devtools.render_torture_text import FontSpec
+        spec = cff[0]
+        head = spec.objects[0].replace(b"/Identity-H", b"/Identity-V")
+        k = int(re.search(rb"/DescendantFonts\s*\[\s*@(\d+)@", head).group(1))
+        objs = [head, *spec.objects[1:]]
+        objs[k] = objs[k].replace(b"<<", b"<</W2 [%d %d -500 250 800] /DW2 [900 -1200]" % (
+            spec.codes[0], spec.codes[0]), 1)
+        v = FontSpec("v", "cid-cff", objs, spec.codes, True)
+        body = b"BT /F0 20 Tf 50 120 Td <%04x%04x%04x> Tj ET" % (spec.codes[0], spec.codes[0], spec.codes[1])
+        doc = pdf.resolve("pure").open(pdf_bytes(body, [v]))
+        try:
+            ys = [c.origin[1] for c in doc[0].chars()]
+        finally:
+            doc.close()
+        assert len(ys) == 3 and ys[0] < ys[1] < ys[2]              # y down: top to bottom
+        assert ys[1] - ys[0] == pytest.approx(10)                 # w1 -500 at 20 pt
+        assert compare(body, [v], 2, False)[0] == 0
 
 
 def test_the_pure_renderer_refuses_text_it_cannot_draw_exactly_yet():
@@ -1149,6 +1257,18 @@ def test_text_torture_pages_extract_as_pdfium_to_the_last_bit():
             ref.close()
             pure.close()
     assert not apart, f"seeds apart (scratch: xtext.py SEED 1): {apart}"
+    # text clip pages (Tr 4..7 then paths, images, text): the text page ignores clips and modes
+    for seed in range(30):
+        content, fonts, _, _ = case(seed, "any", 3)
+        data = pdf_bytes(content, fonts)
+        ref, pure = pdf.resolve("pdfium").open(data), pdf.resolve("pure").open(data)
+        try:
+            assert _chars_and_bounds(pure[0]) == _chars_and_bounds(ref[0]), f"clip page seed {seed}"
+            assert ([dataclasses.astuple(o) for o in pure[0].objects()]
+                    == [dataclasses.astuple(o) for o in ref[0].objects()]), f"clip page seed {seed}"
+        finally:
+            ref.close()
+            pure.close()
     for kind in ["type3"]:
         for seed in range(20):
             content, fonts, _, _ = case(seed, kind)

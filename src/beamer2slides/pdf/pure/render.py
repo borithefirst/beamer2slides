@@ -11,9 +11,11 @@ Drawn: paths (fill, stroke, dashes, constant alpha, fill-and-stroke with a trans
 through DrawFillStrokePath's knockout sub-bitmap), clip paths, forms, and transparency
 (ProcessTransparency: soft masks, transparency groups, group alpha, blend modes;
 `render_transparency.py`), shadings of every type and shading patterns (`render_shading.py`,
-`render_mesh.py`), transfer functions on colours and soft masks (`transfer.py`).
-Not yet: images, tiling patterns, some text; a page holding any of them raises PdfError
-(`unported`) rather than coming back drawn differently."""
+`render_mesh.py`), transfer functions on colours and soft masks (`transfer.py`), text
+(`render_text.py`), images at any angle with their own masks (`render_image.py`, decoded by
+`decode_image.py`).
+Not yet: tiling patterns, transfer functions on images; a page holding any of them raises
+PdfError (`unported`) rather than coming back drawn differently."""
 
 from __future__ import annotations
 
@@ -680,6 +682,7 @@ class Status:
         draws the page up to the object being blended)."""
         self.dev = device
         self.last_clip: tuple = ()
+        self.last_texts: tuple = ()
         self.transparency, self.in_group = transparency, in_group
         self.initial_alpha, self.ctx = initial_alpha, ctx
         self.stop, self.stopped = stop, False
@@ -709,30 +712,45 @@ class Status:
                 return
 
     def render_single(self, obj, matrix) -> None:
-        self.process_clip(obj.clip_paths, matrix)
+        self.process_clip(obj.clip_paths, matrix, obj.clip_texts)
         if obj.smask is not None or obj.blend != "Normal" or obj.type == OBJ_FORM:
             from .render_transparency import process_transparency
             if process_transparency(self, obj, matrix):
                 return
         self.process_no_clip(obj, matrix)
 
-    def process_clip(self, clip_paths: tuple, matrix) -> None:
-        """ProcessClipPath (text clips need a soft-clip device: AGG has none, they are skipped)."""
+    def process_clip(self, clip_paths: tuple, matrix, clip_texts: tuple = ()) -> None:
+        """ProcessClipPath. The AGG device has soft clips (RenderCapSoftClip), so a clip's texts
+        count: each group's glyph outlines, in device space, are one winding clip."""
         dev = self.dev
-        if not clip_paths:
-            if self.last_clip:
+        if not clip_paths and not clip_texts:
+            if self.last_clip or self.last_texts:
                 dev.restore(True)
-                self.last_clip = ()
+                self.last_clip, self.last_texts = (), ()
             return
-        if clip_paths is self.last_clip:
+        if clip_paths is self.last_clip and clip_texts is self.last_texts:
             return
-        self.last_clip = clip_paths
+        self.last_clip, self.last_texts = clip_paths, clip_texts
         dev.restore(True)
         for points, fill_type in clip_paths:
             if not points:
                 dev.set_clip_fill(R.rect_path(-1.0, -1.0, 0.0, 0.0), None, False)
             else:
                 dev.set_clip_fill(points, matrix, fill_type != FILL_WINDING)
+        if not clip_texts:
+            return
+        from .render_text import clip_text_path
+        path = None
+        for text in clip_texts:
+            if text is not None:
+                if path is None:
+                    path = []
+                clip_text_path(text, matrix, path)
+                continue
+            if path is None:
+                continue
+            dev.set_clip_fill(path, None, False)
+            path = None
 
     def process_no_clip(self, obj, matrix) -> None:
         if obj.type == OBJ_PATH:
@@ -745,6 +763,9 @@ class Status:
         elif obj.type == OBJ_TEXT:
             from .render_text import process_text
             process_text(self, obj, matrix)
+        elif obj.type == OBJ_IMAGE:
+            from . import render_image
+            render_image.draw(self, obj, matrix)
 
     def process_path(self, obj, matrix) -> None:
         from . import render_shading
@@ -810,13 +831,23 @@ def unported(objects, ctx=None) -> str | None:
             p = p.parent
         if p is not None:
             continue
+        if o.clip_texts:
+            from .render_text import clip_unsupported
+            why = clip_unsupported(o.clip_texts)
+            if why is not None:
+                return why
         if o.type == OBJ_TEXT:
             from .render_text import unsupported as text_unsupported
             why = text_unsupported(o)
             if why is not None:
                 return why
+        elif o.type == OBJ_IMAGE:
+            from .render_image import refusal as image_refusal
+            why = image_refusal(o, ctx)
+            if why is not None:
+                return why
         elif o.type not in (OBJ_PATH, OBJ_FORM, OBJ_SHADING):
-            return {OBJ_IMAGE: "images"}.get(o.type, "objects")
+            return "objects"
         if o.smask is not None or o.blend != "Normal" or o.transfer is not None:
             from .render_transparency import unsupported
             why = unsupported(o, ctx, unported)

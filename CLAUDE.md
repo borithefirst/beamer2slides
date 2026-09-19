@@ -51,10 +51,17 @@ a per-slide background picture.
   functions (`pure/transfer.py`: /TR, /TR2 and a soft mask's /TR, CreateTransferFunc's quirks
   included; torture `--mode cie|func|mesh|transfer`, 4,500 seeds, none apart), and so is text in embedded Type 1 and CFF fonts (FreeType's CFF
   engine and smooth rasteriser ported, `pure/ftoutline.py`, `pure/ftgrays.py`, `pure/render_text.py`,
-  oracle `tools/render_torture_text.py`). Whole pages: 195 of the test decks' 231 render byte for byte
+  oracle `tools/render_torture_text.py`), with text clips (Tr 4-7 clip what follows, `--simple 3`)
+  and vertical writing (Identity-V / /WMode, /W2 /DW2: origins, boxes and advances, `--simple 4`,
+  `content.item_origin`), and so are images (CPDF_DIB, Flate/RunLength/DCT with CMYK
+  JPEGs as libjpeg's raw bytes, stretch engine, CFX_ImageTransformer for any angle, own masks;
+  `pure/decode_image.py`, `pure/render_image.py`, oracle `tools/render_torture_image.py` levels 0-6,
+  17,000 seeds exact; the AGG driver drops an overprinted CMYK image's Darken, so overprint changes
+  nothing). Whole pages: 229 of the test decks' 241 render byte for byte
   as PDFium's, none apart (`test_whole_beamer_pages_render_as_pdfium_renders_them`);
-  a page with anything not ported yet (images, Type 3 or TrueType or non-embedded text, tiling patterns,
-  ICCBased shadings…) raises PdfError, so
+  a page with anything not ported yet (Type 3 or TrueType or non-embedded text, JPX/JBIG2/CCITT or
+  ICC-profiled images, tiling patterns, ICCBased shadings, transfer functions on images…) raises
+  PdfError, so
   `renders = False`: `classify` runs on it and `convert` doesn't yet. Every call equals PDFium's on 4,373 pages
   (chars and object boxes to the last bit on the test decks),
   and deck.json is identical on all 48 test decks; extract is 7× slower. `tests/test_pure_pdf.py`.
@@ -504,8 +511,8 @@ stop from the text's edge (`adopt.tabbed_tex`, `\slidestab`); `tests/test_adopt_
 tikz grid with measured rows, merged cells, fills and border segments (`adopt.table_block`, cell
 insets inferred by `deck_ir.cell_pad`; `tests/test_adopt_tables.py`). Shapes are drawn in their preset
 (`adopt_shapes.py`: ~110 shapeTypes with OOXML default adjustments, turned/mirrored through the
-element's own `frame`, dashes, alpha, bent and curved connectors, arrow heads; freeforms as their box;
-`tests/test_adopt_shapes.py`). Scripts (`scripts.py`): luaotfload fallbacks for CJK and symbols,
+element's own `frame`, dashes, alpha, bent and curved connectors, arrow heads; freeforms traced from
+the thumbnail, else as their box; `tests/test_adopt_shapes.py`). Scripts (`scripts.py`): luaotfload fallbacks for CJK and symbols,
 babel `onchar=ids` for CJK line breaking and Hebrew/Arabic fonts, `bidi=basic` with RTL paragraphs
 in `otherlanguage` (`tests/test_adopt_scripts.py`).
 **Benchmark** (`tools/adopt_bench.py`, corpus of 29 public decks in `tests/decks/foreign/corpus.json`,
@@ -519,9 +526,23 @@ Lengths in bp (`adopt.to_bp`: the IR is PDF points, TeX's pt is 72.27 to the inc
 backgrounds blended over white: 0.754 -> 0.818 (`units`). Text (tags `units` -> `text-b` -> `text-ins2`):
 boxes 0.818 -> 0.843 -> 0.852, page 0.814 -> 0.839 -> 0.848. With the fills below (`combined`): boxes
 0.885, page 0.881, pixels 0.970, no deck down.
+Then (`combined` -> `weak-e6`: boxes 0.885 -> 0.915, page 0.881 -> 0.911, pixels 0.970 -> 0.975):
+a bullet's `\llap{}` line ended in a word space that pushed every bulleted line right by one space
+(`%` after it: cs161-tls 0.867 -> 0.989, ds-lecture 0.802 -> 0.964, comic-strips 0.908 -> 0.980);
+an empty paragraph is as tall as its own newline's style (creandum-board 0.760 -> 0.867) and a line
+spacing >= `WIDE_SPACING` adds nothing under the last line; foreign decks keep their fonts' real
+names and sizes (`text_paragraphs(foreign=True)`, not FontMapper's CM stand-ins); Windows fonts are
+found by the family their name table gives (`font_candidates`: `ariblk.ttf` = Arial Black), and a
+missing one takes a metric-compatible fetched stand-in (`adopt.SUBSTITUTES`: Arimo, Tinos, Cousine,
+Carlito, Archivo Black, Libre Bodoni...); CJK falls back to the Noto Sans JP/KR/SC/TC Slides draws
+with (`scripts.RENDERER_CJK`); a fixed left-aligned box whose thumbnail ink starts at its edge (and
+whose first ink row is above the inset line) has no insets (`deck_ir.thumbnail_insets`, wherever thumbnails are read:
+gdg24 0.896 -> 0.900). Left: comps-analysis (0.336; its text sits ~4 pt high - insets the API does
+not report - and its Bodoni is narrower than any fetchable one), devfest2020's numbered lists (Slides
+places big numbers differently), jruby-ja (gradient backdrop; Japanese still sets wider), hebrew-lesson.
 Known gaps, by what they cost: text insets the API does not report where no autofit height gives
-them away, freeform shapes (5,791 in the corpus, drawn as their box; Google's .pptx
-export has their geometry), and dragged shape adjustments.
+them away, the freeforms tracing refuses (below; Google's .pptx export has their geometry, and
+none is cached in the corpus), and dragged shape adjustments.
 Fills the API cannot say (`deck_fills.py`, `tests/test_adopt_fills.py`): a gradient, picture or texture
 fill reads `shapeBackgroundFill: {}`, a .pptx table style's cell colour NOT_RENDERED, and every
 placeholder INHERIT chain in the corpus ends NOT_RENDERED too - so `deck_ir(foreign=True,
@@ -535,6 +556,23 @@ the page outside the table), settled top down; a rectangle may read as a three-s
 page 0.734 -> 0.917, cs161-tls 0.647 -> 0.864, hebrew-lesson 0.310 -> 0.668 (paper backdrops and
 style-coloured cells). SlidesCarnival's 2,068 `{}` freeforms are squiggles whose box is not flat
 and stay unfilled: that is the freeform gap, not a fill one.
+Freeforms traced from the thumbnail (`deck_freeforms.py`, `tests/test_adopt_freeforms.py`): the API gives
+a freeform (shapeType CUSTOM or none, and lines with no line type) as a box only, so `deck_fills.settle`
+traces it in the same picture, top down: how much of its paint (fill, outline, or the one colour a
+`{}` fill shows over its ground) each pixel holds, cut at one half by marching squares, simplified
+(Douglas-Peucker 0.4 px) into rings in page pt that `adopt_shapes.traced_block` draws as one even-odd
+TikZ path - a vector outline, since the shapes are flat colour and a path stays editable where a
+cropped PNG would be a picture of a shape. Pixels under opaque elements above are the shape's where
+they continue it; holes are filled when letters above, a shape above nobody could read (`unsaid`),
+or ink no colour under the shape explains made them. Refused (the box stays as before) when the paint
+is ambiguous (a colour an element under it or text over it has too), translucent over an unknown
+ground, runs on outside the box (a squiggle tile over a wave), misses a side of the box, or fills the
+box (the preset rectangle says that better). Corpus slides: 1,573 of 3,322 freeforms traced (142 of
+them `{}` fills); most refusals are off-page (2,358) or `{}` pictures/textures (621). Measured against
+the same code without it, rerun the same day (`ff-base` -> `ff-d`, 912 slides): boxes 0.885 -> 0.890,
+page 0.880 -> 0.886, pixels 0.970 -> 0.971, no deck down (sc-dark-modern 0.739 -> 0.810, devfest2020
+0.827 -> 0.857, sc-dark-minimal 0.864 -> 0.884, sc-memphis 0.831 -> 0.846). `adopt_shapes.pt` wrote
+every length between -1 and 0 as positive until then (`"-0.67".replace("-0", "0")`).
 
 Opt-in suite (real Google Slides, ~95 s): `python -m pytest -m slides` (the default run deselects
 the `slides` marker, pyproject.toml). It converts the stress decks (19–22, 25, 13, demo) 3 at a

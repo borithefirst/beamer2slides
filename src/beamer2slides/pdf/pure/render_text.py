@@ -15,10 +15,11 @@ DrawTextPath: the glyph outlines (LoadGlyphPath) filled / stroked as paths by `r
 
 Refused (`unsupported`), so that a page is drawn exactly or not at all: Type 3 fonts, fonts
 without an embedded Type 1 / CFF program (standard 14 and the other substituted fonts, TrueType),
-codes whose glyph the font lacks (PDFium falls back to another font), vertical writing, pattern
-colours, render modes outside 0..7, and text drawn into a soft mask (a mask device renders glyphs
-in FT_RENDER_MODE_NORMAL). Text clip modes (4..7) are drawn like 0..3: the AGG device has no soft
-clip, so ProcessClipPath skips text clips altogether."""
+codes whose glyph the font lacks (PDFium falls back to another font), pattern colours, render modes outside 0..7, and text drawn into a soft mask (a mask device renders glyphs
+in FT_RENDER_MODE_NORMAL). Text clip modes (4..7) draw like 0..3, and their glyph outlines become
+a clip (`clip_text_path`, called by render.Status.process_clip): the AGG device has soft clips, so
+ProcessClipPath follows a clip's texts, one winding clip per BT..ET group. Vertical writing only
+moves the origins (`_origin`, GetCharPosList): an embedded font's glyphs are drawn as they are."""
 
 from __future__ import annotations
 
@@ -81,6 +82,14 @@ def glyph_of(font, code: int) -> int:
     return -1 if g is None or g == 0xFFFF else g
 
 
+def _origin(obj, item) -> tuple[float, float]:
+    """GetCharPosList's origin: (x, 0), or in vertical writing (0, y) less the font size times the
+    char's vertical origin / 1000 (GetItemInfo's rule; embedded fonts have no CID transform)."""
+    from .content import item_origin
+    x, y = item_origin(obj, item)
+    return F(x), F(y)
+
+
 def unsupported(obj) -> str | None:
     """Why text object `obj` cannot be drawn exactly, or None."""
     mode = obj.text_mode
@@ -95,8 +104,12 @@ def unsupported(obj) -> str | None:
         return None
     if obj.pattern:
         return "text in a pattern colour"
-    if font.vertical:
-        return "vertical text"
+    return _outline_refusal(obj)
+
+
+def _outline_refusal(obj) -> str | None:
+    """Why the glyph outlines of text object `obj` cannot be had exactly, or None."""
+    font = obj.font
     if not font.embedded:
         return "text in a font that is not embedded"
     _, why = _face(font)
@@ -106,6 +119,29 @@ def unsupported(obj) -> str | None:
         if glyph_of(font, code) < 0:
             return "text needing a fallback font"
     return None
+
+
+def clip_unsupported(clip_texts: tuple) -> str | None:
+    """Why a clip's texts (content.append_texts) cannot be turned into a clip exactly, or None.
+    Only their outlines count: colours, patterns and soft masks play no part in a clip."""
+    seen = _CLIP_VERDICTS.get(id(clip_texts))
+    if seen is not None and seen[0] is clip_texts:
+        return seen[1]
+    why = None
+    for text in clip_texts:
+        if text is None or not text.items or text.font is None:
+            continue
+        why = _outline_refusal(text)
+        if why is not None:
+            why = f"a text clip: {why}"
+            break
+    if len(_CLIP_VERDICTS) > 4096:
+        _CLIP_VERDICTS.clear()
+    _CLIP_VERDICTS[id(clip_texts)] = (clip_texts, why)
+    return why
+
+
+_CLIP_VERDICTS: dict = {}
 
 
 # ---------------------------------------------------------------------- ProcessText
@@ -142,7 +178,7 @@ def _process_text(status, obj, matrix) -> None:
     if not _available(text_matrix):
         return
     size = F(obj.font_size)
-    chars = [(glyph_of(font, code), F(x)) for code, x in obj.items]
+    chars = [(glyph_of(font, item[0]), *_origin(obj, item)) for item in obj.items]
     if is_stroke:
         device_matrix = matrix
         ctm = obj.text_ctm
@@ -171,11 +207,11 @@ def draw_text_path(dev, face, chars, size, text2user, user2device, graph, fill_a
     if not (fill_argb or stroke_argb):
         return
     fill_type = FILL_WINDING if fill_argb else FILL_NONE
-    for glyph, x in chars:
+    for glyph, x, y in chars:
         path = face.path(glyph)
         if path is None:
             continue
-        m = R.concat(IDENTITY, (size, 0.0, 0.0, size, x, 0.0))     # GetEffectiveMatrix
+        m = R.concat(IDENTITY, (size, 0.0, 0.0, size, x, y))       # GetEffectiveMatrix
         m = R.concat(m, text2user)
         points = []
         for px, py, kind, close in path:
@@ -183,6 +219,34 @@ def draw_text_path(dev, face, chars, size, text2user, user2device, graph, fill_a
             points.append((tx, ty, _KINDS[kind], close))
         dev.draw_path(points, user2device, graph, fill_argb, stroke_argb, fill_type, stroke,
                       text_mode=True)
+
+
+def clip_text_path(obj, matrix, out: list) -> None:
+    """ProcessText with a clipping path: DrawTextPath appends each glyph's outline, through the
+    text matrix (the CTM is not taken out, whatever the mode) and then `matrix` (CFX_Path::Append
+    with the object-to-device matrix), to `out`, a device-space path."""
+    from .render import _available
+    if not obj.items:
+        return
+    text_matrix = tuple(obj.matrix)
+    if not _available(text_matrix):
+        return
+    font = obj.font
+    face, why = _face(font)
+    if face is None:
+        raise PdfError(f"the pure reader cannot render {why}")
+    size = F(obj.font_size)
+    for item in obj.items:
+        path = face.path(glyph_of(font, item[0]))
+        if path is None:
+            continue
+        x, y = _origin(obj, item)
+        m = R.concat(IDENTITY, (size, 0.0, 0.0, size, x, y))          # GetEffectiveMatrix
+        m = R.concat(m, text_matrix)
+        for px, py, kind, close in path:
+            tx, ty = R.transform(m, px, py)
+            dx, dy = R.transform(matrix, tx, ty)
+            out.append((dx, dy, _KINDS[kind], close))
 
 
 # ---------------------------------------------------------------------- DrawNormalText
@@ -253,8 +317,8 @@ def draw_normal_text(dev, face, chars, size, text2device, fill_argb: int) -> Non
         return
     glyphs = []
     matrix = R.concat(IDENTITY, char2device)                  # GetEffectiveMatrix
-    for glyph, x in chars:
-        ox, oy = R.transform(text2device, x, 0.0)
+    for glyph, x, y in chars:
+        ox, oy = R.transform(text2device, x, y)
         bm = load_glyph_bitmap(face, glyph, matrix)
         glyphs.append((ox, _floor_int(ox), _roundf(oy), bm))
     # GetGlyphsBBox
