@@ -1984,6 +1984,84 @@ def wordart_block(el: dict, ctx: Context, ind: str) -> str:
             f"{ind}  \\noindent{body}\n{ind}\\end{{textblock*}}\n")
 
 
+# \slidepicture: a picture on one line, its Slides edits as options, drawn as `inverse.picture_block`
+# spelled it out (the options go into \includegraphics, a \tikz node, \reflectbox and \rotatebox in
+# the same order, so the page is the same to the pixel).
+PICTURE_MACRO = r"""% --- Pictures ---------------------------------------------------------------------------------
+% \slidepicture[options]{x,y,w,h}{file}: a picture w by h bp whose top left corner is x bp from the
+%   page's left edge and y bp from its top. Options, the picture's edits in Slides:
+%   trim=l b r t   bp of the file cut off its left, bottom, right and top (graphicx's trim, clipped);
+%   angle=a        turned a degrees counter-clockwise; x,y is then the corner of the turned picture's bounds;
+%   flip           mirrored left to right;
+%   opacity=o      see-through, 0..1;
+%   outline=colour, outline width=bp, dash=dotted|dashed: a line drawn on the picture's edge; x,y is then
+%                  the line's outer corner, half its width up and left of the picture's.
+\define@key{slidepicture}{trim}{\def\slides@p@trim{trim=#1,clip,}}
+\define@key{slidepicture}{angle}{\def\slides@p@angle{#1}}
+\define@key{slidepicture}{flip}[]{\def\slides@p@flip{1}}
+\define@key{slidepicture}{opacity}{\def\slides@p@opacity{#1}}
+\define@key{slidepicture}{outline}{\def\slides@p@outline{#1}}
+\define@key{slidepicture}{outline width}{\def\slides@p@weight{#1}}
+\define@key{slidepicture}{dash}{\def\slides@p@dash{,#1}}
+\newcommand\slidepicture[3][]{\slides@xywh#2\@nil
+  \let\slides@p@trim\@empty\let\slides@p@angle\@empty\let\slides@p@flip\@empty\let\slides@p@opacity\@empty
+  \let\slides@p@outline\@empty\def\slides@p@weight{0.75}\let\slides@p@dash\@empty
+  \setkeys{slidepicture}{#1}%
+  \let\slides@p@node\@empty
+  \ifx\slides@p@opacity\@empty\else\edef\slides@p@node{,text opacity=\slides@p@opacity}\fi
+  \ifx\slides@p@outline\@empty\else
+    \edef\slides@p@node{\slides@p@node,draw=\slides@p@outline,line width=\slides@p@weight bp\slides@p@dash}\fi
+  % turned by graphicx itself unless a node or a mirror wraps the picture: then by \rotatebox
+  \let\slides@p@turn\@firstofone\let\slides@p@gangle\@empty
+  \ifx\slides@p@angle\@empty\else
+    \ifx\slides@p@node\@empty\ifx\slides@p@flip\@empty\def\slides@p@gangle{,angle=\slides@p@angle}\fi\fi
+    \ifx\slides@p@gangle\@empty\edef\slides@p@turn{\noexpand\rotatebox{\slides@p@angle}}\fi\fi
+  \edef\slides@p@opts{\slides@p@trim width=\slides@w bp,height=\slides@h bp\slides@p@gangle}%
+  \ifx\slides@p@flip\@empty\let\slides@p@mirror\@firstofone\else\let\slides@p@mirror\reflectbox\fi
+  \ifx\slides@p@node\@empty\let\slides@p@frame\@firstofone\else\let\slides@p@frame\slides@p@tikz\fi
+  \edef\slides@block{\noexpand\begin{textblock*}{\slides@w bp}(\slides@x bp,\slides@y bp)}\slides@block
+  \slides@p@turn{\slides@p@frame{\slides@p@mirror{\expandafter\includegraphics\expandafter[\slides@p@opts]{#3}}}}%
+  \end{textblock*}}
+\def\slides@p@tikz#1{\edef\slides@p@go{\noexpand\tikz\noexpand\node[inner sep=0bp\slides@p@node]}\slides@p@go{#1};}
+\def\slides@xywh#1,#2,#3,#4\@nil{\def\slides@x{#1}\def\slides@y{#2}\def\slides@w{#3}\def\slides@h{#4}}"""
+
+
+def slide_picture(te: dict, pic, ctx: Context, ind: str) -> str:
+    """A deck picture at its place, one `\\slidepicture` line: the numbers `inverse.picture_block`
+    wrote (its block's corner, the picture's size), the edits as named options."""
+    from .adopt_shapes import pt1
+    x0, y0, _, _ = te["bbox"]
+    bx0, by0, bx1, by1 = te.get("box") or te["bbox"]
+    outline = te.get("outline")
+    pad = outline["weight"] / 2 if outline and not te.get("rotation") else 0.0
+    opts = []
+    crop = te.get("crop")
+    if crop:
+        nw, nh = pic.natural
+        trim = (crop["l"] * nw, crop["b"] * nh, crop["r"] * nw, crop["t"] * nh)
+        opts.append("trim=" + " ".join(num(max(0.0, v)) for v in trim))
+    angle = round(-(te.get("rotation") or 0.0), 2)
+    if angle:
+        opts.append(f"angle={angle:g}")
+    if te.get("flip"):
+        opts.append("flip")
+    if te.get("opacity") is not None and te["opacity"] < 0.995:
+        opts.append(f"opacity={num(te['opacity'])}")
+    if outline:
+        opts.append(f"outline={colour_name(outline['color'], ctx.colours)}")
+        if num(outline["weight"]) != "0.75":
+            opts.append(f"outline width={num(outline['weight'])}")
+        if outline.get("dash", "SOLID") != "SOLID":
+            opts.append("dash=" + ("dotted" if "DOT" in outline["dash"] and "DASH" not in outline["dash"] else "dashed"))
+    if outline or te.get("opacity") is not None and te["opacity"] < 0.995:
+        ctx.packages.add(TIKZ)
+    ctx.packages.add("\\usepackage{graphicx}")
+    ctx.packages.add(TEXTPOS)
+    ctx.packages.add(PICTURE_MACRO)
+    box = ",".join(pt1(v) for v in (x0 - pad, y0 - pad, bx1 - bx0, by1 - by0))
+    return f"{ind}\\slidepicture{'[' + ','.join(opts) + ']' if opts else ''}{{{box}}}{{{pic.rel}}}\n"
+
+
 def tikz_block(body: str, x0: float, y0: float, w: float, h: float, ind: str) -> str:
     """A tikzpicture at page coordinates, hanging from the top of its textblock the way a picture
     does: everything is drawn below the origin, so the picture has no height and the whole of it is
@@ -1995,7 +2073,7 @@ def tikz_block(body: str, x0: float, y0: float, w: float, h: float, ind: str) ->
             f"{ind}\\end{{textblock*}}\n")
 
 
-def shape_block(el: dict, ctx: Context, ind: str) -> str:
+def shape_block(el: dict, ctx: Context, ind: str, tree: Path | None = None) -> str:
     """A panel, a node of a flow chart or a connector, at its place on the page.
 
     tikz rather than `\\rule`, because a foreign deck's shapes are not only filled rectangles: the
@@ -2004,15 +2082,18 @@ def shape_block(el: dict, ctx: Context, ind: str) -> str:
     deck's and nothing else."""
     from . import adopt_shapes
     if el.get("role") == "line" and el.get("from") and el.get("to"):
-        return adopt_shapes.line_block(el, ctx, ind)
-    return adopt_shapes.shape_block(el, ctx, ind)
+        return adopt_shapes.line_block(el, ctx, ind, tree)
+    return adopt_shapes.shape_block(el, ctx, ind, tree)
 
 
-# What `table_block` writes calls these. A Slides row is a minimum height that grows until its
-# tallest cell fits, and only TeX knows how tall a cell's text comes out, so the table is measured
-# where it is drawn: every cell is set into a box first (`\adoptcell`, which grows the last row it
-# spans until the rows hold it), `\adopttops` then adds the rows up, and the tikzpicture after it
-# puts fills, borders and boxes at `\adopty{row}`.
+# `table_block` writes a `slidetable`, which reads like a tabular and is drawn by these. A Slides row
+# is a minimum height that grows until its tallest cell fits, and only TeX knows how tall a cell's
+# text comes out, so the table is measured where it is drawn: every cell is set into a box first
+# (`\slides@t@grow`, which grows the last row it spans until the rows hold it), `\slides@t@tops` then
+# adds the rows up, and the tikzpicture after it puts fills, borders and boxes at `\slides@t@y{row}`.
+# Horizontal places are decimal sums of the column widths (l3fp); lines and fills go to the tenth of a
+# point, as the grid of tikz commands this replaces spelled them (pgf turns `90.7bp` into pt with a
+# truncated factor, so the same number must reach it the same way for the same pixels).
 #
 # The insets are a guess, and Slides does not always wrap inside them: creandum-board's native
 # table (left inset 7.2 pt, measured on the thumbnail) keeps "+1 months", 35 pt of 7 pt Arial Bold,
@@ -2025,7 +2106,7 @@ def shape_block(el: dict, ctx: Context, ind: str) -> str:
 # middle, where the strut put creandum-board's P&L 1 pt high in every row. So the text is set with the
 # strut, which decides how rows grow (a Slides-shaped strut of its own grew comps-analysis' tight rows
 # under their underlined headings), and a middle-aligned cell's is drawn 10.67% of the strut lower
-# (`\adoptdrop`), where a Slides line box puts it. Top and bottom ones stay: their place depends on the
+# (`\slides@t@drop`), where a Slides line box puts it. Top and bottom ones stay: their place depends on the
 # vertical inset, which is inferred (`deck_ir.cell_pad`), and comps-analysis' top-aligned cells sat
 # within 0.3 pt with the strut and 0.8 pt low with the drop.
 #
@@ -2033,63 +2114,574 @@ def shape_block(el: dict, ctx: Context, ind: str) -> str:
 # the word is wider than the cell; TeX lets it stick out instead, because a penalty between every
 # two letters, tried, also split the numbers of creandum-board's narrow columns where Slides keeps
 # them whole: the inset is a guess, and a word that sticks out costs less than a row that grows.)
-TABLE_MACROS = r"""\makeatletter
-\newcommand\adoptrow[2]{\expandafter\edef\csname adopt@row@#1\endcsname{\the\dimexpr#2\relax}%
-  \expandafter\let\csname adopt@fix@#1\endcsname\relax}
-\newcommand\adoptfix[1]{\expandafter\def\csname adopt@fix@#1\endcsname{1}}% a row the thumbnail measured
-\newcommand\adoptsetcell[2]{\vbox{\hsize=#1\relax\linewidth\hsize\parindent\z@
-    \hyphenpenalty\@M\exhyphenpenalty\@M\everypar{\strut}#2\ifhmode\strut\fi
-    \xdef\adopt@lastdrop{\the\dimexpr(\ht\strutbox+\dp\strutbox)*1067/10000\relax}}}
-\newcommand\adoptcell[8]{% box, first row, last row, text width, vertical inset (both),
-  % width with no insets, its shift, content
-  \expandafter\ifx\csname adopt@box@#1\endcsname\relax\expandafter\newbox\csname adopt@box@#1\endcsname\fi
-  \global\setbox\csname adopt@box@#1\endcsname\adoptsetcell{#4}{#8}%
-  \expandafter\adopt@first\csname adopt@box@#1\endcsname
-  \expandafter\xdef\csname adopt@drop@#1\endcsname{\adopt@lastdrop}%
+#
+# One word wider than the room the insets leave is set with no insets at all, in its alignment:
+# creandum-board's P&L puts 25 pt numbers into 33 pt columns (18.6 pt inside the insets); the
+# thumbnail shows the centred ones centred on the cell and a left-aligned one starting 1 pt from the
+# cell's edge, where a paragraph left them all sticking out to the right from the left inset, 4 pt
+# off in every one of its 200 cells. TeX finds such a word itself (`\slides@t@check`: a cell of one
+# paragraph that came out one line that does not fit the room), so the source says nothing about it; a
+# cell whose one line has no place to break for another reason (a box, no break at all) says `wrap`.
+# "Does not fit" is what TeX itself says when it boxes the line to the room, not whether the line is
+# wider unset: a line of several words that fits by shrinking its spaces fits, and journey-maps' 10^6
+# * X, 0.2 pt over its column and 0.1 pt of shrink in each of its two spaces, is not a wide word.
+TABLE_MACROS = r"""% --- Tables ---------------------------------------------------------------------------------
+% \begin{slidetable}[options]{x,y}{w1,...,wn} rows \end{slidetable}: a table whose top left corner is
+%   x bp from the page's left edge and y bp from its top, its columns w1...wn bp wide. A row is written
+%   as in a tabular, `a & b & c \\`; a cell is its text, or \cell[options]{text} (text holding \\ or
+%   several paragraphs), or \multicell{k}[options]{text} over k columns (rows=r: and r rows; the rows
+%   under it then leave its columns out). \row[options] opens a row. After the last row,
+%   \hborder{i}[a-b]{style} restyles the line above row i (\vborder{j}...: left of column j), from
+%   cell a to cell b of it or all of it; `none` takes it away.
+%   A row is as tall as it says unless its cells need more (Slides' rule), or `fixed`.
+%   Options, of the table, a \row or a cell (the nearest one says):
+%     inset=d, inset x=d, inset y=d  the text's distance from the cell's edges, bp (table only)
+%     border=style                   TikZ options of every border line (table only); none
+%     h=d, fixed | grow              the row's height, bp; fixed: kept whatever its text needs
+%     fill=colour, fill opacity=o    the cell's fill; none
+%     valign=top|middle|bottom, align=left|center|right
+%     aligns={a1,...,an}             each column's align (table only; a cell's own still wins)
+%     style=switches, pitch=d        the text's font and colour; its lines d bp apart
+%     baseline=d                     the first baseline of a top-aligned cell d bp under its top (the
+%                                    last of a bottom-aligned one d bp over its bottom); empty: the
+%                                    inset places the text
+%     lang=language                  the text is right to left, in that babel language
+%     word | wrap                    one word too wide for the insets is set without them (word, the
+%                                    default), or sticks out like any line (wrap)
+\newbox\slides@t@split
+\newbox\slides@t@cellbox
+\newcount\slides@t@paras
+\newif\ifslides@t@over
+\def\slides@t@val#1#2{\csname slides@t@#1@#2\endcsname}% cell #1's value of #2
+\def\slides@t@setcell#1#2{% cell #2 set #1 wide, into \slides@t@cellbox
+  \global\slides@t@overfalse
+  \setbox\slides@t@cellbox\vbox{\slides@t@begin{#1}{#2}\slides@t@val{#2}{body}\slides@t@end{#2}\slides@t@check{#2}}%
+  \ifslides@t@over
+    \setbox\slides@t@cellbox\vbox{\slides@t@begin{#1}{#2}\slides@t@word{#2}\slides@t@end{#2}}%
+  \fi}
+\def\slides@t@begin#1#2{\hsize=#1\relax\linewidth\hsize\parindent\z@
+  \hyphenpenalty\@M\exhyphenpenalty\@M\global\slides@t@paras\z@
+  \everypar{\global\advance\slides@t@paras\@ne\strut}%
+  \raggedright\slides@t@val{#2}{style}%
+  \slides@t@ifempty{#2}{pitch}{}{\baselineskip=\slides@t@val{#2}{pitch}bp\relax}%
+  \slides@t@ifempty{#2}{lang}{\slides@t@ltr{#2}}{% babel wants the language's name, not a macro holding it
+    \edef\slides@t@lang{\noexpand\begin{otherlanguage}{\slides@t@val{#2}{lang}}}\slides@t@lang\slides@t@rtl{#2}}}
+\def\slides@t@end#1{\slides@t@ifempty{#1}{lang}{}{\par\end{otherlanguage}}%
+  \ifhmode\strut\fi
+  \xdef\slides@t@lastdrop{\the\dimexpr(\ht\strutbox+\dp\strutbox)*1067/10000\relax}}
+% one paragraph set in one line that does not fit its room (TeX is asked to box the line to it: a
+% line that fits by shrinking its spaces fits): a word to set again without the insets
+\def\slides@t@check#1{\ifnum0\slides@t@val{#1}{word}=\@ne
+  \par
+  \ifnum\slides@t@paras=\@ne\ifnum\prevgraf=\@ne
+    \setbox\z@\lastbox\hfuzz\maxdimen\hbadness\@M
+    \setbox\tw@\hbox to\hsize{\unhcopy\z@}%
+    \ifnum\badness>\@M\global\slides@t@overtrue\fi
+    \nointerlineskip\box\z@
+  \fi\fi\fi}
+\def\slides@t@word#1{\noindent\hbox to\linewidth{\setbox\z@\hbox{\slides@t@val{#1}{body}}%
+  \ifdim\wd\z@>\linewidth\kern-\slides@t@ix bp\hbox to\dimexpr\linewidth+\slides@t@ixx bp{\slides@t@lf{#1}\box\z@\slides@t@rf{#1}}%
+  \kern-\slides@t@ix bp\else\slides@t@lf{#1}\box\z@\slides@t@rf{#1}\fi}}
+% cell #1, from row #2 to row #3, its text #4 wide with the vertical inset #5; #6 wide with no insets,
+% shifted by #7: its box, the rows it ends grown to hold it
+\def\slides@t@grow#1#2#3#4#5#6#7{%
+  \expandafter\ifx\csname slides@t@box@#1\endcsname\relax\expandafter\newbox\csname slides@t@box@#1\endcsname\fi
+  \slides@t@setcell{#4}{#1}\global\setbox\csname slides@t@box@#1\endcsname\box\slides@t@cellbox
+  \expandafter\slides@t@first\csname slides@t@box@#1\endcsname
+  \expandafter\xdef\csname slides@t@drop@#1\endcsname{\slides@t@lastdrop}%
   \dimen@\z@\@tempcnta#2\relax
-  \loop\advance\dimen@\csname adopt@row@\the\@tempcnta\endcsname\relax
+  \loop\advance\dimen@\csname slides@t@h@\the\@tempcnta\endcsname\relax
   \ifnum\@tempcnta<#3\relax\advance\@tempcnta\@ne\repeat
-  \dimen@ii\dimexpr\ht\csname adopt@box@#1\endcsname+\dp\csname adopt@box@#1\endcsname+#5*2\relax
+  \dimen@ii\dimexpr\ht\csname slides@t@box@#1\endcsname+\dp\csname slides@t@box@#1\endcsname+#5*2\relax
   % a measured row is what Slides laid out, to the pixel: text that fills it exactly is no sign of
   % text set without insets
-  \expandafter\ifx\csname adopt@fix@#3\endcsname\relax\skip@\z@\else\skip@\p@\fi
+  \if1\csname slides@t@fix@#3\endcsname\skip@\p@\else\skip@\z@\fi
   \ifdim\dimen@ii>\dimexpr\dimen@+\skip@\relax
-    \setbox\@tempboxa\adoptsetcell{#6}{#8}%
+    \slides@t@setcell{#6}{#1}\setbox\@tempboxa\box\slides@t@cellbox
     \ifdim\dimexpr\ht\@tempboxa+\dp\@tempboxa\relax<\dimexpr\dimen@ii-#5*2\relax
-      \adopt@first\@tempboxa
-      \global\setbox\csname adopt@box@#1\endcsname\hbox to #4{\kern#7\box\@tempboxa\hss}%
-      \dimen@ii\dimexpr\ht\csname adopt@box@#1\endcsname+\dp\csname adopt@box@#1\endcsname+#5*2\relax
+      \slides@t@first\@tempboxa
+      \global\setbox\csname slides@t@box@#1\endcsname\hbox to #4{\kern#7\box\@tempboxa\hss}%
+      \dimen@ii\dimexpr\ht\csname slides@t@box@#1\endcsname+\dp\csname slides@t@box@#1\endcsname+#5*2\relax
     \fi
   \fi
-  \expandafter\ifx\csname adopt@fix@#3\endcsname\relax
+  \if1\csname slides@t@fix@#3\endcsname\else
     \ifdim\dimen@ii>\dimen@
-      \expandafter\edef\csname adopt@row@#3\endcsname{\the\dimexpr\csname adopt@row@#3\endcsname+\dimen@ii-\dimen@\relax}%
+      \expandafter\edef\csname slides@t@h@#3\endcsname{\the\dimexpr\csname slides@t@h@#3\endcsname+\dimen@ii-\dimen@\relax}%
     \fi
   \fi
-  \expandafter\let\csname adopt@ht@#1\endcsname\adopt@fht
-  \expandafter\xdef\csname adopt@dp@#1\endcsname{\the\dp\csname adopt@box@#1\endcsname}}
-\newbox\adopt@split
-\newcommand\adopt@first[1]{% from a vbox's top to its first baseline (its height reaches its last,
-  % and a colour's whatsit on either end keeps \lastbox from counting lines): pieces split off the
-  % top until one holds a line
-  {\setbox\adopt@split\copy#1\vbadness\@M\vfuzz\maxdimen\splittopskip\z@\splitmaxdepth\maxdimen
+  \expandafter\let\csname slides@t@ht@#1\endcsname\slides@t@fht
+  \expandafter\xdef\csname slides@t@dp@#1\endcsname{\the\dp\csname slides@t@box@#1\endcsname}}
+\def\slides@t@first#1{% from a vbox's top to its first baseline (its height reaches its last, and a
+  % colour's whatsit on either end keeps \lastbox from counting lines): pieces split off the top until
+  % one holds a line
+  {\setbox\slides@t@split\copy#1\vbadness\@M\vfuzz\maxdimen\splittopskip\z@\splitmaxdepth\maxdimen
    \dimen@\z@\@tempswatrue
-   \loop\setbox\z@\vsplit\adopt@split to\z@\setbox\z@\vbox{\unvbox\z@}%
+   \loop\setbox\z@\vsplit\slides@t@split to\z@\setbox\z@\vbox{\unvbox\z@}%
      \ifdim\ht\z@>\z@\@tempswafalse\advance\dimen@\ht\z@\else\advance\dimen@\dp\z@\fi
-     \ifvoid\adopt@split\@tempswafalse\fi
+     \ifvoid\slides@t@split\@tempswafalse\fi
    \if@tempswa\repeat
-   \xdef\adopt@fht{\the\dimen@}}}
-\newcommand\adopttops[1]{% \adopty{k}: the top of row k, and \adopty{#1} the table's foot
+   \xdef\slides@t@fht{\the\dimen@}}}
+\def\slides@t@tops#1{% \slides@t@y{k}: the top of row k, and \slides@t@y{#1} the table's foot
   \dimen@\z@\@tempcnta\z@
-  \loop\expandafter\edef\csname adopt@y@\the\@tempcnta\endcsname{\the\dimen@}%
+  \loop\expandafter\edef\csname slides@t@y@\the\@tempcnta\endcsname{\the\dimen@}%
   \ifnum\@tempcnta<#1\relax
-    \advance\dimen@\csname adopt@row@\the\@tempcnta\endcsname\relax\advance\@tempcnta\@ne\repeat}
-\newcommand\adopty[1]{\csname adopt@y@#1\endcsname}
-\newcommand\adoptbox[1]{\copy\csname adopt@box@#1\endcsname}
-\newcommand\adoptdrop[1]{\csname adopt@drop@#1\endcsname}
-\newcommand\adoptht[1]{\csname adopt@ht@#1\endcsname}% the height of a cell's first line
-\newcommand\adoptdp[1]{\csname adopt@dp@#1\endcsname}% the depth of its last
-\makeatother"""
+    \advance\dimen@\csname slides@t@h@\the\@tempcnta\endcsname\relax\advance\@tempcnta\@ne\repeat}
+\def\slides@t@y#1{\csname slides@t@y@#1\endcsname}
+\def\slides@t@drop#1{\csname slides@t@drop@#1\endcsname}% a middle cell's line box under TeX's strut
+\def\slides@t@ht#1{\csname slides@t@ht@#1\endcsname}% the height of a cell's first line
+\def\slides@t@dp#1{\csname slides@t@dp@#1\endcsname}% the depth of its last
+\def\slides@t@picture#1#2{\begin{tikzpicture}[baseline=(current bounding box.north),inner sep=0pt,outer sep=0pt]
+  \path[use as bounding box] (0bp,0bp) rectangle (#1bp,{-\slides@t@y{#2}});}
+\def\slides@t@fill#1#2#3#4#5{\fill[#1] (#2bp,{-\slides@t@y{#3}}) rectangle (#4bp,{-\slides@t@y{#5}});}
+\def\slides@t@hdraw#1#2#3#4{\draw[line cap=rect,#1] (#2bp,{-\slides@t@y{#4}}) -- (#3bp,{-\slides@t@y{#4}});}
+\def\slides@t@vdraw#1#2#3#4{\draw[line cap=rect,#1] (#2bp,{-\slides@t@y{#3}}) -- (#2bp,{-\slides@t@y{#4}});}
+\def\slides@t@node#1#2#3#4{\node[anchor=#1] at (#2bp,{#3}) {\copy\csname slides@t@box@#4\endcsname};}
+\ExplSyntaxOn
+\tl_new:N \l__slides_t_ix_tl
+\tl_new:N \l__slides_t_iy_tl
+\tl_new:N \l__slides_t_border_tl
+\tl_new:N \l__slides_t_h_tl
+\tl_new:N \l__slides_t_fill_tl
+\tl_new:N \l__slides_t_op_tl
+\tl_new:N \l__slides_t_valign_tl
+\tl_new:N \l__slides_t_align_tl
+\tl_new:N \l__slides_t_style_tl
+\tl_new:N \l__slides_t_pitch_tl
+\tl_new:N \l__slides_t_base_tl
+\tl_new:N \l__slides_t_lang_tl
+\tl_new:N \l__slides_t_row_tl
+\tl_new:N \l__slides_t_body_tl
+\tl_new:N \l__slides_t_tail_tl
+\tl_new:N \l__slides_t_k_tl
+\tl_new:N \l__slides_t_x_tl
+\tl_new:N \l__slides_t_seg_tl
+\tl_new:N \l__slides_t_now_tl
+\tl_new:N \l__slides_t_anchor_tl
+\tl_new:N \l__slides_t_where_tl
+\bool_new:N \l__slides_t_fixed_bool
+\bool_new:N \l__slides_t_word_bool
+\int_new:N \l__slides_t_m_int
+\int_new:N \l__slides_t_span_int
+\int_new:N \l__slides_t_rs_int
+\int_new:N \l__slides_t_len_int
+\int_new:N \l__slides_t_a_int
+\int_new:N \l__slides_t_r_int
+\int_new:N \l__slides_t_c_int
+\int_new:N \l__slides_t_r_one_int
+\int_new:N \l__slides_t_c_one_int
+\int_new:N \g__slides_t_r_int
+\int_new:N \g__slides_t_c_int
+\int_new:N \g__slides_t_n_int
+\int_new:N \g__slides_t_rs_int
+\prop_new:N \g__slides_t_occ_prop
+\prop_new:N \g__slides_t_seg_prop
+\prop_new:N \g__slides_t_in_prop
+\seq_new:N \l__slides_t_rows_seq
+\seq_new:N \l__slides_t_cells_seq
+\seq_new:N \l__slides_t_w_seq
+\seq_new:N \l__slides_t_styles_seq
+\clist_new:N \l__slides_t_xy_clist
+\clist_new:N \l__slides_t_aligns_clist
+\cs_generate_variant:Nn \seq_set_split_keep_spaces:Nnn { NnV }
+\keys_define:nn { slides/table }
+  {
+    inset .code:n = { \tl_set:Nn \l__slides_t_ix_tl {#1} \tl_set:Nn \l__slides_t_iy_tl {#1} } ,
+    inset~x .tl_set:N = \l__slides_t_ix_tl ,
+    inset~y .tl_set:N = \l__slides_t_iy_tl ,
+    border .tl_set:N = \l__slides_t_border_tl ,
+    h .tl_set:N = \l__slides_t_h_tl ,
+    fixed .bool_set:N = \l__slides_t_fixed_bool ,
+    grow .bool_set_inverse:N = \l__slides_t_fixed_bool ,
+    fill .tl_set:N = \l__slides_t_fill_tl ,
+    fill~opacity .tl_set:N = \l__slides_t_op_tl ,
+    valign .choices:nn = { top , middle , bottom } { \tl_set_eq:NN \l__slides_t_valign_tl \l_keys_choice_tl } ,
+    align .choices:nn = { left , center , right } { \tl_set_eq:NN \l__slides_t_align_tl \l_keys_choice_tl } ,
+    aligns .clist_set:N = \l__slides_t_aligns_clist ,
+    style .tl_set:N = \l__slides_t_style_tl ,
+    pitch .tl_set:N = \l__slides_t_pitch_tl ,
+    baseline .tl_set:N = \l__slides_t_base_tl ,
+    lang .tl_set:N = \l__slides_t_lang_tl ,
+    word .bool_set:N = \l__slides_t_word_bool ,
+    wrap .bool_set_inverse:N = \l__slides_t_word_bool ,
+    rows .int_set:N = \l__slides_t_rs_int ,
+  }
+\cs_new:Npn \slides@t@ifempty #1#2 { \tl_if_empty:cTF { slides@t@ #1 @ #2 } }
+\cs_new:Npn \slides@t@ltr #1
+  { \str_case_e:nn { \tl_use:c { slides@t@ #1 @align } } { { center } { \centering } { right } { \raggedleft } } }
+\cs_new:Npn \slides@t@rtl #1
+  { \str_case_e:nn { \tl_use:c { slides@t@ #1 @align } }
+      { { center } { \centering } { left } { \raggedleft } { right } { \raggedright } } }
+\cs_new:Npn \slides@t@lf #1
+  { \str_case_e:nn { \tl_use:c { slides@t@ #1 @align } } { { center } { \hss } { right } { \hss } } }
+\cs_new:Npn \slides@t@rf #1
+  { \str_case_e:nn { \tl_use:c { slides@t@ #1 @align } } { { center } { \hss } { left } { \hss } } }
+% markers, told apart by meaning
+\cs_new_protected:Npn \__slides_t_row_mark: { \msg_error:nnn { slides } { misplaced } { row } }
+\cs_new_protected:Npn \__slides_t_cell_mark: { \msg_error:nnn { slides } { misplaced } { cell } }
+\cs_new_protected:Npn \__slides_t_multi_mark: { \msg_error:nnn { slides } { misplaced } { multicell } }
+\msg_new:nnn { slides } { misplaced } { \iow_char:N \\#1~belongs~in~a~slidetable. }
+\NewDocumentCommand \__slides_t_hborder:w { m o m } { \__slides_t_border:nnnn { h } {#1} {#2} {#3} }
+\NewDocumentCommand \__slides_t_vborder:w { m o m } { \__slides_t_border:nnnn { v } {#1} {#2} {#3} }
+\cs_new_protected:Npn \__slides_t_border:nnnn #1#2#3#4
+  {
+    \IfNoValueTF {#3}
+      {
+        \int_set:Nn \l__slides_t_a_int { 0 }
+        \int_set:Nn \l__slides_t_len_int
+          { \str_if_eq:nnTF {#1} { h } { \l__slides_t_m_int } { \g__slides_t_r_int } - 1 }
+      }
+      {
+        \seq_set_split:Nnn \l__slides_t_styles_seq { - } {#3}
+        \int_set:Nn \l__slides_t_a_int { \seq_item:Nn \l__slides_t_styles_seq { 1 } }
+        \int_set:Nn \l__slides_t_len_int { \seq_item:Nn \l__slides_t_styles_seq { -1 } }
+      }
+    \int_step_inline:nnn { \l__slides_t_a_int } { \l__slides_t_len_int }
+      { \prop_gput:Nnn \g__slides_t_seg_prop { #1/#2/##1 } {#4} }
+  }
+\NewDocumentEnvironment { slidetable } { O{} m m +b }
+  { \__slides_t_table:nnnn {#1} {#2} {#3} {#4} } { }
+\cs_new_protected:Npn \__slides_t_table:nnnn #1#2#3#4
+  {
+    \group_begin:
+    \cs_set_eq:NN \row \__slides_t_row_mark:
+    \cs_set_eq:NN \cell \__slides_t_cell_mark:
+    \cs_set_eq:NN \multicell \__slides_t_multi_mark:
+    \cs_set_eq:NN \hborder \__slides_t_hborder:w
+    \cs_set_eq:NN \vborder \__slides_t_vborder:w
+    \keys_set:nn { slides/table }
+      {
+        inset = 0 , border = none , h = 0 , grow , fill = none , fill~opacity = , valign = top ,
+        align = left , aligns = , style = , pitch = , baseline = , lang = , word , rows = 1
+      }
+    \keys_set:nn { slides/table } {#1}
+    % the insets to the hundredth where they make lengths, as the tikz grid this replaces wrote them
+    \tl_set:Ne \slides@t@ix { \fp_eval:n { round ( \l__slides_t_ix_tl , 2 ) } }
+    \tl_set:Ne \slides@t@ixx { \fp_eval:n { round ( 2 * ( \l__slides_t_ix_tl ) , 2 ) } }
+    \tl_set:Ne \slides@t@iy { \fp_eval:n { round ( \l__slides_t_iy_tl , 2 ) } }
+    \clist_set:Nn \l__slides_t_xy_clist {#2}
+    \seq_set_from_clist:Nn \l__slides_t_w_seq {#3}
+    \int_set:Nn \l__slides_t_m_int { \seq_count:N \l__slides_t_w_seq }
+    \tl_set:Nn \l__slides_t_x_tl { 0 }
+    \tl_set:cn { slides@t@x@0 } { 0 }
+    \tl_set:cn { slides@t@X@0 } { 0 }
+    \int_zero:N \l__slides_t_a_int
+    \seq_map_inline:Nn \l__slides_t_w_seq
+      {
+        \int_incr:N \l__slides_t_a_int
+        \tl_set:Ne \l__slides_t_x_tl { \fp_eval:n { \l__slides_t_x_tl + ##1 } }
+        \tl_set_eq:cN { slides@t@x@ \int_use:N \l__slides_t_a_int } \l__slides_t_x_tl
+        % where lines and fills go: to a tenth of a point, as the tikz grid this replaces had them
+        \tl_set:ce { slides@t@X@ \int_use:N \l__slides_t_a_int } { \fp_eval:n { round ( \l__slides_t_x_tl , 1 ) } }
+      }
+    \int_gzero:N \g__slides_t_r_int
+    \int_gzero:N \g__slides_t_n_int
+    \int_gset:Nn \g__slides_t_rs_int { 1 }
+    \prop_gclear:N \g__slides_t_occ_prop
+    \prop_gclear:N \g__slides_t_seg_prop
+    \prop_gclear:N \g__slides_t_in_prop
+    \seq_set_split_keep_spaces:Nnn \l__slides_t_rows_seq { \\ } {#4}
+    \seq_pop_right:NN \l__slides_t_rows_seq \l__slides_t_tail_tl
+    \seq_map_function:NN \l__slides_t_rows_seq \__slides_t_row:n
+    \tl_trim_spaces:N \l__slides_t_tail_tl
+    \tl_if_blank:VF \l__slides_t_tail_tl
+      {
+        \bool_lazy_or:nnTF
+          { \exp_args:NV \tl_if_head_eq_meaning_p:nN \l__slides_t_tail_tl \hborder }
+          { \exp_args:NV \tl_if_head_eq_meaning_p:nN \l__slides_t_tail_tl \vborder }
+          { \tl_use:N \l__slides_t_tail_tl }
+          { \exp_args:NV \__slides_t_row:n \l__slides_t_tail_tl }
+      }
+    \int_step_inline:nn { \g__slides_t_n_int } { \__slides_t_inside:n {##1} }
+    \use:e
+      {
+        \exp_not:N \begin { textblock* } { \tl_use:c { slides@t@X@ \int_use:N \l__slides_t_m_int } bp }
+          ( \clist_item:Nn \l__slides_t_xy_clist { 1 } bp , \clist_item:Nn \l__slides_t_xy_clist { 2 } bp )
+      }
+    % rows holding one cell grow first, so a merged cell only adds what they left it short of
+    \int_step_inline:nn { \g__slides_t_rs_int }
+      { \int_step_inline:nn { \g__slides_t_n_int } { \__slides_t_grow:nn {##1} {####1} } }
+    \slides@t@tops { \int_use:N \g__slides_t_r_int }
+    \use:e
+      {
+        \exp_not:N \slides@t@picture { \tl_use:c { slides@t@X@ \int_use:N \l__slides_t_m_int } }
+          { \int_use:N \g__slides_t_r_int }
+      }
+    \int_step_inline:nn { \g__slides_t_n_int } { \__slides_t_fill:n {##1} }
+    \int_step_inline:nnn { 0 } { \g__slides_t_r_int } { \__slides_t_line:nn { h } {##1} }
+    \int_step_inline:nnn { 0 } { \l__slides_t_m_int } { \__slides_t_line:nn { v } {##1} }
+    \int_step_inline:nn { \g__slides_t_n_int } { \__slides_t_node:n {##1} }
+    \end{tikzpicture}
+    \end{textblock*}
+    \group_end:
+  }
+\cs_new_protected:Npn \__slides_t_row:n #1
+  {
+    \group_begin:
+      \tl_set:Nn \l__slides_t_row_tl {#1}
+      \tl_trim_spaces:N \l__slides_t_row_tl
+      \exp_args:NV \tl_if_head_eq_meaning:nNT \l__slides_t_row_tl \row
+        { \exp_after:wN \__slides_t_rowopts:w \l__slides_t_row_tl \q_stop }
+      \tl_gset:ce { slides@t@h@ \int_use:N \g__slides_t_r_int } { \dim_eval:n { \l__slides_t_h_tl bp } }
+      \tl_gset:ce { slides@t@fix@ \int_use:N \g__slides_t_r_int } { \bool_if:NTF \l__slides_t_fixed_bool { 1 } { 0 } }
+      \int_gzero:N \g__slides_t_c_int
+      \seq_set_split_keep_spaces:NnV \l__slides_t_cells_seq { & } \l__slides_t_row_tl
+      \seq_map_function:NN \l__slides_t_cells_seq \__slides_t_cell:n
+    \group_end:
+    \int_gincr:N \g__slides_t_r_int
+  }
+\cs_new_protected:Npn \__slides_t_rowopts:w \row [#1] #2 \q_stop
+  { \keys_set:nn { slides/table } {#1} \tl_set:Nn \l__slides_t_row_tl {#2} }
+\cs_new_protected:Npn \__slides_t_cell:n #1
+  {
+    \group_begin:
+      \tl_set:Nn \l__slides_t_body_tl {#1}
+      \tl_trim_spaces:N \l__slides_t_body_tl
+      \int_set:Nn \l__slides_t_span_int { 1 }
+      \__slides_t_skip:
+      % the column's alignment, then what the cell says
+      \tl_set:Ne \l__slides_t_now_tl
+        { \clist_item:Nn \l__slides_t_aligns_clist { \g__slides_t_c_int + 1 } }
+      \tl_if_blank:VF \l__slides_t_now_tl
+        { \use:e { \keys_set:nn { slides/table } { align = \l__slides_t_now_tl } } }
+      \exp_args:NV \tl_if_head_eq_meaning:nNTF \l__slides_t_body_tl \cell
+        { \exp_after:wN \__slides_t_cellopts:w \l__slides_t_body_tl \q_mark \q_stop }
+        {
+          \exp_args:NV \tl_if_head_eq_meaning:nNT \l__slides_t_body_tl \multicell
+            { \exp_after:wN \__slides_t_multi:w \l__slides_t_body_tl \q_mark \q_stop }
+        }
+      \int_gincr:N \g__slides_t_n_int
+      \tl_set:Ne \l__slides_t_k_tl { \int_use:N \g__slides_t_n_int }
+      \__slides_t_put:ne { row } { \int_use:N \g__slides_t_r_int }
+      \__slides_t_put:ne { col } { \int_use:N \g__slides_t_c_int }
+      \__slides_t_put:ne { span } { \int_use:N \l__slides_t_span_int }
+      \__slides_t_put:ne { rows } { \int_use:N \l__slides_t_rs_int }
+      \__slides_t_put:nV { fill } \l__slides_t_fill_tl
+      \__slides_t_put:nV { op } \l__slides_t_op_tl
+      \__slides_t_put:nV { valign } \l__slides_t_valign_tl
+      \__slides_t_put:nV { align } \l__slides_t_align_tl
+      \__slides_t_put:nV { style } \l__slides_t_style_tl
+      \__slides_t_put:nV { pitch } \l__slides_t_pitch_tl
+      \__slides_t_put:nV { base } \l__slides_t_base_tl
+      \__slides_t_put:nV { lang } \l__slides_t_lang_tl
+      \__slides_t_put:ne { word }
+        { \bool_lazy_and:nnTF { \l__slides_t_word_bool } { \tl_if_empty_p:N \l__slides_t_lang_tl } { 1 } { 0 } }
+      \__slides_t_put:nV { body } \l__slides_t_body_tl
+      \__slides_t_put:ne { boxed } { \tl_if_blank:VTF \l__slides_t_body_tl { 0 } { 1 } }
+      \int_compare:nNnT { \l__slides_t_rs_int } > { \g__slides_t_rs_int }
+        { \int_gset_eq:NN \g__slides_t_rs_int \l__slides_t_rs_int }
+      \int_step_inline:nnn { \g__slides_t_r_int + 1 } { \g__slides_t_r_int + \l__slides_t_rs_int - 1 }
+        {
+          \int_step_inline:nnn { \g__slides_t_c_int } { \g__slides_t_c_int + \l__slides_t_span_int - 1 }
+            { \prop_gput:Nnn \g__slides_t_occ_prop { ##1/####1 } { } }
+        }
+      \int_gadd:Nn \g__slides_t_c_int { \l__slides_t_span_int }
+    \group_end:
+  }
+\cs_new_protected:Npn \__slides_t_put:nn #1#2 { \tl_gset:cn { slides@t@ \l__slides_t_k_tl @ #1 } {#2} }
+\cs_generate_variant:Nn \__slides_t_put:nn { ne , nV }
+\cs_new_protected:Npn \__slides_t_skip:
+  {
+    \exp_args:NNe \prop_if_in:NnT \g__slides_t_occ_prop
+      { \int_use:N \g__slides_t_r_int / \int_use:N \g__slides_t_c_int }
+      { \int_gincr:N \g__slides_t_c_int \__slides_t_skip: }
+  }
+\cs_new_protected:Npn \__slides_t_cellopts:w \cell #1 \q_stop { \__slides_t_optbody:n {#1} }
+\cs_new_protected:Npn \__slides_t_multi:w \multicell #1 #2 \q_stop
+  { \int_set:Nn \l__slides_t_span_int {#1} \__slides_t_optbody:n {#2} }
+\cs_new_protected:Npn \__slides_t_optbody:n #1
+  { \tl_if_head_eq_charcode:nNTF {#1} [ { \__slides_t_ob:w #1 \q_stop } { \__slides_t_ob:w [] #1 \q_stop } }
+\cs_new_protected:Npn \__slides_t_ob:w [#1] #2 #3 \q_stop
+  {
+    \keys_set:nn { slides/table } {#1}
+    \tl_set:Nn \l__slides_t_body_tl {#2}
+    \tl_trim_spaces:N \l__slides_t_body_tl
+  }
+% the border segments a merged cell covers
+\cs_new_protected:Npn \__slides_t_inside:n #1
+  {
+    \int_set:Nn \l__slides_t_r_int { \tl_use:c { slides@t@ #1 @row } }
+    \int_set:Nn \l__slides_t_c_int { \tl_use:c { slides@t@ #1 @col } }
+    \int_set:Nn \l__slides_t_r_one_int { \l__slides_t_r_int + \tl_use:c { slides@t@ #1 @rows } - 1 }
+    \int_set:Nn \l__slides_t_c_one_int { \l__slides_t_c_int + \tl_use:c { slides@t@ #1 @span } - 1 }
+    \int_step_inline:nnn { \l__slides_t_r_int + 1 } { \l__slides_t_r_one_int }
+      {
+        \int_step_inline:nnn { \l__slides_t_c_int } { \l__slides_t_c_one_int }
+          { \prop_gput:Nnn \g__slides_t_in_prop { h/##1/####1 } { } }
+      }
+    \int_step_inline:nnn { \l__slides_t_c_int + 1 } { \l__slides_t_c_one_int }
+      {
+        \int_step_inline:nnn { \l__slides_t_r_int } { \l__slides_t_r_one_int }
+          { \prop_gput:Nnn \g__slides_t_in_prop { v/##1/####1 } { } }
+      }
+  }
+% where cell #1 ends: \l__slides_t_r_one_int = its last row + 1, \l__slides_t_c_one_int = last column + 1
+\cs_new_protected:Npn \__slides_t_ends:n #1
+  {
+    \int_set:Nn \l__slides_t_r_int { \tl_use:c { slides@t@ #1 @row } }
+    \int_set:Nn \l__slides_t_c_int { \tl_use:c { slides@t@ #1 @col } }
+    \int_set:Nn \l__slides_t_r_one_int
+      { \int_min:nn { \l__slides_t_r_int + \tl_use:c { slides@t@ #1 @rows } } { \g__slides_t_r_int } }
+    \int_set:Nn \l__slides_t_c_one_int
+      { \int_min:nn { \l__slides_t_c_int + \tl_use:c { slides@t@ #1 @span } } { \l__slides_t_m_int } }
+  }
+\cs_new_protected:Npn \__slides_t_grow:nn #1#2
+  {
+    \bool_lazy_and:nnT
+      { \int_compare_p:nNn { \tl_use:c { slides@t@ #2 @rows } } = {#1} }
+      { \int_compare_p:nNn { \tl_use:c { slides@t@ #2 @boxed } } = { 1 } }
+      {
+        \__slides_t_ends:n {#2}
+        \tl_set:Ne \l__slides_t_x_tl
+          {
+            \fp_eval:n
+              {
+                \tl_use:c { slides@t@x@ \int_use:N \l__slides_t_c_one_int }
+                - \tl_use:c { slides@t@x@ \int_use:N \l__slides_t_c_int }
+              }
+          }
+        \use:e
+          {
+            \exp_not:N \slides@t@grow {#2} { \int_use:N \l__slides_t_r_int }
+              { \int_eval:n { \l__slides_t_r_one_int - 1 } }
+              { \fp_eval:n { round ( max ( \l__slides_t_x_tl - 2 * ( \l__slides_t_ix_tl ) , 1 ) , 2 ) } bp }
+              { \slides@t@iy bp } { \fp_eval:n { round ( \l__slides_t_x_tl , 2 ) } bp }
+              {
+                \str_case_e:nnF { \tl_use:c { slides@t@ #2 @align } }
+                  {
+                    { center } { - \slides@t@ix }
+                    { right } { - \slides@t@ixx }
+                  }
+                  { 0 }
+                bp
+              }
+          }
+      }
+  }
+\cs_new_protected:Npn \__slides_t_fill:n #1
+  {
+    \exp_args:Nv \str_if_eq:nnF { slides@t@ #1 @fill } { none }
+      {
+        \__slides_t_ends:n {#1}
+        \use:e
+          {
+            \exp_not:N \slides@t@fill
+              {
+                \exp_not:v { slides@t@ #1 @fill }
+                \tl_if_empty:cF { slides@t@ #1 @op } { ,fill~opacity= \exp_not:v { slides@t@ #1 @op } }
+              }
+              { \tl_use:c { slides@t@X@ \int_use:N \l__slides_t_c_int } } { \int_use:N \l__slides_t_r_int }
+              { \tl_use:c { slides@t@X@ \int_use:N \l__slides_t_c_one_int } } { \int_use:N \l__slides_t_r_one_int }
+          }
+      }
+  }
+% segment #3 of line #2 (h: above row #2, v: left of column #2): its style in \l__slides_t_seg_tl
+\cs_new_protected:Npn \__slides_t_seg:nnn #1#2#3
+  {
+    \prop_if_in:NnTF \g__slides_t_in_prop { #1/#2/#3 }
+      { \tl_set:Nn \l__slides_t_seg_tl { none } }
+      {
+        \prop_get:NnNF \g__slides_t_seg_prop { #1/#2/#3 } \l__slides_t_seg_tl
+          { \tl_set_eq:NN \l__slides_t_seg_tl \l__slides_t_border_tl }
+      }
+  }
+% a line's styles in the order they first appear along it, each drawn in runs of touching segments
+\cs_new_protected:Npn \__slides_t_line:nn #1#2
+  {
+    \int_set:Nn \l__slides_t_len_int { \str_if_eq:nnTF {#1} { h } { \l__slides_t_m_int } { \g__slides_t_r_int } }
+    \seq_clear:N \l__slides_t_styles_seq
+    \int_step_inline:nnn { 0 } { \l__slides_t_len_int - 1 }
+      {
+        \__slides_t_seg:nnn {#1} {#2} {##1}
+        \str_if_eq:VnF \l__slides_t_seg_tl { none }
+          {
+            \seq_if_in:NVF \l__slides_t_styles_seq \l__slides_t_seg_tl
+              { \seq_put_right:NV \l__slides_t_styles_seq \l__slides_t_seg_tl }
+          }
+      }
+    \seq_map_inline:Nn \l__slides_t_styles_seq { \__slides_t_runs:nnn {#1} {#2} {##1} }
+  }
+\cs_new_protected:Npn \__slides_t_runs:nnn #1#2#3
+  {
+    \tl_set:Nn \l__slides_t_now_tl {#3}
+    \int_set:Nn \l__slides_t_a_int { -1 }
+    \int_step_inline:nnn { 0 } { \l__slides_t_len_int }
+      {
+        \int_compare:nNnTF {##1} < { \l__slides_t_len_int }
+          { \__slides_t_seg:nnn {#1} {#2} {##1} }
+          { \tl_set:Nn \l__slides_t_seg_tl { none } }
+        \tl_if_eq:NNTF \l__slides_t_seg_tl \l__slides_t_now_tl
+          { \int_compare:nNnT { \l__slides_t_a_int } < { 0 } { \int_set:Nn \l__slides_t_a_int {##1} } }
+          {
+            \int_compare:nNnF { \l__slides_t_a_int } < { 0 }
+              {
+                \str_if_eq:nnTF {#1} { h }
+                  {
+                    \use:e
+                      {
+                        \exp_not:N \slides@t@hdraw { \exp_not:n {#3} }
+                          { \tl_use:c { slides@t@X@ \int_use:N \l__slides_t_a_int } }
+                          { \tl_use:c { slides@t@X@ ##1 } } {#2}
+                      }
+                  }
+                  {
+                    \use:e
+                      {
+                        \exp_not:N \slides@t@vdraw { \exp_not:n {#3} } { \tl_use:c { slides@t@X@ #2 } }
+                          { \int_use:N \l__slides_t_a_int } {##1}
+                      }
+                  }
+                \int_set:Nn \l__slides_t_a_int { -1 }
+              }
+          }
+      }
+  }
+\cs_new_protected:Npn \__slides_t_node:n #1
+  {
+    \int_compare:nNnT { \tl_use:c { slides@t@ #1 @boxed } } = { 1 }
+      {
+        \__slides_t_ends:n {#1}
+        \str_case_e:nnF { \tl_use:c { slides@t@ #1 @valign } }
+          {
+            { middle }
+              {
+                \tl_set:Nn \l__slides_t_anchor_tl { west,yshift=-\slides@t@drop{#1} }
+                \tl_set:Ne \l__slides_t_where_tl
+                  {
+                    -( \exp_not:N \slides@t@y { \int_use:N \l__slides_t_r_int }
+                    + \exp_not:N \slides@t@y { \int_use:N \l__slides_t_r_one_int } )/2
+                  }
+              }
+            { bottom }
+              {
+                \tl_set:Nn \l__slides_t_anchor_tl { south~west }
+                \tl_set:Ne \l__slides_t_where_tl
+                  {
+                    - \exp_not:N \slides@t@y { \int_use:N \l__slides_t_r_one_int }
+                    \tl_if_empty:cTF { slides@t@ #1 @base }
+                      { + \slides@t@iy bp }
+                      { + \tl_use:c { slides@t@ #1 @base } bp - \exp_not:N \slides@t@dp {#1} }
+                  }
+              }
+          }
+          {
+            \tl_set:Nn \l__slides_t_anchor_tl { north~west }
+            \tl_set:Ne \l__slides_t_where_tl
+              {
+                - \exp_not:N \slides@t@y { \int_use:N \l__slides_t_r_int }
+                \tl_if_empty:cTF { slides@t@ #1 @base }
+                  { - \slides@t@iy bp }
+                  { - \tl_use:c { slides@t@ #1 @base } bp + \exp_not:N \slides@t@ht {#1} }
+              }
+          }
+        \use:e
+          {
+            \exp_not:N \slides@t@node { \exp_not:V \l__slides_t_anchor_tl }
+              { \fp_eval:n { round ( \tl_use:c { slides@t@x@ \int_use:N \l__slides_t_c_int } + \l__slides_t_ix_tl , 1 ) } }
+              { \exp_not:V \l__slides_t_where_tl } {#1}
+          }
+      }
+  }
+\ExplSyntaxOff"""
 
 DASHES = {"DOT": "dotted", "DASH": "dashed", "DASH_DOT": "dash dot", "LONG_DASH": "dashed",
           "LONG_DASH_DOT": "dash dot"}
@@ -2152,12 +2744,233 @@ def cell_line_place(cell: dict, text_y: float) -> float | None:
     return text_y + (above if cell.get("valign") == "top" else below)
 
 
+# What a `slidetable` cell option means when nobody writes it (`TABLE_MACROS`).
+CELL_DEFAULTS = {"fill": "none", "op": "", "valign": "top", "align": "left", "style": "", "pitch": "",
+                 "baseline": "", "word": True}
+CELL_KEYS = {"fill": "fill", "op": "fill opacity", "valign": "valign", "align": "align", "style": "style",
+             "pitch": "pitch", "baseline": "baseline"}
+# the macros a run of text sets in a box of its own, where a space is no place to break a line
+UNBREAKABLE_RUN = ("underline", "script")
+
+
+def breakable(p: dict) -> bool:
+    """Whether a paragraph has a space TeX may break its line at (`inverse.runs_latex`: a run's
+    spaces inside an underline or a script are in a box; those around its words are not)."""
+    text = "".join(r["text"] for r in p["runs"] if not r.get("hole"))
+    start, end = len(text) - len(text.lstrip()), len(text.rstrip())
+    if "\x0b" in text[start:end]:
+        return True                        # a soft break: two lines already
+    at = 0
+    for r in p["runs"]:
+        if r.get("hole"):
+            continue
+        t = r["text"]
+        core = (len(t) - len(t.lstrip(" ")), len(t.rstrip(" ")))
+        boxed = any(r.get(k) for k in UNBREAKABLE_RUN)
+        for i, ch in enumerate(t):
+            if ch in " \t" and start <= at + i < end and not (boxed and core[0] <= i < core[1]):
+                return True
+        at += len(t)
+    return False
+
+
+def table_cell(c: dict, ctx: Context, ind: str, text_y) -> tuple[dict, str]:
+    """A cell's options (None: whatever its row says) and its LaTeX, in `slidetable`'s terms."""
+    from .scripts import block_rtl, rtl_language
+    opts: dict = {k: None for k in CELL_DEFAULTS}
+    opts["fill"] = colour_name(c["fill"], ctx.colours) if c.get("fill") else "none"
+    if c.get("fill") and (c.get("fill_alpha") or 1) < 1:
+        opts["op"] = num(c["fill_alpha"])
+    elif c.get("fill"):
+        opts["op"] = ""
+    paras = c.get("paragraphs") or []
+    if not paras:
+        return opts, ""
+    base = element_style(c)
+    body = paragraphs_latex(paras, lambda _p, b=base: b, ctx, ind)
+    p0 = paras[0]
+    a0 = p0.get("align")
+    opts["valign"] = c.get("valign") if c.get("valign") in ("middle", "bottom") else "top"
+    opts["style"] = base_lead(base, ctx)
+    opts["pitch"] = ""
+    if base.get("size"):
+        r = next((p.get("line_spacing") for p in paras if p.get("line_spacing")), 1.0)
+        opts["pitch"] = num(sum(line_box(base["size"], r)))
+    place = cell_line_place(c, text_y) if text_y is not None else None
+    opts["baseline"] = None if opts["valign"] == "middle" else ("" if place is None else num(place))
+    # the insets a cell lets go of keep its first paragraph's alignment (`\slides@t@grow`)
+    opts["align"] = a0 if a0 in ("center", "right") else "left"
+    wrapper = f"{ind}\\begin{{otherlanguage}}{{"
+    rtl_switch = {"center": "\\centering ", "left": "\\raggedleft ", "right": "\\raggedright "}.get(a0)
+    lang = ""
+    if block_rtl(paras) and not p0.get("bullet") and rtl_switch and body.startswith(wrapper):
+        # a right-to-left cell: the language and the alignment are options, the words its text
+        lang = rtl_language({"runs": [r for p in paras for r in p.get("runs", [])]})
+        inner = body.split("\n", 1)[1].rsplit("\\par\n", 1)[0]
+        if inner.startswith(ind + rtl_switch):
+            body, opts["align"] = ind + inner[len(ind + rtl_switch):], a0
+        else:
+            lang = ""
+    opts["lang"] = lang
+    if not lang:
+        switch = {"center": "\\centering ", "right": "\\raggedleft "}.get(opts["align"], "")
+        if switch and body.startswith(ind + switch):
+            body = ind + body[len(ind + switch):]
+        elif switch:
+            # the option aligns the first paragraph, which is a list or right to left: as it was
+            body = ind + "\\raggedright " + body.lstrip(" ")
+    if not body.strip():
+        body = ind + "{}"                  # a box nonetheless: an empty one still holds its insets
+    words = "".join(r["text"] for r in p0["runs"]).strip()
+    real = [p for p in paras if any(r.get("text") and not r.get("hole") for r in p["runs"])]
+    if len(paras) == 1 and not p0.get("bullet") and not p0.get("direction") \
+            and words and not any(ch.isspace() for ch in words):
+        opts["word"] = True                # one word: TeX checks whether it fits (`\slides@t@check`)
+    elif lang or len(real) >= 2 or (not p0.get("bullet") and not p0.get("direction") and breakable(p0)):
+        opts["word"] = None                # TeX would find no one word too wide here, either way
+    else:
+        opts["word"] = False
+    return opts, body
+
+
+def cascade(rows: list[list[dict]], key: str) -> tuple:
+    """The table's value of a cell option and each row's where it differs: the most common one,
+    the option's default on a tie (None where no cell cares)."""
+    def pick(values):
+        counts: dict = {}
+        for v in values:
+            if v is not None:
+                counts[v] = counts.get(v, 0) + 1
+        if not counts:
+            return None
+        return max(counts, key=lambda v: (counts[v], v == CELL_DEFAULTS.get(key)))
+    table = pick(v[key] for row in rows for v in row)
+    if table is None:
+        table = CELL_DEFAULTS.get(key)
+    per_row = []
+    for row in rows:
+        here = pick(v[key] for v in row)
+        per_row.append(here if here is not None and here != table else None)
+    return table, per_row
+
+
+def option_text(key: str, value) -> str:
+    if key == "word":
+        return "word" if value else "wrap"
+    if key == "style":
+        return f"style={{{value}}}"
+    return f"{CELL_KEYS[key]}={value}"
+
+
+def border_style(b: dict, ctx: Context) -> str:
+    """A border segment as TikZ options (`\\hborder`, `border=`)."""
+    opts = [colour_name(b["color"] or "#000000", ctx.colours), f"line width={num(b['weight'])}pt"]
+    if b["dash"] in DASHES:
+        opts += [DASHES[b["dash"]], "line cap=butt"]
+    if b["alpha"] < 1:
+        opts.append(f"draw opacity={num(b['alpha'])}")
+    return ",".join(opts)
+
+
+def table_borders(el: dict, ctx: Context) -> tuple[str, list[str]]:
+    """The table's border style and the `\\hborder` / `\\vborder` lines that say where the lines
+    differ from it. A segment inside a merged cell is no border whatever the deck lists there
+    (`table_segments`), so it goes with whichever style its neighbours have."""
+    n_rows, n_cols = len(el["row_heights"]), len(el["col_widths"])
+    inside = set()
+    for c in el.get("table_cells", []):
+        for r in range(c["row"] + 1, c["row"] + c["rowspan"]):
+            inside.update(("h", r, k) for k in range(c["col"], c["col"] + c["colspan"]))
+        for k in range(c["col"] + 1, c["col"] + c["colspan"]):
+            inside.update(("v", k, r) for r in range(c["row"], c["row"] + c["rowspan"]))
+    styles = {}
+    for b in el.get("table_borders", []):
+        line, at = (b["row"], b["col"]) if b["dir"] == "h" else (b["col"], b["row"])
+        styles[(b["dir"], line, at)] = border_style(b, ctx)
+    grid = [("h", i, n_cols) for i in range(n_rows + 1)] + [("v", j, n_rows) for j in range(n_cols + 1)]
+    seg = {(d, i, a): (None if (d, i, a) in inside else styles.get((d, i, a), "none"))
+           for d, i, n in grid for a in range(n)}
+
+    def common(values, prefer):
+        counts: dict = {}
+        for v in values:
+            if v is not None:
+                counts[v] = counts.get(v, 0) + 1
+        return max(counts, key=lambda v: (counts[v], v == prefer)) if counts else prefer
+    default = common(seg.values(), "none")
+    out = []
+    for d, i, n in grid:
+        values = [seg[(d, i, a)] for a in range(n)]
+        here = common(values, default)
+        cmd = "\\hborder" if d == "h" else "\\vborder"
+        if here != default:
+            out.append(f"{cmd}{{{i}}}{{{here}}}")
+        # runs of one style other than the line's, a merged cell's segments joining either side
+        a = 0
+        while a < n:
+            v = values[a]
+            if v is None or v == here:
+                a += 1
+                continue
+            b = a + 1
+            while b < n and values[b] in (v, None):
+                b += 1
+            end = b
+            while values[end - 1] is None:
+                end -= 1
+            out.append(f"{cmd}{{{i}}}[{a}]{{{v}}}" if end == a + 1 else f"{cmd}{{{i}}}[{a}-{end - 1}]{{{v}}}")
+            a = b
+    return default, out
+
+
+def table_places(widths: list[float], padx: float, pady: float) -> tuple[str, str, list]:
+    """The insets and column edges a `slidetable` is written with, to the thousandth as the deck
+    reads them (`deck_ir`), each width then the step between two edges so that the edges TeX adds
+    up are the deck's however many columns come before.
+
+    TeX rounds them where they make lengths (`TABLE_MACROS`: edges and text to the tenth, insets to
+    the hundredth, as the tikz grid of commands this replaces wrote them), and l3fp rounds a decimal
+    tie to even where Python's format rounded the binary number nearest to it: 63.15 went down, it
+    goes up. A thousandth either way settles such a tie as it was settled before, so the lines and
+    the words land on the same pixels."""
+    from decimal import Decimal, ROUND_HALF_EVEN
+
+    def tex(d, n):
+        return d.quantize(Decimal(1).scaleb(-n), rounding=ROUND_HALF_EVEN)
+
+    def near(value, *oks):
+        # the first test any nearby value passes wins: the old roundings may not all agree on one
+        d = Decimal(f"{value:.3f}")
+        for ok in oks:
+            for step in (0, -1, 1, -2, 2, -3, 3, -4, 4, -5, 5, -6, 6, -7, 7, -8, 8, -9, 9):
+                cand = d + Decimal(step).scaleb(-3)
+                if ok(cand):
+                    return cand
+        return d
+    ix = near(padx, lambda d: tex(d, 2) == Decimal(f"{padx:.2f}") and tex(2 * d, 2) == Decimal(f"{2 * padx:.2f}"))
+    iy = near(pady, lambda d: tex(d, 2) == Decimal(f"{pady:.2f}"))
+    xs, ats = [Decimal(0)], [0.0]
+    for w in widths:
+        ats.append(ats[-1] + w)
+        a, span = ats[-1], ats[-1] - ats[-2]
+
+        def edge(d, a=a):
+            # the edge and the text's place from it: what lines and left-aligned words show
+            return tex(d, 1) == Decimal(f"{a:.1f}") and tex(d + ix, 1) == Decimal(f"{a + padx:.1f}")
+
+        def ok(d, span=span, left=xs[-1]):
+            # and the width of a cell one column wide, which centres and right-aligns its words
+            return (edge(d) and tex(d - left, 2) == Decimal(f"{span:.2f}")
+                    and tex(max(d - left - 2 * ix, Decimal(1)), 2) == Decimal(f"{max(span - 2 * padx, 1.0):.2f}"))
+        xs.append(near(a, ok, edge))
+    return num(float(ix), 3), num(float(iy), 3), xs
+
+
 def table_block(el: dict, ctx: Context, ind: str) -> str:
-    """A table at its place and size: every cell's text set in a box as wide as its columns less
-    Slides' insets, the rows grown until their cells fit (`TABLE_MACROS`), then one tikzpicture with
-    the cell fills, the border segments and the boxes. A `tabular` would be the readable version,
-    but it cannot say what a Slides table says: a colour, weight and dash per border segment, a
-    row's minimum height, and text inset by Slides' own padding at an exact column width."""
+    """A table at its place and size, written as a `slidetable`: columns once, then rows of cells
+    as in a tabular, with what Slides says that a tabular cannot - fills, a row's minimum height,
+    Slides' insets, a colour, weight and dash per border segment - as options that name only where a
+    row or a cell differs from the table (`TABLE_MACROS` measures and draws it)."""
     widths, heights = el.get("col_widths") or [], el.get("row_heights") or []
     if not widths or not heights:
         return ""
@@ -2166,94 +2979,103 @@ def table_block(el: dict, ctx: Context, ind: str) -> str:
     ctx.packages.add(TABLE_MACROS)
     padx, pady = el.get("cell_pad") or (4.5, 4.5)
     text_y = el.get("cell_text_y")
-    xs = [0.0]
-    for w in widths:
-        xs.append(xs[-1] + w)
-    n_rows = len(heights)
+    n_rows, n_cols = len(heights), len(widths)
+    ix, iy, xs = table_places(widths, padx, pady)
+    cols = ",".join(num(float(xs[k + 1] - xs[k]), 3) for k in range(n_cols))
     x0, y0 = el["bbox"][0], el["bbox"][1]
-    lines = [f"{ind}\\begin{{textblock*}}{{{xs[-1]:.1f}pt}}({x0:.1f}pt,{y0:.1f}pt)"]
-    lines += [f"{ind}  \\adoptrow{{{r}}}{{{h:.2f}pt}}" for r, h in enumerate(heights)]
-    # rows the thumbnail showed (`deck_ir.thumbnail_rows`) keep their height whatever TeX makes of
-    # their text
-    lines += [f"{ind}  \\adoptfix{{{r}}}" for r in el.get("rows_fixed", []) if r < n_rows]
-    cells = [c for c in el.get("table_cells", []) if c["row"] < n_rows and c["col"] < len(widths)]
-    boxes: dict[int, int] = {}
-    # rows that hold one cell grow first, so a merged cell only adds what they left it short of
-    for k, c in sorted(enumerate(cells), key=lambda kc: (kc[1]["rowspan"], kc[0])):
-        last_row = min(c["row"] + c["rowspan"], n_rows) - 1
-        last_col = min(c["col"] + c["colspan"], len(widths))
-        span = xs[last_col] - xs[c["col"]]
-        width = max(span - 2 * padx, 1.0)
-        if not c["paragraphs"]:
+    heads = {(c["row"], c["col"]): c for c in el.get("table_cells", []) if c["row"] < n_rows and c["col"] < n_cols}
+    covered: set = set()
+    grid: list[list[tuple]] = []                 # per row: (cell, colspan, rowspan, options, body)
+    cell_ind = ind + "      "
+    for r in range(n_rows):
+        row, c = [], 0
+        while c < n_cols:
+            if (r, c) in covered:
+                c += 1
+                continue
+            cell = heads.get((r, c), {"row": r, "col": c, "rowspan": 1, "colspan": 1, "paragraphs": []})
+            span = max(1, min(cell["colspan"], n_cols - c))
+            rows = max(1, min(cell["rowspan"], n_rows - r))
+            if any((r, k) in covered for k in range(c, c + span)):
+                span = 1
+            covered.update((rr, k) for rr in range(r, r + rows) for k in range(c, c + span))
+            opts, body = table_cell(cell, ctx, cell_ind, text_y)
+            row.append((c, span, rows, opts, body))
+            c += span
+        grid.append(row)
+    options = [[o for _c, _s, _r, o, _b in row] for row in grid]
+    table_opts, row_opts = [], [[] for _ in grid]
+    effective = [dict() for _ in grid]
+    # alignment goes by column, as a tabular's does: each column's most common, then the cells that
+    # differ from their column's
+    aligns = []
+    for k in range(n_cols):
+        counts: dict = {}
+        for row in grid:
+            for c, _s, _r, o, _b in row:
+                if c == k and o["align"] is not None:
+                    counts[o["align"]] = counts.get(o["align"], 0) + 1
+        aligns.append(max(counts, key=lambda v: (counts[v], v == "left")) if counts else "left")
+    if len(set(aligns)) > 1:
+        table_opts.append(f"aligns={{{','.join(aligns)}}}")
+    elif aligns[0] != "left":
+        table_opts.append(f"align={aligns[0]}")
+    for r, row in enumerate(grid):
+        effective[r]["align"] = {c: aligns[c] for c, *_rest in row}
+    for key in CELL_DEFAULTS:
+        if key == "align":
             continue
-        # the insets let go of when the text would otherwise need more room than the stored row
-        # height gives it (see TABLE_MACROS); the wider box keeps the paragraph's alignment
-        shift = {"center": -padx, "right": -2 * padx}.get(c["paragraphs"][0].get("align"), 0.0)
-        base = element_style(c)
-        body = paragraphs_latex(c["paragraphs"], lambda _p, b=base: b, ctx, ind + "    ")
-        one = c["paragraphs"][0]
-        words = "".join(r["text"] for r in one["runs"]).strip()
-        if len(c["paragraphs"]) == 1 and not one.get("bullet") and not one.get("direction") \
-                and words and not any(ch.isspace() for ch in words):
-            # One word wider than the room the insets leave is set with no insets at all, in its
-            # alignment: creandum-board's P&L puts 25 pt numbers into 33 pt columns (18.6 pt inside
-            # the insets); the thumbnail shows the centred ones centred on the cell and a left-aligned
-            # one starting 1 pt from the cell's edge, where a paragraph left them all sticking out to
-            # the right from the left inset, 4 pt off in every one of its 200 cells.
-            from .inverse import runs_latex
-            lf, rf = {"center": ("\\hss", "\\hss"), "right": ("\\hss", "")}.get(one.get("align"), ("", "\\hss"))
-            word = runs_latex(one["runs"], base, ctx).strip()
-            body = (f"{ind}    \\noindent\\hbox to\\linewidth{{\\setbox0\\hbox{{{word}}}"
-                    f"\\ifdim\\wd0>\\linewidth\\kern-{padx:.2f}pt\\hbox to\\dimexpr\\linewidth+{2 * padx:.2f}pt"
-                    f"{{{lf}\\box0{rf}}}\\kern-{padx:.2f}pt\\else{lf}\\box0{rf}\\fi}}")
-        boxes[k] = len(boxes) + 1
-        lines.append(f"{ind}  \\adoptcell{{{boxes[k]}}}{{{c['row']}}}{{{last_row}}}{{{width:.2f}pt}}{{{pady:.2f}pt}}"
-                     f"{{{span:.2f}pt}}{{{shift:.2f}pt}}{{%")
-        lines.append(f"{ind}    \\raggedright{cell_lead(base, c, ctx)}%")
-        lines.append(body + "}")
-    lines.append(f"{ind}  \\adopttops{{{n_rows}}}")
-    lines.append(f"{ind}  \\begin{{tikzpicture}}[baseline=(current bounding box.north),inner sep=0pt,outer sep=0pt]")
-    lines.append(f"{ind}    \\path[use as bounding box] (0pt,0pt) rectangle ({xs[-1]:.1f}pt,{{-\\adopty{{{n_rows}}}}});")
-    for c in cells:
-        if c.get("fill"):
-            opacity = f",fill opacity={c['fill_alpha']:.2f}" if (c.get("fill_alpha") or 1) < 1 else ""
-            r1 = min(c["row"] + c["rowspan"], n_rows)
-            c1 = min(c["col"] + c["colspan"], len(widths))
-            lines.append(f"{ind}    \\fill[{colour_name(c['fill'], ctx.colours)}{opacity}] ({xs[c['col']]:.1f}pt,{{-\\adopty{{{c['row']}}}}})"
-                         f" rectangle ({xs[c1]:.1f}pt,{{-\\adopty{{{r1}}}}});")
-    for (direction, line, colour, alpha, weight, dash), spans in table_segments(el):
-        opts = [colour_name(colour or "#000000", ctx.colours), f"line width={weight:.2f}pt"]
-        opts.append(DASHES.get(dash, "line cap=rect"))
-        if alpha < 1:
-            opts.append(f"draw opacity={alpha:.2f}")
-        for a, b in spans:
-            if direction == "h":
-                path = f"({xs[a]:.1f}pt,{{-\\adopty{{{line}}}}}) -- ({xs[b]:.1f}pt,{{-\\adopty{{{line}}}}})"
+        table, per_row = cascade(options, key)
+        if table != CELL_DEFAULTS[key]:
+            table_opts.append(option_text(key, table))
+        for r, v in enumerate(per_row):
+            if v is not None:
+                row_opts[r].append(option_text(key, v))
+            effective[r][key] = table if v is None else v
+    # row heights and the rows the thumbnail measured (`deck_ir.thumbnail_rows`), which keep their
+    # height whatever TeX makes of their text
+    fixed = set(el.get("rows_fixed", []))
+    hs = [num(h) for h in heights]
+    h_table = max(hs, key=hs.count)
+    fix_table = sum(r in fixed for r in range(n_rows)) * 2 > n_rows
+    for r in range(n_rows):
+        extra = []
+        if hs[r] != h_table:
+            extra.append(f"h={hs[r]}")
+        if (r in fixed) != fix_table:
+            extra.append("fixed" if r in fixed else "grow")
+        row_opts[r] = extra + row_opts[r]
+    inset = f"inset={ix}" if ix == iy else f"inset x={ix}, inset y={iy}"
+    border, border_lines = table_borders(el, ctx)
+    head = [inset] + ([f"border={{{border}}}"] if border != "none" else []) + [f"h={h_table}"] \
+        + (["fixed"] if fix_table else []) + table_opts
+    lines = [f"{ind}\\begin{{slidetable}}[{', '.join(head)}]{{{num(x0, 1)},{num(y0, 1)}}}{{{cols}}}"]
+    for r, row in enumerate(grid):
+        texts = []
+        for c, span, rows, opts, body in row:
+            here = {**effective[r], "align": effective[r]["align"][c]}
+            own = [option_text(k, opts[k]) for k in CELL_DEFAULTS
+                   if opts[k] is not None and opts[k] != here[k]
+                   and not (k == "op" and opts["fill"] == "none")]
+            if opts.get("lang"):
+                own.append(f"lang={opts['lang']}")
+            if rows > 1:
+                own.append(f"rows={rows}")
+            text = body.strip()
+            one_line = "\n" not in text and "\\\\" not in text
+            if span > 1 or rows > 1:
+                texts.append(f"\\multicell{{{span}}}" + (f"[{', '.join(own)}]" if own else "")
+                             + (f"{{{text}}}" if one_line else f"{{\n{body}}}"))
+            elif own or not one_line or text.startswith("["):
+                texts.append("\\cell" + (f"[{', '.join(own)}]" if own else "")
+                             + (f"{{{text}}}" if one_line else f"{{\n{body}}}"))
             else:
-                path = f"({xs[line]:.1f}pt,{{-\\adopty{{{a}}}}}) -- ({xs[line]:.1f}pt,{{-\\adopty{{{b}}}}})"
-            lines.append(f"{ind}    \\draw[{','.join(opts)}] {path};")
-    for k, c in enumerate(cells):
-        if k not in boxes:
-            continue
-        r1 = min(c["row"] + c["rowspan"], n_rows)
-        x = xs[c["col"]] + padx
-        line = cell_line_place(c, text_y) if text_y is not None else None
-        if c.get("valign") == "middle":
-            where, anchor = f"({x:.1f}pt,{{-(\\adopty{{{c['row']}}}+\\adopty{{{r1}}})/2}})", "west"
-        elif line is not None and c.get("valign") == "bottom":
-            # the last baseline where the thumbnail shows it (`deck_thumbs.thumbnail_cell_text`)
-            where, anchor = f"({x:.1f}pt,{{-\\adopty{{{r1}}}+{line:.2f}pt-\\adoptdp{{{boxes[k]}}}}})", "south west"
-        elif line is not None:
-            # the first baseline, likewise, whatever the strut made of the box's first line
-            where, anchor = f"({x:.1f}pt,{{-\\adopty{{{c['row']}}}-{line:.2f}pt+\\adoptht{{{boxes[k]}}}}})", "north west"
-        elif c.get("valign") == "bottom":
-            where, anchor = f"({x:.1f}pt,{{-\\adopty{{{r1}}}+{pady:.2f}pt}})", "south west"
-        else:
-            where, anchor = f"({x:.1f}pt,{{-\\adopty{{{c['row']}}}-{pady:.2f}pt}})", "north west"
-        drop = f",yshift=-\\adoptdrop{{{boxes[k]}}}" if c.get("valign") == "middle" else ""
-        lines.append(f"{ind}    \\node[anchor={anchor}{drop}] at {where} {{\\adoptbox{{{boxes[k]}}}}};")
-    lines.append(f"{ind}  \\end{{tikzpicture}}")
-    lines.append(f"{ind}\\end{{textblock*}}")
+                texts.append(text)
+        lead = f"\\row[{', '.join(row_opts[r])}] " if row_opts[r] else ""
+        cells_text = texts[0] + "".join(" &" + (f" {t}" if t else "") for t in texts[1:])
+        lines.append(f"{ind}  {lead}{cells_text.strip()} \\\\")
+    lines += [f"{ind}  {b}" for b in border_lines]
+    lines.append(f"{ind}\\end{{slidetable}}")
     return "\n".join(lines)
 
 
@@ -2263,7 +3085,7 @@ def element_latex(el: dict, ctx: Context, tree: Path | None = None, ind: str = "
     if el.get("role") in ("math", "icon"):
         return ""                                      # part of a text line, not an element of its own
     if el["kind"] == "shape":
-        out.append(shape_block(el, ctx, ind).rstrip("\n"))
+        out.append(shape_block(el, ctx, ind, tree).rstrip("\n"))
     elif el["kind"] == "table":
         out.append(table_block(el, ctx, ind))
     elif el["kind"] == "image" and el.get("video"):
@@ -2275,11 +3097,11 @@ def element_latex(el: dict, ctx: Context, tree: Path | None = None, ind: str = "
         pic = picture_of(el, tree)
         if pic is not None:
             ctx.packages.add(TEXTPOS)
-            out.append(picture_block(el, pic, ctx, ind).rstrip("\n"))
+            out.append(slide_picture(el, pic, ctx, ind).rstrip("\n"))
     elif el["kind"] == "text" and el.get("paragraphs"):
         ctx.packages.add(TEXTPOS)
         # A node of a flow chart is one element: its box, then its label on top.
-        out.append(shape_block(el, ctx, ind).rstrip("\n"))
+        out.append(shape_block(el, ctx, ind, tree).rstrip("\n"))
         # A turned text box: its words are written upright in the box it would have if it were
         # not turned, and that is then set turned about its centre (`adopt_shapes.turned_text`).
         upright = {**el, "bbox": el["frame"]["box"]} if el.get("frame") else el

@@ -168,7 +168,9 @@ def test_an_elbow_connector_is_drawn_in_its_frame_with_its_heads(tmp_path):
                            tmp_path / "main.tex")
     path = next(l for l in text.splitlines() if "\\path" in l)
     assert path.count("--") == 3, "three legs"
-    assert "-{Triangle" in path and "\\usetikzlibrary{arrows.meta}" in text
+    # Slides' filled head is TikZ's `->`, which slides.sty makes the triangle Slides draws
+    assert ",->]" in path and "\\usetikzlibrary{arrows.meta}" in text
+    assert ">={Triangle[" in (tmp_path / "slides.sty").read_text(encoding="utf-8")
 
 
 def test_a_line_that_says_nothing_of_its_kind_is_a_freeform_and_not_drawn(tmp_path):
@@ -210,12 +212,14 @@ def test_an_unknown_preset_is_a_rectangle():
 def test_a_turned_shape_is_drawn_through_its_transform():
     el, = elements(shape("a", "RECTANGLE", 100, 20, transform(200, 100, deg=30), outline="000000"))
     out = adopt_shapes.shape_block(el, Context(), "")
-    assert "cm={" in out and "fill=" in out and "draw=" in out
-    # the frame's corner is inside the picture's box: the cm shift is from the box's top-left
-    shift = out.split("cm={")[1].split("(")[1].split(")")[0]
-    x, y = (float(v.rstrip("pt")) for v in shift.split(","))
-    w, h = el["bbox"][2] - el["bbox"][0], el["bbox"][3] - el["bbox"][1]
-    assert -0.1 <= x <= w + 0.1 and -h - 0.1 <= y <= 0.1
+    assert out.startswith("\\sliderect[") and "fill=" in out and "draw=" in out
+    # turned by its angle (TikZ counts the other way) about the centre of its upright box, which is
+    # the shape's own size and has the centre of the turned shape's bounds
+    assert "rotate=-30]" in out and "cm=" not in out
+    x, y, w, h = (float(v) for v in out.split("{")[1].split("}")[0].split(","))
+    assert (w, h) == pytest.approx((100 * 453.54 / 720, 20 * 453.54 / 720), abs=0.01)
+    bx0, by0, bx1, by1 = el["bbox"]
+    assert (x + w / 2, y + h / 2) == pytest.approx(((bx0 + bx1) / 2, (by0 + by1) / 2), abs=0.06)
 
 
 def test_transparency_and_dashes_become_tikz_options():

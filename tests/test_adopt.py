@@ -211,9 +211,10 @@ def target_with_pictures(tmp_path: Path) -> dict:
 
 
 def places(text: str) -> int:
-    """How many elements a piece of source places: pictures in textblocks, text boxes, shapes."""
+    """How many elements a piece of source places: pictures, text boxes, shapes, lines, tables."""
     return len(re.findall(r"\\begin\{textblock\*\}|\\begin\{slidebox\}|\\slidetext\b|\\slideshape\b|"
-                          r"\\sliderect\b|\\slideellipse\b", text))
+                          r"\\sliderect\b|\\slideellipse\b|\\slideline\b|\\slidefreeform\b|\\slidepicture\b|"
+                          r"\\begin\{slidetable\}", text))
 
 
 def placed(text: str) -> int:
@@ -275,8 +276,8 @@ def test_a_slide_that_sits_on_another_colour_says_so(tmp_path):
 
 def test_a_node_is_drawn_with_its_outline_and_its_rounded_corners(tmp_path):
     text = source_for(tmp_path) + theme_of(tmp_path)
-    # the corners are quarter circles of the preset's radius (adopt_shapes.rounded_poly)
-    card = next(l for l in text.splitlines() if "controls" in l)
+    # the corners are quarter circles of the preset's radius: TikZ's rounded corners, named once
+    card = next(l for l in text.splitlines() if "\\sliderect[" in l and "rounded=" in l)
     assert "fill=" in card and "draw=" in card and "line width=" in card
 
 

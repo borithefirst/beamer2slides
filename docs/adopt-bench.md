@@ -601,3 +601,90 @@ so older runs score as before).
 Left: `lang=` on every RTL `\slidetext` (hebrew-lesson, arabic-training; a deck default for
 one-paragraph boxes would need `\slidetext` to take one); `prevdepth=` after a paragraph of mixed sizes;
 the per-deck gap and indent numbers themselves (Slides' measures, not beamer's).
+## Tables, pictures and shapes in the same vocabulary (`mt-a` -> `tsp-c`)
+
+What `mt-a` left: tables were a tikz grid of `\adoptcell`s (12% of all frame lines), pictures a
+`textblock*` around an `\includegraphics` (7%), and a shape's path was spelled out in full, rounded
+corners as `.. controls` and a turn as a `cm` matrix. All three now read as what they are:
+
+- `\begin{slidetable}[...]{x,y}{w1,...,wn}` with rows written as in a tabular, `a & b \\`. The column
+  widths are said once; a row is `\row[h=, style=, ...]` only where it differs from the table's own
+  options, a cell `\cell[fill=, valign=, ...]{...}` only where it differs from its row's, and
+  `\multicell{k}[rows=r]{...}` spans. Borders are the table's `border=` plus `\hborder{i}[a-b]{style}`
+  / `\vborder{j}...` after the last row for the few lines that differ, `none` for one Slides does not
+  draw. `aligns={...}` gives each column its alignment. What was 10 `\adoptrow` + 10 `\adoptfix` + 40
+  `\adoptcell` blocks in a `textblock*` (comps-analysis' TSM table, 146 lines) is 12 lines, one a row.
+- `\slidepicture[trim=, angle=, flip, opacity=, outline=, outline width=, dash=]{x,y,w,h}{file}`:
+  one line per picture, its Slides edits as named options, expanding to exactly the
+  `\includegraphics` / tikz node / `\reflectbox` / `\rotatebox` order `inverse.picture_block` wrote.
+- `\sliderect[rounded=r]`, `rotate=`/`flip` on any shape (about its own centre, so the numbers stay
+  the box a person reads), `\slideline[options]{x1,y1}{x2,y2}` for the 0.01 bp boxes that were lines,
+  and `\slidefreeform[...]{x,y,w,h}{file}` for a traced outline, whose hundreds of points live in a
+  file of their own (`shapes/freeform-<sha8>.tex`), as a picture's pixels do.
+
+texmap reads a cell's words like a paragraph's (`"cell": "oM"`, `ENV_ARGS["slidetable"]`), so `pull`
+still finds them; the readability tool's CONSTRUCTS learned the new names (line classification only,
+no score component touched).
+
+**Fidelity: every one of the 912 slides scores exactly as at `mt-a`** - boxes 0.9728, page 0.9714,
+pixels 0.9845, +0.0000 on all 29 decks and on every slide. 768 of the 912 compiled pages are
+pixel-identical at 2x zoom; of the 144 that differ, 141 differ by at most 20 levels of 255 and the
+whole corpus holds 2,968 pixels that differ by more than 8. Every one was tracked down:
+
+- 2,924 of them are on three pages (sc-memphis 1 and 6, solidity-survey 10) and are not this
+  converter's. Nothing in their geometry moved (chars, paths and image matrices equal): lualatex
+  writes unscoped cumulative `cm` translations, so a picture's page x is the float32 composition of
+  every translation before it, and moving a shape earlier on the page changes it by 1.5e-4 bp. That
+  shifts which source pixel PDFium samples where the picture is scaled down, at every zoom.
+- The rest are antialiasing: a rounded rectangle's corner arcs. TikZ's `rounded corners` uses the
+  exact 0.5523 kappa where the old writer printed its control points to 2 decimals, so a control
+  point moves by up to 0.017 bp (bounds by 0.004) - 44 pixels over 8 levels in the corpus.
+- The same rectangle written from another corner, its coordinates agreeing to 0.006 bp: the rasteriser
+  covers its edges a level differently (journey-maps, supercharge-slides, jeb-arch, comic-strips,
+  firebase-jam - 20 to 200 pixels a page, none of them over 2 levels).
+
+Two things the pixel comparison found, which the score could not (both fixed, both real):
+- A **dashed** rounded rectangle's dash pattern runs from where the path starts. TikZ's `cycle` starts
+  it one arc later than the spelled-out path did, which moved every dash on intro-lecture 29 and 33 by
+  a third of a period (138 levels along the whole border). `\sliderect[rounded=]` now writes the path
+  from halfway up the left edge, where the top left corner's arc begins, as the old writer did.
+- `\slides@t@check` (a cell of one paragraph that came out one line too wide is set again without its
+  insets, for creandum-board's numbers) measured the line unset. journey-maps 15's `10^6 * X` is 0.2 bp
+  over its column and has 0.1 bp of shrink in each of its two spaces, so TeX had fitted it and the check
+  widened the cell anyway. It now asks TeX to box the line to the room and looks at the badness.
+
+**Readability 0.253 -> 0.268** (29 decks): lines 0.38 -> 0.52, numbers 0.07 -> 0.11, plumbing 0.17,
+bloat 0.38 -> 0.58, author 0.36 -> 0.16, repeat 0.84. Per frame, without the proxy's denominators:
+
+| | `mt-a` | `tsp-c` |
+|---|---|---|
+| lines a frame | 30.4 | 20.0 |
+| numeric literals a frame | 299 | 79 |
+| characters a frame | 4,321 | 1,609 |
+| main.tex, all 29 decks | 4.19 MB | 1.71 MB |
+
+Frame body lines by construct: table 12.0% -> 2.3%, placement 21.9% -> 9.1%, text plumbing 6.2% ->
+1.0%, shape 20.7% -> 30.2%, text 22.9% -> 32.4%, picture 7.4% -> 11.9% (the shares of what is left;
+in lines, shapes went 5,727 -> 5,515 and tables 3,322 -> 420). Biggest per-deck gains: hebrew-lesson
+0.214 -> 0.451, comps-analysis 0.098 -> 0.282, creandum-board 0.097 -> 0.231, sc-functions 0.109 ->
+0.209, journey-maps 0.120 -> 0.178, solidity-survey 0.254 -> 0.350.
+
+**Where the proxy misleads**, again in the direction of punishing the change:
+- `author` (the share of commands that are author vocabulary) falls 0.36 -> 0.16, because `\path`,
+  `\includegraphics` and `\begin{textblock*}` are author vocabulary to it and `\sliderect`,
+  `\slidepicture` and `\slidetable` are not. It is the one component that *drops*, and it drags six
+  decks' scores down although their sources are half as long: sc-memphis 0.091 -> 0.063 (235 -> 168
+  lines a frame, 12.9 -> 2.0 numeric literals a word), sc-river-a4 0.188 -> 0.110, sc-dark-minimal 0.269 -> 0.158,
+  sc-aesthetic-school 0.321 -> 0.207, firebase-jam 0.530 -> 0.431, instagram 0.443 -> 0.394. Those are
+  the decks that are almost entirely pictures and traced freeforms. Nothing was tuned to this: the
+  scorer is unchanged apart from which construct a line is counted under.
+- `numbers` moves 0.07 -> 0.11 for a 74% cut in numeric literals, because the words it divides by
+  shrank too (option and column names are not words).
+
+Left:
+- shapes are now 30% of the lines: a diagram's own path (`\slideshape{...}{\path ... -- ...}`) is still
+  a list of coordinates, and only a shape whose path *is* its box, its rounded box, its ellipse or a
+  line has a name;
+- `other` is 10%: `\begin{frame}` lines, notes, `\href`, `\resizebox` for WordArt;
+- a freeform's traced outline is a file, not fewer numbers;
+- structure (itemize, columns) is the text layer's, not this change's.
