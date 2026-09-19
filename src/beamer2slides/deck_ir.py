@@ -724,6 +724,70 @@ def top_drift(e: dict, elements: list[dict], thumb, px: float) -> float | None:
     return ((Y0 + rows[0]) / px - (base - cap * z)) * scale
 
 
+def side_gap(e: dict, elements: list[dict], thumb, px: float) -> float | None:
+    """How far the thumbnail shows a box's words from the side they start on, in Slides pt: the box's
+    left edge for left-aligned left-to-right text, its right edge for right-aligned right-to-left text,
+    each less the paragraphs' indent (None: not measurable). That is the side inset plus the first
+    glyph's bearing. Rows another element reaches into are not read."""
+    import numpy as np
+    box_ = e.get("box") if isinstance(e.get("box"), dict) else None
+    if thumb is None or not px or e.get("kind") != "text" or box_ is None or "insets" in box_:
+        return None
+    paras = [p for p in e.get("paragraphs", []) if p.get("runs") and any(r["text"].strip() for r in p["runs"])]
+    if not paras or any(p.get("bullet") for p in paras):
+        return None
+    rtl = {p.get("direction") == "rtl" for p in paras}
+    if len(rtl) != 1:
+        return None
+    rtl = rtl.pop()
+    # centred lines stand further in than the start-aligned ones, so they may be read along
+    start = "right" if rtl else "left"
+    if any(p.get("align", "left") not in (start, "center") for p in paras) \
+            or not any(p.get("align", "left") == start for p in paras):
+        return None
+    scale = box_.get("scale") or 1.0
+    indent = min(min(p["slides"].get("indent_first") or 0, p["slides"].get("indent_start") or 0)
+                 for p in paras) / scale
+    x0, y0, x1, y1 = e["bbox"]
+    reach = (SIDE_READ + indent * scale) / scale
+    strip = (x1 - reach, y0, x1 + 1, y1) if rtl else (x0 - 1, y0, x0 + reach, y1)
+    X0, X1 = int(round(strip[0] * px)), int(round(strip[2] * px))
+    Y0, Y1 = int(round(y0 * px)), int(round(y1 * px))
+    if X0 < 0 or Y0 < 0 or X1 > thumb.shape[1] or Y1 > thumb.shape[0]:
+        return None
+    crop = thumb[Y0:Y1, X0:X1]
+    if crop.shape[0] < 4 or crop.shape[1] < 8:
+        return None
+    free = np.ones(crop.shape[0], dtype=bool)
+    for o in crossing(e, elements, strip):
+        a = max(0, int(np.floor((o["bbox"][1] - 1) * px)) - Y0)
+        b = max(0, int(np.ceil((o["bbox"][3] + 1) * px)) - Y0)
+        free[a:b] = False
+    if free.sum() < 4:
+        return None
+    ground = np.median(crop[free].reshape(-1, crop.shape[-1]), axis=0)
+    ink = (((np.abs(crop - ground).max(axis=-1) > 80) & free[:, None]).sum(axis=0)) >= 2
+    cols = np.nonzero(ink)[0]
+    if len(cols) < 3:
+        return None
+    edge = (X0 + cols[-1] + 1) / px if rtl else (X0 + cols[0]) / px
+    return float(((x1 - indent - edge) if rtl else (edge - x0 - indent)) * scale)
+
+
+SNAP_PAGE = 960.0           # pages up to this wide (Slides pt) set single-spaced lines on whole pixels (box `snap`, adopt.snapped_line_box)
+SIDE_READ = 14.0            # Slides pt from a box's side that `side_gap` reads
+SIDE_BEARING_EM = 0.04      # a first glyph's side bearing, near enough (Times' Hebrew 0.02-0.05, Arial ~0.07)
+# `side_inset` below this is PowerPoint's 3.6 pt, above it Slides' own ~6.7: on the corpus the boxes of
+# comps-analysis read 3.1-4.2 and those of every deck with Slides' sides 5.5-8 (medians 6.2-7.6)
+SIDE_SPLIT = 5.15
+
+
+def side_inset(e: dict, gap: float) -> float:
+    """The side inset a box's `side_gap` shows: the gap less its first glyph's bearing."""
+    z = max((r.get("size") or 0) for p in e.get("paragraphs", []) for r in p.get("runs", []))
+    return gap - SIDE_BEARING_EM * z * ((e.get("box") or {}).get("scale") or 1.0)
+
+
 BASELINE_BAND = (0.95, 0.3)     # em above and below the predicted first baseline `baseline_drift` reads
 BASELINE_MIN_COLUMNS = 0.6      # em of inked columns a first line needs before its baseline is read
 BASELINE_DENSITY = 0.25         # the baseline: the lowest row inked this much of the line's densest one
@@ -776,17 +840,25 @@ def baseline_drift(e: dict, elements: list[dict], paras: list[dict], thumb, px: 
     return float((seen - base) * (e["box"].get("scale") or 1.0))
 
 
-def pptx_insets(slides: list[dict], drifts: list[tuple[dict, float]]) -> None:
+def pptx_insets(slides: list[dict], drifts: list[tuple[dict, float]], sides: list[float] = ()) -> None:
     """Boxes that stand PowerPoint's inset higher than Slides' insets would put them came from a .pptx
     whose boxes kept PowerPoint's defaults (7.2 pt at the sides, 3.6 top and bottom), which the API does
     not report: comps-analysis's text stood ~3.6 pt low on every slide. On the corpus a measured box
     (`top_drift`) is off by 0 +- 1 pt or by -3.6 +- 1, nothing between, so a box measured at -3.6 gets
     the insets; and when most of a deck's measured boxes (at least 3) do, so do its unmeasured ones -
     gdg24 mixes both kinds and keeps Slides' insets where it could not be measured. Such boxes get
-    `box.inset_y`, and their anchors move by the difference."""
+    `box.inset_y`, and their anchors move by the difference.
+
+    The sides are the deck's own question: `sides` (`side_inset` of every box whose words' start edge
+    the thumbnails show) says whether its boxes have PowerPoint's 3.6 pt there or Slides' own. With
+    none to go by, a deck imported whole gets 3.6."""
+    import statistics
     want = PPTX_INSET_Y - 7.2
     hits = [e for e, d in drifts if abs(d - want) <= 1.2]
     whole = len(drifts) >= 3 and len(hits) >= 0.6 * len(drifts)
+    # hebrew-lesson is imported whole too, and its right-to-left words start 3.2 pt further in than
+    # 3.6 pt of inset put them (every box read 5.4-7.4 pt, like Slides' own): its sides are Slides'
+    narrow = not sides or statistics.median(sides) < SIDE_SPLIT
     measured = {id(e) for e, _ in drifts}
     chosen = {id(e) for e in hits}
     for s in slides:
@@ -797,7 +869,7 @@ def pptx_insets(slides: list[dict], drifts: list[tuple[dict, float]]) -> None:
             if id(e) not in chosen and (id(e) in measured or not whole):
                 continue
             box_["inset_y"] = PPTX_INSET_Y
-            if whole:
+            if whole and narrow:
                 # a deck imported whole keeps the .pptx's side insets too, 3.6 pt like the top ones:
                 # comps-analysis's text starts 3.1-3.8 pt left of Slides' 6.7 and wrapped every
                 # other line early (boxes 0.43 -> 0.66); ap-bio-stats' two lone boxes measured at
@@ -910,7 +982,8 @@ def text_element(pe: dict, m: list[float], resolver: StyleResolver, fonts: FontM
             "placeholder": placeholder, "paragraphs": out_paras,
             "box": {"valign": {"MIDDLE": "middle", "BOTTOM": "bottom"}.get(content, "top"), "scale": scale,
                     "font_scale": font_scale, "grows": autofit.get("autofitType") == "SHAPE_AUTOFIT",
-                    **({"insets": 0} if bare else {})}}
+                    **({"insets": 0} if bare else {}),
+                    **({"snap": True} if foreign and page_w * scale <= SNAP_PAGE else {})}}
 
 
 def page_background(page: dict, resolver_pages: dict[str, dict], scheme: dict) -> tuple[str | None, str | None]:
@@ -1036,6 +1109,7 @@ def deck_ir(pres: dict, pdf_size: list[float] | None = None, base: dict | None =
                 object_keys[oid] = (s.get("key"), e.get("key"))
     slides = []
     drifts: list = []                 # (box, `top_drift`) of every measurable box, for `pptx_insets`
+    sides: list = []                  # `side_inset` of every box whose words' start edge could be read
 
     def read_page(page: dict, tags: list) -> list[dict]:
         out: list[dict] = []
@@ -1095,6 +1169,8 @@ def deck_ir(pres: dict, pdf_size: list[float] | None = None, base: dict | None =
             ink_widths(elements, thumb, px)
             drifts += [(e, d) for e, d in ((e, top_drift(e, elements, thumb, px)) for e in elements)
                        if d is not None]
+            sides += [side_inset(e, g) for e, g in ((e, side_gap(e, elements, thumb, px)) for e in elements)
+                      if g is not None]
         key = slide_keys.get(slide["objectId"]) or (max(set(tags), key=tags.count) if tags else None)
         slides.append({"page": n, "frame": str(n + 1), "size": [page_w, page_h], "objectId": slide["objectId"],
                        "key": key, "notes": notes_text(slide), "background_color": color,
@@ -1105,7 +1181,7 @@ def deck_ir(pres: dict, pdf_size: list[float] | None = None, base: dict | None =
             got = stash_picture(picture, fetch, images)
             slides[-1]["background_file"] = got.get("file")
     if foreign:
-        pptx_insets(slides, drifts)
+        pptx_insets(slides, drifts, sides)
     return {"version": 1, "source": {"presentationId": pres.get("presentationId"), "title": pres.get("title"),
                                      "revisionId": pres.get("revisionId")},
             "page_size": [page_w, page_h], "scale": scale, "slides": slides}

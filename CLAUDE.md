@@ -643,6 +643,22 @@ cs161-tls' `google.com` line). Line breaking was studied and needs nothing: Slid
 and breaks on the kerned width of a line at exactly the box's width, as TeX does here (of 579 boxes
 whose thumbnail lines can be counted, the rules tried - unkerned, a tolerance, pixel-rounded widths -
 gain at most one box); the breaks that still differ are fonts unlike Slides' own.
+Right-to-left text and line pitch (`cache-a` -> `rtl-c`, 912 slides: boxes 0.956 -> 0.963, mean per deck
+0.936 -> 0.944, no deck down by more than 0.0003). hebrew-lesson is a .pptx import like comps-analysis
+(`pptx_insets` gave it 3.6 pt sides), but its right-aligned Hebrew starts 3.2 pt further from the box's
+right edge than that put it: its boxes kept Slides' own sides. `deck_ir.side_gap` reads where a box's words
+start from its start side in the thumbnail (the right edge for right-to-left text; no bullets, rows other
+elements reach into left out), `side_inset` takes a 0.04 em bearing off, and a deck imported whole gets
+3.6 pt sides only when the median is below `SIDE_SPLIT` 5.15 (comps-analysis 3.4, every deck with Slides'
+sides 5.3-7.6): hebrew-lesson 0.773 -> 0.879. And single-spaced lines are a whole number of CSS pixels
+apart (`adopt.snapped_line_box`, `emit.snap`): 24 pt lines 28.5 pt, not 28.8, 18 pt 21.75, 16 pt 19.5
+(34 boxes in 7 decks), but not below `SNAP_FROM` 16 pt (gdg24's 14 pt Google Sans Text, journey-maps'
+14 pt Montserrat, cs161-net's 8 pt Arial stand 1.2 em apart - Arial at 14 pt snaps, so the line is where
+the data is), not at other spacings, and not on pages over `deck_ir.SNAP_PAGE` 960 pt (box `snap`: the
+1440 pt SlidesCarnival decks' Inter and NTR lines are 1.2 em apart; snapping them cost sc-dark-minimal
+0.002, gdg24 0.002 at 14 pt). hebrew-lesson -> 0.903, comps-analysis 0.677 -> 0.722, ap-bio-stats
+0.951 -> 0.976, journey-maps 0.913 -> 0.938, ds-lecture +0.004, arabic-training 0.907 -> 0.908. Why
+Slides snaps some lines and not others is not known.
 Bench workflow: `run` caches each deck's scores by its source tree, IR and scorer
 (`<corpus>/<deck>/cache`, `--no-cache` to compile anyway), so a change recompiles only the decks
 whose source it changed, and starts the slowest decks first; `losses --tag T` charges every pixel the

@@ -410,6 +410,75 @@ def test_an_imported_box_has_no_insets_when_the_decks_imports_prove_it():
     assert all(text_of(proven, oid)["box"]["insets"] == 0 for oid in ("s_w", "s_a", "s_b"))
 
 
+def test_the_side_a_boxs_words_start_on_says_whose_side_insets_an_import_kept():
+    """hebrew-lesson is a .pptx import like comps-analysis (its boxes stand PowerPoint's 3.6 pt high),
+    but its right-aligned Hebrew starts 3.2 pt further from the box's right edge than PowerPoint's
+    3.6 pt side inset put it: its boxes kept Slides' own sides. `side_gap` reads a box's start side
+    (the right one for right-to-left text) and `pptx_insets` takes the deck's median."""
+    import numpy as np
+
+    from beamer2slides.deck_ir import PPTX_INSET_Y, pptx_insets, side_gap, side_inset
+    px, scale = 4.0, 2.0
+
+    def element(rtl, oid="e"):
+        p = {"align": "right" if rtl else "left", "bullet": None, "runs": [{"text": "שלום" if rtl else "Hi", "size": 10.0}],
+             "slides": {"indent_first": 0, "indent_start": 0}}
+        if rtl:
+            p["direction"] = "rtl"
+        return {"kind": "text", "id": oid, "bbox": [50.0, 50.0, 250.0, 100.0], "paragraphs": [p],
+                "box": {"valign": "top", "scale": scale}}
+
+    def thumb(x0, x1):
+        im = np.full((600, 1200, 3), 250, dtype=np.int16)
+        im[int(55 * px):int(62 * px), int(x0 * px):int(x1 * px)] = 10
+        return im
+
+    # words 3.4 IR pt (6.8 Slides pt) in from the start side, whichever side that is
+    assert side_gap(element(False), [], thumb(53.4, 120), px) == pytest.approx(6.8, abs=0.3)
+    assert side_gap(element(True), [], thumb(180, 246.6), px) == pytest.approx(6.8, abs=0.3)
+    centred = element(True)
+    centred["paragraphs"][0]["align"] = "center"
+    assert side_gap(centred, [], thumb(180, 246.6), px) is None, "no line starts at a side"
+    over = {"kind": "image", "bbox": [40.0, 40.0, 260.0, 110.0]}
+    assert side_gap(element(True), [element(True), over], thumb(180, 246.6), px) is None
+    assert side_inset(element(True), 6.8) == pytest.approx(6.8 - 0.04 * 10 * scale)
+
+    def imported(sides):
+        slides = [{"elements": [element(True, str(k)) for k in range(4)]}]
+        drifts = [(e, PPTX_INSET_Y - 7.2) for e in slides[0]["elements"]]
+        pptx_insets(slides, drifts, sides)
+        return slides[0]["elements"][0]["box"]
+
+    assert imported([6.1, 6.5, 7.3])["inset_y"] == PPTX_INSET_Y
+    assert "inset_x" not in imported([6.1, 6.5, 7.3]), "Slides' own sides"
+    assert imported([3.3, 3.5, 6.9])["inset_x"] == PPTX_INSET_Y, "comps-analysis: PowerPoint's"
+    assert imported([])["inset_x"] == PPTX_INSET_Y, "nothing to go by: the import's"
+
+
+def test_single_spaced_lines_are_a_whole_number_of_pixels_apart():
+    """24 pt lines at 100% stand 28.5 pt apart on the thumbnails, not 1.2 em (hebrew-lesson,
+    arabic-training, ap-bio-stats, comps-analysis): 38 CSS pixels. Small type, other spacings and
+    pages wider than 960 pt are not snapped."""
+    scale = 2.0
+    pitch = lambda z, r=1.0, on=True: sum(adopt.snapped_line_box(z / scale, r, scale, on)) * scale
+    assert pitch(24) == pytest.approx(28.5)
+    assert pitch(18) == pytest.approx(21.75)
+    assert pitch(16) == pytest.approx(19.5)
+    assert pitch(14) == pytest.approx(16.8), "gdg24's 14 pt body copy"
+    assert pitch(24, on=False) == pytest.approx(28.8)
+    assert pitch(14, 1.15) == pytest.approx(14 * 1.2 * 1.15)
+    above, _ = adopt.snapped_line_box(12.0, 1.0, scale)
+    assert above == adopt.line_box(12.0, 1.0)[0], "the baseline stays; the depth takes the difference"
+
+    def snap_of(width):
+        d = deck(box("s_s", para("Words")))
+        d["pageSize"] = {"width": pt(width), "height": pt(width * 9 / 16)}
+        return text_of(deck_ir(d, foreign=True), "s_s")["box"].get("snap")
+
+    assert snap_of(720) is True
+    assert snap_of(1440) is None, "the 1440 pt SlidesCarnival decks' lines are 1.2 em apart"
+
+
 def test_text_after_a_tab_starts_at_the_next_default_stop(tmp_path):
     """creandum-board's tables of figures are words and tabs: Slides jumps to the next multiple of
     36 pt from the text's edge, TeX's space did not move them at all."""
