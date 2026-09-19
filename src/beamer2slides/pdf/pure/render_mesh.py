@@ -13,6 +13,7 @@ import numpy as np
 
 from . import raster as R
 from .raster import F
+from .crt import i32_array
 from .render_shading import INT_MAX, INT_MIN, U32, argb, i32
 
 
@@ -331,8 +332,7 @@ def gouraud(bitmap, alpha: int, tri, steps) -> None:
         r = run(rs)
         with np.errstate(all="ignore"):
             if steps is not None:
-                idx = np.where(np.isfinite(r) & (r < f32(2147483648.0)) & (r >= f32(-2147483648.0)),
-                               np.trunc(np.nan_to_num(r)), INT_MIN).astype(np.int64)
+                idx = i32_array(r)
                 bitmap[y, start_x:end_x] = steps[np.clip(idx, 0, 255)]
             else:
                 g, b = run(gs), run(bs)
@@ -341,9 +341,7 @@ def gouraud(bitmap, alpha: int, tri, steps) -> None:
 
 def _trunc255(v):
     """static_cast<int>(v * 255) over an array."""
-    t = v * np.float32(255)
-    bad = ~np.isfinite(t) | (t >= np.float32(2147483648.0)) | (t < np.float32(-2147483648.0))
-    return np.where(bad, INT_MIN, np.trunc(np.where(bad, 0, t))).astype(np.int64)
+    return i32_array(v * np.float32(255))
 
 
 def _encode(alpha: int, r, g, b):

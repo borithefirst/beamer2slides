@@ -548,6 +548,20 @@ hold for every sync, including the combinations nobody thought of.
   `parent_group`, so the stale list went unnoticed until something asked what one transform on that
   group would carry - and `merge._descendants`, which sync itself asks, would have answered with the
   dead.
+- Found live, and seen by nothing (dc8523a): sync rebuilt a block's panels around the body text the
+  person had edited, and the new panels, created last, went into the regrouped block on top of it -
+  Slides keeps the page's z-order inside a group, not the order `groupObjects` lists. Nothing was
+  deleted, so the oracle and `integrity` passed. The oracle now has an occlusion notion
+  (`loss_oracle.occlusion_findings`, `text_hidden`): a text no opaque shape covered before the sync
+  (paint order = page elements in order, a group's children in order inside it; opaque = a solid fill
+  at alpha 1, covering more than 20% of the text's box) must not end up under a shape the sync
+  created, unless the new conversion itself stacks that shape above that text. The fuzz world has
+  blocks now (a panel and its text in a converter group) and keeps `order` and group children in
+  paint order through edits and writes; its reference applier gives a rewritten object its old place,
+  which is the outcome - so `fuzz_sync._stacked` replays the mechanism, `Sync.regroups` and
+  `Sync.regroup_requests`, through Slides' z-order rules (`_zorder`) and has the oracle judge that.
+  Taking the restack out fails 14 of 400 offline rounds, each shrunk to one source edit of a block's
+  panel (`test_the_offline_fuzz_stacks_a_rebuilt_block_as_sync_does`).
 - Found in the harness by a live chained round (seed 900): the person ungrouped a figure and then
   pressed Ctrl+D on that slide, and the copy - a slide of theirs that sync never writes a request to -
   was accused of the ungrouping at every step after. A copy is the slide as the person left it, so the

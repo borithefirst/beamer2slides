@@ -48,12 +48,12 @@ def _font_program(font) -> bytes:
 
 
 def _is_active(obj) -> bool:
-    active = ctypes.c_long()
+    active = ctypes.c_int()      # FPDF_BOOL*
     return bool(R.FPDFPageObj_GetIsActive(obj, active)) and bool(active.value)
 
 
 def _rgba(getter, obj) -> tuple[int, int, int, int] | None:
-    r, g, b, a = (ctypes.c_ulong() for _ in range(4))
+    r, g, b, a = (ctypes.c_uint() for _ in range(4))
     if not getter(obj, r, g, b, a):
         return None
     return r.value, g.value, b.value, a.value
@@ -198,7 +198,7 @@ class Page:
         x, y = ctypes.c_double(), ctypes.c_double()
         loose = R.FS_RECTF()
         m = R.FS_MATRIX()
-        r, g, b, a = (ctypes.c_ulong() for _ in range(4))
+        r, g, b, a = (ctypes.c_uint() for _ in range(4))
         tl, tr, tb, tt = (ctypes.c_double() for _ in range(4))
         out: list[Char] = []
         for i in range(n):
@@ -387,7 +387,7 @@ class Page:
 
     def images(self) -> list[dict]:
         out = []
-        w, h = ctypes.c_ulong(), ctypes.c_ulong()
+        w, h = ctypes.c_uint(), ctypes.c_uint()
         for po in self.objects():
             handle = self._handles[po.id]
             if po.type == OBJ_SHADING and _is_active(handle):
@@ -414,7 +414,7 @@ class Page:
         po = self._objects[obj]
         if po.type != OBJ_IMAGE:
             return None
-        w, h = ctypes.c_ulong(), ctypes.c_ulong()
+        w, h = ctypes.c_uint(), ctypes.c_uint()
         R.FPDFImageObj_GetImagePixelSize(handle, w, h)
         meta = R.FPDF_IMAGEOBJ_METADATA()
         R.FPDFImageObj_GetImageMetadata(handle, self.raw, meta)
@@ -506,7 +506,9 @@ class Page:
             matrix = R.FS_MATRIX(*render_matrix(zoom, ix0, iy0, R.FPDFPage_GetRotation(self.raw),
                                                 self.width, self.height))
             clipping = R.FS_RECTF(0, 0, w, h)
-            R.FPDF_RenderPageBitmapWithMatrix(bitmap, self.raw, matrix, clipping, R.FPDF_ANNOT)
+            # NO_NATIVETEXT: on macOS PDFium would draw text through CoreGraphics instead of its own
+            # FreeType/AGG path (CFX_AggDeviceDriver::DrawDeviceText); everywhere else it changes nothing
+            R.FPDF_RenderPageBitmapWithMatrix(bitmap, self.raw, matrix, clipping, R.FPDF_ANNOT | R.FPDF_NO_NATIVETEXT)
             stride = R.FPDFBitmap_GetStride(bitmap)
             buf = R.FPDFBitmap_GetBuffer(bitmap)
             data = np.ctypeslib.as_array(ctypes.cast(buf, ctypes.POINTER(ctypes.c_ubyte)), shape=(h * stride,))

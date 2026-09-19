@@ -71,6 +71,15 @@ merge policy of docs/sync.md says it is not the person's work. Concretely:
   has, and that had a live object before, must have one after - its own objects, an object the sync
   created for it (`b2s_<h6 slide>_<h6 element>_...`) or an object tagged `b2s:<slide>/<element>`.
   Unless a conflict says the deck had deleted it.
+* **Text that could be read must stay readable**: a text object nobody could see through before the
+  sync (no opaque shape above it in paint order - `paint_order`: the slide's page elements in
+  order, a group's children in order inside it) must not end up under an opaque shape the sync
+  created (`text_hidden`). Opaque is a shape whose fill is a solid colour at alpha 1. The text may be
+  the same object or the element's new one; the only excuse is the new conversion itself stacking
+  that shape above that text (`ours`: the shape's element after the text's). Nothing
+  is deleted when this goes wrong, so every other check here passes: a sync that rebuilt a block's
+  panels around the body text the person had edited put them on top of it (group child order, the
+  front page's demo; `sync.Sync.regroup_requests`).
 * **An honest report**: every `applied` entry must have changed something (ids, text, geometry,
   style or picture of that element; `added` must have produced objects, `removed` must have removed
   them), and every `converged` entry must have changed nothing. A report that claims work it did not
@@ -93,6 +102,7 @@ from beamer2slides import identity, merge, snapshot
 WORD = re.compile(r"\w+", re.UNICODE)  # the same pieces `merge.tokens` diffs, so the two agree
 GEOMETRY_TOLERANCE = 0.05   # pt, as merge's own
 SCALE_TOLERANCE = 1e-3
+HIDDEN = 0.2                # of a text's box: an opaque shape above it covering more hides it
 SEVERITIES = ("loss", "undo", "report", "note")
 FAIL = ("loss", "undo", "report")
 
@@ -636,6 +646,114 @@ def content_findings(base: dict, before: dict, after: dict, rep: dict, ours: dic
     return out
 
 
+# ---------------------------------------------------------------- readable text
+
+def paint_order(slide_read: dict) -> list[str]:
+    """Object ids bottom to top: the slide's page elements in `order`, and a group's children in
+    their order where the group stands. (Objects the order doesn't reach - a hand-made read-back -
+    come last, by `z`.)"""
+    objects, out, seen = slide_read["objects"], [], set()
+
+    def walk(ids):
+        for oid in ids:
+            if oid in seen or oid not in objects:
+                continue
+            seen.add(oid)
+            out.append(oid)
+            walk(objects[oid].get("children") or [])
+    walk(slide_read.get("order") or [])
+    walk(sorted((o for o in objects if o not in seen), key=lambda o: objects[o].get("z") or 0))
+    return out
+
+
+def opaque(rb: dict) -> bool:
+    fill = (rb.get("shape_style") or {}).get("fill") or {}
+    return rb.get("kind") == "shape" and fill.get("color") is not None and (fill.get("alpha") or 0) >= 0.999
+
+
+def readable(rb: dict) -> bool:
+    return rb.get("kind") in ("shape", "table") and bool(norm(rb.get("text")))
+
+
+def _cover(inner, outer) -> float:
+    """The part of box `inner` that box `outer` covers."""
+    w = min(inner[2], outer[2]) - max(inner[0], outer[0])
+    h = min(inner[3], outer[3]) - max(inner[1], outer[1])
+    area = (inner[2] - inner[0]) * (inner[3] - inner[1])
+    return w * h / area if w > 0 and h > 0 and area > 0 else 0.0
+
+
+def hiders(slide_read: dict, oid: str, order: list[str] | None = None) -> list[str]:
+    """The opaque shapes above `oid` that cover more than `HIDDEN` of its box."""
+    order = order if order is not None else paint_order(slide_read)
+    if oid not in order or not slide_read["objects"][oid].get("box"):
+        return []
+    box = slide_read["objects"][oid]["box"]
+    return [x for x in order[order.index(oid) + 1:] if opaque(rb := slide_read["objects"][x])
+            and rb.get("box") and _cover(box, rb["box"]) > HIDDEN]
+
+
+def _element_of(skey: str, base_slide: dict | None, slide_read: dict) -> dict[str, dict]:
+    """object id -> the base element it carries on this read-back."""
+    out = {}
+    for el in (base_slide or {}).get("elements", []):
+        for oid in element_objects(skey, el["key"], el, slide_read):
+            out.setdefault(oid, el)
+    return out
+
+
+def _source_stacks_above(ours_slide: list | None, text_key: str | None, shape_key: str | None) -> bool:
+    """The new conversion itself stacks that shape above that text (emit creates elements in order).
+    Only the order is asked, not whether the boxes meet there: a text the person dragged under a
+    panel the source then moved meets it only in the deck, and the sync keeping the source's
+    stacking is not what hid it."""
+    keys = [e["key"] for e in ours_slide or []]
+    return text_key in keys and shape_key in keys and keys.index(shape_key) > keys.index(text_key)
+
+
+def occlusion_findings(base: dict, before: dict, after: dict, ours: dict | None = None) -> list[dict]:
+    """A text that could be read before the sync, under an opaque shape the sync created after it.
+    The text is the same object, or the object the sync made for the same element; it counts as
+    readable before when at least one of its objects then was."""
+    out = []
+    base_by_id = {s["objectId"]: s for s in base["slides"] if s.get("objectId")}
+    after_by_id = {s["objectId"]: s for s in after["slides"]}
+    ours_by_key = {s["key"]: s["elements"] for s in (ours or {}).get("slides", [])}
+    for bs in before["slides"]:
+        a = after_by_id.get(bs["objectId"])
+        if a is None:
+            continue
+        b = base_by_id.get(bs["objectId"])
+        skey = b["key"] if b else bs["objectId"]
+        new = set(a["objects"]) - set(bs["objects"])
+        if not any(opaque(a["objects"][x]) for x in new):
+            continue
+        order_before, order_after = paint_order(bs), paint_order(a)
+        el_after, el_before = _element_of(skey, b, a), _element_of(skey, b, bs)
+        for oid in order_after:
+            rb = a["objects"][oid]
+            if not readable(rb):
+                continue
+            over = [x for x in hiders(a, oid, order_after) if x in new]
+            if not over:
+                continue
+            el = el_after.get(oid)
+            was = [oid] if oid in bs["objects"] else \
+                [x for x, e in el_before.items() if el is not None and e["key"] == el["key"]]
+            was = [x for x in was if readable(bs["objects"][x])]
+            if not was or all(hiders(bs, x, order_before) for x in was):
+                continue  # nothing to read there before, or it was hidden already
+            ours_slide = ours_by_key.get(skey)
+            over = [x for x in over
+                    if not _source_stacks_above(ours_slide, el and el["key"], (el_after.get(x) or {}).get("key"))]
+            if over:
+                out.append(finding("text_hidden", "loss",
+                                   f"{norm(rb.get('text'))[:60]!r} is under {over}, which the sync created "
+                                   "(opaque, above it in z-order); it could be read before",
+                                   slide=skey, element=el and el["key"], object=oid))
+    return out
+
+
 # ---------------------------------------------------------------- an honest report
 
 def report_findings(base: dict, before: dict, after: dict, rep: dict) -> list[dict]:
@@ -733,7 +851,7 @@ def check(base: dict, before: dict, after: dict, report: dict, ours: dict | None
            + text_findings(base, before, after, rep, ours) + style_findings(base, before, after, rep)
            + picture_findings(base, before, after, rep) + geometry_findings(base, before, after, rep, ours)
            + content_findings(base, before, after, rep, ours) + user_slide_findings(base, before, after)
-           + report_findings(base, before, after, rep))
+           + occlusion_findings(base, before, after, ours) + report_findings(base, before, after, rep))
     allowed = set(allow or ())
     return [f for f in out if not ({f["kind"], f"{f['kind']}/{f['slide']}", f"{f['kind']}/{f['slide']}/{f['element']}"}
                                    & allowed)]

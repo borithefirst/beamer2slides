@@ -10,7 +10,7 @@ through the inverted matrix in float, becomes a parameter, and the parameter an 
 steps. The buffer is composited into the page like any bitmap (SetDIBits: CompositeRow_Argb2Rgb /
 Argb2Argb under the clip mask). Everything here is float32 one C operation at a time, the float to
 int conversions are x86's (cvttss2si: INT_MIN for NaN and out of range), and the transcendental
-functions are the C runtime's own (ucrtbase, the one PDFium links on Windows).
+functions are the C runtime's own (`crt.py`: the one PDFium links on each platform).
 
 What is not drawn exactly is refused (`refusal`), never approximated: tiling patterns, ICCBased
 colour spaces, PostScript functions with words that are not plain numbers or operators, and a shading whose
@@ -28,6 +28,7 @@ import numpy as np
 from . import cie
 from . import raster as R
 from .colors import adobe_cmyk_to_srgb
+from .crt import float_fn, i32, i32_array, u32  # noqa: F401 - i32 is imported from here too
 from .raster import F
 from .syntax import Name, Stream, String
 
@@ -37,16 +38,7 @@ U32 = 0xFFFFFFFF
 FLT_MAX = float(np.finfo(np.float32).max)
 PI_F = F(3.1415926535897932384626433832795)     # FXSYS_PI
 
-_crt = ctypes.CDLL("ucrtbase")
-
-
-def _cfun(name, n):
-    fn = getattr(_crt, name)
-    fn.restype = ctypes.c_float
-    fn.argtypes = [ctypes.c_float] * n
-    return fn
-
-
+_cfun = float_fn
 _powf, _hypotf, _atan2f = _cfun("powf", 2), _cfun("_hypotf", 2), _cfun("atan2f", 2)
 _sinf, _cosf, _logf, _log10f = _cfun("sinf", 1), _cfun("cosf", 1), _cfun("logf", 1), _cfun("log10f", 1)
 
@@ -56,20 +48,6 @@ class Unsupported(Exception):
 
 
 # ---------------------------------------------------------------------- C conversions
-
-
-def i32(v: float) -> int:
-    """static_cast<int32_t>(float) as x86 does it (cvttss2si)."""
-    if v != v or v >= 2147483648.0 or v < -2147483648.0:
-        return INT_MIN
-    return int(v)
-
-
-def u32(v: float) -> int:
-    """static_cast<uint32_t>(float) as clang does it on x64 (64-bit cvttss2si, low half)."""
-    if v != v or v >= 9223372036854775808.0 or v < -9223372036854775808.0:
-        return 0
-    return int(v) & U32
 
 
 def sat_int(v: float) -> int:
@@ -1247,9 +1225,7 @@ def _grid(final, w: int, h: int):
 
 def _index(s):
     """static_cast<int32_t>(s * 255) on an array."""
-    t = s * np.float32(255)
-    bad = ~np.isfinite(t) | (t >= np.float32(2147483648.0)) | (t < np.float32(-2147483648.0))
-    return np.where(bad, INT_MIN, np.trunc(np.where(bad, 0, t)).astype(np.int64))
+    return i32_array(s * np.float32(255))
 
 
 def _paint(bitmap, idx, steps, start_ext: bool, end_ext: bool, live=None):

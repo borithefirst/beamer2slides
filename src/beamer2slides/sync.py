@@ -1161,7 +1161,6 @@ class Sync:
         bunits = merge.units(b["elements"])
         reqs: list[dict] = []
         w["objects"], w["new_oid"], w["in_place"], w["groups"] = {}, {}, {}, []
-        roots_removed: list[tuple[str, list[str]]] = []  # (unit key, old root ids)
         recreated = [u for u in p["units"] if u["action"] in ("create", "recreate")]
         index = {e["key"]: k for k, e in enumerate(o["elements"])}
 
@@ -1220,27 +1219,7 @@ class Sync:
         # Groups the old objects were in (blocks, and groups the deck made around them): ungrouped
         # first, outermost first (a group inside a group can't be ungrouped), and regrouped with the
         # new objects under the same ids, innermost first.
-        def ancestors(g: str) -> list[str]:
-            chain, x = [], objects.get(g, {}).get("parent_group")
-            while x and x not in chain:
-                chain.append(x)
-                x = objects.get(x, {}).get("parent_group")
-            return chain
-        regroup: dict[str, dict] = {}
-        for u in p["units"]:
-            if u["action"] not in ("recreate", "delete"):
-                continue
-            members = bunits.get(u["key"], [])
-            roots = merge.unit_roots(members, read)
-            roots_removed.append((u["key"], roots))
-            for r in roots:
-                g = objects[r].get("parent_group")
-                if g and g not in roots:
-                    regroup.setdefault(g, {"remove": set(), "unit_of": {}})["remove"].add(r)
-                    regroup[g]["unit_of"][r] = u["key"]
-                    for a in ancestors(g):
-                        regroup.setdefault(a, {"remove": set(), "unit_of": {}})
-        depth = {g: len(ancestors(g)) for g in regroup}
+        regroup, depth, roots_removed = self.regroups(p["units"], bunits, read)
         reqs = [{"ungroupObjects": {"objectIds": [g]}} for g in sorted(regroup, key=lambda g: depth[g])] + reqs
 
         # A unit whose group the deck took apart (its pictures and text still there) is rebuilt ungrouped.
@@ -1277,6 +1256,56 @@ class Sync:
                 i = index[u["key"]]
                 oids = created.get(i, [])
                 tops[u["key"]] = next((x for x in oids if x.endswith("_g") and x[:-2] == new_oid[i]), new_oid[i])
+        reqs += self.regroup_requests(regroup, depth, objects, tops, keep_ids)
+        # Moves: the deck object goes where the source moved the element.
+        reqs += self.move_requests(p["units"], bunits, read, self.scale)
+        reqs += self.tag_requests(o, created, new_oid, in_place)
+        if p.get("background"):
+            reqs += self.background_requests(sid, p["background"], slide, pres)
+        if p.get("notes") is not None and read.get("notes_id"):
+            if read.get("notes"):
+                reqs.append({"deleteText": {"objectId": read["notes_id"], "textRange": {"type": "ALL"}}})
+            if p["notes"]:
+                reqs.append({"insertText": {"objectId": read["notes_id"], "text": p["notes"]}})
+        w["tops"] = tops
+        return reqs
+
+    @staticmethod
+    def regroups(units: list[dict], bunits: dict, read: dict) -> tuple[dict, dict, list]:
+        """The groups a slide's rewrite takes apart: group id -> {"remove": old roots of rewritten
+        units in it, "unit_of": root -> unit key}, with every ancestor of such a group (empty), their
+        depth, and (unit key, old root ids) of every unit rewritten or deleted."""
+        objects = read["objects"]
+
+        def ancestors(g: str) -> list[str]:
+            chain, x = [], objects.get(g, {}).get("parent_group")
+            while x and x not in chain:
+                chain.append(x)
+                x = objects.get(x, {}).get("parent_group")
+            return chain
+        regroup: dict[str, dict] = {}
+        roots_removed: list[tuple[str, list[str]]] = []
+        for u in units:
+            if u["action"] not in ("recreate", "delete"):
+                continue
+            members = bunits.get(u["key"], [])
+            roots = merge.unit_roots(members, read)
+            roots_removed.append((u["key"], roots))
+            for r in roots:
+                g = objects[r].get("parent_group")
+                if g and g not in roots:
+                    regroup.setdefault(g, {"remove": set(), "unit_of": {}})["remove"].add(r)
+                    regroup[g]["unit_of"][r] = u["key"]
+                    for a in ancestors(g):
+                        regroup.setdefault(a, {"remove": set(), "unit_of": {}})
+        return regroup, {g: len(ancestors(g)) for g in regroup}, roots_removed
+
+    @staticmethod
+    def regroup_requests(regroup: dict, depth: dict, objects: dict, tops: dict, keep_ids: set) -> list[dict]:
+        """The groups `regroups` took apart, made again under the same ids, innermost first: a
+        rewritten unit's new top object takes its old root's place among the children (`tops`: unit
+        key -> new top; `objects`: the read-back before the rewrite)."""
+        reqs = []
         replaced: dict[str, str | None] = {}  # regrouped group -> what stands for it now (None: gone)
         for g in sorted(regroup, key=lambda g: -depth[g]):
             info = regroup[g]
@@ -1296,24 +1325,13 @@ class Sync:
                 # on top: a block's recreated panels covered the body text the person had edited and
                 # sync kept (live, the front page's demo). Once grouped, a child can't be restacked
                 # (`restack` orders what is on the page), so the old order goes back now, while they
-                # are all still on the page.
+                # are all still on the page. (The offline fuzz replays this: `fuzz_sync._stacked`.)
                 reqs += [{"updatePageElementsZOrder": {"pageElementObjectIds": [c], "operation": "BRING_TO_FRONT"}}
                          for c in children]
                 reqs.append({"groupObjects": {"groupObjectId": g, "childrenObjectIds": children}})
                 replaced[g] = g
             else:
                 replaced[g] = children[0] if children else None
-        # Moves: the deck object goes where the source moved the element.
-        reqs += self.move_requests(p["units"], bunits, read, self.scale)
-        reqs += self.tag_requests(o, created, new_oid, in_place)
-        if p.get("background"):
-            reqs += self.background_requests(sid, p["background"], slide, pres)
-        if p.get("notes") is not None and read.get("notes_id"):
-            if read.get("notes"):
-                reqs.append({"deleteText": {"objectId": read["notes_id"], "textRange": {"type": "ALL"}}})
-            if p["notes"]:
-                reqs.append({"insertText": {"objectId": read["notes_id"], "text": p["notes"]}})
-        w["tops"] = tops
         return reqs
 
     def background_requests(self, sid: str, key: str, slide: dict, pres: dict, created: bool = False) -> list[dict]:

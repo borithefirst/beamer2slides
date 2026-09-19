@@ -588,11 +588,16 @@ def deck_group(rng, base, live):
     picked = rng.sample(tops, 2)
     gid = f"user_g{rng.randrange(10 ** 6):06}"
     boxes = [s["objects"][o]["box"] for o in picked]
+    # Slides keeps the children's z-order, and the group stands where the topmost of them stood
+    order = s.setdefault("order", [])
+    picked.sort(key=lambda o: order.index(o) if o in order else len(order))
     s["objects"][gid] = {**W.readback("elementGroup", [min(b[0] for b in boxes), min(b[1] for b in boxes),
                                                        max(b[2] for b in boxes), max(b[3] for b in boxes)]),
                          "children": picked}
     for o in picked:
         s["objects"][o]["parent_group"] = gid
+    W._take_place(s, picked[-1], [gid])
+    s["order"] = [o for o in s["order"] if o not in picked]
     return f"group {picked} as {gid}"
 
 
@@ -601,9 +606,11 @@ def deck_ungroup(rng, base, live):
     if not options:
         return None
     s, gid = rng.choice(options)
-    for rb in s["objects"].values():
-        if rb.get("parent_group") == gid:
-            rb["parent_group"] = None
+    parent = s["objects"][gid].get("parent_group")
+    kids = W._kids(s["objects"], gid)
+    for c in kids:
+        s["objects"][c]["parent_group"] = parent   # (a group inside a group hands them to its parent)
+    W._take_place(s, gid, kids)                    # ... where the group stood, in their order
     s["objects"].pop(gid)
     return f"ungroup {gid}"
 
@@ -645,7 +652,7 @@ def _sync_step(seed: int, step: int, doc: dict, base: dict, live: dict, tmp: Pat
     after = W.apply_plan(base, ours, live, mplan, tok)
     report = mplan["report"]
     findings = (loss_oracle.check(base, live, after, report, ours) + _writable(ours, mplan)
-                + _movable(base, live, mplan))
+                + _movable(base, live, mplan) + _stacked(base, live, after, ours, mplan, tok))
     next_base = W.rebase(base, ours, after, mplan, tok) if rebase else None
     findings += _settled(doc2, next_base, after, tmp, reordered or "move_slide" in source_ops)
     return {"seed": seed, "step": step, "source_ops": list(source_ops), "deck_ops": list(deck_ops),
@@ -789,6 +796,100 @@ def _movable(base: dict, live: dict, mplan: dict) -> list[dict]:
                         "unwritten_move", "report",
                         f"the requests move {oid} {moved[oid]} times, not once: the unit's step is "
                         f"written on {sorted(set(moved))}", slide=p["key"], element=u["key"]))
+    return out
+
+
+def _zorder(read: dict, reqs: list[dict], created: list[str]) -> dict[str, list[str]]:
+    """Slides' z-order under a rewrite, as far as grouping goes: the slide as `read` has it, the
+    `ungroupObjects` in `reqs` (a group's children take its place), `created` put on top in that
+    order (a new object is created last, so above everything), then `updatePageElementsZOrder`
+    BRING_TO_FRONT and `groupObjects` - which keeps the z-order its children have on the page, not
+    the order the request lists them in, and stands where the topmost of them stood (the fix of
+    dc8523a is exactly that difference). Returns every container's list bottom to top: "" for the
+    page, a group id for its children."""
+    objects = read["objects"]
+    lists = {"": list(read.get("order") or [])}
+    for oid, rb in objects.items():
+        if rb.get("kind") == "elementGroup":
+            lists[oid] = list(rb.get("children") or [])
+
+    def where(oid):
+        return next(((k, lst) for k, lst in lists.items() if oid in lst), (None, None))
+    for r in reqs:
+        if "ungroupObjects" in r:
+            for g in r["ungroupObjects"]["objectIds"]:
+                _, lst = where(g)
+                if lst is not None:
+                    i = lst.index(g)
+                    lst[i:i + 1] = lists.pop(g, [])
+    lists[""] += created
+    for r in reqs:
+        if "updatePageElementsZOrder" in r:
+            body = r["updatePageElementsZOrder"]
+            assert body["operation"] == "BRING_TO_FRONT", body
+            for oid in body["pageElementObjectIds"]:
+                _, lst = where(oid)
+                if lst is not None:
+                    lst.remove(oid)
+                lists[""].append(oid)
+        elif "groupObjects" in r:
+            page = lists[""]
+            kids = sorted((c for c in r["groupObjects"]["childrenObjectIds"] if c in page), key=page.index)
+            if kids:
+                at = page.index(kids[-1]) - len(kids) + 1
+                lists[""] = page = [c for c in page if c not in kids]
+                page.insert(at, r["groupObjects"]["groupObjectId"])
+            lists[r["groupObjects"]["groupObjectId"]] = kids
+    return lists
+
+
+def _stacked(base: dict, live: dict, after: dict, ours: dict, mplan: dict, tok: str) -> list[dict]:
+    """A group a rewrite takes apart is made again by `sync.Sync.regroup_requests`, and what order
+    its children end up in is a question about those requests and Slides' rules, not about the
+    merge: the reference applier gives a rewritten object its old place in the group, which is the
+    outcome, not the mechanism. So without this the campaign cannot see a block's panels recreated
+    on top of the body text sync kept - exactly what a live sync did (dc8523a), and what nothing but
+    `loss_oracle.occlusion_findings` notices, since nothing is deleted. Each rewritten slide's groups
+    are stacked as sync's requests stack them, and the oracle judges that deck instead."""
+    from beamer2slides.sync import Sync
+    slides = {s["objectId"]: s for s in live["slides"]}
+    stacked = copy.deepcopy(after)
+    judged = set()
+    for p in mplan["slides"]:
+        sid = p.get("objectId")
+        if p["action"] != "update" or p.get("base") is None or sid not in slides:
+            continue
+        read = slides[sid]
+        bunits = merge.units(base["slides"][p["base"]]["elements"])
+        regroup, depth, roots_removed = Sync.regroups(p["units"], bunits, read)
+        now = next((s for s in stacked["slides"] if s["objectId"] == sid), None)
+        if not regroup or now is None:
+            continue
+        skey = ours["slides"][p["ours"]]["key"]
+        tops, created = {}, []
+        for u in p["units"]:
+            if u["action"] not in ("create", "recreate") or u["key"] not in u.get("ours_members", []):
+                continue
+            old = dict(roots_removed).get(u["key"]) or []
+            kept = [r for r in old if r in now["objects"]]  # (the reference keeps an anchored unit's group)
+            tops[u["key"]] = kept[0] if kept else f"b2s_{W.h6(skey)}_{W.h6(u['key'])}_{tok}"
+            if not kept:
+                created.append(tops[u["key"]])
+        ungroup = [{"ungroupObjects": {"objectIds": [g]}} for g in sorted(regroup, key=lambda g: depth[g])]
+        lists = _zorder(read, ungroup + Sync.regroup_requests(regroup, depth, read["objects"], tops, set()), created)
+        for g in regroup:
+            rb = now["objects"].get(g)
+            if rb is None or g not in lists:
+                continue
+            mine = [c for c in lists[g] if c in rb.get("children", [])]
+            rb["children"] = mine + [c for c in rb.get("children", []) if c not in mine]
+        judged.add(sid)
+    if not judged:
+        return []
+    pick = lambda read: {**read, "slides": [s for s in read["slides"] if s["objectId"] in judged]}  # noqa: E731
+    out = loss_oracle.occlusion_findings(base, pick(live), pick(stacked), ours)
+    for f in out:
+        f["detail"] = f"stacked as sync.Sync.regroup_requests stacks it: {f['detail']}"
     return out
 
 

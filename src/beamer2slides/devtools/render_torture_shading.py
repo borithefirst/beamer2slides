@@ -832,6 +832,11 @@ def run(seed0: int, n: int, out: Path | None = None, verbose: bool = True, mode:
             continue
         stats["failed"].append(seed)
         if not verbose:
+            if out is not None:     # what another platform's PDFium drew, to study where it is
+                out.mkdir(parents=True, exist_ok=True)
+                (out / f"{mode}-{seed}.pdf").write_bytes(pdf_bytes([content], objects, resources, forms=forms))
+                np.savez_compressed(out / f"{mode}-{seed}.npz", pdfium=a, pure=b, zoom=zoom,
+                                    transparent=transparent)
             continue
         small, sforms = shrink(content, objects, resources, zoom, transparent, forms)
         npx, a, b, d = compare(small, objects, resources, zoom, transparent, sforms)
@@ -858,7 +863,7 @@ def main(argv=None) -> int:
     args = ap.parse_args(argv)
     stats = run(args.seed0, args.n, Path(args.out), not args.quiet, args.mode)
     print(f"{args.mode} seeds {args.seed0}..{args.seed0 + args.n - 1}: {stats['drawn']} exact, "
-          f"{len(stats['failed'])} failed, refused {stats['refused']}")
+          f"{len(stats['failed'])} failed {stats['failed']}, refused {stats['refused']}")
     return 1 if stats["failed"] else 0
 
 

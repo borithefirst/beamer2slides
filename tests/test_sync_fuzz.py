@@ -444,6 +444,105 @@ def test_a_word_the_source_put_in_another_element_is_no_undone_deletion():
     assert [f["kind"] for f in back] == ["deletion_undone"]
 
 
+def _occlusion_world():
+    """A slide with a text object `t` on an opaque block panel `p` (both in the block group `g`,
+    panel first) and a user text box `u` elsewhere, as the read-back before a sync."""
+    fill = {"fill": {"color": "#dde4f0", "alpha": 1.0}}
+    objects = {
+        "g": {"kind": "elementGroup", "box": [50, 100, 400, 156], "children": ["p", "t"]},
+        "p": {"kind": "shape", "box": [50, 100, 400, 156], "text": "", "parent_group": "g", "shape_style": fill},
+        "t": {"kind": "shape", "box": [60, 116, 390, 140], "text": "words the person edited\n", "parent_group": "g",
+              "shape_style": {"fill": None}},
+        "u": {"kind": "shape", "box": [300, 300, 460, 330], "text": "a note of the person's\n",
+              "shape_style": {"fill": None}},
+    }
+    base = {"slides": [{"key": "f1", "objectId": "s1", "groups": ["g"], "elements": [
+        {"key": "shape/panel/0", "main": "p", "objects": ["p"]},
+        {"key": "text/body/0", "main": "t", "objects": ["t"]}]}]}
+    before = {"slides": [{"objectId": "s1", "order": ["g", "u"], "objects": objects}]}
+    return base, before
+
+
+def test_catches_text_hidden_under_a_shape_the_sync_created():
+    """Nothing is deleted when a sync stacks a new panel over the words on it, so every other check
+    passes: the text is still there, just unreadable (a live sync did this to a block the person had
+    edited, dc8523a). The rebuilt panel has to go where the old one was, under the text."""
+    base, before = _occlusion_world()
+    new = f"b2s_{loss_oracle.h6('f1')}_{loss_oracle.h6('shape/panel/0')}_1zz"
+
+    def synced(children):
+        after = copy.deepcopy(before)
+        objects = after["slides"][0]["objects"]
+        objects[new] = {**objects.pop("p"), "box": [50, 96, 400, 160]}  # the source resized the panel
+        objects["g"]["children"] = children
+        return after
+    ours_order = {"slides": [{"key": "f1", "elements": [{"key": "shape/panel/0"}, {"key": "text/body/0"}]}]}
+    found = loss_oracle.occlusion_findings(base, before, synced(["t", new]), ours_order)
+    assert [(f["kind"], f["object"], f["element"]) for f in found] == [("text_hidden", "t", "text/body/0")]
+    assert "loss" in {f["severity"] for f in found}
+    assert loss_oracle.occlusion_findings(base, before, synced([new, "t"]), ours_order) == []   # the fix
+    # A text the sync rebuilt as well counts through its element (its new object is not `t`).
+    after = synced(["t", new])
+    text = f"b2s_{loss_oracle.h6('f1')}_{loss_oracle.h6('text/body/0')}_1zz"
+    objs = after["slides"][0]["objects"]
+    objs[text] = objs.pop("t")
+    objs["g"]["children"] = [text, new]
+    assert [f["object"] for f in loss_oracle.occlusion_findings(base, before, after, ours_order)] == [text]
+    # The new conversion stacking the shape above that text itself: the sync kept the source's order.
+    above = {"slides": [{"key": "f1", "elements": [{"key": "text/body/0"}, {"key": "shape/panel/0"}]}]}
+    assert loss_oracle.occlusion_findings(base, before, synced(["t", new]), above) == []
+
+
+def test_text_already_hidden_or_under_something_else_is_no_finding():
+    base, before = _occlusion_world()
+    new = "b2s_000000_111111_1zz"
+    opaque = {"kind": "shape", "text": "", "shape_style": {"fill": {"color": "#000000", "alpha": 1.0}}}
+    # the person had already put an opaque shape over their own note: nothing readable to lose
+    covered = copy.deepcopy(before)
+    covered["slides"][0]["objects"]["mine"] = {**opaque, "box": [290, 290, 470, 340]}
+    covered["slides"][0]["order"].append("mine")
+    after = copy.deepcopy(covered)
+    after["slides"][0]["objects"][new] = {**opaque, "box": [290, 290, 470, 340]}
+    after["slides"][0]["order"].append(new)
+    assert loss_oracle.occlusion_findings(base, covered, after) == []
+    # ... but on the readable slide the same new shape hides the note
+    after = copy.deepcopy(before)
+    after["slides"][0]["objects"][new] = {**opaque, "box": [290, 290, 470, 340]}
+    after["slides"][0]["order"].append(new)
+    assert [f["object"] for f in loss_oracle.occlusion_findings(base, before, after)] == ["u"]
+    # a see-through fill, a corner overlap and a shape below it hide nothing
+    for rb, where in (({**opaque, "shape_style": {"fill": {"color": "#000000", "alpha": 0.5}}, "box": [290, 290, 470, 340]}, "top"),
+                      ({**opaque, "box": [440, 320, 520, 400]}, "top"),
+                      ({**opaque, "box": [290, 290, 470, 340]}, "bottom")):
+        after = copy.deepcopy(before)
+        after["slides"][0]["objects"][new] = rb
+        order = after["slides"][0]["order"]
+        order.insert(0, new) if where == "bottom" else order.append(new)
+        assert loss_oracle.occlusion_findings(base, before, after) == [], rb
+
+
+def test_the_offline_fuzz_stacks_a_rebuilt_block_as_sync_does(monkeypatch):
+    """`fuzz_sync._stacked` replays `sync.Sync.regroup_requests` through Slides' z-order rules (a
+    group keeps the page order its children had), so taking the restack out of sync - which is what
+    hid a block's body text under its rebuilt panel live - fails the offline fuzz: the source resizes
+    a block's panel, sync rebuilds it, and the text it kept is under it. With the restack, clean."""
+    from beamer2slides.sync import Sync
+    ops = dict(source_ops=["resize_element"], deck_ops=["edit_cell"])   # seed 373, as the fuzz shrank it
+    result = fuzz_sync.offline_round(373, **ops)
+    assert not result["failures"], loss_oracle.describe(result["failures"])
+    assert any("resize p0k0" in s for s in result["source"])   # (p<page>k0: a block's panel)
+    kept = Sync.regroup_requests
+
+    def unstacked(*args):
+        return [r for r in kept(*args) if "updatePageElementsZOrder" not in r]
+    monkeypatch.setattr(Sync, "regroup_requests", staticmethod(unstacked))
+    found = fuzz_sync.offline_round(373, **ops)["failures"]
+    assert [f["kind"] for f in found] == ["text_hidden"], loss_oracle.describe(found)
+    assert "regroup_requests" in found[0]["detail"]
+    # and over the default rounds too, not only on a seed picked for it
+    assert any(fuzz_sync.offline_round(seed)["failures"] for seed in (156, 250, 263, 290, 349))
+
+
 def test_failures_are_the_severities_that_matter():
     made = [loss_oracle.finding("x", "note", "unverified"), loss_oracle.finding("y", "loss", "gone")]
     assert [f["kind"] for f in loss_oracle.failures(made)] == ["y"]

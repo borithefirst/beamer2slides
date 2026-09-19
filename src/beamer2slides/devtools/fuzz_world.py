@@ -49,9 +49,12 @@ def image_ir(eid, bbox, file, anchor=None, role="figure"):
     return el
 
 
-def shape_ir(eid, bbox, fill="#dddddd"):
-    return {"id": eid, "kind": "shape", "role": "panel", "bbox": [float(v) for v in bbox], "shape": "RECTANGLE",
-            "fill": fill, "flip": False, "radius": 0.0}
+def shape_ir(eid, bbox, fill="#dddddd", block=None):
+    el = {"id": eid, "kind": "shape", "role": "panel", "bbox": [float(v) for v in bbox], "shape": "RECTANGLE",
+          "fill": fill, "flip": False, "radius": 0.0}
+    if block is not None:
+        el["block"] = block
+    return el
 
 
 def table_ir(eid, bbox, rows):
@@ -93,6 +96,14 @@ def make_doc(rng: random.Random, out: Path) -> dict:
         if rng.random() < 0.35:
             els.append(shape_ir(f"p{i}s0", (25, y, 200, y + 30)))
             y += 38
+        brng = random.Random(f"{title}/block")  # (its own draws: every older seed keeps its deck)
+        if brng.random() < 0.35:
+            # a beamer block: an opaque panel and the body text on it, which emit groups
+            # (`block_groups`) - the panel first, so under the text
+            body = " ".join(brng.choice(WORDS) for _ in range(brng.randint(3, 6)))
+            els.append(shape_ir(f"p{i}k0", (25, y, 200, y + 28), fill="#dde4f0", block=0))
+            els.append({**text_ir(f"p{i}k1", body, (30, y + 8, 195, y + 20)), "block": 0})
+            y += 36
         if rng.random() < 0.35:
             rows = [[rng.choice(WORDS) for _ in range(2)] for _ in range(2)]
             els.append(table_ir(f"p{i}b0", (25, y, 180, y + 30), rows))
@@ -119,13 +130,19 @@ def picture_signature(data: bytes) -> str:
     return "100x50:" + bytes([(data[0] * 97 + i * 13) % 256 for i in range(1024)]).hex()
 
 
-def readback(kind, box, text=None, image=None, parent=None, title=None, z=0, table=None):
+def panel_fill(el) -> dict | None:
+    """A shape element's fill as `snapshot.shape_style` reads it (text boxes have none: emit's
+    text boxes are transparent, so only panels can hide anything)."""
+    return {"color": el["fill"], "alpha": 1.0} if el.get("kind") == "shape" and el.get("fill") else None
+
+
+def readback(kind, box, text=None, image=None, parent=None, title=None, z=0, table=None, fill=None):
     out = {"kind": kind, "transform": [1.0, 0.0, 0.0, 1.0, round(box[0], 2), round(box[1], 2)],
            "size": [round(box[2] - box[0], 2), round(box[3] - box[1], 2)], "box": [round(v, 2) for v in box],
            "parent_group": parent, "z": z, "title": title, "description": None, "text": text,
            "text_styles": [{"fontFamily": "Lato", "fontSize": 18.0}] if text is not None else [],
            "paragraph_styles": [{"alignment": "START"}] if text is not None else [], "run_spans": [],
-           "text_style_hash": "s0", "shape_style": {"fill": {"color": "#dddddd", "alpha": 1.0}},
+           "text_style_hash": "s0", "shape_style": {"fill": fill},
            "shape_style_hash": "h0"}
     if image:
         out["image"] = image
@@ -159,7 +176,7 @@ def object_readback(el, oid, out: Path, parent=None, z=0):
         rows = el["cells"]
         return styled(readback("table", box, text=table_text(el), parent=parent, z=z, table=[len(rows), len(rows[0])]), el)
     if el["kind"] == "shape":
-        return styled(readback("shape", box, text="", parent=parent, z=z), el)
+        return styled(readback("shape", box, text="", parent=parent, z=z, fill=panel_fill(el)), el)
     return styled(readback("shape", box, text=merge.predicted_text(el), parent=parent, z=z), el)
 
 
@@ -194,11 +211,20 @@ def build_base(doc, out: Path) -> dict:
         sid = f"b2s_s{n:03}"
         by_id = {e["id"]: e for e in s["elements"]}
         anchored = {e.get("anchor") for e in s["elements"] if e.get("anchor") in by_id}
+        # blocks: emit groups a block's panels with its content (`emit.block_groups`), a group no
+        # element owns (the base lists it under `groups`); its children are in element order, so
+        # the panel is under the text on it
+        blocks: dict[str, list[str]] = {}
+        for k, el in enumerate(s["elements"]):
+            if el.get("block") is not None:
+                blocks.setdefault(f"{sid}_blk{el['block']}", []).append(f"{sid}_e{k}")
+        blocks = {g: kids for g, kids in blocks.items() if len(kids) >= 2}
+        block_of = {oid: g for g, kids in blocks.items() for oid in kids}
         order, z = [], 0
         for k, (el, e) in enumerate(zip(s["elements"], entry["elements"])):
             oid = f"{sid}_e{k}"
             group = f"{sid}_e{list(by_id).index(el['anchor'])}_g" if el.get("anchor") in by_id else \
-                (f"{oid}_g" if el["id"] in anchored else None)
+                (f"{oid}_g" if el["id"] in anchored else block_of.get(oid))
             e["objects"] = [oid] + ([group] if el["id"] in anchored else [])
             e["main"] = oid
             e["readback"] = {oid: object_readback(el, oid, out, parent=group, z=z)}
@@ -209,9 +235,18 @@ def build_base(doc, out: Path) -> dict:
                 order.append(group)
             elif group is None:
                 order.append(oid)
+            elif group in blocks and group not in order:
+                order.append(group)
             z += 1
+        group_readback = {}
+        for g, kids in blocks.items():
+            boxes = [next(e["readback"][o] for e in entry["elements"] if o in e["readback"])["box"] for o in kids]
+            group_readback[g] = {**readback("elementGroup", [min(b[0] for b in boxes), min(b[1] for b in boxes),
+                                                             max(b[2] for b in boxes), max(b[3] for b in boxes)]),
+                                 "children": kids}
         entry.update(objectId=sid, layoutObjectId="L", background_readback={"color": s["bg"]},
-                     notes_readback=s.get("notes") or "", groups=[], order=order)
+                     notes_readback=s.get("notes") or "", groups=list(blocks), order=order,
+                     group_readback=group_readback)  # (fuzz world only: what `live_of` puts on the page)
     return {"version": 1, "generation": 1, "presentationId": "P", "revisionId": "r0",
             "source": {"pdf": "talk.pdf", "sha1": "x"}, "scale": SCALE, "page_size": [360.0, 202.5],
             "deck_page_size": [720.0, 405.0], "master_background": "color:#ffffff",
@@ -245,6 +280,7 @@ def live_of(base) -> dict:
         for el in s["elements"]:
             for oid, rb in el["readback"].items():
                 objects[oid] = copy.deepcopy(rb)
+        objects.update(copy.deepcopy(s.get("group_readback") or {}))
         slides.append({"objectId": s["objectId"], "layoutObjectId": "L",
                        "background": copy.deepcopy(s["background_readback"]), "notes": s["notes_readback"],
                        "notes_id": f"{s['objectId']}_notes", "order": list(s["order"]), "objects": objects})
@@ -299,7 +335,7 @@ def new_object(skey, o_el, base_el, live, overrides, tok):
     elif ir["kind"] == "table":
         rb = readback("table", box, text=text, parent=parent, table=[len(ir["cells"]), len(ir["cells"][0])])
     else:
-        rb = readback("shape", box, text=text, parent=parent)
+        rb = readback("shape", box, text=text, parent=parent, fill=panel_fill(ir))
     rb["title"] = snapshot.tag(skey, o_el["key"])
     styled(rb, ir)
     live_rb = live["objects"].get(main) if main else None
@@ -378,6 +414,9 @@ def _update_slide(base, ours, live, p, tok):
                         rb["transform"] = rb["transform"][:4] + [rb["transform"][4] + dx, rb["transform"][5] + dy]
             continue
         parents = {m["key"]: live["objects"].get(m.get("main"), {}).get("parent_group") for m in members}
+        # where each old object stands in the z-order: its replacement takes that place, in its
+        # group too (what `sync.Sync.restack` and `regroup_requests` are there to achieve)
+        slots = {m["key"]: m.get("main") for m in members if m.get("main") in live["objects"]}
         if action == "recreate":
             # (sync ungroups, deletes, creates and regroups under the same group ids)
             for m in members:
@@ -392,6 +431,10 @@ def _update_slide(base, ours, live, p, tok):
             parent = parents.get(m["key"])
             rb["parent_group"] = parent if parent in live["objects"] else None
             live["objects"][oid] = rb
+            if not (slots.get(m["key"]) and _take_place(live, slots[m["key"]], [oid])):
+                # new: on top (of its group)
+                (live["objects"][rb["parent_group"]].setdefault("children", []) if rb["parent_group"]
+                 else live.setdefault("order", [])).append(oid)
             made.append((m, rb))
         _place_unit(u, members, theirs, made, base_by)
     if p.get("background"):
@@ -533,17 +576,40 @@ def _place_unit(u, members, theirs, made, base_by):
         rb["transform"] = rb["transform"][:4] + [rb["transform"][4] + dx, rb["transform"][5] + dy]
 
 
+def _take_place(live, old: str, new: list[str]) -> bool:
+    """`new` takes `old`'s place in the z-order: among the page elements (`order`) or among its
+    group's children. False when `old` stands nowhere."""
+    found = False
+    for lst in [live.setdefault("order", [])] + [rb.setdefault("children", []) for rb in live["objects"].values()
+                                                if rb["kind"] == "elementGroup"]:
+        if old in lst:
+            i = lst.index(old)
+            lst[i:i + 1] = new
+            found = True
+    return found
+
+
+def _kids(objects: dict, gid: str) -> list[str]:
+    """A group's children bottom to top: the ones its list names, then any that joined it since."""
+    listed = [c for c in objects[gid].get("children") or [] if objects.get(c, {}).get("parent_group") == gid]
+    return list(dict.fromkeys(listed + [c for c, x in objects.items() if x.get("parent_group") == gid]))
+
+
 def _drop_lonely_groups(live):
+    """Slides drops a group left with one child (the child takes its place), and a read-back lists
+    what is really there, in paint order: `order` the slide's own page elements, a group's
+    `children` its own (`loss_oracle.paint_order` reads both)."""
     changed = True
     while changed:
         changed = False
         for oid, rb in list(live["objects"].items()):
             if rb["kind"] != "elementGroup":
                 continue
-            kids = [c for c, x in live["objects"].items() if x.get("parent_group") == oid]
+            kids = _kids(live["objects"], oid)
             if len(kids) <= 1:
                 for c in kids:
                     live["objects"][c]["parent_group"] = rb.get("parent_group")
+                _take_place(live, oid, kids)
                 live["objects"].pop(oid)
                 changed = True
     # A group says who its children are, and a unit rewritten under it has new ones: leaving the
@@ -551,6 +617,9 @@ def _drop_lonely_groups(live):
     # `merge._descendants` - which sync itself asks what a group carries - then answers with the
     # dead. Everything else here reads `parent_group`, which is why it went unnoticed until
     # `fuzz_sync._movable` asked what one transform on a group would move.
-    for oid, rb in live["objects"].items():
+    objects = live["objects"]
+    for oid, rb in objects.items():
         if rb["kind"] == "elementGroup":
-            rb["children"] = [c for c, x in live["objects"].items() if x.get("parent_group") == oid]
+            rb["children"] = _kids(objects, oid)
+    top = [o for o in live.get("order") or [] if o in objects and not objects[o].get("parent_group")]
+    live["order"] = list(dict.fromkeys(top + [o for o, x in objects.items() if not x.get("parent_group")]))

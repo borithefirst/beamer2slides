@@ -26,7 +26,7 @@ import sys
 from pathlib import Path
 from typing import Callable
 
-from . import sfnt
+from . import crt, sfnt
 from .encodings import NAMES, UNICODES
 from .syntax import Name, Stream, String, float32, operations
 
@@ -1286,6 +1286,9 @@ class SimpleFont(Font):
             first_unicode = maps[0].encoding == "unicode"
             if not (len(maps) == 1 and first_unicode):
                 p.set_charmap(1 if first_unicode else 0)
+        # macOS PDFium's own path when CoreGraphics takes the font program (bCoreText): it names a
+        # code by glyph 0's name too, and gives .notdef and space the space's glyph
+        core_text = crt.quartz_font(self.program_data if self.embedded else getattr(p, "platform_data", None))
         if self.flags & FLAG_SYMBOLIC:
             for code in range(256):
                 name = self.char_name(code)
@@ -1295,7 +1298,7 @@ class SimpleFont(Font):
                 else:
                     g = p.char_index(code)
                     self.glyphs[code] = g
-                    if g:
+                    if g or core_text:
                         gname = p.glyph_name(g)
                         self.enc_unicode[code] = unicode_from_adobe_name(gname) if gname else 0
             return
@@ -1313,7 +1316,7 @@ class SimpleFont(Font):
                 self.glyphs[code] = p.char_index(self.enc_unicode[code] if unicode else code)
             else:
                 self.enc_unicode[code] = 0x20
-                self.glyphs[code] = NO_GLYPH
+                self.glyphs[code] = p.char_index(0x20) if core_text and unicode else NO_GLYPH
 
     # CPDF_TrueTypeFont::DetermineEncoding
     def _determine_encoding(self, p: Program) -> str:

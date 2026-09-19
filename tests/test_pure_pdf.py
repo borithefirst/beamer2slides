@@ -9,6 +9,7 @@ reader rounds where PDFium stores a float, but not after every operation)."""
 import dataclasses
 import json
 import re
+import sys
 from pathlib import Path
 
 import numpy as np
@@ -861,10 +862,7 @@ def test_a_type3_font_box_is_truncated_toward_zero():
 
 
 def _needs_foxit():
-    import sys
     from beamer2slides.pdf.pure import foxit
-    if sys.platform != "win32":
-        pytest.skip("PDFium maps fonts through GDI here; outside Windows it asks fontconfig, which is not ported")
     if foxit.missing():
         pytest.skip(f"the Foxit faces are not in {foxit.cache_dir()}: python -m beamer2slides.pdf.pure.foxit")
 
@@ -959,7 +957,8 @@ def test_a_generic_face_keeps_its_blend_between_documents():
         bounds.append((before, doc[0].object_bounds()))
         doc.close()
     assert bounds[0] == bounds[1]
-    assert bounds[0][0] != bounds[0][1]                  # the blend moved the advances
+    if sys.platform != "darwin":                         # macOS CI: unmoved in PDFium too
+        assert bounds[0][0] != bounds[0][1]              # the blend moved the advances
 
 
 # ---------------------------------------------------------------------- PDFium's rules, one by one
@@ -1407,14 +1406,12 @@ FONT_AND_FILTER_CASES = {
 def test_fonts_and_filters_resolve_as_pdfium_resolves_them(name):
     """Fonts that are missing, not inherited or carry impossible widths, and streams whose filters
     PDFium won't decode. A non-embedded base-14 font is drawn with the system's Arial / Times New
-    Roman / Courier New (CFX_Win32FontInfo), so outside Windows only the object list is compared."""
-    import sys
+    Roman / Courier New (the platform's font info, `fontmapper`)."""
     data = FONT_AND_FILTER_CASES[name]
     a, b = pdf.resolve("pure").open(data)[0], pdf.resolve("pdfium").open(data)[0]
     close([dataclasses.astuple(o) for o in a.objects()], [dataclasses.astuple(o) for o in b.objects()], name)
-    if sys.platform == "win32":
-        for call in ("object_bounds", "chars"):
-            close(getattr(a, call)(), getattr(b, call)(), f"{name} {call}")
+    for call in ("object_bounds", "chars"):
+        close(getattr(a, call)(), getattr(b, call)(), f"{name} {call}")
 
 
 def _subst_case(name: bytes, subtype: bytes = b"TrueType", flags: int = 32, widths: bool = True,
@@ -1468,10 +1465,7 @@ def test_substituted_fonts_are_measured_with_pdfiums_face(name):
     """CPDF_Font::LoadSubstFont -> CFX_FontMapper::FindSubstFace -> CFX_Win32FontInfo (GDI's own
     choice of face) or the built-in Foxit faces, FoxitSerifMM/FoxitSansMM blended by weight and
     width. Object boxes, char boxes and advances all come from the face picked."""
-    import sys
     from beamer2slides.pdf.pure import foxit
-    if sys.platform != "win32":
-        pytest.skip("PDFium maps fonts through GDI here; outside Windows it asks fontconfig, which is not ported")
     if foxit.missing():
         pytest.skip(f"the Foxit faces are not in {foxit.cache_dir()}: python -m beamer2slides.pdf.pure.foxit")
     data = SUBST_CASES[name]
@@ -1570,7 +1564,10 @@ def test_text_torture_pages_extract_as_pdfium_to_the_last_bit():
         pytest.skip("no fonts to harvest (build the test decks)")
     apart = []
     for seed in [0, 7, 20, 21, 28, 45, 51, *range(100, 130)]:
-        content, fonts, _, _ = case(seed, "any")
+        try:
+            content, fonts, _, _ = case(seed, "any")
+        except SystemExit:          # TeX Live's decks have no Type 3 fonts (cm-super is there)
+            continue
         data = pdf_bytes(content, fonts)
         ref, pure = pdf.resolve("pdfium").open(data), pdf.resolve("pure").open(data)
         try:
@@ -1582,7 +1579,10 @@ def test_text_torture_pages_extract_as_pdfium_to_the_last_bit():
     assert not apart, f"seeds apart (scratch: xtext.py SEED 1): {apart}"
     # text clip pages (Tr 4..7 then paths, images, text): the text page ignores clips and modes
     for seed in range(30):
-        content, fonts, _, _ = case(seed, "any", 3)
+        try:
+            content, fonts, _, _ = case(seed, "any", 3)
+        except SystemExit:
+            continue
         data = pdf_bytes(content, fonts)
         ref, pure = pdf.resolve("pdfium").open(data), pdf.resolve("pure").open(data)
         try:
@@ -1594,7 +1594,10 @@ def test_text_torture_pages_extract_as_pdfium_to_the_last_bit():
             pure.close()
     for kind in ["type3"]:
         for seed in range(20):
-            content, fonts, _, _ = case(seed, kind)
+            try:
+                content, fonts, _, _ = case(seed, kind)
+            except SystemExit:
+                break
             data = pdf_bytes(content, fonts)
             ref, pure = pdf.resolve("pdfium").open(data), pdf.resolve("pure").open(data)
             try:
@@ -1644,6 +1647,44 @@ def test_the_ucrt_qsort_port_sorts():
         assert [k for k, _ in a] == sorted(k for k, _ in a)
 
 
+def test_the_c_runtimes_qsort_is_called_as_freetype_calls_it():
+    """Off Windows the glyph name maps are sorted by the platform's own qsort (crt.qsort, through
+    ctypes): glibc's keeps equal items in order, macOS's does not. On Windows the ctypes call must
+    put equal items where the UCRT port does - the proof the index sort makes the same moves."""
+    import random
+    import sys
+    from beamer2slides.pdf.pure import crt
+    from beamer2slides.pdf.pure.sfnt import msvc_qsort
+    r = random.Random(1)
+    for _ in range(300):
+        a = [(r.randrange(6), i) for i in range(r.randrange(0, 120))]
+        b = list(a)
+        crt.qsort(b, lambda x, y: (x[0] > y[0]) - (x[0] < y[0]))
+        assert [k for k, _ in b] == sorted(k for k, _ in a)
+        if sys.platform == "win32":
+            msvc_qsort(a, lambda x, y: x[0] > y[0], lambda x, y: x[0] == y[0])
+            assert a == b
+
+
+def test_a_calrgb_colour_that_goes_nan_is_what_the_platforms_pdfium_makes_of_it():
+    """A CalRGB component below zero with a fractional gamma is powf's NaN, and PDFium's
+    RGB_Conversion hands that to std::clamp, whose answer for a NaN is its compiler's: the x86-64
+    builds keep the NaN and the colour comes out black, the arm64 one saturates the red channel
+    (cie._srgb3). Measured on macOS: the shading torture seeds cie 8, mesh 47, transfer 57 and 76
+    differ from PDFium in nothing else."""
+    from beamer2slides.pdf.pure import cie, crt
+    buf = [0.4, 0.6382, -0.2]
+    assert cie.powf(buf[2], 1.8) != cie.powf(buf[2], 1.8)       # NaN: that is what starts it
+    out = cie.calrgb((1.0, 1.0, 1.0), (1.8, 1.8, 1.8), None, buf)
+    assert out == ((1.0, 0.0, 0.0) if crt.ARM else (0.0, 0.0, 0.0))
+    for arm, want in ((False, (0.0, 0.0, 0.0)), (True, (1.0, 0.0, 0.0))):
+        keep, cie._ARM = cie._ARM, arm
+        try:
+            assert cie.calrgb((1.0, 1.0, 1.0), (1.8, 1.8, 1.8), None, buf) == want
+        finally:
+            cie._ARM = keep
+
+
 def test_actual_text_reads_as_pdfium_reads_it():
     """/ActualText (devtools/marked_content_torture.py): an object in a marked-content sequence
     whose dictionary carries it gives that text, sliced over its rectangle, and the sequence's later
@@ -1651,10 +1692,7 @@ def test_actual_text_reads_as_pdfium_reads_it():
     arabic-training deck of the adopt corpus read a U+FFFD where Word wrote /ActualText for a
     ligature; with PreMarkedContent off 143 of 300 seeds are apart, with every /ActualText line
     reversed like glyphs (CloseTempLine keeps its logical order) 29."""
-    import sys
     from beamer2slides.devtools.marked_content_torture import first_diff
-    if sys.platform != "win32":
-        pytest.skip("Helvetica is drawn with GDI's Arial here; elsewhere PDFium asks fontconfig")
     apart = [(s, d) for s in (3, 30, 36, *range(60)) if (d := first_diff(s))]
     assert not apart, f"seeds apart (python tools/marked_content_torture.py SEED 1): {apart}"
 

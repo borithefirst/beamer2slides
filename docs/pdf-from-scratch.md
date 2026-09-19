@@ -288,6 +288,16 @@ Each of these was a diff against PDFium until it was ported:
   48 decks. In raw.json, 2 numbers are 0.01 apart.
 - **Speed**: extract takes 4.2 s for the 48 decks against 0.6 s on PDFium, mostly in the text page and
   fontTools. Classify is the same either way.
+- **On each platform**: `.github/workflows/pure-pdf.yml` runs the suite, the oracles and
+  `devtools/platform_check.py` on ubuntu, macOS (arm64) and Windows. Where PDFium's answer is its
+  platform's and not the format's, the port asks the platform too: the C runtime's powf and qsort
+  (`crt`), the CPU's float-to-int casts, the width of a wchar_t (`navigation.wide`), the folder
+  font scan off Windows (`fontmapper.FolderFontInfo`), what CoreGraphics makes of a Type 1 program
+  (`crt.quartz_font`), and the red an arm64 build saturates a NaN CalRGB colour to (`cie._srgb3`).
+  One platform path the port is spared: macOS PDFium draws text through Core Graphics
+  (`CGContextShowGlyphsAtPositions`, not FreeType) whenever the device's bitmap has no alpha and
+  the font is not a medium-weight substitute - but only when the caller allows native text, and
+  the pipeline renders with `FPDF_NO_NATIVETEXT`, so that path never runs here.
 - `tests/test_pure_pdf.py` holds this in the default run: seven decks call for call, the pipeline on
   the same seven, plus one test per quirk. `tests/test_pdf_backend.py` runs the contract suite on
   `pure` too; its render and save checks know it cannot draw.
@@ -303,9 +313,8 @@ Each of these was a diff against PDFium until it was ported:
   Text in a substituted font is drawn when PDFium draws it with one of its Foxit faces (see
   "Substituted text" below); a system TrueType substitute (GDI's Arial for Helvetica, Symbol,Bold,
   Verdana...) raises PdfError until TrueType glyphs are ported.
-- Font substitution outside Windows (PDFium's fontconfig/`CFX_LinuxFontInfo` scan is not ported),
-  and without the Foxit cache (older rules, see above); CID fonts' own substitution
-  (CPDF_CIDFont's CJK charset and ordering rules) keeps the older behaviour too.
+- Font substitution without the Foxit cache (older rules, see above); CID fonts' own
+  substitution (CPDF_CIDFont's CJK charset and ordering rules) keeps the older behaviour too.
 - Encrypted PDFs (LaTeX doesn't write them), ActualText, and JPX/JBIG2/CCITT
   decoding (those streams pass through as raw).
 

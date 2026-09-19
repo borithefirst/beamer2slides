@@ -19,11 +19,20 @@ the installed-font list is enumerated once, and faces are cached by (substitute 
 italic) - two fonts with the same /BaseFont and style share the first one's face even if GDI
 would now give another. The same here.
 
-Only on Windows, and only with the Foxit faces in their cache (`foxit.available()`): anywhere else
-`active()` is False and `fonts.py` keeps its older, narrower substitution.
+Off Windows PDFium's font info is `CFX_FolderFontInfo` (cfx_folderfontinfo.cpp): the .ttf/.ttc/.otf
+files under a few folders, named by their 'name' table (family, plus the style unless it is
+"Regular"), their charsets from OS/2's code page bits; `LinuxFontInfo` and `MacFontInfo` are its two
+MapFonts. Its quirks come along: a face inside a collection is always loaded as the collection's
+first face (GetFontData gives 0 for the face alone, so GetTTCIndex finds no offset), and the first
+face of a name wins.
+
+Only with the Foxit faces in their cache (`foxit.available()`): without them `active()` is False and
+`fonts.py` keeps its older, narrower substitution.
 """
 from __future__ import annotations
 
+import os
+import stat
 import sys
 from dataclasses import dataclass, field
 
@@ -418,6 +427,282 @@ class Win32FontInfo:
         raise NotImplementedError("CJK font preferences")     # unreachable for simple fonts
 
 
+# ---------------------------------------------------------------------- CFX_FolderFontInfo
+
+# FX_Charset of each ulCodePageRange1 bit ReportFace reads, in its order
+_CODEPAGE_CHARSETS = ((1, 238), (2, 204), (3, 161), (4, 162), (5, 177), (6, 178), (7, 186), (8, 163),
+                      (16, 222), (17, 128), (18, 134), (19, 129), (20, 136), (21, 130), (30, 255), (31, 2))
+
+# CFX_FolderFontInfo's (and CFX_MacFontInfo's) kBase14Substs: name -> face name in the folders
+_FOLDER_BASE14 = {"Courier": "Courier New", "Courier-Bold": "Courier New Bold",
+                  "Courier-BoldOblique": "Courier New Bold Italic", "Courier-Oblique": "Courier New Italic",
+                  "Helvetica": "Arial", "Helvetica-Bold": "Arial Bold", "Helvetica-BoldOblique": "Arial Bold Italic",
+                  "Helvetica-Oblique": "Arial Italic", "Times-Roman": "Times New Roman",
+                  "Times-Bold": "Times New Roman Bold", "Times-BoldItalic": "Times New Roman Bold Italic",
+                  "Times-Italic": "Times New Roman Italic"}
+
+
+def _table_location(tables: bytes, tag: bytes):
+    """FindFontTableLocation: (offset, size) of the first directory entry with that tag."""
+    for i in range(len(tables) // 16):
+        entry = tables[16 * i:16 * i + 16]
+        if entry[:4] == tag:
+            return int.from_bytes(entry[8:12], "big"), int.from_bytes(entry[12:16], "big")
+    return None
+
+
+@dataclass(eq=False)
+class FolderFace:
+    """CFX_FolderFontInfo::FontFaceInfo: the font handle."""
+    path: bytes
+    face_name: str
+    tables: bytes
+    offset: int
+    file_size: int
+    charsets: set = field(default_factory=set)
+    styles: int = 0
+
+    def eligible(self, charset: int) -> bool:
+        return charset in self.charsets or charset == CHARSET_DEFAULT
+
+    def similarity(self, weight: int, italic: bool, pitch_family: int, exact_bonus: bool) -> int:
+        score = 0
+        if bool(self.styles & STYLE_FORCE_BOLD) == (weight > 400):
+            score += 16
+        if bool(self.styles & STYLE_ITALIC) == italic:
+            score += 16
+        if bool(self.styles & STYLE_SERIF) == bool(pitch_family & PITCH_ROMAN):
+            score += 16
+        if bool(self.styles & STYLE_SCRIPT) == bool(pitch_family & PITCH_SCRIPT):
+            score += 8
+        if bool(self.styles & STYLE_FIXED_PITCH) == bool(pitch_family & PITCH_FIXED):
+            score += 8
+        if exact_bonus:
+            score += 4
+        return score
+
+
+_SCORE_MAX = 68      # FontFaceInfo::kSimilarityScoreMax
+
+
+def _family_name_match(family: str, installed: str) -> bool:
+    """FindFamilyNameMatch: `family` in the name, not followed by a lowercase ASCII letter."""
+    k = installed.find(family)
+    if k < 0:
+        return False
+    nxt = k + len(family)
+    return not (nxt < len(installed) and "a" <= installed[nxt] <= "z")
+
+
+class FolderFontInfo:
+    """CFX_FolderFontInfo: the fonts found in a list of folders (PDFium's font info off Windows).
+    Handles are `FolderFace`s. Folders are read as fx_folder_posix reads them: readdir order,
+    `stat` through links, and a name `stat` refuses ends that folder's scan."""
+
+    narrow_family = "ArialNarrow"
+    symbol_internal = True           # FindSubstFace's `#if !BUILDFLAG(IS_WIN)` Symbol branch
+
+    def __init__(self, paths):
+        self.paths = [os.fsencode(p) for p in paths]
+        self.font_list: dict[str, FolderFace] = {}
+
+    # EnumFontList, ScanPath, ScanFile
+    def enum_font_list(self, mapper: "FontMapper") -> None:
+        for path in self.paths:
+            self._scan_path(mapper, path)
+        self.font_list = dict(sorted(self.font_list.items()))     # a std::map, ordered bytewise
+
+    def _scan_path(self, mapper, path: bytes) -> None:
+        try:
+            it = os.scandir(path)
+        except OSError:
+            return
+        with it:
+            for entry in it:
+                full = path + b"/" + os.fsencode(entry.name)
+                try:
+                    is_dir = stat.S_ISDIR(os.stat(full).st_mode)
+                except OSError:
+                    return
+                name = os.fsencode(entry.name)
+                if is_dir:
+                    if name in (b".", b".."):
+                        continue
+                    self._scan_path(mapper, full)
+                elif name[-4:].lower() in (b".ttf", b".ttc", b".otf"):
+                    self._scan_file(mapper, full)
+
+    def _scan_file(self, mapper, path: bytes) -> None:
+        try:
+            with open(path, "rb") as f:
+                f.seek(0, 2)
+                size = f.tell()
+                f.seek(0)
+                head = f.read(12)
+                if len(head) != 12:
+                    return
+                if head[:4] != b"ttcf":
+                    self._report_face(mapper, path, f, size, 0)
+                    return
+                n = int.from_bytes(head[8:12], "big")
+                offsets = f.read(4 * n)
+                if len(offsets) != 4 * n:
+                    return
+                for i in range(n):
+                    self._report_face(mapper, path, f, size, int.from_bytes(offsets[4 * i:4 * i + 4], "big"))
+        except OSError:
+            return
+
+    @staticmethod
+    def _at(f, size: int, loc) -> bytes | None:
+        """DataVectorAtLocation."""
+        offset, length = loc
+        if offset + length > size:
+            return None
+        f.seek(offset)
+        data = f.read(length)
+        return data if len(data) == length else None
+
+    def _report_face(self, mapper, path: bytes, f, size: int, offset: int) -> None:
+        f.seek(offset)
+        head = f.read(12)
+        if len(head) != 12:
+            return
+        n = int.from_bytes(head[4:6], "big") * 16
+        tables = f.read(n)
+        if len(tables) != n or not tables:
+            return
+        loc = _table_location(tables, b"name")
+        names = self._at(f, size, loc) if loc else None
+        if names is None:
+            return
+        facename = _name_from_tt(names, 1)
+        if not facename:
+            return
+        style = _name_from_tt(names, 2)
+        if style != "Regular":
+            facename += " " + style
+        if facename in self.font_list:
+            return
+        face = FolderFace(path, facename, tables, offset, size)
+        loc = _table_location(tables, b"OS/2")
+        os2 = self._at(f, size, loc) if loc else None
+        codepages = int.from_bytes(os2[78:82], "big") if os2 is not None and len(os2) >= 86 else 0
+        for bit, charset in _CODEPAGE_CHARSETS:
+            if codepages & (1 << bit):
+                mapper.add_installed_font(facename, charset)
+                face.charsets.add(charset)
+        mapper.add_installed_font(facename, CHARSET_ANSI)
+        face.charsets.add(CHARSET_ANSI)
+        if "Bold" in style:
+            face.styles |= STYLE_FORCE_BOLD
+        if "Italic" in style or "Oblique" in style:
+            face.styles |= STYLE_ITALIC
+        if "Serif" in facename:
+            face.styles |= STYLE_SERIF
+        self.font_list[facename] = face
+
+    def get_subst_font(self, face: str):
+        subst = _FOLDER_BASE14.get(face)
+        return self.get_font(subst) if subst is not None else None
+
+    def find_font(self, weight: int, italic: bool, charset: int, pitch_family: int, family: str,
+                  must_match_name: bool):
+        found, best = None, 0
+        if must_match_name:
+            font = self.font_list.get(family)
+            if font is not None and font.eligible(charset):
+                best, found = font.similarity(weight, italic, pitch_family, True), font
+                if best == _SCORE_MAX:
+                    return font
+        for font in self.font_list.values():
+            if not font.eligible(charset):
+                continue
+            score = font.similarity(weight, italic, pitch_family,
+                                    must_match_name and len(family) == len(font.face_name))
+            if score > best and (not must_match_name or _family_name_match(family, font.face_name)):
+                best, found = score, font
+        if found is not None:
+            return found
+        if charset == CHARSET_ANSI and pitch_family & PITCH_FIXED:
+            return self.get_font("Courier New")
+        return None
+
+    def map_font(self, weight: int, italic: bool, charset: int, pitch_family: int, face: str):
+        return None
+
+    def get_font(self, face: str):
+        return self.font_list.get(face)
+
+    def get_font_data(self, font: FolderFace, table: int, size: int | None) -> tuple[int, bytes]:
+        """GetFontData: the size alone when `size` is None or too small (nothing is read then)."""
+        if font is None:
+            return 0, b""
+        offset = 0
+        if table == TABLE_NONE:
+            datasize = 0 if font.offset else font.file_size
+        elif table == TABLE_TTCF:
+            datasize = font.file_size if font.offset else 0
+        else:
+            loc = _table_location(font.tables, table.to_bytes(4, "little"))
+            offset, datasize = loc if loc else (0, 0)
+        if not datasize or size is None or size < datasize:
+            return datasize, b""
+        try:
+            with open(font.path, "rb") as f:
+                f.seek(offset)
+                data = f.read(datasize)
+        except OSError:
+            return 0, b""
+        return (datasize, data) if len(data) == datasize else (0, b"")
+
+    def delete_font(self, font) -> None:
+        pass
+
+    def get_face_name(self, font: FolderFace) -> str | None:
+        return font.face_name if font is not None else None
+
+
+class LinuxFontInfo(FolderFontInfo):
+    """CFX_LinuxFontInfo (core/fxge/linux/fx_linux_impl.cpp). Its CJK tables are not ported: a
+    simple font asks for the ANSI or the symbol charset."""
+
+    narrow_family = "LiberationSansNarrow"
+    PATHS = ("/usr/share/fonts", "/usr/share/X11/fonts/Type1", "/usr/share/X11/fonts/TTF", "/usr/local/share/fonts")
+
+    def map_font(self, weight: int, italic: bool, charset: int, pitch_family: int, face: str):
+        font = self.get_subst_font(face)
+        if font is not None:
+            return font
+        if charset in _CJK_CHARSETS:
+            raise NotImplementedError("CJK font preferences")     # unreachable for simple fonts
+        return self.find_font(weight, italic, charset, pitch_family, face, True)
+
+
+class MacFontInfo(FolderFontInfo):
+    """CFX_MacFontInfo (core/fxge/apple/capple_platform.cpp). "~" is not expanded: PDFium's first
+    folder is opened as written and never found."""
+
+    PATHS = ("~/Library/Fonts", "/Library/Fonts", "/System/Library/Fonts")
+
+    def map_font(self, weight: int, italic: bool, charset: int, pitch_family: int, face: str):
+        if face in _FOLDER_BASE14:
+            return self.get_font(_FOLDER_BASE14[face])
+        if "Bold" not in face and "Italic" not in face:
+            new_face = face + (" Bold" if weight > 400 else "") + (" Italic" if italic else "")
+            if new_face in self.font_list:
+                return self.font_list[new_face]
+        if face in self.font_list:
+            return self.font_list[face]
+        if charset == CHARSET_ANSI and pitch_family & PITCH_FIXED:
+            return self.get_font("Courier New")
+        if charset in (CHARSET_ANSI, CHARSET_SYMBOL):
+            return None
+        if charset in _CJK_CHARSETS:
+            raise NotImplementedError("CJK font preferences")     # unreachable for simple fonts
+        return self.font_list.get(face)
+
+
 # ---------------------------------------------------------------------- CFX_FontMapper
 
 
@@ -530,7 +815,7 @@ class _Face:
 
 @dataclass
 class FontMapper:
-    font_info: Win32FontInfo | None
+    font_info: Win32FontInfo | FolderFontInfo | None
     list_loaded: bool = False
     installed: list = field(default_factory=list)
     localized: list = field(default_factory=list)      # (PS name, family)
@@ -596,7 +881,7 @@ class FontMapper:
                 if data is not None:
                     try:
                         prog = load_cff(data)
-                        prog.face_data = data             # what render_text draws the glyphs from
+                        prog.face_data = prog.platform_data = data   # what render_text draws the glyphs from
                     except Exception:  # noqa: BLE001
                         prog = None
                 self.standard_faces[base_font] = prog
@@ -615,6 +900,8 @@ class FontMapper:
         if name not in self.generic:
             data = foxit.face_data(name)
             self.generic[name] = load_generic(data) if data is not None else None
+            if self.generic[name] is not None:
+                self.generic[name].platform_data = data
         prog = self.generic[name]
         return _Face(prog, generic=True, subst=subst) if prog is not None else None
 
@@ -635,7 +922,9 @@ class FontMapper:
                 _, head = info.get_font_data(hfont, TABLE_TTCF, 1024)
                 head = head.ljust(1024, b"\0")
                 checksum = sum(int.from_bytes(head[k:k + 4], "little") for k in range(0, 1024, 4)) & 0xFFFFFFFF
-                key = (ttc_size, checksum)
+                # a folder font info reads nothing into a buffer smaller than the file: PDFium then sums
+                # whatever the stack held, so only the file itself tells two collections apart
+                key = (ttc_size, checksum, getattr(hfont, "path", None))
                 if key not in self.ttc_face_map:
                     n, data = info.get_font_data(hfont, TABLE_TTCF, ttc_size)
                     if n != ttc_size:
@@ -649,6 +938,8 @@ class FontMapper:
                     except Exception:  # noqa: BLE001 - a face FreeType would not open either
                         faces[index] = None
                 prog = faces[index]
+                if prog is not None:
+                    prog.platform_data = data                # CFX_Font's span: the whole collection
             else:
                 key = (face_name, weight, bool(italic))
                 if key not in self.face_map:
@@ -657,6 +948,7 @@ class FontMapper:
                         return None
                     try:
                         self.face_map[key] = load_truetype(data)
+                        self.face_map[key].platform_data = data
                     except Exception:  # noqa: BLE001
                         self.face_map[key] = None
                 prog = self.face_map[key]
@@ -664,7 +956,7 @@ class FontMapper:
             info.delete_font(hfont)
         if prog is None:
             return None
-        # GetFaceName succeeds on Windows, so the family is GDI's face name, never the face's own
+        # GetFaceName succeeds on every font info, so the family is its face name, never the face's own
         bold, italic_face = _face_style(prog)
         subst.configure_external(face_name, charset, weight, italic, italic_angle, bold, italic_face)
         return _Face(prog, subst=subst)
@@ -747,7 +1039,7 @@ class FontMapper:
                     is_italic = italic_angle != 0
                     weight = old_weight               # skip_font_enumeration_ is false on Windows
                 if _is_narrow_font_name(subst_name):
-                    family = NARROW_FAMILY
+                    family = getattr(self.font_info, "narrow_family", NARROW_FAMILY)
             if flags & STYLE_ITALIC:
                 is_italic = True
         else:
@@ -768,6 +1060,9 @@ class FontMapper:
                 return self.use_internal_subst(base_font, pitch_family, old_weight, italic_angle, subst)
             return self.use_external_subst(hfont, subst_name, weight, is_italic, italic_angle, charset, subst)
         if charset == CHARSET_SYMBOL:
+            if getattr(self.font_info, "symbol_internal", False) and subst_name == "Symbol":
+                subst.family, subst.charset = "Chrome Symbol", CHARSET_SYMBOL
+                return self.use_internal_subst(SYMBOL, pitch_family, old_weight, italic_angle, subst)
             return self.find_subst_face(family, truetype, flags & ~STYLE_SYMBOLIC, weight, italic_angle, subst)
         # charset is ANSI here: the face_array search for other charsets is CJK only
         return self.use_internal_subst(base_font, pitch_family, old_weight, italic_angle, subst)
@@ -801,14 +1096,23 @@ _mapper: FontMapper | None = None
 
 
 def active() -> bool:
-    """Whether substitution follows PDFium's Windows mapper (else fonts.py's older rules)."""
-    return sys.platform == "win32" and foxit.available()
+    """Whether substitution follows PDFium's mapper (else fonts.py's older rules)."""
+    return foxit.available()
+
+
+def platform_font_info():
+    """The font info PDFium's platform creates (CreateDefaultSystemFontInfo, no user font paths)."""
+    if sys.platform == "win32":
+        return Win32FontInfo()
+    if sys.platform == "darwin":
+        return MacFontInfo(MacFontInfo.PATHS)
+    return LinuxFontInfo(LinuxFontInfo.PATHS)
 
 
 def mapper() -> FontMapper:
     global _mapper
     if _mapper is None:
-        _mapper = FontMapper(Win32FontInfo())
+        _mapper = FontMapper(platform_font_info())
     return _mapper
 
 
