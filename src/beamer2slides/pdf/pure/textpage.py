@@ -8,8 +8,9 @@ backend's `chars()` reads the same fields PDFium's accessors do, so every rule h
 written, oddities included (a zero-height glyph box grows by font_size/1000, not by the size).
 
 Right to left: a line is cut into CFX_BidiChar's segments and right-to-left ones are written
-backwards with mirrored characters, as CloseTempLine does; the bidi classes are Python's
-`unicodedata` (PDFium's table is its own copy of the same Unicode data).
+backwards with mirrored characters, as CloseTempLine does. Bidi classes, mirrors and decompositions
+are PDFium's own tables (`unicode_data`), not Python's `unicodedata`: an old snapshot with Foxit's
+choices, thousands of code points apart from today's Unicode.
 
 Not ported: vertical writing (CID fonts with a -V CMap are laid out horizontally) and /ActualText
 marked content."""
@@ -17,8 +18,8 @@ marked content."""
 from __future__ import annotations
 
 import math
-import unicodedata
 
+from . import unicode_data
 from .content import OBJ_FORM, OBJ_TEXT, PObj, f32m, f32p
 from .syntax import float32 as f32
 from .fonts import INVALID_CODE
@@ -29,29 +30,18 @@ TIE = 1e-6  # relative: well under float32's resolution
 DEFAULT_FONT_SIZE = 1.0
 IDENTITY = (1.0, 0.0, 0.0, 1.0, 0.0, 0.0)
 EMPTY = (0.0, 0.0, 0.0, 0.0)
-# GetUnicodeNormalization for the Latin ligatures, the only characters it touches left to right
-LIGATURE_PIECES = {0xFB00: "ff", 0xFB01: "fi", 0xFB02: "fl", 0xFB03: "ffi", 0xFB04: "ffl",
-                   0xFB05: "st", 0xFB06: "st"}
 
 
 # ---------------------------------------------------------------------- CFX_BidiChar / CFX_BidiString
 
 BIDI_NEUTRAL, BIDI_LEFT, BIDI_RIGHT, BIDI_LEFT_WEAK = range(4)
-_BIDI = {"L": BIDI_LEFT, "AN": BIDI_LEFT_WEAK, "EN": BIDI_LEFT_WEAK, "R": BIDI_RIGHT, "AL": BIDI_RIGHT}
-# BidiMirroring.txt, the pairs a text page can meet (pdfium::unicode::GetMirrorChar)
-_MIRROR_PAIRS = "()<>[]{}«»‹›⁅⁆⁽⁾₍₎∈∋∉∌∊∍≤≥≦≧≨≩≪≫≮≯≰≱≲≳≺≻≼≽⊂⊃⊄⊅⊆⊇⊈⊉⊊⊋⊏⊐⊑⊒⊢⊣⌈⌉⌊⌋〈〉⟨⟩⟪⟫⟦⟧⟮⟯⦃⦄⦅⦆《》「」『』【】〔〕〖〗〘〙〚〛"
-MIRROR = {}
-for _a, _b in zip(_MIRROR_PAIRS[::2], _MIRROR_PAIRS[1::2]):
-    MIRROR[ord(_a)], MIRROR[ord(_b)] = ord(_b), ord(_a)
+bidi_direction = unicode_data.direction    # CFX_BidiChar::AppendChar over PDFium's own table
 
 
-def bidi_direction(u: int) -> int:
-    return _BIDI.get(unicodedata.bidirectional(chr(u)) if u < 0x110000 else "", BIDI_NEUTRAL)
-
-
-def bidi_segments(units: list[int]) -> tuple[list[tuple[int, int, int]], bool]:
+def bidi_segments(units: list[int], auto_order: bool = True) -> tuple[list[tuple[int, int, int]], bool]:
     """CFX_BidiString: (start, count, direction) segments in the order they are written, and
-    whether the overall direction is right to left (as many right segments as left ones, or more).
+    whether the overall direction is right to left: with `auto_order`, more right segments than
+    left ones; without, never (only SetOverallDirectionRight turns it).
     Like PDFium's, the list starts with the empty segment a first change of direction closes."""
     order, start, count, direction = [], 0, 0, BIDI_NEUTRAL
     for u in units:
@@ -64,16 +54,13 @@ def bidi_segments(units: list[int]) -> tuple[list[tuple[int, int, int]], bool]:
         order.append((start, count, direction))
     rights = sum(1 for s in order if s[2] == BIDI_RIGHT)
     lefts = sum(1 for s in order if s[2] == BIDI_LEFT)
-    rtl = rights > 0 and rights >= lefts
+    rtl = auto_order and rights > lefts
     return (order[::-1] if rtl else order), rtl
 
 
-def normalization(u: int) -> list[int]:
-    """GetUnicodeNormalization: a compatibility decomposition, else the character itself (never
-    empty, so every character of a right-to-left run becomes a kPiece - a generated space too)."""
-    if u >= 0x110000 or not unicodedata.decomposition(chr(u)):
-        return [u]
-    return [ord(c) for c in unicodedata.normalize("NFKD", chr(u))]
+# GetUnicodeNormalization: PDFium's table, else the code unit itself (never empty, so every character
+# of a right-to-left run becomes a kPiece - a generated space too)
+normalization = unicode_data.normalization
 
 
 H_NONE, H_SPACE, H_LINEBREAK, H_HYPHEN = range(4)      # GenerateCharacter
@@ -346,8 +333,9 @@ def is_normal(ci: CharInfo) -> bool:
 class TextPage:
     """CPDF_TextPage over `objects` (content.py's page objects, pre-order)."""
 
-    def __init__(self, objects: list[PObj], width: float, height: float, display=None):
+    def __init__(self, objects: list[PObj], width: float, height: float, display=None, rtl: bool = False):
         self.objects = objects
+        self.rtl = rtl
         self.width, self.height = width, height
         self.display = display or (1.0, 0.0, 0.0, -1.0, 0.0, height)
         self.chars: list[CharInfo] = []
@@ -658,10 +646,11 @@ class TextPage:
         width = 0
         if prev.obj is not None and prev.code != INVALID_CODE:
             width = char_width(prev.code, prev.obj.font)
-        size = prev.obj.font_size if prev.obj is not None else prev.box[3] - prev.box[1]
+        # in C floats: the size, the char box's Height(), `pre_width * font_size / 1000` and the sum
+        size = f32(prev.obj.font_size) if prev.obj is not None else f32(prev.box[3] - prev.box[1])
         if not size:
             size = DEFAULT_FONT_SIZE
-        x, y = prev.origin[0] + width * size / 1000, prev.origin[1]
+        x, y = f32(prev.origin[0] + f32(f32(width * size) / 1000)), prev.origin[1]
         return CharInfo(GENERATED, INVALID_CODE, unicode, (x, y), (x, y, x, y), form_matrix, None)
 
     def _append_generated(self, unicode: int, form_matrix, temp: bool) -> None:
@@ -724,7 +713,9 @@ class TextPage:
         # IsRightToLeft: a mirrored right-to-left object's characters are put back in order
         mirrored = matrix[0] * matrix[3] - matrix[1] * matrix[2] < 0
         if mirrored:
-            firsts = [first_unicode(font, code) for code, _ in obj.items if code != INVALID_CODE]
+            # every item, a TJ kern too (its invalid code is U+FFFF as a 16-bit wchar_t); Front()
+            # of the item's Unicode, the code when that is 0, and 0 left out
+            firsts = [(unicode_of(font, code) or [0])[0] or code & 0xFFFF for code, _ in obj.items]
             mirrored = bidi_segments([u for u in firsts if u])[1]
         start_chars = len(self.temp)
         self._items_in_order(obj, form_matrix, matrix, fsh, base_space)
@@ -804,8 +795,12 @@ class TextPage:
                 prev_space = True
             buf.append(u)
             chars.append(ci)
-        segments, rtl = bidi_segments(buf)
-        current = BIDI_RIGHT if rtl else BIDI_LEFT
+        # CFX_BidiString(str, auto_order=false): a line runs right to left only in a document whose
+        # /ViewerPreferences say /Direction /R2L (FPDFText_LoadPage), whatever its letters
+        segments, _ = bidi_segments(buf, auto_order=False)
+        if self.rtl:
+            segments = segments[::-1]
+        current = BIDI_RIGHT if self.rtl else BIDI_LEFT
         for start, count, direction in segments:
             if direction == BIDI_RIGHT or (direction == BIDI_NEUTRAL and current == BIDI_RIGHT):
                 current = BIDI_RIGHT
@@ -823,7 +818,7 @@ class TextPage:
         if not is_normal(ci):
             self.chars.append(ci)
             return
-        for p in normalization(MIRROR.get(u, u)):
+        for p in normalization(unicode_data.mirror(u)):
             c = ci.copy()
             c.type = PIECE
             c.unicode = p
@@ -834,14 +829,13 @@ class TextPage:
         if not is_normal(ci):
             self.chars.append(ci)
             return
-        pieces = LIGATURE_PIECES.get(u)
-        if not pieces:
+        if not 0xFB00 <= u <= 0xFB06:   # left to right, only the Latin ligatures are normalized
             self.buf.append(u)
             self.chars.append(ci)
             return
-        for p in pieces:
+        for p in normalization(u):
             c = ci.copy()
             c.type = PIECE
-            c.unicode = ord(p)
-            self.buf.append(ord(p))
+            c.unicode = p
+            self.buf.append(p)
             self.chars.append(c)

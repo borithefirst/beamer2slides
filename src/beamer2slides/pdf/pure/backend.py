@@ -26,11 +26,22 @@ from .render import render_page
 from . import navigation
 from .document import PdfFile, read, write_file
 from .filters import ABBREVIATIONS, decode
-from .syntax import InlineImage, Name, Stream, float32
+from .syntax import InlineImage, Name, Stream, String, float32
 from .textpage import GENERATED, HYPHEN, NOT_UNICODE, TextPage
 
 _CS_ABBREVIATIONS = {"G": "DeviceGray", "RGB": "DeviceRGB", "CMYK": "DeviceCMYK", "I": "Indexed"}
 _CS_CODES = {name: code for code, name in COLOR_SPACES.items()}
+
+
+def _direction_r2l(pdf: PdfFile) -> bool:
+    """CPDF_ViewerPreferences::IsDirectionR2L: the catalog's /ViewerPreferences dictionary has
+    /Direction R2L (GetByteStringFor: a name or a string)."""
+    prefs = navigation.dict_for(pdf, pdf.catalog, "ViewerPreferences")
+    if not prefs:
+        return False
+    d = pdf.resolve(prefs.get("Direction"))
+    return (str(d) if isinstance(d, Name) else bytes(d).decode("latin-1") if isinstance(d, String)
+            else "") == "R2L"
 
 
 def _alpha255(a: float) -> int:
@@ -142,7 +153,8 @@ class Page:
 
     def textpage(self) -> TextPage:
         if self._textpage is None:
-            self._textpage = TextPage(self._parse(), self.width, self.height, self.to_page)
+            self._textpage = TextPage(self._parse(), self.width, self.height, self.to_page,
+                                      _direction_r2l(self.doc.pdf))
         return self._textpage
 
     def _font(self, font) -> tuple[int, str, float, float]:

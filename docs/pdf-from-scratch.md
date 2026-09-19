@@ -150,6 +150,19 @@ Each of these was a diff against PDFium until it was ported:
     forced to fill. A Tr outside 0..7 is ignored (`SetTextRenderingModeFromInt`). Found by reading
     the render torture's text pages instead of drawing them
     (`test_text_torture_pages_extract_as_pdfium_to_the_last_bit`).
+- **Right-to-left text** follows PDFium's own Unicode tables (`pure/unicode_data.py`, written by
+  `tools/pdfium_unicode_data.py` from fx_ucddata.inc and unicodenormalizationdata.cpp at the PDFium
+  build pypdfium2 ships): an old snapshot with Foxit's choices, 3,982 bidi directions and 3,996
+  decompositions apart from Python's `unicodedata` (U+00A8 decomposes to U+0308 alone, an unassigned
+  Hebrew point is right to left, U+FB05 is "ſt"). CFX_BidiChar makes CS/ES/ET/NSM/BN weak left, not
+  neutral. CloseTempLine builds its CFX_BidiString without auto order, so a line is reversed only in
+  a document whose catalog says `/ViewerPreferences << /Direction /R2L >>` (FPDFText_LoadPage), never
+  by its letters; IsRightToLeft (a mirrored object's chars put back) does auto order, which wants
+  strictly more right segments than left ones, and sees a TJ kern as U+FFFF. A generated char is
+  placed in floats. Found by the first TrueType deck (`26_truetype_fonts`, xelatex + DejaVu from the
+  TeX distribution): its subsets have glyph ids with no Unicode, so the text page reads the codes
+  themselves - Hebrew, Arabic, Syriac - and 78 of 100 torture pages were apart
+  (`test_right_to_left_text_is_ordered_as_pdfium_orders_it`, with and without /R2L).
 - **Cross references** are CPDF_Parser's loading ported, not a reader that accepts good files
   (`document.PdfFile`, whose table is CPDF_CrossRefTable; `test_cross_references_are_read_as_pdfium_reads_them`
   and `test_cross_references_are_loaded_as_pdfium_loads_them`, one case per rule). A regex reader
@@ -376,7 +389,8 @@ alpha and line widths, rendered at zooms 0.5 to 3.1 on white and clear bitmaps. 
 one-glyph pages, not one pixel apart (59 refused, all Type 3); across the test, sync, stress and
 theme PDFs, 1,499 pages holding text render byte-identical and none differs (the rest are refused
 for shadings, images, TrueType or Type 3). `tests/test_pure_pdf.py` keeps 80 seeds of two levels
-and the shrunk cases.
+and the shrunk cases. Since `26_truetype_fonts` the harvest also holds CID TrueType (DejaVu) and
+simple CFF fonts (xelatex's Computer Modern): CFF renders exact (60 of 60 seeds), TrueType is refused.
 
 ## Risks
 

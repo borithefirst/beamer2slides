@@ -35,7 +35,8 @@ a per-slide background picture.
   thresholds still hold.
 - **A PDF reader from scratch** (`pdf/pure/`, docs/pdf-from-scratch.md, extra `[pure]` = fontTools):
   a pure Python port of the PDFium parts the pipeline reads (syntax, filters, xref/repair, colour
-  spaces, fonts, content stream, CPDF_TextPage with bidi), answering the contract *as PDFium does*,
+  spaces, fonts, content stream, CPDF_TextPage with bidi over PDFium's own Unicode tables,
+  `tools/pdfium_unicode_data.py`), answering the contract *as PDFium does*,
   quirks included (float32 numbers, U+0002 hyphens, FreeType's legacy AGL, Type 3 form boxes, image
   metadata rules). Rendering is being ported from PDFium's AGG renderer (`pure/raster.py`,
   `pure/render.py`): paths, clips and forms come out byte-identical (float32 after every operation,

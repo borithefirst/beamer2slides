@@ -454,8 +454,9 @@ def test_the_pure_renderer_survives_text_torture_seeds(simple):
         content, fonts, zoom, transparent = case(seed, "any", simple)
         try:
             n = compare(content, fonts, zoom, transparent)[0]
-        except PdfError:
-            refused += 1                     # Type 3 text: refused, never drawn wrong
+        except PdfError as e:
+            if "TrueType" not in str(e):     # TrueType glyphs are not ported yet (26_truetype_fonts)
+                refused += 1                 # Type 3 text: refused, never drawn wrong
             continue
         if n:
             apart[seed] = n
@@ -1023,6 +1024,43 @@ def test_text_torture_pages_extract_as_pdfium_to_the_last_bit():
                 pure.close()
 
 
+@pytest.mark.parametrize("direction", ["", "R2L"])
+def test_right_to_left_text_is_ordered_as_pdfium_orders_it(direction):
+    """TrueType subsets (26_truetype_fonts, xelatex) carry glyph ids with no Unicode, so the text page
+    reads the code itself - Hebrew, Arabic and Syriac code points, unassigned ones included. 78 of 100
+    such pages were apart: PDFium classifies, mirrors and decomposes with its own old tables (U+00A8
+    decomposes to U+0308 alone, an unassigned Hebrew point is right to left, CS/ES/ET/NSM/BN are
+    weak left), a line is never reordered by its letters (CFX_BidiString without auto order) but only
+    when the catalog's /ViewerPreferences say /Direction /R2L, IsRightToLeft wants strictly more
+    right segments than left ones and counts a TJ kern as U+FFFF, and a generated space is placed in
+    floats."""
+    from beamer2slides.devtools.render_torture_text import case, harvest, pdf_bytes
+    if not any(s.kind == "cid-truetype" for s in harvest()):
+        pytest.skip("no TrueType font to harvest (build the test decks)")
+    apart = []
+    for seed in range(60):
+        content, fonts, _, _ = case(seed, "cid-truetype")
+        data = pdf_bytes(content, fonts)
+        if direction:
+            data = data.replace(b"<< /Type /Catalog /Pages", b"<</ViewerPreferences<</Direction/R2L>>/Pages", 1)
+        ref, pure = pdf.resolve("pdfium").open(data), pdf.resolve("pure").open(data)
+        try:
+            if _chars_and_bounds(pure[0]) != _chars_and_bounds(ref[0]):
+                apart.append(seed)
+        finally:
+            ref.close()
+            pure.close()
+    assert not apart, f"seeds apart: {apart}"
+
+
+def test_pdfiums_unicode_tables_are_its_own():
+    from beamer2slides.pdf.pure import unicode_data as u
+    assert (u.direction(0x5EB), u.direction(0x70E), u.direction(ord(",")), u.direction(ord("a"))) == (2, 2, 3, 1)
+    assert u.normalization(0xA8) == [0x308] and u.normalization(0xFB05) == [0x17F, 0x74]
+    assert u.mirror(ord("(")) == ord(")") and u.mirror(0x2018) == 0x2019 and u.mirror(ord("a")) == ord("a")
+    assert u.normalization(0x1_05EB) == [0x5EB]    # GetUnicodeNormalization masks to 16 bits
+
+
 _TWO_PAGES ={1: _CAT, 2: b"<< /Type /Pages /Kids [3 0 R 4 0 R] /Count 2 >>", 3: _LEAF % 10, 4: _LEAF % 20}
 
 
@@ -1228,10 +1266,15 @@ def test_bidi_segments_are_cfx_bidistrings():
 
     units = [ord(c) for c in "ab שלום 12"]
     segments, rtl = bidi_segments(units)
-    # PDFium's list starts with an empty segment too; one right segment against one left one makes
-    # the line right to left, so the segments come in reverse (digits are weak: they don't count)
-    assert rtl and segments[::-1] == [(0, 0, BIDI_NEUTRAL), (0, 2, BIDI_LEFT), (2, 1, BIDI_NEUTRAL),
-                                      (3, 4, BIDI_RIGHT), (7, 1, BIDI_NEUTRAL), (8, 2, BIDI_LEFT_WEAK)]
+    # PDFium's list starts with an empty segment too; one right segment against one left one is a tie,
+    # and auto order turns the line only for strictly more right segments (digits are weak: they
+    # don't count)
+    assert not rtl and segments == [(0, 0, BIDI_NEUTRAL), (0, 2, BIDI_LEFT), (2, 1, BIDI_NEUTRAL),
+                                    (3, 4, BIDI_RIGHT), (7, 1, BIDI_NEUTRAL), (8, 2, BIDI_LEFT_WEAK)]
+    segments, rtl = bidi_segments([ord(c) for c in "שלום ab אב"])
+    assert rtl and [s[2] for s in segments] == [BIDI_RIGHT, BIDI_NEUTRAL, BIDI_LEFT, BIDI_NEUTRAL,
+                                                BIDI_RIGHT, BIDI_NEUTRAL]
+    assert not bidi_segments([ord(c) for c in "שלום ab אב"], auto_order=False)[1]
     segments, rtl = bidi_segments([ord(c) for c in "left to right"])
     assert not rtl and [s[2] for s in segments if s[1]] == [BIDI_LEFT, BIDI_NEUTRAL] * 2 + [BIDI_LEFT]
 
