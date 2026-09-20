@@ -284,6 +284,23 @@ a per-slide background picture.
   where no Hebrew font is installed). What is left in `arabic-training` is not order but a font
   with no ToUnicode: two glyphs come back carrying the same *pair* of letters, so one word has two
   letters too many.
+- **And the deck is told which way its paragraphs read.** Reading them right is half of it: a
+  paragraph Slides takes for left-to-right puts a Hebrew sentence's full stop at the wrong end,
+  hangs its bullet on the wrong side and walks the cursor the wrong way. `classify.Paragraph.direction`
+  is `rtl` where the paragraph reads right to left (`bidi.reads_rtl`: Unicode's P2 over the words as
+  they are *now* read, the same rule as `_base` asked of a question rather than an answer), said in
+  deck.json only where it is true and spelled as `deck_ir` spells it of a deck read back, so the two
+  sides of `pull` agree and `scripts.py` puts such a paragraph in an `otherlanguage`. `emit` then
+  writes `direction: RIGHT_TO_LEFT` - and **mirrors the alignment**, because START and END are the
+  reading direction's own ends while what `classify` measured is the page's left and right
+  (`emit.hugs`: a Hebrew paragraph whose lines end together hugs the *right*, which `align` calls
+  "left" because they start together too - justified prose - or because there is one line and
+  nothing was measured at all). indentStart is mirrored the same way, and a bullet's from the
+  bullet box's left edge. Measured on Google's own renderer (`tools/probe_rtl.py`): the API takes
+  `direction` and reads it back, START puts a Hebrew word at 230-292 pt of a 300 pt box and END at
+  7.6-70.2, and a paragraph never told reads back `LEFT_TO_RIGHT` and sits at the left - which is
+  where every Hebrew deck this converter wrote has been sitting. Tests: the last section of
+  `tests/test_emit_requests.py` (a paragraph, its edges, a bullet and a table cell).
 - Hole and overlay pictures are placed by measurement (`emit.measure_places`, ~2-3 s per deck):
   scratch slides get copies of the text boxes with holes or overlay words (run highlights
   removed), every hole run and marked word highlighted in a mark colour and all text black; one

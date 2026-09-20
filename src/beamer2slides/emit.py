@@ -14,6 +14,7 @@ import numpy as np
 from googleapiclient.errors import HttpError
 from googleapiclient.http import MediaIoBaseUpload
 
+from . import bidi
 from .classify import HOLE_PAD
 from .fonts import font_info, google_font
 from .google_auth import drive_service, slides_service
@@ -322,6 +323,19 @@ def _vertical_pass(paras, baselines, sizes, estimate):
     return ratios, space_above
 
 
+def hugs(p: dict) -> str:
+    """Which page edge the paragraph's lines are drawn against, which `align` says for a
+    left-to-right paragraph and understates for a right-to-left one: a Hebrew paragraph
+    whose lines all end together hugs the **right**, and `align` calls that "left" because
+    its lines also start together (justified prose) or because it has only one line, where
+    nothing was measured at all. Slides is told an alignment relative to the reading
+    direction, so it needs the edge, not the name."""
+    if p.get("direction") == "rtl" and p["align"] == "left" and \
+            max(l["x1"] for l in p["lines"]) - min(l["x1"] for l in p["lines"]) <= 1:
+        return "right"
+    return p["align"]
+
+
 def text_box_requests(el: dict, slide_id: str, object_id: str, scale: float, fonts: FontMapper,
                       placeholder: dict | None = None, page_slide: dict[int, str] | None = None,
                       bar: list[float] | None = None, right_limit: float | None = None,
@@ -339,10 +353,15 @@ def text_box_requests(el: dict, slide_id: str, object_id: str, scale: float, fon
     sizes = [max(fonts(r, scale)[1] * (SMALL_CAPS_LINE if r.get("smallcaps") else 1) for r in p["runs"])
              if p["runs"] else p["size"] * scale for p in paras]
 
+    edges = [hugs(p) for p in paras]
     # (a centred or right-aligned paragraph's longest line can start left of its first line)
     left_pdf = min(p["bullet"]["bbox"][0] if p["bullet"] else
-                   min([p["text_x0"]] + ([l["x0"] for l in p["lines"]] if p["align"] != "left" else [])) for p in paras)
-    right_pdf = max(line["x1"] for p in paras for line in p["lines"])
+                   min([p["text_x0"]] + ([l["x0"] for l in p["lines"]] if e != "left" else []))
+                   for p, e in zip(paras, edges))
+    # (a right-to-left paragraph's bullet hangs right of its text, as a left-to-right one's
+    # hangs left of it, so it is that side's edge)
+    right_pdf = max([line["x1"] for p in paras for line in p["lines"]] +
+                    [p["bullet"]["bbox"][2] for p in paras if p["bullet"] and p.get("direction") == "rtl"])
     first_baseline = paras[0]["lines"][0]["baseline"] * scale
     last_baseline = paras[-1]["lines"][-1]["baseline"] * scale
 
@@ -365,7 +384,7 @@ def text_box_requests(el: dict, slide_id: str, object_id: str, scale: float, fon
     else:
         slack = 2 + 0.01 * inner_w
     x = left_pdf * scale - PAD_X
-    aligns = {p["align"] for p in paras}
+    aligns = set(edges)
     if aligns == {"center"}:
         x -= slack / 2
     elif aligns == {"right"}:
@@ -469,7 +488,7 @@ def text_box_requests(el: dict, slide_id: str, object_id: str, scale: float, fon
 
     # From here on indices refer to the final text, without tabs.
     pos = 0
-    for p, t, ratio, above, base in zip(paras, texts, ratios, space_above, base_sizes):
+    for p, t, ratio, above, base, edge in zip(paras, texts, ratios, space_above, base_sizes, edges):
         p_start, p_end = pos, pos + len(t)
         pos = p_end + 1
         start = p_start
@@ -509,15 +528,24 @@ def text_box_requests(el: dict, slide_id: str, object_id: str, scale: float, fon
                 }})
             start = end
 
+        # Slides measures a paragraph from where it *starts*, which is the right edge of a
+        # right-to-left one (classify.Paragraph.direction): START is that edge, and so is
+        # indentStart. What classify measured is the page's own left and right, so both are
+        # mirrored here, around the edge the paragraph hugs (`hugs`).
+        rtl = p.get("direction") == "rtl"
         # Code lines carry their indentation as leading spaces already.
-        # Centred and right-aligned paragraphs place themselves: an indent would only offset them.
-        text_indent = 0.0 if el.get("code") or p["align"] != "left" else (p["text_x0"] - left_pdf) * scale
+        # A paragraph that hugs the other edge, or the middle, places itself: an indent would
+        # only offset it.
+        start_edge = "right" if rtl else "left"
+        room = (right_pdf - max(l["x1"] for l in p["lines"])) if rtl else (p["text_x0"] - left_pdf)
+        text_indent = 0.0 if el.get("code") or edge != start_edge else room * scale
         if p["bullet"]:
             # Slides ends the bullet glyph a little before indentFirstLine.
-            first_indent = (p["bullet"]["bbox"][2] - left_pdf) * scale + \
-                bullet_gap(p["bullet"], bullet_size(p["bullet"], base, scale))
-        elif p.get("tab_x0") and not el.get("code"):
+            side = (right_pdf - p["bullet"]["bbox"][0]) if rtl else (p["bullet"]["bbox"][2] - left_pdf)
+            first_indent = side * scale + bullet_gap(p["bullet"], bullet_size(p["bullet"], base, scale))
+        elif p.get("tab_x0") and not el.get("code") and not rtl:
             # "label<TAB>content": a tab after the hanging label jumps to indentStart.
+            # (a right-to-left label's tab lands where nothing in the PDF says: no hang)
             first_indent, text_indent = text_indent, (p["tab_x0"] - left_pdf) * scale
         else:
             first_indent = text_indent
@@ -525,12 +553,14 @@ def text_box_requests(el: dict, slide_id: str, object_id: str, scale: float, fon
             "objectId": object_id,
             "textRange": {"type": "FIXED_RANGE", "startIndex": p_start, "endIndex": max(p_end, p_start + 1)},
             "style": {
-                "alignment": {"left": "START", "center": "CENTER", "right": "END"}[p["align"]],
+                "alignment": "CENTER" if edge == "center" else "START" if (edge == "right") == rtl else "END",
                 "lineSpacing": round(100 * ratio, 1),
                 "spaceAbove": pt(round(above, 2)), "spaceBelow": pt(0),
                 "indentStart": pt(round(text_indent, 2)), "indentFirstLine": pt(round(first_indent, 2)),
+                **({"direction": "RIGHT_TO_LEFT"} if rtl else {}),
             },
-            "fields": "alignment,lineSpacing,spaceAbove,spaceBelow,indentStart,indentFirstLine",
+            "fields": "alignment,lineSpacing,spaceAbove,spaceBelow,indentStart,indentFirstLine" +
+                      (",direction" if rtl else ""),
         }})
     return reqs
 
@@ -1003,17 +1033,24 @@ def table_requests(el: dict, slide_id: str, object_id: str, scale: float, fonts:
             col = cols[c]
             align = col["align"]
             # Line the text up with the original inside the (contiguous) Slides columns.
-            indent_start = max(0.0, (col["x0"] - bounds[c]) * scale - PAD_X) if align == "left" else 0.0
-            indent_end = max(0.0, (bounds[c + 1] - col["x1"]) * scale - PAD_X) if align == "right" else 0.0
+            left_pad = max(0.0, (col["x0"] - bounds[c]) * scale - PAD_X) if align == "left" else 0.0
+            right_pad = max(0.0, (bounds[c + 1] - col["x1"]) * scale - PAD_X) if align == "right" else 0.0
             if (r, c) in merged and merged[(r, c)]["cols"] > 1:
-                align, indent_start, indent_end = merged[(r, c)]["align"], 0.0, 0.0
+                align, left_pad, right_pad = merged[(r, c)]["align"], 0.0, 0.0
+            # A cell that reads right to left starts at its right edge, so its alignment and
+            # its two indents are mirrored (the text element's rule, one cell wide).
+            rtl = bidi.reads_rtl(text)
+            indent_start, indent_end = (right_pad, left_pad) if rtl else (left_pad, right_pad)
             reqs.append({"updateParagraphStyle": {
                 "objectId": object_id, "cellLocation": loc, "textRange": {"type": "ALL"},
-                "style": {"alignment": {"left": "START", "center": "CENTER", "right": "END"}[align],
+                "style": {"alignment": ({"left": "END", "center": "CENTER", "right": "START"} if rtl else
+                                        {"left": "START", "center": "CENTER", "right": "END"})[align],
                           "lineSpacing": round(100 * row_ratio[r], 1), "spaceAbove": pt(0), "spaceBelow": pt(0),
                           "indentStart": pt(round(indent_start, 2)), "indentFirstLine": pt(round(indent_start, 2)),
-                          "indentEnd": pt(round(indent_end, 2))},
-                "fields": "alignment,lineSpacing,spaceAbove,spaceBelow,indentStart,indentFirstLine,indentEnd"}})
+                          "indentEnd": pt(round(indent_end, 2)),
+                          **({"direction": "RIGHT_TO_LEFT"} if rtl else {})},
+                "fields": "alignment,lineSpacing,spaceAbove,spaceBelow,indentStart,indentFirstLine,indentEnd" +
+                          (",direction" if rtl else "")}})
     return reqs
 
 

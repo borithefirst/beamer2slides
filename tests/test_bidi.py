@@ -67,6 +67,14 @@ def test_a_combining_mark_stays_on_its_letter():
     assert bidi.logical_text(drawn) == ALEF + BET + "ַ"
 
 
+def test_reads_rtl_asks_the_first_strong_letter():
+    # Unicode's P2 over words already in reading order: which way the paragraph reads, which
+    # is what Slides has to be told (emit writes direction RIGHT_TO_LEFT).
+    assert bidi.reads_rtl(f"{ALEF}{BET} PDF {GIMEL}")
+    assert not bidi.reads_rtl(f"PDF {ALEF}{BET} {GIMEL}"), "a Latin sentence with a Hebrew phrase in it"
+    assert not bidi.reads_rtl("1948 (plain)") and not bidi.reads_rtl("")
+
+
 def test_looks_rtl_counts_letters_and_not_punctuation():
     assert bidi.looks_rtl(f"{ALEF}{BET}, 1948!")
     assert not bidi.looks_rtl("plain, 1948!")
@@ -138,6 +146,18 @@ def test_a_line_of_latin_spans_says_what_it_always_said():
 def test_runs_for_a_short_piece_of_hebrew_read_right_to_left():
     runs = classify.span_runs([span(GIMEL, 0, 10), span(BET, 12, 22), span(ALEF, 24, 34)])
     assert "".join(r["text"] for r in runs) == f"{ALEF} {BET} {GIMEL}"
+
+
+def test_a_hebrew_paragraph_says_that_it_reads_right_to_left():
+    line = classify.Line([span(GIMEL, 0, 10), span(BET, 12, 22), span(ALEF, 24, 34)])
+    assert classify.Paragraph([line]).direction == "rtl"
+
+
+def test_a_latin_paragraph_says_nothing_at_all():
+    # The key is only there where it is true, as `deck_ir` writes it of a deck read back:
+    # every deck this project had until now is a left-to-right one.
+    line = classify.Line([span("one", 0, 10), span("two", 12, 22)])
+    assert classify.Paragraph([line]).direction is None
 
 
 def test_the_gap_between_two_spans_is_what_it_always_was_for_a_left_to_right_pair():

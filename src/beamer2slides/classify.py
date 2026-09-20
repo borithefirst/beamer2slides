@@ -258,6 +258,14 @@ class Paragraph:
         return self.first.bullet
 
     @property
+    def direction(self) -> str | None:
+        """`rtl` where the paragraph reads right to left, else None - Unicode's P2 over the
+        words as they are now read (`bidi`). Slides has to be told: in a paragraph it takes
+        for left-to-right, a Hebrew sentence's full stop lands at the wrong end, a bullet
+        hangs on the wrong side and the cursor walks the wrong way."""
+        return "rtl" if bidi.reads_rtl(" ".join(l.text for l in self.lines)) else None
+
+    @property
     def x0(self) -> float:
         return self.first.x0
 
@@ -2421,6 +2429,9 @@ class PageClassifier:
             "panel": self.panel_of(rect),
             "paragraphs": [{
                 "align": p.align, "level": p.level, "bullet": p.bullet, "size": round(p.size, 2),
+                # Said only where it is true, as `deck_ir` says it of a deck that is read
+                # back: a left-to-right paragraph is every deck this project had until now.
+                **({"direction": p.direction} if p.direction else {}),
                 "text_x0": round(p.x0, 2),
                 "tab_x0": round(p.first.tab.rect.x0, 2) if p.first.tab else None,
                 "lines": [{"baseline": round(l.baseline, 2), "x0": round(l.x0, 2), "x1": round(l.x1, 2)}

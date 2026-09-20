@@ -29,6 +29,11 @@ line with no right-to-left letters in it untouched, which is every deck this pro
 
 Mirrored characters go back too (a run written backwards has its brackets mirrored with it), a mark
 stays on the letter it is drawn over (`_clusters`), and which way the line reads is `_base`.
+
+Reading a paragraph right is half of it: the deck has to be told which way it reads, or Slides
+lays it out left to right and its full stop lands at the wrong end. `reads_rtl` is that question,
+asked of words already in reading order - `classify.Paragraph.direction` carries the answer into
+deck.json and `emit` writes it as the API's `direction`.
 """
 from __future__ import annotations
 
@@ -59,6 +64,16 @@ def looks_rtl(text: str) -> bool:
     """The text holds more right-to-left letters than left-to-right ones."""
     right = sum(1 for c in text if _class(c) == RIGHT)
     return right > sum(1 for c in text if _class(c) == LEFT)
+
+
+def reads_rtl(text: str) -> bool:
+    """Which way a paragraph reads, of text that is already in reading order: Unicode's P2,
+    the first strong letter, asked of the question this time and not of the answer (`_base`
+    is the same rule where the order is what is in doubt)."""
+    for c in text:
+        if _class(c) in (LEFT, RIGHT):
+            return _class(c) == RIGHT
+    return False
 
 
 def _clusters(text: str) -> list[tuple[int, int]]:

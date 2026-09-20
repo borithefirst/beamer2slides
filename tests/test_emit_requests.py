@@ -16,7 +16,8 @@ from beamer2slides import emit
 from beamer2slides.classify import HOLE_PAD, classify
 from beamer2slides.emit import (EMU_PER_PT, HOLE_FONT, HOLE_SPACE_EM, SLIDE_W, FontMapper, find_marks, fit_holes,
                                 formula_shifts, hole_offset, hole_run, mark_alpha, number_box_requests,
-                                measure_jobs, overlay_boxes, pick_gap, slide_holes, space_shift)
+                                measure_jobs, overlay_boxes, pick_gap, slide_holes, space_shift,
+                                table_requests)
 from beamer2slides.extract import extract, select_overlays
 from beamer2slides.notes import prepare
 
@@ -797,3 +798,88 @@ def test_measured_overlay_move_keeps_the_left_edge_under_a_relative_scale(decks)
     assert t["applyMode"] == "RELATIVE"
     moved = [t["transform"]["scaleX"] * v + t["transform"]["translateX"] / EMU_PER_PT for v in (x0, x1)]
     assert moved == pytest.approx([x0 + 4.0, x0 + 4.0 + 1.2 * (x1 - x0)], abs=0.01)
+
+# ---------------------------------------------------------------- right to left
+
+# A Hebrew paragraph is a left-to-right paragraph to Slides unless it is told otherwise, and
+# then its full stop lands at the wrong end and the cursor walks the wrong way. Synthetic, as
+# `tests/test_bidi.py` is: the characters, not a font.
+ALEF, BET, GIMEL = "א", "ב", "ג"
+
+
+def hebrew_element(align: str = "left", lines=((100.0, 200.0),), bullet=None,
+                   direction: str | None = "rtl", text: str | None = None) -> dict:
+    para = {"align": align, "level": 0, "bullet": bullet, "size": 10.91, "text_x0": lines[0][0],
+            "tab_x0": None, "wrap_limit": None,
+            "runs": [run_of(f"{ALEF}{BET} {GIMEL}" if text is None else text)],
+            "lines": [{"baseline": 60.0 + 12 * i, "x0": x0, "x1": x1} for i, (x0, x1) in enumerate(lines)]}
+    if direction:
+        para["direction"] = direction
+    return {"id": "p0t0", "kind": "text", "role": "body", "code": False,
+            "bbox": [min(l[0] for l in lines), 50.0, max(l[1] for l in lines), 50.0 + 12 * len(lines)],
+            "paragraphs": [para]}
+
+
+def paragraph_style(el: dict) -> dict:
+    reqs = emit.text_box_requests(el, "b2s_s001", "b2s_s001_t0", SCALE, FONTS)
+    return next(r["updateParagraphStyle"] for r in reqs if "updateParagraphStyle" in r)
+
+
+def test_a_hebrew_paragraph_is_told_which_way_it_reads():
+    style = paragraph_style(hebrew_element())
+    assert style["style"]["direction"] == "RIGHT_TO_LEFT" and "direction" in style["fields"].split(",")
+
+
+def test_a_left_to_right_paragraph_is_told_nothing_it_was_not_told_before():
+    style = paragraph_style(hebrew_element(direction=None, text="one two"))
+    assert "direction" not in style["style"] and "direction" not in style["fields"]
+    assert style["fields"] == "alignment,lineSpacing,spaceAbove,spaceBelow,indentStart,indentFirstLine"
+
+
+@pytest.mark.parametrize("align, lines, alignment", [
+    ("right", ((120.0, 200.0), (100.0, 200.0)), "START"),   # flush right: where it starts
+    ("left", ((100.0, 200.0),), "START"),                   # one line: nothing was measured
+    ("left", ((100.0, 200.0), (100.0, 200.0)), "START"),    # justified: it starts at the right too
+    ("left", ((100.0, 200.0), (100.0, 170.0)), "END"),      # really ragged right: it ends there
+    ("center", ((110.0, 190.0), (100.0, 200.0)), "CENTER"),
+])
+def test_a_hebrew_paragraph_keeps_the_edge_it_is_drawn_against(align, lines, alignment):
+    # START and END are the reading direction's own ends, so the page's left and right have to
+    # be mirrored into them (emit.hugs), or every Hebrew paragraph moves across its box.
+    assert paragraph_style(hebrew_element(align, lines))["style"]["alignment"] == alignment
+
+
+def test_a_hebrew_paragraph_is_indented_from_the_right():
+    # The second paragraph starts 10 pt short of the right margin the first one reaches.
+    el = hebrew_element(lines=((100.0, 200.0),))
+    short = hebrew_element(lines=((100.0, 190.0),))["paragraphs"][0]
+    el["paragraphs"].append(short)
+    styles = [r["updateParagraphStyle"]["style"]
+              for r in emit.text_box_requests(el, "b2s_s001", "b2s_s001_t0", SCALE, FONTS)
+              if "updateParagraphStyle" in r]
+    assert pt_of(styles[0]["indentStart"]) == 0
+    assert pt_of(styles[1]["indentStart"]) == pytest.approx(10 * SCALE, abs=0.01)
+
+
+def test_a_hebrew_bullet_hangs_on_the_right_of_its_item():
+    bullet = {"kind": "glyph", "text": "●", "bbox": [204.0, 52.0, 210.0, 58.0], "color": "#000000"}
+    style = paragraph_style(hebrew_element(bullet=bullet))["style"]
+    # indentFirstLine is measured from the paragraph's own edge, which is the bullet's right.
+    assert pt_of(style["indentFirstLine"]) == pytest.approx((210.0 - 204.0) * SCALE + emit.BULLET_GAP, abs=0.01)
+    assert style["direction"] == "RIGHT_TO_LEFT"
+
+
+def hebrew_table() -> dict:
+    return {"id": "p0b0", "kind": "table", "frame": [100.0, 50.0, 200.0, 70.0], "size": 10.91,
+            "columns": [{"x0": 100.0, "x1": 140.0, "align": "left"},
+                        {"x0": 160.0, "x1": 200.0, "align": "left"}],
+            "cells": [[[run_of(f"{ALEF}{BET}")], [run_of("one")]]],
+            "row_baselines": [60.0], "row_heights": [20.0], "rules": []}
+
+
+def test_a_hebrew_table_cell_reads_right_to_left_and_stays_where_it_is_drawn():
+    reqs = table_requests(hebrew_table(), "b2s_s001", "b2s_s001_b0", SCALE, FONTS)
+    styles = {r["updateParagraphStyle"]["cellLocation"]["columnIndex"]: r["updateParagraphStyle"]["style"]
+              for r in reqs if "updateParagraphStyle" in r}
+    assert styles[0]["direction"] == "RIGHT_TO_LEFT" and styles[0]["alignment"] == "END"
+    assert "direction" not in styles[1] and styles[1]["alignment"] == "START"
