@@ -746,6 +746,43 @@ def test_an_empty_paragraphs_key_stays_on_it_when_a_block_is_written_at_its_mark
     assert again["applied"] == []
 
 
+def test_a_range_a_reader_stretched_over_the_next_block_does_not_take_its_key():
+    """The other way a range drifts, and the last of `lost-key`: a reader who presses
+    Enter in the middle of a paragraph — or, as the campaign did it, drags a block
+    into one — writes inside that paragraph's named range, which grows, so one name
+    now covers both halves.
+
+    Nothing shows while both stand: `apply_keys` gives the name to the first, which is
+    where the text it was given to still is, and the second is keyed by its words at
+    the settle. But when the source then drops that first block, the delete takes only
+    its own span, the stretched range lives on over the second block's words, and the
+    second block reads back under the first one's key — its own key gone with neither
+    side dropping the block (campaign seeds 279 and 361 at chain 4).
+
+    `anchor_range` was built for the mirror image (a range must not end *on* the mark,
+    or deleting the newline between two paragraphs stretches it), so `replant_requests`
+    plants a range that ends past its block again, as it does one that starts too late.
+    """
+    world, ours, base = _build([_para("A line."), _para("A closing line.")])
+    closing = doc_world.read_ir(world, ours, base)["blocks"][-1]
+    world.apply([{"insertText": {"location": {"index": closing["span"][0] + 5},
+                                 "text": "\n"}}])       # Enter, in the middle of it
+    stretched = doc_world.read_ir(world, ours, base)["blocks"][-2]
+    assert stretched["range"][1] > doc_ir.anchor_range(stretched)[1], \
+        "the split has to grow the range for this to be the case it is about"
+    report, ours, base = fuzz_docs.sync_once(world, ours, base)
+    assert _keys(ours) == ["paragraph:a-line", "paragraph:a-closing-line",
+                           "paragraph:sing-line"]
+    ours["blocks"] = [b for b in ours["blocks"]
+                      if b["key"] != "paragraph:a-closing-line"]
+    was, mine = copy.deepcopy(base), copy.deepcopy(ours)
+    before = doc_world.settled_ir(world, ours, base)
+    report, ours, base = fuzz_docs.sync_once(world, ours, base)
+    assert not oracle.failures(oracle.check(was, before, base, report, mine))
+    assert _keys(doc_world.read_ir(world, ours, base)) == [
+        "paragraph:a-line", "paragraph:sing-line"]
+
+
 def test_a_key_a_readers_chip_pushed_onto_the_mark_survives_a_structural_batch():
     """The same drift from the reader's side, and the batch of words is too late for
     it: a person chip put into an empty paragraph pushes its range onto the mark, and

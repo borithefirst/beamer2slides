@@ -1343,6 +1343,15 @@ keys, named ranges), `doc_merge.py` (pure planning), `doc_sync.py` (the commands
   `name_requests` plants them back at the settle and `structure` heads its batch with them -
   the batch that builds a table swallows the mark before it, which carried the chip
   paragraph's range, and the moved table is found again by that block's key (seed 296).
+  A range also *stretches*: text written inside one grows it, so a reader who presses Enter
+  in the middle of a paragraph (or drags a block into it) leaves one name over both halves -
+  invisible while both stand, since `apply_keys` gives it to the first, but when the source
+  drops that first block the delete takes only its own span and the stretched range settles
+  onto the second block's words, whose own key goes. `replant_requests` plants a range that
+  ends past its block again, as it does one that starts too late; a range may end *short* of
+  its block, text typed at the mark falling outside it, so only `here[1] > planted[1]` is
+  wrong (seeds 279 and 361 at chain 4, found once `read_unmark_word` changed which seeds draw
+  what; both fail identically at the commit before it).
   `moved-styling` was `_retext` folding the stretch between two frozen runs into its first
   writable run: it pairs the document's words with the merged text now and gives each its own
   styling (`_runs_from_styles`). Its wordless signature hid two more: a block written from

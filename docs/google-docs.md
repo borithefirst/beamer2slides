@@ -1118,6 +1118,21 @@ block it follows (chain-8 seed 296: the table settled as `table:empty`, the file
 naming `table:c`). At one seed, 300 rounds at chain 8 and 600 at chain 4 under
 `--strict`: nothing.
 
+A range does not only drift, it **stretches**: text written *inside* one grows it, so a
+reader who presses Enter in the middle of a paragraph — or, as the campaign did it, drags
+a block into one — leaves a single name over both halves. Nothing shows while both stand,
+because `apply_keys` gives the name to the first block, which is where the text it was
+given to still is, and the second is keyed by its words at the settle. It shows when the
+source later drops that first block: the delete takes only its own span, the stretched
+range lives on over the second block's words, and that block reads back under the first
+one's key with its own gone, though neither side dropped it. `replant_requests` therefore
+plants a range that ends *past* its block again, as it does one that starts too late. Only
+past: a range may well end short of its block, since text typed at the paragraph mark falls
+outside it, and replanting on that would rewrite a name at every settle for nothing.
+Campaign seeds 279 and 361 at chain 4, which came out of nowhere when a new reader op
+changed which seeds draw what — and fail identically at the commit before it, which is the
+only thing that tells a defect the campaign has just reached from one somebody just wrote.
+
 `moved-styling` was `_retext`: a block the source reworded *and* moved is written again
 from nothing, and the reader's styling was carried over by folding the whole stretch
 between two frozen runs into its first writable run, so every mark inside it went while

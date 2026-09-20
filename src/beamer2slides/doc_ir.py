@@ -1241,6 +1241,15 @@ def replant_requests(ir: dict) -> list[dict]:
     so a chip or a word put into an empty paragraph leaves the range on the
     paragraph mark, where the next "\\ntext" appended at that mark takes it away
     with the new block and a structural batch that swallows the mark deletes it.
+    A range also *stretches*: text written inside it grows it (Docs' rule again), and
+    a block written at the end of the one before it — which is how a block appended to
+    a body goes in, "\\ntext" at the last paragraph's mark — grows that block's range
+    over the new block's words. Two blocks under one name is one block's key gone: the
+    first of them wins in `apply_keys`, and a later delete of *that* one leaves the
+    stretched range sitting on the other's words, whose own key it then takes
+    (campaign seeds 279 and 361, chain 4). A range may end short of its block, since
+    text typed at the mark falls outside it, but it may never end past it.
+
     The old range goes (`deleteNamedRange`) and the new one is planted, in that
     order, so a name is never carried twice. Nothing here moves an index, so these
     can head any batch planned against `ir`.
@@ -1249,7 +1258,8 @@ def replant_requests(ir: dict) -> list[dict]:
     for block in ir["blocks"]:
         planted = anchor_range(block)
         here = block.get("range")
-        if not planted or not block.get("rangeId") or not here or here[0] == planted[0]:
+        if not planted or not block.get("rangeId") or not here \
+                or (here[0] == planted[0] and here[1] <= planted[1]):
             continue
         out.append({"deleteNamedRange": {"namedRangeId": block["rangeId"]}})
         out.append({"createNamedRange": {
