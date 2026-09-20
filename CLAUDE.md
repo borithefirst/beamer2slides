@@ -650,10 +650,18 @@ carrying a real `\frametitle`), and Slides lists as `itemize`/`enumerate` with e
 sync can follow, and adopt-shaped fuzz says nothing else recovers these decks) and every font face
 named, so a style the deck calls bold comes out bold (`devtools/bold_torture.py` probes what a deck
 draws: 63 of 267 (family, style) pairs drew no emphasis, now 6, none of them asked for by deck text).
-Measured over the corpus: 0.128 -> 0.438 on the scorer as it stands (it was tightened on the way:
-repetition inside a frame is charged and the recovered theme counted with the frames), with every
-slide's fidelity unchanged; sources people wrote score 0.6-1.0, and shape coordinates are what is
-left (28% of frame body lines, 30k numbers).
+A look the deck draws three times or more is **said once and named after what it is**
+(`adopt_shapes.survey_styles`: the preamble says
+`\slideshapestyle{fill-white-outline-darkgrey}{fill=white,draw=DarkGrey,line width=0.47bp}`, the
+frame says `\sliderect[fill-white-outline-darkgrey]{...}` - 192 names over 27 decks, 3,534 uses),
+and an outline of more than 12 numbers keeps its points in a file of its own
+(`\slidepath[...]{shapes/star5-9b3c2dfe.tex}` nested inside `\slideshape`, 85 files for 132 lines).
+Names are `\tikzset` styles, not macros, so `\sliderect[card,fill=Red]{...}` changes one shape and
+nothing else. Measured over the corpus: 0.128 -> **0.4477** on the scorer as it stands (it was
+tightened on the way: repetition inside a frame is charged and the recovered theme counted with the
+frames), with every slide's fidelity unchanged to four decimals (`fl-a` -> `sh-a`, 912 slides, no
+deck moving by 0.0001); sources people wrote score 0.6-1.0, and shape coordinates are still what is
+left - 28% of frame body lines, now 26.3k numbers rather than 30.6k.
 **Does an edited source still stand up?** (`devtools/edit_robustness.py`, `sample`/`run`/`report`):
 the same nine edits - reword longer/shorter, restyle, retitle, move a box, add or delete an item, a
 paragraph, a table row - applied to the same slide in two forms, compiled, and judged by whether the
