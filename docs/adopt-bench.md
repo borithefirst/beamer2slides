@@ -921,3 +921,204 @@ python -m beamer2slides.devtools.readability_calib report -v # agreement, Spearm
 `tests/decks/foreign/readability_calib/verdicts/jN-batch-NN.json`, so `report` replays the numbers
 above from the tree. `tests/test_readability_calib.py` pins the draw (the committed sample is what
 the corpus gives back), the prompt hygiene and the agreement maths on a made-up verdict set.
+
+## Does an edited source still stand up? (m6-a vs ls-a, by compiling)
+
+Readability is a proxy for one thing: a person opens the source, changes a line, and the slide still
+holds. `devtools/edit_robustness.py` measures that directly - it makes the change and compiles. The
+blind judges above were given exactly this task in words ("change the wording of a line, move a box
+20 pt to the right, restyle a phrase"); this is the objective half of the same question, and the
+answer is not the one the readability number would predict.
+
+**Both forms behave identically. On all 143 edits the two forms reach the same verdict - not one
+disagreement - and their unedited pages are pixel-identical on all 24 slides.** `ls-a` is a
+refactoring of what `m6-a` said, not a change of what it does. What `ls-a` buys is the *cost* of the
+edit: 1.2 source lines per edit against 2.1, and 1 line against 19.8 for a table row.
+
+### The design
+
+**The sample.** 24 slides drawn from the slides both tags have, by `random.Random(seed)` over each
+category's pool sorted by (deck, slide) - so the draw replays exactly - taken round-robin over what
+the slide is made of (`slide_category`: prose, list, table, shape, picture, title) and with every
+deck used once before any deck is used twice. Seed 7 gives 4 slides of each category over 16 decks.
+`sample` prints it, and `tests/test_edit_robustness.py` pins that the draw replays and that the
+categories come out even.
+
+**The nine edits**, each applied to the *same element of the same slide in both forms*. The element
+is found by the words it prints (`Anchor.text`, a phrase that appears on exactly one clean line of
+each form), so no edit can land on a different thing in one form than in the other:
+
+| edit | what it does | slides it applied to |
+|---|---|---|
+| reword-longer | the line's words, half as many again | 24 |
+| reword-shorter | half the words | 24 |
+| restyle-run | two words into `\textbf` | 24 |
+| change-title | another title of about the same length | 16 |
+| move-box | the element's box 20 pt right | 24 |
+| add-item | one more list item | 5 |
+| delete-item | one list item less | 5 |
+| add-paragraph | one more paragraph in a text box | 17 |
+| add-table-row | one more row at the end of a table | 4 |
+
+Not every edit fits every slide, and only the ones that applied are counted: 143 pairs.
+An edit is offered only where **both** forms can take it (`both_forms`): a box inside `\adoptturned`
+is never moved (the turn places it as much as its x does), a title is changed only where both forms
+have one, and an `ls-a` `\item` that has a list under it is neither added after nor deleted.
+
+**The judgement.** Each (edit, form) is compiled **as a one-frame document** with the deck's own
+preamble and `.sty` files (as `adopt_bench.broken_frames` does; one `Builder` per deck and form, so
+the tree is copied once), the page is rendered at 1000 px wide and three things are asked:
+
+- **compiles** - lualatex produced a PDF, of one page.
+- **confined** - every pixel that differs from the unedited page (≥ 16 in any channel) lies in the
+  room the edit is allowed. That room is the element's own box out of the IR, plus 3 bp, **together
+  with the pixels that element already covers on the unedited page** - measured by compiling the
+  frame a second time with that element's lines taken out (`element_span`, `ink_hull`). 40 px
+  outside is the threshold, and the sides breached are reported.
+- **visible** - the page really changed (≥ 40 px), the words the edit writes are on it and the words
+  it takes away are not. An edit that compiles because LaTeX quietly swallowed it is a failure, and
+  this is the criterion that caught the biggest finding below.
+
+**Why `confined` is fair.** It is one criterion, measured the same way on both forms, against the
+same element box out of the same IR, with no reference to how either form is written. TeX's own
+overfull-box warnings cannot serve: both forms set `\hfuzz=\maxdimen` and `\vfuzz=\maxdimen` inside
+`\slidesbox`, so neither *ever* reports a box it overflows - the judgement has to be pixels.
+Three allowances keep it from charging an edit for something it did not do, and all three are read
+from facts about the element, not from the form:
+
+- the element's existing ink, because Slides lets a text box's last line hang below it and both
+  forms reproduce that. Without it every edit to such a box inherits the box's own overflow - which
+  is how the first run came to fail `move-box` and `change-title`, edits that reflow no text at all
+  and that now pass 24/24 and 16/16;
+- `move-box` gets 20 pt more room to the right, and nothing else;
+- an edit that *adds* content gets the box's column as far as the edge its flow grows towards -
+  `box_align`, read out of each form's own syntax (`m6-a` puts `\vss` where the slack goes, `ls-a`
+  names `bottom`/`middle` as a box key; **the two forms agree on the alignment of all 24 anchors**).
+  A bottom-aligned box given one more line grows *upward*, as it does in Slides, and judging it
+  downward charged it for the one direction it can never use (drawings-basics slide 11).
+  A reword gets no such room: whether the words still fit is the question being asked.
+
+A slide whose IR size is no paper size beamer knows is written at the paper's scale (poster-48x36:
+362.8 × 272.1 in the IR, 1728 × 1296 bp on paper), so IR boxes are put into the page's units first
+(`on_page`) - without it that deck failed all 7 of its edits in both forms, against the wrong part of
+the page. A table's box is the one the source *draws* (`table_of`, `x .. x + Σ widths`), not the IR
+element's: a Slides table sizes itself to its rows, so the box the API reports is not the table on
+the slide (cs161-net slide 48: the IR says 148.8 wide, the table is 269.3).
+
+**The fourth number is the cost of the form**: `lines`, how many source lines a person must add,
+delete or change to make that edit - the edit as written here, which is the edit a person types.
+
+### The numbers
+
+```
+edit             slides |         m6-a         |         ls-a
+reword-longer        24 | 13/24 pass    1.0 lines | 13/24 pass    1.0 lines
+reword-shorter       24 | 24/24 pass    1.0 lines | 24/24 pass    1.0 lines
+restyle-run          24 | 15/24 pass    1.0 lines | 15/24 pass    1.0 lines
+change-title         16 | 16/16 pass    1.0 lines | 16/16 pass    1.0 lines
+move-box             24 | 24/24 pass    1.0 lines | 24/24 pass    1.0 lines
+add-item              5 |  5/5  pass    4.0 lines |  5/5  pass    1.0 lines
+delete-item           5 |  5/5  pass    4.0 lines |  5/5  pass    1.0 lines
+add-paragraph        17 | 17/17 pass    4.0 lines | 17/17 pass    2.9 lines
+add-table-row         4 |  4/4  pass   19.8 lines |  4/4  pass    1.0 lines
+
+m6-a: 123/143 pass (86%), 299 lines over 143 edits (2.1 each)
+ls-a: 123/143 pass (86%), 176 lines over 143 edits (1.2 each)
+
+143 pairs, 0 where the two forms disagree on the verdict
+24 slides, 24 whose unedited page is pixel-identical in the two forms
+286 rows in 1335 s (seed 7, --n 24, --jobs 5; about 430 compiles - 48 baselines, 96 for the
+element ink, 286 edits)
+```
+
+**Nothing failed to compile**, in either form, on any of the 286 edits. All 20 failures are the same
+two kinds, and both forms fail on exactly the same slides.
+
+`lines` is where the forms part, and it is the whole of what the rewrite bought. A list item is one
+`\item` against a four-line `{\leftskip=...}` ... `\par}` group; a paragraph the same; a table row is
+one `Newly & added \\` line against 11 to 31 lines of `\adoptrow` / `\adoptfix` / `\adoptcell` /
+`\adopttops` / bounding box / foot rule / vertical-rule ends / one `\node` per cell, every piece
+named by number. The ls-a row also comes out *right*: the `slidetable` environment gives it the
+table's own default height (`h=19.56` on cs161-net 48), its fill and its verticals, while the m6-a
+row can only inherit the previous row's geometry - on that slide the last row is 74.87 bp tall, so
+the added row is nearly four times the height of a real one. Both "pass": the row is visible and
+stays in the table's column. Only the source says which one a person would want to have typed.
+
+### What fails
+
+**reword-longer, 11 of 24, both forms.** A line made half as long again wraps, and the extra line
+leaves the box: the box has a fixed height and no form reflows anything around it. Ten breach
+downward, one upward (drawings-basics 11, whose box is bottom-aligned, so its flow grows the other
+way). This is not a defect of either writer - it is the price of absolute geometry, which `adopt`
+chooses deliberately, and the blind judges felt the same thing from the other side when they said
+flowed beamer "has no coordinate at all". It is worth knowing how big it is: **a text box in an
+adopted source has no slack at all in 46% of cases**, and the ink lands on whatever is below.
+
+```
+reword-longer  drawings-basics         11 title   changed= 47901 outside= 20716 top
+reword-longer  sc-aesthetic-school      3 prose   changed= 10615 outside= 10615 bottom
+reword-longer  comps-analysis          10 table   changed= 19871 outside=  4604 bottom
+reword-longer  ap-bio-stats            56 picture changed= 32177 outside=  4585 bottom
+reword-longer  sc-river-a4              2 shape   changed=  9997 outside=  1991 bottom
+reword-longer  sc-functions             5 table   changed=  2400 outside=  1792 bottom
+reword-longer  gdg24                   37 shape   changed=  3193 outside=  1377 bottom
+reword-longer  sc-functions             2 picture changed=  1337 outside=  1337 bottom
+reword-longer  sc-functions             3 table   changed=  1263 outside=  1263 bottom
+reword-longer  gdg24                   34 shape   changed=  3194 outside=   730 bottom
+reword-longer  supercharge-slides       7 picture changed=    57 outside=    57 bottom
+```
+
+The last one is marginal: 57 changed pixels of a 5 bp footer, 17 over the 40 px threshold. The other
+ten are not close.
+
+**restyle-run, 9 of 24, both forms: the page did not change at all.** Zero pixels, and the compile
+was clean. Six of these are a real defect (below); three (ap-bio-stats 21, 22, 56) are a limit of the
+measurement - their style is already `weight=bold`, so `\textbf` asks for what is already there.
+
+### The one real defect this found: `\textbf` is a silent no-op
+
+Six of the nine invisible restyles are slides whose style resolves to a family `adopt` declares with
+an upright file and nothing else:
+
+```
+\setsansfont{NTR}[Path=fonts/,Extension=.ttf,UprightFont=*-Regular]              sc-functions 2, 3, 5
+\setsansfont{Delius}[Path=fonts/,Extension=.ttf,UprightFont=*-Regular]           drawing-workshop 52
+\newfontfamily\adoptfontB{Pacifico}[...,UprightFont=*-Regular]                   sc-aesthetic-school 3
+\newfontfamily\adoptfontB{msgothic}[...,Extension=.ttc,UprightFont=*,FontIndex=2] apps-edu-zh 10
+```
+
+With `Path`/`Extension`/`UprightFont` given, fontspec looks for no other file, so the bold series is
+the upright one. `\textbf` then draws nothing different - no error, no warning the reader would see,
+and the edit a person just made is gone. That is worse than a failure to compile: the source
+compiled, the slide looks finished, and the emphasis is missing.
+
+It is in **both** forms, because it is in the preamble `adopt` writes, not in how the frame is
+written; `adopt.py`/`fontfetch.py` know whether google/fonts had a bold instance, and a family with
+none should get `AutoFakeBold` (luaotfload draws it) or a named substitute. Worth fixing next; it was
+not fixed here, because this task measures.
+
+### What the measurement cannot say
+
+- **Three of the nine invisible restyles are the measurement's own fault**: the anchor's style is
+  already bold, so the edit is a no-op by construction. Picking the run to embolden by what the style
+  says would fix it and would also stop the edit being the same edit in both forms.
+- **`confined` is a proxy for "the layout holds"**, not the thing itself: ink that stays inside the
+  element's own room can still be ugly (a line cramped onto two), and ink that leaves it may land on
+  empty paper. It does say, exactly, whether the edit took room it did not have.
+- **One frame is not the deck.** Each compile is the frame alone, which is what makes 286 compiles
+  affordable; a frame whose neighbours matter (a continued list) is not measured as such.
+- **These are nine edits, not editing.** Nothing here measures the edit a person most often makes to
+  an adopted source, which is to throw away the geometry and let beamer lay the slide out.
+
+### Replaying it
+
+```
+python -m beamer2slides.devtools.edit_robustness sample --seed 7 --n 24   # the slides and their edits
+python -m beamer2slides.devtools.edit_robustness run --seed 7 --n 24 --jobs 5 --tag a
+python -m beamer2slides.devtools.edit_robustness report --tag a
+```
+`run` needs the corpus (`$B2S_ADOPT_CORPUS`) and lualatex, and writes `sample.json` / `results.json`
+to `out/edit-robustness/<tag>`; re-run it after the writer changes and the table above is what should
+move. `tests/test_edit_robustness.py` is the offline half (34 tests, no corpus and no compile): the
+sample replays, each edit lands where it is meant to in both forms, and the judging is right on
+made-up compile output and made-up pages.
