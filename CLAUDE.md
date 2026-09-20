@@ -1003,6 +1003,21 @@ same functions underneath; nothing here reimplements a journey.
   scores a transcript made in any harness (`agent_bench bundle` prints what one needs).
   `run --tier all --tag T`, `report --tag T`, `tasks`. Baseline: 20/20 correct, HARM 0; 37 wrong
   policies, all failing, 12 of them harmful.
+- **The round trip, live** (`devtools/agent_tasks_google.py`, tier `live_google`, 2 tasks): the one
+  question the other tiers cannot answer - can an agent edit a **real** Slides deck and a **real**
+  Google Doc through the text representation, the beamer `.tex` and the canonical `.html`, which is
+  the only form of either a model can read? The fixture is built in Drive and carries an edit a
+  person made in the browser (a colleague's note on the Risks slide, a reader's sentence in the
+  handbook), and the grade is what Drive holds when the run ends: the source's change arrived and
+  the person's edit is still there. No tool edits the source - the harness's own file tools do that,
+  which is the real arrangement: the eleven journeys are the bridge to Google and the `.tex`/`.html`
+  are ordinary files a model reads, changes and hands back (the Slides half recompiles, and the
+  prompt names the command). Gated before the fixture is built, since the fixture is itself a write:
+  `agent_bench run --tier live_google --allow-google`, `agent_play start <task> --allow-google`.
+  Both fixtures are reused under fixed names, so a hundred runs leave two files behind. Such a run
+  is also the one transcript that cannot be scored by replaying its calls into the tools - they went
+  to a real deck - so `agent_bench.Replayed` hands the grader the answers the run really got and
+  `run_task(facts=...)` the fixture it was played on.
 - **Playing one task as a model runs** (`devtools/agent_play.py`, `tools/agent_play.py`): `Scripted`
   and `Recorded` both want the whole run to exist before grading, and a model decides its next move
   after reading the last result - so between the two there was no door. `agent_play start <task>

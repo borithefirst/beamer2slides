@@ -155,6 +155,43 @@ def test_a_google_writing_tier_cannot_be_started_without_saying_so(tmp_path, mon
     assert session.play["allow_google"] is True
 
 
+def test_a_run_that_wrote_to_google_is_scored_without_being_run_again(tmp_path, monkeypatch):
+    """The one run that cannot be graded by replaying it into the tools.
+
+    Every other transcript is scored by running its calls again - that is what makes a run made
+    in another harness gradeable here. A `live_google` run's calls went to somebody's real deck,
+    so scoring it that way would either write a second time or, against a fresh workspace,
+    build the whole fixture again. Its own answers are the registry, and its own fixture stands.
+    """
+    built = []
+
+    def setup(ws):
+        built.append(ws)
+        path = Path(ws.root) / "talk" / "main.tex"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("\\begin{frame}{Introduction}\\end{frame}", encoding="utf-8")
+        return {"tex": "talk/main.tex", "deck": "a real deck id"}
+
+    def grade(run):
+        assert run.facts["deck"] == "a real deck id", "the fixture is the one the run was played on"
+        return [] if run.result_of("tex_label") and run.said("labelled") else ["nothing happened"]
+
+    spendthrift = tasks.Task(id="spends-a-deck-live", title="t", kind="live",
+                             tier=play.GATED_TIER, prompt="p", grade=grade, setup=setup,
+                             needs_tools=("tex_label", "deck_sync"), note="x" * 30)
+    monkeypatch.setitem(tasks.BY_ID, spendthrift.id, spendthrift)
+    run_dir = tmp_path / "run"
+    play.start(spendthrift.id, run_dir, allow_google=True)
+    assert len(built) == 1
+    play.call(run_dir, "tex_label", {"tex": "talk/main.tex", "apply": True})
+    play.answer(run_dir, "I labelled the frame that had none.")
+
+    run, verdict = play.score(run_dir)
+    assert verdict["status"] == "passed", run.failures
+    assert len(built) == 1, "scoring must not build the fixture a second time"
+    assert run.results[0].ok, "the result the run really got is what the grader sees"
+
+
 def test_a_task_whose_fixture_dies_with_the_process_is_refused_rather_than_played(tmp_path):
     """One process per turn is the design, and it is also what these tasks' world does not survive.
 

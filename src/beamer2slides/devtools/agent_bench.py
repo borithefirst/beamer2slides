@@ -51,7 +51,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping, Protocol, Sequence
 
 from beamer2slides.agent.context import AgentContext
-from beamer2slides.agent.types import Result
+from beamer2slides.agent.types import Artifact, Diagnostic, Result
 from beamer2slides.agent.workspace import LocalWorkspace
 from beamer2slides.paths import out_root
 
@@ -254,6 +254,65 @@ class Recorded:
         return Answer(self.answer)
 
 
+def result_from(payload: Mapping[str, Any]) -> Result:
+    """A `Result` back from what `Result.json()` wrote - the one direction `types` does not have.
+
+    A transcript is JSON on disk, and grading one means handing the grader the same objects the
+    tools returned. Fields a later version adds are ignored rather than fatal: an old transcript
+    stays scoreable.
+    """
+    return Result(
+        tool=payload.get("tool", ""), ok=bool(payload.get("ok", True)), code=payload.get("code"),
+        summary=payload.get("summary", ""), data=dict(payload.get("data") or {}),
+        artifacts=[Artifact(**{k: v for k, v in a.items() if k in Artifact.__annotations__})
+                   for a in payload.get("artifacts") or ()],
+        diagnostics=[Diagnostic(level=d.get("level", "note"), message=d.get("message", ""),
+                                where=d.get("where", "")) for d in payload.get("diagnostics") or ()],
+        next_steps=list(payload.get("next_steps") or ()), seconds=float(payload.get("seconds") or 0))
+
+
+class Replayed(Mapping):
+    """The results a run already got, handed back instead of calling the tools again.
+
+    Scoring normally re-runs: `Recorded` replays the *calls* and the real registry answers them,
+    which is what makes a transcript from another harness gradeable here. A `live_google` run
+    cannot be scored that way - its calls wrote to somebody's deck, and running them a second time
+    would either write again or, against a fresh offline workspace, refuse every one of them and
+    grade the refusals. So the transcript's own answers are the registry, in the order they came.
+
+    `needs_tools` is in the mapping whether or not the run called it, because a task whose tool the
+    agent never touched has *failed* that task, and a registry that looks incomplete would skip it.
+    """
+
+    def __init__(self, steps: Iterable[Mapping[str, Any]], needs: Iterable[str] = ()) -> None:
+        self.results: dict[str, list[Result]] = {}
+        for step in steps:
+            self.results.setdefault(step["tool"], []).append(result_from(step.get("result") or {}))
+        self.counts: dict[str, int] = {}
+        self.names = sorted(set(self.results) | set(needs))
+
+    def __iter__(self):
+        return iter(self.names)
+
+    def __len__(self) -> int:
+        return len(self.names)
+
+    def __getitem__(self, name: str) -> Callable:
+        if name not in self.names:
+            raise KeyError(name)
+
+        def run_tool(ctx=None, **arguments):
+            got = self.results.get(name) or []
+            n = self.counts.get(name, 0)
+            self.counts[name] = n + 1
+            if n >= len(got):                                      # never recorded; never replayed
+                return missing_tool(name)
+            return copy.deepcopy(got[n])
+
+        run_tool.tool_name = name                                  # type: ignore[attr-defined]
+        return run_tool
+
+
 def recorded_dir(folder: Path | str) -> dict[str, Recorded]:
     """`<folder>/<task id>.json` per task: what `--policy recorded:DIR` walks."""
     folder = Path(folder)
@@ -422,15 +481,24 @@ def missing_tool(name: str) -> Result:
 # ------------------------------------------------------------------------------------------- running
 
 def run_task(task, policy: Policy, ctx: AgentContext | None = None,
-             tools: Mapping[str, Callable] | None = None, max_steps: int = 24) -> Run:
-    """One task against one policy. Never raises: a broken grader is `status="error"`."""
+             tools: Mapping[str, Callable] | None = None, max_steps: int = 24,
+             facts: Mapping[str, Any] | None = None, allow_google: bool = False) -> Run:
+    """One task against one policy. Never raises: a broken grader is `status="error"`.
+
+    `facts` stands in for `task.setup`, for the one case where running the setup again would be
+    wrong rather than merely slow: a `live_google` task's fixture is a real deck or document, and
+    building a second one would spend somebody's Drive to grade a run that happened already.
+    """
     run = Run(task=task.id)
     started = time.time()
     tmp: tempfile.TemporaryDirectory | None = None
     try:
         if ctx is None:
             tmp = tempfile.TemporaryDirectory(prefix="b2s-agent-bench-")
-            ctx = AgentContext.offline(tmp.name)
+            # Offline is the default and the point: a task that needs no account must be seen not
+            # to use one. The gated tier is the exception, and it had to say so out loud to get here.
+            ctx = (AgentContext.local(tmp.name) if task.tier == TIERS[-1] and allow_google
+                   else AgentContext.offline(tmp.name))
         if task.kind == "replay":
             table: Mapping[str, Callable] = FakeTools(task.script or {})
         else:
@@ -439,7 +507,14 @@ def run_task(task, policy: Policy, ctx: AgentContext | None = None,
             if missing:
                 raise Skip(f"the registry has no {', '.join(missing)} "
                            f"(beamer2slides.agent.tools is not importable yet)")
-        if task.setup:
+        if task.tier == TIERS[-1] and facts is None and not allow_google:
+            # Its fixture is a real deck or document: building one is a write, before the policy
+            # has made a single move. Nothing runs it by accident.
+            raise Skip(f"{task.tier} builds a real deck or document in somebody's Drive; pass "
+                       f"allow_google=True (--allow-google) in a workspace whose decks may be spent")
+        if facts is not None:
+            run.facts = dict(facts)
+        elif task.setup:
             run.facts = task.setup(ctx.workspace) or {}
         names = sorted(table)
         while True:
@@ -504,7 +579,7 @@ def policies_for(chosen: list, policy: Any) -> dict[str, Policy]:
 def run(tasks: list | None = None, policy: Any = None, tier: str = "offline",
         tag: str = "scripted", ctx: AgentContext | None = None,
         tools: Mapping[str, Callable] | None = None, out: Path | None = None,
-        quiet: bool = False) -> dict:
+        quiet: bool = False, allow_google: bool = False) -> dict:
     """Run a set, write `out/agent-bench/<tag>/results.json` and a table, return the summary."""
     chosen = tasks if tasks is not None else task_set(tier)
     chosen_policies = policies_for(chosen, policy)
@@ -512,7 +587,8 @@ def run(tasks: list | None = None, policy: Any = None, tier: str = "offline",
     for task in chosen:
         if task.id not in chosen_policies:
             continue
-        r = run_task(task, chosen_policies[task.id], ctx=ctx, tools=tools)
+        r = run_task(task, chosen_policies[task.id], ctx=ctx, tools=tools,
+                     allow_google=allow_google)
         runs.append(r)
         if not quiet:
             print(_run_line(task, r))
@@ -634,6 +710,9 @@ def main(argv=None) -> None:
     r.add_argument("--tag", default="scripted")
     r.add_argument("--policy", default="correct",
                    help="correct (each task's own passing policy) | wrong[:name] | recorded:DIR")
+    r.add_argument("--allow-google", action="store_true",
+                   help="let live_google tasks build their real deck or document; without it they "
+                        "are skipped, whatever tier was asked for")
     p = sub.add_parser("report")
     p.add_argument("--tag", default="scripted")
     sub.add_parser("tasks")
@@ -642,7 +721,8 @@ def main(argv=None) -> None:
     args = ap.parse_args(argv)
     if args.cmd == "run":
         chosen = tasks(args.tier, args.ids)
-        summary = run(chosen, policy=_policy_arg(args.policy), tag=args.tag)
+        summary = run(chosen, policy=_policy_arg(args.policy), tag=args.tag,
+                      allow_google=args.allow_google)
         if summary["totals"]["harm"]:
             sys.exit(2)
     elif args.cmd == "report":
