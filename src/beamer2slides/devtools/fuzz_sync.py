@@ -636,12 +636,17 @@ def deck_group(rng, base, live):
     # Slides keeps the children's z-order, and the group stands where the topmost of them stood
     order = s.setdefault("order", [])
     picked.sort(key=lambda o: order.index(o) if o in order else len(order))
-    s["objects"][gid] = {**W.readback("elementGroup", [min(b[0] for b in boxes), min(b[1] for b in boxes),
-                                                       max(b[2] for b in boxes), max(b[3] for b in boxes)]),
-                         "children": picked}
+    rb = {**W.readback("elementGroup", [min(b[0] for b in boxes), min(b[1] for b in boxes),
+                                        max(b[2] for b in boxes), max(b[3] for b in boxes)]),
+          "children": list(picked)}
+    # ... and the group takes the topmost child's place *before* it is a group on this slide:
+    # `_take_place` puts the new id wherever the old one stands, its own children among them, and
+    # a group that lists itself as a child is a deck the API could not describe (its `children` was
+    # `picked` itself, so the op even said so out loud: `group [a, g] as g`).
+    W._take_place(s, picked[-1], [gid])
+    s["objects"][gid] = rb
     for o in picked:
         s["objects"][o]["parent_group"] = gid
-    W._take_place(s, picked[-1], [gid])
     s["order"] = [o for o in s["order"] if o not in picked]
     return f"group {picked} as {gid}"
 
@@ -689,6 +694,10 @@ def _sync_step(seed: int, step: int, doc: dict, base: dict, live: dict, tmp: Pat
                                      f"a deck no Slides could hand back, and whatever the oracle "
                                      f"says about it is about the fuzzer, not the sync")
             seen.add(oid)
+        for gid, rb in s["objects"].items():
+            if rb["kind"] == "elementGroup" and gid in (rb.get("children") or []):
+                raise AssertionError(f"the deck edits made {gid} a child of itself, which is the "
+                                     f"same kind of deck and the same kind of nonsense")
     doc2 = copy.deepcopy(doc)
     applied_src = []
     touched = _deck_edited_ir_ids(base, live)   # what the person just edited, for `collide`

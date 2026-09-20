@@ -180,7 +180,7 @@ def test_the_round_notices_a_base_that_would_not_settle(tmp_path):
     assert [f["kind"] for f in found] == ["second_sync_writes"] and found[0]["severity"] == "report"
 
 
-def test_the_fuzzer_never_hands_out_one_object_id_twice():
+def test_the_fuzzer_only_makes_decks_slides_could_hand_back():
     """Another guard on the harness. Slides never gives two things one objectId, and a deck that
     does is not a deck a sync could ever meet: the two slides read back as one, so the oracle saw a
     picture the person had added disappear and the report list one created slide where two appeared.
@@ -207,6 +207,15 @@ def test_the_fuzzer_never_hands_out_one_object_id_twice():
         fuzz_sync.deck_add_slide(Stuck(), {"slides": []}, live)
     ids = [x for s in live["slides"] for x in [s["objectId"], s["notes_id"], *s["objects"]]]
     assert len(set(ids)) == len(ids), sorted(ids)
+    # ... nor makes a group a child of itself, which is what `_take_place` did while the group's
+    # `children` was the very list the op still held: it put the new id wherever the old one stood,
+    # its own children among them, and the op said so out loud (`group [a, g] as g`).
+    one = {"slides": [slide("b2s_s000", "a\n")]}
+    one["slides"][0]["objects"]["b2s_s000_u"] = fuzz_world.readback("shape", [0, 50, 100, 90], text="b\n")
+    one["slides"][0]["order"].append("b2s_s000_u")
+    fuzz_sync.deck_group(Stuck(), {"slides": []}, one)
+    gid, rb = next((o, r) for o, r in one["slides"][0]["objects"].items() if r["kind"] == "elementGroup")
+    assert sorted(rb["children"]) == ["b2s_s000_t", "b2s_s000_u"] and gid not in rb["children"]
     # and the campaign says so out loud rather than blaming the merge for what it did itself
     live["slides"].append(copy.deepcopy(live["slides"][0]))
     with pytest.raises(AssertionError, match="two things at once"):
