@@ -23,7 +23,9 @@ COPY --chown=player tests/decks/11_research_talk.tex tests/decks/13_inline_math.
 COPY --chown=player docs/media ./docs/media
 
 USER player
+# `shell_escape=f` is the workbench's doing: its journeys compile LaTeX through the library
+# (`inverse.Compiler`), which passes no `-no-shell-escape` of its own.
 ENV B2S_PLAYGROUND_ROOT=/app B2S_PLAYGROUND_JOBS=/tmp/b2s-playground \
-    openin_any=p openout_any=p PYTHONUNBUFFERED=1
+    openin_any=p openout_any=p shell_escape=f PYTHONUNBUFFERED=1
 EXPOSE 7860
 CMD exec python -m beamer2slides playground --host 0.0.0.0 --port "${PORT:-7860}"

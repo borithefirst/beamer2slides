@@ -77,6 +77,41 @@ figcaption { font-size: 13px; color: var(--muted); margin-bottom: 4px; }
 .legend i { display: inline-block; width: 11px; height: 11px; border-radius: 2px; margin-right: 4px; vertical-align: -1px; }
 .slides-out { margin-top: 12px; display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
 .tip { position: fixed; pointer-events: none; background: var(--ink); color: var(--card); font-size: 12px; padding: 4px 7px; border-radius: 5px; max-width: 340px; z-index: 9; }
+/* the workbench: files, the open one, and the journeys */
+#workbench { grid-template-columns: minmax(200px, 260px) minmax(0, 1fr) minmax(320px, 420px); align-items: start; }
+@media (max-width: 1100px) { #workbench { grid-template-columns: 1fr; } }
+#workbench section { max-height: 82vh; overflow: auto; }
+#filelist { list-style: none; margin: 4px 0; padding: 0; font: 12.5px/1.5 "Roboto Mono", monospace; }
+#filelist li { display: flex; gap: 6px; align-items: baseline; }
+#filelist li span { font-size: 11px; flex: none; }
+#filelist button { border: 0; background: none; padding: 1px 0; text-align: left; color: var(--accent);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; }
+#filelist li.dir button { color: var(--muted); cursor: default; }
+#openpath { font: 13px "Roboto Mono", monospace; overflow: hidden; text-overflow: ellipsis; }
+#fileview img { max-width: 100%; box-shadow: 0 1px 4px rgba(0,0,0,.25); }
+#toolform { display: grid; gap: 8px; margin: 8px 0; }
+.arg { display: grid; grid-template-columns: 1fr; gap: 2px; font-size: 13px; }
+.arg b { font: 12.5px "Roboto Mono", monospace; }
+.arg input { font: inherit; color: var(--ink); background: var(--bg); border: 1px solid var(--line);
+  border-radius: 6px; padding: 4px 6px; }
+.arg input[type=checkbox] { justify-self: start; width: auto; }
+.arg span { font-size: 12px; }
+.arg .pick { justify-self: start; font-size: 12px; padding: 2px 7px; margin-top: 2px; }
+#runlog:empty { display: none; }
+#runlog { background: var(--bg); border-radius: 6px; padding: 6px; max-height: 200px; }
+.verdict { font-weight: 600; font-size: 13px; padding: 3px 8px; border-radius: 6px; display: inline-block; margin: 8px 0 2px; }
+.verdict.ok { background: color-mix(in srgb, var(--ok) 18%, transparent); color: var(--ok); }
+.verdict.bad { background: color-mix(in srgb, var(--bad) 15%, transparent); color: var(--bad); }
+#runresult p { margin: 6px 0; font-size: 14px; }
+.diag { border-left: 3px solid var(--line); padding-left: 8px; }
+.diag.conflict { border-color: var(--bad); }
+.diag.warning { border-color: var(--k-image); }
+#runresult h4 { margin: 10px 0 2px; font-size: 13px; }
+#runresult ul { margin: 2px 0; padding-left: 18px; font-size: 13px; }
+.artifacts { list-style: none; padding: 0; }
+.artifacts li { display: flex; gap: 6px; align-items: baseline; }
+.artifacts button { border: 0; background: none; padding: 0; color: var(--accent); font: 12.5px "Roboto Mono", monospace; }
+#instructions { max-height: 40vh; }
 #gallery { grid-template-columns: 1fr; }
 #gallerylist figure { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 12px; margin-bottom: 14px; }
 #gallerylist img { max-width: 100%; display: block; margin: 0 auto; }
