@@ -746,6 +746,33 @@ def test_an_empty_paragraphs_key_stays_on_it_when_a_block_is_written_at_its_mark
     assert again["applied"] == []
 
 
+def test_a_block_appended_where_a_table_is_now_last_goes_after_it_not_into_it():
+    """A body may not end on a table, so the paragraph after a final one keeps its
+    mark however it is deleted (`_delete_range`): its words go and an empty paragraph
+    stays exactly where it stood. But the append index was taken from the last block
+    the sync *keeps*, which is then the table — and a table's own last index is inside
+    its last cell, so the new block was written into the table, swallowing it and the
+    table's named range with it (chain-8 seed 189, shrunk: the source drops the last
+    paragraph and adds one in the same step).
+
+    That empty paragraph is a trailer like the one a body ending on a table already
+    has, and the first block appended is written into it.
+    """
+    world, ours, base = _build([_table([["key", "value"]]),
+                                _para("The table above says it all.")])
+    ours["blocks"] = [b for b in ours["blocks"] if b["key"] == "table:key"]
+    ours["blocks"].append(_para("The source added thicket."))
+    was, mine = copy.deepcopy(base), copy.deepcopy(ours)
+    before = doc_world.settled_ir(world, ours, base)
+    report, ours, base = fuzz_docs.sync_once(world, ours, base)
+    assert not oracle.failures(oracle.check(was, before, base, report, mine))
+    live = doc_world.read_ir(world, ours, base)
+    assert _keys(live) == ["table:key", "paragraph:the-source-added-thicket"]
+    assert oracle.text_of(live["blocks"][0]) == "key value"
+    again, _, _ = fuzz_docs.sync_once(world, copy.deepcopy(ours), copy.deepcopy(base))
+    assert again["applied"] == []
+
+
 def test_a_range_a_reader_stretched_over_the_next_block_does_not_take_its_key():
     """The other way a range drifts, and the last of `lost-key`: a reader who presses
     Enter in the middle of a paragraph — or, as the campaign did it, drags a block

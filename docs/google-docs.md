@@ -1133,6 +1133,18 @@ Campaign seeds 279 and 361 at chain 4, which came out of nowhere when a new read
 changed which seeds draw what — and fail identically at the commit before it, which is the
 only thing that tells a defect the campaign has just reached from one somebody just wrote.
 
+The same signature, a third way: **a body may not end on a table.** The paragraph after a
+final one therefore keeps its paragraph mark however it is deleted — `_delete_range` takes
+its words and leaves an empty paragraph exactly where it stood — but the index a new block
+is appended at came from the last block the sync *keeps*, and with that paragraph gone that
+is the table. A table's own last index is inside its last cell, so a block the source added
+in the same step as it dropped that paragraph was written **into the table**: the table
+swallowed it, the table's named range went with the write, and the whole body came back as
+one table under a name made from its new first word. The empty paragraph left behind is a
+trailer exactly like the one a body ending on a table already has, so `requests` treats it
+as one (`left_empty`) and the first block appended is written into it rather than after the
+table (chain-8 seed 189).
+
 `moved-styling` was `_retext`: a block the source reworded *and* moved is written again
 from nothing, and the reader's styling was carried over by folding the whole stretch
 between two frozen runs into its first writable run, so every mark inside it went while

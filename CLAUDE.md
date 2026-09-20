@@ -1352,6 +1352,13 @@ keys, named ranges), `doc_merge.py` (pure planning), `doc_sync.py` (the commands
   its block, text typed at the mark falling outside it, so only `here[1] > planted[1]` is
   wrong (seeds 279 and 361 at chain 4, found once `read_unmark_word` changed which seeds draw
   what; both fail identically at the commit before it).
+  A body may not end on a table, so the paragraph after a final one keeps its mark however it
+  is deleted (`_delete_range`: its words go, an empty paragraph stays where it stood) - but
+  the append index came from the last block the sync *keeps*, which is then the table, and a
+  table's own last index is inside its last cell. A block the source added in the same step as
+  it dropped that paragraph was written into the table, swallowing it and its named range
+  (chain-8 seed 189). That empty paragraph is a trailer like the one a body ending on a table
+  already has (`requests`: `left_empty`), and the first block appended is written into it.
   `moved-styling` was `_retext` folding the stretch between two frozen runs into its first
   writable run: it pairs the document's words with the merged text now and gives each its own
   styling (`_runs_from_styles`). Its wordless signature hid two more: a block written from

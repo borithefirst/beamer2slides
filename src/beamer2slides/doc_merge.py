@@ -1657,11 +1657,20 @@ def requests(theirs: dict, merged: list[dict]) -> list[dict]:
     ends = not theirs.get("trailer")
     filled = any(_written_here(b) and _insert_index(merged, p) is None
                  for p, b in enumerate(merged))
+    left_empty = None
     for index in sorted(going):
         start, end = _delete_range(theirs["blocks"], index, going, ends, theirs.get("lead"),
                                    filled)
         plans.append((start, DELETE, [{"deleteContentRange": {
             "range": {"startIndex": start, "endIndex": end}}}]))
+        if index == len(theirs["blocks"]) - 1 and end == theirs["blocks"][index]["span"][1] - 1 \
+                and index and _structural(theirs["blocks"][index - 1]):
+            # The body's last paragraph, standing right after a table: its words go
+            # and its own mark stays (`_delete_range`), so the document ends on an
+            # empty paragraph exactly where this block was. It has to, since a body
+            # may not end on a table — and it is where anything appended goes, the
+            # table's own last index being *inside* its last cell.
+            left_empty = start
 
     for index, live in enumerate(theirs["blocks"]):
         want = by_key.get(live.get("key"))
@@ -1678,7 +1687,7 @@ def requests(theirs: dict, merged: list[dict]) -> list[dict]:
     kept = [b for b in theirs["blocks"]
             if b.get("key") is None or (b["key"] in by_key and not by_key[b["key"]].get("moved"))]
     tail = kept[-1]["span"][1] - 1 if kept else 1
-    trailer = theirs.get("trailer")
+    trailer = theirs.get("trailer") or ([left_empty] if left_empty is not None else None)
     if trailer:
         # The body ends on a table and the empty paragraph after it: the first block
         # appended is written *into* that paragraph, and the rest after it.
