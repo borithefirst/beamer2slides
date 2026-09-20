@@ -53,6 +53,7 @@ from .doc_world import Refused
 MIN_EDITS, MAX_EDITS = 1, 4
 COLLIDE_CHANCE = 0.45
 WORD = re.compile(r"\w+")
+MARK_KEYS = {key for key, _ in doc_ir.MARK_FIELDS}
 
 FRESH = ["kestrel", "harbour", "lantern", "meadow", "quartz", "ribbon", "signal",
          "thicket", "umbrella", "vellum", "willow", "zephyr"]
@@ -1106,6 +1107,20 @@ def theme_fields(world: doc_world.World) -> dict:
             for name, style in (world.theme or {}).items()}
 
 
+def theme_values(world: doc_world.World) -> dict:
+    """What the world's theme *says*, by named style, as the reader subtracts it.
+
+    `theme_fields` names the fields for the oracle, which only needs to know that
+    there was something to inherit. The campaign's styling judge needs the values:
+    a source that centres a heading its theme already centres has asked for nothing,
+    and the read-back reports no alignment at all, so comparing names alone reads a
+    write that arrived as one that vanished (seed 96300). `doc_ir._named_defaults`
+    is the reader's own subtraction, so taking it from there is the only way the
+    judge normalises the file's side exactly as a read normalises the document's.
+    """
+    return doc_ir._named_defaults(world.read(), None)
+
+
 def run_script(script: dict, seen: Counter | None = None) -> list[dict]:
     """One round: push, then (reader edits, source edits, sync, judge) per step."""
     seen = seen if seen is not None else Counter()
@@ -1141,7 +1156,8 @@ def run_script(script: dict, seen: Counter | None = None) -> list[dict]:
         found += [f | {"detail": f"step {step}: {f['detail']}"}
                   for f in oracle.check(was, before, base, report, mine,
                                         theme=theme_fields(world))]
-        found += _arrived(was, before, mine, ours, report, step, seen)
+        found += _arrived(was, before, mine, ours, report, step, seen,
+                          theme_values(world))
         found += _settled(world, ours, base, step, seen)
         if found:
             return found
@@ -1177,7 +1193,7 @@ def _grid(block: dict | None) -> tuple[int, int] | None:
 
 
 def _arrived(was: dict, before: dict, mine: dict, after: dict, report: dict,
-             step: int, seen: Counter) -> list[dict]:
+             step: int, seen: Counter, theme: dict | None = None) -> list[dict]:
     """Did the source's regrid arrive? The third judge, and the campaign's own.
 
     The loss oracle says in its first paragraph that it does not ask this — it asks
@@ -1214,6 +1230,8 @@ def _arrived(was: dict, before: dict, mine: dict, after: dict, report: dict,
             if _grid(block) is None:
                 out += _words_arrived(key, block, here, file_b, then, said, tab,
                                       step, seen)
+                out += _styling_arrived(key, block, here, file_b, then, said, tab,
+                                        step, seen, theme or {})
                 continue
             out += _cells_arrived(key, block, here, file_b, then, said, tab,
                                   step, seen)
@@ -1270,6 +1288,135 @@ def _words_arrived(key, block, here, file_b, then, said, tab, step,
         f"step {step}: the reader left {key!r} word for word as the base has it and "
         f"the source made it {mine[0]!r}, but the sync left the document saying "
         f"{end[0]!r} and the report says nothing", tab=tab, key=key)]
+
+
+def _styling_arrived(key, block, here, file_b, then, said, tab, step,
+                     seen: Counter, theme: dict) -> list[dict]:
+    """And the same question about a block's *look*: one the reader left exactly as
+    the base has it, words and styling both, must look the way the file asks when the
+    sync is over.
+
+    The widest mechanism in the merge had the narrowest judge. `MANAGED` and
+    `MANAGED_PARAGRAPH` are the fields a restyle may *clear*, `_take_shape` is what
+    makes a dropped property go away, `paragraph_style` subtracts the named style so a
+    theme is not pinned, `named_style` says which style a block is, and the settle
+    repairs what no import could carry (`carry_unimported`) and what the write itself
+    mangled (`_unwritten`). Every one of those is measured by the loss oracle only
+    from the reader's side — it asks whether the reader's own face or shading survived
+    — and by convergence only for self-consistency. A restyle that never arrived takes
+    nothing of the reader's and leaves the base agreeing with the document, so it is
+    exactly the shape of thing both other judges are built to miss.
+
+    Two questions, because they are two code paths: the runs travel as
+    `updateTextStyle` off `_text_style`, the paragraph as `updateParagraphStyle` off
+    `paragraph_style` plus `_take_shape`, and a finding should say which.
+
+    Value and all (`_worn`), which `oracle.marks_on` deliberately does not do: it
+    counts a mark per word to answer "is the bold back on?", so a run's face is the
+    bare key `font` there and Georgia reads the same as Roboto Mono. And what somebody
+    *chose* rather than what a word wears, so no theme values are needed: the named
+    style is part of `_shape`, and two blocks of one named style that were given the
+    same styling look the same.
+    """
+    if block.get("kind") == "table":
+        return []
+    text, mine = _says(block), _says(file_b)
+    if _says(here) != text or mine != text:
+        return []                     # the reader wrote in it, or the source did
+    look = [(_worn(b, theme), _shape(b, theme)) for b in (block, here, file_b, then)]
+    was_look, now_look, want_look, got_look = look
+    if now_look != was_look:
+        return []                     # the reader restyled it: the merge decides
+    out = []
+    for what, kind, now, want, got in (
+            ("runs", "restyle_lost", was_look[0], want_look[0], got_look[0]),
+            ("shape", "reshape_lost", was_look[1], want_look[1], got_look[1])):
+        if want == now:
+            continue
+        seen[f"arrival/{what} asked"] += 1
+        if want == got or oracle._named(said, key):
+            continue
+        seen[f"arrival/{what} missed"] += 1
+        out.append(oracle.finding(
+            kind, "loss",
+            f"step {step}: the reader left {key!r} exactly as the base has it, the "
+            f"base had {now}, the source asks for {want}, and the sync left the "
+            f"document at {got} with the report saying nothing", tab=tab, key=key))
+    return out
+
+
+def _worn(block: dict, theme: dict) -> tuple:
+    """A block's run styling as styled stretches of text, adjacent alike ones merged.
+
+    Per character and not per word, which is what `oracle.marks_on` is and what this
+    was first: a word wears only what every character of it wears, so a reader bolding
+    `it` inside the word `it.` changed nothing that could be seen, and the block read
+    as one they had left alone (seed 110082). That rule is right for the question the
+    oracle asks — is the bold *back on*? — and wrong for this one, which is about what
+    the merge wrote over which characters. Merging the stretches keeps it blind to the
+    one thing that does not matter, how many runs the text was cut into.
+
+    Two normalisations, both because the file and a read-back spell the same thing
+    differently: `code` is the file's older word for a monospaced face and reaches the
+    document as `weightedFontFamily` (`doc_ir.CODE_FAMILY`), and a mark that says no
+    more than the paragraph's named style says is left out of a read
+    (`doc_ir._named_defaults`), so it has to go from the file's side too. Both
+    directions of that: a `bold: True` under a style that bolds, and a `bold: False`
+    under one that does not — the second because a source that *retitles* a heading
+    the reader had un-bolded keeps the `False` in the file, where it now says nothing
+    (seed 220012), and reading it as a mark accuses the sync of losing an un-bolding
+    of a word that was never bold.
+    """
+    puts_on = set(theme.get(doc_merge.named_style(block), {}).get("marks") or ())
+    out: list[list] = []
+    for run in block.get("runs", []):
+        if run.get("frozen"):
+            continue
+        style = dict(run)
+        if style.pop("code", None) and not style.get("font"):
+            style["font"] = doc_ir.CODE_FAMILY
+        marks = tuple(sorted((k, _flat(v)) for k, v in style.items()
+                             if k not in ("text", "width")
+                             and not (k in MARK_KEYS and bool(v) == (k in puts_on))))
+        if out and out[-1][0] == marks:
+            out[-1][1] += run.get("text", "")
+        else:
+            out.append([marks, run.get("text", "")])
+    return tuple((marks, text) for marks, text in out if text)
+
+
+def _flat(value):
+    return json.dumps(value, sort_keys=True) if isinstance(value, (dict, list)) else value
+
+
+def _shape(block: dict, theme: dict) -> tuple:
+    """A block's paragraph styling: its named style and every measure the merge owns.
+
+    A paragraph reads back with a property only where it differs from its named
+    style's (`doc_ir._named_defaults`), while the file says its own out loud, so what
+    the theme already says has to come off the file's side too or a write that arrived
+    reads as one that vanished: a source centring a heading its theme centres (seed
+    96300), and, commonest of all, an explicit `left` where the style aligns left or
+    not at all. Where the theme aligns this style otherwise, an explicit `left` is a
+    real choice and is reported as one.
+
+    An item's indents are nobody's to write (`doc_merge.ITEM_PARAGRAPH`): they are the
+    list preset's, `doc_ir` leaves them out of a read and `createParagraphBullets`
+    would overwrite them anyway. Only `_mark_paragraph` can put one in a file at all.
+    """
+    name = doc_merge.named_style(block)
+    fields = ("level", "ordered") + tuple(k for k, _ in doc_merge.PARAGRAPH_KEYS)
+    if block.get("kind") == "item":
+        fields = tuple(f for f in fields if not f.startswith("indent"))
+    gives = theme.get(name, {})
+    out = {}
+    for field in fields:
+        value = block.get(field)
+        # A theme that sets nothing aligns left, which is what the API's own default
+        # is: the two spellings of that are one thing.
+        inherited = gives.get(field) or ("left" if field == "align" else None)
+        out[field] = None if value == inherited else value
+    return (name,) + tuple(sorted((k, v) for k, v in out.items() if v is not None))
 
 
 def _says(block: dict) -> tuple:

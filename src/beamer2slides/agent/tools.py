@@ -69,6 +69,8 @@ def b2s_status(j: Job,
         reason = access.get("reason", "no Google access")
         parts.append(f"Google is not reachable ({reason}); local journeys - deck_inspect, "
                      f"tex_label, tex_converge - still work.")
+        if access.get("fix"):
+            parts.append(access["fix"])
         if access.get("command"):
             parts.append(f"A person has to run `{access['command']}` at a terminal to fix it.")
         j.warn(f"Google is not reachable: {reason}")
@@ -178,9 +180,28 @@ def instructions() -> str:
 
 INSTRUCTIONS = instructions()
 
-TOOLS: dict[str, Callable[..., Result]] = {
+#: The order of operations of INSTRUCTIONS.md, which is also the order a caller meets the tools
+#: in: a model's tool list, the MCP catalogue and the workbench's dropdown all read top to
+#: bottom, and what they read there is advice. Iterating the modules put `deck_convert` above
+#: `deck_inspect` and `doc_adopt` above `doc_push` - the two orders this file spends a section
+#: telling people not to follow. `_collect` stays the truth about *which* tools exist, so a
+#: journey added to a module and forgotten here fails loudly instead of sorting itself last.
+ORDER = ("b2s_status", "deck_inspect", "tex_label", "deck_convert", "deck_sync",
+         "deck_pull", "deck_adopt", "tex_converge", "doc_push", "doc_sync", "doc_adopt")
+
+
+def _ordered(found: dict[str, Callable[..., Result]]) -> dict[str, Callable[..., Result]]:
+    unnamed, unknown = sorted(set(found) - set(ORDER)), sorted(set(ORDER) - set(found))
+    if unnamed or unknown:
+        raise RuntimeError("agent.tools.ORDER and the journeys disagree: "
+                           + "; ".join(([f"not in ORDER: {', '.join(unnamed)}"] if unnamed else [])
+                                       + ([f"no such tool: {', '.join(unknown)}"] if unknown else [])))
+    return {name: found[name] for name in ORDER}
+
+
+TOOLS: dict[str, Callable[..., Result]] = _ordered({
     "b2s_status": b2s_status,
     **_collect(deck_tools, source_tools, doc_tools),
-}
+})
 
-__all__ = ["TOOLS", "INSTRUCTIONS", "instructions", "b2s_status"]
+__all__ = ["TOOLS", "ORDER", "INSTRUCTIONS", "instructions", "b2s_status"]

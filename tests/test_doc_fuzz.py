@@ -90,7 +90,20 @@ REGRESSIONS = ((60, 1), (181, 1), (309, 4), (1031, 8), (1147, 8),
                # restyled, whose shape the write changed under it. Between them,
                # 93212 is the welded token and 94030 the pared-down one whose joiner
                # went with it.
-               (93212, 8), (94030, 6), (94465, 6), (94577, 6), (96300, 4))
+               (93212, 8), (94030, 6), (94465, 6), (94577, 6), (96300, 4),
+               # The styling judge's own first three: 110149 the world sharing one
+               # measures dict between a paragraph and the one split off it, 110265
+               # a picture the reader inserted read as the reader restyling the
+               # block, and 220012 the judge itself calling a `bold: False` a mark
+               # after the source had retitled the heading that made it one.
+               (110149, 4), (110265, 4), (220012, 8),
+               # And the oracle counting a deleted row's words rather than looking
+               # them up: the source rewrote the row beside it into exactly what the
+               # deleted one said. Then 280039, a table the source moved right behind
+               # another, and 280398, a chip's face read as words the reader typed.
+               # And 290010, where Docs' merge-on-delete made an indented paragraph
+               # an item, so the settle read its indent as the list preset's.
+               (260208, 6), (280039, 8), (280398, 8), (290010, 10))
 
 
 def _round(seed: int, chain: int, shape: str | None = None) -> None:
@@ -538,6 +551,44 @@ def test_the_oracle_sees_a_row_the_reader_deleted_come_back():
     # they deleted — the same forgiveness a block gets.
     moved = _ir(_grid([["ribbon", "x"], ["h1", "h2"]], key="t1"))
     assert "row_resurrected" not in _kinds(oracle.check(base, moved, after, NOTHING, ours))
+
+
+def test_the_oracle_lets_the_source_spend_a_deleted_rows_words_elsewhere():
+    """A row's words are evidence, not the row. The source may write into a row the
+    reader *kept* exactly what a row they deleted used to say, and then the row left
+    saying it is the source's own asking. Counted rather than looked up: the reader
+    took the count to what the document shows and the source raised it by one of its
+    own accord, so one row saying it is right. Chain-6 seed 260208, shrunk to a
+    `delete_row` against a `collide` on the row beside it."""
+    base = _ir(_grid([["thicket"], ["meadow"]], key="t1"))
+    before = _ir(_grid([["meadow"]], key="t1"))          # the reader deleted 'thicket'
+    ours = _ir(_grid([["thicket"], ["thicket"]], key="t1"))   # the source rewrote 'meadow'
+    after = _ir(_grid([["thicket"]], key="t1"))
+    assert "row_resurrected" not in _kinds(oracle.check(base, before, after, NOTHING, ours))
+    # Two of them is one row more than the source ever asked for.
+    twice = _ir(_grid([["thicket"], ["thicket"]], key="t1"))
+    assert "row_resurrected" in _kinds(oracle.check(base, before, twice, NOTHING, ours))
+
+
+def test_a_chips_face_is_not_words_the_reader_typed():
+    """A chip's face is the document's to draw: the file says `Grace`, Docs renders
+    `grace` off the address, and a date chip inserted again from its value comes back
+    in whatever form the document spells a date in. So a block the source merely
+    *moved* — a delete and a write, every chip in it made again — read as losing the
+    words the reader's own Backspace had brought into it (chain-8 seed 280398). The
+    chip itself is counted by what identifies it (`frozen_marks`), which is the
+    question that really guards it."""
+    chip = {"frozen": True, "chip": "date", "value": "2026-09-20T00:00:00Z"}
+    base = _ir(_p("k1", "ask "))
+    before = _ir({"key": "k1", "kind": "paragraph",
+                  "runs": [{"text": "ask "}, chip | {"text": "Sep 20, 2026"}]})
+    after = _ir({"key": "k1", "kind": "paragraph",
+                 "runs": [{"text": "ask "}, chip | {"text": "2026-09-20"}]})
+    assert "words_lost" not in _kinds(oracle.check(base, before, after, NOTHING, base))
+    # The chip going is another matter, and that one is still heard.
+    gone = _ir(_p("k1", "ask "))
+    assert "frozen_gone" in _kinds(
+        oracle.check(base, before, gone, NOTHING, _ir(*before["blocks"])))
 
 
 def test_the_oracle_forgives_the_words_a_drag_glues_to_their_neighbours():
@@ -1342,6 +1393,30 @@ def test_the_world_applies_every_run_field_the_merge_writes():
     assert set(doc_merge.MANAGED) <= set(doc_world.API_TO_IR)
 
 
+def test_the_campaign_sees_a_restyle_that_never_arrived(monkeypatch):
+    """The fourth half of the campaign's own judge, measured the way the other three
+    are: put a defect in and count the rounds that say so.
+
+    `_styling_arrived` asks the plainest question there is — the reader left the block
+    word for word as the base has it and the source restyled it, so there is nothing
+    to merge — and nobody was asking it. Neither other judge can: the loss oracle asks
+    only about the *reader's* work, and the source's marks going nowhere costs the
+    reader nothing; convergence is satisfied by any self-consistent reading, and the
+    settle regenerates the file from the document it wrote, so the next sync agrees.
+
+    The defect injected here is the merge writing the document's runs back where it
+    means to write the source's, which is what dropping a restyle looks like from the
+    outside and says nothing in the report.
+    """
+    monkeypatch.setattr(doc_merge, "_restyled",
+                        lambda live, mine: [dict(r) for r in live.get("runs", [])])
+    caught = 0
+    for seed in range(32):
+        found = fuzz_docs.offline_round(seed, 3, script=fuzz_docs.draw(seed, 3))
+        caught += "restyle_lost" in {f["kind"] for f in oracle.failures(found)}
+    assert caught >= 2, "the campaign no longer reaches the defect it was built for"
+
+
 # ------------------------------------------------- one test per defect the campaign found
 
 def _push(shape: str):
@@ -1745,6 +1820,28 @@ def test_a_paragraph_the_source_moves_between_two_tables_is_left_where_it_is():
     assert _keys(base) == ["paragraph:before-both", "table:a", "table:c",
                            "paragraph:after-both"]
     assert any("no paragraph to write in" in note for note in report["notes"]), report
+
+
+def test_a_table_the_source_moves_right_behind_another_is_left_where_it_is():
+    """Docs keeps an undeletable paragraph between two tables, so a file asking for
+    two with nothing between them asks for what the document cannot hold: the
+    `insertTable` splits the paragraph it goes to and the half in front of the new
+    table *is* that mandatory paragraph. Nothing then says which of the two empty
+    paragraphs is which — and where the file's own is the body's last it is hidden
+    altogether — so the settle keyed the leftover with its name, the order read as the
+    base's, the move was undone in silence, and the `align` the source gave that
+    paragraph in the same run was planned onto nothing next time round (chain-8 seed
+    280039). `refuse_back_to_back` leaves the table where the document has it and the
+    report says why."""
+    world, ours, base = _push("between_tables")
+    at = [i for i, b in enumerate(ours["blocks"]) if b.get("key") == "table:c"][0]
+    ours["blocks"].insert(at - 1, ours["blocks"].pop(at))   # right behind `table:a`
+    ours["blocks"][at]["align"] = "justify"                # the paragraph it passed
+    report, ours, base = fuzz_docs.sync_once(world, ours, base)
+    assert any("right behind another table" in note for note in report["notes"]), report
+    assert _keys(base) == ["table:a", "paragraph:a-paragraph-in-between", "table:c",
+                           "paragraph:the-end"]
+    assert base["blocks"][1]["align"] == "justify"
 
 
 def test_two_tables_after_one_anchor_are_told_apart_by_what_they_say():

@@ -77,6 +77,14 @@ in `signin` mode with the visitor's, asked for at the click and handed to that o
 The server asks for it only where the journey needs it (`effects.google`), and a local journey
 carries nobody's credentials.
 
+Which is why such a journey must not *report* on Google as though it had looked. `b2s_status`
+is the tool whose job is to say whether Google is reachable, it needs no account to run, and so
+on a `signin` host it is never handed a token: it used to answer "Google is not reachable
+(offline)" - a server that cannot reach Google at all - on a page with a sign-in button at the
+top of it. `runner.SIGN_IN` says the arrangement instead (`auth.NoGoogle` carries a `reason` and
+a one-sentence `fix`), because the arrangement is the part this process can see: not being handed
+a token is not evidence that there is none.
+
 ### Reaching a deck this app did not make
 
 `drive.file` reaches only the files the app itself created, which is what keeps it a
@@ -196,6 +204,20 @@ What the flags are for, beyond taste:
 - **`--timeout 900`**: a compile and a conversion take seconds, but the deck build waits on
   Google's API; the default 5 minutes is close enough to be worth raising.
 - **`--allow-unauthenticated`** is what makes it a public playground rather than a private one.
+
+#### A run only moves while somebody is asking about it
+
+Both tabs do the work on a thread of the server's own and let the page poll for the answer, and
+Cloud Run gives an instance CPU **while it is serving a request** and throttles it to almost
+nothing in between. So the same journey takes as long as one is prepared to watch it: measured on
+the live service, `b2s_status` is **2.7 s** when the caller polls four times a second, **21 s**
+when it polls twice, and **68 s** when it is left alone; `tex_compile` was 6.6 s from the page and
+40 s from a script that slept. The page polls while it watches a run, so a visitor sees the first
+number - it is a script driving the HTTP API that should poll rather than sleep, which is how
+these were found.
+
+`--no-cpu-throttling` removes it, at the price of paying for the instance's whole life rather than
+for the requests it serves, so it is a spending decision and not a fix to make quietly.
 
 The service's URL (`https://<service>-<hash>.<region>.run.app`) must then be added to the OAuth
 web client's **authorized JavaScript origins**, or the browser's sign-in is refused before it

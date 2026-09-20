@@ -1053,7 +1053,11 @@ same functions underneath; nothing here reimplements a journey.
   `deck_sync` writes to somebody's deck while `deck_inspect` does not). `b2s_status` (what this
   workspace holds and whether Google is reachable, no Google call), `deck_inspect`, `deck_convert`,
   `deck_sync`, `deck_pull`, `deck_adopt`, `tex_label`, `tex_converge`, `doc_push`, `doc_sync`,
-  `doc_adopt`. `tools.TOOLS` is the registry.
+  `doc_adopt`. `tools.TOOLS` is the registry, iterating in `tools.ORDER` - the order of operations
+  INSTRUCTIONS.md gives, since a model's tool list, the MCP catalogue and the workbench's dropdown
+  all read top to bottom and what they read there is advice (collecting them from the modules put
+  `deck_convert` above `deck_inspect` and `doc_adopt` above `doc_push`); the collection still says
+  which tools exist, so one left out of `ORDER` raises at import.
 - **Three seams**, which is all a harness plugs in (`context.AgentContext`): `Workspace` (refs in,
   absolute paths out; a ref that climbs out is `outside_workspace`, a folder may be `readable` but
   never written, `stage` brings an outside file in, `out_dir` is the workspace's own - `paths.out_root()`
@@ -1196,7 +1200,9 @@ correctness as much as thrift, since a job lives in one container's memory, and 
 be an authorized JavaScript origin of the web client). A Hugging Face Docker Space now needs PRO.
 **Live**: https://beamer2slides-playground-702466108736.europe-west1.run.app (project `beamer2slides`,
 region europe-west1, one instance, scale to zero, CHF 50/month with the budget's *spend cap*
-enforcing on Cloud Run). The consent screen is **In production**, which it could only become once
+enforcing on Cloud Run). A run there moves only while somebody is asking about it: Cloud Run gives
+CPU during a request and throttles in between, so `b2s_status` measured 2.7 s polled four times a
+second, 21 s polled twice and 68 s left alone (the page polls; a script should too). The consent screen is **In production**, which it could only become once
 the Branding page had a home page and a privacy policy on an authorized domain: hence `/privacy`
 (`static/privacy.html`), served by the playground itself and saying what the code does.
 **The workbench** (`playground/workbench.py`, `runner.py`, `static/workbench.js`) is the second
@@ -1211,7 +1217,11 @@ start from. **There is no shell**; the only two things executed are a TeX engine
 a journey runs in a **subprocess** (`@tool` serialises one per process, `inverse.Compiler`'s
 compiles carry no time limit of their own and a process can be killed where a thread cannot), with
 the job - and the visitor's access token - going in on **stdin**, never a command line, and
-progress and the result coming back as JSON lines. Stopped after 420 s, killed by process group;
+progress and the result coming back as JSON lines. A journey that needs no account is handed no
+token, so it must not report on Google as though it had looked: `b2s_status` on a `signin` host
+said "not reachable (offline)" on a page with a sign-in button, and now says the arrangement
+(`runner.SIGN_IN`; `auth.NoGoogle` carries a `reason` and a one-sentence `fix`), which is the part
+the process can see. Stopped after 420 s, killed by process group;
 every path goes through `LocalWorkspace.resolve`; `shell_escape=f` beside `openin_any=p` so the
 library's own compiles are fenced as the playground's are; 80 MB and 3000 files per workspace, the
 last 12 kept. A deck **this app did not make** is unreachable under `drive.file`, which is what
@@ -1928,6 +1938,75 @@ keys, named ranges), `doc_merge.py` (pure planning), `doc_sync.py` (the commands
   key gone with nothing in the report. Then 2,700 rounds clean under `--strict` (800 at chain 4
   from 998000, 500 at chain 8 from 996000, 400 at chain 10 from 997000, 700 at chain 6 from
   991000, 300 at chain 12 from 999000), `KNOWN` still empty.
+  **And the same question about a block's look** (`fuzz_docs._styling_arrived`): the reader
+  left it word for word as the base has it, the source restyled it, so what the file asks for
+  must be what the document says at the end. It asks of the marks (`_worn`: the run styling as
+  styled stretches, adjacent alike joined, so how many runs the text was cut into is the one
+  thing it cannot see) and of the paragraph (`_shape`: the named style and every measure the
+  merge owns), 118 and 233 times over 400 chain-4 rounds. Neither other judge can: the oracle
+  asks about the *reader's* work, and convergence is satisfied by any self-consistent reading,
+  the settle regenerating the file from the document it wrote. One defect in each of the three
+  places there are. **The harness**: `dict(para)` is shallow and `measures` is a dict of its
+  own, so a paragraph split off another shared it - every appended block is written `"\ntext"`,
+  which is a split, so one `updateParagraphStyle` set the line spacing of half the body and the
+  next clearing of a measure cleared it everywhere, leaving the document self-consistent
+  (`doc_world.copy_para`; seed 110149, 3 of 200 at chain 4). **The merge**: `styles_of` counts
+  run boundaries on purpose, but a reader inserting a picture or a chip splits a run and puts a
+  frozen one between the halves - content the text merge carries, saying nothing about marks -
+  and that read as the reader restyling the block, so the merge decided both sides had and
+  dropped the source's marks (`doc_merge.marks_of` is the question "did somebody change what
+  these words are marked with", frozen runs out and alike stretches joined; seed 110265, 6 of
+  400 at chain 4 and 10 of 400 at chain 8). **The report**: where both sides set one paragraph
+  or restyle one block the document wins, as everywhere, but it won in silence - the words have
+  raised a conflict on every clash since the beginning - so two notes now, and the second is
+  why the first defect had to be fixed in `marks_of` and not in the report: the judge forgives
+  what the report names, so with `styles_of` back *and* the note in place the campaign passes
+  while the report tells the person their document restyled a block it never touched. And twice
+  the judge's own, both normalising the file's side less than a read normalises the document's
+  (`doc_ir._named_defaults`): a `bold: False` the source left in the file after retitling the
+  heading that made it meaningful (seed 220012), and a source centring a heading its theme
+  already centres (96300). Then 2,100 rounds clean under `--strict` (800 at chain 4 from 230000,
+  600 at chain 6 from 210000, 400 at chain 8 from 220000, 300 at chain 10 from 240000). The two
+  notes are for **blocks**: a cell has no key, and the base a cell is merged against need not be
+  what that cell said last time - a row or a column one side has just added pairs with nothing,
+  so every cell of it reads as both sides having styled it, and the note would open with "a table
+  cell", naming neither the table nor the cell. Then, at fresh seeds, the oracle once more:
+  **a row's words are evidence and not the row** (chain-6 seed 260208). The base's rows say
+  `thicket` and `meadow`, the reader deletes `thicket`, the source rewrites `meadow` into
+  `thicket`, and the one row left rightly says `thicket` - which `_row_resurrection_findings`
+  read as the deleted row coming back, the source having spent its words elsewhere. They are
+  counted now rather than looked up: the reader took the count to what the document shows, the
+  source raised it by `file - base` of its own accord, and a row over that sum is one that came
+  back; where the source leaves those words alone the sum is what the document shows, which is
+  the question as it was, and with `_table_lines`' inherited settlement put back in memory the
+  campaign still catches the defect the check was built for (seed 63000, chain 4).
+  Three more at fresh seeds, one the merge's and two the judges'. **A table written right
+  behind another is a table written nowhere** (chain-8 seed 280039): Docs keeps an undeletable
+  paragraph between two tables, so `insertTable` splits the paragraph it goes to and the half in
+  front becomes that mandatory one, which the file has no block for - nothing then says which of
+  the two empty paragraphs is which, and where the second is the body's last it is hidden
+  (`_hide_trailer`), so the settle keyed the leftover with the name of the paragraph the file
+  wanted *after* the table, the order read as the base's, the move was undone in silence and a
+  restyle planned for that paragraph was planned onto nothing next time round.
+  `doc_merge.refuse_back_to_back` leaves it where the document has it and says why - the sibling
+  of `refuse_nowhere` and `restore_undeletable`; a table written in *front* of another is not
+  this, its empty half landing between the two where Docs wants a paragraph anyway. **A chip's
+  face is not words anybody typed** (280398, the oracle's): the file says `Grace` and Docs
+  renders `grace` off the address, so counting the face made a block the source merely *moved* -
+  a delete and a write, every chip inserted again - read as losing the `Sep 20, 2026` the
+  reader's Backspace had brought into it (`oracle.own_words`, `_says` asked from the other side;
+  a chip that really goes is `frozen_marks`'). And **an indent a bullet ate** (chain-10 seed
+  290010): merge-on-delete hands a block the whole style of the paragraph deleted in front of it,
+  bullet and all, so a plain paragraph the source had just indented came back an *item*, whose
+  indents are the list preset's and belong to neither side - and the settle took that bullet off
+  in the same batch (`restore_bullets`), leaving it with neither. The question is whether the
+  block is an item once the settle has **finished** (`_paragraph_fields`: the plan's kind
+  decides, since the settle writes the bullet to match it, and that kind is the source's only
+  where the document kept the base's), and the delete goes first now too, as
+  `_paragraph_requests` has always done it - `deleteParagraphBullets` keeps the nesting by adding
+  indents of its own. 1 of 200 rounds at chain 10 with the old rule back in memory; then 1,000
+  clean under `--strict` (300 at chain 10 from 290000, 500 at chain 6 from 310000), with 800 at
+  chain 4 from 270000 and 600 at chain 6 from 300000 before them.
 - Live suite (opt-in, marker `docs`, ~5 min): `python -m pytest -m docs tests/test_docs_live.py`
   pushes a document per test, edits both sides, syncs, checks a second sync writes nothing, and
   deletes the document. Offline: `tests/test_doc_ir.py`, `test_doc_merge.py`, `test_doc_sync.py`.
