@@ -1,0 +1,122 @@
+[
+  {
+    "pair": "f01",
+    "prefer": "A",
+    "confidence": 2,
+    "reason": "A is one line: \\slidetext{30.2,92.4,401.39,70.2}{title-bold-white}{Quotes} gives me the x to bump to 50.2, the words, and a named style, all in sight. B says the same thing in eleven lines of hand-kept plumbing.",
+    "in_the_way_A": "Almost nothing; the only care needed is that the restyle must be inline (\\textbf/\\textcolor round the phrase), since editing the shared style title-bold-white in the preamble would repaint every title in the deck.",
+    "in_the_way_B": "The wording sits between a \\vrule width0bp height48.78bp strut and a trailing \\baselineskip=60.47bp\\par that I must not disturb, the inset \\vskip4.08bp and the closing \\vskip\\dimexpr11.69bp-\\prevdepth are hand-maintained numbers, and the frame is wrapped in a bare brace group opened before \\begin{frame} for \\setbeamercolor, which is easy to break when editing."
+  },
+  {
+    "pair": "f02",
+    "prefer": "B",
+    "confidence": 3,
+    "reason": "B's table is four cells written like a tabular, with the whole table's position in one place ({24.3,89.2}); A spells the same table out as \\adoptrow/\\adoptfix/\\adoptcell plus a tikzpicture that redraws every fill, rule and cell node by hand.",
+    "in_the_way_A": "Cell text is buried in \\adoptcell{3}{1}{1}{149.58bp}{1.81bp}{155.42bp}{-2.92bp}{...} whose seven magic lengths I would have to keep true; the fills and white rules are separate \\fill/\\draw lines keyed to \\adopty{0..3}, and \\adoptfix{0..2} pins the row heights that the thumbnail measured, so a longer word silently no longer fits. Moving the table is fine (one textblock*), but the rest of the slide repeats the same pattern for the Hebrew heading and the two rules.",
+    "in_the_way_B": "Only small things: the empty second cells in rows 2-3 read as a mistake until you see the \\multicell rules, \\hborder{1}{white,line width=1.51bp} after the last row is an indirection, and the cell text is right-to-left Hebrew inside \\cell[lang=hebrew]{...}, which is awkward to edit in any editor."
+  },
+  {
+    "pair": "f03",
+    "prefer": "A",
+    "confidence": 3,
+    "reason": "A is a \\frametitle plus a slidebox with two bold leads and two itemize blocks: the line to reword is a plain \\item, the box is \\begin{slidebox}{21.5,63.5,...} (one number to change), and \\textbf round a phrase is all the restyle needs. B is the same content exploded into ten near-identical eight-line paragraphs.",
+    "in_the_way_A": "Nothing much; the per-item space=3.02 on the first \\item of each list is the only non-obvious key, and a restyle that should be permanent would tempt me into the shared body style in the preamble.",
+    "in_the_way_B": "Every bullet repeats \\leftskip=18.14bp, the strut, and \\llap{\\tikz...circle[radius=3.12bp];\\hskip10.28bp} inline, so the ten lines look identical and I have to count to find the right one; the paragraph spacing is carried by hand as \\prevdepth=\\dimexpr\\prevdepth-3.02bp\\relax between blocks, and the frame title is a fourth textblock* of its own rather than \\frametitle."
+  },
+  {
+    "pair": "f04",
+    "prefer": "B",
+    "confidence": 3,
+    "reason": "B is a \\frametitle, one slidebox with a nested itemize, and \\slidepicture{291.4,123,61.4,78}{...} - the picture move is literally the first number of that line. A writes the same seven bullets as seven eight-line paragraph groups.",
+    "in_the_way_B": "Only that the second-level bullets' look (blue, ring mark) comes from \\setslidelist{itemize}{2} in the preamble, so restyling a whole level would be a deck-wide edit; a single phrase is still just \\textbf inline.",
+    "in_the_way_A": "The nesting is expressed only as \\leftskip=36.28bp plus a different \\llap ring, repeated verbatim four times, so the structure has to be read off numbers; \\prevdepth=\\dimexpr\\prevdepth+0.00bp\\relax between every paragraph is noise; the picture's width is stated twice (textblock* {61.4bp} and width=61.4bp), and the frame opens with a stray closing brace before \\begin{frame}."
+  },
+  {
+    "pair": "f05",
+    "prefer": "A",
+    "confidence": 1,
+    "reason": "A's whole frame is \\frametitle{TLS Trust Issues: Certificate Authorities} plus the note, so rewording and restyling are instant; B buys you a movable box only by dragging in the gradient bar, the running head and the page number as slide content.",
+    "in_the_way_A": "The real catch for this job: there is no box in the frame to move. The title's position lives in the layout section-header-optional, so nudging it 20 pt means editing the shared layout (moving it on every section slide) or adding an explicit \\slidetext box for this frame alone.",
+    "in_the_way_B": "Forty lines of chrome the layout should own - the left/right/middle colour gradient strip, the 3.78 bp \"Computer Science 161\" line and the \"33\" page number - each a vbox with its own strut, \\baselineskip and \\vskip\\dimexpr...-\\prevdepth; I must pick the 22.68 bp box out of four before I can touch the title, and that chrome is now this slide's problem forever."
+  },
+  {
+    "pair": "f06",
+    "prefer": "B",
+    "confidence": 2,
+    "reason": "Neither slide has a word on it, so two of the three edits are impossible in both; for the one that remains B does it in one number, \\slidepicture{134.5,46.4,198.6,153.5}{...}.",
+    "in_the_way_A": "The size is written twice - textblock* {198.6bp} and \\includegraphics[width=198.6bp,height=153.5bp] - so anything beyond a pure move is two edits kept in step; and there is no text to reword or restyle at all.",
+    "in_the_way_B": "Same missing text: to reword or restyle anything I would first have to create a \\slidetext box. B also leans on layout=title-slide, so what else appears on the page is not visible here."
+  },
+  {
+    "pair": "f07",
+    "prefer": "B",
+    "confidence": 3,
+    "reason": "B keeps the title as \\frametitle plus one \\slidetext, the pictures as \\slidepicture lines and the arrow as \\slideline[...]{121,244.1}{189.78,244.1}; A repeats the title in two textblocks and turns the arrow into a tikz path with an inline arrow-tip spec.",
+    "in_the_way_B": "The four \\resizebox*{...}{21.8bp}{\\bfseries Example} blocks are still raw WordArt: restyling a phrase inside one means re-fitting a box, and the rotated \"Example\" carries \\rotatebox on top of that. The title style also comes from the layout subtitle-cold, so a colour change there would be deck-wide.",
+    "in_the_way_A": "\"Individual Research\" appears twice - a black copy at (3.0,9.1) under a white one at (4.3,10.0) - so a reworded title silently leaves a stale shadow behind, which is exactly the kind of bug this job produces; the 35% blue overlay panel and the arrow (\\path[draw=black,line width=3.02bp,{Triangle[...]}-{Circle[...]}]) are open tikz; and it carries the same \\resizebox* blocks as B."
+  },
+  {
+    "pair": "f08",
+    "prefer": "A",
+    "confidence": 3,
+    "reason": "Both are unpleasant - the Arabic text is full of hand-made \\textcolor{Yellow}{\\textsf{~}} spacers and \\symbol{34} quotes in either source - but in A each paragraph is one \\slidepar line and the box is \\begin{slidebox}[lang=arabic,space=3.23]{3.4,54.4,...}, one number to move.",
+    "in_the_way_A": "The bullet-line content is still junk I cannot safely reflow: {\\slidesize{4.03}\\textcolor{Yellow}{\\textsf{~}}}\\textcolor{Yellow}{{\\adoptfontA •}} fakes a bullet inside the text, indent=13.61,first=-10.08 fakes a hanging indent, and \\slidebreak inside a paragraph hides a second heading. Two footer boxes sit at the same place (127.3,252.2) with different styles, so \"move one box\" is ambiguous.",
+    "in_the_way_B": "Everything above, plus each paragraph wrapped in \\begin{otherlanguage}{arabic}{\\leftskip=13.61bp...\\parfillskip=0bp} with \\hskip-10.08bp standing in for the hanging indent and \\prevdepth=\\dimexpr\\prevdepth-3.23bp between paragraphs; the RTL text and the LTR plumbing are interleaved on one line, which is the worst case for editing bidi text, and the page's top image is another textblock to scroll past."
+  },
+  {
+    "pair": "f09",
+    "prefer": "A",
+    "confidence": 3,
+    "reason": "A is three lines: the 97% text, \\sliderect[fill=Red,draw=black,line width=1.42bp,rounded=9.49]{103.5,155.9,246.58,56.94}, and the caption. B writes that rounded rectangle as an eight-segment bezier with every control point spelled out.",
+    "in_the_way_A": "Nothing beyond remembering that the caption box (107.7) and the panel (103.5) are two elements: moving the panel 20 pt without its caption would look wrong, so I would edit both x values.",
+    "in_the_way_B": "The panel is one 700-character \\path[...] (0bp,-9.49bp) .. controls ... cycle; if the caption were to be resized rather than moved I would have to regenerate that path by hand. The colour is a bare b2sEA4335 with no \\definecolor in the shown preamble, and the 97% and caption boxes are again vboxes with struts and \\prevdepth arithmetic."
+  },
+  {
+    "pair": "f10",
+    "prefer": "A",
+    "confidence": 3,
+    "reason": "A is eleven one-line elements; I can see the three \"Add a main point\" columns at 25.5 / 169.9 / 314.3 side by side and pick the one to move at a glance. B says the same in nine ten-line vboxes.",
+    "in_the_way_A": "The three columns are identical apart from x, so I must key on the coordinate rather than the words - true of both sources, but here at least the coordinates line up in a column I can read.",
+    "in_the_way_B": "Six blocks whose only difference is the x in textblock* and the text line, each carrying \\slidesize/\\adoptfontA/strut/\\baselineskip/\\vskip\\dimexpr...-\\prevdepth: finding \"the third Add a main point\" means scanning ~90 lines, and the trim on the cropped picture is duplicated into \\includegraphics[trim=... ,clip,width=86.0bp] beside the textblock* width."
+  },
+  {
+    "pair": "f11",
+    "prefer": "tie",
+    "confidence": 1,
+    "reason": "Genuinely split: B's frame is \\frametitle{Expressions} and nothing else, which makes rewording and restyling trivial but leaves no box in the frame to move; A puts the one box in front of me with its x, at the price of ten lines of plumbing.",
+    "in_the_way_A": "The text is sandwiched between \\leftskip=0.00bp plus 1fil / \\rightskip / \\parfillskip, a \\vrule strut and \\baselineskip=18.14bp\\par, and the frame is wrapped in a brace group opened for \\setbeamercolor{background canvas}{bg=b2s4A86E8} before \\begin{frame} - the kind of grouping that bites when you edit round it. The centring is expressed as fil glue rather than a `center` key.",
+    "in_the_way_B": "There is no box here at all: the title's position comes from layout=section, so moving it 20 pt means editing the shared layout (and every section slide with it) or adding an explicit \\slidetext for this frame. The background colour is likewise invisible from the frame."
+  },
+  {
+    "pair": "f12",
+    "prefer": "A",
+    "confidence": 2,
+    "reason": "Same slide as f01 with the word \"Code\": A's single \\slidetext{30.2,92.4,401.39,70.2}{title-bold-white}{Code} puts position, style name and words on one line, and its preamble names the colour (\\definecolor{Red}) and the style.",
+    "in_the_way_A": "Only that title-bold-white is shared, so a lasting restyle belongs inline rather than in the style; and the background=Red is a frame option whose effect I have to take on trust from the vocabulary.",
+    "in_the_way_B": "The word sits inside a vbox between a 48.78 bp strut and \\baselineskip=60.47bp, with \\vskip4.08bp above and \\vskip\\dimexpr11.69bp-\\prevdepth below; the colour is a bare b2sEA4335 with no \\definecolor shown, and the frame is inside a brace group opened before \\begin{frame} and closed after \\end{frame}."
+  },
+  {
+    "pair": "f13",
+    "prefer": "B",
+    "confidence": 3,
+    "reason": "B is \\frametitle{第一題} plus a slidebox with six \\slidepar lines - the A/B/C/D options are one line each and the box's x is the 19.7 in {19.7,72.8,414.24,172.3}. A spreads the same over four textblocks and six styled paragraph groups.",
+    "in_the_way_B": "The hanging-indent trick is a box-level first=22.68 overridden by first=0 on the first two paragraphs, which takes a moment to read; and space=0.01 on the second paragraph is an odd number I would not dare to round.",
+    "in_the_way_A": "The options are indented by a literal \\hskip22.68bp\\relax inside each paragraph rather than by a list, the title, the 學科 label and the dashed 30 bp rule are three more textblocks to scroll past, and the paragraph spacing is carried by \\prevdepth=\\dimexpr\\prevdepth-1.04bp\\relax; the CJK title also sits next to \\adoptfontA\\bfseries inline."
+  },
+  {
+    "pair": "f14",
+    "prefer": "B",
+    "confidence": 3,
+    "reason": "B lists 45 caption boxes one per line (\\slidetext[center]{40.6,79.4,31,9}{tiny-grey}{Alarm}) - I can find \"Trolley\", change it, and bump its x in seconds. A is the same slide with \"620 further lines of the same forms\" elided, each caption a nine-line vbox.",
+    "in_the_way_B": "The captions are positionally, not semantically, tied to the icons under them, so moving a caption 20 pt right silently breaks its pairing with its \\slidefreeform; and the freeform shapes are external files (shapes/freeform-*.tex), which I cannot inspect from here.",
+    "in_the_way_A": "Sheer bulk: every 2.13 bp caption costs nine lines of \\vbox/\\slidesize/strut/\\baselineskip/\\vskip\\dimexpr, so the edit is a needle-in-haystack search. Worse for this job, A has flattened the whole icon grid into one full-page \\includegraphics{figures/image-8439d22e.png}, so the icons are no longer editable at all - anything but the captions would mean regenerating that picture."
+  },
+  {
+    "pair": "f15",
+    "prefer": "B",
+    "confidence": 3,
+    "reason": "Identical content, but B is six lines: four \\slidepicture calls with their trims, and two \\slidetext calls carrying the text (\"Chapter \\textbf{Title\\ }Goes Here.\") and the box origin. A needs a textblock* wrapper round each of them.",
+    "in_the_way_B": "The named styles (title-googlesans-24.6, tiny-googlesans-medium-green) are shared, so a permanent restyle wants to be inline; and the full-page picture at {0,0,453.5,255.1} sits on top of the first one, so moving a box means checking what covers what.",
+    "in_the_way_A": "Each picture's width is repeated in the textblock* and in \\includegraphics[...,width=...], and the two text boxes are vboxes with struts, \\baselineskip and \\vskip\\dimexpr...-\\prevdepth; the green caption's weight is spelled \\fontseries{w500}\\selectfont inline instead of being named once, so a restyle there must be made in the middle of the layout plumbing."
+  }
+]

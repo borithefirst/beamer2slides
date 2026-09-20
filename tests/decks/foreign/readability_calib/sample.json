@@ -1,0 +1,800 @@
+{
+ "seed": "readability-calibration-1",
+ "tags": [
+  "m6-a",
+  "ls-a"
+ ],
+ "quota": {
+  "title": 5,
+  "table": 5,
+  "picture": 10,
+  "shape": 6,
+  "list": 7,
+  "prose": 7
+ },
+ "per_deck": 2,
+ "slides": [
+  {
+   "deck": "gdg24",
+   "index": 61,
+   "kind": "title"
+  },
+  {
+   "deck": "hebrew-lesson",
+   "index": 8,
+   "kind": "table"
+  },
+  {
+   "deck": "ds-lecture",
+   "index": 5,
+   "kind": "list"
+  },
+  {
+   "deck": "comic-strips",
+   "index": 10,
+   "kind": "list"
+  },
+  {
+   "deck": "cs161-tls",
+   "index": 32,
+   "kind": "title"
+  },
+  {
+   "deck": "drawings-basics",
+   "index": 25,
+   "kind": "picture"
+  },
+  {
+   "deck": "drawing-workshop",
+   "index": 36,
+   "kind": "picture"
+  },
+  {
+   "deck": "arabic-training",
+   "index": 7,
+   "kind": "list"
+  },
+  {
+   "deck": "gdg24",
+   "index": 42,
+   "kind": "prose"
+  },
+  {
+   "deck": "sc-aesthetic-school",
+   "index": 16,
+   "kind": "picture"
+  },
+  {
+   "deck": "intro-lecture",
+   "index": 25,
+   "kind": "title"
+  },
+  {
+   "deck": "gdg24",
+   "index": 75,
+   "kind": "title"
+  },
+  {
+   "deck": "apps-edu-zh",
+   "index": 9,
+   "kind": "prose"
+  },
+  {
+   "deck": "devfest2020",
+   "index": 35,
+   "kind": "shape"
+  },
+  {
+   "deck": "gdg24",
+   "index": 17,
+   "kind": "picture"
+  },
+  {
+   "deck": "hebrew-lesson",
+   "index": 20,
+   "kind": "table"
+  },
+  {
+   "deck": "apps-edu-zh",
+   "index": 27,
+   "kind": "list"
+  },
+  {
+   "deck": "drawing-workshop",
+   "index": 23,
+   "kind": "picture"
+  },
+  {
+   "deck": "ap-bio-stats",
+   "index": 11,
+   "kind": "picture"
+  },
+  {
+   "deck": "supercharge-slides",
+   "index": 17,
+   "kind": "picture"
+  },
+  {
+   "deck": "sc-aesthetic-school",
+   "index": 1,
+   "kind": "prose"
+  },
+  {
+   "deck": "journey-maps",
+   "index": 16,
+   "kind": "table"
+  },
+  {
+   "deck": "gdg24",
+   "index": 72,
+   "kind": "shape"
+  },
+  {
+   "deck": "apps-edu-zh",
+   "index": 25,
+   "kind": "list"
+  },
+  {
+   "deck": "comic-strips",
+   "index": 7,
+   "kind": "list"
+  },
+  {
+   "deck": "solidity-survey",
+   "index": 7,
+   "kind": "picture"
+  },
+  {
+   "deck": "journey-maps",
+   "index": 10,
+   "kind": "shape"
+  },
+  {
+   "deck": "journey-maps",
+   "index": 22,
+   "kind": "prose"
+  },
+  {
+   "deck": "gdg24",
+   "index": 83,
+   "kind": "shape"
+  },
+  {
+   "deck": "cs161-tls",
+   "index": 16,
+   "kind": "title"
+  },
+  {
+   "deck": "comps-analysis",
+   "index": 8,
+   "kind": "table"
+  },
+  {
+   "deck": "comic-strips",
+   "index": 0,
+   "kind": "picture"
+  },
+  {
+   "deck": "cs161-tls",
+   "index": 20,
+   "kind": "list"
+  },
+  {
+   "deck": "sc-functions",
+   "index": 4,
+   "kind": "table"
+  },
+  {
+   "deck": "creandum-board",
+   "index": 25,
+   "kind": "shape"
+  },
+  {
+   "deck": "creandum-board",
+   "index": 13,
+   "kind": "picture"
+  },
+  {
+   "deck": "cs161-net",
+   "index": 54,
+   "kind": "prose"
+  },
+  {
+   "deck": "apps-edu-zh",
+   "index": 17,
+   "kind": "prose"
+  },
+  {
+   "deck": "ap-bio-stats",
+   "index": 50,
+   "kind": "prose"
+  },
+  {
+   "deck": "devfest2020",
+   "index": 30,
+   "kind": "shape"
+  }
+ ],
+ "pairs": [
+  {
+   "id": "f01",
+   "kind": "form",
+   "slide_kind": "title",
+   "deck": "gdg24",
+   "index": 61,
+   "left": "ls-a",
+   "right": "m6-a"
+  },
+  {
+   "id": "f02",
+   "kind": "form",
+   "slide_kind": "table",
+   "deck": "hebrew-lesson",
+   "index": 8,
+   "left": "m6-a",
+   "right": "ls-a"
+  },
+  {
+   "id": "f03",
+   "kind": "form",
+   "slide_kind": "list",
+   "deck": "ds-lecture",
+   "index": 5,
+   "left": "ls-a",
+   "right": "m6-a"
+  },
+  {
+   "id": "f04",
+   "kind": "form",
+   "slide_kind": "list",
+   "deck": "comic-strips",
+   "index": 10,
+   "left": "m6-a",
+   "right": "ls-a"
+  },
+  {
+   "id": "f05",
+   "kind": "form",
+   "slide_kind": "title",
+   "deck": "cs161-tls",
+   "index": 32,
+   "left": "ls-a",
+   "right": "m6-a"
+  },
+  {
+   "id": "f06",
+   "kind": "form",
+   "slide_kind": "picture",
+   "deck": "drawings-basics",
+   "index": 25,
+   "left": "m6-a",
+   "right": "ls-a"
+  },
+  {
+   "id": "f07",
+   "kind": "form",
+   "slide_kind": "picture",
+   "deck": "drawing-workshop",
+   "index": 36,
+   "left": "m6-a",
+   "right": "ls-a"
+  },
+  {
+   "id": "f08",
+   "kind": "form",
+   "slide_kind": "list",
+   "deck": "arabic-training",
+   "index": 7,
+   "left": "ls-a",
+   "right": "m6-a"
+  },
+  {
+   "id": "f09",
+   "kind": "form",
+   "slide_kind": "prose",
+   "deck": "gdg24",
+   "index": 42,
+   "left": "ls-a",
+   "right": "m6-a"
+  },
+  {
+   "id": "f10",
+   "kind": "form",
+   "slide_kind": "picture",
+   "deck": "sc-aesthetic-school",
+   "index": 16,
+   "left": "ls-a",
+   "right": "m6-a"
+  },
+  {
+   "id": "f11",
+   "kind": "form",
+   "slide_kind": "title",
+   "deck": "intro-lecture",
+   "index": 25,
+   "left": "m6-a",
+   "right": "ls-a"
+  },
+  {
+   "id": "f12",
+   "kind": "form",
+   "slide_kind": "title",
+   "deck": "gdg24",
+   "index": 75,
+   "left": "ls-a",
+   "right": "m6-a"
+  },
+  {
+   "id": "f13",
+   "kind": "form",
+   "slide_kind": "prose",
+   "deck": "apps-edu-zh",
+   "index": 9,
+   "left": "m6-a",
+   "right": "ls-a"
+  },
+  {
+   "id": "f14",
+   "kind": "form",
+   "slide_kind": "shape",
+   "deck": "devfest2020",
+   "index": 35,
+   "left": "m6-a",
+   "right": "ls-a"
+  },
+  {
+   "id": "f15",
+   "kind": "form",
+   "slide_kind": "picture",
+   "deck": "gdg24",
+   "index": 17,
+   "left": "m6-a",
+   "right": "ls-a"
+  },
+  {
+   "id": "f16",
+   "kind": "form",
+   "slide_kind": "table",
+   "deck": "hebrew-lesson",
+   "index": 20,
+   "left": "m6-a",
+   "right": "ls-a"
+  },
+  {
+   "id": "f17",
+   "kind": "form",
+   "slide_kind": "list",
+   "deck": "apps-edu-zh",
+   "index": 27,
+   "left": "m6-a",
+   "right": "ls-a"
+  },
+  {
+   "id": "f18",
+   "kind": "form",
+   "slide_kind": "picture",
+   "deck": "drawing-workshop",
+   "index": 23,
+   "left": "m6-a",
+   "right": "ls-a"
+  },
+  {
+   "id": "f19",
+   "kind": "form",
+   "slide_kind": "picture",
+   "deck": "ap-bio-stats",
+   "index": 11,
+   "left": "ls-a",
+   "right": "m6-a"
+  },
+  {
+   "id": "f20",
+   "kind": "form",
+   "slide_kind": "picture",
+   "deck": "supercharge-slides",
+   "index": 17,
+   "left": "m6-a",
+   "right": "ls-a"
+  },
+  {
+   "id": "f21",
+   "kind": "form",
+   "slide_kind": "prose",
+   "deck": "sc-aesthetic-school",
+   "index": 1,
+   "left": "m6-a",
+   "right": "ls-a"
+  },
+  {
+   "id": "f22",
+   "kind": "form",
+   "slide_kind": "table",
+   "deck": "journey-maps",
+   "index": 16,
+   "left": "ls-a",
+   "right": "m6-a"
+  },
+  {
+   "id": "f23",
+   "kind": "form",
+   "slide_kind": "shape",
+   "deck": "gdg24",
+   "index": 72,
+   "left": "ls-a",
+   "right": "m6-a"
+  },
+  {
+   "id": "f24",
+   "kind": "form",
+   "slide_kind": "list",
+   "deck": "apps-edu-zh",
+   "index": 25,
+   "left": "ls-a",
+   "right": "m6-a"
+  },
+  {
+   "id": "f25",
+   "kind": "form",
+   "slide_kind": "list",
+   "deck": "comic-strips",
+   "index": 7,
+   "left": "m6-a",
+   "right": "ls-a"
+  },
+  {
+   "id": "f26",
+   "kind": "form",
+   "slide_kind": "picture",
+   "deck": "solidity-survey",
+   "index": 7,
+   "left": "m6-a",
+   "right": "ls-a"
+  },
+  {
+   "id": "f27",
+   "kind": "form",
+   "slide_kind": "shape",
+   "deck": "journey-maps",
+   "index": 10,
+   "left": "m6-a",
+   "right": "ls-a"
+  },
+  {
+   "id": "f28",
+   "kind": "form",
+   "slide_kind": "prose",
+   "deck": "journey-maps",
+   "index": 22,
+   "left": "m6-a",
+   "right": "ls-a"
+  },
+  {
+   "id": "f29",
+   "kind": "form",
+   "slide_kind": "shape",
+   "deck": "gdg24",
+   "index": 83,
+   "left": "ls-a",
+   "right": "m6-a"
+  },
+  {
+   "id": "f30",
+   "kind": "form",
+   "slide_kind": "title",
+   "deck": "cs161-tls",
+   "index": 16,
+   "left": "ls-a",
+   "right": "m6-a"
+  },
+  {
+   "id": "f31",
+   "kind": "form",
+   "slide_kind": "table",
+   "deck": "comps-analysis",
+   "index": 8,
+   "left": "ls-a",
+   "right": "m6-a"
+  },
+  {
+   "id": "f32",
+   "kind": "form",
+   "slide_kind": "picture",
+   "deck": "comic-strips",
+   "index": 0,
+   "left": "m6-a",
+   "right": "ls-a"
+  },
+  {
+   "id": "f33",
+   "kind": "form",
+   "slide_kind": "list",
+   "deck": "cs161-tls",
+   "index": 20,
+   "left": "m6-a",
+   "right": "ls-a"
+  },
+  {
+   "id": "f34",
+   "kind": "form",
+   "slide_kind": "table",
+   "deck": "sc-functions",
+   "index": 4,
+   "left": "ls-a",
+   "right": "m6-a"
+  },
+  {
+   "id": "f35",
+   "kind": "form",
+   "slide_kind": "shape",
+   "deck": "creandum-board",
+   "index": 25,
+   "left": "ls-a",
+   "right": "m6-a"
+  },
+  {
+   "id": "f36",
+   "kind": "form",
+   "slide_kind": "picture",
+   "deck": "creandum-board",
+   "index": 13,
+   "left": "ls-a",
+   "right": "m6-a"
+  },
+  {
+   "id": "f37",
+   "kind": "form",
+   "slide_kind": "prose",
+   "deck": "cs161-net",
+   "index": 54,
+   "left": "m6-a",
+   "right": "ls-a"
+  },
+  {
+   "id": "f38",
+   "kind": "form",
+   "slide_kind": "prose",
+   "deck": "apps-edu-zh",
+   "index": 17,
+   "left": "m6-a",
+   "right": "ls-a"
+  },
+  {
+   "id": "f39",
+   "kind": "form",
+   "slide_kind": "prose",
+   "deck": "ap-bio-stats",
+   "index": 50,
+   "left": "m6-a",
+   "right": "ls-a"
+  },
+  {
+   "id": "f40",
+   "kind": "form",
+   "slide_kind": "shape",
+   "deck": "devfest2020",
+   "index": 30,
+   "left": "ls-a",
+   "right": "m6-a"
+  },
+  {
+   "id": "h01",
+   "kind": "human",
+   "slide_kind": "title",
+   "deck": "gdg24",
+   "index": 61,
+   "human_source": "19_labels_on_graphics",
+   "human_index": 1,
+   "left": "ls-a",
+   "right": "human"
+  },
+  {
+   "id": "h02",
+   "kind": "human",
+   "slide_kind": "list",
+   "deck": "ds-lecture",
+   "index": 5,
+   "human_source": "21_bullet_shapes",
+   "human_index": 3,
+   "left": "human",
+   "right": "ls-a"
+  },
+  {
+   "id": "h03",
+   "kind": "human",
+   "slide_kind": "title",
+   "deck": "cs161-tls",
+   "index": 32,
+   "human_source": "21_bullet_shapes",
+   "human_index": 7,
+   "left": "human",
+   "right": "ls-a"
+  },
+  {
+   "id": "h04",
+   "kind": "human",
+   "slide_kind": "picture",
+   "deck": "drawing-workshop",
+   "index": 36,
+   "human_source": "23_raster_images",
+   "human_index": 4,
+   "left": "ls-a",
+   "right": "human"
+  },
+  {
+   "id": "h05",
+   "kind": "human",
+   "slide_kind": "prose",
+   "deck": "gdg24",
+   "index": 42,
+   "human_source": "19_labels_on_graphics",
+   "human_index": 10,
+   "left": "ls-a",
+   "right": "human"
+  },
+  {
+   "id": "h06",
+   "kind": "human",
+   "slide_kind": "title",
+   "deck": "intro-lecture",
+   "index": 25,
+   "human_source": "07_images",
+   "human_index": 0,
+   "left": "ls-a",
+   "right": "human"
+  },
+  {
+   "id": "h07",
+   "kind": "human",
+   "slide_kind": "prose",
+   "deck": "apps-edu-zh",
+   "index": 9,
+   "human_source": "14_misc",
+   "human_index": 1,
+   "left": "human",
+   "right": "ls-a"
+  },
+  {
+   "id": "h08",
+   "kind": "human",
+   "slide_kind": "picture",
+   "deck": "gdg24",
+   "index": 17,
+   "human_source": "23_raster_images",
+   "human_index": 1,
+   "left": "ls-a",
+   "right": "human"
+  },
+  {
+   "id": "h09",
+   "kind": "human",
+   "slide_kind": "list",
+   "deck": "apps-edu-zh",
+   "index": 27,
+   "human_source": "sync_smoke_v1",
+   "human_index": 2,
+   "left": "human",
+   "right": "ls-a"
+  },
+  {
+   "id": "h10",
+   "kind": "human",
+   "slide_kind": "picture",
+   "deck": "ap-bio-stats",
+   "index": 11,
+   "human_source": "23_raster_images",
+   "human_index": 3,
+   "left": "ls-a",
+   "right": "human"
+  },
+  {
+   "id": "h11",
+   "kind": "human",
+   "slide_kind": "prose",
+   "deck": "sc-aesthetic-school",
+   "index": 1,
+   "human_source": "20_marks_edge_cases",
+   "human_index": 5,
+   "left": "human",
+   "right": "ls-a"
+  },
+  {
+   "id": "h12",
+   "kind": "human",
+   "slide_kind": "shape",
+   "deck": "gdg24",
+   "index": 72,
+   "human_source": "11_research_talk",
+   "human_index": 5,
+   "left": "human",
+   "right": "ls-a"
+  },
+  {
+   "id": "h13",
+   "kind": "human",
+   "slide_kind": "list",
+   "deck": "comic-strips",
+   "index": 7,
+   "human_source": "10_helvet",
+   "human_index": 0,
+   "left": "human",
+   "right": "ls-a"
+  },
+  {
+   "id": "h14",
+   "kind": "human",
+   "slide_kind": "shape",
+   "deck": "journey-maps",
+   "index": 10,
+   "human_source": "talk",
+   "human_index": 8,
+   "left": "ls-a",
+   "right": "human"
+  },
+  {
+   "id": "h15",
+   "kind": "human",
+   "slide_kind": "shape",
+   "deck": "gdg24",
+   "index": 83,
+   "human_source": "22_overlays_on_text",
+   "human_index": 2,
+   "left": "human",
+   "right": "ls-a"
+  },
+  {
+   "id": "h16",
+   "kind": "human",
+   "slide_kind": "table",
+   "deck": "comps-analysis",
+   "index": 8,
+   "human_source": "16_colored_table",
+   "human_index": 1,
+   "left": "ls-a",
+   "right": "human"
+  },
+  {
+   "id": "h17",
+   "kind": "human",
+   "slide_kind": "list",
+   "deck": "cs161-tls",
+   "index": 20,
+   "human_source": "04_theme_blocks",
+   "human_index": 2,
+   "left": "human",
+   "right": "ls-a"
+  },
+  {
+   "id": "h18",
+   "kind": "human",
+   "slide_kind": "shape",
+   "deck": "creandum-board",
+   "index": 25,
+   "human_source": "22_overlays_on_text",
+   "human_index": 6,
+   "left": "human",
+   "right": "ls-a"
+  },
+  {
+   "id": "h19",
+   "kind": "human",
+   "slide_kind": "prose",
+   "deck": "cs161-net",
+   "index": 54,
+   "human_source": "25_hole_placement",
+   "human_index": 1,
+   "left": "ls-a",
+   "right": "human"
+  },
+  {
+   "id": "h20",
+   "kind": "human",
+   "slide_kind": "prose",
+   "deck": "ap-bio-stats",
+   "index": 50,
+   "human_source": "sync_smoke_v1",
+   "human_index": 1,
+   "left": "human",
+   "right": "ls-a"
+  }
+ ]
+}

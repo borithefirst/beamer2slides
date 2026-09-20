@@ -706,3 +706,218 @@ On that scorer: m6-a 0.130 -> mt-a 0.366 -> ls-a 0.490
 author 0.19 -> 0.92, repeat 0.61 -> 0.84).
 Frame body lines now: text 36%, shape 28%, picture 11%, other 10%, placement 9%, table 2%, plumbing 1%.
 Numbers per word (0.12) is the weakest component: shape paths hold most of them.
+
+## Is the proxy measuring what a person means? (blind judging)
+
+The readability number now steers the work, and it has already been wrong twice (it read style names
+handed to a macro as visible words, and it read the deck's own `.sty` vocabulary as plumbing, so a
+source scored *lower* for saying the same thing in one word). So it was checked against readers who
+know nothing about it: `devtools/readability_calib.py` builds the sample and the prompts, the judging
+is done outside the module by fresh agents that never see this repo, and the module takes the verdicts
+back as JSON and prints the agreement. **The module calls no model**, and the scorer was not touched:
+the point was to find where it is wrong, not to make it agree.
+
+**The sample.** 40 slides of the 909 that both tags have, drawn by sha256 of (seed, deck, index) -
+no RNG stream, so the draw replays exactly - and stratified by what the frame is made of
+(`frame_kind`, which reads both vocabularies): 5 title, 5 table, 10 picture, 6 shape, 7 list,
+7 prose. Five of every kind so each is represented at all, the rest shared out towards what the corpus
+is (424 of its 909 slides are picture-led, 187 prose, 174 list, 43 title, 43 shape, 38 table), and at
+most 2 slides per deck, so no deck's habits carry the result. Seed `readability-calibration-1`,
+sample and pairs in `tests/decks/foreign/readability_calib/sample.json`.
+
+**The pairs.** 40 *form* pairs - the same slide at `m6-a` (`textblock*` + `\vbox to` + `\leftskip`)
+and at `ls-a` (the vocabulary) - and 20 *human* pairs, an `ls-a` frame against a frame from
+`tests/decks/*.tex` or `tests/decks/sync/talk.tex` matched by kind. Sides are shuffled per pair by
+hash and shown as A and B; a frame is shown with the wrapper lines around it (`m6-a` sets the slide
+colour *outside* the frame, and hiding that would have been a tell); the frame's deck preamble is
+filtered to the names it actually uses; the vocabulary of each form is given once per batch as
+signatures plus their doc comments, never the implementation. `scrub` removes the comments that name
+the writer. Nothing in a prompt says `beamer2slides`, `adopt`, `readability`, `m6-a` or `ls-a`.
+
+**The question is an editing task, not taste**: change the wording of a line, move a box 20 pt to the
+right, restyle a phrase. Which source makes that easier, how sure are you, *and what stands in the
+way on each side* - the free text is the evidence, the vote is only the index into it.
+**Three independent judges per pair**, 60 pairs in 4 batches of 15, 12 judge runs, each a fresh agent
+with no memory of the others. Their agreement with each other is the ceiling any proxy can reach.
+
+### The numbers
+
+```
+form   pairs  39  proxy agrees with the judges' majority 0.97   (no majority: 1)
+       title 5/5  table 5/5  picture 8/9  shape 6/6  list 7/7  prose 7/7
+human  pairs  20  proxy agrees with the judges' majority 0.65   (no majority: 0)
+       title 1/3  table 0/1  picture 2/3  shape 4/4  list 2/4  prose 4/5
+
+inter-judge  all three agree 0.88   pairwise 0.92
+   j1 with the other two 0.96 | j2 0.93 | j3 0.98
+
+Spearman (proxy margin vs judge margin): all 0.67, form pairs 0.85
+Spearman over 100 frames (score vs share of votes won): 0.59
+   m6-a: score 0.18 wins 0.02 | ls-a: score 0.54 wins 0.88 | human: score 0.72 wins 0.43
+```
+
+**On the question the proxy was built to answer - did this change make the source better to keep? -
+it is right 0.97 of the time against a ceiling of 0.92-0.96**, on every kind of slide, and the size of
+its margin tracks the judges' confidence (Spearman 0.85). The one form pair with no majority (f19) is a
+slide holding a single picture: all three judges answered "tie" and said so in the same words - "the
+move is the same single number in both". 113 of the 180 votes were at the top confidence, 10 at the
+bottom, 5 were ties.
+
+Against the hand-written anchors it is right 0.65 of the time, and that is the interesting half.
+
+### The eight disagreements
+
+| pair | slide | judges | proxy | |
+|---|---|---|---|---|
+| h13 | list, comic-strips | ls-a, 3-0 | human by 0.511 | |
+| h01 | title, gdg24 | ls-a, 3-0 | human by 0.500 | |
+| h02 | list, ds-lecture | ls-a, 3-0 | human by 0.313 | |
+| h05 | prose, gdg24 | ls-a, 3-0 | human by 0.179 | |
+| h06 | title, intro-lecture | human, 3-0 | **ls-a by 0.150** | |
+| h04 | picture, drawing-workshop | ls-a, 3-0 | human by 0.107 | |
+| h16 | table, comps-analysis | ls-a, 2-1 | human by 0.094 | |
+| f06 | picture, drawings-basics | ls-a, 2-0-1 | m6-a by 0.033 | |
+
+Six of the seven human pairs go the same way: the judges prefer the adopt frame where the proxy
+prefers the hand-written one. Their reasons say why, and it is **mostly the task, not the proxy**.
+One of the three edits is "move a box 20 pt right", and flowed beamer has no box:
+
+> "A's nested itemize is flowed and has no coordinate at all." (h02, j3)
+> "Plain beamer flows the list in the text area, so a 20 pt shift needs `\hspace*{20pt}`, an
+> adjustwidth or a `\leftskip` change - none of them an exact move, and any of them re-wraps the
+> items." (h01, j3)
+> "`\centering` means nothing has a position: a 20 pt move of the `\includegraphics` needs
+> `\hspace*{...}` inside a centred line, which shifts the box by only half the skip." (h06, j3)
+
+That is a real property of absolute geometry and it is worth knowing that readers feel it, but it is
+not evidence that an adopt source is nicer to keep than a talk somebody wrote. **The adopt-vs-human
+comparison measures this task as much as it measures the sources**, and the 0.65 should be read that
+way; the `m6-a`-vs-`ls-a` half, where both sides are absolute, is the clean measurement. The same
+caveat explains the win shares: `ls-a` frames win 0.88 of their votes and the anchors 0.43, while the
+proxy scores them 0.54 and 0.72.
+
+Two disagreements are the proxy being wrong, and both are worth fixing.
+
+**h06 - a frame with nothing in it scores 0.86.** The `ls-a` side is a section slide whose whole body
+is `\frametitle{Expressions}` under `layout=section`; the anchor is a centred figure with a caption.
+The proxy prefers the empty one, because every one of its components is a ratio per word or per line
+and a frame with almost nothing in it has almost nothing to charge.
+
+> "A's frame is a title and nothing else, so two of the three edits have no target at all." (j1)
+> "`layout=section` draws the whole slide: the only editable token is `\frametitle{Expressions}`.
+> There is no phrase to restyle, and moving a box means editing the shared layout (hitting every
+> section slide) or inventing a textblock that isn't there." (j1)
+> "I would have to invent a slidebox with coordinates and a style from the preamble just to have
+> something to edit." (j3)
+
+This is the theme layer's shadow: moving content out of the frame and into a recovered layout raised
+the score *and* took the content out of reach. The proxy scores frame bodies only - the theme file is
+not scored at all - so an edit at a distance is free.
+
+**h16's dissent - a thing said twenty times in one frame is invisible.** Two judges preferred the
+`ls-a` table; the third preferred the anchor for a reason the proxy cannot see, because `repeat` only
+charges lines that appear in three or more *different* frames:
+
+> "A's table is split into two `\slidetable` blocks with a per-row `\fontsize`/`\color` dump repeated
+> twenty times." (j3)
+> "`\row[h=10.42, style={\fontsize{5.4bp}{6.5bp}\selectfont\color{LightPink}}]` is repeated on nearly
+> every row, so a restyle has to be written in that idiom rather than as `\textbf`." (j2)
+
+f06 is the last one and it is noise: a slide holding one picture, margin 0.033, judges B-tie-B.
+
+### What the judges say stands in the way, that the proxy does not charge for
+
+Every judge wrote what stood in the way on both sides of all 60 pairs. Sorted by how often it comes
+back, on the `ls-a` side:
+
+- **Saying the same thing twice inside one frame.** The URL in `\href{...}{\uline{...}}` written raw
+  in the target and `\_`-escaped in the text ("so any change there is two edits", f17 j3); a title
+  written both as `\frametitle` and as a `\slidetext` drop shadow ("a reword done once leaves the
+  other copy stale", f07 j3); "Drag and Drop Activity is written twice, at (9.7bp,6.5bp) and
+  (7.2bp,6.5bp)" (f18 j2); a footer "duplicated at the same coordinates (127.3,252.2) in two styles"
+  (f08 j2). `repeat` sees none of it.
+- **One thing that is several elements.** "a node is four independent elements at four coordinates
+  (rect, label, ellipse, freeform), so 'move the box 20 pt right' is four edits that must agree"
+  (f23 j3); "every chip is two elements ... so a 20 pt move has to be made twice or the label slides
+  off its box" (f35 j3); `\slideline[...]{192.5,116.25}{250.43,87}` "gives two absolute endpoints, so
+  moving that arrow 20 pt right costs two numbers instead of one" (f20 j3).
+- **Rows of near-identical lines told apart only by a coordinate.** "Fifty `\slidetext` lines whose
+  only distinguishing content is the word and the coordinates" (f29 j2); "44 near-identical
+  `\slidetext[inset=0,center]` lines at 1.89 bp type, so the label you want is found only by its
+  coordinates" (f29 j3); "All seven labels read 'Short label'" (f23 j1). The proxy counts those as
+  short clean lines and rewards them.
+- **Positional quads.** "{37,160.8,98.74,55.4} is positional, so you must count to the first number to
+  move the box" (f21 j3); "{26.7,3.8,418.8,247.6} is positional, so without the vocabulary note you
+  cannot tell x from w" (f19 j3). Named keys and a bare list of four numbers score the same.
+- **Numbers that are not geometry.** "`space=0.01` / `space=-0.01` on the two blank `\slidepar` lines
+  are unexplained hundredth-of-a-point fudges" (f16 j3); "the column widths 78.846/79.155/79.158/78.226
+  are magic numbers I must not disturb" (f31 j2); `\slidestrut{5.49}{1.32}` "in front of every single
+  word" (f27 j2). `numbers` counts a coordinate somebody needs and a fudge nobody understands alike.
+- **Content in a file named by a hash.** "the freeform outlines live in external files
+  (shapes/freeform-*.tex)", "which I cannot inspect from here" (f14 j2, j1); "named only by hash
+  (shapes/freeform-8103ffe1.tex)" (f29 j3). Hundreds of numbers leave the frame and the frame's score
+  improves.
+- **Edits at a distance.** "the gradient bar, the 'Computer Science 161' strip and the page number have
+  gone into `layout=section-header`, so if the box you are asked to move is one of those it is not in
+  the frame at all" (f30 j3); "editing the shared style title-bold-white in the preamble would repaint
+  every title in the deck" (f01 j1). Both are improvements the score should not get for free.
+
+Two things the judges *did* credit, which the scorer already counts the way they read it: named
+vocabulary reads as vocabulary ("a person reads `\slidepicture{x,y,w,h}{file}` as they read
+`\includegraphics`" was the fix before this; no judge ever called `\slidetext` plumbing), and
+`\slidestrut`/`\slidesize` are plumbing to them too.
+
+### What to change in the proxy - named, not done
+
+Nothing below was applied: a scorer tuned to its own calibration measures nothing. Each is worth a
+separate round with the fidelity numbers held flat.
+
+1. **Charge within-frame repetition.** `repeat` counts only lines shared by `REPEAT_FRAMES` (3) or
+   more frames. Add a per-frame term: distinct lines / lines, or distinct option lists / option lists.
+   *Gain*: it sees the per-row `\fontsize` walls, the doubled `\href` text, the twenty identical
+   `\row` styles - the single most common complaint. *Cost*: a table of ten honest rows or a grid of
+   labels is legitimately repetitive; the term has to charge repeated *plumbing*, not repeated
+   content, so it should count option lists and macro arguments, not whole lines, or it will punish
+   real tables.
+2. **Refuse to reward an empty frame.** A frame under some floor of visible words (the corpus median
+   is far above it) should not contribute a near-perfect score to the mean; either exclude it, or
+   score the layout it names along with it. *Gain*: h06, and the whole class of "the content moved to
+   the theme so the frame got easier". *Cost*: some slides really are one title, and the honest fix -
+   scoring the recovered theme file as part of the deck - is a bigger change than a floor.
+3. **Count a value written twice in one frame as a defect of its own.** A literal string or number
+   appearing in two places in one frame body (a URL, a title, a size in both `textblock*` and
+   `\includegraphics`) is exactly "one edit is two edits". *Gain*: it is the judges' own test, and it
+   also catches the `m6-a` duplication they flagged (f06, f19). *Cost*: coordinates repeat innocently
+   (a shared left edge), so it must compare only strings above some length and numbers that are not
+   geometry.
+4. **Tell a named argument from a positional quad.** `numbers` treats `{37,160.8,98.74,55.4}` and
+   `x=37, y=160.8` alike. Weighting a literal by whether it sits under a name would say what the
+   judges say. *Gain*: honest. *Cost*: it points the work at `key=value` everywhere, which lengthens
+   every line and would fight the `lines` component; and no judge ever preferred the *other* source
+   because of a quad - it is a tie-breaker, not a decider. Lowest value of the six.
+5. **Separate a coordinate from a fudge.** A number under `space=`, `first=`, `ascent=`, `prevdepth=`,
+   `h=` or inside a `\slidestrut` is the text model's residue, not the deck's geometry, and readers
+   single those out every time. Charging them more than a position would aim the work where the
+   judges point. *Gain*: it names the real remaining problem (0.12 on `numbers`). *Cost*: it is the
+   easiest of the six to turn into tuning; the weights would need to come from the judges' *reasons*,
+   which is exactly the thing this calibration must not be used for twice.
+6. **Do not let a hash-named include hide its content.** A `\slidefreeform{...}{shapes/freeform-<sha8>.tex}`
+   takes hundreds of numbers out of the frame. Count the included file's numbers at a discount, or
+   charge the frame for naming a file whose name says nothing. *Gain*: the freeform decks (sc-memphis
+   and friends) stop scoring as if their outlines were gone. *Cost*: it would undo a real improvement
+   on paper - the frame genuinely is easier to read - so the right shape may be a separate reported
+   number ("numbers in files this frame names") rather than a component.
+
+Ranked by what the judges actually complained about: 1, 2, 3 first; 5 next and carefully; 6 as a
+reported number; 4 last.
+
+### Replaying it
+
+```
+python -m beamer2slides.devtools.readability_calib build     # sample.json + prompts/batch-NN.md
+python -m beamer2slides.devtools.readability_calib report -v # agreement, Spearman, every disagreement
+```
+`build` needs the corpus (`$B2S_ADOPT_CORPUS`); the verdicts are committed under
+`tests/decks/foreign/readability_calib/verdicts/jN-batch-NN.json`, so `report` replays the numbers
+above from the tree. `tests/test_readability_calib.py` pins the draw (the committed sample is what
+the corpus gives back), the prompt hygiene and the agreement maths on a made-up verdict set.

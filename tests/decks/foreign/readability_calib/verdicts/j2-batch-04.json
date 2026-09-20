@@ -1,0 +1,122 @@
+[
+  {
+    "pair": "h06",
+    "prefer": "B",
+    "confidence": 2,
+    "reason": "B at least has a caption line to reword and somewhere to put a \\textbf; A's frame body is empty, so two of the three edits have nothing to land on.",
+    "in_the_way_A": "The whole frame is \\begin{frame}[plain,layout=section] \\frametitle{Expressions} \\end{frame}: no \\slidetext, no \\slidebox, no body words at all. I would have to invent a box and guess where the section layout already puts the title before I could move or restyle anything.",
+    "in_the_way_B": "Everything is in \\centering flow: \\hspace*{20pt} before \\includegraphics shifts the picture by 10 pt, not 20, because the centring splits the extra width. An exact 20 pt move means wrapping the picture and the \\small caption in a minipage or \\makebox first."
+  },
+  {
+    "pair": "h07",
+    "prefer": "B",
+    "confidence": 2,
+    "reason": "B's slidebox carries its position as {19.7,72.8,414.24,172.3}, so '20 pt right' is 19.7 -> 39.7, and every line is its own \\slidepar to reword; A has no coordinate anywhere.",
+    "in_the_way_A": "\\hyperlink{last}{\\beamergotobutton{...}}, the {\\tiny ...} group and the verse all sit in beamer's vertical flow, so the move has to be faked with \\hspace* or changepage's adjustwidth; and the disclaimer's text is inside a brace group, so a restyle has to be nested into it.",
+    "in_the_way_B": "The frametitle and the layout name are CJK (\\frametitle{\u7b2c\u4e00\u984c}, layout=\u6a19\u984c\u8207\u5167\u6587-2), and the second paragraph opens with {\\adoptfontB -\\ } in front of the words you would actually reword. first=22.68 and space=0.01 are measured numbers not to be disturbed, and a longer line reflows inside a box fixed at 172.3 bp tall."
+  },
+  {
+    "pair": "h08",
+    "prefer": "A",
+    "confidence": 3,
+    "reason": "A has two real text elements at explicit coordinates, so all three edits are one line each; B's frame is two \\includegraphics and nothing else, so there is no line to reword and no phrase to restyle.",
+    "in_the_way_A": "\\slidetext{30.2,78.9,...}{Chapter \\textbf{Title\\ }Goes Here.} hides a \\  inside the bold group, so a reword must keep that space or the words run together; and \\slidepicture{0,0,453.5,255.1} is a full-page backdrop, so I must be sure I move the text box and not it.",
+    "in_the_way_B": "No body text at all: only the frametitle and two pictures, so the reword and the restyle have nowhere to go, and the only way to shift one picture is \\hspace inside \\centering, which halves the offset."
+  },
+  {
+    "pair": "h09",
+    "prefer": "A",
+    "confidence": 2,
+    "reason": "A's two items are plain English I can reword and bold in seconds; B's body is Chinese and its two visible URLs each repeat the address twice, so two of the three edits are slow and error-prone there.",
+    "in_the_way_A": "The itemize is in beamer's flow, so moving it 20 pt right means \\addtolength{\\leftmargini}{20pt} or an adjustwidth block, not a number - and that shifts all the items, not one box.",
+    "in_the_way_B": "The slidebox holds \\uline{\u5efa\u7acb\u7fa4\u7d44} and friends: rewording means typing CJK I cannot proofread. The two \\slidetext lines carry the Drive URL twice, once raw in \\href and once escaped as the visible text (0B6VPO\\_ULtz0R...), so any edit to one has to be mirrored in the other."
+  },
+  {
+    "pair": "h10",
+    "prefer": "A",
+    "confidence": 1,
+    "reason": "Nearly a tie and nearly useless either way: neither slide has a word of body text, so the reword and the restyle have nothing to act on. A wins only because its one element carries {26.7,3.8,418.8,247.6}, so the move is 26.7 -> 46.7.",
+    "in_the_way_A": "The frame is a single \\slidepicture and nothing else - no text, no phrase - and trim=8.07 17.41 0 0 means the visible edge of the picture is not the edge of the box I would be moving.",
+    "in_the_way_B": "Also no body text; and the two pictures are \\includegraphics[angle=30] and \\reflectbox{...}, so an \\hspace shift moves the rotated/mirrored bounding box rather than what the eye sees on the slide."
+  },
+  {
+    "pair": "h11",
+    "prefer": "B",
+    "confidence": 2,
+    "reason": "B's paragraphs are plain English inside \\slidetext boxes with explicit x,y, so each of the three edits is one edit; A's sentences are threaded through fragile inline boxes and have no position at all.",
+    "in_the_way_A": "Every mark is a different construct sitting mid-sentence - \\textsuperscript{\\circled{1}}, \\colorbox{orange}{\\color{white}1}, {\\fboxsep=1pt\\fbox{\\tiny 2}}, a real \\footnote - so a reword has to step around them; \\circled is not even in the stated vocabulary, and the paragraphs are in flow, so the 20 pt shift has no home.",
+    "in_the_way_B": "Quotes are written \\symbol{34}Canva\\symbol{34}, which makes the sentence hard to read while editing it. The three columns are hard-coded at x=37 / 175.4 / 317.3 with their CANVA / POWERPOINT / GOOGLE SLIDES headers at y=140.7, so moving one column means moving its header too or the pair comes apart, and the boxes are 55.4-78.9 bp tall, so a longer reword can overrun."
+  },
+  {
+    "pair": "h12",
+    "prefer": "A",
+    "confidence": 3,
+    "reason": "A is a dozen lines of named tikz nodes: reword {Valid?}, add xshift=20pt to a node and change its fill, and the edges follow. B is thirty absolutely placed elements where one 'box' is four separate lines.",
+    "in_the_way_A": "Only mild: `below=of dec` and `\\draw[->] (ok) |- (start);` mean an xshift pulls the arrows with it, so I must decide whether the edge labels ('yes', 'no') should move too.",
+    "in_the_way_B": "One node is \\sliderect{231.9,71,...} + \\slidetext{240.2,110.8,...} + \\slideellipse{247.3,82.3,...} + \\slidefreeform{253.1,87.9,...}, four coordinates to step in unison; and all six labels read 'Short label', so the only way to find the one asked for is by its x."
+  },
+  {
+    "pair": "h13",
+    "prefer": "B",
+    "confidence": 2,
+    "reason": "Both texts are plain English, but B's slidebox is at {21.5,63.5,319.85,197.1}, so the move is one number, while in A the shift is a margin hack that moves the whole list.",
+    "in_the_way_A": "The itemize is in flow: 20 pt right means \\addtolength{\\leftmargini}{20pt} or a changepage block, and it moves all three items rather than one box; otherwise the reword and the \\textbf are trivial.",
+    "in_the_way_B": "\\symbol{34}Slide\\symbol{34}, \\symbol{34}Background\\symbol{34} instead of quotes make the second item hard to read while rewording it; `\\item[space=3.02]` is a measured number not to be touched; and the fixed 319.85 bp width means a longer line or a bold phrase reflows with no warning."
+  },
+  {
+    "pair": "h14",
+    "prefer": "B",
+    "confidence": 3,
+    "reason": "B is a four-node tikzpicture where all three edits are one token each; A's text boxes are written with a \\slidestrut in front of every single word, which makes rewording a line a typesetting exercise.",
+    "in_the_way_A": "\\slidetext[mixed]{87.4,56,...}{{\\slidesize{8.82}\\slidestrut{8.54}{2.05}A \\slidestrut{8.54}{2.05}Inc.}\\slidebreak \\slidestrut{5.49}{1.32}Opportunity ...}: every new word needs its own strut. And one pipeline 'stage' is a \\slideellipse, a \\slideline and a \\slidetext at three separate coordinates (e.g. 107.2 / 107.23 / 111.4), so a 20 pt move is three edits that must agree.",
+    "in_the_way_B": "Very little: the nodes are placed `below left=of base`, so an xshift=20pt on one node drags its two \\draw arrows along - usually what you want - and moving the whole picture would mean replacing the \\centering."
+  },
+  {
+    "pair": "h15",
+    "prefer": "A",
+    "confidence": 2,
+    "reason": "A is twelve readable lines of prose; B is ninety lines of coordinates forming a 9-column icon grid where the label and the icon above it are separate elements that a move would pull apart.",
+    "in_the_way_A": "The words to reword sit inside \\tikzmarknode{noisy}{noisy} with an overlay tikzpicture anchored to it, so the decoration follows the text but the picture must stay put after the paragraph and `remember picture` needs a second compile to settle; and there is no box, so the 20 pt move is again an \\hspace.",
+    "in_the_way_B": "Forty-five one-word \\slidetext labels and fifty \\slidefreeform icons on a grid: moving \\slidetext{123.1,153.7,...}{Mic} leaves \\slidefreeform{135.5,137.4,...} where it was and breaks the column. The labels are set in tiny-googlesans-white-1.9 (size 1.89), so a colour restyle means writing another \\slidestyle."
+  },
+  {
+    "pair": "h16",
+    "prefer": "A",
+    "confidence": 2,
+    "reason": "A's table has real cells to reword and moves as a unit by one number ({39.9,29} -> {59.9,29}); B's centred booktabs tabular can only be shifted by an \\hspace hack and has almost no prose in it.",
+    "in_the_way_A": "`\\row[h=10.42, style={\\fontsize{5.4bp}{6.5bp}\\selectfont\\color{LightPink}}]` is repeated on nearly every row, so a restyle has to be written in that idiom rather than as \\textbf; and the slide is two slidetables ({39.9,29} and {39.9,145.1}) that are halves of one grid, so moving one leaves the other behind.",
+    "in_the_way_B": "Only the header row is prose - the rest is $\\alpha$, $\\lambda_{\\max}$, $\\pm 2\\times 10^{-4}$, where a bold restyle means \\mathbf, not \\textbf - and \\centering halves any \\hspace, so an exact 20 pt move needs the tabular wrapped in a \\makebox."
+  },
+  {
+    "pair": "h17",
+    "prefer": "B",
+    "confidence": 2,
+    "reason": "B's body is one slidebox at {14.1,61.8,414.24,186.8} full of plain English items, so reword, move and \\textbf are each a single edit; A's columns give no position to change.",
+    "in_the_way_A": "\\column{0.48\\textwidth} sets a width, not a place, so 20 pt right means an \\hspace at the column's start or an adjustwidth, and the wrapped text moves with it; the reword and the \\textbf themselves are trivial.",
+    "in_the_way_B": "The frame also carries a footer number box at {424.5,231.3} and a seven-paragraph \\note to scroll past; the nested items take their font from \\setslidelist{itemize}{2}, so a colour restyle wants a new \\slidestyle rather than an inline switch; and the box is fixed at 414.24 x 186.8, so the reflow after a reword is silent."
+  },
+  {
+    "pair": "h18",
+    "prefer": "B",
+    "confidence": 1,
+    "reason": "Close to a tie: A's prose is the nicer thing to reword, but it has no box at all to move, while B carries every position explicitly - at the price of hunting among eight identical labels.",
+    "in_the_way_A": "The three paragraphs and their overlay tikzpictures are all in flow, so '20 pt right' has to be an \\hspace guess; the snake \\draw needs decorations.pathmorphing, and each rule is anchored to \\tikzmarknode{al}{\\alert{not convex}}, so a reword that crosses the node breaks the anchor.",
+    "in_the_way_B": "Every bar is a \\sliderect plus a \\slidetext 4.2 bp inside it (\\sliderect{148.2,96.5,...} with \\slidetext{152.4,96.5,...}), so a move is two numbers kept in step; eight boxes all say 'Feature', so the one to reword can only be picked by its y; and there is no bold white Arial style defined, so the restyle means adding a \\slidestyle or an inline \\textbf."
+  },
+  {
+    "pair": "h19",
+    "prefer": "A",
+    "confidence": 2,
+    "reason": "A has editable prose at explicit coordinates - the orange 'Notice:' box at {3.3,160.6} is a rect plus its text and nothing else, so all three edits are direct; B's center/flushright/block are flow and its lines are mostly inline math.",
+    "in_the_way_A": "The packet picture is five nested rects each with its own slidebox ({211.7,140.1} down to {233.5,213.3}), so if the box asked for is one of those, every layer inside it has to move by the same 20; and HTTP/TCP/IP/Ethernet/Wires each appear twice (x=56.5 and x=325.8), so a reword has to name which side.",
+    "in_the_way_B": "\\begin{center}, \\begin{flushright} and the block are all in beamer's flow: no box to move 20 pt without an adjustwidth. The lines are mostly $\\sqrt{a^2 + b^2}$, $\\frac{p}{q}\\sum_k c_k$, $\\bar{X}_n^{(k)}$, so there is little wording to change and a bold restyle inside them means \\mathbf."
+  },
+  {
+    "pair": "h20",
+    "prefer": "B",
+    "confidence": 2,
+    "reason": "B's two \\slidetext boxes give the move as one number and already use \\textcolor and \\uline, so the restyle is in the idiom; A's block sits in flow with nothing positioned to shift.",
+    "in_the_way_A": "block + \\vspace{1em} in beamer's flow: the 20 pt move has to be an \\hspace or an adjustwidth around the block, and since the block spans the text width the shift shows up as a width change; the reword and \\textbf are otherwise trivial.",
+    "in_the_way_B": "The second \\slidetext is one ~900-character paragraph on a single source line with an \\href to a long minitab URL buried in it, so the 'line' to reword has to be found by search rather than by eye; and the title box splits its own words oddly - \\textcolor{black}{\\uline{Determining Significance}}\\textcolor{black}{-} Null Hypothesis... - so a restyle there has to be threaded into those existing groups."
+  }
+]
