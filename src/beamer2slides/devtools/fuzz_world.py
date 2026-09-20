@@ -671,6 +671,14 @@ def rebase(base, ours, after, mplan, tok="2zz") -> dict:
                 o = ours["slides"][p["ours"]]  # ... and says what the source says (sync.new_base)
                 entries[sid] = {**entries[sid], **{k: o.get(k) for k in ("label", "title", "text", "page")}}
             continue
+        if p.get("held"):
+            # `merge.hold_slide`: nothing was written here, so the base says exactly what it said
+            # before. The source's words are not recorded as arrived, or the edit held back would
+            # read as already made next time (sync.new_base).
+            b = base["slides"][p["base"]]
+            entries[b["objectId"]] = copy.deepcopy(b)
+            sids[id(p)] = b["objectId"]
+            continue
         o = ours["slides"][p["ours"]]
         sid = f"b2s_{h6(p['key'])}_{tok}" if p["action"] == "create" else p["objectId"]
         sids[id(p)] = sid

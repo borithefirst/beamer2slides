@@ -90,10 +90,13 @@ the person's edits onto a slide they never touched.
 
 Sync notices (`identity.label_moves`). When the words on both sides agree that the label moved, the
 content decides instead of the label - the person's edits stay with the words they edited. When
-only half the story fits, the label is followed and nothing is re-paired. Either way it is a
-**conflict** in `sync-report.md`, addressed to whoever maintains the source, because which frame is
-which is not something a program should guess. A label renamed or dropped where the content still
-recognises the frame is a warning instead: nothing was at risk this time.
+only half the story fits, **that slide is held back and nothing is written to it**: the sync goes
+ahead everywhere else and the report names the slide it left alone. Put the label back (or, if the
+labels were right all along and it was a passage that moved, sync again with `--follow-labels`) and
+the slide catches up on the next run - nothing was lost by waiting. Either way it is a **conflict**
+in `sync-report.md`, addressed to whoever maintains the source, because which frame is which is not
+something a program should guess. A label renamed or dropped where the content still recognises the
+frame is a warning instead: nothing was at risk this time.
 
 `docs/sync.md`, "When a label moved", has the rules and what they measure out at.
 

@@ -115,6 +115,12 @@ per attempt. Say so before you start one; do not start two.
 * An **open comment** on a Google Doc lives in Drive, not in the document's content. Nothing the
   merge reads can see one, so a sync that rewrites the passage a comment hangs on answers it by
   accident. `doc_sync` names the open comments; pass them on before writing.
+* `deck_sync` may **hold a slide back** (`data["held"]`): a frame label looks as if it moved onto
+  another frame, so which frame that slide belongs to is an open question and nothing was written
+  to it. The rest of the deck was synced; the slide keeps its base and catches up next time. This
+  is a question for the person — ask them to check the `.tex`. Do **not** pass
+  `follow_labels=True` to make it go through: that is a claim about what the author meant, and
+  only the author can make it.
 * Slide order is merged, not taken wholesale: a slide a person dragged stays where they put it.
 * A sync killed halfway loses nothing — the next one sweeps up — so a timeout is not a reason to
   force anything.

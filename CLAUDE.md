@@ -498,10 +498,24 @@ A label that moved to another frame (docs/sync.md, "When a label moved"): nothin
 and following it writes one frame's text onto another frame's slide with the person's edits still on
 it - no loss, so the loss oracle can't see it. `identity.label_moves` asks whether the two slides a
 label pairs say the same thing and, if not, whether some other slide *nothing else accounts for*
-explains them better: both directions -> `moved` (the content decides), one -> `unsure` (the label is
-followed; it may equally be a passage the author moved), neither -> silence (a frame rewritten from
-scratch). Both verdicts are conflicts in the report (`field: label`); a renamed or dropped label the
-content still recognises is a warning. The title counts by degree (`_title_alike`): a source that
+explains them better: both directions -> `moved` (the content decides), one -> `unsure` (it may
+equally be a passage the author moved), neither -> silence (a frame rewritten from scratch). Both
+verdicts are conflicts in the report (`field: label`); a renamed or dropped label the content still
+recognises is a warning. **An `unsure` slide is held back** (`merge.hold_slide`, report
+`slides.held`): following the label was the safest thing a *pairing* could do, but following it is
+also a write, and a write onto the wrong slide is the same mistake one step later - one frame's new
+sentences merged into somebody's edits about another frame, nothing deleted, no way back but by
+hand. So nothing is planned for that slide, the base keeps the entry it had (`sync.new_base` - a
+base recording the source's words there would read them next time as a change already arrived, and
+the held edit would be gone for good), and the next sync plans it from scratch, correctly if the
+label was put back. The rest of the deck syncs as usual: one ambiguous label freezes one slide, not
+the talk. `--follow-labels` (agent `follow_labels`) is a person saying they have read the `.tex` -
+the house rule that `--force-rebuild` and `--force-adopted-deck` follow. A wrong *pairing* is not a
+wrong *write*, and `fuzz_labels` now counts both (`costly` -> `written`): on 1339 adopt-shaped
+broken rounds chained 4 deep (7349 frames), 98 frames land on a slide that would really say
+something else and **66 of them on a slide nothing is written to**, leaving 32 (1.33% -> 0.44%); on
+a converted talk 31 of 58 held, 27 written (0.97% -> 0.45%). The price is 3 `unsure` verdicts in
+1366 adopt-shaped sound rounds and none in 1449 converted ones. The title counts by degree (`_title_alike`): a source that
 retitles every frame while moving a label ("Moving labels" -> "Moving labels v2") makes a yes-or-no
 "same title?" say no to every pair at once. An explanation must also beat the label's own pairing by
 `LABEL_MARGIN` (0.5), which no swap between near-twins can: the pairing such a swap leaves behind is

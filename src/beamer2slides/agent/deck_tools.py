@@ -423,6 +423,10 @@ def deck_sync(
                              "rather than predicting it."] = True,
     backup: Annotated[str, "Way back kept before the first write: auto (a .pptx), none, file, "
                            "drive, both."] = "auto",
+    follow_labels: Annotated[bool, "Write to a slide even where a frame label may have moved onto "
+                                   "another frame. By default such a slide is held back and nothing "
+                                   "is written to it; only a person who has read the .tex and knows "
+                                   "the labels are right can say this."] = False,
 ) -> None:
     """Merge a changed PDF into a deck someone has edited, three ways, keeping their edits.
 
@@ -457,7 +461,8 @@ def deck_sync(
     note = None if dry_run else _cli().record_sync_point(source, target, out_dir, backup)
 
     try:
-        info = run_sync(source, target, out_dir, dry_run, overlays, measure)
+        info = run_sync(source, target, out_dir, dry_run, overlays, measure,
+                        follow_labels=follow_labels)
     except SystemExit as exc:
         # `sync.sync` says no by exiting. Without a base there is nothing to merge against: the
         # deck's own edits cannot be told apart from what the last conversion put there.
@@ -497,6 +502,7 @@ def deck_sync(
         "applied": len(report["applied"]),
         "kept": len(report["overrides"]),
         "conflicts": len(report["conflicts"]),
+        "held": [h["slide"] for h in report["slides"].get("held") or []],
         "warnings": len(report["warnings"]),
         "requests": requests,
         "requests_by_phase": sent,
@@ -517,7 +523,11 @@ def deck_sync(
                     f"{requests} request(s) were sent; the revision before them is in the "
                     f"recovery block.")
                  + (" Every conflict is a place both sides changed, where the deck won - read them "
-                    "before deciding the source is right." if report["conflicts"] else ""))
+                    "before deciding the source is right." if report["conflicts"] else "")
+                 + (f" {len(j.data['held'])} slide(s) were held back with nothing written: a frame label "
+                    f"may have moved onto another frame, so which frame those slides belong to is in "
+                    f"doubt. That is a question for the person, not for you - ask them to check the "
+                    f"`.tex`." if j.data.get("held") else ""))
     if dry_run and not report["conflicts"]:
         j.suggest("run deck_sync again with dry_run=False")
     elif dry_run:

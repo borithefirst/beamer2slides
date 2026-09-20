@@ -18,8 +18,14 @@ against the truth:
     now         the same with the moved-label check as well (what sync does)
 
 and counts what the check said about each round: `moved` (the content decided), `unsure` (the
-label was followed and the report asks), or nothing. A false alarm is an `unsure` or `moved` in a
+report asks and the slide is held back), or nothing. A false alarm is an `unsure` or `moved` in a
 round whose labels nobody touched; a miss is a frame the `now` pairing still gets wrong.
+
+A wrong pairing is not the same as a wrong write, and the last two lines of each group are that
+difference. `costly` is the frames on a slide that really would end up saying something else
+(`_costly`); `written` is what is left of them once the slides `merge.hold_slide` refuses to write
+to are taken out. The gap between the two is what holding an `unsure` slide back buys, and the
+`unsure` count in the sound groups is what it costs.
 
 Rounds that moved a frame are counted apart, because a frame that crossed another has a second way
 of losing its identity: the alignment keeps the order, so one of the two falls out of it.
@@ -83,7 +89,7 @@ def _wrong(pairs, ours_truth, base_truth) -> int:
     return len(_wrong_frames(pairs, ours_truth, base_truth))
 
 
-def _costly(wrong, pairs, ours_truth, base_truth, ours) -> int:
+def _costly(wrong, pairs, ours_truth, base_truth, ours) -> list[int]:
     """Of the frames on the wrong slide, the ones a person would see.
 
     Two frames that say *word for word* the same thing are interchangeable: sync writes this
@@ -96,14 +102,14 @@ def _costly(wrong, pairs, ours_truth, base_truth, ours) -> int:
     def words(info: dict) -> tuple:
         return info.get("title", ""), tuple(info["text"].split())
 
-    costly = 0
+    costly = []
     for j in wrong:
         i = pairs.get(j)
         mate = None
         if i is not None and base_truth[i] in ours_truth:
             mate = ours_truth.index(base_truth[i])
         if mate is None or words(ours[mate]) != words(ours[j]):
-            costly += 1
+            costly.append(j)
     return costly
 
 
@@ -173,9 +179,15 @@ def round_once(seed: int, label_chance: float, tmp: Path, chain: int = 1,
                 return True
             return i is not None and bool(base_infos[i].get("label")) \
                 and infos[j].get("label") != base_infos[i].get("label")
+        # A slide `merge.plan_merge` holds back is a slide nothing is written to, so a frame paired
+        # with it lands nowhere: the pairing is wrong and the person is asked, but their edits are
+        # not merged with another frame's sentences. `written` is what is left of `costly` once the
+        # held ones are taken out - the frames sync really does put on the wrong slide.
+        held = {m["ours"] for m in moves if m["verdict"] == "unsure"}
+        costly = _costly(wrong_now, pairings["now"], ours_truth, base_truth, infos)
         steps.append({"seed": seed, "step": step, "broke": broke, "said": said, "ops": done,
                       "weak": sum(1 for j in wrong_now if warned(j)), "weak_all": len(weak),
-                      "costly": _costly(wrong_now, pairings["now"], ours_truth, base_truth, infos),
+                      "costly": len(costly), "written": sum(1 for j in costly if j not in held),
                       "reordered": any(line.startswith("move_slide") and not line.endswith("None") for line in done),
                       "wrong": {k: _wrong(p, ours_truth, base_truth) for k, p in pairings.items()},
                       "frames": len(ours_truth)})
@@ -213,6 +225,7 @@ def main() -> int:
                     frames[f"{group}/{how}"] += w
                 frames[f"{group}/frames"] += r["frames"]
                 frames[f"{group}/costly"] += r["costly"]
+                frames[f"{group}/written"] += r["written"]
                 tally[f"{group}/warned"] += r["weak_all"]
                 if r["wrong"]["now"]:
                     told = r["said"] != "quiet" or r["weak"]
@@ -233,9 +246,13 @@ def main() -> int:
             w = frames[f"{group}/{how}"]
             print(f"  {how:6} misidentified {w:5} frames ({100 * w / max(1, frames[f'{group}/frames']):.2f}%)")
         costly = frames[f"{group}/costly"]
+        total = max(1, frames[f"{group}/frames"])
         print(f"  of the `now` frames, {costly} a person would see "
-              f"({100 * costly / max(1, frames[f'{group}/frames']):.2f}%); the rest are frames that "
+              f"({100 * costly / total:.2f}%); the rest are frames that "
               f"say word for word what the frame they displaced says")
+        written = frames[f"{group}/written"]
+        print(f"  of those, {written} are written onto the wrong slide ({100 * written / total:.2f}%); "
+              f"{costly - written} are on a slide sync holds back and writes nothing to")
         print("  said " + ", ".join(f"{s} in {tally[f'{group}/said:{s}']}" for s in ("moved", "unsure", "quiet")))
         print(f"  of the rounds still wrong, {tally[f'{group}/said so']} were reported and "
               f"{tally[f'{group}/silent']} passed in silence; {tally[f'{group}/worse']} came out worse than before")

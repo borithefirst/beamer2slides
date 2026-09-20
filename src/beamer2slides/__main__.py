@@ -257,6 +257,9 @@ def main() -> None:
     c.add_argument("--backup", choices=list(BACKUP_MODES), default="auto",
                    help="keep a way back before sync's first write: auto = file (a .pptx in <out>/backups), "
                         "none, drive (a copy of the presentation), both")
+    c.add_argument("--follow-labels", dest="follow_labels", action="store_true",
+                   help="write to a slide whose label may have moved onto another frame (docs/sync.md, When a "
+                        "label moved): by default such a slide is held back and nothing is written to it")
     c.add_argument("--force-adopted-deck", dest="force_adopted", action="store_true",
                    help="write into an adopted deck although sync cannot vouch for what it would write "
                         "(docs/sync.md, Adopt): the objects were made by a person, not by this converter")
@@ -356,15 +359,18 @@ def main() -> None:
             # The recovery note carries the backup that was (or was not) kept: an adopted deck has
             # no way back at all unless one was, so the refusal has to be able to ask.
             info = sync(args.pdf, args.deck, args.out, args.dry_run, args.overlays, not args.predict_places,
-                        (note or {}).get("entry", {}).get("backup"), args.backup, args.force_adopted)
+                        (note or {}).get("entry", {}).get("backup"), args.backup, args.force_adopted,
+                        args.follow_labels)
         except FirstSyncRefused as refused:
             raise SystemExit(str(refused)) from None
         if note:
             add_recovery(note, info)
         r = info["report"]
         sent = info["requests"] or {}          # Sync.sent counts them per phase, not in total
+        held = r["slides"].get("held") or []
         print(f"sync{' (dry run)' if args.dry_run else ''}: {len(r['applied'])} source changes applied, "
               f"{len(r['overrides'])} deck edits kept, {len(r['conflicts'])} conflicts, "
+              + (f"{len(held)} slide(s) held back, " if held else "") +
               f"requests {sum(sent.values()) if isinstance(sent, dict) else sent}")
         for c in r["conflicts"]:
             print(f"  conflict: {c['slide']} / {c['element']}: {c['field']} ({c['resolution']})")

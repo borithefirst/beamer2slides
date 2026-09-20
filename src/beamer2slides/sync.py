@@ -506,7 +506,8 @@ def matrix_request(oid: str, m: list[float]) -> dict:
 
 class Sync:
     def __init__(self, slides, drive, pid: str, base: dict, ours: dict, out: Path, dry_run: bool = False,
-                 measure: bool = True, trust_generation: bool = True, check_plan=None):
+                 measure: bool = True, trust_generation: bool = True, check_plan=None,
+                 follow_labels: bool = False):
         # check_plan(mplan, theirs): raises instead of letting the write go ahead. It sits between
         # planning and preparing because that is the last point at which nothing has been sent and
         # the whole of what would be written is known (adopt_sync.problems).
@@ -515,6 +516,7 @@ class Sync:
         self.base, self.ours, self.out = base, ours, out
         self.dry_run, self.measure = dry_run, measure
         self.trust_generation = trust_generation  # may this base's generation decide what is a leftover?
+        self.follow_labels = follow_labels        # write to a slide whose label may have moved (merge.hold_slide)
         self.plan = ours["plan"]
         self.scale = self.plan.scale
         self.tok = self.token()
@@ -589,7 +591,8 @@ class Sync:
             if self.recovery.get("restore"):
                 restore_in_place(theirs, self.recovery["restore"])
             self.sign_changed(theirs, pres)
-            mplan = merge.plan_merge(self.base, self.ours, theirs, self.picture_adopter(pres))
+            mplan = merge.plan_merge(self.base, self.ours, theirs, self.picture_adopter(pres),
+                                     follow_labels=self.follow_labels)
             if self.check_plan is not None:
                 self.check_plan(mplan, theirs)  # (adopt_sync: an adopted deck this may not be written to)
             work = self.prepare(mplan, pres, theirs)
@@ -1600,6 +1603,15 @@ class Sync:
                 # slide the source no longer describes must not hold a live label hostage.
                 entries[p["objectId"] or f"gone:{p['key']}"] = {**self.base["slides"][p["base"]], "label": None}
                 continue
+            if p.get("held"):
+                # Nothing was written here (`merge.hold_slide`), and the entry must not say
+                # otherwise. An entry takes its label, title and words from the source, so a held
+                # slide recorded the usual way would read next time as a change already made - and
+                # the edit this sync held back would be gone for good instead of waiting for the
+                # labels to be put right.
+                b = self.base["slides"][p["base"]]
+                entries[b["objectId"]] = dict(b)
+                continue
             o = self.ours["slides"][p["ours"]]
             sid = w["sid"]
             read = now.get(sid)
@@ -1742,6 +1754,7 @@ def write_reports(out: Path, info: dict) -> tuple[Path, Path]:
     s = r["slides"]
     lines += ["## Slides", f"- created: {s['created'] or 'none'}", f"- deleted: {s['deleted'] or 'none'}",
               f"- moved: {s['moved'] or 'none'}", f"- kept (removed from the source, edited in the deck): {s['kept'] or 'none'}",
+              f"- held (nothing written: which frame the slide is is in doubt): {s.get('held') or 'none'}",
               f"- added in the deck: {s['user_added'] or 'none'}", ""]
     section("Objects added in the deck", r["user_objects"], lambda x: f"- `{x['slide']}`: {x['objectId']}" + (f" (copy of {x['copy_of']})" if x.get("copy_of") else ""))
     section("Warnings", r["warnings"], lambda x: f"- {x}")
@@ -1765,7 +1778,7 @@ def overlay_mode(asked: str | None, recorded: str | None) -> tuple[str, str | No
 
 def sync(pdf: Path, deck: str, out: Path | None = None, dry_run: bool = False, overlays: str | None = None,
          measure: bool = True, way_back: dict | None = None, backup_mode: str = "auto",
-         force_adopted: bool = False) -> dict:
+         force_adopted: bool = False, follow_labels: bool = False) -> dict:
     from . import adopt_sync
     from .google_auth import drive_service, slides_service
 
@@ -1806,7 +1819,7 @@ def sync(pdf: Path, deck: str, out: Path | None = None, dry_run: bool = False, o
         check = check_plan
     # A base that may be behind the deck never decides on its own that an object is a leftover.
     s = Sync(slides, drive, pid, base, ours, out, dry_run, measure, trust_generation=stale is None,
-             check_plan=check)
+             check_plan=check, follow_labels=follow_labels)
     result = s.run()
     report = result["plan"]["report"]
     report["warnings"] += s.warnings + warnings

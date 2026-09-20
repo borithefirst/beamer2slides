@@ -1217,6 +1217,27 @@ def test_a_slide_the_source_dropped_keeps_no_label_in_the_new_base():
     assert identity.label_pairs(written["slides"], ours) == {}
 
 
+def test_a_held_slide_keeps_the_base_it_had():
+    """`merge.hold_slide` wrote nothing to this slide, so the base must not say the source's words
+    arrived. An entry otherwise takes its label, title and text from `ours`, and then the next sync
+    would read the edit this one held back as a change already made - the one way to actually lose
+    work by waiting."""
+    from beamer2slides.sync import Sync
+    base = three_slides()
+    s = Sync.__new__(Sync)
+    s.warnings, s.base, s.final_revision = [], base, "r2"
+    s.ours = {"slides": [{**ours_of(base["slides"][1]), "title": "Results v2", "text": "quite different now"}],
+              "source": Path("talk.pdf")}
+    s.created = {"slides": []}
+    plans = [{"key": "results", "action": "update", "held": "label", "ours": 0, "base": 1,
+              "objectId": "b2s_s001", "units": []}]
+    result = {"plan": {"slides": plans}, "theirs": {"slides": [{"objectId": "b2s_s001"}]},
+              "work": {"slides": [{"plan": plans[0], "sid": "b2s_s001"}]}}
+    (written,) = s.new_base(result)["slides"]
+    assert written["title"] == "Results" and written["text"] == base["slides"][1]["text"]
+    assert written["elements"] == base["slides"][1]["elements"]
+
+
 def test_renamed_title_keeps_its_key():
     """A retitled frame's title inherits the title key (it was deleted and recreated as a plain text
     box above the placeholder's place)."""

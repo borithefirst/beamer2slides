@@ -9,6 +9,8 @@ line between "this label is somewhere else now" and the plausible edits that loo
 
 from beamer2slides import identity, merge
 
+from .test_sync import live, many_slides, ours_of, text_ir
+
 
 def info(title, text, label=None, page=0):
     return {"label": label, "title": title, "text": text, "page": page}
@@ -290,9 +292,9 @@ def test_a_label_written_into_a_frame_that_had_none_is_not_a_move():
 
 # ---------------------------------------------------------------- what the report says
 
-def report_of(moves):
+def report_of(moves, held=True):
     report = merge.empty_report()
-    merge.report_label_moves(moves, report)
+    merge.report_label_moves(moves, report, held=held)
     return report
 
 
@@ -313,17 +315,31 @@ def unsure_move():
              "slide_is": None, "slide_score": None, "frame_is": "x", "frame_score": 1.4}]
 
 
-def test_an_unsure_move_says_that_it_followed_the_label():
+def test_an_unsure_move_says_that_nothing_was_written_to_that_slide():
     (c,) = report_of(unsure_move())["conflicts"]
+    assert "nothing written to this slide" in c["resolution"]
+
+
+def test_an_unsure_move_under_follow_labels_says_it_followed_the_label():
+    """`--follow-labels` is a person saying they have read the `.tex` and the labels are right, so
+    the sync writes - and the report says that is what it did, not that the slide was left alone."""
+    (c,) = report_of(unsure_move(), held=False)["conflicts"]
     assert "followed the label" in c["resolution"] and "nothing re-paired" in c["resolution"]
 
 
-def test_an_unsure_move_names_the_slide_that_is_about_to_be_written_on():
-    """A question with no consequence attached is a question nobody acts on. `unsure` re-pairs
-    nothing, which means the sync goes ahead and writes the frame now carrying the label onto the
-    slide the label names - the slide somebody has been editing. That slide is what the reader has
-    to look at, so the warning names it rather than leaving them to work it out."""
+def test_an_unsure_move_names_the_slide_that_was_left_alone():
+    """A question with no consequence attached is a question nobody acts on. What hangs on this one
+    is a slide: the frame now carrying the label would go onto the slide the label names, which is
+    a slide somebody has been editing. It is held back instead, and the warning says which slide,
+    what would have happened to it, and how to say that it should happen after all."""
     (w,) = report_of(unsure_move())["warnings"]
+    assert "Nothing was written to the slide `mobile`" in w
+    assert "edits and all" in w and "--follow-labels" in w
+    assert "The rest of the deck was synced." in w
+
+
+def test_under_follow_labels_the_warning_names_the_slide_about_to_be_written_on():
+    (w,) = report_of(unsure_move(), held=False)["warnings"]
     assert "writes the frame carrying `mobile` onto the slide `mobile`" in w
     assert "edits and all" in w and "that is the slide to look at" in w
 
@@ -336,7 +352,7 @@ def test_a_decided_move_does_not_threaten_a_slide_it_is_not_writing_on():
     for m in moves:
         m["slide"], m["frame_is"], m["slide_is"] = "mobile", "title:arriving labels#1", "Moving labels"
     (w,) = report_of(moves)["warnings"]
-    assert "the slide to look at" not in w and "went by the content" in w
+    assert "Nothing was written to the slide" not in w and "went by the content" in w
 
 
 def test_a_label_that_was_renamed_is_a_warning_not_a_conflict():
@@ -351,3 +367,83 @@ def test_a_label_that_was_renamed_is_a_warning_not_a_conflict():
     assert report["conflicts"] == []
     (w,) = report["warnings"]
     assert "`introduction` now" in w and "`intro`" in w
+
+
+# ---------------------------------------------------------------- what is written
+
+def three_way(unsure_slide: int | None):
+    """Three slides, the source rewording the middle one's body, and - if asked - a label whose
+    move `identity.label_moves` could not settle sitting on that very frame."""
+    base = many_slides(["intro", "results", "end"])
+    ours = {"slides": [ours_of(s) for s in base["slides"]], "pairs": {j: j for j in range(3)}}
+    body = ours["slides"][1]["elements"][1]
+    body["ir"] = text_ir("A different first point\nA different second point", (20, 60, 200, 90), "p1t1")
+    h, fields = identity.ir_fields(body["ir"], None, None)
+    body.update(ir_hash=h, fields=fields, fingerprint=identity.fingerprint(body["ir"], None, None))
+    if unsure_slide is not None:
+        ours["label_moves"] = [{"label": "results", "verdict": "unsure", "ours": unsure_slide, "base": unsure_slide,
+                                "similarity": 0.4, "slide": "results", "base_title": "Results",
+                                "ours_title": "Results", "slide_is": None, "slide_score": None,
+                                "frame_is": "end", "frame_score": 1.3}]
+    theirs = {"revisionId": "r", "slides": [live(s) for s in base["slides"]]}
+    return base, ours, theirs
+
+
+def writes(mplan, theirs) -> bool:
+    return merge.has_writes(mplan, [s["objectId"] for s in theirs["slides"]])
+
+
+def test_a_slide_whose_label_may_have_moved_is_not_written_to():
+    """The verdict the check cannot settle is the one place the merge does not know which frame a
+    slide is, and every rule after it assumes it does. So the slide waits: nothing is planned for
+    it, the report says so, and the rest of the deck is synced as usual."""
+    base, ours, theirs = three_way(unsure_slide=1)
+    mplan = merge.plan_merge(base, ours, theirs)
+    held = next(p for p in mplan["slides"] if p["key"] == "results")
+    assert held.get("held") == "label" and held["units"] == []
+    assert not writes(mplan, theirs), "the only source change there was is on the held slide"
+    assert mplan["report"]["slides"]["held"] == [{"slide": "results", "reason": "label", "label": "results"}]
+    assert not any(a["slide"] == "results" for a in mplan["report"]["applied"])
+
+
+def test_holding_one_slide_does_not_hold_the_talk():
+    """One ambiguous label freezes one slide. A source change on any other slide goes in, which is
+    what makes waiting cheap enough to be the default."""
+    base, ours, theirs = three_way(unsure_slide=2)   # the doubt is about `end`, the edit about `results`
+    mplan = merge.plan_merge(base, ours, theirs)
+    assert writes(mplan, theirs)
+    assert [a["slide"] for a in mplan["report"]["applied"]] == ["results"]
+    assert [h["slide"] for h in mplan["report"]["slides"]["held"]] == ["end"]
+
+
+def test_follow_labels_writes_the_held_slide_after_all():
+    """A person who has read the `.tex` and knows the labels are right says so, and then the sync
+    does what it always did - follows the label."""
+    base, ours, theirs = three_way(unsure_slide=1)
+    mplan = merge.plan_merge(base, ours, theirs, follow_labels=True)
+    assert writes(mplan, theirs)
+    assert mplan["report"]["slides"]["held"] == []
+    assert [a["slide"] for a in mplan["report"]["applied"]] == ["results"]
+
+
+def test_a_held_slide_is_not_moved_either():
+    """A slide's place in the merged order is its place *as that frame*, and which frame it is is
+    the open question. So the order leaves it where the deck has it, like a slide the person
+    dragged - nothing about a held slide changes until somebody answers the question."""
+    base, ours, theirs = three_way(unsure_slide=1)
+    ours["slides"] = [ours["slides"][1], ours["slides"][0], ours["slides"][2]]   # the source moved it first
+    ours["pairs"] = {0: 1, 1: 0, 2: 2}
+    ours["label_moves"][0]["ours"] = 0
+    mplan = merge.plan_merge(base, ours, theirs)
+    assert mplan["order"] == ["b2s_s000", "b2s_s001", "b2s_s002"], "held where the deck has it"
+    assert merge.plan_merge(base, ours, theirs, follow_labels=True)["order"] \
+        == ["b2s_s001", "b2s_s000", "b2s_s002"], "and moved once somebody says the label is right"
+
+
+def test_a_settled_move_writes_where_the_content_says():
+    """`moved` is not `unsure`: the content decided which frame the slide is, so there is nothing
+    left to wait for and the slide is written."""
+    base, ours, theirs = three_way(unsure_slide=1)
+    ours["label_moves"][0]["verdict"] = "moved"
+    mplan = merge.plan_merge(base, ours, theirs)
+    assert writes(mplan, theirs) and mplan["report"]["slides"]["held"] == []

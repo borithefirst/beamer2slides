@@ -675,17 +675,21 @@ def plan_unit(skey: str, ukey: str, base_members: list[dict] | None, ours_member
 
 def empty_report() -> dict:
     return {"applied": [], "overrides": [], "conflicts": [], "converged": [], "user_objects": [],
-            "slides": {"created": [], "deleted": [], "moved": [], "kept": [], "user_added": []}, "warnings": []}
+            "slides": {"created": [], "deleted": [], "moved": [], "kept": [], "held": [], "user_added": []},
+            "warnings": []}
 
 
-def report_label_moves(moves: list[dict], report: dict) -> None:
+def report_label_moves(moves: list[dict], report: dict, held: bool = True) -> None:
     r"""Conflicts for the labels `identity.label_moves` found somewhere else than it left them.
 
     There is no resolution to offer here, which is the point: a three-way merge writes what it can
     and hands back what it cannot, and which frame is which is exactly what it cannot. What sync
-    did with the slide is said plainly - either the content decided, or the label was followed
-    anyway - so whoever reads this knows what they are looking at before they go and fix the
+    did with the slide is said plainly - either the content decided, or the slide was left alone -
+    so whoever reads this knows what they are looking at before they go and fix the
     `.tex` (docs/ai-authoring.md).
+
+    `held` is whether an `unsure` verdict stops this sync writing to that slide (`plan_merge`,
+    `--follow-labels` turns it off).
     """
     for m in moves:
         moved = m["verdict"] == "moved"
@@ -699,27 +703,34 @@ def report_label_moves(moves: list[dict], report: dict) -> None:
             "slide": m.get("slide") or m["label"], "element": None, "field": "label",
             "base": base_says, "ours": ours_says, "theirs": None,
             "resolution": ("the label moved: identity taken from the content instead" if moved else
+                           "either the label moved or that passage did: nothing written to this slide" if held else
                            "either the label moved or that passage did: followed the label, nothing re-paired"),
         })
-        # An `unsure` verdict re-pairs nothing, so saying only "check the .tex" leaves the reader
-        # to work out what happens if they do not. What happens is that this sync writes the frame
-        # now carrying the label onto the slide the label names - the slide with somebody's edits
-        # on it - so that slide is the one to look at, and it is named.
-        at_risk = (f" This sync writes the frame carrying `{m['label']}` onto the slide "
-                   f"`{m.get('slide') or m['label']}`, edits and all, so that is the slide to look at."
-                   if not moved else "")
+        # An `unsure` verdict re-pairs nothing, so saying only "check the .tex" leaves the reader to
+        # work out what happens if they do not. What happens is that the frame now carrying the
+        # label would be written onto the slide the label names - the slide with somebody's edits on
+        # it. That slide is named, and by default it is held back rather than written.
+        slide = m.get("slide") or m["label"]
+        at_risk = "" if moved else (
+            f" Nothing was written to the slide `{slide}`: the frame carrying `{m['label']}` would have gone "
+            f"onto it, edits and all, and which frame that slide belongs to is the question. The rest of the "
+            f"deck was synced. `--follow-labels` writes it anyway."
+            if held else
+            f" This sync writes the frame carrying `{m['label']}` onto the slide `{slide}`, edits and all, "
+            f"so that is the slide to look at.")
         report["warnings"].append(
             f"label `{m['label']}` is not on the frame this deck's slide was made from" + (
                 ". Deck edits belong to the words a person edited, so sync went by the content and not by the "
                 "label. Put the label back on its own frame" if moved else
-                ", or a passage moved between two frames - from the PDF alone the two look the same. Sync "
-                "followed the label. Check the `.tex`: if the label moved, put it back") +
+                ", or a passage moved between two frames - from the PDF alone the two look the same. Check the "
+                "`.tex`: if the label moved, put it back; if the passage did, the labels are right") +
             ": docs/labels.md, \"If a label does change\"." + at_risk)
 
 
-def plan_merge(base: dict, ours: dict, theirs: dict, adopt=None) -> dict:
+def plan_merge(base: dict, ours: dict, theirs: dict, adopt=None, follow_labels: bool = False) -> dict:
     """ours: {"slides": [slide entries with inherited keys], "pairs": {ours index: base index}}.
     `adopt`: see plan_unit (a picture the deck already shows).
+    `follow_labels`: write to a slide whose label `identity.label_moves` is unsure about anyway.
     Returns {"slides": [per slide plan], "order": [live slide ids or "new:<key>"], "report"}."""
     report = empty_report()
     live = {s["objectId"]: s for s in theirs["slides"]}
@@ -727,7 +738,14 @@ def plan_merge(base: dict, ours: dict, theirs: dict, adopt=None) -> dict:
     pairs = {int(k): v for k, v in ours["pairs"].items()}
     matched_base = set(pairs.values())
     plans = []
-    report_label_moves(ours.get("label_moves") or [], report)
+    moves = ours.get("label_moves") or []
+    report_label_moves(moves, report, held=not follow_labels)
+    # An `unsure` label move is the one place where this merge does not know which frame a slide
+    # belongs to, and every other rule here assumes it does: the words are merged, the deck's edits
+    # kept, the source's changes written - onto whichever slide the pairing names. Get that wrong
+    # and nothing is deleted and nothing is lost, but one frame's sentences land beside somebody's
+    # edits about another frame, and the way back is by hand. So the slide waits.
+    held = set() if follow_labels else {m["ours"] for m in moves if m["verdict"] == "unsure"}
 
     weak = {int(k): v for k, v in (ours.get("weak_pairs") or {}).items()}
     for j, o in enumerate(ours["slides"]):
@@ -775,6 +793,9 @@ def plan_merge(base: dict, ours: dict, theirs: dict, adopt=None) -> dict:
                 report["conflicts"].append({"slide": o["key"], "element": None, "field": "slide", "base": "slide",
                                             "ours": "changed", "theirs": "deleted", "resolution": "kept deleted"})
             plans.append({"key": o["key"], "action": "gone", "ours": j, "base": i, "objectId": None})
+            continue
+        if j in held:
+            plans.append(hold_slide(b, o, read, report, j, i))
             continue
         plans.append(plan_slide(b, o, read, report, base, j, i, adopt))
 
@@ -846,6 +867,30 @@ def deck_scale(base: dict) -> float | None:
     if base.get("deck_page_size") and base.get("page_size"):
         return base["deck_page_size"][0] / base["page_size"][0]
     return None
+
+
+def hold_slide(b: dict, o: dict, read: dict, report: dict, j: int, i: int) -> dict:
+    r"""A slide this sync writes nothing to, because which frame it is is in doubt.
+
+    `identity.label_moves` says `unsure` when something in the deck looks exactly like what this
+    label used to name: either the label moved onto another frame, or the author moved that passage
+    between two frames, and from the PDF alone the two are the same picture. The label was followed
+    anyway until now - the safest thing a *pairing* can do, since re-pairing on a guess is how edits
+    land on the wrong slide - but following it is a write, and a write onto the wrong slide is the
+    same mistake one step later: the frame's new sentences merged into the person's edits about a
+    different frame, with no deletion, no loss and no way back but by hand.
+
+    Nothing is lost by waiting. The source still says what it says, the deck still says what it
+    says, the base is left as it was (`sync.Sync.new_base`), so the next sync plans this slide from
+    scratch - and if the label was put back, it plans it right. The rest of the deck is synced as
+    usual: one ambiguous label freezes one slide, not the talk. A person who has looked and knows
+    the labels are right says so with `--follow-labels`.
+    """
+    report["slides"]["held"].append({"slide": o["key"], "reason": "label", "label": o.get("label")})
+    for u in user_objects(b, read):
+        report["user_objects"].append({"slide": o["key"], **u})
+    return {"key": o["key"], "action": "update", "held": "label", "ours": j, "base": i,
+            "objectId": b["objectId"], "units": []}
 
 
 def plan_slide(b: dict, o: dict, read: dict, report: dict, base: dict, j: int, i: int, adopt=None) -> dict:
@@ -949,15 +994,19 @@ def plan_order(base: dict, ours: dict, theirs: dict, plans: list[dict],
         prev = next((base["slides"][q]["objectId"] for q in range(k - 1, -1, -1)
                      if base["slides"][q].get("objectId") in order), None)
         order.insert(order.index(prev) + 1 if prev else 0, p["objectId"])
-    # slides the deck moved: out of their base order there, so back beside what they follow now
-    for sid in _out_of_place(was, existing):
+    # slides the deck moved: out of their base order there, so back beside what they follow now.
+    # A slide held back (`hold_slide`) is placed the same way, and for the same reason one step
+    # further on: its place in the source's order is its place *as that frame*, and which frame it
+    # is is the open question. Nothing about it changes until somebody answers that.
+    deck_placed = _out_of_place(was, existing)
+    for sid in deck_placed + [p["objectId"] for p in plans if p.get("held") and p["objectId"] not in deck_placed]:
         if sid not in order:
             continue
         order.remove(sid)
         k = live_order.index(sid)
         prev = next((live_order[q] for q in range(k - 1, -1, -1) if live_order[q] in order), None)
         order.insert(order.index(prev) + 1 if prev else 0, sid)
-        if report is not None and sid in source_moved:
+        if report is not None and sid in source_moved and sid in deck_placed:
             report["warnings"].append(
                 f"slide {base_by_id[sid]['key']}: both the source and the deck moved this slide; "
                 f"it stays where the deck put it.")

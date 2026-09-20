@@ -27,6 +27,7 @@ reported as a conflict (with both versions) so the author can decide.
 python -m beamer2slides sync deck.pdf --deck <url|id|out folder> [--out DIR] [--dry-run]
                                       [--overlays last|all] [--predict-places]
                                       [--backup auto|none|file|drive|both] [--force-adopted-deck]
+                                      [--follow-labels]
 ```
 `--out` defaults to the folder given as `--deck` (else `out/<pdf stem>`). The new conversion goes to
 `<out>/sync/ours/`, reports to `<out>/sync/sync-report.{json,md}` (`sync-report-dry-run.*` for a dry
@@ -335,11 +336,10 @@ its own label can never be stolen.
   labelled slide is recognisably some other source frame. The label is ignored and the content
   decides. That is also where the person's edits belong: they edited those words, not that label.
 - **`unsure`** - only one of the two. Either a label moved, or the author moved a passage from one
-  frame to another; from the PDF the two look the same. The label is followed and nothing is
-  re-paired - so the warning names the slide that is about to be written on ("this sync writes the
-  frame carrying `q3` onto the slide `q3`, edits and all, so that is the slide to look at"). A
-  question with no consequence attached is a question nobody acts on, and this one has a
-  consequence whether or not anybody reads it.
+  frame to another; from the PDF the two look the same. Nothing is re-paired, and **nothing is
+  written to that slide either**: it is held back and named ("nothing was written to the slide
+  `q3`: the frame carrying `q3` would have gone onto it, edits and all, and which frame that slide
+  belongs to is the question"). See "A slide held back" below.
 - **silence** - neither. A frame rewritten from scratch looks exactly like a label move from one
   side, and that is a plausible edit, not a broken invariant.
 
@@ -347,6 +347,40 @@ Both verdicts are **conflicts** in the report (`field: label`), because which fr
 question with an answer and guessing it wrong is the one mistake here that quietly moves somebody's
 work. A label renamed or dropped where the content still recognises the frame is a **warning**: the
 slide kept its identity, but the source has one hook fewer for the next version.
+
+### A slide held back
+An `unsure` verdict is the one place in this merge where **which frame a slide is** is an open
+question, and every rule after it assumes the question is closed: the words are merged, the deck's
+edits kept, the source's changes written - onto whichever slide the pairing names. Following the
+label was the safest thing a *pairing* could do, since re-pairing on a guess is how edits land on
+the wrong slide; but following it is also a write, and a write onto the wrong slide is the same
+mistake one step later. Nothing is deleted and no words disappear - one frame's new sentences are
+merged into somebody's edits about a different frame, and the way back is by hand.
+
+So the slide waits (`merge.hold_slide`). Nothing is planned for it, it is not even moved - a
+slide's place in the merged order is its place *as that frame*, so it stays where the deck has it,
+like a slide somebody dragged (`merge.plan_order`) - and the base keeps the entry it had
+(`sync.new_base`: a base that recorded the source's words here would read them next time as a
+change already arrived, and the edit held back would be gone for good). The next sync plans
+that slide from scratch - correctly, if the label was put back meanwhile. **The rest of the deck
+is synced as usual**: one ambiguous label freezes one slide, not the talk, which is what makes
+waiting cheap enough to be the default. The report lists it under `held`, the terminal says how
+many, and `deck_sync` hands an agent the slide keys with the instruction that this is a question
+for the person.
+
+A person who has read the `.tex` and knows the labels are right says so with **`--follow-labels`**,
+and the sync does what it always did. That is the house rule for everything here that refuses:
+`--force-rebuild`, `--force-adopted-deck`, `--backup none` - a refusal is undone by somebody
+saying, in words, that they have looked.
+
+Measured by the campaign below, which counts the difference between a wrong *pairing* and a wrong
+*write*: on 1339 adopt-shaped broken rounds (7349 frames), four revisions deep, 98 frames end up on
+a slide that really would say something else - and **66 of those 98 are on a slide sync now writes
+nothing to**, leaving 32 (1.33% → **0.44%** of the frames). On a converted talk, the same four-deep
+campaign: 58 costly frames in 1288 broken rounds, 31 of them held, 27 written (0.97% → **0.45%**).
+The price is in the sound rounds: 3 `unsure` verdicts in 1366 adopt-shaped ones and **none at all**
+in 1449 converted ones, so about one sync in 450 on the hardest deck shape there is holds one slide
+back for a person to confirm, and on a talk this converter wrote, none.
 
 An explanation counts when it is good on its own (`LABEL_MOVED`) and beats the label's own pairing
 by `LABEL_MARGIN` (0.5), which is what keeps an overlay step, a retitled frame or a frame edited
@@ -446,6 +480,11 @@ would have received anyway, so the pairing is wrong on paper and nowhere else. O
 repeats itself that is not a rare accident — of 32 misidentified frames in 372 broken rounds, 6 are
 of that kind — and a number counting them is one nobody can feel. The columns above are the strict
 count; the costly one is the one to improve.
+
+And a costly pairing is still not a write. The line after it (`written`) takes out the frames whose
+slide this sync holds back ("A slide held back" above), which is what a person actually receives:
+of 98 costly frames in a four-deep adopt-shaped campaign, 32 are written onto the wrong slide and
+66 onto no slide at all (on a converted talk, 27 of 58).
 
 `before` equals `order` frame for frame: `cross_pairs` and `gap_pairs`, which take 5.53% to 0.00% on
 a converted talk, **recover nothing at all** here — one leftover never explains one slide

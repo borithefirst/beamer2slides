@@ -126,15 +126,21 @@ A conflict about **identity** is different. It looks like this:
 ```
 
 Sync is telling you that `[label=mobile]` is not on the frame this deck's slide was made from. It
-has already done the safe thing - either it went by the content (`the label moved`) or it followed
-the label and re-paired nothing (`either the label moved or that passage did`) - and it is asking
-you to put the source right so the next sync has nothing to work out.
+has already done the safe thing - either it went by the content (`the label moved`) or, where only
+half the story fit, it wrote **nothing at all** to that slide (`nothing written to this slide`) and
+synced the rest of the deck - and it is asking you to put the source right so the next sync has
+nothing to work out. A slide held back is not a slide that failed: it is waiting, it keeps the base
+it had, and the next sync writes it once the labels say which frame it is.
 
 **Do not guess, and do not resolve it by moving the label again.** Open the `.tex`, find the two
 frames named in the conflict, and either put the label back on the frame whose words the deck's
 slide shows, or say in your reply that the two frames genuinely changed places and let a person
 confirm. Everything else in this system is recoverable; a wrong identity silently moves somebody's
 work onto another slide.
+
+**Never reach for `--follow-labels`** to make a held slide go through. It says "I have read the
+source and the labels are right", which is a claim about the author's intent, and only the person
+can make it. Your job is to fix the `.tex` or to report what you found.
 
 A **warning** about a label (renamed, or gone) means the content recognised the frame anyway, so
 nothing was at risk - but put the label back to what it was, or the next edit has nothing to fall
