@@ -15,9 +15,17 @@ a human at a browser. That is all this package is.
 Schema, `mcp.py` serves it over MCP - and `INSTRUCTIONS` is the guide that has to travel with
 them, because the rules this library lives by (a rebuild never destroys deck edits, a frame's
 label is its identity, sync before you rebuild) are not deducible from the schemas.
+
+A harness with no filesystem to name passes content instead of paths and gets content back
+(`content.py`); the workspace underneath is a temporary directory nobody outside the context
+learns the name of.
+
+    with AgentContext.detached(google=InjectedToken(token)) as ctx:
+        deck_inspect(ctx, pdf={"name": "talk.pdf", "base64": encoded})
 """
 
 from .auth import GoogleAccess, InjectedToken, NoGoogle, TokenFile, default_access
+from .content import MemoryWorkspace, deliver, take_in
 from .context import ALL_ACTIONS, LOCAL_ONLY, READ_ONLY, AgentContext, Job, tool
 from .types import (CODES, READS, READS_GOOGLE, WRITES, WRITES_GOOGLE, Artifact, Diagnostic,
                     Refused, Result)
@@ -25,7 +33,7 @@ from .workspace import LocalWorkspace, Workspace
 
 __all__ = [
     "AgentContext", "Job", "tool",
-    "Workspace", "LocalWorkspace",
+    "Workspace", "LocalWorkspace", "MemoryWorkspace", "take_in", "deliver",
     "GoogleAccess", "TokenFile", "InjectedToken", "NoGoogle", "default_access",
     "Result", "Artifact", "Diagnostic", "Refused", "CODES",
     "READS", "READS_GOOGLE", "WRITES", "WRITES_GOOGLE",

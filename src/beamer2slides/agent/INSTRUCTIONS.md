@@ -77,8 +77,28 @@ Every tool returns the same shape and never raises:
 * `diagnostics` at level **conflict** mean the merge could not decide something. Do not report
   success while conflicts are open. Name them to the person, with the slide.
 * `artifacts` are files that were produced, named relative to the workspace. A sync report and
-  a pull's `edits.md` are meant to be read, not just mentioned.
+  a pull's `edits.md` are meant to be read, not just mentioned. Where the harness asked for it,
+  an artifact also carries its own content (`text` or `base64`), its size and its `sha256`; one
+  marked `"truncated": true` was over the cap and has to be asked for by `ref`.
 * `ok: false` always carries a `code`. Branch on the code, not on the words.
+
+## Files: a name, or the file itself
+
+Anywhere a tool takes a workspace ref for a file, it also takes the file. Three forms:
+
+```json
+{"pdf": "talks/2026/talk.pdf"}
+{"pdf": "data:application/pdf;base64,JVBERi0xLjcK…"}
+{"pdf": {"name": "talk.pdf", "base64": "JVBERi0xLjcK…"}}
+```
+
+Text content goes under `text` instead of `base64`. Give a `name` when you have one: it is what
+you will see again in every artifact and every refusal, so `talk.pdf` reads better than `pdf.pdf`.
+
+A **plain string is never content**. `"talk.pdf"` is a ref and
+`"https://docs.google.com/presentation/d/…"` is a deck the journey resolves itself; neither is
+fetched. A `{"url": …}` is fetched only if the operator gave this context a fetcher, and refused
+by name if not - nothing here opens a socket to a host you chose.
 
 ## The refusals, and what each one wants
 
