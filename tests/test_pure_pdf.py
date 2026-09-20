@@ -446,10 +446,13 @@ def test_the_pure_renderer_survives_new_shading_torture_modes(mode):
     assert stats["drawn"] >= 18
 
 
-# Level-4 image pages that were once apart (run-length sizes, CMYK, decode arrays, masks), and
-# level-6 ones through CFX_ImageTransformer (bgr, bgra, 1-bit mask, masked) and CMYK JPEGs.
+# Level-4 image pages that were once apart (run-length sizes, CMYK, decode arrays, masks),
+# level-6 ones through CFX_ImageTransformer (bgr, bgra, 1-bit mask, masked) and CMYK JPEGs, and
+# level-7 ones whose sRGB ICCBased palette differs unless GetRGB leaves the components unclamped
+# and ArgbEncode lets them run into the byte above (clamping either fails 90, 94, 95).
 IMAGE_SEEDS = [(4, s) for s in (144, 229, 230, 283, 325, 351, 788, 2626, 4459, 6130)] + \
-    [(6, s) for s in (0, 4, 13, 19, 50, 74, 118, 139, 196)]
+    [(6, s) for s in (0, 4, 13, 19, 50, 74, 118, 139, 196)] + \
+    [(7, s) for s in (90, 94, 95)]
 
 
 @pytest.mark.parametrize("level,seed", IMAGE_SEEDS)

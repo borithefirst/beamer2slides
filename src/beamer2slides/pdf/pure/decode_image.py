@@ -1,8 +1,8 @@
 """PDFium's image loading, ported for `render_image.py`: CPDF_DIB (LoadColorInfo, the decode and
 colour-key arrays, LoadPalette, GetScanline and TranslateScanline24bpp), the image decoders it
 creates (Flate with PNG/TIFF predictors, RunLength, DCT through libjpeg) and the colour spaces an
-image can be in (DeviceGray, DeviceRGB, DeviceCMYK, Indexed, ICCBased read through its alternate),
-value for value.
+image can be in (DeviceGray, DeviceRGB, DeviceCMYK, Indexed, ICCBased as sRGB or read through its
+alternate), value for value.
 
 `load` gives a `DIB`: a CFX_DIBBase's format ("mask1" k1bppMask, "rgb1" k1bppRgb, "rgb8" k8bppRgb,
 "bgr" kBgr, "bgra" kBgra), its rows (1-bit formats unpacked to 0/1 per pixel), its palette (ARGB
@@ -20,7 +20,7 @@ import zlib
 import numpy as np
 
 from . import filters as FL
-from .colors import adobe_cmyk_to_srgb_array
+from .colors import adobe_cmyk_to_srgb_array, icc_openable, icc_srgb
 from .syntax import Name, Stream
 
 F32 = np.float32
@@ -35,12 +35,22 @@ def F(v: float) -> float:
 
 
 def roundf(v: float) -> int:
-    """FXSYS_roundf for the 0..255 range images use."""
-    return int(math.floor(abs(v) + 0.5)) * (1 if v >= 0 else -1)
+    """FXSYS_roundf: NaN is 0 and the int range saturates (an unclamped sRGB component can leave
+    the 0..255 range images usually stay in)."""
+    if v != v:
+        return 0
+    if v < -2147483648.0:
+        return -2147483648
+    if v >= 2147483648.0:
+        return 2147483647
+    r = int(math.floor(abs(v) + 0.5)) if abs(v) < 4503599627370496.0 else int(abs(v))
+    return r if v >= 0 else -r
 
 
 def argb(a: int, r: int, g: int, b: int) -> int:
-    return ((a & 255) << 24) | ((r & 255) << 16) | ((g & 255) << 8) | (b & 255)
+    """ArgbEncode: uint32 arguments, so a channel outside 0..255 runs into the bytes above it."""
+    return (((a & 0xFFFFFFFF) << 24) | ((r & 0xFFFFFFFF) << 16) | ((g & 0xFFFFFFFF) << 8)
+            | (b & 0xFFFFFFFF)) & 0xFFFFFFFF
 
 
 class DIB:
@@ -62,8 +72,8 @@ class DIB:
 class CS:
     """The image-relevant part of a CPDF_ColorSpace."""
 
-    def __init__(self, family: str, n: int, base: "CS | None" = None, stock: bool = False):
-        self.family, self.n, self.base, self.stock = family, n, base, stock
+    def __init__(self, family: str, n: int, base: "CS | None" = None, stock: bool = False, srgb: bool = False):
+        self.family, self.n, self.base, self.stock, self.srgb = family, n, base, stock, srgb
         self.lookup = b""
         self.max_index = 0
 
@@ -84,6 +94,9 @@ class CS:
         if f == "DeviceCMYK":
             return _cmyk_rgb_f(v)
         if f == "ICCBased":
+            if self.srgb:   # GetRGB hands the first three components back: no clamp, always valid
+                c = v[..., :3].astype(F32)
+                return c[..., 0], c[..., 1], c[..., 2], np.ones(c.shape[:-1], bool)
             if self.n == 1 and self.base.n > 1:
                 v = np.repeat(v[..., :1], self.base.n, axis=-1)
             return self.base.rgb(v)
@@ -118,12 +131,6 @@ def _cmyk_rgb_f(v: np.ndarray):
 
 GRAY, RGB, CMYK = CS("DeviceGray", 1, stock=True), CS("DeviceRGB", 3, stock=True), CS("DeviceCMYK", 4, stock=True)
 _STOCK = {"DeviceGray": GRAY, "G": GRAY, "DeviceRGB": RGB, "RGB": RGB, "DeviceCMYK": CMYK, "CMYK": CMYK}
-
-
-def _icc_valid(data: bytes) -> bool:
-    """Could lcms open this as a profile? Anything that might be one is refused: only data that
-    cannot be an ICC profile falls back to the alternate as PDFium's does."""
-    return len(data) >= 128 and data[36:40] == b"acsp"
 
 
 def load_cs(doc, obj, resources, depth=0) -> CS | None:
@@ -190,7 +197,11 @@ def _load_array(doc, arr, depth) -> CS | None:
         n = r(st.get("N"))
         if not isinstance(n, int) or isinstance(n, bool) or n not in (1, 3, 4):
             raise Unsupported("an ICC profile without a usable /N")
-        if _icc_valid(doc.stream_data(st)):
+        data = doc.stream_data(st)
+        if icc_srgb(data, n):
+            # No lcms transform and no clamping: the alternate PDFium still loads is never read.
+            return CS("ICCBased", 3, RGB, srgb=True)
+        if icc_openable(data):
             raise Unsupported("ICC profiles")
         alt = None
         if st.get("Alternate") is not None:

@@ -8,14 +8,16 @@ alpha. Each page is rendered by PDFium and by the pure reader; any pixel that di
 shrunk to the lines of the page that still make it differ. A page the pure reader refuses is
 counted, not failed, and listed with its reason.
 
-    python tools/render_torture_image.py [seed0] [n] [--level 0..6] [--out DIR]
+    python tools/render_torture_image.py [seed0] [n] [--level 0..7] [--out DIR]
 
 `--level` grows the generator one class of images at a time: 0 = one upright 8-bit RGB Flate
 image; 1 = scaled and flipped, several per page, on clear bitmaps too; 2 = quarter turns, skews,
 clips and constant alpha; 3 = every colour space and bit depth; 4 = filters, predictors, /Decode,
 masks, inline images, truncated data; 5 = CMYK at every bit depth, Indexed over CMYK, CMYK mattes
-and fill overprint; 6 (the default) = everything, images turned by any angle and skewed
-(CFX_ImageTransformer) and CMYK JPEGs too (levels below keep their seeds).
+and fill overprint; 6 = everything, images turned by any angle and skewed
+(CFX_ImageTransformer) and CMYK JPEGs too; 7 (the default) = ICCBased spaces whose profile PDFium
+detects as sRGB (`SRGB_PROFILE`), with the low bit depths and wide /Decode arrays that make its
+unclamped GetRGB show in the palette (levels below keep their seeds).
 Failures go to DIR as seedN.pdf (the shrunk page) and seedN.png (PDFium | pure | difference)."""
 
 from __future__ import annotations
@@ -38,6 +40,21 @@ MEDIA = (0, 0, 200, 150)
 IMAGE_EXTGS = EXTGS[:-2] + (b"/OP0 << /OP true >> /OP1 << /op true /OPM 1 >> /OP2 << /OP true /op false >> "
                             b"/OP3 << /op true /OPM 0 >> >>")
 JUNK_PROFILE = b"not an ICC profile"
+
+
+def _srgb_profile() -> bytes:
+    """A made-up ICC profile PDFium detects as sRGB: DetectSRGB looks at nothing but the length
+    (3144) and the description at offset 400. It carries no `acsp` signature, so under any /N but 3
+    it is data lcms cannot open and both readers fall back to the alternate space."""
+    b = bytearray(3144)
+    b[0:4] = (3144).to_bytes(4, "big")
+    b[16:20] = b"RGB "
+    b[20:24] = b"XYZ "
+    b[400:417] = b"sRGB IEC61966-2.1"
+    return bytes(b)
+
+
+SRGB_PROFILE = _srgb_profile()
 
 
 def pdf_bytes(content: bytes, objects: list[bytes], xobjects: list[tuple[bytes, int]], media=MEDIA) -> bytes:
@@ -116,11 +133,12 @@ def _png(rows: np.ndarray, bpp: int, r: random.Random) -> bytes:
 
 
 class Builder:
-    def __init__(self, r: random.Random, level: int = 6):
+    def __init__(self, r: random.Random, level: int = 7):
         self.r = r
         self.level = level
         self.objects: list[bytes] = []
         self.xobjects: list[tuple[bytes, int]] = []
+        self.srgb = False
 
     def add(self, b: bytes) -> int:
         self.objects.append(b)
@@ -182,8 +200,9 @@ class Builder:
         return b"", data
 
     def colorspace(self):
-        """(entry, components, is indexed)"""
+        """(entry, components, is indexed); `self.srgb` says whether it is an sRGB ICCBased one."""
         r = self.r
+        self.srgb = False
         if self.level < 3:
             return b"/DeviceRGB", 3, False
         k = r.random()
@@ -205,7 +224,13 @@ class Builder:
             return b"[/Indexed %s %d %d 0 R]" % (base, hival, sid), 1, True
         n = r.choice([1, 3])
         alt = b" /Alternate %s" % (b"/DeviceGray" if n == 1 else b"/DeviceRGB") if r.random() < 0.5 else b""
-        sid = self.stream(b"/N %d%s" % (n, alt), JUNK_PROFILE)
+        profile = JUNK_PROFILE
+        if self.level >= 7:
+            profile = r.choice([JUNK_PROFILE, SRGB_PROFILE, SRGB_PROFILE, SRGB_PROFILE])
+            if profile is SRGB_PROFILE and r.random() < 0.75:
+                n, alt = 3, r.choice([b"", b" /Alternate /DeviceRGB", b" /Alternate /DeviceCMYK"])
+            self.srgb = profile is SRGB_PROFILE and n == 3
+        sid = self.stream(b"/N %d%s" % (n, alt), profile)
         return b"[/ICCBased %d 0 R]" % sid, n, False
 
     def image(self, inline: bool):
@@ -225,11 +250,13 @@ class Builder:
         bpc = r.choice([1, 2, 4, 8, 8, 8, 16]) if lv >= 3 else 8
         if comps == 4 and bpc != 8 and lv < 5:
             bpc = 8
+        if lv >= 7 and self.srgb and r.random() < 0.5:
+            bpc = r.choice([1, 2])   # bpc * comps <= 8: the palette, where the missing clamp shows
         data = self.pixels(w, h, comps, bpc)
         jpeg_ok = (bpc == 8 and (comps in (1, 3) or comps == 4 and lv >= 6) and not indexed
                    and len(data) == ((w * comps * 8 + 7) // 8) * h)
         filt, enc = self.encode(data, w, h, comps, bpc, jpeg_ok)
-        if lv >= 4 and r.random() < 0.2:
+        if lv >= 4 and r.random() < (0.6 if lv >= 7 and self.srgb else 0.2):
             vals = []
             for _ in range(comps):
                 if indexed:
@@ -321,7 +348,7 @@ class Builder:
         return b"\n".join(ops)
 
 
-def case(seed: int, level: int = 6):
+def case(seed: int, level: int = 7):
     """(content, objects, xobjects, zoom, transparent) for `seed`."""
     r = random.Random(seed)
     b = Builder(r, level)
@@ -374,7 +401,7 @@ def shrink(content: bytes, objects, xobjects, zoom: float, transparent: bool):
     return b"\n".join(lines)
 
 
-def run(seed0: int, n: int, out: Path | None = None, verbose: bool = True, level: int = 6) -> dict:
+def run(seed0: int, n: int, out: Path | None = None, verbose: bool = True, level: int = 7) -> dict:
     """{'failed': [seeds], 'refused': {reason: count}, 'drawn': count}."""
     stats = {"failed": [], "refused": {}, "drawn": 0}
     for seed in range(seed0, seed0 + n):
@@ -412,7 +439,7 @@ def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("seed0", type=int, nargs="?", default=0)
     ap.add_argument("n", type=int, nargs="?", default=200)
-    ap.add_argument("--level", type=int, default=6)
+    ap.add_argument("--level", type=int, default=7)
     ap.add_argument("--out", default="out/render-torture-image")
     ap.add_argument("-q", "--quiet", action="store_true", help="no shrinking, only the counts")
     args = ap.parse_args(argv)

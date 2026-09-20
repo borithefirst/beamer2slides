@@ -560,6 +560,18 @@ def _smask_parts(doc, smask: dict):
     return (g if isinstance(g, Stream) else None), lum
 
 
+def _srgb_backdrop(doc, smask: dict, cs) -> bool:
+    """A backdrop in an sRGB ICCBased space is DeviceRGB without the clamp (GetBackgroundColor
+    takes it because IsNormal() is true for such a profile, and GetRGB hands the components back):
+    exact while each one lands in a byte, refused when one does not."""
+    if not getattr(cs, "srgb", False):
+        return False
+    bc = doc.resolve(smask.get("BC"))
+    vals = [doc.resolve(v) for v in bc[:3]] if isinstance(bc, list) else []
+    vals = [v if isinstance(v, (int, float)) and not isinstance(v, bool) else 0.0 for v in vals]
+    return all(0.0 <= float(v) <= 1.0 for v in vals)
+
+
 def background_color(doc, smask: dict, g: Stream) -> int:
     """GetBackgroundColor: /BC in the group's /CS, as 0xAARRGGBB (black when anything is off)."""
     default = 0xFF000000
@@ -570,7 +582,9 @@ def background_color(doc, smask: dict, g: Stream) -> int:
     group = r(g.get("Group"))
     cs_obj = r(group.get("CS")) if isinstance(group, dict) else None
     cs = load_colorspace(doc, cs_obj, None) if cs_obj is not None else None
-    if cs is None or cs.family in ("Lab", "Indexed", "Separation", "DeviceN", "Pattern", "ICCBased"):
+    if cs is None or cs.family in ("Lab", "Indexed", "Separation", "DeviceN", "Pattern"):
+        return default
+    if cs.family == "ICCBased" and not cs.srgb:   # kICCBased && !IsNormal()
         return default
     vals = []
     for v in bc[:8]:
@@ -656,7 +670,8 @@ def unsupported(obj, ctx, check) -> str | None:
         group = r(g.get("Group"))
         cs_obj = r(group.get("CS")) if isinstance(group, dict) else None
         cs = load_colorspace(doc, cs_obj, None) if cs_obj is not None else None
-        if cs is not None and cs.family not in ("DeviceGray", "DeviceRGB", "DeviceCMYK"):
+        if (cs is not None and cs.family not in ("DeviceGray", "DeviceRGB", "DeviceCMYK")
+                and not _srgb_backdrop(doc, obj.smask, cs)):
             return "soft mask backdrop colour spaces"
     if ctx.depth >= MAX_MASK_DEPTH:
         return "soft masks nested this deep"
