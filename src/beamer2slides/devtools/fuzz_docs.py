@@ -660,6 +660,33 @@ def read_delete_row(rng, part, tab):
                               "rowIndex": row, "columnIndex": 0}}}], [table.get("key")]
 
 
+def read_add_column(rng, part, tab):
+    """The reader adds a column. Rows and columns are not the same thing to the merge:
+    a row is one line of the grid, a column is a cell taken out of *every* row, matched
+    by its words across the whole table (`doc_merge._column_score`) rather than by its
+    place. That half of `_table_lines` had never been drawn — the campaign planned
+    `insertTableRow` and `deleteTableRow` and no column request at all."""
+    tables = _tables(part)
+    if not tables:
+        return [], []
+    table = rng.choice(tables)
+    return [{"insertTableColumn": {
+        "tableCellLocation": {"tableStartLocation": _at(table["span"][0], tab),
+                              "rowIndex": 0, "columnIndex": 0},
+        "insertRight": True}}], [table.get("key")]
+
+
+def read_delete_column(rng, part, tab):
+    tables = [t for t in _tables(part) if len(t.get("rows", [[]])[0]) > 1]
+    if not tables:
+        return [], []
+    table = rng.choice(tables)
+    column = rng.randrange(len(table["rows"][0]))
+    return [{"deleteTableColumn": {
+        "tableCellLocation": {"tableStartLocation": _at(table["span"][0], tab),
+                              "rowIndex": 0, "columnIndex": column}}}], [table.get("key")]
+
+
 def read_insert_picture(rng, part, tab):
     blocks = _paragraph_blocks(part)
     if not blocks:
@@ -742,6 +769,7 @@ READER = {
     "face": read_face, "measure": read_measure,
     "renumber_list": read_renumber_list, "cell_type": read_cell_type,
     "add_row": read_add_row, "delete_row": read_delete_row,
+    "add_column": read_add_column, "delete_column": read_delete_column,
     "insert_picture": read_insert_picture, "insert_chip": read_insert_chip,
     "move_block": read_move_block, "rename_tab": read_rename_tab,
     "add_tab": read_add_tab, "drop_tab": read_drop_tab,
@@ -909,10 +937,22 @@ def src_regrid(rng, ir, touched):
     if not tables:
         return
     table = rng.choice(tables)
-    if rng.random() < 0.5 or len(table["rows"]) < 2:
-        table["rows"].append([[_p(rng.choice(FRESH))] for _ in table["rows"][0]])
+    # Columns as well as rows, and the merge treats the two quite differently: a
+    # column is matched across the table by its words, a row by its cells in the
+    # columns that matched. Drawing rows alone left `_column_score` and the whole
+    # column half of `_table_lines` unreached.
+    if rng.random() < 0.5:
+        if rng.random() < 0.5 or len(table["rows"]) < 2:
+            table["rows"].append([[_p(rng.choice(FRESH))] for _ in table["rows"][0]])
+        else:
+            table["rows"].pop(rng.randrange(len(table["rows"])))
+    elif rng.random() < 0.5 or len(table["rows"][0]) < 2:
+        for row in table["rows"]:
+            row.append([_p(rng.choice(FRESH))])
     else:
-        table["rows"].pop(rng.randrange(len(table["rows"])))
+        column = rng.randrange(len(table["rows"][0]))
+        for row in table["rows"]:
+            row.pop(column)
 
 
 def src_edit_cell(rng, ir, touched):
@@ -922,7 +962,10 @@ def src_edit_cell(rng, ir, touched):
     if not cells:
         return
     cell = rng.choice(cells)
-    cell["runs"] = [{"text": rng.choice(FRESH)}]
+    # Distinctive, not a word out of `FRESH`: a cell edit nobody can tell from the
+    # cell beside it is one no judge can follow to where it landed, and following it
+    # is the whole of `_arrived`. Real sources write words of their own too.
+    cell["runs"] = [{"text": f"{rng.choice(FRESH)}-{rng.randrange(1 << 20):05x}"}]
 
 
 def src_add_picture(rng, ir, touched):
@@ -1098,6 +1141,7 @@ def run_script(script: dict, seen: Counter | None = None) -> list[dict]:
         found += [f | {"detail": f"step {step}: {f['detail']}"}
                   for f in oracle.check(was, before, base, report, mine,
                                         theme=theme_fields(world))]
+        found += _arrived(was, before, mine, ours, report, step, seen)
         found += _settled(world, ours, base, step, seen)
         if found:
             return found
@@ -1120,6 +1164,121 @@ def _settled(world, ours, base, step, seen) -> list[dict]:
         "unsettled", "report",
         f"step {step}: a second sync still writes {report['requests']} request(s): "
         f"{'; '.join(report['applied'][:3])}")]
+
+
+def _grid(block: dict | None) -> tuple[int, int] | None:
+    """A table's shape, or None when it is not a rectangular table — a ragged one
+    (merged cells) is a thing the merge reports rather than writes."""
+    rows = (block or {}).get("rows")
+    if (block or {}).get("kind") != "table" or not rows:
+        return None
+    widths = {len(row) for row in rows}
+    return (len(rows), widths.pop()) if len(widths) == 1 else None
+
+
+def _arrived(was: dict, before: dict, mine: dict, after: dict, report: dict,
+             step: int, seen: Counter) -> list[dict]:
+    """Did the source's regrid arrive? The third judge, and the campaign's own.
+
+    The loss oracle says in its first paragraph that it does not ask this — it asks
+    about the *reader's* work — and it is right not to: a column matched to the wrong
+    column never deletes anything of the reader's, because a line the base and the
+    document disagree about is never `gone` (`doc_merge._merged_lines`), so a wrong
+    matching errs towards keeping. Convergence cannot see it either, and for a sharper
+    reason: `rebase_tables` writes the matching it used into the base, so the second
+    sync makes the same reading of the same table and writes nothing. A merge can be
+    wrong and stable at once.
+
+    Measured: with `_table_lines` pairing columns by place instead of by their words,
+    200 rounds at chain 6 on `two_tables` came back clean. That is what a judge with
+    no opinion about the source looks like from the outside, and it is why the column
+    half of the table merge — `_column_score`, `_align`, the column side of
+    `_merged_lines` — had no measurement behind it at all until this.
+
+    The question is deliberately the narrowest one that catches it: a table **the
+    reader did not touch at all** must come out of the sync with the grid the file
+    asks for. There is nothing to merge in that case, so no merge rule can stand in
+    the way, and the only excuse is the report naming the table.
+    """
+    said = oracle.accounted(report)
+    sides = [oracle.parts_by_tab(ir) for ir in (was, before, mine, after)]
+    out = []
+    for tab, part in sides[0].items():
+        if any(tab not in side for side in sides[1:]):
+            continue
+        base_b, doc_b, src_b, end_b = (oracle.keyed(side[tab]) for side in sides)
+        for key, block in base_b.items():
+            here, file_b, then = doc_b.get(key), src_b.get(key), end_b.get(key)
+            if _grid(block) is None or here is None or then is None or file_b is None:
+                continue
+            out += _cells_arrived(key, block, here, file_b, then, said, tab,
+                                  step, seen)
+            if _grid(here) != _grid(block) \
+                    or oracle.cells_of(here) != oracle.cells_of(block):
+                continue                  # the reader touched it: the merge decides
+            want, got = _grid(file_b), _grid(then)
+            if want is None or got is None:
+                continue
+            if want != _grid(block):
+                # A judge that never looks is indistinguishable from one that never
+                # finds anything, so the chance is counted and not only the miss.
+                seen["arrival/grid asked"] += 1
+            if want == got:
+                continue
+            seen["arrival/grid missed"] += 1
+            if oracle._named(said, key):
+                continue
+            out.append(oracle.finding(
+                "grid_lost", "loss",
+                f"step {step}: the reader left the table {key!r} exactly as the base "
+                f"has it and the source asks for {want[0]}x{want[1]}, but the sync "
+                f"left the document at {got[0]}x{got[1]} and the report says nothing",
+                tab=tab, key=key))
+    return out
+
+
+def _cells_arrived(key, block, here, file_b, then, said, tab, step,
+                   seen: Counter) -> list[dict]:
+    """A cell the source rewrote, in a table whose words the reader did not touch,
+    must be somewhere in the table when the sync is over.
+
+    This is the half of `_arrived` that can see a column matched wrongly, and the
+    narrow half above cannot: with the reader's hands off the grid entirely, pairing
+    columns by place and pairing them by their words agree, because the base grid and
+    the document's grid are the same grid. What tells them apart is the reader
+    *regridding* while the source edits a cell — the reader takes the first column
+    out, the source rewrites a cell in the last one, and by place the file's last
+    column pairs with a base column the merge has already accounted for, so the
+    source's words are written nowhere at all.
+
+    The reader may add and delete rows and columns here; what they may not do is
+    write, and `doc_cells - base_cells` is how that is asked. A cell whose base text
+    the reader deleted along with its line is no arrival to wait for, so the old text
+    has to still be there before the sync for the new one to be owed.
+    """
+    if _grid(block) is None or _grid(file_b) != _grid(block):
+        return []                     # the source regridded: the half above asks
+    base_cells, doc_cells = (Counter(oracle.cells_of(b).values())
+                             for b in (block, here))
+    if doc_cells - base_cells:
+        return []                     # the reader wrote in it: the merge decides
+    was_cells, file_cells = (oracle.cells_of(b) for b in (block, file_b))
+    after = Counter(oracle.cells_of(then).values())
+    out = []
+    for at, text in file_cells.items():
+        old = was_cells.get(at)
+        if text == old or doc_cells[old] < base_cells[old]:
+            continue
+        seen["arrival/cell asked"] += 1
+        if after[text] or oracle._named(said, key):
+            continue
+        seen["arrival/cell missed"] += 1
+        out.append(oracle.finding(
+            "cell_lost", "loss",
+            f"step {step}: the source rewrote the cell at {at} of the table {key!r} "
+            f"to {text!r}, the reader wrote nothing in that table, and no cell of it "
+            f"says so when the sync is over", tab=tab, key=key))
+    return out
 
 
 def offline_round(seed: int, chain: int = 1, script: dict | None = None,

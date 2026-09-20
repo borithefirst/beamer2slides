@@ -76,7 +76,13 @@ REGRESSIONS = ((60, 1), (181, 1), (309, 4), (1031, 8), (1147, 8),
                (970228, 6), (970528, 6), (970711, 6), (980193, 6),
                (912452, 6), (993608, 6), (994410, 8), (994424, 8), (41000, 8),
                (63138, 4), (64166, 8), (65370, 8), (66195, 4), (70140, 4),
-               (74230, 8), (76101, 4), (77064, 8))
+               (74230, 8), (76101, 4), (77064, 8),
+               # The first seeds a judge of the campaign's own caught: a table the
+               # source regrids *and* moves, built again at the grid the sync was
+               # about to change (`doc_merge._built_size`). Both shapes of it —
+               # `two_tables` with a reader in the round, and the same thing with no
+               # reader at all.
+               (88033, 6), (88075, 6))
 
 
 def _round(seed: int, chain: int, shape: str | None = None) -> None:
@@ -2010,3 +2016,80 @@ def test_the_oracle_lets_a_base_word_the_reader_only_undressed_go():
     assert not oracle.joined_differently("kestrel", after, was), \
         "the base's `kestrel.` is still there, so the bare word is the reader's own"
     assert not oracle.joined_differently("zephyr", after, was)
+
+
+# ---------------------------------------------------------------- the third judge
+
+def _grid_block(key: str, rows: list[list[str]]) -> dict:
+    return {"kind": "table", "key": key,
+            "rows": [[[{"kind": "paragraph", "runs": [{"text": text}]}] for text in row]
+                     for row in rows]}
+
+
+def _asked(was, before, mine, after, report=None):
+    from collections import Counter
+    return fuzz_docs._arrived(was, before, mine, after,
+                              report or {"conflicts": [], "notes": []}, 0, Counter())
+
+
+def test_a_table_the_source_shrinks_and_moves_is_built_at_the_shape_it_asked_for():
+    """The source deletes a row from a table *and* moves it, with no reader anywhere.
+
+    A move is a delete and a table built again blank, so the shape it is built at is
+    the whole of the question, and `_merge_table` lays a trap for it: when the merge
+    also regrids, it returns before merging the cells, so the block's own `rows` are
+    still the document's. `_size` of those is the grid the sync was about to change,
+    and the table came back 2x2 with an empty row on the end. `_built_size` counts the
+    lines the matching settled instead (offline seed 88075, shrunk to three source ops
+    and no reader at all).
+    """
+    world, ours, base = _push("two_tables")
+    table = [b for b in ours["blocks"] if b.get("key") == "table:a"][0]
+    table["rows"].pop(0)                       # the source drops the header row
+    ours["blocks"].remove(table)               # ... and moves the table to the end
+    ours["blocks"].append(table)
+    report, ours, base = fuzz_docs.sync_once(world, ours, base)
+    assert "`table:a`: moved where the source has it" in report["applied"]
+    assert [b.get("key") for b in ours["blocks"]][-1] == "table:a"
+    grid = [b for b in ours["blocks"] if b.get("key") == "table:a"][0]
+    assert [[doc_ir.runs_text(cell[0].get("runs", [])) for cell in row]
+            for row in grid["rows"]] == [["1", "2"]]
+    again, _, _ = fuzz_docs.sync_once(world, copy.deepcopy(ours), copy.deepcopy(base))
+    assert again["requests"] == 0
+
+
+def test_the_campaign_asks_whether_the_sources_regrid_arrived():
+    """The judge the campaign did not have. The loss oracle asks about the *reader's*
+    work and says so in its first paragraph, and convergence cannot see a wrong grid
+    either, because `rebase_tables` writes the matching it used into the base and the
+    second sync makes the same reading. So a table the reader did not touch at all
+    must simply come out at the shape the file asks for."""
+    was = {"blocks": [_grid_block("table:x", [["a", "b"], ["1", "2"]])]}
+    before = copy.deepcopy(was)                      # the reader touched nothing
+    mine = {"blocks": [_grid_block("table:x", [["a", "b"]])]}   # the source drops a row
+    assert [f["kind"] for f in _asked(was, before, mine, was)] == ["grid_lost"]
+    assert not _asked(was, before, mine, mine), "the regrid arrived: nothing to say"
+    assert not _asked(was, before, mine, was,
+                      {"conflicts": [{"key": "table:x"}], "notes": []}), \
+        "a report that names the table is the escape hatch, as everywhere else"
+    assert not _asked(was, was, was, was), "the source asked for nothing"
+
+
+def test_the_campaign_asks_whether_the_sources_cell_edit_arrived():
+    """The half that can see a column matched wrongly, which the half above cannot:
+    with the reader's hands off the grid, pairing columns by place and pairing them by
+    their words agree. Here the reader takes the first column out and the source
+    rewrites a cell in the one that is left."""
+    was = {"blocks": [_grid_block("table:x", [["a", "b"], ["1", "2"]])]}
+    before = {"blocks": [_grid_block("table:x", [["b"], ["2"]])]}   # a column deleted
+    mine = {"blocks": [_grid_block("table:x", [["a", "zephyr"], ["1", "2"]])]}
+    assert [f["kind"] for f in _asked(was, before, mine, before)] == ["cell_lost"]
+    arrived = {"blocks": [_grid_block("table:x", [["zephyr"], ["2"]])]}
+    assert not _asked(was, before, mine, arrived)
+    # And the cell the reader took away with its column is no arrival to wait for.
+    gone = {"blocks": [_grid_block("table:x", [["kestrel", "b"], ["1", "2"]])]}
+    assert not _asked(was, before, gone, before), \
+        "the reader deleted the column that cell was in"
+    # Nor is anything owed once the reader has written in the table themselves.
+    wrote = {"blocks": [_grid_block("table:x", [["b"], ["typed"]])]}
+    assert not _asked(was, wrote, mine, wrote), "the reader wrote in it: the merge decides"
