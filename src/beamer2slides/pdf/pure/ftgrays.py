@@ -15,6 +15,8 @@ have no conic points).
 """
 from __future__ import annotations
 
+import numpy
+
 ON, CUBIC, CONIC = 1, 2, 0
 
 PIXEL_BITS = 8
@@ -408,15 +410,27 @@ def render_lcd(outline, ppem: int = 64, mode: str | None = None):
         decompose(imploded, raster)
         w = LCD_WEIGHTS
         size = len(buf)
+        # The FIR as a convolution, which is what it is: every write is `+= add` on a byte that
+        # started at zero, so the taps reaching one byte may be summed before the mask, and the
+        # spans of a row never overlap (gray_sweep_direct walks a row left to right, and a row's
+        # bytes are its own: pitch >= width). So the coverages go into a flat byte array at
+        # `base + px + 2` - the +2 undoes the -2 in `base`, and cutting the ends off the slices
+        # below is the `0 <= j < size` test the byte loop made per tap - and numpy adds the five
+        # taps for a whole glyph at once instead of Python adding one byte at a time.
+        covs = bytearray(size + 6)
         for y, x, length, cov in raster.spans():
-            base = (rows - 1 - y) * pitch - 2
-            adds = [(cov * wk + 85) >> 8 for wk in w]
-            for px in range(x, x + length):
-                d = base + px
-                for k in range(5):
-                    j = d + k
-                    if 0 <= j < size:
-                        buf[j] = (buf[j] + adds[k]) & 0xFF
+            q = (rows - 1 - y) * pitch + x
+            if length == 1:
+                covs[q] = cov
+            else:
+                covs[q:q + length] = bytes((cov,)) * length
+        cov_a = numpy.frombuffer(covs, numpy.uint8).astype(numpy.int32)
+        taps = {wk: (cov_a * wk + 85) >> 8 for wk in set(w)}   # 08 4D 56 4D 08: three weights
+        acc = numpy.zeros(len(cov_a), numpy.int32)
+        for k, wk in enumerate(w):
+            tap = taps[wk]
+            acc[k:] += tap[:len(tap) - k]
+        buf[:] = (acc[2:size + 2] & 0xFF).astype(numpy.uint8).tobytes()
     else:
         shifted = [([(x + x_shift, y + y_shift) for x, y in pts], tags) for pts, tags in outline]
         for i, sub in enumerate(LCD_GEOMETRY):
