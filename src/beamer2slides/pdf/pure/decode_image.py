@@ -81,9 +81,10 @@ class CS:
         """GetDefaultValue: (min, max)."""
         return 0.0, 1.0
 
-    def rgb(self, v: np.ndarray):
+    def rgb(self, v: np.ndarray, std: bool = False):
         """GetRGB over (..., n) float32 values: (r, g, b) float32 arrays and a validity mask
-        (GetRGBOrZerosOnError gives zeros where it is False)."""
+        (GetRGBOrZerosOnError gives zeros where it is False). `std` is IsStdConversionEnabled(),
+        which a colour space passes on to its base (CPDF_BasedCS::EnableStdConversion)."""
         f = self.family
         if f == "DeviceGray":
             g = np.clip(v[..., 0], F32(0), F32(1))
@@ -92,14 +93,14 @@ class CS:
             c = np.clip(v[..., :3], F32(0), F32(1))
             return c[..., 0], c[..., 1], c[..., 2], np.ones(c.shape[:-1], bool)
         if f == "DeviceCMYK":
-            return _cmyk_rgb_f(v)
+            return _cmyk_std_f(v) if std else _cmyk_rgb_f(v)
         if f == "ICCBased":
             if self.srgb:   # GetRGB hands the first three components back: no clamp, always valid
                 c = v[..., :3].astype(F32)
                 return c[..., 0], c[..., 1], c[..., 2], np.ones(c.shape[:-1], bool)
             if self.n == 1 and self.base.n > 1:
                 v = np.repeat(v[..., :1], self.base.n, axis=-1)
-            return self.base.rgb(v)
+            return self.base.rgb(v, std)
         if f == "Indexed":
             x = v[..., 0]
             finite = np.isfinite(x) & (x > -2147483648.0) & (x < 2147483648.0)
@@ -114,7 +115,7 @@ class CS:
                 mx = F32(F(hi - lo))
                 byte = table[np.minimum(safe * n + i, len(table) - 1)] if len(table) else np.zeros(idx.shape, np.uint8)
                 comps[..., i] = F32(lo) + (mx * byte.astype(F32)) / F32(255)
-            r, g, b, valid = self.base.rgb(comps)
+            r, g, b, valid = self.base.rgb(comps, std)
             return r, g, b, valid & ok
         raise Unsupported(f"{f} image colours")
 
@@ -127,6 +128,19 @@ def _cmyk_rgb_f(v: np.ndarray):
     table = adobe_cmyk_to_srgb_array(q.reshape(-1, 4))
     rgb = (table.astype(F32) * F32(1.0 / 255.0)).reshape(q.shape[:-1] + (3,))
     return rgb[..., 0], rgb[..., 1], rgb[..., 2], np.ones(q.shape[:-1], bool)
+
+
+def _cmyk_std_f(v: np.ndarray):
+    """CPDF_DeviceCS::GetRGB for CMYK with std conversion (the colours of an image loaded inside a
+    soft mask, or of a /SMask stream): 1 - min(1, c + k) per channel, the components not normalised,
+    and std::min(1.0f, x) keeping 1.0f where x is NaN. Always valid."""
+    c = v[..., :4].astype(F32)
+    k = c[..., 3]
+    out = []
+    for i in range(3):
+        t = F32(1) - np.where(c[..., i] + k < F32(1), c[..., i] + k, F32(1))
+        out.append(t.astype(F32))
+    return out[0], out[1], out[2], np.ones(c.shape[:-1], bool)
 
 
 GRAY, RGB, CMYK = CS("DeviceGray", 1, stock=True), CS("DeviceRGB", 3, stock=True), CS("DeviceCMYK", 4, stock=True)
@@ -490,8 +504,15 @@ def _get_int(arr, i, r) -> int:
     return int(x)
 
 
-def load(doc, stream, resources, dev_size=(0, 0), is_mask=False, with_mask=True) -> DIB | None:
-    """CPDF_DIB::Load (+ the mask, when the image has one and `with_mask`)."""
+def load(doc, stream, resources, dev_size=(0, 0), is_mask=False, with_mask=True,
+         std_cs=False, group_cmyk=False) -> DIB | None:
+    """CPDF_DIB::Load (+ the mask, when the image has one and `with_mask`).
+
+    `std_cs` is StartLoadDIBBase's bStdCS: an image drawn inside a soft mask (and every /SMask or
+    /Mask stream) has EnableStdConversion on while it loads, which is over again by the time its
+    lines are translated, so it reaches LoadPalette and the /Matte colour and nothing else.
+    `group_cmyk` is the other half of TransMask(): a luminosity mask whose group colour space is
+    DeviceCMYK makes a DeviceCMYK image's lines the naive (1-c)(1-k) instead of Adobe's table."""
     r = doc.resolve
     d = stream.dict
     raw = stream.raw if isinstance(stream, Stream) else stream.data
@@ -577,14 +598,14 @@ def load(doc, stream, resources, dev_size=(0, 0), is_mask=False, with_mask=True)
         raise Unsupported("a colour-keyed soft mask")
 
     bits = bpc * comps
-    cmyk = family == "DeviceCMYK" or (family == "ICCBased" and cs.base.family == "DeviceCMYK")
+    trans_mask = group_cmyk and family == "DeviceCMYK"   # CPDF_DIB::TransMask()
 
     # LoadPalette
     palette = None
     if bits == 1:
         if not (default_decode and family in ("DeviceGray", "DeviceRGB")) and cs.n <= 3:
             vals = np.array([[comp_min[0]] * 3, [F(comp_min[0] + comp_step[0])] * 3], F32)
-            pr, pg, pb, ok = cs.rgb(vals)
+            pr, pg, pb, ok = cs.rgb(vals, std_cs)
             cols = [argb(255, roundf(F(float(pr[k]) * 255)) if ok[k] else 0,
                          roundf(F(float(pg[k]) * 255)) if ok[k] else 0,
                          roundf(F(float(pb[k]) * 255)) if ok[k] else 0) for k in range(2)]
@@ -601,7 +622,7 @@ def load(doc, stream, resources, dev_size=(0, 0), is_mask=False, with_mask=True)
                 enc = cd % (1 << bpc)
                 cd //= 1 << bpc
                 vals[i, j] = F32(comp_min[j]) + F32(comp_step[j]) * F32(enc)
-        pr, pg, pb, ok = cs.rgb(vals)
+        pr, pg, pb, ok = cs.rgb(vals, std_cs)
         palette = []
         for k in range(n):
             if ok[k]:
@@ -646,7 +667,7 @@ def load(doc, stream, resources, dev_size=(0, 0), is_mask=False, with_mask=True)
             out[present:] = 0
             dib = DIB("bgra", out)
     else:
-        bgr = _translate24(rows, cs, family, bpc, comps, w, h, default_decode, comp_min, comp_step, cmyk)
+        bgr = _translate24(rows, cs, family, bpc, comps, w, h, default_decode, comp_min, comp_step, trans_mask)
         if color_key:
             s = _bits(rows, bpc, w * comps).reshape(h, w, comps)
             out_of = np.zeros((h, w), bool)
@@ -672,7 +693,7 @@ def load(doc, stream, resources, dev_size=(0, 0), is_mask=False, with_mask=True)
         matte = _float_array(smask.dict.get("Matte"), r)
         if matte is not None and len(matte) == comps and cs.n <= comps and cs.family != "Pattern":
             vals = np.array([[_get_float(matte, i, r) for i in range(comps)]], F32)
-            pr, pg, pb, ok = cs.rgb(vals)
+            pr, pg, pb, ok = cs.rgb(vals, std_cs)     # StartLoadMask runs inside the std window
             if ok[0]:
                 dib.matte = argb(0, roundf(float(F32(pr[0]) * F32(255))), roundf(float(F32(pg[0]) * F32(255))),
                                  roundf(float(F32(pb[0]) * F32(255))))
@@ -683,7 +704,8 @@ def load(doc, stream, resources, dev_size=(0, 0), is_mask=False, with_mask=True)
         if isinstance(m, Stream):
             mstream = m
     if mstream is not None:
-        mdib = load(doc, mstream, None, (0, 0), is_mask=True)
+        # StartLoadMaskDIB loads the mask with bStdCS true, whatever the image itself was loaded with
+        mdib = load(doc, mstream, None, (0, 0), is_mask=True, std_cs=True)
         if mdib is not None:
             if mdib.fmt not in ("rgb1", "rgb8", "mask1"):
                 raise Unsupported("soft masks that are not gray")
@@ -691,8 +713,12 @@ def load(doc, stream, resources, dev_size=(0, 0), is_mask=False, with_mask=True)
     return dib
 
 
-def _translate24(rows, cs, family, bpc, comps, w, h, default_decode, comp_min, comp_step, cmyk) -> np.ndarray:
-    """TranslateScanline24bpp: BGR bytes."""
+def _translate24(rows, cs, family, bpc, comps, w, h, default_decode, comp_min, comp_step,
+                 trans_mask=False) -> np.ndarray:
+    """TranslateScanline24bpp: BGR bytes. Under TransMask() the CMYK lines are (1-c)(1-k) and no
+    colour space is asked: the default-decode path writes that byte-wise through
+    CPDF_DeviceCS::TranslateImageLine, which fills an FX_RGB_STRUCT laid over the BGR bytes in its
+    own order, so the cyan channel lands where blue goes - the float path below does not."""
     out = np.zeros((h, w, 3), np.uint8)
     if default_decode:
         if family != "DeviceRGB":
@@ -707,6 +733,12 @@ def _translate24(rows, cs, family, bpc, comps, w, h, default_decode, comp_min, c
                 elif bf == "DeviceRGB":
                     out[...] = src[..., ::-1]
                 elif bf == "DeviceCMYK":
+                    if trans_mask:
+                        px = src[..., :4].astype(np.int64)
+                        k = 255 - px[..., 3]
+                        for ch in range(3):
+                            out[..., ch] = (((255 - px[..., ch]) * k) // 255).astype(np.uint8)
+                        return out
                     rgb = adobe_cmyk_to_srgb_array(src[..., :4].reshape(-1, 4)).astype(np.uint8)
                     out[...] = rgb[:, ::-1].reshape(h, w, 3)
                 else:
@@ -729,7 +761,12 @@ def _translate24(rows, cs, family, bpc, comps, w, h, default_decode, comp_min, c
     vals = np.zeros((h, w, max(comps, cs.n)), F32)
     for c in range(comps):
         vals[..., c] = F32(comp_min[c]) + F32(comp_step[c]) * s[..., c].astype(F32)
-    pr, pg, pb, ok = cs.rgb(vals)
+    if trans_mask:
+        k = F32(1) - vals[..., 3]
+        pr, pg, pb = ((F32(1) - vals[..., i]) * k for i in range(3))
+        ok = np.ones((h, w), bool)
+    else:
+        pr, pg, pb, ok = cs.rgb(vals)
     for k, ch in ((0, pb), (1, pg), (2, pr)):
         v = np.where(ok, np.clip(ch, F32(0), F32(1)), F32(0)).astype(F32)
         out[..., k] = (v * F32(255)).astype(np.uint8)

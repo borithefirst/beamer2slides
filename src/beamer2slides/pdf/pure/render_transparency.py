@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from ..api import OBJ_FORM, OBJ_PATH, OBJ_SHADING, OBJ_TEXT
+from ..api import OBJ_FORM, OBJ_IMAGE, OBJ_PATH, OBJ_SHADING, OBJ_TEXT
 from . import raster as R
 from .colors import load_colorspace
 from .raster import F
@@ -56,6 +56,12 @@ class Context:
         self.page_group = page_group
         self._forms: dict = {}
         self.depth = 0
+        # what a soft mask's own render status carries (meaningful while depth > 0): SetLoadMask's
+        # luminosity, whether SetGroupFamily got kDeviceCMYK, and which objects that status draws
+        # itself (a form's children go through ProcessForm, which starts a status with none of it)
+        self.mask_lum = True
+        self.mask_group_cmyk = False
+        self.mask_top: frozenset = frozenset()
 
     def form(self, stream: Stream):
         """CPDF_Form(doc, page resources, G).ParseContent() with no parent states: (top-level
@@ -137,11 +143,36 @@ def _norm(r):
 # ---------------------------------------------------------------------- ProcessTransparency
 
 
+def effective_smask(obj):
+    """The graphics state's soft mask as ProcessTransparency reads it: an image with an /SMask of
+    its own drops it (`pSMaskDict = nullptr`), so that mask is never rendered at all."""
+    smask = obj.smask
+    if smask is not None and obj.type == OBJ_IMAGE:
+        d = getattr(getattr(obj, "stream", None), "dict", None)
+        if isinstance(d, dict) and "SMask" in d:
+            return None
+    return smask
+
+
+def transparency_status(obj) -> bool:
+    """Whether ProcessTransparency draws `obj` into a bitmap of its own, whose CPDF_RenderStatus
+    has SetStdCS(true) and neither the load-mask flag nor a group family. Asked about images, whose
+    fill alpha and group flags never reach that test (they are a form object's)."""
+    return effective_smask(obj) is not None or blend_mode(obj.blend) != "Normal"
+
+
+def alpha_mode(ctx) -> bool:
+    """CPDF_RenderOptions::ColorModeIs(kAlpha): set by LoadSMask for an alpha mask and inherited by
+    every status under it (ProcessForm and ProcessTransparency both copy the options), until a
+    luminosity mask inside it renders with kNormal again."""
+    return ctx is not None and ctx.depth > 0 and not ctx.mask_lum
+
+
 def process_transparency(status, obj, matrix) -> bool:
     """CPDF_RenderStatus::ProcessTransparency: True when the object was drawn here."""
     from .render import Device, Status
     blend = blend_mode(obj.blend)
-    smask = obj.smask
+    smask = effective_smask(obj)
     group_alpha = 1.0
     initial_alpha = 1.0
     transparency = status.transparency
@@ -572,19 +603,30 @@ def _srgb_backdrop(doc, smask: dict, cs) -> bool:
     return all(0.0 <= float(v) <= 1.0 for v in vals)
 
 
+def group_cs(doc, smask: dict, g: Stream):
+    """The colour space GetBackgroundColor reads /BC in, or None where it takes the default colour
+    and leaves *pCSFamily at kUnknown (no /BC, a space that doesn't load, Lab, a special one or an
+    ICC profile that is not sRGB). That family is what TransMask() later asks about."""
+    r = doc.resolve
+    if not isinstance(r(smask.get("BC")), list):
+        return None
+    group = r(g.get("Group"))
+    cs_obj = r(group.get("CS")) if isinstance(group, dict) else None
+    cs = load_colorspace(doc, cs_obj, None) if cs_obj is not None else None
+    if cs is None or cs.family in ("Lab", "Indexed", "Separation", "DeviceN", "Pattern"):
+        return None
+    if cs.family == "ICCBased" and not cs.srgb:   # kICCBased && !IsNormal()
+        return None
+    return cs
+
+
 def background_color(doc, smask: dict, g: Stream) -> int:
     """GetBackgroundColor: /BC in the group's /CS, as 0xAARRGGBB (black when anything is off)."""
     default = 0xFF000000
     r = doc.resolve
     bc = r(smask.get("BC"))
-    if not isinstance(bc, list):
-        return default
-    group = r(g.get("Group"))
-    cs_obj = r(group.get("CS")) if isinstance(group, dict) else None
-    cs = load_colorspace(doc, cs_obj, None) if cs_obj is not None else None
-    if cs is None or cs.family in ("Lab", "Indexed", "Separation", "DeviceN", "Pattern"):
-        return default
-    if cs.family == "ICCBased" and not cs.srgb:   # kICCBased && !IsNormal()
+    cs = group_cs(doc, smask, g)
+    if cs is None:
         return default
     vals = []
     for v in bc[:8]:
@@ -596,6 +638,25 @@ def background_color(doc, smask: dict, g: Stream) -> int:
         rgb = (0.0, 0.0, 0.0)
     cr, cg, cb = (int(F(F(v) * 255.0)) for v in rgb)
     return 0xFF000000 | (cr << 16) | (cg << 8) | cb
+
+
+def _enter_mask(ctx, doc, smask: dict, g: Stream, lum: bool):
+    """The mask's own CPDF_RenderStatus: SetLoadMask(bLuminosity), SetGroupFamily(nCSFamily) and
+    SetStdCS(true). Not sticky - a luminosity mask inside an alpha one is a kNormal status again,
+    and only the objects this status draws itself (the group's top-level ones) carry its flags."""
+    keep = (ctx.mask_lum, ctx.mask_group_cmyk, ctx.mask_top)
+    ctx.depth += 1
+    ctx.mask_lum = lum
+    cs = group_cs(doc, smask, g) if lum else None
+    ctx.mask_group_cmyk = lum and cs is not None and cs.family == "DeviceCMYK"
+    children, _ = ctx.form(g)
+    ctx.mask_top = frozenset(id(o) for o in children)
+    return keep
+
+
+def _leave_mask(ctx, keep) -> None:
+    ctx.depth -= 1
+    ctx.mask_lum, ctx.mask_group_cmyk, ctx.mask_top = keep
 
 
 def load_smask(status, smask: dict, rect, smask_matrix):
@@ -616,11 +677,11 @@ def load_smask(status, smask: dict, rect, smask_matrix):
         dev.bgra[..., 3] = 255
     else:
         dev = mask_device(width, height)
-    ctx.depth += 1
+    keep = _enter_mask(ctx, doc, smask, g, lum)
     try:
         Status(dev, (False, False), False, 1.0, ctx).render_list(children, matrix)
     finally:
-        ctx.depth -= 1
+        _leave_mask(ctx, keep)
     px = dev.bgra.astype(np.int32)
     if lum:
         out = (px[..., 0] * 11 + px[..., 1] * 59 + px[..., 2] * 30) // 100
@@ -653,31 +714,32 @@ def unsupported(obj, ctx, check) -> str | None:
         if (t is not None and not t.identity and obj.type == OBJ_TEXT
                 and getattr(getattr(obj, "font", None), "is_type3", False)):
             return "transfer functions on Type 3 text"     # the glyphs' own colours: not checked
-    if obj.smask is None:
+    smask = effective_smask(obj)
+    if smask is None:
         return None
     if ctx is None:
         return "soft masks"
     doc = ctx.doc
-    g, lum = _smask_parts(doc, obj.smask)
+    g, lum = _smask_parts(doc, smask)
     if g is None:
         return None
     r = doc.resolve
     try:
-        transfer.smask_table(doc, r(obj.smask.get("TR")))
+        transfer.smask_table(doc, r(smask.get("TR")))
     except Unsupported as e:
         return str(e)
-    if lum and isinstance(r(obj.smask.get("BC")), list):
+    if lum and isinstance(r(smask.get("BC")), list):
         group = r(g.get("Group"))
         cs_obj = r(group.get("CS")) if isinstance(group, dict) else None
         cs = load_colorspace(doc, cs_obj, None) if cs_obj is not None else None
         if (cs is not None and cs.family not in ("DeviceGray", "DeviceRGB", "DeviceCMYK")
-                and not _srgb_backdrop(doc, obj.smask, cs)):
+                and not _srgb_backdrop(doc, smask, cs)):
             return "soft mask backdrop colour spaces"
     if ctx.depth >= MAX_MASK_DEPTH:
         return "soft masks nested this deep"
     _, every = ctx.form(g)
-    ctx.depth += 1
+    keep = _enter_mask(ctx, doc, smask, g, lum)
     try:
         return check(every, ctx)
     finally:
-        ctx.depth -= 1
+        _leave_mask(ctx, keep)

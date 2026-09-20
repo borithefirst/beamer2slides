@@ -8,16 +8,19 @@ alpha. Each page is rendered by PDFium and by the pure reader; any pixel that di
 shrunk to the lines of the page that still make it differ. A page the pure reader refuses is
 counted, not failed, and listed with its reason.
 
-    python tools/render_torture_image.py [seed0] [n] [--level 0..7] [--out DIR]
+    python tools/render_torture_image.py [seed0] [n] [--level 0..8] [--out DIR]
 
 `--level` grows the generator one class of images at a time: 0 = one upright 8-bit RGB Flate
 image; 1 = scaled and flipped, several per page, on clear bitmaps too; 2 = quarter turns, skews,
 clips and constant alpha; 3 = every colour space and bit depth; 4 = filters, predictors, /Decode,
 masks, inline images, truncated data; 5 = CMYK at every bit depth, Indexed over CMYK, CMYK mattes
 and fill overprint; 6 = everything, images turned by any angle and skewed
-(CFX_ImageTransformer) and CMYK JPEGs too; 7 (the default) = ICCBased spaces whose profile PDFium
+(CFX_ImageTransformer) and CMYK JPEGs too; 7 = ICCBased spaces whose profile PDFium
 detects as sRGB (`SRGB_PROFILE`), with the low bit depths and wide /Decode arrays that make its
-unclamped GetRGB show in the palette (levels below keep their seeds).
+unclamped GetRGB show in the palette; 8 (the default) = images drawn inside a soft mask's group
+(luminosity and alpha, every group /CS with and without /BC), where LoadSMask's SetStdCS makes a
+CMYK palette the naive 1 - min(1, c + k) and a DeviceCMYK group family makes a DeviceCMYK image's
+lines TransMask's (1-c)(1-k) (levels below keep their seeds).
 Failures go to DIR as seedN.pdf (the shrunk page) and seedN.png (PDFium | pure | difference)."""
 
 from __future__ import annotations
@@ -57,11 +60,14 @@ def _srgb_profile() -> bytes:
 SRGB_PROFILE = _srgb_profile()
 
 
-def pdf_bytes(content: bytes, objects: list[bytes], xobjects: list[tuple[bytes, int]], media=MEDIA) -> bytes:
+def pdf_bytes(content: bytes, objects: list[bytes], xobjects: list[tuple[bytes, int]], media=MEDIA,
+              extgs=()) -> bytes:
     """One page of `content`, with `objects` numbered 1.. in front and `xobjects` (name, object
-    number) in its /XObject dictionary; the ExtGStates are `render_torture.EXTGS` (/A0../A4)."""
+    number) in its /XObject dictionary; the ExtGStates are `render_torture.EXTGS` (/A0../A4) plus
+    `extgs` (entries of the same dictionary, e.g. the soft-mask states level 8 builds)."""
     objs = list(objects)
-    res = b"<< " + IMAGE_EXTGS + b" /XObject << " + b" ".join(b"/%s %d 0 R" % (n, i) for n, i in xobjects) + b" >> >>"
+    gs = IMAGE_EXTGS if not extgs else IMAGE_EXTGS[:-2] + b" " + b" ".join(extgs) + b" >>"
+    res = b"<< " + gs + b" /XObject << " + b" ".join(b"/%s %d 0 R" % (n, i) for n, i in xobjects) + b" >> >>"
     objs.append(b"<< /Length %d >>\nstream\n" % len(content) + content + b"\nendstream")
     cid = len(objs)
     pages = cid + 2
@@ -133,11 +139,12 @@ def _png(rows: np.ndarray, bpp: int, r: random.Random) -> bytes:
 
 
 class Builder:
-    def __init__(self, r: random.Random, level: int = 7):
+    def __init__(self, r: random.Random, level: int = 8):
         self.r = r
         self.level = level
         self.objects: list[bytes] = []
         self.xobjects: list[tuple[bytes, int]] = []
+        self.gstates: list[bytes] = []
         self.srgb = False
 
     def add(self, b: bytes) -> int:
@@ -347,25 +354,58 @@ class Builder:
         ops.append(b"Q")
         return b"\n".join(ops)
 
+    def masked(self) -> bytes:
+        """Images drawn inside a soft mask's group, the mask laid over a fill or another image.
+        The group gets no /Resources, so its images are the page's own: the same stream can be
+        drawn inside the mask and outside it, and PDFium's page image cache keeps whichever
+        conversion loaded it first."""
+        r = self.r
+        inner = b"\n".join(self.draw() for _ in range(r.randint(1, 2)))
+        lum = r.random() < 0.75
+        cs = r.choice([None, b"/DeviceGray", b"/DeviceRGB", b"/DeviceCMYK", b"/DeviceCMYK"])
+        group = b"/Group << /S /Transparency"
+        if cs is not None:
+            group += b" /CS " + cs
+        if r.random() < 0.4:
+            group += b" /I true"
+        fid = self.stream(b"/Type /XObject /Subtype /Form /BBox [0 0 200 150] " + group + b" >>", inner)
+        bc = b""
+        if r.random() < 0.8:      # without /BC the group family stays kUnknown: no TransMask
+            n = {b"/DeviceGray": 1, b"/DeviceCMYK": 4}.get(cs, 3)
+            bc = b" /BC [" + b" ".join(b"%.3g" % r.choice([0, 1, r.random()]) for _ in range(n)) + b"]"
+        name = b"Sm%d" % len(self.gstates)
+        self.gstates.append(b"/%s << /SMask << /S %s /G %d 0 R%s >> >>"
+                            % (name, b"/Luminosity" if lum else b"/Alpha", fid, bc))
+        ops = [b"q", b"/" + name + b" gs"]
+        if r.random() < 0.5:
+            ops.append(b"%.3f %.3f %.3f rg %.1f %.1f %.1f %.1f re f"
+                       % (r.random(), r.random(), r.random(), r.uniform(-10, 40), r.uniform(-10, 40),
+                          r.uniform(60, 200), r.uniform(60, 160)))
+        else:
+            ops.append(self.draw())
+        ops.append(b"Q")
+        return b"\n".join(ops)
 
-def case(seed: int, level: int = 7):
-    """(content, objects, xobjects, zoom, transparent) for `seed`."""
+
+def case(seed: int, level: int = 8):
+    """(content, objects, xobjects, zoom, transparent, extgs) for `seed`."""
     r = random.Random(seed)
     b = Builder(r, level)
     count = 1 if level == 0 else r.randint(1, 3)
-    content = b"\n".join(b.draw() for _ in range(count))
+    parts = [b.masked() if level >= 8 and r.random() < 0.7 else b.draw() for _ in range(count)]
+    content = b"\n".join(parts)
     zoom = r.choice([0.5, 1, 1.37, 2, 3.1])
     transparent = level >= 1 and r.random() < 0.3
-    return content, b.objects, b.xobjects, zoom, transparent
+    return content, b.objects, b.xobjects, zoom, transparent, b.gstates
 
 
-def compare(content: bytes, objects, xobjects, zoom: float, transparent: bool):
+def compare(content: bytes, objects, xobjects, zoom: float, transparent: bool, extgs=()):
     """(pixels that differ or None when the pure reader refuses, PDFium's render, pure's render,
     per-pixel difference or the refusal)."""
     from ..pdf.api import PdfError
     from ..pdf.pdfium_backend import PdfiumBackend
     from ..pdf.pure.backend import PureBackend
-    data = pdf_bytes(content, objects, xobjects)
+    data = pdf_bytes(content, objects, xobjects, extgs=extgs)
     docs = PdfiumBackend().open(data), PureBackend().open(data)
     try:
         a = docs[0][0].render(zoom, transparent=transparent)
@@ -380,11 +420,11 @@ def compare(content: bytes, objects, xobjects, zoom: float, transparent: bool):
     return int((d > 0).sum()), a, b, d
 
 
-def shrink(content: bytes, objects, xobjects, zoom: float, transparent: bool):
+def shrink(content: bytes, objects, xobjects, zoom: float, transparent: bool, extgs=()):
     """Drop lines of the page while the difference remains."""
     def fails(c):
         try:
-            return (compare(c, objects, xobjects, zoom, transparent)[0] or 0) > 0
+            return (compare(c, objects, xobjects, zoom, transparent, extgs)[0] or 0) > 0
         except Exception:
             return False
     lines = content.split(b"\n")
@@ -401,13 +441,13 @@ def shrink(content: bytes, objects, xobjects, zoom: float, transparent: bool):
     return b"\n".join(lines)
 
 
-def run(seed0: int, n: int, out: Path | None = None, verbose: bool = True, level: int = 7) -> dict:
+def run(seed0: int, n: int, out: Path | None = None, verbose: bool = True, level: int = 8) -> dict:
     """{'failed': [seeds], 'refused': {reason: count}, 'drawn': count}."""
     stats = {"failed": [], "refused": {}, "drawn": 0}
     for seed in range(seed0, seed0 + n):
-        content, objects, xobjects, zoom, transparent = case(seed, level)
+        content, objects, xobjects, zoom, transparent, extgs = case(seed, level)
         try:
-            npx, a, b, d = compare(content, objects, xobjects, zoom, transparent)
+            npx, a, b, d = compare(content, objects, xobjects, zoom, transparent, extgs)
         except Exception as e:
             if verbose:
                 print("seed", seed, "EXC", type(e).__name__, e)
@@ -422,8 +462,8 @@ def run(seed0: int, n: int, out: Path | None = None, verbose: bool = True, level
         stats["failed"].append(seed)
         if not verbose:
             continue
-        small = shrink(content, objects, xobjects, zoom, transparent)
-        npx, a, b, d = compare(small, objects, xobjects, zoom, transparent)
+        small = shrink(content, objects, xobjects, zoom, transparent, extgs)
+        npx, a, b, d = compare(small, objects, xobjects, zoom, transparent, extgs)
         print(f"seed {seed} zoom {zoom} transparent {transparent}: {npx} px, max {d.max() if npx else 0}")
         print("-- page\n" + small.decode("latin-1")[:1500])
         if out is not None and npx:
@@ -431,7 +471,7 @@ def run(seed0: int, n: int, out: Path | None = None, verbose: bool = True, level
             from PIL import Image
             vis = np.concatenate([a[..., :3], b[..., :3], np.stack([np.where(d > 0, 255, 0)] * 3, -1)], 1)
             Image.fromarray(vis.astype(np.uint8)).save(out / f"seed{seed}.png")
-            (out / f"seed{seed}.pdf").write_bytes(pdf_bytes(small, objects, xobjects))
+            (out / f"seed{seed}.pdf").write_bytes(pdf_bytes(small, objects, xobjects, extgs=extgs))
     return stats
 
 
@@ -439,7 +479,7 @@ def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("seed0", type=int, nargs="?", default=0)
     ap.add_argument("n", type=int, nargs="?", default=200)
-    ap.add_argument("--level", type=int, default=7)
+    ap.add_argument("--level", type=int, default=8)
     ap.add_argument("--out", default="out/render-torture-image")
     ap.add_argument("-q", "--quiet", action="store_true", help="no shrinking, only the counts")
     args = ap.parse_args(argv)

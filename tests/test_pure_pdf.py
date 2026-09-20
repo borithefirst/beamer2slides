@@ -450,9 +450,17 @@ def test_the_pure_renderer_survives_new_shading_torture_modes(mode):
 # level-6 ones through CFX_ImageTransformer (bgr, bgra, 1-bit mask, masked) and CMYK JPEGs, and
 # level-7 ones whose sRGB ICCBased palette differs unless GetRGB leaves the components unclamped
 # and ArgbEncode lets them run into the byte above (clamping either fails 90, 94, 95).
+# The level-8 ones are images and soft masks meeting: 1 draws an image in an alpha mask, which is
+# StartBitmapAlpha's unit square; 33 an image under a /SMask gs, which ProcessTransparency loads
+# with std conversion on although it stands on the page (the old "inside a mask" rule fails it, and
+# so does Adobe's CMYK table); 40 an image with an /SMask of its own under a /SMask gs, where
+# ProcessTransparency drops the state's mask and draws the image alone; 122 and 147 more std
+# conversions; 351 a DeviceCMYK image in a luminosity mask whose group is DeviceCMYK, whose lines
+# are TransMask's (1-c)(1-k) (that one needs 900 seeds to meet by chance).
 IMAGE_SEEDS = [(4, s) for s in (144, 229, 230, 283, 325, 351, 788, 2626, 4459, 6130)] + \
     [(6, s) for s in (0, 4, 13, 19, 50, 74, 118, 139, 196)] + \
-    [(7, s) for s in (90, 94, 95)]
+    [(7, s) for s in (90, 94, 95)] + \
+    [(8, s) for s in (1, 33, 40, 122, 147, 351)]
 
 
 @pytest.mark.parametrize("level,seed", IMAGE_SEEDS)
