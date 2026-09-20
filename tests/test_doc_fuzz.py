@@ -102,8 +102,9 @@ REGRESSIONS = ((60, 1), (181, 1), (309, 4), (1031, 8), (1147, 8),
                # deleted one said. Then 280039, a table the source moved right behind
                # another, and 280398, a chip's face read as words the reader typed.
                # And 290010, where Docs' merge-on-delete made an indented paragraph
-               # an item, so the settle read its indent as the list preset's.
-               (260208, 6), (280039, 8), (280398, 8), (290010, 10))
+               # an item, so the settle read its indent as the list preset's; then
+               # 330127, a new table's swallow taking an empty paragraph's name.
+               (260208, 6), (280039, 8), (280398, 8), (290010, 10), (330127, 4))
 
 
 def _round(seed: int, chain: int, shape: str | None = None) -> None:
@@ -1805,6 +1806,27 @@ def test_a_table_added_between_two_tables_is_refused_and_said_out_loud():
     for _ in range(2):                       # a grid is built on one pass, filled on the next
         report, ours, base = fuzz_docs.sync_once(world, ours, base)
     assert "h1 h2 willow x" in [oracle.text_of(b) for b in base["blocks"]]
+
+
+def test_an_empty_paragraph_a_new_tables_swallow_unnames_keeps_its_key():
+    """`insertTable` leaves an empty paragraph in front of the table, which
+    `_new_table_requests` gets rid of by deleting the mark of the block before — and
+    a block that is *itself* an empty paragraph is all mark, so the delete takes its
+    named range whole. Being keyed again from its words at the settle is too late:
+    a structural batch is followed by a re-plan against the document it just wrote,
+    and there the file's key names nothing, so the block reads as one the reader
+    deleted and everything the source asks of it is dropped in silence. Here that is
+    a chip, and the round converges with file, base and document all agreeing on an
+    empty paragraph (offline chain-4 seed 330127)."""
+    chip = {"frozen": True, "chip": "person", "text": "Grace", "value": "grace@example.com"}
+    world, ours, base = _build([_para("Head."), _para(""), _para("Tail.")])
+    ours["blocks"][1]["runs"] = [chip]
+    ours["blocks"].insert(2, _table([["h1", "h2"]]))
+    for _ in range(2):                       # a grid is built on one pass, filled on the next
+        report, ours, base = fuzz_docs.sync_once(world, ours, base)
+    assert _keys(base) == ["paragraph:head", "paragraph:empty", "table:h1",
+                           "paragraph:tail"]
+    assert list(oracle.frozen_marks(base["blocks"][1])) == [("person", "grace@example.com")]
 
 
 def test_a_paragraph_the_source_moves_between_two_tables_is_left_where_it_is():

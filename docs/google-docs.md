@@ -2029,6 +2029,26 @@ Three more at fresh seeds, one of the merge's and two the judges'.
 Then 1,000 rounds clean under `--strict`: 300 at chain 10 from 290000 and 500 at chain 6
 from 310000, with 800 at chain 4 from 270000 and 600 at chain 6 from 300000 before them.
 
+**And the name a new table's swallow takes** (chain-4 seed 330127, shape `between_tables`).
+`insertTable` leaves an empty paragraph in front of the table, which
+`_new_table_requests` gets rid of by deleting the mark of the block before it — and a
+block that is *itself* an empty paragraph is all mark, so the delete covers its named
+range whole and Docs drops it. `_swallowed` has known that since seed 501271 and said, in
+so many words, that nothing is lost by it because the settle keys the block again from
+its words. That is true of the settle and not of what comes before it: a structural batch
+is followed by a **re-plan** against the document it has just written, and there the key
+the file asserts names nothing, so the block reads as one the reader deleted and
+everything the source asked of it is dropped. Here the source had put a person chip in
+the paragraph between two tables; the chip was written nowhere, and the round converged
+with file, base and document all agreeing on an empty paragraph, so neither the loss
+oracle (nothing of the reader's went) nor convergence could see it — only
+`_words_arrived`, and only because `_says` counts a chip by what it *is*.
+`doc_merge.recover_swallowed` gives the key back between the batch and the re-plan, after
+`anchor_tables` because the survivor is found by the table it stands in front of, and
+`plant_ranges` puts the range back in the same breath — the third repair to hang off that
+one read, beside `recover_tables` and the anchoring. 900 rounds at chain 4 from 330000
+clean afterwards, with 400 at chain 8 from 320000 beside them.
+
 ## Remaining risks
 
 1. **Pictures** — retired, see "Pictures, and the chips a request can make" above. What
