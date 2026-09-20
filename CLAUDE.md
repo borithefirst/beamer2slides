@@ -674,8 +674,8 @@ are never touched at all (`master_background = None`: the deck's look is the per
 Then `Sync.check_plan` runs between planning and any write and **refuses** four things
 (`adopt_sync.problems` / `refusal_message`, every message asserted verbatim in `tests/test_adopt_sync.py`):
 a unit whose base members include an **unpaired** element (writing it puts a second object beside the
-person's), a deck **page** that is not 720 pt wide while emit plans into one (most real decks are 1440:
-the objects would land right-looking and wrong), no **way back** on the first sync, and **slides the
+person's), a deck **page of another shape** than the paper the source compiles to, no **way back** on
+the first sync, and **slides the
 plan would delete** on the first sync (on a first sync that is a label that moved far more often than a
 slide the author meant to drop). Each names what it found and offers `--dry-run` (which never refuses:
 that is how one sees what it wanted to do), a backup, the labels, editing that element in the deck
@@ -686,6 +686,14 @@ The first two outlive the first sync - found by the campaign (`fuzz_world.build_
 rounds duplicated a person's box on the *second* sync, because a rebased base still carries unpaired
 elements. Clean at chain 1x400, 4x200 and 5x250; taking the `slides-deleted` refusal out fails 0 rounds,
 so that one is a judgement, not a measurement, and says so.
+**The plan is made for the deck it is going into**: everything sync writes is PDF pt times one number,
+and that number was `SLIDE_W / page`, so a deck of any other width got nothing created in it at all -
+ten of the 29 corpus decks (1440, 1920, 960, 800, 3456, 481.5, 595 pt). `DeckPlan(deck, page_width)`
+and `measure_places(..., page_width)` (a thumbnail is 1600 px over the deck's page, not over 720) take
+it from `snapshot.page_size`, `sync.build_ours` passes the base's `deck_page_size`, and what is refused
+instead is the one thing a single scale cannot carry: a source recompiled onto paper of another
+**shape** (`aspect_mismatch`, 0.5%), where every created object lands at the right place across the
+slide and the wrong one down it.
 
 Opt-in suite (real Google Slides, ~95 s): `python -m pytest -m slides` (the default run deselects
 the `slides` marker, pyproject.toml). It converts the stress decks (19–22, 25, 13, demo) 3 at a
