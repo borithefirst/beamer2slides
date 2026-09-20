@@ -1172,11 +1172,13 @@ keys, named ranges), `doc_merge.py` (pure planning), `doc_sync.py` (the commands
   ordinary block, which kills the sync outright; a table the source dropped deleted however
   much the reader typed in it; one block's key landing on another; a block
   reworded *and* moved losing the reader's styling. A fixed entry goes out of `KNOWN`, or it
-  would swallow the next defect that looks like it. **Eight are fixed**: four ways of losing a
+  would swallow the next defect that looks like it. **Seven of the ten signatures are at
+  zero**, closed by four groups of fixes: five ways of losing a
   block's identity - which is the root of the worst of the rest, since a block the
   merge cannot recognise is one it deletes as dropped by the source - two ways of losing the
-  reader's content outright, and three ways of killing the sync where it stood (two of the
-  eight closed one of each). (1) `inherit_keys`
+  reader's content outright, three ways of killing the sync where it stood, and one place in
+  a document where Docs lets nothing be written at all (several closed one of each).
+  (1) `inherit_keys`
   matched every block of the file again by its words although the file had just named them
   all with its own `id=`, so two blocks that read alike swapped keys; a key the file asserts
   is now never matched again, which is the rule `doc_ir.key_blocks` had written down all
@@ -1192,12 +1194,24 @@ keys, named ranges), `doc_merge.py` (pure planning), `doc_sync.py` (the commands
   table with no named range and `anchor_tables` only looked for tables the batch had *built*,
   so it settled under a name made from its new first word, the file's key read as gone and the
   source's own cell edit was written nowhere (`structure` now gives a regrid the same `after`
-  a new table gets). (5) the one that was not identity: a table the source dropped was deleted
+  a new table gets). (5) `adopt_keys`, the one thing that gives a block written from nothing
+  its key back, matched a block's shape *and* its words, so the blocks a write mangles were
+  the ones it could never adopt: Docs merges two paragraphs keeping the first one's style, so
+  a delete hands the block after it the shape of the one that went (an item under a deleted
+  paragraph comes back a plain paragraph, a heading under a deleted subtitle a subtitle), and
+  the repair that would put the shape back is itself keyed by the key this restores, so the
+  two held each other up (`doc_merge._adopt_by_words`, a second pass on the words alone taken
+  only where one free key and one unkeyed block say the same thing; seeds 7034, 7048). Its
+  other half is no identity at all: an item and a paragraph are both NORMAL_TEXT, so writing
+  the named style back is blind to the bullet - the thing a delete takes away most often -
+  and the settle then wrote that plain paragraph into the file, the source's own list quietly
+  one item shorter (`carry_unimported` reads the bullet, `restore_bullets` writes it).
+  (6) the one that was not identity: a table the source dropped was deleted
   however much the reader had typed in it, because the test for "edited in the document" was
   `block_text`, which is empty for a table (`doc_merge._edited` reads the cells, the grid and
   the frozen runs) - and the same decision now keeps a block holding an equation, a dropdown or
   a TOC no request can make again, which `_merge_block`'s rewrite path had always refused to
-  destroy while a plain delete did it silently. (6-8) the three that killed a sync outright,
+  destroy while a plain delete did it silently. (7-9) the three that killed a sync outright,
   all one mistake: **Docs' index rules are about structural elements, not about tables**
   (nothing inserted at one's own index, the newline in front of one undeletable, a body
   neither opening nor ending on one without an empty paragraph beside it, one deleted by its
@@ -1208,12 +1222,26 @@ keys, named ranges), `doc_merge.py` (pure planning), `doc_sync.py` (the commands
   front of a table, the block before it is a table with none to lend), so `_delete_range` came
   back with a range of length zero and Docs refused it - Docs wants that paragraph anyway, so
   `doc_merge.restore_undeletable` puts the block back into the merge, round by round since
-  keeping one changes what the next delete may take, and the report says why. At one seed,
+  keeping one changes what the next delete may take, and the report says why. (10) and the
+  one that is no mistake in the arithmetic but a place where Docs lets nothing be written:
+  between two tables there is no paragraph, so the mark a block in front of a table borrows
+  does not exist and the index it borrows is inside the last cell of the table before it - a
+  table added there was built inside the old one and each re-plan built another, an ordinary
+  paragraph *moved* there was deleted from its old place first, so the move destroyed it.
+  Both are refused now (`_new_table_requests` asks for nothing, `doc_merge.refuse_nowhere`
+  leaves the paragraph where the document has it) and the report says why; Docs keeps a
+  paragraph between two tables anyway, which is the `between_tables` shape and where the
+  arithmetic is right. At one seed,
   200 rounds at chain 8: `toc-block` 10 -> 0, `toc-table-split` 4 -> 0, `empty-delete` 6 -> 0,
-  `dropped-table` 17 -> 0, `dropped-frozen` 8 -> 0, `crossed-frozen` 22 -> 0, `lost-key` 34 -> 7,
-  `crossed-delete` 2 -> 2, `moved-styling` 2 -> 2, and the same at
-  two more seeds; what is left
-  under the others has no named cause yet and the entries say so. Four of the harness's own,
+  `dropped-table` 17 -> 0, `dropped-frozen` 8 -> 0, `crossed-frozen` 22 -> 0,
+  `table-in-a-table` 1 -> 0, `lost-key` 34 -> 2,
+  `crossed-delete` 2 -> 1, `moved-styling` 2 -> 2, and the same at a second seed and at
+  chain 4. `lost-key`'s last two have a cause and no fix: an empty paragraph is all mark, so
+  its named range *is* its mark, and "\ntext" written at that mark is handed the range (an
+  insert at a range's own first index pushes it along), so the empty paragraph's key rides
+  onto the block that was written; no index both appends after an empty paragraph and leaves
+  its range alone, and reading the key back off the wrong block was tried in two widths and
+  cost that round its convergence. Five of the harness's own,
   found at chain 8 and pinned by tests that fail without the fix: `doc_world` shifted no named range when a
   table row was deleted, so after a source regrid every key below the table slid onto the block
   above (seeds 5099, 5167); the oracle accused a `\S+` token each side had edited one half
@@ -1227,7 +1255,14 @@ keys, named ranges), `doc_merge.py` (pure planning), `doc_sync.py` (the commands
   (`oracle.telling_names` keeps the names no picture beside it carries, `pair_images` matches
   on those first and on anything at all second so two copies of one file still pair off, and
   the excuse "the source took it out of the file" asks the telling names too; 13 -> 0, every
-  one of the nine pointing at a picture still standing in the document).
+  one of the nine pointing at a picture still standing in the document). And taking that
+  entry out uncovered the fifth, at two other seeds: chips are counted by value over the
+  whole tab and the excuse is that the file still holds one of that value, which credits a
+  chip the source added *somewhere else* against the one it is deleting here - a source that
+  drops the block its person chip is in and puts one of the same address into another block
+  read as no change, then as a loss when that block turned out to be one no request can
+  write (`oracle._source_dropped`, only for a block the reader left as the base has it,
+  since a chip the reader put in is one the merge keeps the whole block for).
 - Live suite (opt-in, marker `docs`, ~5 min): `python -m pytest -m docs tests/test_docs_live.py`
   pushes a document per test, edits both sides, syncs, checks a second sync writes nothing, and
   deletes the document. Offline: `tests/test_doc_ir.py`, `test_doc_merge.py`, `test_doc_sync.py`.

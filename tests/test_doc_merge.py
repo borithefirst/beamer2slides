@@ -1564,6 +1564,47 @@ def test_a_title_the_importer_flattened_is_put_back_by_the_settle():
                                             {"startIndex": 12, "endIndex": 20}]
 
 
+def test_a_bullet_a_delete_took_off_is_put_back_by_the_settle():
+    """A list item and a plain paragraph are both NORMAL_TEXT, so the named style is
+    blind to exactly the thing a delete takes away most often: Docs merges two
+    paragraphs keeping the first one's style, so the item under a deleted paragraph
+    comes back with no bullet, and the settle then wrote that plain paragraph into
+    the file — the source's own list, quietly one item shorter."""
+    planned = [{"kind": "item", "key": "item:a", "level": 0,
+                "runs": [styled_run("lantern")]}]
+    read = live([para("item:a", "lantern")])
+    doc_merge.adopt_keys(read, planned)
+    assert read["blocks"][0]["unimported"]["bullet"] == "unordered"
+    assert doc_merge.tidy_requests(read) == [{"createParagraphBullets": {
+        "range": {"startIndex": 1, "endIndex": 9},
+        "bulletPreset": doc_merge.BULLETS[False]}}]
+    # And the other way: a bullet the write put on a block that is no item.
+    planned = [para("p:a", "lantern")]
+    read = live([{"kind": "item", "key": "p:a", "level": 0,
+                  "runs": [styled_run("lantern")]}])
+    doc_merge.adopt_keys(read, planned)
+    assert read["blocks"][0]["unimported"]["bullet"] == "none"
+    assert doc_merge.tidy_requests(read) == [{"deleteParagraphBullets": {
+        "range": {"startIndex": 1, "endIndex": 9}}}]
+
+
+def test_a_block_whose_shape_the_write_changed_is_still_adopted_by_its_words():
+    """`adopt_keys` matched shape and words together, so the very blocks a write
+    mangles — a delete hands the block after it the shape of the one that went —
+    were the ones that could never be adopted. And the repair that would put the
+    shape back is keyed by the key this restores, so the two held each other up."""
+    planned = [para("p:above", "kept"),
+               {"kind": "item", "key": "item:a", "level": 0, "runs": [styled_run("lantern")]}]
+    read = live([para("p:above", "kept"), para(None, "lantern")])
+    assert doc_merge.adopt_keys(read, planned) == 1
+    assert read["blocks"][1]["key"] == "item:a"
+    # Never a guess: two blocks that say the same thing say nothing about which is which.
+    planned = [{"kind": "item", "key": "item:a", "level": 0, "runs": [styled_run("same")]},
+               {"kind": "item", "key": "item:b", "level": 0, "runs": [styled_run("same")]}]
+    read = live([para(None, "same"), para(None, "same")])
+    assert doc_merge.adopt_keys(read, planned) == 0
+
+
 def test_a_later_tabs_blocks_are_adopted_before_anything_keys_them():
     """`doc_ir.key_blocks` recurses into the tabs, so adopting and keying one part at
     a time let the first part's keying name every later tab's blocks after their
