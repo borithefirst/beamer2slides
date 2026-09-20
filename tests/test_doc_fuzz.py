@@ -43,8 +43,11 @@ CHAINED = (0, 1, 2, 3, 4, 5)
 # Seeds that once failed and are kept as regressions: 60 a block the source renamed read
 # as a block gone, 181 a cell judged by its place after the reader inserted a row above
 # it, 309 (chain 4) one of two identical person chips counted as lost, 1031 and 1147
-# (chain 8) the two defects the chained campaign found last.
-REGRESSIONS = ((60, 1), (181, 1), (309, 4), (1031, 8), (1147, 8))
+# (chain 8) the two defects the chained campaign found last, 5099/5167 (chain 8) the
+# world not moving a named range when a table row went, 5130 (chain 8) the oracle
+# accusing a token both sides had edited half of.
+REGRESSIONS = ((60, 1), (181, 1), (309, 4), (1031, 8), (1147, 8),
+               (5099, 8), (5130, 8), (5167, 8))
 
 
 def _round(seed: int, chain: int) -> None:
@@ -196,6 +199,48 @@ def test_the_oracle_catches_a_loss_put_into_a_real_round():
     assert _kinds(oracle.check(was, before, hurt, report, mine)) == {"block_gone"}
 
 
+def test_the_oracle_lets_a_token_both_sides_edited_half_of_alone():
+    """`WORD` is `\\S+`, so a soft hyphen makes one token out of two words and each side
+    can rewrite one half. The merge is then right to write a token neither side typed,
+    and the reader's half is in it (chain-8 seed 5130). What must survive is only what
+    the reader added — the other half is the source's to change."""
+    base = _ir(_p("k1", "a soft­hyphen here"))
+    before = _ir(_p("k1", "a quartz­hyphen here"))          # the reader took "soft"
+    after = _ir(_p("k1", "a quartz­zephyr here"))           # the source took "hyphen"
+    assert not oracle.failures(oracle.check(base, before, after, NOTHING))
+    # And the reader's own half going is still a loss.
+    gone = _ir(_p("k1", "a soft­zephyr here"))
+    assert _kinds(oracle.check(base, before, gone, NOTHING)) == {"words_lost"}
+
+
+# ---------------------------------------------------------------- the world is the rules
+
+def test_deleting_a_table_row_moves_the_named_ranges_below_it():
+    """A row's content leaves the document, so every index after it moves up and Google
+    moves the anchors with it. The world shifted by 0, so after a source regrid every key
+    below the table slid onto the block above (chain-8 seeds 5099 and 5167)."""
+    def said(ir):
+        return [(b.get("key"), "".join(r.get("text", "") for r in b.get("runs", [])))
+                for b in ir["blocks"] if b.get("kind") != "table"]
+
+    # Short blocks under the table, so a row's worth of units is more than one of them:
+    # that is what makes a key land on the wrong block rather than merely on the right
+    # one's wrong end.
+    world = doc_world.build([{"blocks": [
+        fuzz_docs._t([["k", "v"], ["a", "1"], ["b", "2"]]),
+        fuzz_docs._p("one"), fuzz_docs._p("two"), fuzz_docs._p("six"),
+        fuzz_docs._p("ten"), fuzz_docs._p("end")]}], title="fuzz")
+    ours = fuzz_docs.bootstrap(world)
+    base = copy.deepcopy(ours)
+    was = said(doc_world.read_ir(world, ours, base))
+    assert was and all(key for key, _ in was)
+    table = [b for b in ours["blocks"] if b.get("kind") == "table"][0]
+
+    world.apply([{"deleteTableRow": {"tableCellLocation": {
+        "tableStartLocation": {"index": table["span"][0]}, "rowIndex": 1}}}])
+    assert said(doc_world.read_ir(world, ours, base)) == was
+
+
 # ---------------------------------------------------------------- what is still broken
 
 def _push(shape: str):
@@ -312,11 +357,12 @@ def test_inherit_keys_leaves_the_keys_the_file_asserts_alone():
     assert _keys(ours) == ["paragraph:before-both", "paragraph:after-both"]
 
 
-@pytest.mark.xfail(strict=True, reason="a heading the source turned into a paragraph "
-                   "keeps the `level` of the heading, because `_merge_block` patches "
-                   "the shape fields the file has instead of replacing them — and a "
-                   "block of no shape at all is one `adopt_keys` cannot pair")
 def test_a_heading_the_source_turned_into_a_paragraph_is_a_paragraph():
+    """Found by the campaign as a defect and fixed before it was ever reported:
+    `_merge_block` used to patch the shape fields the file has instead of replacing
+    them, so a heading the source demoted kept its `level` and `adopt_keys` could
+    not pair a block whose shape said one thing and whose kind said another.
+    `doc_merge._take_shape` now takes the source's shape whole, absences included."""
     was = {"blocks": [{"key": "k", "kind": "heading", "level": 1,
                        "runs": [{"text": "Results"}]}]}
     mine = {"blocks": [{"key": "k", "kind": "paragraph", "runs": [{"text": "Results"}]}]}

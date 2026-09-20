@@ -57,6 +57,22 @@ WORD = re.compile(r"\w+")
 FRESH = ["kestrel", "harbour", "lantern", "meadow", "quartz", "ribbon", "signal",
          "thicket", "umbrella", "vellum", "willow", "zephyr"]
 
+# The whole dialect, not the one mark it is easiest to draw. `doc_merge.MANAGED` says
+# which run fields a restyle may *clear* and `MANAGED_PARAGRAPH` which paragraph ones,
+# so every field named there has to be reachable from both sides or the clearing is
+# unfuzzed: a campaign that only ever sets italic proves nothing about a face, a size
+# or an indent. `code` and `font` are one field on the wire (both are the run's family),
+# so drawing one drops the other.
+RUN_MARKS = [("bold", True), ("italic", True), ("underline", True), ("strike", True),
+             ("smallcaps", True), ("code", True),
+             ("font", "Georgia"), ("font", "Roboto Mono"),
+             ("fontsize", 9.0), ("fontsize", 14.5),
+             ("color", "#993333"), ("highlight", "#ffee88")]
+
+PARA_MARKS = [("align", "center"), ("align", "justify"), ("indent", 18.0),
+              ("indent_first", 36.0), ("line_spacing", 1.5), ("shading", "#eef2ff"),
+              ("space_above", 6.0), ("space_below", 12.0)]
+
 
 # ---------------------------------------------------------------- the corpus
 
@@ -409,6 +425,56 @@ def read_heading(rng, part, tab):
         "fields": "namedStyleType"}}], [block.get("key")]
 
 
+# What the reader picks in the editor's own menus, written the way Docs writes it.
+# Spelled out here rather than taken from `doc_merge`, so the harness is not checking
+# the merge against its own idea of a Dimension.
+READER_FACES = [
+    ({"weightedFontFamily": {"fontFamily": "Georgia", "weight": 400}}, "weightedFontFamily"),
+    ({"weightedFontFamily": {"fontFamily": "Courier New", "weight": 400}},
+     "weightedFontFamily"),
+    ({"fontSize": {"magnitude": 18, "unit": "PT"}}, "fontSize"),
+    ({"fontSize": {"magnitude": 8.5, "unit": "PT"}}, "fontSize"),
+    ({"smallCaps": True}, "smallCaps"),
+    ({"foregroundColor": {"color": {"rgbColor": {"red": 0.1, "green": 0.3, "blue": 0.7}}}},
+     "foregroundColor"),
+]
+
+READER_MEASURES = [
+    ({"indentStart": {"magnitude": 36, "unit": "PT"}}, "indentStart"),
+    ({"indentFirstLine": {"magnitude": 18, "unit": "PT"}}, "indentFirstLine"),
+    ({"lineSpacing": 200}, "lineSpacing"),
+    ({"spaceAbove": {"magnitude": 12, "unit": "PT"}}, "spaceAbove"),
+    ({"spaceBelow": {"magnitude": 3, "unit": "PT"}}, "spaceBelow"),
+    ({"shading": {"backgroundColor": {"color": {"rgbColor": {
+        "red": 1.0, "green": 0.95, "blue": 0.8}}}}}, "shading"),
+    ({"alignment": "CENTER"}, "alignment"),
+]
+
+
+def read_face(rng, part, tab):
+    """The reader chooses a face, a size or a colour for a word — the case that
+    matters most, because `doc_merge.MANAGED` lets a source restyle clear it."""
+    spots = [(b, s) for b in _paragraph_blocks(part) for s in _word_spots(b)]
+    if not spots:
+        return [], []
+    block, (_, low, high) = rng.choice(spots)
+    style, field = rng.choice(READER_FACES)
+    return [{"updateTextStyle": {"range": _span(low, high, tab),
+                                 "textStyle": style, "fields": field}}], [block.get("key")]
+
+
+def read_measure(rng, part, tab):
+    """The reader indents a paragraph, spaces it out or shades it."""
+    blocks = _paragraph_blocks(part)
+    if not blocks:
+        return [], []
+    block = rng.choice(blocks)
+    style, field = rng.choice(READER_MEASURES)
+    return [{"updateParagraphStyle": {"range": _span(*block["span"], tab),
+                                      "paragraphStyle": style, "fields": field}}], \
+        [block.get("key")]
+
+
 def read_renumber_list(rng, part, tab):
     items = [b for b in _blocks(part) if b.get("kind") == "item" and b.get("span")]
     if not items:
@@ -492,6 +558,7 @@ READER = {
     "type_word": read_type_word, "reword": read_reword, "delete_word": read_delete_word,
     "append_block": read_append_block, "delete_block": read_delete_block,
     "bold_word": read_bold_word, "heading": read_heading,
+    "face": read_face, "measure": read_measure,
     "renumber_list": read_renumber_list, "cell_type": read_cell_type,
     "add_row": read_add_row, "delete_row": read_delete_row,
     "insert_picture": read_insert_picture, "insert_chip": read_insert_chip,
@@ -588,15 +655,39 @@ def src_move(rng, ir, touched):
     part["blocks"].insert(rng.randrange(len(part["blocks"]) + 1), block)
 
 
+def _mark_run(rng, block) -> bool:
+    """Put one run mark of the dialect on one run of a block."""
+    runs = [r for r in block.get("runs", []) if not r.get("frozen") and r["text"].strip()]
+    if not runs:
+        return False
+    run = rng.choice(runs)
+    key, value = rng.choice(RUN_MARKS)
+    run[key] = value
+    if key in ("font", "code"):
+        run.pop("code" if key == "font" else "font", None)
+    return True
+
+
+def _mark_paragraph(rng, block) -> bool:
+    """Put one paragraph measure of the dialect on a block. These are `SHAPE_KEYS`,
+    so they travel by `_take_shape`, not by the run restyler: a different code path
+    from `_mark_run` and worth drawing on its own."""
+    if block.get("kind") == "table":
+        return False
+    key, value = rng.choice(PARA_MARKS)
+    block[key] = value
+    return True
+
+
 def src_restyle(rng, ir, touched):
     spot = _pick(rng, ir)
     if not spot:
         return
     _, _, block = spot
-    runs = [r for r in block.get("runs", []) if not r.get("frozen") and r["text"].strip()]
-    if not runs:
-        return
-    rng.choice(runs)["italic"] = True
+    if rng.random() < 0.35:
+        _mark_paragraph(rng, block)
+    else:
+        _mark_run(rng, block)
 
 
 def src_retitle(rng, ir, touched):
@@ -702,9 +793,10 @@ def src_collide(rng, ir, touched):
         if cells:
             rng.choice(cells)["runs"] = [{"text": rng.choice(FRESH)}]
     elif how == "restyle" and block.get("kind") != "table":
-        runs = [r for r in block.get("runs", []) if not r.get("frozen")]
-        if runs:
-            rng.choice(runs)["bold"] = True
+        if rng.random() < 0.35:
+            _mark_paragraph(rng, block)
+        else:
+            _mark_run(rng, block)
     elif block.get("kind") != "table":
         _swap_word(rng, block)
     elif block.get("kind") == "table":

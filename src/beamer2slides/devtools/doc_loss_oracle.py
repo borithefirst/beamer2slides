@@ -104,6 +104,38 @@ def words(text: str) -> Counter:
     return Counter(WORD.findall(text))
 
 
+PIECE = re.compile(r"\w+")
+
+
+def _split(token: str) -> list[str]:
+    return [p for p in PIECE.findall(token) if len(p) > 1]
+
+
+def joined_differently(token: str, after: Counter, was: Counter) -> bool:
+    r"""A token the reader typed is not lost when the words *they* put in it are still
+    there, joined to something else.
+
+    `WORD` is `\S+`, so a soft hyphen, a slash or an em dash makes one token out of two
+    words, and the two sides can each rewrite one half of it. Then the merge is right
+    to produce a token neither side ever typed, and the reader's work is inside it:
+    chain-8 seed 5130, shape `astral` — the base said `soft\xadhyphen`, the reader
+    typed `quartz\xadhyphen`, the source `soft\xadzephyr`, and the document ended up
+    saying `quartz\xadzephyr`. Both edits arrived. Calling that a loss is the oracle's
+    mistake, not the sync's.
+
+    What must survive is only what the reader added, measured against the base
+    (`was`): the other half is the source's to change. Nothing real gets through — a
+    token of one word must still survive whole, and a word the sync really dropped is
+    in no token of the tab at all.
+    """
+    pieces = _split(token)
+    if len(pieces) < 2:
+        return False
+    base = {piece for other in was for piece in _split(other)}
+    there = {piece for other in after for piece in _split(other)}
+    return all(piece in there for piece in pieces if piece not in base)
+
+
 def runs_of(block: dict):
     if block.get("kind") == "table":
         for row in block.get("rows", []):
@@ -342,7 +374,8 @@ def _words_findings(key, block, base_block, after_block, after_words, said, tab)
         return []
     survived = words(text_of(after_block))
     lost = typed - survived - (after_words - survived)     # nowhere in the tab
-    lost = Counter({w: n for w, n in lost.items() if len(w) > 1})
+    lost = Counter({w: n for w, n in lost.items()
+                    if len(w) > 1 and not joined_differently(w, after_words, was)})
     if not lost or _named(said, key):
         return []
     return [finding("words_lost", "loss",
