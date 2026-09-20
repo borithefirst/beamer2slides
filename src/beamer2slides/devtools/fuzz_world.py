@@ -16,6 +16,7 @@ import copy
 import json
 import random
 import re
+from difflib import SequenceMatcher
 from pathlib import Path
 
 from beamer2slides import identity, merge, snapshot, sync
@@ -391,20 +392,22 @@ def h6(text):
 
 
 def _styling_ends(base_rb, live_rb, text) -> bool:
-    """Whether the deck's run styling has words to go back onto. `sync.style_range_requests` puts
-    each styled run onto the same words in the new text; a word the source replaced is not there,
-    and that run's styling simply ends. (`merge.styling_lost` decides the same thing in the planner;
-    this is the reference applier's own opinion of it, on purpose.)"""
+    """Whether the deck's run styling has anything to go back onto. `sync.style_range_requests`
+    maps each styled run through the matching blocks of the live text and the text sync is about to
+    write, so a run still sitting on something the source kept goes back on; a run whose characters
+    are all gone is styling that simply ends. (`merge.styling_lost` decides the same thing in the
+    planner, by words; this is the reference applier's own opinion of it, on purpose - but it has to
+    be the mechanism's opinion. Reading it word by word had the applier throw away styling sync
+    really does re-apply, and the campaign accused the merge of it: offline seed 23599 --shape
+    adopt, where the person's own earlier rewording had clipped their bold to two letters inside a
+    word, which is not a word and was not looked for in the new text.)"""
     base_styles = base_rb.get("text_styles") or []
-    words = set(re.findall(r"\w+", text or ""))
-    live_text = live_rb.get("text") or ""
-    for start, end, style in live_rb.get("run_spans") or []:
-        if style in base_styles:
-            continue                                  # the converter's own styling, not the person's
-        on = set(re.findall(r"\w+", live_text[start:end]))
-        if on and not (on & words):
-            return True
-    return False
+    before, after = live_rb.get("text") or "", text or ""
+    spans = [(s, e) for s, e, style in (live_rb.get("run_spans") or []) if style not in base_styles]
+    if not spans:
+        return False
+    blocks = SequenceMatcher(None, before, after, autojunk=False).get_matching_blocks()
+    return any(not any(min(end, i + n) > max(start, i) for i, _, n in blocks) for start, end in spans)
 
 
 def new_object(skey, o_el, base_el, live, overrides, tok):

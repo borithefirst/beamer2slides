@@ -146,6 +146,28 @@ def test_a_frame_the_source_moved_across_another_keeps_its_slide(tmp_path):
     assert all(r["wrong"]["before"] <= r["wrong"]["order"] for r in rounds)  # never worse than the order alone
 
 
+def test_the_applier_keeps_styling_the_real_sync_would_put_back():
+    """The reference applier decides for itself whether the person's run styling has anywhere to go
+    when an element is recreated, and it has to decide it the way `sync.style_range_requests` really
+    does: by mapping each styled span through the matching blocks of the old text and the new one.
+
+    Reading it word by word instead threw styling away that sync re-applies, and the campaign then
+    accused the merge of losing it (offline seed 23599 --shape adopt, chained: the person bolded a
+    word, reworded that very sentence themselves two syncs later - which clips the bold to two
+    letters inside another word, as Slides does - and the source then reworded it too)."""
+    from beamer2slides.devtools import fuzz_world
+
+    plain, bold = {"fontFamily": "Lato"}, {"fontFamily": "Lato", "bold": True}
+    base_rb = {"text_styles": [plain]}
+    live = {"text": "policy-theirs colleague source\n", "run_spans": [[11, 13, bold], [13, 30, plain]]}
+    assert not fuzz_world._styling_ends(base_rb, live, "policy-theirs colleague-ours source\n")
+    # The other way: the source replaced the word those letters were in, so the styling really ends.
+    assert fuzz_world._styling_ends(base_rb, live, "wording colleague source\n")
+    # The converter's own styling is not the person's, and never counts as lost.
+    only_ours = {"text": live["text"], "run_spans": [[0, 30, plain]]}
+    assert not fuzz_world._styling_ends(base_rb, only_ours, "wording colleague source\n")
+
+
 def test_the_round_notices_a_base_that_would_not_settle(tmp_path):
     """The settle check with a base broken on purpose: one that has forgotten a slide makes the next
     sync create it again, and the round has to say so."""
