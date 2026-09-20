@@ -795,6 +795,30 @@ keys, named ranges), `doc_merge.py` (pure planning), `doc_sync.py` (the commands
   (`doc_merge.restore_unreadable`) and `settle` then gives the list bullets of the
   document's own (`bullet_requests`: measured, they read back from then on, so a reader's
   switch to numbers is seen); block identity ignores ordered-ness entirely.
+- **What the dialect says** (`doc_ir`): runs carry `font`, `fontsize` and `smallcaps`
+  beside the marks — one unquoted family name (a fallback list is mangled on import:
+  `Georgia, serif` → `Geo`), the size as the document reports it (the importer rounds a
+  fraction away and the settle rewrites the file, so nothing oscillates), small caps as
+  `data-smallcaps`. `<code>` made four families one face; it is still written and still
+  means Courier New, but a face is now carried as itself. Paragraphs carry `indent`,
+  `indent_first` and `line_spacing` as `margin-left` / `text-indent` / `line-height`
+  (kept by the importer) and `shading`, `space_above`, `space_below` as `data-`
+  attributes: `background-color` on a `<p>` is a character highlight on its runs, not
+  paragraph shading, and no margin survives, so those three go in by `batchUpdate`
+  only. A run or paragraph that only repeats its named style says nothing
+  (`_named_defaults`), or an imported document reads back as a wall of spans; a
+  bullet's own indents are the list preset's. `adopt_keys` compares the plan with the
+  read-back (`carry_unimported`) and `tidy_requests` writes what no import could carry
+  — additions only, since in a read "absent" is also a reader who took the styling off.
+- **`MANAGED` / `MANAGED_PARAGRAPH`**: the fields the merge owns, named on a restyle
+  whether or not the block asks for them, so a property the source dropped goes away. A
+  field belongs there only when the file can say it *and* a read can see it — naming
+  one the file cannot carry would clear, on every source restyle, something a reader set
+  in the browser; that is why `weightedFontFamily` stayed out while `<code>` was all the
+  file could say, and why it, `fontSize` and `smallCaps` are in now. `_take_shape`
+  replaces a dict update that could only add, so a source that took a block's centring
+  or shading away now takes it away. Both fire only where the source changed the styling
+  and the document did not, so a reader's own face or shading is never written over.
 - An equation (several index units, not one) reads as `equation {}`; its LaTeX is only in
   Drive's Markdown export, which escapes no dollar anywhere. `settle` asks the export
   (`doc_sync.equation_latex`), `doc_ir.latex_of` places each equation by the words the
@@ -837,6 +861,11 @@ keys, named ranges), `doc_merge.py` (pure planning), `doc_sync.py` (the commands
   the pass after. A cell whose paragraph counts differ merges as one text with its breaks in it
   (`_merge_cell`, written against `_joined`). A table the source moved, which the document left
   as the base has it, is deleted and built again blank where the file has it (`structure`).
+  A table is written one line per row, so a changed row is a changed line: the breaks sit
+  between `</tr>` and `<tr>` and inside the table's own tags, where a parser has nowhere to
+  put text, and a row stays whole with its cells, since inside a `<td>` the space would be
+  content (measured on `from_html`; the live importer's side of it is what
+  `tests/test_docs_live_styles.py` asks, and that file has not been run).
   Deleting one: its own span; with its `lead` when a body opens on it; with the mark in front
   when it ends the body (measured: no stray trailer). `insertTable` splits the paragraph
   its index is in and needs one, so a table goes at the following block's start (and the empty

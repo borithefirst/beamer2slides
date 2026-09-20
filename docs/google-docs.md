@@ -146,6 +146,78 @@ HTML for structure and the bulk of the styling, then one `batchUpdate` for page 
 headers/footers, footnotes, page and section breaks, checklists, small caps and
 paragraph decoration — and the named-range anchors, which go in the same batch.
 
+## What the canonical dialect says
+
+The file is the source, so what it cannot spell cannot be authored. The dialect
+therefore carries every styling property that a read can see and one of the two
+write paths can create, and nothing else.
+
+**Runs.** `<b>`, `<i>`, `<u>`, `<s>` and `<a>` as before, plus:
+
+| IR key | in the file | how it reaches the document |
+|---|---|---|
+| `font` | `style="font-family:Consolas"` | the import (one name, unquoted, no fallback) |
+| `fontsize` | `style="font-size:18pt"` | the import (rounded to whole points) |
+| `smallcaps` | `data-smallcaps="1"` | `updateTextStyle` only |
+
+`<code>` used to stand for four monospaced families at once, which silently made
+Consolas and Roboto Mono the same face — and the importer drops `<code>`'s styling
+anyway, so the face only appeared after the next sync wrote it. A face is now carried
+as the face it is, and arrives with the import. The tag is still written and still
+read, and still means Courier New (`doc_ir.CODE_FAMILY`), so a file written before
+this keeps working.
+
+A size is kept as the document reports it, not rounded. The importer rounds at
+`push`, but `push` settles by regenerating the file from the document it made, so the
+file then says the whole point and nothing oscillates; every write after that is a
+`batchUpdate`, which takes the size as given. Rounding in the reader would instead
+move a 7.5 pt a reader chose in the editor.
+
+**Paragraphs.** `text-align` as before, plus `margin-left` (`indentStart`),
+`text-indent` (`indentFirstLine`) and `line-height` (`lineSpacing`) — all three kept
+by the importer — and three attributes of ours that only `batchUpdate` can write:
+`data-shading`, `data-space-above`, `data-space-below`. The spelling matters:
+`background-color` on a `<p>` is a character highlight on its runs, not paragraph
+shading, so the CSS would be a lie; and no margin property is among what survives.
+A `<li>` carries the same, except its indents, which belong to the list preset and
+would fight `createParagraphBullets`.
+
+**A run or paragraph that only repeats its named style says nothing**
+(`doc_ir._named_defaults`). An import sets a face and a size on nearly every run it
+writes, and without subtracting the named style the canonical file would come back as
+a wall of spans. It is safe as well as tidy: clearing such a field falls back to
+exactly the value that was left out.
+
+**What no import can carry is written by the settle.** `doc_sync.settle` already hands
+`doc_merge.adopt_keys` the blocks the run planned, so `adopt_keys` compares them with
+the read-back and `carry_unimported` notes the shading, the space around a paragraph
+and the small caps the document has not got; `tidy_requests` writes them in the batch
+the settle sends anyway. Only what the plan asks for and the document lacks is
+written, never a removal: in a read, "absent" is also what a reader who took the
+styling off looks like. After a sync it is almost always empty, the merge's own batch
+having written those fields; after a `push`, which is an import and nothing else, it
+is the whole of them.
+
+**What the merge owns.** `doc_merge.MANAGED` and `MANAGED_PARAGRAPH` are named on a
+restyle whether or not the block asks for them, which is what makes a property the
+source dropped go away. A field belongs there only when the file can say it *and* a
+read can see it — naming a field the file cannot carry would clear, on every source
+restyle, something a reader set in the browser and nothing on our side ever knew
+about. That is why `weightedFontFamily` stayed out while `<code>` was all the file
+could say, and why it, `fontSize` and `smallCaps` are in now.
+
+**Tables are written one line per row**, so a changed row is a changed line in a diff.
+The breaks go between `</tr>` and `<tr>` and between the table's own tags and its
+rows, where an HTML parser has nowhere to put text; a row stays whole with its cells,
+because inside a `<td>` the white space *would* be content. Measured on `from_html`;
+that Drive's importer ignores them too is what `tests/test_docs_live_styles.py` is
+for — **not yet run**.
+
+Still not carried, and easy to add next: `baselineOffset` (`<sup>`/`<sub>`, which the
+importer keeps). Not carryable: a real font weight — `font-weight: 600` arrives as
+plain `bold: true` with the weight recorded as 400, so the IR could not tell a
+reader's 600 from ordinary bold.
+
 ## Reading what we cannot write: chips and the rest
 
 `tools/probe_docs_chips.py` makes a document with one labelled line per Docs-native
