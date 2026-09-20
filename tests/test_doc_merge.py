@@ -668,6 +668,30 @@ def test_a_row_the_source_deleted_but_the_document_wrote_in_is_kept():
     assert "took away a row, but the document wrote in it" in result["notes"][0]
 
 
+def test_a_row_the_document_deleted_that_the_source_wrote_in_is_said_to_be_gone():
+    """The mirror of the note above, and the half that was silent.
+
+    Deleting a row is a change to the grid, and the grid is the document's, so the
+    source's words in that row go with it — nothing can be merged and nothing kept.
+    Only the report can tell the author they asked for something that went (offline
+    chain-10 seed 480066).
+    """
+    ours = grid_table([["a one", "b one"], ["a two", "b REWRITTEN"]])
+    result = doc_merge.plan(GRID, ours, grid_table([["a one", "b one"]]))
+    assert result["structure"] == []
+    assert not any("REWRITTEN" in r.get("insertText", {}).get("text", "")
+                   for r in result["requests"])
+    assert any("deleted a row the source wrote in" in note for note in result["notes"]), \
+        result["notes"]
+
+
+def test_a_row_the_document_deleted_that_the_source_left_alone_says_nothing():
+    """The whole grid is one row shorter, which is not the source writing in it."""
+    ours = grid_table([["a one", "b one", "c one"], ["a two", "b two", "c two"]])
+    result = doc_merge.plan(GRID, ours, grid_table([["a one", "b one"]]))
+    assert not any("the words with it" in note for note in result["notes"]), result["notes"]
+
+
 def test_a_row_the_document_added_stays_while_the_source_adds_a_column():
     theirs = grid_table([["a one", "b one"], ["a two", "b two"], ["a doc", "b doc"]])
     ours = grid_table([["a one", "b one", "c one"], ["a two", "b two", "c two"]])

@@ -2049,6 +2049,134 @@ oracle (nothing of the reader's went) nor convergence could see it — only
 one read, beside `recover_tables` and the anchoring. 900 rounds at chain 4 from 330000
 clean afterwards, with 400 at chain 8 from 320000 beside them.
 
+### The order nobody was judging, and the level no request can write
+
+`_grid`, `_cells_arrived`, `_words_arrived` and `_shape_arrived` ask whether the source's
+words, grid and look arrived. Nothing asked about the **order** — and a source move that
+never arrives has exactly the shape this whole apparatus was built for: it takes nothing of
+the reader's, so the loss oracle is silent, and the settle writes the order the document
+ended up with into the base, so the next sync agrees with itself and the round converges.
+`fuzz_docs._order_arrived` asks it, narrowly: only where the reader left the shared keys in
+exactly the base's order, so no merge rule can stand in the way, and only of **pairs** of
+keys, because which block "moved" is not a fact about two orders — swapping a paragraph and
+the table after it reads as either of them moving, and the merge may refuse and name the one
+the file reads as having stayed. A pair is explained where the report names either of its two.
+
+It found four things, and two more came out of the same corner while it was being written.
+
+* **A refused move is not a move, in the merged list either** (chain-4 seed 380191). All
+  three places where the merge refuses one — a block between two tables, one in front of the
+  table a body opens on, a table right behind another — cleared `moved` and left the block at
+  the *file's* position in `merged`. Every index the sync computes comes from a block's span,
+  and a span says where a block **is**, so the refusal had to put it back where the document
+  has it (`doc_merge._put_back`). Two of the three already did; `structure`'s did not, and the
+  table then stood in the merged order where only the file had it, which is a lie the pass
+  after reads as truth.
+* **`_moved_keys` was not a longest common subsequence** (chain-6 seed 400186). It read the
+  file against the base with `SequenceMatcher`'s matching blocks, which are *contiguous*, so a
+  closing paragraph sent to the front made every block it passed read as moved: four moves
+  where one would do, and among them a table whose move was then refused because the reader
+  had regridded it — the order came out neither side's with nothing saying so. It is the
+  longest increasing subsequence of base positions now, which is the shortest set of moves
+  that explains the file. And the moves go in **before** the additions, because an addition is
+  placed after the block the file puts it behind and a move does not carry what stands behind
+  it: a picture added behind an item the source moved was left where the item had been, and
+  the block after *it* then read as standing in its place already, so its own move was refused
+  as one whose two ends are one place.
+* **A refused move drags its followers, and the report only named the one that was refused**
+  (chain-10 seed 450252). A source that moves a section moves its blocks one by one, each
+  placed after the one the file puts it behind — so where that one's move was just refused,
+  this one does not go where the file has it either, and the next along is stuck on this one
+  in its turn. Nobody could read that off the line naming the table. `_apply_source_moves`
+  keeps a `stuck` set and says it, for a block that then does not move at all *and* for one
+  that moves only partway.
+* **A mark the reader moved from one word to another** (chain-6 seed 400044, the merge's).
+  `marks_of` is a sequence of distinct mark-sets with no words in it, so a reader who takes a
+  bold off one word and puts it on another is invisible to it — and `_restyled_words` then
+  wrote the file's styling onto every word the file has, taking the reader's bold back off.
+  It writes only what the source really *changed* now.
+
+And the level. **No request sets a bullet's nesting level**: `createParagraphBullets` says
+nothing about one, and Docs reads it off the paragraph's leading tabs, which the merge does
+not write. So a level lives on a paragraph mark and survives exactly as long as that mark
+does, and there are three ways for it not to — a block **written from nothing** (one the
+source added, or moved, a move being a delete and a write) comes out at the level of the list
+it lands in, whether that is deeper than the source asks for (chain-4 seed 430296) or
+shallower (chain-8 seed 530265: a level-0 item moved to the end of a document whose last item
+the reader had indented — the note fired only for an item *asking* to be nested, so the
+commoner half was silent); and a block whose **paragraph mark a delete in front of it hands
+over** wears the deleted one's level, a run of deletes passing the first one's along (chain-4
+seed 430587). Everything else about that style is put back — the named style and the bullet by
+`carry_unimported` / `restore_bullets`, the measures by the block's own restyle — and the
+level alone cannot be. `doc_merge.unwritten_levels` says so before the write, which is the
+only honest thing left: the reader having touched nothing, the loss oracle has no question,
+and the base agrees with the document afterwards, so the round converges.
+`fuzz_docs._shape_arrived` is the judge that is not satisfied.
+
+### A row the reader deleted, a range two deletes claimed, and a repair undone by the request after it
+
+Four at fresh seeds, three of the merge's and one the campaign's own.
+
+* **The document deleted a row the source wrote in** (chain-10 seed 480066). Deleting a row is
+  a change to the grid, and the grid is the document's, so the source's words in that row go
+  with it — nothing to merge and nothing to keep. `_table_lines` had the mirror note since it
+  was written ("the source took away a row, but the document wrote in it — kept") and not this
+  one: the file's line was settled out of the merge in silence. It is asked of the cells of the
+  *other* dimension's lines both sides share, as `_line_unchanged` asks, so a column the source
+  added beside them is not mistaken for news about every row it crosses.
+* **A range two deletes of one batch both claimed** (chain-6 seed 550667), and this one killed
+  the sync where it stood. A range is destroyed with its text or not at all, so a
+  `deleteNamedRange` for one already gone is refused — and a refusal throws out the whole
+  batch. `_orphan_range` asked only whether *this* delete covers the range, and a run of
+  deletes hands each mark leftwards: the block in front of the table gives up its neighbour's
+  mark and keeps its own, which the neighbour's own delete then takes. Every cut of the batch
+  is asked now.
+* **The settle undoing its own repair** (chain-4 seed 570181). Docs merges two paragraphs
+  keeping the first one's style, so a paragraph the source retitles behind an item the source
+  deletes comes back a bulleted NORMAL_TEXT line. `carry_unimported` sees both,
+  `restore_bullets` takes the bullet off and `unimported_requests` writes TITLE — and then
+  `bullet_requests`, reading the block as the *read-back* has it, counted it in the run of
+  items behind it and re-bulletted the lot, a paragraph-wide request that flattened the named
+  style again. What a run is made of is what the settle **leaves behind**, not what it found
+  (`_settles_as_item`) — the same lesson as seed 290010's indent, one request further on.
+* **The cell judge's own blind spot** (chain-4 seed 570177, the campaign's). `_cells_arrived`
+  recognises a regrid by the grid's *size*, so a source that takes one row out and puts another
+  in slips past it, and every cell below the one that went reads as rewritten with the row
+  above's words. The reader had deleted a different row, both deletes stood and the merge was
+  right. A word the base already says somewhere is one a regrid shifted into this cell, not one
+  the source wrote; the new token an `edit_cell` writes is never one of those, so the judge is
+  as sharp as it was.
+
+And two more at fresh seeds, one on each side of the line again.
+
+* **An empty paragraph of the source's own is never a table's lead** (chain-12 seed 630138).
+  A body may not open on a table, so Docs keeps an empty paragraph in front of the first one
+  and `doc_ir._hide_trailer` leaves it out of the IR — by its **shape**, which a block of the
+  file's own can have. A delete is all it takes to put one there: the opening table goes with
+  its lead, and the empty paragraph that stood behind it is now the one in front of the next
+  table. It then vanished out of the IR, its named range was taken by no block and read as an
+  orphan, `orphan_requests` deleted it, and the settle wrote the file with that paragraph
+  behind the table — the source's order undone, nothing of the reader's lost, the round
+  converging on the new reading. A mark somebody has planted an identity on is not Docs'
+  scaffolding: `_planted_starts` gives the reader the `b2s:` ranges and neither lead nor
+  trailer is hidden where one begins.
+* **A paragraph dragged against a word standing in a cell** (chain-4 seed 600784, the
+  oracle's). `WORD` is `\S+`, and a cell is the one place a reader's drag can weld text from
+  *anywhere else in the tab* onto a word of the table: "…after it." dropped against the `x` in
+  a cell makes one token of the two, which is a token of neither the base's table nor the
+  base's paragraph, so it read as a word the reader had typed and the source rewriting its own
+  half of it read as a loss. `_welded` sees it as soon as `_cell_findings` is given the tab's
+  base words, which is what `_words_findings` already had.
+
+Each pinned by a test that fails with its mechanism put back in memory, and measured the same
+way: `_moved_keys` 1 of 200 at chain 6, `_restyled_words` 1 of 200 at chain 6,
+`unwritten_levels` 2 of 700 at chain 4 and its widened half 1 of 900 at chain 4, the stuck
+anchor 1 of 300 at chain 10, the row note 1 of 400 at chain 10, `_orphan_range`'s cuts 1 of 700
+at chain 6, `_settles_as_item` 1 of 900 at chain 4, the shape-only lead 1 of 400 at chain 12,
+the cell judge's blindness to the tab 1 of 1,200 at chain 4. `_order_arrived` itself is what
+sees the order defects: with it and the old `_moved_keys` both in place, 300 rounds pass in
+silence. Then clean under `--strict` at thirteen fresh settings, `KNOWN` still empty.
+
 ## Remaining risks
 
 1. **Pictures** — retired, see "Pictures, and the chips a request can make" above. What
@@ -2074,7 +2202,21 @@ clean afterwards, with 400 at chain 8 from 320000 beside them.
    writes and three reads. Until then the reorder is refused, because an index written
    blind rearranges a strip somebody arranged by hand. Both names are carried: the
    document's, through Drive, and the first tab's own, in the `b2s-tab` meta.
-5. **Page-level structure** — `documentStyle`, headers, footers, footnote bodies,
+5. **A bullet's nesting level cannot be written.** `createParagraphBullets` says nothing
+   about one and no other request does either: Docs reads a level off the paragraph's
+   leading tabs, which are text the merge does not write. So a level lives on a paragraph
+   mark, and the three doors above — a block written from nothing, a block moved, a block
+   handed the mark of the one deleted in front of it — all lose it.
+   `doc_merge.unwritten_levels` says so before the write, which is honest but not a fix.
+   **Owed, and the one measurement that would close it**: write the tabs. Does an
+   `insertText` of `"\t\ttext"` at a paragraph's start make Docs read that paragraph as
+   level 2 once `createParagraphBullets` runs over it, and does the read-back then show
+   `nestingLevel: 2` with the tabs *gone* from the text (the UI's own behaviour) or still
+   in it? If they are eaten, the level is writable and `_text_style`'s indices are
+   unaffected; if they stay, every index the sync computes for that paragraph is two
+   units out and the words themselves are wrong. One live document, two writes and two
+   reads. Until then a level the source asks for and cannot have is reported.
+6. **Page-level structure** — `documentStyle`, headers, footers, footnote bodies,
    section breaks and positioned objects are read by nobody and authored by nobody. The
    paragraph level is now nearly closed (borders, `pageBreakBefore` and `keepWithNext`
    went in with the rest), which leaves the page as the one place where a real document

@@ -30,6 +30,7 @@ The campaign itself, past these seeds:
 
 import copy
 import os
+from collections import Counter
 
 import pytest
 
@@ -104,7 +105,33 @@ REGRESSIONS = ((60, 1), (181, 1), (309, 4), (1031, 8), (1147, 8),
                # And 290010, where Docs' merge-on-delete made an indented paragraph
                # an item, so the settle read its indent as the list preset's; then
                # 330127, a new table's swallow taking an empty paragraph's name.
-               (260208, 6), (280039, 8), (280398, 8), (290010, 10), (330127, 4))
+               (260208, 6), (280039, 8), (280398, 8), (290010, 10), (330127, 4),
+               # The order judge's own first four: 380191 a table whose refused move
+               # left it standing, in `merged`, where only the file has it; 400186
+               # `_moved_keys` reading the file against the base with
+               # `SequenceMatcher`'s contiguous blocks rather than the longest common
+               # subsequence, and the additions placed before the moves; 400044 a
+               # bold the reader moved from one word to another, written over by a
+               # source restyle that never asked about it; 450252 a paragraph the
+               # file puts behind a table that could not move, stuck with it and
+               # nothing saying so. Between them 430296 and 430587, the two doors
+               # onto a nesting level no request can write.
+               # 530265 is the third door onto a level: an item moved to the end
+               # behind one the reader had nested came out nested, which the note
+               # was too narrow to say. 480066 is a row the reader deleted and the
+               # source had written in, and 550667 a range two deletes of one batch
+               # both claimed, which Google refuses and which killed the sync. Then
+               # 570181, the settle's own bullet run reaching over the block it had
+               # just unbulletted, and 570177, the cell judge counting a regrid's
+               # shifted words as words the source wrote.
+               (380191, 4), (400044, 6), (400186, 6), (430296, 4), (430587, 4),
+               (450252, 10), (480066, 10), (530265, 8), (550667, 6),
+               (570177, 4), (570181, 4),
+               # And two the fresh campaigns found: 600784 a paragraph the reader
+               # dragged against the word standing in a cell, welded to it, and
+               # 630138 an empty paragraph of the source's own promoted into the
+               # place Docs keeps in front of a body's first table.
+               (600784, 4), (630138, 12))
 
 
 def _round(seed: int, chain: int, shape: str | None = None) -> None:
@@ -1027,6 +1054,115 @@ def test_a_range_left_by_a_join_is_deleted_before_the_words_it_would_steal_are_w
     assert again["requests"] == 0
 
 
+def test_a_block_retitled_behind_a_deleted_item_is_not_re_bulletted_by_the_settle():
+    """The settle's three repairs are one batch and they must not undo each other.
+
+    Docs merges two paragraphs keeping the first one's style, so a paragraph the
+    source retitles behind an item the source deletes comes back a bulleted
+    NORMAL_TEXT line. `carry_unimported` sees both, `restore_bullets` takes the
+    bullet off and `unimported_requests` writes TITLE — and then `bullet_requests`,
+    reading the block as the *read-back* has it, counted it in the run of items
+    behind it and re-bulletted the lot, a paragraph-wide request that flattened the
+    named style again (offline chain-4 seed 570181). What a run is made of is what
+    the settle leaves behind, not what it found.
+    """
+    world, ours, base = _push("imported_list")
+    by_key = {b["key"]: b for b in ours["blocks"]}
+    ours["blocks"] = [b for b in ours["blocks"] if b["key"] != "item:cool"]
+    by_key["paragraph:follow-them-in-order"]["kind"] = "title"
+    fuzz_docs.sync_once(world, ours, base)
+    last = doc_world.read_ir(world, ours, base)["blocks"][-1]
+    assert (last["key"], last["kind"]) == ("paragraph:follow-them-in-order", "title")
+
+
+def test_the_cell_judge_waits_only_for_words_the_source_really_wrote():
+    """`_cells_arrived` recognises a regrid by the grid's *size*, so a source that
+    takes one row out and puts another in slips past it — and then every cell below
+    the one that went reads as rewritten with the row above's words. The reader had
+    deleted a different row, both deletes stood, and the merge was right (seed
+    570177). A word the base already says is one a regrid shifted, not a new one."""
+    seen = Counter()
+    was = _table([["year", "count"], ["2024", "7"], ["2025", "9"]])
+    here = _table([["year", "count"], ["2024", "7"]])       # the reader dropped a row
+    shifted = _table([["2024", "7"], ["2025", "9"], ["umbrella", "thicket"]])
+    then = _table([["2024", "7"], ["umbrella", "thicket"]])
+    assert fuzz_docs._cells_arrived("table:year", was, here, shifted, then,
+                                    {}, None, 0, seen) == []
+    written = _table([["year", "count"], ["2024", "vellum"], ["2025", "9"]])
+    out = fuzz_docs._cells_arrived("table:year", was, here, written, then,
+                                   {}, None, 0, seen)
+    assert [f["kind"] for f in out] == ["cell_lost"], out
+
+
+def test_two_paragraphs_deleted_in_front_of_a_table_do_not_delete_one_range_twice():
+    """A range is destroyed with its text, so a `deleteNamedRange` for one already
+    gone is refused — and a refusal throws out the whole batch and kills the sync.
+
+    `_orphan_range` asked only whether *this* delete covers the range, and a run of
+    deletes hands each mark leftwards: the block in front of the table gives up its
+    neighbour's mark and keeps its own, which the neighbour's own delete takes
+    (offline chain-6 seed 550667). Every cut of the batch is asked now, so nothing is
+    named twice.
+    """
+    block = {"key": "paragraph:empty", "rangeId": "nr.15", "range": [90, 91]}
+    assert doc_merge._orphan_range(block, 89, 90) \
+        == [{"deleteNamedRange": {"namedRangeId": "nr.15"}}]
+    assert doc_merge._orphan_range(block, 89, 90, [(89, 90), (90, 99)]) == []
+
+    world, ours, base = _build([_para("Head."), _para(""), _para(""),
+                                _table([["a"]]), _para("End.")])
+    ours["blocks"] = [b for b in ours["blocks"]
+                      if b.get("key") not in ("paragraph:empty", "paragraph:empty#2")]
+    fuzz_docs.sync_once(world, ours, base)
+    assert _keys(doc_world.read_ir(world, ours, base)) \
+        == ["paragraph:head", "table:a", "paragraph:end"]
+
+
+def test_an_empty_paragraph_of_the_sources_own_is_never_a_tables_lead():
+    """A body may not open on a table, so Docs keeps an empty paragraph in front of
+    the first one and `doc_ir._hide_trailer` leaves it out of the IR. It knows it by
+    its shape alone — and an empty paragraph the *file* asks for can be pushed into
+    that place by a delete: the opening table goes with its lead, and the paragraph
+    behind it is now the one in front of the next table.
+
+    It then vanished out of the IR, its named range read as an orphan and was deleted,
+    and the settle wrote the file with that paragraph behind the table instead — the
+    source's order undone in silence, which only the campaign's own judge could see
+    (offline chain-12 seed 630138). A mark somebody has planted an identity on is not
+    Docs' scaffolding.
+    """
+    world, ours, base = _build([_table([["a"]]), _para(""), _table([["b"]])])
+    first, rest = ours["blocks"][0], ours["blocks"][1:]
+    ours["blocks"] = rest + [first]            # the source moves the opening table down
+    fuzz_docs.sync_once(world, ours, base)
+    keys = _keys(doc_world.read_ir(world, ours, base))
+    assert "paragraph:empty" in keys, keys
+    assert keys.index("paragraph:empty") < keys.index("table:b") < keys.index("table:a")
+
+
+def test_a_paragraph_dragged_against_a_cells_word_is_not_a_word_of_the_readers():
+    r"""`WORD` is `\S+`, and a cell is the one place a reader's drag can weld text
+    from anywhere else in the tab onto a word standing in the table. "…after it."
+    dropped against the `x` in a cell makes the token `it.x`, which is a token of
+    neither the base's table nor the base's paragraph — so it read as a word the
+    reader had typed, and the source rewriting its own half of it read as a loss
+    (offline chain-4 seed 600784). `_welded` sees it once it is given the tab's base
+    words, which is why `_words_findings` has them too.
+    """
+    was = _table([["h1", "h2"], ["signal", "x"]])
+    here = _table([["h1", "h2"], ["signal", " and a line after it.x"]])
+    then = _table([["h1", "h2"], ["signal", "\nand a line after it.meadow"]])
+    tab_was = oracle.words("and a line after it. " + oracle.text_of(was))
+    after = oracle.words(oracle.text_of(then))
+    assert oracle._cell_findings("table:h1", here, was, then, after, {}, None,
+                                 tab_was) == []
+    # Without the tab's own base words the weld is invisible, and the source rewriting
+    # its half of the token reads as the reader's work gone.
+    assert [f["kind"] for f in
+            oracle._cell_findings("table:h1", here, was, then, after, {}, None)] \
+        == ["cell_words_lost"]
+
+
 def test_a_table_the_source_moves_and_regrids_at_once_keeps_the_row_the_reader_deleted():
     """A move is a delete and a table built again, and what it built was the *file's*
     grid. That is the same table as the merged one until this very sync writes the
@@ -1864,6 +2000,156 @@ def test_a_table_the_source_moves_right_behind_another_is_left_where_it_is():
     assert _keys(base) == ["table:a", "paragraph:a-paragraph-in-between", "table:c",
                            "paragraph:the-end"]
     assert base["blocks"][1]["align"] == "justify"
+
+
+def test_a_table_whose_move_structure_refuses_is_no_anchor_where_the_file_has_it():
+    """`structure` refuses a move of its own — a table the file puts where the
+    document has no paragraph to write in — and it was the one of the three refusals
+    that did not put the block back. So `merged` went on saying the table stood
+    where the file wants it while its span said the other end of the document, and
+    every index the sync computes comes from a span: the paragraph the source moved
+    *in front of* that table took it for an anchor, was written at its span instead,
+    and came out exactly where it already was. The move was undone in silence, and
+    on the next pass the merge planned it again (offline chain-4 seed 380191, found
+    by `fuzz_docs._order_arrived`).
+
+    Pinned as the invariant rather than as that seed's story, which the two order
+    fixes made after it reach by another road: a refusal puts the block back, all
+    three of them, because every index the sync computes comes from a span."""
+    world, ours, base = _build([_table([["a", "b"]]), _para("Mid."),
+                                _table([["c", "d"]]), _para("End.")])
+    at = [i for i, b in enumerate(ours["blocks"]) if b.get("key") == "table:c"][0]
+    ours["blocks"].insert(0, ours["blocks"].pop(at))   # in front of the table it opens on
+    result = doc_merge.plan(base, ours, doc_world.read_ir(world, ours, base))
+    assert any("no paragraph to write in" in note for note in result["notes"]), result
+    assert [b.get("key") for b in result["blocks"]] == [
+        "table:a", "paragraph:mid", "table:c", "paragraph:end"]
+
+
+def test_a_block_the_file_puts_behind_a_table_that_cannot_move_is_said_to_stay_too():
+    """A source that moves a section moves its blocks one by one, and where the first
+    of them cannot be moved — a table the reader has regridded is built again blank,
+    so it is left where the document has it — every block behind it is placed after
+    it and lands exactly where it already was. `_apply_source_moves` then took the
+    silent branch: a move whose two ends are one place is no move, which is true and
+    is not the reason here. The report named the table and nothing said the rest of
+    the section had stayed with it (offline chain-10 seed 450252, found by
+    `fuzz_docs._order_arrived`)."""
+    world, ours, base = _build([_para("Status today."), _table([["h1", "h2"]]),
+                                _para(""), _para("One."), _para("Two."), _para("Three.")])
+    live = doc_world.read_ir(world, ours, base)
+    row = [b for b in live["blocks"] if b["kind"] == "table"][0]["rows"][0]
+    world.apply([{"insertText": {"location": {"index": row[0][0]["span"][0]}, "text": "x"}}])
+    at = [i for i, b in enumerate(ours["blocks"]) if b.get("key") == "table:h1"][0]
+    ours["blocks"] += [ours["blocks"].pop(at), ours["blocks"].pop(at)]   # table + empty
+    report, ours, base = fuzz_docs.sync_once(world, ours, base)
+    assert _keys(base) == ["paragraph:status-today", "table:h1", "paragraph:empty",
+                           "paragraph:one", "paragraph:two", "paragraph:three"]
+    assert any("left where the document has it" in note for note in report["notes"]), report
+    assert any("not where the file has it" in note for note in report["notes"]), report
+
+
+def test_an_item_written_from_nothing_cannot_be_given_its_nesting_level():
+    """No request sets a bullet's nesting level: `createParagraphBullets` says nothing
+    about one and Docs reads it off leading tabs the merge does not write. So an item
+    the source moves — a move being a delete and a write — comes out at the level of
+    the list it lands in, and nothing else could see it: the reader left the block
+    alone, so the loss oracle has no question, and the base agrees with the document
+    afterwards, so the round converges (offline chain-4 seed 430296)."""
+    world, ours, base = _push("prose")
+    at = [i for i, b in enumerate(ours["blocks"]) if b.get("key") == "item:gamma"][0]
+    ours["blocks"].insert(1, ours["blocks"].pop(at))      # the nested item, up front
+    report, ours, base = fuzz_docs.sync_once(world, ours, base)
+    assert any("written from nothing as a list item" in note
+               for note in report["notes"]), report
+
+
+def test_an_item_whose_mark_a_delete_hands_over_says_the_level_it_comes_out_at():
+    """The same loss by the other door, and this one takes no move of its own: Docs
+    merges two paragraphs keeping the first one's style, so the block behind a deleted
+    one wears the deleted one's. The named style, the bullet and the measures are all
+    put back by the settle, and the level alone cannot be — a nested item behind an
+    item the source moved away came out at the moved one's level (offline chain-4 seed
+    430587)."""
+    world, ours, base = _push("prose")
+    at = [i for i, b in enumerate(ours["blocks"]) if b.get("key") == "item:beta"][0]
+    ours["blocks"].append(ours["blocks"].pop(at))         # `beta`, level 0, to the end
+    report, ours, base = fuzz_docs.sync_once(world, ours, base)
+    assert any("it comes out at level 0, not at 1" in note
+               for note in report["notes"]), report
+    assert [b["key"] for b in base["blocks"] if b["kind"] == "item"] \
+        == ["item:alpha", "item:gamma", "item:beta"]
+
+
+def test_an_item_that_lands_behind_a_deeper_one_says_so_although_it_asks_for_level_0():
+    """The level a block written from nothing comes out at is the one in front of it,
+    which can as easily be deeper than the source asks for as shallower — and the note
+    fired only for an item asking to be nested, so the commoner half was silent: a
+    level-0 item moved behind a nested one came out nested (offline chain-8 seed
+    530265, where the source moved an item to the end of a document whose last item
+    the reader had indented)."""
+    world, ours, base = _push("prose")
+    keys = [b.get("key") for b in ours["blocks"]]
+    at, behind = keys.index("item:alpha"), keys.index("item:gamma")
+    ours["blocks"].insert(behind, ours["blocks"].pop(at))   # level 0, behind level 1
+    report, ours, base = fuzz_docs.sync_once(world, ours, base)
+    assert any("it comes out at level 1, the level of the item in front of it, not at 0"
+               in note for note in report["notes"]), report
+
+
+def test_one_block_sent_past_a_list_is_one_move_and_not_every_block_it_passed():
+    """`_moved_keys` is the longest common *subsequence*, not `SequenceMatcher`'s
+    matching blocks, which are contiguous: a closing paragraph sent to the front made
+    every block it passed read as moved instead. Four moves where one would do — and
+    the table among them, whose move was then refused because the reader had regridded
+    it, so the order came out neither side's with nothing saying so (offline chain-6
+    seed 400186)."""
+    was = ["a", "b", "c", "d", "e"]
+    assert doc_merge._moved_keys(was, ["e", "a", "b", "c", "d"]) == ["e"]
+    assert doc_merge._moved_keys(was, ["b", "c", "d", "e", "a"]) == ["a"]
+    assert doc_merge._moved_keys(was, ["d", "e", "a", "b", "c"]) == ["d", "e"]
+
+
+def test_a_mark_the_reader_moved_to_another_word_survives_a_source_restyle():
+    """`marks_of` is a sequence of distinct mark *sets* with no words in it, so a
+    reader who takes a mark off one word and puts it on another says nothing to it:
+    the merge reads the restyle as the source's alone and `_restyled_words` runs. It
+    then wrote the file's styling on every word the file also has — including the
+    word the reader had just marked, whose styling the file has no opinion about. The
+    file's styling is written only where the source really *changed* it (offline
+    chain-6 seed 400044)."""
+    world, ours, base = _build([{"kind": "paragraph", "runs": [
+        {"text": "alpha "}, {"text": "bravo", "bold": True},
+        {"text": " charlie delta"}]}])
+    start = doc_world.read_ir(world, ours, base)["blocks"][0]["span"][0]
+    world.apply([{"deleteContentRange": {                    # `bravo `, the bold run
+        "range": {"startIndex": start + 6, "endIndex": start + 12}}},
+        {"updateTextStyle": {                                # and `charlie` bold now
+            "range": {"startIndex": start + 6, "endIndex": start + 13},
+            "textStyle": {"bold": True}, "fields": "bold"}}])
+    ours["blocks"][0]["runs"] = [
+        {"text": "alpha "}, {"text": "bravo", "bold": True},
+        {"text": " charlie "}, {"text": "delta", "italic": True}]
+    _, ours, base = fuzz_docs.sync_once(world, ours, base)
+    runs = [(r["text"], r.get("bold"), r.get("italic"))
+            for r in base["blocks"][0]["runs"]]
+    assert runs == [("alpha ", None, None), ("charlie", True, None),
+                    (" ", None, None), ("delta", None, True)], runs
+
+
+def test_a_block_the_source_adds_behind_one_it_moves_goes_with_it():
+    """A block the source adds is placed after the block the file puts it behind, and
+    a move does not carry what stands behind it — so the additions have to wait for
+    the moves. A picture added behind a list item the same source moved was left where
+    the item had been, and the block after *it* then read as standing in its place
+    already, so its own move was refused as one whose two ends are one place: the order
+    came out neither side's and nothing said so (offline chain-6 seed 400186)."""
+    world, ours, base = _build([_para("One."), _para("Two."), _para("Three.")])
+    ours["blocks"].insert(0, ours["blocks"].pop())              # `Three.` to the front
+    ours["blocks"].insert(1, _para("Right behind it."))
+    report, ours, base = fuzz_docs.sync_once(world, ours, base)
+    assert _keys(base) == ["paragraph:three", "paragraph:right-behind-it",
+                           "paragraph:one", "paragraph:two"]
 
 
 def test_two_tables_after_one_anchor_are_told_apart_by_what_they_say():

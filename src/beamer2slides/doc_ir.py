@@ -276,11 +276,20 @@ def from_document(doc: dict, tab_id: str | None = None) -> dict:
         block = _block_of(element, lists, objects, defaults)
         if block:
             ir["blocks"].append(block)
-    _hide_trailer(ir)
+    _hide_trailer(ir, _planted_starts(named_ranges_of(doc, tab)))
     return ir
 
 
-def _hide_trailer(ir: dict) -> None:
+def _planted_starts(named_ranges: dict) -> list[int]:
+    """Where this document's `b2s:` ranges begin: the marks somebody has planted an
+    identity on."""
+    return sorted(span.get("startIndex", 0)
+                  for name, entry in named_ranges.items() if name.startswith(KEY_PREFIX)
+                  for ranged in entry.get("namedRanges", [])
+                  for span in ranged.get("ranges", []))
+
+
+def _hide_trailer(ir: dict, planted: list[int] = ()) -> None:
     """Leave out the empty paragraph a body keeps after a table that ends it.
 
     A document must end on a paragraph, so a table written last — by an import or by
@@ -292,12 +301,30 @@ def _hide_trailer(ir: dict) -> None:
     It is the other half of the paragraph the table was inserted into, so it can come
     with that one's bullet or heading: `trailer_kind` says so, and
     `doc_merge.tidy_requests` makes it a plain paragraph again.
+
+    Both are recognised by their **shape**, and a block of the source's own can have
+    that shape: an empty paragraph the file asks for, standing in front of a table, is
+    a lead by this rule and vanishes out of the IR — its named range, taken by no
+    block, then reads as an orphan and is deleted, so the block loses its identity and
+    the file is settled with it somewhere else. A delete is all it takes to put one
+    there: the body's opening table goes with its lead, and the paragraph behind it
+    becomes the first thing in front of the next table (offline chain-12 seed 630138,
+    where the source moved the opening table to the end and the empty paragraph
+    between the two came back behind the second one, silently). So a paragraph
+    somebody has **planted an identity on** is never scaffolding, whichever end it
+    stands at: `planted` is where this document's `b2s:` ranges begin.
     """
     blocks = ir["blocks"]
+
+    def theirs(block: dict) -> bool:
+        low, high = block.get("span", [0, 0])
+        return any(low <= start < high for start in planted)
+
     # A body with nothing in it — a tab just added — is one empty paragraph, and that
     # one is a trailer too: what is written there goes *into* it.
     if (blocks and (len(blocks) == 1 or blocks[-2]["kind"] in STRUCTURAL)
-            and blocks[-1]["kind"] in TEXT_KINDS and not blocks[-1]["runs"]):
+            and blocks[-1]["kind"] in TEXT_KINDS and not blocks[-1]["runs"]
+            and not theirs(blocks[-1])):
         last = blocks.pop()
         ir["trailer"] = last["span"]
         if last["kind"] != "paragraph" or last.get("align"):
@@ -307,7 +334,8 @@ def _hide_trailer(ir: dict) -> None:
     # tab's first table, made by `insertTable`, always does). That one is the `lead`,
     # and the first block written in front of the table goes into it.
     if (len(blocks) >= 2 and blocks[1]["kind"] in STRUCTURAL
-            and blocks[0]["kind"] in TEXT_KINDS and not blocks[0]["runs"]):
+            and blocks[0]["kind"] in TEXT_KINDS and not blocks[0]["runs"]
+            and not theirs(blocks[0])):
         first = blocks.pop(0)
         ir["lead"] = first["span"]
         if first["kind"] != "paragraph" or first.get("align"):

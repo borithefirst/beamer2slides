@@ -2093,6 +2093,58 @@ keys, named ranges), `doc_merge.py` (pure planning), `doc_sync.py` (the commands
   batch and the re-plan, after `anchor_tables` (the survivor is found by the table it stands in
   front of) with `plant_ranges` putting the range back - the third repair hanging off that one
   read. 900 rounds at chain 4 from 330000 clean afterwards, and 400 at chain 8 from 320000.
+  **And the same question about the order** (`fuzz_docs._order_arrived`, the fourth judge):
+  where the reader left the shared keys exactly as the base has them, the blocks the source
+  moved must come out where the file puts them - a move that never arrives takes nothing of
+  the reader's, so the oracle is silent, and the settle writes the order the document ended
+  up with into the base, so the round converges on it. What is asked is a **pair** of keys,
+  not a block: which of two swapped blocks "moved" is not a fact about two orders, and the
+  merge may refuse and name the one the file reads as having stayed. Four defects, and two
+  more from the same corner. (1) *A refused move is not a move in the merged list either*
+  (chain-4 seed 380191): every index comes from a block's span and a span says where a block
+  **is**, so all three refusals put it back where the document has it; `structure`'s did not,
+  and the table then stood in the merged order where only the file had it. (2) *`_moved_keys`
+  was not a longest common subsequence* (chain-6 seed 400186): `SequenceMatcher`'s matching
+  blocks are contiguous, so a paragraph sent to the front made every block it passed read as
+  moved - among them a table whose move was then refused, the order coming out neither side's
+  in silence. It is the longest increasing subsequence of base positions now, and the moves
+  go in **before** the additions, an addition being placed after the block the file puts it
+  behind. (3) *A refused move drags its followers* (chain-10 seed 450252), which nobody could
+  read off the line naming the one that was refused (`_apply_source_moves`' `stuck` set says
+  it, for a block that does not move at all and for one that moves partway). (4) *A mark the
+  reader moved from one word to another* (chain-6 seed 400044): `marks_of` is a sequence of
+  mark-sets with no words in it, so `_restyled_words` wrote the file's styling onto every
+  word the file has and took the reader's bold back off; it writes only what the source
+  changed. And the level: **no request sets a bullet's nesting level** - Docs reads it off
+  leading tabs the merge does not write - so it lives on a paragraph mark and goes three
+  ways, a block written from nothing coming out at the level of the list it lands in whether
+  that is deeper (430296) or shallower (chain-8 seed 530265, the half the note was too narrow
+  to say) and a block handed the mark of the one deleted in front of it wearing its level
+  (430587). `doc_merge.unwritten_levels` says so before the write; docs/google-docs.md
+  "Remaining risks" 5 has the one live measurement that would make it writable.
+  Then six at fresh seeds, four the merge's and two the judges'. *The document deleted a row
+  the source wrote in* (chain-10 seed 480066): the mirror note `_table_lines` never had - the
+  words go with the row and only the report can say so. *A range two deletes of one batch
+  both claimed* (chain-6 seed 550667), which killed the sync: a run of deletes hands each
+  mark leftwards, so `_orphan_range` asks every cut of the batch, a `deleteNamedRange` for a
+  range already gone being refused and a refusal throwing out the whole batch. *The settle
+  undoing its own repair* (chain-4 seed 570181): a paragraph the source retitled behind an
+  item the source deleted came back a bulleted plain line, `restore_bullets` took the bullet
+  off, and `bullet_requests` - reading the block as the read-back has it - counted it into
+  the run behind it and re-bulletted the lot, flattening the named style written one request
+  earlier; a run is what the settle **leaves** (`_settles_as_item`). *An empty paragraph of
+  the source's own is never a table's lead* (chain-12 seed 630138): `doc_ir._hide_trailer`
+  knows the lead and the trailer by their **shape**, and a delete puts a block of the file's
+  own into that place - the opening table goes with its lead and the paragraph behind it is
+  now the one in front of the next table - so it vanished out of the IR, its range read as an
+  orphan and was deleted, and the settle wrote the file with that paragraph behind the table;
+  a mark somebody planted an identity on is not scaffolding (`_planted_starts`). And the
+  judges': `_cells_arrived` recognising a regrid by the grid's *size*, so a row-out/row-in
+  regrid made every shifted cell read as rewritten (570177), and `_cell_findings` not being
+  given the tab's base words, so a paragraph the reader dragged against the word standing in
+  a cell welded to it (`it.x`) and the source rewriting its own half read as a loss (600784).
+  Each measured by breaking its mechanism (1 of 200 to 1 of 1,200 rounds) and pinned by a
+  hand-built test; then clean under `--strict` at thirteen settings from 380000 to 650000.
 - Live suite (opt-in, marker `docs`, ~5 min): `python -m pytest -m docs tests/test_docs_live.py`
   pushes a document per test, edits both sides, syncs, checks a second sync writes nothing, and
   deletes the document. Offline: `tests/test_doc_ir.py`, `test_doc_merge.py`, `test_doc_sync.py`.
