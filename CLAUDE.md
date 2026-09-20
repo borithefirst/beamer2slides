@@ -1156,9 +1156,11 @@ keys, named ranges), `doc_merge.py` (pure planning), `doc_sync.py` (the commands
   `unread_blocks` every block of every tab, most laden first) and `adopt`/`push` name them by
   the words a person sees ("the paragraph 'Why this matters' carries
   paragraphStyle.borderBottom; rewriting that block through the file would drop it",
-  `doc_sync.block_risk_notes`, 8 blocks x 4 properties): a section break and anything outside
-  the blocks are left out, since no rewrite reaches them. It is a risk, not a loss - a block
-  nobody rewrites keeps all of it. Naming what a sync *did* rewrite is the next step.
+  `doc_sync.block_risk_notes`, 8 blocks x 4 properties), while a sync says how many blocks
+  carry one: a section break and anything outside the blocks are left out, since no rewrite
+  reaches them. It is a risk, not a loss - a block nobody rewrites keeps all of it. The
+  `doc_adopt` journey hands the same lines to an agent as warnings. Naming what a sync
+  *did* rewrite is the next step.
 - Fuzzed against a loss oracle, as the Slides sync is (docs/google-docs.md, "Proving nothing
   is lost"): `devtools/doc_loss_oracle.py` judges one sync from the two read-backs, the base
   and the report - did anything the *reader* put in the document disappear without the report

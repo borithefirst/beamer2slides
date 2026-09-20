@@ -444,9 +444,13 @@ def unmodelled_notes(doc: dict, full: bool = False) -> list[str]:
                 f"(e.g. {found[path]['example']}), which the canonical file cannot say"
                 for path in order] + block_risk_notes(doc)
     rest = f" and {len(order) - 3} more" if len(order) > 3 else ""
+    # The one number a sync can act on: not how many kinds there are but how many
+    # blocks a rewrite would cost something. Naming them is `adopt`'s job, once.
+    risky = len(doc_ir.unread_blocks(doc))
+    carried = f"{risky} block(s) carry one, and " if risky else ""
     return [f"{len(order)} kinds of document property this file cannot say "
-            f"({', '.join(order[:3])}{rest}); they survive an edit and go with a "
-            f"block written again from nothing"]
+            f"({', '.join(order[:3])}{rest}); {carried}they survive an edit and go "
+            f"with a block written again from nothing"]
 
 
 RISKY_BLOCKS = 8        # how many to name before saying how many more there are

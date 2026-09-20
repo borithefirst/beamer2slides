@@ -310,6 +310,35 @@ def test_adopt_writes_the_file_a_document_nobody_pushed_never_had(tmp_path, monk
     assert any("doc_sync" in step for step in result.next_steps)
 
 
+def test_adopt_names_the_block_an_edit_through_the_file_would_cost(tmp_path, monkeypatch):
+    """A property the dialect never reads survives every ordinary edit and goes the
+    moment its block is written again from nothing. The count is no use on its own —
+    the agent is being handed a document and has to know *which* paragraph that is.
+
+    `doc_world` holds only what the IR models, so the border is put on the read: it is
+    what `documents.get` would answer for a document somebody built in the browser.
+    """
+    _, _, _, service = _pair(tmp_path, monkeypatch)
+    plain = service.world.read
+
+    def bordered(*a, **kw):
+        doc = plain(*a, **kw)
+        body = doc["tabs"][0]["documentTab"]["body"]["content"]
+        at = next(e for e in body
+                  if "The second paragraph" in str(e.get("paragraph", {}).get("elements")))
+        at["paragraph"]["paragraphStyle"]["borderLeft"] = {"width": {"magnitude": 1}}
+        return doc
+
+    service.world.read = bordered
+    result = doc_tools.doc_adopt(_ctx(tmp_path), doc="doc-1", file="taken.html")
+    assert result.ok, result.summary
+    said = [d.message for d in result.diagnostics]
+    assert any("paragraphStyle.borderLeft" in line and "The second paragraph" in line
+               and "would drop it" in line for line in said), said
+    # And nothing is said about the paragraph that carries nothing.
+    assert not any("The first paragraph" in line for line in said), said
+
+
 def test_adopt_with_no_path_writes_inside_the_workspace(tmp_path, monkeypatch):
     """`doc_sync.adopt` names the file after the document's title and resolves it against
     the current folder; the journey runs it in the workspace so it cannot land elsewhere."""

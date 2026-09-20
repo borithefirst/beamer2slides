@@ -260,7 +260,8 @@ of every tab, most heavily laden first), and `adopt` and `push` name the blocks 
 words the person can see in the document: *the paragraph 'Why this matters' carries
 paragraphStyle.borderBottom; rewriting that block through the file would drop it*
 (`doc_sync.block_risk_notes`, eight blocks and four properties each before it says how
-many more). A section break is left out — nothing rewrites one — and so is everything
+many more); a sync, which names nothing, at least says how many blocks carry one, which
+is the number it can act on. A section break is left out — nothing rewrites one — and so is everything
 outside the blocks, since no rewrite of a paragraph can drop the page's margins. It is
 a **risk**, not a loss: a block nobody rewrites keeps all of it, which is exactly the
 thing one can act on. What a sync *did* rewrite is the next step and waits on nothing
