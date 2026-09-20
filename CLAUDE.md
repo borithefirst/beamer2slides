@@ -925,7 +925,16 @@ report list one created slide where two appeared, three findings and every one o
 fuzzer's hand. `fuzz_sync._fresh` gives a drawn id a *tail* when the deck already answers to it
 (one op still takes one number, so every other round is unchanged), a duplicated slide gets its
 own notes page as it does in Slides, and `_sync_step` now refuses a deck carrying an id twice out
-loud rather than letting the oracle blame the merge for it. And the one that killed a sync outright (seeds 608, 616): the
+loud rather than letting the oracle blame the merge for it. **A decision the base does not record
+reverses itself** (converted seed 7700464 at chain 10): a unit the source removed and the person
+edited is kept with a conflict, but the base then said only what it had always said, so the next
+sync - finding the deck no longer different from the base - deleted the box the sync before had
+promised to keep, and silently, `removed` being an applied change rather than a conflict. The
+evidence for keeping is the deck differing from the base and a sync can take it away with its own
+hands: deleting another element the source dropped left the person's group around this one with a
+single child, which Slides dissolves. A kept unit now says `removed` in the base, as a kept *slide*
+does (`merge.plan_unit`, `sync.new_base`), and only the person taking it out of the deck ends it.
+And the one that killed a sync outright (seeds 608, 616): the
 newline a Slides text ends on cannot be deleted - the API reads it back but leaves it out of the
 length it will accept - so a deck edit that deleted a box's *last* paragraph made the merged text end
 early, the diff's last hunk ran to the end, and the overrides batch was refused whole

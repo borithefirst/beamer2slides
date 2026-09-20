@@ -780,6 +780,51 @@ def test_removed_in_source():
     assert mplan["report"]["conflicts"][0]["field"] == "removed"
 
 
+def test_an_element_kept_because_the_deck_edited_it_stays_kept():
+    """A decision has to be recorded, or it reverses itself the moment the evidence for it goes.
+    The source drops an element, the person's own edit keeps it (a conflict), and the base then said
+    only what it had always said - so the next sync, finding the deck no longer different from the
+    base, deleted the box this one had promised to keep, and silently, `removed` being an applied
+    change rather than a conflict. The evidence is the deck differing from the base and the sync can
+    take it away itself: deleting another element the source dropped left the person's group around
+    this one with a single child, which Slides dissolves (converted fuzz seed 7700464 at chain 10).
+    So a kept unit says `removed` in the base, as a kept *slide* does, and only the person taking it
+    out of the deck ends it."""
+    from beamer2slides.sync import Sync
+    base = three_slides()
+    ours, theirs = triple(base)
+    del ours["slides"][2]["elements"][1]                  # the source no longer draws it
+    theirs["slides"][2]["objects"]["b2s_s002_t1"]["parent_group"] = "user_g"   # ... the person grouped it
+    theirs["slides"][2]["objects"]["user_g"] = readback([0, 0, 400, 200], kind="elementGroup")
+    theirs["slides"][2]["objects"]["user_g"]["children"] = ["b2s_s002_t1"]
+    mplan = merge.plan_merge(base, ours, theirs)
+    u = unit(mplan, "end", "text/body/0")
+    assert u["action"] == "keep" and u["removed"] is True
+    assert mplan["report"]["conflicts"][0]["field"] == "removed"
+
+    s = Sync.__new__(Sync)                                 # the base such a sync leaves behind
+    s.base, s.ours, s.created, s.final_revision = base, {**ours, "source": Path("new.pdf")}, theirs, "r2"
+    work = [{"plan": p, "sid": p["objectId"], "objects": {}, "new_oid": {}, "groups": [], "doomed": set()}
+            for p in mplan["slides"]]
+    nb = s.new_base({"plan": mplan, "work": {"slides": work}, "theirs": theirs})
+    el = next(e for e in nb["slides"][2]["elements"] if e["key"] == "text/body/0")
+    assert el["removed"] is True
+
+    # the person's group is gone (its other child was deleted), so the deck says the base's own
+    # words again - and the element is still theirs, still kept, still in the report.
+    theirs["slides"][2]["objects"].pop("user_g")
+    theirs["slides"][2]["objects"]["b2s_s002_t1"]["parent_group"] = None
+    again = merge.plan_merge(nb, ours, theirs)
+    assert unit(again, "end", "text/body/0")["action"] == "keep"
+    assert [c["field"] for c in again["report"]["conflicts"]] == ["removed"]
+    assert again["report"]["conflicts"][0]["resolution"] == "kept (the deck's own since the source dropped it)"
+    assert not merge.has_writes(again, [x["objectId"] for x in theirs["slides"]])
+    # ... until they take it out of the deck themselves, and then it is gone for good
+    theirs["slides"][2]["objects"].pop("b2s_s002_t1")
+    third = merge.plan_merge(nb, ours, theirs)
+    assert unit(third, "end", "text/body/0")["action"] == "none"
+
+
 def test_removed_text_living_on_in_a_conflict_is_kept():
     base = three_slides()
     extra = entry("text/body/1", text_ir("A closing remark", (20, 120, 200, 130), "p0t2"), "b2s_s000_t2")

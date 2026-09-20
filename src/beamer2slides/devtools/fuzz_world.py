@@ -849,7 +849,9 @@ def rebase(base, ours, after, mplan, tok="2zz") -> dict:
                                     rb[oid].update({k: live_obj[k] for k in fields.get(f, ()) if k in live_obj})
                         elements.append({**m, "objects": old["objects"], "main": old["main"], "readback": rb})
                 elif action == "keep":
-                    elements += bunits.get(u["key"], [])
+                    # (a unit kept because the source dropped it says so: `merge.plan_unit`)
+                    elements += [{**m, "removed": True} for m in bunits.get(u["key"], [])] \
+                        if u.get("removed") else bunits.get(u["key"], [])
                 # delete / none: gone
             entry.update(objectId=sid, layoutObjectId=b.get("layoutObjectId"), groups=list(b.get("groups", [])),
                          order=list(read.get("order") or b.get("order", [])))

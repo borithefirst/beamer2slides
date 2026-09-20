@@ -183,7 +183,15 @@ now keeps the image's own box and the author's own bytes, so on the first sync o
 before that it changes box and picture - one correct update, not a conflict.
 
 A unit removed from the source is kept when its words went into a unit kept in conflict (classify
-joined two paragraphs), so no text is lost. Slides: new frames are created at the aligned
+joined two paragraphs), so no text is lost. A unit the source removed that the **deck** edited is
+kept too, with a conflict - and the base records that it was (`removed` on the element, as
+`keep_removed` records it on a slide), because a decision that is not written down reverses itself
+the moment the evidence for it goes. The evidence is the deck differing from the base, and a sync
+can take it away with its own hands: deleting another element the source dropped left the person's
+group around this one with a single child, which Slides dissolves, so the next sync found the deck
+exactly as the base had it and deleted the box the sync before had promised to keep - in silence,
+`removed` being an applied change and not a conflict (converted fuzz seed 7700464 at chain 10).
+Once kept, kept: only the person taking it out of the deck themselves ends it. Slides: new frames are created at the aligned
 position; frames removed from the source are deleted if the deck didn't touch them (no edits, no
 user objects, same notes and background), else kept after their base predecessor and reported;
 a frame the deck deleted stays deleted (a conflict if the source changed more than its frame counter);

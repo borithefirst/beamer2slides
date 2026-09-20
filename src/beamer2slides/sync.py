@@ -1936,7 +1936,10 @@ class Sync:
                                     rb[old["main"]].update({k: live_obj[k] for k in fields.get(f, ()) if k in live_obj})
                             elements.append({**m, "objects": old["objects"], "main": old["main"], "readback": rb})
                     elif a in ("keep",):
-                        elements += bunits.get(u["key"], [])
+                        # A unit kept because the source dropped it says so, or the next sync reads
+                        # a deck that no longer differs from the base and deletes it (merge.plan_unit).
+                        elements += [{**m, "removed": True} for m in bunits.get(u["key"], [])] \
+                            if u.get("removed") else bunits.get(u["key"], [])
                     # delete / none: gone
                 bg_conflict = b.get("background") != o.get("background") and not p.get("background")
                 notes_kept = (b.get("notes") or "") != (o.get("notes") or "") and p.get("notes") is None

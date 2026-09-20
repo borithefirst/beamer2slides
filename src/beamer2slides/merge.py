@@ -589,14 +589,27 @@ def plan_unit(skey: str, ukey: str, base_members: list[dict] | None, ours_member
             edits.setdefault(f, []).extend(oids)
     deck = set(edits)
     if ours_members is None:
-        if not deck:
+        # The source no longer draws this element. Deck edits on it make it the person's and it
+        # stays, with a conflict - and the base has to *record* that (`removed`), the way a slide
+        # the source dropped does (`keep_removed`), or the decision reverses itself the moment the
+        # evidence for it goes. The evidence is the deck differing from the base, and the sync can
+        # take that away with its own hands: deleting another element this source dropped left the
+        # person's group around this one with a single child, which Slides then dissolves, so the
+        # next sync found the deck exactly as the base had it and deleted the box this one had
+        # promised to keep - silently, as `removed` is an applied change and not a conflict
+        # (converted fuzz seed 7700464 at chain 10). Once kept, kept: only the person taking it
+        # out of the deck ends it.
+        kept_before = bool(base_members) and all(m.get("removed") for m in base_members)
+        if deck and deck <= {"deleted", "part_deleted"}:
+            return {"key": ukey, "action": "none", "gone": True}
+        if not deck and not kept_before:
             report["applied"].append({**where, "fields": ["removed"]})
             return {"key": ukey, "action": "delete"}
-        if deck <= {"deleted", "part_deleted"}:
-            return {"key": ukey, "action": "none", "gone": True}
         report["conflicts"].append(conflict_entry(res, skey, ukey, "removed", "element", None,
-                                                  sorted(deck), "kept (edited in the deck)")[0])
-        return {"key": ukey, "action": "keep", "deck": sorted(deck)}
+                                                  sorted(deck) or ["the deck's own"],
+                                                  "kept (edited in the deck)" if deck else
+                                                  "kept (the deck's own since the source dropped it)")[0])
+        return {"key": ukey, "action": "keep", "deck": sorted(deck), "removed": True}
     base_by = {m["key"]: m for m in base_members}
     ours_by = {m["key"]: m for m in ours_members}
     src: set[str] = set()
