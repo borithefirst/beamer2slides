@@ -565,6 +565,10 @@ def draw(status, obj, matrix) -> None:
     if dib is None:
         return
     alpha = F(obj.fill_alpha)
+    from .render_transparency import alpha_mode
+    if alpha_mode(status.ctx) and dib.mask is None:
+        bitmap_alpha(dev, dib, alpha, m)      # kAlpha: the image is drawn as its own alpha
+        return
     mask_argb = 0
     if dib.fmt == "mask1":
         # GetFillArgb: in a Type 3 glyph the text's colour unless a d0 glyph set its own
@@ -574,6 +578,22 @@ def draw(status, obj, matrix) -> None:
         draw_masked(dev, dib, alpha, m, rect)
         return
     start_dibits(dev, dib, alpha, mask_argb, m, dib.interpolate)
+
+
+def bitmap_alpha(dev, dib, alpha: float, m) -> None:
+    """CPDF_ImageRenderer::StartBitmapAlpha, the kAlpha colour mode an alpha soft mask renders in:
+    an opaque image is its unit square filled with ArgbEncode(255, a, a, a) for a = roundf(alpha
+    * 255) - on the 8-bit mask device the gray is forced to 255 and the colour's own alpha is all
+    that counts, so the fill is opaque whatever the image's constant alpha was. A mask-format or
+    alpha-format bitmap goes on as its alpha channel instead, which `refusal` refuses."""
+    from .render import FILL_WINDING, PT_LINE, PT_MOVE
+    if dib.fmt not in ("rgb1", "rgb8", "bgr"):
+        raise PdfError("the pure reader cannot render this image in an alpha soft mask yet")
+    a = DI.roundf(F(alpha * 255))
+    corners = ((0.0, 0.0), (0.0, 1.0), (1.0, 1.0), (1.0, 0.0), (0.0, 0.0))
+    pts = [R.transform(m, x, y) for x, y in corners]
+    path = [(p[0], p[1], PT_MOVE if i == 0 else PT_LINE, i == 4) for i, p in enumerate(pts)]
+    dev.draw_path(path, None, None, DI.argb(255, a, a, a), 0, FILL_WINDING, False)
 
 
 def draw_masked(dev, dib, alpha: float, m, rect) -> None:
@@ -653,8 +673,9 @@ def get_dib(ctx, obj, dev):
                 return dib
     dib = _probed(ctx, obj, need)
     if dib is _NOT_PROBED:
+        std, gc = status_flags(obj, ctx)
         try:
-            dib = DI.load(ctx.doc, obj.stream, _resources(ctx, obj), need)
+            dib = DI.load(ctx.doc, obj.stream, _resources(ctx, obj), need, std_cs=std, group_cmyk=gc)
         except DI.Unsupported as e:
             raise PdfError(f"the pure reader cannot render {e} yet")
     cache[key] = (obj.stream, dib, need[0] != 0 and need[1] != 0)
@@ -664,13 +685,34 @@ def get_dib(ctx, obj, dev):
 _NOT_PROBED = object()
 
 
+def status_flags(obj, ctx) -> tuple[bool, bool]:
+    """(bStdCS, TransMask's group half) of the CPDF_RenderStatus that draws this image. Three
+    statuses set them and none of them inherits: LoadSMask's (SetStdCS(true), SetLoadMask and
+    SetGroupFamily, so a luminosity mask with a DeviceCMYK group makes TransMask's half true) draws
+    the mask group's own objects; ProcessTransparency's bitmap_render (SetStdCS(true) alone) draws
+    the one object that needed it, wherever it stands - a page-level image under a /SMask gs is
+    loaded with std conversion on; and ProcessForm's starts from nothing, so a form's children are
+    loaded as the page's are, inside a soft mask as well."""
+    if ctx is None:
+        return False, False
+    from .render_transparency import transparency_status
+    if transparency_status(obj):
+        return True, False
+    if id(obj) in ctx.mask_top:
+        return True, bool(ctx.mask_group_cmyk)
+    return False, False
+
+
 def _probed(ctx, obj, need):
     """The bitmap `refusal` loaded for this image (at no device size), when loading it for `need`
     gives the same: the device size only picks a JPEG's scale, and only for a DCT image at least
-    twice the device's size both ways (decode_image._jpeg; masks load at no size either way)."""
+    twice the device's size both ways (decode_image._jpeg; masks load at no size either way). The
+    probe is kept only for a draw whose colour conversion is the one it was loaded with."""
     probes = getattr(ctx, "image_probes", None)
     got = probes.get(id(obj.stream)) if probes else None
-    if got is None or got[0] is not obj.stream or got[1] is not None or len(got) < 4:
+    if got is None or got[0] is not obj.stream or got[1] is not None or len(got) < 5:
+        return _NOT_PROBED
+    if got[4] != status_flags(obj, ctx):
         return _NOT_PROBED
     d = obj.stream.dict
     r = ctx.doc.resolve
@@ -693,32 +735,34 @@ def refusal(obj, ctx) -> str | None:
     """What drawing this image object needs that is not ported, if anything."""
     if ctx is None:
         return "images"
-    if ctx.depth > 0:
-        return "images in soft masks"
     if obj.blend != "Normal":
         return "images with blend modes"
     if not getattr(obj.stream, "exact", True):
         return "inline images whose codec's end is not found as PDFium finds it (DCT, CCITT)"
-    d = obj.stream.dict
-    r = ctx.doc.resolve
-    if obj.smask is not None and d.get("SMask") is not None:
-        return "images with a soft mask of their own under a soft mask"
     probes = ctx.__dict__.setdefault("image_probes", {})
     key = id(obj.stream)
     if key not in probes:
         why = None
         stencil = False
         dib = None
+        flags = status_flags(obj, ctx)
         try:
-            dib = DI.load(ctx.doc, obj.stream, _resources(ctx, obj), (0, 0))
+            dib = DI.load(ctx.doc, obj.stream, _resources(ctx, obj), (0, 0),
+                          std_cs=flags[0], group_cmyk=flags[1])
             stencil = dib is not None and dib.fmt == "mask1"
             if stencil and dib.mask is not None:
                 why = "image masks with masks"
         except DI.Unsupported as e:
             why = str(e)
         # the bitmap too, for `get_dib` to take instead of loading the image again (`_probed`)
-        probes[key] = (obj.stream, why, stencil, dib)
-    _, why, stencil = probes[key][:3]
+        probes[key] = (obj.stream, why, stencil, dib, flags)
+    _, why, stencil, dib = probes[key][:4]
     if why is None and stencil and obj.fill_pattern is not None:
         return "pattern-filled image masks"
+    from .render_transparency import alpha_mode
+    if why is None and alpha_mode(ctx) and dib is not None and dib.mask is None:
+        # StartBitmapAlpha draws an opaque image as its unit square; a stencil or a see-through
+        # one goes on as its alpha through SetBitMask/StretchBitMask, which is not ported
+        if dib.fmt not in ("rgb1", "rgb8", "bgr"):
+            return "stencils and see-through images in an alpha soft mask"
     return why

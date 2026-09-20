@@ -31,9 +31,9 @@ ORACLES = [
     ("paths-mutate", "render_torture", ["0", "100", "--mutate", "--out", "{out}"]),
     ("transparency", "render_torture_transparency", ["0", "100", "--no-shrink", "--out", "{out}"]),
     *[(f"shading-{m}", "render_torture_shading", ["0", "80", "--mode", m, "--quiet", "--out", "{out}"])
-      for m in ("classic", "cie", "func", "mesh", "transfer")],
+      for m in ("classic", "cie", "func", "mesh", "transfer", "tiling")],
     *[(f"image-{lv}", "render_torture_image", ["0", "100", "--level", str(lv), "-q", "--out", "{out}"])
-      for lv in (0, 3, 6)],
+      for lv in (0, 3, 6, 7, 8)],
     ("type3", "render_torture_type3", ["0", "100", "-q", "--out", "{out}"]),
     *[(f"subst-{p}", "render_torture_subst", ["0", "150", "--pool", p, "--no-shrink", "--out", "{out}"])
       for p in ("any", "installed")],

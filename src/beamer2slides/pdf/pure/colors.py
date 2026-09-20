@@ -82,11 +82,29 @@ def _round255(v: float) -> int:
     return int(_f32(_f32(_f32(v) * 255.0) + 0.49999997))
 
 
+SRGB_PROFILE_TAG = b"sRGB IEC61966-2.1"
+
+
+def icc_srgb(data, n) -> bool:
+    """CPDF_IccProfile's `is_srgb_`: /N 3 and DetectSRGB (a profile of exactly 3144 bytes carrying
+    this description at 400). Such a profile is never handed to lcms: CPDF_ICCBasedCS::GetRGB gives
+    the first three components back unchanged (no clamp), TranslateImageLine only reverses the line
+    and IsNormal() is true, so it is exactly a device space without the clamping."""
+    return n == 3 and len(data) == 3144 and bytes(data[400:417]) == SRGB_PROFILE_TAG
+
+
+def icc_openable(data) -> bool:
+    """Could lcms open this as a profile? Anything that might be one is refused where a profile has
+    to be interpreted: only data that cannot be one falls back to the alternate as PDFium's does."""
+    return len(data) >= 128 and bytes(data[36:40]) == b"acsp"
+
+
 class ColorSpace:
     """One colour space: `n` components, `rgb(values)` -> 0-1 floats or None."""
 
-    def __init__(self, family: str, n: int, base: "ColorSpace | None" = None, extra=None):
+    def __init__(self, family: str, n: int, base: "ColorSpace | None" = None, extra=None, srgb: bool = False):
         self.family, self.n, self.base, self.extra = family, n, base, extra
+        self.srgb = srgb
 
     @property
     def is_pattern(self) -> bool:
@@ -111,7 +129,9 @@ class ColorSpace:
             return r / 255.0, g / 255.0, b / 255.0
         if f == "Lab":
             return _lab_rgb(*v[:3])
-        if f == "ICCBased":  # the profile is not interpreted: its alternate (or Device* by N) stands in
+        if f == "ICCBased":  # an sRGB profile is the identity; any other is read through its alternate
+            if self.srgb:
+                return v[0], v[1], v[2]
             return self.base.rgb(v) if self.base else None
         if f == "Indexed":
             base, hival, lookup = self.base, self.extra[0], self.extra[1]
@@ -215,6 +235,8 @@ def load_colorspace(doc, obj, resources: dict | None, depth: int = 0) -> ColorSp
         if not isinstance(stream, Stream):
             return None
         n = r(stream.get("N"))
+        if n == 3 and icc_srgb(doc.stream_data(stream), n):
+            return ColorSpace("ICCBased", 3, DEVICE["DeviceRGB"], srgb=True)
         alt = load_colorspace(doc, stream.get("Alternate"), None, depth + 1)
         if alt is None or (isinstance(n, int) and alt.n != n):
             alt = {1: DEVICE["DeviceGray"], 3: DEVICE["DeviceRGB"], 4: DEVICE["DeviceCMYK"]}.get(n)
