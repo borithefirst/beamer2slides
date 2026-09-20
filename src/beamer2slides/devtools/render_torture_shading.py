@@ -943,6 +943,11 @@ def case(seed: int, mode: str = "classic"):
         entries = b"/BBox [%s %s %s %s]" % (num(r), num(r), num(r), num(r))
         if r.random() < 0.7:
             m = [r.choice([1, 0, -1, r.uniform(-2, 2)]) for _ in range(4)] + [r.uniform(-60, 60), r.uniform(-60, 60)]
+            if mode == "tiling" and abs(m[0] * m[3] - m[1] * m[2]) < 1e-3:
+                # a pattern painted inside a form whose /Matrix has no inverse makes PDFium walk
+                # tiles for minutes (seed 3069 of an older draw): nothing real does that, and the
+                # other modes keep the singular matrices
+                m[0], m[1], m[2], m[3] = 1.0, 0.0, 0.0, 1.0
             entries += b" /Matrix [" + b" ".join(b"%.4f" % v for v in m) + b"]"
         if r.random() < 0.25:
             entries += r.choice([b" /Group << /S /Transparency >>", b" /Group << /S /Transparency /I true >>",
