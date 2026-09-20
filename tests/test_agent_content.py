@@ -304,6 +304,35 @@ def test_the_gate_still_runs_even_though_content_was_materialised_first(tmp_path
     assert not (Path(tmp_path) / "out" / "answer.json").exists()
 
 
+def test_a_real_pdf_goes_through_a_real_journey_with_no_path_either_way():
+    """The stand-in above proves the seam; this proves it against PDFium and `classify`.
+
+    A harness at the other end of this has a PDF in memory, nowhere to put it and nothing to read
+    back from - so the bytes go in as base64 and `deck.json` comes back as text, and the only
+    thing that touched a filesystem was a temporary directory that no longer exists.
+    """
+    from .test_agent_deck_tools import deck_pdf                # skips if the decks are not built
+
+    from beamer2slides.agent.deck_tools import deck_inspect
+
+    raw = deck_pdf().read_bytes()
+    ctx = AgentContext.detached(allow=LOCAL)
+    root = ctx.workspace.root                                  # only so the teardown can be checked
+    try:
+        out = deck_inspect(ctx, pdf={"name": "talk.pdf", "base64": base64.b64encode(raw).decode()},
+                           checks=False)
+        assert out.ok, out.summary
+        assert out.data["pages"] >= 1
+        decks = [a for a in out.artifacts if a.ref.endswith("deck.json")]
+        assert decks, [a.ref for a in out.artifacts]
+        carried = json.loads(decks[0].text)
+        assert len(carried["slides"]) == out.data["pages"]
+        assert decks[0].sha256 and decks[0].bytes == len(decks[0].text.encode("utf-8"))
+    finally:
+        ctx.close()
+    assert not root.exists(), "a detached run leaves nothing on the machine"
+
+
 def test_dispatch_takes_content_before_the_schema_check():
     """A content dict is not a publishable parameter type, so it must be gone before `validate`."""
     from beamer2slides.agent import mcp
