@@ -1010,6 +1010,47 @@ def test_a_created_panel_stays_under_words_only_the_deck_has():
     assert order.index("new_s0") < order.index("b2s_s000_t1")
 
 
+def test_an_element_a_dissolved_group_frees_onto_the_page_takes_the_sources_place():
+    """`restack` rewrites the deck's page order slot by slot, so an object with no slot used to land
+    on top of everything - past the ceiling that keeps a new panel under the text the source draws
+    above it, and past the guard that keeps it under words only the deck has. A created element was
+    given its place for that reason; an element a group this rewrite dissolves *frees onto the page*
+    has none either, its old top having stood inside that group, and Slides ungroups before
+    rebuilding while a group left with fewer than two members is not rebuilt at all. The offline
+    campaign cannot reach it: its applier models the outcome and hands the freed child the group's
+    own slot (`fuzz_world._drop_lonely_groups`)."""
+    from beamer2slides.sync import Sync
+    els = [entry("text/title/0", text_ir("Intro", (10, 10, 100, 24), "p0t0", "title"), "b2s_s000_t0"),
+           entry("shape/panel/0", shape_ir((15, 80, 210, 130), "p0s0"), "b2s_s000_s0"),
+           entry("text/body/0", text_ir("First point\nSecond point", (20, 100, 200, 120), "p0t1"), "b2s_s000_t1")]
+    slide = base_slide("intro", "b2s_s000", els, label="intro", title="Intro")
+    slide["groups"], slide["order"] = ["blk"], ["b2s_s000_t0", "blk"]   # the panel and the body are a block
+    base = {"version": 1, "generation": 0, "presentationId": "P", "master_background": None, "slides": [slide]}
+    ours, _ = triple(base)
+    before = {"objectId": "b2s_s000", "order": ["b2s_s000_t0", "blk"], "objects": {
+        "b2s_s000_t0": readback([20, 20, 200, 48], text="Intro"),
+        "blk": {**readback([30, 160, 440, 280], kind="elementGroup"),
+                "children": ["b2s_s000_s0", "b2s_s000_t1"]},
+        "b2s_s000_s0": {**readback([30, 160, 420, 260]), "parent_group": "blk"},
+        "b2s_s000_t1": {**readback([40, 200, 400, 240], text="First point"), "parent_group": "blk"}}}
+    p = {"action": "update", "key": "intro", "base": 0, "ours": 0, "objectId": "b2s_s000",
+         "units": [{"key": "text/title/0", "action": "keep"}, {"key": "shape/panel/0", "action": "recreate"},
+                   {"key": "text/body/0", "action": "keep"}]}
+    sync = Sync.__new__(Sync)
+    sync.base, sync.ours = base, ours
+    w = {"plan": p, "doomed": {"b2s_s000_s0"}, "tops": {"shape/panel/0": "new_s0"}}
+    # the group is gone: Slides ungrouped it and one member was left, so both stand on the page
+    now = {"order": ["b2s_s000_t0", "b2s_s000_s0", "b2s_s000_t1", "new_s0"],
+           "objects": {"b2s_s000_t0": before["objects"]["b2s_s000_t0"],
+                       "b2s_s000_t1": {**before["objects"]["b2s_s000_t1"], "parent_group": None},
+                       "new_s0": readback([30, 160, 420, 270])}}     # opaque, over the body's box
+    order = [x for x in now["order"] if x not in w["doomed"]]
+    for r in sync.restack(w, before, now):
+        oid, = r["updatePageElementsZOrder"]["pageElementObjectIds"]
+        order.append(order.pop(order.index(oid)))
+    assert order.index("new_s0") < order.index("b2s_s000_t1")
+
+
 def test_the_elements_a_rewrite_replaces_take_the_sources_order():
     """The same sentence at page level. Two recreated elements kept the deck's order, which between
     two converter elements is not an edit anybody made - it is what the last conversion drew - so a
@@ -1048,6 +1089,30 @@ def test_the_source_orders_a_rewrite_against_the_elements_it_keeps():
     theirs = ["old_t1", "old_t0", "new_s0"]
     Sync._by_the_source(theirs, oldtop, tops, keys, ["old_t0", "old_t1", "old_s0"])
     assert theirs == ["old_t1", "old_t0", "new_s0"]
+
+
+def test_a_converter_group_takes_the_source_order_of_what_it_carries():
+    """What the page rule orders are the page *elements*, and a block group is the page element of
+    everything in it. Asking it of the objects alone left out everything inside a group, so a
+    block's panel could not be ordered against a table beside it however the source drew them: the
+    recreated panel stayed in its group above a table the source draws over it (converted seed
+    1300381 at chain 6). The group stands for the first element the source draws in there."""
+    from beamer2slides.sync import Sync
+    keys = ["shape/panel/0", "text/body/0", "table/table/0"]   # the table is drawn over the block
+    tops = {"shape/panel/0": "new_s0"}
+    oldtop = {"shape/panel/0": "old_s0", "text/body/0": "old_t0", "table/table/0": "tbl"}
+    stands_now = {"new_s0": "blk", "old_t0": "blk", "tbl": "tbl", "blk": "blk"}
+    stands_before = {"old_s0": "blk", "old_t0": "blk", "tbl": "tbl", "blk": "blk"}
+    desired = ["tbl", "blk"]
+    Sync._by_the_source(desired, oldtop, tops, keys, ["tbl", "blk"], stands_now, stands_before)
+    assert desired == ["blk", "tbl"]
+    # ... and a group the person made is not one the base draws, so it stands for nobody: nothing
+    # names it, and the one element left has nothing to be ordered against
+    folded = ["tbl", "user_g"]
+    Sync._by_the_source(folded, oldtop, tops, keys, ["tbl", "blk"],
+                        {"new_s0": "user_g", "old_t0": "user_g", "tbl": "tbl"},
+                        {"old_s0": "user_g", "old_t0": "user_g", "tbl": "tbl"})
+    assert folded == ["tbl", "user_g"]
 
 
 def test_the_children_of_a_rebuilt_group_take_the_sources_order():

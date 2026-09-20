@@ -1542,7 +1542,8 @@ class Sync:
                     "to read the words again")
 
     @staticmethod
-    def _by_the_source(desired: list[str], oldtop: dict, tops: dict, keys: list[str], base_order: list[str]):
+    def _by_the_source(desired: list[str], oldtop: dict, tops: dict, keys: list[str], base_order: list[str],
+                       stands_now: dict | None = None, stands_before: dict | None = None):
         """The source's own elements take the source's order among themselves, in the places they
         hold on the page, whether this sync rewrote them or kept them - but only where the deck still
         has them in the order the base does.
@@ -1560,17 +1561,37 @@ class Sync:
         `Sync.zrank` ranks a group's kept children - or a slide with one rewritten element has
         nothing to be ordered against and the rule never fires: a panel the source draws under a text
         it did not touch grew over it and stayed on top (converted seed 1500512 at chain 10, on a
-        slide the person had ungrouped, so every element stood on the page)."""
+        slide the person had ungrouped, so every element stood on the page).
+
+        What is ordered are the *page elements* (`stands_now` / `stands_before`, `drawn_order`'s
+        second answer), and a converter group - one the base itself draws on the page - stands for
+        the elements it carries, the first the source draws among them, blocks being made of
+        consecutive elements. Asking it of the objects alone left out everything inside a group, so
+        a block's panel could not be ordered against a table beside it however the source drew them
+        (converted seed 1300381 at chain 6). A group the *person* made stands for nobody: it is not
+        in the base's order, restacking it would move everything else they put in there, and that is
+        the one shape of this the sync answers by talking (`warn_about_folded_hiders`)."""
         rank = {k: i for i, k in enumerate(keys)}
-        at = {(tops.get(k) or oldtop[k]): k for k in oldtop if k in rank}
-        mine = [(i, at[oid]) for i, oid in enumerate(desired) if oid in at]
-        here = [k for _, k in mine]
-        if len(mine) < 2 or any(oldtop[k] not in base_order for k in here):
+        page = set(base_order)
+
+        def stands(oid, where):
+            t = (where or {}).get(oid, oid)
+            return t if t == oid or t in page else oid
+
+        at, was = {}, {}
+        for k in sorted((k for k in oldtop if k in rank), key=lambda k: rank[k]):
+            el = stands(tops.get(k) or oldtop[k], stands_now)
+            if el not in at:                # the first element the source draws in there speaks
+                at[el] = k
+                was[el] = stands(oldtop[k], stands_before)
+        here = [oid for oid in desired if oid in at]
+        if len(here) < 2 or any(was[oid] not in base_order for oid in here):
             return
-        if here != sorted(here, key=lambda k: base_order.index(oldtop[k])):
+        if here != sorted(here, key=lambda oid: base_order.index(was[oid])):
             return                                  # the person restacked: their order stands
-        for (i, _), k in zip(mine, sorted(here, key=lambda k: rank[k])):
-            desired[i] = tops.get(k) or oldtop[k]
+        slots = [i for i, oid in enumerate(desired) if oid in at]
+        for i, oid in zip(slots, sorted(here, key=lambda o: rank[at[o]])):
+            desired[i] = oid
 
     def restack(self, w: dict, before: dict, now: dict) -> list[dict]:
         """BRING_TO_FRONT so recreated elements take their old place in the z-order and new
@@ -1602,13 +1623,24 @@ class Sync:
                 desired.append(oid)
         keys = [e["key"] for e in o["elements"]]
         shown = now.get("objects") or {}
-        self._by_the_source(desired, oldtop, w["tops"], keys, b.get("order") or [])
+        self._by_the_source(desired, oldtop, w["tops"], keys, b.get("order") or [],
+                            drawn_order(shown, now.get("order") or [])[1],
+                            drawn_order(before.get("objects") or {}, before.get("order") or [])[1])
 
         def placed(k):
             return w["tops"].get(k) or (merge.unit_top(bunits[k], now) if k in bunits else None)
 
-        for ukey in added:
-            new = w["tops"][ukey]
+        # An element with no place in the deck's order takes the place the source gives it. That is
+        # one this sync created - and also one a group this rewrite dissolved has freed onto the
+        # page: its old top stood *inside* that group, so nothing of the deck's held a slot for it,
+        # and it landed on top of everything, past the ceiling below and past the guard that keeps a
+        # panel under words only the deck has. The offline campaign cannot reach this, its applier
+        # modelling the outcome (`fuzz_world._drop_lonely_groups` gives the freed child the group's
+        # own slot), so the rule is pinned by a test of its own.
+        homeless = [k for k in keys if k not in added and (oid := placed(k))
+                    and oid in top_now and oid not in desired]
+        for ukey in sorted(added + homeless, key=keys.index):
+            new = placed(ukey)
             if new not in top_now or new in desired:
                 continue
             i = keys.index(ukey)

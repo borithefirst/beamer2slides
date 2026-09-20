@@ -951,7 +951,14 @@ inside a group; on the page the source's elements do too (`Sync._by_the_source`)
 (1500512 at chain 10: ordering only the rewritten ones leaves a slide with one of them nothing to be
 ordered against), but only where the deck still has them in the base's order, because where it does
 not somebody restacked and that survives - asked of the whole set at once, a z-order change being
-the one deck edit `merge.deck_edits` cannot see. (2) *Words only the deck has* (78036, adopt 680477): the ceiling
+the one deck edit `merge.deck_edits` cannot see. What the page rule orders are the page *elements*,
+a converter group - one the base itself draws on the page - standing for the elements it carries and
+a group the **person** made for nobody (1300381 at chain 6: asked of the objects alone it left out
+everything inside a group, so a block's panel could not be ordered against a table beside it). And
+an object the deck's order has no slot for - one this sync created, or one a group this rewrite
+dissolves frees onto the page - is placed by the source too, or it lands on top of everything past
+both guards; the applier models the outcome there (`_drop_lonely_groups` gives the freed child the
+group's slot), so that half is pinned by a test alone. (2) *Words only the deck has* (78036, adopt 680477): the ceiling
 above consults source elements alone, so a created panel landed on a text the source had dropped and
 the deck's edits had kept alive, and a recreated panel that grew landed on another; nothing a sync
 writes now ends up above a page element the source does not draw whose words it would cover

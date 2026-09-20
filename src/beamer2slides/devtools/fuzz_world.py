@@ -615,26 +615,41 @@ def _page_order(live, b, o, deck_order, tok_fresh, tok):
     applier kept an order the last conversion drew and this one contradicts - a panel the source now
     draws under a text came back on top of it (converted seed 610106, chain 10). The elements this
     sync *keeps* count too, or a slide with one rewritten element has nothing to be ordered against
-    (seed 1500512 at chain 10)."""
+    (seed 1500512 at chain 10). What is ordered are the *page elements*, a converter group standing
+    for the elements it carries (the first of them the source draws), or a block's panel could not be
+    ordered against a table beside it however the source drew them (seed 1300381 at chain 6). A group
+    the person made stands for nobody: moving it moves everything else they put in there, which is
+    the one shape of this the sync answers by talking (`sync.folded_hiders`)."""
     order, objects = live.get("order") or [], live["objects"]
     keys = [el["key"] for el in o["elements"]]
     rank = {k: i for i, k in enumerate(keys)}
     base_main = {el["key"]: el.get("main") for el in b["elements"]}
-    at, stands = {}, {}
+    # A container the base itself draws on the page - a converter group. Not `b["groups"]`, which a
+    # rebase carries over even after the person took that group apart (converted seed 1500512).
+    groups = set(b.get("order") or [])
+    base_stand = {}
+    for el in b["elements"]:
+        parent = ((el.get("readback") or {}).get(el.get("main")) or {}).get("parent_group")
+        base_stand[el["key"]] = parent if parent in groups else el.get("main")
+    at, was = {}, {}
     for k in keys:
         made = f"b2s_{h6(o['key'])}_{h6(k)}_{tok}"
         oid = made if made in objects else base_main.get(k)
-        if oid and base_main.get(k) and oid not in tok_fresh:
-            at[oid], stands[k] = k, oid
-    mine = [(i, at[oid]) for i, oid in enumerate(order) if oid in at]
-    here = [k for _, k in mine]
-    if len(mine) < 2 or any(base_main[k] not in deck_order or base_main[k] not in (b.get("order") or [])
-                            for k in here):
+        if not oid or not base_main.get(k) or oid in tok_fresh:
+            continue
+        parent = (objects.get(oid) or {}).get("parent_group")
+        stands = parent if parent in groups else oid
+        if stands not in at:                # the first element the source draws in there speaks
+            at[stands], was[stands] = k, base_stand[k]
+    slots = [i for i, oid in enumerate(order) if oid in at]
+    here = [order[i] for i in slots]
+    if len(here) < 2 or any(was[x] not in deck_order or was[x] not in (b.get("order") or [])
+                            for x in here):
         return
-    if here != sorted(here, key=lambda k: b["order"].index(base_main[k])):
+    if here != sorted(here, key=lambda x: b["order"].index(was[x])):
         return                                  # the person restacked: their order stands
-    for (i, _), k in zip(mine, sorted(here, key=lambda k: rank[k])):
-        order[i] = stands[k]
+    for i, oid in zip(slots, sorted(here, key=lambda x: rank[at[x]])):
+        order[i] = oid
 
 
 def _regroup_order(live, b, o, tok):

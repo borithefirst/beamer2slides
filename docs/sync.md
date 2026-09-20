@@ -815,10 +815,19 @@ hold for every sync, including the combinations nobody thought of.
     means a slide with one of them has nothing to be ordered against and the rule never fires, so a
     panel the source draws under a text it did not touch grew over it and stayed on top (converted
     seed 1500512 at chain 10, on a slide the person had ungrouped, so every element stood on the
-    page). `test_the_children_of_a_rebuilt_group_take_the_sources_order`,
+    page). And what the page rule orders are the page **elements**, so a converter group — a
+    container the base itself draws on the page — stands for the elements it carries, the first of
+    them the source draws (blocks being made of consecutive elements). Asked of the objects alone it
+    left out everything inside a group, so a block's panel could not be ordered against a table
+    beside it however the source drew them, and the recreated panel stayed above a table the source
+    draws over it (converted seed 1300381 at chain 6). A group the **person** made stands for
+    nobody — it is not in the base's order, and moving it moves everything else they put in there:
+    that is the shape below, the one the sync answers by talking.
+    `test_the_children_of_a_rebuilt_group_take_the_sources_order`,
     `test_the_rank_a_rebuilt_group_is_ordered_by_covers_kept_objects_too`,
     `test_the_elements_a_rewrite_replaces_take_the_sources_order`,
-    `test_the_source_orders_a_rewrite_against_the_elements_it_keeps`.
+    `test_the_source_orders_a_rewrite_against_the_elements_it_keeps`,
+    `test_a_converter_group_takes_the_source_order_of_what_it_carries`.
   - **Words only the deck has** (seeds 78036 chain 4 and adopt-shaped 680477 chain 4). The ceiling
     above — never above an element the source draws above it — consults source elements alone, so a
     created panel landed on top of a text the source had dropped and the deck's edits had kept
@@ -829,6 +838,14 @@ hold for every sync, including the combinations nobody thought of.
     before the write instead of after it). Hiding those words loses work nobody can get back; the
     price of going under them is z-order, so that is the way round to be wrong.
     `test_a_created_panel_stays_under_words_only_the_deck_has`.
+  - **An element with no slot at all.** `restack` rewrites the deck's page order slot by slot, and
+    an object the deck's order has no slot for lands on top of everything — past the ceiling above
+    and past the guard below. A created element is given its place for that reason; so now is one a
+    group this rewrite **dissolves** frees onto the page, whose old top stood *inside* that group
+    (Slides ungroups before rebuilding, and a group left with fewer than two members is not rebuilt).
+    The offline campaign cannot reach this one: its applier models the outcome and hands the freed
+    child the group's own slot (`fuzz_world._drop_lonely_groups`), so the mechanism is pinned by
+    `test_an_element_a_dissolved_group_frees_onto_the_page_takes_the_sources_place`.
   All four are mirrored in the reference applier, whose `_restack`, `_not_over_kept`, `_page_order`
   and `_regroup_order` model the outcome (the raw oracle finding fires here, not only the `_stacked`
   replay of the requests).
