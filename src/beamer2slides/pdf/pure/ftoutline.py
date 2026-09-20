@@ -40,6 +40,12 @@ class GlyphError(Exception):
 
 
 def i32(v: int) -> int:
+    # The three quarters of a million calls a render pass makes are nearly all on values that
+    # already are an FT_Long, where the mask and the compare below cannot move them: `v & MASK32`
+    # is v for a positive one, and for a negative one it is v + 2**32, which has bit 31 set exactly
+    # because v >= -2**31 - so the subtraction gives v back. That is the path taken here.
+    if -0x80000000 <= v <= 0x7FFFFFFF:
+        return v
     v &= MASK32
     return v - (1 << 32) if v & 0x80000000 else v
 
@@ -47,7 +53,11 @@ def i32(v: int) -> int:
 def mulfix(a: int, b: int) -> int:
     """FT_MulFix: (a*b + 0x8000 + (ab >> 63)) >> 16, as a 32-bit FT_Long."""
     ab = a * b
-    return i32((ab + 0x8000 + (-1 if ab < 0 else 0)) >> 16)
+    # `ab >> 63` is -1 for a negative product and 0 otherwise, so the two shifts below are the one
+    # C expression; the result is an FT_Long already unless a or b was out of range, and then i32
+    # wraps it as before. Written out because this is the port's hottest arithmetic.
+    v = (ab + 0x8000) >> 16 if ab >= 0 else (ab + 0x7FFF) >> 16
+    return v if -0x80000000 <= v <= 0x7FFFFFFF else i32(v)
 
 
 def divfix(a: int, b: int) -> int:
