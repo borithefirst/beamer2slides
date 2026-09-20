@@ -178,6 +178,13 @@ gcloud run deploy beamer2slides-playground --source . --region europe-west1 \
   --set-env-vars B2S_PLAYGROUND_GOOGLE_CLIENT_ID=<the web client id>,B2S_PLAYGROUND_GOOGLE_API_KEY=<the browser key>
 ```
 
+In **PowerShell** that comma is an array separator, so the two variables arrive as two arguments
+and gcloud stores them as one: the client id comes out with `B2S_PLAYGROUND_GOOGLE_API_KEY=…`
+appended and the key is empty (measured - it broke the sign-in until it was noticed). Quote the
+whole value: `--set-env-vars '<A>=…,<B>=…'`. Changing only the variables of a service that is
+already built needs no rebuild - `gcloud run services update <service> --set-env-vars '…'` makes
+a revision in about a minute.
+
 What the flags are for, beyond taste:
 
 - **`--max-instances 1`** is not only about money. A job lives in the server's memory and on its
