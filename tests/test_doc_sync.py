@@ -620,12 +620,14 @@ def _unmodelled_doc(**style) -> dict:
 def test_a_sync_says_how_much_of_the_document_the_file_cannot_say():
     """One line, not fifteen: a sync report that repeats the whole list every run is
     a report nobody reads twice."""
-    doc = _unmodelled_doc(keepWithNext=True, direction="LEFT_TO_RIGHT",
-                          pageBreakBefore=True, borderLeft={"width": {"magnitude": 1}})
+    doc = _unmodelled_doc(avoidWidowAndOrphan=True, direction="LEFT_TO_RIGHT",
+                          tabStops=[{"offset": {"magnitude": 36}}],
+                          borderBetween={"width": {"magnitude": 1}})
     notes = doc_sync.unmodelled_notes(doc)
     assert len(notes) == 1
-    assert notes[0].startswith("4 kinds of document property this file cannot say "
-                               "(structural.paragraph.paragraphStyle.borderLeft, ")
+    assert notes[0].startswith(
+        "4 kinds of document property this file cannot say "
+        "(structural.paragraph.paragraphStyle.avoidWidowAndOrphan, ")
     assert "and 1 more" in notes[0]
     # The one number a sync can act on: naming the blocks is `adopt`'s job.
     assert "1 block(s) carry one" in notes[0]
@@ -634,13 +636,13 @@ def test_a_sync_says_how_much_of_the_document_the_file_cannot_say():
 def test_adopt_names_every_one_of_them():
     """A document somebody else wrote is handed over once, and that is the moment to
     say what will not survive being written again."""
-    doc = _unmodelled_doc(keepWithNext=True, pageBreakBefore=True)
+    doc = _unmodelled_doc(avoidWidowAndOrphan=True, direction="LEFT_TO_RIGHT")
     notes = doc_sync.unmodelled_notes(doc, full=True)
     assert notes[:2] == [
-        "the document has 1 × structural.paragraph.paragraphStyle.keepWithNext "
+        "the document has 1 × structural.paragraph.paragraphStyle.avoidWidowAndOrphan "
         "(e.g. True), which the canonical file cannot say",
-        "the document has 1 × structural.paragraph.paragraphStyle.pageBreakBefore "
-        "(e.g. True), which the canonical file cannot say"]
+        "the document has 1 × structural.paragraph.paragraphStyle.direction "
+        "(e.g. LEFT_TO_RIGHT), which the canonical file cannot say"]
 
 
 def test_a_document_the_dialect_covers_is_said_nothing_about():
@@ -664,10 +666,10 @@ def test_the_block_that_would_lose_something_is_named_by_its_own_words():
     """The counts say the document has a border somewhere, which is true and of no
     use: the person about to edit a paragraph needs to know it is *that* one."""
     doc = _said_doc(("Plain enough", {}),
-                    ("Why this matters", {"borderBottom": {"width": {"magnitude": 1}}}))
+                    ("Why this matters", {"borderBetween": {"width": {"magnitude": 1}}}))
     notes = doc_sync.block_risk_notes(doc)
     assert notes == ["the paragraph 'Why this matters' carries "
-                     "paragraphStyle.borderBottom; rewriting that block "
+                     "paragraphStyle.borderBetween; rewriting that block "
                      "through the file would drop it"]
 
 
@@ -677,12 +679,13 @@ def test_a_block_carrying_nothing_the_file_misses_is_not_named():
 
 
 def test_the_blocks_are_named_most_laden_first_and_the_tail_is_counted():
-    doc = _said_doc(*[(f"line {n}", {"keepWithNext": True}) for n in range(10)],
-                    ("the heavy one", {"keepWithNext": True, "pageBreakBefore": True,
-                                       "borderLeft": {"width": {"magnitude": 1}}}))
+    doc = _said_doc(*[(f"line {n}", {"avoidWidowAndOrphan": True}) for n in range(10)],
+                    ("the heavy one", {"avoidWidowAndOrphan": True,
+                                       "direction": "LEFT_TO_RIGHT",
+                                       "borderBetween": {"width": {"magnitude": 1}}}))
     notes = doc_sync.block_risk_notes(doc, limit=3)
     assert notes[0].startswith("the paragraph 'the heavy one' carries "
-                               "paragraphStyle.borderLeft, ")
+                               "paragraphStyle.avoidWidowAndOrphan, ")
     assert len(notes) == 4
     assert notes[-1].startswith("and 8 more blocks carry something the file cannot say")
 
@@ -709,10 +712,10 @@ def test_the_block_this_sync_is_about_to_cost_something_is_named_as_a_loss():
     plan exists, the question has an answer: this run moves that very block, and a
     move is a delete and a write, so the border is going. Said before the write."""
     doc = _said_doc(("First words", {}), ("Second words", {}),
-                    ("Bordered words", {"borderBottom": {"width": {"magnitude": 1}}}))
+                    ("Bordered words", {"borderBetween": {"width": {"magnitude": 1}}}))
     assert doc_sync.rewrite_losses(doc, _planned(doc, reorder=True)) == [
         "the paragraph 'Bordered words' is being moved, which drops "
-        "paragraphStyle.borderBottom — the document's, and in nothing the file can say"]
+        "paragraphStyle.borderBetween — the document's, and in nothing the file can say"]
 
 
 def test_a_block_whose_words_merely_change_costs_nothing_and_is_not_named():
@@ -720,7 +723,7 @@ def test_a_block_whose_words_merely_change_costs_nothing_and_is_not_named():
     merge owns is a field nobody reads. A report that cried loss on every edit to a
     bordered paragraph would teach whoever reads it to skip the line."""
     doc = _said_doc(("First words", {}), ("Second words", {}),
-                    ("Bordered words", {"borderBottom": {"width": {"magnitude": 1}}}))
+                    ("Bordered words", {"borderBetween": {"width": {"magnitude": 1}}}))
     planned = _planned(doc, reword=True)
     assert planned[0]["result"]["requests"], "the source edit reached no request"
     assert doc_sync.rewrite_losses(doc, planned) == []

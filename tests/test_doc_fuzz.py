@@ -54,6 +54,12 @@ CHAINED = (0, 1, 2, 3, 4, 5)
 # the centring of the one deleted above it. And two at chain 8: 994410 the surviving copy
 # of a picture answering for the one the reader deleted, 994424 a kept paragraph following
 # the table the source moved away from it.
+# A seed names a *script*, not a defect: growing `fuzz_docs.PARA_MARKS` or
+# `READER_MEASURES` (paragraph borders, `pageBreakBefore` and `keepWithNext` went in with
+# the dialect) makes every draw come out different, so these rounds no longer replay the
+# scripts they were found on. They stay because a passing seed costs nothing and a whole
+# corner of the space is cheap to keep walking; what actually pins each defect is its own
+# hand-built test below.
 REGRESSIONS = ((60, 1), (181, 1), (309, 4), (1031, 8), (1147, 8),
                (5099, 8), (5130, 8), (5167, 8),
                (970228, 6), (970528, 6), (970711, 6), (980193, 6),

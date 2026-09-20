@@ -1121,10 +1121,17 @@ keys, named ranges), `doc_merge.py` (pure planning), `doc_sync.py` (the commands
   refusal has no tag, so the file says `data-script="none"` and only a `batchUpdate`
   writes it. Paragraphs carry `indent`,
   `indent_first` and `line_spacing` as `margin-left` / `text-indent` / `line-height`
-  (kept by the importer) and `shading`, `space_above`, `space_below` as `data-`
-  attributes: `background-color` on a `<p>` is a character highlight on its runs, not
-  paragraph shading, and no margin survives, so those three go in by `batchUpdate`
-  only. A run or paragraph that only repeats its named style says nothing
+  (kept by the importer) and `shading`, `space_above`, `space_below`, the four
+  `border_<side>`s, `page_break` and `keep_with_next` as `data-` attributes:
+  `background-color` on a `<p>` is a character highlight on its runs, not
+  paragraph shading, and no margin survives, so those go in by `batchUpdate`
+  only. A rule is `"<width>pt <solid|dotted|dashed> #rrggbb [pad <n>pt]"`
+  (`doc_ir.BORDER_RE`) and a rule of no width is no rule; the padding is always named,
+  since inside a `paragraphBorder` an unset field is not the API's "back to what you
+  inherit" — the border itself is the field being written (`doc_merge._border_value`).
+  `borderBetween` stays unmodelled on purpose: it is a rule *between* consecutive
+  paragraphs sharing a style, and a block model that plans one paragraph on its own has
+  nowhere honest to put half of it. A run or paragraph that only repeats its named style says nothing
   (`_named_defaults`), or an imported document reads back as a wall of spans; a
   bullet's own indents are the list preset's. `adopt_keys` compares the plan with the
   read-back (`carry_unimported`) and `tidy_requests` writes what no import could carry
@@ -1305,8 +1312,9 @@ keys, named ranges), `doc_merge.py` (pure planning), `doc_sync.py` (the commands
   example (`checks.lost_ink`'s question, one dimension down); `adopt` and `push` print each
   one (`doc_sync.unmodelled_notes(full=True)`), a sync the count and the commonest three.
   Real documents turn up page structure (`documentStyle`, headers, footnotes,
-  `sectionBreak`, `pageBreakBefore`), `baselineOffset`, paragraph borders/tab stops/
-  `keepWithNext`, a table's column widths and `tableCellStyle` (the ragged-table limit under
+  `sectionBreak`, positioned objects), paragraph tab stops/`direction`/`borderBetween`/
+  the widow-orphan and keep-lines flags,
+  a table's column widths and `tableCellStyle` (the ragged-table limit under
   its real name), a picture's crop/angle/brightness, a list's `startNumber` - and, of the
   document's theme, a named style's marks and alignment (its face and measures *are* read).
   Two tests pin the map: a fixture holding one of everything, so a property Docs adds later
@@ -1316,7 +1324,7 @@ keys, named ranges), `doc_merge.py` (pure planning), `doc_sync.py` (the commands
   runs **a block at a time** (`doc_ir.unmodelled_in` one structural element,
   `unread_blocks` every block of every tab, most laden first) and `adopt`/`push` name them by
   the words a person sees ("the paragraph 'Why this matters' carries
-  paragraphStyle.borderBottom; rewriting that block through the file would drop it",
+  paragraphStyle.borderBetween; rewriting that block through the file would drop it",
   `doc_sync.block_risk_notes`, 8 blocks x 4 properties), while a sync says how many blocks
   carry one: a section break and anything outside the blocks are left out, since no rewrite
   reaches them. It is a risk, not a loss - a block nobody rewrites keeps all of it. The

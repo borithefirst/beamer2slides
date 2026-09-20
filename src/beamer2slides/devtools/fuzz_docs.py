@@ -72,7 +72,11 @@ RUN_MARKS = [("bold", True), ("italic", True), ("underline", True), ("strike", T
 
 PARA_MARKS = [("align", "center"), ("align", "justify"), ("indent", 18.0),
               ("indent_first", 36.0), ("line_spacing", 1.5), ("shading", "#eef2ff"),
-              ("space_above", 6.0), ("space_below", 12.0)]
+              ("space_above", 6.0), ("space_below", 12.0),
+              ("border_bottom", "1pt solid #333333"),
+              ("border_bottom", "2.5pt dashed #cc0000 pad 4pt"),
+              ("border_left", "3pt dotted #0000ff"),
+              ("page_break", True), ("keep_with_next", True)]
 
 
 # ---------------------------------------------------------------- the corpus
@@ -507,6 +511,14 @@ READER_MEASURES = [
     ({"spaceBelow": {"magnitude": 3, "unit": "PT"}}, "spaceBelow"),
     ({"shading": {"backgroundColor": {"color": {"rgbColor": {
         "red": 1.0, "green": 0.95, "blue": 0.8}}}}}, "shading"),
+    ({"borderBottom": {"width": {"magnitude": 1, "unit": "PT"},
+                       "padding": {"magnitude": 0, "unit": "PT"}, "dashStyle": "SOLID",
+                       "color": {"color": {"rgbColor": {}}}}}, "borderBottom"),
+    ({"borderTop": {"width": {"magnitude": 2.25, "unit": "PT"},
+                    "padding": {"magnitude": 6, "unit": "PT"}, "dashStyle": "DOT",
+                    "color": {"color": {"rgbColor": {"blue": 0.6}}}}}, "borderTop"),
+    ({"pageBreakBefore": True}, "pageBreakBefore"),
+    ({"keepWithNext": True}, "keepWithNext"),
     ({"alignment": "CENTER"}, "alignment"),
 ]
 

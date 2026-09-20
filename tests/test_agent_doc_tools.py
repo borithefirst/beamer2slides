@@ -252,7 +252,7 @@ def test_the_one_note_that_is_a_loss_is_not_left_among_the_cautions(tmp_path):
     comes with the only thing left to do about it."""
     from beamer2slides import doc_sync
     lost = ("the paragraph 'Why this matters' is being moved, which drops "
-            f"paragraphStyle.borderBottom — the document's, and {doc_sync.LOSS_MARK}")
+            f"paragraphStyle.borderBetween — the document's, and {doc_sync.LOSS_MARK}")
     j = _job(tmp_path)
     counts = doc_tools.report_diagnostics(j, REPORT | {"notes": [lost]})
     assert counts["lost"] == 1
@@ -357,14 +357,14 @@ def test_adopt_names_the_block_an_edit_through_the_file_would_cost(tmp_path, mon
         body = doc["tabs"][0]["documentTab"]["body"]["content"]
         at = next(e for e in body
                   if "The second paragraph" in str(e.get("paragraph", {}).get("elements")))
-        at["paragraph"]["paragraphStyle"]["borderLeft"] = {"width": {"magnitude": 1}}
+        at["paragraph"]["paragraphStyle"]["borderBetween"] = {"width": {"magnitude": 1}}
         return doc
 
     service.world.read = bordered
     result = doc_tools.doc_adopt(_ctx(tmp_path), doc="doc-1", file="taken.html")
     assert result.ok, result.summary
     said = [d.message for d in result.diagnostics]
-    assert any("paragraphStyle.borderLeft" in line and "The second paragraph" in line
+    assert any("paragraphStyle.borderBetween" in line and "The second paragraph" in line
                and "would drop it" in line for line in said), said
     # And nothing is said about the paragraph that carries nothing.
     assert not any("The first paragraph" in line for line in said), said

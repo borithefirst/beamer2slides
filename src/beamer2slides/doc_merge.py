@@ -56,9 +56,11 @@ MANAGED = ("backgroundColor", "baselineOffset", "bold", "fontSize", "foregroundC
 # `text-align`, `margin-left`, `text-indent`, `line-height`"); the last three only
 # through `batchUpdate` (`doc_ir.PARAGRAPH_DATA` says why), which the study measured
 # working for `updateParagraphStyle` with `shading`.
-PARAGRAPH_FIELDS = (("indent", "indentStart"), ("indent_first", "indentFirstLine"),
-                    ("line_spacing", "lineSpacing"), ("shading", "shading"),
-                    ("space_above", "spaceAbove"), ("space_below", "spaceBelow"))
+PARAGRAPH_FIELDS = ((("indent", "indentStart"), ("indent_first", "indentFirstLine"),
+                     ("line_spacing", "lineSpacing"), ("shading", "shading"),
+                     ("space_above", "spaceAbove"), ("space_below", "spaceBelow"))
+                    + tuple(doc_ir.BORDER_SIDES.items())
+                    + tuple(doc_ir.PARAGRAPH_FLAGS.items()))
 # What is written on a paragraph, named whether or not the block asks for it, so
 # that a property the source took away goes away. Unset-and-named is the API's own
 # way of saying "back to the default" (documented, not measured here).
@@ -73,7 +75,8 @@ ITEM_PARAGRAPH = tuple(f for f in MANAGED_PARAGRAPH if not f.startswith("indent"
 SHAPE_KEYS = ("kind", "level", "ordered", "align") + tuple(k for k, _ in PARAGRAPH_FIELDS)
 # What no HTML import can put in a document, so a push has to write it afterwards
 # (`carry_unimported`, `tidy_requests`).
-UNIMPORTABLE = ("shading", "space_above", "space_below")
+UNIMPORTABLE = (("shading", "space_above", "space_below")
+                + tuple(doc_ir.BORDER_SIDES) + tuple(doc_ir.PARAGRAPH_FLAGS))
 # What is written first when two edits are planned at one and the same index
 # (`requests` says why each one sits where it does).
 DELETE, APPEND, REPLANT, EDIT, BEFORE = 0, 1, 2, 3, 4
@@ -1829,7 +1832,27 @@ def _paragraph_value(key: str, value):
         return float(value) * 100
     if key == "shading":
         return {"backgroundColor": {"color": {"rgbColor": _rgb(value)}}}
+    if key in doc_ir.PARAGRAPH_FLAGS:
+        return bool(value)
+    if key in doc_ir.BORDER_SIDES:
+        return _border_value(value)
     return {"magnitude": float(value), "unit": "PT"}
+
+
+def _border_value(said: str) -> dict:
+    """A `ParagraphBorder` from the way the file spells one (`doc_ir._border`).
+
+    The padding is always named: a rule the source moved back against the text has
+    no `pad`, and a border written without a padding field would keep whatever gap
+    the document had — an unset field inside a border is not the API's "back to the
+    default", because the border itself is the field being written.
+    """
+    width, dash, colour, *pad = (said or "").replace(" pad ", " ").split()
+    return {"color": {"color": {"rgbColor": _rgb(colour)}},
+            "width": {"magnitude": float(width.removesuffix("pt")), "unit": "PT"},
+            "padding": {"magnitude": float(pad[0].removesuffix("pt")) if pad else 0.0,
+                        "unit": "PT"},
+            "dashStyle": doc_ir.TO_DASH_STYLE.get(dash, "SOLID")}
 
 
 def _run_requests(start: int, block: dict, reset: bool = False) -> list[dict]:

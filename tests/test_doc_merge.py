@@ -1625,6 +1625,38 @@ def test_a_measurement_the_source_dropped_is_named_with_no_value_so_it_goes():
     assert "indent" not in result["blocks"][0] and "align" not in result["blocks"][0]
 
 
+def test_a_rule_and_a_page_break_the_source_set_are_written_as_docs_spells_them():
+    base = live([para("p:s", "one two")])
+    ours = live([para("p:s", "one two", border_bottom="1.5pt dotted #cc0000 pad 5pt",
+                      page_break=True)])
+    result = doc_merge.plan(base, ours, live(base["blocks"]))
+    style = [r["updateParagraphStyle"] for r in result["requests"]
+             if "updateParagraphStyle" in r][0]["paragraphStyle"]
+    assert style["pageBreakBefore"] is True
+    assert style["borderBottom"] == {
+        "color": {"color": {"rgbColor": {"red": 204 / 255, "green": 0.0, "blue": 0.0}}},
+        "width": {"magnitude": 1.5, "unit": "PT"},
+        "padding": {"magnitude": 5.0, "unit": "PT"}, "dashStyle": "DOT"}
+    # A rule with no gap names its padding all the same: an unset field inside a
+    # border is not "back to the default" — the border itself is the field written.
+    tight = live([para("p:s", "one two", border_bottom="1pt solid #000000")])
+    again = doc_merge.plan(base, tight, live(base["blocks"]))
+    side = [r["updateParagraphStyle"] for r in again["requests"]
+            if "updateParagraphStyle" in r][0]["paragraphStyle"]["borderBottom"]
+    assert side["padding"] == {"magnitude": 0.0, "unit": "PT"}
+
+
+def test_a_rule_the_source_took_off_is_named_with_no_value_so_it_goes():
+    base = live([para("p:s", "one two", border_bottom="1pt solid #000000",
+                      keep_with_next=True)])
+    result = doc_merge.plan(base, live([para("p:s", "one two")]), live(base["blocks"]))
+    style = [r["updateParagraphStyle"] for r in result["requests"]
+             if "updateParagraphStyle" in r][0]
+    assert "borderBottom" not in style["paragraphStyle"]
+    assert "keepWithNext" not in style["paragraphStyle"]
+    assert "borderBottom" in style["fields"] and "keepWithNext" in style["fields"]
+
+
 def test_an_alignment_somebody_chose_is_still_written_with_a_value():
     """The other half: leaving `alignment` unset means "whatever the named style
     says", so a block that does say something must not be left to it. `left` is a

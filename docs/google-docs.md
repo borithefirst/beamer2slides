@@ -189,12 +189,27 @@ move a 7.5 pt a reader chose in the editor.
 
 **Paragraphs.** `text-align` as before, plus `margin-left` (`indentStart`),
 `text-indent` (`indentFirstLine`) and `line-height` (`lineSpacing`) — all three kept
-by the importer — and three attributes of ours that only `batchUpdate` can write:
-`data-shading`, `data-space-above`, `data-space-below`. The spelling matters:
-`background-color` on a `<p>` is a character highlight on its runs, not paragraph
-shading, so the CSS would be a lie; and no margin property is among what survives.
-A `<li>` carries the same, except its indents, which belong to the list preset and
-would fight `createParagraphBullets`.
+by the importer — and attributes of ours that only `batchUpdate` can write:
+`data-shading`, `data-space-above`, `data-space-below`, `data-border-top` /
+`-bottom` / `-left` / `-right`, `data-page-break` and `data-keep-with-next`. The
+spelling matters: `background-color` on a `<p>` is a character highlight on its runs,
+not paragraph shading, so the CSS would be a lie; and no margin property is among what
+survives. A `<li>` carries the same, except its indents, which belong to the list
+preset and would fight `createParagraphBullets`.
+
+A rule is spelled `"<width>pt <solid|dotted|dashed> #rrggbb"` with an optional
+` pad <n>pt` (`doc_ir.BORDER_RE`), and a rule of no width is no rule at all — that is
+how a reader who took one off reads back, and how the source says to take one off. A
+border is written as a **whole struct**, so the padding is always named even when it is
+zero (`doc_merge._border_value`): inside a `paragraphBorder` an unset field is not the
+API's "back to what you inherit", because the field being written is the border itself.
+The two flags are booleans; `data-page-break="1"` is `pageBreakBefore`, which is how a
+source says "this heading starts a page", and losing it silently was the shape of every
+other unmodelled property — a horizontal rule under a heading is exactly the kind of
+thing a person puts in and a rewrite takes away. `borderBetween` stays deliberately
+unmodelled: it is a rule *between* consecutive paragraphs that share a style, and a
+block model where one paragraph is one block, planned and written on its own, has
+nowhere honest to put half of a property that belongs to a pair.
 
 **Every named style Docs has is a kind of its own.** `NORMAL_TEXT` is a paragraph,
 `HEADING_1..6` are headings of that level, and `TITLE` and `SUBTITLE` are `title` and
@@ -319,8 +334,8 @@ difference lie on something we account for?
 to whoever hands over a document somebody else wrote; `push` too; a sync says the count
 and the commonest three, or every report would carry fifteen lines that never change.
 What a real document turns up: page-level structure (`documentStyle`, `headers`,
-`footnotes`, `positionedObjects`, `sectionBreak`, `pageBreakBefore`), `baselineOffset`,
-paragraph borders and tab stops and `keepWithNext`, a table's column widths and its
+`footnotes`, `positionedObjects`, `sectionBreak`), paragraph tab stops, `direction`,
+`borderBetween` and the widow/orphan and keep-lines flags, a table's column widths and its
 merged cells (`tableCellStyle`, which is the ragged-table limit under its real name), a
 picture's crop, angle and brightness, a list's `startNumber` — and, of the document's
 theme, a named style's **marks**: the face, the alignment and the measures are read
@@ -328,12 +343,12 @@ theme, a named style's **marks**: the face, the alignment and the measures are r
 of ours ever names it with a value.
 
 A count is not an address, though, and the question a person actually has is not
-"does this document carry borders" but "is the paragraph I am about to edit the one
-with the border on it". So the same walk is run a block at a time
+"does this document carry something nobody reads" but "is the paragraph I am about to
+edit the one carrying it". So the same walk is run a block at a time
 (`doc_ir.unmodelled_in`, one structural element; `doc_ir.unread_blocks`, every block
 of every tab, most heavily laden first), and `adopt` and `push` name the blocks by the
 words the person can see in the document: *the paragraph 'Why this matters' carries
-paragraphStyle.borderBottom; rewriting that block through the file would drop it*
+paragraphStyle.borderBetween; rewriting that block through the file would drop it*
 (`doc_sync.block_risk_notes`, eight blocks and four properties each before it says how
 many more); a sync, which names nothing, at least says how many blocks carry one, which
 is the number it can act on. A section break is left out — nothing rewrites one — and so is everything
@@ -1531,6 +1546,14 @@ clean under `--strict`, and `KNOWN` still empty.
    never written (the document's stands, and a source reorder is reported now rather
    than dropped), and the first tab's title is not carried — the file's `<title>` is the
    document's name, which *is* merged and written, through Drive.
+5. **Page-level structure** — `documentStyle`, headers, footers, footnote bodies,
+   section breaks and positioned objects are read by nobody and authored by nobody. The
+   paragraph level is now nearly closed (borders, `pageBreakBefore` and `keepWithNext`
+   went in with the rest), which leaves the page as the one place where a real document
+   carries something the file has no word for. It is a risk that is *named*
+   (`doc_ir.unmodelled`) rather than one that bites: nothing outside the blocks is ever
+   rewritten, so the margins and the headers of a synced document survive untouched —
+   what is missing is the ability to *author* them from the file.
 
 ## Alternatives considered
 

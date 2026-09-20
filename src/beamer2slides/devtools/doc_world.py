@@ -96,8 +96,8 @@ def mark(style: dict | None = None, para: dict | None = None) -> dict:
 
 
 def plain() -> dict:
-    # `measures` holds the six properties of `doc_merge.PARAGRAPH_FIELDS` by their
-    # IR key, absent meaning inherited rather than zero (`doc_ir._paragraph_measures`).
+    # `measures` holds the properties of `doc_merge.PARAGRAPH_FIELDS` by their IR
+    # key, absent meaning inherited rather than zero (`doc_ir._paragraph_measures`).
     # `align` is None when the paragraph sets none of its own, which is not the same
     # as START: it is whatever the document's named style says, and saying it out loud
     # is the only way this world can hold a theme (`THEME`).
@@ -736,11 +736,15 @@ def _ir_measure(key: str, value):
     if key == "shading":
         rgb = (value or {}).get("backgroundColor", {}).get("color", {}).get("rgbColor")
         return doc_ir._hex(rgb) if rgb else None
+    if key in doc_ir.PARAGRAPH_FLAGS:
+        return True if value else None
+    if key in doc_ir.BORDER_SIDES:
+        return doc_ir._border(value)
     return doc_ir._points(value)
 
 
 def _api_measures(measures: dict) -> dict:
-    """The six paragraph properties as `documents.get` reports them."""
+    """Every paragraph property of the dialect as `documents.get` reports it."""
     return {api: doc_merge._paragraph_value(key, measures[key])
             for key, api in doc_merge.PARAGRAPH_FIELDS
             if measures.get(key) is not None}
