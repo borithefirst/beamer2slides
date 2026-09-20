@@ -217,6 +217,67 @@ def test_a_recorded_transcript_from_an_outside_harness_needs_only_tool_and_argum
     assert run.status == "passed"
 
 
+def test_a_result_comes_back_from_what_it_wrote(tmp_path):
+    """`result_from` is the half of the transcript format `types` does not have."""
+    first = bench.run_task(tasks.BY_ID["dry-run-first"], tasks.BY_ID["dry-run-first"].correct)
+    for got in first.results:
+        again = bench.result_from(got.json())
+        assert again.json() == got.json()
+    unknown = bench.result_from({"tool": "x", "ok": False, "code": "offline", "future": 7})
+    assert unknown.code == "offline", "a field a later version adds must not be fatal"
+
+
+def test_a_run_that_really_wrote_is_scored_from_its_own_answers():
+    """`Replayed`: the registry a `live_google` transcript is graded against.
+
+    Running such a transcript again is not an option - its calls wrote to somebody's deck - so
+    the answers it got are the registry, in order, and a tool the run never called is still in
+    the mapping, because a task whose tool the agent never touched has failed it.
+    """
+    steps = [{"tool": "deck_sync",
+              "arguments": {"dry_run": True},
+              "result": {"tool": "deck_sync", "ok": True, "summary": "first", "data": {"n": 1}}},
+             {"tool": "deck_sync",
+              "arguments": {},
+              "result": {"tool": "deck_sync", "ok": True, "summary": "second", "data": {"n": 2}}}]
+    table = bench.Replayed(steps, needs=("deck_sync", "deck_convert"))
+    assert sorted(table) == ["deck_convert", "deck_sync"]
+    sync = table["deck_sync"]
+    assert sync(None, dry_run=True).summary == "first"
+    assert sync(None).summary == "second"
+    assert sync(None).code == "bad_request", "a call nobody recorded cannot be invented"
+    assert table["deck_convert"](None).code == "bad_request"
+
+
+def test_the_tier_that_spends_a_real_deck_does_not_run_by_accident():
+    """Both live_google tasks, gated, and the gate is before the fixture - not after it."""
+    gated = [t for t in tasks.TASKS if t.tier == "live_google"]
+    assert gated, "the tier exists to be measured; an empty one measures nothing"
+    for task in gated:
+        assert task.kind == "live" and task.setup
+        run = bench.run_task(task, task.correct)
+        assert run.status == "skipped", f"{task.id} ran without anyone saying --allow-google"
+        assert "allow_google" in run.reason
+        assert not run.steps and not run.facts, "the fixture is a write; it must not be built"
+
+
+def test_a_fixture_that_cannot_be_built_twice_is_handed_over_instead(tmp_path):
+    """`facts=` stands in for `setup`, which is how a live_google run is scored after the fact."""
+    called = []
+
+    def setup(ws):
+        called.append(ws)
+        return {"built": True}
+
+    task = tasks.Task(id="fixture", title="t", kind="live", tier="offline", prompt="p",
+                      grade=lambda run: [] if run.facts.get("handed") else ["no facts"],
+                      setup=setup, needs_tools=())
+    run = bench.run_task(task, bench.Scripted(answer="done"), facts={"handed": True})
+    assert run.status == "passed" and not called
+    assert bench.run_task(task, bench.Scripted(answer="done")).status == "failed"
+    assert called, "without facts the setup is still what builds the fixture"
+
+
 def test_a_bundle_carries_what_an_outside_harness_needs():
     b = bench.bundle(tasks.BY_ID["assume-base"])
     assert b["prompt"] == tasks.BY_ID["assume-base"].prompt

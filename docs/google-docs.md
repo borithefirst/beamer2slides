@@ -466,7 +466,8 @@ like this:
   (`doc_merge.on_tab`). Keys are unique per tab, as named ranges are.
 - **The tabs themselves** follow the three-way rule one level up (`doc_merge.pair_tabs`),
   with the tab id as identity: a tab the source added is created (`addDocumentTab`, under
-  its parent if it has one) and written like any tab whose base is empty; one it renamed is
+  its parent if it has one and at the index the file puts it at) and written like any tab
+  whose base is empty; one it renamed is
   renamed (`updateDocumentTabProperties`) unless the reader renamed it too; one it deleted
   goes (`deleteTab`) only if the document left it exactly as the base has it and keeps no
   wanted tab inside it. A tab the reader added is theirs and is read into the file; one
@@ -477,14 +478,34 @@ like this:
   request can delete (measured). Both are hidden from the IR the way the trailer after a
   final table is (`doc_ir._hide_trailer`: `trailer`, and `lead` in front of a first table),
   and the first block written there goes *into* them.
-- **The order of the tabs is the document's.** Blocks the source moved go back where the
-  file has them, because a move is a delete and a write — and a tab cannot be written
-  from nothing: everything in it would have to be made again, chips and equations and
-  all. So a source that reorders its sections does not reorder the tabs, and since the
-  settle then rewrites the file in the document's order, a reorder in the file used to
-  disappear twice over. `doc_merge.tab_order` says it instead, and only where the *source*
-  moved one: where the file still has the base's order, it is the reader who moved a tab
-  and the file is simply following.
+- **A tab the source adds goes where the file puts it.** `addDocumentTab` takes the index
+  the new tab is to have among its parent's tabs and pushes the later ones along, so
+  `doc_merge.tab_index` names it: after the nearest tab in front of it in the file that the
+  document already has — or that this run has just made, the creates going in file order
+  with each new id written back before the next one is placed (`tab_siblings` is the
+  document's rows to count in). The body is the document's first tab, so a tab the file
+  puts first goes to 1: nothing may stand in front of the body, and the file has no way of
+  saying it does. Without this a new tab landed at the end and the settle read that order
+  back into the file, so the source's own placing disappeared twice over — the same shape
+  of loss as a first-tab rename before `first_tab_title`.
+- **The order of the tabs that are already there is the document's.** Blocks the source
+  moved go back where the file has them, because a move is a delete and a write — and a tab
+  cannot be written from nothing: everything in it would have to be made again, chips and
+  equations and all. So a source that reorders its sections does not reorder the tabs, and
+  since the settle then rewrites the file in the document's order, a reorder in the file
+  used to disappear twice over. `doc_merge.tab_order` says it instead, and only where the
+  *source* moved one: where the file still has the base's order, it is the reader who moved
+  a tab and the file is simply following.
+
+  A tab *can* be moved, which the code used to deny: `TabProperties.index` carries no
+  "Output only" marker — unlike `nestingLevel` beside it — and
+  `updateDocumentTabProperties.fields` takes any field of `tab_properties` (discovery
+  document, revision 20260427). What is unknown is what happens to the tabs it passes:
+  `addDocumentTab` says outright that it pushes the later ones along and nothing says an
+  update does the same, so an index written blind could leave two tabs on one number or
+  shuffle a strip somebody arranged by hand. That is work destroyed on a hunch, which this
+  tool does not do, so the reorder waits for a live measurement (**owed**, below) and the
+  note says the order stands rather than that nothing could move it.
 - **The first tab names itself in a meta.** Every other tab says its title on its
   `<section>`; the first tab *is* the file's body, and the file's `<title>` is the
   **document's** name, which is a different thing — a document of one tab has both, and
@@ -834,6 +855,17 @@ happen in between:
   match the rows and columns again from their words, one side of which it just made
   blank; `rebase_tables` records the matching it already knows (`aligned`), and it is
   used for as long as both grids are the size it expects.
+- **a table the source also moved is built from the merged grid, not from the file's.**
+  A move is a delete and a table built again, and the two grids are the same table until
+  this very sync writes one: the regrid goes in the batch above, the base takes it, and
+  the round after plans the move against a file that still holds the row the reader
+  deleted. Building from the file put that row back and the report said only that the
+  table had moved (chain-8 seed 74230). `_apply_source_moves` takes the size from the
+  merged block now, and `rebase_tables` gives such a table the same `aligned` a regrid
+  gets (`_moved_table`) — its base can only be the blank grid the document shows, and a
+  blank row matches nothing by its words, so without it the round after reads the file's
+  extra line as one the source has just added and puts the row back a second way. Both
+  halves are pinned by a test that fails, differently, with either one out.
 
 **Rows and columns merge three ways, like blocks** (`doc_merge._table_lines`). Tables of
 one shape on all three sides are matched by place, as a cell always was, so a row the
@@ -1212,6 +1244,50 @@ Campaign seeds 279 and 361 at chain 4, which came out of nowhere when a new read
 changed which seeds draw what — and fail identically at the commit before it, which is the
 only thing that tells a defect the campaign has just reached from one somebody just wrote.
 
+And a range **outlives its block**, which is the mirror image of the same thing. The two
+commonest edits a person makes after typing are pressing Enter in the middle of a paragraph
+and backspacing at the start of one, and the campaign was doing neither by hand — it reached
+the split only through a dragged block, and the join not at all — so `read_split_block` and
+`read_join_blocks` now do them (84 and 73 draws in 200 rounds at chain 4). The join is the
+one that bites: Docs merges the two paragraphs keeping the first one's style, and *both*
+named ranges are now inside the one paragraph that survives. Nothing shows while it stands,
+since `apply_keys` gives the block the range that starts in it and the loser is simply not
+looked at — until a source edit rewrites the winner's words. The delete takes the winner's
+range with it, the loser is all that is left, and the block comes back under the name of the
+paragraph that was swallowed: the key the file asserts names nothing, and a second checkout
+reads one block gone and one added, though neither side dropped anything. So `apply_keys`
+now records what no block took (`ir["orphans"]`) and `doc_ir.orphan_requests` deletes those
+ranges at the settle, at the head of `name_requests` — one block, one name, and nothing
+there moves an index. Chain-4 seed 70140; breaking the delete fails 1 round of 200 at
+chain 4 and 1 of 200 at chain 8, two `identity_lost` findings each, which is thin enough
+that the mechanism is pinned by a test built by hand
+(`test_a_range_left_behind_by_a_join_does_not_steal_the_blocks_key`: join, sync, rewrite the
+survivor, sync, and the file's key is still on it). With the two ops in, 400 rounds at
+chain 4 and 300 at chain 8 under `--strict`: nothing.
+
+**The settle is one write too late**, though, and the campaign said so as soon as it could
+join. A reader joins a picture paragraph into a list item and the source rewords that item:
+the write replaces the words the *surviving* range sits on, which destroys it, while the
+picture is untouched — so the orphan is the only name left in the paragraph, the read-back
+names the block after the paragraph that was swallowed, and the key the plan meant it to
+have is nowhere for `adopt_keys` to give back. The settle then plants a range for the wrong
+key, and the file the author wrote `id=` in comes back saying something else. So the orphan
+deletes head the write batch as well (`doc_merge.requests`, where they move no index), and
+only a sync that writes nothing leaves them to the settle. Chain-8 seed 77064, shrunk to one
+source op and two reader ops; with the head of the batch taken out, 2 of 250 rounds at chain
+8 fail with 8 findings between them.
+
+And a third op would have been one too many. `read_paste_block` — the reader copies a
+paragraph and pastes it elsewhere — makes the one thing nothing else here makes: **two
+blocks that say exactly the same thing**, one named and one known to nobody, which is the
+degenerate case of identity by words, the fallback under `key_blocks`, `inherit_keys` and
+`_adopt_by_words` alike. It found nothing (124 draws in 400 rounds at chain 4, 137 in 250 at
+chain 8) and is kept for what it says while it keeps finding nothing, with
+`test_a_paragraph_the_reader_pasted_twice_over_keeps_the_originals_identity` to pin the
+behaviour it walks over. What it did do is move every draw, which is how 74230, 76101 and
+77064 were reached at all — and that is the campaign's own law again: a seed names a script,
+not a defect.
+
 The same signature, a third way: **a body may not end on a table.** The paragraph after a
 final one therefore keeps its paragraph mark however it is deleted — `_delete_range` takes
 its words and leaves an empty paragraph exactly where it stood — but the index a new block
@@ -1389,6 +1465,12 @@ second, and is the worst of the four.
   it exactly, like `_pared_down`, and one thing more: the base word has to be gone from the
   tab as well, or a base word the reader typed again somewhere new, with a stop after it,
   would be excused too.
+* And the same thing the other way about (chain-4 seed 76101). A drag that carries a full
+  stop *away* leaves `section` where the base said `section.`, which whole-token arithmetic
+  reads as a word of the reader's just as surely; the word is the base's, only the
+  punctuation is theirs, and `collide` making that word into `kestrel` is the source's
+  right. `_undressed` is `_dressed_up` mirrored, condition and all. With it out, 1 of 400
+  rounds at chain 4 cries wolf.
 
 Each has its test, each verified by breaking its mechanism. Two of the three merge defects
 were reachable only by chaining — the second needs the source to have reordered a body
@@ -1695,6 +1777,19 @@ counts them and each answers for one new tab before any of them is called a
 resurrection. With the excuse in place, putting the resurrection back into `pair_tabs`
 still fails 26 of 200 rounds at chain 4.
 
+And the forgiveness was still aimed at the wrong text. `block_resurrected` asked whether
+the *base's* words were still standing before the sync — but a base is what the document
+said one sync ago, and everything the reader's own hand has taken out of that block since
+is missing from it by right: a chip no retype carries, a word they went on to delete.
+Chain-4 seed 66195 is a paragraph the source gave a person chip, which the reader then
+dragged: the drag retyped the text, the chip stayed behind, and the settle keyed the same
+untouched paragraph from its own words again — nothing created, nothing written, and a
+`block_resurrected` for the chip's name. The question belongs on the block that carries
+the key *after* the sync: if what stands there now was standing there before it, nothing
+came back at all. A real resurrection puts back words the document did not hold, so it
+still fails — with the block delete broken on purpose, 44 of 200 rounds at chain 4, 91
+findings.
+
 ## Remaining risks
 
 1. **Pictures** — retired, see "Pictures, and the chips a request can make" above. What
@@ -1710,10 +1805,16 @@ still fails 26 of 200 rounds at chain 4.
 3. **Anchors under a human editor** — retired, see "Under a human editor" above. What
    is still unmeasured there: dragging a selection to a new place, "paste without
    formatting", and a second person editing concurrently.
-4. **Tabs** — retired, see "Document tabs" above. Still open: the order of the tabs is
-   never written (the document's stands, and a source reorder is reported now rather
-   than dropped). Both names are carried: the document's, through Drive, and the first
-   tab's own, in the `b2s-tab` meta.
+4. **Tabs** — retired, see "Document tabs" above. Still open: a tab the source *moves*
+   is not moved (a tab it adds now lands where the file puts it; the order of the ones
+   already there is the document's, and a source reorder is reported rather than
+   dropped). **Owed, and the one measurement that would close it**: does
+   `updateDocumentTabProperties` with `fields: "index"` push the tabs it passes along,
+   the way `addDocumentTab` says it does — and what does it do to a child tab's
+   siblings, and to a tab it moves under another parent? One live document, three
+   writes and three reads. Until then the reorder is refused, because an index written
+   blind rearranges a strip somebody arranged by hand. Both names are carried: the
+   document's, through Drive, and the first tab's own, in the `b2s-tab` meta.
 5. **Page-level structure** — `documentStyle`, headers, footers, footnote bodies,
    section breaks and positioned objects are read by nobody and authored by nobody. The
    paragraph level is now nearly closed (borders, `pageBreakBefore` and `keepWithNext`

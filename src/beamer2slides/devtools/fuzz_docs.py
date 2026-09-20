@@ -231,17 +231,19 @@ def sync_once(world: doc_world.World, ours: dict, base: dict,
         world.title = tabs["rename"]   # Drive's, not a request (`doc_sync.rename_document`)
     pairs = list(tabs["pairs"])
     known = {p.get("tab") for p in doc_ir.parts(theirs)} - {None}
-    made: dict = {}
+    siblings, made = doc_merge.tab_siblings(theirs), {}
     for part in tabs["create"]:
-        parent = made.get(part.get("parent"), part.get("parent"))
-        reply = _send(world, [doc_merge.add_tab_request(
-            part | {"parent": parent}, known | set(made.values()))], seen)
+        if part.get("parent") in made:
+            part["parent"] = made[part["parent"]]
+        request = doc_merge.add_tab_request(part, known | set(made.values()),
+                                            ours, siblings)
+        reply = _send(world, [request], seen)
         tab = reply["replies"][0]["addDocumentTab"]["tabProperties"]["tabId"]
         if part.get("tab"):
             made[part["tab"]] = tab
         part["tab"] = tab
-        if part.get("parent") in made:
-            part["parent"] = made[part["parent"]]
+        props = request["addDocumentTab"]["tabProperties"]
+        siblings.setdefault(props.get("parentTabId"), []).insert(props["index"], tab)
         pairs.append((tab, part, {"blocks": []}))
 
     stager, written = Stager(), []
@@ -440,6 +442,67 @@ def read_delete_block(rng, part, tab):
     block = rng.choice(blocks)
     low, high = block["span"]
     return [{"deleteContentRange": {"range": _span(low, high, tab)}}], [block.get("key")]
+
+
+def read_split_block(rng, part, tab):
+    """The reader presses Enter in the middle of a paragraph.
+
+    The commonest editing action there is, and one nothing else here draws. A named
+    range is half-open, so the newline typed inside it grows it: one `b2s:` range now
+    spans two paragraphs, and `doc_ir.apply_keys` gives the key to the first of them
+    (where the range begins, and so where the words it was given to still are). The
+    second half is a block nobody has ever seen, which the settle must key and name.
+    """
+    spots = [(b, s) for b in _paragraph_blocks(part) for s in _word_spots(b)
+             if s[1] > b["span"][0]]
+    if not spots:
+        return [], []
+    block, (_, low, _) = rng.choice(spots)
+    return [{"insertText": {"location": _at(low, tab), "text": "\n"}}], [block.get("key")]
+
+
+def read_join_blocks(rng, part, tab):
+    """The reader backspaces at the start of a paragraph, joining it to the one above.
+
+    The mirror of the split, and the shape Docs' own merge-on-delete rule is about:
+    the paragraph mark that goes is the *first* block's, the two texts become one, and
+    the survivor keeps the first block's style. Both named ranges live on — the first
+    shrinks by the mark, the second is now inside the merged paragraph — so the read
+    finds two keys starting in one block and `apply_keys` keeps the first. The second
+    key is gone from the document, which is the reader deleting that block.
+    """
+    blocks = _blocks(part)
+    pairs = [(blocks[i], blocks[i + 1]) for i in range(len(blocks) - 1)
+             if all(b.get("kind") in doc_ir.TEXT_KINDS and b.get("span")
+                    for b in blocks[i:i + 2])]
+    if not pairs:
+        return [], []
+    first, second = rng.choice(pairs)
+    mark = first["span"][1] - 1
+    return [{"deleteContentRange": {"range": _span(mark, mark + 1, tab)}}], \
+        [first.get("key"), second.get("key")]
+
+
+def read_paste_block(rng, part, tab):
+    """The reader copies a paragraph and pastes it somewhere else in the tab.
+
+    What this makes that nothing else does is **two blocks that say exactly the same
+    thing**, one of them keyed and named and the other known to nobody. Identity by
+    words is the fallback under every part of the merge — `key_blocks` at the settle,
+    `inherit_keys` on the file, `_adopt_by_words` after a write mangles a block — and
+    each of them is right only while the words pick a block out. A person pasting a
+    paragraph is the everyday way to take that away.
+    """
+    blocks = _paragraph_blocks(part)
+    if len(blocks) < 2:
+        return [], []
+    block = rng.choice(blocks)
+    target = rng.choice([b for b in blocks if b is not block])
+    text = doc_ir.runs_text(block.get("runs", []))
+    if not text.strip():
+        return [], []
+    return [{"insertText": {"location": _at(target["span"][1] - 1, tab),
+                            "text": "\n" + text}}], [block.get("key")]
 
 
 def read_bold_word(rng, part, tab):
@@ -672,6 +735,8 @@ read_drop_tab.wants_tabs = True
 READER = {
     "type_word": read_type_word, "reword": read_reword, "delete_word": read_delete_word,
     "append_block": read_append_block, "delete_block": read_delete_block,
+    "split_block": read_split_block, "join_blocks": read_join_blocks,
+    "paste_block": read_paste_block,
     "bold_word": read_bold_word, "unmark_word": read_unmark_word,
     "heading": read_heading,
     "face": read_face, "measure": read_measure,

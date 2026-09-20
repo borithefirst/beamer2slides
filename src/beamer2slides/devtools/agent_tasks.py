@@ -2120,4 +2120,12 @@ TASKS: list[Task] = [
     task_docs_adopt(),
 ]
 
+# The two that spend a real deck and a real document. They live in their own module - their
+# fixtures compile LaTeX, create files in Drive and edit them as a person would - and they are
+# gated wherever a run can start (`agent_bench.run_task`, `agent_play.start`), so being in this
+# list costs nothing until somebody says --allow-google.
+from .agent_tasks_google import task_deck, task_doc                       # noqa: E402
+
+TASKS += [task_deck(), task_doc()]
+
 BY_ID = {t.id: t for t in TASKS}

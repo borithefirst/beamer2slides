@@ -638,9 +638,30 @@ class World:
     # -- tabs
 
     def _do_addDocumentTab(self, arg: dict, request: dict) -> dict:
+        """A new tab, at the index it asks for among its parent's ("when a tab is
+        added at a given index, all subsequent tabs' indexes are incremented" — the
+        discovery document). No index means the end, which is where one lands.
+
+        `self.tabs` is flat and `read` groups it by parent keeping this order, so
+        the new tab goes in front of the sibling whose place it takes.
+
+        The refusal at root index 0 is a guard, not a measurement: the first tab is
+        the body, it cannot be deleted, and a tab in front of it would be a body
+        nothing has ever written to. `doc_merge.tab_index` never asks for it — that
+        is what this makes sure of.
+        """
         props = arg.get("tabProperties", {})
+        parent = props.get("parentTabId")
         ident = self.fresh("t.")
-        self.tabs.append(Tab(ident, props.get("title", ""), props.get("parentTabId")))
+        siblings = [t for t in self.tabs if t.parent == parent]
+        index = props.get("index")
+        if parent is None and index == 0:
+            raise Refused(request, "no tab can go in front of the first tab")
+        fresh = Tab(ident, props.get("title", ""), parent)
+        if index is None or index >= len(siblings):
+            self.tabs.append(fresh)
+        else:
+            self.tabs.insert(self.tabs.index(siblings[index]), fresh)
         return {"addDocumentTab": {"tabProperties": {"tabId": ident,
                                                      "title": props.get("title", "")}}}
 

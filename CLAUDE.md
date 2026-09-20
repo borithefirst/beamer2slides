@@ -1067,6 +1067,21 @@ same functions underneath; nothing here reimplements a journey.
   scores a transcript made in any harness (`agent_bench bundle` prints what one needs).
   `run --tier all --tag T`, `report --tag T`, `tasks`. Baseline: 20/20 correct, HARM 0; 37 wrong
   policies, all failing, 12 of them harmful.
+- **The round trip, live** (`devtools/agent_tasks_google.py`, tier `live_google`, 2 tasks): the one
+  question the other tiers cannot answer - can an agent edit a **real** Slides deck and a **real**
+  Google Doc through the text representation, the beamer `.tex` and the canonical `.html`, which is
+  the only form of either a model can read? The fixture is built in Drive and carries an edit a
+  person made in the browser (a colleague's note on the Risks slide, a reader's sentence in the
+  handbook), and the grade is what Drive holds when the run ends: the source's change arrived and
+  the person's edit is still there. No tool edits the source - the harness's own file tools do that,
+  which is the real arrangement: the eleven journeys are the bridge to Google and the `.tex`/`.html`
+  are ordinary files a model reads, changes and hands back (the Slides half recompiles, and the
+  prompt names the command). Gated before the fixture is built, since the fixture is itself a write:
+  `agent_bench run --tier live_google --allow-google`, `agent_play start <task> --allow-google`.
+  Both fixtures are reused under fixed names, so a hundred runs leave two files behind. Such a run
+  is also the one transcript that cannot be scored by replaying its calls into the tools - they went
+  to a real deck - so `agent_bench.Replayed` hands the grader the answers the run really got and
+  `run_task(facts=...)` the fixture it was played on.
 - **Playing one task as a model runs** (`devtools/agent_play.py`, `tools/agent_play.py`): `Scripted`
   and `Recorded` both want the whole run to exist before grading, and a model decides its next move
   after reading the last result - so between the two there was no door. `agent_play start <task>
@@ -1354,10 +1369,20 @@ keys, named ranges), `doc_merge.py` (pure planning), `doc_sync.py` (the commands
   a tab the document left as the base has it). A new tab's lone empty paragraph and the
   undeletable one in front of a body's first table are hidden like the trailer (`trailer`,
   `lead`) and written into; nothing can be inserted at a table's own index (measured), so a
-  block in front of a table goes in as `\ntext` at the previous paragraph's mark. The **order
-  of the tabs is the document's** - a tab cannot be written from nothing, so no request moves
-  one - and a source reorder is reported (`doc_merge.tab_order`) rather than dropped and then
-  taken out of the file by the settle. The **first tab names itself** in `<meta name="b2s-tab">`
+  block in front of a table goes in as `\ntext` at the previous paragraph's mark. A tab the
+  source **adds** goes where the file puts it (`doc_merge.tab_index` / `tab_siblings`:
+  `addDocumentTab` takes the index among the parent's tabs and pushes the later ones along,
+  so it lands after the nearest tab in front of it the document has - or that this run just
+  made, the creates going in file order; a tab the file puts first goes to 1, since the body
+  is index 0 and nothing may stand in front of it). It used to land at the end and the settle
+  read that back, so the source's placing disappeared twice over. The **order of the tabs
+  already there is the document's** - a tab cannot be written from nothing - and a source
+  reorder is reported (`doc_merge.tab_order`) rather than dropped and then taken out of the
+  file by the settle. A tab *can* be moved (`TabProperties.index` is not output-only and
+  `updateDocumentTabProperties` takes any field of it, discovery document 20260427); what is
+  unknown is what happens to the tabs it passes, and an index written blind rearranges a strip
+  somebody arranged by hand, so the reorder waits for a live measurement (docs/google-docs.md,
+  "Remaining risks" 4). The **first tab names itself** in `<meta name="b2s-tab">`
   (`doc_ir.TAB_META`, IR key `tab_title`): it is the body, so it has no `<section>` to say it
   on, and the file's `<title>` is the *document's* name, a different thing - a document of one
   tab has both. `doc_merge.first_tab_title` merges it as the other tabs' titles merge, with one
@@ -1412,7 +1437,15 @@ keys, named ranges), `doc_merge.py` (pure planning), `doc_sync.py` (the commands
   campaign's small vocabulary eventually has two `add_tab`s pick one name (chain-8 seed
   65370). A `<section>` with no `data-tab` is a tab the document never had, so `_fresh_asks`
   counts them and each answers for one new tab; with that in, the injected resurrection
-  still fails 26 of 200 rounds at chain 4.
+  still fails 26 of 200 rounds at chain 4. And the forgiveness was aimed at the wrong text:
+  it asked for the **base's** words, and a base is what the document said one sync ago, so
+  everything the reader's own hand has taken out of that block since is missing from it by
+  right - a chip no retype carries, a word they went on to delete (chain-4 seed 66195: the
+  source gave a paragraph a person chip, the reader dragged the paragraph, the chip stayed
+  behind, and the settle keyed the same untouched block from its words again). The question
+  belongs on the block carrying the key **after** the sync: if what stands there now stood
+  there before it, nothing came back. 44 of 200 rounds at chain 4 with the block delete
+  broken on purpose, 91 findings.
 - The **document's name** is the file's `<title>`, and a Google Doc's title *is* its name in
   Drive: no `batchUpdate` request writes one, so `push` named it at birth and nothing said it
   again. `doc_merge.document_title` merges it three ways (the file alone renamed it -> written;
@@ -1575,6 +1608,24 @@ keys, named ranges), `doc_merge.py` (pure planning), `doc_sync.py` (the commands
   the stale one sitting where the next block written will be, which the sync after then hands
   this key while the block that owned it is renamed from its words (chain-8 seed 41000, one
   round in 500). `doc_merge._orphan_range` names it in the delete's own batch.
+  The mirror of the stretch is a range that *outlives its block*: a reader backspacing at the
+  start of a paragraph (`read_join_blocks`, with `read_split_block` the two commonest edits
+  after typing, which the campaign reached only through a dragged block) makes Docs merge the
+  two keeping the first one's style, so both ranges are in the one paragraph left. `apply_keys`
+  gives the block the range that starts in it and the loser waits - until a source edit
+  rewrites the winner's words, whose delete takes the winner's range, and the block comes back
+  under the swallowed paragraph's name while the key the file asserts names nothing (chain-4
+  seed 70140). `apply_keys` records what no block took (`ir["orphans"]`) and
+  `doc_ir.orphan_requests` deletes those at the head of `name_requests`: one block, one name.
+  The settle is one write too late when the same sync rewrites the survivor: the write kills
+  the range those words carried while the orphan (on a picture, say) lives on, so the
+  read-back names the block after the paragraph that was swallowed and `adopt_keys` has no
+  key to give back - the deletes head the write batch too (`doc_merge.requests`; they move no
+  index, and a sync that writes nothing still leaves them to the settle). Chain-8 seed 77064,
+  2 of 250 rounds at chain 8 without it. `read_paste_block` (a pasted duplicate: two blocks
+  saying exactly the same thing, the degenerate case of identity by words) has found nothing
+  in 400+250 rounds and is kept for that, with a test pinning what it walks over; it moved
+  every draw, which is how the three defects above were reached.
   A body may not end on a table, so the paragraph after a final one keeps its mark however it
   is deleted (`_delete_range`: its words go, an empty paragraph stays where it stood) - but
   the append index came from the last block the sync *keeps*, which is then the table, and a

@@ -346,10 +346,19 @@ def score(run_dir: str | Path, *, unfinished: bool = False) -> tuple[bench.Run, 
                         f"so far), and the answer is half of what every task grades. Finish with "
                         f"`{CLI} answer \"...\" --run-dir {folder}`, or pass --unfinished to grade "
                         f"the run as it stands.")
-    # `ctx=None`: `run_task` makes a fresh offline workspace, which is what `--policy recorded:DIR`
-    # gives a transcript too. A live task's fixture is therefore built again and its tools run
-    # again - the grade is of the transcript, not of the folder this run happened to leave behind.
-    run = bench.run_task(task, bench.Recorded(record=session.record()))
+    if task.kind == "live" and task.tier == GATED_TIER:
+        # The one run that cannot be scored by running it again: its calls wrote to a real deck or
+        # document. So the transcript's own answers are the registry, the fixture is the one this
+        # run was played against, and the grader looks at what is in Drive now.
+        run = bench.run_task(task, bench.Recorded(record=session.record()), ctx=_context(session),
+                             tools=bench.Replayed(session.steps, task.needs_tools),
+                             facts=session.play.get("facts") or {})
+    else:
+        # `ctx=None`: `run_task` makes a fresh offline workspace, which is what `--policy
+        # recorded:DIR` gives a transcript too. A live task's fixture is therefore built again and
+        # its tools run again - the grade is of the transcript, not of the folder this run
+        # happened to leave behind.
+        run = bench.run_task(task, bench.Recorded(record=session.record()))
     verdict = {"task": task.id, "title": task.title, "kind": task.kind, "tier": task.tier,
                "status": run.status, "reason": run.reason, "failures": run.failures,
                "harm": run.harm, "answered": session.finished,

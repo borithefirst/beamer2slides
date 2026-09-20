@@ -157,7 +157,9 @@ def joined_differently(token: str, after: Counter, was: Counter) -> bool:
     is a token of the base with one of its words taken out, nothing else.
     """
     pieces = _split(token)
-    if len(pieces) < 2 and not _pared_down(token, was) and not _dressed_up(token, after, was):
+    if len(pieces) < 2 and not _pared_down(token, was) \
+            and not _dressed_up(token, after, was) \
+            and not _undressed(token, after, was):
         return False
     base = {piece for other in was for piece in _split(other)}
     there = {piece for other in after for piece in _split(other)}
@@ -201,6 +203,32 @@ def _dressed_up(token: str, after: Counter, was: Counter) -> bool:
             continue
         for rest in (token[:-len(other)] if token.endswith(other) else None,
                      token[len(other):] if token.startswith(other) else None):
+            if rest and not PIECE.search(rest):
+                return True
+    return False
+
+
+def _undressed(token: str, after: Counter, was: Counter) -> bool:
+    """Whether this token is a token of the base with its punctuation taken off,
+    whose word the source then rewrote.
+
+    `_dressed_up` the other way about. A reader whose drag carries a full stop away
+    leaves `section` where the base said `section.`, and `theirs - was` compares whole
+    tokens, so the bare word reads as one they typed. It is not one: the word is the
+    base's, only the punctuation is theirs, and the source is entitled to rewrite the
+    word — which is what happened at chain-4 seed 76101, where the drag took the stop
+    off `Second section.`, `collide` made the word into `kestrel`, and the merge said
+    `Second kestrel`. Both edits arrived.
+
+    Exact, and with `_dressed_up`'s one condition: the base token it undresses has to
+    be gone from the tab too, or a base word the reader typed again somewhere new
+    would be excused along with it.
+    """
+    for other in was:
+        if after.get(other):
+            continue
+        for rest in (other[:-len(token)] if other.endswith(token) else None,
+                     other[len(token):] if other.startswith(token) else None):
             if rest and not PIECE.search(rest):
                 return True
     return False
@@ -648,12 +676,13 @@ def _tab_findings(was: dict | None, now: dict, then: dict | None, said: str,
         # *moves* a block deletes its text and types it again, which destroys the
         # named range, and the settle then keys the block from its own words as
         # before. So the question is asked of the words, not of the key — and of the
-        # words rather than the text, because a moved block that held an equation
-        # comes down without it (no request makes one), so the two never read alike.
-        # A block whose every word still stands somewhere is not one that was deleted
-        # and put back (`stands_elsewhere`, which is also what forgives the gluing a
-        # drag does to the words it carries).
-        if stands_elsewhere(text_of(was_block), before_text):
+        # block that carries the key *after* the sync, not of the one the base
+        # remembers: if what stands there now was standing there before, nothing came
+        # back at all. Asked of the base's text instead, everything the reader's own
+        # hand took out of that block on the way read as a resurrection — a chip no
+        # retype carries, a word they went on to delete (chain-4 seed 66195, where a
+        # dragged paragraph came down without the chip the source had put in it).
+        if stands_elsewhere(text_of(new[key]), before_text):
             continue
         if _named(said, key, text_of(was_block)[:40]):
             continue

@@ -1287,6 +1287,10 @@ def apply_keys(ir: dict, named_ranges: dict) -> dict:
     document carries it as a range, and the two are compared by the merge. A range
     whose paragraph was split shows up twice; the first block wins, which is where
     the range begins and so where the text the key was given to still is.
+
+    What no block takes is left on the IR as `orphans`, for `name_requests` to
+    delete — see `orphan_requests` for why a range outliving its block is a key
+    waiting to be stolen.
     """
     starts = []
     for name, entry in named_ranges.items():
@@ -1309,6 +1313,12 @@ def apply_keys(ir: dict, named_ranges: dict) -> dict:
                 block["range"] = [start, end]
                 taken.add(key)
                 break
+    held = {block.get("rangeId") for block in ir["blocks"]}
+    orphans = [range_id for _, _, _, range_id in starts if range_id not in held]
+    if orphans:
+        ir["orphans"] = orphans
+    else:
+        ir.pop("orphans", None)
     return ir
 
 
@@ -1375,10 +1385,32 @@ def replant_requests(ir: dict) -> list[dict]:
     return out
 
 
+def orphan_requests(ir: dict) -> list[dict]:
+    """`deleteNamedRange` for every `b2s:` range no block is known by.
+
+    A range outlives the block it named, and a range with nothing of its own is a
+    key waiting to be stolen. The commonest way to make one is the commonest edit
+    after typing: a reader backspaces at the start of a paragraph, Docs merges it
+    into the one above keeping the first one's style, and *both* ranges are now
+    inside the one paragraph that survives. `apply_keys` keeps the first, the
+    document reads right, and nothing is wrong — until a source edit rewrites the
+    words the winner covers. Deleting them takes its range with them, the loser is
+    all that is left, and the block is suddenly known by the name of the paragraph
+    that was swallowed: the key the file asserts names nothing, and a checkout that
+    has not settled yet reads one block gone and one added (chain-4 seed 70140).
+
+    The mirror of `replant_requests`' stretched range, and the same cure: one block,
+    one name. Nothing here moves an index, so these can head any batch.
+    """
+    return [{"deleteNamedRange": {"namedRangeId": range_id}}
+            for range_id in ir.get("orphans", [])]
+
+
 def name_requests(ir: dict) -> list[dict]:
     """`createNamedRange` for every keyed block the document does not name yet — and
-    again for one whose range drifted (`replant_requests`)."""
-    out = replant_requests(ir)
+    again for one whose range drifted (`replant_requests`) or that no block is known
+    by any more (`orphan_requests`)."""
+    out = orphan_requests(ir) + replant_requests(ir)
     for block in ir["blocks"]:
         planted = anchor_range(block)
         if not planted or block.get("rangeId"):
