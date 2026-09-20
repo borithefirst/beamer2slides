@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor
 from difflib import SequenceMatcher
 from pathlib import Path
 
-from beamer2slides import merge
+from beamer2slides import adopt_sync, merge
 from beamer2slides.paths import CHECKOUT as ROOT  # live rounds build tests/decks/sync from the checkout
 
 from . import fuzz_world as W
@@ -659,16 +659,30 @@ def _sync_step(seed: int, step: int, doc: dict, base: dict, live: dict, tmp: Pat
         applied_src.append(f"{name}: {done}" if done else f"{name}: (not applicable)")
     ours = W.build_ours(doc2, base, tmp)
     mplan = merge.plan_merge(base, ours, live)
+    # `--backup auto` keeps a .pptx of the deck before sync's first write, so the campaign asks what
+    # the other refusals do; the no-way-back one has its own test (tests/test_adopt_sync.py).
+    refused = adopt_sync.problems(base, mplan, live, {"drive": {"presentationId": "way-back"}})
+    if refused:
+        # A sync into an adopted deck this one may not write (adopt_sync.problems). Nothing is sent,
+        # so the deck is exactly as the person left it - that is the whole answer, and the oracle
+        # has nothing to judge. The base does not move either: the next step plans from this one.
+        return {"seed": seed, "step": step, "source_ops": list(source_ops), "deck_ops": list(deck_ops),
+                "source": applied_src, "deck": applied_deck, "findings": [], "failures": [],
+                "refused": [p["reason"] for p in refused], "doc": doc2,
+                "message": adopt_sync.refusal_message(base["presentationId"], tmp, "new.pdf", refused),
+                "state": {"base": base, "before": live, "after": live, "report": mplan["report"],
+                          "ours": ours, "next_base": None, "doc": doc2, "work": tmp}}
     tok = f"{step}zz"  # a token per run, like sync's
     after = W.apply_plan(base, ours, live, mplan, tok)
     report = mplan["report"]
     findings = (loss_oracle.check(base, live, after, report, ours) + _writable(ours, mplan)
-                + _movable(base, live, mplan) + _stacked(base, live, after, ours, mplan, tok))
+                + _movable(base, live, mplan) + _stacked(base, live, after, ours, mplan, tok)
+                + _doubled(base, live, after, mplan))
     next_base = W.rebase(base, ours, after, mplan, tok) if rebase else None
     findings += _settled(doc2, next_base, after, tmp, reordered or "move_slide" in source_ops)
     return {"seed": seed, "step": step, "source_ops": list(source_ops), "deck_ops": list(deck_ops),
             "source": applied_src, "deck": applied_deck, "findings": findings,
-            "failures": loss_oracle.failures(findings), "doc": doc2,
+            "failures": loss_oracle.failures(findings), "doc": doc2, "refused": [],
             "state": {"base": base, "before": live, "after": after, "report": report, "ours": ours,
                       "next_base": next_base, "doc": doc2, "work": tmp}}
 
@@ -765,6 +779,38 @@ def _writable(ours: dict, mplan: dict) -> list[dict]:
                 out.append(loss_oracle.finding("unwritable_text", "report",
                                                f"the requests write {written!r}, not the merged {merged!r}",
                                                slide=p["key"], element=u["key"]))
+    return out
+
+
+def _doubled(base: dict, live: dict, after: dict, mplan: dict) -> list[dict]:
+    """An adopted deck's element the base could not pair with an object of the deck must not be
+    written (`adopt_sync.problems`, reason "unpaired").
+
+    The loss oracle cannot see this one, and that is the point of having it. Sync deletes a
+    recreated unit's *old* objects, which it finds through the base - and an unpaired element names
+    none, so nothing is deleted and nothing is lost. What happens instead is that the person's own
+    box stays where it was and a second one, saying what the source now says, is created on top of
+    it. No loss, a wrecked slide: the same shape of problem as a label that moved."""
+    if base.get("origin") != adopt_sync.ORIGIN:
+        return []
+    out = []
+    before = {o for s in live["slides"] for o in s["objects"]}
+    for p in mplan["slides"]:
+        if p["action"] != "update" or p.get("base") is None:
+            continue
+        b = base["slides"][p["base"]]
+        blind = {e["key"] for e in b["elements"] if not e.get("objects")}
+        made = [s for s in after["slides"] if s["objectId"] == p.get("objectId")]
+        fresh = {o for s in made for o in s["objects"] if o not in before}
+        for u in p["units"]:
+            if u["action"] in ("recreate", "move") and fresh and blind & set(u.get("base_members") or []):
+                # `report`, not `loss`: the sync reported the source change as applied, and what the
+                # slide shows is both versions of it.
+                out.append(loss_oracle.finding(
+                    "adopt_double", "report",
+                    f"unit {u['key']} was {u['action']}d although {sorted(blind & set(u['base_members']))} "
+                    f"is tied to no object of the deck: the person's own object is still there",
+                    slide=b["key"], element=u["key"]))
     return out
 
 
@@ -941,18 +987,21 @@ def _draw(rng: random.Random, deck_ops, source_ops):
 
 
 def offline_chain(seed: int, chain: int = 1, ops=None, work: Path | None = None,
-                  shape: str = "converted") -> dict:
+                  shape: str = "converted", first_sync: bool = False) -> dict:
     """`chain` edit+sync steps on one deck. Each sync starts from the base the previous one wrote
     (`fuzz_world.rebase`), which is where a sync undoing what the last one merged would show.
     `ops`: per step `{"deck": [...], "source": [...]}` (default: drawn from the seed).
     `shape`: which world the deck is drawn from - "converted" (a talk this converter made) or
-    "adopt" (a foreign deck `adopt` took over: `fuzz_world.make_adopt_doc`)."""
+    "adopt" (a foreign deck `adopt` took over: `fuzz_world.make_adopt_doc`).
+    `first_sync`: start from the base `adopt` records rather than the one `convert` writes
+    (`fuzz_world.build_adopt_base`) - nothing has ever been written to this deck, its objects are a
+    person's own, and some of them are not paired with the source at all."""
     rng = random.Random(seed)
     tmp = work or Path(tempfile.mkdtemp(prefix="b2s-fuzz-"))
     tmp.mkdir(parents=True, exist_ok=True)
     try:
         doc = W.make(shape, rng, tmp)
-        base = W.build_base(doc, tmp)
+        base = W.build_adopt_base(doc, tmp, rng) if first_sync else W.build_base(doc, tmp)
         live = W.live_of(base)
         steps = []
         reordered = False  # a frame moved in the source, in this step or an earlier one
@@ -967,8 +1016,9 @@ def offline_chain(seed: int, chain: int = 1, ops=None, work: Path | None = None,
             steps.append(record)
             doc, live = record.pop("doc"), record["state"]["after"]
             base = record["state"]["next_base"] or base
-        return {"seed": seed, "chain": chain, "shape": shape, "steps": steps,
+        return {"seed": seed, "chain": chain, "shape": shape, "steps": steps, "first_sync": first_sync,
                 "ops": [{"deck": s["deck_ops"], "source": s["source_ops"]} for s in steps],
+                "refused": [r for s in steps for r in s.get("refused") or []],
                 "failures": [f for s in steps for f in s["failures"]]}
     finally:
         if work is None:
@@ -976,12 +1026,14 @@ def offline_chain(seed: int, chain: int = 1, ops=None, work: Path | None = None,
 
 
 def offline_round(seed: int, source_ops=None, deck_ops=None, work: Path | None = None,
-                  shape: str = "converted") -> dict:
+                  shape: str = "converted", first_sync: bool = False) -> dict:
     """One offline round. `source_ops` / `deck_ops`: op names (default: drawn from the seed)."""
-    return offline_chain(seed, 1, [{"deck": deck_ops, "source": source_ops}], work, shape)["steps"][0]
+    return offline_chain(seed, 1, [{"deck": deck_ops, "source": source_ops}], work, shape,
+                         first_sync)["steps"][0]
 
 
-def shrink_offline(result: dict, limit: int = 200, shape: str = "converted") -> dict:
+def shrink_offline(result: dict, limit: int = 200, shape: str = "converted",
+                   first_sync: bool = False) -> dict:
     """Drop edits one at a time while the round keeps failing."""
     best = result
     tries = 0
@@ -994,7 +1046,7 @@ def shrink_offline(result: dict, limit: int = 200, shape: str = "converted") -> 
                     break
                 ops = best[field][:i] + best[field][i + 1:]
                 tries += 1
-                candidate = offline_round(best["seed"], shape=shape,
+                candidate = offline_round(best["seed"], shape=shape, first_sync=first_sync,
                                           **{"source_ops": best["source_ops"], "deck_ops": best["deck_ops"],
                                              field: ops})
                 if candidate["failures"]:
@@ -1006,7 +1058,7 @@ def shrink_offline(result: dict, limit: int = 200, shape: str = "converted") -> 
 def shrink_chain(result: dict, limit: int = 300) -> dict:
     """Drop edits one at a time, in the first failing step and the ones before it."""
     failing = next(i for i, s in enumerate(result["steps"]) if s["failures"])
-    shape = result.get("shape", "converted")
+    shape, first_sync = result.get("shape", "converted"), result.get("first_sync", False)
     best = {**result, "ops": result["ops"][:failing + 1], "chain": failing + 1}
     tries = 0
     for step in range(failing, -1, -1):
@@ -1020,7 +1072,8 @@ def shrink_chain(result: dict, limit: int = 300) -> dict:
                     if step == failing and field == "deck" and not ops[step][field]:
                         continue
                     tries += 1
-                    candidate = offline_chain(best["seed"], best["chain"], ops, shape=shape)
+                    candidate = offline_chain(best["seed"], best["chain"], ops, shape=shape,
+                                              first_sync=first_sync)
                     if candidate["steps"][-1]["failures"]:
                         best, changed = candidate, True
                         break
@@ -1032,16 +1085,21 @@ def describe_chain(result: dict) -> str:
     for s in result["steps"]:
         lines.append(f"  step {s['step']}: deck:   " + "; ".join(s["deck"]))
         lines.append(f"          source: " + "; ".join(s["source"]))
+        if s.get("refused"):
+            lines.append("          refused: " + ", ".join(s["refused"]) + " (nothing written)")
         if s["failures"]:
             lines.append(loss_oracle.describe(s["failures"]))
     return "\n".join(lines)
 
 
 def run_offline(rounds: int, seed0: int, shrink: bool, quiet: bool = False, chain: int = 1,
-                shape: str = "converted") -> list[dict]:
+                shape: str = "converted", first_sync: bool = False) -> list[dict]:
     bad = []
+    refused: dict[str, int] = {}
     for seed in range(seed0, seed0 + rounds):
-        result = offline_chain(seed, chain, shape=shape)
+        result = offline_chain(seed, chain, shape=shape, first_sync=first_sync)
+        for reason in result.get("refused") or []:
+            refused[reason] = refused.get(reason, 0) + 1
         if result["failures"]:
             bad.append(shrink_chain(result) if shrink else result)
             if not quiet:
@@ -1049,6 +1107,11 @@ def run_offline(rounds: int, seed0: int, shrink: bool, quiet: bool = False, chai
                 print(describe_chain(bad[-1]))
         elif not quiet and (seed - seed0) % 50 == 49:
             print(f"  ... {seed - seed0 + 1} rounds")
+    if refused and not quiet:
+        # Not failures: a sync that refused wrote nothing, so there was nothing for the oracle to
+        # judge. Counting them is how one sees whether the refusals are so broad that the campaign
+        # stopped exercising the merge at all.
+        print("  refused: " + ", ".join(f"{k} {v}" for k, v in sorted(refused.items())))
     return bad
 
 
@@ -1463,18 +1526,27 @@ def main() -> int:
     ap.add_argument("--chain", type=int, default=1, help="how many edit+sync steps per round")
     ap.add_argument("--shape", choices=sorted(W.SHAPES), default="converted",
                     help="offline: which world the deck is drawn from (adopt = a foreign deck adopt took over)")
+    ap.add_argument("--first-sync", action="store_true",
+                    help="offline: the base is the one `adopt` recorded, not the one `convert` wrote - the "
+                         "deck has never been written to, its objects are a person's, and some of them are "
+                         "not paired with the source (implies --shape adopt)")
     ap.add_argument("--keep-decks", action="store_true", help="live: don't delete the decks of passing rounds")
     ap.add_argument("--out", type=Path, default=Path(os.environ.get("B2S_FUZZ_OUT", ROOT / "out" / "sync-fuzz")))
     args = ap.parse_args()
 
+    shape = "adopt" if args.first_sync else args.shape
     if args.mode == "offline":
         if args.replay is not None:
-            result = offline_chain(args.replay, args.chain, shape=args.shape)
+            result = offline_chain(args.replay, args.chain, shape=shape, first_sync=args.first_sync)
             print(describe_chain(result))
+            for s in result["steps"]:
+                if s.get("message"):
+                    print(s["message"])
             print(loss_oracle.describe([f for s in result["steps"] for f in s["findings"]]) or "nothing lost")
             return 1 if result["failures"] else 0
         started = time.monotonic()
-        bad = run_offline(args.rounds, args.seed, not args.no_shrink, chain=args.chain, shape=args.shape)
+        bad = run_offline(args.rounds, args.seed, not args.no_shrink, chain=args.chain, shape=shape,
+                          first_sync=args.first_sync)
         print(f"{args.rounds - len(bad)}/{args.rounds} offline rounds clean in {time.monotonic() - started:.1f} s")
         return 1 if bad else 0
 
