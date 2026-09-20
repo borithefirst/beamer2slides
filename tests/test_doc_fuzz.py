@@ -57,7 +57,9 @@ CHAINED = (0, 1, 2, 3, 4, 5)
 # whose named range outlived the delete that borrowed the mark before it. Then 63138
 # (chain 4) a row the reader deleted put back by the round after the regrid, and 64166
 # (chain 8) the oracle calling a dragged block that held a chip a resurrection, and 65370
-# (chain 8) two `add_tab` draws picking one name, the second read as the first coming back.
+# (chain 8) two `add_tab` draws picking one name, the second read as the first coming back,
+# and 70140 (chain 4) a named range left in the paragraph a join swallowed, which stole the
+# survivor's key the moment the source rewrote its words.
 # A seed names a *script*, not a defect: growing `fuzz_docs.PARA_MARKS` or
 # `READER_MEASURES` (paragraph borders, `pageBreakBefore` and `keepWithNext` went in with
 # the dialect) makes every draw come out different, so these rounds no longer replay the
@@ -68,7 +70,7 @@ REGRESSIONS = ((60, 1), (181, 1), (309, 4), (1031, 8), (1147, 8),
                (5099, 8), (5130, 8), (5167, 8),
                (970228, 6), (970528, 6), (970711, 6), (980193, 6),
                (912452, 6), (993608, 6), (994410, 8), (994424, 8), (41000, 8),
-               (63138, 4), (64166, 8), (65370, 8), (66195, 4))
+               (63138, 4), (64166, 8), (65370, 8), (66195, 4), (70140, 4))
 
 
 def _round(seed: int, chain: int, shape: str | None = None) -> None:
@@ -895,6 +897,35 @@ def test_a_tab_the_reader_added_is_read_into_the_file_and_left_alone():
     assert doc_merge.block_text(added[0]["blocks"][0]) == "A thought of my own."
     # Keyed and named: the second sync finds it again rather than reading it as new.
     assert added[0]["blocks"][0]["key"]
+    again, _, _ = fuzz_docs.sync_once(world, ours, base)
+    assert again["requests"] == 0
+
+
+def test_a_range_left_behind_by_a_join_does_not_steal_the_blocks_key():
+    """The reader backspaces at the start of a paragraph and Docs merges it into the
+    one above. Both named ranges are now inside the paragraph that survives, and
+    `apply_keys` keeps the first — nothing is wrong, and nothing says anything is,
+    until the source rewrites the words the winner covers: the delete takes the
+    winner's range with it, the loser is all that is left, and the block comes back
+    under the name of the paragraph that was swallowed. The file's key then names
+    nothing (chain-4 seed 70140, 1 of 200 rounds at chain 4 and at chain 8, which is
+    why this test exists)."""
+    world, ours, base = _build([_p("a", "Results here."), _p("b", "What we found.")])
+    first, second = (b["key"] for b in ours["blocks"])
+    mark = ours["blocks"][0]["span"][1] - 1
+    world.apply([{"deleteContentRange": {
+        "range": {"startIndex": mark, "endIndex": mark + 1}}}])
+    report, ours, base = fuzz_docs.sync_once(world, ours, base)
+    assert [b["key"] for b in ours["blocks"]] == [first]
+    assert doc_merge.block_text(ours["blocks"][0]) == "Results here.What we found."
+    # The swallowed block's range is gone from the document, not merely unread.
+    assert [r["name"] for r in world.tabs[0].named] == [doc_ir.KEY_PREFIX + first]
+    assert second not in [r["name"][len(doc_ir.KEY_PREFIX):] for r in world.tabs[0].named]
+    # And now the source rewrites the very words the surviving range sits on.
+    ours["blocks"][0]["runs"] = [{"text": "Rewritten entirely."}]
+    report, ours, base = fuzz_docs.sync_once(world, ours, base)
+    assert [b["key"] for b in ours["blocks"]] == [first]
+    assert doc_merge.block_text(ours["blocks"][0]) == "Rewritten entirely."
     again, _, _ = fuzz_docs.sync_once(world, ours, base)
     assert again["requests"] == 0
 

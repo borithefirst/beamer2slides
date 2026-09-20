@@ -1233,6 +1233,27 @@ Campaign seeds 279 and 361 at chain 4, which came out of nowhere when a new read
 changed which seeds draw what — and fail identically at the commit before it, which is the
 only thing that tells a defect the campaign has just reached from one somebody just wrote.
 
+And a range **outlives its block**, which is the mirror image of the same thing. The two
+commonest edits a person makes after typing are pressing Enter in the middle of a paragraph
+and backspacing at the start of one, and the campaign was doing neither by hand — it reached
+the split only through a dragged block, and the join not at all — so `read_split_block` and
+`read_join_blocks` now do them (84 and 73 draws in 200 rounds at chain 4). The join is the
+one that bites: Docs merges the two paragraphs keeping the first one's style, and *both*
+named ranges are now inside the one paragraph that survives. Nothing shows while it stands,
+since `apply_keys` gives the block the range that starts in it and the loser is simply not
+looked at — until a source edit rewrites the winner's words. The delete takes the winner's
+range with it, the loser is all that is left, and the block comes back under the name of the
+paragraph that was swallowed: the key the file asserts names nothing, and a second checkout
+reads one block gone and one added, though neither side dropped anything. So `apply_keys`
+now records what no block took (`ir["orphans"]`) and `doc_ir.orphan_requests` deletes those
+ranges at the settle, at the head of `name_requests` — one block, one name, and nothing
+there moves an index. Chain-4 seed 70140; breaking the delete fails 1 round of 200 at
+chain 4 and 1 of 200 at chain 8, two `identity_lost` findings each, which is thin enough
+that the mechanism is pinned by a test built by hand
+(`test_a_range_left_behind_by_a_join_does_not_steal_the_blocks_key`: join, sync, rewrite the
+survivor, sync, and the file's key is still on it). With the two ops in, 400 rounds at
+chain 4 and 300 at chain 8 under `--strict`: nothing.
+
 The same signature, a third way: **a body may not end on a table.** The paragraph after a
 final one therefore keeps its paragraph mark however it is deleted — `_delete_range` takes
 its words and leaves an empty paragraph exactly where it stood — but the index a new block

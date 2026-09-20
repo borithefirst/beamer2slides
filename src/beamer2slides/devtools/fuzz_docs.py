@@ -444,6 +444,45 @@ def read_delete_block(rng, part, tab):
     return [{"deleteContentRange": {"range": _span(low, high, tab)}}], [block.get("key")]
 
 
+def read_split_block(rng, part, tab):
+    """The reader presses Enter in the middle of a paragraph.
+
+    The commonest editing action there is, and one nothing else here draws. A named
+    range is half-open, so the newline typed inside it grows it: one `b2s:` range now
+    spans two paragraphs, and `doc_ir.apply_keys` gives the key to the first of them
+    (where the range begins, and so where the words it was given to still are). The
+    second half is a block nobody has ever seen, which the settle must key and name.
+    """
+    spots = [(b, s) for b in _paragraph_blocks(part) for s in _word_spots(b)
+             if s[1] > b["span"][0]]
+    if not spots:
+        return [], []
+    block, (_, low, _) = rng.choice(spots)
+    return [{"insertText": {"location": _at(low, tab), "text": "\n"}}], [block.get("key")]
+
+
+def read_join_blocks(rng, part, tab):
+    """The reader backspaces at the start of a paragraph, joining it to the one above.
+
+    The mirror of the split, and the shape Docs' own merge-on-delete rule is about:
+    the paragraph mark that goes is the *first* block's, the two texts become one, and
+    the survivor keeps the first block's style. Both named ranges live on — the first
+    shrinks by the mark, the second is now inside the merged paragraph — so the read
+    finds two keys starting in one block and `apply_keys` keeps the first. The second
+    key is gone from the document, which is the reader deleting that block.
+    """
+    blocks = _blocks(part)
+    pairs = [(blocks[i], blocks[i + 1]) for i in range(len(blocks) - 1)
+             if all(b.get("kind") in doc_ir.TEXT_KINDS and b.get("span")
+                    for b in blocks[i:i + 2])]
+    if not pairs:
+        return [], []
+    first, second = rng.choice(pairs)
+    mark = first["span"][1] - 1
+    return [{"deleteContentRange": {"range": _span(mark, mark + 1, tab)}}], \
+        [first.get("key"), second.get("key")]
+
+
 def read_bold_word(rng, part, tab):
     spots = [(b, s) for b in _paragraph_blocks(part) for s in _word_spots(b)]
     if not spots:
@@ -674,6 +713,7 @@ read_drop_tab.wants_tabs = True
 READER = {
     "type_word": read_type_word, "reword": read_reword, "delete_word": read_delete_word,
     "append_block": read_append_block, "delete_block": read_delete_block,
+    "split_block": read_split_block, "join_blocks": read_join_blocks,
     "bold_word": read_bold_word, "unmark_word": read_unmark_word,
     "heading": read_heading,
     "face": read_face, "measure": read_measure,

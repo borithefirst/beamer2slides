@@ -1529,6 +1529,15 @@ keys, named ranges), `doc_merge.py` (pure planning), `doc_sync.py` (the commands
   the stale one sitting where the next block written will be, which the sync after then hands
   this key while the block that owned it is renamed from its words (chain-8 seed 41000, one
   round in 500). `doc_merge._orphan_range` names it in the delete's own batch.
+  The mirror of the stretch is a range that *outlives its block*: a reader backspacing at the
+  start of a paragraph (`read_join_blocks`, with `read_split_block` the two commonest edits
+  after typing, which the campaign reached only through a dragged block) makes Docs merge the
+  two keeping the first one's style, so both ranges are in the one paragraph left. `apply_keys`
+  gives the block the range that starts in it and the loser waits - until a source edit
+  rewrites the winner's words, whose delete takes the winner's range, and the block comes back
+  under the swallowed paragraph's name while the key the file asserts names nothing (chain-4
+  seed 70140). `apply_keys` records what no block took (`ir["orphans"]`) and
+  `doc_ir.orphan_requests` deletes those at the head of `name_requests`: one block, one name.
   A body may not end on a table, so the paragraph after a final one keeps its mark however it
   is deleted (`_delete_range`: its words go, an empty paragraph stays where it stood) - but
   the append index came from the last block the sync *keeps*, which is then the table, and a
