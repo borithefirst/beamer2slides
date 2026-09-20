@@ -559,3 +559,38 @@ def test_a_document_edit_inside_a_cell_is_reported_as_the_documents():
     assert result["requests"] == []
     assert doc_sync._summary(result)[1] == ["`t:one` says what the document says: "
                                             "'Region | Sales | North | 1500'"]
+
+
+# ------------------------------------------- what the document has and the file cannot
+
+def _unmodelled_doc(**style) -> dict:
+    return {"documentId": "d", "body": {"content": [{"paragraph": {
+        "elements": [], "paragraphStyle": {"namedStyleType": "NORMAL_TEXT"} | style}}]}}
+
+
+def test_a_sync_says_how_much_of_the_document_the_file_cannot_say():
+    """One line, not fifteen: a sync report that repeats the whole list every run is
+    a report nobody reads twice."""
+    doc = _unmodelled_doc(keepWithNext=True, direction="LEFT_TO_RIGHT",
+                          pageBreakBefore=True, borderLeft={"width": {"magnitude": 1}})
+    notes = doc_sync.unmodelled_notes(doc)
+    assert len(notes) == 1
+    assert notes[0].startswith("4 kinds of document property this file cannot say "
+                               "(structural.paragraph.paragraphStyle.borderLeft, ")
+    assert "and 1 more" in notes[0]
+
+
+def test_adopt_names_every_one_of_them():
+    """A document somebody else wrote is handed over once, and that is the moment to
+    say what will not survive being written again."""
+    doc = _unmodelled_doc(keepWithNext=True, pageBreakBefore=True)
+    notes = doc_sync.unmodelled_notes(doc, full=True)
+    assert notes == [
+        "the document has 1 × structural.paragraph.paragraphStyle.keepWithNext "
+        "(e.g. True), which the canonical file cannot say",
+        "the document has 1 × structural.paragraph.paragraphStyle.pageBreakBefore "
+        "(e.g. True), which the canonical file cannot say"]
+
+
+def test_a_document_the_dialect_covers_is_said_nothing_about():
+    assert doc_sync.unmodelled_notes(_unmodelled_doc(alignment="CENTER"), full=True) == []

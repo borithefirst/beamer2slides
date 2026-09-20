@@ -230,6 +230,36 @@ restyle, something a reader set in the browser and nothing on our side ever knew
 about. That is why `weightedFontFamily` stayed out while `<code>` was all the file
 could say, and why it, `fontSize` and `smallCaps` are in now.
 
+**What the dialect does not model, it names** (`doc_ir.unmodelled`). The convergence
+check — a second sync writes 0 requests — is measured on the IR, so it proves the IR
+round-trips and says *exactly nothing* about a property the IR never looked at. That is
+the shape of the blind spot: a field no reader reads survives an ordinary edit, because
+a request names the fields it writes, and goes without a word when the block holding it
+is written again from nothing. So `_NODES` is the reader's own map — what it takes the
+value of, and what it descends into — and `unmodelled` walks a raw `documents.get`
+answer against it and reports, by path, everything left over with a count and an
+example. It is the same question `checks.lost_ink` asks of a converted slide: does every
+difference lie on something we account for?
+
+`adopt` prints each one (`doc_sync.unmodelled_notes(full=True)`), which is what is owed
+to whoever hands over a document somebody else wrote; `push` too; a sync says the count
+and the commonest three, or every report would carry fifteen lines that never change.
+What a real document turns up: page-level structure (`documentStyle`, `headers`,
+`footnotes`, `positionedObjects`, `sectionBreak`, `pageBreakBefore`), `baselineOffset`,
+paragraph borders and tab stops and `keepWithNext`, a table's column widths and its
+merged cells (`tableCellStyle`, which is the ragged-table limit under its real name), a
+picture's crop, angle and brightness, a list's `startNumber` — and, of the document's
+theme, a named style's **marks and alignment**: the face and the measures are read
+(`_named_defaults`), a heading's bold and centring are not.
+
+Two tests pin it. One walks a fixture holding one of everything and asserts the whole
+set, so a property Docs adds later surfaces as a failure rather than as silence. The
+other walks every shape of the fuzz corpus — `doc_world` holds a document the way Docs
+holds it and was written apart from this map — and gets back the one thing it has that
+we do not model, the section break a body opens on. That is also the campaign's blind
+spot named out loud: a defect the world cannot represent is a defect the fuzzing cannot
+find.
+
 **Tables are written one line per row**, so a changed row is a changed line in a diff.
 The breaks go between `</tr>` and `<tr>` and between the table's own tags and its
 rows, where an HTML parser has nowhere to put text; a row stays whole with its cells,

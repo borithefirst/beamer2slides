@@ -981,7 +981,22 @@ keys, named ranges), `doc_merge.py` (pure planning), `doc_sync.py` (the commands
   `lead`) and written into; nothing can be inserted at a table's own index (measured), so a
   block in front of a table goes in as `\ntext` at the previous paragraph's mark.
 - What the file cannot carry is reported too (`doc_sync.limits`): a picture file that is not
-  there.
+  there. And **what the dialect does not model is named** (`doc_ir.unmodelled`, `_NODES` = the
+  reader's own map of `documents.get`): the convergence check is measured on the IR, so it
+  proves the IR round-trips and says nothing about a property the IR never looked at - such a
+  property survives an edit (a request names the fields it writes) and goes when its block is
+  written again from nothing. The walker reports every leftover path with a count and an
+  example (`checks.lost_ink`'s question, one dimension down); `adopt` and `push` print each
+  one (`doc_sync.unmodelled_notes(full=True)`), a sync the count and the commonest three.
+  Real documents turn up page structure (`documentStyle`, headers, footnotes,
+  `sectionBreak`, `pageBreakBefore`), `baselineOffset`, paragraph borders/tab stops/
+  `keepWithNext`, a table's column widths and `tableCellStyle` (the ragged-table limit under
+  its real name), a picture's crop/angle/brightness, a list's `startNumber` - and, of the
+  document's theme, a named style's marks and alignment (its face and measures *are* read).
+  Two tests pin it: a fixture holding one of everything, so a property Docs adds later fails
+  rather than passes in silence, and every fuzz corpus shape walked through `doc_world` -
+  written apart from the map - which reports only the section break a body opens on, which is
+  also the campaign's blind spot named out loud.
 - Fuzzed against a loss oracle, as the Slides sync is (docs/google-docs.md, "Proving nothing
   is lost"): `devtools/doc_loss_oracle.py` judges one sync from the two read-backs, the base
   and the report - did anything the *reader* put in the document disappear without the report

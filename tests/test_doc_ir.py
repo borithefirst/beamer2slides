@@ -591,3 +591,111 @@ def test_a_bullets_own_indents_are_the_presets_and_never_the_files():
     block = doc_ir.from_document(doc)["blocks"][0]
     assert block["kind"] == "item" and "indent" not in block
     assert block["line_spacing"] == 1.5   # everything else is still carried
+
+
+# ------------------------------------------------- what the reader does not read
+
+# A document carrying one of everything the dialect leaves behind. Each value here
+# was put in because Docs really returns it, and the test below is the claim: this
+# is the whole of what a canonical file cannot say. A property Docs adds later shows
+# up as a failure rather than as silence — which is the only way it ever would,
+# since a sync converges on the IR and the IR is exactly what cannot see it.
+UNMODELLED_LIVE = {
+    "documentId": "d1", "title": "Report", "revisionId": "r1",
+    "documentStyle": {"marginTop": {"magnitude": 72, "unit": "PT"}},
+    "headers": {"h1": {"content": []}},
+    "footnotes": {"f1": {"content": []}},
+    "positionedObjects": {"p1": {"objectId": "p1"}},
+    "body": {"content": [
+        {"startIndex": 1, "endIndex": 9, "paragraph": {
+            "elements": [{"startIndex": 1, "endIndex": 9, "textRun": {
+                "content": "one two\n",
+                "textStyle": {"bold": True, "baselineOffset": "SUPERSCRIPT"}}}],
+            "paragraphStyle": {"namedStyleType": "NORMAL_TEXT", "keepWithNext": True,
+                               "borderLeft": {"width": {"magnitude": 1}},
+                               "tabStops": [{"offset": {"magnitude": 36}}],
+                               "direction": "LEFT_TO_RIGHT", "pageBreakBefore": True}}},
+        {"startIndex": 9, "endIndex": 40, "table": {
+            "rows": 1, "columns": 2,
+            "tableStyle": {"tableColumnProperties": [{"width": {"magnitude": 100}}]},
+            "tableRows": [{"startIndex": 9, "endIndex": 40,
+                           "tableRowStyle": {"minRowHeight": {"magnitude": 20}},
+                           "tableCells": [{"startIndex": 10, "endIndex": 20, "content": [],
+                                           "tableCellStyle": {"rowSpan": 1, "columnSpan": 2}}]}]}},
+        {"startIndex": 40, "endIndex": 41, "sectionBreak": {"sectionStyle": {}}}]},
+    "inlineObjects": {"i1": {"objectId": "i1", "inlineObjectProperties": {
+        "embeddedObject": {"title": "t",
+                           "imageProperties": {"contentUri": "https://x", "angle": 0.3,
+                                               "brightness": 0.1,
+                                               "cropProperties": {"offsetLeft": 0.2}},
+                           "marginTop": {"magnitude": 9},
+                           "embeddedObjectBorder": {"width": {"magnitude": 1}}}}}},
+    "lists": {"l1": {"listProperties": {"nestingLevels": [
+        {"glyphSymbol": "-", "startNumber": 7, "indentStart": {"magnitude": 36},
+         "textStyle": {"bold": True}}]}}},
+    "namedStyles": {"styles": [
+        {"namedStyleType": "HEADING_1",
+         "textStyle": {"weightedFontFamily": {"fontFamily": "Arial"}, "bold": True,
+                       "foregroundColor": {"color": {"rgbColor": {"blue": 1.0}}}},
+         "paragraphStyle": {"alignment": "CENTER", "spaceAbove": {"magnitude": 12}}}]},
+}
+
+UNMODELLED = {
+    # Page-level structure, which has no place in the file at all.
+    "documentStyle", "headers", "footnotes", "positionedObjects",
+    "structural.sectionBreak", "structural.paragraph.paragraphStyle.pageBreakBefore",
+    # Run and paragraph properties the dialect has no spelling for.
+    "element.textRun.textStyle.baselineOffset",
+    "structural.paragraph.paragraphStyle.borderLeft",
+    "structural.paragraph.paragraphStyle.direction",
+    "structural.paragraph.paragraphStyle.keepWithNext",
+    "structural.paragraph.paragraphStyle.tabStops",
+    # A table's geometry and its merged cells: the ragged-table limit, named.
+    "structural.table.tableStyle", "tableRow.tableRowStyle", "tableCell.tableCellStyle",
+    # A picture's own editing, which `pull` reads off a deck and this does not.
+    "inlineObject.inlineObjectProperties.embeddedObject.embeddedObjectBorder",
+    "inlineObject.inlineObjectProperties.embeddedObject.marginTop",
+    "inlineObject.inlineObjectProperties.embeddedObject.imageProperties.angle",
+    "inlineObject.inlineObjectProperties.embeddedObject.imageProperties.brightness",
+    "inlineObject.inlineObjectProperties.embeddedObject.imageProperties.cropProperties",
+    # A list's own look, its start number among it.
+    "nestingLevel.indentStart", "nestingLevel.startNumber", "nestingLevel.textStyle",
+    # The document's theme: a named style's face and measures are read, its marks and
+    # its alignment are not, so a heading's bold and centring are the document's own.
+    "namedStyle.textStyle.bold", "namedStyle.textStyle.foregroundColor",
+    "namedStyle.paragraphStyle.alignment",
+}
+
+
+def test_what_the_reader_never_reads_is_named_one_by_one():
+    """The other half of the convergence check. "A second sync writes 0 requests" is
+    measured on the IR, so it proves the IR round-trips and says nothing at all about
+    what the IR never looked at; this is the walker that says it."""
+    found = doc_ir.unmodelled(UNMODELLED_LIVE)
+    assert set(found) == UNMODELLED
+    assert found["element.textRun.textStyle.baselineOffset"] == {
+        "count": 1, "example": "SUPERSCRIPT"}
+    assert found["nestingLevel.startNumber"]["example"] == "7"
+    assert list(found) == sorted(found)
+
+
+def test_a_document_of_nothing_but_what_we_read_reports_nothing():
+    """Every path in the map, proved to be a path and not a hope: the fixture the
+    rest of this file reads is walked and comes back empty."""
+    assert doc_ir.unmodelled(STYLED_LIVE) == {}
+
+
+def test_an_empty_struct_says_nothing_and_is_not_reported():
+    """Docs leaves plenty of those about, and a report of them would be noise."""
+    doc = {"documentId": "d", "documentStyle": {}, "headers": {},
+           "body": {"content": [{"paragraph": {"elements": [], "paragraphStyle": {
+               "keepWithNext": False, "borderLeft": {}}}}]}}
+    assert doc_ir.unmodelled(doc) == {}
+
+
+def test_every_node_the_map_descends_into_is_a_node():
+    """A map that names a node it has not got would walk into a KeyError on the one
+    document that reaches it, which is no way to find out."""
+    for node, (_, into) in doc_ir._NODES.items():
+        for key, target in into.items():
+            assert target.rstrip("[]{}") in doc_ir._NODES, f"{node}.{key} -> {target}"

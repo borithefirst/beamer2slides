@@ -241,6 +241,22 @@ def test_deleting_a_table_row_moves_the_named_ranges_below_it():
     assert said(doc_world.read_ir(world, ours, base)) == was
 
 
+@pytest.mark.parametrize("shape", sorted(fuzz_docs.SHAPES))
+def test_the_world_carries_nothing_the_reader_does_not_read(shape):
+    """`doc_ir.unmodelled` and `doc_world` were written apart and from the same API
+    reference: one says what the reader reads, the other holds a document the way
+    Docs holds it. Walking the second with the first is therefore a real check of
+    both — and it comes back with the one thing the world has and we do not model,
+    the section break a body opens on.
+
+    It is also what keeps the campaign honest: a defect the world cannot represent
+    is a defect the campaign cannot find, and this names the whole of that blind
+    spot in one line per shape.
+    """
+    world, _, _ = _push(shape)
+    assert set(doc_ir.unmodelled(world.read())) == {"structural.sectionBreak"}
+
+
 # ---------------------------------------------------------------- what is still broken
 
 def _push(shape: str):

@@ -1217,3 +1217,149 @@ def _first_words(block: dict) -> str:
                 name = run.get("src") or ""
                 return re.sub(r"\.\w+$", "", name.rsplit("/", 1)[-1]) if name else run["alt"]
     return words
+
+
+# ---------------------------------------------------------------- what we do not read
+
+# Every part of a `documents.get` answer this module consults, as a small graph: a
+# node's `read` is what the reader takes the value of, and `into` maps a key to the
+# node its value is — `[]` for a list of them, `{}` for a map of them. Anything a
+# document carries that is in neither is what `unmodelled` reports.
+#
+# This is the other half of the convergence check. "A second sync writes 0 requests"
+# is measured on the IR, so it proves the IR round-trips and says exactly nothing
+# about what the IR never looked at: a property no node below names is a property a
+# rewrite drops without a word. It is the same question `checks.lost_ink` asks of a
+# converted slide — does every difference lie on something we account for? — and the
+# same answer: name what is left over, out loud, rather than trust that there is none.
+#
+# Precision is the point, so a node is split wherever the reader reads less than the
+# whole of it: a named style's textStyle is `namedTextStyle`, which reads the face and
+# the size and not the marks, because a heading's bold is in fact not carried.
+_NODES: dict[str, tuple[tuple, dict]] = {
+    "document": (("documentId", "title", "revisionId", "suggestionsViewMode"),
+                 {"body": "body", "tabs": "tab[]", "lists": "lists{}",
+                  "inlineObjects": "inlineObject{}", "namedStyles": "namedStyles",
+                  "namedRanges": "namedRangeGroup{}"}),
+    "tab": ((), {"tabProperties": "tabProperties", "documentTab": "documentTab",
+                 "childTabs": "tab[]"}),
+    "tabProperties": (("tabId", "title", "parentTabId", "index", "nestingLevel"), {}),
+    "documentTab": ((), {"body": "body", "lists": "lists{}",
+                         "inlineObjects": "inlineObject{}", "namedStyles": "namedStyles",
+                         "namedRanges": "namedRangeGroup{}"}),
+    "body": ((), {"content": "structural[]"}),
+    "structural": (("startIndex", "endIndex"),
+                   {"paragraph": "paragraph", "table": "table",
+                    "tableOfContents": "toc"}),
+    # A table of contents is kept whole and frozen, span and all: what it generates is
+    # deliberately opaque, not overlooked.
+    "toc": (("content",), {}),
+    "paragraph": ((), {"elements": "element[]", "paragraphStyle": "paragraphStyle",
+                       "bullet": "bullet"}),
+    "paragraphStyle": (("namedStyleType", "alignment", "indentStart", "indentFirstLine",
+                        "lineSpacing", "spaceAbove", "spaceBelow", "shading"), {}),
+    "bullet": (("listId", "nestingLevel"), {}),
+    "element": (("startIndex", "endIndex"),
+                {"textRun": "textRun", "dateElement": "dateElement", "person": "person",
+                 "richLink": "richLink", "footnoteReference": "footnoteReference",
+                 "equation": "equation", "inlineObjectElement": "inlineObjectElement",
+                 "horizontalRule": "horizontalRule"}),
+    "textRun": (("content",), {"textStyle": "textStyle"}),
+    "textStyle": (("bold", "italic", "underline", "strikethrough", "smallCaps",
+                   "weightedFontFamily", "fontSize", "foregroundColor",
+                   "backgroundColor", "link"), {}),
+    "table": (("rows", "columns"), {"tableRows": "tableRow[]"}),
+    "tableRow": (("startIndex", "endIndex"), {"tableCells": "tableCell[]"}),
+    "tableCell": (("startIndex", "endIndex"), {"content": "structural[]"}),
+    # Chips: what identifies each one, and nothing about how it is drawn.
+    "dateElement": ((), {"dateElementProperties": "dateProperties"}),
+    "dateProperties": (("displayText", "timestamp", "dateFormat", "locale"), {}),
+    "person": ((), {"personProperties": "personProperties"}),
+    "personProperties": (("name", "email"), {}),
+    "richLink": ((), {"richLinkProperties": "richLinkProperties"}),
+    "richLinkProperties": (("title", "uri", "mimeType"), {}),
+    "footnoteReference": (("footnoteNumber", "footnoteId"), {}),
+    # An equation's LaTeX is in no field at all — it comes from the Markdown export
+    # (`equation_spots`, `latex_of`) — so there is nothing here to read.
+    "equation": ((), {}),
+    "inlineObjectElement": (("inlineObjectId",), {}),
+    "horizontalRule": ((), {}),
+    "inlineObject": (("objectId",), {"inlineObjectProperties": "objectProperties"}),
+    "objectProperties": ((), {"embeddedObject": "embeddedObject"}),
+    "embeddedObject": (("title", "description"),
+                       {"size": "size", "imageProperties": "imageProperties"}),
+    "size": ((), {"width": "dimension", "height": "dimension"}),
+    "dimension": (("magnitude", "unit"), {}),
+    "imageProperties": (("contentUri",), {}),
+    "lists": ((), {"listProperties": "listProperties"}),
+    "listProperties": ((), {"nestingLevels": "nestingLevel[]"}),
+    "nestingLevel": (("glyphSymbol", "glyphType"), {}),
+    "namedStyles": ((), {"styles": "namedStyle[]"}),
+    "namedStyle": (("namedStyleType",), {"textStyle": "namedTextStyle",
+                                         "paragraphStyle": "namedParagraphStyle"}),
+    "namedTextStyle": (("weightedFontFamily", "fontSize"), {}),
+    "namedParagraphStyle": (("indentStart", "indentFirstLine", "lineSpacing",
+                             "spaceAbove", "spaceBelow", "shading"), {}),
+    "namedRangeGroup": (("name",), {"namedRanges": "namedRange[]"}),
+    "namedRange": (("namedRangeId", "name"), {"ranges": "range[]"}),
+    "range": (("startIndex", "endIndex", "segmentId", "tabId"), {}),
+}
+
+
+def unmodelled(doc: dict) -> dict[str, dict]:
+    """Everything a live document carries that this module never reads.
+
+    A `documents.get` answer, walked against `_NODES`; the answer is, by the path
+    each was found at, how many there were and one example. It is what a canonical
+    file cannot say and therefore what a sync would drop if it ever rewrote the
+    block holding it — the report `adopt` owes whoever hands us a document somebody
+    else made, and the test that pins it is how a property Docs adds later shows up
+    as a failure rather than as silence.
+
+    A path reads like `structural.paragraph.paragraphStyle.borderLeft`. Empty values
+    say nothing and are left out, so a document that sets none of a struct's fields
+    does not report the struct.
+    """
+    found: dict[str, dict] = {}
+    _walk(doc, "document", "", found)
+    return dict(sorted(found.items()))
+
+
+def _walk(value, node: str, path: str, found: dict) -> None:
+    read, into = _NODES[node]
+    for key, inner in (value or {}).items():
+        here = f"{path}.{key}".lstrip(".")
+        if key in read or _nothing(inner):
+            continue
+        if key in into:
+            target = into[key]
+            # A list or a map starts the path again at its node's name, so the
+            # structural elements of a table cell and those of the body report at one
+            # path and the recursion does not make the answer infinite.
+            if target.endswith("[]"):
+                for item in inner:
+                    _walk(item, target[:-2], target[:-2], found)
+            elif target.endswith("{}"):
+                for item in inner.values():
+                    _walk(item, target[:-2], target[:-2], found)
+            else:
+                _walk(inner, target, here, found)
+            continue
+        entry = found.setdefault(here, {"count": 0, "example": _example(inner)})
+        entry["count"] += 1
+
+
+def _nothing(value) -> bool:
+    """A value that says nothing at all: Docs leaves plenty of empty structs about."""
+    return value is None or value == {} or value == [] or value is False
+
+
+def _example(value) -> str:
+    """One example of an unmodelled value, short enough to print in a report."""
+    if isinstance(value, dict):
+        return "{" + ", ".join(sorted(value)[:4]) + "}"
+    if isinstance(value, list):
+        return f"[{len(value)}]"
+    text = str(value)
+    return text if len(text) <= 60 else text[:57] + "..."
+

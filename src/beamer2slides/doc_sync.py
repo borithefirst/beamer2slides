@@ -419,6 +419,35 @@ def limits(ours: dict) -> list[str]:
     return list(ours.get("unsupported", []))
 
 
+def unmodelled_notes(doc: dict, full: bool = False) -> list[str]:
+    """What the live document carries that the dialect never reads.
+
+    `doc_ir.unmodelled` walks the raw `documents.get` answer against the reader's own
+    map, and this says what it found. It is the other half of the convergence check:
+    "a second sync writes 0 requests" is measured on the IR, so it proves the IR
+    round-trips and says nothing at all about a property the IR never looked at. Such
+    a property survives an ordinary edit — a request names the fields it writes, and
+    a block is restyled, not rebuilt — and goes when the block holding it is written
+    again from nothing.
+
+    `full` names every one, which is what `adopt` owes whoever hands us a document
+    somebody else wrote. A sync says the count and the commonest few instead, or
+    every report would carry fifteen lines that never change.
+    """
+    found = doc_ir.unmodelled(doc)
+    if not found:
+        return []
+    order = sorted(found, key=lambda path: (-found[path]["count"], path))
+    if full:
+        return [f"the document has {found[path]['count']} × {path} "
+                f"(e.g. {found[path]['example']}), which the canonical file cannot say"
+                for path in order]
+    rest = f" and {len(order) - 3} more" if len(order) > 3 else ""
+    return [f"{len(order)} kinds of document property this file cannot say "
+            f"({', '.join(order[:3])}{rest}); they survive an edit and go with a "
+            f"block written again from nothing"]
+
+
 def stamp_of(ir: dict, part: dict) -> str | None:
     """The `tabId` a tab's requests carry: none for the first tab, which is where a
     request without one goes (`doc_merge.on_tab`)."""
@@ -597,16 +626,23 @@ def plant_ranges(docs, ident: str, ir: dict, tab: str | None = None) -> int:
 
 
 def settle(docs, ident: str, path: Path, ours: dict, base: dict,
-           planned: dict | None = None, drive=None, problems: list[str] | None = None) -> dict:
+           planned: dict | None = None, drive=None, problems: list[str] | None = None,
+           name_unmodelled: bool = False) -> dict:
     """After a write: read the document, anchor what is new, and let that read be both
     the new base and the new canonical file. File, document and base agree from here.
 
     `planned` is what each tab was written as, by its stamp (None: the first tab).
     With `drive`, the equations get their LaTeX (`equation_latex`) and the base goes
     to Drive as well as to the cache beside the file; a Drive write that fails is
-    said out loud (`problems`) and fails nothing."""
+    said out loud (`problems`) and fails nothing. So is what the document carries and
+    the dialect does not (`unmodelled_notes`); `name_unmodelled` names every one of
+    those, which is what `adopt` and `push` want and a sync does not."""
     planned = planned or {}
     doc, live = read_document(docs, ident, ours, base)
+    for line in unmodelled_notes(doc, name_unmodelled):
+        print(f"  {line}")
+        if problems is not None:
+            problems.append(line)
     tidy, named = [], 0
     for part in doc_ir.parts(live):
         stamp = stamp_of(live, part)
@@ -755,11 +791,12 @@ def push(path: Path, name: str | None = None, new_doc: bool = False) -> dict:
     written = _write_tabs(drive, docs, ident, path, source, {"blocks": []}, live, tabs,
                           first=False)
     planned = {None: source["blocks"]} | {w["stamp"]: w["result"]["blocks"] for w in written}
-    live = settle(docs, ident, path, source, source, planned, drive)
+    notes = limits(source)
+    live = settle(docs, ident, path, source, source, planned, drive, notes, True)
     blocks = [b for part in doc_ir.parts(live) for b in part["blocks"]]
     return {"document": ident, "url": url(ident), "blocks": len(blocks),
             "anchored": sum(1 for b in blocks if b.get("rangeId")),
-            "tabs": len(doc_ir.parts(live)), "notes": limits(source)}
+            "tabs": len(doc_ir.parts(live)), "notes": notes}
 
 
 def adopt(document: str, path: Path | None = None, force: bool = False) -> dict:
@@ -794,11 +831,12 @@ def adopt(document: str, path: Path | None = None, force: bool = False) -> dict:
                 f"  Adopting {ident} would write the document's words over it.\n"
                 f"  Give another path, or --force to overwrite this one.")
     path.parent.mkdir(parents=True, exist_ok=True)
-    live = settle(docs, ident, path, None, {}, None, drive)
+    notes = limits(live)
+    live = settle(docs, ident, path, None, {}, None, drive, notes, True)
     blocks = [b for part in doc_ir.parts(live) for b in part["blocks"]]
     return {"document": ident, "url": url(ident), "file": str(path), "blocks": len(blocks),
             "anchored": sum(1 for b in blocks if b.get("rangeId")),
-            "tabs": len(doc_ir.parts(live)), "notes": limits(live)}
+            "tabs": len(doc_ir.parts(live)), "notes": notes}
 
 
 def sync(path: Path, document: str | None = None, dry_run: bool = False,
@@ -845,7 +883,8 @@ def sync(path: Path, document: str | None = None, dry_run: bool = False,
                 each["result"]["structure"] + each["result"]["requests"], each["stamp"])]
         info["requests"] = len(info["plan"]) + len(tabs["create"])
         info["base"] = where
-        info["notes"] = troubles + info["notes"]
+        # A dry run never reaches `settle`, which is where this is normally said.
+        info["notes"] = troubles + info["notes"] + unmodelled_notes(doc)
         info["report"] = str(write_report(path, info))
         return info
 
