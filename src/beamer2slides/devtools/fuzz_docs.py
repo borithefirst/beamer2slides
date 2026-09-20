@@ -231,17 +231,19 @@ def sync_once(world: doc_world.World, ours: dict, base: dict,
         world.title = tabs["rename"]   # Drive's, not a request (`doc_sync.rename_document`)
     pairs = list(tabs["pairs"])
     known = {p.get("tab") for p in doc_ir.parts(theirs)} - {None}
-    made: dict = {}
+    siblings, made = doc_merge.tab_siblings(theirs), {}
     for part in tabs["create"]:
-        parent = made.get(part.get("parent"), part.get("parent"))
-        reply = _send(world, [doc_merge.add_tab_request(
-            part | {"parent": parent}, known | set(made.values()))], seen)
+        if part.get("parent") in made:
+            part["parent"] = made[part["parent"]]
+        request = doc_merge.add_tab_request(part, known | set(made.values()),
+                                            ours, siblings)
+        reply = _send(world, [request], seen)
         tab = reply["replies"][0]["addDocumentTab"]["tabProperties"]["tabId"]
         if part.get("tab"):
             made[part["tab"]] = tab
         part["tab"] = tab
-        if part.get("parent") in made:
-            part["parent"] = made[part["parent"]]
+        props = request["addDocumentTab"]["tabProperties"]
+        siblings.setdefault(props.get("parentTabId"), []).insert(props["index"], tab)
         pairs.append((tab, part, {"blocks": []}))
 
     stager, written = Stager(), []

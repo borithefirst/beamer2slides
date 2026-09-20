@@ -2802,7 +2802,7 @@ def document_title(base: dict, ours: dict, theirs: dict, out: dict) -> None:
 
 
 def tab_order(base: dict, ours: dict, theirs: dict, out: dict) -> None:
-    """A tab the source moved, which nothing can write.
+    """A tab the source moved, which is not written.
 
     Blocks the source moved go back where the file has them, because a move is a
     delete and a write — and a tab cannot be written from nothing (everything in it
@@ -2810,6 +2810,14 @@ def tab_order(base: dict, ours: dict, theirs: dict, out: dict) -> None:
     tabs is the document's, whole. Said out loud rather than dropped: the settle
     rewrites the file in the document's order, so a reorder in the file disappears
     twice over.
+
+    A tab *can* be moved: `TabProperties.index` carries no "Output only" marker, and
+    `updateDocumentTabProperties` takes any field of it (discovery document, revision
+    20260427). What is not known is what happens to the tabs it passes — `addDocumentTab`
+    says it pushes the later ones along and nothing says that an update does — and a
+    wrong guess rearranges somebody's tab strip, which is the one thing this tool does
+    not do on a hunch. So the reorder waits for a live measurement (docs/google-docs.md)
+    and the note says the order stands, not that nothing could move it.
 
     Only what the *source* moved: where the file still has the base's order, the
     reader moved a tab and the file is simply following it.
@@ -2827,12 +2835,65 @@ def tab_order(base: dict, ours: dict, theirs: dict, out: dict) -> None:
     out["notes"].append(
         "the source puts the tabs in the order " + ", ".join(repr(titles.get(t, t))
                                                              for t in mine)
-        + "; no request moves a tab, so the document's order stands")
+        + "; moving a tab is not written, so the document's order stands")
 
 
-def add_tab_request(part: dict, parents: dict) -> dict:
-    """`addDocumentTab` for a tab the source added, under its parent if that exists."""
+def tab_siblings(theirs: dict) -> dict:
+    """The document's tabs by parent, each in the order the document shows them.
+
+    The first tab is a root tab like any other — index 0, and the one every other
+    root tab counts from — so it heads the root row under whatever id the read gave
+    it, `None` for a read that holds only that tab. A place is all the arithmetic
+    wants, and that is one thing the file cannot name anyway.
+    """
+    out: dict = {None: [theirs.get("tab")]}
+    for part in theirs.get("tabs", []):
+        if part.get("tab"):
+            out.setdefault(part.get("parent") or None, []).append(part["tab"])
+    return out
+
+
+def tab_index(part: dict, ours: dict, parent: str | None, siblings: list) -> int:
+    """Where among its parent's tabs a tab the source added goes.
+
+    `addDocumentTab` takes the index the new tab is to have and pushes the later ones
+    along, so a tab lands where the file puts it rather than always at the end: after
+    the nearest tab in front of it in the file that the document already has — or
+    that this run has just made, the creates going in file order with each new id
+    written back into the part before the next one is placed.
+
+    The file's body is the document's first tab, so a root tab whose only forerunner
+    is the body goes at 1: the file has no way of saying anything stands in front of
+    the body, and nothing may.
+    """
+    parts = doc_ir.parts(ours)
+    before: list = []
+    for other in parts:
+        if other is part:
+            break
+        before.append(other)
+    for other in reversed(before):
+        if (other.get("parent") or None) != parent:
+            continue
+        if other is parts[0]:
+            return 1
+        if other.get("tab") in siblings:
+            return siblings.index(other["tab"]) + 1
+    return 0
+
+
+def add_tab_request(part: dict, parents: dict, ours: dict | None = None,
+                    siblings: dict | None = None) -> dict:
+    """`addDocumentTab` for a tab the source added, under its parent if that exists
+    and where the file puts it among that parent's tabs.
+
+    With no `ours` and `siblings` to say where that is, the request names no index
+    and the tab lands at the end, which is where every tab this made used to land.
+    """
     props = {"title": part.get("title") or "Tab"}
     if part.get("parent") in parents:
         props["parentTabId"] = part["parent"]
+    if ours is not None and siblings is not None:
+        under = props.get("parentTabId")
+        props["index"] = tab_index(part, ours, under, siblings.get(under, []))
     return {"addDocumentTab": {"tabProperties": props}}

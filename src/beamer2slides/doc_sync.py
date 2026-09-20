@@ -1067,18 +1067,21 @@ def _write_tabs(drive, docs, ident: str, path: Path, ours: dict, base: dict, the
         send(docs, ident, tabs["requests"])
     pairs = list(tabs["pairs"])
     known = {p.get("tab") for p in doc_ir.parts(theirs)} - {None}
-    made: dict = {}
+    siblings, made = doc_merge.tab_siblings(theirs), {}
     for part in tabs["create"]:
-        # One at a time: a child tab needs the id its parent was just given.
-        parent = made.get(part.get("parent"), part.get("parent"))
-        reply = send(docs, ident, [doc_merge.add_tab_request(
-            part | {"parent": parent}, known | set(made.values()))])
+        # One at a time: a child tab needs the id its parent was just given, and a
+        # tab placed among its siblings needs the ids of the ones already made.
+        if part.get("parent") in made:
+            part["parent"] = made[part["parent"]]
+        request = doc_merge.add_tab_request(part, known | set(made.values()),
+                                            ours, siblings)
+        reply = send(docs, ident, [request])
         tab = reply["replies"][0]["addDocumentTab"]["tabProperties"]["tabId"]
         if part.get("tab"):
             made[part["tab"]] = tab
         part["tab"] = tab
-        if part.get("parent") in made:
-            part["parent"] = made[part["parent"]]
+        props = request["addDocumentTab"]["tabProperties"]
+        siblings.setdefault(props.get("parentTabId"), []).insert(props["index"], tab)
         pairs.append((tab, part, {"blocks": []}))
     stager = Stager(drive, docs, path)
     written = []

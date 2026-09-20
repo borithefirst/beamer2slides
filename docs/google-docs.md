@@ -466,7 +466,8 @@ like this:
   (`doc_merge.on_tab`). Keys are unique per tab, as named ranges are.
 - **The tabs themselves** follow the three-way rule one level up (`doc_merge.pair_tabs`),
   with the tab id as identity: a tab the source added is created (`addDocumentTab`, under
-  its parent if it has one) and written like any tab whose base is empty; one it renamed is
+  its parent if it has one and at the index the file puts it at) and written like any tab
+  whose base is empty; one it renamed is
   renamed (`updateDocumentTabProperties`) unless the reader renamed it too; one it deleted
   goes (`deleteTab`) only if the document left it exactly as the base has it and keeps no
   wanted tab inside it. A tab the reader added is theirs and is read into the file; one
@@ -477,14 +478,34 @@ like this:
   request can delete (measured). Both are hidden from the IR the way the trailer after a
   final table is (`doc_ir._hide_trailer`: `trailer`, and `lead` in front of a first table),
   and the first block written there goes *into* them.
-- **The order of the tabs is the document's.** Blocks the source moved go back where the
-  file has them, because a move is a delete and a write — and a tab cannot be written
-  from nothing: everything in it would have to be made again, chips and equations and
-  all. So a source that reorders its sections does not reorder the tabs, and since the
-  settle then rewrites the file in the document's order, a reorder in the file used to
-  disappear twice over. `doc_merge.tab_order` says it instead, and only where the *source*
-  moved one: where the file still has the base's order, it is the reader who moved a tab
-  and the file is simply following.
+- **A tab the source adds goes where the file puts it.** `addDocumentTab` takes the index
+  the new tab is to have among its parent's tabs and pushes the later ones along, so
+  `doc_merge.tab_index` names it: after the nearest tab in front of it in the file that the
+  document already has — or that this run has just made, the creates going in file order
+  with each new id written back before the next one is placed (`tab_siblings` is the
+  document's rows to count in). The body is the document's first tab, so a tab the file
+  puts first goes to 1: nothing may stand in front of the body, and the file has no way of
+  saying it does. Without this a new tab landed at the end and the settle read that order
+  back into the file, so the source's own placing disappeared twice over — the same shape
+  of loss as a first-tab rename before `first_tab_title`.
+- **The order of the tabs that are already there is the document's.** Blocks the source
+  moved go back where the file has them, because a move is a delete and a write — and a tab
+  cannot be written from nothing: everything in it would have to be made again, chips and
+  equations and all. So a source that reorders its sections does not reorder the tabs, and
+  since the settle then rewrites the file in the document's order, a reorder in the file
+  used to disappear twice over. `doc_merge.tab_order` says it instead, and only where the
+  *source* moved one: where the file still has the base's order, it is the reader who moved
+  a tab and the file is simply following.
+
+  A tab *can* be moved, which the code used to deny: `TabProperties.index` carries no
+  "Output only" marker — unlike `nestingLevel` beside it — and
+  `updateDocumentTabProperties.fields` takes any field of `tab_properties` (discovery
+  document, revision 20260427). What is unknown is what happens to the tabs it passes:
+  `addDocumentTab` says outright that it pushes the later ones along and nothing says an
+  update does the same, so an index written blind could leave two tabs on one number or
+  shuffle a strip somebody arranged by hand. That is work destroyed on a hunch, which this
+  tool does not do, so the reorder waits for a live measurement (**owed**, below) and the
+  note says the order stands rather than that nothing could move it.
 - **The first tab names itself in a meta.** Every other tab says its title on its
   `<section>`; the first tab *is* the file's body, and the file's `<title>` is the
   **document's** name, which is a different thing — a document of one tab has both, and
@@ -1695,6 +1716,19 @@ counts them and each answers for one new tab before any of them is called a
 resurrection. With the excuse in place, putting the resurrection back into `pair_tabs`
 still fails 26 of 200 rounds at chain 4.
 
+And the forgiveness was still aimed at the wrong text. `block_resurrected` asked whether
+the *base's* words were still standing before the sync — but a base is what the document
+said one sync ago, and everything the reader's own hand has taken out of that block since
+is missing from it by right: a chip no retype carries, a word they went on to delete.
+Chain-4 seed 66195 is a paragraph the source gave a person chip, which the reader then
+dragged: the drag retyped the text, the chip stayed behind, and the settle keyed the same
+untouched paragraph from its own words again — nothing created, nothing written, and a
+`block_resurrected` for the chip's name. The question belongs on the block that carries
+the key *after* the sync: if what stands there now was standing there before it, nothing
+came back at all. A real resurrection puts back words the document did not hold, so it
+still fails — with the block delete broken on purpose, 44 of 200 rounds at chain 4, 91
+findings.
+
 ## Remaining risks
 
 1. **Pictures** — retired, see "Pictures, and the chips a request can make" above. What
@@ -1710,10 +1744,16 @@ still fails 26 of 200 rounds at chain 4.
 3. **Anchors under a human editor** — retired, see "Under a human editor" above. What
    is still unmeasured there: dragging a selection to a new place, "paste without
    formatting", and a second person editing concurrently.
-4. **Tabs** — retired, see "Document tabs" above. Still open: the order of the tabs is
-   never written (the document's stands, and a source reorder is reported now rather
-   than dropped). Both names are carried: the document's, through Drive, and the first
-   tab's own, in the `b2s-tab` meta.
+4. **Tabs** — retired, see "Document tabs" above. Still open: a tab the source *moves*
+   is not moved (a tab it adds now lands where the file puts it; the order of the ones
+   already there is the document's, and a source reorder is reported rather than
+   dropped). **Owed, and the one measurement that would close it**: does
+   `updateDocumentTabProperties` with `fields: "index"` push the tabs it passes along,
+   the way `addDocumentTab` says it does — and what does it do to a child tab's
+   siblings, and to a tab it moves under another parent? One live document, three
+   writes and three reads. Until then the reorder is refused, because an index written
+   blind rearranges a strip somebody arranged by hand. Both names are carried: the
+   document's, through Drive, and the first tab's own, in the `b2s-tab` meta.
 5. **Page-level structure** — `documentStyle`, headers, footers, footnote bodies,
    section breaks and positioned objects are read by nobody and authored by nobody. The
    paragraph level is now nearly closed (borders, `pageBreakBefore` and `keepWithNext`

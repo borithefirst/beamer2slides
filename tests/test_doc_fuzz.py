@@ -68,7 +68,7 @@ REGRESSIONS = ((60, 1), (181, 1), (309, 4), (1031, 8), (1147, 8),
                (5099, 8), (5130, 8), (5167, 8),
                (970228, 6), (970528, 6), (970711, 6), (980193, 6),
                (912452, 6), (993608, 6), (994410, 8), (994424, 8), (41000, 8),
-               (63138, 4), (64166, 8), (65370, 8))
+               (63138, 4), (64166, 8), (65370, 8), (66195, 4))
 
 
 def _round(seed: int, chain: int, shape: str | None = None) -> None:
@@ -539,6 +539,27 @@ def test_the_oracle_forgives_the_words_a_drag_glues_to_their_neighbours():
         oracle.check(base, struck, after, NOTHING, _ir(*base["blocks"])))
 
 
+def test_the_oracle_forgives_a_block_the_reader_dragged_away_from_a_chip():
+    """The same drag, one step on: the chip was the *source's*, put there by the sync
+    before, and the reader's own retype dropped it — so the base says a word the
+    document has not held since. Asked of the base's text that reads as a block gone
+    and come back; asked of what carries the key after the sync, which stood there
+    before it and unchanged, nothing came back at all (chain-4 seed 66195)."""
+    chip = {"frozen": True, "chip": "person", "text": "", "value": "grace@example.com"}
+    base = _ir(_p("k1", "First."),
+               {"key": "k2", "kind": "paragraph",
+                "runs": [{"text": "And this follows."}, chip]})
+    before = _ir(_p("k1", "First."),
+                 {"kind": "paragraph", "runs": [{"text": "And this follows."}]})
+    after = _ir(_p("k1", "First."), _p("k2", "And this follows."))
+    assert "block_resurrected" not in _kinds(
+        oracle.check(base, before, after, NOTHING, _ir(*base["blocks"])))
+    # And a block that really was gone before the sync is still heard.
+    struck = _ir(_p("k1", "First."))
+    assert "block_resurrected" in _kinds(
+        oracle.check(base, struck, after, NOTHING, _ir(*base["blocks"])))
+
+
 def test_the_oracle_sees_a_tab_the_reader_deleted_come_back():
     """The mirror of `tab_gone`, and invisible to every other question here: nothing
     of the reader's disappears when a tab they deleted is created again, and the tab
@@ -876,6 +897,30 @@ def test_a_tab_the_reader_added_is_read_into_the_file_and_left_alone():
     assert added[0]["blocks"][0]["key"]
     again, _, _ = fuzz_docs.sync_once(world, ours, base)
     assert again["requests"] == 0
+
+
+def test_a_tab_the_source_adds_in_the_middle_is_made_in_the_middle():
+    """End to end, and the one thing about tab order that *is* written: a new tab
+    goes where the file puts it. It used to land at the end, and the settle then
+    read that order back into the file, so the source's own placing disappeared
+    twice over — the same way a rename did before `first_tab_title`."""
+    world, ours, base = _push("tabs")
+    assert [t.title for t in world.tabs[1:]] == ["Appendix"]
+    ours["tabs"].insert(0, {"title": "Notes", "blocks": [_p("p:notes", "In between.")]})
+    was, mine = copy.deepcopy(base), copy.deepcopy(ours)
+    before = doc_world.settled_ir(world, ours, base)
+    report, ours, base = fuzz_docs.sync_once(world, ours, base)
+    assert not oracle.failures(oracle.check(was, before, base, report, mine))
+    assert [t.title for t in world.tabs[1:]] == ["Notes", "Appendix"]
+    assert [p.get("title") for p in doc_ir.parts(ours)[1:]] == ["Notes", "Appendix"]
+    assert doc_merge.block_text(doc_ir.parts(ours)[1]["blocks"][0]) == "In between."
+    again, _, _ = fuzz_docs.sync_once(world, ours, base)
+    assert again["requests"] == 0
+    # And nothing goes in front of the body, which is root index 0 and the one tab
+    # that cannot be deleted: the world refuses it so that a planner asking would be
+    # heard rather than quietly making a second body.
+    with pytest.raises(doc_world.Refused):
+        world.apply([{"addDocumentTab": {"tabProperties": {"title": "?", "index": 0}}}])
 
 
 def test_a_tab_the_reader_deleted_stays_deleted_and_goes_out_of_the_file():

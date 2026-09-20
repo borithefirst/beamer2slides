@@ -648,12 +648,13 @@ def _tab_findings(was: dict | None, now: dict, then: dict | None, said: str,
         # *moves* a block deletes its text and types it again, which destroys the
         # named range, and the settle then keys the block from its own words as
         # before. So the question is asked of the words, not of the key — and of the
-        # words rather than the text, because a moved block that held an equation
-        # comes down without it (no request makes one), so the two never read alike.
-        # A block whose every word still stands somewhere is not one that was deleted
-        # and put back (`stands_elsewhere`, which is also what forgives the gluing a
-        # drag does to the words it carries).
-        if stands_elsewhere(text_of(was_block), before_text):
+        # block that carries the key *after* the sync, not of the one the base
+        # remembers: if what stands there now was standing there before, nothing came
+        # back at all. Asked of the base's text instead, everything the reader's own
+        # hand took out of that block on the way read as a resurrection — a chip no
+        # retype carries, a word they went on to delete (chain-4 seed 66195, where a
+        # dragged paragraph came down without the chip the source had put in it).
+        if stands_elsewhere(text_of(new[key]), before_text):
             continue
         if _named(said, key, text_of(was_block)[:40]):
             continue

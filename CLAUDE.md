@@ -1290,10 +1290,20 @@ keys, named ranges), `doc_merge.py` (pure planning), `doc_sync.py` (the commands
   a tab the document left as the base has it). A new tab's lone empty paragraph and the
   undeletable one in front of a body's first table are hidden like the trailer (`trailer`,
   `lead`) and written into; nothing can be inserted at a table's own index (measured), so a
-  block in front of a table goes in as `\ntext` at the previous paragraph's mark. The **order
-  of the tabs is the document's** - a tab cannot be written from nothing, so no request moves
-  one - and a source reorder is reported (`doc_merge.tab_order`) rather than dropped and then
-  taken out of the file by the settle. The **first tab names itself** in `<meta name="b2s-tab">`
+  block in front of a table goes in as `\ntext` at the previous paragraph's mark. A tab the
+  source **adds** goes where the file puts it (`doc_merge.tab_index` / `tab_siblings`:
+  `addDocumentTab` takes the index among the parent's tabs and pushes the later ones along,
+  so it lands after the nearest tab in front of it the document has - or that this run just
+  made, the creates going in file order; a tab the file puts first goes to 1, since the body
+  is index 0 and nothing may stand in front of it). It used to land at the end and the settle
+  read that back, so the source's placing disappeared twice over. The **order of the tabs
+  already there is the document's** - a tab cannot be written from nothing - and a source
+  reorder is reported (`doc_merge.tab_order`) rather than dropped and then taken out of the
+  file by the settle. A tab *can* be moved (`TabProperties.index` is not output-only and
+  `updateDocumentTabProperties` takes any field of it, discovery document 20260427); what is
+  unknown is what happens to the tabs it passes, and an index written blind rearranges a strip
+  somebody arranged by hand, so the reorder waits for a live measurement (docs/google-docs.md,
+  "Remaining risks" 4). The **first tab names itself** in `<meta name="b2s-tab">`
   (`doc_ir.TAB_META`, IR key `tab_title`): it is the body, so it has no `<section>` to say it
   on, and the file's `<title>` is the *document's* name, a different thing - a document of one
   tab has both. `doc_merge.first_tab_title` merges it as the other tabs' titles merge, with one
@@ -1348,7 +1358,15 @@ keys, named ranges), `doc_merge.py` (pure planning), `doc_sync.py` (the commands
   campaign's small vocabulary eventually has two `add_tab`s pick one name (chain-8 seed
   65370). A `<section>` with no `data-tab` is a tab the document never had, so `_fresh_asks`
   counts them and each answers for one new tab; with that in, the injected resurrection
-  still fails 26 of 200 rounds at chain 4.
+  still fails 26 of 200 rounds at chain 4. And the forgiveness was aimed at the wrong text:
+  it asked for the **base's** words, and a base is what the document said one sync ago, so
+  everything the reader's own hand has taken out of that block since is missing from it by
+  right - a chip no retype carries, a word they went on to delete (chain-4 seed 66195: the
+  source gave a paragraph a person chip, the reader dragged the paragraph, the chip stayed
+  behind, and the settle keyed the same untouched block from its words again). The question
+  belongs on the block carrying the key **after** the sync: if what stands there now stood
+  there before it, nothing came back. 44 of 200 rounds at chain 4 with the block delete
+  broken on purpose, 91 findings.
 - The **document's name** is the file's `<title>`, and a Google Doc's title *is* its name in
   Drive: no `batchUpdate` request writes one, so `push` named it at birth and nothing said it
   again. `doc_merge.document_title` merges it three ways (the file alone renamed it -> written;

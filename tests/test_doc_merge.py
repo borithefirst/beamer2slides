@@ -1584,11 +1584,69 @@ def test_a_tab_the_source_moved_is_reported_rather_than_dropped():
     out = doc_merge.pair_tabs(base, tabbed(three, one, two), tabbed(one, two, three))
     assert out["requests"] == [] and len(out["notes"]) == 1
     assert out["notes"][0] == ("the source puts the tabs in the order 'Three', 'One', "
-                               "'Two'; no request moves a tab, so the document's order "
-                               "stands")
+                               "'Two'; moving a tab is not written, so the document's "
+                               "order stands")
     # The reader moved one and the file still has the base's order: nothing to say.
     quiet = doc_merge.pair_tabs(base, tabbed(one, two, three), tabbed(three, one, two))
     assert quiet["notes"] == []
+
+
+def _made(ours, theirs, parents=()):
+    """Every tab the source adds, made one at a time as the sync makes them: each
+    request's index, and the root row the one before it left behind."""
+    out = doc_merge.pair_tabs(tabbed(*[t for t in ours["tabs"] if t.get("tab")]),
+                              ours, theirs)
+    siblings, indices = doc_merge.tab_siblings(theirs), []
+    known = {p.get("tab") for p in doc_ir.parts(theirs)} - {None} | set(parents)
+    for i, part in enumerate(out["create"]):
+        request = doc_merge.add_tab_request(part, known, ours, siblings)
+        props = request["addDocumentTab"]["tabProperties"]
+        indices.append(props["index"])
+        part["tab"] = f"t.new{i}"
+        siblings.setdefault(props.get("parentTabId"), []).insert(props["index"],
+                                                                 part["tab"])
+    return indices, siblings
+
+
+def test_a_tab_the_source_adds_is_made_where_the_file_puts_it():
+    """`addDocumentTab` takes the index the tab is to have and pushes the later ones
+    along, so a tab lands where the file says rather than always at the end."""
+    one, two = tab("t.1", "One", "a"), tab("t.2", "Two", "b")
+    theirs = tabbed(one, two) | {"tab": "t.0"}
+    ours = tabbed(one, tab(None, "Middle", "m"), two)
+    indices, siblings = _made(ours, theirs)
+    assert indices == [2] and siblings[None] == ["t.0", "t.1", "t.new0", "t.2"]
+
+
+def test_a_tab_the_file_puts_first_goes_after_the_body_and_never_before_it():
+    """The body is the document's first tab and the file has no way of saying that
+    anything stands in front of it — a tab at root index 0 would be a new body."""
+    one = tab("t.1", "One", "a")
+    indices, _ = _made(tabbed(tab(None, "Front", "f"), one),
+                       tabbed(one) | {"tab": "t.0"})
+    assert indices == [1]
+
+
+def test_two_tabs_the_source_adds_at_once_keep_the_files_order():
+    """Each is made on its own, so the second counts from the first — which is in
+    the document by then and nowhere in the read the planning began with."""
+    one = tab("t.1", "One", "a")
+    indices, siblings = _made(tabbed(tab(None, "A", "a"), tab(None, "B", "b"), one),
+                              tabbed(one) | {"tab": "t.0"})
+    assert indices == [1, 2]
+    assert siblings[None] == ["t.0", "t.new0", "t.new1", "t.1"]
+
+
+def test_a_child_tab_is_placed_among_its_parents_tabs_not_among_the_roots():
+    """An index is a place inside the parent, so a child counts from its siblings —
+    and a first child goes to 0, where no root tab may go."""
+    parent = tab("t.1", "Parent", "a")
+    child = tab("t.2", "Child", "b", parent="t.1")
+    theirs = tabbed(parent, child) | {"tab": "t.0"}
+    first = _made(tabbed(parent, tab(None, "Eldest", "e", parent="t.1"), child), theirs)
+    assert first[0] == [0] and first[1]["t.1"] == ["t.new0", "t.2"]
+    last = _made(tabbed(parent, child, tab(None, "Youngest", "y", parent="t.1")), theirs)
+    assert last[0] == [1] and last[1]["t.1"] == ["t.2", "t.new0"]
 
 
 def test_a_new_tab_left_empty_by_a_sync_that_died_is_taken_not_made_twice():
