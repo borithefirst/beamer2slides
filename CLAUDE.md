@@ -1015,6 +1015,11 @@ on this machine (no Docker). Hosted on Cloud Run (`docs/playground.md`, "On Clou
 `gcloud run deploy --source .` builds it, `.gcloudignore` says what goes up; `--max-instances 1` is
 correctness as much as thrift, since a job lives in one container's memory, and the service URL must
 be an authorized JavaScript origin of the web client). A Hugging Face Docker Space now needs PRO.
+**Live**: https://beamer2slides-playground-702466108736.europe-west1.run.app (project `beamer2slides`,
+region europe-west1, one instance, scale to zero, CHF 50/month with the budget's *spend cap*
+enforcing on Cloud Run). The consent screen is **In production**, which it could only become once
+the Branding page had a home page and a privacy policy on an authorized domain: hence `/privacy`
+(`static/privacy.html`), served by the playground itself and saying what the code does.
 Tests: `tests/test_playground.py` (offline, an uploaded test PDF through the HTTP API).
 
 ## Google Docs (docs/google-docs.md)
