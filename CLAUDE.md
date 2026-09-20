@@ -1267,7 +1267,14 @@ keys, named ranges), `doc_merge.py` (pure planning), `doc_sync.py` (the commands
   change, a renamed one is not), new ones learn theirs by place (`place_pictures`), and a picture
   a reader inserted is saved to `<stem>.media/` (`fetch_pictures`). `insertPerson`/`insertDate`
   make those chips (rich links refused); a block whose chips the source changed and the document
-  did not touch is written again (`rewrite`), never when it holds an equation-like chip.
+  did not touch is written again (`rewrite`), never when it holds an equation-like chip. No
+  request in the v1 API *changes* an embedded object, so a **size or alt text the source gives a
+  picture it already has** is written only where the picture goes in again anyway - a regenerated
+  one carries the file's `objectSize`, a merely moved one the document's copy - and an alt text
+  never at all; the settle then puts the document's values back into the file, so the edit goes
+  twice over, and `doc_merge.unwritten_pictures` names it with the way out (write the picture into
+  the file again *without* its `data-object`: a picture with no object id is a new one and is
+  inserted at the size asked for, at the price of whatever the browser put on the old one).
 - Tabs: the first tab is the file's body, every other one a `<section data-tab title
   [data-parent]>` (`doc_ir.parts`; no `data-tab` = a tab the source asks for). Each tab is its
   own plan and batch, every location/range stamped with its `tabId` (`doc_merge.on_tab`; none

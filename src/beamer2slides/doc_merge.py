@@ -224,6 +224,56 @@ def place_pictures(live: dict, planned: list[dict]) -> int:
     return done
 
 
+def unwritten_pictures(base: dict, ours: dict, theirs: dict, merged: list[dict],
+                       notes: list[str]) -> None:
+    """A picture's size and its alt text are read and never written.
+
+    No request in the v1 API changes an embedded object. `insertInlineImage` carries
+    an `objectSize`, so a size the source changes does reach the document when that
+    block is written from nothing *and* the run the plan writes is the file's — a
+    block whose picture the source regenerated, not one merely moved, where the run
+    written is the document's copy and its size the document's. An alt text never
+    reaches it at all, at any size. The settle then regenerates the file from the
+    document, so such an edit is not merely unwritten: it is taken back out of the
+    file, and the next sync sees nothing to say. Something that disappears twice
+    over has to be said out loud.
+
+    Deleting the picture from the file and writing it again is the way to have it at
+    another size, because a picture with no `data-object` is a new one and goes in
+    with its `objectSize` — at the price of whatever the browser put on the old one
+    (a crop, a recolour: `doc_ir.unmodelled`), which is why the sync will not do it
+    of its own accord over a number.
+    """
+    was = {r["value"]: r for r in _image_runs(base["blocks"]) if r.get("value")}
+    live = {r["value"]: r for r in _image_runs(theirs["blocks"]) if r.get("value")}
+    written = {r.get("value"): r.get("size") for block in merged
+               if block.get("rewrite") or block.get("moved") or block.get("origin")
+               == "added by the source" for r in _image_runs([block])}
+    for block in ours["blocks"]:
+        for run in _image_runs([block]):
+            before = was.get(run.get("value"))
+            if before is None:
+                continue
+            for what, key in (("size", "size"), ("alt text", "alt"), ("title", "title")):
+                if run.get(key) == before.get(key) or (
+                        key == "size" and run["value"] in written
+                        and written[run["value"]] == run.get("size")):
+                    continue
+                way = (". Write the picture into the file again without its data-object "
+                       "to have it inserted at that size" if key == "size" else "")
+                notes.append(
+                    f"{block.get('key')}: the source gave the picture the {what} "
+                    f"{_said(key, run.get(key))} and no request writes one — the document "
+                    f"keeps {_said(key, live.get(run['value'], before).get(key))} and the "
+                    f"file goes back to it{way}")
+
+
+def _said(key: str, value) -> str:
+    if value is None:
+        return "none"
+    return f"{value[0]}×{value[1]}" if key == "size" else repr(value)
+
+
 def _unseen_pictures(ours: dict, base: dict) -> None:
     """A picture file the checkout does not have says nothing about its bytes: take the
     base's word for them, or every sync would see it change."""
@@ -2512,6 +2562,7 @@ def plan(base: dict, ours: dict, theirs: dict) -> dict:
             result["notes"].append(f"{block.get('key')}: a new block with a chip in it that no "
                                    f"request can create (or a picture file that is not there) "
                                    f"cannot be written")
+    unwritten_pictures(base, ours, theirs, result["blocks"], result["notes"])
     refuse_nowhere(theirs, result["blocks"], result["notes"])
     restore_undeletable(theirs, result["blocks"], result["notes"])
     result["structure"], result["shaped"] = structure(theirs, result["blocks"], result["notes"])

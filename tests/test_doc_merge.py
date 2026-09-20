@@ -886,6 +886,55 @@ def test_a_picture_file_that_is_not_checked_out_is_no_change():
     assert doc_merge.plan(base, ours, theirs)["requests"] == []
 
 
+def test_a_size_the_source_changes_is_said_out_loud_rather_than_dropped():
+    """No request in the v1 API changes an embedded object, so a width edited in the
+    file reaches nothing — and the settle then regenerates the file from the document,
+    so the edit is taken back out of the file as well. Twice gone in silence is what
+    the report is for. Deleting the picture from the file and writing it again is the
+    way to have it at another size: a picture with no `data-object` is a new one and
+    goes in with its `objectSize`."""
+    base = live([figure("p:plot", picture("plot.png", value="i.0", sha="s", size=[60, 40],
+                                          alt="A plot"))])
+    ours = live([figure("p:plot", picture("plot.png", value="i.0", sha="s", size=[120, 80],
+                                          alt="A bigger plot"))])
+    result = doc_merge.plan(base, ours, live(base["blocks"]))
+    assert result["requests"] == []
+    assert [note.split(" — ")[0] for note in result["notes"]] == [
+        "p:plot: the source gave the picture the size 120×80 and no request writes one",
+        "p:plot: the source gave the picture the alt text 'A bigger plot' and no request "
+        "writes one"]
+    assert "60×40" in result["notes"][0] and "data-object" in result["notes"][0]
+
+
+def test_a_size_that_goes_in_with_the_picture_the_sync_writes_is_not_reported():
+    """A picture the source regenerated is inserted again from the file, `objectSize`
+    and all, so that resize is written and there is nothing to say. A picture merely
+    *moved* is written from the document's copy — the file's size is not on the run
+    the plan writes, so that one is reported like any other. The alt text is reported
+    either way: nothing carries one, at any size."""
+    def plot(**rest):
+        return figure("p:plot", {"text": "see "},
+                      picture("plot.png", value="i.0", **rest))
+
+    base = live([para("p:one", "one"), para("p:two", "two"),
+                 plot(sha="s", size=[60, 40]), para("p:four", "four")])
+    theirs = live(base["blocks"])
+    theirs["blocks"][2]["runs"][1]["uri"] = "https://lh7/plot"
+    ours = live(base["blocks"][:2] + [plot(sha="new", size=[120, 80], alt="A plot")]
+                + base["blocks"][3:])
+    result = doc_merge.plan(base, ours, theirs)
+    images = [r["insertInlineImage"] for r in result["requests"] if "insertInlineImage" in r]
+    assert images and images[0]["objectSize"]["width"]["magnitude"] == 90.0
+    assert [note for note in result["notes"] if "the size" in note] == []
+    assert [note for note in result["notes"] if "the alt text" in note]
+    # Moved instead: the insert carries the document's 60 × 40, and it is said.
+    ours = live([plot(sha="s", size=[120, 80])] + base["blocks"][:2] + base["blocks"][3:])
+    result = doc_merge.plan(base, ours, live(theirs["blocks"]))
+    images = [r["insertInlineImage"] for r in result["requests"] if "insertInlineImage" in r]
+    assert images and images[0]["objectSize"]["width"]["magnitude"] == 45.0
+    assert [note for note in result["notes"] if "the size" in note]
+
+
 def test_a_picture_the_reader_replaced_is_the_documents():
     base = live([figure("p:plot", picture("plot.png", value="i.0", sha="s"))])
     theirs = live([figure("p:plot", {"chip": "image", "frozen": True, "text": "", "value": "kix.9"})])

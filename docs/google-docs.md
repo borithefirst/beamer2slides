@@ -905,6 +905,7 @@ Each of these is reported in the sync report, never guessed at:
 | a source restyle of the very words the document rewrote | the marks follow the words (`doc_merge._restyled_words`): every word of the merged text takes the document's styling, and the file's where the file has that word too — so a word the source bolded is bold while the reader rewrites the rest of the paragraph. Only a restyled word the document replaced has nothing to carry the marks: its new words keep the document's styling, and the report says so |
 | a **move of a block with an equation-like chip in it, or of a table the document changed** | a move is a delete and a write, and those cannot be written from nothing — the block stays where the document has it |
 | a **reorder both sides made** | the document's order stands whole; the file's is reported |
+| a picture's **size or alt text** the source changed | no request in the v1 API changes an embedded object. `insertInlineImage` carries an `objectSize`, so a resize is written when the picture is inserted again anyway (one the source regenerated) and not when the run the plan writes is the document's copy (one merely moved); an alt text is never written. The settle then puts the document's values back into the file, so the edit goes twice over — `doc_merge.unwritten_pictures` names it, and says that a picture written into the file again *without* its `data-object` goes in at the size asked for |
 
 Everything else is written: text on both sides, a block's kind, level and alignment,
 its bullets, the marks the source added *or took away* (the fields Docs needs named for
@@ -1491,9 +1492,11 @@ clean under `--strict`, and `KNOWN` still empty.
 
 1. **Pictures** — retired, see "Pictures, and the chips a request can make" above. What
    is still open: a picture's size or alt text the *source* changes is not written (no
-   request updates an inline object), and a picture a reader inserts comes back as the
-   `contentUri`'s bytes, which Google may have re-encoded; the zip export would be the
-   byte-exact route.
+   request updates an inline object) — that one is said out loud now rather than dropped
+   (`doc_merge.unwritten_pictures`, the table above), with the way to have the size
+   anyway, but it is still a thing the file cannot simply ask for; and a picture a reader
+   inserts comes back as the `contentUri`'s bytes, which Google may have re-encoded; the
+   zip export would be the byte-exact route.
 2. **Lists in the read-back.** `listId` is opaque and output-only; whether Docs forks or
    reuses one when a user splits a list in the UI is undocumented. What an *imported*
    list's glyphs read as is no longer a risk but a measurement — see the table above.
