@@ -90,9 +90,16 @@ a per-slide background picture.
   once in a TeX Live container (`tests/decks/build.py` reruns until the .aux settles: TeX Live's
   tikzmark needs a third pass); failing shading seeds leave their PDF and both renders in the
   artifact. All three platforms pass.
-  And deck.json is identical on all 48 test decks; extract is ~2.3× slower than PDFium, rendering
-  ~7× (float32 rounding batched through `syntax.F32X*` structs with a scalar fallback on overflow,
-  one regex per word in both lexers, psLib shortcuts for Type 1 programs). `tests/test_pure_pdf.py`.
+  And deck.json is identical on all 48 test decks; extract is ~2.4× slower than PDFium, rendering
+  ~10× (`devtools/pure_bench`: 11 decks at the test zoom, the process's own CPU, the minimum of
+  several passes - and an A/B measured *interleaved*, since the same unchanged file drifts 8% with
+  the machine's state; float32 rounding batched through `syntax.F32X*` structs with a scalar
+  fallback on overflow, one regex per word in both lexers, psLib shortcuts for Type 1 programs,
+  ftgrays' LCD filter as one numpy convolution and its cell machinery without the int32 wrap C does
+  not do: -8% of a render pass). Half a render pass is glyphs (`render_text` 43%: 31% rasterising
+  the 24% the glyph cache misses, of which ftgrays is half, and 11% composing the cached bitmaps),
+  and 12% of an extract pass is `fonts.SimpleFont._load_metrics` building a glyph outline to read
+  its bounding box. `tests/test_pure_pdf.py`.
   Cross references (CPDF_Parser, rebuild included) and navigation (`pure/navigation.py`: links,
   actions, destinations, name trees, page labels, metadata) are ported rule for rule; the whole-file
   fuzz (`--structure`, seeds 0-500) differs from PDFium on none (27 before font substitution was
