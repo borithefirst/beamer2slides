@@ -113,6 +113,24 @@ def _split(token: str) -> list[str]:
     return [p for p in PIECE.findall(token) if len(p) > 1]
 
 
+def stands_elsewhere(text: str, whole: str) -> bool:
+    r"""Whether every word of `text` is still somewhere in `whole`.
+
+    What both resurrection checks ask before calling something deleted, and the same
+    forgiveness `joined_differently` grants a token, granted to a whole block. The
+    words are looked for *inside* `whole`, not among its tokens, because `WORD` is
+    `\S+` and a reader's drag glues the text it carries to whatever it lands in: a
+    paragraph dropped inside the full stop of the one before it says "section.."
+    where the base said "section." (chain-8 seeds 64057, 64084), and one that held a
+    chip comes down without it, closing the gap it left ("harbourgrace" for "harbour
+    grace", seed 64166 — no `insertText` retypes a chip). Neither is a block that
+    went away. Erring this way costs a finding; the other way cries wolf on every
+    move.
+    """
+    return all(piece in whole for token in WORD.findall(text)
+               for piece in _split(token))
+
+
 def joined_differently(token: str, after: Counter, was: Counter) -> bool:
     r"""A token the reader typed is not lost when the words *they* put in it are still
     there, joined to something else.
@@ -595,8 +613,9 @@ def _tab_findings(was: dict | None, now: dict, then: dict | None, said: str,
         out += _inherited_findings(key, block, new[key], (mine or {}), said, tab, theme)
         if block.get("kind") == "table":
             out += _cell_findings(key, block, base_block, new[key], after_words, said, tab)
+            out += _row_resurrection_findings(key, block, base_block, new[key], said, tab)
 
-    before_words = words(part_text(now))
+    before_text = part_text(now)
     for key, was_block in old.items():
         # The mirror of `block_gone`, and the same shape as `tab_resurrected`: the
         # reader deleted this block in the browser, the file still asks for it, and it
@@ -614,9 +633,9 @@ def _tab_findings(was: dict | None, now: dict, then: dict | None, said: str,
         # words rather than the text, because a moved block that held an equation
         # comes down without it (no request makes one), so the two never read alike.
         # A block whose every word still stands somewhere is not one that was deleted
-        # and put back; erring this way costs a finding, the other way cries wolf on
-        # every move.
-        if not (words(text_of(was_block)) - before_words):
+        # and put back (`stands_elsewhere`, which is also what forgives the gluing a
+        # drag does to the words it carries).
+        if stands_elsewhere(text_of(was_block), before_text):
             continue
         if _named(said, key, text_of(was_block)[:40]):
             continue
@@ -893,6 +912,40 @@ def _cell_findings(key, block, base_block, after_block, after_words, said, tab):
             out.append(finding("cell_words_lost", "loss",
                                f"the cell {at} of {key} lost {' '.join(sorted(lost))[:60]}",
                                tab=tab, key=key))
+    return out
+
+
+def _row_texts(block: dict | None) -> list[str]:
+    """One string per row, its cells joined: what a row *says*, which is the only
+    handle on a row there is (a row carries no key of its own)."""
+    return [" | ".join(text_of(inner) for cell in row for inner in cell).strip()
+            for row in (block or {}).get("rows", [])]
+
+
+def _row_resurrection_findings(key, block, base_block, after_block, said, tab):
+    """A row the reader deleted that the sync put back.
+
+    `block_resurrected` at the third size. A row has no key: the merge knows it by
+    what it says (`doc_merge._table_lines`), and so does this. A row the reader
+    reordered or reworded is not one they deleted — its words are still in the table
+    before the sync — so the question is asked of the words, as it is of a block, and
+    is just as forgiving on purpose.
+    """
+    if not base_block or block.get("kind") != "table" or not after_block:
+        return []
+    live_rows = _row_texts(block)
+    live_text = " ".join(live_rows)
+    after_rows = set(_row_texts(after_block))
+    out = []
+    for row in _row_texts(base_block):
+        if not row.strip() or row in live_rows or row not in after_rows:
+            continue
+        if stands_elsewhere(row, live_text) or _named(said, key, row[:40]):
+            continue
+        out.append(finding("row_resurrected", "loss",
+                           f"the reader deleted the row {row[:60]!r} of {key} and it is "
+                           f"back after the sync; the report does not say why",
+                           tab=tab, key=key))
     return out
 
 

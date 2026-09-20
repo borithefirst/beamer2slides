@@ -1325,6 +1325,24 @@ keys, named ranges), `doc_merge.py` (pure planning), `doc_sync.py` (the commands
   comes down without it. Forgiving on purpose (a block whose every word still stands is let
   go), or it accuses every move: 7 false alarms of 300 at chain 4 before that, 0 after,
   68 with the clause out.
+  And once more at the size of a **row**, which is the last size (below it are cells, and a
+  cell the reader emptied is words, not a decision). A row has no key: the merge knows it by
+  what it says and so does `_row_resurrection_findings`. It found a defect `_table_lines`
+  itself could not show, because `_table_lines` is right: the grid goes in a batch of its own
+  and `rebase_tables` then moves the base onto it, which takes a row the *reader* deleted out
+  of the base - and with it the only thing that said which of the **file's** rows it was, so
+  the round after the regrid read that file row as one the source had just added and put the
+  reader's row back, twice-applied and unmentioned (seed 63138, chain 4). The merge now
+  carries what it knew instead of guessing again: `_table_lines` gives back the file lines it
+  has settled as not in the grid, `_rebased_table` puts them in `aligned`, `_merged_lines`
+  counts them as known, and each round unions its own settlement with the inherited one.
+  300 rounds at chain 4 and 200 at chain 8 clean; taking it out fails 1 of 200 at each depth,
+  which is thin, so the defect is also pinned by a hand-built test. The row check cost the
+  other two a lesson in forgiveness: `WORD` is `\S+`, and the harness's drag lands where the
+  reader dropped it - inside the full stop before (`section.` -> `section..`) or with a
+  dropped chip's gap closed (`harbour grace` -> `harbourgrace`) - so `stands_elsewhere` looks
+  for the words *inside* the tab's text, `joined_differently`'s forgiveness at block size.
+  It costs nothing: 34 of 200 rounds still fail with the block delete broken on purpose.
 - The **document's name** is the file's `<title>`, and a Google Doc's title *is* its name in
   Drive: no `batchUpdate` request writes one, so `push` named it at birth and nothing said it
   again. `doc_merge.document_title` merges it three ways (the file alone renamed it -> written;

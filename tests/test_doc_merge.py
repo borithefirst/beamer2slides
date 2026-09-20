@@ -668,6 +668,27 @@ def test_a_column_and_a_row_the_source_added_get_their_words_on_the_next_pass():
         "NEW", "NEW2", "a three", "b three", "x"]
 
 
+def test_a_row_the_reader_deleted_is_not_put_back_on_the_pass_after_the_regrid():
+    """The rebase takes the deleted row out of the base, and with it the only thing
+    that said which of the file's rows it was — so the pass after the regrid would
+    find that row matched to nothing and read it as one the source had just added.
+    `aligned` carries the settlement instead (`_table_lines`'s `dropped`)."""
+    ours = grid_table([["a one", "b one"], ["a two", "b two"], ["a new", "b new"]])
+    theirs = grid_table([["a one", "b one"]])
+    result = doc_merge.plan(GRID, ours, theirs)
+    assert kinds(result["structure"]) == ["insertTableRow"]
+    assert result["shaped"][0]["lines"]["dropped"] == {"row": [1], "column": []}
+
+    after = grid_table([["a one", "b one"], ["", ""]])
+    rebased = doc_merge.rebase_tables(GRID, after, result["shaped"])
+    assert rebased["blocks"][1]["aligned"]["row_dropped"] == [1]
+    again = doc_merge.plan(rebased, ours, after)
+    assert again["structure"] == []
+    assert [[doc_merge.block_text(c[0]) for c in row]
+            for row in again["blocks"][1]["rows"]] == [["a one", "b one"],
+                                                       ["a new", "b new"]]
+
+
 def test_a_cell_the_source_split_into_two_paragraphs_is_written_with_the_break():
     ours = grid_table([["a one", "b one"], ["a two", "b two"]])
     ours["blocks"][1]["rows"][0][1] = [{"kind": "paragraph", "runs": [{"text": "b one"}]},

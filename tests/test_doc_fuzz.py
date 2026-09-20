@@ -54,7 +54,9 @@ CHAINED = (0, 1, 2, 3, 4, 5)
 # the centring of the one deleted above it. And two at chain 8: 994410 the surviving copy
 # of a picture answering for the one the reader deleted, 994424 a kept paragraph following
 # the table the source moved away from it, 41000 an empty heading in front of a table
-# whose named range outlived the delete that borrowed the mark before it.
+# whose named range outlived the delete that borrowed the mark before it. Then 63138
+# (chain 4) a row the reader deleted put back by the round after the regrid, and 64166
+# (chain 8) the oracle calling a dragged block that held a chip a resurrection.
 # A seed names a *script*, not a defect: growing `fuzz_docs.PARA_MARKS` or
 # `READER_MEASURES` (paragraph borders, `pageBreakBefore` and `keepWithNext` went in with
 # the dialect) makes every draw come out different, so these rounds no longer replay the
@@ -64,7 +66,8 @@ CHAINED = (0, 1, 2, 3, 4, 5)
 REGRESSIONS = ((60, 1), (181, 1), (309, 4), (1031, 8), (1147, 8),
                (5099, 8), (5130, 8), (5167, 8),
                (970228, 6), (970528, 6), (970711, 6), (980193, 6),
-               (912452, 6), (993608, 6), (994410, 8), (994424, 8), (41000, 8))
+               (912452, 6), (993608, 6), (994410, 8), (994424, 8), (41000, 8),
+               (63138, 4), (64166, 8))
 
 
 def _round(seed: int, chain: int, shape: str | None = None) -> None:
@@ -493,6 +496,46 @@ def test_the_oracle_does_not_call_a_block_the_reader_moved_a_resurrection():
     after = _ir(_p("k2", "Dragged somewhere else."), _p("k1", "Kept."))
     ours = _ir(_p("k1", "Kept."), _p("k2", "Dragged somewhere else."))
     assert "block_resurrected" not in _kinds(oracle.check(base, before, after, NOTHING, ours))
+
+
+def test_the_oracle_sees_a_row_the_reader_deleted_come_back():
+    """The same question at the third size. A row carries no key of its own, so it is
+    known by what it says — which is how the merge knows it too
+    (`doc_merge._table_lines`)."""
+    base = _ir(_grid([["h1", "h2"], ["ribbon", "x"]], key="t1"))
+    before = _ir(_grid([["h1", "h2"]], key="t1"))            # the reader deleted it
+    after = _ir(_grid([["h1", "h2"], ["ribbon", "x"]], key="t1"))
+    ours = _ir(_grid([["h1", "h2"], ["ribbon", "x"]], key="t1"))
+    assert "row_resurrected" in _kinds(oracle.check(base, before, after, NOTHING, ours))
+    told = {"conflicts": [], "applied": [],
+            "notes": ["t1: the row 'ribbon | x' the document deleted is written again"]}
+    assert "row_resurrected" not in _kinds(oracle.check(base, before, after, told, ours))
+    # A row whose words are still in the table is one they moved or reworded, not one
+    # they deleted — the same forgiveness a block gets.
+    moved = _ir(_grid([["ribbon", "x"], ["h1", "h2"]], key="t1"))
+    assert "row_resurrected" not in _kinds(oracle.check(base, moved, after, NOTHING, ours))
+
+
+def test_the_oracle_forgives_the_words_a_drag_glues_to_their_neighbours():
+    """A reader's drag lands where they dropped it: inside the full stop of the
+    paragraph before (`section.` -> `section..`), or, when the block held a chip no
+    `insertText` can retype, with the gap closed (`harbour grace` -> `harbourgrace`).
+    Both read as a block whose words are gone and came back. Chain-8 seeds 64057,
+    64084 and 64166, each shrinking to a lone `move_block`."""
+    chip = {"frozen": True, "chip": "person", "text": "", "value": "ada@example.com"}
+    base = _ir(_p("k1", "Second section."),
+               {"key": "k2", "kind": "paragraph",
+                "runs": [{"text": "harbour"}, chip, {"text": "grace"}]})
+    before = _ir(_p("k1", "Second section"),
+                 {"kind": "paragraph", "runs": [{"text": "harbourgrace"}]})
+    after = _ir(_p("k1", "Second section"),
+                _p("k2", "harbourgrace"))
+    assert "block_resurrected" not in _kinds(
+        oracle.check(base, before, after, NOTHING, _ir(*base["blocks"])))
+    # And a word that stands nowhere at all is still heard.
+    struck = _ir(_p("k1", "Second section"))
+    assert "block_resurrected" in _kinds(
+        oracle.check(base, struck, after, NOTHING, _ir(*base["blocks"])))
 
 
 def test_the_oracle_sees_a_tab_the_reader_deleted_come_back():

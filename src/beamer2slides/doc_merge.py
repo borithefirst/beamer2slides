@@ -723,7 +723,10 @@ def _rebased_table(was: dict, lines: dict, now: dict) -> dict:
     A row the source added is in it, blank; a row the document added is not, since
     nothing agreed on it; the rest keep the base's words. `aligned` records which of
     its lines is which line of the document's new grid and of the file, because
-    that is known here for certain and would only be guessed again from the words.
+    that is known here for certain and would only be guessed again from the words —
+    and, with them, the file's lines this table no longer has room for
+    (`_table_lines`), which are exactly the ones no line of the rebased base can
+    speak for.
     """
     names = ("row", "column")
     kept = {name: [line for line in lines[name] if not line.gone] for name in names}
@@ -733,6 +736,7 @@ def _rebased_table(was: dict, lines: dict, now: dict) -> dict:
              for column in agreed["column"]] for row in agreed["row"]]
     aligned = {"live": _size(now.get("rows", [])), "mine": lines["mine"]}
     for name in names:
+        aligned[f"{name}_dropped"] = lines.get("dropped", {}).get(name, [])
         where = {id(line): k for k, line in enumerate(kept[name])}
         aligned[f"{name}_live"] = [(i, where[id(line)]) for i, line in enumerate(agreed[name])]
         aligned[f"{name}_mine"] = [(i, line.mine) for i, line in enumerate(agreed[name])
@@ -1255,11 +1259,11 @@ def _merge_table(was: dict, mine: dict, live: dict, conflicts: list, notes: list
             notes.append(f"{key}: the table's rows and columns differ between the sides "
                          f"— left alone")
             return out | {"origin": "table grid differs"}
-        rows, columns = found
+        rows, columns, settled = found
         ops = _grid_ops(rows, "row") + _grid_ops(columns, "column")
         if ops:
             return out | {"origin": "the grid the source has", "regrid": ops,
-                          "lines": {"row": rows, "column": columns,
+                          "lines": {"row": rows, "column": columns, "dropped": settled,
                                     "mine": _size(mine.get("rows", []))}}
         # No line is added or taken away, so the document's grid is the merged one,
         # and every live cell is merged where it stands.
@@ -1314,19 +1318,26 @@ BLANK = 0.6    # two lines with nothing written in them: alike, but less than eq
 
 
 def _table_lines(was: dict, mine: dict, live: dict, notes: list,
-                 key: str) -> tuple[list[_Line], list[_Line]] | None:
+                 key: str) -> tuple[list[_Line], list[_Line], dict] | None:
     """The merged rows and columns of a table, or None when there is no telling.
 
     The columns are matched by the words in them and the rows by their cells in those
     columns, each side against the base, and the two matchings are merged
     (`_merged_lines`). A base the grid was just written to says how its lines match
     (`rebase_tables`), so the pass after a regrid does not guess them a second time.
+    The third thing it gives back is what that base cannot hold: the file's lines this
+    merge has settled as *not* in the grid, because the document deleted the base line
+    they pair with. The rebase takes such a line out of the base altogether, so the
+    round after it would find the file's line matched to nothing and read it as one the
+    source has just added — and put back the row a reader deleted.
     """
     here, old, src = (b.get("rows", []) for b in (live, was, mine))
     if not all(_size(rows) for rows in (here, old, src)):
         return None                            # a row out of step with the others
     now, then, want = (_texts(rows) for rows in (here, old, src))
     hint = _hint(was, mine, live)
+    dropped = {name: frozenset((hint or {}).get(f"{name}_dropped", ()))
+               for name in ("row", "column")}
     if hint:
         live_columns, mine_columns = hint["column_live"], hint["column_mine"]
         live_rows, mine_rows = hint["row_live"], hint["row_mine"]
@@ -1343,16 +1354,21 @@ def _table_lines(was: dict, mine: dict, live: dict, notes: list,
         return _line_unchanged([row[w] for row in then], [row[l] for row in now],
                                live_rows, len(now))
 
-    rows = _merged_lines(len(now), len(want), live_rows, mine_rows, row_kept)
-    columns = _merged_lines(len(now[0]), len(want[0]), live_columns, mine_columns, column_kept)
+    rows = _merged_lines(len(now), len(want), live_rows, mine_rows, row_kept,
+                         dropped["row"])
+    columns = _merged_lines(len(now[0]), len(want[0]), live_columns, mine_columns,
+                            column_kept, dropped["column"])
     if rows is None or columns is None:
         return None
-    for name, merged in (("row", rows), ("column", columns)):
+    settled = {}
+    for name, merged, pairs in (("row", rows, mine_rows), ("column", columns, mine_columns)):
         for line in merged:
             if line.was is not None and line.mine is None and not line.gone:
                 notes.append(f"{key}: the source took away a {name}, but the document wrote "
                              f"in it — kept")
-    return rows, columns
+        have = {line.mine for line in merged if line.mine is not None}
+        settled[name] = sorted(dropped[name] | {m for _, m in pairs if m not in have})
+    return rows, columns, settled
 
 
 def _hint(was: dict, mine: dict, live: dict) -> dict | None:
@@ -1447,12 +1463,16 @@ def _line_unchanged(was: list[str], live: list[str], across: list[tuple[int, int
 
 
 def _merged_lines(n_live: int, n_mine: int, live: list[tuple[int, int]],
-                  mine: list[tuple[int, int]], unchanged) -> list[_Line] | None:
+                  mine: list[tuple[int, int]], unchanged,
+                  dropped: frozenset = frozenset()) -> list[_Line] | None:
     """The rows (or columns) of the merged table, in the document's order.
 
     Every line the document has is there: one the source took away is marked `gone`
     when the document left it as it was, and kept otherwise. Lines the source added
-    go in after the line that precedes them in the file. A table the merge would
+    go in after the line that precedes them in the file — all but the ones in
+    `dropped`, which the file has and nobody is adding: they pair with a base line
+    the *document* deleted, and are only here at all because a line with no line of
+    the document's leaves no `_Line` behind to say so. A table the merge would
     leave with no line of the document's is not a merge a grid request can write
     (the last row cannot be deleted), and says so with None.
     """
@@ -1467,7 +1487,7 @@ def _merged_lines(n_live: int, n_mine: int, live: list[tuple[int, int]],
             lines.append(_Line(w, l, mine_of[w]))
         else:
             lines.append(_Line(w, l, None, gone=unchanged(w, l)))
-    known = set(mine_of.values())
+    known = set(mine_of.values()) | set(dropped)
     for m in range(n_mine):
         if m in known:
             continue

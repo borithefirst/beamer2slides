@@ -1642,6 +1642,48 @@ Measured over 300 rounds at chain 4: with the clause in place, 0 failed — 7 be
 move was told from the deletion, every one of them shrinking to a lone `move_block`.
 With the clause taken out, 68 failed, shrinking to a lone `delete_block`.
 
+### And once more, at the size of a row
+
+A row is the third size the same question has, and the last one: below a row there are
+cells, and a cell the reader emptied is words and not a decision. A row carries no key
+of its own — the merge knows it by what it says (`doc_merge._table_lines`) — so
+`_row_resurrection_findings` knows it the same way: a row the base has, the read before
+the sync has not, and the table has again afterwards.
+
+It found a real defect on its second campaign, and one that no amount of staring at
+`_table_lines` would have shown, because `_table_lines` is right. The sync writes a
+table's grid in a batch of its own and then reads the document again, and `rebase_tables`
+moves the base onto the grid that was just written. A row the *reader* deleted is not in
+that new grid, so the rebase takes it out of the base — and with it the only thing that
+said which of the **file's** rows it was. The round after the regrid then finds that
+file row matched to nothing, reads it as a row the source has just added, and inserts
+it. The reader's deletion is undone, the report says `inserts a row` twice, and the
+notes are empty (offline seed 63138, chain 4, shrunk to `delete_row` against `regrid`).
+
+What was missing is a fact the merge knew and threw away, so it is carried rather than
+guessed again: `_table_lines` gives back, beside the merged rows and columns, the file's
+lines it has **settled as not in the grid**, `_rebased_table` puts them in `aligned`
+next to the matchings it already records there, and `_merged_lines` counts them among
+the lines it need not add. The knowledge accumulates over the rounds, since a later
+round's own settlement is unioned with the one it inherited.
+
+Calibration, as for the other two: with the settlement carried, 300 rounds at chain 4
+and 200 at chain 8 pass. Taking it back out fails 1 of 200 at each depth — thin, which
+is why the defect is pinned deterministically by
+`test_a_row_the_reader_deleted_is_not_put_back_on_the_pass_after_the_regrid` as well.
+
+The row check also cost the other two a lesson in forgiveness. `block_resurrected` asks
+whether the block's words are still in the tab, and three chain-8 rounds said they were
+not when the reader had merely dragged the block: the harness's drag is a cut and a
+retype at the index the reader dropped on, which lands *inside* the full stop of the
+paragraph before it (`section.` becomes `section..`) or, when the block held a chip no
+`insertText` can retype, closes the gap the chip left (`harbour grace` becomes
+`harbourgrace`). `WORD` is `\S+`, so both read as words that went away. `stands_elsewhere`
+asks for the words *inside* the tab's text instead — the forgiveness `joined_differently`
+already grants a single token, granted to a whole block — and both resurrection checks
+use it. It costs nothing that matters: with the block delete broken on purpose, 34 of 200
+rounds at chain 4 still fail, 68 findings.
+
 ## Remaining risks
 
 1. **Pictures** — retired, see "Pictures, and the chips a request can make" above. What
