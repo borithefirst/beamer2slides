@@ -863,6 +863,16 @@ def plan_merge(base: dict, ours: dict, theirs: dict, adopt=None, follow_labels: 
                 f"it says; it was matched by where it stands, between the frames around it. Move it too, or "
                 f"rewrite the rest of it, and there is nothing left to recognise it by - give it a label "
                 f"(`beamer2slides label`), see docs/labels.md.")
+        if b is not None and weak.get(j) == "crossed":
+            # `identity.crossed_twins`: this frame's label and another's changed places over two
+            # slides that say word for word the same thing, so nothing in the words can say whether
+            # the author moved the frames or moved a label. The label was followed; it is the
+            # promise, and nobody's edits move either way.
+            report["warnings"].append(
+                f"slide {b['key']}: this frame's label `{o.get('label')}` and another's have changed places "
+                f"over two slides that say the same thing, so nothing they say can tell whether you moved the "
+                f"frames or moved a label. The labels were followed. If `{o.get('label')}` belongs on the other "
+                f"frame, put it back before the next sync - see docs/labels.md.")
         if b is not None and weak.get(j) == "twins" and not o.get("label"):
             # `identity.align_slides`: this frame has no label and says about as much as its
             # neighbour does, so putting it on this slide and putting it on the other one are the

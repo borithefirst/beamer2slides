@@ -173,9 +173,14 @@ def round_once(seed: int, label_chance: float, tmp: Path, chain: int = 1,
         # label the frame no longer carries (`b["label"] and o["label"] != b["label"]`).
         wrong_now = _wrong_frames(pairings["now"], ours_truth, base_truth)
 
+        # A frame no pass would pair, named beside the slide it says much of the same thing as,
+        # is the third: `identity.near_misses` is in the report for exactly this - the person is
+        # asked whether the new slide and the old one are one frame (docs/sync.md).
+        near = {m["ours"] for m in identity.near_misses(base_infos, infos, pairings["now"])}
+
         def warned(j: int) -> bool:
             i = pairings["now"].get(j)
-            if j in weak:
+            if j in weak or j in near:
                 return True
             return i is not None and bool(base_infos[i].get("label")) \
                 and infos[j].get("label") != base_infos[i].get("label")

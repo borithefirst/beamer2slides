@@ -110,6 +110,75 @@ def test_labels_swapped_between_two_frames_that_also_share_a_title():
     assert identity.align_slides(base, ours) == {0: 0, 1: 1}, "the words decide, and they are right"
 
 
+UNTITLED3 = "the figure on the left counts the regions we sell in and the table beside it names the partners"
+UNTITLED4 = "the picture at the top ranks the launches we shipped and the notes under it name the new hires"
+
+
+def test_a_label_swapped_between_two_slides_nobody_gave_a_title():
+    """What a bar of 1.0 means depends on the pair, and this is where it meant everything.
+
+    `_evidence` is the word ratio plus half of what the titles agree on, so it can reach 1.5 for
+    two slides with the same title and only 1.0 for two with no title at all - which is half of
+    every deck `adopt` writes, and the very decks where a label is the only identity there is. On
+    those, `LABEL_MOVED` asked for *word for word* before anything could explain a moved label,
+    and a swap between two frames each reworded by one word - which is what a revision looks like
+    - scored 0.95 and was taken in silence. `_moved_bar` asks for the same share of what the pair
+    could say instead."""
+    base = [info("", UNTITLED3, "one"), info("", UNTITLED4, "two")]
+    ours = [info("", UNTITLED3.replace("counts", "lists"), "two"),
+            info("", UNTITLED4.replace("ranks", "sorts"), "one")]
+    here = identity._evidence(base[1], ours[1])
+    assert identity._evidence(base[1], ours[0]) < 0.5, "the label's own pairing explains nothing"
+    assert 0.9 < here < 1.0, "unmistakable, and under a flat bar of 1.0"
+    assert {m["verdict"] for m in identity.label_moves(base, ours)} == {"moved"}
+    assert identity.align_slides(base, ours) == {0: 0, 1: 1}, "the words decide, and they are right"
+    assert identity.label_pairs(base, ours) == {0: 1, 1: 0}, "the label alone would have crossed them"
+
+
+TWIN_SLIDE = "the table lists the review and export figures for the quarter that has just gone by"
+
+
+def test_two_labels_crossed_over_slides_that_say_the_same_thing_are_a_coin_toss():
+    """Where nothing can be decided and something can still be said (`identity.crossed_twins`).
+
+    Two slides of the deck say word for word the same thing, and the source comes back with their
+    labels the other way round. `label_moves` has nothing to work with and is right to keep quiet:
+    the reading where the labels swapped and the reading where they did not score *exactly* alike,
+    so neither explains the other. What is not alike is the order - the labels cross where the
+    slides do not - and that is either two frames the author moved or `[label=one]` pasted onto
+    the frame below. The labels are followed, since a label is the promise and nobody's edits move
+    either way, and the person is told (fuzz_labels --shape adopt seeds 7100725 and 7100896, which
+    wrote each frame onto the other's slide without a word)."""
+    base = [info("", TWIN_SLIDE, "one"), info("", TWIN_SLIDE, "two")]
+    ours = [info("", TWIN_SLIDE, "two"), info("", TWIN_SLIDE + " and by the one before", "one")]
+    assert identity.label_moves(base, ours) == [], "every reading ties: there is nothing to decide"
+    weak: dict[int, str] = {}
+    assert identity.align_slides(base, ours, weak=weak) == {0: 1, 1: 0}, "the labels are followed"
+    assert weak == {0: "crossed", 1: "crossed"}
+
+
+def test_the_same_two_slides_with_their_labels_in_order_say_nothing():
+    """The counter-case that keeps the rule about the *crossing*: a deck that repeats itself is
+    full of pairings a tie could have gone either way, and one warning per twin would be noise."""
+    base = [info("", TWIN_SLIDE, "one"), info("", TWIN_SLIDE, "two")]
+    ours = [info("", TWIN_SLIDE, "one"), info("", TWIN_SLIDE + " and by the one before", "two")]
+    weak: dict[int, str] = {}
+    assert identity.align_slides(base, ours, weak=weak) == {0: 0, 1: 1}
+    assert weak == {}
+
+
+def test_the_crossing_is_named_in_the_report():
+    """It is a warning, not a conflict: the labels were followed and nothing is at risk this
+    time - but which slide each frame writes to next time is the author's to settle."""
+    base = many_slides(["one", "two"])
+    ours = {"slides": [ours_of(s) for s in base["slides"]],
+            "pairs": {0: 1, 1: 0}, "weak_pairs": {0: "crossed", 1: "crossed"}}
+    ours["slides"][0]["label"], ours["slides"][1]["label"] = "two", "one"
+    theirs = {"revisionId": "r", "slides": [live(s) for s in base["slides"]]}
+    said = [w for w in merge.plan_merge(base, ours, theirs)["report"]["warnings"] if "changed places" in w]
+    assert len(said) == 2 and "`two`" in said[0] and "docs/labels.md" in said[0]
+
+
 REVENUE3 = "revenue rose in the third quarter and the table below lists every region we sell in"
 REVENUE4 = "revenue fell in the fourth quarter and the chart below ranks every partner we work with"
 
@@ -172,7 +241,7 @@ def test_a_frame_reworded_on_a_deck_of_twins_is_no_exchange():
     ours = [info("Roadmap", reworded, "half1"), info("Roadmap", twin)]
     own = identity._evidence(base[0], ours[0])
     here, there = identity._evidence(base[0], ours[1]), identity._evidence(base[1], ours[0])
-    assert min(here, there) >= identity.LABEL_MOVED
+    assert min(here, there) >= identity._moved_bar(base[0], ours[1])
     assert min(here, there) - own >= identity.LABEL_EXCHANGE, "every number says exchange"
     assert identity.label_moves(base, ours) == [], "the readings point elsewhere, so nothing is said"
     assert identity.align_slides(base, ours) == {0: 0, 1: 1}

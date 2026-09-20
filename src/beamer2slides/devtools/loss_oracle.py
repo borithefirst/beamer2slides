@@ -774,9 +774,13 @@ def uncertain_slides(base: dict, ours: dict | None) -> set[str]:
         # `sync.build_ours` puts the base's keys on these before the report is written
         out.update(k for k in (m.get("slide"), m.get("frame_is")) if isinstance(k, str))
     pairs = {int(k): v for k, v in (ours.get("pairs") or {}).items()}
-    for j, _how in (ours.get("weak_pairs") or {}).items():
+    for j, how in (ours.get("weak_pairs") or {}).items():
         i, o = pairs.get(int(j)), ours["slides"][int(j)]
-        if i is not None and not o.get("label"):   # the warning `merge.plan_merge` writes
+        # exactly the warning `merge.plan_merge` writes. `crossed` - two labels that changed
+        # places over slides that say the same thing - is a warning too and is deliberately left
+        # out: nothing in the campaigns has ever failed on such a slide, and an excuse nothing
+        # needs is the one way to make sure nothing is caught. Put it in when a round asks for it.
+        if i is not None and how in ("place", "twins") and not o.get("label"):
             out.add(base["slides"][i]["key"])
     return out
 

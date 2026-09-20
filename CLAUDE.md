@@ -626,7 +626,27 @@ edits move) and the report names the slide and asks for a label. Measured with `
 adopt`, 2000 rounds chained 4 deep: with the labels kept, 2 frames of 20,080 are misidentified and
 both are now named in the report, none in silence; 1 pairing in 20,080 is called a coin toss, so it
 is not noise. The campaign counts what a person is told, not what `label_moves` said alone - a
-changed label is a warning of its own in `merge.plan_merge`.
+changed label is a warning of its own in `merge.plan_merge`. Its labelled counterpart is
+`weak_pairs` value `crossed` (`identity.crossed_twins`): two labels that changed places over slides
+saying word for word the same thing, where the reading with the swap and the reading without score
+*exactly* alike, so every rule above is right to stay silent and only the **order** says anything -
+either two frames the author moved or `[label=one]` pasted onto the frame below, and nothing
+downstream will tell those apart. The labels are followed and both slides are named.
+And what counts as an explanation at all is a share of what the pair *can* say, not a number
+(`identity._moved_bar`): `_evidence` reaches 1.5 where the titles match and 1.0 where the slides
+never had one, so a flat `LABEL_MOVED` of 1.0 asked for word for word on a deck `adopt` wrote -
+where a label is the only identity there is - and a swap between two untitled frames each reworded
+by a word scored 0.95 against 0.42 and was followed in silence. Measured over the same seeds with
+only that swapped (1400 rounds four deep): adopt-shaped, misidentified frames 311 -> **109** of
+14,304, written onto the wrong slide 63 -> **40** (0.44% -> 0.28%); converted, 115 -> **43** of
+11,031 and written 35 -> **17**, with `unsure` 62 -> 26 (a question the content can now answer
+becomes an answer). With the crossing named too, the adopt-shaped rounds that get a frame onto the
+wrong slide go from 137 told / 27 silent to **61 told / 2 silent**, and those last two were the
+campaign's own: `src_add_slide` reissued a deleted slide's label (following a label onto the frame
+that carries it now is what a label *means*), and `near_misses`, which is in the report, was not
+counted as telling anybody. Corrected, **nothing written onto the wrong slide in 2,607 broken
+rounds goes unmentioned**; the price is 34 warnings in the 200 sound rounds that really moved a
+frame, each about two slides a person cannot tell apart either.
 
 Slide order is merged, not all-or-nothing (`merge.plan_order`): the source's order is the ground and
 a slide the deck itself picked up (out of its base order there, `_out_of_place`) goes back beside

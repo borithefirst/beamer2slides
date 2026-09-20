@@ -158,12 +158,18 @@ def src_delete_element(rng, doc):
 def src_add_slide(rng, doc):
     i = rng.randrange(len(doc["slides"]) + 1)
     # a label and element ids nothing else uses: two frames with one \label is a broken source,
-    # and two slides with one key would make the whole identity model meaningless
+    # and two slides with one key would make the whole identity model meaningless. A label a
+    # deleted slide took with it is not free either, though nothing living carries it: reissuing
+    # it says "this new frame is that frame", which is exactly what a label means, so the sync
+    # pairs them and is right to - while a campaign that keeps its own truth reads the pairing as
+    # a frame on the wrong slide (fuzz_labels --shape adopt seed 7100523: one step deleted the
+    # slide holding `new5` and added a frame that was handed `new5` again).
     labels = {s.get("label") for s in doc["slides"]}
     ids = {e["id"] for s in doc["slides"] for e in s["elements"]}
-    page = len(doc["slides"])
+    page = max(len(doc["slides"]), doc.get("labelled", 0))
     while f"new{page}" in labels or f"p{page}t0" in ids:
         page += 1
+    doc["labelled"] = page + 1
     title = "New source frame " + rng.choice(W.WORDS)
     slide = {"page": page, "label": f"new{page}", "title": title, "notes": "", "bg": "#ffffff",
              "elements": [W.text_ir(f"p{page}t0", title, (20, 20, 200, 34), role="title"),

@@ -436,6 +436,23 @@ behind is already 0.9 alike, and nothing can beat 0.9 by half. What stands in fo
 about a pair depends on what their titles already say) while the label's own pairing is not exact.
 A frame edited hard, an overlay step and a retitled frame are exact on neither side.
 
+**What "good on its own" means depends on the pair, too.** `_evidence` is the word ratio plus half
+of what the titles agree on, so it reaches 1.5 for two slides with the same title and only 1.0 for
+two that never had one - and a flat `LABEL_MOVED` of 1.0 therefore asked for most of the words and
+the same title on a talk, and for *word for word* on a deck `adopt` wrote, where half the slides
+have no title at all and a label is the only identity there is. Nothing short of a perfect copy
+could explain a moved label there, so a swap between two untitled frames each reworded by one word -
+which is what a revision looks like - scored 0.95 against 0.42 for the label's own pairing and was
+followed in silence. `identity._moved_bar` asks for the same *share* of what the pair could say,
+which is what `_complete` does for exactness one line above. Measured over the same seeds with only
+that swapped (1400 rounds, four revisions deep): adopt-shaped, misidentified frames 311 → **109** of
+14,304 (2.17% → 0.76%), costly 279 → **77**, written onto the wrong slide 63 → **40** (0.44% →
+0.28%); on a converted talk, where the bar moves only for a pair whose titles differ, 115 → **43**
+of 11,031 (1.04% → 0.39%) and written 35 → **17** (0.32% → 0.15%), with `unsure` verdicts 62 → 26,
+since a question the content can now answer becomes an answer. The sound rounds are unchanged on
+both shapes but for one extra `moved` verdict in 2,812 adopt-shaped ones, and no sound round
+anywhere puts a frame on the wrong slide.
+
 The two sides are not worth the same, though, and only one of them may stand alone:
 
 - **the frame's side** (`there_exact`): the frame carrying the label says word for word what some
@@ -476,6 +493,27 @@ lose to it outright. The look back is what carries the rule, not the number: a f
 its twin's phrasing clears every numeric bar, and is refused because its two rivals are about each
 other rather than about it (`test_a_frame_reworded_on_a_deck_of_twins_is_no_exchange` - which
 matters more than yield, since `moved` re-pairs, and a wrong `moved` is edits on the wrong slide).
+
+**And where nothing can be decided, something can still be said.** Two slides that say word for word
+the same thing - a deck `adopt` wrote is full of them - leave every rule above nothing to work with:
+the reading where their two labels swapped and the reading where they did not score *exactly* alike,
+so neither explains the other and the check is right to keep quiet. What is not alike is the order -
+the labels cross where the slides do not. A crossing the words account for is a frame the author
+moved; a crossing they cannot account for at all is either two frames moved or `[label=one]` pasted
+onto the frame below, and nothing downstream will ever tell those apart. So the labels are followed
+(a label is the promise, and nobody's edits move either way) and the person is told which two slides
+it was: `identity.crossed_twins`, `weak["crossed"]`, a warning of the same shape `weak["twins"]`
+gives an unlabelled frame standing between look-alikes, one dimension over. On the adopt-shaped
+campaign it takes the rounds that got a frame onto the wrong slide from 42 told and 21 silent to
+**61 told and 2 silent**; the price is 34 warnings in the 200 sound rounds where the source really
+did move a frame, each about two slides the person cannot tell apart either.
+
+The last two silences were the campaign's own, and correcting them is what makes the column mean
+anything: `src_add_slide` handed a new frame the label of a slide deleted in the same step, and
+following a label onto the frame that now carries it is precisely what a label *means* (a new frame
+now gets a name nothing has ever carried), and a frame no pass would pair is named in the report by
+`identity.near_misses`, which the campaign's notion of "told" did not count. With both corrected,
+**not one frame written onto the wrong slide in 2,607 broken adopt-shaped rounds goes unmentioned.**
 
 The title counts by degree, not as yes or no (`identity._title_alike`). The stress deck moves a
 label and retitles all 48 frames in the same version ("Moving labels" → "Moving labels v2"), and a
