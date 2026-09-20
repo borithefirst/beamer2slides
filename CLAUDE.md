@@ -157,6 +157,18 @@ a per-slide background picture.
   shared Arial face decides the next document's fallback glyphs (subst torture seed 316 after 311;
   PDFium renders both orders alike). 6,000 seeds exact, nothing refused for a fallback font; a
   fallback for vertical writing (LoadSubstFace's IsVertWriting) still is.
+  The face a fallback lands on may have no family at all - `UseInternalSubst` sets none on its
+  standard Foxit faces, only `ConfigureExternalSubst` does - and `CFX_SubstFont::IsActualFontLoaded`
+  is a `ByteString::Find`, which never finds an empty needle, so such a face has *not* loaded the
+  actual font and its glyphs are still moved or narrowed to the /Widths width; only a folder scan
+  with no Arial reaches that (GDI answers with Arial, macOS with Helvetica), which is why the ubuntu
+  runner alone drew subst torture seeds 13, 25, 26, 29, 90 and 129 apart. `render_torture_subst
+  --fonts DIR` reproduces another platform's chain here: `FPDF_InitLibraryWithConfig`'s
+  `m_pUserFontPaths` makes PDFium itself substitute from that folder alone through
+  `CFX_FolderFontInfo` (on Windows `CFX_Win32FallbackFontInfo`, whose `MapFont` is
+  `CFX_LinuxFontInfo::MapFont` for a non-CJK charset) and the pure reader through `LinuxFontInfo`
+  over the same folder - exact but for `FindSubstFace`'s two `#if BUILDFLAG(IS_WIN)` switches, which
+  are the build's: Symbol and narrow fonts say nothing about the other OS.
 - No public links: pictures reach Slides inside the imported .pptx, never as shared Drive
   files (they break in protected Workspace domains).
 - **Fidelity is measured on Google's own renderer**, not a local preview: render the PDF page
