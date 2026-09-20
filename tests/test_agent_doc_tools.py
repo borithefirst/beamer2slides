@@ -214,7 +214,8 @@ REPORT = {
 def test_a_report_becomes_diagnostics_at_the_right_levels(tmp_path):
     j = _job(tmp_path)
     counts = doc_tools.report_diagnostics(j, REPORT)
-    assert counts == {"conflicts": 2, "notes": 2, "comments": 1, "chunked": True}
+    assert counts == {"conflicts": 2, "notes": 2, "comments": 1, "chunked": True,
+                      "lost": 0}
     levels = [d.level for d in j.diagnostics]
     assert levels.count("conflict") == 2 and "note" not in levels
     clash = j.diagnostics[0]
@@ -231,6 +232,25 @@ def test_a_chunked_write_is_said_to_be_the_one_that_is_not_atomic(tmp_path):
     chunk = [d for d in j.diagnostics if d.where == "the write"]
     assert len(chunk) == 1 and "not atomic" in chunk[0].message
     assert doc_tools.report_diagnostics(_job(tmp_path), REPORT | {"notes": []})["chunked"] is False
+
+
+def test_the_one_note_that_is_a_loss_is_not_left_among_the_cautions(tmp_path):
+    """Most notes say what a sync left alone. This one says what it took away, and an
+    agent reading fifteen warnings has no way to tell unless the levels differ: it is
+    marked at the source (`doc_sync.LOSS_MARK`) rather than guessed at here, and it
+    comes with the only thing left to do about it."""
+    from beamer2slides import doc_sync
+    lost = ("the paragraph 'Why this matters' is being moved, which drops "
+            f"paragraphStyle.borderBottom — the document's, and {doc_sync.LOSS_MARK}")
+    j = _job(tmp_path)
+    counts = doc_tools.report_diagnostics(j, REPORT | {"notes": [lost]})
+    assert counts["lost"] == 1
+    said = [d for d in j.diagnostics if d.where == "what is lost"]
+    assert len(said) == 1 and "Why this matters" in said[0].message
+    assert "no spelling for it" in said[0].message
+    assert any("set the property again by hand" in step for step in j.next_steps)
+    # And an ordinary note is still an ordinary note.
+    assert doc_tools.report_diagnostics(_job(tmp_path), REPORT)["lost"] == 0
 
 
 def test_an_open_comment_becomes_a_warning_because_nothing_else_can_see_one(tmp_path):

@@ -1502,9 +1502,18 @@ def paragraph_style(block: dict) -> tuple[dict, str]:
     Every field the merge owns is named; only the ones the block asks for are given
     a value. Named-and-unset is how the API is told to put a property back to its
     default, which is what a source that dropped an indent means.
+
+    The alignment goes the same way, and used to be the one exception: START was
+    written whenever the file said nothing, which is also what a heading centred by
+    the document's *theme* says (`doc_ir._named_defaults` reads that now). So a
+    source restyle that never mentioned alignment left-aligned every such heading.
+    Unset, the paragraph falls back to its named style, which is the whole point of
+    a theme; a reader who left-aligned a centred heading in the browser still reads
+    back as `align: left` and is written as START.
     """
-    style = {"namedStyleType": named_style(block),
-             "alignment": doc_ir.TO_ALIGNMENT[block.get("align") or "left"]}
+    style = {"namedStyleType": named_style(block)}
+    if block.get("align"):
+        style["alignment"] = doc_ir.TO_ALIGNMENT[block["align"]]
     fields = ITEM_PARAGRAPH if block["kind"] == "item" else MANAGED_PARAGRAPH
     for key, api in PARAGRAPH_FIELDS:
         if api in fields and block.get(key) is not None:

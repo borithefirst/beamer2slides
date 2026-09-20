@@ -606,6 +606,25 @@ def test_a_paragraph_reports_only_what_it_sets_itself():
     assert "indent_first" not in block and "space_below" not in block
 
 
+def test_a_heading_the_theme_centres_says_nothing_about_its_alignment():
+    """The centring belongs to the document's HEADING_1, not to this paragraph, and a
+    file that claimed it would hand it to the write side as a value — where it stops
+    being the theme's and becomes ours, left-aligned the moment a source edit drops it.
+    The reader's own choice still counts: a heading somebody left-aligned in the
+    browser differs from the style and is carried."""
+    def doc(alignment):
+        return {"namedStyles": {"styles": [
+            {"namedStyleType": "HEADING_1",
+             "paragraphStyle": {"alignment": "CENTER"}}]},
+            "body": {"content": [paragraph(
+                "A heading", 1, {"namedStyleType": "HEADING_1"} |
+                ({"alignment": alignment} if alignment else {}))]}}
+
+    assert "align" not in doc_ir.from_document(doc(None))["blocks"][0]
+    assert "align" not in doc_ir.from_document(doc("CENTER"))["blocks"][0]
+    assert doc_ir.from_document(doc("START"))["blocks"][0]["align"] == "left"
+
+
 def test_a_bullets_own_indents_are_the_presets_and_never_the_files():
     """`createParagraphBullets` owns them: a value written back would fight it."""
     doc = dict(STYLED_LIVE)
@@ -685,10 +704,11 @@ UNMODELLED = {
     "inlineObject.inlineObjectProperties.embeddedObject.imageProperties.cropProperties",
     # A list's own look, its start number among it.
     "nestingLevel.indentStart", "nestingLevel.startNumber", "nestingLevel.textStyle",
-    # The document's theme: a named style's face and measures are read, its marks and
-    # its alignment are not, so a heading's bold and centring are the document's own.
+    # The document's theme: a named style's face, alignment and measures are read (a
+    # paragraph that only repeats them says nothing, and a rewrite leaves them to the
+    # style), its marks are not — a heading's bold is the document's own and survives
+    # a rewrite because no request of ours ever names it with a value.
     "namedStyle.textStyle.bold", "namedStyle.textStyle.foregroundColor",
-    "namedStyle.paragraphStyle.alignment",
 }
 
 

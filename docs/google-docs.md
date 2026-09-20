@@ -212,6 +212,36 @@ writes, and without subtracting the named style the canonical file would come ba
 a wall of spans. It is safe as well as tidy: clearing such a field falls back to
 exactly the value that was left out.
 
+**The document's theme is the reader's, and an edit through the file leaves it alone.**
+What a document looks like — what Heading 1 is, what body text is — lives in its named
+styles, and those are the one thing the API cannot write at all: there is no request that
+changes one (documented; nothing here has tried). So the only question a source edit
+raises is whether it can *pin* a paragraph against its theme, and that turns on a single
+rule of `documents.get`: a paragraph and its runs report the properties **set on them**,
+never the ones they inherit. A heading a theme makes blue, bold and centred reports none
+of the three. The file says nothing about them either, and every field the merge owns is
+written *named with no value* (`_run_requests(reset=True)`, `paragraph_style`) — the API's
+way of saying "back to what you inherit". So the blue and the bold come back from the
+theme after a rewrite, and a reader who later recolours Heading 1 in the browser recolours
+the text the source wrote along with the rest. What the reader chose on the paragraph
+*itself* still counts, because that is what the document reports and what the file carries.
+
+The alignment was the one exception, and it was a real loss: `paragraph_style` gave
+`alignment` a value always, `START` whenever the file said nothing — which is also what a
+heading centred by the theme says. One source restyle that never mentioned alignment, and
+every such heading went to the margin for good. It is subtracted now like everything else
+(`_named_defaults` reads the named style's alignment, `_block_of` keeps only a paragraph
+that differs from it) and written like everything else: with a value only when somebody
+chose one, `left` among them — a heading the theme centres and the reader pulled back to
+the margin is a choice, and is written as `START`.
+
+All of this rests on named-and-unset meaning "inherit", which is the API's documented rule
+and the one `MANAGED_PARAGRAPH` has relied on since it existed. The offline world cannot
+check it, since `doc_world` has no named styles to inherit from; the experiment that would
+settle it is a themed heading through a live sync, which
+`tests/test_docs_live_styles.py::test_a_heading_the_theme_centres_survives_a_source_restyle`
+asks for and which has not been run.
+
 **What no import can carry is written by the settle.** `doc_sync.settle` already hands
 `doc_merge.adopt_keys` the blocks the run planned, so `adopt_keys` compares them with
 the read-back and `carry_unimported` notes the shading, the space around a paragraph
@@ -249,8 +279,9 @@ What a real document turns up: page-level structure (`documentStyle`, `headers`,
 paragraph borders and tab stops and `keepWithNext`, a table's column widths and its
 merged cells (`tableCellStyle`, which is the ragged-table limit under its real name), a
 picture's crop, angle and brightness, a list's `startNumber` — and, of the document's
-theme, a named style's **marks and alignment**: the face and the measures are read
-(`_named_defaults`), a heading's bold and centring are not.
+theme, a named style's **marks**: the face, the alignment and the measures are read
+(`_named_defaults`), a heading's bold is not, and does not need to be, since no request
+of ours ever names it with a value.
 
 A count is not an address, though, and the question a person actually has is not
 "does this document carry borders" but "is the paragraph I am about to edit the one
@@ -264,8 +295,20 @@ many more); a sync, which names nothing, at least says how many blocks carry one
 is the number it can act on. A section break is left out — nothing rewrites one — and so is everything
 outside the blocks, since no rewrite of a paragraph can drop the page's margins. It is
 a **risk**, not a loss: a block nobody rewrites keeps all of it, which is exactly the
-thing one can act on. What a sync *did* rewrite is the next step and waits on nothing
-but a way to ask the plan.
+thing one can act on.
+
+And once the plan exists the risk has an answer (`doc_sync.rewrite_losses`). Of the
+blocks carrying something unread, which is *this run* about to write again from
+nothing? Nearly always none, and then the report says nothing at all; when it is one,
+it is the single line in the report that is a loss rather than a caution, and it is
+there before the write — in a `--dry-run` above all, which is the run whose whole job
+is to say what a write would cost. A block merely restyled or reworded is left out,
+and that is the distinction the whole thing rests on: a request names the fields it
+writes, and no field the merge owns is a field nobody reads. A block **rewritten**
+(the file's runs go in where the document's were) or **moved** (a move is a delete and
+a write, and the write says only what the file says) is named. A block the source
+**deleted** is left out too — its words are going on purpose, and a property going
+with them is not news.
 
 Two tests pin the map. One walks a fixture holding one of everything and asserts the
 whole set, so a property Docs adds later surfaces as a failure rather than as silence.
