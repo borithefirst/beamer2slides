@@ -269,6 +269,30 @@ def test_the_bold_a_heading_inherits_is_not_bold_the_reader_put_on():
                                             NOTHING, theme=MARKED))
 
 
+def test_a_second_copy_of_the_un_bolded_word_is_not_the_readers_coming_back():
+    """Inside the block the question is asked by *occurrence*: how many of this word
+    the reader un-marked, against how many are still un-marked afterwards.
+
+    Asked instead as "does this word wear the bold anywhere in the block?", a second
+    occurrence the source had just appended answered yes, while the word the reader
+    pressed Ctrl+B on stood exactly as they left it (themed seed 40254: the heading
+    said "and willow" and the source added " and harbour").
+    """
+    base = _run_head("k1", "A heading and willow")
+    before = {"key": "k1", "kind": "heading", "level": 1,
+              "runs": [{"text": "A heading "}, {"text": "and", "bold": False},
+                       {"text": " willow"}]}
+    after = copy.deepcopy(before)
+    after["runs"].append({"text": " and harbour"})          # the source's own "and"
+    assert not oracle.failures(oracle.check(_ir(base), _ir(before), _ir(after),
+                                            NOTHING, theme=MARKED))
+    # And the reader's own occurrence going back to the theme is still a loss.
+    handed = copy.deepcopy(after)
+    handed["runs"][1] = {"text": "and"}
+    assert _kinds(oracle.check(_ir(base), _ir(before), _ir(handed), NOTHING,
+                               theme=MARKED)) == {"styling_restored"}
+
+
 def test_the_un_bolded_word_is_asked_about_in_its_own_block():
     """The theme bolds every heading, so the same word in the heading next door wears
     the bold whatever happens here. Asked tab-wide, every un-bolding a sync honoured
@@ -457,6 +481,24 @@ def test_the_oracle_lets_a_token_both_sides_edited_half_of_alone():
     # And the reader's own half going is still a loss.
     gone = _ir(_p("k1", "a soft­zephyr here"))
     assert _kinds(oracle.check(base, before, gone, NOTHING)) == {"words_lost"}
+
+
+def test_the_oracle_lets_a_token_the_reader_pared_down_alone():
+    """The reader can also *delete* one of the joined words, and then the token left
+    over is one of one word: `joined_differently` stopped at that and the leftover read
+    as a word the reader had typed, so the source rewriting its other half — which is
+    the source's own word — was called a loss (fresh-seed 91197).
+
+    It holds nothing of theirs. `_pared_down` says exactly that: the token is a token
+    of the base with the span of one of its words cut out, and nothing looser.
+    """
+    base = _ir(_p("k1", "a soft­hyphen here"))
+    before = _ir(_p("k1", "a ­hyphen here"))                # the reader deleted "soft"
+    after = _ir(_p("k1", "a ­willow here"))                 # the source reworded it
+    assert not oracle.failures(oracle.check(base, before, after, NOTHING))
+    # A word of the base the reader typed again somewhere new is still their own work.
+    typed = _ir(_p("k1", "a ­hyphen here hyphen"))
+    assert _kinds(oracle.check(base, typed, after, NOTHING)) == {"words_lost"}
 
 
 # ---------------------------------------------------------------- the world is the rules
@@ -704,6 +746,34 @@ def test_a_block_the_source_reworded_and_moved_keeps_the_readers_styling():
         [("lantern ", None), ("beta", True)]
 
 
+def test_a_block_whose_only_change_was_a_mark_is_not_one_the_source_may_delete():
+    """A block the source drops is kept when the document changed it, and `_edited`
+    asked the words, the grid and the frozen runs — never the marks.
+
+    So a block whose only change was styling read as untouched: the delete went
+    through and took the bold the reader had just put on with it, in silence
+    (fresh-seed 90175 at chain 4, where `collide` drops the very block the reader
+    bolded a word of). Bolding a word is a choice a reader made in the document, as
+    much as typing one, and `styling_lost` says so everywhere else.
+    """
+    world, ours, base = _build([_para("alpha beta gamma"), _para("The end.")])
+    part = doc_world.read_ir(world, ours, base)
+    start = part["blocks"][0]["span"][0]
+    world.apply([{"updateTextStyle": {
+        "range": {"startIndex": start + 6, "endIndex": start + 10},
+        "textStyle": {"bold": True}, "fields": "bold"}}])
+    was, mine = copy.deepcopy(base), copy.deepcopy(ours)
+    ours["blocks"].pop(0)                          # the source drops that very block
+    before = doc_world.settled_ir(world, ours, base)
+    report, ours, base = fuzz_docs.sync_once(world, ours, base)
+    assert not oracle.failures(oracle.check(was, before, base, report, mine))
+    live = doc_world.read_ir(world, ours, base)
+    assert [(r["text"], r.get("bold")) for r in live["blocks"][0]["runs"]] == \
+        [("alpha ", None), ("beta", True), (" gamma", None)]
+    again, _, _ = fuzz_docs.sync_once(world, copy.deepcopy(ours), copy.deepcopy(base))
+    assert again["applied"] == []
+
+
 def test_a_styled_word_the_source_replaced_is_reported_with_the_styling():
     """A word the reader styled and the source then rewrote: the styling has nowhere
     to go, which is right, but nothing said so and the oracle called it lost in
@@ -914,6 +984,102 @@ def test_a_paragraph_the_source_moves_between_two_tables_is_left_where_it_is():
     assert _keys(base) == ["paragraph:before-both", "table:a", "table:c",
                            "paragraph:after-both"]
     assert any("no paragraph to write in" in note for note in report["notes"]), report
+
+
+def test_two_tables_after_one_anchor_are_told_apart_by_what_they_say():
+    """A table the source adds in front of one it regrids shares its anchor, and
+    `shaped`'s order then decided which was which — although what the batch did with
+    them is the requests' order and not that one.
+
+    They came out crossed: the regridded table's key went on the blank table
+    `insertTable` had just built and the new table's key on the one with all the words
+    in it. The base took each other's content, so the next round read the real table
+    as one the source had moved and emptied it — the reader's cells and the source's
+    both gone (fresh-seed 40204 at chain 4). A table built from nothing is blank and a
+    regridded one still says what it said, so the words are asked first
+    (`_blank_table`) and `shaped`'s order is only the tie-break it always was.
+    """
+    world, ours, base = _build([_para("Before both."),
+                                _table([["a", "b"], ["1", "2"]]), _para("After both.")])
+    grid = next(b for b in ours["blocks"] if b["key"] == "table:a")
+    grid["rows"] = grid["rows"][1:]      # the source drops the row table:a is anchored
+    ours["blocks"].insert(1, _table([["h1", "h2"], ["harbour", "x"]]))   # in, and adds
+    was, mine = copy.deepcopy(base), copy.deepcopy(ours)                 # one in front
+    before = doc_world.settled_ir(world, ours, base)
+    report, ours, base = fuzz_docs.sync_once(world, ours, base)
+    assert not oracle.failures(oracle.check(was, before, base, report, mine))
+    for _ in range(2):        # a grid is built on one pass and filled on the next
+        report, ours, base = fuzz_docs.sync_once(world, ours, base)
+    live = doc_world.read_ir(world, ours, base)
+    assert [(b["key"], oracle.text_of(b))
+            for b in live["blocks"] if b["kind"] == "table"] == \
+        [("table:h1", "h1 h2 harbour x"), ("table:a", "1 2")]
+
+
+def test_a_table_moved_behind_one_the_same_batch_regrids_is_found_again():
+    """`anchor_tables` names the tables a structural batch built by what they follow —
+    and one of those anchors may be a table the same batch has just stripped of its
+    key, since a regrid that deletes row 0 takes the cell the table is anchored in.
+
+    The pass went through `shaped` once, in order: the moved table's anchor was not
+    there yet, the regrid put it back a moment later, and nothing looked again. The
+    moved table stayed blank and unkeyed, the re-plan read the key the file still
+    names as a table the *reader* had deleted, and the sync wrote its words nowhere —
+    a whole table of the source's gone with no conflict and no note (fresh-seed 90190
+    at chain 4, shrunk to one step). It runs to a fixed point now.
+    """
+    world, ours, base = _push("between_tables")
+    grid = next(b for b in ours["blocks"] if b["key"] == "table:a")
+    grid["rows"] = grid["rows"][1:]                       # the source deletes row 0
+    moved = ours["blocks"].pop(next(i for i, b in enumerate(ours["blocks"])
+                                    if b["key"] == "table:c"))
+    ours["blocks"].insert(1, moved)                       # and moves table:c up to it
+    was, mine = copy.deepcopy(base), copy.deepcopy(ours)
+    before = doc_world.settled_ir(world, ours, base)
+    report, ours, base = fuzz_docs.sync_once(world, ours, base)
+    assert not oracle.failures(oracle.check(was, before, base, report, mine))
+    live = doc_world.read_ir(world, ours, base)
+    assert [k for k in _keys(live) if k.startswith("table:")] == ["table:a", "table:c"]
+    tables = [b for b in live["blocks"] if b["kind"] == "table"]
+    assert oracle.text_of(tables[0]) == "1 2"             # the row is gone
+    assert oracle.text_of(tables[1]) == "c d 3 4"         # and the words came along
+    again, _, _ = fuzz_docs.sync_once(world, copy.deepcopy(ours), copy.deepcopy(base))
+    assert again["applied"] == []
+
+
+def test_a_move_the_merge_takes_back_leaves_the_block_where_the_document_has_it():
+    """"Left where the document has it" has to be true of the merged list too.
+
+    An empty paragraph between two tables can be deleted in no way at all, so a move
+    of it is taken back (`restore_undeletable`; `refuse_nowhere` takes back the other
+    kind). Both only cleared `moved` and left the block at the *file's* position — and
+    every index the sync computes comes from a block's span, so the table in front of
+    it was written at that paragraph's old index, which is where the table already
+    stood. The document came back unchanged, the next round planned the same move,
+    and the three rounds `_write_structure` allows ran out with the table blank, its
+    words nowhere and an empty paragraph left over from each attempt (fresh-seed
+    40344 at chain 4).
+    """
+    world, ours, base = _build([_para("A paragraph in between."),
+                                _table([["a", "b"], ["1", "2"]]), _para(""),
+                                _table([["c", "d"], ["3", "4"]]), _para("The end.")])
+    assert _keys(ours)[2] == "paragraph:empty", _keys(ours)
+    # The source moves the table and the empty paragraph behind it up to the front,
+    # and adds a table where they came from — which is what makes the merge carry the
+    # table rather than the paragraph the other way.
+    ours["blocks"][:3] = [ours["blocks"][1], ours["blocks"][2], ours["blocks"][0]]
+    ours["blocks"].insert(3, _table([["h1", "h2"], ["harbour", "x"]]))
+    was, mine = copy.deepcopy(base), copy.deepcopy(ours)
+    before = doc_world.settled_ir(world, ours, base)
+    report, ours, base = fuzz_docs.sync_once(world, ours, base)
+    assert not oracle.failures(oracle.check(was, before, base, report, mine))
+    live = doc_world.read_ir(world, ours, base)
+    assert oracle.text_of(next(b for b in live["blocks"] if b["key"] == "table:a")) \
+        == "a b 1 2"
+    assert sum(1 for b in live["blocks"] if not oracle.text_of(b)) == 2, \
+        "one empty paragraph per attempt at the move would be left over"
+    again, _, _ = fuzz_docs.sync_once(world, copy.deepcopy(ours), copy.deepcopy(base))
+    assert again["applied"] == []
 
 
 def test_a_block_in_a_second_tab_keeps_its_key_when_the_source_moves_and_rewords_it():

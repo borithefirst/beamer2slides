@@ -95,9 +95,37 @@ def _edited(live: dict, was: dict) -> bool:
     in cell by cell read as untouched and went with everything in it. A table says
     what it is through its cells and its grid, and a block holding a picture the
     reader replaced says it through its frozen runs.
+
+    Nor can it be the words alone. Bolding a word is a choice a reader made in the
+    document, as much as typing one, and `styling_lost` says so everywhere else —
+    but a block whose only change was a mark read as untouched, so the source's
+    delete went through and took the reader's styling with the block (fresh-seed
+    90175: the reader bolds a word, `collide` drops that very block in the same
+    step).
     """
     return (_match_text(live) != _match_text(was) or _grid(live) != _grid(was)
-            or frozen_of(live) != frozen_of(was))
+            or frozen_of(live) != frozen_of(was) or _styled(live) != _styled(was))
+
+
+def _styled(block: dict) -> tuple:
+    """The styling of a block's words, in the order they wear it.
+
+    By the stretch of text a style covers, not by the runs it is written in: a reader
+    bolding a word splits one run into three and a rewrite joins them again, and
+    neither is a change of styling. A frozen run is a place in the text, never a mark.
+    """
+    if block.get("kind") == "table":
+        return tuple(_styled(inner) for row in block.get("rows", [])
+                     for cell in row for inner in cell)
+    out: list[list] = []
+    for run in block.get("runs", []):
+        text = FROZEN if run.get("frozen") else run.get("text", "")
+        style = () if run.get("frozen") else tuple(sorted(_text_style(run).items()))
+        if out and out[-1][1] == style:
+            out[-1][0] += text
+        else:
+            out.append([text, style])
+    return tuple((text, style) for text, style in out)
 
 
 def frozen_of(block: dict) -> tuple:
@@ -465,26 +493,58 @@ def anchor_tables(live: dict, shaped: list[dict]) -> int:
     A table `insertTable` built carries no named range, and a read cannot tell it from
     one a reader made in the browser. It is found by what it follows: the block the
     plan put it after, which the document already had.
+
+    One of those anchors may be a table this very batch has just stripped of its key —
+    a regrid that deletes the row a table is anchored in (`doc_ir.anchor_span`) is in
+    `shaped` for exactly that reason. So the pass runs to a fixed point, and a told
+    whose anchor is already there goes first in each: a moved table anchored on the
+    regridded one used to be skipped, the regrid took its key back a moment later,
+    and nothing looked again. The moved table then stayed blank and unkeyed, the
+    re-plan read the key the file still names as a table the reader had deleted, and
+    the sync wrote the source's words nowhere (fresh-seed 90190, shape
+    `between_tables`).
+
+    Two tables may also share one anchor — a table the source adds in front of one it
+    regrids — and then `shaped`'s order decides which is which, although what the
+    batch did with them is the requests' order and not that one. They came out
+    crossed: the regridded table's key went on the blank table `insertTable` had just
+    built and the new table's key on the one with all the words in it, the base took
+    each other's content, and the next round "moved" the table it had just named,
+    which emptied the real one (fresh-seed 40204, shape `ends_on_table`). What tells
+    them apart is that a table built from nothing is blank and a regridded one still
+    says what it said, so the words are asked first and `shaped`'s order is only the
+    tie-break it always was.
     """
     done = 0
-    for told in shaped:
-        if "after" not in told or not told["key"]:
-            continue
-        if any(b.get("key") == told["key"] for b in live["blocks"]):
-            continue
-        start = 0
-        if told["after"] is not None:
-            at = next((i for i, b in enumerate(live["blocks"])
-                       if b.get("key") == told["after"]), None)
-            if at is None:
+    todo = [told for told in shaped if "after" in told and told["key"]]
+    moved = True
+    while moved:
+        moved = False
+        for told in sorted(todo, key=lambda t: t["after"] is None):
+            if any(b.get("key") == told["key"] for b in live["blocks"]):
                 continue
-            start = at + 1
-        found = next((b for b in live["blocks"][start:]
-                      if b.get("kind") == "table" and not b.get("key")), None)
-        if found is not None:
-            found["key"] = told["key"]
-            done += 1
+            start = 0
+            if told["after"] is not None:
+                at = next((i for i, b in enumerate(live["blocks"])
+                           if b.get("key") == told["after"]), None)
+                if at is None:
+                    continue
+                start = at + 1
+            free = [b for b in live["blocks"][start:]
+                    if b.get("kind") == "table" and not b.get("key")]
+            built = not (told.get("ops") or told.get("lines"))
+            found = next((b for b in free if _blank_table(b) == built), None) \
+                or (free[0] if free else None)
+            if found is not None:
+                found["key"] = told["key"]
+                done += 1
+                moved = True
     return done
+
+
+def _blank_table(block: dict) -> bool:
+    """Whether a table says nothing at all — which is how `insertTable` leaves one."""
+    return not _match_text(block).strip(" |")
 
 
 def rebase_tables(base: dict, theirs: dict, shaped: list[dict]) -> dict:
@@ -2092,12 +2152,14 @@ def refuse_nowhere(theirs: dict, merged: list[dict], notes: list[str]) -> None:
     is left unwritten and the report says why. Before `restore_undeletable`, which
     decides what can be deleted and must see a move this one has taken back.
     """
-    for position, block in enumerate(merged):
+    for block in list(merged):
+        position = next(i for i, b in enumerate(merged) if b is block)
         if not _written_here(block) or not _nowhere(theirs, merged, position):
             continue
         key = block.get("key")
         if block.get("moved"):
             block["moved"] = False
+            _put_back(merged, block)
             notes.append(f"{key}: the source moved it between two tables, where the "
                          f"document has no paragraph to write in — left where the "
                          f"document has it")
@@ -2105,6 +2167,29 @@ def refuse_nowhere(theirs: dict, merged: list[dict], notes: list[str]) -> None:
             block["nowhere"] = True
             notes.append(f"{key}: the source adds it between two tables, where the "
                          f"document has no paragraph to write in — not written")
+
+
+def _put_back(merged: list[dict], block: dict) -> None:
+    """Put a block whose move was refused back where the document has it.
+
+    "Left where the document has it" has to be true of the list as well, not only of
+    the requests: every index the sync computes comes from a block's span, and a span
+    says where a block *is*. A block that stays put while `merged` keeps it at the
+    file's position is an anchor pointing at the wrong end of the document — the move
+    of a table in front of such a paragraph was written at the paragraph's old index,
+    which is where that table already stood, so the document came back unchanged, the
+    next round planned the same move again, and the three rounds `_write_structure`
+    allows ran out with the table blank, its words nowhere and an empty paragraph left
+    over from each attempt (fresh-seed 40344, shape `between_tables`).
+    """
+    merged.pop(next(i for i, b in enumerate(merged) if b is block))
+    span = block.get("span")
+    where = len(merged)
+    if span:
+        where = next((i for i, b in enumerate(merged)
+                      if b.get("span") and not b.get("moved") and b["span"][0] > span[0]),
+                     len(merged))
+    merged.insert(where, block)
 
 
 def _nowhere(theirs: dict, merged: list[dict], position: int) -> bool:
@@ -2149,6 +2234,7 @@ def restore_undeletable(theirs: dict, merged: list[dict], notes: list[str]) -> N
             # leaving it where the document has it is what `_apply_source_moves` does
             # for everything else it cannot carry.
             by_key[key]["moved"] = False
+            _put_back(merged, by_key[key])
             notes.append(f"{key}: the source moved it, but it stands between two tables "
                          f"where nothing can be deleted — left where the document has it")
             continue

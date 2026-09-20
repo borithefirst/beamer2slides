@@ -1110,6 +1110,15 @@ KNOWN = (
     # the rest of this tuple was emptied by holds for the last one too.
 )
 # Nothing known is outstanding. A campaign that fails now has found something new.
+#
+# What that was worth, the first time it was tried: at two seeds nobody had used
+# (1200 rounds at chain 4 from 90000, 400 at chain 8 from 40000) the campaign came
+# back with six findings, and one of them was the `block_gone ... though the file
+# still names it` that `crossed-delete` covered word for word. Four were real losses
+# — `anchor_tables` looking once where it had to look twice, two tables behind one
+# anchor taking each other's keys, a move taken back and left at the file's position
+# anyway, and `_edited` blind to a mark the reader put on — and two were the oracle's
+# own. Every one of them is a test in tests/test_doc_fuzz.py now.
 
 
 def known_bug(found: dict) -> str | None:

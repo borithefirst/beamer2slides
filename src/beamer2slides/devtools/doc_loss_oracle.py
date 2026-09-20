@@ -129,13 +129,37 @@ def joined_differently(token: str, after: Counter, was: Counter) -> bool:
     (`was`): the other half is the source's to change. Nothing real gets through — a
     token of one word must still survive whole, and a word the sync really dropped is
     in no token of the tab at all.
+
+    A reader may also *delete* one of the joined words, and then the token left over
+    reads as one they typed — `theirs - was` compares whole tokens, and `\xadhyphen`
+    is not `soft\xadhyphen`. It holds nothing of theirs: its words are the base's, and
+    the source is entitled to rewrite them, which is what happened at fresh-seed 91197
+    (the reader deleted `soft`, the source made `hyphen` into `willow`, and the merge
+    said `\xadwillow` — both edits arrived). `_pared_down` asks it exactly: this token
+    is a token of the base with one of its words taken out, nothing else.
     """
     pieces = _split(token)
-    if len(pieces) < 2:
+    if len(pieces) < 2 and not _pared_down(token, was):
         return False
     base = {piece for other in was for piece in _split(other)}
     there = {piece for other in after for piece in _split(other)}
     return all(piece in there for piece in pieces if piece not in base)
+
+
+def _pared_down(token: str, was: Counter) -> bool:
+    """Whether this token is a token of the base with one of its joined words deleted.
+
+    Exactly that, and nothing looser: the base token with the span of one of its word
+    pieces cut out has to *equal* the token. A word of the base the reader typed again
+    somewhere new is then still their own work and still has to survive.
+    """
+    for other in was:
+        spans = [m.span() for m in PIECE.finditer(other)]
+        if len(spans) < 2:
+            continue
+        if any(other[:start] + other[end:] == token for start, end in spans):
+            return True
+    return False
 
 
 def runs_of(block: dict):
@@ -621,6 +645,15 @@ def _style_findings(key, block, base_block, after_styles, after_block, after_wor
     asked of this block alone: the word is one the theme bolds, so the same word in
     the heading next door wears it too, and a tab-wide answer would call every
     un-bolding a loss (themed seeds 9, 32, 40).
+
+    And inside the block it is asked by *occurrence*: how many of this word the reader
+    un-marked, against how many are still un-marked afterwards. Asking instead whether
+    the word wears the mark anywhere in the block counted a second occurrence the
+    source had just added — "and willow" plus " and harbour" — as the reader's own
+    coming back bold, while the word they pressed Ctrl+B on stood untouched (themed
+    seed 40254). The mark must also really be on in the end: a block that stopped
+    being a heading took the bold off every word of it, which is `theme_undone`'s
+    question and not this one.
     """
     theirs = styles_of(block)
     was = styles_of(base_block) if base_block else Counter()
@@ -631,8 +664,8 @@ def _style_findings(key, block, base_block, after_styles, after_block, after_wor
         return [finding("styling_lost", "loss",
                         f"the block {key} lost the {'/'.join(marks)} the reader put on "
                         f"{word!r}", tab=tab, key=key)]
-    back = Counter({m: n for m, n in (unmarked_of(block, theme)
-                                      & marks_on(after_block, theme)).items()
+    undone = unmarked_of(block, theme) - unmarked_of(after_block, theme)
+    back = Counter({m: n for m, n in (undone & marks_on(after_block, theme)).items()
                     if after_words.get(m[1])})
     if back and not _named(said, key):
         mark, word = next(iter(back))

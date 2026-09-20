@@ -1270,7 +1270,8 @@ keys, named ranges), `doc_merge.py` (pure planning), `doc_sync.py` (the commands
   italic was undrawn, so the ops now draw a face, a size, small caps and the six paragraph
   measures on both sides (`RUN_MARKS`, `PARA_MARKS`, `READER_FACES`, `READER_MEASURES`) - the
   case that matters is a reader choosing a face and the source then restyling that block.
-  Ten defects found, each pinned by a test in `tests/test_doc_fuzz.py` (`xfail(strict=True)`
+  Ten defects found by the first campaigns and six more at fresh seeds once `KNOWN` was
+  empty (below), each pinned by a test in `tests/test_doc_fuzz.py` (`xfail(strict=True)`
   while it stands, a plain test once fixed) and the ones still standing described in
   `fuzz_docs.KNOWN` (let through by default, `--strict` fails on them): a TOC treated as an
   ordinary block, which kills the sync outright; a table the source dropped deleted however
@@ -1403,6 +1404,38 @@ keys, named ranges), `doc_merge.py` (pure planning), `doc_sync.py` (the commands
   read as no change, then as a loss when that block turned out to be one no request can
   write (`oracle._source_dropped`, only for a block the reader left as the base has it,
   since a chip the reader put in is one the merge keeps the whole block for).
+  **What the empty `KNOWN` was worth**: the first run at seeds nobody had used (1200 at
+  chain 4 from 90000, 400 at chain 8 from 40000) came back with six findings, one of them
+  the `block_gone ... though the file still names it` that the departed `crossed-delete`
+  covered word for word. Four losses in the merge, two the oracle's (so seven of the
+  harness's against thirteen of the sync's), each now pinned by a test that fails when its
+  mechanism is put back: (a) `anchor_tables` went through `shaped` once, so a table moved
+  behind one the *same batch* regrids - a regrid deletes the row the table is anchored in,
+  which is why it carries an `after` - was skipped before its anchor came back and nothing
+  looked again; it stayed blank and unkeyed, the re-plan read the file's key as a table the
+  reader had deleted, and a whole table of the source's went nowhere (seed 90190; a fixed
+  point now, anchors already there going first). (b) A table the source *adds* in front of
+  one it *regrids* shares its anchor, and `shaped`'s order decided which was which although
+  `insertTable` puts the blank one in front: the keys came out crossed, the base took each
+  other's content, and the next round "moved" the table it had just named, emptying the
+  real one (seed 40204; `_blank_table` asks the words first, `shaped`'s order is the
+  tie-break it always was). (c) Both places that take a move back (`refuse_nowhere`,
+  `restore_undeletable`) cleared `moved` and left the block at the *file's* position in
+  `merged`, but every index comes from a block's span and a span says where a block is: the
+  move of a table in front of such a paragraph was written at the paragraph's old index,
+  where that table already stood, so the document came back unchanged, each round planned
+  it again and the three `_write_structure` allows ran out with the table blank and an
+  empty paragraph per attempt (seed 40344; `_put_back`). (d) `_edited` - the test that
+  outranks a source delete - read the words, the grid and the frozen runs, never the marks,
+  so a block the reader had only *styled* read as untouched and the delete took the bold
+  with it in silence (seed 90175; `_styled` compares by the stretch a style covers, so
+  splitting a run to bold a word and joining it again are both nothing). And the oracle
+  twice: a reader deleting one of two soft-hyphen-joined words leaves a token the base does
+  not have, which read as one they typed, so the source rewording the other half read as a
+  loss (`_pared_down`, seed 91197); and `styling_restored` asked whether an un-marked word
+  wears its mark anywhere in the block, so a second occurrence the source had just appended
+  answered yes while the reader's own stood untouched (asked by occurrence now, seed 40254).
+  All four campaigns clean under `--strict` afterwards.
 - Live suite (opt-in, marker `docs`, ~5 min): `python -m pytest -m docs tests/test_docs_live.py`
   pushes a document per test, edits both sides, syncs, checks a second sync writes nothing, and
   deletes the document. Offline: `tests/test_doc_ir.py`, `test_doc_merge.py`, `test_doc_sync.py`.

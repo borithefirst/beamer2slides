@@ -1198,6 +1198,75 @@ left exactly as the base has it — and only that, because a chip the reader put
 chip the merge keeps the whole block for, and if it ever stopped doing that the oracle
 must still say so.
 
+### What an empty `KNOWN` was worth, immediately
+
+The rule above — an entry goes the moment its defect has a fix and a test, or it swallows
+the next defect that looks like it — is easy to write down and uncomfortable to follow,
+since the campaign is green either way and a wide entry costs nothing until it costs
+everything. It paid on the first run after `KNOWN` went empty. At two seeds nobody had
+used before (1200 rounds at chain 4 from seed 90000, 400 at chain 8 from seed 40000) the
+campaign came back with **six** findings, and `block_gone … though the file still names
+it` — which the departed `crossed-delete` covered word for word — was one of them. Four
+were real losses in the merge; two were the oracle's own, which makes seven of the
+harness's against thirteen of the sync's.
+
+* **A table found again only if it is looked for twice** (seed 90190, `between_tables`).
+  `anchor_tables` names the tables a structural batch built by what they follow, and one
+  of those anchors may be a table the *same* batch has just stripped of its key: a regrid
+  that deletes row 0 takes the cell the table is anchored in, which is why a regrid
+  carries an `after` at all (the fourth bullet of the identity list above). The pass went
+  through `shaped` once, in order. The moved table's anchor was not there yet, the regrid
+  put it back a moment later, and nothing looked again — so the moved table stayed blank
+  and unkeyed, the re-plan read the key the file still names as a table the *reader* had
+  deleted, and the sync wrote the source's words nowhere. A whole table of the source's
+  gone, with no conflict and no note. It runs to a fixed point now, anchors that are
+  already there going first in each pass.
+* **Two tables behind one anchor, told apart by `shaped`'s order** (seed 40204,
+  `ends_on_table`). A table the source *adds* in front of one it *regrids* shares its
+  anchor, and the order of `shaped` then decided which was which — although what the
+  batch did with them is the order of the requests, and `insertTable` puts the blank new
+  table in front. They came out crossed: the regridded table's key went on the blank one
+  and the new table's key on the one holding all the words, the base took each other's
+  content, and the next round read the real table as one the source had moved and emptied
+  it. What tells them apart is what they *say* — a table built from nothing is blank and a
+  regridded one still says what it said — so the words are asked first (`_blank_table`)
+  and `shaped`'s order is the tie-break it always was.
+* **"Left where the document has it" was only half true** (seed 40344, `between_tables`).
+  Both places that take a move back — `refuse_nowhere`, when the new place has no
+  paragraph to write in, and `restore_undeletable`, when the block cannot be deleted from
+  the old one — cleared `moved` and left the block sitting at the *file's* position in
+  `merged`. But every index the sync computes comes from a block's span, and a span says
+  where a block **is**: a block that stays put while `merged` keeps it elsewhere is an
+  anchor pointing at the wrong end of the document. The move of a table in front of such a
+  paragraph was written at that paragraph's old index, which is where the table already
+  stood; the document came back unchanged, the next round planned the same move, and the
+  three rounds `_write_structure` allows ran out with the table blank, its words nowhere
+  and an empty paragraph left over from each attempt. `_put_back` puts the block where its
+  span says it is.
+* **A block whose only change was a mark** (seed 90175, `dropdown`). `_edited` is the test
+  that outranks a source delete, and the campaign's own history is written into it: not
+  `block_text`, because a table is empty there; the cells, the grid and the frozen runs.
+  Never the marks. So a block the reader had only *styled* read as untouched, the source's
+  delete went through, and the bold went with the block — in silence, while
+  `styling_lost` says everywhere else that bolding a word is a choice a reader made.
+  `_styled` compares the styling by the stretch of text it covers, so splitting a run to
+  bold a word and joining it again are both nothing.
+* Twice the oracle's own. `joined_differently` lets a token both sides edited half of
+  alone — a soft hyphen makes `soft\xadhyphen` one `\S+` token — but a reader may also
+  *delete* one of the joined words, and the leftover `\xadhyphen` is a whole token the
+  base does not have, so it read as one the reader had typed and the source rewording its
+  other half read as a loss (seed 91197). `_pared_down` asks it exactly: a base token with
+  the span of one of its words cut out, nothing looser. And `styling_restored` asked
+  whether an un-marked word wears its mark *anywhere in the block*, so a second occurrence
+  the source had just appended — "and willow", plus " and harbour" — answered yes while
+  the word the reader pressed Ctrl+B on stood exactly as they left it (seed 40254). It is
+  asked by occurrence now: how many the reader un-marked against how many are still
+  un-marked.
+
+Each has a test that fails when its mechanism is put back the way it was. After them,
+both fresh campaigns and the two standing ones (400 at chain 4, 300 at chain 8) are clean
+under `--strict`.
+
 Fixed seeds from the campaign run in the default offline suite.
 
 ## Remaining risks
