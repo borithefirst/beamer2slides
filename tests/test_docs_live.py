@@ -610,6 +610,100 @@ def test_an_open_comment_in_the_document_is_named_in_the_report(paper):
     paper.settled()
 
 
+def test_a_checkout_with_no_local_state_syncs_from_the_base_in_drive(paper):
+    """`.b2s/` is scratch state a fresh clone, a colleague's machine or a second
+    checkout does not have. The base itself lives in Drive, named by the document's
+    own `appProperties.b2sBase`, so the sync finds it there and never has to ask
+    `--assume-base`, where both answers throw somebody's work away."""
+    from beamer2slides import doc_sync
+    from beamer2slides.google_auth import credentials, drive_service
+    drive = drive_service(credentials())
+    stored = doc_sync.load_drive(drive, paper.ident)
+    assert stored and stored["document"] == paper.ident, "push should store the base in Drive"
+
+    doc_sync.base_path(paper.path).unlink()          # what a fresh clone looks like
+    paper.typed("The opening paragraph", " Typed by a reader.")
+    paper.edit("The closing paragraph.", "The closing paragraph, revised.")
+    info = paper.sync()                              # no --assume-base needed
+    assert info["base"] == "drive", info.get("notes")
+    assert info["conflicts"] == []
+    assert "Typed by a reader." in paper.text and "revised" in paper.text
+    paper.settled()
+
+
+ADOPTED = """<html><body>
+<h1>A document nobody pushed</h1>
+<p>The opening paragraph, with <b>bold words</b> in it.</p>
+<ul>
+ <li>the first point</li>
+ <li>the second point</li>
+</ul>
+<table><tr><td><p>Region</p></td><td><p>Sales</p></td></tr>\
+<tr><td><p>North</p></td><td><p>1200</p></td></tr></table>
+<p>The closing paragraph.</p>
+</body></html>"""
+
+
+def test_a_document_nobody_pushed_is_adopted_and_then_syncs_to_nothing(google, request):
+    """`push` goes file → document and refuses a file that already names one, so a
+    team that has been writing a Google Doc for a year had no way in. `adopt` reads
+    the document, keys its blocks, plants one named range each, writes the canonical
+    file and stores the base — after which it is an ordinary synced pair.
+
+    The document here is made the way `push` makes one (an HTML import through
+    Drive) but never pushed, which is exactly the case adopt exists for.
+    """
+    import io
+    from googleapiclient.http import MediaIoBaseUpload
+    from beamer2slides import doc_ir, doc_sync
+    from beamer2slides.google_auth import credentials, docs_service, drive_service
+    drive = drive_service(credentials())
+    ident = drive.files().create(
+        body={"name": f"b2s docs test: {request.node.name}", "mimeType": doc_sync.DOC_MIME},
+        media_body=MediaIoBaseUpload(io.BytesIO(ADOPTED.encode("utf-8")), mimetype="text/html"),
+        fields="id").execute()["id"]
+    try:
+        OUT.mkdir(parents=True, exist_ok=True)
+        path = OUT / f"{request.node.name}.html"
+        path.unlink(missing_ok=True)
+        doc_sync.base_path(path).unlink(missing_ok=True)
+
+        info = doc_sync.adopt(ident, path)
+        assert info["blocks"] and info["anchored"] == info["blocks"], info
+        text = path.read_text(encoding="utf-8")
+        assert f'content="{ident}"' in text              # the file says where it lives
+        assert "<b>bold words</b>" in text
+        assert "the second point</li>" in text
+        assert "<td><p>1200</p></td>" in text
+        assert ">The closing paragraph.</p>" in text
+        assert doc_sync.load_drive(drive, ident) is not None      # and the base is in Drive
+
+        paper = Paper(path, ident)
+        paper.settled()
+
+        # Idempotent: a second adopt plants no second set of anchors and writes the
+        # same file, because every block is already named by its range.
+        docs = docs_service(credentials())
+        doc, _ = doc_sync.read_document(docs, ident)
+        before = len(doc_ir.named_ranges_of(doc))
+        again = doc_sync.adopt(ident, path)
+        doc, _ = doc_sync.read_document(docs, ident)
+        assert len(doc_ir.named_ranges_of(doc)) == before
+        assert again["blocks"] == info["blocks"]
+        assert path.read_text(encoding="utf-8") == text
+        paper.settled()
+
+        # And it refuses to write over a file that belongs to another document.
+        other = OUT / f"{request.node.name}-other.html"
+        other.write_text(text.replace(ident, "someone-elses-document"), encoding="utf-8")
+        with pytest.raises(SystemExit):
+            doc_sync.adopt(ident, other)
+        doc_sync.adopt(ident, other, force=True)
+        assert f'content="{ident}"' in other.read_text(encoding="utf-8")
+    finally:
+        drive.files().delete(fileId=ident).execute()
+
+
 def test_the_cli_reaches_the_same_plan(paper):
     done = subprocess.run([sys.executable, "-m", "beamer2slides", "docs", "sync",
                            str(paper.path), "--dry-run"],
