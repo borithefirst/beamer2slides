@@ -653,6 +653,40 @@ to the smallest element box holding it and ranks elements, decks, kinds and font
 freeforms, pies and video posters the API does not give are read off the slide thumbnails
 (`deck_fills.py`, `deck_freeforms.py`, `deck_thumbs.py`: rows, cell and text insets, stand-in widths, weights). Now (`fl-a`, 912 slides): boxes 0.973, page 0.971, pixels 0.984, mean per deck 0.956.
 
+**Back into the deck you adopted** (`adopt_sync.py`, docs/sync.md "Adopt"): adopt used to write a
+source tree and nothing else, so the only way on was `convert`, which makes a *second* deck and
+leaves the person's - comments, sharing, history - behind (`sync` said "no sync base for
+presentation <pid>", or "<folder>: no emit.json or sync/base.json in this folder"). `adopt` now
+records a base, so the .tex it wrote can be edited and synced into the very deck it came from.
+The base lives in the **work folder**, not in Drive (`--base-in-drive` asks for the other half,
+`--no-base` for none): `snapshot.save_drive` writes the presentation's `appProperties`, and adopt is
+the one command routinely pointed at a deck the person may only read - the corpus decks are exactly
+that. So one syncs with `--deck <the adopt work folder>`, which sync's no-base message now says.
+Its IR side is a fresh conversion of the source on disk (`convert_source` mirrors `sync.build_ours`),
+its deck side the person's own objectIds; no alt text is written anywhere. Identity is `kind × words
+× place` (`pair_elements`: mutual best, `PAIR_SURE` 0.45, and `PAIR_MARGIN` 0.08 clear of the runner-up
+**on both sides**, so two identical boxes side by side pair with neither), slides pairing exactly
+because `adopt.frame_labels` labels every frame from the slide's objectId (`labels_match` refuses if
+that chain does not come back). Measured over the corpus: 10-80% of elements tied to an object
+(gdg24 427/563, hebrew-lesson 25/244), the spread being how far `classify` regroups the person's boxes
+into one element. What no element draws is `left_alone` and never touched; the master and the layouts
+are never touched at all (`master_background = None`: the deck's look is the person's).
+Then `Sync.check_plan` runs between planning and any write and **refuses** four things
+(`adopt_sync.problems` / `refusal_message`, every message asserted verbatim in `tests/test_adopt_sync.py`):
+a unit whose base members include an **unpaired** element (writing it puts a second object beside the
+person's), a deck **page** that is not 720 pt wide while emit plans into one (most real decks are 1440:
+the objects would land right-looking and wrong), no **way back** on the first sync, and **slides the
+plan would delete** on the first sync (on a first sync that is a label that moved far more often than a
+slide the author meant to drop). Each names what it found and offers `--dry-run` (which never refuses:
+that is how one sees what it wanted to do), a backup, the labels, editing that element in the deck
+instead, `convert`, or `--force-adopted-deck`. The gate is wider than `merge.has_writes`: a unit merely
+reworded counts, because that is still the first time this converter puts anything into a person's deck.
+The first two outlive the first sync - found by the campaign (`fuzz_world.build_adopt_base`,
+`fuzz_sync offline --first-sync`, new finding `adopt_double`): gated on generation 0, 16 of 200 chained
+rounds duplicated a person's box on the *second* sync, because a rebased base still carries unpaired
+elements. Clean at chain 1x400, 4x200 and 5x250; taking the `slides-deleted` refusal out fails 0 rounds,
+so that one is a judgement, not a measurement, and says so.
+
 Opt-in suite (real Google Slides, ~95 s): `python -m pytest -m slides` (the default run deselects
 the `slides` marker, pyproject.toml). It converts the stress decks (19–22, 25, 13, demo) 3 at a
 time into `out/slides-tests/<deck>` of the main checkout (fixed folders: the same decks are
