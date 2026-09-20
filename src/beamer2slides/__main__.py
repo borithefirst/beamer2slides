@@ -257,6 +257,9 @@ def main() -> None:
     c.add_argument("--backup", choices=list(BACKUP_MODES), default="auto",
                    help="keep a way back before sync's first write: auto = file (a .pptx in <out>/backups), "
                         "none, drive (a copy of the presentation), both")
+    c.add_argument("--force-adopted-deck", dest="force_adopted", action="store_true",
+                   help="write into an adopted deck although sync cannot vouch for what it would write "
+                        "(docs/sync.md, Adopt): the objects were made by a person, not by this converter")
     for name, help_text in (("pull", "edit the beamer source until its conversion matches an edited deck"),
                             ("converge", "offline pull: edit the source until its conversion matches a deck.json")):
         c = sub.add_parser(name, help=help_text)
@@ -282,6 +285,12 @@ def main() -> None:
     c.add_argument("--work", type=Path, help="loop folder and reports (default: <tex folder>/out/adopt)")
     c.add_argument("--max-iter", type=int, default=6)
     c.add_argument("--engine", help="pdflatex, xelatex or lualatex (default: from the source)")
+    c.add_argument("--no-base", dest="base", action="store_false",
+                   help="do not record a sync base for the adopted deck (a later sync then has nothing "
+                        "to merge into it)")
+    c.add_argument("--base-in-drive", action="store_true",
+                   help="also store the base in the deck's own appProperties, as convert does. This WRITES to "
+                        "the presentation, which adopt otherwise never does: ask for it only for a deck you own")
     c = sub.add_parser("docs", help="a Google Doc from a canonical HTML file, and back (docs/google-docs.md)")
     docs_sub = c.add_subparsers(dest="docs_command", required=True)
     d = docs_sub.add_parser("push", help="create the document from the file and anchor its blocks")
@@ -330,7 +339,7 @@ def main() -> None:
         from .adopt import cmd_adopt
         target = Path(args.deck) if Path(args.deck).suffix == ".json" else None
         cmd_adopt(args.deck, args.tex, args.work, args.apply, args.out, args.max_iter, args.engine,
-                  args.flow, target)
+                  args.flow, target, args.base, args.base_in_drive)
         return
     if args.command in ("pull", "converge"):
         from .inverse import cmd_converge, cmd_pull
@@ -340,9 +349,16 @@ def main() -> None:
             cmd_converge(args.target, args.tex, args.work, args.apply, args.out, args.max_iter, args.handout, args.engine)
         return
     if args.command == "sync":
+        from .adopt_sync import FirstSyncRefused
         from .sync import sync
         note = None if args.dry_run else record_sync_point(args.pdf, args.deck, args.out, args.backup)
-        info = sync(args.pdf, args.deck, args.out, args.dry_run, args.overlays, not args.predict_places)
+        try:
+            # The recovery note carries the backup that was (or was not) kept: an adopted deck has
+            # no way back at all unless one was, so the refusal has to be able to ask.
+            info = sync(args.pdf, args.deck, args.out, args.dry_run, args.overlays, not args.predict_places,
+                        (note or {}).get("entry", {}).get("backup"), args.backup, args.force_adopted)
+        except FirstSyncRefused as refused:
+            raise SystemExit(str(refused)) from None
         if note:
             add_recovery(note, info)
         r = info["report"]

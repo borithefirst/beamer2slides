@@ -500,7 +500,11 @@ def matrix_request(oid: str, m: list[float]) -> dict:
 
 class Sync:
     def __init__(self, slides, drive, pid: str, base: dict, ours: dict, out: Path, dry_run: bool = False,
-                 measure: bool = True, trust_generation: bool = True):
+                 measure: bool = True, trust_generation: bool = True, check_plan=None):
+        # check_plan(mplan, theirs): raises instead of letting the write go ahead. It sits between
+        # planning and preparing because that is the last point at which nothing has been sent and
+        # the whole of what would be written is known (adopt_sync.problems).
+        self.check_plan = check_plan
         self.slides, self.drive, self.pid = slides, drive, pid
         self.base, self.ours, self.out = base, ours, out
         self.dry_run, self.measure = dry_run, measure
@@ -580,6 +584,8 @@ class Sync:
                 restore_in_place(theirs, self.recovery["restore"])
             self.sign_changed(theirs, pres)
             mplan = merge.plan_merge(self.base, self.ours, theirs, self.picture_adopter(pres))
+            if self.check_plan is not None:
+                self.check_plan(mplan, theirs)  # (adopt_sync: an adopted deck this may not be written to)
             work = self.prepare(mplan, pres, theirs)
             result = {"attempts": attempt, "plan": mplan, "work": work, "theirs": theirs}
             if self.dry_run or not work["writes"]:
@@ -1752,7 +1758,9 @@ def overlay_mode(asked: str | None, recorded: str | None) -> tuple[str, str | No
 
 
 def sync(pdf: Path, deck: str, out: Path | None = None, dry_run: bool = False, overlays: str | None = None,
-         measure: bool = True) -> dict:
+         measure: bool = True, way_back: dict | None = None, backup_mode: str = "auto",
+         force_adopted: bool = False) -> dict:
+    from . import adopt_sync
     from .google_auth import drive_service, slides_service
 
     started = time.monotonic()
@@ -1763,6 +1771,10 @@ def sync(pdf: Path, deck: str, out: Path | None = None, dry_run: bool = False, o
     base, where = snapshot.load_base(pid, folder or out, drive, problems)
     if base is None:
         raise SystemExit("\n".join([f"no sync base for presentation {pid}: convert the deck with this version first",
+                                    "  A deck this converter never made has one only where `adopt` wrote it: sync it "
+                                    "with `--deck <the adopt work folder>`,",
+                                    "  not with the deck's URL. `convert` would make a second deck and leave this one "
+                                    "with its comments and history behind.",
                                     *problems]))
     stale = snapshot.stale_base_warning(where, drive, pid)
     warnings = problems + ([stale] if stale else [])
@@ -1772,8 +1784,21 @@ def sync(pdf: Path, deck: str, out: Path | None = None, dry_run: bool = False, o
         print(f"warning: {w}")
     ours = build_ours(pdf, out / "sync" / "ours", base, overlays)
     refreshed = snapshot.refresh_pictures(base, ours, out)
+
+    def check_plan(mplan: dict, theirs: dict) -> None:
+        """An adopted deck's objects are a person's, not ours: refuse rather than write beside
+        them (adopt_sync.problems). A dry run plans and reports; it writes nothing, so it never
+        refuses - that is how a person sees what the sync wanted to do."""
+        found = adopt_sync.problems(base, mplan, theirs, way_back, backup_mode)
+        if found:
+            raise adopt_sync.FirstSyncRefused(adopt_sync.refusal_message(pid, out, pdf, found), found)
+
+    check = None
+    if base.get("origin") == adopt_sync.ORIGIN and not dry_run and not force_adopted:
+        check = check_plan
     # A base that may be behind the deck never decides on its own that an object is a leftover.
-    s = Sync(slides, drive, pid, base, ours, out, dry_run, measure, trust_generation=stale is None)
+    s = Sync(slides, drive, pid, base, ours, out, dry_run, measure, trust_generation=stale is None,
+             check_plan=check)
     result = s.run()
     report = result["plan"]["report"]
     report["warnings"] += s.warnings + warnings

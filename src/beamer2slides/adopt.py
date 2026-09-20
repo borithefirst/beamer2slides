@@ -26,6 +26,7 @@ import shutil
 from pathlib import Path
 
 from . import labels as labels_mod
+from . import snapshot
 from .adopt_shapes import turned_text
 from .inverse import (Context, TEXTPOS, body_style, colour_name, frame_latex, paragraphs_latex,
                       picture_block)
@@ -3471,20 +3472,71 @@ def recovered_theme(target: dict, pieces: list[list[str]], ctx: Context, tree: P
                             lambda c: colour_name(c, ctx.colours), picture, deck_bg)
 
 
+def presentation_beside(target_path: Path) -> dict | None:
+    """The raw `presentations.get` answer stored next to an offline target (the adopt corpus keeps
+    `presentation.json` beside `target.json`). Without it there is no read-back and so no base."""
+    for name in ("presentation.json", Path(target_path).stem + ".presentation.json"):
+        p = Path(target_path).resolve().parent / name
+        if p.exists():
+            return json.loads(p.read_text(encoding="utf-8"))
+    return None
+
+
+def record_base(target: dict, pres: dict | None, tex: Path, work: Path, engine: str | None,
+                base_in_drive: bool = False, log=print) -> dict | None:
+    """Record the sync base for the deck just adopted, in `<work>/sync/base.json`.
+
+    Why the folder and not Drive: `convert` keeps its base in the deck's own `appProperties` because
+    it made that deck. `adopt` did not - it may have been pointed at a deck the person can only read,
+    or one they never asked us to touch - and `snapshot.save_drive` both stamps the presentation and
+    creates a file in the owner's Drive. Writing to a deck we do not own must never happen because a
+    command was run; `--base-in-drive` is how one asks for it. `sync.resolve_deck` already takes a
+    folder whose only content is `sync/base.json`, so the folder base is a first-class deck
+    reference, not a fallback."""
+    from . import adopt_sync
+    if pres is None:
+        log("no sync base recorded: the deck was read from a file with no presentation beside it "
+            "(a base needs the deck's own object ids)")
+        return None
+    base, why = adopt_sync.record(tex, work / "sync-base", target, pres, engine, log=log)
+    if base is None:
+        log(f"no sync base recorded: {why}")
+        log("  `sync --deck <this folder>` will say there is none; `convert` would make a second deck.")
+        return None
+    drive = None
+    if base_in_drive:
+        from .google_auth import drive_service
+        drive = drive_service()
+    adopt_sync.store(base, work, drive)
+    for line in adopt_sync.report_lines(base):
+        log(line)
+    log(f"wrote {snapshot.local_path(work)}")
+    log(f"when the source changes, merge it into this deck: {adopt_sync.next_command('main.pdf', work)}")
+    return base
+
+
 def cmd_adopt(deck: str, tex: Path, work: Path | None, apply: bool, out: Path | None, max_iter: int,
-              engine: str | None, flow: bool, target_path: Path | None = None):
+              engine: str | None, flow: bool, target_path: Path | None = None, base: bool = True,
+              base_in_drive: bool = False):
     """Read a foreign deck, write a source for it, then converge that source onto the deck."""
     from .inverse import run_pull
     tex = Path(tex).resolve()
     work = Path(work).resolve() if work else tex.parent / "out" / "adopt"
+    pres = None
     if target_path is not None:
         target = json.loads(Path(target_path).read_text(encoding="utf-8"))
+        pres = presentation_beside(target_path)
     else:
         from .deck_ir import read_deck
-        target = read_deck(deck, images=work / "target-images", foreign=True)
+        kept: dict = {}
+        target = read_deck(deck, images=work / "target-images", foreign=True, keep=kept)
+        pres = kept.get("presentation")
     print(f"deck: {len(target['slides'])} slides read")
     if tex.exists():
         raise SystemExit(f"{tex} exists already: adopt writes a new source tree (use `pull` to refine one)")
     bootstrap(target, tex, flow)
     print(f"wrote {tex} ({len(target['slides'])} frames)")
-    return run_pull(target, tex, work, apply, out, max_iter, False, engine)
+    result = run_pull(target, tex, work, apply, out, max_iter, False, engine)
+    if base:
+        record_base(target, pres, tex, work, engine, base_in_drive)
+    return result

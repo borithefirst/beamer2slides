@@ -350,6 +350,50 @@ def build_base(doc, out: Path) -> dict:
             "master_readback": {"color": "#ffffff"}, "slides": slides}
 
 
+def build_adopt_base(doc, out: Path, rng: random.Random) -> dict:
+    """The base `adopt_sync.record` leaves behind, in the shape this world can apply a plan to.
+
+    `build_base` is the base `convert` writes: generation 1, every object made by this converter
+    under an id it chose, groups where emit made them. An adopted deck is none of that, and the
+    three differences are exactly what the first sync has to survive:
+
+    - `origin` is "adopt" and the generation is 0 - nothing has ever been written to this deck;
+    - the objects carry a person's own ids (Slides' own shape, not `b2s_*`), so nothing that
+      recognises this converter's work recognises them, and `sync.plan_recovery` can never sweep
+      one;
+    - some elements have no object at all. `adopt_sync.pair_elements` refuses to guess where two
+      boxes are equally close, and on real decks it leaves 0-36% of them unpaired, so the campaign
+      draws that too: an element with `objects: []` is one the source draws and nothing in the deck
+      is known to be.
+
+    Groups are gone as well: adopt records none (`groups: []`), because a group on an adopted slide
+    was made by the person and is theirs to keep."""
+    base = build_base(doc, out)
+    unpaired = 0
+    for n, entry in enumerate(base["slides"]):
+        sid = f"gx{n:x}{h6(str(n))}"
+        rename = {entry["objectId"]: sid}
+        for k, el in enumerate(entry["elements"]):
+            for j, oid in enumerate(el["objects"]):
+                rename[oid] = f"{sid}_{k:x}{j}{h6(oid)[:3]}"
+        entry["objectId"] = sid
+        entry["groups"] = []
+        entry["group_readback"] = {}
+        keep = []
+        for el in entry["elements"]:
+            oids = [rename[o] for o in el["objects"]][:1]  # one object per element: no groups
+            if oids and rng.random() < 0.15:
+                oids, unpaired = [], unpaired + 1        # a pairing adopt refused to make
+            old_main = el["main"]
+            el["readback"] = {oids[0]: {**el["readback"][old_main], "parent_group": None}} if oids else {}
+            el["objects"], el["main"] = oids, oids[0] if oids else None
+            keep += oids
+        entry["order"] = keep
+    return {**base, "generation": 0, "origin": "adopt", "master_background": None,
+            "adopt": {"presentationId": base["presentationId"], "deck_page_size": base["deck_page_size"],
+                      "frame_width": 720.0, "slides": len(base["slides"]), "unpaired": unpaired}}
+
+
 def build_ours(doc, base, out: Path) -> dict:
     infos = [slide_info(s) for s in doc["slides"]]
     base_infos = [{"label": b.get("label"), "title": b.get("title") or "", "text": b.get("text") or "", "page": b["page"]}

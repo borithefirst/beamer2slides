@@ -26,12 +26,16 @@ reported as a conflict (with both versions) so the author can decide.
 ```
 python -m beamer2slides sync deck.pdf --deck <url|id|out folder> [--out DIR] [--dry-run]
                                       [--overlays last|all] [--predict-places]
+                                      [--backup auto|none|file|drive|both] [--force-adopted-deck]
 ```
 `--out` defaults to the folder given as `--deck` (else `out/<pdf stem>`). The new conversion goes to
 `<out>/sync/ours/`, reports to `<out>/sync/sync-report.{json,md}` (`sync-report-dry-run.*` for a dry
-run). `convert` records the first base itself (`snapshot.snapshot_after_convert`). Modules:
+run). `convert` records the first base itself (`snapshot.snapshot_after_convert`); a deck this
+converter never made has one only where `adopt` put it, so `--deck` is then the adopt work folder
+("Syncing back into the deck you adopted"). Modules:
 `identity.py` (keys, fingerprints, IR field hashes), `snapshot.py` (read-back, base.json, tags,
-storage), `merge.py` (pure planning and diff3), `sync.py` (requests and the write loop).
+storage), `merge.py` (pure planning and diff3), `sync.py` (requests and the write loop),
+`adopt_sync.py` (the base adopt records and the refusals a sync into such a deck makes).
 
 ## Identity
 - **Slide key**: the beamer frame label (`\begin{frame}[label=results]` → PDF named destinations
@@ -786,6 +790,7 @@ step (compile with `--handout` to pull a handout-style deck).
 ## Adopt: a beamer source for a deck nobody converted
 ```
 beamer2slides adopt --deck <url|id|deck.json> --tex main.tex [--flow] [--apply | --out DIR] [--max-iter N]
+                    [--no-base] [--base-in-drive]
 ```
 Pull refines a source until its conversion matches a deck, which needs a source to begin with. For a
 deck this repository produced that is the .tex it came from; for a **foreign** deck — one a person
@@ -913,6 +918,137 @@ Tests: `tests/test_adopt.py` (offline, no TeX and no Google: a hand-built `prese
 shaped like those templates, the IR that comes back and the source written from it) and
 `tests/test_adopt_media.py` (charts, videos, WordArt, page sizes, and font fetching against a fake
 google/fonts with fonts built by fontTools).
+
+### Syncing back into the deck you adopted (`adopt_sync.py`)
+
+Adopting a deck and then converting the changed source would make a **second** deck and leave the
+first one — with its comments, its sharing and its history — behind. That is the opposite of the
+promise, so `adopt` ends by recording a sync base for the deck it just read, and `sync` merges into
+that deck like any other.
+
+**What you do.** Adopt once, then edit the source, compile it, and sync:
+```
+python -m beamer2slides adopt --deck <url> --tex talk/main.tex        # writes talk/out/adopt/sync/base.json
+...edit talk/main.tex, then compile it...
+python -m beamer2slides sync talk/main.pdf --deck talk/out/adopt      # merges into the deck you adopted
+```
+`--deck` is **the adopt work folder**, not the deck's URL: that is where the base is. Pointing it at
+the URL says `no sync base for presentation <id>` and tells you the same thing. Keep the folder next
+to the source; without it there is no base, and nothing else can merge into that deck.
+
+**Where the base lives, and why not Drive.** `convert` keeps its base in the deck's own
+`appProperties` plus a file in Drive, because it made that deck. `adopt` did not. It may have been
+pointed at a deck you can only read, or one nobody asked us to touch, and `snapshot.save_drive`
+*writes*: it stamps the presentation and creates a file in the owner's Drive. Writing into someone
+else's deck because a read-only command was run must never happen, so the base goes in the folder
+(`<work>/sync/base.json`, `snapshot.local_path`) and nowhere else. `sync.resolve_deck` already
+accepts a folder that holds only `sync/base.json`, so this is a first-class deck reference and not a
+fallback. `adopt --base-in-drive` asks for the other half explicitly — for a deck you own. After a
+sync has run, the new base *is* stored in Drive as usual: by then sync has been told to change the
+deck, so there is nothing left to be careful about.
+
+**What the base holds.** The IR side is the conversion of the source adopt left on disk — one extra
+compile, extract, classify, `render_backgrounds` and `DeckPlan` at the end of adopt (3-160 s over the
+corpus), exactly `sync.build_ours`. It is not the foreign deck IR and not the loop's own candidate:
+the base has to be what the *converter* makes of that source, or the first sync would read every
+element as changed. (The loop's candidate cannot be used either: `converge` overwrites its classify
+directory and its PDF every iteration and never renders the figures, so `identity.image_sha1` would
+be `None` in the base and a real hash in `ours`, and every picture would be rewritten.)
+
+The deck side is the person's own objects: each base element's `objects`/`main` is a real
+`objectId`, its `readback` the same normalised read `sync` compares against. **No alt text is
+written to the deck** — tagging the objects `b2s:...` the way `convert` does would be a write into
+someone else's file, and the base naming the ids does the same job. `groups` is empty (a group on an
+adopted slide is the person's, and `merge.user_objects` reports it), and `master_background` is
+`None`, so a source background change can never copy the deck's own master fill onto a slide.
+
+**What the first sync can pair.** Slides pair exactly: `adopt.frame_labels` wrote a `label=` per
+deck slide, slugged from its `objectId`, and the conversion carries them back. If they do not come
+back one for one, `adopt_sync.labels_match` refuses to record a base at all — a base built on the
+wrong slide pairing would tie one frame's source to another slide's objects.
+
+Elements have no such hook. Nothing on a person's slide says which part of the source it came from,
+so `adopt_sync.pair_elements` pairs the conversion against the deck IR by where a box stands and
+what it says: `0.55 x` the text ratio `+ 0.45 x identity._geometry`, times a penalty when the kinds
+differ, over the slide's **own** objects only (what the layout and master draw is skipped: writing
+to one would edit the template under every other slide). A pair is made only when it is **mutual
+best**, clears `PAIR_SURE` (0.45) and beats the runner-up on both sides by `PAIR_MARGIN` (0.08).
+Two identical cards side by side pair with neither, which is the point.
+
+Measured over 14 corpus decks (912 slides' worth of source), elements tied to an object:
+
+| deck | paired | deck objects the source does not draw |
+| --- | --- | --- |
+| comic-strips | 37/46 | 15 |
+| ds-lecture | 27/42 | 6 |
+| journey-maps | 122/242 | 320 |
+| cs161-tls | 183/257 | 260 |
+| gdg24 | 427/563 | 655 |
+| hebrew-lesson | 25/244 | 22 |
+| sc-memphis | 69/92 | 3237 |
+| jeb-arch | 12/15 | 166 |
+| drawings-basics | 87/120 | 141 |
+| apps-edu-zh | 80/120 | 53 |
+| comps-analysis | 23/79 | 10 |
+| poster-48x36 | 19/34 | 41 |
+| instagram | 3/6 | 6 |
+
+Between 10% and 80%, and the spread is not noise: it is how far the conversion of the adopted source
+regroups what the deck has. Where classify merges three of the person's boxes into one paragraph (or
+crops three objects into one figure picture) the merged element stands where none of them does and
+says what none of them says, so it pairs with nothing — 219 of hebrew-lesson's 244. That is a
+refusal, not a loss: an unpaired element is one the first sync will not write.
+
+**The refusals** (`adopt_sync.problems`, one message, `--force-adopted-deck` to go ahead anyway):
+
+- **no way back.** `--backup auto` (the default) exports the deck as .pptx before sync's first
+  write, and a Drive revision of a Slides file always exports its *current* content, so that file is
+  the only way back — and an adopted deck has no earlier conversion to fall back on either. If the
+  export could not be kept, the first sync does not happen. `--backup none` is how you say out loud
+  that the deck may go. This is the answer to "what must the default be": the same `--backup auto`
+  as everywhere, but fatal here instead of a warning.
+- **slides deleted.** A frame the source no longer accounts for would delete a slide **a person
+  made**. On the first sync that is far more often a label that did not survive the round trip than
+  a slide the author meant to drop.
+- **unpaired.** The source changed an element the base could not tie to any object. Sync deletes a
+  recreated unit's old objects through the base, and an unpaired element names none — so the
+  person's box would stay where it is and a second one would appear beside it. Nothing is lost, and
+  that is why the loss oracle cannot see it; `fuzz_sync._doubled` is what does.
+- **page frame.** `emit.DeckPlan` lays every object out in a 720 pt frame and precomputes the hole
+  widths, the template keys, the predicted shifts and the overlay boxes from that scale, so it
+  cannot be changed after the plan is built. On a deck of another width every object a sync
+  *creates* would land at the wrong place and the wrong size — silently, because the boxes are
+  valid. Ten of the 29 corpus decks are like this (1440, 1920, 960, 800, 3456, 481.5, 595 pt).
+
+The first two are about a deck nothing has been written to yet, so they stop at generation 0. The
+last two do not heal by being written to once — an element every sync refuses to write never gets an
+object, and the deck's page stays the size it is — so they hold at every generation. (That was found
+by the offline campaign at chain depth 2: with the unpaired refusal gated on the first sync, the
+base rebased after it let the *second* sync duplicate the person's box.)
+
+`--dry-run` never refuses: it writes nothing, so it is how you see what the sync wanted to do.
+
+**What not to expect to survive.**
+- A deck that is not 720 pt wide cannot have anything created in it. Keeps, text edits, moves and
+  deletions still work (those are written in deck coordinates, `merge.deck_scale`), but a sync that
+  would add a slide or an object refuses. Making emit's frame the deck's own is the fix, and it is
+  not a one-line one: the scale is baked into the plan, and `measure_places` reads the deck's
+  thumbnail as 1600 px over `SLIDE_W` as well.
+- An element the pairing refused stays refused. Change it in the deck, not in the source, or move
+  the boxes apart so the pairing can tell them from each other. The base lists every one of them
+  under `adopt.unpaired`, with the reason, and `adopt` prints the count.
+- The person's own objects that the source does not draw at all are never touched, and never will
+  be: they are reported as user objects, as in any deck.
+- Comments, sharing and history stay because the deck stays — but a sync that rewrites the passage a
+  comment hangs on answers it by accident, exactly as for a converted deck.
+- The base is a file in the adopt work folder. Lose it and nothing can merge into that deck any
+  more; adopting again writes a new source, not a base for the one you have.
+
+Tests: `tests/test_adopt_sync.py` (offline: the pairing, the base's shape, every refusal's message
+word for word, and the round trip through `fuzz_world`/`loss_oracle`). Campaign:
+`python -m beamer2slides.devtools.fuzz_sync offline --first-sync [--chain N]` starts from the base
+adopt records instead of the one convert writes (`fuzz_world.build_adopt_base`: generation 0, a
+person's object ids, groups gone, 15% of the elements unpaired) and adds `fuzz_sync._doubled`.
 
 ## Never lose deck edits
 

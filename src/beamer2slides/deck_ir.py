@@ -1300,14 +1300,20 @@ def presentation_id(ref: str) -> str:
 
 
 def read_deck(ref: str, images: Path | None = None, base: dict | None = None, pdf_size: list[float] | None = None,
-              slides=None, foreign: bool = False) -> dict:
+              slides=None, foreign: bool = False, keep: dict | None = None) -> dict:
     """Fetch a live deck and return its IR (pictures downloaded into `images`). `foreign`: read it as
-    a deck nobody converted (`deck_ir`) - what `adopt` asks for and `pull` does not."""
+    a deck nobody converted (`deck_ir`) - what `adopt` asks for and `pull` does not.
+
+    `keep`: a dict the raw `presentations.get` answer is put into under "presentation". The IR says
+    where things are, not which object they are; `adopt_sync` needs the read-back (object ids, text
+    runs, transforms) to record a sync base, and this is how it gets it without a second fetch."""
     from .google_auth import slides_service
     from .gslides import execute
     slides = slides or slides_service()
     pid = presentation_id(ref)
     pres = execute(slides.presentations().get(presentationId=pid))
+    if keep is not None:
+        keep["presentation"] = pres
     p = Path(ref)
     if pdf_size is None and p.is_dir() and (p / "deck.json").exists():
         pdf_size = json.loads((p / "deck.json").read_text(encoding="utf-8"))["slides"][0]["size"]
