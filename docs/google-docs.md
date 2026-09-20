@@ -1907,6 +1907,128 @@ take the joiner with it, guarded by the narrow leftover not standing there as we
 token pared down once leaves one token, so `hyphen` beside `\xadhyphen` is a word the reader
 typed and still has to survive.
 
+### The look the source asked for, and whether it arrived
+
+The judge's third half asks the same question about a block's **look**. The reader left
+it word for word as the base has it, the source restyled it, so again there is nothing
+to merge: what the file asks for has to be what the document says at the end.
+`_styling_arrived` asks it of a block's marks (`_worn`: the run styling as styled
+stretches of text, adjacent alike ones joined, so the one thing that does not matter —
+how many runs the text was cut into — is the one thing it cannot see) and of its
+paragraph (`_shape`: the named style and every measure the merge owns). Over 400 chain-4
+rounds it asks 118 times about marks and 233 about paragraphs; over 400 at chain 8, 210
+and 454.
+
+Neither other judge can ask it. The loss oracle asks about the **reader's** work, and a
+source restyle going nowhere costs the reader nothing. Convergence is satisfied by any
+*self-consistent* reading, and the settle regenerates the file from the document it just
+wrote — so the second sync agrees with the first about a look neither of them has.
+
+It found one defect in each of the three places there are.
+
+**The harness.** `dict(para)` is a shallow copy and a paragraph's `measures` is a dict of
+its own, so a paragraph split off another went on sharing the very dict its measures live
+in. Every block a sync appends is written `"\ntext"`, which is a split, so one
+`updateParagraphStyle` set the line spacing of half the body — and the next request to
+clear a measure cleared it everywhere too, which is exactly why nothing saw it: the
+document stayed self-consistent and the base agreed with it (`doc_world.copy_para`; seed
+110149, 3 of 200 rounds at chain 4 with the shallow copy back).
+
+**The merge.** `styles_of` counts run boundaries, on purpose: a mark applied to part of a
+run splits it, so the boundaries are where the information is. Asked of the *document* it
+answers something else as well — a reader who inserts a picture or a person chip splits a
+run and puts a frozen one between the halves, which is content the text merge carries and
+says nothing about marks. The merge read it as the reader restyling the block, concluded
+both sides had, and dropped the source's marks. `doc_merge.marks_of` is the question "did
+somebody change what these words are marked with": the frozen runs left out, adjacent
+alike stretches joined, `styles_of` keeping its exact meaning where a rewrite needs it.
+Seed 110265; without it 6 of 400 rounds fail at chain 4 and 10 of 400 at chain 8.
+
+**The report.** Both of those were found through a silence. Where both sides set one
+paragraph, or both restyle one block, the document wins — as it does everywhere — but it
+used to win with nothing said. The words have raised a conflict on every clash since the
+beginning; the styling, settled the same way, said nothing, and a source that centres a
+paragraph or gives a word a face has said something a person will look for. Two notes now
+(`_merge_block`), and the second one is why the first defect had to be fixed in `marks_of`
+and not in the report: the judge, like the oracle, forgives what the report names, so with
+`styles_of` back **and** the note in place the campaign passes — while the report tells
+the person that their document restyled a block it never touched. A note that is only ever
+true is the whole of what makes it an excuse.
+
+And twice the judge's own, both the same mistake: normalising the file's side less than a
+read normalises the document's. A read reports only what a paragraph or a run sets *beyond*
+its named style (`doc_ir._named_defaults`), so a `bold: False` left in the file by a source
+that has since retitled the heading which made it meaningful says nothing at all (seed
+220012), and so does a source centring a heading its theme already centres (seed 96300).
+`_worn` subtracts a mark whose truthiness is the style's, in both directions, and `_shape`
+subtracts any field whose value the style already gives — taken from `_named_defaults`
+itself, so the judge normalises the file exactly as the reader normalises the document.
+
+Then 2,100 rounds clean under `--strict` at four fresh seeds: 800 at chain 4, 600 at
+chain 6, 400 at chain 8, 300 at chain 10.
+
+The two notes are for **blocks**. A cell has no key of its own, and the base a cell is
+merged against need not be what that cell said last time: a row or a column one side has
+just added pairs with nothing, so every cell of it reads as both sides having styled and
+set it. The note would then open with "a table cell", which names neither the table nor
+the cell; a table's own report is `_merge_table`'s, which can at least say which table.
+
+**A row's words are evidence, not the row** (chain-6 seed 260208, the oracle's). The base's
+rows say `thicket` and `meadow`, the reader deletes `thicket`, the source rewrites `meadow`
+into `thicket`, and the one row left rightly says `thicket` — which
+`_row_resurrection_findings` read as the deleted row coming back, the source having spent
+its words elsewhere. They are counted now rather than looked up: the reader took the count
+to what the document shows, the source has raised it by `file - base` of its own accord,
+and a row over that sum is one that came back. Where the source leaves those words alone
+the sum is what the document shows, which is the question as it was — and with the
+inherited settlement of `_table_lines` put back in memory the campaign still catches the
+defect the check was built for (seed 63000, chain 4).
+
+### Where a table may not stand, a face nobody typed, and an indent a bullet ate
+
+Three more at fresh seeds, one of the merge's and two the judges'.
+
+* **A table written right behind another is a table written nowhere** (chain-8 seed 280039,
+  shrunk to a `move` and a `restyle`). Docs keeps an undeletable paragraph between two
+  tables, so a file asking for two with nothing between them asks for something the
+  document cannot hold: `insertTable` splits the paragraph at the index it goes to, the
+  half in front of the new table becomes that mandatory paragraph, and the file has no
+  block for it. Nothing then says which of the two empty paragraphs is which, and where
+  the second is the body's last it is hidden altogether (`doc_ir._hide_trailer`), so the
+  settle keys the leftover with the name of the paragraph the file wanted *after* the
+  table: the order reads as the base's, the move is undone in silence, and a restyle
+  planned for that paragraph in the same run is planned onto nothing next time round.
+  `doc_merge.refuse_back_to_back` leaves the table where the document has it and the
+  report says why — the sibling of `refuse_nowhere` and `restore_undeletable`, the other
+  two places where Docs' own shape outranks the file's. The mirror case is not this one:
+  a table written in *front* of another goes at the mark of the paragraph before it and
+  the empty half lands between the two, which is where Docs wants a paragraph anyway.
+* **A chip's face is not words anybody typed** (chain-8 seed 280398, the oracle's). The
+  file says `Grace` and Docs renders `grace` off the address; a date chip re-inserted from
+  its value comes back in whatever form the document spells a date in. Counting the face
+  as words made a block the source merely *moved* — a delete and a write, so every chip in
+  it is inserted again — read as losing the `Sep 20, 2026` the reader's own Backspace had
+  brought into it. `oracle.own_words` leaves the frozen runs out, which is `_says` in
+  `fuzz_docs` asked from the other side; a chip that really goes is caught by
+  `frozen_marks`, which counts it by what identifies it and not by what it reads as.
+* **An indent a bullet ate** (chain-10 seed 290010). Docs' merge-on-delete hands a block
+  the whole style of the paragraph deleted in front of it, bullet and all, so a plain
+  paragraph the source had just indented came back an *item* — and an item's indents are
+  the list preset's, belonging to neither side, so `_unwritten` left them alone. The
+  settle took the bullet off in the same batch (`restore_bullets`), and the block ended
+  with neither the bullet nor the indent, the report saying nothing. The question is
+  whether the block is an item once the settle has **finished**, not what the write
+  happened to leave: the plan's kind decides (`_paragraph_fields`), because the settle
+  writes the bullet to match it, and the plan's kind is the source's only where the
+  document kept the base's (`_take_shape`), so a reader who made a list item in the
+  browser still keeps it. The delete goes first now, too —
+  `deleteParagraphBullets` keeps the nesting by adding indents of its own, so a style
+  written before it is a style it then edits, which is the order `_paragraph_requests`
+  has always used. 1 of 200 rounds at chain 10 with the old rule put back in memory.
+
+Then 1,000 rounds clean under `--strict`: 300 at chain 10 from 290000 and 500 at chain 6
+from 310000, with 800 at chain 4 from 270000 and 600 at chain 6 from 300000 before them.
+
 ## Remaining risks
 
 1. **Pictures** — retired, see "Pictures, and the chips a request can make" above. What

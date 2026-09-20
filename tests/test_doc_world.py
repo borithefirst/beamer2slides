@@ -80,3 +80,24 @@ def test_a_key_planted_again_on_an_empty_paragraph_stays_on_it():
     paragraphs = [c for c in content if "paragraph" in c]
     assert [c["startIndex"] for c in paragraphs] == [1, 2]
     assert paragraphs[0]["paragraph"]["elements"][0]["textRun"]["content"] == "\n"
+
+
+def test_a_paragraph_split_off_another_has_measurements_of_its_own():
+    """The world's own defect, and the reason it was invisible: `dict(para)` is a
+    shallow copy, so the paragraph a split makes went on sharing the very dict its
+    measures live in. Appending a block writes "\\ntext", which is a split, so one
+    `updateParagraphStyle` set the line spacing of every paragraph descended from the
+    same ancestor — and the next request to clear a measure cleared it everywhere too,
+    which left the document self-consistent and the base agreeing with it. Only a judge
+    asking "did the source's restyle arrive *here*?" could see it (offline seed 110149).
+    """
+    world = doc_world.World()
+    world.apply([{"insertText": {"location": {"index": 1}, "text": "one\ntwo"}}])
+    world.apply([{"updateParagraphStyle": {
+        "range": {"startIndex": 1, "endIndex": 4},
+        "paragraphStyle": {"lineSpacing": 150.0}, "fields": "lineSpacing"}}])
+    styles = [c["paragraph"]["paragraphStyle"]
+              for c in world.read()["tabs"][0]["documentTab"]["body"]["content"]
+              if "paragraph" in c]
+    assert [s.get("lineSpacing") for s in styles] == [150.0, None]
+

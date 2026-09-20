@@ -98,6 +98,26 @@ def text_of(block: dict) -> str:
                    for r in block.get("runs", []))
 
 
+def own_words(block: dict) -> str:
+    """What a block says in its own right: the frozen runs left out.
+
+    A chip's **face is the document's to draw** — the file says `Grace`, Docs renders
+    `grace` off the address, and a date chip re-inserted from its value comes back in
+    whatever form the document spells a date in. So the face is not words anybody
+    typed, and a chip that goes is caught by `frozen_marks`, which counts it by what
+    identifies it (kind and value) and not by what it reads as. Counting the face
+    made a block the source merely *moved* — a delete and a write, so every chip in it
+    is inserted again — read as losing the words `Sep 20, 2026` that the reader's own
+    Backspace had brought into it (chain-8 seed 280398). `_says` in `fuzz_docs` is the
+    same subtraction, asked from the other side.
+    """
+    if block.get("kind") == "table":
+        return " ".join(own_words(b) for row in block.get("rows", [])
+                        for cell in row for b in cell)
+    return "".join(" " if r.get("frozen") else r["text"]
+                   for r in block.get("runs", []))
+
+
 def part_text(part: dict | None) -> str:
     return " ".join(text_of(b) for b in (part or {}).get("blocks", []))
 
@@ -713,7 +733,8 @@ def _tab_findings(was: dict | None, now: dict, then: dict | None, said: str,
         out += _inherited_findings(key, block, new[key], (mine or {}), said, tab, theme)
         if block.get("kind") == "table":
             out += _cell_findings(key, block, base_block, new[key], after_words, said, tab)
-            out += _row_resurrection_findings(key, block, base_block, new[key], said, tab)
+            out += _row_resurrection_findings(key, block, base_block, new[key], said, tab,
+                                              file_blocks.get(key))
 
     before_text = part_text(now)
     for key, was_block in old.items():
@@ -912,8 +933,8 @@ def _stands(key, block, mine: dict | None, then: dict | None) -> bool:
 def _words_findings(key, block, base_block, after_block, after_words, said, tab,
                     tab_was: Counter | None = None):
     """Words the reader typed that the document does not say any more."""
-    theirs = words(text_of(block))
-    was = words(text_of(base_block)) if base_block else Counter()
+    theirs = words(own_words(block))
+    was = words(own_words(base_block)) if base_block else Counter()
     typed = theirs - was                                  # what the reader added
     if not typed:
         return []
@@ -1036,7 +1057,8 @@ def _row_texts(block: dict | None) -> list[str]:
             for row in (block or {}).get("rows", [])]
 
 
-def _row_resurrection_findings(key, block, base_block, after_block, said, tab):
+def _row_resurrection_findings(key, block, base_block, after_block, said, tab,
+                               file_block=None):
     """A row the reader deleted that the sync put back.
 
     `block_resurrected` at the third size. A row has no key: the merge knows it by
@@ -1044,15 +1066,30 @@ def _row_resurrection_findings(key, block, base_block, after_block, said, tab):
     reordered or reworded is not one they deleted — its words are still in the table
     before the sync — so the question is asked of the words, as it is of a block, and
     is just as forgiving on purpose.
+
+    Words are evidence and not the thing itself, and the source can spend them: it may
+    write into a row the reader *kept* exactly what a row they deleted used to say, and
+    then a row saying that after the sync is the source's own asking and no
+    resurrection at all (chain-6 seed 260208: the base's rows say `thicket` and
+    `meadow`, the reader deletes `thicket`, the source rewrites `meadow` to `thicket`,
+    and the one row left rightly says `thicket`). So they are counted rather than
+    looked up: the reader took the count to what the document shows, the source has
+    raised it by `file - base` of its own accord, and a row over that sum is one that
+    came back. With the source leaving those words alone the sum is what the document
+    shows, which is the question as it was.
     """
     if not base_block or block.get("kind") != "table" or not after_block:
         return []
     live_rows = _row_texts(block)
     live_text = " ".join(live_rows)
-    after_rows = set(_row_texts(after_block))
+    base_rows = _row_texts(base_block)
+    after_rows = Counter(_row_texts(after_block))
+    live_count = Counter(live_rows)
+    asked = Counter(_row_texts(file_block)) if file_block else Counter(base_rows)
     out = []
-    for row in _row_texts(base_block):
-        if not row.strip() or row in live_rows or row not in after_rows:
+    for row in dict.fromkeys(base_rows):
+        allowed = live_count[row] + max(0, asked[row] - Counter(base_rows)[row])
+        if not row.strip() or after_rows[row] <= allowed:
             continue
         if stands_elsewhere(row, live_text) or _named(said, key, row[:40]):
             continue

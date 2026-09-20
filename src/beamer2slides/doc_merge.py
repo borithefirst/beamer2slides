@@ -360,9 +360,13 @@ def tidy_requests(live: dict) -> list[dict]:
     item's glyph or a heading's style.
 
     The unimportable styling goes first, for the same reason bullets go last: a
-    paragraph-wide style request restyles the glyph with the words.
+    paragraph-wide style request restyles the glyph with the words. A bullet the
+    settle *takes off* goes before it, though, which is the order `_paragraph_requests`
+    writes as well: `deleteParagraphBullets` keeps the nesting by adding indent of its
+    own, so a style written before it is a style the delete then edits.
     """
-    out = unimported_requests(live) + restore_bullets(live) + bullet_requests(live)
+    out = (restore_bullets(live, taking_off=True) + unimported_requests(live)
+           + restore_bullets(live, taking_off=False) + bullet_requests(live))
     for part in ("trailer", "lead"):
         if live.get(f"{part}_kind"):
             start, end = live[part]
@@ -412,18 +416,20 @@ def unimported_requests(live: dict) -> list[dict]:
     return out
 
 
-def restore_bullets(live: dict) -> list[dict]:
+def restore_bullets(live: dict, taking_off: bool) -> list[dict]:
     """Put back the bullet a write took off a block, or take off one it put on.
 
-    `carry_unimported` found it. After the paragraph styling, because a
-    paragraph-wide style request restyles the glyph with the words, and before
-    `bullet_requests`, which looks at what the read-back says a list is and would
-    not see this block in the run at all.
+    `carry_unimported` found it. The half that creates one comes after the paragraph
+    styling, because a paragraph-wide style request restyles the glyph with the
+    words, and before `bullet_requests`, which looks at what the read-back says a
+    list is and would not see this block in the run at all; the half that takes one
+    off comes first, `deleteParagraphBullets` being a request that writes indents of
+    its own (`tidy_requests`).
     """
     out = []
     for block in live["blocks"]:
         want = (block.get("unimported") or {}).get("bullet")
-        if want is None or not block.get("span"):
+        if want is None or not block.get("span") or (want == "none") != taking_off:
             continue
         span = {"startIndex": block["span"][0], "endIndex": block["span"][1]}
         out.append({"deleteParagraphBullets": {"range": span}} if want == "none" else
@@ -466,6 +472,32 @@ def styles_of(block: dict) -> tuple:
     return tuple(("chip", frozenset()) if r.get("frozen") else
                  ("text", frozenset((k, v) for k, v in r.items() if k not in ("text", "width")))
                  for r in block.get("runs", []))
+
+
+def marks_of(block: dict) -> tuple:
+    """What a block's words are marked with: the chips left out, alike runs joined.
+
+    `styles_of` answers "is this block styled exactly as it was", boundaries and
+    all. Asked of the *document* it answers something else as well, and that was
+    the defect: a reader who inserts a picture or a person chip splits a run in
+    two and puts a frozen one between the halves, which is content and not a
+    mark — the text merge carries it — yet the merge read it as the reader
+    restyling the block, decided both sides had, and dropped the source's marks
+    with nobody told. A boundary with the same marks either side says nothing
+    about marks, and a frozen run says nothing about them at all.
+
+    So this is the question "did somebody change what these words are marked
+    with", and `styles_of` stays the question "is this block's styling untouched"
+    that a rewrite has to ask (`_merge_block`'s frozen-content path).
+    """
+    out: list[frozenset] = []
+    for run in block.get("runs", []):
+        if run.get("frozen"):
+            continue
+        marks = frozenset((k, v) for k, v in run.items() if k not in ("text", "width"))
+        if not out or out[-1] != marks:
+            out.append(marks)
+    return tuple(out)
 
 
 def _shape(block: dict) -> tuple:
@@ -1045,13 +1077,23 @@ def _unwritten(mine: dict, live: dict) -> list[str]:
     alone whichever side is one.
     """
     return [api for key, api in PARAGRAPH_KEYS
-            if api in _paragraph_fields(mine, live) and mine.get(key) != live.get(key)]
+            if api in _paragraph_fields(mine) and mine.get(key) != live.get(key)]
 
 
-def _paragraph_fields(mine: dict, live: dict) -> tuple:
+def _paragraph_fields(mine: dict) -> tuple:
     """Which paragraph properties the settle may write on a block. A bullet's own
-    indents are the list preset's, whichever side of the pair is the item."""
-    return ITEM_PARAGRAPH if "item" in (mine["kind"], live["kind"]) else MANAGED_PARAGRAPH
+    indents are the list preset's, so they belong to neither side — but the question
+    is whether the block is an **item once this settle has finished**, not what the
+    write happened to leave. Docs' merge-on-delete hands a block the style of the
+    paragraph deleted in front of it, bullet and all, so a plain paragraph the source
+    had just indented came back an item, its indent was read as the list preset's and
+    left alone, and the bullet the settle took off in the same batch (`restore_bullets`)
+    left it with neither (offline chain-10 seed 290010). The plan's kind decides,
+    because the settle writes the bullet to match it — and the plan's kind is the
+    source's only where the document kept the base's (`_take_shape`), so a reader who
+    made a list item in the browser still keeps it.
+    """
+    return ITEM_PARAGRAPH if mine["kind"] == "item" else MANAGED_PARAGRAPH
 
 
 def _unimportable_runs(mine: dict, live: dict) -> list[tuple[int, int, dict]]:
@@ -1261,6 +1303,12 @@ def _moved_keys(was: list[str], mine: list[str]) -> list[str]:
 
 def _merge_block(was: dict, mine: dict, live: dict, conflicts: list, notes: list) -> dict:
     key = live.get("key") or "a table cell"
+    # A cell has no key, and the base a cell is merged against may be a stand-in: a row
+    # or a column one side has just added pairs with nothing, so every cell of it reads
+    # as both sides having styled it. The styling notes below are for blocks, where the
+    # base really is what that block said last time; a cell's own report is the table's
+    # (`_merge_table`), which can at least say which table.
+    a_block = bool(live.get("key"))
     out = dict(live)
     if live.get("kind") == "table":
         return _merge_table(was, mine, live, conflicts, notes)
@@ -1288,8 +1336,17 @@ def _merge_block(was: dict, mine: dict, live: dict, conflicts: list, notes: list
     text, clashes = diff3(block_text(was), block_text(mine), block_text(live))
     for clash in clashes:
         conflicts.append(dict(clash) | {"key": key})
-    if _shape(mine) != _shape(was) and _shape(live) == _shape(was):
-        _take_shape(out, mine)
+    if _shape(mine) != _shape(was):
+        if _shape(live) == _shape(was):
+            _take_shape(out, mine)
+        elif a_block:
+            # Both sides set the paragraph differently. The document wins, as it does
+            # everywhere — but it used to win in silence, and a source that centres a
+            # paragraph or gives it a rule has said something a person will look for.
+            # The words have had this since the beginning (`diff3` raises a conflict on
+            # every clash); the styling, which is settled the same way, said nothing.
+            notes.append(f"{key}: both sides changed how the paragraph is set — the "
+                         f"document's setting is kept")
     if text != block_text(live):
         out["runs"] = _retext(live, text)
         out["origin"] = "merged"
@@ -1304,16 +1361,27 @@ def _merge_block(was: dict, mine: dict, live: dict, conflicts: list, notes: list
     # the source changed them and the document's styling is as the base has it. Where
     # the words differ too, the marks follow the words — each word of the merged text
     # the file also has takes the file's marks, the rest keep the document's.
-    if styles_of(mine) != styles_of(was) and styles_of(live) == styles_of(was):
-        if text == block_text(mine):
+    if marks_of(mine) != marks_of(was):
+        if marks_of(live) != marks_of(was):
+            # And the same the other way round: a reader who marked one word of a
+            # paragraph the source has just made italic keeps their mark and the whole
+            # italic goes. That is the document winning, which is this project's rule,
+            # but the source's restyle disappearing with nobody told is not: the
+            # neighbouring note above says as much for the words that carry it.
+            if a_block:
+                notes.append(f"{key}: both sides restyled it — the document's styling is "
+                             f"kept and the source's is not written")
+        elif text == block_text(mine):
             out["runs"] = _restyled(live, mine)
+            out["restyle"] = True
+            out["origin"] = "merged"
         else:
             out["runs"], lost = _restyled_words(was, mine, live, text)
             if lost:
                 notes.append(f"{key}: the source restyled words the document rewrote — "
                              f"those keep the document's styling")
-        out["restyle"] = True
-        out["origin"] = "merged"
+            out["restyle"] = True
+            out["origin"] = "merged"
     if not out.get("origin") and (block_text(live) != block_text(was)
                                   or styles_of(live) != styles_of(was)):
         # Nothing to write: the document says this, and the merge agrees. It is said
@@ -2313,7 +2381,7 @@ def structure(theirs: dict, merged: list[dict],
         elif block.get("origin") == "added by the source":
             rows = len(block.get("rows", []))
             columns = len(block["rows"][0]) if rows else 0
-            if not rows or not columns:
+            if not rows or not columns or block.get("nowhere"):
                 continue
             at, reqs = _new_table_requests(theirs, _insert_index(merged, position),
                                            rows, columns)
@@ -2610,6 +2678,52 @@ def _anchor(merged: list[dict], position: int) -> dict | None:
     return None
 
 
+def refuse_back_to_back(merged: list[dict], notes: list[str]) -> None:
+    """Refuse to write a table where it would stand right behind another one.
+
+    Docs keeps an undeletable paragraph between two tables (the `between_tables`
+    shape), so a file asking for two tables with nothing between them asks for
+    something the document cannot hold: `insertTable` splits the paragraph at the
+    index it goes to, the half in front of the new table becomes that mandatory
+    paragraph, and the file has no block for it. Nothing says which of the two empty
+    paragraphs is which afterwards, and where the second one is the body's last it is
+    hidden altogether (`doc_ir._hide_trailer`), so the settle keys the leftover with
+    the name of the paragraph the file wanted *after* the table — the order reads as
+    the base's, the move is undone in silence, and a restyle planned for that
+    paragraph in the same run is planned onto nothing next time round (chain-8 seed
+    280039, shrunk to a `move` and a `restyle`).
+
+    So the table stays where the document has it and the report says why. The mirror
+    case — a table written in *front* of another — is not this: it goes at the mark
+    of the paragraph before it and the empty half lands between the two, which is
+    where Docs wants a paragraph anyway (`_new_table_requests`).
+    """
+    for block in list(merged):
+        position = next(i for i, b in enumerate(merged) if b is block)
+        built = block.get("moved") or block.get("origin") == "added by the source"
+        if block.get("kind") != "table" or not built or not position:
+            continue
+        if not _structural(merged[position - 1]) or block.get("nowhere"):
+            continue
+        # Only where there *is* a paragraph to split. With a table or nothing at all in
+        # front of it the insert has no index to take and `_new_table_requests` refuses
+        # it already, in the words that fit that case — the one below would steal them.
+        anchor = _anchor(merged, position)
+        if anchor is None or _structural(anchor):
+            continue
+        key = block.get("key")
+        if block.get("moved"):
+            block["moved"] = False
+            _put_back(merged, block)
+            notes.append(f"{key}: the source moved it right behind another table, where "
+                         f"the document keeps a paragraph of its own — left where the "
+                         f"document has it")
+        else:
+            block["nowhere"] = True
+            notes.append(f"{key}: the source adds it right behind another table, where "
+                         f"the document keeps a paragraph of its own — not written")
+
+
 def refuse_nowhere(theirs: dict, merged: list[dict], notes: list[str]) -> None:
     """Refuse to write a block whose place in the document has no paragraph in it.
 
@@ -2757,6 +2871,7 @@ def plan(base: dict, ours: dict, theirs: dict) -> dict:
                                    f"request can create (or a picture file that is not there) "
                                    f"cannot be written")
     unwritten_pictures(base, ours, theirs, result["blocks"], result["notes"])
+    refuse_back_to_back(result["blocks"], result["notes"])
     refuse_nowhere(theirs, result["blocks"], result["notes"])
     restore_undeletable(theirs, result["blocks"], result["notes"])
     result["structure"], result["shaped"] = structure(theirs, result["blocks"], result["notes"])

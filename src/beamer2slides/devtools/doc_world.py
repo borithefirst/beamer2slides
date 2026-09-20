@@ -92,7 +92,28 @@ def char(c: str, style: dict | None = None) -> dict:
 
 def mark(style: dict | None = None, para: dict | None = None) -> dict:
     """A paragraph mark: the newline that ends a paragraph, and where its style lives."""
-    return {"k": "m", "c": "\n", "s": dict(style or {}), "p": dict(para or plain())}
+    return {"k": "m", "c": "\n", "s": dict(style or {}),
+            "p": copy_para(para) if para else plain()}
+
+
+def copy_para(para: dict) -> dict:
+    """A paragraph's properties, copied deeply enough to be its own.
+
+    `dict(para)` is not deep enough: `measures` and `bullet` are dicts of their
+    own, so a paragraph split off another went on sharing the very dict its
+    measures live in, and `_do_updateParagraphStyle`, which writes into it,
+    wrote every paragraph ever split from the same ancestor. Splitting is how
+    every block a sync appends comes into the world ("\\ntext"), so one
+    `updateParagraphStyle` on one block set the line spacing of half the body -
+    and the next request to clear a measure cleared it everywhere too, which is
+    what made it invisible: the document stayed self-consistent, so nothing but
+    a judge asking "did the source's restyle arrive *here*?" could see it.
+    """
+    out = dict(para)
+    out["measures"] = dict(para.get("measures") or {})
+    if para.get("bullet"):
+        out["bullet"] = dict(para["bullet"])
+    return out
 
 
 def plain() -> dict:
@@ -419,7 +440,7 @@ class World:
         if gone is not None:
             after = next((u for u in cont[i:] if u["k"] == "m"), None)
             if after is not None:
-                after["p"] = dict(gone)
+                after["p"] = copy_para(gone)
         self._shift(tab, start, -(end - start), end)
 
     # -- objects
@@ -717,7 +738,7 @@ def _paragraph_at(cont: list[dict], offset: int) -> dict:
     """The paragraph style at this offset: the mark that terminates it."""
     for u in cont[offset:]:
         if u["k"] == "m":
-            return dict(u["p"])
+            return copy_para(u["p"])
     return plain()
 
 

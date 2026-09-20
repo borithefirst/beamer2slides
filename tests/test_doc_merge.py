@@ -288,6 +288,50 @@ def test_a_word_the_source_restyled_and_the_document_rewrote_is_the_documents():
     assert "keep the document's styling" in result["notes"][0]
 
 
+def test_a_picture_the_reader_inserted_is_not_a_restyle():
+    """Inserting a chip or a picture splits a run and puts a frozen one between the
+    halves. That is content — the text merge carries it — and it says nothing about
+    marks, but `styles_of` counts run boundaries, so the merge read it as the reader
+    restyling the block, decided both sides had, and dropped the source's bold with
+    nobody told (`doc_merge.marks_of`; offline seed 110265, 6 of 400 rounds at chain 4
+    and 10 of 400 at chain 8 without it).
+    """
+    picture = {"chip": "image", "frozen": True, "text": "", "value": "kix.i9",
+               "uri": "https://example.invalid/reader.png"}
+    base = live([styled("p:s", {"text": "lantern"})])
+    ours = live([styled("p:s", {"text": "lantern", "bold": True})])
+    theirs = live([styled("p:s", {"text": "lantern"}, dict(picture))])
+    result = doc_merge.plan(base, ours, theirs)
+    assert [style for _, _, style in styles_written(result)] == [{"bold": True}]
+    assert result["notes"] == []
+    # And the reader's picture is still there: the source's marks go on the words, not
+    # over the block.
+    assert [r.get("value") or r["text"] for r in result["blocks"][0]["runs"]] == [
+        "lantern", "kix.i9"]
+
+
+def test_both_sides_restyling_one_block_is_said_out_loud():
+    """The document wins, as everywhere — but it used to win in silence, and a source
+    restyle that disappears is something a person will look for. The words have raised
+    a conflict on every clash since the beginning; the marks said nothing."""
+    base = live([styled("p:s", {"text": "one two"})])
+    ours = live([styled("p:s", {"text": "one two", "italic": True})])
+    theirs = live([styled("p:s", {"text": "one "}, {"text": "two", "bold": True})])
+    result = doc_merge.plan(base, ours, theirs)
+    assert styles_written(result) == []
+    assert [n for n in result["notes"] if "both sides restyled it" in n]
+
+
+def test_both_sides_setting_one_paragraph_is_said_out_loud():
+    base = live([para("p:s", "one")])
+    ours = live([para("p:s", "one") | {"align": "center"}])
+    theirs = live([para("p:s", "one") | {"line_spacing": 1.5}])
+    result = doc_merge.plan(base, ours, theirs)
+    assert [n for n in result["notes"]
+            if "both sides changed how the paragraph is set" in n]
+    assert not [r for r in result["requests"] if "updateParagraphStyle" in r]
+
+
 def test_the_source_restyles_and_rewords_while_the_document_adds_words():
     base = live([styled("p:s", {"text": "the plan is ready"})])
     ours = live([styled("p:s", {"text": "the "}, {"text": "new plan", "italic": True},
@@ -1931,6 +1975,36 @@ def test_a_bullet_a_delete_took_off_is_put_back_by_the_settle():
     assert read["blocks"][0]["unimported"]["bullet"] == "none"
     assert doc_merge.tidy_requests(read) == [{"deleteParagraphBullets": {
         "range": {"startIndex": 1, "endIndex": 9}}}]
+
+
+def test_the_indent_of_a_block_a_write_made_an_item_is_still_put_back():
+    """An item's indents are the list preset's and belong to neither side — but the
+    question is whether the block is an item once the settle has *finished*, not what
+    the write happened to leave. Docs' merge-on-delete hands a block the whole style
+    of the paragraph deleted in front of it, bullet and all, so a plain paragraph the
+    source had just indented came back an item, its indent was read as the preset's
+    and left alone, and the bullet the settle takes off in the same batch left it with
+    neither (offline chain-10 seed 290010).
+
+    And the delete goes first: `deleteParagraphBullets` keeps the nesting by adding
+    indents of its own, so a style written before it is a style it then edits."""
+    planned = [para("p:a", "lantern", indent=18.0)]
+    planned[0]["paragraph_written"] = True
+    read = live([{"kind": "item", "key": "p:a", "level": 0,
+                  "runs": [styled_run("lantern")]}])
+    doc_merge.adopt_keys(read, planned)
+    assert read["blocks"][0]["unimported"]["bullet"] == "none"
+    requests = doc_merge.tidy_requests(read)
+    assert list(requests[0]) == ["deleteParagraphBullets"]
+    style = requests[1]["updateParagraphStyle"]
+    assert style["paragraphStyle"]["indentStart"] == {"magnitude": 18.0, "unit": "PT"}
+    # An item the plan really asks for still keeps the preset's indents.
+    planned = [{"kind": "item", "key": "p:a", "level": 0, "indent": 18.0,
+                "paragraph_written": True, "runs": [styled_run("lantern")]}]
+    read = live([{"kind": "item", "key": "p:a", "level": 0,
+                  "runs": [styled_run("lantern")]}])
+    doc_merge.adopt_keys(read, planned)
+    assert "unimported" not in read["blocks"][0]
 
 
 def test_a_block_whose_shape_the_write_changed_is_still_adopted_by_its_words():
