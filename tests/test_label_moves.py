@@ -307,11 +307,36 @@ def test_a_move_is_reported_as_a_conflict_with_both_sides_of_the_story():
     assert "content" in c["resolution"]
 
 
+def unsure_move():
+    return [{"label": "mobile", "verdict": "unsure", "ours": 0, "base": 0, "similarity": 0.3,
+             "slide": "mobile", "base_title": "Moving labels", "ours_title": "Arriving labels",
+             "slide_is": None, "slide_score": None, "frame_is": "x", "frame_score": 1.4}]
+
+
 def test_an_unsure_move_says_that_it_followed_the_label():
-    (c,) = report_of([{"label": "mobile", "verdict": "unsure", "ours": 0, "base": 0, "similarity": 0.3,
-                       "base_title": "Moving labels", "ours_title": "Arriving labels",
-                       "slide_is": None, "slide_score": None, "frame_is": "x", "frame_score": 1.4}])["conflicts"]
+    (c,) = report_of(unsure_move())["conflicts"]
     assert "followed the label" in c["resolution"] and "nothing re-paired" in c["resolution"]
+
+
+def test_an_unsure_move_names_the_slide_that_is_about_to_be_written_on():
+    """A question with no consequence attached is a question nobody acts on. `unsure` re-pairs
+    nothing, which means the sync goes ahead and writes the frame now carrying the label onto the
+    slide the label names - the slide somebody has been editing. That slide is what the reader has
+    to look at, so the warning names it rather than leaving them to work it out."""
+    (w,) = report_of(unsure_move())["warnings"]
+    assert "writes the frame carrying `mobile` onto the slide `mobile`" in w
+    assert "edits and all" in w and "that is the slide to look at" in w
+
+
+def test_a_decided_move_does_not_threaten_a_slide_it_is_not_writing_on():
+    """The other verdict re-paired by content, so nobody's slide is about to receive another
+    frame's words and there is nothing to warn about beyond the label itself."""
+    base, ours = moved_pair()
+    moves = identity.label_moves(base, ours)
+    for m in moves:
+        m["slide"], m["frame_is"], m["slide_is"] = "mobile", "title:arriving labels#1", "Moving labels"
+    (w,) = report_of(moves)["warnings"]
+    assert "the slide to look at" not in w and "went by the content" in w
 
 
 def test_a_label_that_was_renamed_is_a_warning_not_a_conflict():

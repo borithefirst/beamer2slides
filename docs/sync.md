@@ -336,7 +336,10 @@ its own label can never be stolen.
   decides. That is also where the person's edits belong: they edited those words, not that label.
 - **`unsure`** - only one of the two. Either a label moved, or the author moved a passage from one
   frame to another; from the PDF the two look the same. The label is followed and nothing is
-  re-paired.
+  re-paired - so the warning names the slide that is about to be written on ("this sync writes the
+  frame carrying `q3` onto the slide `q3`, edits and all, so that is the slide to look at"). A
+  question with no consequence attached is a question nobody acts on, and this one has a
+  consequence whether or not anybody reads it.
 - **silence** - neither. A frame rewritten from scratch looks exactly like a label move from one
   side, and that is a plausible edit, not a broken invariant.
 

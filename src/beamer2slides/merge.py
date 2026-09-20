@@ -701,13 +701,20 @@ def report_label_moves(moves: list[dict], report: dict) -> None:
             "resolution": ("the label moved: identity taken from the content instead" if moved else
                            "either the label moved or that passage did: followed the label, nothing re-paired"),
         })
+        # An `unsure` verdict re-pairs nothing, so saying only "check the .tex" leaves the reader
+        # to work out what happens if they do not. What happens is that this sync writes the frame
+        # now carrying the label onto the slide the label names - the slide with somebody's edits
+        # on it - so that slide is the one to look at, and it is named.
+        at_risk = (f" This sync writes the frame carrying `{m['label']}` onto the slide "
+                   f"`{m.get('slide') or m['label']}`, edits and all, so that is the slide to look at."
+                   if not moved else "")
         report["warnings"].append(
             f"label `{m['label']}` is not on the frame this deck's slide was made from" + (
                 ". Deck edits belong to the words a person edited, so sync went by the content and not by the "
                 "label. Put the label back on its own frame" if moved else
                 ", or a passage moved between two frames - from the PDF alone the two look the same. Sync "
                 "followed the label. Check the `.tex`: if the label moved, put it back") +
-            ": docs/labels.md, \"If a label does change\".")
+            ": docs/labels.md, \"If a label does change\"." + at_risk)
 
 
 def plan_merge(base: dict, ours: dict, theirs: dict, adopt=None) -> dict:
