@@ -618,20 +618,36 @@ class Program:
         self._boxes[index] = box
         return box
 
-    def advance(self, index: int) -> int:
-        """The glyph's advance in 1/1000 em (GetGlyphTTWidth), 0 when unknown."""
+    def _advance_units(self, index: int):
+        """FT_Load_Glyph(FT_LOAD_NO_SCALE)'s metrics.horiAdvance in font units, None where
+        FT_Load_Glyph would fail."""
         try:
             name = self.order[index]
             if self.kind == "truetype":
-                return normalize_metric(self.glyphs.hmtx[name][0], self.upem) if hasattr(self.glyphs, "hmtx") \
-                    else normalize_metric(self.glyphs[name].width, self.upem)
+                return self.glyphs.hmtx[name][0] if hasattr(self.glyphs, "hmtx") \
+                    else self.glyphs[name].width
             g = self.glyphs[name]
             if getattr(g, "width", None) is None:
                 from fontTools.pens.basePen import NullPen
                 g.draw(NullPen())
-            return normalize_metric(g.width or 0, self.upem)
+            return g.width or 0
         except Exception:  # noqa: BLE001
+            return None
+
+    def advance(self, index: int) -> int:
+        """The glyph's advance in 1/1000 em (GetGlyphTTWidth: NormalizeFontMetric, which rounds),
+        0 when unknown."""
+        a = self._advance_units(index)
+        return 0 if a is None else normalize_metric(a, self.upem)
+
+    def em_width(self, index: int) -> int:
+        """CFX_Face::GetGlyphWidth: the same advance through EmAdjust, which is a plain C++
+        `value * 1000 / units_per_em` - truncated, not rounded - so on a 2048-unit face it can come
+        out one less than `advance`. 0 where FT_Load_Glyph fails."""
+        a = self._advance_units(index)
+        if a is None:
             return 0
+        return int(a) if not self.upem else _cdiv(int(a) * 1000, self.upem)
 
 
 def _upem_from_matrix(matrix) -> int:
@@ -695,9 +711,8 @@ class GenericProgram(Program):
         self._boxes[key] = box
         return box
 
-    def advance(self, index: int) -> int:
-        a = self.face.advance(index) if 0 <= index < len(self.order) else None
-        return normalize_metric(a, 1000) if a else 0
+    def _advance_units(self, index: int):
+        return self.face.advance(index) if 0 <= index < len(self.order) else None
 
 
 def load_generic(data: bytes) -> Program | None:
