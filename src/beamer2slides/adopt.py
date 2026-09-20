@@ -3472,7 +3472,7 @@ def recovered_theme(target: dict, pieces: list[list[str]], ctx: Context, tree: P
 
 
 def cmd_adopt(deck: str, tex: Path, work: Path | None, apply: bool, out: Path | None, max_iter: int,
-              engine: str | None, flow: bool, target_path: Path | None = None):
+              engine: str | None, flow: bool, target_path: Path | None = None, log=print):
     """Read a foreign deck, write a source for it, then converge that source onto the deck."""
     from .inverse import run_pull
     tex = Path(tex).resolve()
@@ -3482,9 +3482,9 @@ def cmd_adopt(deck: str, tex: Path, work: Path | None, apply: bool, out: Path | 
     else:
         from .deck_ir import read_deck
         target = read_deck(deck, images=work / "target-images", foreign=True)
-    print(f"deck: {len(target['slides'])} slides read")
+    log(f"deck: {len(target['slides'])} slides read")
     if tex.exists():
         raise SystemExit(f"{tex} exists already: adopt writes a new source tree (use `pull` to refine one)")
     bootstrap(target, tex, flow)
-    print(f"wrote {tex} ({len(target['slides'])} frames)")
-    return run_pull(target, tex, work, apply, out, max_iter, False, engine)
+    log(f"wrote {tex} ({len(target['slides'])} frames)")
+    return run_pull(target, tex, work, apply, out, max_iter, False, engine, log=log)

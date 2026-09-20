@@ -1,0 +1,167 @@
+# beamer2slides as tools for an agent
+
+`src/beamer2slides/agent/` is the library's journeys - convert, sync, pull, adopt, label, the
+Google Docs loop - offered to something that is not a person at a terminal. This document is
+why it is shaped the way it is. The guide the *agent* reads is
+[`src/beamer2slides/agent/INSTRUCTIONS.md`](../src/beamer2slides/agent/INSTRUCTIONS.md); this
+one is for whoever wires it into a harness.
+
+## What was wrong with the command line
+
+Nothing, for a person. `python -m beamer2slides convert talk.pdf` prints a line per slide and a
+deck URL at the end, and exits non-zero when it refuses. Three things in that sentence do not
+survive the trip into an agent harness:
+
+* **Results arrive as prose.** `cmd_classify` returns `(pdf, raw, deck)` but prints its report;
+  `cmd_convert` returns `None` and prints the URL. An agent would have to parse English to learn
+  what happened, and would parse it differently after every wording change.
+* **Refusals arrive as `SystemExit`.** A harness running the library in-process takes the exit
+  through the heart. The refusals are the *good* part of this library - `guard.check_rebuild`
+  exists so that a rebuild can never destroy a deck someone edited - and they were reachable
+  only by catching a process death and reading its message.
+* **Authentication waits for a browser.** `google_auth.credentials()` calls
+  `InstalledAppFlow.run_local_server(open_browser=True)`, which binds a port, opens a browser
+  and blocks the calling thread until a human clicks. In a harness that is not an error; it is
+  a hang, with nothing in the transcript to say why.
+
+The agent layer fixes exactly those three, and changes nothing else. Underneath, every tool
+calls the same functions the CLI calls.
+
+## One tool per journey, not one gateway
+
+The obvious alternative was a single `beamer2slides(action=..., args={...})` entry point: one
+thing to register, a small context footprint. It was not taken.
+
+A model chooses a tool by reading its schema. Behind a gateway there is one schema, and the
+action names and their arguments live in prose the model has to recall rather than in a
+structure it can read; tool-choice accuracy drops, and the failures are silent - a plausible
+action name that does not exist, an argument spelled the way the docs spelled it two paragraphs
+earlier. Eleven schemas cost more context and buy a model that cannot misremember what
+`deck_sync` takes, because it is looking at it.
+
+The eleven are the journeys a person would name, not the flags: `b2s_status`, `deck_inspect`,
+`deck_convert`, `deck_sync`, `deck_pull`, `deck_adopt`, `tex_label`, `tex_converge`,
+`doc_push`, `doc_sync`, `doc_adopt`. Each maps to one CLI command and reuses its entry point.
+
+## The three seams a harness plugs into
+
+Everything a harness differs on is in `AgentContext`, and nothing in the agent layer reads the
+environment or the filesystem behind its back.
+
+### `Workspace` - where the files are
+
+This is deliberately **not** a virtual filesystem. The library needs real paths: LaTeX compiles
+files, PDFium opens files, python-pptx reads pictures. Pretending otherwise would only move the
+temporary directory somewhere less honest. What a harness actually differs on is narrower - what
+a path *means* when an agent writes one, where output may land, and how a produced file is named
+when it is handed back - and that is what `Workspace` decides.
+
+Every path an agent gives or gets is a **ref**: relative, forward-slashed, under the workspace
+root. `resolve(ref, write=)` refuses anything that climbs out; `ref(path)` names a file on the
+way back; `stage(path)` brings an outside file in. `LocalWorkspace` is the one implementation
+that ships. A harness whose files live elsewhere stages in and out around a journey rather than
+teaching the library a new kind of path.
+
+`out_dir(name)` is here for a second reason. `paths.out_root()` answers `out/` *in the checkout*
+when the library runs from one and `out/` in the process's current folder otherwise - the same
+call writing to two different places depending on how beamer2slides was installed. A workspace
+answers it the same way everywhere.
+
+### `GoogleAccess` - where the credentials come from
+
+Three implementations, none of them interactive:
+
+* `TokenFile` - this machine's cached token, refreshed when it can be. A missing or dead token
+  comes back as `needs_consent` with the one command a human has to run, in milliseconds,
+  rather than as a hang.
+* `InjectedToken` - the harness holds the credentials and hands them over, for a harness that
+  keeps secrets in its own store and never puts them on disk.
+* `NoGoogle` - there is no account here; Google journeys refuse with `offline` and the local
+  ones still work.
+
+The library asks for credentials by calling `google_auth.credentials()` from a dozen places, so
+rather than thread a parameter through all of them, `google_auth.use_provider` puts the
+context's source in front of the browser flow for the length of one journey. `describe()`
+answers what an agent legitimately needs - is there access, until when - and never what the
+token is; a test asserts that the description of a token file contains none of its contents.
+
+### `allow` - what the agent may do
+
+Four actions: `reads`, `writes`, `reads_google`, `writes_google`. A context lists what it
+permits, and `@tool` checks before the body runs, so a forbidden journey does no work rather
+than discovering the policy halfway through a rebuild. `READ_ONLY` and `LOCAL_ONLY` are the
+useful presets.
+
+`@tool` declares the **least** a journey does, which is what lets `deck_sync(dry_run=True)` run
+in a read-only context; a body about to write for real calls `j.require(WRITES_GOOGLE)` first
+and gets the same refusal the gate would have given. That is the seam a harness uses to let an
+agent plan freely and gate only the writes behind a human.
+
+`progress` is the fourth field: a callback that receives, line by line, whatever the library
+prints, so a harness can show a thirty-second conversion happening.
+
+## The result envelope
+
+```json
+{"tool": "deck_sync", "ok": true, "summary": "…", "data": {…},
+ "artifacts": [{"ref": "out/talk/sync/sync-report.md", "kind": "report"}],
+ "diagnostics": [{"level": "conflict", "message": "…", "where": "slide 7"}],
+ "next_steps": ["…"], "seconds": 12.4}
+```
+
+`summary` is the only field written for a model to read; `data` is written for it to act on. A
+tool never raises: `Refused` carries a code, `SystemExit` becomes `refused`,
+`guard.RebuildRefused` becomes `deck_edited`, and anything unforeseen becomes `failed` with the
+exception in the summary. The codes are in `types.CODES`, and each one has a documented way
+forward in INSTRUCTIONS.md - `deck_edited` says run `deck_sync`, `needs_consent` says tell the
+person and stop, `base_choice_needed` says ask rather than guess.
+
+Conflicts are diagnostics, not prose. An agent that reports success with open conflicts is
+making a mistake the benchmark is built to catch.
+
+## One journey at a time per process
+
+`@tool` holds a process-wide lock. The library underneath is full of state two journeys would
+share: `redirect_stdout` is global, `pdf.use_backend` sets a module variable,
+`checks.convert_locally` monkey-patches `render.save_png`, and the pure PDF backend carries
+PDFium's own process-wide multiple-master font blend, where even the order documents are opened
+in can change what is rendered. A harness that wants two journeys at once runs two processes.
+
+## Plugging it in
+
+```python
+from beamer2slides.agent import AgentContext
+from beamer2slides.agent.tools import TOOLS, INSTRUCTIONS
+from beamer2slides.agent.schema import anthropic_tools, openai_tools, validate
+
+ctx = AgentContext.local("C:/talks")
+result = TOOLS["deck_inspect"](ctx, pdf="talk.pdf")
+```
+
+`schema.py` turns the registry into JSON Schema in either of the two shapes harnesses want;
+parameter descriptions come from `typing.Annotated`, so they sit next to the parameter and
+cannot drift from it. `mcp.py` serves the same registry over MCP stdio, with `INSTRUCTIONS` as
+the server's instructions - a harness that publishes the tools without the rules will sooner or
+later force a rebuild over someone's edits.
+
+## What is deliberately not abstracted
+
+* **LaTeX.** `deck_pull`, `tex_converge` and `deck_adopt` shell out to pdflatex/lualatex and
+  read SyncTeX. A harness without a TeX installation gets `compile_failed`, which is the truth.
+* **The out-folder layout.** `raw.json`, `deck.json`, `emit.json`, `sync/base.json`: `sync`
+  identifies a deck *by its folder*, and the crash-safety story is written in those files.
+  Making the layout pluggable would make the guarantees pluggable too.
+* **The Google APIs themselves.** The tools inject *credentials*, not services. A fake service
+  would have to reproduce what Google refuses, and the project already knows how hard that is -
+  `tests/slides_sim.py` reproduces exactly three refusals and `devtools/doc_world.py` a great
+  many more, and both exist because a fake that is wrong in the wrong place teaches an agent a
+  habit that destroys a real deck.
+
+## Measuring it
+
+`devtools/agent_bench.py` and `docs/agent-bench.md`. The question is not whether the library is
+correct - the existing suites answer that - but whether an agent given these tools and these
+instructions does the journeys *well*: dry-runs before it writes, reads a conflict before it
+claims success, refuses to force a rebuild, tells the person when it needs a consent it cannot
+give. Most of that is measurable with no Google at all, by replaying canned results and grading
+the decision sequence.

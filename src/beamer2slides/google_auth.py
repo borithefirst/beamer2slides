@@ -5,11 +5,17 @@ The client secret and the cached token are looked for in `$B2S_CLIENT_SECRET` /
 then in the user's config folder (`%APPDATA%\\beamer2slides`, `~/.config/beamer2slides`),
 which is where a pip-installed beamer2slides keeps them. Both are readable only
 by the user who owns them.
+
+`credentials()` may open a browser, which is the right thing at a terminal and the wrong
+thing everywhere else: an agent harness, a server, a CI job. `use_provider` lets a caller
+put its own supply in front of that flow for the duration of a block, so nothing in the
+library has to learn where credentials come from (`agent/auth.py` is the caller that does).
 """
 
 import getpass
 import os
 import subprocess
+from contextlib import contextmanager
 from pathlib import Path
 
 from google.auth.exceptions import RefreshError
@@ -68,7 +74,27 @@ def restrict_to_current_user(path: Path) -> None:
         path.chmod(0o600)
 
 
+_provider = None  # what supplies credentials instead of the browser flow, while a block asks for it
+
+
+@contextmanager
+def use_provider(provider):
+    """Take credentials from `provider()` inside this block, never from the browser flow.
+
+    Process-wide, like the flow it replaces, so the caller holds it for one journey at a time
+    (`agent.context.journey` owns the lock that makes that true).
+    """
+    global _provider
+    before, _provider = _provider, provider
+    try:
+        yield
+    finally:
+        _provider = before
+
+
 def credentials() -> Credentials:
+    if _provider is not None:
+        return _provider()
     creds = None
     if TOKEN.exists():
         creds = Credentials.from_authorized_user_file(str(TOKEN), SCOPES)
