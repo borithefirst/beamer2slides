@@ -967,6 +967,21 @@ def test_a_slide_matched_by_its_place_alone_is_said_out_loud():
     assert [w for w in merge.plan_merge(base, ours, theirs)["report"]["warnings"] if "where it stands" in w]
 
 
+def test_a_frame_matched_between_twins_is_said_out_loud_too():
+    """`identity.align_slides` marks a pairing it could as well have made with another slide, for
+    the same score, when the frame has no label to settle it. Nothing downstream can tell that from
+    a match the words really made, so the report says which way the coin fell and asks for a label."""
+    base = many_slides(["a", "b", "c"])
+    base["slides"][1]["label"] = None
+    ours, theirs = triple(base)
+    ours["slides"][1]["label"] = None
+    ours["weak_pairs"] = {1: "twins"}
+    warnings = merge.plan_merge(base, ours, theirs)["report"]["warnings"]
+    assert [w for w in warnings if w.startswith("slide b:") and "coin toss" in w]
+    ours["slides"][1]["label"] = "b"        # a frame with a label of its own was never in doubt
+    assert not [w for w in merge.plan_merge(base, ours, theirs)["report"]["warnings"] if "coin toss" in w]
+
+
 def test_user_added_slide_stays_after_its_predecessor():
     base = three_slides()
     ours, theirs = triple(base)

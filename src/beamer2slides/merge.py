@@ -735,6 +735,16 @@ def plan_merge(base: dict, ours: dict, theirs: dict, adopt=None) -> dict:
                 f"it says; it was matched by where it stands, between the frames around it. Move it too, or "
                 f"rewrite the rest of it, and there is nothing left to recognise it by - give it a label "
                 f"(`beamer2slides label`), see docs/labels.md.")
+        if b is not None and weak.get(j) == "twins" and not o.get("label"):
+            # `identity.align_slides`: this frame has no label and says about as much as its
+            # neighbour does, so putting it on this slide and putting it on the other one are the
+            # same alignment as far as the words go. It was put here; a person who knows which
+            # frame is which should say so with a label before the next sync repeats the guess.
+            report["warnings"].append(
+                f"slide {b['key']}: this frame has no label, and it and the slides around it say so nearly "
+                f"the same thing that the match could as well have been one of them; it was matched here. "
+                f"Your edits on that slide are safe either way, but which slide this frame writes to next "
+                f"time is a coin toss - give it a label (`beamer2slides label`), see docs/labels.md.")
         if b is not None and b.get("label") and o.get("label") != b.get("label"):
             # The label is gone or different, and the content recognised the frame anyway. Nothing
             # is at risk this time; the next version of the source has one hook fewer to hang on.

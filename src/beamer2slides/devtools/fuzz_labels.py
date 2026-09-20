@@ -73,14 +73,14 @@ def _order_only():
         identity.CROSS_SURE, identity.GAP_SURE = sure, gap
 
 
-def _wrong(pairs, ours_truth, base_truth) -> int:
+def _wrong_frames(pairs, ours_truth, base_truth) -> list[int]:
     """Frames the pairing reads as another frame, or as new when the base knows them."""
-    wrong = 0
-    for j, truth in enumerate(ours_truth):
-        want = base_truth.index(truth) if truth in base_truth else None
-        if pairs.get(j) != want:
-            wrong += 1
-    return wrong
+    return [j for j, truth in enumerate(ours_truth)
+            if pairs.get(j) != (base_truth.index(truth) if truth in base_truth else None)]
+
+
+def _wrong(pairs, ours_truth, base_truth) -> int:
+    return len(_wrong_frames(pairs, ours_truth, base_truth))
 
 
 def round_once(seed: int, label_chance: float, tmp: Path, chain: int = 1,
@@ -132,11 +132,25 @@ def round_once(seed: int, label_chance: float, tmp: Path, chain: int = 1,
         moves = identity.label_moves(base_infos, infos)
         with _order_only():
             order = identity.align_slides(base_infos, infos, moves=[])
+        weak: dict[int, str] = {}
         pairings = {"order": order,
                     "before": identity.align_slides(base_infos, infos, moves=[]),
-                    "now": identity.align_slides(base_infos, infos, moves)}
+                    "now": identity.align_slides(base_infos, infos, moves, weak)}
         said = "moved" if any(m["verdict"] == "moved" for m in moves) else ("unsure" if moves else "quiet")
+        # A frame the report warns about is not a frame the sync moved in silence, whatever the
+        # label verdict says. `merge.plan_merge` warns on two things besides the label moves: a
+        # pairing `weak` marks (matched by content, by place, or between twins) and a slide whose
+        # label the frame no longer carries (`b["label"] and o["label"] != b["label"]`).
+        wrong_now = _wrong_frames(pairings["now"], ours_truth, base_truth)
+
+        def warned(j: int) -> bool:
+            i = pairings["now"].get(j)
+            if j in weak:
+                return True
+            return i is not None and bool(base_infos[i].get("label")) \
+                and infos[j].get("label") != base_infos[i].get("label")
         steps.append({"seed": seed, "step": step, "broke": broke, "said": said, "ops": done,
+                      "weak": sum(1 for j in wrong_now if warned(j)), "weak_all": len(weak),
                       "reordered": any(line.startswith("move_slide") and not line.endswith("None") for line in done),
                       "wrong": {k: _wrong(p, ours_truth, base_truth) for k, p in pairings.items()},
                       "frames": len(ours_truth)})
@@ -173,8 +187,10 @@ def main() -> int:
                 for how, w in r["wrong"].items():
                     frames[f"{group}/{how}"] += w
                 frames[f"{group}/frames"] += r["frames"]
+                tally[f"{group}/warned"] += r["weak_all"]
                 if r["wrong"]["now"]:
-                    tally[f"{group}/{'silent' if r['said'] == 'quiet' else 'said so'}"] += 1
+                    told = r["said"] != "quiet" or r["weak"]
+                    tally[f"{group}/{'said so' if told else 'silent'}"] += 1
                 if r["wrong"]["now"] > r["wrong"]["before"]:
                     tally[f"{group}/worse"] += 1
                 if r["wrong"]["now"] or (not r["broke"] and r["said"] != "quiet"):
@@ -193,6 +209,8 @@ def main() -> int:
         print("  said " + ", ".join(f"{s} in {tally[f'{group}/said:{s}']}" for s in ("moved", "unsure", "quiet")))
         print(f"  of the rounds still wrong, {tally[f'{group}/said so']} were reported and "
               f"{tally[f'{group}/silent']} passed in silence; {tally[f'{group}/worse']} came out worse than before")
+        print(f"  {tally[f'{group}/warned']} pairings warned about in all "
+              f"({100 * tally[f'{group}/warned'] / max(1, frames[f'{group}/frames']):.2f}% of frames)")
     if worst:
         print(f"\n{len(worst)} round(s) left wrong or noisy:")
         for r in worst[:args.show]:

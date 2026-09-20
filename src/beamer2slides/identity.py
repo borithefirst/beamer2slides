@@ -21,6 +21,7 @@ CROSS_SURE = 1.15     # a slide this alike, left over by the order-keeping pass,
 CROSS_MARGIN = 0.4    # ... unless another leftover comes this close to explaining it too
 GAP_SURE = 0.3        # the only leftover between two paired frames needs this much of the same words
 NEAR_TELL = 0.35      # leftovers this alike are worth a word in the report, though nothing pairs them
+TWIN_TIE = 0.02       # an alignment this close to the best one is a second reading, not a worse one
 KEY_MATCH = 0.5       # least similarity for an element keeping the key it would get anyway
 ELEMENT_MATCH = 0.35  # least similarity for an element inheriting another key
 # Render output, not source: "picture" says how a bare image reached its file (raw stream or
@@ -216,9 +217,11 @@ def align_slides(base: list[dict], ours: list[dict], moves: list[dict] | None = 
     A label the content says has moved to another frame (`label_moves`) is not followed: its two
     slides go into the alignment with the rest.
 
-    `weak`, if given, is filled with the pairings the two leftover passes made and how - "content"
-    (`cross_pairs`) or "place" (`gap_pairs`) - because they are inferences the alignment itself
-    could not draw, and a report that says so lets the author put a label there instead."""
+    `weak`, if given, is filled with the pairings nothing quite proved and how: "content"
+    (`cross_pairs`) or "place" (`gap_pairs`), the two leftover passes, which are inferences the
+    alignment itself could not draw, and "twins" - an unlabelled frame the alignment could have
+    put on another slide for the same score. A report that says so lets the author put a label
+    there instead."""
     if moves is None:
         moves = label_moves(base, ours)
     dropped = {m["ours"] for m in moves if m["verdict"] == "moved"}
@@ -252,15 +255,41 @@ def align_slides(base: list[dict], ours: list[dict], moves: list[dict] | None = 
                 best = max(best, sim[a][b] + score[a + 1][b + 1])
             score[a][b] = best
     a = b = 0
+    chosen = {}
     while a < m and b < n:
         s = sim[a][b]
         if s >= SLIDE_MATCH and allow[a][b] and abs(score[a][b] - (s + score[a + 1][b + 1])) < 1e-9:
             pairs[os_[b]] = bs[a]
+            chosen[b] = a
             a, b = a + 1, b + 1
         elif score[a + 1][b] >= score[a][b + 1]:
             a += 1
         else:
             b += 1
+    # An alignment of equal score is an alignment the traceback could as well have picked, and on a
+    # deck of look-alike slides there are several: a frame with no label, between twins, pairs with
+    # whichever of them the walk reaches first. Nothing downstream can tell that from a match made
+    # on the words, so the person is told instead (fuzz_labels seed 32773 --shape adopt: the source
+    # deleted one of four near-identical slides, the unlabelled frame after it took the deleted
+    # slide's place, and the sync wrote it over a slide the person had edited, in silence).
+    # `pre` is the same alignment read forwards, so a pairing lies on *some* best alignment exactly
+    # when what leads to it plus what follows it adds up to the best score there is.
+    if weak is not None and chosen:
+        pre = [[0.0] * (n + 1) for _ in range(m + 1)]
+        for a in range(1, m + 1):
+            for b in range(1, n + 1):
+                best = max(pre[a - 1][b], pre[a][b - 1])
+                if sim[a - 1][b - 1] >= SLIDE_MATCH and allow[a - 1][b - 1]:
+                    best = max(best, pre[a - 1][b - 1] + sim[a - 1][b - 1])
+                pre[a][b] = best
+
+        def optimal(a: int, b: int) -> bool:
+            return (sim[a][b] >= SLIDE_MATCH and allow[a][b]
+                    and score[0][0] - (pre[a][b] + sim[a][b] + score[a + 1][b + 1]) <= TWIN_TIE + 1e-9)
+
+        for b, a in chosen.items():
+            if not ours[os_[b]].get("label") and any(optimal(other, b) for other in range(m) if other != a):
+                weak[os_[b]] = "twins"
     # One after the other, each seeing what the one before it took: written as one tuple, both
     # passes were handed the *same* leftovers and could claim the same slide - and did (offline
     # fuzz seed 5521: the source swapped two frames, `cross_pairs` recognised one of them by its

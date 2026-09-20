@@ -146,6 +146,26 @@ def test_two_leftovers_that_look_alike_are_reported_though_nothing_pairs_them():
     assert identity.near_misses(base, other, identity.align_slides(base, other)) == []
 
 
+def test_an_unlabelled_frame_between_twins_is_matched_and_said_out_loud():
+    """A deck a person built in Slides repeats itself: three slides saying the same thing, one of
+    them dropped by the source. Whichever of the survivors the alignment pairs the unlabelled frame
+    with, the other is as good a reading and costs the same score, so the answer is a coin toss -
+    and a coin toss that decides whose edits get written over must not pass in silence
+    (`fuzz_labels --shape adopt` seed 32773: two frames of 20,080 misidentified, both silent).
+    """
+    base = [info("Results", SAME, "one"), info("Results", SAME), info("Results", SAME),
+            info("Takeaways", SUMMARY, "end")]
+    ours = [base[0], info("Results", SAME), base[3]]          # one of the twins is gone; which one?
+    weak: dict[int, str] = {}
+    pairs = identity.align_slides(base, ours, weak=weak)
+    assert pairs == {0: 0, 1: 1, 2: 3} and weak == {1: "twins"}
+    # The same frame with a label of its own is no coin toss: the label pairs it and nothing is said.
+    named = [base[0], info("Results", SAME, "middle"), base[3]]
+    base_named = [base[0], info("Results", SAME, "middle"), base[2], base[3]]
+    weak = {}
+    assert identity.align_slides(base_named, named, weak=weak) == {0: 0, 1: 1, 2: 3} and weak == {}
+
+
 def test_the_leftovers_obey_the_labels_too():
     """Two labels that both exist on both sides belong to two frames that both exist, so the
     leftovers are no more free to pair across them than the alignment is (`align_slides.pairable`)."""
