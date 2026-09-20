@@ -694,7 +694,8 @@ def _restack(live, b, o, fresh, tok):
     element before it in ours order (at the bottom when none of them is on the page). This is the
     outcome; the mechanism is `sync.Sync.restack`, which the offline campaign does not replay (as it
     does not replay a move's transforms - see `_place_unit`), so the rule is pinned separately by
-    `test_a_created_unit_goes_where_the_source_draws_it_not_on_top`. Without it the applier stacked a
+    `test_a_created_shape_stays_under_the_text_the_source_draws_above_it` and
+    `test_an_element_a_dissolved_group_frees_onto_the_page_takes_the_sources_place`. Without it the applier stacked a
     new panel over body text the conversion draws above it, and the oracle called that `text_hidden`
     - 11 of 1000 adopt-shaped rounds, all of them the harness's own doing."""
     order = live.setdefault("order", [])
@@ -706,11 +707,14 @@ def _restack(live, b, o, fresh, tok):
         return _page_element(objects, oid)
 
     keys = [el["key"] for el in o["elements"]]
+    rank = {k: i for i, k in enumerate(keys)}
     made = {f"b2s_{h6(o['key'])}_{h6(k)}_{tok}": k for k in keys}
-    stands, drawn = {}, set()       # key -> its page element; and every object the source draws
+    stands, at_rank = {}, {}    # key -> its page element; and where the source draws each object
     for k in keys:
         oid = f"b2s_{h6(o['key'])}_{h6(k)}_{tok}"
-        drawn |= {x for x in (oid, base_main.get(k)) if x in objects}
+        for x in (oid, base_main.get(k)):
+            if x in objects:
+                at_rank[x] = min(at_rank.get(x, rank[k]), rank[k])
         oid = oid if oid in objects else base_main.get(k)
         if oid in objects and (t := top(oid)) in order:
             stands[k] = t
@@ -729,10 +733,10 @@ def _restack(live, b, o, fresh, tok):
                 pos = min(pos, order.index(nxt))
                 break
         order.insert(pos, oid)
-    _not_over_kept(live, drawn, made)
+    _not_over_kept(live, at_rank, made, rank)
 
 
-def _not_over_kept(live, drawn, made):
+def _not_over_kept(live, at_rank, made, rank):
     """Nothing the sync wrote ends up above words only the deck has: a text the source dropped and
     the deck's edits kept alive, or one the person drew themselves. The source's order says where an
     element goes among the source's own and nothing at all about those, and a panel that grew over
@@ -745,11 +749,25 @@ def _not_over_kept(live, drawn, made):
     source had just grown covered a text the source no longer has (converted seed 2300025 at chain
     12). Which words are the deck's own is asked of each **text** (`drawn`), not of the page element
     holding it: a group the person made may hold one of their text boxes beside one of the
-    converter's (converted seed 5200496 at chain 12)."""
+    converter's (converted seed 5200496 at chain 12).
+
+    Nor above words the source draws above it and the page order could not carry (`at_rank`): a page
+    element stands for every converter element inside it and `_page_order` ranks it by the first of
+    them, so a group holding two of them with a panel drawn *between* is a place where the source's
+    order cannot be honoured at all - the group goes under the panel for the sake of the text below
+    it, taking the text above it with it. There the words are the source's own and this pass was told
+    to keep quiet about them (converted seed 8300231 at chain 11)."""
     order, objects = live.get("order") or [], live["objects"]
-    for m in made:
+    stand_rank = {}                 # page element -> the first of them it stands for
+    for oid, r in at_rank.items():
+        el = _page_element(objects, oid)
+        stand_rank[el] = min(stand_rank.get(el, r), r)
+    for m, key in made.items():
         if m not in objects or (oid := _page_element(objects, m)) not in order:
             continue
+        r = rank.get(key)
+        drawn = {x for x, xr in at_rank.items()
+                 if r is None or xr <= r or stand_rank.get(_page_element(objects, x), r) >= r}
         i = order.index(oid)
         for j, other in enumerate(order[:i]):
             if sync.would_hide(objects, m, other, drawn):

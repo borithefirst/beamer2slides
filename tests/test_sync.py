@@ -1054,6 +1054,56 @@ def test_a_created_panel_goes_under_a_persons_box_grouped_with_one_of_the_conver
     assert order.index("new_s0") > order.index("user_g")
 
 
+def test_a_created_panel_goes_under_the_text_a_group_carries_above_it():
+    """A page element stands for *every* converter element inside it, and `Sync._by_the_source` ranks
+    it by the first of them - so a group holding two of the converter's texts with the panel drawn
+    between them is a place where the source's order cannot be honoured at all: the group goes below
+    the panel for the sake of the text the source draws below it, and takes the text the source draws
+    above it down with it. Those words are the source's own, so the guard above had been told to keep
+    quiet about them, and a created panel covered a text still on the slide (converted fuzz seed
+    8300231 at chain 11). A text the source draws above the shape is spoken for only while its page
+    element is not standing below the shape on another text's account."""
+    from beamer2slides.sync import Sync
+    els = [entry("text/title/0", text_ir("Intro", (10, 10, 100, 24), "p0t0", "title"), "b2s_s000_t0"),
+           entry("text/body/1", text_ir("Above the panel", (20, 40, 200, 60), "p0t1"), "b2s_s000_t1"),
+           entry("shape/panel/0", shape_ir((15, 70, 210, 120), "p0s0"), "b2s_s000_s0"),
+           entry("text/body/2", text_ir("Under the panel", (20, 130, 200, 150), "p0t2"), "b2s_s000_t2")]
+    slide = base_slide("intro", "b2s_s000", els, label="intro", title="Intro")
+    slide["order"] = ["b2s_s000_t0", "b2s_s000_s0", "user_g"]   # the person grouped the two bodies
+    base = {"version": 1, "generation": 0, "presentationId": "P", "master_background": None, "slides": [slide]}
+    ours, _ = triple(base)
+    before = {"objectId": "b2s_s000", "order": ["b2s_s000_t0", "b2s_s000_s0", "user_g"], "objects": {
+        "b2s_s000_t0": readback([20, 20, 200, 48], text="Intro"),
+        "b2s_s000_s0": readback([30, 140, 420, 200]),
+        "user_g": {**readback([40, 80, 400, 300], kind="elementGroup"),
+                   "children": ["b2s_s000_t1", "b2s_s000_t2"]},
+        "b2s_s000_t1": {**readback([40, 80, 400, 120], text="Above the panel"), "parent_group": "user_g"},
+        "b2s_s000_t2": {**readback([40, 240, 400, 300], text="Under the panel"), "parent_group": "user_g"}}}
+    p = {"action": "update", "key": "intro", "base": 0, "ours": 0, "objectId": "b2s_s000",
+         "units": [{"key": "text/title/0", "action": "keep"}, {"key": "text/body/1", "action": "keep"},
+                   {"key": "shape/panel/0", "action": "recreate"}, {"key": "text/body/2", "action": "keep"}]}
+    sync = Sync.__new__(Sync)
+    sync.base, sync.ours = base, ours
+    w = {"plan": p, "doomed": {"b2s_s000_s0"}, "tops": {"shape/panel/0": "new_s0"}}
+    # the source grew the panel: it now covers the body the group carries *above* it
+    now = {"order": ["b2s_s000_t0", "b2s_s000_s0", "user_g", "new_s0"],
+           "objects": {**{k: v for k, v in before["objects"].items() if k != "b2s_s000_s0"},
+                       "new_s0": readback([30, 200, 420, 320])}}
+    order = [x for x in now["order"] if x not in w["doomed"]]
+    for r in sync.restack(w, before, now):
+        oid, = r["updatePageElementsZOrder"]["pageElementObjectIds"]
+        order.append(order.pop(order.index(oid)))
+    assert order.index("new_s0") < order.index("user_g")
+    # ... and where the group carries nothing the source draws above the panel, the source's order
+    # stands: the panel it draws last stays last, over the words it is meant to sit on.
+    now["objects"]["new_s0"] = readback([30, 90, 420, 130])      # over the body drawn *under* it
+    order = [x for x in now["order"] if x not in w["doomed"]]
+    for r in sync.restack(w, before, now):
+        oid, = r["updatePageElementsZOrder"]["pageElementObjectIds"]
+        order.append(order.pop(order.index(oid)))
+    assert order.index("new_s0") > order.index("user_g")
+
+
 def test_a_panel_in_a_block_takes_the_whole_block_under_words_only_the_deck_has():
     """The same rule, asked of the page element rather than the object. A block's panel is no page
     element of its own - what the page order holds is the group - so the guard above looked up an id

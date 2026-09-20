@@ -999,7 +999,16 @@ panel belongs to - since that is what the page order holds: asked of the object 
 reached nothing at all when the panel was in a block, its id being in no page order (2300025 at chain
 12, adopt 3200538 at chain 10). Which words are the deck's own is asked of each *text*, not of the
 page element holding it, a group the person made being able to hold one of their text boxes beside
-one of the converter's (5200496 at chain 12). All four are mirrored in the
+one of the converter's (5200496 at chain 12). And the two halves have a seam: a page element stands
+for *every* converter element inside it while `_by_the_source` ranks it by the **first** of them, so
+a group holding two of the converter's texts with a panel drawn between them is a place where the
+source's order cannot be honoured at all - the group goes below the panel for the sake of the text
+below it and takes the text above it down with it, and those words being the source's own is exactly
+what this guard had been told to keep quiet about (8300231 at chain 11: one rule silent because the
+other had spoken, and it had not). A text the source draws above the shape is spoken for only while
+its page element is not itself standing below the shape on another text's account; where the page
+order does carry the source's word the text is already above and the pass never sees it, so nothing
+else moves (`test_a_created_panel_goes_under_the_text_a_group_carries_above_it`). All four are mirrored in the
 applier (`_restack`, `_not_over_kept`, `_page_order`, `_regroup_order`) and pinned by tests that fail
 without them (`test_a_created_panel_stays_under_words_only_the_deck_has`,
 `test_the_children_of_a_rebuilt_group_take_the_sources_order`,

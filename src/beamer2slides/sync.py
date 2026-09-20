@@ -1683,13 +1683,40 @@ class Sync:
         # element holding it: a group the person made may hold one of their text boxes beside one of
         # the converter's, and reading the group as the source's let a created panel cover their box
         # inside it (converted seed 5200496 at chain 12).
+        # ... nor above words the source draws above it and the page order could not carry. One page
+        # element stands for every converter element inside it, and `_by_the_source` ranks it by the
+        # first of them, so a group holding two of them with a panel drawn *between* is a place where
+        # the source's order cannot be honoured at all: the group goes under the panel for the sake of
+        # the text below it, taking the text above it with it. There the words are the source's own
+        # and the last pass was told to keep quiet about them, so a created panel covered a text still
+        # on the slide (converted seed 8300231 at chain 11, a person's group around two of the
+        # converter's texts). A text the source draws *above* this shape is therefore spoken for only
+        # while its page element is not standing below the shape on another text's account.
         keyset = set(keys)
-        drawn = {t for k in keys if (t := placed(k))}
-        drawn |= {oid for el in b["elements"] if el["key"] in keyset for oid in el.get("objects") or []}
+        rank = {k: i for i, k in enumerate(keys)}
+        at_rank: dict[str, int] = {}                # object -> where the source draws it
+        for k in keys:
+            if (t := placed(k)) is not None:
+                at_rank[t] = min(at_rank.get(t, rank[k]), rank[k])
+        for el in b["elements"]:
+            if el["key"] in keyset:
+                for oid in el.get("objects") or []:
+                    at_rank[oid] = min(at_rank.get(oid, rank[el["key"]]), rank[el["key"]])
+        stand_rank: dict[str, int] = {}             # page element -> the first of them it stands for
+        for oid, r in at_rank.items():
+            el = stands_now.get(oid, oid)
+            stand_rank[el] = min(stand_rank.get(el, r), r)
+        made_rank: dict[str, int] = {}
+        for k, t in w["tops"].items():
+            if k in rank:
+                made_rank[t] = min(made_rank.get(t, rank[k]), rank[k])
         for made in dict.fromkeys(w["tops"].values()):
             oid = stands_now.get(made, made)
             if oid not in desired:
                 continue
+            r = made_rank.get(made)
+            drawn = {x for x, xr in at_rank.items()
+                     if r is None or xr <= r or stand_rank.get(stands_now.get(x, x), r) >= r}
             i = desired.index(oid)
             for j, other in enumerate(desired[:i]):
                 if would_hide(shown, made, other, drawn):

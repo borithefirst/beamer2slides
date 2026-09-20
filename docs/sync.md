@@ -908,6 +908,18 @@ hold for every sync, including the combinations nobody thought of.
     `test_a_created_panel_stays_under_words_only_the_deck_has`,
     `test_a_panel_in_a_block_takes_the_whole_block_under_words_only_the_deck_has`,
     `test_a_created_panel_goes_under_a_persons_box_grouped_with_one_of_the_converters`.
+  - **Words the source draws above it that the page order cannot carry** (converted seed 8300231 at
+    chain 11). A page element stands for *every* converter element inside it and `_by_the_source`
+    ranks it by the **first** of them, so a group holding two of the converter's texts with a panel
+    drawn between them is a place where the source's order cannot be honoured at all: the group goes
+    below the panel for the sake of the text the source draws below it, and takes the text the source
+    draws above it down with it. There the words *are* the source's own, which is exactly what the
+    guard above had been told to keep quiet about — one rule silent because the other one had spoken,
+    and it had not — so a created panel covered a text still on the slide. A text the source draws
+    above the shape is spoken for only while its page element is not itself standing below the shape
+    on another text's account; everywhere the page order does carry the source's word, the text is
+    already above and the pass never looks at it, so nothing else moves.
+    `test_a_created_panel_goes_under_the_text_a_group_carries_above_it`.
   - **An element with no slot at all.** `restack` rewrites the deck's page order slot by slot, and
     an object the deck's order has no slot for lands on top of everything — past the ceiling above
     and past the guard below. A created element is given its place for that reason; so now is one a
