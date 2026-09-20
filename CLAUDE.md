@@ -1626,6 +1626,27 @@ keys, named ranges), `doc_merge.py` (pure planning), `doc_sync.py` (the commands
   saying exactly the same thing, the degenerate case of identity by words) has found nothing
   in 400+250 rounds and is kept for that, with a test pinning what it walks over; it moved
   every draw, which is how the three defects above were reached.
+  **Columns, and a third judge.** Coverage said it plainly: `insertTableRow` was planned in
+  every run and **no column request ever was**, so `_column_score` and the column side of
+  `_align`/`_merged_lines` had no measurement at all. Drawing them (`read_add_column`,
+  `read_delete_column`, a `src_regrid` that draws a column half the time) passed 1,700
+  rounds - and so did pairing columns **by place**, the straw man, because both judges are
+  blind to it: the oracle asks about the *reader's* work and a wrong matching never marks a
+  line `gone`, so it errs towards keeping; and `rebase_tables` writes the matching it used
+  into the base, so the second sync reads the table the same way and converges. A merge can
+  be wrong and stable at once. `fuzz_docs._arrived` is the campaign's own judge (where the
+  oracle's docstring always put it): a table the reader did not touch must come out at the
+  grid the file asks for, and a cell the source rewrote, in a table whose words the reader
+  did not touch, must be somewhere in it afterwards - the second being the one that sees a
+  wrong column (with the reader's hands off the grid the two pairings agree), now that
+  `src_edit_cell` writes a distinctive token. Place pairing then fails 3 of 200 at chain 6.
+  It found a real defect at once: a table the source **regrids and moves at once** was built
+  again at `_size` of its own rows, which `_merge_table` leaves as the *document's* when
+  there is a regrid to write - the source drops the header row, moves the table, and it
+  comes back `[['1','2'], ['','']]`. `_built_size` counts the lines the matching settled.
+  Nine findings over 2,100 rounds, shrunk to three source ops and no reader at all (seeds
+  88033, 88075); with the fix, 2,800 rounds at chains 4/6/8 clean, the judge asking ~3,100
+  questions.
   A body may not end on a table, so the paragraph after a final one keeps its mark however it
   is deleted (`_delete_range`: its words go, an empty paragraph stays where it stood) - but
   the append index came from the last block the sync *keeps*, which is then the table, and a

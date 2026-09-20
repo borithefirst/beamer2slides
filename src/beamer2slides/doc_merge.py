@@ -1151,7 +1151,7 @@ def _apply_source_moves(base: dict, ours: dict, theirs: dict, merged: list, note
             # batch of its own, the base takes the new grid (`rebase_tables`), and the
             # round after it plans the move — with a file that still holds the row the
             # reader deleted. Building from the file puts that row back.
-            build = _size(block.get("rows", []))
+            build = _built_size(block)
             if build is None \
                     or not _table_movable(sides["was"][key], sides["live"][key]):
                 notes.append(f"{key}: the source moved the table, but the document changed "
@@ -1424,6 +1424,28 @@ def _size(rows: list) -> tuple[int, int] | None:
     if not rows or not rows[0] or any(len(row) != len(rows[0]) for row in rows):
         return None
     return len(rows), len(rows[0])
+
+
+def _built_size(block: dict) -> tuple[int, int] | None:
+    """The shape a table the source moved has to be built again at.
+
+    Not the file's — the file may still hold a row the reader deleted — and not
+    `_size` of the block's own rows either, which is the trap: when the merge also
+    regrids, `_merge_table` returns *before* it merges the cells, so `rows` is still
+    the document's grid, and `structure` builds the moved table at the very shape the
+    sync was about to change. The source deletes a row and moves the table, and it
+    comes back with an empty row on the end (offline seed 88075, shrunk to three
+    source ops and no reader at all).
+
+    The merged shape is in the matching instead: every line but the ones the merge
+    settled as `gone`.
+    """
+    lines = block.get("lines")
+    if not lines:
+        return _size(block.get("rows", []))
+    rows, columns = (sum(not line.gone for line in lines[name])
+                     for name in ("row", "column"))
+    return (rows, columns) if rows and columns else None
 
 
 def _cell_text(cell: list[dict]) -> str:

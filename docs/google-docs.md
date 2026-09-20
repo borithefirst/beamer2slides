@@ -1790,6 +1790,64 @@ came back at all. A real resurrection puts back words the document did not hold,
 still fails — with the block delete broken on purpose, 44 of 200 rounds at chain 4, 91
 findings.
 
+### The column nobody had ever drawn, and the third judge
+
+Coverage is the campaign's own account of itself, and it said something plainly that
+nobody had read: `insertTableRow` and `deleteTableRow` were planned in every run, and
+**no column request ever was**. `src_regrid` added and dropped rows only, and the
+reader's ops were `add_row` and `delete_row`. So `_column_score`, the column side of
+`_align` and the column side of `_merged_lines` — the half of `_table_lines` that the
+documentation above describes at length, "columns by their words … so both sides may
+regrid, and rows and columns may change at once" — had no measurement behind them at
+all. `read_add_column`, `read_delete_column` and a `src_regrid` that draws a column half
+the time put that right: 1,700 rounds at chains 4, 6 and 8 with 235 column requests
+planned in the concentrated run, and nothing failed.
+
+Which proved less than it looked. Pairing columns **by place** instead of by their
+words — the straw man anybody would write first — also passed, 200 rounds at chain 6 on
+`two_tables`, without a murmur. Both of the campaign's judges are blind to it, and each
+for its own reason. The loss oracle asks about the *reader's* work and says so in its
+first paragraph; a column matched to the wrong column never deletes anything of the
+reader's, because a line the base and the document disagree about is never `gone`
+(`_merged_lines`), so a wrong matching errs towards keeping. And convergence is blind
+for a sharper reason: `rebase_tables` writes the matching it used into the base, so the
+second sync makes the same reading of the same table and writes nothing. **A merge can
+be wrong and stable at once.**
+
+So there is a third judge now, `fuzz_docs._arrived`, and it belongs to the campaign
+rather than to the oracle — which is where the oracle's own docstring had always put it
+("what this module does not judge: whether the source's changes arrived"). It asks two
+questions, both the narrowest that do the job:
+
+* a table **the reader did not touch at all** must come out of the sync at the grid the
+  file asks for. There is nothing to merge in that case, so no merge rule can stand in
+  the way, and the only excuse is the report naming the table;
+* a cell the source rewrote, in a table whose words the reader did not touch — they may
+  have added and deleted rows and columns, they may not have written — must be somewhere
+  in the table when the sync is over, unless the reader deleted the line it was in.
+
+The second is the one that sees the column matching, because the first cannot: with the
+reader's hands off the grid entirely, pairing by place and pairing by words agree, the
+base grid and the document's being the same grid. What tells them apart is the reader
+*regridding* while the source edits a cell. `src_edit_cell` writes a distinctive token
+now rather than a word out of the shared vocabulary — a cell edit nobody can tell from
+the cell beside it is one no judge can follow — and with that, pairing columns by place
+fails 3 of 200 rounds at chain 6 where it had failed none.
+
+And the judge found a real defect on its first outing, in the other half: a table the
+source **regrids and moves at once**. A move is a delete and a table built again blank,
+so the shape it is built at is the whole of the question, and `_merge_table` lays a trap
+for it — when the merge also regrids it returns *before* it merges the cells, so the
+block's own `rows` are still the document's. `_size` of those is the grid the sync was
+about to change, and the table came back with an empty row on the end: the source
+deletes the header row and moves the table, and the document ends up 2×2 holding
+`[['1','2'], ['','']]`. `_built_size` counts the lines the matching settled instead.
+Nine findings over 2,100 rounds, at every chain depth and in three shapes, shrunk to
+three source ops and **no reader at all** (offline seeds 88033 and 88075) — a defect
+a whole campaign built around the reader could never have reached, which is rather the
+point of having a judge that is not about the reader. With the fix: 2,800 rounds at
+chains 4, 6 and 8, nothing failed, the judge asking some 3,100 questions in them.
+
 ## Remaining risks
 
 1. **Pictures** — retired, see "Pictures, and the chips a request can make" above. What
