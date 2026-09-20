@@ -1044,6 +1044,44 @@ def test_a_cached_system_face_lives_while_a_document_holds_it():
     assert all(name not in (m.ttc_face_map if kind == "ttc" else m.face_map) for kind, name in alone)
 
 
+def test_a_fallback_face_with_no_family_takes_the_glyph_spacing_heuristic():
+    """CFX_SubstFont::IsActualFontLoaded asks ByteString::Find, which never finds an empty needle,
+    and UseInternalSubst's standard Foxit faces set no family at all - so a font whose fallback
+    lands on one has not loaded the actual font and its fallback glyphs are moved or narrowed to
+    the /Widths width (CPDF_Font::ShouldApplyGlyphSpacingHeuristic). Only a folder scan with no
+    Arial reaches it, which is Linux: GDI answers with Arial and macOS with Helvetica, so the
+    ubuntu runner alone drew subst torture seeds 13, 25, 26, 29, 90 and 129 differently."""
+    from beamer2slides.devtools.render_torture_subst import pdf_bytes
+    from beamer2slides.pdf.pure import fontmapper, render_text
+    from beamer2slides.pdf.pure.backend import PureBackend
+    _needs_foxit()
+    # a name that is not a standard one (or the heuristic is off before the family is looked at),
+    # drawn from Foxit's dingbats face, which has no glyph for a letter: the fallback draws them
+    content = b"BT /F0 30 Tf 10 30 Td (Wavy) Tj ET"
+    fonts = [_subst_font(b"ZapfDingbats,Bold", 4, _WIDTHS + b" /Encoding /WinAnsiEncoding",
+                         b"/StemV 80", b"TrueType")]
+    was_info, was_mapper = fontmapper.platform_font_info, fontmapper._mapper
+    fontmapper.platform_font_info = lambda: fontmapper.LinuxFontInfo([])   # a machine with no fonts
+    fontmapper._mapper = None
+    try:
+        doc = PureBackend().open(pdf_bytes(content, fonts))
+        try:
+            page = doc[0]
+            page.chars()
+            font = page._fonts[0]
+            face = render_text.fallback_face(font)
+            assert face.subst.family == ""
+            assert render_text._spacing_heuristic(font, face)
+            code = ord("W")
+            glyph = render_text.fallback_glyph(font, code, face)
+            assert glyph > 0
+            assert face.glyph_width(glyph) not in (0, font.char_width(code))   # it moves something
+        finally:
+            doc.close()
+    finally:
+        fontmapper.platform_font_info, fontmapper._mapper = was_info, was_mapper
+
+
 # ---------------------------------------------------------------------- PDFium's rules, one by one
 
 
