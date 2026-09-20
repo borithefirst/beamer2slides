@@ -1122,3 +1122,25 @@ to `out/edit-robustness/<tag>`; re-run it after the writer changes and the table
 move. `tests/test_edit_robustness.py` is the offline half (34 tests, no corpus and no compile): the
 sample replays, each edit lands where it is meant to in both forms, and the judging is right on
 made-up compile output and made-up pages.
+
+## What the judges changed in the proxy (ls-a rescored)
+
+Three of the six changes the calibration named, made:
+- `_key` is now a line without its words, and a key must carry at least HEAVY (20) characters of
+  machinery. A line counts as repeated when its key is said REPEAT_FRAMES times anywhere, within one
+  frame or across frames: a style dumped onto twenty rows of one table is no longer free (the judges
+  commonest complaint), while a list of items is not machinery and is not charged.
+- A recovered beamer theme is measured with the frames it serves (`measure(..., shared=...)`, its
+  lines spread over them). Every measure is a ratio per word, so a frame whose body is
+  `\frametitle{Expressions}` scored 0.86 while the box a person wants to move had gone to the layout
+  (judges h06). Moving content out of the frames is still worth it, but not free.
+- `twins` (reported, not scored): long literals a frame says twice - a link raw and escaped, a title
+  both in `\frametitle` and in a text box. Two edits, one of them easy to forget.
+
+Rescored on that scorer: m6-a 0.128, mt-a 0.329, ls-a 0.438 (lines 0.41, numbers 0.12, plumbing 0.53,
+bloat 0.57, author 0.86, repeat 0.87). The ranking the judges agreed with at 0.97 is unchanged.
+
+Not made, and why: naming positional quads (no judge decided a pair on it), separating a coordinate
+from a fudge (`space=-0.01`; the easiest of the six to turn into tuning), and charging a hash-named
+include (better as a reported number). A wall of 50 `\slidetext` lines told apart only by their
+coordinates is still uncharged: their machinery really does differ.

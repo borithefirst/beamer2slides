@@ -61,3 +61,33 @@ def test_lines_every_frame_repeats_are_what_a_theme_should_say():
     tex = "\\begin{document}\n" + "".join(frame % k for k in range(4)) + "\\end{document}"
     m = readability.measure(tex)
     assert m["repeat"] < 0.7 and m["top_repeated"][0][0] == 4
+
+
+def test_machinery_said_three_times_inside_one_frame_counts_as_said_three_times():
+    """The judges' commonest complaint: a style dumped onto every row of one table is free while the
+    same line on three frames is charged. A list of items is not machinery: its key is too short."""
+    words = ("alpha", "beta", "gamma", "delta")
+    rows = "".join("  \\slidepar[style=body-mono-blue,space=0.01,indent=22.68]{Row %s}\n" % w for w in words)
+    table = "\\begin{document}\n\\begin{frame}\n" + rows + "\\end{frame}\n\\end{document}"
+    items = "\\begin{document}\n\\begin{frame}\n" + "".join(f"  \\item Item {w}\n" for w in words) + \
+            "\\end{frame}\n\\end{document}"
+    assert readability.measure(table)["repeat"] < 0.3, "one style, said four times"
+    assert readability.measure(items)["repeat"] == 1.0, "four items a person wrote"
+
+
+def test_a_frame_emptied_into_the_theme_is_not_free():
+    """Every measure is a ratio per word, so a frame holding only its title scored near 1.0 while the
+    box a person wants to move now lives in the layout (the judges refused that source)."""
+    tex = "\\begin{document}\n" + "".join(
+        "\\begin{frame}[plain,layout=section]\n  \\frametitle{Section %d}\n\\end{frame}\n" % k for k in range(3)) + \
+        "\\end{document}"
+    theme = "\\defbeamertemplate{background}{section}{%\n" + "".join(
+        "  \\slidetext{%d.5,63,243.57,37.8}{body}{Decoration %d}\n" % (k, k) for k in range(20)) + "}\n"
+    assert readability.score(readability.measure(tex)) > readability.score(readability.measure(tex, shared=theme))
+
+
+def test_a_literal_a_frame_says_twice_is_reported():
+    twice = ("\\begin{document}\n\\begin{frame}\n  \\frametitle{Quarterly revenue}\n"
+             "  \\slidetext{1,2,3,4}{body}{Quarterly revenue}\n\\end{frame}\n\\end{document}")
+    once = twice.replace("{body}{Quarterly revenue}", "{body}{Something else entirely}")
+    assert readability.measure(twice)["twins"] == 1 and readability.measure(once)["twins"] == 0

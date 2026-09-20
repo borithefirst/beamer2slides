@@ -1,4 +1,4 @@
-"""How readable a beamer source is to the person who will edit it: a cheap proxy, no compile.
+r"""How readable a beamer source is to the person who will edit it: a cheap proxy, no compile.
 
 `adopt` is scored for fidelity by `adopt_bench`; this scores the other half of its promise - a source
 a person can keep. Only the frame bodies count (what one edits slide by slide); the preamble and any
@@ -15,8 +15,13 @@ geometric mean: 1.0 reads like a hand-written source.
   files define: `vocabulary`), per word.
 - `bloat`: source characters per visible character.
 - `author`: the share of commands that are an author's vocabulary.
-- `repeat`: 1 - the share of body lines found in at least `REPEAT_FRAMES` frames - what a theme or a
-  macro should say once (a layout's placeholders, a master's decoration, the same text style).
+- `repeat`: 1 - the share of lines whose machinery (`_key`: the line without its words) is said at
+  least `REPEAT_FRAMES` times, within a frame or across them - what a theme or a macro should say once
+  (a layout's decoration, a style dumped onto every row). A list's `\item`s are not machinery.
+
+A recovered beamer theme is measured with the frames it serves (`measure(..., shared=...)`, spread
+over them): moving a box out of the frames does not make it free to change. `twins` is reported, not
+scored: long literals a frame says twice, which are two edits and one of them easy to forget.
 
 `construct` charges each body line to what wrote it (text plumbing, style switches, placement,
 shapes, pictures, tables, text), so a report ranks where the lines go, as `adopt_bench losses` does
@@ -99,11 +104,22 @@ def construct(line: str) -> str:
     return "text" if visible(s) else "other"
 
 
+HEAVY = 20          # characters of machinery, words not counted: what is worth saying once
+
+
 def _key(line: str) -> str | None:
+    """What a line says apart from its words: `\\slidepar[style=body,space=0.01]{Hello}` and the same
+    with `{World}` share a key, so a style dumped onto twenty rows counts as said twenty times - which
+    is the judges' commonest complaint - while `\\item Hello` and `\\item World` (a short key) are the
+    list a person meant. Content repeats innocently; machinery around it does not."""
     s = line.strip()
-    if len(s) < 12 or s.startswith("\\end{") or not re.search(r"[A-Za-z]", s):
+    if s.startswith("\\end{") or not re.search(r"[A-Za-z]", s):
         return None
-    return s
+    words = visible(s)
+    shape = s
+    for w in sorted(set(words.split()), key=len, reverse=True):
+        shape = shape.replace(w, "")
+    return shape if len(shape.strip()) >= HEAVY else None
 
 
 DEFINED = re.compile(r"\\(?:newcommand|renewcommand|providecommand|DeclareDocumentCommand|def)\s*\\?"
@@ -122,35 +138,51 @@ def vocabulary(*sources: str) -> set[str]:
     return {n for n in names if not n.startswith("slides@") and not any(p.search("\\" + n) for p in plumbing)}
 
 
-def measure(tex: str, known: set[str] | None = None) -> dict:
+def measure(tex: str, known: set[str] | None = None, shared: str = "") -> dict:
+    """`shared` is what the frames make the reader read besides themselves - the recovered beamer
+    theme, which holds the elements the layouts draw. It counts once, spread over the frames: saying
+    a thing once is the point, but a frame whose body is `\\frametitle{Expressions}` and nothing else
+    is not free. Every ratio here is per word, so without this an emptied frame scores near 1.0 while
+    a person who wants to move its box has to go and edit the layout (judges h06)."""
     fs = frames(tex)
     if not fs:
         return {}
-    words = sum(len(visible(f).split()) for f in fs)
-    text_chars = sum(len(visible(f)) for f in fs)
-    cmds = Counter(m for f in fs for m in CS.findall(f) if m[:1].isalpha() and m not in NEUTRAL)
+    pieces = fs + ([shared] if shared.strip() else [])
+    words = sum(len(visible(f).split()) for f in pieces)
+    text_chars = sum(len(visible(f)) for f in pieces)
+    cmds = Counter(m for f in pieces for m in CS.findall(f) if m[:1].isalpha() and m not in NEUTRAL)
     n_cmd = sum(cmds.values())
     author = sum(n for c, n in cmds.items() if c in AUTHOR or (known and c in known))
-    lines = [ln for f in fs for ln in f.strip("\n").split("\n")]
-    seen = defaultdict(set)
-    for k, f in enumerate(fs):
+    lines = [ln for f in pieces for ln in f.strip("\n").split("\n")]
+    seen: Counter = Counter()
+    for f in pieces:
         for ln in f.split("\n"):
-            key = _key(ln)
-            if key:
-                seen[key].add(k)
-    repeated = sum(1 for ln in lines if (key := _key(ln)) and len(seen[key]) >= REPEAT_FRAMES)
-    by = Counter(construct(ln) for ln in lines)
+            if key := _key(ln):
+                seen[key] += 1
+    # said three times anywhere, within one frame or across them: a macro or a theme should say it once
+    repeated = sum(1 for ln in lines if (key := _key(ln)) and seen[key] >= REPEAT_FRAMES)
+    by = Counter(construct(ln) for f in fs for ln in f.strip("\n").split("\n"))
     w = max(words, 1)
     return {"frames": len(fs), "words": words,
             "lines": len(lines) / len(fs),
-            "numbers": sum(len(NUM.findall(re.sub(r"(?<!\\)%.*", "", f))) for f in fs) / w,
+            "numbers": sum(len(NUM.findall(re.sub(r"(?<!\\)%.*", "", f))) for f in pieces) / w,
             "plumbing": (n_cmd - author) / w,
-            "bloat": sum(len(f) for f in fs) / max(text_chars, 1),
+            "bloat": sum(len(f) for f in pieces) / max(text_chars, 1),
             "author": author / max(n_cmd, 1),
             "repeat": 1 - repeated / max(len(lines), 1),
             "constructs": dict(by),
+            "twins": twins(fs),
             "top_commands": cmds.most_common(10),
-            "top_repeated": sorted(((len(v), k) for k, v in seen.items() if len(v) >= REPEAT_FRAMES), reverse=True)[:5]}
+            "top_repeated": [(n, k) for k, n in seen.most_common(5) if n >= REPEAT_FRAMES]}
+
+
+TWIN = re.compile(r"[^\s{}\[\],;=]{8,}")
+
+
+def twins(fs: list[str]) -> int:
+    """Long literals a frame says twice (a link written raw and escaped, a title both in
+    `\\frametitle` and in a text box): any change there is two edits, and the second is easy to miss."""
+    return sum(sum(1 for n in Counter(TWIN.findall(f)).values() if n > 1) for f in fs)
 
 
 def components(m: dict, human: dict = HUMAN) -> dict:
@@ -184,11 +216,17 @@ def tree_vocabulary(tree: Path) -> set[str]:
     return vocabulary(*(p.read_text(encoding="utf-8", errors="replace") for p in sorted(tree.glob("*.sty"))))
 
 
+def tree_theme(tree: Path) -> str:
+    """The recovered theme (`beamertheme<Deck>.sty`): deck content the frames no longer hold, which a
+    person edits to move what a layout draws. slides.sty is not it - that is generic machinery."""
+    return "\n".join(p.read_text(encoding="utf-8", errors="replace") for p in sorted(tree.glob("beamertheme*.sty")))
+
+
 def report(corpus: Path, tag: str, verbose: bool = False) -> None:
     rows, lines_by = [], Counter()
     for d in sorted(p for p in corpus.iterdir() if (p / "runs" / tag / "tree").is_dir()):
         tree = d / "runs" / tag / "tree"
-        m = measure(tree_source(tree), tree_vocabulary(tree))
+        m = measure(tree_source(tree), tree_vocabulary(tree), tree_theme(tree))
         if not m:
             continue
         rows.append((d.name, m))
@@ -201,7 +239,7 @@ def report(corpus: Path, tag: str, verbose: bool = False) -> None:
         print(f"{name:<22} {score(m):5.3f}  {m['lines']:6.1f} {m['numbers']:6.2f} {m['plumbing']:7.2f} "
               f"{m['bloat']:5.1f} {m['author']:6.2f} {m['repeat']:6.2f}")
         if verbose:
-            print("    ", m["top_commands"])
+            print("    ", m["top_commands"], f"twins {m['twins']}")
             for n, k in m["top_repeated"]:
                 print(f"     x{n}: {k[:100]}")
     mean = sum(score(m) for _, m in rows) / len(rows)
