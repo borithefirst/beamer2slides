@@ -145,6 +145,13 @@ def _evidence(a: dict, b: dict) -> float:
     return SequenceMatcher(None, a["text"].split(), b["text"].split(), autojunk=False).ratio() + 0.5 * alike
 
 
+def _complete(a: dict, b: dict, score: float) -> bool:
+    """Whether `_evidence` has nothing left to hold against these two: the same words, word for
+    word. The most it can say depends on the pair - 1 for the words, plus half of what the titles
+    already say - so "nothing left" is a question about this pair, not a number to compare with."""
+    return bool(a["text"].split()) and score >= 1.0 + 0.5 * _title_alike(a, b) - 1e-9
+
+
 def label_moves(base: list[dict], ours: list[dict]) -> list[dict]:
     r"""Labels that look as if they moved to another frame (docs/sync.md, "When a label moved").
 
@@ -196,8 +203,18 @@ def label_moves(base: list[dict], ours: list[dict]) -> list[dict]:
         i = pairs[j]
         here, slide_is = best((_evidence(base[i], ours[k]), k) for k in free_ours if k != j)
         there, frame_is = best((_evidence(base[k], ours[j]), k) for k in free_base if k != i)
-        strong = (here >= LABEL_MOVED and here - own[j] >= LABEL_MARGIN,
-                  there >= LABEL_MOVED and there - own[j] >= LABEL_MARGIN)
+        # Two frames that say nearly the same thing cannot be told apart by `LABEL_MARGIN`: the
+        # pairing a label swapped between them leaves behind is already 0.85 alike, and nothing
+        # can beat that by half. What such a swap can do is come out *exact* on both sides - this
+        # slide's words are word for word another frame's, and this frame's are word for word
+        # another slide's, while the label's own pairing is neither. A frame edited hard, an
+        # overlay step or a retitled frame is never both of those at once, which is why this is
+        # allowed to stand in for the margin and nothing looser is.
+        swapped = (slide_is is not None and frame_is is not None
+                   and _complete(base[i], ours[slide_is], here) and _complete(base[frame_is], ours[j], there)
+                   and not _complete(base[i], ours[j], own[j]))
+        strong = (here >= LABEL_MOVED and (here - own[j] >= LABEL_MARGIN or swapped),
+                  there >= LABEL_MOVED and (there - own[j] >= LABEL_MARGIN or swapped))
         if not any(strong):
             continue
         label = ours[j]["label"]

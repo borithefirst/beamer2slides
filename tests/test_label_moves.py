@@ -75,6 +75,37 @@ def test_two_labels_swapped_between_frames_are_both_re_paired():
     assert identity.align_slides(base, ours) == {0: 0, 1: 1}
 
 
+QUARTER3 = "the table notes review and export figures for the third quarter of the year"
+QUARTER4 = "the table notes review and export figures for the fourth quarter of the year"
+
+
+def test_labels_swapped_between_two_frames_that_say_nearly_the_same_thing():
+    """`LABEL_MARGIN` cannot see this one. The two frames differ by a word, so the pairing the swap
+    leaves behind is already 0.9 alike and nothing can beat it by half - which is why a deck full of
+    near-twins (every deck `adopt` writes) used to take this in silence. What a swap does do is come
+    out word for word right on *both* sides while its own pairing is neither."""
+    base = [info("", QUARTER3, "q3"), info("", QUARTER4, "q4")]
+    ours = [info("", QUARTER3, "q4"), info("", QUARTER4, "q3")]
+    moves = identity.label_moves(base, ours)
+    assert sorted(m["label"] for m in moves) == ["q3", "q4"]
+    assert {m["verdict"] for m in moves} == {"moved"}
+    assert identity.align_slides(base, ours) == {0: 0, 1: 1}, "the words decide, and they are right"
+    assert identity.label_pairs(base, ours) == {0: 1, 1: 0}, "the label alone would have crossed them"
+
+
+def test_one_twin_edited_is_not_a_swap():
+    """The mirror image, and the reason the exactness is asked for on both sides: two frames that
+    say word for word the same thing, nobody touching a label, and the source rewording one of
+    them. The untouched twin then explains the edited one's slide exactly - one side of the story,
+    which is what a frame edited hard always looks like. Requiring only that side would cry wolf on
+    every deck that repeats itself."""
+    twin = "the table notes review and export figures for the quarter just gone"
+    base = [info("", twin, "first"), info("", twin, "second")]
+    ours = [info("", twin.replace("just gone", "about to start"), "first"), base[1]]
+    assert identity.label_moves(base, ours) == []
+    assert identity.align_slides(base, ours) == {0: 0, 1: 1}
+
+
 def test_a_label_moved_onto_a_frame_that_did_not_exist_before_is_only_a_question():
     """The frame that had the label is gone from the source, so only one half of the story can be
     checked. Nothing is re-paired; the report asks."""
