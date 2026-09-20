@@ -952,6 +952,18 @@ def plan_merge(base: dict, ours: dict, theirs: dict, adopt=None, follow_labels: 
         if read is None:
             continue  # removed on both sides
         touched = slide_touched(b, read)
+        if not touched and base.get("origin") == ADOPTED:
+            # A slide of a deck a person built. Nothing here made it, and a frame that has gone out
+            # of the source is as likely to be a label that did not survive the round trip as a
+            # slide the author meant to drop (`adopt.frame_labels` writes one per slide from its
+            # objectId, and a person editing the .tex can move or lose one). Deleting it would take
+            # somebody's own slide - its pictures, the comments hanging on it - on that evidence, so
+            # it is kept and said out loud instead, at every generation: a decision the base does not
+            # record reverses itself, and the base records this one by not accounting for the slide.
+            # The way to really drop it is to delete it in Slides, which is one click and no guess.
+            # It used to refuse the whole first sync (`adopt_sync.problems`, "slides-deleted"): 109
+            # of 600 campaign rounds at chain 8 wrote nothing at all on that account.
+            touched = ["the deck's own"]
         if touched:
             report["slides"]["kept"].append({"slide": b["key"], "reason": touched})
             plans.append({"key": b["key"], "action": "keep_removed", "ours": None, "base": i, "objectId": b["objectId"]})
@@ -982,6 +994,15 @@ def plan_merge(base: dict, ours: dict, theirs: dict, adopt=None, follow_labels: 
         # (a slide duplicated in Slides carries the tags of the original's objects)
         copies = {rb["title"][4:].rsplit("/", 3)[0] for rb in s["objects"].values() if (rb.get("title") or "").startswith("b2s:")}
         report["slides"]["user_added"].append({"objectId": s["objectId"], "copy_of": sorted(copies) or None})
+    unaccounted = [k["slide"] for k in report["slides"]["kept"] if k["reason"] == ["the deck's own"]]
+    if unaccounted:
+        # The leftover-base loop: slides of a person's own deck that no frame of the source explains.
+        report["warnings"].append(
+            f"{len(unaccounted)} slide(s) of this deck are accounted for by no frame of the source, and were "
+            f"kept: {', '.join(unaccounted[:3])}{', ...' if len(unaccounted) > 3 else ''}. Nothing here made "
+            f"those slides, so a frame gone out of the source is as likely to be a label that moved as a "
+            f"slide you meant to drop - put the label back where `adopt` wrote it (docs/labels.md) and the "
+            f"frame finds its slide again; if you did mean to drop it, delete the slide in Slides.")
     unpaired = [f"`{p['key']}` / `{u['key']}`" for p in plans for u in p.get("units") or [] if u.get("unpaired")]
     if unpaired:
         # `plan_unit`: the source changed elements this deck's pairing cannot place. Each one is a

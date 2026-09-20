@@ -805,7 +805,8 @@ The first two outlive the first sync - found by the campaign (`fuzz_world.build_
 rounds duplicated a person's box on the *second* sync, because a rebased base still carries unpaired
 elements. Clean at chain 1x400, 4x200 and 5x250; taking the `slides-deleted` refusal out fails 0 rounds,
 so that one is a judgement, not a measurement, and says so.
-**One element nothing can be written to freezes that element, not the talk.** The unpaired refusal was
+**One element nothing can be written to freezes that element, not the talk.**
+(The same for one slide: see below.) The unpaired refusal was
 the right decision at the wrong size: a deck a person built has unpaired elements by construction
 (10-80% of them), so a *whole sync* stopping at the first one meant that on 400 first-sync campaign
 rounds, 734 of ~2,400 syncs wrote nothing at all. `merge.plan_unit` now makes the decision itself, one
@@ -822,6 +823,17 @@ the probe that proves it opens both doors (`merge.ADOPTED` made a word no base s
 whose `objects` is empty, so the evidence for the decision is the decision (unlike the `removed` one,
 which had to be written down). Measured by repeating the campaign that found it: `unpaired` refusals
 734 -> 0, 400/400 first-sync rounds at chain 6 clean.
+**And one slide no frame accounts for.** The other whole-sync refusal is the same shape and now the
+same answer: `merge.plan_merge` keeps such a slide (`keep_removed`, `reason: ["the deck's own"]`, a
+warning per sync) instead of deleting it. Nothing here made those slides, and a frame gone out of the
+source is as likely to be a label that did not survive the round trip as a slide the author meant to
+drop - on that evidence this tool may not take somebody's own slide, with its pictures and the
+comments hanging on it, when the way to really drop one is one click in Slides. At **every**
+generation, not the first only: the base records the decision by not accounting for the slide, so
+there is nothing to reverse itself (the lesson above, applied before it could be learnt twice). It
+was 109 refusals in 600 campaign rounds at chain 8; the same 400 rounds at chain 6 that had 734
+`unpaired` and 30 `slides-deleted` refusals now have **none at all** - every one of 2,400 first syncs
+into a person's deck does what it can - and are clean, as are 600 at chain 8 and 500 at chain 10.
 **The plan is made for the deck it is going into**: everything sync writes is PDF pt times one number,
 and that number was `SLIDE_W / page`, so a deck of any other width got nothing created in it at all -
 ten of the 29 corpus decks (1440, 1920, 960, 800, 3456, 481.5, 595 pt). `DeckPlan(deck, page_width)`

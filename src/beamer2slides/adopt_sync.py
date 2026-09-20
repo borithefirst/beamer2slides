@@ -345,11 +345,13 @@ def problems(base: dict, mplan: dict, theirs: dict, way_back: dict | None = None
     (`fuzz_sync._doubled`), where a base rebased after one sync let the second one duplicate an
     unpaired box.
 
-    `unpaired` is the gate behind a decision the merge now makes itself: `merge.plan_unit` keeps
-    such a unit as the deck has it and reports a conflict, so an ordinary sync never brings one
-    here and the rest of the deck syncs (it used to refuse whole syncs by the hundred - see the
-    comment there). What is left is the last thing between a plan and a write into somebody's
-    deck, for a plan that says otherwise however it came to say it."""
+    Two of them are gates behind a decision the merge now makes itself, per element and per slide:
+    `merge.plan_unit` keeps an unpaired unit as the deck has it and `plan_merge` keeps a slide no
+    frame accounts for (`keep_removed`), both with a conflict or a warning naming it, so an
+    ordinary sync brings neither here and the rest of the deck syncs (between them they used to
+    refuse whole syncs by the hundred - see the comments there). What is left of them is the last
+    thing between a plan and a write into somebody's deck, for a plan that says otherwise however
+    it came to say it."""
     if base.get("origin") != ORIGIN:
         return []
     if not touches_deck(mplan, theirs):

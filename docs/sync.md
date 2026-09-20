@@ -1377,8 +1377,13 @@ that, one that stopped at the first unpaired element would never write anything 
   that the deck may go. This is the answer to "what must the default be": the same `--backup auto`
   as everywhere, but fatal here instead of a warning.
 - **slides deleted.** A frame the source no longer accounts for would delete a slide **a person
-  made**. On the first sync that is far more often a label that did not survive the round trip than
-  a slide the author meant to drop.
+  made**. That is far more often a label that did not survive the round trip than a slide the author
+  meant to drop. Per slide, like `unpaired`, and for the same reason: **`merge.plan_merge` keeps it**
+  (`keep_removed`, `reason: ["the deck's own"]`, one warning per sync) and the rest of the deck
+  syncs. At every generation, not only the first — a decision the base does not record reverses
+  itself, and the base records this one by not accounting for the slide. Nothing here made those
+  slides, and there is a way to really drop one that needs no guess: delete it in Slides. The
+  refusal stays as the gate behind the merge, on the first sync as before.
 - **unpaired.** The source changed an element the base could not tie to any object. Sync deletes a
   recreated unit's old objects through the base, and an unpaired element names none — so the
   person's box would stay where it is and a second one would appear beside it. Nothing is lost, and
@@ -1401,8 +1406,10 @@ that, one that stopped at the first unpaired element would never write anything 
   lands at the right place across the slide and the wrong one down it — silently, because the boxes
   are valid. That is what is refused now (`aspect_mismatch`, 0.5%).
 
-The first two are about a deck nothing has been written to yet, so they stop at generation 0. The
-last two do not heal by being written to once — an element no sync ever writes never gets an
+Two of them are gates now, behind a decision the merge makes per element and per slide; an ordinary
+sync brings neither here, and what is left of them is the last thing between a plan and a write into
+somebody's deck. The first two are about a deck nothing has been written to yet, so they stop at
+generation 0. The last two do not heal by being written to once — an element no sync ever writes never gets an
 object, and the deck's page keeps the shape it has — so they hold at every generation. (That was found
 by the offline campaign at chain depth 2: with the unpaired refusal gated on the first sync, the
 base rebased after it let the *second* sync duplicate the person's box.)

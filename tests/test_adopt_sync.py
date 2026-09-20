@@ -292,12 +292,54 @@ def test_backup_none_is_how_one_asks_for_a_sync_with_no_way_back(world):
     assert [p["reason"] for p in found] == []
 
 
-def test_a_first_sync_that_would_delete_a_slide_of_the_adopted_deck_is_refused(world):
-    """Those slides were made by a person. On the first sync, a frame the source no longer accounts
-    for is far more likely to be a label that moved than a slide the author meant to drop."""
+def test_a_slide_of_the_adopted_deck_no_frame_accounts_for_is_kept(world):
+    """Those slides were made by a person. A frame that has gone out of the source is as likely to
+    be a label that did not survive the round trip as a slide the author meant to drop, and on that
+    evidence nothing here may take somebody's own slide - so it is kept and said out loud, and the
+    rest of the sync goes in. At every generation: the base records the decision by not accounting
+    for the slide, so there is nothing to reverse itself."""
+    for generation in (0, 4):
+        base = {**copy.deepcopy(world["base"]), "generation": generation}
+        doc = copy.deepcopy(world["doc"])
+        fuzz_sync.src_delete_slide(random.Random(5), doc)
+        mplan = plan_of({**world, "base": base}, doc)
+        kept = [k for k in mplan["report"]["slides"]["kept"] if k["reason"] == ["the deck's own"]]
+        assert len(kept) == 1 and mplan["report"]["slides"]["deleted"] == []
+        assert [p["action"] for p in mplan["slides"] if p["key"] == kept[0]["slide"]] == ["keep_removed"]
+        assert any("accounted for by no frame of the source, and were kept" in w and
+                   "delete the slide in Slides" in w for w in mplan["report"]["warnings"])
+        assert adopt_sync.problems(base, mplan, world["live"], KEPT) == []
+
+
+def test_a_frame_put_back_finds_the_slide_that_was_kept_for_it(world):
+    """What keeping costs: `sync.new_base`'s `keep_removed` takes the label off that base entry - a
+    slide the source no longer describes must not hold a live label hostage - so when the author
+    puts the frame back, the content alone has to pair them. It does: nothing is created beside the
+    kept slide, which is the one way this could have gone wrong."""
+    gone = copy.deepcopy(world["doc"])
+    fuzz_sync.src_delete_slide(random.Random(5), gone)
+    ours = W.build_ours(gone, world["base"], world["out"])
+    mplan = merge.plan_merge(world["base"], ours, world["live"])
+    kept = [k["slide"] for k in mplan["report"]["slides"]["kept"] if k["reason"] == ["the deck's own"]]
+    after = W.apply_plan(world["base"], ours, world["live"], mplan, "t1")
+    base2 = W.rebase(world["base"], ours, after, mplan, "t1")
+    entry = next(s for s in base2["slides"] if s["key"] == kept[0])
+    assert entry["label"] is None and entry["removed"] is True
+
+    again = merge.plan_merge(base2, W.build_ours(world["doc"], base2, world["out"]), after)
+    assert again["report"]["slides"]["created"] == [] and again["report"]["slides"]["kept"] == []
+    assert again["report"]["slides"]["deleted"] == []
+
+
+def test_the_slide_gate_still_stands_behind_the_merge(world):
+    """As with an unpaired element: the merge decides, and the gate is what a plan saying otherwise
+    meets on its way to a write (`adopt_sync.problems`, the first sync only)."""
     doc = copy.deepcopy(world["doc"])
     fuzz_sync.src_delete_slide(random.Random(5), doc)
-    message = refuse(world["base"], plan_of(world, doc), world["live"], KEPT)
+    mplan = plan_of(world, doc)
+    p = next(p for p in mplan["slides"] if p["action"] == "keep_removed")
+    p["action"] = "delete"
+    message = refuse(world["base"], mplan, world["live"], KEPT)
     assert "  - 1 slide(s) of the deck would be deleted, because no frame of the source accounts for them " \
            "any more: " in message
     assert ("      On the first sync that is usually a label that moved, not a slide the author meant to drop."
