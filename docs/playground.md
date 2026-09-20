@@ -77,6 +77,14 @@ in `signin` mode with the visitor's, asked for at the click and handed to that o
 The server asks for it only where the journey needs it (`effects.google`), and a local journey
 carries nobody's credentials.
 
+Which is why such a journey must not *report* on Google as though it had looked. `b2s_status`
+is the tool whose job is to say whether Google is reachable, it needs no account to run, and so
+on a `signin` host it is never handed a token: it used to answer "Google is not reachable
+(offline)" - a server that cannot reach Google at all - on a page with a sign-in button at the
+top of it. `runner.SIGN_IN` says the arrangement instead (`auth.NoGoogle` carries a `reason` and
+a one-sentence `fix`), because the arrangement is the part this process can see: not being handed
+a token is not evidence that there is none.
+
 ### Reaching a deck this app did not make
 
 `drive.file` reaches only the files the app itself created, which is what keeps it a

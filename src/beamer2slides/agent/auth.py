@@ -37,16 +37,27 @@ class NoGoogle:
 
     The right source for a benchmark's offline tier, for a harness that has not been given an
     account, and for a first run where only the local journeys should be reachable.
+
+    A host that *could* have an account says so: `reason` is what `b2s_status` reports and `fix`
+    the one sentence telling a person what to do about it. They matter where the absence is not
+    a property of the machine but of this moment - the playground's visitor has not signed in
+    yet, and "offline" there reads as a server that cannot reach Google at all.
     """
+
+    def __init__(self, reason: str = "offline", fix: str | None = None) -> None:
+        self.reason, self.fix = reason, fix
 
     def credentials(self) -> Any:
         raise Refused("offline",
                       "This workspace has no Google access. Local journeys (deck_inspect, "
                       "tex_label, and converge) work; anything touching Slides, Docs or Drive "
-                      "does not.")
+                      "does not." + (f" {self.fix}" if self.fix else ""))
 
     def describe(self) -> dict:
-        return {"available": False, "reason": "offline", "scopes": []}
+        out = {"available": False, "reason": self.reason, "scopes": []}
+        if self.fix:
+            out["fix"] = self.fix
+        return out
 
 
 class TokenFile:

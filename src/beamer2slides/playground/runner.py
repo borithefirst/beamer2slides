@@ -46,13 +46,24 @@ class VisitorToken:
         return {"available": True, "source": "the visitor's own Google sign-in", "scopes": list(SCOPES)}
 
 
+#: What a visitor of a `signin` host is told instead of "offline". The server hands a token to a
+#: journey that needs one and to no other (`start_run`), so a local journey runs with no
+#: credentials whether or not anybody is signed in - and `b2s_status`, whose whole job is to say
+#: whether Google is reachable, would otherwise report a server that cannot reach Google at all
+#: from a page with a sign-in button on it. The wording says the arrangement rather than a state
+#: this process cannot see: not being handed a token is not evidence that there is none.
+SIGN_IN = ("A journey that touches Slides, Docs or Drive is given the token from your sign-in at "
+           "the top of this page; a local journey like this one never is, so it cannot tell "
+           "whether you are signed in.")
+
+
 def access(spec: dict):
     """Where this run's Google credentials come from, or `NoGoogle` when there are none."""
     from ..agent.auth import NoGoogle, default_access
 
     mode, token = spec.get("mode"), spec.get("token")
     if mode == "signin":
-        return VisitorToken(token) if token else NoGoogle()
+        return VisitorToken(token) if token else NoGoogle("no token in this run", SIGN_IN)
     if mode == "local":
         return default_access()
     return NoGoogle()

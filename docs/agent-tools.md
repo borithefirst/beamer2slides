@@ -187,6 +187,13 @@ cannot drift from it. `mcp.py` serves the same registry over MCP stdio, with `IN
 the server's instructions - a harness that publishes the tools without the rules will sooner or
 later force a rebuild over someone's edits.
 
+`TOOLS` iterates in `tools.ORDER`, which is the order of operations above: a model's tool list,
+the MCP catalogue and the workbench's dropdown all read top to bottom, and what they read there
+is advice. Collecting them from the modules instead put `deck_convert` above `deck_inspect` and
+`doc_adopt` above `doc_push` - the two orders this guide spends a section telling people not to
+follow. The collection is still what says *which* tools exist, so a journey added to a module
+and left out of `ORDER` raises at import rather than quietly sorting itself last.
+
 ## What is deliberately not abstracted
 
 * **LaTeX.** `deck_pull`, `tex_converge` and `deck_adopt` shell out to pdflatex/lualatex and

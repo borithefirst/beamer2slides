@@ -77,6 +77,10 @@ def test_every_journey_is_offered_with_its_own_schema(base):
     names = [t["name"] for t in catalogue["tools"]]
     assert "tex_compile" in names and "deck_convert" in names and "doc_sync" in names
     assert len(names) == 12                              # the eleven journeys plus the compile step
+    # The dropdown reads top to bottom, and what it reads there is the order of operations:
+    # compile first, because that is where a talk in this workspace starts.
+    from beamer2slides.agent import tools as registry
+    assert names == ["tex_compile", *registry.ORDER]
     for tool in catalogue["tools"]:
         assert tool["description"].strip() and tool["input_schema"]["type"] == "object"
         for name, prop in tool["input_schema"]["properties"].items():
@@ -221,6 +225,7 @@ def test_where_the_credentials_come_from(monkeypatch):
     from beamer2slides.agent.auth import NoGoogle, TokenFile
     from beamer2slides.playground import runner
     assert isinstance(runner.access({}), NoGoogle)
+    assert runner.access({}).describe()["reason"] == "offline"   # a host with no account at all
     assert isinstance(runner.access({"mode": "signin", "token": None}), NoGoogle)
     monkeypatch.delenv("B2S_AGENT_OFFLINE", raising=False)
     assert isinstance(runner.access({"mode": "local"}), TokenFile)
@@ -229,6 +234,18 @@ def test_where_the_credentials_come_from(monkeypatch):
                                   "scopes": runner.SCOPES}
     assert "ya29.x" not in json.dumps(visitor.describe())
     assert runner.SCOPES == server.WEB_SCOPES
+
+
+def test_a_local_journey_on_a_signin_host_does_not_report_a_server_that_cannot_reach_google():
+    """`b2s_status` is the tool that answers "is Google reachable?", and on a `signin` host it
+    is never handed a token - a local journey carries nobody's credentials. Saying "offline"
+    there describes a machine, on a page with a sign-in button on it; what is true is the
+    arrangement, which this process can see, and not whether somebody is signed in, which it
+    cannot."""
+    from beamer2slides.playground import runner
+    described = runner.access({"mode": "signin", "token": None}).describe()
+    assert described["available"] is False and described["reason"] == "no token in this run"
+    assert described["fix"] == runner.SIGN_IN and "sign-in at the top of this page" in runner.SIGN_IN
 
 
 def test_a_run_that_will_not_end_is_stopped(ws, tmp_path, monkeypatch):

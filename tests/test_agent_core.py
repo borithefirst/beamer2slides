@@ -326,6 +326,52 @@ def test_no_google_is_said_plainly_with_the_command_that_fixes_it(tmp_path):
     assert any(d.level == "warning" for d in r.diagnostics)
 
 
+def test_a_host_that_knows_the_way_back_to_google_says_it(tmp_path):
+    """Not every absence is a machine with no account: the playground's visitor signs in.
+
+    "offline" there reads as a server that cannot reach Google at all, on a page with a
+    sign-in button on it, so a source may carry the one sentence that says what to do.
+    """
+    from beamer2slides.agent import tools
+
+    source = NoGoogle("no token in this run", "Sign in at the top of the page.")
+    assert source.describe() == {"available": False, "reason": "no token in this run",
+                                 "scopes": [], "fix": "Sign in at the top of the page."}
+    r = tools.TOOLS["b2s_status"](_ctx(tmp_path, google=source))
+    assert "no token in this run" in r.summary and "Sign in at the top of the page." in r.summary
+    with pytest.raises(Refused) as exc:
+        source.credentials()
+    assert exc.value.code == "offline" and "Sign in at the top" in str(exc.value)
+
+
+# -- the order they are met in -----------------------------------------------------------
+
+
+def test_the_registry_is_in_the_order_of_operations():
+    """A dropdown, a model's tool list and the guide all read top to bottom.
+
+    Iterating the modules put `deck_convert` above `deck_inspect` and `doc_adopt` above
+    `doc_push` - the two orders INSTRUCTIONS.md spends a section telling people not to follow.
+    """
+    from beamer2slides.agent import tools
+
+    assert list(tools.TOOLS) == list(tools.ORDER)
+    order = list(tools.TOOLS)
+    assert order[0] == "b2s_status"
+    assert order.index("deck_inspect") < order.index("deck_convert") < order.index("deck_sync")
+    assert order.index("tex_label") < order.index("deck_convert")
+    assert order.index("doc_push") < order.index("doc_sync") < order.index("doc_adopt")
+
+
+def test_a_journey_missing_from_the_order_is_a_failure_not_a_tool_that_sorts_last():
+    from beamer2slides.agent import tools
+
+    with pytest.raises(RuntimeError, match="not in ORDER: deck_teleport"):
+        tools._ordered({**tools.TOOLS, "deck_teleport": lambda: None})
+    with pytest.raises(RuntimeError, match="no such tool: b2s_status"):
+        tools._ordered({n: f for n, f in tools.TOOLS.items() if n != "b2s_status"})
+
+
 # -- the guide ---------------------------------------------------------------------------
 
 
