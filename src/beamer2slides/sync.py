@@ -248,7 +248,8 @@ def build_ours(pdf: Path, work: Path, base: dict, overlays: str = "last",
                     page_width or SLIDE_W)
     deck = plan.deck
     infos = [identity.slide_info(s) for s in deck["slides"]]
-    base_infos = [{"label": b.get("label"), "title": b.get("title") or "", "text": b.get("text") or "", "page": b["page"]}
+    base_infos = [{"label": b.get("label"), "title": b.get("title") or "", "text": b.get("text") or "",
+                   "page": b["page"], "removed": b.get("removed")}   # `align_slides`: a slide the source dropped
                   for b in base["slides"]]
     moves = identity.label_moves(base_infos, infos)
     for m in moves:  # indices are no use to a reader of the report; the base's keys are
@@ -482,15 +483,23 @@ def subtree(objects: dict, oid: str) -> list[str]:
     return out
 
 
-def would_hide(objects: dict, top: str, under: str) -> bool:
+def would_hide(objects: dict, top: str, under: str, spoken_for: set[str] | None = None) -> bool:
     """Would drawing `top` above `under` put an opaque shape over words somebody can read? The
-    question `loss_oracle.occlusion_findings` asks of a finished sync, asked before the write."""
+    question `loss_oracle.occlusion_findings` asks of a finished sync, asked before the write.
+
+    `spoken_for`: objects whose words the source draws itself, and about whose stacking it therefore
+    has an opinion (`Sync.restack`'s last pass asks only about words **only the deck** has). It is
+    asked of each text rather than of `under` as a whole, because one page element may hold both - a
+    group the person made around one of their own text boxes and one of the converter's. Asking
+    whether that element is the source's protected the group and let a created panel cover the
+    person's box inside it (converted seed 5200496 at chain 12)."""
     shapes = [objects[x] for x in subtree(objects, top)
               if objects[x].get("kind") == "shape" and objects[x].get("box")
               and ((objects[x].get("shape_style") or {}).get("fill") or {}).get("color") is not None
               and (((objects[x].get("shape_style") or {}).get("fill") or {}).get("alpha") or 0) >= 0.999]
     texts = [objects[x] for x in subtree(objects, under)
-             if objects[x].get("box") and (objects[x].get("text") or "").strip()]
+             if x not in (spoken_for or ()) and objects[x].get("box")
+             and (objects[x].get("text") or "").strip()]
     for t in texts:
         area = (t["box"][2] - t["box"][0]) * (t["box"][3] - t["box"][1])
         for s in shapes:
@@ -1623,8 +1632,8 @@ class Sync:
                 desired.append(oid)
         keys = [e["key"] for e in o["elements"]]
         shown = now.get("objects") or {}
-        self._by_the_source(desired, oldtop, w["tops"], keys, b.get("order") or [],
-                            drawn_order(shown, now.get("order") or [])[1],
+        stands_now = drawn_order(shown, now.get("order") or [])[1]
+        self._by_the_source(desired, oldtop, w["tops"], keys, b.get("order") or [], stands_now,
                             drawn_order(before.get("objects") or {}, before.get("order") or [])[1])
 
         def placed(k):
@@ -1664,11 +1673,26 @@ class Sync:
         # deck's edits kept alive, or one the person drew themselves, it says nothing at all. A
         # panel that grew over such a text hides work nobody can get back, and the price of going
         # under it is z-order, so that is the way round to be wrong (`loss_oracle.text_hidden`).
-        drawn = {placed(k) for k in keys}
-        for oid in [x for x in desired if x in set(w["tops"].values())]:
+        #
+        # What moves is the page **element** the new shape is drawn inside - a converter group this
+        # rewrite rebuilt, most often the block the panel belongs to - because that is what the page
+        # order holds. Asking it of the object alone reached nothing at all when the panel was in a
+        # block: its id is in no page order, so the loop looked at an empty list and a panel the
+        # source had just grown covered a text the source no longer has (converted seed 2300025 at
+        # chain 12). Which words are the deck's own is asked of each **text**, not of the page
+        # element holding it: a group the person made may hold one of their text boxes beside one of
+        # the converter's, and reading the group as the source's let a created panel cover their box
+        # inside it (converted seed 5200496 at chain 12).
+        keyset = set(keys)
+        drawn = {t for k in keys if (t := placed(k))}
+        drawn |= {oid for el in b["elements"] if el["key"] in keyset for oid in el.get("objects") or []}
+        for made in dict.fromkeys(w["tops"].values()):
+            oid = stands_now.get(made, made)
+            if oid not in desired:
+                continue
             i = desired.index(oid)
             for j, other in enumerate(desired[:i]):
-                if other not in drawn and would_hide(shown, oid, other):
+                if would_hide(shown, made, other, drawn):
                     desired.insert(j, desired.pop(i))
                     break
         desired += [x for x in now["order"] if x not in desired and x not in doomed]
@@ -1813,13 +1837,17 @@ class Sync:
                 # source, or a frame whose label or title changed after the deletion stops looking
                 # like this entry and comes back as a new slide.
                 b, o = self.base["slides"][p["base"]], self.ours["slides"][p["ours"]]
-                entries[f"gone:{p['key']}"] = {**b, **{k: o.get(k) for k in ("label", "title", "text", "page")}}
+                entries[f"gone:{p['key']}"] = {**b, **{k: o.get(k) for k in ("label", "title", "text", "page")},
+                                               "removed": False}   # the source has this frame
                 continue
             if p["action"] == "keep_removed":
                 # The source dropped this frame and the deck's own edits keep the slide alive. Its
                 # label goes with the frame: the source may put it on another frame tomorrow, and a
-                # slide the source no longer describes must not hold a live label hostage.
-                entries[p["objectId"] or f"gone:{p['key']}"] = {**self.base["slides"][p["base"]], "label": None}
+                # slide the source no longer describes must not hold a live label hostage. And the
+                # entry says the source dropped it (`removed`), or it competes with the slide the
+                # frame really lives on for the frame that looks most like it - see `align_slides`.
+                entries[p["objectId"] or f"gone:{p['key']}"] = {**self.base["slides"][p["base"]],
+                                                                "label": None, "removed": True}
                 continue
             if p.get("held"):
                 # Nothing was written here (`merge.hold_slide`), and the entry must not say

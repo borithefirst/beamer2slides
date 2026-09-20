@@ -607,7 +607,16 @@ entry at the moment of deletion (its label/title/words now follow the source, it
 and a renamed label costing a slide its identity (`align_slides.pairable` lets the content fix it
 when neither side knows the other's label), and a slide the source dropped but the deck's edits kept
 alive still claiming its label in the base, so the frame that carries that label now paired with the
-dead entry (`sync.new_base` clears it: a label belongs to the source).
+dead entry (`sync.new_base` clears it: a label belongs to the source). Clearing the label was half
+of it: such an entry still says what the frame said, and `sync.base_order` puts it back beside the
+slide the frame really lives on, so for the frame carrying those words the two entries read *exactly*
+alike and the order-keeping walk, handed two readings of one score, takes the earlier - the frame
+flipped onto the dead entry and the next sync planned to **delete** the slide this one had just
+written, with the person's edits on it (converted 2100403 and 2100135 at chain 6; nothing was lost
+in the sync that caused it, so only the `_settled` check saw it). The entry says the source dropped
+it (`removed`) and between two readings that tie `align_slides` takes the slide the source still
+describes (`DROPPED_FRAME`, a hair: a frame the author puts back still re-pairs with its kept slide
+when nothing else explains it, and a real difference in the words decides as it did).
 
 A pairing that was a coin toss says so (`identity.align_slides`, `weak_pairs` value `twins`): where
 an unlabelled frame sits among slides that say nearly the same thing, a second alignment of the same
@@ -964,7 +973,13 @@ the deck's edits had kept alive, and a recreated panel that grew landed on anoth
 writes now ends up above a page element the source does not draw whose words it would cover
 (`sync.would_hide`, the oracle's own question - opaque fill at alpha 1 over more than 20% of a text's
 box - asked before the write). Hiding those words loses work nobody can get back and the price of
-going under them is z-order, so that is the way round to be wrong. All four are mirrored in the
+going under them is z-order, so that is the way round to be wrong. What moves is the page *element*
+the new shape is drawn inside - the converter group this rewrite rebuilt, most often the block the
+panel belongs to - since that is what the page order holds: asked of the object alone the rule
+reached nothing at all when the panel was in a block, its id being in no page order (2300025 at chain
+12, adopt 3200538 at chain 10). Which words are the deck's own is asked of each *text*, not of the
+page element holding it, a group the person made being able to hold one of their text boxes beside
+one of the converter's (5200496 at chain 12). All four are mirrored in the
 applier (`_restack`, `_not_over_kept`, `_page_order`, `_regroup_order`) and pinned by tests that fail
 without them (`test_a_created_panel_stays_under_words_only_the_deck_has`,
 `test_the_children_of_a_rebuilt_group_take_the_sources_order`,

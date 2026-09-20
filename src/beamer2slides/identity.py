@@ -23,6 +23,7 @@ CROSS_MARGIN = 0.4    # ... unless another leftover comes this close to explaini
 GAP_SURE = 0.3        # the only leftover between two paired frames needs this much of the same words
 NEAR_TELL = 0.35      # leftovers this alike are worth a word in the report, though nothing pairs them
 TWIN_TIE = 0.02       # an alignment this close to the best one is a second reading, not a worse one
+DROPPED_FRAME = 1e-4  # a tie between a slide the source still describes and one it dropped goes live
 KEY_MATCH = 0.5       # least similarity for an element keeping the key it would get anyway
 ELEMENT_MATCH = 0.35  # least similarity for an element inheriting another key
 # Render output, not source: "picture" says how a bare image reached its file (raw stream or
@@ -337,7 +338,18 @@ def align_slides(base: list[dict], ours: list[dict], moves: list[dict] | None = 
         return bl not in theirs_labels and ol not in base_labels
 
     allow = [[pairable(bs[a], os_[b]) for b in range(n)] for a in range(m)]
-    sim = [[slide_similarity(base[bs[a]], ours[os_[b]]) for b in range(n)] for a in range(m)]
+    # A base entry the source dropped, kept alive by the deck's own edits (`sync.new_base`'s
+    # `keep_removed`), still says what that frame said and has lost its label, and the rebase puts
+    # it back beside the slide the frame really lives on. So it reads exactly as well as that slide
+    # for the frame that carries the words - and the traceback, handed two alignments of one score,
+    # takes the earlier: the frame flipped onto the dead entry and the next sync planned to *delete*
+    # the slide it had just written, with the person's edits on it (converted seed 2100403 at chain
+    # 6). Between two readings that tie, the one the source still describes wins; the penalty is a
+    # hair, so a frame the source brings back still re-pairs with its kept slide when nothing else
+    # explains it, and a real difference in the words decides as it did.
+    sim = [[slide_similarity(base[bs[a]], ours[os_[b]])
+            - (DROPPED_FRAME if base[bs[a]].get("removed") else 0.0) for b in range(n)]
+           for a in range(m)]
     score = [[0.0] * (n + 1) for _ in range(m + 1)]
     for a in range(m - 1, -1, -1):
         for b in range(n - 1, -1, -1):

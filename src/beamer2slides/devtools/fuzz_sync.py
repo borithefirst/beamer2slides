@@ -635,10 +635,9 @@ DECK_OPS = {f.__name__[5:]: f for f in (deck_reword, deck_append, deck_delete_pa
 # ---------------------------------------------------------------- offline rounds
 
 def _sync_step(seed: int, step: int, doc: dict, base: dict, live: dict, tmp: Path,
-               deck_ops: list[str], source_ops: list[str], rebase: bool, reordered: bool = False) -> dict:
+               deck_ops: list[str], source_ops: list[str], rebase: bool) -> dict:
     """One edit + sync: the person edits the deck, the author changes the source, merge plans, the
-    reference applier writes the plan and the oracle judges what the person is left with.
-    `reordered`: an earlier step of the chain moved a frame in the source (see `_settled`)."""
+    reference applier writes the plan and the oracle judges what the person is left with."""
     applied_deck = []
     for k, name in enumerate(deck_ops):
         if not live["slides"]:
@@ -679,8 +678,7 @@ def _sync_step(seed: int, step: int, doc: dict, base: dict, live: dict, tmp: Pat
                 + _movable(base, live, mplan) + _stacked(base, live, after, ours, mplan, tok)
                 + _doubled(base, live, after, mplan))
     next_base = W.rebase(base, ours, after, mplan, tok) if rebase else None
-    findings += _settled(doc2, next_base, after, tmp, reordered or "move_slide" in source_ops,
-                         bool(loss_oracle.uncertain_slides(base, ours)))
+    findings += _settled(doc2, next_base, after, tmp, bool(loss_oracle.uncertain_slides(base, ours)))
     return {"seed": seed, "step": step, "source_ops": list(source_ops), "deck_ops": list(deck_ops),
             "source": applied_src, "deck": applied_deck, "findings": findings,
             "failures": loss_oracle.failures(findings), "doc": doc2, "refused": [],
@@ -953,17 +951,20 @@ def _stacked(base: dict, live: dict, after: dict, ours: dict, mplan: dict, tok: 
     return out
 
 
-def _settled(doc: dict, next_base: dict | None, after: dict, tmp: Path, reordered: bool = False,
-             unsure: bool = False) -> list[dict]:
+def _settled(doc: dict, next_base: dict | None, after: dict, tmp: Path, unsure: bool = False) -> list[dict]:
     """Syncing the same source again must write nothing. The base a sync leaves behind is what the
     next one merges against, so a base that doesn't describe the deck it just wrote would have the
     next sync rewrite those units - and a rewrite is where a person's work gets lost.
 
-    `reordered`: the source moved a frame this round. The alignment keeps the order, so a frame that
-    crossed another falls out of it; `identity.cross_pairs` picks it up again when the content says
-    clearly which frame it is, but frames that say too little to be told apart are what docs/sync.md
-    lists under "Not supported yet", and there the source's frame stays paired with another slide,
-    so the property can't hold. The finding is still recorded, as a note rather than a failure.
+    There used to be a second excuse here, `reordered`: the source moved a frame somewhere in this
+    chain, the alignment keeps the order, so a frame that crossed another falls out of it, and where
+    the content says too little for `identity.cross_pairs` to pick it up the property cannot hold -
+    docs/sync.md's "Not supported yet". It never once fired: measured by running the campaign with it
+    taken out, 2,200 chained rounds over three shapes and three depths, then 2,900 more after the two
+    defects below, and every `second_sync_writes` there was is one the excuse would have let through
+    as a note. An excuse nothing needs is the one way to make sure nothing is caught (the empty
+    `KNOWN` of `fuzz_docs`, the same argument), so it is gone; should a round ever fail for exactly
+    that reason, the paragraph above is why, and it belongs back.
 
     `unsure`: this sync told the person that some frame may be on the wrong slide
     (`loss_oracle.uncertain_slides`). It is the same excuse, one step further along: a frame put
@@ -982,7 +983,7 @@ def _settled(doc: dict, next_base: dict | None, after: dict, tmp: Path, reordere
             if p["action"] in ("create", "delete") or (p["action"] == "update" and (
                 any(u["action"] in ("create", "recreate", "delete", "move") for u in p["units"])
                 or p.get("background") or p.get("notes") is not None))]
-    return [loss_oracle.finding("second_sync_writes", "note" if reordered or unsure else "report",
+    return [loss_oracle.finding("second_sync_writes", "note" if unsure else "report",
                                 "the same source synced again would write: " + ("; ".join(busy) or "another slide order"),
                                 slide=(busy[0].split(":")[0] if busy else "order"))]
 
@@ -1015,15 +1016,12 @@ def offline_chain(seed: int, chain: int = 1, ops=None, work: Path | None = None,
         base = W.build_adopt_base(doc, tmp, rng) if first_sync else W.build_base(doc, tmp)
         live = W.live_of(base)
         steps = []
-        reordered = False  # a frame moved in the source, in this step or an earlier one
         for step in range(chain):
             want = (ops[step] if ops and step < len(ops) else None) or {}
             deck_ops, source_ops = _draw(rng, want.get("deck"), want.get("source"))
             # Every step rebases: the next step needs that base, and the last step's base is what
             # the "a second sync writes nothing" check judges.
-            record = _sync_step(seed, step, doc, base, live, tmp, deck_ops, source_ops, rebase=True,
-                                reordered=reordered)
-            reordered = reordered or "move_slide" in source_ops
+            record = _sync_step(seed, step, doc, base, live, tmp, deck_ops, source_ops, rebase=True)
             steps.append(record)
             doc, live = record.pop("doc"), record["state"]["after"]
             base = record["state"]["next_base"] or base

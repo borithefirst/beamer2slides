@@ -396,7 +396,8 @@ def build_adopt_base(doc, out: Path, rng: random.Random) -> dict:
 
 def build_ours(doc, base, out: Path) -> dict:
     infos = [slide_info(s) for s in doc["slides"]]
-    base_infos = [{"label": b.get("label"), "title": b.get("title") or "", "text": b.get("text") or "", "page": b["page"]}
+    base_infos = [{"label": b.get("label"), "title": b.get("title") or "", "text": b.get("text") or "",
+                   "page": b["page"], "removed": b.get("removed")}   # `align_slides`: a slide the source dropped
                   for b in base["slides"]]
     moves = identity.label_moves(base_infos, infos)
     for m in moves:
@@ -676,6 +677,16 @@ def _regroup_order(live, b, o, tok):
                 kids[slot] = oid
 
 
+def _page_element(objects: dict, oid: str) -> str:
+    """The page element that carries `oid`: itself, or the outermost group it is in."""
+    for _ in range(16):
+        parent = objects.get(oid, {}).get("parent_group")
+        if not parent or parent not in objects:
+            break
+        oid = parent
+    return oid
+
+
 def _restack(live, b, o, fresh, tok):
     """An element the source added goes where the source draws it, not on top. Slides puts every
     object it creates in front of everything, so the page order after a rewrite is nothing the
@@ -691,19 +702,15 @@ def _restack(live, b, o, fresh, tok):
     fresh = [x for x in fresh if x in order]
     base_main = {el["key"]: el.get("main") for el in b["elements"]}
 
-    def top(oid):                       # the page element that carries it: itself, or its group
-        for _ in range(16):
-            parent = objects.get(oid, {}).get("parent_group")
-            if not parent or parent not in objects:
-                break
-            oid = parent
-        return oid
+    def top(oid):
+        return _page_element(objects, oid)
 
     keys = [el["key"] for el in o["elements"]]
     made = {f"b2s_{h6(o['key'])}_{h6(k)}_{tok}": k for k in keys}
-    stands = {}
+    stands, drawn = {}, set()       # key -> its page element; and every object the source draws
     for k in keys:
         oid = f"b2s_{h6(o['key'])}_{h6(k)}_{tok}"
+        drawn |= {x for x in (oid, base_main.get(k)) if x in objects}
         oid = oid if oid in objects else base_main.get(k)
         if oid in objects and (t := top(oid)) in order:
             stands[k] = t
@@ -722,21 +729,30 @@ def _restack(live, b, o, fresh, tok):
                 pos = min(pos, order.index(nxt))
                 break
         order.insert(pos, oid)
-    _not_over_kept(live, o, stands, made, tok)
+    _not_over_kept(live, drawn, made)
 
 
-def _not_over_kept(live, o, stands, made, tok):
+def _not_over_kept(live, drawn, made):
     """Nothing the sync wrote ends up above words only the deck has: a text the source dropped and
     the deck's edits kept alive, or one the person drew themselves. The source's order says where an
     element goes among the source's own and nothing at all about those, and a panel that grew over
     such a text hides work nobody can get back, while the price of going under it is z-order
-    (`sync.Sync.restack`'s last pass; `loss_oracle.text_hidden`, seed 680477)."""
+    (`sync.Sync.restack`'s last pass; `loss_oracle.text_hidden`, seed 680477).
+
+    What moves is the page **element** the new shape is drawn inside - the converter group this
+    rewrite rebuilt, most often the block the panel belongs to. Asked of the object alone the rule
+    reached nothing when the panel was in a block, its id being in no page order, and a panel the
+    source had just grown covered a text the source no longer has (converted seed 2300025 at chain
+    12). Which words are the deck's own is asked of each **text** (`drawn`), not of the page element
+    holding it: a group the person made may hold one of their text boxes beside one of the
+    converter's (converted seed 5200496 at chain 12)."""
     order, objects = live.get("order") or [], live["objects"]
-    drawn = set(stands.values())
-    for oid in [x for x in order if x in made]:
+    for m in made:
+        if m not in objects or (oid := _page_element(objects, m)) not in order:
+            continue
         i = order.index(oid)
         for j, other in enumerate(order[:i]):
-            if other not in drawn and sync.would_hide(objects, oid, other):
+            if sync.would_hide(objects, m, other, drawn):
                 order.insert(j, order.pop(i))
                 break
 
@@ -753,12 +769,15 @@ def rebase(base, ours, after, mplan, tok="2zz") -> dict:
             continue
         if p["action"] in ("keep_removed", "gone"):
             sid = p.get("objectId") or f"gone:{p['key']}"
-            # a frame the source dropped keeps no label: it may be on another frame tomorrow
-            entries[sid] = {**base["slides"][p["base"]], "label": None}
+            # a frame the source dropped keeps no label: it may be on another frame tomorrow, and
+            # it says so (`removed`), or it reads as well as the live slide for the frame that
+            # carries its words (sync.new_base, identity.align_slides)
+            entries[sid] = {**base["slides"][p["base"]], "label": None, "removed": True}
             if p["action"] == "gone":
                 sids[id(p)] = sid  # it keeps its place in the source's order (see the ordering below)
                 o = ours["slides"][p["ours"]]  # ... and says what the source says (sync.new_base)
-                entries[sid] = {**entries[sid], **{k: o.get(k) for k in ("label", "title", "text", "page")}}
+                entries[sid] = {**entries[sid], "removed": False,
+                                **{k: o.get(k) for k in ("label", "title", "text", "page")}}
             continue
         if p.get("held"):
             # `merge.hold_slide`: nothing was written here, so the base says exactly what it said

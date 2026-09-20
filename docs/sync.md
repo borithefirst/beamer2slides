@@ -685,7 +685,13 @@ hold for every sync, including the combinations nobody thought of.
   losing styling that was never where the spans said it was (seed 2194).
 - Each round also checks that the sync **settles**: replanning against the base the round recorded,
   with the same source, must write nothing - a base that doesn't describe the deck it just wrote
-  makes the next sync rewrite units, and a rewrite is where work gets lost.
+  makes the next sync rewrite units, and a rewrite is where work gets lost. It used to excuse a
+  round whose source had moved a frame (the alignment keeps the order, so a frame that crossed
+  another falls out of it and `cross_pairs` cannot always tell which it is - "Not supported yet"
+  below). That excuse never once fired: measured by running the campaign without it, 2,200 chained
+  rounds over three shapes and three depths and 2,900 more after the two defects below, and every
+  `second_sync_writes` there was would have been let through as a note. It is gone; only `unsure`
+  (a slide this sync *told* the person it may have matched wrongly) still softens the finding.
 - Found by it so far: the `move` shortcut took its step from the unit's anchor although the source
   may have re-placed only an anchored member (`merge.unit_shift`); a geometry override was promised
   for a unit whose parts the person had moved apart, which sync cannot write
@@ -700,6 +706,19 @@ hold for every sync, including the combinations nobody thought of.
   `fuzz_world.rebase` now orders the base with `sync.base_order` itself rather than with a correct
   copy of it, so the campaign catches it again if it stops doing that: putting the old rule back
   fails 54 of 1500 rounds).
+- Found by the `_settled` check at two fresh seeds (converted 2100403 and 2100135, both at chain 6),
+  and it is the other half of that same entry: a slide the source dropped and the deck's edits keep
+  alive stays in the base saying what the frame said, with its label cleared — and `sync.base_order`
+  puts it back beside the slide the frame really lives on. So for the frame that carries those words
+  the two entries read **exactly** alike, and the order-keeping alignment, handed two readings of one
+  score, takes the earlier: the frame flipped onto the dead entry, and the next sync planned to
+  *delete* the slide this one had just written, with the person's edits on it. Nothing was lost in
+  the sync that caused it, which is why only the settle check saw it. The entry now says the source
+  dropped it (`removed` in `sync.new_base`'s `keep_removed`), and between two readings that tie
+  `identity.align_slides` takes the slide the source still describes (`DROPPED_FRAME`, a hair — so a
+  frame the author puts back still re-pairs with its kept slide when nothing else explains it, and a
+  real difference in the words decides as it did).
+  `test_a_frame_prefers_the_slide_the_source_still_describes_to_the_one_it_dropped`.
 - Found by a live chained round (seed 404): a person bolded a word of a frame title and the source
   rewrote that title two versions later. The deck's run styling goes back onto *the same words*, and
   those words were gone - so the bold ended, while the report promised an override. Nothing can save
@@ -837,7 +856,20 @@ hold for every sync, including the combinations nobody thought of.
     the oracle's own question — an opaque fill at alpha 1 over more than 20% of a text's box — asked
     before the write instead of after it). Hiding those words loses work nobody can get back; the
     price of going under them is z-order, so that is the way round to be wrong.
-    `test_a_created_panel_stays_under_words_only_the_deck_has`.
+    What moves is the page **element** the new shape is drawn inside — the converter group this
+    rewrite rebuilt, which is most often the block the panel belongs to — because that is what the
+    page order holds. Asked of the object alone the rule reached nothing at all when the panel was in
+    a block: its id is in no page order, the loop looked at an empty list, and a panel the source had
+    just grown covered a text the source no longer has (converted seed 2300025 at chain 12,
+    adopt-shaped 3200538 at chain 10). Which words are the deck's own is asked of each **text**,
+    though, not of the page element holding it: a group the person made may hold one of their own
+    text boxes beside one of the converter's, and reading that element as the source's let a created
+    panel cover their box inside it (converted seed 5200496 at chain 12, the first campaign the rule
+    above ran in). A group holding nothing but the converter's own is the source's, and its order
+    stands.
+    `test_a_created_panel_stays_under_words_only_the_deck_has`,
+    `test_a_panel_in_a_block_takes_the_whole_block_under_words_only_the_deck_has`,
+    `test_a_created_panel_goes_under_a_persons_box_grouped_with_one_of_the_converters`.
   - **An element with no slot at all.** `restack` rewrites the deck's page order slot by slot, and
     an object the deck's order has no slot for lands on top of everything — past the ceiling above
     and past the guard below. A created element is given its place for that reason; so now is one a

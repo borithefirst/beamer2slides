@@ -166,6 +166,24 @@ def test_an_unlabelled_frame_between_twins_is_matched_and_said_out_loud():
     assert identity.align_slides(base_named, named, weak=weak) == {0: 0, 1: 1, 2: 3} and weak == {}
 
 
+def test_a_frame_prefers_the_slide_the_source_still_describes_to_the_one_it_dropped():
+    """A slide the source dropped that the deck's own edits keep alive stays in the base
+    (`sync.new_base`'s `keep_removed`), saying what that frame said and carrying no label any more -
+    and `sync.base_order` puts it back beside the slide the frame really lives on. So for the frame
+    that carries those words the two entries read exactly alike, the traceback takes the earlier of
+    two alignments of one score, and the frame flips onto the dead entry: the next sync then plans
+    to *delete* the slide this one has just written, with the person's edits on it (converted fuzz
+    seed 2100403 at chain 6, and 2100135). `removed` breaks the tie towards the living slide."""
+    base = [info("Motivation", MOTIV), {**info("Results", RESULTS), "removed": True},
+            info("Results", RESULTS), info("Takeaways", SUMMARY)]
+    ours = [base[0], info("Results", RESULTS), base[3]]
+    assert identity.align_slides(base, ours) == {0: 0, 1: 2, 2: 3}
+    # It is a tie-break and nothing more: with no living twin the frame comes back to the very slide
+    # the source had dropped, which is a frame the author put back and its edits waiting for it.
+    back = [base[0], base[1], base[3]]
+    assert identity.align_slides(back, ours) == {0: 0, 1: 1, 2: 2}
+
+
 def test_the_leftovers_obey_the_labels_too():
     """Two labels that both exist on both sides belong to two frames that both exist, so the
     leftovers are no more free to pair across them than the alignment is (`align_slides.pairable`)."""

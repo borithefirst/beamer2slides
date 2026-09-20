@@ -1010,6 +1010,94 @@ def test_a_created_panel_stays_under_words_only_the_deck_has():
     assert order.index("new_s0") < order.index("b2s_s000_t1")
 
 
+def test_a_created_panel_goes_under_a_persons_box_grouped_with_one_of_the_converters():
+    """Which words are the deck's own is a question about each *text*, not about the page element
+    holding it. A person who groups one of their own text boxes with one of the converter's leaves a
+    page element that is partly the source's, and reading the element as a whole made it the
+    source's: the guard let a created panel land on the box inside it (converted fuzz seed 5200496
+    at chain 12, found when the page-element rule above first reached this loop)."""
+    from beamer2slides.sync import Sync
+    base = many_slides(["intro"])
+    ours, _ = triple(base)
+    o = ours["slides"][0]
+    o["elements"] = [*o["elements"], ours_entry("shape/panel/0", shape_ir((15, 80, 210, 130), "p0s0"))]
+    slide = base["slides"][0]
+    slide["order"] = ["user_g", "b2s_s000_t1"]          # the person's group is at the bottom
+    p = {"action": "update", "key": "intro", "base": 0, "ours": 0, "objectId": "b2s_s000",
+         "units": [{"key": "text/title/0", "action": "keep"}, {"key": "text/body/0", "action": "keep"},
+                   {"key": "shape/panel/0", "action": "create"}]}
+    sync = Sync.__new__(Sync)
+    sync.base, sync.ours = base, ours
+    before = {"objectId": "b2s_s000", "order": ["user_g", "b2s_s000_t1"], "objects": {
+        "user_g": {**readback([20, 20, 300, 120], kind="elementGroup"),
+                   "children": ["b2s_s000_t0", "user_box"]},
+        "b2s_s000_t0": {**readback([20, 20, 200, 48], text="Intro"), "parent_group": "user_g"},
+        "user_box": {**readback([20, 60, 300, 120], text="a note nobody may lose"), "parent_group": "user_g"},
+        "b2s_s000_t1": readback([40, 120, 400, 180], text="First point of intro")}}
+    w = {"plan": p, "doomed": set(), "tops": {"shape/panel/0": "new_s0"}}
+    now = {"order": ["user_g", "b2s_s000_t1", "new_s0"],
+           "objects": {**before["objects"], "new_s0": readback([10, 10, 400, 190])}}   # over the lot
+    order = list(now["order"])
+    for r in sync.restack(w, before, now):
+        oid, = r["updatePageElementsZOrder"]["pageElementObjectIds"]
+        order.append(order.pop(order.index(oid)))
+    assert order.index("new_s0") < order.index("user_g")
+    # ... but a group holding nothing but the converter's own is the source's, and the source's
+    # order stands: the panel it draws last stays last.
+    before["objects"]["user_g"]["children"] = ["b2s_s000_t0"]
+    del before["objects"]["user_box"]
+    now["objects"] = {**before["objects"], "new_s0": now["objects"]["new_s0"]}
+    order = list(now["order"])
+    for r in sync.restack(w, before, now):
+        oid, = r["updatePageElementsZOrder"]["pageElementObjectIds"]
+        order.append(order.pop(order.index(oid)))
+    assert order.index("new_s0") > order.index("user_g")
+
+
+def test_a_panel_in_a_block_takes_the_whole_block_under_words_only_the_deck_has():
+    """The same rule, asked of the page element rather than the object. A block's panel is no page
+    element of its own - what the page order holds is the group - so the guard above looked up an id
+    that is in no order at all, found nothing, and a panel the source had just grown covered a text
+    the source no longer has (converted fuzz seed 2300025 at chain 12, adopt-shaped 3200538 at chain
+    10). What goes under the text is the block, which is this converter's own container and carries
+    only what it drew; a group the *person* made is left where it is (`sync.folded_hiders` names
+    that one instead)."""
+    from beamer2slides.sync import Sync
+    els = [entry("text/title/0", text_ir("Intro", (10, 10, 100, 24), "p0t0", "title"), "b2s_s000_t0"),
+           entry("text/body/1", text_ir("Only the deck has this", (20, 80, 200, 100), "p0t1"), "b2s_s000_t1"),
+           entry("shape/panel/0", shape_ir((15, 120, 210, 170), "p0s0"), "b2s_s000_s0"),
+           entry("text/body/2", text_ir("In the block", (20, 130, 200, 150), "p0t2"), "b2s_s000_t2")]
+    slide = base_slide("intro", "b2s_s000", els, label="intro", title="Intro")
+    slide["groups"], slide["order"] = ["blk"], ["b2s_s000_t0", "b2s_s000_t1", "blk"]
+    base = {"version": 1, "generation": 0, "presentationId": "P", "master_background": None, "slides": [slide]}
+    ours, _ = triple(base)
+    o = ours["slides"][0]
+    o["elements"] = [o["elements"][0], o["elements"][2], o["elements"][3]]   # the source dropped body/1
+    before = {"objectId": "b2s_s000", "order": ["b2s_s000_t0", "b2s_s000_t1", "blk"], "objects": {
+        "b2s_s000_t0": readback([20, 20, 200, 48], text="Intro"),
+        "b2s_s000_t1": readback([40, 160, 400, 200], text="Only the deck has this"),
+        "blk": {**readback([30, 240, 440, 340], kind="elementGroup"),
+                "children": ["b2s_s000_s0", "b2s_s000_t2"]},
+        "b2s_s000_s0": {**readback([30, 240, 420, 340]), "parent_group": "blk"},
+        "b2s_s000_t2": {**readback([40, 260, 400, 300], text="In the block"), "parent_group": "blk"}}}
+    p = {"action": "update", "key": "intro", "base": 0, "ours": 0, "objectId": "b2s_s000",
+         "units": [{"key": "text/title/0", "action": "keep"}, {"key": "shape/panel/0", "action": "recreate"},
+                   {"key": "text/body/2", "action": "keep"}, {"key": "text/body/1", "action": "keep"}]}
+    sync = Sync.__new__(Sync)
+    sync.base, sync.ours = base, ours
+    w = {"plan": p, "doomed": {"b2s_s000_s0"}, "tops": {"shape/panel/0": "new_s0"}}
+    # the source grew the panel: it now covers the text the deck alone has, two page elements below
+    now = {"order": ["b2s_s000_t0", "b2s_s000_t1", "blk"],
+           "objects": {**{k: v for k, v in before["objects"].items() if k != "b2s_s000_s0"},
+                       "blk": {**before["objects"]["blk"], "children": ["new_s0", "b2s_s000_t2"]},
+                       "new_s0": {**readback([30, 150, 420, 340]), "parent_group": "blk"}}}
+    order = [x for x in now["order"] if x not in w["doomed"]]
+    for r in sync.restack(w, before, now):
+        oid, = r["updatePageElementsZOrder"]["pageElementObjectIds"]
+        order.append(order.pop(order.index(oid)))
+    assert order.index("blk") < order.index("b2s_s000_t1")
+
+
 def test_an_element_a_dissolved_group_frees_onto_the_page_takes_the_sources_place():
     """`restack` rewrites the deck's page order slot by slot, so an object with no slot used to land
     on top of everything - past the ceiling that keeps a new panel under the text the source draws
