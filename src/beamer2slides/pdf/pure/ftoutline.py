@@ -73,6 +73,10 @@ def divfix(a: int, b: int) -> int:
 
 
 def int_to_fixed(i: int) -> int:
+    # A charstring's integers are small, and for those the mask and the wrap cannot move anything:
+    # a negative i only gains 2**48 from the mask, which the wrap takes straight back off.
+    if -0x8000 <= i <= 0x7FFF:
+        return i << 16
     return i32((i & MASK32) << 16)
 
 
@@ -804,13 +808,15 @@ class Stack:
     def push_int(self, i: int) -> None:
         if len(self.v) >= STACK_SIZE:
             raise GlyphError("stack overflow")
-        self.v.append(i32(i))
+        # the FT_Long cast inline: a charstring pushes some 113,000 values in a render pass, and
+        # what it pushes is an FT_Long already, so i32's mask and compare are the path not taken
+        self.v.append(i if -0x80000000 <= i <= 0x7FFFFFFF else i32(i))
         self.is_int.append(True)
 
     def push_fixed(self, r: int) -> None:
         if len(self.v) >= STACK_SIZE:
             raise GlyphError("stack overflow")
-        self.v.append(i32(r))
+        self.v.append(r if -0x80000000 <= r <= 0x7FFFFFFF else i32(r))
         self.is_int.append(False)
 
     def pop_int(self) -> int:
@@ -968,10 +974,15 @@ class Decoder:
         buf = subr_stack[0]
 
         while True:
-            if buf.end():
+            # cf2_buf_isEnd and cf2_buf_readByte are inline in C and this runs once per operator,
+            # which was 340,000 method calls a render pass; the read is the one `byte` makes, its
+            # guard being the test just above it.
+            chars, pos = buf.data, buf.pos
+            if pos >= len(chars):
                 op = 11 if len(subr_stack) > 1 else 14
             else:
-                op = buf.byte()
+                op = chars[pos]
+                buf.pos = pos + 1
             if t1:
                 if not initial_map_ready and not (op in (1, 3, 13, 10, 11, 12, 14) or op >= 32):
                     st.clear()
