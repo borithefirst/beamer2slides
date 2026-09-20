@@ -551,7 +551,8 @@ something one asks for — `--no-backup` — and never something that happens be
 export failed. The export is Drive's HTML, which is a lossy read-back (see "The round
 trip does not close on its own"): a copy of the words to recover from, not a file this
 tool could push back unchanged. The non-destructive direction writes nothing to the
-document and needs no backup.
+document and needs no backup, and neither does `--dry-run`: a look at what this answer
+would cost leaves nothing behind, and the report says the export a real run would take.
 
 ### Batching, and the atomicity it costs
 
@@ -751,6 +752,55 @@ Each of these is reported in the sync report, never guessed at:
 Everything else is written: text on both sides, a block's kind, level and alignment,
 its bullets, the marks the source added *or took away* (the fields Docs needs named for
 a removal are listed in `doc_merge.MANAGED`), and whole new blocks with their styling.
+
+### Proving nothing is lost
+
+The bargain above is only worth what it can be held to, so the Docs sync is fuzzed the
+way the Slides one is: random edits on both sides, and an oracle at the end that asks
+one question — *did anything a person put in the document disappear without the report
+saying so?* `doc_loss_oracle.py`'s docstring defines every word of that (the **reader**
+is the person, the file in git is a *request*, and the merge may refuse a request but
+never throw work away in silence), and it judges the read-back **after** the sync has
+settled, not the plan and not the requests.
+
+`tools/fuzz_docs.py offline --rounds N [--chain N]` runs it. One round is a whole life
+of a document: a shape from the corpus is pushed, the reader types in it, the source
+rewrites the file, `docs sync` runs, the oracle judges, and then the sync runs once more
+on a copy and must write **nothing** — a sync that does not settle would keep rewriting
+a document for ever. About 150 rounds/s at chain 1, 20/s at chain 4.
+
+Three pieces make it find things rather than merely run:
+
+* **`doc_world.py`**, a reference applier that holds a document as Docs holds it and
+  applies the real requests `doc_merge.plan` produces under Docs' real index rules —
+  including **throwing out the whole batch when one request is refused**. That is the
+  failure that killed Slides syncs twice, and an applier that merges *state* instead of
+  replaying requests can never see it.
+* **`collide`**, a source op that changes exactly what the reader just changed. Two
+  independent random draws almost never land on one block; over on the Slides side this
+  op took text overrides from 5 in 200 rounds to 56.
+* **Chains** (`--chain N`): edit, sync, edit, sync. Several of the worst Slides bugs
+  only showed at depth 4 to 8, because they need a base a previous sync wrote rather
+  than one a push made.
+
+Everything the campaign reaches is counted and printed — corpus shapes, reader and
+source ops, request kinds, merge outcomes. That counting is not decoration: it is what
+showed that the whole of §"What the canonical dialect says" beyond bold and italic —
+the face, the size, small caps and the six paragraph measures — was unfuzzed, and
+therefore that the *clearing* `doc_merge.MANAGED` governs had never been exercised. The
+ops now draw from the whole dialect on both sides (`RUN_MARKS`, `PARA_MARKS`,
+`READER_FACES`, `READER_MEASURES`), which is the case that matters most: a reader
+chooses a face, and then the source restyles that block.
+
+The campaign found ten defects, each pinned by an `xfail(strict=True)` in
+`tests/test_doc_fuzz.py` and described in `fuzz_docs.KNOWN` — a table of contents
+treated as an ordinary block (which kills the sync outright, because a refused request
+throws out the batch), a table the source dropped deleted however much the reader typed
+into it, `inherit_keys` handing one block's key to another, a block reworded *and* moved
+losing the reader's styling, and the rest. They are let through by default and
+`--strict` fails on them, so a fix shows up as a defect that stops being reached.
+
+Fixed seeds from the campaign run in the default offline suite.
 
 ## Remaining risks
 

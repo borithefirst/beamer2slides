@@ -289,6 +289,18 @@ def test_the_destructive_direction_exports_the_document_first(tmp_path):
     assert base is ours and kept is None and len(drive.exports) == 1
 
 
+def test_a_dry_run_of_the_destructive_direction_exports_nothing(tmp_path):
+    """`--dry-run` is how one looks at that answer before giving it, and a look must
+    leave nothing behind: the backup is taken for the write, and there is no write."""
+    path = tmp_path / "doc.html"
+    drive = _Storage()
+    ours, theirs = {"blocks": ["the file"]}, {"blocks": ["the document"]}
+    base, kept = doc_sync._no_base(path, ours, theirs, "source-wins", drive, "doc-1",
+                                   dry_run=True)
+    assert base is theirs and kept is None
+    assert drive.exports == [] and not (tmp_path / ".b2s" / "backups").exists()
+
+
 def test_a_backup_drive_refuses_stops_that_sync(tmp_path):
     """`guard.demand_way_back`'s principle: a write with no way back is something
     one asks for, and never something that happens because an export failed."""

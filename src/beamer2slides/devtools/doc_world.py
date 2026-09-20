@@ -95,7 +95,9 @@ def mark(style: dict | None = None, para: dict | None = None) -> dict:
 
 
 def plain() -> dict:
-    return {"named": "NORMAL_TEXT", "align": "START", "bullet": None}
+    # `measures` holds the six properties of `doc_merge.PARAGRAPH_FIELDS` by their
+    # IR key, absent meaning inherited rather than zero (`doc_ir._paragraph_measures`).
+    return {"named": "NORMAL_TEXT", "align": "START", "bullet": None, "measures": {}}
 
 
 def obj(kind: str, **fields) -> dict:
@@ -124,6 +126,22 @@ def unit_size(u: dict) -> int:
 
 def size(units: list[dict]) -> int:
     return sum(unit_size(u) for u in units)
+
+
+def _row_size(row: list) -> int:
+    """What a table row costs in document indices: the row itself, then each cell."""
+    return 1 + sum(1 + size(cell) for cell in row)
+
+
+def _row_start(grid: dict, at: int, index: int) -> int:
+    """Where a row begins: the table's own unit, then every row in front of it."""
+    return at + 1 + sum(_row_size(row) for row in grid["rows"][:index])
+
+
+def _cell_start(grid: dict, at: int, row: int, column: int) -> int:
+    """Where a cell begins: its row, then every cell in front of it in that row."""
+    return (_row_start(grid, at, row) + 1
+            + sum(1 + size(cell) for cell in grid["rows"][row][:column]))
 
 
 def text_units(text: str, style: dict | None = None) -> list[dict]:
@@ -423,13 +441,15 @@ class World:
         style = _ir_style(arg.get("textStyle", {}))
         for u, _ in self._chars(tab, arg["range"], request):
             for field in fields:
-                key = {"foregroundColor": "color", "backgroundColor": "highlight",
-                       "weightedFontFamily": "code", "link": "link"}.get(
-                           field, STYLE_FIELDS.get(field, field))
+                key = API_TO_IR.get(field, field)
                 if style.get(key):
                     u["s"][key] = style[key]
                 else:
                     u["s"].pop(key, None)
+                    # A face named with no value puts the paragraph's own back, and
+                    # the file's older `code` spelling is a face like any other.
+                    if key == "font":
+                        u["s"].pop("code", None)
 
     def _do_updateParagraphStyle(self, arg: dict, request: dict) -> None:
         style = arg.get("paragraphStyle", {})
@@ -439,6 +459,17 @@ class World:
                 para["named"] = style["namedStyleType"]
             if "alignment" in fields and style.get("alignment"):
                 para["align"] = style["alignment"]
+            # A field the merge names without a value means "back to the default"
+            # (`doc_merge.paragraph_style`), which is how a property the source
+            # dropped goes away. Naming it and not applying that would make the
+            # merge write it again for ever.
+            for key, api in doc_merge.PARAGRAPH_FIELDS:
+                if api not in fields:
+                    continue
+                if api in style:
+                    para.setdefault("measures", {})[key] = _ir_measure(key, style[api])
+                else:
+                    para.get("measures", {}).pop(key, None)
 
     def _do_createParagraphBullets(self, arg: dict, request: dict) -> None:
         tab = self.tab(arg["range"].get("tabId"))
@@ -499,34 +530,49 @@ class World:
         self._shift(tab, index, 1 + unit_size(grid))
 
     def _do_insertTableRow(self, arg: dict, request: dict) -> None:
+        # A row is written at its own index, not the table's: a named range on a cell
+        # of a row *above* the new one does not move, and one below does. Shifting the
+        # whole table by the row's size, which this did, moved every anchor in it.
         tab, grid, at = self._grid(arg["tableCellLocation"], request)
         cell = arg["tableCellLocation"]
         row = cell.get("rowIndex", 0) + (1 if arg.get("insertBelow") else 0)
+        start = _row_start(grid, at, row)
         grid["rows"].insert(row, [[mark()] for _ in grid["rows"][0]])
-        self._shift(tab, at, 1 + len(grid["rows"][0]) * 2)
+        self._shift(tab, start, _row_size(grid["rows"][row]))
 
     def _do_insertTableColumn(self, arg: dict, request: dict) -> None:
         tab, grid, at = self._grid(arg["tableCellLocation"], request)
         cell = arg["tableCellLocation"]
         column = cell.get("columnIndex", 0) + (1 if arg.get("insertRight") else 0)
-        for row in grid["rows"]:
-            row.insert(column, [mark()])
-        self._shift(tab, at, len(grid["rows"]) * 2)
+        # One cell per row, back to front: a cell written low down leaves the indices
+        # above it alone, so each `_cell_start` is still the one the grid has.
+        for r in reversed(range(len(grid["rows"]))):
+            start = _cell_start(grid, at, r, column)
+            grid["rows"][r].insert(column, [mark()])
+            self._shift(tab, start, 1 + size(grid["rows"][r][column]))
 
     def _do_deleteTableRow(self, arg: dict, request: dict) -> None:
+        """A row's content goes out of the document, so everything after it moves up.
+        Shifting by 0, which this did, left every anchor below the table one row's
+        worth of units too high: the keys below a table the source regridded all slid
+        onto the block above (chain-8 seeds 5099, 5167). Google moves them."""
         tab, grid, at = self._grid(arg["tableCellLocation"], request)
         if len(grid["rows"]) <= 1:
             raise Refused(request, "a table's last row cannot be deleted")
-        grid["rows"].pop(arg["tableCellLocation"].get("rowIndex", 0))
-        self._shift(tab, at, 0)
+        row = arg["tableCellLocation"].get("rowIndex", 0)
+        start = _row_start(grid, at, row)
+        self._shift(tab, start, -_row_size(grid["rows"][row]))
+        grid["rows"].pop(row)
 
     def _do_deleteTableColumn(self, arg: dict, request: dict) -> None:
         tab, grid, at = self._grid(arg["tableCellLocation"], request)
         if len(grid["rows"][0]) <= 1:
             raise Refused(request, "a table's last column cannot be deleted")
-        for row in grid["rows"]:
-            row.pop(arg["tableCellLocation"].get("columnIndex", 0))
-        self._shift(tab, at, 0)
+        column = arg["tableCellLocation"].get("columnIndex", 0)
+        for r in reversed(range(len(grid["rows"]))):
+            start = _cell_start(grid, at, r, column)
+            self._shift(tab, start, -(1 + size(grid["rows"][r][column])))
+            grid["rows"][r].pop(column)
 
     def _grid(self, where: dict, request: dict) -> tuple[Tab, dict, int]:
         tab = self.tab(where["tableStartLocation"].get("tabId"))
@@ -615,29 +661,66 @@ def _paragraph_at(cont: list[dict], offset: int) -> dict:
 
 
 def _ir_style(text_style: dict) -> dict:
-    """A Docs textStyle as the IR spells it — `doc_ir._style_of` without the document."""
-    out = {}
-    for api, key in STYLE_FIELDS.items():
-        if text_style.get(api):
-            out[key] = True
-    if text_style.get("weightedFontFamily", {}).get("fontFamily") in doc_ir.MONO:
-        out["code"] = True
-    for api, key in (("foregroundColor", "color"), ("backgroundColor", "highlight")):
-        rgb = text_style.get(api, {}).get("color", {}).get("rgbColor")
-        if rgb is not None:
-            out[key] = doc_ir._hex(rgb)
-    if text_style.get("link", {}).get("url"):
-        out["link"] = text_style["link"]["url"]
-    return out
+    """A Docs textStyle as the IR spells it.
+
+    `doc_ir._style_of` itself, never a copy of it. A copy is what this was, and it
+    drifted the moment the dialect grew a face and a size: the world went on
+    calling four families `code` while the reader had stopped, so every styling
+    comparison in the oracle was against a reader nobody uses. The world's whole
+    claim is that it reads what `doc_ir` reads, so it has to call it.
+
+    No `default`: a named style is subtracted from what a *document* reports, and
+    the world's documents carry no `namedStyles` — nothing here sets a property
+    that only repeats one.
+    """
+    return doc_ir._style_of(text_style)
+
+
+# The `updateTextStyle` fields the merge writes, and the IR key each one sets
+# (`doc_merge.MANAGED`). The world applies a request field by field, so a field it
+# does not know would be silently ignored and the read-back would never show it.
+API_TO_IR = {"bold": "bold", "italic": "italic", "underline": "underline",
+             "strikethrough": "strike", "foregroundColor": "color",
+             "backgroundColor": "highlight", "link": "link",
+             "weightedFontFamily": "font", "fontSize": "fontsize",
+             "smallCaps": "smallcaps"}
+
+
+def _ir_measure(key: str, value):
+    """One `paragraphStyle` property as the IR spells it — the inverse of
+    `doc_merge._paragraph_value`, rounded as `doc_ir._paragraph_measures` rounds it,
+    so a value written and then read back is the same number and the merge does not
+    see a change nobody made."""
+    if key == "line_spacing":
+        return round(float(value) / 100, 3)
+    if key == "shading":
+        rgb = (value or {}).get("backgroundColor", {}).get("color", {}).get("rgbColor")
+        return doc_ir._hex(rgb) if rgb else None
+    return doc_ir._points(value)
+
+
+def _api_measures(measures: dict) -> dict:
+    """The six paragraph properties as `documents.get` reports them."""
+    return {api: doc_merge._paragraph_value(key, measures[key])
+            for key, api in doc_merge.PARAGRAPH_FIELDS
+            if measures.get(key) is not None}
 
 
 def _api_style(style: dict) -> dict:
+    """The inverse of `_ir_style`: what `documents.get` would report for it."""
     out: dict = {}
     for api, key in STYLE_FIELDS.items():
         if style.get(key):
             out[api] = True
-    if style.get("code"):
-        out["weightedFontFamily"] = {"fontFamily": "Courier New"}
+    if style.get("smallcaps"):
+        out["smallCaps"] = True
+    # `code` is the file's older spelling for a monospaced face and still means
+    # Courier New (`doc_ir.CODE_FAMILY`); an explicit face wins over it.
+    family = style.get("font") or (doc_ir.CODE_FAMILY if style.get("code") else None)
+    if family:
+        out["weightedFontFamily"] = {"fontFamily": family}
+    if style.get("fontsize"):
+        out["fontSize"] = {"magnitude": float(style["fontsize"]), "unit": "PT"}
     for api, key in (("foregroundColor", "color"), ("backgroundColor", "highlight")):
         if style.get(key):
             out[api] = {"color": {"rgbColor": doc_merge._rgb(style[key])}}
@@ -721,7 +804,8 @@ def _paragraph_json(run: list[dict], start: int, objects: dict) -> dict:
     out = {"startIndex": start, "endIndex": at,
            "paragraph": {"elements": elements,
                          "paragraphStyle": {"namedStyleType": para["named"],
-                                            "alignment": para["align"]}}}
+                                            "alignment": para["align"]}
+                         | _api_measures(para.get("measures") or {})}}
     if para.get("bullet"):
         out["paragraph"]["bullet"] = {"listId": para["bullet"]["list"],
                                       "nestingLevel": para["bullet"]["level"]}
@@ -818,6 +902,8 @@ def _units_of(blocks: list[dict], tab: Tab, world: World) -> list[dict]:
             para["named"] = f"HEADING_{block.get('level', 1)}"
         if block.get("align"):
             para["align"] = doc_ir.TO_ALIGNMENT[block["align"]]
+        para["measures"] = {key: block[key] for key, _ in doc_merge.PARAGRAPH_FIELDS
+                            if block.get(key) is not None}
         if block["kind"] == "item":
             lid = block.get("list") or "kix.imported"
             para["bullet"] = {"list": lid, "level": block.get("level", 0)}

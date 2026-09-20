@@ -906,6 +906,30 @@ keys, named ranges), `doc_merge.py` (pure planning), `doc_sync.py` (the commands
   block in front of a table goes in as `\ntext` at the previous paragraph's mark.
 - What the file cannot carry is reported too (`doc_sync.limits`): a picture file that is not
   there.
+- Fuzzed against a loss oracle, as the Slides sync is (docs/google-docs.md, "Proving nothing
+  is lost"): `devtools/doc_loss_oracle.py` judges one sync from the two read-backs, the base
+  and the report - did anything the *reader* put in the document disappear without the report
+  saying so? (Its docstring defines that; no Google call.) `tools/fuzz_docs.py offline --rounds
+  N [--chain N]` pushes a corpus shape, edits both sides and syncs, then checks a second sync
+  writes nothing; ~150 rounds/s at chain 1, 20 at chain 4, with a shrinker. `doc_world.py` is a
+  reference applier that holds a document as Docs holds it and applies the real requests under
+  Docs' index rules - **including throwing out the whole batch when one request is refused**,
+  the failure an applier that merges *state* can never see. `collide` (a source op changing
+  exactly what the reader just changed) and `--chain N` are the two things that make it find
+  anything; coverage is printed, and it is what showed that the whole dialect past bold and
+  italic was undrawn, so the ops now draw a face, a size, small caps and the six paragraph
+  measures on both sides (`RUN_MARKS`, `PARA_MARKS`, `READER_FACES`, `READER_MEASURES`) - the
+  case that matters is a reader choosing a face and the source then restyling that block.
+  Ten defects found, each an `xfail(strict=True)` in `tests/test_doc_fuzz.py` and an entry in
+  `fuzz_docs.KNOWN` (let through by default, `--strict` fails on them): a TOC treated as an
+  ordinary block, which kills the sync outright; a table the source dropped deleted however
+  much the reader typed in it; `inherit_keys` handing one block's key to another; a block
+  reworded *and* moved losing the reader's styling. Two of the harness's own, found at chain 8
+  and pinned by tests that fail without the fix: `doc_world` shifted no named range when a
+  table row was deleted, so after a source regrid every key below the table slid onto the block
+  above (seeds 5099, 5167); and the oracle accused a `\S+` token each side had edited one half
+  of - a soft hyphen joins two words, and only what the *reader* added has to survive
+  (`joined_differently`, seed 5130).
 - Live suite (opt-in, marker `docs`, ~5 min): `python -m pytest -m docs tests/test_docs_live.py`
   pushes a document per test, edits both sides, syncs, checks a second sync writes nothing, and
   deletes the document. Offline: `tests/test_doc_ir.py`, `test_doc_merge.py`, `test_doc_sync.py`.
