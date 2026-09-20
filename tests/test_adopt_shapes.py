@@ -2,6 +2,7 @@
 adopt_shapes). Offline: hand-made `presentations.get` answers, no TeX and no Google."""
 
 import math
+import re
 
 import pytest
 
@@ -234,6 +235,75 @@ def test_a_freeform_is_drawn_as_its_box():
     out = adopt_shapes.shape_block({"kind": "shape", "bbox": [0, 0, 10, 10], "shape_type": "CUSTOM",
                                     "fill": "#ff0000"}, Context(), "")
     assert "\\sliderect" in out and "controls" not in out
+
+
+# ------------------------------------------- the deck's own names, and points that belong in a file
+
+def alike(n: int, kind: str = "STAR_5", fill: str = "FFCC00", outline: str = "0000FF") -> list[dict]:
+    """`n` shapes of one size drawn in one look, at places of their own."""
+    return [shape(f"s{i}", kind, 40, 40, transform(10 + 50 * i, 10), fill=fill, outline=outline)
+            for i in range(n)]
+
+
+def boxes(n: int) -> list[dict]:
+    return [shape(f"r{i}", "RECTANGLE", 60, 20, transform(10, 200 + 30 * i), fill="123456") for i in range(n)]
+
+
+def test_a_look_the_deck_draws_again_and_again_becomes_a_name(tmp_path):
+    """A person reading the source should meet a shape once: shapes drawn alike name the look, and
+    the preamble says once what the name is. Twice is not a repetition - those keep their keys."""
+    text = adopt.bootstrap(deck_ir(deck(*alike(3), *boxes(2)), foreign=True), tmp_path / "main.tex")
+    keys = dict(re.findall(r"\\slideshapestyle\{([\w-]+)\}\{([^}]*)\}", text))
+    assert keys == {"fill-yellow-outline-blue": "fill=Yellow,draw=blue,line width=1.89pt"}
+    assert text.count("[fill-yellow-outline-blue]") == 3
+    assert len(re.findall(r"\\sliderect\[fill=\w+\]", text)) == 2, "the two rectangles keep their keys"
+
+
+def test_a_style_name_is_never_a_word_tikz_reads_as_a_colour():
+    """TikZ reads a bare `red` among a path's options as the colour red, so a style called `red`
+    would take that word away from anyone editing the frame."""
+    taken: set = set()
+    assert adopt_shapes.style_word("fill=red", taken) == "fill-red"
+    assert adopt_shapes.style_word("draw=red,line width=1pt", taken) == "outline-red"
+    # two looks alike but for the weight are told apart by it, as `adopt.text_style` uses the size
+    assert adopt_shapes.style_word("draw=red,line width=2pt", taken) == "outline-red-2"
+    assert adopt_shapes.style_word("fill=red,fill opacity=0.5,dash pattern=on 4pt off 3pt", taken) \
+        == "fill-red-faded-dashed"
+
+
+def test_a_named_look_can_still_be_changed_on_one_shape(tmp_path):
+    """A name must make an edit cheaper, not dearer: `\\sliderect[card,fill=Red]{...}` recolours one
+    card and leaves the rest, because TikZ takes the last key that sets a property."""
+    adopt.bootstrap(deck_ir(deck(*alike(3)), foreign=True), tmp_path / "main.tex")
+    sty = (tmp_path / "slides.sty").read_text(encoding="utf-8")
+    assert "\\newcommand\\slideshapestyle[2]{\\tikzset{#1/.style={#2}}}" in sty
+
+
+def test_a_path_of_too_many_points_to_read_keeps_them_in_a_file(tmp_path):
+    """As a traced freeform's outline does (`traced_block`): a five-pointed star is twenty numbers
+    that nobody edits by hand, and in the frame they bury the slide's words. `\\slidepath` expands to
+    the very `\\path` the frame held, so nothing moves, and the shape is still a `\\slideshape`."""
+    text = adopt.bootstrap(deck_ir(deck(*alike(3)), foreign=True), tmp_path / "main.tex")
+    drawn = [ln.strip() for ln in text.splitlines() if "\\slidepath" in ln]
+    assert len(drawn) == 3 and all(ln.startswith("\\slideshape{") for ln in drawn)
+    rel = re.search(r"\{(shapes/star5-\w+\.tex)\}", drawn[0]).group(1)
+    points = (tmp_path / rel).read_text(encoding="utf-8").strip()
+    assert len(adopt_shapes.NUMBER.findall(points)) == 20 and ";" not in points
+    assert len(adopt_shapes.NUMBER.findall(drawn[0].split("{shapes/")[0])) == 4, "the box, and nothing else"
+    # a file is named after the points it holds, so shapes of one geometry share one; two of these
+    # three round to the same size and do (the third is 0.01 pt narrower, and rounding that away to
+    # make it one file would move pixels, which is not a trade this is allowed to make)
+    assert len(list((tmp_path / "shapes").iterdir())) == 2
+    sty = (tmp_path / "slides.sty").read_text(encoding="utf-8")
+    assert "\\newcommand\\slidepath[2][]" in sty and "\\noexpand\\path[#1]" in sty
+
+
+def test_a_path_short_enough_to_read_stays_in_the_frame(tmp_path):
+    """The file is for coordinates nobody reads; an elbow connector's three legs are the shape."""
+    text = adopt.bootstrap(deck_ir(deck(line("l", 100, 50, transform(10, 10), line_type="BENT_CONNECTOR_3",
+                                             category="BENT")), foreign=True), tmp_path / "main.tex")
+    assert "\\slidepath" not in text and "\\path[" in text
+    assert not (tmp_path / "shapes").exists()
 
 
 # ---------------------------------------------------------------- turned text

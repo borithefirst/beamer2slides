@@ -1537,3 +1537,153 @@ the frames. `numbers` is now the weakest component by a factor of four, and shap
 numbers are - 5,515 shape lines over 26 decks carrying 30,574 of them, 28% of all frame body lines,
 with `\sliderect[fill=white,fill opacity=#]{#,#,#,#}` said 785 times and `\sliderect[fill=black]`
 756 times. That is the next lane.
+
+## A shape met once (sh-a)
+
+Based on `d838120`, the tree `fl-a` was measured from (main had moved on to `98fb536`; not merged
+again mid-flight). Two moves, both of them about **repetition and coordinates**, neither of them
+about the drawing:
+
+1. **A look the deck draws again and again becomes a name.** `survey_styles` writes every shape of
+   the deck onto a scratch context (the way `adopt.recovered_theme` surveys the theme), counts the
+   option lists the frames really produce, and gives a name to each one said `REPEAT_STYLE` = 3
+   times or more. main.tex's preamble says it once - `\slideshapestyle{fill-white-outline-darkgrey}
+   {fill=white,draw=DarkGrey,line width=0.47bp}` - and the frame says
+   `\sliderect[fill-white-outline-darkgrey]{67.2,63,243.6,37.8}`. **192 names over 27 decks, 3,534
+   uses.**
+2. **A path of more numbers than anyone reads keeps its points in a file.** Past
+   `OUTLINE_NUMBERS` = 12 numbers, a preset's outline goes to `shapes/<kind>-<sha8>.tex` and the
+   frame says `\slideshape{151.9,174,19.64,17.74}{\slidepath[fill-yellow-outline-paleblue]
+   {shapes/star5-9b3c2dfe.tex}}` - the box, and a name for the look. A five-pointed star is twenty
+   numbers; jruby-ja's frames were 2,346 numbers over 102 lines. **132 such lines, 85 new files**
+   (identical geometry is written once and shared, whatever style each shape draws it in), on top of
+   the 1,462 files `\slidefreeform` already wrote.
+
+### The names
+
+Named after what they are, from the keys themselves: `fill-white`, `outline-darkgrey`,
+`fill-lightblue-outline-darkgrey`, `gradient-nearblack`, `outline-red-dashed`, `fill-red-faded`. The
+colour word is the deck's own colour name where it has one (`colour_word` turns `b2sFFCC00` into
+`yellow`), and the name says `fill` or `outline` **in front of** the colour on purpose: TikZ reads a
+bare `red` in that very place as the colour red, so a style called `red` would take the word away
+from anyone editing the frame. Two styles alike but for the weight get the weight
+(`outline-black-0.47` beside `outline-black-0.94`); anything still colliding gets `-2`, `-3`
+(`fill-green-2`, where the deck fills in two different greens).
+
+A name is a `\tikzset` style, not a macro, so it sits where the options go and **any key after it
+still wins**: `\sliderect[card,fill=Red]{...}` changes that one card and nothing else. That is the
+answer to "a named shape must make an edit cheaper, not dearer".
+
+`\slidepath` is nested inside `\slideshape`, not a macro of its own, for two reasons: the expansion
+is then byte-identical to the tokens the frame held (turned, transformed or plain), and
+`readability.construct()` would count a brand-new top-level macro name as "text", which would move
+the ruler rather than the source.
+
+### Fidelity: nothing moved, in either direction
+
+`adopt_bench run --jobs 5 --tag sh-a`, 29 decks, 912 slides: **boxes 0.9728, page 0.9714, pixels
+0.9844, deck mean 0.9557** - equal to `fl-a` in every digit. `cmp.py fl-a sh-a` compares **per
+slide**: every one of the 912 moves by +0.0000, and no deck moves by 0.0001 in either direction
+(slides mean 0.9727 -> 0.9727, deck mean 0.9557 -> 0.9557). That is what the
+design was for - `\slideshapestyle` expands to exactly the keys it replaced (written through `to_bp`
+like the frames' own lines, or a named `line width` would be 0.4% off the inline one), and
+`\CatchFileDef` pulls the path back byte for byte.
+
+### Readability: 0.438 -> 0.448
+
+| component | fl-a | sh-a |
+|---|---|---|
+| **score** | **0.4382** | **0.4477** |
+| lines | 0.4054 | 0.4054 |
+| numbers | 0.1147 | 0.1231 |
+| plumbing | 0.5333 | 0.5350 |
+| bloat | 0.5596 | 0.5825 |
+| author | 0.8639 | 0.8639 |
+| repeat | 0.9061 | 0.9061 |
+
+Every deck moves up or stands still; none moves down. The biggest: jruby-ja 0.235 -> 0.333,
+instagram 0.296 -> 0.336, comic-strips 0.510 -> 0.544, drawing-workshop 0.444 -> 0.458,
+intro-lecture 0.492 -> 0.504, jeb-arch 0.267 -> 0.276, journey-maps 0.340 -> 0.349. On the shape
+lines themselves: **30,574 numbers -> 26,300** (-14%) and **437,832 characters -> 382,552** (-13%);
+jruby-ja 2,346 -> 1,061 numbers, cs161-net 2,002 -> 1,637, sc-memphis 11,640 -> 11,246.
+
+What did **not** move says as much:
+
+- `lines` is untouched, and the construct table is identical (5,515 shape lines, 28.4%). Neither
+  move removes a line: a shape is still one line, it is shorter and says fewer numbers.
+- `repeat` is untouched because `readability._key` keeps a line's numbers and only takes its words
+  out, so two rects at different coordinates never shared a key and still do not. What the naming
+  removes is repetition a reader sees and the ruler does not charge.
+- `author` is untouched: `\slidepath` replaced `\path` one for one, and a style *name* is neither a
+  command nor vocabulary (`vocabulary()` reads `\newcommand|\def|\newenvironment`, so a
+  `\tikzset{name/.style=...}` name is neutral - it costs nothing and earns nothing).
+
+**Disclosure, for the ruler's sake.** The preamble is not a frame body, so the 192 `\slideshapestyle`
+lines and the 85 files are not charged at all, and a file path inside braces counts as a *visible
+word* (and a sha8 beginning with a digit as one spurious number), which flatters the per-word ratios
+by at most 132 words. This is the arrangement `\slidefreeform` has had since `ff-*`; it is the same
+bargain - the source a person reads is smaller, and the bytes are still in the tree - but it is a
+bargain the score cannot see, which is why the honest numbers above are the per-line counts.
+
+### What was left inline, on purpose
+
+- **A style used twice.** Three is the threshold (`REPEAT_STYLE`, the ruler's own `REPEAT_FRAMES`):
+  a name a person meets once costs them a lookup and saves nothing. cs161-net's
+  `\sliderect[fill=Purple,draw=black,line width=0.94bp]` stays as it is, two doors down from
+  `\sliderect[fill-yellow-outline-black]`.
+- **A path of 12 numbers or fewer.** An elbow connector (`\slideline{a,b}{c,d}` plus one bend) and
+  gdg24's arcs read perfectly well; putting them in a file would cost a reader a second file to
+  open for less than they already see.
+- **Multi-path preset bodies** (CUBE, DONUT, an ARC drawn filled and then stroked): the body is
+  several `\path`s that differ in their keys, and the shape is the *relation* between them. One file
+  per path would scatter it; one name for a body that appears twice would be a macro nobody reads.
+- **Arrow tips and the geometry keys** - `->`, `rotate=`, `flip`, `rounded=` - stay where they are.
+  They are this shape's own facts, not the deck's look; a `rounded=29.4` in a style would be a
+  number hidden in a name.
+- **`\slidefreeform`'s options**, which are keyval and already carry their points in a file.
+
+### What it costs a person editing the source
+
+`edit_robustness`'s two forms are the frozen corpus tags `m6-a` and `ls-a`, and the tool is not this
+lane's to change, so the measurement was made **against a shadow corpus**: a scratch directory whose
+`<deck>/runs/m6-a` and `<deck>/runs/ls-a` are NTFS junctions onto the real corpus's `m6-a` and onto
+`fl-a` (the before run) or `sh-a` (the after run), with `target.json` copied. `$B2S_ADOPT_CORPUS`
+points the tool at it; the real corpus, and `ls-a` in it, are untouched. Both runs draw the **same
+sample** (seed 7, 24 slides; `sample.json` identical byte for byte).
+
+**The two runs agree in every row**: 143 judged edits each, `m6-a` 123/143 pass (86%), 2.1 lines per
+edit; the adopted form 129/143 (90%), 1.2 lines per edit - and the whole `results.json`, pixel
+counts included, is the same multiset of rows before and after. Naming a shape's look and moving a
+long outline into a file costs a person editing the *text* of a slide exactly nothing, which is what
+one would want and is worth having measured rather than assumed.
+
+What the tool cannot say is the other half: none of its nine edits touches a shape, so it can
+neither confirm nor deny that a named shape is cheaper to change. That half is by construction and
+is pinned offline instead (`tests/test_adopt_shapes.py`):
+
+- a name is a `\tikzset` style in the options slot, so one shape changes on the spot -
+  `\sliderect[card,fill=Red]{...}` - with no macro to break and no optional argument to design
+  (`test_a_named_look_can_still_be_changed_on_one_shape`);
+- changing what *all* of them look like is now one line in the preamble instead of one line per
+  shape: sc-memphis's nine names cover 1,629 frame lines, cs161-net's eighteen cover 332;
+- and a name is never a word TikZ reads as a colour, so it cannot quietly redefine `red` under an
+  editing hand (`test_a_style_name_is_never_a_word_tikz_reads_as_a_colour`).
+
+### What was tried and rejected
+
+- **Decoration every slide repeats hoisted into the theme** (candidate 2). Measured over the corpus:
+  whole groups of shapes repeated slide to slide account for ~340 of 5,515 shape elements, and
+  hoisting only the blocks that are identical *and* consecutive saves 1.7% of shape lines. Worse,
+  the repeats are not identical: sc-memphis's tile differs in the last hundredth of a coordinate
+  from slide to slide and carries a per-slide `fill opacity`, so a layout drawing it once would move
+  pixels. Fidelity is the hard constraint; rejected.
+- **A lattice for a column or row of cards** (the arithmetic-run form of candidate 3). Only 22 of
+  the 5,515 shape lines sit in an exact arithmetic run of three or more. Rejected: a `\foreach`
+  wrapper for 0.4% of the lines is machinery, which is what this lane is removing.
+- **Rounding coordinates.** It cannot help at all: `readability.NUM` counts a literal whether it is
+  `63` or `63.174`, so precision is free to the ruler and costs only pixels. Rejected on both sides.
+- **Dropping a shape that draws nothing** (a white rect at `fill opacity` on white, a shape another
+  shape covers completely). Not attempted, and deliberately: the brief allows it only with a proof
+  by construction, and "nothing is on top of it" is a fact about the whole paint order - layout
+  decoration, pictures, the deck's own background - which the writer does not model per pixel. A
+  line saved against a proof that holds for one deck's thumbnail is not a line saved.

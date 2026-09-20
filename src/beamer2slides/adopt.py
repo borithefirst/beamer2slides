@@ -27,7 +27,7 @@ from pathlib import Path
 
 from . import labels as labels_mod
 from . import snapshot
-from .adopt_shapes import turned_text
+from .adopt_shapes import SHAPE_MACRO, shape_style_definitions, survey_styles, turned_text
 from .inverse import (Context, TEXTPOS, body_style, colour_name, frame_latex, paragraphs_latex,
                       picture_block)
 
@@ -3398,6 +3398,8 @@ def bootstrap(target: dict, tex: Path, flow: bool = False) -> str:
     if not flow:
         # what most paragraphs and list items are, said once in the preamble
         deck_text_survey(target, ctx)
+    # and what its shapes are drawn in, where the deck draws the same look again and again
+    survey_styles(target, ctx, tex.parent)
     # "% slide N" says which deck slide a frame is, for a person reading the source and for tools
     # that compile frames one at a time (devtools.adopt_bench finds the frames that break a build)
     from . import inverse
@@ -3431,6 +3433,13 @@ def bootstrap(target: dict, tex: Path, flow: bool = False) -> str:
         extra += ["% the deck's text styles: size (bp), typeface, weight, colour, and the Slides line box of a",
                   "% paragraph in each (ascent above the first baseline, pitch, depth under the last line)"]
         extra += styles
+    # (only where slides.sty carries the shapes: a name with nothing to draw it on is not worth a line)
+    # `to_bp` as the frames' own lines get it, or a named `line width` would be 0.4% off the inline one
+    shape_styles = [to_bp(s) for s in shape_style_definitions(ctx)] if SHAPE_MACRO in ctx.packages else []
+    if shape_styles:
+        extra += ["% the deck's shape styles: a fill, outline, opacity and dash pattern its shapes draw in again",
+                  "% and again. A shape names one where its options go, and a key after the name still wins."]
+        extra += shape_styles
     if SLIDES_TEXT in ctx.packages:
         levels = level_definitions(ctx)
         if levels:
