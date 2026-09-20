@@ -917,7 +917,15 @@ through the `bold_word` deck edit and `fuzz_world._styling_ends`, and taking the
 copy riding behind it - had merely passed (`loss_oracle.order_findings`). A third was the campaign's
 own: chained steps could drop the same picture on the same slide at the same box twice, which is a
 real duplicate made by the fuzzer, so `random_spec` now places an added picture or blank shape where
-no other one stands (`_free_box`). And the one that killed a sync outright (seeds 608, 616): the
+no other one stands (`_free_box`). The campaign's own again, at converted seed 9200614: a slide the
+person adds or duplicates was given a six-digit id drawn afresh, which the birthday rule collides
+well before a campaign is over, and two slides of one objectId is a deck Slides could never hand
+back - the two read as one, so the oracle saw a picture the person had added disappear and the
+report list one created slide where two appeared, three findings and every one of them the
+fuzzer's hand. `fuzz_sync._fresh` gives a drawn id a *tail* when the deck already answers to it
+(one op still takes one number, so every other round is unchanged), a duplicated slide gets its
+own notes page as it does in Slides, and `_sync_step` now refuses a deck carrying an id twice out
+loud rather than letting the oracle blame the merge for it. And the one that killed a sync outright (seeds 608, 616): the
 newline a Slides text ends on cannot be deleted - the API reads it back but leaves it out of the
 length it will accept - so a deck edit that deleted a box's *last* paragraph made the merged text end
 early, the diff's last hunk ran to the end, and the overrides batch was refused whole

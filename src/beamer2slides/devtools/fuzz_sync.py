@@ -524,9 +524,36 @@ def deck_replace_image(rng, base, live):
     return f"replace the picture of {oid}"
 
 
+def _taken(live: dict) -> set[str]:
+    """Every id the deck already carries - slides, their notes pages and their objects."""
+    ids: set[str] = set()
+    for s in live["slides"]:
+        ids.add(s["objectId"])
+        ids.add(s.get("notes_id"))
+        ids.update(s["objects"])
+    return ids - {None}
+
+
+def _fresh(rng, live: dict, prefix: str, width: int = 6) -> str:
+    """An id nothing in the deck answers to. Slides never hands out an objectId twice, and a fuzzer
+    that does is not fuzzing the sync: two slides of one id read back as one slide, so the oracle
+    saw a picture the person had added disappear and the report list one created slide where two
+    appeared (converted seed 9200614, three findings, every one of them the harness's own hand). Six
+    digits drawn afresh each time is not rare enough for a long campaign - the birthday rule makes a
+    collision likely well before a thousand rounds - and the ids a slide's own derive from it, so a
+    slide id nobody else has makes its objects and its notes page unique too."""
+    taken = _taken(live)
+    drawn = oid = f"{prefix}{rng.randrange(10 ** width):0{width}}"
+    n = 0
+    while oid in taken:      # (a tail rather than another draw: one op takes one number, always)
+        n += 1
+        oid = f"{drawn}x{n}"
+    return oid
+
+
 def deck_add_text_box(rng, base, live):
     s = rng.choice(live["slides"])
-    oid = f"user{rng.randrange(10 ** 9):09}"
+    oid = _fresh(rng, live, "user", 9)
     s["objects"][oid] = W.readback("shape", [300, 300, 460, 330], text=f"a note nobody may lose {oid}\n")
     s["order"].append(oid)
     return f"add a text box {oid}"
@@ -534,7 +561,7 @@ def deck_add_text_box(rng, base, live):
 
 def deck_add_image(rng, base, live):
     s = rng.choice(live["slides"])
-    oid = f"user{rng.randrange(10 ** 9):09}"
+    oid = _fresh(rng, live, "user", 9)
     s["objects"][oid] = W.readback("image", [400, 200, 500, 260],
                                    image={"contentHash": f"u{rng.randrange(10 ** 6)}", "sourceUrl": None,
                                           "signature": W.picture_signature(bytes([rng.randrange(200)]))})
@@ -544,7 +571,7 @@ def deck_add_image(rng, base, live):
 
 def deck_add_slide(rng, base, live):
     i = rng.randrange(len(live["slides"]) + 1)
-    sid = f"user_s{rng.randrange(10 ** 6):06}"
+    sid = _fresh(rng, live, "user_s")
     oid = f"{sid}_t"
     live["slides"].insert(i, {"objectId": sid, "layoutObjectId": "L", "background": {"color": "#ffffff"},
                               "notes": "a slide the person added", "notes_id": f"{sid}_n", "order": [oid],
@@ -554,9 +581,10 @@ def deck_add_slide(rng, base, live):
 
 def deck_duplicate_slide(rng, base, live):
     s = rng.choice(live["slides"])
-    sid = f"user_s{rng.randrange(10 ** 6):06}"
+    sid = _fresh(rng, live, "user_s")
     copy_ = copy.deepcopy(s)
     copy_["objectId"] = sid
+    copy_["notes_id"] = f"{sid}_n"   # (a copy gets its own notes page, as it does in Slides)
     copy_["objects"] = {f"{sid}_{k}": v for k, v in enumerate(copy_["objects"].values())}
     copy_["order"] = list(copy_["objects"])
     for rb in copy_["objects"].values():
@@ -603,7 +631,7 @@ def deck_group(rng, base, live):
     s = rng.choice(options)
     tops = [o for o, rb in s["objects"].items() if not rb.get("parent_group") and rb["kind"] != "elementGroup"]
     picked = rng.sample(tops, 2)
-    gid = f"user_g{rng.randrange(10 ** 6):06}"
+    gid = _fresh(rng, live, "user_g")
     boxes = [s["objects"][o]["box"] for o in picked]
     # Slides keeps the children's z-order, and the group stands where the topmost of them stood
     order = s.setdefault("order", [])
@@ -653,6 +681,14 @@ def _sync_step(seed: int, step: int, doc: dict, base: dict, live: dict, tmp: Pat
         applied_deck.append(f"{name}: {done}" if done else f"{name}: (not applicable)")
     for s in live["slides"]:
         W._drop_lonely_groups(s)  # (Slides drops a group an edit left with one child)
+    seen: set[str] = set()        # ... and never hands out one objectId twice (`_fresh`)
+    for s in live["slides"]:
+        for oid in [s["objectId"], s.get("notes_id"), *s["objects"]]:
+            if oid is not None and oid in seen:
+                raise AssertionError(f"the deck edits gave {oid} to two things at once: "
+                                     f"a deck no Slides could hand back, and whatever the oracle "
+                                     f"says about it is about the fuzzer, not the sync")
+            seen.add(oid)
     doc2 = copy.deepcopy(doc)
     applied_src = []
     touched = _deck_edited_ir_ids(base, live)   # what the person just edited, for `collide`

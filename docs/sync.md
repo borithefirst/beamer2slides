@@ -982,6 +982,17 @@ hold for every sync, including the combinations nobody thought of.
   excuse (`integrity(allow_ungrouped=...)`) named the slide by the title the edit used, and the sync
   had just given that slide another one. A slide is now excused by its objectId as well - the one
   name of a slide a sync cannot change.
+- Found in the harness by the occlusion campaign (converted seed 9200614 at chain 6): a slide the
+  person adds or duplicates was given `user_s` plus six digits drawn afresh, and a campaign is long
+  enough for the birthday rule to draw one twice. Two slides of one objectId is a deck no Slides
+  could hand back - the two read as one - so the oracle saw a picture the person had added
+  disappear, the report listed one created slide where two appeared, and the second sync wrote
+  another order: three findings, every one of them the fuzzer's hand. `fuzz_sync._fresh` gives a
+  drawn id a *tail* when the deck already answers to it, rather than drawing again, so an op still
+  takes exactly one number from its rng and every other round of a campaign is unchanged; a
+  duplicated slide gets its own notes page, as it does in Slides; and `_sync_step` refuses such a
+  deck out loud, so the next collision is a crash naming the fuzzer and not an accusation against
+  the merge.
 - Found in the oracle itself, by a live chained round (seed 303): the person duplicated a slide, the
   source moved the original, sync moved the copy along behind it - and the slide the pair passed was
   accused of having moved unreported. Which of two slides that change places "moved" has no single

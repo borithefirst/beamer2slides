@@ -180,6 +180,39 @@ def test_the_round_notices_a_base_that_would_not_settle(tmp_path):
     assert [f["kind"] for f in found] == ["second_sync_writes"] and found[0]["severity"] == "report"
 
 
+def test_the_fuzzer_never_hands_out_one_object_id_twice():
+    """Another guard on the harness. Slides never gives two things one objectId, and a deck that
+    does is not a deck a sync could ever meet: the two slides read back as one, so the oracle saw a
+    picture the person had added disappear and the report list one created slide where two appeared.
+    That was converted seed 9200614 at chain 6 - three findings, every one of them the fuzzer's own
+    hand - and six digits drawn afresh per slide collide long before a campaign is over.
+    `fuzz_sync._fresh` gives a drawn id a tail rather than drawing again, so an op still takes
+    exactly one number from its rng and a campaign's every other round is unchanged."""
+    import random
+    from beamer2slides.devtools import fuzz_world
+
+    def slide(sid, text):
+        return {"objectId": sid, "layoutObjectId": "L", "background": None, "notes": "",
+                "notes_id": f"{sid}_n", "order": [f"{sid}_t"],
+                "objects": {f"{sid}_t": fuzz_world.readback("shape", [0, 0, 100, 40], text=text)}}
+
+    class Stuck(random.Random):
+        """An rng whose every draw is the collision."""
+        def randrange(self, start, stop=None, step=1):
+            return 790791 % start if stop is None else start
+
+    live = {"slides": [slide("b2s_s000", "the converter's own\n")]}
+    for _ in range(3):
+        fuzz_sync.deck_duplicate_slide(Stuck(), {"slides": []}, live)
+        fuzz_sync.deck_add_slide(Stuck(), {"slides": []}, live)
+    ids = [x for s in live["slides"] for x in [s["objectId"], s["notes_id"], *s["objects"]]]
+    assert len(set(ids)) == len(ids), sorted(ids)
+    # and the campaign says so out loud rather than blaming the merge for what it did itself
+    live["slides"].append(copy.deepcopy(live["slides"][0]))
+    with pytest.raises(AssertionError, match="two things at once"):
+        fuzz_sync._sync_step(3, 0, {}, {"slides": []}, live, Path("."), [], [], False)
+
+
 def test_the_rounds_really_exercise_sync():
     """A guard on the harness: a round that edited nothing would pass the oracle for free."""
     result = fuzz_sync.offline_round(3, source_ops=["reword", "move_element"],
