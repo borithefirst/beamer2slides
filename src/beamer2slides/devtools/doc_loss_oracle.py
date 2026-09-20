@@ -491,12 +491,24 @@ def check(base: dict, before: dict, after: dict, report: dict,
         out += _tab_findings(was.get(tab), part, then.get(tab), said, tab,
                              doc_ir.tab_part(ours, tab) if tab else ours, theme)
         out += _title_findings(was.get(tab), part, then[tab], said, tab)
-    out += _resurrection_findings(was, now, then, file_tabs, said)
+    out += _resurrection_findings(was, now, then, file_tabs, said, ours)
     return [f for f in out if f["kind"] not in allow]
 
 
+def _fresh_asks(ours: dict | None) -> Counter:
+    """How many tabs of each title the *source* is asking for outright.
+
+    A `<section>` with no `data-tab` is a tab the file wants and the document has
+    never had (`doc_ir.parts`), so the sync creating one is the merge doing its job.
+    They cannot be read off `parts_by_tab`, which keys by tab id and puts every one
+    of them on `None` beside the first tab.
+    """
+    return Counter(part.get("title") for part in doc_ir.parts(ours)[1:]
+                   if not part.get("tab")) if ours else Counter()
+
+
 def _resurrection_findings(was: dict, now: dict, then: dict, file_tabs: dict,
-                           said: str) -> list[dict]:
+                           said: str, ours: dict | None = None) -> list[dict]:
     """A tab the reader deleted that the sync put back.
 
     Nothing of the reader's *disappears* here, so every other question in this file
@@ -508,21 +520,27 @@ def _resurrection_findings(was: dict, now: dict, then: dict, file_tabs: dict,
     Only the shape the merge could actually produce is accused: the file still asks
     for that tab (`<section data-tab>`), so the source never dropped it either, and a
     tab now stands in the document, unknown to the base, saying the same thing under
-    the same name. A tab the source freshly asks for cannot be mistaken for one,
-    unless it is a word-for-word copy of the deleted one, in which case the report
-    naming it excuses it.
+    the same name. A tab the source freshly asks for *is* word for word that shape —
+    two new empty tabs say exactly as much as each other — so each such ask answers
+    for one of the new tabs before any of them is called a resurrection (`_fresh_asks`;
+    chain-8 seed 65370, two `add_tab`s drawing the same name).
     """
-    out = []
+    asked, out = _fresh_asks(ours), []
     for tab, old in was.items():
         if tab is None or tab in now or tab not in file_tabs:
             continue
+        title = old.get("title")
         twins = [p for t, p in then.items()
                  if t is not None and t not in was and t not in now
-                 and p.get("title") == old.get("title")
-                 and part_text(p) == part_text(old)]
-        if twins and not _named(said, old.get("title")):
+                 and p.get("title") == title and part_text(p) == part_text(old)]
+        if not twins:
+            continue
+        if asked[title] >= len(twins):
+            asked[title] -= len(twins)
+            continue
+        if not _named(said, title):
             out.append(finding("tab_resurrected", "loss",
-                               f"the reader deleted the tab {old.get('title')!r} and it is "
+                               f"the reader deleted the tab {title!r} and it is "
                                f"back after the sync; the report does not say why", tab=tab))
     return out
 

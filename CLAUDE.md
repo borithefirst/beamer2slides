@@ -1369,6 +1369,12 @@ keys, named ranges), `doc_merge.py` (pure planning), `doc_sync.py` (the commands
   dropped chip's gap closed (`harbour grace` -> `harbourgrace`) - so `stands_elsewhere` looks
   for the words *inside* the tab's text, `joined_differently`'s forgiveness at block size.
   It costs nothing: 34 of 200 rounds still fail with the block delete broken on purpose.
+  `tab_resurrected` needed the same at its own size: a tab the *source* freshly asks for is
+  word for word the shape it accuses (two new empty tabs say as much as each other), and the
+  campaign's small vocabulary eventually has two `add_tab`s pick one name (chain-8 seed
+  65370). A `<section>` with no `data-tab` is a tab the document never had, so `_fresh_asks`
+  counts them and each answers for one new tab; with that in, the injected resurrection
+  still fails 26 of 200 rounds at chain 4.
 - The **document's name** is the file's `<title>`, and a Google Doc's title *is* its name in
   Drive: no `batchUpdate` request writes one, so `push` named it at birth and nothing said it
   again. `doc_merge.document_title` merges it three ways (the file alone renamed it -> written;
