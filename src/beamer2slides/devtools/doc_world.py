@@ -595,6 +595,24 @@ class World:
         tab.named.append({"id": ident, "name": arg["name"], "start": start, "end": end})
         return {"createNamedRange": {"namedRangeId": ident}}
 
+    def _do_deleteNamedRange(self, arg: dict, request: dict) -> None:
+        """By id, or every range of a name: the two the API takes, one of them required.
+        A range id is the document's, not a tab's, so it is looked for everywhere; a
+        name goes by `tabsCriteria` where the request gives one, else every tab."""
+        ident, name = arg.get("namedRangeId"), arg.get("name")
+        if not ident and not name:
+            raise Refused(request, "deleteNamedRange needs a namedRangeId or a name")
+        wanted = set((arg.get("tabsCriteria") or {}).get("tabIds", []))
+        tabs = [t for t in self.tabs if not wanted or t.id in wanted]
+        hit = False
+        for tab in tabs:
+            kept = [r for r in tab.named
+                    if not (r["id"] == ident if ident else r["name"] == name)]
+            hit = hit or len(kept) != len(tab.named)
+            tab.named = kept
+        if not hit:
+            raise Refused(request, f"no named range {ident or name!r} to delete")
+
     # -- tabs
 
     def _do_addDocumentTab(self, arg: dict, request: dict) -> dict:
