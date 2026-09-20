@@ -828,6 +828,17 @@ hold for every sync, including the combinations nobody thought of.
   `Sync.regroup_requests`, through Slides' z-order rules (`_zorder`) and has the oracle judge that.
   Taking the restack out fails 14 of 400 offline rounds, each shrunk to one source edit of a block's
   panel (`test_the_offline_fuzz_stacks_a_rebuilt_block_as_sync_does`).
+  The page's own element order is replayed there too (`_restacked`, `Sync.restack`'s requests over
+  the slide as the content batch leaves it: every created object in front, the old ones still
+  standing, `doomed` what the cleanup will take). The reason is sharper than symmetry — the applier's
+  `_page_order`, `_restack` and `_not_over_kept` are a hand-written **copy** of that method, so every
+  fix has to be made twice and a campaign judging only the copy has nothing to say when the two drift
+  apart. The occlusion defect at converted seed 8300231 was caught only because both halves happened
+  to be wrong in the same way. The replay differs from the copy on about 10% of rewritten slides, and
+  it reaches what the group rule cannot — an element standing on the page itself, which no
+  `groupObjects` can reorder: with `Sync.restack` writing nothing, 6 of the first 120 converted rounds
+  at chain 6 end with words a person could read under a shape the sync made
+  (`test_the_offline_fuzz_orders_the_page_as_sync_does`).
 - **Adopt-shaped decks** (`--shape adopt`, `fuzz_world.make_adopt_doc`): the campaign's deck was one
   `convert` would write — a title, a few paragraphs, a figure, a block. What `adopt` writes is not
   that: 4-7 slides of 6-16 small boxes, fewer than half of them with a title at all, two columns of

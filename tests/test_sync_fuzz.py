@@ -722,6 +722,23 @@ def test_the_offline_fuzz_stacks_a_rebuilt_block_as_sync_does(monkeypatch):
     assert any(fuzz_sync.offline_round(seed)["failures"] for seed in (156, 250, 263, 290, 349))
 
 
+def test_the_offline_fuzz_orders_the_page_as_sync_does(monkeypatch):
+    """The same for the page's own element order. `fuzz_sync._restacked` replays `Sync.restack`'s
+    requests over the slide as the content batch leaves it, so what the campaign judges there is the
+    mechanism and not the applier's hand-written copy of it (`fuzz_world._page_order` / `_restack` /
+    `_not_over_kept`). Those are two files that have to be fixed together, and until this there was
+    nothing to say when they drift apart: the occlusion defect at converted seed 8300231 was caught
+    only because both halves happened to be wrong in the same way. With `restack` writing nothing, 6
+    of the first 120 converted rounds at chain 6 end with words a person could read under a shape the
+    sync made; with it, clean. It reaches what the group rule cannot: an element that stands on the
+    page itself, which no `groupObjects` can reorder."""
+    from beamer2slides.sync import Sync
+    assert not fuzz_sync.offline_chain(19, 6)["failures"]
+    monkeypatch.setattr(Sync, "restack", lambda self, w, before, now: [])
+    found = fuzz_sync.offline_chain(19, 6)["failures"]
+    assert [f["kind"] for f in found] == ["text_hidden"], loss_oracle.describe(found)
+
+
 def test_failures_are_the_severities_that_matter():
     made = [loss_oracle.finding("x", "note", "unverified"), loss_oracle.finding("y", "loss", "gone")]
     assert [f["kind"] for f in loss_oracle.failures(made)] == ["y"]

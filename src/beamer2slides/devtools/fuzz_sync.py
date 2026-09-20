@@ -905,18 +905,55 @@ def _zorder(read: dict, reqs: list[dict], created: list[str]) -> dict[str, list[
     return lists
 
 
+def _restacked(sync, p: dict, read: dict, now: dict, lists: dict[str, list[str]], tops: dict) -> None:
+    """`now["order"]` as `Sync.restack`'s requests leave it, replacing the applier's own opinion.
+
+    `restack` runs in `finish`, after the content batch and before the cleanup deletions, so the
+    slide it is handed is the deck as it was plus every object this sync created (Slides puts a new
+    object in front of everything) with the old ones still standing - `lists`, the containers after
+    the ungrouping and regrouping - and `doomed` is what the cleanup will take away, which here is
+    simply everything the applier's own write made disappear."""
+    doomed = {oid for oid in read["objects"] if oid not in now["objects"]}
+    objects = {oid: dict(rb) for oid, rb in now["objects"].items()}
+    for oid in doomed:
+        objects[oid] = dict(read["objects"][oid])
+    for g, kids in lists.items():
+        if g in objects:
+            objects[g]["children"] = [c for c in kids if c in objects]
+    page = [x for x in lists[""] if x in objects]
+    w = {"plan": p, "doomed": doomed, "tops": tops}
+    order = list(page)
+    for r in sync.restack(w, read, {"objectId": p["objectId"], "order": page, "objects": objects}):
+        oid, = r["updatePageElementsZOrder"]["pageElementObjectIds"]
+        if oid in order:
+            order.append(order.pop(order.index(oid)))
+    kept = [x for x in order if x in now["objects"]]
+    now["order"] = kept + [x for x in now.get("order") or [] if x not in kept and x in now["objects"]]
+
+
 def _stacked(base: dict, live: dict, after: dict, ours: dict, mplan: dict, tok: str) -> list[dict]:
-    """A group a rewrite takes apart is made again by `sync.Sync.regroup_requests`, and what order
-    its children end up in is a question about those requests and Slides' rules, not about the
-    merge: the reference applier gives a rewritten object its old place in the group, which is the
-    outcome, not the mechanism. So without this the campaign cannot see a block's panels recreated
-    on top of the body text sync kept - exactly what a live sync did (dc8523a), and what nothing but
-    `loss_oracle.occlusion_findings` notices, since nothing is deleted. Each rewritten slide's groups
-    are stacked as sync's requests stack them, and the oracle judges that deck instead."""
+    """Z-order as sync's own requests write it, rather than as the applier models it.
+
+    A group a rewrite takes apart is made again by `sync.Sync.regroup_requests`, and what order its
+    children end up in is a question about those requests and Slides' rules, not about the merge:
+    the reference applier gives a rewritten object its old place in the group, which is the outcome,
+    not the mechanism. So without this the campaign cannot see a block's panels recreated on top of
+    the body text sync kept - exactly what a live sync did (dc8523a), and what nothing but
+    `loss_oracle.occlusion_findings` notices, since nothing is deleted.
+
+    The page's own element order is replayed the same way (`Sync.restack`), and for a sharper reason
+    than symmetry. The applier's `_page_order` / `_restack` / `_not_over_kept` are a hand-written
+    *copy* of that method, so every fix to one has to be made twice and a campaign judging only the
+    copy cannot see the two drift apart - the day the occlusion rule missed a person's group holding
+    two of the converter's texts (converted seed 8300231 at chain 11) it was found only because both
+    halves were wrong in the same way. Now the requests decide and the copy is what the campaign
+    fails against."""
     from beamer2slides.sync import Sync
     slides = {s["objectId"]: s for s in live["slides"]}
     stacked = copy.deepcopy(after)
     judged = set()
+    sync = Sync.__new__(Sync)
+    sync.base, sync.ours = base, ours
     for p in mplan["slides"]:
         sid = p.get("objectId")
         if p["action"] != "update" or p.get("base") is None or sid not in slides:
@@ -925,7 +962,7 @@ def _stacked(base: dict, live: dict, after: dict, ours: dict, mplan: dict, tok: 
         bunits = merge.units(base["slides"][p["base"]]["elements"])
         regroup, depth, roots_removed = Sync.regroups(p["units"], bunits, read)
         now = next((s for s in stacked["slides"] if s["objectId"] == sid), None)
-        if not regroup or now is None:
+        if now is None:
             continue
         skey = ours["slides"][p["ours"]]["key"]
         tops, created = {}, []
@@ -937,6 +974,8 @@ def _stacked(base: dict, live: dict, after: dict, ours: dict, mplan: dict, tok: 
             tops[u["key"]] = kept[0] if kept else f"b2s_{W.h6(skey)}_{W.h6(u['key'])}_{tok}"
             if not kept:
                 created.append(tops[u["key"]])
+        if not regroup and not tops:
+            continue
         ungroup = [{"ungroupObjects": {"objectIds": [g]}} for g in sorted(regroup, key=lambda g: depth[g])]
         rank = Sync.zrank(ours["slides"][p["ours"]], bunits, tops)
         lists = _zorder(read, ungroup + Sync.regroup_requests(regroup, depth, read["objects"], tops, set(), rank),
@@ -947,13 +986,14 @@ def _stacked(base: dict, live: dict, after: dict, ours: dict, mplan: dict, tok: 
                 continue
             mine = [c for c in lists[g] if c in rb.get("children", [])]
             rb["children"] = mine + [c for c in rb.get("children", []) if c not in mine]
+        _restacked(sync, p, read, now, lists, tops)
         judged.add(sid)
     if not judged:
         return []
     pick = lambda read: {**read, "slides": [s for s in read["slides"] if s["objectId"] in judged]}  # noqa: E731
     out = loss_oracle.occlusion_findings(base, pick(live), pick(stacked), ours)
     for f in out:
-        f["detail"] = f"stacked as sync.Sync.regroup_requests stacks it: {f['detail']}"
+        f["detail"] = f"stacked as sync.Sync.regroup_requests and Sync.restack stack it: {f['detail']}"
     return out
 
 

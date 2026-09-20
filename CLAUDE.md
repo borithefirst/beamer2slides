@@ -966,7 +966,14 @@ end up under a shape the sync created, unless the new conversion stacks that sha
 rebuilt with its panels over the kept body text (dc8523a) deleted nothing, so nothing else saw it. The
 fuzz world has blocks and keeps z-order; `fuzz_sync._stacked` replays `Sync.regroups` /
 `Sync.regroup_requests` through Slides' rule that a group keeps its children's page order (`_zorder`):
-without the restack, 14 of 400 offline rounds fail.
+without the restack, 14 of 400 offline rounds fail. The page's own element order is replayed the same
+way (`_restacked`, `Sync.restack`'s requests over the slide as the content batch leaves it), because
+the applier's `_page_order` / `_restack` / `_not_over_kept` are a hand-written *copy* of that method -
+two files that must be fixed together, with nothing to say when they drift apart (seed 8300231 was
+caught only because both halves were wrong alike). It differs from the copy on ~10% of rewritten
+slides and reaches what the group rule cannot, an element standing on the page itself: with
+`Sync.restack` writing nothing, 6 of the first 120 converted rounds at chain 6 hide words a person
+could read (`test_the_offline_fuzz_orders_the_page_as_sync_does`).
 Four fresh seeds over three shapes then said the rest of it, in one sentence with two halves: **the
 deck's order between two converter elements is nobody's edit, and about what it does not draw the
 source has no opinion at all.** (1) *The order the last conversion drew* (79045, 610106): a rebuilt
