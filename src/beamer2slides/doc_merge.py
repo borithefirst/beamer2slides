@@ -271,7 +271,7 @@ def tidy_requests(live: dict) -> list[dict]:
     The unimportable styling goes first, for the same reason bullets go last: a
     paragraph-wide style request restyles the glyph with the words.
     """
-    out = unimported_requests(live) + bullet_requests(live)
+    out = unimported_requests(live) + restore_bullets(live) + bullet_requests(live)
     for part in ("trailer", "lead"):
         if live.get(f"{part}_kind"):
             start, end = live[part]
@@ -309,6 +309,26 @@ def unimported_requests(live: dict) -> list[dict]:
             out.append({"updateTextStyle": {
                 "range": {"startIndex": start, "endIndex": end},
                 "textStyle": {"smallCaps": True}, "fields": "smallCaps"}})
+    return out
+
+
+def restore_bullets(live: dict) -> list[dict]:
+    """Put back the bullet a write took off a block, or take off one it put on.
+
+    `carry_unimported` found it. After the paragraph styling, because a
+    paragraph-wide style request restyles the glyph with the words, and before
+    `bullet_requests`, which looks at what the read-back says a list is and would
+    not see this block in the run at all.
+    """
+    out = []
+    for block in live["blocks"]:
+        want = (block.get("unimported") or {}).get("bullet")
+        if want is None or not block.get("span"):
+            continue
+        span = {"startIndex": block["span"][0], "endIndex": block["span"][1]}
+        out.append({"deleteParagraphBullets": {"range": span}} if want == "none" else
+                   {"createParagraphBullets": {
+                       "range": span, "bulletPreset": BULLETS[want == "ordered"]}})
     return out
 
 
@@ -557,18 +577,56 @@ def adopt_keys(live: dict, planned: list[dict]) -> int:
     also where `carry_unimported` notes the styling no import could carry.
     """
     taken = {b["key"] for b in live["blocks"] if b.get("key")}
-    free: dict[tuple, list[str]] = {}
+    free: dict[tuple, list[dict]] = {}
     for block in planned:
         if block.get("key") and block["key"] not in taken:
-            free.setdefault((_match_shape(block), _match_text(block)), []).append(block["key"])
+            free.setdefault((_match_shape(block), _match_text(block)), []).append(block)
     done = 0
     for block in live["blocks"]:
         if block.get("key"):
             continue
         if same := free.get((_match_shape(block), _match_text(block))):
-            block["key"] = same.pop(0)
+            block["key"] = same.pop(0)["key"]
             done += 1
+    done += _adopt_by_words(live, free)
     carry_unimported(live, planned)
+    return done
+
+
+def _adopt_by_words(live: dict, free: dict) -> int:
+    """A second pass on the words alone, for a block whose *shape* the write changed.
+
+    Docs merges two paragraphs keeping the first one's style, so deleting a block
+    hands the block after it the shape of the one that went: a list item under a
+    deleted paragraph comes back a plain paragraph, a heading under a deleted
+    subtitle comes back a subtitle. Matched on shape and words together, the very
+    blocks a write mangles are the ones that can never be adopted — and the repair
+    that would put the shape back (`carry_unimported`) is itself keyed by the key
+    this pass restores, so the two failures hold each other up: the block settled
+    under a name made from its new shape and its new words, and the file's key read
+    as gone (offline chain-8 seeds 7034 and 7048, shrunk to one source op pair and
+    no reader at all).
+
+    Only where nothing is in doubt: one free key says those words, one block without
+    a key says them, and the two agree on being a structural element or not. A guess
+    here would hand one block's identity to another, which is the defect this whole
+    family is about.
+    """
+    by_words: dict[str, list[dict]] = {}
+    for (_, words), blocks in free.items():
+        by_words.setdefault(words, []).extend(blocks)
+    orphans: dict[str, list[dict]] = {}
+    for block in live["blocks"]:
+        if not block.get("key"):
+            orphans.setdefault(_match_text(block), []).append(block)
+    done = 0
+    for words, mine in by_words.items():
+        theirs = orphans.get(words, [])
+        if len(mine) == 1 and len(theirs) == 1 and (
+                (mine[0]["kind"] in doc_ir.STRUCTURAL)
+                == (theirs[0]["kind"] in doc_ir.STRUCTURAL)):
+            theirs[0]["key"] = mine[0]["key"]
+            done += 1
     return done
 
 
@@ -633,9 +691,22 @@ def carry_unimported(live: dict, planned: list[dict]) -> int:
         named = named_style(mine)
         if named == named_style(block):
             named = None
-        if missing or ranges or named:
+        # And the bullet, which no named style carries: a list item and a plain
+        # paragraph are both NORMAL_TEXT, so the line above is blind to exactly the
+        # thing a delete takes away most often. Docs merges two paragraphs keeping
+        # the first one's style, so the item under a deleted paragraph comes back
+        # with no bullet at all, and the settle then wrote that plain paragraph into
+        # the file: the source's own list, quietly one item shorter. Safe against a
+        # reader who took the bullet off in the browser for the same reason `named`
+        # is — `_take_shape` gives the plan the source's shape only where the
+        # document kept the base's.
+        bullet = None
+        if (mine["kind"] == "item") != (block["kind"] == "item"):
+            bullet = ("ordered" if mine.get("ordered") else "unordered") \
+                if mine["kind"] == "item" else "none"
+        if missing or ranges or named or bullet is not None:
             block["unimported"] = {"paragraph": missing, "smallcaps": ranges,
-                                   "named": named}
+                                   "named": named, "bullet": bullet}
             done += 1
     return done
 
@@ -1631,7 +1702,8 @@ def _written_here(block: dict) -> bool:
     moved — but not a table, which is a grid (`structure` builds it), and not a block
     with a chip no request can create (`plan` says so in its notes)."""
     return ((block.get("origin") == "added by the source" or bool(block.get("moved")))
-            and block.get("kind") != "table" and _writable_block(block))
+            and block.get("kind") != "table" and not block.get("nowhere")
+            and _writable_block(block))
 
 
 def structure(theirs: dict, merged: list[dict],
@@ -1662,9 +1734,10 @@ def structure(theirs: dict, merged: list[dict],
             if not reqs:
                 block["moved"] = False
                 if notes is not None:
-                    notes.append(f"{key}: the source moved it in front of the table the "
-                                 f"document opens on, where nothing can be written — left "
-                                 f"where the document has it")
+                    notes.append(f"{key}: the source moved it where the document has no "
+                                 f"paragraph to write in — before the table it opens on, "
+                                 f"or between two tables — and it stays where the document "
+                                 f"has it")
                 continue
             index = next(i for i, b in enumerate(theirs["blocks"])
                          if b.get("span") == block.get("span"))
@@ -1696,6 +1769,10 @@ def structure(theirs: dict, merged: list[dict],
                 plans.append((at, reqs, {"key": key, "after": _after_key(merged, position),
                                          "note": f"`{key}`: a table of {rows}×{columns} "
                                                  f"added by the source"}))
+            elif notes is not None:
+                notes.append(f"{key}: a table the source adds where the document has no "
+                             f"paragraph to write in — before the table it opens on, or "
+                             f"between two tables — cannot be built")
     shaped: list[dict] = []
     steps: list[tuple[int, int, list[dict]]] = []
     seen: set[int] = set()
@@ -1744,6 +1821,13 @@ def _new_table_requests(theirs: dict, at: int | None, rows: int,
       table — between the two, which is where Docs wants a paragraph anyway;
     - written after everything, it goes to the end of the segment, and Docs keeps a
       paragraph after it, because a document ends on one.
+
+    Which leaves the place where no paragraph is to be had at all: between two tables,
+    or at the very start of a document that opens on one. There is nowhere to write
+    and no requests come back — the caller says so and leaves the document alone.
+    Written anyway at `at - 1`, the new table was built inside the last cell of the
+    table before it, the words never reached it, `anchor_tables` could not find it and
+    every re-plan built another (`fuzz_docs.KNOWN` 'table-in-a-table').
     """
     table = {"rows": rows, "columns": columns}
     if at is None:
@@ -1751,8 +1835,8 @@ def _new_table_requests(theirs: dict, at: int | None, rows: int,
     after = next((b for b in theirs["blocks"] if b["span"][0] == at), None)
     before = next((b for b in theirs["blocks"] if b["span"][1] == at), None)
     if _structural(after):
-        if before is None:
-            return at, []                  # a document that opens on a table: nowhere to write
+        if before is None or _structural(before):
+            return at, []                              # nowhere to write it
         return at - 1, [{"insertTable": table | {"location": {"index": at - 1}}}]
     out = [{"insertTable": table | {"location": {"index": at}}}]
     if at > 1 and before is not None and not _structural(before):
@@ -1906,6 +1990,49 @@ def _anchor(merged: list[dict], position: int) -> dict | None:
     return None
 
 
+def refuse_nowhere(theirs: dict, merged: list[dict], notes: list[str]) -> None:
+    """Refuse to write a block whose place in the document has no paragraph in it.
+
+    Nothing can be written at a table's or a table of contents' own index, so a block
+    in front of one goes in as "\\ntext" at the paragraph mark before it — and when
+    the block before is structural too, there is no such mark: that index is inside
+    its last cell. The paragraph went into the table and was never seen again, and a
+    *moved* block was deleted from its old place first, so the move destroyed it
+    outright (offline chain-8 seed 7008, shrunk to one source op and no reader).
+
+    Docs keeps an undeletable paragraph between two tables anyway — that is the
+    `between_tables` shape, where the borrowed mark is that paragraph's and the
+    arithmetic is right. A document that has none has nowhere for this block, so it
+    is left unwritten and the report says why. Before `restore_undeletable`, which
+    decides what can be deleted and must see a move this one has taken back.
+    """
+    for position, block in enumerate(merged):
+        if not _written_here(block) or not _nowhere(theirs, merged, position):
+            continue
+        key = block.get("key")
+        if block.get("moved"):
+            block["moved"] = False
+            notes.append(f"{key}: the source moved it between two tables, where the "
+                         f"document has no paragraph to write in — left where the "
+                         f"document has it")
+        else:
+            block["nowhere"] = True
+            notes.append(f"{key}: the source adds it between two tables, where the "
+                         f"document has no paragraph to write in — not written")
+
+
+def _nowhere(theirs: dict, merged: list[dict], position: int) -> bool:
+    """Whether the place this block is written at is inside a table's last cell."""
+    anchor = _anchor(merged, position)
+    if not _structural(anchor):
+        return False
+    at = next((i for i, b in enumerate(theirs["blocks"])
+               if b.get("span") == anchor.get("span")), None)
+    # The first block of a body that opens on a table has the hidden paragraph in
+    # front of it to write in (`doc_ir._hide_trailer`), and that is `lead`.
+    return at is not None and at > 0 and _structural(theirs["blocks"][at - 1])
+
+
 def restore_undeletable(theirs: dict, merged: list[dict], notes: list[str]) -> None:
     """Put back a block the merge means to delete and that no request can delete.
 
@@ -1974,6 +2101,7 @@ def plan(base: dict, ours: dict, theirs: dict) -> dict:
             result["notes"].append(f"{block.get('key')}: a new block with a chip in it that no "
                                    f"request can create (or a picture file that is not there) "
                                    f"cannot be written")
+    refuse_nowhere(theirs, result["blocks"], result["notes"])
     restore_undeletable(theirs, result["blocks"], result["notes"])
     result["structure"], result["shaped"] = structure(theirs, result["blocks"], result["notes"])
     result["requests"] = requests(theirs, result["blocks"])

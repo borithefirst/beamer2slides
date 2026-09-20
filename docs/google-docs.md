@@ -252,8 +252,23 @@ picture's crop, angle and brightness, a list's `startNumber` — and, of the doc
 theme, a named style's **marks and alignment**: the face and the measures are read
 (`_named_defaults`), a heading's bold and centring are not.
 
-Two tests pin it. One walks a fixture holding one of everything and asserts the whole
-set, so a property Docs adds later surfaces as a failure rather than as silence. The
+A count is not an address, though, and the question a person actually has is not
+"does this document carry borders" but "is the paragraph I am about to edit the one
+with the border on it". So the same walk is run a block at a time
+(`doc_ir.unmodelled_in`, one structural element; `doc_ir.unread_blocks`, every block
+of every tab, most heavily laden first), and `adopt` and `push` name the blocks by the
+words the person can see in the document: *the paragraph 'Why this matters' carries
+paragraphStyle.borderBottom; rewriting that block through the file would drop it*
+(`doc_sync.block_risk_notes`, eight blocks and four properties each before it says how
+many more). A section break is left out — nothing rewrites one — and so is everything
+outside the blocks, since no rewrite of a paragraph can drop the page's margins. It is
+a **risk**, not a loss: a block nobody rewrites keeps all of it, which is exactly the
+thing one can act on. What a sync *did* rewrite is the next step and waits on nothing
+but a way to ask the plan.
+
+Two tests pin the map. One walks a fixture holding one of everything and asserts the
+whole set, so a property Docs adds later surfaces as a failure rather than as silence.
+The
 other walks every shape of the fuzz corpus — `doc_world` holds a document the way Docs
 holds it and was written apart from this map — and gets back the one thing it has that
 we do not model, the section break a body opens on. That is also the campaign's blind
@@ -857,10 +872,15 @@ reader's styling, and the rest. The ones still standing are let through by defau
 it is fixed and has a test, its entry goes, or it would swallow the next defect that
 looks like it.
 
-**Eight of the ten are fixed**, in three groups: four ways of losing a block's identity,
-two ways of losing the reader's content outright, and three ways of killing the sync
-where it stood. (Two of the eight — a table losing its anchor, and Docs' index rules —
-each closed one of the first group and one of a later one.)
+**Seven of the ten signatures are now at zero**, and what closed them falls into four
+groups: five ways of losing a block's identity, two ways of losing the reader's content
+outright, three ways of killing the sync where it stood, and one place in a document
+where Docs will let nothing be written at all. (Some of them closed one of the first
+group and one of a later one — a table losing its anchor, Docs' index rules, the place
+with nowhere to write.) The three left are `lost-key`, down from 34 findings to 2,
+`crossed-delete`, 2 to 1, and `moved-styling`, unmoved at 2. And one of the seven
+reached zero with no defect behind it at all: it was the oracle miscounting, twice, and
+that is the last part of this section.
 
 Losing a block's identity is the root of the worst of the rest, because a block the
 merge cannot recognise is a block it deletes as "dropped by the source".
@@ -892,6 +912,26 @@ merge cannot recognise is a block it deletes as "dropped by the source".
   own cell edit — were written nowhere. `structure` now gives a regrid the same `after`
   a new table gets, so the table is found again and `plant_ranges` puts its range back.
   One source op, no reader at all (offline chain-8 seed 7122, shrunk).
+* And `adopt_keys` — the one thing that gives a block written from nothing its key
+  back — matched a block's **shape and its words together**, so the very blocks a
+  write mangles were the ones it could never adopt. Docs merges two paragraphs
+  keeping the first one's style, so deleting a block hands the block after it the
+  shape of the one that went: a list item under a deleted paragraph comes back a
+  plain paragraph, a heading under a deleted subtitle comes back a subtitle. And the
+  repair that would put the shape back, `carry_unimported`, is itself keyed by the
+  key this pass restores — so the two failures held each other up, and the block
+  settled under a name made from its new shape and its new words. `_adopt_by_words`
+  is a second pass on the words alone, taken only where one free key and one unkeyed
+  block say the same thing. One source op pair and no reader at all (offline chain-8
+  seeds 7034 and 7048, shrunk).
+
+  Its other half is not about identity at all: **the bullet**. A list item and a
+  plain paragraph are both `NORMAL_TEXT`, so writing the named style back is blind to
+  exactly the thing a delete takes away most often, and the settle then wrote that
+  plain paragraph into the file — the source's own list, quietly one item shorter,
+  with nobody the wiser, since file, base and document then agreed. `carry_unimported`
+  reads the bullet too and `restore_bullets` writes it, after the paragraph styling
+  and before `bullet_requests`, for the reason bullets always go last.
 
 Then the two losses that were not about identity at all. **A table the source dropped
 was deleted however much the reader had typed into it**: a document edit outranks a
@@ -923,28 +963,73 @@ paragraph between two tables anyway, so `restore_undeletable` puts the block bac
 the merge (round by round, since keeping one changes what the next delete may take) and
 the report says why it stayed.
 
-At one seed, 200 rounds at chain 8: `toc-block` 10 → 0, `toc-table-split` 4 → 0,
-`empty-delete` 6 → 0, `dropped-table` 17 → 0, `dropped-frozen` 8 → 0, `lost-key`
-34 → 7, `crossed-delete` 2 → 2, `crossed-frozen` 22 → 9, `moved-styling` 2 → 2 — and
-the same at a second seed and a third. The five signatures that reached zero are **out
-of `KNOWN`** rather than rewritten: each has a test of its own now, and each was wide
-enough to swallow the next defect that looks like it — `block_gone` mentioning `table:`
-had been catching crossed keys on tables all along. What is left under the others has a
-cause nobody has named yet, and the entries say so rather than keep blaming what was
-fixed.
+And then the one that is not a mistake in the arithmetic at all but a place in a
+document where Docs will let nothing be written. Where two tables really do touch there
+is **no paragraph**, so the mark a block in front of a table borrows does not exist and
+the index it borrows is inside the last cell of the table before it: a table added there
+was built inside the old one, its words never reached it, `anchor_tables` could not find
+it and each re-plan built another; an ordinary paragraph *moved* there was deleted from
+its old place first, so the move destroyed it outright. Both are refused now —
+`_new_table_requests` asks for nothing, `refuse_nowhere` leaves the paragraph where the
+document has it — and the report says why. That is the `two_tables` shape; in the
+`between_tables` one the editor's own undeletable paragraph is there to borrow from and
+everything goes in.
 
-And one of the findings was the **oracle's own**, which is the third time the harness
-has been the thing at fault. A picture is identified by the file it shows and not by
-the object id Docs gave it, because a block the sync rewrites comes back with a new id
-— but the file is not stable either: a picture a reader inserted in the browser has
-only a `contentUri` until the settle saves it and gives it a name and a digest
-(`fetch_pictures`). The document had not changed; the name the oracle knew it by had.
-`image_names` takes all of them and `_picture_findings` matches one picture at a time
-against any, so a rewrite and a settle are both survivable and two copies of one file
-are still two pictures. Thirteen findings became nine — and it is worth saying what
-that cost: for as long as the oracle has existed it has been accusing the sync of
-losing every picture a reader ever inserted, and nine real ones were standing behind
-that noise.
+At one seed, 200 rounds at chain 8: `toc-block` 10 → 0, `toc-table-split` 4 → 0,
+`empty-delete` 6 → 0, `dropped-table` 17 → 0, `dropped-frozen` 8 → 0, `crossed-frozen`
+22 → 0, `table-in-a-table` 1 → 0, `lost-key` 34 → 2, `crossed-delete` 2 → 1,
+`moved-styling` 2 → 2 — and the same at a second seed and at chain 4. The seven
+signatures that reached zero are **out of `KNOWN`** rather than rewritten: each has a
+test of its own now, and each was wide enough to swallow the next defect that looks
+like it — `block_gone` mentioning `table:` had been catching crossed keys on tables all
+along, and `frozen_gone` with no words at all would catch every way of losing a picture
+there will ever be. That is not a worry about the future: taking `crossed-frozen` out
+uncovered, at two other seeds, a person chip going with the block the source dropped,
+which had been filed under it all along.
+
+`lost-key`'s last two have a cause and no fix yet, and the entry says so. An empty
+paragraph is all mark, so its named range **is** its mark — and a block written in
+front of a table goes in as `"\ntext"` at the mark of the paragraph before it, which
+Docs then hands to the new paragraph, a range being pushed along by an insert at its
+own first index. The empty paragraph's key rides onto the block that was written and
+the key the file gave the moved block is nowhere. There is no index that both appends
+after an empty paragraph and leaves its range alone, so the write is right and the
+read has to be read — and reading it by taking the key off the block whose words
+contradict the plan was tried, in two widths, and cost that round its convergence.
+
+And one of the ten was the **oracle's own** from beginning to end, twice over, which is
+the third and fourth time the harness has been the thing at fault. A picture is identified by the file
+it shows and not by the object id Docs gave it, because a block the sync rewrites comes
+back with a new id — but the file is not stable either: a picture a reader inserted in
+the browser has only a `contentUri` until the settle saves it and gives it a name and a
+digest (`fetch_pictures`). The document had not changed; the name the oracle knew it by
+had. `image_names` takes all of them and `_picture_findings` matches one picture at a
+time against any, so a rewrite and a settle are both survivable and two copies of one
+file are still two pictures. Thirteen findings became nine.
+
+Then the nine, which were subtler and the same shape: a reader who pastes the same image
+twice gives two pictures **one `uri`**, and a name two pictures share says nothing about
+which is which. Matched on it, the picture that went was paired with the one that stayed,
+the survivor was left over, and the oracle named the survivor — every one of the nine
+pointed at a picture still standing in the document. `telling_names` keeps only the names
+no other picture beside it carries, `pair_images` matches on those first and on anything
+at all second (so two copies of one file still pair off one for one), and the excuse —
+*the source took this picture out of the file* — is asked of the telling names too, or
+the copy the source kept would answer for the one it dropped. It is worth saying what
+that cost: for as long as the oracle has existed it accused the sync of losing every
+picture a reader ever inserted, and then of losing whichever picture it had just watched
+survive. Behind both accusations there was nothing at all.
+
+And a fifth harness defect, uncovered by taking that entry out. Chips are counted by
+value over the whole tab, and the excuse for one that goes is that the file still
+holds one of that value — which credits a chip the source added *somewhere else*
+against the one it is deleting here. A source that drops the block its person chip is
+in and puts a chip of the same address into another block read as no change at all,
+and then as a loss when the second block turned out to be one no request can write.
+`_source_dropped` leaves out what goes with a block the source dropped and the reader
+left exactly as the base has it — and only that, because a chip the reader put in is a
+chip the merge keeps the whole block for, and if it ever stopped doing that the oracle
+must still say so.
 
 Fixed seeds from the campaign run in the default offline suite.
 

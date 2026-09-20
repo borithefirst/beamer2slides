@@ -430,7 +430,8 @@ def unmodelled_notes(doc: dict, full: bool = False) -> list[str]:
     a block is restyled, not rebuilt — and goes when the block holding it is written
     again from nothing.
 
-    `full` names every one, which is what `adopt` owes whoever hands us a document
+    `full` names every one, and then names the blocks that carry them
+    (`block_risk_notes`), which is what `adopt` owes whoever hands us a document
     somebody else wrote. A sync says the count and the commonest few instead, or
     every report would carry fifteen lines that never change.
     """
@@ -441,11 +442,46 @@ def unmodelled_notes(doc: dict, full: bool = False) -> list[str]:
     if full:
         return [f"the document has {found[path]['count']} × {path} "
                 f"(e.g. {found[path]['example']}), which the canonical file cannot say"
-                for path in order]
+                for path in order] + block_risk_notes(doc)
     rest = f" and {len(order) - 3} more" if len(order) > 3 else ""
     return [f"{len(order)} kinds of document property this file cannot say "
             f"({', '.join(order[:3])}{rest}); they survive an edit and go with a "
             f"block written again from nothing"]
+
+
+RISKY_BLOCKS = 8        # how many to name before saying how many more there are
+PROPERTIES = 4          # how many of one block's properties to name on its line
+
+
+def block_risk_notes(doc: dict, limit: int = RISKY_BLOCKS) -> list[str]:
+    """Which blocks would lose something if the source rewrote them.
+
+    The counts above are the document's; these are addresses. A property the dialect
+    never reads is not carried by the file, so it survives every ordinary edit — a
+    request names the fields it writes — and goes the moment the block holding it is
+    written again from nothing. Whoever is about to edit an adopted document through
+    its file is entitled to know *which* paragraph that is, in the words they can see
+    in the document, and to leave that one alone.
+    """
+    risky = doc_ir.unread_blocks(doc)
+    out = []
+    for block in risky[:limit]:
+        # The last two segments of the path: the struct and the field, which is what
+        # names the property. The nodes above them say where the walker was, not what
+        # the person lost, and a whole path per property makes a line nobody finishes.
+        named = [".".join(path.split(".")[-2:])
+                 + (f" ×{entry['count']}" if entry["count"] > 1 else "")
+                 for path, entry in block["unread"].items()]
+        what = ", ".join(named[:PROPERTIES]) + (
+            f" and {len(named) - PROPERTIES} more" if len(named) > PROPERTIES else "")
+        where = f"[{block['tab']}] " if block["tab"] else ""
+        words = f"{block['words'][:48]!r}" if block["words"] else f"at {block['span'][0]}"
+        out.append(f"{where}the {block['kind']} {words} carries {what}; rewriting that "
+                   f"block through the file would drop {'it' if len(named) == 1 else 'them'}")
+    if len(risky) > limit:
+        out.append(f"and {len(risky) - limit} more blocks carry something the file "
+                   f"cannot say (`doc_ir.unread_blocks` names them all)")
+    return out
 
 
 def stamp_of(ir: dict, part: dict) -> str | None:

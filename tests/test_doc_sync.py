@@ -585,7 +585,7 @@ def test_adopt_names_every_one_of_them():
     say what will not survive being written again."""
     doc = _unmodelled_doc(keepWithNext=True, pageBreakBefore=True)
     notes = doc_sync.unmodelled_notes(doc, full=True)
-    assert notes == [
+    assert notes[:2] == [
         "the document has 1 × structural.paragraph.paragraphStyle.keepWithNext "
         "(e.g. True), which the canonical file cannot say",
         "the document has 1 × structural.paragraph.paragraphStyle.pageBreakBefore "
@@ -594,3 +594,43 @@ def test_adopt_names_every_one_of_them():
 
 def test_a_document_the_dialect_covers_is_said_nothing_about():
     assert doc_sync.unmodelled_notes(_unmodelled_doc(alignment="CENTER"), full=True) == []
+
+
+def _said_doc(*paragraphs: tuple[str, dict]) -> dict:
+    """A body of paragraphs, each with its words and its paragraph style."""
+    content, at = [], 1
+    for text, style in paragraphs:
+        end = at + len(text) + 1
+        content.append({"startIndex": at, "endIndex": end, "paragraph": {
+            "elements": [{"startIndex": at, "endIndex": end,
+                          "textRun": {"content": text + "\n", "textStyle": {}}}],
+            "paragraphStyle": {"namedStyleType": "NORMAL_TEXT"} | style}})
+        at = end
+    return {"documentId": "d", "body": {"content": content}}
+
+
+def test_the_block_that_would_lose_something_is_named_by_its_own_words():
+    """The counts say the document has a border somewhere, which is true and of no
+    use: the person about to edit a paragraph needs to know it is *that* one."""
+    doc = _said_doc(("Plain enough", {}),
+                    ("Why this matters", {"borderBottom": {"width": {"magnitude": 1}}}))
+    notes = doc_sync.block_risk_notes(doc)
+    assert notes == ["the paragraph 'Why this matters' carries "
+                     "paragraphStyle.borderBottom; rewriting that block "
+                     "through the file would drop it"]
+
+
+def test_a_block_carrying_nothing_the_file_misses_is_not_named():
+    """Or the report would list the whole document and say nothing."""
+    assert doc_sync.block_risk_notes(_said_doc(("Plain enough", {}))) == []
+
+
+def test_the_blocks_are_named_most_laden_first_and_the_tail_is_counted():
+    doc = _said_doc(*[(f"line {n}", {"keepWithNext": True}) for n in range(10)],
+                    ("the heavy one", {"keepWithNext": True, "pageBreakBefore": True,
+                                       "borderLeft": {"width": {"magnitude": 1}}}))
+    notes = doc_sync.block_risk_notes(doc, limit=3)
+    assert notes[0].startswith("the paragraph 'the heavy one' carries "
+                               "paragraphStyle.borderLeft, ")
+    assert len(notes) == 4
+    assert notes[-1].startswith("and 8 more blocks carry something the file cannot say")

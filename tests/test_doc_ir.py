@@ -693,6 +693,48 @@ def test_an_empty_struct_says_nothing_and_is_not_reported():
     assert doc_ir.unmodelled(doc) == {}
 
 
+def test_what_a_rewrite_of_one_block_would_drop_is_named_block_by_block():
+    """The document-wide count has no address, and an address is the whole use of it:
+    a person deciding whether to edit a document through the file has to know which
+    paragraph is the one with the border on it."""
+    risky = doc_ir.unread_blocks(UNMODELLED_LIVE)
+    # The paragraph carries six — its own five and a superscript on a run inside it,
+    # which a rewrite drops just as surely — the table three (its own style, a row's,
+    # a cell's), and the section break is no block at all: nothing rewrites one.
+    assert [b["kind"] for b in risky] == ["paragraph", "table"]
+    assert set(risky[1]["unread"]) == {"structural.table.tableStyle",
+                                       "tableRow.tableRowStyle",
+                                       "tableCell.tableCellStyle"}
+    assert risky[0]["words"] == "one two"
+    assert set(risky[0]["unread"]) == {
+        "element.textRun.textStyle.baselineOffset",
+        "structural.paragraph.paragraphStyle.borderLeft",
+        "structural.paragraph.paragraphStyle.direction",
+        "structural.paragraph.paragraphStyle.keepWithNext",
+        "structural.paragraph.paragraphStyle.pageBreakBefore",
+        "structural.paragraph.paragraphStyle.tabStops"}
+    assert risky[0]["span"] == [1, 9]
+
+
+def test_a_block_the_dialect_reads_whole_carries_no_risk():
+    """The fixture the rest of this file reads: every block of it comes back clean,
+    which is what makes a block that does not stand out."""
+    assert doc_ir.unread_blocks(STYLED_LIVE) == []
+
+
+def test_a_property_outside_the_blocks_is_no_block_s_risk():
+    """`documentStyle`, `headers`, `footnotes` are the page, not a paragraph: no
+    rewrite of a block can drop them, and naming a block for them would be a lie."""
+    doc = {"documentId": "d", "documentStyle": {"marginTop": {"magnitude": 72}},
+           "headers": {"h1": {"content": []}},
+           "body": {"content": [{"startIndex": 1, "endIndex": 5, "paragraph": {
+               "elements": [{"startIndex": 1, "endIndex": 5,
+                             "textRun": {"content": "abc\n", "textStyle": {}}}],
+               "paragraphStyle": {"namedStyleType": "NORMAL_TEXT"}}}]}}
+    assert set(doc_ir.unmodelled(doc)) == {"documentStyle", "headers"}
+    assert doc_ir.unread_blocks(doc) == []
+
+
 def test_every_node_the_map_descends_into_is_a_node():
     """A map that names a node it has not got would walk into a KeyError on the one
     document that reaches it, which is no way to find out."""

@@ -182,6 +182,43 @@ def images_of(part: dict | None) -> list[dict]:
             if run.get("frozen") and run.get("chip") == "image"]
 
 
+def telling_names(runs: list[dict]) -> list[set]:
+    """Of each picture's names, the ones that say *which* picture it is: the names no
+    other picture standing beside it carries.
+
+    A reader who pastes the same image twice gives two pictures one `uri`, and that
+    uri then names neither of them. Matched on it, one insertion could stand in for
+    the other: the picture that went was paired with the one that stayed, the one
+    that stayed was left over, and the oracle named the survivor as lost (chain-8
+    seed 7049 and six of its neighbours). What is left may be empty - two copies of
+    one file really are indistinguishable - and those are matched by count instead.
+    """
+    seen = Counter(name for run in runs for name in image_names(run))
+    return [{name for name in image_names(run) if seen[name] == 1} for run in runs]
+
+
+def pair_images(now: list[dict], then: list[dict]) -> list[int | None]:
+    """For each picture the document held, the one it has now, or None.
+
+    Two passes: a telling name first, then any name at all, so a picture keeps its
+    own counterpart where one exists and two copies of one file still pair off one
+    for one. Each survivor is claimed once.
+    """
+    telling = telling_names(now)
+    every = [image_names(run) for run in then]
+    hit: list[int | None] = [None] * len(now)
+    free = set(range(len(then)))
+    for names in (telling, [image_names(run) for run in now]):
+        for i in range(len(now)):
+            if hit[i] is not None or not names[i]:
+                continue
+            at = next((j for j in sorted(free) if names[i] & every[j]), None)
+            if at is not None:
+                hit[i] = at
+                free.discard(at)
+    return hit
+
+
 def frozen_marks(block: dict) -> Counter:
     """What a block holds that a plain paragraph cannot say, by what identifies it.
     Pictures are left out: they are matched by name, not counted (`image_names`)."""
@@ -344,6 +381,8 @@ def _tab_findings(was: dict | None, now: dict, then: dict | None, said: str,
 
     before_frozen: Counter = Counter()
     for block in now.get("blocks", []):
+        if _source_dropped(block, was, mine):
+            continue
         before_frozen += frozen_marks(block)
     mine_frozen: Counter = Counter()
     for block in (mine or {}).get("blocks", []):
@@ -371,26 +410,49 @@ def _tab_findings(was: dict | None, now: dict, then: dict | None, said: str,
     return out
 
 
+def _source_dropped(block: dict, was: dict | None, mine: dict | None) -> bool:
+    """Whether this block is one the source dropped and the reader left alone, so
+    that what it holds goes with it.
+
+    Chips are counted by value over the whole tab, and the excuse is that the file
+    still holds one of that value (`mine_frozen`) — which credits a chip the source
+    *added somewhere else* against the one it is deleting here. A source that drops
+    the block its person chip is in and adds a chip of the same address to another
+    block read as no change at all, and then as a loss when the second block turned
+    out to be one no request can write (chain-8 seed 9109, chain-4 seed 3286).
+
+    Only a block the reader left exactly as the base has it: a chip the reader put
+    in is a chip the merge keeps the block for (`doc_merge._edited`), and if it ever
+    stopped doing that this must still say so.
+    """
+    key = block.get("key")
+    if mine is None or key is None or key in {b.get("key") for b in mine.get("blocks", [])}:
+        return False
+    base_block = keyed(was).get(key)
+    return base_block is not None and frozen_marks(base_block) == frozen_marks(block) \
+        and text_of(base_block) == text_of(block)
+
+
 def _picture_findings(now: dict, mine: dict | None, then: dict | None,
                       said: str, tab) -> list[dict]:
     """The pictures the document held and does not hold any more.
 
-    One at a time and by any of their names (`image_names`), because a picture may
-    keep its object id or keep its file and need not keep both. Each survivor is
-    claimed once, so two copies of one file are two pictures. A picture the *source*
-    itself took out of the file is meant to go — but only when the file has that tab
-    at all: where it does not, the whole tab is the reader's and everything in it has
-    to survive.
+    Paired by name (`pair_images`), because a picture may keep its object id or keep
+    its file and need not keep both. A picture the *source* itself took out of the
+    file is meant to go — but only when the file has that tab at all: where it does
+    not, the whole tab is the reader's and everything in it has to survive. Whether
+    the file holds it is asked of its telling names too: a uri two pictures share
+    would have the one the source kept excusing the one it dropped.
     """
     out: list[dict] = []
-    left = images_of(then)
+    held = images_of(now)
+    hits = pair_images(held, images_of(then))
+    telling = telling_names(held)
     theirs = [image_names(run) for run in images_of(mine)] if mine is not None else None
-    for run in images_of(now):
-        names = image_names(run)
-        hit = next((i for i, other in enumerate(left) if names & image_names(other)), None)
-        if hit is not None:
-            left.pop(hit)
+    for i, run in enumerate(held):
+        if hits[i] is not None:
             continue
+        names = telling[i] or image_names(run)
         if theirs is not None and not any(names & one for one in theirs):
             continue
         if _named(said, *(value for _, value in names)):

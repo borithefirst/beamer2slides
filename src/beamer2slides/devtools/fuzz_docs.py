@@ -979,40 +979,46 @@ def describe_script(script: dict) -> str:
 # was seen, not which defect caused it: several of these show up as a lost key, and
 # the tests, not the signature, say which is which.
 KNOWN = (
-    # Five entries stood at the head of this tuple and are gone, not rewritten: each is
-    # fixed and has a test of its own in tests/test_doc_fuzz.py, and each signature was
-    # wide enough to swallow the next defect that looks like it — `block_gone`
-    # mentioning `table:` had been catching crossed keys on tables all along, and
-    # `batch_refused` saying "not one run of text" would catch any range that crosses a
-    # real table. They were `toc-block`, `toc-table-split` and `empty-delete` (all
-    # three ways of killing a sync outright — `doc_ir.STRUCTURAL` and
-    # `doc_merge.restore_undeletable`), `dropped-table` and `dropped-frozen`.
+    # Seven entries stood at the head and the foot of this tuple and are gone, not
+    # rewritten: each is fixed and has a test of its own in tests/test_doc_fuzz.py, and
+    # each signature was wide enough to swallow the next defect that looks like it —
+    # `block_gone` mentioning `table:` had been catching crossed keys on tables all
+    # along, and `frozen_gone` with no words at all would catch every way of losing a
+    # picture there will ever be. They were `toc-block`, `toc-table-split` and
+    # `empty-delete` (all three ways of killing a sync outright — `doc_ir.STRUCTURAL`
+    # and `doc_merge.restore_undeletable`), `dropped-table`, `dropped-frozen`,
+    # `crossed-frozen`, whose last 9 findings were the oracle's own — two pictures a
+    # reader pasted from one url share a name that says which picture it is, so the
+    # one that went was paired with the one that stayed and the survivor was named as
+    # lost (`doc_loss_oracle.telling_names`), 22 -> 13 -> 9 -> 0 — and
+    # `table-in-a-table`, which is `doc_merge.refuse_nowhere`: between two tables the
+    # document has no paragraph to write in, and a block written there anyway lands
+    # inside the last cell of the table before it.
     {"id": "lost-key",
      "kind": "identity_lost", "has": "",
-     "why": "a block keeps its words and loses the key the file gave it. Four causes "
-            "are fixed and the count is down by four fifths: `inherit_keys` "
+     "why": "a block keeps its words and loses the key the file gave it. Five causes "
+            "are fixed and the count is down from 34 to 2: `inherit_keys` "
             "reassigning a key the file itself asserts, `settle` keying every tab "
             "before those tabs are adopted (`doc_merge.settle_keys`), a delete "
             "carrying the style of the block above onto the survivor (the settle "
             "writes the named style back), and a row delete taking with it the first "
             "cell a table is anchored in (`structure` gives a regrid an `after`, so "
-            "`anchor_tables` finds it again). A heading turned paragraph keeping its "
-            "level is the one left, and what else reaches this signature is not yet "
-            "known — it is the widest of these, so anything that renames a block "
-            "lands here"},
-    {"id": "table-in-a-table",
-     "kind": "block_gone", "has": "a table the reader added",
-     "why": "a table the source adds in front of another table is written at the "
-            "anchor's index less one — the rule that lets a *paragraph* borrow the "
-            "mark in front of a table — and when the block before it is a table too, "
-            "that index is inside its last cell: the new table is built inside the old "
-            "one, the words never reach it, `anchor_tables` cannot find it, and each "
-            "re-plan builds another. A table of the document's standing after it goes "
-            "with it (chain-8 seed 1031; `tools/fuzz_docs.py` shape `two_tables`). "
-            "Whether a real document can have two tables touching is not measured here "
-            "— the editor keeps an undeletable paragraph between them, which is the "
-            "`between_tables` shape, and there the borrowed mark is that paragraph's "
-            "and the arithmetic is right"},
+            "`anchor_tables` finds it again), and a write changing a block's *shape* "
+            "— a delete hands the block after it the shape of the one that went — "
+            "so that `adopt_keys`, matching shape and words together, could never "
+            "adopt the very blocks a write mangles (`doc_merge._adopt_by_words`). "
+            "The 2 that are left have a cause and no fix yet: an empty paragraph is "
+            "all mark, so its named range *is* its mark, and a block written in "
+            "front of a table goes in as \"\\ntext\" at the mark of the paragraph "
+            "before it — which Docs hands to the new paragraph, a range being pushed "
+            "along by an insert at its own first index. The empty paragraph's key "
+            "rides onto the block that was written and the moved block's key is "
+            "nowhere (chain-8 seed 7029, shrunk to `ends_on_table` + two "
+            "`add_table`s + a `move`). There is no index that both appends after an "
+            "empty paragraph and leaves its range alone, so the write is right and "
+            "the read has to be read — and reading it by taking the key off the "
+            "block whose words contradict the plan was tried, twice, and cost that "
+            "round its convergence"},
     {"id": "crossed-delete",
      "kind": "block_gone", "has": "though the file still names it",
      "why": "two blocks end up under one key and none under the other, so the merge "
@@ -1030,18 +1036,6 @@ KNOWN = (
             "first writable run: every mark the reader put on a word inside it goes, "
             "while the report calls the block merged. A move alone keeps them (the "
             "runs are then the document's own), so it takes both to see it"},
-    {"id": "crossed-frozen",
-     "kind": "frozen_gone", "has": "",
-     "why": "the sync writes the file's words over a block that was holding a picture "
-            "or a chip, and it goes. `inherit_keys` giving one block's key to another "
-            "was the cause found first — two blocks under one key, none under the "
-            "other, two wordless blocks being enough since both are keyed "
-            "`paragraph:empty` (chain-8 seed 1147, where the reader's person chip went "
-            "and a picture with it) — and fixing it took this from 22 findings to 13 "
-            "in 200 chain-8 rounds. What the 13 are is not yet known: the signature is "
-            "any frozen run gone at all, so every other way of losing a chip — "
-            "including any return of the `dropped-frozen` that used to stand above — "
-            "is filed here too"},
 )
 
 

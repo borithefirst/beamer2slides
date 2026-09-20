@@ -1354,6 +1354,48 @@ def _walk(value, node: str, path: str, found: dict) -> None:
         entry["count"] += 1
 
 
+def unmodelled_in(element: dict) -> dict[str, dict]:
+    """`unmodelled` for one structural element: what a rewrite of *this block* drops.
+
+    The document-wide answer is a count with no address, which is the right thing to
+    print once and the wrong thing to act on. A property no node of `_NODES` names
+    survives an ordinary edit — a request names the fields it writes — and goes when
+    the block holding it is written again from nothing, so the question a person
+    actually has is not "does this document carry borders" but "is the paragraph I am
+    about to rewrite the one with the border on it".
+    """
+    found: dict[str, dict] = {}
+    _walk(element, "structural", "structural", found)
+    return dict(sorted(found.items()))
+
+
+def unread_blocks(doc: dict) -> list[dict]:
+    """Every block of every tab that carries something `unmodelled_in` names.
+
+    The most heavily laden first, each with its tab, its span in that tab, its first
+    words and what it carries. It is a *risk*, not a loss: a block nobody rewrites
+    keeps all of it.
+    """
+    out: list[dict] = []
+    for tab in tabs_of(doc) or [None]:
+        tab_id = tab.get("tabProperties", {}).get("tabId") if tab else None
+        body, _ = _body_of(doc, tab_id)
+        for element in body:
+            found = unmodelled_in(element)
+            block = _block_of(element, {}, {}, {})
+            # A section break is not a block: no rewrite can reach it, and naming one
+            # for it would send a person to a paragraph that is not the one.
+            if not found or block is None:
+                continue
+            out.append({"tab": tab_id,
+                        "span": [element.get("startIndex", 0), element.get("endIndex", 0)],
+                        "kind": block["kind"],
+                        "words": _first_words(block).strip(),
+                        "unread": found})
+    out.sort(key=lambda e: (-sum(v["count"] for v in e["unread"].values()), e["span"]))
+    return out
+
+
 def _nothing(value) -> bool:
     """A value that says nothing at all: Docs leaves plenty of empty structs about."""
     return value is None or value == {} or value == [] or value is False

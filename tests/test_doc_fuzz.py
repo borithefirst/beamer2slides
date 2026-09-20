@@ -177,6 +177,55 @@ def test_the_oracle_lets_a_picture_the_settle_named_alone():
     assert not oracle.failures(oracle.check(settled, settled, after, NOTHING))
 
 
+def test_the_oracle_names_the_right_one_of_two_pictures_from_one_url():
+    """A reader who pastes the same image twice gives two pictures one `uri`, and
+    that uri then says nothing about which is which. Matched on it, the one that went
+    paired with the one that stayed and the survivor was left over and named as lost:
+    seven of the nine findings a chain-8 run had left were that, each pointing at a
+    picture still standing in the document (`oracle.telling_names`)."""
+    def shot(oid, **more):
+        return {"frozen": True, "chip": "image", "text": "", "value": oid,
+                "uri": "https://example.invalid/reader.png"} | more
+
+    first, second = shot("kix.i4", sha="sha-i4"), shot("kix.i5", sha="sha-i5")
+    base = _ir(_p("k1", "look "), _p("k2", "and "))
+    before = _ir({"key": "k1", "kind": "paragraph", "runs": [{"text": "look "}, first]},
+                 {"key": "k2", "kind": "paragraph", "runs": [{"text": "and "}, second]})
+    after = _ir(_p("k1", "look "),
+                {"key": "k2", "kind": "paragraph", "runs": [{"text": "and "}, second]})
+    found = oracle.failures(oracle.check(base, before, after, NOTHING))
+    assert [one["detail"] for one in found if "image" in one["detail"]] == [
+        "the image 'sha-i4' the document held is not in it any more"]
+    # And the excuse asks the same question: a file that holds `second` and not
+    # `first` is a source that took `first` out, and their shared uri must not make
+    # the one it kept answer for the one it dropped.
+    ours = _ir(_p("k1", "look "),
+               {"key": "k2", "kind": "paragraph", "runs": [{"text": "and "}, second]})
+    found = oracle.failures(oracle.check(base, before, after, NOTHING, ours))
+    assert not [one for one in found if "image" in one["detail"]]
+
+
+def test_the_oracle_lets_a_chip_go_with_the_block_the_source_dropped():
+    """Chips are counted by value over the whole tab, and the excuse is that the file
+    still holds one of that value — which credits a chip the source added *somewhere
+    else* against the one it is deleting here. A source that drops the block its
+    person chip is in and adds a chip of the same address to another block read as no
+    change at all, and then as a loss when the second block turned out to be one no
+    request can write (`_source_dropped`; chain-8 seed 9109)."""
+    chip = {"frozen": True, "chip": "person", "text": "Grace", "value": "grace@example.com"}
+    held = {"key": "k1", "kind": "paragraph", "runs": [{"text": "ask "}, chip]}
+    base = _ir(held, _p("k2", "status"))
+    after = _ir(_p("k2", "status"))
+    # The file has dropped k1 and put a chip of the same address into k2.
+    ours = _ir({"key": "k2", "kind": "paragraph", "runs": [{"text": "status"}, chip]})
+    assert not oracle.failures(oracle.check(base, base, after, NOTHING, ours))
+    # But a chip the reader put there is not the source's to drop.
+    theirs = _ir({"key": "k1", "kind": "paragraph",
+                  "runs": [{"text": "ask "}, chip, {"text": " today"}]},
+                 _p("k2", "status"))
+    assert "frozen_gone" in _kinds(oracle.check(base, theirs, after, NOTHING, ours))
+
+
 def test_the_oracle_sees_a_cell_the_reader_typed_in_overwritten():
     def table(second):
         return {"key": "t1", "kind": "table",
@@ -484,17 +533,45 @@ def test_a_block_the_source_reworded_and_moved_keeps_the_readers_styling():
     assert not oracle.failures(oracle.check(was, before, base, report, mine))
 
 
-@pytest.mark.xfail(strict=True, reason="fuzz_docs.KNOWN 'table-in-a-table': a table the "
-                   "source adds in front of another table is written at the anchor's "
-                   "index less one — the rule that lets a paragraph borrow the mark in "
-                   "front of a table — which is inside the table before it")
-def test_a_table_added_in_front_of_a_table_is_not_written_inside_the_one_before_it():
+def test_a_table_added_between_two_tables_is_refused_and_said_out_loud():
+    """Was `table-in-a-table`. A block in front of a table is written at the anchor's
+    index less one — the paragraph mark it borrows — and when the block before is a
+    table too, that index is inside its last cell: the new table was built inside the
+    old one, the words never reached it, `anchor_tables` could not find it and every
+    re-plan built another. There is nowhere to write it, so `_new_table_requests`
+    asks for nothing and the report says why. Docs keeps a paragraph between two
+    tables anyway (the `between_tables` shape), where the borrowed mark is that
+    paragraph's and the table goes in."""
     world, ours, base = _push("two_tables")
     at = [i for i, b in enumerate(ours["blocks"]) if b.get("key") == "table:c"][0]
     ours["blocks"].insert(at, _table([["h1", "h2"], ["willow", "x"]]))
     report, ours, base = fuzz_docs.sync_once(world, ours, base)
     texts = [oracle.text_of(b) for b in base["blocks"]]
-    assert "h1 h2 willow x" in texts, f"the new table was written into {texts}"
+    assert not any("willow" in one for one in texts), \
+        f"the new table was written into {texts}"
+    assert any("no paragraph to write in" in note for note in report["notes"]), report
+
+    world, ours, base = _push("between_tables")
+    at = [i for i, b in enumerate(ours["blocks"]) if b.get("key") == "table:c"][0]
+    ours["blocks"].insert(at, _table([["h1", "h2"], ["willow", "x"]]))
+    for _ in range(2):                       # a grid is built on one pass, filled on the next
+        report, ours, base = fuzz_docs.sync_once(world, ours, base)
+    assert "h1 h2 willow x" in [oracle.text_of(b) for b in base["blocks"]]
+
+
+def test_a_paragraph_the_source_moves_between_two_tables_is_left_where_it_is():
+    """The same arithmetic, and the same nowhere, for an ordinary block — but a move
+    is a delete and a write, so this one was deleted from its old place and written
+    into the last cell of the table before its new one: the paragraph was destroyed
+    by a source op no reader had touched (offline chain-8 seed 7008, shrunk). It
+    stays where the document has it and the report says why (`refuse_nowhere`)."""
+    world, ours, base = _push("two_tables")
+    at = [i for i, b in enumerate(ours["blocks"]) if b.get("key") == "table:c"][0]
+    ours["blocks"].insert(at, ours["blocks"].pop())
+    report, ours, base = fuzz_docs.sync_once(world, ours, base)
+    assert _keys(base) == ["paragraph:before-both", "table:a", "table:c",
+                           "paragraph:after-both"]
+    assert any("no paragraph to write in" in note for note in report["notes"]), report
 
 
 def test_a_block_in_a_second_tab_keeps_its_key_when_the_source_moves_and_rewords_it():
