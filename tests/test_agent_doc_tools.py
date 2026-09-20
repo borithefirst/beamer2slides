@@ -86,12 +86,23 @@ def comment(author: str, about: str, says: str) -> dict:
 class _Drive(_Storage):
     """The base storage and the backup, plus the one thing no merge can see."""
 
-    def __init__(self, document="doc-1", comments=()):
+    def __init__(self, document="doc-1", comments=(), world=None):
         super().__init__(document)
-        self.open_comments = list(comments)
+        self.open_comments, self.world = list(comments), world
 
     def comments(self):
         return _Comments(self.open_comments)
+
+    def update(self, fileId, fields="", body=None, media_body=None):
+        inner = super().update(fileId, fields, body, media_body)
+
+        def run():
+            answer = inner.execute()
+            # Drive and Docs are two views of one document: a rename shows in both.
+            if self.world is not None and body and "name" in body and fileId == self.document:
+                self.world.title = body["name"]
+            return answer
+        return _Reply(run)
 
 
 def _pair(tmp_path, monkeypatch, blocks=BLOCKS, comments=(), base=True):
@@ -107,7 +118,7 @@ def _pair(tmp_path, monkeypatch, blocks=BLOCKS, comments=(), base=True):
     if base:
         docs.save_base(path, json.loads(json.dumps(ir)) | {"document": "doc-1",
                                                            "generation": 1})
-    drive, service = _Drive(comments=comments), _Docs(world)
+    drive, service = _Drive(comments=comments, world=world), _Docs(world)
     monkeypatch.setattr(docs, "docs_service", lambda creds=None: service)
     monkeypatch.setattr(docs, "drive_service", lambda creds=None: drive)
     return world, path, drive, service
@@ -405,6 +416,28 @@ def test_a_sync_writes_the_source_edit_and_then_has_nothing_left_to_write(tmp_pa
     again = doc_tools.doc_sync(ctx, file="doc.html")
     assert again.ok and again.data["requests"] == 0 and not again.data["written"]
     assert again.data["base"] == "drive"
+
+
+def test_a_document_renamed_in_the_file_is_renamed_in_drive_and_stays_renamed(
+        tmp_path, monkeypatch):
+    """A Google Doc's title is its name in Drive and no `batchUpdate` request writes
+    one, so the file's `<title>` was a dead letter: the sync dropped the rename and
+    the settle then took it back out of the file, which reads the old name. It is the
+    one thing the merge writes outside a batch."""
+    world, path, drive, service = _pair(tmp_path, monkeypatch)
+    _reword(path, "<title>The report</title>", "<title>The quarterly report</title>")
+    ctx = _ctx(tmp_path)
+
+    result = doc_tools.doc_sync(ctx, file="doc.html")
+    assert result.ok, result.summary
+    assert drive.names == ["The quarterly report"] and world.title == "The quarterly report"
+    report = (tmp_path / ".b2s" / "doc.sync-report.md").read_text(encoding="utf-8")
+    assert "renamed 'The quarterly report'" in report
+    assert "<title>The quarterly report</title>" in path.read_text(encoding="utf-8")
+
+    again = doc_tools.doc_sync(ctx, file="doc.html")
+    assert again.ok and again.data["requests"] == 0
+    assert drive.names == ["The quarterly report"]          # and never renamed twice
 
 
 def test_a_dry_run_plans_the_same_edit_and_sends_nothing(tmp_path, monkeypatch):

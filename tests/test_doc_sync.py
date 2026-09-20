@@ -98,7 +98,8 @@ class _Storage:
     def __init__(self, document="doc-1"):
         self.document, self.props, self.blobs = document, {}, {}
         self.created, self.exports, self.export_error = [], [], None
-        self.refuse_create = False
+        self.refuse_create = self.refuse_rename = False
+        self.names: list[str] = []
         self.n = 0
 
     def files(self):
@@ -138,6 +139,10 @@ class _Storage:
                 self.blobs[fileId] = media_body._fd.getvalue()
             if body and body.get("appProperties"):
                 self.props.update(body["appProperties"])
+            if body and "name" in body:
+                if self.refuse_rename:
+                    raise _http(403)
+                self.names.append(body["name"])
             return {"id": fileId}
         return _Reply(run)
 
@@ -258,6 +263,50 @@ def test_a_drive_write_that_fails_keeps_the_cache_and_says_why(tmp_path):
     why = doc_sync.store_base(path, _base(0, "p:one"), drive, "doc-1")
     assert why and "HttpError" in why
     assert doc_sync.load_local(path, "doc-1")["generation"] == 1
+
+
+def test_the_document_is_renamed_through_drive_and_a_refusal_says_so():
+    """A Google Doc's title is its Drive name: no `batchUpdate` request writes one,
+    so the file's `<title>` reaches the document only this way — and a rename Drive
+    refuses fails nothing, as a base it refuses does not."""
+    drive, problems = _Storage(), []
+    assert doc_sync.rename_document(drive, "doc-1", "A better name", problems) == \
+        "A better name"
+    assert drive.names == ["A better name"] and problems == []
+    drive.refuse_rename = True
+    assert doc_sync.rename_document(drive, "doc-1", "Nope", problems) is None
+    assert "could not be renamed 'Nope'" in problems[0]
+    assert "keeps the name it has" in problems[0]
+
+
+class _OneRead:
+    """`documents.get` of a document with nothing in it but its name."""
+
+    def __init__(self, title):
+        self.title = title
+
+    def documents(self):
+        return self
+
+    def get(self, documentId, includeTabsContent=False):
+        return _Reply(lambda: {"title": self.title, "revisionId": "r1",
+                               "body": {"content": []}})
+
+
+def test_a_rename_drive_has_made_is_what_the_file_and_the_base_say(tmp_path):
+    """`documents.get` need not have caught up with a Drive rename, and if the settle
+    took the name it reads, the file would go straight back to the old one — the
+    rename undone the moment it was made, and nothing to try again next time, since
+    the base would agree with the file."""
+    path = tmp_path / "doc.html"
+    live = doc_sync.settle(_OneRead("The old name"), "doc-1", path,
+                           {"blocks": []}, {"blocks": []}, renamed="A better name")
+    assert live["title"] == "A better name"
+    assert "<title>A better name</title>" in path.read_text(encoding="utf-8")
+    assert doc_sync.load_local(path, "doc-1")["title"] == "A better name"
+    # Without one, the settle says whatever the read said.
+    doc_sync.settle(_OneRead("The old name"), "doc-1", path, {"blocks": []}, {"blocks": []})
+    assert "<title>The old name</title>" in path.read_text(encoding="utf-8")
 
 
 # ---------------------------------------------------------------- --assume-base

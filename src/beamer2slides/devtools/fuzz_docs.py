@@ -215,6 +215,8 @@ def sync_once(world: doc_world.World, ours: dict, base: dict,
     tabs = doc_merge.pair_tabs(base, ours, theirs)
     if tabs["requests"]:
         _send(world, tabs["requests"], seen)
+    if tabs["rename"]:
+        world.title = tabs["rename"]   # Drive's, not a request (`doc_sync.rename_document`)
     pairs = list(tabs["pairs"])
     known = {p.get("tab") for p in doc_ir.parts(theirs)} - {None}
     made: dict = {}

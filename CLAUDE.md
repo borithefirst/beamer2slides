@@ -1283,7 +1283,19 @@ keys, named ranges), `doc_merge.py` (pure planning), `doc_sync.py` (the commands
   a tab the document left as the base has it). A new tab's lone empty paragraph and the
   undeletable one in front of a body's first table are hidden like the trailer (`trailer`,
   `lead`) and written into; nothing can be inserted at a table's own index (measured), so a
-  block in front of a table goes in as `\ntext` at the previous paragraph's mark.
+  block in front of a table goes in as `\ntext` at the previous paragraph's mark. The **order
+  of the tabs is the document's** - a tab cannot be written from nothing, so no request moves
+  one - and a source reorder is reported (`doc_merge.tab_order`) rather than dropped and then
+  taken out of the file by the settle; the first tab's own title is still not carried.
+- The **document's name** is the file's `<title>`, and a Google Doc's title *is* its name in
+  Drive: no `batchUpdate` request writes one, so `push` named it at birth and nothing said it
+  again. `doc_merge.document_title` merges it three ways (the file alone renamed it -> written;
+  the document alone -> the file follows at the settle; both -> the document's, with a note; a
+  base too old to hold a title -> the document's, saying why) and `doc_sync.rename_document`
+  writes it through `drive.files.update` - the plan's `rename`, not a request; a refusal fails
+  nothing and is said. The file and the base then say the name *written*, not the one the next
+  read gives (`settle(renamed=...)`): `documents.get` need not have caught up with Drive, and
+  taking its word would undo the rename with the base agreeing, so nothing tried again.
 - What the file cannot carry is reported too (`doc_sync.limits`): a picture file that is not
   there. And **what the dialect does not model is named** (`doc_ir.unmodelled`, `_NODES` = the
   reader's own map of `documents.get`): the convergence check is measured on the IR, so it

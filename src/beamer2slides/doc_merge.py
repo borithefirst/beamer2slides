@@ -2607,12 +2607,14 @@ def pair_tabs(base: dict, ours: dict, theirs: dict) -> dict:
 
     `pairs` is `(tab id, our tab, base tab)` for every tab past the first that is
     written; `requests` the tab edits that go before any text, `applied` and `notes`
-    what the report says about them.
+    what the report says about them, and `rename` the document's new name, which is
+    no request at all (`document_title`).
     """
     live = {p["tab"]: p for p in theirs.get("tabs", []) if p.get("tab")}
     was = {p["tab"]: p for p in base.get("tabs", []) if p.get("tab")}
     ours_ids = {p.get("tab") for p in ours.get("tabs", [])}
-    out: dict = {"pairs": [], "create": [], "requests": [], "applied": [], "notes": []}
+    out: dict = {"pairs": [], "create": [], "requests": [], "applied": [], "notes": [],
+                 "rename": None}
     taken: set = set()
     for part in ours.get("tabs", []):
         tab, name = part.get("tab"), part.get("title", "")
@@ -2655,7 +2657,75 @@ def pair_tabs(base: dict, ours: dict, theirs: dict) -> dict:
         else:
             out["requests"].append({"deleteTab": {"tabId": tab}})
             out["applied"].append(f"tab {name!r} deleted")
+    document_title(base, ours, theirs, out)
+    tab_order(base, ours, theirs, out)
     return out
+
+
+def document_title(base: dict, ours: dict, theirs: dict, out: dict) -> None:
+    """The document's name, which the file says in its `<title>`.
+
+    A Google Doc's title *is* its name in Drive, and no `batchUpdate` request writes
+    one — `push` gives the document the file's title at birth and nothing said it
+    again, so a source that renamed the document had the rename dropped and then
+    taken back out of the file by the settle, which reads the old name back. The
+    three-way rule is the one everything else follows: renamed in the file alone and
+    it is written (through Drive, `doc_sync.rename_document`, which is why this is
+    `rename` and not a request); renamed in the document alone and the file simply
+    follows at the settle; renamed on both sides and the document's name stands,
+    with a note.
+
+    A base with no title at all — one an older version of this tool wrote — cannot
+    say who moved, so the document's name stands and the note says that too. No base
+    at all is `push` making the document out of this very file: it is named from the
+    file's title there, and there is nothing to say.
+    """
+    mine, now = ours.get("title"), theirs.get("title")
+    was = base.get("title")
+    if not mine or mine == now or mine == was:
+        return
+    if was is None and not (base.get("blocks") or base.get("tabs")):
+        return
+    if was is None:
+        out["notes"].append(f"the file calls the document {mine!r} and the document calls "
+                            f"itself {now!r}; the base does not say which of them renamed "
+                            f"it, so the document's name is kept")
+    elif now != was:
+        out["notes"].append(f"the document was renamed on both sides — it keeps {now!r}, "
+                            f"not {mine!r}")
+    else:
+        out["rename"] = mine
+        out["applied"].append(f"the document renamed {mine!r} (in Drive: no request "
+                              f"writes a document's title)")
+
+
+def tab_order(base: dict, ours: dict, theirs: dict, out: dict) -> None:
+    """A tab the source moved, which nothing can write.
+
+    Blocks the source moved go back where the file has them, because a move is a
+    delete and a write — and a tab cannot be written from nothing (everything in it
+    would have to be made again, chips and equations and all), so the order of the
+    tabs is the document's, whole. Said out loud rather than dropped: the settle
+    rewrites the file in the document's order, so a reorder in the file disappears
+    twice over.
+
+    Only what the *source* moved: where the file still has the base's order, the
+    reader moved a tab and the file is simply following it.
+    """
+    def order(ir, known):
+        return [p["tab"] for p in ir.get("tabs", []) if p.get("tab") in known]
+
+    known = ({p.get("tab") for p in ours.get("tabs", [])}
+             & {p.get("tab") for p in theirs.get("tabs", [])}
+             & {p.get("tab") for p in base.get("tabs", [])})
+    mine, now = order(ours, known), order(theirs, known)
+    if len(mine) < 2 or mine == now or mine == order(base, known):
+        return
+    titles = {p["tab"]: p.get("title", "") for p in theirs.get("tabs", []) if p.get("tab")}
+    out["notes"].append(
+        "the source puts the tabs in the order " + ", ".join(repr(titles.get(t, t))
+                                                             for t in mine)
+        + "; no request moves a tab, so the document's order stands")
 
 
 def add_tab_request(part: dict, parents: dict) -> dict:

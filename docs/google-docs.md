@@ -461,8 +461,31 @@ like this:
   in its body: `insertTable` there leaves an empty paragraph in front of the table that no
   request can delete (measured). Both are hidden from the IR the way the trailer after a
   final table is (`doc_ir._hide_trailer`: `trailer`, and `lead` in front of a first table),
-  and the first block written there goes *into* them. The order of the tabs is the
-  document's; a source that reorders its sections does not reorder the tabs.
+  and the first block written there goes *into* them.
+- **The order of the tabs is the document's.** Blocks the source moved go back where the
+  file has them, because a move is a delete and a write — and a tab cannot be written
+  from nothing: everything in it would have to be made again, chips and equations and
+  all. So a source that reorders its sections does not reorder the tabs, and since the
+  settle then rewrites the file in the document's order, a reorder in the file used to
+  disappear twice over. `doc_merge.tab_order` says it instead, and only where the *source*
+  moved one: where the file still has the base's order, it is the reader who moved a tab
+  and the file is simply following. The first tab's own title is still not carried at all
+  — the file has nowhere to say it, since its `<title>` is the document's name.
+
+**The document's name.** A Google Doc's title *is* its name in Drive: `documents.get`
+reports it and no `batchUpdate` request writes one. `push` names the document from the
+file's `<title>` at birth and nothing said it again, so a source that renamed the document
+had the rename dropped and then taken back out of the file by the settle, which reads the
+old name back — the same double disappearance. `doc_merge.document_title` merges it three
+ways like everything else (renamed in the file alone → written; in the document alone →
+the file follows at the settle; on both sides → the document's name stands, with a note;
+a base too old to hold a title → the document's name, and the note says why), and
+`doc_sync.rename_document` writes it through `drive.files.update`, which is why the plan
+carries it as `rename` and not as a request. A rename Drive refuses fails nothing and is
+said out loud, as a base it refuses is. The name written — not the one the next read
+gives — is what the file and the base then say (`settle(renamed=…)`): `documents.get`
+need not have caught up with Drive, and taking the read's word for it would undo the
+rename the moment it was made, with the base agreeing so nothing tried again.
 
 ## The round trip does not close on its own
 
@@ -905,6 +928,7 @@ Each of these is reported in the sync report, never guessed at:
 | a source restyle of the very words the document rewrote | the marks follow the words (`doc_merge._restyled_words`): every word of the merged text takes the document's styling, and the file's where the file has that word too — so a word the source bolded is bold while the reader rewrites the rest of the paragraph. Only a restyled word the document replaced has nothing to carry the marks: its new words keep the document's styling, and the report says so |
 | a **move of a block with an equation-like chip in it, or of a table the document changed** | a move is a delete and a write, and those cannot be written from nothing — the block stays where the document has it |
 | a **reorder both sides made** | the document's order stands whole; the file's is reported |
+| a **tab the source moved** | a tab cannot be written from nothing, so no request moves one; the document's order of tabs stands and the file's is reported (`doc_merge.tab_order`) |
 | a picture's **size or alt text** the source changed | no request in the v1 API changes an embedded object. `insertInlineImage` carries an `objectSize`, so a resize is written when the picture is inserted again anyway (one the source regenerated) and not when the run the plan writes is the document's copy (one merely moved); an alt text is never written. The settle then puts the document's values back into the file, so the edit goes twice over — `doc_merge.unwritten_pictures` names it, and says that a picture written into the file again *without* its `data-object` goes in at the size asked for |
 
 Everything else is written: text on both sides, a block's kind, level and alignment,
@@ -1504,7 +1528,9 @@ clean under `--strict`, and `KNOWN` still empty.
    is still unmeasured there: dragging a selection to a new place, "paste without
    formatting", and a second person editing concurrently.
 4. **Tabs** — retired, see "Document tabs" above. Still open: the order of the tabs is
-   never written (the document's stands), and the first tab's title is not carried.
+   never written (the document's stands, and a source reorder is reported now rather
+   than dropped), and the first tab's title is not carried — the file's `<title>` is the
+   document's name, which *is* merged and written, through Drive.
 
 ## Alternatives considered
 
