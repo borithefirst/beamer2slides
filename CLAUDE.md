@@ -832,6 +832,24 @@ that chain does not come back). Measured over the corpus: 10-80% of elements tie
 (gdg24 427/563, hebrew-lesson 25/244), the spread being how far `classify` regroups the person's boxes
 into one element. What no element draws is `left_alone` and never touched; the master and the layouts
 are never touched at all (`master_background = None`: the deck's look is the person's).
+**Not every miss is a miss**: a converted element with no object of the slide behind it may be one
+the deck's *layout or master* draws, which `adopt` recovered as the source's theme and the source
+therefore draws again on every slide that inherits it - the object exists, one level up, where
+nothing here may write. `explained_by_layout` asks that of what `pair_elements` left over (the
+slide's own object wins first) and without the margin, which decides *which* object to write to and
+has nothing to do when the answer is none; `same_drawing` demands the same size, since
+`identity._geometry` also scores by how close two centres are and a full-bleed layout picture shares
+its centre with everything a person put in the middle of the slide (sc-dark-modern's 35 pt icon
+scored 0.45 against it) - except for words, which the converter reads back at their ink, so the same
+words inside the template's own box are the same drawing however much room they have (firebase-jam's
+`Thank you!`: a 296 pt placeholder, 109 pt of ink). Measured over the 12 corpus decks whose IR
+carries anything inherited: **181 of 1,844 misses**, the size rule taking 28 false positives off
+that (solidity-survey 74 of 107, hebrew-lesson 39 of 215, cs161-net 31, instagram 3 of 3). Counted
+apart in the base (`adopt.from_layout`, the element carrying `from_layout` for the merge to read)
+and reported by `merge.plan_unit` as `field: inherited`, "kept (the deck's layout draws this, not
+the slide)". Same decision, different sentence, and the sentence is the point: "change them in the
+deck itself" sends a person to look on the slide for a footer that is not on the slide, while the
+layout warning names the door it is behind (Slide > Edit theme).
 Then `Sync.check_plan` runs between planning and any write and **refuses** four things
 (`adopt_sync.problems` / `refusal_message`, every message asserted verbatim in `tests/test_adopt_sync.py`):
 a unit whose base members include an **unpaired** element (writing it puts a second object beside the

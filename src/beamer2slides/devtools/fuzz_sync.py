@@ -712,7 +712,8 @@ def _sync_step(seed: int, step: int, doc: dict, base: dict, live: dict, tmp: Pat
     # What this sync left alone because it is a person's deck and nothing here may write there
     # (`merge.plan_unit`'s unpaired unit, `plan_merge`'s slide no frame accounts for). Counted for
     # the same reason as `refused` below: it is how one sees the campaign's own reach.
-    held = (["element"] * sum(1 for p in mplan["slides"] for u in p.get("units") or [] if u.get("unpaired"))
+    held = (["element"] * sum(1 for p in mplan["slides"] for u in p.get("units") or []
+                              if u.get("unpaired") or u.get("inherited"))
             + ["slide"] * sum(1 for k in mplan["report"]["slides"]["kept"] if k["reason"] == ["the deck's own"]))
     # `--backup auto` keeps a .pptx of the deck before sync's first write, so the campaign asks what
     # the other refusals do; the no-way-back one has its own test (tests/test_adopt_sync.py).

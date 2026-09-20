@@ -1368,6 +1368,36 @@ refusal, not a loss: an unpaired element is one no sync will ever write, and the
 of it is what stays. Which is why the refusal below is per element and not per sync: on a deck like
 that, one that stopped at the first unpaired element would never write anything at all.
 
+**Not every miss is a miss.** A converted element with no object of the slide behind it may still be
+one the deck's **layout or master** draws: `adopt` recovers those as a beamer theme
+(`adopt_theme.py`, a background template per layout), so the source draws the footer, the ornament
+and the logo again on every slide that inherits them, and the conversion has an element for each
+with nothing on the slide to pair with — for ever, since there never was anything there. That is not
+a pairing that failed. The object exists, one level up, where nothing here may write.
+`adopt_sync.explained_by_layout` asks it of what `pair_elements` left over (the slide's own object
+always wins first) and without the margin, which is there to decide *which* object to write to and
+has no work to do when the answer is none. Two boxes are the same drawing only if they are the same
+*size* (`same_drawing`): `identity._geometry` scores a pair by the better of their overlap and how
+close their centres are, which is right for two readings of one element and wrong here — a layout
+that draws a picture over the whole slide shares its centre with everything a person put in the
+middle of it, and a 35 pt icon of sc-dark-modern's scored 0.45 against the background. Words are the
+exception, the converter reading them back at the ink they cover: firebase-jam's `Thank you!` is a
+296 pt placeholder that comes back 109 pt wide, so the same words inside the template's own box are
+the same drawing whatever the room around them.
+
+Measured over the corpus (the 12 decks whose deck IR carries anything inherited at all): **181 of
+1,844 misses** are the deck's own theme drawn again — solidity-survey 74 of 107, hebrew-lesson 39 of
+215, cs161-net 31 of 112, cs161-tls 14, apps-edu-zh 11 of 40, creandum-board 5, instagram 3 of 3.
+The size rule takes 28 false positives off that (209 → 181): every one of sc-dark-modern's 5, and 18
+of hebrew-lesson's, which were block panels scored against a hairline rule through their middle.
+They are counted apart in the base (`adopt.from_layout`, not `adopt.unpaired`), the element carries
+`from_layout` so the merge can tell one from the other, and `merge.plan_unit` reports it as
+`field: inherited`, "kept (the deck's layout draws this, not the slide)". The decision is the same —
+nothing is written either way — and the difference is the sentence a person reads: "could not be
+tied to any object of this deck; change them in the deck itself" sends them to look on the slide for
+a footer that is not on the slide. It is on the layout, and Slides has a door for that
+(Slide > Edit theme), which is what the warning now says.
+
 **The refusals** (`adopt_sync.problems`, one message, `--force-adopted-deck` to go ahead anyway):
 
 - **no way back.** `--backup auto` (the default) exports the deck as .pptx before sync's first
@@ -1425,6 +1455,10 @@ base rebased after it let the *second* sync duplicate the person's box.)
   so in the report. Change it in the deck, not in the source, or move the boxes apart so the
   pairing can tell them from each other. The base lists every one of them under `adopt.unpaired`,
   with the reason, and `adopt` prints the count.
+- An element the deck's **layout** draws is refused for a different reason and has a different
+  answer: change it on the layout, in Slides, under Slide > Edit theme. Writing it would put a copy
+  on this one slide over a thing every other slide still shows. The base lists those under
+  `adopt.from_layout` and `adopt` prints the count beside the other.
 - The person's own objects that the source does not draw at all are never touched, and never will
   be: they are reported as user objects, as in any deck.
 - Comments, sharing and history stay because the deck stays — but a sync that rewrites the passage a

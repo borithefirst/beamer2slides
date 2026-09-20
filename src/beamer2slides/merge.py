@@ -648,10 +648,17 @@ def plan_unit(skey: str, ukey: str, base_members: list[dict] | None, ours_member
         # wrote nothing at all because one element of one slide could not be paired. One element
         # nothing can be written to freezes that element, not the talk - `hold_slide`'s rule one
         # dimension down. `adopt_sync.problems` still stands between a plan and a write.
-        report["conflicts"].append(conflict_entry(res, skey, ukey, "unpaired", "element", sorted(src),
-                                                  sorted(deck) or ["the deck's own"],
-                                                  "kept (tied to no object of the deck)")[0])
-        return {**action, "action": "keep", "unpaired": blind}
+        # Two kinds of nothing to write to, and they are not the same thing to the person reading
+        # this. An element the deck's *layout* draws (`adopt_sync.explained_by_layout`) has an
+        # object; it stands one level up, under every other slide that inherits it, and the way to
+        # change it is Slide > Edit theme - not a pairing that failed, and not a thing to go
+        # looking for on the slide.
+        drawn = all(m.get("from_layout") for m in base_members if not m.get("objects"))
+        field, why = ("inherited", "kept (the deck's layout draws this, not the slide)") if drawn else \
+            ("unpaired", "kept (tied to no object of the deck)")
+        report["conflicts"].append(conflict_entry(res, skey, ukey, field, "element", sorted(src),
+                                                  sorted(deck) or ["the deck's own"], why)[0])
+        return {**action, "action": "keep", **({"inherited": blind} if drawn else {"unpaired": blind})}
     if not edited:
         report["applied"].append({**where, "fields": sorted(src)})
         if "group" in deck:
@@ -1015,6 +1022,18 @@ def plan_merge(base: dict, ours: dict, theirs: dict, adopt=None, follow_labels: 
             f"every one of them under `adopt.unpaired`, with the reason); writing one would put a second "
             f"object beside yours rather than over it. Change them in the deck itself - the rest of this "
             f"sync went in as usual.")
+    inherited = [f"`{p['key']}` / `{u['key']}`" for p in plans for u in p.get("units") or [] if u.get("inherited")]
+    if inherited:
+        # The other half of it: these the source *can* draw and this deck does draw - on its
+        # layouts, which are the person's own look and which nothing here ever writes to
+        # (`adopt_sync.layout_elements`, `build_base`'s `master_background = None`).
+        report["warnings"].append(
+            f"{len(inherited)} element(s) the source changed are drawn by this deck's layouts or its master, "
+            f"not by the slide: {', '.join(inherited[:3])}{', ...' if len(inherited) > 3 else ''}. `adopt` "
+            f"recovered those as the theme of the source it wrote, so the source draws them on every slide "
+            f"that inherits them - but they belong to the template, and writing one would put a copy on this "
+            f"one slide over a thing every other slide still shows. Change them in Slides under "
+            f"Slide > Edit theme - the rest of this sync went in as usual.")
     report_resolutions(res, report)
     order, moved = plan_order(base, ours, theirs, plans, report)
     report["slides"]["moved"] = moved

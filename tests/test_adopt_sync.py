@@ -126,6 +126,60 @@ def test_what_the_layout_draws_is_never_paired():
     tgt = target([[deck_element("gA", (30, 40, 130, 56), "Why it matters"),
                    deck_element("L~gDeco", (0, 0, 453, 20), "conference 2026", inherited="L")]])
     assert [e["id"] for e in adopt_sync.deck_objects(tgt["slides"][0])] == ["gA"]
+    assert [e["id"] for e in adopt_sync.layout_elements(tgt["slides"][0])] == ["L~gDeco"]
+
+
+# ---------------------------------------------------------------- what the layout draws
+
+def test_an_element_the_layout_draws_is_recognised_and_not_counted_as_a_miss():
+    """`adopt` recovers the deck's layouts as a beamer theme, so the source draws the footer on
+    every slide that inherits it and the conversion has an element for each - with nothing on the
+    slide to pair with, for ever. That is not the pairing failing: the object is there, one level
+    up, where nothing here may write. Told apart, the person gets the one instruction that works
+    (Slide > Edit theme) instead of being sent to look for a box that is not on the slide."""
+    conv = [conv_element("a", (30, 40, 130, 56), "Why it matters"),
+            conv_element("b", (12, 4, 118, 18), "conference 2026")]
+    tgt = target([[deck_element("gA", (30, 40, 130, 56), "Why it matters"),
+                   deck_element("L~gDeco", (10, 2, 120, 20), "conference 2026", inherited="L")]])
+    slide = tgt["slides"][0]
+    pairs, why = adopt_sync.pair_elements(conv, adopt_sync.deck_objects(slide))
+    assert pairs == {0: 0} and list(why) == [1]
+    assert adopt_sync.explained_by_layout(conv, why, slide) == {1}
+
+
+def test_the_slides_own_object_is_asked_first():
+    """A person who put a box of their own over the template's is the one this sync writes to, so
+    the layout is only ever asked about what `pair_elements` left over."""
+    conv = [conv_element("a", (10, 2, 120, 20), "conference 2026")]
+    tgt = target([[deck_element("gA", (10, 2, 120, 20), "conference 2026"),
+                   deck_element("L~gDeco", (10, 2, 120, 20), "conference 2026", inherited="L")]])
+    slide = tgt["slides"][0]
+    pairs, why = adopt_sync.pair_elements(conv, adopt_sync.deck_objects(slide))
+    assert pairs == {0: 0} and adopt_sync.explained_by_layout(conv, why, slide) == set()
+
+
+def test_an_icon_in_the_middle_of_a_full_bleed_background_is_not_the_layouts():
+    """`identity._geometry` scores two boxes by the better of their overlap and how close their
+    centres are, which is right for two readings of one element and wrong here: a layout that draws
+    a picture over the whole slide shares its centre with everything a person put in the middle of
+    it. Measured on the corpus deck sc-dark-modern, where a 35 pt icon scored 0.45 against the
+    background and would have been reported as a thing to go and change on the layout."""
+    page = {"kind": "image", "bbox": [0, 1, 454, 254], "text": ""}
+    icon = {"kind": "image", "bbox": [226, 82, 261, 117], "text": ""}
+    assert adopt_sync.similarity(icon, page) >= adopt_sync.PAIR_SURE
+    assert not adopt_sync.same_drawing(icon, page)
+    assert adopt_sync.same_drawing({"kind": "image", "bbox": [0, 0, 453, 255], "text": ""}, page)
+
+
+def test_a_layouts_words_are_the_same_drawing_however_much_room_they_have():
+    """The one thing sizes cannot decide. A layout's `Thank you!` placeholder is 296 pt wide and
+    the converter reads the words back at the 109 pt they cover (firebase-jam), so the same words
+    inside the template's own box are the same drawing whatever the room around them."""
+    place = {"kind": "text", "bbox": [79, 120, 375, 164], "text": "Thank you!"}
+    ink = {"kind": "text", "bbox": [172, 128, 281, 151], "text": "Thank you!"}
+    assert adopt_sync.same_drawing(ink, place)
+    assert not adopt_sync.same_drawing({**ink, "text": "Something else"}, place)
+    assert not adopt_sync.same_drawing({**ink, "bbox": [172, 200, 281, 223]}, place), "outside it"
 
 
 # ---------------------------------------------------------------- the base
@@ -170,6 +224,30 @@ def test_the_base_refuses_to_claim_an_object_it_could_not_tell_apart(adopted):
     said = adopted["base"]["adopt"]["unpaired"]
     assert [(u["element"], u["why"]) for u in said] == [(el["key"], adopt_sync.AMBIGUOUS)]
     assert adopted["base"]["adopt"]["paired"] == 2
+
+
+def test_the_base_counts_what_the_layout_draws_apart_from_what_it_could_not_place(tmp_path):
+    """Two different answers to "no object": one is a pairing that could not be made and refuses a
+    sync that touches it, the other is an object that exists on the template. Kept apart in the
+    base, because the merge reads the elements and a person reads the summary. Measured on the
+    corpus: 57 of hebrew-lesson's 215 misses are its own theme drawn again, and 11 of 40 of
+    apps-edu-zh's are one header."""
+    tgt = target([[deck_element("gA", (30, 40, 130, 56), "Why it matters"),
+                   deck_element("L~gDeco", (10, 2, 120, 20), "conference 2026", inherited="L")]])
+    pres = presentation([[live_shape("gA", (48, 64, 206, 89), "Why it matters")]])
+    conv = conversion(tgt, [[conv_element("p0e0", (30, 40, 130, 56), "Why it matters"),
+                             conv_element("p0e1", (12, 4, 118, 18), "conference 2026")]])
+    pdf = tmp_path / "main.pdf"
+    pdf.write_bytes(b"%PDF-1.4\n")
+    base = adopt_sync.build_base(conv, tmp_path, tgt, pres, pdf)
+    el = base["slides"][0]["elements"][1]
+    assert el["objects"] == [] and el["from_layout"] is True, "the merge reads this, not the summary"
+    assert base["adopt"]["unpaired"] == []
+    assert [(u["element"], u["why"]) for u in base["adopt"]["from_layout"]] == [(el["key"], adopt_sync.FROM_LAYOUT)]
+    assert adopt_sync.report_lines(base) == [
+        "sync base: 1 slides, 1 of 2 elements tied to an object of the deck",
+        "  1 of them are drawn by the deck's own layouts and master, which this converter never "
+        "writes to: change those on the layout, in Slides"]
 
 
 def test_the_base_names_the_deck_objects_the_source_does_not_draw(adopted):
@@ -376,6 +454,30 @@ def test_an_element_tied_to_no_object_of_the_deck_is_kept_and_the_rest_syncs(wor
     assert c["resolution"] == "kept (tied to no object of the deck)" and not c.get("takeable")
     assert any("could not be tied to any object of this deck" in w and "Change them in the deck itself"
                in w for w in mplan["report"]["warnings"])
+    assert adopt_sync.problems(base, mplan, world["live"], KEPT) == [], "nothing left to refuse"
+    assert merge.has_writes(mplan, [s["objectId"] for s in world["live"]["slides"]]), \
+        "and the rest of the deck is synced as usual"
+
+
+def test_an_element_the_decks_layout_draws_is_named_for_what_it_is(world):
+    """The same decision - keep it, write nothing, say so - told in the words that lead somewhere.
+    "Could not be tied to any object of this deck. Change them in the deck itself" sends a person
+    to look on the slide for a footer that is not on the slide; it is on the layout, and Slides
+    has a door for that."""
+    base, doc = unpair(world)
+    el = next(e for s in base["slides"] for e in s["elements"] if not e["objects"])
+    el["from_layout"] = True
+    fuzz_sync.src_reword(random.Random(1), doc)            # ... and the source changes another slide too
+    mplan = merge.plan_merge(base, W.build_ours(doc, base, world["out"]), world["live"])
+    held = [(p["key"], u) for p in mplan["slides"] for u in p.get("units") or [] if u.get("inherited")]
+    assert len(held) == 1 and held[0][1]["action"] == "keep"
+    assert not any(u.get("unpaired") for p in mplan["slides"] for u in p.get("units") or [])
+    c = next(c for c in mplan["report"]["conflicts"] if c["field"] == "inherited")
+    assert (c["slide"], c["element"]) == (held[0][0], held[0][1]["key"])
+    assert c["resolution"] == "kept (the deck's layout draws this, not the slide)"
+    assert any("are drawn by this deck's layouts or its master, not by the slide" in w and
+               "Slide > Edit theme" in w for w in mplan["report"]["warnings"])
+    assert not any("could not be tied to any object" in w for w in mplan["report"]["warnings"])
     assert adopt_sync.problems(base, mplan, world["live"], KEPT) == [], "nothing left to refuse"
     assert merge.has_writes(mplan, [s["objectId"] for s in world["live"]["slides"]]), \
         "and the rest of the deck is synced as usual"

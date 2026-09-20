@@ -64,6 +64,16 @@ def deck_objects(slide: dict) -> list[dict]:
     return [e for e in slide.get("elements", []) if e.get("object") and not e.get("inherited")]
 
 
+def layout_elements(slide: dict) -> list[dict]:
+    """What the deck's layout and its master draw on this slide - `deck_objects`' complement.
+
+    `adopt` recovers those as a beamer theme (`adopt_theme.py`: a background template per layout),
+    so the source draws them again on every slide that inherits them and the conversion of that
+    source has an element for each. There is nothing on the slide for one to pair with, and that is
+    not a miss: the object exists, one level up, where this program may not write."""
+    return [e for e in slide.get("elements", []) if e.get("inherited")]
+
+
 def conv_words(el: dict) -> str:
     """The words of an element of the conversion (classify's IR, which `identity` is written for)."""
     return " ".join(identity.plain_text(el).split())
@@ -115,6 +125,7 @@ def similarity(conv: dict, deck: dict) -> float:
 NO_CANDIDATE = "nothing on that slide stands where it does and says what it says"
 NOT_BEST = "another element of the source explains the same object better"
 AMBIGUOUS = "two of the deck's objects are equally close: which one it is cannot be told"
+FROM_LAYOUT = "the deck's layout draws this, not the slide"
 
 
 def pair_elements(conv: list[dict], deck: list[dict]) -> tuple[dict[int, int], dict[int, str]]:
@@ -146,6 +157,63 @@ def pair_elements(conv: list[dict], deck: list[dict]) -> tuple[dict[int, int], d
         else:
             pairs[i] = j
     return pairs, why
+
+
+# How far two boxes' sides may differ and still be the same drawing, redrawn: a flat allowance for
+# a text box the converter tightened to its ink or a rule it read one point tall, and a quarter of
+# the bigger side for everything that scales with the drawing itself.
+SAME_SLACK = 8.0
+SAME_SHARE = 0.25
+
+
+def _inside(a: list[float], b: list[float], slack: float = 2.0) -> bool:
+    return a[0] >= b[0] - slack and a[1] >= b[1] - slack and a[2] <= b[2] + slack and a[3] <= b[3] + slack
+
+
+def same_drawing(a: dict, b: dict) -> bool:
+    """Whether a converted element and one the layout draws are one drawing seen twice, rather
+    than two things that happen to be near each other.
+
+    `identity._geometry` scores a pair by the better of their overlap and how close their centres
+    are, because the elements it compares are two readings of one source and a box that moved is
+    still that box. Here the second box may be the whole slide - a full-bleed background picture
+    the layout draws - and everything a person put in the middle of that slide shares its centre,
+    so the distance alone calls a 35 pt icon the template's background. Sizes decide it instead:
+    adopt draws the layout's element at its own box and the converter reads it back at that box.
+    The exception is words, which the converter tightens to their ink: a layout's `Thank you!`
+    placeholder is 296 pt wide and comes back 109, so the same words inside the template's own box
+    are the same drawing whatever the room around them."""
+    if a["text"] and a["text"] == b["text"] and _inside(a["bbox"], b["bbox"]):
+        return True
+    for lo, hi in ((0, 2), (1, 3)):
+        pa, pb = a["bbox"][hi] - a["bbox"][lo], b["bbox"][hi] - b["bbox"][lo]
+        if abs(pa - pb) > SAME_SLACK + SAME_SHARE * max(pa, pb):
+            return False
+    return True
+
+
+def explained_by_layout(conv: list[dict], why: dict[int, str], slide: dict) -> set[int]:
+    """Of the converted elements the slide's own objects cannot explain, the ones its **layout**
+    draws (`layout_elements`).
+
+    Asked second, and only of what `pair_elements` left over, because a slide's own object always
+    wins: a person who put a box of their own over the template's is the one this sync writes to.
+    And asked without the margin, which the pairing needs and this does not - the margin is there
+    to decide *which* object to write to, and the answer here is that there is none to write to at
+    all. What it buys is a true word for a miss that is no miss: the ornament and the rule and the
+    footer that the recovered theme draws on all thirty slides are not thirty things the pairing
+    failed at, and a person told to 'change that element in the deck instead' would look for it on
+    the slide and not find it - it lives on the layout, behind Slide > Edit theme."""
+    drawn = layout_elements(slide)
+    if not drawn:
+        return set()
+    b = [{"kind": e["kind"], "bbox": e["bbox"], "text": deck_words(e)} for e in drawn]
+    out = set()
+    for i in why:
+        a = {"kind": conv[i]["kind"], "bbox": conv[i]["bbox"], "text": conv_words(conv[i])}
+        if any(similarity(a, y) >= PAIR_SURE and same_drawing(a, y) for y in b):
+            out.add(i)
+    return out
 
 
 # ---------------------------------------------------------------- the base
@@ -194,12 +262,13 @@ def build_base(conv_deck: dict, conv_out: Path, target: dict, pres: dict, pdf: P
     naming the ids does the same job."""
     read = snapshot.read_presentation(pres)
     by_id = {s["objectId"]: s for s in read["slides"]}
-    state_slides, whys, leftovers = [], [], []
+    state_slides, whys, layouts, leftovers = [], [], [], []
     for conv_slide, tgt in zip(conv_deck["slides"], target["slides"]):
         sid = tgt.get("objectId")
         live = by_id.get(sid)
         on_slide = [e for e in deck_objects(tgt) if live and e["object"] in live["objects"]]
         pairs, why = pair_elements(conv_slide["elements"], on_slide)
+        layouts.append(explained_by_layout(conv_slide["elements"], why, tgt))
         state_slides.append({"objectId": sid, "elements": [e["id"] for e in conv_slide["elements"]],
                              "objects": [[on_slide[pairs[i]]["object"]] if i in pairs else []
                                          for i in range(len(conv_slide["elements"]))],
@@ -216,15 +285,22 @@ def build_base(conv_deck: dict, conv_out: Path, target: dict, pres: dict, pdf: P
     # (`sync.background_requests`). Every background this base writes is written explicitly.
     base["master_background"] = None
     base["origin"] = ORIGIN
-    unpaired = []
-    for entry, why in zip(base["slides"], whys):
+    unpaired, from_layout = [], []
+    for entry, why, lay in zip(base["slides"], whys, layouts):
         for i, el in enumerate(entry["elements"]):
-            if i in why:
-                unpaired.append({"slide": entry["key"], "element": el["key"], "kind": el["kind"], "why": why[i]})
+            if i not in why:
+                continue
+            if i in lay:
+                # The merge has to know one from the other, and it reads the base's elements and
+                # not this summary (`merge.plan_unit`'s `blind`).
+                el["from_layout"] = True
+            item = {"slide": entry["key"], "element": el["key"], "kind": el["kind"],
+                    "why": FROM_LAYOUT if i in lay else why[i]}
+            (from_layout if i in lay else unpaired).append(item)
     paired = sum(1 for e in base["slides"] for el in e["elements"] if el.get("main"))
     base["adopt"] = {"presentationId": read["presentationId"], "deck_page_size": read["page_size"],
                      "frame_width": read["page_size"][0], "slides": len(base["slides"]), "paired": paired,
-                     "unpaired": unpaired,
+                     "unpaired": unpaired, "from_layout": from_layout,
                      "left_alone": [{"slide": e["key"], "objects": oids}
                                     for e, oids in zip(base["slides"], leftovers) if oids]}
     return base
@@ -451,9 +527,13 @@ def refusal_message(pid: str, out: Path, pdf: Path | str, problems_found: list[d
 def report_lines(base: dict) -> list[str]:
     """What `adopt` prints about the base it just recorded, and `sync` about the one it read."""
     info = base.get("adopt") or {}
-    total = info.get("paired", 0) + len(info.get("unpaired") or [])
+    drawn = info.get("from_layout") or []
+    total = info.get("paired", 0) + len(info.get("unpaired") or []) + len(drawn)
     lines = [f"sync base: {info.get('slides', 0)} slides, {info.get('paired', 0)} of {total} elements tied to an "
              f"object of the deck"]
+    if drawn:
+        lines.append(f"  {len(drawn)} of them are drawn by the deck's own layouts and master, which this "
+                     f"converter never writes to: change those on the layout, in Slides")
     if info.get("unpaired"):
         lines.append(f"  {len(info['unpaired'])} element(s) could not be tied to one; a sync that changes them "
                      f"refuses rather than write beside the person's object")
