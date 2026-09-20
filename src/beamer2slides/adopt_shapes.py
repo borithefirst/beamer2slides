@@ -15,7 +15,9 @@ What cannot be drawn: freeform shapes (`CUSTOM`, or no shapeType at all). The AP
 for them, only a box; see `CUSTOM_AS`.
 """
 
+import hashlib
 import math
+import re
 
 from .inverse import colour_name
 
@@ -464,6 +466,88 @@ def options(opts: list[str]) -> str:
     return f"[{','.join(opts)}]" if opts else ""
 
 
+REPEAT_STYLE = 3       # `readability.REPEAT_FRAMES`: what a source says three times it should name
+
+
+def styled(ctx, opts: list[str]) -> list[str]:
+    """`opts` under the deck's name for that style where it has one, the keys themselves where not.
+    While a survey is running (`survey_styles`) the style is counted instead, so that what gets a
+    name is what the frames really write."""
+    if not opts:
+        return opts
+    key = ",".join(opts)
+    count = getattr(ctx, "shape_style_count", None)
+    if count is not None:
+        count[key] = count.get(key, 0) + 1
+    names = getattr(ctx, "shape_styles", None) or {}
+    return [names[key]] if key in names else list(opts)
+
+
+def style_word(keys: str, taken: set[str]) -> str:
+    """A name for a shape style, after what it is: `fill-white`, `fill-white-outline-grey`,
+    `outline-black-dashed`, `gradient-blue`. The fill comes first and then what sets the style apart
+    - see-through, an outline and its colour, a dash pattern - as `adopt.text_style` names a text
+    style by its size and then what differs from the body. The name says `fill` or `outline` in front
+    of the colour because TikZ reads a bare `red` in that very place as the colour red: a style
+    called `red` would take the word away from anyone editing the frame."""
+    from .adopt import colour_word
+
+    def word(name: str) -> str:
+        return (colour_word(name[3:]) if re.fullmatch(r"b2s[0-9A-Fa-f]{6}", name) else name).lower()
+    words: list[str] = []
+    if m := re.search(r"(?:left|top) color=([A-Za-z0-9@]+)", keys):
+        words = ["gradient", word(m.group(1))]
+    elif m := re.search(r"\bfill=([A-Za-z0-9@]+)", keys):
+        words = ["fill", word(m.group(1))]
+    if "fill opacity=" in keys:
+        words.append("faded")
+    if m := re.search(r"\bdraw=([A-Za-z0-9@]+)", keys):
+        words += ["outline", word(m.group(1))]
+        if "draw opacity=" in keys:
+            words.append("faint")
+    if m := re.search(r"dash pattern=on ([\d.]+)pt off ([\d.]+)pt", keys):
+        words.append("dotted" if m.group(1) == m.group(2) else "dashed")
+    name = "-".join(words) or "plain"
+    if name in taken and (m := re.search(r"line width=([\d.]+)", keys)):
+        name = f"{name}-{m.group(1)}"       # two styles alike but for the weight: say the weight
+    base, k = name, 2
+    while name in taken:
+        name, k = f"{base}-{k}", k + 1
+    taken.add(name)
+    return name
+
+
+def survey_styles(target: dict, ctx, tree=None) -> None:
+    """Name the fill, outline, opacity and dashes the deck's shapes draw in again and again, so that
+    a person reading a frame meets a shape's look once: `\\sliderect[card]{67.2,63,243.6,37.8}` where
+    four TikZ keys stood, and the preamble says once what `card` is.
+
+    Counted by writing every shape onto a scratch context (as `adopt.recovered_theme` surveys the
+    theme), so a style is named exactly when the frames and the theme really write it three times or
+    more; the writer itself does the counting (`styled`), so the two can't drift apart."""
+    import copy
+    from .adopt import shape_block
+    scratch = copy.deepcopy(ctx)
+    scratch.__dict__["shape_style_count"] = count = {}
+    scratch.__dict__.pop("shape_styles", None)
+    for slide in target.get("slides") or []:
+        for el in slide.get("elements") or []:
+            if el.get("kind") in ("shape", "text") and el.get("role") not in ("math", "icon"):
+                shape_block(el, scratch, "  ", tree)
+    names: dict[str, str] = {}
+    taken: set[str] = set()
+    for key, n in sorted(count.items(), key=lambda kv: (-kv[1], kv[0])):
+        if n >= REPEAT_STYLE:
+            names[key] = style_word(key, taken)
+    ctx.__dict__["shape_styles"] = names
+
+
+def shape_style_definitions(ctx) -> list[str]:
+    """The `\\slideshapestyle` lines for the styles `survey_styles` named, most used first."""
+    return [f"\\slideshapestyle{{{name}}}{{{keys}}}"
+            for keys, name in (getattr(ctx, "shape_styles", None) or {}).items()]
+
+
 # \slideshape{x,y,w,h}{paths}: a tikzpicture whose bounding box is the element's box, x bp from the
 # page's left edge and y bp from its top, w by h bp, with its origin at that box's top left corner
 # (y up, so the shape is drawn below it). Written into slides.sty.
@@ -523,6 +607,19 @@ SHAPE_MACRO = r"""% --- Shapes -------------------------------------------------
       -- (\fpeval{\slides@x-\slides@mx}bp,\fpeval{\slides@my-\slides@y}bp);}}%
   \slides@rect}
 \def\slides@xy#1,#2\@nil{\def\slides@x{#1}\def\slides@y{#2}}
+% \slidepath[options]{file}: inside a \slideshape, one path drawn with those options whose points are
+%   in `file` (TikZ coordinates relative to the box's top left corner, y pointing up, no semicolon).
+%   A preset's outline is a list of coordinates nobody reads, let alone edits - a five-pointed star is
+%   twenty numbers - and in the frame they bury the slide's words; the file holds the very path the
+%   frame held, so nothing moves.
+\RequirePackage{catchfile}
+\newcommand\slidepath[2][]{\CatchFileDef\slides@p@pts{#2}{}%
+  \edef\slides@p@go{\noexpand\path[#1] \unexpanded\expandafter{\slides@p@pts};}\slides@p@go}
+% \slideshapestyle{name}{options}: the deck's name for a fill, outline, opacity and dash pattern its
+%   shapes draw in again and again, said once in main.tex's preamble. A shape names it where its
+%   options go - \sliderect[card]{...} - and any key after the name still wins, so one shape can be
+%   changed on the spot without touching the others: \sliderect[card,fill=Red]{...}.
+\newcommand\slideshapestyle[2]{\tikzset{#1/.style={#2}}}
 \tikzset{flip/.style={xscale=-1}, rounded/.style={rounded corners=#1bp}}
 \def\slides@xywh#1,#2,#3,#4\@nil{\def\slides@x{#1}\def\slides@y{#2}\def\slides@w{#3}\def\slides@h{#4}}"""
 
@@ -560,6 +657,29 @@ FREEFORM_MACRO = r"""% --- Freeforms -------------------------------------------
     \noexpand\begin{scope}[even odd rule]\noexpand\clip \unexpanded\expandafter{\slides@f@path};
     \noexpand\path[draw=\slides@f@ol,line width=\the\dimexpr2\dimexpr\slides@f@olw bp\relax\relax]
     \unexpanded\expandafter{\slides@f@path};\noexpand\end{scope}\fi}}\slides@f@go}"""
+
+
+OUTLINE_NUMBERS = 12      # numbers past which a path is a list of points, not a shape anyone reads
+NUMBER = re.compile(r"-?\d+(?:\.\d+)?")
+
+
+def path_body(opts: list[str], path: str, kind: str, tree) -> str:
+    """One `\\path[options] points;` for the body of a `\\slideshape`, with the points in a file of
+    their own under `shapes/` (`\\slidepath`) once there are too many of them to read - a five-pointed
+    star is twenty numbers, jruby-ja drew 96 of them. It is the same move `traced_block` makes for a
+    traced freeform, and `\\slidepath` expands to exactly the `\\path` written here, so nothing moves.
+    Identical geometry is written once and shared, whatever style each shape draws it in."""
+    if tree is not None and len(NUMBER.findall(path)) >= OUTLINE_NUMBERS:
+        from .adopt import to_bp
+        text = to_bp(path) + "\n"
+        word = re.sub(r"[^a-z0-9]", "", (kind or "shape").lower()) or "shape"
+        rel = f"shapes/{word}-{hashlib.sha1(text.encode()).hexdigest()[:8]}.tex"
+        dest = tree / rel
+        if not dest.exists():
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_text(text, encoding="utf-8")
+        return f"\\slidepath{options(opts)}{{{rel}}}"
+    return f"\\path{options(opts)} {path};"
 
 
 def tikz_block(body: str, x0: float, y0: float, w: float, h: float, ind: str, ctx=None) -> str:
@@ -725,18 +845,21 @@ def line_block(el: dict, ctx, ind: str, tree=None) -> str:
         return ""
     ctx.packages.add("\\usepackage{tikz}")
     _, so = style_options(el, ctx, stroke_only=True)
+    so = styled(ctx, so)          # the deck's name for a colour, weight and dash it draws again and again
     x0, y0, x1, y1 = el["bbox"]
     fr = el.get("frame")
     if fr and el.get("line_type") and "STRAIGHT" not in el["line_type"]:
         w, h = fr["size"]
         turn = turn_options(fr)
+        kind = el.get("line_type") or "connector"
         if turn is not None:
             ctx.packages.add(SHAPE_MACRO)
-            body = f"\\path{options(so + tip_options(el, ctx, True))} {connector_path(el, w, h)};"
+            body = path_body(so + tip_options(el, ctx, True), connector_path(el, w, h), kind, tree)
             bw, bh = pt(max(w, 0.01)), pt(max(h, 0.01))
             box = ",".join(turned_box(fr, x0, y0, float(bw) / 2, float(bh) / 2) + (bw, bh))
             return f"{ind}\\slideshape{options(turn)}{{{box}}}{{{body}}}\n"
-        body = f"\\path{options(so + tip_options(el, ctx, False) + [transform_option(fr, x0, y0)])} {connector_path(el, w, h)};"
+        body = path_body(so + tip_options(el, ctx, False) + [transform_option(fr, x0, y0)],
+                         connector_path(el, w, h), kind, tree)
         return tikz_block(body, x0, y0, x1 - x0, y1 - y0, ind, ctx)
     # the ends where the old writer put them: its picture at the box corner rounded to 0.1, and the
     # ends 0.01 from there, so the two sums are the page point to 0.01
@@ -776,33 +899,44 @@ def shape_block(el: dict, ctx, ind: str, tree=None) -> str:
     ctx.packages.add("\\usepackage{tikz}")
     x0, y0, x1, y1 = el["bbox"]
     where = transform_option(fr, x0, y0)
+    # one path filled and outlined alike is the shape the deck drew: that is the line whose style the
+    # deck can name (`survey_styles` counts it here, once per element, so the count is of real lines)
+    one = len(paths) == 1 and paths[0][1] == "fs"
+    opts = styled(ctx, fo + so) if one else fo + so
 
-    def draw(where: str) -> list[str]:
+    def draw(where: str) -> list[tuple[list[str], str]]:
+        """(path options, geometry) per path of the preset."""
         body = []
         for path, mode in paths:
-            opts = []
             if mode.startswith("fs"):
-                opts = fo + so
+                keys = list(opts) if mode == "fs" else fo + so
             elif mode == "f":
-                opts = fo
+                keys = list(fo)
             elif mode == "s":
-                opts = so
-            elif mode.startswith("shade"):
+                keys = list(so)
+            else:
+                keys = []
+            if mode.startswith("shade"):
                 if fo:                                   # the face in the fill, then lightened/darkened
-                    body.append(f"\\path{options(fo + [where])} {path};")
-                    opts = [f"fill={'white' if mode == 'shade+' else 'black'}", "fill opacity=0.2"]
-                opts = opts + so
-            if mode.endswith("-eo") and opts:
-                opts.append("even odd rule")
-            if not opts:
+                    body.append((fo + [where], path))
+                    keys = [f"fill={'white' if mode == 'shade+' else 'black'}", "fill opacity=0.2"]
+                keys = keys + so
+            if mode.endswith("-eo") and keys:
+                keys.append("even odd rule")
+            if not keys:
                 continue
-            body.append(f"\\path{options(opts + [where])} {path};")
+            body.append((keys + [where], path))
         return body
-    body = draw(where)
-    if not body:
+
+    def bodies(drawn: list[tuple[list[str], str]]) -> str:
+        """The paths as a `\\slideshape` body, the points of a lone long one in a file of their own."""
+        if len(drawn) == 1:
+            return path_body(drawn[0][0], drawn[0][1], kind, tree)
+        return " ".join(f"\\path{options(o)} {p};" for o, p in drawn)
+    drawn = draw(where)
+    if not drawn:
         return ""
-    opts = fo + so
-    one = len(body) == 1 and len(paths) == 1 and paths[0][1] == "fs"
+    one = one and len(drawn) == 1
     radius = rounded_radius(kind, w, h)
     turn = turn_options(fr) if where.startswith("cm=") else None
     if one and turn is not None:
@@ -822,27 +956,27 @@ def shape_block(el: dict, ctx, ind: str, tree=None) -> str:
         ctx.packages.add(SHAPE_MACRO)
         bw, bh = pt(w), pt(h)
         box = ",".join(turned_box(fr, x0, y0, float(bw) / 2, float(bh) / 2) + (bw, bh))
-        return f"{ind}\\slideshape{options(turn)}{{{box}}}{{{' '.join(draw(''))}}}\n"
+        return f"{ind}\\slideshape{options(turn)}{{{box}}}{{{bodies(draw(''))}}}\n"
     bw, bh = float(pt(max(x1 - x0, 0.01))), float(pt(max(y1 - y0, 0.01)))
     if one and not where and radius is not None and pt(w) == pt(bw) and pt(h) == pt(bh):
         # rounded corners: TikZ's own, from the box's numbers and the radius
         ctx.packages.add(SHAPE_MACRO)
         box = ",".join((pt1(x0), pt1(y0), pt(bw), pt(bh)))
         return f"{ind}\\sliderect{options(opts + [f'rounded={pt(radius)}'])}{{{box}}}\n"
-    if len(body) == 1 and len(paths) == 1 and not where and paths[0][0] == poly([(0, 0), (bw, 0), (bw, bh), (0, bh)]):
+    if len(drawn) == 1 and len(paths) == 1 and not where and paths[0][0] == poly([(0, 0), (bw, 0), (bw, bh), (0, bh)]):
         # a plain rectangle filling its box: \sliderect draws that very path from the box's numbers
         ctx.packages.add(SHAPE_MACRO)
         box = ",".join((pt1(x0), pt1(y0), pt(bw), pt(bh)))
         return f"{ind}\\sliderect{options(opts)}{{{box}}}\n"
     rx, ry = float(pt(w / 2)), float(pt(h / 2))
-    if len(body) == 1 and len(paths) == 1 and not where and rx >= 0.01 and ry >= 0.01 \
+    if len(drawn) == 1 and len(paths) == 1 and not where and rx >= 0.01 and ry >= 0.01 \
             and paths[0][0] == ellipse(rx, ry, rx, ry):
         # an ellipse in its box: \slideellipse draws that very path from the radii (the box it is
         # given, twice them, is not the element's to the last 0.01 pt, and moves nothing: the picture
         # hangs from its top left corner)
         ctx.packages.add(SHAPE_MACRO)
         return f"{ind}\\slideellipse{options(opts)}{{{pt1(x0)},{pt1(y0)},{pt(rx)},{pt(ry)}}}\n"
-    return tikz_block(" ".join(body), x0, y0, x1 - x0, y1 - y0, ind, ctx)
+    return tikz_block(bodies(drawn), x0, y0, x1 - x0, y1 - y0, ind, ctx)
 
 
 def turned_text(latex: str, el: dict, ctx) -> str:

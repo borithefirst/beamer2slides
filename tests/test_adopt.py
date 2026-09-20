@@ -310,7 +310,10 @@ def test_a_node_is_drawn_with_its_outline_and_its_rounded_corners(tmp_path):
     text = source_for(tmp_path) + theme_of(tmp_path)
     # the corners are quarter circles of the preset's radius: TikZ's rounded corners, named once
     card = next(l for l in text.splitlines() if "\\sliderect[" in l and "rounded=" in l)
-    assert "fill=" in card and "draw=" in card and "line width=" in card
+    # its fill and outline are the deck's own style, named once (`adopt_shapes.survey_styles`)
+    name = re.match(r"\s*\\sliderect\[([\w-]+),rounded=", card).group(1)
+    keys = re.search(r"\\slideshapestyle\{" + name + r"\}\{([^}]*)\}", text).group(1)
+    assert "fill=" in keys and "draw=" in keys and "line width=" in keys
 
 
 def test_the_base_style_of_a_box_is_set_where_the_box_is(tmp_path):
