@@ -12,8 +12,11 @@ Argb2Argb under the clip mask). Everything here is float32 one C operation at a 
 int conversions are x86's (cvttss2si: INT_MIN for NaN and out of range), and the transcendental
 functions are the C runtime's own (`crt.py`: the one PDFium links on each platform).
 
-What is not drawn exactly is refused (`refusal`), never approximated: tiling patterns, ICCBased
-colour spaces, PostScript functions with words that are not plain numbers or operators, and a shading whose
+Tiling patterns are patterns too and come through here (`find_pattern`, `_draw_pattern`), drawn by
+`render_pattern.py`.
+
+What is not drawn exactly is refused (`refusal`), never approximated: ICCBased colour spaces,
+PostScript functions with words that are not plain numbers or operators, and a shading whose
 validation fails with a valid type (PDFium's Load then succeeds on a second call only, so what is
 drawn depends on history)."""
 
@@ -1046,7 +1049,7 @@ class Record:
         self._loaded = None
         self.reason: str | None = None
         self.pattern_to_form = (1.0, 0.0, 0.0, 1.0, 0.0, 0.0)
-        if kind == "pattern":
+        if kind in ("pattern", "tiling"):     # SetPatternToFormMatrix, in both constructors
             self.pattern_to_form = R.concat(self.a.matrix_for(_Access.dict_of(obj), "Matrix"), parent_matrix)
 
     def load(self) -> bool:
@@ -1061,7 +1064,8 @@ class Record:
     def _load(self) -> bool:
         a = self.a
         if self.kind == "tiling":
-            raise Unsupported("tiling patterns")
+            from . import render_pattern
+            return render_pattern.load(self)
         if self.kind == "?":
             raise Unsupported("a pattern state PDFium's parser keeps differently")
         sobj = self.obj if self.kind == "shading" else a.r(_Access.dict_of(self.obj).get("Shading"))
@@ -1464,7 +1468,8 @@ def path_pattern(status, obj, matrix) -> tuple:
 
 
 def _draw_pattern(status, obj, matrix, rec, stroke: bool) -> None:
-    """DrawPathWithPattern -> DrawShadingPattern."""
+    """DrawPathWithPattern -> DrawTilingPattern / DrawShadingPattern (both clip to the path
+    first: ClipPattern -> SelectClipPath)."""
     if rec is False or not isinstance(rec, Record) or not rec.load():
         return
     dev = status.dev
@@ -1488,6 +1493,10 @@ def _draw_pattern(status, obj, matrix, rec, stroke: bool) -> None:
                 dev._set_clip_mask(rz, False)
             else:
                 dev.set_clip_fill(obj.points, pm, obj.fill_type == FILL_EVENODD)
+            if rec.kind == "tiling":
+                from . import render_pattern
+                render_pattern.draw(status, obj, matrix, rec, stroke)
+                return
             rect = fx_intersect(outer(R.transform_rect(matrix, path_rect(obj))), dev.clip_box())
             if R.rect_empty(rect):
                 return
@@ -1497,8 +1506,9 @@ def _draw_pattern(status, obj, matrix, rec, stroke: bool) -> None:
         dev.restore(False)
 
 
-def refusal(obj) -> str | None:
-    """What of a shading object or a pattern-painted path is not drawn exactly, if anything."""
+def refusal(obj, ctx=None) -> str | None:
+    """What of a shading object or a pattern-painted path is not drawn exactly, if anything
+    (`ctx` is render_transparency.Context: a tiling pattern's cell is looked into with it)."""
     recs = []
     if getattr(obj, "shading_record", None) is not None:
         recs.append(obj.shading_record)
@@ -1511,7 +1521,12 @@ def refusal(obj) -> str | None:
             continue
         if not isinstance(rec, Record):
             return "a pattern state PDFium's parser keeps differently"
-        rec.load()
+        loaded = rec.load()
         if rec.reason:
             return rec.reason
+        if loaded and rec.kind == "tiling":
+            from . import render_pattern
+            why = render_pattern.unsupported(rec, obj, ctx)
+            if why is not None:
+                return why
     return None

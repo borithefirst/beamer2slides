@@ -11,11 +11,12 @@ Drawn: paths (fill, stroke, dashes, constant alpha, fill-and-stroke with a trans
 through DrawFillStrokePath's knockout sub-bitmap), clip paths, forms, and transparency
 (ProcessTransparency: soft masks, transparency groups, group alpha, blend modes;
 `render_transparency.py`), shadings of every type and shading patterns (`render_shading.py`,
-`render_mesh.py`), transfer functions on colours and soft masks (`transfer.py`), text
-(`render_text.py`), images at any angle with their own masks (`render_image.py`, decoded by
-`decode_image.py`).
-Not yet: tiling patterns, transfer functions on images; a page holding any of them raises
-PdfError (`unported`) rather than coming back drawn differently."""
+`render_mesh.py`), coloured tiling patterns (`render_pattern.py`), transfer functions on colours
+and soft masks (`transfer.py`), text (`render_text.py`), images at any angle with their own masks
+(`render_image.py`, decoded by `decode_image.py`).
+Not yet: uncoloured tiling patterns and tiling patterns inside a form, transfer functions on
+images; a page holding any of them raises PdfError (`unported`) rather than coming back drawn
+differently."""
 
 from __future__ import annotations
 
@@ -882,7 +883,7 @@ def unported(objects, ctx=None) -> str | None:
             return "transparency groups"
         if o.type in (OBJ_PATH, OBJ_SHADING):
             from . import render_shading
-            reason = render_shading.refusal(o)
+            reason = render_shading.refusal(o, ctx)
             if reason is not None:
                 return reason
     return None
