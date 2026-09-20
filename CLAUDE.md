@@ -1441,6 +1441,32 @@ keys, named ranges), `doc_merge.py` (pure planning), `doc_sync.py` (the commands
   wears its mark anywhere in the block, so a second occurrence the source had just appended
   answered yes while the reader's own stood untouched (asked by occurrence now, seed 40254).
   All four campaigns clean under `--strict` afterwards.
+  **Then deeper rather than wider**, since green at four settings is green at four settings:
+  2000 rounds at chain 6 from 500000 (six edit-and-sync steps per round, not one) found five
+  more in four signatures, three of them `block_gone` on a table again. (a) `insertTable` in
+  front of an ordinary block leaves an empty paragraph, which `_new_table_requests` removes
+  by deleting the mark of the block *before* - and when that block is itself an empty
+  paragraph, which is all mark, the delete covers its named range whole and it comes back
+  unnamed. Nothing by itself (the settle re-keys it) except that the new table is found
+  between the batch and the settle *by that key*: no anchor, the blank table settled under
+  its own emptiness, the re-plan read the file's key as a table the reader had deleted, and
+  the source's table was gone (seeds 501271, 501871; `doc_merge._swallowed`, `_after_key`
+  looks past it). (b) `_moved_keys` reads the file's order against the **base** while the
+  merged order is the **document's**, so a block the source moved can land exactly where the
+  document already has it - a delete and a build from nothing for no gain, and for a table
+  destructive twice: built blank with its words waiting for the next pass, which asks for the
+  same move again until the three rounds are spent (seeds 501429, 500077; a move whose two
+  ends are one place is no move). (c) Found by sweeping every reordering of a five-block body,
+  written to find a scenario for (b), and the worst of the four: the index a block is appended
+  at is the mark of the last block the sync *keeps*, and a block the source moved away is no
+  more kept than one it deleted - move everything after a table to somewhere in front and the
+  last kept block is the table, whose own last index is inside its last cell, so the moved
+  paragraph was written into the table and it swallowed it. This is chain-8 seed 189's defect,
+  fixed a day earlier for deletes only; one condition covers both halves now. (d) The oracle
+  once more: `WORD` is `\S+`, so a reader's full stop against the `1` in a cell makes the token
+  `.1`, which the base has not - but its only word is the base's, and the source rewriting that
+  `1` takes the stop with it (seed 500249; `_dressed_up`, exact like `_pared_down` and asking
+  besides that the base word be gone from the tab).
 - Live suite (opt-in, marker `docs`, ~5 min): `python -m pytest -m docs tests/test_docs_live.py`
   pushes a document per test, edits both sides, syncs, checks a second sync writes nothing, and
   deletes the document. Offline: `tests/test_doc_ir.py`, `test_doc_merge.py`, `test_doc_sync.py`.

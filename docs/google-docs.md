@@ -1267,6 +1267,61 @@ Each has a test that fails when its mechanism is put back the way it was. After 
 both fresh campaigns and the two standing ones (400 at chain 4, 300 at chain 8) are clean
 under `--strict`.
 
+### And the run after that: going deeper rather than wider
+
+Green at four settings is not green, it is four settings. The next run went deeper instead
+of wider — 2000 rounds at chain 6 from seed 500000, so each round is six edit-and-sync
+steps on one document rather than one — and came back with **five** more findings in four
+signatures, three of them the same shape: a table the source added or regridded, gone with
+all its words, `block_gone … though the file still names it` again. Three defects behind
+them, one of which is the oracle's; a fourth was found by a sweep written to confirm the
+second, and is the worst of the four.
+
+* **A table anchored on an empty paragraph the same batch unnames** (seeds 501271, 501871).
+  `insertTable` in front of an ordinary block leaves an empty paragraph, and
+  `_new_table_requests` gets rid of it by deleting the mark of the block *before* — Docs'
+  merge-on-delete keeps the first one's style, so both blocks come out as the file has
+  them. Unless that block is itself an empty paragraph, which is all mark: the delete then
+  covers its named range whole and it comes back unnamed. By itself that is nothing, since
+  the settle keys it again from its words. But the new table is found between the batch and
+  the settle, by the key of the block it follows, and that key was this one — so
+  `anchor_tables` found no anchor, the blank table settled under a name made from its own
+  emptiness, the re-plan read the key the file still names as a table the reader had
+  deleted, and the source's table was gone. `_swallowed` names the block the batch is about
+  to unname and `_after_key` looks past it.
+* **A move whose two ends are one place** (seeds 501429, 500077). `_moved_keys` reads the
+  file's order against the **base**, and the merged order is the **document's**, so a block
+  the source moved can come out exactly where the document already has it. Writing it
+  anyway is a delete and a build from nothing for no gain at all — and for a table it is
+  destructive twice over: it is built again blank with its words waiting for the next pass,
+  and the next pass asks for the same move again, nothing having changed, until the three
+  rounds `_write_structure` allows are spent and the table is left blank. A paragraph got
+  off with losing its key. A move whose two ends are one place is no move.
+* **A block moved to the end past a table, written into it** (found by sweeping every
+  reordering of a five-block body, which is how the scenario for the previous bullet was
+  looked for). This is the move half of chain-8 seed 189, fixed a day earlier for deletes
+  only: the index a block is appended at is the mark of the last block the sync **keeps**,
+  and a block the source moved away is no more kept than one it deleted. Move everything
+  after a table to somewhere in front of it and the last kept block is the table — whose
+  own last index is inside its last cell — so the moved paragraph was written into the
+  table, which swallowed it and took its key. The body cannot end on a table, so the last
+  block's mark stays behind however it goes, and that leftover empty paragraph is the
+  trailer. One condition now covers both halves.
+* Once more the oracle's own (seed 500249). `WORD` is `\S+`, so a reader who moves a
+  paragraph ending in a full stop against the `1` in a cell makes the token `.1`, which the
+  base does not have and `theirs - was` therefore reads as a word of theirs. It is not one:
+  its only word is the base's, and when the source's `edit_cell` rewrites that `1` the stop
+  goes along with it — the merge said `.thicket`, with both edits in it. `_dressed_up` asks
+  it exactly, like `_pared_down`, and one thing more: the base word has to be gone from the
+  tab as well, or a base word the reader typed again somewhere new, with a stop after it,
+  would be excused too.
+
+Each has its test, each verified by breaking its mechanism. Two of the three merge defects
+were reachable only by chaining — the second needs the source to have reordered a body
+*and* added a block to it — which is the argument for depth over breadth: at chain 1 the
+file and the document are never far enough apart for the two orders to disagree the way
+`_moved_keys` needs.
+
 Fixed seeds from the campaign run in the default offline suite.
 
 ## Remaining risks

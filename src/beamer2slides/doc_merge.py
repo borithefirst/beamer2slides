@@ -876,6 +876,9 @@ def _apply_source_moves(base: dict, ours: dict, theirs: dict, merged: list, note
     file's order of the blocks all three sides know differs from the base's and the
     document's does not, those blocks are moved to where the file has them. Where
     both sides reordered, the document keeps its order, as everywhere else.
+
+    A move whose two ends are one place is no move, and writing it is destructive:
+    the guard at the bottom is what says so.
     """
     placed = {b["key"]: b for b in merged if b.get("key")}
     common = placed.keys() & {b.get("key") for b in base["blocks"]} \
@@ -905,9 +908,21 @@ def _apply_source_moves(base: dict, ours: dict, theirs: dict, merged: list, note
                          f"chip in it cannot be written from nothing — left where the "
                          f"document has it")
             continue
+        was_at = merged.index(block)
         merged.remove(block)
         index = next(i for i, b in enumerate(ours["blocks"]) if b.get("key") == key)
-        merged.insert(_place(ours, merged, index), block)
+        where = _place(ours, merged, index)
+        merged.insert(where, block)
+        if where == was_at:
+            # The file asks for a move whose two ends are one place. `_moved_keys`
+            # reads the file against the *base*, and the merged order is the
+            # document's, so a block the source moved can come out exactly where the
+            # document already has it. Writing it anyway is a delete and a build from
+            # nothing, which for a table throws its words away for a round — and,
+            # nothing having changed, the next round asks for the same move again,
+            # until `_write_structure`'s three rounds are spent and the table is left
+            # blank (the campaign's 'block_gone', seed 501429).
+            continue
         block["moved"] = True
 
 
@@ -1723,13 +1738,10 @@ def requests(theirs: dict, merged: list[dict]) -> list[dict]:
                                    filled)
         plans.append((start, DELETE, [{"deleteContentRange": {
             "range": {"startIndex": start, "endIndex": end}}}]))
-        if index == len(theirs["blocks"]) - 1 and end == theirs["blocks"][index]["span"][1] - 1 \
-                and index and _structural(theirs["blocks"][index - 1]):
-            # The body's last paragraph, standing right after a table: its words go
-            # and its own mark stays (`_delete_range`), so the document ends on an
-            # empty paragraph exactly where this block was. It has to, since a body
-            # may not end on a table — and it is where anything appended goes, the
-            # table's own last index being *inside* its last cell.
+        if index == len(theirs["blocks"]) - 1 and end == theirs["blocks"][index]["span"][1] - 1:
+            # The body's last block, whose words go and whose own mark stays
+            # (`_delete_range`): the document ends on an empty paragraph exactly
+            # where it was. It has to, since a body may not end on a table.
             left_empty = start
 
     for index, live in enumerate(theirs["blocks"]):
@@ -1747,7 +1759,16 @@ def requests(theirs: dict, merged: list[dict]) -> list[dict]:
     kept = [b for b in theirs["blocks"]
             if b.get("key") is None or (b["key"] in by_key and not by_key[b["key"]].get("moved"))]
     tail = kept[-1]["span"][1] - 1 if kept else 1
-    trailer = theirs.get("trailer") or ([left_empty] if left_empty is not None else None)
+    trailer = theirs.get("trailer")
+    if trailer is None and left_empty is not None and kept and _structural(kept[-1]):
+        # Everything the body ended on is going — deleted by the source, or moved to
+        # somewhere in front — and the last block that stays is a table, whose own
+        # last index is *inside* its last cell. The mark left behind at the end is
+        # where anything appended goes. Without it the appended block was written
+        # into the table: the table swallowed it and the write took the table's named
+        # range with it (chain-8 seed 189 for the delete, the permutation sweep of
+        # `_apply_source_moves` for the move).
+        trailer = [left_empty]
     if trailer:
         # The body ends on a table and the empty paragraph after it: the first block
         # appended is written *into* that paragraph, and the rest after it.
@@ -1883,9 +1904,11 @@ def structure(theirs: dict, merged: list[dict],
                                        not theirs.get("trailer"), theirs.get("lead"))
             deletes[key] = (start, 0, [{"deleteContentRange": {
                 "range": {"startIndex": start, "endIndex": end}}}])
-            plans.append((at, reqs, {"key": key, "after": _after_key(merged, position),
-                                     "moved": True,
-                                     "note": f"`{key}`: moved where the source has it"}))
+            plans.append((at, reqs,
+                          {"key": key,
+                           "after": _after_key(merged, position, _swallowed(theirs, reqs)),
+                           "moved": True,
+                           "note": f"`{key}`: moved where the source has it"}))
         elif block.get("regrid"):
             what = ", ".join(f"{how}s a {line}" for line, how, _ in block["regrid"])
             # `after` although nothing is built: a table is anchored in its first cell
@@ -1904,9 +1927,12 @@ def structure(theirs: dict, merged: list[dict],
             at, reqs = _new_table_requests(theirs, _insert_index(merged, position),
                                            rows, columns)
             if reqs:
-                plans.append((at, reqs, {"key": key, "after": _after_key(merged, position),
-                                         "note": f"`{key}`: a table of {rows}×{columns} "
-                                                 f"added by the source"}))
+                plans.append((at, reqs,
+                              {"key": key,
+                               "after": _after_key(merged, position,
+                                                   _swallowed(theirs, reqs)),
+                               "note": f"`{key}`: a table of {rows}×{columns} "
+                                       f"added by the source"}))
             elif notes is not None:
                 notes.append(f"{key}: a table the source adds where the document has no "
                              f"paragraph to write in — before the table it opens on, or "
@@ -1940,11 +1966,40 @@ def structure(theirs: dict, merged: list[dict],
 _END = 1 << 30  # a table appended at the end of the body: after every index there is
 
 
-def _after_key(merged: list[dict], position: int) -> str | None:
+def _after_key(merged: list[dict], position: int, swallowed: str | None = None) -> str | None:
     """The key of the nearest block in front of this one that the document already
-    has — where a table written from nothing will be found again once it exists."""
+    has — where a table written from nothing will be found again once it exists.
+
+    Never the block this very batch swallows the mark of (`_swallowed`): an anchor is
+    read back *after* the batch, and that one comes back unnamed.
+    """
     for block in reversed(merged[:position]):
         if block.get("key") and block.get("span") and not block.get("moved"):
+            if block["key"] == swallowed:
+                continue
+            return block["key"]
+    return None
+
+
+def _swallowed(theirs: dict, reqs: list[dict]) -> str | None:
+    """The key a new table's swallow takes with the mark it deletes, if it takes one.
+
+    `_new_table_requests` gets rid of the empty paragraph `insertTable` leaves by
+    deleting the mark of the block in front, which merges the two the way the Delete
+    key does. That block keeps its words, and so its named range — unless it is
+    *itself* an empty paragraph, which is all mark: then the delete covers its range
+    whole and Docs drops it, and the block comes back unnamed. It is keyed again at
+    the settle from its words (`_adopt_by_words`), so nothing is lost by it; what
+    cannot wait that long is a table anchored on it, which `anchor_tables` looks for
+    between the batch and the settle and would never find.
+    """
+    for req in reqs:
+        span = req.get("deleteContentRange", {}).get("range")
+        if not span:
+            continue
+        gone = [span["startIndex"], span["endIndex"]]
+        block = next((b for b in theirs["blocks"] if b.get("span") == gone), None)
+        if block is not None and block.get("key"):
             return block["key"]
     return None
 
@@ -1960,7 +2015,9 @@ def _new_table_requests(theirs: dict, at: int | None, rows: int,
     - written in front of an ordinary block, it goes at that block's start, which
       leaves an empty paragraph in front of the table. The mark of the block before
       that one goes instead, which merges the two the way the Delete key does and
-      leaves both blocks exactly as the file has them;
+      leaves both blocks exactly as the file has them — all but that block's named
+      range, when the block is an empty paragraph and its whole range is that mark
+      (`_swallowed`);
     - written in front of a table there is no paragraph at that index at all. It goes
       at the mark of the paragraph before it, and the empty half lands *after* the new
       table — between the two, which is where Docs wants a paragraph anyway;

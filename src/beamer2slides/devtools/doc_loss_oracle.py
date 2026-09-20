@@ -139,7 +139,7 @@ def joined_differently(token: str, after: Counter, was: Counter) -> bool:
     is a token of the base with one of its words taken out, nothing else.
     """
     pieces = _split(token)
-    if len(pieces) < 2 and not _pared_down(token, was):
+    if len(pieces) < 2 and not _pared_down(token, was) and not _dressed_up(token, after, was):
         return False
     base = {piece for other in was for piece in _split(other)}
     there = {piece for other in after for piece in _split(other)}
@@ -159,6 +159,32 @@ def _pared_down(token: str, was: Counter) -> bool:
             continue
         if any(other[:start] + other[end:] == token for start, end in spans):
             return True
+    return False
+
+
+def _dressed_up(token: str, after: Counter, was: Counter) -> bool:
+    """Whether this token is a token of the base dressed in punctuation of the
+    reader's, whose word the source then rewrote.
+
+    A reader who moves a paragraph ending in a full stop against the `1` in a cell
+    makes the token `.1`, which the base does not have, so `theirs - was` reads it as
+    a word of theirs. It is not one: its only word is the base's, and the source is
+    entitled to rewrite that — which is what happened at chain-6 seed 500249, where
+    `edit_cell` made the `1` into `thicket`, the merge said `.thicket`, and both edits
+    were in it.
+
+    Exact, like `_pared_down`, and one thing more: the base token it dresses has to be
+    gone from the tab as well. A base word the reader typed again somewhere new, with
+    a stop after it, is their own work; only a word the source really rewrote can take
+    the reader's punctuation with it.
+    """
+    for other in was:
+        if not PIECE.search(other) or after.get(other):
+            continue
+        for rest in (token[:-len(other)] if token.endswith(other) else None,
+                     token[len(other):] if token.startswith(other) else None):
+            if rest and not PIECE.search(rest):
+                return True
     return False
 
 
@@ -696,7 +722,10 @@ def _cell_findings(key, block, base_block, after_block, after_words, said, tab):
             continue
         # By place when the grid still has that cell, else anywhere in the table.
         survived = words(now[at]) if at in now else Counter()
-        lost = typed - survived - (words(text_of(after_block)) - survived)
+        after_all = words(text_of(after_block))
+        lost = typed - survived - (after_all - survived)
+        lost = Counter({w: n for w, n in lost.items()
+                        if not joined_differently(w, after_all, elsewhere)})
         if lost and not _named(said, key):
             out.append(finding("cell_words_lost", "loss",
                                f"the cell {at} of {key} lost {' '.join(sorted(lost))[:60]}",

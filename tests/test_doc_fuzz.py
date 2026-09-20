@@ -1101,3 +1101,116 @@ def test_a_block_in_a_second_tab_keeps_its_key_when_the_source_moves_and_rewords
     appendix = {b["key"] for b in doc_ir.parts(base)[1]["blocks"]}
     assert "heading:notes" in body                      # the control: the body is right
     assert "heading:results" in appendix
+
+
+def test_a_table_anchored_on_an_empty_paragraph_the_batch_swallows_is_found_again():
+    """`insertTable` in front of an ordinary block leaves an empty paragraph, which
+    `_new_table_requests` gets rid of by deleting the mark of the block before —
+    Docs' merge-on-delete keeps the first one's style, so both blocks come out as the
+    file has them. Unless that block is *itself* an empty paragraph, which is all
+    mark: the delete then covers its named range whole and it comes back unnamed.
+
+    Which is nothing by itself — the settle keys it again from its words — but the
+    new table is found between the batch and the settle, by the key of the block it
+    follows, and that key was this one. `anchor_tables` found no anchor, the blank
+    table settled under a name made from its own emptiness, the re-plan read the key
+    the file still names as a table the reader had deleted, and the source's table
+    was gone with all its words (fresh-seed 501271 at chain 6). `_swallowed` names
+    the block the batch is about to unname and `_after_key` looks past it.
+    """
+    world, ours, base = _build([_para("Before it."), _para(""), _para("After it.")])
+    assert _keys(ours)[1] == "paragraph:empty", _keys(ours)
+    at = _keys(ours).index("paragraph:after-it")
+    ours["blocks"].insert(at, _table([["h1", "h2"], ["harbour", "x"]]))
+    was, mine = copy.deepcopy(base), copy.deepcopy(ours)
+    before = doc_world.settled_ir(world, ours, base)
+    report, ours, base = fuzz_docs.sync_once(world, ours, base)
+    assert not oracle.failures(oracle.check(was, before, base, report, mine))
+    for _ in range(2):        # a grid is built on one pass and filled on the next
+        report, ours, base = fuzz_docs.sync_once(world, ours, base)
+    live = doc_world.read_ir(world, ours, base)
+    assert _keys(live) == ["paragraph:before-it", "paragraph:empty", "table:h1",
+                           "paragraph:after-it"]
+    assert oracle.text_of(live["blocks"][2]) == "h1 h2 harbour x"
+
+
+def test_a_source_move_onto_the_place_the_document_already_has_is_not_written():
+    """`_moved_keys` reads the file's order against the *base*, but the merged order
+    is the document's — so a block the source moved can come out exactly where the
+    document already has it, and the move is a delete and a build from nothing for
+    no gain at all.
+
+    For a table that is destructive: it is built again blank and its words wait for
+    the next pass, which asks for the same move again, since nothing changed. The
+    three rounds `_write_structure` allows ran out with the table still blank and its
+    words nowhere (fresh-seed 501429 at chain 6); a paragraph merely lost its key
+    (fresh-seed 500077). A move whose two ends are one place is no move.
+    """
+    world, ours, base = _build([_para("Status today."), _para("Harbour next."),
+                                _para("A line after it."),
+                                _table([["h1", "h2"], ["harbour", "x"]]),
+                                _para("Kestrel last.")])
+    keys = _keys(ours)
+    ours["blocks"] = [ours["blocks"][keys.index(k)] for k in
+                      ["paragraph:a-line-after-it", "paragraph:harbour-next", "table:h1",
+                       "paragraph:status-today", "paragraph:kestrel-last"]]
+    ours["blocks"].insert(2, _para("The source added zephyr."))
+    was, mine = copy.deepcopy(base), copy.deepcopy(ours)
+    before = doc_world.settled_ir(world, ours, base)
+    report, ours, base = fuzz_docs.sync_once(world, ours, base)
+    assert not oracle.failures(oracle.check(was, before, base, report, mine))
+    live = doc_world.read_ir(world, ours, base)
+    assert oracle.text_of(next(b for b in live["blocks"] if b["kind"] == "table")) \
+        == "h1 h2 harbour x"
+    again, _, _ = fuzz_docs.sync_once(world, copy.deepcopy(ours), copy.deepcopy(base))
+    assert again["applied"] == []
+
+
+def test_a_block_moved_to_the_end_past_a_table_goes_after_it_not_into_it():
+    """The move half of `test_a_block_appended_where_a_table_is_now_last_...`: the
+    append index is the mark of the last block the sync *keeps*, and a block the
+    source moved away is not kept either. Move everything after a table to somewhere
+    in front of it and the last kept block is the table, whose own last index is
+    inside its last cell — so the moved block was written into the table, which
+    swallowed it and took its key.
+
+    The body cannot end on a table, so the last block's mark stays behind however it
+    goes (`_delete_range`), and that leftover empty paragraph is the trailer. Found
+    by sweeping every reordering of one five-block body.
+    """
+    world, ours, base = _build([_para("Alpha one."), _para("Beta two."),
+                                _table([["a", "b"], ["1", "2"]]),
+                                _para("Delta four."), _para("Echo five.")])
+    keys = _keys(ours)
+    ours["blocks"] = [ours["blocks"][keys.index(k)] for k in
+                      ["paragraph:delta-four", "paragraph:echo-five", "paragraph:beta-two",
+                       "table:a", "paragraph:alpha-one"]]
+    was, mine = copy.deepcopy(base), copy.deepcopy(ours)
+    before = doc_world.settled_ir(world, ours, base)
+    report, ours, base = fuzz_docs.sync_once(world, ours, base)
+    assert not oracle.failures(oracle.check(was, before, base, report, mine))
+    live = doc_world.read_ir(world, ours, base)
+    assert _keys(live) == ["paragraph:delta-four", "paragraph:echo-five",
+                           "paragraph:beta-two", "table:a", "paragraph:alpha-one"]
+    assert oracle.text_of(live["blocks"][3]) == "a b 1 2"
+    again, _, _ = fuzz_docs.sync_once(world, copy.deepcopy(ours), copy.deepcopy(base))
+    assert again["applied"] == []
+
+
+def test_the_oracle_lets_a_base_word_the_reader_only_dressed_in_punctuation_go():
+    """`WORD` is `\\S+`, so a reader who moves a paragraph ending in a full stop
+    against the `1` in a cell makes the token `.1`, which the base does not have and
+    `theirs - was` therefore reads as a word of theirs. It is not one: its only word
+    is the base's, and when the source rewrites that `1` the stop goes with it. Both
+    edits arrived; calling it a loss was the oracle's mistake (fresh-seed 500249).
+
+    Exact, like `_pared_down`, and one thing more — the base word has to be gone from
+    the tab as well, or a base word the reader typed again somewhere new, with a stop
+    after it, would be excused too. That is the second half here.
+    """
+    was = oracle.words("a b 1 2 kestrel")
+    after = oracle.words("a b .thicket 2 kestrel")
+    assert oracle.joined_differently(".1", after, was)
+    assert not oracle.joined_differently(".kestrel", after, was), \
+        "the base's `kestrel` is still there, so the stop the reader put after it is theirs"
+    assert not oracle.joined_differently("zephyr", after, was)

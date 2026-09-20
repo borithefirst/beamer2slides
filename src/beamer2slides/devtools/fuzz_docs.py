@@ -1119,6 +1119,19 @@ KNOWN = (
 # anchor taking each other's keys, a move taken back and left at the file's position
 # anyway, and `_edited` blind to a mark the reader put on — and two were the oracle's
 # own. Every one of them is a test in tests/test_doc_fuzz.py now.
+#
+# And the run after that, which went deeper rather than wider — 2000 rounds at chain
+# 6 from 500000, six edit-and-sync steps per round instead of one — came back with
+# five more in four signatures, three of them `block_gone` on a table again: a table
+# anchored on an empty paragraph whose mark the same batch swallows, which takes its
+# named range (`doc_merge._swallowed`); a source move whose two ends are one place,
+# written anyway, which for a table means built blank and asked for again until
+# `_write_structure`'s rounds run out; and the oracle counting the base's word in
+# `.1` as one the reader typed (`_dressed_up`). A sweep of every reordering of a
+# five-block body, written to find a scenario for the second, turned up the fourth
+# and worst: a block the source moves past a table to the end of the body was
+# written *into* the table — chain-8 seed 189's defect, whose fix a day earlier had
+# covered deletes and not moves.
 
 
 def known_bug(found: dict) -> str | None:
