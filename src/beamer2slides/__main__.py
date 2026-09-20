@@ -10,6 +10,8 @@
       the same against a deck.json-shaped target, offline
   python -m beamer2slides docs push|sync doc.html [--dry-run]
       a Google Doc from a canonical HTML file, and the merge that keeps both in step
+  python -m beamer2slides docs adopt --doc URL|ID [doc.html]
+      the canonical file for a document nobody pushed: keys, anchors, base
 """
 
 import argparse
@@ -176,7 +178,7 @@ def cmd_label(tex: Path, apply: bool) -> None:
 
 def cmd_docs(args) -> None:
     """Google Docs: the canonical HTML file and the document, kept in step (docs/google-docs.md)."""
-    from .doc_sync import push, sync
+    from .doc_sync import adopt, push, sync
     if args.docs_command == "push":
         info = push(args.file, args.name, args.new_doc)
         for note in info["notes"]:
@@ -184,7 +186,16 @@ def cmd_docs(args) -> None:
         print(f"{args.file}: {info['blocks']} blocks, {info['anchored']} of them anchored")
         print(f"Google Docs: {info['url']}")
         return
-    info = sync(args.file, args.doc, args.dry_run, args.assume_base)
+    if args.docs_command == "adopt":
+        info = adopt(args.doc, args.file, args.force)
+        for note in info["notes"]:
+            print(f"  note: {note}")
+        print(f"{info['file']}: {info['blocks']} blocks, {info['anchored']} of them anchored, "
+              f"{info['tabs']} tab(s)")
+        print(f"Google Docs: {info['url']}")
+        print(f"`docs sync {info['file']}` from here on.")
+        return
+    info = sync(args.file, args.doc, args.dry_run, args.assume_base, not args.no_backup)
     for clash in info["conflicts"]:
         print(f"  conflict {clash['key']}: the source said {clash['ours']!r}, "
               f"the document says {clash['theirs']!r} (the document wins)")
@@ -195,6 +206,8 @@ def cmd_docs(args) -> None:
     print(f"docs sync{' (dry run)' if args.dry_run else ''}: {len(info['applied'])} block(s) from "
           f"the source, {len(info['kept'])} kept from the document, "
           f"{len(info['conflicts'])} conflict(s), {info['requests']} request(s)")
+    if info.get("backup"):
+        print(f"  the document was exported to {info['backup']} before being written over")
     print(f"report: {info['report']}")
     print(f"Google Docs: {info['url']}")
 
@@ -276,13 +289,28 @@ def main() -> None:
     d.add_argument("--name", help="the document's name in Drive (default: the file's <title>)")
     d.add_argument("--new-doc", action="store_true",
                    help="create a second document although the file already names one")
+    d = docs_sub.add_parser("adopt", help="write the canonical file for a document nobody pushed")
+    d.add_argument("--doc", required=True, help="document URL or id")
+    d.add_argument("file", type=Path, nargs="?",
+                   help="where the canonical HTML goes (default: a slug of the document's title)")
+    d.add_argument("--force", action="store_true",
+                   help="write over a file that is already there and names another document")
     d = docs_sub.add_parser("sync", help="merge file and document three ways, then rewrite the file")
     d.add_argument("file", type=Path)
     d.add_argument("--doc", help="document URL or id (default: the <meta> in the file)")
     d.add_argument("--dry-run", action="store_true", help="plan and report without writing")
-    d.add_argument("--assume-base", choices=["file", "document"],
-                   help="when the base of the last sync is missing: which side is right where "
-                        "they differ (file = write nothing, document = write the file out)")
+    d.add_argument("--assume-base", choices=["document-wins", "source-wins", "file", "document"],
+                   metavar="{document-wins,source-wins}",
+                   help="when no base of the last sync can be found (neither in Drive nor beside "
+                        "the file): whose work is discarded. document-wins = nothing is written "
+                        "to the document and the file is rewritten from it (source edits since "
+                        "the last sync are lost); source-wins = the file is written over the "
+                        "live document (the reader's edits are lost), after exporting it to "
+                        ".b2s/backups/. `file` and `document` are the old names for the two, "
+                        "and they read backwards")
+    d.add_argument("--no-backup", action="store_true",
+                   help="do not export the document before --assume-base source-wins writes over "
+                        "it: this is how one asks for a write with no way back")
     c = sub.add_parser("label", help="write a `label=` into every frame that has none (docs/labels.md)")
     c.add_argument("tex", type=Path, help="the main .tex (its \\input files are labelled too)")
     c.add_argument("--apply", action="store_true",

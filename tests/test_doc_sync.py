@@ -1,10 +1,13 @@
-"""Offline tests for the Docs sync command: its state beside the file, and its report.
+"""Offline tests for the Docs sync command: its state, its writes and its report.
 
 No Google calls — everything here is the part of `doc_sync` that only handles paths,
-identifiers and the summary a person reads afterwards.
+identifiers, the batches it would send and the summary a person reads afterwards.
+Drive and Docs are the fakes at the bottom of this module.
 """
 
 import json
+
+import pytest
 
 from beamer2slides import doc_ir, doc_merge, doc_sync
 
@@ -25,9 +28,13 @@ def test_the_state_sits_in_a_b2s_folder_beside_the_file(tmp_path):
 def test_a_base_of_another_document_is_no_base(tmp_path):
     path = tmp_path / "doc.html"
     doc_sync.save_base(path, {"document": "one", "blocks": []})
-    assert doc_sync.load_base(path, "one") == {"document": "one", "blocks": []}
-    assert doc_sync.load_base(path, "another") is None
-    assert doc_sync.load_base(tmp_path / "nothing.html", "one") is None
+    assert doc_sync.load_local(path, "one") == {"document": "one", "blocks": []}
+    assert doc_sync.load_local(path, "another") is None
+    assert doc_sync.load_local(tmp_path / "nothing.html", "one") is None
+    assert doc_sync.base_problem({"document": "one", "blocks": []}, "two") == \
+        "it belongs to document one"
+    assert doc_sync.base_problem({"document": "one"}, "one") == "no blocks"
+    assert doc_sync.base_problem("not json at all", None) == "not a JSON object"
 
 
 def test_the_report_keeps_its_name_beside_a_file_called_doc_html(tmp_path):
@@ -65,8 +72,295 @@ def test_a_base_forgets_the_urls_that_die_within_the_hour(tmp_path):
     path = tmp_path / "doc.html"
     doc_sync.save_base(path, {"document": "d", "blocks": [{"kind": "paragraph", "runs": [
         {"chip": "image", "frozen": True, "text": "", "value": "i.0", "uri": "https://lh7/x"}]}]})
-    run = doc_sync.load_base(path, "d")["blocks"][0]["runs"][0]
+    run = doc_sync.load_local(path, "d")["blocks"][0]["runs"][0]
     assert run["value"] == "i.0" and "uri" not in run
+
+
+# ---------------------------------------------------------------- Drive, faked
+
+def _http(status: int):
+    from googleapiclient.errors import HttpError
+    return HttpError(type("R", (), {"status": status, "reason": "no"})(), b"{}")
+
+
+class _Reply:
+    def __init__(self, run):
+        self.run = run
+
+    def execute(self):
+        return self.run()
+
+
+class _Storage:
+    """Drive as the base storage and the backup see it: a document with
+    `appProperties`, a blob per file id, and an export."""
+
+    def __init__(self, document="doc-1"):
+        self.document, self.props, self.blobs = document, {}, {}
+        self.created, self.exports, self.export_error = [], [], None
+        self.refuse_create = False
+        self.n = 0
+
+    def files(self):
+        return self
+
+    def get(self, fileId, fields=""):
+        def run():
+            if fileId != self.document:
+                raise _http(404)
+            return {"name": "The report", "parents": ["folder"],
+                    "appProperties": dict(self.props)}
+        return _Reply(run)
+
+    def get_media(self, fileId):
+        def run():
+            if fileId not in self.blobs:
+                raise _http(404)
+            return self.blobs[fileId]
+        return _Reply(run)
+
+    def create(self, body, fields="", media_body=None):
+        def run():
+            if self.refuse_create:
+                raise _http(403)
+            self.n += 1
+            fid = f"base-{self.n}"
+            self.blobs[fid] = media_body._fd.getvalue()
+            self.created.append(body)
+            return {"id": fid}
+        return _Reply(run)
+
+    def update(self, fileId, fields="", body=None, media_body=None):
+        def run():
+            if media_body is not None:
+                if fileId not in self.blobs:
+                    raise _http(404)
+                self.blobs[fileId] = media_body._fd.getvalue()
+            if body and body.get("appProperties"):
+                self.props.update(body["appProperties"])
+            return {"id": fileId}
+        return _Reply(run)
+
+    def export(self, fileId, mimeType):
+        def run():
+            if self.export_error:
+                raise self.export_error
+            self.exports.append((fileId, mimeType))
+            return b"<html>the document as it was</html>"
+        return _Reply(run)
+
+
+def _base(generation: int, key: str) -> dict:
+    return {"document": "doc-1", "generation": generation,
+            "blocks": [para(key, "some words")]}
+
+
+def test_a_checkout_with_no_state_folder_finds_the_base_in_drive(tmp_path):
+    """The headline: `.b2s/` is scratch state a fresh clone does not have, and
+    before the base went to Drive that dropped the sync into the `--assume-base`
+    dialog, where both answers throw somebody's work away."""
+    drive = _Storage()
+    doc_sync.save_drive(drive, "doc-1", _base(2, "p:drive"))
+    problems = []
+    base, where = doc_sync.load_base(tmp_path / "doc.html", "doc-1", drive, problems)
+    assert where == "drive" and base["blocks"][0]["key"] == "p:drive"
+    assert problems == []
+    assert drive.props[doc_sync.BASE_PROPERTY] == "base-1"   # the document names it
+
+
+def test_the_base_in_drive_beats_a_stale_copy_beside_the_file(tmp_path):
+    path = tmp_path / "doc.html"
+    drive = _Storage()
+    doc_sync.save_base(path, _base(3, "p:stale"))
+    doc_sync.save_drive(drive, "doc-1", _base(5, "p:drive"))
+    problems = []
+    base, where = doc_sync.load_base(path, "doc-1", drive, problems)
+    assert where == "drive" and base["blocks"][0]["key"] == "p:drive"
+    assert any("another checkout has synced" in line for line in problems), problems
+
+
+def test_a_copy_newer_than_drives_is_the_one_used(tmp_path):
+    """What a sync whose Drive upload failed leaves behind: the cache is ahead."""
+    path = tmp_path / "doc.html"
+    drive = _Storage()
+    doc_sync.save_drive(drive, "doc-1", _base(2, "p:drive"))
+    doc_sync.save_base(path, _base(4, "p:local"))
+    problems = []
+    base, where = doc_sync.load_base(path, "doc-1", drive, problems)
+    assert where == "local" and base["blocks"][0]["key"] == "p:local"
+    assert any("older than the copy beside the file" in line for line in problems), problems
+
+
+def test_the_copy_is_used_with_a_word_about_it_when_drive_has_no_base(tmp_path):
+    path = tmp_path / "doc.html"
+    drive = _Storage()
+    doc_sync.save_base(path, _base(1, "p:local"))
+    problems = []
+    base, where = doc_sync.load_base(path, "doc-1", drive, problems)
+    assert where == "local" and base["blocks"][0]["key"] == "p:local"
+    assert any("Drive has none" in line for line in problems), problems
+
+
+def test_a_base_drive_names_but_cannot_serve_is_said_out_loud(tmp_path):
+    """Deleted, or somebody else's now. Nothing is lost by syncing from the copy —
+    the document wins where both moved — but the copy may be older than the
+    document, and that is the person's to know."""
+    path = tmp_path / "doc.html"
+    drive = _Storage()
+    doc_sync.save_drive(drive, "doc-1", _base(2, "p:drive"))
+    drive.blobs.clear()
+    doc_sync.save_base(path, _base(1, "p:local"))
+    problems = []
+    base, where = doc_sync.load_base(path, "doc-1", drive, problems)
+    assert where == "local" and base["blocks"][0]["key"] == "p:local"
+    assert any("cannot be read" in line for line in problems), problems
+
+
+def test_a_base_from_another_document_is_ignored_wherever_it_sits(tmp_path):
+    path = tmp_path / "doc.html"
+    drive = _Storage()
+    doc_sync.save_drive(drive, "doc-1", {"document": "elsewhere", "blocks": []})
+    doc_sync.save_base(path, {"document": "elsewhere", "blocks": []})
+    problems = []
+    assert doc_sync.load_base(path, "doc-1", drive, problems) == (None, "none")
+    assert len(problems) == 2 and all("belongs to document elsewhere" in p for p in problems)
+
+
+def test_with_no_base_anywhere_the_assume_base_dialog_is_what_is_left(tmp_path):
+    path = tmp_path / "doc.html"
+    assert doc_sync.load_base(path, "doc-1", _Storage(), []) == (None, "none")
+    with pytest.raises(SystemExit) as raised:
+        doc_sync._no_base(path, {"blocks": []}, {"blocks": []}, None)
+    said = str(raised.value)
+    assert "document-wins" in said and "source-wins" in said
+    # and it says, for each answer, whose work it discards.
+    assert "every edit made to the source since the last sync is discarded" in said
+    assert "every edit a reader made there since the last sync is discarded" in said
+
+
+def test_a_stored_base_goes_to_both_places_and_the_count_rises(tmp_path):
+    path = tmp_path / "doc.html"
+    drive = _Storage()
+    assert doc_sync.store_base(path, _base(0, "p:one"), drive, "doc-1", previous=4) is None
+    assert doc_sync.load_local(path, "doc-1")["generation"] == 5
+    assert doc_sync.load_drive(drive, "doc-1")["generation"] == 5
+    doc_sync.store_base(path, _base(0, "p:one"), drive, "doc-1", previous=5)
+    assert len(drive.created) == 1                       # the same file, written again
+    assert doc_sync.load_drive(drive, "doc-1")["generation"] == 6
+
+
+def test_a_drive_write_that_fails_keeps_the_cache_and_says_why(tmp_path):
+    """A Drive write that fails must never fail the sync: the document has already
+    been written by then, and the cache is a base the next run can still use."""
+    path = tmp_path / "doc.html"
+    drive = _Storage()
+    drive.refuse_create = True
+    why = doc_sync.store_base(path, _base(0, "p:one"), drive, "doc-1")
+    assert why and "HttpError" in why
+    assert doc_sync.load_local(path, "doc-1")["generation"] == 1
+
+
+# ---------------------------------------------------------------- --assume-base
+
+def test_the_assume_base_names_say_which_side_loses(capsys):
+    assert doc_sync.assume_mode(None) is None
+    assert doc_sync.assume_mode("document-wins") == "document-wins"
+    assert doc_sync.assume_mode("source-wins") == "source-wins"
+    assert capsys.readouterr().out == ""
+    # The old names read backwards — they named the side the base is taken *from*,
+    # which is the side whose changes are thereby thrown away.
+    assert doc_sync.assume_mode("file") == "document-wins"
+    assert "old name" in capsys.readouterr().out
+    assert doc_sync.assume_mode("document") == "source-wins"
+    assert "reader made there" in capsys.readouterr().out
+
+
+def test_the_destructive_direction_exports_the_document_first(tmp_path):
+    path = tmp_path / "doc.html"
+    drive = _Storage()
+    ours, theirs = {"blocks": ["the file"]}, {"blocks": ["the document"]}
+    base, kept = doc_sync._no_base(path, ours, theirs, "source-wins", drive, "doc-1")
+    assert base is theirs                       # every difference is the source's
+    assert kept and kept.parent == tmp_path / ".b2s" / "backups"
+    assert kept.read_bytes() == b"<html>the document as it was</html>"
+    assert drive.exports == [("doc-1", "text/html")]
+    # The other direction writes nothing to the document, so it needs no way back.
+    base, kept = doc_sync._no_base(path, ours, theirs, "document-wins", drive, "doc-1")
+    assert base is ours and kept is None and len(drive.exports) == 1
+
+
+def test_a_backup_drive_refuses_stops_that_sync(tmp_path):
+    """`guard.demand_way_back`'s principle: a write with no way back is something
+    one asks for, and never something that happens because an export failed."""
+    path = tmp_path / "doc.html"
+    drive = _Storage()
+    drive.export_error = _http(403)
+    ours, theirs = {"blocks": ["the file"]}, {"blocks": ["the document"]}
+    with pytest.raises(SystemExit) as raised:
+        doc_sync._no_base(path, ours, theirs, "source-wins", drive, "doc-1")
+    assert "--no-backup" in str(raised.value)
+    base, kept = doc_sync._no_base(path, ours, theirs, "source-wins", drive, "doc-1",
+                                   backup=False)
+    assert base is theirs and kept is None
+
+
+# ---------------------------------------------------------------- batching
+
+class _Batches:
+    """Docs' `batchUpdate`, remembering every body it was given."""
+
+    def __init__(self, revisions=True):
+        self.sent, self.revisions, self.n = [], revisions, 0
+
+    def documents(self):
+        return self
+
+    def batchUpdate(self, documentId, body):
+        def run():
+            self.n += 1
+            self.sent.append(body)
+            out = {"replies": [{"n": i} for i in range(len(body["requests"]))]}
+            if self.revisions:
+                out["writeControl"] = {"requiredRevisionId": f"rev{self.n}"}
+            return out
+        return _Reply(run)
+
+
+def _texts(count):
+    return [{"insertText": {"location": {"index": i + 1}, "text": str(i)}}
+            for i in range(count)]
+
+
+def test_a_plan_up_to_the_threshold_is_one_batch_and_stays_atomic():
+    docs, notes = _Batches(), []
+    doc_sync.send(docs, "d", _texts(doc_sync.CHUNK), "rev0", notes)
+    assert len(docs.sent) == 1 and notes == []
+    assert docs.sent[0]["writeControl"] == {"requiredRevisionId": "rev0"}
+
+
+def test_a_long_plan_is_cut_in_order_with_the_revision_chained():
+    """Docs applies a batch in order, so consecutive batches write the same
+    document — as long as nothing is reordered and no request crosses a boundary.
+    The guard has to carry across: each batch requires the revision the one before
+    it produced, so somebody typing half-way through the run is still refused."""
+    docs, notes = _Batches(), []
+    requests = _texts(doc_sync.CHUNK * 2 + 3)
+    answer = doc_sync.send(docs, "d", requests, "rev0", notes)
+    assert [len(body["requests"]) for body in docs.sent] == [doc_sync.CHUNK, doc_sync.CHUNK, 3]
+    assert [r for body in docs.sent for r in body["requests"]] == requests
+    assert [body["writeControl"]["requiredRevisionId"] for body in docs.sent] == \
+        ["rev0", "rev1", "rev2"]
+    assert len(answer["replies"]) == len(requests)
+    # And the atomicity it costs is said, not hidden.
+    assert notes and "3 batches" in notes[0] and "fails part-way" in notes[0]
+
+
+def test_without_a_write_control_in_the_answer_the_later_batches_go_unguarded():
+    """Unmeasured against the live API: whether the answer always carries one. If
+    it does not, the chain stops guarding rather than sending a stale revision."""
+    docs = _Batches(revisions=False)
+    doc_sync.send(docs, "d", _texts(doc_sync.CHUNK + 1), "rev0")
+    assert "writeControl" in docs.sent[0] and "writeControl" not in docs.sent[1]
 
 
 class _Staging:
