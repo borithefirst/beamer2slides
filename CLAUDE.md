@@ -1173,7 +1173,9 @@ library's own compiles are fenced as the playground's are; 80 MB and 3000 files 
 last 12 kept. A deck **this app did not make** is unreachable under `drive.file`, which is what
 keeps that scope non-sensitive, so `deck`/`doc` arguments grow a Google **Picker** button where
 `B2S_PLAYGROUND_GOOGLE_API_KEY` names a browser key: the visitor picks the file in Google's own
-window and that grants this app `drive.file` on that one file.
+window and that grants this app `drive.file` on that one file. A `signin` thing only (`canPick`):
+the Picker wants a token from the *browser*, and in `local` mode the host's own token carries
+`presentations` and already reaches whatever its owner can open.
 Tests: `tests/test_playground.py` and `tests/test_workbench.py` (offline: a workspace through the
 HTTP API, a journey in its own process, the boundary, the time limit, and where the token goes).
 

@@ -88,6 +88,11 @@ answer: the visitor chooses the file in Google's own window, and that choice gra
 a *Pick from Drive…* button. An API key is not a secret; like the client id it belongs in the
 deployment's environment. Without one the buttons are simply not there.
 
+They are a `signin` thing only. The Picker wants an OAuth token from the *browser*, and the
+browser has one exactly where visitors sign in; in `local` mode the token is the host's own, it
+carries `presentations` as well, and it already reaches whatever its owner can open - so there is
+nothing for a Picker to grant there, and the button would be a promise the page cannot keep.
+
 ## The Google deck
 
 A public playground must never convert into its owner's Drive, so whose Drive a deck goes into

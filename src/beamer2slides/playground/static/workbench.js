@@ -165,7 +165,7 @@ function pickTool() {
     input.dataset.arg = name;
     input.dataset.kinds = kinds.join(" ");
     row.append(input);
-    if (PICKABLE[name] && config.google_api_key) {
+    if (PICKABLE[name] && canPick()) {
       const b = Object.assign(document.createElement("button"),
                               { type: "button", className: "pick", textContent: "Pick from Drive…" });
       b.onclick = () => pick(name, input);
@@ -205,8 +205,17 @@ function values() {
 // invisible to `deck_adopt` and `deck_pull`. The Picker is Google's own answer: the visitor
 // chooses the file in Google's window, and that choice grants this app `drive.file` on that one
 // file. The app id is the project number, which is what a web client id starts with.
+//
+// It is a `signin` thing only: the Picker wants an OAuth token from the browser, and the browser
+// has one exactly where visitors sign in. In `local` mode the token is the host's own, it carries
+// `presentations` as well, and it already reaches whatever its owner can open - so there is
+// nothing for a Picker to grant there, and the button would only be a promise the page cannot keep.
 const PICKABLE = { deck: "presentation", doc: "document" };
 let pickerLoaded = null;
+
+function canPick() {
+  return config.google === "signin" && config.google_api_key && config.google_client_id;
+}
 
 function pickerReady() {
   pickerLoaded = pickerLoaded || loadScript("https://apis.google.com/js/api.js")
