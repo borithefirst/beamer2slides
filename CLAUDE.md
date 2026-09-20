@@ -100,9 +100,10 @@ a per-slide background picture.
   FindSubstFace, CFX_Win32FontInfo through GDI's own CreateFont/GetTextFace; the TrueType and
   Type 1 LoadGlyphMap over FreeType's charmap list), with PDFium's built-in Foxit faces (MM ones
   blended, `pure/type1.py`) loaded from a user cache that `python -m beamer2slides.pdf.pure.foxit`
-  fills from PDFium's sources with pinned SHA-256 (no binaries in the tree); without the cache, or
-  outside Windows, the older rules stay and `test_substituted_fonts_are_measured_with_pdfiums_face`
-  skips. Substituted text in a Foxit face draws as PDFium's (`render_text._SubstFace`: Symbol and
+  fills from PDFium's sources with pinned SHA-256 (no binaries in the tree); without the cache the
+  older rules stay and `test_substituted_fonts_are_measured_with_pdfiums_face` skips - with it the
+  test runs everywhere against the platform's own chain (`platform_font_info` picks it; CI fills the
+  cache on all three and its conformance step runs the same 402 tests on each). Substituted text in a Foxit face draws as PDFium's (`render_text._SubstFace`: Symbol and
   ZapfDingbats CFF; FoxitSansMM/SerifMM blended per glyph to weight and /Widths width - process-wide
   face state, as in PDFium - skewed by the italic angle; GetCharPosList's spacing heuristic; oracle
   `tools/render_torture_subst.py`, made-up non-embedded fonts, 6,000 seeds exact - a face's blend is
