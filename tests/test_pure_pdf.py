@@ -425,7 +425,14 @@ def test_the_pure_renderer_survives_shading_torture_seeds():
 # lattice + Coons (t5, t6), free triangles + tensor (t4, t7), function-based over CIE (t1), and
 # /TR, /TR arrays and soft-mask /TR together
 _SHADING_SEEDS = [("cie", 5), ("cie", 48), ("mesh", 21), ("mesh", 35), ("mesh", 64), ("func", 22),
-                  ("transfer", 7), ("transfer", 100)]
+                  ("transfer", 7), ("transfer", 100),
+                  # a cell taller than the clip (the tiles are drawn one by one, not stamped from
+                  # a bitmap) holding a form, under a path whose fill alpha the tiles inherit
+                  ("tiling", 858),
+                  # the aligned grids (/BBox [0 0 XStep YStep] under a scaled or 90-rotated
+                  # matrix: integer device steps) and a cell under 16 pixels, which PDFium draws
+                  # at 8 x 8 and stretches down
+                  ("tiling", 0), ("tiling", 62), ("tiling", 10)]
 
 
 @pytest.mark.parametrize("mode, seed", _SHADING_SEEDS)
@@ -443,6 +450,17 @@ def test_the_pure_renderer_survives_new_shading_torture_modes(mode):
     stats = run(0, 25, verbose=False, mode=mode)
     assert not stats["failed"], (f"seeds apart (python tools/render_torture_shading.py SEED 1 --mode {mode}): "
                                  f"{stats['failed']}")
+    assert stats["drawn"] >= 18
+
+
+def test_the_pure_renderer_survives_tiling_pattern_torture_seeds():
+    """Tiling patterns (`pdf/pure/render_pattern.py`): a slice of the random pages the cell drawing
+    and the tile walk were made exact on (4,000 seeds when it was written, none apart; a third of
+    them refused for an uncoloured cell or a pattern inside a form)."""
+    from beamer2slides.devtools.render_torture_shading import run
+    stats = run(0, 30, verbose=False, mode="tiling")
+    assert not stats["failed"], ("seeds apart (python tools/render_torture_shading.py SEED 1 "
+                                 f"--mode tiling): {stats['failed']}")
     assert stats["drawn"] >= 18
 
 
