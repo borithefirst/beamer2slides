@@ -984,6 +984,37 @@ def test_a_system_face_does_not_carry_its_charmap_into_the_next_document():
     assert not any(apart.values()), apart
 
 
+def test_a_cached_system_face_lives_while_a_document_holds_it():
+    """The cache entry is an ObservedPtr: two documents drawing the same substitute share the face
+    (CFX_FontMapper hands out the one it has), and the entry goes when the last of them closes."""
+    from beamer2slides.devtools.render_torture_subst import FontSpec, pdf_bytes
+    from beamer2slides.pdf.pure import fontmapper
+    from beamer2slides.pdf.pure.backend import PureBackend
+    _needs_foxit()
+    spec = FontSpec("arial", "installed",
+                    [b"<< /Type /Font /Subtype /TrueType /BaseFont /Arial /FontDescriptor @1@ >>",
+                     b"<< /Type /FontDescriptor /FontName /Arial /Flags 32 >>"], [65])
+    data = pdf_bytes(b"BT /F0 20 Tf 10 10 Td (Arial) Tj ET", [spec])
+    m = fontmapper.mapper()
+    first = PureBackend().open(data)
+    first[0].render(1)
+    held = set(first.pdf.__dict__.get("_b2s_held_faces", ()))
+    if not held:
+        first.close()
+        pytest.skip("this platform's font info gave no system face")
+    counts = {key: m.holders[key] for key in held}
+    second = PureBackend().open(data)
+    second[0].render(1)
+    assert all(m.holders[key] == counts[key] + 1 for key in held)
+    first.close()
+    assert all(m.holders[key] == counts[key] for key in held)
+    assert all(name in (m.ttc_face_map if kind == "ttc" else m.face_map) for kind, name in held)
+    second.close()
+    alone = [key for key in held if counts[key] == 1]      # what no other open document holds
+    assert all(key not in m.holders for key in alone)
+    assert all(name not in (m.ttc_face_map if kind == "ttc" else m.face_map) for kind, name in alone)
+
+
 # ---------------------------------------------------------------------- PDFium's rules, one by one
 
 
