@@ -108,6 +108,74 @@ def test_labels_swapped_between_two_frames_that_also_share_a_title():
     assert identity.align_slides(base, ours) == {0: 0, 1: 1}, "the words decide, and they are right"
 
 
+REVENUE3 = "revenue rose in the third quarter and the table below lists every region we sell in"
+REVENUE4 = "revenue fell in the fourth quarter and the chart below ranks every partner we work with"
+
+
+def test_a_label_pasted_onto_the_twin_beside_it_is_an_exchange():
+    """The commonest way a label really moves, and one nothing above could see: `[label=q3]` cut
+    from one frame and pasted onto the near-twin after it, both frames reworded a little in the
+    same version. The frame it left is now *unlabelled*, so there is no second pairing to notice
+    the crossing from, and nothing is word for word right, so exactness has nothing to say. The
+    pairing the paste leaves behind scores 1.06 while both other readings score 1.44: better by
+    0.375, which `LABEL_MARGIN` still calls a tie.
+
+    What decides it is that the two readings point back at *this* pairing - the frame explaining
+    this label's slide belongs on the slide explaining this frame, each looking there before
+    anywhere else. That is two frames changing places and nothing else known to produce it
+    (`identity.exchanged`, `LABEL_EXCHANGE`)."""
+    base = [info("Results", REVENUE3, "q3"), info("Results", REVENUE4)]
+    ours = [info("Results", REVENUE3.replace("rose", "climbed")),
+            info("Results", REVENUE4.replace("fell", "dropped"), "q3")]
+    own = identity._evidence(base[0], ours[1])
+    assert identity._evidence(base[0], ours[0]) - own < identity.LABEL_MARGIN, "the margin sees a tie"
+    assert not identity._complete(base[0], ours[0], identity._evidence(base[0], ours[0])), "nothing exact"
+    (m,) = identity.label_moves(base, ours)
+    assert m["verdict"] == "moved" and m["label"] == "q3"
+    assert m["frame_is"] == 1 and m["slide_is"] == 0
+    assert identity.align_slides(base, ours) == {0: 0, 1: 1}, "the words decide, and they are right"
+    assert identity.label_pairs(base, ours) == {1: 0}, "the label alone would have crossed them"
+
+
+def test_two_twins_reworded_with_their_labels_where_they_belong_say_nothing():
+    """The same deck with nobody touching a label, which is what keeps `LABEL_EXCHANGE` as small as
+    it is. An exchange asks for the rivals to beat the label's own pairing; here they lose to it by
+    the same 0.375, because each frame still looks most like the slide it came from. A deck of
+    twins where nothing moved has *negative* room, not a little - only a crossing makes it
+    positive, and that is why a bar of 0.1 costs nothing (no sound round in 1,392 chained ones
+    says a word)."""
+    base = [info("Results", REVENUE3, "q3"), info("Results", REVENUE4, "q4")]
+    ours = [info("Results", REVENUE3.replace("rose", "climbed"), "q3"),
+            info("Results", REVENUE4.replace("fell", "dropped"), "q4")]
+    own = identity._evidence(base[0], ours[0])
+    assert identity._evidence(base[0], ours[1]) - own < 0, "the rival loses to the pairing itself"
+    assert identity.label_moves(base, ours) == []
+    assert identity.align_slides(base, ours) == {0: 0, 1: 1}
+
+
+def test_a_frame_reworded_on_a_deck_of_twins_is_no_exchange():
+    """What the look back is for, and the reason `LABEL_EXCHANGE` may be as low as it is. Two
+    parallel frames, and the source brings the labelled one into line with the other's phrasing -
+    a real edit somebody makes on purpose. Every number an exchange asks for is there: both
+    readings clear `LABEL_MOVED` (1.27 and 1.32) and both beat the label's own pairing (1.09) by
+    0.18. But they are not about each other - the frame explaining this label's slide is the twin,
+    whose own slide is the other one, so the look back lands elsewhere and the rule says nothing.
+
+    Firing here would be the worst kind of mistake this file can make: `moved` re-pairs, so the
+    person's edits on the first slide would receive the second frame's text."""
+    roadmap = "the roadmap for the first half lists the launches the hires and the budget we asked for"
+    twin = "the roadmap for the second half ranks the partners the regions and the budget we asked for"
+    reworded = "the roadmap for the second half ranks the partners the regions and the money we put in"
+    base = [info("Roadmap", roadmap, "half1"), info("Roadmap", twin)]
+    ours = [info("Roadmap", reworded, "half1"), info("Roadmap", twin)]
+    own = identity._evidence(base[0], ours[0])
+    here, there = identity._evidence(base[0], ours[1]), identity._evidence(base[1], ours[0])
+    assert min(here, there) >= identity.LABEL_MOVED
+    assert min(here, there) - own >= identity.LABEL_EXCHANGE, "every number says exchange"
+    assert identity.label_moves(base, ours) == [], "the readings point elsewhere, so nothing is said"
+    assert identity.align_slides(base, ours) == {0: 0, 1: 1}
+
+
 def test_one_twin_edited_is_not_a_swap():
     """The mirror image, and the reason the exactness is asked for on both sides: two frames that
     say word for word the same thing, nobody touching a label, and the source rewording one of

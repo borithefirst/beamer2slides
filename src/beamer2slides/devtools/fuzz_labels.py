@@ -83,6 +83,30 @@ def _wrong(pairs, ours_truth, base_truth) -> int:
     return len(_wrong_frames(pairs, ours_truth, base_truth))
 
 
+def _costly(wrong, pairs, ours_truth, base_truth, ours) -> int:
+    """Of the frames on the wrong slide, the ones a person would see.
+
+    Two frames that say *word for word* the same thing are interchangeable: sync writes this
+    frame's text onto the other one's slide and the other one's onto this slide, and each receives
+    exactly what it would have received anyway. Nobody's words move, so that pairing is wrong on
+    paper and nowhere else - which matters, because a deck `adopt` wrote repeats itself and a
+    campaign counting those frames is reporting a number nobody can feel. What is left is a frame
+    whose words or title differ from the frame that should have had this slide: a slide that really
+    does end up saying something else."""
+    def words(info: dict) -> tuple:
+        return info.get("title", ""), tuple(info["text"].split())
+
+    costly = 0
+    for j in wrong:
+        i = pairs.get(j)
+        mate = None
+        if i is not None and base_truth[i] in ours_truth:
+            mate = ours_truth.index(base_truth[i])
+        if mate is None or words(ours[mate]) != words(ours[j]):
+            costly += 1
+    return costly
+
+
 def round_once(seed: int, label_chance: float, tmp: Path, chain: int = 1,
                shape: str = "converted") -> list[dict]:
     """One deck, `chain` revisions of it in a row. Each revision is measured against the one before
@@ -151,6 +175,7 @@ def round_once(seed: int, label_chance: float, tmp: Path, chain: int = 1,
                 and infos[j].get("label") != base_infos[i].get("label")
         steps.append({"seed": seed, "step": step, "broke": broke, "said": said, "ops": done,
                       "weak": sum(1 for j in wrong_now if warned(j)), "weak_all": len(weak),
+                      "costly": _costly(wrong_now, pairings["now"], ours_truth, base_truth, infos),
                       "reordered": any(line.startswith("move_slide") and not line.endswith("None") for line in done),
                       "wrong": {k: _wrong(p, ours_truth, base_truth) for k, p in pairings.items()},
                       "frames": len(ours_truth)})
@@ -187,6 +212,7 @@ def main() -> int:
                 for how, w in r["wrong"].items():
                     frames[f"{group}/{how}"] += w
                 frames[f"{group}/frames"] += r["frames"]
+                frames[f"{group}/costly"] += r["costly"]
                 tally[f"{group}/warned"] += r["weak_all"]
                 if r["wrong"]["now"]:
                     told = r["said"] != "quiet" or r["weak"]
@@ -206,6 +232,10 @@ def main() -> int:
         for how in ("order", "before", "now"):
             w = frames[f"{group}/{how}"]
             print(f"  {how:6} misidentified {w:5} frames ({100 * w / max(1, frames[f'{group}/frames']):.2f}%)")
+        costly = frames[f"{group}/costly"]
+        print(f"  of the `now` frames, {costly} a person would see "
+              f"({100 * costly / max(1, frames[f'{group}/frames']):.2f}%); the rest are frames that "
+              f"say word for word what the frame they displaced says")
         print("  said " + ", ".join(f"{s} in {tally[f'{group}/said:{s}']}" for s in ("moved", "unsure", "quiet")))
         print(f"  of the rounds still wrong, {tally[f'{group}/said so']} were reported and "
               f"{tally[f'{group}/silent']} passed in silence; {tally[f'{group}/worse']} came out worse than before")

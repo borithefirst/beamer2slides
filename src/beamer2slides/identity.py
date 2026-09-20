@@ -17,6 +17,7 @@ SLIDE_MATCH = 0.6     # least similarity of two unlabelled slides to be the same
 LABEL_SURE = 1.2      # a label pairing this alike (same title, most of the words) needs no second opinion
 LABEL_MOVED = 1.0     # a slide elsewhere this alike may be the frame the label used to name
 LABEL_MARGIN = 0.5    # ... but only if it beats the label's own pairing by this much
+LABEL_EXCHANGE = 0.1  # ... or by this much, if the two readings point at each other (an exchange)
 CROSS_SURE = 1.15     # a slide this alike, left over by the order-keeping pass, is that frame moved
 CROSS_MARGIN = 0.4    # ... unless another leftover comes this close to explaining it too
 GAP_SURE = 0.3        # the only leftover between two paired frames needs this much of the same words
@@ -166,8 +167,9 @@ def label_moves(base: list[dict], ours: list[dict]) -> list[dict]:
     labelled frame look like some *other* base slide (`frame_is`), and does the base's labelled
     slide look like some *other* source frame (`slide_is`)? An explanation counts only if it is
     good on its own (`LABEL_MOVED`) *and* better than the label's own pairing by `LABEL_MARGIN`,
-    or word for word right where the label's own pairing is not - which is what keeps an overlay
-    step, a retitled frame or a frame edited hard from setting this off.
+    or word for word right where the label's own pairing is not, or part of an exchange - two
+    readings pointing at each other (`exchanged`) - which is what keeps an overlay step, a
+    retitled frame or a frame edited hard from setting this off.
 
     - both, clearly: `moved`. The label is ignored for pairing and the content decides, which is
       also where the person's edits belong - they edited those words, not that label.
@@ -208,18 +210,63 @@ def label_moves(base: list[dict], ours: list[dict]) -> list[dict]:
                 top = (score, k)
         return top
 
+    # A slide carrying this frame's own label is another overlay step of this very frame, not
+    # another frame: `--overlays all` keeps one slide per step, they say word for word what the
+    # step before said plus a bullet, and a step dropped or added leaves the one beside it
+    # explaining the pairing exactly. That is the frame itself, so it explains nothing about
+    # where its label went (`test_overlay_steps_of_one_frame_are_never_a_move`).
+    def apart(a: dict, b: dict) -> bool:
+        """Not two overlay steps of one frame. A label names a frame, so the same label on both
+        sides is that frame itself; two *unlabelled* slides say nothing of the kind, and reading
+        `None == None` as one frame would hide half the deck from the check."""
+        return not a.get("label") or a.get("label") != b.get("label")
+
+    def rivals(i: int, j: int) -> tuple[float, int | None, float, int | None]:
+        """The best explanation on each side of the pairing (label j, slide i): the frame that
+        looks most like this slide, and the slide that looks most like this frame."""
+        here, slide_is = best((_evidence(base[i], ours[k]), k) for k in free_ours
+                              if k != j and apart(base[i], ours[k]))
+        there, frame_is = best((_evidence(base[k], ours[j]), k) for k in free_base
+                               if k != i and apart(ours[j], base[k]))
+        return here, slide_is, there, frame_is
+
+    def exchanged(j: int) -> bool:
+        """Do the two readings this pairing is up against point back at *it*?
+
+        A frame the source merely reworded looks a bit like half the deck, and one loud rival says
+        little. Two that agree say something else: the frame explaining this label's slide belongs
+        on the slide explaining this frame, each looking there before anywhere else - which is a
+        label and a frame that changed places, and nothing else known to produce it. So inside such
+        an exchange the bar is `LABEL_EXCHANGE` rather than `LABEL_MARGIN`, which no swap between
+        near-twins can ever meet. Innocent twins do *not* clear even that: they tie (the twin
+        explains the slide exactly as well as the label's own pairing does), and a tie is 0.
+
+        The other frame carries no label of its own here. `[label=intro]` pasted onto the next
+        frame is how a label moves in practice, and the frame it left is then unlabelled, so
+        nothing pairs it and there is no second pairing to notice the exchange from.
+        """
+        i = pairs[j]
+        here, slide_is, there, frame_is = look[j]
+        if slide_is is None or frame_is is None or min(here, there) < LABEL_MOVED:
+            return False
+        if min(here, there) - own[j] < LABEL_EXCHANGE:
+            return False
+        # Nothing is left out of the look back, though `rivals` leaves out the pairing's own two
+        # sides: the frame that best explains the slide this frame would move to may well be the
+        # twin standing beside it, and then the two readings are not about each other at all -
+        # they are two frames that both look like the deck's other half
+        # (`test_a_frame_reworded_on_a_deck_of_twins_is_no_exchange`).
+        _, back_i = best((_evidence(base[s], ours[slide_is]), s) for s in free_base
+                         if apart(ours[slide_is], base[s]))
+        _, back_j = best((_evidence(base[frame_is], ours[m]), m) for m in free_ours
+                         if apart(base[frame_is], ours[m]))
+        return back_i == i and back_j == j
+
+    look = {j: rivals(pairs[j], j) for j in doubt}
     found: dict[str, dict] = {}
     for j in doubt:
         i = pairs[j]
-        # A slide carrying this frame's own label is another overlay step of this very frame, not
-        # another frame: `--overlays all` keeps one slide per step, they say word for word what the
-        # step before said plus a bullet, and a step dropped or added leaves the one beside it
-        # explaining the pairing exactly. That is the frame itself, so it explains nothing about
-        # where its label went (`test_overlay_steps_of_one_frame_are_never_a_move`).
-        here, slide_is = best((_evidence(base[i], ours[k]), k) for k in free_ours
-                              if k != j and ours[k].get("label") != base[i].get("label"))
-        there, frame_is = best((_evidence(base[k], ours[j]), k) for k in free_base
-                               if k != i and base[k].get("label") != ours[j].get("label"))
+        here, slide_is, there, frame_is = look[j]
         # Two frames that say nearly the same thing cannot be told apart by `LABEL_MARGIN`: the
         # pairing a label swapped between them leaves behind is already 0.85 alike, and nothing
         # can beat that by half. What such a move does do is come out *exact* - word for word -
@@ -238,8 +285,10 @@ def label_moves(base: list[dict], ours: list[dict]) -> list[dict]:
         own_exact = _complete(base[i], ours[j], own[j])
         here_exact = slide_is is not None and not own_exact and _complete(base[i], ours[slide_is], here)
         there_exact = frame_is is not None and not own_exact and _complete(base[frame_is], ours[j], there)
-        strong = (here >= LABEL_MOVED and (here - own[j] >= LABEL_MARGIN or (here_exact and there_exact)),
-                  there >= LABEL_MOVED and (there - own[j] >= LABEL_MARGIN or there_exact))
+        trade = exchanged(j)
+        strong = (here >= LABEL_MOVED and (trade or here - own[j] >= LABEL_MARGIN
+                                           or (here_exact and there_exact)),
+                  there >= LABEL_MOVED and (trade or there - own[j] >= LABEL_MARGIN or there_exact))
         if not any(strong):
             continue
         label = ours[j]["label"]

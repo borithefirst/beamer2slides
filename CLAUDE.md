@@ -534,6 +534,19 @@ misidentified frames go 510 -> **428** (2.32% -> 1.94%), told 150 -> **167**, si
 at chance 0.5 on that deck, 194 -> 153 frames and 45 -> **16** silent rounds; on a converted talk,
 identical again. The price is one question: over 1524 adopt-shaped and 1524 converted sound rounds
 there is a single `unsure` (seed 5179), no `moved`, and not one frame on the wrong slide.
+Two readings that **point at each other** are an exchange, and inside one the bar is `LABEL_EXCHANGE`
+(0.1) rather than the margin (`identity.exchanged`): exactness reaches a label swapped between two
+labelled frames, but the commonest move is `[label=q3]` pasted onto the near-twin after it, leaving
+the frame it came from unlabelled - no second pairing to see the crossing from, and, once both
+frames are reworded, nothing word for word either. What decides it is that the frame explaining this
+label's slide belongs on the slide explaining this frame, each looking there before anywhere else;
+twins that nobody touched *tie* (gap 0) and a frame merely reworded loses to its own pairing. The
+look back carries the rule, not the number - a frame reworded into its twin's phrasing clears every
+bar and is refused because its two rivals are about each other
+(`test_a_frame_reworded_on_a_deck_of_twins_is_no_exchange`; `moved` re-pairs, so a wrong one is
+edits on the wrong slide). Measured where it belongs, on a source revised again and again: 700
+four-deep chains (7766 frames) go 162 -> **146** misidentified (2.09% -> 1.88%) and 23 -> **15**
+silent rounds, sound rounds identical to the last verdict; unchained, 288 -> 282 of 13,860.
 What the order-keeping alignment leaves over is picked up twice more (`tests/test_frame_moves.py`):
 by content, when one leftover frame explains one leftover slide and no other comes close
 (`identity.cross_pairs`, `CROSS_SURE`/`CROSS_MARGIN`) - that is a frame the source moved across

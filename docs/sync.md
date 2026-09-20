@@ -380,6 +380,21 @@ word for word what the step before said plus a bullet). Without that, a step dro
 be a question on every sync, since the step beside the pairing explains it exactly
 (`test_overlay_steps_of_one_frame_are_never_a_move`).
 
+**Two readings that point at each other are an exchange**, and inside one the bar is
+`LABEL_EXCHANGE` (0.1) rather than `LABEL_MARGIN` (`identity.exchanged`). Exactness reaches a label
+swapped between two *labelled* frames, but the commonest way a label really moves is a person
+cutting `[label=q3]` from one frame and pasting it onto the near-twin after it: the frame it left
+is then unlabelled, so nothing pairs it and there is no second pairing to notice the crossing from.
+Reword both frames a little in the same version and nothing is word for word either. What is left
+is that the frame explaining this label's slide belongs on the slide explaining this frame, **each
+looking there before anywhere else** - two frames changing places, and nothing else known to
+produce it. Innocent twins do not clear even a bar of 0.1: they *tie* (the twin explains the slide
+exactly as well as the label's own pairing does), and where the source merely reworded a frame they
+lose to it outright. The look back is what carries the rule, not the number: a frame reworded into
+its twin's phrasing clears every numeric bar, and is refused because its two rivals are about each
+other rather than about it (`test_a_frame_reworded_on_a_deck_of_twins_is_no_exchange` - which
+matters more than yield, since `moved` re-pairs, and a wrong `moved` is edits on the wrong slide).
+
 The title counts by degree, not as yes or no (`identity._title_alike`). The stress deck moves a
 label and retitles all 48 frames in the same version ("Moving labels" → "Moving labels v2"), and a
 yes-or-no "same title?" says no to every pair at once - which leaves the frame the label left no
@@ -418,14 +433,22 @@ of the one before it. 1500 rounds, 8239 frames:
 |---|---|---|---|
 | labels sound | 0.00% | 0.00% | 0.00% |
 | labels sound, a frame moved | 0.00% | 0.00% | 0.00% |
-| labels broken | 12.34% | 12.34% | **1.65%** |
+| labels broken | 12.34% | 12.34% | **1.55%** |
 | labels broken, a frame moved | 11.49% | 11.49% | **0.68%** |
+
+The campaign also says how many of those frames **a person would see** (`fuzz_labels._costly`). Two
+frames that say word for word the same thing are interchangeable: sync writes this frame's text onto
+the other one's slide and the other one's onto this slide, and each slide receives exactly what it
+would have received anyway, so the pairing is wrong on paper and nowhere else. On a deck that
+repeats itself that is not a rare accident — of 32 misidentified frames in 372 broken rounds, 6 are
+of that kind — and a number counting them is one nobody can feel. The columns above are the strict
+count; the costly one is the one to improve.
 
 `before` equals `order` frame for frame: `cross_pairs` and `gap_pairs`, which take 5.53% to 0.00% on
 a converted talk, **recover nothing at all** here — one leftover never explains one slide
 unmistakably when six slides say the same four words, and no gap holds one slide and one frame that
-share words nobody else shares. `label_moves` still earns its place, but saves less (1.65%, against
-1.04%) and says less. Three rules stand between `LABEL_MARGIN` and a deck of twins, and each was
+share words nobody else shares. `label_moves` still earns its place, but saves less (1.55%, against
+1.04%) and says less. Four rules stand between `LABEL_MARGIN` and a deck of twins, and each was
 measured the same way: the campaign run twice over the same seeds, with only `label_moves` swapped
 for the version before it. The **swap rule** was worth 2.94% → 2.18% of frames misidentified when it
 went in (at label-chance 1 *every* round the pairing still got wrong used `move_label`, and the 54
@@ -444,6 +467,16 @@ and of the wrong rounds 150 → **167** are told and 117 → **59** pass in sile
 0.5 on the same deck (3000 rounds) it is 194 → 153 frames and 45 → **16** silent rounds. On a
 converted talk (3000 rounds at chance 0.5) every figure is identical, down to the single silent
 round of 1476: nothing there is a swap between near-twins for either rule to fire on.
+
+The **exchange** is measured where it belongs, on a source revised again and again: 700 four-deep
+chains (1408 broken rounds, 7766 frames) take misidentified frames 162 → **146** (2.09% → 1.88%),
+`moved` verdicts 378 → 387, and the rounds that got a pairing wrong and said nothing 23 → **15** —
+a third of the silence left, in the shape a revised talk really has. Unchained it reaches less
+(2500 rounds at label-chance 1: 288 → **282** frames, 40 → 38 silent), because a label pasted onto
+an unlabelled twin needs both frames reworded before the margin loses sight of it, and that takes a
+second revision. On a converted talk, identical in every figure again. The 1392 sound rounds of the
+chained campaign are identical too, down to the same three `unsure` verdicts and no frame on the
+wrong slide: a deck where nothing moved has *negative* room for an exchange, not a little.
 
 What a sound round hears is the price, and it is one question: across 1524 adopt-shaped and 1524
 converted sound rounds there is a single `unsure` (seed 5179, a source that retitles one frame while
