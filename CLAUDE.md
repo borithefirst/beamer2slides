@@ -84,7 +84,8 @@ a per-slide background picture.
   content included; one torture shading refused), and on their first 10 pages every other call too -
   drawings, links, glyph widths, clipped/transparent/partial renders and `embedded_image` with
   PDFium's own bitmaps (GetBitmap, GetRenderedBitmap: `backend._image_pixels`, `_rendered_image`).
-  Which pages are refused was measured the same way: of 38,017 pages in
+  Which pages are refused was measured the same way (`devtools/refusal_sweep.py`, read-only, one
+  process per slice, resumable): of 38,017 pages in
   4,435 PDFs, 53 (0.14%) in 27 documents - ICC profiles 32, text needing a fallback font 11, tiling
   patterns 2, and no JPX, JBIG2, CCITT or image transfer function anywhere. With sRGB profiles,
   soft-masked images and tiling patterns ported, the only real documents left are 3 PDFs whose 9
