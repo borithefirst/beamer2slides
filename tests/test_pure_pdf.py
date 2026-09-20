@@ -867,10 +867,10 @@ def _needs_foxit():
         pytest.skip(f"the Foxit faces are not in {foxit.cache_dir()}: python -m beamer2slides.pdf.pure.foxit")
 
 
-def _subst_font(base, flags, extra=b"", desc=b""):
+def _subst_font(base, flags, extra=b"", desc=b"", subtype=b"Type1"):
     from beamer2slides.devtools.render_torture_text import FontSpec
     return FontSpec(base.decode(), "unknown", [
-        b"<< /Type /Font /Subtype /Type1 /BaseFont /%s %s /FontDescriptor @1@ >>" % (base, extra),
+        b"<< /Type /Font /Subtype /%s /BaseFont /%s %s /FontDescriptor @1@ >>" % (subtype, base, extra),
         b"<< /Type /FontDescriptor /FontName /%s /Flags %d /FontBBox [0 -200 1000 900] %s >>" % (base, flags, desc)], [65])
 
 
@@ -894,6 +894,16 @@ SUBST_TEXT_CASES = {
     "dingbats_spacing_heuristic": (b"BT /F0 30 Tf 5 60 Td (ABCDEF) Tj ET",
                                    [_subst_font(b"ZapfDingbats,Bold", 4, _WIDTHS + b" /Encoding << /Differences "
                                                 b"[65 /a1 /a2 /a10 /a20 /a71 /a100] >>")], 1.37),
+    # letters Foxit's dingbats face has no glyph for: a non-embedded TrueType font with glyph 0 and
+    # no /ToUnicode fails CPDF_Font::ShouldUseFont, so every one of them is drawn from the font's
+    # fallback CFX_Font - LoadSubstFace("Arial", ...), GDI's Arial here - at its Unicode
+    "fallback_arial": (b"BT /F0 30 Tf 10 30 Td (Wavy) Tj ET",
+                       [_subst_font(b"ZapfDingbats", 4, b"/Encoding /WinAnsiEncoding", b"/StemV 80",
+                                    b"TrueType")], 2),
+    # the same, with the fallback face asked for weight stem_v * 5 = 600 and the italic angle
+    "fallback_arial_bold_italic": (b"BT /F0 30 Tf 10 30 Td (Wavy) Tj ET",
+                                   [_subst_font(b"ZapfDingbats", 4, b"/Encoding /WinAnsiEncoding",
+                                                b"/StemV 120 /ItalicAngle -15", b"TrueType")], 1.37),
 }
 
 
@@ -912,7 +922,8 @@ def test_the_pure_renderer_survives_substituted_text_torture_seeds():
     3,000 seeds when it was written, none apart), and of GDI's TrueType faces (`--pool installed`):
     seeds 18, 21 and 29 were apart until a font without a descriptor got flags 0 (PDFium's
     m_Flags default) rather than nonsymbolic - its TrueType glyph map then takes the Mac cmap.
-    Fallback fonts are refused."""
+    Seeds 6, 13, 25, 26 and 29 draw glyphs through a font's fallback face, so nothing here may be
+    refused for one any more."""
     from beamer2slides.devtools.render_torture_subst import case, compare
     _needs_foxit()
     apart, drawn = {}, 0
@@ -920,7 +931,7 @@ def test_the_pure_renderer_survives_substituted_text_torture_seeds():
         try:
             n = compare(*case(seed, 2, pool))[0]
         except PdfError as e:
-            assert "fallback" in str(e), (seed, pool, str(e))
+            assert "fallback" not in str(e), (seed, pool, str(e))
             continue
         drawn += 1
         if n:
@@ -959,6 +970,49 @@ def test_a_generic_face_keeps_its_blend_between_documents():
     assert bounds[0] == bounds[1]
     if sys.platform != "darwin":                         # macOS CI: unmoved in PDFium too
         assert bounds[0][0] != bounds[0][1]              # the blend moved the advances
+
+
+def test_a_system_face_does_not_carry_its_charmap_into_the_next_document():
+    """A system face is not: `face_map_` and `ttc_face_map_` hold ObservedPtrs, so the face dies
+    with the last CFX_Font holding it and the next document opens its own. Torture seed 311 draws a
+    non-embedded TrueType font with flags 0, whose LoadGlyphMap leaves the Mac charmap selected on
+    the shared Arial face; seed 316 then asks that face for its fallback glyphs. Run in this order,
+    both must still be PDFium's - which they were not while the face was cached for good."""
+    from beamer2slides.devtools.render_torture_subst import case, compare
+    _needs_foxit()
+    apart = {seed: compare(*case(seed))[0] for seed in (311, 316)}
+    assert not any(apart.values()), apart
+
+
+def test_a_cached_system_face_lives_while_a_document_holds_it():
+    """The cache entry is an ObservedPtr: two documents drawing the same substitute share the face
+    (CFX_FontMapper hands out the one it has), and the entry goes when the last of them closes."""
+    from beamer2slides.devtools.render_torture_subst import FontSpec, pdf_bytes
+    from beamer2slides.pdf.pure import fontmapper
+    from beamer2slides.pdf.pure.backend import PureBackend
+    _needs_foxit()
+    spec = FontSpec("arial", "installed",
+                    [b"<< /Type /Font /Subtype /TrueType /BaseFont /Arial /FontDescriptor @1@ >>",
+                     b"<< /Type /FontDescriptor /FontName /Arial /Flags 32 >>"], [65])
+    data = pdf_bytes(b"BT /F0 20 Tf 10 10 Td (Arial) Tj ET", [spec])
+    m = fontmapper.mapper()
+    first = PureBackend().open(data)
+    first[0].render(1)
+    held = set(first.pdf.__dict__.get("_b2s_held_faces", ()))
+    if not held:
+        first.close()
+        pytest.skip("this platform's font info gave no system face")
+    counts = {key: m.holders[key] for key in held}
+    second = PureBackend().open(data)
+    second[0].render(1)
+    assert all(m.holders[key] == counts[key] + 1 for key in held)
+    first.close()
+    assert all(m.holders[key] == counts[key] for key in held)
+    assert all(name in (m.ttc_face_map if kind == "ttc" else m.face_map) for kind, name in held)
+    second.close()
+    alone = [key for key in held if counts[key] == 1]      # what no other open document holds
+    assert all(key not in m.holders for key in alone)
+    assert all(name not in (m.ttc_face_map if kind == "ttc" else m.face_map) for kind, name in alone)
 
 
 # ---------------------------------------------------------------------- PDFium's rules, one by one

@@ -20,9 +20,16 @@ per glyph to the font's weight and the glyph's /Widths width, or a system TrueTy
 (`truetype_face`, hinted like an embedded one), skewed by the italic angle, with GetCharPosList's
 spacing heuristic and a glyph cache per face and document.
 
+A code whose glyph the font itself must not draw (`_uses_font` = CPDF_Font::ShouldUseFont) is drawn
+from the font's one fallback face instead (`fallback_font` = FallbackFontFromCharcode: LoadSubstFace
+of "Arial" at the descriptor's StemV times 5), at the glyph that face's charmap gives the code's
+first Unicode unit (`fallback_glyph`); consecutive chars with the same fallback position are one
+device call, as CPDF_TextRenderer splits the char pos list.
+
 Refused (`unsupported`), so that a page is drawn exactly or not at all: what `truetype` refuses
-(tricky and variable fonts, hinting that depends on earlier loads...), codes whose glyph the font
-lacks (PDFium falls back to another font), pattern colours, render modes outside 0..7, and text
+(tricky and variable fonts, hinting that depends on earlier loads...), a fallback for vertical
+writing or one the mapper cannot give a drawable face,
+pattern colours, render modes outside 0..7, and text
 drawn into a soft mask (a mask device renders glyphs in FT_RENDER_MODE_NORMAL). Text clip modes
 (4..7) draw like 0..3, and their glyph outlines become a clip (`clip_text_path`, called by
 render.Status.process_clip): the AGG device has soft clips, so ProcessClipPath follows a clip's
@@ -77,7 +84,8 @@ def _face(font):
     try:
         return (ftoutline.face_of(font) if font.embedded else subst_face(font)), None
     except ftoutline.Unported as e:
-        why = f"text in a font the port cannot draw ({e})"
+        what = "a fallback font" if getattr(font, "is_fallback", False) else "text in a font"
+        why = f"{what} the port cannot draw ({e})"
         font.__dict__["_b2s_face_refused"] = why
         return None, why
 
@@ -145,6 +153,61 @@ def glyph_of(font, code: int) -> int:
     return -1 if g is None or g == 0xFFFF else g
 
 
+class _Fallback:
+    """The one CFX_Font a CPDF_Font falls back to (`font_fallbacks_`, always position 0), made by
+    CPDF_Font::FallbackFontFromCharcode: LoadSubstFace("Arial", IsTrueTypeFont(), flags_,
+    stem_v_ * 5 (kFontWeightNormal when that overflows an int32), italic_angle_, kDefANSI,
+    IsVertWriting()). It stands in for a CPDF_Font wherever the drawing code asks one for its face,
+    its CFX_SubstFont and its document's glyph caches."""
+
+    is_fallback = True
+    embedded = False
+    vertical = False
+    subtype = ""
+    subst_generic = False
+
+    def __init__(self, font):
+        from . import fontmapper
+        self.doc = font.doc
+        weight = font.stem_v * 5
+        if not -0x80000000 <= weight <= 0x7FFFFFFF:          # FX_SAFE_INT32::ValueOrDefault
+            weight = 400
+        face = fontmapper.load_subst_face("Arial", font.subtype == "TrueType",
+                                          font.flags & 0xFFFFFFFF, weight, font.italic_angle, font.doc)
+        self.program = face.program if face is not None else None
+        self.subst = face.subst if face is not None else None
+        self.subst_generic = face is not None and face.generic
+
+
+def fallback_font(font) -> _Fallback:
+    """CPDF_Font::FallbackFontFromCharcode: the fallback CFX_Font, made once per font."""
+    fb = font.__dict__.get("_b2s_fallback")
+    if fb is None:
+        fb = font.__dict__["_b2s_fallback"] = _Fallback(font)
+    return fb
+
+
+def fallback_face(font) -> "_SubstFace":
+    """The fallback CFX_Font's face, as `_SubstFace` draws a substituted font's."""
+    fb = fallback_font(font)
+    face = fb.__dict__.get("_b2s_subst")
+    if face is None:
+        got, why = _face(fb)
+        if got is None:
+            raise ftoutline.Unported(why)
+        face = fb.__dict__["_b2s_subst"] = _SubstFace(got, fb, font.subtype == "Type0")
+    return face
+
+
+def fallback_glyph(font, code: int, face: "_SubstFace") -> int:
+    """CPDF_Font::FallbackGlyphFromCharcode: the first UTF-16 unit of the code's Unicode (the code
+    itself when it has none) through the fallback face's charmap (CFX_Font::GetCharIndex, which is
+    FT_Get_Char_Index on whatever charmap the shared face has selected); 0 comes back as -1."""
+    units = font.unicode(code)
+    g = face.font.program.char_index(units[0] if units else code)
+    return -1 if g == 0 else g
+
+
 def _origin(obj, item) -> tuple[float, float]:
     """GetCharPosList's origin: (x, 0), or in vertical writing (0, y) less the font size times the
     char's vertical origin / 1000 (GetItemInfo's rule; embedded fonts have no CID transform)."""
@@ -180,8 +243,15 @@ def _outline_refusal(obj) -> str | None:
     if why is not None:
         return why
     for code, _x in obj.items:
-        if not _uses_font(font, glyph_of(font, code)):
-            return "text needing a fallback font"
+        if _uses_font(font, glyph_of(font, code)):
+            continue
+        if font.vertical:      # LoadSubstFace(..., IsVertWriting()): a vertical face is not ported
+            return "a fallback font for vertical writing"
+        try:
+            fallback_face(font)
+        except ftoutline.Unported as e:
+            return str(e)
+        break
     return None
 
 
@@ -231,8 +301,9 @@ class _SubstFace:
     the multiple master blend at the font's weight and each glyph's /Widths width
     (AdjustVariationParams), synthetic bold (FT_Outline_Embolden), and the shared glyph cache."""
 
-    def __init__(self, face, font):
+    def __init__(self, face, font, is_cid: bool = False):
         self.face, self.font, self.subst = face, font, font.subst
+        self.is_cid = is_cid            # CFX_TextRenderOptions::font_is_cid, for GetEffective*
         self.cache = _subst_cache(font, face)
 
     def _key(self):
@@ -241,15 +312,19 @@ class _SubstFace:
 
     def bitmap(self, glyph: int, matrix, dest_width: int):
         """CFX_GlyphCache::LoadGlyphBitmap with a substitute's key."""
+        if glyph < 0:                   # kInvalidGlyphIndex: no cache entry, no blend
+            return None
         key = (_key_part(matrix[0]), _key_part(matrix[1]), _key_part(matrix[2]), _key_part(matrix[3]),
                dest_width) + self._key()
         sizes = self.cache.bitmaps.setdefault(key, {})
         if glyph not in sizes:
-            sizes[glyph] = render_glyph(self.face, glyph, matrix, self.subst, dest_width)
+            sizes[glyph] = render_glyph(self.face, glyph, matrix, self.subst, dest_width, self.is_cid)
         return sizes[glyph]
 
     def path(self, glyph: int, dest_width: int):
         """CFX_GlyphCache::LoadGlyphPath -> CFX_Face::LoadGlyphPath."""
+        if glyph < 0:                   # kInvalidGlyphIndex, before the cache and the blend
+            return None
         key = (glyph, dest_width) + self._key()
         if key not in self.cache.paths:
             s = self.subst
@@ -273,12 +348,14 @@ class _SubstFace:
         return self.cache.paths[key]
 
     def glyph_width(self, glyph: int) -> int:
-        """CFX_Font::GetGlyphWidth(glyph) = GetGlyphWidth(glyph, 0, 0): the unscaled advance."""
+        """CFX_Font::GetGlyphWidth(glyph) = GetGlyphWidth(glyph, 0, 0): the unscaled advance.
+        Unlike LoadGlyphPath / LoadGlyphBitmap this has no kInvalidGlyphIndex guard: FT_Load_Glyph
+        simply fails on it, so the width is 0."""
         key = (glyph, 0, 0)
         if key not in self.cache.widths:
             if self.subst.flag_mm:
                 raise ftoutline.Unported("the width of a multiple master glyph")
-            self.cache.widths[key] = self.font.program.advance(glyph)
+            self.cache.widths[key] = 0 if glyph < 0 else self.font.program.em_width(glyph)
         return self.cache.widths[key]
 
 
@@ -295,27 +372,49 @@ def _spacing_heuristic(font, face: _SubstFace) -> bool:
 
 
 def char_pos_list(obj, face=None) -> list:
-    """CPDF_Font::GetCharPosList: (glyph, x, y, font_char_width, adjust) per item. The origin is
-    (x, 0), or in vertical writing (0, y) (`_origin`); a substitute's glyphs are drawn at their
-    /Widths width (dest_width) and, for a substitute that is not multiple master, moved or narrowed
-    where /Widths disagree with the face (horizontal simple fonts only)."""
+    """CPDF_Font::GetCharPosList: (glyph, x, y, font_char_width, adjust, fallback position) per
+    item. The origin is (x, 0), or in vertical writing (0, y) (`_origin`); a substitute's glyphs are
+    drawn at their /Widths width (dest_width) and, for a substitute that is not multiple master,
+    moved or narrowed where /Widths disagree with the face (horizontal simple fonts only), the face
+    being the one the char is drawn from. A char the font itself must not draw (ShouldUseFont) takes
+    the font's fallback face (position 0) and that face's glyph for the char's Unicode."""
     font, size = obj.font, F(obj.font_size)
     subst = not font.embedded and font.subtype != "Type0"
     heuristic = subst and face is not None and not font.vertical and _spacing_heuristic(font, face)
+    fb_face, fb_heuristic = None, False
     out = []
     for item in obj.items:
         code = item[0]
         glyph, adjust = glyph_of(font, code), None
+        cur, position, cur_heuristic = face, -1, heuristic
+        if not _uses_font(font, glyph):
+            if fb_face is None:
+                fb_face = fallback_face(font)
+                fb_heuristic = subst and not font.vertical and _spacing_heuristic(font, fb_face)
+            cur, position, cur_heuristic = fb_face, 0, fb_heuristic
+            glyph = fallback_glyph(font, code, fb_face)
         x, y = _origin(obj, item)
         dest_width = font.char_width(code) if subst else 0
-        if heuristic:
-            pdf_w, font_w = font.char_width(code), face.glyph_width(glyph)
+        if cur_heuristic:
+            pdf_w, font_w = font.char_width(code), cur.glyph_width(glyph)
             if font_w and pdf_w > font_w + 1:
                 x = F(x + F(F(F(float(pdf_w - font_w)) * size) / 2000.0))
             elif pdf_w and font_w and pdf_w < font_w:
                 adjust = (F(F(pdf_w) / F(font_w)), 0.0, 0.0, 1.0)
-        out.append((glyph, x, y, dest_width, adjust))
+        out.append((glyph, x, y, dest_width, adjust, position))
     return out
+
+
+def _runs(chars: list):
+    """CPDF_TextRenderer::DrawNormalText / DrawTextPath: the char pos list is cut into runs of
+    consecutive chars with the same fallback_font_position_, one device call each."""
+    start = 0
+    for i in range(1, len(chars)):
+        if chars[i][5] != chars[start][5]:
+            yield chars[start][5], chars[start:i]
+            start = i
+    if chars:
+        yield chars[start][5], chars[start:]
 
 
 def _effective(adjust, m):
@@ -325,7 +424,9 @@ def _effective(adjust, m):
 
 def _glyph_path(face, glyph: int, dest_width: int):
     """CFX_Font::LoadGlyphPath: a substitute's path goes through its skew, blend and embolden."""
-    return face.path(glyph, dest_width) if isinstance(face, _SubstFace) else face.path(glyph)
+    if isinstance(face, _SubstFace):
+        return face.path(glyph, dest_width)
+    return None if glyph < 0 else face.path(glyph)          # kInvalidGlyphIndex
 
 
 # ---------------------------------------------------------------------- ProcessText
@@ -379,10 +480,15 @@ def _process_text(status, obj, matrix) -> None:
             device_matrix = R.concat(m, matrix)
         graph = (F(obj.line_width), obj.line_cap, obj.line_join, F(obj.miter),
                  tuple(F(v) for v in obj.dash), F(obj.dash_phase))
-        draw_text_path(status.dev, face, chars, size, text_matrix, device_matrix, graph,
-                       fill_argb, stroke_argb, is_stroke and is_fill)
+        for position, run in _runs(chars):
+            draw_text_path(status.dev, face if position < 0 else fallback_face(font), run, size,
+                           text_matrix, device_matrix, graph, fill_argb, stroke_argb,
+                           is_stroke and is_fill)
         return
-    draw_normal_text(status.dev, face, chars, size, R.concat(text_matrix, matrix), fill_argb)
+    text2device = R.concat(text_matrix, matrix)
+    for position, run in _runs(chars):
+        draw_normal_text(status.dev, face if position < 0 else fallback_face(font), run, size,
+                         text2device, fill_argb)
 
 
 # ---------------------------------------------------------------------- DrawTextPath
@@ -398,7 +504,7 @@ def draw_text_path(dev, face, chars, size, text2user, user2device, graph, fill_a
     if not (fill_argb or stroke_argb):
         return
     fill_type = FILL_WINDING if fill_argb else FILL_NONE
-    for glyph, x, y, dest_width, adjust in chars:
+    for glyph, x, y, dest_width, adjust, _position in chars:
         path = _glyph_path(face, glyph, dest_width)
         if path is None:
             continue
@@ -429,8 +535,9 @@ def clip_text_path(obj, matrix, out: list) -> None:
     size = F(obj.font_size)
     if not font.embedded:
         face = _SubstFace(face, font)
-    for glyph, x, y, dest_width, adjust in char_pos_list(obj, face if not font.embedded else None):
-        path = _glyph_path(face, glyph, dest_width)
+    for glyph, x, y, dest_width, adjust, position in char_pos_list(obj, face if not font.embedded
+                                                                   else None):
+        path = _glyph_path(face if position < 0 else fallback_face(font), glyph, dest_width)
         if path is None:
             continue
         m = _effective(adjust, (size, 0.0, 0.0, size, x, y))          # GetEffectiveMatrix
@@ -472,6 +579,8 @@ def _key_part(v: float) -> int:
 
 def load_glyph_bitmap(face, glyph: int, matrix):
     """CFX_GlyphCache::LoadGlyphBitmap (kLcd): (left, top, width_bytes, rows, array) or None."""
+    if glyph < 0:                                           # kInvalidGlyphIndex
+        return None
     cache = face.__dict__.setdefault("_b2s_glyph_bitmaps", {})
     key = (_key_part(matrix[0]), _key_part(matrix[1]), _key_part(matrix[2]), _key_part(matrix[3]))
     sizes = cache.setdefault(key, {})
@@ -486,13 +595,14 @@ def _ft_fixed(v: float) -> int:
     return int(v)
 
 
-def render_glyph(face, glyph: int, matrix, subst=None, dest_width: int = 0):
-    """CFX_Face::RenderGlyph in FT_RENDER_MODE_LCD (`subst`: the font's CFX_SubstFont)."""
+def render_glyph(face, glyph: int, matrix, subst=None, dest_width: int = 0, is_cid: bool = False):
+    """CFX_Face::RenderGlyph in FT_RENDER_MODE_LCD (`subst`: the font's CFX_SubstFont; `is_cid`:
+    CFX_TextRenderOptions::font_is_cid, which picks the CJK skew and weight of a CJK substitute)."""
     a, b, c, d = matrix[:4]
     xx, xy, yx, yy = (_ft_fixed(F(F(a / 64.0) * 65536.0)), _ft_fixed(F(F(c / 64.0) * 65536.0)),
                       _ft_fixed(F(F(b / 64.0) * 65536.0)), _ft_fixed(F(F(d / 64.0) * 65536.0)))
     if subst is not None:
-        skew = subst.effective_skew(False)
+        skew = subst.effective_skew(is_cid)
         if skew:
             xy = ftoutline.i32(xy - _cdiv(ftoutline.i32(xx * skew), 100))
         if subst.flag_mm:
@@ -501,7 +611,7 @@ def render_glyph(face, glyph: int, matrix, subst=None, dest_width: int = 0):
     if outline is None:
         return None
     if subst is not None:
-        level = subst.embolden_level_for_render(False, xx, xy)
+        level = subst.embolden_level_for_render(is_cid, xx, xy)
         if level < 0:
             return None
         if level > 0:
@@ -525,7 +635,7 @@ def draw_normal_text(dev, face, chars, size, text2device, fill_argb: int) -> Non
         draw_text_path(dev, face, chars, size, text2device, None, None, fill_argb, 0, False)
         return
     glyphs = []
-    for glyph, x, y, dest_width, adjust in chars:
+    for glyph, x, y, dest_width, adjust, _position in chars:
         matrix = _effective(adjust, char2device)              # GetEffectiveMatrix
         ox, oy = R.transform(text2device, x, y)
         if isinstance(face, _SubstFace):
