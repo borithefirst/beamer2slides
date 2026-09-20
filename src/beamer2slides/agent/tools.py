@@ -72,6 +72,13 @@ def b2s_status(j: Job,
         if access.get("command"):
             parts.append(f"A person has to run `{access['command']}` at a terminal to fix it.")
         j.warn(f"Google is not reachable: {reason}")
+    elif access.get("expired"):
+        # `available` is true on a refresh token alone, and an expired access token is the
+        # ordinary state between calls - the next journey refreshes it. Saying "good until
+        # <a time already past>" reads like a problem, and an agent that believes it goes
+        # looking for consent nobody needs to give.
+        parts.append("The Google access token has expired and will be refreshed on the next "
+                     "call; no consent is needed unless that refresh is refused.")
     elif access.get("expires"):
         parts.append(f"Google access is good until {access['expires']}.")
 

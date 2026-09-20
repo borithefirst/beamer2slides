@@ -356,7 +356,7 @@ def _refuse_rebuild(j: Job, refused: Any, source: Path, out_dir: Path) -> NoRetu
         j.suggest("deck_convert with force_rebuild=True and backup='drive' to keep a Drive copy instead",
                   "deck_convert with force_rebuild=True and backup='none' to rebuild with no way back")
     pid = survey.get("presentationId")
-    raise Refused(code, str(refused),
+    raise Refused(code, _rebuild_message(refused, survey, reason, code),
                   url=f"https://docs.google.com/presentation/d/{pid}/edit" if pid else None,
                   presentationId=pid,
                   reason=reason,
@@ -367,6 +367,44 @@ def _refuse_rebuild(j: Job, refused: Any, source: Path, out_dir: Path) -> NoRetu
                   reordered=bool(survey.get("reordered")),
                   revisionId=survey.get("revisionId"),
                   out=ref)
+
+
+def _rebuild_message(refused: Any, survey: dict, reason: str, code: str) -> str:
+    """Say what the guard found, in this layer's vocabulary rather than the CLI's.
+
+    The library's own message ends with three shell commands - `python -m beamer2slides
+    convert ... --force-rebuild` among them - because it is written for a person at a
+    terminal. Handed to a model it is worse than useless: prose is the first thing read,
+    so the refusal would be teaching the one move it exists to prevent, and offering a
+    shell as the way round a tool that just said no. The facts are all in `data` and the
+    ways forward are all in `next_steps`, both in terms of calls that can actually be
+    made; this says only what happened.
+    """
+    if code == "no_way_back":
+        return ("The rebuild was forced, but no backup could be made, so there would be no way "
+                "back to what is in the deck now. Every Drive revision of a Slides file exports "
+                "its current content, so a .pptx export is the only way back there is. "
+                "Nothing was written.")
+    counts = survey.get("counts") or {}
+    what = ", ".join(f"{n} {kind.replace('_', ' ')} change(s)" for kind, n in counts.items())
+    added, deleted = survey.get("slides_added", 0), survey.get("slides_deleted", 0)
+    for n, word in ((added, "added"), (deleted, "deleted")):
+        if n:
+            what += f", {n} slide(s) {word}"
+    if survey.get("reordered"):
+        what += ", slides reordered"
+    if reason != "edited":
+        # `no-base`, `other-pdf`: the deck may be untouched and still unsafe to replace.
+        return (f"Refusing to rebuild this deck: {str(refused).splitlines()[0].strip() or reason}. "
+                f"Rebuilding replaces the whole deck, and nothing here can say what would be "
+                f"lost. Nothing was written.")
+    examples = survey.get("examples") or []
+    shown = "".join(f"\n  - {line}" for line in examples[:3])
+    return (f"Refusing to rebuild: somebody edited this deck in Google Slides after it was last "
+            f"written ({what or 'changes found'}). A rebuild replaces the whole deck, so their "
+            f"work would be gone. Nothing was written.{shown}\n"
+            f"The ways forward are in next_steps; forcing is one of them and is a decision for "
+            f"the person who made those edits, not for you.")
 
 
 @tool("deck_sync", needs=(READS, WRITES, READS_GOOGLE))

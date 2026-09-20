@@ -846,17 +846,24 @@ ops now draw from the whole dialect on both sides (`RUN_MARKS`, `PARA_MARKS`,
 `READER_FACES`, `READER_MEASURES`), which is the case that matters most: a reader
 chooses a face, and then the source restyles that block.
 
-The campaign found ten defects, each pinned by an `xfail(strict=True)` in
-`tests/test_doc_fuzz.py` and described in `fuzz_docs.KNOWN` — a table of contents
-treated as an ordinary block (which kills the sync outright, because a refused request
+The campaign found ten defects, each pinned by a test in `tests/test_doc_fuzz.py` —
+`xfail(strict=True)` while it stands, a plain test once it is fixed — and the ones
+still standing described in `fuzz_docs.KNOWN`: a table of contents
+treated as an ordinary block (which killed the sync outright, because a refused request
 throws out the batch), a table the source dropped deleted however much the reader typed
 into it, one block's key landing on another, a block reworded *and* moved losing the
-reader's styling, and the rest. They are let through by default and `--strict` fails on
-them, so a fix shows up as a defect that stops being reached.
+reader's styling, and the rest. The ones still standing are let through by default and
+`--strict` fails on them, so a fix shows up as a defect that stops being reached; once
+it is fixed and has a test, its entry goes, or it would swallow the next defect that
+looks like it.
 
-**Three of the ten are fixed**, and all three were ways of losing a block's identity —
-which is the root of the worst of the rest, because a block the merge cannot recognise
-is a block it deletes as "dropped by the source".
+**Eight of the ten are fixed**, in three groups: four ways of losing a block's identity,
+two ways of losing the reader's content outright, and three ways of killing the sync
+where it stood. (Two of the eight — a table losing its anchor, and Docs' index rules —
+each closed one of the first group and one of a later one.)
+
+Losing a block's identity is the root of the worst of the rest, because a block the
+merge cannot recognise is a block it deletes as "dropped by the source".
 
 * `inherit_keys` matched **every** block of the file again by its words, although the
   file had just named them all with its own `id=`. Two blocks that read alike swapped
@@ -877,11 +884,67 @@ is a block it deletes as "dropped by the source".
 * The paragraph under a deleted heading became a heading (Docs merges the two keeping
   the **first** one's style, and the merge writes its style before the delete above it),
   which the settle now repairs — see "Every named style Docs has is a kind" above.
+* A table is anchored in its first cell, and a **row delete can take that very cell**.
+  The structural batch went out, the table came back with no named range at all, and
+  nothing put one back: `anchor_tables` only ever looked for tables the batch had
+  *built*. The table settled under a name made from its new first word, the file's
+  `table:year` read as gone, and the words planned against the new grid — the source's
+  own cell edit — were written nowhere. `structure` now gives a regrid the same `after`
+  a new table gets, so the table is found again and `plant_ranges` puts its range back.
+  One source op, no reader at all (offline chain-8 seed 7122, shrunk).
 
-At one seed, 200 rounds at chain 8: `lost-key` 34 → 22, `crossed-delete` 2 → 0,
-`crossed-frozen` 22 → 13, `moved-styling` 2 → 1. What is left under those signatures
-has a cause nobody has named yet, and the entries say so rather than keep blaming what
-was fixed.
+Then the two losses that were not about identity at all. **A table the source dropped
+was deleted however much the reader had typed into it**: a document edit outranks a
+source delete, and the test for "edited" was `block_text`, which is empty for a table —
+so every table read as untouched. `doc_merge._edited` reads a table's cells and its
+grid, and a block's frozen runs, which also stops a picture a reader replaced from being
+thrown away. And the same decision now refuses to delete a block holding an equation, a
+dropdown or a table of contents **at all**: `_merge_block` already refused to
+delete-and-rewrite one, and a plain delete is that same loss with nothing written back.
+The block is kept and the report says the source asked for it to go.
+
+And then the three that killed the sync outright, where a request Docs refuses throws
+out the whole batch. All three were the same mistake: **Docs' index rules are about
+structural elements, not about tables.** Nothing can be inserted at one's own index,
+the newline in front of one cannot be deleted, a body cannot open or end on one without
+an empty paragraph beside it, and one is deleted by its own span — and every test for
+any of that read `kind == "table"`. A table of contents was therefore an ordinary
+paragraph to the planner: a block written in front of one went at its own index, a
+block deleted in front of one gave up its own mark, and a table added beside one was
+written with a delete that landed inside the TOC's own units. `doc_ir.STRUCTURAL` is
+the set, `doc_merge._structural` the test, and `_hide_trailer` now hides the lead and
+the trailer beside a TOC as it always did beside a table.
+
+The third of them cannot be written at all and is now refused rather than attempted: an
+empty paragraph **between two tables** has no mark to give up — its own is the newline
+in front of a table, and the block before it is a table with none to lend — so
+`_delete_range` came back with a range of length zero, which Docs refuses. Docs wants a
+paragraph between two tables anyway, so `restore_undeletable` puts the block back into
+the merge (round by round, since keeping one changes what the next delete may take) and
+the report says why it stayed.
+
+At one seed, 200 rounds at chain 8: `toc-block` 10 → 0, `toc-table-split` 4 → 0,
+`empty-delete` 6 → 0, `dropped-table` 17 → 0, `dropped-frozen` 8 → 0, `lost-key`
+34 → 7, `crossed-delete` 2 → 2, `crossed-frozen` 22 → 9, `moved-styling` 2 → 2 — and
+the same at a second seed and a third. The five signatures that reached zero are **out
+of `KNOWN`** rather than rewritten: each has a test of its own now, and each was wide
+enough to swallow the next defect that looks like it — `block_gone` mentioning `table:`
+had been catching crossed keys on tables all along. What is left under the others has a
+cause nobody has named yet, and the entries say so rather than keep blaming what was
+fixed.
+
+And one of the findings was the **oracle's own**, which is the third time the harness
+has been the thing at fault. A picture is identified by the file it shows and not by
+the object id Docs gave it, because a block the sync rewrites comes back with a new id
+— but the file is not stable either: a picture a reader inserted in the browser has
+only a `contentUri` until the settle saves it and gives it a name and a digest
+(`fetch_pictures`). The document had not changed; the name the oracle knew it by had.
+`image_names` takes all of them and `_picture_findings` matches one picture at a time
+against any, so a rewrite and a settle are both survivable and two copies of one file
+are still two pictures. Thirteen findings became nine — and it is worth saying what
+that cost: for as long as the oracle has existed it has been accusing the sync of
+losing every picture a reader ever inserted, and nine real ones were standing behind
+that noise.
 
 Fixed seeds from the campaign run in the default offline suite.
 

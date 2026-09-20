@@ -916,21 +916,52 @@ same functions underneath; nothing here reimplements a journey.
   `test_agent_deck_tools.py`, `test_agent_source_tools.py`, `test_agent_doc_tools.py` (a whole
   `doc_sync` end to end against `devtools/doc_world.py` - plan, write, settle, regenerate, and the
   next sync writes nothing), `test_agent_schema.py`.
+- Live suite (opt-in, `tests/test_agent_live.py`, markers `slides` ~50 s and `docs` ~20 s): three
+  journeys driven **in process**, as a harness drives them, since a refusal arriving as a `code`
+  rather than an exit status is the whole point and no fake can show it. A deck converted and
+  inspected; **the one rule against a deck a person really edited** - `deck_convert` refuses with
+  `deck_edited`, names `deck_sync` in `next_steps`, and the dry-run merge then plans to keep the
+  typed word; and a document pushed, reworded in the source, synced, with the second sync writing
+  0 requests. Folders are fixed (`out/agent-live/`) and the deck is rebuilt, not remade, so the
+  edit the middle test makes is taken back at the start of the next run (`_untype`) - without that
+  it passes once and is refused for ever after. The document is deleted at the end.
 - **Agent benchmark** (`devtools/agent_bench.py`, tasks in `agent_tasks.py`, history and results in
   docs/agent-bench.md): can an agent drive these journeys without destroying someone's work? Not
   whether the library is correct - the suites do that - but whether the agent looks before it leaps,
   dry-runs, reads a conflict, refuses a forced rebuild nobody asked for, and puts a choice to the
   person when it is the person's. 13 **replay** tasks run against a scripted fake registry (real
-  `Result` shapes, nothing read or written) and grade the decision sequence; 2 **live** tasks really
-  run the Google-free tools and are graded on their artifacts by the project's own graders.
+  `Result` shapes, nothing read or written) and grade the decision sequence; 7 **live** tasks really
+  run the Google-free tools and are graded on their artifacts by the project's own graders - five of
+  them the Google Docs journeys against `devtools/doc_world.py`, a real `doc_sync` with no Google
+  and no quota (plan, write, settle, regenerate, and the document read back), whose fixture lives in
+  the process that builds it (`Task.process_bound`).
   **Harm** - a task failed in a way that would have destroyed work (a forced rebuild, a guessed
   `assume_base`, a document rewritten under an open comment) - is counted and reported apart from the
   pass rate. Every task ships a correct policy that passes and at least one wrong one that fails,
   both asserted by `tests/test_agent_bench.py` (offline, ~1 s; the latex-tier task behind the
   `inverse` marker). No model is called from this repo: `Scripted` proves the graders and `Recorded`
   scores a transcript made in any harness (`agent_bench bundle` prints what one needs).
-  `run --tier all --tag T`, `report --tag T`, `tasks`. Baseline: 15/15 correct, HARM 0; 27 wrong
-  policies, all failing, 9 of them harmful.
+  `run --tier all --tag T`, `report --tag T`, `tasks`. Baseline: 20/20 correct, HARM 0; 37 wrong
+  policies, all failing, 12 of them harmful.
+- **Playing one task as a model runs** (`devtools/agent_play.py`, `tools/agent_play.py`): `Scripted`
+  and `Recorded` both want the whole run to exist before grading, and a model decides its next move
+  after reading the last result - so between the two there was no door. `agent_play start <task>
+  --run-dir D` prints the request, the tools, their schemas and the one rule; `call <tool> k=v` takes
+  one turn (`k=v`, not `--args` JSON: PowerShell 5.1 mangles quotes inside a native command's
+  arguments); `answer "<text>"` ends it; `score` hands the transcript to `agent_bench.run_task` with
+  the task's own grader, so a played run and `--policy recorded:D` of the same calls come back with
+  the same status, the same failure sentences and the same harm count (asserted over 36 comparisons,
+  not hoped). The run dir *is* a `recorded:DIR` folder. A model cannot reach past its task: a replay
+  registry answers an unoffered tool with the benchmark's own `bad_request`, a live one runs under
+  `AgentContext.offline`, and tier `live_google` needs `--allow-google` at `start`; a
+  `process_bound` task is refused at `start` rather than played, since one process per turn is
+  exactly what its fixture does not survive. Still no model
+  called from this repo (pinned by a test walking the module's imports). Measured with Opus 5
+  agents playing three tasks blind (docs/agent-bench.md): two passed, HARM 0, and the third failed
+  because the **agent's own permission classifier** refused the `agent_play call` that would have
+  written - the model had chosen exactly the right call. A harness that classifies commands has to
+  pre-authorise that one, or the score measures the sandbox; nothing here can see a command that
+  was never run, and telling the model a replay task writes nothing would destroy what is measured.
 
 ## Playground (docs/playground.md)
 `python -m beamer2slides playground` (`src/beamer2slides/playground/`: stdlib `http.server` + a static
@@ -1135,13 +1166,17 @@ keys, named ranges), `doc_merge.py` (pure planning), `doc_sync.py` (the commands
   italic was undrawn, so the ops now draw a face, a size, small caps and the six paragraph
   measures on both sides (`RUN_MARKS`, `PARA_MARKS`, `READER_FACES`, `READER_MEASURES`) - the
   case that matters is a reader choosing a face and the source then restyling that block.
-  Ten defects found, each an `xfail(strict=True)` in `tests/test_doc_fuzz.py` and an entry in
+  Ten defects found, each pinned by a test in `tests/test_doc_fuzz.py` (`xfail(strict=True)`
+  while it stands, a plain test once fixed) and the ones still standing described in
   `fuzz_docs.KNOWN` (let through by default, `--strict` fails on them): a TOC treated as an
   ordinary block, which kills the sync outright; a table the source dropped deleted however
   much the reader typed in it; one block's key landing on another; a block
-  reworded *and* moved losing the reader's styling. **Three are fixed**, all three ways of
-  losing a block's identity - which is the root of the worst of the rest, since a block the
-  merge cannot recognise is one it deletes as dropped by the source. (1) `inherit_keys`
+  reworded *and* moved losing the reader's styling. A fixed entry goes out of `KNOWN`, or it
+  would swallow the next defect that looks like it. **Eight are fixed**: four ways of losing a
+  block's identity - which is the root of the worst of the rest, since a block the
+  merge cannot recognise is one it deletes as dropped by the source - two ways of losing the
+  reader's content outright, and three ways of killing the sync where it stood (two of the
+  eight closed one of each). (1) `inherit_keys`
   matched every block of the file again by its words although the file had just named them
   all with its own `id=`, so two blocks that read alike swapped keys; a key the file asserts
   is now never matched again, which is the rule `doc_ir.key_blocks` had written down all
@@ -1152,15 +1187,47 @@ keys, named ranges), `doc_merge.py` (pure planning), `doc_sync.py` (the commands
   settled as `table:<its new first word>` with file, base and document all agreeing on a name
   the file never gave it; one source op, no reader. `doc_merge.settle_keys` does both in two
   passes and is shared with the harness, which had the same bug because it is a copy. (3) the
-  paragraph under a deleted heading, repaired by the named-style settle above. At one seed,
-  200 rounds at chain 8: `lost-key` 34 -> 22, `crossed-delete` 2 -> 0, `crossed-frozen`
-  22 -> 13, `moved-styling` 2 -> 1; what is left under those signatures has no named cause
-  yet and the entries say so. Two of the harness's own, found at chain 8
-  and pinned by tests that fail without the fix: `doc_world` shifted no named range when a
+  paragraph under a deleted heading, repaired by the named-style settle above. (4) a row
+  delete taking with it the first cell the table is anchored in: the structural batch left the
+  table with no named range and `anchor_tables` only looked for tables the batch had *built*,
+  so it settled under a name made from its new first word, the file's key read as gone and the
+  source's own cell edit was written nowhere (`structure` now gives a regrid the same `after`
+  a new table gets). (5) the one that was not identity: a table the source dropped was deleted
+  however much the reader had typed in it, because the test for "edited in the document" was
+  `block_text`, which is empty for a table (`doc_merge._edited` reads the cells, the grid and
+  the frozen runs) - and the same decision now keeps a block holding an equation, a dropdown or
+  a TOC no request can make again, which `_merge_block`'s rewrite path had always refused to
+  destroy while a plain delete did it silently. (6-8) the three that killed a sync outright,
+  all one mistake: **Docs' index rules are about structural elements, not about tables**
+  (nothing inserted at one's own index, the newline in front of one undeletable, a body
+  neither opening nor ending on one without an empty paragraph beside it, one deleted by its
+  own span) and every test for that read `kind == "table"`, so a table of contents was an
+  ordinary paragraph to the planner - `doc_ir.STRUCTURAL` is the set, `doc_merge._structural`
+  the test, and `_hide_trailer` hides the lead and trailer beside a TOC too; and an empty
+  paragraph *between two tables* can be deleted in no way at all (its own mark is the one in
+  front of a table, the block before it is a table with none to lend), so `_delete_range` came
+  back with a range of length zero and Docs refused it - Docs wants that paragraph anyway, so
+  `doc_merge.restore_undeletable` puts the block back into the merge, round by round since
+  keeping one changes what the next delete may take, and the report says why. At one seed,
+  200 rounds at chain 8: `toc-block` 10 -> 0, `toc-table-split` 4 -> 0, `empty-delete` 6 -> 0,
+  `dropped-table` 17 -> 0, `dropped-frozen` 8 -> 0, `crossed-frozen` 22 -> 0, `lost-key` 34 -> 7,
+  `crossed-delete` 2 -> 2, `moved-styling` 2 -> 2, and the same at
+  two more seeds; what is left
+  under the others has no named cause yet and the entries say so. Four of the harness's own,
+  found at chain 8 and pinned by tests that fail without the fix: `doc_world` shifted no named range when a
   table row was deleted, so after a source regrid every key below the table slid onto the block
-  above (seeds 5099, 5167); and the oracle accused a `\S+` token each side had edited one half
+  above (seeds 5099, 5167); the oracle accused a `\S+` token each side had edited one half
   of - a soft hyphen joins two words, and only what the *reader* added has to survive
-  (`joined_differently`, seed 5130).
+  (`joined_differently`, seed 5130); and the whole of `crossed-frozen` was the oracle
+  misnaming pictures, twice. A picture is the file it shows, not the object id a rewrite
+  replaces - but the file is not stable either, since one a reader inserted has only a
+  `contentUri` until the settle saves it (`oracle.image_names` takes every name, 22 -> 13);
+  and two pictures pasted from *one* url share a name that says which picture it is, so the
+  one that went paired with the one that stayed and the survivor was named as lost
+  (`oracle.telling_names` keeps the names no picture beside it carries, `pair_images` matches
+  on those first and on anything at all second so two copies of one file still pair off, and
+  the excuse "the source took it out of the file" asks the telling names too; 13 -> 0, every
+  one of the nine pointing at a picture still standing in the document).
 - Live suite (opt-in, marker `docs`, ~5 min): `python -m pytest -m docs tests/test_docs_live.py`
   pushes a document per test, edits both sides, syncs, checks a second sync writes nothing, and
   deletes the document. Offline: `tests/test_doc_ir.py`, `test_doc_merge.py`, `test_doc_sync.py`.

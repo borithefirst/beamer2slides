@@ -796,7 +796,8 @@ def push(path: Path, name: str | None = None, new_doc: bool = False) -> dict:
             "tabs": len(doc_ir.parts(live)), "notes": notes}
 
 
-def adopt(document: str, path: Path | None = None, force: bool = False) -> dict:
+def adopt(document: str, path: Path | None = None, force: bool = False,
+          folder: Path | None = None) -> dict:
     """Write the canonical file a document nobody pushed never had.
 
     The Docs twin of `beamer2slides adopt`. `push` goes file → document and refuses
@@ -811,13 +812,19 @@ def adopt(document: str, path: Path | None = None, force: bool = False) -> dict:
     importer built cannot say whether its lists are numbered (`doc_ir._ordered`) and
     there is no file yet to say for it, so `settle` gives those lists bullets of the
     document's own — from then on they read back as what they are.
+
+    `folder` is where a `path` of None lands. The name comes from the document's title,
+    which is only known once it has been read, so without this the file resolves against
+    whatever folder the process happens to be in — right for the command line, where that
+    is the folder the person typed in, and wrong for a caller that has one workspace the
+    file must stay inside (`agent/doc_tools.py`).
     """
     ident = document_id(document)
     creds = credentials()
     docs, drive = docs_service(creds), drive_service(creds)
     doc, live = read_document(docs, ident)
     if path is None:
-        path = Path(f"{doc_ir.slug(doc.get('title') or ident)}.html")
+        path = Path(folder or ".") / f"{doc_ir.slug(doc.get('title') or ident)}.html"
     if path.exists():
         named = doc_ir.from_html(path.read_text(encoding="utf-8")).get("document")
         if named != ident and not force:

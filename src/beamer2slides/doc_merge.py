@@ -86,6 +86,20 @@ def _match_text(block: dict) -> str:
     return block_text(block)
 
 
+def _edited(live: dict, was: dict) -> bool:
+    """Whether the document changed a block since the base — the test that outranks a
+    source delete, and so the last thing standing between a reader's words and a
+    `deleteContentRange`.
+
+    It cannot be `block_text`: that is empty for a table, so a table the reader filled
+    in cell by cell read as untouched and went with everything in it. A table says
+    what it is through its cells and its grid, and a block holding a picture the
+    reader replaced says it through its frozen runs.
+    """
+    return (_match_text(live) != _match_text(was) or _grid(live) != _grid(was)
+            or frozen_of(live) != frozen_of(was))
+
+
 def frozen_of(block: dict) -> tuple:
     """What the frozen runs are, in order. Two blocks may only be merged if equal."""
     return tuple(_frozen_id(r) for r in block.get("runs", []) if r.get("frozen"))
@@ -115,7 +129,20 @@ def writable(run: dict) -> bool:
 
 
 def _writable_block(block: dict) -> bool:
+    if block.get("kind") == "toc":
+        return False                       # no insertTableOfContents in the v1 API
     return all(writable(r) for r in block.get("runs", []))
+
+
+# A structural element that is not a paragraph. Docs' index rules are about *these*,
+# not about tables: nothing can be inserted at one's own index, the newline in front of
+# one cannot be deleted, and one is deleted by its own span. Every test for them read
+# `kind == "table"`, so a table of contents was an ordinary block to the planner — a
+# block written in front of one went at its own index and a block deleted in front of
+# one gave up its own mark. Docs refuses both, a refusal throws out the whole batch,
+# and the sync died (`fuzz_docs.KNOWN` 'toc-block').
+def _structural(block: dict | None) -> bool:
+    return block is not None and block.get("kind") in doc_ir.STRUCTURAL
 
 
 def restore_pictures(live: dict, base: dict | None, ours: dict | None = None) -> dict:
@@ -669,8 +696,17 @@ def merge(base: dict, ours: dict, theirs: dict) -> dict:
             continue
         if mine is None:
             # The source dropped it. A document edit outranks that.
-            if block_text(block) != block_text(was):
+            if _edited(block, was):
                 notes.append(f"{key}: dropped by the source but edited in the document — kept")
+                merged.append(dict(block) | {"origin": "kept over a source delete"})
+            elif not _writable_block(block):
+                # And so does content no request could ever make again: the rewrite path
+                # in `_merge_block` refuses to delete-and-write such a block, and a plain
+                # delete is the same loss with nothing written back. The source's author
+                # is told and can take it out in the document, where it is theirs to lose.
+                notes.append(f"{key}: dropped by the source but holds an equation, a "
+                             f"dropdown or a table of contents no request can make "
+                             f"again — kept")
                 merged.append(dict(block) | {"origin": "kept over a source delete"})
             continue
         merged.append(_merge_block(was, mine, block, conflicts, notes))
@@ -1549,10 +1585,10 @@ def requests(theirs: dict, merged: list[dict]) -> list[dict]:
             continue
         at = _insert_index(merged, position)
         anchor = _anchor(merged, position)
-        if anchor is not None and anchor.get("kind") == "table":
-            # Nothing can be written at a table's own index (measured: refused), so a
-            # block in front of one goes after the paragraph before it — "\ntext" at
-            # that paragraph's mark, ahead of the paragraph's own edits there.
+        if _structural(anchor):
+            # Nothing can be written at a table's or a table of contents' own index
+            # (measured: refused), so a block in front of one goes after the paragraph
+            # before it — "\ntext" at that paragraph's mark, ahead of its own edits there.
             at -= 1
             if position == lead_first:
                 plans.append((at, APPEND, _content_requests(at, block)
@@ -1641,8 +1677,13 @@ def structure(theirs: dict, merged: list[dict],
                                      "note": f"`{key}`: moved where the source has it"}))
         elif block.get("regrid"):
             what = ", ".join(f"{how}s a {line}" for line, how, _ in block["regrid"])
+            # `after` although nothing is built: a table is anchored in its first cell
+            # (`doc_ir.anchor_span`), and a row or column delete can take that very
+            # cell, so a regrid can leave the table with no named range at all. It is
+            # then found again exactly as a new one is, and the range planted back.
             plans.append((block["span"][0], _grid_requests(block["span"][0], block["regrid"]),
                           {"key": key, "ops": block["regrid"], "lines": block.get("lines"),
+                           "after": _after_key(merged, position),
                            "note": f"`{key}`: {what} — the grid the source has"}))
         elif block.get("origin") == "added by the source":
             rows = len(block.get("rows", []))
@@ -1709,12 +1750,12 @@ def _new_table_requests(theirs: dict, at: int | None, rows: int,
         return _END, [{"insertTable": table | {"endOfSegmentLocation": {}}}]
     after = next((b for b in theirs["blocks"] if b["span"][0] == at), None)
     before = next((b for b in theirs["blocks"] if b["span"][1] == at), None)
-    if after is not None and after.get("kind") == "table":
+    if _structural(after):
         if before is None:
             return at, []                  # a document that opens on a table: nowhere to write
         return at - 1, [{"insertTable": table | {"location": {"index": at - 1}}}]
     out = [{"insertTable": table | {"location": {"index": at}}}]
-    if at > 1 and before is not None and before.get("kind") != "table":
+    if at > 1 and before is not None and not _structural(before):
         out.append({"deleteContentRange": {"range": {"startIndex": at - 1, "endIndex": at}}})
     return at, out
 
@@ -1774,8 +1815,9 @@ def _delete_range(blocks: list[dict], index: int, going: set[int],
     same kind of newline (measured: refused), so the last block does the same when
     `ends` says it is the body's last paragraph.
 
-    A table is deleted by its own span, which leaves the paragraphs on both sides of
-    it as they were (measured). Two paragraphs no request can delete come with one,
+    A structural element — a table, or a table of contents — is deleted by its own
+    span, which leaves the paragraphs on both sides of it as they were (measured).
+    Two paragraphs no request can delete come with a table,
     though: the empty `lead` in front of a table a body opens on, and the empty
     trailer after one it ends on. The first goes with the table from its start; the
     second stays, and the mark in front of the table goes instead — which, measured,
@@ -1784,16 +1826,16 @@ def _delete_range(blocks: list[dict], index: int, going: set[int],
     be merged into one paragraph, so the table goes alone.
     """
     start, end = blocks[index]["span"]
-    if blocks[index].get("kind") == "table":
+    if _structural(blocks[index]):
         if index == 0 and lead and lead[1] == start:
             return lead[0], end
         if (index == len(blocks) - 1 and not ends and not filled and index > 0
-                and blocks[index - 1].get("kind") != "table"):
+                and not _structural(blocks[index - 1])):
             return start - 1, end
         return start, end
     if not _mark_is_taken(blocks, index, going, ends, lead, filled):
         return start, end
-    if index == 0 or blocks[index - 1].get("kind") == "table":
+    if index == 0 or _structural(blocks[index - 1]):
         # No mark to take: the block's words go and an empty paragraph stays in front
         # of the table. Docs wants one between two tables anyway.
         return start, end - 1
@@ -1803,15 +1845,16 @@ def _delete_range(blocks: list[dict], index: int, going: set[int],
 def _mark_is_taken(blocks: list[dict], index: int, going: set[int], ends: bool,
                    lead: list | None = None, filled: bool = False) -> bool:
     """Whether this block's own paragraph mark must survive the delete — because a
-    table follows it, because it ends the body, or because the deleted block that
-    follows it takes this one's."""
+    structural element follows it (a table or a table of contents: the newline in
+    front of one cannot be deleted), because it ends the body, or because the deleted
+    block that follows it takes this one's."""
     after = index + 1
     if after >= len(blocks):
         return ends
     if after in going:
         return (_delete_range(blocks, after, going, ends, lead, filled)[0]
                 < blocks[after]["span"][0])
-    return blocks[after].get("kind") == "table"
+    return _structural(blocks[after])
 
 
 def _pairs(live: dict, want: dict):
@@ -1863,6 +1906,61 @@ def _anchor(merged: list[dict], position: int) -> dict | None:
     return None
 
 
+def restore_undeletable(theirs: dict, merged: list[dict], notes: list[str]) -> None:
+    """Put back a block the merge means to delete and that no request can delete.
+
+    An empty paragraph between two tables is the case: its own mark is the newline in
+    front of a table, and the block before it is a table with no mark to lend, so
+    `_delete_range` comes back with a range of length zero. Docs refuses that, and a
+    refusal throws out the whole batch — a sync died over a paragraph Docs wants to be
+    there anyway. It stays where it is, and the report says so.
+
+    Round by round, because keeping one block changes what the next delete may take:
+    `_mark_is_taken` asks whether the block after this one is going too.
+    """
+    for _ in range(len(theirs["blocks"]) + 1):
+        by_key = {b["key"]: b for b in merged if b.get("key")}
+        going = {i for i, live in enumerate(theirs["blocks"]) if _goes(live, by_key)}
+        ends = not theirs.get("trailer")
+        filled = any(_written_here(b) and _insert_index(merged, p) is None
+                     for p, b in enumerate(merged))
+        stuck = next((i for i in sorted(going)
+                      if _empty_range(theirs["blocks"], i, going, ends,
+                                      theirs.get("lead"), filled)), None)
+        if stuck is None:
+            return
+        live = theirs["blocks"][stuck]
+        key = live.get("key")
+        if by_key.get(key, {}).get("moved"):
+            # It is not being dropped but moved, and the move is a delete and a write:
+            # leaving it where the document has it is what `_apply_source_moves` does
+            # for everything else it cannot carry.
+            by_key[key]["moved"] = False
+            notes.append(f"{key}: the source moved it, but it stands between two tables "
+                         f"where nothing can be deleted — left where the document has it")
+            continue
+        notes.append(f"{key}: dropped by the source, but it stands between two tables "
+                     f"where no request can delete it — kept")
+        merged.insert(_after_live(theirs, merged, stuck),
+                      dict(live) | {"origin": "kept from the document"})
+
+
+def _empty_range(blocks: list[dict], index: int, going: set[int], ends: bool,
+                 lead: list | None, filled: bool) -> bool:
+    start, end = _delete_range(blocks, index, going, ends, lead, filled)
+    return end <= start
+
+
+def _after_live(theirs: dict, merged: list[dict], index: int) -> int:
+    """Where a block of the document goes back into the merge: behind the merged block
+    that carries the key of the one in front of it there, or at the front."""
+    for live in reversed(theirs["blocks"][:index]):
+        at = next((i for i, b in enumerate(merged) if b.get("key") == live.get("key")), None)
+        if at is not None:
+            return at + 1
+    return 0
+
+
 def plan(base: dict, ours: dict, theirs: dict) -> dict:
     """The whole planning step: keys, merge, the grid, the edits."""
     doc_ir.key_blocks(ours)
@@ -1876,6 +1974,7 @@ def plan(base: dict, ours: dict, theirs: dict) -> dict:
             result["notes"].append(f"{block.get('key')}: a new block with a chip in it that no "
                                    f"request can create (or a picture file that is not there) "
                                    f"cannot be written")
+    restore_undeletable(theirs, result["blocks"], result["notes"])
     result["structure"], result["shaped"] = structure(theirs, result["blocks"], result["notes"])
     result["requests"] = requests(theirs, result["blocks"])
     return result

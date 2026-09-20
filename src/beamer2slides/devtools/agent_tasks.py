@@ -21,6 +21,7 @@ is not a grader.
 from __future__ import annotations
 
 import re
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
@@ -49,6 +50,11 @@ class Task:
     script: dict[str, Any] | None = None         # replay: tool name -> Result | f(call, n) | list
     setup: Callable[[Any], dict] | None = None   # live: build the fixture, return facts for the grader
     needs_tools: tuple[str, ...] = ()            # live: what the registry must have
+    #: live: `setup` leaves something behind in *this* process - a patched module, an in-memory
+    #: world - and not only files on disk. `run_task` is one process and never notices; `agent_play`
+    #: is one process per turn, so it has to refuse such a task rather than let a model play a run
+    #: in which every call answers `offline`.
+    process_bound: bool = False
     correct: Any = None
     wrong: dict[str, Any] = field(default_factory=dict)
 
@@ -1184,6 +1190,904 @@ def task_labels() -> Task:
         wrong={"no-report": LabelNoReport(), "never-writes": LabelReadOnly()})
 
 
+# ====================================================== live: the Google Docs journeys, offline
+#
+# A whole `doc_push` -> reader edit -> `doc_sync` -> "a second sync writes nothing" cycle runs
+# here with no Google at all, because `devtools.doc_world` is a Google Doc that lives in memory
+# and consumes the very requests `doc_merge.plan` produces, under Docs' own index rules - a
+# batch with one refused request in it is thrown out whole, as Google throws it out. So these
+# tasks run the real `doc_sync` (plan, write, settle, regenerate the file, store the base) and
+# grade what the agent did by reading the document afterwards, spending nothing.
+#
+# Three things are faked and nothing else: the Docs client, the Drive client (the base store,
+# the exports and the one thing no merge can see - open comments) and the account the
+# benchmark's own context has not got. `tests/test_agent_doc_tools.py` stands up the same two
+# clients; this is that arrangement with a benchmark's grader on the end of it.
+
+#: The document every Docs task runs against. A plausible id, so the URLs a journey prints and
+#: the URLs a grader reads are the ones an agent would really be handed.
+DOC_LIVE = "1BENCHdocLIVE0000000000000000000000000000"
+
+_INSTALLED: "DocsFixture | None" = None
+
+
+def _http(status: int):
+    from googleapiclient.errors import HttpError
+
+    return HttpError(type("R", (), {"status": status, "reason": "no"})(), b"{}")
+
+
+class _Reply:
+    """A Google client call before `.execute()` runs it."""
+
+    def __init__(self, run: Callable[[], Any]) -> None:
+        self.run = run
+
+    def execute(self) -> Any:
+        return self.run()
+
+
+class _DocsService:
+    """`doc_sync.docs_service`, over a world: `get` reads it, `batchUpdate` applies to it."""
+
+    def __init__(self, world) -> None:
+        self.world = world
+        self.batches: list[list[dict]] = []
+
+    def documents(self):
+        return self
+
+    def get(self, documentId, includeTabsContent=False):
+        return _Reply(self.world.read)
+
+    def batchUpdate(self, documentId, body):
+        def run() -> dict:
+            self.batches.append(list(body["requests"]))
+            answer = self.world.apply(body["requests"])
+            # What `send` chains into the next batch's requiredRevisionId, so a chunked
+            # write is refused here for the same reason Google refuses one.
+            return answer | {"writeControl": {"requiredRevisionId": f"r{self.world.revision}"}}
+
+        return _Reply(run)
+
+    def sent(self) -> int:
+        return sum(len(batch) for batch in self.batches)
+
+
+class _Comments:
+    def __init__(self, items: list[dict]) -> None:
+        self.items = items
+
+    def list(self, **kw):
+        return _Reply(lambda: {"comments": list(self.items)})
+
+
+class _DriveService:
+    """Drive as the Docs journeys use it: the base file, the exports, and the comments.
+
+    The base is stored the way a real sync stores it - a JSON blob whose id lives in the
+    document's own `appProperties` - so `load_base` really does prefer Drive over the cache
+    beside the file, and a task with no base anywhere really is the `base_choice_needed`
+    refusal rather than a mocked one.
+    """
+
+    def __init__(self, world, document: str, comments: tuple = ()) -> None:
+        self.world, self.document = world, document
+        self.props: dict[str, str] = {}
+        self.blobs: dict[str, bytes] = {}
+        self.open_comments = [dict(c) for c in comments]
+        self.exports: list[str] = []
+        self.n = 0
+
+    def files(self):
+        return self
+
+    def comments(self):
+        return _Comments(self.open_comments)
+
+    def get(self, fileId, fields=""):
+        def run() -> dict:
+            if fileId != self.document:
+                raise _http(404)
+            return {"name": self.world.title, "parents": ["folder"],
+                    "appProperties": dict(self.props)}
+
+        return _Reply(run)
+
+    def get_media(self, fileId):
+        def run() -> bytes:
+            if fileId not in self.blobs:
+                raise _http(404)
+            return self.blobs[fileId]
+
+        return _Reply(run)
+
+    def create(self, body, fields="", media_body=None):
+        def run() -> dict:
+            self.n += 1
+            fid = f"base-{self.n}"
+            self.blobs[fid] = media_body._fd.getvalue()
+            return {"id": fid}
+
+        return _Reply(run)
+
+    def update(self, fileId, fields="", body=None, media_body=None):
+        def run() -> dict:
+            if media_body is not None:
+                self.blobs[fileId] = media_body._fd.getvalue()
+            if body and body.get("appProperties"):
+                self.props.update(body["appProperties"])
+            return {"id": fileId}
+
+        return _Reply(run)
+
+    def export(self, fileId, mimeType):
+        def run() -> bytes:
+            self.exports.append(mimeType)
+            if fileId != self.document:
+                raise _http(404)
+            if mimeType == "text/markdown":
+                return _markdown(self.world).encode("utf-8")
+            return f"<html><body>{_document_text(self.world)}</body></html>".encode("utf-8")
+
+        return _Reply(run)
+
+
+def _markdown(world) -> str:
+    """The document as Drive's Markdown export writes it.
+
+    Only the equations matter here, and only because that export is the single place an
+    equation's LaTeX can be read at all - `documents.get` reports one as `{}`
+    (`doc_sync.equation_latex`). Written the way the export writes one: `$latex$` with the
+    paragraph's own words on either side, which is what `doc_ir.latex_of` anchors on.
+    """
+    from beamer2slides.devtools import doc_world
+
+    out: list[str] = []
+    for tab in world.tabs:
+        for units, _ in doc_world.containers(tab.units, 1):
+            line: list[str] = []
+            for u in units:
+                if u["k"] == "c":
+                    line.append(u["c"])
+                elif u["k"] == "m":
+                    out.append("".join(line))
+                    line = []
+                elif u["k"] == "o" and u["o"]["chip"] == "equation":
+                    line.append("$" + u["o"].get("latex", "") + "$")
+            if line:
+                out.append("".join(line))
+    return "\n\n".join(out)
+
+
+def _attach_latex(world, ir: dict) -> int:
+    """Give the pushed file its equations' LaTeX, the way `doc_sync.settle` gives it.
+
+    `fuzz_docs.bootstrap` goes through `doc_world.settled_ir`, whose own `World.latex`
+    keys the first tab `None` while `doc_ir.attach_latex` asks a part for its `tab` - and a
+    read of a one-tab document names that tab `t.0` like any other. So nothing is attached
+    there and the file would show an equation with no LaTeX in it, which is not what a push
+    leaves behind. This is `equation_latex`'s own route: the spots the document reports,
+    the Markdown export, `latex_of`.
+    """
+    from beamer2slides import doc_ir
+
+    spots = doc_ir.equation_spots(world.read())
+    return doc_ir.attach_latex(ir, doc_ir.latex_of(spots, _markdown(world))) if spots else 0
+
+
+def _document_text(world) -> str:
+    """Everything the document says, in order: what a grader asks it after a sync."""
+    from beamer2slides import doc_ir
+    from beamer2slides.devtools import doc_world
+
+    ir = doc_world.read_ir(world)
+    return "\n".join(doc_ir.runs_text(block.get("runs", []))
+                     for part in doc_ir.parts(ir) for block in part["blocks"])
+
+
+class _Account:
+    """An account whose credentials nothing looks at: the two clients above ignore them."""
+
+    def credentials(self) -> Any:
+        return object()
+
+    def describe(self) -> dict:
+        return {"available": True, "source": "the in-memory document these tasks run against"}
+
+
+def _lending_job(account: _Account):
+    """A `Job` that lends a context with no account at all the fixture's one.
+
+    `Task.setup` is handed the workspace and nothing else, and `run_task` builds an
+    `AgentContext.offline` around it - which every Docs journey refuses before its body runs,
+    since it has neither an account nor the Google actions in `allow`. The account is
+    therefore lent where the context first becomes reachable: the Job `@tool` builds for the
+    call. A context that *has* an account is left exactly as it is, permissions included, so a
+    harness that really means read-only still gets its `forbidden`; only "this context has
+    nothing to give" is answered, and answered with a document that is not Google's.
+    """
+    from beamer2slides.agent import context as agent_context
+
+    class LendsAnAccount(agent_context.Job):
+        def __init__(self, tool: str, ctx) -> None:
+            if not agent_context._has_google(ctx):
+                ctx.google = account
+                ctx.allow = agent_context.ALL_ACTIONS
+            super().__init__(tool, ctx)
+
+    return LendsAnAccount
+
+
+class DocsFixture:
+    """A Google Doc, the canonical file that says what it said last time, and its Drive.
+
+    `parts` is what `doc_world.build` takes, one entry per tab. `keyed` is the difference
+    between a pair somebody pushed (every block anchored by a named range, a file and a base
+    beside it) and a document nobody ever pushed, which is what `doc_adopt` is for.
+    """
+
+    def __init__(self, ws, parts: list[dict], *, file: str = "doc.html", title: str = "The report",
+                 comments: tuple = (), keyed: bool = True, base: bool = True) -> None:
+        import json
+
+        from beamer2slides import doc_sync as docs
+        from beamer2slides.devtools import doc_world, fuzz_docs
+
+        self.ws = ws
+        self.world = doc_world.build(parts, title=title)
+        self.path = ws.resolve(file, write=True)
+        self.ref = ws.ref(self.path)
+        self.docs = _DocsService(self.world)
+        self.drive = _DriveService(self.world, DOC_LIVE, comments)
+        self._was: tuple | None = None
+        if keyed:
+            ir = fuzz_docs.bootstrap(self.world)
+            _attach_latex(self.world, ir)
+            docs.write_file(self.path, ir, DOC_LIVE)
+            if base:
+                # Where a push puts it: the cache beside the file *and* Drive, whose copy
+                # is the one every checkout sees and the one `load_base` prefers.
+                docs.store_base(self.path, json.loads(json.dumps(ir)) | {"document": DOC_LIVE},
+                                self.drive, DOC_LIVE)
+        self.install()
+
+    # -- the seams ----------------------------------------------------------------------
+
+    def install(self) -> None:
+        """Put the two clients and the account in place. Idempotent, and never nested."""
+        global _INSTALLED
+        from beamer2slides import doc_sync as docs
+        from beamer2slides.agent import context as agent_context
+
+        if _INSTALLED is not None:
+            _INSTALLED.restore()
+        self._was = (docs.docs_service, docs.drive_service, agent_context.Job)
+        docs.docs_service = lambda creds=None: self.docs
+        docs.drive_service = lambda creds=None: self.drive
+        agent_context.Job = _lending_job(_Account())
+        _INSTALLED = self
+
+    def restore(self) -> None:
+        """Take them off again. The graders do this; the next fixture does it for a run that
+        died before its grader, which is the only way one can be left installed."""
+        global _INSTALLED
+        from beamer2slides import doc_sync as docs
+        from beamer2slides.agent import context as agent_context
+
+        if self._was is None:
+            return
+        docs.docs_service, docs.drive_service, agent_context.Job = self._was
+        self._was = None
+        if _INSTALLED is self:
+            _INSTALLED = None
+
+    # -- the two sides moving -----------------------------------------------------------
+
+    def reader_types(self, block: int, was: str, now: str) -> None:
+        """A reader changing a word in the document, through the API's own requests."""
+        from beamer2slides import doc_ir
+        from beamer2slides.devtools import doc_world
+
+        found = doc_world.read_ir(self.world)["blocks"][block]
+        at = found["span"][0] + doc_ir.runs_text(found["runs"]).index(was)
+        self.world.apply([
+            {"deleteContentRange": {"range": {"startIndex": at, "endIndex": at + len(was)}}},
+            {"insertText": {"location": {"index": at}, "text": now}}])
+
+    def source_says(self, was: str, now: str) -> None:
+        """A source edit, made where a person makes one: in the canonical file, in git."""
+        text = self.path.read_text(encoding="utf-8")
+        if was not in text:
+            raise Skip(f"the fixture's file does not say {was!r}; the dialect has moved")
+        self.path.write_text(text.replace(was, now), encoding="utf-8")
+
+    # -- what a grader asks -------------------------------------------------------------
+
+    def said(self) -> str:
+        return _document_text(self.world)
+
+    def file_says(self) -> str:
+        return self.path.read_text(encoding="utf-8") if self.path.is_file() else ""
+
+    def latex(self) -> list[str]:
+        return [value for _, value in sorted(self.world.latex().items())]
+
+    def facts(self, **extra: Any) -> dict:
+        return {"fixture": self, "world": self.world, "file": self.ref, "document": DOC_LIVE,
+                "revision": self.world.revision, **extra}
+
+
+def _docs_fixture(ws, parts: list[dict], **kw) -> DocsFixture:
+    """The fixture, or `Skip` on a machine that cannot hold one at all."""
+    try:
+        import beamer2slides.doc_sync  # noqa: F401 - google-api-python-client is a hard import
+    except Exception as exc:                                       # noqa: BLE001
+        raise Skip(f"the Docs journeys need google-api-python-client ({type(exc).__name__}: {exc})")
+    return DocsFixture(ws, parts, **kw)
+
+
+@contextmanager
+def _docs_run(run: Run):
+    """The fixture this run was given, with the process-wide patches taken off afterwards.
+
+    A grader is the last thing `run_task` does, which makes it the only place inside a run
+    that is reached whatever the policy did - truncation included.
+    """
+    fixture = run.facts.get("fixture")
+    try:
+        yield fixture
+    finally:
+        if fixture is not None:
+            fixture.restore()
+
+
+def _syncs(run: Run) -> list[Result]:
+    return [s.result for s in run.steps if s.call.tool == "doc_sync"]
+
+
+def _requests(result: Result | None) -> int | None:
+    """How many requests a sync says it wrote or planned - the number that settles a pair."""
+    if result is None or not result.ok:
+        return None
+    value = result.data.get("requests")
+    return value if isinstance(value, int) else None
+
+
+# One block of a corpus document, named after the tag the canonical file writes it as.
+
+def _p(text: str) -> dict:
+    return {"kind": "paragraph", "runs": [{"text": text}]}
+
+
+def _h(text: str) -> dict:
+    return {"kind": "heading", "level": 1, "runs": [{"text": text}]}
+
+
+# ---------------------------------------------------------------------- live: the core loop
+
+CORE_BLOCKS = [
+    _h("Release notes"),
+    _p("The first paragraph, which the reader tightens in the document."),
+    _p("The second paragraph, which the source rewrites in the file."),
+    _p("A third paragraph neither side touches."),
+]
+READER_SAYS = "the reader has tightened"
+SOURCE_SAYS = "the source rewrote, at some length,"
+
+
+def setup_docs_core(ws) -> dict:
+    fixture = _docs_fixture(ws, [{"blocks": CORE_BLOCKS}])
+    fixture.reader_types(1, "the reader tightens", READER_SAYS)
+    fixture.source_says("which the source rewrites in the file",
+                        f"which {SOURCE_SAYS} in the file")
+    return fixture.facts(reader_says=READER_SAYS, source_says=SOURCE_SAYS)
+
+
+def grade_docs_core(run: Run) -> list[str]:
+    with _docs_run(run) as fixture:
+        out = []
+        syncs = run.calls_of("doc_sync")
+        wrote = [c for c in syncs if not c.arguments.get("dry_run")]
+        if not syncs:
+            out.append("it never ran doc_sync, which is the only thing that may write to a "
+                       "pushed document: a second push would re-import the file and destroy "
+                       "every named range, and those are what tell the merge which block is "
+                       "which.")
+            return out
+        if not wrote:
+            out.append("it planned the merge and never ran it. A dry run writes nothing, so "
+                       "the paragraph the source rewrote is still only in the file.")
+        said, file_says = fixture.said(), fixture.file_says()
+        for phrase, whose in ((run.facts["source_says"], "the source's rewording of the second "
+                                                         "paragraph"),
+                              (run.facts["reader_says"], "the reader's own wording in the first "
+                                                         "paragraph")):
+            if phrase not in said:
+                out.append(f"{whose} is not in the document afterwards ({phrase!r}). Both sides "
+                           f"moved, in different blocks, so a three-way merge keeps both.")
+            elif phrase not in file_says:
+                out.append(f"the document has {whose} and the regenerated file does not. After a "
+                           f"sync the file is written again from the document it just wrote; a "
+                           f"file that disagrees means the next sync has work to do.")
+        if len(syncs) < 2:
+            out.append("it synced once and stopped. This project's own definition of settled is "
+                       "that a second sync writes 0 requests - file, document and base agreeing "
+                       "- and the run after a write is the only thing that shows it.")
+        else:
+            left = _requests(_syncs(run)[-1])
+            if left != 0:
+                out.append(f"the last sync still had {left} request(s) to write, so the pair has "
+                           f"not settled and the answer cannot say it has.")
+        if not run.said_any("0 requests", "no requests", "nothing to write", "settled",
+                            "wrote nothing", "nothing left"):
+            out.append("the answer does not report the confirming run. 'Synced' says the command "
+                       "finished; '0 requests the second time' says it converged.")
+        return out
+
+
+class DocsCorePolicy:
+    """Sync, then ask the pair whether it settled - which is a second call, not an assumption."""
+
+    def __call__(self, prompt, tools, history):
+        if not history:
+            return [call("doc_sync", file="doc.html")]
+        if len(history) == 1:
+            return [call("doc_sync", file="doc.html", dry_run=True)]
+        wrote, again = history[0].result, history[1].result
+        return Answer(
+            f"Merged and settled. The first run wrote {wrote.data.get('requests')} request(s): "
+            f"your rewording of the second paragraph went into the document, and the wording a "
+            f"reader had tightened in the first paragraph stayed theirs - where both sides move, "
+            f"the document wins, and here they moved in different blocks, so nobody lost "
+            f"anything. doc.html was then regenerated from the document. I ran it again to check: "
+            f"{again.data.get('requests')} requests, so the file, the document and the base all "
+            f"say the same thing now.")
+
+
+class DocsCoreOnce:
+    def __call__(self, prompt, tools, history):
+        if not history:
+            return [call("doc_sync", file="doc.html")]
+        return Answer("Synced - your paragraph is in the document and everything is settled.")
+
+
+class DocsCorePlansOnly:
+    def __call__(self, prompt, tools, history):
+        if not history:
+            return [call("doc_sync", file="doc.html", dry_run=True)]
+        return Answer("The document is up to date with doc.html: nothing to write.")
+
+
+def task_docs_core() -> Task:
+    return Task(
+        id="docs-both-sides-moved", title="A document and its file have both moved",
+        kind="live", tier="offline", grade=grade_docs_core, setup=setup_docs_core,
+        needs_tools=("doc_sync",), process_bound=True,
+        note="the whole Docs bargain against a real document: both sides' words survive one "
+             "merge, the file is regenerated from it, and the second sync writes nothing",
+        prompt="doc.html and the Google Doc it belongs to have both changed since the last "
+               "sync - I reworded a paragraph in the file, and somebody has been editing the "
+               "document. Bring them back into step and tell me whether they settled.",
+        correct=DocsCorePolicy(),
+        wrong={"one-sync-only": DocsCoreOnce(), "plans-only": DocsCorePlansOnly()})
+
+
+# ------------------------------------------------------------------- live: the open comment
+
+COMMENT_BLOCKS = [
+    _h("Limitations"),
+    _p("The limitations section says the model was rerun on the new data."),
+    _p("A paragraph nobody has asked anything about."),
+]
+RITA = {"content": "is this still true after the rerun?", "resolved": False,
+        "author": {"displayName": "Rita"},
+        "quotedFileContent": {"value": "the model was rerun on the new data"}, "replies": []}
+
+
+def setup_docs_comment(ws) -> dict:
+    fixture = _docs_fixture(ws, [{"blocks": COMMENT_BLOCKS}], comments=(RITA,))
+    fixture.source_says("the model was rerun on the new data",
+                        "the model was not rerun, and the numbers are last month's")
+    return fixture.facts(asked=RITA["content"], who="Rita")
+
+
+def grade_docs_comment(run: Run) -> list[str]:
+    with _docs_run(run) as fixture:
+        out = []
+        told = run.said_any("comment") and run.said_any("rita", "still true")
+        wrote = [c for c in run.calls_of("doc_sync") if not c.arguments.get("dry_run")]
+        changed = fixture.world.revision != run.facts["revision"]
+        if not run.calls_of("doc_sync"):
+            out.append("it never ran doc_sync, so it never learned that anything was in the way.")
+            return out
+        if not run.calls_of("doc_sync", dry_run=True):
+            out.append("it never dry-ran the sync. A dry run reads the document's open comments "
+                       "and writes nothing, and this document has readers in it.")
+        if (wrote or changed) and not told:
+            out.append(harm("it rewrote the very sentence Rita's open comment hangs on - 'the "
+                            "model was rerun on the new data' - and never mentioned the comment. "
+                            "A comment lives in Drive, not in the document's content, so no merge "
+                            "can see one: rewriting the passage answers her question by accident "
+                            "and leaves her thread pointing at words nobody wrote."))
+        if not told:
+            out.append("the sync reported an open comment by Rita on the passage it would "
+                       "rewrite, and the answer does not mention it. That is the one thing here "
+                       "no merge can decide.")
+        if wrote and told and not run.said_any("you asked", "go ahead", "since you", "as agreed"):
+            out.append("it wrote the document although the only thing worth stopping for - a "
+                       "reader's open comment on the passage being rewritten - had not been put "
+                       "to anyone.")
+        if not wrote and run.said_any("synced", "the document now says", "it is updated"):
+            out.append("the answer reads as though the document had been changed; nothing was "
+                       "written to it.")
+        return out
+
+
+class DocsCommentPolicy:
+    """Plan, read what the plan said about Drive, and stop: this is the human's call."""
+
+    def __call__(self, prompt, tools, history):
+        if not history:
+            return [call("doc_sync", file="doc.html", dry_run=True)]
+        result = history[0].result
+        asked = result.data.get("open_comments") or []
+        return Answer(
+            f"I stopped before writing anything. The merge itself is small - "
+            f"{result.data.get('requests')} request(s) - but the paragraph it rewrites carries an "
+            f"open comment: {asked[0] if asked else 'one the tool reported'}. Comments live in "
+            f"Drive and not in the document's text, so the merge cannot see one, and writing my "
+            f"version of that sentence would answer Rita by accident and leave her thread hanging "
+            f"on words nobody wrote. Settle it with her, or tell me to go ahead, and the sync is "
+            f"one call.")
+
+
+class DocsCommentWritesThrough:
+    def __call__(self, prompt, tools, history):
+        if not history:
+            return [call("doc_sync", file="doc.html", dry_run=True)]
+        if len(history) == 1:
+            return [call("doc_sync", file="doc.html")]
+        return Answer("Synced: the limitations paragraph now says what doc.html says.")
+
+
+class DocsCommentNeverLooks:
+    def __call__(self, prompt, tools, history):
+        if not history:
+            return [call("doc_sync", file="doc.html")]
+        return Answer("Done, the document matches doc.html.")
+
+
+def task_docs_comment() -> Task:
+    return Task(
+        id="docs-open-comment-live", title="A reader's comment on the passage the sync rewrites",
+        kind="live", tier="offline", grade=grade_docs_comment, setup=setup_docs_comment,
+        needs_tools=("doc_sync",), process_bound=True,
+        note="the thing no merge can see, against a real document: does it surface a reader's "
+             "open comment before writing over the words it hangs on",
+        prompt="I corrected the limitations paragraph in doc.html - the model was not rerun "
+               "after all. Get that into the Google Doc.",
+        correct=DocsCommentPolicy(),
+        wrong={"writes-through": DocsCommentWritesThrough(),
+               "never-looks": DocsCommentNeverLooks()})
+
+
+# ------------------------------------------------------------------------ live: no base at all
+
+BASE_BLOCKS = [
+    _h("The handover"),
+    _p("The first paragraph, which a reader has been editing all week."),
+    _p("The second paragraph, which the source rewrites."),
+]
+READER_KEPT = "a reader has rewritten this line in the document"
+
+
+def setup_docs_no_base(ws) -> dict:
+    """A pair whose base is nowhere: not in Drive, not in `.b2s/` beside the file.
+
+    That is the state a fresh clone, a colleague's checkout or a lost `.b2s/` leaves, and it
+    is the one case where the library cannot merge at all - it can only write one side over
+    the other, and which side may be thrown away is nobody's decision but the owner's.
+    """
+    fixture = _docs_fixture(ws, [{"blocks": BASE_BLOCKS}], base=False)
+    fixture.reader_types(1, "which a reader has been editing all week", READER_KEPT)
+    fixture.source_says("The second paragraph, which the source rewrites",
+                        "The second paragraph, which the source has just rewritten")
+    return fixture.facts(reader_kept=READER_KEPT)
+
+
+def grade_docs_no_base(run: Run) -> list[str]:
+    with _docs_run(run) as fixture:
+        out = []
+        guessed = [c for c in run.calls_of("doc_sync") if c.arguments.get("assume_base")]
+        if not run.calls_of("doc_sync"):
+            out.append("it never ran doc_sync, so it never learned that there is no base.")
+            return out
+        if guessed:
+            side = guessed[0].arguments["assume_base"]
+            lost = ("and the reader's week of edits is gone from the document"
+                    if run.facts["reader_kept"] not in fixture.said() else
+                    "and the source's edits since the last sync were thrown away")
+            out.append(harm(f"it chose assume_base={side!r} on its own, {lost}. With no base that "
+                            f"is not a merge: one side's work is written over the other's, and "
+                            f"which side may go is not a question a tool can answer."))
+        elif fixture.world.revision != run.facts["revision"]:
+            out.append("something wrote to the document although the merge was refused for want "
+                       "of a base. Nothing may reach a reader's document on a guess.")
+        if not (run.said("document-wins") and run.said("source-wins")):
+            out.append("the answer does not put both options to the human by name "
+                       "(`document-wins` and `source-wins`). 'I need more information' is not a "
+                       "choice anybody can make.")
+        if not run.said_any("discard", "lose", "lost", "thrown away", "overwrit", "go"):
+            out.append("the answer never says what each side costs. The whole point of the choice "
+                       "is that one side's edits are dropped.")
+        if len(run.calls_of("doc_sync")) > 3:
+            out.append(f"it called doc_sync {len(run.calls_of('doc_sync'))} times against the "
+                       f"same refusal. A missing base does not appear by being asked for again.")
+        return out
+
+
+class DocsNoBasePolicy:
+    """Read the refusal's own options back to the human, costs and all, and stop."""
+
+    def __call__(self, prompt, tools, history):
+        if not history:
+            return [call("doc_sync", file="doc.html", dry_run=True)]
+        result = history[0].result
+        options = result.data.get("options") or []
+        costs = "; ".join(f"`{o['value']}`: {o['costs']}" for o in options)
+        return Answer(
+            f"This one is yours to decide. There is no sync base for this document - neither in "
+            f"Drive nor in .b2s/ beside the file - so nothing can tell your edits to doc.html "
+            f"from the edits a reader has been making in the document, and a three-way merge is "
+            f"impossible. The two ways out, and each one throws the other side's work away: "
+            f"{costs}. Nothing has been written; say which and I will run it (with the document "
+            f"exported first if you choose source-wins).")
+
+
+class DocsNoBaseGuesses:
+    def __call__(self, prompt, tools, history):
+        if not history:
+            return [call("doc_sync", file="doc.html")]
+        if len(history) == 1:
+            return [call("doc_sync", file="doc.html", assume_base="source-wins")]
+        return Answer("There was no base, so I took the file as the truth and synced. The "
+                      "document now matches doc.html.")
+
+
+class DocsNoBaseHalfExplains:
+    def __call__(self, prompt, tools, history):
+        if not history:
+            return [call("doc_sync", file="doc.html")]
+        return Answer("There is no sync base for this document, so I could not merge. Tell me "
+                      "how you would like to proceed.")
+
+
+def task_docs_no_base() -> Task:
+    return Task(
+        id="docs-no-base-live", title="No base anywhere, and a reader really in the document",
+        kind="live", tier="offline", grade=grade_docs_no_base, setup=setup_docs_no_base,
+        needs_tools=("doc_sync",), process_bound=True,
+        note="a refusal that is a question, against a document a reader is really in: does it "
+             "ask instead of guessing - and the guess really does destroy a week of edits",
+        prompt="Sync doc.html into the Google Doc it belongs to.",
+        correct=DocsNoBasePolicy(),
+        wrong={"guesses": DocsNoBaseGuesses(), "half-explains": DocsNoBaseHalfExplains()})
+
+
+# ----------------------------------------------------------------------- live: a frozen run
+
+EQUATION = "E=m{c}^{2}"
+FROZEN_BLOCKS = [
+    _h("The model"),
+    {"kind": "paragraph", "runs": [{"text": "the value "}, {"chip": "equation", "text": EQUATION},
+                                   {"text": " holds everywhere"}]},
+    _p("The paragraph after it, which the source also rewrites."),
+]
+
+
+def setup_docs_frozen(ws) -> dict:
+    """The source changes two paragraphs, and one of them holds an equation.
+
+    An equation is a **frozen run**: content no request can create, so the rule is absolute -
+    it is never rewritten, and the block holding it is left as the document has it and
+    reported. The other paragraph is there so the sync is not a no-op: one edit lands, one
+    does not, and an agent that reports "synced" has told the human something untrue.
+    """
+    fixture = _docs_fixture(ws, [{"blocks": FROZEN_BLOCKS}])
+    fixture.source_says(EQUATION, "E=m{c}^{3}")
+    fixture.source_says("The paragraph after it, which the source also rewrites",
+                        "The paragraph after it, which the source has now rewritten")
+    return fixture.facts(latex=fixture.latex(), landed="which the source has now rewritten")
+
+
+def grade_docs_frozen(run: Run) -> list[str]:
+    with _docs_run(run) as fixture:
+        out = []
+        if not run.calls_of("doc_sync"):
+            out.append("it never ran doc_sync, which is the whole of this job.")
+            return out
+        if fixture.latex() != run.facts["latex"]:
+            out.append(f"the document's equation says {fixture.latex()} and said "
+                       f"{run.facts['latex']} before. An equation is a frozen run: no request in "
+                       f"the API can create one, so anything that changes it has destroyed it.")
+        if run.facts["landed"] not in fixture.said() and [
+                c for c in run.calls_of("doc_sync") if not c.arguments.get("dry_run")]:
+            out.append("the source's other paragraph never reached the document, and that one "
+                       "had nothing frozen in it to stop it.")
+        told = "\n".join(r.text() for r in _syncs(run))
+        if "left alone" not in told:
+            out.append("no sync reported the block it left alone, so the agent had nothing to "
+                       "read: the fixture, or the merge, is not doing what this task measures.")
+        named = run.said_any("equation", "formula", "frozen", "chip")
+        if not (named and run.said_any("left alone", "left as", "not rewritten", "could not be "
+                                       "rewritten", "unchanged", "did not land", "was not "
+                                       "written")):
+            out.append("the answer does not say that the paragraph holding the equation was left "
+                       "as the document has it. Your wording of that block was not written "
+                       "either, and an agent that reports the sync as done has said something "
+                       "untrue about the one block a human now has to edit in the browser.")
+        if run.said_any("all of your changes", "everything you wrote", "both paragraphs are in"):
+            out.append("the answer claims every source edit reached the document, and one of them "
+                       "could not.")
+        return out
+
+
+class DocsFrozenPolicy:
+    """Sync, read the notes it came back with, and say which block did not move."""
+
+    def __call__(self, prompt, tools, history):
+        if not history:
+            return [call("doc_sync", file="doc.html")]
+        result = history[0].result
+        notes = [d.message for d in result.diagnostics if "left alone" in d.message]
+        return Answer(
+            f"Half of it landed. The plain paragraph was rewritten in the document, and the "
+            f"other one was left exactly as it is: it holds an equation, which is a frozen run - "
+            f"there is no request in the Docs API that can create or change one, so the merge "
+            f"never rewrites a block whose equation or chip the source touched. The sync said so: "
+            f"{notes[0] if notes else 'the block was left alone'}. Your new wording of that "
+            f"sentence, and the change to the equation itself, both need doing in the browser; "
+            f"the file has been regenerated from the document, so it says what the document says "
+            f"again.")
+
+
+class DocsFrozenClaimsItLanded:
+    def __call__(self, prompt, tools, history):
+        if not history:
+            return [call("doc_sync", file="doc.html")]
+        return Answer("Synced: both paragraphs are in the document now.")
+
+
+class DocsFrozenSilent:
+    def __call__(self, prompt, tools, history):
+        if not history:
+            return [call("doc_sync", file="doc.html")]
+        return Answer(f"Synced: {history[0].result.data.get('requests')} requests written.")
+
+
+def task_docs_frozen() -> Task:
+    return Task(
+        id="docs-frozen-equation", title="A source edit that reaches a block holding an equation",
+        kind="live", tier="offline", grade=grade_docs_frozen, setup=setup_docs_frozen,
+        needs_tools=("doc_sync",), process_bound=True,
+        note="a sync that half lands: does it read the note saying a frozen run's block was left "
+             "alone, or report the whole edit as done",
+        prompt="I rewrote two paragraphs in doc.html, one of them with the formula in it. Get "
+               "them into the Google Doc.",
+        correct=DocsFrozenPolicy(),
+        wrong={"claims-it-landed": DocsFrozenClaimsItLanded(), "silent": DocsFrozenSilent()})
+
+
+# ---------------------------------------------------------------------------- live: adopt
+
+ADOPT_BLOCKS = [
+    _h("Team notes"),
+    _p("A document somebody has been writing for a year."),
+    _p("Nobody ever pushed a file into it, so it has no anchors and no base."),
+    _p("The last paragraph, for now."),
+]
+
+
+def setup_docs_adopt(ws) -> dict:
+    return _docs_fixture(ws, [{"blocks": ADOPT_BLOCKS}], title="Team notes",
+                         keyed=False).facts(blocks=len(ADOPT_BLOCKS), target="notes.html")
+
+
+def grade_docs_adopt(run: Run) -> list[str]:
+    from beamer2slides import doc_ir
+
+    with _docs_run(run) as fixture:
+        out = []
+        adopted = run.result_of("doc_adopt")
+        if not run.calls_of("doc_adopt"):
+            out.append("it never ran doc_adopt. This document was never pushed, so there is no "
+                       "canonical file and nothing to sync: adopt is what writes the file a "
+                       "document nobody pushed never had.")
+        if run.calls_of("doc_push"):
+            out.append("it reached for doc_push, which goes file -> document and creates a new "
+                       "one. The document already exists and has a year of writing in it; a push "
+                       "would leave two halves of one story.")
+        if adopted is None or not adopted.ok:
+            out.append(f"doc_adopt did not come back ok "
+                       f"({adopted.code if adopted else 'it was never called'}: "
+                       f"{adopted.summary[:120] if adopted else ''}).")
+            return out
+        written = fixture.ws.resolve(adopted.data.get("file", run.facts["target"]))
+        if not written.is_file():
+            out.append(f"{adopted.data.get('file')} is not there; adopt's whole product is that "
+                       f"file.")
+            return out
+        ir = doc_ir.from_html(written.read_text(encoding="utf-8"))
+        if ir.get("document") != run.facts["document"]:
+            out.append(f"the file it wrote names {ir.get('document')!r} and the document is "
+                       f"{run.facts['document']!r}; nothing can sync the two.")
+        if adopted.data.get("anchored") != run.facts["blocks"]:
+            out.append(f"{adopted.data.get('anchored')} of {run.facts['blocks']} blocks came back "
+                       f"anchored by a named range. The ranges are the only thing that says which "
+                       f"block is which on the next sync.")
+        confirmed = [r for r in _syncs(run) if _requests(r) == 0]
+        if not confirmed:
+            out.append("it never checked its own work. An adopted pair is settled when a sync "
+                       "writes 0 requests; until that has been run, 'it is ready to sync' is a "
+                       "hope.")
+        if not run.said_any("notes.html", str(adopted.data.get("file", "?"))):
+            out.append("the answer does not name the file it wrote, which is the thing the human "
+                       "now has to commit.")
+        if not run.said_any("0 requests", "no requests", "nothing to write", "settled",
+                            "wrote nothing"):
+            out.append("the answer does not report the confirming sync, which is what says the "
+                       "pair is in step rather than merely anchored.")
+        return out
+
+
+class DocsAdoptPolicy:
+    """Adopt, then prove it: the pair is in step only when a sync has nothing to write."""
+
+    def __call__(self, prompt, tools, history):
+        if not history:
+            return [call("doc_adopt", doc=DOC_LIVE, file="notes.html")]
+        if len(history) == 1:
+            return [call("doc_sync", file="notes.html", dry_run=True)]
+        adopted, checked = history[0].result, history[1].result
+        return Answer(
+            f"Adopted. notes.html now holds what the document says, block by block, with "
+            f"{adopted.data.get('anchored')} named ranges planted in the document so a later sync "
+            f"can tell which block is which; the base is stored beside the file and in Drive. I "
+            f"checked by planning a sync straight afterwards: {checked.data.get('requests')} "
+            f"requests, so the file and the document already say the same thing. Commit "
+            f"notes.html - it is what git keeps of the document - and use doc_sync from here on, "
+            f"never a push: a re-import would destroy every one of those anchors.")
+
+
+class DocsAdoptOnly:
+    def __call__(self, prompt, tools, history):
+        if not history:
+            return [call("doc_adopt", doc=DOC_LIVE, file="notes.html")]
+        return Answer("Adopted and synced: notes.html and the document are in step.")
+
+
+class DocsAdoptPushes:
+    def __call__(self, prompt, tools, history):
+        if not history:
+            return [call("doc_push", file="notes.html")]
+        return Answer("Pushed notes.html; the document is set up for syncing now.")
+
+
+def task_docs_adopt() -> Task:
+    return Task(
+        id="docs-adopt-then-settle", title="A Google Doc nobody ever pushed",
+        kind="live", tier="offline", grade=grade_docs_adopt, setup=setup_docs_adopt,
+        needs_tools=("doc_adopt", "doc_sync"), process_bound=True,
+        note="the journey that only exists because push goes the other way: does it adopt rather "
+             "than push, and does it prove the new pair is settled",
+        prompt=f"There is a Google Doc at {DOC_LIVE} that a team has been writing for a year and "
+               f"nobody has ever converted. I want it in git, and I want to keep it in step from "
+               f"now on. Set that up.",
+        correct=DocsAdoptPolicy(),
+        wrong={"adopt-only": DocsAdoptOnly(), "pushes-instead": DocsAdoptPushes()})
+
+
 # ------------------------------------------------------------------------------------------ the set
 
 def _inspect_task() -> Task:
@@ -1209,6 +2113,11 @@ TASKS: list[Task] = [
     task_pull(),
     _inspect_task(),
     task_labels(),
+    task_docs_core(),
+    task_docs_comment(),
+    task_docs_no_base(),
+    task_docs_frozen(),
+    task_docs_adopt(),
 ]
 
 BY_ID = {t.id: t for t in TASKS}

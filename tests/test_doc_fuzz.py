@@ -147,6 +147,36 @@ def test_the_oracle_sees_a_chip_the_reader_inserted_disappear():
     assert "frozen_gone" in _kinds(oracle.check(base, before, after, NOTHING))
 
 
+def test_the_oracle_sees_a_picture_the_reader_inserted_disappear():
+    shot = {"frozen": True, "chip": "image", "text": "", "value": "kix.i7",
+            "uri": "https://example.invalid/reader.png"}
+    base = _ir(_p("k1", "look "))
+    before = _ir({"key": "k1", "kind": "paragraph", "runs": [{"text": "look "}, shot]})
+    after = _ir(_p("k1", "look "))
+    assert "frozen_gone" in _kinds(oracle.check(base, before, after, NOTHING))
+
+
+def test_the_oracle_lets_a_picture_the_settle_named_alone():
+    """A picture a reader inserted has only a `uri` until the settle saves it and
+    gives it a file and a digest (`doc_sync.fetch_pictures`). The document did not
+    change; the name we knew it by did. Judged on one name — and `frozen_key` prefers
+    the digest — every such picture read as lost, which was thirteen of the twenty
+    findings a chain-8 run had left. A picture is now the same picture under any of
+    its names, and the object id is one of them."""
+    shot = {"frozen": True, "chip": "image", "text": "", "value": "kix.i7",
+            "uri": "https://example.invalid/reader.png"}
+    named = shot | {"src": "doc.media/kix.i7.png", "sha": "b9c1f0a2"}
+    before = _ir({"key": "k1", "kind": "paragraph", "runs": [{"text": "look "}, shot]})
+    after = _ir({"key": "k1", "kind": "paragraph", "runs": [{"text": "look "}, named]})
+    assert not oracle.failures(oracle.check(_ir(_p("k1", "look ")), before, after, NOTHING))
+    # And the other way round: a block the sync rewrote keeps the file and is given a
+    # new object id, which is the case `frozen_key`'s docstring was written for.
+    rewritten = named | {"value": "kix.i9", "uri": "https://example.invalid/again.png"}
+    settled = _ir({"key": "k1", "kind": "paragraph", "runs": [{"text": "look "}, named]})
+    after = _ir({"key": "k1", "kind": "paragraph", "runs": [{"text": "look "}, rewritten]})
+    assert not oracle.failures(oracle.check(settled, settled, after, NOTHING))
+
+
 def test_the_oracle_sees_a_cell_the_reader_typed_in_overwritten():
     def table(second):
         return {"key": "t1", "kind": "table",
@@ -257,6 +287,26 @@ def test_a_table_in_a_later_tab_keeps_the_key_the_file_gave_it():
             if b["kind"] == "table"] == ["table:year"]
 
 
+def test_a_table_whose_anchor_row_the_source_deletes_keeps_its_key():
+    """A table is anchored in its first cell, and a row delete can take that very
+    cell: the structural batch then leaves the table with no named range at all, the
+    re-read cannot find it, and the words planned against the new grid are written
+    nowhere. `table:year` came back as `table:2024` — gone, as far as the file was
+    concerned — and the source's cell edit went with it. `structure` gives a regrid
+    the same `after` a new table gets, so `anchor_tables` finds it again and
+    `plant_ranges` puts the range back (offline chain-8 seed 7122, shrunk).
+    """
+    world, ours, base = _push("tabs")
+    grid = [b for b in doc_ir.parts(ours)[1]["blocks"] if b["kind"] == "table"][0]
+    assert grid["key"] == "table:year" and len(grid["rows"]) == 3
+    del grid["rows"][0]                       # the row the named range lives in
+    grid["rows"][0][0][0]["runs"] = [{"text": "umbrella"}]
+    _, ours, _ = fuzz_docs.sync_once(world, ours, base)
+    now = [b for b in doc_ir.parts(ours)[1]["blocks"] if b["kind"] == "table"]
+    assert [b["key"] for b in now] == ["table:year"]
+    assert doc_merge._match_text(now[0]) == "umbrella | 7 | 2025 | 9"
+
+
 @pytest.mark.parametrize("shape", sorted(fuzz_docs.SHAPES))
 def test_the_world_carries_nothing_the_reader_does_not_read(shape):
     """`doc_ir.unmodelled` and `doc_world` were written apart and from the same API
@@ -300,41 +350,46 @@ def _keys(ir):
     return [b.get("key") for b in ir["blocks"]]
 
 
-@pytest.mark.xfail(strict=True, reason="fuzz_docs.KNOWN 'toc-block': every test for one "
-                   "of these reads kind == 'table', so a table of contents is an "
-                   "ordinary block to the planner and the delete takes the newline in "
-                   "front of it — which Docs refuses, and a refusal throws out the "
-                   "whole batch")
 def test_a_block_in_front_of_a_table_of_contents_can_be_deleted():
+    """Was `toc-block`: every test for Docs' index rules read `kind == "table"`, so a
+    table of contents was an ordinary block to the planner and the delete took the
+    newline in front of it. Docs refuses that, and a refusal throws out the whole
+    batch — the sync died. `doc_ir.STRUCTURAL` is what those rules are about."""
     world, ours, base = _build([_para("First line."), {"kind": "toc"}, _para("After it.")])
     ours["blocks"] = [b for b in ours["blocks"] if b["key"] != "paragraph:first-line"]
     fuzz_docs.sync_once(world, ours, base)
+    assert _keys(doc_world.read_ir(world, ours, base)) == ["toc:empty", "paragraph:after-it"]
 
 
-@pytest.mark.xfail(strict=True, reason="fuzz_docs.KNOWN 'toc-block': the same, writing "
-                   "rather than deleting — the block goes in at the TOC's own index, "
-                   "where nothing can be inserted")
 def test_a_block_can_be_written_in_front_of_a_table_of_contents():
+    """The same, writing rather than deleting: the block went in at the TOC's own
+    index, where nothing can be inserted."""
     world, ours, base = _build([_para("First line."), {"kind": "toc"}, _para("After it.")])
     ours["blocks"].insert(1, _para("A new line."))
-    fuzz_docs.sync_once(world, ours, base)
+    _, ours, base = fuzz_docs.sync_once(world, ours, base)
+    assert [doc_merge.block_text(b) for b in doc_world.read_ir(world, ours, base)["blocks"]] \
+        == ["First line.", "A new line.", "", "After it."]
 
 
-@pytest.mark.xfail(strict=True, reason="fuzz_docs.KNOWN 'empty-delete': an empty "
-                   "paragraph between two tables has no mark to give up — its own is "
-                   "the one in front of a table and the block before it is a table — so "
-                   "`_delete_range` returns a range of length 0 and Docs refuses it")
-def test_an_empty_paragraph_between_two_tables_can_be_deleted():
+def test_an_empty_paragraph_between_two_tables_is_kept_and_said_out_loud():
+    """Was `empty-delete`, and it killed the sync: such a paragraph has no mark to give
+    up — its own is the newline in front of a table and the block before it is a table
+    — so `_delete_range` came back with a range of length 0, Docs refused it, and the
+    refusal threw out the whole batch. Docs wants a paragraph between two tables
+    anyway, so `restore_undeletable` keeps it and the report says why."""
     world, ours, base = _build([_table([["a", "b"]]), _para(""),
                                 _table([["c", "d"]]), _para("The end.")])
     ours["blocks"] = [b for b in ours["blocks"] if b["key"] != "paragraph:empty"]
-    fuzz_docs.sync_once(world, ours, base)
+    report, ours, base = fuzz_docs.sync_once(world, ours, base)
+    assert _keys(doc_world.read_ir(world, ours, base)) == [
+        "table:a", "paragraph:empty", "table:c", "paragraph:the-end"]
+    assert any("no request can delete it" in line for line in report["notes"])
 
 
-@pytest.mark.xfail(strict=True, reason="fuzz_docs.KNOWN 'dropped-table': the 'edited in "
-                   "the document' test at doc_merge.py:469 uses block_text, which is "
-                   "empty for a table, so the reader's cells count for nothing")
 def test_a_table_the_reader_typed_in_survives_the_source_dropping_it():
+    """Was `dropped-table`: the 'edited in the document' test used `block_text`, which
+    is empty for a table, so the reader's cells counted for nothing and the table went
+    with everything in it. `doc_merge._edited` reads the cells and the grid."""
     world, ours, base = _push("ends_on_table")
     part = doc_world.read_ir(world, ours, base)
     table = [b for b in part["blocks"] if b["kind"] == "table"][0]
@@ -348,11 +403,11 @@ def test_a_table_the_reader_typed_in_survives_the_source_dropping_it():
     assert not oracle.failures(oracle.check(was, before, base, report, mine))
 
 
-@pytest.mark.xfail(strict=True, reason="fuzz_docs.KNOWN 'dropped-frozen': a block the "
-                   "source dropped is deleted although no request could ever make its "
-                   "equation again — the rewrite path checks that, the delete path "
-                   "does not")
 def test_a_block_with_an_equation_survives_the_source_dropping_it():
+    """Was `dropped-frozen`: the rewrite path in `_merge_block` refuses to delete and
+    write back a block holding content no request can make again, and the delete path
+    did not check at all — the same loss with nothing written back. It is kept now, and
+    the report says the source asked for it to go."""
     world, ours, base = _push("equations")
     was, mine = copy.deepcopy(base), copy.deepcopy(ours)
     ours["blocks"] = [b for b in ours["blocks"]

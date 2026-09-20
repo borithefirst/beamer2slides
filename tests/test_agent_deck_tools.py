@@ -236,6 +236,44 @@ def test_a_rebuild_with_no_way_back_is_its_own_refusal(tmp_path):
     assert any("backup='none'" in s for s in job.next_steps)
 
 
+def test_a_refusal_never_hands_the_agent_a_shell_command(tmp_path):
+    """The library's own refusal ends in three commands, `--force-rebuild` among them.
+
+    It is written for a person at a terminal, where offering the escape hatch beside the two
+    safe routes is honest. Handed to a model it is the opposite: prose is the first thing read,
+    so the refusal would be teaching the one move it exists to prevent - and offering a shell as
+    the way round a tool that has just said no. The facts belong in `data` and the ways forward
+    in `next_steps`, both as calls that can actually be made.
+    """
+    from beamer2slides.agent.context import Job
+    from beamer2slides.agent.deck_tools import _refuse_rebuild
+    from beamer2slides.agent.types import Refused
+    from beamer2slides.guard import RebuildRefused, refusal_message
+
+    root = tmp_path / "ws"
+    root.mkdir()
+    out = root / "out" / "talk"
+    survey = {"presentationId": "PID123", "revisionId": "r7", "reason": "edited", "edited": True,
+              "examples": ["slide 3: the text of `b2s_s003_t0` was changed"], "slides": ["b2s_s003"],
+              "counts": {"text": 1}, "slides_added": 0, "slides_deleted": 0, "reordered": False}
+    # The real prose, not a stand-in: this test is about what the library actually raises.
+    cli = refusal_message("PID123", out, root / "talk.pdf", survey, "edited")
+    assert "--force-rebuild" in cli, "the message this test guards against has changed"
+
+    for reason, code in (("edited", "deck_edited"), ("backup-failed", "no_way_back")):
+        job = Job("deck_convert", AgentContext.offline(root))
+        with pytest.raises(Refused) as caught:
+            _refuse_rebuild(job, RebuildRefused(cli, dict(survey, reason=reason)),
+                            root / "talk.pdf", out)
+        assert caught.value.code == code
+        said = str(caught.value)                    # what becomes `Result.summary`
+        for shell in ("python -m beamer2slides", "--force-rebuild", "--new-deck", "--backup"):
+            assert shell not in said, f"{code} hands the agent `{shell}`"
+        assert "Nothing was written." in said
+    # Forcing is still reachable - as an argument to this tool, and named as somebody's decision.
+    assert any("force_rebuild=True" in s for s in job.next_steps)
+
+
 # ---------------------------------------------------------------- tex_label
 
 

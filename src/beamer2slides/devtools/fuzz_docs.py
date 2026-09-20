@@ -979,43 +979,24 @@ def describe_script(script: dict) -> str:
 # was seen, not which defect caused it: several of these show up as a lost key, and
 # the tests, not the signature, say which is which.
 KNOWN = (
-    {"id": "toc-block",
-     "kind": "batch_refused", "has": "table of contents",
-     "why": "doc_merge treats a table of contents as an ordinary block, because every "
-            "test for one of these reads `kind == 'table'`: a block added in front of a "
-            "TOC is written at its own index and a block deleted in front of one gives "
-            "up its own paragraph mark. Docs refuses both, and a refusal throws out the "
-            "whole batch, so the sync dies"},
-    {"id": "toc-table-split",
-     "kind": "batch_refused", "has": "not one run of text",
-     "why": "a table the source added next to a table of contents: the empty paragraph "
-            "insertTable leaves is deleted at an index that lands inside the TOC's own "
-            "units. Only ever seen on the `toc` shape — the signature is the message, "
-            "so a range crossing a real table would be filed here too"},
-    {"id": "empty-delete",
-     "kind": "batch_refused", "has": "is empty or before the body",
-     "why": "an empty paragraph standing between two tables can be deleted in no way at "
-            "all: its own mark is the one in front of a table, and the block before it "
-            "is a table with no mark to borrow, so `doc_merge._delete_range` returns a "
-            "range of length 0. Google refuses it and the whole batch goes with it"},
-    {"id": "dropped-table",
-     "kind": "block_gone", "has": "table:",
-     "why": "a table the source dropped is deleted however much the reader typed into "
-            "it: the 'edited in the document' test uses block_text, which is empty for "
-            "a table (_match_text is the one that sees its cells)"},
-    {"id": "dropped-frozen",
-     "kind": "frozen_gone", "has": "no request can make one",
-     "why": "a block the source dropped is deleted although it holds an equation, a "
-            "dropdown or a table of contents no request can ever make again, and the "
-            "report does not say so"},
+    # Five entries stood at the head of this tuple and are gone, not rewritten: each is
+    # fixed and has a test of its own in tests/test_doc_fuzz.py, and each signature was
+    # wide enough to swallow the next defect that looks like it — `block_gone`
+    # mentioning `table:` had been catching crossed keys on tables all along, and
+    # `batch_refused` saying "not one run of text" would catch any range that crosses a
+    # real table. They were `toc-block`, `toc-table-split` and `empty-delete` (all
+    # three ways of killing a sync outright — `doc_ir.STRUCTURAL` and
+    # `doc_merge.restore_undeletable`), `dropped-table` and `dropped-frozen`.
     {"id": "lost-key",
      "kind": "identity_lost", "has": "",
-     "why": "a block keeps its words and loses the key the file gave it. Three of the "
-            "four causes are fixed and the count is down by a third: `inherit_keys` "
+     "why": "a block keeps its words and loses the key the file gave it. Four causes "
+            "are fixed and the count is down by four fifths: `inherit_keys` "
             "reassigning a key the file itself asserts, `settle` keying every tab "
-            "before those tabs are adopted (`doc_merge.settle_keys`), and a delete "
+            "before those tabs are adopted (`doc_merge.settle_keys`), a delete "
             "carrying the style of the block above onto the survivor (the settle "
-            "writes the named style back). A heading turned paragraph keeping its "
+            "writes the named style back), and a row delete taking with it the first "
+            "cell a table is anchored in (`structure` gives a regrid an `after`, so "
+            "`anchor_tables` finds it again). A heading turned paragraph keeping its "
             "level is the one left, and what else reaches this signature is not yet "
             "known — it is the widest of these, so anything that renames a block "
             "lands here"},
@@ -1058,8 +1039,9 @@ KNOWN = (
             "`paragraph:empty` (chain-8 seed 1147, where the reader's person chip went "
             "and a picture with it) — and fixing it took this from 22 findings to 13 "
             "in 200 chain-8 rounds. What the 13 are is not yet known: the signature is "
-            "a frozen run gone that is not the `dropped-frozen` one above, so any "
-            "other way of losing a chip is filed here too"},
+            "any frozen run gone at all, so every other way of losing a chip — "
+            "including any return of the `dropped-frozen` that used to stand above — "
+            "is filed here too"},
 )
 
 

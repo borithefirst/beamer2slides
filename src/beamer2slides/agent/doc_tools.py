@@ -27,7 +27,6 @@ credentials: `@tool` has installed the provider by the time a body runs.
 
 from __future__ import annotations
 
-import contextlib
 from pathlib import Path
 from typing import Annotated, Any
 
@@ -340,15 +339,10 @@ def doc_adopt(
     if target is not None:
         target.parent.mkdir(parents=True, exist_ok=True)
     try:
-        if target is None:
-            # `doc_sync.adopt` names the file after the document's title, which it only
-            # learns by reading it - and resolves that name against the process's current
-            # folder. Run it inside the workspace, so the file cannot land outside one.
-            # (Safe here: `@tool` holds a process-wide lock for the length of a journey.)
-            with contextlib.chdir(j.ctx.workspace.root):
-                info = docs.adopt(doc, None, force)
-        else:
-            info = docs.adopt(doc, target, force)
+        # A `path` of None makes adopt name the file after the document's title, which it
+        # only learns by reading it; `folder` is where that name lands, so the file cannot
+        # come out anywhere but the workspace.
+        info = docs.adopt(doc, target, force, folder=j.ctx.workspace.root)
     except SystemExit as exc:
         _exit(j, exc, file)
         return
