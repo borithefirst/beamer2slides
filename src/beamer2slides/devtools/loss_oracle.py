@@ -718,11 +718,40 @@ def _source_stacks_above(ours_slide: list | None, text_key: str | None, shape_ke
     return text_key in keys and shape_key in keys and keys.index(shape_key) > keys.index(text_key)
 
 
+def uncertain_slides(base: dict, ours: dict | None) -> set[str]:
+    """The base keys of the slides this very sync told the person it may have matched wrongly.
+
+    Which frame is which is the one question a three-way merge cannot answer for itself, and the
+    two passes that come closest both say so out loud: a label the content says is on another
+    frame now (`identity.label_moves` -> a `label` conflict per slide) and a pairing the words
+    could as well have made with the slide next door (`identity.align_slides`' weak pairs -> a
+    warning naming the slide and asking for a label). What follows on such a slide - the frame's
+    panels drawn over the person's text there - is the frame landing where the report said it
+    might land, so it is not a loss in silence, which is the only thing this oracle judges. A
+    slide nobody was warned about is not in here, and a finding on it still fails."""
+    out: set[str] = set()
+    if not ours:
+        return out
+    for m in ours.get("label_moves") or []:
+        # `sync.build_ours` puts the base's keys on these before the report is written
+        out.update(k for k in (m.get("slide"), m.get("frame_is")) if isinstance(k, str))
+    pairs = {int(k): v for k, v in (ours.get("pairs") or {}).items()}
+    for j, _how in (ours.get("weak_pairs") or {}).items():
+        i, o = pairs.get(int(j)), ours["slides"][int(j)]
+        if i is not None and not o.get("label"):   # the warning `merge.plan_merge` writes
+            out.add(base["slides"][i]["key"])
+    return out
+
+
 def occlusion_findings(base: dict, before: dict, after: dict, ours: dict | None = None) -> list[dict]:
     """A text that could be read before the sync, under an opaque shape the sync created after it.
     The text is the same object, or the object the sync made for the same element; it counts as
-    readable before when at least one of its objects then was."""
+    readable before when at least one of its objects then was.
+
+    A shape lands on a slide because a frame was written there, so on a slide whose identity the
+    report itself calls uncertain (`uncertain_slides`) this is a note, not a failure."""
     out = []
+    unsure = uncertain_slides(base, ours)
     base_by_id = {s["objectId"]: s for s in base["slides"] if s.get("objectId")}
     after_by_id = {s["objectId"]: s for s in after["slides"]}
     ours_by_key = {s["key"]: s["elements"] for s in (ours or {}).get("slides", [])}
@@ -754,9 +783,11 @@ def occlusion_findings(base: dict, before: dict, after: dict, ours: dict | None 
             over = [x for x in over
                     if not _source_stacks_above(ours_slide, el and el["key"], (el_after.get(x) or {}).get("key"))]
             if over:
-                out.append(finding("text_hidden", "loss",
+                said = skey in unsure
+                out.append(finding("text_hidden", "note" if said else "loss",
                                    f"{norm(rb.get('text'))[:60]!r} is under {over}, which the sync created "
-                                   "(opaque, above it in z-order); it could be read before",
+                                   "(opaque, above it in z-order); it could be read before"
+                                   + (" - on a slide the report says may be the wrong one" if said else ""),
                                    slide=skey, element=el and el["key"], object=oid))
     return out
 

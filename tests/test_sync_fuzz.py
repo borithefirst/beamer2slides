@@ -559,6 +559,55 @@ def test_catches_text_hidden_under_a_shape_the_sync_created():
     assert loss_oracle.occlusion_findings(base, before, synced(["t", new]), above) == []
 
 
+def test_the_fuzz_world_hands_the_merge_everything_sync_does_about_identity(tmp_path):
+    """`fuzz_world.build_ours` is a copy of `sync.build_ours`, and a copy drifts. It left out
+    `weak_pairs` and `near_misses` - the two things `merge.plan_merge` turns into its warnings
+    about which frame is which - so every campaign round ran against a world where the person is
+    never told the pairing was a guess, and a frame put on a look-alike slide read as a loss in
+    silence. What sync hands the merge, the harness hands it too."""
+    import inspect
+    import random
+
+    from beamer2slides import sync
+    from beamer2slides.devtools import fuzz_world as W
+
+    said = inspect.getsource(sync.build_ours)
+    wanted = {k for k in ("pairs", "label_moves", "weak_pairs", "near_misses") if f'"{k}"' in said}
+    assert wanted == {"pairs", "label_moves", "weak_pairs", "near_misses"}, "sync stopped saying one"
+    doc = W.make("adopt", random.Random(7), tmp_path)
+    ours = W.build_ours(doc, W.build_base(doc, tmp_path), tmp_path)
+    assert wanted <= set(ours), f"the harness says less than sync does: {wanted - set(ours)}"
+
+
+def test_hidden_text_on_a_slide_the_report_calls_uncertain_is_a_note():
+    """A shape lands on a slide because a frame was written there, so this finding is downstream of
+    the pairing: when the sync has already told the person, in the same report, that it may have
+    put a frame on the wrong slide, the panel over their words is that frame landing where the
+    report said it might - announced, not silent, which is the only thing this oracle judges.
+
+    Seven of the eight rounds the 4,000-round adopt-shaped campaign failed on were exactly this,
+    and the campaign could not see it because `fuzz_world.build_ours` left `weak_pairs` out of
+    `ours` - a world where the person is never told."""
+    base, before = _occlusion_world()
+    new = f"b2s_{loss_oracle.h6('f1')}_{loss_oracle.h6('shape/panel/0')}_1zz"
+    after = copy.deepcopy(before)
+    after["slides"][0]["objects"][new] = {**before["slides"][0]["objects"]["p"], "parent_group": "g"}
+    after["slides"][0]["objects"]["g"]["children"] = ["t", new]
+    ours = {"slides": [{"key": "f1", "elements": [{"key": "shape/panel/0"}, {"key": "text/body/0"}]}]}
+    assert [f["severity"] for f in loss_oracle.occlusion_findings(base, before, after, ours)] == ["loss"]
+
+    # a label the content says is on another frame now: the report carries a conflict per slide
+    moved = {**ours, "label_moves": [{"label": "x", "verdict": "unsure", "slide": "f1", "frame_is": None}]}
+    found = loss_oracle.occlusion_findings(base, before, after, moved)
+    assert [f["severity"] for f in found] == ["note"] and "may be the wrong one" in found[0]["detail"]
+    # ... and a pairing the words could as well have made next door, for an unlabelled frame
+    twins = {**ours, "pairs": {0: 0}, "weak_pairs": {0: "twins"}}
+    assert [f["severity"] for f in loss_oracle.occlusion_findings(base, before, after, twins)] == ["note"]
+    # the same frame with a label of its own is not what `merge.plan_merge` warns about
+    labelled = {"slides": [{**ours["slides"][0], "label": "f1"}], "pairs": {0: 0}, "weak_pairs": {0: "twins"}}
+    assert [f["severity"] for f in loss_oracle.occlusion_findings(base, before, after, labelled)] == ["loss"]
+
+
 def test_a_shape_the_source_itself_added_above_the_text_is_no_finding():
     """The same excuse for an element the *source added*: it has no base element, so an oracle that
     named objects by the base alone could not tell which shape it was looking at - and

@@ -205,16 +205,24 @@ def label_moves(base: list[dict], ours: list[dict]) -> list[dict]:
         there, frame_is = best((_evidence(base[k], ours[j]), k) for k in free_base if k != i)
         # Two frames that say nearly the same thing cannot be told apart by `LABEL_MARGIN`: the
         # pairing a label swapped between them leaves behind is already 0.85 alike, and nothing
-        # can beat that by half. What such a swap can do is come out *exact* on both sides - this
-        # slide's words are word for word another frame's, and this frame's are word for word
-        # another slide's, while the label's own pairing is neither. A frame edited hard, an
-        # overlay step or a retitled frame is never both of those at once, which is why this is
-        # allowed to stand in for the margin and nothing looser is.
-        swapped = (slide_is is not None and frame_is is not None
-                   and _complete(base[i], ours[slide_is], here) and _complete(base[frame_is], ours[j], there)
-                   and not _complete(base[i], ours[j], own[j]))
-        strong = (here >= LABEL_MOVED and (here - own[j] >= LABEL_MARGIN or swapped),
-                  there >= LABEL_MOVED and (there - own[j] >= LABEL_MARGIN or swapped))
+        # can beat that by half. What such a move does do is come out *exact* - word for word -
+        # while the label's own pairing is not. A frame edited hard, an overlay step or a retitled
+        # frame is exact on neither side, which is why exactness is allowed to stand in for the
+        # margin and nothing looser is.
+        #
+        # The two sides are not worth the same, though, and only one of them may stand alone:
+        #  - `there_exact`, the frame carrying the label says word for word what some other,
+        #    unclaimed slide said. For that to be innocent the *source* must have rewritten this
+        #    frame into a copy of another one - a real edit, and one worth a question either way.
+        #  - `here_exact`, some other frame says word for word what this label's slide said. On a
+        #    deck of twins that is true without anybody editing anything: the untouched twin
+        #    always explains it. So it counts only together with the other side, which is what a
+        #    swap looks like (`test_one_twin_edited_is_not_a_swap`).
+        own_exact = _complete(base[i], ours[j], own[j])
+        here_exact = slide_is is not None and not own_exact and _complete(base[i], ours[slide_is], here)
+        there_exact = frame_is is not None and not own_exact and _complete(base[frame_is], ours[j], there)
+        strong = (here >= LABEL_MOVED and (here - own[j] >= LABEL_MARGIN or (here_exact and there_exact)),
+                  there >= LABEL_MOVED and (there - own[j] >= LABEL_MARGIN or there_exact))
         if not any(strong):
             continue
         label = ours[j]["label"]

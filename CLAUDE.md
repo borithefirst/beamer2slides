@@ -507,15 +507,23 @@ retitles every frame while moving a label ("Moving labels" -> "Moving labels v2"
 `LABEL_MARGIN` (0.5), which no swap between near-twins can: the pairing such a swap leaves behind is
 already 0.9 alike, and that was every silent misidentification the adopt-shaped campaign had (at
 label-chance 1, all of them `move_label`, 54 of 108 rounds silent). What stands in for the margin is
-both sides coming out **word for word** right (`identity._complete` - a bar that depends on the pair,
-the title being half of what `_evidence` says) while the label's own pairing is neither; a twin the
-source merely reworded is exact on one side only, which is why the other side is asked for too
-(`test_one_twin_edited_is_not_a_swap`). Measured by `tools/fuzz_labels.py` against a tagged
-truth: over 3000 rounds, misidentified frames 14.68% -> 1.04% when the invariant is broken, 0 false
-alarms in 1524 sound rounds, nothing ever worse than before (fixed seeds in `tests/test_sync_fuzz.py`);
-with the swap rule an adopt-shaped deck goes 2.94% -> 2.18% and 4.7% -> 2.1% of broken rounds silent,
-a converted one 1.29% with **no** wrong round silent at all, and the sound rounds stay wordless
-(1987 adopt-shaped, 1582 converted: no verdict, no warning, not one frame on the wrong slide).
+**word for word** exactness (`identity._complete` - a bar that depends on the pair, the title being
+half of what `_evidence` says) while the label's own pairing is not exact. The two sides are not
+worth the same, and only one may stand alone: the **frame's** side (`there_exact` - the source
+rewrote the labelled frame into a copy of another slide) is a real edit and enough on its own for
+`unsure`, which re-pairs nothing and only asks; the **slide's** side (`here_exact`) is true for free
+on a deck of twins, so it counts only together with the other side, which is what a swap looks like
+(`test_one_twin_edited_is_not_a_swap`, `test_the_other_side_alone_is_not_enough_when_the_deck_has_
+twins`, `test_a_label_on_a_frame_that_is_word_for_word_another_slide_is_asked_about`). Measured by
+`tools/fuzz_labels.py` against a tagged truth, each rule by running the campaign twice over the same
+seeds with only `label_moves` swapped: over 3000 rounds, misidentified frames 14.68% -> 1.04% when
+the invariant is broken, 0 false alarms in 1524 sound rounds, nothing ever worse than before (fixed
+seeds in `tests/test_sync_fuzz.py`); the swap rule took an adopt-shaped deck 2.94% -> 2.18%, and the
+one-sided exactness moves no frame at all but is heard - on 4000 adopt-shaped rounds at chance 1 the
+same 510 frames of 22,014 (2.32%) are misidentified, while `unsure` goes 123 -> 137 and the 267
+wrong rounds go 136 -> **150** told and 131 -> **117** silent; on a converted talk every figure is
+identical (1.05%, 38 told, 1 silent of 1476 broken rounds). Sound rounds gain no verdict from either
+(1515 adopt-shaped, 1524 converted: not one frame on the wrong slide).
 What the order-keeping alignment leaves over is picked up twice more (`tests/test_frame_moves.py`):
 by content, when one leftover frame explains one leftover slide and no other comes close
 (`identity.cross_pairs`, `CROSS_SURE`/`CROSS_MARGIN`) - that is a frame the source moved across

@@ -347,14 +347,23 @@ slide kept its identity, but the source has one hook fewer for the next version.
 
 An explanation counts when it is good on its own (`LABEL_MOVED`) and beats the label's own pairing
 by `LABEL_MARGIN` (0.5), which is what keeps an overlay step, a retitled frame or a frame edited
-hard from setting this off. **That margin cannot see a swap between near-twins**, and every deck
-`adopt` writes is full of them: when two frames differ by a word, the pairing a swapped label leaves
-behind is already 0.9 alike, and nothing can beat 0.9 by half. So one thing stands in for the
-margin: both sides coming out *word for word* right (`identity._complete` - not a number, since the
-most `_evidence` can say about a pair depends on what their titles already say) while the label's
-own pairing is neither. A frame edited hard, an overlay step and a retitled frame are never both of
-those at once; a twin the source merely reworded is exact on **one** side only, which is why the
-other side is asked for too (`test_one_twin_edited_is_not_a_swap`).
+hard from setting this off. **That margin cannot see a move between near-twins**, and every deck
+`adopt` writes is full of them: when two frames differ by a word, the pairing such a move leaves
+behind is already 0.9 alike, and nothing can beat 0.9 by half. What stands in for the margin is
+*word for word* exactness (`identity._complete` - not a number, since the most `_evidence` can say
+about a pair depends on what their titles already say) while the label's own pairing is not exact.
+A frame edited hard, an overlay step and a retitled frame are exact on neither side.
+
+The two sides are not worth the same, though, and only one of them may stand alone:
+
+- **the frame's side** (`there_exact`): the frame carrying the label says word for word what some
+  other, unclaimed slide said. For that to be innocent the *source* must have rewritten this frame
+  into a copy of another one - a real edit, and one worth a question either way. So this side alone
+  is enough for `unsure`, which re-pairs nothing and only asks.
+- **the slide's side** (`here_exact`): some other frame says word for word what this label's slide
+  said. On a deck of twins that is true without anybody editing anything - the untouched twin
+  always explains it - so it counts only together with the other side, which is what a swap looks
+  like (`test_one_twin_edited_is_not_a_swap`, and its unlabelled twin one test below).
 
 The title counts by degree, not as yes or no (`identity._title_alike`). The stress deck moves a
 label and retitles all 48 frames in the same version ("Moving labels" → "Moving labels v2"), and a
@@ -401,13 +410,22 @@ of the one before it. 1500 rounds, 8239 frames:
 a converted talk, **recover nothing at all** here — one leftover never explains one slide
 unmistakably when six slides say the same four words, and no gap holds one slide and one frame that
 share words nobody else shares. `label_moves` still earns its place, but saves less (2.18%, against
-1.04%) and says less. The swap rule above is what took it from 2.94%: measured at label-chance 1 on
-4000 adopt-shaped rounds, *every* round the pairing still got wrong used `move_label`, and the 54
-silent ones of 108 were all swaps between frames saying nearly the same thing. With it, 1875 broken
-rounds leave 2.18% of frames misidentified and 40 rounds silent (4.7% of broken rounds → 2.1%), the
-1987 sound rounds say nothing at all (no verdict, no warning, not one frame on the wrong slide), and
-on a converted talk **no** wrong round passes in silence any more (1332 broken rounds: 1.29%
-misidentified, 44 reported, 0 silent). Which is the whole argument for `adopt.frame_labels`: on a deck like this the label
+1.04%) and says less. Two rules stand between `LABEL_MARGIN` and a deck of twins, and both were
+measured the same way: the campaign run twice over the same seeds, with only `label_moves` swapped
+for the version before it. The **swap rule** was worth 2.94% → 2.18% of frames misidentified when it
+went in (at label-chance 1 *every* round the pairing still got wrong used `move_label`, and the 54
+silent ones of 108 were all swaps between frames saying nearly the same thing). The **one-sided
+exactness** is worth nothing in that column, and is not meant to be: an `unsure` verdict re-pairs
+nothing, it asks. On 4000 adopt-shaped rounds at label-chance 1 (22,014 frames) the 510 frames
+(2.32%) that end up on the wrong slide are the same 510 before and after it; what moves is what the
+person hears — 123 → **137** `unsure` verdicts, and of the 267 rounds that got a pairing wrong,
+136 → **150** are told about it and 131 → **117** pass in silence. On a converted talk (3000 rounds
+at chance 0.5) every figure is identical down to the last one, the single silent round of 1476:
+nothing there is a swap between near-twins for the rule to fire on. And no round that kept its
+labels gains a word from it — across 1515 adopt-shaped and 1524 converted sound rounds there is no
+verdict of either kind and not one frame on the wrong slide (the warnings such a round does carry
+are `gap_pairs` recoveries asking for a label, which is the point of them). Which is the whole
+argument for `adopt.frame_labels`: on a deck like this the label
 is not the best identity available, it is the only one — and with the labels kept, not one frame of
 4068 went to the wrong slide. `tests/test_sync_fuzz.py::test_labels_are_the_only_thing_holding_an_
 adopt_shaped_deck_together` holds that on 150 seeds.

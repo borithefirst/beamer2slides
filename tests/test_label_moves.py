@@ -106,6 +106,45 @@ def test_one_twin_edited_is_not_a_swap():
     assert identity.align_slides(base, ours) == {0: 0, 1: 1}
 
 
+# Two frames of one talk, half their words shared, and a third that has nothing to do with either.
+AGENDA = "the agenda for today welcome demos questions and the break in the middle"
+ROADMAP = "the agenda for today welcome demos budgets owners dates and the year ahead"
+NEWWORDS = "a page about the sponsors and where to find coffee during the break"
+
+
+def test_a_label_on_a_frame_that_is_word_for_word_another_slide_is_asked_about():
+    """The last silent misidentification the 4,000-round adopt-shaped sync campaign had (seed
+    22204): the source moved a label onto the frame after it *and* dropped a frame in the same
+    version, so the slide the label left had no frame left to explain it - one side of the story
+    only, and that side missed `LABEL_MARGIN` by 0.013.
+
+    The side it has is exact: the frame carrying the label says, word for word, what another slide
+    said, while the label's own pairing (0.62 here) says half of it. The margin cannot see that -
+    1.0 beats 0.62 by 0.38 - and the source cannot have written it by editing this frame either:
+    it would have had to rewrite it into a copy of another one. So the question is worth asking,
+    even though one side proves nothing and nothing is re-paired."""
+    base = [info("", AGENDA, "agenda"), info("", ROADMAP, "roadmap")]
+    ours = [info("", NEWWORDS), info("", ROADMAP, "agenda")]
+    (m,) = identity.label_moves(base, ours)
+    assert m["verdict"] == "unsure" and m["label"] == "agenda"
+    assert m["frame_is"] == 1 and m["slide_is"] is None
+    assert m["frame_score"] == 1.0 and m["similarity"] == 0.62, "the margin alone would have missed it"
+    assert identity.align_slides(base, ours) == {1: 0}, "the label is followed; the report asks"
+
+
+def test_the_other_side_alone_is_not_enough_when_the_deck_has_twins():
+    """Why only one of the two sides may stand on its own. Here the exact match is on the other
+    side: some frame says word for word what this label's slide said. On a deck of twins that is
+    true without anybody moving anything - the untouched twin always explains it - so a source
+    that merely rewords the labelled frame would set this off on every deck that repeats itself.
+    (`test_one_twin_edited_is_not_a_swap` says the same with both frames labelled, where their own
+    labels settle them and there is nothing free to explain anything.)"""
+    twin = "the table notes review and export figures for the quarter just gone"
+    base = [info("", twin, "first"), info("", twin)]
+    ours = [info("", twin.replace("just gone", "now ending"), "first"), info("", twin)]
+    assert identity.label_moves(base, ours) == []
+
+
 def test_a_label_moved_onto_a_frame_that_did_not_exist_before_is_only_a_question():
     """The frame that had the label is gone from the source, so only one half of the story can be
     checked. Nothing is re-paired; the report asks."""

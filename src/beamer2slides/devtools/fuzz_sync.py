@@ -679,7 +679,8 @@ def _sync_step(seed: int, step: int, doc: dict, base: dict, live: dict, tmp: Pat
                 + _movable(base, live, mplan) + _stacked(base, live, after, ours, mplan, tok)
                 + _doubled(base, live, after, mplan))
     next_base = W.rebase(base, ours, after, mplan, tok) if rebase else None
-    findings += _settled(doc2, next_base, after, tmp, reordered or "move_slide" in source_ops)
+    findings += _settled(doc2, next_base, after, tmp, reordered or "move_slide" in source_ops,
+                         bool(loss_oracle.uncertain_slides(base, ours)))
     return {"seed": seed, "step": step, "source_ops": list(source_ops), "deck_ops": list(deck_ops),
             "source": applied_src, "deck": applied_deck, "findings": findings,
             "failures": loss_oracle.failures(findings), "doc": doc2, "refused": [],
@@ -950,7 +951,8 @@ def _stacked(base: dict, live: dict, after: dict, ours: dict, mplan: dict, tok: 
     return out
 
 
-def _settled(doc: dict, next_base: dict | None, after: dict, tmp: Path, reordered: bool = False) -> list[dict]:
+def _settled(doc: dict, next_base: dict | None, after: dict, tmp: Path, reordered: bool = False,
+             unsure: bool = False) -> list[dict]:
     """Syncing the same source again must write nothing. The base a sync leaves behind is what the
     next one merges against, so a base that doesn't describe the deck it just wrote would have the
     next sync rewrite those units - and a rewrite is where a person's work gets lost.
@@ -959,7 +961,14 @@ def _settled(doc: dict, next_base: dict | None, after: dict, tmp: Path, reordere
     crossed another falls out of it; `identity.cross_pairs` picks it up again when the content says
     clearly which frame it is, but frames that say too little to be told apart are what docs/sync.md
     lists under "Not supported yet", and there the source's frame stays paired with another slide,
-    so the property can't hold. The finding is still recorded, as a note rather than a failure."""
+    so the property can't hold. The finding is still recorded, as a note rather than a failure.
+
+    `unsure`: this sync told the person that some frame may be on the wrong slide
+    (`loss_oracle.uncertain_slides`). It is the same excuse, one step further along: a frame put
+    where the words allowed and the report asked about goes on being put there, so what it did not
+    write into the slide it came from is still outstanding next time. Round-level, not per slide,
+    because the settle names the slide the *next* plan would write, which is by construction not
+    the one this one was warned about."""
     if next_base is None:
         return []
     again = merge.plan_merge(next_base, W.build_ours(doc, next_base, tmp), after)
@@ -971,7 +980,7 @@ def _settled(doc: dict, next_base: dict | None, after: dict, tmp: Path, reordere
             if p["action"] in ("create", "delete") or (p["action"] == "update" and (
                 any(u["action"] in ("create", "recreate", "delete", "move") for u in p["units"])
                 or p.get("background") or p.get("notes") is not None))]
-    return [loss_oracle.finding("second_sync_writes", "note" if reordered else "report",
+    return [loss_oracle.finding("second_sync_writes", "note" if reordered or unsure else "report",
                                 "the same source synced again would write: " + ("; ".join(busy) or "another slide order"),
                                 slide=(busy[0].split(":")[0] if busy else "order"))]
 
