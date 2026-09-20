@@ -372,6 +372,37 @@ def test_a_cell_the_source_edited_is_written():
     assert insert[0]["location"]["index"] == GRID["blocks"][1]["rows"][0][1][0]["span"][1] - 1
 
 
+def test_a_table_the_reader_typed_in_survives_the_source_dropping_it():
+    """A document edit outranks a source delete, and `block_text` is empty for a
+    table: every table read as untouched, so one the source dropped was deleted
+    however much the reader had typed into it. Its cells say what it says.
+    """
+    ours = live([GRID["blocks"][0], GRID["blocks"][2]])
+    theirs = live(GRID["blocks"])
+    theirs["blocks"][1]["rows"][0][1][0]["runs"] = [{"text": "b ONE typed"}]
+    result = doc_merge.plan(GRID, ours, live(theirs["blocks"]))
+    assert [b.get("key") for b in result["blocks"]] == ["p:before", "t:grid", "p:after"]
+    assert cell_text(result["blocks"][1], 0, 1) == "b ONE typed"
+    assert any("dropped by the source but edited" in note for note in result["notes"])
+
+
+def test_a_row_the_reader_added_survives_the_source_dropping_the_table():
+    """The same, for a reader who changed the grid and not a word: two empty cells
+    more read back as the same words in the same order."""
+    ours = live([GRID["blocks"][0], GRID["blocks"][2]])
+    theirs = live([GRID["blocks"][0],
+                   table("t:grid", [["a one", "b one"], ["a two", "b two"], ["", ""]]),
+                   GRID["blocks"][2]])
+    result = doc_merge.plan(GRID, ours, theirs)
+    assert [b.get("key") for b in result["blocks"]] == ["p:before", "t:grid", "p:after"]
+
+
+def test_a_table_nobody_touched_still_goes_when_the_source_drops_it():
+    ours = live([GRID["blocks"][0], GRID["blocks"][2]])
+    result = doc_merge.plan(GRID, ours, live(GRID["blocks"]))
+    assert [b.get("key") for b in result["blocks"]] == ["p:before", "p:after"]
+
+
 def test_a_block_added_in_front_of_a_table_goes_after_the_paragraph_before_it():
     """Measured: nothing can be inserted at a table's own index."""
     ours = live([GRID["blocks"][0], para("p:new", "a new line"), *GRID["blocks"][1:]])

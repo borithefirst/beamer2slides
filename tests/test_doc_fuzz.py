@@ -257,6 +257,26 @@ def test_a_table_in_a_later_tab_keeps_the_key_the_file_gave_it():
             if b["kind"] == "table"] == ["table:year"]
 
 
+def test_a_table_whose_anchor_row_the_source_deletes_keeps_its_key():
+    """A table is anchored in its first cell, and a row delete can take that very
+    cell: the structural batch then leaves the table with no named range at all, the
+    re-read cannot find it, and the words planned against the new grid are written
+    nowhere. `table:year` came back as `table:2024` — gone, as far as the file was
+    concerned — and the source's cell edit went with it. `structure` gives a regrid
+    the same `after` a new table gets, so `anchor_tables` finds it again and
+    `plant_ranges` puts the range back (offline chain-8 seed 7122, shrunk).
+    """
+    world, ours, base = _push("tabs")
+    grid = [b for b in doc_ir.parts(ours)[1]["blocks"] if b["kind"] == "table"][0]
+    assert grid["key"] == "table:year" and len(grid["rows"]) == 3
+    del grid["rows"][0]                       # the row the named range lives in
+    grid["rows"][0][0][0]["runs"] = [{"text": "umbrella"}]
+    _, ours, _ = fuzz_docs.sync_once(world, ours, base)
+    now = [b for b in doc_ir.parts(ours)[1]["blocks"] if b["kind"] == "table"]
+    assert [b["key"] for b in now] == ["table:year"]
+    assert doc_merge._match_text(now[0]) == "umbrella | 7 | 2025 | 9"
+
+
 @pytest.mark.parametrize("shape", sorted(fuzz_docs.SHAPES))
 def test_the_world_carries_nothing_the_reader_does_not_read(shape):
     """`doc_ir.unmodelled` and `doc_world` were written apart and from the same API
@@ -331,10 +351,10 @@ def test_an_empty_paragraph_between_two_tables_can_be_deleted():
     fuzz_docs.sync_once(world, ours, base)
 
 
-@pytest.mark.xfail(strict=True, reason="fuzz_docs.KNOWN 'dropped-table': the 'edited in "
-                   "the document' test at doc_merge.py:469 uses block_text, which is "
-                   "empty for a table, so the reader's cells count for nothing")
 def test_a_table_the_reader_typed_in_survives_the_source_dropping_it():
+    """Was `dropped-table`: the 'edited in the document' test used `block_text`, which
+    is empty for a table, so the reader's cells counted for nothing and the table went
+    with everything in it. `doc_merge._edited` reads the cells and the grid."""
     world, ours, base = _push("ends_on_table")
     part = doc_world.read_ir(world, ours, base)
     table = [b for b in part["blocks"] if b["kind"] == "table"][0]
@@ -348,11 +368,11 @@ def test_a_table_the_reader_typed_in_survives_the_source_dropping_it():
     assert not oracle.failures(oracle.check(was, before, base, report, mine))
 
 
-@pytest.mark.xfail(strict=True, reason="fuzz_docs.KNOWN 'dropped-frozen': a block the "
-                   "source dropped is deleted although no request could ever make its "
-                   "equation again — the rewrite path checks that, the delete path "
-                   "does not")
 def test_a_block_with_an_equation_survives_the_source_dropping_it():
+    """Was `dropped-frozen`: the rewrite path in `_merge_block` refuses to delete and
+    write back a block holding content no request can make again, and the delete path
+    did not check at all — the same loss with nothing written back. It is kept now, and
+    the report says the source asked for it to go."""
     world, ours, base = _push("equations")
     was, mine = copy.deepcopy(base), copy.deepcopy(ours)
     ours["blocks"] = [b for b in ours["blocks"]

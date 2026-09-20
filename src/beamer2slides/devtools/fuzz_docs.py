@@ -998,24 +998,20 @@ KNOWN = (
             "all: its own mark is the one in front of a table, and the block before it "
             "is a table with no mark to borrow, so `doc_merge._delete_range` returns a "
             "range of length 0. Google refuses it and the whole batch goes with it"},
-    {"id": "dropped-table",
-     "kind": "block_gone", "has": "table:",
-     "why": "a table the source dropped is deleted however much the reader typed into "
-            "it: the 'edited in the document' test uses block_text, which is empty for "
-            "a table (_match_text is the one that sees its cells)"},
-    {"id": "dropped-frozen",
-     "kind": "frozen_gone", "has": "no request can make one",
-     "why": "a block the source dropped is deleted although it holds an equation, a "
-            "dropdown or a table of contents no request can ever make again, and the "
-            "report does not say so"},
+    # `dropped-table` and `dropped-frozen` stood here and are gone, not rewritten: both
+    # are fixed, both have a test of their own in tests/test_doc_fuzz.py, and their
+    # signatures were wide enough to swallow the next defect that looks like them —
+    # `block_gone` mentioning `table:` was catching crossed keys on tables all along.
     {"id": "lost-key",
      "kind": "identity_lost", "has": "",
-     "why": "a block keeps its words and loses the key the file gave it. Three of the "
-            "four causes are fixed and the count is down by a third: `inherit_keys` "
+     "why": "a block keeps its words and loses the key the file gave it. Four causes "
+            "are fixed and the count is down by four fifths: `inherit_keys` "
             "reassigning a key the file itself asserts, `settle` keying every tab "
-            "before those tabs are adopted (`doc_merge.settle_keys`), and a delete "
+            "before those tabs are adopted (`doc_merge.settle_keys`), a delete "
             "carrying the style of the block above onto the survivor (the settle "
-            "writes the named style back). A heading turned paragraph keeping its "
+            "writes the named style back), and a row delete taking with it the first "
+            "cell a table is anchored in (`structure` gives a regrid an `after`, so "
+            "`anchor_tables` finds it again). A heading turned paragraph keeping its "
             "level is the one left, and what else reaches this signature is not yet "
             "known — it is the widest of these, so anything that renames a block "
             "lands here"},

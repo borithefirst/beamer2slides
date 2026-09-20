@@ -86,6 +86,20 @@ def _match_text(block: dict) -> str:
     return block_text(block)
 
 
+def _edited(live: dict, was: dict) -> bool:
+    """Whether the document changed a block since the base — the test that outranks a
+    source delete, and so the last thing standing between a reader's words and a
+    `deleteContentRange`.
+
+    It cannot be `block_text`: that is empty for a table, so a table the reader filled
+    in cell by cell read as untouched and went with everything in it. A table says
+    what it is through its cells and its grid, and a block holding a picture the
+    reader replaced says it through its frozen runs.
+    """
+    return (_match_text(live) != _match_text(was) or _grid(live) != _grid(was)
+            or frozen_of(live) != frozen_of(was))
+
+
 def frozen_of(block: dict) -> tuple:
     """What the frozen runs are, in order. Two blocks may only be merged if equal."""
     return tuple(_frozen_id(r) for r in block.get("runs", []) if r.get("frozen"))
@@ -669,8 +683,17 @@ def merge(base: dict, ours: dict, theirs: dict) -> dict:
             continue
         if mine is None:
             # The source dropped it. A document edit outranks that.
-            if block_text(block) != block_text(was):
+            if _edited(block, was):
                 notes.append(f"{key}: dropped by the source but edited in the document — kept")
+                merged.append(dict(block) | {"origin": "kept over a source delete"})
+            elif not _writable_block(block):
+                # And so does content no request could ever make again: the rewrite path
+                # in `_merge_block` refuses to delete-and-write such a block, and a plain
+                # delete is the same loss with nothing written back. The source's author
+                # is told and can take it out in the document, where it is theirs to lose.
+                notes.append(f"{key}: dropped by the source but holds an equation, a "
+                             f"dropdown or a table of contents no request can make "
+                             f"again — kept")
                 merged.append(dict(block) | {"origin": "kept over a source delete"})
             continue
         merged.append(_merge_block(was, mine, block, conflicts, notes))
@@ -1641,8 +1664,13 @@ def structure(theirs: dict, merged: list[dict],
                                      "note": f"`{key}`: moved where the source has it"}))
         elif block.get("regrid"):
             what = ", ".join(f"{how}s a {line}" for line, how, _ in block["regrid"])
+            # `after` although nothing is built: a table is anchored in its first cell
+            # (`doc_ir.anchor_span`), and a row or column delete can take that very
+            # cell, so a regrid can leave the table with no named range at all. It is
+            # then found again exactly as a new one is, and the range planted back.
             plans.append((block["span"][0], _grid_requests(block["span"][0], block["regrid"]),
                           {"key": key, "ops": block["regrid"], "lines": block.get("lines"),
+                           "after": _after_key(merged, position),
                            "note": f"`{key}`: {what} — the grid the source has"}))
         elif block.get("origin") == "added by the source":
             rows = len(block.get("rows", []))

@@ -846,15 +846,16 @@ ops now draw from the whole dialect on both sides (`RUN_MARKS`, `PARA_MARKS`,
 `READER_FACES`, `READER_MEASURES`), which is the case that matters most: a reader
 chooses a face, and then the source restyles that block.
 
-The campaign found ten defects, each pinned by an `xfail(strict=True)` in
-`tests/test_doc_fuzz.py` and described in `fuzz_docs.KNOWN` — a table of contents
+The campaign found ten defects, each pinned by a test in `tests/test_doc_fuzz.py` —
+`xfail(strict=True)` while it stands, a plain test once it is fixed — and the ones
+still standing described in `fuzz_docs.KNOWN`: a table of contents
 treated as an ordinary block (which kills the sync outright, because a refused request
 throws out the batch), a table the source dropped deleted however much the reader typed
 into it, one block's key landing on another, a block reworded *and* moved losing the
 reader's styling, and the rest. They are let through by default and `--strict` fails on
 them, so a fix shows up as a defect that stops being reached.
 
-**Three of the ten are fixed**, and all three were ways of losing a block's identity —
+**Five of the ten are fixed.** Four of the five were ways of losing a block's identity —
 which is the root of the worst of the rest, because a block the merge cannot recognise
 is a block it deletes as "dropped by the source".
 
@@ -877,11 +878,32 @@ is a block it deletes as "dropped by the source".
 * The paragraph under a deleted heading became a heading (Docs merges the two keeping
   the **first** one's style, and the merge writes its style before the delete above it),
   which the settle now repairs — see "Every named style Docs has is a kind" above.
+* A table is anchored in its first cell, and a **row delete can take that very cell**.
+  The structural batch went out, the table came back with no named range at all, and
+  nothing put one back: `anchor_tables` only ever looked for tables the batch had
+  *built*. The table settled under a name made from its new first word, the file's
+  `table:year` read as gone, and the words planned against the new grid — the source's
+  own cell edit — were written nowhere. `structure` now gives a regrid the same `after`
+  a new table gets, so the table is found again and `plant_ranges` puts its range back.
+  One source op, no reader at all (offline chain-8 seed 7122, shrunk).
 
-At one seed, 200 rounds at chain 8: `lost-key` 34 → 22, `crossed-delete` 2 → 0,
-`crossed-frozen` 22 → 13, `moved-styling` 2 → 1. What is left under those signatures
-has a cause nobody has named yet, and the entries say so rather than keep blaming what
-was fixed.
+The fifth is the one loss that was not about identity at all: **a table the source
+dropped was deleted however much the reader had typed into it.** A document edit
+outranks a source delete, and the test for "edited" was `block_text`, which is empty
+for a table — so every table read as untouched. `doc_merge._edited` reads a table's
+cells and its grid, and a block's frozen runs, which also stops a picture a reader
+replaced from being thrown away. The same decision now refuses to delete a block
+holding an equation, a dropdown or a table of contents at all: `_merge_block` already
+refused to delete-and-rewrite one, and a plain delete is that same loss with nothing
+written back. The block is kept and the report says the source asked for it to go.
+
+At one seed, 200 rounds at chain 8: `lost-key` 34 → 6, `dropped-table` 17 → 0,
+`dropped-frozen` 8 → 0, `crossed-delete` 2 → 0, `crossed-frozen` 22 → 13,
+`moved-styling` 2 → 1. The two signatures that reached zero are **out of `KNOWN`**
+rather than rewritten — each has a test of its own now, and `block_gone` mentioning
+`table:` was wide enough that it had been swallowing crossed keys on tables all along.
+What is left under the others has a cause nobody has named yet, and the entries say so
+rather than keep blaming what was fixed.
 
 Fixed seeds from the campaign run in the default offline suite.
 

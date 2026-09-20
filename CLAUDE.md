@@ -1127,11 +1127,12 @@ keys, named ranges), `doc_merge.py` (pure planning), `doc_sync.py` (the commands
   italic was undrawn, so the ops now draw a face, a size, small caps and the six paragraph
   measures on both sides (`RUN_MARKS`, `PARA_MARKS`, `READER_FACES`, `READER_MEASURES`) - the
   case that matters is a reader choosing a face and the source then restyling that block.
-  Ten defects found, each an `xfail(strict=True)` in `tests/test_doc_fuzz.py` and an entry in
+  Ten defects found, each pinned by a test in `tests/test_doc_fuzz.py` (`xfail(strict=True)`
+  while it stands, a plain test once fixed) and the ones still standing described in
   `fuzz_docs.KNOWN` (let through by default, `--strict` fails on them): a TOC treated as an
   ordinary block, which kills the sync outright; a table the source dropped deleted however
   much the reader typed in it; one block's key landing on another; a block
-  reworded *and* moved losing the reader's styling. **Three are fixed**, all three ways of
+  reworded *and* moved losing the reader's styling. **Five are fixed**, four of them ways of
   losing a block's identity - which is the root of the worst of the rest, since a block the
   merge cannot recognise is one it deletes as dropped by the source. (1) `inherit_keys`
   matched every block of the file again by its words although the file had just named them
@@ -1144,11 +1145,23 @@ keys, named ranges), `doc_merge.py` (pure planning), `doc_sync.py` (the commands
   settled as `table:<its new first word>` with file, base and document all agreeing on a name
   the file never gave it; one source op, no reader. `doc_merge.settle_keys` does both in two
   passes and is shared with the harness, which had the same bug because it is a copy. (3) the
-  paragraph under a deleted heading, repaired by the named-style settle above. At one seed,
-  200 rounds at chain 8: `lost-key` 34 -> 22, `crossed-delete` 2 -> 0, `crossed-frozen`
-  22 -> 13, `moved-styling` 2 -> 1; what is left under those signatures has no named cause
-  yet and the entries say so. Two of the harness's own, found at chain 8
-  and pinned by tests that fail without the fix: `doc_world` shifted no named range when a
+  paragraph under a deleted heading, repaired by the named-style settle above. (4) a row
+  delete taking with it the first cell the table is anchored in: the structural batch left the
+  table with no named range and `anchor_tables` only looked for tables the batch had *built*,
+  so it settled under a name made from its new first word, the file's key read as gone and the
+  source's own cell edit was written nowhere (`structure` now gives a regrid the same `after`
+  a new table gets). (5) the one that was not identity: a table the source dropped was deleted
+  however much the reader had typed in it, because the test for "edited in the document" was
+  `block_text`, which is empty for a table (`doc_merge._edited` reads the cells, the grid and
+  the frozen runs) - and the same decision now keeps a block holding an equation, a dropdown or
+  a TOC no request can make again, which `_merge_block`'s rewrite path had always refused to
+  destroy while a plain delete did it silently. At one seed,
+  200 rounds at chain 8: `lost-key` 34 -> 6, `dropped-table` 17 -> 0, `dropped-frozen` 8 -> 0,
+  `crossed-delete` 2 -> 0, `crossed-frozen` 22 -> 13, `moved-styling` 2 -> 1; the two that
+  reached zero are out of `KNOWN` rather than rewritten (each has a test, and `block_gone`
+  mentioning `table:` was wide enough to swallow crossed keys on tables), and what is left
+  under the others has no named cause yet and the entries say so. Two of the harness's own,
+  found at chain 8 and pinned by tests that fail without the fix: `doc_world` shifted no named range when a
   table row was deleted, so after a source regrid every key below the table slid onto the block
   above (seeds 5099, 5167); and the oracle accused a `\S+` token each side had edited one half
   of - a soft hyphen joins two words, and only what the *reader* added has to survive
