@@ -2680,9 +2680,39 @@ def pair_tabs(base: dict, ours: dict, theirs: dict) -> dict:
         else:
             out["requests"].append({"deleteTab": {"tabId": tab}})
             out["applied"].append(f"tab {name!r} deleted")
+    first_tab_title(base, ours, theirs, out)
     document_title(base, ours, theirs, out)
     tab_order(base, ours, theirs, out)
     return out
+
+
+def first_tab_title(base: dict, ours: dict, theirs: dict, out: dict) -> None:
+    """The first tab's own name, which the file says in its `b2s-tab` meta.
+
+    Every other tab names itself on its `<section>`; the first tab is the file's body
+    and had nowhere to say it, because the file's `<title>` is the *document's* name
+    and the two are different things — a document of one tab has both. So the source
+    could rename any tab but the one everybody actually looks at, and a rename written
+    into the file went twice over: dropped by the sync and then taken back out by the
+    settle, which reads the document's name back.
+
+    The rule is the one the other tabs follow, with one difference at the beginning:
+    a `push` has no base, and unlike the document's name — which the import takes from
+    the file's `<title>` at birth — the first tab's title is Drive's own default, which
+    nothing but this has ever said. So with no base the file's name is written rather
+    than treated as a side of a disagreement nobody can settle.
+    """
+    mine, now = ours.get("tab_title"), theirs.get("tab_title")
+    was, tab = base.get("tab_title"), theirs.get("tab")
+    if not mine or not tab or mine == now or mine == was:
+        return
+    if was is not None and now != was:
+        out["notes"].append(f"the first tab was renamed on both sides — it keeps {now!r}, "
+                            f"not {mine!r}")
+        return
+    out["requests"].append({"updateDocumentTabProperties": {
+        "tabProperties": {"tabId": tab, "title": mine}, "fields": "title"}})
+    out["applied"].append(f"the first tab renamed {mine!r}")
 
 
 def document_title(base: dict, ours: dict, theirs: dict, out: dict) -> None:

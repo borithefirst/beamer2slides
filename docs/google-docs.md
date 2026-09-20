@@ -484,8 +484,19 @@ like this:
   settle then rewrites the file in the document's order, a reorder in the file used to
   disappear twice over. `doc_merge.tab_order` says it instead, and only where the *source*
   moved one: where the file still has the base's order, it is the reader who moved a tab
-  and the file is simply following. The first tab's own title is still not carried at all
-  — the file has nowhere to say it, since its `<title>` is the document's name.
+  and the file is simply following.
+- **The first tab names itself in a meta.** Every other tab says its title on its
+  `<section>`; the first tab *is* the file's body, and the file's `<title>` is the
+  **document's** name, which is a different thing — a document of one tab has both, and
+  they part company the moment anybody renames either. So the source could rename every
+  tab but the one people actually look at, and a name written into the file went twice
+  over: dropped by the sync, then taken back out by the settle. `doc_ir.TAB_META`
+  (`<meta name="b2s-tab">`) is where it goes, `doc_merge.first_tab_title` merges it the
+  way the other tabs' titles merge, and it is an `updateDocumentTabProperties` like
+  theirs. One difference at the beginning: a `push` has no base, and unlike the
+  document's name — which the import takes from the `<title>` — the first tab's title is
+  Drive's own default, which nothing but the file has ever said, so with no base the
+  file's name is written rather than treated as a disagreement nobody can settle.
 
 **The document's name.** A Google Doc's title *is* its name in Drive: `documents.get`
 reports it and no `batchUpdate` request writes one. `push` names the document from the
@@ -1544,8 +1555,8 @@ clean under `--strict`, and `KNOWN` still empty.
    formatting", and a second person editing concurrently.
 4. **Tabs** — retired, see "Document tabs" above. Still open: the order of the tabs is
    never written (the document's stands, and a source reorder is reported now rather
-   than dropped), and the first tab's title is not carried — the file's `<title>` is the
-   document's name, which *is* merged and written, through Drive.
+   than dropped). Both names are carried: the document's, through Drive, and the first
+   tab's own, in the `b2s-tab` meta.
 5. **Page-level structure** — `documentStyle`, headers, footers, footnote bodies,
    section breaks and positioned objects are read by nobody and authored by nobody. The
    paragraph level is now nearly closed (borders, `pageBreakBefore` and `keepWithNext`

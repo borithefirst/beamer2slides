@@ -274,6 +274,19 @@ def test_a_tabbed_read_has_no_body_and_every_tab_is_reachable(tab_id, words):
     assert ir["tab"] == (tab_id or "t.0")
 
 
+def test_the_first_tabs_own_name_survives_the_file():
+    """The file's `<title>` is the document's name; the first tab has a name of its
+    own, and a document of one tab has both."""
+    html = doc_ir.to_html({"title": "The Quarterly Report", "tab_title": "Chapter one",
+                           "blocks": [{"kind": "paragraph", "runs": [{"text": "x"}]}]})
+    assert '<meta name="b2s-tab" content="Chapter one">' in html
+    assert "<title>The Quarterly Report</title>" in html
+    back = doc_ir.from_html(html)
+    assert back["tab_title"] == "Chapter one" and back["title"] == "The Quarterly Report"
+    # A file that says nothing says nothing: no meta, and no key in the IR.
+    assert "b2s-tab" not in doc_ir.to_html({"title": "t", "blocks": []})
+
+
 def test_keys_are_readable_and_unique():
     ir = doc_ir.key_blocks(doc_ir.from_html(doc_ir.to_html(RICH)))
     keys = [b["key"] for b in ir["blocks"]]

@@ -1293,7 +1293,15 @@ keys, named ranges), `doc_merge.py` (pure planning), `doc_sync.py` (the commands
   block in front of a table goes in as `\ntext` at the previous paragraph's mark. The **order
   of the tabs is the document's** - a tab cannot be written from nothing, so no request moves
   one - and a source reorder is reported (`doc_merge.tab_order`) rather than dropped and then
-  taken out of the file by the settle; the first tab's own title is still not carried.
+  taken out of the file by the settle. The **first tab names itself** in `<meta name="b2s-tab">`
+  (`doc_ir.TAB_META`, IR key `tab_title`): it is the body, so it has no `<section>` to say it
+  on, and the file's `<title>` is the *document's* name, a different thing - a document of one
+  tab has both. `doc_merge.first_tab_title` merges it as the other tabs' titles merge, with one
+  difference at the start: a `push` has no base and the import takes the document's name from
+  the `<title>` but the tab's from Drive's default, so with no base the file's name is written
+  rather than called a disagreement. The oracle judges it (`tab_renamed`), the campaign draws
+  it on both sides (`src_rename_tab`, `read_rename_tab`), and taking the both-sides note out
+  fails 19 of 200 chained rounds.
 - The **document's name** is the file's `<title>`, and a Google Doc's title *is* its name in
   Drive: no `batchUpdate` request writes one, so `push` named it at birth and nothing said it
   again. `doc_merge.document_title` merges it three ways (the file alone renamed it -> written;

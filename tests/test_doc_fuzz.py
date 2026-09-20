@@ -421,7 +421,9 @@ def test_the_campaign_sees_a_mark_the_file_cannot_say_is_off(monkeypatch):
     `doc_merge._text_style` used to write a mark only when it was on, which is all the
     file could say before `doc_ir.MARK_FIELDS`: the first source edit to rewrite the
     block then names no bold, and the word goes back to wearing the theme's. Measured
-    over 300 `themed` seeds at chain 3 the campaign catches 13; these twenty hold two.
+    over 300 `themed` seeds at chain 3 the campaign catches 11 (it was 13 before the
+    draws moved: every op added to the campaign changes what every seed draws); these
+    110 hold four.
     """
     real = doc_merge._text_style
 
@@ -434,11 +436,29 @@ def test_the_campaign_sees_a_mark_the_file_cannot_say_is_off(monkeypatch):
 
     monkeypatch.setattr(doc_merge, "_text_style", broken)
     caught = 0
-    for seed in range(20):
+    for seed in range(110):
         found = fuzz_docs.offline_round(
             seed, script=fuzz_docs.draw(seed, 3, shape="themed"))
         caught += "styling_restored" in {f["kind"] for f in oracle.failures(found)}
-    assert caught >= 2, "the campaign no longer reaches the defect it was built for"
+    assert caught >= 3, "the campaign no longer reaches the defect it was built for"
+
+
+def test_the_oracle_sees_the_first_tab_renamed_back_under_the_reader():
+    """Only the reader's own rename is theirs to lose. A source rename over a title
+    the document left alone lands in `applied`, which `accounted` does not read, so
+    the oracle has to ask the narrow question: did the *reader* name it, and is it
+    called something else now?"""
+    base = _ir(_p("k1", "x")) | {"tab_title": "Draft"}
+    before = _ir(_p("k1", "x")) | {"tab_title": "The reader's name"}
+    after = _ir(_p("k1", "x")) | {"tab_title": "The source's name"}
+    assert "tab_renamed" in _kinds(oracle.check(base, before, after, NOTHING))
+    # Said out loud, it is no longer a loss...
+    told = {"conflicts": [], "notes": ["the first tab was renamed on both sides — it "
+                                       "keeps 'The reader's name', not 'x'"], "applied": []}
+    assert "tab_renamed" not in _kinds(oracle.check(base, before, after, told))
+    # ...and neither is a rename the reader never made.
+    kept = _ir(_p("k1", "x")) | {"tab_title": "Draft"}
+    assert "tab_renamed" not in _kinds(oracle.check(base, kept, after, NOTHING))
 
 
 def test_the_oracle_sees_a_chip_the_reader_inserted_disappear():
@@ -706,6 +726,22 @@ def test_a_table_in_a_later_tab_keeps_the_key_the_file_gave_it():
     _, ours, _ = fuzz_docs.sync_once(world, ours, base)
     assert [b["key"] for b in doc_ir.parts(ours)[1]["blocks"]
             if b["kind"] == "table"] == ["table:year"]
+
+
+def test_the_first_tab_renamed_in_the_file_is_renamed_and_stays_renamed():
+    """End to end: the source names the first tab, the sync writes it, and the settle
+    — which regenerates the file from the document it just wrote — reads it back. A
+    rename nothing wrote would be taken back out of the file here, twice over."""
+    world, ours, base = _push("tabs")
+    assert ours["tab_title"] == world.tabs[0].title
+    ours["tab_title"] = "Chapter one"
+    report, ours, base = fuzz_docs.sync_once(world, ours, base)
+    assert world.tabs[0].title == "Chapter one"
+    assert ours["tab_title"] == "Chapter one" and base["tab_title"] == "Chapter one"
+    assert any("first tab renamed 'Chapter one'" in a for a in report["applied"])
+    # And the sync after it writes nothing: the three sides agree.
+    again, _, _ = fuzz_docs.sync_once(world, ours, base)
+    assert again["requests"] == 0
 
 
 def test_a_table_whose_anchor_row_the_source_deletes_keeps_its_key():

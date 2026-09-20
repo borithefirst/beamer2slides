@@ -1013,11 +1013,15 @@ def part_ir(world: World, tab: str | None, ours: dict | None = None,
     doc_merge.restore_pictures(part, was, mine)
     if tab:
         part.pop("title", None)
-        for each in world.tabs:
-            if each.id == tab:
-                part["title"] = each.title
-                if each.parent:
-                    part["parent"] = each.parent
+    for each in world.tabs:
+        if each.id != (tab or part.get("tab")):
+            continue
+        if not tab:
+            part["tab_title"] = each.title
+        else:
+            part["title"] = each.title
+            if each.parent:
+                part["parent"] = each.parent
     return part
 
 

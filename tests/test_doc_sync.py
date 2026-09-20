@@ -522,6 +522,11 @@ def test_every_tab_is_read_with_its_own_keys_and_written_to_the_file():
     assert again["blocks"][0]["key"] == ir["blocks"][0]["key"]
     assert again["tabs"][0]["blocks"][0]["key"] == "paragraph:notes"
     assert doc_ir.to_html(again | {"document": "d"}) == html
+    # The first tab's `title` is the document's name; its own is `tab_title`, and the
+    # file says it in a meta, since the body has no `<section>` to hang it on.
+    assert (ir["title"], ir["tab"], ir["tab_title"]) == ("D", "t.0", "Tab 1")
+    assert '<meta name="b2s-tab" content="Tab 1">' in html
+    assert again["tab_title"] == "Tab 1"
 
 
 def test_a_tab_just_added_is_empty_and_what_is_written_there_goes_into_it():

@@ -115,6 +115,12 @@ SLUG = re.compile(r"[^a-z0-9]+")
 KEY_PREFIX = "b2s:"
 # The `<meta>` that tells a canonical file which document it belongs to.
 DOCUMENT_META = "b2s-document"
+# The first tab's own title. The file's `<title>` is the *document's* name, and a
+# document's name is not the name of the tab you are looking at: a document of one tab
+# has both, and they differ as soon as somebody renames either. Every other tab says
+# its title on its `<section>`, so without this the first tab alone could not be named
+# from the file — read back at every settle, so a rename in the file went twice over.
+TAB_META = "b2s-tab"
 # An `<img width>` is CSS pixels, a document's picture size is points (measured: a
 # 60 × 40 px picture imports as 45 × 30 pt).
 PT_PER_PX = 0.75
@@ -744,6 +750,8 @@ def to_html(ir: dict) -> str:
         # Which document this file is. The file is the project: told where it lives, it
         # can be synced from any checkout without a folder of state beside it.
         lines.append(f'<meta name="{DOCUMENT_META}" content="{escape(ir["document"], quote=True)}">')
+    if ir.get("tab_title"):
+        lines.append(f'<meta name="{TAB_META}" content="{escape(ir["tab_title"], quote=True)}">')
     if ir.get("title"):
         lines.append(f"<title>{escape(ir['title'])}</title>")
     lines += ["</head>", "<body>"]
@@ -1003,6 +1011,8 @@ class _Reader(HTMLParser):
         if tag == "meta":
             if attr.get("name") == DOCUMENT_META and attr.get("content"):
                 self.ir["document"] = attr["content"]
+            elif attr.get("name") == TAB_META and attr.get("content"):
+                self.ir["tab_title"] = attr["content"]
         elif tag == "title":
             self.in_title = True
         elif tag == "section":

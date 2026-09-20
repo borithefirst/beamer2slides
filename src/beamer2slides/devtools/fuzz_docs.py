@@ -626,6 +626,17 @@ def read_move_block(rng, part, tab):
                              "text": "\n" + text}}]], [block.get("key")]
 
 
+def read_rename_tab(rng, part, tab):
+    """The reader renames the tab they are looking at, in the tab strip. The first
+    tab's id is not `tab` (a location in it carries none) but the part's own."""
+    ident = tab or part.get("tab")
+    if not ident:
+        return [], []
+    return [{"updateDocumentTabProperties": {
+        "tabProperties": {"tabId": ident, "title": f"Reader's {rng.choice(FRESH)}"},
+        "fields": "title"}}], []
+
+
 READER = {
     "type_word": read_type_word, "reword": read_reword, "delete_word": read_delete_word,
     "append_block": read_append_block, "delete_block": read_delete_block,
@@ -635,7 +646,7 @@ READER = {
     "renumber_list": read_renumber_list, "cell_type": read_cell_type,
     "add_row": read_add_row, "delete_row": read_delete_row,
     "insert_picture": read_insert_picture, "insert_chip": read_insert_chip,
-    "move_block": read_move_block,
+    "move_block": read_move_block, "rename_tab": read_rename_tab,
 }
 
 
@@ -839,8 +850,11 @@ def src_add_tab(rng, ir, touched):
 
 
 def src_rename_tab(rng, ir, touched):
+    """The first tab is drawn too: it names itself in the file's `b2s-tab` meta and
+    nowhere else, and it is the tab everybody is actually looking at."""
     extra = ir.get("tabs") or []
-    if not extra:
+    if not extra or rng.random() < 0.4:
+        ir["tab_title"] = f"Renamed {rng.choice(FRESH)}"
         return
     rng.choice(extra)["title"] = f"Renamed {rng.choice(FRESH)}"
 

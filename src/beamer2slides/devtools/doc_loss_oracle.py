@@ -472,7 +472,31 @@ def check(base: dict, before: dict, after: dict, report: dict,
             continue
         out += _tab_findings(was.get(tab), part, then.get(tab), said, tab,
                              doc_ir.tab_part(ours, tab) if tab else ours, theme)
+        out += _title_findings(was.get(tab), part, then[tab], said, tab)
     return [f for f in out if f["kind"] not in allow]
+
+
+def _tab_name(part: dict | None, tab) -> str:
+    """What a tab calls itself. The first tab's `title` is the *document's* name, so
+    its own is `tab_title` (`doc_ir.TAB_META`)."""
+    return ((part or {}).get("title") if tab else (part or {}).get("tab_title")) or ""
+
+
+def _title_findings(was: dict | None, now: dict, then: dict, said: str, tab) -> list[dict]:
+    """A tab the reader renamed and the sync renamed back.
+
+    Only the reader's own rename is theirs to lose: a source rename over a title the
+    document left as the base had it is the merge doing its job, and it lands in
+    `applied`, which `accounted` deliberately does not read. So the question is the
+    narrow one — the reader renamed it, and it is called something else now — which is
+    the both-sides case, and the merge answers that with a note.
+    """
+    mine, after = _tab_name(now, tab), _tab_name(then, tab)
+    if mine == _tab_name(was, tab) or after == mine or _named(said, mine):
+        return []
+    return [finding("tab_renamed", "loss",
+                    f"the tab the reader named {mine!r} is called {after!r} now and the "
+                    f"report does not say why", tab=tab)]
 
 
 def _tab_findings(was: dict | None, now: dict, then: dict | None, said: str,

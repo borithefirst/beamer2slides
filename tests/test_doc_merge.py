@@ -1491,6 +1491,40 @@ def test_a_document_renamed_on_both_sides_keeps_the_name_the_reader_gave_it():
     assert birth["rename"] is None and birth["notes"] == []
 
 
+def _first(title=None, **rest):
+    """The first tab, which is the file's body: `tab` is its id, `tab_title` its own
+    name, and `title` the document's."""
+    return tabbed() | {"tab": "t.0"} | ({"tab_title": title} if title else {}) | rest
+
+
+def test_the_first_tab_is_renamed_when_the_file_alone_renamed_it():
+    """Every other tab names itself on its `<section>`; the first tab is the body, and
+    the file's `<title>` is the *document's* name, not this tab's."""
+    out = doc_merge.pair_tabs(_first("Draft"), _first("Chapter one"), _first("Draft"))
+    assert out["requests"] == [{"updateDocumentTabProperties": {
+        "tabProperties": {"tabId": "t.0", "title": "Chapter one"}, "fields": "title"}}]
+    assert out["applied"] == ["the first tab renamed 'Chapter one'"] and out["notes"] == []
+    # The reader renamed it and the source did not: the file follows at the settle.
+    quiet = doc_merge.pair_tabs(_first("Draft"), _first("Draft"), _first("Theirs"))
+    assert quiet["requests"] == [] and quiet["notes"] == []
+
+
+def test_the_first_tab_renamed_on_both_sides_keeps_the_readers_name():
+    out = doc_merge.pair_tabs(_first("Draft"), _first("Mine"), _first("Theirs"))
+    assert out["requests"] == []
+    assert out["notes"] == ["the first tab was renamed on both sides — it keeps "
+                            "'Theirs', not 'Mine'"]
+
+
+def test_the_first_tab_is_named_out_of_the_file_when_there_is_no_base():
+    """Unlike the document's name, which the import takes from the file's `<title>` at
+    birth, the first tab's title is Drive's own default — so a `push` whose file says
+    one writes it rather than calling it a disagreement nobody can settle."""
+    out = doc_merge.pair_tabs({"blocks": []}, _first("Chapter one"), _first("Tab 1"))
+    assert out["applied"] == ["the first tab renamed 'Chapter one'"]
+    assert out["notes"] == []
+
+
 def test_a_tab_the_source_moved_is_reported_rather_than_dropped():
     one, two, three = (tab("t.1", "One", "a"), tab("t.2", "Two", "b"),
                        tab("t.3", "Three", "c"))

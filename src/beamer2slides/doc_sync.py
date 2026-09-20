@@ -395,12 +395,18 @@ def _part_of(doc: dict, tab: str | None, ours: dict | None, base: dict | None) -
     doc_merge.restore_pictures(part, base, ours)
     if tab:
         part.pop("title", None)
-        for each in doc_ir.tabs_of(doc):
-            props = each.get("tabProperties", {})
-            if props.get("tabId") == tab:
-                part["title"] = props.get("title", "")
-                if props.get("parentTabId"):
-                    part["parent"] = props["parentTabId"]
+    for each in doc_ir.tabs_of(doc):
+        props = each.get("tabProperties", {})
+        if props.get("tabId") != (tab or part.get("tab")):
+            continue
+        if not tab:
+            # The first tab keeps the *document's* name as its `title` (that is what the
+            # file's `<title>` is); its own tab title is `tab_title`.
+            part["tab_title"] = props.get("title", "")
+        else:
+            part["title"] = props.get("title", "")
+            if props.get("parentTabId"):
+                part["parent"] = props["parentTabId"]
     return part
 
 
