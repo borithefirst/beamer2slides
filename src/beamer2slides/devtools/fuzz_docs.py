@@ -979,29 +979,14 @@ def describe_script(script: dict) -> str:
 # was seen, not which defect caused it: several of these show up as a lost key, and
 # the tests, not the signature, say which is which.
 KNOWN = (
-    {"id": "toc-block",
-     "kind": "batch_refused", "has": "table of contents",
-     "why": "doc_merge treats a table of contents as an ordinary block, because every "
-            "test for one of these reads `kind == 'table'`: a block added in front of a "
-            "TOC is written at its own index and a block deleted in front of one gives "
-            "up its own paragraph mark. Docs refuses both, and a refusal throws out the "
-            "whole batch, so the sync dies"},
-    {"id": "toc-table-split",
-     "kind": "batch_refused", "has": "not one run of text",
-     "why": "a table the source added next to a table of contents: the empty paragraph "
-            "insertTable leaves is deleted at an index that lands inside the TOC's own "
-            "units. Only ever seen on the `toc` shape — the signature is the message, "
-            "so a range crossing a real table would be filed here too"},
-    {"id": "empty-delete",
-     "kind": "batch_refused", "has": "is empty or before the body",
-     "why": "an empty paragraph standing between two tables can be deleted in no way at "
-            "all: its own mark is the one in front of a table, and the block before it "
-            "is a table with no mark to borrow, so `doc_merge._delete_range` returns a "
-            "range of length 0. Google refuses it and the whole batch goes with it"},
-    # `dropped-table` and `dropped-frozen` stood here and are gone, not rewritten: both
-    # are fixed, both have a test of their own in tests/test_doc_fuzz.py, and their
-    # signatures were wide enough to swallow the next defect that looks like them —
-    # `block_gone` mentioning `table:` was catching crossed keys on tables all along.
+    # Five entries stood at the head of this tuple and are gone, not rewritten: each is
+    # fixed and has a test of its own in tests/test_doc_fuzz.py, and each signature was
+    # wide enough to swallow the next defect that looks like it — `block_gone`
+    # mentioning `table:` had been catching crossed keys on tables all along, and
+    # `batch_refused` saying "not one run of text" would catch any range that crosses a
+    # real table. They were `toc-block`, `toc-table-split` and `empty-delete` (all
+    # three ways of killing a sync outright — `doc_ir.STRUCTURAL` and
+    # `doc_merge.restore_undeletable`), `dropped-table` and `dropped-frozen`.
     {"id": "lost-key",
      "kind": "identity_lost", "has": "",
      "why": "a block keeps its words and loses the key the file gave it. Four causes "

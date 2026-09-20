@@ -908,6 +908,15 @@ same functions underneath; nothing here reimplements a journey.
   `test_agent_deck_tools.py`, `test_agent_source_tools.py`, `test_agent_doc_tools.py` (a whole
   `doc_sync` end to end against `devtools/doc_world.py` - plan, write, settle, regenerate, and the
   next sync writes nothing), `test_agent_schema.py`.
+- Live suite (opt-in, `tests/test_agent_live.py`, markers `slides` ~50 s and `docs` ~20 s): three
+  journeys driven **in process**, as a harness drives them, since a refusal arriving as a `code`
+  rather than an exit status is the whole point and no fake can show it. A deck converted and
+  inspected; **the one rule against a deck a person really edited** - `deck_convert` refuses with
+  `deck_edited`, names `deck_sync` in `next_steps`, and the dry-run merge then plans to keep the
+  typed word; and a document pushed, reworded in the source, synced, with the second sync writing
+  0 requests. Folders are fixed (`out/agent-live/`) and the deck is rebuilt, not remade, so the
+  edit the middle test makes is taken back at the start of the next run (`_untype`) - without that
+  it passes once and is refused for ever after. The document is deleted at the end.
 - **Agent benchmark** (`devtools/agent_bench.py`, tasks in `agent_tasks.py`, history and results in
   docs/agent-bench.md): can an agent drive these journeys without destroying someone's work? Not
   whether the library is correct - the suites do that - but whether the agent looks before it leaps,
@@ -1132,9 +1141,12 @@ keys, named ranges), `doc_merge.py` (pure planning), `doc_sync.py` (the commands
   `fuzz_docs.KNOWN` (let through by default, `--strict` fails on them): a TOC treated as an
   ordinary block, which kills the sync outright; a table the source dropped deleted however
   much the reader typed in it; one block's key landing on another; a block
-  reworded *and* moved losing the reader's styling. **Five are fixed**, four of them ways of
-  losing a block's identity - which is the root of the worst of the rest, since a block the
-  merge cannot recognise is one it deletes as dropped by the source. (1) `inherit_keys`
+  reworded *and* moved losing the reader's styling. A fixed entry goes out of `KNOWN`, or it
+  would swallow the next defect that looks like it. **Eight are fixed**: four ways of losing a
+  block's identity - which is the root of the worst of the rest, since a block the
+  merge cannot recognise is one it deletes as dropped by the source - two ways of losing the
+  reader's content outright, and three ways of killing the sync where it stood (two of the
+  eight closed one of each). (1) `inherit_keys`
   matched every block of the file again by its words although the file had just named them
   all with its own `id=`, so two blocks that read alike swapped keys; a key the file asserts
   is now never matched again, which is the rule `doc_ir.key_blocks` had written down all
@@ -1155,11 +1167,22 @@ keys, named ranges), `doc_merge.py` (pure planning), `doc_sync.py` (the commands
   `block_text`, which is empty for a table (`doc_merge._edited` reads the cells, the grid and
   the frozen runs) - and the same decision now keeps a block holding an equation, a dropdown or
   a TOC no request can make again, which `_merge_block`'s rewrite path had always refused to
-  destroy while a plain delete did it silently. At one seed,
-  200 rounds at chain 8: `lost-key` 34 -> 6, `dropped-table` 17 -> 0, `dropped-frozen` 8 -> 0,
-  `crossed-delete` 2 -> 0, `crossed-frozen` 22 -> 13, `moved-styling` 2 -> 1; the two that
-  reached zero are out of `KNOWN` rather than rewritten (each has a test, and `block_gone`
-  mentioning `table:` was wide enough to swallow crossed keys on tables), and what is left
+  destroy while a plain delete did it silently. (6-8) the three that killed a sync outright,
+  all one mistake: **Docs' index rules are about structural elements, not about tables**
+  (nothing inserted at one's own index, the newline in front of one undeletable, a body
+  neither opening nor ending on one without an empty paragraph beside it, one deleted by its
+  own span) and every test for that read `kind == "table"`, so a table of contents was an
+  ordinary paragraph to the planner - `doc_ir.STRUCTURAL` is the set, `doc_merge._structural`
+  the test, and `_hide_trailer` hides the lead and trailer beside a TOC too; and an empty
+  paragraph *between two tables* can be deleted in no way at all (its own mark is the one in
+  front of a table, the block before it is a table with none to lend), so `_delete_range` came
+  back with a range of length zero and Docs refused it - Docs wants that paragraph anyway, so
+  `doc_merge.restore_undeletable` puts the block back into the merge, round by round since
+  keeping one changes what the next delete may take, and the report says why. At one seed,
+  200 rounds at chain 8: `toc-block` 10 -> 0, `toc-table-split` 4 -> 0, `empty-delete` 6 -> 0,
+  `dropped-table` 17 -> 0, `dropped-frozen` 8 -> 0, `lost-key` 34 -> 7,
+  `crossed-delete` 2 -> 2, `crossed-frozen` 22 -> 13, `moved-styling` 2 -> 1, and the same at
+  two more seeds; what is left
   under the others has no named cause yet and the entries say so. Two of the harness's own,
   found at chain 8 and pinned by tests that fail without the fix: `doc_world` shifted no named range when a
   table row was deleted, so after a source regrid every key below the table slid onto the block

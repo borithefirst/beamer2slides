@@ -320,35 +320,40 @@ def _keys(ir):
     return [b.get("key") for b in ir["blocks"]]
 
 
-@pytest.mark.xfail(strict=True, reason="fuzz_docs.KNOWN 'toc-block': every test for one "
-                   "of these reads kind == 'table', so a table of contents is an "
-                   "ordinary block to the planner and the delete takes the newline in "
-                   "front of it — which Docs refuses, and a refusal throws out the "
-                   "whole batch")
 def test_a_block_in_front_of_a_table_of_contents_can_be_deleted():
+    """Was `toc-block`: every test for Docs' index rules read `kind == "table"`, so a
+    table of contents was an ordinary block to the planner and the delete took the
+    newline in front of it. Docs refuses that, and a refusal throws out the whole
+    batch — the sync died. `doc_ir.STRUCTURAL` is what those rules are about."""
     world, ours, base = _build([_para("First line."), {"kind": "toc"}, _para("After it.")])
     ours["blocks"] = [b for b in ours["blocks"] if b["key"] != "paragraph:first-line"]
     fuzz_docs.sync_once(world, ours, base)
+    assert _keys(doc_world.read_ir(world, ours, base)) == ["toc:empty", "paragraph:after-it"]
 
 
-@pytest.mark.xfail(strict=True, reason="fuzz_docs.KNOWN 'toc-block': the same, writing "
-                   "rather than deleting — the block goes in at the TOC's own index, "
-                   "where nothing can be inserted")
 def test_a_block_can_be_written_in_front_of_a_table_of_contents():
+    """The same, writing rather than deleting: the block went in at the TOC's own
+    index, where nothing can be inserted."""
     world, ours, base = _build([_para("First line."), {"kind": "toc"}, _para("After it.")])
     ours["blocks"].insert(1, _para("A new line."))
-    fuzz_docs.sync_once(world, ours, base)
+    _, ours, base = fuzz_docs.sync_once(world, ours, base)
+    assert [doc_merge.block_text(b) for b in doc_world.read_ir(world, ours, base)["blocks"]] \
+        == ["First line.", "A new line.", "", "After it."]
 
 
-@pytest.mark.xfail(strict=True, reason="fuzz_docs.KNOWN 'empty-delete': an empty "
-                   "paragraph between two tables has no mark to give up — its own is "
-                   "the one in front of a table and the block before it is a table — so "
-                   "`_delete_range` returns a range of length 0 and Docs refuses it")
-def test_an_empty_paragraph_between_two_tables_can_be_deleted():
+def test_an_empty_paragraph_between_two_tables_is_kept_and_said_out_loud():
+    """Was `empty-delete`, and it killed the sync: such a paragraph has no mark to give
+    up — its own is the newline in front of a table and the block before it is a table
+    — so `_delete_range` came back with a range of length 0, Docs refused it, and the
+    refusal threw out the whole batch. Docs wants a paragraph between two tables
+    anyway, so `restore_undeletable` keeps it and the report says why."""
     world, ours, base = _build([_table([["a", "b"]]), _para(""),
                                 _table([["c", "d"]]), _para("The end.")])
     ours["blocks"] = [b for b in ours["blocks"] if b["key"] != "paragraph:empty"]
-    fuzz_docs.sync_once(world, ours, base)
+    report, ours, base = fuzz_docs.sync_once(world, ours, base)
+    assert _keys(doc_world.read_ir(world, ours, base)) == [
+        "table:a", "paragraph:empty", "table:c", "paragraph:the-end"]
+    assert any("no request can delete it" in line for line in report["notes"])
 
 
 def test_a_table_the_reader_typed_in_survives_the_source_dropping_it():

@@ -44,6 +44,11 @@ NAMED_KINDS = {"TITLE": "title", "SUBTITLE": "subtitle"}
 KIND_STYLE = {kind: style for style, kind in NAMED_KINDS.items()}
 # Every kind that is one paragraph of text.
 TEXT_KINDS = ("paragraph", "heading", "item", *NAMED_KINDS.values())
+# And every kind that is a structural element and not a paragraph. Docs' index rules
+# are about these: nothing can be inserted at one's own index, the newline in front of
+# one cannot be deleted, a body cannot open or end on one without an empty paragraph
+# beside it, and one is deleted by its own span. `doc_merge._structural` is the test.
+STRUCTURAL = ("table", "toc")
 ALIGNMENTS = {"START": "left", "CENTER": "center", "END": "right", "JUSTIFIED": "justify"}
 TO_ALIGNMENT = {v: k for k, v in ALIGNMENTS.items()}
 # Paragraph properties the importer keeps, and the CSS each is written as (measured,
@@ -237,7 +242,7 @@ def _hide_trailer(ir: dict) -> None:
     blocks = ir["blocks"]
     # A body with nothing in it — a tab just added — is one empty paragraph, and that
     # one is a trailer too: what is written there goes *into* it.
-    if (blocks and (len(blocks) == 1 or blocks[-2]["kind"] == "table")
+    if (blocks and (len(blocks) == 1 or blocks[-2]["kind"] in STRUCTURAL)
             and blocks[-1]["kind"] in TEXT_KINDS and not blocks[-1]["runs"]):
         last = blocks.pop()
         ir["trailer"] = last["span"]
@@ -247,7 +252,7 @@ def _hide_trailer(ir: dict) -> None:
     # an empty paragraph in front of it that no request can delete either (measured: a
     # tab's first table, made by `insertTable`, always does). That one is the `lead`,
     # and the first block written in front of the table goes into it.
-    if (len(blocks) >= 2 and blocks[1]["kind"] == "table"
+    if (len(blocks) >= 2 and blocks[1]["kind"] in STRUCTURAL
             and blocks[0]["kind"] in TEXT_KINDS and not blocks[0]["runs"]):
         first = blocks.pop(0)
         ir["lead"] = first["span"]
