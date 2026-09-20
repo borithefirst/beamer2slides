@@ -147,6 +147,36 @@ def test_the_oracle_sees_a_chip_the_reader_inserted_disappear():
     assert "frozen_gone" in _kinds(oracle.check(base, before, after, NOTHING))
 
 
+def test_the_oracle_sees_a_picture_the_reader_inserted_disappear():
+    shot = {"frozen": True, "chip": "image", "text": "", "value": "kix.i7",
+            "uri": "https://example.invalid/reader.png"}
+    base = _ir(_p("k1", "look "))
+    before = _ir({"key": "k1", "kind": "paragraph", "runs": [{"text": "look "}, shot]})
+    after = _ir(_p("k1", "look "))
+    assert "frozen_gone" in _kinds(oracle.check(base, before, after, NOTHING))
+
+
+def test_the_oracle_lets_a_picture_the_settle_named_alone():
+    """A picture a reader inserted has only a `uri` until the settle saves it and
+    gives it a file and a digest (`doc_sync.fetch_pictures`). The document did not
+    change; the name we knew it by did. Judged on one name — and `frozen_key` prefers
+    the digest — every such picture read as lost, which was thirteen of the twenty
+    findings a chain-8 run had left. A picture is now the same picture under any of
+    its names, and the object id is one of them."""
+    shot = {"frozen": True, "chip": "image", "text": "", "value": "kix.i7",
+            "uri": "https://example.invalid/reader.png"}
+    named = shot | {"src": "doc.media/kix.i7.png", "sha": "b9c1f0a2"}
+    before = _ir({"key": "k1", "kind": "paragraph", "runs": [{"text": "look "}, shot]})
+    after = _ir({"key": "k1", "kind": "paragraph", "runs": [{"text": "look "}, named]})
+    assert not oracle.failures(oracle.check(_ir(_p("k1", "look ")), before, after, NOTHING))
+    # And the other way round: a block the sync rewrote keeps the file and is given a
+    # new object id, which is the case `frozen_key`'s docstring was written for.
+    rewritten = named | {"value": "kix.i9", "uri": "https://example.invalid/again.png"}
+    settled = _ir({"key": "k1", "kind": "paragraph", "runs": [{"text": "look "}, named]})
+    after = _ir({"key": "k1", "kind": "paragraph", "runs": [{"text": "look "}, rewritten]})
+    assert not oracle.failures(oracle.check(settled, settled, after, NOTHING))
+
+
 def test_the_oracle_sees_a_cell_the_reader_typed_in_overwritten():
     def table(second):
         return {"key": "t1", "kind": "table",

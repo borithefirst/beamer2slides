@@ -1039,8 +1039,9 @@ KNOWN = (
             "`paragraph:empty` (chain-8 seed 1147, where the reader's person chip went "
             "and a picture with it) — and fixing it took this from 22 findings to 13 "
             "in 200 chain-8 rounds. What the 13 are is not yet known: the signature is "
-            "a frozen run gone that is not the `dropped-frozen` one above, so any "
-            "other way of losing a chip is filed here too"},
+            "any frozen run gone at all, so every other way of losing a chip — "
+            "including any return of the `dropped-frozen` that used to stand above — "
+            "is filed here too"},
 )
 
 

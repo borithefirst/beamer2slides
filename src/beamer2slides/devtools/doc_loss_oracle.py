@@ -161,13 +161,35 @@ def frozen_key(run: dict) -> tuple:
     return (run.get("chip", "object"), run.get("value") or run.get("text", ""))
 
 
+def image_names(run: dict) -> set:
+    """Every name that says which picture this is — and it takes all of them.
+
+    Neither half of `frozen_key`'s rule holds on its own across one sync. The object
+    id goes when the block is rewritten, which is why the key is the file. But the
+    *file* goes too: a picture the reader inserted in the browser has only a `uri`
+    before the sync, and the settle saves it and gives it a `src` and a digest
+    (`doc_sync.fetch_pictures`) — the document did not change, the name we know it by
+    did. Judged on one name the oracle called every such picture lost and had done
+    since it was written, which was thirteen of the twenty findings left in a chain-8
+    run: a false accusation hides the true ones behind it.
+    """
+    return {("image", value) for value in (run.get("sha"), run.get("src"),
+                                           run.get("uri"), run.get("value")) if value}
+
+
+def images_of(part: dict | None) -> list[dict]:
+    return [run for block in (part or {}).get("blocks", []) for run in runs_of(block)
+            if run.get("frozen") and run.get("chip") == "image"]
+
+
 def frozen_marks(block: dict) -> Counter:
-    """What a block holds that a plain paragraph cannot say, by what identifies it."""
+    """What a block holds that a plain paragraph cannot say, by what identifies it.
+    Pictures are left out: they are matched by name, not counted (`image_names`)."""
     out: Counter = Counter()
     if block.get("kind") == "toc":
         out[("toc", "")] += 1
     for run in runs_of(block):
-        if run.get("frozen"):
+        if run.get("frozen") and run.get("chip") != "image":
             out[frozen_key(run)] += 1
     return out
 
@@ -344,7 +366,38 @@ def _tab_findings(was: dict | None, now: dict, then: dict | None, said: str,
                            + ("" if remakeable else ", and no request can make one"),
                            tab=tab))
 
+    out += _picture_findings(now, mine, then, said, tab)
     out += _order_findings(was, now, then, said, tab)
+    return out
+
+
+def _picture_findings(now: dict, mine: dict | None, then: dict | None,
+                      said: str, tab) -> list[dict]:
+    """The pictures the document held and does not hold any more.
+
+    One at a time and by any of their names (`image_names`), because a picture may
+    keep its object id or keep its file and need not keep both. Each survivor is
+    claimed once, so two copies of one file are two pictures. A picture the *source*
+    itself took out of the file is meant to go — but only when the file has that tab
+    at all: where it does not, the whole tab is the reader's and everything in it has
+    to survive.
+    """
+    out: list[dict] = []
+    left = images_of(then)
+    theirs = [image_names(run) for run in images_of(mine)] if mine is not None else None
+    for run in images_of(now):
+        names = image_names(run)
+        hit = next((i for i, other in enumerate(left) if names & image_names(other)), None)
+        if hit is not None:
+            left.pop(hit)
+            continue
+        if theirs is not None and not any(names & one for one in theirs):
+            continue
+        if _named(said, *(value for _, value in names)):
+            continue
+        out.append(finding("frozen_gone", "loss",
+                           f"the image {frozen_key(run)[1]!r} the document held is not "
+                           f"in it any more", tab=tab))
     return out
 
 

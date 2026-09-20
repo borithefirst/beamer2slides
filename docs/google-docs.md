@@ -925,13 +925,26 @@ the report says why it stayed.
 
 At one seed, 200 rounds at chain 8: `toc-block` 10 → 0, `toc-table-split` 4 → 0,
 `empty-delete` 6 → 0, `dropped-table` 17 → 0, `dropped-frozen` 8 → 0, `lost-key`
-34 → 6, `crossed-delete` 2 → 0, `crossed-frozen` 22 → 13, `moved-styling` 2 → 1 — and
+34 → 7, `crossed-delete` 2 → 2, `crossed-frozen` 22 → 9, `moved-styling` 2 → 2 — and
 the same at a second seed and a third. The five signatures that reached zero are **out
 of `KNOWN`** rather than rewritten: each has a test of its own now, and each was wide
 enough to swallow the next defect that looks like it — `block_gone` mentioning `table:`
 had been catching crossed keys on tables all along. What is left under the others has a
 cause nobody has named yet, and the entries say so rather than keep blaming what was
 fixed.
+
+And one of the findings was the **oracle's own**, which is the third time the harness
+has been the thing at fault. A picture is identified by the file it shows and not by
+the object id Docs gave it, because a block the sync rewrites comes back with a new id
+— but the file is not stable either: a picture a reader inserted in the browser has
+only a `contentUri` until the settle saves it and gives it a name and a digest
+(`fetch_pictures`). The document had not changed; the name the oracle knew it by had.
+`image_names` takes all of them and `_picture_findings` matches one picture at a time
+against any, so a rewrite and a settle are both survivable and two copies of one file
+are still two pictures. Thirteen findings became nine — and it is worth saying what
+that cost: for as long as the oracle has existed it has been accusing the sync of
+losing every picture a reader ever inserted, and nine real ones were standing behind
+that noise.
 
 Fixed seeds from the campaign run in the default offline suite.
 
