@@ -928,13 +928,20 @@ def test_a_block_the_source_added_is_inserted_with_its_styling():
     result = doc_merge.plan(BASE, ours, live(BASE["blocks"]))
     assert texts(result)[1] == "New heading"
     kinds = [next(iter(r)) for r in result["requests"]]
+    # One updateTextStyle per run, the plain one included: text written from nothing
+    # inherits the styling of the character in front of it, so every managed field is
+    # named, or a block moved under an underlined heading comes out underlined.
     assert kinds == ["insertText", "deleteParagraphBullets", "updateParagraphStyle",
-                     "updateTextStyle"]
+                     "updateTextStyle", "updateTextStyle"]
     insert = result["requests"][0]["insertText"]
     assert insert["text"] == "New heading\n"
     assert insert["location"]["index"] == BASE["blocks"][1]["span"][0]
     assert (result["requests"][2]["updateParagraphStyle"]["paragraphStyle"]["namedStyleType"]
             == "HEADING_2")
+    plain, bold = (r["updateTextStyle"] for r in result["requests"][3:])
+    assert plain["textStyle"] == {} and "bold" in plain["fields"].split(",")
+    assert bold["textStyle"] == {"bold": True}
+    assert set(plain["fields"].split(",")) == set(doc_merge.MANAGED)
 
 
 def test_a_list_item_gets_its_bullets_after_its_styling():
@@ -942,7 +949,8 @@ def test_a_list_item_gets_its_bullets_after_its_styling():
                                    "key": "item:step", "runs": [{"text": "step one"}]}])
     result = doc_merge.plan(BASE, ours, live(BASE["blocks"]))
     kinds = [next(iter(r)) for r in result["requests"]]
-    assert kinds == ["insertText", "updateParagraphStyle", "createParagraphBullets"]
+    assert kinds == ["insertText", "updateParagraphStyle", "updateTextStyle",
+                     "createParagraphBullets"]
     # A block that is not a list item says so, or it joins the list it was written into.
     assert "deleteParagraphBullets" not in kinds
     assert (result["requests"][-1]["createParagraphBullets"]["bulletPreset"]
@@ -954,7 +962,8 @@ def test_a_block_appended_at_the_end_puts_its_paragraph_break_first():
     result = doc_merge.plan(BASE, ours, live(BASE["blocks"]))
     tail = BASE["blocks"][-1]["span"][1] - 1
     kinds = [next(iter(r)) for r in result["requests"]]
-    assert kinds == ["insertText", "deleteParagraphBullets", "updateParagraphStyle"]
+    assert kinds == ["insertText", "deleteParagraphBullets", "updateParagraphStyle",
+                     "updateTextStyle"]
     insert = result["requests"][0]["insertText"]
     # The body's last newline cannot be written past, so the break goes in before
     # the words: "delta seven\n" at `tail` would join the last paragraph instead and
@@ -1172,7 +1181,7 @@ def test_a_block_the_source_moved_up_is_moved_in_the_document():
     kinds = [next(iter(r)) for r in result["requests"]]
     # Deleted where it was first (the higher index), then written where it belongs.
     assert kinds == ["deleteContentRange", "insertText", "deleteParagraphBullets",
-                     "updateParagraphStyle"]
+                     "updateParagraphStyle", "updateTextStyle"]
     assert result["requests"][0]["deleteContentRange"]["range"] == {
         "startIndex": FIVE["blocks"][D]["span"][0], "endIndex": FIVE["blocks"][D]["span"][1]}
     assert result["requests"][1]["insertText"] == {
@@ -1185,7 +1194,7 @@ def test_a_block_the_source_moved_down_is_written_before_it_is_deleted():
                              "echo five"]
     kinds = [next(iter(r)) for r in result["requests"]]
     assert kinds == ["insertText", "deleteParagraphBullets", "updateParagraphStyle",
-                     "deleteContentRange"]
+                     "updateTextStyle", "deleteContentRange"]
     assert result["requests"][0]["insertText"] == {
         "location": {"index": FIVE["blocks"][E]["span"][0]}, "text": "bravo two\n"}
 
@@ -1210,7 +1219,7 @@ def test_a_moved_list_item_is_written_as_a_list_item():
     result = doc_merge.plan(was, ours, live(was["blocks"]))
     kinds = [next(iter(r)) for r in result["requests"]]
     assert kinds == ["deleteContentRange", "insertText", "updateParagraphStyle",
-                     "createParagraphBullets"]
+                     "updateTextStyle", "createParagraphBullets"]
     assert (result["requests"][-1]["createParagraphBullets"]["bulletPreset"]
             == "NUMBERED_DECIMAL_ALPHA_ROMAN")
 

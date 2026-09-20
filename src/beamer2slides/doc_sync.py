@@ -661,7 +661,9 @@ def plant_ranges(docs, ident: str, ir: dict, tab: str | None = None) -> int:
             send(docs, ident, [request])
             done += 1
         except HttpError as err:
-            print(f"  no anchor for {request['createNamedRange']['name']}: {err.resp.status}")
+            what = next(iter(request.values()))
+            print(f"  no anchor for {what.get('name') or what.get('namedRangeId')}: "
+                  f"{err.resp.status}")
     return done
 
 

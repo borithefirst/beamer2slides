@@ -1245,12 +1245,28 @@ keys, named ranges), `doc_merge.py` (pure planning), `doc_sync.py` (the commands
   `dropped-table` 17 -> 0, `dropped-frozen` 8 -> 0, `crossed-frozen` 22 -> 0,
   `table-in-a-table` 1 -> 0, `lost-key` 34 -> 2,
   `crossed-delete` 2 -> 1, `moved-styling` 2 -> 2, and the same at a second seed and at
-  chain 4. `lost-key`'s last two have a cause and no fix: an empty paragraph is all mark, so
-  its named range *is* its mark, and "\ntext" written at that mark is handed the range (an
-  insert at a range's own first index pushes it along), so the empty paragraph's key rides
-  onto the block that was written; no index both appends after an empty paragraph and leaves
-  its range alone, and reading the key back off the wrong block was tried in two widths and
-  cost that round its convergence. Five of the harness's own,
+  chain 4; then `lost-key` 2 -> 0 and `moved-styling` 2 -> 0, leaving `crossed-delete` alone
+  in `KNOWN` (300 rounds at chain 8 and 600 at chain 4 under `--strict`: nothing).
+  `lost-key`'s last two: an empty paragraph is all mark, so its named range *is* its mark,
+  and "\ntext" written at that mark is handed the range (an insert at a range's own first
+  index pushes it along), so the empty paragraph's key rode onto the block that was written;
+  no index both appends after an empty paragraph and leaves its range alone, and reading the
+  key back off the wrong block was tried in two widths and cost that round its convergence.
+  The range is planted again instead, in the same batch (`doc_merge.requests`, `REPLANT`:
+  `deleteNamedRange` then a fresh `createNamedRange` on the mark, after the appends there and
+  before a block inserted in front; `doc_world` takes `deleteNamedRange`). A reader's chip or
+  word put into an empty paragraph pushes its range the same way, so `apply_keys` records
+  where a range is (`block["range"]`), `doc_ir.replant_requests` names the drifted ones,
+  `name_requests` plants them back at the settle and `structure` heads its batch with them -
+  the batch that builds a table swallows the mark before it, which carried the chip
+  paragraph's range, and the moved table is found again by that block's key (seed 296).
+  `moved-styling` was `_retext` folding the stretch between two frozen runs into its first
+  writable run: it pairs the document's words with the merged text now and gives each its own
+  styling (`_runs_from_styles`). Its wordless signature hid two more: a block written from
+  nothing inherits the styling of the character in front of it (Docs' rule: one moved under
+  an underlined heading came out underlined), so `_style_requests` names every managed field
+  on every run; and a word the reader styled that the source rewrote is a loss that is
+  right, now said in the report (`doc_merge.reader_styling_gone`). Five of the harness's own,
   found at chain 8 and pinned by tests that fail without the fix: `doc_world` shifted no named range when a
   table row was deleted, so after a source regrid every key below the table slid onto the block
   above (seeds 5099, 5167); the oracle accused a `\S+` token each side had edited one half

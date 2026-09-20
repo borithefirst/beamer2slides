@@ -331,6 +331,31 @@ def test_a_block_the_document_does_not_name_gets_a_range():
     assert requests[0]["createNamedRange"]["range"] == {"startIndex": 19, "endIndex": 27}
 
 
+def test_a_range_that_drifted_is_planted_again_where_it_belongs():
+    """`apply_keys` records where a range *is*; `name_requests` compares that with
+    where `anchor_range` puts it. A range drifts when text is written at its first
+    index (Docs pushes it along): the old one goes and a fresh one is planted, in that
+    order, so a name is never carried twice — and a range where it belongs, or a
+    block with none yet, gets no delete."""
+    drifted = {"b2s:heading:a-heading": {"name": "b2s:heading:a-heading", "namedRanges": [
+        {"namedRangeId": "r1", "name": "b2s:heading:a-heading",
+         "ranges": [{"startIndex": 9, "endIndex": 10}]}]}}
+    ir = doc_ir.apply_keys(doc_ir.from_document(LIVE), NAMED | drifted)
+    assert ir["blocks"][0]["range"] == [9, 10]
+    assert ir["blocks"][1]["range"] == [11, 18]
+    low, high = doc_ir.anchor_range(ir["blocks"][0])
+    assert doc_ir.replant_requests(ir) == [
+        {"deleteNamedRange": {"namedRangeId": "r1"}},
+        {"createNamedRange": {"name": "b2s:heading:a-heading",
+                              "range": {"startIndex": low, "endIndex": high}}}]
+    doc_ir.key_blocks(ir)
+    requests = doc_ir.name_requests(ir)
+    assert requests[:2] == doc_ir.replant_requests(ir)
+    assert [next(iter(r)) for r in requests[2:]] == ["createNamedRange"] * (len(requests) - 2)
+    assert "b2s:paragraph:centred" not in [
+        r["createNamedRange"]["name"] for r in requests if "createNamedRange" in r]
+
+
 def test_the_named_ranges_of_a_tabbed_read_are_found_in_the_tab():
     tabbed = {"title": "t", "tabs": [
         {"tabProperties": {"tabId": "t.0"},
