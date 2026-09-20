@@ -1538,6 +1538,44 @@ Then 800 rounds at chain 4 from 998000, 500 at chain 8 from 996000, 400 at chain
 997000, 700 at chain 6 from 991000 and 300 at chain 12 from 999000 — 2,700 rounds, all
 clean under `--strict`, and `KNOWN` still empty.
 
+### The name that stayed behind
+
+One round in 500 at chain 8 from 41000, and the only failure in the 3,200 rounds run
+since: `identity_lost paragraph:second-section — the block said 'meadow section.' and
+has lost its key, though neither side dropped the block`.
+
+A range is destroyed with its text or not at all. That is Docs' rule and the reason
+`replant_requests` exists — but there is one delete that takes no text of the block it
+is deleting. A block in front of a table gives up the *previous* block's paragraph mark
+and keeps its own (`_delete_range`, and the API refuses anything else), and a range can
+live exactly there: an empty paragraph is all mark, so its range *is* the mark, and a
+reader's chip or word pushes an ordinary paragraph's range onto the mark too
+(`doc_ir.apply_keys` records where a range really is, which is what made this visible at
+all). Nothing of the range's own text is deleted, so Docs keeps the range — on a mark
+that now belongs to the paragraph the two were merged into. The document goes on saying
+this block is there.
+
+It costs identity twice over, and the second time is the one that bites. The block was
+*moved*, so its range is planted again where it went and the document holds two ranges
+of one name; and the stale one sits where the next block written will be, so the sync
+after hands *that* block this key and the block that owned it is renamed from its words.
+Which is why the report said a block neither side dropped had lost its key: it had been
+given away.
+
+`_orphan_range` names and deletes the range in the same batch, wherever the text it sits
+on is not the text going. Both halves are pinned by hand
+(`test_a_delete_that_borrows_the_mark_in_front_names_the_range_it_leaves_behind`, and
+its counterpart saying an ordinary block's range — which stops short of its mark, so the
+borrowed-mark delete covers it — is left to Docs); without them, seed 41000 and the
+first of the two fail and nothing else does. 500 rounds at chain 8 from 41000, clean.
+
+The empty paragraph this round turned on is itself a thing worth naming: a table the
+source adds after a table of contents cannot swallow the leftover of the paragraph
+`insertTable` splits, because the block before the insertion point is structural. The
+spurious empty block survives the write and the settle keys it. It is legal, it is
+harmless, and it is one more reason the identity of a block may never depend on a block
+being there for a reason.
+
 ## Remaining risks
 
 1. **Pictures** — retired, see "Pictures, and the chips a request can make" above. What

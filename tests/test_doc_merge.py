@@ -482,6 +482,37 @@ def test_two_blocks_deleted_in_front_of_a_table_do_not_want_one_mark_twice():
     assert spans[1]["endIndex"] == spans[0]["startIndex"]
 
 
+def test_a_delete_that_borrows_the_mark_in_front_names_the_range_it_leaves_behind():
+    """An empty paragraph is all mark, and its named range *is* that mark — which the
+    delete in front of a table does not take (it borrows the previous block's). Nothing
+    of the range's own text goes, so Docs keeps it, and the document goes on saying the
+    block is there: the next block written at that index is handed this one's key."""
+    was = live([para("p:title", "the title"), para("p:empty", ""),
+                table("t:grid", [["a one"]])])
+    empty = was["blocks"][1]
+    empty["rangeId"], empty["range"] = "r7", list(empty["span"])
+    result = doc_merge.plan(was, live([was["blocks"][0], was["blocks"][2]]),
+                            live(was["blocks"]))
+    assert result["requests"] == [
+        {"deleteContentRange": {"range": {"startIndex": empty["span"][0] - 1,
+                                          "endIndex": empty["span"][1] - 1}}},
+        {"deleteNamedRange": {"namedRangeId": "r7"}}]
+
+
+def test_a_delete_that_takes_the_range_with_it_names_nothing():
+    """The other side of it: an ordinary block's range stops short of its paragraph
+    mark (`doc_ir.anchor_range`), so the borrowed-mark delete covers it and Docs
+    destroys it with the text. Naming it too would be a request that does nothing."""
+    was = live([para("p:title", "the title"), para("p:before", "before the table"),
+                table("t:grid", [["a one"]])])
+    before = was["blocks"][1]
+    before["rangeId"] = "r7"
+    before["range"] = [before["span"][0], before["span"][1] - 1]
+    result = doc_merge.plan(was, live([was["blocks"][0], was["blocks"][2]]),
+                            live(was["blocks"]))
+    assert not [r for r in result["requests"] if "deleteNamedRange" in r]
+
+
 def test_a_block_deleted_between_two_tables_leaves_its_paragraph_behind():
     """There is no mark to borrow — and Docs wants a paragraph between two tables
     anyway, so the words go and the empty paragraph stays."""

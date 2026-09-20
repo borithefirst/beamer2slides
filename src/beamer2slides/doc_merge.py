@@ -1980,10 +1980,12 @@ def requests(theirs: dict, merged: list[dict]) -> list[dict]:
                  for p, b in enumerate(merged))
     left_empty = None
     for index in sorted(going):
+        live = theirs["blocks"][index]
         start, end = _delete_range(theirs["blocks"], index, going, ends, theirs.get("lead"),
                                    filled)
         plans.append((start, DELETE, [{"deleteContentRange": {
-            "range": {"startIndex": start, "endIndex": end}}}]))
+            "range": {"startIndex": start, "endIndex": end}}}]
+            + _orphan_range(live, start, end)))
         if index == len(theirs["blocks"]) - 1 and end == theirs["blocks"][index]["span"][1] - 1:
             # The body's last block, whose words go and whose own mark stays
             # (`_delete_range`): the document ends on an empty paragraph exactly
@@ -2149,7 +2151,8 @@ def structure(theirs: dict, merged: list[dict],
             start, end = _delete_range(theirs["blocks"], index, {index},
                                        not theirs.get("trailer"), theirs.get("lead"))
             deletes[key] = (start, 0, [{"deleteContentRange": {
-                "range": {"startIndex": start, "endIndex": end}}}])
+                "range": {"startIndex": start, "endIndex": end}}}]
+                + _orphan_range(theirs["blocks"][index], start, end))
             plans.append((at, reqs,
                           {"key": key,
                            "after": _after_key(merged, position, _swallowed(theirs, reqs)),
@@ -2373,6 +2376,32 @@ def _delete_range(blocks: list[dict], index: int, going: set[int],
         # of the table. Docs wants one between two tables anyway.
         return start, end - 1
     return start - 1, end - 1
+
+
+def _orphan_range(block: dict, start: int, end: int) -> list[dict]:
+    """The `deleteNamedRange` a delete needs when the block's own range outlives it.
+
+    A block standing in front of a table gives up the *previous* block's paragraph
+    mark and keeps its own (`_delete_range`), and a range may live on that mark: an
+    empty paragraph is all mark, and a reader's chip or word pushes a range onto the
+    mark of one (`doc_ir.apply_keys` records where a range really is). Nothing of the
+    range's own text is deleted then, so Docs keeps it — and the document goes on
+    saying this block is there, on a mark that now belongs to the paragraph the two
+    were merged into.
+
+    What that costs is identity, twice over. A *move* plants the block's range again
+    where the block went, so the document holds two ranges of one name; and the stale
+    one sits where the next block written will be, so the sync after hands that block
+    this one's key and the block that owned the key is renamed from its words
+    (chain-8 seed 41000: an empty heading left in front of a table the source added
+    after a table of contents, moved one step later, ended up wearing
+    `paragraph:second-section`'s identity). A range is destroyed with its text or not
+    at all, so where the text does not go the range is named and deleted.
+    """
+    span = block.get("range") or doc_ir.anchor_range(block)
+    if not block.get("rangeId") or not span or (start <= span[0] and span[1] <= end):
+        return []
+    return [{"deleteNamedRange": {"namedRangeId": block["rangeId"]}}]
 
 
 def _mark_is_taken(blocks: list[dict], index: int, going: set[int], ends: bool,

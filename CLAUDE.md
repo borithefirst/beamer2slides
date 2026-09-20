@@ -1456,6 +1456,14 @@ keys, named ranges), `doc_merge.py` (pure planning), `doc_sync.py` (the commands
   its block, text typed at the mark falling outside it, so only `here[1] > planted[1]` is
   wrong (seeds 279 and 361 at chain 4, found once `read_unmark_word` changed which seeds draw
   what; both fail identically at the commit before it).
+  And a range is destroyed *with its text or not at all*, which leaves one delete taking no
+  text of its own: a block in front of a table gives up the previous block's mark and keeps
+  its own (`_delete_range`), and that mark is exactly where an empty paragraph's range lives,
+  or a drifted one. Docs keeps it, the document goes on saying the block is there, and since
+  the block was *moved* its range is planted again where it went - two ranges of one name,
+  the stale one sitting where the next block written will be, which the sync after then hands
+  this key while the block that owned it is renamed from its words (chain-8 seed 41000, one
+  round in 500). `doc_merge._orphan_range` names it in the delete's own batch.
   A body may not end on a table, so the paragraph after a final one keeps its mark however it
   is deleted (`_delete_range`: its words go, an empty paragraph stays where it stood) - but
   the append index came from the last block the sync *keeps*, which is then the table, and a
