@@ -193,8 +193,16 @@ class Stager:
 
 
 def bootstrap(world: doc_world.World) -> dict:
-    """What `docs push` leaves behind: every block keyed and named in the document, and
-    a file that is the document's own read."""
+    """Every block keyed and named in the document, and a file that is the document's
+    own read.
+
+    That is `docs adopt`, not `docs push`, and deliberately: `push` would import HTML
+    and get back only what an import can carry, while the corpus shapes hold chips,
+    equations, dropdowns and a table of contents that no import can make. Starting
+    from the document means the campaign measures the journey somebody actually has —
+    a document written in the browser for a year, adopted, edited in the file, synced
+    back — rather than one this tool made out of its own dialect.
+    """
     ir = doc_world.read_ir(world)
     for part in doc_ir.parts(ir):
         stamp = None if part is ir else part.get("tab")
