@@ -922,16 +922,38 @@ same functions underneath; nothing here reimplements a journey.
   whether the library is correct - the suites do that - but whether the agent looks before it leaps,
   dry-runs, reads a conflict, refuses a forced rebuild nobody asked for, and puts a choice to the
   person when it is the person's. 13 **replay** tasks run against a scripted fake registry (real
-  `Result` shapes, nothing read or written) and grade the decision sequence; 2 **live** tasks really
-  run the Google-free tools and are graded on their artifacts by the project's own graders.
+  `Result` shapes, nothing read or written) and grade the decision sequence; 7 **live** tasks really
+  run the Google-free tools and are graded on their artifacts by the project's own graders - five of
+  them the Google Docs journeys against `devtools/doc_world.py`, a real `doc_sync` with no Google
+  and no quota (plan, write, settle, regenerate, and the document read back), whose fixture lives in
+  the process that builds it (`Task.process_bound`).
   **Harm** - a task failed in a way that would have destroyed work (a forced rebuild, a guessed
   `assume_base`, a document rewritten under an open comment) - is counted and reported apart from the
   pass rate. Every task ships a correct policy that passes and at least one wrong one that fails,
   both asserted by `tests/test_agent_bench.py` (offline, ~1 s; the latex-tier task behind the
   `inverse` marker). No model is called from this repo: `Scripted` proves the graders and `Recorded`
   scores a transcript made in any harness (`agent_bench bundle` prints what one needs).
-  `run --tier all --tag T`, `report --tag T`, `tasks`. Baseline: 15/15 correct, HARM 0; 27 wrong
-  policies, all failing, 9 of them harmful.
+  `run --tier all --tag T`, `report --tag T`, `tasks`. Baseline: 20/20 correct, HARM 0; 37 wrong
+  policies, all failing, 12 of them harmful.
+- **Playing one task as a model runs** (`devtools/agent_play.py`, `tools/agent_play.py`): `Scripted`
+  and `Recorded` both want the whole run to exist before grading, and a model decides its next move
+  after reading the last result - so between the two there was no door. `agent_play start <task>
+  --run-dir D` prints the request, the tools, their schemas and the one rule; `call <tool> k=v` takes
+  one turn (`k=v`, not `--args` JSON: PowerShell 5.1 mangles quotes inside a native command's
+  arguments); `answer "<text>"` ends it; `score` hands the transcript to `agent_bench.run_task` with
+  the task's own grader, so a played run and `--policy recorded:D` of the same calls come back with
+  the same status, the same failure sentences and the same harm count (asserted over 36 comparisons,
+  not hoped). The run dir *is* a `recorded:DIR` folder. A model cannot reach past its task: a replay
+  registry answers an unoffered tool with the benchmark's own `bad_request`, a live one runs under
+  `AgentContext.offline`, and tier `live_google` needs `--allow-google` at `start`; a
+  `process_bound` task is refused at `start` rather than played, since one process per turn is
+  exactly what its fixture does not survive. Still no model
+  called from this repo (pinned by a test walking the module's imports). Measured with Opus 5
+  agents playing three tasks blind (docs/agent-bench.md): two passed, HARM 0, and the third failed
+  because the **agent's own permission classifier** refused the `agent_play call` that would have
+  written - the model had chosen exactly the right call. A harness that classifies commands has to
+  pre-authorise that one, or the score measures the sandbox; nothing here can see a command that
+  was never run, and telling the model a replay task writes nothing would destroy what is measured.
 
 ## Playground (docs/playground.md)
 `python -m beamer2slides playground` (`src/beamer2slides/playground/`: stdlib `http.server` + a static
@@ -1180,15 +1202,24 @@ keys, named ranges), `doc_merge.py` (pure planning), `doc_sync.py` (the commands
   `doc_merge.restore_undeletable` puts the block back into the merge, round by round since
   keeping one changes what the next delete may take, and the report says why. At one seed,
   200 rounds at chain 8: `toc-block` 10 -> 0, `toc-table-split` 4 -> 0, `empty-delete` 6 -> 0,
-  `dropped-table` 17 -> 0, `dropped-frozen` 8 -> 0, `lost-key` 34 -> 7,
-  `crossed-delete` 2 -> 2, `crossed-frozen` 22 -> 13, `moved-styling` 2 -> 1, and the same at
+  `dropped-table` 17 -> 0, `dropped-frozen` 8 -> 0, `crossed-frozen` 22 -> 0, `lost-key` 34 -> 7,
+  `crossed-delete` 2 -> 2, `moved-styling` 2 -> 2, and the same at
   two more seeds; what is left
-  under the others has no named cause yet and the entries say so. Two of the harness's own,
+  under the others has no named cause yet and the entries say so. Four of the harness's own,
   found at chain 8 and pinned by tests that fail without the fix: `doc_world` shifted no named range when a
   table row was deleted, so after a source regrid every key below the table slid onto the block
-  above (seeds 5099, 5167); and the oracle accused a `\S+` token each side had edited one half
+  above (seeds 5099, 5167); the oracle accused a `\S+` token each side had edited one half
   of - a soft hyphen joins two words, and only what the *reader* added has to survive
-  (`joined_differently`, seed 5130).
+  (`joined_differently`, seed 5130); and the whole of `crossed-frozen` was the oracle
+  misnaming pictures, twice. A picture is the file it shows, not the object id a rewrite
+  replaces - but the file is not stable either, since one a reader inserted has only a
+  `contentUri` until the settle saves it (`oracle.image_names` takes every name, 22 -> 13);
+  and two pictures pasted from *one* url share a name that says which picture it is, so the
+  one that went paired with the one that stayed and the survivor was named as lost
+  (`oracle.telling_names` keeps the names no picture beside it carries, `pair_images` matches
+  on those first and on anything at all second so two copies of one file still pair off, and
+  the excuse "the source took it out of the file" asks the telling names too; 13 -> 0, every
+  one of the nine pointing at a picture still standing in the document).
 - Live suite (opt-in, marker `docs`, ~5 min): `python -m pytest -m docs tests/test_docs_live.py`
   pushes a document per test, edits both sides, syncs, checks a second sync writes nothing, and
   deletes the document. Offline: `tests/test_doc_ir.py`, `test_doc_merge.py`, `test_doc_sync.py`.
