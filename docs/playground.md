@@ -205,6 +205,20 @@ What the flags are for, beyond taste:
   Google's API; the default 5 minutes is close enough to be worth raising.
 - **`--allow-unauthenticated`** is what makes it a public playground rather than a private one.
 
+#### A run only moves while somebody is asking about it
+
+Both tabs do the work on a thread of the server's own and let the page poll for the answer, and
+Cloud Run gives an instance CPU **while it is serving a request** and throttles it to almost
+nothing in between. So the same journey takes as long as one is prepared to watch it: measured on
+the live service, `b2s_status` is **2.7 s** when the caller polls four times a second, **21 s**
+when it polls twice, and **68 s** when it is left alone; `tex_compile` was 6.6 s from the page and
+40 s from a script that slept. The page polls while it watches a run, so a visitor sees the first
+number - it is a script driving the HTTP API that should poll rather than sleep, which is how
+these were found.
+
+`--no-cpu-throttling` removes it, at the price of paying for the instance's whole life rather than
+for the requests it serves, so it is a spending decision and not a fix to make quietly.
+
 The service's URL (`https://<service>-<hash>.<region>.run.app`) must then be added to the OAuth
 web client's **authorized JavaScript origins**, or the browser's sign-in is refused before it
 starts. Cloud Run scales to zero, so an idle playground costs only storage of the built image.

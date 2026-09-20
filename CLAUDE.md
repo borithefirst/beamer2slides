@@ -1156,7 +1156,9 @@ correctness as much as thrift, since a job lives in one container's memory, and 
 be an authorized JavaScript origin of the web client). A Hugging Face Docker Space now needs PRO.
 **Live**: https://beamer2slides-playground-702466108736.europe-west1.run.app (project `beamer2slides`,
 region europe-west1, one instance, scale to zero, CHF 50/month with the budget's *spend cap*
-enforcing on Cloud Run). The consent screen is **In production**, which it could only become once
+enforcing on Cloud Run). A run there moves only while somebody is asking about it: Cloud Run gives
+CPU during a request and throttles in between, so `b2s_status` measured 2.7 s polled four times a
+second, 21 s polled twice and 68 s left alone (the page polls; a script should too). The consent screen is **In production**, which it could only become once
 the Branding page had a home page and a privacy policy on an authorized domain: hence `/privacy`
 (`static/privacy.html`), served by the playground itself and saying what the code does.
 **The workbench** (`playground/workbench.py`, `runner.py`, `static/workbench.js`) is the second
