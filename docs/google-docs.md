@@ -1684,6 +1684,17 @@ already grants a single token, granted to a whole block — and both resurrectio
 use it. It costs nothing that matters: with the block delete broken on purpose, 34 of 200
 rounds at chain 4 still fail, 68 findings.
 
+And one at the size of a tab, from the other side: `tab_resurrected` asks whether some
+tab unknown to the base now says the same thing under the same name as the one the
+reader deleted — and a tab the *source* freshly asks for is word for word that shape,
+since two new empty tabs say exactly as much as each other. The campaign draws tab
+titles from a small vocabulary, so two `add_tab`s eventually pick one name (chain-8 seed
+65370), and the merge creating the second was accused of resurrecting the first. A
+`<section>` with no `data-tab` is a tab the document has never had, so `_fresh_asks`
+counts them and each answers for one new tab before any of them is called a
+resurrection. With the excuse in place, putting the resurrection back into `pair_tabs`
+still fails 26 of 200 rounds at chain 4.
+
 ## Remaining risks
 
 1. **Pictures** — retired, see "Pictures, and the chips a request can make" above. What

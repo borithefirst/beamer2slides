@@ -56,7 +56,8 @@ CHAINED = (0, 1, 2, 3, 4, 5)
 # the table the source moved away from it, 41000 an empty heading in front of a table
 # whose named range outlived the delete that borrowed the mark before it. Then 63138
 # (chain 4) a row the reader deleted put back by the round after the regrid, and 64166
-# (chain 8) the oracle calling a dragged block that held a chip a resurrection.
+# (chain 8) the oracle calling a dragged block that held a chip a resurrection, and 65370
+# (chain 8) two `add_tab` draws picking one name, the second read as the first coming back.
 # A seed names a *script*, not a defect: growing `fuzz_docs.PARA_MARKS` or
 # `READER_MEASURES` (paragraph borders, `pageBreakBefore` and `keepWithNext` went in with
 # the dialect) makes every draw come out different, so these rounds no longer replay the
@@ -67,7 +68,7 @@ REGRESSIONS = ((60, 1), (181, 1), (309, 4), (1031, 8), (1147, 8),
                (5099, 8), (5130, 8), (5167, 8),
                (970228, 6), (970528, 6), (970711, 6), (980193, 6),
                (912452, 6), (993608, 6), (994410, 8), (994424, 8), (41000, 8),
-               (63138, 4), (64166, 8))
+               (63138, 4), (64166, 8), (65370, 8))
 
 
 def _round(seed: int, chain: int, shape: str | None = None) -> None:
@@ -555,10 +556,20 @@ def test_the_oracle_sees_a_tab_the_reader_deleted_come_back():
     # ...nor is it a resurrection when the source gave the tab up too...
     gone = _ir(_p("k1", "x"))
     assert "tab_resurrected" not in _kinds(oracle.check(base, before, after, NOTHING, gone))
-    # ...nor when what stands there now says something else under that name.
+    # ...nor when what stands there now says something else under that name...
     other = _ir(_p("k1", "x"), tabs=[dict(appendix, tab="t.9",
                                           blocks=[_p("k2", "Something else.")])])
     assert "tab_resurrected" not in _kinds(oracle.check(base, before, other, NOTHING, ours))
+    # ...nor when the source is asking for a fresh tab of that name. A `<section>` with
+    # no `data-tab` is a tab the document never had, and two new tabs saying the same
+    # thing are word-for-word twins by construction (chain-8 seed 65370: two `add_tab`
+    # draws picked one name).
+    asks = _ir(_p("k1", "x"), tabs=[appendix, {"title": "Appendix",
+                                               "blocks": [_p("k2", "Later.")]}])
+    assert "tab_resurrected" not in _kinds(oracle.check(base, before, after, NOTHING, asks))
+    # One ask does not answer for two tabs, though.
+    twice = _ir(_p("k1", "x"), tabs=[dict(appendix, tab="t.9"), dict(appendix, tab="t.10")])
+    assert "tab_resurrected" in _kinds(oracle.check(base, before, twice, NOTHING, asks))
 
 
 def test_the_oracle_sees_a_chip_the_reader_inserted_disappear():
