@@ -13,7 +13,7 @@ import pytest
 from beamer2slides import adopt
 from beamer2slides.deck_ir import deck_ir
 
-from .test_adopt import at, pt, solid
+from .test_adopt import at, font_folder, pt, solid
 
 EMU = 12700
 
@@ -843,6 +843,96 @@ def test_a_family_in_two_file_formats_names_every_file():
     opts = font_files_latex({"UprightFont": Path("c/cambria.ttc"), "BoldFont": Path("c/cambriab.ttf")}, None)
     assert "Extension" not in opts
     assert "UprightFont=cambria.ttc" in opts and "BoldFont=cambriab.ttf" in opts
+    # the two styles with no file of their own are slanted off the two that have one, by file name too
+    assert "ItalicFont=cambria.ttc,ItalicFeatures={FakeSlant=" in opts
+    assert "BoldItalicFont=cambriab.ttf,BoldItalicFeatures={FakeSlant=" in opts
+
+
+# ---------------------------------------------------------------- every style is named (adopt.fake_faces)
+#
+# `\setsansfont{NTR}[Path=..,Extension=.ttf,UprightFont=*-Regular]` names no other file, so fontspec
+# looks for none: the bold series *is* the upright and `\textbf` draws nothing different - no error,
+# no warning, the slide looks finished and the emphasis is gone. What a family has no file for is
+# said out loud instead, synthesised from the nearest face it does have.
+
+def faces(*names: str) -> dict:
+    from pathlib import Path
+    return {n: Path(f"f/Fam-{n[:-4]}.ttf") for n in names}
+
+
+def test_a_family_with_every_face_fakes_nothing():
+    opts = adopt.font_files_latex(faces("UprightFont", "BoldFont", "ItalicFont", "BoldItalicFont"), None)
+    assert "Fake" not in opts
+    assert opts.endswith("UprightFont=*-Upright,BoldFont=*-Bold,ItalicFont=*-Italic,"
+                         "BoldItalicFont=*-BoldItalic")
+
+
+def test_a_family_of_one_face_still_says_bold_italic_and_both():
+    """NTR, Pacifico, Satisfy...: one file, and `\\textbf`, `\\textit` and the two together all drew
+    the upright (`devtools/bold_torture`, 57 of the corpus' 252 family/style pairs)."""
+    opts = adopt.font_files_latex(faces("UprightFont"), None)
+    bold, slant = adopt.FAKE_BOLD, adopt.FAKE_SLANT
+    assert opts.endswith(f"UprightFont=*-Upright,BoldFont=*-Upright,BoldFeatures={{FakeBold={bold}}},"
+                         f"ItalicFont=*-Upright,ItalicFeatures={{FakeSlant={slant}}},"
+                         f"BoldItalicFont=*-Upright,BoldItalicFeatures={{FakeBold={bold},FakeSlant={slant}}}")
+
+
+def test_a_family_with_a_bold_and_no_italic_slants_the_bold_for_bold_italic():
+    """Oswald, Noto Sans JP, every google/fonts family whose variable font has no `ital` axis: the
+    bold italic is the *bold* slanted, never the upright emboldened twice over."""
+    opts = adopt.font_files_latex(faces("UprightFont", "BoldFont"), None)
+    assert f"ItalicFont=*-Upright,ItalicFeatures={{FakeSlant={adopt.FAKE_SLANT}}}" in opts
+    assert f"BoldItalicFont=*-Bold,BoldItalicFeatures={{FakeSlant={adopt.FAKE_SLANT}}}" in opts
+    assert "FakeBold" not in opts, "the family's own bold is drawn, not a synthesised one"
+
+
+def test_a_family_with_an_italic_and_no_bold_emboldens_the_italic_for_bold_italic():
+    opts = adopt.font_files_latex(faces("UprightFont", "ItalicFont"), None)
+    assert f"BoldFont=*-Upright,BoldFeatures={{FakeBold={adopt.FAKE_BOLD}}}" in opts
+    assert f"BoldItalicFont=*-Italic,BoldItalicFeatures={{FakeBold={adopt.FAKE_BOLD}}}" in opts
+    assert "FakeSlant" not in opts, "the family's own italic is drawn"
+
+
+def test_a_lone_face_of_a_collection_keeps_its_index_in_every_style():
+    """apps-edu-zh's MS PGothic is face 2 of msgothic.ttc and the only one of its family. FontIndex
+    is family-wide, so the faked faces are that face too - not face 0, which is monospaced."""
+    from pathlib import Path
+    opts = adopt.font_files_latex({"FontIndex": 2, "UprightFont": Path("w/msgothic.ttc")}, None)
+    assert opts.startswith("FontIndex=2,")
+    assert f"BoldFont=*,BoldFeatures={{FakeBold={adopt.FAKE_BOLD}}}" in opts
+    assert f"BoldItalicFont=*,BoldItalicFeatures={{FakeBold={adopt.FAKE_BOLD},FakeSlant={adopt.FAKE_SLANT}}}" in opts
+
+
+def test_a_bold_run_in_a_family_with_no_bold_gets_a_source_that_says_bold(tmp_path, monkeypatch):
+    """End to end: the IR says bold, the machine's family has only a regular, and the source both
+    asks for bold and declares a bold face for it to find."""
+    monkeypatch.setenv("B2S_FONTS", str(font_folder(tmp_path, "Lonely-Regular.ttf")))
+    d = deck(box("s_b", para("x", runs=[("plain ", {"fontFamily": "Lonely", "fontSize": pt(20)}),
+                                        ("loud", {"fontFamily": "Lonely", "fontSize": pt(20), "bold": True})])))
+    text = source(tmp_path, d)
+    line = next(l for l in text.splitlines() if l.startswith("\\setsansfont"))
+    assert "UprightFont=*-Regular,BoldFont=*-Regular,BoldFeatures={FakeBold=" in line
+    assert "\\textbf{loud}" in text, "and the run still asks for it"
+
+
+def test_a_babel_language_font_names_every_style_too(tmp_path):
+    """`onchar=ids fonts` sends every Hebrew letter to this font whatever the line is set in, so it
+    is this line that decides what `\\textit` draws for them: hebrew-lesson's Hebrew came out upright."""
+    from pathlib import Path
+
+    from beamer2slides.scripts import Face, babelfont_line
+    regular = Face(Path("w/times.ttf"), 0, ("timesnewroman",), 400, False)
+    bold = Face(Path("w/timesbd.ttf"), 0, ("timesnewroman",), 700, False)
+    line = babelfont_line("hebrew", "rm", regular, bold, None)
+    assert line.startswith("\\babelfont[hebrew]{rm}[Path=w/,Renderer=HarfBuzz,BoldFont=timesbd.ttf,")
+    assert f"ItalicFont=times.ttf,ItalicFeatures={{FakeSlant={adopt.FAKE_SLANT}}}" in line
+    assert f"BoldItalicFont=timesbd.ttf,BoldItalicFeatures={{FakeSlant={adopt.FAKE_SLANT}}}" in line
+    assert line.endswith("]{times.ttf}")
+    # a bold in another folder cannot share the family's one Path: it is faked, not dropped
+    far = babelfont_line("hebrew", "rm", regular,
+                         Face(Path("o/timesbd.ttf"), 0, ("timesnewroman",), 700, False), None)
+    assert "BoldFont=timesbd.ttf" not in far
+    assert f"BoldFont=times.ttf,BoldFeatures={{FakeBold={adopt.FAKE_BOLD}}}" in far
 
 
 def test_powerpoint_insets_where_the_thumbnails_show_them():

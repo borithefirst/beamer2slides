@@ -354,19 +354,81 @@ def _font_family(name: str, want: str, near: str = "") -> dict[str, Path]:
     return {"stem": files["UprightFont"].stem.partition("-")[0], "match": stem, **files}
 
 
+FACES = ("UprightFont", "BoldFont", "ItalicFont", "BoldItalicFont")
+
+# What fontspec is asked to synthesise for a style the family has no file for: emboldening (a stroke
+# round every glyph) and slant (a shear). Calibrated against the one thing that can judge them, which
+# is what the deck itself draws, since Slides synthesises the same two faces.
+#
+# FakeBold is linear in the stroke width it adds: over NTR, Delius, Pacifico and ArchitectsDaughter
+# set at 40 pt it adds 0.011-0.015 em of stroke per unit (mean stroke = 2 x ink area / ink outline,
+# the measure `deck_thumbs.stroke_em` uses). Slides' own synthetic bold can only be read off a
+# thumbnail where the text is big enough for a pixel not to be the whole answer - one thumbnail pixel
+# is 1/(2.22 x size) em, so at the 5-12 pt most bold runs are set in it is 0.03-0.05 em and swamps
+# the difference. The clean sample is sc-aesthetic-school's Pacifico at 28 pt (pixel 0.016 em):
+# 0.128 em upright, 0.166 em bold. FakeBold=2.5 puts the same text at 0.162 em, within that pixel
+# (3.0 gives 0.170, also within it; 1.5 gives 0.147, a pixel and a half short). The other three
+# families then read 1.34-1.37x their upright, which is about what a drawn bold weighs.
+FAKE_BOLD = 2.5
+# The corpus sets almost no italic at all (260 runs in 13 decks, nearly all of them Arial, which has
+# a real italic file), so there is no synthetic italic of Slides' to match. This is fontspec's own
+# documented value, atan(0.2) = 11.3 deg; the one italic the thumbnails do show - ap-bio-stats' Arial
+# Italic, which is drawn, not synthesised - leans 0.23 against its upright's -0.02 by the shear
+# `devtools/bold_torture.slant` measures, and a FakeSlant=0.2 face reads 0.15-0.22 the same way.
+FAKE_SLANT = 0.2
+
+
+def fake_faces(files: dict, spelling, extra=None) -> list[str]:
+    """fontspec options for the styles a family has no file of its own for: the nearest face it does
+    have, emboldened and/or slanted by fontspec (`spelling` writes a face's file the way the rest of
+    the options do; `extra` gives the features a base face needs besides, such as its `FontIndex`).
+
+    **A style a deck says is bold must come out bold.** With `Path`, `Extension` and `UprightFont`
+    given and no `BoldFont`, fontspec looks for no other file at all, so the bold series *is* the
+    upright: `\\textbf` then draws nothing different - no error, no warning, and the emphasis is gone
+    from a source that compiled and looks finished. `devtools/edit_robustness` found it on 6 of 24
+    restyle edits (NTR, Delius, Pacifico, the MS PGothic face of a collection); `\\textit` and
+    `\\emph` had the same hole, and so did bold italic wherever a family has a bold and no italic
+    (Oswald, Noto Sans JP, every google/fonts family whose variable font has no `ital` axis).
+
+    A fake is also what the deck shows: Slides has no second face either and synthesises one, which
+    is why the answer is to say so in the source rather than to leave the style unsaid.
+
+    Per face, never `AutoFakeBold`/`AutoFakeSlant`: measured, `AutoFakeBold` overrides a real
+    `BoldFont` (Oswald's bold came out as its emboldened regular), and `AutoFakeSlant` alone leaves
+    bold italic unslanted - it makes the `it` shape from the upright and never touches `bx/it`.
+    A family-level `BoldFeatures` does *not* clobber the one `scripts.script_preamble` puts in
+    `\\defaultfontfeatures` (measured: a CJK fallback still draws under `BoldFeatures={FakeBold=..}`)."""
+    out = []
+    for style in ("BoldFont", "ItalicFont", "BoldItalicFont"):
+        if style in files:
+            continue
+        bold, italic = "Bold" in style, "Italic" in style
+        # the closest face the family has: a bold italic is slanted off the real bold where there is
+        # one, emboldened off the real italic otherwise, and both off the upright when that is all
+        base = next(k for k in ("BoldFont", "ItalicFont", "UprightFont")
+                    if k in files and k != style and ("Bold" in k) <= bold and ("Italic" in k) <= italic)
+        feats = (list(extra(base)) if extra else []) + \
+                ([f"FakeBold={FAKE_BOLD}"] if bold and "Bold" not in base else []) + \
+                ([f"FakeSlant={FAKE_SLANT}"] if italic and "Italic" not in base else [])
+        out.append(f"{style}={spelling(base)}")
+        out.append(f"{style[:-4]}Features={{{','.join(feats)}}}")
+    return out
+
+
 def font_files_latex(files: dict, tree: Path | None) -> str:
     """fontspec's options for a family's files (`font_family`'s answer, without its stem), the files
-    copied into `<tree>/fonts/` with the licence that came with them."""
+    copied into `<tree>/fonts/` with the licence that came with them. A style with no file of its own
+    is named all the same, synthesised from the nearest one (`fake_faces`)."""
     index = files.get("FontIndex")
     if index:
-        # one face of a collection, the only one of its family (MS PGothic): no other styles
-        return font_files_latex({"UprightFont": files["UprightFont"]}, tree) + f",FontIndex={index}"
+        # One face of a collection, the only one of its family (MS PGothic): every other style is
+        # faked off it. FontIndex is a family-wide key, so it holds for those faces too (measured:
+        # the faked bold keeps face 2's proportional widths, not face 0's monospaced ones).
+        return f"FontIndex={index}," + font_files_latex({"UprightFont": files["UprightFont"]}, tree)
     files = {k: v for k, v in files.items() if isinstance(v, Path)}
     # Windows' own files have no dash and a name per style (arialbd.ttf beside arial.ttf)
     upright = files["UprightFont"].stem
-    opts = [f"{k}=*-{files[k].stem.partition('-')[2]}" if "-" in files[k].stem else
-            f"{k}=*" if files[k].stem == upright else f"{k}={files[k].stem}"
-            for k in ("UprightFont", "BoldFont", "ItalicFont", "BoldItalicFont") if k in files]
     if tree is not None:
         first = next(iter(files.values()))
         licence = first.parent / f"{first.stem.partition('-')[0]}-LICENSE.txt"
@@ -381,10 +443,16 @@ def font_files_latex(files: dict, tree: Path | None) -> str:
     if len(exts) > 1:
         # one family in two formats (Windows' cambria.ttc beside cambriab.ttf): every file by its
         # full name, since fontspec's Extension is one for all
-        opts = [f"{k}={files[k].name}" for k in ("UprightFont", "BoldFont", "ItalicFont", "BoldItalicFont")
-                if k in files]
-        return f"{where}{','.join(opts)}"
-    return f"{where}Extension={exts.pop()},{','.join(opts)}"
+        def spelling(k):
+            return files[k].name
+        head = where
+    else:
+        def spelling(k):
+            stem = files[k].stem
+            return f"*-{stem.partition('-')[2]}" if "-" in stem else "*" if stem == upright else stem
+        head = f"{where}Extension={exts.pop()},"
+    opts = [f"{k}={spelling(k)}" for k in FACES if k in files] + fake_faces(files, spelling)
+    return head + ",".join(opts)
 
 
 # A weight other than regular and bold gets a face of its own when it sets this many letters of a font.

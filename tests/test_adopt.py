@@ -364,9 +364,17 @@ def test_without_the_decks_typeface_the_source_says_tex_gyre(tmp_path, monkeypat
     """Always fontspec, so the source compiles with lualatex and any script: pdflatex stopped a
     deck at its first IPA letter (U+0263). What the machine lacks is set in TeX Gyre Heros."""
     monkeypatch.setenv("B2S_FONTS", str(font_folder(tmp_path)))
+    monkeypatch.setenv("B2S_FONT_FETCH", "0")
     text = source_for(tmp_path)
     assert "\\usepackage{fontspec}" in text and "helvet" not in text
-    assert "\\setsansfont{texgyreheros}[Extension=.otf," in text
+    line = next(l for l in text.splitlines() if l.startswith("\\setsansfont"))
+    assert line.startswith("\\setsansfont{texgyreheros}[Extension=.otf,")
+    # a machine with no font and no network still gives a source that shows emphasis: TeX Gyre is
+    # in every TeX distribution and has all four faces, so none of them has to be synthesised
+    for style in ("UprightFont=*-regular", "BoldFont=*-bold", "ItalicFont=*-italic",
+                  "BoldItalicFont=*-bolditalic"):
+        assert style in line
+    assert "Fake" not in line
 
 
 def test_the_deck_is_set_in_its_own_typeface_when_the_machine_has_it(tmp_path, monkeypatch):
@@ -379,7 +387,10 @@ def test_the_deck_is_set_in_its_own_typeface_when_the_machine_has_it(tmp_path, m
     line = next(l for l in text.splitlines() if l.startswith("\\setsansfont"))
     assert line.startswith("\\setsansfont{GoogleSansFlex}[Path=fonts/,Extension=.ttf,")
     assert "UprightFont=*-Regular" in line and "BoldFont=*-Bold" in line
-    assert "BoldItalicFont" not in line, "a style the folder does not have is not promised"
+    assert "ItalicFont=*-Italic" in line
+    # the folder has no bold italic, so it is said out loud: the real bold, slanted. Leaving the
+    # style unnamed is what made `\textbf` draw the upright - fontspec then looks for no other file
+    assert "BoldItalicFont=*-Bold,BoldItalicFeatures={FakeSlant=" in line
     assert (tmp_path / "tree" / "fonts" / "GoogleSansFlex-Regular.ttf").exists()
 
 
