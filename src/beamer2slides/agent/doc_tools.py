@@ -19,6 +19,11 @@ over, are lifted into structure here:
   both options and what each one costs in `data["options"]`.
 * **A chunked write.** Past 500 requests one batch becomes several, and several batches
   are not atomic: one that fails part-way leaves the earlier ones in the document.
+* **What a sync took away.** Most notes say what a sync left alone; one says what it
+  dropped - a block written again from nothing that carried a property the dialect has no
+  spelling for. It comes back under "what is lost", with `data["lost"]` counting them and
+  a next step, because an agent reading a column of warnings cannot otherwise tell the one
+  that is a loss from the fourteen that are cautions.
 
 The library module is imported as `docs` here, because the tool named `doc_sync` would
 otherwise shadow it. Nothing in this file builds a Google service or asks for
@@ -59,14 +64,25 @@ def report_diagnostics(j: Job, info: dict) -> dict[str, Any]:
         j.conflict(f"the source said {clash.get('ours')!r}, the document says "
                    f"{clash.get('theirs')!r}; the document won", where)
     chunked = False
+    lost = 0
     for note in info.get("notes") or []:
         if CHUNK_MARK in note:
             chunked = True
             j.warn(f"the write did not go in as one batch: {note}. Unlike a single batch "
                    f"this is not atomic, so read the document rather than assuming it "
                    f"either all landed or none of it did.", "the write")
+        elif docs.LOSS_MARK in note:
+            # The one note that is a loss and not a caution: this run really is
+            # writing that block again from nothing (`doc_sync.rewrite_losses`).
+            lost += 1
+            j.warn(f"{note}. Nothing on our side can put it back, since the file has no "
+                   f"spelling for it.", "what is lost")
         else:
             j.warn(note)
+    if lost:
+        j.suggest("set the property again by hand on the block(s) named above, or, next "
+                  "time, leave that block to the document and make the change where the "
+                  "file can carry it")
     comments = list(info.get("comments") or [])
     for comment in comments:
         j.warn(f"open comment, which no merge can see (it lives in Drive, not in the "
@@ -82,7 +98,7 @@ def report_diagnostics(j: Job, info: dict) -> dict[str, Any]:
                "three-way comparison", "the base")
     return {"conflicts": len(info.get("conflicts") or []),
             "notes": len(info.get("notes") or []), "comments": len(comments),
-            "chunked": chunked}
+            "chunked": chunked, "lost": lost}
 
 
 def _state_artifacts(j: Job, path: Path) -> dict[str, str]:
@@ -285,6 +301,9 @@ def doc_sync(
         "written": wrote, "requests": info["requests"],
         "applied": len(info["applied"]), "kept": len(info["kept"]),
         "conflicts": counts["conflicts"], "chunked": counts["chunked"],
+        # Blocks this run wrote again from nothing that carried something the file
+        # cannot say. Almost always 0, and a number worth seeing when it is not.
+        "lost": counts["lost"],
         "base": info.get("base"), "open_comments": list(info.get("comments") or []),
         "applied_examples": list(info["applied"])[:20],
         "kept_examples": list(info["kept"])[:20],

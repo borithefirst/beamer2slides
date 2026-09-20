@@ -455,6 +455,11 @@ def unmodelled_notes(doc: dict, full: bool = False) -> list[str]:
 
 RISKY_BLOCKS = 8        # how many to name before saying how many more there are
 PROPERTIES = 4          # how many of one block's properties to name on its line
+#: The tail of a `rewrite_losses` line. A report's notes are prose, and this is the
+#: one note that is a loss rather than a caution, so a reader of the notes — the
+#: agent journey above all — needs to be able to tell it from the rest. Named here,
+#: where the line is written, rather than guessed at by whoever reads it.
+LOSS_MARK = "in nothing the file can say"
 
 
 def block_risk_notes(doc: dict, limit: int = RISKY_BLOCKS) -> list[str]:
@@ -522,7 +527,7 @@ def rewrite_losses(doc: dict, planned: list[dict]) -> list[str]:
             where = f"[{each['label']}] " if each.get("label") else ""
             words = f"{hit['words'][:48]!r}" if hit["words"] else f"at {hit['span'][0]}"
             out.append(f"{where}the {hit['kind']} {words} is being {why}, which drops "
-                       f"{named} — the document's, and in nothing the file can say")
+                       f"{named} — the document's, and {LOSS_MARK}")
     return out
 
 
