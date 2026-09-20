@@ -850,9 +850,38 @@ The campaign found ten defects, each pinned by an `xfail(strict=True)` in
 `tests/test_doc_fuzz.py` and described in `fuzz_docs.KNOWN` — a table of contents
 treated as an ordinary block (which kills the sync outright, because a refused request
 throws out the batch), a table the source dropped deleted however much the reader typed
-into it, `inherit_keys` handing one block's key to another, a block reworded *and* moved
-losing the reader's styling, and the rest. They are let through by default and
-`--strict` fails on them, so a fix shows up as a defect that stops being reached.
+into it, one block's key landing on another, a block reworded *and* moved losing the
+reader's styling, and the rest. They are let through by default and `--strict` fails on
+them, so a fix shows up as a defect that stops being reached.
+
+**Three of the ten are fixed**, and all three were ways of losing a block's identity —
+which is the root of the worst of the rest, because a block the merge cannot recognise
+is a block it deletes as "dropped by the source".
+
+* `inherit_keys` matched **every** block of the file again by its words, although the
+  file had just named them all with its own `id=`. Two blocks that read alike swapped
+  keys; one key then stood on two blocks and none on the other. `doc_ir.key_blocks`
+  had the rule written down all along — a key from the file or from a named range
+  outranks a guess from the text — and this broke it for every block at once. What is
+  left to match is what the file does *not* name, which is what `push` calls it for.
+* `settle` adopted and keyed one part at a time, and `key_blocks` recurses into the
+  tabs, so the **first** part's keying named every later tab's blocks after their words
+  — before those tabs reached `adopt_keys`, which then found them keyed and left them
+  alone. A block whose named range the write had taken with it came back under a name
+  made from its new text. A table is anchored in its first cell (`anchor_span`), so a
+  source that rewords that cell destroys the range *every time*: the table settled as
+  `table:<its new first word>`, and file, base and document all agreed on an identity
+  the file never gave it. One source op and no reader at all was enough.
+  `doc_merge.settle_keys` is now the one place that does both, in two passes — and it
+  is shared with the harness, which had the same bug because it is a copy.
+* The paragraph under a deleted heading became a heading (Docs merges the two keeping
+  the **first** one's style, and the merge writes its style before the delete above it),
+  which the settle now repairs — see "Every named style Docs has is a kind" above.
+
+At one seed, 200 rounds at chain 8: `lost-key` 34 → 22, `crossed-delete` 2 → 0,
+`crossed-frozen` 22 → 13, `moved-styling` 2 → 1. What is left under those signatures
+has a cause nobody has named yet, and the entries say so rather than keep blaming what
+was fixed.
 
 Fixed seeds from the campaign run in the default offline suite.
 

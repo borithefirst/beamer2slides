@@ -3517,7 +3517,7 @@ def record_base(target: dict, pres: dict | None, tex: Path, work: Path, engine: 
 
 def cmd_adopt(deck: str, tex: Path, work: Path | None, apply: bool, out: Path | None, max_iter: int,
               engine: str | None, flow: bool, target_path: Path | None = None, base: bool = True,
-              base_in_drive: bool = False):
+              base_in_drive: bool = False, log=print):
     """Read a foreign deck, write a source for it, then converge that source onto the deck."""
     from .inverse import run_pull
     tex = Path(tex).resolve()
@@ -3531,12 +3531,12 @@ def cmd_adopt(deck: str, tex: Path, work: Path | None, apply: bool, out: Path | 
         kept: dict = {}
         target = read_deck(deck, images=work / "target-images", foreign=True, keep=kept)
         pres = kept.get("presentation")
-    print(f"deck: {len(target['slides'])} slides read")
+    log(f"deck: {len(target['slides'])} slides read")
     if tex.exists():
         raise SystemExit(f"{tex} exists already: adopt writes a new source tree (use `pull` to refine one)")
     bootstrap(target, tex, flow)
-    print(f"wrote {tex} ({len(target['slides'])} frames)")
-    result = run_pull(target, tex, work, apply, out, max_iter, False, engine)
+    log(f"wrote {tex} ({len(target['slides'])} frames)")
+    result = run_pull(target, tex, work, apply, out, max_iter, False, engine, log=log)
     if base:
-        record_base(target, pres, tex, work, engine, base_in_drive)
+        record_base(target, pres, tex, work, engine, base_in_drive, log=log)
     return result

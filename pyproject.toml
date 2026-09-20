@@ -18,6 +18,9 @@ dependencies = [
 # The pure Python PDF backend (B2S_PDF_BACKEND=pure, docs/pdf-from-scratch.md) reads embedded font
 # programs and the Adobe Glyph List through fontTools.
 pure = ["fonttools>=4.40"]
+# The MCP server (`beamer2slides.agent.mcp`) speaks the protocol through the reference SDK.
+# Everything else in beamer2slides.agent - the tools, the schemas, `mcp.dispatch` - works without it.
+mcp = ["mcp>=1.2"]
 # What the tests need beyond the package itself. pytest-xdist is what makes `-n auto` work;
 # the suite runs without it, one worker, about three times slower (tests/conftest.py).
 dev = ["pytest>=8", "pytest-xdist>=3",
@@ -25,6 +28,7 @@ dev = ["pytest>=8", "pytest-xdist>=3",
 
 [project.scripts]
 beamer2slides = "beamer2slides.__main__:main"
+beamer2slides-mcp = "beamer2slides.agent.mcp:main"
 
 [build-system]
 requires = ["setuptools>=69"]
@@ -35,12 +39,13 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 beamer2slides = ["calibration/*.json",   # the measured font substitutes emit needs
-                 "playground/static/*"]  # the playground's page (docs/playground.md)
+                 "playground/static/*",  # the playground's page (docs/playground.md)
+                 "agent/*.md"]           # the guide that travels with the agent tools
 
 [tool.pytest.ini_options]
 markers = ["slides: converts decks on real Google Slides and measures the thumbnails (opt-in: python -m pytest -m slides)",
            "sync: sync and pull scenarios with simulated deck edits on real Google Slides (opt-in: python -m pytest -m sync)",
-           "inverse: pull's compile loop on source pairs and synthetic deck edits (opt-in: python -m pytest -m inverse)",
+           "inverse: pull's compile loop on source pairs, synthetic deck edits, and the agent benchmark's latex tier (opt-in: python -m pytest -m inverse)",
            "docs: the Google Docs loop on a real document (opt-in: python -m pytest -m docs)",
            "xdist_group: which -n worker a test goes to (pytest-xdist's own; declared so the suite is quiet without it)"]
 addopts = "-m \"not slides and not sync and not inverse and not docs\""

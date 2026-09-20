@@ -850,6 +850,70 @@ fuzz world has blocks and keeps z-order; `fuzz_sync._stacked` replays `Sync.regr
 `Sync.regroup_requests` through Slides' rule that a group keeps its children's page order (`_zorder`):
 without the restack, 14 of 400 offline rounds fail.
 
+## Agent tools (`src/beamer2slides/agent/`, docs/agent-tools.md)
+Every journey in this file is a thing an AI should be able to do, and the CLI is the wrong door for
+one: it says what happened in prose, says no by raising `SystemExit`, and asks for Google by opening
+a browser - which hangs a harness forever. The agent layer fixes exactly those three and calls the
+same functions underneath; nothing here reimplements a journey.
+- **Eleven tools, one per journey** (not a gateway: a model picks better from eleven named tools with
+  their own arguments than from one with a `command` string, and a gateway's schema cannot say that
+  `deck_sync` writes to somebody's deck while `deck_inspect` does not). `b2s_status` (what this
+  workspace holds and whether Google is reachable, no Google call), `deck_inspect`, `deck_convert`,
+  `deck_sync`, `deck_pull`, `deck_adopt`, `tex_label`, `tex_converge`, `doc_push`, `doc_sync`,
+  `doc_adopt`. `tools.TOOLS` is the registry.
+- **Three seams**, which is all a harness plugs in (`context.AgentContext`): `Workspace` (refs in,
+  absolute paths out; a ref that climbs out is `outside_workspace`, a folder may be `readable` but
+  never written, `stage` brings an outside file in, `out_dir` is the workspace's own - `paths.out_root()`
+  answers differently for a checkout and a pip install and a workspace must not); `GoogleAccess`
+  (`NoGoogle`, `TokenFile`, `InjectedToken`; **never interactive** - a dead token is `needs_consent`
+  naming the command a person runs, and `InstalledAppFlow` is never reached, pinned by a test);
+  and `allow`, four action classes (`READS`, `WRITES`, `READS_GOOGLE`, `WRITES_GOOGLE`) checked
+  **before the body runs**, so a forbidden journey does no work rather than stopping halfway through
+  a rebuild. `google_auth.use_provider` is the one hook added to the library: credentials injected
+  for the length of a call instead of found in the filesystem.
+- `@tool(name, needs)` is the wrapper every journey is written inside (a contextmanager cannot skip
+  its body when the gate refuses). It serialises - **one journey per process**, because the library
+  underneath is full of process-wide state two journeys would share (`redirect_stdout`, `pdf._backend`,
+  `checks.convert_locally` monkey-patching `render.save_png`, the pure backend's multiple-master
+  blend); catches, so prints become `data["log"]` and a progress callback, `SystemExit` becomes a
+  code and an unforeseen exception becomes `failed` rather than taking the harness down; gates; and
+  fetches credentials up front. `needs` declares the **least** a journey does, so a read-only context
+  can still run `deck_sync(dry_run=True)`; a body about to write for real calls `j.require(WRITES_GOOGLE)`
+  and gets the same refusal one step earlier. A context with no account hears `offline`, not
+  `forbidden`: it is not withholding permission, it has nothing to give.
+- **One result shape** (`types.Result`): `ok`, `code`, `summary` (prose for the model), `data`
+  (numbers for a benchmark), `artifacts` (workspace refs with a kind), `diagnostics`
+  (`warning`/`conflict` with a `where`), `next_steps`, `seconds`. The refusal vocabulary is closed
+  (`types.CODES`) and every code in it is explained in the guide, pinned by a test.
+- `INSTRUCTIONS.md` travels in the wheel (package data, read through `importlib.resources`): the
+  bargain, the one rule (**never rebuild a deck somebody has edited** - `force_rebuild` is a thing a
+  person asks for in words), the order of operations, and the truths an agent cannot infer - a label
+  written twice reaches the PDF as no label at all, an open comment is invisible to the merge, a
+  second `doc_sync` writes zero requests.
+- `schema.py` / `mcp.py`: JSON Schema straight off `typing.Annotated` parameter descriptions, plus
+  `needs` and an `effects` block saying whether a call wants approval; `anthropic_tools` /
+  `openai_tools` for the two wire formats, `dispatch` (validates, never raises), and an MCP server
+  (`beamer2slides-mcp`, extra `[mcp]`; everything else works without the SDK).
+- Tests are offline and fast: `tests/test_agent_core.py` (each promise broken on purpose),
+  `test_agent_deck_tools.py`, `test_agent_source_tools.py`, `test_agent_doc_tools.py` (a whole
+  `doc_sync` end to end against `devtools/doc_world.py` - plan, write, settle, regenerate, and the
+  next sync writes nothing), `test_agent_schema.py`.
+- **Agent benchmark** (`devtools/agent_bench.py`, tasks in `agent_tasks.py`, history and results in
+  docs/agent-bench.md): can an agent drive these journeys without destroying someone's work? Not
+  whether the library is correct - the suites do that - but whether the agent looks before it leaps,
+  dry-runs, reads a conflict, refuses a forced rebuild nobody asked for, and puts a choice to the
+  person when it is the person's. 13 **replay** tasks run against a scripted fake registry (real
+  `Result` shapes, nothing read or written) and grade the decision sequence; 2 **live** tasks really
+  run the Google-free tools and are graded on their artifacts by the project's own graders.
+  **Harm** - a task failed in a way that would have destroyed work (a forced rebuild, a guessed
+  `assume_base`, a document rewritten under an open comment) - is counted and reported apart from the
+  pass rate. Every task ships a correct policy that passes and at least one wrong one that fails,
+  both asserted by `tests/test_agent_bench.py` (offline, ~1 s; the latex-tier task behind the
+  `inverse` marker). No model is called from this repo: `Scripted` proves the graders and `Recorded`
+  scores a transcript made in any harness (`agent_bench bundle` prints what one needs).
+  `run --tier all --tag T`, `report --tag T`, `tasks`. Baseline: 15/15 correct, HARM 0; 27 wrong
+  policies, all failing, 9 of them harmful.
+
 ## Playground (docs/playground.md)
 `python -m beamer2slides playground` (`src/beamer2slides/playground/`: stdlib `http.server` + a static
 page): a talk typed, picked or uploaded runs through compile → extract + classify → render on one
@@ -1056,8 +1120,24 @@ keys, named ranges), `doc_merge.py` (pure planning), `doc_sync.py` (the commands
   Ten defects found, each an `xfail(strict=True)` in `tests/test_doc_fuzz.py` and an entry in
   `fuzz_docs.KNOWN` (let through by default, `--strict` fails on them): a TOC treated as an
   ordinary block, which kills the sync outright; a table the source dropped deleted however
-  much the reader typed in it; `inherit_keys` handing one block's key to another; a block
-  reworded *and* moved losing the reader's styling. Two of the harness's own, found at chain 8
+  much the reader typed in it; one block's key landing on another; a block
+  reworded *and* moved losing the reader's styling. **Three are fixed**, all three ways of
+  losing a block's identity - which is the root of the worst of the rest, since a block the
+  merge cannot recognise is one it deletes as dropped by the source. (1) `inherit_keys`
+  matched every block of the file again by its words although the file had just named them
+  all with its own `id=`, so two blocks that read alike swapped keys; a key the file asserts
+  is now never matched again, which is the rule `doc_ir.key_blocks` had written down all
+  along. (2) `settle` adopted and keyed one part at a time and `key_blocks` recurses into the
+  tabs, so the first part's keying named every later tab's blocks after their words, before
+  those tabs reached `adopt_keys` - and a table, anchored in its first cell
+  (`doc_ir.anchor_span`), loses its named range whenever the source rewords that cell, so it
+  settled as `table:<its new first word>` with file, base and document all agreeing on a name
+  the file never gave it; one source op, no reader. `doc_merge.settle_keys` does both in two
+  passes and is shared with the harness, which had the same bug because it is a copy. (3) the
+  paragraph under a deleted heading, repaired by the named-style settle above. At one seed,
+  200 rounds at chain 8: `lost-key` 34 -> 22, `crossed-delete` 2 -> 0, `crossed-frozen`
+  22 -> 13, `moved-styling` 2 -> 1; what is left under those signatures has no named cause
+  yet and the entries say so. Two of the harness's own, found at chain 8
   and pinned by tests that fail without the fix: `doc_world` shifted no named range when a
   table row was deleted, so after a source regrid every key below the table slid onto the block
   above (seeds 5099, 5167); and the oracle accused a `\S+` token each side had edited one half

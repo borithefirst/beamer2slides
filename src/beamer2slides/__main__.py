@@ -362,8 +362,10 @@ def main() -> None:
         if note:
             add_recovery(note, info)
         r = info["report"]
+        sent = info["requests"] or {}          # Sync.sent counts them per phase, not in total
         print(f"sync{' (dry run)' if args.dry_run else ''}: {len(r['applied'])} source changes applied, "
-              f"{len(r['overrides'])} deck edits kept, {len(r['conflicts'])} conflicts, requests {info['requests'] or 0}")
+              f"{len(r['overrides'])} deck edits kept, {len(r['conflicts'])} conflicts, "
+              f"requests {sum(sent.values()) if isinstance(sent, dict) else sent}")
         for c in r["conflicts"]:
             print(f"  conflict: {c['slide']} / {c['element']}: {c['field']} ({c['resolution']})")
         for wmsg in r["warnings"]:

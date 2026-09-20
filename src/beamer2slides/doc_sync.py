@@ -644,12 +644,9 @@ def settle(docs, ident: str, path: Path, ours: dict, base: dict,
         if problems is not None:
             problems.append(line)
     tidy, named = [], 0
+    doc_merge.settle_keys(live, planned)
     for part in doc_ir.parts(live):
-        stamp = stamp_of(live, part)
-        if planned.get(stamp):
-            doc_merge.adopt_keys(part, planned[stamp])
-        doc_ir.key_blocks(part)
-        tidy += doc_merge.on_tab(doc_merge.tidy_requests(part), stamp)
+        tidy += doc_merge.on_tab(doc_merge.tidy_requests(part), stamp_of(live, part))
     if tidy:
         send(docs, ident, tidy)
     for part in doc_ir.parts(live):
