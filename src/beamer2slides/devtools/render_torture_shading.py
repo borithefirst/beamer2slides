@@ -2,7 +2,10 @@
 radial shadings painted by `sh` and as shading patterns filling or stroking paths, coloured by
 functions of types 0, 2, 3 and 4 through Device Gray/RGB/CMYK, CalGray, Separation and DeviceN,
 with random /Domain, /Extend, /Background, /BBox, pattern /Matrix, `cm`, clips, constant alpha and
-forms. Each page is rendered by PDFium and by the pure reader; any pixel that differs is a failure,
+forms; and (`--mode tiling`) tiling patterns (`pdf/pure/render_pattern.py`): coloured cells of
+paths, shadings, forms and patterns of their own, from a pixel to bigger than the page, with steps
+that tile, overlap or leave gaps and a /Matrix that is identity, scaled, 90-rotated or turned.
+Each page is rendered by PDFium and by the pure reader; any pixel that differs is a failure,
 shrunk to the lines of the page that still make it differ. A page the pure reader refuses is
 counted, not failed (that is what refusing is for), and listed with its reason.
 
@@ -687,8 +690,199 @@ class Builder:
         self.patterns.append(self.add(b"<< /PatternType 2 /Shading %s%s >>" % (self.shading(True), m)))
         return len(self.patterns) - 1
 
+    # ---- tiling patterns
+    def cell_path(self, bbox) -> bytes:
+        """A path around a cell's /BBox (it reaches out of it, so the cell's clip counts)."""
+        r = self.r
+        x0, y0, x1, y1 = bbox
+        w, h = max(x1 - x0, 0.5), max(y1 - y0, 0.5)
 
-def random_group(r: random.Random, b: Builder, nforms: int) -> bytes:
+        def x():
+            return x0 + r.uniform(-0.3, 1.3) * w
+
+        def y():
+            return y0 + r.uniform(-0.3, 1.3) * h
+
+        parts = []
+        for _ in range(r.randint(1, 3)):
+            if r.random() < 0.45:
+                parts.append(b"%.3f %.3f %.3f %.3f re" % (x(), y(), r.uniform(-1, 1.2) * w, r.uniform(-1, 1.2) * h))
+                continue
+            parts.append(b"%.3f %.3f m" % (x(), y()))
+            for _ in range(r.randint(1, 3)):
+                if r.random() < 0.55:
+                    parts.append(b"%.3f %.3f l" % (x(), y()))
+                else:
+                    parts.append(b"%.3f %.3f %.3f %.3f %.3f %.3f c" % (x(), y(), x(), y(), x(), y()))
+            if r.random() < 0.4:
+                parts.append(b"h")
+        return b" ".join(parts)
+
+    def cell_colour(self) -> bytes:
+        r = self.r
+        k = r.random()
+        if k < 0.5:
+            return b"%.3f %.3f %.3f rg\n%.3f %.3f %.3f RG" % tuple(r.random() for _ in range(6))
+        if k < 0.75:
+            return b"%.3f g\n%.3f G" % (r.random(), r.random())
+        return b"%.3f %.3f %.3f %.3f k\n%.3f %.3f %.3f %.3f K" % tuple(r.random() for _ in range(8))
+
+    def cell_image(self) -> bytes:
+        """A small image XObject for a cell (the stretch engine inside a pattern bitmap)."""
+        r = self.r
+        w, h = r.randint(1, 10), r.randint(1, 10)
+        if r.random() < 0.2:                        # a stencil: drawn in the cell's fill colour
+            rows = bytes(r.randrange(256) for _ in range(((w + 7) // 8) * h))
+            entries = b"/ImageMask true /BitsPerComponent 1"
+            if r.random() < 0.3:
+                entries += b" /Decode [1 0]"
+        else:
+            comps, cs = r.choice([(1, b"/DeviceGray"), (3, b"/DeviceRGB"), (4, b"/DeviceCMYK")])
+            rows = bytes(r.randrange(256) for _ in range(w * h * comps))
+            entries = b"/ColorSpace %s /BitsPerComponent 8" % cs
+        if r.random() < 0.2:
+            entries += b" /Interpolate true"
+        return self.add(b"<< /Type /XObject /Subtype /Image /Width %d /Height %d %s /Length %d >>\n"
+                        b"stream\n" % (w, h, entries, len(rows)) + rows + b"\nendstream")
+
+    def cell_form(self, bbox, nested: int) -> bytes:
+        """A form XObject inside a cell (its own resources, maybe a transparency group)."""
+        r = self.r
+        content, res = self.tiling_cell(bbox, nested, form=True)
+        entries = b"/BBox [%.3f %.3f %.3f %.3f]" % (bbox[0] - 5, bbox[1] - 5, bbox[2] + 5, bbox[3] + 5)
+        if r.random() < 0.5:
+            vals = [r.choice([1, 1, 0.5, -1, r.uniform(-1.5, 1.5)]) for _ in range(4)] + \
+                   [r.uniform(-10, 10), r.uniform(-10, 10)]
+            entries += b" /Matrix [" + b" ".join(b"%.4f" % v for v in vals) + b"]"
+        if r.random() < 0.3:
+            entries += b" /Group << /S /Transparency >>"
+        return self.add(b"<< /Type /XObject /Subtype /Form %s /Resources %s /Length %d >>\nstream\n"
+                        % (entries, res, len(content)) + content + b"\nendstream")
+
+    def tiling_cell(self, bbox, nested: int, form: bool = False) -> tuple[bytes, bytes]:
+        """(a cell's content, its own /Resources): the page's resources never reach it, so every
+        name it uses is written into a dictionary of its own."""
+        r = self.r
+        gs: list[bytes] = []
+        shs: list[bytes] = []
+        pats: list[bytes] = []
+        xobj: list[bytes] = []
+        ops: list[bytes] = []
+        for _ in range(r.randint(1, 3 if form else 4)):
+            g = [b"q"]
+            if r.random() < 0.3:
+                g.append(random_cm(r))
+            if r.random() < 0.25:
+                g.append(self.cell_path(bbox) + r.choice([b" W n", b" W* n"]))
+            if r.random() < 0.3:
+                e = b"/ca %s /CA %s" % (self.f(), self.f())
+                if r.random() < 0.3:
+                    e += b" /BM /" + r.choice([b"Multiply", b"Screen", b"Darken", b"Difference", b"Luminosity"])
+                gs.append(b"<< " + e + b" >>")
+                g.append(b"/G%d gs" % (len(gs) - 1))
+            g.append(self.cell_colour())
+            k = r.random()
+            if k < 0.15:
+                shs.append(self.shading(False))
+                g.append(b"/S%d sh" % (len(shs) - 1))
+            elif k < 0.3:
+                pats.append(self.add(b"<< /PatternType 2 /Shading %s >>" % self.shading(True)))
+                g.append(b"/Pattern cs /Q%d scn" % (len(pats) - 1))
+                g.append(self.cell_path(bbox) + b" " + r.choice([b"f", b"f*", b"B"]))
+            elif k < 0.42 and nested > 0 and not form:
+                pats.append(self.tiling_object(nested - 1))
+                g.append(b"/Pattern cs /Q%d scn" % (len(pats) - 1))
+                g.append(self.cell_path(bbox) + b" " + r.choice([b"f", b"f*"]))
+            elif k < 0.55 and nested > 0 and not form:
+                xobj.append(self.cell_form(bbox, nested - 1))
+                g.append(b"/X%d Do" % (len(xobj) - 1))
+            elif k < 0.65:
+                xobj.append(self.cell_image())
+                x0, y0, x1, y1 = bbox
+                g.append(b"%.3f 0 0 %.3f %.3f %.3f cm" % (
+                    (x1 - x0) * r.uniform(0.2, 1.4), (y1 - y0) * r.uniform(0.2, 1.4),
+                    x0 + r.uniform(-0.2, 0.6) * (x1 - x0), y0 + r.uniform(-0.2, 0.6) * (y1 - y0)))
+                g.append(b"/X%d Do" % (len(xobj) - 1))
+            elif k < 0.75:
+                g.append(b"%s w %d J %d j" % (r.choice([b"0", b"0.4", b"1", b"3"]), r.randint(0, 2), r.randint(0, 2)))
+                g.append(self.cell_path(bbox) + b" " + r.choice([b"S", b"s", b"B", b"b*"]))
+            else:
+                g.append(self.cell_path(bbox) + b" " + r.choice([b"f", b"f*", b"B", b"b"]))
+            g.append(b"Q")
+            ops.append(b"\n".join(g))
+        res = b"<<"
+        if gs:
+            res += b" /ExtGState << " + b" ".join(b"/G%d %s" % (i, e) for i, e in enumerate(gs)) + b" >>"
+        if shs:
+            res += b" /Shading << " + b" ".join(b"/S%d %s" % (i, s) for i, s in enumerate(shs)) + b" >>"
+        if pats:
+            res += b" /Pattern << " + b" ".join(b"/Q%d %s" % (i, s) for i, s in enumerate(pats)) + b" >>"
+        if xobj:
+            res += b" /XObject << " + b" ".join(b"/X%d %s" % (i, s) for i, s in enumerate(xobj)) + b" >>"
+        return b"\n".join(ops), res + b" >>"
+
+    def tiling_object(self, nested: int = 1) -> bytes:
+        """A PatternType 1 pattern: cell sizes from a pixel to bigger than the page, steps that
+        tile, overlap or leave gaps, and a /Matrix that is often the aligned case (a scaled or
+        90-rotated matrix over a /BBox of [0 0 XStep YStep])."""
+        r = self.r
+        size = r.choice(["tiny", "tiny", "small", "small", "small", "medium", "medium", "big"])
+        w = {"tiny": r.uniform(0.6, 4), "small": r.uniform(4, 20), "medium": r.uniform(20, 70),
+             "big": r.uniform(150, 400)}[size]
+        h = w * r.choice([1, 1, r.uniform(0.3, 3)])
+        ox, oy = 0.0, 0.0
+        if r.random() < 0.3:
+            ox, oy = r.uniform(-20, 20), r.uniform(-20, 20)
+        if r.random() < 0.05:
+            w = 0.0 if r.random() < 0.5 else w
+            h = 0.0 if r.random() < 0.5 else h
+        bbox = (ox, oy, ox + w, oy + h)
+        xstep = w if r.random() < 0.55 else w * r.choice([1.5, 2.0, 0.6, 0.35, -1.0])
+        ystep = h if r.random() < 0.55 else h * r.choice([1.5, 2.0, 0.6, 0.35, -1.0])
+        sx = sy = 1.0
+        vals = None
+        k = r.random()
+        if k < 0.3:
+            pass                                    # no /Matrix: the identity
+        elif k < 0.6:
+            sx, sy = r.choice([0.5, 1.0, 1.0, 2.0, 3.0, -1.0]), r.choice([0.5, 1.0, 1.0, 2.0, -1.0])
+            vals = [sx, 0.0, 0.0, sy, r.uniform(-40, 40), r.uniform(-40, 40)]
+        elif k < 0.75:                              # 90 degrees: the other aligned matrix
+            s = r.choice([0.5, 1.0, 1.0, 2.0, -1.5])
+            vals = [0.0, s, -s, 0.0, r.uniform(-40, 40), r.uniform(-40, 40)]
+            sx = sy = abs(s)
+        else:
+            ang = r.uniform(0, 6.283)
+            s = r.uniform(0.4, 2.2)
+            vals = [s * np.cos(ang), s * np.sin(ang), -s * np.sin(ang), s * np.cos(ang),
+                    r.uniform(-40, 40), r.uniform(-40, 40)]
+            sx = sy = s
+        # keep the tile count sane (PDFium walks every tile too): steps at least a few points
+        cols = 200.0 / max(abs(xstep) * abs(sx), 1e-6)
+        rows = 150.0 / max(abs(ystep) * abs(sy), 1e-6)
+        while cols * rows > 900 and abs(xstep) > 0:
+            xstep, ystep, cols, rows = xstep * 2, ystep * 2, cols / 2, rows / 2
+        if r.random() < 0.03:
+            xstep = r.choice([0.0, 1e30])
+        m = b"" if vals is None else b" /Matrix [" + b" ".join(b"%.4f" % v for v in vals) + b"]"
+        content, res = self.tiling_cell(bbox, nested)
+        paint = 1 if r.random() < 0.93 else 2       # 2 is uncoloured: refused, not drawn
+        return self.add(b"<< /PatternType 1 /PaintType %d /TilingType %d /BBox [%.4f %.4f %.4f %.4f] "
+                        b"/XStep %.4f /YStep %.4f%s /Resources %s /Length %d >>\nstream\n"
+                        % (paint, r.choice([1, 2, 3]), bbox[0], bbox[1], bbox[2], bbox[3],
+                           xstep, ystep, m, res, len(content)) + content + b"\nendstream")
+
+    def new_tiling(self) -> int:
+        self.patterns.append(self.tiling_object())
+        return len(self.patterns) - 1
+
+    def any_pattern(self, in_form: bool) -> int:
+        if self.mode == "tiling" and self.r.random() < (0.35 if in_form else 0.85):
+            return self.new_tiling()
+        return self.new_pattern()
+
+
+def random_group(r: random.Random, b: Builder, nforms: int, in_form: bool = False) -> bytes:
     g = [b"q"]
     if r.random() < 0.4:
         g.append(random_cm(r))
@@ -713,11 +907,11 @@ def random_group(r: random.Random, b: Builder, nforms: int) -> bytes:
     k = r.random()
     if nforms and k < 0.2:
         g.append(b"/X%d Do" % r.randrange(nforms))
-    elif k < 0.5:
+    elif k < (0.25 if b.mode == "tiling" else 0.5):
         sh = r.randrange(len(b.shadings)) if b.shadings and r.random() < 0.3 else b.new_shading()
         g.append(b"/Sh%d sh" % sh)
     elif k < 0.9:
-        p = r.randrange(len(b.patterns)) if b.patterns and r.random() < 0.3 else b.new_pattern()
+        p = r.randrange(len(b.patterns)) if b.patterns and r.random() < 0.3 else b.any_pattern(in_form)
         stroke = r.random() < 0.35
         if stroke:
             g.append(b"/Pattern CS /P%d SCN %s w %d J %d j" % (p, r.choice([b"1", b"4", b"12", b"0"]),
@@ -735,28 +929,36 @@ def random_group(r: random.Random, b: Builder, nforms: int) -> bytes:
     return b"\n".join(g)
 
 
-MODES = ("classic", "cie", "func", "mesh", "transfer")
+MODES = ("classic", "cie", "func", "mesh", "transfer", "tiling")
 
 
 def case(seed: int, mode: str = "classic"):
     """(content, forms, objects, resources, zoom, transparent) for `seed`. `mode`: classic (axial and
-    radial), cie (CalRGB, CalGray, Lab, Indexed), func (type 1), mesh (types 4-7), transfer (/TR)."""
+    radial), cie (CalRGB, CalGray, Lab, Indexed), func (type 1), mesh (types 4-7), transfer (/TR),
+    tiling (PatternType 1)."""
     r = random.Random(seed if mode == "classic" else f"{mode}:{seed}")
     b = Builder(r, mode)
     forms = []
-    for k in range(r.choice([0, 0, 0, 1, 2])):
+    for k in range(r.choice([0, 0, 0, 0, 1] if mode == "tiling" else [0, 0, 0, 1, 2])):
         entries = b"/BBox [%s %s %s %s]" % (num(r), num(r), num(r), num(r))
         if r.random() < 0.7:
             m = [r.choice([1, 0, -1, r.uniform(-2, 2)]) for _ in range(4)] + [r.uniform(-60, 60), r.uniform(-60, 60)]
+            if mode == "tiling" and abs(m[0] * m[3] - m[1] * m[2]) < 1e-3:
+                # a pattern painted inside a form whose /Matrix has no inverse makes PDFium walk
+                # tiles for minutes (seed 3069 of an older draw): nothing real does that, and the
+                # other modes keep the singular matrices
+                m[0], m[1], m[2], m[3] = 1.0, 0.0, 0.0, 1.0
             entries += b" /Matrix [" + b" ".join(b"%.4f" % v for v in m) + b"]"
         if r.random() < 0.25:
             entries += r.choice([b" /Group << /S /Transparency >>", b" /Group << /S /Transparency /I true >>",
                                  b" /Group << /S /Transparency /K true >>"])
-        forms.append((entries, b"\n".join(random_group(r, b, k) for _ in range(r.randint(1, 3)))))
+        forms.append((entries, b"\n".join(random_group(r, b, k, True) for _ in range(r.randint(1, 3)))))
     content = b"\n".join(random_group(r, b, len(forms)) for _ in range(r.randint(1, 4)))
     zoom = r.choice([0.5, 1, 1.37, 2, 3.1])
     if mode == "func":
         zoom = min(zoom, 1.37)          # a Python function call per pixel
+    if mode == "tiling":
+        zoom = min(zoom, 2)             # every tile is a bitmap of its own
     return content, forms, b.objects, b.resources(), zoom, r.random() < 0.3
 
 

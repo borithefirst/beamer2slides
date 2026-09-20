@@ -361,8 +361,8 @@ content stream (`--mutate`: odd numbers, stray operators, unbalanced `[ << >>`),
 random zooms on white and on clear bitmaps, each difference shrunk to the lines (and, mutated, the
 tokens) that still cause it. When paths were done: 5,500 seeds of pages, 3,000 with forms, 300 of
 page geometry and 3,500 mutated, not one pixel apart; `tests/test_pure_pdf.py` keeps 40 seeds of
-each plus the shrunk pages that were once apart. `render_page` refuses (`unported`) what
-it does not draw yet: images, tiling patterns, some text.
+each plus the shrunk pages that were once apart. `render_page` refuses (`unported`) whatever
+a page holds that is not ported yet, each with its own reason.
 
 **Transparency** (`pure/render_transparency.py`) is CPDF_RenderStatus::ProcessTransparency and
 everything under it: soft masks (Luminosity and Alpha, /BC, /G drawn through its own Status with the
@@ -460,8 +460,34 @@ records which pattern each colour side holds and the shading's CTM (`PObj.fill_p
   drawn as 13-point bezier paths with *full cover* (every pixel the rasteriser touches is painted
   opaque, `Device.draw_path(full_cover=True)`). The shading object's box is GetShadingBBox (every
   mesh point, colours skipped) cut by the clip, so a mesh draws only where its points are.
+**Tiling patterns** (`pure/render_pattern.py`) are CPDF_TilingPattern::Load and
+CPDF_RenderTiling::Draw. Load parses the pattern stream as a `CPDF_Form(doc, no page resources,
+stream)`: its own /Resources reach nothing else, the objects take the /Matrix as their first CTM and
+the /BBox as their clip, and their states are the default ones plus the painted object's general
+state (alpha, blend, soft mask, transfer). The cell is re-parsed per painted object, so this keeps
+one parse per distinct general state. Draw ceils the cell box in device space to a bitmap width and
+height (at least 1), takes /XStep and /YStep as `fabsf` (zero or non-finite draws nothing), and gets
+the columns and rows from the clip box mapped back through the inverse of the pattern-to-device
+matrix. Then either:
+- the cell is wider or taller than the clip (or covers more pixels): the cell's objects are drawn
+  again per tile, with mtObj2Device moved to that tile's origin. The states the tiles get are
+  default ones carrying the painted *path's* fill alpha (`CloneObjStates` is for the uncoloured
+  patterns), which is `initial_alpha` for a form in the cell: ProcessTransparency multiplies by it;
+- else DrawPatternBitmap renders the cell once into a BGRA bitmap through a render context of its
+  own (colour mode kNormal, so a cell inside an alpha mask is still drawn in colour), a cell under
+  16 pixels at 8 x 8 and then `StretchTo`, and the tiles are composited into a screen bitmap the
+  size of the clip box and `SetDIBits` at its origin. A 1 x 1 cell is copied pixel by pixel.
+  /BBox [0 0 XStep YStep] under a scaled or 90-rotated matrix is `bAligned`: the tiles then step in
+  whole device pixels from the rounded pattern origin, with C's truncating division.
+Refused, each with its reason: uncoloured cells (PaintType 2, which PDFium composites through an
+8-bit mask device with the object's fill colour), a pattern used inside a form (the parser gives the
+cell's /BBox clip the parent matrix but its objects only the pattern's), a cell painted with its own
+pattern, a huge image in a cell (DrawPatternBitmap's `bForceHalftone` is the one flag that changes
+what `StartDIBBase` does with an image over `kHugeImageSize`), and whatever else the cell holds that
+this reader does not draw - the cell is a form, so its own content answers.
+
 The oracle is `devtools/render_torture_shading.py` (`python tools/render_torture_shading.py SEED0 N
-[--mode classic|cie|func|mesh|transfer]`; classic is the original sequence of seeds):
+[--mode classic|cie|func|mesh|transfer|tiling]`; classic is the original sequence of seeds):
 random axial and radial shadings as `sh` and as patterns (fill and stroke, /Matrix, /Background,
 /BBox, forms and transparency groups around them), random functions of every type (sampled at every
 bit depth, stitched, PostScript programs) through every colour space above, clips, `cm`, alphas,
@@ -476,10 +502,19 @@ other modes each stress one of the gaps closed later:
 - `mesh`: types 4-7 at every bit width, with flags carrying edges over, invalid bit widths, a short
   /Decode, cut or padded streams, bad /VerticesPerRow and a dictionary instead of a stream.
 - `transfer`: described above.
+- `tiling`: text, paths and forms painted with tiling patterns - cells of every size against the
+  clip, steps equal to the box or larger, smaller and negative, identity, scaled, 90-rotated and
+  turned matrices, degenerate steps, PaintType 2 - whose cells hold paths, images (every colour
+  space, stencils, /Decode, /Interpolate), shadings, alpha, blend modes, transparency groups and
+  patterns of their own. A form whose /Matrix has no inverse gets the identity in this mode only:
+  a pattern painted under one makes PDFium itself walk tiles for minutes.
 
-Not one pixel apart in 900 seeds of `cie`, 900 of `func`, 1,500 of `mesh` and 1,200 of `transfer`.
+Not one pixel apart in 900 seeds of `cie`, 900 of `func`, 1,500 of `mesh`, 1,200 of `transfer` and
+4,000 of `tiling` - of those 2,618 drawn, the rest refused: 687 a pattern inside a form, 348 an
+uncoloured cell, 195 an image with a blend mode, 118 a shading that fails validation, 34 a pattern
+state the parser keeps differently.
 The tests keep 60 classic seeds and 25 per mode, eight fixed seeds (one per feature), the shrunk
-cases and one deck. Refused, each with its reason: tiling patterns, ICCBased colour spaces, a
+cases and one deck. Refused, each with its reason: ICCBased colour spaces, a
 PostScript word that is not a plain number, a pattern stroked through an all-zero matrix, a shading
 that fails validation (PDFium's Load keeps the type it read, so the *second* Load of the same
 object succeeds and draws: what is drawn depends on history), and a pattern object the page uses
@@ -679,7 +714,7 @@ compositor rows. Rules found on the way:
 - A constant alpha multiplies an image mask's colour as FXARGB_MUL_ALPHA with `roundf(alpha * 255)`,
   a bitmap's alpha as `a * int(alpha * 255) / 255`; both then meet only the clip mask.
 The oracle is `devtools/render_torture_image.py` (`python tools/render_torture_image.py SEED0 N
-[--level 0..6]`): image XObjects and inline images of every format above, stencils, colour-key and
+[--level 0..8]`): image XObjects and inline images of every format above, stencils, colour-key and
 stream masks, soft masks with mattes, /Interpolate and truncated data, drawn upright, flipped,
 scaled, quarter-turned, turned by any angle and skewed, under clips and constant alpha, at zooms 0.5
 to 3.1 on white and clear bitmaps; levels grow the generator a class at a time and keep their seeds.
@@ -688,13 +723,18 @@ level 6 (everything, the transformer and CMYK JPEGs) 6,000, not one pixel apart;
 all "filters that decode to nothing". Every page of the test decks `07_images` and
 `23_raster_images` is exact, and across the 50 test PDFs 229 of 241 pages rendered byte for byte (the
 other 12 were refused for TrueType and Type 3 text; 231 once Type 3 was ported, below). `tests/test_pure_pdf.py` keeps 60 seeds of level
-6, the level-4 seeds that were once apart and one of each transformer format. Refused, each with its
-reason: JPX, JBIG2 and CCITT data, ICC profiles lcms would open (only data that cannot be a profile
-falls back to the alternate), Default colour spaces, CalGray/CalRGB/Lab/Separation/DeviceN images,
+6, the level-4 seeds that were once apart and one of each transformer format. Level 7 adds ICCBased
+images with a profile PDFium detects as sRGB (460 seeds), level 8 - the default - images inside
+luminosity and alpha soft masks, every group /CS with and without /BC, the same stream inside a mask
+and outside it (3,400 seeds, none apart). Refused, each with its
+reason: JPX, JBIG2 and CCITT data, ICC profiles lcms would open that are not PDFium's sRGB (only
+data that cannot be a profile falls back to the alternate), Default colour spaces,
+CalGray/CalRGB/Lab/Separation/DeviceN images,
 JPEG /ColorTransform 0 and JPEGs PDFium patches or scales, LZW and mid-chain predictors, a filter
-that fails or decodes to nothing, images inside soft masks, image blend modes, pattern-filled
-stencils, a soft mask under a soft mask, an 8-bit mask device, and inline images whose DCT or CCITT
-end the parser cannot find as PDFium does.
+that fails or decodes to nothing, image blend modes, pattern-filled
+stencils, stencils and see-through images inside an alpha mask (StartBitmapAlpha's
+SetBitMask/StretchBitMask branch), a soft mask under a soft mask, an 8-bit mask device, and inline
+images whose DCT or CCITT end the parser cannot find as PDFium does.
 
 **Type 3 text** (`pure/render_type3.py`) is ProcessType3Text over CPDF_Type3Font, CPDF_Type3Char,
 CPDF_Type3Cache and CPDF_Type3GlyphMap. A glyph whose procedure is a sole image mask in a d1 font is

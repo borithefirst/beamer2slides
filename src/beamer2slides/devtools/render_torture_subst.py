@@ -15,7 +15,12 @@ with nothing (or none), and /Encoding by name or /Differences. PDFium's Foxit fa
 user cache (`python -m beamer2slides.pdf.pure.foxit`), or every page is refused.
 
 Failures are written to DIR as seedN.pdf (the shrunk page) and seedN.png (PDFium | pure |
-difference). A refused page (PdfError) is counted, never a failure."""
+difference). A refused page (PdfError) is counted, never a failure.
+
+`--fonts DIR` points both readers at one font folder through the folder scan PDFium uses off
+Windows (`use_font_folder`), which is how a substitution that only differs on another platform is
+reproduced on this one: seeds 13, 25, 26, 29, 90 and 129 failed on the ubuntu runner alone, and
+over a folder of DejaVu faces (no Arial, as that machine has none) they fail here too."""
 
 from __future__ import annotations
 
@@ -501,6 +506,46 @@ def shrink(content: bytes, fonts, zoom: float, transparent: bool) -> bytes:
     return b"\n".join(lines)
 
 
+_USER_FONT_PATHS = None          # PDFium reads the paths later: the buffer has to stay alive
+
+
+def use_font_folder(folder: str) -> None:
+    """Substitute from `folder` alone, in both readers, through the folder scan PDFium uses off
+    Windows: that is how a substitution that only differs on another OS is reproduced here.
+
+    PDFium takes `m_pUserFontPaths` at FPDF_InitLibraryWithConfig, and a build given them makes a
+    CFX_FolderFontInfo of those folders and nothing else (CFX_Win32FallbackFontInfo on Windows,
+    whose MapFont *is* CFX_LinuxFontInfo::MapFont for a non-CJK charset; CFX_LinuxFontInfo /
+    CFX_MacFontInfo over the given paths elsewhere); the pure reader gets `LinuxFontInfo` over the
+    same folder. The library is destroyed and created again, so this must run before any document
+    is opened. One caveat: `FindSubstFace`'s `#if BUILDFLAG(IS_WIN)` switches - the internal Symbol
+    branch and kNarrowFamily - belong to the *build*, not to the font info, so they are left as the
+    running build has them, and a page of Symbol or narrow fonts still says nothing about Linux."""
+    global _USER_FONT_PATHS
+    import ctypes
+    import sys
+
+    import pypdfium2.raw as raw
+
+    from ..pdf.pure import fontmapper
+    _USER_FONT_PATHS = (ctypes.c_char_p * 2)(str(folder).encode("utf-8"), None)
+    config = raw.FPDF_LIBRARY_CONFIG()
+    config.version = 2
+    config.m_pIsolate = None
+    config.m_v8EmbedderSlot = 0
+    config.m_pUserFontPaths = ctypes.cast(_USER_FONT_PATHS, ctypes.POINTER(ctypes.POINTER(ctypes.c_char)))
+    raw.FPDF_DestroyLibrary()
+    raw.FPDF_InitLibraryWithConfig(config)
+
+    def info():
+        got = fontmapper.LinuxFontInfo([folder])
+        if sys.platform == "win32":
+            got.symbol_internal, got.narrow_family = False, "ArialNarrow"
+        return got
+    fontmapper.platform_font_info = info
+    fontmapper._mapper = None
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("seed0", type=int, nargs="?", default=0)
@@ -509,7 +554,11 @@ def main(argv=None) -> int:
     ap.add_argument("--pool", default="any", choices=["any", "unknown", "symbol", "installed"])
     ap.add_argument("--out", default="out/render-torture-subst")
     ap.add_argument("--no-shrink", action="store_true")
+    ap.add_argument("--fonts", help="substitute from this folder alone, through the folder scan "
+                                    "PDFium uses off Windows (see use_font_folder)")
     args = ap.parse_args(argv)
+    if args.fonts:
+        use_font_folder(args.fonts)
     from ..pdf.api import PdfError
     out = Path(args.out)
     fails = refused = drawn = 0

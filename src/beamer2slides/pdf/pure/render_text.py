@@ -368,6 +368,13 @@ def _spacing_heuristic(font, face: _SubstFace) -> bool:
     if standard_font_index(base) is not None or face.subst.flag_mm:
         return False
     family = face.subst.family.replace(" ", "").lower()
+    if not family:
+        # CFX_SubstFont::IsActualFontLoaded is ByteString::Find, which finds no empty needle: a
+        # face with no family - UseInternalSubst's standard Foxit faces, which set none - has not
+        # loaded the actual font, so the heuristic applies. Only a fallback font reaches this
+        # (a base font on a standard face is refused a line above, by its standard name), and only
+        # where the platform has no Arial: the folder scan of Linux, never GDI.
+        return True
     return not base.startswith(family)                           # IsActualFontLoaded
 
 
@@ -690,17 +697,32 @@ def _helper(bitmap, has_alpha: bool, g8, ncols: int, nrows: int, px: int, py: in
     if r0 >= r1:
         return
     g = g8[r0:r1].astype(np.int32)
-    s = (np.arange(start, end) - px) * 3
-    if x_subpixel == 0:
-        v = (g[:, s] + g[:, s + 1] + g[:, s + 2]) // 3
-    elif x_subpixel == 1:
-        v = (g[:, np.maximum(s - 1, 0)] + g[:, s] + g[:, s + 1]) // 3
-        if start == px:
-            v[:, 0] = (g[:, 0] + g[:, 1]) // 3
+    n = end - start
+    # Whatever the subpixel shift, an output column averages three *consecutive* glyph columns,
+    # and the next output column's three sit 3 further on - so the three taps are strides of the
+    # row, and slicing them costs nothing where a fancy index built an array and gathered. A glyph
+    # here is 64 pixels at the median, so the call overhead of a numpy op is the whole cost.
+    # The C branches `if (x_subpixel == 0) ... else if (x_subpixel == 1) ... else ...`, and the
+    # last branch also takes the -1 and -2 that C's % gives a glyph placed left of its origin: the
+    # shift is which branch is taken, never the number itself.
+    shift = 0 if x_subpixel == 0 else 1 if x_subpixel == 1 else 2
+    base = (start - px) * 3 - shift                      # the first column that column 0 averages
+
+    def taps(first: int, cols: int):
+        return (g[:, first:first + 3 * cols:3], g[:, first + 1:first + 1 + 3 * cols:3],
+                g[:, first + 2:first + 2 + 3 * cols:3])
+
+    if base >= 0:
+        a, b, c = taps(base, n)
+        v = (a + b + c) // 3
     else:
-        v = (g[:, np.maximum(s - 2, 0)] + g[:, np.maximum(s - 1, 0)] + g[:, s]) // 3
-        if start == px:
-            v[:, 0] = g[:, 0] // 3
+        # base < 0 is exactly `start == px and x_subpixel != 0`: the taps of column 0 reach past
+        # the glyph's left edge, where NormalizeSrc drops them (the C read g8[0] and the fix-up
+        # below overwrote the column anyway), so column 0 is written on its own.
+        v = np.empty((r1 - r0, n), np.int32)
+        a, b, c = taps(base + 3, n - 1)
+        v[:, 1:] = (a + b + c) // 3
+        v[:, 0] = (g[:, 0] + g[:, 1]) // 3 if x_subpixel == 1 else g[:, 0] // 3
     cb, cg, cr, ca = color
     sa = GAMMA[v] * ca // 255
     dest = bitmap[py + r0:py + r1, start:end]

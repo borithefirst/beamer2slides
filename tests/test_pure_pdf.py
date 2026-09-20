@@ -425,7 +425,14 @@ def test_the_pure_renderer_survives_shading_torture_seeds():
 # lattice + Coons (t5, t6), free triangles + tensor (t4, t7), function-based over CIE (t1), and
 # /TR, /TR arrays and soft-mask /TR together
 _SHADING_SEEDS = [("cie", 5), ("cie", 48), ("mesh", 21), ("mesh", 35), ("mesh", 64), ("func", 22),
-                  ("transfer", 7), ("transfer", 100)]
+                  ("transfer", 7), ("transfer", 100),
+                  # a cell taller than the clip (the tiles are drawn one by one, not stamped from
+                  # a bitmap) holding a form, under a path whose fill alpha the tiles inherit
+                  ("tiling", 858),
+                  # the aligned grids (/BBox [0 0 XStep YStep] under a scaled or 90-rotated
+                  # matrix: integer device steps) and a cell under 16 pixels, which PDFium draws
+                  # at 8 x 8 and stretches down
+                  ("tiling", 0), ("tiling", 62), ("tiling", 10)]
 
 
 @pytest.mark.parametrize("mode, seed", _SHADING_SEEDS)
@@ -446,10 +453,32 @@ def test_the_pure_renderer_survives_new_shading_torture_modes(mode):
     assert stats["drawn"] >= 18
 
 
-# Level-4 image pages that were once apart (run-length sizes, CMYK, decode arrays, masks), and
-# level-6 ones through CFX_ImageTransformer (bgr, bgra, 1-bit mask, masked) and CMYK JPEGs.
+def test_the_pure_renderer_survives_tiling_pattern_torture_seeds():
+    """Tiling patterns (`pdf/pure/render_pattern.py`): a slice of the random pages the cell drawing
+    and the tile walk were made exact on (4,000 seeds when it was written, none apart; a third of
+    them refused for an uncoloured cell or a pattern inside a form)."""
+    from beamer2slides.devtools.render_torture_shading import run
+    stats = run(0, 30, verbose=False, mode="tiling")
+    assert not stats["failed"], ("seeds apart (python tools/render_torture_shading.py SEED 1 "
+                                 f"--mode tiling): {stats['failed']}")
+    assert stats["drawn"] >= 18
+
+
+# Level-4 image pages that were once apart (run-length sizes, CMYK, decode arrays, masks),
+# level-6 ones through CFX_ImageTransformer (bgr, bgra, 1-bit mask, masked) and CMYK JPEGs, and
+# level-7 ones whose sRGB ICCBased palette differs unless GetRGB leaves the components unclamped
+# and ArgbEncode lets them run into the byte above (clamping either fails 90, 94, 95).
+# The level-8 ones are images and soft masks meeting: 1 draws an image in an alpha mask, which is
+# StartBitmapAlpha's unit square; 33 an image under a /SMask gs, which ProcessTransparency loads
+# with std conversion on although it stands on the page (the old "inside a mask" rule fails it, and
+# so does Adobe's CMYK table); 40 an image with an /SMask of its own under a /SMask gs, where
+# ProcessTransparency drops the state's mask and draws the image alone; 122 and 147 more std
+# conversions; 351 a DeviceCMYK image in a luminosity mask whose group is DeviceCMYK, whose lines
+# are TransMask's (1-c)(1-k) (that one needs 900 seeds to meet by chance).
 IMAGE_SEEDS = [(4, s) for s in (144, 229, 230, 283, 325, 351, 788, 2626, 4459, 6130)] + \
-    [(6, s) for s in (0, 4, 13, 19, 50, 74, 118, 139, 196)]
+    [(6, s) for s in (0, 4, 13, 19, 50, 74, 118, 139, 196)] + \
+    [(7, s) for s in (90, 94, 95)] + \
+    [(8, s) for s in (1, 33, 40, 122, 147, 351)]
 
 
 @pytest.mark.parametrize("level,seed", IMAGE_SEEDS)
@@ -1013,6 +1042,44 @@ def test_a_cached_system_face_lives_while_a_document_holds_it():
     alone = [key for key in held if counts[key] == 1]      # what no other open document holds
     assert all(key not in m.holders for key in alone)
     assert all(name not in (m.ttc_face_map if kind == "ttc" else m.face_map) for kind, name in alone)
+
+
+def test_a_fallback_face_with_no_family_takes_the_glyph_spacing_heuristic():
+    """CFX_SubstFont::IsActualFontLoaded asks ByteString::Find, which never finds an empty needle,
+    and UseInternalSubst's standard Foxit faces set no family at all - so a font whose fallback
+    lands on one has not loaded the actual font and its fallback glyphs are moved or narrowed to
+    the /Widths width (CPDF_Font::ShouldApplyGlyphSpacingHeuristic). Only a folder scan with no
+    Arial reaches it, which is Linux: GDI answers with Arial and macOS with Helvetica, so the
+    ubuntu runner alone drew subst torture seeds 13, 25, 26, 29, 90 and 129 differently."""
+    from beamer2slides.devtools.render_torture_subst import pdf_bytes
+    from beamer2slides.pdf.pure import fontmapper, render_text
+    from beamer2slides.pdf.pure.backend import PureBackend
+    _needs_foxit()
+    # a name that is not a standard one (or the heuristic is off before the family is looked at),
+    # drawn from Foxit's dingbats face, which has no glyph for a letter: the fallback draws them
+    content = b"BT /F0 30 Tf 10 30 Td (Wavy) Tj ET"
+    fonts = [_subst_font(b"ZapfDingbats,Bold", 4, _WIDTHS + b" /Encoding /WinAnsiEncoding",
+                         b"/StemV 80", b"TrueType")]
+    was_info, was_mapper = fontmapper.platform_font_info, fontmapper._mapper
+    fontmapper.platform_font_info = lambda: fontmapper.LinuxFontInfo([])   # a machine with no fonts
+    fontmapper._mapper = None
+    try:
+        doc = PureBackend().open(pdf_bytes(content, fonts))
+        try:
+            page = doc[0]
+            page.chars()
+            font = page._fonts[0]
+            face = render_text.fallback_face(font)
+            assert face.subst.family == ""
+            assert render_text._spacing_heuristic(font, face)
+            code = ord("W")
+            glyph = render_text.fallback_glyph(font, code, face)
+            assert glyph > 0
+            assert face.glyph_width(glyph) not in (0, font.char_width(code))   # it moves something
+        finally:
+            doc.close()
+    finally:
+        fontmapper.platform_font_info, fontmapper._mapper = was_info, was_mapper
 
 
 # ---------------------------------------------------------------------- PDFium's rules, one by one
