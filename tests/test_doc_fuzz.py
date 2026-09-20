@@ -462,6 +462,39 @@ def test_the_oracle_sees_the_first_tab_renamed_back_under_the_reader():
     assert "tab_renamed" not in _kinds(oracle.check(base, kept, after, NOTHING))
 
 
+def test_the_oracle_sees_a_block_the_reader_deleted_come_back():
+    """`tab_resurrected` one level down, and the commoner journey by far. Nothing of
+    the reader's disappears when their deletion is undone, so every other question
+    here passes it; what is gone is the decision, which the document must win."""
+    base = _ir(_p("k1", "Kept."), _p("k2", "Struck out by the reader."))
+    before = _ir(_p("k1", "Kept."))
+    after = _ir(_p("k1", "Kept."), _p("k2", "Struck out by the reader."))
+    ours = _ir(_p("k1", "Kept."), _p("k2", "Struck out by the reader."))
+    assert "block_resurrected" in _kinds(oracle.check(base, before, after, NOTHING, ours))
+    # Said out loud it is no longer silent — in the notes, which is where `accounted`
+    # looks; "created", like "applied", says one line per block and would excuse all.
+    told = {"conflicts": [], "applied": [],
+            "notes": ["k2 was deleted in the document and the source still asks for it"]}
+    assert "block_resurrected" not in _kinds(oracle.check(base, before, after, told, ours))
+    # ...and the source dropping it too leaves nothing for the file to ask for.
+    gone = _ir(_p("k1", "Kept."))
+    assert "block_resurrected" not in _kinds(oracle.check(base, before, after, NOTHING, gone))
+
+
+def test_the_oracle_does_not_call_a_block_the_reader_moved_a_resurrection():
+    """A move in the browser is a delete and a retype, so the named range goes and the
+    key with it — and the settle names the block from its own words again, exactly as
+    a resurrected one would be named. The words say which it was: they never left the
+    document. Without this the campaign cried wolf on 7 of 300 rounds, every one of
+    them shrinking to a lone `move_block`."""
+    base = _ir(_p("k1", "Kept."), _p("k2", "Dragged somewhere else."))
+    before = _ir({"kind": "paragraph", "runs": [{"text": "Dragged somewhere else."}]},
+                 _p("k1", "Kept."))
+    after = _ir(_p("k2", "Dragged somewhere else."), _p("k1", "Kept."))
+    ours = _ir(_p("k1", "Kept."), _p("k2", "Dragged somewhere else."))
+    assert "block_resurrected" not in _kinds(oracle.check(base, before, after, NOTHING, ours))
+
+
 def test_the_oracle_sees_a_tab_the_reader_deleted_come_back():
     """The mirror of `tab_gone`, and invisible to every other question here: nothing
     of the reader's disappears when a tab they deleted is created again, and the tab

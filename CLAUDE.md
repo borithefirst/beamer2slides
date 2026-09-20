@@ -1315,6 +1315,16 @@ keys, named ranges), `doc_merge.py` (pure planning), `doc_sync.py` (the commands
   file still asks for it, and something unknown to the base now says the same words under the
   same name). With it, the injected bug fails 1 of 80 rounds and shrinks to those two ops
   alone; 400 rounds at chain 6 clean without it.
+  The hole was one level down as well, and there it is the commoner journey: take out
+  `_merge_block`'s clause that a key in the base and not in the read-back is a delete that
+  stands, and every block the reader struck out is written again on every sync, in silence
+  (80 rounds, not a word). `block_resurrected` asks the same question of a block - but of
+  its **words**, not its key, because a move in the browser is a delete and a retype, so a
+  dragged block loses its range and is keyed from its words again exactly as a resurrected
+  one is; and of the words rather than the text, since a moved block that held an equation
+  comes down without it. Forgiving on purpose (a block whose every word still stands is let
+  go), or it accuses every move: 7 false alarms of 300 at chain 4 before that, 0 after,
+  68 with the clause out.
 - The **document's name** is the file's `<title>`, and a Google Doc's title *is* its name in
   Drive: no `batchUpdate` request writes one, so `push` named it at birth and nothing said it
   again. `doc_merge.document_title` merges it three ways (the file alone renamed it -> written;

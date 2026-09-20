@@ -596,6 +596,35 @@ def _tab_findings(was: dict | None, now: dict, then: dict | None, said: str,
         if block.get("kind") == "table":
             out += _cell_findings(key, block, base_block, new[key], after_words, said, tab)
 
+    before_words = words(part_text(now))
+    for key, was_block in old.items():
+        # The mirror of `block_gone`, and the same shape as `tab_resurrected`: the
+        # reader deleted this block in the browser, the file still asks for it, and it
+        # stands in the document again after the sync. Nothing of theirs disappeared,
+        # so every question above passes it — what was undone is the deletion itself,
+        # which the document is supposed to win. A block the reader merely *emptied*
+        # is not one they deleted (its range, and so its key, is still there), and a
+        # key the merge handed to another block is `identity_lost`, not this.
+        if key in live or key not in new or key not in file_blocks:
+            continue
+        # A key missing from the read-back does not mean the block is: a reader who
+        # *moves* a block deletes its text and types it again, which destroys the
+        # named range, and the settle then keys the block from its own words as
+        # before. So the question is asked of the words, not of the key — and of the
+        # words rather than the text, because a moved block that held an equation
+        # comes down without it (no request makes one), so the two never read alike.
+        # A block whose every word still stands somewhere is not one that was deleted
+        # and put back; erring this way costs a finding, the other way cries wolf on
+        # every move.
+        if not (words(text_of(was_block)) - before_words):
+            continue
+        if _named(said, key, text_of(was_block)[:40]):
+            continue
+        out.append(finding("block_resurrected", "loss",
+                           f"the reader deleted the block {key}, {text_of(was_block)[:60]!r}, "
+                           f"and it is back after the sync; the report does not say why",
+                           tab=tab, key=key))
+
     for block in unkeyed(now):
         text = text_of(block).strip()
         lost = words(text) - after_words

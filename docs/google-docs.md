@@ -1616,6 +1616,32 @@ step 1: reader drop_tab | source
 
 — which is as small as a script gets.
 
+### The same hole, one level down
+
+If the oracle could not see a tab the reader deleted come back, it could not see a
+*block* come back either — and that is the commoner journey by a long way. The same
+experiment says so: take the clause out of `_merge_block`'s placing loop that says a
+key in the base and not in the read-back is a delete that stands, so every block the
+reader struck out and the file still asks for is written again, and 80 rounds pass
+without a word. Every sentence is present, every round converges, and the reader's
+deletion is quietly undone on every sync for ever.
+
+`block_resurrected` asks it the way `tab_resurrected` does: the base had the block, the
+read before the sync has not, the file still asks for it, and it is there again
+afterwards. One thing had to be learned to ask it without crying wolf. **A move in the
+browser is a delete and a retype**, so a block the reader dragged loses its named range
+and its key exactly as a deleted one does, and the settle names it from its own words
+again — which is indistinguishable from a resurrection if you ask about keys. Ask about
+the words instead: they never left the document. And about the *words*, not the text,
+because a moved block that held an equation comes down without it (no request makes
+one), so the two never read alike. It is the forgiving direction on purpose — a block
+whose every word still stands somewhere is let go — because the other way round accuses
+every move.
+
+Measured over 300 rounds at chain 4: with the clause in place, 0 failed — 7 before the
+move was told from the deletion, every one of them shrinking to a lone `move_block`.
+With the clause taken out, 68 failed, shrinking to a lone `delete_block`.
+
 ## Remaining risks
 
 1. **Pictures** — retired, see "Pictures, and the chips a request can make" above. What
