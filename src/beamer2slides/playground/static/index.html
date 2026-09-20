@@ -15,6 +15,7 @@
   <p class="tag">A beamer talk in, an editable Google Slides deck out. Type or pick a talk, run it, and see what each stage decided.</p>
   <nav>
     <button class="tab on" data-tab="run">Try it</button>
+    <button class="tab" data-tab="workbench">Workbench</button>
     <button class="tab" data-tab="gallery">Sync &amp; adopt (recorded)</button>
     <a href="https://github.com/borithefirst/beamer2slides" target="_blank" rel="noopener">GitHub ↗</a>
   </nav>
@@ -64,6 +65,41 @@
   </section>
 </main>
 
+<main id="workbench" class="panel">
+  <section class="files">
+    <div class="row">
+      <b>Files</b>
+      <button id="newfile" title="A new empty file in the workspace">New</button>
+      <label class="file">Upload<input id="wbupload" type="file"></label>
+      <button id="wbfresh" title="Throw this workspace away and open a fresh one">Reset</button>
+    </div>
+    <ul id="filelist"></ul>
+    <p id="wsnote" class="muted"></p>
+  </section>
+
+  <section class="editor">
+    <div class="row">
+      <b id="openpath">README.md</b>
+      <button id="savefile">Save</button>
+      <button id="delfile">Delete</button>
+    </div>
+    <textarea id="filetext" spellcheck="false" aria-label="the open file"></textarea>
+    <div id="fileview" hidden></div>
+  </section>
+
+  <section class="tools">
+    <div class="row"><b>Run a journey</b> <select id="tool"></select>
+      <button id="runtool" class="primary">Run</button></div>
+    <p id="toolabout" class="muted"></p>
+    <form id="toolform" onsubmit="return false"></form>
+    <p id="runnote" class="status"></p>
+    <pre id="runlog"></pre>
+    <div id="runresult"></div>
+    <details id="rules"><summary>The rules these tools are used by</summary>
+      <pre id="instructions"></pre></details>
+  </section>
+</main>
+
 <main id="gallery" class="panel">
   <p class="muted">The Google side needs an account, so the playground shows it from recorded runs:
     every picture below comes from a real conversion, sync or adopt (tools/readme_demos.py).</p>
@@ -72,5 +108,6 @@
 
 <footer class="muted">Everything before the Google deck runs on this server: pdflatex, extract, classify, render. Jobs are kept for a while, then deleted. <a href="/privacy">Privacy</a></footer>
 <script src="/static/app.js"></script>
+<script src="/static/workbench.js"></script>
 </body>
 </html>

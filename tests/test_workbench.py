@@ -1,0 +1,259 @@
+"""The workbench, offline: a workspace, the files in it, and journeys run in a process of their own.
+
+No Google (the server is not given any), so the tools that need it must come back saying `offline`
+rather than failing - which is the whole point of the agent layer's vocabulary reaching the page.
+"""
+import json
+import sys
+import threading
+import time
+import urllib.error
+import urllib.request
+
+import pytest
+
+from beamer2slides.playground import server, workbench
+
+from .test_playground import call
+
+
+@pytest.fixture(scope="module")
+def base(tmp_path_factory):
+    jobs = tmp_path_factory.mktemp("bench-jobs")
+    mp = pytest.MonkeyPatch()
+    mp.setenv("B2S_PLAYGROUND_JOBS", str(jobs))
+    mp.delenv("B2S_PLAYGROUND_GOOGLE", raising=False)
+    mp.delenv("B2S_PLAYGROUND_GOOGLE_CLIENT_ID", raising=False)
+    httpd = server.ThreadingHTTPServer(("127.0.0.1", 0), server.Handler)
+    port = httpd.server_address[1]
+    stale = jobs / str(port) / "ws" / "0123456789ab"   # a workspace an earlier run on this port left
+    stale.mkdir(parents=True)
+    server.Handler.app = server.Playground(port)
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    assert not stale.exists()
+    yield f"http://127.0.0.1:{httpd.server_address[1]}"
+    httpd.shutdown()
+    mp.undo()
+
+
+def request(url, method, data=None, ctype="application/json"):
+    req = urllib.request.Request(url, data=data, method=method,
+                                 headers={"Content-Type": ctype} if data is not None else {})
+    try:
+        with urllib.request.urlopen(req, timeout=60) as r:
+            body = r.read()
+            return r.status, json.loads(body) if r.headers["Content-Type"] == "application/json" else body
+    except urllib.error.HTTPError as e:
+        return e.code, json.loads(e.read())
+
+
+@pytest.fixture
+def ws(base):
+    status, made = request(f"{base}/api/ws", "POST", b"")
+    assert status == 201
+    return f"{base}/api/ws/{made['id']}"
+
+
+def run(ws, tool, args=None, seconds=180):
+    status, made = request(f"{ws}/runs", "POST",
+                           json.dumps({"tool": tool, "args": args or {}}).encode())
+    assert status == 201, made
+    return _wait(ws, made["id"], seconds)
+
+
+def _wait(ws, rid, seconds=180):
+    for _ in range(seconds * 4):
+        status, state = call(f"{ws}/runs/{rid}")
+        if state["state"] == "done":
+            return state
+        time.sleep(0.25)
+    raise AssertionError(f"run {rid} never finished")
+
+
+def test_every_journey_is_offered_with_its_own_schema(base):
+    """The form a visitor fills in is read off the tools themselves, so the two cannot drift."""
+    status, catalogue = call(f"{base}/api/tools")
+    assert status == 200
+    names = [t["name"] for t in catalogue["tools"]]
+    assert "tex_compile" in names and "deck_convert" in names and "doc_sync" in names
+    assert len(names) == 12                              # the eleven journeys plus the compile step
+    for tool in catalogue["tools"]:
+        assert tool["description"].strip() and tool["input_schema"]["type"] == "object"
+        for name, prop in tool["input_schema"]["properties"].items():
+            assert prop.get("description"), f"{tool['name']}.{name}"
+    assert "never rebuild" in catalogue["instructions"].lower() or catalogue["instructions"].strip()
+    convert = next(t for t in catalogue["tools"] if t["name"] == "deck_convert")
+    assert convert["effects"]["writes_google"] and convert["effects"]["approval"] == "required"
+
+
+def test_a_new_workspace_has_something_to_start_from(ws):
+    status, view = call(ws)
+    assert status == 200
+    names = {f["path"] for f in view["files"]}
+    assert {"README.md", "talk.tex", "doc.html"} <= names
+    assert view["bytes"] > 0 and view["limits"]["files"] == workbench.MAX_FILES
+    status, talk = call(f"{ws}/file?path=talk.tex")
+    assert status == 200 and b"\\begin{frame}" in talk
+
+
+def test_files_are_written_read_and_deleted(ws):
+    assert request(f"{ws}/file?path=notes/one.txt", "PUT", b"hello", "text/plain")[0] == 200
+    status, body = call(f"{ws}/file?path=notes/one.txt")
+    assert status == 200 and body == b"hello"
+    assert {"notes", "notes/one.txt"} <= {f["path"] for f in call(ws)[1]["files"]}
+    assert request(f"{ws}/file?path=notes/one.txt", "DELETE")[0] == 200
+    assert call(f"{ws}/file?path=notes/one.txt")[0] == 404
+
+
+def test_nothing_reaches_outside_the_workspace(ws, base):
+    """The same boundary a journey's own path crosses: `LocalWorkspace.resolve` draws it once."""
+    for ref in ("../escape.txt", "../../pyproject.toml", "/etc/passwd", "C:/Windows/win.ini"):
+        status, answer = request(f"{ws}/file?path={urllib.parse.quote(ref)}", "PUT", b"x", "text/plain")
+        assert status == 403 and "outside the workspace" in answer["error"], ref
+        assert call(f"{ws}/file?path={urllib.parse.quote(ref)}")[0] in (403, 404)
+    assert call(f"{base}/api/ws/ffffffffffff")[0] == 404
+
+
+def test_a_local_journey_runs_in_the_workspace(ws):
+    """`b2s_status` needs nothing but the folder, and says what is in it."""
+    state = run(ws, "b2s_status")
+    result = state["result"]
+    assert result["ok"] and result["tool"] == "b2s_status"
+    assert "LaTeX source" in result["summary"]
+    assert result["data"]["workspace"].endswith(ws.rsplit("/", 1)[1])
+    assert result["data"]["google"]["available"] is False
+    assert sorted(result["data"]["allows"]) == ["reads", "writes"]   # no account: no Google actions
+
+
+def test_a_google_journey_on_a_server_with_no_account_says_so(ws):
+    """Not a crash and not a traceback: the refusal vocabulary reaches the page as a code."""
+    state = run(ws, "deck_convert", {"pdf": "talk.pdf"})
+    assert state["result"]["ok"] is False
+    assert state["result"]["code"] == "offline"
+    assert "Google" in state["result"]["summary"]
+
+
+def test_a_tool_nobody_has_is_a_bad_request(ws):
+    assert request(f"{ws}/runs", "POST", json.dumps({"tool": "rm_rf"}).encode())[0] == 404
+    state = run(ws, "b2s_status", {"nonsense": 1})
+    assert state["result"]["code"] == "bad_request" and "does not take" in state["result"]["summary"]
+
+
+def test_a_compile_with_no_tex_engine_is_refused_in_the_result(ws, monkeypatch):
+    monkeypatch.setattr(server.Handler.app.bench, "engines", [])
+    state = run(ws, "tex_compile", {"tex": "talk.tex"})
+    assert state["result"]["ok"] is False and "no TeX distribution" in state["result"]["summary"]
+
+
+@pytest.mark.skipif(not server.tex_engines(), reason="no TeX distribution")
+def test_a_talk_compiles_and_then_inspects(ws):
+    state = run(ws, "tex_compile", {"tex": "talk.tex"})
+    assert state["result"]["ok"], state["result"]["summary"]
+    assert state["result"]["data"]["pdf"] == "talk.pdf"
+    assert call(f"{ws}/file?path=talk.pdf")[1][:4] == b"%PDF"
+    state = run(ws, "deck_inspect", {"pdf": "talk.pdf"})
+    assert state["result"]["ok"], state["result"]["summary"]
+    assert state["result"]["data"]["pages"] == 3
+    assert "native" in state["result"]["summary"]
+
+
+CHILD = """\
+import json, sys, time
+job = json.loads(sys.stdin.read())
+{body}
+"""
+SAYS = CHILD.format(body="""
+for n in range(3):
+    print(json.dumps({"progress": f"line {n}"}), flush=True)
+print(json.dumps({"result": {"tool": job["tool"], "ok": True, "summary": "said so",
+                             "data": {"args": job["args"], "google": job["google"],
+                                      "root": job["root"]},
+                             "artifacts": [], "diagnostics": [], "next_steps": []}}), flush=True)
+""")
+HANGS = CHILD.format(body="time.sleep(600)")
+DIES = CHILD.format(body="""
+print("a traceback nobody meant to write", file=sys.stderr)
+sys.exit(3)
+""")
+
+
+def child(tmp_path, source):
+    path = tmp_path / "child.py"
+    path.write_text(source, encoding="utf-8")
+    return [sys.executable, "-u", str(path)]
+
+
+def test_the_child_streams_its_progress_and_its_result(ws, tmp_path, monkeypatch):
+    """What the page shows while a conversion runs: the lines the library printed, as they come."""
+    bench = server.Handler.app.bench
+    monkeypatch.setattr(bench, "command", lambda: child(tmp_path, SAYS))
+    state = run(ws, "b2s_status", {"out": "somewhere"})
+    assert state["log"] == ["line 0", "line 1", "line 2"]
+    assert state["result"]["ok"] and state["result"]["data"]["args"] == {"out": "somewhere"}
+    assert state["result"]["data"]["root"].endswith(ws.rsplit("/", 1)[1])
+    assert state["seconds"] >= 0
+
+
+def test_a_visitors_token_goes_to_the_child_and_no_further(base, ws, tmp_path, monkeypatch):
+    """It is handed over on stdin - never a command line, never the run record - and only to a
+    journey that needs Google."""
+    monkeypatch.setenv("B2S_PLAYGROUND_GOOGLE_CLIENT_ID", "1234.apps.googleusercontent.com")
+    bench = server.Handler.app.bench
+    monkeypatch.setattr(bench, "command", lambda: child(tmp_path, SAYS))
+
+    status, answer = request(f"{ws}/runs", "POST",
+                             json.dumps({"tool": "deck_convert", "args": {"pdf": "t.pdf"}}).encode())
+    assert status == 401 and "sign in" in answer["error"]   # a deck needs a Drive to go into
+
+    asked = {"tool": "deck_convert", "args": {"pdf": "t.pdf"}, "access_token": "ya29.thesecret"}
+    status, made = request(f"{ws}/runs", "POST", json.dumps(asked).encode())
+    state = _wait(ws, made["id"])
+    assert state["result"]["data"]["google"] == {"mode": "signin", "token": "ya29.thesecret"}
+    assert "thesecret" not in json.dumps(call(ws)[1])       # not in the workspace's own view
+
+    asked["tool"] = "deck_inspect"                          # a local journey carries nobody's
+    status, made = request(f"{ws}/runs", "POST", json.dumps(asked).encode())
+    assert _wait(ws, made["id"])["result"]["data"]["google"] == {"mode": "signin", "token": None}
+
+
+def test_where_the_credentials_come_from(monkeypatch):
+    """The third `GoogleAccess`: one access token, no refresh, nothing stored."""
+    from beamer2slides.agent.auth import NoGoogle, TokenFile
+    from beamer2slides.playground import runner
+    assert isinstance(runner.access({}), NoGoogle)
+    assert isinstance(runner.access({"mode": "signin", "token": None}), NoGoogle)
+    monkeypatch.delenv("B2S_AGENT_OFFLINE", raising=False)
+    assert isinstance(runner.access({"mode": "local"}), TokenFile)
+    visitor = runner.access({"mode": "signin", "token": "ya29.x"})
+    assert visitor.describe() == {"available": True, "source": "the visitor's own Google sign-in",
+                                  "scopes": runner.SCOPES}
+    assert "ya29.x" not in json.dumps(visitor.describe())
+    assert runner.SCOPES == server.WEB_SCOPES
+
+
+def test_a_run_that_will_not_end_is_stopped(ws, tmp_path, monkeypatch):
+    """A journey's own LaTeX has no time limit of its own; a process can be killed where a
+    thread cannot."""
+    bench = server.Handler.app.bench
+    monkeypatch.setattr(bench, "command", lambda: child(tmp_path, HANGS))
+    monkeypatch.setattr(workbench, "RUN_TIMEOUT", 2)
+    state = run(ws, "b2s_status", seconds=60)
+    assert state["result"]["ok"] is False and "stopped after" in state["result"]["summary"]
+
+
+def test_a_child_that_dies_says_what_it_said(ws, tmp_path, monkeypatch):
+    bench = server.Handler.app.bench
+    monkeypatch.setattr(bench, "command", lambda: child(tmp_path, DIES))
+    state = run(ws, "b2s_status", seconds=60)
+    assert state["result"]["ok"] is False
+    assert "exit 3" in state["result"]["summary"]
+    assert "a traceback nobody meant to write" in state["result"]["summary"]
+
+
+def test_a_workspace_is_swept_when_too_many_are_open(base, monkeypatch):
+    bench = server.Handler.app.bench
+    monkeypatch.setattr(workbench, "KEEP_SESSIONS", 2)
+    opened = [bench.open() for _ in range(4)]
+    assert len(bench.sessions) == 2 and not opened[0].root.exists() and opened[-1].root.exists()
+    for session in opened[-2:]:
+        bench.sessions.pop(session.id, None)

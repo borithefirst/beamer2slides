@@ -1155,7 +1155,27 @@ region europe-west1, one instance, scale to zero, CHF 50/month with the budget's
 enforcing on Cloud Run). The consent screen is **In production**, which it could only become once
 the Branding page had a home page and a privacy policy on an authorized domain: hence `/privacy`
 (`static/privacy.html`), served by the playground itself and saying what the code does.
-Tests: `tests/test_playground.py` (offline, an uploaded test PDF through the HTTP API).
+**The workbench** (`playground/workbench.py`, `runner.py`, `static/workbench.js`) is the second
+tab and the rest of the library: *Try it* is one road, and sync, pull, adopt and the Docs side are
+roads it does not have. A folder per visitor, a file editor, and the **eleven journeys of the agent
+layer** run in it - nothing reimplemented: the tools are `agent.tools.TOOLS`, each form is built in
+the browser from `agent.schema.all_schemas()` (so the form and the signature are the same text),
+what comes back is the `Result` every tool answers in (summary, diagnostics, the files it wrote -
+clickable - and `next_steps`), and `INSTRUCTIONS.md` is on the page. `tex_compile` is the twelfth
+entry and the only non-journey: how a source in the workspace becomes the PDF the deck journeys
+start from. **There is no shell**; the only two things executed are a TeX engine and a journey, and
+a journey runs in a **subprocess** (`@tool` serialises one per process, `inverse.Compiler`'s
+compiles carry no time limit of their own and a process can be killed where a thread cannot), with
+the job - and the visitor's access token - going in on **stdin**, never a command line, and
+progress and the result coming back as JSON lines. Stopped after 420 s, killed by process group;
+every path goes through `LocalWorkspace.resolve`; `shell_escape=f` beside `openin_any=p` so the
+library's own compiles are fenced as the playground's are; 80 MB and 3000 files per workspace, the
+last 12 kept. A deck **this app did not make** is unreachable under `drive.file`, which is what
+keeps that scope non-sensitive, so `deck`/`doc` arguments grow a Google **Picker** button where
+`B2S_PLAYGROUND_GOOGLE_API_KEY` names a browser key: the visitor picks the file in Google's own
+window and that grants this app `drive.file` on that one file.
+Tests: `tests/test_playground.py` and `tests/test_workbench.py` (offline: a workspace through the
+HTTP API, a journey in its own process, the boundary, the time limit, and where the token goes).
 
 ## Google Docs (docs/google-docs.md)
 The same bargain as the Slides sync, one dimension smaller: a **canonical HTML file** in git is

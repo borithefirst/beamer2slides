@@ -11,6 +11,16 @@ API (JSON unless said otherwise):
                                    where visitors sign in, {"access_token": ...} says whose Drive)
   GET  /media/<file>               the front page's pictures (docs/media), for the recorded runs
 
+The workbench (`workbench.py`) is the second half: a folder per visitor and the agent layer's
+journeys run inside it, one subprocess each.
+
+  GET  /api/tools                  every journey as JSON Schema, plus the instructions
+  POST /api/ws                     open a workspace -> {"id"}
+  GET  /api/ws/<sid>               its files, its byte count, its limits and its runs
+  GET/PUT/DELETE /api/ws/<sid>/file?path=<ref>    one file (PUT's body is the content)
+  POST /api/ws/<sid>/runs          {"tool", "args", "access_token"?} -> {"id"}
+  GET  /api/ws/<sid>/runs/<rid>?since=<n>         state, new log lines and, at the end, the Result
+
 Jobs run one at a time on a worker thread (the stages print, and pdflatex is heavy), at most
 `MAX_QUEUE` wait, and the last `KEEP_JOBS` stay on disk (job folders of an earlier run on the same
 port are swept at start). A talk's TeX is compiled with shell escape off, TeX Live's paranoid file access (no absolute
@@ -25,16 +35,18 @@ import os
 import queue
 import re
 import shutil
-import subprocess
 import sys
 import tempfile
 import threading
 import time
 import traceback
+import urllib.parse
 import uuid
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+
+from . import workbench
 
 STATIC = Path(__file__).parent / "static"
 # examples and docs/media come from a checkout: this one (src/beamer2slides/playground -> the repo), or another
@@ -72,6 +84,20 @@ WEB_SCOPES = ["https://www.googleapis.com/auth/drive.file"]
 def google_client_id() -> str:
     """The OAuth *web* client of the host, for visitors signing in. A client id is not a secret."""
     return os.environ.get("B2S_PLAYGROUND_GOOGLE_CLIENT_ID", "").strip()
+
+
+def google_api_key() -> str:
+    """The browser API key the Google Picker needs, or "" where the host set none.
+
+    `drive.file` reaches the files this app created and no others, which is what keeps it a
+    non-sensitive scope - and what makes a deck somebody else built unreachable by
+    `deck_adopt` or `deck_pull`. The Picker is Google's own answer to exactly that: the visitor
+    chooses a file in Google's window, and that choice grants this app `drive.file` access to
+    that one file. It runs in the browser and needs a key of its own; an API key is not a
+    secret (it identifies the project and is restricted by referrer), so it belongs in the
+    deployment's environment beside the client id.
+    """
+    return os.environ.get("B2S_PLAYGROUND_GOOGLE_API_KEY", "").strip()
 
 
 def google_mode() -> str | None:
@@ -124,6 +150,8 @@ class Playground:
         self.root = jobs_root() / str(port)
         self.root.mkdir(parents=True, exist_ok=True)
         self.sweep()
+        self.bench = workbench.Workbench(self.root)
+        self.bench.engines = tex_engines()
         threading.Thread(target=self.worker, daemon=True).start()
 
     # ---- jobs
@@ -239,25 +267,19 @@ class Busy(Exception):
 
 
 def compile_tex(job: Job, tex: str) -> Path:
+    """The talk, compiled in its own job folder. The fence is `workbench.run_latex`'s.
+
+    One compile on this server, wherever it was asked for: the workbench compiles the same way,
+    and a source from a stranger must not be fenced one way here and another way there.
+    """
     engines = tex_engines()
     if not engines:
         raise JobError("no TeX distribution on this server: upload a compiled PDF instead")
-    engine = "lualatex" if re.search(r"\\usepackage(\[[^]]*\])?\{fontspec\}", tex) and "lualatex" in engines \
-        else engines[0]
-    main = job.dir / "talk.tex"
-    main.write_text(tex, encoding="utf-8")
-    env = {**os.environ, "openout_any": "p", "openin_any": "p"}   # TeX Live: no files outside the job
-    for _ in range(2):                                            # the second run settles navigation
-        try:
-            r = subprocess.run([engine, "-interaction=nonstopmode", "-halt-on-error", "-no-shell-escape", main.name],
-                               cwd=job.dir, capture_output=True, text=True, errors="replace", timeout=TEX_TIMEOUT,
-                               env=env)
-        except subprocess.TimeoutExpired:
-            raise JobError(f"{engine} took longer than {TEX_TIMEOUT} s")
-        if r.returncode:
-            errors = [l for l in r.stdout.splitlines() if l.startswith("!") or l.startswith("l.")]
-            raise JobError(f"{engine} failed:\n" + ("\n".join(errors[:12]) or r.stdout[-1500:]))
-    return job.dir / "talk.pdf"
+    (job.dir / "talk.tex").write_text(tex, encoding="utf-8")
+    try:                                     # the second run settles navigation
+        return workbench.run_latex(job.dir, "talk.tex", engines, TEX_TIMEOUT, passes=2)
+    except workbench.TexError as e:
+        raise JobError(str(e)) from None
 
 
 def page_pngs(pdf: Path, deck: dict, folder: Path) -> None:
@@ -336,8 +358,78 @@ class Handler(BaseHTTPRequestHandler):
         ctype = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
         self.send(path.read_bytes(), ctype, cache=cache)
 
+    # ---- the workbench: a folder per visitor and the journeys run in it (workbench.py)
+
+    def query(self) -> dict:
+        return {k: v[0] for k, v in
+                urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query).items()}
+
+    def bench(self, method: str, path: str, body: bytes) -> None:
+        """Everything the workbench answers. A `Denied` carries the status; nothing else escapes."""
+        try:
+            return self.bench_route(method, path, body)
+        except workbench.Denied as e:
+            return self.json({"error": str(e)}, e.status)
+
+    def bench_route(self, method: str, path: str, body: bytes) -> None:
+        bench = self.app.bench
+        if path == "/api/tools" and method == "GET":
+            return self.json(workbench.catalogue())
+        if path == "/api/ws" and method == "POST":
+            return self.json({"id": bench.open().id}, 201)
+        m = re.fullmatch(r"/api/ws/([0-9a-f]{12})(?:/(file|runs)(?:/(\w+))?)?", path)
+        if not m:
+            return self.json({"error": "not found"}, 404)
+        session = bench.get(m.group(1))
+        part, rest = m.group(2), m.group(3)
+        if part is None and method == "GET":
+            return self.json(session.view())
+        if part == "file":
+            ref = self.query().get("path", "")
+            if method == "GET":
+                here = bench.resolve(session, ref)
+                if not here.is_file():
+                    return self.json({"error": "no such file"}, 404)
+                ctype = mimetypes.guess_type(here.name)[0] or "application/octet-stream"
+                return self.send(here.read_bytes(), ctype)
+            if method == "PUT":
+                return self.json(bench.write(session, ref, body))
+            if method == "DELETE":
+                bench.remove(session, ref)
+                return self.json({"deleted": ref})
+        if part == "runs":
+            if method == "POST" and not rest:
+                return self.json({"id": self.start_run(session, body).id}, 201)
+            if method == "GET" and rest:
+                run = session.runs.get(rest)
+                if run is None:
+                    return self.json({"error": "no such run"}, 404)
+                return self.json(run.view(int(self.query().get("since") or 0)))
+        return self.json({"error": "not found"}, 404)
+
+    def start_run(self, session, body: bytes):
+        """One journey, asked for by name. The token, where there is one, goes no further than
+        the child process it is handed to on stdin."""
+        try:
+            asked = json.loads(body or b"{}")
+            tool, args = asked.get("tool"), asked.get("args") or {}
+        except (ValueError, AttributeError):
+            tool, args = None, None
+        if not isinstance(tool, str) or not isinstance(args, dict):
+            raise workbench.Denied('send {"tool": ..., "args": {...}}')
+        mode, token = google_mode(), asked.get("access_token")
+        if not workbench.needs_google(tool):
+            token = None                        # a local journey carries nobody's credentials
+        elif mode == "signin" and not isinstance(token, str):
+            raise workbench.Denied("sign in with Google first", 401)
+        return self.app.bench.start(session, tool, args, mode=mode, token=token)
+
+    # ---- routes
+
     def do_GET(self):
         path = self.path.split("?")[0]
+        if path == "/api/tools" or path == "/api/ws" or path.startswith("/api/ws/"):
+            return self.bench("GET", path, b"")
         if path == "/":
             return self.file(STATIC, "index.html")
         # A published OAuth app must show the visitor a privacy policy, on its own domain.
@@ -350,7 +442,7 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/config":
             return self.json({"engines": tex_engines(), "google": google_mode(),
                               "google_client_id": google_client_id(), "google_scopes": " ".join(WEB_SCOPES),
-                              "max_pages": MAX_PAGES,
+                              "google_api_key": google_api_key(), "max_pages": MAX_PAGES,
                               "examples": [{"name": n, "about": a, "pdf": t.with_suffix(".pdf").is_file()}
                                            for n, (t, a) in examples().items()],
                               "gallery": [{"file": f, "caption": c} for f, c in GALLERY if (MEDIA / f).exists()]})
@@ -379,6 +471,8 @@ class Handler(BaseHTTPRequestHandler):
         if length > MAX_UPLOAD:
             return self.json({"error": f"over {MAX_UPLOAD // 2**20} MB"}, HTTPStatus.REQUEST_ENTITY_TOO_LARGE)
         body = self.rfile.read(length)
+        if path == "/api/ws" or path.startswith("/api/ws/"):
+            return self.bench("POST", path, body)
         if path == "/api/jobs":
             tex = pdf = None
             if (self.headers.get("Content-Type") or "").startswith("application/pdf"):
@@ -422,6 +516,16 @@ class Handler(BaseHTTPRequestHandler):
                 return self.json({"error": message.replace(token, "…") if token else message,
                                   "signin": status == 401}, status)
         self.json({"error": "not found"}, 404)
+
+    def do_PUT(self):
+        length = int(self.headers.get("Content-Length") or 0)
+        if length > MAX_UPLOAD:
+            return self.json({"error": f"over {MAX_UPLOAD // 2**20} MB"},
+                             HTTPStatus.REQUEST_ENTITY_TOO_LARGE)
+        self.bench("PUT", self.path.split("?")[0], self.rfile.read(length))
+
+    def do_DELETE(self):
+        self.bench("DELETE", self.path.split("?")[0], b"")
 
 
 def serve(host: str = "127.0.0.1", port: int = 7860) -> None:

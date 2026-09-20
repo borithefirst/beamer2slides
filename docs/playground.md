@@ -26,11 +26,67 @@ no new dependency, nothing to build.
   - *Background*: what stays a picture.
   - *Classify debug*: classify's own debug image.
   - *IR*: the slide's `deck.json` entry.
+- **Workbench**: a folder on the server and every journey run inside it - see below.
 - **Sync & adopt (recorded)**: the Google side, from the front page's recorded runs
   (`docs/media`, made by `tools/readme_demos.py` and `tools/readme_images.py`).
 
 A link to a job (`?job=<id>&slide=3&mode=native`) opens that job, slide and view, with its source
 in the editor, for as long as the server keeps the job.
+
+## The workbench
+
+*Try it* is one road - a talk in, a deck out - and everything else this library does (sync,
+pull, adopt, the whole Google Docs side) is a road it does not have. The workbench is the rest:
+a folder per visitor, a file editor, and the eleven journeys of the agent layer
+(`src/beamer2slides/agent/`, docs/agent-tools.md) run in it, one form each.
+
+Nothing is reimplemented. The tools come from `agent.tools.TOOLS`, their forms are built in the
+browser from `agent.schema.all_schemas()` - so what a visitor fills in and the signature that
+runs are the same text - and what comes back is the `Result` every tool answers in: the summary,
+the diagnostics, the files it wrote (clickable, they open in the editor) and what to consider
+next. `INSTRUCTIONS.md`, the rules these tools are used by, is on the page under the log.
+
+`tex_compile` is the twelfth entry and the only one that is not a journey: it is how a source in
+the workspace becomes the PDF the deck journeys start from.
+
+A round trip is therefore: `tex_compile` on `talk.tex`, `deck_inspect` on `talk.pdf`,
+`deck_convert` into your own Drive, edit the deck in Slides and `talk.tex` here, then
+`deck_sync` with `dry_run` on to see what the merge would do. The Docs side starts at `doc_push`
+on `doc.html`. A new workspace is seeded with a talk, a canonical document and a README saying
+exactly that.
+
+**There is no shell.** The only two things the workbench executes are a TeX engine and its own
+journeys, and both are fenced:
+
+- a journey runs in a **subprocess** (`runner.py`). `@tool` serialises one journey per process,
+  so two visitors would otherwise wait on each other's conversion; the library's own LaTeX
+  compiles (`inverse.Compiler`, which `pull` and `converge` loop over) carry no time limit of
+  their own, and a process can be killed where a thread cannot; and a journey that dies takes
+  nothing of the server with it. The job goes in on **stdin**, so a visitor's access token is
+  never in a command line, and progress lines and the `Result` come back as JSON lines.
+- a run is stopped after `RUN_TIMEOUT` (420 s), and the kill takes the whole process group - a
+  journey's TeX run is not its last breath.
+- every path a visitor names goes through `LocalWorkspace.resolve`, the agent layer's own
+  boundary: one that climbs out is refused by the same code a journey's would be.
+- `shell_escape=f`, `openin_any=p` and `openout_any=p` are set for everything a run starts, so
+  the compiles the library does for itself are fenced as the playground's own are.
+- the workspace holds 80 MB and 3000 files; one upload is 25 MB; the last 12 workspaces stay.
+
+Google works as it does everywhere else on this page: in `local` mode with the host's own token,
+in `signin` mode with the visitor's, asked for at the click and handed to that one child process.
+The server asks for it only where the journey needs it (`effects.google`), and a local journey
+carries nobody's credentials.
+
+### Reaching a deck this app did not make
+
+`drive.file` reaches only the files the app itself created, which is what keeps it a
+non-sensitive scope - and what makes a deck somebody else built invisible to `deck_adopt` and
+`deck_pull`. The [Google Picker](https://developers.google.com/drive/picker) is Google's own
+answer: the visitor chooses the file in Google's own window, and that choice grants this app
+`drive.file` on that one file. Where `B2S_PLAYGROUND_GOOGLE_API_KEY` names a browser API key
+(Picker API enabled, restricted to the service's referrer), the `deck` and `doc` arguments grow
+a *Pick from Drive…* button. An API key is not a secret; like the client id it belongs in the
+deployment's environment. Without one the buttons are simply not there.
 
 ## The Google deck
 
@@ -73,6 +129,8 @@ lists can sign in; everyone else is refused by Google before the playground sees
 | upload | 25 MB |
 | each TeX run | 90 s, twice (navigation needs the second) |
 | jobs kept | the last 40 finished ones; folders an earlier run of the server left are swept at start |
+| workbench runs | one at a time, stopped after 420 s (`B2S_WORKBENCH_TIMEOUT`) |
+| a workspace | 80 MB, 3000 files; the last 12 stay |
 
 Jobs live in `$B2S_PLAYGROUND_JOBS/<port>` (default: the temp folder's `b2s-playground`); one
 folder per port, so a second server on the same machine does not sweep the first one's jobs.
@@ -94,7 +152,8 @@ docker run --rm -p 7860:7860 beamer2slides-playground
 
 A TeX source from strangers is code. What keeps it contained:
 
-- shell escape off (`-no-shell-escape`), so `\write18` runs nothing;
+- shell escape off (`-no-shell-escape` on the command line, `shell_escape=f` in the environment
+  for the compiles the library starts for itself), so `\write18` runs nothing;
 - `openin_any=p` / `openout_any=p` (TeX Live's paranoid mode, set in the image and for every run):
   no reading or writing absolute paths or `..`, so `\input{/etc/passwd}` is refused;
 - a time limit per run and a page limit per job;
@@ -111,7 +170,7 @@ source it is handed. From a checkout, with the project's billing account linked:
 ```
 gcloud run deploy beamer2slides-playground --source . --region europe-west1 \
   --allow-unauthenticated --memory 2Gi --cpu 2 --timeout 900 --max-instances 1 \
-  --set-env-vars B2S_PLAYGROUND_GOOGLE_CLIENT_ID=<the web client id>
+  --set-env-vars B2S_PLAYGROUND_GOOGLE_CLIENT_ID=<the web client id>,B2S_PLAYGROUND_GOOGLE_API_KEY=<the browser key>
 ```
 
 What the flags are for, beyond taste:
