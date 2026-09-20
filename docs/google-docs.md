@@ -1848,6 +1848,65 @@ a whole campaign built around the reader could never have reached, which is rath
 point of having a judge that is not about the reader. With the fix: 2,800 rounds at
 chains 4, 6 and 8, nothing failed, the judge asking some 3,100 questions in them.
 
+### The same question for a paragraph, and the twin that took its key
+
+The narrow half of `_arrived` asks about a grid. The same question for a paragraph is
+plainer still — the reader left the block **word for word** as the base has it and the
+source reworded it, so there is nothing to merge and the file's words must simply be
+there at the end — and nobody was asking it either. `_words_arrived` does, and it costs
+nothing to ask: over 900 chain-4 rounds it asks 1,261 times, over 450 chain-8 rounds
+1,315.
+
+Two things had to be got right before it would say anything true. A chip's **face is
+the document's to draw** — the file asks for a person chip reading `Grace`, Docs renders
+`grace` off the address — so the comparison is `_says`: the block's own words, plus its
+frozen runs by what they *are* (`oracle.frozen_marks`), which is the oracle's own answer
+to the same question. And the finding is `wording_lost`, not `words_lost`: the oracle
+already has that kind and it asks the opposite question (words of the *reader's* gone
+from a block), and two checks under one kind make one `KNOWN` entry mean two things.
+
+It found a defect straight away, and a bad one. `adopt_keys` is the one place that gives
+a block written from nothing the key the plan meant it to have — a rewrite is a delete
+and a write, and the delete takes the block's named range with it. It matched the plan to
+the read-back through a **dictionary of words**. A reader who pastes a paragraph makes a
+second block word for word the same, and a document is full of blocks that read alike; so
+when the copy stood *in front* of the original and the same sync rewrote the original
+(the source had added a chip to it), the walk down the document reached the copy first and
+handed it the key the file had carried since the push. The source's chip landed on exactly
+the right block — and that block then settled under a name nobody asked for, with file,
+base and document all agreeing on it. Convergence is blind to that by construction, and so
+is the loss oracle: nothing of the reader's went anywhere.
+
+Order is the information the dictionary threw away, and there is plenty of it: the plan is
+the merged block list and the read-back is the document written from it, so the two are
+very nearly the same sequence. `doc_merge._adopt_in_order` aligns them and pairs inside
+every matching run. On the **words** and not the shape — Docs merges two paragraphs keeping
+the first one's style, so the shape is the very thing a write changes, and a heading the
+source had moved *and* restyled came back under neither pass, the alignment refusing it for
+its shape and the words pass for its two pasted twins (seed 96300, which the oracle *could*
+see, as `identity_lost`, because that key landed on nobody at all). And only where the two
+sequences hold the same number of blocks saying that thing: one plan block against three
+identical ones in the read-back has an alignment too, and it is a guess, which is the defect
+this whole family is about.
+
+Measured: with the pass taken out, seed 94000 fails 2 of 700 rounds at chain 6 and 96000
+1 of 1,200 at chain 4. With the pass out **and `_words_arrived` out**, those 700 rounds
+pass in silence — which is the judge's whole case.
+
+It also paid for itself twice over in the oracle. `_twin_unmarks`, written a few days
+earlier to forgive an un-bolding standing on a block's pasted double, was forgiving a
+symptom of this very defect; with the cause fixed it excuses nothing (3,750 rounds at
+chains 4 to 8 without it, nothing found) and is gone, because an oracle that forgives what
+no longer happens is a blind spot waiting for the next defect that looks like it. And
+`_pared_down` was recognising only half of its own case: deleting `soft` out of
+`soft\xadhyphen` leaves `\xadhyphen` if the reader stops at the word and plain `hyphen` if
+they sweep the soft hyphen up too — the same deletion, and only the first was known, so the
+second read as a word they had typed and the source's rewriting of the other half looked
+like a loss (seed 94030, 1 of 700 rounds at chain 6 without the widening). The cut may now
+take the joiner with it, guarded by the narrow leftover not standing there as well: a base
+token pared down once leaves one token, so `hyphen` beside `\xadhyphen` is a word the reader
+typed and still has to survive.
+
 ## Remaining risks
 
 1. **Pictures** — retired, see "Pictures, and the chips a request can make" above. What

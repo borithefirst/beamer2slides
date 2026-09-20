@@ -1209,7 +1209,11 @@ def _arrived(was: dict, before: dict, mine: dict, after: dict, report: dict,
         base_b, doc_b, src_b, end_b = (oracle.keyed(side[tab]) for side in sides)
         for key, block in base_b.items():
             here, file_b, then = doc_b.get(key), src_b.get(key), end_b.get(key)
-            if _grid(block) is None or here is None or then is None or file_b is None:
+            if here is None or then is None or file_b is None:
+                continue
+            if _grid(block) is None:
+                out += _words_arrived(key, block, here, file_b, then, said, tab,
+                                      step, seen)
                 continue
             out += _cells_arrived(key, block, here, file_b, then, said, tab,
                                   step, seen)
@@ -1235,6 +1239,51 @@ def _arrived(was: dict, before: dict, mine: dict, after: dict, report: dict,
                 f"left the document at {got[0]}x{got[1]} and the report says nothing",
                 tab=tab, key=key))
     return out
+
+
+def _words_arrived(key, block, here, file_b, then, said, tab, step,
+                   seen: Counter) -> list[dict]:
+    """The same question for a paragraph: one the reader left word for word as the
+    base has it, and the source reworded, must say what the file says when the sync
+    is over.
+
+    There is nothing to merge in that case — it is the plainest thing a sync does —
+    and it was judged by nobody. The oracle asks whether the *reader's* work is still
+    there and a source edit that never arrives takes nothing of theirs away;
+    convergence is satisfied by any reading the base then agrees with. So an edit
+    could be dropped in silence as long as it was dropped consistently.
+    """
+    if block.get("kind") == "table":
+        return []
+    mine, was, now, end = (_says(b) for b in (file_b, block, here, then))
+    if now != was or mine == was:
+        return []                     # the reader wrote in it, or the source did not
+    seen["arrival/words asked"] += 1
+    if end == mine or oracle._named(said, key):
+        return []
+    seen["arrival/words missed"] += 1
+    return [oracle.finding(
+        # Not `words_lost`, which is the oracle's own and asks the opposite question
+        # (words of the *reader's* gone from a block). Two checks under one kind make
+        # a `KNOWN` entry, and a triage, mean two things at once.
+        "wording_lost", "loss",
+        f"step {step}: the reader left {key!r} word for word as the base has it and "
+        f"the source made it {mine[0]!r}, but the sync left the document saying "
+        f"{end[0]!r} and the report says nothing", tab=tab, key=key)]
+
+
+def _says(block: dict) -> tuple:
+    """What a block says, comparably between the file and a read-back: the words of
+    its own, and the frozen runs by what they *are*.
+
+    Not `oracle.text_of`, which takes a chip at its face value — and a chip's face is
+    the document's to draw. The file asks for a person chip reading `Grace` and Docs
+    renders `grace` off the address, so every source `add_chip` read as an edit that
+    never arrived. `frozen_key` is the oracle's own answer to the same question.
+    """
+    return ("".join(r.get("text", "") for r in oracle.runs_of(block)
+                    if not r.get("frozen")),
+            oracle.frozen_marks(block))
 
 
 def _cells_arrived(key, block, here, file_b, then, said, tab, step,

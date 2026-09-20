@@ -1654,6 +1654,28 @@ keys, named ranges), `doc_merge.py` (pure planning), `doc_sync.py` (the commands
   Nine findings over 2,100 rounds, shrunk to three source ops and no reader at all (seeds
   88033, 88075); with the fix, 2,800 rounds at chains 4/6/8 clean, the judge asking ~3,100
   questions.
+  **The same question for a paragraph** (`_words_arrived`) is plainer still - the reader left
+  the block word for word as the base has it and the source reworded it, so there is nothing
+  to merge - and nobody asked it either (~1,300 questions per campaign). It compares `_says`
+  (own words + `frozen_marks`), because a chip's **face is the document's to draw** (the file
+  says `Grace`, Docs renders `grace` off the address), and its kind is `wording_lost`, since
+  `words_lost` is the oracle's own and asks the opposite question. It found `adopt_keys`
+  matching the plan to the read-back by a **dictionary of words**: a reader's pasted copy
+  standing in front of a block the same sync rewrote (a rewrite deletes the block's named
+  range) took the key the file had carried since the push, the source's chip landing on the
+  right block and settling under a name nobody asked for - file, base and document agreeing,
+  nothing of the reader's gone, so neither other judge could see it. `_adopt_in_order` aligns
+  the plan with the read-back and pairs inside every matching run: on the **words**, not the
+  shape (Docs merges two paragraphs keeping the first one's style, so a heading the source
+  moved *and* restyled came back under neither pass - seed 96300), and only where both
+  sequences hold the same number of blocks saying that thing (one plan block against three
+  identical ones has an alignment too, and it is a guess). Without the pass, 2 of 700 rounds
+  at chain 6 and 1 of 1,200 at chain 4; without the pass *and* without the judge, those 700
+  pass in silence. Two oracle changes came with it: `_twin_unmarks` was forgiving a symptom of
+  this defect and is **gone** (3,750 rounds at chains 4-8 without it, nothing found - an
+  oracle that forgives what no longer happens is a blind spot waiting), and `_pared_down` now
+  lets the cut take the joiner with it (`soft\xadhyphen` minus `soft\xad` is `hyphen`, not only
+  `\xadhyphen`; seed 94030, 1 of 700), guarded by the narrow leftover not standing there too.
   A body may not end on a table, so the paragraph after a final one keeps its mark however it
   is deleted (`_delete_range`: its words go, an empty paragraph stays where it stood) - but
   the append index came from the last block the sync *keeps*, which is then the table, and a
