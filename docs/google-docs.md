@@ -182,6 +182,30 @@ shading, so the CSS would be a lie; and no margin property is among what survive
 A `<li>` carries the same, except its indents, which belong to the list preset and
 would fight `createParagraphBullets`.
 
+**Every named style Docs has is a kind of its own.** `NORMAL_TEXT` is a paragraph,
+`HEADING_1..6` are headings of that level, and `TITLE` and `SUBTITLE` are `title` and
+`subtitle` (`doc_ir.NAMED_KINDS`), written as `data-style="title"` on the `<p>`. They
+had no kind before, and `namedStyleType` is in `MANAGED_PARAGRAPH` — named on every
+restyle whether or not the block asks for it — so a named style the dialect could not
+spell was one the merge quietly wrote `NORMAL_TEXT` over: the document's Title became
+body text the first time the source touched that block. A named style the dialect does
+not know is a named style it destroys, which is why the set is now the whole of Docs'.
+
+`class="title"` reaches nothing in Drive's importer, so a Title and a Subtitle are also
+in what no import can carry: `carry_unimported` compares the plan's named style with
+the read-back's and `tidy_requests` writes the difference. Comparing the *style* and
+not the kind is what keeps a list item the importer left a plain paragraph quiet — both
+are `NORMAL_TEXT` — and it is safe against a reader who demoted a heading in the
+browser for the reason the rest of the settle is: the plan is the merged IR, and
+`_take_shape` gives it the source's shape only where the document kept the base's.
+
+It also repairs a defect that had nothing to do with named styles being missing:
+deleting a block takes its paragraph mark, and Docs merges the two keeping the **first**
+one's style, so the paragraph under a deleted heading became a heading. Its style is
+written before the delete above it, not after, and nothing could reorder those. The
+settle now sees a plan that says paragraph and a document that says heading, and writes
+`NORMAL_TEXT`.
+
 **A run or paragraph that only repeats its named style says nothing**
 (`doc_ir._named_defaults`). An import sets a face and a size on nearly every run it
 writes, and without subtracting the named style the canonical file would come back as

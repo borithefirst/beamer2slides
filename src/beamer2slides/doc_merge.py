@@ -261,16 +261,20 @@ def unimported_requests(live: dict) -> list[dict]:
 
     A paragraph's own span for the shading and the space around it; the exact
     stretch of words for small caps, which is why the ranges were measured
-    character by character and not run by run.
+    character by character and not run by run; and the named style, for a Title or
+    a Subtitle, which the importer flattens to body text whatever the file says
+    (`class="title"` reaches nothing).
     """
     out = []
     for block in live["blocks"]:
         want = block.get("unimported")
         if not want:
             continue
-        if want["paragraph"]:
+        if want["paragraph"] or want.get("named"):
             style = {api: _paragraph_value(key, want["paragraph"][key])
                      for key, api in PARAGRAPH_FIELDS if key in want["paragraph"]}
+            if want.get("named"):
+                style["namedStyleType"] = want["named"]
             out.append({"updateParagraphStyle": {
                 "range": {"startIndex": block["span"][0], "endIndex": block["span"][1]},
                 "paragraphStyle": style, "fields": ",".join(sorted(style))}})
@@ -548,8 +552,18 @@ def carry_unimported(live: dict, planned: list[dict]) -> int:
         missing = {key: mine[key] for key in UNIMPORTABLE
                    if mine.get(key) is not None and mine[key] != block.get(key)}
         ranges = _smallcaps_gaps(mine, block)
-        if missing or ranges:
-            block["unimported"] = {"paragraph": missing, "smallcaps": ranges}
+        # A named style the import could not carry. Compared as the style and not as
+        # the kind, so a list item the importer left a plain paragraph — both
+        # NORMAL_TEXT — says nothing, and only a real difference is written. It is
+        # safe against a reader who demoted a heading in the browser for the reason
+        # the rest of this is: `mine` is the merged plan, and `_take_shape` gives it
+        # the source's shape only where the document kept the base's.
+        named = named_style(mine)
+        if named == named_style(block):
+            named = None
+        if missing or ranges or named:
+            block["unimported"] = {"paragraph": missing, "smallcaps": ranges,
+                                   "named": named}
             done += 1
     return done
 
@@ -1311,14 +1325,22 @@ def paragraph_style(block: dict) -> tuple[dict, str]:
     a value. Named-and-unset is how the API is told to put a property back to its
     default, which is what a source that dropped an indent means.
     """
-    style = {"namedStyleType": doc_ir.NAMED_STYLE[block.get("level", 0)
-                                                  if block["kind"] == "heading" else 0],
+    style = {"namedStyleType": named_style(block),
              "alignment": doc_ir.TO_ALIGNMENT[block.get("align") or "left"]}
     fields = ITEM_PARAGRAPH if block["kind"] == "item" else MANAGED_PARAGRAPH
     for key, api in PARAGRAPH_FIELDS:
         if api in fields and block.get(key) is not None:
             style[api] = _paragraph_value(key, block[key])
     return style, ",".join(fields)
+
+
+def named_style(block: dict) -> str:
+    """Which of Docs' named styles a block is. `namedStyleType` is named on every
+    paragraph the merge writes, so a kind missing from here is silently written as
+    body text: that is what happened to Title and Subtitle (`doc_ir.NAMED_KINDS`)."""
+    if block["kind"] == "heading":
+        return doc_ir.NAMED_STYLE[block.get("level", 0)]
+    return doc_ir.KIND_STYLE.get(block["kind"], "NORMAL_TEXT")
 
 
 def _paragraph_value(key: str, value):

@@ -308,6 +308,24 @@ def test_a_paragraph_the_source_turned_into_a_heading_is_written():
     assert style["range"] == {"startIndex": 1, "endIndex": 11}
 
 
+def test_a_title_the_source_moved_or_reworded_is_still_a_title():
+    """`namedStyleType` is named on every paragraph the merge writes, so a style the
+    dialect could not spell was one it wrote NORMAL_TEXT over. Docs has NORMAL_TEXT,
+    TITLE, SUBTITLE and HEADING_1..6, and `doc_ir.NAMED_KINDS` covers the last two."""
+    was = {"kind": "title", "key": "t:x", "runs": [{"text": "The Report"}]}
+    base = live([was])
+    # The source centres it — a shape change, so the whole paragraph style is written,
+    # `namedStyleType` with it.
+    result = doc_merge.plan(base, live([was | {"align": "center"}]), live(base["blocks"]))
+    style = [r["updateParagraphStyle"] for r in result["requests"]][0]
+    assert style["paragraphStyle"]["namedStyleType"] == "TITLE"
+    assert style["paragraphStyle"]["alignment"] == "CENTER"
+    # And the source moving it off the style still writes what it asked for.
+    plain = doc_merge.plan(base, live([para("t:x", "The Report")]), live(base["blocks"]))
+    assert [r["updateParagraphStyle"] for r in plain["requests"]][0][
+        "paragraphStyle"]["namedStyleType"] == "NORMAL_TEXT"
+
+
 def test_a_list_item_the_source_made_a_paragraph_loses_its_bullet():
     base = live([{"kind": "item", "level": 0, "ordered": False, "key": "i:x",
                   "runs": [{"text": "an item"}]}])
@@ -1493,6 +1511,37 @@ def test_small_caps_is_only_carried_where_the_words_came_through_whole():
         styled_run("caps"), {"chip": "equation", "frozen": True, "text": "x^2"}]}])
     doc_merge.adopt_keys(read, planned)
     assert "unimported" not in read["blocks"][0]
+
+
+def test_a_title_the_importer_flattened_is_put_back_by_the_settle():
+    """`class="title"` reaches nothing in Drive's importer, so a pushed file's Title
+    and Subtitle come back as body text. The settle writes the named style, exactly
+    as it writes the shading the import drops."""
+    planned = [{"kind": "title", "key": "title:t", "runs": [styled_run("The report")]},
+               {"kind": "subtitle", "key": "subtitle:s", "runs": [styled_run("A draft")]},
+               para("p:b", "one two")]
+    read = live([para("title:t", "The report"), para("subtitle:s", "A draft"),
+                 para("p:b", "one two")])
+    doc_merge.adopt_keys(read, planned)
+    assert read["blocks"][0]["unimported"]["named"] == "TITLE"
+    assert read["blocks"][1]["unimported"]["named"] == "SUBTITLE"
+    assert "unimported" not in read["blocks"][2]   # body text is what it already is
+    styles = [r["updateParagraphStyle"] for r in doc_merge.tidy_requests(read)]
+    assert [s["paragraphStyle"]["namedStyleType"] for s in styles] == ["TITLE", "SUBTITLE"]
+    assert [s["fields"] for s in styles] == ["namedStyleType", "namedStyleType"]
+    assert [s["range"] for s in styles] == [{"startIndex": 1, "endIndex": 12},
+                                            {"startIndex": 12, "endIndex": 20}]
+
+
+def test_a_heading_the_reader_demoted_is_left_demoted():
+    """The merged plan is document-wins, so a named style only reaches the settle
+    when the document never chose it. A reader who made a heading body text has
+    chosen, and the source did not say otherwise."""
+    base = live([{"kind": "heading", "level": 1, "key": "h:t", "runs": [styled_run("Goals")]}])
+    theirs = live([para("h:t", "Goals")])
+    result = doc_merge.plan(base, live(base["blocks"]), theirs)
+    doc_merge.adopt_keys(theirs, result["blocks"])
+    assert doc_merge.tidy_requests(theirs) == []
 
 
 def test_a_parent_tab_the_source_deleted_is_kept_while_a_child_is_still_wanted():

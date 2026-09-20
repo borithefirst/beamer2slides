@@ -892,6 +892,16 @@ keys, named ranges), `doc_merge.py` (pure planning), `doc_sync.py` (the commands
   replaces a dict update that could only add, so a source that took a block's centring
   or shading away now takes it away. Both fire only where the source changed the styling
   and the document did not, so a reader's own face or shading is never written over.
+- **Every named style Docs has is a kind** (`doc_ir.NAMED_KINDS`: `TITLE`/`SUBTITLE` ->
+  `title`/`subtitle`, `data-style` on the `<p>`; `doc_merge.named_style`), for the same
+  reason - `namedStyleType` is in `MANAGED_PARAGRAPH`, so a named style the dialect could
+  not spell was one the merge wrote `NORMAL_TEXT` over the first time the source touched
+  that block. The importer flattens both (`class="title"` reaches nothing), so
+  `carry_unimported` compares the plan's named style with the read-back's and
+  `tidy_requests` writes the difference - comparing the style, not the kind, so a list
+  item the importer left a plain paragraph says nothing. That also repairs the paragraph
+  under a deleted heading, which Docs' merge-on-delete rule leaves carrying the heading's
+  style (one of `KNOWN` `lost-key`'s four causes, and an `xfail` until now).
 - An equation (several index units, not one) reads as `equation {}`; its LaTeX is only in
   Drive's Markdown export, which escapes no dollar anywhere. `settle` asks the export
   (`doc_sync.equation_latex`), `doc_ir.latex_of` places each equation by the words the
