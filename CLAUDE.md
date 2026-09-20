@@ -834,6 +834,13 @@ there is nothing to reverse itself (the lesson above, applied before it could be
 was 109 refusals in 600 campaign rounds at chain 8; the same 400 rounds at chain 6 that had 734
 `unpaired` and 30 `slides-deleted` refusals now have **none at all** - every one of 2,400 first syncs
 into a person's deck does what it can - and are clean, as are 600 at chain 8 and 500 at chain 10.
+**A campaign that stops writing stops measuring**, so both decisions are counted where the refusals
+are (`fuzz_sync` prints `held: element N, slide M` beside `refused:`), and the deck they are measured
+on is drawn rather than fixed: `fuzz_world.build_adopt_base` takes its unpaired share from
+`rng.uniform(0.0, 0.9)` per deck, since a flat 15% was gentler than every deck in the corpus (24% of
+gdg24's elements are tied to no object, 90% of hebrew-lesson's) and the hard deck is the campaign's
+whole job here. 200 rounds at chain 6 hold 1,338 elements and 76 slides, 500 at chain 8 hold 5,055
+and 175, 400 at chain 12 hold 7,640 and 166; all clean, and not one refusal among them.
 **The plan is made for the deck it is going into**: everything sync writes is PDF pt times one number,
 and that number was `SLIDE_W / page`, so a deck of any other width got nothing created in it at all -
 ten of the 29 corpus decks (1440, 1920, 960, 800, 3456, 481.5, 595 pt). `DeckPlan(deck, page_width)`

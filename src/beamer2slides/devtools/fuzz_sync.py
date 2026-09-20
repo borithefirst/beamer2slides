@@ -709,6 +709,11 @@ def _sync_step(seed: int, step: int, doc: dict, base: dict, live: dict, tmp: Pat
         applied_src.append(f"{name}: {done}" if done else f"{name}: (not applicable)")
     ours = W.build_ours(doc2, base, tmp)
     mplan = merge.plan_merge(base, ours, live)
+    # What this sync left alone because it is a person's deck and nothing here may write there
+    # (`merge.plan_unit`'s unpaired unit, `plan_merge`'s slide no frame accounts for). Counted for
+    # the same reason as `refused` below: it is how one sees the campaign's own reach.
+    held = (["element"] * sum(1 for p in mplan["slides"] for u in p.get("units") or [] if u.get("unpaired"))
+            + ["slide"] * sum(1 for k in mplan["report"]["slides"]["kept"] if k["reason"] == ["the deck's own"]))
     # `--backup auto` keeps a .pptx of the deck before sync's first write, so the campaign asks what
     # the other refusals do; the no-way-back one has its own test (tests/test_adopt_sync.py).
     refused = adopt_sync.problems(base, mplan, live, {"drive": {"presentationId": "way-back"}})
@@ -718,7 +723,7 @@ def _sync_step(seed: int, step: int, doc: dict, base: dict, live: dict, tmp: Pat
         # has nothing to judge. The base does not move either: the next step plans from this one.
         return {"seed": seed, "step": step, "source_ops": list(source_ops), "deck_ops": list(deck_ops),
                 "source": applied_src, "deck": applied_deck, "findings": [], "failures": [],
-                "refused": [p["reason"] for p in refused], "doc": doc2,
+                "refused": [p["reason"] for p in refused], "held": held, "doc": doc2,
                 "message": adopt_sync.refusal_message(base["presentationId"], tmp, "new.pdf", refused),
                 "state": {"base": base, "before": live, "after": live, "report": mplan["report"],
                           "ours": ours, "next_base": None, "doc": doc2, "work": tmp}}
@@ -732,7 +737,7 @@ def _sync_step(seed: int, step: int, doc: dict, base: dict, live: dict, tmp: Pat
     findings += _settled(doc2, next_base, after, tmp, bool(loss_oracle.uncertain_slides(base, ours)))
     return {"seed": seed, "step": step, "source_ops": list(source_ops), "deck_ops": list(deck_ops),
             "source": applied_src, "deck": applied_deck, "findings": findings,
-            "failures": loss_oracle.failures(findings), "doc": doc2, "refused": [],
+            "failures": loss_oracle.failures(findings), "doc": doc2, "refused": [], "held": held,
             "state": {"base": base, "before": live, "after": after, "report": report, "ours": ours,
                       "next_base": next_base, "doc": doc2, "work": tmp}}
 
@@ -1119,6 +1124,7 @@ def offline_chain(seed: int, chain: int = 1, ops=None, work: Path | None = None,
         return {"seed": seed, "chain": chain, "shape": shape, "steps": steps, "first_sync": first_sync,
                 "ops": [{"deck": s["deck_ops"], "source": s["source_ops"]} for s in steps],
                 "refused": [r for s in steps for r in s.get("refused") or []],
+                "held": [h for s in steps for h in s.get("held") or []],
                 "failures": [f for s in steps for f in s["failures"]]}
     finally:
         if work is None:
@@ -1196,10 +1202,13 @@ def run_offline(rounds: int, seed0: int, shrink: bool, quiet: bool = False, chai
                 shape: str = "converted", first_sync: bool = False) -> list[dict]:
     bad = []
     refused: dict[str, int] = {}
+    held: dict[str, int] = {}
     for seed in range(seed0, seed0 + rounds):
         result = offline_chain(seed, chain, shape=shape, first_sync=first_sync)
         for reason in result.get("refused") or []:
             refused[reason] = refused.get(reason, 0) + 1
+        for what in result.get("held") or []:
+            held[what] = held.get(what, 0) + 1
         if result["failures"]:
             bad.append(shrink_chain(result) if shrink else result)
             if not quiet:
@@ -1207,6 +1216,11 @@ def run_offline(rounds: int, seed0: int, shrink: bool, quiet: bool = False, chai
                 print(describe_chain(bad[-1]))
         elif not quiet and (seed - seed0) % 50 == 49:
             print(f"  ... {seed - seed0 + 1} rounds")
+    if held and not quiet:
+        # Nor are these: what a sync into a person's deck left alone because nothing here may write
+        # there (an element the base could tie to no object, a slide no frame accounts for). The
+        # rest of that sync went in and the oracle judged it.
+        print("  held: " + ", ".join(f"{k} {v}" for k, v in sorted(held.items())))
     if refused and not quiet:
         # Not failures: a sync that refused wrote nothing, so there was nothing for the oracle to
         # judge. Counting them is how one sees whether the refusals are so broad that the campaign

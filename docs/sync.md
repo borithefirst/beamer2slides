@@ -1436,7 +1436,11 @@ Tests: `tests/test_adopt_sync.py` (offline: the pairing, the base's shape, every
 word for word, and the round trip through `fuzz_world`/`loss_oracle`). Campaign:
 `python -m beamer2slides.devtools.fuzz_sync offline --first-sync [--chain N]` starts from the base
 adopt records instead of the one convert writes (`fuzz_world.build_adopt_base`: generation 0, a
-person's object ids, groups gone, 15% of the elements unpaired) and adds `fuzz_sync._doubled`.
+person's object ids, groups gone, and a share of the elements unpaired **drawn per deck** — it was
+15% flat, which is gentler than every deck in the corpus table above, and the hard deck is the one
+this campaign is for) and adds `fuzz_sync._doubled`. The run prints what it **held** beside what it
+**refused**, for the same reason: to say whether the campaign is still exercising the merge or has
+quietly stopped writing anything.
 
 ## Never lose deck edits
 

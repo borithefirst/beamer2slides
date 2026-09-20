@@ -362,13 +362,17 @@ def build_adopt_base(doc, out: Path, rng: random.Random) -> dict:
       recognises this converter's work recognises them, and `sync.plan_recovery` can never sweep
       one;
     - some elements have no object at all. `adopt_sync.pair_elements` refuses to guess where two
-      boxes are equally close, and on real decks it leaves 0-36% of them unpaired, so the campaign
-      draws that too: an element with `objects: []` is one the source draws and nothing in the deck
-      is known to be.
+      boxes are equally close, and an element with `objects: []` is one the source draws and
+      nothing in the deck is known to be. How many there are is the deck's own affair - over the
+      29-deck corpus, between 24% (gdg24) and 90% (hebrew-lesson) of the elements are unpaired,
+      being how far `classify` regroups a person's boxes into one element - so the rate is drawn
+      per deck rather than fixed. It was 15% flat, which is gentler than every real deck measured,
+      and the campaign's whole job here is the deck that is not gentle.
 
     Groups are gone as well: adopt records none (`groups: []`), because a group on an adopted slide
     was made by the person and is theirs to keep."""
     base = build_base(doc, out)
+    rate = rng.uniform(0.0, 0.9)   # this deck's own (see above); 0 is a deck that paired throughout
     unpaired = 0
     for n, entry in enumerate(base["slides"]):
         sid = f"gx{n:x}{h6(str(n))}"
@@ -382,7 +386,7 @@ def build_adopt_base(doc, out: Path, rng: random.Random) -> dict:
         keep = []
         for el in entry["elements"]:
             oids = [rename[o] for o in el["objects"]][:1]  # one object per element: no groups
-            if oids and rng.random() < 0.15:
+            if oids and rng.random() < rate:
                 oids, unpaired = [], unpaired + 1        # a pairing adopt refused to make
             old_main = el["main"]
             el["readback"] = {oids[0]: {**el["readback"][old_main], "parent_group": None}} if oids else {}
