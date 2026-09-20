@@ -9,11 +9,16 @@ Half of it is what Drive's importer keeps (measured in docs/google-docs.md) and
 half is what only `batchUpdate` can write, which a push reaches through
 `doc_merge.carry_unimported` and `doc_merge.tidy_requests`.
 
+The last one is the theme question, which nothing offline can reach: `doc_world` has
+no named styles to inherit from, so only a real document can say whether a heading
+its theme centres comes through a source restyle still centred.
+
 **Not yet run.** Every assertion here follows either a measured line of
 docs/google-docs.md or the offline tests in `test_doc_ir` / `test_doc_merge`; what
 no offline test can show is whether the importer minds the newlines inside a
-`<table>`, and whether it puts a face and a size on the run or on the paragraph's
-named style. That is what this file is for.
+`<table>`, whether it puts a face and a size on the run or on the paragraph's
+named style, and whether named-and-unset really means "inherit". That is what this
+file is for.
 
 Skipped when the Google token needs a browser consent.
 """
@@ -117,6 +122,105 @@ def test_a_table_written_one_row_per_line_brings_no_white_space_with_it(paper):
 
 def find_text(cell: list[dict]) -> str:
     return "".join(r["text"] for block in cell for r in block.get("runs", []))
+
+
+# A .docx whose Heading 1 *style* is centred, bold and blue, and whose heading
+# paragraph says none of the three itself. Drive's HTML import cannot make such a
+# document (a `<style>` rule does not reach a named style, docs/google-docs.md), and
+# the API has no request that writes one either, so an import is the only way in.
+THEME_STYLES = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+<w:style w:type="paragraph" w:styleId="Heading1"><w:name w:val="heading 1"/>
+<w:pPr><w:jc w:val="center"/></w:pPr>
+<w:rPr><w:b/><w:color w:val="1155CC"/></w:rPr></w:style></w:styles>"""
+
+THEME_DOCX = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>
+<w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:r><w:t>A themed heading</w:t></w:r></w:p>
+<w:p><w:r><w:t>A paragraph under it.</w:t></w:r></w:p>
+</w:body></w:document>"""
+
+
+def test_a_heading_the_theme_centres_survives_a_source_restyle(request):
+    """The whole of the theme question, live: a heading whose centring, bold and
+    colour live in the document's HEADING_1, restyled through the file, must come out
+    centred, bold and blue still.
+
+    The mechanism is that every field the merge owns is written *named with no value*
+    when the file says nothing, which the API documents as "back to what you inherit".
+    Nothing offline can check it: `doc_world` has no named styles to inherit from.
+
+    The premise is checked before the claim. If Drive's .docx import does not put the
+    style's centring into the document's named style, the first assertion says so and
+    the test has measured that instead — which is worth knowing too.
+    """
+    import io
+
+    from googleapiclient.http import MediaIoBaseUpload
+
+    from beamer2slides import doc_sync
+    from beamer2slides.google_auth import credentials, docs_service, drive_service
+    from .test_docs_live import docx
+
+    if reason := google_unavailable():
+        pytest.skip(reason)
+    drive = drive_service(credentials())
+    ident = drive.files().create(
+        body={"name": f"b2s docs test: {request.node.name}", "mimeType": doc_sync.DOC_MIME},
+        media_body=MediaIoBaseUpload(
+            io.BytesIO(docx(THEME_DOCX, THEME_STYLES)), mimetype=(
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document")),
+        fields="id").execute()["id"]
+    docs = docs_service(credentials())
+
+    def raw() -> dict:
+        return docs.documents().get(documentId=ident).execute()
+
+    def heading_style(doc: dict) -> dict:
+        return [s for s in doc["namedStyles"]["styles"]
+                if s["namedStyleType"] == "HEADING_1"][0]
+
+    def heading_paragraph(doc: dict) -> dict:
+        return [e["paragraph"] for e in doc["body"]["content"]
+                if "A themed heading" in "".join(
+                    el.get("textRun", {}).get("content", "")
+                    for el in e.get("paragraph", {}).get("elements", []))][0]
+
+    try:
+        before = raw()
+        style = heading_style(before)
+        assert style.get("paragraphStyle", {}).get("alignment") == "CENTER", (
+            "the premise: Drive's importer did not put the style's centring into "
+            "HEADING_1, so this document cannot answer the question")
+        assert style.get("textStyle", {}).get("bold") is True
+        # And the heading itself says none of it: that is the rule the whole answer
+        # rests on — a paragraph reports what is set on it, never what it inherits.
+        paragraph = heading_paragraph(before)
+        assert "alignment" not in paragraph["paragraphStyle"]
+        assert not any(el.get("textRun", {}).get("textStyle", {}).get("bold")
+                       for el in paragraph["elements"])
+
+        OUT.mkdir(parents=True, exist_ok=True)
+        path = OUT / f"{request.node.name}.html"
+        doc_sync.adopt(ident, path)
+        paper = Paper(path, ident)
+        assert "text-align" not in paper.text   # the file claims none of the theme
+        # A source restyle of that very block: the words change and the styling with
+        # them, which is what makes the merge name every field it owns.
+        paper.edit("A themed heading", "<em>A themed heading</em>, restyled")
+        assert paper.sync()["requests"] > 0
+
+        after = raw()
+        assert heading_style(after)["paragraphStyle"]["alignment"] == "CENTER"
+        paragraph = heading_paragraph(after)
+        assert paragraph["paragraphStyle"].get("alignment") in (None, "CENTER")
+        assert paragraph["paragraphStyle"]["namedStyleType"] == "HEADING_1"
+        # Nothing of ours pinned the run against the theme either.
+        assert not any(el.get("textRun", {}).get("textStyle", {}).get("bold") is False
+                       for el in paragraph["elements"])
+        paper.settled()
+    finally:
+        drive.files().delete(fileId=ident).execute()
 
 
 def test_a_reader_who_changes_a_face_keeps_it_through_a_source_edit(paper):

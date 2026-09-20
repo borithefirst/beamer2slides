@@ -1057,6 +1057,21 @@ keys, named ranges), `doc_merge.py` (pure planning), `doc_sync.py` (the commands
   replaces a dict update that could only add, so a source that took a block's centring
   or shading away now takes it away. Both fire only where the source changed the styling
   and the document did not, so a reader's own face or shading is never written over.
+- **The document's theme is the reader's, and an edit through the file leaves it alone.**
+  A document's look lives in its named styles, which no request can write, so the only
+  question is whether a source edit can *pin* a paragraph against its theme - and
+  `documents.get` reports what is set on a paragraph and its runs, never what they
+  inherit. A heading a theme makes blue, bold and centred says none of it, the file says
+  none of it, and a managed field with no value is the API's "back to what you inherit",
+  so all three come back after a rewrite and follow the theme if the reader changes it.
+  The alignment was the one exception and a real loss: `paragraph_style` wrote `START`
+  whenever the file said nothing, which is also what such a heading says, so one source
+  restyle took it to the margin for good. It is subtracted now like the rest
+  (`_named_defaults` reads the named style's alignment) and given a value only when
+  somebody chose one, `left` among them. Nothing offline can check the inheritance
+  itself - `doc_world` has no named styles - so the experiment is a themed heading
+  through a live sync (`tests/test_docs_live_styles.py`, imported as a .docx since no
+  HTML import makes a theme; not run).
 - **Every named style Docs has is a kind** (`doc_ir.NAMED_KINDS`: `TITLE`/`SUBTITLE` ->
   `title`/`subtitle`, `data-style` on the `<p>`; `doc_merge.named_style`), for the same
   reason - `namedStyleType` is in `MANAGED_PARAGRAPH`, so a named style the dialect could

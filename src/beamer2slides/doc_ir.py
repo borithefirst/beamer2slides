@@ -467,6 +467,11 @@ def _named_defaults(doc: dict, tab_id: str | None) -> dict:
         out[style.get("namedStyleType", "")] = {
             "font": text.get("weightedFontFamily", {}).get("fontFamily"),
             "fontsize": round(float(size), 2) if size else None,
+            # A theme that centres its headings says so here, and the heading itself
+            # then reports no alignment at all. Without this the file said nothing
+            # and the write side put START back: the document's own theme, undone by
+            # a source edit that never mentioned alignment.
+            "align": ALIGNMENTS.get(para.get("alignment", "")),
         } | _paragraph_measures(para)
     return out
 
@@ -576,7 +581,7 @@ def _block_of(element: dict, lists: dict, objects: dict | None = None,
     else:
         block["kind"] = "paragraph"
     align = ALIGNMENTS.get(style.get("alignment", ""))
-    if align and align != "left":
+    if align and align != (default.get("align") or "left"):
         block["align"] = align
     # A property that only says what the paragraph's named style already says is left
     # out; so are a bullet's own indents, which belong to the list preset and not to
@@ -1337,7 +1342,7 @@ _NODES: dict[str, tuple[tuple, dict]] = {
     "namedStyle": (("namedStyleType",), {"textStyle": "namedTextStyle",
                                          "paragraphStyle": "namedParagraphStyle"}),
     "namedTextStyle": (("weightedFontFamily", "fontSize"), {}),
-    "namedParagraphStyle": (("indentStart", "indentFirstLine", "lineSpacing",
+    "namedParagraphStyle": (("alignment", "indentStart", "indentFirstLine", "lineSpacing",
                              "spaceAbove", "spaceBelow", "shading"), {}),
     "namedRangeGroup": (("name",), {"namedRanges": "namedRange[]"}),
     "namedRange": (("namedRangeId", "name"), {"ranges": "range[]"}),

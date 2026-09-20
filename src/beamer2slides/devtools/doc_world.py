@@ -457,8 +457,10 @@ class World:
         for para in self._paragraphs(arg["range"]):
             if "namedStyleType" in fields and style.get("namedStyleType"):
                 para["named"] = style["namedStyleType"]
-            if "alignment" in fields and style.get("alignment"):
-                para["align"] = style["alignment"]
+            if "alignment" in fields:
+                # Named with no value: back to what the paragraph inherits. This
+                # world has no named styles, so that is Docs' own START.
+                para["align"] = style.get("alignment") or "START"
             # A field the merge names without a value means "back to the default"
             # (`doc_merge.paragraph_style`), which is how a property the source
             # dropped goes away. Naming it and not applying that would make the

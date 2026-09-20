@@ -1476,9 +1476,26 @@ def test_a_measurement_the_source_dropped_is_named_with_no_value_so_it_goes():
              if "updateParagraphStyle" in r][0]
     assert "indentStart" not in style["paragraphStyle"]     # named and unset: back to default
     assert "indentStart" in style["fields"]
-    assert style["paragraphStyle"]["alignment"] == "START"
+    # The alignment goes exactly the same way, and is the reason a heading a theme
+    # centres is not left-aligned by a source edit that never mentioned alignment.
+    assert "alignment" not in style["paragraphStyle"]
+    assert "alignment" in style["fields"]
     # And the merged block itself no longer carries what the source took away.
     assert "indent" not in result["blocks"][0] and "align" not in result["blocks"][0]
+
+
+def test_an_alignment_somebody_chose_is_still_written_with_a_value():
+    """The other half: leaving `alignment` unset means "whatever the named style
+    says", so a block that does say something must not be left to it. `left` is a
+    real answer — a heading the theme centres and the reader pulled back to the
+    margin reads as `align: left` and has to be written as START."""
+    for align, want in (("left", "START"), ("center", "CENTER")):
+        base = live([para("p:s", "one two")])
+        ours = live([para("p:s", "one two", align=align)])
+        result = doc_merge.plan(base, ours, live(base["blocks"]))
+        style = [r["updateParagraphStyle"] for r in result["requests"]
+                 if "updateParagraphStyle" in r][0]
+        assert style["paragraphStyle"]["alignment"] == want
 
 
 def test_an_items_indents_are_left_to_the_bullet_preset():

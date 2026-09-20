@@ -485,9 +485,15 @@ EQUATION_DOCX = f"""<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 </w:body></w:document>"""
 
 
-def docx(body: str) -> bytes:
+def docx(body: str, styles: str | None = None) -> bytes:
     """A .docx of one document part: Drive's importer turns its OMML into equations,
-    which is the only way to make one — the Docs API has no request for it."""
+    which is the only way to make one — the Docs API has no request for it.
+
+    `styles` adds a `word/styles.xml`, which is the only way to make the other thing
+    no request writes: a document whose *named styles* say something (a Heading 1
+    that is centred and bold). An HTML import cannot, so a themed document has to
+    arrive as a .docx.
+    """
     import io
     import zipfile
     types = ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
@@ -495,16 +501,27 @@ def docx(body: str) -> bytes:
              '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.'
              'relationships+xml"/><Default Extension="xml" ContentType="application/xml"/>'
              '<Override PartName="/word/document.xml" ContentType="application/vnd.'
-             'openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>')
+             'openxmlformats-officedocument.wordprocessingml.document.main+xml"/>'
+             + ('<Override PartName="/word/styles.xml" ContentType="application/vnd.'
+                'openxmlformats-officedocument.wordprocessingml.styles+xml"/>'
+                if styles else '') + '</Types>')
     rels = ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
             '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
             '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/'
             '2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>')
+    part_rels = ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+                 '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/'
+                 'relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats'
+                 '.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>'
+                 '</Relationships>')
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w") as z:
         z.writestr("[Content_Types].xml", types)
         z.writestr("_rels/.rels", rels)
         z.writestr("word/document.xml", body)
+        if styles:
+            z.writestr("word/_rels/document.xml.rels", part_rels)
+            z.writestr("word/styles.xml", styles)
     return buf.getvalue()
 
 
