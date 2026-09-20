@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>beamer2slides playground — privacy</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🧩</text></svg>">
+<link rel="stylesheet" href="/static/style.css">
+<style>
+  .doc { max-width: 760px; margin: 0 auto; padding: 0 16px 48px; }
+  .doc h2 { margin: 28px 0 6px; font-size: 17px; }
+  .doc li { margin: 4px 0; }
+</style>
+</head>
+<body>
+<header>
+  <h1>beamer2slides <span>playground</span></h1>
+  <p class="tag">Privacy policy</p>
+  <nav><a href="/">← back to the playground</a>
+    <a href="https://github.com/borithefirst/beamer2slides" target="_blank" rel="noopener">GitHub ↗</a></nav>
+</header>
+
+<div class="doc">
+<p>This page is a converter, not a service with accounts. It takes a LaTeX beamer talk (typed,
+picked from the examples or uploaded as a compiled PDF), runs it through
+<a href="https://github.com/borithefirst/beamer2slides" target="_blank" rel="noopener">beamer2slides</a>,
+and — only if you ask it to — creates the resulting deck in your own Google Drive.</p>
+
+<h2>What is asked of your Google account</h2>
+<p>Only when you press <em>Create the Google Slides deck</em>, and only then, Google asks you to sign
+in and grant one permission: <code>https://www.googleapis.com/auth/drive.file</code>. That permission
+reaches <strong>only the files this app itself creates</strong> — the deck it is about to build.
+Nothing else in your Drive can be listed, read or changed with it.</p>
+
+<h2>What happens to the access token</h2>
+<ul>
+  <li>Your browser gets the token from Google and sends it with that one request.</li>
+  <li>The server holds it in memory for the single conversion and then drops it.</li>
+  <li>It is never written to disk, never logged, and never given to anyone else.</li>
+  <li>No refresh token is requested, so nothing here can act on your account later.</li>
+</ul>
+<p>You can review or withdraw the permission at any time at
+<a href="https://myaccount.google.com/permissions" target="_blank" rel="noopener">myaccount.google.com/permissions</a>.
+The deck itself is yours: it stays in your Drive until you delete it.</p>
+
+<h2>What the server keeps</h2>
+<ul>
+  <li>The source or PDF you submit and everything the conversion produced (page images,
+      backgrounds, the intermediate JSON), in a temporary folder named by a random job id.</li>
+  <li>Only the last 40 jobs are kept; older ones are deleted, and every job is gone when the
+      container restarts, which happens whenever the playground has been idle for a while.</li>
+  <li>Ordinary web-server request lines (time, path, the address the request came from).</li>
+</ul>
+<p>There are no accounts, no cookies, no analytics and no tracking. A job link
+(<code>?job=…</code>) is the only handle on a conversion; anyone who has the link can see that job
+for as long as it is kept, so treat it as you would a share link.</p>
+
+<h2>Who else is involved</h2>
+<ul>
+  <li><strong>Google</strong> — the sign-in script, and the Drive and Slides APIs that build the
+      deck. Their handling of your data is governed by the
+      <a href="https://policies.google.com/privacy" target="_blank" rel="noopener">Google privacy policy</a>.</li>
+  <li><strong>Google Fonts</strong> — the page loads the fonts the preview is drawn in.</li>
+  <li>The playground runs on Google Cloud Run. Nothing is sent to any other service.</li>
+</ul>
+
+<h2>Use of Google user data</h2>
+<p>This app's use of information received from Google APIs adheres to the
+<a href="https://developers.google.com/terms/api-services-user-data-policy" target="_blank" rel="noopener">Google
+API Services User Data Policy</a>, including the Limited Use requirements. The data is used for the
+single purpose you asked for — creating your deck — and is not transferred to anyone, used for
+advertising, or read by a human.</p>
+
+<h2>This is free software, offered as is</h2>
+<p>The playground is a demonstration of an open-source project, provided without warranty of any
+kind. Do not submit anything confidential. Questions and reports:
+<a href="https://github.com/borithefirst/beamer2slides/issues" target="_blank" rel="noopener">the issue tracker</a>.</p>
+</div>
+</body>
+</html>

@@ -106,6 +106,12 @@ def test_an_uploaded_pdf_goes_through_every_stage(base):
     assert call(f"{base}/api/jobs/{made['id']}/slides", b"")[0] == 403
 
 
+def test_the_privacy_policy_is_served(base):
+    """A published OAuth app must link one, and the link must be on the playground's own domain."""
+    status, page = call(f"{base}/privacy")
+    assert status == 200 and b"auth/drive.file" in page
+
+
 def test_what_it_refuses(base):
     assert call(f"{base}/api/jobs", b"not a pdf", "application/pdf")[0] == 400
     assert call(f"{base}/api/jobs", b"{not json")[0] == 400

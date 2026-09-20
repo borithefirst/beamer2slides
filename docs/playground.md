@@ -129,3 +129,24 @@ What the flags are for, beyond taste:
 The service's URL (`https://<service>-<hash>.<region>.run.app`) must then be added to the OAuth
 web client's **authorized JavaScript origins**, or the browser's sign-in is refused before it
 starts. Cloud Run scales to zero, so an idle playground costs only storage of the built image.
+
+What `--source .` sends to Cloud Build is `.gcloudignore` - the same set as `.dockerignore`, but
+read with **git's** rules rather than Docker's: a file only comes back if every folder above it
+came back first, and re-including a folder brings its whole subtree, so each one has to be cut
+down again. `gcloud meta list-files-for-upload` prints exactly what a deploy would send, which is
+how one checks that no credential is among it.
+
+The running deployment is
+[beamer2slides-playground](https://beamer2slides-playground-702466108736.europe-west1.run.app),
+with a CHF 50/month budget whose **spend cap** (Preview; Cloud Run is one of the services it can
+enforce on) pauses the service rather than only mailing about it. `--max-instances 1` is the other
+half of that: there is never a second instance to bill for.
+
+### The consent screen
+
+The playground serves its privacy policy at `/privacy` (`static/privacy.html`), because Google
+will not let an External app leave *Testing* until the Branding page has an application home page
+and a privacy policy link, and every link's domain must be an authorized domain - which is why
+both live on the service's own `run.app` URL rather than on GitHub. What the policy says is what
+the code does: `drive.file` only, the token used for one conversion and kept nowhere, jobs deleted
+as they roll over.

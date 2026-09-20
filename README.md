@@ -116,14 +116,20 @@ In the debug images, green boxes are text, blue are pictures, purple tables and 
 Shaded text stays in the background (red math, blue figure, grey theme).
 
 ### Playground
+
+**[Try it in your browser →](https://beamer2slides-playground-702466108736.europe-west1.run.app)**
+— type a talk, watch the stages, and, if you sign in, get the deck in your own Drive.
+
 ```
 python -m beamer2slides playground                 # http://127.0.0.1:7860
 docker build -t beamer2slides-playground . && docker run -p 7860:7860 beamer2slides-playground
 ```
 A web page to type a talk (or pick an example, or upload a PDF), compile it and see every stage:
 what becomes native, what stays in the background, and the slide rebuilt from the IR over its
-background, text editable in place. The Google deck itself is shown from recorded runs, unless the
-server is yours and you turn it on. `docs/playground.md` has the details, including hosting it.
+background, text editable in place. On the hosted one the deck is built in *your* Drive: the
+browser asks Google for `drive.file` alone — which reaches only the files the app itself creates —
+and the server uses that token for the one conversion and keeps nothing.
+`docs/playground.md` has the details, including hosting it yourself.
 
 ## How it works
 

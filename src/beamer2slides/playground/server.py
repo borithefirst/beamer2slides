@@ -340,6 +340,9 @@ class Handler(BaseHTTPRequestHandler):
         path = self.path.split("?")[0]
         if path == "/":
             return self.file(STATIC, "index.html")
+        # A published OAuth app must show the visitor a privacy policy, on its own domain.
+        if path == "/privacy":
+            return self.file(STATIC, "privacy.html")
         if path.startswith("/static/"):
             return self.file(STATIC, path[len("/static/"):])
         if path.startswith("/media/"):

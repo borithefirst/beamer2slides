@@ -1,12 +1,25 @@
 # What `gcloud run deploy --source .` sends to Cloud Build. Without this file gcloud infers one
 # from .gitignore, which would keep the credentials out by luck rather than on purpose: say it.
-# The same set as .dockerignore, since only what the Dockerfile copies can matter.
+# The same set as .dockerignore - but read with git's rules, not Docker's: a file only comes back
+# if every folder above it comes back first, and re-including a folder brings its whole subtree,
+# so each one is cut down again below. `gcloud meta list-files-for-upload` prints what this sends.
 *
-!pyproject.toml
-!README.md
-!Dockerfile
-!src/
-!examples/demo/demo.tex
-!tests/decks/*.tex
-!docs/media/
-**/__pycache__
+!/pyproject.toml
+!/README.md
+!/Dockerfile
+!/src/
+!/docs/
+!/examples/
+!/tests/
+
+# ... and now only the pieces of those the Dockerfile copies.
+/docs/*
+!/docs/media/
+/examples/demo/*
+!/examples/demo/demo.tex
+/tests/*
+!/tests/decks/
+/tests/decks/*
+!/tests/decks/*.tex
+
+**/__pycache__/
