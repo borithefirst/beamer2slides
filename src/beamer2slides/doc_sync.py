@@ -1188,6 +1188,10 @@ def _write_structure(docs, ident: str, tab: str | None, ours: dict, base: dict,
         # `plant_ranges` puts its own range back in the same breath.
         found = doc_merge.recover_tables(was, theirs)
         anchored = doc_merge.anchor_tables(theirs, result["shaped"])
+        # And the empty paragraph a new table's swallow took the name off, which the
+        # plan below would read as a block the reader had deleted. After the
+        # anchoring: it is found by the table it stands in front of.
+        anchored += doc_merge.recover_swallowed(theirs, result["shaped"])
         if anchored or found:
             plant_ranges(docs, ident, theirs, tab)
             doc, theirs = read_part(docs, ident, tab, ours, base)

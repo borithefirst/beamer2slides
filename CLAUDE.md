@@ -2015,7 +2015,21 @@ keys, named ranges), `doc_merge.py` (pure planning), `doc_sync.py` (the commands
   `_paragraph_requests` has always done it - `deleteParagraphBullets` keeps the nesting by adding
   indents of its own. 1 of 200 rounds at chain 10 with the old rule back in memory; then 1,000
   clean under `--strict` (300 at chain 10 from 290000, 500 at chain 6 from 310000), with 800 at
-  chain 4 from 270000 and 600 at chain 6 from 300000 before them.
+  chain 4 from 270000 and 600 at chain 6 from 300000 before them. And **the name a new table's
+  swallow takes** (chain-4 seed 330127): `_new_table_requests` gets rid of the empty paragraph
+  `insertTable` leaves by deleting the mark of the block before it, and a block that is itself an
+  empty paragraph is all mark, so its named range goes whole - which `_swallowed` has known since
+  seed 501271 and called harmless, the settle keying it again from its words. True of the settle,
+  not of what comes before it: a structural batch is followed by a **re-plan** against the
+  document it has just written, where the file's key names nothing, so the block reads as one the
+  reader deleted and everything the source asked of it is dropped. Here a person chip the source
+  put in the paragraph between two tables, written nowhere, the round converging with file, base
+  and document all agreeing on an empty paragraph - invisible to the oracle (nothing of the
+  reader's went) and to convergence, seen only by `_words_arrived`, and only because `_says`
+  counts a chip by what it *is*. `doc_merge.recover_swallowed` gives the key back between the
+  batch and the re-plan, after `anchor_tables` (the survivor is found by the table it stands in
+  front of) with `plant_ranges` putting the range back - the third repair hanging off that one
+  read. 900 rounds at chain 4 from 330000 clean afterwards, and 400 at chain 8 from 320000.
 - Live suite (opt-in, marker `docs`, ~5 min): `python -m pytest -m docs tests/test_docs_live.py`
   pushes a document per test, edits both sides, syncs, checks a second sync writes nothing, and
   deletes the document. Offline: `tests/test_doc_ir.py`, `test_doc_merge.py`, `test_doc_sync.py`.

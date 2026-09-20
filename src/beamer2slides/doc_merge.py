@@ -707,6 +707,44 @@ def anchor_tables(live: dict, shaped: list[dict]) -> int:
     return done
 
 
+def recover_swallowed(live: dict, shaped: list[dict]) -> int:
+    """Give back the key a new table's swallow took off an empty paragraph.
+
+    `_new_table_requests` gets rid of the empty paragraph `insertTable` leaves by
+    deleting the mark of the block in front of it, and a block that is *itself* an
+    empty paragraph is all mark: the delete covers its named range whole and Docs
+    drops it (`_swallowed`). Being keyed again from its words at the settle is not
+    soon enough, because a structural batch is followed by a **re-plan** against the
+    document it has just written — and there the file's key names nothing, so the
+    block reads as one the reader deleted and everything the source asked of it is
+    dropped in silence. A chip the source put in the paragraph between two tables
+    went that way, the round converging with file, base and document all agreeing on
+    a paragraph with nothing in it (offline chain-4 seed 330127).
+
+    The survivor is the empty paragraph standing right in front of the table whose
+    insert swallowed it: the two are merged into one, and that one keeps neither's
+    name. So this runs after `anchor_tables`, which is what gives that table its key.
+    """
+    have = {b.get("key") for b in live["blocks"] if b.get("key")}
+    done = 0
+    for told in shaped:
+        key = told.get("swallowed")
+        if not key or key in have:
+            continue
+        at = next((i for i, b in enumerate(live["blocks"])
+                   if b.get("key") == told["key"]), None)
+        if not at:                      # not found, or nothing in front of it
+            continue
+        before = live["blocks"][at - 1]
+        if before.get("key") or before["kind"] != "paragraph" \
+                or _match_text(before).strip():
+            continue
+        before["key"] = key
+        have.add(key)
+        done += 1
+    return done
+
+
 def _table_words(block: dict) -> str:
     """A table's cells as one stretch of words, with nothing of the grid in it."""
     return " ".join(block_text(inner) for row in block.get("rows", [])
@@ -2363,10 +2401,11 @@ def structure(theirs: dict, merged: list[dict],
             deletes[key] = (start, 0, [{"deleteContentRange": {
                 "range": {"startIndex": start, "endIndex": end}}}]
                 + _orphan_range(theirs["blocks"][index], start, end))
+            swallowed = _swallowed(theirs, reqs)
             plans.append((at, reqs,
-                          {"key": key,
-                           "after": _after_key(merged, position, _swallowed(theirs, reqs)),
+                          {"key": key, "after": _after_key(merged, position, swallowed),
                            "moved": True, "lines": block.get("lines"),
+                           **({"swallowed": swallowed} if swallowed else {}),
                            "note": f"`{key}`: moved where the source has it"}))
         elif block.get("regrid"):
             what = ", ".join(f"{how}s a {line}" for line, how, _ in block["regrid"])
@@ -2386,10 +2425,11 @@ def structure(theirs: dict, merged: list[dict],
             at, reqs = _new_table_requests(theirs, _insert_index(merged, position),
                                            rows, columns)
             if reqs:
+                swallowed = _swallowed(theirs, reqs)
                 plans.append((at, reqs,
                               {"key": key,
-                               "after": _after_key(merged, position,
-                                                   _swallowed(theirs, reqs)),
+                               "after": _after_key(merged, position, swallowed),
+                               **({"swallowed": swallowed} if swallowed else {}),
                                "note": f"`{key}`: a table of {rows}×{columns} "
                                        f"added by the source"}))
             elif notes is not None:
@@ -2447,10 +2487,11 @@ def _swallowed(theirs: dict, reqs: list[dict]) -> str | None:
     deleting the mark of the block in front, which merges the two the way the Delete
     key does. That block keeps its words, and so its named range — unless it is
     *itself* an empty paragraph, which is all mark: then the delete covers its range
-    whole and Docs drops it, and the block comes back unnamed. It is keyed again at
-    the settle from its words (`_adopt_by_words`), so nothing is lost by it; what
-    cannot wait that long is a table anchored on it, which `anchor_tables` looks for
-    between the batch and the settle and would never find.
+    whole and Docs drops it, and the block comes back unnamed. Two things cannot wait
+    for the settle to key it again from its words (`_adopt_by_words`): a table
+    anchored on it, which `anchor_tables` looks for in between and would never find,
+    and the block itself, which the re-plan after this batch reads as one the reader
+    deleted (`recover_swallowed`).
     """
     for req in reqs:
         span = req.get("deleteContentRange", {}).get("range")
