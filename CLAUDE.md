@@ -1546,6 +1546,34 @@ keys, named ranges), `doc_merge.py` (pure planning), `doc_sync.py` (the commands
   keep, so name-matching put the two roles on different copies and named the one that went; the
   question is how **many** the file asks for, not which (980193). Clean afterwards at 970000 and
   at three fresh seeds (600 at chain 6, 400 at chain 8, 900 at chain 4) under `--strict`.
+  **The third read, and the style a delete hands over** (500 rounds at chain 10 from 992000, 700
+  at chain 6 from 993000, plus a seed left from the round before). A sync that changes a grid
+  writes it on its own, reads the tab again and hands what it finds to `anchor_tables`, which
+  names a table whose range one of *our own* requests destroyed - and that third read was the
+  one place `recover_tables` was not run, so the free table it found was the one the reader had
+  beheaded and the regridded table's key went onto it: the reader's rows stood under the source's
+  table's name, the real one settled as `table:empty`, the file's key was gone (993608;
+  `doc_sync._write_structure` and the harness copy recover first and `plant_ranges` puts the
+  range back. Hard to see because `anchor_tables` prefers a blank table for a new one and a
+  worded one for a regrid, so the crossing needs a regrid that leaves the table blank). And Docs'
+  merge-on-delete reaches the **measurements**, not only the named style and the bullet: a
+  paragraph the reader centred, deleted by the source in the same batch, leaves the block behind
+  it centred of its own - although the merge wrote `alignment` named-and-unset one request
+  earlier, following a named style being the whole point of a theme - and that block's own source
+  restyle, written in the same breath, is handed back the spacing of the paragraph that went
+  (912452). The settle writes the plan's **whole** paragraph style back on a block this run wrote
+  whose style the write did not leave as the plan asked (`_unwritten`, `paragraph_written`),
+  rather than the difference: the repairs read each other's work otherwise, the named style
+  deciding what "inherited" means - a block still read as HEADING_1 under a theme that centres
+  headings reports no alignment of its own, and the centring shows only once `named` has written
+  NORMAL_TEXT back, which is in this very batch. It is the one thing in the settle that takes
+  styling away, and the narrowing is what keeps it safe: a block nobody wrote is left alone
+  (`test_styling_the_plan_does_not_ask_for_is_never_taken_away` fails without it). It heals a
+  *plan* that pins an inherited alignment too, which is the defect
+  `test_the_campaign_sees_a_theme_undone` puts back on purpose, so that probe opens both doors
+  now - what it measures is the oracle's reach, not which of our mechanisms is broken. Clean
+  afterwards at 993000 (700 at chain 6) and 995000 (400 at chain 10) under `--strict`; 500 at
+  chain 8 from 994000 came back with three, two of them `frozen_gone`, which is still open.
 - Live suite (opt-in, marker `docs`, ~5 min): `python -m pytest -m docs tests/test_docs_live.py`
   pushes a document per test, edits both sides, syncs, checks a second sync writes nothing, and
   deletes the document. Offline: `tests/test_doc_ir.py`, `test_doc_merge.py`, `test_doc_sync.py`.

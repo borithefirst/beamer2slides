@@ -63,6 +63,9 @@ PARAGRAPH_FIELDS = (("indent", "indentStart"), ("indent_first", "indentFirstLine
 # that a property the source took away goes away. Unset-and-named is the API's own
 # way of saying "back to the default" (documented, not measured here).
 MANAGED_PARAGRAPH = ("namedStyleType", "alignment") + tuple(a for _, a in PARAGRAPH_FIELDS)
+# Those of them a block says in its own words, and how each is spelled in the API.
+# The named style is not one: it is the block's kind (`named_style`).
+PARAGRAPH_KEYS = (("align", "alignment"),) + PARAGRAPH_FIELDS
 # A bullet's indents are the list preset's, not a choice anybody made: `doc_ir`
 # leaves them out of an item and `createParagraphBullets` would overwrite them.
 ITEM_PARAGRAPH = tuple(f for f in MANAGED_PARAGRAPH if not f.startswith("indent"))
@@ -332,9 +335,18 @@ def unimported_requests(live: dict) -> list[dict]:
         want = block.get("unimported")
         if not want:
             continue
-        if want["paragraph"] or want.get("named"):
-            style = {api: _paragraph_value(key, want["paragraph"][key])
-                     for key, api in PARAGRAPH_FIELDS if key in want["paragraph"]}
+        if want.get("whole"):
+            # A paragraph this run wrote: the whole style the plan asked for, fields
+            # named whether or not it asks for them, so what a write left on the
+            # block and nobody asked for goes away with the rest (`carry_unimported`).
+            style, fields = want["whole"]["style"], want["whole"]["fields"]
+            out.append({"updateParagraphStyle": {
+                "range": {"startIndex": block["span"][0], "endIndex": block["span"][1]},
+                "paragraphStyle": style, "fields": fields}})
+        elif want["paragraph"] or want.get("named"):
+            style = {api: (doc_ir.TO_ALIGNMENT[want["paragraph"][key]] if key == "align"
+                           else _paragraph_value(key, want["paragraph"][key]))
+                     for key, api in PARAGRAPH_KEYS if key in want["paragraph"]}
             if want.get("named"):
                 style["namedStyleType"] = want["named"]
             out.append({"updateParagraphStyle": {
@@ -854,11 +866,55 @@ def carry_unimported(live: dict, planned: list[dict]) -> int:
         if (mine["kind"] == "item") != (block["kind"] == "item"):
             bullet = ("ordered" if mine.get("ordered") else "unordered") \
                 if mine["kind"] == "item" else "none"
-        if missing or ranges or named or bullet is not None:
-            block["unimported"] = {"paragraph": missing, "runs": ranges,
-                                   "named": named, "bullet": bullet}
+        # And, for a paragraph this run wrote, every measurement the write did not
+        # leave as the plan asked — in either direction, because Docs' merge-on-delete
+        # gives as well as takes. The style goes back whole rather than as the
+        # difference: the repairs would otherwise read each other's work, the named
+        # style deciding what "inherited" means. A block still read as a HEADING_1
+        # under a theme that centres headings reports no alignment of its own, and
+        # the centring the delete above it handed over shows only once `named` has
+        # written NORMAL_TEXT back — which is in this very batch (seed 912452).
+        whole = None
+        if mine.get("paragraph_written") and (named or _unwritten(mine, block)):
+            style, fields = paragraph_style(mine)
+            whole = {"style": style, "fields": fields}
+        if missing or ranges or named or bullet is not None or whole:
+            block["unimported"] = {"paragraph": missing, "runs": ranges, "named": named,
+                                   "bullet": bullet, "whole": whole}
             done += 1
     return done
+
+
+def _unwritten(mine: dict, live: dict) -> list[str]:
+    """Which measurements the write did not leave as the plan asked.
+
+    Deleting a paragraph hands the block behind it the style of the one that went,
+    which `carry_unimported` already repairs for the named style and the bullet. It
+    reaches the measurements too, in both directions: a paragraph the reader
+    centred, deleted by the source in the same batch, leaves the block after it
+    centred *of its own* — although the merge had written that field named-and-unset
+    one request earlier, because following its named style is the whole point of a
+    theme — and the source's own restyle of that block, written in the same breath,
+    is handed back the spacing of the paragraph that went (offline chain-6 seed
+    912452).
+
+    Only a paragraph this run wrote is asked about (`_paragraph_requests` says so on
+    the block it writes), because putting the style back is the one thing in the
+    settle that can take styling away. It is the write's own field being taken back,
+    and a block nobody wrote is left alone — which keeps the rule the rest of this
+    pass is built on: in a read, "absent" is also what a reader who took the styling
+    off looks like, and a settle must never undo that. An item's indents are the
+    list preset's and belong to neither side (`ITEM_PARAGRAPH`), so they are left
+    alone whichever side is one.
+    """
+    return [api for key, api in PARAGRAPH_KEYS
+            if api in _paragraph_fields(mine, live) and mine.get(key) != live.get(key)]
+
+
+def _paragraph_fields(mine: dict, live: dict) -> tuple:
+    """Which paragraph properties the settle may write on a block. A bullet's own
+    indents are the list preset's, whichever side of the pair is the item."""
+    return ITEM_PARAGRAPH if "item" in (mine["kind"], live["kind"]) else MANAGED_PARAGRAPH
 
 
 def _unimportable_runs(mine: dict, live: dict) -> list[tuple[int, int, dict]]:
@@ -1663,6 +1719,9 @@ def _object_request(index: int, run: dict) -> dict:
 def _paragraph_requests(start: int, end: int, block: dict, was_item: bool) -> list[dict]:
     """The paragraph's kind, alignment and bullet, in the only order that works."""
     out: list[dict] = []
+    # The settle reads this back: only a paragraph this run wrote may have a field
+    # of its own written again from the plan (`_unwritten`).
+    block["paragraph_written"] = True
     if block["kind"] != "item" and was_item:
         # Text inserted at the start of a list item joins that item, bullet and all;
         # and a block the source turned back into a paragraph must lose its glyph.

@@ -1146,7 +1146,15 @@ def _write_structure(docs, ident: str, tab: str | None, ours: dict, base: dict,
             continue
         shaped += result["shaped"]
         doc, theirs = read_part(docs, ident, tab, ours, base)
-        if doc_merge.anchor_tables(theirs, result["shaped"]):
+        # A table the *reader* beheaded in the browser carries no range either
+        # (`doc_merge.recover_tables`), and this read is the one place that had
+        # nobody to recover it: `anchor_tables` then saw a table with no key where
+        # it was looking for one of ours whose range this very batch destroyed, and
+        # gave it that key. Recovered first, it is not free to be taken, and
+        # `plant_ranges` puts its own range back in the same breath.
+        found = doc_merge.recover_tables(was, theirs)
+        anchored = doc_merge.anchor_tables(theirs, result["shaped"])
+        if anchored or found:
             plant_ranges(docs, ident, theirs, tab)
             doc, theirs = read_part(docs, ident, tab, ours, base)
         was = doc_merge.rebase_tables(was, theirs, result["shaped"])

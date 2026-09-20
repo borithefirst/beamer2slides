@@ -46,13 +46,16 @@ CHAINED = (0, 1, 2, 3, 4, 5)
 # it, 309 (chain 4) one of two identical person chips counted as lost, 1031 and 1147
 # (chain 8) the two defects the chained campaign found last, 5099/5167 (chain 8) the
 # world not moving a named range when a table row went, 5130 (chain 8) the oracle
-# accusing a token both sides had edited half of, and five at chain 6: 970711 a table
+# accusing a token both sides had edited half of, and seven at chain 6: 970711 a table
 # the reader beheaded in a tab the merge plans nothing for, 970228 a mark the source
 # asked for on an un-bolding the base already had, 970528 a word the merge split into
-# two runs, 980193 two copies of one picture with one dropped by the source.
+# two runs, 980193 two copies of one picture with one dropped by the source, 993608 a
+# beheaded table taking the key of one the source regrids, 912452 a paragraph keeping
+# the centring of the one deleted above it.
 REGRESSIONS = ((60, 1), (181, 1), (309, 4), (1031, 8), (1147, 8),
                (5099, 8), (5130, 8), (5167, 8),
-               (970228, 6), (970528, 6), (970711, 6), (980193, 6))
+               (970228, 6), (970528, 6), (970711, 6), (980193, 6),
+               (912452, 6), (993608, 6))
 
 
 def _round(seed: int, chain: int, shape: str | None = None) -> None:
@@ -259,6 +262,14 @@ def test_the_campaign_sees_a_theme_undone(monkeypatch):
     whenever the file said nothing, which is also what a heading centred by the
     document's theme says. Measured over the first 40 `themed` seeds at chain 2, the
     campaign catches 6 of them; these sixteen hold two.
+
+    The defect now sits behind two doors, and the probe opens both: the settle puts
+    the plan's whole paragraph style back on a block this run wrote whose style the
+    write did not leave as the plan asked (`_unwritten`), which heals a plan that
+    pins an alignment as surely as it heals the one Docs' merge-on-delete pins. That
+    repair is a second line and not this check's subject — what is measured here is
+    the oracle's reach, so both are put back and the question stays the one it
+    always was: with a theme undone in the document, does the campaign say so?
     """
     real = doc_merge.paragraph_style
 
@@ -268,6 +279,7 @@ def test_the_campaign_sees_a_theme_undone(monkeypatch):
         return style, fields
 
     monkeypatch.setattr(doc_merge, "paragraph_style", broken)
+    monkeypatch.setattr(doc_merge, "_unwritten", lambda mine, live: [])
     caught = 0
     for seed in range(16):
         found = fuzz_docs.offline_round(
@@ -787,6 +799,98 @@ def test_a_beheaded_table_keeps_its_key_in_a_tab_the_merge_plans_nothing_for():
     _, ours, _ = fuzz_docs.sync_once(world, ours, base)
     assert [b["key"] for b in doc_ir.parts(ours)[1]["blocks"]
             if b["kind"] == "table"] == ["table:year"]
+
+
+def test_a_table_the_reader_beheaded_does_not_take_the_key_of_one_the_source_regrids():
+    """The third read in a sync had nobody to recover a beheaded table for it.
+
+    `_write_structure` writes the grid, reads the tab again and hands what it finds
+    to `anchor_tables`, whose job is to name a table whose range one of our own
+    requests destroyed — a regrid that deletes the row the table is anchored in. A
+    table the *reader* beheaded in the browser has no range either, and that read was
+    the one place `recover_tables` was not run: the free table `anchor_tables` found
+    was the reader's, and it took the regridded table's key. The reader's rows then
+    stood under the source's table's name, the real one settled as `table:empty`, and
+    the file's key was gone (fresh seed 993608, chain 6).
+    """
+    world, ours, base = _push("between_tables")
+    live = doc_world.read_ir(world, ours, base)
+    first, second = [b for b in live["blocks"] if b["kind"] == "table"]
+    # The reader empties the second table's last row and beheads the first table,
+    # whose anchor cell goes with the row.
+    for inner in reversed([b for row in second["rows"][1:] for cell in row for b in cell]):
+        start, end = inner["span"]
+        if end - 1 > start:
+            world.apply([{"deleteContentRange": {
+                "range": {"startIndex": start, "endIndex": end - 1}}}])
+    world.apply([{"deleteTableRow": {"tableCellLocation": {
+        "tableStartLocation": {"index": first["span"][0]}, "rowIndex": 0}}}])
+    # And the source takes the first row off the *second* table, which takes that
+    # one's range in the structural batch and leaves it blank: two tables, neither
+    # named, and the one with the words in it is the reader's.
+    mine = next(b for b in ours["blocks"] if b["key"] == second["key"])
+    mine["rows"] = mine["rows"][1:]
+    report, ours, base = fuzz_docs.sync_once(world, ours, base)
+    grids = [b for b in base["blocks"] if b["kind"] == "table"]
+    assert [b["key"] for b in grids] == [first["key"], second["key"]]
+    assert [doc_merge._table_words(b) for b in grids] == ["1 2", ""]
+
+
+def test_a_paragraph_does_not_keep_the_centring_of_the_one_deleted_above_it():
+    """Docs merges two paragraphs on a delete keeping the FIRST one's style, and that
+    reaches the measurements, not only the named style and the bullet.
+
+    The reader centres a paragraph; the source deletes that paragraph and restyles the
+    block behind it. The merge writes that block's paragraph style with `alignment`
+    named and no value — which is how a paragraph is told to follow its named style,
+    the whole point of a theme — and the delete, one request later in the same batch,
+    hands it the centring of the paragraph that went. It said `center` of its own from
+    then on and no longer followed the document's theme, and neither side had asked
+    for it (fresh seed 912452, chain 6). And the source's own restyle, written one
+    request earlier, went the same way. The settle writes the plan's whole paragraph
+    style back on a block this run wrote (`_unwritten`), so both come right.
+    """
+    world, ours, base = _push("themed")
+    live = doc_world.read_ir(world, ours, base)
+    above = next(b for b in live["blocks"] if b["key"] == "heading:another-heading")
+    world.apply([{"updateParagraphStyle": {
+        "range": {"startIndex": above["span"][0], "endIndex": above["span"][1]},
+        "paragraphStyle": {"alignment": "CENTER"}, "fields": "alignment"}}])
+    ours["blocks"] = [b for b in ours["blocks"] if b["key"] != above["key"]]
+    behind = next(b for b in ours["blocks"] if b["key"] == "paragraph:and-prose-after-that")
+    behind["line_spacing"] = 1.5
+    report, ours, base = fuzz_docs.sync_once(world, ours, base)
+    now = next(b for b in base["blocks"] if b["key"] == "paragraph:and-prose-after-that")
+    assert now.get("kind") == "paragraph"     # the heading's named style, already put back
+    assert now.get("line_spacing") == 1.5     # the restyle the source did ask for
+    assert now.get("align") is None           # and no centring of its own, which nobody asked for
+
+
+def test_a_paragraph_under_a_deleted_one_of_its_own_kind_is_not_centred_either():
+    """The same wound where the two blocks agree on their named style.
+
+    `carry_unimported`'s named-style repair does not fire then — both are
+    NORMAL_TEXT — so nothing would look at the paragraph at all, and the centring
+    the delete handed over would stay. `_unwritten` asks instead whether the write
+    left the paragraph as the plan asked, which is a question about the
+    measurements and not about the kind.
+    """
+    world, ours, base = _push("prose")
+    live = doc_world.read_ir(world, ours, base)
+    above = next(b for b in live["blocks"]
+                 if b["key"] == "paragraph:the-first-paragraph-says-one-thing")
+    world.apply([{"updateParagraphStyle": {
+        "range": {"startIndex": above["span"][0], "endIndex": above["span"][1]},
+        "paragraphStyle": {"alignment": "CENTER"}, "fields": "alignment"}}])
+    ours["blocks"] = [b for b in ours["blocks"] if b["key"] != above["key"]]
+    behind = next(b for b in ours["blocks"]
+                  if b["key"] == "paragraph:the-second-paragraph-says-another")
+    behind["line_spacing"] = 1.5
+    report, ours, base = fuzz_docs.sync_once(world, ours, base)
+    now = next(b for b in base["blocks"]
+               if b["key"] == "paragraph:the-second-paragraph-says-another")
+    assert now.get("line_spacing") == 1.5
+    assert now.get("align") is None
 
 
 @pytest.mark.parametrize("shape", sorted(fuzz_docs.SHAPES))

@@ -1406,6 +1406,52 @@ Each has its test, each verified by breaking its mechanism. After them 970000 is
 and so are 600 rounds at chain 6, 400 at chain 8 and 900 at chain 4 from fresh seeds,
 all under `--strict`.
 
+### The third read, and the style a delete hands over
+
+Two more at fresh seeds, 500 rounds at chain 10 from 992000 (clean) and 700 at chain 6
+from 993000 (one), plus a seed left over from the round before.
+
+* **The read nobody recovers a table for** (seed 993608, `ends_on_table`). A sync that
+  changes a grid writes it on its own, reads the tab again and hands what it finds to
+  `anchor_tables`, whose job is to name a table whose range one of *our own* requests
+  destroyed — a regrid that deletes the row the table is anchored in. A table the
+  **reader** beheaded has no range either, and that third read was the one place
+  `recover_tables` was not run: the free table `anchor_tables` found was the reader's,
+  and the regridded table's key went onto it. The reader's rows then stood under the
+  source's table's name, the real one settled as `table:empty`, and the key the file
+  names was gone. It is recovered before the anchoring now, in `doc_sync._write_structure`
+  and in the harness's copy of it, and `plant_ranges` puts its range back in the same
+  breath. (What made it hard to see: `anchor_tables` prefers a *blank* table for a new
+  one and a worded table for a regrid, so the crossing needs a regrid that leaves the
+  table blank — and the reader had emptied the row the source's regrid kept.)
+* **The style a delete hands over reaches the measurements** (seed 912452, `themed`).
+  Docs merges two paragraphs on a delete keeping the first one's style, which
+  `carry_unimported` already repaired for the named style and the bullet. It hands over
+  the alignment and the spacing too: a paragraph the reader centred, deleted by the
+  source in the same batch, leaves the block behind it centred **of its own** — although
+  the merge had written `alignment` named-and-unset one request earlier, because
+  following its named style is the whole point of a theme — and the source's own restyle
+  of that block, written in the same breath, is handed back the spacing of the paragraph
+  that went. The settle writes the plan's **whole** paragraph style back on a block this
+  run wrote whose style the write did not leave as the plan asked (`_unwritten`,
+  `paragraph_written`), rather than the difference: the repairs read each other's work
+  otherwise, the named style deciding what "inherited" means. A block still read as a
+  HEADING_1 under a theme that centres headings reports no alignment of its own, and the
+  centring shows only once `named` has written NORMAL_TEXT back — which is in this very
+  batch. It is the one thing in the settle that takes styling away, and what keeps that
+  safe is the narrowing: only a paragraph this run wrote, whose own field is being taken
+  back. A block nobody wrote is left alone, so a reader's styling is never undone
+  (`test_styling_the_plan_does_not_ask_for_is_never_taken_away` fails without it).
+
+That second one also heals a *plan* that pins an inherited alignment, which is the
+defect `test_the_campaign_sees_a_theme_undone` puts back on purpose, so that probe now
+opens both doors: what it measures is the oracle's reach, not which of our own
+mechanisms is broken.
+
+After them: 700 rounds at chain 6 from 993000, 400 at chain 10 from 995000, both clean
+under `--strict`. 500 at chain 8 from 994000 came back with three, two of them the
+`frozen_gone` signature that is still open.
+
 ## Remaining risks
 
 1. **Pictures** — retired, see "Pictures, and the chips a request can make" above. What
