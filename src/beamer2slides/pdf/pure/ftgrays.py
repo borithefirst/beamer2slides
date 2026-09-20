@@ -15,6 +15,8 @@ have no conic points).
 """
 from __future__ import annotations
 
+import numpy
+
 ON, CUBIC, CONIC = 1, 2, 0
 
 PIXEL_BITS = 8
@@ -30,11 +32,15 @@ LCD_GEOMETRY = (-21, 0, 21)          # Harmony's sub[i].x (y all 0)
 
 
 def _int32(v: int) -> int:
+    if -0x80000000 <= v <= 0x7FFFFFFF:       # already an FT_Int32: the mask below would not move it
+        return v
     v &= 0xFFFFFFFF
     return v - (1 << 32) if v & 0x80000000 else v
 
 
 def _int64(v: int) -> int:
+    if -0x8000000000000000 <= v <= 0x7FFFFFFFFFFFFFFF:
+        return v
     v &= 0xFFFFFFFFFFFFFFFF
     return v - (1 << 64) if v & 0x8000000000000000 else v
 
@@ -46,6 +52,9 @@ def _udiv_prep(d: int) -> int:
 
 def _udiv(a: int, r: int) -> int:
     """``FT_UDIV``: (UInt64)a * (UInt64)r >> 32, cast to int."""
+    if 0 <= a <= 0xFFFFFFFF:                 # what the call sites pass (they carry the sign in the
+        v = (a * r) >> 32                    # argument) and FT_UDIVPREP's r is a UInt32 too, so
+        return v if v < 0x80000000 else _int32(v)   # neither cast nor the 64-bit mask moves anything
     return _int32(((a & 0xFFFFFFFFFFFFFFFF) * (r & 0xFFFFFFFFFFFFFFFF) & 0xFFFFFFFFFFFFFFFF) >> 32)
 
 
@@ -62,8 +71,13 @@ class _Raster:
         if ey < self.min_ey or ey >= self.max_ey or ex >= self.max_ex:
             self.cell = None
             return
-        ex = max(ex, self.min_ex - 1)
-        row = self.rows.setdefault(ey, {})
+        min_ex = self.min_ex
+        if ex < min_ex:
+            ex = min_ex - 1                      # FT_MAX(ex, ras.min_ex - 1)
+        rows = self.rows
+        row = rows.get(ey)                       # not setdefault: that builds a dict on every call
+        if row is None:
+            row = rows[ey] = {}
         cell = row.get(ex)
         if cell is None:
             cell = row[ex] = [0, 0]              # cover, area
@@ -72,8 +86,12 @@ class _Raster:
     def integrate(self, a: int, b: int) -> None:
         cell = self.cell
         if cell is not None:
-            cell[0] = _int32(cell[0] + a)
-            cell[1] = _int32(cell[1] + a * b)
+            # `FT_INTEGRATE`, with the 32-bit wrap inline: a cell of a glyph never leaves the range,
+            # so _int32 is the path not taken and this is the one called three times per scanline.
+            cover = cell[0] + a
+            area = cell[1] + a * b
+            cell[0] = cover if -0x80000000 <= cover <= 0x7FFFFFFF else _int32(cover)
+            cell[1] = area if -0x80000000 <= area <= 0x7FFFFFFF else _int32(area)
 
     def move_to(self, x: int, y: int) -> None:
         x, y = x * 4, y * 4                      # UPSCALE
@@ -99,60 +117,66 @@ class _Raster:
             self.x, self.y = to_x, to_y
             return
         elif dx == 0:
+            integrate, set_cell = self.integrate, self.set_cell    # out of the loop, as the C's are
             if dy > 0:
                 while True:
-                    self.integrate(ONE_PIXEL - fy1, fx1 * 2)
+                    integrate(ONE_PIXEL - fy1, fx1 * 2)
                     fy1 = 0
                     ey1 += 1
-                    self.set_cell(ex1, ey1)
+                    set_cell(ex1, ey1)
                     if ey1 == ey2:
                         break
             else:
                 while True:
-                    self.integrate(-fy1, fx1 * 2)
+                    integrate(-fy1, fx1 * 2)
                     fy1 = ONE_PIXEL
                     ey1 -= 1
-                    self.set_cell(ex1, ey1)
+                    set_cell(ex1, ey1)
                     if ey1 == ey2:
                         break
         else:
             prod = dx * fy1 - dy * fx1
             dx_r = _udiv_prep(dx) if ex1 != ex2 else 0
             dy_r = _udiv_prep(dy) if ey1 != ey2 else 0
+            # `dx * ONE_PIXEL` and `dy * ONE_PIXEL` are the loop's invariants (a C compiler hoists
+            # them out of gray_render_line for FreeType); so are the two bound methods.
+            dx_one = dx * ONE_PIXEL
+            dy_one = dy * ONE_PIXEL
+            integrate, set_cell = self.integrate, self.set_cell
             while True:
-                if prod - dx * ONE_PIXEL > 0 and prod <= 0:                        # left
+                if prod - dx_one > 0 and prod <= 0:                                 # left
                     fx2 = 0
                     fy2 = _udiv(-prod, dx_r)
-                    prod -= dy * ONE_PIXEL
-                    self.integrate(fy2 - fy1, fx1 + fx2)
+                    prod -= dy_one
+                    integrate(fy2 - fy1, fx1 + fx2)
                     fx1 = ONE_PIXEL
                     fy1 = fy2
                     ex1 -= 1
-                elif prod - dx * ONE_PIXEL + dy * ONE_PIXEL > 0 and prod - dx * ONE_PIXEL <= 0:  # up
-                    prod -= dx * ONE_PIXEL
+                elif prod - dx_one + dy_one > 0 and prod - dx_one <= 0:              # up
+                    prod -= dx_one
                     fx2 = _udiv(-prod, dy_r)
                     fy2 = ONE_PIXEL
-                    self.integrate(fy2 - fy1, fx1 + fx2)
+                    integrate(fy2 - fy1, fx1 + fx2)
                     fx1 = fx2
                     fy1 = 0
                     ey1 += 1
-                elif prod + dy * ONE_PIXEL >= 0 and prod - dx * ONE_PIXEL + dy * ONE_PIXEL <= 0:  # right
-                    prod += dy * ONE_PIXEL
+                elif prod + dy_one >= 0 and prod - dx_one + dy_one <= 0:             # right
+                    prod += dy_one
                     fx2 = ONE_PIXEL
                     fy2 = _udiv(prod, dx_r)
-                    self.integrate(fy2 - fy1, fx1 + fx2)
+                    integrate(fy2 - fy1, fx1 + fx2)
                     fx1 = 0
                     fy1 = fy2
                     ex1 += 1
                 else:                                                               # down
                     fx2 = _udiv(prod, dy_r)
                     fy2 = 0
-                    prod += dx * ONE_PIXEL
-                    self.integrate(fy2 - fy1, fx1 + fx2)
+                    prod += dx_one
+                    integrate(fy2 - fy1, fx1 + fx2)
                     fx1 = fx2
                     fy1 = ONE_PIXEL
                     ey1 -= 1
-                self.set_cell(ex1, ey1)
+                set_cell(ex1, ey1)
                 if ex1 == ex2 and ey1 == ey2:
                     break
         fx2 = to_x & (ONE_PIXEL - 1)
@@ -251,8 +275,7 @@ class _Raster:
                 continue
             x = min_ex
             cover = 0
-            for cx in sorted(row):
-                ccover, carea = row[cx]
+            for cx, (ccover, carea) in sorted(row.items()):
                 if cover != 0 and cx > x:
                     yield y, x, cx - x, _coverage(cover)
                 cover = _int32(cover + ccover * (ONE_PIXEL * 2))
@@ -408,15 +431,27 @@ def render_lcd(outline, ppem: int = 64, mode: str | None = None):
         decompose(imploded, raster)
         w = LCD_WEIGHTS
         size = len(buf)
+        # The FIR as a convolution, which is what it is: every write is `+= add` on a byte that
+        # started at zero, so the taps reaching one byte may be summed before the mask, and the
+        # spans of a row never overlap (gray_sweep_direct walks a row left to right, and a row's
+        # bytes are its own: pitch >= width). So the coverages go into a flat byte array at
+        # `base + px + 2` - the +2 undoes the -2 in `base`, and cutting the ends off the slices
+        # below is the `0 <= j < size` test the byte loop made per tap - and numpy adds the five
+        # taps for a whole glyph at once instead of Python adding one byte at a time.
+        covs = bytearray(size + 6)
         for y, x, length, cov in raster.spans():
-            base = (rows - 1 - y) * pitch - 2
-            adds = [(cov * wk + 85) >> 8 for wk in w]
-            for px in range(x, x + length):
-                d = base + px
-                for k in range(5):
-                    j = d + k
-                    if 0 <= j < size:
-                        buf[j] = (buf[j] + adds[k]) & 0xFF
+            q = (rows - 1 - y) * pitch + x
+            if length == 1:
+                covs[q] = cov
+            else:
+                covs[q:q + length] = bytes((cov,)) * length
+        cov_a = numpy.frombuffer(covs, numpy.uint8).astype(numpy.int32)
+        taps = {wk: (cov_a * wk + 85) >> 8 for wk in set(w)}   # 08 4D 56 4D 08: three weights
+        acc = numpy.zeros(len(cov_a), numpy.int32)
+        for k, wk in enumerate(w):
+            tap = taps[wk]
+            acc[k:] += tap[:len(tap) - k]
+        buf[:] = (acc[2:size + 2] & 0xFF).astype(numpy.uint8).tobytes()
     else:
         shifted = [([(x + x_shift, y + y_shift) for x, y in pts], tags) for pts, tags in outline]
         for i, sub in enumerate(LCD_GEOMETRY):

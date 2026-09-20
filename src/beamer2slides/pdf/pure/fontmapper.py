@@ -19,6 +19,20 @@ the installed-font list is enumerated once, and faces are cached by (substitute 
 italic) - two fonts with the same /BaseFont and style share the first one's face even if GDI
 would now give another. The same here.
 
+A system face is cached *weakly*, though: `face_map_` and `ttc_face_map_` hold `ObservedPtr`s
+(cfx_fontmapper.h) and a `FontCacheEntry`'s `ttc_faces_` are `ObservedPtr`s too, so the face and the
+bytes behind it live only while some `CFX_Font` - that is, some open document's font - holds them,
+and the next document gets a face freshly opened from GDI's bytes. That matters because a face
+carries mutable state between the fonts that share it: the selected charmap
+(`CPDF_TrueTypeFont::LoadGlyphMap` leaves behind the one it used) and, through it, what
+`CFX_Font::GetCharIndex` answers at drawing time - a leftover Mac charmap otherwise decides the next
+document's fallback glyphs. `hold` and `release` keep that lifetime: the document whose font took a
+face holds its cache entry (`load_subst_face`'s `doc`), and closing the document drops every entry
+no other open document holds, as the last `CFX_Font` on it being destroyed does in PDFium. PDFium's
+built-in faces are the exception - `standard_faces_`, `generic_sans_face_` and `generic_serif_face_`
+are `RetainPtr`s, so the multiple master blend really is process-wide - and `standard_faces` /
+`generic` below are never dropped for that reason.
+
 Off Windows PDFium's font info is `CFX_FolderFontInfo` (cfx_folderfontinfo.cpp): the .ttf/.ttc/.otf
 files under a few folders, named by their 'name' table (family, plus the style unless it is
 "Regular"), their charsets from OS/2's code page bits; `LinuxFontInfo` and `MacFontInfo` are its two
@@ -807,10 +821,24 @@ class SubstFont:
 @dataclass
 class _Face:
     """What FindSubstFace hands back: the face (a fonts.Program), whether it is PDFium's generic
-    multiple master face (CFX_SubstFont::IsBuiltInGenericFont), and the CFX_SubstFont it filled in."""
+    multiple master face (CFX_SubstFont::IsBuiltInGenericFont), and the CFX_SubstFont it filled in.
+    `key` names the cache entry a system face came from, for `hold` and `release`."""
     program: object
     generic: bool = False
     subst: SubstFont = field(default_factory=SubstFont)
+    key: tuple | None = None
+
+
+class _TtcEntry:
+    """CFX_FontMapper::FontCacheEntry for a collection: the bytes GDI gave, and the faces cut out of
+    them. It lives as long as the rest of the cache does (see the module docstring)."""
+
+    __slots__ = ("data", "faces", "failed")
+
+    def __init__(self, data: bytes):
+        self.data = data
+        self.faces: dict = {}
+        self.failed: set = set()
 
 
 @dataclass
@@ -823,8 +851,36 @@ class FontMapper:
     last_family: str = ""
     standard_faces: dict = field(default_factory=dict)
     generic: dict = field(default_factory=dict)
+    # ObservedPtr entries in PDFium: an entry is dropped when the last document holding it closes
     face_map: dict = field(default_factory=dict)       # (subst name, weight, italic) -> program
-    ttc_face_map: dict = field(default_factory=dict)   # (ttc size, checksum) -> (data, {index: program})
+    face_failed: set = field(default_factory=set)      # keys whose bytes FreeType would not open
+    ttc_face_map: dict = field(default_factory=dict)   # (ttc size, checksum, path) -> _TtcEntry
+    holders: dict = field(default_factory=dict)        # cache key -> how many open documents hold it
+
+    def hold(self, face: "_Face | None", doc) -> None:
+        """A document's font took this face; PDFium's CFX_Font retains it while the font lives."""
+        if face is None or face.key is None or doc is None:
+            return
+        held = doc.__dict__.setdefault("_b2s_held_faces", set())
+        if face.key not in held:
+            held.add(face.key)
+            self.holders[face.key] = self.holders.get(face.key, 0) + 1
+
+    def release(self, doc) -> None:
+        """A document is gone, and so are its CPDF_Fonts and the CFX_Fonts under them: an entry no
+        other open document holds is observed away, bytes and all."""
+        for key in doc.__dict__.pop("_b2s_held_faces", ()):
+            left = self.holders.get(key, 0) - 1
+            if left > 0:
+                self.holders[key] = left
+                continue
+            self.holders.pop(key, None)
+            kind, name = key
+            if kind == "ttc":
+                self.ttc_face_map.pop(name, None)
+            else:
+                self.face_map.pop(name, None)
+                self.face_failed.discard(name)
 
     def add_installed_font(self, name: str, charset: int) -> None:
         if self.font_info is None:
@@ -925,33 +981,42 @@ class FontMapper:
                 # a folder font info reads nothing into a buffer smaller than the file: PDFium then sums
                 # whatever the stack held, so only the file itself tells two collections apart
                 key = (ttc_size, checksum, getattr(hfont, "path", None))
-                if key not in self.ttc_face_map:
+                cache_key = ("ttc", key)
+                entry = self.ttc_face_map.get(key)
+                if entry is None:
                     n, data = info.get_font_data(hfont, TABLE_TTCF, ttc_size)
                     if n != ttc_size:
                         return None
-                    self.ttc_face_map[key] = (data, {})
-                data, faces = self.ttc_face_map[key]
+                    entry = self.ttc_face_map[key] = _TtcEntry(data)
+                data = entry.data
                 index = _ttc_index(data, ttc_size - font_size)
-                if index not in faces:
+                prog = entry.faces.get(index)
+                if prog is None and index not in entry.failed:
                     try:
-                        faces[index] = load_truetype(data, index)
+                        prog = load_truetype(data, index)
                     except Exception:  # noqa: BLE001 - a face FreeType would not open either
-                        faces[index] = None
-                prog = faces[index]
+                        entry.failed.add(index)
+                        prog = None
+                    else:
+                        entry.faces[index] = prog
                 if prog is not None:
                     prog.platform_data = data                # CFX_Font's span: the whole collection
             else:
                 key = (face_name, weight, bool(italic))
-                if key not in self.face_map:
+                cache_key = ("face", key)
+                prog = self.face_map.get(key)
+                if prog is None and key not in self.face_failed:
                     n, data = info.get_font_data(hfont, TABLE_NONE, font_size)
                     if n != font_size:
                         return None
                     try:
-                        self.face_map[key] = load_truetype(data)
-                        self.face_map[key].platform_data = data
+                        prog = load_truetype(data)
                     except Exception:  # noqa: BLE001
-                        self.face_map[key] = None
-                prog = self.face_map[key]
+                        self.face_failed.add(key)
+                        prog = None
+                    else:
+                        prog.platform_data = data
+                        self.face_map[key] = prog
         finally:
             info.delete_font(hfont)
         if prog is None:
@@ -959,7 +1024,7 @@ class FontMapper:
         # GetFaceName succeeds on every font info, so the family is its face name, never the face's own
         bold, italic_face = _face_style(prog)
         subst.configure_external(face_name, charset, weight, italic, italic_angle, bold, italic_face)
-        return _Face(prog, subst=subst)
+        return _Face(prog, subst=subst, key=cache_key)
 
     def find_subst_face(self, name: str, truetype: bool, flags: int, weight: int, italic_angle: int,
                         subst: SubstFont | None = None) -> _Face | None:
@@ -1116,6 +1181,17 @@ def mapper() -> FontMapper:
     return _mapper
 
 
-def load_subst_face(name: str, truetype: bool, flags: int, weight: int, italic_angle: int) -> _Face | None:
-    """CFX_Font::LoadSubstFace for a simple font (code page kDefANSI, horizontal)."""
-    return mapper().find_subst_face(name, truetype, flags, weight, italic_angle)
+def document_closed(doc) -> None:
+    """A document was closed: the system faces it was the last to hold go with it."""
+    if _mapper is not None:
+        _mapper.release(doc)
+
+
+def load_subst_face(name: str, truetype: bool, flags: int, weight: int, italic_angle: int,
+                    doc=None) -> _Face | None:
+    """CFX_Font::LoadSubstFace for a simple font (code page kDefANSI, horizontal). `doc` is the
+    document whose font will hold the face (see the module docstring)."""
+    m = mapper()
+    face = m.find_subst_face(name, truetype, flags, weight, italic_angle)
+    m.hold(face, doc)
+    return face

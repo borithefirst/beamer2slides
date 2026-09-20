@@ -157,6 +157,9 @@ def float32(v: float) -> float:
 # this keeps a `float32` path to fall back on (the hot paths below: raster, textpage, content).
 F32X2, F32X3, F32X4 = struct.Struct("<2f"), struct.Struct("<3f"), struct.Struct("<4f")
 F32X6, F32X8 = struct.Struct("<6f"), struct.Struct("<8f")
+# One value the same way: `float32` without the call and the guard, for a lone rounding already
+# inside such a caller's `try` (it raises there instead of giving the infinity back).
+F32X1 = _FLOAT32
 
 
 _REAL = re.compile(rb"-?(?:\d+\.?\d*|\.\d+)")

@@ -90,9 +90,16 @@ a per-slide background picture.
   once in a TeX Live container (`tests/decks/build.py` reruns until the .aux settles: TeX Live's
   tikzmark needs a third pass); failing shading seeds leave their PDF and both renders in the
   artifact. All three platforms pass.
-  And deck.json is identical on all 48 test decks; extract is ~2.3× slower than PDFium, rendering
-  ~7× (float32 rounding batched through `syntax.F32X*` structs with a scalar fallback on overflow,
-  one regex per word in both lexers, psLib shortcuts for Type 1 programs). `tests/test_pure_pdf.py`.
+  And deck.json is identical on all 48 test decks; extract is ~2.4× slower than PDFium, rendering
+  ~10× (`devtools/pure_bench`: 11 decks at the test zoom, the process's own CPU, the minimum of
+  several passes - and an A/B measured *interleaved*, since the same unchanged file drifts 8% with
+  the machine's state; float32 rounding batched through `syntax.F32X*` structs with a scalar
+  fallback on overflow, one regex per word in both lexers, psLib shortcuts for Type 1 programs,
+  ftgrays' LCD filter as one numpy convolution and its cell machinery without the int32 wrap C does
+  not do: -8% of a render pass). Half a render pass is glyphs (`render_text` 43%: 31% rasterising
+  the 24% the glyph cache misses, of which ftgrays is half, and 11% composing the cached bitmaps),
+  and 12% of an extract pass is `fonts.SimpleFont._load_metrics` building a glyph outline to read
+  its bounding box. `tests/test_pure_pdf.py`.
   Cross references (CPDF_Parser, rebuild included) and navigation (`pure/navigation.py`: links,
   actions, destinations, name trees, page labels, metadata) are ported rule for rule; the whole-file
   fuzz (`--structure`, seeds 0-500) differs from PDFium on none (27 before font substitution was
@@ -112,9 +119,22 @@ a per-slide background picture.
   a page whose fonts no platform's font folder can answer: a font whose widths are all one number is
   FIXED_PITCH, which macOS answers with Courier New); GDI's TrueType
   substitutes (base 14 and installed names on Windows) draw through the TrueType port
-  (`render_text.truetype_face`, one shared face per program; `--pool installed`: 300 seeds, 251 drawn exact, 49 refused for fallback fonts). A font
+  (`render_text.truetype_face`, one shared face per program; `--pool installed`: 300 seeds drawn exact). A font
   with no descriptor has flags 0 (PDFium's m_Flags default), not nonsymbolic: a TrueType one then
   maps codes through the Mac cmap (subst seeds 18, 21, 29).
+  A code the font itself must not draw (`CPDF_Font::ShouldUseFont`) comes from the font's one
+  fallback face (`render_text.fallback_font` = FallbackFontFromCharcode: LoadSubstFace of Arial at
+  the descriptor's StemV × 5, the font's flags and italic angle; `fallback_glyph` = that face's
+  charmap on the code's first Unicode unit, 0 meaning none), and the char pos list is cut into runs
+  of one fallback position, one device call each, as CPDF_TextRenderer cuts it; the spacing
+  heuristic measures the face the char is drawn from with `CFX_Face::GetGlyphWidth`, whose EmAdjust
+  truncates where GetGlyphTTWidth rounds (`fonts.em_width`, a pixel on 2048-unit Arial). A cached
+  system face is an ObservedPtr, not a face for the life of the process: it is held by the documents
+  whose fonts took it and dropped when the last of them closes (`fontmapper.hold` / `release`,
+  `Document.close`), or the Mac charmap `CPDF_TrueTypeFont::LoadGlyphMap` leaves selected on the
+  shared Arial face decides the next document's fallback glyphs (subst torture seed 316 after 311;
+  PDFium renders both orders alike). 6,000 seeds exact, nothing refused for a fallback font; a
+  fallback for vertical writing (LoadSubstFace's IsVertWriting) still is.
 - No public links: pictures reach Slides inside the imported .pptx, never as shared Drive
   files (they break in protected Workspace domains).
 - **Fidelity is measured on Google's own renderer**, not a local preview: render the PDF page
@@ -782,6 +802,30 @@ keys, named ranges), `doc_merge.py` (pure planning), `doc_sync.py` (the commands
   (`doc_merge.restore_unreadable`) and `settle` then gives the list bullets of the
   document's own (`bullet_requests`: measured, they read back from then on, so a reader's
   switch to numbers is seen); block identity ignores ordered-ness entirely.
+- **What the dialect says** (`doc_ir`): runs carry `font`, `fontsize` and `smallcaps`
+  beside the marks — one unquoted family name (a fallback list is mangled on import:
+  `Georgia, serif` → `Geo`), the size as the document reports it (the importer rounds a
+  fraction away and the settle rewrites the file, so nothing oscillates), small caps as
+  `data-smallcaps`. `<code>` made four families one face; it is still written and still
+  means Courier New, but a face is now carried as itself. Paragraphs carry `indent`,
+  `indent_first` and `line_spacing` as `margin-left` / `text-indent` / `line-height`
+  (kept by the importer) and `shading`, `space_above`, `space_below` as `data-`
+  attributes: `background-color` on a `<p>` is a character highlight on its runs, not
+  paragraph shading, and no margin survives, so those three go in by `batchUpdate`
+  only. A run or paragraph that only repeats its named style says nothing
+  (`_named_defaults`), or an imported document reads back as a wall of spans; a
+  bullet's own indents are the list preset's. `adopt_keys` compares the plan with the
+  read-back (`carry_unimported`) and `tidy_requests` writes what no import could carry
+  — additions only, since in a read "absent" is also a reader who took the styling off.
+- **`MANAGED` / `MANAGED_PARAGRAPH`**: the fields the merge owns, named on a restyle
+  whether or not the block asks for them, so a property the source dropped goes away. A
+  field belongs there only when the file can say it *and* a read can see it — naming
+  one the file cannot carry would clear, on every source restyle, something a reader set
+  in the browser; that is why `weightedFontFamily` stayed out while `<code>` was all the
+  file could say, and why it, `fontSize` and `smallCaps` are in now. `_take_shape`
+  replaces a dict update that could only add, so a source that took a block's centring
+  or shading away now takes it away. Both fire only where the source changed the styling
+  and the document did not, so a reader's own face or shading is never written over.
 - An equation (several index units, not one) reads as `equation {}`; its LaTeX is only in
   Drive's Markdown export, which escapes no dollar anywhere. `settle` asks the export
   (`doc_sync.equation_latex`), `doc_ir.latex_of` places each equation by the words the
@@ -824,6 +868,11 @@ keys, named ranges), `doc_merge.py` (pure planning), `doc_sync.py` (the commands
   the pass after. A cell whose paragraph counts differ merges as one text with its breaks in it
   (`_merge_cell`, written against `_joined`). A table the source moved, which the document left
   as the base has it, is deleted and built again blank where the file has it (`structure`).
+  A table is written one line per row, so a changed row is a changed line: the breaks sit
+  between `</tr>` and `<tr>` and inside the table's own tags, where a parser has nowhere to
+  put text, and a row stays whole with its cells, since inside a `<td>` the space would be
+  content (measured on `from_html`; the live importer's side of it is what
+  `tests/test_docs_live_styles.py` asks, and that file has not been run).
   Deleting one: its own span; with its `lead` when a body opens on it; with the mark in front
   when it ends the body (measured: no stray trailer). `insertTable` splits the paragraph
   its index is in and needs one, so a table goes at the following block's start (and the empty

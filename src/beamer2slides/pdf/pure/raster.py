@@ -16,10 +16,12 @@ import math
 
 import numpy as np
 
-from .syntax import F32X2, F32X4, F32X6
+from .syntax import F32X1, F32X2, F32X4, F32X6, F32X8
 from .syntax import float32 as F
 
+_p1, _u1 = F32X1.pack, F32X1.unpack
 _p2, _u2, _p4, _u4, _p6, _u6 = F32X2.pack, F32X2.unpack, F32X4.pack, F32X4.unpack, F32X6.pack, F32X6.unpack
+_p8, _u8 = F32X8.pack, F32X8.unpack
 
 # path commands (agg_basics.h)
 STOP, MOVE_TO, LINE_TO, CURVE4 = 0, 1, 2, 4
@@ -394,9 +396,14 @@ def _bezier(pts, x1, y1, x2, y2, x3, y3, x4, y4, level):
 
 
 def _dist(x1, y1, x2, y2):
-    dx = F(x2 - x1)
-    dy = F(y2 - y1)
-    return F(math.sqrt(F(F(dx * dx) + F(dy * dy))))
+    try:        # the same roundings, several per C call (syntax.F32X*); the scalar form below
+        dx, dy = _u2(_p2(x2 - x1, y2 - y1))
+        a, b = _u2(_p2(dx * dx, dy * dy))
+        return _u1(_p1(math.sqrt(_u1(_p1(a + b))[0])))[0]
+    except OverflowError:
+        dx = F(x2 - x1)
+        dy = F(y2 - y1)
+        return F(math.sqrt(F(F(dx * dx) + F(dy * dy))))
 
 
 class _Seq(list):
@@ -434,6 +441,16 @@ def _acos_da(width, approx):
     return F(F(math.acos(F(width / F(width + F(0.125 / approx))))) * 2)
 
 
+def _arc_point(x, y, width, a1):
+    """`F(x + F(width * F(cos(a1))))`, `F(y + F(width * F(sin(a1))))`, batched (syntax.F32X*)."""
+    try:
+        c, s = _u2(_p2(math.cos(a1), math.sin(a1)))
+        wc, ws = _u2(_p2(width * c, width * s))
+        return _u2(_p2(x + wc, y + ws))
+    except OverflowError:
+        return F(x + F(width * F(math.cos(a1)))), F(y + F(width * F(math.sin(a1))))
+
+
 def calc_arc(out, x, y, dx1, dy1, dx2, dy2, width, approx):
     a1 = F(math.atan2(dy1, dx1))
     a2 = F(math.atan2(dy2, dx2))
@@ -450,7 +467,7 @@ def calc_arc(out, x, y, dx1, dy1, dx2, dy2, width, approx):
             a2 = F(a2 - F(da / 4))
             a1 = F(a1 + da)
             while a1 < a2:
-                out.append((F(x + F(width * F(math.cos(a1)))), F(y + F(width * F(math.sin(a1))))))
+                out.append(_arc_point(x, y, width, a1))
                 a1 = F(a1 + da)
         else:
             if a1 < a2:
@@ -458,12 +475,25 @@ def calc_arc(out, x, y, dx1, dy1, dx2, dy2, width, approx):
             a2 = F(a2 + F(da / 4))
             a1 = F(a1 - da)
             while a1 > a2:
-                out.append((F(x + F(width * F(math.cos(a1)))), F(y + F(width * F(math.sin(a1))))))
+                out.append(_arc_point(x, y, width, a1))
                 a1 = F(a1 - da)
     out.append((F(x + dx2), F(y + dy2)))
 
 
 def _intersection(ax, ay, bx, by, cx, cy, dx, dy):
+    try:        # the same roundings, several per C call (syntax.F32X*); the scalar form below.
+        # The differences each appear twice in the C (num and den, den and the result): one
+        # rounding of one expression, so computing them once is the same value.
+        d = _u6(_p6(ay - cy, dx - cx, ax - cx, dy - cy, bx - ax, by - ay))
+        m = _u4(_p4(d[0] * d[1], d[2] * d[3], d[4] * d[3], d[5] * d[1]))
+        num, den = _u2(_p2(m[0] - m[1], m[2] - m[3]))
+        if abs(den) < EPS30:
+            return None
+        t = _u2(_p2(d[4] * num, d[5] * num))
+        q = _u2(_p2(t[0] / den, t[1] / den))
+        return _u2(_p2(ax + q[0], ay + q[1]))
+    except OverflowError:
+        pass
     num = F(F(F(ay - cy) * F(dx - cx)) - F(F(ax - cx) * F(dy - cy)))
     den = F(F(F(bx - ax) * F(dy - cy)) - F(F(by - ay) * F(dx - cx)))
     if abs(den) < EPS30:
@@ -473,8 +503,16 @@ def _intersection(ax, ay, bx, by, cx, cy, dx, dy):
 
 def calc_miter(out, v0, v1, v2, dx1, dy1, dx2, dy2, width, join, limit, approx):
     exceeded = True
-    hit = _intersection(F(v0[0] + dx1), F(v0[1] - dy1), F(v1[0] + dx1), F(v1[1] - dy1),
-                        F(v1[0] + dx2), F(v1[1] - dy2), F(v2[0] + dx2), F(v2[1] - dy2))
+    # the two offset segments, (v0, v1) shifted by d1 and (v1, v2) by d2: the eight roundings
+    # the C writes out one by one, in one C call (syntax.F32X*)
+    try:
+        a0x, a0y, a1x, a1y, b1x, b1y, b2x, b2y = _u8(_p8(
+            v0[0] + dx1, v0[1] - dy1, v1[0] + dx1, v1[1] - dy1,
+            v1[0] + dx2, v1[1] - dy2, v2[0] + dx2, v2[1] - dy2))
+    except OverflowError:
+        a0x, a0y, a1x, a1y = F(v0[0] + dx1), F(v0[1] - dy1), F(v1[0] + dx1), F(v1[1] - dy1)
+        b1x, b1y, b2x, b2y = F(v1[0] + dx2), F(v1[1] - dy2), F(v2[0] + dx2), F(v2[1] - dy2)
+    hit = _intersection(a0x, a0y, a1x, a1y, b1x, b1y, b2x, b2y)
     if hit is not None:
         xi, yi = hit
         d1 = _dist(v1[0], v1[1], xi, yi)
@@ -482,17 +520,21 @@ def calc_miter(out, v0, v1, v2, dx1, dy1, dx2, dy2, width, join, limit, approx):
             out.append((xi, yi))
             exceeded = False
     else:
-        x2 = F(v1[0] + dx1)
-        y2 = F(v1[1] - dy1)
-        s1 = F(F(F(x2 - v0[0]) * dy1) - F(F(v0[1] - y2) * dx1))
-        s2 = F(F(F(x2 - v2[0]) * dy1) - F(F(v2[1] - y2) * dx1))
+        x2, y2 = a1x, a1y
+        try:
+            e = _u4(_p4(x2 - v0[0], v0[1] - y2, x2 - v2[0], v2[1] - y2))
+            p = _u4(_p4(e[0] * dy1, e[1] * dx1, e[2] * dy1, e[3] * dx1))
+            s1, s2 = _u2(_p2(p[0] - p[1], p[2] - p[3]))
+        except OverflowError:
+            s1 = F(F(F(x2 - v0[0]) * dy1) - F(F(v0[1] - y2) * dx1))
+            s2 = F(F(F(x2 - v2[0]) * dy1) - F(F(v2[1] - y2) * dx1))
         if (s1 < 0) != (s2 < 0):
-            out.append((F(v1[0] + dx1), F(v1[1] - dy1)))
+            out.append((a1x, a1y))
             exceeded = False
     if exceeded:
         if join == MITER_JOIN_REVERT:
-            out.append((F(v1[0] + dx1), F(v1[1] - dy1)))
-            out.append((F(v1[0] + dx2), F(v1[1] - dy2)))
+            out.append((a1x, a1y))
+            out.append((b1x, b1y))
         elif join == MITER_JOIN_ROUND:
             calc_arc(out, v1[0], v1[1], dx1, -dy1, dx2, -dy2, width, approx)
         else:
@@ -502,11 +544,16 @@ def calc_miter(out, v0, v1, v2, dx1, dy1, dx2, dy2, width, join, limit, approx):
 
 def calc_cap(out, v0, v1, length, cap, width, approx):
     out.clear()
-    dx1 = F(F(v1[1] - v0[1]) / length)
-    dy1 = F(F(v1[0] - v0[0]) / length)
+    try:        # the same roundings, several per C call (syntax.F32X*)
+        d = _u2(_p2(v1[1] - v0[1], v1[0] - v0[0]))
+        d = _u2(_p2(d[0] / length, d[1] / length))
+        dx1, dy1 = _u2(_p2(d[0] * width, d[1] * width))
+    except OverflowError:
+        dx1 = F(F(v1[1] - v0[1]) / length)
+        dy1 = F(F(v1[0] - v0[0]) / length)
+        dx1 = F(dx1 * width)
+        dy1 = F(dy1 * width)
     dx2 = dy2 = 0.0
-    dx1 = F(dx1 * width)
-    dy1 = F(dy1 * width)
     if cap != ROUND_CAP:
         if cap == SQUARE_CAP:
             dx2, dy2 = dy1, dx1
@@ -522,18 +569,26 @@ def calc_cap(out, v0, v1, length, cap, width, approx):
         a1 = F(a1 + da)
         a2 = F(a2 - F(da / 4))
         while a1 < a2:
-            out.append((F(v0[0] + F(width * F(math.cos(a1)))), F(v0[1] + F(width * F(math.sin(a1))))))
+            out.append(_arc_point(v0[0], v0[1], width, a1))
             a1 = F(a1 + da)
         out.append((F(v0[0] + dx1), F(v0[1] - dy1)))
 
 
 def calc_join(out, v0, v1, v2, len1, len2, width, join, miter_limit, approx):
-    dx1 = F(F(width * F(v1[1] - v0[1])) / len1)
-    dy1 = F(F(width * F(v1[0] - v0[0])) / len1)
-    dx2 = F(F(width * F(v2[1] - v1[1])) / len2)
-    dy2 = F(F(width * F(v2[0] - v1[0])) / len2)
+    try:        # the same roundings, several per C call (syntax.F32X*); the four differences
+        # are one rounded expression each, whether the C writes them for the d's or for `loc`
+        e = _u4(_p4(v1[1] - v0[1], v1[0] - v0[0], v2[1] - v1[1], v2[0] - v1[0]))
+        w = _u4(_p4(width * e[0], width * e[1], width * e[2], width * e[3]))
+        dx1, dy1, dx2, dy2 = _u4(_p4(w[0] / len1, w[1] / len1, w[2] / len2, w[3] / len2))
+        c = _u2(_p2(e[3] * e[0], e[2] * e[1]))
+        loc = F(c[0] - c[1])
+    except OverflowError:
+        dx1 = F(F(width * F(v1[1] - v0[1])) / len1)
+        dy1 = F(F(width * F(v1[0] - v0[0])) / len1)
+        dx2 = F(F(width * F(v2[1] - v1[1])) / len2)
+        dy2 = F(F(width * F(v2[0] - v1[0])) / len2)
+        loc = F(F(F(v2[0] - v1[0]) * F(v1[1] - v0[1])) - F(F(v2[1] - v1[1]) * F(v1[0] - v0[0])))
     out.clear()
-    loc = F(F(F(v2[0] - v1[0]) * F(v1[1] - v0[1])) - F(F(v2[1] - v1[1]) * F(v1[0] - v0[0])))
     if loc > 0:
         # inner join: inner_miter
         calc_miter(out, v0, v1, v2, dx1, dy1, dx2, dy2, width, MITER_JOIN_REVERT, INNER_MITER_LIMIT, 1.0)
