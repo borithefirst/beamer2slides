@@ -1144,3 +1144,142 @@ Not made, and why: naming positional quads (no judge decided a pair on it), sepa
 from a fudge (`space=-0.01`; the easiest of the six to turn into tuning), and charging a hash-named
 include (better as a reported number). A wall of 50 `\slidetext` lines told apart only by their
 coordinates is still uncharged: their machinery really does differ.
+## Can the deck be synced back? Identity, and the merge (`ls-a` -> `lbl-a`)
+
+Everything above asks how well the source *draws* the deck. This asks the other question: a person
+adopts a deck, edits the source, and meanwhile somebody edits the deck in Slides. Does `sync` put the
+two together without losing their work? Two things had to be true, and one of them was not.
+
+### Every frame `adopt` writes now carries a label
+
+**Before: none did.** `adopt.bootstrap` wrote `\begin{frame}[plain,layout=...]`, and a compiled
+adopted source read back **0 labelled pages**. A frame label is the only piece of a slide's identity
+that survives compiling (docs/labels.md): without one, `identity` falls back to the slide's title, its
+occurrence among slides of that title, and the order-keeping alignment. That is the weakest identity
+the system has, and an adopted deck is the worst deck to hand it:
+
+| the corpus (29 decks, 912 slides) | |
+| --- | --- |
+| slides with a title | 483 (53%) |
+| slides with no words at all | 17 |
+| slides whose `objectId` repeats inside its deck | 0 |
+
+Nearly half the slides have nothing to be identified by, and `pull` then rewrites the words of the
+ones that do.
+
+**Now** (`adopt.frame_labels`, `FramePlan.options`, `inverse.frame_latex`) every frame carries
+`label=<slug of the slide's objectId>` — the deck's own name for the slide. It is unique by
+construction, the same on every read, present for a slide with no words, and unrelated to anything the
+source may later change. A title-derived label would have to move the day the slide is retitled, and a
+label may not move: that is what `beamer2slides label` refuses to do to an existing one, and what
+docs/sync.md "When a label moved" is about. `labels.slug` makes the id legal for `\label`/hyperref,
+and because slugging is lossy (`Same_Id` and `same-id` slug alike; the API's own
+`SLIDES_API1234567890_0` ids differ late) uniqueness is enforced against the labels already given out.
+That guard matters more here than anywhere else: **a label written twice never reaches the PDF twice**
+— hyperref keeps the first destination and drops the second — so a duplicate does not show up as a
+clash, it shows up as *no label*, on the slides that have nothing else. Over the corpus the guard
+never had to fire (0 slug collisions in 912 slides), and the labels are the same on a second run.
+
+The option goes in ahead of the theme's own keys, where beamer reads `label` as the plain option it
+looks like (`\deck@keys` sets templates and colours as they are read).
+
+Measured: a compiled adopted `comic-strips` reads back **17 of 17 pages labelled**
+(`p`, `g11460474-0-27`, …) where it read back 0.
+
+**Fidelity is untouched** — `adopt_bench run --jobs 5 --tag lbl-a`, 29/29 decks, 912 slides:
+
+| | boxes | page | pixels | deck mean |
+| --- | --- | --- | --- | --- |
+| `ls-a` | 0.9728 | 0.9714 | 0.9845 | 0.9557 |
+| `lbl-a` | 0.9728 | 0.9714 | 0.9845 | 0.9557 |
+
+`cmp.py ls-a lbl-a` reports `+0.0000` on every deck and every slide it lists. A frame option changes
+no ink, which is the point of checking.
+
+### The merge, against adopt-shaped decks
+
+The offline loss campaign (docs/sync.md, "Proving nothing is lost") drew decks `convert` would write.
+`fuzz_sync offline --shape adopt` draws what `adopt` writes instead: 4-7 slides of 6-16 small boxes,
+fewer than half with a title, two columns of near-identical one-line phrases from the same dozen
+("Agenda", "Next steps", "Questions?"), a footer and a shared logo on every slide, grouped clusters, a
+table on a third of them, and every third slide a twin of the one before it with one line of its own.
+Over 120 seeds: 649 slides, 10.56 elements a slide, 274 titled, 237 with a grouped cluster, 196 with a
+table (5358 texts, 825 pictures, 473 shapes, 196 tables). It runs at about the same speed as the
+converted shape and shrinks the same way.
+
+It found three things, and one of them was a real defect:
+
+1. **`sync.Sync.restack` could stack a new panel over kept text** (a real defect, fixed). A recreated
+   element keeps the deck's place in the z-order and a created one goes where the source puts it —
+   after the element before it. Where those two orders disagree, a created opaque panel landed above
+   text the source draws *above* it, and nothing was deleted, so every other check passed. An adopted
+   deck reaches that at once (a label that moved writes a whole other frame's elements onto a slide);
+   a converted one rarely does. A created element now also stays below the first element the source
+   draws above it. `tests/test_sync.py::test_a_created_shape_stays_under_the_text_the_source_draws_
+   above_it` fails without it, and so do 2 of 400 rounds.
+2. **The oracle could not name an element the source added** (a harness bug, fixed):
+   `loss_oracle._element_of` read the base's elements only, so an object created for a *new* element
+   had no key, and `_source_stacks_above` — the only excuse `text_hidden` has — can excuse nothing it
+   cannot name. 3 of 400 rounds.
+3. **The reference applier left created objects on top** (a harness bug, fixed):
+   `fuzz_world._update_slide` gave a recreated object its old slot and a created one whatever place
+   Slides gives a new object, which is the front. `_restack` now models the outcome sync writes.
+
+Campaigns after the fixes, all clean: 5000 adopt-shaped rounds, 600 at chain 4 (edit → sync → edit →
+sync, four times), and — the regression check, since the world and the shrinker both changed — 2000
+converted rounds and 500 converted rounds at chain 4. `tests/test_sync_fuzz.py` runs 25 adopt-shaped
+seeds plus the five that failed (82, 328, 441, 568, 629) in the default suite.
+
+### What the label is worth, measured
+
+The loss oracle cannot answer this: following a label onto the wrong frame deletes nothing, so the
+sync campaign is clean with labels and clean without them (400 rounds each way). `fuzz_labels`
+can, because its synthetic source tags every frame and so knows the right pairing. It takes the
+shape now too (`--shape adopt`), and 1500 rounds over 8239 frames say:
+
+| misidentified frames | `order` | `before` | `now` (what sync does) |
+|---|---|---|---|
+| adopt-shaped, labels sound | 0.00% | 0.00% | 0.00% |
+| adopt-shaped, labels broken | 12.34% | 12.34% | **2.94%** |
+| a converted talk, labels sound, a frame moved | 6.93% | **0.00%** | 0.00% |
+| a converted talk, labels broken | 15.48% | 15.38% | **1.29%** |
+
+Two things to read there. With the labels kept, **not one frame of 4068 went to the wrong slide** —
+that is the deck a person adopts from now on. And `before` equals `order` frame for frame on this
+shape: `identity.cross_pairs` and `identity.gap_pairs`, the two passes that rescue a converted
+talk's moved or retitled frames, **recover nothing at all** here. They need one leftover that
+explains one slide unmistakably, or a lone gap whose slide and frame share words nobody else shares;
+a deck of repeated one-line phrases offers neither. `identity.label_moves` still earns its place
+(12.34% -> 2.94%) but saves less than on a talk and says less — 39 of the 60 rounds left wrong
+passed in silence, against 1 of 22.
+
+So on an adopted deck the label is not the best identity available. It is the only one.
+
+### What a person should still not expect to survive
+
+- **A label that moved.** If the source's frames are reordered or rewritten so that a label ends up on
+  another frame, sync follows the label and writes that frame onto that slide. `identity.label_moves`
+  reports it when the content disagrees; it cannot undo it. On an adopted deck the labels are written
+  once and never touched, so this only happens if someone moves them by hand.
+- **A slide with no label and no words.** 17 corpus slides have no text at all. Those are kept by the
+  alignment and by nothing else: insert a frame in front of one and it can be created afresh while
+  the old slide keeps the person's edits.
+- **Stacking a person chose.** Sync keeps the deck's z-order for what it recreates and the source's
+  for what it adds, and where the two contradict each other the new element goes to the bottom. That
+  is safe, not faithful: a panel the person deliberately brought to the front can end up behind.
+- **Everything docs/sync.md "Not supported yet" already lists** — crossing reorders of unlabelled
+  frames, diff3 inside diagrams, a group the person drew being rebuilt.
+
+### The rebuild guard, checked by reading
+
+Asked as part of this: does `guard.py` hold for an adopted deck, whose base `convert` never wrote?
+It does, and for two reasons that need no new code.
+
+- `adopt` writes a source tree and **no output folder**. The only way `convert` rebuilds a deck in
+  place is `guard.previous_deck`, which reads `<out>/emit.json`, and only `convert` writes one — so
+  the foreign deck a person adopted can never be the deck a rebuild replaces. Adopt, then convert,
+  and the convert makes a *new* deck in `out/<stem>/` with a base of its own; rebuilding that folder
+  is the ordinary guarded path, and the foreign deck is not touched.
+- If a base is missing anyway (the folder's copy deleted and Drive's `appProperties.b2sBase` gone),
+  `guard.check_rebuild` sets `reason = "no-base"` and refuses — already pinned by
+  `tests/test_guard.py::test_a_deck_without_a_base_is_never_silently_rebuilt`.

@@ -1415,15 +1415,28 @@ class Sync:
             if oid in top_now and oid not in desired:
                 desired.append(oid)
         keys = [e["key"] for e in o["elements"]]
+
+        def placed(k):
+            return w["tops"].get(k) or (merge.unit_top(bunits[k], now) if k in bunits else None)
+
         for ukey in added:
             new = w["tops"][ukey]
             if new not in top_now or new in desired:
                 continue
+            i = keys.index(ukey)
             pos = 0
-            for k in reversed(keys[:keys.index(ukey)]):
-                prev = w["tops"].get(k) or (merge.unit_top(bunits[k], now) if k in bunits else None)
-                if prev in desired:
+            for k in reversed(keys[:i]):
+                if (prev := placed(k)) in desired:
                     pos = desired.index(prev) + 1
+                    break
+            # ... but never above an element the source draws above it. A recreated element keeps the
+            # deck's place, a new one follows the source, and where those two orders disagree - a
+            # frame the source rewrote, or a label that moved onto another slide - a new opaque panel
+            # would land on top of text the source puts above it, and nothing is deleted for any
+            # other check to see (`loss_oracle.text_hidden`).
+            for k in keys[i + 1:]:
+                if (nxt := placed(k)) in desired:
+                    pos = min(pos, desired.index(nxt))
                     break
             desired.insert(pos, new)
         desired += [x for x in now["order"] if x not in desired and x not in doomed]

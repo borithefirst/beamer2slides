@@ -762,6 +762,37 @@ def test_a_moved_unit_that_still_has_its_group_is_moved_once():
     assert [r["updatePageElementTransform"]["objectId"] for r in reqs] == ["new_t1_g"]
 
 
+def test_a_created_shape_stays_under_the_text_the_source_draws_above_it():
+    """`Sync.restack` gives a recreated element the deck's place in the z-order (a restack the person
+    made survives) and a created one the place the source gives it - right after the element before
+    it. Where those two orders disagree - a frame the source rewrote from scratch, or a label that
+    moved onto another slide - that put a newly created opaque panel on top of text the source draws
+    above it. Nothing is deleted when that happens, so every other check passes; the offline campaign
+    saw it as `loss_oracle.text_hidden` on 5 of 1000 adopt-shaped rounds. A created element now also
+    stays below the first element the source draws above it."""
+    from beamer2slides.sync import Sync
+    base = many_slides(["intro"])
+    ours, _ = triple(base)
+    o = ours["slides"][0]
+    panel = ours_entry("shape/panel/0", shape_ir((15, 55, 210, 95), "p0s0"))
+    # the source draws body, then the panel, then the title: the deck has the title at the bottom
+    o["elements"] = [o["elements"][1], panel, o["elements"][0]]
+    p = {"action": "update", "key": "intro", "base": 0, "ours": 0, "objectId": "b2s_s000",
+         "units": [{"key": "text/body/0", "action": "recreate"}, {"key": "shape/panel/0", "action": "create"},
+                   {"key": "text/title/0", "action": "recreate"}]}
+    sync = Sync.__new__(Sync)
+    sync.base, sync.ours = base, ours
+    before = live(base["slides"][0])
+    w = {"plan": p, "doomed": set(before["order"]),
+         "tops": {"text/body/0": "new_t1", "shape/panel/0": "new_s0", "text/title/0": "new_t0"}}
+    now = {"order": [*before["order"], "new_t1", "new_s0", "new_t0"]}
+    order = [x for x in now["order"] if x not in w["doomed"]]
+    for r in sync.restack(w, before, now):     # BRING_TO_FRONT, bottom to top
+        oid, = r["updatePageElementsZOrder"]["pageElementObjectIds"]
+        order.append(order.pop(order.index(oid)))
+    assert order.index("new_s0") < order.index("new_t0")
+
+
 def test_image_replaced_in_deck_is_kept():
     base = three_slides()
     pic = {"id": "p1f0", "kind": "image", "role": "figure", "bbox": [200, 60, 300, 160], "file": None}

@@ -2168,8 +2168,8 @@ def textblock_latex(te: dict, style_for, ctx: Context, ind: str, reset: bool = F
             + body + f"\n{ind}\\end{{textblock*}}")
 
 
-def frame_latex(ts: dict, style_for, ctx: Context) -> str:
-    key = ts.get("key")
+def frame_latex(ts: dict, style_for, ctx: Context, label: str | None = None) -> str:
+    key = label or ts.get("key")
     # sync's own keys for unlabelled frames (title:..., page:N) are not labels
     label = f"[label={key}]" if key and re.fullmatch(r"[A-Za-z][\w:.-]*", key) and not re.match(r"(title|page):", key) else ""
     title = ""

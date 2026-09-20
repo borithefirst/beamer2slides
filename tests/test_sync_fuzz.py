@@ -39,6 +39,12 @@ ROUNDS = int(os.environ.get("B2S_FUZZ_ROUNDS", "40"))
 # blameless sync (a word the source put in another element, an ambiguous reported swap),
 # 45/60/108/177 the base kept the slides the deck deleted, so a second sync brought them back.
 REGRESSIONS = (0, 20, 45, 60, 108, 177, 252, 430, 3312, 3799)
+# The same against adopt-shaped decks (`fuzz_world.make_adopt_doc`): what `adopt` writes rather than
+# what `convert` does - many small boxes, most slides with no title, near-identical twins, grouped
+# clusters, tables, a shared logo and a footer on every slide. Seeds that once failed: 82/328/441/
+# 568/629, a panel the source added stacked over text the source draws above it (`Sync.restack`).
+ADOPT_ROUNDS = int(os.environ.get("B2S_FUZZ_ADOPT_ROUNDS", "25"))
+ADOPT_REGRESSIONS = (82, 328, 441, 568, 629)
 
 
 # ---------------------------------------------------------------- the fuzz itself
@@ -49,6 +55,15 @@ def test_offline_round_loses_nothing(seed):
     if result["failures"]:
         small = fuzz_sync.shrink_offline(result)
         pytest.fail(f"seed {seed} lost something\n{loss_oracle.describe(small['failures'])}\n"
+                    f"  deck:   {'; '.join(small['deck'])}\n  source: {'; '.join(small['source'])}")
+
+
+@pytest.mark.parametrize("seed", [*range(ADOPT_ROUNDS), *ADOPT_REGRESSIONS])
+def test_offline_round_on_an_adopt_shaped_deck_loses_nothing(seed):
+    result = fuzz_sync.offline_round(seed, shape="adopt")
+    if result["failures"]:
+        small = fuzz_sync.shrink_offline(result, shape="adopt")
+        pytest.fail(f"adopt seed {seed} lost something\n{loss_oracle.describe(small['failures'])}\n"
                     f"  deck:   {'; '.join(small['deck'])}\n  source: {'; '.join(small['source'])}")
 
 
@@ -79,6 +94,35 @@ def test_a_broken_label_invariant_sends_far_fewer_slides_to_the_wrong_frame(tmp_
     assert len(silent) <= 1 and len(wrong) <= 2, \
         f"too much goes wrong unsaid: {[(r['seed'], r['ops']) for r in wrong]}"
     assert all(r["wrong"]["now"] <= r["wrong"]["before"] for r in rounds)  # never worse than before
+
+
+def test_labels_are_the_only_thing_holding_an_adopt_shaped_deck_together(tmp_path):
+    """The same campaign on a deck `adopt` wrote (`--shape adopt`): about half the slides have no
+    title, the phrases repeat from slide to slide, and every third slide is a near-twin of the one
+    before it. That is where the fallbacks have nothing to work with, and the measurement says so.
+
+    Over 1500 rounds: with the labels kept, not one frame of 4068 went to the wrong slide and the
+    check never spoke. With one broken, 12.34% of frames did, and `identity.cross_pairs` /
+    `gap_pairs` - which take 6.93% to 0.00% on a converted talk - recovered **nothing at all**
+    (`before` equals `order`, frame for frame): one leftover never explains one slide unmistakably
+    when six slides say "Next steps", and no gap holds one slide and one frame that share words
+    nobody else shares. `identity.label_moves` still earns its place (12.34% -> 2.94%), but 39 of
+    the 60 rounds left wrong passed in silence, against 1 of 22 on a converted talk.
+
+    Which is the whole argument for `adopt.frame_labels`: on this shape of deck the label is not the
+    best identity, it is the only one."""
+    from beamer2slides.devtools import fuzz_labels
+
+    rounds = [r for seed in range(150) for r in fuzz_labels.round_once(seed, 0.5, tmp_path, shape="adopt")]
+    sound = [r for r in rounds if not r["broke"]]
+    broken = [r for r in rounds if r["broke"]]
+    assert len(sound) > 30 and len(broken) > 30
+    assert sum(r["wrong"]["now"] for r in sound) == 0, "a source that kept its labels lost a frame's slide"
+    assert [r["said"] for r in sound] == ["quiet"] * len(sound)   # and never a word about a sound one
+    order, before, now = (sum(r["wrong"][k] for r in broken) for k in ("order", "before", "now"))
+    assert order > 10, "the harness stopped breaking labels, so this proves nothing"
+    assert before == order, f"the leftover passes now recover something here ({order} -> {before}): say so"
+    assert now * 2 < order, f"the moved-label check is not earning its place: {order} -> {now}"
 
 
 def test_a_frame_the_source_moved_across_another_keeps_its_slide(tmp_path):
@@ -491,6 +535,24 @@ def test_catches_text_hidden_under_a_shape_the_sync_created():
     # The new conversion stacking the shape above that text itself: the sync kept the source's order.
     above = {"slides": [{"key": "f1", "elements": [{"key": "text/body/0"}, {"key": "shape/panel/0"}]}]}
     assert loss_oracle.occlusion_findings(base, before, synced(["t", new]), above) == []
+
+
+def test_a_shape_the_source_itself_added_above_the_text_is_no_finding():
+    """The same excuse for an element the *source added*: it has no base element, so an oracle that
+    named objects by the base alone could not tell which shape it was looking at - and
+    `_source_stacks_above` can excuse nothing it cannot name. Every adopt-shaped round where a new
+    source drew a panel over its own text was reported as a loss."""
+    base, before = _occlusion_world()
+    added = f"b2s_{loss_oracle.h6('f1')}_{loss_oracle.h6('shape/panel/1')}_1zz"
+    after = copy.deepcopy(before)
+    objs = after["slides"][0]["objects"]
+    objs[added] = {**objs["p"], "box": [50, 96, 400, 160], "parent_group": None}
+    after["slides"][0]["order"].append(added)
+    els = [{"key": "shape/panel/0"}, {"key": "text/body/0"}, {"key": "shape/panel/1"}]
+    assert loss_oracle.occlusion_findings(base, before, after, {"slides": [{"key": "f1", "elements": els}]}) == []
+    below = [els[0], els[2], els[1]]   # ... and it is a loss again when the source draws it under
+    found = loss_oracle.occlusion_findings(base, before, after, {"slides": [{"key": "f1", "elements": below}]})
+    assert [(f["kind"], f["object"]) for f in found] == [("text_hidden", "t")]
 
 
 def test_text_already_hidden_or_under_something_else_is_no_finding():

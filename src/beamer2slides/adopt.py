@@ -25,6 +25,7 @@ import re
 import shutil
 from pathlib import Path
 
+from . import labels as labels_mod
 from .adopt_shapes import turned_text
 from .inverse import (Context, TEXTPOS, body_style, colour_name, frame_latex, paragraphs_latex,
                       picture_block)
@@ -3109,19 +3110,54 @@ def element_latex(el: dict, ctx: Context, tree: Path | None = None, ind: str = "
     return "\n".join(x for x in out if x.strip())
 
 
+def frame_labels(target: dict) -> list[str]:
+    r"""A `label=` for every frame the bootstrap writes, one per deck slide (docs/labels.md).
+
+    A frame's label is the only piece of a slide's identity that survives compiling, and without one
+    a sync falls back to the title, the occurrence among frames of that title, and the position. That
+    fallback is at its weakest on exactly the decks `adopt` is for: a foreign deck's slides often have
+    no title at all (429 of the benchmark corpus's 912, and 17 with no words whatever), repeat the
+    same words slide after slide, and are reordered by the person who owns them. Leaving the frames
+    unlabelled would mean the one command that exists to take a deck into git hands it the weakest
+    identity the system has.
+
+    The name comes from the deck's own name for the slide, its `objectId`: unique within the
+    presentation by construction, the same on every read of the same deck (so re-adopting writes the
+    same labels), present for every slide whether or not it has words, and unrelated to anything the
+    source may later change. A title would be readable and is none of those things - retitle a slide
+    and its label would have to move, which is precisely the promise a label is not allowed to break.
+
+    `labels.slug` folds it to what a beamer option list and a PDF destination carry, and keeps the
+    result unique: slugging is lossy (case, length, punctuation), so two ids can land on one name and
+    the second then takes `-2`. That matters more than it looks - a label written twice never reaches
+    the PDF twice (hyperref keeps the first destination and drops the second), so a collision would
+    come back as a frame with *no* label and nothing downstream could tell.
+    """
+    taken: set[str] = set()
+    out = []
+    for n, s in enumerate(target.get("slides") or [], 1):
+        name = s.get("objectId") or s.get("key") or f"slide-{n}"
+        out.append(labels_mod.slug(str(name), taken, fallback=f"slide-{n}"))
+        taken.add(out[-1])
+    return out
+
+
 def slide_latex(s: dict, style_for, ctx: Context, flow: bool, tree: Path | None = None,
-                deck_bg: str | None = None, pieces: list[str] | None = None, plan=None) -> str:
+                deck_bg: str | None = None, pieces: list[str] | None = None, plan=None,
+                label: str | None = None) -> str:
     """One deck slide as a frame. `flow` writes the readable version (`inverse.frame_latex`: a frame
     title and body text in the flow); otherwise every element keeps its own place.
 
     `pieces`: each element's `element_latex`, when the caller has them already. `plan`: what the
     recovered theme draws for this slide (`adopt_theme.FramePlan`): its layout's decoration, title,
-    subtitle and number are left out of the frame, which names the layout instead."""
+    subtitle and number are left out of the frame, which names the layout instead. `label`: the
+    frame's identity (`frame_labels`)."""
     if flow:
-        return frame_latex(s, style_for, ctx)
+        return frame_latex(s, style_for, ctx, label)
     if pieces is None:
         pieces = [element_latex(el, ctx, tree) for el in s["elements"]]
-    out = ["\\begin{frame}" + (plan.options() if plan else "[plain]")]
+    out = ["\\begin{frame}" + (plan.options(label) if plan else
+                               f"[plain,label={label}]" if label else "[plain]")]
     if plan:
         out += plan.header()
     # The deck lists a page's elements in z-order, and a textblock written later is drawn on top:
@@ -3299,15 +3335,16 @@ def bootstrap(target: dict, tex: Path, flow: bool = False) -> str:
     inverse.GUARD_UNITS = True
     theme = None
     try:
+        names = frame_labels(target)
         if flow:
-            frames = [f"% slide {n}\n" + to_bp(slide_latex(s, style_for, ctx, flow, tex.parent, deck_bg))
-                      for n, s in enumerate(target["slides"], 1)]
+            frames = [f"% slide {n}\n" + to_bp(slide_latex(s, style_for, ctx, flow, tex.parent, deck_bg, label=name))
+                      for n, (s, name) in enumerate(zip(target["slides"], names), 1)]
         else:
             pieces = [[to_bp(element_latex(el, ctx, tex.parent)) for el in s["elements"]] for s in target["slides"]]
             theme = recovered_theme(target, pieces, ctx, tex.parent, deck_bg)
             plans = theme[1] if theme else [None] * len(pieces)
-            frames = [f"% slide {n}\n" + to_bp(slide_latex(s, style_for, ctx, flow, tex.parent, deck_bg, p, plan))
-                      for n, (s, p, plan) in enumerate(zip(target["slides"], pieces, plans), 1)]
+            frames = [f"% slide {n}\n" + to_bp(slide_latex(s, style_for, ctx, flow, tex.parent, deck_bg, p, plan, name))
+                      for n, (s, p, plan, name) in enumerate(zip(target["slides"], pieces, plans, names), 1)]
     finally:
         inverse.GUARD_UNITS = False
     head = preamble(target, ctx, flow, tex.parent)

@@ -194,21 +194,32 @@ def src_move_slide(rng, doc):
     return f"move slide {i}->{j}"
 
 
+def _titled(rng, doc):
+    """A slide with a title element, and that element. An adopt-shaped deck has slides with none -
+    that is the shape they come in - and there is no title there to edit."""
+    options = [(s, W.title_element(s)) for s in doc["slides"] if W.title_element(s)]
+    return rng.choice(options) if options else (None, None)
+
+
 def src_retitle(rng, doc):
-    s = rng.choice(doc["slides"])
+    s, el = _titled(rng, doc)
+    if not s:
+        return None
     title = f"{rng.choice(W.WORDS).title()} retitled"
     s["title"] = title
-    s["elements"][0]["paragraphs"] = [{**s["elements"][0]["paragraphs"][0], "runs": [W.run(title)]}]
+    el["paragraphs"] = [{**el["paragraphs"][0], "runs": [W.run(title)]}]
     return f"retitle {title!r}"
 
 
 def src_amend_title(rng, doc):
     """A title edited rather than replaced ("Results" -> "Results v2"), which is what a source does
     when it revises a whole talk - and what tells a yes-or-no "same title?" nothing at all."""
-    s = rng.choice(doc["slides"])
-    title = f"{s['title']} {rng.choice(('v2', 'again', 'revisited'))}"
+    s, el = _titled(rng, doc)
+    if not s:
+        return None
+    title = f"{W.title_of(s)} {rng.choice(('v2', 'again', 'revisited'))}"
     s["title"] = title
-    s["elements"][0]["paragraphs"] = [{**s["elements"][0]["paragraphs"][0], "runs": [W.run(title)]}]
+    el["paragraphs"] = [{**el["paragraphs"][0], "runs": [W.run(title)]}]
     return f"amend title to {title!r}"
 
 
@@ -929,15 +940,18 @@ def _draw(rng: random.Random, deck_ops, source_ops):
     return list(deck_ops), list(source_ops)
 
 
-def offline_chain(seed: int, chain: int = 1, ops=None, work: Path | None = None) -> dict:
+def offline_chain(seed: int, chain: int = 1, ops=None, work: Path | None = None,
+                  shape: str = "converted") -> dict:
     """`chain` edit+sync steps on one deck. Each sync starts from the base the previous one wrote
     (`fuzz_world.rebase`), which is where a sync undoing what the last one merged would show.
-    `ops`: per step `{"deck": [...], "source": [...]}` (default: drawn from the seed)."""
+    `ops`: per step `{"deck": [...], "source": [...]}` (default: drawn from the seed).
+    `shape`: which world the deck is drawn from - "converted" (a talk this converter made) or
+    "adopt" (a foreign deck `adopt` took over: `fuzz_world.make_adopt_doc`)."""
     rng = random.Random(seed)
     tmp = work or Path(tempfile.mkdtemp(prefix="b2s-fuzz-"))
     tmp.mkdir(parents=True, exist_ok=True)
     try:
-        doc = W.make_doc(rng, tmp)
+        doc = W.make(shape, rng, tmp)
         base = W.build_base(doc, tmp)
         live = W.live_of(base)
         steps = []
@@ -953,7 +967,7 @@ def offline_chain(seed: int, chain: int = 1, ops=None, work: Path | None = None)
             steps.append(record)
             doc, live = record.pop("doc"), record["state"]["after"]
             base = record["state"]["next_base"] or base
-        return {"seed": seed, "chain": chain, "steps": steps,
+        return {"seed": seed, "chain": chain, "shape": shape, "steps": steps,
                 "ops": [{"deck": s["deck_ops"], "source": s["source_ops"]} for s in steps],
                 "failures": [f for s in steps for f in s["failures"]]}
     finally:
@@ -961,12 +975,13 @@ def offline_chain(seed: int, chain: int = 1, ops=None, work: Path | None = None)
             shutil.rmtree(tmp, ignore_errors=True)
 
 
-def offline_round(seed: int, source_ops=None, deck_ops=None, work: Path | None = None) -> dict:
+def offline_round(seed: int, source_ops=None, deck_ops=None, work: Path | None = None,
+                  shape: str = "converted") -> dict:
     """One offline round. `source_ops` / `deck_ops`: op names (default: drawn from the seed)."""
-    return offline_chain(seed, 1, [{"deck": deck_ops, "source": source_ops}], work)["steps"][0]
+    return offline_chain(seed, 1, [{"deck": deck_ops, "source": source_ops}], work, shape)["steps"][0]
 
 
-def shrink_offline(result: dict, limit: int = 200) -> dict:
+def shrink_offline(result: dict, limit: int = 200, shape: str = "converted") -> dict:
     """Drop edits one at a time while the round keeps failing."""
     best = result
     tries = 0
@@ -979,8 +994,9 @@ def shrink_offline(result: dict, limit: int = 200) -> dict:
                     break
                 ops = best[field][:i] + best[field][i + 1:]
                 tries += 1
-                candidate = offline_round(best["seed"], **{"source_ops": best["source_ops"], "deck_ops": best["deck_ops"],
-                                                           field: ops})
+                candidate = offline_round(best["seed"], shape=shape,
+                                          **{"source_ops": best["source_ops"], "deck_ops": best["deck_ops"],
+                                             field: ops})
                 if candidate["failures"]:
                     best, changed = candidate, True
                     break
@@ -990,6 +1006,7 @@ def shrink_offline(result: dict, limit: int = 200) -> dict:
 def shrink_chain(result: dict, limit: int = 300) -> dict:
     """Drop edits one at a time, in the first failing step and the ones before it."""
     failing = next(i for i, s in enumerate(result["steps"]) if s["failures"])
+    shape = result.get("shape", "converted")
     best = {**result, "ops": result["ops"][:failing + 1], "chain": failing + 1}
     tries = 0
     for step in range(failing, -1, -1):
@@ -1003,7 +1020,7 @@ def shrink_chain(result: dict, limit: int = 300) -> dict:
                     if step == failing and field == "deck" and not ops[step][field]:
                         continue
                     tries += 1
-                    candidate = offline_chain(best["seed"], best["chain"], ops)
+                    candidate = offline_chain(best["seed"], best["chain"], ops, shape=shape)
                     if candidate["steps"][-1]["failures"]:
                         best, changed = candidate, True
                         break
@@ -1020,10 +1037,11 @@ def describe_chain(result: dict) -> str:
     return "\n".join(lines)
 
 
-def run_offline(rounds: int, seed0: int, shrink: bool, quiet: bool = False, chain: int = 1) -> list[dict]:
+def run_offline(rounds: int, seed0: int, shrink: bool, quiet: bool = False, chain: int = 1,
+                shape: str = "converted") -> list[dict]:
     bad = []
     for seed in range(seed0, seed0 + rounds):
-        result = offline_chain(seed, chain)
+        result = offline_chain(seed, chain, shape=shape)
         if result["failures"]:
             bad.append(shrink_chain(result) if shrink else result)
             if not quiet:
@@ -1443,18 +1461,20 @@ def main() -> int:
     ap.add_argument("--no-shrink", action="store_true")
     ap.add_argument("--parallel", type=int, default=3)
     ap.add_argument("--chain", type=int, default=1, help="how many edit+sync steps per round")
+    ap.add_argument("--shape", choices=sorted(W.SHAPES), default="converted",
+                    help="offline: which world the deck is drawn from (adopt = a foreign deck adopt took over)")
     ap.add_argument("--keep-decks", action="store_true", help="live: don't delete the decks of passing rounds")
     ap.add_argument("--out", type=Path, default=Path(os.environ.get("B2S_FUZZ_OUT", ROOT / "out" / "sync-fuzz")))
     args = ap.parse_args()
 
     if args.mode == "offline":
         if args.replay is not None:
-            result = offline_chain(args.replay, args.chain)
+            result = offline_chain(args.replay, args.chain, shape=args.shape)
             print(describe_chain(result))
             print(loss_oracle.describe([f for s in result["steps"] for f in s["findings"]]) or "nothing lost")
             return 1 if result["failures"] else 0
         started = time.monotonic()
-        bad = run_offline(args.rounds, args.seed, not args.no_shrink, chain=args.chain)
+        bad = run_offline(args.rounds, args.seed, not args.no_shrink, chain=args.chain, shape=args.shape)
         print(f"{args.rounds - len(bad)}/{args.rounds} offline rounds clean in {time.monotonic() - started:.1f} s")
         return 1 if bad else 0
 

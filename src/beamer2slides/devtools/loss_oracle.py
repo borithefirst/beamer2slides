@@ -693,11 +693,18 @@ def hiders(slide_read: dict, oid: str, order: list[str] | None = None) -> list[s
             and rb.get("box") and _cover(box, rb["box"]) > HIDDEN]
 
 
-def _element_of(skey: str, base_slide: dict | None, slide_read: dict) -> dict[str, dict]:
-    """object id -> the base element it carries on this read-back."""
+def _element_of(skey: str, base_slide: dict | None, slide_read: dict,
+                ours_slide: list | None = None) -> dict[str, dict]:
+    """object id -> the element it carries on this read-back: a base element, or - for an object the
+    sync has just created - the *ours* element it was made for. Naming only base elements left an
+    element the source added nameless, and `_source_stacks_above` can excuse nothing it cannot name:
+    a panel a new source draws over its own text was then reported as hiding it, every time."""
     out = {}
     for el in (base_slide or {}).get("elements", []):
         for oid in element_objects(skey, el["key"], el, slide_read):
+            out.setdefault(oid, el)
+    for el in ours_slide or []:
+        for oid in element_objects(skey, el["key"], None, slide_read):
             out.setdefault(oid, el)
     return out
 
@@ -729,7 +736,8 @@ def occlusion_findings(base: dict, before: dict, after: dict, ours: dict | None 
         if not any(opaque(a["objects"][x]) for x in new):
             continue
         order_before, order_after = paint_order(bs), paint_order(a)
-        el_after, el_before = _element_of(skey, b, a), _element_of(skey, b, bs)
+        ours_slide = ours_by_key.get(skey)
+        el_after, el_before = _element_of(skey, b, a, ours_slide), _element_of(skey, b, bs)
         for oid in order_after:
             rb = a["objects"][oid]
             if not readable(rb):
@@ -743,7 +751,6 @@ def occlusion_findings(base: dict, before: dict, after: dict, ours: dict | None 
             was = [x for x in was if readable(bs["objects"][x])]
             if not was or all(hiders(bs, x, order_before) for x in was):
                 continue  # nothing to read there before, or it was hidden already
-            ours_slide = ours_by_key.get(skey)
             over = [x for x in over
                     if not _source_stacks_above(ours_slide, el and el["key"], (el_after.get(x) or {}).get("key"))]
             if over:
