@@ -1155,16 +1155,19 @@ def apply_keys(ir: dict, named_ranges: dict) -> dict:
             continue
         for ranged in entry.get("namedRanges", []):
             for span in ranged.get("ranges", []):
-                starts.append((span.get("startIndex", 0), name[len(KEY_PREFIX):],
-                               ranged.get("namedRangeId", "")))
+                starts.append((span.get("startIndex", 0), span.get("endIndex", 0),
+                               name[len(KEY_PREFIX):], ranged.get("namedRangeId", "")))
     starts.sort()
     taken: set[str] = set()
     for block in ir["blocks"]:
         low, high = block.get("span", [0, 0])
-        for start, key, range_id in starts:
+        for start, end, key, range_id in starts:
             if low <= start < high and key not in taken:
                 block["key"] = key
                 block["rangeId"] = range_id
+                # Where the range is, as against where `name_requests` would put it:
+                # a range drifts (an insert at its first index pushes it along).
+                block["range"] = [start, end]
                 taken.add(key)
                 break
     return ir
@@ -1187,22 +1190,53 @@ def anchor_span(block: dict) -> list | None:
     return block.get("span")
 
 
-def name_requests(ir: dict) -> list[dict]:
-    """`createNamedRange` for every keyed block the document does not name yet.
+def anchor_range(block: dict) -> tuple[int, int] | None:
+    """Where a keyed block's named range is planted: its anchor span short of the
+    paragraph mark where it can be, so that deleting the newline between two
+    paragraphs never silently stretches one block's identity over the other's
+    words. An empty paragraph is all mark, so its range is that."""
+    span = anchor_span(block) if block.get("key") else None
+    if not span:
+        return None
+    low, high = span
+    return low, max(high - 1, low + 1)
 
-    The range stops short of the paragraph mark where it can, so that deleting the
-    newline between two paragraphs never silently stretches one block's identity
-    over the other's words.
+
+def replant_requests(ir: dict) -> list[dict]:
+    """The named ranges that drifted, planted again where `anchor_range` puts them.
+
+    A range drifts: text written *at* its first index pushes it along (Docs' rule),
+    so a chip or a word put into an empty paragraph leaves the range on the
+    paragraph mark, where the next "\\ntext" appended at that mark takes it away
+    with the new block and a structural batch that swallows the mark deletes it.
+    The old range goes (`deleteNamedRange`) and the new one is planted, in that
+    order, so a name is never carried twice. Nothing here moves an index, so these
+    can head any batch planned against `ir`.
     """
     out = []
     for block in ir["blocks"]:
-        span = anchor_span(block) if block.get("key") and not block.get("rangeId") else None
-        if not span:
+        planted = anchor_range(block)
+        here = block.get("range")
+        if not planted or not block.get("rangeId") or not here or here[0] == planted[0]:
             continue
-        low, high = span
+        out.append({"deleteNamedRange": {"namedRangeId": block["rangeId"]}})
         out.append({"createNamedRange": {
             "name": KEY_PREFIX + block["key"],
-            "range": {"startIndex": low, "endIndex": max(high - 1, low + 1)}}})
+            "range": {"startIndex": planted[0], "endIndex": planted[1]}}})
+    return out
+
+
+def name_requests(ir: dict) -> list[dict]:
+    """`createNamedRange` for every keyed block the document does not name yet — and
+    again for one whose range drifted (`replant_requests`)."""
+    out = replant_requests(ir)
+    for block in ir["blocks"]:
+        planted = anchor_range(block)
+        if not planted or block.get("rangeId"):
+            continue
+        out.append({"createNamedRange": {
+            "name": KEY_PREFIX + block["key"],
+            "range": {"startIndex": planted[0], "endIndex": planted[1]}}})
     return out
 
 

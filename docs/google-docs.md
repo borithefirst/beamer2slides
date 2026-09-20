@@ -260,7 +260,8 @@ of every tab, most heavily laden first), and `adopt` and `push` name the blocks 
 words the person can see in the document: *the paragraph 'Why this matters' carries
 paragraphStyle.borderBottom; rewriting that block through the file would drop it*
 (`doc_sync.block_risk_notes`, eight blocks and four properties each before it says how
-many more). A section break is left out — nothing rewrites one — and so is everything
+many more); a sync, which names nothing, at least says how many blocks carry one, which
+is the number it can act on. A section break is left out — nothing rewrites one — and so is everything
 outside the blocks, since no rewrite of a paragraph can drop the page's margins. It is
 a **risk**, not a loss: a block nobody rewrites keeps all of it, which is exactly the
 thing one can act on. What a sync *did* rewrite is the next step and waits on nothing
@@ -872,13 +873,13 @@ reader's styling, and the rest. The ones still standing are let through by defau
 it is fixed and has a test, its entry goes, or it would swallow the next defect that
 looks like it.
 
-**Seven of the ten signatures are now at zero**, and what closed them falls into four
-groups: five ways of losing a block's identity, two ways of losing the reader's content
+**Nine of the ten signatures are now at zero**, and what closed them falls into four
+groups: six ways of losing a block's identity, two ways of losing the reader's content
 outright, three ways of killing the sync where it stood, and one place in a document
 where Docs will let nothing be written at all. (Some of them closed one of the first
 group and one of a later one — a table losing its anchor, Docs' index rules, the place
-with nowhere to write.) The three left are `lost-key`, down from 34 findings to 2,
-`crossed-delete`, 2 to 1, and `moved-styling`, unmoved at 2. And one of the seven
+with nowhere to write.) The one left is `crossed-delete`, 2 to 1 and not reached since;
+`lost-key` went 34 → 2 → 0 and `moved-styling` 2 → 0, both below. And one of the nine
 reached zero with no defect behind it at all: it was the oracle miscounting, twice, and
 that is the last part of this section.
 
@@ -978,7 +979,8 @@ everything goes in.
 At one seed, 200 rounds at chain 8: `toc-block` 10 → 0, `toc-table-split` 4 → 0,
 `empty-delete` 6 → 0, `dropped-table` 17 → 0, `dropped-frozen` 8 → 0, `crossed-frozen`
 22 → 0, `table-in-a-table` 1 → 0, `lost-key` 34 → 2, `crossed-delete` 2 → 1,
-`moved-styling` 2 → 2 — and the same at a second seed and at chain 4. The seven
+`moved-styling` 2 → 2 — and the same at a second seed and at chain 4; `lost-key` and
+`moved-styling` then went to 0 (below). The nine
 signatures that reached zero are **out of `KNOWN`** rather than rewritten: each has a
 test of its own now, and each was wide enough to swallow the next defect that looks
 like it — `block_gone` mentioning `table:` had been catching crossed keys on tables all
@@ -987,15 +989,43 @@ there will ever be. That is not a worry about the future: taking `crossed-frozen
 uncovered, at two other seeds, a person chip going with the block the source dropped,
 which had been filed under it all along.
 
-`lost-key`'s last two have a cause and no fix yet, and the entry says so. An empty
-paragraph is all mark, so its named range **is** its mark — and a block written in
-front of a table goes in as `"\ntext"` at the mark of the paragraph before it, which
-Docs then hands to the new paragraph, a range being pushed along by an insert at its
-own first index. The empty paragraph's key rides onto the block that was written and
-the key the file gave the moved block is nowhere. There is no index that both appends
-after an empty paragraph and leaves its range alone, so the write is right and the
-read has to be read — and reading it by taking the key off the block whose words
-contradict the plan was tried, in two widths, and cost that round its convergence.
+`lost-key`'s last two had a cause that looked like it had no fix, and the entry said
+so. An empty paragraph is all mark, so its named range **is** its mark — and a block
+written in front of a table goes in as `"\ntext"` at the mark of the paragraph before
+it, which Docs then hands to the new paragraph, a range being pushed along by an insert
+at its own first index. The empty paragraph's key rides onto the block that was written
+and the key the file gave the moved block is nowhere. There is no index that both
+appends after an empty paragraph and leaves its range alone, and reading the key back
+off the block whose words contradict the plan was tried, in two widths, and cost that
+round its convergence. What works is neither: the write is right, and the range is
+**planted again** where it belongs, in the same batch — `doc_merge.requests` puts a
+`deleteNamedRange` and a fresh `createNamedRange` on the mark after every append there
+and before a block inserted in front of the paragraph (`REPLANT`, between `APPEND` and
+`EDIT` in the order at one index), which `doc_world` had to learn to take. The same
+drift comes from the reader's side: a person chip or a word put into an empty paragraph
+pushes its range onto the mark, so `apply_keys` now records where a range *is*
+(`block["range"]`), `doc_ir.replant_requests` names the ones that no longer start where
+`anchor_range` puts them, `name_requests` sends those at the settle, and `structure`
+heads its batch with them — because the batch that builds a table swallows the empty
+paragraph `insertTable` leaves by deleting the mark before it, that mark carried the
+chip paragraph's drifted range, and the moved table is found again by the key of the
+block it follows (chain-8 seed 296: the table settled as `table:empty`, the file still
+naming `table:c`). At one seed, 300 rounds at chain 8 and 600 at chain 4 under
+`--strict`: nothing.
+
+`moved-styling` was `_retext`: a block the source reworded *and* moved is written again
+from nothing, and the reader's styling was carried over by folding the whole stretch
+between two frozen runs into its first writable run, so every mark inside it went while
+the report called the block merged. It now pairs the document's words with the merged
+text (`_word_pairs`) and gives each one the document's own styling, through the run
+builder `_restyled_words` already used (`_runs_from_styles`). Taking the entry out
+uncovered two more under the same signature, since a signature with no words swallows
+every styling loss there is: a block written from nothing inherits the styling of the
+character in front of it (Docs' rule), so one moved under an underlined heading came
+out underlined — `_style_requests` names every managed field on every run now,
+whatever the run carries; and a word the reader styled that the source then rewrote
+has nowhere to carry the styling to, which is right, but nothing said so —
+`doc_merge.reader_styling_gone` names the word in the report.
 
 And one of the ten was the **oracle's own** from beginning to end, twice over, which is
 the third and fourth time the harness has been the thing at fault. A picture is identified by the file

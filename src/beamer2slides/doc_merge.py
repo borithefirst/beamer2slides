@@ -66,7 +66,7 @@ SHAPE_KEYS = ("kind", "level", "ordered", "align") + tuple(k for k, _ in PARAGRA
 UNIMPORTABLE = ("shading", "space_above", "space_below")
 # What is written first when two edits are planned at one and the same index
 # (`requests` says why each one sits where it does).
-DELETE, APPEND, EDIT, BEFORE = 0, 1, 2, 3
+DELETE, APPEND, REPLANT, EDIT, BEFORE = 0, 1, 2, 3, 4
 
 
 # ---------------------------------------------------------------- block text
@@ -909,6 +909,13 @@ def _merge_block(was: dict, mine: dict, live: dict, conflicts: list, notes: list
     if text != block_text(live):
         out["runs"] = _retext(live, text)
         out["origin"] = "merged"
+        if styles_of(live) != styles_of(was):
+            # The reader styled a word and the source replaced that very word: the
+            # styling is rightly gone, but gone with nothing said it reads as lost.
+            word = reader_styling_gone(was, live, text)
+            if word:
+                notes.append(f"{key}: the source rewrote {word!r}, a word the document "
+                             f"had styled — that styling is gone with the word")
     # Styling is merged the same way the words are: the source's marks are taken when
     # the source changed them and the document's styling is as the base has it. Where
     # the words differ too, the marks follow the words — each word of the merged text
@@ -1291,13 +1298,19 @@ def _restyled_words(was: dict, mine: dict, live: dict, text: str) -> tuple[list[
     lost = any(i not in kept and mine_styles[i] != was_styles[w]
                for w, i in _word_pairs(block_text(was), block_text(mine))
                if block_text(mine)[i] != FROZEN)
+    return _runs_from_styles(text, styles, live), lost
+
+
+def _runs_from_styles(text: str, styles: list, live: dict) -> list[dict]:
+    """Runs for `text` from one style per character: a character with none takes the
+    one before it, as Docs gives a typed character, and the frozen runs are the
+    document's own, in its order — the merge adds or drops none the document does
+    not have (`_merge_block` checks the source's)."""
     runs: list[dict] = []
     frozen = iter([r for r in live.get("runs", []) if r.get("frozen")])
     previous: dict = {}
     for char, style in zip(text, styles):
         if char == FROZEN:
-            # The merge adds or drops none the document does not have (`_merge_block`
-            # checks the source's), so they are the document's, in its order.
             chip = next(frozen, None)
             if chip is not None:
                 runs.append(dict(chip))
@@ -1312,32 +1325,45 @@ def _restyled_words(was: dict, mine: dict, live: dict, text: str) -> tuple[list[
     for run in runs:
         if not run.get("frozen"):
             run["width"] = doc_ir.utf16_len(run["text"])
-    return runs, lost
+    return runs
 
 
 def _retext(live: dict, text: str) -> list[dict]:
     """Put merged text back into the live block's runs, frozen runs untouched.
 
-    The styled pieces keep their share by following the frozen runs: text between
-    two frozen runs stays in the first writable run of that stretch, which is the
-    honest thing a word-level merge can promise.
+    Every word the document has keeps the document's styling on it, wherever the
+    merge put it; a word neither side has whole takes the styling before it. It used
+    to fold each stretch between two frozen runs into the first writable run of that
+    stretch, which threw away every mark the reader had put inside the stretch as
+    soon as the block was written again from nothing (a block the source both
+    reworded and moved, `moved-styling`).
     """
-    pieces = text.split(FROZEN)
-    runs, piece = [], iter(pieces)
-    stretch = next(piece, "")
-    writable_seen = False
-    for run in live.get("runs", []):
-        if run.get("frozen"):
-            runs.append(dict(run))
-            stretch, writable_seen = next(piece, ""), False
-            continue
-        if writable_seen:
-            continue  # its words were folded into the first run of this stretch
-        runs.append(dict(run) | {"text": stretch, "width": doc_ir.utf16_len(stretch)})
-        writable_seen = True
-    if not writable_seen and stretch:
-        runs.append({"text": stretch, "width": doc_ir.utf16_len(stretch)})
-    return [r for r in runs if r.get("frozen") or r["text"]]
+    styles: list = [None] * len(text)
+    live_styles = _char_styles(live)
+    for i, j in _word_pairs(block_text(live), text):
+        styles[j] = live_styles[i]
+    return _runs_from_styles(text, styles, live)
+
+
+def reader_styling_gone(was: dict, live: dict, text: str) -> str | None:
+    """The first word the reader styled that the merged `text` no longer has.
+
+    A word carries the reader's styling when its marks differ from the base's on
+    that same word; it is gone when no word of the merged text pairs with it. Both
+    sides are read-backs, so a named style's own defaults are absent on both alike
+    (`_named_defaults`) and never read as a mark. Frozen runs are not words.
+    """
+    live_styles, was_styles = _char_styles(live), _char_styles(was)
+    live_text = block_text(live)
+    theirs = {i for w, i in _word_pairs(block_text(was), live_text)
+              if live_text[i] != FROZEN and live_styles[i] != was_styles[w]}
+    kept = {i for i, _ in _word_pairs(live_text, text)}
+    lost = sorted(theirs - kept)
+    if not lost:
+        return None
+    start = live_text.rfind(" ", 0, lost[0]) + 1
+    end = live_text.find(" ", lost[0])
+    return live_text[start:end if end >= 0 else None]
 
 
 # ---------------------------------------------------------------- edits
@@ -1533,8 +1559,14 @@ def _bullets_last(paragraph: list[dict], runs: list[dict]) -> list[dict]:
     return [r for r in paragraph if "createParagraphBullets" not in r] + runs + made
 
 
-def _style_requests(start: int, block: dict, reset: bool = False) -> list[dict]:
-    """Everything but the words, for a block written at `start` from nothing."""
+def _style_requests(start: int, block: dict, reset: bool = True) -> list[dict]:
+    """Everything but the words, for a block written at `start` from nothing.
+
+    The runs are written with `reset`: text inserted inherits the styling of the
+    character in front of it (Docs' rule), so a block moved in front of an underlined
+    heading came out underlined, with the reader's bold on it, and the oracle called
+    the bold lost. Naming every managed field puts the paragraph's own face back.
+    """
     end = start + _width(block) + 1
     return _bullets_last(_paragraph_requests(start, end, block, was_item=True),
                          _run_requests(start, block, reset))
@@ -1648,6 +1680,20 @@ def requests(theirs: dict, merged: list[dict]) -> list[dict]:
     lead_first = min((p for p, b in enumerate(merged) if _written_here(b) and lead
                       and (_anchor(merged, p) or {}).get("span", [None])[0] == lead[1]),
                      default=None)
+    # An empty paragraph is all mark, so its named range *is* its mark, and text
+    # written at a range's first index pushes the range along (Docs' rule): "\ntext"
+    # appended at that mark leaves the key on the new block's mark and the empty
+    # paragraph with none, so the plan after reads the new block as the old one. The
+    # same for a range a reader's chip or word pushed onto the mark of a paragraph
+    # that was empty (`apply_keys` records where a range is). The range is planted
+    # again where it belongs in the same batch — once, after every append there
+    # (`REPLANT`), and before a block inserted in front of the paragraph, which
+    # pushes the fresh range along as it should.
+    empties = {b["span"][1] - 1: b for i, b in enumerate(theirs["blocks"])
+               if i not in going and b.get("key") and b.get("rangeId") and b.get("span")
+               and (b["range"][0] == b["span"][1] - 1 if b.get("range")
+                    else b["span"][1] == b["span"][0] + 1 and not b.get("runs"))}
+    replant: dict[int, dict] = {}
     # Back to front here too: two blocks added at one index both insert there, and
     # what is written last ends up in front, so the later block is planned first.
     for position in range(len(merged) - 1, -1, -1):
@@ -1667,6 +1713,8 @@ def requests(theirs: dict, merged: list[dict]) -> list[dict]:
             else:
                 plans.append((at, APPEND, _content_requests(at, block, before="\n")
                               + _style_requests(at + 1, block)))
+                if at in empties:
+                    replant[at] = empties[at]
         elif at is not None:
             plans.append((at, BEFORE, _content_requests(at, block, after="\n")
                           + _style_requests(at, block)))
@@ -1680,11 +1728,21 @@ def requests(theirs: dict, merged: list[dict]) -> list[dict]:
             # would join the last paragraph and leave an empty one behind instead.
             plans.append((tail, APPEND, _content_requests(tail, block, before="\n")
                           + _style_requests(tail + 1, block)))
+            if tail in empties:
+                replant[tail] = empties[tail]
         else:
             # Nothing of the document survives: write into the empty paragraph Docs
             # always keeps, and let the empty one end up at the bottom.
             plans.append((tail, APPEND, _content_requests(tail, block, after="\n")
                           + _style_requests(tail, block)))
+    for at, live in replant.items():
+        # The block's own indices are below the mark, so nothing written there has
+        # moved them and its anchor is where `theirs` read it.
+        low, high = doc_ir.anchor_range(live)
+        plans.append((at, REPLANT, [
+            {"deleteNamedRange": {"namedRangeId": live["rangeId"]}},
+            {"createNamedRange": {"name": doc_ir.KEY_PREFIX + live["key"],
+                                  "range": {"startIndex": low, "endIndex": high}}}]))
 
     out: list[dict] = []
     # Back to front, so an earlier edit never moves a later one's indices, and at one
@@ -1789,6 +1847,13 @@ def structure(theirs: dict, merged: list[dict],
     out: list[dict] = []
     for _, _, reqs in sorted(steps, key=lambda p: (-p[0], p[1])):
         out += reqs
+    if out:
+        # A range a reader's chip pushed onto an empty paragraph's mark goes with the
+        # mark when a new table's empty paragraph is swallowed — and a table built
+        # after that paragraph is found again by that very key (`anchor_tables`).
+        # Planted back first: `requests` does the same for the batch of words, but
+        # this batch goes before it, against a document read again in between.
+        out = doc_ir.replant_requests(theirs) + out
     return out, shaped
 
 

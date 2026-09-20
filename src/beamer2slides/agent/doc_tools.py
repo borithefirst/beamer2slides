@@ -334,6 +334,12 @@ def doc_adopt(
     What no HTML import could create does not come back in the file: chips, equations,
     dropdowns and a table of contents are frozen runs, reported by every sync and never
     rewritten by one.
+
+    The warnings also name the individual blocks that carry something the dialect cannot
+    say — a paragraph border, a tab stop, a superscript, a table's column widths. Those
+    survive every ordinary edit and go the moment the block holding them is written again
+    from nothing, so a block named there is one to change in the document rather than in
+    the file.
     """
     target = j.path(file, write=True) if file else None
     if target is not None:
@@ -365,7 +371,8 @@ def doc_adopt(
         f"ordinary synced pair from here, and doc_sync is the only thing that should write "
         f"to either. What an HTML import cannot create does not come back in the file - "
         f"chips, equations, dropdowns and a table of contents are frozen runs that every "
-        f"sync reports and never rewrites.")
+        f"sync reports and never rewrites. The warnings name the blocks carrying something "
+        f"the file cannot say: change those in the document, not in the file.")
 
 
 TOOLS = (doc_push, doc_sync, doc_adopt)

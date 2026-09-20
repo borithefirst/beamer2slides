@@ -510,12 +510,13 @@ def test_a_heading_the_source_turned_into_a_paragraph_is_a_paragraph():
     assert merged["kind"] == "paragraph" and merged.get("level") is None
 
 
-@pytest.mark.xfail(strict=True, reason="fuzz_docs.KNOWN 'moved-styling': a block the "
-                   "source both reworded and moved is written again from nothing, and "
-                   "`_retext` folds the whole stretch into the first writable run, so "
-                   "every mark the reader put inside it goes while the report calls the "
-                   "block merged")
 def test_a_block_the_source_reworded_and_moved_keeps_the_readers_styling():
+    """Was `moved-styling`: a block the source both reworded and moved is written again
+    from nothing, and `_retext` folded the whole stretch between two frozen runs into
+    the first writable run, so every mark the reader put inside it went while the
+    report called the block merged. `_retext` now gives every word the document has
+    the document's own styling, through the run builder `_restyled_words` already
+    used (`_runs_from_styles`)."""
     world = doc_world.build([{"blocks": [_para("alpha beta"), _para("gamma"),
                                          _para("delta")]}], title="fuzz")
     ours = fuzz_docs.bootstrap(world)
@@ -531,6 +532,116 @@ def test_a_block_the_source_reworded_and_moved_keeps_the_readers_styling():
     before = doc_world.settled_ir(world, ours, base)
     report, ours, base = fuzz_docs.sync_once(world, ours, base)
     assert not oracle.failures(oracle.check(was, before, base, report, mine))
+    moved = doc_world.read_ir(world, ours, base)["blocks"][-1]
+    assert [(r["text"], r.get("bold")) for r in moved["runs"]] == \
+        [("lantern ", None), ("beta", True)]
+
+
+def test_a_styled_word_the_source_replaced_is_reported_with_the_styling():
+    """A word the reader styled and the source then rewrote: the styling has nowhere
+    to go, which is right, but nothing said so and the oracle called it lost in
+    silence (offline chain-8 seeds 53 and 274). `doc_merge.reader_styling_gone` names
+    the word in the report."""
+    world, ours, base = _build([_para("alpha beta gamma"), _para("The end.")])
+    part = doc_world.read_ir(world, ours, base)
+    start = part["blocks"][0]["span"][0]
+    world.apply([{"updateTextStyle": {
+        "range": {"startIndex": start + 6, "endIndex": start + 10},
+        "textStyle": {"bold": True}, "fields": "bold"}}])
+    was, mine = copy.deepcopy(base), copy.deepcopy(ours)
+    ours["blocks"][0]["runs"][0]["text"] = "alpha quartz gamma"
+    before = doc_world.settled_ir(world, ours, base)
+    report, ours, base = fuzz_docs.sync_once(world, ours, base)
+    assert not oracle.failures(oracle.check(was, before, base, report, mine))
+    assert any("'beta'" in line for line in report["notes"])
+    assert doc_merge.block_text(doc_world.read_ir(world, ours, base)["blocks"][0]) \
+        == "alpha quartz gamma"
+
+
+def test_an_empty_paragraphs_key_stays_on_it_when_a_block_is_written_at_its_mark():
+    """Was the last cause of `lost-key`: an empty paragraph's range is exactly its mark,
+    and text written *at* a range's first index pushes the range along (Docs' rule), so
+    "\\ntext" appended at that mark left the key on the new block and the empty
+    paragraph with none — the plan after read the new block as the old one and the
+    empty one as the reader's. Reading it back off the wrong block was tried twice and
+    cost the round its convergence; `requests` instead plants the range again on the
+    mark in the same batch, after the appends there and before a block inserted in
+    front of the paragraph (offline chain-8 seed 66, shrunk: a source move in the
+    `between_tables` shape; `doc_world` takes `deleteNamedRange` for it)."""
+    world, ours, base = _build([_table([["a", "b"]]), _para(""),
+                                _table([["c", "d"]]), _para("The end.")])
+    at = [i for i, b in enumerate(ours["blocks"]) if b.get("key") == "table:c"][0]
+    ours["blocks"].insert(at, _para("Willow here."))
+    report, ours, base = fuzz_docs.sync_once(world, ours, base)
+    assert _keys(doc_world.read_ir(world, ours, base)) == [
+        "table:a", "paragraph:empty", "paragraph:willow-here", "table:c", "paragraph:the-end"]
+    assert _keys(ours) == _keys(base) == _keys(doc_world.read_ir(world, ours, base))
+    again, _, _ = fuzz_docs.sync_once(world, copy.deepcopy(ours), copy.deepcopy(base))
+    assert again["applied"] == []
+
+
+def test_a_key_a_readers_chip_pushed_onto_the_mark_survives_a_structural_batch():
+    """The same drift from the reader's side, and the batch of words is too late for
+    it: a person chip put into an empty paragraph pushes its range onto the mark, and
+    when the source then moves the table after it, the structural batch that builds
+    the table swallows that very mark — the chip paragraph loses its key, and the
+    rebuilt table, found again by the key of the block it follows (`anchor_tables`),
+    settles as `table:empty` while the file still names `table:c` (offline chain-8
+    seed 296, shrunk). `structure` now heads its batch with `doc_ir.replant_requests`,
+    and `settle` plants a drifted range back too (`name_requests`)."""
+    world, ours, base = _build([_table([["a", "b"]]), _para(""), _para("Signal."),
+                                _table([["c", "d"]]), _para("The end.")])
+    part = doc_world.read_ir(world, ours, base)
+    empty = next(b for b in part["blocks"] if b["key"] == "paragraph:empty")
+    world.apply([{"insertPerson": {"location": {"index": empty["span"][1] - 1},
+                                   "personProperties": {"email": "reader@example.com"}}}])
+    part = doc_world.read_ir(world, ours, base)
+    empty = next(b for b in part["blocks"] if b["key"] == "paragraph:empty")
+    assert empty["range"][0] == empty["span"][1] - 1, "the chip pushed the range along"
+    was, mine = copy.deepcopy(base), copy.deepcopy(ours)
+    # The table goes up, right behind the chip paragraph: it is built at "Signal."'s
+    # start, and the empty paragraph that leaves is swallowed by deleting the mark
+    # before it — the chip paragraph's, where the drifted range sits.
+    at = [i for i, b in enumerate(ours["blocks"]) if b.get("key") == "table:c"][0]
+    ours["blocks"].insert(2, ours["blocks"].pop(at))
+    before = doc_world.settled_ir(world, ours, base)
+    report, ours, base = fuzz_docs.sync_once(world, ours, base)
+    assert not oracle.failures(oracle.check(was, before, base, report, mine))
+    live = doc_world.read_ir(world, ours, base)
+    assert _keys(live) == ["table:a", "paragraph:empty", "table:c", "paragraph:signal",
+                           "paragraph:the-end"]
+    assert [r.get("chip") for r in live["blocks"][1]["runs"]] == ["person"]
+    assert oracle.text_of(live["blocks"][2]) == "c d"
+    again, _, _ = fuzz_docs.sync_once(world, copy.deepcopy(ours), copy.deepcopy(base))
+    assert again["applied"] == []
+
+
+def test_a_block_written_from_nothing_does_not_inherit_its_neighbours_styling():
+    """Text inserted inherits the styling of the character in front of it (Docs'
+    rule), so a block the source moved in front of an underlined heading came out
+    underlined with the reader's bold on it, and the oracle called the bold lost
+    (offline chain-8 seed 280, shrunk). `_style_requests` names every managed field
+    on every run now, so a block written from nothing has the styling the file gives
+    it and no other."""
+    world = doc_world.build([{"blocks": [
+        _para("alpha beta"), _para("gamma"),
+        {"kind": "heading", "level": 2, "runs": [{"text": "Underlined", "underline": True}]},
+        _para("delta")]}], title="fuzz")
+    ours = fuzz_docs.bootstrap(world)
+    base = copy.deepcopy(ours)
+    part = doc_world.read_ir(world, ours, base)
+    start = part["blocks"][0]["span"][0]
+    world.apply([{"updateTextStyle": {
+        "range": {"startIndex": start + 6, "endIndex": start + 10},
+        "textStyle": {"bold": True}, "fields": "bold"}}])
+    was, mine = copy.deepcopy(base), copy.deepcopy(ours)
+    ours["blocks"].insert(3, ours["blocks"].pop(0))     # in front of "delta", after the heading
+    before = doc_world.settled_ir(world, ours, base)
+    report, ours, base = fuzz_docs.sync_once(world, ours, base)
+    assert not oracle.failures(oracle.check(was, before, base, report, mine))
+    moved = doc_world.read_ir(world, ours, base)["blocks"][3]
+    assert [(r["text"], r.get("bold"), r.get("underline")) for r in moved["runs"]] == \
+        [("alpha ", None, None), ("beta", True, None)]
 
 
 def test_a_table_added_between_two_tables_is_refused_and_said_out_loud():

@@ -578,6 +578,8 @@ def test_a_sync_says_how_much_of_the_document_the_file_cannot_say():
     assert notes[0].startswith("4 kinds of document property this file cannot say "
                                "(structural.paragraph.paragraphStyle.borderLeft, ")
     assert "and 1 more" in notes[0]
+    # The one number a sync can act on: naming the blocks is `adopt`'s job.
+    assert "1 block(s) carry one" in notes[0]
 
 
 def test_adopt_names_every_one_of_them():

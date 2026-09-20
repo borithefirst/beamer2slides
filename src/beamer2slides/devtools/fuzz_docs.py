@@ -994,31 +994,28 @@ KNOWN = (
     # `table-in-a-table`, which is `doc_merge.refuse_nowhere`: between two tables the
     # document has no paragraph to write in, and a block written there anyway lands
     # inside the last cell of the table before it.
-    {"id": "lost-key",
-     "kind": "identity_lost", "has": "",
-     "why": "a block keeps its words and loses the key the file gave it. Five causes "
-            "are fixed and the count is down from 34 to 2: `inherit_keys` "
-            "reassigning a key the file itself asserts, `settle` keying every tab "
-            "before those tabs are adopted (`doc_merge.settle_keys`), a delete "
-            "carrying the style of the block above onto the survivor (the settle "
-            "writes the named style back), and a row delete taking with it the first "
-            "cell a table is anchored in (`structure` gives a regrid an `after`, so "
-            "`anchor_tables` finds it again), and a write changing a block's *shape* "
-            "— a delete hands the block after it the shape of the one that went — "
-            "so that `adopt_keys`, matching shape and words together, could never "
-            "adopt the very blocks a write mangles (`doc_merge._adopt_by_words`). "
-            "The 2 that are left have a cause and no fix yet: an empty paragraph is "
-            "all mark, so its named range *is* its mark, and a block written in "
-            "front of a table goes in as \"\\ntext\" at the mark of the paragraph "
-            "before it — which Docs hands to the new paragraph, a range being pushed "
-            "along by an insert at its own first index. The empty paragraph's key "
-            "rides onto the block that was written and the moved block's key is "
-            "nowhere (chain-8 seed 7029, shrunk to `ends_on_table` + two "
-            "`add_table`s + a `move`). There is no index that both appends after an "
-            "empty paragraph and leaves its range alone, so the write is right and "
-            "the read has to be read — and reading it by taking the key off the "
-            "block whose words contradict the plan was tried, twice, and cost that "
-            "round its convergence"},
+    # `lost-key` (34 -> 2 -> 0) went the same way once its sixth cause was fixed: an
+    # empty paragraph is all mark, so its named range *is* its mark, and "\ntext"
+    # written at that mark is handed the range (an insert at a range's own first index
+    # pushes it along) - the empty paragraph's key rode onto the block that was written.
+    # Reading it back off the wrong block was tried twice and cost the round its
+    # convergence; `doc_merge.requests` plants the range again on the mark in the same
+    # batch instead (`REPLANT`), which puts it where the write meant it - and the same
+    # drift from the reader's side (a chip put into an empty paragraph) is planted back
+    # at the settle and at the head of a structural batch (`doc_ir.replant_requests`),
+    # since the batch that builds a table swallows that very mark. The five
+    # before it: `inherit_keys` reassigning a key the file itself asserts, `settle`
+    # keying every tab before those tabs are adopted (`doc_merge.settle_keys`), a delete
+    # carrying the style of the block above onto the survivor (the settle writes the
+    # named style back), a row delete taking with it the first cell a table is anchored
+    # in (`structure` gives a regrid an `after`), and a write changing a block's shape
+    # so that `adopt_keys` could never adopt the very blocks a write mangles
+    # (`doc_merge._adopt_by_words`). `moved-styling` (2 -> 0) was `_retext` folding a
+    # whole stretch into its first writable run; it maps every word's styling now. Its
+    # signature had no words, so it hid two more: a block written from nothing
+    # inheriting the styling in front of it (`_style_requests` names every managed
+    # field), and a styled word the source rewrote, which is a loss that is right and
+    # is now said (`doc_merge.reader_styling_gone`).
     {"id": "crossed-delete",
      "kind": "block_gone", "has": "though the file still names it",
      "why": "two blocks end up under one key and none under the other, so the merge "
@@ -1029,13 +1026,6 @@ KNOWN = (
             "1031). `inherit_keys` crossing the keys the file asserts was how it got "
             "there, and that is fixed; nothing has reached this signature since, so "
             "the entry stays to catch whatever else can"},
-    {"id": "moved-styling",
-     "kind": "styling_lost", "has": "",
-     "why": "a block the source both reworded and moved is written again from nothing, "
-            "and its runs come from `_retext`, which folds a whole stretch into the "
-            "first writable run: every mark the reader put on a word inside it goes, "
-            "while the report calls the block merged. A move alone keeps them (the "
-            "runs are then the document's own), so it takes both to see it"},
 )
 
 
