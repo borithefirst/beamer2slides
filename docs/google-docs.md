@@ -189,12 +189,27 @@ move a 7.5 pt a reader chose in the editor.
 
 **Paragraphs.** `text-align` as before, plus `margin-left` (`indentStart`),
 `text-indent` (`indentFirstLine`) and `line-height` (`lineSpacing`) — all three kept
-by the importer — and three attributes of ours that only `batchUpdate` can write:
-`data-shading`, `data-space-above`, `data-space-below`. The spelling matters:
-`background-color` on a `<p>` is a character highlight on its runs, not paragraph
-shading, so the CSS would be a lie; and no margin property is among what survives.
-A `<li>` carries the same, except its indents, which belong to the list preset and
-would fight `createParagraphBullets`.
+by the importer — and attributes of ours that only `batchUpdate` can write:
+`data-shading`, `data-space-above`, `data-space-below`, `data-border-top` /
+`-bottom` / `-left` / `-right`, `data-page-break` and `data-keep-with-next`. The
+spelling matters: `background-color` on a `<p>` is a character highlight on its runs,
+not paragraph shading, so the CSS would be a lie; and no margin property is among what
+survives. A `<li>` carries the same, except its indents, which belong to the list
+preset and would fight `createParagraphBullets`.
+
+A rule is spelled `"<width>pt <solid|dotted|dashed> #rrggbb"` with an optional
+` pad <n>pt` (`doc_ir.BORDER_RE`), and a rule of no width is no rule at all — that is
+how a reader who took one off reads back, and how the source says to take one off. A
+border is written as a **whole struct**, so the padding is always named even when it is
+zero (`doc_merge._border_value`): inside a `paragraphBorder` an unset field is not the
+API's "back to what you inherit", because the field being written is the border itself.
+The two flags are booleans; `data-page-break="1"` is `pageBreakBefore`, which is how a
+source says "this heading starts a page", and losing it silently was the shape of every
+other unmodelled property — a horizontal rule under a heading is exactly the kind of
+thing a person puts in and a rewrite takes away. `borderBetween` stays deliberately
+unmodelled: it is a rule *between* consecutive paragraphs that share a style, and a
+block model where one paragraph is one block, planned and written on its own, has
+nowhere honest to put half of a property that belongs to a pair.
 
 **Every named style Docs has is a kind of its own.** `NORMAL_TEXT` is a paragraph,
 `HEADING_1..6` are headings of that level, and `TITLE` and `SUBTITLE` are `title` and
@@ -319,8 +334,8 @@ difference lie on something we account for?
 to whoever hands over a document somebody else wrote; `push` too; a sync says the count
 and the commonest three, or every report would carry fifteen lines that never change.
 What a real document turns up: page-level structure (`documentStyle`, `headers`,
-`footnotes`, `positionedObjects`, `sectionBreak`, `pageBreakBefore`), `baselineOffset`,
-paragraph borders and tab stops and `keepWithNext`, a table's column widths and its
+`footnotes`, `positionedObjects`, `sectionBreak`), paragraph tab stops, `direction`,
+`borderBetween` and the widow/orphan and keep-lines flags, a table's column widths and its
 merged cells (`tableCellStyle`, which is the ragged-table limit under its real name), a
 picture's crop, angle and brightness, a list's `startNumber` — and, of the document's
 theme, a named style's **marks**: the face, the alignment and the measures are read
@@ -328,12 +343,12 @@ theme, a named style's **marks**: the face, the alignment and the measures are r
 of ours ever names it with a value.
 
 A count is not an address, though, and the question a person actually has is not
-"does this document carry borders" but "is the paragraph I am about to edit the one
-with the border on it". So the same walk is run a block at a time
+"does this document carry something nobody reads" but "is the paragraph I am about to
+edit the one carrying it". So the same walk is run a block at a time
 (`doc_ir.unmodelled_in`, one structural element; `doc_ir.unread_blocks`, every block
 of every tab, most heavily laden first), and `adopt` and `push` name the blocks by the
 words the person can see in the document: *the paragraph 'Why this matters' carries
-paragraphStyle.borderBottom; rewriting that block through the file would drop it*
+paragraphStyle.borderBetween; rewriting that block through the file would drop it*
 (`doc_sync.block_risk_notes`, eight blocks and four properties each before it says how
 many more); a sync, which names nothing, at least says how many blocks carry one, which
 is the number it can act on. A section break is left out — nothing rewrites one — and so is everything
@@ -461,8 +476,42 @@ like this:
   in its body: `insertTable` there leaves an empty paragraph in front of the table that no
   request can delete (measured). Both are hidden from the IR the way the trailer after a
   final table is (`doc_ir._hide_trailer`: `trailer`, and `lead` in front of a first table),
-  and the first block written there goes *into* them. The order of the tabs is the
-  document's; a source that reorders its sections does not reorder the tabs.
+  and the first block written there goes *into* them.
+- **The order of the tabs is the document's.** Blocks the source moved go back where the
+  file has them, because a move is a delete and a write — and a tab cannot be written
+  from nothing: everything in it would have to be made again, chips and equations and
+  all. So a source that reorders its sections does not reorder the tabs, and since the
+  settle then rewrites the file in the document's order, a reorder in the file used to
+  disappear twice over. `doc_merge.tab_order` says it instead, and only where the *source*
+  moved one: where the file still has the base's order, it is the reader who moved a tab
+  and the file is simply following.
+- **The first tab names itself in a meta.** Every other tab says its title on its
+  `<section>`; the first tab *is* the file's body, and the file's `<title>` is the
+  **document's** name, which is a different thing — a document of one tab has both, and
+  they part company the moment anybody renames either. So the source could rename every
+  tab but the one people actually look at, and a name written into the file went twice
+  over: dropped by the sync, then taken back out by the settle. `doc_ir.TAB_META`
+  (`<meta name="b2s-tab">`) is where it goes, `doc_merge.first_tab_title` merges it the
+  way the other tabs' titles merge, and it is an `updateDocumentTabProperties` like
+  theirs. One difference at the beginning: a `push` has no base, and unlike the
+  document's name — which the import takes from the `<title>` — the first tab's title is
+  Drive's own default, which nothing but the file has ever said, so with no base the
+  file's name is written rather than treated as a disagreement nobody can settle.
+
+**The document's name.** A Google Doc's title *is* its name in Drive: `documents.get`
+reports it and no `batchUpdate` request writes one. `push` names the document from the
+file's `<title>` at birth and nothing said it again, so a source that renamed the document
+had the rename dropped and then taken back out of the file by the settle, which reads the
+old name back — the same double disappearance. `doc_merge.document_title` merges it three
+ways like everything else (renamed in the file alone → written; in the document alone →
+the file follows at the settle; on both sides → the document's name stands, with a note;
+a base too old to hold a title → the document's name, and the note says why), and
+`doc_sync.rename_document` writes it through `drive.files.update`, which is why the plan
+carries it as `rename` and not as a request. A rename Drive refuses fails nothing and is
+said out loud, as a base it refuses is. The name written — not the one the next read
+gives — is what the file and the base then say (`settle(renamed=…)`): `documents.get`
+need not have caught up with Drive, and taking the read's word for it would undo the
+rename the moment it was made, with the base agreeing so nothing tried again.
 
 ## The round trip does not close on its own
 
@@ -905,6 +954,8 @@ Each of these is reported in the sync report, never guessed at:
 | a source restyle of the very words the document rewrote | the marks follow the words (`doc_merge._restyled_words`): every word of the merged text takes the document's styling, and the file's where the file has that word too — so a word the source bolded is bold while the reader rewrites the rest of the paragraph. Only a restyled word the document replaced has nothing to carry the marks: its new words keep the document's styling, and the report says so |
 | a **move of a block with an equation-like chip in it, or of a table the document changed** | a move is a delete and a write, and those cannot be written from nothing — the block stays where the document has it |
 | a **reorder both sides made** | the document's order stands whole; the file's is reported |
+| a **tab the source moved** | a tab cannot be written from nothing, so no request moves one; the document's order of tabs stands and the file's is reported (`doc_merge.tab_order`) |
+| a picture's **size or alt text** the source changed | no request in the v1 API changes an embedded object. `insertInlineImage` carries an `objectSize`, so a resize is written when the picture is inserted again anyway (one the source regenerated) and not when the run the plan writes is the document's copy (one merely moved); an alt text is never written. The settle then puts the document's values back into the file, so the edit goes twice over — `doc_merge.unwritten_pictures` names it, and says that a picture written into the file again *without* its `data-object` goes in at the size asked for |
 
 Everything else is written: text on both sides, a block's kind, level and alignment,
 its bullets, the marks the source added *or took away* (the fields Docs needs named for
@@ -1406,13 +1457,242 @@ Each has its test, each verified by breaking its mechanism. After them 970000 is
 and so are 600 rounds at chain 6, 400 at chain 8 and 900 at chain 4 from fresh seeds,
 all under `--strict`.
 
+### The third read, and the style a delete hands over
+
+Two more at fresh seeds, 500 rounds at chain 10 from 992000 (clean) and 700 at chain 6
+from 993000 (one), plus a seed left over from the round before.
+
+* **The read nobody recovers a table for** (seed 993608, `ends_on_table`). A sync that
+  changes a grid writes it on its own, reads the tab again and hands what it finds to
+  `anchor_tables`, whose job is to name a table whose range one of *our own* requests
+  destroyed — a regrid that deletes the row the table is anchored in. A table the
+  **reader** beheaded has no range either, and that third read was the one place
+  `recover_tables` was not run: the free table `anchor_tables` found was the reader's,
+  and the regridded table's key went onto it. The reader's rows then stood under the
+  source's table's name, the real one settled as `table:empty`, and the key the file
+  names was gone. It is recovered before the anchoring now, in `doc_sync._write_structure`
+  and in the harness's copy of it, and `plant_ranges` puts its range back in the same
+  breath. (What made it hard to see: `anchor_tables` prefers a *blank* table for a new
+  one and a worded table for a regrid, so the crossing needs a regrid that leaves the
+  table blank — and the reader had emptied the row the source's regrid kept.)
+* **The style a delete hands over reaches the measurements** (seed 912452, `themed`).
+  Docs merges two paragraphs on a delete keeping the first one's style, which
+  `carry_unimported` already repaired for the named style and the bullet. It hands over
+  the alignment and the spacing too: a paragraph the reader centred, deleted by the
+  source in the same batch, leaves the block behind it centred **of its own** — although
+  the merge had written `alignment` named-and-unset one request earlier, because
+  following its named style is the whole point of a theme — and the source's own restyle
+  of that block, written in the same breath, is handed back the spacing of the paragraph
+  that went. The settle writes the plan's **whole** paragraph style back on a block this
+  run wrote whose style the write did not leave as the plan asked (`_unwritten`,
+  `paragraph_written`), rather than the difference: the repairs read each other's work
+  otherwise, the named style deciding what "inherited" means. A block still read as a
+  HEADING_1 under a theme that centres headings reports no alignment of its own, and the
+  centring shows only once `named` has written NORMAL_TEXT back — which is in this very
+  batch. It is the one thing in the settle that takes styling away, and what keeps that
+  safe is the narrowing: only a paragraph this run wrote, whose own field is being taken
+  back. A block nobody wrote is left alone, so a reader's styling is never undone
+  (`test_styling_the_plan_does_not_ask_for_is_never_taken_away` fails without it).
+
+That second one also heals a *plan* that pins an inherited alignment, which is the
+defect `test_the_campaign_sees_a_theme_undone` puts back on purpose, so that probe now
+opens both doors: what it measures is the oracle's reach, not which of our own
+mechanisms is broken.
+
+After them: 700 rounds at chain 6 from 993000, 400 at chain 10 from 995000, both clean
+under `--strict`. 500 at chain 8 from 994000 came back with three, two of them the
+`frozen_gone` signature that is still open.
+
+### The copy that answers for another, and a paragraph that follows a table away
+
+The three left over from 994000, two signatures, one each side of the line: one the
+oracle's, one the merge's.
+
+* **A picture's names do not say which copy it is; its object id does** (seed 994410,
+  `equations`, shrunk to three steps). The source adds the same figure twice, then the
+  reader deletes one of the two blocks in the browser while the source drops the other.
+  Nothing is lost by either — but the copy still standing paired, by their shared digest,
+  with the file's entry for the copy the reader had *already* taken away, so the count of
+  what the file still asks for came out one too high, nothing was excused, and the picture
+  the source itself gave up was named as lost. The excuse pairing asks for the ids now
+  (`pair_images(..., ids=True)`): the file's ids are the document's own, since the settle
+  regenerates the file from the document it wrote, so a picture the file names by id *is*
+  that object and one it names by file alone is a picture the source has just added and
+  the document has never held. The other pairing — the document before the sync against
+  the document after — still goes by name, because a rewrite gives a picture a new id;
+  that asymmetry is the whole of `frozen_key`'s docstring.
+* **A block kept because nothing can move it follows nothing that moves** (seed 994424,
+  `two_tables`). An empty paragraph between two tables can be deleted in no way at all, so
+  one the source dropped is kept where the document has it (`restore_undeletable`), and
+  `_after_live` puts it back into the merged list behind the block in front of it *there*
+  — which was the very table the source was moving somewhere else. The kept paragraph then
+  stood in the merged order as that table's own next block, so `_insert_index` read the
+  table's new place off a span a single character behind where the table already was: it
+  was deleted and built again in its own place, blank, and the next two passes did the
+  same. The three rounds `_write_structure` allows ran out with the table's words written
+  nowhere and the file's key gone, and the report said nothing. It is the sibling of
+  `test_a_move_the_merge_takes_back_leaves_the_block_where_the_document_has_it`, and the
+  same sentence fixes it: `_after_live` looks past a neighbour the source moves.
+
+Then 800 rounds at chain 4 from 998000, 500 at chain 8 from 996000, 400 at chain 10 from
+997000, 700 at chain 6 from 991000 and 300 at chain 12 from 999000 — 2,700 rounds, all
+clean under `--strict`, and `KNOWN` still empty.
+
+### The name that stayed behind
+
+One round in 500 at chain 8 from 41000, and the only failure in the 3,200 rounds run
+since: `identity_lost paragraph:second-section — the block said 'meadow section.' and
+has lost its key, though neither side dropped the block`.
+
+A range is destroyed with its text or not at all. That is Docs' rule and the reason
+`replant_requests` exists — but there is one delete that takes no text of the block it
+is deleting. A block in front of a table gives up the *previous* block's paragraph mark
+and keeps its own (`_delete_range`, and the API refuses anything else), and a range can
+live exactly there: an empty paragraph is all mark, so its range *is* the mark, and a
+reader's chip or word pushes an ordinary paragraph's range onto the mark too
+(`doc_ir.apply_keys` records where a range really is, which is what made this visible at
+all). Nothing of the range's own text is deleted, so Docs keeps the range — on a mark
+that now belongs to the paragraph the two were merged into. The document goes on saying
+this block is there.
+
+It costs identity twice over, and the second time is the one that bites. The block was
+*moved*, so its range is planted again where it went and the document holds two ranges
+of one name; and the stale one sits where the next block written will be, so the sync
+after hands *that* block this key and the block that owned it is renamed from its words.
+Which is why the report said a block neither side dropped had lost its key: it had been
+given away.
+
+`_orphan_range` names and deletes the range in the same batch, wherever the text it sits
+on is not the text going. Both halves are pinned by hand
+(`test_a_delete_that_borrows_the_mark_in_front_names_the_range_it_leaves_behind`, and
+its counterpart saying an ordinary block's range — which stops short of its mark, so the
+borrowed-mark delete covers it — is left to Docs); without them, seed 41000 and the
+first of the two fail and nothing else does. 500 rounds at chain 8 from 41000, clean.
+
+The empty paragraph this round turned on is itself a thing worth naming: a table the
+source adds after a table of contents cannot swallow the leftover of the paragraph
+`insertTable` splits, because the block before the insertion point is structural. The
+spurious empty block survives the write and the settle keys it. It is legal, it is
+harmless, and it is one more reason the identity of a block may never depend on a block
+being there for a reason.
+
+### The tab strip, from the reader's side
+
+Everything the campaign knew about tabs, the *source* did: `add_tab`, `drop_tab`,
+`rename_tab` were all source ops, and only the rename had a reader counterpart. So the
+two commonest things a person does in a tab strip — clicking **+**, and deleting a tab —
+had never been drawn, although `pair_tabs` has a rule for each of them
+(`read_add_tab`, `read_drop_tab`; the second is told which tabs there are, the way
+`read_unmark_word` is told what the theme sets, because which tabs exist is not
+something the tab it is looking at can say).
+
+Both rules hold. A tab the reader added is in neither the file nor the base, so the
+merge plans nothing for it and the settle reads it into the file with keys and named
+ranges of its own — which is what makes the sync after it write nothing rather than see
+a tab the file has and the document does not. A tab the reader deleted stays deleted,
+its `<section>` leaves the file and its entry the base, and when the source had changed
+that tab the report says the changes went nowhere. 500 rounds at chain 6 with the two
+ops in, clean.
+
+What the round-trip did turn up is a hole in the **oracle**. Put the resurrection bug
+into `pair_tabs` on purpose — one line, a tab the source still asks for and the reader
+deleted goes into `create` — and nothing objected: the document converges, every word
+is present, and the tab that comes back carries a *new* id, so the first version of the
+test, which asked for the old one, passed as well. Nothing of the reader's disappears
+when their deletion is undone; it is the decision that is gone, and this oracle only
+ever asked about content.
+
+`_resurrection_findings` (`tab_resurrected`) asks the other question, narrowly: the base
+had that tab, the read before the sync does not, the file still asks for it, and
+something now stands in the document under the same name saying the same words, unknown
+to the base. With it in, the injected bug fails the campaign at round 17 of 80 and the
+shrinker cuts it to the two new ops and nothing else —
+
+```
+shape imported_list
+step 0: reader add_tab | source
+step 1: reader drop_tab | source
+```
+
+— which is as small as a script gets.
+
+### The same hole, one level down
+
+If the oracle could not see a tab the reader deleted come back, it could not see a
+*block* come back either — and that is the commoner journey by a long way. The same
+experiment says so: take the clause out of `_merge_block`'s placing loop that says a
+key in the base and not in the read-back is a delete that stands, so every block the
+reader struck out and the file still asks for is written again, and 80 rounds pass
+without a word. Every sentence is present, every round converges, and the reader's
+deletion is quietly undone on every sync for ever.
+
+`block_resurrected` asks it the way `tab_resurrected` does: the base had the block, the
+read before the sync has not, the file still asks for it, and it is there again
+afterwards. One thing had to be learned to ask it without crying wolf. **A move in the
+browser is a delete and a retype**, so a block the reader dragged loses its named range
+and its key exactly as a deleted one does, and the settle names it from its own words
+again — which is indistinguishable from a resurrection if you ask about keys. Ask about
+the words instead: they never left the document. And about the *words*, not the text,
+because a moved block that held an equation comes down without it (no request makes
+one), so the two never read alike. It is the forgiving direction on purpose — a block
+whose every word still stands somewhere is let go — because the other way round accuses
+every move.
+
+Measured over 300 rounds at chain 4: with the clause in place, 0 failed — 7 before the
+move was told from the deletion, every one of them shrinking to a lone `move_block`.
+With the clause taken out, 68 failed, shrinking to a lone `delete_block`.
+
+### And once more, at the size of a row
+
+A row is the third size the same question has, and the last one: below a row there are
+cells, and a cell the reader emptied is words and not a decision. A row carries no key
+of its own — the merge knows it by what it says (`doc_merge._table_lines`) — so
+`_row_resurrection_findings` knows it the same way: a row the base has, the read before
+the sync has not, and the table has again afterwards.
+
+It found a real defect on its second campaign, and one that no amount of staring at
+`_table_lines` would have shown, because `_table_lines` is right. The sync writes a
+table's grid in a batch of its own and then reads the document again, and `rebase_tables`
+moves the base onto the grid that was just written. A row the *reader* deleted is not in
+that new grid, so the rebase takes it out of the base — and with it the only thing that
+said which of the **file's** rows it was. The round after the regrid then finds that
+file row matched to nothing, reads it as a row the source has just added, and inserts
+it. The reader's deletion is undone, the report says `inserts a row` twice, and the
+notes are empty (offline seed 63138, chain 4, shrunk to `delete_row` against `regrid`).
+
+What was missing is a fact the merge knew and threw away, so it is carried rather than
+guessed again: `_table_lines` gives back, beside the merged rows and columns, the file's
+lines it has **settled as not in the grid**, `_rebased_table` puts them in `aligned`
+next to the matchings it already records there, and `_merged_lines` counts them among
+the lines it need not add. The knowledge accumulates over the rounds, since a later
+round's own settlement is unioned with the one it inherited.
+
+Calibration, as for the other two: with the settlement carried, 300 rounds at chain 4
+and 200 at chain 8 pass. Taking it back out fails 1 of 200 at each depth — thin, which
+is why the defect is pinned deterministically by
+`test_a_row_the_reader_deleted_is_not_put_back_on_the_pass_after_the_regrid` as well.
+
+The row check also cost the other two a lesson in forgiveness. `block_resurrected` asks
+whether the block's words are still in the tab, and three chain-8 rounds said they were
+not when the reader had merely dragged the block: the harness's drag is a cut and a
+retype at the index the reader dropped on, which lands *inside* the full stop of the
+paragraph before it (`section.` becomes `section..`) or, when the block held a chip no
+`insertText` can retype, closes the gap the chip left (`harbour grace` becomes
+`harbourgrace`). `WORD` is `\S+`, so both read as words that went away. `stands_elsewhere`
+asks for the words *inside* the tab's text instead — the forgiveness `joined_differently`
+already grants a single token, granted to a whole block — and both resurrection checks
+use it. It costs nothing that matters: with the block delete broken on purpose, 34 of 200
+rounds at chain 4 still fail, 68 findings.
+
 ## Remaining risks
 
 1. **Pictures** — retired, see "Pictures, and the chips a request can make" above. What
    is still open: a picture's size or alt text the *source* changes is not written (no
-   request updates an inline object), and a picture a reader inserts comes back as the
-   `contentUri`'s bytes, which Google may have re-encoded; the zip export would be the
-   byte-exact route.
+   request updates an inline object) — that one is said out loud now rather than dropped
+   (`doc_merge.unwritten_pictures`, the table above), with the way to have the size
+   anyway, but it is still a thing the file cannot simply ask for; and a picture a reader
+   inserts comes back as the `contentUri`'s bytes, which Google may have re-encoded; the
+   zip export would be the byte-exact route.
 2. **Lists in the read-back.** `listId` is opaque and output-only; whether Docs forks or
    reuses one when a user splits a list in the UI is undocumented. What an *imported*
    list's glyphs read as is no longer a risk but a measurement — see the table above.
@@ -1420,7 +1700,17 @@ all under `--strict`.
    is still unmeasured there: dragging a selection to a new place, "paste without
    formatting", and a second person editing concurrently.
 4. **Tabs** — retired, see "Document tabs" above. Still open: the order of the tabs is
-   never written (the document's stands), and the first tab's title is not carried.
+   never written (the document's stands, and a source reorder is reported now rather
+   than dropped). Both names are carried: the document's, through Drive, and the first
+   tab's own, in the `b2s-tab` meta.
+5. **Page-level structure** — `documentStyle`, headers, footers, footnote bodies,
+   section breaks and positioned objects are read by nobody and authored by nobody. The
+   paragraph level is now nearly closed (borders, `pageBreakBefore` and `keepWithNext`
+   went in with the rest), which leaves the page as the one place where a real document
+   carries something the file has no word for. It is a risk that is *named*
+   (`doc_ir.unmodelled`) rather than one that bites: nothing outside the blocks is ever
+   rewritten, so the margins and the headers of a synced document survive untouched —
+   what is missing is the ability to *author* them from the file.
 
 ## Alternatives considered
 

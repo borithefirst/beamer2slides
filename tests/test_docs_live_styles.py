@@ -9,9 +9,10 @@ Half of it is what Drive's importer keeps (measured in docs/google-docs.md) and
 half is what only `batchUpdate` can write, which a push reaches through
 `doc_merge.carry_unimported` and `doc_merge.tidy_requests`.
 
-The last one is the theme question, which nothing offline can reach: `doc_world` has
-no named styles to inherit from, so only a real document can say whether a heading
-its theme centres comes through a source restyle still centred.
+The last one is the theme question. `doc_world` has named styles now and the campaign
+checks the arithmetic of inheritance against them, but only against a theme this repo
+wrote: whether a heading a *Google* theme centres comes through a source restyle still
+centred is a thing only a real document can say.
 
 **Not yet run.** Every assertion here follows either a measured line of
 docs/google-docs.md or the offline tests in `test_doc_ir` / `test_doc_merge`; what
@@ -148,7 +149,12 @@ def test_a_heading_the_theme_centres_survives_a_source_restyle(request):
 
     The mechanism is that every field the merge owns is written *named with no value*
     when the file says nothing, which the API documents as "back to what you inherit".
-    Nothing offline can check it: `doc_world` has no named styles to inherit from.
+    The campaign checks the *arithmetic* of that offline — `doc_world` grew named
+    styles (`fuzz_docs.THEME`, the `themed` shape) and the oracle judges what a
+    paragraph inherits (`doc_loss_oracle._inherited_findings`) — but only against a
+    theme this repo wrote. What is still owed to a live run is the premise underneath:
+    that Google's own editor and importer behave as the world assumes, and that a
+    field named with no value really does fall back rather than clear.
 
     The premise is checked before the claim. If Drive's .docx import does not put the
     style's centring into the document's named style, the first assertion says so and

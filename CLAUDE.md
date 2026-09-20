@@ -1147,10 +1147,17 @@ keys, named ranges), `doc_merge.py` (pure planning), `doc_sync.py` (the commands
   refusal has no tag, so the file says `data-script="none"` and only a `batchUpdate`
   writes it. Paragraphs carry `indent`,
   `indent_first` and `line_spacing` as `margin-left` / `text-indent` / `line-height`
-  (kept by the importer) and `shading`, `space_above`, `space_below` as `data-`
-  attributes: `background-color` on a `<p>` is a character highlight on its runs, not
-  paragraph shading, and no margin survives, so those three go in by `batchUpdate`
-  only. A run or paragraph that only repeats its named style says nothing
+  (kept by the importer) and `shading`, `space_above`, `space_below`, the four
+  `border_<side>`s, `page_break` and `keep_with_next` as `data-` attributes:
+  `background-color` on a `<p>` is a character highlight on its runs, not
+  paragraph shading, and no margin survives, so those go in by `batchUpdate`
+  only. A rule is `"<width>pt <solid|dotted|dashed> #rrggbb [pad <n>pt]"`
+  (`doc_ir.BORDER_RE`) and a rule of no width is no rule; the padding is always named,
+  since inside a `paragraphBorder` an unset field is not the API's "back to what you
+  inherit" — the border itself is the field being written (`doc_merge._border_value`).
+  `borderBetween` stays unmodelled on purpose: it is a rule *between* consecutive
+  paragraphs sharing a style, and a block model that plans one paragraph on its own has
+  nowhere honest to put half of it. A run or paragraph that only repeats its named style says nothing
   (`_named_defaults`), or an imported document reads back as a wall of spans; a
   bullet's own indents are the list preset's. `adopt_keys` compares the plan with the
   read-back (`carry_unimported`) and `tidy_requests` writes what no import could carry
@@ -1293,7 +1300,14 @@ keys, named ranges), `doc_merge.py` (pure planning), `doc_sync.py` (the commands
   change, a renamed one is not), new ones learn theirs by place (`place_pictures`), and a picture
   a reader inserted is saved to `<stem>.media/` (`fetch_pictures`). `insertPerson`/`insertDate`
   make those chips (rich links refused); a block whose chips the source changed and the document
-  did not touch is written again (`rewrite`), never when it holds an equation-like chip.
+  did not touch is written again (`rewrite`), never when it holds an equation-like chip. No
+  request in the v1 API *changes* an embedded object, so a **size or alt text the source gives a
+  picture it already has** is written only where the picture goes in again anyway - a regenerated
+  one carries the file's `objectSize`, a merely moved one the document's copy - and an alt text
+  never at all; the settle then puts the document's values back into the file, so the edit goes
+  twice over, and `doc_merge.unwritten_pictures` names it with the way out (write the picture into
+  the file again *without* its `data-object`: a picture with no object id is a new one and is
+  inserted at the size asked for, at the price of whatever the browser put on the old one).
 - Tabs: the first tab is the file's body, every other one a `<section data-tab title
   [data-parent]>` (`doc_ir.parts`; no `data-tab` = a tab the source asks for). Each tab is its
   own plan and batch, every location/range stamped with its `tabId` (`doc_merge.on_tab`; none
@@ -1302,7 +1316,68 @@ keys, named ranges), `doc_merge.py` (pure planning), `doc_sync.py` (the commands
   a tab the document left as the base has it). A new tab's lone empty paragraph and the
   undeletable one in front of a body's first table are hidden like the trailer (`trailer`,
   `lead`) and written into; nothing can be inserted at a table's own index (measured), so a
-  block in front of a table goes in as `\ntext` at the previous paragraph's mark.
+  block in front of a table goes in as `\ntext` at the previous paragraph's mark. The **order
+  of the tabs is the document's** - a tab cannot be written from nothing, so no request moves
+  one - and a source reorder is reported (`doc_merge.tab_order`) rather than dropped and then
+  taken out of the file by the settle. The **first tab names itself** in `<meta name="b2s-tab">`
+  (`doc_ir.TAB_META`, IR key `tab_title`): it is the body, so it has no `<section>` to say it
+  on, and the file's `<title>` is the *document's* name, a different thing - a document of one
+  tab has both. `doc_merge.first_tab_title` merges it as the other tabs' titles merge, with one
+  difference at the start: a `push` has no base and the import takes the document's name from
+  the `<title>` but the tab's from Drive's default, so with no base the file's name is written
+  rather than called a disagreement. The oracle judges it (`tab_renamed`), the campaign draws
+  it on both sides (`src_rename_tab`, `read_rename_tab`), and taking the both-sides note out
+  fails 19 of 200 chained rounds.
+  The reader's own two moves in the strip - clicking **+** and deleting a tab - are drawn too
+  (`read_add_tab`, `read_drop_tab`, which is told which tabs exist, as `read_unmark_word` is
+  told what the theme sets). Both rules hold: a tab the reader added is in neither file nor
+  base, so nothing is planned for it and the settle reads it in with keys and ranges of its
+  own; one the reader deleted stays deleted, leaves the file and the base, and the source's
+  changes to it are a note. Drawing them showed a hole in the *oracle* instead: put the
+  resurrection into `pair_tabs` on purpose and nothing objected - the words are all there, the
+  round converges, and the tab that comes back has a new id. It is the reader's *decision*
+  that is undone, not their content, and this oracle only asked about content
+  (`_resurrection_findings`, `tab_resurrected`: the base had it, the read before does not, the
+  file still asks for it, and something unknown to the base now says the same words under the
+  same name). With it, the injected bug fails 1 of 80 rounds and shrinks to those two ops
+  alone; 400 rounds at chain 6 clean without it.
+  The hole was one level down as well, and there it is the commoner journey: take out
+  `_merge_block`'s clause that a key in the base and not in the read-back is a delete that
+  stands, and every block the reader struck out is written again on every sync, in silence
+  (80 rounds, not a word). `block_resurrected` asks the same question of a block - but of
+  its **words**, not its key, because a move in the browser is a delete and a retype, so a
+  dragged block loses its range and is keyed from its words again exactly as a resurrected
+  one is; and of the words rather than the text, since a moved block that held an equation
+  comes down without it. Forgiving on purpose (a block whose every word still stands is let
+  go), or it accuses every move: 7 false alarms of 300 at chain 4 before that, 0 after,
+  68 with the clause out.
+  And once more at the size of a **row**, which is the last size (below it are cells, and a
+  cell the reader emptied is words, not a decision). A row has no key: the merge knows it by
+  what it says and so does `_row_resurrection_findings`. It found a defect `_table_lines`
+  itself could not show, because `_table_lines` is right: the grid goes in a batch of its own
+  and `rebase_tables` then moves the base onto it, which takes a row the *reader* deleted out
+  of the base - and with it the only thing that said which of the **file's** rows it was, so
+  the round after the regrid read that file row as one the source had just added and put the
+  reader's row back, twice-applied and unmentioned (seed 63138, chain 4). The merge now
+  carries what it knew instead of guessing again: `_table_lines` gives back the file lines it
+  has settled as not in the grid, `_rebased_table` puts them in `aligned`, `_merged_lines`
+  counts them as known, and each round unions its own settlement with the inherited one.
+  300 rounds at chain 4 and 200 at chain 8 clean; taking it out fails 1 of 200 at each depth,
+  which is thin, so the defect is also pinned by a hand-built test. The row check cost the
+  other two a lesson in forgiveness: `WORD` is `\S+`, and the harness's drag lands where the
+  reader dropped it - inside the full stop before (`section.` -> `section..`) or with a
+  dropped chip's gap closed (`harbour grace` -> `harbourgrace`) - so `stands_elsewhere` looks
+  for the words *inside* the tab's text, `joined_differently`'s forgiveness at block size.
+  It costs nothing: 34 of 200 rounds still fail with the block delete broken on purpose.
+- The **document's name** is the file's `<title>`, and a Google Doc's title *is* its name in
+  Drive: no `batchUpdate` request writes one, so `push` named it at birth and nothing said it
+  again. `doc_merge.document_title` merges it three ways (the file alone renamed it -> written;
+  the document alone -> the file follows at the settle; both -> the document's, with a note; a
+  base too old to hold a title -> the document's, saying why) and `doc_sync.rename_document`
+  writes it through `drive.files.update` - the plan's `rename`, not a request; a refusal fails
+  nothing and is said. The file and the base then say the name *written*, not the one the next
+  read gives (`settle(renamed=...)`): `documents.get` need not have caught up with Drive, and
+  taking its word would undo the rename with the base agreeing, so nothing tried again.
 - What the file cannot carry is reported too (`doc_sync.limits`): a picture file that is not
   there. And **what the dialect does not model is named** (`doc_ir.unmodelled`, `_NODES` = the
   reader's own map of `documents.get`): the convergence check is measured on the IR, so it
@@ -1312,8 +1387,9 @@ keys, named ranges), `doc_merge.py` (pure planning), `doc_sync.py` (the commands
   example (`checks.lost_ink`'s question, one dimension down); `adopt` and `push` print each
   one (`doc_sync.unmodelled_notes(full=True)`), a sync the count and the commonest three.
   Real documents turn up page structure (`documentStyle`, headers, footnotes,
-  `sectionBreak`, `pageBreakBefore`), `baselineOffset`, paragraph borders/tab stops/
-  `keepWithNext`, a table's column widths and `tableCellStyle` (the ragged-table limit under
+  `sectionBreak`, positioned objects), paragraph tab stops/`direction`/`borderBetween`/
+  the widow-orphan and keep-lines flags,
+  a table's column widths and `tableCellStyle` (the ragged-table limit under
   its real name), a picture's crop/angle/brightness, a list's `startNumber` - and, of the
   document's theme, a named style's marks and alignment (its face and measures *are* read).
   Two tests pin the map: a fixture holding one of everything, so a property Docs adds later
@@ -1323,7 +1399,7 @@ keys, named ranges), `doc_merge.py` (pure planning), `doc_sync.py` (the commands
   runs **a block at a time** (`doc_ir.unmodelled_in` one structural element,
   `unread_blocks` every block of every tab, most laden first) and `adopt`/`push` name them by
   the words a person sees ("the paragraph 'Why this matters' carries
-  paragraphStyle.borderBottom; rewriting that block through the file would drop it",
+  paragraphStyle.borderBetween; rewriting that block through the file would drop it",
   `doc_sync.block_risk_notes`, 8 blocks x 4 properties), while a sync says how many blocks
   carry one: a section break and anything outside the blocks are left out, since no rewrite
   reaches them. It is a risk, not a loss - a block nobody rewrites keeps all of it. The
@@ -1447,6 +1523,14 @@ keys, named ranges), `doc_merge.py` (pure planning), `doc_sync.py` (the commands
   its block, text typed at the mark falling outside it, so only `here[1] > planted[1]` is
   wrong (seeds 279 and 361 at chain 4, found once `read_unmark_word` changed which seeds draw
   what; both fail identically at the commit before it).
+  And a range is destroyed *with its text or not at all*, which leaves one delete taking no
+  text of its own: a block in front of a table gives up the previous block's mark and keeps
+  its own (`_delete_range`), and that mark is exactly where an empty paragraph's range lives,
+  or a drifted one. Docs keeps it, the document goes on saying the block is there, and since
+  the block was *moved* its range is planted again where it went - two ranges of one name,
+  the stale one sitting where the next block written will be, which the sync after then hands
+  this key while the block that owned it is renamed from its words (chain-8 seed 41000, one
+  round in 500). `doc_merge._orphan_range` names it in the delete's own batch.
   A body may not end on a table, so the paragraph after a final one keeps its mark however it
   is deleted (`_delete_range`: its words go, an empty paragraph stays where it stood) - but
   the append index came from the last block the sync *keeps*, which is then the table, and a
@@ -1572,6 +1656,52 @@ keys, named ranges), `doc_merge.py` (pure planning), `doc_sync.py` (the commands
   keep, so name-matching put the two roles on different copies and named the one that went; the
   question is how **many** the file asks for, not which (980193). Clean afterwards at 970000 and
   at three fresh seeds (600 at chain 6, 400 at chain 8, 900 at chain 4) under `--strict`.
+  **The third read, and the style a delete hands over** (500 rounds at chain 10 from 992000, 700
+  at chain 6 from 993000, plus a seed left from the round before). A sync that changes a grid
+  writes it on its own, reads the tab again and hands what it finds to `anchor_tables`, which
+  names a table whose range one of *our own* requests destroyed - and that third read was the
+  one place `recover_tables` was not run, so the free table it found was the one the reader had
+  beheaded and the regridded table's key went onto it: the reader's rows stood under the source's
+  table's name, the real one settled as `table:empty`, the file's key was gone (993608;
+  `doc_sync._write_structure` and the harness copy recover first and `plant_ranges` puts the
+  range back. Hard to see because `anchor_tables` prefers a blank table for a new one and a
+  worded one for a regrid, so the crossing needs a regrid that leaves the table blank). And Docs'
+  merge-on-delete reaches the **measurements**, not only the named style and the bullet: a
+  paragraph the reader centred, deleted by the source in the same batch, leaves the block behind
+  it centred of its own - although the merge wrote `alignment` named-and-unset one request
+  earlier, following a named style being the whole point of a theme - and that block's own source
+  restyle, written in the same breath, is handed back the spacing of the paragraph that went
+  (912452). The settle writes the plan's **whole** paragraph style back on a block this run wrote
+  whose style the write did not leave as the plan asked (`_unwritten`, `paragraph_written`),
+  rather than the difference: the repairs read each other's work otherwise, the named style
+  deciding what "inherited" means - a block still read as HEADING_1 under a theme that centres
+  headings reports no alignment of its own, and the centring shows only once `named` has written
+  NORMAL_TEXT back, which is in this very batch. It is the one thing in the settle that takes
+  styling away, and the narrowing is what keeps it safe: a block nobody wrote is left alone
+  (`test_styling_the_plan_does_not_ask_for_is_never_taken_away` fails without it). It heals a
+  *plan* that pins an inherited alignment too, which is the defect
+  `test_the_campaign_sees_a_theme_undone` puts back on purpose, so that probe opens both doors
+  now - what it measures is the oracle's reach, not which of our mechanisms is broken. Clean
+  afterwards at 993000 (700 at chain 6) and 995000 (400 at chain 10) under `--strict`; 500 at
+  chain 8 from 994000 came back with three, which were two signatures, one each side of the
+  line. **A picture's names do not say which copy it is; its object id does** (994410): the
+  source adds one figure twice, the reader deletes one of the blocks in the browser and the
+  source drops the other, and the copy still standing paired - by their shared digest - with
+  the file's entry for the copy the reader had already taken away, so nothing was excused and
+  the picture the source itself gave up was named as lost. The excuse pairing asks for the ids
+  (`pair_images(..., ids=True)`): the file's are the document's own, the settle regenerating it
+  from the document it wrote, so a picture the file names by id *is* that object and one it
+  names by file alone is one the source has just added; the other pairing still goes by name,
+  since a rewrite gives a picture a new id. **A block kept because nothing can move it follows
+  nothing that moves** (994424): an empty paragraph between two tables can be deleted in no way
+  at all, so one the source dropped is kept where the document has it, and `_after_live` put it
+  back into the merged list behind the block in front of it there - the very table the source
+  was moving away. It then stood as that table's own next block, so `_insert_index` read the
+  table's new place off a span one character behind where the table already was: deleted and
+  built again in its own place, blank, three passes running, its words nowhere and the file's
+  key gone with nothing in the report. Then 2,700 rounds clean under `--strict` (800 at chain 4
+  from 998000, 500 at chain 8 from 996000, 400 at chain 10 from 997000, 700 at chain 6 from
+  991000, 300 at chain 12 from 999000), `KNOWN` still empty.
 - Live suite (opt-in, marker `docs`, ~5 min): `python -m pytest -m docs tests/test_docs_live.py`
   pushes a document per test, edits both sides, syncs, checks a second sync writes nothing, and
   deletes the document. Offline: `tests/test_doc_ir.py`, `test_doc_merge.py`, `test_doc_sync.py`.

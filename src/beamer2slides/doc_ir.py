@@ -77,7 +77,26 @@ PARAGRAPH_CSS = {"indent": "margin-left", "indent_first": "text-indent",
 # written by `batchUpdate` instead (`doc_merge.tidy_requests`), which was measured
 # working for `updateParagraphStyle` with `shading`.
 PARAGRAPH_DATA = {"shading": "data-shading", "space_above": "data-space-above",
-                  "space_below": "data-space-below"}
+                  "space_below": "data-space-below",
+                  "border_top": "data-border-top", "border_bottom": "data-border-bottom",
+                  "border_left": "data-border-left", "border_right": "data-border-right",
+                  "page_break": "data-page-break",
+                  "keep_with_next": "data-keep-with-next"}
+# The four sides of a paragraph's border, and the `paragraphStyle` field of each.
+# Borders sit in the very dialog that sets shading (Format → Paragraph styles →
+# Borders and shading), so a document whose shading round-tripped while its rule
+# vanished on the first rewrite was a difference nobody could explain.
+BORDER_SIDES = {"border_top": "borderTop", "border_bottom": "borderBottom",
+                "border_left": "borderLeft", "border_right": "borderRight"}
+# The two paragraph properties that are simply on or off.
+PARAGRAPH_FLAGS = {"page_break": "pageBreakBefore", "keep_with_next": "keepWithNext"}
+# Docs' dash styles, spelled as CSS spells them, since the file says a border the
+# way CSS says one: `<width> <style> <colour>`, and `pad <n>pt` after it when Docs
+# leaves a gap between the rule and the text.
+DASH_STYLES = {"SOLID": "solid", "DOT": "dotted", "DASH": "dashed"}
+TO_DASH_STYLE = {css: api for api, css in DASH_STYLES.items()}
+BORDER_RE = re.compile(r"\s*(-?\d+(?:\.\d+)?)pt\s+(solid|dotted|dashed)\s+"
+                       r"(#[0-9a-fA-F]{6})(?:\s+pad\s+(-?\d+(?:\.\d+)?)pt)?\s*$")
 # What Docs paints a link with when nobody asked: the import's blue, and the editor's.
 LINK_COLORS = {"#0000ee", "#1155cc"}
 # Docs writes this private-use character where an object sits that the API will not
@@ -96,6 +115,12 @@ SLUG = re.compile(r"[^a-z0-9]+")
 KEY_PREFIX = "b2s:"
 # The `<meta>` that tells a canonical file which document it belongs to.
 DOCUMENT_META = "b2s-document"
+# The first tab's own title. The file's `<title>` is the *document's* name, and a
+# document's name is not the name of the tab you are looking at: a document of one tab
+# has both, and they differ as soon as somebody renames either. Every other tab says
+# its title on its `<section>`, so without this the first tab alone could not be named
+# from the file — read back at every settle, so a rename in the file went twice over.
+TAB_META = "b2s-tab"
 # An `<img width>` is CSS pixels, a document's picture size is points (measured: a
 # 60 × 40 px picture imports as 45 × 30 pt).
 PT_PER_PX = 0.75
@@ -526,7 +551,31 @@ def _paragraph_measures(style: dict) -> dict:
     out["line_spacing"] = round(spacing / 100, 3) if spacing else None
     rgb = style.get("shading", {}).get("backgroundColor", {}).get("color", {}).get("rgbColor")
     out["shading"] = _hex(rgb) if rgb else None
+    for key, api in BORDER_SIDES.items():
+        out[key] = _border(style.get(api))
+    for key, api in PARAGRAPH_FLAGS.items():
+        out[key] = True if style.get(api) else None
     return out
+
+
+def _border(side: dict | None) -> str | None:
+    """One paragraph border as the file spells it: CSS's `<width> <style> <colour>`,
+    with `pad <n>pt` after it where Docs leaves a gap between the rule and the text.
+
+    A border of no width is no border — Docs reports a rule somebody took off that
+    way, with its colour still on it — so the file says nothing rather than `0pt`,
+    which would make taking a rule off read as setting one.
+    """
+    if not side:
+        return None
+    width = _points(side.get("width")) or 0.0
+    if not width:
+        return None
+    rgb = side.get("color", {}).get("color", {}).get("rgbColor")
+    said = (f"{_number(width)}pt {DASH_STYLES.get(side.get('dashStyle', ''), 'solid')} "
+            f"{_hex(rgb) if rgb else '#000000'}")
+    pad = _points(side.get("padding")) or 0.0
+    return f"{said} pad {_number(pad)}pt" if pad else said
 
 
 def _points(dimension: dict | None) -> float | None:
@@ -642,7 +691,9 @@ def _inherited(key: str, default: dict):
     indent, no space around it, no shading."""
     if default.get(key) is not None:
         return default[key]
-    return {"line_spacing": 1.0, "shading": None}.get(key, 0.0)
+    return ({"line_spacing": 1.0, "shading": None}
+            | {k: None for k in BORDER_SIDES} | {k: None for k in PARAGRAPH_FLAGS}
+            ).get(key, 0.0)
 
 
 def _split_sentinel(content: str) -> list[tuple[str, bool]]:
@@ -699,6 +750,8 @@ def to_html(ir: dict) -> str:
         # Which document this file is. The file is the project: told where it lives, it
         # can be synced from any checkout without a folder of state beside it.
         lines.append(f'<meta name="{DOCUMENT_META}" content="{escape(ir["document"], quote=True)}">')
+    if ir.get("tab_title"):
+        lines.append(f'<meta name="{TAB_META}" content="{escape(ir["tab_title"], quote=True)}">')
     if ir.get("title"):
         lines.append(f"<title>{escape(ir['title'])}</title>")
     lines += ["</head>", "<body>"]
@@ -958,6 +1011,8 @@ class _Reader(HTMLParser):
         if tag == "meta":
             if attr.get("name") == DOCUMENT_META and attr.get("content"):
                 self.ir["document"] = attr["content"]
+            elif attr.get("name") == TAB_META and attr.get("content"):
+                self.ir["tab_title"] = attr["content"]
         elif tag == "title":
             self.in_title = True
         elif tag == "section":
@@ -1138,10 +1193,29 @@ def _paragraph_of(attr: dict) -> dict:
                 out[key] = value
     for key, name in PARAGRAPH_DATA.items():
         if attr.get(name):
-            value = attr[name] if key == "shading" else _length(attr[name])
+            if key == "shading":
+                value = attr[name]
+            elif key in BORDER_SIDES:
+                value = _border_text(attr[name])
+            elif key in PARAGRAPH_FLAGS:
+                value = True
+            else:
+                value = _length(attr[name])
             if value is not None:
                 out[key] = value
     return out
+
+
+def _border_text(said: str) -> str | None:
+    """A border the file spells, read back — normalised, so the same rule always
+    reads the same way. One this dialect cannot spell is no border at all rather
+    than a guess, as a length in an unknown unit is."""
+    match = BORDER_RE.match(said or "")
+    if not match:
+        return None
+    width, dash, colour, pad = match.groups()
+    out = f"{_number(float(width))}pt {dash} {colour.lower()}"
+    return f"{out} pad {_number(float(pad))}pt" if pad and float(pad) else out
 
 
 def _length(value: str) -> float | None:
@@ -1371,7 +1445,9 @@ _NODES: dict[str, tuple[tuple, dict]] = {
     "paragraph": ((), {"elements": "element[]", "paragraphStyle": "paragraphStyle",
                        "bullet": "bullet"}),
     "paragraphStyle": (("namedStyleType", "alignment", "indentStart", "indentFirstLine",
-                        "lineSpacing", "spaceAbove", "spaceBelow", "shading"), {}),
+                        "lineSpacing", "spaceAbove", "spaceBelow", "shading",
+                        "pageBreakBefore", "keepWithNext") + tuple(BORDER_SIDES.values()),
+                       {}),
     "bullet": (("listId", "nestingLevel"), {}),
     "element": (("startIndex", "endIndex"),
                 {"textRun": "textRun", "dateElement": "dateElement", "person": "person",
@@ -1414,7 +1490,8 @@ _NODES: dict[str, tuple[tuple, dict]] = {
     "namedTextStyle": (("weightedFontFamily", "fontSize")
                        + tuple(api for _, api in MARK_FIELDS), {}),
     "namedParagraphStyle": (("alignment", "indentStart", "indentFirstLine", "lineSpacing",
-                             "spaceAbove", "spaceBelow", "shading"), {}),
+                             "spaceAbove", "spaceBelow", "shading", "pageBreakBefore",
+                             "keepWithNext") + tuple(BORDER_SIDES.values()), {}),
     "namedRangeGroup": (("name",), {"namedRanges": "namedRange[]"}),
     "namedRange": (("namedRangeId", "name"), {"ranges": "range[]"}),
     "range": (("startIndex", "endIndex", "segmentId", "tabId"), {}),

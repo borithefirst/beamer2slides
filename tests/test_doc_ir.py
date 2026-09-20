@@ -274,6 +274,19 @@ def test_a_tabbed_read_has_no_body_and_every_tab_is_reachable(tab_id, words):
     assert ir["tab"] == (tab_id or "t.0")
 
 
+def test_the_first_tabs_own_name_survives_the_file():
+    """The file's `<title>` is the document's name; the first tab has a name of its
+    own, and a document of one tab has both."""
+    html = doc_ir.to_html({"title": "The Quarterly Report", "tab_title": "Chapter one",
+                           "blocks": [{"kind": "paragraph", "runs": [{"text": "x"}]}]})
+    assert '<meta name="b2s-tab" content="Chapter one">' in html
+    assert "<title>The Quarterly Report</title>" in html
+    back = doc_ir.from_html(html)
+    assert back["tab_title"] == "Chapter one" and back["title"] == "The Quarterly Report"
+    # A file that says nothing says nothing: no meta, and no key in the IR.
+    assert "b2s-tab" not in doc_ir.to_html({"title": "t", "blocks": []})
+
+
 def test_keys_are_readable_and_unique():
     ir = doc_ir.key_blocks(doc_ir.from_html(doc_ir.to_html(RICH)))
     keys = [b["key"] for b in ir["blocks"]]
@@ -603,6 +616,62 @@ def test_the_space_around_a_paragraph_is_ours_to_write_not_the_importers():
     assert "margin-top" not in line and "margin-bottom" not in line
 
 
+BORDERED_LIVE = {
+    "title": "bordered",
+    "body": {"content": [
+        {"startIndex": 1, "endIndex": 8, "paragraph": {
+            "paragraphStyle": {
+                "namedStyleType": "HEADING_1", "pageBreakBefore": True,
+                "keepWithNext": True,
+                "borderBottom": {"width": {"magnitude": 1.5, "unit": "PT"},
+                                 "padding": {"magnitude": 5, "unit": "PT"},
+                                 "dashStyle": "SOLID",
+                                 "color": {"color": {"rgbColor": {"red": 0.8}}}},
+                "borderTop": {"width": {"magnitude": 0, "unit": "PT"},
+                              "dashStyle": "SOLID",
+                              "color": {"color": {"rgbColor": {}}}},
+                "borderLeft": {"width": {"magnitude": 3, "unit": "PT"},
+                               "dashStyle": "DASH"}},
+            "elements": [{"startIndex": 1, "endIndex": 8,
+                          "textRun": {"content": "Part I\n", "textStyle": {}}}]}}]},
+}
+
+
+def test_a_paragraphs_rules_and_its_page_break_are_read():
+    """Borders sit in the very dialog that sets shading, and shading round-tripped
+    while the rule beside it vanished on the first rewrite."""
+    block = doc_ir.from_document(BORDERED_LIVE)["blocks"][0]
+    assert block["border_bottom"] == "1.5pt solid #cc0000 pad 5pt"
+    assert block["border_left"] == "3pt dashed #000000"
+    assert block["page_break"] is True and block["keep_with_next"] is True
+    # A rule of no width is a rule somebody took off, colour and all: not `0pt`,
+    # which would read back as setting one.
+    assert "border_top" not in block and "border_right" not in block
+
+
+def test_a_rule_and_a_page_break_survive_the_file():
+    ir = doc_ir.from_document(BORDERED_LIVE)
+    line = [l for l in doc_ir.to_html(ir).splitlines() if "Part I" in l][0]
+    assert 'data-border-bottom="1.5pt solid #cc0000 pad 5pt"' in line
+    assert 'data-border-left="3pt dashed #000000"' in line
+    assert 'data-page-break="1"' in line and 'data-keep-with-next="1"' in line
+    back = doc_ir.from_html(doc_ir.to_html(ir))["blocks"][0]
+    assert {k: v for k, v in back.items() if k.startswith(("border", "page", "keep"))} == \
+        {"border_bottom": "1.5pt solid #cc0000 pad 5pt",
+         "border_left": "3pt dashed #000000", "page_break": True,
+         "keep_with_next": True}
+
+
+def test_a_rule_this_dialect_cannot_spell_is_no_rule_at_all():
+    """As a length in an unknown unit is no length: a guess would put a rule the
+    person never asked for on the paragraph."""
+    said = ('<html><body><p data-border-bottom="thick ridge rebeccapurple">a</p>'
+            '<p data-border-top="2pt dotted #00ff00 pad 0pt">b</p></body></html>')
+    blocks = doc_ir.from_html(said)["blocks"]
+    assert "border_bottom" not in blocks[0]
+    assert blocks[1]["border_top"] == "2pt dotted #00ff00"      # a padding of 0 is none
+
+
 STYLED_LIVE = {
     "title": "styled",
     "namedStyles": {"styles": [
@@ -698,6 +767,7 @@ UNMODELLED_LIVE = {
                 "textStyle": {"bold": True, "baselineOffset": "SUPERSCRIPT"}}}],
             "paragraphStyle": {"namedStyleType": "NORMAL_TEXT", "keepWithNext": True,
                                "borderLeft": {"width": {"magnitude": 1}},
+                               "borderBetween": {"width": {"magnitude": 1}},
                                "tabStops": [{"offset": {"magnitude": 36}}],
                                "direction": "LEFT_TO_RIGHT", "pageBreakBefore": True}}},
         {"startIndex": 9, "endIndex": 40, "table": {
@@ -728,15 +798,18 @@ UNMODELLED_LIVE = {
 UNMODELLED = {
     # Page-level structure, which has no place in the file at all.
     "documentStyle", "headers", "footnotes", "positionedObjects",
-    "structural.sectionBreak", "structural.paragraph.paragraphStyle.pageBreakBefore",
+    "structural.sectionBreak",
     # Paragraph properties the dialect has no spelling for. No *run* property is
     # here any more: `baselineOffset` was the last field of `TextStyle` the dialect
     # could not say, and `<sup>`/`<sub>` say it, so the reader now carries the whole
     # of a run's styling. The fixture still puts one on, which is what makes this a
     # test and not a tautology — a field Docs adds to TextStyle later fails here.
-    "structural.paragraph.paragraphStyle.borderLeft",
+    # The four sides of a border are read; `borderBetween` is not, and is no
+    # oversight: it is a rule *between* consecutive paragraphs that share a style,
+    # and a block model where one paragraph is one block, written on its own, has
+    # nowhere honest to put it.
+    "structural.paragraph.paragraphStyle.borderBetween",
     "structural.paragraph.paragraphStyle.direction",
-    "structural.paragraph.paragraphStyle.keepWithNext",
     "structural.paragraph.paragraphStyle.tabStops",
     # A table's geometry and its merged cells: the ragged-table limit, named.
     "structural.table.tableStyle", "tableRow.tableRowStyle", "tableCell.tableCellStyle",
@@ -762,8 +835,8 @@ def test_what_the_reader_never_reads_is_named_one_by_one():
     what the IR never looked at; this is the walker that says it."""
     found = doc_ir.unmodelled(UNMODELLED_LIVE)
     assert set(found) == UNMODELLED
-    assert found["structural.paragraph.paragraphStyle.keepWithNext"] == {
-        "count": 1, "example": "True"}
+    assert found["structural.paragraph.paragraphStyle.direction"] == {
+        "count": 1, "example": "LEFT_TO_RIGHT"}
     assert found["nestingLevel.startNumber"]["example"] == "7"
     assert list(found) == sorted(found)
 
@@ -778,7 +851,7 @@ def test_an_empty_struct_says_nothing_and_is_not_reported():
     """Docs leaves plenty of those about, and a report of them would be noise."""
     doc = {"documentId": "d", "documentStyle": {}, "headers": {},
            "body": {"content": [{"paragraph": {"elements": [], "paragraphStyle": {
-               "keepWithNext": False, "borderLeft": {}}}}]}}
+               "borderBetween": {}, "tabStops": []}}}]}}
     assert doc_ir.unmodelled(doc) == {}
 
 
@@ -787,19 +860,16 @@ def test_what_a_rewrite_of_one_block_would_drop_is_named_block_by_block():
     a person deciding whether to edit a document through the file has to know which
     paragraph is the one with the border on it."""
     risky = doc_ir.unread_blocks(UNMODELLED_LIVE)
-    # The paragraph carries six — its own five and a superscript on a run inside it,
-    # which a rewrite drops just as surely — the table three (its own style, a row's,
-    # a cell's), and the section break is no block at all: nothing rewrites one.
+    # The paragraph carries three, the table three (its own style, a row's, a cell's),
+    # and the section break is no block at all: nothing rewrites one.
     assert [b["kind"] for b in risky] == ["paragraph", "table"]
     assert set(risky[1]["unread"]) == {"structural.table.tableStyle",
                                        "tableRow.tableRowStyle",
                                        "tableCell.tableCellStyle"}
     assert risky[0]["words"] == "one two"
     assert set(risky[0]["unread"]) == {
-        "structural.paragraph.paragraphStyle.borderLeft",
+        "structural.paragraph.paragraphStyle.borderBetween",
         "structural.paragraph.paragraphStyle.direction",
-        "structural.paragraph.paragraphStyle.keepWithNext",
-        "structural.paragraph.paragraphStyle.pageBreakBefore",
         "structural.paragraph.paragraphStyle.tabStops"}
     assert risky[0]["span"] == [1, 9]
 

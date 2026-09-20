@@ -166,6 +166,24 @@ def save_drive(drive, document: str, base: dict, title: str | None = None) -> st
     return fid
 
 
+def rename_document(drive, document: str, name: str, problems: list[str]) -> str | None:
+    """Rename the document, which is a Drive call and not a request.
+
+    A Google Doc's title is its name in Drive: `documents.get` reports it and no
+    `batchUpdate` request writes it, so the file's `<title>` reaches the document
+    only this way (`doc_merge.document_title` decides whether it should). Returns
+    the name written, or None — a rename Drive refuses fails nothing and is said out
+    loud, as a base it refuses is.
+    """
+    try:
+        drive.files().update(fileId=document, fields="id", body={"name": name}).execute()
+        return name
+    except HttpError as err:
+        problems.append(f"the document could not be renamed {name!r} ({err.resp.status}); "
+                        f"it keeps the name it has")
+        return None
+
+
 def stale_base_warning(where: str, drive, document: str) -> str | None:
     """The document names a base in Drive that we cannot read (deleted, or owned by
     somebody else) while we sync against the copy beside the file: another checkout
@@ -377,12 +395,18 @@ def _part_of(doc: dict, tab: str | None, ours: dict | None, base: dict | None) -
     doc_merge.restore_pictures(part, base, ours)
     if tab:
         part.pop("title", None)
-        for each in doc_ir.tabs_of(doc):
-            props = each.get("tabProperties", {})
-            if props.get("tabId") == tab:
-                part["title"] = props.get("title", "")
-                if props.get("parentTabId"):
-                    part["parent"] = props["parentTabId"]
+    for each in doc_ir.tabs_of(doc):
+        props = each.get("tabProperties", {})
+        if props.get("tabId") != (tab or part.get("tab")):
+            continue
+        if not tab:
+            # The first tab keeps the *document's* name as its `title` (that is what the
+            # file's `<title>` is); its own tab title is `tab_title`.
+            part["tab_title"] = props.get("title", "")
+        else:
+            part["title"] = props.get("title", "")
+            if props.get("parentTabId"):
+                part["parent"] = props["parentTabId"]
     return part
 
 
@@ -712,7 +736,7 @@ def plant_ranges(docs, ident: str, ir: dict, tab: str | None = None) -> int:
 
 def settle(docs, ident: str, path: Path, ours: dict, base: dict,
            planned: dict | None = None, drive=None, problems: list[str] | None = None,
-           name_unmodelled: bool = False) -> dict:
+           name_unmodelled: bool = False, renamed: str | None = None) -> dict:
     """After a write: read the document, anchor what is new, and let that read be both
     the new base and the new canonical file. File, document and base agree from here.
 
@@ -721,7 +745,10 @@ def settle(docs, ident: str, path: Path, ours: dict, base: dict,
     to Drive as well as to the cache beside the file; a Drive write that fails is
     said out loud (`problems`) and fails nothing. So is what the document carries and
     the dialect does not (`unmodelled_notes`); `name_unmodelled` names every one of
-    those, which is what `adopt` and `push` want and a sync does not."""
+    those, which is what `adopt` and `push` want and a sync does not. `renamed` is a
+    name Drive has just been given for the document, which `documents.get` need not
+    have caught up with — the file and the base must say the name that was written,
+    or the next read would put the old one back and the rename would be undone."""
     planned = planned or {}
     doc, live = read_document(docs, ident, ours, base)
     for line in unmodelled_notes(doc, name_unmodelled):
@@ -743,6 +770,8 @@ def settle(docs, ident: str, path: Path, ours: dict, base: dict,
             doc_merge.place_pictures(part, planned[stamp_of(live, part)])
     if drive is not None:
         equation_latex(drive, ident, doc, live)
+    if renamed:
+        live["title"] = renamed
     fetch_pictures(path, live)
     write_file(path, live, ident)
     refused = store_base(path, live, drive, ident, int((base or {}).get("generation", 0)))
@@ -985,6 +1014,8 @@ def sync(path: Path, document: str | None = None, dry_run: bool = False,
     batched: list[str] = []
     written = _write_tabs(drive, docs, ident, path, ours, base, theirs, tabs, doc=doc,
                           notes=batched)
+    renamed = (rename_document(drive, ident, tabs["rename"], batched)
+               if tabs.get("rename") else None)
     info = _report(ident, False, ours, tabs, written, asked)
     info["base"] = where
     if kept:
@@ -992,7 +1023,7 @@ def sync(path: Path, document: str | None = None, dry_run: bool = False,
     info["notes"] = troubles + info["notes"] + batched + rewrite_losses(doc, written)
     live = settle(docs, ident, path, ours, base,
                   {each["stamp"]: each["result"]["blocks"] for each in written}, drive,
-                  info["notes"])
+                  info["notes"], renamed=renamed)
     info["blocks"] = sum(len(part["blocks"]) for part in doc_ir.parts(live))
     info["report"] = str(write_report(path, info))
     return info
@@ -1146,7 +1177,15 @@ def _write_structure(docs, ident: str, tab: str | None, ours: dict, base: dict,
             continue
         shaped += result["shaped"]
         doc, theirs = read_part(docs, ident, tab, ours, base)
-        if doc_merge.anchor_tables(theirs, result["shaped"]):
+        # A table the *reader* beheaded in the browser carries no range either
+        # (`doc_merge.recover_tables`), and this read is the one place that had
+        # nobody to recover it: `anchor_tables` then saw a table with no key where
+        # it was looking for one of ours whose range this very batch destroyed, and
+        # gave it that key. Recovered first, it is not free to be taken, and
+        # `plant_ranges` puts its own range back in the same breath.
+        found = doc_merge.recover_tables(was, theirs)
+        anchored = doc_merge.anchor_tables(theirs, result["shaped"])
+        if anchored or found:
             plant_ranges(docs, ident, theirs, tab)
             doc, theirs = read_part(docs, ident, tab, ours, base)
         was = doc_merge.rebase_tables(was, theirs, result["shaped"])

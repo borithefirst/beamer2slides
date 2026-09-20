@@ -72,7 +72,11 @@ RUN_MARKS = [("bold", True), ("italic", True), ("underline", True), ("strike", T
 
 PARA_MARKS = [("align", "center"), ("align", "justify"), ("indent", 18.0),
               ("indent_first", 36.0), ("line_spacing", 1.5), ("shading", "#eef2ff"),
-              ("space_above", 6.0), ("space_below", 12.0)]
+              ("space_above", 6.0), ("space_below", 12.0),
+              ("border_bottom", "1pt solid #333333"),
+              ("border_bottom", "2.5pt dashed #cc0000 pad 4pt"),
+              ("border_left", "3pt dotted #0000ff"),
+              ("page_break", True), ("keep_with_next", True)]
 
 
 # ---------------------------------------------------------------- the corpus
@@ -189,8 +193,16 @@ class Stager:
 
 
 def bootstrap(world: doc_world.World) -> dict:
-    """What `docs push` leaves behind: every block keyed and named in the document, and
-    a file that is the document's own read."""
+    """Every block keyed and named in the document, and a file that is the document's
+    own read.
+
+    That is `docs adopt`, not `docs push`, and deliberately: `push` would import HTML
+    and get back only what an import can carry, while the corpus shapes hold chips,
+    equations, dropdowns and a table of contents that no import can make. Starting
+    from the document means the campaign measures the journey somebody actually has —
+    a document written in the browser for a year, adopted, edited in the file, synced
+    back — rather than one this tool made out of its own dialect.
+    """
     ir = doc_world.read_ir(world)
     for part in doc_ir.parts(ir):
         stamp = None if part is ir else part.get("tab")
@@ -215,6 +227,8 @@ def sync_once(world: doc_world.World, ours: dict, base: dict,
     tabs = doc_merge.pair_tabs(base, ours, theirs)
     if tabs["requests"]:
         _send(world, tabs["requests"], seen)
+    if tabs["rename"]:
+        world.title = tabs["rename"]   # Drive's, not a request (`doc_sync.rename_document`)
     pairs = list(tabs["pairs"])
     known = {p.get("tab") for p in doc_ir.parts(theirs)} - {None}
     made: dict = {}
@@ -259,7 +273,9 @@ def _write_structure(world, tab, ours, base, mine, was, result, seen) -> tuple:
         _send(world, doc_merge.on_tab(result["structure"], tab), seen)
         shaped += result["shaped"]
         theirs = doc_world.part_ir(world, tab, ours, base)
-        if doc_merge.anchor_tables(theirs, result["shaped"]):
+        found = doc_merge.recover_tables(was, theirs)
+        anchored = doc_merge.anchor_tables(theirs, result["shaped"])
+        if anchored or found:
             _send(world, doc_merge.on_tab(doc_ir.name_requests(theirs), tab), seen)
             theirs = doc_world.part_ir(world, tab, ours, base)
         was = doc_merge.rebase_tables(was, theirs, result["shaped"])
@@ -503,6 +519,14 @@ READER_MEASURES = [
     ({"spaceBelow": {"magnitude": 3, "unit": "PT"}}, "spaceBelow"),
     ({"shading": {"backgroundColor": {"color": {"rgbColor": {
         "red": 1.0, "green": 0.95, "blue": 0.8}}}}}, "shading"),
+    ({"borderBottom": {"width": {"magnitude": 1, "unit": "PT"},
+                       "padding": {"magnitude": 0, "unit": "PT"}, "dashStyle": "SOLID",
+                       "color": {"color": {"rgbColor": {}}}}}, "borderBottom"),
+    ({"borderTop": {"width": {"magnitude": 2.25, "unit": "PT"},
+                    "padding": {"magnitude": 6, "unit": "PT"}, "dashStyle": "DOT",
+                    "color": {"color": {"rgbColor": {"blue": 0.6}}}}}, "borderTop"),
+    ({"pageBreakBefore": True}, "pageBreakBefore"),
+    ({"keepWithNext": True}, "keepWithNext"),
     ({"alignment": "CENTER"}, "alignment"),
 ]
 
@@ -610,6 +634,41 @@ def read_move_block(rng, part, tab):
                              "text": "\n" + text}}]], [block.get("key")]
 
 
+def read_rename_tab(rng, part, tab):
+    """The reader renames the tab they are looking at, in the tab strip. The first
+    tab's id is not `tab` (a location in it carries none) but the part's own."""
+    ident = tab or part.get("tab")
+    if not ident:
+        return [], []
+    return [{"updateDocumentTabProperties": {
+        "tabProperties": {"tabId": ident, "title": f"Reader's {rng.choice(FRESH)}"},
+        "fields": "title"}}], []
+
+
+def read_add_tab(rng, part, tab):
+    """The reader clicks + in the tab strip. Docs makes it with one empty paragraph
+    and hands back its id; nothing here types into it, since a later step's ops draw
+    a tab at random and will reach this one.
+
+    Nobody knows of such a tab: it is in neither the file nor the base, so the merge
+    must leave it alone and the settle must read it into the file — keys, named
+    ranges and all — or the sync after it will see a tab the file never had."""
+    return [{"addDocumentTab": {"tabProperties": {
+        "title": f"Reader's {rng.choice(FRESH)}"}}}], []
+
+
+def read_drop_tab(rng, part, tab, tabs):
+    """The reader deletes a tab in the tab strip. Never the first: that one is the
+    body and Docs refuses it (so does the world). What has to follow the tab is its
+    base entry and its `<section>` in the file."""
+    if not tabs:
+        return [], []
+    return [{"deleteTab": {"tabId": rng.choice(tabs)}}], []
+
+
+read_drop_tab.wants_tabs = True
+
+
 READER = {
     "type_word": read_type_word, "reword": read_reword, "delete_word": read_delete_word,
     "append_block": read_append_block, "delete_block": read_delete_block,
@@ -619,7 +678,8 @@ READER = {
     "renumber_list": read_renumber_list, "cell_type": read_cell_type,
     "add_row": read_add_row, "delete_row": read_delete_row,
     "insert_picture": read_insert_picture, "insert_chip": read_insert_chip,
-    "move_block": read_move_block,
+    "move_block": read_move_block, "rename_tab": read_rename_tab,
+    "add_tab": read_add_tab, "drop_tab": read_drop_tab,
 }
 
 
@@ -644,6 +704,10 @@ def apply_reader(world: doc_world.World, name: str, rng: random.Random,
     # An op that turns styling *off* has to know what the theme turns on, and only
     # that one does; the rest are a reader typing, who knows nothing of the sort.
     wants = {"theme": theme_fields(world)} if getattr(op, "wants_theme", False) else {}
+    # And one op is about the tab strip rather than about a tab: which tabs there are
+    # to delete is not a thing the part it is looking at can say.
+    if getattr(op, "wants_tabs", False):
+        wants["tabs"] = [t.id for t in world.tabs[1:]]
     batches, touched = op(rng, part, tab, **wants)
     if not batches:
         seen["reader/" + name + " (nothing to do)"] += 1
@@ -823,8 +887,11 @@ def src_add_tab(rng, ir, touched):
 
 
 def src_rename_tab(rng, ir, touched):
+    """The first tab is drawn too: it names itself in the file's `b2s-tab` meta and
+    nowhere else, and it is the tab everybody is actually looking at."""
     extra = ir.get("tabs") or []
-    if not extra:
+    if not extra or rng.random() < 0.4:
+        ir["tab_title"] = f"Renamed {rng.choice(FRESH)}"
         return
     rng.choice(extra)["title"] = f"Renamed {rng.choice(FRESH)}"
 

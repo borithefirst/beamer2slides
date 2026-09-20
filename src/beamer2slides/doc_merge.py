@@ -56,13 +56,18 @@ MANAGED = ("backgroundColor", "baselineOffset", "bold", "fontSize", "foregroundC
 # `text-align`, `margin-left`, `text-indent`, `line-height`"); the last three only
 # through `batchUpdate` (`doc_ir.PARAGRAPH_DATA` says why), which the study measured
 # working for `updateParagraphStyle` with `shading`.
-PARAGRAPH_FIELDS = (("indent", "indentStart"), ("indent_first", "indentFirstLine"),
-                    ("line_spacing", "lineSpacing"), ("shading", "shading"),
-                    ("space_above", "spaceAbove"), ("space_below", "spaceBelow"))
+PARAGRAPH_FIELDS = ((("indent", "indentStart"), ("indent_first", "indentFirstLine"),
+                     ("line_spacing", "lineSpacing"), ("shading", "shading"),
+                     ("space_above", "spaceAbove"), ("space_below", "spaceBelow"))
+                    + tuple(doc_ir.BORDER_SIDES.items())
+                    + tuple(doc_ir.PARAGRAPH_FLAGS.items()))
 # What is written on a paragraph, named whether or not the block asks for it, so
 # that a property the source took away goes away. Unset-and-named is the API's own
 # way of saying "back to the default" (documented, not measured here).
 MANAGED_PARAGRAPH = ("namedStyleType", "alignment") + tuple(a for _, a in PARAGRAPH_FIELDS)
+# Those of them a block says in its own words, and how each is spelled in the API.
+# The named style is not one: it is the block's kind (`named_style`).
+PARAGRAPH_KEYS = (("align", "alignment"),) + PARAGRAPH_FIELDS
 # A bullet's indents are the list preset's, not a choice anybody made: `doc_ir`
 # leaves them out of an item and `createParagraphBullets` would overwrite them.
 ITEM_PARAGRAPH = tuple(f for f in MANAGED_PARAGRAPH if not f.startswith("indent"))
@@ -70,7 +75,8 @@ ITEM_PARAGRAPH = tuple(f for f in MANAGED_PARAGRAPH if not f.startswith("indent"
 SHAPE_KEYS = ("kind", "level", "ordered", "align") + tuple(k for k, _ in PARAGRAPH_FIELDS)
 # What no HTML import can put in a document, so a push has to write it afterwards
 # (`carry_unimported`, `tidy_requests`).
-UNIMPORTABLE = ("shading", "space_above", "space_below")
+UNIMPORTABLE = (("shading", "space_above", "space_below")
+                + tuple(doc_ir.BORDER_SIDES) + tuple(doc_ir.PARAGRAPH_FLAGS))
 # What is written first when two edits are planned at one and the same index
 # (`requests` says why each one sits where it does).
 DELETE, APPEND, REPLANT, EDIT, BEFORE = 0, 1, 2, 3, 4
@@ -221,6 +227,56 @@ def place_pictures(live: dict, planned: list[dict]) -> int:
     return done
 
 
+def unwritten_pictures(base: dict, ours: dict, theirs: dict, merged: list[dict],
+                       notes: list[str]) -> None:
+    """A picture's size and its alt text are read and never written.
+
+    No request in the v1 API changes an embedded object. `insertInlineImage` carries
+    an `objectSize`, so a size the source changes does reach the document when that
+    block is written from nothing *and* the run the plan writes is the file's — a
+    block whose picture the source regenerated, not one merely moved, where the run
+    written is the document's copy and its size the document's. An alt text never
+    reaches it at all, at any size. The settle then regenerates the file from the
+    document, so such an edit is not merely unwritten: it is taken back out of the
+    file, and the next sync sees nothing to say. Something that disappears twice
+    over has to be said out loud.
+
+    Deleting the picture from the file and writing it again is the way to have it at
+    another size, because a picture with no `data-object` is a new one and goes in
+    with its `objectSize` — at the price of whatever the browser put on the old one
+    (a crop, a recolour: `doc_ir.unmodelled`), which is why the sync will not do it
+    of its own accord over a number.
+    """
+    was = {r["value"]: r for r in _image_runs(base["blocks"]) if r.get("value")}
+    live = {r["value"]: r for r in _image_runs(theirs["blocks"]) if r.get("value")}
+    written = {r.get("value"): r.get("size") for block in merged
+               if block.get("rewrite") or block.get("moved") or block.get("origin")
+               == "added by the source" for r in _image_runs([block])}
+    for block in ours["blocks"]:
+        for run in _image_runs([block]):
+            before = was.get(run.get("value"))
+            if before is None:
+                continue
+            for what, key in (("size", "size"), ("alt text", "alt"), ("title", "title")):
+                if run.get(key) == before.get(key) or (
+                        key == "size" and run["value"] in written
+                        and written[run["value"]] == run.get("size")):
+                    continue
+                way = (". Write the picture into the file again without its data-object "
+                       "to have it inserted at that size" if key == "size" else "")
+                notes.append(
+                    f"{block.get('key')}: the source gave the picture the {what} "
+                    f"{_said(key, run.get(key))} and no request writes one — the document "
+                    f"keeps {_said(key, live.get(run['value'], before).get(key))} and the "
+                    f"file goes back to it{way}")
+
+
+def _said(key: str, value) -> str:
+    if value is None:
+        return "none"
+    return f"{value[0]}×{value[1]}" if key == "size" else repr(value)
+
+
 def _unseen_pictures(ours: dict, base: dict) -> None:
     """A picture file the checkout does not have says nothing about its bytes: take the
     base's word for them, or every sync would see it change."""
@@ -332,9 +388,18 @@ def unimported_requests(live: dict) -> list[dict]:
         want = block.get("unimported")
         if not want:
             continue
-        if want["paragraph"] or want.get("named"):
-            style = {api: _paragraph_value(key, want["paragraph"][key])
-                     for key, api in PARAGRAPH_FIELDS if key in want["paragraph"]}
+        if want.get("whole"):
+            # A paragraph this run wrote: the whole style the plan asked for, fields
+            # named whether or not it asks for them, so what a write left on the
+            # block and nobody asked for goes away with the rest (`carry_unimported`).
+            style, fields = want["whole"]["style"], want["whole"]["fields"]
+            out.append({"updateParagraphStyle": {
+                "range": {"startIndex": block["span"][0], "endIndex": block["span"][1]},
+                "paragraphStyle": style, "fields": fields}})
+        elif want["paragraph"] or want.get("named"):
+            style = {api: (doc_ir.TO_ALIGNMENT[want["paragraph"][key]] if key == "align"
+                           else _paragraph_value(key, want["paragraph"][key]))
+                     for key, api in PARAGRAPH_KEYS if key in want["paragraph"]}
             if want.get("named"):
                 style["namedStyleType"] = want["named"]
             out.append({"updateParagraphStyle": {
@@ -658,7 +723,10 @@ def _rebased_table(was: dict, lines: dict, now: dict) -> dict:
     A row the source added is in it, blank; a row the document added is not, since
     nothing agreed on it; the rest keep the base's words. `aligned` records which of
     its lines is which line of the document's new grid and of the file, because
-    that is known here for certain and would only be guessed again from the words.
+    that is known here for certain and would only be guessed again from the words —
+    and, with them, the file's lines this table no longer has room for
+    (`_table_lines`), which are exactly the ones no line of the rebased base can
+    speak for.
     """
     names = ("row", "column")
     kept = {name: [line for line in lines[name] if not line.gone] for name in names}
@@ -668,6 +736,7 @@ def _rebased_table(was: dict, lines: dict, now: dict) -> dict:
              for column in agreed["column"]] for row in agreed["row"]]
     aligned = {"live": _size(now.get("rows", [])), "mine": lines["mine"]}
     for name in names:
+        aligned[f"{name}_dropped"] = lines.get("dropped", {}).get(name, [])
         where = {id(line): k for k, line in enumerate(kept[name])}
         aligned[f"{name}_live"] = [(i, where[id(line)]) for i, line in enumerate(agreed[name])]
         aligned[f"{name}_mine"] = [(i, line.mine) for i, line in enumerate(agreed[name])
@@ -854,11 +923,55 @@ def carry_unimported(live: dict, planned: list[dict]) -> int:
         if (mine["kind"] == "item") != (block["kind"] == "item"):
             bullet = ("ordered" if mine.get("ordered") else "unordered") \
                 if mine["kind"] == "item" else "none"
-        if missing or ranges or named or bullet is not None:
-            block["unimported"] = {"paragraph": missing, "runs": ranges,
-                                   "named": named, "bullet": bullet}
+        # And, for a paragraph this run wrote, every measurement the write did not
+        # leave as the plan asked — in either direction, because Docs' merge-on-delete
+        # gives as well as takes. The style goes back whole rather than as the
+        # difference: the repairs would otherwise read each other's work, the named
+        # style deciding what "inherited" means. A block still read as a HEADING_1
+        # under a theme that centres headings reports no alignment of its own, and
+        # the centring the delete above it handed over shows only once `named` has
+        # written NORMAL_TEXT back — which is in this very batch (seed 912452).
+        whole = None
+        if mine.get("paragraph_written") and (named or _unwritten(mine, block)):
+            style, fields = paragraph_style(mine)
+            whole = {"style": style, "fields": fields}
+        if missing or ranges or named or bullet is not None or whole:
+            block["unimported"] = {"paragraph": missing, "runs": ranges, "named": named,
+                                   "bullet": bullet, "whole": whole}
             done += 1
     return done
+
+
+def _unwritten(mine: dict, live: dict) -> list[str]:
+    """Which measurements the write did not leave as the plan asked.
+
+    Deleting a paragraph hands the block behind it the style of the one that went,
+    which `carry_unimported` already repairs for the named style and the bullet. It
+    reaches the measurements too, in both directions: a paragraph the reader
+    centred, deleted by the source in the same batch, leaves the block after it
+    centred *of its own* — although the merge had written that field named-and-unset
+    one request earlier, because following its named style is the whole point of a
+    theme — and the source's own restyle of that block, written in the same breath,
+    is handed back the spacing of the paragraph that went (offline chain-6 seed
+    912452).
+
+    Only a paragraph this run wrote is asked about (`_paragraph_requests` says so on
+    the block it writes), because putting the style back is the one thing in the
+    settle that can take styling away. It is the write's own field being taken back,
+    and a block nobody wrote is left alone — which keeps the rule the rest of this
+    pass is built on: in a read, "absent" is also what a reader who took the styling
+    off looks like, and a settle must never undo that. An item's indents are the
+    list preset's and belong to neither side (`ITEM_PARAGRAPH`), so they are left
+    alone whichever side is one.
+    """
+    return [api for key, api in PARAGRAPH_KEYS
+            if api in _paragraph_fields(mine, live) and mine.get(key) != live.get(key)]
+
+
+def _paragraph_fields(mine: dict, live: dict) -> tuple:
+    """Which paragraph properties the settle may write on a block. A bullet's own
+    indents are the list preset's, whichever side of the pair is the item."""
+    return ITEM_PARAGRAPH if "item" in (mine["kind"], live["kind"]) else MANAGED_PARAGRAPH
 
 
 def _unimportable_runs(mine: dict, live: dict) -> list[tuple[int, int, dict]]:
@@ -1146,11 +1259,11 @@ def _merge_table(was: dict, mine: dict, live: dict, conflicts: list, notes: list
             notes.append(f"{key}: the table's rows and columns differ between the sides "
                          f"— left alone")
             return out | {"origin": "table grid differs"}
-        rows, columns = found
+        rows, columns, settled = found
         ops = _grid_ops(rows, "row") + _grid_ops(columns, "column")
         if ops:
             return out | {"origin": "the grid the source has", "regrid": ops,
-                          "lines": {"row": rows, "column": columns,
+                          "lines": {"row": rows, "column": columns, "dropped": settled,
                                     "mine": _size(mine.get("rows", []))}}
         # No line is added or taken away, so the document's grid is the merged one,
         # and every live cell is merged where it stands.
@@ -1205,19 +1318,26 @@ BLANK = 0.6    # two lines with nothing written in them: alike, but less than eq
 
 
 def _table_lines(was: dict, mine: dict, live: dict, notes: list,
-                 key: str) -> tuple[list[_Line], list[_Line]] | None:
+                 key: str) -> tuple[list[_Line], list[_Line], dict] | None:
     """The merged rows and columns of a table, or None when there is no telling.
 
     The columns are matched by the words in them and the rows by their cells in those
     columns, each side against the base, and the two matchings are merged
     (`_merged_lines`). A base the grid was just written to says how its lines match
     (`rebase_tables`), so the pass after a regrid does not guess them a second time.
+    The third thing it gives back is what that base cannot hold: the file's lines this
+    merge has settled as *not* in the grid, because the document deleted the base line
+    they pair with. The rebase takes such a line out of the base altogether, so the
+    round after it would find the file's line matched to nothing and read it as one the
+    source has just added — and put back the row a reader deleted.
     """
     here, old, src = (b.get("rows", []) for b in (live, was, mine))
     if not all(_size(rows) for rows in (here, old, src)):
         return None                            # a row out of step with the others
     now, then, want = (_texts(rows) for rows in (here, old, src))
     hint = _hint(was, mine, live)
+    dropped = {name: frozenset((hint or {}).get(f"{name}_dropped", ()))
+               for name in ("row", "column")}
     if hint:
         live_columns, mine_columns = hint["column_live"], hint["column_mine"]
         live_rows, mine_rows = hint["row_live"], hint["row_mine"]
@@ -1234,16 +1354,21 @@ def _table_lines(was: dict, mine: dict, live: dict, notes: list,
         return _line_unchanged([row[w] for row in then], [row[l] for row in now],
                                live_rows, len(now))
 
-    rows = _merged_lines(len(now), len(want), live_rows, mine_rows, row_kept)
-    columns = _merged_lines(len(now[0]), len(want[0]), live_columns, mine_columns, column_kept)
+    rows = _merged_lines(len(now), len(want), live_rows, mine_rows, row_kept,
+                         dropped["row"])
+    columns = _merged_lines(len(now[0]), len(want[0]), live_columns, mine_columns,
+                            column_kept, dropped["column"])
     if rows is None or columns is None:
         return None
-    for name, merged in (("row", rows), ("column", columns)):
+    settled = {}
+    for name, merged, pairs in (("row", rows, mine_rows), ("column", columns, mine_columns)):
         for line in merged:
             if line.was is not None and line.mine is None and not line.gone:
                 notes.append(f"{key}: the source took away a {name}, but the document wrote "
                              f"in it — kept")
-    return rows, columns
+        have = {line.mine for line in merged if line.mine is not None}
+        settled[name] = sorted(dropped[name] | {m for _, m in pairs if m not in have})
+    return rows, columns, settled
 
 
 def _hint(was: dict, mine: dict, live: dict) -> dict | None:
@@ -1338,12 +1463,16 @@ def _line_unchanged(was: list[str], live: list[str], across: list[tuple[int, int
 
 
 def _merged_lines(n_live: int, n_mine: int, live: list[tuple[int, int]],
-                  mine: list[tuple[int, int]], unchanged) -> list[_Line] | None:
+                  mine: list[tuple[int, int]], unchanged,
+                  dropped: frozenset = frozenset()) -> list[_Line] | None:
     """The rows (or columns) of the merged table, in the document's order.
 
     Every line the document has is there: one the source took away is marked `gone`
     when the document left it as it was, and kept otherwise. Lines the source added
-    go in after the line that precedes them in the file. A table the merge would
+    go in after the line that precedes them in the file — all but the ones in
+    `dropped`, which the file has and nobody is adding: they pair with a base line
+    the *document* deleted, and are only here at all because a line with no line of
+    the document's leaves no `_Line` behind to say so. A table the merge would
     leave with no line of the document's is not a merge a grid request can write
     (the last row cannot be deleted), and says so with None.
     """
@@ -1358,7 +1487,7 @@ def _merged_lines(n_live: int, n_mine: int, live: list[tuple[int, int]],
             lines.append(_Line(w, l, mine_of[w]))
         else:
             lines.append(_Line(w, l, None, gone=unchanged(w, l)))
-    known = set(mine_of.values())
+    known = set(mine_of.values()) | set(dropped)
     for m in range(n_mine):
         if m in known:
             continue
@@ -1663,6 +1792,9 @@ def _object_request(index: int, run: dict) -> dict:
 def _paragraph_requests(start: int, end: int, block: dict, was_item: bool) -> list[dict]:
     """The paragraph's kind, alignment and bullet, in the only order that works."""
     out: list[dict] = []
+    # The settle reads this back: only a paragraph this run wrote may have a field
+    # of its own written again from the plan (`_unwritten`).
+    block["paragraph_written"] = True
     if block["kind"] != "item" and was_item:
         # Text inserted at the start of a list item joins that item, bullet and all;
         # and a block the source turned back into a paragraph must lose its glyph.
@@ -1720,7 +1852,27 @@ def _paragraph_value(key: str, value):
         return float(value) * 100
     if key == "shading":
         return {"backgroundColor": {"color": {"rgbColor": _rgb(value)}}}
+    if key in doc_ir.PARAGRAPH_FLAGS:
+        return bool(value)
+    if key in doc_ir.BORDER_SIDES:
+        return _border_value(value)
     return {"magnitude": float(value), "unit": "PT"}
+
+
+def _border_value(said: str) -> dict:
+    """A `ParagraphBorder` from the way the file spells one (`doc_ir._border`).
+
+    The padding is always named: a rule the source moved back against the text has
+    no `pad`, and a border written without a padding field would keep whatever gap
+    the document had — an unset field inside a border is not the API's "back to the
+    default", because the border itself is the field being written.
+    """
+    width, dash, colour, *pad = (said or "").replace(" pad ", " ").split()
+    return {"color": {"color": {"rgbColor": _rgb(colour)}},
+            "width": {"magnitude": float(width.removesuffix("pt")), "unit": "PT"},
+            "padding": {"magnitude": float(pad[0].removesuffix("pt")) if pad else 0.0,
+                        "unit": "PT"},
+            "dashStyle": doc_ir.TO_DASH_STYLE.get(dash, "SOLID")}
 
 
 def _run_requests(start: int, block: dict, reset: bool = False) -> list[dict]:
@@ -1848,10 +2000,12 @@ def requests(theirs: dict, merged: list[dict]) -> list[dict]:
                  for p, b in enumerate(merged))
     left_empty = None
     for index in sorted(going):
+        live = theirs["blocks"][index]
         start, end = _delete_range(theirs["blocks"], index, going, ends, theirs.get("lead"),
                                    filled)
         plans.append((start, DELETE, [{"deleteContentRange": {
-            "range": {"startIndex": start, "endIndex": end}}}]))
+            "range": {"startIndex": start, "endIndex": end}}}]
+            + _orphan_range(live, start, end)))
         if index == len(theirs["blocks"]) - 1 and end == theirs["blocks"][index]["span"][1] - 1:
             # The body's last block, whose words go and whose own mark stays
             # (`_delete_range`): the document ends on an empty paragraph exactly
@@ -2017,7 +2171,8 @@ def structure(theirs: dict, merged: list[dict],
             start, end = _delete_range(theirs["blocks"], index, {index},
                                        not theirs.get("trailer"), theirs.get("lead"))
             deletes[key] = (start, 0, [{"deleteContentRange": {
-                "range": {"startIndex": start, "endIndex": end}}}])
+                "range": {"startIndex": start, "endIndex": end}}}]
+                + _orphan_range(theirs["blocks"][index], start, end))
             plans.append((at, reqs,
                           {"key": key,
                            "after": _after_key(merged, position, _swallowed(theirs, reqs)),
@@ -2243,6 +2398,32 @@ def _delete_range(blocks: list[dict], index: int, going: set[int],
     return start - 1, end - 1
 
 
+def _orphan_range(block: dict, start: int, end: int) -> list[dict]:
+    """The `deleteNamedRange` a delete needs when the block's own range outlives it.
+
+    A block standing in front of a table gives up the *previous* block's paragraph
+    mark and keeps its own (`_delete_range`), and a range may live on that mark: an
+    empty paragraph is all mark, and a reader's chip or word pushes a range onto the
+    mark of one (`doc_ir.apply_keys` records where a range really is). Nothing of the
+    range's own text is deleted then, so Docs keeps it — and the document goes on
+    saying this block is there, on a mark that now belongs to the paragraph the two
+    were merged into.
+
+    What that costs is identity, twice over. A *move* plants the block's range again
+    where the block went, so the document holds two ranges of one name; and the stale
+    one sits where the next block written will be, so the sync after hands that block
+    this one's key and the block that owned the key is renamed from its words
+    (chain-8 seed 41000: an empty heading left in front of a table the source added
+    after a table of contents, moved one step later, ended up wearing
+    `paragraph:second-section`'s identity). A range is destroyed with its text or not
+    at all, so where the text does not go the range is named and deleted.
+    """
+    span = block.get("range") or doc_ir.anchor_range(block)
+    if not block.get("rangeId") or not span or (start <= span[0] and span[1] <= end):
+        return []
+    return [{"deleteNamedRange": {"namedRangeId": block["rangeId"]}}]
+
+
 def _mark_is_taken(blocks: list[dict], index: int, going: set[int], ends: bool,
                    lead: list | None = None, filled: bool = False) -> bool:
     """Whether this block's own paragraph mark must survive the delete — because a
@@ -2423,9 +2604,17 @@ def _empty_range(blocks: list[dict], index: int, going: set[int], ends: bool,
 
 def _after_live(theirs: dict, merged: list[dict], index: int) -> int:
     """Where a block of the document goes back into the merge: behind the merged block
-    that carries the key of the one in front of it there, or at the front."""
+    that carries the key of the one in front of it there, or at the front.
+
+    Never behind one the source moves: this block is kept because nothing can move it,
+    and following the neighbour that *is* moving says it goes along. A table moved up
+    past a paragraph then had the empty paragraph behind it for its own anchor, so it
+    was built again exactly where it stood — and again on the next pass, blank each
+    time (offline chain-8 seed 994424).
+    """
     for live in reversed(theirs["blocks"][:index]):
-        at = next((i for i, b in enumerate(merged) if b.get("key") == live.get("key")), None)
+        at = next((i for i, b in enumerate(merged)
+                   if b.get("key") == live.get("key") and not b.get("moved")), None)
         if at is not None:
             return at + 1
     return 0
@@ -2445,6 +2634,7 @@ def plan(base: dict, ours: dict, theirs: dict) -> dict:
             result["notes"].append(f"{block.get('key')}: a new block with a chip in it that no "
                                    f"request can create (or a picture file that is not there) "
                                    f"cannot be written")
+    unwritten_pictures(base, ours, theirs, result["blocks"], result["notes"])
     refuse_nowhere(theirs, result["blocks"], result["notes"])
     restore_undeletable(theirs, result["blocks"], result["notes"])
     result["structure"], result["shaped"] = structure(theirs, result["blocks"], result["notes"])
@@ -2489,12 +2679,14 @@ def pair_tabs(base: dict, ours: dict, theirs: dict) -> dict:
 
     `pairs` is `(tab id, our tab, base tab)` for every tab past the first that is
     written; `requests` the tab edits that go before any text, `applied` and `notes`
-    what the report says about them.
+    what the report says about them, and `rename` the document's new name, which is
+    no request at all (`document_title`).
     """
     live = {p["tab"]: p for p in theirs.get("tabs", []) if p.get("tab")}
     was = {p["tab"]: p for p in base.get("tabs", []) if p.get("tab")}
     ours_ids = {p.get("tab") for p in ours.get("tabs", [])}
-    out: dict = {"pairs": [], "create": [], "requests": [], "applied": [], "notes": []}
+    out: dict = {"pairs": [], "create": [], "requests": [], "applied": [], "notes": [],
+                 "rename": None}
     taken: set = set()
     for part in ours.get("tabs", []):
         tab, name = part.get("tab"), part.get("title", "")
@@ -2537,7 +2729,105 @@ def pair_tabs(base: dict, ours: dict, theirs: dict) -> dict:
         else:
             out["requests"].append({"deleteTab": {"tabId": tab}})
             out["applied"].append(f"tab {name!r} deleted")
+    first_tab_title(base, ours, theirs, out)
+    document_title(base, ours, theirs, out)
+    tab_order(base, ours, theirs, out)
     return out
+
+
+def first_tab_title(base: dict, ours: dict, theirs: dict, out: dict) -> None:
+    """The first tab's own name, which the file says in its `b2s-tab` meta.
+
+    Every other tab names itself on its `<section>`; the first tab is the file's body
+    and had nowhere to say it, because the file's `<title>` is the *document's* name
+    and the two are different things — a document of one tab has both. So the source
+    could rename any tab but the one everybody actually looks at, and a rename written
+    into the file went twice over: dropped by the sync and then taken back out by the
+    settle, which reads the document's name back.
+
+    The rule is the one the other tabs follow, with one difference at the beginning:
+    a `push` has no base, and unlike the document's name — which the import takes from
+    the file's `<title>` at birth — the first tab's title is Drive's own default, which
+    nothing but this has ever said. So with no base the file's name is written rather
+    than treated as a side of a disagreement nobody can settle.
+    """
+    mine, now = ours.get("tab_title"), theirs.get("tab_title")
+    was, tab = base.get("tab_title"), theirs.get("tab")
+    if not mine or not tab or mine == now or mine == was:
+        return
+    if was is not None and now != was:
+        out["notes"].append(f"the first tab was renamed on both sides — it keeps {now!r}, "
+                            f"not {mine!r}")
+        return
+    out["requests"].append({"updateDocumentTabProperties": {
+        "tabProperties": {"tabId": tab, "title": mine}, "fields": "title"}})
+    out["applied"].append(f"the first tab renamed {mine!r}")
+
+
+def document_title(base: dict, ours: dict, theirs: dict, out: dict) -> None:
+    """The document's name, which the file says in its `<title>`.
+
+    A Google Doc's title *is* its name in Drive, and no `batchUpdate` request writes
+    one — `push` gives the document the file's title at birth and nothing said it
+    again, so a source that renamed the document had the rename dropped and then
+    taken back out of the file by the settle, which reads the old name back. The
+    three-way rule is the one everything else follows: renamed in the file alone and
+    it is written (through Drive, `doc_sync.rename_document`, which is why this is
+    `rename` and not a request); renamed in the document alone and the file simply
+    follows at the settle; renamed on both sides and the document's name stands,
+    with a note.
+
+    A base with no title at all — one an older version of this tool wrote — cannot
+    say who moved, so the document's name stands and the note says that too. No base
+    at all is `push` making the document out of this very file: it is named from the
+    file's title there, and there is nothing to say.
+    """
+    mine, now = ours.get("title"), theirs.get("title")
+    was = base.get("title")
+    if not mine or mine == now or mine == was:
+        return
+    if was is None and not (base.get("blocks") or base.get("tabs")):
+        return
+    if was is None:
+        out["notes"].append(f"the file calls the document {mine!r} and the document calls "
+                            f"itself {now!r}; the base does not say which of them renamed "
+                            f"it, so the document's name is kept")
+    elif now != was:
+        out["notes"].append(f"the document was renamed on both sides — it keeps {now!r}, "
+                            f"not {mine!r}")
+    else:
+        out["rename"] = mine
+        out["applied"].append(f"the document renamed {mine!r} (in Drive: no request "
+                              f"writes a document's title)")
+
+
+def tab_order(base: dict, ours: dict, theirs: dict, out: dict) -> None:
+    """A tab the source moved, which nothing can write.
+
+    Blocks the source moved go back where the file has them, because a move is a
+    delete and a write — and a tab cannot be written from nothing (everything in it
+    would have to be made again, chips and equations and all), so the order of the
+    tabs is the document's, whole. Said out loud rather than dropped: the settle
+    rewrites the file in the document's order, so a reorder in the file disappears
+    twice over.
+
+    Only what the *source* moved: where the file still has the base's order, the
+    reader moved a tab and the file is simply following it.
+    """
+    def order(ir, known):
+        return [p["tab"] for p in ir.get("tabs", []) if p.get("tab") in known]
+
+    known = ({p.get("tab") for p in ours.get("tabs", [])}
+             & {p.get("tab") for p in theirs.get("tabs", [])}
+             & {p.get("tab") for p in base.get("tabs", [])})
+    mine, now = order(ours, known), order(theirs, known)
+    if len(mine) < 2 or mine == now or mine == order(base, known):
+        return
+    titles = {p["tab"]: p.get("title", "") for p in theirs.get("tabs", []) if p.get("tab")}
+    out["notes"].append(
+        "the source puts the tabs in the order " + ", ".join(repr(titles.get(t, t))
+                                                             for t in mine)
+        + "; no request moves a tab, so the document's order stands")
 
 
 def add_tab_request(part: dict, parents: dict) -> dict:

@@ -86,12 +86,23 @@ def comment(author: str, about: str, says: str) -> dict:
 class _Drive(_Storage):
     """The base storage and the backup, plus the one thing no merge can see."""
 
-    def __init__(self, document="doc-1", comments=()):
+    def __init__(self, document="doc-1", comments=(), world=None):
         super().__init__(document)
-        self.open_comments = list(comments)
+        self.open_comments, self.world = list(comments), world
 
     def comments(self):
         return _Comments(self.open_comments)
+
+    def update(self, fileId, fields="", body=None, media_body=None):
+        inner = super().update(fileId, fields, body, media_body)
+
+        def run():
+            answer = inner.execute()
+            # Drive and Docs are two views of one document: a rename shows in both.
+            if self.world is not None and body and "name" in body and fileId == self.document:
+                self.world.title = body["name"]
+            return answer
+        return _Reply(run)
 
 
 def _pair(tmp_path, monkeypatch, blocks=BLOCKS, comments=(), base=True):
@@ -107,7 +118,7 @@ def _pair(tmp_path, monkeypatch, blocks=BLOCKS, comments=(), base=True):
     if base:
         docs.save_base(path, json.loads(json.dumps(ir)) | {"document": "doc-1",
                                                            "generation": 1})
-    drive, service = _Drive(comments=comments), _Docs(world)
+    drive, service = _Drive(comments=comments, world=world), _Docs(world)
     monkeypatch.setattr(docs, "docs_service", lambda creds=None: service)
     monkeypatch.setattr(docs, "drive_service", lambda creds=None: drive)
     return world, path, drive, service
@@ -241,7 +252,7 @@ def test_the_one_note_that_is_a_loss_is_not_left_among_the_cautions(tmp_path):
     comes with the only thing left to do about it."""
     from beamer2slides import doc_sync
     lost = ("the paragraph 'Why this matters' is being moved, which drops "
-            f"paragraphStyle.borderBottom — the document's, and {doc_sync.LOSS_MARK}")
+            f"paragraphStyle.borderBetween — the document's, and {doc_sync.LOSS_MARK}")
     j = _job(tmp_path)
     counts = doc_tools.report_diagnostics(j, REPORT | {"notes": [lost]})
     assert counts["lost"] == 1
@@ -346,14 +357,14 @@ def test_adopt_names_the_block_an_edit_through_the_file_would_cost(tmp_path, mon
         body = doc["tabs"][0]["documentTab"]["body"]["content"]
         at = next(e for e in body
                   if "The second paragraph" in str(e.get("paragraph", {}).get("elements")))
-        at["paragraph"]["paragraphStyle"]["borderLeft"] = {"width": {"magnitude": 1}}
+        at["paragraph"]["paragraphStyle"]["borderBetween"] = {"width": {"magnitude": 1}}
         return doc
 
     service.world.read = bordered
     result = doc_tools.doc_adopt(_ctx(tmp_path), doc="doc-1", file="taken.html")
     assert result.ok, result.summary
     said = [d.message for d in result.diagnostics]
-    assert any("paragraphStyle.borderLeft" in line and "The second paragraph" in line
+    assert any("paragraphStyle.borderBetween" in line and "The second paragraph" in line
                and "would drop it" in line for line in said), said
     # And nothing is said about the paragraph that carries nothing.
     assert not any("The first paragraph" in line for line in said), said
@@ -405,6 +416,28 @@ def test_a_sync_writes_the_source_edit_and_then_has_nothing_left_to_write(tmp_pa
     again = doc_tools.doc_sync(ctx, file="doc.html")
     assert again.ok and again.data["requests"] == 0 and not again.data["written"]
     assert again.data["base"] == "drive"
+
+
+def test_a_document_renamed_in_the_file_is_renamed_in_drive_and_stays_renamed(
+        tmp_path, monkeypatch):
+    """A Google Doc's title is its name in Drive and no `batchUpdate` request writes
+    one, so the file's `<title>` was a dead letter: the sync dropped the rename and
+    the settle then took it back out of the file, which reads the old name. It is the
+    one thing the merge writes outside a batch."""
+    world, path, drive, service = _pair(tmp_path, monkeypatch)
+    _reword(path, "<title>The report</title>", "<title>The quarterly report</title>")
+    ctx = _ctx(tmp_path)
+
+    result = doc_tools.doc_sync(ctx, file="doc.html")
+    assert result.ok, result.summary
+    assert drive.names == ["The quarterly report"] and world.title == "The quarterly report"
+    report = (tmp_path / ".b2s" / "doc.sync-report.md").read_text(encoding="utf-8")
+    assert "renamed 'The quarterly report'" in report
+    assert "<title>The quarterly report</title>" in path.read_text(encoding="utf-8")
+
+    again = doc_tools.doc_sync(ctx, file="doc.html")
+    assert again.ok and again.data["requests"] == 0
+    assert drive.names == ["The quarterly report"]          # and never renamed twice
 
 
 def test_a_dry_run_plans_the_same_edit_and_sends_nothing(tmp_path, monkeypatch):

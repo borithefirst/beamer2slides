@@ -482,6 +482,37 @@ def test_two_blocks_deleted_in_front_of_a_table_do_not_want_one_mark_twice():
     assert spans[1]["endIndex"] == spans[0]["startIndex"]
 
 
+def test_a_delete_that_borrows_the_mark_in_front_names_the_range_it_leaves_behind():
+    """An empty paragraph is all mark, and its named range *is* that mark — which the
+    delete in front of a table does not take (it borrows the previous block's). Nothing
+    of the range's own text goes, so Docs keeps it, and the document goes on saying the
+    block is there: the next block written at that index is handed this one's key."""
+    was = live([para("p:title", "the title"), para("p:empty", ""),
+                table("t:grid", [["a one"]])])
+    empty = was["blocks"][1]
+    empty["rangeId"], empty["range"] = "r7", list(empty["span"])
+    result = doc_merge.plan(was, live([was["blocks"][0], was["blocks"][2]]),
+                            live(was["blocks"]))
+    assert result["requests"] == [
+        {"deleteContentRange": {"range": {"startIndex": empty["span"][0] - 1,
+                                          "endIndex": empty["span"][1] - 1}}},
+        {"deleteNamedRange": {"namedRangeId": "r7"}}]
+
+
+def test_a_delete_that_takes_the_range_with_it_names_nothing():
+    """The other side of it: an ordinary block's range stops short of its paragraph
+    mark (`doc_ir.anchor_range`), so the borrowed-mark delete covers it and Docs
+    destroys it with the text. Naming it too would be a request that does nothing."""
+    was = live([para("p:title", "the title"), para("p:before", "before the table"),
+                table("t:grid", [["a one"]])])
+    before = was["blocks"][1]
+    before["rangeId"] = "r7"
+    before["range"] = [before["span"][0], before["span"][1] - 1]
+    result = doc_merge.plan(was, live([was["blocks"][0], was["blocks"][2]]),
+                            live(was["blocks"]))
+    assert not [r for r in result["requests"] if "deleteNamedRange" in r]
+
+
 def test_a_block_deleted_between_two_tables_leaves_its_paragraph_behind():
     """There is no mark to borrow — and Docs wants a paragraph between two tables
     anyway, so the words go and the empty paragraph stays."""
@@ -635,6 +666,27 @@ def test_a_column_and_a_row_the_source_added_get_their_words_on_the_next_pass():
         ["a one", "NEW", "b one"], ["a two", "NEW2", "b TYPED"], ["a three", "x", "b three"]]
     assert sorted(r["insertText"]["text"] for r in again["requests"]) == [
         "NEW", "NEW2", "a three", "b three", "x"]
+
+
+def test_a_row_the_reader_deleted_is_not_put_back_on_the_pass_after_the_regrid():
+    """The rebase takes the deleted row out of the base, and with it the only thing
+    that said which of the file's rows it was — so the pass after the regrid would
+    find that row matched to nothing and read it as one the source had just added.
+    `aligned` carries the settlement instead (`_table_lines`'s `dropped`)."""
+    ours = grid_table([["a one", "b one"], ["a two", "b two"], ["a new", "b new"]])
+    theirs = grid_table([["a one", "b one"]])
+    result = doc_merge.plan(GRID, ours, theirs)
+    assert kinds(result["structure"]) == ["insertTableRow"]
+    assert result["shaped"][0]["lines"]["dropped"] == {"row": [1], "column": []}
+
+    after = grid_table([["a one", "b one"], ["", ""]])
+    rebased = doc_merge.rebase_tables(GRID, after, result["shaped"])
+    assert rebased["blocks"][1]["aligned"]["row_dropped"] == [1]
+    again = doc_merge.plan(rebased, ours, after)
+    assert again["structure"] == []
+    assert [[doc_merge.block_text(c[0]) for c in row]
+            for row in again["blocks"][1]["rows"]] == [["a one", "b one"],
+                                                       ["a new", "b new"]]
 
 
 def test_a_cell_the_source_split_into_two_paragraphs_is_written_with_the_break():
@@ -884,6 +936,55 @@ def test_a_picture_file_that_is_not_checked_out_is_no_change():
     ours = live([figure("p:plot", picture("plot.png", value="i.0", missing=True))])
     theirs = live(base["blocks"])
     assert doc_merge.plan(base, ours, theirs)["requests"] == []
+
+
+def test_a_size_the_source_changes_is_said_out_loud_rather_than_dropped():
+    """No request in the v1 API changes an embedded object, so a width edited in the
+    file reaches nothing — and the settle then regenerates the file from the document,
+    so the edit is taken back out of the file as well. Twice gone in silence is what
+    the report is for. Deleting the picture from the file and writing it again is the
+    way to have it at another size: a picture with no `data-object` is a new one and
+    goes in with its `objectSize`."""
+    base = live([figure("p:plot", picture("plot.png", value="i.0", sha="s", size=[60, 40],
+                                          alt="A plot"))])
+    ours = live([figure("p:plot", picture("plot.png", value="i.0", sha="s", size=[120, 80],
+                                          alt="A bigger plot"))])
+    result = doc_merge.plan(base, ours, live(base["blocks"]))
+    assert result["requests"] == []
+    assert [note.split(" — ")[0] for note in result["notes"]] == [
+        "p:plot: the source gave the picture the size 120×80 and no request writes one",
+        "p:plot: the source gave the picture the alt text 'A bigger plot' and no request "
+        "writes one"]
+    assert "60×40" in result["notes"][0] and "data-object" in result["notes"][0]
+
+
+def test_a_size_that_goes_in_with_the_picture_the_sync_writes_is_not_reported():
+    """A picture the source regenerated is inserted again from the file, `objectSize`
+    and all, so that resize is written and there is nothing to say. A picture merely
+    *moved* is written from the document's copy — the file's size is not on the run
+    the plan writes, so that one is reported like any other. The alt text is reported
+    either way: nothing carries one, at any size."""
+    def plot(**rest):
+        return figure("p:plot", {"text": "see "},
+                      picture("plot.png", value="i.0", **rest))
+
+    base = live([para("p:one", "one"), para("p:two", "two"),
+                 plot(sha="s", size=[60, 40]), para("p:four", "four")])
+    theirs = live(base["blocks"])
+    theirs["blocks"][2]["runs"][1]["uri"] = "https://lh7/plot"
+    ours = live(base["blocks"][:2] + [plot(sha="new", size=[120, 80], alt="A plot")]
+                + base["blocks"][3:])
+    result = doc_merge.plan(base, ours, theirs)
+    images = [r["insertInlineImage"] for r in result["requests"] if "insertInlineImage" in r]
+    assert images and images[0]["objectSize"]["width"]["magnitude"] == 90.0
+    assert [note for note in result["notes"] if "the size" in note] == []
+    assert [note for note in result["notes"] if "the alt text" in note]
+    # Moved instead: the insert carries the document's 60 × 40, and it is said.
+    ours = live([plot(sha="s", size=[120, 80])] + base["blocks"][:2] + base["blocks"][3:])
+    result = doc_merge.plan(base, ours, live(theirs["blocks"]))
+    images = [r["insertInlineImage"] for r in result["requests"] if "insertInlineImage" in r]
+    assert images and images[0]["objectSize"]["width"]["magnitude"] == 45.0
+    assert [note for note in result["notes"] if "the size" in note]
 
 
 def test_a_picture_the_reader_replaced_is_the_documents():
@@ -1416,6 +1517,80 @@ def test_a_tab_the_reader_deleted_stays_deleted_and_a_source_edit_to_it_is_said(
     assert quiet["notes"] == []
 
 
+def test_the_document_is_renamed_when_the_file_alone_renamed_it():
+    base, theirs = tabbed(), tabbed()
+    out = doc_merge.pair_tabs(base, tabbed() | {"title": "A better name"}, theirs)
+    assert out["rename"] == "A better name" and out["requests"] == []
+    assert out["notes"] == [] and "renamed 'A better name'" in out["applied"][0]
+    # The reader renamed it and the source did not: the file simply follows at the settle.
+    quiet = doc_merge.pair_tabs(base, tabbed(), tabbed() | {"title": "Theirs"})
+    assert quiet["rename"] is None and quiet["notes"] == []
+
+
+def test_a_document_renamed_on_both_sides_keeps_the_name_the_reader_gave_it():
+    out = doc_merge.pair_tabs(tabbed(), tabbed() | {"title": "Mine"},
+                              tabbed() | {"title": "Theirs"})
+    assert out["rename"] is None
+    assert out["notes"] == ["the document was renamed on both sides — it keeps 'Theirs', "
+                            "not 'Mine'"]
+    # A base that cannot say who moved keeps the document's name too, and says so.
+    old = doc_merge.pair_tabs({"blocks": [para("p:front", "front")]},
+                              tabbed() | {"title": "Mine"}, tabbed() | {"title": "Theirs"})
+    assert old["rename"] is None and "does not say which of them renamed" in old["notes"][0]
+    # No base at all is `push`, which is naming the document out of this very file.
+    birth = doc_merge.pair_tabs({"blocks": []}, tabbed() | {"title": "Mine"},
+                                tabbed() | {"title": "In Drive"})
+    assert birth["rename"] is None and birth["notes"] == []
+
+
+def _first(title=None, **rest):
+    """The first tab, which is the file's body: `tab` is its id, `tab_title` its own
+    name, and `title` the document's."""
+    return tabbed() | {"tab": "t.0"} | ({"tab_title": title} if title else {}) | rest
+
+
+def test_the_first_tab_is_renamed_when_the_file_alone_renamed_it():
+    """Every other tab names itself on its `<section>`; the first tab is the body, and
+    the file's `<title>` is the *document's* name, not this tab's."""
+    out = doc_merge.pair_tabs(_first("Draft"), _first("Chapter one"), _first("Draft"))
+    assert out["requests"] == [{"updateDocumentTabProperties": {
+        "tabProperties": {"tabId": "t.0", "title": "Chapter one"}, "fields": "title"}}]
+    assert out["applied"] == ["the first tab renamed 'Chapter one'"] and out["notes"] == []
+    # The reader renamed it and the source did not: the file follows at the settle.
+    quiet = doc_merge.pair_tabs(_first("Draft"), _first("Draft"), _first("Theirs"))
+    assert quiet["requests"] == [] and quiet["notes"] == []
+
+
+def test_the_first_tab_renamed_on_both_sides_keeps_the_readers_name():
+    out = doc_merge.pair_tabs(_first("Draft"), _first("Mine"), _first("Theirs"))
+    assert out["requests"] == []
+    assert out["notes"] == ["the first tab was renamed on both sides — it keeps "
+                            "'Theirs', not 'Mine'"]
+
+
+def test_the_first_tab_is_named_out_of_the_file_when_there_is_no_base():
+    """Unlike the document's name, which the import takes from the file's `<title>` at
+    birth, the first tab's title is Drive's own default — so a `push` whose file says
+    one writes it rather than calling it a disagreement nobody can settle."""
+    out = doc_merge.pair_tabs({"blocks": []}, _first("Chapter one"), _first("Tab 1"))
+    assert out["applied"] == ["the first tab renamed 'Chapter one'"]
+    assert out["notes"] == []
+
+
+def test_a_tab_the_source_moved_is_reported_rather_than_dropped():
+    one, two, three = (tab("t.1", "One", "a"), tab("t.2", "Two", "b"),
+                       tab("t.3", "Three", "c"))
+    base = tabbed(one, two, three)
+    out = doc_merge.pair_tabs(base, tabbed(three, one, two), tabbed(one, two, three))
+    assert out["requests"] == [] and len(out["notes"]) == 1
+    assert out["notes"][0] == ("the source puts the tabs in the order 'Three', 'One', "
+                               "'Two'; no request moves a tab, so the document's order "
+                               "stands")
+    # The reader moved one and the file still has the base's order: nothing to say.
+    quiet = doc_merge.pair_tabs(base, tabbed(one, two, three), tabbed(three, one, two))
+    assert quiet["notes"] == []
+
+
 def test_a_new_tab_left_empty_by_a_sync_that_died_is_taken_not_made_twice():
     ours = tabbed(tab(None, "Appendix", "z"))
     out = doc_merge.pair_tabs(tabbed(), ours, tabbed(tab("t.7", "Appendix")))
@@ -1534,6 +1709,38 @@ def test_a_measurement_the_source_dropped_is_named_with_no_value_so_it_goes():
     assert "alignment" in style["fields"]
     # And the merged block itself no longer carries what the source took away.
     assert "indent" not in result["blocks"][0] and "align" not in result["blocks"][0]
+
+
+def test_a_rule_and_a_page_break_the_source_set_are_written_as_docs_spells_them():
+    base = live([para("p:s", "one two")])
+    ours = live([para("p:s", "one two", border_bottom="1.5pt dotted #cc0000 pad 5pt",
+                      page_break=True)])
+    result = doc_merge.plan(base, ours, live(base["blocks"]))
+    style = [r["updateParagraphStyle"] for r in result["requests"]
+             if "updateParagraphStyle" in r][0]["paragraphStyle"]
+    assert style["pageBreakBefore"] is True
+    assert style["borderBottom"] == {
+        "color": {"color": {"rgbColor": {"red": 204 / 255, "green": 0.0, "blue": 0.0}}},
+        "width": {"magnitude": 1.5, "unit": "PT"},
+        "padding": {"magnitude": 5.0, "unit": "PT"}, "dashStyle": "DOT"}
+    # A rule with no gap names its padding all the same: an unset field inside a
+    # border is not "back to the default" — the border itself is the field written.
+    tight = live([para("p:s", "one two", border_bottom="1pt solid #000000")])
+    again = doc_merge.plan(base, tight, live(base["blocks"]))
+    side = [r["updateParagraphStyle"] for r in again["requests"]
+            if "updateParagraphStyle" in r][0]["paragraphStyle"]["borderBottom"]
+    assert side["padding"] == {"magnitude": 0.0, "unit": "PT"}
+
+
+def test_a_rule_the_source_took_off_is_named_with_no_value_so_it_goes():
+    base = live([para("p:s", "one two", border_bottom="1pt solid #000000",
+                      keep_with_next=True)])
+    result = doc_merge.plan(base, live([para("p:s", "one two")]), live(base["blocks"]))
+    style = [r["updateParagraphStyle"] for r in result["requests"]
+             if "updateParagraphStyle" in r][0]
+    assert "borderBottom" not in style["paragraphStyle"]
+    assert "keepWithNext" not in style["paragraphStyle"]
+    assert "borderBottom" in style["fields"] and "keepWithNext" in style["fields"]
 
 
 def test_an_alignment_somebody_chose_is_still_written_with_a_value():

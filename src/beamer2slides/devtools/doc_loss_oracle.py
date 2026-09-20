@@ -113,6 +113,24 @@ def _split(token: str) -> list[str]:
     return [p for p in PIECE.findall(token) if len(p) > 1]
 
 
+def stands_elsewhere(text: str, whole: str) -> bool:
+    r"""Whether every word of `text` is still somewhere in `whole`.
+
+    What both resurrection checks ask before calling something deleted, and the same
+    forgiveness `joined_differently` grants a token, granted to a whole block. The
+    words are looked for *inside* `whole`, not among its tokens, because `WORD` is
+    `\S+` and a reader's drag glues the text it carries to whatever it lands in: a
+    paragraph dropped inside the full stop of the one before it says "section.."
+    where the base said "section." (chain-8 seeds 64057, 64084), and one that held a
+    chip comes down without it, closing the gap it left ("harbourgrace" for "harbour
+    grace", seed 64166 — no `insertText` retypes a chip). Neither is a block that
+    went away. Erring this way costs a finding; the other way cries wolf on every
+    move.
+    """
+    return all(piece in whole for token in WORD.findall(text)
+               for piece in _split(token))
+
+
 def joined_differently(token: str, after: Counter, was: Counter) -> bool:
     r"""A token the reader typed is not lost when the words *they* put in it are still
     there, joined to something else.
@@ -249,22 +267,35 @@ def telling_names(runs: list[dict]) -> list[set]:
     return [{name for name in image_names(run) if seen[name] == 1} for run in runs]
 
 
-def pair_images(now: list[dict], then: list[dict]) -> list[int | None]:
+def pair_images(now: list[dict], then: list[dict], ids: bool = False) -> list[int | None]:
     """For each picture the document held, the one it has now, or None.
 
     Two passes: a telling name first, then any name at all, so a picture keeps its
     own counterpart where one exists and two copies of one file still pair off one
     for one. Each survivor is claimed once.
+
+    `ids` refuses a pairing between two object ids that differ, which is only ever
+    true of the *file*: the settle regenerates it from the document it wrote, so a
+    picture the file names by id is that very object, while a picture it names by
+    file alone is one the source has just added and the document has never held. The
+    document's own pictures may not be asked for their ids across a sync (a rewrite
+    deletes and inserts, and the picture comes back under a new one), which is why
+    the other pairing goes by name.
     """
     telling = telling_names(now)
     every = [image_names(run) for run in then]
     hit: list[int | None] = [None] * len(now)
     free = set(range(len(then)))
+
+    def may(i: int, j: int) -> bool:
+        mine, theirs = now[i].get("value"), then[j].get("value")
+        return not (ids and mine and theirs and mine != theirs)
+
     for names in (telling, [image_names(run) for run in now]):
         for i in range(len(now)):
             if hit[i] is not None or not names[i]:
                 continue
-            at = next((j for j in sorted(free) if names[i] & every[j]), None)
+            at = next((j for j in sorted(free) if names[i] & every[j] and may(i, j)), None)
             if at is not None:
                 hit[i] = at
                 free.discard(at)
@@ -459,7 +490,64 @@ def check(base: dict, before: dict, after: dict, report: dict,
             continue
         out += _tab_findings(was.get(tab), part, then.get(tab), said, tab,
                              doc_ir.tab_part(ours, tab) if tab else ours, theme)
+        out += _title_findings(was.get(tab), part, then[tab], said, tab)
+    out += _resurrection_findings(was, now, then, file_tabs, said)
     return [f for f in out if f["kind"] not in allow]
+
+
+def _resurrection_findings(was: dict, now: dict, then: dict, file_tabs: dict,
+                           said: str) -> list[dict]:
+    """A tab the reader deleted that the sync put back.
+
+    Nothing of the reader's *disappears* here, so every other question in this file
+    passes it: the content is all present, the report converges, and a tab that comes
+    back with a new id slips past anything that asks for the old one. What is undone
+    is the reader's own deletion, which is a decision they made in the browser and
+    the whole bargain says the document wins on.
+
+    Only the shape the merge could actually produce is accused: the file still asks
+    for that tab (`<section data-tab>`), so the source never dropped it either, and a
+    tab now stands in the document, unknown to the base, saying the same thing under
+    the same name. A tab the source freshly asks for cannot be mistaken for one,
+    unless it is a word-for-word copy of the deleted one, in which case the report
+    naming it excuses it.
+    """
+    out = []
+    for tab, old in was.items():
+        if tab is None or tab in now or tab not in file_tabs:
+            continue
+        twins = [p for t, p in then.items()
+                 if t is not None and t not in was and t not in now
+                 and p.get("title") == old.get("title")
+                 and part_text(p) == part_text(old)]
+        if twins and not _named(said, old.get("title")):
+            out.append(finding("tab_resurrected", "loss",
+                               f"the reader deleted the tab {old.get('title')!r} and it is "
+                               f"back after the sync; the report does not say why", tab=tab))
+    return out
+
+
+def _tab_name(part: dict | None, tab) -> str:
+    """What a tab calls itself. The first tab's `title` is the *document's* name, so
+    its own is `tab_title` (`doc_ir.TAB_META`)."""
+    return ((part or {}).get("title") if tab else (part or {}).get("tab_title")) or ""
+
+
+def _title_findings(was: dict | None, now: dict, then: dict, said: str, tab) -> list[dict]:
+    """A tab the reader renamed and the sync renamed back.
+
+    Only the reader's own rename is theirs to lose: a source rename over a title the
+    document left as the base had it is the merge doing its job, and it lands in
+    `applied`, which `accounted` deliberately does not read. So the question is the
+    narrow one — the reader renamed it, and it is called something else now — which is
+    the both-sides case, and the merge answers that with a note.
+    """
+    mine, after = _tab_name(now, tab), _tab_name(then, tab)
+    if mine == _tab_name(was, tab) or after == mine or _named(said, mine):
+        return []
+    return [finding("tab_renamed", "loss",
+                    f"the tab the reader named {mine!r} is called {after!r} now and the "
+                    f"report does not say why", tab=tab)]
 
 
 def _tab_findings(was: dict | None, now: dict, then: dict | None, said: str,
@@ -525,6 +613,36 @@ def _tab_findings(was: dict | None, now: dict, then: dict | None, said: str,
         out += _inherited_findings(key, block, new[key], (mine or {}), said, tab, theme)
         if block.get("kind") == "table":
             out += _cell_findings(key, block, base_block, new[key], after_words, said, tab)
+            out += _row_resurrection_findings(key, block, base_block, new[key], said, tab)
+
+    before_text = part_text(now)
+    for key, was_block in old.items():
+        # The mirror of `block_gone`, and the same shape as `tab_resurrected`: the
+        # reader deleted this block in the browser, the file still asks for it, and it
+        # stands in the document again after the sync. Nothing of theirs disappeared,
+        # so every question above passes it — what was undone is the deletion itself,
+        # which the document is supposed to win. A block the reader merely *emptied*
+        # is not one they deleted (its range, and so its key, is still there), and a
+        # key the merge handed to another block is `identity_lost`, not this.
+        if key in live or key not in new or key not in file_blocks:
+            continue
+        # A key missing from the read-back does not mean the block is: a reader who
+        # *moves* a block deletes its text and types it again, which destroys the
+        # named range, and the settle then keys the block from its own words as
+        # before. So the question is asked of the words, not of the key — and of the
+        # words rather than the text, because a moved block that held an equation
+        # comes down without it (no request makes one), so the two never read alike.
+        # A block whose every word still stands somewhere is not one that was deleted
+        # and put back (`stands_elsewhere`, which is also what forgives the gluing a
+        # drag does to the words it carries).
+        if stands_elsewhere(text_of(was_block), before_text):
+            continue
+        if _named(said, key, text_of(was_block)[:40]):
+            continue
+        out.append(finding("block_resurrected", "loss",
+                           f"the reader deleted the block {key}, {text_of(was_block)[:60]!r}, "
+                           f"and it is back after the sync; the report does not say why",
+                           tab=tab, key=key))
 
     for block in unkeyed(now):
         text = text_of(block).strip()
@@ -647,6 +765,12 @@ def _picture_findings(now: dict, mine: dict | None, then: dict | None,
     source that adds a second copy and then drops the first left the file holding
     that name, and matching by name alone accused the copy that went (fresh seed
     980193, chain 6).
+
+    That pairing does ask for the ids (`ids=True`), because the file's are the
+    document's own: two pictures of one file, one deleted by the reader and the
+    other dropped by the source, left the survivor paired with the file's entry for
+    the one the reader had already taken away, so nothing was excused and the
+    picture the source itself gave up was named as lost (fresh seed 994410, chain 8).
     """
     out: list[dict] = []
     held = images_of(now)
@@ -654,7 +778,7 @@ def _picture_findings(now: dict, mine: dict | None, then: dict | None,
     telling = telling_names(held)
     left = [i for i in range(len(held)) if hits[i] is None]
     if mine is not None:
-        asked = pair_images(held, images_of(mine))
+        asked = pair_images(held, images_of(mine), ids=True)
         left = left[:max(0, len(left) - sum(1 for at in asked if at is None))]
     for i in left:
         run = held[i]
@@ -788,6 +912,40 @@ def _cell_findings(key, block, base_block, after_block, after_words, said, tab):
             out.append(finding("cell_words_lost", "loss",
                                f"the cell {at} of {key} lost {' '.join(sorted(lost))[:60]}",
                                tab=tab, key=key))
+    return out
+
+
+def _row_texts(block: dict | None) -> list[str]:
+    """One string per row, its cells joined: what a row *says*, which is the only
+    handle on a row there is (a row carries no key of its own)."""
+    return [" | ".join(text_of(inner) for cell in row for inner in cell).strip()
+            for row in (block or {}).get("rows", [])]
+
+
+def _row_resurrection_findings(key, block, base_block, after_block, said, tab):
+    """A row the reader deleted that the sync put back.
+
+    `block_resurrected` at the third size. A row has no key: the merge knows it by
+    what it says (`doc_merge._table_lines`), and so does this. A row the reader
+    reordered or reworded is not one they deleted — its words are still in the table
+    before the sync — so the question is asked of the words, as it is of a block, and
+    is just as forgiving on purpose.
+    """
+    if not base_block or block.get("kind") != "table" or not after_block:
+        return []
+    live_rows = _row_texts(block)
+    live_text = " ".join(live_rows)
+    after_rows = set(_row_texts(after_block))
+    out = []
+    for row in _row_texts(base_block):
+        if not row.strip() or row in live_rows or row not in after_rows:
+            continue
+        if stands_elsewhere(row, live_text) or _named(said, key, row[:40]):
+            continue
+        out.append(finding("row_resurrected", "loss",
+                           f"the reader deleted the row {row[:60]!r} of {key} and it is "
+                           f"back after the sync; the report does not say why",
+                           tab=tab, key=key))
     return out
 
 

@@ -46,13 +46,28 @@ CHAINED = (0, 1, 2, 3, 4, 5)
 # it, 309 (chain 4) one of two identical person chips counted as lost, 1031 and 1147
 # (chain 8) the two defects the chained campaign found last, 5099/5167 (chain 8) the
 # world not moving a named range when a table row went, 5130 (chain 8) the oracle
-# accusing a token both sides had edited half of, and five at chain 6: 970711 a table
+# accusing a token both sides had edited half of, and seven at chain 6: 970711 a table
 # the reader beheaded in a tab the merge plans nothing for, 970228 a mark the source
 # asked for on an un-bolding the base already had, 970528 a word the merge split into
-# two runs, 980193 two copies of one picture with one dropped by the source.
+# two runs, 980193 two copies of one picture with one dropped by the source, 993608 a
+# beheaded table taking the key of one the source regrids, 912452 a paragraph keeping
+# the centring of the one deleted above it. And two at chain 8: 994410 the surviving copy
+# of a picture answering for the one the reader deleted, 994424 a kept paragraph following
+# the table the source moved away from it, 41000 an empty heading in front of a table
+# whose named range outlived the delete that borrowed the mark before it. Then 63138
+# (chain 4) a row the reader deleted put back by the round after the regrid, and 64166
+# (chain 8) the oracle calling a dragged block that held a chip a resurrection.
+# A seed names a *script*, not a defect: growing `fuzz_docs.PARA_MARKS` or
+# `READER_MEASURES` (paragraph borders, `pageBreakBefore` and `keepWithNext` went in with
+# the dialect) makes every draw come out different, so these rounds no longer replay the
+# scripts they were found on. They stay because a passing seed costs nothing and a whole
+# corner of the space is cheap to keep walking; what actually pins each defect is its own
+# hand-built test below.
 REGRESSIONS = ((60, 1), (181, 1), (309, 4), (1031, 8), (1147, 8),
                (5099, 8), (5130, 8), (5167, 8),
-               (970228, 6), (970528, 6), (970711, 6), (980193, 6))
+               (970228, 6), (970528, 6), (970711, 6), (980193, 6),
+               (912452, 6), (993608, 6), (994410, 8), (994424, 8), (41000, 8),
+               (63138, 4), (64166, 8))
 
 
 def _round(seed: int, chain: int, shape: str | None = None) -> None:
@@ -259,6 +274,14 @@ def test_the_campaign_sees_a_theme_undone(monkeypatch):
     whenever the file said nothing, which is also what a heading centred by the
     document's theme says. Measured over the first 40 `themed` seeds at chain 2, the
     campaign catches 6 of them; these sixteen hold two.
+
+    The defect now sits behind two doors, and the probe opens both: the settle puts
+    the plan's whole paragraph style back on a block this run wrote whose style the
+    write did not leave as the plan asked (`_unwritten`), which heals a plan that
+    pins an alignment as surely as it heals the one Docs' merge-on-delete pins. That
+    repair is a second line and not this check's subject — what is measured here is
+    the oracle's reach, so both are put back and the question stays the one it
+    always was: with a theme undone in the document, does the campaign say so?
     """
     real = doc_merge.paragraph_style
 
@@ -268,6 +291,7 @@ def test_the_campaign_sees_a_theme_undone(monkeypatch):
         return style, fields
 
     monkeypatch.setattr(doc_merge, "paragraph_style", broken)
+    monkeypatch.setattr(doc_merge, "_unwritten", lambda mine, live: [])
     caught = 0
     for seed in range(16):
         found = fuzz_docs.offline_round(
@@ -401,7 +425,9 @@ def test_the_campaign_sees_a_mark_the_file_cannot_say_is_off(monkeypatch):
     `doc_merge._text_style` used to write a mark only when it was on, which is all the
     file could say before `doc_ir.MARK_FIELDS`: the first source edit to rewrite the
     block then names no bold, and the word goes back to wearing the theme's. Measured
-    over 300 `themed` seeds at chain 3 the campaign catches 13; these twenty hold two.
+    over 300 `themed` seeds at chain 3 the campaign catches 11 (it was 13 before the
+    draws moved: every op added to the campaign changes what every seed draws); these
+    110 hold four.
     """
     real = doc_merge._text_style
 
@@ -414,11 +440,125 @@ def test_the_campaign_sees_a_mark_the_file_cannot_say_is_off(monkeypatch):
 
     monkeypatch.setattr(doc_merge, "_text_style", broken)
     caught = 0
-    for seed in range(20):
+    for seed in range(110):
         found = fuzz_docs.offline_round(
             seed, script=fuzz_docs.draw(seed, 3, shape="themed"))
         caught += "styling_restored" in {f["kind"] for f in oracle.failures(found)}
-    assert caught >= 2, "the campaign no longer reaches the defect it was built for"
+    assert caught >= 3, "the campaign no longer reaches the defect it was built for"
+
+
+def test_the_oracle_sees_the_first_tab_renamed_back_under_the_reader():
+    """Only the reader's own rename is theirs to lose. A source rename over a title
+    the document left alone lands in `applied`, which `accounted` does not read, so
+    the oracle has to ask the narrow question: did the *reader* name it, and is it
+    called something else now?"""
+    base = _ir(_p("k1", "x")) | {"tab_title": "Draft"}
+    before = _ir(_p("k1", "x")) | {"tab_title": "The reader's name"}
+    after = _ir(_p("k1", "x")) | {"tab_title": "The source's name"}
+    assert "tab_renamed" in _kinds(oracle.check(base, before, after, NOTHING))
+    # Said out loud, it is no longer a loss...
+    told = {"conflicts": [], "notes": ["the first tab was renamed on both sides — it "
+                                       "keeps 'The reader's name', not 'x'"], "applied": []}
+    assert "tab_renamed" not in _kinds(oracle.check(base, before, after, told))
+    # ...and neither is a rename the reader never made.
+    kept = _ir(_p("k1", "x")) | {"tab_title": "Draft"}
+    assert "tab_renamed" not in _kinds(oracle.check(base, kept, after, NOTHING))
+
+
+def test_the_oracle_sees_a_block_the_reader_deleted_come_back():
+    """`tab_resurrected` one level down, and the commoner journey by far. Nothing of
+    the reader's disappears when their deletion is undone, so every other question
+    here passes it; what is gone is the decision, which the document must win."""
+    base = _ir(_p("k1", "Kept."), _p("k2", "Struck out by the reader."))
+    before = _ir(_p("k1", "Kept."))
+    after = _ir(_p("k1", "Kept."), _p("k2", "Struck out by the reader."))
+    ours = _ir(_p("k1", "Kept."), _p("k2", "Struck out by the reader."))
+    assert "block_resurrected" in _kinds(oracle.check(base, before, after, NOTHING, ours))
+    # Said out loud it is no longer silent — in the notes, which is where `accounted`
+    # looks; "created", like "applied", says one line per block and would excuse all.
+    told = {"conflicts": [], "applied": [],
+            "notes": ["k2 was deleted in the document and the source still asks for it"]}
+    assert "block_resurrected" not in _kinds(oracle.check(base, before, after, told, ours))
+    # ...and the source dropping it too leaves nothing for the file to ask for.
+    gone = _ir(_p("k1", "Kept."))
+    assert "block_resurrected" not in _kinds(oracle.check(base, before, after, NOTHING, gone))
+
+
+def test_the_oracle_does_not_call_a_block_the_reader_moved_a_resurrection():
+    """A move in the browser is a delete and a retype, so the named range goes and the
+    key with it — and the settle names the block from its own words again, exactly as
+    a resurrected one would be named. The words say which it was: they never left the
+    document. Without this the campaign cried wolf on 7 of 300 rounds, every one of
+    them shrinking to a lone `move_block`."""
+    base = _ir(_p("k1", "Kept."), _p("k2", "Dragged somewhere else."))
+    before = _ir({"kind": "paragraph", "runs": [{"text": "Dragged somewhere else."}]},
+                 _p("k1", "Kept."))
+    after = _ir(_p("k2", "Dragged somewhere else."), _p("k1", "Kept."))
+    ours = _ir(_p("k1", "Kept."), _p("k2", "Dragged somewhere else."))
+    assert "block_resurrected" not in _kinds(oracle.check(base, before, after, NOTHING, ours))
+
+
+def test_the_oracle_sees_a_row_the_reader_deleted_come_back():
+    """The same question at the third size. A row carries no key of its own, so it is
+    known by what it says — which is how the merge knows it too
+    (`doc_merge._table_lines`)."""
+    base = _ir(_grid([["h1", "h2"], ["ribbon", "x"]], key="t1"))
+    before = _ir(_grid([["h1", "h2"]], key="t1"))            # the reader deleted it
+    after = _ir(_grid([["h1", "h2"], ["ribbon", "x"]], key="t1"))
+    ours = _ir(_grid([["h1", "h2"], ["ribbon", "x"]], key="t1"))
+    assert "row_resurrected" in _kinds(oracle.check(base, before, after, NOTHING, ours))
+    told = {"conflicts": [], "applied": [],
+            "notes": ["t1: the row 'ribbon | x' the document deleted is written again"]}
+    assert "row_resurrected" not in _kinds(oracle.check(base, before, after, told, ours))
+    # A row whose words are still in the table is one they moved or reworded, not one
+    # they deleted — the same forgiveness a block gets.
+    moved = _ir(_grid([["ribbon", "x"], ["h1", "h2"]], key="t1"))
+    assert "row_resurrected" not in _kinds(oracle.check(base, moved, after, NOTHING, ours))
+
+
+def test_the_oracle_forgives_the_words_a_drag_glues_to_their_neighbours():
+    """A reader's drag lands where they dropped it: inside the full stop of the
+    paragraph before (`section.` -> `section..`), or, when the block held a chip no
+    `insertText` can retype, with the gap closed (`harbour grace` -> `harbourgrace`).
+    Both read as a block whose words are gone and came back. Chain-8 seeds 64057,
+    64084 and 64166, each shrinking to a lone `move_block`."""
+    chip = {"frozen": True, "chip": "person", "text": "", "value": "ada@example.com"}
+    base = _ir(_p("k1", "Second section."),
+               {"key": "k2", "kind": "paragraph",
+                "runs": [{"text": "harbour"}, chip, {"text": "grace"}]})
+    before = _ir(_p("k1", "Second section"),
+                 {"kind": "paragraph", "runs": [{"text": "harbourgrace"}]})
+    after = _ir(_p("k1", "Second section"),
+                _p("k2", "harbourgrace"))
+    assert "block_resurrected" not in _kinds(
+        oracle.check(base, before, after, NOTHING, _ir(*base["blocks"])))
+    # And a word that stands nowhere at all is still heard.
+    struck = _ir(_p("k1", "Second section"))
+    assert "block_resurrected" in _kinds(
+        oracle.check(base, struck, after, NOTHING, _ir(*base["blocks"])))
+
+
+def test_the_oracle_sees_a_tab_the_reader_deleted_come_back():
+    """The mirror of `tab_gone`, and invisible to every other question here: nothing
+    of the reader's disappears when a tab they deleted is created again, and the tab
+    that comes back carries a new id, so an id-shaped check never notices. What is
+    undone is a decision the reader made, which the document is supposed to win."""
+    appendix = {"tab": "t.2", "title": "Appendix", "blocks": [_p("k2", "Later.")]}
+    base = _ir(_p("k1", "x"), tabs=[appendix])
+    before = _ir(_p("k1", "x"))                        # the reader deleted it
+    after = _ir(_p("k1", "x"), tabs=[dict(appendix, tab="t.9")])
+    ours = _ir(_p("k1", "x"), tabs=[appendix])         # the file still asks for it
+    assert "tab_resurrected" in _kinds(oracle.check(base, before, after, NOTHING, ours))
+    # Said out loud it is no longer silent...
+    told = {"conflicts": [], "notes": ["tab 'Appendix' was created again"], "applied": []}
+    assert "tab_resurrected" not in _kinds(oracle.check(base, before, after, told, ours))
+    # ...nor is it a resurrection when the source gave the tab up too...
+    gone = _ir(_p("k1", "x"))
+    assert "tab_resurrected" not in _kinds(oracle.check(base, before, after, NOTHING, gone))
+    # ...nor when what stands there now says something else under that name.
+    other = _ir(_p("k1", "x"), tabs=[dict(appendix, tab="t.9",
+                                          blocks=[_p("k2", "Something else.")])])
+    assert "tab_resurrected" not in _kinds(oracle.check(base, before, other, NOTHING, ours))
 
 
 def test_the_oracle_sees_a_chip_the_reader_inserted_disappear():
@@ -509,6 +649,34 @@ def test_two_copies_of_one_picture_and_the_source_drops_one():
     # Both copies going is still a loss: the file asks for one of them.
     assert "frozen_gone" in _kinds(oracle.check(base, copy.deepcopy(base),
                                                 _ir(_p("k2", "  ")), NOTHING, ours))
+
+
+def test_the_copy_the_reader_deleted_does_not_answer_for_the_one_the_source_drops():
+    """And which the file asks for is told by the object id, because the file's ids
+    are the document's own: the settle regenerates it from the document it wrote, so
+    a picture the file names by id is that very object and one it names by file alone
+    is a picture the source has just added.
+
+    Two copies of one figure, the reader deletes one block in the browser and the
+    source drops the other. Nothing is lost by either — but the copy still standing
+    paired, by their shared digest, with the file's entry for the copy the reader had
+    already taken away, so nothing was excused and the picture the source itself gave
+    up was named as lost (fresh seed 994410, chain 8)."""
+    def shot(oid):
+        return {"frozen": True, "chip": "image", "text": "", "value": oid,
+                "sha": "sha-zephyr", "src": "media/zephyr.png"}
+
+    def held(key, oid):
+        return {"key": key, "kind": "paragraph", "runs": [{"text": "  "}, shot(oid)]}
+
+    base = _ir(held("k1", "kix.i5"), held("k2", "kix.i7"))
+    before = _ir(held("k2", "kix.i7"))          # the reader deleted the first block
+    ours = _ir(held("k1", "kix.i5"))            # and the source dropped the second
+    assert not oracle.failures(oracle.check(base, before, _ir(), NOTHING, ours))
+    # The control: a file that still asks for the copy the document holds is a
+    # picture that has to survive.
+    assert "frozen_gone" in _kinds(oracle.check(base, before, _ir(), NOTHING,
+                                                _ir(held("k2", "kix.i7"))))
 
 
 def test_the_oracle_lets_a_chip_go_with_the_block_the_source_dropped():
@@ -660,6 +828,85 @@ def test_a_table_in_a_later_tab_keeps_the_key_the_file_gave_it():
             if b["kind"] == "table"] == ["table:year"]
 
 
+def test_the_first_tab_renamed_in_the_file_is_renamed_and_stays_renamed():
+    """End to end: the source names the first tab, the sync writes it, and the settle
+    — which regenerates the file from the document it just wrote — reads it back. A
+    rename nothing wrote would be taken back out of the file here, twice over."""
+    world, ours, base = _push("tabs")
+    assert ours["tab_title"] == world.tabs[0].title
+    ours["tab_title"] = "Chapter one"
+    report, ours, base = fuzz_docs.sync_once(world, ours, base)
+    assert world.tabs[0].title == "Chapter one"
+    assert ours["tab_title"] == "Chapter one" and base["tab_title"] == "Chapter one"
+    assert any("first tab renamed 'Chapter one'" in a for a in report["applied"])
+    # And the sync after it writes nothing: the three sides agree.
+    again, _, _ = fuzz_docs.sync_once(world, ours, base)
+    assert again["requests"] == 0
+
+
+def test_a_tab_the_reader_added_is_read_into_the_file_and_left_alone():
+    """Somebody clicks + in the tab strip and writes in the new tab. Nobody knows of
+    it — it is in neither the file nor the base — so the merge must plan nothing for
+    it and the settle must read it into the file with keys and named ranges of its
+    own, or the sync after would see a tab the file has and the document does not."""
+    world, ours, base = _push("tabs")
+    reply = world.apply([{"addDocumentTab": {"tabProperties": {"title": "Reader's tab"}}}])
+    ident = reply["replies"][0]["addDocumentTab"]["tabProperties"]["tabId"]
+    world.apply([{"insertText": {"location": {"index": 1, "tabId": ident},
+                                 "text": "A thought of my own."}}])
+    was, mine = copy.deepcopy(base), copy.deepcopy(ours)
+    before = doc_world.settled_ir(world, ours, base)
+    report, ours, base = fuzz_docs.sync_once(world, ours, base)
+    assert not oracle.failures(oracle.check(was, before, base, report, mine))
+    added = [p for p in doc_ir.parts(ours) if p.get("tab") == ident]
+    assert len(added) == 1 and added[0]["title"] == "Reader's tab"
+    assert doc_merge.block_text(added[0]["blocks"][0]) == "A thought of my own."
+    # Keyed and named: the second sync finds it again rather than reading it as new.
+    assert added[0]["blocks"][0]["key"]
+    again, _, _ = fuzz_docs.sync_once(world, ours, base)
+    assert again["requests"] == 0
+
+
+def test_a_tab_the_reader_deleted_stays_deleted_and_goes_out_of_the_file():
+    """The other side of the strip. Document wins, so the tab does not come back —
+    and its `<section>` has to leave the file and its entry the base, or the sync
+    after this one reads the file as asking for a tab the document never had."""
+    world, ours, base = _push("tabs")
+    ident, title, count = world.tabs[1].id, world.tabs[1].title, len(world.tabs)
+    assert any(p.get("tab") == ident for p in doc_ir.parts(ours))
+    world.apply([{"deleteTab": {"tabId": ident}}])
+    was, mine = copy.deepcopy(base), copy.deepcopy(ours)
+    before = doc_world.settled_ir(world, ours, base)
+    report, ours, base = fuzz_docs.sync_once(world, ours, base)
+    assert not oracle.failures(oracle.check(was, before, base, report, mine))
+    # By title, not by id: a tab created again to answer for the deleted one would
+    # carry a new id and slip past every check that asks for the old one.
+    assert [t.title for t in world.tabs].count(title) == 0
+    assert len(world.tabs) == count - 1
+    assert [p.get("title") for p in doc_ir.parts(ours)[1:]].count(title) == 0
+    assert [p.get("title") for p in doc_ir.parts(base)[1:]].count(title) == 0
+    again, _, _ = fuzz_docs.sync_once(world, ours, base)
+    assert again["requests"] == 0
+
+
+def test_a_tab_the_reader_deleted_takes_the_sources_changes_to_it_with_it():
+    """And when the source did change that tab, the change has nowhere to go. That is
+    right — the document wins — but it is a thing the person must be told, so the
+    report says it rather than the file quietly losing the words."""
+    world, ours, base = _push("tabs")
+    ident = world.tabs[1].id
+    part = [p for p in doc_ir.parts(ours) if p.get("tab") == ident][0]
+    part["blocks"][0]["runs"] = [{"text": "A sentence the source rewrote."}]
+    world.apply([{"deleteTab": {"tabId": ident}}])
+    was, mine = copy.deepcopy(base), copy.deepcopy(ours)
+    before = doc_world.settled_ir(world, ours, base)
+    report, ours, base = fuzz_docs.sync_once(world, ours, base)
+    assert not oracle.failures(oracle.check(was, before, base, report, mine))
+    assert any("deleted in the document" in line for line in report["notes"])
+    again, _, _ = fuzz_docs.sync_once(world, ours, base)
+    assert again["requests"] == 0
+
+
 def test_a_table_whose_anchor_row_the_source_deletes_keeps_its_key():
     """A table is anchored in its first cell, and a row delete can take that very
     cell: the structural batch then leaves the table with no named range at all, the
@@ -787,6 +1034,98 @@ def test_a_beheaded_table_keeps_its_key_in_a_tab_the_merge_plans_nothing_for():
     _, ours, _ = fuzz_docs.sync_once(world, ours, base)
     assert [b["key"] for b in doc_ir.parts(ours)[1]["blocks"]
             if b["kind"] == "table"] == ["table:year"]
+
+
+def test_a_table_the_reader_beheaded_does_not_take_the_key_of_one_the_source_regrids():
+    """The third read in a sync had nobody to recover a beheaded table for it.
+
+    `_write_structure` writes the grid, reads the tab again and hands what it finds
+    to `anchor_tables`, whose job is to name a table whose range one of our own
+    requests destroyed — a regrid that deletes the row the table is anchored in. A
+    table the *reader* beheaded in the browser has no range either, and that read was
+    the one place `recover_tables` was not run: the free table `anchor_tables` found
+    was the reader's, and it took the regridded table's key. The reader's rows then
+    stood under the source's table's name, the real one settled as `table:empty`, and
+    the file's key was gone (fresh seed 993608, chain 6).
+    """
+    world, ours, base = _push("between_tables")
+    live = doc_world.read_ir(world, ours, base)
+    first, second = [b for b in live["blocks"] if b["kind"] == "table"]
+    # The reader empties the second table's last row and beheads the first table,
+    # whose anchor cell goes with the row.
+    for inner in reversed([b for row in second["rows"][1:] for cell in row for b in cell]):
+        start, end = inner["span"]
+        if end - 1 > start:
+            world.apply([{"deleteContentRange": {
+                "range": {"startIndex": start, "endIndex": end - 1}}}])
+    world.apply([{"deleteTableRow": {"tableCellLocation": {
+        "tableStartLocation": {"index": first["span"][0]}, "rowIndex": 0}}}])
+    # And the source takes the first row off the *second* table, which takes that
+    # one's range in the structural batch and leaves it blank: two tables, neither
+    # named, and the one with the words in it is the reader's.
+    mine = next(b for b in ours["blocks"] if b["key"] == second["key"])
+    mine["rows"] = mine["rows"][1:]
+    report, ours, base = fuzz_docs.sync_once(world, ours, base)
+    grids = [b for b in base["blocks"] if b["kind"] == "table"]
+    assert [b["key"] for b in grids] == [first["key"], second["key"]]
+    assert [doc_merge._table_words(b) for b in grids] == ["1 2", ""]
+
+
+def test_a_paragraph_does_not_keep_the_centring_of_the_one_deleted_above_it():
+    """Docs merges two paragraphs on a delete keeping the FIRST one's style, and that
+    reaches the measurements, not only the named style and the bullet.
+
+    The reader centres a paragraph; the source deletes that paragraph and restyles the
+    block behind it. The merge writes that block's paragraph style with `alignment`
+    named and no value — which is how a paragraph is told to follow its named style,
+    the whole point of a theme — and the delete, one request later in the same batch,
+    hands it the centring of the paragraph that went. It said `center` of its own from
+    then on and no longer followed the document's theme, and neither side had asked
+    for it (fresh seed 912452, chain 6). And the source's own restyle, written one
+    request earlier, went the same way. The settle writes the plan's whole paragraph
+    style back on a block this run wrote (`_unwritten`), so both come right.
+    """
+    world, ours, base = _push("themed")
+    live = doc_world.read_ir(world, ours, base)
+    above = next(b for b in live["blocks"] if b["key"] == "heading:another-heading")
+    world.apply([{"updateParagraphStyle": {
+        "range": {"startIndex": above["span"][0], "endIndex": above["span"][1]},
+        "paragraphStyle": {"alignment": "CENTER"}, "fields": "alignment"}}])
+    ours["blocks"] = [b for b in ours["blocks"] if b["key"] != above["key"]]
+    behind = next(b for b in ours["blocks"] if b["key"] == "paragraph:and-prose-after-that")
+    behind["line_spacing"] = 1.5
+    report, ours, base = fuzz_docs.sync_once(world, ours, base)
+    now = next(b for b in base["blocks"] if b["key"] == "paragraph:and-prose-after-that")
+    assert now.get("kind") == "paragraph"     # the heading's named style, already put back
+    assert now.get("line_spacing") == 1.5     # the restyle the source did ask for
+    assert now.get("align") is None           # and no centring of its own, which nobody asked for
+
+
+def test_a_paragraph_under_a_deleted_one_of_its_own_kind_is_not_centred_either():
+    """The same wound where the two blocks agree on their named style.
+
+    `carry_unimported`'s named-style repair does not fire then — both are
+    NORMAL_TEXT — so nothing would look at the paragraph at all, and the centring
+    the delete handed over would stay. `_unwritten` asks instead whether the write
+    left the paragraph as the plan asked, which is a question about the
+    measurements and not about the kind.
+    """
+    world, ours, base = _push("prose")
+    live = doc_world.read_ir(world, ours, base)
+    above = next(b for b in live["blocks"]
+                 if b["key"] == "paragraph:the-first-paragraph-says-one-thing")
+    world.apply([{"updateParagraphStyle": {
+        "range": {"startIndex": above["span"][0], "endIndex": above["span"][1]},
+        "paragraphStyle": {"alignment": "CENTER"}, "fields": "alignment"}}])
+    ours["blocks"] = [b for b in ours["blocks"] if b["key"] != above["key"]]
+    behind = next(b for b in ours["blocks"]
+                  if b["key"] == "paragraph:the-second-paragraph-says-another")
+    behind["line_spacing"] = 1.5
+    report, ours, base = fuzz_docs.sync_once(world, ours, base)
+    now = next(b for b in base["blocks"]
+               if b["key"] == "paragraph:the-second-paragraph-says-another")
+    assert now.get("line_spacing") == 1.5
+    assert now.get("align") is None
 
 
 @pytest.mark.parametrize("shape", sorted(fuzz_docs.SHAPES))
@@ -1311,6 +1650,39 @@ def test_a_move_the_merge_takes_back_leaves_the_block_where_the_document_has_it(
         == "a b 1 2"
     assert sum(1 for b in live["blocks"] if not oracle.text_of(b)) == 2, \
         "one empty paragraph per attempt at the move would be left over"
+    again, _, _ = fuzz_docs.sync_once(world, copy.deepcopy(ours), copy.deepcopy(base))
+    assert again["applied"] == []
+
+
+def test_a_kept_paragraph_does_not_follow_the_table_the_source_moves_away_from_it():
+    """The other half of it. A block the source dropped between two tables is kept
+    where the document has it (`restore_undeletable`), and `_after_live` puts it back
+    into the merged list behind the block in front of it there — which may be the very
+    table the source is moving somewhere else.
+
+    The kept paragraph then stood in the merged order as the table's own next block,
+    so `_insert_index` read the table's new place off a span that is right behind
+    where the table already was: it was deleted and built again in its own place,
+    blank, and the next two passes did it again. The words were written nowhere and
+    the file's key was gone, with nothing in the report (fresh-seed 994424 at chain 8,
+    shrunk). A block kept because nothing can move it follows nothing that moves.
+    """
+    world, ours, base = _build([_para("Before both."), _para("Quartz next."),
+                                _table([["h1", "h2"], ["thicket", "x"]]), _para(""),
+                                _table([["a", "b"], ["1", "2"]]), _para("After both.")])
+    assert _keys(ours)[3] == "paragraph:empty", _keys(ours)
+    ours["blocks"].pop(3)                            # the source drops it, and moves
+    ours["blocks"].insert(1, ours["blocks"].pop(2))  # the table up past the paragraph
+    was, mine = copy.deepcopy(base), copy.deepcopy(ours)
+    before = doc_world.settled_ir(world, ours, base)
+    report, ours, base = fuzz_docs.sync_once(world, ours, base)
+    assert not oracle.failures(oracle.check(was, before, base, report, mine))
+    live = doc_world.read_ir(world, ours, base)
+    # The paragraph is kept on the pass that moves the table and deleted on the next,
+    # where it stands between two ordinary blocks and has a mark to borrow again.
+    assert _keys(live) == ["paragraph:before-both", "table:h1", "paragraph:quartz-next",
+                           "table:a", "paragraph:after-both"]
+    assert oracle.text_of(live["blocks"][1]) == "h1 h2 thicket x"
     again, _, _ = fuzz_docs.sync_once(world, copy.deepcopy(ours), copy.deepcopy(base))
     assert again["applied"] == []
 
