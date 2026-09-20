@@ -1,0 +1,12 @@
+# What `gcloud run deploy --source .` sends to Cloud Build. Without this file gcloud infers one
+# from .gitignore, which would keep the credentials out by luck rather than on purpose: say it.
+# The same set as .dockerignore, since only what the Dockerfile copies can matter.
+*
+!pyproject.toml
+!README.md
+!Dockerfile
+!src/
+!examples/demo/demo.tex
+!tests/decks/*.tex
+!docs/media/
+**/__pycache__
