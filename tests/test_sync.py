@@ -1010,25 +1010,60 @@ def test_a_created_panel_stays_under_words_only_the_deck_has():
     assert order.index("new_s0") < order.index("b2s_s000_t1")
 
 
-def test_the_children_a_rewrite_replaces_take_the_sources_order():
-    """A group a rewrite takes apart is made again under the same id, and its children used to go
-    back in the order the deck had them. Between two converter elements that order is not an edit
-    anybody made - it is whatever the last conversion drew - so a panel the source has since put
-    *under* a text came back on top of it (converted seed 79045, chain 6). The children this sync
-    wrote take the source's order among themselves; the person's own children keep their places."""
+def test_the_elements_a_rewrite_replaces_take_the_sources_order():
+    """The same sentence at page level. Two recreated elements kept the deck's order, which between
+    two converter elements is not an edit anybody made - it is what the last conversion drew - so a
+    source that now draws a panel *under* a text (a label that moved brings another frame's elements
+    onto this slide) got it back on top (converted seed 610106, chain 10). Where the deck's order is
+    no longer the base's, somebody restacked and that survives: `Sync._by_the_source` asks the whole
+    set at once, a z-order edit being the one deck edit the merge cannot see."""
     from beamer2slides.sync import Sync
-    objects = {"g": {"kind": "elementGroup", "children": ["old_t", "user_pic", "old_s"]}}
+    keys = ["text/title/0", "shape/panel/0", "text/body/0"]   # the source draws the panel under the body
+    tops = {"text/title/0": "new_t0", "shape/panel/0": "new_s0", "text/body/0": "new_t1"}
+    oldtop = {"text/title/0": "old_t0", "text/body/0": "old_t1", "shape/panel/0": "old_s0"}
+    base_order = ["old_t0", "old_t1", "old_s0"]               # the last conversion drew the panel on top
+    desired = ["new_t0", "user_pic", "new_t1", "new_s0"]
+    Sync._by_the_source(desired, oldtop, tops, keys, base_order)
+    assert desired == ["new_t0", "user_pic", "new_s0", "new_t1"]
+    # ... but a deck whose order is no longer the base's is one somebody restacked, and that stands
+    theirs = ["new_s0", "user_pic", "new_t0", "new_t1"]
+    Sync._by_the_source(theirs, oldtop, tops, keys, ["old_t0", "old_t1", "old_s0"])
+    assert theirs == ["new_s0", "user_pic", "new_t0", "new_t1"]
+
+
+def test_the_children_of_a_rebuilt_group_take_the_sources_order():
+    """A group a rewrite takes apart is made again under the same id, and its children used to go
+    back in the order the deck had them. Inside a group that order is nobody's edit - Slides will
+    not let a person restack there - so it carries only what the last conversion drew, and a panel
+    the source has since put *under* a text came back on top of it (converted seed 79045). The
+    children that are elements of the source take the source's order among themselves, whether this
+    sync rewrote them or kept them (seeds 670146, 660326, 680477, where the text underneath was one
+    the sync kept); anything else in the group holds its slot."""
+    from beamer2slides.sync import Sync
+    objects = {"g": {"kind": "elementGroup", "children": ["old_t", "user_pic", "old_s", "kept_t"]}}
     regroup = {"g": {"remove": {"old_t", "old_s"}, "unit_of": {"old_t": "text/body/0", "old_s": "shape/panel/0"}}}
     tops = {"text/body/0": "new_t", "shape/panel/0": "new_s"}
-    # the source draws the panel first (under) and the body after it; the deck had them the other way
-    order = ["text/title/0", "shape/panel/0", "text/body/0"]
-    reqs = Sync.regroup_requests(regroup, {"g": 0}, objects, tops, set(), order)
+    # the source draws the panel under both texts; the deck had it on top of them
+    rank = {"new_t": 2, "new_s": 1, "kept_t": 3}
+    reqs = Sync.regroup_requests(regroup, {"g": 0}, objects, tops, set(), rank)
     group, = [r["groupObjects"] for r in reqs if "groupObjects" in r]
-    assert group["childrenObjectIds"] == ["new_s", "user_pic", "new_t"]
+    assert group["childrenObjectIds"] == ["new_s", "user_pic", "new_t", "kept_t"]
     # ... and with no source order to go by, the deck's own order stands
     plain, = [r["groupObjects"] for r in Sync.regroup_requests(regroup, {"g": 0}, objects, tops, set())
               if "groupObjects" in r]
-    assert plain["childrenObjectIds"] == ["new_t", "user_pic", "new_s"]
+    assert plain["childrenObjectIds"] == ["new_t", "user_pic", "new_s", "kept_t"]
+
+
+def test_the_rank_a_rebuilt_group_is_ordered_by_covers_kept_objects_too():
+    """`Sync.zrank` is where that order comes from: the objects this sync writes, and the deck's own
+    objects, which stand for the elements it is keeping. Leaving the kept ones out was why the first
+    version of the rule reached only a group whose children the sync rewrote outright."""
+    from beamer2slides.sync import Sync
+    base = many_slides(["intro"])
+    o = ours_of(base["slides"][0])
+    bunits = merge.units(base["slides"][0]["elements"])
+    rank = Sync.zrank(o, bunits, {"text/title/0": "new_t0"})
+    assert rank == {"b2s_s000_t0": 0, "b2s_s000_t1": 1, "new_t0": 0}
 
 
 def test_image_replaced_in_deck_is_kept():

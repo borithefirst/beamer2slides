@@ -794,26 +794,40 @@ hold for every sync, including the combinations nobody thought of.
   up at the bottom, which is the only choice that can hide nothing.
   `tests/test_sync.py::test_a_created_shape_stays_under_the_text_the_source_draws_above_it` fails
   without it, and so do 2 of 400 adopt-shaped rounds.
-- Found by the same check at two fresh converted seeds, and both are the same sentence one level
-  apart: **the source's order says nothing about what the source does not draw.**
-  - At page level (seed 78036, chain 4), the ceiling above only consults source elements, so a
-    created opaque panel still landed on top of a **kept** text — a unit the source dropped and the
-    deck's edits kept alive. The source has no opinion about a unit it gave up, and neither has it
-    about an object the person drew themselves; a created element is now placed below any page
-    element the source does not draw whose words it would cover (`sync.would_hide`, the oracle's own
-    `text_hidden` question — opaque fill at alpha 1 over more than 20% of a text's box — asked
-    before the write rather than after it).
+- Found by the same check at four fresh seeds, three shapes and two levels, and all of it is one
+  sentence with two halves: **the deck's order between two converter elements is nobody's edit, and
+  about what it does not draw the source has no opinion at all.** Each was `text_hidden` and nothing
+  else, because nothing is ever deleted when a rewrite stacks something wrongly.
+  - **The order the last conversion drew** (seeds 79045 chain 6 and 610106 chain 10). A rebuilt
+    group put its children back in the deck's order, and `restack` gave two recreated page elements
+    the deck's places; in both, that order is not an edit anybody made — it is what the previous
+    conversion happened to draw — and this conversion draws them the other way round (the source
+    moved a text into a panel; a label that moved brought another frame's elements onto the slide).
+    The panel came back on top of the text. Now: the children of a rebuilt group that are elements
+    of the source take the source's order among themselves, whether this sync rewrote them or kept
+    them (`Sync.zrank`, `regroup_requests`), unconditionally, because Slides will not let a person
+    restack inside a group, so there is no edit there to protect. On the page the rewritten elements
+    take the source's order too (`Sync._by_the_source`) — but only where the deck still has them in
+    the order the base does, since where it does not somebody restacked and that survives; asked of
+    the whole set at once, a z-order change being the one deck edit `merge.deck_edits` cannot see.
+    `test_the_children_of_a_rebuilt_group_take_the_sources_order`,
+    `test_the_rank_a_rebuilt_group_is_ordered_by_covers_kept_objects_too`,
+    `test_the_elements_a_rewrite_replaces_take_the_sources_order`.
+  - **Words only the deck has** (seeds 78036 chain 4 and adopt-shaped 680477 chain 4). The ceiling
+    above — never above an element the source draws above it — consults source elements alone, so a
+    created panel landed on top of a text the source had dropped and the deck's edits had kept
+    alive, and a recreated panel that *grew* landed on another. The source says nothing about a unit
+    it gave up, nor about an object the person drew themselves, so nothing this sync writes now ends
+    up above a page element the source does not draw whose words it would cover (`sync.would_hide`,
+    the oracle's own question — an opaque fill at alpha 1 over more than 20% of a text's box — asked
+    before the write instead of after it). Hiding those words loses work nobody can get back; the
+    price of going under them is z-order, so that is the way round to be wrong.
     `test_a_created_panel_stays_under_words_only_the_deck_has`.
-  - Inside a group (seed 79045, chain 6), `regroup_requests` put the rebuilt group's children back
-    in the order the **deck** had them. Between two converter elements that order is not an edit
-    anybody made: it is whatever the last conversion drew, and keeping it is keeping an opinion
-    nobody holds. The two children had not overlapped before, so the old order carried no
-    information at all — then the source moved the text into the panel and drew the panel *under*
-    it, and the panel came back on top. The children this sync rewrote now take the source's order
-    among themselves, in the places the person's own children leave them.
-    `test_the_children_a_rewrite_replaces_take_the_sources_order`.
-  Both are mirrored in the reference applier, whose `_restack` and new `_regroup_order` model the
-  outcome (the raw oracle finding fires, not only the `_stacked` replay).
+  All four are mirrored in the reference applier, whose `_restack`, `_not_over_kept`, `_page_order`
+  and `_regroup_order` model the outcome (the raw oracle finding fires here, not only the `_stacked`
+  replay of the requests). What they do not reach is a converter element the person has folded into
+  **their own** group: the sync honours the grouping, and the source's order across two page
+  elements then cannot be realised at all — 2 of 2,600 rounds at chains 4 to 10.
 - Found **in the oracle** by the same campaign: `_element_of` named an object by the base elements
   only, so an object the sync had just created for an element the *source added* had no name — and
   `_source_stacks_above`, the only excuse `text_hidden` has, can excuse nothing it cannot name. A new

@@ -551,6 +551,7 @@ def _update_slide(base, ours, live, p, tok):
     # The deck's own version of the objects, read before anything is deleted: that is what the
     # overrides (the deck's box, its styling) are re-applied from.
     theirs = {"objects": dict(live["objects"])}
+    deck_order = list(live.get("order") or [])   # before anything takes anything's place
     fresh: list[str] = []   # page objects that went on top because nothing of theirs held their place
     for u in p["units"]:
         action = u["action"]
@@ -597,8 +598,9 @@ def _update_slide(base, ours, live, p, tok):
                     fresh.append(oid)
             made.append((m, rb))
         _place_unit(u, members, theirs, made, base_by)
+    _page_order(live, b, o, deck_order, fresh, tok)
     _restack(live, b, o, fresh, tok)
-    _regroup_order(live, o, tok)
+    _regroup_order(live, b, o, tok)
     if p.get("background"):
         live["background"] = {"color": p["background"].split(":", 1)[1]}
     if p.get("notes") is not None:
@@ -606,15 +608,44 @@ def _update_slide(base, ours, live, p, tok):
     _drop_lonely_groups(live)
 
 
-def _regroup_order(live, o, tok):
-    """Inside a group a rewrite takes apart, the children this sync wrote take the source's order
-    among themselves, in the places the person's own children leave them. This is the outcome;
-    `sync.Sync.regroup_requests` is the mechanism (BRING_TO_FRONT each child, then `groupObjects`),
-    which the campaign replays through `fuzz_sync._stacked`. Without it a group whose two children
-    the source has since put the other way round kept the deck's order, and the panel the source now
-    draws *under* a text came back on top of it (`loss_oracle.text_hidden`, converted seed 79045)."""
+def _page_order(live, b, o, deck_order, tok_fresh, tok):
+    """The outcome of `sync.Sync._by_the_source` on the page: the elements this sync rewrote take the
+    source's order among themselves, in the places they hold, where the deck still has them in the
+    order the base does. A rewritten object takes its old slot (`_take_place`), so without this the
+    applier kept an order the last conversion drew and this one contradicts - a panel the source now
+    draws under a text came back on top of it (converted seed 610106, chain 10)."""
+    order = live.get("order") or []
     keys = [el["key"] for el in o["elements"]]
-    rank = {f"b2s_{h6(o['key'])}_{h6(k)}_{tok}": i for i, k in enumerate(keys)}
+    rank = {k: i for i, k in enumerate(keys)}
+    base_main = {el["key"]: el.get("main") for el in b["elements"]}
+    made = {f"b2s_{h6(o['key'])}_{h6(k)}_{tok}": k for k in keys}
+    mine = [(i, made[oid]) for i, oid in enumerate(order) if oid in made and oid not in tok_fresh]
+    here = [k for _, k in mine]
+    if len(mine) < 2 or any(base_main.get(k) not in deck_order or base_main.get(k) not in (b.get("order") or [])
+                            for k in here):
+        return
+    if here != sorted(here, key=lambda k: b["order"].index(base_main[k])):
+        return                                  # the person restacked: their order stands
+    for (i, _), k in zip(mine, sorted(here, key=lambda k: rank[k])):
+        order[i] = f"b2s_{h6(o['key'])}_{h6(k)}_{tok}"
+
+
+def _regroup_order(live, b, o, tok):
+    """Inside a group a rewrite takes apart, the children that are elements of the source take the
+    source's order among themselves, in the places they hold; anything else in there keeps its slot.
+    This is the outcome; `sync.Sync.regroup_requests` is the mechanism (BRING_TO_FRONT each child,
+    then `groupObjects`), which the campaign replays through `fuzz_sync._stacked`. Without it a
+    group kept the deck's child order, which is what the last conversion drew and nobody's edit
+    (Slides will not restack inside a group), and the panel the source now draws *under* a text came
+    back on top of it (`loss_oracle.text_hidden`: converted seed 79045 over a text the sync wrote,
+    then 670146 and adopt-shaped 660326 and 680477 over one it kept)."""
+    keys = [el["key"] for el in o["elements"]]
+    pos = {k: i for i, k in enumerate(keys)}
+    rank = {f"b2s_{h6(o['key'])}_{h6(k)}_{tok}": i for k, i in pos.items()}
+    for el in b["elements"]:                    # the deck's own objects stand for the kept elements
+        for oid in el.get("objects", []):
+            if el["key"] in pos:
+                rank.setdefault(oid, pos[el["key"]])
     for rb in live["objects"].values():
         kids = rb.get("children") or []
         slots = [i for i, c in enumerate(kids) if c in rank]
@@ -636,8 +667,6 @@ def _restack(live, b, o, fresh, tok):
     order = live.setdefault("order", [])
     objects = live["objects"]
     fresh = [x for x in fresh if x in order]
-    if not fresh:
-        return
     base_main = {el["key"]: el.get("main") for el in b["elements"]}
 
     def top(oid):                       # the page element that carries it: itself, or its group
@@ -670,12 +699,24 @@ def _restack(live, b, o, fresh, tok):
             if (nxt := stands.get(k)) in order and nxt != oid:
                 pos = min(pos, order.index(nxt))
                 break
-        drawn = set(stands.values())    # ... nor above words only the deck has
-        for j, other in enumerate(order[:pos]):
-            if other not in drawn and sync.would_hide(objects, oid, other):
-                pos = j
-                break
         order.insert(pos, oid)
+    _not_over_kept(live, o, stands, made, tok)
+
+
+def _not_over_kept(live, o, stands, made, tok):
+    """Nothing the sync wrote ends up above words only the deck has: a text the source dropped and
+    the deck's edits kept alive, or one the person drew themselves. The source's order says where an
+    element goes among the source's own and nothing at all about those, and a panel that grew over
+    such a text hides work nobody can get back, while the price of going under it is z-order
+    (`sync.Sync.restack`'s last pass; `loss_oracle.text_hidden`, seed 680477)."""
+    order, objects = live.get("order") or [], live["objects"]
+    drawn = set(stands.values())
+    for oid in [x for x in order if x in made]:
+        i = order.index(oid)
+        for j, other in enumerate(order[:i]):
+            if other not in drawn and sync.would_hide(objects, oid, other):
+                order.insert(j, order.pop(i))
+                break
 
 
 def rebase(base, ours, after, mplan, tok="2zz") -> dict:

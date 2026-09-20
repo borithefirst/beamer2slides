@@ -938,22 +938,32 @@ rebuilt with its panels over the kept body text (dc8523a) deleted nothing, so no
 fuzz world has blocks and keeps z-order; `fuzz_sync._stacked` replays `Sync.regroups` /
 `Sync.regroup_requests` through Slides' rule that a group keeps its children's page order (`_zorder`):
 without the restack, 14 of 400 offline rounds fail.
-What decides where a rewrite puts a thing is the **source's** order, and the source has an opinion
-only about what it draws. Two fresh converted seeds said so one level apart. At page level (78036)
-`Sync.restack`'s ceiling - never above an element the source draws above it - consults source
-elements alone, so a created opaque panel still landed over a **kept** text, a unit the source
-dropped and the deck's edits kept alive; a created element now stays below any page element the
-source does not draw whose words it would cover (`sync.would_hide`, the oracle's own question -
-opaque fill at alpha 1 over more than 20% of a text's box - asked before the write), which covers an
-object the person drew themselves too. Inside a group (79045) `Sync.regroup_requests` put the
-children back in the **deck's** order, which between two converter elements is not an edit anybody
-made but whatever the last conversion drew: there the two had never overlapped, so that order said
-nothing, and when the source moved the text into the panel and drew the panel under it the panel
-came back on top. The children a sync rewrote now take the source's order among themselves, in the
-places the person's own children leave them. Both are mirrored in the reference applier (`_restack`,
-`_regroup_order`), whose outcome the raw oracle judges; each is pinned by a test that fails without
-it (`test_a_created_panel_stays_under_words_only_the_deck_has`,
-`test_the_children_a_rewrite_replaces_take_the_sources_order`).
+Four fresh seeds over three shapes then said the rest of it, in one sentence with two halves: **the
+deck's order between two converter elements is nobody's edit, and about what it does not draw the
+source has no opinion at all.** (1) *The order the last conversion drew* (79045, 610106): a rebuilt
+group put its children back in the deck's order and `restack` gave two recreated page elements the
+deck's places, but that order is only what the previous conversion happened to draw, and this one
+draws them the other way round - the source moved a text into a panel; a moved label brought another
+frame's elements onto the slide - so the panel came back over the text. A rebuilt group's children
+that are source elements now take the source's order among themselves, rewritten or kept
+(`Sync.zrank`, `regroup_requests`), unconditionally, since Slides will not let a person restack
+inside a group; on the page the rewritten elements do too (`Sync._by_the_source`), but only where
+the deck still has them in the base's order, because where it does not somebody restacked and that
+survives - asked of the whole set at once, a z-order change being the one deck edit
+`merge.deck_edits` cannot see. (2) *Words only the deck has* (78036, adopt 680477): the ceiling
+above consults source elements alone, so a created panel landed on a text the source had dropped and
+the deck's edits had kept alive, and a recreated panel that grew landed on another; nothing a sync
+writes now ends up above a page element the source does not draw whose words it would cover
+(`sync.would_hide`, the oracle's own question - opaque fill at alpha 1 over more than 20% of a text's
+box - asked before the write). Hiding those words loses work nobody can get back and the price of
+going under them is z-order, so that is the way round to be wrong. All four are mirrored in the
+applier (`_restack`, `_not_over_kept`, `_page_order`, `_regroup_order`) and pinned by tests that fail
+without them (`test_a_created_panel_stays_under_words_only_the_deck_has`,
+`test_the_children_of_a_rebuilt_group_take_the_sources_order`,
+`test_the_rank_a_rebuilt_group_is_ordered_by_covers_kept_objects_too`,
+`test_the_elements_a_rewrite_replaces_take_the_sources_order`). What they do not reach is a converter
+element the person folded into **their own** group: the sync honours the grouping and the source's
+order across two page elements is then unrealisable - 2 of 2,600 rounds at chains 4 to 10.
 
 ## Agent tools (`src/beamer2slides/agent/`, docs/agent-tools.md)
 Every journey in this file is a thing an AI should be able to do, and the CLI is the wrong door for

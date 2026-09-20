@@ -934,8 +934,8 @@ def _stacked(base: dict, live: dict, after: dict, ours: dict, mplan: dict, tok: 
             if not kept:
                 created.append(tops[u["key"]])
         ungroup = [{"ungroupObjects": {"objectIds": [g]}} for g in sorted(regroup, key=lambda g: depth[g])]
-        keys = [e["key"] for e in ours["slides"][p["ours"]]["elements"]]
-        lists = _zorder(read, ungroup + Sync.regroup_requests(regroup, depth, read["objects"], tops, set(), keys),
+        rank = Sync.zrank(ours["slides"][p["ours"]], bunits, tops)
+        lists = _zorder(read, ungroup + Sync.regroup_requests(regroup, depth, read["objects"], tops, set(), rank),
                         created)
         for g in regroup:
             rb = now["objects"].get(g)

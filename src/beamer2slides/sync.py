@@ -1307,7 +1307,7 @@ class Sync:
                 i = index[u["key"]]
                 oids = created.get(i, [])
                 tops[u["key"]] = next((x for x in oids if x.endswith("_g") and x[:-2] == new_oid[i]), new_oid[i])
-        reqs += self.regroup_requests(regroup, depth, objects, tops, keep_ids, [e["key"] for e in o["elements"]])
+        reqs += self.regroup_requests(regroup, depth, objects, tops, keep_ids, self.zrank(o, bunits, tops))
         # Moves: the deck object goes where the source moved the element.
         reqs += self.move_requests(p["units"], bunits, read, self.scale)
         reqs += self.tag_requests(o, created, new_oid, in_place)
@@ -1320,6 +1320,17 @@ class Sync:
                 reqs.append({"insertText": {"objectId": read["notes_id"], "text": p["notes"]}})
         w["tops"] = tops
         return reqs
+
+    @staticmethod
+    def zrank(o: dict, bunits: dict, tops: dict) -> dict[str, int]:
+        """Object id -> where the source draws that element, for every object a rewrite may put into
+        a group: the ones this sync writes (`tops`) and the deck's own, which stand for the elements
+        the sync is keeping."""
+        pos = {e["key"]: i for i, e in enumerate(o["elements"])}
+        rank = {oid: pos[m["key"]] for members in bunits.values() for m in members
+                for oid in m.get("objects", []) if m["key"] in pos}
+        rank.update({oid: pos[k] for k, oid in tops.items() if k in pos})
+        return rank
 
     @staticmethod
     def regroups(units: list[dict], bunits: dict, read: dict) -> tuple[dict, dict, list]:
@@ -1353,37 +1364,39 @@ class Sync:
 
     @staticmethod
     def regroup_requests(regroup: dict, depth: dict, objects: dict, tops: dict, keep_ids: set,
-                         order: list[str] = ()) -> list[dict]:
+                         rank: dict | None = None) -> list[dict]:
         """The groups `regroups` took apart, made again under the same ids, innermost first: a
         rewritten unit's new top object takes its old root's place among the children (`tops`: unit
-        key -> new top; `objects`: the read-back before the rewrite; `order`: the source's element
-        keys)."""
+        key -> new top; `objects`: the read-back before the rewrite; `rank`: object id -> where the
+        source draws that element, for every child this sync writes and every one it keeps)."""
         reqs = []
-        rank = {k: i for i, k in enumerate(order)}
+        rank = rank or {}
         replaced: dict[str, str | None] = {}  # regrouped group -> what stands for it now (None: gone)
         for g in sorted(regroup, key=lambda g: -depth[g]):
             info = regroup[g]
-            children, mine = [], {}   # mine: place among the children -> the unit written there
+            children, mine = [], {}   # mine: place among the children -> the object standing there
             for c in objects[g].get("children", []):
                 if c in info["remove"]:
                     ukey = info["unit_of"][c]
                     if ukey in tops and tops[ukey] not in children and tops[ukey] not in keep_ids:
-                        mine[len(children)] = ukey
+                        mine[len(children)] = tops[ukey]
                         children.append(tops[ukey])
                 elif c in replaced:
                     if replaced[c]:
                         children.append(replaced[c])
                 else:
+                    mine[len(children)] = c
                     children.append(c)
-            # The children this sync rewrote take the source's order among themselves, in the places
-            # the deck's own children leave them. A group's child order is the person's edit only
-            # where the person made it: between two converter elements it is whatever the last
-            # conversion drew, and keeping it is keeping an opinion nobody holds - which is how a
-            # panel the source now draws *under* a text came back on top of it, hiding words the
-            # person could read (`loss_oracle.text_hidden`).
-            if (slots := [i for i, k in mine.items() if k in rank]) and len(slots) > 1:
-                for slot, ukey in zip(slots, sorted((mine[i] for i in slots), key=lambda k: rank[k])):
-                    children[slot] = tops[ukey]
+            # The children that are elements of the source take the source's order among themselves,
+            # in the places they hold; anything else in the group (a picture the person dropped in)
+            # keeps its slot. Inside a group the child order is nobody's edit - Slides will not let
+            # a person restack there - so it carries only what the last conversion drew, and keeping
+            # it is keeping an opinion nobody holds. That is how a panel the source now draws
+            # *under* a text came back on top of it, over words the person could read and over words
+            # the sync kept for them (`loss_oracle.text_hidden`).
+            if (slots := [i for i, oid in mine.items() if oid in rank]) and len(slots) > 1:
+                for slot, oid in zip(slots, sorted((mine[i] for i in slots), key=lambda x: rank[x])):
+                    children[slot] = oid
             if len(children) >= 2:
                 # A group keeps its children's z-order, and the new members were created last, so
                 # on top: a block's recreated panels covered the body text the person had edited and
@@ -1454,6 +1467,30 @@ class Sync:
         self.final_revision = rev
         return rev
 
+    @staticmethod
+    def _by_the_source(desired: list[str], oldtop: dict, tops: dict, keys: list[str], base_order: list[str]):
+        """The elements this sync rewrote take the source's order among themselves, in the places
+        they hold on the page - but only where the deck still has them in the order the base does.
+
+        Between two converter elements the deck's order is not an edit anybody made: it is whatever
+        the last conversion drew, and this conversion may draw them the other way round (a label that
+        moved brings another frame's elements onto this slide). Keeping it there put a panel the
+        source now draws *under* a text back on top of it, hiding words somebody could read
+        (`loss_oracle.text_hidden`, converted seed 610106 at chain 10). Where the deck's order is
+        *not* the base's, somebody restacked and that survives untouched - asked of the whole set at
+        once, since a z-order edit is the one deck edit `merge.deck_edits` cannot see, so there is
+        nothing finer to go on."""
+        rank = {k: i for i, k in enumerate(keys)}
+        by_new = {tops[k]: k for k in oldtop if k in tops and k in rank}
+        mine = [(i, by_new[oid]) for i, oid in enumerate(desired) if oid in by_new]
+        here = [k for _, k in mine]
+        if len(mine) < 2 or any(oldtop[k] not in base_order for k in here):
+            return
+        if here != sorted(here, key=lambda k: base_order.index(oldtop[k])):
+            return                                  # the person restacked: their order stands
+        for (i, _), k in zip(mine, sorted(here, key=lambda k: rank[k])):
+            desired[i] = tops[k]
+
     def restack(self, w: dict, before: dict, now: dict) -> list[dict]:
         """BRING_TO_FRONT so recreated elements take their old place in the z-order and new
         ones follow their predecessor in the source. The objects the cleanup phase will delete are
@@ -1464,13 +1501,14 @@ class Sync:
         o = self.ours["slides"][p["ours"]]
         bunits = merge.units(b["elements"])
         top_now = {oid for oid in now["order"] if oid not in doomed}
-        replace, added = {}, []
+        replace, added, oldtop = {}, [], {}
         for u in p["units"]:
             if u["action"] == "recreate":
                 old = merge.unit_top(bunits[u["key"]], before)
                 new = w["tops"].get(u["key"])
                 if old and new:
                     replace[old] = new
+                    oldtop[u["key"]] = old
             elif u["action"] == "create" and u["key"] in w["tops"]:
                 added.append(u["key"])
         desired = []
@@ -1480,6 +1518,7 @@ class Sync:
                 desired.append(oid)
         keys = [e["key"] for e in o["elements"]]
         shown = now.get("objects") or {}
+        self._by_the_source(desired, oldtop, w["tops"], keys, b.get("order") or [])
 
         def placed(k):
             return w["tops"].get(k) or (merge.unit_top(bunits[k], now) if k in bunits else None)
@@ -1503,16 +1542,19 @@ class Sync:
                 if (nxt := placed(k)) in desired:
                     pos = min(pos, desired.index(nxt))
                     break
-            # ... and never above words only the deck has. The source's order places a new element
-            # among the source's own; about an element the source dropped and the deck kept, or one
-            # the person drew themselves, it says nothing at all, and the costly guess is the one
-            # that puts a new opaque panel over somebody's text.
-            drawn = {placed(k) for k in keys}
-            for j, other in enumerate(desired[:pos]):
-                if other not in drawn and would_hide(shown, new, other):
-                    pos = j
-                    break
             desired.insert(pos, new)
+        # ... and nothing this sync wrote ends up above words only the deck has. The source's order
+        # places an element among the source's own; about an element the source dropped and the
+        # deck's edits kept alive, or one the person drew themselves, it says nothing at all. A
+        # panel that grew over such a text hides work nobody can get back, and the price of going
+        # under it is z-order, so that is the way round to be wrong (`loss_oracle.text_hidden`).
+        drawn = {placed(k) for k in keys}
+        for oid in [x for x in desired if x in set(w["tops"].values())]:
+            i = desired.index(oid)
+            for j, other in enumerate(desired[:i]):
+                if other not in drawn and would_hide(shown, oid, other):
+                    desired.insert(j, desired.pop(i))
+                    break
         desired += [x for x in now["order"] if x not in desired and x not in doomed]
         order_now = [x for x in now["order"] if x not in doomed]
         k = 0
