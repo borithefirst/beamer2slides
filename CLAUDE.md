@@ -1553,6 +1553,15 @@ keys, named ranges), `doc_merge.py` (pure planning), `doc_sync.py` (the commands
   under the swallowed paragraph's name while the key the file asserts names nothing (chain-4
   seed 70140). `apply_keys` records what no block took (`ir["orphans"]`) and
   `doc_ir.orphan_requests` deletes those at the head of `name_requests`: one block, one name.
+  The settle is one write too late when the same sync rewrites the survivor: the write kills
+  the range those words carried while the orphan (on a picture, say) lives on, so the
+  read-back names the block after the paragraph that was swallowed and `adopt_keys` has no
+  key to give back - the deletes head the write batch too (`doc_merge.requests`; they move no
+  index, and a sync that writes nothing still leaves them to the settle). Chain-8 seed 77064,
+  2 of 250 rounds at chain 8 without it. `read_paste_block` (a pasted duplicate: two blocks
+  saying exactly the same thing, the degenerate case of identity by words) has found nothing
+  in 400+250 rounds and is kept for that, with a test pinning what it walks over; it moved
+  every draw, which is how the three defects above were reached.
   A body may not end on a table, so the paragraph after a final one keeps its mark however it
   is deleted (`_delete_range`: its words go, an empty paragraph stays where it stood) - but
   the append index came from the last block the sync *keeps*, which is then the table, and a

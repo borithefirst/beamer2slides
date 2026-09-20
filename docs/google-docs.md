@@ -855,6 +855,17 @@ happen in between:
   match the rows and columns again from their words, one side of which it just made
   blank; `rebase_tables` records the matching it already knows (`aligned`), and it is
   used for as long as both grids are the size it expects.
+- **a table the source also moved is built from the merged grid, not from the file's.**
+  A move is a delete and a table built again, and the two grids are the same table until
+  this very sync writes one: the regrid goes in the batch above, the base takes it, and
+  the round after plans the move against a file that still holds the row the reader
+  deleted. Building from the file put that row back and the report said only that the
+  table had moved (chain-8 seed 74230). `_apply_source_moves` takes the size from the
+  merged block now, and `rebase_tables` gives such a table the same `aligned` a regrid
+  gets (`_moved_table`) — its base can only be the blank grid the document shows, and a
+  blank row matches nothing by its words, so without it the round after reads the file's
+  extra line as one the source has just added and puts the row back a second way. Both
+  halves are pinned by a test that fails, differently, with either one out.
 
 **Rows and columns merge three ways, like blocks** (`doc_merge._table_lines`). Tables of
 one shape on all three sides are matched by place, as a cell always was, so a row the
@@ -1254,6 +1265,29 @@ that the mechanism is pinned by a test built by hand
 survivor, sync, and the file's key is still on it). With the two ops in, 400 rounds at
 chain 4 and 300 at chain 8 under `--strict`: nothing.
 
+**The settle is one write too late**, though, and the campaign said so as soon as it could
+join. A reader joins a picture paragraph into a list item and the source rewords that item:
+the write replaces the words the *surviving* range sits on, which destroys it, while the
+picture is untouched — so the orphan is the only name left in the paragraph, the read-back
+names the block after the paragraph that was swallowed, and the key the plan meant it to
+have is nowhere for `adopt_keys` to give back. The settle then plants a range for the wrong
+key, and the file the author wrote `id=` in comes back saying something else. So the orphan
+deletes head the write batch as well (`doc_merge.requests`, where they move no index), and
+only a sync that writes nothing leaves them to the settle. Chain-8 seed 77064, shrunk to one
+source op and two reader ops; with the head of the batch taken out, 2 of 250 rounds at chain
+8 fail with 8 findings between them.
+
+And a third op would have been one too many. `read_paste_block` — the reader copies a
+paragraph and pastes it elsewhere — makes the one thing nothing else here makes: **two
+blocks that say exactly the same thing**, one named and one known to nobody, which is the
+degenerate case of identity by words, the fallback under `key_blocks`, `inherit_keys` and
+`_adopt_by_words` alike. It found nothing (124 draws in 400 rounds at chain 4, 137 in 250 at
+chain 8) and is kept for what it says while it keeps finding nothing, with
+`test_a_paragraph_the_reader_pasted_twice_over_keeps_the_originals_identity` to pin the
+behaviour it walks over. What it did do is move every draw, which is how 74230, 76101 and
+77064 were reached at all — and that is the campaign's own law again: a seed names a script,
+not a defect.
+
 The same signature, a third way: **a body may not end on a table.** The paragraph after a
 final one therefore keeps its paragraph mark however it is deleted — `_delete_range` takes
 its words and leaves an empty paragraph exactly where it stood — but the index a new block
@@ -1431,6 +1465,12 @@ second, and is the worst of the four.
   it exactly, like `_pared_down`, and one thing more: the base word has to be gone from the
   tab as well, or a base word the reader typed again somewhere new, with a stop after it,
   would be excused too.
+* And the same thing the other way about (chain-4 seed 76101). A drag that carries a full
+  stop *away* leaves `section` where the base said `section.`, which whole-token arithmetic
+  reads as a word of the reader's just as surely; the word is the base's, only the
+  punctuation is theirs, and `collide` making that word into `kestrel` is the source's
+  right. `_undressed` is `_dressed_up` mirrored, condition and all. With it out, 1 of 400
+  rounds at chain 4 cries wolf.
 
 Each has its test, each verified by breaking its mechanism. Two of the three merge defects
 were reachable only by chaining — the second needs the source to have reordered a body

@@ -707,9 +707,12 @@ def rebase_tables(base: dict, theirs: dict, shaped: list[dict]) -> dict:
             # Built from nothing — a table the source added, or one it moved, which
             # was deleted where it stood: the base has it where the document now does,
             # and as blank as it is there.
+            fresh = theirs["blocks"][index]
+            if told.get("moved") and told.get("lines"):
+                fresh = _moved_table(fresh, told["lines"])
             if at is not None:
                 del blocks[at]
-            blocks.insert(_place(theirs, blocks, index), theirs["blocks"][index])
+            blocks.insert(_place(theirs, blocks, index), fresh)
         elif told.get("lines"):
             blocks[at] = _rebased_table(blocks[at], told["lines"], theirs["blocks"][index])
         elif told.get("ops"):
@@ -742,6 +745,29 @@ def _rebased_table(was: dict, lines: dict, now: dict) -> dict:
         aligned[f"{name}_mine"] = [(i, line.mine) for i, line in enumerate(agreed[name])
                                    if line.mine is not None]
     return dict(was) | {"rows": rows, "aligned": aligned}
+
+
+def _moved_table(now: dict, lines: dict) -> dict:
+    """The base's table for one this sync moved: as blank as the document has it, and
+    with the matching a regrid records.
+
+    A move is a delete and a table built again, so the base can only be the blank grid
+    the document now shows — the base's own words are nowhere any more. But the grid
+    that was built is the *merged* one, which is not the file's whenever the document
+    had a hand in it, and a blank row matches nothing by its words: without the
+    matching, the round after reads the file's extra line as one the source has just
+    added and puts back the row a reader deleted. Its rows are the document's, so each
+    stands for the merged line of the same number.
+    """
+    names = ("row", "column")
+    kept = {name: [line for line in lines[name] if not line.gone] for name in names}
+    aligned = {"live": _size(now.get("rows", [])), "mine": lines["mine"]}
+    for name in names:
+        aligned[f"{name}_dropped"] = lines.get("dropped", {}).get(name, [])
+        aligned[f"{name}_live"] = [(i, i) for i in range(len(kept[name]))]
+        aligned[f"{name}_mine"] = [(i, line.mine) for i, line in enumerate(kept[name])
+                                   if line.mine is not None]
+    return dict(now) | {"aligned": aligned}
 
 
 def _regridded(was: dict, ops: list[tuple]) -> dict:
@@ -1120,11 +1146,18 @@ def _apply_source_moves(base: dict, ours: dict, theirs: dict, merged: list, note
         # the document has nothing of its own in it — it is built again blank, and
         # its words are the file's.
         if block.get("kind") == "table":
-            if not _table_movable(sides["was"][key], sides["mine"][key], sides["live"][key]):
+            # Built again from the *merged* grid, never from the file's. The two are
+            # the same table until this very sync writes the grid: a regrid goes in a
+            # batch of its own, the base takes the new grid (`rebase_tables`), and the
+            # round after it plans the move — with a file that still holds the row the
+            # reader deleted. Building from the file puts that row back.
+            build = _size(block.get("rows", []))
+            if build is None \
+                    or not _table_movable(sides["was"][key], sides["live"][key]):
                 notes.append(f"{key}: the source moved the table, but the document changed "
                              f"it or it holds a chip — left where the document has it")
                 continue
-            block["build"] = _size(sides["mine"][key]["rows"])
+            block["build"] = build
         elif not _writable_block(block):
             notes.append(f"{key}: the source moved it, but a block with an equation-like "
                          f"chip in it cannot be written from nothing — left where the "
@@ -1148,13 +1181,13 @@ def _apply_source_moves(base: dict, ours: dict, theirs: dict, merged: list, note
         block["moved"] = True
 
 
-def _table_movable(was: dict, mine: dict, live: dict) -> bool:
-    """Whether a table can be deleted and built again from the file with nothing lost:
-    the document's cells say what the base's do, nothing in them is frozen, and the
-    file's grid is whole rows."""
+def _table_movable(was: dict, live: dict) -> bool:
+    """Whether a table can be deleted and built again with nothing lost: the
+    document's cells say what the base's do, and nothing in them is frozen. That the
+    grid to build is whole rows is the caller's question, since what it builds is the
+    merged grid and not the file's."""
     cells = [b for row in live.get("rows", []) for cell in row for b in cell]
-    return (_size(mine.get("rows", [])) is not None
-            and _texts(was.get("rows", [])) == _texts(live.get("rows", []))
+    return (_texts(was.get("rows", [])) == _texts(live.get("rows", []))
             and not any(r.get("frozen") for b in cells for r in b.get("runs", [])))
 
 
@@ -1261,12 +1294,17 @@ def _merge_table(was: dict, mine: dict, live: dict, conflicts: list, notes: list
             return out | {"origin": "table grid differs"}
         rows, columns, settled = found
         ops = _grid_ops(rows, "row") + _grid_ops(columns, "column")
+        matched = {"row": rows, "column": columns, "dropped": settled,
+                   "mine": _size(mine.get("rows", []))}
         if ops:
             return out | {"origin": "the grid the source has", "regrid": ops,
-                          "lines": {"row": rows, "column": columns, "dropped": settled,
-                                    "mine": _size(mine.get("rows", []))}}
+                          "lines": matched}
         # No line is added or taken away, so the document's grid is the merged one,
-        # and every live cell is merged where it stands.
+        # and every live cell is merged where it stands. The matching is carried all
+        # the same: a table the source *moved* is built again blank, and the round
+        # after has to be told which of the file's lines that grid stands for
+        # (`rebase_tables`) rather than guess it from words that are not there yet.
+        out = out | {"lines": matched}
         lines = [[(row.live, column.live, row.was, column.was, row.mine, column.mine)
                   for column in columns] for row in rows]
     merged = []
@@ -2121,7 +2159,15 @@ def requests(theirs: dict, merged: list[dict]) -> list[dict]:
     # delete of it first of all.
     for _, _, reqs in sorted(plans, key=lambda p: (-p[0], p[1])):
         out += reqs
-    return out
+    # A range no block is known by any more (`doc_ir.apply_keys`) goes at the head of
+    # the batch, and not only at the settle: a reader's join leaves two ranges in one
+    # paragraph, and when this sync also rewrites the words the surviving range sits
+    # on, that range dies with them — leaving the orphan the only name in the
+    # paragraph, so the read-back names the block after the paragraph that was
+    # swallowed and the plan's own key is nowhere (chain-8 seed 77064, a picture
+    # paragraph joined into a list item the source reworded). It moves no index, and
+    # a sync that writes nothing needs it no sooner than the settle.
+    return doc_ir.orphan_requests(theirs) + out if out else out
 
 
 def _written_here(block: dict) -> bool:
@@ -2176,7 +2222,7 @@ def structure(theirs: dict, merged: list[dict],
             plans.append((at, reqs,
                           {"key": key,
                            "after": _after_key(merged, position, _swallowed(theirs, reqs)),
-                           "moved": True,
+                           "moved": True, "lines": block.get("lines"),
                            "note": f"`{key}`: moved where the source has it"}))
         elif block.get("regrid"):
             what = ", ".join(f"{how}s a {line}" for line, how, _ in block["regrid"])

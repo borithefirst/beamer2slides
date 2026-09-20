@@ -727,8 +727,10 @@ def test_a_table_the_source_moved_is_deleted_and_built_again_where_the_file_has_
     assert result["structure"] == [
         {"deleteContentRange": {"range": {"startIndex": grid[0], "endIndex": grid[1]}}},
         {"insertTable": {"rows": 1, "columns": 2, "location": {"index": 1}}}]
+    # `lines` is None: one grid on all three sides needs no matching carried over.
     assert result["shaped"][0] | {"note": ""} == {"key": "t:grid", "after": None,
-                                                  "moved": True, "note": ""}
+                                                  "moved": True, "lines": None,
+                                                  "note": ""}
 
     after = live([table(None, [["", ""]]), *MOVE["blocks"][:2], MOVE["blocks"][3]])
     after["blocks"][0]["key"] = None

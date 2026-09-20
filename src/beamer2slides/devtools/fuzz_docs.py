@@ -483,6 +483,28 @@ def read_join_blocks(rng, part, tab):
         [first.get("key"), second.get("key")]
 
 
+def read_paste_block(rng, part, tab):
+    """The reader copies a paragraph and pastes it somewhere else in the tab.
+
+    What this makes that nothing else does is **two blocks that say exactly the same
+    thing**, one of them keyed and named and the other known to nobody. Identity by
+    words is the fallback under every part of the merge — `key_blocks` at the settle,
+    `inherit_keys` on the file, `_adopt_by_words` after a write mangles a block — and
+    each of them is right only while the words pick a block out. A person pasting a
+    paragraph is the everyday way to take that away.
+    """
+    blocks = _paragraph_blocks(part)
+    if len(blocks) < 2:
+        return [], []
+    block = rng.choice(blocks)
+    target = rng.choice([b for b in blocks if b is not block])
+    text = doc_ir.runs_text(block.get("runs", []))
+    if not text.strip():
+        return [], []
+    return [{"insertText": {"location": _at(target["span"][1] - 1, tab),
+                            "text": "\n" + text}}], [block.get("key")]
+
+
 def read_bold_word(rng, part, tab):
     spots = [(b, s) for b in _paragraph_blocks(part) for s in _word_spots(b)]
     if not spots:
@@ -714,6 +736,7 @@ READER = {
     "type_word": read_type_word, "reword": read_reword, "delete_word": read_delete_word,
     "append_block": read_append_block, "delete_block": read_delete_block,
     "split_block": read_split_block, "join_blocks": read_join_blocks,
+    "paste_block": read_paste_block,
     "bold_word": read_bold_word, "unmark_word": read_unmark_word,
     "heading": read_heading,
     "face": read_face, "measure": read_measure,
