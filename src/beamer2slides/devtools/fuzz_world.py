@@ -609,25 +609,32 @@ def _update_slide(base, ours, live, p, tok):
 
 
 def _page_order(live, b, o, deck_order, tok_fresh, tok):
-    """The outcome of `sync.Sync._by_the_source` on the page: the elements this sync rewrote take the
+    """The outcome of `sync.Sync._by_the_source` on the page: the source's own elements take the
     source's order among themselves, in the places they hold, where the deck still has them in the
     order the base does. A rewritten object takes its old slot (`_take_place`), so without this the
     applier kept an order the last conversion drew and this one contradicts - a panel the source now
-    draws under a text came back on top of it (converted seed 610106, chain 10)."""
-    order = live.get("order") or []
+    draws under a text came back on top of it (converted seed 610106, chain 10). The elements this
+    sync *keeps* count too, or a slide with one rewritten element has nothing to be ordered against
+    (seed 1500512 at chain 10)."""
+    order, objects = live.get("order") or [], live["objects"]
     keys = [el["key"] for el in o["elements"]]
     rank = {k: i for i, k in enumerate(keys)}
     base_main = {el["key"]: el.get("main") for el in b["elements"]}
-    made = {f"b2s_{h6(o['key'])}_{h6(k)}_{tok}": k for k in keys}
-    mine = [(i, made[oid]) for i, oid in enumerate(order) if oid in made and oid not in tok_fresh]
+    at, stands = {}, {}
+    for k in keys:
+        made = f"b2s_{h6(o['key'])}_{h6(k)}_{tok}"
+        oid = made if made in objects else base_main.get(k)
+        if oid and base_main.get(k) and oid not in tok_fresh:
+            at[oid], stands[k] = k, oid
+    mine = [(i, at[oid]) for i, oid in enumerate(order) if oid in at]
     here = [k for _, k in mine]
-    if len(mine) < 2 or any(base_main.get(k) not in deck_order or base_main.get(k) not in (b.get("order") or [])
+    if len(mine) < 2 or any(base_main[k] not in deck_order or base_main[k] not in (b.get("order") or [])
                             for k in here):
         return
     if here != sorted(here, key=lambda k: b["order"].index(base_main[k])):
         return                                  # the person restacked: their order stands
     for (i, _), k in zip(mine, sorted(here, key=lambda k: rank[k])):
-        order[i] = f"b2s_{h6(o['key'])}_{h6(k)}_{tok}"
+        order[i] = stands[k]
 
 
 def _regroup_order(live, b, o, tok):

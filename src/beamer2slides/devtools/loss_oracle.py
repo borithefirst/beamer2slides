@@ -693,6 +693,44 @@ def hiders(slide_read: dict, oid: str, order: list[str] | None = None) -> list[s
             and rb.get("box") and _cover(box, rb["box"]) > HIDDEN]
 
 
+def page_elements(slide_read: dict) -> dict[str, str]:
+    """Object id -> the page element it is drawn inside (itself, when it is one)."""
+    out: dict[str, str] = {}
+
+    def walk(oid, root):
+        if oid not in slide_read["objects"] or oid in out:
+            return
+        out[oid] = root
+        for c in slide_read["objects"][oid].get("children") or []:
+            walk(c, root)
+    for t in slide_read.get("order") or []:
+        walk(t, t)
+    return out
+
+
+def _folded_into_a_group_of_their_own(base_slide: dict | None, slide_read: dict, made: set[str],
+                                      text: str, shape: str) -> bool:
+    """The sync could not have drawn that shape under that text without undoing an edit.
+
+    Z-order is written in two places: the page's element order (`sync.Sync.restack`) and the
+    children of a group this sync rebuilds (`regroup_requests`). Neither reaches a converter element
+    the person has folded into a group of *their own*: its page element is that group, so restacking
+    it moves everything else the person put in there, and the children of a group nobody rebuilds
+    cannot be reordered at all. With the hidden text in another page element, the source's order
+    across the two is simply unrealisable, and the sync honouring the grouping is not what hid the
+    words - so this is a note, and `Sync.finish` names it in the report (`sync.folded_hiders`).
+
+    The converter's own containers are known from the base, which records its groups
+    (`merge.user_objects` asks it the same question) and its elements' objects; `made` is what this
+    very sync created, whose containers are its own too."""
+    ours = {o for el in (base_slide or {}).get("elements", []) for o in el.get("objects", [])}
+    ours |= set((base_slide or {}).get("groups") or [])
+    top = page_elements(slide_read)
+    stands_in = top.get(shape)
+    return (stands_in is not None and stands_in != shape and stands_in not in ours
+            and stands_in not in made and top.get(text) != stands_in)
+
+
 def _element_of(skey: str, base_slide: dict | None, slide_read: dict,
                 ours_slide: list | None = None) -> dict[str, dict]:
     """object id -> the element it carries on this read-back: a base element, or - for an object the
@@ -749,7 +787,9 @@ def occlusion_findings(base: dict, before: dict, after: dict, ours: dict | None 
     readable before when at least one of its objects then was.
 
     A shape lands on a slide because a frame was written there, so on a slide whose identity the
-    report itself calls uncertain (`uncertain_slides`) this is a note, not a failure."""
+    report itself calls uncertain (`uncertain_slides`) this is a note, not a failure. So is a shape
+    the person folded into a group of their own (`_folded_into_a_group_of_their_own`), which no
+    ordering the sync may write can reach."""
     out = []
     unsure = uncertain_slides(base, ours)
     base_by_id = {s["objectId"]: s for s in base["slides"] if s.get("objectId")}
@@ -782,13 +822,18 @@ def occlusion_findings(base: dict, before: dict, after: dict, ours: dict | None 
                 continue  # nothing to read there before, or it was hidden already
             over = [x for x in over
                     if not _source_stacks_above(ours_slide, el and el["key"], (el_after.get(x) or {}).get("key"))]
-            if over:
-                said = skey in unsure
-                out.append(finding("text_hidden", "note" if said else "loss",
-                                   f"{norm(rb.get('text'))[:60]!r} is under {over}, which the sync created "
-                                   "(opaque, above it in z-order); it could be read before"
-                                   + (" - on a slide the report says may be the wrong one" if said else ""),
-                                   slide=skey, element=el and el["key"], object=oid))
+            folded = [x for x in over
+                      if _folded_into_a_group_of_their_own(b, a, new, oid, x)]
+            said = skey in unsure
+            for over_, sev, why in ((folded, "note", " - in a group the person made, where the "
+                                                     "source's order across two page elements cannot be realised"),
+                                    ([x for x in over if x not in folded], "note" if said else "loss",
+                                     " - on a slide the report says may be the wrong one" if said else "")):
+                if over_:
+                    out.append(finding("text_hidden", sev,
+                                       f"{norm(rb.get('text'))[:60]!r} is under {over_}, which the sync created "
+                                       "(opaque, above it in z-order); it could be read before" + why,
+                                       slide=skey, element=el and el["key"], object=oid))
     return out
 
 

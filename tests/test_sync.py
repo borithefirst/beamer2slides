@@ -1031,6 +1031,25 @@ def test_the_elements_a_rewrite_replaces_take_the_sources_order():
     assert theirs == ["new_s0", "user_pic", "new_t0", "new_t1"]
 
 
+def test_the_source_orders_a_rewrite_against_the_elements_it_keeps():
+    """The elements this sync keeps count as much as the ones it rewrites - the same reason
+    `Sync.zrank` ranks a group's kept children. Ordering only the rewritten ones among themselves
+    means a slide with one of them has nothing to be ordered against and the rule never fires: a
+    panel the source draws under a text it did not touch grew over it and stayed on top (converted
+    seed 1500512 at chain 10, on a slide the person had ungrouped)."""
+    from beamer2slides.sync import Sync
+    keys = ["text/title/0", "shape/panel/0", "text/body/0"]   # the source draws the panel under the body
+    tops = {"shape/panel/0": "new_s0"}                        # ... and only the panel was rewritten
+    oldtop = {"text/title/0": "old_t0", "shape/panel/0": "old_s0", "text/body/0": "old_t1"}
+    desired = ["old_t0", "old_t1", "new_s0"]
+    Sync._by_the_source(desired, oldtop, tops, keys, ["old_t0", "old_t1", "old_s0"])
+    assert desired == ["old_t0", "new_s0", "old_t1"]
+    # ... and a deck whose order is no longer the base's is one somebody restacked, and that stands
+    theirs = ["old_t1", "old_t0", "new_s0"]
+    Sync._by_the_source(theirs, oldtop, tops, keys, ["old_t0", "old_t1", "old_s0"])
+    assert theirs == ["old_t1", "old_t0", "new_s0"]
+
+
 def test_the_children_of_a_rebuilt_group_take_the_sources_order():
     """A group a rewrite takes apart is made again under the same id, and its children used to go
     back in the order the deck had them. Inside a group that order is nobody's edit - Slides will
@@ -1064,6 +1083,45 @@ def test_the_rank_a_rebuilt_group_is_ordered_by_covers_kept_objects_too():
     bunits = merge.units(base["slides"][0]["elements"])
     rank = Sync.zrank(o, bunits, {"text/title/0": "new_t0"})
     assert rank == {"b2s_s000_t0": 0, "b2s_s000_t1": 1, "new_t0": 0}
+
+
+def test_words_a_grouping_the_person_made_keeps_covered_are_named_in_the_report():
+    """What the three ordering rules above cannot reach. A converter element the person folded into
+    a group of their own has that group for its page element, so `restack` cannot put it under a
+    text in another one without moving everything else they grouped with it, and `regroup_requests`
+    reorders only the children of groups this sync rebuilds. A panel that grew when the source
+    redrew it then covers words with no way round it - nothing is deleted, every write went through,
+    and no other line of the report would mention it (converted seed 670146 at chain 6, 2 of 2,600
+    rounds). `folded_hiders` finds exactly that pair, and only that pair."""
+    from beamer2slides import sync as S
+    opaque = readback([50, 272, 370, 352])                      # the source redrew it taller
+    read = {"order": ["blk", "ug"], "objects": {
+        "blk": {"kind": "elementGroup", "box": [80, 328, 430, 384], "children": ["new_t"]},
+        "new_t": readback([90, 344, 420, 368], text="bullet editor picture table\n"),
+        "ug": {"kind": "elementGroup", "box": [40, 40, 400, 352], "children": ["mine", "new_s"]},
+        "mine": readback([40, 40, 256, 68], text="the person's own heading\n"),
+        "new_s": opaque}}
+    made, ours = {"new_t", "new_s"}, {"blk", "old_t", "old_s"}
+    assert S.folded_hiders(read, made, ours) == [("new_t", "new_s")]
+    # ... and nothing where the shape stands on the page itself: that one `restack` orders away
+    page = {"order": ["blk", "new_s"], "objects": {k: v for k, v in read["objects"].items()
+                                                   if k not in ("ug", "mine")}}
+    assert S.folded_hiders(page, made, ours) == []
+    # ... nor where the person's group is where the text is too: no page order decides that
+    together = {"order": ["ug"], "objects": {**read["objects"],
+                                             "ug": {**read["objects"]["ug"], "children": ["new_t", "new_s"]}}}
+    assert S.folded_hiders(together, made, ours) == []
+    # and the report says it, in the person's words: the sync's own `ours`/`made` come from the base
+    sync = S.Sync.__new__(S.Sync)
+    sync.warnings = []
+    sync.base = {"slides": [{"key": "intro", "groups": ["blk"],
+                             "elements": [{"key": "text/body/0", "objects": ["old_t"]},
+                                          {"key": "shape/panel/0", "objects": ["old_s"]}]}]}
+    work = {"slides": [{"plan": {"action": "update", "base": 0, "objectId": "s1"},
+                        "objects": {"text/body/0": ["new_t"], "shape/panel/0": ["new_s"]}}]}
+    sync.warn_about_folded_hiders(work, {"slides": [{**read, "objectId": "s1"}]})
+    assert len(sync.warnings) == 1 and "bullet editor picture table" in sync.warnings[0]
+    assert "group you made" in sync.warnings[0] and "Ungroup it" in sync.warnings[0]
 
 
 def test_image_replaced_in_deck_is_kept():

@@ -806,13 +806,19 @@ hold for every sync, including the combinations nobody thought of.
     The panel came back on top of the text. Now: the children of a rebuilt group that are elements
     of the source take the source's order among themselves, whether this sync rewrote them or kept
     them (`Sync.zrank`, `regroup_requests`), unconditionally, because Slides will not let a person
-    restack inside a group, so there is no edit there to protect. On the page the rewritten elements
+    restack inside a group, so there is no edit there to protect. On the page the source's elements
     take the source's order too (`Sync._by_the_source`) — but only where the deck still has them in
     the order the base does, since where it does not somebody restacked and that survives; asked of
     the whole set at once, a z-order change being the one deck edit `merge.deck_edits` cannot see.
-    `test_the_children_of_a_rebuilt_group_take_the_sources_order`,
+    There too the elements this sync **keeps** count as much as the ones it rewrites, for the same
+    reason `zrank` ranks a group's kept children: ordering only the rewritten ones among themselves
+    means a slide with one of them has nothing to be ordered against and the rule never fires, so a
+    panel the source draws under a text it did not touch grew over it and stayed on top (converted
+    seed 1500512 at chain 10, on a slide the person had ungrouped, so every element stood on the
+    page). `test_the_children_of_a_rebuilt_group_take_the_sources_order`,
     `test_the_rank_a_rebuilt_group_is_ordered_by_covers_kept_objects_too`,
-    `test_the_elements_a_rewrite_replaces_take_the_sources_order`.
+    `test_the_elements_a_rewrite_replaces_take_the_sources_order`,
+    `test_the_source_orders_a_rewrite_against_the_elements_it_keeps`.
   - **Words only the deck has** (seeds 78036 chain 4 and adopt-shaped 680477 chain 4). The ceiling
     above — never above an element the source draws above it — consults source elements alone, so a
     created panel landed on top of a text the source had dropped and the deck's edits had kept
@@ -825,9 +831,25 @@ hold for every sync, including the combinations nobody thought of.
     `test_a_created_panel_stays_under_words_only_the_deck_has`.
   All four are mirrored in the reference applier, whose `_restack`, `_not_over_kept`, `_page_order`
   and `_regroup_order` model the outcome (the raw oracle finding fires here, not only the `_stacked`
-  replay of the requests). What they do not reach is a converter element the person has folded into
-  **their own** group: the sync honours the grouping, and the source's order across two page
-  elements then cannot be realised at all — 2 of 2,600 rounds at chains 4 to 10.
+  replay of the requests).
+- **The one shape of it the sync cannot order away, so the person is told** (converted seed 670146
+  at chain 6; 2 of 2,600 rounds at chains 4 to 10). Z-order is written in two places — the page's
+  element order (`Sync.restack`) and the children of a group this sync rebuilds
+  (`regroup_requests`) — and neither reaches a converter element the person has folded into **their
+  own** group: its page element *is* that group, so restacking it moves everything else they put in
+  there, and the children of a group nobody rebuilds cannot be reordered at all. With the hidden
+  text in another page element, the source's order across the two is simply unrealisable, and
+  honouring the grouping is not what hid the words. So the oracle calls it a **note** rather than a
+  loss (`loss_oracle._folded_into_a_group_of_their_own`, the `uncertain_slides` precedent: not a
+  loss *in silence*), and `Sync.finish` names it in the report — which nothing else would, since
+  nothing was deleted and every write went through (`sync.folded_hiders`, the warning says to
+  ungroup it or move the shape). The excuse is exactly that shape and no wider: the same panel
+  standing on the page itself is a loss again, because `restack` could have ordered it
+  (`test_a_shape_in_a_group_the_person_made_is_a_note_not_a_loss`,
+  `test_words_a_grouping_the_person_made_keeps_covered_are_named_in_the_report`). It lives in the
+  oracle rather than in `merge.plan_merge` because the offline campaign never runs `Sync.finish`,
+  and predicting the final z-order at plan time would mean reimplementing the applier inside
+  `merge`.
 - Found **in the oracle** by the same campaign: `_element_of` named an object by the base elements
   only, so an object the sync had just created for an element the *source added* had no name — and
   `_source_stacks_above`, the only excuse `text_hidden` has, can excuse nothing it cannot name. A new

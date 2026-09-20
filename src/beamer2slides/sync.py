@@ -501,6 +501,59 @@ def would_hide(objects: dict, top: str, under: str) -> bool:
     return False
 
 
+def drawn_order(objects: dict, order: list[str]) -> tuple[list[str], dict[str, str]]:
+    """Object ids bottom to top, and for each the page element it is drawn inside (itself, when it is
+    one): the page's elements in `order`, a group's children where the group stands."""
+    out: list[str] = []
+    top: dict[str, str] = {}
+
+    def walk(oid, root):
+        if oid not in objects or oid in top:
+            return
+        out.append(oid)
+        top[oid] = root
+        for c in objects[oid].get("children") or []:
+            walk(c, root)
+    for t in order:
+        walk(t, t)
+    return out, top
+
+
+def folded_hiders(read: dict, made: set[str], ours: set[str]) -> list[tuple[str, str]]:
+    """(text, shape) pairs this sync could not order its way out of, for the report to name.
+
+    Z-order is written in two places: the page's element order (`Sync.restack`) and the children of a
+    group this sync rebuilds (`regroup_requests`). Neither reaches a converter element the person has
+    folded into a group of *their own*: its page element is that group, so restacking it moves
+    everything else they put in there, and the children of a group nobody rebuilds cannot be
+    reordered at all. A panel that grew when the source redrew it can then cover a text in another
+    page element with no way round it, and the person is told rather than left to find the words gone
+    (`loss_oracle.text_hidden`, converted seed 670146 at chain 6: 2 of 2,600 rounds).
+
+    `ours` is what the converter's own containers are (the base's groups and its elements' objects),
+    `made` what this sync created, whose containers are its own too."""
+    objects = read.get("objects") or {}
+    order, top = drawn_order(objects, read.get("order") or [])
+    out = []
+    for i, oid in enumerate(order):
+        rb, stands_in = objects[oid], top[oid]
+        fill = (rb.get("shape_style") or {}).get("fill") or {}
+        if (oid not in made or stands_in == oid or stands_in in ours or stands_in in made
+                or rb.get("kind") != "shape" or not rb.get("box")
+                or fill.get("color") is None or (fill.get("alpha") or 0) < 0.999):
+            continue
+        for under in order[:i]:
+            u = objects[under]
+            if top[under] == stands_in or not u.get("box") or not (u.get("text") or "").strip():
+                continue
+            area = (u["box"][2] - u["box"][0]) * (u["box"][3] - u["box"][1])
+            w = min(u["box"][2], rb["box"][2]) - max(u["box"][0], rb["box"][0])
+            h = min(u["box"][3], rb["box"][3]) - max(u["box"][1], rb["box"][1])
+            if area > 0 and w > 0 and h > 0 and w * h / area > HIDDEN:
+                out.append((under, oid))
+    return out
+
+
 BREAK = {"__b2s_break__": True}  # where a batch may be cut: between slides
 
 
@@ -1456,6 +1509,7 @@ class Sync:
             rev = self.send("order", reqs, rev)
             raw = self.read()
             now = snapshot.read_presentation(raw)
+        self.warn_about_folded_hiders(work, now)
         # read-back of objects as the converter created them, with the new pictures' signatures
         created = {x for w in work["slides"] for oids in (w.get("objects") or {}).values() for x in oids}
         repainted = {w.get("sid") for w in work["slides"] if w["plan"]["action"] == "create" or w["plan"].get("background")}
@@ -1467,10 +1521,31 @@ class Sync:
         self.final_revision = rev
         return rev
 
+    def warn_about_folded_hiders(self, work: dict, now: dict) -> None:
+        """Words this sync covered and could not uncover: `folded_hiders` says why, and nothing else
+        in the report would mention it, since nothing was deleted and every write went through."""
+        live = {s["objectId"]: s for s in now["slides"]}
+        for w in work["slides"]:
+            p = w["plan"]
+            s = live.get(p.get("objectId"))
+            if p["action"] != "update" or not w.get("objects") or s is None:
+                continue
+            b = self.base["slides"][p["base"]]
+            ours = {o for el in b["elements"] for o in el.get("objects", [])} | set(b.get("groups") or [])
+            made = {x for oids in w["objects"].values() for x in oids} | set(w.get("groups") or [])
+            for text, shape in folded_hiders(s, made, ours):
+                words = (s["objects"][text].get("text") or "").strip().replace("\n", " ")[:40]
+                self.warnings.append(
+                    f"slide {b['key']}: {words!r} is now under a shape the source redrew, which stands in a "
+                    "group you made: its page element cannot be restacked without moving the rest of that "
+                    "group, so the source's order could not be followed. Ungroup it, or move the shape, "
+                    "to read the words again")
+
     @staticmethod
     def _by_the_source(desired: list[str], oldtop: dict, tops: dict, keys: list[str], base_order: list[str]):
-        """The elements this sync rewrote take the source's order among themselves, in the places
-        they hold on the page - but only where the deck still has them in the order the base does.
+        """The source's own elements take the source's order among themselves, in the places they
+        hold on the page, whether this sync rewrote them or kept them - but only where the deck still
+        has them in the order the base does.
 
         Between two converter elements the deck's order is not an edit anybody made: it is whatever
         the last conversion drew, and this conversion may draw them the other way round (a label that
@@ -1479,17 +1554,23 @@ class Sync:
         (`loss_oracle.text_hidden`, converted seed 610106 at chain 10). Where the deck's order is
         *not* the base's, somebody restacked and that survives untouched - asked of the whole set at
         once, since a z-order edit is the one deck edit `merge.deck_edits` cannot see, so there is
-        nothing finer to go on."""
+        nothing finer to go on.
+
+        The elements this sync *keeps* count as much as the ones it rewrites - the same reason
+        `Sync.zrank` ranks a group's kept children - or a slide with one rewritten element has
+        nothing to be ordered against and the rule never fires: a panel the source draws under a text
+        it did not touch grew over it and stayed on top (converted seed 1500512 at chain 10, on a
+        slide the person had ungrouped, so every element stood on the page)."""
         rank = {k: i for i, k in enumerate(keys)}
-        by_new = {tops[k]: k for k in oldtop if k in tops and k in rank}
-        mine = [(i, by_new[oid]) for i, oid in enumerate(desired) if oid in by_new]
+        at = {(tops.get(k) or oldtop[k]): k for k in oldtop if k in rank}
+        mine = [(i, at[oid]) for i, oid in enumerate(desired) if oid in at]
         here = [k for _, k in mine]
         if len(mine) < 2 or any(oldtop[k] not in base_order for k in here):
             return
         if here != sorted(here, key=lambda k: base_order.index(oldtop[k])):
             return                                  # the person restacked: their order stands
         for (i, _), k in zip(mine, sorted(here, key=lambda k: rank[k])):
-            desired[i] = tops[k]
+            desired[i] = tops.get(k) or oldtop[k]
 
     def restack(self, w: dict, before: dict, now: dict) -> list[dict]:
         """BRING_TO_FRONT so recreated elements take their old place in the z-order and new
@@ -1511,6 +1592,9 @@ class Sync:
                     oldtop[u["key"]] = old
             elif u["action"] == "create" and u["key"] in w["tops"]:
                 added.append(u["key"])
+            elif u["action"] not in ("delete", "gone") and u["key"] in bunits:
+                if old := merge.unit_top(bunits[u["key"]], before):
+                    oldtop[u["key"]] = old      # kept: the deck's own object stands for it
         desired = []
         for oid in before["order"]:
             oid = replace.get(oid, oid)

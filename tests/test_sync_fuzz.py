@@ -608,6 +608,52 @@ def test_hidden_text_on_a_slide_the_report_calls_uncertain_is_a_note():
     assert [f["severity"] for f in loss_oracle.occlusion_findings(base, before, after, labelled)] == ["loss"]
 
 
+def _folded_world():
+    """The person folded a converter panel into a group of their own, beside their own heading; the
+    body text it belongs with stays in the converter's block group, below that group on the page."""
+    opaque = {"fill": {"color": "#dddddd", "alpha": 1.0}}
+    objects = {
+        "g": {"kind": "elementGroup", "box": [80, 328, 430, 384], "children": ["t"]},
+        "t": {"kind": "shape", "box": [90, 344, 420, 368], "text": "bullet editor picture table\n",
+              "parent_group": "g", "shape_style": {"fill": None}},
+        "ug": {"kind": "elementGroup", "box": [40, 40, 400, 332], "children": ["mine", "p"]},
+        "mine": {"kind": "shape", "box": [40, 40, 256, 68], "text": "the person's own heading\n",
+                 "parent_group": "ug", "shape_style": {"fill": None}},
+        "p": {"kind": "shape", "box": [50, 272, 400, 332], "text": "", "parent_group": "ug", "shape_style": opaque},
+    }
+    base = {"slides": [{"key": "f1", "objectId": "s1", "groups": ["g"], "elements": [
+        {"key": "shape/panel/0", "main": "p", "objects": ["p"]},
+        {"key": "text/body/0", "main": "t", "objects": ["t"]}]}]}
+    before = {"slides": [{"objectId": "s1", "order": ["g", "ug"], "objects": objects}]}
+    return base, before
+
+
+def test_a_shape_in_a_group_the_person_made_is_a_note_not_a_loss():
+    """The one shape of this defect the sync cannot order its way out of. Z-order is written in two
+    places - the page's element order and the children of a group the sync rebuilds - and neither
+    reaches a converter element the person folded into a group of their own: its page element is
+    that group, so restacking it moves the rest of what they put in there, and children of a group
+    nobody rebuilds cannot be reordered at all. The source's order across the two page elements is
+    then unrealisable, honouring the grouping is not what hid the words, and `Sync.finish` says so
+    in the report (`sync.folded_hiders`). 2 of 2,600 chained rounds; converted seed 670146 at 6."""
+    base, before = _folded_world()
+    new = f"b2s_{loss_oracle.h6('f1')}_{loss_oracle.h6('shape/panel/0')}_3zz"
+    after = copy.deepcopy(before)
+    objs = after["slides"][0]["objects"]
+    objs[new] = {**objs.pop("p"), "box": [50, 272, 370, 352]}   # the source redrew it taller
+    objs["ug"]["children"] = ["mine", new]
+    ours = {"slides": [{"key": "f1", "elements": [{"key": "shape/panel/0"}, {"key": "text/body/0"}]}]}
+    found = loss_oracle.occlusion_findings(base, before, after, ours)
+    assert [(f["kind"], f["severity"], f["object"]) for f in found] == [("text_hidden", "note", "t")]
+    assert "in a group the person made" in found[0]["detail"]
+    # ... and the very same panel standing on the page itself is a loss: `restack` could order it.
+    page = copy.deepcopy(after)
+    page["slides"][0]["order"] = ["g", new]
+    page["slides"][0]["objects"][new]["parent_group"] = None
+    del page["slides"][0]["objects"]["ug"], page["slides"][0]["objects"]["mine"]
+    assert [f["severity"] for f in loss_oracle.occlusion_findings(base, before, page, ours)] == ["loss"]
+
+
 def test_a_shape_the_source_itself_added_above_the_text_is_no_finding():
     """The same excuse for an element the *source added*: it has no base element, so an oracle that
     named objects by the base alone could not tell which shape it was looking at - and
