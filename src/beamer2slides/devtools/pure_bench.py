@@ -15,6 +15,14 @@ optimisation here is worth. `--wall` asks for the wall clock instead.
 
 `--baseline f.json` prints each deck's change against an earlier run's file, which is how an
 optimisation is measured: the same decks, the same repeats, one number per deck plus the total.
+
+**Measure A against B interleaved**, alternating the two versions of the file back to back for
+several rounds and comparing the minima, never a run today against a run an hour ago: the same
+unchanged code measured 2484 ms and 1922 ms on this machine within the hour, so even the process's
+own CPU time drifts ~8% with the machine's state (frequency scaling, another job in the caches).
+The ratio to PDFium drifts the same way and worse, because PDFium's time is C and does not suffer
+the contention Python does, and because its total is only ~230 ms with a 15.6 ms clock granularity:
+read the ratio to one significant digit, or from the quietest pass of a long run.
 """
 
 from __future__ import annotations
