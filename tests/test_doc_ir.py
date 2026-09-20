@@ -704,11 +704,11 @@ UNMODELLED = {
     "inlineObject.inlineObjectProperties.embeddedObject.imageProperties.cropProperties",
     # A list's own look, its start number among it.
     "nestingLevel.indentStart", "nestingLevel.startNumber", "nestingLevel.textStyle",
-    # The document's theme: a named style's face, alignment and measures are read (a
-    # paragraph that only repeats them says nothing, and a rewrite leaves them to the
-    # style), its marks are not — a heading's bold is the document's own and survives
-    # a rewrite because no request of ours ever names it with a value.
-    "namedStyle.textStyle.bold", "namedStyle.textStyle.foregroundColor",
+    # The document's theme: a named style's face, alignment, measures and marks are
+    # read — the marks so that a run saying one of them *off* can be told from a run
+    # inheriting it (`doc_ir.MARK_FIELDS`). Its colour is not: nothing subtracts it,
+    # and a heading's blue survives a rewrite because no request names it.
+    "namedStyle.textStyle.foregroundColor",
 }
 
 

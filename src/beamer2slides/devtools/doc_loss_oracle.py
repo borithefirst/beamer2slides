@@ -56,6 +56,8 @@ SEVERITIES = ("loss", "undo", "report", "note")
 FAIL = ("loss", "undo", "report")
 
 WORD = re.compile(r"\S+")
+# The run marks, which are the only styling a named style can put on a word here.
+MARK_KEYS = {key for key, _ in doc_ir.MARK_FIELDS}
 
 
 def finding(kind: str, severity: str, detail: str, tab=None, key=None, block=None) -> dict:
@@ -245,16 +247,74 @@ def frozen_runs(part: dict | None) -> dict:
 
 
 def styles_of(block: dict) -> Counter:
-    """The style marks on a block's words, by (mark, word)."""
+    """The style marks somebody *chose* for a block's words, by (mark, word).
+
+    The value, not the key: a run saying `bold: False` is a reader who took the bold
+    off (`doc_ir.MARK_FIELDS`), and counting the key would read that as a reader who
+    put bold on — and then call the un-bolding a loss the moment it was honoured.
+
+    What a word inherits is deliberately not in here. A theme's bold belongs to the
+    named style, so a block that becomes a heading (Docs hands the paragraph after a
+    deleted one the style of the one that went) would otherwise read as the reader
+    bolding its every word, and any later restyle as losing that (themed seed 283).
+    """
     out: Counter = Counter()
     for run in runs_of(block):
         if run.get("frozen"):
             continue
-        marks = tuple(sorted(k for k in run if k not in ("text", "width")))
+        marks = tuple(sorted(k for k, value in run.items()
+                             if k not in ("text", "width") and value))
         if not marks:
             continue
         for word in WORD.findall(run.get("text", "")):
             out[(marks, word)] += 1
+    return out
+
+
+def _wears(block: dict, theme: dict | None) -> set:
+    """The marks this block's named style puts on, which is what its runs inherit."""
+    if not block.get("kind") or block.get("kind") == "table":
+        return set()
+    return MARK_KEYS & set((theme or {}).get(doc_merge.named_style(block), ()))
+
+
+def marks_on(block: dict, theme: dict | None = None) -> Counter:
+    """What each of a block's words *wears*, by (mark, word): the marks chosen for it
+    and the ones its named style puts on, less the ones a run says False to.
+
+    This is the reader's view rather than the file's, so it is what answers "is the
+    bold back on?" — a run that says nothing under a bold theme is bold again.
+    """
+    wears = _wears(block, theme)
+    out: Counter = Counter()
+    for run in runs_of(block):
+        if run.get("frozen"):
+            continue
+        marks = {k for k in set(run) | wears
+                 if k not in ("text", "width") and (run[k] if k in run else True)}
+        for word in WORD.findall(run.get("text", "")):
+            for mark in marks:
+                out[(mark, word)] += 1
+    return out
+
+
+def unmarked_of(block: dict, theme: dict | None = None) -> Counter:
+    """The marks a reader deliberately took *off* a word, by (mark, word).
+
+    Only an explicit False counts, and only against a named style that puts the mark
+    on: that is a reader pressing Ctrl+B on a bold heading, and it is the one thing
+    the absence of a mark can never be told from. A block that merely stopped being a
+    heading — which a move in the document can do — lost the mark and chose nothing.
+    """
+    wears = _wears(block, theme)
+    out: Counter = Counter()
+    for run in runs_of(block):
+        if run.get("frozen"):
+            continue
+        off = [key for key in wears if run.get(key) is False]
+        for word in WORD.findall(run.get("text", "")):
+            for mark in off:
+                out[(mark, word)] += 1
     return out
 
 
@@ -371,7 +431,8 @@ def _tab_findings(was: dict | None, now: dict, then: dict | None, said: str,
                     tab=tab, key=key))
             continue
         out += _words_findings(key, block, base_block, new[key], after_words, said, tab)
-        out += _style_findings(key, block, base_block, after_styles, after_words, said, tab)
+        out += _style_findings(key, block, base_block, after_styles, new[key],
+                               after_words, said, tab, theme)
         out += _inherited_findings(key, block, new[key], (mine or {}), said, tab, theme)
         if block.get("kind") == "table":
             out += _cell_findings(key, block, base_block, new[key], after_words, said, tab)
@@ -545,19 +606,40 @@ def _words_findings(key, block, base_block, after_block, after_words, said, tab)
                     f"{' '.join(sorted(lost))[:80]}", tab=tab, key=key)]
 
 
-def _style_findings(key, block, base_block, after_styles, after_words, said, tab):
-    """Styling the reader put on words that are still there."""
+def _style_findings(key, block, base_block, after_styles, after_block, after_words,
+                    said, tab, theme=None):
+    """Styling the reader put on words that are still there — or took off them.
+
+    Taking a mark off is as much a choice as putting one on, and the only way to
+    make it is against a theme that puts it on (`styles_of`): a reader who un-bolds
+    a word of a heading has done something the file has to carry, or the first
+    source edit that writes that block again hands the word back to the theme.
+
+    The two questions are not asked at the same width. A mark the reader *put on* is
+    looked for anywhere in the tab (`after_styles`), because a block the sync rewrote
+    and re-keyed still carries it and nothing is lost. A mark the reader *took off* is
+    asked of this block alone: the word is one the theme bolds, so the same word in
+    the heading next door wears it too, and a tab-wide answer would call every
+    un-bolding a loss (themed seeds 9, 32, 40).
+    """
     theirs = styles_of(block)
     was = styles_of(base_block) if base_block else Counter()
-    added = theirs - was
-    lost = Counter({m: n for m, n in (added - after_styles).items()
+    lost = Counter({m: n for m, n in ((theirs - was) - after_styles).items()
                     if after_words.get(m[1])})
-    if not lost or _named(said, key):
-        return []
-    marks, word = next(iter(lost))
-    return [finding("styling_lost", "loss",
-                    f"the block {key} lost the {'/'.join(marks)} the reader put on "
-                    f"{word!r}", tab=tab, key=key)]
+    if lost and not _named(said, key):
+        marks, word = next(iter(lost))
+        return [finding("styling_lost", "loss",
+                        f"the block {key} lost the {'/'.join(marks)} the reader put on "
+                        f"{word!r}", tab=tab, key=key)]
+    back = Counter({m: n for m, n in (unmarked_of(block, theme)
+                                      & marks_on(after_block, theme)).items()
+                    if after_words.get(m[1])})
+    if back and not _named(said, key):
+        mark, word = next(iter(back))
+        return [finding("styling_restored", "loss",
+                        f"the block {key} has the {mark} back on {word!r}, which the "
+                        f"reader had taken off", tab=tab, key=key)]
+    return []
 
 
 def _cell_findings(key, block, base_block, after_block, after_words, said, tab):

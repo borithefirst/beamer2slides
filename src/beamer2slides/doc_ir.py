@@ -29,6 +29,13 @@ from html.parser import HTMLParser
 # (`font`), so Consolas and Roboto Mono stop being the same thing — but the tag is
 # still written and still understood, so a file written before that keeps working.
 MARKS = {"bold": "b", "italic": "i", "underline": "u", "strike": "s", "code": "code"}
+# The marks themselves, and the `textStyle` field each one is. A mark is True, absent
+# — or **False**, which is not the same thing: a theme that makes its headings bold
+# leaves a reader who un-bolds one word with a run that says `bold: false`, and a file
+# that could only say "bold" or nothing would have that word bold again the first time
+# the source restyled the block (`_style_of`, `data-off`).
+MARK_FIELDS = (("bold", "bold"), ("italic", "italic"), ("underline", "underline"),
+               ("strike", "strikethrough"), ("smallcaps", "smallCaps"))
 # What `<code>` has always meant on the write side, and goes on meaning.
 CODE_FAMILY = "Courier New"
 # A named style is a block kind; everything else is a paragraph.
@@ -109,10 +116,16 @@ def _style_of(text_style: dict, default: dict | None = None) -> dict:
     """
     style = {}
     default = default or {}
-    for key, api in (("bold", "bold"), ("italic", "italic"), ("underline", "underline"),
-                     ("strike", "strikethrough"), ("smallcaps", "smallCaps")):
+    for key, api in MARK_FIELDS:
         if text_style.get(api):
             style[key] = True
+        elif api in text_style and key in (default.get("marks") or ()):
+            # The theme says this mark and the run says no. Saying nothing here would
+            # leave the file unable to tell that from a run that simply inherits, and
+            # the field is named with no value on every restyle (`doc_merge.MANAGED`),
+            # which is "back to what you inherit": the reader's choice would be
+            # undone by a source edit that never mentioned it.
+            style[key] = False
     family = text_style.get("weightedFontFamily", {}).get("fontFamily")
     if family and family != default.get("font"):
         style["font"] = family
@@ -465,6 +478,12 @@ def _named_defaults(doc: dict, tab_id: str | None) -> dict:
         text, para = style.get("textStyle", {}), style.get("paragraphStyle", {})
         size = text.get("fontSize", {}).get("magnitude")
         out[style.get("namedStyleType", "")] = {
+            # Which marks this style puts on, so that a run saying one of them off
+            # can be told from a run inheriting it (`_style_of`). The marks are not
+            # subtracted the way the face and the size are: a run that repeats the
+            # theme's bold is written bold, which costs the file a `<b>` and keeps it
+            # readable on its own.
+            "marks": {key for key, api in MARK_FIELDS if text.get(api)},
             "font": text.get("weightedFontFamily", {}).get("fontFamily"),
             "fontsize": round(float(size), 2) if size else None,
             # A theme that centres its headings says so here, and the heading itself
@@ -847,6 +866,12 @@ def _run_html(run: dict) -> str:
         # among the things `updateTextStyle` writes — so the file says it in an
         # attribute of ours and `doc_merge` writes it with `batchUpdate`.
         attrs += ' data-smallcaps="1"'
+    off = " ".join(key for key, _ in MARK_FIELDS if run.get(key) is False)
+    if off:
+        # A mark turned off against a theme that turns it on. HTML has no tag for it
+        # — `<b>` has no opposite — so the file names the marks in an attribute of
+        # ours, as it does small caps, and `doc_merge` writes them `False`.
+        attrs += f' data-off="{off}"'
     if attrs:
         out = f"<span{attrs}>{out}</span>"
     for key, tag in MARKS.items():
@@ -978,6 +1003,8 @@ class _Reader(HTMLParser):
                 frame = _span_style(attr.get("style", ""))
                 if attr.get("data-smallcaps"):
                     frame["smallcaps"] = True
+                for key in attr.get("data-off", "").split():
+                    frame[key] = False
                 self.marks.append(frame)
 
     def handle_endtag(self, tag: str) -> None:
@@ -1278,8 +1305,8 @@ def _first_words(block: dict) -> str:
 # same answer: name what is left over, out loud, rather than trust that there is none.
 #
 # Precision is the point, so a node is split wherever the reader reads less than the
-# whole of it: a named style's textStyle is `namedTextStyle`, which reads the face and
-# the size and not the marks, because a heading's bold is in fact not carried.
+# whole of it: a named style's textStyle is `namedTextStyle`, which reads the face, the
+# size and the marks — not its colour, which nothing subtracts.
 _NODES: dict[str, tuple[tuple, dict]] = {
     "document": (("documentId", "title", "revisionId", "suggestionsViewMode"),
                  {"body": "body", "tabs": "tab[]", "lists": "lists{}",
@@ -1341,7 +1368,8 @@ _NODES: dict[str, tuple[tuple, dict]] = {
     "namedStyles": ((), {"styles": "namedStyle[]"}),
     "namedStyle": (("namedStyleType",), {"textStyle": "namedTextStyle",
                                          "paragraphStyle": "namedParagraphStyle"}),
-    "namedTextStyle": (("weightedFontFamily", "fontSize"), {}),
+    "namedTextStyle": (("weightedFontFamily", "fontSize")
+                       + tuple(api for _, api in MARK_FIELDS), {}),
     "namedParagraphStyle": (("alignment", "indentStart", "indentFirstLine", "lineSpacing",
                              "spaceAbove", "spaceBelow", "shading"), {}),
     "namedRangeGroup": (("name",), {"namedRanges": "namedRange[]"}),

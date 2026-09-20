@@ -61,6 +61,7 @@ class Refused(RuntimeError):
 ORDERED_PRESET = "NUMBERED_DECIMAL_ALPHA_ROMAN"
 STYLE_FIELDS = {"bold": "bold", "italic": "italic", "underline": "underline",
                 "strikethrough": "strike"}
+MARK_KEYS = {key for key, _ in doc_ir.MARK_FIELDS}
 
 
 # ---------------------------------------------------------------- UTF-16 code units
@@ -451,11 +452,17 @@ class World:
     def _do_updateTextStyle(self, arg: dict, request: dict) -> None:
         tab = self.tab(arg["range"].get("tabId"))
         fields = [f.strip() for f in arg.get("fields", "").split(",") if f.strip()]
-        style = _ir_style(arg.get("textStyle", {}))
+        given = arg.get("textStyle", {})
+        style = _ir_style(given)
         for u, _ in self._chars(tab, arg["range"], request):
             for field in fields:
                 key = API_TO_IR.get(field, field)
-                if style.get(key):
+                if key in MARK_KEYS and field in given:
+                    # A mark named *with* a value, False included: `_ir_style` reads
+                    # a document, where False against no named style is nothing, but
+                    # a request means what it says.
+                    u["s"][key] = bool(given[field])
+                elif style.get(key):
                     u["s"][key] = style[key]
                 else:
                     u["s"].pop(key, None)
@@ -742,11 +749,12 @@ def _api_measures(measures: dict) -> dict:
 def _api_style(style: dict) -> dict:
     """The inverse of `_ir_style`: what `documents.get` would report for it."""
     out: dict = {}
-    for api, key in STYLE_FIELDS.items():
-        if style.get(key):
-            out[api] = True
-    if style.get("smallcaps"):
-        out["smallCaps"] = True
+    for key, api in doc_ir.MARK_FIELDS:
+        # A mark is True, absent — or False, which a reader leaves behind by turning
+        # off a mark the named style puts on. `documents.get` reports all three, and
+        # collapsing the last two is how a theme's bold would come back unasked.
+        if style.get(key) is not None:
+            out[api] = bool(style[key])
     # `code` is the file's older spelling for a monospaced face and still means
     # Courier New (`doc_ir.CODE_FAMILY`); an explicit face wins over it.
     family = style.get("font") or (doc_ir.CODE_FAMILY if style.get("code") else None)

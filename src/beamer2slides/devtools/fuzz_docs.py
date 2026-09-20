@@ -149,7 +149,8 @@ def _shapes() -> dict:
 #: The named styles the `themed` shape's world carries. No request writes one — the
 #: API has none — so this is fixed for the life of a round, and every difference it
 #: makes is a difference in what a paragraph *inherits*.
-THEME = {"HEADING_1": {"paragraphStyle": {"alignment": "CENTER"}}}
+THEME = {"HEADING_1": {"paragraphStyle": {"alignment": "CENTER"},
+                       "textStyle": {"bold": True}}}
 
 
 def corpus(name: str) -> doc_world.World:
@@ -434,6 +435,37 @@ def read_bold_word(rng, part, tab):
         [block.get("key")]
 
 
+def read_unmark_word(rng, part, tab, theme=None):
+    """A reader pressing Ctrl+B on a word a *theme* made bold.
+
+    This is the run-level twin of the alignment loss: a mark turned off is a run
+    saying `bold: false`, which reads back as itself, and a file that could only say
+    "bold" or nothing would hand the word back to the theme on the first source
+    restyle. Headings first, since that is where a theme's marks live; on a shape
+    with no theme the request is written all the same and means nothing, which is
+    also what the document says about it.
+    """
+    blocks = [b for b in _paragraph_blocks(part) if b.get("kind") == "heading"] \
+        or _paragraph_blocks(part)
+    spots = [(b, s) for b in blocks for s in _word_spots(b)]
+    if not spots:
+        return [], []
+    block, (_, low, high) = rng.choice(spots)
+    # A mark the theme actually puts on this block, when there is one: turning off a
+    # mark nothing puts on is a request that means nothing, and a campaign made of
+    # those would say it had drawn this and proved nothing by it.
+    wears = sorted((theme or {}).get(doc_merge.named_style(block), set())
+                   & {key for key, _ in doc_ir.MARK_FIELDS})
+    key = rng.choice(wears) if wears else rng.choice(doc_ir.MARK_FIELDS)[0]
+    api = dict(doc_ir.MARK_FIELDS)[key]
+    return [{"updateTextStyle": {"range": _span(low, high, tab),
+                                 "textStyle": {api: False}, "fields": api}}], \
+        [block.get("key")]
+
+
+read_unmark_word.wants_theme = True
+
+
 def read_heading(rng, part, tab):
     blocks = [b for b in _paragraph_blocks(part) if b.get("kind") != "item"]
     if not blocks:
@@ -578,7 +610,8 @@ def read_move_block(rng, part, tab):
 READER = {
     "type_word": read_type_word, "reword": read_reword, "delete_word": read_delete_word,
     "append_block": read_append_block, "delete_block": read_delete_block,
-    "bold_word": read_bold_word, "heading": read_heading,
+    "bold_word": read_bold_word, "unmark_word": read_unmark_word,
+    "heading": read_heading,
     "face": read_face, "measure": read_measure,
     "renumber_list": read_renumber_list, "cell_type": read_cell_type,
     "add_row": read_add_row, "delete_row": read_delete_row,
@@ -604,7 +637,11 @@ def apply_reader(world: doc_world.World, name: str, rng: random.Random,
     tab = rng.choice(tabs)
     part = doc_ir.from_document(world.read(), tab)
     doc_ir.apply_keys(part, doc_ir.named_ranges_of(world.read(), part.get("tab")))
-    batches, touched = READER[name](rng, part, tab)
+    op = READER[name]
+    # An op that turns styling *off* has to know what the theme turns on, and only
+    # that one does; the rest are a reader typing, who knows nothing of the sort.
+    wants = {"theme": theme_fields(world)} if getattr(op, "wants_theme", False) else {}
+    batches, touched = op(rng, part, tab, **wants)
     if not batches:
         seen["reader/" + name + " (nothing to do)"] += 1
         return []
@@ -809,9 +846,17 @@ def src_collide(rng, ir, touched):
     if not spots:
         return src_reword(rng, ir, touched)
     part, i, block = rng.choice(spots)
-    how = rng.choice(["reword", "append", "drop", "cell", "restyle"])
+    how = rng.choice(["reword", "append", "drop", "cell", "restyle", "move"])
     if how == "drop" and len(part["blocks"]) > 1:
         part["blocks"].pop(i)
+    elif how == "move" and len(part["blocks"]) > 2:
+        # A move is a delete and a write, so the block the reader just worked on is
+        # written again from nothing: every managed field on every run, which is
+        # where the marks the reader took *off* are lost if the file cannot say them
+        # (`doc_ir.MARK_FIELDS`). Nothing else in the campaign moves a block both
+        # sides are on.
+        part["blocks"].pop(i)
+        part["blocks"].insert(rng.randrange(len(part["blocks"]) + 1), block)
     elif how == "append" and block.get("kind") != "table":
         block.setdefault("runs", []).append({"text": f" and {rng.choice(FRESH)}"})
     elif how == "cell" and block.get("kind") == "table":
@@ -870,9 +915,16 @@ THEME_FIELDS = {"alignment": "align"} | {api: key for key, api in doc_merge.PARA
 def theme_fields(world: doc_world.World) -> dict:
     """What the world's theme sets, as `doc_loss_oracle.check` wants it: the IR fields
     per named style. Nothing in a read says a paragraph *inherits* — only that it sets
-    nothing itself — so the oracle has to be told what there was to inherit."""
+    nothing itself — so the oracle has to be told what there was to inherit.
+
+    A named style's run marks are in here too, for `read_unmark_word`; the oracle asks
+    its question of a block's own fields, where a run mark is never one, so naming
+    them costs it nothing.
+    """
     return {name: {THEME_FIELDS[api] for api in (style.get("paragraphStyle") or {})
                    if api in THEME_FIELDS}
+            | {key for key, api in doc_ir.MARK_FIELDS
+               if (style.get("textStyle") or {}).get(api)}
             for name, style in (world.theme or {}).items()}
 
 

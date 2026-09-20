@@ -1106,6 +1106,25 @@ keys, named ranges), `doc_merge.py` (pure planning), `doc_sync.py` (the commands
   Inheritance itself is still Google's word: the experiment is a themed heading
   through a live sync (`tests/test_docs_live_styles.py`, imported as a .docx since no
   HTML import makes a theme; not run).
+- **A mark is on, absent, or *off*** (`doc_ir.MARK_FIELDS`), which is the same question one
+  dimension down. A theme that bolds its headings bolds every word of one, so a reader who
+  un-bolds a word has made a choice the run says as `bold: False` - and the file could only
+  say bold or nothing, so the first source edit to write that block again named no bold and
+  handed the word back to the theme. HTML has no tag for not-bold: the file says it as
+  `data-off="bold"` on the run (`_run_html`), `_named_defaults` reports a mark the named
+  style puts on so `_style_of` can tell an absence from a refusal, and `doc_merge._text_style`
+  writes the field whenever the run has a value for it, `False` among them. The oracle's
+  question is `styling_restored` (severity `loss`): a word the reader took a mark off wears it
+  again. What it asks it of is delicate in both directions - a mark the reader *put on* is
+  looked for anywhere in the tab, since a block the sync re-keyed still carries it, while a
+  mark taken *off* is asked of that block alone, or the same word in the heading next door
+  answers for it (themed seeds 9, 32, 40); and an inherited mark is never counted as one
+  somebody chose, or a paragraph that becomes a heading because Docs merged a deleted one into
+  it reads as the reader bolding its every word, and the next restyle as losing that (seed
+  283). A block that stopped being a heading took nothing off anybody: only an explicit `False`
+  against a style that puts the mark on counts (`unmarked_of`). `read_unmark_word` is the
+  campaign's reader op; with `_text_style` reverted in memory it catches 13 of 300 `themed`
+  seeds at chain 3 (`test_the_campaign_sees_a_mark_the_file_cannot_say_is_off`).
 - **Every named style Docs has is a kind** (`doc_ir.NAMED_KINDS`: `TITLE`/`SUBTITLE` ->
   `title`/`subtitle`, `data-style` on the `<p>`; `doc_merge.named_style`), for the same
   reason - `namedStyleType` is in `MANAGED_PARAGRAPH`, so a named style the dialect could

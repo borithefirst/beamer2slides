@@ -209,6 +209,102 @@ def test_the_campaign_sees_a_theme_undone(monkeypatch):
     assert caught >= 2, "the campaign no longer reaches the defect it was built for"
 
 
+MARKED = {"HEADING_1": {"align", "bold"}}
+
+
+def _run_head(key, text, **run):
+    return {"key": key, "kind": "heading", "level": 1,
+            "runs": [{"text": text, **run}]}
+
+
+def test_the_oracle_sees_a_mark_the_reader_took_off_handed_back():
+    """A reader who un-bolds a word of a bold heading has done something the file has
+    to be able to say. Afterwards the run says nothing about bold, which is how a word
+    wearing the theme's bold reads — so the word is bold again and nobody said so.
+
+    Nothing was deleted and no word moved, and the file is regenerated from the
+    document, so the convergence check is happy too: this is the only thing that sees
+    it."""
+    base = _run_head("k1", "A heading")
+    before = _run_head("k1", "A heading", bold=False)
+    after = _run_head("k1", "A heading")
+    found = oracle.check(_ir(base), _ir(before), _ir(after), NOTHING, theme=MARKED)
+    assert _kinds(found) == {"styling_restored"}
+    # And silent when the report owns up to it.
+    said = {"conflicts": [{"key": "k1", "field": "text"}], "notes": []}
+    assert not oracle.failures(oracle.check(_ir(base), _ir(before), _ir(after), said,
+                                            theme=MARKED))
+
+
+def test_a_mark_no_named_style_puts_on_is_not_one_a_reader_took_off():
+    """`bold: False` on an ordinary paragraph is not a choice against anything: there
+    is no bold to take off, so there is nothing to hand back."""
+    before = {"key": "k1", "kind": "paragraph", "runs": [{"text": "A line.",
+                                                          "bold": False}]}
+    after = _p("k1", "A line.")
+    assert not oracle.failures(oracle.check(_ir(_p("k1", "A line.")), _ir(before),
+                                            _ir(after), NOTHING, theme=MARKED))
+
+
+def test_a_block_that_stopped_being_a_heading_took_no_mark_off_anybody():
+    """The word lost the bold because the block lost the named style that put it on —
+    which the source is allowed to do, and which `theme_undone` is the check for. The
+    reader's choice was honoured, not undone."""
+    before = _run_head("k1", "A heading", bold=False)
+    after = {"key": "k1", "kind": "paragraph", "runs": [{"text": "A heading"}]}
+    assert "styling_restored" not in _kinds(
+        oracle.check(_ir(before), _ir(before), _ir(after), NOTHING, theme=MARKED))
+
+
+def test_the_bold_a_heading_inherits_is_not_bold_the_reader_put_on():
+    """Docs merges the paragraph behind a deleted one into it and hands over its style,
+    so a paragraph really does become a heading with nobody writing one — and wears the
+    theme's bold from then on. Counted as the reader's, the next source restyle of that
+    block reads as losing it (themed seed 283)."""
+    base = _p("k1", "And prose after that.")
+    before = _run_head("k1", "And prose after that.")          # merged into a heading
+    after = _run_head("k1", "And prose after that.", fontsize=14.5)
+    assert not oracle.failures(oracle.check(_ir(base), _ir(before), _ir(after),
+                                            NOTHING, theme=MARKED))
+
+
+def test_the_un_bolded_word_is_asked_about_in_its_own_block():
+    """The theme bolds every heading, so the same word in the heading next door wears
+    the bold whatever happens here. Asked tab-wide, every un-bolding a sync honoured
+    read as a loss (themed seeds 9, 32, 40)."""
+    other = _run_head("k2", "Another heading")
+    base = _ir(_run_head("k1", "A heading"), other)
+    before = _ir(_run_head("k1", "A heading", bold=False), other)
+    assert not oracle.failures(oracle.check(base, before, copy.deepcopy(before),
+                                            NOTHING, theme=MARKED))
+
+
+def test_the_campaign_sees_a_mark_the_file_cannot_say_is_off(monkeypatch):
+    """The other half of the theme defect, put back on purpose.
+
+    `doc_merge._text_style` used to write a mark only when it was on, which is all the
+    file could say before `doc_ir.MARK_FIELDS`: the first source edit to rewrite the
+    block then names no bold, and the word goes back to wearing the theme's. Measured
+    over 300 `themed` seeds at chain 3 the campaign catches 13; these twenty hold two.
+    """
+    real = doc_merge._text_style
+
+    def broken(run):
+        style = real(run)
+        for key, api in doc_ir.MARK_FIELDS:
+            if run.get(key) is False:
+                style.pop(api, None)
+        return style
+
+    monkeypatch.setattr(doc_merge, "_text_style", broken)
+    caught = 0
+    for seed in range(20):
+        found = fuzz_docs.offline_round(
+            seed, script=fuzz_docs.draw(seed, 3, shape="themed"))
+        caught += "styling_restored" in {f["kind"] for f in oracle.failures(found)}
+    assert caught >= 2, "the campaign no longer reaches the defect it was built for"
+
+
 def test_the_oracle_sees_a_chip_the_reader_inserted_disappear():
     chip = {"frozen": True, "chip": "person", "text": "Ada", "value": "ada@example.com"}
     base = _ir(_p("k1", "ask "))

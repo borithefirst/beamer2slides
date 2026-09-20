@@ -244,6 +244,32 @@ settle it is a themed heading through a live sync, which
 `tests/test_docs_live_styles.py::test_a_heading_the_theme_centres_survives_a_source_restyle`
 asks for and which has not been run.
 
+**A mark is on, absent, or off.** The same question one dimension down, and the alignment's
+twin: a theme that bolds Heading 1 bolds every word of one, so a reader who selects a word
+and presses Ctrl+B has *taken the bold off* — a choice, reported as `bold: false` set on the
+run, and one the file could not say at all. HTML has no tag for not-bold, so `<b>` or nothing
+was the whole vocabulary, the first source edit to rewrite that block named no bold, and the
+word went back to wearing the theme's. The run carries it as `data-off="bold"`
+(`doc_ir._run_html`, `MARK_FIELDS` for the five marks), `_named_defaults` now reports which
+marks the named style puts on so `_style_of` can tell "the theme's bold, unmentioned" from
+"the theme's bold, refused", and `doc_merge._text_style` writes the field whenever the run has
+a value for it — `False` being a value and an absence being the "back to what you inherit"
+the rest of this section is about.
+
+The oracle's half is `styling_restored` (severity `loss`): a word the reader took a mark off
+wears it again. Where it looks matters in both directions. A mark the reader *put on* is
+looked for anywhere in the tab, because a block the sync rewrote and re-keyed still carries
+it and nothing was lost; a mark taken *off* is asked of that block alone, since the theme
+bolds the heading next door too and its copy of the word would answer for this one (themed
+seeds 9, 32, 40 each failed that way). And what a word *inherits* is never counted as a mark
+somebody chose: Docs merges the paragraph behind a deleted one into it and hands over its
+style, so a paragraph really does become a heading with nobody writing one — counted as the
+reader's bold, the next source restyle of that block read as losing it (seed 283). A block
+that stopped being a heading, likewise, took nothing off anybody: only an explicit `False`
+against a named style that puts the mark on is a refusal (`unmarked_of`). The campaign's
+reader op is `read_unmark_word`, and with `_text_style` reverted in memory it catches 13 of
+300 `themed` seeds at chain 3 (`test_the_campaign_sees_a_mark_the_file_cannot_say_is_off`).
+
 **What no import can carry is written by the settle.** `doc_sync.settle` already hands
 `doc_merge.adopt_keys` the blocks the run planned, so `adopt_keys` compares them with
 the read-back and `carry_unimported` notes the shading, the space around a paragraph
@@ -931,6 +957,15 @@ memory, the campaign catches 6 of the first 40 `themed` seeds at chain 2, which 
 `test_the_campaign_sees_a_theme_undone`; without it, none. Inheritance itself is still
 Google's word and not something any offline world can settle — that is what the live
 experiment in `tests/test_docs_live_styles.py` is for.
+
+The run marks are the same defect one dimension down (§"A mark is on, absent, or off"),
+and the world holds them the same way: a named style's `textStyle` says what its runs
+wear, `updateTextStyle` with `bold` and no value puts a run back to inheriting it, and
+`read_unmark_word` is a reader taking a mark off a word of a themed heading. The oracle
+asks it as `styling_restored`, and with `doc_merge._text_style` reverted to writing a mark
+only when it is on, the campaign catches 13 of 300 `themed` seeds at chain 3
+(`test_the_campaign_sees_a_mark_the_file_cannot_say_is_off`). Both halves needed the
+reader op *and* a source op that rewrites the same block, which is what `collide` is for.
 
 The campaign found ten defects, each pinned by a test in `tests/test_doc_fuzz.py` —
 `xfail(strict=True)` while it stands, a plain test once it is fixed — and the ones

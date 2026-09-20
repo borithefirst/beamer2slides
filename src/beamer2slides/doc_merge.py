@@ -1610,10 +1610,12 @@ def _restyle_requests(live: dict, want: dict) -> list[dict]:
 
 def _text_style(run: dict) -> dict:
     style: dict = {}
-    for key, api in (("bold", "bold"), ("italic", "italic"), ("underline", "underline"),
-                     ("strike", "strikethrough"), ("smallcaps", "smallCaps")):
-        if run.get(key):
-            style[api] = True
+    for key, api in doc_ir.MARK_FIELDS:
+        # False is a value, not an absence: it is how a run says it is *not* bold
+        # against a theme whose headings are, and naming the field with no value
+        # would hand it back to the theme (`doc_ir.MARK_FIELDS`).
+        if run.get(key) is not None:
+            style[api] = bool(run[key])
     # The face the run says it is; `<code>` in a file written before faces were
     # carried still means the one face it always meant (`doc_ir.CODE_FAMILY`).
     if run.get("font") or run.get("code"):
