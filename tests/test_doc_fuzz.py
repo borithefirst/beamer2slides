@@ -241,6 +241,22 @@ def test_deleting_a_table_row_moves_the_named_ranges_below_it():
     assert said(doc_world.read_ir(world, ours, base)) == was
 
 
+def test_a_table_in_a_later_tab_keeps_the_key_the_file_gave_it():
+    """A table is anchored in its first cell, so a source that rewords that cell
+    destroys its named range and the read-back has no key: only the plan knows one.
+    It never got there while the first tab's keying — `doc_ir.key_blocks` recurses
+    into every tab — had already named the block after its new words, and the file,
+    the base and the document then all agreed on `table:quartz`. One source op and
+    no reader at all (offline chain-8 seed 7007, shrunk)."""
+    world, ours, base = _push("tabs")
+    grid = [b for b in doc_ir.parts(ours)[1]["blocks"] if b["kind"] == "table"][0]
+    assert grid["key"] == "table:year"
+    grid["rows"][0][0][0]["runs"] = [{"text": "quartz"}]
+    _, ours, _ = fuzz_docs.sync_once(world, ours, base)
+    assert [b["key"] for b in doc_ir.parts(ours)[1]["blocks"]
+            if b["kind"] == "table"] == ["table:year"]
+
+
 @pytest.mark.parametrize("shape", sorted(fuzz_docs.SHAPES))
 def test_the_world_carries_nothing_the_reader_does_not_read(shape):
     """`doc_ir.unmodelled` and `doc_world` were written apart and from the same API
@@ -358,11 +374,13 @@ def test_a_paragraph_stays_a_paragraph_when_the_heading_above_it_is_deleted():
     assert base["blocks"][0]["kind"] == "paragraph"
 
 
-@pytest.mark.xfail(strict=True, reason="fuzz_docs.KNOWN 'lost-key'/'crossed-delete': "
-                   "`inherit_keys` hands a key the file itself asserts to another "
-                   "block, so two blocks end up under one key and the paragraph the "
-                   "first one named is deleted as 'dropped by the source'")
 def test_inherit_keys_leaves_the_keys_the_file_asserts_alone():
+    """`inherit_keys` used to match every block of the file again by its words,
+    although the file had just named them all: two blocks that read alike swapped
+    keys, one key ended up on two blocks and none on the other, and the merge read
+    the second as dropped by the source. Here the source reworded the first block
+    and the second holds a chip, so neither matches exactly and the similarity pass
+    is what runs — which is where the two of them used to cross."""
     base = {"blocks": [_para("Before both.") | {"key": "paragraph:before-both"},
                        _para("After both.") | {"key": "paragraph:after-both"}]}
     ours = {"blocks": [_para("lantern both.") | {"key": "paragraph:before-both"},
@@ -424,12 +442,13 @@ def test_a_table_added_in_front_of_a_table_is_not_written_inside_the_one_before_
     assert "h1 h2 willow x" in texts, f"the new table was written into {texts}"
 
 
-@pytest.mark.xfail(strict=True, reason="`doc_sync.settle` keys the body first, and "
-                   "`doc_ir.key_blocks` recurses into every tab, so a block in the "
-                   "second tab is keyed from its own words before that tab's "
-                   "`adopt_keys` runs — and adopt_keys skips a block that has a key. "
-                   "The body's block, one line above, keeps its key")
 def test_a_block_in_a_second_tab_keeps_its_key_when_the_source_moves_and_rewords_it():
+    """A move is a delete and an insert, so the block's named range goes and only the
+    plan knows its key. `doc_sync.settle` used to key the body first, and
+    `doc_ir.key_blocks` recurses into every tab, so the block was named after its own
+    new words before that tab's `adopt_keys` ran — and `adopt_keys` skips a block that
+    has a key. The body's block, one line above, always kept its key, which is the
+    control here. `doc_merge.settle_keys` adopts every part before it keys any."""
     world = fuzz_docs.corpus("tabs")
     ours = fuzz_docs.bootstrap(world)
     base = copy.deepcopy(ours)

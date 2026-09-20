@@ -363,15 +363,34 @@ def inherit_keys(base: dict, ours: dict) -> dict:
 
     Exact text first, then a similarity pass over what is left — `identity.py`'s
     rule, one dimension smaller because a document is a list, not a grid.
+
+    A key the file itself asserts is never matched again. `doc_ir.key_blocks` says
+    why: a key from the canonical file or from a named range outranks a guess from
+    the text. This used to break that rule for every block at once — `ours` in a
+    plan is the file, every block of it already keyed by its own `id=` — and
+    matching them all again by their words handed one block's key to another
+    whenever two of them read alike. Two blocks then stood under one key and none
+    under the other, and the merge read the second as "the source dropped it": it
+    deleted the paragraph the reader was reading (`crossed-delete`), or wrote the
+    file's words over a block that was holding a picture or a chip and took it with
+    them (`crossed-frozen`), or at best left the block alive under a name nobody
+    meant (`lost-key`). Two wordless blocks were enough to do it.
+
+    What is left for the matching is what the file does *not* name: a block somebody
+    wrote into the HTML by hand, and every block of a document just imported, which
+    is the case `push` calls this for.
     """
+    asserted = [block.get("key") for block in ours["blocks"]]
     doc_ir.key_blocks(ours)
-    free = [b for b in base["blocks"] if b.get("key")]
-    taken: set[str] = set()
+    taken: set[str] = {key for key in asserted if key}
+    free = [b for b in base["blocks"] if b.get("key") and b["key"] not in taken]
     by_text: dict[tuple, list] = {}
     for block in free:
         by_text.setdefault((_match_shape(block), _match_text(block)), []).append(block)
     pending = []
-    for block in ours["blocks"]:
+    for block, mine in zip(ours["blocks"], asserted):
+        if mine:
+            continue
         same = by_text.get((_match_shape(block), _match_text(block)))
         if same:
             block["key"] = same.pop(0)["key"]
@@ -524,6 +543,32 @@ def adopt_keys(live: dict, planned: list[dict]) -> int:
             done += 1
     carry_unimported(live, planned)
     return done
+
+
+def settle_keys(live: dict, planned: dict) -> None:
+    """Give every part the keys the plan meant it to have, then key what is left.
+
+    Two passes and not one, which is the whole of it: `doc_ir.key_blocks` recurses
+    into the tabs, because a key belongs to its tab, so adopting and keying one part
+    at a time let the *first* part's keying name every later tab's blocks after
+    their words — and `adopt_keys`, reaching that tab afterwards, found them keyed
+    and left them alone.
+
+    What that cost: a block whose named range the write had taken with it came back
+    under a name made from its new text. A table is anchored in its first cell
+    (`doc_ir.anchor_span`), so a source that rewords that cell destroys the range
+    every time; the table then settled as `table:<its new first word>`, and the
+    file, the base and the document all agreed on an identity the file never gave
+    it. `planned` is by stamp — None for the first part, else its tab id — which is
+    `doc_sync.stamp_of`'s rule.
+    """
+    parts = doc_ir.parts(live)
+    for part in parts:
+        stamp = None if part is live else part.get("tab")
+        if planned.get(stamp):
+            adopt_keys(part, planned[stamp])
+    for part in parts:
+        doc_ir.key_blocks(part)
 
 
 def carry_unimported(live: dict, planned: list[dict]) -> int:

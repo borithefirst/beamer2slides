@@ -255,11 +255,9 @@ def settle(world: doc_world.World, ours: dict, base: dict, planned: dict) -> dic
     read be the new file and the new base."""
     live = doc_world.read_ir(world, ours, base)
     tidy = []
+    doc_merge.settle_keys(live, planned)
     for part in doc_ir.parts(live):
         stamp = None if part is live else part.get("tab")
-        if planned.get(stamp):
-            doc_merge.adopt_keys(part, planned[stamp])
-        doc_ir.key_blocks(part)
         tidy += doc_merge.on_tab(doc_merge.tidy_requests(part), stamp)
     if tidy:
         world.apply(tidy)
@@ -1012,11 +1010,15 @@ KNOWN = (
             "report does not say so"},
     {"id": "lost-key",
      "kind": "identity_lost", "has": "",
-     "why": "a block keeps its words and loses the key the file gave it — inherit_keys "
-            "reassigning a key the file asserts, settle keying every tab before those "
-            "tabs are adopted, or a heading turned paragraph keeping its level. A "
-            "delete carrying the style of the block above onto the survivor used to be "
-            "the fourth; the settle writes the named style back now"},
+     "why": "a block keeps its words and loses the key the file gave it. Three of the "
+            "four causes are fixed and the count is down by a third: `inherit_keys` "
+            "reassigning a key the file itself asserts, `settle` keying every tab "
+            "before those tabs are adopted (`doc_merge.settle_keys`), and a delete "
+            "carrying the style of the block above onto the survivor (the settle "
+            "writes the named style back). A heading turned paragraph keeping its "
+            "level is the one left, and what else reaches this signature is not yet "
+            "known — it is the widest of these, so anything that renames a block "
+            "lands here"},
     {"id": "table-in-a-table",
      "kind": "block_gone", "has": "a table the reader added",
      "why": "a table the source adds in front of another table is written at the "
@@ -1032,12 +1034,14 @@ KNOWN = (
             "and the arithmetic is right"},
     {"id": "crossed-delete",
      "kind": "block_gone", "has": "though the file still names it",
-     "why": "`inherit_keys` hands one block's key to another, so the file ends up with "
-            "two blocks under one key and none under the first one's: the merge reads "
-            "that as 'the source dropped it', deletes the paragraph the reader was "
-            "reading, and writes the source's new wording nowhere. The same defect as "
-            "`lost-key`, one step worse — there the block survives under a wrong key, "
-            "here it goes altogether (shrunk from chain-8 seed 1031)"},
+     "why": "two blocks end up under one key and none under the other, so the merge "
+            "reads the second as 'the source dropped it', deletes the paragraph the "
+            "reader was reading, and writes the source's new wording nowhere. The "
+            "same defect as `lost-key`, one step worse — there the block survives "
+            "under a wrong key, here it goes altogether (shrunk from chain-8 seed "
+            "1031). `inherit_keys` crossing the keys the file asserts was how it got "
+            "there, and that is fixed; nothing has reached this signature since, so "
+            "the entry stays to catch whatever else can"},
     {"id": "moved-styling",
      "kind": "styling_lost", "has": "",
      "why": "a block the source both reworded and moved is written again from nothing, "
@@ -1047,13 +1051,15 @@ KNOWN = (
             "runs are then the document's own), so it takes both to see it"},
     {"id": "crossed-frozen",
      "kind": "frozen_gone", "has": "",
-     "why": "`inherit_keys` gives one block's key to another — two blocks under one key, "
-            "none under the other — so the sync writes the file's words over a block "
-            "that was holding a picture or a chip, and it goes. Two wordless blocks are "
-            "enough: both are keyed `paragraph:empty` (chain-8 seed 1147, where the "
-            "reader's person chip went and a picture with it). The signature is a "
-            "frozen run gone that is not the `dropped-frozen` one above, so any other "
-            "way of losing a chip would be filed here too"},
+     "why": "the sync writes the file's words over a block that was holding a picture "
+            "or a chip, and it goes. `inherit_keys` giving one block's key to another "
+            "was the cause found first — two blocks under one key, none under the "
+            "other, two wordless blocks being enough since both are keyed "
+            "`paragraph:empty` (chain-8 seed 1147, where the reader's person chip went "
+            "and a picture with it) — and fixing it took this from 22 findings to 13 "
+            "in 200 chain-8 rounds. What the 13 are is not yet known: the signature is "
+            "a frozen run gone that is not the `dropped-frozen` one above, so any "
+            "other way of losing a chip is filed here too"},
 )
 
 

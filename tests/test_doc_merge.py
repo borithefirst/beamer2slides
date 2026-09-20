@@ -1533,6 +1533,29 @@ def test_a_title_the_importer_flattened_is_put_back_by_the_settle():
                                             {"startIndex": 12, "endIndex": 20}]
 
 
+def test_a_later_tabs_blocks_are_adopted_before_anything_keys_them():
+    """`doc_ir.key_blocks` recurses into the tabs, so adopting and keying one part at
+    a time let the first part's keying name every later tab's blocks after their
+    words — and `adopt_keys`, reaching that tab afterwards, found them keyed and left
+    them alone. Here the write took a block's named range with it, so the read-back
+    has no key and the plan is the only thing that knows one."""
+    live = {"blocks": [para("p:first", "one two")],
+            "tabs": [{"tab": "t.1", "blocks": [dict(para("", "quartz count"),
+                                                    key=None)]}]}
+    live["tabs"][0]["blocks"][0].pop("key")
+    doc_merge.settle_keys(live, {"t.1": [para("t:year", "quartz count")]})
+    assert [b["key"] for b in live["tabs"][0]["blocks"]] == ["t:year"]
+
+
+def test_a_block_no_plan_knows_is_still_keyed_from_its_words():
+    """The second pass is not optional: a block the merge never planned — one a
+    reader added — has to come out of the settle with a key of some kind."""
+    live = {"blocks": [dict(para("", "a reader wrote this"))], "tabs": []}
+    live["blocks"][0].pop("key")
+    doc_merge.settle_keys(live, {})
+    assert live["blocks"][0]["key"] == "paragraph:a-reader-wrote-this"
+
+
 def test_a_heading_the_reader_demoted_is_left_demoted():
     """The merged plan is document-wins, so a named style only reaches the settle
     when the document never chose it. A reader who made a heading body text has
