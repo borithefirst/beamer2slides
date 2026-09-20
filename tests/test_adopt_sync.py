@@ -305,17 +305,48 @@ def test_a_first_sync_that_would_delete_a_slide_of_the_adopted_deck_is_refused(w
     assert "    put the frame labels back where adopt wrote them (docs/labels.md), then sync again" in message
 
 
-def test_a_first_sync_that_would_write_an_unpaired_element_is_refused(world):
-    """Sync deletes a recreated unit's old objects through the base, and an unpaired element names
-    none: the person's own box would stay and a second one appear beside it."""
-    base = copy.deepcopy(world["base"])
+def unpair(world, generation: int = 0) -> tuple[dict, dict]:
+    """The world's base with its first paired element tied to nothing, and a source that changes
+    exactly that element - the shape `adopt_sync.pair_elements` leaves behind when two of a deck's
+    boxes are too alike to tell apart."""
+    base = {**copy.deepcopy(world["base"]), "generation": generation}
     doc = copy.deepcopy(world["doc"])
     el = next(e for s in base["slides"] for e in s["elements"] if e["objects"])
     el["objects"], el["main"], el["readback"] = [], None, {}
     ir = next(e for s in doc["slides"] for e in s["elements"] if e["id"] == el["ir"]["id"])
     ir["paragraphs"][0]["runs"] = [W.run("the source says something else now")]
-    ours = W.build_ours(doc, base, world["out"])
-    message = refuse(base, merge.plan_merge(base, ours, world["live"]), world["live"], KEPT)
+    return base, doc
+
+
+def test_an_element_tied_to_no_object_of_the_deck_is_kept_and_the_rest_syncs(world):
+    """Sync deletes a recreated unit's old objects through the base, and an unpaired element names
+    none: writing it would leave the person's own box standing and put a second one on top of it.
+    So that unit is kept and everything else goes in - one element nothing can be written to
+    freezes that element, not the talk. It used to refuse the whole sync, and over 400 first-sync
+    campaign rounds that was 734 of ~2,400 syncs writing nothing at all."""
+    base, doc = unpair(world)
+    fuzz_sync.src_reword(random.Random(1), doc)            # ... and the source changes another slide too
+    mplan = merge.plan_merge(base, W.build_ours(doc, base, world["out"]), world["live"])
+    held = [(p["key"], u) for p in mplan["slides"] for u in p.get("units") or [] if u.get("unpaired")]
+    assert len(held) == 1 and held[0][1]["action"] == "keep"
+    c = next(c for c in mplan["report"]["conflicts"] if c["field"] == "unpaired")
+    assert (c["slide"], c["element"]) == (held[0][0], held[0][1]["key"])
+    assert c["resolution"] == "kept (tied to no object of the deck)" and not c.get("takeable")
+    assert any("could not be tied to any object of this deck" in w and "Change them in the deck itself"
+               in w for w in mplan["report"]["warnings"])
+    assert adopt_sync.problems(base, mplan, world["live"], KEPT) == [], "nothing left to refuse"
+    assert merge.has_writes(mplan, [s["objectId"] for s in world["live"]["slides"]]), \
+        "and the rest of the deck is synced as usual"
+
+
+def test_the_gate_still_stands_behind_the_merge(world):
+    """`merge.plan_unit` decides it, `adopt_sync.problems` is the last thing between a plan and a
+    write into somebody's deck - for a plan that says recreate anyway, however it came to."""
+    base, doc = unpair(world)
+    mplan = merge.plan_merge(base, W.build_ours(doc, base, world["out"]), world["live"])
+    u = next(u for p in mplan["slides"] for u in p.get("units") or [] if u.get("unpaired"))
+    u["action"] = "recreate"
+    message = refuse(base, mplan, world["live"], KEPT)
     assert "  - 1 element(s) the source changed could not be tied to any object of the deck: " in message
     assert "      Writing them would put a second object beside the person's, not over it." in message
     assert "    change those elements in the deck instead of in the source, and sync the rest" in message
@@ -383,20 +414,15 @@ def test_the_page_shape_refusal_outlives_the_first_sync(world):
     assert reasons == ["page-shape"]
 
 
-def test_the_unpaired_refusal_outlives_the_first_sync(world):
-    """Nor does an unpaired element heal by itself: every sync refuses to write it, so no sync ever
-    gives it an object, so it is still unpaired at generation 4. The offline campaign found this
-    at chain depth 2, where the base rebased after the first sync let the second one duplicate the
-    person's box (`fuzz_sync._doubled`)."""
-    base = {**copy.deepcopy(world["base"]), "generation": 4}
-    doc = copy.deepcopy(world["doc"])
-    el = next(e for s in base["slides"] for e in s["elements"] if e["objects"])
-    el["objects"], el["main"], el["readback"] = [], None, {}
-    ir = next(e for s in doc["slides"] for e in s["elements"] if e["id"] == el["ir"]["id"])
-    ir["paragraphs"][0]["runs"] = [W.run("the source says something else now")]
-    reasons = [p["reason"] for p in adopt_sync.problems(base, plan_of({**world, "base": base}, doc),
-                                                        world["live"], None, "none")]
-    assert reasons == ["unpaired"]
+def test_an_unpaired_element_is_held_at_every_generation(world):
+    """Nor does an unpaired element heal by itself: no sync ever writes it, so no sync ever gives
+    it an object, so it is still unpaired at generation 4 and still held there. The offline
+    campaign found this at chain depth 2, where the base rebased after the first sync let the
+    second one duplicate the person's box (`fuzz_sync._doubled`)."""
+    base, doc = unpair(world, generation=4)
+    mplan = merge.plan_merge(base, W.build_ours(doc, base, world["out"]), world["live"])
+    assert [u["action"] for p in mplan["slides"] for u in p.get("units") or [] if u.get("unpaired")] == ["keep"]
+    assert adopt_sync.problems(base, mplan, world["live"], None, "none") == []
 
 
 def test_a_sync_that_writes_nothing_is_never_refused(world):
@@ -434,11 +460,13 @@ def test_a_chain_of_syncs_after_an_adopt_loses_nothing(seed, tmp_path):
     assert loss_oracle.describe(result["failures"]) == ""
 
 
-def test_the_campaign_sees_the_duplicate_the_unpaired_refusal_prevents(tmp_path, monkeypatch):
+def test_the_campaign_sees_the_duplicate_the_unpaired_hold_prevents(tmp_path, monkeypatch):
     """The loss oracle cannot judge this one: nothing is lost when sync writes a second object
     beside the person's, because sync deletes the old ones through the base and an unpaired element
-    names none. `fuzz_sync._doubled` is what sees it - and with the refusal in place it never fires,
-    so this is the test that it would."""
+    names none. `fuzz_sync._doubled` is what sees it - and with the hold and the gate in place it
+    never fires, so this is the test that it would. Both doors are opened: the merge stops
+    recognising an adopted base, and the gate stops asking about unpaired elements."""
+    monkeypatch.setattr(merge, "ADOPTED", "a word no base says")
     real = adopt_sync.problems
     monkeypatch.setattr(adopt_sync, "problems",
                         lambda *a, **kw: [p for p in real(*a, **kw) if p["reason"] != "unpaired"])

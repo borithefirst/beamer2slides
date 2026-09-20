@@ -16,6 +16,7 @@ SCALE_TOLERANCE = 1e-3
 CONVERGED_PLACE = 2.0  # pt: a deck move the source now reproduces this closely counts as converged
 MOVE_TOLERANCE = 0.05  # pt: members within this of the same step moved together (PDF pt)
 EDIT_FIELDS = ("geometry", "text", "text_style", "shape_style", "image")
+ADOPTED = "adopt"  # a base's `origin` when the deck is a person's own (`adopt_sync.ORIGIN`, which imports this)
 TOKEN = re.compile(r"\w+|\s+|[^\w\s]")
 TAKEN_SAYS = "the source's version was written (asked for by `--take-source`)"
 # Fields whose conflict is about what something *says*, and so can be settled for the source.
@@ -567,13 +568,15 @@ def geometry_writable(members: list[dict], slide_read: dict | None) -> bool:
 
 def plan_unit(skey: str, ukey: str, base_members: list[dict] | None, ours_members: list[dict] | None,
               slide_read: dict | None, report: dict, scale: float | None = None, adopt=None,
-              res=None) -> dict:
+              res=None, adopted: bool = False) -> dict:
     """The action for one element unit: keep, recreate (with deck overrides), create, delete,
     move, adopt (the deck already shows the source's change) or adopt_object (the deck's own
     object is what the source now draws); conflicts and overrides go to `report`. `scale`: deck pt
     per PDF pt. `adopt(skey, ours_members, slide_read, oid=None)`: the live object showing the same
     picture as the unit's new one - a user object, or `oid` itself (sync.picture_adopter).
-    `res`: the conflicts a person asked to settle for the source (`Resolutions`)."""
+    `res`: the conflicts a person asked to settle for the source (`Resolutions`).
+    `adopted`: the deck is a person's own and the base is a pairing (`ADOPTED`), so an element
+    tied to no object is one nothing may be written for."""
     where = {"slide": skey, "element": ukey}
     if base_members is None:
         oid = adopt(skey, ours_members, slide_read) if adopt and slide_read else None
@@ -632,6 +635,23 @@ def plan_unit(skey: str, ukey: str, base_members: list[dict] | None, ours_member
         report["conflicts"].append({**where, "field": "part_deleted", "base": "element", "ours": sorted(src),
                                     "theirs": edits["part_deleted"], "resolution": "deck kept"})
         return {**action, "action": "keep"}
+    blind = [m["key"] for m in base_members if not m.get("objects")] if adopted else []
+    if blind:
+        # A person's deck, and this element is one the pairing could not tie to any object of it
+        # (`adopt_sync.pair_elements`). Sync deletes a recreated unit's old objects through the
+        # base and this one names none, so writing it would leave the person's own box standing
+        # and put a second one saying the source's new words on top of it: no loss, a wrecked
+        # slide (`fuzz_sync._doubled`). Nor does it heal - no sync ever gives such an element an
+        # object - so the unit is kept as the deck has it and the person is told, once per sync
+        # (`plan_merge`'s warning) and here by name. It used to refuse the whole sync, which is
+        # the wrong size of answer: over 400 first-sync campaign rounds, 734 of ~2,400 syncs
+        # wrote nothing at all because one element of one slide could not be paired. One element
+        # nothing can be written to freezes that element, not the talk - `hold_slide`'s rule one
+        # dimension down. `adopt_sync.problems` still stands between a plan and a write.
+        report["conflicts"].append(conflict_entry(res, skey, ukey, "unpaired", "element", sorted(src),
+                                                  sorted(deck) or ["the deck's own"],
+                                                  "kept (tied to no object of the deck)")[0])
+        return {**action, "action": "keep", "unpaired": blind}
     if not edited:
         report["applied"].append({**where, "fields": sorted(src)})
         if "group" in deck:
@@ -962,6 +982,18 @@ def plan_merge(base: dict, ours: dict, theirs: dict, adopt=None, follow_labels: 
         # (a slide duplicated in Slides carries the tags of the original's objects)
         copies = {rb["title"][4:].rsplit("/", 3)[0] for rb in s["objects"].values() if (rb.get("title") or "").startswith("b2s:")}
         report["slides"]["user_added"].append({"objectId": s["objectId"], "copy_of": sorted(copies) or None})
+    unpaired = [f"`{p['key']}` / `{u['key']}`" for p in plans for u in p.get("units") or [] if u.get("unpaired")]
+    if unpaired:
+        # `plan_unit`: the source changed elements this deck's pairing cannot place. Each one is a
+        # conflict of its own; this says the thing a person has to *do* about them, once.
+        report["warnings"].append(
+            f"{len(unpaired)} element(s) the source changed could not be tied to any object of this deck, so "
+            f"they were left exactly as the deck has them: {', '.join(unpaired[:3])}"
+            f"{', ...' if len(unpaired) > 3 else ''}. `adopt` paired the source it wrote with the deck's own "
+            f"objects by where they stand and what they say, and these it could not place (the base lists "
+            f"every one of them under `adopt.unpaired`, with the reason); writing one would put a second "
+            f"object beside yours rather than over it. Change them in the deck itself - the rest of this "
+            f"sync went in as usual.")
     report_resolutions(res, report)
     order, moved = plan_order(base, ours, theirs, plans, report)
     report["slides"]["moved"] = moved
@@ -1046,7 +1078,8 @@ def plan_slide(b: dict, o: dict, read: dict, report: dict, base: dict, j: int, i
     bu, ou = units(b["elements"]), units(o["elements"])
     unit_plans = []
     for ukey in list(ou) + [k for k in bu if k not in ou]:
-        unit_plans.append({**plan_unit(skey, ukey, bu.get(ukey), ou.get(ukey), read, report, deck_scale(base), adopt, res),
+        unit_plans.append({**plan_unit(skey, ukey, bu.get(ukey), ou.get(ukey), read, report, deck_scale(base), adopt,
+                                       res, base.get("origin") == ADOPTED),
                            "base_members": [m["key"] for m in bu.get(ukey, [])],
                            "ours_members": [m["key"] for m in ou.get(ukey, [])]})
     # A unit the source removed may live on inside another one (paragraphs joined): if that one

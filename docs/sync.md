@@ -1364,7 +1364,9 @@ Between 10% and 80%, and the spread is not noise: it is how far the conversion o
 regroups what the deck has. Where classify merges three of the person's boxes into one paragraph (or
 crops three objects into one figure picture) the merged element stands where none of them does and
 says what none of them says, so it pairs with nothing — 219 of hebrew-lesson's 244. That is a
-refusal, not a loss: an unpaired element is one the first sync will not write.
+refusal, not a loss: an unpaired element is one no sync will ever write, and the deck's own version
+of it is what stays. Which is why the refusal below is per element and not per sync: on a deck like
+that, one that stopped at the first unpaired element would never write anything at all.
 
 **The refusals** (`adopt_sync.problems`, one message, `--force-adopted-deck` to go ahead anyway):
 
@@ -1381,6 +1383,14 @@ refusal, not a loss: an unpaired element is one the first sync will not write.
   recreated unit's old objects through the base, and an unpaired element names none — so the
   person's box would stay where it is and a second one would appear beside it. Nothing is lost, and
   that is why the loss oracle cannot see it; `fuzz_sync._doubled` is what does.
+  This one is no longer the *sync's* answer, only its last gate: **`merge.plan_unit` keeps that one
+  unit** as the deck has it and reports a conflict (`field: unpaired`, plus one warning per sync
+  saying what to do), and everything else goes in. Refusing the whole sync was the wrong size of
+  answer to one box on one slide — over 400 first-sync campaign rounds it was 734 of ~2,400 syncs
+  writing nothing at all, which is most of them, because a deck a person built has unpaired elements
+  by construction (10–80% of them, the table above). One element nothing can be written to freezes
+  that element, not the talk: `merge.hold_slide`'s rule one dimension down. The gate stays where it
+  is, for a plan that says recreate anyway however it came to say it.
 - **page shape.** `emit.DeckPlan` turns this converter's PDF points into the deck's with one
   number, and everything it precomputes — hole widths, template keys, predicted shifts, overlay
   boxes — is that scale. The number is now the *deck's* page width (`DeckPlan(deck, page_width)`,
@@ -1392,7 +1402,7 @@ refusal, not a loss: an unpaired element is one the first sync will not write.
   are valid. That is what is refused now (`aspect_mismatch`, 0.5%).
 
 The first two are about a deck nothing has been written to yet, so they stop at generation 0. The
-last two do not heal by being written to once — an element every sync refuses to write never gets an
+last two do not heal by being written to once — an element no sync ever writes never gets an
 object, and the deck's page keeps the shape it has — so they hold at every generation. (That was found
 by the offline campaign at chain depth 2: with the unpaired refusal gated on the first sync, the
 base rebased after it let the *second* sync duplicate the person's box.)
@@ -1404,9 +1414,10 @@ base rebased after it let the *second* sync duplicate the person's box.)
   Keeps, text edits, moves and deletions still work (those are written in deck coordinates,
   `merge.deck_scale`), but a sync that would add a slide or an object refuses until the source's
   page is the deck's shape again — `adopt.page_setup` is what wrote it.
-- An element the pairing refused stays refused. Change it in the deck, not in the source, or move
-  the boxes apart so the pairing can tell them from each other. The base lists every one of them
-  under `adopt.unpaired`, with the reason, and `adopt` prints the count.
+- An element the pairing refused stays refused: every sync keeps the deck's version of it and says
+  so in the report. Change it in the deck, not in the source, or move the boxes apart so the
+  pairing can tell them from each other. The base lists every one of them under `adopt.unpaired`,
+  with the reason, and `adopt` prints the count.
 - The person's own objects that the source does not draw at all are never touched, and never will
   be: they are reported as user objects, as in any deck.
 - Comments, sharing and history stay because the deck stays — but a sync that rewrites the passage a

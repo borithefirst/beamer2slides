@@ -792,7 +792,8 @@ are never touched at all (`master_background = None`: the deck's look is the per
 Then `Sync.check_plan` runs between planning and any write and **refuses** four things
 (`adopt_sync.problems` / `refusal_message`, every message asserted verbatim in `tests/test_adopt_sync.py`):
 a unit whose base members include an **unpaired** element (writing it puts a second object beside the
-person's), a deck **page of another shape** than the paper the source compiles to, no **way back** on
+person's - now decided per unit by the merge, see below), a deck **page of another shape** than the
+paper the source compiles to, no **way back** on
 the first sync, and **slides the
 plan would delete** on the first sync (on a first sync that is a label that moved far more often than a
 slide the author meant to drop). Each names what it found and offers `--dry-run` (which never refuses:
@@ -804,6 +805,23 @@ The first two outlive the first sync - found by the campaign (`fuzz_world.build_
 rounds duplicated a person's box on the *second* sync, because a rebased base still carries unpaired
 elements. Clean at chain 1x400, 4x200 and 5x250; taking the `slides-deleted` refusal out fails 0 rounds,
 so that one is a judgement, not a measurement, and says so.
+**One element nothing can be written to freezes that element, not the talk.** The unpaired refusal was
+the right decision at the wrong size: a deck a person built has unpaired elements by construction
+(10-80% of them), so a *whole sync* stopping at the first one meant that on 400 first-sync campaign
+rounds, 734 of ~2,400 syncs wrote nothing at all. `merge.plan_unit` now makes the decision itself, one
+unit at a time (`adopted`, `merge.ADOPTED`, which `adopt_sync.ORIGIN` is): a unit whose base members
+include an element tied to no object is **kept as the deck has it**, with a conflict
+(`field: unpaired`, not takeable - taking the source's side is the write that duplicates) and one
+warning per sync saying the thing to do about it, while the rest of the deck syncs as usual. That is
+`merge.hold_slide`'s rule one dimension down, and the same answer the refusal's own advice gave
+("change those elements in the deck instead of in the source, and sync the rest") - now given by
+doing it. `adopt_sync.problems` keeps the check as the last gate between a plan and a write, for a
+plan that says recreate anyway however it came to; `fuzz_sync._doubled` still watches the result, and
+the probe that proves it opens both doors (`merge.ADOPTED` made a word no base says, and the gate's
+`unpaired` reason removed). The base needs nothing new: a kept unit records the base's own members,
+whose `objects` is empty, so the evidence for the decision is the decision (unlike the `removed` one,
+which had to be written down). Measured by repeating the campaign that found it: `unpaired` refusals
+734 -> 0, 400/400 first-sync rounds at chain 6 clean.
 **The plan is made for the deck it is going into**: everything sync writes is PDF pt times one number,
 and that number was `SLIDE_W / page`, so a deck of any other width got nothing created in it at all -
 ten of the 29 corpus decks (1440, 1920, 960, 800, 3456, 481.5, 595 pt). `DeckPlan(deck, page_width)`

@@ -30,7 +30,7 @@ from pathlib import Path
 from . import guard, identity, merge, snapshot
 from .emit import SLIDE_W
 
-ORIGIN = "adopt"
+ORIGIN = merge.ADOPTED   # (the word itself lives there: the merge plans by it and cannot import this)
 # A pair is a claim that one converted element *is* one object of the deck. Both numbers are about
 # refusing rather than guessing: how close the best candidate has to be, and how far it has to beat
 # everything else. A miss costs a report line; a wrong pair would write the source over an object
@@ -343,7 +343,13 @@ def problems(base: dict, mplan: dict, theirs: dict, way_back: dict | None = None
     The other two - the way back and the deck's own slides - are about a deck nothing has been
     written to yet, which is true exactly once. Found by the offline campaign at chain depth 2
     (`fuzz_sync._doubled`), where a base rebased after one sync let the second one duplicate an
-    unpaired box."""
+    unpaired box.
+
+    `unpaired` is the gate behind a decision the merge now makes itself: `merge.plan_unit` keeps
+    such a unit as the deck has it and reports a conflict, so an ordinary sync never brings one
+    here and the rest of the deck syncs (it used to refuse whole syncs by the hundred - see the
+    comment there). What is left is the last thing between a plan and a write into somebody's
+    deck, for a plan that says otherwise however it came to say it."""
     if base.get("origin") != ORIGIN:
         return []
     if not touches_deck(mplan, theirs):
