@@ -27,7 +27,7 @@ reported as a conflict (with both versions) so the author can decide.
 python -m beamer2slides sync deck.pdf --deck <url|id|out folder> [--out DIR] [--dry-run]
                                       [--overlays last|all] [--predict-places]
                                       [--backup auto|none|file|drive|both] [--force-adopted-deck]
-                                      [--follow-labels]
+                                      [--follow-labels] [--take-source ID[,ID...]]
 ```
 `--out` defaults to the folder given as `--deck` (else `out/<pdf stem>`). The new conversion goes to
 `<out>/sync/ours/`, reports to `<out>/sync/sync-report.{json,md}` (`sync-report-dry-run.*` for a dry
@@ -194,6 +194,51 @@ no instruction to freeze the other forty; user-added slides stay after their liv
 a background the source changed is rewritten unless the deck changed it too (conflict).
 Recreated units with holes or overlays are re-measured (`measure_places` scratch slides in the live
 deck; leftovers `b2s_mNNN` of an interrupted run are deleted at the next start).
+
+## Taking the source's version (`--take-source`)
+A conflict is resolved, not guessed: the deck keeps what it has, whole, and the report says where.
+That is right as a default and it is not always what the author wants - sometimes the source really
+is the later thought, and until now the only ways to say so were to edit the deck by hand or to
+rebuild it, which is the one thing this project refuses to do. `--take-source` is the third way: a
+person reads the report, names one conflict, and the source's version of *that* is written.
+
+Everything about it is built so that it cannot reach anything else.
+
+- **Every conflict carries an id** (`merge.conflict_id`): 8 hex of a sha256 over the slide, the
+  element, the field and the three versions. It is the same on every run while the same two changes
+  stand against each other, and a different one the moment either side moves. So an id copied out of
+  yesterday's report cannot land on a disagreement that has since become another one: it matches
+  nothing, the deck keeps what it has, and the run warns that the id found no home (and *why* -
+  read the report this run wrote). Nothing is written on a stale id and nothing is lost.
+- **Only conflicts about what something says can be taken** (`merge.TAKEABLE_FIELDS`: text,
+  text_style, shape_style, image, geometry, background, notes). Existence and identity - `removed`,
+  `deleted`, `part_deleted`, a slide the deck kept, a label that moved - carry an id to talk about
+  and refuse to be settled this way. The difference is the way back: writing the source's paragraph
+  over a person's leaves their paragraph in the report, verbatim, and deleting their slide leaves
+  nothing. Deleting what somebody made is `--force-rebuild`'s business, and it asks in those words.
+- **A take is per paragraph where the merge is per paragraph.** A text box both sides rewrote is
+  merged line by line (`merge.text_merge`); each paragraph both sides rewrote is its own conflict
+  with its own id, and taking one writes the source's line there and leaves the other clashes as
+  the deck has them - which is the point of merging by paragraph at all. The handle is the
+  paragraph's index, which is the one thing the planner and the writer agree on: the planner merges
+  the *predicted* text and `sync.override_requests` re-merges what the deck actually holds, and
+  `collapse_holes` is the whole difference between them - it collapses runs of no-break spaces and
+  never adds or drops a newline. The indices ride in `overrides["text"]["take"]`.
+  Where nothing of the source survived the merge at all the conflict is the whole box, and taking
+  it writes the source's text entire.
+- **What it wrote over is kept verbatim** in the report's `resolved` section (`--take-source` in the
+  markdown), with the id, the slide, the element and the field. That is the way back, and it has to
+  be there because a minute from now nothing else will hold those words. A field settled this way is
+  no longer an override either: the report must not also promise the deck's version was kept.
+- It is a **person's decision**, like `--follow-labels`, `--force-rebuild` and `--force-adopted-deck`.
+  The agent tool takes it as `deck_sync(take_source=[...])` and `INSTRUCTIONS.md` says plainly that
+  an agent relays an id somebody gave it in words and never picks one itself - least of all to make
+  a report come back clean.
+
+Offline tests in `tests/test_sync.py` (id stability, a paragraph taken while its neighbours are not,
+the whole-box take, the stale-id warning, geometry/background/notes, existence refused, the report's
+three-sided rendering). The fuzz world merges overrides with `text_merge` and the take list now,
+which is what `sync.override_requests` really does, so a take cannot look like a loss to the oracle.
 
 ## Writing to the live deck
 - Every batchUpdate carries `writeControl.requiredRevisionId`, chained through the responses. A
@@ -581,10 +626,13 @@ and its place stay); and a renamed label used to cost the slide its identity out
 what `align_slides.pairable` now allows the content to fix.
 
 ## Reports
-`sync-report.json` (top level: `applied`, `overrides`, `conflicts` with field, base, ours, theirs
-and resolution, `converged`, `user_objects`, `slides_created`, `slides_deleted`, `slides_moved`,
-`slides_kept`, `slides_user_added`, `warnings`, plus pdf, url, attempts, requests per phase and the
-per-slide `actions`) and `sync-report.md`.
+`sync-report.json` (top level: `applied`, `overrides`, `conflicts` with id, field, base, ours, theirs,
+resolution and whether it is `takeable`, `resolved` (what `--take-source` settled, each keeping the
+deck's own version of that spot), `converged`, `user_objects`, `slides_created`, `slides_deleted`,
+`slides_moved`, `slides_kept`, `slides_user_added`, `warnings`, plus pdf, url, attempts, requests per
+phase and the per-slide `actions`) and `sync-report.md`, where a conflict shows its three versions one
+under the other and, where the source's can be written there instead, the `--take-source ID` that
+does it.
 
 ## Proving nothing is lost (fuzzing, `tools/loss_oracle.py` + `tools/fuzz_sync.py`)
 The live scenarios check hand-written expectations; the fuzz checks the one property that has to

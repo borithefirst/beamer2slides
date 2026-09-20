@@ -153,7 +153,10 @@ forward in INSTRUCTIONS.md - `deck_edited` says run `deck_sync`, `needs_consent`
 person and stop, `base_choice_needed` says ask rather than guess.
 
 Conflicts are diagnostics, not prose. An agent that reports success with open conflicts is
-making a mistake the benchmark is built to catch.
+making a mistake the benchmark is built to catch. Each one a person *can* settle names its own id
+in the diagnostic, and `deck_sync(take_source=[...])` relays that decision - a decision made in
+words by somebody who read the three versions, never one an agent takes on its own. What such a
+call writes over is in `data["resolved"]`, verbatim, because nowhere else will hold it afterwards.
 
 An artifact is `{"ref", "kind", "description"}` and, where the context delivers content inline,
 `text` or `base64` beside `bytes` and `sha256`. The three original fields are always there, so a

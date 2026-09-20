@@ -507,7 +507,7 @@ def matrix_request(oid: str, m: list[float]) -> dict:
 class Sync:
     def __init__(self, slides, drive, pid: str, base: dict, ours: dict, out: Path, dry_run: bool = False,
                  measure: bool = True, trust_generation: bool = True, check_plan=None,
-                 follow_labels: bool = False):
+                 follow_labels: bool = False, take_source=()):
         # check_plan(mplan, theirs): raises instead of letting the write go ahead. It sits between
         # planning and preparing because that is the last point at which nothing has been sent and
         # the whole of what would be written is known (adopt_sync.problems).
@@ -517,6 +517,7 @@ class Sync:
         self.dry_run, self.measure = dry_run, measure
         self.trust_generation = trust_generation  # may this base's generation decide what is a leftover?
         self.follow_labels = follow_labels        # write to a slide whose label may have moved (merge.hold_slide)
+        self.take_source = tuple(take_source or ())  # conflicts to settle for the source (merge.Resolutions)
         self.plan = ours["plan"]
         self.scale = self.plan.scale
         self.tok = self.token()
@@ -592,7 +593,7 @@ class Sync:
                 restore_in_place(theirs, self.recovery["restore"])
             self.sign_changed(theirs, pres)
             mplan = merge.plan_merge(self.base, self.ours, theirs, self.picture_adopter(pres),
-                                     follow_labels=self.follow_labels)
+                                     follow_labels=self.follow_labels, take_source=self.take_source)
             if self.check_plan is not None:
                 self.check_plan(mplan, theirs)  # (adopt_sync: an adopted deck this may not be written to)
             work = self.prepare(mplan, pres, theirs)
@@ -1530,7 +1531,8 @@ class Sync:
                                                                      {"rowIndex": r, "columnIndex": c})
                 elif "text" in ov and main in n_read["objects"]:
                     current = n_read["objects"][main].get("text") or ""
-                    merged, clashes, safe = merge.text_merge(ov["text"]["base"], current, ov["text"]["theirs"])
+                    merged, clashes, safe = merge.text_merge(ov["text"]["base"], current, ov["text"]["theirs"],
+                                                             ov["text"].get("take") or ())
                     if not safe:
                         self.warnings.append(f"slide {p['key']}: {u['key']}: deck text edits clash with the new text; not re-applied")
                     else:
@@ -1727,6 +1729,30 @@ def stand_in_request(oid: str, sid: str, key: tuple) -> dict:
 
 # ---------------------------------------------------------------- reports
 
+def _quote(value) -> str:
+    """One side of a conflict as a report shows it: a text on its own lines, anything else as the
+    JSON these entries have always printed. Three versions of a paragraph one under the other is
+    most of what a person opens a conflict report to see."""
+    if not isinstance(value, str):
+        return f"    {json.dumps(value, ensure_ascii=False)}"
+    if not value.strip():
+        return "    (nothing)"
+    return "\n".join(f"    > {line}" if line.strip() else "    >"
+                     for line in value.rstrip("\n").split("\n"))
+
+
+def conflict_lines(c: dict) -> str:
+    """A conflict, its three sides under it, and - where the source's version can be written here
+    instead - the one thing a person types to ask for that (`merge.Resolutions`)."""
+    where = f"`{c['slide']}`" + (f" / `{c['element']}`" if c.get("element") else "")
+    out = [f"- {'`' + c['id'] + '` ' if c.get('id') else ''}{where}: **{c['field']}**, {c['resolution']}",
+           "  - base:", _quote(c["base"]), "  - source:", _quote(c["ours"]), "  - deck:", _quote(c["theirs"])]
+    if c.get("takeable") and c["resolution"] != merge.TAKEN_SAYS:
+        out.append(f"  - to write the source's version here instead: sync again with "
+                   f"`--take-source {c['id']}`. What it writes over is the deck's version above.")
+    return "\n".join(out)
+
+
 def write_reports(out: Path, info: dict) -> tuple[Path, Path]:
     folder = out / "sync"
     folder.mkdir(parents=True, exist_ok=True)
@@ -1748,8 +1774,10 @@ def write_reports(out: Path, info: dict) -> tuple[Path, Path]:
     loc = lambda x: f"`{x['slide']}`" + (f" / `{x['element']}`" if x.get("element") else "")
     section("Source changes applied", r["applied"], lambda x: f"- {loc(x)}: {', '.join(x['fields'])}" + (f" ({x['how']})" if x.get("how") else ""))
     section("Deck edits kept (overrides)", r["overrides"], lambda x: f"- {loc(x)}: {', '.join(x['fields'])}")
-    section("Conflicts", r["conflicts"], lambda x: f"- {loc(x)}: **{x['field']}**, {x['resolution']}\n  - base: {json.dumps(x['base'], ensure_ascii=False)}\n"
-                                                  f"  - ours: {json.dumps(x['ours'], ensure_ascii=False)}\n  - theirs: {json.dumps(x['theirs'], ensure_ascii=False)}")
+    section("Conflicts", r["conflicts"], conflict_lines)
+    section("Settled for the source (--take-source)", r.get("resolved") or [],
+            lambda x: f"- `{x['id']}` {loc(x)}: **{x['field']}**. The deck said, and this sync wrote over:\n"
+                      f"{_quote(x['was'])}")
     section("Converged", r["converged"], lambda x: f"- {loc(x)}: {x['field']}")
     s = r["slides"]
     lines += ["## Slides", f"- created: {s['created'] or 'none'}", f"- deleted: {s['deleted'] or 'none'}",
@@ -1778,7 +1806,7 @@ def overlay_mode(asked: str | None, recorded: str | None) -> tuple[str, str | No
 
 def sync(pdf: Path, deck: str, out: Path | None = None, dry_run: bool = False, overlays: str | None = None,
          measure: bool = True, way_back: dict | None = None, backup_mode: str = "auto",
-         force_adopted: bool = False, follow_labels: bool = False) -> dict:
+         force_adopted: bool = False, follow_labels: bool = False, take_source=()) -> dict:
     from . import adopt_sync
     from .google_auth import drive_service, slides_service
 
@@ -1819,7 +1847,7 @@ def sync(pdf: Path, deck: str, out: Path | None = None, dry_run: bool = False, o
         check = check_plan
     # A base that may be behind the deck never decides on its own that an object is a leftover.
     s = Sync(slides, drive, pid, base, ours, out, dry_run, measure, trust_generation=stale is None,
-             check_plan=check, follow_labels=follow_labels)
+             check_plan=check, follow_labels=follow_labels, take_source=take_source)
     result = s.run()
     report = result["plan"]["report"]
     report["warnings"] += s.warnings + warnings

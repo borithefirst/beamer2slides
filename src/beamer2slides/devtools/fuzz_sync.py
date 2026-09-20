@@ -766,7 +766,7 @@ def _writable(ours: dict, mplan: dict) -> list[dict]:
                 out += _writable_cells(p["key"], u["key"], ir, current, ov)
                 continue
             current = current if current.endswith("\n") else current + "\n"   # as Slides reads it back
-            merged, _, safe = merge.text_merge(ov["base"], current, ov["theirs"])
+            merged, _, safe = merge.text_merge(ov["base"], current, ov["theirs"], ov.get("take") or ())
             if not safe:
                 continue
             merged = merged if merged.endswith("\n") else merged + "\n"

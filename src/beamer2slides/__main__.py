@@ -260,6 +260,11 @@ def main() -> None:
     c.add_argument("--follow-labels", dest="follow_labels", action="store_true",
                    help="write to a slide whose label may have moved onto another frame (docs/sync.md, When a "
                         "label moved): by default such a slide is held back and nothing is written to it")
+    c.add_argument("--take-source", dest="take_source", action="append", metavar="ID", default=[],
+                   help="settle one reported conflict for the source instead of the deck (docs/sync.md, Taking "
+                        "the source's version): ID is the id the last report gave that conflict, repeat or "
+                        "comma-separate for several. It writes over what the person wrote there, so the report "
+                        "keeps their version verbatim; an id whose conflict has since changed matches nothing")
     c.add_argument("--force-adopted-deck", dest="force_adopted", action="store_true",
                    help="write into an adopted deck although sync cannot vouch for what it would write "
                         "(docs/sync.md, Adopt): the objects were made by a person, not by this converter")
@@ -352,15 +357,19 @@ def main() -> None:
             cmd_converge(args.target, args.tex, args.work, args.apply, args.out, args.max_iter, args.handout, args.engine)
         return
     if args.command == "sync":
+        from . import merge
         from .adopt_sync import FirstSyncRefused
         from .sync import sync
         note = None if args.dry_run else record_sync_point(args.pdf, args.deck, args.out, args.backup)
         try:
             # The recovery note carries the backup that was (or was not) kept: an adopted deck has
             # no way back at all unless one was, so the refusal has to be able to ask.
+            # One --take-source may name several ids, since a report that lists three of them is
+            # read in one go and typed back in one go.
+            take = [p.strip() for arg in args.take_source for p in str(arg).split(",") if p.strip()]
             info = sync(args.pdf, args.deck, args.out, args.dry_run, args.overlays, not args.predict_places,
                         (note or {}).get("entry", {}).get("backup"), args.backup, args.force_adopted,
-                        args.follow_labels)
+                        args.follow_labels, take)
         except FirstSyncRefused as refused:
             raise SystemExit(str(refused)) from None
         if note:
@@ -368,12 +377,16 @@ def main() -> None:
         r = info["report"]
         sent = info["requests"] or {}          # Sync.sent counts them per phase, not in total
         held = r["slides"].get("held") or []
+        resolved = r.get("resolved") or []
         print(f"sync{' (dry run)' if args.dry_run else ''}: {len(r['applied'])} source changes applied, "
               f"{len(r['overrides'])} deck edits kept, {len(r['conflicts'])} conflicts, "
+              + (f"{len(resolved)} settled for the source, " if resolved else "")
               + (f"{len(held)} slide(s) held back, " if held else "") +
               f"requests {sum(sent.values()) if isinstance(sent, dict) else sent}")
         for c in r["conflicts"]:
-            print(f"  conflict: {c['slide']} / {c['element']}: {c['field']} ({c['resolution']})")
+            print(f"  conflict: {c['slide']} / {c['element']}: {c['field']} ({c['resolution']})"
+                  + (f" [--take-source {c['id']}]" if c.get("takeable") and c.get("id")
+                     and c["resolution"] != merge.TAKEN_SAYS else ""))
         for wmsg in r["warnings"]:
             print(f"  warning: {wmsg}")
         print(f"Google Slides: {info['url']}")

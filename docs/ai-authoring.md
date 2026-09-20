@@ -96,13 +96,18 @@ deck both changed the same thing, and the deck won. They are addressed to you.
 A conflict looks like:
 
 ```
-- `backup` / `text/body/0`: **text**, deck kept
-  - base:   "The numbers are rounded to whole seconds"
-  - ours:   "Seconds are rounded, milliseconds are dropped"
-  - theirs: "The numbers are rounded to full seconds"
+- `7f31ac02` `backup` / `text/body/0`: **text**, deck kept
+  - base:
+    > The numbers are rounded to whole seconds
+  - source:
+    > Seconds are rounded, milliseconds are dropped
+  - deck:
+    > The numbers are rounded to full seconds
+  - to write the source's version here instead: sync again with `--take-source 7f31ac02`.
+    What it writes over is the deck's version above.
 ```
 
-`base` is what the converter last wrote, `ours` is what the source now says, `theirs` is what the
+`base` is what the converter last wrote, `source` is what the `.tex` now says, `deck` is what the
 deck shows. The deck's version is what people see. Your job is to make the source say what the deck
 says, so the two stop disagreeing - the same thing you would do resolving a three-way merge, except
 that one side has already won.
@@ -111,6 +116,13 @@ Usually this means rewriting that bullet in the `.tex` to the deck's wording, ke
 version was actually trying to add. Do not simply revert your change if it carried real
 information; fold it into the deck's sentence. If you genuinely disagree with the deck's edit, say
 so in your reply rather than overwriting it - a person made that edit on purpose.
+
+That last line, `--take-source`, is the other way out, and it is **not yours to take**. It writes
+the source's version over what somebody wrote in the deck; the report then keeps their words, and
+nothing else does. Put it to the person - quote the three versions and the id - and run it only if
+they say so, in words. The id names that one disagreement and stops matching as soon as either side
+of it moves, so it has to come out of the report of the run you are looking at; a stale one settles
+nothing and says so. Editing the `.tex` remains the answer that costs nobody anything.
 
 `beamer2slides pull --tex main.tex --apply` does the mechanical part of this for you: it edits the
 source until its conversion matches the deck, and writes what it could not resolve into

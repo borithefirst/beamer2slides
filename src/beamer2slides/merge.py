@@ -4,6 +4,8 @@ the merge rules per element unit and field, and slide add/delete/reorder plannin
 Inputs are the base (snapshot.build_base), ours (the new conversion's slide entries with keys
 inherited: snapshot.slide_entries) and theirs (snapshot.read_presentation of the live deck)."""
 
+import hashlib
+import json
 import re
 from difflib import SequenceMatcher
 
@@ -15,6 +17,74 @@ CONVERGED_PLACE = 2.0  # pt: a deck move the source now reproduces this closely 
 MOVE_TOLERANCE = 0.05  # pt: members within this of the same step moved together (PDF pt)
 EDIT_FIELDS = ("geometry", "text", "text_style", "shape_style", "image")
 TOKEN = re.compile(r"\w+|\s+|[^\w\s]")
+TAKEN_SAYS = "the source's version was written (asked for by `--take-source`)"
+# Fields whose conflict is about what something *says*, and so can be settled for the source.
+# Existence and identity are not among them on purpose: see `Resolutions`.
+TAKEABLE_FIELDS = ("text", "text_style", "shape_style", "image", "geometry", "background", "notes")
+
+
+# ---------------------------------------------------------------- conflicts a person can settle
+
+def conflict_id(slide: str, element: str | None, field: str, base, ours, theirs) -> str:
+    """A name for one disagreement: short enough to read out of a report and type back in.
+
+    It is a digest of the disagreement itself - where it is, which field, and what each of the
+    three sides says - so it is the same id for as long as the same two changes stand against
+    each other, and a different one the moment either side moves. That is the whole safety of
+    `--take-source`: an id copied out of yesterday's report cannot land on a disagreement that
+    has since become another one. It matches nothing, the deck keeps what it has, and the report
+    says the id was not found."""
+    blob = json.dumps([slide, element, field, base, ours, theirs], sort_keys=True,
+                      ensure_ascii=False, default=str)
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:8]
+
+
+class Resolutions:
+    """What a person decided after reading a sync report.
+
+    A three-way merge can settle everything the two sides did not both touch, and where they did
+    it keeps the deck's version and says so - the deck is the side that cannot be recompiled.
+    That rule is right by default and wrong sometimes, and until now the only ways out were to
+    retype the passage in Slides or to `pull` the deck's wording back into the `.tex`. So a
+    conflict carries an id (`conflict_id`) and `--take-source <id>` says: at that one spot, the
+    source is right.
+
+    What it will settle is what a conflict is *about*: `TAKEABLE_FIELDS` are the fields that say
+    what something says - its words, its styling, its picture, its place. A conflict about
+    whether something exists at all (an element or a slide the source removed and somebody
+    edited) is not settled here however loudly it is asked for. Overwriting a paragraph leaves
+    the deck's version in the report, verbatim, and the way back is to paste it; deleting leaves
+    nothing, and that is what `--force-rebuild` is for, with its backup and its refusal.
+
+    Ids that matched nothing are `unused` - reported, never silently dropped."""
+
+    def __init__(self, take_source=()):
+        self.wanted = {str(x).strip().lower() for x in (take_source or ()) if str(x).strip()}
+        self.used: set[str] = set()
+
+    def take(self, cid: str) -> bool:
+        if cid not in self.wanted:
+            return False
+        self.used.add(cid)
+        return True
+
+    @property
+    def unused(self) -> list[str]:
+        return sorted(self.wanted - self.used)
+
+
+def conflict_entry(res, slide: str, element: str | None, field: str, base, ours, theirs,
+                   resolution: str = "deck kept", takeable: bool = False) -> tuple[dict, bool]:
+    """One conflict as the report holds it, and whether the person asked to settle it for the
+    source. `takeable` is the caller saying the source's version *can* be written here: the id is
+    on every conflict either way, since it is also how one talks about one that cannot."""
+    cid = conflict_id(slide, element, field, base, ours, theirs)
+    taken = bool(takeable and res is not None and res.take(cid))
+    entry = {"slide": slide, "element": element, "id": cid, "field": field, "base": base,
+             "ours": ours, "theirs": theirs, "resolution": TAKEN_SAYS if taken else resolution}
+    if takeable:
+        entry["takeable"] = True
+    return entry, taken
 
 
 # ---------------------------------------------------------------- text
@@ -28,10 +98,10 @@ def _hunks(base: list[str], other: list[str]) -> list[tuple[int, int, list[str]]
     return [(i1, i2, other[j1:j2]) for op, i1, i2, j1, j2 in sm.get_opcodes() if op != "equal"]
 
 
-def text_merge(base: str, ours: str, theirs: str) -> tuple[str, list[dict], bool]:
+def text_merge(base: str, ours: str, theirs: str, take=()) -> tuple[str, list[dict], bool]:
     """Three-way merge of an element's text, one paragraph at a time. Returns the merged text, the
-    paragraphs both sides rewrote (kept as the deck's, whole), and whether the result is safe to
-    write.
+    paragraphs both sides rewrote (kept as the deck's, whole, and carrying their index), and
+    whether the result is safe to write.
 
     A paragraph is a bullet or a line: the unit an edit belongs to. When the source rewrites three
     bullets and the person changed one word in the third, the first two are the source's and the
@@ -43,25 +113,34 @@ def text_merge(base: str, ours: str, theirs: str) -> tuple[str, list[dict], bool
 
     Prose in one paragraph still merges word by word, and so does a box whose paragraphs cannot be
     lined up (the source added or removed one). `safe` is False only when that word-level fallback
-    conflicts: the caller then keeps the deck's text and reports the conflict, as before."""
+    conflicts: the caller then keeps the deck's text and reports the conflict, as before.
+
+    `take`: paragraph indices a person asked to settle for the source after reading the report
+    (`Resolutions`, docs/sync.md "Taking the source's version"). Such a paragraph takes the
+    source's words whole, exactly as a kept one takes the deck's, and is no longer a conflict.
+    The index is the handle because it is the one thing both sides of the write agree on: the
+    planner merges the *predicted* text and sync merges what the deck actually holds, and
+    `collapse_holes` is the only difference between them - it never adds or drops a newline."""
     bp, op, tp = base.split("\n"), ours.split("\n"), theirs.split("\n")
     if len(bp) < 2 or not len(bp) == len(op) == len(tp):
         merged, clashes = diff3(base, ours, theirs)
         return merged, clashes, not clashes
     out: list[str] = []
     conflicts: list[dict] = []
-    for b, o, t in zip(bp, op, tp):
+    for k, (b, o, t) in enumerate(zip(bp, op, tp)):
         if b == o or o == t:      # the source left it alone, or both arrived at the same words
             out.append(t)
         elif b == t:              # only the source changed it
             out.append(o)
         else:
             merged, clashes = diff3(b, o, t)
-            if clashes:
-                out.append(t)
-                conflicts.append({"base": b, "ours": o, "theirs": t})
-            else:
+            if not clashes:
                 out.append(merged)
+            elif k in take:
+                out.append(o)
+            else:
+                out.append(t)
+                conflicts.append({"base": b, "ours": o, "theirs": t, "paragraph": k})
     return "\n".join(out), conflicts, True
 
 
@@ -487,12 +566,14 @@ def geometry_writable(members: list[dict], slide_read: dict | None) -> bool:
 
 
 def plan_unit(skey: str, ukey: str, base_members: list[dict] | None, ours_members: list[dict] | None,
-              slide_read: dict | None, report: dict, scale: float | None = None, adopt=None) -> dict:
+              slide_read: dict | None, report: dict, scale: float | None = None, adopt=None,
+              res=None) -> dict:
     """The action for one element unit: keep, recreate (with deck overrides), create, delete,
     move, adopt (the deck already shows the source's change) or adopt_object (the deck's own
     object is what the source now draws); conflicts and overrides go to `report`. `scale`: deck pt
     per PDF pt. `adopt(skey, ours_members, slide_read, oid=None)`: the live object showing the same
-    picture as the unit's new one - a user object, or `oid` itself (sync.picture_adopter)."""
+    picture as the unit's new one - a user object, or `oid` itself (sync.picture_adopter).
+    `res`: the conflicts a person asked to settle for the source (`Resolutions`)."""
     where = {"slide": skey, "element": ukey}
     if base_members is None:
         oid = adopt(skey, ours_members, slide_read) if adopt and slide_read else None
@@ -513,8 +594,8 @@ def plan_unit(skey: str, ukey: str, base_members: list[dict] | None, ours_member
             return {"key": ukey, "action": "delete"}
         if deck <= {"deleted", "part_deleted"}:
             return {"key": ukey, "action": "none", "gone": True}
-        report["conflicts"].append({**where, "field": "removed", "base": "element", "ours": None,
-                                    "theirs": sorted(deck), "resolution": "kept (edited in the deck)"})
+        report["conflicts"].append(conflict_entry(res, skey, ukey, "removed", "element", None,
+                                                  sorted(deck), "kept (edited in the deck)")[0])
         return {"key": ukey, "action": "keep", "deck": sorted(deck)}
     base_by = {m["key"]: m for m in base_members}
     ours_by = {m["key"]: m for m in ours_members}
@@ -570,8 +651,19 @@ def plan_unit(skey: str, ukey: str, base_members: list[dict] | None, ours_member
     overrides: dict = {}
     conflicts = []
 
-    def conflict(field, base_v, ours_v, theirs_v, resolution="deck kept"):
-        conflicts.append({**where, "field": field, "base": base_v, "ours": ours_v, "theirs": theirs_v, "resolution": resolution})
+    def conflict(field, base_v, ours_v, theirs_v, resolution="deck kept", takeable=False) -> bool:
+        entry, was_taken = conflict_entry(res, skey, ukey, field, base_v, ours_v, theirs_v, resolution, takeable)
+        conflicts.append(entry)
+        return was_taken
+
+    def taken(field, base_v, ours_v, theirs_v, resolution="deck kept") -> bool:
+        """Report the conflict, and say whether the person asked for the source's version of this
+        field. If they did, the deck's edit to it is not an override any more - nothing of it is
+        re-applied, and the report must not promise it was kept."""
+        if not conflict(field, base_v, ours_v, theirs_v, resolution, takeable=True):
+            return False
+        edited.discard(field)
+        return True
 
     keep = False
     # What the object will say once this unit is written: the source's new text, or the merge of it
@@ -585,37 +677,40 @@ def plan_unit(skey: str, ukey: str, base_members: list[dict] | None, ours_member
             if rest:
                 report["overrides"].append({**where, "fields": sorted(rest)})
             return {**action, "action": "adopt", "adopt": sorted(edited & {"image", "geometry"})}
-        conflict("image", "picture", sorted(src), "replaced in the deck")
-        keep = True
+        keep = not taken("image", "picture", sorted(src), "replaced in the deck")
     if "text" in edited and not keep:
         if anchor["kind"] == "table" and set(edits["text"]) == {main}:
             cells = table_merge(base_rb.get("text"), identity.plain_text(first["ir"]), theirs_rb.get("text"),
                                 base_rb.get("table"), theirs_rb.get("table"))
             if cells is None:
-                conflict("text", anchor["fingerprint"]["text"], first["fingerprint"]["text"], theirs_rb.get("text"))
-                keep = True
+                keep = not taken("text", anchor["fingerprint"]["text"], first["fingerprint"]["text"],
+                                 theirs_rb.get("text"))
             else:
                 overrides["text"] = {"table": True, "base": base_rb.get("text") or "", "theirs": theirs_rb.get("text") or "",
                                      "dims": base_rb.get("table")}
                 if cells[1]:
                     report["converged"].append({**where, "field": "text", "value": theirs_rb.get("text")})
         elif anchor["kind"] != "text" or set(edits["text"]) != {main}:
-            conflict("text", anchor["fingerprint"]["text"], first["fingerprint"]["text"], theirs_rb.get("text"))
-            keep = True
+            keep = not taken("text", anchor["fingerprint"]["text"], first["fingerprint"]["text"],
+                             theirs_rb.get("text"))
         else:
             b, o, t = (collapse_holes(x) for x in (base_rb.get("text") or "", predicted_text(first["ir"]), theirs_rb.get("text") or ""))
             merged, clashes, safe = text_merge(b, o, t)
             if not safe or (clashes and merged == t):
                 # Nothing of the source's survived the merge (or it cannot be written safely): the
                 # deck's text stands as it is, and there is nothing to write.
-                conflict("text", b, o, t)
-                keep = True
+                keep = not taken("text", b, o, t)
             else:
                 # Paragraphs both sides rewrote are conflicts of their own: the deck keeps them,
-                # and the rest of the box still takes what the source now says.
-                for c in clashes:
-                    conflict("text", c["base"], c["ours"], c["theirs"])
-                overrides["text"] = {"base": base_rb.get("text") or "", "theirs": theirs_rb.get("text") or ""}
+                # and the rest of the box still takes what the source now says. A person who read
+                # the report can name one of them and have the source's paragraph written instead;
+                # the others are untouched, which is the point of merging by paragraph at all.
+                take = [c["paragraph"] for c in clashes
+                        if conflict("text", c["base"], c["ours"], c["theirs"], takeable=True)]
+                if take:
+                    merged, clashes, safe = text_merge(b, o, t, take)
+                overrides["text"] = {"base": base_rb.get("text") or "", "theirs": theirs_rb.get("text") or "",
+                                     **({"take": take} if take else {})}
                 written = merged
                 if merged == o:
                     report["converged"].append({**where, "field": "text", "value": theirs_rb.get("text")})
@@ -626,8 +721,7 @@ def plan_unit(skey: str, ukey: str, base_members: list[dict] | None, ours_member
         # (a source "style" change can be list levels or sizes; only the same attributes clash)
         clash = "style" in src and source_style_keys(anchor, first) & deck_style_keys(base_rb, theirs_rb)
         if paras is None or set(edits["text_style"]) != {main} or anchor["kind"] not in ("text", "table"):
-            conflict("text_style", "style", sorted(src), "restyled in the deck")
-            keep = True
+            keep = not taken("text_style", "style", sorted(src), "restyled in the deck")
         elif runs is None or anchor["kind"] == "table":
             # Some words restyled (or a table): the deck's run styles go onto the same words of the
             # new text (sync.style_range_requests).
@@ -637,44 +731,50 @@ def plan_unit(skey: str, ukey: str, base_members: list[dict] | None, ours_member
                 # ends here, and saying nothing would make the report claim it was kept.
                 conflict("text_style", "style", "the words it was on were replaced", "restyled in the deck",
                          "the styling of the replaced words is gone")
-            if clash:
-                conflict("text_style", "style", "restyled in the source", "restyled in the deck", "deck style re-applied")
+            if clash and taken("text_style", "style", "restyled in the source", "restyled in the deck",
+                               "deck style re-applied"):
+                overrides.pop("text_style", None)
         else:
             overrides["text_style"] = {"runs": runs, "paragraphs": paras}
-            if clash:
-                conflict("text_style", "style", "restyled in the source", "restyled in the deck", "deck style re-applied")
+            if clash and taken("text_style", "style", "restyled in the source", "restyled in the deck",
+                               "deck style re-applied"):
+                overrides.pop("text_style", None)
     if "shape_style" in edited and not keep:
         if anchor["kind"] != "shape" or set(edits["shape_style"]) != {main}:
-            conflict("shape_style", "style", sorted(src), "restyled in the deck")
-            keep = True
+            keep = not taken("shape_style", "style", sorted(src), "restyled in the deck")
         else:
             overrides["shape_style"] = theirs_rb.get("shape_style")
-            if "style" in src:
-                conflict("shape_style", "style", "restyled in the source", "restyled in the deck", "deck style re-applied")
+            if "style" in src and taken("shape_style", "style", "restyled in the source",
+                                        "restyled in the deck", "deck style re-applied"):
+                overrides.pop("shape_style", None)
     if "geometry" in edited and not keep and not geometry_writable(base_members, slide_read):
         # The person moved something inside the unit; a rewritten unit can't be put back that way.
-        conflict("geometry", anchor["fingerprint"]["bbox"], first["fingerprint"]["bbox"], theirs_rb.get("box"),
-                 "deck kept (the deck moved a part of the element on its own)")
-        keep = True
+        keep = not taken("geometry", anchor["fingerprint"]["bbox"], first["fingerprint"]["bbox"],
+                         theirs_rb.get("box"), "deck kept (the deck moved a part of the element on its own)")
     if "geometry" in edited and not keep:
         both = "position" in src
         overrides["geometry"] = {"mode": "theirs" if both else "delta"}
-        if both:
-            conflict("geometry", anchor["fingerprint"]["bbox"], first["fingerprint"]["bbox"], theirs_rb.get("box"),
-                     "deck position kept")
+        if both and taken("geometry", anchor["fingerprint"]["bbox"], first["fingerprint"]["bbox"],
+                          theirs_rb.get("box"), "deck position kept"):
+            overrides.pop("geometry", None)
     report["conflicts"] += conflicts
+    # `edited` can be empty by now: `taken` takes a field out of it when the person asked for the
+    # source's version of it, and an entry here says "the deck's version of these fields was kept",
+    # which with no fields left would be a promise about nothing.
     if keep:
-        report["overrides"].append({**where, "fields": sorted(edited)})
+        if edited:
+            report["overrides"].append({**where, "fields": sorted(edited)})
         return {**action, "action": "keep"}
     report["applied"].append({**where, "fields": sorted(src)})
-    report["overrides"].append({**where, "fields": sorted(edited)})
+    if edited:
+        report["overrides"].append({**where, "fields": sorted(edited)})
     return {**action, "action": "recreate", "overrides": overrides}
 
 
 # ---------------------------------------------------------------- slides
 
 def empty_report() -> dict:
-    return {"applied": [], "overrides": [], "conflicts": [], "converged": [], "user_objects": [],
+    return {"applied": [], "overrides": [], "conflicts": [], "resolved": [], "converged": [], "user_objects": [],
             "slides": {"created": [], "deleted": [], "moved": [], "kept": [], "held": [], "user_added": []},
             "warnings": []}
 
@@ -727,12 +827,15 @@ def report_label_moves(moves: list[dict], report: dict, held: bool = True) -> No
             ": docs/labels.md, \"If a label does change\"." + at_risk)
 
 
-def plan_merge(base: dict, ours: dict, theirs: dict, adopt=None, follow_labels: bool = False) -> dict:
+def plan_merge(base: dict, ours: dict, theirs: dict, adopt=None, follow_labels: bool = False,
+               take_source=()) -> dict:
     """ours: {"slides": [slide entries with inherited keys], "pairs": {ours index: base index}}.
     `adopt`: see plan_unit (a picture the deck already shows).
     `follow_labels`: write to a slide whose label `identity.label_moves` is unsure about anyway.
+    `take_source`: conflict ids from an earlier report to settle for the source (`Resolutions`).
     Returns {"slides": [per slide plan], "order": [live slide ids or "new:<key>"], "report"}."""
     report = empty_report()
+    res = Resolutions(take_source)
     live = {s["objectId"]: s for s in theirs["slides"]}
     base_slides = base["slides"]
     pairs = {int(k): v for k, v in ours["pairs"].items()}
@@ -790,14 +893,14 @@ def plan_merge(base: dict, ours: dict, theirs: dict, adopt=None, follow_labels: 
                           if e["key"] == oe["key"]) \
                 or {e["key"] for e in content(b["elements"])} != {e["key"] for e in content(o["elements"])}
             if changed:
-                report["conflicts"].append({"slide": o["key"], "element": None, "field": "slide", "base": "slide",
-                                            "ours": "changed", "theirs": "deleted", "resolution": "kept deleted"})
+                report["conflicts"].append(conflict_entry(res, o["key"], None, "slide", "slide", "changed",
+                                                          "deleted", "kept deleted")[0])
             plans.append({"key": o["key"], "action": "gone", "ours": j, "base": i, "objectId": None})
             continue
         if j in held:
             plans.append(hold_slide(b, o, read, report, j, i))
             continue
-        plans.append(plan_slide(b, o, read, report, base, j, i, adopt))
+        plans.append(plan_slide(b, o, read, report, base, j, i, adopt, res))
 
     for i, b in enumerate(base_slides):
         if i in matched_base:
@@ -836,9 +939,30 @@ def plan_merge(base: dict, ours: dict, theirs: dict, adopt=None, follow_labels: 
         # (a slide duplicated in Slides carries the tags of the original's objects)
         copies = {rb["title"][4:].rsplit("/", 3)[0] for rb in s["objects"].values() if (rb.get("title") or "").startswith("b2s:")}
         report["slides"]["user_added"].append({"objectId": s["objectId"], "copy_of": sorted(copies) or None})
+    report_resolutions(res, report)
     order, moved = plan_order(base, ours, theirs, plans, report)
     report["slides"]["moved"] = moved
     return {"slides": plans, "order": order, "report": report}
+
+
+def report_resolutions(res: Resolutions, report: dict) -> None:
+    """What `--take-source` settled, and what it did not reach.
+
+    `resolved` keeps the deck's own version of each spot that was written over, verbatim: that is
+    the way back, and it has to be in the report because nowhere else will have it a minute from
+    now. An id that matched nothing is the ordinary case of a report read a version too late -
+    nothing was written and nothing is lost, and the warning is there so that a person who meant
+    to settle something does not read "no conflicts" and believe it happened."""
+    for c in report["conflicts"]:
+        if c.get("resolution") == TAKEN_SAYS:
+            report["resolved"].append({"id": c["id"], "slide": c["slide"], "element": c["element"],
+                                       "field": c["field"], "was": c["theirs"]})
+    for cid in res.unused:
+        report["warnings"].append(
+            f"--take-source {cid}: no conflict in this sync has that id, so nothing was settled for the "
+            f"source. An id names one disagreement and stops matching as soon as either side of it moves, "
+            f"so a report a version old cannot reach today's conflict - read the report this run wrote and "
+            f"take the id from there. Nothing was written on that account and nothing is lost.")
 
 
 def background_edited(b: dict, read: dict) -> bool:
@@ -893,12 +1017,13 @@ def hold_slide(b: dict, o: dict, read: dict, report: dict, j: int, i: int) -> di
             "objectId": b["objectId"], "units": []}
 
 
-def plan_slide(b: dict, o: dict, read: dict, report: dict, base: dict, j: int, i: int, adopt=None) -> dict:
+def plan_slide(b: dict, o: dict, read: dict, report: dict, base: dict, j: int, i: int, adopt=None,
+               res=None) -> dict:
     skey = o["key"]
     bu, ou = units(b["elements"]), units(o["elements"])
     unit_plans = []
     for ukey in list(ou) + [k for k in bu if k not in ou]:
-        unit_plans.append({**plan_unit(skey, ukey, bu.get(ukey), ou.get(ukey), read, report, deck_scale(base), adopt),
+        unit_plans.append({**plan_unit(skey, ukey, bu.get(ukey), ou.get(ukey), read, report, deck_scale(base), adopt, res),
                            "base_members": [m["key"] for m in bu.get(ukey, [])],
                            "ours_members": [m["key"] for m in ou.get(ukey, [])]})
     # A unit the source removed may live on inside another one (paragraphs joined): if that one
@@ -910,8 +1035,8 @@ def plan_slide(b: dict, o: dict, read: dict, report: dict, base: dict, j: int, i
         if u["action"] == "delete" and words and any(words in t for t in kept_texts):
             u["action"] = "keep"
             report["applied"] = [a for a in report["applied"] if not (a["slide"] == skey and a["element"] == u["key"])]
-            report["conflicts"].append({"slide": skey, "element": u["key"], "field": "removed", "base": words, "ours": None,
-                                        "theirs": words, "resolution": "kept: its text moved into an element in conflict"})
+            report["conflicts"].append(conflict_entry(res, skey, u["key"], "removed", words, None, words,
+                                                      "kept: its text moved into an element in conflict")[0])
     adopted = {u["objectId"] for u in unit_plans if u["action"] == "adopt_object"}
     for u in user_objects(b, read):
         if u["objectId"] not in adopted:  # (an adopted object is the source's element now)
@@ -919,10 +1044,12 @@ def plan_slide(b: dict, o: dict, read: dict, report: dict, base: dict, j: int, i
     plan = {"key": skey, "action": "update", "ours": j, "base": i, "objectId": b["objectId"], "units": unit_plans}
     # Background: the source's picture or colour unless the deck changed it.
     if b.get("background") != o.get("background"):
+        write = True
         if background_edited(b, read):
-            report["conflicts"].append({"slide": skey, "element": None, "field": "background", "base": b.get("background"),
-                                        "ours": o.get("background"), "theirs": read.get("background"), "resolution": "deck kept"})
-        else:
+            entry, write = conflict_entry(res, skey, None, "background", b.get("background"),
+                                          o.get("background"), read.get("background"), takeable=True)
+            report["conflicts"].append(entry)
+        if write:
             plan["background"] = o["background"]
             report["applied"].append({"slide": skey, "element": None, "fields": ["background"]})
     elif background_edited(b, read):
@@ -937,8 +1064,11 @@ def plan_slide(b: dict, o: dict, read: dict, report: dict, base: dict, j: int, i
         else:
             merged, clashes = diff3(b.get("notes_readback") or "", on, tn)
             if clashes:
-                report["conflicts"].append({"slide": skey, "element": None, "field": "notes", "base": bn, "ours": on,
-                                            "theirs": tn, "resolution": "deck kept"})
+                entry, take_ours = conflict_entry(res, skey, None, "notes", bn, on, tn, takeable=True)
+                report["conflicts"].append(entry)
+                if take_ours:
+                    plan["notes"] = on
+                    report["applied"].append({"slide": skey, "element": None, "fields": ["notes"]})
             elif merged != tn:
                 plan["notes"] = merged
                 report["applied"].append({"slide": skey, "element": None, "fields": ["notes"], "how": "merged"})

@@ -178,6 +178,25 @@ def test_a_real_sync_from_that_same_context_is_forbidden_before_anything_happens
     assert sorted(p.name for p in root.rglob("*")) == before, "a forbidden sync made a folder"
 
 
+def test_take_source_is_published_as_a_list_of_ids_a_person_chose(tmp_path):
+    """`--take-source` writes over what somebody wrote in the deck, so the tool has to be able to
+    carry several ids at once (a person reads one report and answers it once) and its description
+    has to say whose decision it is - INSTRUCTIONS.md says the same thing at greater length."""
+    from beamer2slides.agent.schema import all_schemas
+
+    schema = next(s for s in all_schemas() if s["name"] == "deck_sync")
+    prop = schema["input_schema"]["properties"]["take_source"]
+    assert "array" in prop["type"] and prop["items"]["type"] == "string"
+    assert "take_source" not in schema["input_schema"].get("required", [])
+    assert "never pick an id yourself" in prop["description"]
+    # and it reaches the journey: a context that may not write refuses before the ids matter
+    root = tmp_path / "ws"
+    root.mkdir(parents=True)
+    shutil.copy2(deck_pdf(), root / "talk.pdf")
+    result = deck_sync(may_read_google(root), pdf="talk.pdf", deck="d", take_source=["abc12345"])
+    assert not result.ok and result.code == "forbidden", result.summary
+
+
 def test_a_bad_backup_mode_is_a_bad_request_not_a_crash(tmp_path):
     root = tmp_path / "ws"
     root.mkdir(parents=True)

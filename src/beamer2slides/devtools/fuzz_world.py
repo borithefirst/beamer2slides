@@ -477,8 +477,11 @@ def new_object(skey, o_el, base_el, live, overrides, tok):
             cells = merge.table_merge(ov["base"], text, ov["theirs"], ov["dims"], ov["dims"])
             text = "\n".join("\t".join(r) for r in cells[0]) if cells else ov["theirs"]
         else:
-            text = merge.diff3(merge.collapse_holes(ov["base"]), merge.collapse_holes(text),
-                               merge.collapse_holes(ov["theirs"]))[0]
+            # `sync.override_requests` merges by paragraph, not by word, and carries the
+            # paragraphs a person settled for the source: the applier has to do both, or a
+            # `--take-source` would look like a loss to the oracle.
+            text = merge.text_merge(merge.collapse_holes(ov["base"]), merge.collapse_holes(text),
+                                    merge.collapse_holes(ov["theirs"]), ov.get("take") or ())[0]
     main = base_el.get("main") if base_el else None
     parent = live["objects"].get(main, {}).get("parent_group") if main else None
     if parent not in live["objects"]:

@@ -45,6 +45,12 @@ def _cli():
     return cli
 
 
+def _merge():
+    """`merge` as a module, imported when a tool runs, for the same reason `_cli` is."""
+    from .. import merge
+    return merge
+
+
 def _pdf(j: Job, ref: str) -> Path:
     path = j.path(ref)
     if not path.is_file():
@@ -427,6 +433,12 @@ def deck_sync(
                                    "another frame. By default such a slide is held back and nothing "
                                    "is written to it; only a person who has read the .tex and knows "
                                    "the labels are right can say this."] = False,
+    take_source: Annotated[list[str] | None,
+                           "Ids of conflicts the last report listed, to be settled for the source "
+                           "instead of the deck: what the person wrote there is written over, and "
+                           "the report keeps their version verbatim. Relay a decision somebody made "
+                           "in words after reading the report; never pick an id yourself. An id "
+                           "whose conflict has since changed matches nothing and is warned about."] = None,
 ) -> None:
     """Merge a changed PDF into a deck someone has edited, three ways, keeping their edits.
 
@@ -462,7 +474,7 @@ def deck_sync(
 
     try:
         info = run_sync(source, target, out_dir, dry_run, overlays, measure,
-                        follow_labels=follow_labels)
+                        follow_labels=follow_labels, take_source=take_source or ())
     except SystemExit as exc:
         # `sync.sync` says no by exiting. Without a base there is nothing to merge against: the
         # deck's own edits cannot be told apart from what the last conversion put there.
@@ -476,7 +488,13 @@ def deck_sync(
 
     report = info["report"]
     for clash in report["conflicts"]:
-        j.conflict(f"{clash.get('element')}: {clash.get('field')} ({clash.get('resolution')})",
+        # The id is what a person types back to settle that one conflict for the source, so it
+        # belongs in the line the agent relays, not only in the report file.
+        takeable = (clash.get("takeable") and clash.get("id")
+                    and clash.get("resolution") != _merge().TAKEN_SAYS)
+        j.conflict(f"{clash.get('element')}: {clash.get('field')} ({clash.get('resolution')})"
+                   + (f"; take_source={clash['id']} would write the source's version here instead"
+                      if takeable else ""),
                    where=str(clash.get("slide")))
     for warning in report["warnings"]:
         j.warn(warning, where="sync")
@@ -503,6 +521,9 @@ def deck_sync(
         "kept": len(report["overrides"]),
         "conflicts": len(report["conflicts"]),
         "held": [h["slide"] for h in report["slides"].get("held") or []],
+        # What `take_source` settled, each carrying the deck's own version of that spot: the
+        # report file keeps it too, and there is nowhere else it still exists.
+        "resolved": report.get("resolved") or [],
         "warnings": len(report["warnings"]),
         "requests": requests,
         "requests_by_phase": sent,
@@ -524,6 +545,9 @@ def deck_sync(
                     f"recovery block.")
                  + (" Every conflict is a place both sides changed, where the deck won - read them "
                     "before deciding the source is right." if report["conflicts"] else "")
+                 + (f" {len(j.data['resolved'])} conflict(s) were settled for the source because "
+                    f"take_source named them; what was written over is in `resolved` and in the "
+                    f"report, and nowhere else." if j.data.get("resolved") else "")
                  + (f" {len(j.data['held'])} slide(s) were held back with nothing written: a frame label "
                     f"may have moved onto another frame, so which frame those slides belong to is in "
                     f"doubt. That is a question for the person, not for you - ask them to check the "

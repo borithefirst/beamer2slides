@@ -475,6 +475,32 @@ sync keeps it unless `--overlays` says otherwise (`sync.overlay_mode`), or a dec
 `--overlays all` would lose its in-between steps. `pull --apply` and `pull --out DIR` keep every
 file they replace (`inverse.keep_backup`: `.bak`, `.bak2`, …, pictures included).
 
+**A conflict a person can settle** (`--take-source`, docs/sync.md "Taking the source's version"):
+the deck keeping what it has is right as a default and is not always what the author wants, and the
+only ways to say otherwise were editing the deck by hand or rebuilding it - the one thing this
+project refuses to do. Every conflict now carries an **id** (`merge.conflict_id`: 8 hex over the
+slide, the element, the field and the three versions), and `--take-source ID` writes the source's
+version of that one. The id is the whole safety: it is stable while the same two changes stand
+against each other and different the moment either moves, so one copied out of an older report
+matches nothing, nothing is written and the run says which id found no home and why. Only conflicts
+about what something *says* can be taken (`merge.TAKEABLE_FIELDS`: text, text_style, shape_style,
+image, geometry, background, notes); existence and identity - `removed`, `deleted`, `part_deleted`,
+a slide, a label - carry an id to talk about and refuse, because overwriting a paragraph leaves the
+person's paragraph in the report verbatim and deleting their slide leaves nothing, which is
+`--force-rebuild`'s business and asks in those words. Where both sides rewrote several paragraphs of
+one box each is its own conflict, and taking one writes the source's line there while the others
+stay the deck's; the handle is the paragraph index, the one thing the planner (which merges the
+*predicted* text) and `sync.override_requests` (which re-merges what the deck holds) agree on, since
+`collapse_holes` never adds or drops a newline. What was written over is kept verbatim in the
+report's `resolved` section - the way back, and nowhere else will hold those words a minute later -
+and a field settled this way stops counting as an override, so the report does not also promise the
+deck's version was kept. It is a person's decision like `--follow-labels`: the agent tool takes
+`deck_sync(take_source=[...])` and `INSTRUCTIONS.md` says an agent relays an id somebody gave it in
+words and never picks one itself. The markdown report shows a conflict's three versions one under
+the other with the `--take-source ID` that settles it; `fuzz_world` merges overrides with
+`text_merge` and the take list now, as `override_requests` really does, so a take cannot read as a
+loss to the oracle.
+
 Frame labels (`labels.py`, `docs/labels.md`): `\begin{frame}[label=x]` is the only piece of a slide's
 identity that survives compiling (beamer writes the PDF destination `x`, and `x<n>` per overlay step;
 `extract.frame_labels` reads them back and `identity` keys the slide by them), so a label per frame,

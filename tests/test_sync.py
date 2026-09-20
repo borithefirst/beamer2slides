@@ -475,6 +475,192 @@ def test_same_text_on_both_sides_converges():
     assert not mplan["report"]["applied"] and not merge.has_writes(mplan, [s["objectId"] for s in theirs["slides"]])
 
 
+# ------------------------------------------------- taking the source's version of one conflict
+
+def take_base(text="One from the base\nTwo from the base\nThree from the base"):
+    """`intro` with a body box of however many paragraphs the case wants."""
+    base = three_slides()
+    slide = base["slides"][0]
+    slide["elements"][1] = entry("text/body/0", text_ir(text, (20, 60, 200, 110), "p0t1"), "b2s_s000_t1")
+    slide["text"] = " ".join(e["fingerprint"]["text"] for e in slide["elements"])
+    slide["order"] = [e["main"] for e in slide["elements"] if "main" in e]
+    return base
+
+
+def take_case(base, source, deck):
+    """The source rewrites intro's body to `source`, a person in the deck to `deck` (which ends on
+    the newline Slides keeps)."""
+    ours, theirs = triple(base)
+    ours["slides"][0]["elements"][1] = ours_entry("text/body/0", text_ir(source, (20, 60, 200, 110), "p0t1"))
+    edit_text(theirs["slides"][0], "b2s_s000_t1", deck + "\n")
+    return ours, theirs
+
+
+def only_conflict(mplan, field="text"):
+    (c,) = [x for x in mplan["report"]["conflicts"] if x["field"] == field]
+    return c
+
+
+def test_a_conflict_id_names_those_two_changes_and_nothing_else():
+    """The id is a hash of the spot and the three versions, so it is the same on every run while
+    the same two changes stand against each other, and a different one the moment either moves.
+    That is the whole safety of `--take-source`: an id copied out of an older report cannot land
+    on a disagreement that has since become another one."""
+    base = take_base()
+    args = ("One from the source\nTwo from the source\nThree from the base",
+            "One from the base\nTwo from the deck\nThree from the base")
+    first = only_conflict(merge.plan_merge(base, *take_case(base, *args)))
+    again = only_conflict(merge.plan_merge(base, *take_case(base, *args)))
+    assert first["id"] == again["id"] and len(first["id"]) == 8
+    moved = only_conflict(merge.plan_merge(base, *take_case(
+        base, args[0], "One from the base\nTwo from the deck, reworded\nThree from the base")))
+    assert moved["id"] != first["id"]
+
+
+def test_take_source_writes_that_paragraph_and_leaves_the_others_alone():
+    """Two paragraphs clash; the person reads the report and says the source is right about one of
+    them. That one is written, the other stays as the deck has it, and the paragraph only the
+    source touched was never in question."""
+    base = take_base()
+    args = ("One from the source\nTwo from the source\nThree from the source",
+            "One from the base\nTwo from the deck\nThree from the deck")
+    mplan = merge.plan_merge(base, *take_case(base, *args))
+    two = next(c for c in mplan["report"]["conflicts"] if c["ours"] == "Two from the source")
+    ours, theirs = take_case(base, *args)
+    mplan = merge.plan_merge(base, ours, theirs, take_source=[two["id"]])
+    ov = unit(mplan, "intro", "text/body/0")["overrides"]["text"]
+    assert ov["take"] == [1]
+    # What sync writes: `override_requests` re-merges the deck's text back onto the element it has
+    # just recreated, which holds the source's words, with the same list of paragraphs.
+    current = merge.predicted_text(ours["slides"][0]["elements"][1]["ir"])
+    written, _, safe = merge.text_merge(ov["base"], current, ov["theirs"], ov["take"])
+    assert safe and written == "One from the source\nTwo from the source\nThree from the deck\n"
+    resolutions = {c["ours"]: c["resolution"] for c in mplan["report"]["conflicts"]}
+    assert resolutions == {"Two from the source": merge.TAKEN_SAYS, "Three from the source": "deck kept"}
+
+
+def test_what_take_source_wrote_over_is_kept_verbatim_in_the_report():
+    """A person's words are about to stop existing anywhere: the report is the way back, and it has
+    to hold them, because a minute from now nothing else will."""
+    base = take_base()
+    args = ("One from the source\nTwo from the source\nThree from the base",
+            "One from the base\nTwo from the deck\nThree from the base")
+    cid = only_conflict(merge.plan_merge(base, *take_case(base, *args)))["id"]
+    report = merge.plan_merge(base, *take_case(base, *args), take_source=[cid])["report"]
+    assert report["resolved"] == [{"id": cid, "slide": "intro", "element": "text/body/0",
+                                   "field": "text", "was": "Two from the deck"}]
+
+
+def test_taking_a_whole_box_makes_the_decks_text_no_override_at_all():
+    """Where nothing of the source survived the merge the conflict is the whole box, and taking it
+    writes the source's text entire - so the deck's edit is not an override any more and the report
+    must not promise it was kept."""
+    base = take_base("One from the base\nTwo from the base")
+    args = ("One from the source\nTwo from the source", "One from the deck\nTwo from the deck")
+    cid = only_conflict(merge.plan_merge(base, *take_case(base, *args)))["id"]
+    mplan = merge.plan_merge(base, *take_case(base, *args), take_source=[cid])
+    u = unit(mplan, "intro", "text/body/0")
+    assert u["action"] == "recreate" and u["overrides"] == {}
+    assert mplan["report"]["overrides"] == []
+    assert mplan["report"]["resolved"][0]["was"] == "One from the deck\nTwo from the deck\n"
+
+
+def test_an_id_that_matches_nothing_settles_nothing_and_says_so():
+    """A report a version old cannot reach today's conflict. Nothing is written on that account,
+    and the run says which id found no home rather than dropping it."""
+    base = take_base()
+    mplan = merge.plan_merge(base, *take_case(
+        base, "One from the source\nTwo from the source\nThree from the base",
+        "One from the base\nTwo from the deck\nThree from the base"), take_source=["0badcafe"])
+    assert only_conflict(mplan)["resolution"] == "deck kept"
+    assert mplan["report"]["resolved"] == []
+    (w,) = mplan["report"]["warnings"]
+    assert w.startswith("--take-source 0badcafe: no conflict in this sync has that id")
+
+
+def test_a_geometry_conflict_can_be_settled_for_the_source():
+    """Both sides moved the element: `--take-source` puts it back where the source draws it."""
+    base = three_slides()
+
+    def case():
+        ours, theirs = triple(base)
+        ours["slides"][0]["elements"][1] = ours_entry("text/body/0", text_ir(
+            "First point of intro\nSecond point, changed", (20, 100, 200, 130), "p0t1"))
+        obj = theirs["slides"][0]["objects"]["b2s_s000_t1"]
+        obj["box"] = [v + 30 for v in obj["box"]]
+        return ours, theirs
+
+    cid = only_conflict(merge.plan_merge(base, *case()), "geometry")["id"]
+    mplan = merge.plan_merge(base, *case(), take_source=[cid])
+    u = unit(mplan, "intro", "text/body/0")
+    assert "geometry" not in u["overrides"] and u["action"] == "recreate"
+    assert only_conflict(mplan, "geometry")["resolution"] == merge.TAKEN_SAYS
+
+
+def test_a_background_and_a_note_can_be_settled_for_the_source():
+    base = three_slides()
+
+    def case():
+        ours, theirs = triple(base)
+        ours["slides"][0]["background"] = "color:#eeeeee"
+        ours["slides"][0]["notes"] = "Say the numbers are new"
+        theirs["slides"][0]["background"] = {"state": "RENDERED", "solidFill": {"color": "#fff2cc"}}
+        theirs["slides"][0]["notes"] = "Mention the deadline"
+        return ours, theirs
+
+    plain = merge.plan_merge(base, *case())
+    fields = {c["field"]: c for c in plain["report"]["conflicts"]}
+    assert set(fields) == {"background", "notes"} and all(c["takeable"] for c in fields.values())
+    mplan = merge.plan_merge(base, *case(), take_source=[c["id"] for c in fields.values()])
+    plan = next(p for p in mplan["slides"] if p["key"] == "intro")
+    assert plan["background"] == "color:#eeeeee" and plan["notes"] == "Say the numbers are new"
+    assert {r["field"] for r in mplan["report"]["resolved"]} == {"background", "notes"}
+
+
+def test_existence_is_never_settled_for_the_source():
+    """`--take-source` decides what something *says*. Whether it exists at all is another question:
+    overwriting text leaves the deck's version in the report as the way back, deleting leaves
+    nothing, and a deletion nobody can undo is what `--force-rebuild` is for. So a `removed`, a
+    `deleted` or a whole slide the deck kept carries an id to talk about and refuses to be taken."""
+    base = three_slides()
+    ours, theirs = triple(base)
+    del ours["slides"][2]["elements"][1]
+    edit_text(theirs["slides"][2], "b2s_s002_t1", "Edited in the deck\n")
+    mplan = merge.plan_merge(base, ours, theirs)
+    (c,) = mplan["report"]["conflicts"]
+    assert c["field"] == "removed" and "takeable" not in c and c["id"]
+    # and naming it anyway settles nothing at all
+    ours, theirs = triple(base)
+    del ours["slides"][2]["elements"][1]
+    edit_text(theirs["slides"][2], "b2s_s002_t1", "Edited in the deck\n")
+    again = merge.plan_merge(base, ours, theirs, take_source=[c["id"]])
+    assert unit(again, "end", "text/body/0")["action"] == "keep"
+    assert again["report"]["resolved"] == [] and len(again["report"]["warnings"]) == 1
+
+
+def test_every_takeable_conflict_is_about_what_something_says():
+    """The line is drawn once, in `merge.TAKEABLE_FIELDS`, and a field added to a report later has
+    to be put on one side of it on purpose."""
+    assert set(merge.TAKEABLE_FIELDS).isdisjoint({"removed", "deleted", "part_deleted", "slide", "label"})
+
+
+def test_the_report_shows_three_sides_and_how_to_take_the_source():
+    """What a person opens a conflict report to see: the base, what the source now says, what they
+    wrote - and, where it can be, the one thing they type to choose the source."""
+    from beamer2slides.sync import conflict_lines
+    text = conflict_lines({"slide": "intro", "element": "text/body/0", "id": "abc12345", "field": "text",
+                           "base": "Two from the base", "ours": "Two from the source",
+                           "theirs": "Two from the deck", "resolution": "deck kept", "takeable": True})
+    assert "`intro` / `text/body/0`: **text**, deck kept" in text
+    assert "    > Two from the deck" in text and "    > Two from the source" in text
+    assert "`--take-source abc12345`" in text
+    # a conflict already settled does not offer to settle itself again
+    taken = conflict_lines({"slide": "intro", "element": None, "id": "abc12345", "field": "notes",
+                            "base": "", "ours": "a", "theirs": "b", "resolution": merge.TAKEN_SAYS,
+                            "takeable": True})
+    assert "to write the source's version here instead" not in taken and "(nothing)" in taken
+
+
 def table_ir(rows, bbox=(20, 60, 200, 120), eid="p1tab0"):
     return {"id": eid, "kind": "table", "role": "table", "bbox": list(bbox), "frame": list(bbox), "size": 10.0,
             "row_baselines": [bbox[1] + 12 * k for k in range(len(rows))], "row_heights": [12.0] * len(rows),

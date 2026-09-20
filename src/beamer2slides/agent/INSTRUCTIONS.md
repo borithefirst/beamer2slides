@@ -141,6 +141,14 @@ per attempt. Say so before you start one; do not start two.
   is a question for the person — ask them to check the `.tex`. Do **not** pass
   `follow_labels=True` to make it go through: that is a claim about what the author meant, and
   only the author can make it.
+* A conflict is settled **for the deck** and reported; `take_source` on `deck_sync` is the one way
+  to settle one the other way, and it is a decision the person makes, not you. Each conflict in the
+  report carries an id; a person who reads the three versions and says "the source is right about
+  that paragraph" gives you the id, and you pass it on. Never pick one yourself, never pass every
+  id you were shown, and never pass one to make a report come back clean: the id names a place
+  somebody wrote something, and what it writes over survives only in the report's `resolved`
+  section. An id stops matching as soon as either side of its conflict moves, so it is read out of
+  *this* run's report, not a stored one — a stale id settles nothing and says so in a warning.
 * Slide order is merged, not taken wholesale: a slide a person dragged stays where they put it.
 * A sync killed halfway loses nothing — the next one sweeps up — so a timeout is not a reason to
   force anything.
