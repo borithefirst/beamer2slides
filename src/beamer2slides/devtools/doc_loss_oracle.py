@@ -131,7 +131,9 @@ def stands_elsewhere(text: str, whole: str) -> bool:
                for piece in _split(token))
 
 
-def joined_differently(token: str, after: Counter, was: Counter) -> bool:
+def joined_differently(token: str, after: Counter, was: Counter,
+                       tab_was: Counter | None = None,
+                       theirs: Counter | None = None) -> bool:
     r"""A token the reader typed is not lost when the words *they* put in it are still
     there, joined to something else.
 
@@ -157,28 +159,52 @@ def joined_differently(token: str, after: Counter, was: Counter) -> bool:
     is a token of the base with one of its words taken out, nothing else.
     """
     pieces = _split(token)
-    if len(pieces) < 2 and not _pared_down(token, was) \
+    if len(pieces) < 2 and not _pared_down(token, was, theirs) \
             and not _dressed_up(token, after, was) \
-            and not _undressed(token, after, was):
+            and not _undressed(token, after, was) \
+            and not _welded(token, after, tab_was if tab_was is not None else was):
         return False
     base = {piece for other in was for piece in _split(other)}
     there = {piece for other in after for piece in _split(other)}
     return all(piece in there for piece in pieces if piece not in base)
 
 
-def _pared_down(token: str, was: Counter) -> bool:
+def _pared_down(token: str, was: Counter, theirs: Counter | None = None) -> bool:
     """Whether this token is a token of the base with one of its joined words deleted.
 
     Exactly that, and nothing looser: the base token with the span of one of its word
     pieces cut out has to *equal* the token. A word of the base the reader typed again
     somewhere new is then still their own work and still has to survive.
+
+    The cut may take the joiner with it, which is the half this missed. Deleting
+    `soft` out of `soft\xadhyphen` leaves `\xadhyphen` if the reader stopped at the
+    word and plain `hyphen` if they swept the soft hyphen up too — the same deletion
+    either way, and only the first was recognised, so the second read as a word they
+    had typed and the source's rewriting of the other half looked like a loss
+    (chain-6 seed 94030: the reader deleted `a soft\xad`, `collide` made `hyphen`
+    into `kestrel`, the merge said `kestrel` and both edits were in it). Only the
+    joiners *between* two of the token's words are cut with it; punctuation at the
+    ends is `_undressed`'s question and stays its own.
+
+    And only when the narrow leftover is not standing there as well: a base token
+    pared down once leaves one token, so if `\xadhyphen` is in the reader's text
+    then that is the paring and a bare `hyphen` beside it is a word they typed
+    (`theirs`, the guard the test of this function has always asserted).
     """
     for other in was:
         spans = [m.span() for m in PIECE.finditer(other)]
         if len(spans) < 2:
             continue
-        if any(other[:start] + other[end:] == token for start, end in spans):
-            return True
+        for i, (start, end) in enumerate(spans):
+            narrow = other[:start] + other[end:]
+            if narrow == token:
+                return True
+            if theirs is not None and theirs.get(narrow):
+                continue
+            lefts = (start, spans[i - 1][1]) if i else (start,)
+            rights = (end, spans[i + 1][0]) if i + 1 < len(spans) else (end,)
+            if any(other[:a] + other[b:] == token for a in lefts for b in rights):
+                return True
     return False
 
 
@@ -204,6 +230,33 @@ def _dressed_up(token: str, after: Counter, was: Counter) -> bool:
         for rest in (token[:-len(other)] if token.endswith(other) else None,
                      token[len(other):] if token.startswith(other) else None):
             if rest and not PIECE.search(rest):
+                return True
+    return False
+
+
+def _welded(token: str, after: Counter, was: Counter) -> bool:
+    """Whether this token is two tokens of the base pushed together, one of which the
+    source has since rewritten.
+
+    A reader who joins two paragraphs welds the last token of the first to the first
+    token of the second with nothing between them: "And prose after that." and "A line
+    the source can move." become "…after that.A line…", and `that.A` is a token the
+    base never had, so `theirs - was` reads it as a word the reader typed. It holds
+    nothing of theirs — both its words are the base's — and the source may rewrite
+    either. That is chain-8 seed 93212, where `collide` made `that.` into `vellum.`,
+    the merge said `vellum.A`, and the reader's join and the source's wording were
+    both in it.
+
+    `joined_differently`'s general rule covers this already whenever both halves carry
+    a word of two letters or more; `_split` drops a one-letter piece, so a paragraph
+    beginning "A" falls straight through it. Exact, like the others, and the same
+    condition: one of the two base tokens has to be gone from the tab as well, since
+    that is what made the welded token disappear.
+    """
+    for other in was:
+        for rest in (token[:-len(other)] if token.endswith(other) else None,
+                     token[len(other):] if token.startswith(other) else None):
+            if rest and rest in was and not (after.get(other) and after.get(rest)):
                 return True
     return False
 
@@ -653,7 +706,8 @@ def _tab_findings(was: dict | None, now: dict, then: dict | None, said: str,
                     + (", though the file still names it" if key in source_keys else ""),
                     tab=tab, key=key))
             continue
-        out += _words_findings(key, block, base_block, new[key], after_words, said, tab)
+        out += _words_findings(key, block, base_block, new[key], after_words, said, tab,
+                               words(part_text(was)))
         out += _style_findings(key, block, base_block, after_styles, new[key],
                                after_words, said, tab, theme, file_blocks.get(key))
         out += _inherited_findings(key, block, new[key], (mine or {}), said, tab, theme)
@@ -855,7 +909,8 @@ def _stands(key, block, mine: dict | None, then: dict | None) -> bool:
                for after in (then or {}).get("blocks", []) for w in wanted)
 
 
-def _words_findings(key, block, base_block, after_block, after_words, said, tab):
+def _words_findings(key, block, base_block, after_block, after_words, said, tab,
+                    tab_was: Counter | None = None):
     """Words the reader typed that the document does not say any more."""
     theirs = words(text_of(block))
     was = words(text_of(base_block)) if base_block else Counter()
@@ -864,8 +919,12 @@ def _words_findings(key, block, base_block, after_block, after_words, said, tab)
         return []
     survived = words(text_of(after_block))
     lost = typed - survived - (after_words - survived)     # nowhere in the tab
+    # `tab_was` for `_welded` alone: a join is the one reader edit that makes a token
+    # out of two blocks, so the other half of it is a word of the tab's base and not
+    # of this block's. Everything else is measured against the block, as it must be.
     lost = Counter({w: n for w, n in lost.items()
-                    if len(w) > 1 and not joined_differently(w, after_words, was)})
+                    if len(w) > 1
+                    and not joined_differently(w, after_words, was, tab_was, theirs)})
     if not lost or _named(said, key):
         return []
     return [finding("words_lost", "loss",
@@ -906,6 +965,14 @@ def _style_findings(key, block, base_block, after_styles, after_block, after_wor
     because what excuses it is the file *saying* the mark: a file that says nothing
     there (a block the source merely moved, written again from nothing) leaves the
     finding exactly where it was (fresh seed 970228, chain 6).
+
+    A twin once had to be forgiven here too — the reader pastes a copy, the key lands
+    on whichever paragraph comes first, and their own un-bolding is right beside it in
+    plain sight (chain-5 seed 90736). That was a symptom: `doc_merge._adopt_in_order`
+    keeps the key on the block the plan meant, and with it the excuse became dead
+    weight (3,750 rounds at chains 4 to 8 without it, nothing found). An oracle that
+    forgives what no longer happens is a blind spot waiting for the next defect that
+    looks like it, so it is gone.
     """
     theirs = marks_on(block)
     was = marks_on(base_block) if base_block else Counter()

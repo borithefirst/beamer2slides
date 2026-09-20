@@ -1943,11 +1943,18 @@ def test_a_block_whose_shape_the_write_changed_is_still_adopted_by_its_words():
     read = live([para("p:above", "kept"), para(None, "lantern")])
     assert doc_merge.adopt_keys(read, planned) == 1
     assert read["blocks"][1]["key"] == "item:a"
-    # Never a guess: two blocks that say the same thing say nothing about which is which.
+    # Two blocks that say the same thing say nothing about which is which — but their
+    # order does, and the plan and the read-back are the same sequence
+    # (`_adopt_in_order`).
     planned = [{"kind": "item", "key": "item:a", "level": 0, "runs": [styled_run("same")]},
                {"kind": "item", "key": "item:b", "level": 0, "runs": [styled_run("same")]}]
     read = live([para(None, "same"), para(None, "same")])
-    assert doc_merge.adopt_keys(read, planned) == 0
+    assert doc_merge.adopt_keys(read, planned) == 2
+    assert [b["key"] for b in read["blocks"]] == ["item:a", "item:b"]
+    # Where the order says nothing either — the read-back holds a block the plan has
+    # never heard of — the words pass still refuses to guess.
+    read = live([para(None, "same"), para(None, "same"), para(None, "same")])
+    assert doc_merge.adopt_keys(read, [planned[0]]) == 0
 
 
 def test_a_later_tabs_blocks_are_adopted_before_anything_keys_them():

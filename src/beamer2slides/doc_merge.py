@@ -806,11 +806,11 @@ def adopt_keys(live: dict, planned: list[dict]) -> int:
     also where `carry_unimported` notes the styling no import could carry.
     """
     taken = {b["key"] for b in live["blocks"] if b.get("key")}
+    done = _adopt_in_order(live["blocks"], planned, taken)
     free: dict[tuple, list[dict]] = {}
     for block in planned:
         if block.get("key") and block["key"] not in taken:
             free.setdefault((_match_shape(block), _match_text(block)), []).append(block)
-    done = 0
     for block in live["blocks"]:
         if block.get("key"):
             continue
@@ -819,6 +819,60 @@ def adopt_keys(live: dict, planned: list[dict]) -> int:
             done += 1
     done += _adopt_by_words(live, free)
     carry_unimported(live, planned)
+    return done
+
+
+def _adopt_in_order(live: list[dict], planned: list[dict], taken: set) -> int:
+    """The plan and the read-back, side by side and *in order*.
+
+    Words alone cannot say which block is which, and a document is full of blocks
+    that say the same thing: a reader who pastes a paragraph makes a second one
+    word for word, and that is the one the dictionary pass below reaches first,
+    because it walks the document and the pasted copy stands earlier on the page.
+    So the key of the block the source had just written a chip into went to the
+    reader's copy, the block that had carried that key since the push settled under
+    a name made from its own words, and file, base and document all agreed on it —
+    the `lost-key` shape again, with the added twist that the source's edit was
+    written correctly and landed under a name nobody asked for (offline chain-6
+    seed 94577, and 94465 with the chip in an empty paragraph).
+
+    Order is the information the dictionary threw away, and there is plenty of it:
+    the plan is the merged block list and the read-back is the document that was
+    written from it, so the two are very nearly the same sequence. Aligned on their
+    words, every block inside a matching run is paired with the one the plan meant,
+    whatever its twins say. What the alignment does not cover — a block whose
+    *words* the write itself mangled — is what the two passes after this one are
+    for.
+
+    On the words and not on the shape, which is what `_adopt_by_words` had already
+    learnt the hard way: Docs merges two paragraphs keeping the first one's style,
+    so the shape is the very thing a write changes, and a heading the source moved
+    and restyled came back under neither pass — the alignment refused it for its
+    shape and the words pass for its two pasted twins (offline chain-4 seed 96300,
+    which fails the same way with this pass taken out). Structural elements are
+    still never paired with anything else: a table is not a paragraph however alike
+    they read.
+    """
+    a = [(b["kind"] in doc_ir.STRUCTURAL, _match_text(b)) for b in planned]
+    b = [(x["kind"] in doc_ir.STRUCTURAL, _match_text(x)) for x in live]
+    # The alignment is only worth listening to where the two sequences hold the same
+    # number of blocks saying that thing. One plan block against three identical ones
+    # in the read-back has an alignment, and it is a guess — which is the defect this
+    # whole family is about. Where the counts agree, they are the same blocks.
+    mine, theirs = Counter(a), Counter(b)
+    done = 0
+    for op, i1, _, j1, j2 in SequenceMatcher(None, a, b, autojunk=False).get_opcodes():
+        if op != "equal":
+            continue
+        for offset in range(j2 - j1):
+            want, got = planned[i1 + offset], live[j1 + offset]
+            if got.get("key") or not want.get("key") or want["key"] in taken:
+                continue
+            if mine[a[i1 + offset]] != theirs[a[i1 + offset]]:
+                continue
+            got["key"] = want["key"]
+            taken.add(want["key"])
+            done += 1
     return done
 
 

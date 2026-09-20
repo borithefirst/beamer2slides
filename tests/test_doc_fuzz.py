@@ -82,7 +82,15 @@ REGRESSIONS = ((60, 1), (181, 1), (309, 4), (1031, 8), (1147, 8),
                # about to change (`doc_merge._built_size`). Both shapes of it —
                # `two_tables` with a reader in the round, and the same thing with no
                # reader at all.
-               (88033, 6), (88075, 6))
+               (88033, 6), (88075, 6),
+               # The key the reader's pasted twin took off the block the source had
+               # just written a chip into (`doc_merge._adopt_in_order`): once with
+               # the copy in front of a rewritten paragraph, once with the chip in an
+               # empty one, and once — 96300 — with the heading the source moved and
+               # restyled, whose shape the write changed under it. Between them,
+               # 93212 is the welded token and 94030 the pared-down one whose joiner
+               # went with it.
+               (93212, 8), (94030, 6), (94465, 6), (94577, 6), (96300, 4))
 
 
 def _round(seed: int, chain: int, shape: str | None = None) -> None:
@@ -2018,6 +2026,28 @@ def test_the_oracle_lets_a_base_word_the_reader_only_undressed_go():
     assert not oracle.joined_differently("zephyr", after, was)
 
 
+def test_the_oracle_lets_two_base_words_a_join_welded_together_go():
+    r"""A reader who joins two paragraphs welds the last token of the first to the
+    first token of the second with nothing between them, and `theirs - was` compares
+    whole tokens, so `that.A` reads as a word they typed. Both its words are the
+    base's and the source may rewrite either — chain-8 seed 93212, where `collide`
+    made `that.` into `vellum.` and the merge said `vellum.A`, the reader's join and
+    the source's wording both in it.
+
+    `joined_differently`'s general rule covers this whenever both halves carry a word
+    of two letters or more; `_split` drops a one-letter piece, so a paragraph
+    beginning "A" falls straight through it. The other half has to be measured against
+    the *tab's* base and not the block's: a join is the one reader edit that makes one
+    token out of two blocks."""
+    was = oracle.words("And prose after that. A line the source can move.")
+    after = oracle.words("And prose after vellum.A line the source can move.")
+    assert oracle.joined_differently("that.A", after, was, was)
+    assert not oracle.joined_differently("that.Z", after, was, was), \
+        "`Z` is no token of the base: a word the reader typed"
+    assert not oracle.joined_differently("line.A", after, was, was), \
+        "both halves still stand in the tab, so nothing made this token disappear"
+
+
 # ---------------------------------------------------------------- the third judge
 
 def _grid_block(key: str, rows: list[list[str]]) -> dict:
@@ -2093,3 +2123,81 @@ def test_the_campaign_asks_whether_the_sources_cell_edit_arrived():
     # Nor is anything owed once the reader has written in the table themselves.
     wrote = {"blocks": [_grid_block("table:x", [["b"], ["typed"]])]}
     assert not _asked(was, wrote, mine, wrote), "the reader wrote in it: the merge decides"
+
+
+def test_the_campaign_asks_whether_the_sources_wording_arrived():
+    """The same question for a paragraph, and the plainest thing a sync does: the
+    reader left the block word for word as the base has it, so there is nothing to
+    merge and the file's words must simply be there at the end.
+
+    Nobody asked it. The oracle asks whether the *reader's* work survived and a
+    source edit that never lands takes nothing of theirs away; convergence is
+    satisfied by any reading the base then agrees with. An edit could be dropped for
+    ever as long as it was dropped consistently."""
+    was = {"blocks": [_p("k1", "Results here.")]}
+    before = copy.deepcopy(was)                      # the reader touched nothing
+    mine = {"blocks": [_p("k1", "Results, revised.")]}
+    assert [f["kind"] for f in _asked(was, before, mine, was)] == ["wording_lost"]
+    assert not _asked(was, before, mine, mine), "the wording arrived"
+    assert not _asked(was, before, mine, was,
+                      {"conflicts": [], "notes": ["k1: left alone"]}), \
+        "a report that names the block is the escape hatch, as everywhere else"
+    typed = {"blocks": [_p("k1", "Results here, and more.")]}
+    assert not _asked(was, typed, mine, typed), "the reader wrote in it: the merge decides"
+    # A chip is read by what it *is*: its face is the document's to draw, and Docs
+    # renders a person chip off the address, so comparing the text called every
+    # source `add_chip` an edit that never arrived.
+    chip = {"chip": "person", "frozen": True, "text": "Grace", "value": "g@example.com"}
+    asks = {"blocks": [_p("k1", "Results here.") | {"runs": [{"text": "Results here."},
+                                                             chip]}]}
+    drawn = copy.deepcopy(asks)
+    drawn["blocks"][0]["runs"][1] = dict(chip, text="grace")
+    assert not _asked(was, before, asks, drawn), "the chip arrived, under its own face"
+
+
+def test_a_paragraph_the_reader_pasted_in_front_does_not_take_the_originals_key():
+    """The other way round from `..._pasted_twice_over`, and the way that broke: the
+    copy stands *before* the original and the same sync rewrites the original.
+
+    A rewrite is a delete and a write, so the block gives up its named range, and
+    `adopt_keys` was left matching the plan to the read-back through a dictionary of
+    words. Two blocks said the same thing, the walk reached the reader's copy first,
+    and the key the file had carried since the push went to it — the source's chip
+    landed correctly and then settled under a name nobody asked for, with file, base
+    and document all agreeing on it (offline chain-6 seed 94577). `_adopt_in_order`
+    pairs the two sequences by their order first, which is the information the
+    dictionary threw away."""
+    world, ours, base = _build([_p("a", "Results here."), _p("b", "What we found.")])
+    first = ours["blocks"][0]["key"]
+    text = doc_merge.block_text(ours["blocks"][0])
+    start = ours["blocks"][0]["span"][0]
+    world.apply([{"insertText": {"location": {"index": start}, "text": text + "\n"}}])
+    ours["blocks"][0]["runs"] = [{"text": text},
+                                 {"chip": "person", "frozen": True, "text": "Grace",
+                                  "value": "grace@example.com"}]
+    report, ours, base = fuzz_docs.sync_once(world, ours, base)
+    assert [doc_merge.block_text(b) for b in ours["blocks"]] == \
+        [text, text + "￼", "What we found."]
+    assert _keys(ours)[1] == first, "the chip's block is the one the file named"
+    assert _keys(ours)[0] != first
+    again, _, _ = fuzz_docs.sync_once(world, copy.deepcopy(ours), copy.deepcopy(base))
+    assert again["requests"] == 0
+
+
+def test_the_oracle_lets_a_pared_down_token_whose_joiner_went_too_alone():
+    """`_pared_down` recognised the leftover only when the reader had stopped at the
+    word: deleting `soft` out of `soft\xadhyphen` leaves `\xadhyphen`, and sweeping the
+    soft hyphen up with it leaves plain `hyphen`. The same deletion, and only the
+    first was known, so the second read as a word the reader had typed and the
+    source's rewriting of the other half looked like a loss (chain-6 seed 94030).
+
+    The guard is that the narrow leftover must not be standing there as well: a base
+    token pared down once leaves one token, so `hyphen` beside `\xadhyphen` is a word
+    the reader typed and still has to survive."""
+    base = _ir(_p("k1", "a soft\xadhyphen here"))
+    before = _ir(_p("k1", "a hyphen here"))         # the reader deleted "a soft\xad"
+    after = _ir(_p("k1", "a kestrel here"))         # the source reworded the other half
+    assert not oracle.failures(oracle.check(base, before, after, NOTHING))
+    both = _ir(_p("k1", "a \xadhyphen here hyphen"))
+    assert _kinds(oracle.check(base, both, after, NOTHING)) == {"words_lost"}, \
+        "the paring is the one with the joiner still on it; the bare word is theirs"
