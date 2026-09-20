@@ -522,8 +522,18 @@ seeds in `tests/test_sync_fuzz.py`); the swap rule took an adopt-shaped deck 2.9
 one-sided exactness moves no frame at all but is heard - on 4000 adopt-shaped rounds at chance 1 the
 same 510 frames of 22,014 (2.32%) are misidentified, while `unsure` goes 123 -> 137 and the 267
 wrong rounds go 136 -> **150** told and 131 -> **117** silent; on a converted talk every figure is
-identical (1.05%, 38 told, 1 silent of 1476 broken rounds). Sound rounds gain no verdict from either
-(1515 adopt-shaped, 1524 converted: not one frame on the wrong slide).
+identical (1.05%, 38 told, 1 silent of 1476 broken rounds).
+A pairing is beyond doubt only when it is **word for word** right, not merely above `LABEL_SURE`
+(1.2): a label swapped between two near-twins that share a title scores 1.25 on both sides, so the
+check used to stop looking, and that was every silent misidentification left. From up there the
+margin can no longer be met (`LABEL_SURE` + `LABEL_MARGIN` is above what `_evidence` can score), so
+only exactness can speak - and a slide carrying this frame's **own** label is no explanation at all,
+being another overlay step of this very frame (`test_overlay_steps_of_one_frame_are_never_a_move`).
+That one moves frames, since what it reaches are swaps the content settles: on the same 4000 rounds
+misidentified frames go 510 -> **428** (2.32% -> 1.94%), told 150 -> **167**, silent 117 -> **59**;
+at chance 0.5 on that deck, 194 -> 153 frames and 45 -> **16** silent rounds; on a converted talk,
+identical again. The price is one question: over 1524 adopt-shaped and 1524 converted sound rounds
+there is a single `unsure` (seed 5179), no `moved`, and not one frame on the wrong slide.
 What the order-keeping alignment leaves over is picked up twice more (`tests/test_frame_moves.py`):
 by content, when one leftover frame explains one leftover slide and no other comes close
 (`identity.cross_pairs`, `CROSS_SURE`/`CROSS_MARGIN`) - that is a frame the source moved across

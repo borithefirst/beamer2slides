@@ -365,6 +365,21 @@ The two sides are not worth the same, though, and only one of them may stand alo
   always explains it - so it counts only together with the other side, which is what a swap looks
   like (`test_one_twin_edited_is_not_a_swap`, and its unlabelled twin one test below).
 
+**A pairing is beyond doubt only when it is word for word right.** `LABEL_SURE` (1.2) is the bar
+above which the check used to stop looking, and a label swapped between two near-twins clears it on
+both sides: the frame says most of what the slide says and carries its title, so the pairing scores
+1.25 and nobody ever asked. A pairing short of word for word still has something left to explain,
+however alike it is, so it is in doubt too - and from up there the margin can no longer be met
+(`LABEL_SURE` + `LABEL_MARGIN` is above the most `_evidence` can score), so the only thing that can
+speak against such a pairing is the exactness above. That is what the swap between "Results" and
+"Results" looks like: not word for word right, and both other readings exact.
+
+One kind of slide is no explanation at all, though: a slide carrying **this frame's own label** is
+another overlay step of this very frame (`--overlays all` keeps one slide per step, each saying
+word for word what the step before said plus a bullet). Without that, a step dropped or added would
+be a question on every sync, since the step beside the pairing explains it exactly
+(`test_overlay_steps_of_one_frame_are_never_a_move`).
+
 The title counts by degree, not as yes or no (`identity._title_alike`). The stress deck moves a
 label and retitles all 48 frames in the same version ("Moving labels" → "Moving labels v2"), and a
 yes-or-no "same title?" says no to every pair at once - which leaves the frame the label left no
@@ -403,29 +418,39 @@ of the one before it. 1500 rounds, 8239 frames:
 |---|---|---|---|
 | labels sound | 0.00% | 0.00% | 0.00% |
 | labels sound, a frame moved | 0.00% | 0.00% | 0.00% |
-| labels broken | 12.34% | 12.34% | **2.18%** |
-| labels broken, a frame moved | 11.49% | 11.49% | **3.38%** |
+| labels broken | 12.34% | 12.34% | **1.65%** |
+| labels broken, a frame moved | 11.49% | 11.49% | **0.68%** |
 
 `before` equals `order` frame for frame: `cross_pairs` and `gap_pairs`, which take 5.53% to 0.00% on
 a converted talk, **recover nothing at all** here — one leftover never explains one slide
 unmistakably when six slides say the same four words, and no gap holds one slide and one frame that
-share words nobody else shares. `label_moves` still earns its place, but saves less (2.18%, against
-1.04%) and says less. Two rules stand between `LABEL_MARGIN` and a deck of twins, and both were
+share words nobody else shares. `label_moves` still earns its place, but saves less (1.65%, against
+1.04%) and says less. Three rules stand between `LABEL_MARGIN` and a deck of twins, and each was
 measured the same way: the campaign run twice over the same seeds, with only `label_moves` swapped
 for the version before it. The **swap rule** was worth 2.94% → 2.18% of frames misidentified when it
 went in (at label-chance 1 *every* round the pairing still got wrong used `move_label`, and the 54
-silent ones of 108 were all swaps between frames saying nearly the same thing). The **one-sided
-exactness** is worth nothing in that column, and is not meant to be: an `unsure` verdict re-pairs
-nothing, it asks. On 4000 adopt-shaped rounds at label-chance 1 (22,014 frames) the 510 frames
-(2.32%) that end up on the wrong slide are the same 510 before and after it; what moves is what the
-person hears — 123 → **137** `unsure` verdicts, and of the 267 rounds that got a pairing wrong,
-136 → **150** are told about it and 131 → **117** pass in silence. On a converted talk (3000 rounds
-at chance 0.5) every figure is identical down to the last one, the single silent round of 1476:
-nothing there is a swap between near-twins for the rule to fire on. And no round that kept its
-labels gains a word from it — across 1515 adopt-shaped and 1524 converted sound rounds there is no
-verdict of either kind and not one frame on the wrong slide (the warnings such a round does carry
-are `gap_pairs` recoveries asking for a label, which is the point of them). Which is the whole
-argument for `adopt.frame_labels`: on a deck like this the label
+silent ones of 108 were all swaps between frames saying nearly the same thing).
+
+The **one-sided exactness** is worth nothing in that column, and is not meant to be: an `unsure`
+verdict re-pairs nothing, it asks. On 4000 adopt-shaped rounds at label-chance 1 (22,014 frames) the
+510 frames (2.32%) that end up on the wrong slide are the same 510 before and after it; what moves
+is what the person hears — 123 → **137** `unsure` verdicts, and of the 267 rounds that got a pairing
+wrong, 136 → **150** are told about it and 131 → **117** pass in silence.
+
+The **doubt gate** (a pairing above `LABEL_SURE` that is not word for word right is still in doubt)
+is the one that moves frames, because what it reaches are swaps the content can settle: on the same
+4000 rounds, misidentified frames go 510 → **428** (2.32% → 1.94%), `moved` verdicts 1091 → 1137,
+and of the wrong rounds 150 → **167** are told and 117 → **59** pass in silence. At label-chance
+0.5 on the same deck (3000 rounds) it is 194 → 153 frames and 45 → **16** silent rounds. On a
+converted talk (3000 rounds at chance 0.5) every figure is identical, down to the single silent
+round of 1476: nothing there is a swap between near-twins for either rule to fire on.
+
+What a sound round hears is the price, and it is one question: across 1524 adopt-shaped and 1524
+converted sound rounds there is a single `unsure` (seed 5179, a source that retitles one frame while
+every title in the talk is amended), no `moved`, and not one frame on the wrong slide — 29 rounds
+newly told for one question nobody needed. (The warnings a sound round does carry are `gap_pairs`
+recoveries asking for a label, which is the point of them.) Which is the whole argument for
+`adopt.frame_labels`: on a deck like this the label
 is not the best identity available, it is the only one — and with the labels kept, not one frame of
 4068 went to the wrong slide. `tests/test_sync_fuzz.py::test_labels_are_the_only_thing_holding_an_
 adopt_shaped_deck_together` holds that on 150 seeds.

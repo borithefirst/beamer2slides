@@ -161,12 +161,13 @@ def label_moves(base: list[dict], ours: list[dict]) -> list[dict]:
     label is simply somewhere else - so the only witness is the content on both sides.
 
     For each label the base and the source share, the check asks whether the two slides say the
-    same thing. Short of `LABEL_SURE` they do not quite, and then it looks for a better
-    explanation among the slides nothing else accounts for: does the source's labelled frame look
-    like some *other* base slide (`frame_is`), and does the base's labelled slide look like some
-    *other* source frame (`slide_is`)? An explanation counts only if it is good on its own
-    (`LABEL_MOVED`) *and* better than the label's own pairing by `LABEL_MARGIN` - which is what
-    keeps an overlay step, a retitled frame or a frame edited hard from setting this off.
+    same thing. Short of `LABEL_SURE`, or short of word for word, they do not quite, and then it
+    looks for a better explanation among the slides nothing else accounts for: does the source's
+    labelled frame look like some *other* base slide (`frame_is`), and does the base's labelled
+    slide look like some *other* source frame (`slide_is`)? An explanation counts only if it is
+    good on its own (`LABEL_MOVED`) *and* better than the label's own pairing by `LABEL_MARGIN`,
+    or word for word right where the label's own pairing is not - which is what keeps an overlay
+    step, a retitled frame or a frame edited hard from setting this off.
 
     - both, clearly: `moved`. The label is ignored for pairing and the content decides, which is
       also where the person's edits belong - they edited those words, not that label.
@@ -181,7 +182,16 @@ def label_moves(base: list[dict], ours: list[dict]) -> list[dict]:
     """
     pairs = label_pairs(base, ours)
     own = {j: _evidence(base[i], ours[j]) for j, i in pairs.items()}
-    doubt = sorted(j for j, s in own.items() if s < LABEL_SURE)
+    # `LABEL_SURE` says a pairing needs no second opinion, and on a deck of near-twins a label
+    # swapped between two of them clears it on both sides: the frame says most of what the slide
+    # says and carries its title, so the pairing scores 1.25 and the check never looks. A pairing
+    # that is not *word for word* right still has something left to explain, however alike it is,
+    # so it is in doubt too. Nothing below changes for it: the margin cannot be met from up there
+    # (`LABEL_SURE` + `LABEL_MARGIN` is above what `_evidence` can score), so the only thing that
+    # can speak against such a pairing is exactness - another slide saying word for word what this
+    # frame says, or another frame saying word for word what this slide said.
+    doubt = sorted(j for j, s in own.items()
+                   if s < LABEL_SURE or not _complete(base[pairs[j]], ours[j], s))
     if not doubt:
         return []
     # A pairing in doubt settles nothing, so both of its slides are free to be somebody else's
@@ -201,8 +211,15 @@ def label_moves(base: list[dict], ours: list[dict]) -> list[dict]:
     found: dict[str, dict] = {}
     for j in doubt:
         i = pairs[j]
-        here, slide_is = best((_evidence(base[i], ours[k]), k) for k in free_ours if k != j)
-        there, frame_is = best((_evidence(base[k], ours[j]), k) for k in free_base if k != i)
+        # A slide carrying this frame's own label is another overlay step of this very frame, not
+        # another frame: `--overlays all` keeps one slide per step, they say word for word what the
+        # step before said plus a bullet, and a step dropped or added leaves the one beside it
+        # explaining the pairing exactly. That is the frame itself, so it explains nothing about
+        # where its label went (`test_overlay_steps_of_one_frame_are_never_a_move`).
+        here, slide_is = best((_evidence(base[i], ours[k]), k) for k in free_ours
+                              if k != j and ours[k].get("label") != base[i].get("label"))
+        there, frame_is = best((_evidence(base[k], ours[j]), k) for k in free_base
+                               if k != i and base[k].get("label") != ours[j].get("label"))
         # Two frames that say nearly the same thing cannot be told apart by `LABEL_MARGIN`: the
         # pairing a label swapped between them leaves behind is already 0.85 alike, and nothing
         # can beat that by half. What such a move does do is come out *exact* - word for word -

@@ -93,6 +93,21 @@ def test_labels_swapped_between_two_frames_that_say_nearly_the_same_thing():
     assert identity.label_pairs(base, ours) == {0: 1, 1: 0}, "the label alone would have crossed them"
 
 
+def test_labels_swapped_between_two_frames_that_also_share_a_title():
+    """The same swap one notch harder, and the last silent family the adopt-shaped campaign had.
+    Give the two near-twins the same title - "Results", which every deck `adopt` writes says three
+    times - and the pairing the swap leaves behind scores 1.42: *above* `LABEL_SURE`, where the
+    check used to stop looking. It says nearly the same thing, but not word for word, and that is
+    the thing left to explain: both other readings are exact."""
+    base = [info("Results", QUARTER3, "q3"), info("Results", QUARTER4, "q4")]
+    ours = [info("Results", QUARTER3, "q4"), info("Results", QUARTER4, "q3")]
+    assert identity._evidence(base[1], ours[0]) > identity.LABEL_SURE, "no doubt on the old bar"
+    moves = identity.label_moves(base, ours)
+    assert sorted(m["label"] for m in moves) == ["q3", "q4"]
+    assert {m["verdict"] for m in moves} == {"moved"}
+    assert identity.align_slides(base, ours) == {0: 0, 1: 1}, "the words decide, and they are right"
+
+
 def test_one_twin_edited_is_not_a_swap():
     """The mirror image, and the reason the exactness is asked for on both sides: two frames that
     say word for word the same thing, nobody touching a label, and the source rewording one of
@@ -167,8 +182,10 @@ def test_a_frame_rewritten_from_scratch_keeps_its_label_and_its_slide():
 
 
 def test_overlay_steps_of_one_frame_are_never_a_move():
-    """Steps share the frame's label and differ by a bullet; the step before is always the best
-    other candidate there is. The margin is what keeps it quiet."""
+    """Steps share the frame's label and differ by a bullet, so the step beside one says word for
+    word what it said - and once a pairing short of word for word is in doubt, exactness would
+    have made every dropped or added step a question. A slide carrying this frame's own label is
+    the frame itself, though, so it is no candidate for explaining where the label went."""
     def step(n, page):
         return info("Building up", " ".join(["a bullet about decks"] * (n + 1)), "build", page)
     base = [step(0, 0), step(1, 1), step(2, 2)]
