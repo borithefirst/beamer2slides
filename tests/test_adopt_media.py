@@ -358,7 +358,11 @@ def test_adopt_sets_the_deck_in_a_fetched_family(monkeypatch, tmp_path):
     ir = deck_ir(deck_with(text_shape("t", "Words in a fetched face", 10, 10, 300, 40, font="Tiny Flex")),
                  foreign=True)
     text = adopt.bootstrap(ir, tmp_path / "tree" / "main.tex")
-    assert "\\setsansfont{TinyFlex}[Path=fonts/,Extension=.ttf,UprightFont=*-Regular,BoldFont=*-Bold]" in text
+    # the family has no italic (the variable font has no ital axis), so italic and bold italic are
+    # fontspec's slant of the two faces it does have, never left unsaid
+    assert ("\\setsansfont{TinyFlex}[Path=fonts/,Extension=.ttf,UprightFont=*-Regular,BoldFont=*-Bold,"
+            f"ItalicFont=*-Regular,ItalicFeatures={{FakeSlant={adopt.FAKE_SLANT}}},"
+            f"BoldItalicFont=*-Bold,BoldItalicFeatures={{FakeSlant={adopt.FAKE_SLANT}}}]") in text
     fonts = sorted(p.name for p in (tmp_path / "tree" / "fonts").iterdir())
     assert fonts == ["TinyFlex-Bold.ttf", "TinyFlex-LICENSE.txt", "TinyFlex-Regular.ttf"]
 

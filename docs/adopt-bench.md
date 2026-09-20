@@ -1122,3 +1122,238 @@ to `out/edit-robustness/<tag>`; re-run it after the writer changes and the table
 move. `tests/test_edit_robustness.py` is the offline half (34 tests, no corpus and no compile): the
 sample replays, each edit lands where it is meant to in both forms, and the judging is right on
 made-up compile output and made-up pages.
+
+## Making `\textbf` draw bold (fb-a vs ls-a)
+
+The defect the section above found, fixed and fenced. A source `adopt` writes now names **every one
+of the four faces** of every family it declares, and says in the source when one of them is
+synthesised; a new torture test compiles the real preamble and measures the ink, so the hole cannot
+open again quietly.
+
+**Before, 63 of 267 (family, style) pairs across the corpus drew no emphasis at all; after, 6 - and
+none of those 6 is a style the decks' own text asks for.** Fidelity is unchanged (slides mean
+0.9728 -> 0.9727, deck mean 0.9557 -> 0.9557) and readability is unchanged to every decimal the
+report prints (0.490, and every component equal).
+
+### What was wrong
+
+`font_files_latex` wrote only the faces the family had files for:
+
+```
+\setsansfont{NTR}[Path=fonts/,Extension=.ttf,UprightFont=*-Regular]
+```
+
+With `Path`, `Extension` and `UprightFont` given and no `BoldFont`, fontspec looks for no second
+file, so the bold series *is* the upright. `\textbf` draws the same glyphs, lualatex says nothing,
+and the slide looks finished with its emphasis gone - which is worse than an error, because nothing
+asks the reader to look. The same hole was open for `\textit` / `\emph`, and for bold italic
+wherever a family has a bold and no italic (Oswald, Noto Sans JP, every google/fonts family whose
+variable font has no `ital` axis - `fontfetch` cuts wght 400 and 700 and nothing else).
+
+### What it writes now
+
+`adopt.fake_faces` fills the missing styles from the nearest face the family does have - a bold
+italic is slanted off the real bold where there is one, emboldened off the real italic otherwise,
+and both off the upright when that is all there is:
+
+```
+\setsansfont{NTR}[Path=fonts/,Extension=.ttf,UprightFont=*-Regular,
+  BoldFont=*-Regular,BoldFeatures={FakeBold=2.5},
+  ItalicFont=*-Regular,ItalicFeatures={FakeSlant=0.2},
+  BoldItalicFont=*-Regular,BoldItalicFeatures={FakeBold=2.5,FakeSlant=0.2}]
+\newfontfamily\adoptfontC{Oswald}[...,UprightFont=*-Regular,BoldFont=*-Bold,
+  ItalicFont=*-Regular,ItalicFeatures={FakeSlant=0.2},
+  BoldItalicFont=*-Bold,BoldItalicFeatures={FakeSlant=0.2}]
+\newfontfamily\adoptfontB{msgothic}[FontIndex=2,Path=fonts/,Extension=.ttc,UprightFont=*,
+  BoldFont=*,BoldFeatures={FakeBold=2.5},...]
+```
+
+Three decisions, each of them measured, not assumed:
+
+- **Synthesise rather than leave it unsaid, because that is what the deck shows.** Slides has no
+  second face either and draws a synthetic one; matching Slides is the goal, so the source should
+  say out loud what Slides does silently.
+- **Per face, never `AutoFakeBold`/`AutoFakeSlant`.** `AutoFakeBold` *overrides* a real `BoldFont`
+  (Oswald's drawn bold came out as its emboldened regular), and `AutoFakeSlant` on its own leaves
+  bold italic upright - it makes the `it` shape from the upright and never touches `bx/it`. A
+  family-level `BoldFeatures` does not clobber the one `scripts.script_preamble` puts into
+  `\defaultfontfeatures` (measured: a CJK fallback still draws under `BoldFeatures={FakeBold=..}`).
+- **`FontIndex` first.** For the one face of a collection (MS PGothic, face 2 of `msgothic.ttc`) the
+  index is a family-wide key, so it holds for the faked faces too and the synthetic bold keeps face
+  2's proportional widths instead of face 0's monospaced ones.
+
+`scripts.babelfont_line` had the identical hole in a second writer, and the torture found it:
+`onchar=ids fonts` sends every Hebrew or Arabic letter to the babel font whatever the surrounding
+text is set in, so it is *that* line, not `adopt.font_preamble`'s, that decides what `\textit` draws
+for those letters - and it named only the upright. hebrew-lesson's Hebrew serif drew `\textit`
+upright; it now goes through the same `fake_faces`.
+
+### Calibrating the two numbers
+
+`FakeBold` is linear in the stroke it adds: over NTR, Delius, Pacifico and ArchitectsDaughter set at
+40 pt it adds 0.011-0.015 em of stroke per unit (mean stroke = 2 x ink area / ink outline, the
+measure `deck_thumbs.stroke_em` uses).
+
+The judge has to be the deck, and the deck can only be read where the text is big: one thumbnail
+pixel is 1/(2.222 x size) em, which at the 5-12 pt most bold runs are set in is 0.03-0.05 em and
+swamps any emboldening difference. **The corpus has exactly one clean sample** -
+sc-aesthetic-school's Pacifico at 28.35 pt, where a pixel is 0.016 em:
+
+```
+deck thumbnails   Pacifico upright 0.128 em    Slides' own bold 0.166 em
+compiled source   Pacifico upright 0.126 em    FakeBold=2.5     0.161 em
+```
+
+1.5 gives 0.147 (a pixel and a half short) and 3.0 gives 0.170 (also within the pixel); 2.5 sits
+nearest. The other families then read 1.33-1.38x their upright, which is about what a drawn bold
+weighs (Arial's real bold reads 1.49x, Changa's 1.70x).
+
+`FakeSlant=0.2` is fontspec's own documented value, atan(0.2) = 11.3 deg. It is not calibrated
+against Slides, because there is nothing to calibrate against: the corpus sets 260 italic runs in 13
+decks and nearly all of them are Arial, which has a real italic file. The one italic the thumbnails
+do show - ap-bio-stats' Arial Italic, drawn and not synthesised - leans 0.23 against its upright's
+-0.02 by the shear the torture measures, and a `FakeSlant=0.2` face reads 0.15-0.22 the same way.
+
+**Offline, the fix costs nothing**: a machine with no font and no network (`$B2S_FONT_FETCH=0`) is
+set in TeX Gyre, which every TeX distribution carries with all four faces, so nothing is synthesised
+and the source still shows emphasis. `tests/test_adopt.py` asserts exactly that.
+
+### The torture test: `devtools/bold_torture.py`
+
+Nothing already in the tree could see this. The fidelity bench cannot: a word drawn upright where it
+should be bold costs a handful of pixels on one slide out of 912. `edit_robustness` found it, but
+only by accident, on 6 of 24 restyle edits, and it takes 22 minutes.
+
+So the emphasis gets its own judge, and the judge is the ink. Per deck: build the source's real font
+preamble (`scripts.script_preamble` + `adopt.font_preamble`, the writers under test - no bootstrap,
+no slides, no Google), then compile **one page per declared family** with the deck's own most used
+letters for that family set four ways (upright, `\bfseries`, `\itshape`, both) at 40 pt, and measure
+each band:
+
+```
+stroke   2 x ink area / ink outline: the mean stroke width in em, the same measure
+         `deck_thumbs.stroke_em` reads the deck's thumbnails with
+slant    the shear that lines the ink into columns (projection-profile deskew, argmax over
+         the sum of squares of the column histogram): ~0 upright, > 0.1 leaning right
+```
+
+A family fails `bold` when its bold weighs no more than 1.10x its upright, `italic` when it leans no
+further than 0.08 past it, `bolditalic` when either holds. The defect gives exactly 1.00 and 0.00, a
+fake gives 1.3-1.5 and ~0.20, a real face as much or more - so the threshold never has to be a
+judgement call.
+
+**Every family the preamble declares is probed, not only the styles the deck's text asks for**: a
+person restyling an adopted slide in Slides reaches the rest, which is how `edit_robustness` found
+this in the first place. `asked` records which is which, so the report can separate "the deck is
+missing an emphasis it prints" from "the deck would be, if someone typed one".
+
+It is cheap and re-runnable: one compile per deck, 698 s over the 29 decks (about 3 minutes wall at
+`--jobs 5`, and gdg24's 115 s is the floor), and it exits non-zero on a finding.
+
+```
+python -m beamer2slides.devtools.bold_torture run --jobs 5 --tag after
+python -m beamer2slides.devtools.bold_torture report --tag after
+```
+
+**The PDF's own font names are deliberately not used as evidence.** A static instance cut from a
+variable font reports the name it was cut from - every weight of Open Sans says `OpenSans-Regular` -
+and the four styles of a `.ttc` face share one font id, so the names agree exactly where the ink
+does not.
+
+### The numbers
+
+```
+                       before                            after
+29 decks, 267 (family, style) pairs
+  drawn                204                               261
+  not drawn             63  (8 the deck's text asks for)   6  (0 the deck's text asks for)
+  decks with a finding  13                                 2
+```
+
+The four decks the defect was reported on, by the torture's own reading (x = heavier than its
+upright, lean = past its upright's slant):
+
+```
+                                             before                    after
+sc-functions         NTR      bold        x1.01  not bold          x1.37  drawn   (asked)
+                     NTR      italic      x0.99  not slanted       lean +0.21  drawn
+                     Changa   bolditalic  lean +0.04  not slanted  lean +0.22  drawn
+drawing-workshop     Delius   bold        x0.97  not bold          x1.33  drawn   (asked)
+                     Delius   italic      lean +0.00  not slanted  lean +0.20  drawn   (asked)
+                     Delius   bolditalic  x1.00  neither           x1.36 lean +0.21  (asked)
+                     11 families, 33 pairs   23 not drawn     0 not drawn
+sc-aesthetic-school  Pacifico bold        x1.00  not bold          x1.28  drawn   (asked)
+                     Pacifico italic      lean +0.00  not slanted  lean +0.21  drawn
+apps-edu-zh          MSPGothic bold       x1.00  not bold          x1.33  drawn
+                     Oswald   bolditalic  lean +0.00  not slanted  lean +0.21  drawn
+```
+
+### Fidelity and readability
+
+```
+python -m beamer2slides.devtools.adopt_bench run --jobs 5 --tag fb-a
+29/29 decks, 912 slides: boxes 0.9728 page 0.9714 pixels 0.9844
+slides mean 0.9728 -> 0.9727      deck mean 0.9557 -> 0.9557      (vs ls-a)
+readability 0.490 -> 0.490        (every component equal: the fix adds options to preamble lines
+                                   that were already there, and writes no new line)
+```
+
+Only three decks move at all.
+
+**sc-aesthetic-school +0.0001, all of it slide 11 (+0.003).** That slide has the one Pacifico bold
+run in the corpus set big enough to read - 28.35 pt - and the deck's own thumbnail shows it at
+0.166 em against the upright's 0.128. The gain is the compiled page finally drawing a heavier face
+there. This is the calibration sample, so it is also the one slide where a gain was expected.
+
+**sc-functions +0.0001, slides 7 and 11 (+0.001 each), slide 9 -0.001.** Both gaining slides carry
+NTR bold runs; the deck's thumbnails read NTR bold at 0.119 em against 0.075 upright, so Slides
+synthesises one there too. (Those runs are set at 5-9 pt, where a thumbnail pixel is 0.05-0.09 em, so
+that reading says "the deck draws something heavier" and not how much heavier - which is why the
+calibration used Pacifico and not this.)
+
+**drawing-workshop -0.0005: slides 3, 23 and 24, -0.005 to -0.007 each. This one is a loss, and it
+is not the deck's own emphasis.** Those slides have no bold or italic runs in the IR at all. The
+whole difference between the two pages is WordArt: `adopt.wordart_block` writes `\bfseries` on
+purpose, to stand in for the heavy outline Slides draws WordArt with, and drawing-workshop's WordArt
+is set in Delius - which had no bold, so that `\bfseries` drew nothing and the score was measured
+against an approximation that was never applied. Diffing the two compiled pages charges every
+differing pixel to a WordArt element (32,074 px on slide 3: 24,435 to `Joshua Pomeroy`, 7,527 to
+`#GOALS`; 22,788 and 22,714 on 23 and 24 to the two stacked `Drag and Drop Activity` boxes).
+
+So the loss is real and its cause is exact: **WordArt's own weight has never been calibrated**, and
+now that `\bfseries` really draws, it is slightly too heavy for a family with no bold of its own.
+That is a question about `wordart_block`, not about the face declarations, and it is left where it
+is - fixing it means measuring Slides' WordArt outline against the corpus, which is its own exercise.
+
+### What the torture still cannot see
+
+- **Whether the weight is the right one.** A faked bold is not the family's real bold, only heavier
+  than its own upright; and a family whose real bold this machine cannot fetch (`$B2S_FONT_FETCH=0`)
+  is still a pass, because TeX Gyre has all four faces.
+- **Whether a run the deck sets at weight 600 got 600** rather than 700. `weight_faces` is not
+  probed; only the four shapes are.
+- **Whether the face a style names has the deck's own glyphs in it.** This is the one finding left
+  that is not a limitation: arabic-training's `\textit` picks the real `ariali.ttf`, which has no
+  Arabic in it, so the probe reads half the ink (x0.50) and no slant. The torture calls it "not
+  slanted", which is true but not the reason; the real defect is that a family's italic file can
+  lack the script the deck is written in. Left open - it is a different fix (fall back to a slanted
+  upright when the named face has none of the run's characters), and no deck in the corpus prints an
+  italic Arabic run.
+- **The styles a fallback chain draws.** `scripts.script_preamble` names one
+  `luaotfload.add_fallback` chain for upright and one for bold, so `\textit` over Japanese draws the
+  upright chain (jruby-ja, 2 pairs). Giving the chain an italic means a third and fourth chain plus
+  per-shape `RawFeature`s inside a `\defaultfontfeatures` every family reads - where a `FakeSlant`
+  would slant the real italic of every family that has one, twice. Left open, and now measured.
+- **Whether the emphasis is in the right place.** The probe sets words the writer chose, not the
+  deck's own runs on the deck's own slides; it proves the *face* draws, not that the run reached it.
+  `devtools/edit_robustness`'s restyle edit is the check that covers that, and it agrees.
+
+### The offline tests
+
+`tests/test_adopt_text.py`, under "every style is named (adopt.fake_faces)": a family with all four
+faces fakes nothing; a family of one face still names bold, italic and both; a bold and no italic
+slants the bold for bold italic; an italic and no bold emboldens the italic for bold italic; a lone
+face of a collection keeps its `FontIndex` in every style; a bold run in a family with no bold comes
+out of `bootstrap` with a source that says bold; and a babel language font names every style too.
+`tests/test_adopt.py`'s two font tests and `test_adopt_media.py` / `test_adopt_scripts.py` pin the
+exact declarations the writers now produce.

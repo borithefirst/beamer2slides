@@ -211,7 +211,10 @@ def test_every_face_of_a_collection_is_found(font_folder):
     files = adopt.font_family("MS PGothic", "sans")
     assert files["FontIndex"] == 1
     opts = adopt.font_files_latex({k: v for k, v in files.items() if k not in ("stem", "match")}, None)
-    assert opts.endswith("Extension=.ttc,UprightFont=*,FontIndex=1")
+    # FontIndex is family-wide, so it comes first and holds for the faces the family has no file of
+    # its own for (measured: the faked bold keeps face 1's widths, not face 0's)
+    assert opts.startswith("FontIndex=1,")
+    assert "Extension=.ttc,UprightFont=*," in opts and "BoldFont=*,BoldFeatures={FakeBold=" in opts
     assert files["stem"] == "msgothic"
 
 

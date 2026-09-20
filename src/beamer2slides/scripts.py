@@ -357,16 +357,31 @@ def font_spec(face: Face, tree: Path | None, mode: str, extra: str = "") -> str:
 
 
 def babelfont_line(lang: str, key: str, regular: Face, bold: Face | None, tree: Path | None) -> str:
+    """The font babel sets one language's letters in, with every style named.
+
+    `onchar=ids fonts` sends each Hebrew or Arabic letter to this font whatever the text around it is
+    set in, so it is this line, not `adopt.font_preamble`'s, that decides what `\\textbf` and
+    `\\textit` draw for those letters - and naming only the upright leaves fontspec looking for no
+    other file, so the emphasis is silently gone (`devtools/bold_torture`: hebrew-lesson's Hebrew
+    serif drew `\\textit` upright). A style with no file of its own is synthesised from the nearest
+    one, as `adopt.fake_faces` does it for the deck's own families. A bold that lives in another
+    folder is faked off the upright rather than dropped: one `Path` holds for the whole family."""
+    from .adopt import fake_faces
     folder, name = font_file(regular, tree)
     opts = [f"Path={folder}", "Renderer=HarfBuzz"]
     if regular.index:
         opts.append(f"FontIndex={regular.index}")
+    files, index = {"UprightFont": name}, {"UprightFont": regular.index}
     if bold is not None:
         bfolder, bname = font_file(bold, tree)
         if bfolder == folder:
+            files["BoldFont"], index["BoldFont"] = bname, bold.index
             opts.append(f"BoldFont={bname}")
             if bold.index != regular.index:
                 opts.append(f"BoldFeatures={{FontIndex={bold.index}}}")
+    # a face of a collection keeps its own index wherever it stands in for a style it is not
+    opts += fake_faces(files, files.__getitem__,
+                       lambda k: [f"FontIndex={index[k]}"] if index[k] != regular.index else [])
     return f"\\babelfont[{lang}]{{{key}}}[{','.join(opts)}]{{{name}}}"
 
 
