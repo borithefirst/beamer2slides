@@ -63,17 +63,34 @@ a per-slide background picture.
   6,400 seeds exact, 1% refused: glyph images that are not masks), and so is TrueType text,
   embedded or a GDI system substitute (FreeType's glyf loader and bytecode interpreter, v40,
   pedantic, 64 ppem: `pure/truetype.py`, `pure/ttinterp.py`; torture `--kind cid-truetype` 600
-  seeds exact; tricky/variable fonts and glyphs hinted differently after earlier loads refused).
+  seeds exact; tricky/variable fonts and glyphs hinted differently after earlier loads refused),
+  and so are coloured tiling patterns (`pure/render_pattern.py`: CPDF_TilingPattern::Load parses the
+  cell as a form over its own resources with the painted object's general state, CPDF_RenderTiling::Draw
+  stamps one rendered cell over the clip box - 8x8 then stretched under 16 px, whole-pixel steps with
+  C's truncating division in the aligned case - or, when the cell is bigger than the clip, draws the
+  cell's objects again per tile with the painted path's fill alpha as their initial alpha; oracle
+  `tools/render_torture_shading.py --mode tiling`, 4,000 seeds, 2,618 drawn exact, none apart),
+  images inside soft masks (LoadSMask's std conversion, TransMask's DeviceCMYK scanlines, an image's
+  own /SMask dropping the state mask, kAlpha mode: image torture levels 7-8, 3,860 seeds) and
+  ICCBased spaces PDFium detects as sRGB (3144 bytes, `sRGB IEC61966-2.1` at offset 400: DeviceRGB
+  without the clamp, `colors.icc_srgb`).
   Whole pages: all 269 of the test decks' pages render byte for byte
   as PDFium's, none apart (`test_whole_beamer_pages_render_as_pdfium_renders_them`);
-  a page with anything not ported yet (JPX/JBIG2/CCITT or ICC-profiled images, tiling patterns,
-  ICCBased shadings, transfer functions on images…) raises PdfError, so
+  a page with anything not ported yet (JPX/JBIG2/CCITT or ICC-profiled images, uncoloured or in-form
+  tiling patterns, transfer functions on images…) raises PdfError, so
   `renders = False`: `classify` runs on it and `convert` doesn't yet. Every call equals PDFium's on 4,373 pages
   (chars and object boxes to the last bit on the test decks). Swept over the 3,198 distinct PDFs on this
   machine: extraction and whole-page renders equal on 72,249 pages (up to 60 each, /ActualText marked
   content included; one torture shading refused), and on their first 10 pages every other call too -
   drawings, links, glyph widths, clipped/transparent/partial renders and `embedded_image` with
   PDFium's own bitmaps (GetBitmap, GetRenderedBitmap: `backend._image_pixels`, `_rendered_image`).
+  Which pages are refused was measured the same way: of 38,017 pages in
+  4,435 PDFs, 53 (0.14%) in 27 documents - ICC profiles 32, text needing a fallback font 11, tiling
+  patterns 2, and no JPX, JBIG2, CCITT or image transfer function anywhere. With sRGB profiles,
+  soft-masked images and tiling patterns ported, the only real documents left are 3 PDFs whose 9
+  pages use one 536-byte v4.3 matrix/TRC RGB profile (lcms's matrix-shaper path, ~1,000-1,500 lines
+  to port bit for bit); everything else still refused is a file the tortures and the structure fuzz
+  wrote themselves.
   Measured on Windows; Linux and macOS answer as their own PDFium does too: substitution goes
   through CFX_LinuxFontInfo / CFX_MacFontInfo's folder scan off Windows (`fontmapper.FolderFontInfo`,
   `platform_font_info`: readdir order, first face of a name wins, a TTC face always loads as index
