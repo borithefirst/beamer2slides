@@ -368,6 +368,13 @@ def _spacing_heuristic(font, face: _SubstFace) -> bool:
     if standard_font_index(base) is not None or face.subst.flag_mm:
         return False
     family = face.subst.family.replace(" ", "").lower()
+    if not family:
+        # CFX_SubstFont::IsActualFontLoaded is ByteString::Find, which finds no empty needle: a
+        # face with no family - UseInternalSubst's standard Foxit faces, which set none - has not
+        # loaded the actual font, so the heuristic applies. Only a fallback font reaches this
+        # (a base font on a standard face is refused a line above, by its standard name), and only
+        # where the platform has no Arial: the folder scan of Linux, never GDI.
+        return True
     return not base.startswith(family)                           # IsActualFontLoaded
 
 
