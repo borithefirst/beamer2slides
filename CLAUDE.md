@@ -90,16 +90,21 @@ a per-slide background picture.
   once in a TeX Live container (`tests/decks/build.py` reruns until the .aux settles: TeX Live's
   tikzmark needs a third pass); failing shading seeds leave their PDF and both renders in the
   artifact. All three platforms pass.
-  And deck.json is identical on all 48 test decks; extract is ~2.4× slower than PDFium, rendering
-  ~10× (`devtools/pure_bench`: 11 decks at the test zoom, the process's own CPU, the minimum of
-  several passes - and an A/B measured *interleaved*, since the same unchanged file drifts 8% with
-  the machine's state; float32 rounding batched through `syntax.F32X*` structs with a scalar
-  fallback on overflow, one regex per word in both lexers, psLib shortcuts for Type 1 programs,
-  ftgrays' LCD filter as one numpy convolution and its cell machinery without the int32 wrap C does
-  not do: -8% of a render pass). Half a render pass is glyphs (`render_text` 43%: 31% rasterising
-  the 24% the glyph cache misses, of which ftgrays is half, and 11% composing the cached bitmaps),
-  and 12% of an extract pass is `fonts.SimpleFont._load_metrics` building a glyph outline to read
-  its bounding box. `tests/test_pure_pdf.py`.
+  And deck.json is identical on all 48 test decks; extract is ~2.1× slower than PDFium, rendering
+  ~9.9× (`devtools/pure_bench`: 11 decks at the test zoom, the minimum of several passes with both
+  readers timed in the same rounds, and an A/B measured *interleaved*, since the same unchanged file
+  drifts 8% with the machine's state; float32 rounding batched through `syntax.F32X*` structs with a
+  scalar fallback on overflow, one regex per word in both lexers, psLib shortcuts for Type 1
+  programs, ftgrays' LCD filter as one numpy convolution). What is fast is the C's own shape:
+  `FT_MulFix` and the FT_Long cast without the mask C does not do, `gray_sweep_direct`'s
+  `FT_FILL_RULE` and its two casts written out where the C has them (-31% of the sweep),
+  `cf2_buf_readByte` and the stack's casts inline in the charstring interpreter (-11% of
+  `Face.units`), and `DrawNormalTextHelper`'s three LCD taps as strides of the glyph row rather than
+  three fancy-index gathers (-26% of it) - together -7% of a render pass; `fonts.Program.glyph_box`
+  reads a glyph's extent off the points the charstring draws instead of growing a box through
+  `ControlBoundsPen` (-13% of it). Of a render pass, 38% is drawing text: 29% the 1,390 glyphs the
+  cache misses (16% ftgrays rasterising, 10% loading and transforming the outline, of which 8.5% is
+  the charstring) and 6.5% composing the cached bitmaps. `tests/test_pure_pdf.py`.
   Cross references (CPDF_Parser, rebuild included) and navigation (`pure/navigation.py`: links,
   actions, destinations, name trees, page labels, metadata) are ported rule for rule; the whole-file
   fuzz (`--structure`, seeds 0-500) differs from PDFium on none (27 before font substitution was
@@ -964,6 +969,11 @@ keys, named ranges), `doc_merge.py` (pure planning), `doc_sync.py` (the commands
     at about page resolution (a 2400 px photo renders 138 px wide), so it is a detector, never a
     source of pixels. An image's matrix in page space is `a > 0, b = c = 0, d < 0` when it is
     drawn upright: the y flip is the norm, `d > 0` or `a < 0` is a mirror, `b`/`c` a rotation.
+- `render_text`'s `x_subpixel` is C's `%`: a glyph left of its origin gives -1 or -2, and PDFium's
+  cascade (`if 0 ... else if 1 ... else`) draws those as 2. Anything that reads the number rather
+  than the branch shifts those glyphs by a third of a pixel - `render_torture_text` failed 39 seeds
+  of 2,500 on it and `render_torture_subst` 35 of 2,000, while the test decks and the offline suite
+  saw nothing.
 - Switching objects off (`FPDFPageObj_SetIsActive`) needs no content regeneration and is
   undone after each render, so crops and backgrounds share one open page.
 - Ball bullets are patched out of the PNG (themes draw them with soft masks shared with shadows).
