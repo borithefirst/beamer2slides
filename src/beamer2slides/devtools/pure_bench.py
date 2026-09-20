@@ -1,10 +1,13 @@
-"""How much slower the pure reader is than PDFium, per page, on the built test decks.
+﻿"""How much slower the pure reader is than PDFium, per page, on the built test decks.
 
 The two numbers CLAUDE.md records: extraction (the raw.json path - `extract.extract`, which asks
 for objects, chars, drawings, images and links) and whole-page rendering (`page.render(zoom)`).
 Both are measured warm (the file is read once, the caches are warm after the first repeat) and
 reported as the **minimum** of the repeats, because the machine this runs on is usually busy with
-something else and the minimum is the only robust statistic under an unrelated load.
+something else and the minimum is the only robust statistic under an unrelated load. The clock is
+`time.process_time` - this process's own CPU - not the wall clock: a second heavy job on the
+machine moved a wall-clock total by 35% between two runs of the same code, which is more than any
+optimisation here is worth. `--wall` asks for the wall clock instead.
 
     python -m beamer2slides.devtools.pure_bench                  # both, the default deck set
     python -m beamer2slides.devtools.pure_bench --what render --repeat 5
@@ -31,6 +34,7 @@ DEFAULT = ("04_theme_blocks", "23_raster_images", "01_basic", "14_misc", "12_met
            "13_inline_math", "22_overlays_on_text", "03_figures", "16_colored_table",
            "11_research_talk", "26_truetype_fonts")
 ZOOM = 1.37                                  # test_whole_beamer_pages_render_as_pdfium_renders_them
+clock = time.process_time                    # --wall swaps in time.perf_counter
 
 
 def decks_dir() -> Path:
@@ -43,32 +47,15 @@ def decks_dir() -> Path:
 
 
 def time_extract(spec: str, path: Path) -> tuple[float, int]:
-    """Seconds for `extract` over the whole file, and how many pages that was."""
+    """Seconds for `extract` over the whole file, and how many pages that was.
+
+    One clock reading for the whole file, never one per page: `process_time` on Windows moves in
+    15.6 ms steps, so a sum of per-page differences is mostly quantisation noise."""
     from beamer2slides.extract import extract
     with pdf.use_backend(spec):
-        t = time.perf_counter()
+        t = clock()
         raw = extract(path)
-        return time.perf_counter() - t, len(raw["pages"])
-
-
-def time_render(spec: str, path: Path) -> tuple[float, int]:
-    """Seconds spent inside `render` alone (opening the document is not counted), and the number
-    of pages drawn: a page the pure reader refuses is drawn by neither."""
-    doc = pdf.resolve(spec).open(path)
-    try:
-        total, drawn = 0.0, 0
-        for i in range(len(doc)):
-            page = doc[i]
-            t = time.perf_counter()
-            try:
-                page.render(ZOOM)
-            except PdfError:
-                continue
-            total += time.perf_counter() - t
-            drawn += 1
-        return total, drawn
-    finally:
-        doc.close()
+        return clock() - t, len(raw["pages"])
 
 
 def refused(path: Path) -> set[int]:
@@ -86,90 +73,93 @@ def refused(path: Path) -> set[int]:
         doc.close()
 
 
-def time_render_pages(spec: str, path: Path, skip: set[int]) -> tuple[float, int]:
+def draw_pages(spec: str, path: Path, skip: set[int]) -> int:
+    """Draw every page the pure reader does not refuse; the document is opened and closed around
+    the drawing, which the caller times."""
     doc = pdf.resolve(spec).open(path)
     try:
-        total, drawn = 0.0, 0
-        for i in range(len(doc)):
-            if i in skip:
-                continue
-            page = doc[i]
-            t = time.perf_counter()
+        pages = [doc[i] for i in range(len(doc)) if i not in skip]
+        for page in pages:
             page.render(ZOOM)
-            total += time.perf_counter() - t
-            drawn += 1
-        return total, drawn
+        return len(pages)
     finally:
         doc.close()
 
 
 def bench(what: str, decks: list[Path], repeat: int, only: str | None) -> dict:
-    out: dict[str, dict] = {}
+    """One clock reading per pass over the *whole* deck set, `repeat` passes, the shortest kept.
+
+    A pass is about two seconds, so the clock's 15.6 ms step is under 1%; a per-deck reading is a
+    tenth of that and mostly quantisation. Per-deck seconds are the median of the same passes and
+    are there to say where the time goes, not to be compared at a few percent."""
     specs = [only] if only else ["pure", "pdfium"]
-    for path in decks:
-        row: dict[str, object] = {}
-        skip = refused(path) if what == "render" else set()
-        for spec in specs:
-            runs, pages = [], 0
-            for _ in range(repeat):
+    skips = {p: refused(p) if what == "render" else set() for p in decks}
+    rows: dict[str, dict] = {p.stem: {"pages": 0} for p in decks}
+    for spec in specs:
+        passes: list[float] = []
+        each: dict[str, list[float]] = {p.stem: [] for p in decks}
+        for _ in range(repeat):
+            t0 = clock()
+            for p in decks:
+                t = clock()
                 if what == "extract":
-                    t, pages = time_extract(spec, path)
+                    with pdf.use_backend(spec):
+                        from beamer2slides.extract import extract
+                        rows[p.stem]["pages"] = len(extract(p)["pages"])
                 else:
-                    t, pages = time_render_pages(spec, path, skip)
-                runs.append(t)
-            row[spec] = {"best": min(runs), "median": statistics.median(runs), "pages": pages}
-        row["pages"] = row[specs[0]]["pages"]
-        if len(specs) == 2:
-            row["ratio"] = row["pure"]["best"] / row["pdfium"]["best"]
-        out[path.stem] = row
-    return out
+                    rows[p.stem]["pages"] = draw_pages(spec, p, skips[p])
+                each[p.stem].append(clock() - t)
+            passes.append(clock() - t0)
+        for p in decks:
+            rows[p.stem][spec] = {"best": statistics.median(each[p.stem]), "runs": each[p.stem]}
+        rows.setdefault("_total", {})[spec] = {"best": min(passes), "runs": passes}
+    total = rows["_total"]
+    if len(specs) == 2:
+        total["ratio"] = total["pure"]["best"] / total["pdfium"]["best"]
+        for p in decks:
+            rows[p.stem]["ratio"] = rows[p.stem]["pure"]["best"] / max(1e-9, rows[p.stem]["pdfium"]["best"])
+    return rows
 
 
 def report(what: str, rows: dict, baseline: dict | None) -> None:
     head = f"{'deck':<22}{'pages':>6}{'pure ms/pg':>12}{'pdfium ms/pg':>14}{'ratio':>8}"
     if baseline:
         head += f"{'was':>10}{'change':>9}"
-    print(f"\n{what}  (best of the repeats)")
+    print(f"\n{what}  (per deck the median pass, the total the shortest whole pass)")
     print(head)
     print("-" * len(head))
-    tot_pure = tot_ref = tot_was = 0.0
     for name, row in rows.items():
-        n = max(1, row["pages"])
+        total = name == "_total"
+        n = 1 if total else max(1, row["pages"])
         pure = row.get("pure", {}).get("best")
         ref = row.get("pdfium", {}).get("best")
-        line = f"{name:<22}{row['pages']:>6}"
+        if total:
+            print("-" * len(head))
+        line = f"{('total' if total else name):<22}{('' if total else row['pages']):>6}"
         line += f"{pure / n * 1000:>12.2f}" if pure is not None else f"{'-':>12}"
         line += f"{ref / n * 1000:>14.2f}" if ref is not None else f"{'-':>14}"
         line += f"{row['ratio']:>8.2f}" if "ratio" in row else f"{'-':>8}"
-        if pure is not None:
-            tot_pure += pure
-        if ref is not None:
-            tot_ref += ref
         if baseline:
             old = baseline.get(name, {}).get("pure", {}).get("best")
             if old is not None and pure is not None:
-                tot_was += old
                 line += f"{old / n * 1000:>10.2f}{(pure / old - 1) * 100:>8.1f}%"
             else:
                 line += f"{'-':>10}{'-':>9}"
-        print(line)
-    print("-" * len(head))
-    tail = f"{'total':<22}{'':>6}{tot_pure * 1000:>12.1f}{tot_ref * 1000:>14.1f}"
-    tail += f"{tot_pure / tot_ref:>8.2f}" if tot_ref else f"{'-':>8}"
-    if baseline and tot_was:
-        tail += f"{tot_was * 1000:>10.1f}{(tot_pure / tot_was - 1) * 100:>8.1f}%"
-    print(tail + "   (ms, whole run)")
+        print(line + ("   (ms, whole pass)" if total else ""))
 
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--what", choices=("extract", "render", "both"), default="both")
     ap.add_argument("--decks", nargs="*", default=list(DEFAULT))
-    ap.add_argument("--repeat", type=int, default=3)
+    ap.add_argument("--repeat", type=int, default=5)
     ap.add_argument("--only", choices=("pure", "pdfium"), help="time one backend only")
     ap.add_argument("--json", type=Path, help="write the numbers here")
     ap.add_argument("--baseline", type=Path, help="an earlier --json file to compare against")
+    ap.add_argument("--wall", action="store_true", help="wall clock instead of this process's CPU")
     args = ap.parse_args(argv)
+    if args.wall:
+        globals()["clock"] = time.perf_counter
 
     out = decks_dir()
     decks = [out / f"{n}.pdf" for n in args.decks]
