@@ -488,6 +488,44 @@ def block_risk_notes(doc: dict, limit: int = RISKY_BLOCKS) -> list[str]:
     return out
 
 
+def rewrite_losses(doc: dict, planned: list[dict]) -> list[str]:
+    """What this sync actually costs, as opposed to what it risks.
+
+    `block_risk_notes` names every block that carries something the dialect never
+    read, which is what somebody deciding *how* to edit a document needs. This is the
+    other end of the same question, asked once the plan exists: of those blocks, which
+    is this run about to write again from nothing? Nearly always none, and then the
+    report says nothing at all; when it is one, it is the one line in the report that
+    is a loss rather than a caution, and it says so before the write, not after.
+
+    A block merely **restyled** is safe and is left out: every request names the
+    fields it writes, and no field the merge owns is a field nobody reads. A block
+    **rewritten** (the file's runs go in where the document's were) or **moved** (a
+    move is a delete and a write, and the write says only what the file says) is not.
+    A block the source **deleted** is left out too — its words are going on purpose,
+    and a property going with them is not news.
+    """
+    risky = {(block["tab"], tuple(block["span"])): block
+             for block in doc_ir.unread_blocks(doc)}
+    if not risky:
+        return []
+    out = []
+    for each in planned:
+        for block in each["result"].get("blocks", []):
+            if not block.get("span") or not (block.get("rewrite") or block.get("moved")):
+                continue
+            hit = risky.get((each["stamp"], tuple(block["span"])))
+            if hit is None:
+                continue
+            named = ", ".join(".".join(path.split(".")[-2:]) for path in hit["unread"])
+            why = "moved" if block.get("moved") else "rewritten from the file"
+            where = f"[{each['label']}] " if each.get("label") else ""
+            words = f"{hit['words'][:48]!r}" if hit["words"] else f"at {hit['span'][0]}"
+            out.append(f"{where}the {hit['kind']} {words} is being {why}, which drops "
+                       f"{named} — the document's, and in nothing the file can say")
+    return out
+
+
 def stamp_of(ir: dict, part: dict) -> str | None:
     """The `tabId` a tab's requests carry: none for the first tab, which is where a
     request without one goes (`doc_merge.on_tab`)."""
@@ -929,8 +967,10 @@ def sync(path: Path, document: str | None = None, dry_run: bool = False,
                 each["result"]["structure"] + each["result"]["requests"], each["stamp"])]
         info["requests"] = len(info["plan"]) + len(tabs["create"])
         info["base"] = where
-        # A dry run never reaches `settle`, which is where this is normally said.
-        info["notes"] = troubles + info["notes"] + unmodelled_notes(doc)
+        # A dry run never reaches `settle`, which is where this is normally said —
+        # and it is the run where being told what a write would cost is worth most.
+        info["notes"] = (troubles + info["notes"] + unmodelled_notes(doc)
+                         + rewrite_losses(doc, planned))
         info["report"] = str(write_report(path, info))
         return info
 
@@ -944,7 +984,7 @@ def sync(path: Path, document: str | None = None, dry_run: bool = False,
     info["base"] = where
     if kept:
         info["backup"] = str(kept)
-    info["notes"] = troubles + info["notes"] + batched
+    info["notes"] = troubles + info["notes"] + batched + rewrite_losses(doc, written)
     live = settle(docs, ident, path, ours, base,
                   {each["stamp"]: each["result"]["blocks"] for each in written}, drive,
                   info["notes"])

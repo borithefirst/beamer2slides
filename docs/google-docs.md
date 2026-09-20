@@ -295,8 +295,20 @@ many more); a sync, which names nothing, at least says how many blocks carry one
 is the number it can act on. A section break is left out — nothing rewrites one — and so is everything
 outside the blocks, since no rewrite of a paragraph can drop the page's margins. It is
 a **risk**, not a loss: a block nobody rewrites keeps all of it, which is exactly the
-thing one can act on. What a sync *did* rewrite is the next step and waits on nothing
-but a way to ask the plan.
+thing one can act on.
+
+And once the plan exists the risk has an answer (`doc_sync.rewrite_losses`). Of the
+blocks carrying something unread, which is *this run* about to write again from
+nothing? Nearly always none, and then the report says nothing at all; when it is one,
+it is the single line in the report that is a loss rather than a caution, and it is
+there before the write — in a `--dry-run` above all, which is the run whose whole job
+is to say what a write would cost. A block merely restyled or reworded is left out,
+and that is the distinction the whole thing rests on: a request names the fields it
+writes, and no field the merge owns is a field nobody reads. A block **rewritten**
+(the file's runs go in where the document's were) or **moved** (a move is a delete and
+a write, and the write says only what the file says) is named. A block the source
+**deleted** is left out too — its words are going on purpose, and a property going
+with them is not news.
 
 Two tests pin the map. One walks a fixture holding one of everything and asserts the
 whole set, so a property Docs adds later surfaces as a failure rather than as silence.

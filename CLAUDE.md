@@ -1184,8 +1184,13 @@ keys, named ranges), `doc_merge.py` (pure planning), `doc_sync.py` (the commands
   `doc_sync.block_risk_notes`, 8 blocks x 4 properties), while a sync says how many blocks
   carry one: a section break and anything outside the blocks are left out, since no rewrite
   reaches them. It is a risk, not a loss - a block nobody rewrites keeps all of it. The
-  `doc_adopt` journey hands the same lines to an agent as warnings. Naming what a sync
-  *did* rewrite is the next step.
+  `doc_adopt` journey hands the same lines to an agent as warnings. Once the plan exists the
+  risk has an answer (`doc_sync.rewrite_losses`): of those blocks, which is *this run* about
+  to write again from nothing? Usually none, and the report says nothing; otherwise it is the
+  one line that is a loss and not a caution, and it is there before the write (a `--dry-run`
+  above all). A block rewritten or moved is named - a move is a delete and a write - a block
+  restyled or reworded is not, since a request names the fields it writes and no field the
+  merge owns is one nobody reads, and a block the source deleted is not either.
 - Fuzzed against a loss oracle, as the Slides sync is (docs/google-docs.md, "Proving nothing
   is lost"): `devtools/doc_loss_oracle.py` judges one sync from the two read-backs, the base
   and the report - did anything the *reader* put in the document disappear without the report

@@ -636,3 +636,47 @@ def test_the_blocks_are_named_most_laden_first_and_the_tail_is_counted():
                                "paragraphStyle.borderLeft, ")
     assert len(notes) == 4
     assert notes[-1].startswith("and 8 more blocks carry something the file cannot say")
+
+
+def _planned(doc: dict, reorder: bool = False, reword: bool = False) -> list[dict]:
+    """One tab's plan over a document, keyed as a synced document would be."""
+    import copy
+
+    from beamer2slides import doc_ir, doc_merge
+    theirs = doc_ir.from_document(doc)
+    for n, block in enumerate(theirs["blocks"]):
+        block["key"] = f"p:{n}"
+    base, ours = copy.deepcopy(theirs), copy.deepcopy(theirs)
+    if reorder:
+        ours["blocks"] = ours["blocks"][-1:] + ours["blocks"][:-1]
+    if reword:
+        ours["blocks"][-1]["runs"] = [{"text": "Bordered words, reworded"}]
+    return [{"stamp": None, "label": None,
+             "result": doc_merge.plan(base, ours, copy.deepcopy(theirs))}]
+
+
+def test_the_block_this_sync_is_about_to_cost_something_is_named_as_a_loss():
+    """The risk notes say what a rewrite *would* drop, which is a caution. Once the
+    plan exists, the question has an answer: this run moves that very block, and a
+    move is a delete and a write, so the border is going. Said before the write."""
+    doc = _said_doc(("First words", {}), ("Second words", {}),
+                    ("Bordered words", {"borderBottom": {"width": {"magnitude": 1}}}))
+    assert doc_sync.rewrite_losses(doc, _planned(doc, reorder=True)) == [
+        "the paragraph 'Bordered words' is being moved, which drops "
+        "paragraphStyle.borderBottom — the document's, and in nothing the file can say"]
+
+
+def test_a_block_whose_words_merely_change_costs_nothing_and_is_not_named():
+    """The whole distinction: a request names the fields it writes, and no field the
+    merge owns is a field nobody reads. A report that cried loss on every edit to a
+    bordered paragraph would teach whoever reads it to skip the line."""
+    doc = _said_doc(("First words", {}), ("Second words", {}),
+                    ("Bordered words", {"borderBottom": {"width": {"magnitude": 1}}}))
+    planned = _planned(doc, reword=True)
+    assert planned[0]["result"]["requests"], "the source edit reached no request"
+    assert doc_sync.rewrite_losses(doc, planned) == []
+
+
+def test_a_document_with_nothing_unread_says_nothing_however_much_moves():
+    doc = _said_doc(("First words", {}), ("Second words", {}), ("Third words", {}))
+    assert doc_sync.rewrite_losses(doc, _planned(doc, reorder=True)) == []
