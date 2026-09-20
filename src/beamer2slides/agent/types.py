@@ -54,14 +54,38 @@ WRITES_GOOGLE = "writes_google"   # changes a deck or document someone may be lo
 
 @dataclass
 class Artifact:
-    """A file a journey produced, named the way the workspace names things."""
+    """A file a journey produced, named the way the workspace names things.
+
+    The name is always there. The *content* is there when the context asked for it
+    (`content.deliver`), which is what a harness with no filesystem needs: it never opens the
+    file, it reads `text` or `base64` off the artifact. What was too big to carry says so in
+    `truncated` and still carries its size and digest, so the harness can ask for it by ref.
+    """
 
     ref: str                      # workspace-relative, the form the agent passes back in
     kind: str                     # json | image | pdf | tex | html | report | folder | pptx
     description: str = ""
+    #: Filled in only when the context delivers content inline; see `agent/content.py`.
+    text: str | None = None
+    base64: str | None = None
+    bytes: int | None = None      # the file's size, whether or not its content is carried
+    sha256: str | None = None
+    truncated: bool = False       # over the cap: read it with `workspace.read_bytes(ref)`
+
+    #: The shape every artifact has had, and still has when no content is delivered.
+    _ALWAYS = ("ref", "kind", "description")
 
     def json(self) -> dict:
-        return asdict(self)
+        # The content fields are left out rather than sent as nulls: a conversion's thirty
+        # artifacts would otherwise carry five empty keys each into the model's context. The
+        # three original fields are always there, so a reader written before this still works.
+        out = {k: getattr(self, k) for k in self._ALWAYS}
+        for key in ("text", "base64", "bytes", "sha256"):
+            if getattr(self, key) is not None:
+                out[key] = getattr(self, key)
+        if self.truncated:
+            out["truncated"] = True
+        return out
 
 
 @dataclass

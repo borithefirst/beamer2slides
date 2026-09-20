@@ -11,6 +11,11 @@ workspace root. `resolve` turns one into an absolute path and refuses anything t
 `ref` turns a path back. A harness that keeps its files somewhere else stages them in and out
 around a journey (`stage`, `Artifact.ref`) rather than teaching the library a new kind of path.
 
+A harness with no filesystem *to* keep files in does the same thing without naming anything:
+`content.py` writes its inline arguments into the workspace and reads its artifacts back out,
+and `content.MemoryWorkspace` is a root nobody outside the context learns the name of. The disk
+does not go away - it leaves the interface.
+
 `out_dir` is here for a second reason: `paths.out_root()` answers `out/` *in the checkout* when
 the library runs from one and `out/` in the process's current folder otherwise, which makes the
 same call write to two different places depending on how beamer2slides was installed. A
@@ -28,7 +33,13 @@ from .types import Refused
 
 @runtime_checkable
 class Workspace(Protocol):
-    """The filesystem seam. `root` is the only directory a journey may write into."""
+    """The filesystem seam. `root` is the only directory a journey may write into.
+
+    The read/write pair is part of the contract rather than a convenience of the local
+    implementation: `content.py` puts inline arguments in and takes artifacts out through it, and
+    a harness with no filesystem of its own fetches what was too big to inline with
+    `read_bytes(ref)`. A ref is the name it hands back, not a path it has to resolve.
+    """
 
     root: Path
 
@@ -37,6 +48,10 @@ class Workspace(Protocol):
     def out_dir(self, name: str) -> Path: ...
     def exists(self, ref: str) -> bool: ...
     def glob(self, pattern: str) -> list[str]: ...
+    def read_bytes(self, ref: str) -> bytes: ...
+    def read_text(self, ref: str) -> str: ...
+    def write_bytes(self, ref: str, data: bytes) -> str: ...
+    def write_text(self, ref: str, text: str) -> str: ...
 
 
 class LocalWorkspace:

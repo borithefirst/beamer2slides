@@ -934,6 +934,21 @@ same functions underneath; nothing here reimplements a journey.
   **before the body runs**, so a forbidden journey does no work rather than stopping halfway through
   a rebuild. `google_auth.use_provider` is the one hook added to the library: credentials injected
   for the length of a call instead of found in the filesystem.
+- **A harness with no filesystem to name** (`content.py`, docs/agent-tools.md): the disk the library
+  needs does not go away, it leaves the interface. Every file argument also takes the file - a `data:`
+  URI or `{"name", "base64"|"text"}` - which `take_in` writes into the workspace's `inbox/` and
+  replaces with the ref, so the journey underneath sees the file it always saw (in `@tool`, and in
+  `mcp.dispatch` *before* the schema check, since a content dict is not a publishable parameter type;
+  idempotent, because what comes out is a plain ref). `deliver="inline"` fills each `Artifact` with
+  its own `text`/`base64` beside `bytes` and `sha256`, under a per-artifact cap and a per-call budget
+  so a 30-slide conversion cannot hand a model its own weight in PNG; what did not fit says
+  `truncated` and is fetched with `workspace.read_bytes`. `AgentContext.detached()` is both over a
+  `MemoryWorkspace` - a private temp dir removed on `close()` whose name nothing outside the context
+  learns. **A plain string is never content**: `"talk.pdf"` is a ref and a `docs.google.com` URL is a
+  deck the journey resolves itself, or `deck_sync(deck=<url>)` would start syncing against the deck's
+  own HTML; `data:` is the one string form. A `{"url": …}` is fetched by the *context's* fetcher and
+  refused by name when there is none - a built-in `urlopen` would be an egress path from a model's
+  argument to any host inside a call the harness thought was local. `tests/test_agent_content.py`.
 - `@tool(name, needs)` is the wrapper every journey is written inside (a contextmanager cannot skip
   its body when the gate refuses). It serialises - **one journey per process**, because the library
   underneath is full of process-wide state two journeys would share (`redirect_stdout`, `pdf._backend`,

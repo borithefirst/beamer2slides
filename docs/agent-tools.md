@@ -67,6 +67,41 @@ when the library runs from one and `out/` in the process's current folder otherw
 call writing to two different places depending on how beamer2slides was installed. A workspace
 answers it the same way everywhere.
 
+#### A harness with no filesystem to name
+
+The paragraph above stays true and is not the whole story. A harness can have no filesystem of
+its own - a sandboxed service holding a PDF in memory, with nowhere to put one and nothing to
+read one back from. The disk it needs does not disappear; it **leaves the interface**
+(`agent/content.py`):
+
+* **In.** Any argument that is a workspace ref also takes the file itself: a `data:` URI, or
+  `{"name": "talk.pdf", "base64": "…"}` / `{"text": "…"}`. `take_in` writes it into the
+  workspace's `inbox/` and replaces it with the ref, so the journey underneath sees the ordinary
+  file it has always seen. It runs in `@tool` and again in `mcp.dispatch` - before the schema
+  check there, because a content dict is not a publishable parameter type - and is idempotent,
+  since what comes out is a plain ref.
+* **Out.** `AgentContext(deliver="inline")` fills each `Artifact` with its own content: `text`
+  where it is text, `base64` where it is not, plus `bytes` and `sha256` on every one. A cap per
+  artifact and a budget per call stop a thirty-slide conversion from handing a model its own
+  weight in PNG; what did not fit says `truncated` and is fetched with `workspace.read_bytes`.
+  The default is still `"refs"`, so nothing already running starts carrying payloads.
+* **Nowhere.** `AgentContext.detached()` is both at once over a `MemoryWorkspace`: a private
+  temporary directory, removed on `close()`, whose name nothing outside the context learns.
+
+```python
+with AgentContext.detached(google=InjectedToken(creds)) as ctx:
+    result = deck_convert(ctx, pdf={"name": "talk.pdf", "base64": encoded})
+```
+
+**A plain string is never content.** `"talk.pdf"` is a ref and a `docs.google.com` URL is a deck
+the journey resolves itself; if this layer ever fetched one, `deck_sync(deck=<url>)` would start
+downloading the deck's own HTML and syncing against it. The one string form is `data:`, which
+nothing else begins with. A `{"url": …}` is fetched by the **context's own fetcher** and refused
+by name when there is none: a library that grows its own `urlopen` grows an egress path from a
+model's argument to an arbitrary host, inside a call the harness thought was local, while a
+harness that wants URL inputs already has a client with its own allow-list and passes it in one
+line. Tests: `tests/test_agent_content.py`.
+
 ### `GoogleAccess` - where the credentials come from
 
 Three implementations, none of them interactive:
@@ -97,8 +132,9 @@ in a read-only context; a body about to write for real calls `j.require(WRITES_G
 and gets the same refusal the gate would have given. That is the seam a harness uses to let an
 agent plan freely and gate only the writes behind a human.
 
-`progress` is the fourth field: a callback that receives, line by line, whatever the library
-prints, so a harness can show a thirty-second conversion happening.
+`progress` is the field beside the three: a callback that receives, line by line, whatever the
+library prints, so a harness can show a thirty-second conversion happening. `deliver`, `fetch`
+and the two inline caps belong to the workspace seam and are described under it.
 
 ## The result envelope
 
@@ -118,6 +154,10 @@ person and stop, `base_choice_needed` says ask rather than guess.
 
 Conflicts are diagnostics, not prose. An agent that reports success with open conflicts is
 making a mistake the benchmark is built to catch.
+
+An artifact is `{"ref", "kind", "description"}` and, where the context delivers content inline,
+`text` or `base64` beside `bytes` and `sha256`. The three original fields are always there, so a
+reader written before any of that still works.
 
 ## One journey at a time per process
 

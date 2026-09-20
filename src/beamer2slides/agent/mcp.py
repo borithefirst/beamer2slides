@@ -29,7 +29,7 @@ import sys
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
-from . import schema
+from . import content, schema
 from .auth import NoGoogle, default_access
 from .context import ALL_ACTIONS, LOCAL_ONLY, READ_ONLY, AgentContext
 from .types import Refused, Result
@@ -73,6 +73,11 @@ def dispatch(ctx: AgentContext, name: str, arguments: Mapping[str, Any] | None =
                         f"There is no tool called {name!r}. This server has {offer}.",
                         {"tools": sorted(known)})
     try:
+        # Before the schema check, not after: a content dict is not a publishable parameter
+        # type, and by the time `validate` sees the argument it has to be the string ref the
+        # schema says it is. `@tool` does this again for a caller who came in another way;
+        # both passes are idempotent, since what comes out is a plain ref.
+        arguments = content.take_in(ctx.workspace, arguments or {}, ctx.fetch)
         cleaned = schema.validate(fn, arguments)
     except Refused as exc:
         return _refusal(name, exc.code, str(exc), exc.data)

@@ -57,6 +57,16 @@ class AgentContext:
     #: How many lines of a journey's own output to keep in `data["log"]`. The library prints a
     #: line per slide, which is useful when something went wrong and noise when it did not.
     log_lines: int = 40
+    #: Whether an artifact comes back as a name alone (`"refs"`, the default) or with its own
+    #: content in it (`"inline"`), which is what a harness with no filesystem reads. See
+    #: `agent/content.py`; the caps are per artifact and per call.
+    deliver: str = "refs"
+    inline_limit: int = 0         # 0 = content.INLINE_LIMIT
+    inline_budget: int = 0        # 0 = content.INLINE_BUDGET
+    #: How a `{"url": ...}` argument is fetched. None means it is refused by name: this library
+    #: never opens a socket to a host a model chose. A harness that wants URL inputs passes the
+    #: client it already trusts, with its own allow-list.
+    fetch: Callable[[str], bytes] | None = None
 
     @classmethod
     def local(cls, root: Path | str, **kw: Any) -> "AgentContext":
@@ -70,8 +80,33 @@ class AgentContext:
         kw.setdefault("allow", LOCAL_ONLY)
         return cls(workspace=LocalWorkspace(root), **kw)
 
+    @classmethod
+    def detached(cls, **kw: Any) -> "AgentContext":
+        """No path in or out: content comes in inline and artifacts come back with their own.
+
+        For the harness that has no filesystem to name. The workspace underneath is a private
+        temporary directory, because the library needs one; nothing outside this object ever
+        learns where it is, and `close()` removes it. Use it as a context manager.
+        """
+        from .content import MemoryWorkspace
+
+        kw.setdefault("deliver", "inline")
+        return cls(workspace=MemoryWorkspace(), **kw)
+
     def permits(self, *actions: str) -> bool:
         return all(a in self.allow for a in actions)
+
+    def close(self) -> None:
+        """Release what the workspace holds. A no-op unless it is a temporary one."""
+        closing = getattr(self.workspace, "close", None)
+        if callable(closing):
+            closing()
+
+    def __enter__(self) -> "AgentContext":
+        return self
+
+    def __exit__(self, *exc: Any) -> None:
+        self.close()
 
 
 class Job:
@@ -175,6 +210,11 @@ def tool(name: str, needs: tuple[str, ...] = (READS,)):
             started = time.time()
             with _LOCK:
                 try:
+                    # Inline content becomes a file in the workspace before anything else, so
+                    # the journey underneath sees the ordinary ref it has always seen. Cheap
+                    # and idempotent: a call whose arguments are all plain strings walks the
+                    # dict once, and a ref that has already been materialised is one.
+                    kw = _take_in(job, kw)
                     _gate(job, needs)
                     creds = job.credentials() if _wants_google(needs) else None
                     with redirect_stdout(_Tee(job)):
@@ -202,7 +242,7 @@ def tool(name: str, needs: tuple[str, ...] = (READS,)):
                     _refuse(job, code, f"{type(exc).__name__}: {exc}", {})
                 finally:
                     job.seconds = time.time() - started
-            return job.result
+            return _deliver(job.result, ctx)
 
         call.tool_name = name                                      # type: ignore[attr-defined]
         call.needs = needs                                         # type: ignore[attr-defined]
@@ -210,6 +250,35 @@ def tool(name: str, needs: tuple[str, ...] = (READS,)):
         return call
 
     return wrap
+
+
+def _take_in(job: Job, arguments: dict[str, Any]) -> dict[str, Any]:
+    """Materialise inline arguments, or refuse as this layer refuses anything else.
+
+    Inside the `try`, so a malformed `base64` comes back as `bad_request` with the parameter
+    named rather than as a traceback the harness has to catch.
+    """
+    from .content import is_content, take_in
+
+    if not any(is_content(v) for v in arguments.values()):
+        return arguments
+    return take_in(job.ctx.workspace, arguments, job.ctx.fetch)
+
+
+def _deliver(result: Result, ctx: AgentContext) -> Result:
+    """Put the artifacts' content into them when the context asked for that.
+
+    Outside the lock and outside the `try`: reading back what a journey already wrote is not
+    part of the journey, and a file that vanished between the two is skipped rather than
+    turning a finished conversion into a failure.
+    """
+    if ctx.deliver != "inline" or not result.artifacts:
+        return result
+    from . import content
+
+    return content.deliver(ctx.workspace, result,
+                           limit=ctx.inline_limit or content.INLINE_LIMIT,
+                           budget=ctx.inline_budget or content.INLINE_BUDGET)
 
 
 def _gate(job: Job, needs: tuple[str, ...]) -> None:
