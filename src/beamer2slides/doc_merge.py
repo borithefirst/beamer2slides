@@ -33,8 +33,37 @@ BLOCK_MATCH = 0.5  # least similarity for an unkeyed block to inherit a key
 BULLETS = {False: "BULLET_DISC_CIRCLE_SQUARE", True: "NUMBERED_DECIMAL_ALPHA_ROMAN"}
 # The textStyle fields this merge owns: named on a restyle whether or not the run
 # carries them, so that a mark the source took away is taken away in the document.
-MANAGED = ("backgroundColor", "bold", "foregroundColor", "italic", "link",
-           "strikethrough", "underline")
+#
+# A field belongs here only when the canonical file can say it *and* a read can see
+# it: naming a field the file cannot carry would clear, on every source restyle,
+# something a reader set in the browser and nothing on our side ever knew about.
+# `fontSize`, `weightedFontFamily` and `smallCaps` joined the list when `doc_ir`
+# began carrying them (`font`, `fontsize`, `smallcaps`) — the face a reader chooses now
+# round-trips through the file, so writing the merge's answer back is writing the
+# reader's own choice back, and a run that only repeats its named style carries
+# nothing, so clearing the field there leaves the same face on the page.
+MANAGED = ("backgroundColor", "bold", "fontSize", "foregroundColor", "italic", "link",
+           "smallCaps", "strikethrough", "underline", "weightedFontFamily")
+# The paragraph properties the merge owns, and the `paragraphStyle` field each is.
+# The first three reach a document from HTML as well (measured: "Paragraph CSS:
+# `text-align`, `margin-left`, `text-indent`, `line-height`"); the last three only
+# through `batchUpdate` (`doc_ir.PARAGRAPH_DATA` says why), which the study measured
+# working for `updateParagraphStyle` with `shading`.
+PARAGRAPH_FIELDS = (("indent", "indentStart"), ("indent_first", "indentFirstLine"),
+                    ("line_spacing", "lineSpacing"), ("shading", "shading"),
+                    ("space_above", "spaceAbove"), ("space_below", "spaceBelow"))
+# What is written on a paragraph, named whether or not the block asks for it, so
+# that a property the source took away goes away. Unset-and-named is the API's own
+# way of saying "back to the default" (documented, not measured here).
+MANAGED_PARAGRAPH = ("namedStyleType", "alignment") + tuple(a for _, a in PARAGRAPH_FIELDS)
+# A bullet's indents are the list preset's, not a choice anybody made: `doc_ir`
+# leaves them out of an item and `createParagraphBullets` would overwrite them.
+ITEM_PARAGRAPH = tuple(f for f in MANAGED_PARAGRAPH if not f.startswith("indent"))
+# Everything about a block that is not its words, its styling or its identity.
+SHAPE_KEYS = ("kind", "level", "ordered", "align") + tuple(k for k, _ in PARAGRAPH_FIELDS)
+# What no HTML import can put in a document, so a push has to write it afterwards
+# (`carry_unimported`, `tidy_requests`).
+UNIMPORTABLE = ("shading", "space_above", "space_below")
 # What is written first when two edits are planned at one and the same index
 # (`requests` says why each one sits where it does).
 DELETE, APPEND, EDIT, BEFORE = 0, 1, 2, 3
@@ -208,9 +237,14 @@ def _equations(block: dict):
 
 def tidy_requests(live: dict) -> list[dict]:
     """What a sync writes after the merge so the document reads back as it looks:
-    bullets for the lists it cannot describe, and a plain paragraph after a final
-    table that took over a list item's glyph or a heading's style."""
-    out = bullet_requests(live)
+    the styling no import could carry (`carry_unimported`), bullets for the lists it
+    cannot describe, and a plain paragraph after a final table that took over a list
+    item's glyph or a heading's style.
+
+    The unimportable styling goes first, for the same reason bullets go last: a
+    paragraph-wide style request restyles the glyph with the words.
+    """
+    out = unimported_requests(live) + bullet_requests(live)
     for part in ("trailer", "lead"):
         if live.get(f"{part}_kind"):
             start, end = live[part]
@@ -219,6 +253,31 @@ def tidy_requests(live: dict) -> list[dict]:
                     {"updateParagraphStyle": {"range": span, "fields": "namedStyleType,alignment",
                                               "paragraphStyle": {"namedStyleType": "NORMAL_TEXT",
                                                                  "alignment": "START"}}}]
+    return out
+
+
+def unimported_requests(live: dict) -> list[dict]:
+    """The styling `carry_unimported` found missing, written with `batchUpdate`.
+
+    A paragraph's own span for the shading and the space around it; the exact
+    stretch of words for small caps, which is why the ranges were measured
+    character by character and not run by run.
+    """
+    out = []
+    for block in live["blocks"]:
+        want = block.get("unimported")
+        if not want:
+            continue
+        if want["paragraph"]:
+            style = {api: _paragraph_value(key, want["paragraph"][key])
+                     for key, api in PARAGRAPH_FIELDS if key in want["paragraph"]}
+            out.append({"updateParagraphStyle": {
+                "range": {"startIndex": block["span"][0], "endIndex": block["span"][1]},
+                "paragraphStyle": style, "fields": ",".join(sorted(style))}})
+        for start, end in want["smallcaps"]:
+            out.append({"updateTextStyle": {
+                "range": {"startIndex": start, "endIndex": end},
+                "textStyle": {"smallCaps": True}, "fields": "smallCaps"}})
     return out
 
 
@@ -259,8 +318,28 @@ def styles_of(block: dict) -> tuple:
 
 
 def _shape(block: dict) -> tuple:
-    """The part of a block that is not its words."""
-    return (block["kind"], block.get("level"), block.get("ordered"), block.get("align"))
+    """The part of a block that is not its words.
+
+    The paragraph's own measurements count: a source that changes nothing but a
+    block's line spacing has changed the block, and this is what says so, so that
+    `_restyle_requests` writes the paragraph again.
+    """
+    return tuple(block.get(key) for key in SHAPE_KEYS)
+
+
+def _take_shape(out: dict, mine: dict) -> dict:
+    """Give a block the source's shape — the whole of it, absences included.
+
+    A dict update can only add: for as long as this was one, a source that took a
+    block's centring (or its shading) away left the document centred for good,
+    because the key it no longer writes said nothing at all.
+    """
+    for key in SHAPE_KEYS:
+        if key in mine:
+            out[key] = mine[key]
+        else:
+            out.pop(key, None)
+    return out
 
 
 def _match_shape(block: dict) -> tuple:
@@ -423,6 +502,9 @@ def adopt_keys(live: dict, planned: list[dict]) -> int:
     its own words instead, it would lose the identity the canonical file carries —
     the `id=` its author wrote — and the next diff would rename a paragraph nobody
     touched. The same holds for a block the source added with an id of its own.
+
+    Being the one place that holds the plan and the read-back side by side, this is
+    also where `carry_unimported` notes the styling no import could carry.
     """
     taken = {b["key"] for b in live["blocks"] if b.get("key")}
     free: dict[tuple, list[str]] = {}
@@ -436,7 +518,69 @@ def adopt_keys(live: dict, planned: list[dict]) -> int:
         if same := free.get((_match_shape(block), _match_text(block))):
             block["key"] = same.pop(0)
             done += 1
+    carry_unimported(live, planned)
     return done
+
+
+def carry_unimported(live: dict, planned: list[dict]) -> int:
+    """Note on each read-back block what the plan asked for that no import can write.
+
+    Paragraph shading and the space above and below a paragraph are not in what
+    Drive's importer keeps (measured: `background-color` on a `<p>` arrives as a
+    character highlight on its runs, and the study's list of paragraph CSS has no
+    margins), and small caps has no CSS at all; all four are written by
+    `updateTextStyle` / `updateParagraphStyle`, which the study measured working.
+    A `push` is an import and nothing else, so its document comes back without them:
+    what is missing is recorded here and `tidy_requests` writes it, in the batch a
+    settle sends anyway. After a sync this is almost always empty — the merge's own
+    batch wrote those fields — and it costs one comparison to be sure.
+
+    Only what the plan asks for and the document has not got is carried. A property
+    the plan does not mention is left alone: in a read, "absent" is also what a
+    reader who took the styling off looks like, and a settle must never undo that.
+    """
+    want = {b["key"]: b for b in planned if b.get("key")}
+    done = 0
+    for block in live["blocks"]:
+        mine = want.get(block.get("key"))
+        if mine is None or not block.get("span"):
+            continue
+        missing = {key: mine[key] for key in UNIMPORTABLE
+                   if mine.get(key) is not None and mine[key] != block.get(key)}
+        ranges = _smallcaps_gaps(mine, block)
+        if missing or ranges:
+            block["unimported"] = {"paragraph": missing, "smallcaps": ranges}
+            done += 1
+    return done
+
+
+def _smallcaps_gaps(mine: dict, live: dict) -> list[list[int]]:
+    """Where the plan wants small caps and the document has none, in its index space.
+
+    Character by character, because a mark on part of a run is a run boundary on one
+    side and not on the other. Only a block whose words came through unchanged and
+    holds nothing frozen is looked at: an equation is several index units where a
+    character is one, so anywhere else an offset would be a guess.
+    """
+    if block_text(mine) != block_text(live) or any(
+            r.get("frozen") for b in (mine, live) for r in b.get("runs", [])):
+        return []
+    theirs = _smallcaps_mask(live)
+    gaps, start, at = [], None, live["span"][0]
+    for spot, want in enumerate(_smallcaps_mask(mine)):
+        if want and not theirs[spot]:
+            start = at + spot if start is None else start
+        elif start is not None:
+            gaps.append([start, at + spot])
+            start = None
+    if start is not None:
+        gaps.append([start, at + len(theirs)])
+    return gaps
+
+
+def _smallcaps_mask(block: dict) -> list[bool]:
+    return [bool(run.get("smallcaps")) for run in block.get("runs", [])
+            for _ in range(doc_ir.utf16_len(run.get("text", "")))]
 
 
 # ---------------------------------------------------------------- merge
@@ -584,8 +728,8 @@ def _merge_block(was: dict, mine: dict, live: dict, conflicts: list, notes: list
             # written, so an equation in it — which no request can make again — keeps
             # the whole block as the document has it.
             if _writable_block(live) and all(writable(r) for r in runs):
-                return out | {k: mine[k] for k in ("kind", "level", "ordered", "align")
-                              if k in mine} | {"runs": runs, "rewrite": True, "origin": "merged"}
+                return _take_shape(dict(out), mine) | {"runs": runs, "rewrite": True,
+                                                       "origin": "merged"}
             notes.append(f"{key}: the source changed a chip or picture no request can write "
                          f"— left alone")
             return out | {"origin": "frozen content differs"}
@@ -595,7 +739,7 @@ def _merge_block(was: dict, mine: dict, live: dict, conflicts: list, notes: list
     for clash in clashes:
         conflicts.append(dict(clash) | {"key": key})
     if _shape(mine) != _shape(was) and _shape(live) == _shape(was):
-        out |= {k: v for k, v in mine.items() if k in ("kind", "level", "ordered", "align")}
+        _take_shape(out, mine)
     if text != block_text(live):
         out["runs"] = _retext(live, text)
         out["origin"] = "merged"
@@ -1147,12 +1291,10 @@ def _paragraph_requests(start: int, end: int, block: dict, was_item: bool) -> li
         # Text inserted at the start of a list item joins that item, bullet and all;
         # and a block the source turned back into a paragraph must lose its glyph.
         out.append({"deleteParagraphBullets": {"range": {"startIndex": start, "endIndex": end}}})
-    style = {"namedStyleType": doc_ir.NAMED_STYLE[block.get("level", 0)
-                                                  if block["kind"] == "heading" else 0],
-             "alignment": doc_ir.TO_ALIGNMENT[block.get("align") or "left"]}
+    style, fields = paragraph_style(block)
     out.append({"updateParagraphStyle": {
         "range": {"startIndex": start, "endIndex": end}, "paragraphStyle": style,
-        "fields": "namedStyleType,alignment"}})
+        "fields": fields}})
     if block["kind"] == "item":
         # Bullets last: a style request covering the whole paragraph would restyle
         # the glyph too, the same trap as the Slides pipeline's createParagraphBullets.
@@ -1162,23 +1304,48 @@ def _paragraph_requests(start: int, end: int, block: dict, was_item: bool) -> li
     return out
 
 
+def paragraph_style(block: dict) -> tuple[dict, str]:
+    """A block's `paragraphStyle` and the fields to write it under.
+
+    Every field the merge owns is named; only the ones the block asks for are given
+    a value. Named-and-unset is how the API is told to put a property back to its
+    default, which is what a source that dropped an indent means.
+    """
+    style = {"namedStyleType": doc_ir.NAMED_STYLE[block.get("level", 0)
+                                                  if block["kind"] == "heading" else 0],
+             "alignment": doc_ir.TO_ALIGNMENT[block.get("align") or "left"]}
+    fields = ITEM_PARAGRAPH if block["kind"] == "item" else MANAGED_PARAGRAPH
+    for key, api in PARAGRAPH_FIELDS:
+        if api in fields and block.get(key) is not None:
+            style[api] = _paragraph_value(key, block[key])
+    return style, ",".join(fields)
+
+
+def _paragraph_value(key: str, value):
+    if key == "line_spacing":
+        # A Docs lineSpacing is the multiplier × 100 (single spacing is 100).
+        return float(value) * 100
+    if key == "shading":
+        return {"backgroundColor": {"color": {"rgbColor": _rgb(value)}}}
+    return {"magnitude": float(value), "unit": "PT"}
+
+
 def _run_requests(start: int, block: dict, reset: bool = False) -> list[dict]:
     """`updateTextStyle` per run of a block laid out from `start`.
 
     `reset` is for a block that already exists: the fields are named whether or not
     the run carries them, so a mark the source took away is taken away in the
-    document too. The font is only named when one of the sides asks for the code
-    face — resetting `weightedFontFamily` on every sync would undo a font the
-    person chose in the document, which is not ours to touch.
+    document too. The face and the size are named with the rest of `MANAGED` — the
+    file carries them now, so what is written back is what the last read saw, and a
+    run that only repeats its named style names the field with no value, which puts
+    the paragraph's own face back rather than some face of ours.
     """
-    fonts = any(run.get("code") for run in block.get("runs", []))
     out, at = [], start
     for run in block.get("runs", []):
         width = _run_width(run)
         marks = _text_style(run)
         if width and not run.get("frozen") and (marks or reset):
-            fields = sorted(set(marks) | (set(MANAGED + (("weightedFontFamily",) if fonts else ()))
-                                          if reset else set()))
+            fields = sorted(set(marks) | (set(MANAGED) if reset else set()))
             out.append({"updateTextStyle": {
                 "range": {"startIndex": at, "endIndex": at + width},
                 "textStyle": marks, "fields": ",".join(fields)}})
@@ -1229,11 +1396,15 @@ def _restyle_requests(live: dict, want: dict) -> list[dict]:
 def _text_style(run: dict) -> dict:
     style: dict = {}
     for key, api in (("bold", "bold"), ("italic", "italic"), ("underline", "underline"),
-                     ("strike", "strikethrough")):
+                     ("strike", "strikethrough"), ("smallcaps", "smallCaps")):
         if run.get(key):
             style[api] = True
-    if run.get("code"):
-        style["weightedFontFamily"] = {"fontFamily": "Courier New"}
+    # The face the run says it is; `<code>` in a file written before faces were
+    # carried still means the one face it always meant (`doc_ir.CODE_FAMILY`).
+    if run.get("font") or run.get("code"):
+        style["weightedFontFamily"] = {"fontFamily": run.get("font") or doc_ir.CODE_FAMILY}
+    if run.get("fontsize"):
+        style["fontSize"] = {"magnitude": float(run["fontsize"]), "unit": "PT"}
     if run.get("color"):
         style["foregroundColor"] = {"color": {"rgbColor": _rgb(run["color"])}}
     if run.get("highlight"):

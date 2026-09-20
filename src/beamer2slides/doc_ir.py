@@ -24,14 +24,31 @@ import re
 from html import escape
 from html.parser import HTMLParser
 
-# textStyle keys we carry, and the tag each becomes in the canonical file.
+# textStyle keys we carry as a tag of their own, and the tag each becomes.
+# `code` is no longer *read* from a document — a face is carried as the face it is
+# (`font`), so Consolas and Roboto Mono stop being the same thing — but the tag is
+# still written and still understood, so a file written before that keeps working.
 MARKS = {"bold": "b", "italic": "i", "underline": "u", "strike": "s", "code": "code"}
+# What `<code>` has always meant on the write side, and goes on meaning.
+CODE_FAMILY = "Courier New"
 # A named style is a block kind; everything else is a paragraph.
 HEADINGS = {f"HEADING_{n}": n for n in range(1, 7)}
 NAMED_STYLE = {n: f"HEADING_{n}" for n in range(1, 7)} | {0: "NORMAL_TEXT"}
 ALIGNMENTS = {"START": "left", "CENTER": "center", "END": "right", "JUSTIFIED": "justify"}
 TO_ALIGNMENT = {v: k for k, v in ALIGNMENTS.items()}
-MONO = {"Courier New", "Roboto Mono", "Consolas", "Source Code Pro"}
+# Paragraph properties the importer keeps, and the CSS each is written as (measured,
+# docs/google-docs.md: "Paragraph CSS: `text-align` (incl. justify), `margin-left`,
+# `text-indent`, `line-height`"). A length is always written in points.
+PARAGRAPH_CSS = {"indent": "margin-left", "indent_first": "text-indent",
+                 "line_spacing": "line-height"}
+# Paragraph properties no HTML can carry, and the attribute each is written as. The
+# spelling matters: `background-color` on a `<p>` is *not* paragraph shading, it is
+# "a character highlight on its runs" (measured), so the CSS would be a lie; and the
+# study lists no `margin-top`/`margin-bottom` among what survives. All three are
+# written by `batchUpdate` instead (`doc_merge.tidy_requests`), which was measured
+# working for `updateParagraphStyle` with `shading`.
+PARAGRAPH_DATA = {"shading": "data-shading", "space_above": "data-space-above",
+                  "space_below": "data-space-below"}
 # What Docs paints a link with when nobody asked: the import's blue, and the editor's.
 LINK_COLORS = {"#0000ee", "#1155cc"}
 # Docs writes this private-use character where an object sits that the API will not
@@ -59,16 +76,36 @@ PICTURE_ATTRS = ("src", "alt", "title")
 
 # ---------------------------------------------------------------- runs
 
-def _style_of(text_style: dict) -> dict:
-    """The marks we keep, from a Docs textStyle."""
+def _style_of(text_style: dict, default: dict | None = None) -> dict:
+    """The marks we keep, from a Docs textStyle.
+
+    `default` is what the paragraph's named style already says (`_named_defaults`):
+    a run that only repeats it needs nothing in the canonical file, and clearing the
+    field leaves the same face on the page. Without that, a document whose importer
+    wrote `font-family` on every run would come back as a file of spans, which is
+    the opposite of what a file in git is for.
+
+    A size is kept as the document reports it, to two places. The importer rounds a
+    size to a whole point (measured: 7.5pt → 7pt), so a half point written in the
+    file is lost at `push` — but the push settles by regenerating the file from the
+    document it made, so the file then says 7 and nothing oscillates. Every write
+    after that is a `batchUpdate`, which takes the size as given: rounding here
+    would instead move a size a reader chose in the editor.
+    """
     style = {}
+    default = default or {}
     for key, api in (("bold", "bold"), ("italic", "italic"), ("underline", "underline"),
-                     ("strike", "strikethrough")):
+                     ("strike", "strikethrough"), ("smallcaps", "smallCaps")):
         if text_style.get(api):
             style[key] = True
     family = text_style.get("weightedFontFamily", {}).get("fontFamily")
-    if family in MONO:
-        style["code"] = True
+    if family and family != default.get("font"):
+        style["font"] = family
+    size = text_style.get("fontSize", {}).get("magnitude")
+    if size:
+        size = round(float(size), 2)
+        if size and size != default.get("fontsize"):
+            style["fontsize"] = size
     rgb = text_style.get("foregroundColor", {}).get("color", {}).get("rgbColor")
     if rgb:
         style["color"] = _hex(rgb)
@@ -165,8 +202,9 @@ def from_document(doc: dict, tab_id: str | None = None) -> dict:
     lists = (doc.get("lists") if "lists" in doc else {}) or _tab_part(doc, tab, "lists")
     objects = (doc.get("inlineObjects") if "body" in doc else None) \
         or _tab_part(doc, tab, "inlineObjects")
+    defaults = _named_defaults(doc, tab)
     for element in body:
-        block = _block_of(element, lists, objects)
+        block = _block_of(element, lists, objects, defaults)
         if block:
             ir["blocks"].append(block)
     _hide_trailer(ir)
@@ -397,6 +435,48 @@ def _flatten_tabs(tabs: list) -> list:
     return out
 
 
+def _named_defaults(doc: dict, tab_id: str | None) -> dict:
+    """What each named style says, by `namedStyleType`.
+
+    A paragraph and its runs report the properties *set on them*, and an import sets
+    plenty that only repeat the style they are already in. Subtracting the named
+    style keeps the canonical file down to what somebody chose: everything here is
+    what a cleared field falls back to anyway, so nothing is lost by leaving it out.
+    """
+    styles = (doc.get("namedStyles") if "body" in doc else None) \
+        or _tab_part(doc, tab_id, "namedStyles")
+    out: dict = {}
+    for style in (styles or {}).get("styles", []):
+        text, para = style.get("textStyle", {}), style.get("paragraphStyle", {})
+        size = text.get("fontSize", {}).get("magnitude")
+        out[style.get("namedStyleType", "")] = {
+            "font": text.get("weightedFontFamily", {}).get("fontFamily"),
+            "fontsize": round(float(size), 2) if size else None,
+        } | _paragraph_measures(para)
+    return out
+
+
+def _paragraph_measures(style: dict) -> dict:
+    """The paragraph properties the dialect carries, from a Docs paragraphStyle.
+    A property the paragraph does not set is None: it is inherited, not zero."""
+    out = {key: _points(style.get(api)) for key, api in
+           (("indent", "indentStart"), ("indent_first", "indentFirstLine"),
+            ("space_above", "spaceAbove"), ("space_below", "spaceBelow"))}
+    spacing = style.get("lineSpacing")
+    out["line_spacing"] = round(spacing / 100, 3) if spacing else None
+    rgb = style.get("shading", {}).get("backgroundColor", {}).get("color", {}).get("rgbColor")
+    out["shading"] = _hex(rgb) if rgb else None
+    return out
+
+
+def _points(dimension: dict | None) -> float | None:
+    """A Docs Dimension in points. Rounded, so two reads of one document spell the
+    same number and a diff of the file shows only what somebody changed."""
+    if not dimension or "magnitude" not in dimension:
+        return None
+    return round(float(dimension["magnitude"]), 2)
+
+
 def _tab_part(doc: dict, tab_id: str | None, part: str) -> dict:
     """A tab's `lists` or `inlineObjects`: they sit beside its body, not in it."""
     for tab in _flatten_tabs(doc.get("tabs", [])):
@@ -424,10 +504,12 @@ def _picture(run: dict, objects: dict) -> dict:
     return run
 
 
-def _block_of(element: dict, lists: dict, objects: dict | None = None) -> dict | None:
+def _block_of(element: dict, lists: dict, objects: dict | None = None,
+              defaults: dict | None = None) -> dict | None:
     objects = objects or {}
+    defaults = defaults or {}
     if "table" in element:
-        return _table_block(element, lists, objects)
+        return _table_block(element, lists, objects, defaults)
     if "tableOfContents" in element:
         # Generated content: readable, never writable (no insertTableOfContents in v1).
         return {"kind": "toc", "frozen": True, "runs": [],
@@ -435,6 +517,8 @@ def _block_of(element: dict, lists: dict, objects: dict | None = None) -> dict |
     para = element.get("paragraph")
     if para is None:
         return None
+    default = defaults.get(para.get("paragraphStyle", {}).get("namedStyleType")
+                           or "NORMAL_TEXT", {})
     runs = []
     for el in para.get("elements", []):
         # `width` is how many index units the run holds in the live document: a chip
@@ -447,7 +531,7 @@ def _block_of(element: dict, lists: dict, objects: dict | None = None) -> dict |
                     runs.append({"chip": "object", "frozen": True, "text": piece, "width": 1})
                 elif piece:
                     runs.append({"text": piece, "width": utf16_len(piece)}
-                                | _style_of(el["textRun"].get("textStyle", {})))
+                                | _style_of(el["textRun"].get("textStyle", {}), default))
             continue
         for key, kind in CHIPS.items():
             if key in el:
@@ -477,7 +561,26 @@ def _block_of(element: dict, lists: dict, objects: dict | None = None) -> dict |
     align = ALIGNMENTS.get(style.get("alignment", ""))
     if align and align != "left":
         block["align"] = align
+    # A property that only says what the paragraph's named style already says is left
+    # out; so are a bullet's own indents, which belong to the list preset and not to
+    # anybody's choice — writing them back would fight `createParagraphBullets`, and
+    # the file would then differ from the document at every sync.
+    measured = _paragraph_measures(style)
+    for key in PARAGRAPH_CSS | PARAGRAPH_DATA:
+        if block["kind"] == "item" and key in ("indent", "indent_first"):
+            continue
+        if measured[key] is not None and measured[key] != _inherited(key, default):
+            block[key] = measured[key]
     return block
+
+
+def _inherited(key: str, default: dict):
+    """What a paragraph that sets nothing shows: its named style's value, or, where
+    the style says nothing either, the property's own default — single spacing, no
+    indent, no space around it, no shading."""
+    if default.get(key) is not None:
+        return default[key]
+    return {"line_spacing": 1.0, "shading": None}.get(key, 0.0)
 
 
 def _split_sentinel(content: str) -> list[tuple[str, bool]]:
@@ -507,13 +610,13 @@ def _ordered(lists: dict, list_id: str | None, level: int) -> bool | None:
     return None
 
 
-def _table_block(element: dict, lists: dict, objects: dict) -> dict:
+def _table_block(element: dict, lists: dict, objects: dict, defaults: dict | None = None) -> dict:
     rows = []
     for row in element["table"].get("tableRows", []):
         cells = []
         for cell in row.get("tableCells", []):
-            blocks = [b for b in (_block_of(e, lists, objects) for e in cell.get("content", []))
-                      if b]
+            blocks = [b for b in (_block_of(e, lists, objects, defaults)
+                                  for e in cell.get("content", [])) if b]
             cells.append(blocks)
         rows.append(cells)
     return {"kind": "table", "rows": rows,
@@ -564,9 +667,30 @@ def _blocks_html(blocks: list[dict], depth: int) -> list[str]:
             lines += _list_html(blocks[index:index + run], depth)
             index += run
             continue
+        if block["kind"] == "table":
+            lines += _table_html(block, depth)
+            index += 1
+            continue
         lines.append(pad + _block_html(block))
         index += 1
     return lines
+
+
+def _table_html(block: dict, depth: int) -> list[str]:
+    """A table over several lines, one per row, so a git diff reads like the document.
+
+    The line breaks go between `</tr>` and `<tr>`, and between the table's own tags
+    and its rows — the places where an HTML parser has nowhere to put text, so the
+    white space cannot become content. A row stays on one line with its cells: it is
+    inside a `<td>` that white space *would* be content. (Measured on `from_html`;
+    the importer's side of it wants confirming on a live document.)
+    """
+    pad = " " * depth
+    lines = [pad + f"<table{_key_attr(block)}>"]
+    for row in block["rows"]:
+        cells = "".join(f"<td>{''.join(_blocks_html(cell, 0))}</td>" for cell in row)
+        lines.append(pad + f" <tr>{cells}</tr>")
+    return lines + [pad + "</table>"]
 
 
 def _item_run(blocks: list[dict], start: int) -> int:
@@ -588,7 +712,8 @@ def _list_html(items: list[dict], depth: int) -> list[str]:
         deeper = index + 1
         while deeper < len(items) and items[deeper].get("level", 0) > level:
             deeper += 1
-        lines.append(pad + f" <li{_key_attr(items[index])}>"
+        lines.append(pad + f" <li{_key_attr(items[index])}"
+                           f"{_paragraph_attrs(items[index])}>"
                            f"{_runs_html(items[index]['runs'])}</li>")
         if deeper > index + 1:
             lines += _list_html(items[index + 1:deeper], depth + 1)
@@ -609,18 +734,39 @@ def _key_attr(block: dict) -> str:
 
 
 def _block_html(block: dict) -> str:
+    """One block on one line. A table is the exception (`_table_html`): it is written
+    across several, and `_blocks_html` sends it there before this is reached."""
     kind = block["kind"]
-    if kind == "table":
-        cells = []
-        for row in block["rows"]:
-            inner = "".join(f"<td>{''.join(_blocks_html(c, 0))}</td>" for c in row)
-            cells.append(f"<tr>{inner}</tr>")
-        return f"<table{_key_attr(block)}>{''.join(cells)}</table>"
     if kind == "toc":
         return f'<p class="b2s-toc"{_key_attr(block)}></p>'
     tag = f"h{block['level']}" if kind == "heading" else "p"
-    attrs = f' style="text-align:{block["align"]}"' if block.get("align") else ""
-    return f"<{tag}{_key_attr(block)}{attrs}>{_runs_html(block['runs'])}</{tag}>"
+    return (f"<{tag}{_key_attr(block)}{_paragraph_attrs(block)}>"
+            f"{_runs_html(block['runs'])}</{tag}>")
+
+
+def _paragraph_attrs(block: dict) -> str:
+    """What a paragraph says about itself past its words: its alignment and indents
+    as CSS the importer keeps, its shading and the space around it as attributes of
+    ours, which only `batchUpdate` can write (`PARAGRAPH_DATA` says why)."""
+    styles = [f"text-align:{block['align']}"] if block.get("align") else []
+    for key, css in PARAGRAPH_CSS.items():
+        if block.get(key) is not None:
+            unit = "" if key == "line_spacing" else "pt"
+            styles.append(f"{css}:{_number(block[key])}{unit}")
+    out = f' style="{";".join(styles)}"' if styles else ""
+    for key, name in PARAGRAPH_DATA.items():
+        if block.get(key) is not None:
+            out += f' {name}="{escape(str(_number(block[key])), quote=True)}"'
+    return out
+
+
+def _number(value) -> str:
+    """A measurement as the file spells it: no trailing zeros, so one number always
+    reads the same way and a diff shows only what somebody changed."""
+    if isinstance(value, str):
+        return value
+    text = f"{float(value):.3f}".rstrip("0").rstrip(".")
+    return text or "0"
 
 
 def _runs_html(runs: list[dict]) -> str:
@@ -657,8 +803,24 @@ def _run_html(run: dict) -> str:
         styles.append(f"color:{run['color']}")
     if run.get("highlight"):
         styles.append(f"background-color:{run['highlight']}")
-    if styles:
-        out = f'<span style="{";".join(styles)}">{out}</span>'
+    if run.get("font"):
+        # One name, unquoted, no fallback list: a list is *mangled* on import
+        # (measured, docs/google-docs.md: `Georgia, serif` arrives as `Geo`), while a
+        # single name survives verbatim, `Comic Sans MS` included.
+        styles.append(f"font-family:{run['font']}")
+    if run.get("fontsize"):
+        # In points, as the document says it (the importer rounds a fraction away;
+        # `_style_of` says why that is harmless). The key is `fontsize`, not `size`:
+        # a picture run's `size` is its width and height.
+        styles.append(f"font-size:{_number(run['fontsize'])}pt")
+    attrs = f' style="{escape(";".join(styles), quote=True)}"' if styles else ""
+    if run.get("smallcaps"):
+        # No CSS reaches `smallCaps` through the importer — the study lists it only
+        # among the things `updateTextStyle` writes — so the file says it in an
+        # attribute of ours and `doc_merge` writes it with `batchUpdate`.
+        attrs += ' data-smallcaps="1"'
+    if attrs:
+        out = f"<span{attrs}>{out}</span>"
     for key, tag in MARKS.items():
         if run.get(key):
             out = f"<{tag}>{out}</{tag}>"
@@ -731,17 +893,14 @@ class _Reader(HTMLParser):
         elif tag == "li":
             self._open({"kind": "item", "level": max(0, len(self.lists) - 1),
                         "ordered": bool(self.lists and self.lists[-1]), "runs": []}
-                       | _key_of(attr))
+                       | _paragraph_of(attr) | _key_of(attr))
         elif tag in ("p", "h1", "h2", "h3", "h4", "h5", "h6"):
             if attr.get("class") == "b2s-toc":
                 self._emit({"kind": "toc", "frozen": True, "runs": []} | _key_of(attr))
                 return
             block = ({"kind": "heading", "level": int(tag[1]), "runs": []} if tag != "p"
                      else {"kind": "paragraph", "runs": []})
-            align = _align_of(attr.get("style", ""))
-            if align:
-                block["align"] = align
-            self._open(block | _key_of(attr))
+            self._open(block | _paragraph_of(attr) | _key_of(attr))
         elif tag == "img":
             # A picture is a frozen run like a chip — one index unit, never rewritten
             # as text — that a sync can nevertheless create (`doc_merge.writable`).
@@ -784,7 +943,10 @@ class _Reader(HTMLParser):
                         self.chip[key] = attr[f"data-{key}"]
                 self.marks.append({})
             else:
-                self.marks.append(_span_style(attr.get("style", "")))
+                frame = _span_style(attr.get("style", ""))
+                if attr.get("data-smallcaps"):
+                    frame["smallcaps"] = True
+                self.marks.append(frame)
 
     def handle_endtag(self, tag: str) -> None:
         if tag == "title":
@@ -842,24 +1004,65 @@ def _key_of(attr: dict) -> dict:
     return {"key": attr["id"]} if attr.get("id") else {}
 
 
-def _span_style(style: str) -> dict:
-    out = {}
+def _css(style: str):
+    """The declarations of a `style=` attribute, lowercased property and raw value."""
     for piece in style.split(";"):
         key, _, value = piece.partition(":")
-        key, value = key.strip().lower(), value.strip()
+        if key.strip():
+            yield key.strip().lower(), value.strip()
+
+
+def _span_style(style: str) -> dict:
+    out = {}
+    for key, value in _css(style):
         if key == "color":
             out["color"] = value
         elif key == "background-color":
             out["highlight"] = value
+        elif key == "font-family":
+            # Read as written: one name, no fallback list (`_run_html` says why).
+            out["font"] = value.strip("'\"")
+        elif key == "font-size":
+            size = _length(value)
+            if size:
+                out["fontsize"] = size
     return out
 
 
-def _align_of(style: str) -> str:
-    for piece in style.split(";"):
-        key, _, value = piece.partition(":")
-        if key.strip().lower() == "text-align" and value.strip() in TO_ALIGNMENT:
-            return value.strip()
-    return ""
+def _paragraph_of(attr: dict) -> dict:
+    """What a `<p>`, `<h*>` or `<li>` says about the paragraph itself.
+
+    The CSS half of it is what the importer keeps; the `data-` half is what only
+    `batchUpdate` can write (`PARAGRAPH_CSS`, `PARAGRAPH_DATA`).
+    """
+    out: dict = {}
+    css = {key: value for key, value in _css(attr.get("style", ""))}
+    if css.get("text-align") in TO_ALIGNMENT:
+        out["align"] = css["text-align"]
+    for key, name in PARAGRAPH_CSS.items():
+        if name in css:
+            value = (_ratio(css[name]) if key == "line_spacing" else _length(css[name]))
+            if value is not None:
+                out[key] = value
+    for key, name in PARAGRAPH_DATA.items():
+        if attr.get(name):
+            value = attr[name] if key == "shading" else _length(attr[name])
+            if value is not None:
+                out[key] = value
+    return out
+
+
+def _length(value: str) -> float | None:
+    """A measurement in points. The dialect writes `pt` and nothing else, so a unit
+    we don't know is read as no measurement at all rather than guessed at."""
+    match = re.match(r"\s*(-?\d+(?:\.\d+)?)\s*(pt)?\s*$", value or "")
+    return round(float(match.group(1)), 2) if match else None
+
+
+def _ratio(value: str) -> float | None:
+    """A line height: the unitless multiplier Docs calls `lineSpacing` (× 100)."""
+    match = re.match(r"\s*(\d+(?:\.\d+)?)\s*$", value or "")
+    return round(float(match.group(1)), 3) if match else None
 
 
 def from_html(html: str) -> dict:

@@ -413,3 +413,157 @@ def test_repeated_text_gets_an_occurrence_suffix():
         {"kind": "paragraph", "runs": [{"text": "same"}]},
         {"kind": "paragraph", "runs": [{"text": "same"}]}]})
     assert [b["key"] for b in ir["blocks"]] == ["paragraph:same", "paragraph:same#2"]
+
+
+# ---------------------------------------------------------------- tables
+
+def test_a_table_is_written_one_line_per_row_so_a_diff_reads():
+    """A row changed shows as one changed line, not as a whole table rewritten."""
+    lines = doc_ir.to_html(RICH).splitlines()
+    assert "<table>" in lines and "</table>" in lines
+    assert " <tr><td><p>a</p></td><td><p>b</p></td></tr>" in lines
+    assert " <tr><td><p>c</p></td><td><p>d</p></td></tr>" in lines
+
+
+def test_the_line_breaks_in_a_table_are_not_words_in_it():
+    """They sit between `</tr>` and `<tr>` and inside the table's own tags, where an
+    HTML parser has nowhere to put text. A row stays whole: inside a `<td>` the white
+    space *would* be content. (Measured here on `from_html`; Drive's own importer
+    wants confirming on a live document.)"""
+    blocks = doc_ir.from_html(doc_ir.to_html(RICH))["blocks"]
+    table = [b for b in blocks if b["kind"] == "table"][0]
+    assert [[[doc_ir.runs_text(b["runs"]) for b in cell] for cell in row]
+            for row in table["rows"]] == [[["a"], ["b"]], [["c"], ["d"]]]
+    # And no block of white space arrived beside the table either.
+    assert [b["kind"] for b in blocks].count("table") == 1
+    assert not [b for b in blocks
+                if b.get("runs") and not doc_ir.runs_text(b["runs"]).strip()
+                and not any(r.get("frozen") for r in b["runs"])]
+
+
+# ---------------------------------------------------------------- faces and measures
+
+DRESSED = {
+    "title": "dressed",
+    "blocks": [
+        {"kind": "paragraph", "indent": 36.0, "indent_first": 18.0, "line_spacing": 1.5,
+         "space_above": 12.0, "space_below": 6.0, "shading": "#fff2cc", "runs": [
+             {"text": "set in "},
+             {"text": "Consolas", "font": "Consolas", "fontsize": 9},
+             {"text": " and "},
+             {"text": "Roboto Mono", "font": "Roboto Mono", "fontsize": 9},
+             {"text": ", "},
+             {"text": "Small Caps", "smallcaps": True},
+             {"text": " and "},
+             {"text": "big and bold", "font": "Comic Sans MS", "fontsize": 18, "bold": True},
+             {"text": "."}]},
+        {"kind": "item", "level": 0, "ordered": False, "line_spacing": 2.0,
+         "space_below": 3.0, "runs": [{"text": "a roomy item"}]},
+        {"kind": "heading", "level": 2, "align": "center", "shading": "#eeeeee",
+         "runs": [{"text": "A shaded heading"}]},
+    ],
+}
+
+
+def test_a_dressed_document_round_trips_through_the_file():
+    assert strip(doc_ir.from_html(doc_ir.to_html(DRESSED))) == strip(DRESSED)
+    once = doc_ir.to_html(DRESSED)
+    assert doc_ir.to_html(doc_ir.from_html(once)) == once
+
+
+def test_two_monospaced_faces_stay_two_faces():
+    """`<code>` flattened every mono face into one; a face is now carried as itself."""
+    html = doc_ir.to_html(DRESSED)
+    assert "font-family:Consolas" in html and "font-family:Roboto Mono" in html
+    runs = doc_ir.from_html(html)["blocks"][0]["runs"]
+    assert [r.get("font") for r in runs if r.get("font")] == [
+        "Consolas", "Roboto Mono", "Comic Sans MS"]
+    # One name, unquoted, no fallback list: a list arrives at the importer as `Geo`.
+    assert "," not in html.split("font-family:")[1].split(";")[0].split('"')[0]
+
+
+def test_code_is_still_written_and_still_understood():
+    """Files written before faces were carried keep working, and say what they said."""
+    ir = doc_ir.from_html("<body><p><code>mono</code></p></body>")
+    assert ir["blocks"][0]["runs"] == [{"text": "mono", "code": True}]
+    assert "<code>mono</code>" in doc_ir.to_html(ir)
+
+
+def test_small_caps_travels_as_an_attribute_because_no_css_carries_it():
+    html = doc_ir.to_html(DRESSED)
+    assert '<span data-smallcaps="1">Small Caps</span>' in html
+    assert "font-variant" not in html
+
+
+def test_the_indents_and_the_line_height_are_css_the_importer_keeps():
+    line = [l for l in doc_ir.to_html(DRESSED).splitlines() if "set in" in l][0]
+    assert 'style="margin-left:36pt;text-indent:18pt;line-height:1.5"' in line
+
+
+def test_paragraph_shading_is_never_written_as_css():
+    """`background-color` on a `<p>` becomes a character highlight on its runs
+    (measured), so the CSS spelling would be a lie: the file says `data-shading`."""
+    line = [l for l in doc_ir.to_html(DRESSED).splitlines() if "shaded heading" in l][0]
+    assert 'data-shading="#eeeeee"' in line and "background-color" not in line
+
+
+def test_the_space_around_a_paragraph_is_ours_to_write_not_the_importers():
+    line = [l for l in doc_ir.to_html(DRESSED).splitlines() if "set in" in l][0]
+    assert 'data-space-above="12"' in line and 'data-space-below="6"' in line
+    assert "margin-top" not in line and "margin-bottom" not in line
+
+
+STYLED_LIVE = {
+    "title": "styled",
+    "namedStyles": {"styles": [
+        {"namedStyleType": "NORMAL_TEXT",
+         "textStyle": {"weightedFontFamily": {"fontFamily": "Arial"},
+                       "fontSize": {"magnitude": 11, "unit": "PT"}},
+         "paragraphStyle": {"lineSpacing": 100}}]},
+    "body": {"content": [
+        {"startIndex": 1, "endIndex": 14, "paragraph": {
+            "paragraphStyle": {"namedStyleType": "NORMAL_TEXT", "lineSpacing": 150,
+                               "indentStart": {"magnitude": 36, "unit": "PT"},
+                               "spaceAbove": {"magnitude": 12, "unit": "PT"},
+                               "shading": {"backgroundColor": {"color": {"rgbColor": {
+                                   "red": 1.0, "green": 0.9490196, "blue": 0.8}}}}},
+            "elements": [
+                {"startIndex": 1, "endIndex": 6, "textRun": {
+                    "content": "same ", "textStyle": {
+                        "weightedFontFamily": {"fontFamily": "Arial"},
+                        "fontSize": {"magnitude": 11, "unit": "PT"}}}},
+                {"startIndex": 6, "endIndex": 14, "textRun": {
+                    "content": "diff\n", "textStyle": {
+                        "weightedFontFamily": {"fontFamily": "Courier New"},
+                        "fontSize": {"magnitude": 7.5, "unit": "PT"},
+                        "smallCaps": True}}}]}}]},
+}
+
+
+def test_a_run_that_only_repeats_its_named_style_says_nothing():
+    """Subtracting the named style is what keeps the file from being a wall of spans:
+    an import sets a face and a size on every run it writes."""
+    runs = doc_ir.from_document(STYLED_LIVE)["blocks"][0]["runs"]
+    assert runs[0] == {"text": "same ", "width": 5}
+    assert runs[1] == {"text": "diff", "width": 4, "font": "Courier New",
+                       "fontsize": 7.5, "smallcaps": True}
+
+
+def test_a_paragraph_reports_only_what_it_sets_itself():
+    block = doc_ir.from_document(STYLED_LIVE)["blocks"][0]
+    assert block["line_spacing"] == 1.5 and block["indent"] == 36.0
+    assert block["space_above"] == 12.0 and block["shading"] == "#fff2cc"
+    # Nothing it does not set, and nothing that only repeats the named style.
+    assert "indent_first" not in block and "space_below" not in block
+
+
+def test_a_bullets_own_indents_are_the_presets_and_never_the_files():
+    """`createParagraphBullets` owns them: a value written back would fight it."""
+    doc = dict(STYLED_LIVE)
+    doc["body"] = {"content": [dict(STYLED_LIVE["body"]["content"][0])]}
+    doc["body"]["content"][0]["paragraph"] = dict(
+        STYLED_LIVE["body"]["content"][0]["paragraph"],
+        bullet={"listId": "kix.l", "nestingLevel": 0})
+    block = doc_ir.from_document(doc)["blocks"][0]
+    assert block["kind"] == "item" and "indent" not in block
+    assert block["line_spacing"] == 1.5   # everything else is still carried
