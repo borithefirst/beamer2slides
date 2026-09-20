@@ -57,8 +57,12 @@ class FramePlan:
     backdrop: str | None = None                # a canvas picture of the slide's own (a tree path)
     nonumber: bool = False                     # the layout numbers its slides, this one it does not
 
-    def options(self) -> str:
+    def options(self, label: str | None = None) -> str:
         opts = ["plain"]
+        if label:
+            # ahead of the theme's own keys, which set templates and colours as they are read
+            # (`\deck@keys`): beamer's `label` is then the plain option it looks like
+            opts.append(f"label={label}")
         if self.layout:
             opts.append(f"layout={self.layout}")
         if self.background is not None:

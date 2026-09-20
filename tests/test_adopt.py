@@ -240,6 +240,38 @@ def test_the_source_has_a_frame_per_slide_and_compiles_as_beamer(tmp_path):
     assert text.index("\\begin{document}") < text.index("\\begin{frame}") < text.index("\\end{document}")
 
 
+def test_every_frame_carries_a_label_of_the_decks_own_name_for_the_slide(tmp_path):
+    r"""A frame's `label=` is the only identity that survives compiling (docs/labels.md), and the
+    fallback without one - title, occurrence, position - is weakest on exactly these decks: slides
+    with no title, the same words twice, reordered by their owner. So `adopt` writes one per frame,
+    from the slide's `objectId`, which the deck itself keeps unique and says again on every read."""
+    text = source_for(tmp_path)
+    found = re.findall(r"\\begin\{frame\}\[[^\]]*\blabel=([^,\]]+)", text)
+    assert found == ["s0", "s1", "s2"], "every frame, named as the deck names the slide"
+    assert len(set(found)) == len(found)
+
+
+def test_a_label_is_never_written_twice_however_the_deck_names_its_slides(tmp_path):
+    r"""Slugging is lossy - case, length, punctuation - so two objectIds can land on one name, and a
+    label written twice never reaches the PDF twice: hyperref keeps the first destination and drops
+    the second, so the second frame comes back with *no* label and nothing downstream can tell
+    (CLAUDE.md, `labels.survey`). The second one has to take a name of its own here."""
+    pres = presentation()
+    for s, oid in zip(pres["slides"], ["Same_Id", "same-id", "SLIDES_API1638390000000000000_0"]):
+        s["objectId"] = oid
+    names = adopt.frame_labels(deck_ir(pres, foreign=True))
+    assert names[0] != names[1] and len(set(names)) == 3
+    assert all(re.fullmatch(r"[a-z][a-z0-9-]*", n) for n in names), "a beamer option list carries it"
+
+
+def test_a_slide_with_no_words_at_all_is_still_labelled():
+    """Half of a template deck's slides say nothing an identity could be built from; the deck's own
+    name for them does not care."""
+    pres = presentation()
+    pres["slides"][1]["pageElements"] = []
+    assert adopt.frame_labels(deck_ir(pres, foreign=True))[1] == "s1"
+
+
 def test_every_element_keeps_its_own_place(tmp_path):
     """A foreign deck's geometry is boxes a person dragged, not flow text a theme laid out, so the
     bootstrap places each one; the loop would otherwise spend a round per element escalating flow
@@ -250,7 +282,7 @@ def test_every_element_keeps_its_own_place(tmp_path):
     # template, and each frame names the layout and hands it its words
     assert places(theme_of(tmp_path)) == 4
     assert placed(text) == 0
-    assert text.count("\\begin{frame}[plain,layout=section") == 3
+    assert text.count(",layout=section") == 3
     assert "\\framesubtitle{Slide 0}" in text
 
 

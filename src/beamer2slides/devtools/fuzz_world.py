@@ -119,8 +119,104 @@ def make_doc(rng: random.Random, out: Path) -> dict:
     return {"slides": slides}
 
 
+# What a template deck says over and over: chrome, section headings, calls to action. Short, and
+# most of it on more than one slide - which is what makes an adopt-shaped deck hard to key.
+ADOPT_PHRASES = ("Agenda", "Thank you", "Questions?", "Get started", "What we shipped", "Roadmap",
+                 "Next steps", "Demo", "Resources", "Build with us", "Why it matters", "In short")
+
+
+def _box(eid, x, y, w, words, role="body"):
+    """One of the small boxes an adopted slide is made of (a `textblock*` per element)."""
+    return text_ir(eid, words, (x, y, x + w, y + 12), role=role)
+
+
+def make_adopt_doc(rng: random.Random, out: Path) -> dict:
+    r"""A deck `adopt` took over, as the converter reads its source back (docs/sync.md, "Adopt").
+
+    `make_doc` draws a talk: a frame title over a few big paragraphs, a figure, a block. A foreign
+    deck is the opposite of that in every way identity depends on, and the source `adopt` writes
+    keeps it that way on purpose - a slide is a page of small boxes somebody dragged
+    (`textblock*`/`slidebox` per element), often with no title at all, with the deck's chrome
+    repeated word for word on every slide, one logo file shared by all of them, tikz clusters, a
+    `slidetable`, and whole slides that differ from their neighbour by a line. Every rule downstream
+    - `slide_similarity`, `_evidence`, `match_elements`, the fingerprints - has less to go on here
+    than anywhere the campaign had been looking.
+
+    Every frame carries a label (`adopt.frame_labels`), because that is what the adopted source now
+    writes; the source ops that move, rename and drop one are how the campaign asks what happens
+    when that promise is broken.
+    """
+    n = rng.randint(4, 7)
+    chrome = f"{rng.choice(WORDS).title()} Conf {rng.randrange(2020, 2030)}"
+    # Pictures adopt copies into `figures/<slug>-<sha8>.<ext>`: one logo on every slide, so several
+    # elements point at one file and their fingerprints' `image_sha1` cannot tell them apart.
+    pool = []
+    for k in range(2):
+        path = out / f"fig-adopt{k}.bin"
+        path.write_bytes(bytes([(k * 71 + j) % 251 for j in range(64)]))
+        pool.append(path.name)
+    slides: list[dict] = []
+    for i in range(n):
+        els: list[dict] = []
+        if rng.random() < 0.45:                       # the layout's title placeholder, when it has one
+            els.append(_box(f"p{i}e0", 40, 24, 300, rng.choice(ADOPT_PHRASES), role="title"))
+        # the deck's chrome: the same words at the same place on every slide
+        els.append(_box(f"p{i}e1", 20, 190, 120, chrome, role="footer"))
+        els.append(image_ir(f"p{i}e2", (300, 186, 330, 198), pool[0], role="figure"))
+        y = 52
+        for k in range(rng.randint(4, 9)):
+            words = rng.choice(ADOPT_PHRASES) if rng.random() < 0.4 else \
+                " ".join(rng.choice(WORDS) for _ in range(rng.randint(1, 4)))
+            x = 30 + 150 * (k % 2)
+            els.append(_box(f"p{i}e{k + 3}", x, y, 130, words))
+            y += 16 if k % 2 else 0
+        if rng.random() < 0.4:                        # a tikz cluster the deck groups
+            els.append(shape_ir(f"p{i}g0", (200, 40, 300, 70), fill="#e8eaed", block=0))
+            els.append({**_box(f"p{i}g1", 206, 48, 88, rng.choice(ADOPT_PHRASES)), "block": 0})
+            els.append(shape_ir(f"p{i}g2", (200, 78, 300, 100), fill="#fce8e6", block=0))
+        if rng.random() < 0.3:
+            els.append(image_ir(f"p{i}e90", (210, 110, 300, 170), pool[1], role="figure"))
+        if rng.random() < 0.3:
+            rows = [[rng.choice(WORDS) for _ in range(3)] for _ in range(2)]
+            els.append(table_ir(f"p{i}b0", (30, 120, 180, 160), rows))
+        slides.append({"page": i, "label": f"g{i}-0-{rng.randrange(10, 99)}", "title": title_of({"elements": els}),
+                       "notes": "", "bg": "#ffffff", "elements": els})
+        # A template deck's neighbours differ by a line. `align_slides` pairs on the words, so two
+        # slides this alike are what makes a reorder, an insertion or a moved label ambiguous.
+        if i and rng.random() < 0.3:
+            twin = copy.deepcopy(slides[-2])
+            body = [e for e in twin["elements"] if e["kind"] == "text" and e.get("role") == "body"]
+            if body:
+                body[-1]["paragraphs"][0]["runs"] = [run("and one line of its own")]
+            twin["elements"] = [{**e, "id": e["id"].replace(f"p{i - 1}", f"p{i}", 1)} for e in twin["elements"]]
+            for e in twin["elements"]:
+                if e.get("anchor"):
+                    e["anchor"] = e["anchor"].replace(f"p{i - 1}", f"p{i}", 1)
+            slides[-1] = {**twin, "page": i, "label": slides[-1]["label"]}
+    return {"slides": slides}
+
+
+SHAPES = {"converted": make_doc, "adopt": make_adopt_doc}
+
+
+def make(shape: str, rng: random.Random, out: Path) -> dict:
+    return SHAPES[shape](rng, out)
+
+
+def title_of(s) -> str:
+    """The slide's title as `identity` finds it: the text element whose role says so, and nothing
+    else. A converted talk has one on top of every slide, so "the first element" used to be the
+    same answer; an adopt-shaped deck is a page of boxes with no title at all, and reading the
+    topmost of them as one would hand `align_slides` a title nothing in the deck ever showed."""
+    return identity.slide_title(s)
+
+
+def title_element(s):
+    return next((e for e in s["elements"] if e["kind"] == "text" and e.get("role") == "title"), None)
+
+
 def slide_info(s):
-    return {"label": s.get("label"), "title": identity.plain_text(s["elements"][0]) if s["elements"] else "",
+    return {"label": s.get("label"), "title": title_of(s),
             "text": " ".join(identity.plain_text(e) for e in s["elements"]), "page": s["page"]}
 
 
@@ -195,7 +291,7 @@ def entries(doc, out: Path, keys, all_ekeys, all_fps):
                 entry["picture"] = {"contentHash": identity.sha1(data)[:16], "sourceUrl": None,
                                     "signature": picture_signature(data)}
             elements.append(entry)
-        slides.append({"key": key, "label": s.get("label"), "title": identity.plain_text(s["elements"][0]) if s["elements"] else "",
+        slides.append({"key": key, "label": s.get("label"), "title": title_of(s),
                        "page": s["page"], "text": " ".join(identity.plain_text(e) for e in s["elements"]),
                        "layout": "TITLE_ONLY", "background": f"color:{s['bg']}", "notes": s.get("notes") or "",
                        "elements": elements})
@@ -394,6 +490,7 @@ def _update_slide(base, ours, live, p, tok):
     # The deck's own version of the objects, read before anything is deleted: that is what the
     # overrides (the deck's box, its styling) are re-applied from.
     theirs = {"objects": dict(live["objects"])}
+    fresh: list[str] = []   # page objects that went on top because nothing of theirs held their place
     for u in p["units"]:
         action = u["action"]
         members = bu.get(u["key"], [])
@@ -435,13 +532,66 @@ def _update_slide(base, ours, live, p, tok):
                 # new: on top (of its group)
                 (live["objects"][rb["parent_group"]].setdefault("children", []) if rb["parent_group"]
                  else live.setdefault("order", [])).append(oid)
+                if not rb["parent_group"]:
+                    fresh.append(oid)
             made.append((m, rb))
         _place_unit(u, members, theirs, made, base_by)
+    _restack(live, b, o, fresh, tok)
     if p.get("background"):
         live["background"] = {"color": p["background"].split(":", 1)[1]}
     if p.get("notes") is not None:
         live["notes"] = p["notes"]
     _drop_lonely_groups(live)
+
+
+def _restack(live, b, o, fresh, tok):
+    """An element the source added goes where the source draws it, not on top. Slides puts every
+    object it creates in front of everything, so the page order after a rewrite is nothing the
+    conversion asked for; a correct sync brings it back, placing each new object after the last
+    element before it in ours order (at the bottom when none of them is on the page). This is the
+    outcome; the mechanism is `sync.Sync.restack`, which the offline campaign does not replay (as it
+    does not replay a move's transforms - see `_place_unit`), so the rule is pinned separately by
+    `test_a_created_unit_goes_where_the_source_draws_it_not_on_top`. Without it the applier stacked a
+    new panel over body text the conversion draws above it, and the oracle called that `text_hidden`
+    - 11 of 1000 adopt-shaped rounds, all of them the harness's own doing."""
+    order = live.setdefault("order", [])
+    objects = live["objects"]
+    fresh = [x for x in fresh if x in order]
+    if not fresh:
+        return
+    base_main = {el["key"]: el.get("main") for el in b["elements"]}
+
+    def top(oid):                       # the page element that carries it: itself, or its group
+        for _ in range(16):
+            parent = objects.get(oid, {}).get("parent_group")
+            if not parent or parent not in objects:
+                break
+            oid = parent
+        return oid
+
+    keys = [el["key"] for el in o["elements"]]
+    made = {f"b2s_{h6(o['key'])}_{h6(k)}_{tok}": k for k in keys}
+    stands = {}
+    for k in keys:
+        oid = f"b2s_{h6(o['key'])}_{h6(k)}_{tok}"
+        oid = oid if oid in objects else base_main.get(k)
+        if oid in objects and (t := top(oid)) in order:
+            stands[k] = t
+    for oid in fresh:
+        key = made.get(oid)
+        if key is None or oid not in order:
+            continue
+        order.remove(oid)
+        i, pos = keys.index(key), 0
+        for k in reversed(keys[:i]):
+            if (prev := stands.get(k)) in order and prev != oid:
+                pos = order.index(prev) + 1
+                break
+        for k in keys[i + 1:]:          # and never above what the source draws above it
+            if (nxt := stands.get(k)) in order and nxt != oid:
+                pos = min(pos, order.index(nxt))
+                break
+        order.insert(pos, oid)
 
 
 def rebase(base, ours, after, mplan, tok="2zz") -> dict:

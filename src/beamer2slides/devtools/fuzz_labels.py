@@ -83,13 +83,19 @@ def _wrong(pairs, ours_truth, base_truth) -> int:
     return wrong
 
 
-def round_once(seed: int, label_chance: float, tmp: Path, chain: int = 1) -> list[dict]:
+def round_once(seed: int, label_chance: float, tmp: Path, chain: int = 1,
+               shape: str = "converted") -> list[dict]:
     """One deck, `chain` revisions of it in a row. Each revision is measured against the one before
     it - which is what sync does, and what a talk revised over a term looks like: the second version
     is not edited from the pristine deck but from a source already reworded, reordered and retitled,
-    with titles that carry two rounds of amendments and frames whose text has drifted twice."""
+    with titles that carry two rounds of amendments and frames whose text has drifted twice.
+
+    `shape` picks the deck (`fuzz_world.SHAPES`). `adopt` is the hard case for identity and the
+    reason this takes a shape at all: about half its slides have no title, its phrases repeat from
+    slide to slide, and every third slide is a near-twin of the one before it - so the fallbacks the
+    campaign measures (`cross_pairs`, `gap_pairs`, `near_misses`) have almost nothing to work with."""
     rng = random.Random(seed)
-    doc = W.make_doc(rng, tmp)
+    doc = W.make(shape, rng, tmp)
     for i, s in enumerate(doc["slides"]):
         s["truth"] = f"t{i}"                      # what frame this really is, whatever its label
     fresh = len(doc["slides"])
@@ -114,8 +120,11 @@ def round_once(seed: int, label_chance: float, tmp: Path, chain: int = 1) -> lis
                 broke = False                      # nothing to move: the invariant still holds
         if revision:
             for s in doc2["slides"]:
+                el = W.title_element(s)     # a deck adopt wrote has slides with no title to amend
+                if el is None:
+                    continue
                 s["title"] += " v2"
-                s["elements"][0]["paragraphs"] = [{**s["elements"][0]["paragraphs"][0], "runs": [W.run(s["title"])]}]
+                el["paragraphs"] = [{**el["paragraphs"][0], "runs": [W.run(s["title"])]}]
             done.append("revision: every title amended")
         ours_truth = [s.get("truth") for s in doc2["slides"]]
 
@@ -147,6 +156,8 @@ def main() -> int:
     ap.add_argument("--label-chance", type=float, default=0.5, help="rounds that break the invariant")
     ap.add_argument("--show", type=int, default=5, help="worst rounds to print")
     ap.add_argument("--chain", type=int, default=1, help="revisions per round, each measured against the last")
+    ap.add_argument("--shape", choices=sorted(W.SHAPES), default="converted",
+                    help="what the deck looks like: a talk convert wrote, or a deck adopt did")
     args = ap.parse_args()
 
     tmp = Path(tempfile.mkdtemp(prefix="b2s-labels-"))
@@ -155,7 +166,7 @@ def main() -> int:
     worst = []
     try:
         for n in range(args.rounds):
-            for r in round_once(args.seed + n, args.label_chance, tmp, args.chain):
+            for r in round_once(args.seed + n, args.label_chance, tmp, args.chain, args.shape):
                 group = ("broken" if r["broke"] else "sound") + (", frame moved" if r["reordered"] else "")
                 tally[f"{group}/rounds"] += 1
                 tally[f"{group}/said:{r['said']}"] += 1

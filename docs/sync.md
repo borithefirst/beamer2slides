@@ -370,6 +370,28 @@ campaign gives the same tally anywhere from 0.2 to 0.45 and degrades below 0.2, 
 sits in the middle of that - the stress deck's own retitled-and-half-rewritten frame scores 0.45,
 which is how close to the edge a real frame comes.
 
+**On an adopted deck those fallbacks have nothing to work with.** `fuzz_labels --shape adopt` runs
+the same campaign against a deck `adopt` wrote (docs/adopt-bench.md): about half the slides have no
+title, the phrases repeat ("Agenda", "Next steps", "Questions?"), and every third slide is a near-twin
+of the one before it. 1500 rounds, 8239 frames:
+
+| | `order` | `before` | `now` |
+|---|---|---|---|
+| labels sound | 0.00% | 0.00% | 0.00% |
+| labels sound, a frame moved | 0.00% | 0.00% | 0.00% |
+| labels broken | 12.34% | 12.34% | **2.94%** |
+| labels broken, a frame moved | 11.49% | 11.49% | **3.38%** |
+
+`before` equals `order` frame for frame: `cross_pairs` and `gap_pairs`, which take 5.53% to 0.00% on
+a converted talk, **recover nothing at all** here — one leftover never explains one slide
+unmistakably when six slides say the same four words, and no gap holds one slide and one frame that
+share words nobody else shares. `label_moves` still earns its place, but saves less (2.94%, against
+1.04%) and says less: 39 of the 60 rounds left wrong passed in silence, against 1 of 22 on a
+converted talk. Which is the whole argument for `adopt.frame_labels`: on a deck like this the label
+is not the best identity available, it is the only one — and with the labels kept, not one frame of
+4068 went to the wrong slide. `tests/test_sync_fuzz.py::test_labels_are_the_only_thing_holding_an_
+adopt_shaped_deck_together` holds that on 150 seeds.
+
 A frame paired that way - by its place, with no label, because the source changed its title and most
 of what it says - is a **warning** in the report, for the same reason a dropped label is: nothing
 was at risk this time (the alternative was a second slide beside this one), but the frame is now
@@ -453,7 +475,8 @@ hold for every sync, including the combinations nobody thought of.
   builds a synthetic deck, applies 2-8 random deck edits and 1-4 random source changes, plans the
   merge and applies the plan the way this document says sync does (`tools/fuzz_world.py`, the
   reference applier), then runs the oracle. About 50 rounds a second per core; today 10 000
-  single-step rounds, 4000 three-step chains, 1500 six-step and 600 ten-step chains ran clean.
+  single-step rounds, 4000 three-step chains, 1500 six-step and 600 ten-step chains ran clean, and
+  on adopt-shaped decks (`--shape adopt`, below) 5000 single-step rounds and 600 four-step chains.
   `live` does the same against real decks (convert v1 → random `deck_edits` → `sync <variant>` →
   oracle + `sync_check.integrity`), 3 at a time in `out/sync-fuzz/<seed>`, decks of passing rounds
   deleted; `--chain N` edits and syncs N times in a row. Every failure writes base, before, after,
@@ -562,6 +585,42 @@ hold for every sync, including the combinations nobody thought of.
   `Sync.regroup_requests`, through Slides' z-order rules (`_zorder`) and has the oracle judge that.
   Taking the restack out fails 14 of 400 offline rounds, each shrunk to one source edit of a block's
   panel (`test_the_offline_fuzz_stacks_a_rebuilt_block_as_sync_does`).
+- **Adopt-shaped decks** (`--shape adopt`, `fuzz_world.make_adopt_doc`): the campaign's deck was one
+  `convert` would write — a title, a few paragraphs, a figure, a block. What `adopt` writes is not
+  that: 4-7 slides of 6-16 small boxes, fewer than half of them with a title at all, two columns of
+  near-identical one-line phrases drawn from the same dozen ("Agenda", "Next steps", "Questions?"), a
+  footer and a shared logo on every slide, grouped clusters (a tikz panel, its label and a second
+  panel under one `block`), tables, a second picture, and every third slide a **twin** of the one
+  before it with a single line of its own. Measured over 120 seeds: 649 slides, 10.56 elements a
+  slide, 274 titled, 237 with a grouped cluster, 196 with a table, 5358 texts / 825 pictures / 473
+  shapes / 196 tables. The shape is a draw, so the world, the shrinker and the fixed seeds all take
+  `shape=` and the converted shape is untouched (2000 rounds clean, same speed: ~20 rounds/s at this
+  size). It found one defect and two of the harness's own, below.
+- Found by it (adopt shape, 11 of the first 1000 rounds, all `text_hidden`): `Sync.restack` gives a
+  **recreated** element the deck's place in the z-order — a restack the person made has to survive —
+  and a **created** one the place the source gives it, right after the element before it in `ours`.
+  Where those two orders disagree, a newly created opaque panel lands on top of text the source draws
+  *above* it. Nothing is deleted, so every other check passes. It needs a source whose element order
+  differs from the base's, which a converted deck rarely manages and an adopted one does at once: a
+  label that moved onto another slide writes a whole other frame's elements onto it. A created
+  element now also stays **below** the first element the source draws above it (the predecessor is a
+  preference, the successor a ceiling); where the two orders contradict each other outright it ends
+  up at the bottom, which is the only choice that can hide nothing.
+  `tests/test_sync.py::test_a_created_shape_stays_under_the_text_the_source_draws_above_it` fails
+  without it, and so do 2 of 400 adopt-shaped rounds.
+- Found **in the oracle** by the same campaign: `_element_of` named an object by the base elements
+  only, so an object the sync had just created for an element the *source added* had no name — and
+  `_source_stacks_above`, the only excuse `text_hidden` has, can excuse nothing it cannot name. A new
+  source that draws a panel over its own text was therefore reported as a loss every time (5 of the
+  11; `test_a_shape_the_source_itself_added_above_the_text_is_no_finding`, 3 of 400 rounds without
+  the fix). The oracle now reads the ours slide too, through the same `element_objects` rule the rest
+  of it uses (`b2s_<h6 slide>_<h6 element>_…`, or the `b2s:<slide>/<element>` alt-text tag).
+- Found **in the reference applier** by the same campaign: `fuzz_world._update_slide` gave a
+  recreated object its old slot and left a created one wherever Slides had put it, which is on top of
+  everything — so the applier's page order was one no correct sync would leave, and the oracle judged
+  that. `_restack` now models the outcome (`sync.Sync.restack` is the mechanism, as `_place_unit` is
+  to the transforms): a created element goes after the last element before it in ours order, below
+  the first one after it, and at the bottom when neither is on the page.
 - Found in the harness by a live chained round (seed 900): the person ungrouped a figure and then
   pressed Ctrl+D on that slide, and the copy - a slide of theirs that sync never writes a request to -
   was accused of the ungrouping at every step after. A copy is the slide as the person left it, so the
@@ -815,6 +874,28 @@ with `\geometry{papersize=...}` after the class (`adopt.page_setup`) instead of 
 which drew a portrait deck squeezed onto a landscape page. A foreign deck more than 5 times beamer's page
 (`deck_ir.MAX_BEAMER_SCALE`: a 48 x 36 in poster is 4:3) keeps half its size too, or its 24 pt text
 would be 2.5 pt.
+
+**Every frame it writes carries a label** (`adopt.frame_labels`). The source `adopt` writes is meant
+to be kept and synced later, and `\begin{frame}[label=x]` is the only piece of a slide's identity that
+survives compiling (see "Identity" and docs/labels.md). Without one a slide is found again by its
+title, its occurrence and the alignment — and an adopted deck is the worst case for that: most of its
+slides have no title at all, many say near enough the same thing as their neighbour, and what `pull`
+then rewrites moves the words about. The label is made from **the deck's own name for the slide**, its
+`objectId`, and is argued that way on purpose:
+- it is unique by construction, it is the same on every read, it is there for a slide with no words,
+  and it is tied to nothing the source may later change;
+- a title is not. A label derived from the title would have to move the day the slide is retitled, and
+  that is the one promise a label may not break — `beamer2slides label` never renames an existing one
+  for exactly this reason, and a label that moves to another frame is the hazard "When a label moved"
+  is about.
+The id is slugged into something `\label` and hyperref accept (`labels.slug`), and slugging is lossy —
+`Same_Id` and `same-id` slug alike, and the API's own ids (`SLIDES_API1234567890_0`) differ late — so
+uniqueness is enforced against the labels already handed out. That matters more here than anywhere:
+**a label written twice never reaches the PDF twice** (hyperref keeps the first destination and drops
+the second), so a duplicate does not come back as a clash, it comes back as *no label*, on a deck
+whose slides have nothing else to be known by. Re-adopting the same deck gives the same labels.
+Measured: a compiled adopted `comic-strips` reads back 17 labelled pages of 17 where it had 0, and the
+fidelity bench does not move (docs/adopt-bench.md).
 
 Absolute-first is a decision, not a shortcut: a foreign deck's geometry *is* boxes the person
 dragged, and every guess at flow text that misses costs the loop a `geometry` round to escalate back
