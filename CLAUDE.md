@@ -999,10 +999,22 @@ same functions underneath; nothing here reimplements a journey.
 page): a talk typed, picked or uploaded runs through compile → extract + classify → render on one
 worker thread (the stages print; `redirect_stdout` is process-wide, so request logs go to stderr), and
 the page draws each slide from the job's deck.json (editable preview over the background, native
-boxes, background, debug, IR). Google only with `B2S_PLAYGROUND_GOOGLE=1` and a token; public hosts
-get the recorded runs from `docs/media`. Jobs in `$B2S_PLAYGROUND_JOBS/<port>` (swept at start: one
-folder per port, or a second server deletes the first one's jobs). `Dockerfile` = the deployment
-(TeX Live, uid 1000, port 7860, `openin_any=p`); not built on this machine (no Docker).
+boxes, background, debug, IR). Jobs in `$B2S_PLAYGROUND_JOBS/<port>` (swept at start: one
+folder per port, or a second server deletes the first one's jobs).
+Whose Drive a deck goes into decides whether the button exists at all (`server.google_mode`):
+`local` = `B2S_PLAYGROUND_GOOGLE=1` and a token, the owner's Drive, for one's own machine;
+`signin` = `B2S_PLAYGROUND_GOOGLE_CLIENT_ID` (an OAuth **web** client, not a secret), the visitor's
+own - their browser gets an access token from Google's sign-in script and the server holds it for
+one `emit` call through `google_auth.use_provider` (nothing stored, no refresh token; `to_slides`
+takes a lock, since that provider is process-wide); neither = the recorded runs from `docs/media`.
+The browser asks for `drive.file` alone (`server.WEB_SCOPES`): measured, a token carrying only that
+builds a deck end to end - and unlike `presentations`, which the command line asks for, it is not a
+*sensitive* scope, so a published playground needs no Google review.
+`Dockerfile` = the deployment (TeX Live, uid 1000, port 7860 or `$PORT`, `openin_any=p`); not built
+on this machine (no Docker). Hosted on Cloud Run (`docs/playground.md`, "On Cloud Run":
+`gcloud run deploy --source .` builds it, `.gcloudignore` says what goes up; `--max-instances 1` is
+correctness as much as thrift, since a job lives in one container's memory, and the service URL must
+be an authorized JavaScript origin of the web client). A Hugging Face Docker Space now needs PRO.
 Tests: `tests/test_playground.py` (offline, an uploaded test PDF through the HTTP API).
 
 ## Google Docs (docs/google-docs.md)
