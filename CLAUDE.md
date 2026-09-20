@@ -1148,10 +1148,17 @@ keys, named ranges), `doc_merge.py` (pure planning), `doc_sync.py` (the commands
   `keepWithNext`, a table's column widths and `tableCellStyle` (the ragged-table limit under
   its real name), a picture's crop/angle/brightness, a list's `startNumber` - and, of the
   document's theme, a named style's marks and alignment (its face and measures *are* read).
-  Two tests pin it: a fixture holding one of everything, so a property Docs adds later fails
-  rather than passes in silence, and every fuzz corpus shape walked through `doc_world` -
+  Two tests pin the map: a fixture holding one of everything, so a property Docs adds later
+  fails rather than passes in silence, and every fuzz corpus shape walked through `doc_world` -
   written apart from the map - which reports only the section break a body opens on, which is
-  also the campaign's blind spot named out loud.
+  also the campaign's blind spot named out loud. A count is not an address, so the same walk
+  runs **a block at a time** (`doc_ir.unmodelled_in` one structural element,
+  `unread_blocks` every block of every tab, most laden first) and `adopt`/`push` name them by
+  the words a person sees ("the paragraph 'Why this matters' carries
+  paragraphStyle.borderBottom; rewriting that block through the file would drop it",
+  `doc_sync.block_risk_notes`, 8 blocks x 4 properties): a section break and anything outside
+  the blocks are left out, since no rewrite reaches them. It is a risk, not a loss - a block
+  nobody rewrites keeps all of it. Naming what a sync *did* rewrite is the next step.
 - Fuzzed against a loss oracle, as the Slides sync is (docs/google-docs.md, "Proving nothing
   is lost"): `devtools/doc_loss_oracle.py` judges one sync from the two read-backs, the base
   and the report - did anything the *reader* put in the document disappear without the report

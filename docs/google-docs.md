@@ -252,8 +252,23 @@ picture's crop, angle and brightness, a list's `startNumber` — and, of the doc
 theme, a named style's **marks and alignment**: the face and the measures are read
 (`_named_defaults`), a heading's bold and centring are not.
 
-Two tests pin it. One walks a fixture holding one of everything and asserts the whole
-set, so a property Docs adds later surfaces as a failure rather than as silence. The
+A count is not an address, though, and the question a person actually has is not
+"does this document carry borders" but "is the paragraph I am about to edit the one
+with the border on it". So the same walk is run a block at a time
+(`doc_ir.unmodelled_in`, one structural element; `doc_ir.unread_blocks`, every block
+of every tab, most heavily laden first), and `adopt` and `push` name the blocks by the
+words the person can see in the document: *the paragraph 'Why this matters' carries
+paragraphStyle.borderBottom; rewriting that block through the file would drop it*
+(`doc_sync.block_risk_notes`, eight blocks and four properties each before it says how
+many more). A section break is left out — nothing rewrites one — and so is everything
+outside the blocks, since no rewrite of a paragraph can drop the page's margins. It is
+a **risk**, not a loss: a block nobody rewrites keeps all of it, which is exactly the
+thing one can act on. What a sync *did* rewrite is the next step and waits on nothing
+but a way to ask the plan.
+
+Two tests pin the map. One walks a fixture holding one of everything and asserts the
+whole set, so a property Docs adds later surfaces as a failure rather than as silence.
+The
 other walks every shape of the fuzz corpus — `doc_world` holds a document the way Docs
 holds it and was written apart from this map — and gets back the one thing it has that
 we do not model, the section break a body opens on. That is also the campaign's blind
