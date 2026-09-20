@@ -471,6 +471,30 @@ def test_a_dressed_document_round_trips_through_the_file():
     assert doc_ir.to_html(doc_ir.from_html(once)) == once
 
 
+def test_a_title_and_a_subtitle_are_kinds_of_their_own():
+    """Docs' named styles are NORMAL_TEXT, TITLE, SUBTITLE and HEADING_1..6. The first
+    six were a block kind and a level; these two are a kind each, because they are not
+    a level — and the merge names `namedStyleType` on every paragraph it writes, so a
+    style the file cannot spell is one a sync writes body text over."""
+    def document(named):
+        return {"body": {"content": [{"paragraph": {
+            "paragraphStyle": {"namedStyleType": named},
+            "elements": [{"startIndex": 1, "endIndex": 5,
+                          "textRun": {"content": "hi\n", "textStyle": {}}}]}}]}}
+
+    assert [doc_ir.from_document(document(n))["blocks"][0]["kind"]
+            for n in ("TITLE", "SUBTITLE", "NORMAL_TEXT")] == \
+        ["title", "subtitle", "paragraph"]
+
+    ir = doc_ir.key_blocks({"title": "", "blocks": [
+        {"kind": "title", "runs": [{"text": "The Report"}]},
+        {"kind": "subtitle", "runs": [{"text": "a sub"}]}]})
+    html = doc_ir.to_html(ir)
+    assert 'data-style="title"' in html and 'data-style="subtitle"' in html
+    assert [b["kind"] for b in doc_ir.from_html(html)["blocks"]] == ["title", "subtitle"]
+    assert doc_ir.to_html(doc_ir.from_html(html)) == html
+
+
 def test_two_monospaced_faces_stay_two_faces():
     """`<code>` flattened every mono face into one; a face is now carried as itself."""
     html = doc_ir.to_html(DRESSED)

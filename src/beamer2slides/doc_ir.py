@@ -34,6 +34,16 @@ CODE_FAMILY = "Courier New"
 # A named style is a block kind; everything else is a paragraph.
 HEADINGS = {f"HEADING_{n}": n for n in range(1, 7)}
 NAMED_STYLE = {n: f"HEADING_{n}" for n in range(1, 7)} | {0: "NORMAL_TEXT"}
+# The two named styles that are not a heading level. They are a block kind of their
+# own rather than a level, because that is what they are: Docs has NORMAL_TEXT,
+# TITLE, SUBTITLE and HEADING_1..6, and nothing else. `namedStyleType` is a field the
+# merge owns (`doc_merge.MANAGED_PARAGRAPH`), so a style it cannot name is one it
+# writes NORMAL_TEXT over: before these were modelled, a document's Title that the
+# source moved, rewrote or restyled came back as body text, and nothing said so.
+NAMED_KINDS = {"TITLE": "title", "SUBTITLE": "subtitle"}
+KIND_STYLE = {kind: style for style, kind in NAMED_KINDS.items()}
+# Every kind that is one paragraph of text.
+TEXT_KINDS = ("paragraph", "heading", "item", *NAMED_KINDS.values())
 ALIGNMENTS = {"START": "left", "CENTER": "center", "END": "right", "JUSTIFIED": "justify"}
 TO_ALIGNMENT = {v: k for k, v in ALIGNMENTS.items()}
 # Paragraph properties the importer keeps, and the CSS each is written as (measured,
@@ -228,7 +238,7 @@ def _hide_trailer(ir: dict) -> None:
     # A body with nothing in it — a tab just added — is one empty paragraph, and that
     # one is a trailer too: what is written there goes *into* it.
     if (blocks and (len(blocks) == 1 or blocks[-2]["kind"] == "table")
-            and blocks[-1]["kind"] in ("paragraph", "item", "heading") and not blocks[-1]["runs"]):
+            and blocks[-1]["kind"] in TEXT_KINDS and not blocks[-1]["runs"]):
         last = blocks.pop()
         ir["trailer"] = last["span"]
         if last["kind"] != "paragraph" or last.get("align"):
@@ -238,7 +248,7 @@ def _hide_trailer(ir: dict) -> None:
     # tab's first table, made by `insertTable`, always does). That one is the `lead`,
     # and the first block written in front of the table goes into it.
     if (len(blocks) >= 2 and blocks[1]["kind"] == "table"
-            and blocks[0]["kind"] in ("paragraph", "item", "heading") and not blocks[0]["runs"]):
+            and blocks[0]["kind"] in TEXT_KINDS and not blocks[0]["runs"]):
         first = blocks.pop(0)
         ir["lead"] = first["span"]
         if first["kind"] != "paragraph" or first.get("align"):
@@ -556,6 +566,8 @@ def _block_of(element: dict, lists: dict, objects: dict | None = None,
     elif style.get("namedStyleType") in HEADINGS:
         block["kind"] = "heading"
         block["level"] = HEADINGS[style["namedStyleType"]]
+    elif style.get("namedStyleType") in NAMED_KINDS:
+        block["kind"] = NAMED_KINDS[style["namedStyleType"]]
     else:
         block["kind"] = "paragraph"
     align = ALIGNMENTS.get(style.get("alignment", ""))
@@ -748,12 +760,18 @@ def _paragraph_attrs(block: dict) -> str:
     """What a paragraph says about itself past its words: its alignment and indents
     as CSS the importer keeps, its shading and the space around it as attributes of
     ours, which only `batchUpdate` can write (`PARAGRAPH_DATA` says why)."""
+    # Title and Subtitle have no tag: HTML's headings are levels and these are not,
+    # so they go in as ours. Whether the importer makes anything of a `<p>` like this
+    # is not measured and does not matter — `push` settles by regenerating the file
+    # from the document it made, and every write after that is a `batchUpdate`, which
+    # names the style outright.
+    out = (f' data-style="{block["kind"]}"' if block["kind"] in KIND_STYLE else "")
     styles = [f"text-align:{block['align']}"] if block.get("align") else []
     for key, css in PARAGRAPH_CSS.items():
         if block.get(key) is not None:
             unit = "" if key == "line_spacing" else "pt"
             styles.append(f"{css}:{_number(block[key])}{unit}")
-    out = f' style="{";".join(styles)}"' if styles else ""
+    out += f' style="{";".join(styles)}"' if styles else ""
     for key, name in PARAGRAPH_DATA.items():
         if block.get(key) is not None:
             out += f' {name}="{escape(str(_number(block[key])), quote=True)}"'
@@ -898,8 +916,12 @@ class _Reader(HTMLParser):
             if attr.get("class") == "b2s-toc":
                 self._emit({"kind": "toc", "frozen": True, "runs": []} | _key_of(attr))
                 return
-            block = ({"kind": "heading", "level": int(tag[1]), "runs": []} if tag != "p"
-                     else {"kind": "paragraph", "runs": []})
+            if tag != "p":
+                block = {"kind": "heading", "level": int(tag[1]), "runs": []}
+            else:
+                named = attr.get("data-style", "")
+                block = {"kind": named if named in KIND_STYLE else "paragraph",
+                         "runs": []}
             self._open(block | _paragraph_of(attr) | _key_of(attr))
         elif tag == "img":
             # A picture is a frozen run like a chip — one index unit, never rewritten

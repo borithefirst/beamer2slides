@@ -97,6 +97,13 @@ def _shapes() -> dict:
     """One entry per shape that has broken something, plus enough ordinary prose to
     give the merge somewhere to work (docs/google-docs.md names every one of these)."""
     return {
+        # Docs' named styles past the heading levels. A Title is what the top of a
+        # real document is, and `namedStyleType` is a field the merge names on every
+        # paragraph it writes.
+        "titled": [{"kind": "title", "runs": [{"text": "The Quarterly Report"}]},
+                   {"kind": "subtitle", "runs": [{"text": "and what it does not say"}]},
+                   _h("Summary"), _p("One paragraph of it."),
+                   _p("And a second one after that.")],
         "prose": [_h("Notes"), _p("The first paragraph says one thing."),
                   _p("The second paragraph says another."),
                   _i("alpha"), _i("beta"), _i("gamma", 1), _p("A closing line.")],
@@ -340,7 +347,7 @@ def _word_spots(block: dict) -> list[tuple[str, int, int]]:
 
 
 def _paragraph_blocks(part: dict) -> list[dict]:
-    return [b for b in _blocks(part) if b.get("kind") in ("paragraph", "heading", "item")
+    return [b for b in _blocks(part) if b.get("kind") in doc_ir.TEXT_KINDS
             and b.get("span")]
 
 
@@ -419,9 +426,10 @@ def read_heading(rng, part, tab):
     if not blocks:
         return [], []
     block = rng.choice(blocks)
+    named = rng.choice(["HEADING_3", "TITLE", "SUBTITLE", "NORMAL_TEXT"])
     return [{"updateParagraphStyle": {
         "range": _span(*block["span"], tab),
-        "paragraphStyle": {"namedStyleType": "HEADING_3"},
+        "paragraphStyle": {"namedStyleType": named},
         "fields": "namedStyleType"}}], [block.get("key")]
 
 
@@ -605,7 +613,7 @@ def _parts(ir: dict) -> list[dict]:
     return doc_ir.parts(ir)
 
 
-def _pick(rng, ir, kinds=("paragraph", "heading", "item")):
+def _pick(rng, ir, kinds=doc_ir.TEXT_KINDS):
     spots = [(part, i, b) for part in _parts(ir)
              for i, b in enumerate(part.get("blocks", [])) if b.get("kind") in kinds]
     return rng.choice(spots) if spots else None
@@ -691,11 +699,16 @@ def src_restyle(rng, ir, touched):
 
 
 def src_retitle(rng, ir, touched):
-    spot = _pick(rng, ir, ("paragraph", "heading"))
+    """Move a block between the named styles. Every one of Docs' styles is drawn:
+    `namedStyleType` is a field the merge names on every paragraph it writes, so a
+    style the dialect cannot spell is one it silently writes body text over."""
+    spot = _pick(rng, ir, ("paragraph", "heading", "title", "subtitle"))
     if not spot:
         return
     _, _, block = spot
-    block["kind"] = "heading" if block["kind"] == "paragraph" else "paragraph"
+    kinds = [k for k in ("paragraph", "heading", "title", "subtitle")
+             if k != block["kind"]]
+    block["kind"] = rng.choice(kinds)
     if block["kind"] == "heading":
         block["level"] = rng.randint(1, 3)
     else:
@@ -1001,8 +1014,9 @@ KNOWN = (
      "kind": "identity_lost", "has": "",
      "why": "a block keeps its words and loses the key the file gave it — inherit_keys "
             "reassigning a key the file asserts, settle keying every tab before those "
-            "tabs are adopted, a heading turned paragraph keeping its level, or a "
-            "delete carrying the style of the block above onto the survivor"},
+            "tabs are adopted, or a heading turned paragraph keeping its level. A "
+            "delete carrying the style of the block above onto the survivor used to be "
+            "the fourth; the settle writes the named style back now"},
     {"id": "table-in-a-table",
      "kind": "block_gone", "has": "a table the reader added",
      "why": "a table the source adds in front of another table is written at the "

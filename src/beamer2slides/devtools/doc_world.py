@@ -898,8 +898,8 @@ def _units_of(blocks: list[dict], tab: Tab, world: World) -> list[dict]:
             out.append(toc())
             continue
         para = plain()
-        if block["kind"] == "heading":
-            para["named"] = f"HEADING_{block.get('level', 1)}"
+        if block["kind"] != "item":
+            para["named"] = doc_merge.named_style(block)
         if block.get("align"):
             para["align"] = doc_ir.TO_ALIGNMENT[block["align"]]
         para["measures"] = {key: block[key] for key, _ in doc_merge.PARAGRAPH_FIELDS

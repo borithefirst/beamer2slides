@@ -330,11 +330,12 @@ def test_a_block_with_an_equation_survives_the_source_dropping_it():
     assert not oracle.failures(oracle.check(was, before, base, report, mine))
 
 
-@pytest.mark.xfail(strict=True, reason="deleting a block takes its paragraph mark, and "
-                   "Docs merges the two keeping the FIRST one's style: the paragraph "
-                   "under a deleted heading becomes a heading. Its style is written "
-                   "before the delete above it, not after")
 def test_a_paragraph_stays_a_paragraph_when_the_heading_above_it_is_deleted():
+    """Deleting a block takes its paragraph mark, and Docs merges the two keeping the
+    FIRST one's style, so the paragraph under a deleted heading became a heading: the
+    merge writes its style before the delete above it, not after. The settle repairs
+    it, because `carry_unimported` now compares the plan's named style with the
+    read-back's and `tidy_requests` writes the difference."""
     world, ours, base = _push("prose")
     ours["blocks"] = [b for b in ours["blocks"] if b["key"] != "heading:notes"]
     report, ours, base = fuzz_docs.sync_once(world, ours, base)
