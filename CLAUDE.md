@@ -741,10 +741,37 @@ wins. `python -m beamer2slides docs push doc.html` imports the file through Driv
 `<meta name="b2s-document">`; `docs sync doc.html [--dry-run]` merges three ways, writes with
 `requiredRevisionId` (re-plans up to 3 times on a mismatch; `B2S_DOCS_BEFORE_WRITE` is the test
 hook) and then **regenerates the file from the document it just wrote**, so file, document and
-base agree and the next sync writes 0 requests. State beside the file: `.b2s/<stem>.base.json`
-and `.b2s/<stem>.sync-report.{json,md}`; without a base, sync stops and asks for
-`--assume-base file|document`. Modules: `doc_ir.py` (IR ↔ canonical HTML ↔ `documents.get`,
+base agree and the next sync writes 0 requests. Modules: `doc_ir.py` (IR ↔ canonical HTML ↔ `documents.get`,
 keys, named ranges), `doc_merge.py` (pure planning), `doc_sync.py` (the commands).
+- **The base is Drive-first**: it is a JSON file in Drive beside the document, its id in the
+  document's own `appProperties.b2sBase`, and `.b2s/<stem>.base.json` is a cache (the Slides
+  arrangement, `snapshot.save_drive`; `.b2s/` is scratch state a fresh clone, a colleague or a
+  second checkout does not have, and without a base `sync` fell into the `--assume-base` dialog,
+  where both answers throw work away). Reading prefers Drive, falls back to the cache and says
+  which it used - a cache another checkout has overtaken (`generation` counts the syncs), a cache
+  newer than Drive's (a sync whose upload failed), no base in Drive yet, or one Drive names and
+  cannot serve; a base that is truncated or belongs to another document is refused out loud.
+  Writing goes to the cache atomically, then to Drive; a Drive write that fails never fails the
+  sync. `.b2s/<stem>.sync-report.{json,md}` is the report. With no base anywhere, sync stops and
+  asks for `--assume-base document-wins` (nothing is written to the document, the file is
+  rewritten from it: source edits since the last sync go) or `source-wins` (the file is written
+  over the live document: the reader's edits go). `file` / `document` are the old names and read
+  backwards - they named the side the base is taken *from* - and still work with a warning.
+  Before `source-wins` the document is exported to `.b2s/backups/<stem>-<when>.html` and the path
+  is reported; an export Drive refuses stops that sync (`guard.demand_way_back`'s principle),
+  `--no-backup` is how one asks for a write with no way back.
+- **`docs adopt --doc <url|id> [doc.html] [--force]`**: the canonical file a document nobody
+  pushed never had - `push` only goes file → document and refuses a file that already names one.
+  It reads every tab, keys the blocks, plants one named range each, writes the file and stores
+  the base; then it is an ordinary synced pair. The path defaults to a slug of the title;
+  idempotent (a second run plants no second set of anchors and writes the same file); refuses a
+  target that names another document, or none, unless `--force`.
+- Batching: `send` cuts a plan over 500 requests into consecutive batches in the same order,
+  chaining each answer's `writeControl` into the next `requiredRevisionId` so a reader typing
+  mid-run is still refused. Order is preserved and nothing crosses a boundary, so the document
+  written is the same - but a chunked write is **not atomic**: one that fails part-way leaves
+  the earlier batches in. The report says so whenever chunking happened. `_write_structure`
+  keeps its own batch.
 - A `files.update` rebuild **destroys every named range**, so after the first import only
   incremental `batchUpdate` edits - there is no Docs equivalent of `convert`'s rebuild.
 - Indices are UTF-16 code units, and a chip is **one** unit however long its words look.

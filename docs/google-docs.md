@@ -390,9 +390,11 @@ it as it wins everything. What the merge reports instead of writing is listed un
 ## The commands
 
 ```
-python -m beamer2slides docs push doc.html [--name "In Drive"] [--new-doc]
-python -m beamer2slides docs sync doc.html [--doc <url|id>] [--dry-run]
-                                           [--assume-base file|document]
+python -m beamer2slides docs push  doc.html [--name "In Drive"] [--new-doc]
+python -m beamer2slides docs adopt --doc <url|id> [doc.html] [--force]
+python -m beamer2slides docs sync  doc.html [--doc <url|id>] [--dry-run]
+                                            [--assume-base document-wins|source-wins]
+                                            [--no-backup]
 ```
 
 - **`push`** imports the file through Drive, reads the document back, gives it the
@@ -400,6 +402,17 @@ python -m beamer2slides docs sync doc.html [--doc <url|id>] [--dry-run]
   and a `<meta name="b2s-document">` naming the document. From then on the file alone
   says where it lives, and a push is never repeated: `--new-doc` is the only way to get
   a second document out of one file.
+- **`adopt`** is the way in for a document nobody pushed — a Google Doc a team has been
+  writing for a year, which `push` can only refuse. It reads the document (every tab),
+  keys its blocks, plants one named range each, writes the canonical HTML file and
+  stores the base; from then on the pair is an ordinary synced pair. The path defaults
+  to a slug of the document's title in the current directory. It is idempotent: a
+  second run finds every block already named by its range and writes the same file with
+  no second set of anchors. It refuses a target file that is already there and names
+  another document — or none at all, which is somebody's canonical file — unless
+  `--force`. A document Drive's HTML importer built cannot say whether its lists are
+  numbered and there is no file yet to say for it, so `settle` gives those lists
+  bullets of the document's own, after which they read back as what they are.
 - **`sync`** merges base, file and document three ways, sends the edits with
   `requiredRevisionId`, and **regenerates the file from the document it just wrote**.
   A refusal on the revision — somebody typed between the read and the write — re-reads
@@ -414,13 +427,76 @@ can see one — and a sync that rewrites the passage a comment hangs on answers 
 accident. Nothing here writes or resolves one: that is the reader's to do, in the
 browser. A read that fails (a scope, a share) is reported too, never raised.
 
-State lives beside the file, in `.b2s/`: `<stem>.base.json` is what both sides agreed
-on at the end of the last sync, and `<stem>.sync-report.{json,md}` says what each side
-contributed, what conflicted (the document wins) and what was left alone. Without a
-base there is no way to tell a source change from a document change, and `sync` says so
-rather than guessing; `--assume-base file` then treats every difference as the
-document's (nothing is written, the file is rewritten from the document) and
-`--assume-base document` treats every difference as the source's.
+`<stem>.sync-report.{json,md}` in `.b2s/` beside the file says what each side
+contributed, what conflicted (the document wins) and what was left alone.
+
+### The base is Drive-first
+
+The base of the last sync — what both sides agreed on, and the only thing that can tell
+a source change from a document change — is **a JSON file in Drive**, in the document's
+own folder, whose id is written into the **document's** `appProperties.b2sBase`. The
+copy in `.b2s/<stem>.base.json` beside the file is a **cache**. That is the Slides
+side's arrangement (`snapshot.save_drive` / `load_drive`) and the Docs side did not
+have it at first: the base lived only in `.b2s/`, which is git-ignorable scratch state,
+so a fresh clone, a colleague's machine, a second checkout or anyone who deleted what
+looked like scratch dropped `sync` into the `--assume-base` dialog — where both answers
+throw somebody's work away. `drive.file` reaches both files (this tool made them), and
+no wider scope is asked for.
+
+Reading (`doc_sync.load_base`) prefers Drive and falls back to the cache, and **says
+which it used**: that the cache is older than Drive's (another checkout has synced
+since — `generation` counts the syncs, so the two can be compared), that Drive's is the
+older one and the cache is being used instead (what a sync whose Drive upload failed
+leaves behind), that Drive has no base for this document yet, or that the document
+names a base in Drive that cannot be read — deleted, or somebody else's now — in which
+case the cache may be older than the document. Nothing is lost when it is: the document
+wins where both moved, and the other checkout's changes read as the document's. A base
+that is truncated or belongs to another document is not used at all, and why is
+reported rather than swallowed, because a base ignored in silence makes the next sync
+read every difference as somebody's change. Writing (`store_base`) goes to the cache
+first, atomically, then to Drive; **a Drive write that fails never fails the sync** —
+the document has already been written by then — it is printed and named in the report.
+
+### `--assume-base`: whose work is discarded
+
+Only when there is no base anywhere. The two answers used to be spelled `file` and
+`document`, which named the side the base would be *taken from* — the exact opposite of
+how anyone reads them, because that is the side whose changes are thereby thrown away.
+They are now:
+
+| | what it does |
+|---|---|
+| `--assume-base document-wins` | the document is right where they differ: nothing is written to it, and the file is rewritten from the document. Every edit made to the source since the last sync is discarded |
+| `--assume-base source-wins` | the file is right where they differ: the file is written over the live document. Every edit a reader made there since the last sync is discarded |
+
+`file` and `document` still work as aliases and print one line saying what they really
+do. Before the destructive direction — `source-wins`, which overwrites a live document
+other people may be in, with no base to merge against — the document is exported to
+`.b2s/backups/<stem>-<timestamp>.html` (`files.export`, `text/html`), and the path is
+printed and named in the sync report. An export Drive refuses **stops that sync**: the
+Slides side's rule (`guard.demand_way_back`) is that a write with no way back is
+something one asks for — `--no-backup` — and never something that happens because an
+export failed. The export is Drive's HTML, which is a lossy read-back (see "The round
+trip does not close on its own"): a copy of the words to recover from, not a file this
+tool could push back unchanged. The non-destructive direction writes nothing to the
+document and needs no backup.
+
+### Batching, and the atomicity it costs
+
+`doc_sync.send` puts a plan of up to 500 requests into one `batchUpdate`, which is
+atomic: it lands whole or not at all. Above that it cuts the plan into consecutive
+batches of 500. Docs applies a batch in the order it is given and the plan is already
+in that order, so consecutive batches write the same document as one batch would —
+nothing is reordered, and no request crosses a boundary. `requiredRevisionId` can only
+guard the first batch, since after it the document's revision is ours; the answer
+carries the new one (`writeControl`), so each batch requires the revision the one
+before it produced, and somebody typing half-way through the run is still refused.
+(Unmeasured: whether `BatchUpdateDocumentResponse` always answers with a
+`writeControl`. If it does not, the chain stops guarding rather than sending a stale
+revision.) **The honest caveat:** a chunked write that fails part-way leaves the
+batches before it in the document, where a single batch could not. The sync report says
+so whenever chunking actually happened. The structure pass (`_write_structure`) is
+unaffected — it is already a batch of its own, for its own reasons.
 
 ### Order: a section the source moved
 
