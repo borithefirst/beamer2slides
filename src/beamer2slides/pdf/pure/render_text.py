@@ -173,7 +173,7 @@ class _Fallback:
         if not -0x80000000 <= weight <= 0x7FFFFFFF:          # FX_SAFE_INT32::ValueOrDefault
             weight = 400
         face = fontmapper.load_subst_face("Arial", font.subtype == "TrueType",
-                                          font.flags & 0xFFFFFFFF, weight, font.italic_angle)
+                                          font.flags & 0xFFFFFFFF, weight, font.italic_angle, font.doc)
         self.program = face.program if face is not None else None
         self.subst = face.subst if face is not None else None
         self.subst_generic = face is not None and face.generic

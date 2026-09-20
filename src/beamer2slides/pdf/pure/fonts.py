@@ -1183,7 +1183,7 @@ class SimpleFont(Font):
             if weight is None or not 100 <= weight <= 900:    # kFontWeightExtraLight .. ExtraBold
                 weight = 400
             face = fontmapper.load_subst_face(self.base_name, self.subtype == "TrueType", self.flags & 0xFFFFFFFF,
-                                              weight, self.italic_angle)
+                                              weight, self.italic_angle, self.doc)
             if face is not None:
                 self.program, self.subst_generic, self.subst = face.program, face.generic, face.subst
             return

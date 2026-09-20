@@ -867,10 +867,10 @@ def _needs_foxit():
         pytest.skip(f"the Foxit faces are not in {foxit.cache_dir()}: python -m beamer2slides.pdf.pure.foxit")
 
 
-def _subst_font(base, flags, extra=b"", desc=b""):
+def _subst_font(base, flags, extra=b"", desc=b"", subtype=b"Type1"):
     from beamer2slides.devtools.render_torture_text import FontSpec
     return FontSpec(base.decode(), "unknown", [
-        b"<< /Type /Font /Subtype /Type1 /BaseFont /%s %s /FontDescriptor @1@ >>" % (base, extra),
+        b"<< /Type /Font /Subtype /%s /BaseFont /%s %s /FontDescriptor @1@ >>" % (subtype, base, extra),
         b"<< /Type /FontDescriptor /FontName /%s /Flags %d /FontBBox [0 -200 1000 900] %s >>" % (base, flags, desc)], [65])
 
 
@@ -894,6 +894,16 @@ SUBST_TEXT_CASES = {
     "dingbats_spacing_heuristic": (b"BT /F0 30 Tf 5 60 Td (ABCDEF) Tj ET",
                                    [_subst_font(b"ZapfDingbats,Bold", 4, _WIDTHS + b" /Encoding << /Differences "
                                                 b"[65 /a1 /a2 /a10 /a20 /a71 /a100] >>")], 1.37),
+    # letters Foxit's dingbats face has no glyph for: a non-embedded TrueType font with glyph 0 and
+    # no /ToUnicode fails CPDF_Font::ShouldUseFont, so every one of them is drawn from the font's
+    # fallback CFX_Font - LoadSubstFace("Arial", ...), GDI's Arial here - at its Unicode
+    "fallback_arial": (b"BT /F0 30 Tf 10 30 Td (Wavy) Tj ET",
+                       [_subst_font(b"ZapfDingbats", 4, b"/Encoding /WinAnsiEncoding", b"/StemV 80",
+                                    b"TrueType")], 2),
+    # the same, with the fallback face asked for weight stem_v * 5 = 600 and the italic angle
+    "fallback_arial_bold_italic": (b"BT /F0 30 Tf 10 30 Td (Wavy) Tj ET",
+                                   [_subst_font(b"ZapfDingbats", 4, b"/Encoding /WinAnsiEncoding",
+                                                b"/StemV 120 /ItalicAngle -15", b"TrueType")], 1.37),
 }
 
 
@@ -912,7 +922,8 @@ def test_the_pure_renderer_survives_substituted_text_torture_seeds():
     3,000 seeds when it was written, none apart), and of GDI's TrueType faces (`--pool installed`):
     seeds 18, 21 and 29 were apart until a font without a descriptor got flags 0 (PDFium's
     m_Flags default) rather than nonsymbolic - its TrueType glyph map then takes the Mac cmap.
-    Fallback fonts are refused."""
+    Seeds 6, 13, 25, 26 and 29 draw glyphs through a font's fallback face, so nothing here may be
+    refused for one any more."""
     from beamer2slides.devtools.render_torture_subst import case, compare
     _needs_foxit()
     apart, drawn = {}, 0
@@ -920,7 +931,7 @@ def test_the_pure_renderer_survives_substituted_text_torture_seeds():
         try:
             n = compare(*case(seed, 2, pool))[0]
         except PdfError as e:
-            assert "fallback" in str(e), (seed, pool, str(e))
+            assert "fallback" not in str(e), (seed, pool, str(e))
             continue
         drawn += 1
         if n:
@@ -959,6 +970,18 @@ def test_a_generic_face_keeps_its_blend_between_documents():
     assert bounds[0] == bounds[1]
     if sys.platform != "darwin":                         # macOS CI: unmoved in PDFium too
         assert bounds[0][0] != bounds[0][1]              # the blend moved the advances
+
+
+def test_a_system_face_does_not_carry_its_charmap_into_the_next_document():
+    """A system face is not: `face_map_` and `ttc_face_map_` hold ObservedPtrs, so the face dies
+    with the last CFX_Font holding it and the next document opens its own. Torture seed 311 draws a
+    non-embedded TrueType font with flags 0, whose LoadGlyphMap leaves the Mac charmap selected on
+    the shared Arial face; seed 316 then asks that face for its fallback glyphs. Run in this order,
+    both must still be PDFium's - which they were not while the face was cached for good."""
+    from beamer2slides.devtools.render_torture_subst import case, compare
+    _needs_foxit()
+    apart = {seed: compare(*case(seed))[0] for seed in (311, 316)}
+    assert not any(apart.values()), apart
 
 
 # ---------------------------------------------------------------------- PDFium's rules, one by one

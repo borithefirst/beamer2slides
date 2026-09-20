@@ -524,8 +524,6 @@ class Document:
         self._pages: dict[int, Page] = {}
         from .fonts import doc_fonts
         self._font_cache: dict = doc_fonts(self.pdf)
-        from . import fontmapper
-        fontmapper.document_opened()
         self._open = True
 
     def __len__(self) -> int:
@@ -575,15 +573,15 @@ class Document:
 
     def close(self) -> None:
         # FPDF_CloseDocument destroys CPDF_DocPageData, and with it the document's fonts and the
-        # CFX_Fonts under them: the system faces they were the last to hold go too (`fontmapper`,
-        # PDFium's ObservedPtr caches), so the next document opens its own instead of inheriting
-        # the charmap this one's LoadGlyphMap left selected.
+        # CFX_Fonts under them: the system faces this document was the last to hold go too
+        # (`fontmapper.release`, PDFium's ObservedPtr caches), so the next document opens its own
+        # instead of inheriting the charmap this one's LoadGlyphMap left selected.
         self._pages.clear()
         self._font_cache.clear()
         if self._open:
             self._open = False
             from . import fontmapper
-            fontmapper.document_closed()
+            fontmapper.document_closed(self.pdf)
 
 
 class PureBackend:
