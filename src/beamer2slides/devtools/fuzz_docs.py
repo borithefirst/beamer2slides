@@ -1050,15 +1050,17 @@ def describe_script(script: dict) -> str:
 
 # ---------------------------------------------------------------- what is known already
 
-# The defects this campaign found and nobody has fixed yet. They are listed so the
-# hunt can go past them: a round that ends on one of these is counted, named and let
-# through, and only an unknown finding fails the campaign. Each is pinned by an xfail
-# in tests/test_doc_fuzz.py with its minimal reproduction, and `--strict` fails on them
+# The defects this campaign found and nobody has fixed yet — **empty**, and that is
+# the point of the tuple, not an accident of it. They are listed so the hunt can go
+# past them: a round that ends on one of these is counted, named and let through, and
+# only an unknown finding fails the campaign. Each is pinned by an xfail in
+# tests/test_doc_fuzz.py with its minimal reproduction, and `--strict` fails on them
 # again — which is how one checks a fix, and how a fix is noticed here at all.
 #
 # A signature is a finding's kind and a piece of its words. It says which *symptom*
-# was seen, not which defect caused it: several of these show up as a lost key, and
-# the tests, not the signature, say which is which.
+# was seen, not which defect caused it: several of these showed up as a lost key, and
+# the tests, not the signature, say which is which. Which is why a fixed entry goes:
+# it is let through, so it would swallow the next defect that looks like it.
 KNOWN = (
     # Seven entries stood at the head and the foot of this tuple and are gone, not
     # rewritten: each is fixed and has a test of its own in tests/test_doc_fuzz.py, and
@@ -1097,17 +1099,17 @@ KNOWN = (
     # inheriting the styling in front of it (`_style_requests` names every managed
     # field), and a styled word the source rewrote, which is a loss that is right and
     # is now said (`doc_merge.reader_styling_gone`).
-    {"id": "crossed-delete",
-     "kind": "block_gone", "has": "though the file still names it",
-     "why": "two blocks end up under one key and none under the other, so the merge "
-            "reads the second as 'the source dropped it', deletes the paragraph the "
-            "reader was reading, and writes the source's new wording nowhere. The "
-            "same defect as `lost-key`, one step worse — there the block survives "
-            "under a wrong key, here it goes altogether (shrunk from chain-8 seed "
-            "1031). `inherit_keys` crossing the keys the file asserts was how it got "
-            "there, and that is fixed; nothing has reached this signature since, so "
-            "the entry stays to catch whatever else can"},
+    # The tenth, `crossed-delete`, is gone the same way and was the last one here: two
+    # blocks under one key and none under the other, so the merge read the second as
+    # "the source dropped it", deleted the paragraph the reader was reading and wrote
+    # the source's new wording nowhere — `lost-key` one step worse (shrunk from chain-8
+    # seed 1031). `inherit_keys` crossing the keys the file asserts was how it got
+    # there, and that is fixed. It stayed on here after the fix, to catch whatever else
+    # could reach the signature, which is backwards: an entry in this tuple is *let
+    # through*, so keeping it is the one way to make sure nothing is caught. The rule
+    # the rest of this tuple was emptied by holds for the last one too.
 )
+# Nothing known is outstanding. A campaign that fails now has found something new.
 
 
 def known_bug(found: dict) -> str | None:
@@ -1163,6 +1165,9 @@ def run_offline(rounds: int, seed: int = 0, chain: int = 1, do_shrink: bool = Tr
 def known_seen(hit: Counter) -> str:
     """What the round hit of what is known already. A known defect nobody reaches any
     more is worth saying out loud: either it is fixed, or the campaign stopped looking."""
+    if not KNOWN:
+        return ("known defects: none outstanding — every finding fails the campaign, "
+                "and --strict has nothing more to add.")
     lines = ["known defects (let through; --strict fails on them):"]
     for bug in KNOWN:
         lines.append(f"  {bug['id']}: {hit.get(bug['id'], 0)}"

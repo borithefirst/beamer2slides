@@ -140,7 +140,7 @@ def _writable_block(block: dict) -> bool:
 # `kind == "table"`, so a table of contents was an ordinary block to the planner — a
 # block written in front of one went at its own index and a block deleted in front of
 # one gave up its own mark. Docs refuses both, a refusal throws out the whole batch,
-# and the sync died (`fuzz_docs.KNOWN` 'toc-block').
+# and the sync died (the campaign's 'toc-block', fixed and out of `fuzz_docs.KNOWN`).
 def _structural(block: dict | None) -> bool:
     return block is not None and block.get("kind") in doc_ir.STRUCTURAL
 
@@ -1912,7 +1912,8 @@ def _new_table_requests(theirs: dict, at: int | None, rows: int,
     and no requests come back — the caller says so and leaves the document alone.
     Written anyway at `at - 1`, the new table was built inside the last cell of the
     table before it, the words never reached it, `anchor_tables` could not find it and
-    every re-plan built another (`fuzz_docs.KNOWN` 'table-in-a-table').
+    every re-plan built another (the campaign's 'table-in-a-table', fixed and out of
+    `fuzz_docs.KNOWN`).
     """
     table = {"rows": rows, "columns": columns}
     if at is None:

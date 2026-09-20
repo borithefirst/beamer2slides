@@ -968,25 +968,30 @@ only when it is on, the campaign catches 13 of 300 `themed` seeds at chain 3
 reader op *and* a source op that rewrites the same block, which is what `collide` is for.
 
 The campaign found ten defects, each pinned by a test in `tests/test_doc_fuzz.py` —
-`xfail(strict=True)` while it stands, a plain test once it is fixed — and the ones
-still standing described in `fuzz_docs.KNOWN`: a table of contents
-treated as an ordinary block (which killed the sync outright, because a refused request
-throws out the batch), a table the source dropped deleted however much the reader typed
-into it, one block's key landing on another, a block reworded *and* moved losing the
-reader's styling, and the rest. The ones still standing are let through by default and
-`--strict` fails on them, so a fix shows up as a defect that stops being reached; once
-it is fixed and has a test, its entry goes, or it would swallow the next defect that
-looks like it.
+`xfail(strict=True)` while it stands, a plain test once it is fixed — and the ones still
+standing described in `fuzz_docs.KNOWN`: a table of contents treated as an ordinary block
+(which killed the sync outright, because a refused request throws out the batch), a table
+the source dropped deleted however much the reader typed into it, one block's key landing
+on another, a block reworded *and* moved losing the reader's styling, and the rest. A
+defect still standing is let through by default and `--strict` fails on it, so a fix shows
+up as a defect that stops being reached; once it is fixed and has a test, its entry goes,
+or it would swallow the next defect that looks like it.
 
-**Nine of the ten signatures are now at zero**, and what closed them falls into four
-groups: six ways of losing a block's identity, two ways of losing the reader's content
-outright, three ways of killing the sync where it stood, and one place in a document
-where Docs will let nothing be written at all. (Some of them closed one of the first
-group and one of a later one — a table losing its anchor, Docs' index rules, the place
-with nowhere to write.) The one left is `crossed-delete`, 2 to 1 and not reached since;
-`lost-key` went 34 → 2 → 0 and `moved-styling` 2 → 0, both below. And one of the nine
-reached zero with no defect behind it at all: it was the oracle miscounting, twice, and
-that is the last part of this section.
+**All ten signatures are now at zero and `KNOWN` is empty**, so any finding at all fails
+the campaign. What closed them falls into four groups: six ways of losing a block's
+identity, two ways of losing the reader's content outright, three ways of killing the sync
+where it stood, and one place in a document where Docs will let nothing be written at all.
+(Some of them closed one of the first group and one of a later one — a table losing its
+anchor, Docs' index rules, the place with nowhere to write.) `lost-key` went 34 → 2 → 0
+and `moved-styling` 2 → 0, both below. `crossed-delete` — two blocks under one key and
+none under the other, so the merge read the second as dropped by the source, deleted the
+paragraph the reader was reading and wrote the source's new wording nowhere — was
+`inherit_keys` crossing the keys the file asserts, the first entry in that list of six,
+and it went 2 → 1 → 0 with it. Its entry stayed on after the fix "to catch whatever else
+can reach the signature", which is backwards: an entry here is *let through*, so keeping
+it is the one way to make sure nothing is caught. And one of the ten reached zero with no
+defect behind it at all: it was the oracle miscounting, twice, and that is the last part
+of this section.
 
 Losing a block's identity is the root of the worst of the rest, because a block the
 merge cannot recognise is a block it deletes as "dropped by the source".
@@ -1084,9 +1089,9 @@ everything goes in.
 At one seed, 200 rounds at chain 8: `toc-block` 10 → 0, `toc-table-split` 4 → 0,
 `empty-delete` 6 → 0, `dropped-table` 17 → 0, `dropped-frozen` 8 → 0, `crossed-frozen`
 22 → 0, `table-in-a-table` 1 → 0, `lost-key` 34 → 2, `crossed-delete` 2 → 1,
-`moved-styling` 2 → 2 — and the same at a second seed and at chain 4; `lost-key` and
-`moved-styling` then went to 0 (below). The nine
-signatures that reached zero are **out of `KNOWN`** rather than rewritten: each has a
+`moved-styling` 2 → 2 — and the same at a second seed and at chain 4; `lost-key`,
+`moved-styling` and `crossed-delete` then went to 0 (below). Every
+signature that reached zero is **out of `KNOWN`** rather than rewritten: each has a
 test of its own now, and each was wide enough to swallow the next defect that looks
 like it — `block_gone` mentioning `table:` had been catching crossed keys on tables all
 along, and `frozen_gone` with no words at all would catch every way of losing a picture

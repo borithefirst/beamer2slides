@@ -7,9 +7,9 @@ Three parts, all offline and all fast (no Google call anywhere in this file).
    under Docs' index rules), changes the canonical file as an author would, runs the real
    `doc_merge.plan` and the real settle, and hands the two read-backs, the base and the
    report to `doc_loss_oracle`. A round is clean when the oracle finds nothing the report
-   does not name, and when a second sync writes nothing. Defects nobody has fixed yet are
-   listed in `fuzz_docs.KNOWN`: a round that ends on one of those is counted and let
-   through, and each of them is pinned by an xfail below.
+   does not name, and when a second sync writes nothing. Defects nobody has fixed yet
+   would be listed in `fuzz_docs.KNOWN` — a round that ends on one of those is counted
+   and let through — and that tuple is **empty**: every finding fails the campaign now.
 
 2. **The oracle is not vacuous.** A clean round is taken apart again with a loss put in on
    purpose — a block the reader added deleted, a word swallowed, styling dropped, a chip
@@ -17,10 +17,11 @@ Three parts, all offline and all fast (no Google call anywhere in this file).
    oracle has to catch every one of them, and to stay silent when the report owns up to
    the same thing. An oracle nobody has tried to fool proves nothing.
 
-3. **One xfail per defect the campaign found**, each a hand-written scenario rather than a
-   seed, so it says what is wrong rather than which dice fell. `--strict` on the campaign
-   (`python -m beamer2slides.devtools.fuzz_docs --strict`) is the other half of that: when
-   one of these is fixed, both the xfail and the KNOWN entry have to go.
+3. **One test per defect the campaign found**, each a hand-written scenario rather than a
+   seed, so it says what is wrong rather than which dice fell. Each was an xfail while its
+   defect stood and became a plain test when it was fixed, its `KNOWN` entry going in the
+   same commit — an entry that stays on after the fix is let through, so it hides the next
+   defect that reaches the same signature rather than catching it.
 
 The campaign itself, past these seeds:
     python -m beamer2slides.devtools.fuzz_docs offline --rounds 300
@@ -538,7 +539,7 @@ def test_the_world_carries_nothing_the_reader_does_not_read(shape):
     assert set(doc_ir.unmodelled(world.read())) == {"structural.sectionBreak"}
 
 
-# ---------------------------------------------------------------- what is still broken
+# ------------------------------------------------- one test per defect the campaign found
 
 def _push(shape: str):
     """`docs push` on a corpus shape: the world, the file and the base it leaves."""

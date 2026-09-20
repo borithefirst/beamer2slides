@@ -1264,8 +1264,9 @@ keys, named ranges), `doc_merge.py` (pure planning), `doc_sync.py` (the commands
   ordinary block, which kills the sync outright; a table the source dropped deleted however
   much the reader typed in it; one block's key landing on another; a block
   reworded *and* moved losing the reader's styling. A fixed entry goes out of `KNOWN`, or it
-  would swallow the next defect that looks like it. **Seven of the ten signatures are at
-  zero**, closed by four groups of fixes: five ways of losing a
+  would swallow the next defect that looks like it. **All ten signatures are at zero and
+  `KNOWN` is empty**, so any finding at all fails the campaign; closed by four groups of
+  fixes: five ways of losing a
   block's identity - which is the root of the worst of the rest, since a block the
   merge cannot recognise is one it deletes as dropped by the source - two ways of losing the
   reader's content outright, three ways of killing the sync where it stood, and one place in
@@ -1329,7 +1330,10 @@ keys, named ranges), `doc_merge.py` (pure planning), `doc_sync.py` (the commands
   `table-in-a-table` 1 -> 0, `lost-key` 34 -> 2,
   `crossed-delete` 2 -> 1, `moved-styling` 2 -> 2, and the same at a second seed and at
   chain 4; then `lost-key` 2 -> 0 and `moved-styling` 2 -> 0, leaving `crossed-delete` alone
-  in `KNOWN` (300 rounds at chain 8 and 600 at chain 4 under `--strict`: nothing).
+  in `KNOWN` (300 rounds at chain 8 and 600 at chain 4 under `--strict`: nothing) - and it
+  went 1 -> 0 with `inherit_keys`, the first of the five, so its entry went too: it had
+  stayed on after its fix "to catch whatever else can reach the signature", which is
+  backwards, an entry here being the one way to make sure nothing is caught.
   `lost-key`'s last two: an empty paragraph is all mark, so its named range *is* its mark,
   and "\ntext" written at that mark is handed the range (an insert at a range's own first
   index pushes it along), so the empty paragraph's key rode onto the block that was written;
