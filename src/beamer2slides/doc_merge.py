@@ -30,6 +30,8 @@ from .merge import diff3, tokens
 # words around it but never through it. U+FFFC is the object replacement character.
 FROZEN = "￼"
 BLOCK_MATCH = 0.5  # least similarity for an unkeyed block to inherit a key
+TABLE_MATCH = 0.5  # least similarity for a table that lost its anchor to be known again
+TABLE_MARGIN = 0.1  # and how far clear of the runner-up, on both sides, it has to be
 BULLETS = {False: "BULLET_DISC_CIRCLE_SQUARE", True: "NUMBERED_DECIMAL_ALPHA_ROMAN"}
 # The textStyle fields this merge owns: named on a restyle whether or not the run
 # carries them, so that a mark the source took away is taken away in the document.
@@ -492,6 +494,55 @@ def inherit_keys(base: dict, ours: dict) -> dict:
     return ours
 
 
+def recover_tables(base: dict, theirs: dict) -> int:
+    """Give back the key of a table whose anchor the *reader* deleted in the browser.
+
+    A table is anchored in its first cell (`doc_ir.anchor_span`), because the cells
+    are the only text a table has of its own — so a reader who deletes its first row,
+    or its first column, or merely the words in that cell, takes its named range with
+    them. Every other repair in this file is for a range one of *our own* writes
+    destroyed (`anchor_tables`, `adopt_keys`, `settle_keys`); this one is for a range
+    a person destroyed between two syncs, and nothing was looking at that.
+
+    What it cost: the read-back had a table with no key, the merge read the key the
+    file and the base both name as a table the reader had deleted, and the whole table
+    went — the rows the reader kept with it, and the report said nothing (fresh seed
+    970567 at chain 6, shape `between_tables`, shrunk to a reader's row delete and a
+    source's added table).
+
+    Only where nothing is in doubt, which is this family's rule throughout: a base
+    table missing from the read-back and an unkeyed table in it pair when they are
+    each other's best match, above `TABLE_MATCH` and `TABLE_MARGIN` clear of the
+    runner-up on both sides. So a reader who deleted one table and built another keeps
+    both of those facts, and two tables that read alike pair with neither.
+    """
+    claimed = {block.get("key") for block in theirs["blocks"]}
+    missing = [b for b in base["blocks"]
+               if b.get("kind") == "table" and b.get("key") and b["key"] not in claimed]
+    free = [b for b in theirs["blocks"] if b.get("kind") == "table" and not b.get("key")]
+    if not missing or not free:
+        return 0
+    # The words, not `_match_text` — whose " | " between every cell is most of a
+    # small table's characters, so a table `insertTable` had just built out of
+    # nothing scored 0.55 against one with four words in it.
+    score = {(i, j): SequenceMatcher(None, _table_words(was), _table_words(now)).ratio()
+             for i, was in enumerate(missing) for j, now in enumerate(free)}
+    done = 0
+    for i, was in enumerate(missing):
+        row = sorted(((score[i, j], j) for j in range(len(free))), reverse=True)
+        best, j = row[0]
+        column = sorted(score[k, j] for k in range(len(missing)))
+        if best < TABLE_MATCH or best != column[-1]:
+            continue
+        if len(row) > 1 and best - row[1][0] < TABLE_MARGIN:
+            continue
+        if len(column) > 1 and best - column[-2] < TABLE_MARGIN:
+            continue
+        free[j]["key"] = was["key"]
+        done += 1
+    return done
+
+
 def anchor_tables(live: dict, shaped: list[dict]) -> int:
     """Name the tables the structural batch created, so the next plan knows them.
 
@@ -535,8 +586,20 @@ def anchor_tables(live: dict, shaped: list[dict]) -> int:
                 if at is None:
                     continue
                 start = at + 1
+            # Forward from the anchor first, and then *backwards* — because
+            # `insertTable` splits the paragraph it goes into, and the paragraph's
+            # named range stays with the half after the table. So a table inserted
+            # at its anchor's own index lands in front of the block the plan
+            # anchored it on, and looking only forward found the next table along:
+            # the one the reader had just made anonymous by deleting the row it was
+            # anchored in. Its key went onto the new table, and the sync wrote the
+            # source's rows into the reader's table and built a blank one for the
+            # rest (fresh seed 970567, shape `between_tables`, where the empty
+            # paragraph between two tables cannot be deleted and so stays).
             free = [b for b in live["blocks"][start:]
                     if b.get("kind") == "table" and not b.get("key")]
+            free += [b for b in reversed(live["blocks"][:start])
+                     if b.get("kind") == "table" and not b.get("key")]
             built = not (told.get("ops") or told.get("lines"))
             found = next((b for b in free if _blank_table(b) == built), None) \
                 or (free[0] if free else None)
@@ -545,6 +608,12 @@ def anchor_tables(live: dict, shaped: list[dict]) -> int:
                 done += 1
                 moved = True
     return done
+
+
+def _table_words(block: dict) -> str:
+    """A table's cells as one stretch of words, with nothing of the grid in it."""
+    return " ".join(block_text(inner) for row in block.get("rows", [])
+                    for cell in row for inner in cell).strip()
 
 
 def _blank_table(block: dict) -> bool:
@@ -695,7 +764,7 @@ def _adopt_by_words(live: dict, free: dict) -> int:
     return done
 
 
-def settle_keys(live: dict, planned: dict) -> None:
+def settle_keys(live: dict, planned: dict, base: dict | None = None) -> None:
     """Give every part the keys the plan meant it to have, then key what is left.
 
     Two passes and not one, which is the whole of it: `doc_ir.key_blocks` recurses
@@ -711,12 +780,28 @@ def settle_keys(live: dict, planned: dict) -> None:
     file, the base and the document all agreed on an identity the file never gave
     it. `planned` is by stamp — None for the first part, else its tab id — which is
     `doc_sync.stamp_of`'s rule.
+
+    With `base`, a table whose anchor the *reader* destroyed is known again here too
+    (`recover_tables`), and then `doc_ir.name_requests` plants its range back, so the
+    repair reaches the document and not only this run's plan. The merge does the same
+    on the tabs it plans; this is for the ones it does not — a tab the source deleted
+    and the document kept is a note and no plan at all (`pair_tabs`), so a table the
+    reader had beheaded in it settled under a name made from its surviving first
+    word, and the next sync would read the file's key as gone and build a second
+    table beside it (offline chain-6 seeds 970705 and 970711).
     """
     parts = doc_ir.parts(live)
     for part in parts:
         stamp = None if part is live else part.get("tab")
         if planned.get(stamp):
             adopt_keys(part, planned[stamp])
+    if base:
+        was = {None if p is base else p.get("tab"): p
+               for p in doc_ir.parts(base) if p.get("blocks") is not None}
+        for part in parts:
+            stamp = None if part is live else part.get("tab")
+            if stamp in was:
+                recover_tables(was[stamp], part)
     for part in parts:
         doc_ir.key_blocks(part)
 
@@ -2351,6 +2436,7 @@ def plan(base: dict, ours: dict, theirs: dict) -> dict:
     doc_ir.key_blocks(ours)
     restore_unreadable(base, ours)
     restore_unreadable(theirs, ours, base)
+    recover_tables(base, theirs)
     _unseen_pictures(ours, base)
     inherit_keys(base, ours)
     result = merge(base, ours, theirs)

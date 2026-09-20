@@ -1347,6 +1347,65 @@ file and the document are never far enough apart for the two orders to disagree 
 
 Fixed seeds from the campaign run in the default offline suite.
 
+### Deeper again: the wound the reader makes, and four false alarms
+
+The next run stayed at chain 6 and moved to fresh seeds (800 rounds from 970000, then
+600 from 980000). **Seven** findings in four signatures; three were the merge's and four
+the oracle's, and the merge's three are one wound seen from three sides.
+
+* **A table the reader beheaded** (seeds 970200, 970567, and the pair 970705/970711).
+  A table is anchored in its first cell (`anchor_span`), because the cells are the only
+  text a table has of its own — so a person who deletes its first row in the browser
+  takes its named range with them. Every other repair in `doc_merge` is for a range one
+  of *our own* writes destroyed; nothing was looking at one a reader destroys. The
+  read-back had a table with no key, the merge read the key the file and the base both
+  name as a table the reader had deleted, and the source's own edit to a row the reader
+  had kept was written nowhere. `recover_tables` pairs the two again and only where
+  nothing is in doubt (`TABLE_MATCH`, and `TABLE_MARGIN` clear of the runner-up on both
+  sides) — and it asks the **words**, not `_match_text`, whose " | " between every cell
+  is most of a small table's characters: a blank 2×2 `insertTable` had just built scored
+  0.55 against one with four words in it and took its key, which is the crossing this
+  whole family is about.
+* **The same wound, and `anchor_tables` looking only forward** (seed 970567,
+  `between_tables`). `insertTable` splits the paragraph it goes into and the paragraph's
+  named range stays with the half *after* the table, so a new table goes in front of the
+  block the plan anchored it on. Where the reader had just made the next table along
+  anonymous, the forward search handed *that* table's identity to the one the batch had
+  built: the source's rows were written into the reader's table and a blank one was left
+  for the rest, with the reader's row gone and the report saying nothing. The search
+  looks backwards after it has looked forwards, and a blank table and one with words are
+  told apart as they are everywhere else (`_blank_table`).
+* **And the tab the merge plans nothing for** (seeds 970705, 970711). A tab the source
+  deleted and the document changed is kept — which is a note and no pair at all
+  (`pair_tabs`), so nothing plans that tab and the settle has no planned blocks to adopt
+  from. The beheaded table there settled under a name made from its surviving first word,
+  with file, base and document all agreeing on an identity the file never gave it, and
+  the next sync would have built a second table beside it. `settle_keys` asks the base as
+  well, and `doc_ir.name_requests` then plants the range back, so the repair reaches the
+  document and not only the run's plan.
+* Four times the oracle's own, and the first of them was made by the fix above. A table
+  the reader beheaded reads as one the reader *made* — `unkeyed` is the oracle's word for
+  that — and everything in it then has to survive, so the source's own cell edit read as
+  a loss; `_tab_findings` asks `recover_tables` the same question before it judges. Then
+  three in the styling, each an accusation with nothing behind it: an un-bolding the
+  **base** already records, on a word the file itself now marks, is a source restyle of a
+  block the document has not restyled since, which the merge's own rule gives to the
+  source (seed 970228). A word is what a reader sees and not what a run holds — the merge
+  writing the source's strike on the words the file has left a typed word in a run of its
+  own, and the coloured token `\xadvellum` came apart into `\xad` and `vellum`
+  (seed 970528, `_under_words`: a word wears what every character of it wears). And
+  styling was counted in whole *sets* of marks, so the source adding its strike to a word
+  made the tuple the reader's colour was in disappear and the colour read as lost while it
+  sat there — one mark at a time now. The fourth: two copies of one picture, one of which
+  the source drops. Which copy survived and which the file still asks for are told apart
+  by object ids the survivor need not keep, so name-matching put the two roles on
+  different copies and named the one that went; the question is how **many** the file
+  asks for, not which (seed 980193).
+
+Each has its test, each verified by breaking its mechanism. After them 970000 is clean,
+and so are 600 rounds at chain 6, 400 at chain 8 and 900 at chain 4 from fresh seeds,
+all under `--strict`.
+
 ## Remaining risks
 
 1. **Pictures** — retired, see "Pictures, and the chips a request can make" above. What

@@ -296,29 +296,45 @@ def frozen_runs(part: dict | None) -> dict:
     return out
 
 
-def styles_of(block: dict) -> Counter:
-    """The style marks somebody *chose* for a block's words, by (mark, word).
+def _under_words(block: dict):
+    r"""Each word of a block with the runs under its characters.
 
-    The value, not the key: a run saying `bold: False` is a reader who took the bold
-    off (`doc_ir.MARK_FIELDS`), and counting the key would read that as a reader who
-    put bold on — and then call the un-bolding a loss the moment it was honoured.
-
-    What a word inherits is deliberately not in here. A theme's bold belongs to the
-    named style, so a block that becomes a heading (Docs hands the paragraph after a
-    deleted one the style of the one that went) would otherwise read as the reader
-    bolding its every word, and any later restyle as losing that (themed seed 283).
+    A word is what a reader sees, so it is read off the block's whole text and not
+    run by run — the same rule as `text_of`, and for the same reason. Asked run by
+    run, a run boundary was a word boundary: the merge writing the source's strike on
+    the words the file has left the reader's freshly typed word in a run of its own,
+    and the token `\xadvellum` the reader had coloured came apart into `\xad` and
+    `vellum`, so the colour read as lost although every character still wore it
+    (fresh seed 970528, chain 6). A frozen run is a gap with a space each side, as
+    `text_of` has it and as skipping the run used to make it.
     """
-    out: Counter = Counter()
-    for run in runs_of(block):
+    text, under = _chars_under(block)
+    for match in WORD.finditer(text):
+        runs = [r for r in under[match.start():match.end()] if r is not None]
+        if runs:
+            yield match.group(), runs
+
+
+def _chars_under(block: dict) -> tuple[str, list]:
+    """A block's text and, per character, the run it came from (None where frozen)."""
+    if block.get("kind") == "table":
+        text, under = "", []
+        for row in block.get("rows", []):
+            for cell in row:
+                for inner in cell:
+                    body, fields = _chars_under(inner)
+                    if text:
+                        text, under = text + " ", under + [None]
+                    text, under = text + body, under + fields
+        return text, under
+    text, under = "", []
+    for run in block.get("runs", []):
+        body = run.get("text", "")
         if run.get("frozen"):
-            continue
-        marks = tuple(sorted(k for k, value in run.items()
-                             if k not in ("text", "width") and value))
-        if not marks:
-            continue
-        for word in WORD.findall(run.get("text", "")):
-            out[(marks, word)] += 1
-    return out
+            text, under = text + f" {body} ", under + [None] * (len(body) + 2)
+        else:
+            text, under = text + body, under + [run] * len(body)
+    return text, under
 
 
 def _wears(block: dict, theme: dict | None) -> set:
@@ -333,18 +349,34 @@ def marks_on(block: dict, theme: dict | None = None) -> Counter:
     and the ones its named style puts on, less the ones a run says False to.
 
     This is the reader's view rather than the file's, so it is what answers "is the
-    bold back on?" — a run that says nothing under a bold theme is bold again.
+    bold back on?" — a run that says nothing under a bold theme is bold again. Asked
+    without a theme it is what somebody *chose* for a word, which is the other half
+    of the styling question.
+
+    One mark at a time, and the value rather than the key: a run saying `bold: False`
+    is a reader who took the bold off (`doc_ir.MARK_FIELDS`), and counting the key
+    would read that as a reader who put bold on — and then call the un-bolding a loss
+    the moment it was honoured. Counting whole *sets* of marks was the same mistake
+    one turn out: the source adding its strike to a word made the tuple the reader's
+    colour was in disappear, so the colour read as lost while it sat there (fresh
+    seed 970528). A word split across runs wears what every character of it wears
+    (`_under_words`).
+
+    What a word inherits is deliberately not in here when no theme is given. A
+    theme's bold belongs to the named style, so a block that becomes a heading (Docs
+    hands the paragraph after a deleted one the style of the one that went) would
+    otherwise read as the reader bolding its every word, and any later restyle as
+    losing that (themed seed 283).
     """
     wears = _wears(block, theme)
     out: Counter = Counter()
-    for run in runs_of(block):
-        if run.get("frozen"):
-            continue
-        marks = {k for k in set(run) | wears
-                 if k not in ("text", "width") and (run[k] if k in run else True)}
-        for word in WORD.findall(run.get("text", "")):
-            for mark in marks:
-                out[(mark, word)] += 1
+    for word, under in _under_words(block):
+        marks = set.intersection(*({k for k in set(run) | wears
+                                    if k not in ("text", "width")
+                                    and (run[k] if k in run else True)}
+                                   for run in under))
+        for mark in marks:
+            out[(mark, word)] += 1
     return out
 
 
@@ -358,13 +390,10 @@ def unmarked_of(block: dict, theme: dict | None = None) -> Counter:
     """
     wears = _wears(block, theme)
     out: Counter = Counter()
-    for run in runs_of(block):
-        if run.get("frozen"):
-            continue
-        off = [key for key in wears if run.get(key) is False]
-        for word in WORD.findall(run.get("text", "")):
-            for mark in off:
-                out[(mark, word)] += 1
+    for word, under in _under_words(block):
+        for mark in set.intersection(*({key for key in wears if run.get(key) is False}
+                                       for run in under)):
+            out[(mark, word)] += 1
     return out
 
 
@@ -436,6 +465,15 @@ def check(base: dict, before: dict, after: dict, report: dict,
 def _tab_findings(was: dict | None, now: dict, then: dict | None, said: str,
                   tab, mine: dict | None, theme: dict | None = None) -> list[dict]:
     out: list[dict] = []
+    if was:
+        # A table the reader beheaded is not a table the reader *made*. Deleting a
+        # table's first row takes its named range with it (`doc_ir.anchor_span`), so
+        # the read-back has it unkeyed — and `unkeyed` below is the oracle's word for
+        # "the reader added this", whose whole content then has to survive. It is the
+        # base's table, and the merge knows it again (`doc_merge.recover_tables`), so
+        # the oracle asks the same question and judges it by its key: the source's own
+        # edit to a cell the reader kept is then a change and not a loss.
+        doc_merge.recover_tables(was, now)
     old, new = keyed(was), keyed(then)
     live = keyed(now)
     after_text = part_text(then)
@@ -445,8 +483,9 @@ def _tab_findings(was: dict | None, now: dict, then: dict | None, said: str,
         after_frozen += frozen_marks(block)
     after_styles: Counter = Counter()
     for block in (then or {}).get("blocks", []):
-        after_styles += styles_of(block)
+        after_styles += marks_on(block)
     source_keys = {b["key"] for b in (mine or {}).get("blocks", []) if b.get("key")}
+    file_blocks = keyed(mine) if mine else {}
 
     for key, block in live.items():
         theirs_text = text_of(block)
@@ -482,7 +521,7 @@ def _tab_findings(was: dict | None, now: dict, then: dict | None, said: str,
             continue
         out += _words_findings(key, block, base_block, new[key], after_words, said, tab)
         out += _style_findings(key, block, base_block, after_styles, new[key],
-                               after_words, said, tab, theme)
+                               after_words, said, tab, theme, file_blocks.get(key))
         out += _inherited_findings(key, block, new[key], (mine or {}), said, tab, theme)
         if block.get("kind") == "table":
             out += _cell_findings(key, block, base_block, new[key], after_words, said, tab)
@@ -598,21 +637,28 @@ def _picture_findings(now: dict, mine: dict | None, then: dict | None,
     Paired by name (`pair_images`), because a picture may keep its object id or keep
     its file and need not keep both. A picture the *source* itself took out of the
     file is meant to go — but only when the file has that tab at all: where it does
-    not, the whole tab is the reader's and everything in it has to survive. Whether
-    the file holds it is asked of its telling names too: a uri two pictures share
-    would have the one the source kept excusing the one it dropped.
+    not, the whole tab is the reader's and everything in it has to survive.
+
+    What the file asks for is claimed one for one as well (`pair_images` again), and
+    counted rather than matched picture by picture: two copies of one file are told
+    apart by their object ids, which the survivor may not keep, so *which* of them
+    survived and *which* the file still asks for can land on different copies and
+    mean nothing. The document has to keep as many as the file still asks for; a
+    source that adds a second copy and then drops the first left the file holding
+    that name, and matching by name alone accused the copy that went (fresh seed
+    980193, chain 6).
     """
     out: list[dict] = []
     held = images_of(now)
     hits = pair_images(held, images_of(then))
     telling = telling_names(held)
-    theirs = [image_names(run) for run in images_of(mine)] if mine is not None else None
-    for i, run in enumerate(held):
-        if hits[i] is not None:
-            continue
+    left = [i for i in range(len(held)) if hits[i] is None]
+    if mine is not None:
+        asked = pair_images(held, images_of(mine))
+        left = left[:max(0, len(left) - sum(1 for at in asked if at is None))]
+    for i in left:
+        run = held[i]
         names = telling[i] or image_names(run)
-        if theirs is not None and not any(names & one for one in theirs):
-            continue
         if _named(said, *(value for _, value in names)):
             continue
         out.append(finding("frozen_gone", "loss",
@@ -657,7 +703,7 @@ def _words_findings(key, block, base_block, after_block, after_words, said, tab)
 
 
 def _style_findings(key, block, base_block, after_styles, after_block, after_words,
-                    said, tab, theme=None):
+                    said, tab, theme=None, file_block=None):
     """Styling the reader put on words that are still there — or took off them.
 
     Taking a mark off is as much a choice as putting one on, and the only way to
@@ -680,17 +726,29 @@ def _style_findings(key, block, base_block, after_styles, after_block, after_wor
     seed 40254). The mark must also really be on in the end: a block that stopped
     being a heading took the bold off every word of it, which is `theme_undone`'s
     question and not this one.
+
+    One unmarking is not the reader's news: one the *base* already records, on a word
+    the file itself now marks. The reader pressed Ctrl+B a sync ago, the settle wrote
+    that into the file and the base, and the source has since asked for the mark on
+    that very word — a source restyle of a block the document has not restyled since,
+    which the merge's own rule gives to the source. `marks_on` without the theme,
+    because what excuses it is the file *saying* the mark: a file that says nothing
+    there (a block the source merely moved, written again from nothing) leaves the
+    finding exactly where it was (fresh seed 970228, chain 6).
     """
-    theirs = styles_of(block)
-    was = styles_of(base_block) if base_block else Counter()
+    theirs = marks_on(block)
+    was = marks_on(base_block) if base_block else Counter()
     lost = Counter({m: n for m, n in ((theirs - was) - after_styles).items()
                     if after_words.get(m[1])})
     if lost and not _named(said, key):
-        marks, word = next(iter(lost))
+        mark, word = next(iter(lost))
         return [finding("styling_lost", "loss",
-                        f"the block {key} lost the {'/'.join(marks)} the reader put on "
+                        f"the block {key} lost the {mark} the reader put on "
                         f"{word!r}", tab=tab, key=key)]
-    undone = unmarked_of(block, theme) - unmarked_of(after_block, theme)
+    agreed = unmarked_of(base_block, theme) if base_block else Counter()
+    asked = marks_on(file_block) if file_block else Counter()
+    undone = (unmarked_of(block, theme) - unmarked_of(after_block, theme)
+              - (agreed & asked))
     back = Counter({m: n for m, n in (undone & marks_on(after_block, theme)).items()
                     if after_words.get(m[1])})
     if back and not _named(said, key):

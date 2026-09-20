@@ -1480,6 +1480,38 @@ keys, named ranges), `doc_merge.py` (pure planning), `doc_sync.py` (the commands
   `.1`, which the base has not - but its only word is the base's, and the source rewriting that
   `1` takes the stop with it (seed 500249; `_dressed_up`, exact like `_pared_down` and asking
   besides that the base word be gone from the tab).
+  **Deeper again, at fresh seeds** (800 rounds at chain 6 from 970000, 600 from 980000): seven
+  findings, three the merge's and four the oracle's, and the merge's three are one wound seen
+  from three sides - **the one a reader makes**. A table is anchored in its first cell, so a
+  person who deletes its first row in the browser takes its named range with them; every other
+  repair in `doc_merge` is for a range one of *our own* writes destroyed and nothing was looking
+  at this one, so the merge read the key the file and the base both name as a table the reader
+  had deleted and the source's edit to a row they had kept went nowhere (`recover_tables`, only
+  where nothing is in doubt: `TABLE_MATCH`, `TABLE_MARGIN` clear on both sides, and asking the
+  **words** - `_match_text`'s " | " between every cell is most of a small table's characters, so
+  a blank 2x2 `insertTable` had just built scored 0.55 against one with four words in it and
+  took its key). `insertTable` splits the paragraph it goes into and the range stays with the
+  half *after* the table, so a new table goes in front of the block the plan anchored it on, and
+  `anchor_tables` looking only forward handed the beheaded next table's identity to the one the
+  batch had built (seed 970567; it looks backwards afterwards). And a tab the source deleted and
+  the document changed is kept, which is a note and no pair at all (`pair_tabs`), so nothing
+  plans it and the settle had no planned blocks to adopt from: the beheaded table there settled
+  under its surviving first word, file, base and document agreeing on an identity the file never
+  gave it (seeds 970705, 970711; `settle_keys` asks the base too and `name_requests` plants the
+  range back, so the repair reaches the document and not only the plan). Four false alarms, the
+  first made by that fix - a table the reader beheaded reads as one the reader *made*, so the
+  source's own cell edit read as a loss (`_tab_findings` asks `recover_tables` first) - and
+  three in the styling: an un-bolding the **base** already records, on a word the file itself now
+  marks, is a source restyle the merge's own rule gives to the source (970228); a word is what a
+  reader sees and not what a run holds, so the coloured token `\xadvellum` coming apart into
+  `\xad` and `vellum` when the merge wrote the source's strike around the reader's typed word was
+  no loss (970528, `_under_words`: a word wears what every character of it wears); and styling
+  counted in whole *sets* of marks made the source's strike hide the reader's colour, so it is
+  one mark at a time now. The fourth: two copies of one picture with one dropped by the source -
+  which survived and which the file asks for are told apart by object ids the survivor need not
+  keep, so name-matching put the two roles on different copies and named the one that went; the
+  question is how **many** the file asks for, not which (980193). Clean afterwards at 970000 and
+  at three fresh seeds (600 at chain 6, 400 at chain 8, 900 at chain 4) under `--strict`.
 - Live suite (opt-in, marker `docs`, ~5 min): `python -m pytest -m docs tests/test_docs_live.py`
   pushes a document per test, edits both sides, syncs, checks a second sync writes nothing, and
   deletes the document. Offline: `tests/test_doc_ir.py`, `test_doc_merge.py`, `test_doc_sync.py`.

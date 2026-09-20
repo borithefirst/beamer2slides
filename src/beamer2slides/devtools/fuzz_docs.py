@@ -272,7 +272,7 @@ def settle(world: doc_world.World, ours: dict, base: dict, planned: dict) -> dic
     read be the new file and the new base."""
     live = doc_world.read_ir(world, ours, base)
     tidy = []
-    doc_merge.settle_keys(live, planned)
+    doc_merge.settle_keys(live, planned, base)
     for part in doc_ir.parts(live):
         stamp = None if part is live else part.get("tab")
         tidy += doc_merge.on_tab(doc_merge.tidy_requests(part), stamp)
