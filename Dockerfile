@@ -2,6 +2,7 @@
 #   docker build -t beamer2slides-playground .
 #   docker run --rm -p 7860:7860 beamer2slides-playground
 # Works as is as a Hugging Face Docker Space (port 7860, user 1000) and on any container host.
+# Google Cloud Run sets $PORT instead, which the command below follows.
 FROM python:3.12-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -25,4 +26,4 @@ USER player
 ENV B2S_PLAYGROUND_ROOT=/app B2S_PLAYGROUND_JOBS=/tmp/b2s-playground \
     openin_any=p openout_any=p PYTHONUNBUFFERED=1
 EXPOSE 7860
-CMD ["python", "-m", "beamer2slides", "playground", "--host", "0.0.0.0", "--port", "7860"]
+CMD exec python -m beamer2slides playground --host 0.0.0.0 --port "${PORT:-7860}"

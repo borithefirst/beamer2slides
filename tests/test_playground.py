@@ -21,6 +21,7 @@ def base(tmp_path_factory):
     mp = pytest.MonkeyPatch()
     mp.setenv("B2S_PLAYGROUND_JOBS", str(jobs))
     mp.delenv("B2S_PLAYGROUND_GOOGLE", raising=False)
+    mp.delenv("B2S_PLAYGROUND_GOOGLE_CLIENT_ID", raising=False)
     httpd = server.ThreadingHTTPServer(("127.0.0.1", 0), server.Handler)
     port = httpd.server_address[1]
     stale = jobs / str(port) / "0123456789ab"      # a job folder left by an earlier run on this port
@@ -57,11 +58,26 @@ def finished(base, jid):
 
 def test_config_says_what_the_server_can_do(base):
     status, config = call(f"{base}/api/config")
-    assert status == 200 and config["google"] is False
+    assert status == 200 and config["google"] is None      # no token, no client: no deck button
     assert "demo" in [e["name"] for e in config["examples"]]
     status, tex = call(f"{base}/api/example/demo.tex")
     assert status == 200 and b"\\begin{document}" in tex
     assert call(f"{base}/api/example/nothing.tex")[0] == 404
+
+
+@pytest.mark.skipif(not PDF.exists(), reason="no test PDFs built")
+def test_a_host_with_no_token_of_its_own_asks_the_visitor_to_sign_in(base, monkeypatch):
+    """A public host converts into the visitor's Drive, never its own: no token, no deck."""
+    monkeypatch.setenv("B2S_PLAYGROUND_GOOGLE_CLIENT_ID", "1234.apps.googleusercontent.com")
+    status, config = call(f"{base}/api/config")
+    assert config["google"] == "signin" and config["google_client_id"] == "1234.apps.googleusercontent.com"
+    # drive.file alone reaches the files the deck is made of, and needs no Google review.
+    assert config["google_scopes"] == "https://www.googleapis.com/auth/drive.file"
+    status, made = call(f"{base}/api/jobs", PDF.read_bytes(), "application/pdf")
+    job = finished(base, made["id"])
+    assert job["state"] == "done", job["error"]
+    status, answer = call(f"{base}/api/jobs/{made['id']}/slides", b"{}")
+    assert status == 401 and "sign in" in answer["error"]
 
 
 @pytest.mark.skipif(not PDF.exists(), reason="no test PDFs built")

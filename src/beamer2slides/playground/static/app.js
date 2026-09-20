@@ -8,6 +8,15 @@ const FONTS = { sans: "Lato, sans-serif", serif: "'PT Serif', serif", mono: "'Ro
 
 let config = null, job = null, deck = null, current = 0, mode = "rebuilt";
 
+// Google's sign-in script, and only where the host asked for visitors to sign in.
+function loadScript(src) {
+  return new Promise(resolve => {
+    const s = document.createElement("script");
+    s.src = src; s.async = true; s.onload = resolve; s.onerror = resolve;
+    document.head.append(s);
+  });
+}
+
 async function api(path, opts) {
   const r = await fetch(path, opts);
   const body = r.headers.get("Content-Type")?.startsWith("application/json") ? await r.json() : await r.text();
@@ -30,6 +39,7 @@ async function init() {
     $("#go").textContent = "Convert the example's PDF";
   }
   if (!config.google) $("li[data-s=emit] b").textContent = "recorded";
+  if (config.google === "signin") await loadScript("https://accounts.google.com/gsi/client");
   $("#go").onclick = () => config.engines.length ? runTex() : runExamplePdf();
   $("#pdf").onchange = e => e.target.files[0] && runPdf(e.target.files[0]);
   $("#toslides").onclick = toSlides;
@@ -120,7 +130,11 @@ async function show(j) {
   }));
   $("#legend").innerHTML = Object.entries(KINDS).map(([k, v]) => `<span><i style="background:var(${v})"></i>${k}</span>`).join("");
   $("#toslides").hidden = !config.google;
-  $("#slidesnote").innerHTML = j.slides_url ? link(j.slides_url) : config.google ? "" :
+  $("#toslides").textContent = config.google === "signin"
+    ? "Sign in with Google and create the deck" : "Create the Google Slides deck";
+  $("#slidesnote").innerHTML = j.slides_url ? link(j.slides_url) :
+    config.google === "signin" ? "The deck is created in your own Drive, and nothing else there is read." :
+    config.google ? "" :
     "This server has no Google account: the <a href=\"#\" onclick=\"$('.tab[data-tab=gallery]').click();return false\">recorded runs</a> show the deck side.";
   $("#result").hidden = false;
   showSlide(Math.min(current, slides.length - 1));
@@ -344,11 +358,33 @@ function diagram(e) {
 
 // ---------------------------------------------------------------- Google, and the recorded runs
 
+// Where visitors sign in, the deck is built in the signer's own Drive: their access token is
+// asked for at the click, sent with that one request and kept nowhere (docs/playground.md).
+let tokenClient = null;
+
+function googleToken(again) {
+  return new Promise((resolve, reject) => {
+    if (!window.google?.accounts?.oauth2) return reject(new Error("Google's sign-in script did not load"));
+    tokenClient = tokenClient || google.accounts.oauth2.initTokenClient({
+      client_id: config.google_client_id, scope: config.google_scopes, callback: () => {} });
+    tokenClient.callback = r => r.error ? reject(new Error(r.error_description || r.error)) : resolve(r.access_token);
+    tokenClient.error_callback = e => reject(new Error(e.type === "popup_closed" ? "sign-in was closed" : e.type));
+    tokenClient.requestAccessToken({ prompt: again ? "consent" : "" });
+  });
+}
+
 async function toSlides() {
-  const b = $("#toslides");
-  b.disabled = true; $("#slidesnote").textContent = "building the deck (15-30 s)…";
-  try { $("#slidesnote").innerHTML = link((await api(`/api/jobs/${job.id}/slides`, { method: "POST" })).url); }
-  catch (e) { $("#slidesnote").textContent = e.message; }
+  const b = $("#toslides"), note = $("#slidesnote");
+  b.disabled = true;
+  try {
+    let body;
+    if (config.google === "signin") {
+      note.textContent = "waiting for the Google sign-in window…";
+      body = JSON.stringify({ access_token: await googleToken(false) });
+    }
+    note.textContent = "building the deck (15-30 s)…";
+    note.innerHTML = link((await api(`/api/jobs/${job.id}/slides`, { method: "POST", body })).url);
+  } catch (e) { note.textContent = e.message; }
   b.disabled = false;
 }
 

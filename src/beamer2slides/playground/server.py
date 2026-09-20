@@ -7,7 +7,8 @@ API (JSON unless said otherwise):
   GET  /api/jobs/<id>              state, log, timings and, once done, the slides
   GET  /api/jobs/<id>/source       the talk as it was sent
   GET  /api/jobs/<id>/files/<path> a file the job wrote (deck.json, backgrounds/, debug/, figures/, pages/)
-  POST /api/jobs/<id>/slides       convert the job into a Google Slides deck (only with Google enabled)
+  POST /api/jobs/<id>/slides       convert the job into a Google Slides deck (only with Google enabled;
+                                   where visitors sign in, {"access_token": ...} says whose Drive)
   GET  /media/<file>               the front page's pictures (docs/media), for the recorded runs
 
 Jobs run one at a time on a worker thread (the stages print, and pdflatex is heavy), at most
@@ -62,12 +63,30 @@ def tex_engines() -> list[str]:
     return [e for e in ("pdflatex", "lualatex", "xelatex") if shutil.which(e)]
 
 
-def google_enabled() -> bool:
-    """Only where someone asked for it: a public host must never convert into its owner's Drive."""
+# What the visitor's browser asks Google for. `drive.file` reaches only the files this app
+# itself creates, which is all the deck needs (it is imported as a .pptx and then edited), and
+# Google counts it as non-sensitive: a published app asking for it alone needs no review.
+WEB_SCOPES = ["https://www.googleapis.com/auth/drive.file"]
+
+
+def google_client_id() -> str:
+    """The OAuth *web* client of the host, for visitors signing in. A client id is not a secret."""
+    return os.environ.get("B2S_PLAYGROUND_GOOGLE_CLIENT_ID", "").strip()
+
+
+def google_mode() -> str | None:
+    """Whose Drive a deck would go into, or None where the button does not exist.
+
+    `local`: this machine's own token (`B2S_PLAYGROUND_GOOGLE=1`), for running the playground
+    at home. `signin`: the visitor's, by signing in with Google in their browser - the only
+    one a public host may use, since it must never convert into its owner's Drive.
+    """
+    if google_client_id():
+        return "signin"
     if os.environ.get("B2S_PLAYGROUND_GOOGLE") != "1":
-        return False
+        return None
     from ..google_auth import credential_file
-    return credential_file("B2S_TOKEN", "token.json").exists()
+    return "local" if credential_file("B2S_TOKEN", "token.json").exists() else None
 
 
 SAMPLES = [("demo", "examples/demo/demo.tex", "The demo talk: blocks, a table, a diagram, math, a figure"),
@@ -99,6 +118,7 @@ class Playground:
     def __init__(self, port: int):
         self.jobs: dict[str, Job] = {}
         self.lock = threading.Lock()
+        self.google_lock = threading.Lock()   # one Google conversion at a time (to_slides)
         self.queue: queue.Queue = queue.Queue()
         # One folder per port: the sweep below must not take the jobs of another server running beside this one.
         self.root = jobs_root() / str(port)
@@ -184,16 +204,29 @@ class Playground:
         page_pngs(pdf, deck, out / "pages")
         job.result = summary(deck, pages)
 
-    def to_slides(self, job: Job) -> str:
+    def to_slides(self, job: Job, token: str | None = None) -> str:
+        """Build the deck. `token`: a visitor's access token, which goes no further than this call.
+
+        `google_auth.use_provider` is process-wide, so one conversion runs at a time: two
+        visitors converting at once must never build a deck with the other one's credentials.
+        """
         from ..emit import emit
+        from ..google_auth import use_provider
+        from google.oauth2.credentials import Credentials
         out = job.dir / "out"
         deck = json.loads((out / "deck.json").read_text(encoding="utf-8"))
         source = next(job.dir.glob("*.pdf"))
+        creds = Credentials(token=token, scopes=WEB_SCOPES) if token else None
         buf = io.StringIO()
-        with contextlib.redirect_stdout(buf):
-            state = emit(deck, out, f"beamer2slides playground {job.id}", True, True, False, "none", source)
+        with self.google_lock:
+            with contextlib.ExitStack() as stack:
+                if creds is not None:
+                    stack.enter_context(use_provider(lambda: creds))
+                stack.enter_context(contextlib.redirect_stdout(buf))
+                state = emit(deck, out, f"beamer2slides playground {job.id}", True, True, False, "none", source)
         job.log += buf.getvalue()
-        job.slides_url = state["url"]
+        if token is None:                  # one machine, one Drive: the link belongs to the job
+            job.slides_url = state["url"]
         return state["url"]
 
 
@@ -312,7 +345,9 @@ class Handler(BaseHTTPRequestHandler):
         if path.startswith("/media/"):
             return self.file(MEDIA, path[len("/media/"):], cache=True)
         if path == "/api/config":
-            return self.json({"engines": tex_engines(), "google": google_enabled(), "max_pages": MAX_PAGES,
+            return self.json({"engines": tex_engines(), "google": google_mode(),
+                              "google_client_id": google_client_id(), "google_scopes": " ".join(WEB_SCOPES),
+                              "max_pages": MAX_PAGES,
                               "examples": [{"name": n, "about": a, "pdf": t.with_suffix(".pdf").is_file()}
                                            for n, (t, a) in examples().items()],
                               "gallery": [{"file": f, "caption": c} for f, c in GALLERY if (MEDIA / f).exists()]})
@@ -363,12 +398,26 @@ class Handler(BaseHTTPRequestHandler):
             job = self.app.jobs.get(m.group(1))
             if job is None or job.state != "done":
                 return self.json({"error": "no finished job by that id"}, 404)
-            if not google_enabled():
+            mode = google_mode()
+            if mode is None:
                 return self.json({"error": "this server does not convert into Google Slides"}, 403)
+            token = None
+            if mode == "signin":
+                try:
+                    token = json.loads(body or b"{}").get("access_token")
+                except ValueError:
+                    token = None
+                if not isinstance(token, str) or not token:
+                    return self.json({"error": "sign in with Google first"}, 401)
             try:
-                return self.json({"url": job.slides_url or self.app.to_slides(job)})
+                return self.json({"url": job.slides_url or self.app.to_slides(job, token)})
             except Exception as e:
-                return self.json({"error": f"{type(e).__name__}: {e}"}, 500)
+                # Never echo the token back, whatever the library put in the message.
+                message = f"{type(e).__name__}: {e}"
+                status = 401 if token and ("invalid_grant" in message or "UNAUTHENTICATED" in message
+                                           or "Invalid Credentials" in message) else 500
+                return self.json({"error": message.replace(token, "…") if token else message,
+                                  "signin": status == 401}, status)
         self.json({"error": "not found"}, 404)
 
 
@@ -376,7 +425,7 @@ def serve(host: str = "127.0.0.1", port: int = 7860) -> None:
     httpd = ThreadingHTTPServer((host, port), Handler)     # first: a port in use fails before any sweep
     Handler.app = Playground(port)
     print(f"beamer2slides playground on http://{host}:{port}/  (TeX: {', '.join(tex_engines()) or 'none'};"
-          f" Google Slides: {'on' if google_enabled() else 'off'}; jobs in {Handler.app.root})")
+          f" Google Slides: {google_mode() or 'off'}; jobs in {Handler.app.root})")
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:
