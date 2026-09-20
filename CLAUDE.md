@@ -112,9 +112,22 @@ a per-slide background picture.
   a page whose fonts no platform's font folder can answer: a font whose widths are all one number is
   FIXED_PITCH, which macOS answers with Courier New); GDI's TrueType
   substitutes (base 14 and installed names on Windows) draw through the TrueType port
-  (`render_text.truetype_face`, one shared face per program; `--pool installed`: 300 seeds, 251 drawn exact, 49 refused for fallback fonts). A font
+  (`render_text.truetype_face`, one shared face per program; `--pool installed`: 300 seeds drawn exact). A font
   with no descriptor has flags 0 (PDFium's m_Flags default), not nonsymbolic: a TrueType one then
   maps codes through the Mac cmap (subst seeds 18, 21, 29).
+  A code the font itself must not draw (`CPDF_Font::ShouldUseFont`) comes from the font's one
+  fallback face (`render_text.fallback_font` = FallbackFontFromCharcode: LoadSubstFace of Arial at
+  the descriptor's StemV × 5, the font's flags and italic angle; `fallback_glyph` = that face's
+  charmap on the code's first Unicode unit, 0 meaning none), and the char pos list is cut into runs
+  of one fallback position, one device call each, as CPDF_TextRenderer cuts it; the spacing
+  heuristic measures the face the char is drawn from with `CFX_Face::GetGlyphWidth`, whose EmAdjust
+  truncates where GetGlyphTTWidth rounds (`fonts.em_width`, a pixel on 2048-unit Arial). A cached
+  system face is an ObservedPtr, not a face for the life of the process: it is held by the documents
+  whose fonts took it and dropped when the last of them closes (`fontmapper.hold` / `release`,
+  `Document.close`), or the Mac charmap `CPDF_TrueTypeFont::LoadGlyphMap` leaves selected on the
+  shared Arial face decides the next document's fallback glyphs (subst torture seed 316 after 311;
+  PDFium renders both orders alike). 6,000 seeds exact, nothing refused for a fallback font; a
+  fallback for vertical writing (LoadSubstFace's IsVertWriting) still is.
 - No public links: pictures reach Slides inside the imported .pptx, never as shared Drive
   files (they break in protected Workspace domains).
 - **Fidelity is measured on Google's own renderer**, not a local preview: render the PDF page
