@@ -235,9 +235,11 @@ that differs from it) and written like everything else: with a value only when s
 chose one, `left` among them — a heading the theme centres and the reader pulled back to
 the margin is a choice, and is written as `START`.
 
-All of this rests on named-and-unset meaning "inherit", which is the API's documented rule
-and the one `MANAGED_PARAGRAPH` has relied on since it existed. The offline world cannot
-check it, since `doc_world` has no named styles to inherit from; the experiment that would
+Neither the loss oracle nor the convergence check could see that happen, which is why the
+offline world has learnt to inherit and the campaign now hunts it (§"Proving nothing is
+lost", `theme_undone`). But all of this rests on named-and-unset meaning "inherit", which
+is the API's documented rule and the one `MANAGED_PARAGRAPH` has relied on since it
+existed — a world that models the rule cannot confirm it. The experiment that would
 settle it is a themed heading through a live sync, which
 `tests/test_docs_live_styles.py::test_a_heading_the_theme_centres_survives_a_source_restyle`
 asks for and which has not been run.
@@ -904,6 +906,31 @@ therefore that the *clearing* `doc_merge.MANAGED` governs had never been exercis
 ops now draw from the whole dialect on both sides (`RUN_MARKS`, `PARA_MARKS`,
 `READER_FACES`, `READER_MEASURES`), which is the case that matters most: a reader
 chooses a face, and then the source restyles that block.
+
+**A defect the world cannot represent is a defect the fuzzing cannot find**, and the
+alignment loss above is the plainest case there has been. Nothing was deleted, no word
+moved, and the settle regenerates the file from the document it wrote, so the file then
+says exactly what the document says and the second sync writes nothing: the oracle was
+happy, the convergence check was happy, and the document's theme was gone. The world
+had no named styles at all, so it could not even hold the *question*. It has them now —
+`align` `None` means inherited rather than `START`, a `World.theme` maps a named style
+to what it says (no request ever changes one; the API has none), a read-back reports
+`alignment` only where it is set, as `documents.get` does, and
+`updateParagraphStyle` with the field named and no value puts a paragraph back to
+inheriting. The `themed` corpus shape is a document with a centred Heading 1 whose
+headings say nothing of their own, and `doc_loss_oracle._inherited_findings` asks, of
+every block that survived the sync, whether a field the theme sets for its named style
+has turned into one of its own that neither the reader nor the file asked for
+(`theme_undone`, severity `loss`).
+
+It has to be *told* what the theme sets — `fuzz_docs.theme_fields` passes it in — and
+that is the check's substance, not ceremony: asked about every property, the same
+question accused 14 of 120 rounds of Docs' own merge-on-delete rule, where a paragraph
+really does take the style of the one deleted in front of it. With the fix reverted in
+memory, the campaign catches 6 of the first 40 `themed` seeds at chain 2, which is
+`test_the_campaign_sees_a_theme_undone`; without it, none. Inheritance itself is still
+Google's word and not something any offline world can settle — that is what the live
+experiment in `tests/test_docs_live_styles.py` is for.
 
 The campaign found ten defects, each pinned by a test in `tests/test_doc_fuzz.py` —
 `xfail(strict=True)` while it stands, a plain test once it is fixed — and the ones

@@ -97,7 +97,10 @@ def mark(style: dict | None = None, para: dict | None = None) -> dict:
 def plain() -> dict:
     # `measures` holds the six properties of `doc_merge.PARAGRAPH_FIELDS` by their
     # IR key, absent meaning inherited rather than zero (`doc_ir._paragraph_measures`).
-    return {"named": "NORMAL_TEXT", "align": "START", "bullet": None, "measures": {}}
+    # `align` is None when the paragraph sets none of its own, which is not the same
+    # as START: it is whatever the document's named style says, and saying it out loud
+    # is the only way this world can hold a theme (`THEME`).
+    return {"named": "NORMAL_TEXT", "align": None, "bullet": None, "measures": {}}
 
 
 def obj(kind: str, **fields) -> dict:
@@ -260,6 +263,12 @@ class World:
     def __init__(self, title: str = "doc"):
         self.title = title
         self.tabs: list[Tab] = [Tab("t.0")]
+        # The document's theme: `namedStyleType` -> what that style says, which is
+        # what a paragraph setting nothing of its own shows. No request can write one
+        # (there is none in the API), so nothing here ever changes it — it is here so
+        # that a paragraph *inheriting* a property can be represented at all, which is
+        # the one thing a document's look is made of. Empty for most corpus shapes.
+        self.theme: dict[str, dict] = {}
         self.revision = 1
         # A plain counter, not itertools.count: a world is deep-copied all the time (the
         # campaign tries a second sync on a copy), and copying an iterator is deprecated.
@@ -313,8 +322,12 @@ class World:
                                                      "endIndex": ranged["end"]}]})
         lists = {lid: {"listProperties": {"nestingLevels": _levels(info)}}
                  for lid, info in t.lists.items()}
-        return {"body": {"content": content}, "lists": lists, "inlineObjects": objects,
-                "namedRanges": named}
+        out = {"body": {"content": content}, "lists": lists, "inlineObjects": objects,
+               "namedRanges": named}
+        if self.theme:
+            out["namedStyles"] = {"styles": [
+                {"namedStyleType": name} | dict(style) for name, style in self.theme.items()]}
+        return out
 
     def latex(self) -> dict[tuple, str]:
         """Every equation's LaTeX, by (tab, start) — what `doc_ir.latex_of` digs out of
@@ -458,9 +471,9 @@ class World:
             if "namedStyleType" in fields and style.get("namedStyleType"):
                 para["named"] = style["namedStyleType"]
             if "alignment" in fields:
-                # Named with no value: back to what the paragraph inherits. This
-                # world has no named styles, so that is Docs' own START.
-                para["align"] = style.get("alignment") or "START"
+                # Named with no value: back to what the paragraph inherits, which is
+                # None here — not START. The difference is the whole of a theme.
+                para["align"] = style.get("alignment")
             # A field the merge names without a value means "back to the default"
             # (`doc_merge.paragraph_style`), which is how a property the source
             # dropped goes away. Naming it and not applying that would make the
@@ -821,11 +834,15 @@ def _paragraph_json(run: list[dict], start: int, objects: dict) -> dict:
         at += 1
     flush(at)
     para = run[-1]["p"] if run and run[-1]["k"] == "m" else plain()
+    # A paragraph reports what is set on it, never what it inherits: no `alignment`
+    # key at all when it sets none, which is how Docs answers and what lets the
+    # reader subtract the named style (`doc_ir._named_defaults`).
+    para_style = {"namedStyleType": para["named"]}
+    if para.get("align"):
+        para_style["alignment"] = para["align"]
     out = {"startIndex": start, "endIndex": at,
-           "paragraph": {"elements": elements,
-                         "paragraphStyle": {"namedStyleType": para["named"],
-                                            "alignment": para["align"]}
-                         | _api_measures(para.get("measures") or {})}}
+           "paragraph": {"elements": elements, "paragraphStyle":
+                         para_style | _api_measures(para.get("measures") or {})}}
     if para.get("bullet"):
         out["paragraph"]["bullet"] = {"listId": para["bullet"]["list"],
                                       "nestingLevel": para["bullet"]["level"]}

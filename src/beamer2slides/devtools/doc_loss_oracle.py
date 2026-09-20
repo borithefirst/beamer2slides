@@ -289,10 +289,16 @@ def _named(said: str, *what) -> bool:
 # ---------------------------------------------------------------- the checks
 
 def check(base: dict, before: dict, after: dict, report: dict,
-          ours: dict | None = None, allow=()) -> list[dict]:
+          ours: dict | None = None, allow=(), theme: dict | None = None) -> list[dict]:
     """Judge one sync. `before` is the document as the reader left it, `after` the
     settled read, `base` what both sides last agreed on, `ours` the file that was
-    synced. `allow` names kinds to keep out of the verdict."""
+    synced. `allow` names kinds to keep out of the verdict.
+
+    `theme` is what the document's named styles say, as
+    `{namedStyleType: {the IR fields that style sets}}`. Given it, the verdict also
+    covers what a theme is made of — a paragraph wearing a named style and made to
+    stop (`_inherited_findings`). Nothing in a `documents.get` answer says a
+    paragraph inherits, only that it sets nothing, so the caller has to say."""
     said = accounted(report)
     out: list[dict] = []
     was, now, then = parts_by_tab(base), parts_by_tab(before), parts_by_tab(after)
@@ -313,12 +319,12 @@ def check(base: dict, before: dict, after: dict, report: dict,
                                    f"more and the report does not say why", tab=tab))
             continue
         out += _tab_findings(was.get(tab), part, then.get(tab), said, tab,
-                             doc_ir.tab_part(ours, tab) if tab else ours)
+                             doc_ir.tab_part(ours, tab) if tab else ours, theme)
     return [f for f in out if f["kind"] not in allow]
 
 
 def _tab_findings(was: dict | None, now: dict, then: dict | None, said: str,
-                  tab, mine: dict | None) -> list[dict]:
+                  tab, mine: dict | None, theme: dict | None = None) -> list[dict]:
     out: list[dict] = []
     old, new = keyed(was), keyed(then)
     live = keyed(now)
@@ -366,6 +372,7 @@ def _tab_findings(was: dict | None, now: dict, then: dict | None, said: str,
             continue
         out += _words_findings(key, block, base_block, new[key], after_words, said, tab)
         out += _style_findings(key, block, base_block, after_styles, after_words, said, tab)
+        out += _inherited_findings(key, block, new[key], (mine or {}), said, tab, theme)
         if block.get("kind") == "table":
             out += _cell_findings(key, block, base_block, new[key], after_words, said, tab)
 
@@ -408,6 +415,46 @@ def _tab_findings(was: dict | None, now: dict, then: dict | None, said: str,
     out += _picture_findings(now, mine, then, said, tab)
     out += _order_findings(was, now, then, said, tab)
     return out
+
+
+def _inherited_findings(key, block, after_block, mine: dict, said: str, tab,
+                        theme: dict | None) -> list[dict]:
+    """A paragraph that wore the document's named style and stopped.
+
+    A document's look lives in its named styles, and a paragraph that sets nothing of
+    its own wears them. Write a value onto such a paragraph and it stops wearing them
+    — for good, and invisibly: the file is regenerated from the document afterwards,
+    so it now says what was written, the next sync writes nothing, and the convergence
+    check is perfectly happy with a document whose theme is gone. Nothing else here
+    can see it, because nothing was deleted and no word moved.
+
+    So: a property the theme sets for this paragraph's named style, that the paragraph
+    did not have before, has after, and the file never asked for. The merge does not
+    invent one, which is what makes this a defect rather than a judgement call —
+    `doc_merge.paragraph_style` gave `alignment` a value always until it was found
+    this way.
+
+    `theme` is `{namedStyleType: {the IR fields that style sets}}` and is the whole of
+    what makes this check safe to run. Without it the same question fires on Docs' own
+    merge-on-delete rule, where a paragraph really does take the style of the one
+    deleted in front of it: that is the document's doing, not ours.
+    """
+    named = doc_merge.named_style(block) if block.get("kind") != "table" else None
+    fields = (theme or {}).get(named) or ()
+    if not fields:
+        return []
+    mine_block = next((b for b in mine.get("blocks", []) if b.get("key") == key), None)
+    out = []
+    for field in fields:
+        now, then = block.get(field), after_block.get(field)
+        if then is None or then == now or (mine_block or {}).get(field) == then:
+            continue
+        out.append(finding(
+            "theme_undone", "loss",
+            f"the block {key} inherited its {field} and now says {then!r} of its own, "
+            f"which neither the reader nor the file asked for: it has stopped following "
+            f"the document's named style", tab=tab, key=key))
+    return [f for f in out if not _named(said, key)]
 
 
 def _source_dropped(block: dict, was: dict | None, mine: dict | None) -> bool:
