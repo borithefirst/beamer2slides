@@ -595,8 +595,21 @@ deck's look once and its slides in a vocabulary: a `slides.sty` beside main.tex 
 named `\slidestyle` styles and colour names), the deck's masters and layouts recovered as a
 `beamertheme<Deck>.sty` (`adopt_theme.py`: a background template per layout, frames naming theirs and
 carrying a real `\frametitle`), and Slides lists as `itemize`/`enumerate` with each level set once
-(`\setslidelist`). Measured over the corpus: 0.130 -> 0.490 with every slide's fidelity unchanged
-(sources people wrote score 0.6-1.0); shape coordinates are what is left.
+(`\setslidelist`), every frame carrying `label=` (a slug of the slide's objectId: the one identity
+sync can follow, and adopt-shaped fuzz says nothing else recovers these decks) and every font face
+named, so a style the deck calls bold comes out bold (`devtools/bold_torture.py` probes what a deck
+draws: 63 of 267 (family, style) pairs drew no emphasis, now 6, none of them asked for by deck text).
+Measured over the corpus: 0.128 -> 0.438 on the scorer as it stands (it was tightened on the way:
+repetition inside a frame is charged and the recovered theme counted with the frames), with every
+slide's fidelity unchanged; sources people wrote score 0.6-1.0, and shape coordinates are what is
+left (28% of frame body lines, 30k numbers).
+**Does an edited source still stand up?** (`devtools/edit_robustness.py`, `sample`/`run`/`report`):
+the same nine edits - reword longer/shorter, restyle, retitle, move a box, add or delete an item, a
+paragraph, a table row - applied to the same slide in two forms, compiled, and judged by whether the
+page changed, the words landed, and nothing spilled out of the room the edit is allowed. Both forms
+hold 123 of 143; the edit costs 2.1 source lines in the absolute form and 1.2 in this one (a table
+row 19.8 -> 1.0). The 20 that fail are reword-longer with no slack in the box, which is what a
+foreign deck's absolute geometry is.
 Linked charts are their `contentUrl` picture, videos their poster frame (YouTube `hqdefault`,
 letterbox cut; Drive: a play panel) inside an `\href`, WordArt its `renderedText` in a `\resizebox*`;
 a page beamer has no ratio for is written with `\geometry{papersize}`; fonts the machine lacks are
@@ -628,7 +641,7 @@ thumbnails (read-only), `run [decks] --jobs N --tag T` bootstraps, compiles and 
 source tree, IR and scorer (`--no-cache`); `report --tag T`; `losses --tag T` charges each lost pixel
 to the smallest element box holding it and ranks elements, decks, kinds and fonts. Fills, pictures,
 freeforms, pies and video posters the API does not give are read off the slide thumbnails
-(`deck_fills.py`, `deck_freeforms.py`, `deck_thumbs.py`: rows, cell and text insets, stand-in widths, weights). Now (`m6-a`, 912 slides): boxes 0.973, page 0.971, pixels 0.985, mean per deck 0.956.
+(`deck_fills.py`, `deck_freeforms.py`, `deck_thumbs.py`: rows, cell and text insets, stand-in widths, weights). Now (`fl-a`, 912 slides): boxes 0.973, page 0.971, pixels 0.984, mean per deck 0.956.
 
 Opt-in suite (real Google Slides, ~95 s): `python -m pytest -m slides` (the default run deselects
 the `slides` marker, pyproject.toml). It converts the stress decks (19–22, 25, 13, demo) 3 at a

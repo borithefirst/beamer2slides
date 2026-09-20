@@ -1517,3 +1517,23 @@ face of a collection keeps its `FontIndex` in every style; a bold run in a famil
 out of `bootstrap` with a source that says bold; and a babel language font names every style too.
 `tests/test_adopt.py`'s two font tests and `test_adopt_media.py` / `test_adopt_scripts.py` pin the
 exact declarations the writers now produce.
+
+## The combined tree, verified (fl-a)
+
+Three lanes landed together - labels on every adopted frame, the scorer charging repetition inside a
+frame, and every font face named - so the tree was benched once more from cold (29 decks, 912
+slides, 0 cached): **boxes 0.9728, page 0.9714, pixels 0.9844, deck mean 0.9557**. Against `ls-a`
+exactly three decks move, all of them fonts, and no others by a pixel:
+
+| deck | before | after | why |
+|---|---|---|---|
+| sc-aesthetic-school | 0.9960 | 0.9961 | a style the deck calls bold now draws bold |
+| sc-functions | 0.9853 | 0.9854 | the same |
+| drawing-workshop | 0.9898 | 0.9893 | `wordart_block`s `\bfseries` stand-in, which had never drawn; an honest loss |
+
+Readability is unmoved at **0.438** (lines 0.41, numbers 0.11, plumbing 0.53, bloat 0.56, author
+0.86, repeat 0.91), which is the point: labels and font declarations go in the preamble, not into
+the frames. `numbers` is now the weakest component by a factor of four, and shapes are where the
+numbers are - 5,515 shape lines over 26 decks carrying 30,574 of them, 28% of all frame body lines,
+with `\sliderect[fill=white,fill opacity=#]{#,#,#,#}` said 785 times and `\sliderect[fill=black]`
+756 times. That is the next lane.
