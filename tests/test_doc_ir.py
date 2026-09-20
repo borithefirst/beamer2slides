@@ -479,7 +479,11 @@ DRESSED = {
              {"text": "Roboto Mono", "font": "Roboto Mono", "fontsize": 9},
              {"text": ", "},
              {"text": "Small Caps", "smallcaps": True},
-             {"text": " and "},
+             {"text": ", x"},
+             {"text": "2", "script": "super"},
+             {"text": " and H"},
+             {"text": "2", "script": "sub"},
+             {"text": "O and "},
              {"text": "big and bold", "font": "Comic Sans MS", "fontsize": 18, "bold": True},
              {"text": "."}]},
         {"kind": "item", "level": 0, "ordered": False, "line_spacing": 2.0,
@@ -542,6 +546,43 @@ def test_small_caps_travels_as_an_attribute_because_no_css_carries_it():
     html = doc_ir.to_html(DRESSED)
     assert '<span data-smallcaps="1">Small Caps</span>' in html
     assert "font-variant" not in html
+
+
+def test_a_raised_or_lowered_run_travels_as_sup_and_sub():
+    """`baselineOffset` is content, not decoration — the 2 of x² — and HTML has had
+    the two tags for it since the beginning, so the file says them."""
+    html = doc_ir.to_html(DRESSED)
+    assert "<sup>2</sup>" in html and "<sub>2</sub>" in html
+    runs = doc_ir.from_html(html)["blocks"][0]["runs"]
+    assert [r["text"] for r in runs if r.get("script")] == ["2", "2"]
+    assert [r["script"] for r in runs if r.get("script")] == ["super", "sub"]
+
+
+def test_a_run_a_raising_named_style_puts_back_on_the_baseline_says_so():
+    """The `data-off` reasoning, one value wider: a theme could raise a whole named
+    style, and a reader who puts one word back on the baseline must be able to say it
+    — "none" is a third value, not the absence of the other two. Saying nothing would
+    leave the source's next restyle, which names `baselineOffset` with no value, to
+    undo the reader's choice."""
+    raised = {"namedStyles": {"styles": [
+        {"namedStyleType": "NORMAL_TEXT",
+         "textStyle": {"baselineOffset": "SUPERSCRIPT"}, "paragraphStyle": {}}]},
+        "body": {"content": [{"startIndex": 1, "endIndex": 10, "paragraph": {
+            "paragraphStyle": {"namedStyleType": "NORMAL_TEXT"},
+            "elements": [
+                {"startIndex": 1, "endIndex": 5, "textRun": {
+                    "content": "up  ", "textStyle": {"baselineOffset": "SUPERSCRIPT"}}},
+                {"startIndex": 5, "endIndex": 10, "textRun": {
+                    "content": "down\n", "textStyle": {"baselineOffset": "NONE"}}}]}}]}}
+    runs = doc_ir.from_document(raised)["blocks"][0]["runs"]
+    # A run that says it is raised says so whether or not the theme raises it too —
+    # a mark is carried the same way, and only the *refusal* needs the named style to
+    # be read at all. The file has an attribute for what no tag can spell.
+    assert [r.get("script") for r in runs] == ["super", "none"]
+    html = doc_ir.to_html(doc_ir.key_blocks(doc_ir.from_document(raised)))
+    assert 'data-script="none"' in html
+    assert [r.get("script") for r in doc_ir.from_html(html)["blocks"][0]["runs"]] == \
+        ["super", "none"]
 
 
 def test_the_indents_and_the_line_height_are_css_the_importer_keeps():
@@ -688,8 +729,11 @@ UNMODELLED = {
     # Page-level structure, which has no place in the file at all.
     "documentStyle", "headers", "footnotes", "positionedObjects",
     "structural.sectionBreak", "structural.paragraph.paragraphStyle.pageBreakBefore",
-    # Run and paragraph properties the dialect has no spelling for.
-    "element.textRun.textStyle.baselineOffset",
+    # Paragraph properties the dialect has no spelling for. No *run* property is
+    # here any more: `baselineOffset` was the last field of `TextStyle` the dialect
+    # could not say, and `<sup>`/`<sub>` say it, so the reader now carries the whole
+    # of a run's styling. The fixture still puts one on, which is what makes this a
+    # test and not a tautology — a field Docs adds to TextStyle later fails here.
     "structural.paragraph.paragraphStyle.borderLeft",
     "structural.paragraph.paragraphStyle.direction",
     "structural.paragraph.paragraphStyle.keepWithNext",
@@ -718,8 +762,8 @@ def test_what_the_reader_never_reads_is_named_one_by_one():
     what the IR never looked at; this is the walker that says it."""
     found = doc_ir.unmodelled(UNMODELLED_LIVE)
     assert set(found) == UNMODELLED
-    assert found["element.textRun.textStyle.baselineOffset"] == {
-        "count": 1, "example": "SUPERSCRIPT"}
+    assert found["structural.paragraph.paragraphStyle.keepWithNext"] == {
+        "count": 1, "example": "True"}
     assert found["nestingLevel.startNumber"]["example"] == "7"
     assert list(found) == sorted(found)
 
@@ -752,7 +796,6 @@ def test_what_a_rewrite_of_one_block_would_drop_is_named_block_by_block():
                                        "tableCell.tableCellStyle"}
     assert risky[0]["words"] == "one two"
     assert set(risky[0]["unread"]) == {
-        "element.textRun.textStyle.baselineOffset",
         "structural.paragraph.paragraphStyle.borderLeft",
         "structural.paragraph.paragraphStyle.direction",
         "structural.paragraph.paragraphStyle.keepWithNext",

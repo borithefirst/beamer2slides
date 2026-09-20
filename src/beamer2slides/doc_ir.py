@@ -36,6 +36,13 @@ MARKS = {"bold": "b", "italic": "i", "underline": "u", "strike": "s", "code": "c
 # the source restyled the block (`_style_of`, `data-off`).
 MARK_FIELDS = (("bold", "bold"), ("italic", "italic"), ("underline", "underline"),
                ("strike", "strikethrough"), ("smallcaps", "smallCaps"))
+# A run raised or lowered from the baseline. Not a mark, because it is not a flag:
+# `baselineOffset` is one of NONE / SUPERSCRIPT / SUBSCRIPT, so the run says which,
+# and "none" is the third value rather than the absence of the other two — a theme
+# could raise a whole named style, and a reader who puts one word back on the
+# baseline must be able to say so (the `data-off` reasoning, one value wider).
+SCRIPTS = {"SUPERSCRIPT": "super", "SUBSCRIPT": "sub", "NONE": "none"}
+SCRIPT_TAGS = {"super": "sup", "sub": "sub"}
 # What `<code>` has always meant on the write side, and goes on meaning.
 CODE_FAMILY = "Courier New"
 # A named style is a block kind; everything else is a paragraph.
@@ -126,6 +133,15 @@ def _style_of(text_style: dict, default: dict | None = None) -> dict:
             # which is "back to what you inherit": the reader's choice would be
             # undone by a source edit that never mentioned it.
             style[key] = False
+    script = SCRIPTS.get(text_style.get("baselineOffset", ""))
+    if script == "none":
+        # Said out loud only against a named style that raises the run, exactly as a
+        # mark is said off: everywhere else NONE is what a run with nothing on it
+        # falls back to, and writing `<span data-script="none">` around every word of
+        # an ordinary paragraph is the wall of spans this is all about avoiding.
+        script = "none" if default.get("script") else None
+    if script:
+        style["script"] = script
     family = text_style.get("weightedFontFamily", {}).get("fontFamily")
     if family and family != default.get("font"):
         style["font"] = family
@@ -484,6 +500,11 @@ def _named_defaults(doc: dict, tab_id: str | None) -> dict:
             # theme's bold is written bold, which costs the file a `<b>` and keeps it
             # readable on its own.
             "marks": {key for key, api in MARK_FIELDS if text.get(api)},
+            # Whether this style *raises* its runs, for the same reason. A style that
+            # says NONE says what every run falls back to anyway, so it is no default
+            # to tell a run apart from.
+            "script": SCRIPTS.get(text.get("baselineOffset", "")) if
+            text.get("baselineOffset") in ("SUPERSCRIPT", "SUBSCRIPT") else None,
             "font": text.get("weightedFontFamily", {}).get("fontFamily"),
             "fontsize": round(float(size), 2) if size else None,
             # A theme that centres its headings says so here, and the heading itself
@@ -866,6 +887,11 @@ def _run_html(run: dict) -> str:
         # among the things `updateTextStyle` writes — so the file says it in an
         # attribute of ours and `doc_merge` writes it with `batchUpdate`.
         attrs += ' data-smallcaps="1"'
+    if run.get("script") == "none":
+        # A run put back on the baseline against a named style that raises it. HTML
+        # has no opposite of `<sup>` any more than it has one of `<b>`, so the file
+        # says it in an attribute of ours, as `data-off` does for the marks.
+        attrs += ' data-script="none"'
     off = " ".join(key for key, _ in MARK_FIELDS if run.get(key) is False)
     if off:
         # A mark turned off against a theme that turns it on. HTML has no tag for it
@@ -874,6 +900,8 @@ def _run_html(run: dict) -> str:
         attrs += f' data-off="{off}"'
     if attrs:
         out = f"<span{attrs}>{out}</span>"
+    if run.get("script") in SCRIPT_TAGS:
+        out = f"<{SCRIPT_TAGS[run['script']]}>{out}</{SCRIPT_TAGS[run['script']]}>"
     for key, tag in MARKS.items():
         if run.get(key):
             out = f"<{tag}>{out}</{tag}>"
@@ -990,6 +1018,8 @@ class _Reader(HTMLParser):
             self.marks.append({"strike": True})
         elif tag == "code":
             self.marks.append({"code": True})
+        elif tag in ("sup", "sub"):
+            self.marks.append({"script": "super" if tag == "sup" else "sub"})
         elif tag == "a":
             self.marks.append({"link": attr.get("href", "")})
         elif tag == "span":
@@ -1003,6 +1033,8 @@ class _Reader(HTMLParser):
                 frame = _span_style(attr.get("style", ""))
                 if attr.get("data-smallcaps"):
                     frame["smallcaps"] = True
+                if attr.get("data-script"):
+                    frame["script"] = attr["data-script"]
                 for key in attr.get("data-off", "").split():
                     frame[key] = False
                 self.marks.append(frame)
@@ -1030,7 +1062,8 @@ class _Reader(HTMLParser):
             if self.table is not None:
                 self._emit(self.table)
             self.table = None
-        elif tag in ("b", "strong", "i", "em", "u", "s", "strike", "del", "code", "a", "span"):
+        elif tag in ("b", "strong", "i", "em", "u", "s", "strike", "del", "code", "a",
+                     "span", "sup", "sub"):
             if tag == "span" and self.chip is not None:
                 chip, self.chip = self.chip, None
                 if self.block is not None:
@@ -1347,8 +1380,8 @@ _NODES: dict[str, tuple[tuple, dict]] = {
                  "horizontalRule": "horizontalRule"}),
     "textRun": (("content",), {"textStyle": "textStyle"}),
     "textStyle": (("bold", "italic", "underline", "strikethrough", "smallCaps",
-                   "weightedFontFamily", "fontSize", "foregroundColor",
-                   "backgroundColor", "link"), {}),
+                   "baselineOffset", "weightedFontFamily", "fontSize",
+                   "foregroundColor", "backgroundColor", "link"), {}),
     "table": (("rows", "columns"), {"tableRows": "tableRow[]"}),
     "tableRow": (("startIndex", "endIndex"), {"tableCells": "tableCell[]"}),
     "tableCell": (("startIndex", "endIndex"), {"content": "structural[]"}),

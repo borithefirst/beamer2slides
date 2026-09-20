@@ -67,6 +67,7 @@ RUN_MARKS = [("bold", True), ("italic", True), ("underline", True), ("strike", T
              ("smallcaps", True), ("code", True),
              ("font", "Georgia"), ("font", "Roboto Mono"),
              ("fontsize", 9.0), ("fontsize", 14.5),
+             ("script", "super"), ("script", "sub"),
              ("color", "#993333"), ("highlight", "#ffee88")]
 
 PARA_MARKS = [("align", "center"), ("align", "justify"), ("indent", 18.0),
@@ -488,6 +489,8 @@ READER_FACES = [
     ({"fontSize": {"magnitude": 18, "unit": "PT"}}, "fontSize"),
     ({"fontSize": {"magnitude": 8.5, "unit": "PT"}}, "fontSize"),
     ({"smallCaps": True}, "smallCaps"),
+    ({"baselineOffset": "SUPERSCRIPT"}, "baselineOffset"),
+    ({"baselineOffset": "SUBSCRIPT"}, "baselineOffset"),
     ({"foregroundColor": {"color": {"rgbColor": {"red": 0.1, "green": 0.3, "blue": 0.7}}}},
      "foregroundColor"),
 ]

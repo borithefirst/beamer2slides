@@ -723,7 +723,7 @@ API_TO_IR = {"bold": "bold", "italic": "italic", "underline": "underline",
              "strikethrough": "strike", "foregroundColor": "color",
              "backgroundColor": "highlight", "link": "link",
              "weightedFontFamily": "font", "fontSize": "fontsize",
-             "smallCaps": "smallcaps"}
+             "smallCaps": "smallcaps", "baselineOffset": "script"}
 
 
 def _ir_measure(key: str, value):
@@ -760,6 +760,11 @@ def _api_style(style: dict) -> dict:
     family = style.get("font") or (doc_ir.CODE_FAMILY if style.get("code") else None)
     if family:
         out["weightedFontFamily"] = {"fontFamily": family}
+    if style.get("script"):
+        # Not a mark: one of three values, and "none" is the third rather than the
+        # absence of the other two (`doc_ir.SCRIPTS`).
+        out["baselineOffset"] = {"super": "SUPERSCRIPT", "sub": "SUBSCRIPT",
+                                 "none": "NONE"}[style["script"]]
     if style.get("fontsize"):
         out["fontSize"] = {"magnitude": float(style["fontsize"]), "unit": "PT"}
     for api, key in (("foregroundColor", "color"), ("backgroundColor", "highlight")):

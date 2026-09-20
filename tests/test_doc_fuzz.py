@@ -581,6 +581,15 @@ def test_the_world_carries_nothing_the_reader_does_not_read(shape):
     assert set(doc_ir.unmodelled(world.read())) == {"structural.sectionBreak"}
 
 
+def test_the_world_applies_every_run_field_the_merge_writes():
+    """The other side of the same honesty. `doc_world` applies an `updateTextStyle`
+    field by field, so a field of `doc_merge.MANAGED` it does not know is applied
+    nowhere and read back never — the campaign would draw that styling on both sides
+    and see it agree for the one reason that proves nothing. `baselineOffset` was
+    exactly that for an afternoon."""
+    assert set(doc_merge.MANAGED) <= set(doc_world.API_TO_IR)
+
+
 # ------------------------------------------------- one test per defect the campaign found
 
 def _push(shape: str):

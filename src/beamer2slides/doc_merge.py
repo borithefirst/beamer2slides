@@ -42,8 +42,13 @@ BULLETS = {False: "BULLET_DISC_CIRCLE_SQUARE", True: "NUMBERED_DECIMAL_ALPHA_ROM
 # round-trips through the file, so writing the merge's answer back is writing the
 # reader's own choice back, and a run that only repeats its named style carries
 # nothing, so clearing the field there leaves the same face on the page.
-MANAGED = ("backgroundColor", "bold", "fontSize", "foregroundColor", "italic", "link",
-           "smallCaps", "strikethrough", "underline", "weightedFontFamily")
+# `baselineOffset` joined it the same way (`script`): a superscript is content, not
+# decoration — the 2 of a footnote marker or of x², and the file says it with `<sup>`
+# and `<sub>`. Until it did, a block written again from nothing came back with every
+# raised character back on the baseline, and nothing said so.
+MANAGED = ("backgroundColor", "baselineOffset", "bold", "fontSize", "foregroundColor",
+           "italic", "link", "smallCaps", "strikethrough", "underline",
+           "weightedFontFamily")
 # The paragraph properties the merge owns, and the `paragraphStyle` field each is.
 # The first three reach a document from HTML as well (measured: "Paragraph CSS:
 # `text-align`, `margin-left`, `text-indent`, `line-height`"); the last three only
@@ -315,10 +320,10 @@ def unimported_requests(live: dict) -> list[dict]:
     """The styling `carry_unimported` found missing, written with `batchUpdate`.
 
     A paragraph's own span for the shading and the space around it; the exact
-    stretch of words for small caps, which is why the ranges were measured
-    character by character and not run by run; and the named style, for a Title or
-    a Subtitle, which the importer flattens to body text whatever the file says
-    (`class="title"` reaches nothing).
+    stretch of words for small caps and for a raised or lowered run, which is why
+    those ranges were measured character by character and not run by run; and the
+    named style, for a Title or a Subtitle, which the importer flattens to body text
+    whatever the file says (`class="title"` reaches nothing).
     """
     out = []
     for block in live["blocks"]:
@@ -333,10 +338,10 @@ def unimported_requests(live: dict) -> list[dict]:
             out.append({"updateParagraphStyle": {
                 "range": {"startIndex": block["span"][0], "endIndex": block["span"][1]},
                 "paragraphStyle": style, "fields": ",".join(sorted(style))}})
-        for start, end in want["smallcaps"]:
+        for start, end, style in want["runs"]:
             out.append({"updateTextStyle": {
                 "range": {"startIndex": start, "endIndex": end},
-                "textStyle": {"smallCaps": True}, "fields": "smallCaps"}})
+                "textStyle": style, "fields": ",".join(sorted(style))}})
     return out
 
 
@@ -741,7 +746,7 @@ def carry_unimported(live: dict, planned: list[dict]) -> int:
             continue
         missing = {key: mine[key] for key in UNIMPORTABLE
                    if mine.get(key) is not None and mine[key] != block.get(key)}
-        ranges = _smallcaps_gaps(mine, block)
+        ranges = _unimportable_runs(mine, block)
         # A named style the import could not carry. Compared as the style and not as
         # the kind, so a list item the importer left a plain paragraph — both
         # NORMAL_TEXT — says nothing, and only a real difference is written. It is
@@ -765,14 +770,21 @@ def carry_unimported(live: dict, planned: list[dict]) -> int:
             bullet = ("ordered" if mine.get("ordered") else "unordered") \
                 if mine["kind"] == "item" else "none"
         if missing or ranges or named or bullet is not None:
-            block["unimported"] = {"paragraph": missing, "smallcaps": ranges,
+            block["unimported"] = {"paragraph": missing, "runs": ranges,
                                    "named": named, "bullet": bullet}
             done += 1
     return done
 
 
-def _smallcaps_gaps(mine: dict, live: dict) -> list[list[int]]:
-    """Where the plan wants small caps and the document has none, in its index space.
+def _unimportable_runs(mine: dict, live: dict) -> list[tuple[int, int, dict]]:
+    """Where the plan wants run styling the document has none of, in its index space.
+
+    Two things are asked, both invisible to an HTML import: small caps, which has no
+    CSS at all, and a raised or lowered run, which has `<sup>` and `<sub>` — tags the
+    dialect writes because they keep the file readable, and which this repairs
+    whether or not Drive's importer carries them. A pass that only ever *adds* is
+    what makes that safe: if the import did carry them, nothing is found and nothing
+    is written.
 
     Character by character, because a mark on part of a run is a run boundary on one
     side and not on the other. Only a block whose words came through unchanged and
@@ -782,22 +794,34 @@ def _smallcaps_gaps(mine: dict, live: dict) -> list[list[int]]:
     if block_text(mine) != block_text(live) or any(
             r.get("frozen") for b in (mine, live) for r in b.get("runs", [])):
         return []
-    theirs = _smallcaps_mask(live)
-    gaps, start, at = [], None, live["span"][0]
-    for spot, want in enumerate(_smallcaps_mask(mine)):
-        if want and not theirs[spot]:
+    out = []
+    for key, api, value in (("smallcaps", "smallCaps", True),
+                            ("script", "baselineOffset", "SUPERSCRIPT"),
+                            ("script", "baselineOffset", "SUBSCRIPT")):
+        want = "super" if value == "SUPERSCRIPT" else "sub" if value == "SUBSCRIPT" else True
+        for start, end in _gaps(_mask(mine, key, want), _mask(live, key, want),
+                                live["span"][0]):
+            out.append((start, end, {api: value}))
+    return out
+
+
+def _mask(block: dict, key: str, want) -> list[bool]:
+    return [run.get(key) == want for run in block.get("runs", [])
+            for _ in range(doc_ir.utf16_len(run.get("text", "")))]
+
+
+def _gaps(mine: list[bool], live: list[bool], at: int) -> list[list[int]]:
+    """The stretches the plan asks for and the read-back has not got."""
+    out, start = [], None
+    for spot, want in enumerate(mine):
+        if want and not live[spot]:
             start = at + spot if start is None else start
         elif start is not None:
-            gaps.append([start, at + spot])
+            out.append([start, at + spot])
             start = None
     if start is not None:
-        gaps.append([start, at + len(theirs)])
-    return gaps
-
-
-def _smallcaps_mask(block: dict) -> list[bool]:
-    return [bool(run.get("smallcaps")) for run in block.get("runs", [])
-            for _ in range(doc_ir.utf16_len(run.get("text", "")))]
+        out.append([start, at + len(mine)])
+    return out
 
 
 # ---------------------------------------------------------------- merge
@@ -1695,6 +1719,11 @@ def _text_style(run: dict) -> dict:
     # carried still means the one face it always meant (`doc_ir.CODE_FAMILY`).
     if run.get("font") or run.get("code"):
         style["weightedFontFamily"] = {"fontFamily": run.get("font") or doc_ir.CODE_FAMILY}
+    if run.get("script"):
+        # "none" is a value here, as `False` is for a mark: it is how a run says it is
+        # *not* raised against a named style that raises the whole paragraph.
+        style["baselineOffset"] = {"super": "SUPERSCRIPT", "sub": "SUBSCRIPT",
+                                   "none": "NONE"}[run["script"]]
     if run.get("fontsize"):
         style["fontSize"] = {"magnitude": float(run["fontsize"]), "unit": "PT"}
     if run.get("color"):

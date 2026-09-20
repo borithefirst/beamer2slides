@@ -159,6 +159,20 @@ write paths can create, and nothing else.
 | `font` | `style="font-family:Consolas"` | the import (one name, unquoted, no fallback) |
 | `fontsize` | `style="font-size:18pt"` | the import (rounded to whole points) |
 | `smallcaps` | `data-smallcaps="1"` | `updateTextStyle` only |
+| `script` | `<sup>` / `<sub>`, `data-script="none"` | the import, and `updateTextStyle` |
+
+A superscript is **content**, not decoration: the 2 of x², of H₂O, of a footnote
+marker or a citation. It was the last `TextStyle` field the dialect could not say, and
+the cost was quiet — a block written again from nothing came back with every raised
+character flat on the baseline, and nothing in the report said so, because a field
+nobody reads is a field the merge never notices changing. It is not a mark, either:
+`baselineOffset` is one of NONE / SUPERSCRIPT / SUBSCRIPT, so the run says *which*,
+and "none" is a third value rather than the absence of the other two — a theme can
+raise a whole named style, and a reader who puts one word back on the baseline has to
+be able to say it (the `data-off` reasoning, one value wider). HTML has had the two
+tags since the beginning, so the import carries them; the refusal has no tag, as
+`<b>` has no opposite, so the file says `data-script="none"` and only a `batchUpdate`
+writes it.
 
 `<code>` used to stand for four monospaced families at once, which silently made
 Consolas and Roboto Mono the same face — and the importer drops `<code>`'s styling
@@ -272,8 +286,8 @@ reader op is `read_unmark_word`, and with `_text_style` reverted in memory it ca
 
 **What no import can carry is written by the settle.** `doc_sync.settle` already hands
 `doc_merge.adopt_keys` the blocks the run planned, so `adopt_keys` compares them with
-the read-back and `carry_unimported` notes the shading, the space around a paragraph
-and the small caps the document has not got; `tidy_requests` writes them in the batch
+the read-back and `carry_unimported` notes the shading, the space around a paragraph,
+the small caps and the raised or lowered runs the document has not got; `tidy_requests` writes them in the batch
 the settle sends anyway. Only what the plan asks for and the document lacks is
 written, never a removal: in a read, "absent" is also what a reader who took the
 styling off looks like. After a sync it is almost always empty, the merge's own batch
@@ -286,7 +300,9 @@ source dropped go away. A field belongs there only when the file can say it *and
 read can see it — naming a field the file cannot carry would clear, on every source
 restyle, something a reader set in the browser and nothing on our side ever knew
 about. That is why `weightedFontFamily` stayed out while `<code>` was all the file
-could say, and why it, `fontSize` and `smallCaps` are in now.
+could say, and why it, `fontSize`, `smallCaps` and `baselineOffset` are in now — with
+that last one, every field of a `TextStyle` the merge could ever mean to write is one
+the file can say and a read can see, and `MANAGED` is the whole of them.
 
 **What the dialect does not model, it names** (`doc_ir.unmodelled`). The convergence
 check — a second sync writes 0 requests — is measured on the IR, so it proves the IR
@@ -932,6 +948,13 @@ therefore that the *clearing* `doc_merge.MANAGED` governs had never been exercis
 ops now draw from the whole dialect on both sides (`RUN_MARKS`, `PARA_MARKS`,
 `READER_FACES`, `READER_MEASURES`), which is the case that matters most: a reader
 chooses a face, and then the source restyles that block.
+
+Drawing a field is not enough for the world to *hold* it: `doc_world` applies an
+`updateTextStyle` field by field through `API_TO_IR`, so a `MANAGED` field missing
+there is applied nowhere and read back never — both sides would draw it, and it would
+agree for the one reason that proves nothing. `baselineOffset` was exactly that for
+an afternoon, and `test_the_world_applies_every_run_field_the_merge_writes` is the
+line that says it can never be again.
 
 **A defect the world cannot represent is a defect the fuzzing cannot find**, and the
 alignment loss above is the plainest case there has been. Nothing was deleted, no word

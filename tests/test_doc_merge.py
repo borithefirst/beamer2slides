@@ -1454,6 +1454,58 @@ def test_small_caps_is_a_mark_like_bold():
     assert "smallCaps" in doc_merge.MANAGED
 
 
+def test_a_raised_run_is_written_and_owned_like_the_rest_of_the_styling():
+    """A superscript is content — the 2 of x², of a footnote marker, of a citation —
+    and a block written again from nothing used to come back flat on the baseline
+    with nothing saying so. The file can say it (`<sup>`), a read can see it
+    (`baselineOffset`), which is exactly the bar for `MANAGED`."""
+    assert "baselineOffset" in doc_merge.MANAGED
+    for spelling, api in (("super", "SUPERSCRIPT"), ("sub", "SUBSCRIPT"),
+                          ("none", "NONE")):
+        assert doc_merge._text_style({"text": "2", "script": spelling})[
+            "baselineOffset"] == api
+
+    base = live([para("p:s", "x2 and more")])
+    ours = live([{"kind": "paragraph", "key": "p:s", "runs": [
+        styled_run("x"), styled_run("2", script="super"), styled_run(" and more")]}])
+    result = doc_merge.plan(base, ours, live(base["blocks"]))
+    styles = [r["updateTextStyle"] for r in result["requests"] if "updateTextStyle" in r]
+    raised = [s for s in styles if s["textStyle"].get("baselineOffset")]
+    assert len(raised) == 1
+    assert raised[0]["textStyle"]["baselineOffset"] == "SUPERSCRIPT"
+    assert raised[0]["range"] == {"startIndex": 2, "endIndex": 3}
+    # Every managed field is named on every run of a restyle, so the runs beside it
+    # are told they are *not* raised rather than left to inherit the one that is.
+    assert all("baselineOffset" in s["fields"] for s in styles)
+
+
+def test_a_superscript_the_source_took_away_is_named_with_no_value_so_it_goes():
+    base = live([{"kind": "paragraph", "key": "p:s", "runs": [
+        styled_run("x"), styled_run("2", script="super")]}])
+    ours = live([para("p:s", "x2")])
+    result = doc_merge.plan(base, ours, live(base["blocks"]))
+    styles = [r["updateTextStyle"] for r in result["requests"] if "updateTextStyle" in r]
+    assert styles and all("baselineOffset" not in s["textStyle"] for s in styles)
+    assert all("baselineOffset" in s["fields"] for s in styles)
+
+
+def test_a_raised_run_the_import_flattened_is_written_by_the_settle():
+    """Drive's HTML importer does carry `<sup>`, but the same pass that repairs small
+    caps has to ask: a run the plan raises and the read-back does not is a run to
+    raise, and it is the only way a `data-script` file's word gets its place back."""
+    planned = [{"kind": "paragraph", "key": "p:s", "runs": [
+        styled_run("H"), styled_run("2", script="sub"), styled_run("O and x"),
+        styled_run("2", script="super")]}]
+    read = live([{"kind": "paragraph", "key": "p:s", "runs": [
+        styled_run("H2O and x2")]}])
+    assert doc_merge.adopt_keys(read, planned) == 0
+    requests = [r["updateTextStyle"] for r in doc_merge.tidy_requests(read)]
+    assert [(r["range"]["startIndex"], r["range"]["endIndex"],
+             r["textStyle"]["baselineOffset"]) for r in requests] == [
+        (10, 11, "SUPERSCRIPT"), (2, 3, "SUBSCRIPT")]
+    assert all(r["fields"] == "baselineOffset" for r in requests)
+
+
 def test_the_measurements_of_a_paragraph_are_written_and_named():
     base = live([para("p:s", "one two")])
     ours = live([para("p:s", "one two", indent=36.0, line_spacing=1.5,
