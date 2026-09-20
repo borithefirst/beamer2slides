@@ -1452,6 +1452,41 @@ After them: 700 rounds at chain 6 from 993000, 400 at chain 10 from 995000, both
 under `--strict`. 500 at chain 8 from 994000 came back with three, two of them the
 `frozen_gone` signature that is still open.
 
+### The copy that answers for another, and a paragraph that follows a table away
+
+The three left over from 994000, two signatures, one each side of the line: one the
+oracle's, one the merge's.
+
+* **A picture's names do not say which copy it is; its object id does** (seed 994410,
+  `equations`, shrunk to three steps). The source adds the same figure twice, then the
+  reader deletes one of the two blocks in the browser while the source drops the other.
+  Nothing is lost by either — but the copy still standing paired, by their shared digest,
+  with the file's entry for the copy the reader had *already* taken away, so the count of
+  what the file still asks for came out one too high, nothing was excused, and the picture
+  the source itself gave up was named as lost. The excuse pairing asks for the ids now
+  (`pair_images(..., ids=True)`): the file's ids are the document's own, since the settle
+  regenerates the file from the document it wrote, so a picture the file names by id *is*
+  that object and one it names by file alone is a picture the source has just added and
+  the document has never held. The other pairing — the document before the sync against
+  the document after — still goes by name, because a rewrite gives a picture a new id;
+  that asymmetry is the whole of `frozen_key`'s docstring.
+* **A block kept because nothing can move it follows nothing that moves** (seed 994424,
+  `two_tables`). An empty paragraph between two tables can be deleted in no way at all, so
+  one the source dropped is kept where the document has it (`restore_undeletable`), and
+  `_after_live` puts it back into the merged list behind the block in front of it *there*
+  — which was the very table the source was moving somewhere else. The kept paragraph then
+  stood in the merged order as that table's own next block, so `_insert_index` read the
+  table's new place off a span a single character behind where the table already was: it
+  was deleted and built again in its own place, blank, and the next two passes did the
+  same. The three rounds `_write_structure` allows ran out with the table's words written
+  nowhere and the file's key gone, and the report said nothing. It is the sibling of
+  `test_a_move_the_merge_takes_back_leaves_the_block_where_the_document_has_it`, and the
+  same sentence fixes it: `_after_live` looks past a neighbour the source moves.
+
+Then 800 rounds at chain 4 from 998000, 500 at chain 8 from 996000, 400 at chain 10 from
+997000, 700 at chain 6 from 991000 and 300 at chain 12 from 999000 — 2,700 rounds, all
+clean under `--strict`, and `KNOWN` still empty.
+
 ## Remaining risks
 
 1. **Pictures** — retired, see "Pictures, and the chips a request can make" above. What

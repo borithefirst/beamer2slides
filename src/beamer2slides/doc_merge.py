@@ -2482,9 +2482,17 @@ def _empty_range(blocks: list[dict], index: int, going: set[int], ends: bool,
 
 def _after_live(theirs: dict, merged: list[dict], index: int) -> int:
     """Where a block of the document goes back into the merge: behind the merged block
-    that carries the key of the one in front of it there, or at the front."""
+    that carries the key of the one in front of it there, or at the front.
+
+    Never behind one the source moves: this block is kept because nothing can move it,
+    and following the neighbour that *is* moving says it goes along. A table moved up
+    past a paragraph then had the empty paragraph behind it for its own anchor, so it
+    was built again exactly where it stood — and again on the next pass, blank each
+    time (offline chain-8 seed 994424).
+    """
     for live in reversed(theirs["blocks"][:index]):
-        at = next((i for i, b in enumerate(merged) if b.get("key") == live.get("key")), None)
+        at = next((i for i, b in enumerate(merged)
+                   if b.get("key") == live.get("key") and not b.get("moved")), None)
         if at is not None:
             return at + 1
     return 0

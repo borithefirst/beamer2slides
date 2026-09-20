@@ -249,22 +249,35 @@ def telling_names(runs: list[dict]) -> list[set]:
     return [{name for name in image_names(run) if seen[name] == 1} for run in runs]
 
 
-def pair_images(now: list[dict], then: list[dict]) -> list[int | None]:
+def pair_images(now: list[dict], then: list[dict], ids: bool = False) -> list[int | None]:
     """For each picture the document held, the one it has now, or None.
 
     Two passes: a telling name first, then any name at all, so a picture keeps its
     own counterpart where one exists and two copies of one file still pair off one
     for one. Each survivor is claimed once.
+
+    `ids` refuses a pairing between two object ids that differ, which is only ever
+    true of the *file*: the settle regenerates it from the document it wrote, so a
+    picture the file names by id is that very object, while a picture it names by
+    file alone is one the source has just added and the document has never held. The
+    document's own pictures may not be asked for their ids across a sync (a rewrite
+    deletes and inserts, and the picture comes back under a new one), which is why
+    the other pairing goes by name.
     """
     telling = telling_names(now)
     every = [image_names(run) for run in then]
     hit: list[int | None] = [None] * len(now)
     free = set(range(len(then)))
+
+    def may(i: int, j: int) -> bool:
+        mine, theirs = now[i].get("value"), then[j].get("value")
+        return not (ids and mine and theirs and mine != theirs)
+
     for names in (telling, [image_names(run) for run in now]):
         for i in range(len(now)):
             if hit[i] is not None or not names[i]:
                 continue
-            at = next((j for j in sorted(free) if names[i] & every[j]), None)
+            at = next((j for j in sorted(free) if names[i] & every[j] and may(i, j)), None)
             if at is not None:
                 hit[i] = at
                 free.discard(at)
@@ -647,6 +660,12 @@ def _picture_findings(now: dict, mine: dict | None, then: dict | None,
     source that adds a second copy and then drops the first left the file holding
     that name, and matching by name alone accused the copy that went (fresh seed
     980193, chain 6).
+
+    That pairing does ask for the ids (`ids=True`), because the file's are the
+    document's own: two pictures of one file, one deleted by the reader and the
+    other dropped by the source, left the survivor paired with the file's entry for
+    the one the reader had already taken away, so nothing was excused and the
+    picture the source itself gave up was named as lost (fresh seed 994410, chain 8).
     """
     out: list[dict] = []
     held = images_of(now)
@@ -654,7 +673,7 @@ def _picture_findings(now: dict, mine: dict | None, then: dict | None,
     telling = telling_names(held)
     left = [i for i in range(len(held)) if hits[i] is None]
     if mine is not None:
-        asked = pair_images(held, images_of(mine))
+        asked = pair_images(held, images_of(mine), ids=True)
         left = left[:max(0, len(left) - sum(1 for at in asked if at is None))]
     for i in left:
         run = held[i]

@@ -51,11 +51,13 @@ CHAINED = (0, 1, 2, 3, 4, 5)
 # asked for on an un-bolding the base already had, 970528 a word the merge split into
 # two runs, 980193 two copies of one picture with one dropped by the source, 993608 a
 # beheaded table taking the key of one the source regrids, 912452 a paragraph keeping
-# the centring of the one deleted above it.
+# the centring of the one deleted above it. And two at chain 8: 994410 the surviving copy
+# of a picture answering for the one the reader deleted, 994424 a kept paragraph following
+# the table the source moved away from it.
 REGRESSIONS = ((60, 1), (181, 1), (309, 4), (1031, 8), (1147, 8),
                (5099, 8), (5130, 8), (5167, 8),
                (970228, 6), (970528, 6), (970711, 6), (980193, 6),
-               (912452, 6), (993608, 6))
+               (912452, 6), (993608, 6), (994410, 8), (994424, 8))
 
 
 def _round(seed: int, chain: int, shape: str | None = None) -> None:
@@ -521,6 +523,34 @@ def test_two_copies_of_one_picture_and_the_source_drops_one():
     # Both copies going is still a loss: the file asks for one of them.
     assert "frozen_gone" in _kinds(oracle.check(base, copy.deepcopy(base),
                                                 _ir(_p("k2", "  ")), NOTHING, ours))
+
+
+def test_the_copy_the_reader_deleted_does_not_answer_for_the_one_the_source_drops():
+    """And which the file asks for is told by the object id, because the file's ids
+    are the document's own: the settle regenerates it from the document it wrote, so
+    a picture the file names by id is that very object and one it names by file alone
+    is a picture the source has just added.
+
+    Two copies of one figure, the reader deletes one block in the browser and the
+    source drops the other. Nothing is lost by either — but the copy still standing
+    paired, by their shared digest, with the file's entry for the copy the reader had
+    already taken away, so nothing was excused and the picture the source itself gave
+    up was named as lost (fresh seed 994410, chain 8)."""
+    def shot(oid):
+        return {"frozen": True, "chip": "image", "text": "", "value": oid,
+                "sha": "sha-zephyr", "src": "media/zephyr.png"}
+
+    def held(key, oid):
+        return {"key": key, "kind": "paragraph", "runs": [{"text": "  "}, shot(oid)]}
+
+    base = _ir(held("k1", "kix.i5"), held("k2", "kix.i7"))
+    before = _ir(held("k2", "kix.i7"))          # the reader deleted the first block
+    ours = _ir(held("k1", "kix.i5"))            # and the source dropped the second
+    assert not oracle.failures(oracle.check(base, before, _ir(), NOTHING, ours))
+    # The control: a file that still asks for the copy the document holds is a
+    # picture that has to survive.
+    assert "frozen_gone" in _kinds(oracle.check(base, before, _ir(), NOTHING,
+                                                _ir(held("k2", "kix.i7"))))
 
 
 def test_the_oracle_lets_a_chip_go_with_the_block_the_source_dropped():
@@ -1415,6 +1445,39 @@ def test_a_move_the_merge_takes_back_leaves_the_block_where_the_document_has_it(
         == "a b 1 2"
     assert sum(1 for b in live["blocks"] if not oracle.text_of(b)) == 2, \
         "one empty paragraph per attempt at the move would be left over"
+    again, _, _ = fuzz_docs.sync_once(world, copy.deepcopy(ours), copy.deepcopy(base))
+    assert again["applied"] == []
+
+
+def test_a_kept_paragraph_does_not_follow_the_table_the_source_moves_away_from_it():
+    """The other half of it. A block the source dropped between two tables is kept
+    where the document has it (`restore_undeletable`), and `_after_live` puts it back
+    into the merged list behind the block in front of it there — which may be the very
+    table the source is moving somewhere else.
+
+    The kept paragraph then stood in the merged order as the table's own next block,
+    so `_insert_index` read the table's new place off a span that is right behind
+    where the table already was: it was deleted and built again in its own place,
+    blank, and the next two passes did it again. The words were written nowhere and
+    the file's key was gone, with nothing in the report (fresh-seed 994424 at chain 8,
+    shrunk). A block kept because nothing can move it follows nothing that moves.
+    """
+    world, ours, base = _build([_para("Before both."), _para("Quartz next."),
+                                _table([["h1", "h2"], ["thicket", "x"]]), _para(""),
+                                _table([["a", "b"], ["1", "2"]]), _para("After both.")])
+    assert _keys(ours)[3] == "paragraph:empty", _keys(ours)
+    ours["blocks"].pop(3)                            # the source drops it, and moves
+    ours["blocks"].insert(1, ours["blocks"].pop(2))  # the table up past the paragraph
+    was, mine = copy.deepcopy(base), copy.deepcopy(ours)
+    before = doc_world.settled_ir(world, ours, base)
+    report, ours, base = fuzz_docs.sync_once(world, ours, base)
+    assert not oracle.failures(oracle.check(was, before, base, report, mine))
+    live = doc_world.read_ir(world, ours, base)
+    # The paragraph is kept on the pass that moves the table and deleted on the next,
+    # where it stands between two ordinary blocks and has a mark to borrow again.
+    assert _keys(live) == ["paragraph:before-both", "table:h1", "paragraph:quartz-next",
+                           "table:a", "paragraph:after-both"]
+    assert oracle.text_of(live["blocks"][1]) == "h1 h2 thicket x"
     again, _, _ = fuzz_docs.sync_once(world, copy.deepcopy(ours), copy.deepcopy(base))
     assert again["applied"] == []
 

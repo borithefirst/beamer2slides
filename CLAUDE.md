@@ -1573,7 +1573,25 @@ keys, named ranges), `doc_merge.py` (pure planning), `doc_sync.py` (the commands
   `test_the_campaign_sees_a_theme_undone` puts back on purpose, so that probe opens both doors
   now - what it measures is the oracle's reach, not which of our mechanisms is broken. Clean
   afterwards at 993000 (700 at chain 6) and 995000 (400 at chain 10) under `--strict`; 500 at
-  chain 8 from 994000 came back with three, two of them `frozen_gone`, which is still open.
+  chain 8 from 994000 came back with three, which were two signatures, one each side of the
+  line. **A picture's names do not say which copy it is; its object id does** (994410): the
+  source adds one figure twice, the reader deletes one of the blocks in the browser and the
+  source drops the other, and the copy still standing paired - by their shared digest - with
+  the file's entry for the copy the reader had already taken away, so nothing was excused and
+  the picture the source itself gave up was named as lost. The excuse pairing asks for the ids
+  (`pair_images(..., ids=True)`): the file's are the document's own, the settle regenerating it
+  from the document it wrote, so a picture the file names by id *is* that object and one it
+  names by file alone is one the source has just added; the other pairing still goes by name,
+  since a rewrite gives a picture a new id. **A block kept because nothing can move it follows
+  nothing that moves** (994424): an empty paragraph between two tables can be deleted in no way
+  at all, so one the source dropped is kept where the document has it, and `_after_live` put it
+  back into the merged list behind the block in front of it there - the very table the source
+  was moving away. It then stood as that table's own next block, so `_insert_index` read the
+  table's new place off a span one character behind where the table already was: deleted and
+  built again in its own place, blank, three passes running, its words nowhere and the file's
+  key gone with nothing in the report. Then 2,700 rounds clean under `--strict` (800 at chain 4
+  from 998000, 500 at chain 8 from 996000, 400 at chain 10 from 997000, 700 at chain 6 from
+  991000, 300 at chain 12 from 999000), `KNOWN` still empty.
 - Live suite (opt-in, marker `docs`, ~5 min): `python -m pytest -m docs tests/test_docs_live.py`
   pushes a document per test, edits both sides, syncs, checks a second sync writes nothing, and
   deletes the document. Offline: `tests/test_doc_ir.py`, `test_doc_merge.py`, `test_doc_sync.py`.
