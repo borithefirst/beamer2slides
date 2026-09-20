@@ -267,8 +267,16 @@ class _Raster:
             b -= 3
 
     def spans(self):
-        """``gray_sweep_direct`` with the non-zero rule: yields (y, x, len, coverage)."""
+        """``gray_sweep_direct`` with the non-zero rule: yields (y, x, len, coverage).
+
+        ``FT_FILL_RULE`` (below, three times) and the two FT_Int32 casts are written out rather
+        than called: this is the port's densest loop - a glyph sweeps some 85 cells and a render
+        pass 118,000 - and that was 315,000 calls a pass. The macro is a macro in C too, and the
+        casts are the path not taken, a glyph's cover and area never leaving the 32-bit range.
+        After the complement a coverage is >= 0, so the macro's final cast to a byte is the clamp.
+        """
         min_ex, max_ex = self.min_ex, self.max_ex
+        shift = PIXEL_BITS * 2 + 1 - 8
         for y in range(self.min_ey, self.max_ey):
             row = self.rows.get(y)
             if not row:
@@ -277,24 +285,27 @@ class _Raster:
             cover = 0
             for cx, (ccover, carea) in sorted(row.items()):
                 if cover != 0 and cx > x:
-                    yield y, x, cx - x, _coverage(cover)
-                cover = _int32(cover + ccover * (ONE_PIXEL * 2))
-                area = _int32(cover - carea)
+                    c = cover >> shift
+                    if c < 0:
+                        c = ~c
+                    yield y, x, cx - x, 255 if c > 255 else c
+                cover += ccover * (ONE_PIXEL * 2)
+                if not -0x80000000 <= cover <= 0x7FFFFFFF:
+                    cover = _int32(cover)
+                area = cover - carea
+                if not -0x80000000 <= area <= 0x7FFFFFFF:
+                    area = _int32(area)
                 if area != 0 and cx >= min_ex:
-                    yield y, cx, 1, _coverage(area)
+                    c = area >> shift
+                    if c < 0:
+                        c = ~c
+                    yield y, cx, 1, 255 if c > 255 else c
                 x = cx + 1
             if cover != 0:
-                yield y, x, max_ex - x, _coverage(cover)
-
-
-def _coverage(area: int) -> int:
-    """``FT_FILL_RULE`` for the non-zero rule, cast to unsigned char."""
-    coverage = area >> (PIXEL_BITS * 2 + 1 - 8)
-    if coverage < 0:
-        coverage = ~coverage
-    if coverage > 255:
-        coverage = 255
-    return coverage & 0xFF
+                c = cover >> shift
+                if c < 0:
+                    c = ~c
+                yield y, x, max_ex - x, 255 if c > 255 else c
 
 
 def _half(v: int) -> int:

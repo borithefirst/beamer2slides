@@ -40,6 +40,12 @@ class GlyphError(Exception):
 
 
 def i32(v: int) -> int:
+    # The three quarters of a million calls a render pass makes are nearly all on values that
+    # already are an FT_Long, where the mask and the compare below cannot move them: `v & MASK32`
+    # is v for a positive one, and for a negative one it is v + 2**32, which has bit 31 set exactly
+    # because v >= -2**31 - so the subtraction gives v back. That is the path taken here.
+    if -0x80000000 <= v <= 0x7FFFFFFF:
+        return v
     v &= MASK32
     return v - (1 << 32) if v & 0x80000000 else v
 
@@ -47,7 +53,11 @@ def i32(v: int) -> int:
 def mulfix(a: int, b: int) -> int:
     """FT_MulFix: (a*b + 0x8000 + (ab >> 63)) >> 16, as a 32-bit FT_Long."""
     ab = a * b
-    return i32((ab + 0x8000 + (-1 if ab < 0 else 0)) >> 16)
+    # `ab >> 63` is -1 for a negative product and 0 otherwise, so the two shifts below are the one
+    # C expression; the result is an FT_Long already unless a or b was out of range, and then i32
+    # wraps it as before. Written out because this is the port's hottest arithmetic.
+    v = (ab + 0x8000) >> 16 if ab >= 0 else (ab + 0x7FFF) >> 16
+    return v if -0x80000000 <= v <= 0x7FFFFFFF else i32(v)
 
 
 def divfix(a: int, b: int) -> int:
@@ -63,6 +73,10 @@ def divfix(a: int, b: int) -> int:
 
 
 def int_to_fixed(i: int) -> int:
+    # A charstring's integers are small, and for those the mask and the wrap cannot move anything:
+    # a negative i only gains 2**48 from the mask, which the wrap takes straight back off.
+    if -0x8000 <= i <= 0x7FFF:
+        return i << 16
     return i32((i & MASK32) << 16)
 
 
@@ -794,13 +808,15 @@ class Stack:
     def push_int(self, i: int) -> None:
         if len(self.v) >= STACK_SIZE:
             raise GlyphError("stack overflow")
-        self.v.append(i32(i))
+        # the FT_Long cast inline: a charstring pushes some 113,000 values in a render pass, and
+        # what it pushes is an FT_Long already, so i32's mask and compare are the path not taken
+        self.v.append(i if -0x80000000 <= i <= 0x7FFFFFFF else i32(i))
         self.is_int.append(True)
 
     def push_fixed(self, r: int) -> None:
         if len(self.v) >= STACK_SIZE:
             raise GlyphError("stack overflow")
-        self.v.append(i32(r))
+        self.v.append(r if -0x80000000 <= r <= 0x7FFFFFFF else i32(r))
         self.is_int.append(False)
 
     def pop_int(self) -> int:
@@ -958,10 +974,15 @@ class Decoder:
         buf = subr_stack[0]
 
         while True:
-            if buf.end():
+            # cf2_buf_isEnd and cf2_buf_readByte are inline in C and this runs once per operator,
+            # which was 340,000 method calls a render pass; the read is the one `byte` makes, its
+            # guard being the test just above it.
+            chars, pos = buf.data, buf.pos
+            if pos >= len(chars):
                 op = 11 if len(subr_stack) > 1 else 14
             else:
-                op = buf.byte()
+                op = chars[pos]
+                buf.pos = pos + 1
             if t1:
                 if not initial_map_ready and not (op in (1, 3, 13, 10, 11, 12, 14) or op >= 32):
                     st.clear()
