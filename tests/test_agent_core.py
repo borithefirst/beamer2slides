@@ -283,6 +283,49 @@ def test_describing_access_never_says_what_the_token_is(tmp_path):
     assert "shh" not in described
 
 
+# -- the first call ----------------------------------------------------------------------
+
+
+class _Describes:
+    """A credential source whose `describe` says whatever the test needs it to say."""
+
+    def __init__(self, **described):
+        self.described = described
+
+    def credentials(self):
+        return object()
+
+    def describe(self):
+        return self.described
+
+
+def test_an_expired_token_that_can_refresh_is_not_reported_as_a_problem(tmp_path):
+    """The ordinary state between calls: `available` rides on the refresh token alone.
+
+    Saying "good until <a time already past>" reads like a fault, and an agent that
+    believes it goes asking a person for consent nobody needs to give.
+    """
+    from beamer2slides.agent import tools
+
+    access = _Describes(available=True, source="token file", expired=True, refreshable=True,
+                        expires="2026-09-19T20:55:00+00:00")
+    r = tools.TOOLS["b2s_status"](_ctx(tmp_path, google=access))
+    assert r.ok and "good until" not in r.summary
+    assert "refreshed on the next call" in r.summary
+    assert not [d for d in r.diagnostics if "Google" in d.message]
+
+
+def test_no_google_is_said_plainly_with_the_command_that_fixes_it(tmp_path):
+    from beamer2slides.agent import tools
+
+    access = _Describes(available=False, source="token file", reason="needs_consent",
+                        command="python -m beamer2slides.agent.auth")
+    r = tools.TOOLS["b2s_status"](_ctx(tmp_path, google=access))
+    assert r.ok                                                # status itself never fails
+    assert "not reachable" in r.summary and "python -m beamer2slides.agent.auth" in r.summary
+    assert any(d.level == "warning" for d in r.diagnostics)
+
+
 # -- the guide ---------------------------------------------------------------------------
 
 
