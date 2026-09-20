@@ -44,6 +44,13 @@ has the numbers. Neither will guess: two frames that changed places and say much
 come back as new slides, because the alternative is writing one frame's words onto the other's
 slide, under somebody's edits. And when the place is all that was left to go on, the report says so
 in a warning naming the slide: read it as "this one is down to its last hook, give it a label".
+So does a match that was a coin toss: where an unlabelled frame sits between slides that say nearly
+the same thing, another alignment of the same score would have put it on one of the others, and
+nothing downstream can tell that from a match the words really made. The frame is paired - your
+edits are safe either way - and the report names the slide it went to and asks for a label, because
+which slide that frame writes to next time is otherwise decided by a walk, not by the source. A
+deck a person built in Slides is full of such near-twins, which is why `adopt` labels every frame
+it writes (a slug of the slide's own objectId).
 When even that is gone - a frame retitled, reworded and moved in one version - the report names the
 two halves it could not join: the slide the deck still has, and the frame that came back as new.
 

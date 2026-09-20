@@ -528,6 +528,16 @@ when neither side knows the other's label), and a slide the source dropped but t
 alive still claiming its label in the base, so the frame that carries that label now paired with the
 dead entry (`sync.new_base` clears it: a label belongs to the source).
 
+A pairing that was a coin toss says so (`identity.align_slides`, `weak_pairs` value `twins`): where
+an unlabelled frame sits among slides that say nearly the same thing, a second alignment of the same
+score is a second reading, not a worse one, and the frame goes wherever the walk reaches first -
+which nothing downstream can tell from a match the words made. The frame is still paired (nobody's
+edits move) and the report names the slide and asks for a label. Measured with `fuzz_labels --shape
+adopt`, 2000 rounds chained 4 deep: with the labels kept, 2 frames of 20,080 are misidentified and
+both are now named in the report, none in silence; 1 pairing in 20,080 is called a coin toss, so it
+is not noise. The campaign counts what a person is told, not what `label_moves` said alone - a
+changed label is a warning of its own in `merge.plan_merge`.
+
 Slide order is merged, not all-or-nothing (`merge.plan_order`): the source's order is the ground and
 a slide the deck itself picked up (out of its base order there, `_out_of_place`) goes back beside
 what it follows in the deck; both sides moving the same slide is the deck's, with a warning. One
@@ -782,6 +792,14 @@ needs both sides on one unit: a source that moves a text moves the pictures its 
 Counting what the campaign reaches (`unit/*`, `override/*`, geometry modes) is how the blind spot
 showed; `fuzz_world` also kept `children` on a group whose unit had been recreated, which only
 `parent_group` readers were saving it from.
+The applier's own opinion has to be the mechanism's: a recreated element gets the person's run
+styling back through `sync.style_range_requests`, which maps each styled span through the matching
+blocks of the old text and the new one, so a span still sitting on characters the source kept goes
+back on. `fuzz_world._styling_ends` asked instead whether the styled *words* turn up in the new
+text, so a bold the person's own earlier rewording had clipped to two letters inside another word
+counted as gone - the applier dropped it and the campaign accused the merge of losing it in silence
+(adopt-shaped seed 23599, chained 6 deep, the only failure in 4,000 rounds).
+
 Occlusion (`loss_oracle.occlusion_findings`, `text_hidden`): a text no opaque shape covered before a
 sync (paint order: page elements, a group's children inside it; opaque: solid fill at alpha 1) must not
 end up under a shape the sync created, unless the new conversion stacks that shape above it. A block
