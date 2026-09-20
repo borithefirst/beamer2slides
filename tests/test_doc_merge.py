@@ -241,9 +241,11 @@ def test_a_mark_the_source_took_away_is_named_so_it_goes_away():
     style = [r["updateTextStyle"] for r in result["requests"] if "updateTextStyle" in r][0]
     assert style["textStyle"] == {}
     # The fields are named although the run carries none of them: that is what clears
-    # the bold. The font is not among them — it is not this merge's to reset.
+    # the bold. The face and the size are named too, now that the file carries them —
+    # a field named with no value puts the paragraph's own named style back, which is
+    # what a run saying nothing about its face looks like on the page.
     assert style["fields"] == ",".join(doc_merge.MANAGED)
-    assert "weightedFontFamily" not in style["fields"]
+    assert {"weightedFontFamily", "fontSize", "smallCaps"} <= set(doc_merge.MANAGED)
 
 
 def test_styling_a_second_sync_writes_nothing():
@@ -1363,6 +1365,134 @@ def test_a_new_tab_left_empty_by_a_sync_that_died_is_taken_not_made_twice():
     busy = doc_merge.pair_tabs(tabbed(), tabbed(tab(None, "Appendix", "z")),
                                tabbed(tab("t.7", "Appendix", "reader's")))
     assert [p["title"] for p in busy["create"]] == ["Appendix"]
+
+
+# ---------------------------------------------------------------- faces and measures
+
+def styled_run(text, **rest):
+    return {"text": text, **rest}
+
+
+def test_a_face_and_a_size_the_source_set_are_written_as_themselves():
+    base = live([para("p:s", "one two")])
+    ours = live([{"kind": "paragraph", "key": "p:s", "runs": [
+        styled_run("one ", font="Roboto Mono", fontsize=9), styled_run("two")]}])
+    result = doc_merge.plan(base, ours, live(base["blocks"]))
+    style = [r["updateTextStyle"] for r in result["requests"] if "updateTextStyle" in r][0]
+    assert style["textStyle"]["weightedFontFamily"] == {"fontFamily": "Roboto Mono"}
+    assert style["textStyle"]["fontSize"] == {"magnitude": 9.0, "unit": "PT"}
+
+
+def test_code_in_an_older_file_still_means_the_one_face_it_meant():
+    assert doc_merge._text_style({"text": "x", "code": True})["weightedFontFamily"] == {
+        "fontFamily": doc_ir.CODE_FAMILY}
+    # A face of its own wins over the tag, so a file that says both says the face.
+    both = doc_merge._text_style({"text": "x", "code": True, "font": "Consolas"})
+    assert both["weightedFontFamily"] == {"fontFamily": "Consolas"}
+
+
+def test_small_caps_is_a_mark_like_bold():
+    assert doc_merge._text_style({"text": "x", "smallcaps": True})["smallCaps"] is True
+    assert "smallCaps" in doc_merge.MANAGED
+
+
+def test_the_measurements_of_a_paragraph_are_written_and_named():
+    base = live([para("p:s", "one two")])
+    ours = live([para("p:s", "one two", indent=36.0, line_spacing=1.5,
+                      space_above=12.0, shading="#fff2cc")])
+    result = doc_merge.plan(base, ours, live(base["blocks"]))
+    style = [r["updateParagraphStyle"] for r in result["requests"]
+             if "updateParagraphStyle" in r][0]
+    assert style["paragraphStyle"]["indentStart"] == {"magnitude": 36.0, "unit": "PT"}
+    assert style["paragraphStyle"]["lineSpacing"] == 150.0
+    assert style["paragraphStyle"]["shading"] == {"backgroundColor": {"color": {"rgbColor": {
+        "red": 1.0, "green": 242 / 255, "blue": 204 / 255}}}}
+    assert style["fields"] == ",".join(doc_merge.MANAGED_PARAGRAPH)
+
+
+def test_a_measurement_the_source_dropped_is_named_with_no_value_so_it_goes():
+    base = live([para("p:s", "one two", indent=36.0, align="center")])
+    ours = live([para("p:s", "one two")])
+    result = doc_merge.plan(base, ours, live(base["blocks"]))
+    style = [r["updateParagraphStyle"] for r in result["requests"]
+             if "updateParagraphStyle" in r][0]
+    assert "indentStart" not in style["paragraphStyle"]     # named and unset: back to default
+    assert "indentStart" in style["fields"]
+    assert style["paragraphStyle"]["alignment"] == "START"
+    # And the merged block itself no longer carries what the source took away.
+    assert "indent" not in result["blocks"][0] and "align" not in result["blocks"][0]
+
+
+def test_an_items_indents_are_left_to_the_bullet_preset():
+    base = live([{"kind": "item", "key": "i:a", "level": 0, "ordered": False,
+                  "runs": [{"text": "an item"}]}])
+    ours = live([{"kind": "item", "key": "i:a", "level": 0, "ordered": False,
+                  "line_spacing": 2.0, "runs": [{"text": "an item"}]}])
+    result = doc_merge.plan(base, ours, live(base["blocks"]))
+    style = [r["updateParagraphStyle"] for r in result["requests"]
+             if "updateParagraphStyle" in r][0]
+    assert "indentStart" not in style["fields"] and "indentFirstLine" not in style["fields"]
+    assert style["paragraphStyle"]["lineSpacing"] == 200.0
+
+
+def test_a_paragraph_only_the_document_dressed_is_left_alone():
+    """The reader's own spacing is not a source change, so nothing is written."""
+    base = live([para("p:s", "one two")])
+    theirs = live([para("p:s", "one two", line_spacing=1.5, shading="#eeeeee")])
+    result = doc_merge.plan(base, live(base["blocks"]), theirs)
+    assert result["requests"] == []
+    assert result["blocks"][0]["line_spacing"] == 1.5
+
+
+# ------------------------------------------------- what no import can carry
+
+def test_what_the_import_drops_is_written_by_the_settle_instead():
+    """A push imports HTML, which carries neither shading nor small caps; the
+    read-back is compared with the plan and `tidy_requests` writes the difference."""
+    planned = [para("p:s", "one two", shading="#fff2cc", space_above=6.0),
+               {"kind": "paragraph", "key": "p:t", "runs": [
+                   styled_run("caps", smallcaps=True), styled_run(" and plain")]}]
+    read = live([para("p:s", "one two"),
+                 {"kind": "paragraph", "key": "p:t", "runs": [
+                     styled_run("caps"), styled_run(" and plain")]}])
+    assert doc_merge.adopt_keys(read, planned) == 0   # every block already has its key
+    assert read["blocks"][0]["unimported"]["paragraph"] == {"shading": "#fff2cc",
+                                                            "space_above": 6.0}
+    requests = doc_merge.tidy_requests(read)
+    style = requests[0]["updateParagraphStyle"]
+    assert style["fields"] == "shading,spaceAbove"
+    assert style["range"] == {"startIndex": 1, "endIndex": 9}
+    caps = requests[1]["updateTextStyle"]
+    assert caps == {"range": {"startIndex": 9, "endIndex": 13},
+                    "textStyle": {"smallCaps": True}, "fields": "smallCaps"}
+
+
+def test_a_document_that_already_says_it_is_written_again_for_nothing():
+    planned = [para("p:s", "one", shading="#fff2cc")]
+    read = live([para("p:s", "one", shading="#fff2cc")])
+    doc_merge.adopt_keys(read, planned)
+    assert doc_merge.tidy_requests(read) == []
+
+
+def test_styling_the_plan_does_not_ask_for_is_never_taken_away():
+    """In a read, "absent" is also what a reader who took the styling off looks
+    like, and a settle must never undo that."""
+    planned = [para("p:s", "one")]
+    read = live([para("p:s", "one", shading="#fff2cc")])
+    doc_merge.adopt_keys(read, planned)
+    assert doc_merge.tidy_requests(read) == []
+
+
+def test_small_caps_is_only_carried_where_the_words_came_through_whole():
+    """An equation is several index units where a character is one: anywhere but a
+    block of plain words an offset would be a guess."""
+    planned = [{"kind": "paragraph", "key": "p:s", "runs": [
+        styled_run("caps", smallcaps=True),
+        {"chip": "equation", "frozen": True, "text": "x^2"}]}]
+    read = live([{"kind": "paragraph", "key": "p:s", "runs": [
+        styled_run("caps"), {"chip": "equation", "frozen": True, "text": "x^2"}]}])
+    doc_merge.adopt_keys(read, planned)
+    assert "unimported" not in read["blocks"][0]
 
 
 def test_a_parent_tab_the_source_deleted_is_kept_while_a_child_is_still_wanted():
