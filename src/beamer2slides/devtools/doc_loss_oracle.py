@@ -732,7 +732,8 @@ def _tab_findings(was: dict | None, now: dict, then: dict | None, said: str,
                                after_words, said, tab, theme, file_blocks.get(key))
         out += _inherited_findings(key, block, new[key], (mine or {}), said, tab, theme)
         if block.get("kind") == "table":
-            out += _cell_findings(key, block, base_block, new[key], after_words, said, tab)
+            out += _cell_findings(key, block, base_block, new[key], after_words, said, tab,
+                                  words(part_text(was)))
             out += _row_resurrection_findings(key, block, base_block, new[key], said, tab,
                                               file_blocks.get(key))
 
@@ -1018,7 +1019,8 @@ def _style_findings(key, block, base_block, after_styles, after_block, after_wor
     return []
 
 
-def _cell_findings(key, block, base_block, after_block, after_words, said, tab):
+def _cell_findings(key, block, base_block, after_block, after_words, said, tab,
+                   tab_was: Counter | None = None):
     """Words the reader typed into a cell, cell by cell where the grid allows it.
 
     A cell is known by its place, and a row the reader inserted shifts every cell
@@ -1026,6 +1028,17 @@ def _cell_findings(key, block, base_block, after_block, after_words, said, tab):
     reader's, wherever it has ended up. Without that a source edit two rows down
     reads as a loss (offline seed 181: the reader adds a row, the source rewrites a
     cell, and the cell at that place now holds the word the row above it had).
+
+    `tab_was` is `_words_findings`' parameter for `_welded` and it is wanted here for
+    the same reason and more sharply: a cell is the one place a reader's drag can weld
+    text from *anywhere else in the tab* onto a word of the table. A paragraph dropped
+    into a cell against the word standing there makes one token of the two — `it.x`
+    for "…after it." and `x` — which is a token of neither the base's table nor the
+    base's paragraph, so it read as a word the reader typed, and the source rewriting
+    its own half of it read as a loss (chain-4 seed 600784: `edit_cell` made the `x`
+    into `meadow-83192`, the merge said `it.meadow-83192`, and both edits were in it).
+    Only `_welded` sees the tab; everything else is the table's question, since a
+    regrid is what moves words about inside one.
     """
     theirs, was = cells_of(block), cells_of(base_block) if base_block else {}
     now = cells_of(after_block)
@@ -1042,7 +1055,7 @@ def _cell_findings(key, block, base_block, after_block, after_words, said, tab):
         after_all = words(text_of(after_block))
         lost = typed - survived - (after_all - survived)
         lost = Counter({w: n for w, n in lost.items()
-                        if not joined_differently(w, after_all, elsewhere)})
+                        if not joined_differently(w, after_all, elsewhere, tab_was)})
         if lost and not _named(said, key):
             out.append(finding("cell_words_lost", "loss",
                                f"the cell {at} of {key} lost {' '.join(sorted(lost))[:60]}",

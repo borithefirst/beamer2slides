@@ -19,8 +19,10 @@ Two things are different from the Slides side, and both come from measurement
 
 from __future__ import annotations
 
+from bisect import bisect_left
 from collections import Counter
 from difflib import SequenceMatcher
+from collections.abc import Iterable
 from typing import NamedTuple
 
 from . import doc_ir
@@ -447,19 +449,36 @@ def bullet_requests(live: dict) -> list[dict]:
     back as what it is, so a reader who switches it from bullets to numbers in the
     toolbar is seen doing so, where before the file silently won. One request per run
     of neighbouring items that agree on being numbered.
+
+    What counts as an item is what the block will be **once this settle has
+    finished**, not what the read-back says: the settle may be taking a bullet off it
+    (`restore_bullets`), and a range reaching over such a block puts the bullet
+    straight back on — and, being a paragraph-wide request, flattens the named style
+    the settle wrote in the same breath. A paragraph the source retitled behind an
+    item the source deleted came out a plain bulleted line, the whole repair undone
+    by the request after it (offline chain-4 seed 570181).
     """
     out, run = [], []
     for block in live["blocks"] + [{"kind": "end"}]:
-        if (run and (block.get("kind") != "item" or not block.get("span")
+        item = _settles_as_item(block)
+        if (run and (not item or not block.get("span")
                      or block.get("ordered") != run[0].get("ordered"))):
             if any(b.get("guessed") for b in run):
                 out.append({"createParagraphBullets": {
                     "range": {"startIndex": run[0]["span"][0], "endIndex": run[-1]["span"][1]},
                     "bulletPreset": BULLETS[bool(run[0].get("ordered"))]}})
             run = []
-        if block.get("kind") == "item" and block.get("span"):
+        if item and block.get("span"):
             run.append(block)
     return out
+
+
+def _settles_as_item(block: dict) -> bool:
+    """Whether a read-back block is a list item once the settle has written what
+    `carry_unimported` found: a bullet it is about to take off is already gone."""
+    if (block.get("unimported") or {}).get("bullet") == "none":
+        return False
+    return block.get("kind") == "item"
 
 
 def styles_of(block: dict) -> tuple:
@@ -1224,6 +1243,15 @@ def merge(base: dict, ours: dict, theirs: dict) -> dict:
             continue
         merged.append(_merge_block(was, mine, block, conflicts, notes))
 
+    # The source's moves before its additions, because an addition is placed after the
+    # block the file puts it behind and a move does not carry what stands behind it: a
+    # picture added behind a list item the same source moved was left where the item had
+    # been, and then the block after *it* read as standing in its place already, so its
+    # own move was refused as one whose two ends are one place — the order came out
+    # neither side's and nothing said so (offline chain-6 seed 400186). A block still to
+    # be added is no anchor either way: `_place` looks further back for one that is
+    # there, which is where the file's order puts it all the same.
+    _apply_source_moves(base, ours, theirs, merged, notes)
     for index, block in enumerate(ours["blocks"]):
         key = block.get("key")
         if key in theirs_by or (key in base_by and key not in theirs_by):
@@ -1232,7 +1260,6 @@ def merge(base: dict, ours: dict, theirs: dict) -> dict:
         # and let `origin` be what says this one has to be written from nothing.
         fresh = {k: v for k, v in block.items() if k != "span"}
         merged.insert(_place(ours, merged, index), fresh | {"origin": "added by the source"})
-    _apply_source_moves(base, ours, theirs, merged, notes)
     return {"blocks": merged, "conflicts": conflicts, "notes": notes}
 
 
@@ -1273,6 +1300,7 @@ def _apply_source_moves(base: dict, ours: dict, theirs: dict, merged: list, note
         return
     sides = {name: {b.get("key"): b for b in side["blocks"]}
              for name, side in (("was", base), ("mine", ours), ("live", theirs))}
+    stuck: set[str] = set()          # moves refused, and the blocks that follow them
     for key in _moved_keys(was, mine):
         block = placed[key]
         # A move is written as a delete and a fresh insert, so it can only carry what
@@ -1290,18 +1318,37 @@ def _apply_source_moves(base: dict, ours: dict, theirs: dict, merged: list, note
                     or not _table_movable(sides["was"][key], sides["live"][key]):
                 notes.append(f"{key}: the source moved the table, but the document changed "
                              f"it or it holds a chip — left where the document has it")
+                stuck.add(key)
                 continue
             block["build"] = build
         elif not _writable_block(block):
             notes.append(f"{key}: the source moved it, but a block with an equation-like "
                          f"chip in it cannot be written from nothing — left where the "
                          f"document has it")
+            stuck.add(key)
             continue
         was_at = merged.index(block)
         merged.remove(block)
         index = next(i for i, b in enumerate(ours["blocks"]) if b.get("key") == key)
+        # A source that moves a section moves its blocks one by one, and each is
+        # placed after the one the file puts it behind. Where that one's own move was
+        # just refused it is not where the file has it, so this block does not go
+        # where the file has it either: it follows its anchor to wherever the document
+        # keeps it, and stays put altogether when the anchor is the block in front of
+        # it. The report names the block that could not move; that the rest of the
+        # section went with it is a consequence nobody could read off that line, so it
+        # is said too — and the next block along is stuck on this one in its turn
+        # (offline chain-10 seed 450252: a table the reader had regridded, once with
+        # the empty paragraph behind it and once with a paragraph sent past it).
+        anchor = next((b.get("key") for b in reversed(ours["blocks"][:index])
+                       if any(m.get("key") == b.get("key") for m in merged)), None)
         where = _place(ours, merged, index)
         merged.insert(where, block)
+        if anchor in stuck:
+            notes.append(f"{key}: the file puts it after {anchor}, which stays where the "
+                         f"document has it — so this one goes there too, and not where "
+                         f"the file has it")
+            stuck.add(key)
         if where == was_at:
             # The file asks for a move whose two ends are one place. `_moved_keys`
             # reads the file against the *base*, and the merged order is the
@@ -1332,10 +1379,32 @@ def _moved_keys(was: list[str], mine: list[str]) -> list[str]:
     what somebody moved. Taking it the other way round — moving everything that is
     not where it was — would rewrite a whole document because its first paragraph
     went to the end.
+
+    "The longest run" is the longest common *subsequence*, not `SequenceMatcher`'s
+    matching blocks, which are contiguous: a closing paragraph sent past a list made
+    every block in front of it read as moved instead — four moves where one would do,
+    and the table among them, which the reader had regridded, so that move was refused
+    and the order came out neither side's with nothing saying so (offline chain-6 seed
+    400186). Both sides hold the same keys, so the subsequence is the longest run of
+    the file's blocks whose places in the base keep going up.
     """
-    kept = {mine[j] for op, _, _, j1, j2 in
-            SequenceMatcher(None, was, mine, autojunk=False).get_opcodes()
-            if op == "equal" for j in range(j1, j2)}
+    place = {key: at for at, key in enumerate(was)}
+    rising = [(at, place[key]) for at, key in enumerate(mine) if key in place]
+    tails: list[int] = []            # the smallest end a run of each length has
+    ends: list[int] = []             # and which block of `mine` that end is
+    came: dict[int, int] = {}
+    for at, value in rising:
+        length = bisect_left(tails, value)
+        came[at] = ends[length - 1] if length else -1
+        if length == len(tails):
+            tails.append(value)
+            ends.append(at)
+        else:
+            tails[length], ends[length] = value, at
+    kept, at = set(), ends[-1] if ends else -1
+    while at >= 0:
+        kept.add(mine[at])
+        at = came[at]
     return [key for key in mine if key not in kept]
 
 
@@ -1559,14 +1628,42 @@ def _table_lines(was: dict, mine: dict, live: dict, notes: list,
     if rows is None or columns is None:
         return None
     settled = {}
-    for name, merged, pairs in (("row", rows, mine_rows), ("column", columns, mine_columns)):
+    for name, merged, pairs, across in (("row", rows, mine_rows, mine_columns),
+                                        ("column", columns, mine_columns, mine_rows)):
         for line in merged:
             if line.was is not None and line.mine is None and not line.gone:
                 notes.append(f"{key}: the source took away a {name}, but the document wrote "
                              f"in it — kept")
         have = {line.mine for line in merged if line.mine is not None}
         settled[name] = sorted(dropped[name] | {m for _, m in pairs if m not in have})
+        # And the other way round, which nothing said: the document deleted a line the
+        # source had written in. The words go with the line — deleting a row is a change
+        # to the grid, and the grid is the document's — so there is nothing to merge and
+        # nothing to keep, but the author asked for those words and only the report can
+        # tell them they went (offline chain-10 seed 480066: the reader deleted the very
+        # row whose cell the source was rewriting, and the file's line was settled out of
+        # the merge in silence).
+        was_of = {m: w for w, m in pairs}
+        for m in settled[name]:
+            w = was_of.get(m)
+            if w is None or not _source_wrote_in(then, want, name, w, m, across):
+                continue
+            notes.append(f"{key}: the document deleted a {name} the source wrote in — "
+                         f"that {name} is gone and the words with it")
     return rows, columns, settled
+
+
+def _source_wrote_in(then: list[list[str]], want: list[list[str]], name: str,
+                     w: int, m: int, across: list[tuple[int, int]]) -> bool:
+    """Whether the source changed a cell of a row (or column) of the base.
+
+    Only the cells of the *other* dimension's lines both sides share are asked, as in
+    `_line_unchanged`: a column the source added is a line of its own, and what it says
+    is not news about every row it crosses.
+    """
+    if name == "row":
+        return any(then[w][a] != want[m][b] for a, b in across)
+    return any(then[a][w] != want[b][m] for a, b in across)
 
 
 def _hint(was: dict, mine: dict, live: dict) -> dict | None:
@@ -1811,23 +1908,34 @@ def _restyled_words(was: dict, mine: dict, live: dict, text: str) -> tuple[list[
     """Runs for merged `text` whose words both sides changed, and one side the marks.
 
     Every character takes the document's styling where its word is the document's,
-    and then the file's where its word is the file's too, so a word the source made
-    bold is bold wherever the merge kept it. A character in a word neither side has
-    whole (the merge joined two edits inside one) takes the one before it, as Docs
-    gives a typed character. Frozen runs are always the document's own. The second
-    value says whether a word the source restyled is gone from the merge — the
-    document rewrote it, and its new words keep the document's styling.
+    and then the file's where the source really *changed* that word's, so a word the
+    source made bold is bold wherever the merge kept it. Only where it changed it:
+    the source's other words say nothing, and writing the file's styling on them as
+    well takes back a mark the reader put somewhere the file has no mark, which is
+    the reader's edit and outranks it. Nothing above catches that, because a reader
+    who marks one word and un-marks its neighbour leaves `marks_of` — a sequence of
+    mark sets, with no words in it — saying exactly what it said before, so the merge
+    reads the restyle as the source's alone (offline chain-6 seed 400044: a bold
+    moved from the word the reader deleted to the word they typed). A character in a
+    word neither side has whole (the merge joined two edits inside one) takes the one
+    before it, as Docs gives a typed character. Frozen runs are always the document's
+    own. The second value says whether a word the source restyled is gone from the
+    merge — the document rewrote it, and its new words keep the document's styling.
     """
     styles: list = [None] * len(text)
     live_styles, mine_styles = _char_styles(live), _char_styles(mine)
+    was_styles = _char_styles(was)
     for i, j in _word_pairs(block_text(live), text):
         styles[j] = live_styles[i]
+    # A word of the file the base has too, and set as the base has it: the source is
+    # not asking for anything there. A word it does not have is one the source typed,
+    # and that one comes with the file's styling.
+    said = {i: was_styles[w] for w, i in _word_pairs(block_text(was), block_text(mine))}
     kept = set()
     for i, j in _word_pairs(block_text(mine), text):
         kept.add(i)
-        if text[j] != FROZEN:
+        if text[j] != FROZEN and mine_styles[i] != said.get(i):
             styles[j] = mine_styles[i]
-    was_styles = _char_styles(was)
     lost = any(i not in kept and mine_styles[i] != was_styles[w]
                for w, i in _word_pairs(block_text(was), block_text(mine))
                if block_text(mine)[i] != FROZEN)
@@ -2219,13 +2327,16 @@ def requests(theirs: dict, merged: list[dict]) -> list[dict]:
     filled = any(_written_here(b) and _insert_index(merged, p) is None
                  for p, b in enumerate(merged))
     left_empty = None
+    # Every one of them first, because a range one delete leaves behind another may
+    # already have taken (`_orphan_range`).
+    cuts = {index: _delete_range(theirs["blocks"], index, going, ends,
+                                 theirs.get("lead"), filled) for index in sorted(going)}
     for index in sorted(going):
         live = theirs["blocks"][index]
-        start, end = _delete_range(theirs["blocks"], index, going, ends, theirs.get("lead"),
-                                   filled)
+        start, end = cuts[index]
         plans.append((start, DELETE, [{"deleteContentRange": {
             "range": {"startIndex": start, "endIndex": end}}}]
-            + _orphan_range(live, start, end)))
+            + _orphan_range(live, start, end, cuts.values())))
         if index == len(theirs["blocks"]) - 1 and end == theirs["blocks"][index]["span"][1] - 1:
             # The body's last block, whose words go and whose own mark stays
             # (`_delete_range`): the document ends on an empty paragraph exactly
@@ -2374,9 +2485,10 @@ def structure(theirs: dict, merged: list[dict],
     """
     plans: list[tuple[int, list[dict], dict]] = []
     deletes: dict[str, tuple[int, int, list[dict]]] = {}
-    for position, block in enumerate(merged):
+    for block in list(merged):                   # `_put_back` below rearranges it
         if block.get("kind") != "table":
             continue
+        position = next(i for i, b in enumerate(merged) if b is block)
         key = block.get("key")
         if block.get("moved"):
             # A move is a delete and a table built again where the file has it, blank:
@@ -2388,6 +2500,7 @@ def structure(theirs: dict, merged: list[dict],
                                            rows, columns)
             if not reqs:
                 block["moved"] = False
+                _put_back(merged, block)
                 if notes is not None:
                     notes.append(f"{key}: the source moved it where the document has no "
                                  f"paragraph to write in — before the table it opens on, "
@@ -2629,7 +2742,8 @@ def _delete_range(blocks: list[dict], index: int, going: set[int],
     return start - 1, end - 1
 
 
-def _orphan_range(block: dict, start: int, end: int) -> list[dict]:
+def _orphan_range(block: dict, start: int, end: int,
+                  cuts: Iterable[tuple[int, int]] = ()) -> list[dict]:
     """The `deleteNamedRange` a delete needs when the block's own range outlives it.
 
     A block standing in front of a table gives up the *previous* block's paragraph
@@ -2648,9 +2762,20 @@ def _orphan_range(block: dict, start: int, end: int) -> list[dict]:
     after a table of contents, moved one step later, ended up wearing
     `paragraph:second-section`'s identity). A range is destroyed with its text or not
     at all, so where the text does not go the range is named and deleted.
+
+    Named only where it really outlives *the batch*, not this one delete: a run of
+    blocks that go together hands each mark leftwards, so the block in front of the
+    table gives up its neighbour's mark while its own is covered by the delete of the
+    block behind it — and a `deleteNamedRange` for a range Docs has already dropped
+    with its text is refused, which throws out the whole batch and kills the sync
+    (offline chain-6 seed 550667: two empty paragraphs in front of a table, both
+    deleted in one step). So every cut of the batch is asked, this one among them.
     """
     span = block.get("range") or doc_ir.anchor_range(block)
-    if not block.get("rangeId") or not span or (start <= span[0] and span[1] <= end):
+    if not block.get("rangeId") or not span:
+        return []
+    if any(low <= span[0] and span[1] <= high
+           for low, high in [(start, end), *cuts]):
         return []
     return [{"deleteNamedRange": {"namedRangeId": block["rangeId"]}}]
 
@@ -2916,8 +3041,84 @@ def plan(base: dict, ours: dict, theirs: dict) -> dict:
     refuse_nowhere(theirs, result["blocks"], result["notes"])
     restore_undeletable(theirs, result["blocks"], result["notes"])
     result["structure"], result["shaped"] = structure(theirs, result["blocks"], result["notes"])
+    unwritten_levels(theirs, result["blocks"], result["notes"])
     result["requests"] = requests(theirs, result["blocks"])
     return result
+
+
+def unwritten_levels(theirs: dict, merged: list[dict], notes: list[str]) -> None:
+    """Say when an item cannot be given the nesting level the source asks for.
+
+    No request sets one. `createParagraphBullets` says nothing about a level: Docs
+    reads it off the paragraph's leading tabs, which the merge does not write. So a
+    level lives on the paragraph mark that carries it and survives exactly as long as
+    that mark does — and there are two ways for it not to.
+
+    A block **written from nothing** — one the source added, or moved, a move being a
+    delete and a write — comes out at the level of the list it lands in, whether that
+    is deeper than the source asks for or shallower (offline chain-4 seed 430296,
+    chain-8 seed 530265).
+
+    And a block whose **paragraph mark a delete in front of it hands over**: Docs
+    merges the two paragraphs keeping the first one's style, so the block after a
+    deleted one wears the deleted one's, and a run of deletes passes the first one's
+    along. Everything else about that style is put back — the named style and the
+    bullet by `carry_unimported` / `restore_bullets`, the measures by the block's own
+    restyle — and the level alone cannot be (offline chain-4 seed 430587: the source
+    moved the item standing in front of a nested one, and the nested one came out at
+    the moved item's level, the reader having touched neither).
+
+    Saying so before the write is the only honest thing left: nothing else could see
+    it, the reader having left the block alone and the base agreeing with the
+    document afterwards, so both the loss oracle and the convergence check are
+    satisfied (`fuzz_docs._shape_arrived` is the judge that is not). Writing the tabs
+    is the alternative and waits for a live measurement: a Docs that does not eat
+    them leaves them in the words, which is a corruption where this is a level
+    (docs/google-docs.md, "Remaining risks").
+
+    After `structure`, which is where a move can still be taken back.
+    """
+    def level_of(block: dict) -> int:
+        return block.get("level", 0) if block.get("kind") == "item" else 0
+
+    lands: list[int | None] = []            # the level each item really comes out at
+    for at, block in enumerate(merged):
+        if block.get("kind") != "item":
+            lands.append(None)
+            continue
+        if not _written_here(block):
+            lands.append(block.get("level", 0))
+            continue
+        # The text is written at the mark of the paragraph in front of it and wears
+        # that paragraph's style, its place in a list among it; where no list stands
+        # there, `createParagraphBullets` starts one at level 0. So the level it comes
+        # out at is the one in front of it, which can be deeper than the source asks
+        # for as easily as shallower — a nested item at the end of the document is all
+        # it takes (offline chain-8 seed 530265: the source moved a level-0 item to the
+        # end, behind an item the reader had nested).
+        out = lands[at - 1] if at and lands[at - 1] is not None else 0
+        lands.append(out)
+        if out != block.get("level", 0):
+            notes.append(f"{block.get('key')}: written from nothing as a list item, and no "
+                         f"request gives a bullet its nesting level — it comes out at level "
+                         f"{out}, the level of the item in front of it, not at "
+                         f"{block.get('level', 0)}")
+    by_key = {b["key"]: b for b in merged if b.get("key")}
+    live = theirs.get("blocks", [])
+    going = {i for i, block in enumerate(live) if _goes(block, by_key)}
+    for index, block in enumerate(live):
+        want = by_key.get(block.get("key"))
+        if index in going or want is None or _written_here(want):
+            continue
+        donor = None                      # the first of the run of deletes in front
+        at = index - 1
+        while at in going and not _mark_is_taken(live, at, going, True, theirs.get("lead")):
+            donor, at = live[at], at - 1
+        if donor is None or level_of(donor) == level_of(want):
+            continue
+        notes.append(f"{want.get('key')}: the paragraph in front of it goes, and Docs hands "
+                     f"its style to this one — no request gives a bullet its nesting level, "
+                     f"so it comes out at level {level_of(donor)}, not at {level_of(want)}")
 
 
 # ---------------------------------------------------------------- tabs

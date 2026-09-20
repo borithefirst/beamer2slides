@@ -44,6 +44,7 @@ import re
 import sys
 import time
 from collections import Counter
+from difflib import SequenceMatcher
 
 from .. import doc_ir, doc_merge
 from . import doc_loss_oracle as oracle
@@ -1257,7 +1258,61 @@ def _arrived(was: dict, before: dict, mine: dict, after: dict, report: dict,
                 f"has it and the source asks for {want[0]}x{want[1]}, but the sync "
                 f"left the document at {got[0]}x{got[1]} and the report says nothing",
                 tab=tab, key=key))
+        out += _order_arrived(part, sides[1][tab], sides[2][tab], sides[3][tab],
+                              said, tab, step, seen)
     return out
+
+
+def _block_keys(part: dict) -> list[str]:
+    return [b["key"] for b in part.get("blocks", []) if b.get("key")]
+
+
+def _order_arrived(was_p, doc_p, src_p, end_p, said, tab, step,
+                   seen: Counter) -> list[dict]:
+    """And the same question about the *order*: where the reader moved nothing, the
+    blocks the source moved must come out where the file has them.
+
+    The merged order is the document's, and on top of that the blocks the source
+    moved go back where the file has them (`doc_merge.plan_order`). Only the first
+    half of that was ever judged — by the loss oracle, which asks whether a block the
+    reader put somewhere is still there. A source move that never arrives takes
+    nothing of the reader's, and the settle writes the order the document ended up
+    with into the base, so the next sync agrees with itself: the same shape as a
+    column matched wrongly, and the reason this judge exists.
+
+    Narrow on purpose: only where the reader left the shared keys in exactly the base's
+    order, so no merge rule can stand in the way. There are three places where the
+    merge refuses a move outright — a block between two tables, one in front of the
+    table a body opens on, a table right behind another — and each of them says so.
+
+    What is asked of the report is a **pair**, not a block. Which block "moved" is not
+    a fact about two orders: swapping a paragraph and the table after it reads as
+    either of them moving, `doc_merge._moved_keys` takes the shorter reading and here
+    either is as short as the other, so the sync may refuse — and name — the table
+    while the file reads as though the paragraph went. The disagreement is therefore
+    counted as the pairs of keys that came out the other way round, and a pair is
+    explained where the report names either of its two.
+    """
+    sides = (was_p, doc_p, src_p, end_p)
+    shared = set.intersection(*(set(_block_keys(p)) for p in sides))
+    was, doc, src, end = ([k for k in _block_keys(p) if k in shared] for p in sides)
+    if doc != was or src == was:
+        return []                 # the reader reordered, or the source did not
+    seen["arrival/order asked"] += 1
+    place = {key: at for at, key in enumerate(end)}
+    astray = [(a, b) for at, a in enumerate(src) for b in src[at + 1:]
+              if place[a] > place[b]
+              and not oracle._named(said, a) and not oracle._named(said, b)]
+    if not astray:
+        return []
+    seen["arrival/order missed"] += 1
+    first, second = astray[0]
+    return [oracle.finding(
+        "order_lost", "loss",
+        f"step {step}: the reader left the order of {tab or 'the body'} exactly as "
+        f"the base has it and the file puts {first!r} in front of {second!r}, but the "
+        f"sync left the document ordered {end} and the report says nothing",
+        tab=tab, key=first)]
 
 
 def _words_arrived(key, block, here, file_b, then, said, tab, step,
@@ -1452,6 +1507,14 @@ def _cells_arrived(key, block, here, file_b, then, said, tab, step,
     write, and `doc_cells - base_cells` is how that is asked. A cell whose base text
     the reader deleted along with its line is no arrival to wait for, so the old text
     has to still be there before the sync for the new one to be owed.
+
+    And only words the source really *wrote* are waited for: a word the base already
+    says somewhere is one a regrid shifted into this cell, not a new one. The half
+    above asks about the grid, and it recognises a regrid by the grid's size — so a
+    source that takes one row out and puts another in slips past it, and every cell
+    below the one it took read as rewritten with the row above's words (seed 570177,
+    where the reader deleted a different row, so both deletes stood and the merge was
+    right).
     """
     if _grid(block) is None or _grid(file_b) != _grid(block):
         return []                     # the source regridded: the half above asks
@@ -1464,7 +1527,7 @@ def _cells_arrived(key, block, here, file_b, then, said, tab, step,
     out = []
     for at, text in file_cells.items():
         old = was_cells.get(at)
-        if text == old or doc_cells[old] < base_cells[old]:
+        if text == old or base_cells[text] or doc_cells[old] < base_cells[old]:
             continue
         seen["arrival/cell asked"] += 1
         if after[text] or oracle._named(said, key):
