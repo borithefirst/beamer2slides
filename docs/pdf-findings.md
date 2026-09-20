@@ -25,6 +25,23 @@ described here; PDFium's own quirks are listed under Pitfalls in `CLAUDE.md`.
 6. **Rotated text** (pgfplots `ylabel`) appears as a normal span; the line's `dir`
    vector tells the rotation.
    → Treat non-horizontal text as part of a figure.
+- **Right-to-left text arrives written left to right.** A PDF draws glyphs at places and says
+   nothing about reading order. LuaTeX with `bidi=basic` draws Hebrew and Arabic in *logical*
+   order (falling x), and PDFium's text page, whose job is to undo the *visual* order most
+   writers use, turns that back to front: `hebrew-lesson`'s content stream draws
+   `0x5d1 0x5e1 0x5d9 0x5e4 0x5d5 0x5e8` (בסיפור) and `FPDFText_GetUnicode` gives it back
+   reversed. Every word this converter wrote into a deck was spelt backwards, with the geometry
+   perfectly right.
+   → `bidi.py` turns visual order into logical order (an involution, so it is right whichever
+   side reversed it), at the span and at the line; `classify` asks it in `Line.text`,
+   `reading_order` and `span_runs`. CLAUDE.md has the whole rule.
+- **A font with no ToUnicode gives letters, not glyphs, and may give too many.** In
+   `arabic-training` (Calibri, no ToUnicode) PDFium maps glyphs through the font's cmap and hands
+   back Arabic *presentation forms*, and two glyphs of one word each come back carrying the same
+   pair of letters, so the word has two letters too many. Nothing about reading order: the pair
+   is doubled before anything is reordered.
+   → Not handled. It costs one word of one corpus deck; a fix would have to know which glyph a
+   pair really belongs to.
 
 ## Lists
 7. **Bullets vary with the theme:**

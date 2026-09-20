@@ -258,6 +258,32 @@ a per-slide background picture.
   points (`pdf.api.curve_extremes`). Test deck: `22_overlays_on_text`.
 - Accents PDFium reports as separate chars (`ACCENTS`: ¯ ˆ ˜ …) become combining marks on
   their letter (X̄), also when the accent landed in the previous span.
+- **Hebrew and Arabic read the way they are written** (`bidi.py`): a PDF says nothing about reading
+  order, it draws glyphs at places, and a right-to-left run reaches the pipeline written left to
+  right - whether the writer drew it visually (most do, so PDFium's text page turns it round) or
+  logically (LuaTeX with `bidi=basic`, which is what `adopt` and every Hebrew or Arabic talk
+  compiles with, so that pass turns it *back to front*). Measured on the corpus deck
+  `hebrew-lesson`: the content stream draws `0x5d1 0x5e1 0x5d9 0x5e4 0x5d5 0x5e8` at falling x
+  (בסיפור) and `FPDFText_GetUnicode` gives it back reversed at rising x. **Every Hebrew word this
+  converter ever wrote into a deck was spelt backwards** and nothing said so - the glyphs are all
+  there, the geometry is right, and no check in this project reads a word. Visual order is turned
+  into logical order at the two sizes a line has, since `extract` cuts it into spans by geometry
+  long before anything asks what it says: `logical_text` for one span's characters and
+  `logical_spans` for a line's spans, both the same rule (the order turns round and each island of
+  the other direction - a Latin name, a year - turns back inside it), both their own inverse, so
+  they are right whichever side did the reversing. A whole line often *is* one span (Hebrew word
+  spaces are under the word gap), so reversing each run in place - `CloseTempLine`'s own rule -
+  spells every word right and leaves the sentence backwards; that is what it did first. Which way
+  a line reads is Unicode's P2 asked of the **answer** (`_base`: a reading holds up only if the
+  text it produces would be drawn back the way the page draws it; where both readings hold up, a
+  Latin sentence with a Hebrew phrase in it or the other way round, the commoner letter decides),
+  brackets are mirrored back, and a vowel point stays on its letter (`_clusters`). The seams in
+  `classify` are `Line.text`, `reading_order`, `span_runs` and the run separator, which is now
+  `gap_between` - provably the old `b.x0 - a.x1` for every pair drawn in order, so no left-to-right
+  deck can move. Tests: `tests/test_bidi.py`, synthetic (the characters, not a font, so they run
+  where no Hebrew font is installed). What is left in `arabic-training` is not order but a font
+  with no ToUnicode: two glyphs come back carrying the same *pair* of letters, so one word has two
+  letters too many.
 - Hole and overlay pictures are placed by measurement (`emit.measure_places`, ~2-3 s per deck):
   scratch slides get copies of the text boxes with holes or overlay words (run highlights
   removed), every hole run and marked word highlighted in a mark colour and all text black; one

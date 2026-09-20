@@ -16,6 +16,7 @@ import unicodedata
 from collections import Counter
 from dataclasses import dataclass, field, replace
 
+from . import bidi
 from .fonts import FontInfo, font_info
 
 BULLET_GLYPHS = set("▶►▸‣•◦▪■□○●★⋆✓∗–")
@@ -229,7 +230,7 @@ class Line:
 
     @property
     def text(self) -> str:
-        return " ".join(s.text.strip() for s in self.spans)
+        return " ".join(s.text.strip() for s in bidi.logical_spans(self.spans))
 
 
 @dataclass(eq=False)
@@ -309,11 +310,12 @@ FRACTION_SLASH = "⁄"
 
 
 def reading_order(line: "Line") -> list[tuple]:
-    """The line's content spans left to right, except that each simple fraction becomes
+    """The line's content spans in reading order - left to right, or right to left where that is
+    how the line reads (`bidi.logical_spans`) - except that each simple fraction becomes
     numerator (superscript), fraction slash, denominator (subscript)."""
     owner = {id(s): f for f in line.fractions for s in f[1] + f[2]}
     out, emitted = [], set()
-    for s in line.content:
+    for s in bidi.logical_spans(line.content):
         f = owner.get(id(s))
         if f is None:
             out.append((s, None))
@@ -323,15 +325,23 @@ def reading_order(line: "Line") -> list[tuple]:
     return out
 
 
+def gap_between(a: "Span", b: "Span") -> float:
+    """The room between two neighbours on a line, whichever of them the page draws first: on a
+    right-to-left line the next span stands to the *left* of the one before it."""
+    return max(b.rect.x0 - a.rect.x1, a.rect.x0 - b.rect.x1)
+
+
 def span_runs(spans: list[Span]) -> list[dict]:
-    """Runs for a short piece of text given as spans in reading order (cells, node labels).
-    Simple math works as in text lines: symbols from math fonts, sub/superscripts."""
+    """Runs for a short piece of text given as spans left to right (cells, node labels), put into
+    reading order first. Simple math works as in text lines: symbols from math fonts,
+    sub/superscripts."""
     runs: list[dict] = []
     main = max(spans, key=lambda s: s.size) if spans else None
     base_family = next((s.info.family for s in spans if s.info.family not in ("math", "icon")), "sans")
+    spans = bidi.logical_spans(spans)
     for i, s in enumerate(spans):
         text = s.text
-        if i and s.rect.x0 - spans[i - 1].rect.x1 > 0.15 * s.size and not text.startswith(" "):
+        if i and gap_between(spans[i - 1], s) > 0.15 * s.size and not text.startswith(" "):
             text = " " + text
         family, italic, script = s.info.family, s.info.italic, None
         if family == "math":
@@ -715,6 +725,8 @@ class PageClassifier:
                 a = s["alpha"] / 255
                 color = "#" + "".join(f"{round(int(color[i:i + 2], 16) * a + 255 * (1 - a)):02x}" for i in (1, 3, 5))
             text = TYPE3_SYMBOLS.get(s["text"], s["text"]) if s["font"] == "Type3" else s["text"]
+            # The page draws right-to-left text left to right (bidi.py): put its letters back.
+            text = bidi.logical_text(text)
             span = Span(s["id"], text, s["font"].split("+", 1)[-1], s["size"], color, r,
                         s["origin"][1], abs(dy) < 0.01 and dx > 0, font_info(s["font"]))
             if s.get("smallcaps"):  # OpenType small caps, found from glyph ids (extract.small_caps_spans)
@@ -1455,7 +1467,7 @@ class PageClassifier:
                         sep = "\t"
                     else:
                         # (after a hole, from the end of its graphic: a frame wider than its words)
-                        gap = span.rect.x0 - (hole_x1 if runs[-1].get("hole") else prev.rect.x1)
+                        gap = (span.rect.x0 - hole_x1) if runs[-1].get("hole") else gap_between(prev, span)
                         sep = " " if gap > 0.15 * line.size else ""
                         if gap >= 1.0 * line.size:
                             # \quad and wider (\and between authors): em spaces keep the gap
