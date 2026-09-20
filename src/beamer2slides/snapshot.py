@@ -349,10 +349,16 @@ def read_slide(slide: dict) -> dict:
             "order": [e["objectId"] for e in slide.get("pageElements", [])], "objects": objects}
 
 
+def page_size(pres: dict) -> list[float]:
+    """The presentation's page, in pt. Every box a sync writes is in these points, and a deck a
+    person built is whatever size they made it (`adopt_sync`)."""
+    return [_unit(pres["pageSize"]["width"]), _unit(pres["pageSize"]["height"])]
+
+
 def read_presentation(pres: dict) -> dict:
     layouts = {l["objectId"]: l.get("layoutProperties", {}).get("name") for l in pres.get("layouts", [])}
     return {"presentationId": pres["presentationId"], "revisionId": pres.get("revisionId"),
-            "page_size": [_unit(pres["pageSize"]["width"]), _unit(pres["pageSize"]["height"])],
+            "page_size": page_size(pres),
             "layouts": layouts, "master_background": background(pres["masters"][0]) if pres.get("masters") else None,
             "slides": [read_slide(s) for s in pres.get("slides", [])]}
 

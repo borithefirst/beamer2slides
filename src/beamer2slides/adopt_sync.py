@@ -37,7 +37,11 @@ ORIGIN = "adopt"
 # it was never drawn from.
 PAIR_SURE = 0.45
 PAIR_MARGIN = 0.08
-PAGE_TOLERANCE = 0.5  # pt
+# How far the deck's shape may be from the shape of the page the source compiles to. One number
+# scales PDF pt into the deck's points (`emit.DeckPlan.scale`), so the two have to have the same
+# aspect; 0.5% is under half a point on a 720 pt page, and beamer's own pages for a ratio are
+# rounded to that sort of figure.
+ASPECT_TOLERANCE = 0.005
 
 
 class FirstSyncRefused(Exception):
@@ -146,11 +150,14 @@ def pair_elements(conv: list[dict], deck: list[dict]) -> tuple[dict[int, int], d
 
 # ---------------------------------------------------------------- the base
 
-def convert_source(tex: Path, work: Path, engine: str | None = None) -> tuple[dict | None, str]:
+def convert_source(tex: Path, work: Path, engine: str | None = None,
+                   page_width: float = SLIDE_W) -> tuple[dict | None, str]:
     """Compile the source tree at `tex` and convert it exactly as a later `sync` will
     (`sync.build_ours`'s first half): the base's IR side has to be what the *converter* makes of
     that source, not what adopt read from the deck, or every element would read as changed on the
-    first sync. Returns ({"deck", "out", "pdf", "scale"}, "") or (None, the compile error)."""
+    first sync. `page_width` is the deck's own, for the same reason - the plan's scale, and with it
+    every hole width it fits, is PDF pt to *that* deck's points.
+    Returns ({"deck", "out", "pdf", "plan"}, "") or (None, the compile error)."""
     from .classify import classify
     from .emit import DeckPlan, merge_blocks
     from .extract import extract, select_overlays
@@ -171,7 +178,8 @@ def convert_source(tex: Path, work: Path, engine: str | None = None) -> tuple[di
     raw = select_overlays(raw, "last")
     deck = classify(raw)
     render_backgrounds(prepared.pdf, raw, deck, out)
-    plan = DeckPlan({**deck, "slides": [{**s, "elements": merge_blocks(s["elements"])} for s in deck["slides"]]})
+    plan = DeckPlan({**deck, "slides": [{**s, "elements": merge_blocks(s["elements"])} for s in deck["slides"]]},
+                    page_width)
     return {"deck": plan.deck, "out": out, "pdf": pdf, "plan": plan}, ""
 
 
@@ -215,7 +223,7 @@ def build_base(conv_deck: dict, conv_out: Path, target: dict, pres: dict, pdf: P
                 unpaired.append({"slide": entry["key"], "element": el["key"], "kind": el["kind"], "why": why[i]})
     paired = sum(1 for e in base["slides"] for el in e["elements"] if el.get("main"))
     base["adopt"] = {"presentationId": read["presentationId"], "deck_page_size": read["page_size"],
-                     "frame_width": SLIDE_W, "slides": len(base["slides"]), "paired": paired,
+                     "frame_width": read["page_size"][0], "slides": len(base["slides"]), "paired": paired,
                      "unpaired": unpaired,
                      "left_alone": [{"slide": e["key"], "objects": oids}
                                     for e, oids in zip(base["slides"], leftovers) if oids]}
@@ -251,7 +259,7 @@ def record(tex: Path, work: Path, target: dict, pres: dict, engine: str | None =
     if not pres.get("slides"):
         return None, "the deck was read without its presentation (no read-back to record)"
     log("recording a sync base for the adopted deck...")
-    conv, err = convert_source(Path(tex), Path(work), engine)
+    conv, err = convert_source(Path(tex), Path(work), engine, float(snapshot.page_size(pres)[0]))
     if conv is None:
         return None, f"the source does not compile:\n{err}"
     problem = labels_match(conv["deck"], target)
@@ -275,9 +283,29 @@ def next_command(pdf: Path | str, out: Path) -> str:
 
 # ---------------------------------------------------------------- the first sync
 
+def deck_page(base: dict) -> list[float]:
+    return base.get("deck_page_size") or (base.get("adopt") or {}).get("deck_page_size") or [SLIDE_W]
+
+
 def deck_width(base: dict) -> float:
-    size = base.get("deck_page_size") or (base.get("adopt") or {}).get("deck_page_size") or [SLIDE_W]
-    return float(size[0])
+    """How wide the deck is, in slide pt - which is what `sync` plans its boxes in. `convert` makes
+    a deck SLIDE_W wide and nothing else; a deck `adopt` took over is whatever the person made."""
+    return float(deck_page(base)[0])
+
+
+def aspect_mismatch(base: dict) -> tuple[float, float] | None:
+    """(the deck's aspect, the compiled page's) when one scale cannot carry the plan onto the deck.
+
+    `emit.DeckPlan` turns the PDF's points into the deck's with a single number, so a page the
+    source compiles to that is not the deck's shape puts everything right in x and wrong in y (or
+    the other way about) - silently, since the boxes are valid. `adopt` writes the page from the
+    deck (`deck_ir.page_size_for`, `adopt.page_setup`), so this is a source somebody changed the
+    paper of, not the ordinary case."""
+    deck, page = deck_page(base), base.get("page_size")
+    if not page or len(deck) < 2 or not page[1] or not deck[1]:
+        return None
+    a, b = deck[0] / deck[1], page[0] / page[1]
+    return None if abs(a - b) <= ASPECT_TOLERANCE * b else (a, b)
 
 
 def _creations(mplan: dict) -> list[dict]:
@@ -322,12 +350,10 @@ def problems(base: dict, mplan: dict, theirs: dict, way_back: dict | None = None
         return []
     out: list[dict] = []
     makes = _creations(mplan)
-    width = deck_width(base)
-    if makes and abs(width - SLIDE_W) > PAGE_TOLERANCE:
-        # Everything emit plans is in a frame SLIDE_W pt wide (`emit.DeckPlan.scale`), and sync
-        # creates objects from that plan. On a deck of another size every one of them would land
-        # at the wrong place and the wrong size - silently, since the boxes are valid.
-        out.append({"reason": "page-frame", "width": width, "creations": makes[:3], "count": len(makes)})
+    shape = aspect_mismatch(base)
+    if makes and shape is not None:
+        out.append({"reason": "page-shape", "deck": shape[0], "page": shape[1],
+                    "creations": makes[:3], "count": len(makes)})
     blind = []
     for p in mplan["slides"]:
         if p["action"] != "update" or p.get("base") is None:
@@ -379,10 +405,11 @@ def _lines(p: dict) -> list[str]:
         return [f"  - {len(named)} element(s) the source changed could not be tied to any object of the "
                 f"deck: {_some(named)}",
                 "      Writing them would put a second object beside the person's, not over it."]
-    if p["reason"] == "page-frame":
-        return [f"  - the deck's slides are {p['width']:g} pt wide and this converter writes into a "
-                f"{SLIDE_W:g} pt frame,",
-                f"      so the {p['count']} object(s) this sync would create land at the wrong place and size."]
+    if p["reason"] == "page-shape":
+        return [f"  - the deck's slides are {p['deck']:.3f} wide for every 1 high and the page the source "
+                f"compiles to is {p['page']:.3f},",
+                f"      so the {p['count']} object(s) this sync would create land at the right place across "
+                f"and the wrong one down."]
     return [f"  - {p['reason']}"]
 
 
@@ -402,7 +429,8 @@ def refusal_message(pid: str, out: Path, pdf: Path | str, problems_found: list[d
         ways.append(("put the frame labels back where adopt wrote them (docs/labels.md), then sync again", ""))
     if "unpaired" in reasons:
         ways.append(("change those elements in the deck instead of in the source, and sync the rest", ""))
-    if "page-frame" in reasons:
+    if "page-shape" in reasons:
+        ways.append(("give the source back the paper adopt wrote for it (`\\geometry`, docs/sync.md)", ""))
         ways.append(("convert the source into a deck of its own", f"python -m beamer2slides convert {pdf}"))
     ways.append(("write it anyway, saying so out loud", f"{cmd} --force-adopted-deck"))
     width = min(max(len(label) for label, command in ways if command), 44)

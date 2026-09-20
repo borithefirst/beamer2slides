@@ -1715,10 +1715,13 @@ def overlay_move(o: dict, marks: dict[str, list], scale: float) -> tuple[tuple[f
 
 
 def measure_places(slides, pid: str, deck: dict, scale: float, fonts: FontMapper, placed, page_slide: dict,
-                   out: Path) -> tuple[dict[str, tuple], list[str]]:
+                   out: Path, page_width: float = SLIDE_W) -> tuple[dict[str, tuple], list[str]]:
     """Moves for hole pictures ((dx, dy) in slide pt) and overlay pictures ((dx, dy, scaleX): dx
     moves the left edge), measured on scratch slides (see above), and the scratch slides to
-    delete. What can't be found keeps its predicted place."""
+    delete. What can't be found keeps its predicted place.
+
+    `page_width`: how wide the deck being measured is, in slide pt. A thumbnail is a fixed number
+    of pixels wide whatever the page is, so it alone says how many pixels a point is."""
     from concurrent.futures import ThreadPoolExecutor
     from PIL import Image
     from .google_auth import credentials, slides_service
@@ -1746,7 +1749,7 @@ def measure_places(slides, pid: str, deck: dict, scale: float, fonts: FontMapper
             print(f"warning: slide {n + 1}: no thumbnail to measure the picture places ({e})")
             return {}
         img = np.asarray(Image.open(path).convert("RGB"))
-        px_per_pt = img.shape[1] / SLIDE_W
+        px_per_pt = img.shape[1] / page_width
         marks = {c: find_marks(mark_alpha(img, c), px_per_pt)
                  for c in {f["colour"] for f in found} | {w["colour"] for o in overlays for w in o["words"]}}
         moves = {}
@@ -2322,8 +2325,13 @@ class DeckPlan:
     object IDs, placeholder and template sizes, measured hole moves): pure, so tests can check
     them offline (plan_offline)."""
 
-    def __init__(self, deck: dict):
-        self.scale = scale = SLIDE_W / deck["slides"][0]["size"][0]
+    def __init__(self, deck: dict, page_width: float = SLIDE_W):
+        # `page_width`: the width of the deck this plan is for, in slide pt. A deck `convert` makes
+        # is always SLIDE_W wide (it uploads the .pptx that says so), but `sync` may be writing into
+        # a deck a person built at any size (`adopt_sync`), and every box, font size and hole width
+        # below is this converter's PDF pt times `scale`.
+        self.page_width = page_width
+        self.scale = scale = page_width / deck["slides"][0]["size"][0]
         self.fonts = fonts = FontMapper()
         self.deck = deck = {**deck, "slides": [fit_holes(s, scale, fonts) for s in deck["slides"]]}
         self.keys = list(dict.fromkeys(k for s in deck["slides"] for e in s["elements"] for k in element_template_keys(e, scale)))

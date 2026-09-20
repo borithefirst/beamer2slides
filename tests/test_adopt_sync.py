@@ -321,28 +321,66 @@ def test_a_first_sync_that_would_write_an_unpaired_element_is_refused(world):
     assert "    change those elements in the deck instead of in the source, and sync the rest" in message
 
 
-def test_a_deck_that_is_not_the_frame_this_converter_writes_into_is_refused(world):
-    """`emit.DeckPlan` lays every object out in a 720 pt frame and precomputes the hole widths, the
-    template keys and the predicted shifts from it, so the scale cannot be changed afterwards. On a
-    1440 pt deck every object a sync creates would land at half the place and half the size."""
+def a_deck(width: float, height: float) -> dict:
+    """A one-slide classify IR whose page is `width` x `height` in PDF pt, with one picture on it."""
+    return {"slides": [{"page": 0, "size": [width, height], "notes": "", "background_color": "#ffffff",
+                        "elements": [{"id": "p0i0", "kind": "image", "role": "figure", "bbox": [10, 20, 110, 70],
+                                      "file": "figures/a.png"}]}]}
+
+
+def test_a_deck_the_person_made_wider_is_planned_at_its_own_size():
+    """The scale is the one number that carries this converter's PDF points onto the deck's page
+    (`emit.DeckPlan.scale`), and it is what every box, font size and hole width is multiplied by. A
+    deck a person built is whatever size they made it - 1440 x 810 is an ordinary Slides deck - so
+    the plan is made for *that* page, not for the 720 pt one `convert` uploads."""
+    from beamer2slides.emit import SLIDE_W, DeckPlan
+
+    deck = a_deck(453.54, 255.12)
+    ours, theirs = DeckPlan(deck), DeckPlan(deck, 1440.0)
+    assert ours.page_width == SLIDE_W and ours.scale == pytest.approx(720.0 / 453.54)
+    assert theirs.page_width == 1440.0 and theirs.scale == pytest.approx(1440.0 / 453.54)
+    box = theirs.pictures(theirs.deck["slides"][0])[0][1]
+    assert box == pytest.approx([v * 2 for v in ours.pictures(ours.deck["slides"][0])[0][1]]), \
+        "twice the page, twice the box: the picture lands on the same part of the slide"
+
+
+def test_a_wider_deck_is_not_refused_anymore(world):
+    """What the width used to be refused for is now planned for, so a deck of an ordinary Slides
+    size takes new objects like any other."""
+    base = {**copy.deepcopy(world["base"]), "deck_page_size": [1440.0, 810.0]}
+    assert adopt_sync.deck_width(base) == 1440.0
+    assert adopt_sync.aspect_mismatch(base) is None, "1440 x 810 is the page the source compiles to, doubled"
+    doc = copy.deepcopy(world["doc"])
+    fuzz_sync.src_add_element(random.Random(2), doc)
+    found = adopt_sync.problems(base, plan_of({**world, "base": base}, doc), world["live"], KEPT)
+    assert [p["reason"] for p in found] == []
+
+
+def test_a_deck_of_another_shape_than_the_source_compiles_to_is_refused(world):
+    """One number cannot carry a 16:10 plan onto a 16:9 page: everything would land at the right
+    place across the slide and the wrong one down it, which is exactly the kind of wrong nobody
+    sees until the deck is read."""
     base = copy.deepcopy(world["base"])
-    base["deck_page_size"] = [1440.0, 810.0]
+    base["deck_page_size"] = [1440.0, 900.0]
     doc = copy.deepcopy(world["doc"])
     fuzz_sync.src_add_element(random.Random(2), doc)
     message = refuse(base, plan_of({**world, "base": base}, doc), world["live"], KEPT)
-    assert "  - the deck's slides are 1440 pt wide and this converter writes into a 720 pt frame," in message
-    assert "      so the 1 object(s) this sync would create land at the wrong place and size." in message
+    assert ("  - the deck's slides are 1.600 wide for every 1 high and the page the source compiles to is 1.778,"
+            in message)
+    assert ("      so the 1 object(s) this sync would create land at the right place across and the wrong one down."
+            in message)
+    assert "    give the source back the paper adopt wrote for it (`\\geometry`, docs/sync.md)" in message
 
 
-def test_the_page_frame_refusal_outlives_the_first_sync(world):
+def test_the_page_shape_refusal_outlives_the_first_sync(world):
     """The way back and the deck's own slides are about a deck nothing has been written to yet.
-    Where emit puts things is not: it is the same on the fourth sync as on the first."""
-    base = {**copy.deepcopy(world["base"]), "generation": 4, "deck_page_size": [1440.0, 810.0]}
+    The shape of its page is not: it is the same on the fourth sync as on the first."""
+    base = {**copy.deepcopy(world["base"]), "generation": 4, "deck_page_size": [1440.0, 900.0]}
     doc = copy.deepcopy(world["doc"])
     fuzz_sync.src_add_element(random.Random(2), doc)
     reasons = [p["reason"] for p in adopt_sync.problems(base, plan_of({**world, "base": base}, doc),
                                                         world["live"], None, "none")]
-    assert reasons == ["page-frame"]
+    assert reasons == ["page-shape"]
 
 
 def test_the_unpaired_refusal_outlives_the_first_sync(world):

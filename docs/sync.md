@@ -1014,26 +1014,29 @@ refusal, not a loss: an unpaired element is one the first sync will not write.
   recreated unit's old objects through the base, and an unpaired element names none — so the
   person's box would stay where it is and a second one would appear beside it. Nothing is lost, and
   that is why the loss oracle cannot see it; `fuzz_sync._doubled` is what does.
-- **page frame.** `emit.DeckPlan` lays every object out in a 720 pt frame and precomputes the hole
-  widths, the template keys, the predicted shifts and the overlay boxes from that scale, so it
-  cannot be changed after the plan is built. On a deck of another width every object a sync
-  *creates* would land at the wrong place and the wrong size — silently, because the boxes are
-  valid. Ten of the 29 corpus decks are like this (1440, 1920, 960, 800, 3456, 481.5, 595 pt).
+- **page shape.** `emit.DeckPlan` turns this converter's PDF points into the deck's with one
+  number, and everything it precomputes — hole widths, template keys, predicted shifts, overlay
+  boxes — is that scale. The number is now the *deck's* page width (`DeckPlan(deck, page_width)`,
+  `sync.build_ours`, `measure_places`' thumbnail as 1600 px over that page), so a deck a person made
+  1440 or 1920 pt wide is planned for at its own size; ten of the 29 corpus decks are such a deck,
+  and they used to be refused outright. What one number cannot do is change the *shape* of the page:
+  if the source no longer compiles to the paper `adopt` wrote for it, everything a sync creates
+  lands at the right place across the slide and the wrong one down it — silently, because the boxes
+  are valid. That is what is refused now (`aspect_mismatch`, 0.5%).
 
 The first two are about a deck nothing has been written to yet, so they stop at generation 0. The
 last two do not heal by being written to once — an element every sync refuses to write never gets an
-object, and the deck's page stays the size it is — so they hold at every generation. (That was found
+object, and the deck's page keeps the shape it has — so they hold at every generation. (That was found
 by the offline campaign at chain depth 2: with the unpaired refusal gated on the first sync, the
 base rebased after it let the *second* sync duplicate the person's box.)
 
 `--dry-run` never refuses: it writes nothing, so it is how you see what the sync wanted to do.
 
 **What not to expect to survive.**
-- A deck that is not 720 pt wide cannot have anything created in it. Keeps, text edits, moves and
-  deletions still work (those are written in deck coordinates, `merge.deck_scale`), but a sync that
-  would add a slide or an object refuses. Making emit's frame the deck's own is the fix, and it is
-  not a one-line one: the scale is baked into the plan, and `measure_places` reads the deck's
-  thumbnail as 1600 px over `SLIDE_W` as well.
+- A source recompiled onto other paper than the deck's shape cannot have anything created in it.
+  Keeps, text edits, moves and deletions still work (those are written in deck coordinates,
+  `merge.deck_scale`), but a sync that would add a slide or an object refuses until the source's
+  page is the deck's shape again — `adopt.page_setup` is what wrote it.
 - An element the pairing refused stays refused. Change it in the deck, not in the source, or move
   the boxes apart so the pairing can tell them from each other. The base lists every one of them
   under `adopt.unpaired`, with the reason, and `adopt` prints the count.

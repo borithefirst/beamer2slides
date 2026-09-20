@@ -221,11 +221,16 @@ def drop_objects(pres: dict, objects, slides) -> dict:
 
 # ---------------------------------------------------------------- ours
 
-def build_ours(pdf: Path, work: Path, base: dict, overlays: str = "last") -> dict:
+def build_ours(pdf: Path, work: Path, base: dict, overlays: str = "last",
+               page_width: float | None = None) -> dict:
     """extract, classify and render the new PDF into `work`, plan it like emit and give its
-    slides and elements the keys of the base they match."""
+    slides and elements the keys of the base they match.
+
+    `page_width`: how wide the deck this will be written into is, in slide pt (default: the
+    SLIDE_W frame `convert` makes). A deck `adopt` took over is whatever size the person made it,
+    and every box this plan holds is PDF pt times the scale that width gives."""
     from .classify import classify
-    from .emit import DeckPlan, merge_blocks
+    from .emit import SLIDE_W, DeckPlan, merge_blocks
     from .extract import extract, select_overlays
     from .notes import prepare
     from .render import render_backgrounds
@@ -239,7 +244,8 @@ def build_ours(pdf: Path, work: Path, base: dict, overlays: str = "last") -> dic
     deck = classify(raw)
     render_backgrounds(prepared.pdf, raw, deck, work)
     (work / "deck.json").write_text(json.dumps(deck, indent=1, ensure_ascii=False), encoding="utf-8")
-    plan = DeckPlan({**deck, "slides": [{**s, "elements": merge_blocks(s["elements"])} for s in deck["slides"]]})
+    plan = DeckPlan({**deck, "slides": [{**s, "elements": merge_blocks(s["elements"])} for s in deck["slides"]]},
+                    page_width or SLIDE_W)
     deck = plan.deck
     infos = [identity.slide_info(s) for s in deck["slides"]]
     base_infos = [{"label": b.get("label"), "title": b.get("title") or "", "text": b.get("text") or "", "page": b["page"]}
@@ -928,7 +934,7 @@ class Sync:
         first = theirs["slides"][0]["objectId"]
         page_slide = {k: v if v in live_ids else first for k, v in self.plan.page_slide.items()}
         return measure_places(self.slides, self.pid, {**self.plan.deck, "slides": slides}, self.scale, self.plan.fonts,
-                              self.plan.placed, page_slide, self.ours["out"])
+                              self.plan.placed, page_slide, self.ours["out"], self.plan.page_width)
 
     def delete_scratch(self, scratch: list[str]) -> None:
         try:
@@ -1782,7 +1788,9 @@ def sync(pdf: Path, deck: str, out: Path | None = None, dry_run: bool = False, o
     warnings += [mismatch] if mismatch else []
     for w in warnings:
         print(f"warning: {w}")
-    ours = build_ours(pdf, out / "sync" / "ours", base, overlays)
+    # The deck's own width, not the frame convert writes into: a deck adopt took over is whatever
+    # size the person made it, and everything this sync creates or moves is planned in slide pt.
+    ours = build_ours(pdf, out / "sync" / "ours", base, overlays, adopt_sync.deck_width(base))
     refreshed = snapshot.refresh_pictures(base, ours, out)
 
     def check_plan(mplan: dict, theirs: dict) -> None:
