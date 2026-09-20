@@ -1017,11 +1017,16 @@ same functions underneath; nothing here reimplements a journey.
   `process_bound` task is refused at `start` rather than played, since one process per turn is
   exactly what its fixture does not survive. Still no model
   called from this repo (pinned by a test walking the module's imports). Measured with Opus 5
-  agents playing three tasks blind (docs/agent-bench.md): two passed, HARM 0, and the third failed
+  agents playing **six** tasks blind, one agent per task, given the folder and the three commands
+  and nothing to read (docs/agent-bench.md): 9 calls, **none redundant**, 5 passed with HARM 0, and
+  each of the five stops where the next decision is the person's - declining to force, declining to
+  pick a side when both sides lose work, declining to resolve a duplicate label, doing the half of
+  a request that was possible offline and saying why the other half was not. The sixth failed
   because the **agent's own permission classifier** refused the `agent_play call` that would have
-  written - the model had chosen exactly the right call. A harness that classifies commands has to
-  pre-authorise that one, or the score measures the sandbox; nothing here can see a command that
-  was never run, and telling the model a replay task writes nothing would destroy what is measured.
+  written - the model had chosen exactly the right call (`force_rebuild=True, backup=both`, forcing
+  only because the person asked in words). A harness that classifies commands has to pre-authorise
+  that one, or the score measures the sandbox; nothing here can see a command that was never run,
+  and telling the model a replay task writes nothing would destroy what is measured.
 
 ## Playground (docs/playground.md)
 `python -m beamer2slides playground` (`src/beamer2slides/playground/`: stdlib `http.server` + a static
