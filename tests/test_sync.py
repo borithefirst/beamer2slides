@@ -979,6 +979,58 @@ def test_a_created_shape_stays_under_the_text_the_source_draws_above_it():
     assert order.index("new_s0") < order.index("new_t0")
 
 
+def test_a_created_panel_stays_under_words_only_the_deck_has():
+    """The other half of that rule. The source's order says where a new element goes among the
+    source's own; about an element the source dropped and the deck's edits kept alive it says
+    nothing at all - so the guard above, which only consults source elements, let a created opaque
+    panel land on top of a kept text. Nothing is deleted, so only `loss_oracle.text_hidden` saw it
+    (converted seed 78036, chain 4)."""
+    from beamer2slides.sync import Sync
+    base = many_slides(["intro"])
+    ours, _ = triple(base)
+    o = ours["slides"][0]
+    panel = ours_entry("shape/panel/0", shape_ir((15, 80, 210, 130), "p0s0"))
+    o["elements"] = [o["elements"][0], panel]   # the source dropped the body text; the deck kept it
+    p = {"action": "update", "key": "intro", "base": 0, "ours": 0, "objectId": "b2s_s000",
+         "units": [{"key": "text/title/0", "action": "recreate"}, {"key": "shape/panel/0", "action": "create"},
+                   {"key": "text/body/0", "action": "keep"}]}
+    sync = Sync.__new__(Sync)
+    sync.base, sync.ours = base, ours
+    before = live(base["slides"][0])
+    before["order"] = ["b2s_s000_t1", "b2s_s000_t0"]     # the kept body is at the bottom
+    w = {"plan": p, "doomed": {"b2s_s000_t0"}, "tops": {"text/title/0": "new_t0", "shape/panel/0": "new_s0"}}
+    now = {"order": ["b2s_s000_t1", "b2s_s000_t0", "new_t0", "new_s0"],
+           "objects": {**before["objects"],
+                       "new_t0": readback([20, 20, 200, 48], text="Intro"),
+                       "new_s0": readback([30, 160, 420, 260])}}   # opaque, over the kept body's box
+    order = [x for x in now["order"] if x not in w["doomed"]]
+    for r in sync.restack(w, before, now):
+        oid, = r["updatePageElementsZOrder"]["pageElementObjectIds"]
+        order.append(order.pop(order.index(oid)))
+    assert order.index("new_s0") < order.index("b2s_s000_t1")
+
+
+def test_the_children_a_rewrite_replaces_take_the_sources_order():
+    """A group a rewrite takes apart is made again under the same id, and its children used to go
+    back in the order the deck had them. Between two converter elements that order is not an edit
+    anybody made - it is whatever the last conversion drew - so a panel the source has since put
+    *under* a text came back on top of it (converted seed 79045, chain 6). The children this sync
+    wrote take the source's order among themselves; the person's own children keep their places."""
+    from beamer2slides.sync import Sync
+    objects = {"g": {"kind": "elementGroup", "children": ["old_t", "user_pic", "old_s"]}}
+    regroup = {"g": {"remove": {"old_t", "old_s"}, "unit_of": {"old_t": "text/body/0", "old_s": "shape/panel/0"}}}
+    tops = {"text/body/0": "new_t", "shape/panel/0": "new_s"}
+    # the source draws the panel first (under) and the body after it; the deck had them the other way
+    order = ["text/title/0", "shape/panel/0", "text/body/0"]
+    reqs = Sync.regroup_requests(regroup, {"g": 0}, objects, tops, set(), order)
+    group, = [r["groupObjects"] for r in reqs if "groupObjects" in r]
+    assert group["childrenObjectIds"] == ["new_s", "user_pic", "new_t"]
+    # ... and with no source order to go by, the deck's own order stands
+    plain, = [r["groupObjects"] for r in Sync.regroup_requests(regroup, {"g": 0}, objects, tops, set())
+              if "groupObjects" in r]
+    assert plain["childrenObjectIds"] == ["new_t", "user_pic", "new_s"]
+
+
 def test_image_replaced_in_deck_is_kept():
     base = three_slides()
     pic = {"id": "p1f0", "kind": "image", "role": "figure", "bbox": [200, 60, 300, 160], "file": None}

@@ -466,6 +466,41 @@ def box_overlap(a: list[float] | None, b: list[float] | None) -> float:
     return ix / max(areas) if max(areas) > 0 else 0.0
 
 
+HIDDEN = 0.2  # of a text's box: an opaque shape covering more of it hides it (loss_oracle.HIDDEN)
+
+
+def subtree(objects: dict, oid: str) -> list[str]:
+    """`oid` and everything it carries, a group's children included."""
+    out: list[str] = []
+
+    def walk(x):
+        if x in objects and x not in out:
+            out.append(x)
+            for c in objects[x].get("children") or []:
+                walk(c)
+    walk(oid)
+    return out
+
+
+def would_hide(objects: dict, top: str, under: str) -> bool:
+    """Would drawing `top` above `under` put an opaque shape over words somebody can read? The
+    question `loss_oracle.occlusion_findings` asks of a finished sync, asked before the write."""
+    shapes = [objects[x] for x in subtree(objects, top)
+              if objects[x].get("kind") == "shape" and objects[x].get("box")
+              and ((objects[x].get("shape_style") or {}).get("fill") or {}).get("color") is not None
+              and (((objects[x].get("shape_style") or {}).get("fill") or {}).get("alpha") or 0) >= 0.999]
+    texts = [objects[x] for x in subtree(objects, under)
+             if objects[x].get("box") and (objects[x].get("text") or "").strip()]
+    for t in texts:
+        area = (t["box"][2] - t["box"][0]) * (t["box"][3] - t["box"][1])
+        for s in shapes:
+            w = min(t["box"][2], s["box"][2]) - max(t["box"][0], s["box"][0])
+            h = min(t["box"][3], s["box"][3]) - max(t["box"][1], s["box"][1])
+            if area > 0 and w > 0 and h > 0 and w * h / area > HIDDEN:
+                return True
+    return False
+
+
 BREAK = {"__b2s_break__": True}  # where a batch may be cut: between slides
 
 
@@ -1272,7 +1307,7 @@ class Sync:
                 i = index[u["key"]]
                 oids = created.get(i, [])
                 tops[u["key"]] = next((x for x in oids if x.endswith("_g") and x[:-2] == new_oid[i]), new_oid[i])
-        reqs += self.regroup_requests(regroup, depth, objects, tops, keep_ids)
+        reqs += self.regroup_requests(regroup, depth, objects, tops, keep_ids, [e["key"] for e in o["elements"]])
         # Moves: the deck object goes where the source moved the element.
         reqs += self.move_requests(p["units"], bunits, read, self.scale)
         reqs += self.tag_requests(o, created, new_oid, in_place)
@@ -1317,25 +1352,38 @@ class Sync:
         return regroup, {g: len(ancestors(g)) for g in regroup}, roots_removed
 
     @staticmethod
-    def regroup_requests(regroup: dict, depth: dict, objects: dict, tops: dict, keep_ids: set) -> list[dict]:
+    def regroup_requests(regroup: dict, depth: dict, objects: dict, tops: dict, keep_ids: set,
+                         order: list[str] = ()) -> list[dict]:
         """The groups `regroups` took apart, made again under the same ids, innermost first: a
         rewritten unit's new top object takes its old root's place among the children (`tops`: unit
-        key -> new top; `objects`: the read-back before the rewrite)."""
+        key -> new top; `objects`: the read-back before the rewrite; `order`: the source's element
+        keys)."""
         reqs = []
+        rank = {k: i for i, k in enumerate(order)}
         replaced: dict[str, str | None] = {}  # regrouped group -> what stands for it now (None: gone)
         for g in sorted(regroup, key=lambda g: -depth[g]):
             info = regroup[g]
-            children = []
+            children, mine = [], {}   # mine: place among the children -> the unit written there
             for c in objects[g].get("children", []):
                 if c in info["remove"]:
                     ukey = info["unit_of"][c]
                     if ukey in tops and tops[ukey] not in children and tops[ukey] not in keep_ids:
+                        mine[len(children)] = ukey
                         children.append(tops[ukey])
                 elif c in replaced:
                     if replaced[c]:
                         children.append(replaced[c])
                 else:
                     children.append(c)
+            # The children this sync rewrote take the source's order among themselves, in the places
+            # the deck's own children leave them. A group's child order is the person's edit only
+            # where the person made it: between two converter elements it is whatever the last
+            # conversion drew, and keeping it is keeping an opinion nobody holds - which is how a
+            # panel the source now draws *under* a text came back on top of it, hiding words the
+            # person could read (`loss_oracle.text_hidden`).
+            if (slots := [i for i, k in mine.items() if k in rank]) and len(slots) > 1:
+                for slot, ukey in zip(slots, sorted((mine[i] for i in slots), key=lambda k: rank[k])):
+                    children[slot] = tops[ukey]
             if len(children) >= 2:
                 # A group keeps its children's z-order, and the new members were created last, so
                 # on top: a block's recreated panels covered the body text the person had edited and
@@ -1431,6 +1479,7 @@ class Sync:
             if oid in top_now and oid not in desired:
                 desired.append(oid)
         keys = [e["key"] for e in o["elements"]]
+        shown = now.get("objects") or {}
 
         def placed(k):
             return w["tops"].get(k) or (merge.unit_top(bunits[k], now) if k in bunits else None)
@@ -1453,6 +1502,15 @@ class Sync:
             for k in keys[i + 1:]:
                 if (nxt := placed(k)) in desired:
                     pos = min(pos, desired.index(nxt))
+                    break
+            # ... and never above words only the deck has. The source's order places a new element
+            # among the source's own; about an element the source dropped and the deck kept, or one
+            # the person drew themselves, it says nothing at all, and the costly guess is the one
+            # that puts a new opaque panel over somebody's text.
+            drawn = {placed(k) for k in keys}
+            for j, other in enumerate(desired[:pos]):
+                if other not in drawn and would_hide(shown, new, other):
+                    pos = j
                     break
             desired.insert(pos, new)
         desired += [x for x in now["order"] if x not in desired and x not in doomed]

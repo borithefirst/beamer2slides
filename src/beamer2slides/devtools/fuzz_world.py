@@ -598,11 +598,29 @@ def _update_slide(base, ours, live, p, tok):
             made.append((m, rb))
         _place_unit(u, members, theirs, made, base_by)
     _restack(live, b, o, fresh, tok)
+    _regroup_order(live, o, tok)
     if p.get("background"):
         live["background"] = {"color": p["background"].split(":", 1)[1]}
     if p.get("notes") is not None:
         live["notes"] = p["notes"]
     _drop_lonely_groups(live)
+
+
+def _regroup_order(live, o, tok):
+    """Inside a group a rewrite takes apart, the children this sync wrote take the source's order
+    among themselves, in the places the person's own children leave them. This is the outcome;
+    `sync.Sync.regroup_requests` is the mechanism (BRING_TO_FRONT each child, then `groupObjects`),
+    which the campaign replays through `fuzz_sync._stacked`. Without it a group whose two children
+    the source has since put the other way round kept the deck's order, and the panel the source now
+    draws *under* a text came back on top of it (`loss_oracle.text_hidden`, converted seed 79045)."""
+    keys = [el["key"] for el in o["elements"]]
+    rank = {f"b2s_{h6(o['key'])}_{h6(k)}_{tok}": i for i, k in enumerate(keys)}
+    for rb in live["objects"].values():
+        kids = rb.get("children") or []
+        slots = [i for i, c in enumerate(kids) if c in rank]
+        if len(slots) > 1:
+            for slot, oid in zip(slots, sorted((kids[i] for i in slots), key=lambda c: rank[c])):
+                kids[slot] = oid
 
 
 def _restack(live, b, o, fresh, tok):
@@ -651,6 +669,11 @@ def _restack(live, b, o, fresh, tok):
         for k in keys[i + 1:]:          # and never above what the source draws above it
             if (nxt := stands.get(k)) in order and nxt != oid:
                 pos = min(pos, order.index(nxt))
+                break
+        drawn = set(stands.values())    # ... nor above words only the deck has
+        for j, other in enumerate(order[:pos]):
+            if other not in drawn and sync.would_hide(objects, oid, other):
+                pos = j
                 break
         order.insert(pos, oid)
 

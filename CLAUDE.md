@@ -938,6 +938,22 @@ rebuilt with its panels over the kept body text (dc8523a) deleted nothing, so no
 fuzz world has blocks and keeps z-order; `fuzz_sync._stacked` replays `Sync.regroups` /
 `Sync.regroup_requests` through Slides' rule that a group keeps its children's page order (`_zorder`):
 without the restack, 14 of 400 offline rounds fail.
+What decides where a rewrite puts a thing is the **source's** order, and the source has an opinion
+only about what it draws. Two fresh converted seeds said so one level apart. At page level (78036)
+`Sync.restack`'s ceiling - never above an element the source draws above it - consults source
+elements alone, so a created opaque panel still landed over a **kept** text, a unit the source
+dropped and the deck's edits kept alive; a created element now stays below any page element the
+source does not draw whose words it would cover (`sync.would_hide`, the oracle's own question -
+opaque fill at alpha 1 over more than 20% of a text's box - asked before the write), which covers an
+object the person drew themselves too. Inside a group (79045) `Sync.regroup_requests` put the
+children back in the **deck's** order, which between two converter elements is not an edit anybody
+made but whatever the last conversion drew: there the two had never overlapped, so that order said
+nothing, and when the source moved the text into the panel and drew the panel under it the panel
+came back on top. The children a sync rewrote now take the source's order among themselves, in the
+places the person's own children leave them. Both are mirrored in the reference applier (`_restack`,
+`_regroup_order`), whose outcome the raw oracle judges; each is pinned by a test that fails without
+it (`test_a_created_panel_stays_under_words_only_the_deck_has`,
+`test_the_children_a_rewrite_replaces_take_the_sources_order`).
 
 ## Agent tools (`src/beamer2slides/agent/`, docs/agent-tools.md)
 Every journey in this file is a thing an AI should be able to do, and the CLI is the wrong door for

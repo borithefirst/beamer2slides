@@ -794,6 +794,26 @@ hold for every sync, including the combinations nobody thought of.
   up at the bottom, which is the only choice that can hide nothing.
   `tests/test_sync.py::test_a_created_shape_stays_under_the_text_the_source_draws_above_it` fails
   without it, and so do 2 of 400 adopt-shaped rounds.
+- Found by the same check at two fresh converted seeds, and both are the same sentence one level
+  apart: **the source's order says nothing about what the source does not draw.**
+  - At page level (seed 78036, chain 4), the ceiling above only consults source elements, so a
+    created opaque panel still landed on top of a **kept** text — a unit the source dropped and the
+    deck's edits kept alive. The source has no opinion about a unit it gave up, and neither has it
+    about an object the person drew themselves; a created element is now placed below any page
+    element the source does not draw whose words it would cover (`sync.would_hide`, the oracle's own
+    `text_hidden` question — opaque fill at alpha 1 over more than 20% of a text's box — asked
+    before the write rather than after it).
+    `test_a_created_panel_stays_under_words_only_the_deck_has`.
+  - Inside a group (seed 79045, chain 6), `regroup_requests` put the rebuilt group's children back
+    in the order the **deck** had them. Between two converter elements that order is not an edit
+    anybody made: it is whatever the last conversion drew, and keeping it is keeping an opinion
+    nobody holds. The two children had not overlapped before, so the old order carried no
+    information at all — then the source moved the text into the panel and drew the panel *under*
+    it, and the panel came back on top. The children this sync rewrote now take the source's order
+    among themselves, in the places the person's own children leave them.
+    `test_the_children_a_rewrite_replaces_take_the_sources_order`.
+  Both are mirrored in the reference applier, whose `_restack` and new `_regroup_order` model the
+  outcome (the raw oracle finding fires, not only the `_stacked` replay).
 - Found **in the oracle** by the same campaign: `_element_of` named an object by the base elements
   only, so an object the sync had just created for an element the *source added* had no name — and
   `_source_stacks_above`, the only excuse `text_hidden` has, can excuse nothing it cannot name. A new
