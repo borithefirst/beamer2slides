@@ -1576,6 +1576,46 @@ spurious empty block survives the write and the settle keys it. It is legal, it 
 harmless, and it is one more reason the identity of a block may never depend on a block
 being there for a reason.
 
+### The tab strip, from the reader's side
+
+Everything the campaign knew about tabs, the *source* did: `add_tab`, `drop_tab`,
+`rename_tab` were all source ops, and only the rename had a reader counterpart. So the
+two commonest things a person does in a tab strip — clicking **+**, and deleting a tab —
+had never been drawn, although `pair_tabs` has a rule for each of them
+(`read_add_tab`, `read_drop_tab`; the second is told which tabs there are, the way
+`read_unmark_word` is told what the theme sets, because which tabs exist is not
+something the tab it is looking at can say).
+
+Both rules hold. A tab the reader added is in neither the file nor the base, so the
+merge plans nothing for it and the settle reads it into the file with keys and named
+ranges of its own — which is what makes the sync after it write nothing rather than see
+a tab the file has and the document does not. A tab the reader deleted stays deleted,
+its `<section>` leaves the file and its entry the base, and when the source had changed
+that tab the report says the changes went nowhere. 500 rounds at chain 6 with the two
+ops in, clean.
+
+What the round-trip did turn up is a hole in the **oracle**. Put the resurrection bug
+into `pair_tabs` on purpose — one line, a tab the source still asks for and the reader
+deleted goes into `create` — and nothing objected: the document converges, every word
+is present, and the tab that comes back carries a *new* id, so the first version of the
+test, which asked for the old one, passed as well. Nothing of the reader's disappears
+when their deletion is undone; it is the decision that is gone, and this oracle only
+ever asked about content.
+
+`_resurrection_findings` (`tab_resurrected`) asks the other question, narrowly: the base
+had that tab, the read before the sync does not, the file still asks for it, and
+something now stands in the document under the same name saying the same words, unknown
+to the base. With it in, the injected bug fails the campaign at round 17 of 80 and the
+shrinker cuts it to the two new ops and nothing else —
+
+```
+shape imported_list
+step 0: reader add_tab | source
+step 1: reader drop_tab | source
+```
+
+— which is as small as a script gets.
+
 ## Remaining risks
 
 1. **Pictures** — retired, see "Pictures, and the chips a request can make" above. What

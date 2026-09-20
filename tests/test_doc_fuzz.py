@@ -462,6 +462,29 @@ def test_the_oracle_sees_the_first_tab_renamed_back_under_the_reader():
     assert "tab_renamed" not in _kinds(oracle.check(base, kept, after, NOTHING))
 
 
+def test_the_oracle_sees_a_tab_the_reader_deleted_come_back():
+    """The mirror of `tab_gone`, and invisible to every other question here: nothing
+    of the reader's disappears when a tab they deleted is created again, and the tab
+    that comes back carries a new id, so an id-shaped check never notices. What is
+    undone is a decision the reader made, which the document is supposed to win."""
+    appendix = {"tab": "t.2", "title": "Appendix", "blocks": [_p("k2", "Later.")]}
+    base = _ir(_p("k1", "x"), tabs=[appendix])
+    before = _ir(_p("k1", "x"))                        # the reader deleted it
+    after = _ir(_p("k1", "x"), tabs=[dict(appendix, tab="t.9")])
+    ours = _ir(_p("k1", "x"), tabs=[appendix])         # the file still asks for it
+    assert "tab_resurrected" in _kinds(oracle.check(base, before, after, NOTHING, ours))
+    # Said out loud it is no longer silent...
+    told = {"conflicts": [], "notes": ["tab 'Appendix' was created again"], "applied": []}
+    assert "tab_resurrected" not in _kinds(oracle.check(base, before, after, told, ours))
+    # ...nor is it a resurrection when the source gave the tab up too...
+    gone = _ir(_p("k1", "x"))
+    assert "tab_resurrected" not in _kinds(oracle.check(base, before, after, NOTHING, gone))
+    # ...nor when what stands there now says something else under that name.
+    other = _ir(_p("k1", "x"), tabs=[dict(appendix, tab="t.9",
+                                          blocks=[_p("k2", "Something else.")])])
+    assert "tab_resurrected" not in _kinds(oracle.check(base, before, other, NOTHING, ours))
+
+
 def test_the_oracle_sees_a_chip_the_reader_inserted_disappear():
     chip = {"frozen": True, "chip": "person", "text": "Ada", "value": "ada@example.com"}
     base = _ir(_p("k1", "ask "))
@@ -741,6 +764,69 @@ def test_the_first_tab_renamed_in_the_file_is_renamed_and_stays_renamed():
     assert ours["tab_title"] == "Chapter one" and base["tab_title"] == "Chapter one"
     assert any("first tab renamed 'Chapter one'" in a for a in report["applied"])
     # And the sync after it writes nothing: the three sides agree.
+    again, _, _ = fuzz_docs.sync_once(world, ours, base)
+    assert again["requests"] == 0
+
+
+def test_a_tab_the_reader_added_is_read_into_the_file_and_left_alone():
+    """Somebody clicks + in the tab strip and writes in the new tab. Nobody knows of
+    it — it is in neither the file nor the base — so the merge must plan nothing for
+    it and the settle must read it into the file with keys and named ranges of its
+    own, or the sync after would see a tab the file has and the document does not."""
+    world, ours, base = _push("tabs")
+    reply = world.apply([{"addDocumentTab": {"tabProperties": {"title": "Reader's tab"}}}])
+    ident = reply["replies"][0]["addDocumentTab"]["tabProperties"]["tabId"]
+    world.apply([{"insertText": {"location": {"index": 1, "tabId": ident},
+                                 "text": "A thought of my own."}}])
+    was, mine = copy.deepcopy(base), copy.deepcopy(ours)
+    before = doc_world.settled_ir(world, ours, base)
+    report, ours, base = fuzz_docs.sync_once(world, ours, base)
+    assert not oracle.failures(oracle.check(was, before, base, report, mine))
+    added = [p for p in doc_ir.parts(ours) if p.get("tab") == ident]
+    assert len(added) == 1 and added[0]["title"] == "Reader's tab"
+    assert doc_merge.block_text(added[0]["blocks"][0]) == "A thought of my own."
+    # Keyed and named: the second sync finds it again rather than reading it as new.
+    assert added[0]["blocks"][0]["key"]
+    again, _, _ = fuzz_docs.sync_once(world, ours, base)
+    assert again["requests"] == 0
+
+
+def test_a_tab_the_reader_deleted_stays_deleted_and_goes_out_of_the_file():
+    """The other side of the strip. Document wins, so the tab does not come back —
+    and its `<section>` has to leave the file and its entry the base, or the sync
+    after this one reads the file as asking for a tab the document never had."""
+    world, ours, base = _push("tabs")
+    ident, title, count = world.tabs[1].id, world.tabs[1].title, len(world.tabs)
+    assert any(p.get("tab") == ident for p in doc_ir.parts(ours))
+    world.apply([{"deleteTab": {"tabId": ident}}])
+    was, mine = copy.deepcopy(base), copy.deepcopy(ours)
+    before = doc_world.settled_ir(world, ours, base)
+    report, ours, base = fuzz_docs.sync_once(world, ours, base)
+    assert not oracle.failures(oracle.check(was, before, base, report, mine))
+    # By title, not by id: a tab created again to answer for the deleted one would
+    # carry a new id and slip past every check that asks for the old one.
+    assert [t.title for t in world.tabs].count(title) == 0
+    assert len(world.tabs) == count - 1
+    assert [p.get("title") for p in doc_ir.parts(ours)[1:]].count(title) == 0
+    assert [p.get("title") for p in doc_ir.parts(base)[1:]].count(title) == 0
+    again, _, _ = fuzz_docs.sync_once(world, ours, base)
+    assert again["requests"] == 0
+
+
+def test_a_tab_the_reader_deleted_takes_the_sources_changes_to_it_with_it():
+    """And when the source did change that tab, the change has nowhere to go. That is
+    right — the document wins — but it is a thing the person must be told, so the
+    report says it rather than the file quietly losing the words."""
+    world, ours, base = _push("tabs")
+    ident = world.tabs[1].id
+    part = [p for p in doc_ir.parts(ours) if p.get("tab") == ident][0]
+    part["blocks"][0]["runs"] = [{"text": "A sentence the source rewrote."}]
+    world.apply([{"deleteTab": {"tabId": ident}}])
+    was, mine = copy.deepcopy(base), copy.deepcopy(ours)
+    before = doc_world.settled_ir(world, ours, base)
+    report, ours, base = fuzz_docs.sync_once(world, ours, base)
+    assert not oracle.failures(oracle.check(was, before, base, report, mine))
+    assert any("deleted in the document" in line for line in report["notes"])
     again, _, _ = fuzz_docs.sync_once(world, ours, base)
     assert again["requests"] == 0
 

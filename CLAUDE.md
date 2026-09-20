@@ -1302,6 +1302,19 @@ keys, named ranges), `doc_merge.py` (pure planning), `doc_sync.py` (the commands
   rather than called a disagreement. The oracle judges it (`tab_renamed`), the campaign draws
   it on both sides (`src_rename_tab`, `read_rename_tab`), and taking the both-sides note out
   fails 19 of 200 chained rounds.
+  The reader's own two moves in the strip - clicking **+** and deleting a tab - are drawn too
+  (`read_add_tab`, `read_drop_tab`, which is told which tabs exist, as `read_unmark_word` is
+  told what the theme sets). Both rules hold: a tab the reader added is in neither file nor
+  base, so nothing is planned for it and the settle reads it in with keys and ranges of its
+  own; one the reader deleted stays deleted, leaves the file and the base, and the source's
+  changes to it are a note. Drawing them showed a hole in the *oracle* instead: put the
+  resurrection into `pair_tabs` on purpose and nothing objected - the words are all there, the
+  round converges, and the tab that comes back has a new id. It is the reader's *decision*
+  that is undone, not their content, and this oracle only asked about content
+  (`_resurrection_findings`, `tab_resurrected`: the base had it, the read before does not, the
+  file still asks for it, and something unknown to the base now says the same words under the
+  same name). With it, the injected bug fails 1 of 80 rounds and shrinks to those two ops
+  alone; 400 rounds at chain 6 clean without it.
 - The **document's name** is the file's `<title>`, and a Google Doc's title *is* its name in
   Drive: no `batchUpdate` request writes one, so `push` named it at birth and nothing said it
   again. `doc_merge.document_title` merges it three ways (the file alone renamed it -> written;

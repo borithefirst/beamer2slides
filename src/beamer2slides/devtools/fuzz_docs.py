@@ -645,6 +645,30 @@ def read_rename_tab(rng, part, tab):
         "fields": "title"}}], []
 
 
+def read_add_tab(rng, part, tab):
+    """The reader clicks + in the tab strip. Docs makes it with one empty paragraph
+    and hands back its id; nothing here types into it, since a later step's ops draw
+    a tab at random and will reach this one.
+
+    Nobody knows of such a tab: it is in neither the file nor the base, so the merge
+    must leave it alone and the settle must read it into the file — keys, named
+    ranges and all — or the sync after it will see a tab the file never had."""
+    return [{"addDocumentTab": {"tabProperties": {
+        "title": f"Reader's {rng.choice(FRESH)}"}}}], []
+
+
+def read_drop_tab(rng, part, tab, tabs):
+    """The reader deletes a tab in the tab strip. Never the first: that one is the
+    body and Docs refuses it (so does the world). What has to follow the tab is its
+    base entry and its `<section>` in the file."""
+    if not tabs:
+        return [], []
+    return [{"deleteTab": {"tabId": rng.choice(tabs)}}], []
+
+
+read_drop_tab.wants_tabs = True
+
+
 READER = {
     "type_word": read_type_word, "reword": read_reword, "delete_word": read_delete_word,
     "append_block": read_append_block, "delete_block": read_delete_block,
@@ -655,6 +679,7 @@ READER = {
     "add_row": read_add_row, "delete_row": read_delete_row,
     "insert_picture": read_insert_picture, "insert_chip": read_insert_chip,
     "move_block": read_move_block, "rename_tab": read_rename_tab,
+    "add_tab": read_add_tab, "drop_tab": read_drop_tab,
 }
 
 
@@ -679,6 +704,10 @@ def apply_reader(world: doc_world.World, name: str, rng: random.Random,
     # An op that turns styling *off* has to know what the theme turns on, and only
     # that one does; the rest are a reader typing, who knows nothing of the sort.
     wants = {"theme": theme_fields(world)} if getattr(op, "wants_theme", False) else {}
+    # And one op is about the tab strip rather than about a tab: which tabs there are
+    # to delete is not a thing the part it is looking at can say.
+    if getattr(op, "wants_tabs", False):
+        wants["tabs"] = [t.id for t in world.tabs[1:]]
     batches, touched = op(rng, part, tab, **wants)
     if not batches:
         seen["reader/" + name + " (nothing to do)"] += 1
