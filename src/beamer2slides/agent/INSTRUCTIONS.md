@@ -149,6 +149,14 @@ per attempt. Say so before you start one; do not start two.
   somebody wrote something, and what it writes over survives only in the report's `resolved`
   section. An id stops matching as soon as either side of its conflict moves, so it is read out of
   *this* run's report, not a stored one — a stale id settles nothing and says so in a warning.
+* A deck **`deck_adopt` wrote a source for** can be synced back into, but not all of it. Nothing on
+  a person's slide says which part of a source it came from, so the base is a *pairing* by place and
+  words, and an element it could not tie to an object is kept as the deck has it — at every sync,
+  for ever, since no sync ever gives such an element an object. `data["sync_base"]` says how many
+  were tied, how many were not, and how many are drawn by the deck's **layouts or master** rather
+  than by a slide (those are changed in Slides under Slide > Edit theme, and no amount of editing
+  the source will move them). Tell the person the number before they start editing: a source edit
+  to an untied element is not lost, but it does not arrive either — it comes back as a conflict.
 * Slide order is merged, not taken wholesale: a slide a person dragged stays where they put it.
 * A sync killed halfway loses nothing — the next one sweeps up — so a timeout is not a reason to
   force anything.

@@ -302,6 +302,58 @@ def test_adopt_scores_the_source_it_wrote_for_readability(tmp_path):
     assert j.data["readability_detail"]["frames"] == 5
 
 
+def base_at(work: Path, paired: int, unpaired: int, from_layout: int) -> Path:
+    from beamer2slides import snapshot
+
+    return snapshot.save_local(
+        {"origin": "adopt", "generation": 0, "slides": [],
+         "adopt": {"slides": 3, "paired": paired,
+                   "unpaired": [{"element": f"e{i}"} for i in range(unpaired)],
+                   "from_layout": [{"element": f"f{i}"} for i in range(from_layout)]}}, work)
+
+
+def test_adopt_says_how_much_of_the_source_a_later_sync_can_write(tmp_path):
+    """An agent that has just adopted a deck is about to tell a person they may edit this .tex and
+    merge it back. How much of that is true is a number only the base knows - the base is a pairing
+    by place and words, and what it could not tie is kept as the deck has it at every sync, for
+    ever - and it can be read off neither the source nor the deck nor the fidelity score."""
+    from beamer2slides.agent import source_tools as st
+    from beamer2slides.agent.context import Job
+
+    work = tmp_path / "out" / "adopt"
+    path = base_at(work, paired=12, unpaired=5, from_layout=2)
+    j = Job("deck_adopt", AgentContext.offline(tmp_path))
+    j.summary = "Converged after 2 edit round(s)."
+    st._sync_base(j, work)
+    ref = j.ctx.workspace.ref(path)
+    assert j.data["sync_base"] == {"path": ref, "slides": 3, "elements": 19, "paired": 12,
+                                   "unpaired": 5, "from_layout": 2}
+    assert j.summary.startswith("Converged after 2 edit round(s).")
+    assert f"12 of 19 element(s) are tied to an object of the deck" in j.summary and ref in j.summary
+    said = [d.message for d in j.diagnostics]
+    assert all(d.level == "warning" for d in j.diagnostics)
+    assert any("5 of 19 element(s) are tied to no object of this deck" in m and
+               "Change those in Slides rather than in the source." in m for m in said)
+    assert any("2 of 19 element(s) are drawn by the deck's own layouts or master" in m and
+               "Slide > Edit theme" in m for m in said), "which is a different door"
+    assert any("dry_run=True" in s for s in j.next_steps)
+
+
+def test_a_deck_that_got_no_base_is_a_source_nothing_can_merge_back(tmp_path):
+    """`--no-base`, a deck read from a file with no presentation beside it, a source that does not
+    compile: adopt writes the tree either way, and the one thing that made it more than a one-way
+    export is gone. Said out loud rather than left for deck_sync to discover."""
+    from beamer2slides.agent import source_tools as st
+    from beamer2slides.agent.context import Job
+
+    j = Job("deck_adopt", AgentContext.offline(tmp_path))
+    st._sync_base(j, tmp_path / "out" / "adopt")
+    assert "sync_base" not in j.data
+    assert [d.level for d in j.diagnostics] == ["warning"]
+    assert "no sync base was recorded" in j.diagnostics[0].message
+    assert "deck_convert would make a second deck" in j.diagnostics[0].message
+
+
 def test_an_unrelated_runtime_error_is_not_a_compile_failure():
     from beamer2slides.agent import source_tools as st
     with pytest.raises(RuntimeError):

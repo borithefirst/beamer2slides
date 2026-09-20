@@ -203,6 +203,7 @@ def deck_adopt(
     # which is well past thirty lines of wiring here: agent_bench is where that belongs.
     j.data["page_scores"] = None
     _finish(j, result, work_path, out_path, apply, max_iter, "deck_adopt")
+    _sync_base(j, work_path)
 
 
 SOURCE_TOOLS = (deck_pull, tex_converge, deck_adopt)
@@ -358,6 +359,45 @@ def _finish(j: Job, result: Any, work: Path, out: Path | None, apply: bool, max_
         j.suggest(f"act on {j.ctx.workspace.ref(report)}: it lists what the loop could not write")
     if not apply and out is None and changed:
         j.suggest(f"re-run with apply=True to write the {len(changed)} changed file(s) in place")
+
+
+def _sync_base(j: Job, work: Path) -> None:
+    """What the base `adopt` recorded says about the sync that comes after it.
+
+    An agent that has just adopted a deck is about to tell a person they may edit this .tex and
+    merge it back, and how much of that is true is a number only the base knows. Nothing on a
+    person's slide says which part of a source it came from, so the base is a *pairing* by place
+    and words (`adopt_sync.pair_elements`) and what it could not tie is kept as the deck has it,
+    at every sync, for ever - on the corpus that is between 20% and 90% of the elements. It
+    cannot be read off the source, the deck or the fidelity score, and a run that does not say it
+    leaves an agent to promise a merge the tool will not make.
+    """
+    from .. import adopt_sync, snapshot
+
+    path = snapshot.local_path(work)
+    if not path.exists():
+        j.warn("no sync base was recorded, so the source this wrote cannot be merged back into the "
+               "deck it came from: deck_sync will say there is none, and deck_convert would make a "
+               "second deck and leave the person's behind.")
+        return
+    info = (adopt_sync.load(path).get("adopt") or {})
+    tied, loose = info.get("paired", 0), len(info.get("unpaired") or [])
+    drawn = len(info.get("from_layout") or [])
+    total = tied + loose + drawn
+    j.data["sync_base"] = {"path": j.ctx.workspace.ref(path), "slides": info.get("slides"),
+                           "elements": total, "paired": tied, "unpaired": loose, "from_layout": drawn}
+    if loose:
+        j.warn(f"{loose} of {total} element(s) are tied to no object of this deck, and no sync ever "
+               f"gives one an object: a source edit to one of them is kept as the deck has it and "
+               f"reported. Change those in Slides rather than in the source.")
+    if drawn:
+        j.warn(f"{drawn} of {total} element(s) are drawn by the deck's own layouts or master and "
+               f"not by a slide. Change those in Slides under Slide > Edit theme.")
+    if total:
+        j.summary += (f" {tied} of {total} element(s) are tied to an object of the deck, which is "
+                      f"what a later sync can write; the base is at {j.ctx.workspace.ref(path)}.")
+    j.suggest(f"deck_sync(deck={j.ctx.workspace.ref(work)}, dry_run=True) after editing the source, "
+              f"to see what the merge would write before anything is written")
 
 
 def _summary(j: Job, result: Any, rounds: int, left: dict, changed: list[str], apply: bool,
