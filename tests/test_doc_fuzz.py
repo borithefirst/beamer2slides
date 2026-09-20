@@ -50,12 +50,12 @@ REGRESSIONS = ((60, 1), (181, 1), (309, 4), (1031, 8), (1147, 8),
                (5099, 8), (5130, 8), (5167, 8))
 
 
-def _round(seed: int, chain: int) -> None:
-    found = fuzz_docs.offline_round(seed, chain)
+def _round(seed: int, chain: int, shape: str | None = None) -> None:
+    script = fuzz_docs.draw(seed, chain, shape=shape)
+    found = fuzz_docs.offline_round(seed, chain, script=script)
     unknown, known = fuzz_docs.triage(found)
     if unknown:
-        small = fuzz_docs.shrink(fuzz_docs.draw(seed, chain),
-                                 still=lambda f: fuzz_docs.triage(f)[0])
+        small = fuzz_docs.shrink(script, still=lambda f: fuzz_docs.triage(f)[0])
         pytest.fail(f"seed {seed} (chain {chain}) lost something no one knows about\n"
                     f"{oracle.describe(unknown)}\n{fuzz_docs.describe_script(small)}")
 
@@ -75,6 +75,15 @@ def test_a_chained_round_loses_nothing(seed):
 @pytest.mark.parametrize("seed,chain", REGRESSIONS)
 def test_a_seed_that_once_failed_still_passes(seed, chain):
     _round(seed, chain)
+
+
+@pytest.mark.parametrize("seed", (6, 15, 23, 29))
+def test_a_round_on_a_document_with_a_theme_of_its_own_loses_nothing(seed):
+    """A document's look lives in its named styles, and a paragraph that sets nothing
+    of its own wears them. The `themed` shape is drawn so that a heading's centring is
+    the theme's: seeds the injected defect below is known to reach, so that these four
+    say something rather than pass by luck."""
+    _round(seed, 2, shape="themed")
 
 
 def test_the_campaign_reaches_what_it_claims_to_reach():
@@ -137,6 +146,67 @@ def test_the_oracle_sees_styling_the_reader_put_on_a_word_dropped():
                   "runs": [{"text": "one "}, {"text": "two", "bold": True}]})
     after = _ir(_p("k1", "one two"))
     assert _kinds(oracle.check(base, before, after, NOTHING)) == {"styling_lost"}
+
+
+def _head(key, text, **kw):
+    return {"key": key, "kind": "heading", "level": 1, "runs": [{"text": text}], **kw}
+
+
+THEME = {"HEADING_1": {"align"}}
+
+
+def test_the_oracle_sees_a_paragraph_stop_following_the_documents_theme():
+    """The heading says nothing about its alignment, which is how a paragraph wearing
+    the theme's centring reads; afterwards it says `left` of its own. Nothing was
+    deleted and no word moved, so every other check here is happy, and so is the
+    convergence check: the file is regenerated from the document, so the next sync
+    writes nothing at all. Only the theme is gone."""
+    base = _ir(_head("k1", "A heading"))
+    before = _ir(_head("k1", "A heading"))
+    after = _ir(_head("k1", "A heading", align="left"))
+    found = oracle.check(base, before, after, NOTHING, theme=THEME)
+    assert _kinds(found) == {"theme_undone"}
+    assert all(f["severity"] == "loss" for f in oracle.failures(found))
+    # The file asking for it is the reason a sync may write one.
+    mine = _ir(_head("k1", "A heading", align="left"))
+    assert not oracle.failures(oracle.check(base, before, after, NOTHING, mine,
+                                            theme=THEME))
+
+
+def test_the_oracle_keeps_out_of_what_the_document_does_to_its_own_paragraphs():
+    """The check needs to be told what the theme sets, and that is not pedantry: Docs
+    merges a deleted paragraph into the one behind it and hands over its style, so a
+    paragraph really does change alignment with nobody writing one. Asked about a
+    field no named style sets, the oracle says nothing."""
+    base = _ir(_p("k1", "A line."))
+    before = _ir(_p("k1", "A line."))
+    after = _ir(_p("k1", "A line.", align="center"))
+    assert not oracle.failures(oracle.check(base, before, after, NOTHING, theme=THEME))
+    assert not oracle.failures(oracle.check(base, before, after, NOTHING))
+
+
+def test_the_campaign_sees_a_theme_undone(monkeypatch):
+    """The defect this check was built for, put back on purpose.
+
+    `doc_merge.paragraph_style` used to give `alignment` a value always — START
+    whenever the file said nothing, which is also what a heading centred by the
+    document's theme says. Measured over the first 40 `themed` seeds at chain 2, the
+    campaign catches 6 of them; these sixteen hold two.
+    """
+    real = doc_merge.paragraph_style
+
+    def broken(block):
+        style, fields = real(block)
+        style["alignment"] = doc_ir.TO_ALIGNMENT[block.get("align") or "left"]
+        return style, fields
+
+    monkeypatch.setattr(doc_merge, "paragraph_style", broken)
+    caught = 0
+    for seed in range(16):
+        found = fuzz_docs.offline_round(
+            seed, script=fuzz_docs.draw(seed, 2, shape="themed"))
+        caught += "theme_undone" in {f["kind"] for f in oracle.failures(found)}
+    assert caught >= 2, "the campaign no longer reaches the defect it was built for"
 
 
 def test_the_oracle_sees_a_chip_the_reader_inserted_disappear():

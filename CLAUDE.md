@@ -1081,8 +1081,21 @@ keys, named ranges), `doc_merge.py` (pure planning), `doc_sync.py` (the commands
   whenever the file said nothing, which is also what such a heading says, so one source
   restyle took it to the margin for good. It is subtracted now like the rest
   (`_named_defaults` reads the named style's alignment) and given a value only when
-  somebody chose one, `left` among them. Nothing offline can check the inheritance
-  itself - `doc_world` has no named styles - so the experiment is a themed heading
+  somebody chose one, `left` among them. Neither the loss oracle nor the convergence
+  check could see this - nothing was deleted, no word moved, and the file is
+  regenerated from the document afterwards, so the next sync writes nothing at all -
+  and the campaign could not either, since `doc_world` had no named styles to inherit
+  from. It has now: `align` None means inherited, the world carries a `theme` no
+  request can write (there is none in the API), a read-back names `alignment` only
+  where it is set, and the `themed` corpus shape's heading wears the theme's centring.
+  `doc_loss_oracle._inherited_findings` (`theme_undone`, severity `loss`) then asks of
+  every surviving block whether a field the theme sets for its named style has become
+  one of its own that neither side asked for. It has to be *told* what the theme sets,
+  which is not pedantry: Docs merges a deleted paragraph into the one behind it and
+  hands over its style, so asked about every field it accused 14 of 120 rounds of what
+  the document itself had done. With the fix reverted in memory it catches 6 of the
+  first 40 `themed` seeds at chain 2 (`test_the_campaign_sees_a_theme_undone`).
+  Inheritance itself is still Google's word: the experiment is a themed heading
   through a live sync (`tests/test_docs_live_styles.py`, imported as a .docx since no
   HTML import makes a theme; not run).
 - **Every named style Docs has is a kind** (`doc_ir.NAMED_KINDS`: `TITLE`/`SUBTITLE` ->

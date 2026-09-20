@@ -137,7 +137,19 @@ def _shapes() -> dict:
         "dropdown": [{"kind": "paragraph", "runs": [
             {"text": "status "}, {"chip": "unknown", "text": ""}, {"text": " today"}]},
             _p("and a line after it.")],
+        # A document with a look of its own (`THEME`). Its headings say nothing about
+        # their own alignment: the centring is the theme's, and a paragraph reports
+        # only what is set on it, so the file cannot say it and must not undo it.
+        "themed": [_h("A themed heading"), _p("Under it, a paragraph."),
+                   _h("Another heading"), _p("And prose after that."),
+                   _p("A line the source can move.", align="center")],
     }
+
+
+#: The named styles the `themed` shape's world carries. No request writes one — the
+#: API has none — so this is fixed for the life of a round, and every difference it
+#: makes is a difference in what a paragraph *inherits*.
+THEME = {"HEADING_1": {"paragraphStyle": {"alignment": "CENTER"}}}
 
 
 def corpus(name: str) -> doc_world.World:
@@ -148,7 +160,10 @@ def corpus(name: str) -> doc_world.World:
         return doc_world.build([{"blocks": shapes["prose"]},
                                 {"title": "Appendix", "blocks": shapes["ends_on_table"]}],
                                title="fuzz")
-    return doc_world.build([{"blocks": shapes[name]}], title="fuzz")
+    world = doc_world.build([{"blocks": shapes[name]}], title="fuzz")
+    if name == "themed":
+        world.theme = {name: dict(style) for name, style in THEME.items()}
+    return world
 
 
 SHAPES = sorted(list(_shapes()) + ["tabs"])
@@ -848,6 +863,19 @@ def draw(seed: int, chain: int, shape: str | None = None) -> dict:
     return script
 
 
+#: A named style's `paragraphStyle` keys, by the IR field each one is.
+THEME_FIELDS = {"alignment": "align"} | {api: key for key, api in doc_merge.PARAGRAPH_FIELDS}
+
+
+def theme_fields(world: doc_world.World) -> dict:
+    """What the world's theme sets, as `doc_loss_oracle.check` wants it: the IR fields
+    per named style. Nothing in a read says a paragraph *inherits* — only that it sets
+    nothing itself — so the oracle has to be told what there was to inherit."""
+    return {name: {THEME_FIELDS[api] for api in (style.get("paragraphStyle") or {})
+                   if api in THEME_FIELDS}
+            for name, style in (world.theme or {}).items()}
+
+
 def run_script(script: dict, seen: Counter | None = None) -> list[dict]:
     """One round: push, then (reader edits, source edits, sync, judge) per step."""
     seen = seen if seen is not None else Counter()
@@ -881,7 +909,8 @@ def run_script(script: dict, seen: Counter | None = None) -> list[dict]:
         for conflict in report["conflicts"]:
             seen["conflict/" + str(conflict.get("field", "text"))] += 1
         found += [f | {"detail": f"step {step}: {f['detail']}"}
-                  for f in oracle.check(was, before, base, report, mine)]
+                  for f in oracle.check(was, before, base, report, mine,
+                                        theme=theme_fields(world))]
         found += _settled(world, ours, base, step, seen)
         if found:
             return found
