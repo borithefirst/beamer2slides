@@ -818,9 +818,13 @@ def sync(path: Path, document: str | None = None, dry_run: bool = False,
     doc, theirs = read_document(docs, ident, ours, base or {"blocks": []})
     kept = None
     if base is None:
-        base, kept = _no_base(path, ours, theirs, assume_base, drive, ident, backup)
+        base, kept = _no_base(path, ours, theirs, assume_base, drive, ident, backup,
+                              dry_run)
         if kept:
             print(f"  the document was exported to {kept} before being written over")
+        elif dry_run and backup and assume_mode(assume_base) == "source-wins":
+            print("  a real run would export the document to "
+                  f"{STATE_DIR}/backups/ before writing over it")
     tabs = doc_merge.pair_tabs(base, ours, theirs)
     asked = open_comments(drive, ident)
 
@@ -1077,7 +1081,8 @@ def backup_document(drive, document: str, path: Path) -> Path:
 
 
 def _no_base(path: Path, ours: dict, theirs: dict, assume: str | None, drive=None,
-             document: str | None = None, backup: bool = True) -> tuple[dict, Path | None]:
+             document: str | None = None, backup: bool = True,
+             dry_run: bool = False) -> tuple[dict, Path | None]:
     """What to do when the last sync's base is nowhere — neither in Drive nor beside
     the file. (The base, the backup taken before a destructive answer.)
 
@@ -1092,8 +1097,11 @@ def _no_base(path: Path, ours: dict, theirs: dict, assume: str | None, drive=Non
         # The destructive direction: the file goes over a live document, and nothing
         # read from it survives except by merge luck. Keep a copy first — and if a
         # copy cannot even be attempted, say so rather than write without one.
+        # A dry run writes nothing, so it takes no backup either: `--dry-run` is how
+        # one looks at this answer before giving it, and it used to leave a .docx in
+        # `.b2s/backups/` for the look alone.
         kept = None
-        if backup:
+        if backup and not dry_run:
             if drive is None or not document:
                 raise SystemExit(
                     "--assume-base source-wins writes the file over the live document, and\n"

@@ -551,7 +551,8 @@ something one asks for — `--no-backup` — and never something that happens be
 export failed. The export is Drive's HTML, which is a lossy read-back (see "The round
 trip does not close on its own"): a copy of the words to recover from, not a file this
 tool could push back unchanged. The non-destructive direction writes nothing to the
-document and needs no backup.
+document and needs no backup, and neither does `--dry-run`: a look at what this answer
+would cost leaves nothing behind, and the report says the export a real run would take.
 
 ### Batching, and the atomicity it costs
 
