@@ -159,12 +159,13 @@ REGRESSIONS = ((60, 1), (181, 1), (309, 4), (1031, 8), (1147, 8),
 # oracle owed at chain 10: an un-bolding on a block the source dropped, and one the
 # source reworded away that the word's own twin answered for. And one more from
 # `between_tables`: the empty block a new table swallows, recovered only when it read
-# as a plain paragraph.
+# as a plain paragraph. And one from `astral`: an orphan named range handed to the
+# empty paragraph a new table leaves behind, resurrecting a block the reader deleted.
 SHAPED = ((870308, 8, "two_tables"), (870368, 8, "two_tables"),
           (890070, 8, "ends_on_table"), (1130023, 6, "themed"),
           (1140022, 8, "themed"), (1150196, 6, "themed"),
           (1180145, 10, "themed"), (1180151, 10, "themed"),
-          (1270233, 8, "between_tables"))
+          (1270233, 8, "between_tables"), (1430231, 10, "astral"))
 
 
 def _round(seed: int, chain: int, shape: str | None = None) -> None:
@@ -2788,6 +2789,45 @@ def test_the_empty_block_a_new_table_swallows_is_recovered_whatever_it_wears():
         "the empty block the table swallowed still wears the style the source dropped"
     assert [doc_merge._table_words(b) for b in live["blocks"] if b["kind"] == "table"] \
         == ["a b 1 2", "h1 h2 quartz x", "c d 3 4"]
+    again, _, _ = fuzz_docs.sync_once(world, copy.deepcopy(ours), copy.deepcopy(base))
+    assert again["requests"] == 0
+
+
+def test_the_orphan_a_backspace_leaves_is_not_handed_to_a_new_tables_paragraph():
+    """A reader backspacing at the start of an empty paragraph leaves that
+    paragraph's named range inside the one that survives, naming nothing — the
+    orphan `doc_ir.orphan_requests` is about — and an empty paragraph is all mark, so
+    the orphan sits exactly on the survivor's paragraph mark.
+
+    `insertTable` in front of another table goes at that very mark, splits the
+    paragraph, and the range goes with the half after the table: the empty paragraph
+    the insert leaves behind is read back under the dead name. The re-plan reads the
+    document again between the structural batch and the words, so it sees the block
+    the reader deleted standing there for the source to write into — the deletion
+    undone and the source's words in it (offline chain-10 seed 1430231, shape
+    `astral`; 1 of 250 rounds). The orphans head the structural batch too, for the
+    same reason they head the batch of words one step later."""
+    world = doc_world.build([{"blocks": [
+        fuzz_docs._p("One."), {"kind": "paragraph", "runs": []},
+        fuzz_docs._t([["c", "d"], ["3", "4"]])]}], title="fuzz")
+    ours = fuzz_docs.bootstrap(world)
+    base = copy.deepcopy(ours)
+    assert _keys(ours) == ["paragraph:one", "paragraph:empty", "table:c"]
+
+    mark = doc_world.read_ir(world)["blocks"][0]["span"][1] - 1
+    world.apply([{"deleteContentRange": {"range": {"startIndex": mark,
+                                                   "endIndex": mark + 1}}}])
+    joined = doc_world.read_ir(world, ours, base)
+    assert _keys(joined) == ["paragraph:one", "table:c"] and joined["orphans"]
+
+    # The source never saw that: it rewords the block and puts a table in front of it.
+    ours["blocks"][1]["runs"] = [{"text": " and harbour"}]
+    ours["blocks"].insert(2, fuzz_docs._t([["h1", "h2"], ["quartz", "x"]]))
+    _, ours, base = fuzz_docs.sync_once(world, ours, base)
+
+    live = doc_world.read_ir(world, ours, base)
+    assert [doc_merge.block_text(b) for b in live["blocks"]] == ["One.", "", "", ""], \
+        "the block the reader deleted is back, with the source's words written into it"
     again, _, _ = fuzz_docs.sync_once(world, copy.deepcopy(ours), copy.deepcopy(base))
     assert again["requests"] == 0
 

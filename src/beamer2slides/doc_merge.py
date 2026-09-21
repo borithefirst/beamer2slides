@@ -2642,7 +2642,17 @@ def structure(theirs: dict, merged: list[dict],
         # after that paragraph is found again by that very key (`anchor_tables`).
         # Planted back first: `requests` does the same for the batch of words, but
         # this batch goes before it, against a document read again in between.
-        out = doc_ir.replant_requests(theirs) + out
+        #
+        # And an orphan goes first for the same reason it heads `requests`, one step
+        # earlier: a reader's backspace at the start of an empty paragraph leaves that
+        # paragraph's range inside the one that survives, naming nothing, and
+        # `insertTable` at the mark it sits on splits the paragraph and hands it to the
+        # empty one the insert leaves behind. That paragraph is then read back under
+        # the dead name, and the re-plan — which reads the document again between this
+        # batch and the words — sees the very block the reader deleted standing there
+        # for the source to write into, so the deletion is undone and the source's
+        # words go in (offline chain-10 seed 1430231, shape `astral`).
+        out = doc_ir.orphan_requests(theirs) + doc_ir.replant_requests(theirs) + out
     return out, shaped
 
 

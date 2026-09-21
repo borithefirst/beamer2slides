@@ -2356,6 +2356,19 @@ keys, named ranges), `doc_merge.py` (pure planning), `doc_sync.py` (the commands
   from its words to the very name it had, file, base and document agreeing. Anything but a
   structural element counts now; what makes it the survivor is being empty, unnamed and right
   in front of the table. 1 of 300 rounds, `between_tables` clean at chain 8 and chain 10 after.
+  The same sweep at **chain 10**, 250 rounds each (`themed`, `between_tables`, `opens_on_table`,
+  `two_tables`, `ends_on_table`, `tabs`, `imported_list`, `chips`, `toc`, `titled`, `equations`
+  clean), left `astral` with the other half of that sentence: a range can be *given* an empty
+  paragraph as easily as it can lose one (1430231). A reader's backspace at the start of an
+  empty paragraph leaves its range inside the survivor naming nothing - the orphan
+  `doc_ir.orphan_requests` deletes - and an empty paragraph is all mark, so the orphan sits on
+  the survivor's paragraph mark, which is exactly where `insertTable` goes in front of another
+  table: the split hands the range to the empty paragraph the insert leaves behind, the re-plan
+  (which reads the document again between the structural batch and the words) sees the block the
+  reader deleted standing there, and the source's words go into it. `structure` heads its batch
+  with the orphan deletes now, for the reason `requests` heads the batch of words with them one
+  step later - they move no index, and the one batch they were not run before is the one that
+  makes a new empty paragraph. 1 of 250 rounds at chain 10, pinned by a hand-built test.
 - Live suite (opt-in, marker `docs`, ~5 min): `python -m pytest -m docs tests/test_docs_live.py`
   pushes a document per test, edits both sides, syncs, checks a second sync writes nothing, and
   deletes the document. Offline: `tests/test_doc_ir.py`, `test_doc_merge.py`, `test_doc_sync.py`.

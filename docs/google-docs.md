@@ -2445,6 +2445,31 @@ that it is empty, unnamed and standing right in front of the table. 1 of 300 rou
 8, pinned by a test that fails with the kind check back, seed in `SHAPED`; 300 `between_tables`
 at chain 8 and 250 at chain 10 clean afterwards.
 
+### And one from `astral`: the orphan a new table's empty paragraph picks up
+
+The same sweep at chain 10 — 250 rounds each of `themed`, `between_tables`, `opens_on_table`,
+`two_tables`, `ends_on_table`, `tabs`, `imported_list`, `chips`, `toc`, `titled` and
+`equations`, all clean — left `astral` with one (chain-10 seed 1430231), and it is the other
+half of the same sentence: a named range can be *given* an empty paragraph as easily as it can
+lose one.
+
+A reader backspacing at the start of an empty paragraph leaves that paragraph's range inside
+the one that survives, naming nothing — the orphan `doc_ir.orphan_requests` has deleted since
+chain-4 seed 70140, because a range with nothing of its own is a key waiting to be stolen. An
+empty paragraph is all mark, so the orphan sits exactly on the survivor's paragraph mark; and
+`insertTable` in front of another table goes at that very mark, splits the paragraph, and the
+range goes with the half after the table. The empty paragraph the insert leaves behind is
+therefore read back under the dead name — and the re-plan reads the document again between the
+structural batch and the words, so it sees the block the reader deleted standing there for the
+source to write into. The deletion undone, the source's words in it, and the report saying
+nothing: `block_resurrected`, which exists for exactly this.
+
+`structure` heads its batch with `orphan_requests` now, for the same reason `requests` heads
+the batch of words with them one step later — the deletes move no index, so they can head any
+batch, and the one place they were not run was the one batch that makes a new empty paragraph.
+1 of 250 rounds at chain 10 (0 with it), pinned by a hand-built test that fails when the head
+is taken out, seed in `SHAPED`.
+
 ## Remaining risks
 
 1. **Pictures** — retired, see "Pictures, and the chips a request can make" above. What
