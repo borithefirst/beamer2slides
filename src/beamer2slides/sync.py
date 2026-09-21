@@ -2138,11 +2138,11 @@ def sync(pdf: Path, deck: str, out: Path | None = None, dry_run: bool = False, o
             "attempts": result["attempts"], "requests": s.sent, "seconds": round(time.monotonic() - started, 1),
             "report": report,
             "actions": [{"slide": p["key"], "action": p["action"],
-                         "units": [{k: u[k] for k in ("key", "action", "source", "deck", "unpaired", "inherited")
-                                    if k in u}
+                         "units": [{k: u[k] for k in ("key", "action", "source", "deck", "unpaired", "inherited",
+                                                      "in_table") if k in u}
                                    for u in p.get("units", [])
                                    if u["action"] not in ("keep", "none") or u.get("deck") or u.get("unpaired")
-                                   or u.get("inherited")]}
+                                   or u.get("inherited") or u.get("in_table")]}
                         for p in result["plan"]["slides"]]}
     adopted = any(u["action"] in ("adopt", "adopt_object") for p in result["plan"]["slides"] for u in p.get("units", []))
     recovered = bool(s.recovery.get("sweep") or s.recovery.get("sweep_slides") or s.recovery.get("heal")

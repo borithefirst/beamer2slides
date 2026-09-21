@@ -126,6 +126,7 @@ NO_CANDIDATE = "nothing on that slide stands where it does and says what it says
 NOT_BEST = "another element of the source explains the same object better"
 AMBIGUOUS = "two of the deck's objects are equally close: which one it is cannot be told"
 FROM_LAYOUT = "the deck's layout draws this, not the slide"
+IN_A_TABLE = "it stands inside a table of the deck, which the converter reads back as loose words"
 
 
 def pair_elements(conv: list[dict], deck: list[dict]) -> tuple[dict[int, int], dict[int, str]]:
@@ -216,6 +217,31 @@ def explained_by_layout(conv: list[dict], why: dict[int, str], slide: dict) -> s
     return out
 
 
+def inside_tables(conv: list[dict], why: dict[int, str], objects: list[dict]) -> set[int]:
+    """Of the converted elements nothing could be tied to, the ones standing inside one of the
+    deck's **tables**.
+
+    The converter reads a table somebody drew back as loose words: of the corpus's 42 deck tables
+    9 pair, one comes back as a table, and the other 32 arrive as a cell text here and a cell text
+    there, with the grid's rules as thin pictures. Every one of those is an element the pairing
+    misses - 315 of the 1,078 it still misses after the fold, the biggest thing left - and none of
+    them can be helped by pairing harder: there is nothing on the ours side shaped like the thing
+    it came from. Putting the words back into the cells was tried and refused
+    (`tools/probe_deck_tables.py` rebuilds a grid from the geometry and proves it cell by cell
+    against the deck's own rows: none of the 42 comes back right, the rules and pictures inside them
+    being words no cell says and a wrapped cell arriving as one band for two rows). Writing one
+    cell's words into another's is exactly the mistake nothing downstream could see.
+
+    So it is named instead. A person looking at their slide sees their table standing right there
+    and is told that nothing on the slide stands where this element does - true of the element, and
+    not what they need to hear. What they need to hear is that it is a cell of that table, that
+    this converter cannot write into it, and that the cell is theirs to change in Slides."""
+    tables = [o for o in objects if o["kind"] == "table"]
+    if not tables:
+        return set()
+    return {i for i in why if any(_holds(conv[i]["bbox"], t["bbox"]) for t in tables)}
+
+
 # ---------------------------------------------------------------- one box, read back as several
 
 # How much of a converted element has to lie inside the deck's box for that box to hold it, and
@@ -264,22 +290,32 @@ def composites(conv: list[dict], objects: list[dict]) -> dict[int, list[int]]:
     no idea it was ever one box: where the deck's paragraphs stand more than a line and a half
     apart - a heading over its body, an agenda with air between its items - `classify` calls them
     separate elements, and each of them then pairs with nothing, because the thing each one is
-    part of is the whole box. Measured over the corpus, folding takes **394 elements** off the
-    1,844 the pairing misses (21%), and it falls hardest on the decks adopt is worst at: 136 of
-    intro-lecture's 170 misses, 106 of creandum-board's 140, 38 of gdg24's 136.
+    part of is the whole box. Measured over the corpus, folding takes **455 elements** off the
+    1,533 the pairing misses (30%), and it falls hardest on the decks adopt is worst at: 146 of
+    intro-lecture's 170 misses, 114 of creandum-board's 135, 38 of gdg24's 136.
+
+    What is folded is the box's **words**: the text elements standing in it, and nothing else.
+    Anything else the converter drew inside that box - the rule under its heading, the picture of
+    a formula in its prose, an icon the person put on top - is left where it is, because a fold
+    writes a text box and a text box cannot carry a drawing. That is the one rule with two faces:
+    a drawing inside the box does not refuse the fold, but it does not join it either, so the box
+    is folded only if the words that *are* folded still say what it says.
 
     Folding is a claim about somebody's slide, so it is made only where the words say so and
-    refused everywhere else. Of the corpus's 416 objects holding two or more converted elements,
-    105 are folded (459 elements) and five rules refuse the other 311:
+    refused everywhere else. Of the corpus's 310 objects holding two or more converted texts, 125
+    are folded (534 elements) and four rules refuse the other 185:
 
-      * the object has to **be text** (145 are not): the commonest thing holding a crowd of
+      * the object has to **be text** (91 are not): the commonest thing holding a crowd of
         elements is a panel or a card, and a fold writes a text box - over a person's filled
-        shape it would lose the fill and everything standing on it;
-      * every element has to be text too (111 are not), for the same reason read the other way:
-        the icon on a captioned card would come back as the caption's words;
-      * no element may already say what the object says **on its own** (41 do): that element is
+        shape it would lose the fill and everything standing on it. A table is refused here too
+        (33), and that is the biggest thing this cannot do: the converter reads a table the deck
+        drew back as loose words (one of the corpus's 42 comes back as a table at all), and
+        putting them back into cells has to be right cell by cell or it writes one cell's words
+        into another's - `tools/probe_deck_tables.py`, none of the 42;
+      * no element may already say what the object says **on its own** (52 do): that element is
         the box and the others are things standing on it;
-      * together they have to say what the object says (14 do not);
+      * together they have to say what the object says (42 do not), which is what carries the
+        drawings left out above;
       * and the object has to say something at all, or an empty text box reads as one the
         converter split into everything drawn over it - `SequenceMatcher` scores two empty
         strings 1.00, the degenerate match `same_drawing` was written for. (Nothing in the corpus
@@ -292,8 +328,8 @@ def composites(conv: list[dict], objects: list[dict]) -> dict[int, list[int]]:
     for k, obj in enumerate(objects):
         if obj["kind"] != "text" or not obj["text"].strip():
             continue
-        held = [i for i, e in enumerate(conv) if _holds(e["bbox"], obj["bbox"])]
-        if len(held) < 2 or any(conv[i]["kind"] != "text" for i in held):
+        held = [i for i, e in enumerate(conv) if e["kind"] == "text" and _holds(e["bbox"], obj["bbox"])]
+        if len(held) < 2:
             continue
         held.sort(key=lambda i: (round(conv[i]["bbox"][1], 1), conv[i]["bbox"][0]))
         said = [conv[i]["text"] for i in held]
@@ -420,13 +456,14 @@ def build_base(conv_deck: dict, conv_out: Path, target: dict, pres: dict, pdf: P
     naming the ids does the same job."""
     read = snapshot.read_presentation(pres)
     by_id = {s["objectId"]: s for s in read["slides"]}
-    state_slides, whys, layouts, leftovers = [], [], [], []
+    state_slides, whys, layouts, celled, leftovers = [], [], [], [], []
     for conv_slide, tgt in zip(conv_deck["slides"], target["slides"]):
         sid = tgt.get("objectId")
         live = by_id.get(sid)
         on_slide = [e for e in deck_objects(tgt) if live and e["object"] in live["objects"]]
         pairs, why = pair_elements(conv_slide["elements"], on_slide)
         layouts.append(explained_by_layout(conv_slide["elements"], why, tgt))
+        celled.append(inside_tables(conv_slide["elements"], why, on_slide) - layouts[-1])
         state_slides.append({"objectId": sid, "elements": [e["id"] for e in conv_slide["elements"]],
                              "objects": [[on_slide[pairs[i]]["object"]] if i in pairs else []
                                          for i in range(len(conv_slide["elements"]))],
@@ -444,7 +481,7 @@ def build_base(conv_deck: dict, conv_out: Path, target: dict, pres: dict, pdf: P
     base["master_background"] = None
     base["origin"] = ORIGIN
     unpaired, from_layout = [], []
-    for entry, why, lay in zip(base["slides"], whys, layouts):
+    for entry, why, lay, cells in zip(base["slides"], whys, layouts, celled):
         for i, el in enumerate(entry["elements"]):
             if i not in why:
                 continue
@@ -452,8 +489,10 @@ def build_base(conv_deck: dict, conv_out: Path, target: dict, pres: dict, pdf: P
                 # The merge has to know one from the other, and it reads the base's elements and
                 # not this summary (`merge.plan_unit`'s `blind`).
                 el["from_layout"] = True
+            elif i in cells:
+                el["in_table"] = True
             item = {"slide": entry["key"], "element": el["key"], "kind": el["kind"],
-                    "why": FROM_LAYOUT if i in lay else why[i]}
+                    "why": FROM_LAYOUT if i in lay else IN_A_TABLE if i in cells else why[i]}
             (from_layout if i in lay else unpaired).append(item)
     paired = sum(1 for e in base["slides"] for el in e["elements"] if el.get("main"))
     base["adopt"] = {"presentationId": read["presentationId"], "deck_page_size": read["page_size"],

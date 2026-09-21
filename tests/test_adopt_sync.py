@@ -42,6 +42,18 @@ def live_shape(oid: str, box, text: str | None = None) -> dict:
             "shape": shape}
 
 
+def live_table(oid: str, box, rows: list[list[str]]) -> dict:
+    x0, y0, x1, y1 = box
+    def cell(text):
+        return {"text": {"textElements": [{"paragraphMarker": {"style": {}}},
+                                          {"textRun": {"content": text + "\n", "style": {}}}]}}
+    return {"objectId": oid, "title": None, "description": None,
+            "size": {"width": pt(x1 - x0), "height": pt(y1 - y0)},
+            "transform": {"scaleX": 1, "scaleY": 1, "translateX": x0 * EMU, "translateY": y0 * EMU, "unit": "EMU"},
+            "table": {"rows": len(rows), "columns": len(rows[0]),
+                      "tableRows": [{"tableCells": [cell(c) for c in row]} for row in rows]}}
+
+
 def presentation(slides: list[list[dict]], width: float = 720.0, height: float = 405.0) -> dict:
     """`presentations.get` of a deck a person built: object ids of their own, no alt text."""
     return {"presentationId": "PERSONS_DECK", "revisionId": "rev1",
@@ -182,6 +194,31 @@ def test_a_layouts_words_are_the_same_drawing_however_much_room_they_have():
     assert not adopt_sync.same_drawing({**ink, "bbox": [172, 200, 281, 223]}, place), "outside it"
 
 
+# ---------------------------------------------------------------- a table, read back as words
+
+def test_a_cell_of_the_decks_own_table_is_named_for_what_it_is():
+    """The converter reads a table somebody drew back as the loose words of its cells (one of the
+    corpus's 42 deck tables comes back as a table at all), so each of those words is an element
+    with nothing on the ours side shaped like the thing it came from. The person is looking at
+    their table while being told nothing stands where this element does; what they need to hear is
+    which part of it this is."""
+    conv = [conv_element("a", (40, 60, 90, 72), "Aaa"),
+            conv_element("b", (120, 60, 180, 72), "AAA"),
+            conv_element("c", (40, 90, 200, 102), "Highest quality")]
+    grid = deck_element("gT", (30, 50, 260, 120), "Aaa AAA Highest quality", kind="table")
+    pairs, why = adopt_sync.pair_elements(conv, [grid])
+    assert pairs == {} and set(why) == {0, 1, 2}
+    assert adopt_sync.inside_tables(conv, why, [grid]) == {0, 1, 2}
+
+
+def test_an_element_beside_the_table_is_no_cell_of_it():
+    conv = [conv_element("a", (40, 60, 90, 72), "Aaa"),
+            conv_element("z", (300, 60, 420, 72), "Ratings, roughly")]
+    grid = deck_element("gT", (30, 50, 260, 120), "Aaa AAA Highest quality", kind="table")
+    _, why = adopt_sync.pair_elements(conv, [grid])
+    assert adopt_sync.inside_tables(conv, why, [grid]) == {0}
+
+
 # ---------------------------------------------------------------- one box, read back as several
 
 def lined(eid: str, box, text: str, baseline: float, size: float = 14.0, **extra) -> dict:
@@ -218,7 +255,7 @@ def test_one_box_the_converter_read_as_two_is_folded_back_into_one():
 
 def test_the_folded_element_is_the_object_the_pairing_could_not_find():
     """The whole point: apart, each half pairs with nothing, because the thing it is part of is
-    the whole box. Measured over the corpus, this is 394 of the pairing's 1,844 misses."""
+    the whole box. Measured over the corpus, this is 455 of the pairing's 1,533 misses."""
     conv = [lined("a", (30, 40, 260, 56), "Why this matters to everyone", 52),
             lined("b", (30, 96, 260, 112), "And what happened after that", 108)]
     deck = [deck_element("gA", (30, 40, 260, 112),
@@ -252,7 +289,8 @@ def test_the_gap_that_split_the_box_comes_back_out_of_the_baselines():
 def test_a_fold_never_turns_a_persons_filled_shape_into_a_text_box():
     """The one thing it may not do. A card with a title and a caption on it is a `shape` in the
     deck, and writing a text box over it would lose the fill and everything else standing on it.
-    145 of the corpus's 416 candidates are this."""
+    91 of the corpus's 310 candidates are an object that is not text: 39 pictures, 33 tables and
+    19 shapes."""
     conv = [lined("a", (30, 40, 130, 56), "Why it matters", 52),
             lined("b", (30, 96, 260, 112), "Three things happened", 108)]
     card = adopt_sync.object_records([deck_element("gA", (28, 38, 262, 114),
@@ -261,13 +299,33 @@ def test_a_fold_never_turns_a_persons_filled_shape_into_a_text_box():
     assert adopt_sync.composites(records(conv), card) == {}
 
 
-def test_an_icon_on_a_captioned_card_is_not_folded_into_the_caption():
-    """The same rule read the other way: a member that is not text would come back as words."""
-    conv = [lined("a", (30, 40, 54, 64), "", 60),
+def test_a_drawing_inside_the_box_is_left_where_it_is_and_the_words_are_folded():
+    """What is folded is the box's words. The rule under a heading, the picture of a formula in
+    its prose, the icon somebody dropped on it - a fold writes a text box and a text box cannot
+    carry a drawing, so those are not part of it and do not refuse it either."""
+    conv = [lined("a", (30, 40, 130, 56), "Why it matters", 52),
+            lined("rule", (30, 60, 130, 62), "", 61),
             lined("b", (30, 96, 260, 112), "Three things happened", 108)]
-    conv[0]["kind"] = "image"
-    objects = adopt_sync.object_records([deck_element("gA", (30, 40, 260, 112),
-                                                      "Three things happened")])
+    conv[1]["kind"] = "image"
+    objects = adopt_sync.object_records(
+        [deck_element("gA", (30, 40, 260, 112), "Why it matters Three things happened")])
+    assert adopt_sync.composites(records(conv), objects) == {0: [0, 2]}
+    folded, gone = adopt_sync.fold_composites(conv, objects)
+    assert gone == ["b"]
+    assert [e["id"] for e in folded] == ["a", "rule"], "the drawing stands where it stood"
+
+
+def test_a_box_whose_words_are_partly_a_picture_is_not_folded():
+    """And the rule that carries it: the words that *are* folded still have to say what the box
+    says. Where a picture holds some of them - an icon-font label, a formula the converter sent to
+    the background - the texts alone do not, and the box is left as it is."""
+    conv = [lined("a", (30, 40, 130, 56), "Why it matters", 52),
+            lined("pic", (30, 60, 260, 92), "", 80),
+            lined("b", (30, 96, 260, 112), "and what", 108)]
+    conv[1]["kind"] = "image"
+    objects = adopt_sync.object_records(
+        [deck_element("gA", (30, 40, 260, 112),
+                      "Why it matters happened to every one of the numbers and what")])
     assert adopt_sync.composites(records(conv), objects) == {}
 
 
@@ -407,6 +465,25 @@ def test_the_base_counts_what_the_layout_draws_apart_from_what_it_could_not_plac
         "sync base: 1 slides, 1 of 2 elements tied to an object of the deck",
         "  1 of them are drawn by the deck's own layouts and master, which this converter never "
         "writes to: change those on the layout, in Slides"]
+
+
+def test_the_base_says_which_misses_are_cells_of_the_decks_own_tables(tmp_path):
+    """The third of the three answers to "no object", and the biggest: 315 of the 1,078 misses the
+    corpus has left are words standing in a table the deck drew and the converter read back as
+    words. The merge reads the element (`merge.plan_unit`) and the person reads the summary."""
+    tgt = target([[deck_element("gT", (30, 50, 260, 120), "Aaa AAA Highest quality", kind="table",
+                                rows=[["Aaa", "AAA"], ["Highest quality", ""]])]])
+    pres = presentation([[live_table("gT", (48, 80, 413, 190), [["Aaa", "AAA"], ["Highest quality", ""]])]])
+    conv = conversion(tgt, [[conv_element("p0e0", (40, 60, 90, 72), "Aaa"),
+                             conv_element("p0e1", (120, 60, 180, 72), "AAA"),
+                             conv_element("p0e2", (40, 90, 200, 102), "Highest quality")]])
+    pdf = tmp_path / "main.pdf"
+    pdf.write_bytes(b"%PDF-1.4\n")
+    base = adopt_sync.build_base(conv, tmp_path, tgt, pres, pdf)
+    els = base["slides"][0]["elements"]
+    assert all(e["objects"] == [] and e["in_table"] is True for e in els)
+    assert [u["why"] for u in base["adopt"]["unpaired"]] == [adopt_sync.IN_A_TABLE] * 3
+    assert base["adopt"]["from_layout"] == []
 
 
 def test_the_base_names_the_deck_objects_the_source_does_not_draw(adopted):
@@ -665,6 +742,29 @@ def test_an_element_the_decks_layout_draws_is_named_for_what_it_is(world):
     assert c["resolution"] == "kept (the deck's layout draws this, not the slide)"
     assert any("are drawn by this deck's layouts or its master, not by the slide" in w and
                "Slide > Edit theme" in w for w in mplan["report"]["warnings"])
+    assert not any("could not be tied to any object" in w for w in mplan["report"]["warnings"])
+    assert adopt_sync.problems(base, mplan, world["live"], KEPT) == [], "nothing left to refuse"
+    assert merge.has_writes(mplan, [s["objectId"] for s in world["live"]["slides"]]), \
+        "and the rest of the deck is synced as usual"
+
+
+def test_a_cell_of_a_table_of_the_decks_is_named_for_what_it_is(world):
+    """The third voice of the same decision. This one is not a box the person has to go and find:
+    the table is right there in front of them, and what they cannot see is that this converter
+    reads it back as loose words and so has no cell to write into."""
+    base, doc = unpair(world)
+    el = next(e for s in base["slides"] for e in s["elements"] if not e["objects"])
+    el["in_table"] = True
+    fuzz_sync.src_reword(random.Random(1), doc)            # ... and the source changes another slide too
+    mplan = merge.plan_merge(base, W.build_ours(doc, base, world["out"]), world["live"])
+    held = [(p["key"], u) for p in mplan["slides"] for u in p.get("units") or [] if u.get("in_table")]
+    assert len(held) == 1 and held[0][1]["action"] == "keep"
+    assert not any(u.get("unpaired") or u.get("inherited") for p in mplan["slides"] for u in p.get("units") or [])
+    c = next(c for c in mplan["report"]["conflicts"] if c["field"] == "in_table")
+    assert (c["slide"], c["element"]) == (held[0][0], held[0][1]["key"])
+    assert c["resolution"] == "kept (a cell of a table of the deck's)"
+    assert any("stand inside a table of this deck" in w and "Edit those cells in Slides" in w
+               for w in mplan["report"]["warnings"])
     assert not any("could not be tied to any object" in w for w in mplan["report"]["warnings"])
     assert adopt_sync.problems(base, mplan, world["live"], KEPT) == [], "nothing left to refuse"
     assert merge.has_writes(mplan, [s["objectId"] for s in world["live"]["slides"]]), \

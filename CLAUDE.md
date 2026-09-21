@@ -843,8 +843,8 @@ its centre with everything a person put in the middle of the slide (sc-dark-mode
 scored 0.45 against it) - except for words, which the converter reads back at their ink, so the same
 words inside the template's own box are the same drawing however much room they have (firebase-jam's
 `Thank you!`: a 296 pt placeholder, 109 pt of ink). Measured over the 12 corpus decks whose IR
-carries anything inherited: **181 of 1,844 misses**, the size rule taking 28 false positives off
-that (solidity-survey 74 of 107, hebrew-lesson 39 of 215, cs161-net 31, instagram 3 of 3). Counted
+carries anything inherited: **181 of 1,533 misses**, the size rule taking 28 false positives off
+that (solidity-survey 74 of 107, hebrew-lesson 39 of 213, cs161-net 31, instagram 3 of 3). Counted
 apart in the base (`adopt.from_layout`, the element carrying `from_layout` for the merge to read)
 and reported by `merge.plan_unit` as `field: inherited`, "kept (the deck's layout draws this, not
 the slide)". Same decision, different sentence, and the sentence is the point: "change them in the
@@ -860,21 +860,29 @@ the whole box. The conversion is folded back against the deck's own boxes before
 paragraphs in reading order, boxes unioned, spans and strokes joined, an anchored picture
 re-pointed - which is why it is safe to write back, `emit.vertical_layout` reading each paragraph's
 `spaceAbove` off the baselines the page really has, so the gaps that made `classify` split the box
-come back out of the geometry when it is written again. It is a claim about somebody's slide, so it
-is made only where the words say so: of the corpus's 416 objects holding two or more elements, 105
-are folded (459 elements) and five rules refuse the other 311 - the object must be text (145 are
-not: a fold writes a text box, and over a person's filled shape it would lose the fill), every
-element must be text too (111), none may already say what the object says **on its own** (41: that
-one *is* the box), together they must say it (14 do not), and the object must say something at all
+come back out of the geometry when it is written again. What is folded is the box's **words**: a
+member that is not text does not refuse the box, it is simply not part of the fold and stays where
+it is (the rule under a heading, the picture of a formula in its prose, an icon beside its caption -
+drawings the converter made *of that box*). It is a claim about somebody's slide, so it is made
+only where the words say so: of the corpus's 310 objects holding two or more converted texts, 125
+are folded (534 elements) and four rules refuse the other 185 - the object must be text (91 are
+not: 39 pictures, 33 tables, 19 shapes; a fold writes a text box, and over a person's filled shape
+it would lose the fill), none may already say what the object says **on its own** (52: that one *is*
+the box), together they must say it (42 do not), and the object must say something at all
 (`SequenceMatcher` scores two empty strings 1.00, `same_drawing`'s own degenerate match) - and
 nothing is folded where two objects claim one element, which box it belongs to being exactly what
-is not known. Measured over the corpus: **394 of the 1,844 misses** (21%), hardest on the decks
-this was worst at (136 of intro-lecture's 170, 106 of creandum-board's 140, 38 of gdg24's 136), every
-folded element then pairing and no deck's paired count falling - folding takes rivals away too.
+is not known. Measured over the corpus: **455 of the 1,533 misses** (30%), hardest on the decks
+this was worst at (146 of intro-lecture's 170, 114 of creandum-board's 135, 38 of gdg24's 136), every
+folded element then pairing, no deck's paired count falling (folding takes rivals away too) and
+`from layout` unmoved at 181. Measured against **rebuilt** targets: a corpus deck's `target.json`
+is what `capture` wrote once and `adopt_bench.build_target` makes it again every run, which matters
+because `deck_ir.page_size_for`'s `MAX_BEAMER_SCALE` guard gives an extreme-scale deck `w/2, h/2`
+and the cached read of the 3456 pt poster was 4.8x off - against the cache the same fold reads 394
+of 1,844 (21%), a number about a deck side no current code produces.
 Seven decks were run end to end offline as well (a real `record()` off the corpus cache, one
-compile, no Google): creandum-board 135 -> 29 misses, intro-lecture 170 -> 34, ds-lecture 15 -> 1,
-**51 folds of 51 tied to one of the person's objects**, `from_layout` unmoved on every deck (a
-fold never swallows what the theme draws), and all 51 coming out of `emit.plan_offline` - which is
+compile, no Google): creandum-board 135 -> 21 misses, intro-lecture 170 -> 24, ds-lecture 15 -> 1,
+**58 folds of 58 tied to one of the person's objects**, `from_layout` unmoved on every deck (a
+fold never swallows what the theme draws), and all 58 coming out of `emit.plan_offline` - which is
 what gives `sync` its `DeckPlan.slide_parts` - as a text box at the fold's box saying what the fold
 joined. The base records the **boxes**, not the folds (`adopt.boxes`, per frame label: the deck's
 geometry is what does not change), `sync.build_ours` reads them off the base and folds its own
@@ -883,6 +891,21 @@ by **label** because folding comes before the slides are paired and pairing read
 folding changes (`identity.slide_info`). The offline campaign is blind to it by construction
 (`fuzz_world.build_adopt_base` never runs `convert_source`) and says so: it proves the fold
 regresses nothing and nothing about the fold.
+**And a table of the person's own, read back as a scatter.** Of the 1,078 misses the fold leaves,
+**315 stand inside one of the deck's tables** - the biggest thing left, and the one where naming it
+is the whole answer. `adopt` writes a table as a tikz grid and the converter reads the page back as
+it reads any page: of the corpus's 42 deck tables 9 pair, 1 comes back as a `table` element and 32
+as loose cell texts plus the thin rule pictures between them. Putting the words back into their
+cells was tried and refused (`tools/probe_deck_tables.py`, which also measures the read-back): build
+the grid from the texts' geometry and prove it cell for cell against the `rows` the deck itself
+reports, and **none of the 42 rebuilds correctly** - merged cells, empty cells, a wrapped cell, a
+number right-aligned under a left-aligned heading, each shifting a column or a row by one, and a
+grid wrong by one writes one cell's words into the cell beside it, which is the silent damage this
+design exists to prevent. So it is named: `adopt_sync.inside_tables` asks it of what is left over,
+the base marks the element `in_table`, and `merge.plan_unit` keeps the unit with `field: in_table`,
+"kept (a cell of a table of the deck's)", plus a warning naming the door (edit those cells in
+Slides). Three answers to "no object", each with its own field and sentence: `inherited` (the
+layout draws it), `in_table` (a cell of your own table) and plain `unpaired` (nothing stands there).
 Then `Sync.check_plan` runs between planning and any write and **refuses** four things
 (`adopt_sync.problems` / `refusal_message`, every message asserted verbatim in `tests/test_adopt_sync.py`):
 a unit whose base members include an **unpaired** element (writing it puts a second object beside the

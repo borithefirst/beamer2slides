@@ -653,12 +653,20 @@ def plan_unit(skey: str, ukey: str, base_members: list[dict] | None, ours_member
         # object; it stands one level up, under every other slide that inherits it, and the way to
         # change it is Slide > Edit theme - not a pairing that failed, and not a thing to go
         # looking for on the slide.
+        # And a third kind, for the same reason: an element standing inside one of the deck's own
+        # tables (`adopt_sync.inside_tables`). The converter reads a table somebody drew back as
+        # loose words, so the cell is there in front of the person and the pairing has nothing
+        # shaped like it - "nothing stands where it does" is true of the element and the wrong
+        # thing to hear about a table you are looking at.
         drawn = all(m.get("from_layout") for m in base_members if not m.get("objects"))
+        celled = not drawn and all(m.get("in_table") for m in base_members if not m.get("objects"))
         field, why = ("inherited", "kept (the deck's layout draws this, not the slide)") if drawn else \
+            ("in_table", "kept (a cell of a table of the deck's)") if celled else \
             ("unpaired", "kept (tied to no object of the deck)")
         report["conflicts"].append(conflict_entry(res, skey, ukey, field, "element", sorted(src),
                                                   sorted(deck) or ["the deck's own"], why)[0])
-        return {**action, "action": "keep", **({"inherited": blind} if drawn else {"unpaired": blind})}
+        return {**action, "action": "keep",
+                **({"inherited": blind} if drawn else {"in_table": blind} if celled else {"unpaired": blind})}
     if not edited:
         report["applied"].append({**where, "fields": sorted(src)})
         if "group" in deck:
@@ -1034,6 +1042,18 @@ def plan_merge(base: dict, ours: dict, theirs: dict, adopt=None, follow_labels: 
             f"that inherits them - but they belong to the template, and writing one would put a copy on this "
             f"one slide over a thing every other slide still shows. Change them in Slides under "
             f"Slide > Edit theme - the rest of this sync went in as usual.")
+    celled = [f"`{p['key']}` / `{u['key']}`" for p in plans for u in p.get("units") or [] if u.get("in_table")]
+    if celled:
+        # And the third: a cell of a table of the deck's. The person can see the table, so the
+        # thing to say is which part of it this is and that the cell is theirs to change
+        # (`adopt_sync.inside_tables` for why nothing here can write into one).
+        report["warnings"].append(
+            f"{len(celled)} element(s) the source changed stand inside a table of this deck: "
+            f"{', '.join(celled[:3])}{', ...' if len(celled) > 3 else ''}. This converter reads a table you "
+            f"drew back as the loose words of its cells, not as a table, so there is no cell here to write "
+            f"into and nothing was written - putting the words back into one has to be right cell by cell or "
+            f"it writes one cell's words into another's. Edit those cells in Slides - the rest of this sync "
+            f"went in as usual.")
     report_resolutions(res, report)
     order, moved = plan_order(base, ours, theirs, plans, report)
     report["slides"]["moved"] = moved

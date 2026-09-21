@@ -1386,8 +1386,8 @@ exception, the converter reading them back at the ink they cover: firebase-jam's
 the same drawing whatever the room around them.
 
 Measured over the corpus (the 12 decks whose deck IR carries anything inherited at all): **181 of
-1,844 misses** are the deck's own theme drawn again — solidity-survey 74 of 107, hebrew-lesson 39 of
-215, cs161-net 31 of 112, cs161-tls 14, apps-edu-zh 11 of 40, creandum-board 5, instagram 3 of 3.
+1,533 misses** are the deck's own theme drawn again — solidity-survey 74 of 107, hebrew-lesson 39 of
+213, cs161-net 31 of 112, cs161-tls 14, apps-edu-zh 11 of 40, creandum-board 5, instagram 3 of 3.
 The size rule takes 28 false positives off that (209 → 181): every one of sc-dark-modern's 5, and 18
 of hebrew-lesson's, which were block panels scored against a hairline rule through their middle.
 They are counted apart in the base (`adopt.from_layout`, not `adopt.unpaired`), the element carries
@@ -1410,9 +1410,15 @@ them stands and says what none of them says. Nothing was lost and nothing is wro
 looks the way the person built it — but every one of those elements is one no sync will ever write.
 
 So the conversion is folded back against the deck's own boxes before anything is paired
-(`adopt_sync.fold_composites`, `fold_slides`). A deck object holds a fold when every converted
-element inside it is text, none of them says on its own what the object says, and together they do
-(`_holds` 0.85 of an element's area inside the box, `_says_it` a 0.85 `SequenceMatcher` ratio). The
+(`adopt_sync.fold_composites`, `fold_slides`). A deck object holds a fold when the converted
+**texts** inside it — of which there must be two or more — say together what the object says and
+none of them says it alone (`_holds` 0.85 of an element's area inside the box, `_says_it` a 0.85
+`SequenceMatcher` ratio). What is folded is the box's *words*: a member that is not text does not
+refuse the box, it is simply not part of the fold and stays where it is. The thing standing inside
+somebody's text box that is not text is the rule under its heading, the picture of a formula in its
+prose, an icon beside its caption — drawings the converter made *of that box*, which the fold has
+no business swallowing and no reason to be stopped by. What carries the safety is the rule below
+it: together the words still have to say what the object says. The
 fold itself is a **concatenation and nothing more**: the paragraphs in reading order, the boxes
 unioned, the spans and strokes joined, the id and role of the first part, and an anchored picture
 re-pointed at it. That is the whole reason it is safe to write back — `emit.vertical_layout` lays a
@@ -1421,17 +1427,15 @@ really has, so the gaps that made `classify` split the box come back out of the 
 box is written again. Nothing has to remember the spacing, because the spacing was never thrown away.
 
 Folding is a claim about somebody's slide, so it is made only where the words say so. Of the
-corpus's 416 objects holding two or more converted elements, **105 are folded** (459 elements) and
-five rules refuse the other 311:
+corpus's 310 objects holding two or more converted texts, **125 are folded** (534 elements) and
+four rules refuse the other 185:
 
-- the object has to **be text** (145 are not): the commonest thing holding a crowd of elements is a
-  panel or a card, and a fold writes a text box — over a person's filled shape it would lose the
-  fill and everything standing on it;
-- every element has to be text too (111 are not), the same reason read the other way: the icon on a
-  captioned card would come back as the caption's words;
-- no element may already say what the object says **on its own** (41 do): that element is the box,
+- the object has to **be text** (91 are not: 39 pictures, 33 tables, 19 shapes): the commonest thing
+  holding a crowd of elements is a panel or a card, and a fold writes a text box — over a person's
+  filled shape it would lose the fill and everything standing on it;
+- no element may already say what the object says **on its own** (52 do): that element is the box,
   and the others are things standing on it;
-- together they have to say what the object says (14 do not);
+- together they have to say what the object says (42 do not);
 - and the object has to say something at all, or an empty text box reads as one the converter split
   into everything drawn over it — `SequenceMatcher` scores two empty strings 1.00, the degenerate
   match `same_drawing` was written for. (Nothing in the corpus reaches it, the object-kind rule
@@ -1441,35 +1445,47 @@ five rules refuse the other 311:
 Last, nothing is folded where **two objects claim one element**: an element cannot be part of two
 boxes, and which one it belongs to is exactly what is not known.
 
-Measured over the corpus, folding takes **394 elements off the 1,844 the pairing misses** (21%), and
-it falls hardest on the decks this was worst at — 136 of intro-lecture's 170 misses, 106 of
-creandum-board's 140, 38 of gdg24's 136, 14 of ds-lecture's 15. Every folded element then *pairs*
-(each deck's drop in misses is exactly what it folded), and no deck's paired count fell: folding also
-takes rivals away, which unblocks pairings next to it.
+Measured over the corpus, folding takes **455 elements off the 1,533 the pairing misses** (30%), and
+it falls hardest on the decks this was worst at — 146 of intro-lecture's 170 misses, 114 of
+creandum-board's 135, 38 of gdg24's 136, 14 of ds-lecture's 15, 11 of sc-dark-modern's 39. Every
+folded element then *pairs* (each deck's drop in misses is exactly what it folded), and no deck's
+paired count fell: folding also takes rivals away, which unblocks pairings next to it. The
+`from layout` count does not move either (181 before and after), which is the thing to check: a
+fold must never swallow what the deck's *theme* draws.
 
-That measurement is of the pairing alone, so six decks were also run end to end offline — a real
-`adopt_sync.record()` off the corpus cache (`target.json`, `presentation.json` and the source tree a
-benchmark run left), compiling with no Google call and no Drive write, once, with both bases built
-from the one conversion:
+Those figures are measured against deck sides **rebuilt with the current reader**. A corpus deck's
+`target.json` is what `adopt_bench capture` wrote once, and `load_target` / `build_target` make it
+again from `presentation.json` every run, so a `deck_ir` change shows — it matters here, because
+`deck_ir.page_size_for`'s `MAX_BEAMER_SCALE` guard gives a foreign deck at an extreme scale a page
+of `w/2, h/2` rather than beamer's page of that ratio, and the cached read of the 3456 pt poster
+was 4.8× off (three 1440 pt decks with it). Measured against the cache, the same fold reads 394 of
+1,844 (21%): a number about a deck side no current code produces. Any probe of this kind has to
+build the target, not read it.
+
+That measurement is of the pairing alone, so seven decks were also run end to end offline — a real
+`adopt_sync.record()` off the corpus cache (`presentation.json`, the target built from it, and the
+source tree a benchmark run left), compiling with no Google call and no Drive write, once, with both
+bases built from the one conversion:
 
 | deck | paired | unpaired | from layout | folds | tied to an object |
 | --- | --- | --- | --- | --- | --- |
 | ds-lecture | 27 → 30 | 15 → 1 | 0 | 5 | 5 |
-| creandum-board | 102 → 110 | 135 → 29 | 5 → 5 | 14 | 14 |
-| intro-lecture | 73 → 85 | 170 → 34 | 0 | 21 | 21 |
-| sc-dark-modern | 109 → 112 | 66 → 55 | 0 | 5 | 5 |
-| hebrew-lesson | 29 → 31 | 176 → 160 | 39 → 39 | 4 | 4 |
+| creandum-board | 102 → 112 | 135 → 21 | 5 → 5 | 16 | 16 |
+| intro-lecture | 73 → 86 | 170 → 24 | 0 | 23 | 23 |
+| sc-dark-modern | 136 → 139 | 39 → 28 | 0 | 5 | 5 |
+| hebrew-lesson | 31 → 33 | 174 → 155 | 39 → 39 | 7 | 7 |
 | cs161-net | 335 → 336 | 81 → 78 | 31 → 31 | 2 | 2 |
 | solidity-survey | 100 → 100 | 33 → 33 | 74 → 74 | 0 | 0 |
 
 Two things there are worth more than the numbers. **Every fold is tied to one of the person's
-objects** — 51 of 51 — which is the point of the exercise and not something the pairing owed it.
+objects** — 58 of 58 — which is the point of the exercise and not something the pairing owed it.
 And the `from layout` column never moves: an element the deck's *theme* draws is never swallowed
 into one of the slide's own boxes, so the two answers to "why did this not pair" stay apart.
 The last link is the write, since a folded element is an element nothing in `emit` has ever been
 handed: each one was put through `emit.plan_offline`, which is what gives `sync` its
-`DeckPlan.slide_parts`, and every one of the 51 comes out as a text box at the fold's own box
-carrying exactly the text the fold joined.
+`DeckPlan.slide_parts`, and every one of the 58 comes out as a text box at the fold's own box
+carrying exactly the text the fold joined (a `hole` run counting as the no-break spaces
+`emit.fit_holes` fills it with — three of hebrew-lesson's folds have one).
 
 **The base records the boxes, not the folds** (`adopt.boxes`, per frame label): they are the deck's
 geometry and not a decision, and the source is what changes between syncs. `sync.build_ours` reads
@@ -1485,8 +1501,40 @@ changes (`identity.slide_info`); for an adopted deck a label is a slug of the sl
 `fuzz_world.build_adopt_base` models a base directly and never runs `convert_source`, so
 `fuzz_sync offline --first-sync` proves the fold regresses nothing and proves nothing about the
 fold. What stands in for it is the table above and `tests/test_adopt_sync.py`'s own section, where
-each of the five refusals, the two-objects rule, the anchored picture, the label keying and — the
+each of the four refusals, the two-objects rule, the anchored picture, the label keying and — the
 one that matters — the gap coming back out of the baselines are a test apiece.
+
+### A table of somebody's deck, read back as a scatter
+
+Of the 1,078 misses the fold leaves, **315 stand inside a table of the deck's own** — the largest
+thing left by a long way, and the one place where naming the problem is the whole answer.
+
+`adopt` writes a person's table as a tikz grid with measured rows (`adopt.table_block`), and the
+converter reads the compiled page back the way it reads any page: of the corpus's 42 deck tables,
+**9 come back paired, 1 as a `table` element, and 32 as loose cell texts plus the thin rule images
+between them** (`tools/probe_tables.py`). Each of those texts is a real element with real words and
+nothing on the slide to pair with, because the thing it is part of is a cell of a table, and a cell
+is not an object the Slides API hands back on its own.
+
+Putting the words back into their cells was tried and refused (`tools/probe_grid.py`): build the
+grid from the texts' geometry — column bounds off the x edges, rows off the y — and check it cell
+for cell against the `rows` the deck itself reports. **None of the 42 rebuilt correctly.** Merged
+cells, empty cells, a cell whose text wraps, a number right-aligned under a left-aligned heading:
+each of those shifts a column or a row by one, and a grid wrong by one writes one cell's words into
+the cell beside it. That is exactly the silent damage this whole design exists to prevent, and a
+reconstruction that is right 80% of the time is worse than none — the 20% is somebody's table
+quietly saying something else.
+
+So it is **named** instead, which is the same decision the layout case reached and for the same
+reason: nothing is written either way, and the only thing at stake is the sentence a person reads.
+`adopt_sync.inside_tables` asks of every miss whether it stands inside one of the deck's tables, the
+base marks it `in_table`, and `merge.plan_unit` keeps the unit with `field: in_table`, "kept (a cell
+of a table of the deck's)", plus one warning per sync saying what happened and where the door is:
+the converter reads a table you drew back as the loose words of its cells, so edit those cells in
+Slides — the rest of this sync went in as usual. Three answers now, each with its own field and its
+own sentence: `inherited` (the deck's layout draws it — Slide > Edit theme), `in_table` (a cell of
+your own table — edit it in Slides), and plain `unpaired` (nothing on the slide stands there at all
+— change it in the deck, or in the source).
 
 **The refusals** (`adopt_sync.problems`, one message, `--force-adopted-deck` to go ahead anyway):
 
