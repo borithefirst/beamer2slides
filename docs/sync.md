@@ -461,6 +461,23 @@ since a question the content can now answer becomes an answer. The sound rounds 
 both shapes but for one extra `moved` verdict in 2,812 adopt-shaped ones, and no sound round
 anywhere puts a frame on the wrong slide.
 
+**And so does the margin, which is a difference between readings of two different pairs.** `here`
+scores the label's slide against another frame, `own` against the frame carrying the label, and
+where those two pairs can say different amounts the difference is being measured in two units at
+once: a rival that says *word for word* what an untitled slide said reaches 1.0 and no further, so
+beating a titled pairing of 0.8 by `LABEL_MARGIN` is arithmetically out of reach whatever it says.
+`identity._scaled` puts both readings on the scale the constants are written for - a pair whose
+titles agree - before subtracting them, which is `_moved_bar`'s idea as a score rather than a bar,
+and the three places it is used are the two margins and the `LABEL_EXCHANGE` gate. Measured over
+four adopt-shaped campaigns run twice over the same seeds with only that swapped (1,000 rounds four
+deep, label-chance 1 and 0.5, two seeds each: 61,344 frames in broken rounds): frames written onto
+the wrong slide 174 → **154**, misidentified 421 → **391**, `unsure` verdicts 115 → **94**. In
+3,996 sound rounds the questions go 5 → **1**, no sound round says `moved` that did not before, and
+a converted talk writes the same 26 frames either way (63 → 65 misidentified, both of the two extra
+on a slide sync holds back, and one silent wrong round fewer). The price is in the same coin as
+`_moved_bar`'s and is visible: one campaign's writes went 16 → **18** and another's silent rounds
+3 → **4**, because a bar a pair can actually reach is reachable by a wrong reading too.
+
 The two sides are not worth the same, though, and only one of them may stand alone:
 
 - **the frame's side** (`there_exact`): the frame carrying the label says word for word what some

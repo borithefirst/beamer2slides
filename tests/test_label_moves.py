@@ -135,6 +135,36 @@ def test_a_label_swapped_between_two_slides_nobody_gave_a_title():
     assert identity.label_pairs(base, ours) == {0: 1, 1: 0}, "the label alone would have crossed them"
 
 
+FOOT = "every figure here comes from the finance review"
+WESTERN = FOOT + " regional sales cluster around our western districts beside a map of newly opened offices"
+LAUNCHES = FOOT + " launch dates of each mobile client sit under a photograph showing the shipping team"
+REWORDED = FOOT + " launch dates of each mobile client rest below a drawing showing the delivery crew"
+ELSEWHERE = "a full page of notes nobody wrote down before the partners arrived at the workshop"
+
+
+def test_a_margin_is_a_share_of_what_the_pair_can_say_too():
+    """`LABEL_MOVED` was a share of the pair's ceiling before this (`_moved_bar`); `LABEL_MARGIN`
+    is a *difference* between two readings, and the two readings are of different pairs.
+
+    Here the label's frame was reworded and the frame it came from was rewritten from scratch, so
+    the label's own pairing says 0.41 and the slide the labelled frame really belongs to says 0.77
+    - 0.36 apart, which a flat half-point calls nothing at all. Both pairs are untitled, though,
+    and an untitled pair's whole vocabulary is 1.0: those 0.36 are 0.55 of everything either could
+    have said, which is what `LABEL_MARGIN` is written in. A deck `adopt` wrote is made of such
+    pairs, and there a label is the only identity there is (`identity._scaled`)."""
+    base = [info("", WESTERN, "one"), info("", LAUNCHES)]
+    ours = [info("", ELSEWHERE), info("", REWORDED, "one")]
+    own = identity._evidence(base[0], ours[1])
+    there = identity._evidence(base[1], ours[1])
+    assert there - own < identity.LABEL_MARGIN, "flat, the margin sees nothing"
+    assert (identity._scaled(there, base[1], ours[1])
+            - identity._scaled(own, base[0], ours[1])) >= identity.LABEL_MARGIN
+    (m,) = identity.label_moves(base, ours)
+    # One side only: nothing explains the slide this label used to name, which is what a frame
+    # rewritten from scratch looks like as well. So it is a question, and nothing is re-paired.
+    assert m["verdict"] == "unsure" and m["frame_is"] == 1 and m["slide_is"] is None
+
+
 TWIN_SLIDE = "the table lists the review and export figures for the quarter that has just gone by"
 
 

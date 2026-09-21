@@ -690,6 +690,21 @@ that carries it now is what a label *means*), and `near_misses`, which is in the
 counted as telling anybody. Corrected, **nothing written onto the wrong slide in 2,607 broken
 rounds goes unmentioned**; the price is 34 warnings in the 200 sound rounds that really moved a
 frame, each about two slides a person cannot tell apart either.
+**And so is the margin** (`identity._scaled`), which is a *difference* between two readings - and
+the two are readings of different pairs, `here` scoring the label's slide against another frame and
+`own` against the frame carrying the label. Where those pairs can say different amounts the
+difference is measured in two units at once: a rival that says word for word what an untitled slide
+said reaches 1.0 and no further, so beating a titled pairing of 0.8 by `LABEL_MARGIN` is
+arithmetically out of reach whatever it says - and a deck `adopt` wrote is made of such pairs. Both
+readings go onto the scale the constants are written for before they are subtracted, in the two
+margins and the `LABEL_EXCHANGE` gate. Measured over four adopt-shaped campaigns run twice over the
+same seeds with only that swapped (1000 rounds four deep, label-chance 1 and 0.5, two seeds each,
+61,344 frames): written onto the wrong slide 174 -> **154**, misidentified 421 -> **391**, `unsure`
+115 -> **94**, and in 3,996 sound rounds the questions 5 -> **1** with no new `moved` anywhere; a
+converted talk writes the same 26 frames either way. The price is the same coin as `_moved_bar`'s,
+and visible: one campaign's writes went 16 -> **18** and another's silent rounds 3 -> **4**, a bar a
+pair can actually reach being reachable by a wrong reading too
+(`test_a_margin_is_a_share_of_what_the_pair_can_say_too`).
 
 Slide order is merged, not all-or-nothing (`merge.plan_order`): the source's order is the ground and
 a slide the deck itself picked up (out of its base order there, `_out_of_place`) goes back beside

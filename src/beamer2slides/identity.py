@@ -164,6 +164,27 @@ def _moved_bar(a: dict, b: dict) -> float:
     return LABEL_MOVED * (1.0 + 0.5 * _title_alike(a, b)) / 1.5 - 1e-9
 
 
+def _scaled(score: float, a: dict, b: dict) -> float:
+    """`score` put back on the scale a pair whose titles agree is scored on, which is the one the
+    constants are written for - `_moved_bar` the same idea as a bar rather than a score.
+
+    A margin is a *difference* between two readings, and the two are readings of different pairs:
+    `here` scores the label's slide against another frame, `own` against the frame carrying the
+    label. Where those pairs can say different amounts the difference is measured in two units at
+    once - a rival that says word for word what an untitled slide said reaches 1.0 and no further,
+    so beating a titled pairing of 0.8 by `LABEL_MARGIN` is arithmetically out of reach whatever
+    it says. A deck `adopt` wrote is made of such pairs (half its slides have no title at all), and
+    it is the deck where a label is the only identity there is.
+
+    Measured over four adopt-shaped campaigns run twice with only this swapped (1000 rounds four
+    deep at label-chance 1 and 0.5, two seeds each): frames written onto the wrong slide 174 ->
+    **154** of 61,344, misidentified 421 -> 391, `unsure` verdicts 115 -> 94 and four of the five
+    questions the sound rounds asked gone; one campaign's silent rounds went 3 -> 4 and another's
+    writes 16 -> 18, which is the same coin - a bar a pair can actually reach is reachable by a
+    wrong reading too. Converted decks write the same 26 either way."""
+    return score * 1.5 / (1.0 + 0.5 * _title_alike(a, b))
+
+
 def _complete(a: dict, b: dict, score: float) -> bool:
     """Whether `_evidence` has nothing left to hold against these two: the same words, word for
     word. The most it can say depends on the pair - 1 for the words, plus half of what the titles
@@ -269,7 +290,9 @@ def label_moves(base: list[dict], ours: list[dict]) -> list[dict]:
             return False
         if here < _moved_bar(base[i], ours[slide_is]) or there < _moved_bar(base[frame_is], ours[j]):
             return False
-        if min(here, there) - own[j] < LABEL_EXCHANGE:
+        mine = _scaled(own[j], base[i], ours[j])
+        if min(_scaled(here, base[i], ours[slide_is]),
+               _scaled(there, base[frame_is], ours[j])) - mine < LABEL_EXCHANGE:
             return False
         # Nothing is left out of the look back, though `rivals` leaves out the pairing's own two
         # sides: the frame that best explains the slide this frame would move to may well be the
@@ -306,10 +329,16 @@ def label_moves(base: list[dict], ours: list[dict]) -> list[dict]:
         here_exact = slide_is is not None and not own_exact and _complete(base[i], ours[slide_is], here)
         there_exact = frame_is is not None and not own_exact and _complete(base[frame_is], ours[j], there)
         trade = exchanged(j)
+        # The margin is a difference between two readings of *different* pairs, so both are put on
+        # one scale first (`_scaled`): a rival that says word for word what an untitled slide said
+        # cannot beat a titled pairing by half a point, whatever it says.
+        mine = _scaled(own[j], base[i], ours[j])
         strong = (slide_is is not None and here >= _moved_bar(base[i], ours[slide_is])
-                  and (trade or here - own[j] >= LABEL_MARGIN or (here_exact and there_exact)),
+                  and (trade or _scaled(here, base[i], ours[slide_is]) - mine >= LABEL_MARGIN
+                       or (here_exact and there_exact)),
                   frame_is is not None and there >= _moved_bar(base[frame_is], ours[j])
-                  and (trade or there - own[j] >= LABEL_MARGIN or there_exact))
+                  and (trade or _scaled(there, base[frame_is], ours[j]) - mine >= LABEL_MARGIN
+                       or there_exact))
         if not any(strong):
             continue
         label = ours[j]["label"]
