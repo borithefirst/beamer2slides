@@ -3524,8 +3524,30 @@ def plan(base: dict, ours: dict, theirs: dict) -> dict:
     result["structure"], result["shaped"] = structure(theirs, result["blocks"], result["notes"])
     unwritten_levels(theirs, result["blocks"], result["notes"])
     unwritten_glyphs(theirs, result["blocks"], result["notes"])
+    result["removed"] = deleted_blocks(theirs, result["blocks"])
     result["requests"] = requests(theirs, result["blocks"])
     return result
+
+
+def deleted_blocks(theirs: dict, merged: list[dict]) -> list[dict]:
+    """The document's blocks this plan takes away for good, for the report to name.
+
+    The one thing a sync does that cannot be undone, and the report had no word for
+    it: `doc_sync._summary` walks the *merged* blocks, and a block being deleted is
+    exactly the one that is not among them. So a sync that took two paragraphs out of
+    somebody's document said "1 block(s) from the source, 0 kept from the document, 0
+    conflict(s)" and listed the one rewrite — measured on the playground, where a
+    workbench editor saved a file it had loaded before an earlier sync rewrote it, and
+    the two paragraphs the reader had typed went with no note anywhere.
+
+    Asked after every refusal and restoration above, not where `merge` decides it: a
+    block dropped by the source may still be put back by `restore_undeletable` or
+    `refuse_nowhere`, and what the report must name is what `requests` will really
+    delete — which is this same question, asked by `_goes`. A block the source *moved*
+    is deleted and written again, so it is not one of these.
+    """
+    kept = {b["key"] for b in merged if b.get("key")}
+    return [b for b in theirs["blocks"] if b.get("key") and b["key"] not in kept]
 
 
 def unwritten_levels(theirs: dict, merged: list[dict], notes: list[str]) -> None:

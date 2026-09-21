@@ -859,7 +859,9 @@ def write_report(path: Path, info: dict) -> Path:
     if info.get("backup"):
         lines += [f"The document was exported to `{info['backup']}` before being written over "
                   f"(`--assume-base source-wins` has no base to merge against).", ""]
-    for title, items in (("Conflicts (the document won)",
+    for title, items in ((f"Deleted from the document{'' if info['dry_run'] else ' (no way back)'}",
+                          info.get("removed", [])),
+                         ("Conflicts (the document won)",
                           [(f"[{c['tab']}] " if c.get("tab") is not None else "")
                            + f"`{c['key']}`: the source said {c['ours']!r}, "
                            f"the document says {c['theirs']!r}" for c in info["conflicts"]]),
@@ -882,8 +884,13 @@ def _words(block: dict) -> str:
     return doc_merge.block_text(block)[:60]
 
 
-def _summary(result: dict) -> tuple[list[str], list[str]]:
-    applied, kept = [], []
+def _summary(result: dict) -> tuple[list[str], list[str], list[str]]:
+    applied, kept, gone = [], [], []
+    for block in result.get("removed", []):
+        # Its own list and its own heading, above everything else the report says: it
+        # is the one change here that no second sync can bring back
+        # (`doc_merge.deleted_blocks`).
+        gone.append(f"`{block.get('key', '(unkeyed)')}`: {_words(block)!r}")
     for block in result["blocks"]:
         origin, key = block.get("origin"), block.get("key", "(unkeyed)")
         words = _words(block)
@@ -899,7 +906,7 @@ def _summary(result: dict) -> tuple[list[str], list[str]]:
             kept.append(f"`{key}` says what the document says: {words!r}")
         elif origin == "kept over a source delete":
             kept.append(f"`{key}` was deleted in the source but edited here: {words!r}")
-    return applied, kept
+    return applied, kept, gone
 
 
 # ---------------------------------------------------------------- commands
@@ -1065,7 +1072,7 @@ def _report(ident: str, dry_run: bool, ours: dict, tabs: dict, written: list[dic
     said with the tab's title in front."""
     info = {"document": ident, "url": url(ident), "dry_run": dry_run, "requests": 0,
             "conflicts": [], "notes": limits(ours) + tabs["notes"],
-            "applied": list(tabs["applied"]), "kept": [], "comments": asked}
+            "applied": list(tabs["applied"]), "kept": [], "comments": asked, "removed": []}
     for each in written:
         result, label = each["result"], each["label"]
         say = (lambda line, label=label: f"[{label}] {line}") if label is not None else str
@@ -1073,9 +1080,10 @@ def _report(ident: str, dry_run: bool, ours: dict, tabs: dict, written: list[dic
         info["conflicts"] += [c | {"tab": label} if label is not None else c
                               for c in result["conflicts"]]
         info["notes"] += [say(n) for n in result["notes"]]
-        applied, kept = _summary(result)
+        applied, kept, gone = _summary(result)
         info["applied"] += [say(t["note"]) for t in each["shaped"]] + [say(a) for a in applied]
         info["kept"] += [say(k) for k in kept]
+        info["removed"] += [say(g) for g in gone]
         if each.get("attempts"):
             info["replanned"] = max(info.get("replanned", 0), each["attempts"])
     return info

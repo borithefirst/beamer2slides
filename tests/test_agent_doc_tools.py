@@ -501,6 +501,37 @@ def test_the_reader_wins_where_both_sides_moved(tmp_path, monkeypatch):
     assert "The second paragraph" not in path.read_text(encoding="utf-8")
 
 
+def test_a_paragraph_the_file_no_longer_has_is_deleted_and_said_out_loud(tmp_path, monkeypatch):
+    """A source delete is a deletion in somebody's document, and nothing could undo it.
+
+    An agent hears the count, the words and what to do about them. Measured on the
+    playground, where an editor buffer older than the sync before it was saved back over
+    the file: two paragraphs a reader had typed went, and the summary said "1 block(s)
+    from the source, 0 kept from the document, 0 conflict(s)" — the rewrite, and not a
+    word about the deletion (`doc_merge.deleted_blocks`).
+    """
+    world, path, _, _ = _pair(tmp_path, monkeypatch)
+    text = path.read_text(encoding="utf-8")
+    dropped = [line for line in text.splitlines() if "first paragraph" in line]
+    path.write_text(text.replace(dropped[0] + "\n", ""), encoding="utf-8")
+
+    result = doc_tools.doc_sync(_ctx(tmp_path), file="doc.html")
+    assert result.ok, result.summary
+    assert result.data["deleted"] == 1
+    assert result.data["deleted_examples"] == \
+        ["`paragraph:the-first-paragraph-untouched-by-anyone`: "
+         "'The first paragraph, untouched by anyone.'"]
+    assert "1 deleted from the document" in result.summary
+    gone = [d for d in result.diagnostics if d.where == "what is gone"]
+    assert len(gone) == 1 and gone[0].level == "warning"
+    assert "deleted from the document" in gone[0].message
+    assert "untouched by anyone" in gone[0].message           # the words, not just a count
+    assert any("put them back into the canonical file" in step for step in result.next_steps)
+    assert "untouched by anyone" not in json.dumps(doc_world.read_ir(world))
+    report = (tmp_path / ".b2s" / "doc.sync-report.md").read_text(encoding="utf-8")
+    assert "## Deleted from the document (no way back)" in report
+
+
 @pytest.mark.parametrize("journey", [t.tool_name for t in doc_tools.TOOLS])
 def test_a_journey_never_raises_across_the_boundary(tmp_path, monkeypatch, journey):
     """Whatever goes wrong underneath, the agent gets a Result with a code it can branch

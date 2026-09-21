@@ -1770,6 +1770,19 @@ keys, named ranges), `doc_merge.py` (pure planning), `doc_sync.py` (the commands
 - Styling merges with the words: a source restyle in a block whose words both sides changed
   is written word by word (`doc_merge._restyled_words`: the document's marks, then the file's
   on every word the file also has); only a restyled word the document replaced is reported.
+- **What the sync deletes is said first** (`doc_merge.deleted_blocks`): a block the file no
+  longer has is one this sync takes out of somebody's document, and the one change here no
+  second sync brings back (the words go, the file has not got them either, and the settle
+  writes that agreement into the base). `_summary` walked the *merged* blocks, and a deleted
+  block is exactly the one that is not among them, so a sync that took two paragraphs out of a
+  live document said "1 block(s) from the source, 0 kept from the document, 0 conflict(s)" and
+  listed the one rewrite. Asked after every refusal and restoration above it - the same
+  question `_goes` asks - and it is the report's first section ("Deleted from the document (no
+  way back)") quoting each block's words, a `warning` per block for an agent, and `deleted` /
+  `deleted_examples` in the data. Measured on the playground, where the workbench's editor held
+  a buffer older than an earlier sync's rewrite: saving it put the pre-sync text back, the next
+  sync read that as a source delete, and the merge was right - the file is what the source says
+  - while the person had no way of learning what it cost.
 - Every sync names the document's **open comments** in its report (`doc_sync.open_comments`,
   Drive's comments API under `drive.file`): a comment lives in Drive, not in the document's
   content, so nothing the merge reads can see one - and a sync that rewrites the passage it

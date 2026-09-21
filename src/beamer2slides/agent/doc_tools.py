@@ -63,6 +63,18 @@ def report_diagnostics(j: Job, info: dict) -> dict[str, Any]:
             where = f"{clash['tab']} / {where}"
         j.conflict(f"the source said {clash.get('ours')!r}, the document says "
                    f"{clash.get('theirs')!r}; the document won", where)
+    # A block the file no longer has is deleted from the document, which is what a source
+    # delete means - and it is the one change here that nothing on this side can undo, so
+    # it is said out loud rather than left to be counted. A stale editor buffer saved over
+    # the file is enough to ask for it (see `doc_merge.deleted_blocks`).
+    gone = list(info.get("removed") or [])
+    for line in gone:
+        j.warn(f"{'would be deleted' if info.get('dry_run') else 'deleted'} from the "
+               f"document, the file no longer having it: {line}", "what is gone")
+    if gone and not info.get("dry_run"):
+        j.suggest("if that was not meant, the words are quoted in this report and in the "
+                  "sync report beside the file: put them back into the canonical file and "
+                  "sync again, or undo in the document before anyone else writes to it")
     chunked = False
     lost = 0
     for note in info.get("notes") or []:
@@ -310,16 +322,21 @@ def doc_sync(
         # Blocks this run wrote again from nothing that carried something the file
         # cannot say. Almost always 0, and a number worth seeing when it is not.
         "lost": counts["lost"],
+        # Blocks the document had that this run takes away, the file no longer having
+        # them. The one number here about words that are gone for good.
+        "deleted": len(info.get("removed") or []),
         "base": info.get("base"), "open_comments": list(info.get("comments") or []),
         "applied_examples": list(info["applied"])[:20],
         "kept_examples": list(info["kept"])[:20],
+        "deleted_examples": list(info.get("removed") or [])[:20],
         "file": j.ctx.workspace.ref(path), **refs})
     if info.get("blocks") is not None:
         j.data["blocks"] = info["blocks"]
 
     head = (f"{'Planned' if info['dry_run'] else 'Merged'} {file} against {info['url']}: "
             f"{len(info['applied'])} block(s) from the source, {len(info['kept'])} kept from "
-            f"the document, {counts['conflicts']} conflict(s) the document won, "
+            f"the document, {len(info.get('removed') or [])} deleted from the document, "
+            f"{counts['conflicts']} conflict(s) the document won, "
             f"{info['requests']} request(s) {'planned' if info['dry_run'] else 'sent'}.")
     if info["dry_run"]:
         j.suggest("run doc_sync again with dry_run=False" if info["requests"] else

@@ -729,6 +729,27 @@ browser. A read that fails (a scope, a share) is reported too, never raised.
 `<stem>.sync-report.{json,md}` in `.b2s/` beside the file says what each side
 contributed, what conflicted (the document wins) and what was left alone.
 
+### What the sync deleted, said first
+
+A block the file no longer has is a block this sync **takes out of somebody's
+document**, and it is the one thing here that no second sync brings back: the words
+are gone from the document, the file does not have them either, and the settle writes
+that agreement into the base. Everything else a sync does is recoverable from one side
+or the other. So `doc_merge.deleted_blocks` asks, after every refusal and restoration
+above it, which of the document's blocks `requests` will really delete — the same
+question `_goes` asks — and the answer is the report's **first** section
+("Deleted from the document (no way back)"), quoting each block's words, a `warning`
+per block for an agent, and `deleted` / `deleted_examples` in `doc_sync`'s data.
+
+It had no word for it at all. `doc_sync._summary` walked the *merged* blocks, and a
+block being deleted is exactly the one that is not among them, so a sync that took two
+paragraphs out of a live document reported "1 block(s) from the source, 0 kept from
+the document, 0 conflict(s)" and listed the one rewrite. Measured on the playground:
+the workbench's editor held a buffer older than an earlier sync's rewrite, saving it
+put the pre-sync text back into the file, and the next sync read that as a source
+delete. The merge was right — the file is what the source says — and the person had no
+way of learning what it cost.
+
 ### The base is Drive-first
 
 The base of the last sync — what both sides agreed on, and the only thing that can tell

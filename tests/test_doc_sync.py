@@ -616,23 +616,52 @@ def test_the_report_has_a_section_for_the_open_comments(tmp_path):
 
 
 def test_the_report_says_what_each_side_contributed():
-    applied, kept = doc_sync._summary({"blocks": [
+    applied, kept, gone = doc_sync._summary({"blocks": [
         {"key": "p:new", "kind": "paragraph", "origin": "added by the source",
          "runs": [{"text": "written from the file"}]},
         {"key": "p:one", "kind": "paragraph", "origin": "merged", "runs": [{"text": "merged words"}]},
         {"key": "p:two", "kind": "paragraph", "origin": "kept from the document",
          "runs": [{"text": "typed by a reader"}]},
-        {"key": "p:three", "kind": "paragraph", "runs": [{"text": "untouched"}]}]})
+        {"key": "p:three", "kind": "paragraph", "runs": [{"text": "untouched"}]}],
+        "removed": [{"key": "p:four", "kind": "paragraph",
+                     "runs": [{"text": "the file dropped this"}]}]})
     assert applied == ["`p:new` added: 'written from the file'",
                        "`p:one` rewritten: 'merged words'"]
     assert kept == ["`p:two` says what the document says: 'typed by a reader'"]
+    assert gone == ["`p:four`: 'the file dropped this'"]
+
+
+def test_a_block_the_file_no_longer_has_is_named_as_deleted(tmp_path):
+    """The one change a sync makes that no second sync can undo, so it is said out loud.
+
+    Measured on the playground: the workbench's editor had a buffer older than the sync
+    before it, saving it dropped two paragraphs a reader had typed, and the report said
+    "1 block(s) from the source, 0 kept from the document, 0 conflict(s)" and listed the
+    rewrite. `doc_merge.deleted_blocks` asks what `requests` will really delete, after
+    every restoration above it, and it travels to the heading a person reads first.
+    """
+    base = live([para("p:one", "hello"), para("p:two", "LAlalalalaa")])
+    ours = live([para("p:one", "Gello")])                     # the stale buffer, saved
+    result = doc_merge.plan(base, ours, live(base["blocks"]))
+    assert [doc_merge.block_text(b) for b in result["removed"]] == ["LAlalalalaa"]
+    assert doc_sync._summary(result)[2] == ["`p:two`: 'LAlalalalaa'"]
+
+    path = tmp_path / "doc.html"
+    info = {"url": "u", "requests": 2, "dry_run": False, "conflicts": [], "notes": [],
+            "applied": ["`p:one` rewritten: 'Gello'"], "kept": [],
+            "removed": ["`p:two`: 'LAlalalalaa'"]}
+    text = doc_sync.write_report(path, info).read_text(encoding="utf-8")
+    assert "## Deleted from the document (no way back)" in text
+    assert "- `p:two`: 'LAlalalalaa'" in text
+    # The words themselves, and above everything else the report says about this sync.
+    assert text.index("LAlalalalaa") < text.index("Gello")
 
 
 def test_a_table_is_reported_by_its_cells():
     grid = table("t:one", [["Region", "Sales"], ["North", "1200"]])
-    applied, kept = doc_sync._summary({"blocks": [grid | {"origin": "merged"}]})
+    applied, kept, gone = doc_sync._summary({"blocks": [grid | {"origin": "merged"}]})
     assert applied == ["`t:one` rewritten: 'Region | Sales | North | 1200'"]
-    assert kept == []
+    assert kept == [] and gone == []
 
 
 def test_a_document_edit_inside_a_cell_is_reported_as_the_documents():
