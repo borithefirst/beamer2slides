@@ -1313,6 +1313,21 @@ def carry_unimported(live: dict, planned: list[dict]) -> int:
                 if mine["kind"] == "item" else "none"
         elif mine["kind"] == "item" and bool(mine.get("ordered")) != bool(block.get("ordered")):
             bullet = "ordered" if mine.get("ordered") else "unordered"
+        # And the named style a bullet was hiding. `doc_ir` reads a paragraph with a
+        # bullet on it as an item whatever its `namedStyleType` says — the dialect has
+        # no bulleted heading and the file writes `<li>` — so where the settle is about
+        # to take the bullet off, the style underneath is one no read could report and
+        # the comparison above was blind to it. The delete that handed this block its
+        # mark handed over a heading with it, and taking the bullet off uncovered it
+        # (offline chain-8 seed 8000322, shape `imported_list`: the reader bullets a
+        # heading, the source moves it away, and the item behind it came out a heading).
+        # Written whole rather than as a difference, for the reason `_unwritten` below
+        # is: there is no difference to take, both sides reading NORMAL_TEXT. Its price
+        # is the reader who bullets a heading *and means the heading*: nothing
+        # distinguishes that from one Docs handed over, so where the source takes the
+        # bullet off, the block becomes what the plan says it is, whole.
+        if bullet == "none":
+            named = named_style(mine)
         # And, for a paragraph this run wrote, every measurement the write did not
         # leave as the plan asked — in either direction, because Docs' merge-on-delete
         # gives as well as takes. The style goes back whole rather than as the
@@ -3566,6 +3581,7 @@ def unwritten_levels(theirs: dict, merged: list[dict], notes: list[str]) -> None
     def level_of(block: dict) -> int:
         return block.get("level", 0) if block.get("kind") == "item" else 0
 
+    donors, keeps = _mark_donors(theirs, merged)
     lands: list[int | None] = []            # the level each item really comes out at
     for at, block in enumerate(merged):
         if block.get("kind") != "item":
@@ -3573,6 +3589,22 @@ def unwritten_levels(theirs: dict, merged: list[dict], notes: list[str]) -> None
             continue
         if not _written_here(block):
             lands.append(block.get("level", 0))
+            continue
+        if at in donors:
+            # The two rules at once: the block is written from nothing *and* a delete
+            # in front of it hands over its mark, which happens last and so decides.
+            # The mark a deleted block gives up goes to whatever stands behind it, and
+            # what stands behind it is this new block and not the one it was written
+            # in front of (offline chain-10 seed 8100356, shape `prose`: the source
+            # moves a heading to the end, into the very place a nested item it is
+            # dropping stood, and the heading came out a nested item).
+            out = level_of(donors[at])
+            lands.append(out)
+            if out != level_of(block):
+                notes.append(f"{block.get('key')}: written from nothing where the paragraph "
+                             f"in front of it goes, so Docs hands it that one's style — no "
+                             f"request gives a bullet its nesting level, so it comes out at "
+                             f"level {out}, not at {level_of(block)}")
             continue
         # Whose paragraph style the new text wears, and so whose place in a list; where
         # no list stands there, `createParagraphBullets` starts one at level 0. Either
@@ -3592,17 +3624,11 @@ def unwritten_levels(theirs: dict, merged: list[dict], notes: list[str]) -> None
                          f"request gives a bullet its nesting level — it comes out at level "
                          f"{out}, the level of {whose}, not at "
                          f"{block.get('level', 0)}")
-    by_key = {b["key"]: b for b in merged if b.get("key")}
-    live = theirs.get("blocks", [])
-    going = {i for i, block in enumerate(live) if _goes(block, by_key)}
-    for index, block in enumerate(live):
-        want = by_key.get(block.get("key"))
-        if index in going or want is None or _written_here(want):
+    for at, want in enumerate(merged):
+        block = keeps.get(at)
+        if block is None:
             continue
-        donor = None                      # the first of the run of deletes in front
-        at = index - 1
-        while at in going and not _mark_is_taken(live, at, going, True, theirs.get("lead")):
-            donor, at = live[at], at - 1
+        donor = donors.get(at)
         if donor is None:
             # The plainest of the three, and the one the other two are exceptions to:
             # the block keeps its own paragraph mark, so it keeps the level that mark
@@ -3618,6 +3644,44 @@ def unwritten_levels(theirs: dict, merged: list[dict], notes: list[str]) -> None
         notes.append(f"{want.get('key')}: the paragraph in front of it goes, and Docs hands "
                      f"its style to this one — no request gives a bullet its nesting level, "
                      f"so it comes out at level {level_of(donor)}, not at {level_of(want)}")
+
+
+def _mark_donors(theirs: dict, merged: list[dict]) -> tuple[dict[int, dict], dict[int, dict]]:
+    """Whose paragraph mark each merged block comes out on: what a delete hands it,
+    and what it keeps of its own. Two dicts over the merged index.
+
+    Docs merges two paragraphs keeping the first one's style, so a block behind one
+    this batch deletes wears the deleted one's — a run of deletes passing the first
+    one's along — and everything about that style which no request can write survives
+    into the document (`unwritten_levels`, `unwritten_glyphs`). What stands behind a
+    deleted block is not always the block that stood there before: a block written
+    from nothing at that index takes the mark first, being written in front of the
+    next one (offline chain-10 seed 8100356).
+    """
+    by_key = {b["key"]: b for b in merged if b.get("key")}
+    index_of = {id(block): at for at, block in enumerate(merged)}
+    live = theirs.get("blocks", [])
+    going = {i for i, block in enumerate(live) if _goes(block, by_key)}
+    donors: dict[int, dict] = {}
+    keeps: dict[int, dict] = {}
+    for index, block in enumerate(live):
+        want = by_key.get(block.get("key"))
+        if index in going or want is None or _written_here(want):
+            continue
+        keeps[index_of[id(want)]] = block
+        donor = None                      # the first of the run of deletes in front
+        at = index - 1
+        while at in going and not _mark_is_taken(live, at, going, True, theirs.get("lead")):
+            donor, at = live[at], at - 1
+        if donor is None:
+            continue
+        takes = index_of[id(want)]
+        for new, ahead in enumerate(merged):
+            if _written_here(ahead) and _anchor(merged, new) is want:
+                takes = new
+                break
+        donors[takes] = donor
+    return donors, keeps
 
 
 def unwritten_glyphs(theirs: dict, merged: list[dict], notes: list[str]) -> None:
@@ -3639,17 +3703,20 @@ def unwritten_glyphs(theirs: dict, merged: list[dict], notes: list[str]) -> None
 
     Which list an item is in is the document's word (`doc_ir` reads the `listId` back
     as `list`), never the file's: adjacent items the *file* separates into two lists
-    are one list in a document that already had them.
+    are one list in a document that already had them — and, for a block written from
+    nothing, the list it is about to **land** in, which `unwritten_levels` works out
+    the same way for the same reason. A block goes in as "text\\n" at the start of the
+    block that follows, so Docs splits that paragraph and the new block, the half in
+    front, wears its bullet and its list; only where nothing follows does it wear the
+    style of the block in front of it. An item the source moves to just before one it
+    numbers is that list's second member however the file writes it (offline chain-10
+    seeds 8100237, 8100057 and 8100374, shape `prose`).
     """
-    by_key = {b["key"]: b for b in merged if b.get("key")}
-    lists: dict[str, list[tuple[str, bool]]] = {}
-    for block in theirs.get("blocks", []):
-        want = by_key.get(block.get("key"))
-        if block.get("kind") != "item" or not block.get("list") or want is None:
-            continue
-        if want.get("kind") == "item":
-            lists.setdefault(block["list"], []).append(
-                (block["key"], bool(want.get("ordered"))))
+    lists: dict[object, list[tuple[str, bool]]] = {}
+    for token, block in zip(_landing_lists(theirs, merged), merged):
+        if token is not None:
+            lists.setdefault(token, []).append(
+                (block.get("key") or "a new item", bool(block.get("ordered"))))
     for members in lists.values():
         if len({ordered for _, ordered in members}) < 2:
             continue
@@ -3658,6 +3725,45 @@ def unwritten_glyphs(theirs: dict, merged: list[dict], notes: list[str]) -> None
         notes.append(f"{', '.join(key for key, _ in members)}: one list, and a list's "
                      f"glyphs are the list's — Docs cannot number {numbered} and leave "
                      f"{bulleted} bulleted, so all of them come out alike")
+
+
+def _landing_lists(theirs: dict, merged: list[dict]) -> list[object]:
+    """Which list each merged item comes out in, one token per block, None for
+    anything that is not an item.
+
+    A block that keeps its own paragraph mark keeps the list that mark carries, which
+    is the document's word; where the document has no list for it — a paragraph the
+    source is bulleting — `createParagraphBullets` starts one of its own. A block
+    written from nothing joins the list of the block whose paragraph style it wears,
+    by `unwritten_levels`' rule: the one a delete in front of it hands over, else the
+    one it is written in front of, or, where nothing follows it, the one in front.
+    """
+    donors, _ = _mark_donors(theirs, merged)
+    was = {b.get("key"): b for b in theirs.get("blocks", []) if b.get("key")}
+    tokens: list[object] = [None] * len(merged)
+    for at, block in enumerate(merged):
+        if block.get("kind") != "item" or _written_here(block):
+            continue
+        had = donors.get(at) or was.get(block.get("key")) or {}
+        tokens[at] = had.get("list") if had.get("kind") == "item" else None
+        tokens[at] = tokens[at] or ("own", at)
+    for at, block in enumerate(merged):
+        if block.get("kind") != "item" or not _written_here(block):
+            continue
+        if at in donors:
+            had = donors[at]
+            tokens[at] = (had.get("list") if had.get("kind") == "item" else None) \
+                or ("own", at)
+            continue
+        anchor = _anchor(merged, at)
+        if anchor is not None and not _structural(anchor):
+            where = next(i for i, b in enumerate(merged) if b is anchor)
+            tokens[at] = tokens[where] or ("own", at)
+        elif at and merged[at - 1].get("kind") == "item":
+            tokens[at] = tokens[at - 1] or ("own", at)
+        else:
+            tokens[at] = ("own", at)
+    return tokens
 
 
 # ---------------------------------------------------------------- tabs

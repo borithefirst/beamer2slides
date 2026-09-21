@@ -2885,6 +2885,49 @@ to 380 (four) from 360 to 420 (one). Clean afterwards at 400 rounds chain 8 on t
 found them, and at three fresh runs — 600 chain 6, 500 chain 4, 300 chain 10 — `KNOWN` still
 empty.
 
+### Deeper into the same button
+
+Three more at chain 10 and chain 8 once the campaign had the op, and they finish the thought the
+three above begin: everything a request cannot say about a list is said about a *mark*, and the
+question is always whose mark a block comes out on.
+
+**The list a block lands in is not the list it came from** (`doc_merge._landing_lists`, chain-10
+seeds 8100237, 8100057 and 8100374, shape `prose`). `unwritten_glyphs` asked the document what
+list each block was in — which for a block this very batch is about to write is no list at all,
+so it answered for nobody and the run it belonged to was never seen as one run. The source
+numbers a paragraph and moves an item to just in front of it; the item goes in as `gamma\n` at
+that paragraph's start, Docs splits the paragraph and hands the new half its style, bullet and
+list among it, and the two blocks are one list asking for two glyphs. The note was missing and
+the source's numbering went nowhere, in silence. `_landing_lists` works the landing list out for
+every merged item at once — a written block lands in the list of whatever it splits, one behind a
+delete lands in the deleted block's list — which is also where the two rules meet.
+
+**And where they meet, the delete wins** (`doc_merge._mark_donors`, chain-10 seed 8100356, shape
+`prose`, shrunk to three source ops and no reader in it). A block written from nothing wears the
+style of the block it splits; a block behind a delete is handed the deleted block's style. Where
+the source moves a block to exactly where another one goes, the written block is both, and the
+delete happens last. `unwritten_levels` gave the deleted mark to whatever stood behind it *before*
+the batch — by then one block further on — so it predicted the reader's level for the wrong block
+and never named the right one. `_mark_donors` answers "whose mark does this block come out on?"
+once, for `unwritten_levels` and `_landing_lists` alike: the same handover, asked once about the
+nesting level and once about the glyph.
+
+**The named style a bullet was hiding** (chain-8 seed 8000322, shape `imported_list`) — the only
+one of the six that is a *loss* rather than a missing note. `doc_ir` reads a paragraph with a
+bullet on it as an item whatever its `namedStyleType` says: the dialect has no bulleted heading
+and the file writes `<li>`. So `carry_unimported`'s comparison of the two sides' named styles is
+blind to whatever the document carries underneath one — ordinarily nothing, but the reader clicks
+the bullet button on a heading, Docs' merge-on-delete puts that heading's style under an item that
+never had one, and the moment the settle takes the bullet off, there it is. The item came out a
+HEADING_1 the source had asked to be a plain paragraph, with the report saying nothing and the
+second sync writing nothing, both sides reading the document as an item. The style goes in whole
+now wherever a bullet is taken off, there being no difference to take. Its price is the reader who
+bullets a heading *and means the heading*: nothing distinguishes that from one Docs handed over,
+so the block becomes what the plan says it is.
+
+Clean afterwards under `--strict` at 400 rounds chain 10 on the seeds that found the first two,
+and at fresh seeds: 400 chain 8 `imported_list`, 300 chain 10 `themed`.
+
 ## Remaining risks
 
 1. **Pictures** — retired, see "Pictures, and the chips a request can make" above. What

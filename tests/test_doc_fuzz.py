@@ -2707,6 +2707,104 @@ def test_one_item_of_a_list_cannot_be_numbered_on_its_own():
     assert again["requests"] == 0
 
 
+def test_a_glyph_is_the_list_a_block_lands_in_not_the_one_it_came_from():
+    """The list a block is *about to be in*, which for a block written from nothing is
+    the only list it has ever had. `unwritten_glyphs` read each block's list off the
+    document as it stands, so a block the batch is about to write had none and answered
+    for nobody: the source numbers a paragraph and moves an item to just in front of it,
+    the item goes in as "gamma\\n" at that paragraph's start, and Docs splits the
+    paragraph — one list, two glyphs, and neither block had a word to say about the
+    other. The note was missing and the source's numbering went nowhere in silence
+    (offline chain-10 seeds 8100237, 8100057 and 8100374, shape `prose`).
+
+    `_landing_lists` answers it for every merged item at once, which is also what makes
+    the two rules meet: a block written from nothing lands in the list of whatever it
+    splits, and one handed a deleted block's mark lands in *that* block's list."""
+    world, ours, base = _build([_para("A line."), _para("Numbered soon."),
+                                _item("gamma", 1), _para("Tail.")])
+    at = [i for i, b in enumerate(ours["blocks"]) if b.get("key") == "item:gamma"][0]
+    ours["blocks"].insert(1, ours["blocks"].pop(at))        # gamma, to just in front
+    [b for b in ours["blocks"] if b.get("key") == "paragraph:numbered-soon"][0] \
+        .update(kind="item", level=0, ordered=True)
+    report, ours, base = fuzz_docs.sync_once(world, ours, base)
+    assert any("Docs cannot number paragraph:numbered-soon and leave item:gamma "
+               "bulleted" in note for note in report["notes"]), report
+    live = doc_ir.from_document(world.read(), None)
+    items = [b for b in live["blocks"] if b["kind"] == "item"]
+    assert len({b.get("list") for b in items}) == 1          # one list, so one glyph
+    assert {b.get("ordered") for b in items} == {True}       # gamma numbered with it
+    again, _, _ = fuzz_docs.sync_once(world, copy.deepcopy(ours), copy.deepcopy(base))
+    assert again["requests"] == 0
+
+
+def test_a_block_written_where_a_delete_happens_takes_the_deleted_marks_level():
+    """The two rules at once, and the one that happens last decides. A block written
+    from nothing wears the style of the block it splits; a block behind a delete is
+    handed the deleted block's style. Where the source moves a block to exactly where
+    another one goes, the written block is both — and `unwritten_levels` gave the
+    deleted mark to whatever stood behind it *before* the batch, which by then is one
+    block further on. So the level the reader would see was predicted for the wrong
+    block and the right one was not named at all (offline chain-10 seed 8100356, shape
+    `prose`, shrunk to three source ops and no reader in it).
+
+    `_mark_donors` works out whose mark each merged block comes out on, once, for both
+    this and `_landing_lists` — which is the same question about the same handover, one
+    asked about the nesting level and the other about the glyph."""
+    world, ours, base = _build([_para("Notes"), _para("A first line."), _item("alpha"),
+                                _item("beta"), _item("gamma", 1),
+                                _para("A closing line.")])
+    at = [i for i, b in enumerate(ours["blocks"]) if b.get("key") == "paragraph:notes"][0]
+    block = ours["blocks"].pop(at)
+    block.update(kind="item", level=0)                       # moved, and bulleted
+    ours["blocks"].insert(3, block)                          # to just where gamma goes
+    ours["blocks"] = [b for b in ours["blocks"] if b.get("key") != "item:gamma"]
+    report, ours, base = fuzz_docs.sync_once(world, ours, base)
+    assert any("paragraph:notes: written from nothing where the paragraph in front of "
+               "it goes" in note and "it comes out at level 1, not at 0" in note
+               for note in report["notes"]), report
+    live = doc_world.read_ir(world, ours, base)
+    assert [(b.get("key"), b.get("level")) for b in live["blocks"] if b["kind"] == "item"] \
+        == [("item:alpha", 0), ("item:beta", 0), ("paragraph:notes", 1)]
+    again, _, _ = fuzz_docs.sync_once(world, copy.deepcopy(ours), copy.deepcopy(base))
+    assert again["requests"] == 0
+
+
+def test_the_named_style_a_bullet_was_hiding_is_written_when_the_bullet_goes():
+    """`doc_ir` reads a paragraph with a bullet on it as an item whatever its
+    `namedStyleType` says — the dialect has no bulleted heading, the file writes
+    `<li>` — so `carry_unimported`'s comparison of the two sides' named styles is
+    blind to whatever the document is carrying underneath one. Ordinarily nothing is:
+    a heading the reader bullets in the browser keeps HEADING_1, and the moment the
+    settle takes the bullet off, there it is. Docs' merge-on-delete puts it under an
+    item that never had one — the style a delete hands over is the whole of it — and
+    the item came out a heading with the report saying nothing and the second sync
+    writing nothing, both sides reading the document as an item (offline chain-8 seed
+    8000322, shape `imported_list`).
+
+    The document's own word is what the assertion asks, for the reason
+    `test_the_glyph_a_delete_in_front_hands_over_is_written_again` gives: the sync's
+    read fills in from the file exactly what is at issue."""
+    world, ours, base = _build([{"kind": "heading", "level": 1, "runs": [{"text": "Steps"}]},
+                                {"kind": "item", "level": 0, "glyphs": False,
+                                 "list": "kix.l1", "runs": [{"text": "mix"}]},
+                                _para("Tail.")])
+    head = doc_ir.from_document(world.read(), None)["blocks"][0]
+    world.apply([{"createParagraphBullets": {                # the reader's bullet button
+        "range": {"startIndex": head["span"][0], "endIndex": head["span"][1]},
+        "bulletPreset": "BULLET_DISC_CIRCLE_SQUARE"}}])
+    at = [i for i, b in enumerate(ours["blocks"]) if b.get("key") == "heading:steps"][0]
+    ours["blocks"].append(ours["blocks"].pop(at))            # a move: a delete and a write
+    mix = [b for b in ours["blocks"] if b.get("key") == "item:mix"][0]
+    mix.update(kind="paragraph")
+    mix.pop("ordered", None), mix.pop("level", None)
+    report, ours, base = fuzz_docs.sync_once(world, ours, base)
+    live = doc_ir.from_document(world.read(), None)
+    assert [(b.get("kind"), b.get("level")) for b in live["blocks"]] \
+        == [("paragraph", None), ("paragraph", None), ("item", 0)]
+    again, _, _ = fuzz_docs.sync_once(world, copy.deepcopy(ours), copy.deepcopy(base))
+    assert again["requests"] == 0
+
+
 def test_one_block_sent_past_a_list_is_one_move_and_not_every_block_it_passed():
     """`_moved_keys` is the longest common *subsequence*, not `SequenceMatcher`'s
     matching blocks, which are contiguous: a closing paragraph sent to the front made

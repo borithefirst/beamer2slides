@@ -2603,6 +2603,31 @@ keys, named ranges), `doc_merge.py` (pure planning), `doc_sync.py` (the commands
   into one run, and a guard against nothing is how one stops noticing. Windows re-measured again
   (`theme_undone` 15 of 80, window to the first 40; `styling_restored` 5 of 300, window to 300-380);
   clean at 400 chain 8, 600 chain 6, 500 chain 4, 300 chain 10, then 300 chain 4 and 400 chain 6.
+  **Deeper into the same button**, three more that finish the thought: everything a request cannot
+  say about a list is said about a **mark**, and the question is always whose mark a block comes
+  out on. (4) *The list a block lands in is not the list it came from* (chain-10 seeds 8100237,
+  8100057, 8100374, `prose`): `unwritten_glyphs` asked the document which list each block was in,
+  which for a block this batch is about to write is none at all, so it answered for nobody - the
+  source numbers a paragraph and moves an item to just in front of it, the item goes in as
+  `gamma\n` at that paragraph's start, Docs splits it and hands the new half its list, and the two
+  are one list asking for two glyphs with no note and the numbering gone. `_landing_lists` works
+  it out for every merged item at once. (5) *Where the two rules meet, the delete wins* (8100356):
+  a block written from nothing wears the style of what it splits, a block behind a delete is
+  handed the deleted block's - and where the source moves a block to exactly where another one
+  goes it is both, the delete happening last. `unwritten_levels` gave the deleted mark to whatever
+  stood behind it *before* the batch, by then one block further on, so it named the wrong block
+  and missed the right one; `_mark_donors` answers "whose mark does this come out on?" once, for
+  both it and `_landing_lists` - one handover, asked about the level and about the glyph. (6) *The
+  named style a bullet was hiding* (chain-8 seed 8000322, `imported_list`), the only one of the
+  six that is a **loss** and not a missing note: `doc_ir` reads a bulleted paragraph as an item
+  whatever its `namedStyleType` says, so `carry_unimported` is blind to what the document carries
+  underneath one - the reader bullets a heading, merge-on-delete puts that style under an item
+  that never had one, and taking the bullet off uncovers it. The item came out HEADING_1 where the
+  source asked for a paragraph, the report silent and the second sync writing nothing, both sides
+  reading it as an item. The style goes in whole wherever a bullet comes off, there being no
+  difference to take; the price is the reader who bullets a heading and means it. Clean under
+  `--strict` at 400 chain 10 on the seeds that found the first two, 400 chain 8 `imported_list`
+  and 300 chain 10 `themed`.
 - Live suite (opt-in, marker `docs`, ~5 min): `python -m pytest -m docs tests/test_docs_live.py`
   pushes a document per test, edits both sides, syncs, checks a second sync writes nothing, and
   deletes the document. Offline: `tests/test_doc_ir.py`, `test_doc_merge.py`, `test_doc_sync.py`.

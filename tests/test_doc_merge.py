@@ -1991,14 +1991,22 @@ def test_a_bullet_a_delete_took_off_is_put_back_by_the_settle():
     assert doc_merge.tidy_requests(read) == [{"createParagraphBullets": {
         "range": {"startIndex": 1, "endIndex": 9},
         "bulletPreset": doc_merge.BULLETS[False]}}]
-    # And the other way: a bullet the write put on a block that is no item.
+    # And the other way: a bullet the write put on a block that is no item. The named
+    # style goes with it, whatever the two sides seem to agree on, because a bulleted
+    # paragraph reads as an item whatever its `namedStyleType` says: the style
+    # underneath is one no read reports, so taking the bullet off could uncover
+    # anything (`test_the_named_style_a_bullet_was_hiding_is_written_when_the_bullet
+    # _goes`). The block becomes what the plan says it is, whole.
     planned = [para("p:a", "lantern")]
     read = live([{"kind": "item", "key": "p:a", "level": 0,
                   "runs": [styled_run("lantern")]}])
     doc_merge.adopt_keys(read, planned)
     assert read["blocks"][0]["unimported"]["bullet"] == "none"
-    assert doc_merge.tidy_requests(read) == [{"deleteParagraphBullets": {
-        "range": {"startIndex": 1, "endIndex": 9}}}]
+    assert doc_merge.tidy_requests(read) == [
+        {"deleteParagraphBullets": {"range": {"startIndex": 1, "endIndex": 9}}},
+        {"updateParagraphStyle": {"range": {"startIndex": 1, "endIndex": 9},
+                                  "paragraphStyle": {"namedStyleType": "NORMAL_TEXT"},
+                                  "fields": "namedStyleType"}}]
 
 
 def test_the_indent_of_a_block_a_write_made_an_item_is_still_put_back():
