@@ -3618,12 +3618,19 @@ def unwritten_levels(theirs: dict, merged: list[dict], notes: list[str]) -> None
             (lands[at - 1] if at and lands[at - 1] is not None else 0)
         lands.append(out)
         if out != block.get("level", 0):
-            whose = "the item it is written in front of" if splits \
-                else "the item in front of it"
+            # And where the text wears the style of something that is no item at all —
+            # a plain paragraph it is written behind, or nothing — there is no level to
+            # inherit and `createParagraphBullets` starts a list of its own at 0. The
+            # note used to say "the level of the item in front of it" there, naming an
+            # item nobody could find: a person reading it would look for the wrong
+            # thing (a block the source moves to the end of a document ending in prose).
+            whose = f"level {out}, the level of the item it is written in front of" \
+                if splits else f"level {out}, the level of the item in front of it" \
+                if at and lands[at - 1] is not None \
+                else "level 0, where `createParagraphBullets` starts a list of its own"
             notes.append(f"{block.get('key')}: written from nothing as a list item, and no "
-                         f"request gives a bullet its nesting level — it comes out at level "
-                         f"{out}, the level of {whose}, not at "
-                         f"{block.get('level', 0)}")
+                         f"request gives a bullet its nesting level — it comes out at "
+                         f"{whose}, not at {block.get('level', 0)}")
     for at, want in enumerate(merged):
         block = keeps.get(at)
         if block is None:

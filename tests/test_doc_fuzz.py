@@ -657,10 +657,10 @@ def test_the_campaign_sees_a_mark_the_file_cannot_say_is_off(monkeypatch):
     campaign changes what every seed draws, and a window that held four can come to
     hold none — this one did, six times).
 
-    The density is steady at about 1.7 seeds in 100 (12 of 700 now, 5 of 300 before
-    `link_word`), so a window of 80 holding four was luck and is not asked for again:
-    seeds 0 to 700 hold 53, 80, 93, 208, 210, 244, 330, 387, 419, 482, 574 and 686,
-    and the window is the four in the middle of that.
+    The density is steady at about 2 seeds in 100 (14 of 700 now, 12 before `indent`,
+    5 of 300 before `link_word`), so a window of 80 holding four was luck and is not
+    asked for again: seeds 0 to 700 hold 0, 27, 55, 100, 178, 231, 267, 408, 456,
+    465, 517, 546, 658 and 666, and the window is the densest 160 of that.
     """
     real = doc_merge._text_style
 
@@ -673,7 +673,7 @@ def test_the_campaign_sees_a_mark_the_file_cannot_say_is_off(monkeypatch):
 
     monkeypatch.setattr(doc_merge, "_text_style", broken)
     caught = 0
-    for seed in range(180, 340):
+    for seed in range(400, 560):
         found = fuzz_docs.offline_round(
             seed, script=fuzz_docs.draw(seed, 3, shape="themed"))
         caught += "styling_restored" in {f["kind"] for f in oracle.failures(found)}
@@ -4046,3 +4046,77 @@ def test_a_link_the_source_takes_off_goes_because_link_is_managed():
     after = doc_world.read_ir(world, ours, base)["blocks"][0]
     assert [(r["text"], r.get("link")) for r in after["runs"]] == \
         [("See the manual for details.", None)], "and the link went with it"
+
+
+# ------------------------------------------------- Tab, which is no request at all
+
+def _nest(world, word, level):
+    """What `read_indent` does: the reader presses Tab on the item saying `word`."""
+    part = doc_ir.from_document(world.read(), None)
+    block = next(b for b in part["blocks"] if word in doc_merge.block_text(b))
+    assert doc_world.nest(world, {"startIndex": block["span"][0],
+                                  "endIndex": block["span"][1]}, level)
+
+
+def _levels(world):
+    return [(doc_merge.block_text(b), b.get("level"))
+            for b in doc_ir.from_document(world.read(), None)["blocks"]
+            if b.get("kind") == "item"]
+
+
+def test_a_nesting_level_the_reader_chose_is_named_when_a_rewrite_takes_it():
+    """A nesting level is the one property of a paragraph **no request writes**, so a
+    reader indenting an item in the browser is a change no batch could have made —
+    which is why `doc_world.nest` exists and `read_indent` is the campaign's one op
+    that sends nothing.
+
+    It is the only kind of level the file cannot ask for again, and until the op was
+    written none had ever existed in a round: the corpus shapes were born with theirs
+    and `src_bullet` wrote level 0 and nothing else. `doc_loss_oracle.SHAPE_FIELDS`
+    has had `level` in it all along (`shape_undone`), so the judge was there and had
+    nothing to judge — with `unwritten_levels` broken in memory, 47 of 200 `prose`
+    rounds at chain 6 fail where 6 did before either side drew a level, and 46 of 200
+    `imported_list` at chain 8 where 43 do without the reader's half.
+
+    Here the source moves the item the reader nested, which is a delete and a write
+    from nothing: the level cannot survive that, and saying so before the write is
+    the only honest thing left."""
+    world = fuzz_docs.corpus("prose")
+    ours = fuzz_docs.bootstrap(world)
+    base = copy.deepcopy(ours)
+    _nest(world, "beta", 1)
+    assert _levels(world) == [("alpha", 0), ("beta", 1), ("gamma", 1)]
+
+    beta = next(b for b in ours["blocks"] if "beta" in doc_merge.block_text(b))
+    ours["blocks"].append(ours["blocks"].pop(ours["blocks"].index(beta)))
+    report, ours, base = fuzz_docs.sync_once(world, ours, base)
+    assert _levels(world) == [("alpha", 0), ("gamma", 1), ("beta", 0)]
+    assert report["notes"] == [
+        "item:beta: written from nothing as a list item, and no request gives a "
+        "bullet its nesting level — it comes out at level 0, where "
+        "`createParagraphBullets` starts a list of its own, not at 1"], \
+        "and the note names the list it really lands in, not an item in front of it"
+    again, _, _ = fuzz_docs.sync_once(world, copy.deepcopy(ours), copy.deepcopy(base))
+    assert again["requests"] == 0
+
+
+def test_a_nesting_level_a_delete_in_front_hands_over_is_named_too():
+    """The other way a reader's level goes: Docs merges a deleted paragraph into the
+    one behind it keeping the *deleted* one's style, level and all. The block is not
+    written from nothing — it keeps its own words — so it is the donor branch of
+    `unwritten_levels` that has to speak."""
+    world = fuzz_docs.corpus("prose")
+    ours = fuzz_docs.bootstrap(world)
+    base = copy.deepcopy(ours)
+    _nest(world, "beta", 1)
+
+    ours["blocks"] = [b for b in ours["blocks"]
+                      if "alpha" not in doc_merge.block_text(b)]
+    report, ours, base = fuzz_docs.sync_once(world, ours, base)
+    assert _levels(world) == [("beta", 0), ("gamma", 1)]
+    assert report["notes"] == [
+        "item:beta: the paragraph in front of it goes, and Docs hands its style to "
+        "this one — no request gives a bullet its nesting level, so it comes out at "
+        "level 0, not at 1"]
+    again, _, _ = fuzz_docs.sync_once(world, copy.deepcopy(ours), copy.deepcopy(base))
+    assert again["requests"] == 0

@@ -863,6 +863,28 @@ def _api_style(style: dict) -> dict:
     return out
 
 
+def nest(world: "World", span: dict, level: int) -> bool:
+    """Tab and Shift-Tab in a list — the one reader act that is no request at all.
+
+    `createParagraphBullets` says nothing about a nesting level: Docs reads one off
+    the paragraph's leading tabs, and there is no field for it anywhere in the v1 API
+    (`doc_merge.unwritten_levels` is the whole of what the merge can do about that).
+    So a person indenting an item in the browser is a change to the document that no
+    batch could have made, and the harness has to reach the world directly rather than
+    pretend it sent something. It is kept here, beside the state it changes, so a
+    reader op stays a reader op: the campaign's ops write requests, and this one door
+    is named as the exception it is.
+
+    Answers whether anything moved, since the caller counts a draw that did nothing.
+    """
+    moved = False
+    for para in world._paragraphs(span):
+        if para.get("bullet") and para["bullet"]["level"] != level:
+            para["bullet"]["level"] = level
+            moved = True
+    return moved
+
+
 def _levels(info: dict) -> list[dict]:
     """A list's nesting levels as `documents.get` reports them.
 
