@@ -256,6 +256,85 @@ def _kinds(found):
 NOTHING = {"conflicts": [], "notes": [], "applied": []}
 
 
+def _chip_table(key, chip=True):
+    cell = {"kind": "paragraph", "runs": [{"text": "value"}] + (
+        [{"chip": "person", "frozen": True, "text": "Grace",
+          "value": "grace@example.com"}] if chip else [])}
+    return {"key": key, "kind": "table",
+            "rows": [[[_p(None, "a")], [cell]]]}
+
+
+def _plain_table(key):
+    return {"key": key, "kind": "table", "rows": [[[_p(None, "a")]]]}
+
+
+def _chip_para(key, text):
+    return {"key": key, "kind": "paragraph",
+            "runs": [{"text": text}, {"chip": "person", "frozen": True,
+                                      "text": "Grace",
+                                      "value": "grace@example.com"}]}
+
+
+def test_the_oracle_lets_a_chip_go_with_the_column_the_source_deleted():
+    """`_source_dropped` is about a block and a cell is not one: the table keeps its
+    key while the source deletes the column the chip stands in, so the chip that went
+    with the column had no excuse — and the source adding a chip of that same address
+    somewhere else is credited against it, which is how one round came to read as a
+    loss twice over (offline chain-6 seed 6200507, chain-4 seed 6300228).
+    """
+    base = _ir(_chip_table("t1"), _p("k2", "A note."))
+    before = _ir(_chip_table("t1"), _p("k2", "A note."))
+    after = _ir(_plain_table("t1"), _p("k2", "A note."))
+    ours = _ir(_plain_table("t1"), _chip_para("k2", "A note."))
+    assert not oracle.failures(oracle.check(base, before, after, NOTHING, ours=ours))
+
+
+def test_a_chip_the_reader_put_in_a_cell_is_nobodys_to_drop():
+    """The other half, and what keeps the excuse narrow: the cell has to be the one
+    the base has, frozen runs included. A chip the *reader* put in makes the
+    document's cell unlike the base's, so the column it stands in is not the source's
+    to take away — which is `doc_merge._same_set`'s rule, asked here of the outcome.
+    The loss is then named by the cell judge rather than by the chip count, a chip's
+    face being words the cell did not say before.
+    """
+    base = _ir(_chip_table("t1", chip=False), _p("k2", "A note."))
+    before = _ir(_chip_table("t1"), _p("k2", "A note."))
+    after = _ir(_plain_table("t1"), _p("k2", "A note."))
+    ours = _ir(_plain_table("t1"), _chip_para("k2", "A note."))
+    assert not oracle._dropped_cells(before["blocks"][0], base, ours)
+    assert _kinds(oracle.check(base, before, after, NOTHING, ours=ours)) == \
+        {"cell_words_lost", "frozen_gone"}
+
+
+def _rows_table(key, rows):
+    return {"key": key, "kind": "table",
+            "rows": [[[_p(None, cell)] for cell in row] for row in rows]}
+
+
+def test_a_column_the_reader_deleted_is_not_every_row_deleted_at_once():
+    """A row is known by what it says and what it says is every cell of it, so a
+    reader who deletes a **column** changes the words of every row at once — and each
+    of them read as a row they had deleted. The source then added a column whose cell
+    happened to hold the word the deleted one had held, and two rows came back from a
+    grave neither was ever in (fresh chain-8 seed 6500291, shape `ends_on_table`).
+    """
+    base = _ir(_rows_table("t1", [["year", "count", "zephyr"],
+                                  ["2024", "7", "umbrella"]]))
+    before = _ir(_rows_table("t1", [["year", "count"], ["2024", "7"]]))
+    after = _ir(_rows_table("t1", [["year", "count", "lantern"],
+                                   ["2024", "7", "umbrella"]]))
+    assert not oracle.failures(oracle.check(base, before, after, NOTHING))
+
+
+def test_a_row_the_reader_deleted_beside_a_column_is_still_reported():
+    """The other half: the survivors answer for themselves and for nobody else, which
+    is what consuming them one for one is for."""
+    base = _ir(_rows_table("t1", [["alpha", "xray"], ["bravo", "yankee"]]))
+    before = _ir(_rows_table("t1", [["alpha"]]))
+    after = _ir(_rows_table("t1", [["alpha", "xray"], ["bravo", "yankee"]]))
+    assert "row_resurrected" in _kinds(oracle.check(base, before, after, NOTHING))
+
+
 def test_the_oracle_sees_a_block_the_reader_added_disappear():
     base = _ir(_p("k1", "Kept."))
     before = _ir(_p("k1", "Kept."), {"kind": "paragraph",
@@ -417,9 +496,10 @@ def test_the_campaign_sees_a_theme_undone(monkeypatch):
     `doc_merge.paragraph_style` used to give `alignment` a value always — START
     whenever the file said nothing, which is also what a heading centred by the
     document's theme says. Measured over the first 60 `themed` seeds at chain 2, the
-    campaign catches 15 of them; these 24 hold five (6, 17, 19, 21, 23). Every op
-    added to the campaign changes what every seed draws, so the window is measured
-    again each time: `cell_chip` left the old sixteen with one.
+    campaign catches 11 of them; these 24 hold four (6, 17, 21, 23). Every op added to
+    the campaign changes what every seed draws, so the window is measured again each
+    time: `cell_chip` left the old sixteen with one, and `split_cell` took 15 of 60 to
+    11 without moving this window's own four.
 
     The defect now sits behind two doors, and the probe opens both: the settle puts
     the plan's whole paragraph style back on a block this run wrote whose style the
@@ -571,11 +651,12 @@ def test_the_campaign_sees_a_mark_the_file_cannot_say_is_off(monkeypatch):
     `doc_merge._text_style` used to write a mark only when it was on, which is all the
     file could say before `doc_ir.MARK_FIELDS`: the first source edit to rewrite the
     block then names no bold, and the word goes back to wearing the theme's. Measured
-    over 240 `themed` seeds at chain 3 the campaign catches 5 (6 before `cell_chip`,
-    7 before `cell_style` and `restyle_cell`, 11 before `paste_block`, 13 before that:
-    every op added to the campaign changes what every seed draws, and a window that
-    held four can come to hold none — this one did, three times). Seeds 180 to 420
-    hold five: 189, 297, 302, 303 and 416, of which four are in the window.
+    over 240 `themed` seeds at chain 3 the campaign catches 4 (5 before `split_cell`,
+    6 before `cell_chip`, 7 before `cell_style` and `restyle_cell`, 11 before
+    `paste_block`, 13 before that: every op added to the campaign changes what every
+    seed draws, and a window that held four can come to hold none — this one did, four
+    times). Seeds 180 to 420 hold 234, 368, 412 and 414; the window is the three at
+    the end of it, the old one having been left with a single seed.
     """
     real = doc_merge._text_style
 
@@ -588,7 +669,7 @@ def test_the_campaign_sees_a_mark_the_file_cannot_say_is_off(monkeypatch):
 
     monkeypatch.setattr(doc_merge, "_text_style", broken)
     caught = 0
-    for seed in range(180, 310):
+    for seed in range(360, 420):
         found = fuzz_docs.offline_round(
             seed, script=fuzz_docs.draw(seed, 3, shape="themed"))
         caught += "styling_restored" in {f["kind"] for f in oracle.failures(found)}
@@ -1991,6 +2072,87 @@ def test_the_campaigns_cell_judge_asks_what_a_chip_is_not_what_it_reads_as(monke
         at: (text, ()) for at, text in oracle.cells_of(block).items()})
     blind = oracle.failures(fuzz_docs.run_script(copy.deepcopy(script), Counter()))
     assert {f["kind"] for f in blind} == {"cell_lost"}
+
+
+def test_a_cell_the_source_splits_keeps_the_chip_it_holds():
+    """A cell whose paragraph *count* the source changed used to go through `diff3`,
+    which is text — so a chip in it was flattened to the object character, and
+    `text_requests` skips any hunk holding one, no request rewriting a chip. The cell
+    came out with neither the split nor the chip and the report said nothing (offline
+    chain-4 seed 6000042, shape `themed`, the source splitting the cell it had just
+    put a chip in).
+
+    Where the document left the cell exactly as the base has it there is nothing to
+    merge, so `_cell_kept` sends it down the rewrite path the same question at the size
+    of a block has always used; only a cell both sides changed still needs the words,
+    and one the words cannot carry is a note now rather than a silence.
+    """
+    world, ours, base = _build([_para("One."), _table([["a", "b"]]), _para("Two.")])
+    cell = ours["blocks"][1]["rows"][0][1]
+    cell[0]["runs"].append({"chip": "person", "frozen": True, "text": "Grace",
+                            "value": "grace@example.com"})
+    cell.append(_para("meadow"))
+    _, ours, base = fuzz_docs.sync_once(world, ours, base)
+    live = doc_world.read_ir(world, ours, base)["blocks"][1]["rows"][0][1]
+    assert [doc_merge.block_text(b) for b in live] == ["b" + doc_merge.FROZEN, "meadow"]
+    assert [oracle.frozen_key(r) for b in live for r in b["runs"] if r.get("frozen")] \
+        == [("person", "grace@example.com")]
+    again, _, _ = fuzz_docs.sync_once(world, copy.deepcopy(ours), copy.deepcopy(base))
+    assert again["applied"] == []
+
+
+def test_a_chip_the_source_swaps_in_a_cell_it_splits_is_written():
+    """The other reason a cell's words cannot carry it: the source changing what the
+    frozen runs *are*. An object character stands for whichever chip is there, so a
+    cell whose chip the file replaces has a merged text equal to the one already
+    written — `text_requests` writes the split, the chip arrives nowhere, and the
+    campaign's cell judge said so (offline chain-10 seed 6100210, shape `two_tables`,
+    the reader's picture in the cell against the source's person chip). It is
+    `_merge_block`'s own guard at the size of a cell.
+    """
+    cell = {"kind": "paragraph", "runs": [
+        {"text": "willow thicket"},
+        {"chip": "person", "frozen": True, "text": "Ada", "value": "ada@example.com"}]}
+    world, ours, base = _build([_para("One."),
+                                {"kind": "table", "rows": [[[cell], [_para("b")]]]},
+                                _para("Two.")])
+    first = ours["blocks"][1]["rows"][0][0]
+    first[0]["runs"] = [{"text": "willow"}]
+    first.append({"kind": "paragraph", "runs": [
+        {"text": "thicket"},
+        {"chip": "person", "frozen": True, "text": "Grace",
+         "value": "grace@example.com"}]})
+    _, ours, base = fuzz_docs.sync_once(world, ours, base)
+    live = doc_world.read_ir(world, ours, base)["blocks"][1]["rows"][0][0]
+    assert [oracle.frozen_key(r) for b in live for r in b["runs"] if r.get("frozen")] \
+        == [("person", "grace@example.com")]
+    again, _, _ = fuzz_docs.sync_once(world, copy.deepcopy(ours), copy.deepcopy(base))
+    assert again["applied"] == []
+
+
+def test_the_table_a_rewrite_changes_is_still_the_table_it_was():
+    """A table is anchored in its first cell, so a rewrite of that cell takes its named
+    range with it and `adopt_keys` is the one thing that gives the key back — by the
+    words the plan and the read-back say.
+
+    They did not say the same words. A cell the merge rewrites is one block with the
+    paragraph marks inside it (`_cell_runs`), and the document hands that back as the
+    paragraphs it is, so the plan said `x\\nribbon` where the read-back said
+    `x | ribbon` and the table went unrecognised. Settled under a name made from its
+    new first words, it was a table the file and the base both name and the document
+    does not have (offline chain-4 seed 6000079, shape `astral`). `_match_text` counts
+    a cell's paragraphs one by one, whichever side is holding them.
+    """
+    world, ours, base = _build([_para("One."), _table([["a", "b"]]), _para("Two.")])
+    ours["blocks"][1]["rows"][0][0][0]["runs"].append(
+        {"chip": "person", "frozen": True, "text": "Grace",
+         "value": "grace@example.com"})
+    ours["blocks"][1]["rows"][0][1].append(_para("ribbon"))
+    _, ours, base = fuzz_docs.sync_once(world, ours, base)
+    assert _keys(doc_world.read_ir(world, ours, base)) == \
+        ["paragraph:one", "table:a", "paragraph:two"]
+    again, _, _ = fuzz_docs.sync_once(world, copy.deepcopy(ours), copy.deepcopy(base))
+    assert again["applied"] == []
 
 
 def test_a_bold_the_source_grew_over_the_word_before_it_is_written():

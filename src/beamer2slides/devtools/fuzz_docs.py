@@ -693,6 +693,26 @@ def read_cell_chip(rng, part, tab):
         "location": at, "uri": "https://example.invalid/reader.png"}}], [table.get("key")]
 
 
+def read_split_cell(rng, part, tab):
+    """The reader pressing Enter inside a table cell.
+
+    `read_split_block` is the commonest edit there is and it walks `part["blocks"]`,
+    where a cell never is — so a cell of two paragraphs was a thing the campaign had
+    no way of making from either side, and `_merge_cell`'s `_joined` (a cell whose
+    paragraph counts differ merges as one text with the breaks in it) had never once
+    been asked for. The table's key is what it reports touched, a cell having none of
+    its own, as the other cell ops do.
+    """
+    spots = [(t, b) for t in _tables(part) for _, _, b in _cells(t)
+             if b.get("span") and b["span"][1] - b["span"][0] > 2]
+    if not spots:
+        return [], []
+    table, block = rng.choice(spots)
+    low, high = block["span"]
+    return [{"insertText": {"location": _at(rng.randrange(low + 1, high - 1), tab),
+                            "text": "\n"}}], [table.get("key")]
+
+
 def read_cell_type(rng, part, tab):
     spots = [(t, r, c, b) for t in _tables(part) for r, c, b in _cells(t) if b.get("span")]
     if not spots:
@@ -851,6 +871,7 @@ READER = {
     "face": read_face, "measure": read_measure,
     "renumber_list": read_renumber_list, "cell_type": read_cell_type,
     "cell_style": read_cell_style, "cell_chip": read_cell_chip,
+    "split_cell": read_split_cell,
     "add_row": read_add_row, "delete_row": read_delete_row,
     "add_column": read_add_column, "delete_column": read_delete_column,
     "insert_picture": read_insert_picture, "insert_chip": read_insert_chip,
@@ -1014,6 +1035,17 @@ def src_add_table(rng, ir, touched):
     part.setdefault("blocks", []).insert(at, _t([["h1", "h2"], [rng.choice(FRESH), "x"]]))
 
 
+def _source_cells(ir) -> list[dict]:
+    """Every paragraph inside every cell of every table the file has."""
+    return [inner for cell in _source_cell_lists(ir) for inner in cell]
+
+
+def _source_cell_lists(ir) -> list[list]:
+    """Every cell, as the list of paragraphs it is."""
+    return [cell for part in _parts(ir) for b in part.get("blocks", [])
+            if b.get("kind") == "table" for row in b["rows"] for cell in row]
+
+
 def src_regrid(rng, ir, touched):
     tables = [b for part in _parts(ir) for b in part.get("blocks", [])
               if b.get("kind") == "table"]
@@ -1039,9 +1071,7 @@ def src_regrid(rng, ir, touched):
 
 
 def src_edit_cell(rng, ir, touched):
-    cells = [inner for part in _parts(ir) for b in part.get("blocks", [])
-             if b.get("kind") == "table" for row in b["rows"] for cell in row
-             for inner in cell]
+    cells = _source_cells(ir)
     if not cells:
         return
     cell = rng.choice(cells)
@@ -1055,9 +1085,7 @@ def src_restyle_cell(rng, ir, touched):
     """The source's half of what `read_cell_style` draws: a cell restyled rather
     than reworded. `src_restyle` picks from `part["blocks"]`, where a cell never
     is, so the file had no way of asking for one."""
-    cells = [inner for part in _parts(ir) for b in part.get("blocks", [])
-             if b.get("kind") == "table" for row in b["rows"] for cell in row
-             for inner in cell]
+    cells = _source_cells(ir)
     if not cells:
         return
     cell = rng.choice(cells)
@@ -1067,10 +1095,26 @@ def src_restyle_cell(rng, ir, touched):
         _mark_run(rng, cell)
 
 
-def _source_cells(ir) -> list[dict]:
-    return [inner for part in _parts(ir) for b in part.get("blocks", [])
-            if b.get("kind") == "table" for row in b["rows"] for cell in row
-            for inner in cell]
+def src_split_cell(rng, ir, touched):
+    """The source giving a cell a second paragraph.
+
+    Every cell of every corpus shape holds exactly one paragraph and no op had ever
+    made a second, so `_merge_cell`'s answer to a cell whose paragraph counts differ
+    — merge it as one text with the breaks in it (`_joined`) — was as undrawn as the
+    column requests and the cell styling were before it. `_cells` reads `cell[0]` for
+    the same reason: there has never been a `cell[1]`.
+    """
+    cells = [c for c in _source_cell_lists(ir) if len(c) == 1 and c[0].get("runs")]
+    if not cells:
+        return
+    cell = rng.choice(cells)
+    words = "".join(r.get("text", "") for r in cell[0]["runs"] if not r.get("frozen"))
+    parts = words.split(" ", 1)
+    if len(parts) == 2 and parts[1].strip():
+        cell[0]["runs"] = [{"text": parts[0]}]
+        cell.append(_p(parts[1]))
+    else:
+        cell.append(_p(rng.choice(FRESH)))
 
 
 def src_cell_chip(rng, ir, touched):
@@ -1184,7 +1228,8 @@ SOURCE = {
     "reword": src_reword, "append": src_append, "drop": src_drop, "move": src_move,
     "restyle": src_restyle, "retitle": src_retitle, "add_table": src_add_table,
     "regrid": src_regrid, "edit_cell": src_edit_cell, "restyle_cell": src_restyle_cell,
-    "cell_chip": src_cell_chip, "add_picture": src_add_picture,
+    "cell_chip": src_cell_chip, "split_cell": src_split_cell,
+    "add_picture": src_add_picture,
     "add_chip": src_add_chip, "add_tab": src_add_tab, "rename_tab": src_rename_tab,
     "drop_tab": src_drop_tab, "collide": src_collide,
 }

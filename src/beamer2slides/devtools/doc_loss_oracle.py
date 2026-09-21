@@ -793,7 +793,7 @@ def _tab_findings(was: dict | None, now: dict, then: dict | None, said: str,
     for block in now.get("blocks", []):
         if _source_dropped(block, was, mine):
             continue
-        before_frozen += frozen_marks(block)
+        before_frozen += frozen_marks(block) - _dropped_cells(block, was, mine)
     mine_frozen: Counter = Counter()
     for block in (mine or {}).get("blocks", []):
         mine_frozen += frozen_marks(block)
@@ -950,6 +950,49 @@ def _source_dropped(block: dict, was: dict | None, mine: dict | None) -> bool:
     base_block = keyed(was).get(key)
     return base_block is not None and frozen_marks(base_block) == frozen_marks(block) \
         and text_of(base_block) == text_of(block)
+
+
+def _cell_says(cell: list[dict]) -> tuple:
+    """What one cell is, for counting: its words and the frozen runs in it."""
+    marks: Counter = Counter()
+    for block in cell:
+        marks += frozen_marks(block)
+    return (" ".join(text_of(b) for b in cell), tuple(sorted(marks.items())))
+
+
+def _table_cells(block: dict) -> Counter:
+    return Counter(_cell_says(cell) for row in block.get("rows", []) for cell in row)
+
+
+def _dropped_cells(block: dict, was: dict | None, mine: dict | None) -> Counter:
+    """What a table's cells hold that the source took out of the file with them.
+
+    `_source_dropped` is about a block, and a cell is not one: a table keeps its key
+    while the source deletes the column a chip stands in, so the chip that went with
+    the column had no excuse and the round read as a loss — the more so where the same
+    source step added a chip of that address somewhere else, which `mine_frozen` then
+    credits against it (offline chain-6 seed 6200507 and chain-4 seed 6300228, both
+    shrunk to the source putting a chip in a cell and dropping that column two steps
+    later).
+
+    Asked of what a cell *says* and not of where it stands, a regrid moving every cell
+    after it: a cell the base has word for word, frozen runs included, that the
+    document still has and the file has not, is a cell the source dropped. That is
+    also what keeps it narrow — a chip the *reader* put in makes the document's cell
+    unlike the base's, so it is nobody's to drop, which is the sync's own rule for the
+    line it stands in (`doc_merge._same_set`). By count, as everything about chips is.
+    """
+    if block.get("kind") != "table" or mine is None or not block.get("key"):
+        return Counter()
+    there, base = (keyed(side).get(block["key"]) for side in (mine, was))
+    if there is None or base is None:
+        return Counter()
+    out: Counter = Counter()
+    gone = (_table_cells(block) & _table_cells(base)) - _table_cells(there)
+    for (_, marks), count in gone.items():
+        for mark, n in marks:
+            out[mark] += n * count
+    return out
 
 
 def _picture_findings(now: dict, mine: dict | None, then: dict | None,
@@ -1186,6 +1229,39 @@ def _row_texts(block: dict | None) -> list[str]:
             for row in (block or {}).get("rows", [])]
 
 
+def _row_cells(row: list) -> Counter:
+    return Counter(" ".join(text_of(inner) for inner in cell).strip() for cell in row)
+
+
+def _rows_still_shown(base_block: dict, block: dict) -> Counter:
+    """The base's rows the document still shows, a column the reader deleted not
+    counting against them.
+
+    A row is known by what it says, and what it says is every cell of it — so a reader
+    who deletes a *column* changes the words of every row at once, and each of them
+    read as a row they had deleted. Then the source added a column of its own, one of
+    whose cells happened to hold the word the deleted column had held in that row, and
+    two rows came back from a grave neither of them was ever in (fresh chain-8 seed
+    6500291, shape `ends_on_table`, shrunk to a reader's column delete against a
+    source's regrid).
+
+    So a base row the document still shows *some* of is a row it still has: its cells,
+    counted, cover a document row's. Consumed one for one, or a reader who deleted a
+    row as well as a column would have the survivors answer for it too.
+    """
+    live = [_row_cells(row) for row in block.get("rows", [])]
+    texts = _row_texts(base_block)
+    out: Counter = Counter()
+    for text, row in zip(texts, base_block.get("rows", [])):
+        cells = _row_cells(row)
+        for i, there in enumerate(live):
+            if all(cells[cell] >= n for cell, n in there.items()):
+                out[text] += 1
+                live.pop(i)
+                break
+    return out
+
+
 def _row_resurrection_findings(key, block, base_block, after_block, said, tab,
                                file_block=None):
     """A row the reader deleted that the sync put back.
@@ -1214,10 +1290,12 @@ def _row_resurrection_findings(key, block, base_block, after_block, said, tab,
     base_rows = _row_texts(base_block)
     after_rows = Counter(_row_texts(after_block))
     live_count = Counter(live_rows)
+    shown = _rows_still_shown(base_block, block)
     asked = Counter(_row_texts(file_block)) if file_block else Counter(base_rows)
     out = []
     for row in dict.fromkeys(base_rows):
-        allowed = live_count[row] + max(0, asked[row] - Counter(base_rows)[row])
+        allowed = max(live_count[row], shown[row]) \
+            + max(0, asked[row] - Counter(base_rows)[row])
         if not row.strip() or after_rows[row] <= allowed:
             continue
         if stands_elsewhere(row, live_text) or _named(said, key, row[:40]):

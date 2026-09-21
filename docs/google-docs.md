@@ -2744,6 +2744,82 @@ one sentence has had to be said — block, table, line — and each time it was 
 **styling something is a choice the reader made in the document, exactly as much as typing in
 it.**
 
+### A cell with two paragraphs in it
+
+The op is `split_cell` on both sides — the reader pressing Enter inside a cell, the source
+giving a cell a second paragraph — and until it existed every cell the campaign ever drew held
+exactly one. So `_merge_cell`'s unequal-counts branch, the `diff3` over a cell's joined text,
+had never been asked to carry anything that text cannot say. Five findings came out of it, one
+of each kind again.
+
+**The sync's, and silent.** A cell whose paragraph count the source changed went through that
+`diff3`, which is text, so a chip in it was flattened to the object character — and
+`text_requests` skips any hunk holding one, no request rewriting a chip. `_block_edits` came
+back empty, neither the split nor the chip was written, and nothing was reported (offline
+chain-4 seed 6000042, shape `themed`, the source splitting the cell it had just put a chip in).
+Where the merged text runs through a frozen run and the document left the cell exactly as the
+base has it, there is nothing of the reader's in the way, so `_cell_kept` sends it down the
+`rewrite` path that the same question at the size of a block has always used. Only there, and
+not wherever the paragraph counts differ: a minimal edit keeps the reader's styling on the words
+it does not touch, and keeps the table's own named range, which a rewrite of its first cell
+destroys. A cell **both** sides wrote in is a note now rather than a silence.
+
+Narrowing it that far took the guard out from under the *other* reason a cell's words cannot
+carry it, and the campaign said so within the round: an object character stands for whichever
+chip is there, so a cell whose picture the file replaces with a person chip has a merged text
+equal to the one already written. `text_requests` wrote the split and the chip arrived nowhere
+(chain-10 seed 6100210, shape `two_tables`). `_cell_frozen` asks what the frozen runs *are*,
+which is `_merge_block`'s own guard at the size of a cell — the source changed them and the
+document did not, so the words are not the question.
+
+**Identity.** A table is anchored in its first cell (`doc_ir.anchor_span`), so rewriting that
+cell takes the table's named range with it, and `adopt_keys` is the one thing that gives the key
+back — by the words the plan and the read-back say. They did not say the same words. A cell the
+merge rewrites is one block with the paragraph marks *inside* it (`_cell_runs`) and the document
+hands it back as the paragraphs it is, so the plan said `x\nribbon` where the read-back said
+`x | ribbon`, and the table went unrecognised. Settled under a name made from its new first
+words, it was a table the file and the base both name and the document does not have (offline
+chain-4 seed 6000079, shape `astral`, the source adding a chip to the anchor cell and splitting
+another). `_match_text` counts a cell's paragraphs one by one, whichever side is holding them.
+
+**The judge's.** Then two of the four campaigns, one signature between them: a chip the document
+held, gone. `_source_dropped` is about a *block*, and a cell is not one — the table keeps its
+key while the source deletes the column the chip stands in, so the chip that went with the
+column had no excuse. The more so where the same source step added a chip of that same address
+somewhere else, which `mine_frozen` credits against it, so one round read as a loss twice over
+(chain-6 seed 6200507, chain-4 seed 6300228, both shrunk to the source putting a chip in a cell
+and dropping that column two steps later). `oracle._dropped_cells` asks what a cell *says*, not
+where it stands, a regrid moving every cell after it: a cell the base has word for word, frozen
+runs included, that the document still has and the file has not, is a cell the source dropped.
+That is also what keeps it narrow — a chip the **reader** put in makes the document's cell
+unlike the base's, so the column it stands in is not the source's to take away, which is
+`_same_set`'s rule one paragraph down; and the loss is then named by the cell judge rather than
+by the chip count, a chip's face being words the cell did not say before.
+
+**And a column is not every row at once.** A fresh chain-8 run then said the same thing about
+the row judge, which is the third of them and the newest. A row is known by what it says and
+what it says is every cell of it, so a reader who deletes a **column** changes the words of
+every row in one stroke, and each of them read as a row they had deleted; the source then added
+a column of its own, one of whose cells happened to hold the word the deleted column had held in
+that row, and two rows came back from a grave neither of them was ever in (fresh chain-8 seed
+6500291, shape `ends_on_table`, shrunk to a reader's column delete against a source's regrid —
+the merge's own answer, the reader's column gone and the source's column added, being exactly
+right). `oracle._rows_still_shown`: a base row the document still shows *some* of is a row it
+still has, its cells covering a document row's — consumed one for one, or a reader who deleted a
+row as well as a column would have the survivors answer for that too.
+
+All three campaign judges have now been caught reading a table in the language of one of the
+others: `_cells_arrived` asking a chip's face, `_line_unchanged` asking a cell's words without
+its styling, and this one asking a row's words across columns that are no longer there. A table
+is the one place in this model where four things have identities at once — the block, the row,
+the column and the cell — and every question has to name which of them it is about.
+
+Both campaign seed windows were measured again, every op added changing what every seed draws:
+`theme_undone` 15 of 60 → 11, the test's own window keeping four of them; `styling_restored` 5
+of 240 → 4, of which the old window kept a single seed, so the window moved to the three at the
+end of the range. Clean afterwards at 300 rounds chain 10 `two_tables`, 600 chain 6, 800 chain 4
+and two runs of 400 chain 8, 2,500 rounds in all, `KNOWN` still empty.
+
 ## Remaining risks
 
 1. **Pictures** — retired, see "Pictures, and the chips a request can make" above. What

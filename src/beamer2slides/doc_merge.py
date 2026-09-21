@@ -94,10 +94,22 @@ def block_text(block: dict) -> str:
 def _match_text(block: dict) -> str:
     """What a block is recognised by. A table has no words of its own, so its cells
     stand in for it — without them every table in a document looks like every other,
-    and two of them would swap keys the moment one was added."""
+    and two of them would swap keys the moment one was added.
+
+    A cell's paragraphs count one by one, however the side saying them holds them: the
+    merge writes a cell it rewrites as one block with the marks inside it (`_cell_runs`)
+    and the document hands that back as the paragraphs it is, so a plan and the
+    read-back written from it said `x\\nribbon` and `x | ribbon` about the same table.
+    `adopt_keys` then did not recognise the table it had itself just rewritten, its
+    named range having died with the anchor cell's text, and it settled under a name
+    made from its new first words — file and base naming a table gone from the document
+    (offline chain-4 seed 6000079, shape `astral`, the source adding a chip to the
+    anchor cell and splitting another).
+    """
     if block.get("kind") == "table":
-        return " | ".join(block_text(inner) for row in block.get("rows", [])
-                          for cell in row for inner in cell)
+        return " | ".join(line for row in block.get("rows", [])
+                          for cell in row for inner in cell
+                          for line in block_text(inner).split("\n"))
     return block_text(block)
 
 
@@ -1782,9 +1794,70 @@ def _merge_cell(was: list, mine: list, live: list, conflicts: list, notes: list,
     if text == now:
         return [dict(b) | ({"origin": "kept from the document"} if now != then else {})
                 for b in live]
+    # Two reasons the words cannot carry it. The merged text may run through a frozen
+    # run, and `text_requests` never puts a hunk through one; or the source may have
+    # changed what the frozen runs *are*, which text cannot say at all — an object
+    # character stands for whichever chip is there, so a cell whose image chip the file
+    # replaces with a person chip has a merged text equal to the one already written,
+    # and the source's chip arrives nowhere. That second question is `_merge_block`'s
+    # own guard (line 1653) at the size of a cell, and leaving it out let the campaign's
+    # cell judge straight through (offline chain-10 seed 6100210, shape `two_tables`).
+    if not _text_writable(now, text) or (
+            _cell_frozen(mine) != _cell_frozen(live)
+            and _cell_frozen(mine) != _cell_frozen(was)):
+        # Where the document left the cell exactly as the base has
+        # it there is nothing of the reader's in the way, so the source's cell is
+        # written again from nothing — `_merge_block`'s rewrite, one size down. It has
+        # to be: the whole of a cell the source both split and put a chip into was
+        # skipped, and nothing was written and nothing reported (offline chain-4 seed
+        # 6000042, the first round the campaign ever gave a cell two paragraphs). Only
+        # here, and not wherever the counts differ: a minimal edit keeps the reader's
+        # styling on the words it does not touch, and keeps the table's own named
+        # range, which a rewrite of its first cell destroys.
+        if _cell_kept(was, live):
+            runs = _rewritten_runs(_cell_runs(mine), _cell_runs(live))
+            if all(writable(r) for r in runs) and all(_writable_block(b) for b in live):
+                return [{"kind": "paragraph", "joined": True, "rewrite": True,
+                         "runs": runs, "origin": "merged"}]
+        # Both sides wrote in the cell, or the source asks for something no request can
+        # make at all. Nothing here can write it, and the one thing worse than not
+        # writing it is not saying so.
+        notes.append(f"{key}: the source changed a cell a chip or equation stands in "
+                     f"— left alone")
+        return [dict(b) | {"origin": "kept from the document"} for b in live]
     # `_pairs` sets this against the live cell read as one block (`_joined`), so the
     # breaks are written as the newlines they are.
     return [{"kind": "paragraph", "joined": True, "runs": [{"text": text}], "origin": "merged"}]
+
+
+def _cell_kept(was: list, live: list) -> bool:
+    """Whether the document left a cell exactly as the base has it — words, styling
+    and frozen runs, paragraph by paragraph."""
+    return ([block_text(b) for b in was] == [block_text(b) for b in live]
+            and [_styled(b) for b in was] == [_styled(b) for b in live]
+            and [_shape(b) for b in was] == [_shape(b) for b in live]
+            and [frozen_of(b) for b in was] == [frozen_of(b) for b in live])
+
+
+def _cell_frozen(cell: list[dict]) -> tuple:
+    """What a cell's frozen runs are, in order, the paragraph breaks left out: a cell
+    the source splits keeps its chips, and it is the chips that are being compared."""
+    return tuple(f for block in cell for f in frozen_of(block))
+
+
+def _text_writable(current: str, target: str) -> bool:
+    """Whether `text_requests` can turn one text into the other: it skips a hunk that
+    holds a frozen run on either side, no request rewriting a chip. Everywhere else
+    that is guarded by `frozen_of` being equal on both sides before the text path is
+    taken at all; a cell merged as one text is where the two questions come apart."""
+    a, b = tokens(current), tokens(target)
+    offsets = [0]
+    for token in a:
+        offsets.append(offsets[-1] + len(token))
+    return not any(op != "equal" and (FROZEN in current[offsets[i1]:offsets[i2]]
+                                      or FROZEN in "".join(b[j1:j2]))
+                   for op, i1, i2, j1, j2
+                   in SequenceMatcher(None, a, b, autojunk=False).get_opcodes())
 
 
 class _Line(NamedTuple):
@@ -3133,16 +3206,21 @@ def _pairs(live: dict, want: dict):
                     yield inner, merged
 
 
-def _joined(cell: list[dict]) -> dict:
+def _cell_runs(cell: list[dict]) -> dict:
     """A cell's paragraphs read as one block: the marks between them are newlines in
-    its text, one unit each, and the last one — the cell's own — stays outside."""
+    its text, one unit each. For a side with no spans — the file's cell — which is
+    what a rewrite writes and what `_joined` is over the document's."""
     runs: list[dict] = []
     for i, block in enumerate(cell):
         if i:
             runs.append({"text": "\n", "width": 1})
         runs += block.get("runs", [])
-    return {"kind": "paragraph", "runs": runs,
-            "span": [cell[0]["span"][0], cell[-1]["span"][1]]}
+    return {"kind": "paragraph", "runs": runs}
+
+
+def _joined(cell: list[dict]) -> dict:
+    """The document's cell as one block, the last mark — the cell's own — outside."""
+    return _cell_runs(cell) | {"span": [cell[0]["span"][0], cell[-1]["span"][1]]}
 
 
 def _insert_index(merged: list[dict], position: int) -> int | None:

@@ -2533,6 +2533,44 @@ keys, named ranges), `doc_merge.py` (pure planning), `doc_sync.py` (the commands
   Block, table, line: the third size at which the same sentence had to be said - **styling
   something is a choice the reader made in the document, exactly as much as typing in it**.
   Clean afterwards at 300 rounds chain 10 `two_tables`, 600 chain 6, 800 chain 4 and 400 chain 8.
+  **A cell with two paragraphs in it.** The op is `split_cell` on both sides - the reader pressing
+  Enter in a cell, the source giving a cell a second paragraph - and until it existed every cell
+  the campaign drew held exactly one, so `_merge_cell`'s unequal-counts branch (the `diff3` over
+  the cell's joined text) had never carried anything text cannot say. Five findings, one of each
+  kind again. The **sync's**, silent: a chip in such a cell was flattened to the object character
+  and `text_requests` skips any hunk holding one, so `_block_edits` came back empty - neither the
+  split nor the chip written, nothing reported (chain-4 seed 6000042). Where the merged text runs
+  through a frozen run *and* the document left the cell exactly as the base has it, `_cell_kept`
+  sends it down the `rewrite` path; only there, since a minimal edit keeps the reader's styling on
+  the words it does not touch and keeps the table's named range, which a rewrite of its first cell
+  destroys. Narrowing it that far took the guard out from under the *other* reason the words
+  cannot carry a cell, and the campaign said so within the round: an object character stands for
+  whichever chip is there, so a cell whose picture the file replaces with a person chip has a
+  merged text equal to the one already written, the split was all that got written and the chip
+  arrived nowhere (chain-10 seed 6100210) - `_cell_frozen` is `_merge_block`'s guard at the size
+  of a cell. **Identity**: a table is anchored in its first cell, so rewriting that cell takes its
+  named range and `adopt_keys` is the one thing that gives the key back - by the words the plan and
+  the read-back say, and they did not say the same ones, a rewritten cell being one block with the
+  paragraph marks inside it (`_cell_runs`) where the document hands back the paragraphs it is:
+  `x\nribbon` against `x | ribbon`. The table went unrecognised, settled under a name made from its
+  new first words, and file and base both named a table the document did not have (chain-4 seed
+  6000079); `_match_text` counts a cell's paragraphs one by one, whichever side holds them. The
+  **judge's**, twice. `_source_dropped` is about a *block* and a cell is not one, so a chip that
+  went with the column the source deleted had no excuse - the more so where the same step added a
+  chip of that address elsewhere, which `mine_frozen` credits against it (chain-6 seed 6200507,
+  chain-4 seed 6300228): `oracle._dropped_cells` asks what a cell *says*, a cell the base has word
+  for word that the document still has and the file has not being one the source dropped, which is
+  also what keeps it narrow - a chip the **reader** put in makes the cell unlike the base's, so its
+  column is not the source's to take. And a row is known by what it says across every column, so a
+  reader deleting a **column** read as every row deleted at once; the source's new column then held
+  the word the old one had, and two rows came back from a grave neither was in (fresh chain-8 seed
+  6500291): `_rows_still_shown` counts a base row the document still shows *some* of as one it
+  still has, consumed one for one. All three campaign judges have now been caught reading a table
+  in another's language - a chip's face, a cell's styling, a row's words across columns that are
+  gone - a table being the one place where block, row, column and cell all have identities at once.
+  Windows re-measured (`theme_undone` 15 of 60 -> 11, `styling_restored` 5 of 240 -> 4, its window
+  moved); clean at 300 rounds chain 10 `two_tables`, 600 chain 6, 800 chain 4 and two of 400
+  chain 8.
 - Live suite (opt-in, marker `docs`, ~5 min): `python -m pytest -m docs tests/test_docs_live.py`
   pushes a document per test, edits both sides, syncs, checks a second sync writes nothing, and
   deletes the document. Offline: `tests/test_doc_ir.py`, `test_doc_merge.py`, `test_doc_sync.py`.
