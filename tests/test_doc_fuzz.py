@@ -146,6 +146,16 @@ REGRESSIONS = ((60, 1), (181, 1), (309, 4), (1031, 8), (1147, 8),
                (710370, 4), (720074, 8), (720173, 8), (720270, 8),
                (730061, 12), (730384, 12), (780188, 10), (790329, 6))
 
+# And the seeds whose script only exists on one shape, the campaign having been run
+# with `--shape`: a shape-restricted round draws its tables and its readers every
+# time, so 800 rounds of `two_tables` press on the table repairs the way 1,600 mixed
+# ones do not. The three of them: a full stop the source parked against a bolded
+# word (the oracle's), the key of a table this batch regrids given away by the pass
+# that guesses (`recover_tables`), and a table moved in front of the empty paragraph
+# the body ends behind (`refuse_eaten_anchor`).
+SHAPED = ((870308, 8, "two_tables"), (870368, 8, "two_tables"),
+          (890070, 8, "ends_on_table"))
+
 
 def _round(seed: int, chain: int, shape: str | None = None) -> None:
     script = fuzz_docs.draw(seed, chain, shape=shape)
@@ -172,6 +182,11 @@ def test_a_chained_round_loses_nothing(seed):
 @pytest.mark.parametrize("seed,chain", REGRESSIONS)
 def test_a_seed_that_once_failed_still_passes(seed, chain):
     _round(seed, chain)
+
+
+@pytest.mark.parametrize("seed,chain,shape", SHAPED)
+def test_a_shaped_seed_that_once_failed_still_passes(seed, chain, shape):
+    _round(seed, chain, shape=shape)
 
 
 @pytest.mark.parametrize("seed", (6, 15, 23, 29))
@@ -2834,3 +2849,85 @@ def test_two_empty_paragraphs_trading_names_is_not_an_order_undone():
                       _p("paragraph:empty", ""), tail[1]]}
     assert [f["kind"] for f in fuzz_docs._order_arrived(
         was, was, src, was, "", None, 0, Counter())] == ["order_lost"]
+
+
+def test_the_stop_the_source_parks_against_a_word_does_not_take_its_bold_away():
+    """A word is what a reader sees, and `WORD` is `\\S+`: the full stop the source
+    writes after a bolded word comes along in the token, so "a word wears what every
+    character of it wears" read the bold as gone while it sat there. The reader
+    bolded `zephyr`, the source reworded the sentence around it, and the merge wrote
+    `lantern zephyr` bold and `.` plain — nothing lost, and the oracle cried wolf
+    (chain-8 seed 870308, shape `two_tables`).
+
+    Punctuation only, and only where it clings to an end: a soft hyphen joins two
+    words rather than dressing one, and that is `joined_differently`'s business."""
+    base = _ir(_p("k1", "zephyr both."))
+    before = _ir({"key": "k1", "kind": "paragraph",
+                  "runs": [{"text": "zephyr", "bold": True}, {"text": " both."}]})
+    after = _ir({"key": "k1", "kind": "paragraph",
+                 "runs": [{"text": "lantern zephyr", "bold": True}, {"text": "."}]})
+    assert not oracle.failures(oracle.check(base, before, after, NOTHING))
+    # And the bold really going is a loss still, stop or no stop.
+    gone = _ir({"key": "k1", "kind": "paragraph", "runs": [{"text": "lantern zephyr."}]})
+    assert _kinds(oracle.check(base, before, gone, NOTHING)) == {"styling_lost"}
+
+
+def test_a_key_this_batch_is_about_to_place_is_not_the_recoverys_to_give():
+    """Two repairs look at the same free tables after a structural write:
+    `recover_tables`, for a range the *reader* destroyed by deleting the row a table
+    is anchored in, and `anchor_tables`, for one of our own writes. The recovery goes
+    first, so the reader's table is not free to be taken — and where the same table
+    was regridded by us and beheaded by them, the two can cross.
+
+    A regrid that deletes a table's first column leaves it saying almost nothing,
+    while the reader's beheaded table still says most of what the base recorded: the
+    regridded table's key scored higher on the reader's table than on its own
+    remnant and took it, `anchor_tables` then found that key already placed and left
+    the remnant unnamed, and the source's own regrid went nowhere (chain-8 seed
+    870368, shape `two_tables`). The batch knows where it put its tables; this pass
+    only guesses, so it goes second on those."""
+    base = {"blocks": [dict(_table([["a", "b"], ["1", "2"]]), key="table:a"),
+                       dict(_table([["h1", "h2"]]), key="table:h1")]}
+    # What the read-back holds: the reader's beheaded table, and ours with its first
+    # column gone — which is the one this batch is about to name.
+    scene = {"blocks": [_table([["1", "2"]]), _table([["h2"]])]}
+    theirs = copy.deepcopy(scene)
+    assert doc_merge.recover_tables(base, theirs, {"table:h1"}) == 1
+    assert [b.get("key") for b in theirs["blocks"]] == ["table:a", None]
+    # Without it, the batch's own key is the one the guess gives away.
+    theirs = copy.deepcopy(scene)
+    assert doc_merge.recover_tables(base, theirs) == 1
+    assert [b.get("key") for b in theirs["blocks"]] == ["table:h1", None]
+
+
+def test_a_table_moved_in_front_of_the_empty_paragraph_it_ends_behind_is_refused():
+    """A body may not end on a table, so Docs keeps an empty paragraph after one and
+    no request deletes it: a trailing table goes out by its own span *and the mark in
+    front of it*. That block keeps its words — unless it is itself an empty
+    paragraph, which is all mark. Then the file putting the table in *front* of it
+    asks for a place that the table's own delete takes away: `insertTable` splits
+    what is left of the swallowed paragraph, the table lands behind it again, and the
+    document comes back in the base's order with the move undone in silence (chain-8
+    seed 890070, shape `ends_on_table`)."""
+    subtitle = {"key": "subtitle:empty", "kind": "subtitle", "runs": [], "span": [32, 33]}
+    table = dict(_table([["year", "count"]]), key="table:year", span=[33, 68])
+    heading = dict(_p("heading:results", "Results"), span=[1, 9])
+    theirs = {"blocks": [heading, subtitle, table], "trailer": [68, 69]}
+    merged = [heading, dict(table, moved=True), subtitle]
+    notes: list = []
+    doc_merge.refuse_eaten_anchor(theirs, merged, notes)
+    assert [b["key"] for b in merged] == ["heading:results", "subtitle:empty",
+                                          "table:year"]
+    assert not merged[-1].get("moved")
+    assert len(notes) == 1 and "table:year" in notes[0]
+
+    # A paragraph with words of its own keeps them, and so its name: the move stands.
+    words = dict(_p("paragraph:tail", "Tail."), span=[32, 38])
+    theirs = {"blocks": [heading, words, dict(table, span=[38, 73])],
+              "trailer": [73, 74]}
+    merged = [heading, dict(table, span=[38, 73], moved=True), words]
+    notes = []
+    doc_merge.refuse_eaten_anchor(theirs, merged, notes)
+    assert [b["key"] for b in merged] == ["heading:results", "table:year",
+                                          "paragraph:tail"]
+    assert merged[1]["moved"] and not notes

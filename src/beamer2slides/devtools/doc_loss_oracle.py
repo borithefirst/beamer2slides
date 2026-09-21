@@ -47,6 +47,7 @@ import argparse
 import json
 import re
 import sys
+import unicodedata
 from collections import Counter
 from pathlib import Path
 
@@ -400,6 +401,35 @@ def frozen_runs(part: dict | None) -> dict:
     return out
 
 
+def core(word: str) -> str:
+    """A word without the punctuation clinging to either end.
+
+    What a reader selects when they bold a word is the word, and `WORD` is `\\S+`, so
+    the full stop the *source* then writes after it comes along in the token. The
+    mark is on every character of `zephyr` and on none of `zephyr.`, so the rule
+    below — a word wears what every character of it wears — read the bold as gone
+    while it sat there in the document (chain-8 seed 870308, shape `two_tables`: the
+    reader bolded `zephyr`, the source's `collide` reworded the sentence around it
+    and the merge wrote `lantern zephyr` bold and `.` plain).
+
+    Punctuation only (Unicode `P*`), which leaves a soft hyphen or a slash where it
+    is: those join two words rather than dressing one, and `joined_differently` is
+    the forgiveness written for them. A token that is all punctuation is its own
+    core, or an em dash would have none.
+    """
+    start, end = _core_span(word)
+    return word[start:end]
+
+
+def _core_span(word: str) -> tuple[int, int]:
+    start, end = 0, len(word)
+    while start < end and unicodedata.category(word[start]).startswith("P"):
+        start += 1
+    while end > start and unicodedata.category(word[end - 1]).startswith("P"):
+        end -= 1
+    return (start, end) if start < end else (0, len(word))
+
+
 def _under_words(block: dict):
     r"""Each word of a block with the runs under its characters.
 
@@ -411,12 +441,16 @@ def _under_words(block: dict):
     `vellum`, so the colour read as lost although every character still wore it
     (fresh seed 970528, chain 6). A frozen run is a gap with a space each side, as
     `text_of` has it and as skipping the run used to make it.
+
+    And it is the word, not the punctuation the source parks against it (`core`).
     """
     text, under = _chars_under(block)
     for match in WORD.finditer(text):
-        runs = [r for r in under[match.start():match.end()] if r is not None]
+        start, end = _core_span(match.group())
+        runs = [r for r in under[match.start() + start:match.start() + end]
+                if r is not None]
         if runs:
-            yield match.group(), runs
+            yield match.group()[start:end], runs
 
 
 def _chars_under(block: dict) -> tuple[str, list]:
@@ -970,8 +1004,13 @@ def _style_findings(key, block, base_block, after_styles, after_block, after_wor
     """
     theirs = marks_on(block)
     was = marks_on(base_block) if base_block else Counter()
+    # A styled word is its `core`, so the question "is the word still there?" has to
+    # be asked in the same words: `after_words` counts the tab's `\S+` tokens.
+    standing = Counter()
+    for token, times in after_words.items():
+        standing[core(token)] += times
     lost = Counter({m: n for m, n in ((theirs - was) - after_styles).items()
-                    if after_words.get(m[1])})
+                    if standing.get(m[1])})
     if lost and not _named(said, key):
         mark, word = next(iter(lost))
         return [finding("styling_lost", "loss",
@@ -982,7 +1021,7 @@ def _style_findings(key, block, base_block, after_styles, after_block, after_wor
     undone = (unmarked_of(block, theme) - unmarked_of(after_block, theme)
               - (agreed & asked))
     back = Counter({m: n for m, n in (undone & marks_on(after_block, theme)).items()
-                    if after_words.get(m[1])})
+                    if standing.get(m[1])})
     if back and not _named(said, key):
         mark, word = next(iter(back))
         return [finding("styling_restored", "loss",

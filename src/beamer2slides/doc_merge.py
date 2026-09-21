@@ -610,7 +610,7 @@ def inherit_keys(base: dict, ours: dict) -> dict:
     return ours
 
 
-def recover_tables(base: dict, theirs: dict) -> int:
+def recover_tables(base: dict, theirs: dict, spoken_for: set | None = None) -> int:
     """Give back the key of a table whose anchor the *reader* deleted in the browser.
 
     A table is anchored in its first cell (`doc_ir.anchor_span`), because the cells
@@ -641,11 +641,22 @@ def recover_tables(base: dict, theirs: dict) -> int:
     key: the merge saw its own blank grid where the reader's table should be, deleted
     the reader's table to rebuild it and the word went (chain-12 seed 730384, shape
     `titled`). This is a pairing on words, so a side with no words is not a pairing.
+
+    And a key **this batch is about to place itself** is not one to give away
+    (`spoken_for`): after the structural write both repairs look at the same free
+    tables, and where the same table was regridded by us and beheaded by the reader
+    they can cross. A regrid that deletes a table's first column leaves it saying
+    almost nothing, while the reader's beheaded table next to it still says most of
+    what the base recorded — so the regridded table's key scored higher on the
+    reader's table than on its own remnant and took it, `anchor_tables` then found
+    its key already placed and left the remnant unnamed, and the source's own regrid
+    went nowhere (chain-8 seed 870368, shape `two_tables`). The batch knows where it
+    put its tables; this pass only guesses, so it goes second on those.
     """
     claimed = {block.get("key") for block in theirs["blocks"]}
     missing = [b for b in base["blocks"]
                if b.get("kind") == "table" and b.get("key") and b["key"] not in claimed
-               and _table_words(b)]
+               and b["key"] not in (spoken_for or ()) and _table_words(b)]
     free = [b for b in theirs["blocks"]
             if b.get("kind") == "table" and not b.get("key") and _table_words(b)]
     if not missing or not free:
@@ -2917,6 +2928,49 @@ def refuse_back_to_back(merged: list[dict], notes: list[str]) -> None:
                          f"the document keeps a paragraph of its own — not written")
 
 
+def refuse_eaten_anchor(theirs: dict, merged: list[dict], notes: list[str]) -> None:
+    """Refuse to move the body's last table in front of the paragraph it ends behind.
+
+    A body may not end on a table, so Docs keeps an empty paragraph after one and no
+    request deletes it: a trailing table goes out by its own span *and the mark in
+    front of it*, which leaves the block before it as the body's last and no stray
+    empty one after (`_delete_range`). That block keeps its words, and so its named
+    range — unless it is itself an empty paragraph, which is all mark. Then it is
+    destroyed, and where the file puts the table in *front* of that very block, the
+    place the table is written goes with it: `insertTable` splits the paragraph now
+    standing there, which is what is left of the block the delete swallowed, and the
+    table lands behind it again. The document comes back in the base's order with
+    the paragraph unkeyed, the settle keys it from its words — it is empty, so its
+    name is its kind and it fits — and the move is undone in silence (chain-8 seed
+    890070, shape `ends_on_table`, shrunk to a `move` and a `collide`).
+
+    The mirror of `refuse_back_to_back`, and refused for the same reason: the
+    document cannot hold what the file asks for, and saying so leaves the person
+    with one empty paragraph on the wrong side of a table rather than a sync that
+    writes the same two requests every time it runs.
+    """
+    live = theirs.get("blocks", [])
+    if len(live) < 2 or not theirs.get("trailer") or not _structural(live[-1]):
+        return
+    last, before = live[-1], live[-2]
+    if _structural(before) or block_text(before).strip() or not last.get("key"):
+        return
+    position = next((i for i, b in enumerate(merged)
+                     if b.get("key") == last["key"]), None)
+    if position is None or not merged[position].get("moved"):
+        return
+    anchor = _anchor(merged, position)
+    if anchor is None or anchor.get("key") != before.get("key"):
+        return
+    merged[position]["moved"] = False
+    _put_back(merged, merged[position])
+    notes.append(f"{last['key']}: the source moves it in front of "
+                 f"{before.get('key')}, and the body may not end on a table — the mark "
+                 f"the table gives up on its way out is that empty paragraph's own, so "
+                 f"the place the table would be written goes with it. Left where the "
+                 f"document has it")
+
+
 def refuse_nowhere(theirs: dict, merged: list[dict], notes: list[str]) -> None:
     """Refuse to write a block whose place in the document has no paragraph in it.
 
@@ -3074,6 +3128,7 @@ def plan(base: dict, ours: dict, theirs: dict) -> dict:
                                    f"cannot be written")
     unwritten_pictures(base, ours, theirs, result["blocks"], result["notes"])
     refuse_back_to_back(result["blocks"], result["notes"])
+    refuse_eaten_anchor(theirs, result["blocks"], result["notes"])
     refuse_nowhere(theirs, result["blocks"], result["notes"])
     restore_undeletable(theirs, result["blocks"], result["notes"])
     result["structure"], result["shaped"] = structure(theirs, result["blocks"], result["notes"])
