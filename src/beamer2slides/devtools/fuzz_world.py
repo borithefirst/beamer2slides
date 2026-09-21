@@ -920,7 +920,7 @@ def rebase(base, ours, after, mplan, tok="2zz") -> dict:
                 entry["notes_readback"] = b.get("notes_readback", "")
                 if (b.get("notes") or "") != (o.get("notes") or ""):
                     entry["notes"] = b.get("notes")
-        entry["elements"] = elements
+        entry["elements"] = merge.keys_the_source_took(elements)
         entries[sid] = entry
     # The base is converter output, so it is written in the source's order (a slide the deck deleted
     # while the source still has it keeps its place, or the next conversion can no longer align an

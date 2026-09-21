@@ -693,12 +693,19 @@ def problems(base: dict, mplan: dict, theirs: dict, way_back: dict | None = None
         if p["action"] != "update" or p.get("base") is None:
             continue
         b = base["slides"][p["base"]]
-        els = {e["key"]: e for e in b["elements"]}
+        # The unit's members as the merge itself read them (`merge.units`), not as a map of their
+        # keys: a base slide can answer to one key twice - a unit kept though the source dropped it
+        # keeps the key the next conversion has since given to something else - and looking one up
+        # read the person's own unpaired icon as a member of the source's new unit, refusing this
+        # whole sync over a unit that was never blind (adopt-shaped seed 86066 at chain 8). That is
+        # fixed where it is made (`merge.keys_the_source_took`); this is the gate not asking the
+        # question in a way the answer can depend on.
+        bunits = merge.units(b["elements"])
         for u in p["units"]:
             if u["action"] not in ("recreate", "move"):
                 continue
-            members = [els[mk] for mk in u.get("base_members", []) if mk in els]
-            blind += [{"slide": b["key"], "element": mk} for mk in merge.blind_members(members)]
+            blind += [{"slide": b["key"], "element": mk}
+                      for mk in merge.blind_members(bunits.get(u["key"]) or [])]
     if blind:
         out.append({"reason": "unpaired", "elements": blind})
     if base.get("generation", 0) != 0:

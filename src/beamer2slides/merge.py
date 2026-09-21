@@ -350,6 +350,47 @@ def units(elements: list[dict]) -> dict[str, list[dict]]:
     return out
 
 
+def keys_the_source_took(elements: list[dict]) -> list[dict]:
+    """A base slide's elements, with a unit kept though the source dropped it moved off any key
+    the source has since given to something else.
+
+    A key belongs to the source, the way a label does (`sync.new_base` clears the label of a frame
+    the source dropped, so that tomorrow's frame may carry it). A unit the source removed and the
+    deck's edits keep alive stays in the base under the key it had - and the next conversion's
+    `identity.slide_element_keys` hands that very key to whatever it finds in its place, an icon at
+    the head of *another* line being image/icon/0 as readily as the one that went. The slide then
+    answers to one key twice, and every `{e["key"]: e}` map over a slide's elements silently reads
+    the second of them: `adopt_sync.problems` looked up the person's unpaired icon as a member of
+    the source's new unit, found it tied to nothing and refused the **whole sync** (adopt-shaped
+    seed 86066 at chain 8, 5 slides of 1,997 rebases); `identity.match_elements` cannot see the
+    element the other one hides, and `fuzz_world` ties the wrong object to it.
+
+    The kept one gives way. From here on it is bookkeeping for the deck's own version - the source
+    will never name it again - while the new element's key is the one the next conversion has to
+    inherit. Its own members follow it (an anchored picture names its anchor by key), and nothing
+    the source still draws is renamed, so no pairing moves."""
+    counts: dict[str, int] = {}
+    for e in elements:
+        counts[e["key"]] = counts.get(e["key"], 0) + 1
+    if all(n == 1 for n in counts.values()):
+        return elements
+    taken = set(counts)
+    out, moved = [], {}
+    for e in elements:
+        if counts[e["key"]] > 1 and e.get("removed"):
+            key = next(f"{e['key']}~{k}" for k in range(2, 10 ** 6) if f"{e['key']}~{k}" not in taken)
+            taken.add(key)
+            moved[e["key"]] = None if e["key"] in moved else key   # two of them: no member can say which
+            e = {**e, "key": key}
+        out.append(e)
+    for i, e in enumerate(out):
+        anchor = moved.get(e.get("anchor"))
+        if anchor and e.get("removed"):
+            out[i] = {**e, "anchor": anchor,
+                      "fingerprint": {**e.get("fingerprint", {}), "anchor": anchor}}
+    return out
+
+
 def covered(members: list[dict]) -> set[str]:
     """Of an adopted unit's members, those with no object of their own that another member of this
     same unit accounts for (`adopt_sync.drawn_from`).

@@ -1624,6 +1624,41 @@ deck's own", with the door it names) was never reached at all. The base records 
 a base that forgot them would start calling them added at generation 2) and `slide_touched` leaves
 them out. What a person really added is still an edit and still says so.
 
+### A key belongs to the source
+
+The refusals still came back at chain 8, and over a unit nothing was wrong with: three syncs of one
+campaign round wrote nothing at all (adopt-shaped seed 86066, 5 slides of 1,997 rebases).
+
+A unit the source dropped that the deck's edits keep alive stays in the base under the key it had —
+that is what keeping it means. But the next conversion's `identity.slide_element_keys` hands that
+very key to whatever it finds in its place: keys are `kind/role/N` per slide, so an icon at the head
+of *another* line is `image/icon/0` as readily as the one that went. The base slide then answers to
+one key twice, and every `{e["key"]: e}` map over its elements silently reads the second of them.
+`adopt_sync.problems` looked the source's new unit up that way, found the person's own unpaired icon
+standing under its key, saw it tied to nothing — and refused the **whole sync** over a unit the merge
+itself had never called blind. `identity.match_elements` cannot see the element the other one hides
+either, and `fuzz_world` ties the wrong object to it.
+
+**The kept one gives way** (`merge.keys_the_source_took`, called by `sync.new_base` and by
+`fuzz_world.rebase`, which is its hand-written copy — the two must be fixed together). It is the
+label rule one dimension down: `new_base`'s `keep_removed` clears the *label* of a frame the source
+dropped so that tomorrow's frame may carry it, and a key belongs to the source the same way. From
+here on the kept element's key is bookkeeping for the deck's own version, which the source will never
+name again, while the new element keeps the key the next conversion has to inherit. Its own anchored
+members follow it (a picture names its anchor by key), and nothing the source still draws is renamed,
+so no pairing moves. Where *two* kept elements sit under one key no member can say which it belongs
+to, so their anchors are left alone.
+
+The gate asks `merge.units` rather than a map besides, which is the same member list
+`merge.plan_slide` built `base_members` from: whether a unit is blind may not depend on which of two
+elements a dict happened to keep.
+
+Measured where it happened: of 1,997 rebases over adopt-shaped seeds 86000–86249 at chain 8, five
+slides carried a duplicate key; of 2,000 after the fix, none. Converted seeds 9200000–9200249 read 0
+of 2,000 either way — a converted deck's base has no kept-though-removed units to collide with, which
+is why this is an adopted deck's bug. The 250 rounds that printed `refused: unpaired 3` are now
+250/250 clean with no refusal at all, holding 2,471 elements and 64 slides.
+
 **The refusals** (`adopt_sync.problems`, one message, `--force-adopted-deck` to go ahead anyway):
 
 - **no way back.** `--backup auto` (the default) exports the deck as .pptx before sync's first

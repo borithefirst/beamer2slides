@@ -825,6 +825,49 @@ def test_an_element_kept_because_the_deck_edited_it_stays_kept():
     assert unit(third, "end", "text/body/0")["action"] == "none"
 
 
+def test_a_key_the_source_has_given_away_is_not_claimed_twice_in_the_base():
+    """The other half of "a label belongs to the source", one dimension down. A unit kept though the
+    source dropped it stays in the base under the key it had - and the next conversion hands that
+    key to whatever it finds in its place, an icon at the head of *another* line being image/icon/0
+    as readily as the one that went. The slide then answers to one key twice, and every
+    `{e["key"]: e}` map over a slide's elements reads the second of them: `adopt_sync.problems`
+    looked up the person's own unpaired icon as a member of the source's new unit, found it tied to
+    nothing and refused the whole sync (adopt-shaped seed 86066 at chain 8). The kept one gives
+    way - from here on it is bookkeeping for the deck's version, which the source will never name
+    again."""
+    from beamer2slides.sync import Sync
+    base = three_slides()
+    end = base["slides"][2]
+    pic = {"id": "p2m0", "kind": "image", "role": "icon", "bbox": [16, 62, 24, 70], "file": None}
+    end["elements"].append(entry("image/icon/0", pic, "b2s_s002_m0", anchor="text/body/0"))
+    ours, theirs = triple(base)
+    theirs["slides"][2]["objects"]["b2s_s002_t1"]["text"] = "the person typed this\n"   # ... so it is kept
+    # The source drops that box and puts another one on the slide, whose icon inherits the key.
+    other = text_ir("A line the source adds", (20, 120, 200, 140), "p2t9")
+    ours["slides"][2]["elements"] = [ours["slides"][2]["elements"][0], ours_entry("text/body/1", other),
+                                     ours_entry("image/icon/0", {**pic, "id": "p2m9", "bbox": [16, 122, 24, 130]},
+                                                anchor="text/body/1")]
+    mplan = merge.plan_merge(base, ours, theirs)
+    assert unit(mplan, "end", "text/body/0")["removed"] is True
+    assert unit(mplan, "end", "text/body/1")["action"] == "create"
+
+    s = Sync.__new__(Sync)
+    s.base, s.ours, s.created, s.final_revision = base, {**ours, "source": Path("new.pdf")}, theirs, "r2"
+    work = [{"plan": p, "sid": p["objectId"], "objects": {}, "new_oid": {2: "b2s_s002_m9", 1: "b2s_s002_t9"},
+             "groups": [], "doomed": set()} for p in mplan["slides"]]
+    written = s.new_base({"plan": mplan, "work": {"slides": work}, "theirs": theirs})["slides"][2]["elements"]
+    keys = [e["key"] for e in written]
+    assert len(keys) == len(set(keys)), "the slide answers to each of its keys once"
+    assert [e["key"] for e in written if e.get("removed")] == ["text/body/0", "image/icon/0~2"]
+    assert next(e for e in written if e["key"] == "image/icon/0~2")["anchor"] == "text/body/0"
+    fresh = next(e for e in written if e["key"] == "image/icon/0")
+    assert fresh["anchor"] == "text/body/1" and not fresh.get("removed")
+    # ... and each icon is a member of its own unit, which is what reading the base by key lost.
+    units = merge.units(written)
+    assert [m["key"] for m in units["text/body/0"]] == ["text/body/0", "image/icon/0~2"]
+    assert [m["key"] for m in units["text/body/1"]] == ["text/body/1", "image/icon/0"]
+
+
 def test_removed_text_living_on_in_a_conflict_is_kept():
     base = three_slides()
     extra = entry("text/body/1", text_ir("A closing remark", (20, 120, 200, 130), "p0t2"), "b2s_s000_t2")

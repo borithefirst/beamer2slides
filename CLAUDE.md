@@ -991,6 +991,25 @@ on is drawn rather than fixed: `fuzz_world.build_adopt_base` takes its unpaired 
 gdg24's elements are tied to no object, 90% of hebrew-lesson's) and the hard deck is the campaign's
 whole job here. 200 rounds at chain 6 hold 1,338 elements and 76 slides, 500 at chain 8 hold 5,055
 and 175, 400 at chain 12 hold 7,640 and 166; all clean, and not one refusal among them.
+**And a key belongs to the source, the way a label does.** The refusals came back at chain 8 all the
+same - three syncs of adopt-shaped seed 86066 wrote nothing at all, over a unit the merge itself had
+never called blind. A unit the source dropped that the deck's edits keep alive stays in the base
+under the key it had, and the next conversion's `identity.slide_element_keys` hands that very key to
+whatever it finds in its place: an icon at the head of *another* line is `image/icon/0` as readily as
+the one that went. The slide then answers to one key twice, and every `{e["key"]: e}` map over its
+elements silently reads the second of them - so the gate looked the source's new unit up that way,
+found the person's own unpaired icon standing under its key, and refused the whole sync. The kept one
+gives way (`merge.keys_the_source_took`, called by `sync.new_base` and by `fuzz_world.rebase`, which
+is its hand-written copy): from here on it is bookkeeping for the deck's own version, which the
+source will never name again, while the new element keeps the key the next conversion has to inherit -
+its anchored members follow it (a picture names its anchor by key) and nothing the source still draws
+is renamed, so no pairing moves. The gate asks `merge.units` rather than a map besides, the answer to
+"is this unit blind" not being a thing that may depend on which of two elements a dict kept. Measured
+where it happened: of 1,997 rebases over adopt-shaped seeds 86000-86249 at chain 8, five slides
+carried a duplicate key and none of 2,000 do now (converted seeds 9200000-9200249: 0 of 2,000 either
+way, a converted deck's base having no kept-though-removed units to collide with), and the 250 rounds
+that printed `refused: unpaired 3` are 250/250 clean with no refusal at all, holding 2,471 elements
+and 64 slides.
 **The plan is made for the deck it is going into**: everything sync writes is PDF pt times one number,
 and that number was `SLIDE_W / page`, so a deck of any other width got nothing created in it at all -
 ten of the 29 corpus decks (1440, 1920, 960, 800, 3456, 481.5, 595 pt). `DeckPlan(deck, page_width)`

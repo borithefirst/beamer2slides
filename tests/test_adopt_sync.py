@@ -912,6 +912,33 @@ def test_a_picture_drawn_out_of_another_units_box_still_freezes_this_one(world):
     assert unit["action"] == "keep" and unit["unpaired"] == [icon["key"]]
 
 
+def test_the_gate_reads_the_unit_the_merge_planned_and_not_a_map_of_keys(world):
+    """The same members the merge saw, or the gate is answering about another element. A base slide
+    can answer to one key twice - a unit kept though the source dropped it keeps the key the next
+    conversion has since given to something else (`merge.keys_the_source_took`, which is where that
+    is fixed) - and the gate used to look a unit's members up in a `{key: element}` map of the
+    slide, which reads the second of them. So the person's own icon, tied to nothing and drawn out
+    of a box in *another* unit, answered for the source's new one and the whole sync was refused
+    over a unit that was never blind: adopt-shaped seed 86066 at chain 8, 3 syncs of that round
+    writing nothing at all. Here the two icons stand in one base on purpose, which is the state the
+    other fix now prevents."""
+    base = copy.deepcopy(world["base"])
+    doc = copy.deepcopy(world["doc"])
+    icon, words = an_icon_over_a_tied_box(base)
+    assert icon is not None
+    slide = next(s for s in base["slides"] if any(e is icon for e in s["elements"]))
+    stale = {**copy.deepcopy(icon), "objects": [], "main": None, "removed": True,
+             "drawn_from": "a box of another unit", "anchor": "a box of another unit"}
+    slide["elements"].append(stale)                 # the kept one, under the key the source took
+    ir = next(e for s in doc["slides"] for e in s["elements"] if e["id"] == words["ir"]["id"])
+    ir["paragraphs"][0]["runs"] = [W.run("the source says something else now")]
+    mplan = merge.plan_merge(base, W.build_ours(doc, base, world["out"]), world["live"])
+    unit = next(u for p in mplan["slides"] for u in p.get("units") or [] if u["key"] == words["key"])
+    assert unit["action"] == "recreate" and not unit.get("unpaired")
+    assert adopt_sync.problems(base, mplan, world["live"], KEPT) == [], \
+        "the unit's own members are the ones the merge read"
+
+
 def test_the_gate_still_stands_behind_the_merge(world):
     """`merge.plan_unit` decides it, `adopt_sync.problems` is the last thing between a plan and a
     write into somebody's deck - for a plan that says recreate anyway, however it came to."""

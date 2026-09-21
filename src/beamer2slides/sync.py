@@ -1969,7 +1969,7 @@ class Sync:
                     entry["notes_readback"] = b.get("notes_readback", "")
                     if notes_kept:
                         entry["notes"] = b.get("notes")
-            entry["elements"] = elements
+            entry["elements"] = merge.keys_the_source_took(elements)
             entries[sid] = entry
         slides = [entries.pop(sid) for sid in base_order(mplan, by_plan, [s["objectId"] for s in self.created["slides"]])
                   if sid in entries] + list(entries.values())
