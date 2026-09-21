@@ -68,10 +68,25 @@ def finding(kind: str, severity: str, detail: str, tab=None, key=None, block=Non
 # ---------------------------------------------------------------- reading an IR
 
 def parts_by_tab(ir: dict | None) -> dict:
-    """{tab id (None for the first): part} for a whole IR."""
+    """{tab id (None for the first): part} for a whole IR.
+
+    A `<section>` with no `data-tab` is a tab the *file* is asking for and the
+    document has never had (`_fresh_asks`), so it has no id — and keyed by
+    `part.get("tab")` it landed on `None`, where the first tab is, and the last one
+    written won. Every question asked of the body then got another tab's part
+    instead: the file side of it in `check`, and all four sides in
+    `fuzz_docs._arrived`, which is how the judges came to be silent about the body of
+    two rounds in three (the campaign's `add_tab` draws). The body keeps `None` and a
+    tab nobody can name gets a slot of its own, which matches nothing on the other
+    sides — the honest answer, since nothing on the other sides can name it either.
+    """
     if not ir:
         return {}
-    return {part.get("tab") if part is not ir else None: part for part in doc_ir.parts(ir)}
+    out = {}
+    for at, part in enumerate(doc_ir.parts(ir)):
+        tab = None if part is ir else part.get("tab") or f"?{at}"
+        out.setdefault(tab, part)
+    return out
 
 
 def keyed(part: dict | None) -> dict:
@@ -177,11 +192,20 @@ def joined_differently(token: str, after: Counter, was: Counter,
     (the reader deleted `soft`, the source made `hyphen` into `willow`, and the merge
     said `\xadwillow` — both edits arrived). `_pared_down` asks it exactly: this token
     is a token of the base with one of its words taken out, nothing else.
+
+    There were two more of these, `_dressed_up` and `_undressed`, for a token dressed
+    in or stripped of punctuation of the reader's — and both were written for damage
+    the *harness* was doing. `read_move_block` read its drop index off the document
+    before the cut, so a drag landed some way past where the reader let go: inside a
+    word, which is how a full stop came to stand against the `1` in a cell and how one
+    came off the end of `section.`. The drop is a paragraph mark now and nothing it
+    inserts can land inside a token at all, so neither excuse fires any more — 0 of 800
+    rounds at chain 4, 0 of 500 at chain 8, 0 of 400 at chain 12 and 0 of the 60
+    regression seeds need them — and they are gone. A forgiveness for something that no
+    longer happens is a blind spot waiting, which is what `_twin_unmarks` was.
     """
     pieces = _split(token)
     if len(pieces) < 2 and not _pared_down(token, was, theirs) \
-            and not _dressed_up(token, after, was) \
-            and not _undressed(token, after, was) \
             and not _welded(token, after, tab_was if tab_was is not None else was):
         return False
     base = {piece for other in was for piece in _split(other)}
@@ -204,7 +228,7 @@ def _pared_down(token: str, was: Counter, theirs: Counter | None = None) -> bool
     (chain-6 seed 94030: the reader deleted `a soft\xad`, `collide` made `hyphen`
     into `kestrel`, the merge said `kestrel` and both edits were in it). Only the
     joiners *between* two of the token's words are cut with it; punctuation at the
-    ends is `_undressed`'s question and stays its own.
+    ends is not cut at all.
 
     And only when the narrow leftover is not standing there as well: a base token
     pared down once leaves one token, so if `\xadhyphen` is in the reader's text
@@ -224,32 +248,6 @@ def _pared_down(token: str, was: Counter, theirs: Counter | None = None) -> bool
             lefts = (start, spans[i - 1][1]) if i else (start,)
             rights = (end, spans[i + 1][0]) if i + 1 < len(spans) else (end,)
             if any(other[:a] + other[b:] == token for a in lefts for b in rights):
-                return True
-    return False
-
-
-def _dressed_up(token: str, after: Counter, was: Counter) -> bool:
-    """Whether this token is a token of the base dressed in punctuation of the
-    reader's, whose word the source then rewrote.
-
-    A reader who moves a paragraph ending in a full stop against the `1` in a cell
-    makes the token `.1`, which the base does not have, so `theirs - was` reads it as
-    a word of theirs. It is not one: its only word is the base's, and the source is
-    entitled to rewrite that — which is what happened at chain-6 seed 500249, where
-    `edit_cell` made the `1` into `thicket`, the merge said `.thicket`, and both edits
-    were in it.
-
-    Exact, like `_pared_down`, and one thing more: the base token it dresses has to be
-    gone from the tab as well. A base word the reader typed again somewhere new, with
-    a stop after it, is their own work; only a word the source really rewrote can take
-    the reader's punctuation with it.
-    """
-    for other in was:
-        if not PIECE.search(other) or after.get(other):
-            continue
-        for rest in (token[:-len(other)] if token.endswith(other) else None,
-                     token[len(other):] if token.startswith(other) else None):
-            if rest and not PIECE.search(rest):
                 return True
     return False
 
@@ -277,32 +275,6 @@ def _welded(token: str, after: Counter, was: Counter) -> bool:
         for rest in (token[:-len(other)] if token.endswith(other) else None,
                      token[len(other):] if token.startswith(other) else None):
             if rest and rest in was and not (after.get(other) and after.get(rest)):
-                return True
-    return False
-
-
-def _undressed(token: str, after: Counter, was: Counter) -> bool:
-    """Whether this token is a token of the base with its punctuation taken off,
-    whose word the source then rewrote.
-
-    `_dressed_up` the other way about. A reader whose drag carries a full stop away
-    leaves `section` where the base said `section.`, and `theirs - was` compares whole
-    tokens, so the bare word reads as one they typed. It is not one: the word is the
-    base's, only the punctuation is theirs, and the source is entitled to rewrite the
-    word — which is what happened at chain-4 seed 76101, where the drag took the stop
-    off `Second section.`, `collide` made the word into `kestrel`, and the merge said
-    `Second kestrel`. Both edits arrived.
-
-    Exact, and with `_dressed_up`'s one condition: the base token it undresses has to
-    be gone from the tab too, or a base word the reader typed again somewhere new
-    would be excused along with it.
-    """
-    for other in was:
-        if after.get(other):
-            continue
-        for rest in (other[:-len(token)] if other.endswith(token) else None,
-                     other[len(token):] if other.startswith(token) else None):
-            if rest and not PIECE.search(rest):
                 return True
     return False
 
