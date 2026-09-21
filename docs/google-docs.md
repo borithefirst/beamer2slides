@@ -2941,6 +2941,65 @@ disappear, and the other half standing in the reader's *own* text, since nothing
 word in two. `_cell_findings` passes the reader's cell words for it, as it already passes the
 tab's base words for `_welded`.
 
+**Ctrl+K, the last undrawn field of the dialect.** `doc_merge.MANAGED` names eleven run
+fields, and coverage said plainly that one of them had never been on a run in the campaign's
+life: `link`. Both sides draw it now — the source through `RUN_MARKS`, the reader through
+`read_link_word`, which is Ctrl+K on a word and, a quarter of the time, Ctrl+Shift+K taking
+one off. It found nothing — 1,920 rounds over six settings (`mixed`, `themed`, `prose`,
+`two_tables` and `imported_list`, at chains 4 to 10), drawing 150 to 240 times in each —
+and on `read_paste_block`'s precedent it is kept for what it says while it keeps finding
+nothing, with three tests in `test_doc_fuzz.py` pinning the behaviour it walks over — each
+verified by breaking its mechanism.
+
+The one place a link can be lost is not the restyle but a **move**: a move is a delete and a
+write from nothing, so the words come back as the merge has them and the reader's styling has
+to be carried onto them run by run (`_retext`, `_style_requests`), which it is
+(`test_a_link_the_reader_made_survives_the_source_moving_the_block`; without `_text_style`'s
+link it comes back a plain word). A source restyle of the block the reader linked a word of is
+settled one rule earlier than the field — both sides restyled it, so the document's styling is
+kept and the source's is not written — and the report says which way it went. And what
+membership of `MANAGED` actually buys is narrower than it looks: `_text_style` writes a link
+the run *has* whatever `MANAGED` says, so the field earns its place only where the run has
+none. There a source restyle names `link` with no value in it, which is the API's "back to
+what you inherit", and the `<a href>` the file no longer writes stops being a link in the
+document too (`test_a_link_the_source_takes_off_goes_because_link_is_managed`; with `link` out
+of `MANAGED` the link stays and nobody says so).
+
+**Tab, which is no request at all.** The same audit one level up found the field with no
+request behind it: a bullet's **nesting level**. `createParagraphBullets` says nothing about
+one — Docs reads it off the paragraph's leading tabs — and `doc_merge.unwritten_levels` is
+three rules about a level going astray with nothing the merge can do but say so before the
+write. Yet no level in a round had ever been chosen by anybody: the corpus shapes were born
+with theirs, `src_bullet` wrote level 0 and nothing else moved one. So the three rules were
+being measured against levels that never varied.
+
+Both sides draw one now. `src_bullet` asks for a level, not always 0 — `<li>` inside `<li>` is
+as easy for the file to say as `<li>` beside one — and `read_indent` is the reader pressing
+Tab or Shift-Tab. That second one is the campaign's **one op that sends nothing**: there is no
+field for a nesting level anywhere in the v1 API, so a person indenting an item in the browser
+is a change to the document no batch could have made, and the harness reaches the world
+directly (`doc_world.nest`, named as the exception it is; `apply_reader` counts a draw that
+moved nothing as nothing to do, exactly as it does an empty batch).
+
+The judge was already there and had nothing to judge: `level` is in
+`doc_loss_oracle.SHAPE_FIELDS`, so a reader's level put back the way the file has it is
+`shape_undone`, excused only by a note naming that block. What the two draws are worth is the
+difference they make to a broken merge — with `unwritten_levels` returning early, 200 `prose`
+rounds at chain 6 fail **6** times with neither draw, **44** with the source's, **47** with the
+reader's as well; 200 `imported_list` rounds at chain 8 fail **43** without the reader's half
+and **46** with it. So the source's level is what did the work and the reader's adds a little
+on top, which is the honest way round to report it. Neither found a defect in the merge: 1,920
+rounds over `prose`, `imported_list` and `tabs` at chains 4 to 10 came back clean, and every
+case a hand-built probe could reach was already named in the report.
+
+One thing did come out of it, in the note rather than the merge. A block written from nothing
+takes the level of whatever its text lands in, and where that is no item at all — a plain
+paragraph it is written behind, or nothing — `createParagraphBullets` starts a list of its own
+at 0. The note said "the level of the item in front of it" there, naming an item nobody could
+find; a person reading it would look for the wrong thing. It says what really happened now
+(`test_a_nesting_level_the_reader_chose_is_named_when_a_rewrite_takes_it`, which fails on the
+old wording).
+
 ## Remaining risks
 
 1. **Pictures** — retired, see "Pictures, and the chips a request can make" above. What
@@ -2979,7 +3038,11 @@ tab's base words for `_welded`.
    in it? If they are eaten, the level is writable and `_text_style`'s indices are
    unaffected; if they stay, every index the sync computes for that paragraph is two
    units out and the words themselves are wrong. One live document, two writes and two
-   reads. Until then a level the source asks for and cannot have is reported.
+   reads. Until then a level the source asks for and cannot have is reported — and a level
+   the *reader* chose, which is the kind the file cannot ask for again, is reported too:
+   both sides draw one now (`src_bullet`, `read_indent`), the campaign's judge for it is
+   `shape_undone`, and 1,920 rounds found nothing the report does not name (see "Tab, which
+   is no request at all" above).
 6. **Page-level structure** — `documentStyle`, headers, footers, footnote bodies,
    section breaks and positioned objects are read by nobody and authored by nobody. The
    paragraph level is now nearly closed (borders, `pageBreakBefore` and `keepWithNext`

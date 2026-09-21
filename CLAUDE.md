@@ -2651,6 +2651,37 @@ keys, named ranges), `doc_merge.py` (pure planning), `doc_sync.py` (the commands
   in it, while `theirs - was` read both halves as words they typed (`_cleaved`, chain-6 seed
   8400013, 1 of 500; exact, on `_welded`'s two conditions - the base token gone, the other half
   standing in the reader's own text).
+  **Ctrl+K, the last undrawn field of the dialect**: of the eleven run fields in
+  `doc_merge.MANAGED`, `link` had never been on a run in the campaign's life. Both sides draw it
+  now (the source through `RUN_MARKS`, the reader through `read_link_word` - Ctrl+K, and a quarter
+  of the time Ctrl+Shift+K taking one off), it found nothing in 1,920 rounds over six settings
+  (five shapes, chains 4 to 10), and it is kept for what it says on `read_paste_block`'s
+  precedent, with three
+  tests pinning the behaviour it walks over, each verified by breaking its mechanism. The one place
+  a link can be lost is not the restyle but a **move**, which is a delete and a write from nothing,
+  so the reader's styling is carried onto the merged words run by run (`_retext`,
+  `_style_requests`); a source restyle of that block is settled one rule earlier - both sides
+  restyled it, the document's styling is kept - and the report says so. And membership of `MANAGED`
+  buys less than it looks: `_text_style` writes a link the run *has* whatever `MANAGED` says, so
+  the field earns its place only where the run has none, which is how a link the source **takes
+  off** goes away (the restyle names `link` with no value, the API's "back to what you inherit").
+  **Tab, which is no request at all**: the same audit one level up found the field with no
+  request behind it, a bullet's **nesting level** (`createParagraphBullets` says nothing about
+  one; `unwritten_levels` is three rules with nothing to do but say so before the write). No
+  level in a round had ever been chosen by anybody - the corpus shapes were born with theirs and
+  `src_bullet` wrote 0 - so the three rules were measured against levels that never varied.
+  `src_bullet` asks for a level now, and `read_indent` is the reader pressing Tab: the
+  campaign's **one op that sends nothing**, since no field of the v1 API writes a level, so it
+  reaches the world directly (`doc_world.nest`, the named exception; a draw that moved nothing
+  counts as nothing to do). The judge was already there with nothing to judge - `level` is in
+  `doc_loss_oracle.SHAPE_FIELDS`, so a reader's level put back is `shape_undone`, excused only
+  by a note naming that block. Worth, measured against a broken `unwritten_levels`: 200 `prose`
+  rounds at chain 6 fail 6 times with neither draw, 44 with the source's, 47 with the reader's
+  too; 200 `imported_list` at chain 8, 43 without the reader's half and 46 with it - so the
+  source's level did the work and the reader's adds a little. Neither found a defect (1,920
+  rounds over three shapes at chains 4 to 10, clean); what came out of it was a **note** that
+  named an item nobody could find - a block written from nothing behind a plain paragraph lands
+  in a list `createParagraphBullets` starts at 0, not "the level of the item in front of it".
 - Live suite (opt-in, marker `docs`, ~5 min): `python -m pytest -m docs tests/test_docs_live.py`
   pushes a document per test, edits both sides, syncs, checks a second sync writes nothing, and
   deletes the document. Offline: `tests/test_doc_ir.py`, `test_doc_merge.py`, `test_doc_sync.py`.
