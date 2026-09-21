@@ -270,8 +270,29 @@ def paragraphs(units: list[dict], start: int):
         for i, u in enumerate(cont):
             index += unit_size(u)
             if u["k"] == "m":
-                yield cont, low, i, index - 1 - _run_len(cont[low:i]), index - 1
+                yield cont, low, i, index - 1 - _run_len(_own(cont[low:i])), index - 1
                 low = i + 1
+
+
+def _own(run: list[dict]) -> list[dict]:
+    """The units of a paragraph's own run: whatever follows the last structural
+    element in it.
+
+    A table or a table of contents *ends* the paragraph in front of it, so the
+    paragraph after one begins where it ends, and `documents.get` says so - the
+    named range this world plants on such a block starts after the table. Counting
+    the table into the run put the paragraph's first index back at the table's own
+    start, so `_paragraphs` answered a range aimed at a **cell** with the paragraph
+    standing after the whole table: a source restyle of one cell took the alignment
+    a reader had given that paragraph, and `createParagraphBullets` inside a cell
+    would have bulleted it. Nothing had ever styled a cell until `read_cell_style`
+    and `src_restyle_cell` were drawn, which is why the world could be wrong here
+    for as long as it liked.
+    """
+    for i in range(len(run) - 1, -1, -1):
+        if run[i]["k"] in ("t", "toc"):
+            return run[i + 1:]
+    return run
 
 
 def _run_len(units: list[dict]) -> int:

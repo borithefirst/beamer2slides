@@ -131,7 +131,7 @@ def _edited(live: dict, was: dict) -> bool:
     """
     return (_match_text(live) != _match_text(was) or _grid(live) != _grid(was)
             or frozen_of(live) != frozen_of(was) or _styled(live) != _styled(was)
-            or _shape(live) != _shape(was))
+            or _shapes(live) != _shapes(was))
 
 
 def _styled(block: dict) -> tuple:
@@ -569,6 +569,19 @@ def _shape(block: dict) -> tuple:
     `_restyle_requests` writes the paragraph again.
     """
     return tuple(block.get(key) for key in SHAPE_KEYS)
+
+
+def _shapes(block: dict) -> tuple:
+    """How a block is set — and how a *table* is, which is how its cells are.
+
+    `_styled` is the same shape for the same reason: a table says what it is through
+    its cells, so a question asked of a block has to descend into one to mean
+    anything at all. `_shape` of a table is a row of `None`s.
+    """
+    if block.get("kind") == "table":
+        return tuple(_shapes(inner) for row in block.get("rows", [])
+                     for cell in row for inner in cell)
+    return _shape(block)
 
 
 def _take_shape(out: dict, mine: dict) -> dict:
@@ -1554,11 +1567,20 @@ def _apply_source_moves(base: dict, ours: dict, theirs: dict, merged: list, note
 
 def _table_movable(was: dict, live: dict) -> bool:
     """Whether a table can be deleted and built again with nothing lost: the
-    document's cells say what the base's do, and nothing in them is frozen. That the
-    grid to build is whole rows is the caller's question, since what it builds is the
-    merged grid and not the file's."""
+    document's cells say what the base's do, are marked and set as the base has them,
+    and hold nothing frozen. That the grid to build is whole rows is the caller's
+    question, since what it builds is the merged grid and not the file's.
+
+    The words alone were the question once, and a rebuild carries nothing but words:
+    a reader who small-capped one word of a cell, or centred it, had that taken off by
+    a move the source asked for, with nothing in the report (offline chain-4 seed
+    3000027, shape `two_tables` — the first round the campaign ever styled a cell
+    with). Which is `_edited`'s rule at the size of a table: styling a cell is a
+    choice a reader made in the document, as much as typing in one.
+    """
     cells = [b for row in live.get("rows", []) for cell in row for b in cell]
     return (_texts(was.get("rows", [])) == _texts(live.get("rows", []))
+            and _styled(was) == _styled(live) and _shapes(was) == _shapes(live)
             and not any(r.get("frozen") for b in cells for r in b.get("runs", [])))
 
 

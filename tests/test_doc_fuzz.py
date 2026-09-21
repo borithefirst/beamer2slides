@@ -569,10 +569,11 @@ def test_the_campaign_sees_a_mark_the_file_cannot_say_is_off(monkeypatch):
     `doc_merge._text_style` used to write a mark only when it was on, which is all the
     file could say before `doc_ir.MARK_FIELDS`: the first source edit to rewrite the
     block then names no bold, and the word goes back to wearing the theme's. Measured
-    over 300 `themed` seeds at chain 3 the campaign catches 7 (11 before
-    `paste_block`, 13 before that: every op added to the campaign changes what every
-    seed draws, and a window that held four can come to hold none — this one did);
-    these 120 hold six.
+    over 300 `themed` seeds at chain 3 the campaign catches 6 (7 before `cell_style`
+    and `restyle_cell`, 11 before `paste_block`, 13 before that: every op added to
+    the campaign changes what every seed draws, and a window that held four can come
+    to hold none — this one did, twice). These 300 hold six: 184, 215, 225, 233, 340
+    and 386, of which four are in the window.
     """
     real = doc_merge._text_style
 
@@ -585,7 +586,7 @@ def test_the_campaign_sees_a_mark_the_file_cannot_say_is_off(monkeypatch):
 
     monkeypatch.setattr(doc_merge, "_text_style", broken)
     caught = 0
-    for seed in range(100, 220):
+    for seed in range(180, 300):
         found = fuzz_docs.offline_round(
             seed, script=fuzz_docs.draw(seed, 3, shape="themed"))
         caught += "styling_restored" in {f["kind"] for f in oracle.failures(found)}
@@ -1829,6 +1830,74 @@ def test_a_block_whose_only_change_was_a_mark_is_not_one_the_source_may_delete()
         [("alpha ", None), ("beta", True), (" gamma", None)]
     again, _, _ = fuzz_docs.sync_once(world, copy.deepcopy(ours), copy.deepcopy(base))
     assert again["applied"] == []
+
+
+def test_a_table_the_reader_styled_a_cell_of_is_not_one_the_source_may_move():
+    """A move is a delete and a build from nothing, and a rebuild carries words.
+
+    `_table_movable` asked the cells' *words* alone, so a reader who small-capped
+    one word of a cell — or centred it — had that taken off by a move the source
+    asked for, with nothing in the report (offline chain-4 seed 3000027, shape
+    `two_tables`, the first round the campaign ever styled a cell in). It is
+    `_edited`'s rule at the size of a table, and it needs `_styled` and `_shapes`
+    to descend into the cells, a table being what its cells are.
+    """
+    for edit in ("mark", "shape"):
+        world, ours, base = _build([_para("One."), _table([["a", "b"]]), _para("Two."),
+                                    _para("Three."), _para("Four.")])
+        cell = doc_world.read_ir(world, ours, base)["blocks"][1]["rows"][0][1][0]
+        low, high = cell["span"]
+        world.apply([{"updateTextStyle": {
+            "range": {"startIndex": low, "endIndex": high - 1},
+            "textStyle": {"smallCaps": True}, "fields": "smallCaps"}}]
+            if edit == "mark" else
+            [{"updateParagraphStyle": {"range": {"startIndex": low, "endIndex": high},
+                                       "paragraphStyle": {"alignment": "CENTER"},
+                                       "fields": "alignment"}}])
+        was, mine = copy.deepcopy(base), copy.deepcopy(ours)
+        ours["blocks"].insert(3, ours["blocks"].pop(1))       # the source moves it
+        before = doc_world.settled_ir(world, ours, base)
+        report, ours, base = fuzz_docs.sync_once(world, ours, base)
+        assert not oracle.failures(oracle.check(was, before, base, report, mine))
+        live = doc_world.read_ir(world, ours, base)
+        assert [b["kind"] for b in live["blocks"]] == \
+            ["paragraph", "table", "paragraph", "paragraph", "paragraph"], edit
+        kept = live["blocks"][1]["rows"][0][1][0]
+        assert (kept["runs"][0].get("smallcaps") if edit == "mark"
+                else kept.get("align")) == (True if edit == "mark" else "center"), edit
+        assert any("the document changed it" in note for note in report["notes"]), edit
+        again, _, _ = fuzz_docs.sync_once(world, copy.deepcopy(ours), copy.deepcopy(base))
+        assert again["applied"] == [], edit
+
+
+def test_a_style_written_in_a_cell_stays_out_of_the_paragraph_after_the_table():
+    """The harness's own, and the reason nothing had ever caught it: a range aimed at
+    a cell.
+
+    `doc_world.paragraphs` took a paragraph's first index to be its mark less
+    everything since the mark before it, tables included — so the paragraph standing
+    after a table began, as far as the world was concerned, at the table's own start,
+    and `_paragraphs` answered a range inside any cell with that paragraph too. One
+    source restyle of one cell then took the alignment a reader had given it, and a
+    `createParagraphBullets` inside a cell would have bulleted it. A table ends the
+    paragraph in front of it (`documents.get` says so, and the named range this world
+    plants starts after the table), which is `_own`. Offline chain-10 seed 3400048,
+    shrunk to one step: the reader centres the paragraph after two tables, the source
+    gives a cell a bottom rule.
+    """
+    world, ours, base = _build([_para("Before."), _table([["a", "b"]]), _para("After.")])
+    live = doc_world.read_ir(world, ours, base)
+    after, cell = live["blocks"][2], live["blocks"][1]["rows"][0][1][0]
+    world.apply([{"updateParagraphStyle": {
+        "range": {"startIndex": after["span"][0], "endIndex": after["span"][1]},
+        "paragraphStyle": {"alignment": "CENTER"}, "fields": "alignment"}}])
+    assert doc_world.read_ir(world, ours, base)["blocks"][2]["align"] == "center"
+    world.apply([{"updateParagraphStyle": {
+        "range": {"startIndex": cell["span"][0], "endIndex": cell["span"][1]},
+        "paragraphStyle": {"alignment": "END"}, "fields": "alignment"}}])
+    live = doc_world.read_ir(world, ours, base)
+    assert live["blocks"][1]["rows"][0][1][0]["align"] == "right"
+    assert live["blocks"][2]["align"] == "center"
 
 
 def test_a_bold_the_source_grew_over_the_word_before_it_is_written():

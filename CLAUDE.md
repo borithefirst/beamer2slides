@@ -2484,6 +2484,28 @@ keys, named ranges), `doc_merge.py` (pure planning), `doc_sync.py` (the commands
   carries, so a block the reader had only centred read as untouched and the delete took it.
   `ordered` counts here though the oracle leaves it out: what an import cannot *report* is
   neither side's fault, but both readings `_edited` compares are the document's own.
+  **The cell nobody had ever styled.** Coverage says what is drawn, not where: every
+  `updateTextStyle` and `updateParagraphStyle` the campaign ever drew was on a paragraph of the
+  body, because both sides pick their spot from `part["blocks"]` and a cell lives inside a table
+  block's `rows` - `src_edit_cell` reaches one and only rewrites words, so `_merge_cell`'s
+  styling was as undrawn as the column requests had been. `read_cell_style` / `src_restyle_cell`
+  say it now (the reader's reports the *table's* key, so `collide` answers in the same table;
+  `pageBreakBefore` is left out, Docs refusing it in a cell, and a request the real API would
+  reject is the harness's doing). It found one in the first sixty rounds (chain 4, `two_tables`,
+  seed 3000027): `_table_movable` - "can this table be deleted and built again with nothing
+  lost", asked before a source move is written - compared the cells' **words**, and a rebuild
+  carries nothing else, so a reader who small-capped or centred a cell had it taken off with
+  nothing in the report. It is `_edited`'s rule at the size of a table, and it needed `_shapes`
+  to exist: `_shape` of a table is a row of `None`s, a table saying what it is through its cells,
+  which `_styled` already knew. `_edited` asks `_shapes` too now. Then 1,550 rounds at chains 4,
+  6, 8 and 10 came back with one finding each and all four were the **harness's**, one defect in
+  four hats: `doc_world.paragraphs` took a paragraph's first index to be its mark less everything
+  since the mark before it, and a table is a body unit with no mark, so the paragraph after a
+  table began at the table's own start and *every range aimed at a cell reached it* - a source
+  restyle of one cell took the alignment a reader had given that paragraph, and
+  `createParagraphBullets` inside a cell would have bulleted it (`doc_world._own`: a table ends
+  the paragraph in front of it, as `documents.get` and the world's own named ranges say). All
+  four clean afterwards.
 - Live suite (opt-in, marker `docs`, ~5 min): `python -m pytest -m docs tests/test_docs_live.py`
   pushes a document per test, edits both sides, syncs, checks a second sync writes nothing, and
   deletes the document. Offline: `tests/test_doc_ir.py`, `test_doc_merge.py`, `test_doc_sync.py`.

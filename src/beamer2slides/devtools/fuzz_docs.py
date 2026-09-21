@@ -633,6 +633,43 @@ def read_renumber_list(rng, part, tab):
         "bulletPreset": doc_world.ORDERED_PRESET}}], [b.get("key") for b in items]
 
 
+# What a reader may set on a paragraph *inside a table cell*. `pageBreakBefore` is
+# left out: Docs refuses it in a table, and a request the real API would reject is
+# the harness's own doing, never the sync's.
+CELL_MEASURES = [m for m in READER_MEASURES if m[1] != "pageBreakBefore"]
+
+
+def read_cell_style(rng, part, tab):
+    """The reader styling a word, or setting a paragraph, *inside a table cell*.
+
+    Every reader op that styles anything walks `part["blocks"]`, and a cell is not
+    one of those — it hangs off a table's `rows` — so the whole of `_merge_cell`'s
+    styling was a path the campaign had never driven: `_merge_block` with a cell
+    for a block, `_merged_shape` on it, the marks merge inside it. The tables were
+    exercised for their words and their grid alone, on both sides
+    (`src_edit_cell` only ever rewrites a cell's words).
+
+    The table's key is what it reports touched, a cell having none of its own, so
+    `collide` can answer in the same table.
+    """
+    spots = [(t, b) for t in _tables(part) for _, _, b in _cells(t) if b.get("span")]
+    if not spots:
+        return [], []
+    table, block = rng.choice(spots)
+    if rng.random() < 0.35:
+        style, field = rng.choice(CELL_MEASURES)
+        return [{"updateParagraphStyle": {"range": _span(*block["span"], tab),
+                                          "paragraphStyle": style,
+                                          "fields": field}}], [table.get("key")]
+    words = _word_spots(block)
+    if not words:
+        return [], []
+    _, low, high = rng.choice(words)
+    style, field = rng.choice(READER_FACES + [({"bold": True}, "bold")])
+    return [{"updateTextStyle": {"range": _span(low, high, tab),
+                                 "textStyle": style, "fields": field}}], [table.get("key")]
+
+
 def read_cell_type(rng, part, tab):
     spots = [(t, r, c, b) for t in _tables(part) for r, c, b in _cells(t) if b.get("span")]
     if not spots:
@@ -790,6 +827,7 @@ READER = {
     "heading": read_heading,
     "face": read_face, "measure": read_measure,
     "renumber_list": read_renumber_list, "cell_type": read_cell_type,
+    "cell_style": read_cell_style,
     "add_row": read_add_row, "delete_row": read_delete_row,
     "add_column": read_add_column, "delete_column": read_delete_column,
     "insert_picture": read_insert_picture, "insert_chip": read_insert_chip,
@@ -990,6 +1028,22 @@ def src_edit_cell(rng, ir, touched):
     cell["runs"] = [{"text": f"{rng.choice(FRESH)}-{rng.randrange(1 << 20):05x}"}]
 
 
+def src_restyle_cell(rng, ir, touched):
+    """The source's half of what `read_cell_style` draws: a cell restyled rather
+    than reworded. `src_restyle` picks from `part["blocks"]`, where a cell never
+    is, so the file had no way of asking for one."""
+    cells = [inner for part in _parts(ir) for b in part.get("blocks", [])
+             if b.get("kind") == "table" for row in b["rows"] for cell in row
+             for inner in cell]
+    if not cells:
+        return
+    cell = rng.choice(cells)
+    if rng.random() < 0.35:
+        _mark_paragraph(rng, cell)
+    else:
+        _mark_run(rng, cell)
+
+
 def src_add_picture(rng, ir, touched):
     spot = _pick(rng, ir)
     if not spot:
@@ -1079,7 +1133,8 @@ def src_collide(rng, ir, touched):
 SOURCE = {
     "reword": src_reword, "append": src_append, "drop": src_drop, "move": src_move,
     "restyle": src_restyle, "retitle": src_retitle, "add_table": src_add_table,
-    "regrid": src_regrid, "edit_cell": src_edit_cell, "add_picture": src_add_picture,
+    "regrid": src_regrid, "edit_cell": src_edit_cell, "restyle_cell": src_restyle_cell,
+    "add_picture": src_add_picture,
     "add_chip": src_add_chip, "add_tab": src_add_tab, "rename_tab": src_rename_tab,
     "drop_tab": src_drop_tab, "collide": src_collide,
 }

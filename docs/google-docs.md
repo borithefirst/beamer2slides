@@ -2643,6 +2643,61 @@ are the document's own, one sync apart, so a list the reader renumbered says so.
 Each was put back on purpose to see the campaign fail again, and each is pinned by a test of
 its own. Both campaigns clean afterwards, 1 → 0.
 
+### The cell nobody had ever styled
+
+Coverage says what is drawn, not where. `updateTextStyle` is in every campaign's request
+count by the thousand and `updateParagraphStyle` beside it, and every one of them was on a
+paragraph of the body: the reader's styling ops pick their spot from `part["blocks"]` and the
+source's from the same list, and a cell is never in either — a cell lives inside a table
+block's `rows`. `src_edit_cell` reaches one, and it only rewrites words. So `_merge_cell`'s
+styling was as undrawn as the column requests were, and for the same reason: nothing in the
+campaign's vocabulary could say it.
+
+`read_cell_style` and `src_restyle_cell` say it now — a face, a size, small caps, a mark, or
+one of the paragraph measures, set by either side on a paragraph inside a cell. Two details
+are the harness being careful rather than clever. The reader's op reports the **table's** key
+as what it touched, so `collide` answers in the same table rather than somewhere else. And
+`pageBreakBefore` is left out of what may be set in a cell (`CELL_MEASURES`), because Docs
+refuses it there: a request the real API would reject is the harness's own doing and would
+make the campaign fail at something the sync never asked for.
+
+It found a defect in the first sixty rounds (chain 4, `two_tables`, seed 3000027 — the first
+round the campaign ever styled a cell with). `_table_movable` is the question "can this table
+be deleted and built again with nothing lost", asked before the source's move is written, and
+it compared the cells' **words**. A rebuild carries nothing but words, so a reader who had
+small-capped one word of a cell, or centred it, had that taken off by a move the source asked
+for, with nothing in the report. It is `_edited`'s rule from the section above at the size of
+a table: styling a cell is a choice the reader made in the document, exactly as much as typing
+in one.
+
+The fix needed a shape of `_shapes`, because `_shape` of a table is a row of `None`s — a table
+says what it is through its cells, so a question asked of a block has to descend into one to
+mean anything at all, which `_styled` already did and `_shape` did not. `_table_movable` asks
+all three now, and `_edited` asks `_shapes` rather than `_shape`, so a table whose cell the
+reader only centred is not one the source may delete either. Broken on purpose, the new test
+fails and the oracle itself names the loss (`styling_lost table:a`).
+
+The four broader campaigns run next — 1,550 rounds at chains 4, 6, 8 and 10 — came back with
+one finding each, and all four were the **harness's**, one defect wearing four hats. A
+paragraph's first index in `doc_world` was its mark less everything since the mark before it,
+and a table is a unit in the body's list with no mark of its own, so the paragraph standing
+after a table began, as far as the world was concerned, at the table's own start. Every range
+aimed at a **cell** therefore reached it: one source restyle of one cell took the alignment a
+reader had given that paragraph, and `createParagraphBullets` inside a cell would have
+bulleted it. A table ends the paragraph in front of it — `documents.get` says so, and the
+named range this world plants on such a block starts after the table — which is
+`doc_world._own`. Nothing had ever styled a cell, so the world could be wrong there for as
+long as it liked; with the fix all four campaigns are clean, and the world's reading is pinned
+by a test of its own.
+
+One thing to remember when reading the seed windows in `tests/test_doc_fuzz.py`: an op added
+to the campaign changes what **every** seed draws.
+`test_the_campaign_sees_a_mark_the_file_cannot_say_is_off` samples seeds in a fixed window and
+asserts the injected defect is caught at least three times there; the two cell ops moved its
+window's hits from six to two, so it was re-measured over 100..400 (hits at 184, 215, 225,
+233, 340, 386) and now samples 180..300. That is the second time that test has had to move,
+and it is not flakiness: the window is a sample of a population the ops define.
+
 ## Remaining risks
 
 1. **Pictures** — retired, see "Pictures, and the chips a request can make" above. What
