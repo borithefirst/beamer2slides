@@ -739,6 +739,9 @@ def _tab_findings(was: dict | None, now: dict, then: dict | None, said: str,
                                dropped=mine is not None and not touched
                                and key in old and key not in source_keys)
         out += _inherited_findings(key, block, new[key], (mine or {}), said, tab, theme)
+        out += _shape_findings(key, block, base_block, new[key], said, tab,
+                               behind_dropped=_behind(was, key) is not None
+                               and _behind(was, key) not in source_keys)
         if block.get("kind") == "table":
             out += _cell_findings(key, block, base_block, new[key], after_words, said, tab,
                                   words(part_text(was)))
@@ -854,6 +857,55 @@ def _inherited_findings(key, block, after_block, mine: dict, said: str, tab,
             f"which neither the reader nor the file asked for: it has stopped following "
             f"the document's named style", tab=tab, key=key))
     return [f for f in out if not _named(said, key)]
+
+
+# What a reader can set about a paragraph in the browser that is a choice of theirs.
+# `ordered` is left out: a list's ordered-ness is the one thing an imported document
+# cannot report (`doc_merge` ignores it for identity and the settle hands back the
+# document's own bullets), so the two sides disagree about it by construction.
+SHAPE_FIELDS = tuple(k for k in doc_merge.SHAPE_KEYS if k != "ordered")
+
+
+def _behind(was: dict | None, key) -> str | None:
+    """The key of the block standing in front of this one in the base."""
+    blocks = (was or {}).get("blocks", [])
+    for at, block in enumerate(blocks):
+        if block.get("key") == key:
+            return blocks[at - 1].get("key") if at else None
+    return None
+
+
+def _shape_findings(key, block, base_block, after_block, said, tab,
+                    behind_dropped: bool) -> list[dict]:
+    """How the reader set a paragraph, put back the way the file has it.
+
+    The mirror of `_style_findings` one level up: a mark is a choice about a word and
+    this is a choice about the paragraph — its named style, its alignment, its
+    indents, its spacing, its shading, its rules, its page break. A reader who centres
+    a quotation or makes a line a heading has done something as deliberate as bolding
+    a word, and until this was written **nothing asked whether it survived**. The
+    convergence check cannot: the file is regenerated from the document afterwards, so
+    whatever was written reads back as what both sides wanted and the next sync writes
+    nothing. The campaign's own judge cannot either: it asks whether the *source's*
+    changes arrived, and here the source's change arrived perfectly.
+
+    `behind_dropped` is Docs' own rule and the one thing that has to be forgiven: a
+    paragraph the source deletes is merged into the one behind it, which takes the
+    *deleted* one's style. That is the document's doing, not the sync's — the same
+    reason `_inherited_findings` has to be told what the theme sets.
+    """
+    if base_block is None or block.get("kind") == "table" or behind_dropped:
+        return []
+    for field in SHAPE_FIELDS:
+        theirs, then, now = (block.get(field), base_block.get(field),
+                             after_block.get(field))
+        if theirs == then or now == theirs:
+            continue
+        return [] if _named(said, key) else [finding(
+            "shape_undone", "loss",
+            f"the block {key} had its {field} set to {theirs!r} by the reader and says "
+            f"{now!r} after the sync, which is what the file asks for", tab=tab, key=key)]
+    return []
 
 
 def _source_dropped(block: dict, was: dict | None, mine: dict | None) -> bool:

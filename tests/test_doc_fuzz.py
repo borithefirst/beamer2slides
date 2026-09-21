@@ -168,14 +168,16 @@ REGRESSIONS = ((60, 1), (181, 1), (309, 4), (1031, 8), (1147, 8),
 # and the order it asks for was never reached (1740158, chain 14, mixed shapes).
 # And one from `prose`, which is a report rather than a loss: a cell both sides wrote
 # in raised its conflict under the name `a table cell`, so nobody — the person reading
-# the report, or the oracle looking the cell up in it — could tell which table.
+# the report, or the oracle looking the cell up in it — could tell which table. And
+# 2000188, which is the first thing `_shape_findings` saw the first time it was run:
+# how the reader set a paragraph, thrown away by the rewrite a source chip asks for.
 SHAPED = ((870308, 8, "two_tables"), (870368, 8, "two_tables"),
           (890070, 8, "ends_on_table"), (1130023, 6, "themed"),
           (1140022, 8, "themed"), (1150196, 6, "themed"),
           (1180145, 10, "themed"), (1180151, 10, "themed"),
           (1270233, 8, "between_tables"), (1430231, 10, "astral"),
           (1640036, 12, "tabs"), (1710213, 12, "prose"), (1740158, 14, None),
-          (1730265, 16, "tabs"))
+          (1730265, 16, "tabs"), (2000188, 6, None))
 
 
 def _round(seed: int, chain: int, shape: str | None = None) -> None:
@@ -3256,3 +3258,50 @@ def test_a_cell_both_sides_wrote_in_is_reported_under_the_table_it_is_in():
     assert [(c["ours"], c["theirs"], c["key"]) for c in report["conflicts"]] \
         == [("thicket ", "meadow ", "table:a")], \
         "the cell is named by the table it is in, which is the only address it has"
+
+
+def test_how_the_reader_set_a_paragraph_survives_the_source_moving_a_chip_in_it():
+    """A block whose chip or picture the source changed is written again from the
+    file, because no request edits one — and it was written again *from the file's
+    shape too*, on the grounds that a document which left the block's words, run
+    styles and frozen runs exactly as the base has them has nothing of its own in it.
+    It may have: how a paragraph is set is a choice made without touching a word.
+    Centre a quotation, indent it, space it out, make a line a heading — and the first
+    time the source so much as moves a chip in that block, all of it goes, in silence.
+
+    Nothing could see it. The words are all there, so the loss oracle passed it; the
+    source's own change arrived, so the campaign's judge passed it; and the settle
+    regenerates the file from the document, so the file then says what was written and
+    the next sync writes nothing. `doc_loss_oracle._shape_findings` is the question
+    being asked at all, and it fails 7 of 200 rounds at chain 6 without the fix (seed
+    2000188 shrinks to exactly this: the reader spaces a paragraph out, the source
+    adds a chip to it). `_merged_shape` is the one rule both ways into a block now
+    share: the document's where both sides changed it, with a note."""
+    world, ours, base = _build([_para("One."), _para("The middle one."),
+                                _para("Three.")])
+    key = "paragraph:the-middle-one"
+
+    # The reader centres it and spaces it out, without touching a word of it.
+    span = next(b for b in doc_world.read_ir(world, ours, base)["blocks"]
+                if b.get("key") == key)["span"]
+    world.apply([{"updateParagraphStyle": {
+        "range": {"startIndex": span[0], "endIndex": span[1]},
+        "paragraphStyle": {"alignment": "CENTER",
+                           "spaceAbove": {"magnitude": 12, "unit": "PT"}},
+        "fields": "alignment,spaceAbove"}}])
+
+    # The source adds a person chip to that same block, which is a rewrite.
+    block = next(b for b in ours["blocks"] if b.get("key") == key)
+    block["runs"] = block["runs"] + [{"chip": "person", "frozen": True,
+                                      "text": "Grace", "value": "grace@example.com"}]
+
+    report, ours, base = fuzz_docs.sync_once(world, ours, base)
+    after = next(b for b in doc_world.read_ir(world, ours, base)["blocks"]
+                 if b.get("key") == key)
+    assert (after.get("align"), after.get("space_above")) == ("center", 12.0), \
+        "the reader set the paragraph and said nothing about the chip"
+    assert any(r.get("frozen") for r in after["runs"]), \
+        "and the source's chip went in all the same"
+    assert not report["notes"], "neither side contradicted the other, so nothing to say"
+    again, _, _ = fuzz_docs.sync_once(world, copy.deepcopy(ours), copy.deepcopy(base))
+    assert again["requests"] == 0

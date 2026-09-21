@@ -2443,6 +2443,23 @@ keys, named ranges), `doc_merge.py` (pure planning), `doc_sync.py` (the commands
   of `_merge_cell` had stamped the table's key since it was written; `_merge_block` takes it
   as `inside` now, so a conflict a person is handed says where their words were and the
   oracle's `cell_lost` excuse (the report naming the table) can be found at all.
+  **How the reader set a paragraph** was the largest gap left in the oracle: it asked about
+  the reader's words, chips, pictures, rows, blocks and tabs, and since the theme work the
+  marks on a word - never about a *paragraph*, although centring a quotation, indenting it,
+  shading it or making a line a heading is a choice made without touching a word and as
+  deliberate as bolding one. `_shape_findings` asks it (`shape_undone`), forgiving two
+  things: a list's ordered-ness, which an imported document cannot report at all, and Docs'
+  merge-on-delete, where a paragraph the source deletes hands its own style to the one
+  behind it. It failed 7 of 200 rounds at chain 6 the first time it ran, one signature, shrunk
+  to two operations - **the reader spaces a paragraph out, the source adds a chip to it**
+  (seed 2000188). A block whose chip or picture the source changed is written again from the
+  file, no request being able to edit one, and it took the file's *shape* with it on the
+  grounds that a document leaving the block's words, run styles and frozen runs as the base
+  has them "has nothing of its own in it" - it may have. Silent in every direction: the words
+  are all there, the source's change arrived, and the settle regenerates the file from the
+  document, so the next sync writes nothing. `_merged_shape` is the one rule both ways into a
+  block now share (the source's where the document left it alone, the document's where both
+  changed it, with a note). Clean at 200 @ chain 6 (7 -> 0), 400 @ 4, 300 @ 8, 300 `themed` @ 6.
 - Live suite (opt-in, marker `docs`, ~5 min): `python -m pytest -m docs tests/test_docs_live.py`
   pushes a document per test, edits both sides, syncs, checks a second sync writes nothing, and
   deletes the document. Offline: `tests/test_doc_ir.py`, `test_doc_merge.py`, `test_doc_sync.py`.

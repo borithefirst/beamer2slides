@@ -2559,6 +2559,42 @@ restyled that the document rewrote). The oracle's `cell_lost` excuse is the repo
 the table, so it could never be found either: 400 prose rounds at chain 12 from seed
 1710000 go 1 → 0.
 
+### How the reader set a paragraph
+
+The judges have grown one question at a time, and each new one has found something the
+moment it was first asked. This is the largest gap left in the loss oracle, and it was
+stated plainly: it asked about the reader's **words**, their **chips and pictures**, their
+**rows**, their **blocks and tabs**, and — since the theme work — the **marks on a word**.
+It never asked how the reader set a **paragraph**. Centring a quotation, indenting it,
+spacing it out, shading it, giving it a rule, making a line a heading: every one of those
+is a choice made in the browser without touching a word, and every one of them is as
+deliberate as bolding one.
+
+`doc_loss_oracle._shape_findings` asks it (`shape_undone`, severity `loss`): a field of
+`doc_merge.SHAPE_KEYS` the reader changed from the base that the document does not have
+after the sync. Two things it has to forgive. A list's **ordered-ness** is left out — it is
+the one thing an imported document cannot report, so the two sides disagree about it by
+construction. And Docs' own **merge-on-delete** rule is not the sync's doing: a paragraph
+the source deletes is merged into the one behind it, which takes the *deleted* one's
+style, so a block whose predecessor in the base the source dropped is not asked about.
+That is the same forgiveness `_inherited_findings` needs its `theme` for.
+
+It failed 7 of 200 rounds at chain 6 the first time it ran, in one signature, and the
+shrinker took it down to two operations: **the reader spaces a paragraph out, the source
+adds a chip to it** (seed 2000188). A block whose chip or picture the source changed is
+written again from the file, because no request edits one — and it was written again from
+the file's *shape* too, on the grounds, stated in the comment there, that a document which
+left the block's words, run styles and frozen runs exactly as the base has them "has
+nothing of its own in it". It may have. All of it went, silently: the words are all there
+so the loss oracle passed it, the source's own change arrived so the campaign's judge
+passed it, and the settle regenerates the file from the document, so afterwards the file
+says what was written and the next sync writes nothing at all.
+
+`doc_merge._merged_shape` is the one rule both ways into a block now share — the source's
+shape where the document left it alone, the document's where both sides changed it, with a
+note saying so. Clean afterwards at four settings: 200 at chain 6 (7 → 0), 400 at chain 4,
+300 at chain 8, and 300 `themed` rounds at chain 6.
+
 ## Remaining risks
 
 1. **Pictures** — retired, see "Pictures, and the chips a request can make" above. What

@@ -544,6 +544,38 @@ def _take_shape(out: dict, mine: dict) -> dict:
     return out
 
 
+def _merged_shape(out: dict, was: dict, mine: dict, live: dict, a_block: bool,
+                  key: str, notes: list) -> dict:
+    """How a block is *set*, merged the way its words are: the source's where the
+    document left it alone, the document's where both sides changed it, and a note
+    saying so when they did.
+
+    One rule in one place, because there are two ways into a block. The ordinary one
+    merges the words and settles the shape beside them; the other rewrites the block
+    from the file, because the source changed a chip or a picture and no request can
+    edit one — and that one used to take the source's shape outright, on the grounds
+    that a document which left the block's words, run styles and frozen runs exactly
+    as the base has them "has nothing of its own in it". It may have: the reader
+    centred the paragraph, or indented it, or made it a heading, without touching a
+    word. Every one of those went, in silence, the first time the source so much as
+    moved a chip in that block — 7 of 200 rounds at chain 6 once
+    `doc_loss_oracle._shape_findings` was written to ask (seed 2000188 shrinks to the
+    whole of it: the reader spaces a paragraph out, the source adds a chip to it).
+    """
+    if _shape(mine) != _shape(was):
+        if _shape(live) == _shape(was):
+            _take_shape(out, mine)
+        elif a_block:
+            # Both sides set the paragraph differently. The document wins, as it does
+            # everywhere — but it used to win in silence, and a source that centres a
+            # paragraph or gives it a rule has said something a person will look for.
+            # The words have had this since the beginning (`diff3` raises a conflict on
+            # every clash); the styling, which is settled the same way, said nothing.
+            notes.append(f"{key}: both sides changed how the paragraph is set — the "
+                         f"document's setting is kept")
+    return out
+
+
 def _match_shape(block: dict) -> tuple:
     """What two blocks must share to be the same block.
 
@@ -1553,8 +1585,8 @@ def _merge_block(was: dict, mine: dict, live: dict, conflicts: list, notes: list
             # written, so an equation in it — which no request can make again — keeps
             # the whole block as the document has it.
             if _writable_block(live) and all(writable(r) for r in runs):
-                return _take_shape(dict(out), mine) | {"runs": runs, "rewrite": True,
-                                                       "origin": "merged"}
+                return _merged_shape(dict(out), was, mine, live, a_block, key, notes) \
+                    | {"runs": runs, "rewrite": True, "origin": "merged"}
             notes.append(f"{key}: the source changed a chip or picture no request can write "
                          f"— left alone")
             return out | {"origin": "frozen content differs"}
@@ -1563,17 +1595,7 @@ def _merge_block(was: dict, mine: dict, live: dict, conflicts: list, notes: list
     text, clashes = diff3(block_text(was), block_text(mine), block_text(live))
     for clash in clashes:
         conflicts.append(dict(clash) | {"key": key})
-    if _shape(mine) != _shape(was):
-        if _shape(live) == _shape(was):
-            _take_shape(out, mine)
-        elif a_block:
-            # Both sides set the paragraph differently. The document wins, as it does
-            # everywhere — but it used to win in silence, and a source that centres a
-            # paragraph or gives it a rule has said something a person will look for.
-            # The words have had this since the beginning (`diff3` raises a conflict on
-            # every clash); the styling, which is settled the same way, said nothing.
-            notes.append(f"{key}: both sides changed how the paragraph is set — the "
-                         f"document's setting is kept")
+    _merged_shape(out, was, mine, live, a_block, key, notes)
     if text != block_text(live):
         out["runs"] = _retext(live, text)
         out["origin"] = "merged"
