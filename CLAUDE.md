@@ -2349,6 +2349,65 @@ keys, named ranges), `doc_merge.py` (pure planning), `doc_sync.py` (the commands
   `refuse_back_to_back`). Clean afterwards at five more settings (800 `two_tables` at chain 8
   from 870000, 800 `ends_on_table` at chain 8 from 890000, 700 `between_tables` at chain 6
   from 910000, 800 mixed at chain 4 from 1000000, 400 mixed at chain 10 from 1010000).
+  Then `themed`, the one shape with named styles behind it, so the one where a field going
+  from **inherited** to a paragraph's own can be seen at all - two more, one each side.
+  Docs merges a deleted paragraph into the one behind it and hands over its style, and
+  `carry_unimported` may put the *measurements* back only on a paragraph this run wrote
+  (`_unwritten`) - the narrowing that keeps the settle from taking away styling a reader
+  chose - but the neighbour of a block this batch **deleted** is exactly a block nobody wrote
+  that the write itself changed: the source dropped a justified paragraph, the heading behind
+  it came out justified of its own and stopped following the theme's centring for good, and
+  the settle regenerates the file from it, so the next sync agrees (1130023; `requests` marks
+  that neighbour `paragraph_merged` - the block behind, and the one in front where the delete
+  borrowed *its* mark - and only `theme_undone` could see it). And the campaign's own:
+  `_worn` subtracts a run's marks by the block's named style, so under a theme that bolds
+  HEADING_1 a reader bolding one word of a themed heading says nothing that side can see and
+  the guard read the block as untouched; the source then made it body text, where the same
+  styling spells out differently on either side, and the reader's bold - kept, as it should
+  be - read as the source's restyle vanishing (1140022, 1150196; two named styles are two
+  languages, so the run half is not asked, the named style being part of `_shape` anyway).
+  Then the same shape at **chain 10**, where both findings were the loss oracle's own
+  `styling_restored` - the newest of its questions and the one with the most ways to answer
+  about the wrong word, neither a loss. A block the reader left exactly as the base has it
+  goes when the source drops it and the mark taken off one of its words goes with it (the
+  bargain `block_gone` states in the same words); what made it visible is that the **key**
+  does not go - the reader's own pasted copy stood beside it saying the same words in the
+  theme's bold and took the name, so the question was asked of the block and answered by the
+  copy (1180145; `dropped`, the taken-off half only, since a mark *put on* keeps the block
+  alive, and only where there is a file at all, or "the file no longer names this key" is
+  true of every key there is). And the question is asked by **occurrence**, so where the
+  source rewords one of two alike the mark went with it: the heading said `thicket` twice,
+  the reader un-bolded the first, the source made that one `vellum` - un-bold, exactly as
+  asked - and the plain `thicket` left over answered for it (1180151; capped by what the
+  *file* asks, which says whose doing it was, an occurrence the source **added** being the
+  mirror case that must stay no excuse, seed 40254). 1 of 200 rounds each.
+  Clean at ten more settings (700 `themed` at chain 6, 500 and 300 at chain 8, 400, 200 and
+  250 at chain 10, 700 mixed at chain 6, 500 `chips`, 500 `imported_list`, 300 `equations`
+  and 300 `tabs` at chain 8). Then the shapes nobody had pressed, 300 rounds each at chain 8:
+  `toc`, `opens_on_table`, `titled`, `astral`, `dropdown` and `prose` clean, and one from
+  `between_tables` (1270233). `insertTable` splits the paragraph its index is in, so a table
+  in front of a block leaves an empty paragraph that `_new_table_requests` removes by deleting
+  the mark of the block *before* - and a block that is itself empty is all mark, so its named
+  range goes whole and `recover_swallowed` has to give the key back before the re-plan. It
+  asked for a plain **paragraph**, and Docs' merge keeps the first one's style, so an empty
+  subtitle hands the survivor its named style and the recovery passed it by: the one thing the
+  source asked of that block - to stop being a subtitle - went nowhere, and the settle keyed it
+  from its words to the very name it had, file, base and document agreeing. Anything but a
+  structural element counts now; what makes it the survivor is being empty, unnamed and right
+  in front of the table. 1 of 300 rounds, `between_tables` clean at chain 8 and chain 10 after.
+  The same sweep at **chain 10**, 250 rounds each (`themed`, `between_tables`, `opens_on_table`,
+  `two_tables`, `ends_on_table`, `tabs`, `imported_list`, `chips`, `toc`, `titled`, `equations`
+  clean), left `astral` with the other half of that sentence: a range can be *given* an empty
+  paragraph as easily as it can lose one (1430231). A reader's backspace at the start of an
+  empty paragraph leaves its range inside the survivor naming nothing - the orphan
+  `doc_ir.orphan_requests` deletes - and an empty paragraph is all mark, so the orphan sits on
+  the survivor's paragraph mark, which is exactly where `insertTable` goes in front of another
+  table: the split hands the range to the empty paragraph the insert leaves behind, the re-plan
+  (which reads the document again between the structural batch and the words) sees the block the
+  reader deleted standing there, and the source's words go into it. `structure` heads its batch
+  with the orphan deletes now, for the reason `requests` heads the batch of words with them one
+  step later - they move no index, and the one batch they were not run before is the one that
+  makes a new empty paragraph. 1 of 250 rounds at chain 10, pinned by a hand-built test.
 - Live suite (opt-in, marker `docs`, ~5 min): `python -m pytest -m docs tests/test_docs_live.py`
   pushes a document per test, edits both sides, syncs, checks a second sync writes nothing, and
   deletes the document. Offline: `tests/test_doc_ir.py`, `test_doc_merge.py`, `test_doc_sync.py`.

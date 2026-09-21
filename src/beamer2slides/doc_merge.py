@@ -781,6 +781,15 @@ def recover_swallowed(live: dict, shaped: list[dict]) -> int:
     The survivor is the empty paragraph standing right in front of the table whose
     insert swallowed it: the two are merged into one, and that one keeps neither's
     name. So this runs after `anchor_tables`, which is what gives that table its key.
+
+    It need not read as a *paragraph*: Docs' merge keeps the first one's style, so
+    an empty block wearing a named style hands it to the survivor and that one comes
+    back a subtitle, a heading, a title. Asked for the kind, this recovered nothing
+    there, and the one thing the source was asking of that block — to stop being a
+    subtitle — went nowhere, the settle keying it from its words to the very name it
+    had and file, base and document agreeing on it (offline chain-8 seed 1270233,
+    shape `between_tables`). Anything but a structural element, then: what makes it
+    the survivor is that it is empty, unnamed and right in front of the table.
     """
     have = {b.get("key") for b in live["blocks"] if b.get("key")}
     done = 0
@@ -793,8 +802,7 @@ def recover_swallowed(live: dict, shaped: list[dict]) -> int:
         if not at:                      # not found, or nothing in front of it
             continue
         before = live["blocks"][at - 1]
-        if before.get("key") or before["kind"] != "paragraph" \
-                or _match_text(before).strip():
+        if before.get("key") or _structural(before) or _match_text(before).strip():
             continue
         before["key"] = key
         have.add(key)
@@ -1139,7 +1147,8 @@ def carry_unimported(live: dict, planned: list[dict]) -> int:
         # the centring the delete above it handed over shows only once `named` has
         # written NORMAL_TEXT back — which is in this very batch (seed 912452).
         whole = None
-        if mine.get("paragraph_written") and (named or _unwritten(mine, block)):
+        if (mine.get("paragraph_written") or mine.get("paragraph_merged")) \
+                and (named or _unwritten(mine, block)):
             style, fields = paragraph_style(mine)
             whole = {"style": style, "fields": fields}
         if missing or ranges or named or bullet is not None or whole:
@@ -1170,6 +1179,14 @@ def _unwritten(mine: dict, live: dict) -> list[str]:
     off looks like, and a settle must never undo that. An item's indents are the
     list preset's and belong to neither side (`ITEM_PARAGRAPH`), so they are left
     alone whichever side is one.
+
+    The one block nobody wrote that this run *did* change is the neighbour of one it
+    deleted (`paragraph_merged`, set in `requests`): Docs merges the two and keeps
+    the first one's style, so a heading standing behind a justified paragraph the
+    source dropped comes out justified of its own and stops following the theme,
+    and the file is regenerated from the document afterwards, so nothing ever says
+    it did (offline chain-6 seed 1130023, shape `themed`). Taking that back is the
+    same thing as taking back a field the write itself mangled.
     """
     return [api for key, api in PARAGRAPH_KEYS
             if api in _paragraph_fields(mine) and mine.get(key) != live.get(key)]
@@ -2380,6 +2397,22 @@ def requests(theirs: dict, merged: list[dict]) -> list[dict]:
             # (`_delete_range`): the document ends on an empty paragraph exactly
             # where it was. It has to, since a body may not end on a table.
             left_empty = start
+        # Docs merges a deleted paragraph into its neighbour and keeps the first
+        # one's style, so a block **nobody wrote** can come out of this batch wearing
+        # the style of the one that went: a heading behind a justified paragraph the
+        # source dropped stops following the theme's centring for good, and the file
+        # is regenerated from the document afterwards, so nothing says it ever did
+        # (offline chain-6 seed 1130023, shape `themed`). `carry_unimported` already
+        # puts the named style and the bullet back for every block; the measurements
+        # it may only take back where this run is what changed them, and this is
+        # where. The block behind takes the style; the one in front does only where
+        # the delete borrowed *its* mark (`_delete_range`, a block in front of a
+        # table), so that neighbour is named only then.
+        sides = [1, -1] if start < live["span"][0] else [1]
+        for block in (_neighbour(theirs["blocks"], index, side, going) for side in sides):
+            want = by_key.get((block or {}).get("key"))
+            if want is not None:
+                want["paragraph_merged"] = True
 
     for index, live in enumerate(theirs["blocks"]):
         want = by_key.get(live.get("key"))
@@ -2609,7 +2642,17 @@ def structure(theirs: dict, merged: list[dict],
         # after that paragraph is found again by that very key (`anchor_tables`).
         # Planted back first: `requests` does the same for the batch of words, but
         # this batch goes before it, against a document read again in between.
-        out = doc_ir.replant_requests(theirs) + out
+        #
+        # And an orphan goes first for the same reason it heads `requests`, one step
+        # earlier: a reader's backspace at the start of an empty paragraph leaves that
+        # paragraph's range inside the one that survives, naming nothing, and
+        # `insertTable` at the mark it sits on splits the paragraph and hands it to the
+        # empty one the insert leaves behind. That paragraph is then read back under
+        # the dead name, and the re-plan — which reads the document again between this
+        # batch and the words — sees the very block the reader deleted standing there
+        # for the source to write into, so the deletion is undone and the source's
+        # words go in (offline chain-10 seed 1430231, shape `astral`).
+        out = doc_ir.orphan_requests(theirs) + doc_ir.replant_requests(theirs) + out
     return out, shaped
 
 
@@ -2736,6 +2779,15 @@ def _goes(live: dict, by_key: dict) -> bool:
     if want is None:
         return live.get("key") is not None
     return bool(want.get("moved")) and want.get("span") == live.get("span")
+
+
+def _neighbour(blocks: list[dict], index: int, step: int,
+               going: set[int]) -> dict | None:
+    """The nearest block on one side of `index` that this batch is not deleting."""
+    at = index + step
+    while 0 <= at < len(blocks) and at in going:
+        at += step
+    return blocks[at] if 0 <= at < len(blocks) else None
 
 
 def _delete_range(blocks: list[dict], index: int, going: set[int],
