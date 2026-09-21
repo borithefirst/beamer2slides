@@ -18,7 +18,8 @@ LABEL_SURE = 1.2      # a label pairing this alike (same title, most of the word
 LABEL_MOVED = 1.0     # a slide elsewhere this alike may be the frame the label used to name
                       # (of what the pair can score at all: `_moved_bar`)
 LABEL_MARGIN = 0.5    # ... but only if it beats the label's own pairing by this much
-LABEL_EXCHANGE = 0.1  # ... or by this much, if the two readings point at each other (an exchange)
+LABEL_EXCHANGE = 0.02  # ... or by more than a tie (`TWIN_TIE`), if the two readings point at each
+                       # other (an exchange): there the look back carries the doubt, not the number
 CROSS_SURE = 1.15     # a slide this alike, left over by the order-keeping pass, is that frame moved
 CROSS_MARGIN = 0.4    # ... unless another leftover comes this close to explaining it too
 GAP_SURE = 0.3        # the only leftover between two paired frames needs this much of the same words
@@ -249,6 +250,21 @@ def label_moves(base: list[dict], ours: list[dict]) -> list[dict]:
                 top = (score, k)
         return top
 
+    def among_best(scored, k: int) -> bool:
+        """Whether `k` is one of the best readings there are, ties counted.
+
+        `best` keeps the first of several equal scores, which is the lower index and nothing else.
+        That is harmless where a number is wanted and wrong where the *identity* is: two slides
+        that say word for word the same thing are two readings of one score (`TWIN_TIE`, the same
+        tie `align_slides` names as a coin toss), and a look back that refuses because the arbitrary
+        one of them came first is refusing on the strength of a slide order."""
+        top, mine = 0.0, None
+        for score, x in scored:
+            top = max(top, score)
+            if x == k:
+                mine = score
+        return mine is not None and mine > 0.0 and top - mine <= TWIN_TIE
+
     # A slide carrying this frame's own label is another overlay step of this very frame, not
     # another frame: `--overlays all` keeps one slide per step, they say word for word what the
     # step before said plus a bullet, and a step dropped or added leaves the one beside it
@@ -278,7 +294,12 @@ def label_moves(base: list[dict], ours: list[dict]) -> list[dict]:
         label and a frame that changed places, and nothing else known to produce it. So inside such
         an exchange the bar is `LABEL_EXCHANGE` rather than `LABEL_MARGIN`, which no swap between
         near-twins can ever meet. Innocent twins do *not* clear even that: they tie (the twin
-        explains the slide exactly as well as the label's own pairing does), and a tie is 0.
+        explains the slide exactly as well as the label's own pairing does), and a tie is 0 - which
+        is the whole of what that bar has to say, so it is *a tie* (`TWIN_TIE`) and not a number of
+        its own. A swap between two frames a revision has reworded is a hair either way: the
+        campaign's silent misidentifications at 0.1 were pairs where the crossing read 1.447 and
+        the label's own reading 1.419, and what tells that from an innocent pair of twins is not
+        0.03 of evidence but the look back below.
 
         The other frame carries no label of its own here. `[label=intro]` pasted onto the next
         frame is how a label moves in practice, and the frame it left is then unlabelled, so
@@ -299,11 +320,11 @@ def label_moves(base: list[dict], ours: list[dict]) -> list[dict]:
         # twin standing beside it, and then the two readings are not about each other at all -
         # they are two frames that both look like the deck's other half
         # (`test_a_frame_reworded_on_a_deck_of_twins_is_no_exchange`).
-        _, back_i = best((_evidence(base[s], ours[slide_is]), s) for s in free_base
-                         if apart(ours[slide_is], base[s]))
-        _, back_j = best((_evidence(base[frame_is], ours[m]), m) for m in free_ours
-                         if apart(base[frame_is], ours[m]))
-        return back_i == i and back_j == j
+        back_i = among_best(((_evidence(base[s], ours[slide_is]), s) for s in free_base
+                             if apart(ours[slide_is], base[s])), i)
+        back_j = among_best(((_evidence(base[frame_is], ours[m]), m) for m in free_ours
+                             if apart(base[frame_is], ours[m])), j)
+        return back_i and back_j
 
     look = {j: rivals(pairs[j], j) for j in doubt}
     found: dict[str, dict] = {}
@@ -351,8 +372,8 @@ def label_moves(base: list[dict], ours: list[dict]) -> list[dict]:
     return list(found.values())
 
 
-def crossed_twins(base: list[dict], ours: list[dict], pairs: dict[int, int]) -> list[int]:
-    """Labelled frames whose labels cross over slides the words cannot tell apart.
+def crossed_twins(base: list[dict], ours: list[dict], pairs: dict[int, int]) -> dict[int, str]:
+    """Pairings that cross over slides the words cannot tell apart.
 
     Two slides that say word for word the same thing - a deck `adopt` wrote is full of them - leave
     `label_moves` nothing to work with: the reading where the two labels swapped and the reading
@@ -366,17 +387,33 @@ def crossed_twins(base: list[dict], ours: list[dict], pairs: dict[int, int]) -> 
     person is told which two slides it was (`fuzz_labels --shape adopt`, seeds 7100725 and
     7100896: a label swapped between two slides whose base entries are word for word identical,
     where every reading ties and the sync wrote each frame onto the other's slide in silence).
-    """
-    out: list[int] = []
+
+    `crossed` is two labels that changed places; `traded` is a label that crossed a frame carrying
+    none, which is the commoner half of it and the one nothing named - `[label=q3]` pasted onto the
+    twin below leaves the frame it came from unlabelled, so the *alignment* pairs that one and
+    `weak["twins"]` cannot see the tie either, the slide it would have wanted having been taken by
+    the label (adopt-shaped seed 1400358 at chain 4: a label moved onto the twin of its own slide,
+    each frame written onto the other's slide in silence). Which is why this is asked of the whole
+    pairing and not of the labels alone - and why it is asked only where both sides say enough to
+    be an explanation at all (`_moved_bar`), or two slides that say nothing would tie as surely as
+    two that say the same thing."""
+    out: dict[int, str] = {}
     order = sorted(pairs)
     for x, j1 in enumerate(order):
         for j2 in order[x + 1:]:
             i1, i2 = pairs[j1], pairs[j2]
-            if i1 < i2:                 # the labels keep the order: nothing to wonder about
+            if i1 < i2:                 # the pairings keep the order: nothing to wonder about
+                continue
+            if not (ours[j1].get("label") or ours[j2].get("label")):
+                continue                # two unlabelled frames are the alignment's own business
+            if (_evidence(base[i1], ours[j1]) < _moved_bar(base[i1], ours[j1])
+                    or _evidence(base[i2], ours[j2]) < _moved_bar(base[i2], ours[j2])):
                 continue
             if (abs(_evidence(base[i2], ours[j1]) - _evidence(base[i1], ours[j1])) <= TWIN_TIE
                     and abs(_evidence(base[i1], ours[j2]) - _evidence(base[i2], ours[j2])) <= TWIN_TIE):
-                out += [j1, j2]     # a tie, not a rival: `label_moves` has already had its say
+                # a tie, not a rival: `label_moves` has already had its say
+                how = "crossed" if ours[j1].get("label") and ours[j2].get("label") else "traded"
+                out[j1] = out[j2] = how
     return out
 
 
@@ -391,14 +428,13 @@ def align_slides(base: list[dict], ours: list[dict], moves: list[dict] | None = 
     (`cross_pairs`) or "place" (`gap_pairs`), the two leftover passes, which are inferences the
     alignment itself could not draw, "twins" - an unlabelled frame the alignment could have
     put on another slide for the same score - and "crossed", two labels that changed places over
-    slides the words cannot tell apart (`crossed_twins`). A report that says so lets the author
-    put a label there instead, or put one back where it was."""
+    slides the words cannot tell apart, or "traded", one label that crossed a frame carrying none
+    (`crossed_twins`). A report that says so lets the author put a label there instead, or put one
+    back where it was."""
     if moves is None:
         moves = label_moves(base, ours)
     dropped = {m["ours"] for m in moves if m["verdict"] == "moved"}
     pairs = {j: i for j, i in label_pairs(base, ours).items() if j not in dropped}
-    if weak is not None:
-        weak.update(dict.fromkeys(crossed_twins(base, ours, pairs), "crossed"))
     freed = {m["base"] for m in moves if m["verdict"] == "moved"}
     bs = [i for i in range(len(base)) if i not in pairs.values()]
     os_ = [j for j in range(len(ours)) if j not in pairs]
@@ -490,6 +526,11 @@ def align_slides(base: list[dict], ours: list[dict], moves: list[dict] | None = 
         pairs.update(found)
         if weak is not None:
             weak.update(dict.fromkeys(found, how))
+    # Asked of the finished pairing, not of the labels alone: the frame a label crossed over need
+    # carry no label itself, and then it is the *alignment* that pairs it (`crossed_twins`).
+    if weak is not None:
+        for j, how in crossed_twins(base, ours, pairs).items():
+            weak.setdefault(j, how)
     return pairs
 
 

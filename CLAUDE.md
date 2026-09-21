@@ -705,6 +705,29 @@ converted talk writes the same 26 frames either way. The price is the same coin 
 and visible: one campaign's writes went 16 -> **18** and another's silent rounds 3 -> **4**, a bar a
 pair can actually reach being reachable by a wrong reading too
 (`test_a_margin_is_a_share_of_what_the_pair_can_say_too`).
+**And inside an exchange the bar is a tie, not a number of its own** (`LABEL_EXCHANGE` 0.1 ->
+**0.02** = `TWIN_TIE`): twins nobody touched *tie* and a frame merely reworded loses to its own
+pairing, so a tie is the whole of what that number has to say, and the campaign's silent
+misidentifications at 0.1 were pairs where the crossing read 1.447 against the label's own 1.419 - a
+swap between two frames one revision has reworded is a hair either way, and what tells it from
+innocent twins is not 0.03 of evidence but the look back (`identity.exchanged`,
+`test_the_exchange_bar_is_a_tie_and_not_a_number_of_its_own`). The look back counts ties itself now
+(`among_best`): `best` keeps the first of several equal scores, which is the lower index and nothing
+else, so where the source leaves a copy of a frame beside the one it labelled the slide they both
+explain read them at one score and the arbitrary first of the two refused the exchange - a label
+followed onto the wrong slide on the strength of a slide order
+(`test_a_tie_in_the_look_back_does_not_refuse_an_exchange`). And the crossing is asked of the
+**finished pairing** rather than of the labels alone, because the commoner half of it is `[label=q3]`
+pasted onto the near-twin, which carries no label to see the crossing from: `crossed_twins` runs
+after the content and place passes, wants one of the two frames labelled and both own pairings clear
+of `_moved_bar`, and says `crossed` where both carry a label and **`traded`** where one does - the
+frame that crossed being paired by the alignment like any other. Nothing named those before: the two
+readings tie to the last decimal, and `twins` never fires because the label has already taken the
+alternative slide away from the walk. Measured over the same four adopt-shaped campaigns (1,000
+rounds four deep, label-chance 1 and 0.5, two seeds each, 61,344 frames): written onto the wrong
+slide 154 -> **139** (ties in the look back) -> **111** (the bar; per seed 47->36, 18->15, 52->42,
+22->18), misidentified 391 -> **336**, silent wrong rounds 11 -> **6**; a converted talk writes
+26 -> 25 with its 7 warnings unchanged, and no sound round on either shape gains a verdict.
 
 Slide order is merged, not all-or-nothing (`merge.plan_order`): the source's order is the ground and
 a slide the deck itself picked up (out of its base order there, `_out_of_place`) goes back beside

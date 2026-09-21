@@ -197,6 +197,35 @@ def test_the_same_two_slides_with_their_labels_in_order_say_nothing():
     assert weak == {}
 
 
+def test_a_label_pasted_onto_a_twin_that_carries_none_is_named_too():
+    """The commoner half of a crossing, and the half nothing named (`crossed_twins`' `traded`).
+
+    Two slides say word for word the same thing and only one of them has a label; the source comes
+    back with that label on the *other* frame. Every rule above is right to keep quiet - the two
+    readings tie to the last decimal - and the two that would have spoken cannot: `crossed` wanted
+    a second label to see the crossing from, and `twins` (an alignment that could have gone either
+    way) never fires, because the label has already taken the alternative slide away from the walk.
+    So each frame was written onto the other's slide in silence (adopt-shaped seed 1400358 at chain
+    4). It is asked of the finished pairing instead, where the frame carrying no label is paired by
+    the alignment like any other."""
+    base = [info("", TWIN_SLIDE, "one"), info("", TWIN_SLIDE)]
+    ours = [info("", TWIN_SLIDE), info("", TWIN_SLIDE, "one")]
+    assert identity.label_moves(base, ours) == [], "every reading ties: there is nothing to decide"
+    weak: dict[int, str] = {}
+    assert identity.align_slides(base, ours, weak=weak) == {1: 0, 0: 1}, "the label is followed"
+    assert weak == {0: "traded", 1: "traded"}
+
+
+def test_the_same_deck_with_the_label_on_the_frame_it_belongs_to_says_nothing():
+    """The counter-case, as `crossed` has one: a deck that repeats itself would otherwise carry a
+    warning about every twin it has."""
+    base = [info("", TWIN_SLIDE, "one"), info("", TWIN_SLIDE)]
+    ours = [info("", TWIN_SLIDE, "one"), info("", TWIN_SLIDE)]
+    weak: dict[int, str] = {}
+    assert identity.align_slides(base, ours, weak=weak) == {0: 0, 1: 1}
+    assert weak == {}
+
+
 def test_the_crossing_is_named_in_the_report():
     """It is a warning, not a conflict: the labels were followed and nothing is at risk this
     time - but which slide each frame writes to next time is the author's to settle."""
@@ -207,6 +236,19 @@ def test_the_crossing_is_named_in_the_report():
     theirs = {"revisionId": "r", "slides": [live(s) for s in base["slides"]]}
     said = [w for w in merge.plan_merge(base, ours, theirs)["report"]["warnings"] if "changed places" in w]
     assert len(said) == 2 and "`two`" in said[0] and "docs/labels.md" in said[0]
+
+
+def test_the_trade_is_named_in_the_report_and_asks_for_the_missing_label():
+    """Same warning, one sentence further: the frame that crossed carries no label of its own, so
+    what settles it next time is giving it one."""
+    base = many_slides(["one", "two"])
+    ours = {"slides": [ours_of(s) for s in base["slides"]],
+            "pairs": {0: 1, 1: 0}, "weak_pairs": {0: "traded", 1: "traded"}}
+    ours["slides"][0]["label"], ours["slides"][1]["label"] = None, "one"
+    theirs = {"revisionId": "r", "slides": [live(s) for s in base["slides"]]}
+    said = [w for w in merge.plan_merge(base, ours, theirs)["report"]["warnings"]
+            if "changed places" in w]
+    assert len(said) == 2 and all("Give the other frame a label too" in w for w in said)
 
 
 REVENUE3 = "revenue rose in the third quarter and the table below lists every region we sell in"
@@ -243,8 +285,7 @@ def test_two_twins_reworded_with_their_labels_where_they_belong_say_nothing():
     it is. An exchange asks for the rivals to beat the label's own pairing; here they lose to it by
     the same 0.375, because each frame still looks most like the slide it came from. A deck of
     twins where nothing moved has *negative* room, not a little - only a crossing makes it
-    positive, and that is why a bar of 0.1 costs nothing (no sound round in 1,392 chained ones
-    says a word)."""
+    positive, which is why the bar may be as low as a tie (`TWIN_TIE`) and cost nothing."""
     base = [info("Results", REVENUE3, "q3"), info("Results", REVENUE4, "q4")]
     ours = [info("Results", REVENUE3.replace("rose", "climbed"), "q3"),
             info("Results", REVENUE4.replace("fell", "dropped"), "q4")]
@@ -255,7 +296,8 @@ def test_two_twins_reworded_with_their_labels_where_they_belong_say_nothing():
 
 
 def test_a_frame_reworded_on_a_deck_of_twins_is_no_exchange():
-    """What the look back is for, and the reason `LABEL_EXCHANGE` may be as low as it is. Two
+    """What the look back is for, and the reason `LABEL_EXCHANGE` may be a tie rather than a
+    number of its own - the doubt is carried here, not by the arithmetic. Two
     parallel frames, and the source brings the labelled one into line with the other's phrasing -
     a real edit somebody makes on purpose. Every number an exchange asks for is there: both
     readings clear `LABEL_MOVED` (1.27 and 1.32) and both beat the label's own pairing (1.09) by
@@ -275,6 +317,51 @@ def test_a_frame_reworded_on_a_deck_of_twins_is_no_exchange():
     assert min(here, there) - own >= identity.LABEL_EXCHANGE, "every number says exchange"
     assert identity.label_moves(base, ours) == [], "the readings point elsewhere, so nothing is said"
     assert identity.align_slides(base, ours) == {0: 0, 1: 1}
+
+
+def test_the_exchange_bar_is_a_tie_and_not_a_number_of_its_own():
+    """A real swap whose whole margin is a hair, which the look back settles and no number could.
+
+    Two long twins one word apart, each reworded by one word, and `[label=q3]` moved from the first
+    to the second - the commonest way a label moves. What the arithmetic has to say about it: the
+    crossing reads 1.4722 on both sides and the label's own pairing 1.4444, a gap of 0.0278. That is
+    above a tie and far under the 0.1 this bar used to be, so at 0.1 the frames were written onto
+    each other's slides in silence (adopt-shaped seed 1600255, where the two readings were 1.447 and
+    1.419). Nothing distinguishes it from an innocent pair of twins by *size* - twins tie exactly,
+    so the bar has only to be more than a tie - and what does distinguish it is the look back:
+    the two readings are about each other here, and about the deck's other half in the test above."""
+    a = ("the quarterly review opens with the numbers our finance team signed off on monday and "
+         "walks through the regions we sell in the partners we work with and the launches we "
+         "planned for the third quarter")
+    b = a.replace("third quarter", "fourth quarter")
+    base = [info("Results", a, "q3"), info("Results", b)]
+    ours = [info("Results", a.replace("monday", "friday")),
+            info("Results", b.replace("walks", "runs"), "q3")]
+    own = identity._evidence(base[0], ours[1])
+    here, there = identity._evidence(base[0], ours[0]), identity._evidence(base[1], ours[1])
+    gap = min(here, there) - own
+    assert identity.TWIN_TIE < gap < 0.1, "a hair: above a tie, under the bar this used to be"
+    assert [m["verdict"] for m in identity.label_moves(base, ours)] == ["moved"]
+    assert identity.label_pairs(base, ours) == {1: 0}, "the label says the second frame is the first"
+    assert identity.align_slides(base, ours) == {0: 0, 1: 1}, "the content says it is not"
+
+
+def test_a_tie_in_the_look_back_does_not_refuse_an_exchange():
+    """The look back asks which slide explains a frame best, and `best` answers with the lower index.
+
+    Here the source has moved `[label=q3]` onto a frame and kept a copy of the frame it names beside
+    it - two frames that say word for word the same thing, so the slide they both explain reads them
+    at exactly one score. Which of the two `best` returns is a fact about their order on the page and
+    nothing else, and a look back that refuses because the other one came first refuses an exchange
+    on the strength of a slide order (adopt-shaped seed 1400991 at chain 3, where the label was then
+    followed onto the wrong slide in silence). `among_best` counts the tie (`TWIN_TIE`) instead."""
+    base = [info("Results", REVENUE3, "q3"), info("Results", REVENUE4)]
+    twin = REVENUE4.replace("fell", "dropped")
+    ours = [info("Results", REVENUE3.replace("rose", "climbed")),
+            info("Results", twin), info("Results", twin, "q3")]
+    assert identity._evidence(base[1], ours[1]) == identity._evidence(base[1], ours[2]), "a tie"
+    said = [(m["verdict"], m["slide_is"], m["frame_is"]) for m in identity.label_moves(base, ours)]
+    assert said == [("moved", 0, 1)], "the two readings point at each other; the tie is not a refusal"
 
 
 def test_one_twin_edited_is_not_a_swap():

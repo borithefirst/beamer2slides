@@ -505,19 +505,30 @@ be a question on every sync, since the step beside the pairing explains it exact
 (`test_overlay_steps_of_one_frame_are_never_a_move`).
 
 **Two readings that point at each other are an exchange**, and inside one the bar is
-`LABEL_EXCHANGE` (0.1) rather than `LABEL_MARGIN` (`identity.exchanged`). Exactness reaches a label
+`LABEL_EXCHANGE` rather than `LABEL_MARGIN` (`identity.exchanged`). Exactness reaches a label
 swapped between two *labelled* frames, but the commonest way a label really moves is a person
 cutting `[label=q3]` from one frame and pasting it onto the near-twin after it: the frame it left
 is then unlabelled, so nothing pairs it and there is no second pairing to notice the crossing from.
 Reword both frames a little in the same version and nothing is word for word either. What is left
 is that the frame explaining this label's slide belongs on the slide explaining this frame, **each
 looking there before anywhere else** - two frames changing places, and nothing else known to
-produce it. Innocent twins do not clear even a bar of 0.1: they *tie* (the twin explains the slide
-exactly as well as the label's own pairing does), and where the source merely reworded a frame they
-lose to it outright. The look back is what carries the rule, not the number: a frame reworded into
-its twin's phrasing clears every numeric bar, and is refused because its two rivals are about each
-other rather than about it (`test_a_frame_reworded_on_a_deck_of_twins_is_no_exchange` - which
-matters more than yield, since `moved` re-pairs, and a wrong `moved` is edits on the wrong slide).
+produce it. Innocent twins do not clear even that: they *tie* (the twin explains the slide exactly
+as well as the label's own pairing does), and where the source merely reworded a frame they lose to
+it outright - so a tie is the whole of what the number has to say, and the bar **is** a tie
+(`TWIN_TIE`, 0.02) rather than a figure of its own. At 0.1 it was a figure of its own, and the
+campaign's silent misidentifications were pairs where the crossing read 1.447 and the label's own
+pairing 1.419: a swap between two frames one revision has reworded is a hair either way, and what
+tells it from an innocent pair of twins is not 0.03 of evidence
+(`test_the_exchange_bar_is_a_tie_and_not_a_number_of_its_own`). The look back is what carries the
+rule, not the number: a frame reworded into its twin's phrasing clears every numeric bar, and is
+refused because its two rivals are about each other rather than about it
+(`test_a_frame_reworded_on_a_deck_of_twins_is_no_exchange` - which matters more than yield, since
+`moved` re-pairs, and a wrong `moved` is edits on the wrong slide). And the look back counts ties
+itself (`among_best`): `best` keeps the first of several equal scores, which is the lower index and
+nothing else, so where the source leaves a copy of a frame standing beside the one it labelled, the
+slide they both explain reads them at one score and the arbitrary first of the two made the look
+back refuse - an exchange declined on the strength of a slide order, and the label then followed
+onto the wrong slide in silence (`test_a_tie_in_the_look_back_does_not_refuse_an_exchange`).
 
 **And where nothing can be decided, something can still be said.** Two slides that say word for word
 the same thing - a deck `adopt` wrote is full of them - leave every rule above nothing to work with:
@@ -532,6 +543,21 @@ gives an unlabelled frame standing between look-alikes, one dimension over. On t
 campaign it takes the rounds that got a frame onto the wrong slide from 42 told and 21 silent to
 **61 told and 2 silent**; the price is 34 warnings in the 200 sound rounds where the source really
 did move a frame, each about two slides the person cannot tell apart either.
+
+**And its commoner half, which nothing was asking.** `crossed` wants a second label to see the
+crossing from, and the way a label really moves is by being pasted onto the near-twin beside it -
+which carries no label of its own. Every rule above is right to keep quiet there (the two readings
+tie to the last decimal) and the two that would have spoken cannot: `crossed` has only one label to
+look at, and `twins` - an alignment that could have gone either way - never fires, because the
+label has already taken the alternative slide away from the walk. So each frame was written onto
+the other's slide in silence. The question is asked of the **finished pairing** instead, where the
+frame carrying no label is paired by the alignment like any other: `crossed_twins` runs after the
+content and place passes now, wants one of the two frames labelled and both own pairings clear of
+`_moved_bar`, and answers `crossed` where both carry a label and `traded` where one does. The
+warning is the same sentence one clause longer - nothing they say can tell whether you moved the
+frames or moved a label, the label was followed, and give the other frame a label too
+(`test_a_label_pasted_onto_a_twin_that_carries_none_is_named_too`, with the counter-case every deck
+that repeats itself needs, and `test_the_trade_is_named_in_the_report_and_asks_for_the_missing_label`).
 
 The last two silences were the campaign's own, and correcting them is what makes the column mean
 anything: `src_add_slide` handed a new frame the label of a slide deleted in the same step, and
@@ -627,6 +653,14 @@ an unlabelled twin needs both frames reworded before the margin loses sight of i
 second revision. On a converted talk, identical in every figure again. The 1392 sound rounds of the
 chained campaign are identical too, down to the same three `unsure` verdicts and no frame on the
 wrong slide: a deck where nothing moved has *negative* room for an exchange, not a little.
+
+**Both were measured again at the bar's new size**, over the four adopt-shaped campaigns the
+scaling was measured on (1,000 rounds four deep, label-chance 1 and 0.5, two seeds each, 61,344
+frames): frames written onto the wrong slide 154 → **139** once the look back counts ties, and
+139 → **111** once the bar is one (per seed 47 → 36, 18 → 15, 52 → 42, 22 → 18). Over the two
+changes together, misidentified frames 391 → **336** and the rounds that get a frame onto the wrong
+slide and say nothing 11 → **6**; a converted talk writes 26 → **25** with its 7 warnings unchanged,
+and no sound round on either shape gains a `moved` or an `unsure`.
 
 What a sound round hears is the price, and it is one question: across 1524 adopt-shaped and 1524
 converted sound rounds there is a single `unsure` (seed 5179, a source that retitles one frame while
