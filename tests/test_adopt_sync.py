@@ -562,6 +562,36 @@ def test_the_base_names_the_deck_objects_the_source_does_not_draw(adopted):
     assert sorted(o for oids in left.values() for o in oids) == ["gC", "gD"]
 
 
+def test_the_base_names_the_persons_groups_and_the_boxes_that_draw_nothing(tmp_path):
+    """Every object standing on the slide this conversion is not tied to - not only the ones the
+    read made an element of. The two commonest are exactly the ones it did not: a person's own
+    **group**, which is no drawing at all (`deck_ir(foreign=True)` reads its children and never
+    folds it, so nothing in the IR carries the group's own id), and a shape that draws nothing - an
+    empty placeholder, fill and outline switched off, a fill at alpha 0 - which `deck_ir.foreign_shape` reads as no
+    element either. Neither could ever be named by an element's `objects`, so `merge.user_objects`
+    called both an object the person had added: 2,866 groups and 3,845 blank shapes over the
+    corpus, on 214 of its 912 slides, every one of them a slide nobody had touched since adopt read
+    it, and the sentence that is true there ("the deck's own") never reached."""
+    group = {"objectId": "gG", "title": None, "description": None,
+             "size": {"width": pt(200), "height": pt(30)},
+             "transform": {"scaleX": 1, "scaleY": 1, "translateX": 0, "translateY": 0, "unit": "EMU"},
+             "elementGroup": {"children": [live_shape("gA", (48, 64, 206, 89), "Why it matters")]}}
+    tgt = target([[deck_element("gA", (30, 40, 130, 56), "Why it matters")]])
+    pres = presentation([[group, live_shape("gBLANK", (300, 200, 400, 240))]])
+    conv = conversion(tgt, [[conv_element("p0e0", (30, 40, 130, 56), "Why it matters")]])
+    pdf = tmp_path / "main.pdf"
+    pdf.write_bytes(b"%PDF-1.4\n")
+    base = adopt_sync.build_base(conv, tmp_path, tgt, pres, pdf)
+    entry = base["slides"][0]
+    assert entry["elements"][0]["main"] == "gA", "the box inside the group still pairs"
+    assert entry["left_alone"] == ["gG", "gBLANK"], "the group around it and the box that draws nothing"
+    read = snapshot.read_presentation(pres)["slides"][0]
+    assert [o["objectId"] for o in merge.user_objects(entry, read)] == ["gG", "gBLANK"]
+    assert merge.slide_touched(entry, read) == [], "nobody has touched this slide since adopt read it"
+    read["objects"]["theirs"] = {**read["objects"]["gBLANK"], "parent_group": None}
+    assert merge.slide_touched(entry, read) == ["objects added"], "what they really add still says so"
+
+
 def test_the_base_records_the_decks_own_page_and_scale(adopted):
     base = adopted["base"]
     assert base["deck_page_size"] == [720.0, 405.0]

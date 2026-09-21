@@ -504,8 +504,15 @@ def build_base(conv_deck: dict, conv_out: Path, target: dict, pres: dict, pdf: P
                                          for i in range(len(conv_slide["elements"]))],
                              "groups": []})
         whys.append(why)
-        taken = set(pairs.values())
-        leftovers.append([e["object"] for k, e in enumerate(on_slide) if k not in taken])
+        taken = {on_slide[k]["object"] for k in pairs.values()}
+        # Every object standing on the slide that this conversion is not tied to, and not only the
+        # ones the read made an element of: a person's own **group** is no drawing at all (its
+        # children are the elements, `deck_ir(foreign=True)` never folds it) and a shape that draws
+        # nothing - an empty placeholder, fill and outline switched off, a fill at alpha 0 - is read
+        # as no element either (`deck_ir.foreign_shape`), so neither could ever be named below and both read as
+        # objects the person had just added (2,866 groups and 3,845 blank shapes over the corpus,
+        # on 214 of 912 slides). They are on the slide and nobody added them.
+        leftovers.append([oid for oid in (live or {}).get("objects", ()) if oid not in taken])
     page_w = conv_deck["slides"][0]["size"][0] if conv_deck["slides"] else SLIDE_W
     state = {"presentationId": read["presentationId"],
              "scale": (read["page_size"][0] / page_w) if page_w else None, "slides": state_slides}
@@ -798,7 +805,8 @@ def report_lines(base: dict) -> list[str]:
                      f"keeps the deck's version of it and says so in the report")
     left = sum(len(x["objects"]) for x in info.get("left_alone") or [])
     if left:
-        lines.append(f"  {left} object(s) of the deck the source does not draw: sync never touches them")
+        lines.append(f"  {left} object(s) of the deck no element of the source is tied to (the boxes it "
+                     f"draws nothing for, and the deck's own groups around them): sync never touches them")
     return lines
 
 

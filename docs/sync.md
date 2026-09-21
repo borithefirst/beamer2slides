@@ -1624,6 +1624,21 @@ deck's own", with the door it names) was never reached at all. The base records 
 a base that forgot them would start calling them added at generation 2) and `slide_touched` leaves
 them out. What a person really added is still an edit and still says so.
 
+What the base records there is **every** object standing on the slide that the pairing did not tie
+itself to — not only the ones the read made an element of, which is how it was asked at first and
+which left out the two commonest cases. A person's own **group** is no drawing at all: `deck_ir(foreign=True)` reads its children as
+elements and never folds it, so nothing in the IR carries the group's own id. And a shape that draws
+nothing — an empty placeholder, fill and outline switched off, a fill at alpha 0 — is read as no
+element either (`deck_ir.foreign_shape` returns None); it is still an object on the slide. Neither
+could ever be named by an element's `objects`, so both read as objects the person had just added:
+**2,866 groups and 3,845 blank shapes over the corpus, on 214 of its 912 slides** — gdg24 32 slides,
+hebrew-lesson 18, firebase-jam's groups inside groups, sc-memphis' 3,601 shapes that render nothing —
+and every one of those slides is one nobody has touched since adopt read the deck. The count in
+`adopt`'s own summary says so in those words. The campaign is blind to this by construction —
+`fuzz_world.build_adopt_base` gives every element one object and no groups at all, which is the one
+shape of adopted deck it does not draw — so what stands behind it is the corpus measurement and
+`test_the_base_names_the_persons_groups_and_the_boxes_that_draw_nothing`.
+
 ### A key belongs to the source
 
 The refusals still came back at chain 8, and over a unit nothing was wrong with: three syncs of one

@@ -938,7 +938,16 @@ slide no frame accounts for was kept and the person told they had added objects 
 touched - and "the deck's own", the sentence that names the door, was never reached. The base records
 those objects per slide (`adopt_sync.build_base`, carried by `sync.new_base`: they are never adopted,
 so a base that forgot them would call them added at generation 2) and `slide_touched` leaves them
-out; what a person really added is still an edit.
+out; what a person really added is still an edit. **Every** object standing on the slide, besides,
+and not only the ones the read made an element of - the two commonest were exactly the ones it did
+not. A person's own **group** is no drawing at all (`deck_ir(foreign=True)` reads its children and
+never folds it, so nothing in the IR carries the group's own id) and a shape that draws nothing - an
+empty placeholder, fill and outline switched off, a fill at alpha 0 - is read as no element either
+(`deck_ir.foreign_shape` returns None), so neither could ever be named by an element's `objects` and
+both read as objects the person had just added: 2,866 groups and 3,845 blank shapes over the corpus,
+on **214 of its 912 slides**, every one of them a slide nobody had touched since adopt read it.
+`build_base` records what the pairing did not tie itself to, which is the question as it should
+always have been asked.
 Then `Sync.check_plan` runs between planning and any write and **refuses** four things
 (`adopt_sync.problems` / `refusal_message`, every message asserted verbatim in `tests/test_adopt_sync.py`):
 a unit whose base members include an **unpaired** element (writing it puts a second object beside the
