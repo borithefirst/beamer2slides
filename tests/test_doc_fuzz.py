@@ -3148,6 +3148,32 @@ def test_the_oracle_lets_two_base_words_a_join_welded_together_go():
         "both halves still stand in the tab, so nothing made this token disappear"
 
 
+def test_the_oracle_lets_the_halves_of_a_word_a_reader_split_go():
+    r"""`_welded`'s mirror, and the other thing pressing Enter does: a reader who
+    presses it in the middle of a word cleaves one token into two, and *neither* half
+    is a token the base has, so `theirs - was` reads both as words they typed. They
+    hold nothing of theirs — the letters are the base's — and the source may rewrite
+    them. Chain-6 seed 8400013, shape `two_tables`: the base cell said "signal 4", the
+    reader split the word to make "si" and "gnal 4", `collide` rewrote the cell, and
+    the merge said "si" and "gnal-0c791" with the break and the new wording both in it.
+
+    Exact, and on the same two conditions as `_welded`: the base token has to be gone
+    — that is what made this half disappear — and the other half has to stand in the
+    *reader's own* text, since nothing else can cut a word in two."""
+    was = oracle.words("signal 4")
+    theirs = oracle.words("si gnal 4")
+    after = oracle.words("si gnal-0c791")
+    assert oracle.joined_differently("gnal", after, was, None, theirs)
+    assert not oracle.joined_differently("gnal", after, was, None, oracle.words("gnal 4")), \
+        "no other half in the reader's text: nothing says the word was ever cut"
+    assert not oracle.joined_differently(
+        "gnal", oracle.words("si gnal-0c791 signal"), was, None, theirs), \
+        "the base's word still stands, so nothing made this half disappear"
+    assert not oracle.joined_differently("sig", after, was, None,
+                                         oracle.words("si gnal 4 sig")), \
+        "a word of their own that happens to begin one of the base's is theirs"
+
+
 # ---------------------------------------------------------------- the third judge
 
 def _grid_block(key: str, rows: list[list[str]]) -> dict:

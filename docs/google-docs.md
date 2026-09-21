@@ -2928,6 +2928,19 @@ so the block becomes what the plan says it is.
 Clean afterwards under `--strict` at 400 rounds chain 10 on the seeds that found the first two,
 and at fresh seeds: 400 chain 8 `imported_list`, 300 chain 10 `themed`.
 
+One more came out of those fresh runs, and it is the oracle's: **the halves of a word a reader
+split in two** (`_cleaved`, chain-6 seed 8400013, shape `two_tables`). `_welded` knows that a
+reader joining two paragraphs makes one `\S+` token out of two — and pressing Enter does the
+other thing as well. The base cell said "signal 4"; the reader pressed Enter inside the word,
+leaving "si" and "gnal 4"; `collide` rewrote that cell to "signal-0c791"; the merge said "si" and
+"gnal-0c791", with the reader's break and the source's wording both in it. Neither half is a
+token the base has, so `theirs - was` read both as words they typed and the source's rewriting of
+one looked like a loss. They hold nothing of theirs: the letters are the base's. Exact, on
+`_welded`'s own two conditions — the base token gone from the tab, that being what made this half
+disappear, and the other half standing in the reader's *own* text, since nothing else can cut a
+word in two. `_cell_findings` passes the reader's cell words for it, as it already passes the
+tab's base words for `_welded`.
+
 ## Remaining risks
 
 1. **Pictures** — retired, see "Pictures, and the chips a request can make" above. What

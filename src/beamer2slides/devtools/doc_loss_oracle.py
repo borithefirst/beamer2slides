@@ -194,6 +194,11 @@ def joined_differently(token: str, after: Counter, was: Counter,
     said `\xadwillow` — both edits arrived). `_pared_down` asks it exactly: this token
     is a token of the base with one of its words taken out, nothing else.
 
+    And a reader may *cleave* a base token in two, by pressing Enter in the middle of
+    a word: then neither half is a token the base has and both read as words they
+    typed, while the letters in them are the base's and the source may rewrite them
+    (`_cleaved`, the mirror of `_welded`).
+
     There were two more of these, `_dressed_up` and `_undressed`, for a token dressed
     in or stripped of punctuation of the reader's — and both were written for damage
     the *harness* was doing. `read_move_block` read its drop index off the document
@@ -207,7 +212,8 @@ def joined_differently(token: str, after: Counter, was: Counter,
     """
     pieces = _split(token)
     if len(pieces) < 2 and not _pared_down(token, was, theirs) \
-            and not _welded(token, after, tab_was if tab_was is not None else was):
+            and not _welded(token, after, tab_was if tab_was is not None else was) \
+            and not _cleaved(token, after, was, theirs):
         return False
     base = {piece for other in was for piece in _split(other)}
     there = {piece for other in after for piece in _split(other)}
@@ -277,6 +283,39 @@ def _welded(token: str, after: Counter, was: Counter) -> bool:
                      token[len(other):] if token.startswith(other) else None):
             if rest and rest in was and not (after.get(other) and after.get(rest)):
                 return True
+    return False
+
+
+def _cleaved(token: str, after: Counter, was: Counter,
+             theirs: Counter | None) -> bool:
+    """Whether this token is half of a token of the base the reader split in two.
+
+    `_welded`'s mirror, and the other thing pressing Enter does. A reader who joins
+    two paragraphs welds two tokens into one; a reader who splits a paragraph — or a
+    table cell — in the middle of a word cleaves one token into two, and *neither*
+    half is a token the base has, so `theirs - was` reads both as words they typed.
+    They hold nothing of theirs: the letters are the base's and the source may rewrite
+    them. Chain-6 seed 8400013, shape `two_tables` — the base cell said "signal 4",
+    the reader pressed Enter inside the word to make "si" and "gnal 4", `collide`
+    rewrote the cell to "signal-0c791", and the merge said "si" and "gnal-0c791".
+    The reader's break is in it and so is the source's wording; `gnal` is a token
+    nobody ever typed.
+
+    Exact, and the same condition `_welded` has: the base token must be gone from the
+    tab, that being what made this half disappear, and the *other* half has to stand
+    in the reader's own text, or a word they really typed that happens to begin a word
+    of the base would be forgiven. Only the reader's own break can put the two halves
+    there, since nothing the merge writes cuts a word in half.
+    """
+    if theirs is None:
+        return False
+    for other in was:
+        if len(other) <= len(token) or after.get(other):
+            continue
+        rest = other[len(token):] if other.startswith(token) \
+            else other[:-len(token)] if other.endswith(token) else None
+        if rest and theirs.get(rest):
+            return True
     return False
 
 
@@ -1213,8 +1252,11 @@ def _cell_findings(key, block, base_block, after_block, after_words, said, tab,
         survived = words(now[at]) if at in now else Counter()
         after_all = words(text_of(after_block))
         lost = typed - survived - (after_all - survived)
+        # `words(text)` is the reader's own cell, which `_cleaved` needs: pressing
+        # Enter inside a word leaves both halves in it, and that is the evidence.
         lost = Counter({w: n for w, n in lost.items()
-                        if not joined_differently(w, after_all, elsewhere, tab_was)})
+                        if not joined_differently(w, after_all, elsewhere, tab_was,
+                                                  words(text))})
         if lost and not _named(said, key):
             out.append(finding("cell_words_lost", "loss",
                                f"the cell {at} of {key} lost {' '.join(sorted(lost))[:60]}",

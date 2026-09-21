@@ -2627,7 +2627,13 @@ keys, named ranges), `doc_merge.py` (pure planning), `doc_sync.py` (the commands
   reading it as an item. The style goes in whole wherever a bullet comes off, there being no
   difference to take; the price is the reader who bullets a heading and means it. Clean under
   `--strict` at 400 chain 10 on the seeds that found the first two, 400 chain 8 `imported_list`
-  and 300 chain 10 `themed`.
+  and 300 chain 10 `themed`. One more came out of those fresh runs and it is the **oracle's**:
+  `_welded` knows a reader joining two paragraphs makes one `\S+` token of two, and pressing Enter
+  does the other thing too - the base cell said "signal 4", the reader split the word into "si"
+  and "gnal 4", `collide` rewrote the cell, and the merge said "si" / "gnal-0c791" with both edits
+  in it, while `theirs - was` read both halves as words they typed (`_cleaved`, chain-6 seed
+  8400013, 1 of 500; exact, on `_welded`'s two conditions - the base token gone, the other half
+  standing in the reader's own text).
 - Live suite (opt-in, marker `docs`, ~5 min): `python -m pytest -m docs tests/test_docs_live.py`
   pushes a document per test, edits both sides, syncs, checks a second sync writes nothing, and
   deletes the document. Offline: `tests/test_doc_ir.py`, `test_doc_merge.py`, `test_doc_sync.py`.
