@@ -655,9 +655,12 @@ def test_the_campaign_sees_a_mark_the_file_cannot_say_is_off(monkeypatch):
     5 before `split_cell`, 6 before `cell_chip`, 7 before `cell_style` and
     `restyle_cell`, 11 before `paste_block`, 13 before that: every op added to the
     campaign changes what every seed draws, and a window that held four can come to
-    hold none — this one did, five times). Seeds 180 to 480 hold 211, 300, 314, 329
-    and 369; the window is the four at the end of it, the old one having been left
-    with a single seed.
+    hold none — this one did, six times).
+
+    The density is steady at about 1.7 seeds in 100 (12 of 700 now, 5 of 300 before
+    `link_word`), so a window of 80 holding four was luck and is not asked for again:
+    seeds 0 to 700 hold 53, 80, 93, 208, 210, 244, 330, 387, 419, 482, 574 and 686,
+    and the window is the four in the middle of that.
     """
     real = doc_merge._text_style
 
@@ -670,7 +673,7 @@ def test_the_campaign_sees_a_mark_the_file_cannot_say_is_off(monkeypatch):
 
     monkeypatch.setattr(doc_merge, "_text_style", broken)
     caught = 0
-    for seed in range(300, 380):
+    for seed in range(180, 340):
         found = fuzz_docs.offline_round(
             seed, script=fuzz_docs.draw(seed, 3, shape="themed"))
         caught += "styling_restored" in {f["kind"] for f in oracle.failures(found)}
@@ -3951,3 +3954,95 @@ def test_how_the_reader_set_a_paragraph_survives_the_source_moving_a_chip_in_it(
     assert not report["notes"], "neither side contradicted the other, so nothing to say"
     again, _, _ = fuzz_docs.sync_once(world, copy.deepcopy(ours), copy.deepcopy(base))
     assert again["requests"] == 0
+
+
+def test_a_link_the_reader_made_survives_the_source_moving_the_block():
+    """What `read_link_word` walks over, in the one place a link can be lost.
+
+    `link` is one of `doc_merge.MANAGED`, so a source restyle names it whether or not
+    the block asks for it — and in a field the merge owns, naming it with no value is
+    the API's "back to what you inherit", which for a link means none. No op on either
+    side had ever put a link on a run, so a whole `MANAGED` field was drawn by nobody;
+    `read_link_word` is Ctrl+K and Ctrl+Shift+K, kept for what it says while it keeps
+    finding nothing (1,220 rounds over four settings, no finding), on
+    `read_paste_block`'s precedent.
+
+    The dangerous half is not the restyle — both sides restyling is the document's, so
+    the link is kept and the report says so — but a **move**, which is a delete and a
+    write from nothing: the words come back as the merge has them and the reader's
+    styling has to be carried onto them run by run (`_retext`, `_style_requests`)."""
+    world, ours, base = _build([_para("See the manual for details."),
+                                _para("Second."), _para("Third.")])
+    # The reader presses Ctrl+K on "manual".
+    span = doc_world.read_ir(world, ours, base)["blocks"][0]["span"]
+    low = span[0] + len("See the ")
+    world.apply([{"updateTextStyle": {
+        "range": {"startIndex": low, "endIndex": low + len("manual")},
+        "textStyle": {"link": {"url": "https://example.invalid/manual"}},
+        "fields": "link"}}])
+
+    ours["blocks"].append(ours["blocks"].pop(0))       # and the source moves that block
+    report, ours, base = fuzz_docs.sync_once(world, ours, base)
+    after = doc_world.read_ir(world, ours, base)["blocks"]
+    assert [doc_merge.block_text(b) for b in after] == \
+        ["Second.", "Third.", "See the manual for details."]
+    assert [(r["text"], r.get("link")) for r in after[2]["runs"]] == \
+        [("See the ", None), ("manual", "https://example.invalid/manual"),
+         (" for details.", None)], "the link came back on the word, and only on it"
+    assert not report["notes"], "the source said nothing about links, so nothing to say"
+    again, _, _ = fuzz_docs.sync_once(world, copy.deepcopy(ours), copy.deepcopy(base))
+    assert again["requests"] == 0
+
+
+def test_a_link_the_reader_made_outranks_a_source_restyle_of_the_same_block():
+    """The other half: the source restyles the block the reader linked a word of, and
+    a restyle names `link` with no value in it. The both-sides rule settles it before
+    the field does — the document's styling is kept, the source's is not written — so
+    the link stays and the report says which way it went."""
+    world, ours, base = _build([_para("See the manual for details."), _para("Tail.")])
+    span = doc_world.read_ir(world, ours, base)["blocks"][0]["span"]
+    low = span[0] + len("See the ")
+    world.apply([{"updateTextStyle": {
+        "range": {"startIndex": low, "endIndex": low + len("manual")},
+        "textStyle": {"link": {"url": "https://example.invalid/manual"}},
+        "fields": "link"}}])
+
+    ours["blocks"][0]["runs"][0]["italic"] = True     # the source italicises the line
+    report, ours, base = fuzz_docs.sync_once(world, ours, base)
+    after = doc_world.read_ir(world, ours, base)["blocks"][0]
+    assert [(r["text"], r.get("link"), r.get("italic")) for r in after["runs"]] == \
+        [("See the ", None, None),
+         ("manual", "https://example.invalid/manual", None),
+         (" for details.", None, None)], "the reader's link, and no italic over it"
+    assert report["notes"] == ["paragraph:see-the-manual-for-details: both sides "
+                               "restyled it — the document's styling is kept and the "
+                               "source's is not written"]
+    again, _, _ = fuzz_docs.sync_once(world, copy.deepcopy(ours), copy.deepcopy(base))
+    assert again["requests"] == 0
+
+
+def test_a_link_the_source_takes_off_goes_because_link_is_managed():
+    """And what membership of `MANAGED` is actually for, which neither of the two
+    above shows: `_text_style` writes a link the run *has* whatever `MANAGED` says,
+    so the field earns its place only where the run has none — a source restyle then
+    names `link` with no value, which is the API's "back to what you inherit", and
+    the `<a href>` the file no longer writes stops being a link in the document too.
+
+    Nobody has edited it, so there is nothing for the merge to weigh: the source said
+    it and the source gets it."""
+    world = doc_world.build([{"blocks": [
+        {"kind": "paragraph",
+         "runs": [{"text": "See the "},
+                  {"text": "manual", "link": "https://example.invalid/manual"},
+                  {"text": " for details."}]},
+        _para("Tail.")]}], title="fuzz")
+    ours = fuzz_docs.bootstrap(world)
+    base = copy.deepcopy(ours)
+    assert [r.get("link") for r in ours["blocks"][0]["runs"]] == \
+        [None, "https://example.invalid/manual", None], "the file says it, so it is there"
+
+    ours["blocks"][0]["runs"] = [{"text": "See the manual for details."}]
+    fuzz_docs.sync_once(world, ours, base)
+    after = doc_world.read_ir(world, ours, base)["blocks"][0]
+    assert [(r["text"], r.get("link")) for r in after["runs"]] == \
+        [("See the manual for details.", None)], "and the link went with it"

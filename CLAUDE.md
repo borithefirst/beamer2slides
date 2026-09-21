@@ -2634,6 +2634,20 @@ keys, named ranges), `doc_merge.py` (pure planning), `doc_sync.py` (the commands
   in it, while `theirs - was` read both halves as words they typed (`_cleaved`, chain-6 seed
   8400013, 1 of 500; exact, on `_welded`'s two conditions - the base token gone, the other half
   standing in the reader's own text).
+  **Ctrl+K, the last undrawn field of the dialect**: of the eleven run fields in
+  `doc_merge.MANAGED`, `link` had never been on a run in the campaign's life. Both sides draw it
+  now (the source through `RUN_MARKS`, the reader through `read_link_word` - Ctrl+K, and a quarter
+  of the time Ctrl+Shift+K taking one off), it found nothing in 1,920 rounds over six settings
+  (five shapes, chains 4 to 10), and it is kept for what it says on `read_paste_block`'s
+  precedent, with three
+  tests pinning the behaviour it walks over, each verified by breaking its mechanism. The one place
+  a link can be lost is not the restyle but a **move**, which is a delete and a write from nothing,
+  so the reader's styling is carried onto the merged words run by run (`_retext`,
+  `_style_requests`); a source restyle of that block is settled one rule earlier - both sides
+  restyled it, the document's styling is kept - and the report says so. And membership of `MANAGED`
+  buys less than it looks: `_text_style` writes a link the run *has* whatever `MANAGED` says, so
+  the field earns its place only where the run has none, which is how a link the source **takes
+  off** goes away (the restyle names `link` with no value, the API's "back to what you inherit").
 - Live suite (opt-in, marker `docs`, ~5 min): `python -m pytest -m docs tests/test_docs_live.py`
   pushes a document per test, edits both sides, syncs, checks a second sync writes nothing, and
   deletes the document. Offline: `tests/test_doc_ir.py`, `test_doc_merge.py`, `test_doc_sync.py`.

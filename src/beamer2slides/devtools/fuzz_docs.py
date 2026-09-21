@@ -70,7 +70,12 @@ RUN_MARKS = [("bold", True), ("italic", True), ("underline", True), ("strike", T
              ("font", "Georgia"), ("font", "Roboto Mono"),
              ("fontsize", 9.0), ("fontsize", 14.5),
              ("script", "super"), ("script", "sub"),
-             ("color", "#993333"), ("highlight", "#ffee88")]
+             ("color", "#993333"), ("highlight", "#ffee88"),
+             # Ctrl+K's half of the dialect. `link` is in `doc_merge.MANAGED`, so a
+             # source restyle names it whether or not the block asks for it — and no
+             # op had ever put one on a run from either side, so what a restyle does
+             # to a link was as undrawn as the bullet was (`read_link_word`).
+             ("link", "https://example.invalid/anchor")]
 
 PARA_MARKS = [("align", "center"), ("align", "justify"), ("indent", 18.0),
               ("indent_first", 36.0), ("line_spacing", 1.5), ("shading", "#eef2ff"),
@@ -551,6 +556,42 @@ def read_unmark_word(rng, part, tab, theme=None):
 read_unmark_word.wants_theme = True
 
 
+def read_link_word(rng, part, tab):
+    """The reader presses Ctrl+K on a word, or takes the link off one.
+
+    `link` is one of `doc_merge.MANAGED` — the fields the merge names on a restyle
+    whether or not the block asks for them, so that a property the source dropped goes
+    away — and it earns its place there by the rule the others do: the file can say it
+    (`<a href>`) and a read can see it. What nothing could see is what a *source*
+    restyle does to a link the **reader** made, because no op on either side had ever
+    put one on a run: a whole `MANAGED` field, drawn by nobody, in the one place where
+    naming a field with no value means "back to what you inherit".
+
+    It has found nothing (1,920 rounds over six settings: `mixed`, `themed`, `prose`,
+    `two_tables` and `imported_list`, at chains 4 to 10, drawing 150 to 240 times in
+    each) and is kept for what it says while it keeps finding nothing, on
+    `read_paste_block`'s precedent,
+    with three tests in `test_doc_fuzz.py` pinning the behaviour it walks over: a
+    reader's link survives the source *moving* the block, which is the one place it
+    could be lost (a move is a delete and a write from nothing); a source restyle of
+    the same block is settled by the both-sides rule before the field is reached, so
+    the link stays and the report says so; and a link the source takes off goes, which
+    is the only thing membership of `MANAGED` actually buys — `_text_style` writes a
+    link the run *has* whatever `MANAGED` says.
+    """
+    spots = [(b, s) for b in _paragraph_blocks(part) for s in _word_spots(b)]
+    if not spots:
+        return [], []
+    block, (_, low, high) = rng.choice(spots)
+    # Taking one off is the same request with no url in it, which is how the API says
+    # "no link" and how a reader's Ctrl+Shift+K reads back.
+    style = {} if rng.random() < 0.25 else \
+        {"link": {"url": f"https://example.invalid/{rng.randrange(1 << 16):04x}"}}
+    return [{"updateTextStyle": {"range": _span(low, high, tab),
+                                 "textStyle": style, "fields": "link"}}], \
+        [block.get("key")]
+
+
 def read_heading(rng, part, tab):
     blocks = [b for b in _paragraph_blocks(part) if b.get("kind") != "item"]
     if not blocks:
@@ -893,7 +934,7 @@ READER = {
     "split_block": read_split_block, "join_blocks": read_join_blocks,
     "paste_block": read_paste_block,
     "bold_word": read_bold_word, "unmark_word": read_unmark_word,
-    "heading": read_heading,
+    "link_word": read_link_word, "heading": read_heading,
     "face": read_face, "measure": read_measure,
     "renumber_list": read_renumber_list, "bullet": read_bullet,
     "cell_type": read_cell_type,

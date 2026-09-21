@@ -2941,6 +2941,30 @@ disappear, and the other half standing in the reader's *own* text, since nothing
 word in two. `_cell_findings` passes the reader's cell words for it, as it already passes the
 tab's base words for `_welded`.
 
+**Ctrl+K, the last undrawn field of the dialect.** `doc_merge.MANAGED` names eleven run
+fields, and coverage said plainly that one of them had never been on a run in the campaign's
+life: `link`. Both sides draw it now — the source through `RUN_MARKS`, the reader through
+`read_link_word`, which is Ctrl+K on a word and, a quarter of the time, Ctrl+Shift+K taking
+one off. It found nothing — 1,920 rounds over six settings (`mixed`, `themed`, `prose`,
+`two_tables` and `imported_list`, at chains 4 to 10), drawing 150 to 240 times in each —
+and on `read_paste_block`'s precedent it is kept for what it says while it keeps finding
+nothing, with three tests in `test_doc_fuzz.py` pinning the behaviour it walks over — each
+verified by breaking its mechanism.
+
+The one place a link can be lost is not the restyle but a **move**: a move is a delete and a
+write from nothing, so the words come back as the merge has them and the reader's styling has
+to be carried onto them run by run (`_retext`, `_style_requests`), which it is
+(`test_a_link_the_reader_made_survives_the_source_moving_the_block`; without `_text_style`'s
+link it comes back a plain word). A source restyle of the block the reader linked a word of is
+settled one rule earlier than the field — both sides restyled it, so the document's styling is
+kept and the source's is not written — and the report says which way it went. And what
+membership of `MANAGED` actually buys is narrower than it looks: `_text_style` writes a link
+the run *has* whatever `MANAGED` says, so the field earns its place only where the run has
+none. There a source restyle names `link` with no value in it, which is the API's "back to
+what you inherit", and the `<a href>` the file no longer writes stops being a link in the
+document too (`test_a_link_the_source_takes_off_goes_because_link_is_managed`; with `link` out
+of `MANAGED` the link stays and nobody says so).
+
 ## Remaining risks
 
 1. **Pictures** — retired, see "Pictures, and the chips a request can make" above. What
