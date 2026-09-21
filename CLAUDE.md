@@ -699,10 +699,19 @@ dropped: `merge.plan_merge` prints this warning only `and not o.get("label")` an
 "this frame has no label", so a `twins` on a frame whose label the source renamed - which is in the
 leftovers carrying one - would be counted as spoken for and said to nobody. Its labelled counterpart is
 `weak_pairs` value `crossed` (`identity.crossed_twins`): two labels that changed places over slides
-saying word for word the same thing, where the reading with the swap and the reading without score
-*exactly* alike, so every rule above is right to stay silent and only the **order** says anything -
-either two frames the author moved or `[label=one]` pasted onto the frame below, and nothing
-downstream will tell those apart. The labels are followed and both slides are named.
+the crossing **loses nothing** on - each frame reads at least as well against the other's slide as
+against its own, within `TWIN_TIE` - so the words did not decide this and only the **order** says
+anything, either two frames the author moved or `[label=one]` pasted onto the frame below, and
+nothing downstream will tell those apart. The labels are followed and both slides are named. Asking
+that the two readings *tie* was too narrow by half: a crossing between near-twins the same revision
+has also reworded or retitled reads 0.03 to 0.42 apart, the dead band between a tie and
+`LABEL_MARGIN` (0.5) - too much to be one score, far too little to be an explanation, and so a place
+where nothing at all spoke. That the words might decide it the *other* way is `label_moves`' business
+and refuses the crossing as it always did. Measured over the same four campaigns run twice over the
+same seeds with only that swapped: frames written onto another frame's slide with nothing in the
+report naming *them* **14 -> 7, in 12 -> 7 rounds**, at the price of 22 warnings in 12,037 broken
+rounds (587 -> 609) and **none at all** in the 3,963 sound ones (57 either way), with not one frame
+re-paired (109 `written`, 308 `costly`, 3 converted writes) and no new `moved` or `unsure` anywhere.
 And what counts as an explanation at all is a share of what the pair *can* say, not a number
 (`identity._moved_bar`): `_evidence` reaches 1.5 where the titles match and 1.0 where the slides
 never had one, so a flat `LABEL_MOVED` of 1.0 asked for word for word on a deck `adopt` wrote -
@@ -720,11 +729,18 @@ slide without the report naming something**; the price is 34 warnings in the 200
 really moved a frame, each about two slides a person cannot tell apart either. That is a claim about
 rounds. Asked of the **frames** - a frame written onto another frame's slide with nothing in the
 report naming *it*, which is what a person actually misses - the four adopt-shaped campaigns above
-have **14 of the 109 writes in silence, in 12 rounds** (converted, 1 of 3; 21 in 17 before the
-look-alike half of the `twins` gate above), so the round-level sentence must not be read at frame
-size. What is left is out of any alignment gate's reach: 10 of the 14 are frames a **label** paired,
-3 are frames whose rival slide a label took out of the walk, and one carries a label the deck has
-never seen.
+have **7 of the 109 writes in silence, in 7 rounds** (converted, 1 of 3; 21 in 17 before the
+look-alike half of the `twins` gate above, 14 in 12 before the crossing asked that it lose nothing
+rather than tie), so the round-level sentence must not be read at frame size. What is left is out of
+every pairing rule's reach: **5 are frames a label paired, 2 the alignment did**. Three of the five
+are a label moved between near-twin frames whose best rival scores 0.14 and below - nothing to
+compare them with, and no rule can speak where the deck says nothing; one is a pairing a free rival
+beats by 0.13, inside the dead band under `LABEL_MARGIN`; and one is word for word exact beside an
+equally exact slide **nothing has claimed**, which `_complete` is right to let pass, a pairing past
+doubting being past doubting. Of the two the alignment paired, one is an untitled frame among slides
+that say nearly the same thing (in a round that did say `unsure`, about another frame) and one
+carries a label the deck has never seen - a `rename_label`, which is the one of the seven with a
+report sentence of its own still to write.
 **And so is the margin** (`identity._scaled`), which is a *difference* between two readings - and
 the two are readings of different pairs, `here` scoring the label's slide against another frame and
 `own` against the frame carrying the label. Where those pairs can say different amounts the
@@ -756,8 +772,8 @@ followed onto the wrong slide on the strength of a slide order
 pasted onto the near-twin, which carries no label to see the crossing from: `crossed_twins` runs
 after the content and place passes, wants one of the two frames labelled and both own pairings clear
 of `_moved_bar`, and says `crossed` where both carry a label and **`traded`** where one does - the
-frame that crossed being paired by the alignment like any other. Nothing named those before: the two
-readings tie to the last decimal, and `twins` never fires because the label has already taken the
+frame that crossed being paired by the alignment like any other. Nothing named those before: the
+words say nothing either way, and `twins` never fires because the label has already taken the
 alternative slide away from the walk. Measured over the same four adopt-shaped campaigns (1,000
 rounds four deep, label-chance 1 and 0.5, two seeds each, 61,344 frames): written onto the wrong
 slide 154 -> **139** (ties in the look back) -> **111** (the bar; per seed 47->36, 18->15, 52->42,

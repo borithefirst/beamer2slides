@@ -173,8 +173,8 @@ def test_two_labels_crossed_over_slides_that_say_the_same_thing_are_a_coin_toss(
 
     Two slides of the deck say word for word the same thing, and the source comes back with their
     labels the other way round. `label_moves` has nothing to work with and is right to keep quiet:
-    the reading where the labels swapped and the reading where they did not score *exactly* alike,
-    so neither explains the other. What is not alike is the order - the labels cross where the
+    reading the two frames the other way round loses nothing, so neither reading explains the
+    other. What is not alike is the order - the labels cross where the
     slides do not - and that is either two frames the author moved or `[label=one]` pasted onto
     the frame below. The labels are followed, since a label is the promise and nobody's edits move
     either way, and the person is told (fuzz_labels --shape adopt seeds 7100725 and 7100896, which
@@ -224,6 +224,65 @@ def test_the_same_deck_with_the_label_on_the_frame_it_belongs_to_says_nothing():
     weak: dict[int, str] = {}
     assert identity.align_slides(base, ours, weak=weak) == {0: 0, 1: 1}
     assert weak == {}
+
+
+RETITLED_A = "we build the export table together and the figures come from the quarter that has just gone"
+RETITLED_B = "we build the export table together and the figures come from the quarter before that one"
+
+
+def test_a_crossing_that_loses_nothing_is_named_though_the_two_readings_do_not_tie():
+    """The rule is that the crossing **loses nothing**, not that the two readings tie.
+
+    Asking for a tie was asking the two slides to say word for word the same thing, which one
+    revision rewording either of them takes away - and then the crossed reading is a hair better
+    or a hair worse than the one the labels took, which says nothing about which is right and
+    everything about which words were changed last. `label_moves` has already had its say about a
+    reading better by enough to act on (`LABEL_MARGIN`, or an exchange); between that and a tie
+    there was nothing at all, and the campaign's remaining silent writes lived in the gap.
+
+    This is one of them end to end (adopt-shaped seed 1000403's shape): a label moved onto the
+    near-twin below, whose frame the source also retitled. The retitling is what keeps every rule
+    above quiet - `_evidence` counts the title as half of what a pair can say, so the bonus lands
+    on the reading the labels did *not* take (the unlabelled frame still shares its slide's title,
+    the labelled one no longer shares its rival's), the exchange's look back asks whether this
+    frame is among the best for that slide, and the answer is no. So `label_moves` says nothing,
+    the alignment produces the crossing, and only the order is left to speak."""
+    a2, b2 = RETITLED_A.replace("build", "draw"), RETITLED_B.replace("build", "draw")
+    base = [info("Build with us", RETITLED_A, "one"), info("Build with us", RETITLED_B)]
+    ours = [info("Build with us", a2), info("Notes retitled", b2, "one")]
+    assert identity.label_moves(base, ours) == [], "the title bonus refuses the exchange"
+    weak: dict[int, str] = {}
+    assert identity.align_slides(base, ours, weak=weak) == {1: 0, 0: 1}, "the label is followed"
+    assert weak == {0: "traded", 1: "traded"}
+    # Far outside a tie on both sides - each frame reads *better* against the other's slide by
+    # about 0.15, seven times `TWIN_TIE`, which is exactly the gap that used to be silent.
+    for j, i in ((0, 1), (1, 0)):
+        gain = identity._evidence(base[1 - i], ours[j]) - identity._evidence(base[i], ours[j])
+        assert gain > 7 * identity.TWIN_TIE
+
+
+def test_a_crossing_the_words_decide_against_is_not_named():
+    """The counter-case that keeps the widening honest: two frames the author really moved, whose
+    words tell them apart. The crossing loses 0.44 here, so the reading the labels took is the one
+    the deck says - nothing is ambiguous and nothing is said."""
+    base = [info("", REVENUE3, "q3"), info("", REVENUE4)]
+    ours = [info("", REVENUE4), info("", REVENUE3, "q3")]
+    assert identity.crossed_twins(base, ours, {0: 1, 1: 0}) == {}
+    assert identity.label_moves(base, ours) == [], "the label's own pairing is exact"
+
+
+def test_a_crossing_that_gains_on_one_side_and_loses_on_the_other_is_not_named():
+    """And it has to hold **both** ways round. Where one frame reads better across and the other
+    reads worse by the same amount, the words have an opinion - the deck is not symmetric about
+    the crossing - and the rule is silent, as it is for a pairing the evidence settles."""
+    longer = TWIN_SLIDE + " and by the one before"
+    base = [info("", TWIN_SLIDE, "one"), info("", longer)]
+    ours = [info("", TWIN_SLIDE), info("", TWIN_SLIDE, "one")]
+    # Paired {0: 1, 1: 0}: frame 0 reads better against slide 0 than against the slide it got,
+    # and frame 1 reads worse against slide 1 than against its own, by the same 0.135.
+    assert identity._evidence(base[0], ours[0]) > identity._evidence(base[1], ours[0])
+    assert identity._evidence(base[1], ours[1]) < identity._evidence(base[0], ours[1])
+    assert identity.crossed_twins(base, ours, {0: 1, 1: 0}) == {}
 
 
 def test_the_crossing_is_named_in_the_report():

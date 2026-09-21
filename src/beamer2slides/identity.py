@@ -396,7 +396,23 @@ def crossed_twins(base: list[dict], ours: list[dict], pairs: dict[int, int]) -> 
     each frame written onto the other's slide in silence). Which is why this is asked of the whole
     pairing and not of the labels alone - and why it is asked only where both sides say enough to
     be an explanation at all (`_moved_bar`), or two slides that say nothing would tie as surely as
-    two that say the same thing."""
+    two that say the same thing.
+
+    And what the crossing has to be is that it **loses nothing**, not that it ties. Asking for a
+    tie was asking the two slides to say word for word the same thing, which one revision rewording
+    either of them takes away - and then the crossed reading is a hair better or a hair worse than
+    the one the labels took, which says nothing about which is right and everything about which
+    words were changed last. `label_moves` has already had its say about a reading that is better
+    by enough to act on (`LABEL_MARGIN`, or an exchange); between that and a tie there was nothing
+    at all, and the campaign's remaining silent writes lived in the gap, crossing with 0.03 to 0.42
+    between the two readings. So each frame need only read at least as well (within `TWIN_TIE`)
+    against the other's slide as against its own. It costs a deck nobody reordered nothing, the
+    loop never reaching past the order: measured over the four adopt-shaped campaigns (1,000 rounds
+    four deep, label-chance 1 and 0.5, two seeds each), run twice over the same seeds with only
+    this swapped, frames written onto another frame's slide with nothing in the report naming them
+    go **14 -> 7, in 12 -> 7 rounds**, not one frame moves (109 written and 3 either way, 308
+    costly, `moved` and `unsure` unchanged), and the price is 22 warnings in the 12,037 broken
+    rounds and **none at all** in the 3,963 sound ones."""
     out: dict[int, str] = {}
     order = sorted(pairs)
     for x, j1 in enumerate(order):
@@ -409,9 +425,10 @@ def crossed_twins(base: list[dict], ours: list[dict], pairs: dict[int, int]) -> 
             if (_evidence(base[i1], ours[j1]) < _moved_bar(base[i1], ours[j1])
                     or _evidence(base[i2], ours[j2]) < _moved_bar(base[i2], ours[j2])):
                 continue
-            if (abs(_evidence(base[i2], ours[j1]) - _evidence(base[i1], ours[j1])) <= TWIN_TIE
-                    and abs(_evidence(base[i1], ours[j2]) - _evidence(base[i2], ours[j2])) <= TWIN_TIE):
-                # a tie, not a rival: `label_moves` has already had its say
+            if (_evidence(base[i2], ours[j1]) >= _evidence(base[i1], ours[j1]) - TWIN_TIE
+                    and _evidence(base[i1], ours[j2]) >= _evidence(base[i2], ours[j2]) - TWIN_TIE):
+                # reading the two frames the other way round loses nothing, so the words did not
+                # decide this; that they might decide it the *other* way is `label_moves`' business
                 how = "crossed" if ours[j1].get("label") and ours[j2].get("label") else "traded"
                 out[j1] = out[j2] = how
     return out

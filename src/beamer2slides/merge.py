@@ -994,23 +994,26 @@ def plan_merge(base: dict, ours: dict, theirs: dict, adopt=None, follow_labels: 
                 f"(`beamer2slides label`), see docs/labels.md.")
         if b is not None and weak.get(j) == "crossed":
             # `identity.crossed_twins`: this frame's label and another's changed places over two
-            # slides that say word for word the same thing, so nothing in the words can say whether
-            # the author moved the frames or moved a label. The label was followed; it is the
-            # promise, and nobody's edits move either way.
+            # slides so alike that reading the two frames the other way round loses nothing, so
+            # nothing in the words can say whether the author moved the frames or moved a label.
+            # The label was followed; it is the promise, and nobody's edits move either way.
             report["warnings"].append(
                 f"slide {b['key']}: this frame's label `{o.get('label')}` and another's have changed places "
-                f"over two slides that say the same thing, so nothing they say can tell whether you moved the "
-                f"frames or moved a label. The labels were followed. If `{o.get('label')}` belongs on the other "
-                f"frame, put it back before the next sync - see docs/labels.md.")
+                f"over two slides so alike that reading the two frames the other way round says the deck just "
+                f"as well, so nothing they say can tell whether you moved the frames or moved a label. The "
+                f"labels were followed. If `{o.get('label')}` belongs on the other frame, put it back before "
+                f"the next sync - see docs/labels.md.")
         if b is not None and weak.get(j) == "traded":
             # `identity.crossed_twins`: a label and the frame beside it changed places over two
-            # slides that say word for word the same thing, and that frame carries no label of its
-            # own - so nothing can say whether the author moved the frames or pasted the label onto
-            # the twin. The label was followed; nobody's edits move either way.
+            # slides so alike that reading the two frames the other way round loses nothing, and
+            # that frame carries no label of its own - so nothing can say whether the author moved
+            # the frames or pasted the label onto the twin. The label was followed; nobody's edits
+            # move either way.
             report["warnings"].append(
-                f"slide {b['key']}: this slide and another say the same thing, and the frames that carry them "
-                f"have changed places - so nothing they say can tell whether you moved the frames or moved a "
-                f"label. The label was followed. Give the other frame a label too "
+                f"slide {b['key']}: this slide and another are so alike that reading their two frames the "
+                f"other way round says the deck just as well, and the frames that carry them have changed "
+                f"places - so nothing they say can tell whether you moved the frames or moved a label. The "
+                f"label was followed. Give the other frame a label too "
                 f"(`beamer2slides label`), and the next sync has an answer - see docs/labels.md.")
         if b is not None and weak.get(j) == "twins" and not o.get("label"):
             # `identity.align_slides`: this frame has no label and says about as much as its
