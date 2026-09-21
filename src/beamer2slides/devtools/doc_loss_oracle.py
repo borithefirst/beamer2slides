@@ -735,7 +735,9 @@ def _tab_findings(was: dict | None, now: dict, then: dict | None, said: str,
         out += _words_findings(key, block, base_block, new[key], after_words, said, tab,
                                words(part_text(was)))
         out += _style_findings(key, block, base_block, after_styles, new[key],
-                               after_words, said, tab, theme, file_blocks.get(key))
+                               after_words, said, tab, theme, file_blocks.get(key),
+                               dropped=mine is not None and not touched
+                               and key in old and key not in source_keys)
         out += _inherited_findings(key, block, new[key], (mine or {}), said, tab, theme)
         if block.get("kind") == "table":
             out += _cell_findings(key, block, base_block, new[key], after_words, said, tab,
@@ -960,8 +962,16 @@ def _words_findings(key, block, base_block, after_block, after_words, said, tab,
                     f"{' '.join(sorted(lost))[:80]}", tab=tab, key=key)]
 
 
+def _cored(counted: Counter) -> Counter:
+    """Word counts by `core`: the spelling a styled word is known by."""
+    out: Counter = Counter()
+    for token, times in counted.items():
+        out[core(token)] += times
+    return out
+
+
 def _style_findings(key, block, base_block, after_styles, after_block, after_words,
-                    said, tab, theme=None, file_block=None):
+                    said, tab, theme=None, file_block=None, dropped=False):
     """Styling the reader put on words that are still there — or took off them.
 
     Taking a mark off is as much a choice as putting one on, and the only way to
@@ -1001,14 +1011,23 @@ def _style_findings(key, block, base_block, after_styles, after_block, after_wor
     weight (3,750 rounds at chains 4 to 8 without it, nothing found). An oracle that
     forgives what no longer happens is a blind spot waiting for the next defect that
     looks like it, so it is gone.
+
+    `dropped` is the one twin that is not that: the block the mark was taken off is
+    one the *source* dropped and the reader left as the base has it, so it goes and
+    the mark goes with it — the bargain the `block_gone` branch above states in the
+    same words. What makes it visible at all is that the key then lands on a block
+    the reader's own paste put there, saying the same words in the theme's own bold
+    (chain-10 seed 1180145, shape `themed`). Only the taken-off half: a mark the
+    reader *put on* is looked for tab-wide and would have kept the block alive
+    (`doc_merge._styled`), so the question cannot arise there. And only where there
+    is a file to say it: asked of a check given none, "the file no longer names this
+    key" is true of every key there is, and the whole half falls silent.
     """
     theirs = marks_on(block)
     was = marks_on(base_block) if base_block else Counter()
     # A styled word is its `core`, so the question "is the word still there?" has to
     # be asked in the same words: `after_words` counts the tab's `\S+` tokens.
-    standing = Counter()
-    for token, times in after_words.items():
-        standing[core(token)] += times
+    standing = _cored(after_words)
     lost = Counter({m: n for m, n in ((theirs - was) - after_styles).items()
                     if standing.get(m[1])})
     if lost and not _named(said, key):
@@ -1020,9 +1039,22 @@ def _style_findings(key, block, base_block, after_styles, after_block, after_wor
     asked = marks_on(file_block) if file_block else Counter()
     undone = (unmarked_of(block, theme) - unmarked_of(after_block, theme)
               - (agreed & asked))
-    back = Counter({m: n for m, n in (undone & marks_on(after_block, theme)).items()
-                    if standing.get(m[1])})
-    if back and not _named(said, key):
+    # An un-mark is undone only on a word that is still *that* word. The question is
+    # asked by occurrence and a block may say one twice, so where the source's own
+    # rewording takes an occurrence away, the mark it carried went with it: the block
+    # said `thicket` twice, the reader un-bolded one of them, the source reworded that
+    # one to `vellum` — which came out un-bold, exactly as asked — and the plain
+    # `thicket` left over answered for it (chain-10 seed 1180151, shape `themed`).
+    # Counted against the *file*, because that says whose doing it was: an occurrence
+    # the source has just added is the mirror case and must still be no excuse
+    # (themed seed 40254).
+    here, asks = _cored(words(text_of(block))), _cored(words(text_of(file_block or {})))
+    back = Counter()
+    for (mark, word), times in (undone & marks_on(after_block, theme)).items():
+        reworded = max(0, here[word] - asks[word]) if file_block else 0
+        if standing.get(word) and times > reworded:
+            back[(mark, word)] = times - reworded
+    if back and not dropped and not _named(said, key):
         mark, word = next(iter(back))
         return [finding("styling_restored", "loss",
                         f"the block {key} has the {mark} back on {word!r}, which the "

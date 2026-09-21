@@ -2356,6 +2356,73 @@ settings: 800 rounds of `two_tables` at chain 8, 800 of `ends_on_table` at chain
 `between_tables` at chain 6, 800 mixed at chain 4 and 400 mixed at chain 10. `KNOWN` still
 empty.
 
+### Four from `themed`: what a paragraph inherits, and what a word wears
+
+The same method on the shape whose whole point is what a paragraph *inherits*. `themed` is
+the one corpus shape with named styles behind it (`fuzz_docs.THEME`: HEADING_1 centred and
+bold), so it is where a field going from inherited to a paragraph's own can be seen at all —
+and 700 rounds of it at chain 6 found one in the merge and one in the campaign's own judge,
+200 more at chain 10 two in the loss oracle. One of the four is a loss; the other three are
+judges answering a question about the wrong thing, which on this shape is the easy mistake:
+under a theme, a word that says nothing is not a word nobody styled.
+
+**A heading justified by the paragraph the source deleted above it** (chain-6 seed 1130023).
+Docs merges a deleted paragraph into the one behind it and hands over its style, which is
+why `carry_unimported` puts the named style and the bullet back. The *measurements* it may
+only put back on a paragraph this run wrote (`_unwritten`), and that narrowing is what makes
+the settle safe: writing styling back is the one thing there that can take styling away, and
+in a read "absent" is also a reader who took it off. But the neighbour of a block this batch
+deleted is precisely a block nobody wrote that the write itself changed. The source dropped
+a justified paragraph, the heading behind it came out justified *of its own*, and a heading
+that sets its own alignment has stopped following the theme's centring for ever — the file is
+regenerated from the document afterwards, so the next sync writes nothing and agrees. Only
+the loss oracle's `theme_undone` could see it, which is why it exists. `requests` now marks
+that neighbour `paragraph_merged` — the block behind, and the one in front too where the
+delete borrowed *its* mark (`_delete_range`, a block in front of a table) — and the gate
+widens by exactly those. 1 of 400 rounds at chain 6 without it.
+
+**A mark the theme already puts on says nothing, until the named style changes** (chain-8
+seed 1140022, chain-6 seed 1150196, the campaign's own). `_worn` subtracts a run's marks by
+the block's named style, because the file spells them out and a read leaves out what the
+style already says — the normalisation that lets the two sides be compared at all. Under a
+theme that bolds HEADING_1, then, a reader bolding one word of a themed heading has said
+nothing that side can see, and `_styling_arrived`'s guard read the block as one they had
+left alone. The source then made it body text, where the same run styling spells out
+differently on either side, and the reader's bold — which the merge kept, as it should —
+read as the source's restyle vanishing. Two named styles are two languages, so the run half
+is not a comparison at all and is not asked; the named style itself is part of `_shape`, so
+nothing goes unjudged. 1 of 400 rounds at chain 8 and 1 of 600 at chain 6 with the old judge.
+
+Then the same shape at chain 10, where both findings were the **oracle's** — `styling_restored`,
+the question of whether a mark the reader took off is back on, which is the newest of its
+questions and the one with the most ways to be wrong. Neither was a loss; both were the check
+answering for a word that was not the one it was asked about.
+
+**A mark taken off a block the source dropped** (chain-10 seed 1180145). The bargain the
+`block_gone` branch states in so many words is that a block the reader left exactly as the
+base has it goes when the source drops it — and the mark on one of its words goes with it.
+What made this one visible is that the *key* does not go: the reader's own pasted copy was
+standing beside it, saying the same words in the theme's own bold, and took the name, so the
+question was asked of the block and answered by the copy. The excuse is the file saying it
+(`dropped`), and only for the taken-off half: a mark the reader *put on* keeps the whole block
+alive (`doc_merge._styled`), so the question cannot arise there. It also has to be a file that
+exists — asked of a check given none, "the file no longer names this key" is true of every key
+there is.
+
+**An un-marked word the source reworded away** (chain-10 seed 1180151). The question is asked
+by occurrence and a block may say a word twice: the heading said `thicket` twice, the reader
+un-bolded the first, the source reworded that one to `vellum` — which came out un-bold, exactly
+as asked — and the plain `thicket` left over answered for it. The count is capped by what the
+*file* asks for, which is what says whose doing it was: an occurrence the source has just
+**added** is the mirror case (themed seed 40254, `"and willow"` plus `" and harbour"`) and must
+still be no excuse, and nothing in the document alone tells the two apart. 1 of 200 rounds at
+chain 10 for each.
+
+All four pinned by tests that fail with the mechanism back, all four seeds in `SHAPED`. Clean
+under `--strict` afterwards: 700 `themed` at chain 6, 500 and 300 at chain 8, 400, 200 and 250
+at chain 10, 700 mixed at chain 6, 500 `chips`, 500 `imported_list`, 300 `equations` and
+300 `tabs` at chain 8.
+
 ## Remaining risks
 
 1. **Pictures** — retired, see "Pictures, and the chips a request can make" above. What

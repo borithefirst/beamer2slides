@@ -152,9 +152,16 @@ REGRESSIONS = ((60, 1), (181, 1), (309, 4), (1031, 8), (1147, 8),
 # ones do not. The three of them: a full stop the source parked against a bolded
 # word (the oracle's), the key of a table this batch regrids given away by the pass
 # that guesses (`recover_tables`), and a table moved in front of the empty paragraph
-# the body ends behind (`refuse_eaten_anchor`).
+# the body ends behind (`refuse_eaten_anchor`). Then `themed`, where the theme is
+# what a paragraph *inherits*: a heading justified by the delete above it
+# (`paragraph_merged`), and a bold the theme already puts on read as a restyle that
+# vanished once the source moved the block to another named style. Then the two the
+# oracle owed at chain 10: an un-bolding on a block the source dropped, and one the
+# source reworded away that the word's own twin answered for.
 SHAPED = ((870308, 8, "two_tables"), (870368, 8, "two_tables"),
-          (890070, 8, "ends_on_table"))
+          (890070, 8, "ends_on_table"), (1130023, 6, "themed"),
+          (1140022, 8, "themed"), (1150196, 6, "themed"),
+          (1180145, 10, "themed"), (1180151, 10, "themed"))
 
 
 def _round(seed: int, chain: int, shape: str | None = None) -> None:
@@ -2575,6 +2582,74 @@ def test_the_campaign_asks_whether_the_sources_wording_arrived():
     assert not _asked(was, before, asks, drawn), "the chip arrived, under its own face"
 
 
+def test_a_heading_behind_a_paragraph_the_source_drops_still_follows_the_theme():
+    """Docs merges a deleted paragraph into the one behind it and hands over its
+    style, and that block need not be one this run wrote: the source drops a
+    justified paragraph, the heading after it comes out justified *of its own*, and
+    a heading that sets its own alignment has stopped following the theme's centring
+    for ever — the file is regenerated from the document afterwards, so the next sync
+    agrees and nothing ever says it happened (offline chain-6 seed 1130023, shape
+    `themed`; 1 of 400 rounds with `paragraph_merged` taken out).
+
+    `carry_unimported` already put the named style and the bullet back for every
+    block; only the measurements were held to a paragraph the write itself touched,
+    because taking styling away is the one dangerous thing a settle does. The
+    neighbour of a block this batch deleted is the one place where it is the write's
+    own doing.
+    """
+    world = doc_world.build([{"blocks": [
+        fuzz_docs._p("Justified prose.", align="justify"),
+        fuzz_docs._h("A heading"), fuzz_docs._p("And prose after that.")]}],
+        title="fuzz")
+    world.theme = {name: dict(style) for name, style in fuzz_docs.THEME.items()}
+    ours = fuzz_docs.bootstrap(world)
+    base = copy.deepcopy(ours)
+    ours["blocks"] = [b for b in ours["blocks"] if b["key"] != "paragraph:justified-prose"]
+    _, ours, base = fuzz_docs.sync_once(world, ours, base)
+    live = doc_world.read_ir(world, ours, base)
+    assert _keys(live) == ["heading:a-heading", "paragraph:and-prose-after-that"]
+    assert live["blocks"][0].get("align") is None, \
+        "the heading wears the theme's centring; nobody asked it to justify itself"
+    again, _, _ = fuzz_docs.sync_once(world, copy.deepcopy(ours), copy.deepcopy(base))
+    assert again["requests"] == 0
+
+
+def test_a_mark_the_theme_already_puts_on_is_no_restyle_when_the_named_style_changes():
+    """The campaign's own judge, and its own false alarm. `_worn` subtracts a run's
+    marks by the block's **named style**, because the file spells them out and a read
+    leaves out what the style already says — so where the source moves a block from
+    one named style to another, the two sides are not spelling the same language.
+
+    The theme bolds HEADING_1, so the reader bolding one word of a themed heading
+    says nothing there and the guard read the block as one they had left alone; the
+    source then made it body text, where the same run styling spells out differently
+    on either side, and the reader's bold — which the merge kept, as it should — read
+    as the source's restyle vanishing (chain-8 seed 1140022, chain-6 seed 1150196).
+    The named style itself is part of `_shape`, so nothing goes unjudged.
+    """
+    from collections import Counter
+    theme = fuzz_docs.theme_values(fuzz_docs.corpus("themed"))
+
+    def block(runs, kind="heading"):
+        return {"kind": kind, "level": 1, "key": "k1", "runs": runs}
+
+    plain, unbold = {"text": "A themed "}, {"text": "heading", "bold": False}
+    base = block([plain, unbold])
+    doc = block([{"text": "A "}, {"text": "themed", "bold": True},
+                 {"text": " "}, unbold])                   # the reader bolds a word
+    mine = block([plain, unbold], "paragraph")             # the source demotes it
+    after = block([{"text": "A "}, {"text": "themed", "bold": True},
+                   {"text": " heading"}], "paragraph")
+    asked = dict(said="", tab=None, step=0, theme=theme)
+    assert not fuzz_docs._styling_arrived("k1", base, doc, mine, after,
+                                          seen=Counter(), **asked)
+    # And it still speaks where all four sides are one named style: the source asks
+    # for an italic that never arrives.
+    italic = block([plain, {"text": "heading", "italic": True}])
+    assert [f["kind"] for f in fuzz_docs._styling_arrived(
+        "k1", base, base, italic, base, seen=Counter(), **asked)] == ["restyle_lost"]
+
+
 def test_a_paragraph_the_reader_pasted_in_front_does_not_take_the_originals_key():
     """The other way round from `..._pasted_twice_over`, and the way that broke: the
     copy stands *before* the original and the same sync rewrites the original.
@@ -2621,6 +2696,64 @@ def test_the_oracle_lets_a_pared_down_token_whose_joiner_went_too_alone():
     both = _ir(_p("k1", "a \xadhyphen here hyphen"))
     assert _kinds(oracle.check(base, both, after, NOTHING)) == {"words_lost"}, \
         "the paring is the one with the joiner still on it; the bare word is theirs"
+
+
+def test_a_mark_taken_off_a_block_the_source_dropped_is_not_handed_back():
+    """The block the reader un-bolded a word of is one the *source* dropped, and they
+    left it word for word as the base has it — so it goes, and the mark goes with it.
+    That is the bargain `block_gone` states in the same words, and it is the only
+    excuse the taken-off half has (a mark the reader *put on* keeps the whole block
+    alive, `doc_merge._styled`, so the question cannot arise there).
+
+    What made it visible is that the key does not go with the block: the reader's own
+    pasted copy stands there saying the same words in the theme's own bold, takes the
+    name, and the un-bolding read as handed back (offline chain-10 seed 1180145,
+    shape `themed`; 1 of 200 rounds without the excuse)."""
+    base = _ir(_run_head("k1", "A themed heading"), _p("k2", "Prose."))
+    before = _ir({"key": "k1", "kind": "heading", "level": 1,
+                  "runs": [{"text": "A themed "}, {"text": "heading", "bold": False}]},
+                 _p("k2", "Prose."),
+                 _run_head(None, "A themed heading"))       # the reader's own copy
+    after = _ir(_run_head("k1", "A themed heading"), _p("k2", "Prose."))
+    dropped = _ir(_p("k2", "Prose."))                       # the file drops the heading
+    assert not oracle.failures(oracle.check(base, before, after, NOTHING, dropped,
+                                            theme=MARKED))
+    # And the excuse is the file saying so. A file that still asks for the heading is
+    # a block nobody dropped, and the un-bolding is owed.
+    kept = _ir(_run_head("k1", "A themed heading"), _p("k2", "Prose."))
+    assert _kinds(oracle.check(base, before, after, NOTHING, kept,
+                               theme=MARKED)) == {"styling_restored"}
+
+
+def test_an_un_marked_word_the_source_reworded_away_is_not_owed_by_its_twin():
+    """Asked by occurrence, and a block may say one word twice. The heading said
+    `thicket` twice, the reader un-bolded the first, the source reworded that one to
+    `vellum` — which came out un-bold, exactly as asked — and the plain `thicket` left
+    over answered for it (offline chain-10 seed 1180151, shape `themed`; 1 of 200
+    rounds without the cap).
+
+    Counted against the *file*, because that says whose doing it was: an occurrence
+    the source has just **added** is the mirror case and must still be no excuse
+    (themed seed 40254), so the two cannot be told apart by the document alone."""
+    def heading(runs):
+        return {"key": "k1", "kind": "heading", "level": 1, "runs": runs}
+
+    base = _ir(_run_head("k1", "A thicket and a thicket"))
+    before = _ir(heading([{"text": "A "}, {"text": "thicket", "bold": False},
+                          {"text": " and a thicket"}]))
+    mine = _ir(_run_head("k1", "A vellum and a thicket"))
+    after = _ir(heading([{"text": "A "}, {"text": "vellum", "bold": False},
+                         {"text": " and a thicket"}]))
+    assert not oracle.failures(oracle.check(base, before, after, NOTHING, mine,
+                                            theme=MARKED))
+    # The mirror: the source adds a second `and` and the reader's own goes back bold.
+    was = _ir(_run_head("k1", "A heading and willow"))
+    read = _ir(heading([{"text": "A heading "}, {"text": "and", "bold": False},
+                        {"text": " willow"}]))
+    asks = _ir(_run_head("k1", "A heading and willow and harbour"))
+    back = _ir(_run_head("k1", "A heading and willow and harbour"))
+    assert _kinds(oracle.check(was, read, back, NOTHING, asks,
+                               theme=MARKED)) == {"styling_restored"}
 
 
 def test_a_block_the_merge_will_not_write_is_asked_about_by_the_key_it_is_refused_by():

@@ -1538,10 +1538,25 @@ def _styling_arrived(key, block, here, file_b, then, said, tab, step,
     was_look, now_look, want_look, got_look = look
     if now_look != was_look:
         return []                     # the reader restyled it: the merge decides
+    halves = [("shape", "reshape_lost", was_look[1], want_look[1], got_look[1])]
+    if len({doc_merge.named_style(b)
+            for b in (block, here, file_b, then)}) == 1:
+        halves.insert(0, ("runs", "restyle_lost",
+                          was_look[0], want_look[0], got_look[0]))
+    else:
+        # A mark says what it says against the block's **named style**, which is what
+        # `_worn` subtracts it by, so where the source moves a block from one named
+        # style to another the two sides are not spelling the same language and the
+        # run half is not a comparison at all. Seed 1130023, shape `themed`: the theme
+        # bolds HEADING_1, so the reader's bold on one word of a themed heading says
+        # nothing there and the guard above read the block as one they had left alone;
+        # the source then made it NORMAL_TEXT, where the same run styling spells out
+        # differently on either side, and the reader's bold — which the merge kept, as
+        # it should — read as the source's restyle vanishing. The named style itself is
+        # part of `_shape`, so nothing goes unjudged: the half that can speak does.
+        seen["arrival/runs unasked"] += 1
     out = []
-    for what, kind, now, want, got in (
-            ("runs", "restyle_lost", was_look[0], want_look[0], got_look[0]),
-            ("shape", "reshape_lost", was_look[1], want_look[1], got_look[1])):
+    for what, kind, now, want, got in halves:
         if want == now:
             continue
         seen[f"arrival/{what} asked"] += 1

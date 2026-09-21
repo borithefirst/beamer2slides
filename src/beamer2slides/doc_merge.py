@@ -1139,7 +1139,8 @@ def carry_unimported(live: dict, planned: list[dict]) -> int:
         # the centring the delete above it handed over shows only once `named` has
         # written NORMAL_TEXT back — which is in this very batch (seed 912452).
         whole = None
-        if mine.get("paragraph_written") and (named or _unwritten(mine, block)):
+        if (mine.get("paragraph_written") or mine.get("paragraph_merged")) \
+                and (named or _unwritten(mine, block)):
             style, fields = paragraph_style(mine)
             whole = {"style": style, "fields": fields}
         if missing or ranges or named or bullet is not None or whole:
@@ -1170,6 +1171,14 @@ def _unwritten(mine: dict, live: dict) -> list[str]:
     off looks like, and a settle must never undo that. An item's indents are the
     list preset's and belong to neither side (`ITEM_PARAGRAPH`), so they are left
     alone whichever side is one.
+
+    The one block nobody wrote that this run *did* change is the neighbour of one it
+    deleted (`paragraph_merged`, set in `requests`): Docs merges the two and keeps
+    the first one's style, so a heading standing behind a justified paragraph the
+    source dropped comes out justified of its own and stops following the theme,
+    and the file is regenerated from the document afterwards, so nothing ever says
+    it did (offline chain-6 seed 1130023, shape `themed`). Taking that back is the
+    same thing as taking back a field the write itself mangled.
     """
     return [api for key, api in PARAGRAPH_KEYS
             if api in _paragraph_fields(mine) and mine.get(key) != live.get(key)]
@@ -2380,6 +2389,22 @@ def requests(theirs: dict, merged: list[dict]) -> list[dict]:
             # (`_delete_range`): the document ends on an empty paragraph exactly
             # where it was. It has to, since a body may not end on a table.
             left_empty = start
+        # Docs merges a deleted paragraph into its neighbour and keeps the first
+        # one's style, so a block **nobody wrote** can come out of this batch wearing
+        # the style of the one that went: a heading behind a justified paragraph the
+        # source dropped stops following the theme's centring for good, and the file
+        # is regenerated from the document afterwards, so nothing says it ever did
+        # (offline chain-6 seed 1130023, shape `themed`). `carry_unimported` already
+        # puts the named style and the bullet back for every block; the measurements
+        # it may only take back where this run is what changed them, and this is
+        # where. The block behind takes the style; the one in front does only where
+        # the delete borrowed *its* mark (`_delete_range`, a block in front of a
+        # table), so that neighbour is named only then.
+        sides = [1, -1] if start < live["span"][0] else [1]
+        for block in (_neighbour(theirs["blocks"], index, side, going) for side in sides):
+            want = by_key.get((block or {}).get("key"))
+            if want is not None:
+                want["paragraph_merged"] = True
 
     for index, live in enumerate(theirs["blocks"]):
         want = by_key.get(live.get("key"))
@@ -2736,6 +2761,15 @@ def _goes(live: dict, by_key: dict) -> bool:
     if want is None:
         return live.get("key") is not None
     return bool(want.get("moved")) and want.get("span") == live.get("span")
+
+
+def _neighbour(blocks: list[dict], index: int, step: int,
+               going: set[int]) -> dict | None:
+    """The nearest block on one side of `index` that this batch is not deleting."""
+    at = index + step
+    while 0 <= at < len(blocks) and at in going:
+        at += step
+    return blocks[at] if 0 <= at < len(blocks) else None
 
 
 def _delete_range(blocks: list[dict], index: int, going: set[int],
