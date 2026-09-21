@@ -580,11 +580,19 @@ the held edit would be gone for good), and the next sync plans it from scratch, 
 label was put back. The rest of the deck syncs as usual: one ambiguous label freezes one slide, not
 the talk. `--follow-labels` (agent `follow_labels`) is a person saying they have read the `.tex` -
 the house rule that `--force-rebuild` and `--force-adopted-deck` follow. A wrong *pairing* is not a
-wrong *write*, and `fuzz_labels` now counts both (`costly` -> `written`): on 1339 adopt-shaped
-broken rounds chained 4 deep (7349 frames), 98 frames land on a slide that would really say
-something else and **66 of them on a slide nothing is written to**, leaving 32 (1.33% -> 0.44%); on
-a converted talk 31 of 58 held, 27 written (0.97% -> 0.45%). The price is 3 `unsure` verdicts in
-1366 adopt-shaped sound rounds and none in 1449 converted ones. The title counts by degree (`_title_alike`): a source that
+wrong *write*, and `fuzz_labels` counts the difference (`costly` -> `written`) - in **three** ways,
+because a costly frame ends one of three, and only one of them puts a sentence into somebody's
+edits: its slide is held back and nothing is written to it, or the pairing reads the frame as
+**new** and it is created as a slide of its own (`doubled` - the deck gains a duplicate beside the
+slide it belongs on, which keeps every word the person put there: a cost of another kind, and
+counting it with the writes counted one event twice, the slide it should have had being either held
+or taken by the frame that really did overwrite it), or it is `written` onto another frame's slide.
+Over four adopt-shaped campaigns (1,000 rounds four deep, label-chance 1 and 0.5, seeds 0 and
+1000000; 11,169 broken rounds, 61,543 frames) the 236 costly frames are **89 written**, 104 held and
+43 doubled; on a converted talk (1,000 rounds four deep at chance 1, seed 0; 3,352 broken rounds,
+15,497 frames) 45 costly are **3 written**, 27 held and 15 doubled. Before the split those read 132
+and 18. The price is 3 `unsure` verdicts in 1366 adopt-shaped sound rounds and none in 1449
+converted ones. The title counts by degree (`_title_alike`): a source that
 retitles every frame while moving a label ("Moving labels" -> "Moving labels v2") makes a yes-or-no
 "same title?" say no to every pair at once. An explanation must also beat the label's own pairing by
 `LABEL_MARGIN` (0.5), which no swap between near-twins can: the pairing such a swap leaves behind is
@@ -687,9 +695,13 @@ becomes an answer). With the crossing named too, the adopt-shaped rounds that ge
 wrong slide go from 137 told / 27 silent to **61 told / 2 silent**, and those last two were the
 campaign's own: `src_add_slide` reissued a deleted slide's label (following a label onto the frame
 that carries it now is what a label *means*), and `near_misses`, which is in the report, was not
-counted as telling anybody. Corrected, **nothing written onto the wrong slide in 2,607 broken
-rounds goes unmentioned**; the price is 34 warnings in the 200 sound rounds that really moved a
-frame, each about two slides a person cannot tell apart either.
+counted as telling anybody. Corrected, **no adopt-shaped round of 2,607 gets a frame onto the wrong
+slide without the report naming something**; the price is 34 warnings in the 200 sound rounds that
+really moved a frame, each about two slides a person cannot tell apart either. That is a claim about
+rounds. Asked of the **frames** - a frame written onto another frame's slide with nothing in the
+report naming *it*, which is what a person actually misses - the four adopt-shaped campaigns above
+have **13 of the 89 writes in silence, in 11 rounds** (converted, 1 of 3), so the round-level
+sentence must not be read at frame size.
 **And so is the margin** (`identity._scaled`), which is a *difference* between two readings - and
 the two are readings of different pairs, `here` scoring the label's slide against another frame and
 `own` against the frame carrying the label. Where those pairs can say different amounts the

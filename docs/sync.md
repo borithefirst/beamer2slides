@@ -564,7 +564,10 @@ anything: `src_add_slide` handed a new frame the label of a slide deleted in the
 following a label onto the frame that now carries it is precisely what a label *means* (a new frame
 now gets a name nothing has ever carried), and a frame no pass would pair is named in the report by
 `identity.near_misses`, which the campaign's notion of "told" did not count. With both corrected,
-**not one frame written onto the wrong slide in 2,607 broken adopt-shaped rounds goes unmentioned.**
+no adopt-shaped round of 2,607 got a frame onto the wrong slide without the report naming
+something. That is a claim about **rounds**, which is as fine as the campaign counted then; asked of
+the **frames** on fresh seeds it is no longer true, and the sharpened count is below ("A costly
+pairing is still not a write").
 
 The title counts by degree, not as yes or no (`identity._title_alike`). The stress deck moves a
 label and retitles all 48 frames in the same version ("Moving labels" → "Moving labels v2"), and a
@@ -615,10 +618,26 @@ repeats itself that is not a rare accident — of 32 misidentified frames in 372
 of that kind — and a number counting them is one nobody can feel. The columns above are the strict
 count; the costly one is the one to improve.
 
-And a costly pairing is still not a write. The line after it (`written`) takes out the frames whose
-slide this sync holds back ("A slide held back" above), which is what a person actually receives:
-of 98 costly frames in a four-deep adopt-shaped campaign, 32 are written onto the wrong slide and
-66 onto no slide at all (on a converted talk, 27 of 58).
+And a costly pairing is still not a write. A costly frame ends one of **three** ways, and only one
+of them puts a sentence into somebody's edits. Its slide may be one this sync holds back ("A slide
+held back" above), and then nothing is written to it at all. Or the pairing may read the frame as
+**new**, and then it is created as a slide of its own: the deck gains a duplicate beside the slide
+that frame belongs on, and that slide keeps every word the person put there — a cost of another
+kind (`doubled`), and not this one. `written` is what is left, and counting the doubled ones with
+it counted one event twice: the slide such a frame should have had is either held back or taken by
+the frame that really did overwrite it, and *that* frame is already in the number. Over four
+adopt-shaped campaigns (1,000 rounds four deep, label-chance 1 and 0.5, seeds 0 and 1000000; 11,169
+broken rounds, 61,543 frames) the 236 costly frames are **89 written**, 104 held and 43 doubled; on
+a converted talk (1,000 rounds four deep at chance 1, seed 0; 3,352 broken rounds, 15,497 frames),
+45 costly are **3 written**, 27 held and 15 doubled. Before the split those read 132 and 18.
+
+The silence question is asked of those 89 and of nothing else, which is stricter than the round-level
+one above: a round that gets a frame onto the wrong slide and hears about *some* frame is told, while
+a frame written onto another frame's slide with nothing in the report naming it — not a `moved` or
+`unsure` verdict, not `weak_pairs`, not `near_misses`, not a changed label on the slide it landed on —
+is a frame nobody is told about. Over the four adopt-shaped campaigns **13 of the 89 go in silence, in
+11 rounds**; on the converted talk, 1 of 3. So the round-level sentence above cannot be read at frame
+size: it was true of what it counted and this is the number to quote.
 
 `before` equals `order` frame for frame: `cross_pairs` and `gap_pairs`, which take 5.53% to 0.00% on
 a converted talk, **recover nothing at all** here — one leftover never explains one slide
@@ -660,7 +679,11 @@ frames): frames written onto the wrong slide 154 → **139** once the look back 
 139 → **111** once the bar is one (per seed 47 → 36, 18 → 15, 52 → 42, 22 → 18). Over the two
 changes together, misidentified frames 391 → **336** and the rounds that get a frame onto the wrong
 slide and say nothing 11 → **6**; a converted talk writes 26 → **25** with its 7 warnings unchanged,
-and no sound round on either shape gains a `moved` or an `unsure`.
+and no sound round on either shape gains a `moved` or an `unsure`. Those arrows are like for like
+under the count as it then was, which took a costly frame the pairing reads as **new** for a frame
+written onto somebody's slide; the count has since been split three ways and the standing figure is
+the one above — **89 written** of 236 costly, 104 held and 43 doubled, over 61,543 frames, with 13 of
+the 89 going in silence.
 
 What a sound round hears is the price, and it is one question: across 1524 adopt-shaped and 1524
 converted sound rounds there is a single `unsure` (seed 5179, a source that retitles one frame while

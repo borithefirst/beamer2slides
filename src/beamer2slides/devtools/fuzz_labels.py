@@ -23,9 +23,20 @@ round whose labels nobody touched; a miss is a frame the `now` pairing still get
 
 A wrong pairing is not the same as a wrong write, and the last two lines of each group are that
 difference. `costly` is the frames on a slide that really would end up saying something else
-(`_costly`); `written` is what is left of them once the slides `merge.hold_slide` refuses to write
-to are taken out. The gap between the two is what holding an `unsure` slide back buys, and the
-`unsure` count in the sound groups is what it costs.
+(`_costly`), and two kinds of those are no write at all: a frame on a slide `merge.hold_slide`
+refuses to write to (the gap is what holding an `unsure` slide back buys, and the `unsure` count in
+the sound groups is what it costs), and a frame the pairing reads as **new**, which is created as a
+slide of its own - the deck gains a duplicate and the slide it belongs on keeps every word the
+person put there. `written` is what is left: the frames whose sentences really do end up merged
+into somebody's edits about another frame. Counting the doubled ones as writes counted one event
+twice, since the slide such a frame should have had is either held or taken by the frame that
+really did overwrite it, which is a write already in the number.
+
+Of those writes, the ones **in silence** are the last line and the one every claim about this check
+is about: a frame put on the wrong slide with nothing in the report naming it, which is the only
+damage nobody can look for. It is asked per frame rather than per round - a verdict about the frame
+two slides down tells a person nothing about this one - so `silent` is what is left after the
+frame's own warning (`weak`, a changed label, a near miss) and its own verdict.
 
 Rounds that moved a frame are counted apart, because a frame that crossed another has a second way
 of losing its identity: the alignment keeps the order, so one of the two falls out of it.
@@ -190,9 +201,24 @@ def round_once(seed: int, label_chance: float, tmp: Path, chain: int = 1,
         # held ones are taken out - the frames sync really does put on the wrong slide.
         held = {m["ours"] for m in moves if m["verdict"] == "unsure"}
         costly = _costly(wrong_now, pairings["now"], ours_truth, base_truth, infos)
+        # A frame the pairing reads as **new** is not written onto anybody's slide either: it is
+        # created as a slide of its own, so the deck gains a duplicate and the slide it belongs on
+        # keeps every word the person put there. That is a cost of another kind (`doubled`), and
+        # counting it as a write counts one event twice - the slide it should have had is either
+        # held, or taken by the frame that really did overwrite it, which is a write already here.
+        spoken = {m["ours"] for m in moves}
+        left = [j for j in costly if j not in held]
+        written = [j for j in left if pairings["now"].get(j) is not None]
+        # And the one number every claim about this check is really about: of the frames written
+        # onto the wrong slide, the ones nothing in the report names. Asked per **frame**, not per
+        # round - a `moved` verdict about the frame two slides down tells a person nothing about
+        # this one - so a frame is spoken for by a warning of its own (`warned`) or by a verdict
+        # carrying its index (`m["ours"]`, which `merge.plan_merge` raises as a conflict).
         steps.append({"seed": seed, "step": step, "broke": broke, "said": said, "ops": done,
                       "weak": sum(1 for j in wrong_now if warned(j)), "weak_all": len(weak),
-                      "costly": len(costly), "written": sum(1 for j in costly if j not in held),
+                      "costly": len(costly), "written": len(written),
+                      "doubled": len(left) - len(written),
+                      "silent": [j for j in written if j not in spoken and not warned(j)],
                       "reordered": any(line.startswith("move_slide") and not line.endswith("None") for line in done),
                       "wrong": {k: _wrong(p, ours_truth, base_truth) for k, p in pairings.items()},
                       "frames": len(ours_truth)})
@@ -231,6 +257,10 @@ def main() -> int:
                 frames[f"{group}/frames"] += r["frames"]
                 frames[f"{group}/costly"] += r["costly"]
                 frames[f"{group}/written"] += r["written"]
+                frames[f"{group}/doubled"] += r["doubled"]
+                frames[f"{group}/silent writes"] += len(r["silent"])
+                if r["silent"]:
+                    tally[f"{group}/silent rounds"] += 1
                 tally[f"{group}/warned"] += r["weak_all"]
                 if r["wrong"]["now"]:
                     told = r["said"] != "quiet" or r["weak"]
@@ -255,9 +285,13 @@ def main() -> int:
         print(f"  of the `now` frames, {costly} a person would see "
               f"({100 * costly / total:.2f}%); the rest are frames that "
               f"say word for word what the frame they displaced says")
-        written = frames[f"{group}/written"]
+        written, doubled = frames[f"{group}/written"], frames[f"{group}/doubled"]
         print(f"  of those, {written} are written onto the wrong slide ({100 * written / total:.2f}%); "
-              f"{costly - written} are on a slide sync holds back and writes nothing to")
+              f"{costly - written - doubled} are on a slide sync holds back and writes nothing to, "
+              f"and {doubled} come back as a new slide beside the one they belong on")
+        silent = frames[f"{group}/silent writes"]
+        print(f"  and {silent} of those {written} in silence, in {tally[f'{group}/silent rounds']} rounds: "
+              f"nothing in the report names that frame")
         print("  said " + ", ".join(f"{s} in {tally[f'{group}/said:{s}']}" for s in ("moved", "unsure", "quiet")))
         print(f"  of the rounds still wrong, {tally[f'{group}/said so']} were reported and "
               f"{tally[f'{group}/silent']} passed in silence; {tally[f'{group}/worse']} came out worse than before")
