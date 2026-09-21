@@ -2696,7 +2696,53 @@ to the campaign changes what **every** seed draws.
 asserts the injected defect is caught at least three times there; the two cell ops moved its
 window's hits from six to two, so it was re-measured over 100..400 (hits at 184, 215, 225,
 233, 340, 386) and now samples 180..300. That is the second time that test has had to move,
-and it is not flakiness: the window is a sample of a population the ops define.
+and it is not flakiness: the window is a sample of a population the ops define. (`cell_chip`
+below moved both windows again, to 180..310 and 0..24.)
+
+### A chip in a cell, and the mark a delete borrows
+
+Two more from the same corner, one of each kind — a defect in the sync and a blind spot in a
+judge — plus the op that found the second.
+
+The sync's: a block standing in front of a table gives up the **previous** block's paragraph
+mark, because its own is the undeletable newline in front of the table (`_delete_range`). Where
+that previous block is an **empty paragraph** its named range *is* that mark, and a range is
+destroyed with its text or not at all, so the delete takes the name of a block the source never
+asked to touch. Unnamed, an empty paragraph standing in front of what is now the body's opening
+table is scaffolding by shape (`doc_ir._hide_trailer`'s `lead`) and leaves the IR entirely: its
+key settled on some other empty paragraph, the source's order read as one that had never
+arrived, and nothing was reported (offline chain-10 seed 4200130, shape `two_tables`). It is
+the mirror image of `_orphan_range` — there a range outlives its block, here a block outlives
+its range — and the repair is the same one `doc_ir.replant_requests` makes, with one
+difference: **no `deleteNamedRange` in front of it**. Docs has taken the id already, and a
+request naming an id that is gone throws out the whole batch.
+
+The op: `cell_chip`, on both sides. `src_add_chip` and `src_add_picture` pick their block from
+`part["blocks"]`, so a frozen run had never once been asked for *inside a table* — and a cell
+is a block with no key of its own, inside a structural element the planner treats as one thing,
+which is exactly where the `rewrite` path (the only way a block whose frozen runs the source
+changed is written at all) might have stopped. It does not: the chip arrives, and a hand-built
+test says so.
+
+What did not arrive was the judge. `_cells_arrived` asked `oracle.cells_of`, which is `text_of`
+per cell, so a chip was counted by its **face** — and a chip's face is the document's to draw.
+The file asks for a person chip reading `Grace`, Docs renders the object character off the
+address, and every seed drawing `cell_chip` failed at once: 16 regression seeds, all of them the
+judge's own. `_says` had learned this at the size of a block months ago; the cell was the last
+place in the file still asking in the old language, and `_cell_says` is the same subtraction one
+size down. The two judges were written a week apart, which is the whole explanation.
+
+Then the four campaigns, and one finding in 2,100 rounds — the same rule as `_table_movable`'s
+one size further down. A line the source takes away goes **unless the document wrote in it**,
+and `_line_unchanged` asked the cells' text, so a reader who had small-capped a word of a cell,
+or set its size, had `deleteTableColumn` carry that off with the column and nothing in the
+report said so (chain-8 seed 5300013, shape `themed`, shrunk to three steps: the source adds a
+table, the reader styles one of its cells, the source drops that cell's column). `_same_set`
+asks `_styled` and `_shape` of the cells the two sides share, the line is kept as one written in
+would be, and the note says "wrote in it or styled it". That is now the third size at which this
+one sentence has had to be said — block, table, line — and each time it was the same sentence:
+**styling something is a choice the reader made in the document, exactly as much as typing in
+it.**
 
 ## Remaining risks
 

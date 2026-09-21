@@ -1830,12 +1830,17 @@ def _table_lines(was: dict, mine: dict, live: dict, notes: list,
         live_rows = _align(then, now, _row_score(live_columns))
         mine_rows = _align(then, want, _row_score(mine_columns))
 
+    now_set, then_set = (_sets(rows) for rows in (here, old))
+
     def row_kept(w, l):
-        return _line_unchanged(then[w], now[l], live_columns, len(now[l]))
+        return (_line_unchanged(then[w], now[l], live_columns, len(now[l]))
+                and _same_set(then_set[w], now_set[l], live_columns))
 
     def column_kept(w, l):
-        return _line_unchanged([row[w] for row in then], [row[l] for row in now],
-                               live_rows, len(now))
+        return (_line_unchanged([row[w] for row in then], [row[l] for row in now],
+                                live_rows, len(now))
+                and _same_set([row[w] for row in then_set],
+                              [row[l] for row in now_set], live_rows))
 
     rows = _merged_lines(len(now), len(want), live_rows, mine_rows, row_kept,
                          dropped["row"])
@@ -1849,7 +1854,7 @@ def _table_lines(was: dict, mine: dict, live: dict, notes: list,
         for line in merged:
             if line.was is not None and line.mine is None and not line.gone:
                 notes.append(f"{key}: the source took away a {name}, but the document wrote "
-                             f"in it — kept")
+                             f"in it or styled it — kept")
         have = {line.mine for line in merged if line.mine is not None}
         settled[name] = sorted(dropped[name] | {m for _, m in pairs if m not in have})
         # And the other way round, which nothing said: the document deleted a line the
@@ -1993,6 +1998,30 @@ def _line_unchanged(was: list[str], live: list[str], across: list[tuple[int, int
     matched = {l for _, l in across}
     return (all(was[w] == live[l] for w, l in across)
             and all(not live[l].strip() for l in range(width) if l not in matched))
+
+
+def _sets(rows: list) -> list[list[tuple]]:
+    """How each cell of a grid is *set*, beside what `_texts` says it says."""
+    return [[tuple((_styled(b), _shape(b)) for b in cell) for cell in row]
+            for row in rows]
+
+
+def _same_set(was: list[tuple], live: list[tuple],
+              across: list[tuple[int, int]]) -> bool:
+    """Whether the document left a row (or column) styled as the base has it.
+
+    `_edited`'s rule at the size of a line, and the last place in this file that still
+    asked about a table in words alone: a line the source takes away goes unless the
+    document wrote in it, and a reader who small-caps a word of a cell — or centres it
+    — has made a choice in the document exactly as much as one who typed in it. With
+    only `_line_unchanged` to ask, the source's `deleteTableColumn` stood and the
+    reader's font size went with the column, and nothing in the report said so
+    (offline chain-8 seed 5300013, shape `themed`, shrunk to three steps: the source
+    adds a table, the reader styles a cell, the source drops that column). Only the
+    cells the two sides share are asked, as in `_line_unchanged`: how a cell the base
+    never had is set is not news about the line.
+    """
+    return all(was[w] == live[l] for w, l in across)
 
 
 def _merged_lines(n_live: int, n_mine: int, live: list[tuple[int, int]],
@@ -2667,14 +2696,30 @@ def requests(theirs: dict, merged: list[dict]) -> list[dict]:
             # always keeps, and let the empty one end up at the bottom.
             plans.append((tail, APPEND, _content_requests(tail, block, after="\n")
                           + _style_requests(tail, block)))
+    # The mirror image of `_orphan_range`, and the other way a mark can be somebody
+    # else's undoing: a block in front of a table gives up the **previous** block's
+    # paragraph mark (`_delete_range`), and where a range is all mark that delete
+    # destroys it — an empty paragraph the source kept comes out of the batch with no
+    # name at all. It then reads as no block of ours: standing in front of the body's
+    # opening table it is scaffolding by shape (`doc_ir._hide_trailer`), so it left the
+    # IR entirely and the key settled on some other empty paragraph, the source's order
+    # reading as never arrived (offline chain-10 seed 4200130, shape `two_tables`).
+    # Planted again here, with no `deleteNamedRange` in front of it: Docs has taken the
+    # range already, and a request naming an id that is gone throws out the batch.
+    eaten_marks = {start for start, end in cuts.values() if start < end}
+    for start in eaten_marks:
+        if start in empties:
+            replant.setdefault(start, empties[start])
     for at, live in replant.items():
         # The block's own indices are below the mark, so nothing written there has
         # moved them and its anchor is where `theirs` read it.
         low, high = doc_ir.anchor_range(live)
-        plans.append((at, REPLANT, [
-            {"deleteNamedRange": {"namedRangeId": live["rangeId"]}},
-            {"createNamedRange": {"name": doc_ir.KEY_PREFIX + live["key"],
-                                  "range": {"startIndex": low, "endIndex": high}}}]))
+        plans.append((at, REPLANT,
+                      ([] if at in eaten_marks else
+                       [{"deleteNamedRange": {"namedRangeId": live["rangeId"]}}])
+                      + [{"createNamedRange": {
+                          "name": doc_ir.KEY_PREFIX + live["key"],
+                          "range": {"startIndex": low, "endIndex": high}}}]))
 
     out: list[dict] = []
     # Back to front, so an earlier edit never moves a later one's indices, and at one

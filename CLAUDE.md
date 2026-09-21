@@ -2506,6 +2506,33 @@ keys, named ranges), `doc_merge.py` (pure planning), `doc_sync.py` (the commands
   `createParagraphBullets` inside a cell would have bulleted it (`doc_world._own`: a table ends
   the paragraph in front of it, as `documents.get` and the world's own named ranges say). All
   four clean afterwards.
+  **A chip in a cell, and the mark a delete borrows.** Two more from that corner, one of each
+  kind. The sync's: a block in front of a table gives up the **previous** block's paragraph mark
+  (its own being the undeletable newline before the table, `_delete_range`), and where that
+  previous block is an empty paragraph its named range *is* that mark - a range dying with its
+  text - so the delete takes the name of a block the source never asked to touch; unnamed, an
+  empty paragraph in front of what is now the body's opening table is scaffolding by shape
+  (`doc_ir._hide_trailer`'s `lead`) and leaves the IR entirely, its key settling on some other
+  empty paragraph, the source's order reading as never arrived, nothing reported (chain-10 seed
+  4200130). The mirror image of `_orphan_range` - there a range outlives its block, here a block
+  outlives its range - repaired in the same batch with **no `deleteNamedRange`** in front of it:
+  Docs has taken the id already and a request naming one that is gone throws out the batch. The
+  op: `cell_chip` on both sides, since `src_add_chip` and `src_add_picture` pick from
+  `part["blocks"]`, so a frozen run had never been asked for *inside a table* - where `rewrite`,
+  the only way a block whose frozen runs the source changed is written at all, might have stopped.
+  It does not; what stopped was the **judge**. `_cells_arrived` asked `oracle.cells_of`, which is
+  `text_of` per cell, so a chip was counted by its **face** - and a chip's face is the document's
+  to draw, which `_says` had learned at the size of a block and the cell was the last place still
+  asking in the old language: 16 regression seeds failed at once, every one of them the judge's
+  own (`_cell_says`). The four campaigns then found the same rule one size further down, in
+  2,100 rounds: a line the source takes away goes **unless the document wrote in it**, and
+  `_line_unchanged` asked the cells' text, so a reader who small-capped or resized a word of a
+  cell had `deleteTableColumn` carry it off with the column, unreported (chain-8 seed 5300013,
+  shape `themed`, shrunk to three steps). `_same_set` asks `_styled` and `_shape` of the cells
+  both sides share and the line is kept as one written in would be ("wrote in it or styled it").
+  Block, table, line: the third size at which the same sentence had to be said - **styling
+  something is a choice the reader made in the document, exactly as much as typing in it**.
+  Clean afterwards at 300 rounds chain 10 `two_tables`, 600 chain 6, 800 chain 4 and 400 chain 8.
 - Live suite (opt-in, marker `docs`, ~5 min): `python -m pytest -m docs tests/test_docs_live.py`
   pushes a document per test, edits both sides, syncs, checks a second sync writes nothing, and
   deletes the document. Offline: `tests/test_doc_ir.py`, `test_doc_merge.py`, `test_doc_sync.py`.

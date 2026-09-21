@@ -416,8 +416,10 @@ def test_the_campaign_sees_a_theme_undone(monkeypatch):
 
     `doc_merge.paragraph_style` used to give `alignment` a value always — START
     whenever the file said nothing, which is also what a heading centred by the
-    document's theme says. Measured over the first 40 `themed` seeds at chain 2, the
-    campaign catches 6 of them; these sixteen hold two.
+    document's theme says. Measured over the first 60 `themed` seeds at chain 2, the
+    campaign catches 15 of them; these 24 hold five (6, 17, 19, 21, 23). Every op
+    added to the campaign changes what every seed draws, so the window is measured
+    again each time: `cell_chip` left the old sixteen with one.
 
     The defect now sits behind two doors, and the probe opens both: the settle puts
     the plan's whole paragraph style back on a block this run wrote whose style the
@@ -437,11 +439,11 @@ def test_the_campaign_sees_a_theme_undone(monkeypatch):
     monkeypatch.setattr(doc_merge, "paragraph_style", broken)
     monkeypatch.setattr(doc_merge, "_unwritten", lambda mine, live: [])
     caught = 0
-    for seed in range(16):
+    for seed in range(24):
         found = fuzz_docs.offline_round(
             seed, script=fuzz_docs.draw(seed, 2, shape="themed"))
         caught += "theme_undone" in {f["kind"] for f in oracle.failures(found)}
-    assert caught >= 2, "the campaign no longer reaches the defect it was built for"
+    assert caught >= 3, "the campaign no longer reaches the defect it was built for"
 
 
 MARKED = {"HEADING_1": {"align", "bold"}}
@@ -569,11 +571,11 @@ def test_the_campaign_sees_a_mark_the_file_cannot_say_is_off(monkeypatch):
     `doc_merge._text_style` used to write a mark only when it was on, which is all the
     file could say before `doc_ir.MARK_FIELDS`: the first source edit to rewrite the
     block then names no bold, and the word goes back to wearing the theme's. Measured
-    over 300 `themed` seeds at chain 3 the campaign catches 6 (7 before `cell_style`
-    and `restyle_cell`, 11 before `paste_block`, 13 before that: every op added to
-    the campaign changes what every seed draws, and a window that held four can come
-    to hold none — this one did, twice). These 300 hold six: 184, 215, 225, 233, 340
-    and 386, of which four are in the window.
+    over 240 `themed` seeds at chain 3 the campaign catches 5 (6 before `cell_chip`,
+    7 before `cell_style` and `restyle_cell`, 11 before `paste_block`, 13 before that:
+    every op added to the campaign changes what every seed draws, and a window that
+    held four can come to hold none — this one did, three times). Seeds 180 to 420
+    hold five: 189, 297, 302, 303 and 416, of which four are in the window.
     """
     real = doc_merge._text_style
 
@@ -586,7 +588,7 @@ def test_the_campaign_sees_a_mark_the_file_cannot_say_is_off(monkeypatch):
 
     monkeypatch.setattr(doc_merge, "_text_style", broken)
     caught = 0
-    for seed in range(180, 300):
+    for seed in range(180, 310):
         found = fuzz_docs.offline_round(
             seed, script=fuzz_docs.draw(seed, 3, shape="themed"))
         caught += "styling_restored" in {f["kind"] for f in oracle.failures(found)}
@@ -1898,6 +1900,97 @@ def test_a_style_written_in_a_cell_stays_out_of_the_paragraph_after_the_table():
     live = doc_world.read_ir(world, ours, base)
     assert live["blocks"][1]["rows"][0][1][0]["align"] == "right"
     assert live["blocks"][2]["align"] == "center"
+
+
+def test_an_empty_paragraph_whose_mark_a_delete_borrows_keeps_its_name():
+    """The mirror image of `_orphan_range`: a delete that destroys somebody else's name.
+
+    A block standing in front of a table gives up the **previous** block's paragraph
+    mark (`_delete_range`), and where that previous block is empty its named range *is*
+    that mark, so Docs takes the range with it. Unnamed, the empty paragraph in front
+    of what is now the body's opening table reads as scaffolding
+    (`doc_ir._hide_trailer`'s `lead`) and leaves the IR entirely: its key settled on
+    another empty paragraph, the source's order read as one that never arrived, and
+    nothing was reported (offline chain-10 seed 4200130, shape `two_tables`). It is
+    planted again in the same batch, with no `deleteNamedRange` in front of it — Docs
+    has taken the id already, and a request naming one that is gone throws out the
+    whole batch.
+    """
+    world, ours, base = _build([_para(""), _para("Gone."), _table([["a", "b"]]),
+                                _para("After.")])
+    assert _keys(doc_world.read_ir(world, ours, base))[0] == "paragraph:empty"
+    ours["blocks"] = [b for b in ours["blocks"] if b["key"] != "paragraph:gone"]
+    report, ours, base = fuzz_docs.sync_once(world, ours, base)
+    assert _keys(doc_world.read_ir(world, ours, base)) == \
+        ["paragraph:empty", "table:a", "paragraph:after"]
+    again, _, _ = fuzz_docs.sync_once(world, copy.deepcopy(ours), copy.deepcopy(base))
+    assert again["applied"] == []
+
+
+def test_a_chip_the_source_puts_in_a_table_cell_is_written():
+    """A cell is a block with no key of its own, inside a structural element the
+    planner treats as one thing — and `rewrite` is the only way a block whose frozen
+    runs the source changed is written at all. Whether that path reaches inside a table
+    was a question the campaign could not ask until `cell_chip`, `src_add_chip` and
+    `src_add_picture` both picking from `part["blocks"]`. It does.
+    """
+    world, ours, base = _build([_para("One."), _table([["a", "b"]]), _para("Two.")])
+    ours["blocks"][1]["rows"][0][1][0].setdefault("runs", []).append(
+        {"chip": "person", "frozen": True, "text": "Grace",
+         "value": "grace@example.com"})
+    report, ours, base = fuzz_docs.sync_once(world, ours, base)
+    cell = doc_world.read_ir(world, ours, base)["blocks"][1]["rows"][0][1][0]
+    assert [oracle.frozen_key(r) for r in cell["runs"] if r.get("frozen")] == \
+        [("person", "grace@example.com")]
+    again, _, _ = fuzz_docs.sync_once(world, copy.deepcopy(ours), copy.deepcopy(base))
+    assert again["applied"] == []
+
+
+def test_a_column_the_reader_styled_is_not_one_the_source_may_take_away():
+    """`_edited`'s rule at the size of a line, and the last place in `doc_merge` that
+    still asked about a table in words alone.
+
+    A line the source takes away goes unless the document wrote in it, and `_line_
+    unchanged` asked the cells' text — so a reader who small-capped a word of a cell,
+    or centred it, had `deleteTableColumn` carry that off with the column, and nothing
+    in the report said so (offline chain-8 seed 5300013, shape `themed`, shrunk to
+    three steps: the source adds a table, the reader styles one of its cells, the
+    source drops that cell's column). `_same_set` is the other half of the question.
+    """
+    world, ours, base = _build([_para("One."), _table([["a", "b"], ["c", "d"]]),
+                                _para("Two.")])
+    cell = doc_world.read_ir(world, ours, base)["blocks"][1]["rows"][1][0][0]
+    world.apply([{"updateTextStyle": {
+        "range": {"startIndex": cell["span"][0], "endIndex": cell["span"][1] - 1},
+        "textStyle": {"smallCaps": True}, "fields": "smallCaps"}}])
+    for row in ours["blocks"][1]["rows"]:
+        row.pop(0)                                  # the source drops the column
+    report, ours, base = fuzz_docs.sync_once(world, ours, base)
+    kept = doc_world.read_ir(world, ours, base)["blocks"][1]
+    assert [[doc_merge.block_text(b) for b in cell] for row in kept["rows"]
+            for cell in row] == [["a"], ["b"], ["c"], ["d"]]
+    assert kept["rows"][1][0][0]["runs"][0].get("smallcaps") is True
+    assert any("took away a column" in note for note in report["notes"])
+    again, _, _ = fuzz_docs.sync_once(world, copy.deepcopy(ours), copy.deepcopy(base))
+    assert again["applied"] == []
+
+
+def test_the_campaigns_cell_judge_asks_what_a_chip_is_not_what_it_reads_as(monkeypatch):
+    """`_cell_says`, and why `oracle.cells_of` cannot be the question.
+
+    A chip's face is the document's to draw — the file says `Grace` and Docs renders
+    the object character off the address. `_says` had learned that at the size of a
+    block and `_cells_arrived` had not, comparing `text_of` per cell, so the first run
+    of `cell_chip` failed 16 regression seeds at once and every one of them was the
+    judge's own. The test above is the sync's side of the same round.
+    """
+    script = {"shape": "two_tables",
+              "steps": [{"reader": [], "source": [("cell_chip", 612933180)]}]}
+    assert not oracle.failures(fuzz_docs.run_script(copy.deepcopy(script), Counter()))
+    monkeypatch.setattr(fuzz_docs, "_cell_says", lambda block: {
+        at: (text, ()) for at, text in oracle.cells_of(block).items()})
+    blind = oracle.failures(fuzz_docs.run_script(copy.deepcopy(script), Counter()))
+    assert {f["kind"] for f in blind} == {"cell_lost"}
 
 
 def test_a_bold_the_source_grew_over_the_word_before_it_is_written():

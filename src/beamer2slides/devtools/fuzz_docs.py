@@ -670,6 +670,29 @@ def read_cell_style(rng, part, tab):
                                  "textStyle": style, "fields": field}}], [table.get("key")]
 
 
+def read_cell_chip(rng, part, tab):
+    """The reader putting a person chip or a picture *into a table cell*.
+
+    A table of owners is the commonest place in a real document for a chip to be, and
+    it was the one place the campaign could not put one: `read_insert_chip` and
+    `read_insert_picture` pick from `part["blocks"]` like every other reader op. What
+    it drives is a frozen run inside a cell — `_merge_cell`'s side of `_rewritten_runs`,
+    `_table_movable`'s refusal to rebuild a table holding one, and the oracle's chip
+    and picture accounting where the block that holds them has no key of its own.
+    """
+    spots = [(t, b) for t in _tables(part) for _, _, b in _cells(t) if b.get("span")]
+    if not spots:
+        return [], []
+    table, block = rng.choice(spots)
+    at = _at(block["span"][1] - 1, tab)
+    if rng.random() < 0.5:
+        return [{"insertPerson": {
+            "location": at,
+            "personProperties": {"email": "reader@example.com"}}}], [table.get("key")]
+    return [{"insertInlineImage": {
+        "location": at, "uri": "https://example.invalid/reader.png"}}], [table.get("key")]
+
+
 def read_cell_type(rng, part, tab):
     spots = [(t, r, c, b) for t in _tables(part) for r, c, b in _cells(t) if b.get("span")]
     if not spots:
@@ -827,7 +850,7 @@ READER = {
     "heading": read_heading,
     "face": read_face, "measure": read_measure,
     "renumber_list": read_renumber_list, "cell_type": read_cell_type,
-    "cell_style": read_cell_style,
+    "cell_style": read_cell_style, "cell_chip": read_cell_chip,
     "add_row": read_add_row, "delete_row": read_delete_row,
     "add_column": read_add_column, "delete_column": read_delete_column,
     "insert_picture": read_insert_picture, "insert_chip": read_insert_chip,
@@ -1044,6 +1067,33 @@ def src_restyle_cell(rng, ir, touched):
         _mark_run(rng, cell)
 
 
+def _source_cells(ir) -> list[dict]:
+    return [inner for part in _parts(ir) for b in part.get("blocks", [])
+            if b.get("kind") == "table" for row in b["rows"] for cell in row
+            for inner in cell]
+
+
+def src_cell_chip(rng, ir, touched):
+    """The source asking for a chip or a picture *in a table cell*.
+
+    No request edits an embedded object, so a block whose frozen runs the source
+    changed is written again from nothing (`rewrite`) — and a cell is a block with no
+    key, inside a structural element the planner treats as one thing. Whether that
+    path exists inside a table at all is the question; the campaign could not ask it,
+    `src_add_chip` and `src_add_picture` both picking from `part["blocks"]`.
+    """
+    cells = _source_cells(ir)
+    if not cells:
+        return
+    cell = rng.choice(cells)
+    name = rng.choice(FRESH)
+    cell.setdefault("runs", []).append(
+        {"chip": "person", "frozen": True, "text": "Grace", "value": "grace@example.com"}
+        if rng.random() < 0.5 else
+        {"chip": "image", "frozen": True, "text": "",
+         "src": f"media/{name}.png", "sha": f"sha-{name}"})
+
+
 def src_add_picture(rng, ir, touched):
     spot = _pick(rng, ir)
     if not spot:
@@ -1134,7 +1184,7 @@ SOURCE = {
     "reword": src_reword, "append": src_append, "drop": src_drop, "move": src_move,
     "restyle": src_restyle, "retitle": src_retitle, "add_table": src_add_table,
     "regrid": src_regrid, "edit_cell": src_edit_cell, "restyle_cell": src_restyle_cell,
-    "add_picture": src_add_picture,
+    "cell_chip": src_cell_chip, "add_picture": src_add_picture,
     "add_chip": src_add_chip, "add_tab": src_add_tab, "rename_tab": src_rename_tab,
     "drop_tab": src_drop_tab, "collide": src_collide,
 }
@@ -1715,6 +1765,35 @@ def _says(block: dict) -> tuple:
             oracle.frozen_marks(block))
 
 
+def _cell_says(block: dict) -> dict:
+    """What each cell of a table says, in `_says`' language rather than `cells_of`'s.
+
+    The same subtraction one size down, and it had to be made twice because the two
+    judges were written a week apart: `oracle.cells_of` is `text_of` per cell, so a
+    chip in a cell is counted by its **face**, and the face is the document's to draw
+    — a person chip the source puts into a cell comes back as the object character, so
+    the edit read as one that never arrived and every seed drawing `cell_chip` failed
+    at once. The cell is the last place in this file that asked in the old language.
+    """
+    out = {}
+    for r, row in enumerate(block.get("rows", [])):
+        for c, cell in enumerate(row):
+            said = [_says(b) for b in cell]
+            marks: Counter = Counter()
+            for _, m in said:
+                marks += m
+            out[(r, c)] = (" ".join(w for w, _ in said),
+                           tuple(sorted(marks.items())))
+    return out
+
+
+def _cell_text(said: tuple) -> str:
+    """One cell's `_cell_says` as a line a person can read in a finding."""
+    words, marks = said
+    return words + "".join(f" [{kind} {value}]" for (kind, value), n in marks
+                           for _ in range(n))
+
+
 def _cells_arrived(key, block, here, file_b, then, said, tab, step,
                    seen: Counter) -> list[dict]:
     """A cell the source rewrote, in a table whose words the reader did not touch,
@@ -1744,12 +1823,12 @@ def _cells_arrived(key, block, here, file_b, then, said, tab, step,
     """
     if _grid(block) is None or _grid(file_b) != _grid(block):
         return []                     # the source regridded: the half above asks
-    base_cells, doc_cells = (Counter(oracle.cells_of(b).values())
+    base_cells, doc_cells = (Counter(_cell_says(b).values())
                              for b in (block, here))
     if doc_cells - base_cells:
         return []                     # the reader wrote in it: the merge decides
-    was_cells, file_cells = (oracle.cells_of(b) for b in (block, file_b))
-    after = Counter(oracle.cells_of(then).values())
+    was_cells, file_cells = (_cell_says(b) for b in (block, file_b))
+    after = Counter(_cell_says(then).values())
     out = []
     for at, text in file_cells.items():
         old = was_cells.get(at)
@@ -1762,8 +1841,8 @@ def _cells_arrived(key, block, here, file_b, then, said, tab, step,
         out.append(oracle.finding(
             "cell_lost", "loss",
             f"step {step}: the source rewrote the cell at {at} of the table {key!r} "
-            f"to {text!r}, the reader wrote nothing in that table, and no cell of it "
-            f"says so when the sync is over", tab=tab, key=key))
+            f"to {_cell_text(text)!r}, the reader wrote nothing in that table, and no "
+            f"cell of it says so when the sync is over", tab=tab, key=key))
     return out
 
 
