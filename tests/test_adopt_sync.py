@@ -182,6 +182,165 @@ def test_a_layouts_words_are_the_same_drawing_however_much_room_they_have():
     assert not adopt_sync.same_drawing({**ink, "bbox": [172, 200, 281, 223]}, place), "outside it"
 
 
+# ---------------------------------------------------------------- one box, read back as several
+
+def lined(eid: str, box, text: str, baseline: float, size: float = 14.0, **extra) -> dict:
+    """A conversion element with the line geometry `emit` lays a text box out from."""
+    x0, y0, x1, y1 = box
+    return {"id": eid, "kind": "text", "role": "body", "bbox": [x0, y0, x1, y1],
+            "paragraphs": [{"runs": [{"text": text}], "align": "left", "level": 0, "bullet": None,
+                            "size": size, "text_x0": x0, "tab_x0": None, "wrap_limit": None,
+                            "lines": [{"baseline": baseline, "x0": x0, "x1": x1}]}], **extra}
+
+
+def records(elements: list[dict]) -> list[dict]:
+    return [{"kind": e["kind"], "bbox": e["bbox"], "text": adopt_sync.conv_words(e)} for e in elements]
+
+
+def test_one_box_the_converter_read_as_two_is_folded_back_into_one():
+    """`adopt` wrote one `slidebox`; the deck's heading stands 44 pt above its body, which is more
+    than the 1.45 em `classify` keeps a paragraph together over, so the conversion has two
+    elements and neither of them is the object."""
+    conv = [lined("a", (30, 40, 130, 56), "Why it matters", 52),
+            lined("b", (30, 96, 260, 112), "Three things happened", 108)]
+    objects = adopt_sync.object_records(
+        [deck_element("gA", (30, 40, 260, 112), "Why it matters Three things happened")])
+    assert adopt_sync.composites(records(conv), objects) == {0: [0, 1]}
+    folded, gone = adopt_sync.fold_composites(conv, objects)
+    assert gone == ["b"]
+    assert len(folded) == 1
+    assert folded[0]["id"] == "a", "the fold stands where its first part stood"
+    assert folded[0]["bbox"] == [30, 40, 260, 112], "the union of the parts"
+    assert [p["runs"][0]["text"] for p in folded[0]["paragraphs"]] == ["Why it matters",
+                                                                      "Three things happened"]
+    assert folded[0]["composite"] is True
+
+
+def test_the_folded_element_is_the_object_the_pairing_could_not_find():
+    """The whole point: apart, each half pairs with nothing, because the thing it is part of is
+    the whole box. Measured over the corpus, this is 394 of the pairing's 1,844 misses."""
+    conv = [lined("a", (30, 40, 260, 56), "Why this matters to everyone", 52),
+            lined("b", (30, 96, 260, 112), "And what happened after that", 108)]
+    deck = [deck_element("gA", (30, 40, 260, 112),
+                         "Why this matters to everyone And what happened after that")]
+    pairs, why = adopt_sync.pair_elements(conv, deck)
+    assert pairs == {} and set(why) == {0, 1}
+    folded, _ = adopt_sync.fold_composites(conv, adopt_sync.object_records(deck))
+    assert adopt_sync.pair_elements(folded, deck) == ({0: 0}, {})
+
+
+def test_the_gap_that_split_the_box_comes_back_out_of_the_baselines():
+    """Why a fold may be a concatenation and nothing more. `emit` lays a text box out from its
+    paragraphs' own lines, so the space that made `classify` call these two elements is written
+    again as the second paragraph's `spaceAbove` - nothing has to remember it, because it was
+    never thrown away."""
+    from beamer2slides import emit
+
+    conv = [lined("a", (30, 40, 130, 56), "Why it matters", 52),
+            lined("b", (30, 96, 260, 112), "Three things happened", 108)]
+    objects = adopt_sync.object_records(
+        [deck_element("gA", (30, 40, 260, 112), "Why it matters Three things happened")])
+    folded, _ = adopt_sync.fold_composites(conv, objects)
+    paras = folded[0]["paragraphs"]
+    baselines = [[l["baseline"] for l in p["lines"]] for p in paras]
+    ratios, space_above = emit.vertical_layout(paras, baselines, [14.0, 14.0])
+    assert space_above[1] > 0, "the gap is written, not lost"
+    lands = 52 + emit.pitch_between(14.0, ratios[0], 14.0, ratios[1]) + space_above[1]
+    assert abs(lands - 108) < 0.01, "the second paragraph's baseline lands where the PDF has it"
+
+
+def test_a_fold_never_turns_a_persons_filled_shape_into_a_text_box():
+    """The one thing it may not do. A card with a title and a caption on it is a `shape` in the
+    deck, and writing a text box over it would lose the fill and everything else standing on it.
+    145 of the corpus's 416 candidates are this."""
+    conv = [lined("a", (30, 40, 130, 56), "Why it matters", 52),
+            lined("b", (30, 96, 260, 112), "Three things happened", 108)]
+    card = adopt_sync.object_records([deck_element("gA", (28, 38, 262, 114),
+                                                   "Why it matters Three things happened",
+                                                   kind="shape")])
+    assert adopt_sync.composites(records(conv), card) == {}
+
+
+def test_an_icon_on_a_captioned_card_is_not_folded_into_the_caption():
+    """The same rule read the other way: a member that is not text would come back as words."""
+    conv = [lined("a", (30, 40, 54, 64), "", 60),
+            lined("b", (30, 96, 260, 112), "Three things happened", 108)]
+    conv[0]["kind"] = "image"
+    objects = adopt_sync.object_records([deck_element("gA", (30, 40, 260, 112),
+                                                      "Three things happened")])
+    assert adopt_sync.composites(records(conv), objects) == {}
+
+
+def test_an_empty_box_is_no_composite():
+    """`SequenceMatcher` scores two empty strings 1.00, so an object that says nothing reads as
+    one the converter split into everything drawn over it - the degenerate match `same_drawing`
+    was written for, one dimension along."""
+    conv = [lined("a", (30, 40, 130, 56), "Why it matters", 52),
+            lined("b", (30, 96, 260, 112), "Three things happened", 108)]
+    empty = adopt_sync.object_records([deck_element("gA", (28, 38, 262, 114), "")])
+    assert empty[0]["text"] == ""
+    assert adopt_sync.composites(records(conv), empty) == {}
+
+
+def test_an_element_that_already_says_it_all_is_the_box_and_not_a_part_of_it():
+    """The object's words are one element's; the other is a note somebody dropped on top of it."""
+    conv = [lined("a", (30, 40, 260, 56), "Why it matters, and to whom", 52),
+            lined("b", (200, 96, 250, 108), "p. 4", 104)]
+    objects = adopt_sync.object_records([deck_element("gA", (30, 40, 260, 112),
+                                                      "Why it matters, and to whom")])
+    assert adopt_sync.composites(records(conv), objects) == {}
+
+
+def test_elements_that_do_not_add_up_to_what_the_object_says_are_left_alone():
+    conv = [lined("a", (30, 40, 130, 56), "Why it matters", 52),
+            lined("b", (30, 96, 260, 112), "Three things happened", 108)]
+    objects = adopt_sync.object_records([deck_element("gA", (30, 40, 260, 112),
+                                                      "An entirely different sentence lives here")])
+    assert adopt_sync.composites(records(conv), objects) == {}
+
+
+def test_an_element_two_objects_claim_is_folded_into_neither():
+    """One element cannot be part of two boxes, and which box it belongs to is exactly what is
+    not known."""
+    conv = [lined("a", (30, 40, 130, 56), "Why it matters", 52),
+            lined("b", (30, 96, 260, 112), "Three things happened", 108),
+            lined("c", (30, 150, 260, 166), "And then this", 162)]
+    objects = adopt_sync.object_records(
+        [deck_element("gA", (30, 40, 260, 112), "Why it matters Three things happened"),
+         deck_element("gB", (30, 96, 260, 166), "Three things happened And then this")])
+    assert adopt_sync.composites(records(conv), objects) == {}
+
+
+def test_a_picture_anchored_to_a_folded_part_follows_it():
+    """A formula or an icon in one of those paragraphs belongs to the box the paragraphs are now
+    in; an anchor left pointing at an element that no longer exists is a broken deck."""
+    conv = [lined("a", (30, 40, 130, 56), "Why it matters", 52),
+            lined("b", (30, 96, 260, 112), "Three things happened", 108),
+            {"id": "m", "kind": "image", "role": "math", "bbox": [262, 96, 280, 112], "anchor": "b"}]
+    objects = adopt_sync.object_records(
+        [deck_element("gA", (30, 40, 260, 112), "Why it matters Three things happened")])
+    folded, gone = adopt_sync.fold_composites(conv, objects)
+    assert gone == ["b"]
+    assert [e["id"] for e in folded] == ["a", "m"]
+    assert folded[1]["anchor"] == "a"
+
+
+def test_a_slide_is_folded_against_the_deck_slide_its_label_names():
+    """Folding comes before the slides are paired and pairing reads the elements folding changes,
+    so the two sides find each other by the label `adopt` slugged from the slide's objectId."""
+    tgt = target([[deck_element("gA", (30, 40, 260, 112), "Why it matters Three things happened")]])
+    conv = conversion(tgt, [[lined("a", (30, 40, 130, 56), "Why it matters", 52),
+                             lined("b", (30, 96, 260, 112), "Three things happened", 108)]])
+    folds = adopt_sync.deck_folds(tgt)
+    label = conv["slides"][0]["label"]
+    assert list(folds) == [label]
+    elsewhere = copy.deepcopy(conv)
+    adopt_sync.fold_slides(elsewhere, {"some-other-slide": folds[label]})
+    assert [e["id"] for e in elsewhere["slides"][0]["elements"]] == ["a", "b"], "no label, no fold"
+    adopt_sync.fold_slides(conv, folds)
+    assert [e["id"] for e in conv["slides"][0]["elements"]] == ["a"]
+
+
 # ---------------------------------------------------------------- the base
 
 @pytest.fixture
@@ -262,6 +421,35 @@ def test_the_base_records_the_decks_own_page_and_scale(adopted):
     assert base["page_size"] == [453.54, 255.12]
     assert base["scale"] == pytest.approx(720.0 / 453.54)
     assert merge.deck_scale(base) == pytest.approx(720.0 / 453.54)
+
+
+def test_the_base_records_the_boxes_every_later_sync_folds_against(tmp_path):
+    """A fold is a claim about the deck's geometry, and the deck's geometry is the one thing a
+    later sync cannot read (it converts a source, it does not read Drive). So the base carries the
+    boxes rather than the folds: the source changes between syncs, those do not."""
+    tgt = target([[deck_element("gA", (30, 40, 260, 112), "Why it matters Three things happened")]])
+    pres = presentation([[live_shape("gA", (48, 64, 413, 178), "Why it matters\nThree things happened")]])
+    conv = conversion(tgt, [[lined("a", (30, 40, 130, 56), "Why it matters", 52),
+                             lined("b", (30, 96, 260, 112), "Three things happened", 108)]])
+    folds = adopt_sync.deck_folds(tgt)
+    adopt_sync.fold_slides(conv, folds)
+    pdf = tmp_path / "main.pdf"
+    pdf.write_bytes(b"%PDF-1.4\n")
+    base = adopt_sync.build_base(conv, tmp_path, tgt, pres, pdf, folds=folds)
+    label = conv["slides"][0]["label"]
+    assert base["adopt"]["boxes"][label] == [{"object": "gA", "kind": "text", "bbox": [30, 40, 260, 112],
+                                             "text": "Why it matters Three things happened"}]
+    assert base["adopt"]["paired"] == 1, "the folded element is tied to the person's object"
+    assert base["adopt"]["unpaired"] == []
+
+
+def test_a_base_with_no_boxes_folds_nothing(adopted):
+    """Every base `convert` ever wrote, and one an older `adopt` wrote: the read has to be a
+    question, not an assumption."""
+    deck = {"slides": [{"label": "x", "elements": [conv_element("a", (30, 40, 130, 56), "Why")]}]}
+    adopt_sync.fold_slides(deck, (adopted["base"].get("adopt") or {}).get("boxes") or {})
+    adopt_sync.fold_slides(deck, {})
+    assert [e["id"] for e in deck["slides"][0]["elements"]] == ["a"]
 
 
 def test_the_base_claims_no_master_background(adopted):

@@ -1398,6 +1398,96 @@ tied to any object of this deck; change them in the deck itself" sends them to l
 a footer that is not on the slide. It is on the layout, and Slides has a door for that
 (Slide > Edit theme), which is what the warning now says.
 
+### One box, read back as several
+
+The other half of the misses is the same mistake the other way up. `adopt` writes one `slidebox`
+per object the deck has, and the converter then reads the compiled page back with no idea it was
+ever one box: where the person's paragraphs stand more than a line and a half apart — a heading over
+its body, an agenda with air between its items — `classify` calls them separate elements (that is
+`PageClassifier`'s own rule, and on a beamer talk it is right). Each of them then pairs with
+nothing, and it cannot: the thing each one is part of is the whole box, which stands where none of
+them stands and says what none of them says. Nothing was lost and nothing is wrong — the deck still
+looks the way the person built it — but every one of those elements is one no sync will ever write.
+
+So the conversion is folded back against the deck's own boxes before anything is paired
+(`adopt_sync.fold_composites`, `fold_slides`). A deck object holds a fold when every converted
+element inside it is text, none of them says on its own what the object says, and together they do
+(`_holds` 0.85 of an element's area inside the box, `_says_it` a 0.85 `SequenceMatcher` ratio). The
+fold itself is a **concatenation and nothing more**: the paragraphs in reading order, the boxes
+unioned, the spans and strokes joined, the id and role of the first part, and an anchored picture
+re-pointed at it. That is the whole reason it is safe to write back — `emit.vertical_layout` lays a
+text box out from its paragraphs' own lines, reading each `spaceAbove` off the baselines the page
+really has, so the gaps that made `classify` split the box come back out of the geometry when the
+box is written again. Nothing has to remember the spacing, because the spacing was never thrown away.
+
+Folding is a claim about somebody's slide, so it is made only where the words say so. Of the
+corpus's 416 objects holding two or more converted elements, **105 are folded** (459 elements) and
+five rules refuse the other 311:
+
+- the object has to **be text** (145 are not): the commonest thing holding a crowd of elements is a
+  panel or a card, and a fold writes a text box — over a person's filled shape it would lose the
+  fill and everything standing on it;
+- every element has to be text too (111 are not), the same reason read the other way: the icon on a
+  captioned card would come back as the caption's words;
+- no element may already say what the object says **on its own** (41 do): that element is the box,
+  and the others are things standing on it;
+- together they have to say what the object says (14 do not);
+- and the object has to say something at all, or an empty text box reads as one the converter split
+  into everything drawn over it — `SequenceMatcher` scores two empty strings 1.00, the degenerate
+  match `same_drawing` was written for. (Nothing in the corpus reaches it, the object-kind rule
+  catching the empty panels first; it is there because that rule is about the fill and this one is
+  about the claim.)
+
+Last, nothing is folded where **two objects claim one element**: an element cannot be part of two
+boxes, and which one it belongs to is exactly what is not known.
+
+Measured over the corpus, folding takes **394 elements off the 1,844 the pairing misses** (21%), and
+it falls hardest on the decks this was worst at — 136 of intro-lecture's 170 misses, 106 of
+creandum-board's 140, 38 of gdg24's 136, 14 of ds-lecture's 15. Every folded element then *pairs*
+(each deck's drop in misses is exactly what it folded), and no deck's paired count fell: folding also
+takes rivals away, which unblocks pairings next to it.
+
+That measurement is of the pairing alone, so six decks were also run end to end offline — a real
+`adopt_sync.record()` off the corpus cache (`target.json`, `presentation.json` and the source tree a
+benchmark run left), compiling with no Google call and no Drive write, once, with both bases built
+from the one conversion:
+
+| deck | paired | unpaired | from layout | folds | tied to an object |
+| --- | --- | --- | --- | --- | --- |
+| ds-lecture | 27 → 30 | 15 → 1 | 0 | 5 | 5 |
+| creandum-board | 102 → 110 | 135 → 29 | 5 → 5 | 14 | 14 |
+| intro-lecture | 73 → 85 | 170 → 34 | 0 | 21 | 21 |
+| sc-dark-modern | 109 → 112 | 66 → 55 | 0 | 5 | 5 |
+| hebrew-lesson | 29 → 31 | 176 → 160 | 39 → 39 | 4 | 4 |
+| cs161-net | 335 → 336 | 81 → 78 | 31 → 31 | 2 | 2 |
+| solidity-survey | 100 → 100 | 33 → 33 | 74 → 74 | 0 | 0 |
+
+Two things there are worth more than the numbers. **Every fold is tied to one of the person's
+objects** — 51 of 51 — which is the point of the exercise and not something the pairing owed it.
+And the `from layout` column never moves: an element the deck's *theme* draws is never swallowed
+into one of the slide's own boxes, so the two answers to "why did this not pair" stay apart.
+The last link is the write, since a folded element is an element nothing in `emit` has ever been
+handed: each one was put through `emit.plan_offline`, which is what gives `sync` its
+`DeckPlan.slide_parts`, and every one of the 51 comes out as a text box at the fold's own box
+carrying exactly the text the fold joined.
+
+**The base records the boxes, not the folds** (`adopt.boxes`, per frame label): they are the deck's
+geometry and not a decision, and the source is what changes between syncs. `sync.build_ours` reads
+them off the base itself and folds its own conversion the same way, before anything is keyed — the
+two sides of a merge have to be describing the same boxes, or the first sync would read every fold
+as a change that had already arrived. The key is the frame **label** and not the slide index,
+because folding comes before the slides are paired and pairing reads the very elements folding
+changes (`identity.slide_info`); for an adopted deck a label is a slug of the slide's own
+`objectId`, so it is the one name both sides agree on with nothing computed. A base with no `boxes`
+— every base this converter wrote before, and every converted deck's — folds nothing.
+
+**The offline campaign is blind to this by construction** and says so:
+`fuzz_world.build_adopt_base` models a base directly and never runs `convert_source`, so
+`fuzz_sync offline --first-sync` proves the fold regresses nothing and proves nothing about the
+fold. What stands in for it is the table above and `tests/test_adopt_sync.py`'s own section, where
+each of the five refusals, the two-objects rule, the anchored picture, the label keying and — the
+one that matters — the gap coming back out of the baselines are a test apiece.
+
 **The refusals** (`adopt_sync.problems`, one message, `--force-adopted-deck` to go ahead anyway):
 
 - **no way back.** `--backup auto` (the default) exports the deck as .pptx before sync's first

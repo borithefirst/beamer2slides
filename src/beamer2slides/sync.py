@@ -228,7 +228,13 @@ def build_ours(pdf: Path, work: Path, base: dict, overlays: str = "last",
 
     `page_width`: how wide the deck this will be written into is, in slide pt (default: the
     SLIDE_W frame `convert` makes). A deck `adopt` took over is whatever size the person made it,
-    and every box this plan holds is PDF pt times the scale that width gives."""
+    and every box this plan holds is PDF pt times the scale that width gives.
+
+    A base `adopt` recorded also carries the deck's own boxes (`adopt_sync.deck_folds`), and what
+    one of them the converter reads back as several is put together again before anything is keyed
+    (`adopt_sync.fold_slides`) - the same fold the base's own side was built with, or the two sides
+    of the merge would not be describing the same boxes."""
+    from . import adopt_sync
     from .classify import classify
     from .emit import SLIDE_W, DeckPlan, merge_blocks
     from .extract import extract, select_overlays
@@ -243,6 +249,7 @@ def build_ours(pdf: Path, work: Path, base: dict, overlays: str = "last",
     raw = select_overlays(raw, overlays)
     deck = classify(raw)
     render_backgrounds(prepared.pdf, raw, deck, work)
+    adopt_sync.fold_slides(deck, (base.get("adopt") or {}).get("boxes") or {})
     (work / "deck.json").write_text(json.dumps(deck, indent=1, ensure_ascii=False), encoding="utf-8")
     plan = DeckPlan({**deck, "slides": [{**s, "elements": merge_blocks(s["elements"])} for s in deck["slides"]]},
                     page_width or SLIDE_W)

@@ -850,6 +850,39 @@ and reported by `merge.plan_unit` as `field: inherited`, "kept (the deck's layou
 the slide)". Same decision, different sentence, and the sentence is the point: "change them in the
 deck itself" sends a person to look on the slide for a footer that is not on the slide, while the
 layout warning names the door it is behind (Slide > Edit theme).
+**And one box the converter read back as several.** The other half of the misses is the same
+mistake the other way up: `adopt` writes one `slidebox` per object and the converter reads the
+compiled page with no idea it was ever one box, so where the person's paragraphs stand more than a
+line and a half apart (a heading over its body, an agenda with air between its items) `classify`
+calls them separate elements - and each pairs with nothing, because the thing each is part of is
+the whole box. The conversion is folded back against the deck's own boxes before anything is paired
+(`adopt_sync.fold_composites` / `fold_slides`): a fold is a **concatenation and nothing more** -
+paragraphs in reading order, boxes unioned, spans and strokes joined, an anchored picture
+re-pointed - which is why it is safe to write back, `emit.vertical_layout` reading each paragraph's
+`spaceAbove` off the baselines the page really has, so the gaps that made `classify` split the box
+come back out of the geometry when it is written again. It is a claim about somebody's slide, so it
+is made only where the words say so: of the corpus's 416 objects holding two or more elements, 105
+are folded (459 elements) and five rules refuse the other 311 - the object must be text (145 are
+not: a fold writes a text box, and over a person's filled shape it would lose the fill), every
+element must be text too (111), none may already say what the object says **on its own** (41: that
+one *is* the box), together they must say it (14 do not), and the object must say something at all
+(`SequenceMatcher` scores two empty strings 1.00, `same_drawing`'s own degenerate match) - and
+nothing is folded where two objects claim one element, which box it belongs to being exactly what
+is not known. Measured over the corpus: **394 of the 1,844 misses** (21%), hardest on the decks
+this was worst at (136 of intro-lecture's 170, 106 of creandum-board's 140, 38 of gdg24's 136), every
+folded element then pairing and no deck's paired count falling - folding takes rivals away too.
+Seven decks were run end to end offline as well (a real `record()` off the corpus cache, one
+compile, no Google): creandum-board 135 -> 29 misses, intro-lecture 170 -> 34, ds-lecture 15 -> 1,
+**51 folds of 51 tied to one of the person's objects**, `from_layout` unmoved on every deck (a
+fold never swallows what the theme draws), and all 51 coming out of `emit.plan_offline` - which is
+what gives `sync` its `DeckPlan.slide_parts` - as a text box at the fold's box saying what the fold
+joined. The base records the **boxes**, not the folds (`adopt.boxes`, per frame label: the deck's
+geometry is what does not change), `sync.build_ours` reads them off the base and folds its own
+conversion the same way before anything is keyed, and a base with no `boxes` folds nothing. Keyed
+by **label** because folding comes before the slides are paired and pairing reads the elements
+folding changes (`identity.slide_info`). The offline campaign is blind to it by construction
+(`fuzz_world.build_adopt_base` never runs `convert_source`) and says so: it proves the fold
+regresses nothing and nothing about the fold.
 Then `Sync.check_plan` runs between planning and any write and **refuses** four things
 (`adopt_sync.problems` / `refusal_message`, every message asserted verbatim in `tests/test_adopt_sync.py`):
 a unit whose base members include an **unpaired** element (writing it puts a second object beside the

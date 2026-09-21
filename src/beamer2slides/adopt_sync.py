@@ -216,15 +216,171 @@ def explained_by_layout(conv: list[dict], why: dict[int, str], slide: dict) -> s
     return out
 
 
+# ---------------------------------------------------------------- one box, read back as several
+
+# How much of a converted element has to lie inside the deck's box for that box to hold it, and
+# how near the elements it holds have to come to saying what it says.
+HOLDS = 0.85
+SAYS = 0.85
+
+
+def _holds(inner: list[float], outer: list[float]) -> bool:
+    """Whether the deck's box holds this converted element whole."""
+    x0, y0 = max(inner[0], outer[0]), max(inner[1], outer[1])
+    x1, y1 = min(inner[2], outer[2]), min(inner[3], outer[3])
+    if x1 <= x0 or y1 <= y0:
+        return False
+    area = (inner[2] - inner[0]) * (inner[3] - inner[1])
+    return area > 0 and (x1 - x0) * (y1 - y0) / area >= HOLDS
+
+
+def object_records(elements: list[dict]) -> list[dict]:
+    """The deck's objects as the fold reads them: what kind they are, where they stand, what they
+    say. `build_base` takes them off the deck it just read and a later `sync` off the base, so
+    both sides of a sync fold the same source the same way."""
+    return [{"object": e.get("object"), "kind": e["kind"], "bbox": e["bbox"], "text": deck_words(e)}
+            for e in elements]
+
+
+def deck_folds(target: dict) -> dict[str, list[dict]]:
+    """The deck's own boxes, per frame label: what `convert_source` and `sync.build_ours` fold
+    against.
+
+    Keyed by **label** and not by slide index, because folding comes before the slides are paired
+    and pairing reads the elements folding changes (`identity.slide_info`). `adopt.frame_labels`
+    names every frame after the slide's own `objectId`, so the label is the one name both sides
+    already agree on with nothing computed."""
+    from .adopt import frame_labels
+    return {label: object_records(deck_objects(slide))
+            for label, slide in zip(frame_labels(target), target.get("slides") or []) if label}
+
+
+def composites(conv: list[dict], objects: list[dict]) -> dict[int, list[int]]:
+    """{object index: the converted elements that are that one box of the deck}, in reading order.
+    Both sides are records of kind, box and words (`object_records`, and the same three read off
+    the conversion), so this can be asked of a dump as well as of a live conversion.
+
+    `adopt` writes one `slidebox` per object and the converter reads the compiled page back with
+    no idea it was ever one box: where the deck's paragraphs stand more than a line and a half
+    apart - a heading over its body, an agenda with air between its items - `classify` calls them
+    separate elements, and each of them then pairs with nothing, because the thing each one is
+    part of is the whole box. Measured over the corpus, folding takes **394 elements** off the
+    1,844 the pairing misses (21%), and it falls hardest on the decks adopt is worst at: 136 of
+    intro-lecture's 170 misses, 106 of creandum-board's 140, 38 of gdg24's 136.
+
+    Folding is a claim about somebody's slide, so it is made only where the words say so and
+    refused everywhere else. Of the corpus's 416 objects holding two or more converted elements,
+    105 are folded (459 elements) and five rules refuse the other 311:
+
+      * the object has to **be text** (145 are not): the commonest thing holding a crowd of
+        elements is a panel or a card, and a fold writes a text box - over a person's filled
+        shape it would lose the fill and everything standing on it;
+      * every element has to be text too (111 are not), for the same reason read the other way:
+        the icon on a captioned card would come back as the caption's words;
+      * no element may already say what the object says **on its own** (41 do): that element is
+        the box and the others are things standing on it;
+      * together they have to say what the object says (14 do not);
+      * and the object has to say something at all, or an empty text box reads as one the
+        converter split into everything drawn over it - `SequenceMatcher` scores two empty
+        strings 1.00, the degenerate match `same_drawing` was written for. (Nothing in the corpus
+        reaches it, the object-kind rule catching the empty panels first; it is here because that
+        rule is about the fill and this one is about the claim.)
+
+    Last, nothing is folded at all where two objects claim one element: an element cannot be part
+    of two boxes, and which box it belongs to is exactly what is not known."""
+    out: dict[int, list[int]] = {}
+    for k, obj in enumerate(objects):
+        if obj["kind"] != "text" or not obj["text"].strip():
+            continue
+        held = [i for i, e in enumerate(conv) if _holds(e["bbox"], obj["bbox"])]
+        if len(held) < 2 or any(conv[i]["kind"] != "text" for i in held):
+            continue
+        held.sort(key=lambda i: (round(conv[i]["bbox"][1], 1), conv[i]["bbox"][0]))
+        said = [conv[i]["text"] for i in held]
+        if not all(s.strip() for s in said):
+            continue
+        if any(_says_it(s, obj["text"]) for s in said):
+            continue
+        if _says_it(" ".join(said), obj["text"]):
+            out[k] = held
+    claimed: dict[int, int] = {}
+    for k, held in out.items():
+        for i in held:
+            claimed[i] = claimed.get(i, 0) + 1
+    return {k: held for k, held in out.items() if all(claimed[i] == 1 for i in held)}
+
+
+def _says_it(said: str, wanted: str) -> bool:
+    return SequenceMatcher(None, said, wanted, autojunk=False).ratio() >= SAYS
+
+
+def fold_composites(elements: list[dict], objects: list[dict]) -> tuple[list[dict], list[str]]:
+    """`elements` with each composite folded into the one element the deck has, and the ids that
+    went. The order of what is left is the order it came in, the fold standing where its first
+    part stood.
+
+    The fold is a concatenation and nothing more, which is the whole reason it is safe to write
+    back: `emit` lays a text box out from its paragraphs' own lines - `vertical_layout` reads each
+    paragraph's `spaceAbove` off the baselines the page really has - so the gaps that made
+    `classify` split the box in the first place come back out of the geometry when it is written
+    again. Nothing has to remember what the spacing was, because the spacing was never thrown
+    away.
+
+    A picture anchored to a part follows it (`anchor`): a formula or an icon in one of those
+    paragraphs belongs to the box the paragraphs are now in."""
+    groups = composites([{"kind": e["kind"], "bbox": e["bbox"], "text": conv_words(e)} for e in elements],
+                        objects)
+    folded = {i: idx for idx in groups.values() for i in idx}
+    if not folded:
+        return elements, []
+    gone: dict[str, str] = {}
+    for idx in groups.values():
+        for i in idx[1:]:
+            gone[elements[i]["id"]] = elements[idx[0]]["id"]
+    out = []
+    for i, el in enumerate(elements):
+        if i in folded and folded[i][0] != i:
+            continue
+        if i in folded:
+            parts = [elements[j] for j in folded[i]]
+            box = [min(p["bbox"][0] for p in parts), min(p["bbox"][1] for p in parts),
+                   max(p["bbox"][2] for p in parts), max(p["bbox"][3] for p in parts)]
+            el = {**el, "bbox": box,
+                  "paragraphs": [p for part in parts for p in part["paragraphs"]],
+                  "code": all(part.get("code") for part in parts),
+                  "spans": [s for part in parts for s in part.get("spans") or []],
+                  "strokes": [s for part in parts for s in part.get("strokes") or []],
+                  "composite": True}
+        if el.get("anchor") in gone:
+            el = {**el, "anchor": gone[el["anchor"]]}
+        out.append(el)
+    return out, sorted(gone)
+
+
+def fold_slides(deck: dict, folds: dict[str, list[dict]]) -> None:
+    """Fold every slide of a conversion against the objects of the deck slide it was written from,
+    in place. Slides are found by their **label**, which for an adopted deck is a slug of the
+    slide's own `objectId` (`adopt.frame_labels`) - the one name both sides of a sync agree on
+    without having to pair anything first."""
+    for slide in deck.get("slides", []):
+        objects = folds.get(slide.get("label") or "")
+        if objects:
+            slide["elements"], _ = fold_composites(slide["elements"], objects)
+
+
 # ---------------------------------------------------------------- the base
 
 def convert_source(tex: Path, work: Path, engine: str | None = None,
-                   page_width: float = SLIDE_W) -> tuple[dict | None, str]:
+                   page_width: float = SLIDE_W,
+                   folds: dict[str, list[dict]] | None = None) -> tuple[dict | None, str]:
     """Compile the source tree at `tex` and convert it exactly as a later `sync` will
     (`sync.build_ours`'s first half): the base's IR side has to be what the *converter* makes of
     that source, not what adopt read from the deck, or every element would read as changed on the
     first sync. `page_width` is the deck's own, for the same reason - the plan's scale, and with it
-    every hole width it fits, is PDF pt to *that* deck's points.
+    every hole width it fits, is PDF pt to *that* deck's points. `folds` is the deck's own boxes
+    per frame label (`object_records`), which put back together what one of them the converter read
+    as several (`fold_composites`) - applied after the backgrounds are rendered, so a fold changes
+    what is *paired*, never what is painted.
     Returns ({"deck", "out", "pdf", "plan"}, "") or (None, the compile error)."""
     from .classify import classify
     from .emit import DeckPlan, merge_blocks
@@ -246,13 +402,15 @@ def convert_source(tex: Path, work: Path, engine: str | None = None,
     raw = select_overlays(raw, "last")
     deck = classify(raw)
     render_backgrounds(prepared.pdf, raw, deck, out)
+    if folds:
+        fold_slides(deck, folds)
     plan = DeckPlan({**deck, "slides": [{**s, "elements": merge_blocks(s["elements"])} for s in deck["slides"]]},
                     page_width)
     return {"deck": plan.deck, "out": out, "pdf": pdf, "plan": plan}, ""
 
 
 def build_base(conv_deck: dict, conv_out: Path, target: dict, pres: dict, pdf: Path,
-               overlays: str = "last") -> dict:
+               overlays: str = "last", folds: dict[str, list[dict]] | None = None) -> dict:
     """A base of `snapshot.build_base`'s shape for a deck this converter never wrote.
 
     The IR side is the conversion of the source adopt left on disk; the deck side is the live
@@ -302,7 +460,12 @@ def build_base(conv_deck: dict, conv_out: Path, target: dict, pres: dict, pdf: P
                      "frame_width": read["page_size"][0], "slides": len(base["slides"]), "paired": paired,
                      "unpaired": unpaired, "from_layout": from_layout,
                      "left_alone": [{"slide": e["key"], "objects": oids}
-                                    for e, oids in zip(base["slides"], leftovers) if oids]}
+                                    for e, oids in zip(base["slides"], leftovers) if oids],
+                     # The boxes this conversion was folded against, so that every later sync folds
+                     # its own conversion the same way (`sync.build_ours`). They are the deck's
+                     # geometry and not a decision, which is why they are recorded rather than the
+                     # folds themselves: the source changes, the boxes do not.
+                     "boxes": folds or {}}
     return base
 
 
@@ -335,13 +498,14 @@ def record(tex: Path, work: Path, target: dict, pres: dict, engine: str | None =
     if not pres.get("slides"):
         return None, "the deck was read without its presentation (no read-back to record)"
     log("recording a sync base for the adopted deck...")
-    conv, err = convert_source(Path(tex), Path(work), engine, float(snapshot.page_size(pres)[0]))
+    folds = deck_folds(target)
+    conv, err = convert_source(Path(tex), Path(work), engine, float(snapshot.page_size(pres)[0]), folds)
     if conv is None:
         return None, f"the source does not compile:\n{err}"
     problem = labels_match(conv["deck"], target)
     if problem:
         return None, problem
-    base = build_base(conv["deck"], conv["out"], target, pres, conv["pdf"], overlays)
+    base = build_base(conv["deck"], conv["out"], target, pres, conv["pdf"], overlays, folds)
     return base, None
 
 
