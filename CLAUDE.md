@@ -2459,7 +2459,13 @@ keys, named ranges), `doc_merge.py` (pure planning), `doc_sync.py` (the commands
   are all there, the source's change arrived, and the settle regenerates the file from the
   document, so the next sync writes nothing. `_merged_shape` is the one rule both ways into a
   block now share (the source's where the document left it alone, the document's where both
-  changed it, with a note). Clean at 200 @ chain 6 (7 -> 0), 400 @ 4, 300 @ 8, 300 `themed` @ 6.
+  changed it, with a note). Clean at 200 @ chain 6 (7 -> 0), 400 @ 4, 300 @ 8, 300 `themed` @ 6 -
+  whose own finding was the oracle's and the twin hazard again (2030066): **a key is not a
+  block**. The reader pastes a copy of a heading, which lands in the style of what it was
+  dropped into (Docs' rule: here a heading centred of its own), the source drops the block the
+  key was on, and the settle keys the copy by its words to the name that went, so
+  `_inherited_findings` compared two different blocks. `_twin_already` forgives it, asked of the
+  words the key names *afterwards*, so a twin saying something else answers for nothing.
 - Live suite (opt-in, marker `docs`, ~5 min): `python -m pytest -m docs tests/test_docs_live.py`
   pushes a document per test, edits both sides, syncs, checks a second sync writes nothing, and
   deletes the document. Offline: `tests/test_doc_ir.py`, `test_doc_merge.py`, `test_doc_sync.py`.

@@ -738,7 +738,8 @@ def _tab_findings(was: dict | None, now: dict, then: dict | None, said: str,
                                after_words, said, tab, theme, file_blocks.get(key),
                                dropped=mine is not None and not touched
                                and key in old and key not in source_keys)
-        out += _inherited_findings(key, block, new[key], (mine or {}), said, tab, theme)
+        out += _inherited_findings(key, block, new[key], (mine or {}), said, tab, theme,
+                                   now)
         out += _shape_findings(key, block, base_block, new[key], said, tab,
                                behind_dropped=_behind(was, key) is not None
                                and _behind(was, key) not in source_keys)
@@ -819,8 +820,26 @@ def _tab_findings(was: dict | None, now: dict, then: dict | None, said: str,
     return out
 
 
+def _twin_already(now_part: dict, block: dict, after_block: dict, field, value) -> bool:
+    """Whether the block this key names *after* the sync is another one that already
+    stood in the document saying these words with this field set this way.
+
+    A key is not a block. The reader pastes a copy of a paragraph beside it — which
+    lands in the style of what it was dropped into, as Docs' own rule has it — the
+    source drops the one the key was on, and the settle keys the copy by its words to
+    the name that went. Nothing was written to it and nothing of anybody's was lost:
+    the field is "of its own" because it always was. Asked of the words the key names
+    afterwards, so a twin that says something else answers for nothing (themed seed
+    2030066, chain 6).
+    """
+    words = text_of(after_block)
+    return any(other is not block and text_of(other) == words
+               and other.get(field) == value
+               for other in (now_part or {}).get("blocks", []))
+
+
 def _inherited_findings(key, block, after_block, mine: dict, said: str, tab,
-                        theme: dict | None) -> list[dict]:
+                        theme: dict | None, now_part: dict | None = None) -> list[dict]:
     """A paragraph that wore the document's named style and stopped.
 
     A document's look lives in its named styles, and a paragraph that sets nothing of
@@ -850,6 +869,8 @@ def _inherited_findings(key, block, after_block, mine: dict, said: str, tab,
     for field in fields:
         now, then = block.get(field), after_block.get(field)
         if then is None or then == now or (mine_block or {}).get(field) == then:
+            continue
+        if _twin_already(now_part, block, after_block, field, then):
             continue
         out.append(finding(
             "theme_undone", "loss",

@@ -2595,6 +2595,16 @@ shape where the document left it alone, the document's where both sides changed 
 note saying so. Clean afterwards at four settings: 200 at chain 6 (7 → 0), 400 at chain 4,
 300 at chain 8, and 300 `themed` rounds at chain 6.
 
+The `themed` campaign's own finding at that seed was the oracle's, and it is the twin
+hazard once more (2030066, chain 6): **a key is not a block**. The reader pastes a copy of
+a heading, which lands in the style of what it was dropped into — Docs' own rule, and here
+a heading centred of its own — the source drops the block the key was on, and the settle
+keys the copy by its words to the name that went. `_inherited_findings` then compares two
+*different* blocks and finds a paragraph that has stopped following the theme, on nobody's
+doing: nothing was written to the copy, and the block that really wore the theme is one the
+source dropped and the reader left alone. `_twin_already` is the forgiveness, asked of the
+words the key names *afterwards*, so a twin saying something else answers for nothing.
+
 ## Remaining risks
 
 1. **Pictures** — retired, see "Pictures, and the chips a request can make" above. What

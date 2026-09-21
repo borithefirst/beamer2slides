@@ -370,6 +370,35 @@ def test_the_oracle_sees_a_paragraph_stop_following_the_documents_theme():
                                             theme=THEME))
 
 
+def test_a_twin_the_key_lands_on_is_not_a_paragraph_that_stopped_following_the_theme():
+    """A key is not a block. The reader pastes a copy of a heading beside the
+    original, and the copy lands in the style of what it was dropped into — Docs' own
+    rule, and in the fuzz world that is a heading centred of its own. The source then
+    drops the block the key was on, and the settle keys the copy by its words to the
+    name that went.
+
+    The key therefore names a different block before and after the sync, and asked by
+    key the field did stop being inherited — but on nobody's doing: the copy was set
+    that way before the sync, nothing was written to it, and the block that really
+    wore the theme is one the source dropped and the reader left alone. Asked of the
+    words the key names afterwards, so a twin saying something else answers for
+    nothing (themed seed 2030066, chain 6)."""
+    base = _ir(_head("k1", "A heading"), _p("k2", "Prose."))
+    before = _ir(_head("k1", "A heading"), _p("k2", "Prose."),
+                 _head(None, "A heading", align="center"))   # the reader's own copy
+    after = _ir(_head("k1", "A heading", align="center"), _p("k2", "Prose."))
+    mine = _ir(_p("k2", "Prose."))                           # the file drops the heading
+    assert not oracle.failures(oracle.check(base, before, after, NOTHING, mine,
+                                            theme=THEME))
+    # A twin that says something else is no twin at all, and the question stands.
+    other = _ir(_head("k1", "A heading"), _p("k2", "Prose."),
+                _head(None, "Another heading", align="center"))
+    stands = _ir(_head("k1", "A heading", align="center"), _p("k2", "Prose."),
+                 _head(None, "Another heading", align="center"))
+    assert _kinds(oracle.check(base, other, stands, NOTHING, mine,
+                               theme=THEME)) == {"theme_undone"}
+
+
 def test_the_oracle_keeps_out_of_what_the_document_does_to_its_own_paragraphs():
     """The check needs to be told what the theme sets, and that is not pedantry: Docs
     merges a deleted paragraph into the one behind it and hands over its style, so a
