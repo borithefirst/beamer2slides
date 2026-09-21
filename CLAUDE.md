@@ -681,7 +681,23 @@ edits move) and the report names the slide and asks for a label. Measured with `
 adopt`, 2000 rounds chained 4 deep: with the labels kept, 2 frames of 20,080 are misidentified and
 both are now named in the report, none in silence; 1 pairing in 20,080 is called a coin toss, so it
 is not noise. The campaign counts what a person is told, not what `label_moves` said alone - a
-changed label is a warning of its own in `merge.plan_merge`. Its labelled counterpart is
+changed label is a warning of its own in `merge.plan_merge`.
+**And the same question asked of the *pair* rather than of the alignment**: is there another
+leftover slide whose words read as well against this frame as the one it got? An order-keeping walk
+cannot offer the crossing where the source carried a frame past its near-twin - that reading is
+unrealisable, so it scores worse and `optimal` is silent - while a person looking at the two slides
+sees exactly the coin toss the other half names, which is why the gate asks two questions and not
+one (`test_twins_with_a_frame_between_them_are_a_coin_toss_the_walk_can_never_offer`: identical
+twins with a frame between them, said of both and neither moved, silent the moment each carries a
+label). Taken as the **union**, since a rival on some best alignment need not tie pairwise. Measured
+over the four adopt-shaped campaigns above, run twice over the same seeds with only this swapped: of
+the 109 frames written onto another frame's slide, those written with nothing in the report naming
+*them* go **21 -> 14, in 17 -> 12 rounds**; not one frame moves (109 `written` and 3 either way, 308
+costly, no new `moved` or `unsure`), and the price is 7 more warnings in 3,963 sound rounds (50 ->
+57; broken rounds 402 -> 587). The label condition is factored over both readings rather than
+dropped: `merge.plan_merge` prints this warning only `and not o.get("label")` and its sentence opens
+"this frame has no label", so a `twins` on a frame whose label the source renamed - which is in the
+leftovers carrying one - would be counted as spoken for and said to nobody. Its labelled counterpart is
 `weak_pairs` value `crossed` (`identity.crossed_twins`): two labels that changed places over slides
 saying word for word the same thing, where the reading with the swap and the reading without score
 *exactly* alike, so every rule above is right to stay silent and only the **order** says anything -
@@ -704,8 +720,11 @@ slide without the report naming something**; the price is 34 warnings in the 200
 really moved a frame, each about two slides a person cannot tell apart either. That is a claim about
 rounds. Asked of the **frames** - a frame written onto another frame's slide with nothing in the
 report naming *it*, which is what a person actually misses - the four adopt-shaped campaigns above
-have **21 of the 109 writes in silence, in 17 rounds** (converted, 1 of 3), so the round-level
-sentence must not be read at frame size.
+have **14 of the 109 writes in silence, in 12 rounds** (converted, 1 of 3; 21 in 17 before the
+look-alike half of the `twins` gate above), so the round-level sentence must not be read at frame
+size. What is left is out of any alignment gate's reach: 10 of the 14 are frames a **label** paired,
+3 are frames whose rival slide a label took out of the walk, and one carries a label the deck has
+never seen.
 **And so is the margin** (`identity._scaled`), which is a *difference* between two readings - and
 the two are readings of different pairs, `here` scoring the label's slide against another frame and
 `own` against the frame carrying the label. Where those pairs can say different amounts the

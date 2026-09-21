@@ -507,8 +507,27 @@ def align_slides(base: list[dict], ours: list[dict], moves: list[dict] | None = 
             return (sim[a][b] >= SLIDE_MATCH and allow[a][b]
                     and score[0][0] - (pre[a][b] + sim[a][b] + score[a + 1][b + 1]) <= TWIN_TIE + 1e-9)
 
+        # And the same question asked of the *pair* rather than of the alignment: is there another
+        # leftover slide whose words read as well against this frame as the one it got? An
+        # order-keeping walk cannot offer the crossing where the source carried a frame past its
+        # near-twin - that reading is unrealisable, so it scores worse and `optimal` is silent -
+        # while a person looking at the two slides sees exactly the coin toss the other half names.
+        # Measured as the union, since a rival on some best alignment need not tie pairwise (four
+        # adopt-shaped campaigns, 1,000 rounds four deep, run twice over the same seeds with only
+        # this swapped): of the 109 frames written onto another frame's slide, those written with
+        # nothing in the report naming them go 21 -> 14, in 17 -> 12 rounds; not one frame moves
+        # (109 and 3 either way, no new `moved` or `unsure`), and the price is 7 more warnings in
+        # 3,963 sound rounds. The label condition is factored over both readings, not dropped:
+        # `merge.plan_merge` prints this warning only `and not o.get("label")` and its sentence
+        # opens "this frame has no label", so a `twins` on a frame whose label the source renamed -
+        # which is in `os_` carrying one - would be counted as spoken for and said to nobody.
         for b, a in chosen.items():
-            if not ours[os_[b]].get("label") and any(optimal(other, b) for other in range(m) if other != a):
+            if ours[os_[b]].get("label"):
+                continue
+            alike = any(allow[other][b] and sim[other][b] >= SLIDE_MATCH
+                        and sim[other][b] >= sim[a][b] - TWIN_TIE
+                        for other in range(m) if other != a)
+            if alike or any(optimal(other, b) for other in range(m) if other != a):
                 weak[os_[b]] = "twins"
     # One after the other, each seeing what the one before it took: written as one tuple, both
     # passes were handed the *same* leftovers and could claim the same slide - and did (offline

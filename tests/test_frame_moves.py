@@ -166,6 +166,28 @@ def test_an_unlabelled_frame_between_twins_is_matched_and_said_out_loud():
     assert identity.align_slides(base_named, named, weak=weak) == {0: 0, 1: 1, 2: 3} and weak == {}
 
 
+def test_twins_with_a_frame_between_them_are_a_coin_toss_the_walk_can_never_offer():
+    """The other half of the same question, asked of the *pair* rather than of the alignment.
+    `optimal` looks for a second alignment of the same score, and an order-keeping walk cannot
+    offer the one where two frames cross - with a slide between the twins that reading is
+    unrealisable, so it scores worse and nothing is said, while a person looking at the two slides
+    sees exactly the coin toss the other half names. Whichever way round the source has them
+    (a swap between them says nothing, a frame moved past one says nothing) the words are the only
+    evidence there is, and they read alike: is there another leftover slide whose words read as
+    well against this frame as the one it got?
+    """
+    base = [info("Results", SAME), info("Method", METHOD), info("Results", SAME),
+            info("Takeaways", SUMMARY, "end")]
+    weak: dict[int, str] = {}
+    assert identity.align_slides(base, list(base), weak=weak) == {0: 0, 1: 1, 2: 2, 3: 3}
+    assert weak == {0: "twins", 2: "twins"}                   # both of them, and neither is moved
+    # A label of their own ends the coin toss: each frame pairs by its label and nothing is said.
+    named = [info("Results", SAME, "first"), base[1], info("Results", SAME, "third"), base[3]]
+    weak = {}
+    assert identity.align_slides(named, list(named), weak=weak) == {0: 0, 1: 1, 2: 2, 3: 3}
+    assert weak == {}
+
+
 def test_a_frame_prefers_the_slide_the_source_still_describes_to_the_one_it_dropped():
     """A slide the source dropped that the deck's own edits keep alive stays in the base
     (`sync.new_base`'s `keep_removed`), saying what that frame said and carrying no label any more -
