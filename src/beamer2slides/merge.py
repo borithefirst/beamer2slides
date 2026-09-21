@@ -480,29 +480,40 @@ def deck_attributes(style: dict, base_styles: list[dict]) -> dict:
 def styling_lost(base_rb: dict, theirs_rb: dict, merged: str | None) -> bool:
     """Whether re-applying the deck's run styling to the merged text would leave some of it behind.
 
-    `sync.style_range_requests` puts the person's run styles back onto *the same words* of the text
-    sync is about to write. Words the source replaced are not there to put them back onto, and a
-    word bolded in the deck whose sentence the source has since rewritten is styling that simply
-    ends. Nothing can be done about that - the words it was on are gone - but the report has to say
-    so instead of promising the styling was kept."""
+    `sync.style_range_requests` maps each styled run of the live text through the matching blocks of
+    that text and the text sync is about to write, and writes the run's style onto whatever the
+    blocks carry across. A run they carry nowhere is styling that simply ends: nothing can be done
+    about that - the characters it was on are gone - but the report has to say so instead of
+    promising the styling was kept.
+
+    So the question is that **alignment's**, and it used to be asked of an alignment of the *tokens*
+    instead - whether the words the run sat on turn up in the new text as words. That said the bold
+    was safe where the mechanism drops it: the deck's box said `... typed by a person.` twice, the
+    source replaced the first sentence, and the tokens paired the *first* one's words with the tail
+    of the new text while the characters pair the second, so the bold on a word of the replaced
+    sentence had a token to land on and no request ever wrote it, with an `overrides` entry
+    promising it was kept (offline seed 86044 --shape adopt --first-sync, chained 5 deep;
+    `fuzz_world._styling_ends` is the reference applier's own reading of the same mechanism).
+
+    What the alignment is asked is whether it carries a **word** of the run across whole, not
+    whether it carries anything at all: between two sentences that share no words it still matches
+    the odd letter, and a bold put back on the `i` and the `r` of another word is the styling gone
+    as surely as nothing at all (live round 404, the test below). A run clipped to a few letters
+    inside a word by the person's own earlier rewording is its own word here, so styling sync
+    really does re-apply is not reported as lost (seed 23599, which is `_styling_ends`' lesson)."""
     spans, before = theirs_rb.get("run_spans"), theirs_rb.get("text") or ""
     if not spans or merged is None or merged == before:
         return False
     base_styles = base_rb.get("text_styles") or []
-    was, now = tokens(before), tokens(merged)
-    at, ends = 0, []
-    for t in was:
-        at += len(t)
-        ends.append(at)
-    kept = {k for i, _, n in SequenceMatcher(None, was, now, autojunk=False).get_matching_blocks()
-            for k in range(i, i + n)}
+    blocks = SequenceMatcher(None, before, merged, autojunk=False).get_matching_blocks()
     for start, end, style in spans:
+        end -= len(before[start:end]) - len(before[start:end].rstrip("\n"))  # (paragraph ends keep theirs)
+        if end <= start or not before[start:end].strip():
+            continue                                        # a run of nothing but the line's end
         if not deck_attributes(style, base_styles):
             continue                                        # the converter's own styling, not the person's
-        # Word by word, not letter by letter: a bolded word the source deleted is gone even when
-        # some of its letters turn up elsewhere in the new sentence.
-        on = [k for k, e in enumerate(ends) if e - len(was[k]) < end and e > start and was[k].strip()]
-        if on and not any(k in kept for k in on):
+        words = [(start + m.start(), start + m.end()) for m in re.finditer(r"\S+", before[start:end])]
+        if not any(any(i <= s and e <= i + n for i, _, n in blocks) for s, e in words):
             return True
     return False
 

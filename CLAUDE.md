@@ -1100,7 +1100,17 @@ versions later lost its styling while the report promised an override - nothing 
 whose words are gone, so `merge.styling_lost` makes it a conflict (`snapshot.read_text` now records
 run spans, so the read-back says *which* words a style is on; the offline campaign reaches it
 through the `bold_word` deck edit and `fuzz_world._styling_ends`, and taking the conflict out fails
-2 of 400 rounds); and the oracle itself accused a slide that two others - a moved frame and the
+2 of 400 rounds). **Which** words those are is the alignment's business and was asked of the wrong
+one (adopt-shaped seed 86044 at chain 8): the styling goes back through the matching blocks of the
+live text and the text being written, and asking the tokens instead answered with the other copy of
+a sentence the box says twice - so a bold on a word the source replaced had a token to land on, no
+request wrote it, and the report promised an override. Asked of those blocks now, and of whether
+they carry a **word** of the run across whole rather than anything at all, since two sentences
+sharing no words still match the odd letter and a bold put back on the `i` and the `r` of another
+word is styling gone (seed 404 again); a run the person's own rewording clipped to a few letters
+inside a word is its own word here, so styling sync really does re-apply is not called lost
+(`_styling_ends`' lesson from the other side). 1 of 250 rounds at chain 8 before, 250 of 250 after.
+And the oracle itself accused a slide that two others - a moved frame and the
 copy riding behind it - had merely passed (`loss_oracle.order_findings`). A third was the campaign's
 own: chained steps could drop the same picture on the same slide at the same box twice, which is a
 real duplicate made by the fuzzer, so `random_spec` now places an added picture or blank shape where

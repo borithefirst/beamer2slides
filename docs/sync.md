@@ -773,6 +773,22 @@ hold for every sync, including the combinations nobody thought of.
   (`snapshot.read_text` now records run spans), and the offline campaign can now reach it too: a
   `bold_word` deck edit plus the reference applier's own opinion of what survives
   (`fuzz_world._styling_ends`). Taking the conflict back out fails 2 of 400 offline rounds.
+  And then, by the offline campaign (adopt-shaped seed 86044 at chain 8), *which* words those are:
+  the styling goes back through the matching blocks of the live text and the text being written, so
+  the question belongs to that **alignment** and it was being asked of an alignment of the tokens
+  instead. A box saying `typed by a person` twice, with the source replacing the sentence around the
+  first one, aligns word for word onto the first and character for character onto the second - the
+  characters anchoring on the longer thing the two texts share - so the bold on a word of the
+  replaced sentence had a token to land on, no request ever wrote it, and the report promised an
+  override. It is asked of the same blocks the requests are cut from now, and of whether they carry
+  a **word** of the run across whole rather than anything at all: between two sentences sharing no
+  words the alignment still matches the odd letter, and a bold put back on the `i` and the `r` of
+  another word is styling gone as surely as nothing at all (that is seed 404 again, which is why
+  both are one test away from each other). A run the person's own earlier rewording had clipped to
+  a few letters inside a word is its own word here, so styling sync really does re-apply is not
+  reported as lost - `fuzz_world._styling_ends`' lesson, from the other side. 1 of 250 rounds at
+  chain 8 with the old reading, 250 of 250 clean with this one
+  (`test_a_word_that_stands_twice_in_the_box_does_not_save_the_styling_on_the_other_one`).
 - Found by the `last-paragraph` scenario written for the finding below, which is what a defect found
   by fuzzing is worth: a deck edit that deletes one bullet takes that paragraph's line spacing out of
   the read-back's *distinct* paragraph styles, and `merge.uniform_changes` read the shorter list as a

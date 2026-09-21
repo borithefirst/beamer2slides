@@ -1471,6 +1471,31 @@ def test_styling_on_words_the_source_replaced_is_a_conflict_not_a_promise():
     assert [o for o in quiet["overrides"] if "text_style" in o["fields"]]
 
 
+def test_a_word_that_stands_twice_in_the_box_does_not_save_the_styling_on_the_other_one():
+    """Offline seed 86044 --shape adopt --first-sync, chained 5 deep: the box says `typed by a
+    person` twice, the source replaced the sentence around the first one, and the person had bolded
+    a word of that sentence.
+
+    `sync.style_range_requests` maps each styled run through the matching blocks of the live text
+    and the text it is about to write, and those anchor on the longest thing the two share - so the
+    surviving `typed by a person` is paired with the *second* one and the bolded word has nowhere
+    to go. Asking the same question of an alignment of the tokens answered with the first one, the
+    report promised an override, and the person's bold was gone with nothing said about it."""
+    els = [entry("text/body/0", text_ir("deck wording typed by a person\n"
+                                        "and the source adds merge typed by a person",
+                                        (20, 60, 200, 90), "p0t1"), "b2s_s000_t1")]
+    base = {"version": 1, "generation": 0, "presentationId": "P", "master_background": None,
+            "slides": [base_slide("intro", "b2s_s000", els, label="intro", title="Intro")]}
+    ours, theirs = triple(base)
+    ours["slides"][0]["elements"][0] = ours_entry("text/body/0", text_ir(
+        "and the source adds merge\nand the source adds slides typed by a person",
+        (20, 60, 200, 90), "p0t1"))
+    bolded(theirs["slides"][0], "b2s_s000_t1", "a person")   # the first one: the source replaced it
+    report = merge.plan_merge(base, ours, theirs)["report"]
+    (c,) = [c for c in report["conflicts"] if c["field"] == "text_style"]
+    assert c["resolution"] == "the styling of the replaced words is gone"
+
+
 def test_a_bullet_the_deck_deleted_does_not_freeze_the_box_against_the_source():
     """A read-back keeps the *distinct* paragraph styles of a text, and the converter gives every
     paragraph the line spacing of its own PDF pitch - so deleting one bullet takes an entry out of
