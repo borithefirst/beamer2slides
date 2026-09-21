@@ -359,15 +359,46 @@ function diagram(e) {
 // ---------------------------------------------------------------- Google, and the recorded runs
 
 // Where visitors sign in, the deck is built in the signer's own Drive: their access token is
-// asked for at the click, sent with that one request and kept nowhere (docs/playground.md).
+// asked for at the click and sent with that one request (docs/playground.md).
+//
+// The token Google hands back is good for an hour, so asking for another one at every click put
+// a window in somebody's face for nothing - a workbench visitor meets one per journey, and the
+// Picker too. It is held in this page's memory for as long as it lasts, and **nowhere else**:
+// not in localStorage, not in a cookie, not on the server - it is a bearer token for that
+// person's own Drive files, and a page reload is a cheap price for its life ending with the tab.
+// `again` is the one thing that asks Google afresh: it means the token in hand did not work.
 let tokenClient = null;
+let granted = null;                   // { token, until } — `until` is ms since the epoch
+const TOKEN_MARGIN = 10 * 60 * 1000;  // a journey runs for minutes: never hand out one about to die
+
+function heldToken() {
+  return granted && granted.until - Date.now() > TOKEN_MARGIN ? granted.token : null;
+}
+
+// A token can die before its hour is out - the person signs out, or takes the grant back in
+// their account - and the only thing that says so is Google refusing it. Whoever hears that
+// refusal drops it, so the next click asks again instead of failing the same way for an hour.
+const STALE = /needs_consent|invalid_grant|UNAUTHENTICATED|Invalid Credentials/i;
+
+function forgetToken() {
+  granted = null;
+}
 
 function googleToken(again) {
+  const held = again ? null : heldToken();
+  if (held) return Promise.resolve(held);
   return new Promise((resolve, reject) => {
     if (!window.google?.accounts?.oauth2) return reject(new Error("Google's sign-in script did not load"));
     tokenClient = tokenClient || google.accounts.oauth2.initTokenClient({
       client_id: config.google_client_id, scope: config.google_scopes, callback: () => {} });
-    tokenClient.callback = r => r.error ? reject(new Error(r.error_description || r.error)) : resolve(r.access_token);
+    tokenClient.callback = r => {
+      if (r.error) return reject(new Error(r.error_description || r.error));
+      // `expires_in` is seconds and Google has always said 3599; a missing one is not a reason
+      // to treat the token as immortal, so it counts as the shortest life worth holding.
+      granted = { token: r.access_token,
+                  until: Date.now() + (Number(r.expires_in) || TOKEN_MARGIN / 1000) * 1000 };
+      resolve(r.access_token);
+    };
     tokenClient.error_callback = e => reject(new Error(e.type === "popup_closed" ? "sign-in was closed" : e.type));
     tokenClient.requestAccessToken({ prompt: again ? "consent" : "" });
   });
@@ -379,12 +410,15 @@ async function toSlides() {
   try {
     let body;
     if (config.google === "signin") {
-      note.textContent = "waiting for the Google sign-in window…";
+      if (!heldToken()) note.textContent = "waiting for the Google sign-in window…";
       body = JSON.stringify({ access_token: await googleToken(false) });
     }
     note.textContent = "building the deck (15-30 s)…";
     note.innerHTML = link((await api(`/api/jobs/${job.id}/slides`, { method: "POST", body })).url);
-  } catch (e) { note.textContent = e.message; }
+  } catch (e) {
+    if (STALE.test(e.message)) forgetToken();      // ask Google again at the next click
+    note.textContent = e.message;
+  }
   b.disabled = false;
 }
 

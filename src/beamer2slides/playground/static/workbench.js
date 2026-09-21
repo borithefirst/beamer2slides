@@ -255,6 +255,14 @@ async function runTool() {
   $("#runresult").replaceChildren();
   try {
     const body = { tool: t.name, args: values() };
+    // A token already granted goes with the journey that needs one, so the second click of a
+    // session opens no window and costs no round trip. Only where the journey *needs* Google:
+    // the server drops it for a local one, and the page keeps the same rule rather than
+    // handing somebody's credentials to a compile.
+    if (t.effects?.google) {
+      const held = heldToken();
+      if (held) body.access_token = held;
+    }
     let made;
     try {
       made = await ask(body);
@@ -290,10 +298,14 @@ async function watch(id) {
       log.scrollTop = log.scrollHeight;
     }
     if (state.state === "done") {
+      // The journey is the one thing that finds out a held token is dead: Google refused it.
+      if (state.result.code === "needs_consent") forgetToken();
       verdict(state.result, state.seconds);
       await listFiles();
       note(state.result.ok ? `${state.result.tool} finished in ${state.seconds} s`
-                           : `${state.result.tool}: ${state.result.code}`, !state.result.ok);
+           : state.result.code === "needs_consent"
+             ? `${state.result.tool}: the Google sign-in has run out — run it again to sign in`
+             : `${state.result.tool}: ${state.result.code}`, !state.result.ok);
       return;
     }
     await new Promise(r => setTimeout(r, 500));

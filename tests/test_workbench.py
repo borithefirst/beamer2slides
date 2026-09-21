@@ -236,6 +236,33 @@ def test_where_the_credentials_come_from(monkeypatch):
     assert runner.SCOPES == server.WEB_SCOPES
 
 
+def test_a_token_the_page_holds_on_to_is_held_in_the_page_and_nowhere_else():
+    """Asking Google at every click put a window in somebody's face for nothing - a journey, the
+    Picker, then the next journey - so a granted token is kept for the hour it lasts. Kept in the
+    page's own memory: it is a bearer token for that person's Drive files, and a store that
+    outlives the tab is a copy of it sitting on the machine with nothing to end it. A reload is
+    the price, and it is cheap.
+
+    The page also decides whether to send one by the very field the server decides by
+    (`effects.google`, which `needs_google` reads), so a journey that needs no account is handed
+    nobody's credentials by either side."""
+    from beamer2slides.agent import schema, tools
+    stores = ("localStorage", "sessionStorage", "document.cookie", "indexedDB")
+    granting = (server.STATIC / "app.js").read_text(encoding="utf-8")
+    assert "granted" in granting and not [s for s in stores if s in granting.replace(
+        "not in localStorage, not in a cookie", "")]          # the promise is written there too
+    bench = (server.STATIC / "workbench.js").read_text(encoding="utf-8")
+    assert [line.split('"')[1] for line in bench.splitlines() if "localStorage" in line] \
+        == ["b2s-ws"] * 3                                     # the workspace id, and nothing else
+    assert "t.effects?.google" in bench
+    published = {t["name"]: t for t in schema.all_schemas(tools.TOOLS)}
+    assert published["deck_convert"]["effects"]["google"] is True
+    assert published["tex_label"]["effects"]["google"] is False
+    for name, tool in published.items():
+        assert workbench.needs_google(name) is tool["effects"]["google"]
+    assert workbench.needs_google(workbench.COMPILE_TOOL["name"]) is False
+
+
 def test_a_local_journey_on_a_signin_host_does_not_report_a_server_that_cannot_reach_google():
     """`b2s_status` is the tool that answers "is Google reachable?", and on a `signin` host it
     is never handed a token - a local journey carries nobody's credentials. Saying "offline"
