@@ -2116,7 +2116,9 @@ seed 430587). Everything else about that style is put back — the named style a
 level alone cannot be. `doc_merge.unwritten_levels` says so before the write, which is the
 only honest thing left: the reader having touched nothing, the loss oracle has no question,
 and the base agrees with the document afterwards, so the round converges.
-`fuzz_docs._shape_arrived` is the judge that is not satisfied.
+`fuzz_docs._shape_arrived` is the judge that is not satisfied. *Which* list it lands in is
+which way round it is written, and that took a third seed to get right — see "The level an
+item takes is the list it is written into" below.
 
 ### A row the reader deleted, a range two deletes claimed, and a repair undone by the request after it
 
@@ -2469,6 +2471,35 @@ the batch of words with them one step later — the deletes move no index, so th
 batch, and the one place they were not run was the one batch that makes a new empty paragraph.
 1 of 250 rounds at chain 10 (0 with it), pinned by a hand-built test that fails when the head
 is taken out, seed in `SHAPED`.
+
+### The level an item takes is the list it is written into
+
+Chain 12 next, at fresh seeds: 400 rounds each of `between_tables` and `themed`, 600 mixed,
+all clean; `tabs` came back with one (seed 1640036), and the shrinker took it down to two
+appends and a restyle-and-move with **no reader op at all** — the source's own edits, on a
+document nobody had touched.
+
+An item the source moves is written from nothing, and no request gives a bullet its nesting
+level: it comes out at the level of the list it lands in, which `unwritten_levels` has said
+before the write since chain-4 seed 430296. What it said was *the level of the item in front
+of it* — and that is the rule for one shape of write out of two. A block goes in as "text\n"
+at the **start of the block that follows** it (`_insert_index`): Docs splits that paragraph
+and the new block is the half in front, keeping the style that was already there, bullet and
+level among it. It is only where nothing follows, or a table does, that the text goes in as
+"\ntext" at the mark behind and wears the style of the block in *front*.
+
+So a level-0 item moved to just in front of a nested one comes out nested, and the note that
+exists for exactly this said nothing, because it was looking the other way. The prediction
+now asks the anchor (`_anchor`, the same block `requests` writes in front of) where it
+splits, and the block in front only where it appends. 1 of 400 rounds at chain 12, 0 with it.
+
+It also found the note lying the other way, which nothing had asked: the test standing for
+chain-8 seed 530265 moved an item *behind* a nested one and asserted the note — but that
+write anchors on the plain paragraph after it, so the item really comes out at level 0,
+exactly as the source asks, and the note was a prediction of a loss that never happened. A
+spurious note is not harmless here: it is `fuzz_docs._shape_arrived`'s excuse, so it hides
+the next real one. Both tests now assert the level the **document** ends up at beside the
+note they pin.
 
 ## Remaining risks
 

@@ -3202,6 +3202,17 @@ def unwritten_levels(theirs: dict, merged: list[dict], notes: list[str]) -> None
     is deeper than the source asks for or shallower (offline chain-4 seed 430296,
     chain-8 seed 530265).
 
+    Which list that is, is which way round the block is written. The usual way is
+    "text\\n" at the start of the block that follows it (`_insert_index`): Docs splits
+    that paragraph and the half in front — the new block — keeps the style of the one
+    that was already there, bullet and nesting level among it. It is only where
+    nothing follows, or a table does, that the text goes in as "\\ntext" at the mark
+    behind it and wears the style of the block in *front* of it. This said the second
+    of those for every case and so predicted the wrong level for the commonest one:
+    a level-0 item moved to just before a nested one came out nested, in silence
+    (offline chain-12 seed 1640036, shape `tabs`, shrunk to two appends and a
+    restyle-and-move with no reader at all).
+
     And a block whose **paragraph mark a delete in front of it hands over**: Docs
     merges the two paragraphs keeping the first one's style, so the block after a
     deleted one wears the deleted one's, and a run of deletes passes the first one's
@@ -3232,19 +3243,23 @@ def unwritten_levels(theirs: dict, merged: list[dict], notes: list[str]) -> None
         if not _written_here(block):
             lands.append(block.get("level", 0))
             continue
-        # The text is written at the mark of the paragraph in front of it and wears
-        # that paragraph's style, its place in a list among it; where no list stands
-        # there, `createParagraphBullets` starts one at level 0. So the level it comes
-        # out at is the one in front of it, which can be deeper than the source asks
-        # for as easily as shallower — a nested item at the end of the document is all
-        # it takes (offline chain-8 seed 530265: the source moved a level-0 item to the
-        # end, behind an item the reader had nested).
-        out = lands[at - 1] if at and lands[at - 1] is not None else 0
+        # Whose paragraph style the new text wears, and so whose place in a list; where
+        # no list stands there, `createParagraphBullets` starts one at level 0. Either
+        # way the level can be deeper than the source asks for as easily as shallower —
+        # one nested item beside it is all it takes (offline chain-8 seed 530265: the
+        # source moved a level-0 item to the end, behind an item the reader had nested;
+        # chain-12 seed 1640036: it moved one to just in front of a nested item).
+        anchor = _anchor(merged, at)
+        splits = anchor is not None and not _structural(anchor)
+        out = level_of(anchor) if splits else \
+            (lands[at - 1] if at and lands[at - 1] is not None else 0)
         lands.append(out)
         if out != block.get("level", 0):
+            whose = "the item it is written in front of" if splits \
+                else "the item in front of it"
             notes.append(f"{block.get('key')}: written from nothing as a list item, and no "
                          f"request gives a bullet its nesting level — it comes out at level "
-                         f"{out}, the level of the item in front of it, not at "
+                         f"{out}, the level of {whose}, not at "
                          f"{block.get('level', 0)}")
     by_key = {b["key"]: b for b in merged if b.get("key")}
     live = theirs.get("blocks", [])

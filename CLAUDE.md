@@ -2408,6 +2408,19 @@ keys, named ranges), `doc_merge.py` (pure planning), `doc_sync.py` (the commands
   with the orphan deletes now, for the reason `requests` heads the batch of words with them one
   step later - they move no index, and the one batch they were not run before is the one that
   makes a new empty paragraph. 1 of 250 rounds at chain 10, pinned by a hand-built test.
+  **Chain 12** then (400 `between_tables`, 400 `themed`, 600 mixed clean) gave `tabs` one
+  (1640036), shrunk to two appends and a restyle-and-move with **no reader op at all**: an item
+  written from nothing takes the level of the list it lands in, and `unwritten_levels` - which
+  has said so before the write since chain-4 seed 430296 - named the wrong list. A block goes
+  in as `text\n` at the **start of the block that follows** it, so Docs splits that paragraph
+  and the new block, the half in front, keeps the style that was there, bullet and level among
+  it; only where nothing follows, or a table does, does it wear the style of the block in
+  *front*. A level-0 item moved to just in front of a nested one therefore came out nested in
+  silence. The prediction asks `_anchor` where it splits now and the block in front only where
+  it appends (1 of 400 rounds at chain 12), and it caught the note lying the other way too:
+  the test standing for chain-8 seed 530265 moved an item *behind* a nested one, which really
+  comes out at level 0 as asked - a spurious note is `_shape_arrived`'s excuse, so it hides the
+  next real one. Both tests now assert the level the document ends up at beside the note.
 - Live suite (opt-in, marker `docs`, ~5 min): `python -m pytest -m docs tests/test_docs_live.py`
   pushes a document per test, edits both sides, syncs, checks a second sync writes nothing, and
   deletes the document. Offline: `tests/test_doc_ir.py`, `test_doc_merge.py`, `test_doc_sync.py`.

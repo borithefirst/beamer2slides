@@ -161,11 +161,14 @@ REGRESSIONS = ((60, 1), (181, 1), (309, 4), (1031, 8), (1147, 8),
 # `between_tables`: the empty block a new table swallows, recovered only when it read
 # as a plain paragraph. And one from `astral`: an orphan named range handed to the
 # empty paragraph a new table leaves behind, resurrecting a block the reader deleted.
+# And one from `tabs`: the nesting level an item written in front of a nested one
+# takes, which `unwritten_levels` predicted from the wrong side.
 SHAPED = ((870308, 8, "two_tables"), (870368, 8, "two_tables"),
           (890070, 8, "ends_on_table"), (1130023, 6, "themed"),
           (1140022, 8, "themed"), (1150196, 6, "themed"),
           (1180145, 10, "themed"), (1180151, 10, "themed"),
-          (1270233, 8, "between_tables"), (1430231, 10, "astral"))
+          (1270233, 8, "between_tables"), (1430231, 10, "astral"),
+          (1640036, 12, "tabs"))
 
 
 def _round(seed: int, chain: int, shape: str | None = None) -> None:
@@ -1612,6 +1615,10 @@ def _para(text):
     return {"kind": "paragraph", "runs": [{"text": text}]}
 
 
+def _item(text, level=0):
+    return {"kind": "item", "level": level, "glyphs": None, "runs": [{"text": text}]}
+
+
 def _table(rows):
     return {"kind": "table", "rows": [[[_para(cell)] for cell in row] for row in rows]}
 
@@ -2120,20 +2127,53 @@ def test_an_item_whose_mark_a_delete_hands_over_says_the_level_it_comes_out_at()
         == ["item:alpha", "item:gamma", "item:beta"]
 
 
-def test_an_item_that_lands_behind_a_deeper_one_says_so_although_it_asks_for_level_0():
-    """The level a block written from nothing comes out at is the one in front of it,
-    which can as easily be deeper than the source asks for as shallower — and the note
-    fired only for an item asking to be nested, so the commoner half was silent: a
-    level-0 item moved behind a nested one came out nested (offline chain-8 seed
-    530265, where the source moved an item to the end of a document whose last item
-    the reader had indented)."""
-    world, ours, base = _push("prose")
-    keys = [b.get("key") for b in ours["blocks"]]
-    at, behind = keys.index("item:alpha"), keys.index("item:gamma")
-    ours["blocks"].insert(behind, ours["blocks"].pop(at))   # level 0, behind level 1
+def test_an_item_appended_behind_a_deeper_one_says_so_although_it_asks_for_level_0():
+    """The level a block written from nothing comes out at can as easily be deeper
+    than the source asks for as shallower — and the note fired only for an item asking
+    to be nested, so the commoner half was silent: a level-0 item appended behind a
+    nested one comes out nested (offline chain-8 seed 530265, where the source moved
+    an item to the end of a document whose last item the reader had indented).
+
+    Nothing follows it, so this is the one shape that really does wear the style of
+    the block in *front* — and the live level is asserted beside the note, because a
+    note nobody checks against the document is a prediction that can go quietly
+    wrong."""
+    world, ours, base = _build([_item("alpha"), _item("beta"), _item("gamma", 1)])
+    at = [i for i, b in enumerate(ours["blocks"]) if b.get("key") == "item:alpha"][0]
+    ours["blocks"].append(ours["blocks"].pop(at))           # level 0, past level 1
     report, ours, base = fuzz_docs.sync_once(world, ours, base)
     assert any("it comes out at level 1, the level of the item in front of it, not at 0"
                in note for note in report["notes"]), report
+    live = doc_world.read_ir(world, ours, base)
+    assert [(b.get("key"), b.get("level")) for b in live["blocks"]] == \
+        [("item:beta", 0), ("item:gamma", 1), ("item:alpha", 1)]
+
+
+def test_an_item_written_in_front_of_a_nested_one_takes_that_ones_level():
+    """Which list a block written from nothing lands in is which way round it goes in.
+    The usual way is "text\\n" at the start of the block that follows it: Docs splits
+    that paragraph and the new block — the half in front — keeps the style that was
+    already there, bullet and nesting level among it. Only where nothing follows, or a
+    table does, is it the block in *front* whose style it wears.
+
+    `unwritten_levels` said the second of those for every case, so it predicted the
+    wrong level for the commonest one and said nothing at all: a level-0 item the
+    source moved to just in front of a nested one came out nested, the reader having
+    touched neither (offline chain-12 seed 1640036, shape `tabs`, shrunk to two
+    appends and a restyle-and-move with no reader in it)."""
+    world, ours, base = _build([_item("alpha"), _item("beta"), _para("A line."),
+                                _para("And another."), _item("gamma", 1),
+                                _para("Tail.")])
+    at = [i for i, b in enumerate(ours["blocks"]) if b.get("key") == "item:beta"][0]
+    ours["blocks"].insert(3, ours["blocks"].pop(at))        # beta, to just before gamma
+    report, ours, base = fuzz_docs.sync_once(world, ours, base)
+    assert any("it comes out at level 1, the level of the item it is written in front "
+               "of, not at 0" in note for note in report["notes"]), report
+    live = doc_world.read_ir(world, ours, base)
+    assert [(b.get("key"), b.get("level")) for b in live["blocks"] if b["kind"] == "item"] \
+        == [("item:alpha", 0), ("item:beta", 1), ("item:gamma", 1)]
+    again, _, _ = fuzz_docs.sync_once(world, copy.deepcopy(ours), copy.deepcopy(base))
+    assert again["requests"] == 0
 
 
 def test_one_block_sent_past_a_list_is_one_move_and_not_every_block_it_passed():
