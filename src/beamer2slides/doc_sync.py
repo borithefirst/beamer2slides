@@ -1186,7 +1186,8 @@ def _write_structure(docs, ident: str, tab: str | None, ours: dict, base: dict,
         # it was looking for one of ours whose range this very batch destroyed, and
         # gave it that key. Recovered first, it is not free to be taken, and
         # `plant_ranges` puts its own range back in the same breath.
-        found = doc_merge.recover_tables(was, theirs)
+        found = doc_merge.recover_tables(
+            was, theirs, {t["key"] for t in result["shaped"] if t.get("key")})
         anchored = doc_merge.anchor_tables(theirs, result["shaped"])
         # And the empty paragraph a new table's swallow took the name off, which the
         # plan below would read as a block the reader had deleted. After the

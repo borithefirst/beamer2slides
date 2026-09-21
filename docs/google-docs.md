@@ -2302,6 +2302,60 @@ a pair the report names. The defect is still there and still wrong; it is no lon
 which is the only thing a loss campaign can see. What pins it is the unit test that says
 `_moved_keys` is a longest common subsequence, which needs no seed at all.
 
+### Three the shapes found: a stop, a key, and a table with nowhere to go
+
+A round draws its shape at random, so a defect that needs two tables on the page waits for
+the dice: of fourteen shapes, `two_tables` is one. Fixing the shape with `--shape` is the
+cheap way to press on one part of the machinery, and 800 rounds of `two_tables` at chain 8
+came back with three findings where 1,600 mixed rounds at the same depths had none. One is
+the oracle's own and two are the merge's.
+
+**A full stop is not part of the word it stands against** (chain-8 seed 870308, the
+oracle's). `WORD` is `\S+`, so the token is what a reader would call the word plus whatever
+the *source* has since parked against it — and a word wears a mark only where every
+character of it does (`_under_words`, the rule written for the split runs of seed 970528).
+The reader bolded `zephyr`, the source reworded the sentence around it, the merge wrote
+`lantern zephyr` bold and `.` plain, and the bold read as gone while it sat there in the
+document. `oracle.core` trims the punctuation clinging to either end (Unicode `P*`, so a
+soft hyphen or a slash stays where it is — those join two words rather than dressing one,
+and `joined_differently` is the forgiveness written for them), and the question "is the
+word still there?" is asked in the same words. 1 of 400 rounds at chain 8 with the untrimmed
+token back.
+
+**A key this batch is about to place is not the recovery's to give** (chain-8 seed 870368).
+After a structural write two repairs look at the same free tables: `recover_tables`, for a
+named range the *reader* destroyed by deleting the row a table is anchored in, and
+`anchor_tables`, for one of our own writes. The recovery goes first — that was seed 993608's
+lesson, so that the reader's table is not free to be taken — and where the same table was
+regridded by us and beheaded by them, the two can cross. A regrid that deletes a table's
+first column leaves it saying almost nothing, while the reader's beheaded table still says
+most of what the base recorded, so the regridded table's key scored higher on the reader's
+table than on its own remnant and took it. `anchor_tables` then found that key already
+placed, left the remnant unnamed, and the source's regrid went nowhere. The batch knows
+where it put its tables and this pass only guesses, so it is told which keys are
+`spoken_for` and goes second on those. 1 of 400 rounds at chain 8 without it.
+
+**A table moved in front of the empty paragraph the body ends behind** (chain-8 seed 890070,
+shape `ends_on_table`). A body may not end on a table, so Docs keeps an empty paragraph
+after one and no request deletes it: a trailing table goes out by its own span *and the mark
+in front of it*, which leaves the block before it as the body's last and no stray empty one
+after (`_delete_range`). That block keeps its words, and so its named range — unless it is
+itself an empty paragraph, which is all mark. Then the file putting the table in *front* of
+that block asks for a place the table's own delete takes away: `insertTable` splits what is
+left of the swallowed paragraph, the table lands behind it again, the settle keys the
+leftover from its words (it is empty, so its name is its kind and it fits), and the move is
+undone in silence. `refuse_eaten_anchor` leaves the table where the document has it and says
+why — the mirror of `refuse_back_to_back`, and refused for the same reason: the document
+cannot hold what the file asks for, and saying so beats a sync that writes the same two
+requests every time it runs. 1 of 400 rounds at chain 8 without it.
+
+Each pinned by a test that fails with its mechanism back in memory, and the three seeds kept
+as regressions of their own — `tests/test_doc_fuzz.py`'s `SHAPED`, since a seed names a
+script and these scripts only exist on one shape. Then clean under `--strict` at five more
+settings: 800 rounds of `two_tables` at chain 8, 800 of `ends_on_table` at chain 8, 700 of
+`between_tables` at chain 6, 800 mixed at chain 4 and 400 mixed at chain 10. `KNOWN` still
+empty.
+
 ## Remaining risks
 
 1. **Pictures** — retired, see "Pictures, and the chips a request can make" above. What

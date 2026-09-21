@@ -2285,6 +2285,31 @@ keys, named ranges), `doc_merge.py` (pure planning), `doc_sync.py` (the commands
   810000, 700 at chain 6 from 740000, 600 at chain 6 from 790000, 500 at chain 8 from 720000
   and 760000, 400 at chain 8 from 800000, 400 at chain 10 from 780000, 400 at chain 12 from
   730000 and 820000), `KNOWN` still empty.
+  **Then by shape rather than by depth**: a round draws one of fourteen shapes, so a defect
+  needing two tables on the page waits for the dice, and `--shape` presses on one part of the
+  machinery instead - 800 rounds of `two_tables` at chain 8 found three things where 1,600
+  mixed rounds at the same depths had found none (each 1 of 400 with its mechanism back; kept
+  as `tests/test_doc_fuzz.py`'s `SHAPED`, since these scripts exist on one shape only). The
+  oracle's: `WORD` is `\S+`, so the full stop the **source** parks against a word the reader
+  bolded comes along in the token, and "a word wears what every character of it wears" read
+  the bold as gone while it sat there (870308; `oracle.core` trims Unicode `P*` off either
+  end, leaving a soft hyphen where it is - that joins two words rather than dressing one).
+  And two of the merge's, both about a table: after a structural write `recover_tables` (for
+  a range the **reader** destroyed) runs before `anchor_tables` (for one of ours), and where
+  the same table was regridded by us and beheaded by them the two crossed - a regrid that
+  deletes a table's first column leaves it saying almost nothing while the reader's beheaded
+  table still says most of the base's words, so the regridded table's key went onto theirs,
+  `anchor_tables` found it already placed and the source's regrid went nowhere (870368; the
+  batch knows where it put its tables and this pass only guesses, so it is told which keys
+  are `spoken_for`). And a **body may not end on a table**, so a trailing table goes out by
+  its own span *and the mark in front of it* - which, when that block is an empty paragraph,
+  is all the block has: the file putting the table in front of it asks for a place the
+  table's own delete takes away, `insertTable` splits what is left of the swallowed
+  paragraph, the table lands behind it again and the move is undone in silence (890070;
+  `refuse_eaten_anchor` leaves it where the document has it and says why, the mirror of
+  `refuse_back_to_back`). Clean afterwards at five more settings (800 `two_tables` at chain 8
+  from 870000, 800 `ends_on_table` at chain 8 from 890000, 700 `between_tables` at chain 6
+  from 910000, 800 mixed at chain 4 from 1000000, 400 mixed at chain 10 from 1010000).
 - Live suite (opt-in, marker `docs`, ~5 min): `python -m pytest -m docs tests/test_docs_live.py`
   pushes a document per test, edits both sides, syncs, checks a second sync writes nothing, and
   deletes the document. Offline: `tests/test_doc_ir.py`, `test_doc_merge.py`, `test_doc_sync.py`.
