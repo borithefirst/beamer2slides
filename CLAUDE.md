@@ -2421,6 +2421,20 @@ keys, named ranges), `doc_merge.py` (pure planning), `doc_sync.py` (the commands
   the test standing for chain-8 seed 530265 moved an item *behind* a nested one, which really
   comes out at level 0 as asked - a spurious note is `_shape_arrived`'s excuse, so it hides the
   next real one. Both tests now assert the level the document ends up at beside the note.
+  **Chains 14 and 16** then gave one defect twice over, once through each judge (500 mixed at
+  chain 14, seed 1740158; 300 `tabs` at chain 16, seed 1730265): a body may not end on a table,
+  so a trailing table is deleted with the paragraph mark **in front** of it or Docs' own trailer
+  is left standing as a second empty paragraph - and a block that is itself an empty paragraph
+  is all mark, so the delete takes its named range whole, exactly as a new table's swallow does.
+  Half of that was known and refused (`refuse_eaten_anchor`: where the file puts the table in
+  front of that very block, the place it is written goes with it); where the table moves
+  elsewhere the move stands and the block was being destroyed quietly. The re-plan then reads
+  the file's key as a block the reader deleted, so the source's restyle of it went nowhere
+  (1730265) and the item it had moved came back between the two tables under a fresh name, the
+  file's order never reached (1740158). `recover_eaten` gives the name back to **the trailer**:
+  with the table in front of it gone that empty paragraph *is* the block - at the end of a body
+  there is nowhere else for one to be - and `doc_ir._hide_trailer` leaves a paragraph with an
+  identity planted on it out of the scaffolding. Both campaigns clean afterwards.
 - Live suite (opt-in, marker `docs`, ~5 min): `python -m pytest -m docs tests/test_docs_live.py`
   pushes a document per test, edits both sides, syncs, checks a second sync writes nothing, and
   deletes the document. Offline: `tests/test_doc_ir.py`, `test_doc_merge.py`, `test_doc_sync.py`.

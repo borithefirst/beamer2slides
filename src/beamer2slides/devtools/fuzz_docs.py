@@ -281,6 +281,7 @@ def _write_structure(world, tab, ours, base, mine, was, result, seen) -> tuple:
             was, theirs, {t["key"] for t in result["shaped"] if t.get("key")})
         anchored = doc_merge.anchor_tables(theirs, result["shaped"])
         anchored += doc_merge.recover_swallowed(theirs, result["shaped"])
+        anchored += doc_merge.recover_eaten(theirs, result["shaped"])
         if anchored or found:
             _send(world, doc_merge.on_tab(doc_ir.name_requests(theirs), tab), seen)
             theirs = doc_world.part_ir(world, tab, ours, base)

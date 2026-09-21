@@ -1193,6 +1193,9 @@ def _write_structure(docs, ident: str, tab: str | None, ours: dict, base: dict,
         # plan below would read as a block the reader had deleted. After the
         # anchoring: it is found by the table it stands in front of.
         anchored += doc_merge.recover_swallowed(theirs, result["shaped"])
+        # And the empty paragraph the delete of the body's last table ate the mark
+        # of, which the trailer now stands in for.
+        anchored += doc_merge.recover_eaten(theirs, result["shaped"])
         if anchored or found:
             plant_ranges(docs, ident, theirs, tab)
             doc, theirs = read_part(docs, ident, tab, ours, base)

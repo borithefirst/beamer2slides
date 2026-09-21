@@ -2501,6 +2501,41 @@ spurious note is not harmless here: it is `fuzz_docs._shape_arrived`'s excuse, s
 the next real one. Both tests now assert the level the **document** ends up at beside the
 note they pin.
 
+### The empty paragraph a table's delete eats
+
+Chains 14 and 16, at fresh seeds again, and the two findings that came back were one
+defect seen from either side: 500 mixed rounds at chain 14 (seed 1740158) and 300 `tabs`
+rounds at chain 16 (seed 1730265), each shrunk to three steps and a source that moves the
+table the body ends on.
+
+A body may not end on a table, so Docs keeps an empty paragraph after one and no request
+deletes it. A trailing table therefore goes out by its own span **and the mark in front of
+it**, or that trailer would be left standing as a second empty paragraph (`_delete_range`,
+measured). The block that mark belongs to keeps its words, and so its named range — unless
+it is *itself* an empty paragraph, which is all mark: the delete covers its range whole and
+Docs drops it, exactly as a new table's swallow does (`_swallowed`). Half of this was known
+and refused: where the file puts the table in **front** of that very block, the place the
+table is written goes with it and the move is unrealisable (`refuse_eaten_anchor`, chain-8
+seed 890070). Where the table moves somewhere else the move stands — and the block was
+being destroyed anyway, quietly.
+
+What that costs is identity, and the re-plan after the structural batch is where it is
+spent: the file's key names nothing there, so the block reads as one the reader deleted and
+everything the source asked of it goes in silence. An empty paragraph the source had made a
+`HEADING_1` came back a plain paragraph (1730265), and an empty list item came back between
+the two tables under a fresh name, so the order the file asks for was never reached
+(1740158). Two different judges, one mechanism.
+
+`recover_eaten` gives the name back, and the place it puts it is what makes this simple:
+the survivor is **the trailer**. With the table in front of it gone, that empty paragraph
+*is* the block — at the end of a body there is nowhere else for one to be — and
+`doc_ir._hide_trailer` leaves a paragraph somebody has planted an identity on out of the
+scaffolding, so the name is what makes it a block again. Where the batch left the body
+ending on something other than a table the trailer is no longer hidden and stands there as
+a plain empty block; that one is the same paragraph and takes the key in place. It runs
+after `anchor_tables`, as `recover_swallowed` does, so a table anchored on that block is
+found by the name the batch really left behind. Both campaigns clean afterwards.
+
 ## Remaining risks
 
 1. **Pictures** — retired, see "Pictures, and the chips a request can make" above. What

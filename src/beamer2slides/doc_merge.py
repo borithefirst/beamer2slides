@@ -810,6 +810,67 @@ def recover_swallowed(live: dict, shaped: list[dict]) -> int:
     return done
 
 
+def recover_eaten(live: dict, shaped: list[dict]) -> int:
+    """Give back the key the delete of a body's last table ate off the empty
+    paragraph in front of it: the trailer takes that paragraph's place.
+
+    A table that ends the body is deleted with the paragraph mark in *front* of it,
+    or the empty trailer behind it would be left standing as a second paragraph
+    (`_delete_range`, measured). The block that mark belongs to keeps its words, and
+    so its named range — unless it is *itself* an empty paragraph, which is all mark:
+    then the delete covers the range whole and Docs drops it, exactly as a new
+    table's swallow does (`_swallowed`). The block the merge means to keep is
+    therefore gone from the re-plan that follows the structural batch, where it reads
+    as one the reader deleted, and everything the source asked of it goes in silence:
+    an empty paragraph the source had made a heading (offline chain-16 seed 1730265,
+    shape `tabs`) and an empty list item the source moved past the table in front of
+    it, which came back between the two tables under a name of its own and left the
+    file's order unreached (offline chain-14 seed 1740158, the same shape).
+
+    The survivor is the trailer. With the table in front of it gone, that empty
+    paragraph *is* the block — at the end of a body there is nowhere else for one to
+    be — and `doc_ir._hide_trailer` leaves a paragraph somebody has planted an
+    identity on out of the scaffolding, so the name is what makes it a block again.
+    Where the batch left the body ending on something other than a table the trailer
+    is no longer hidden and stands there as a plain empty block; that one is the same
+    paragraph and takes the key in place.
+
+    After `anchor_tables`, as `recover_swallowed` is: a table anchored on the block
+    this recovers must be found by the name the batch really left behind.
+    """
+    have = {b.get("key") for b in live["blocks"] if b.get("key")}
+    done = 0
+    for told in shaped:
+        key = told.get("eaten")
+        if not key or key in have:
+            continue
+        block, span = _trailing_empty(live)
+        if block is None and span is None:
+            continue
+        if block is not None:
+            block["key"] = key
+        else:
+            live["blocks"].append({"kind": "paragraph", "runs": [], "key": key,
+                                   "span": list(span)})
+            live.pop("trailer", None)
+            live.pop("trailer_kind", None)
+        have.add(key)
+        done += 1
+    return done
+
+
+def _trailing_empty(live: dict) -> tuple[dict | None, list | None]:
+    """The empty paragraph the body ends on: the hidden trailer, or — where the body
+    no longer ends on a table — the unnamed block that same paragraph reads as."""
+    if live.get("trailer"):
+        return None, list(live["trailer"])
+    last = live["blocks"][-1] if live["blocks"] else None
+    if last is not None and not last.get("key") and not _structural(last) \
+            and not _match_text(last).strip():
+        return last, None
+    return None, None
+
+
 def _table_words(block: dict) -> str:
     """A table's cells as one stretch of words, with nothing of the grid in it."""
     return " ".join(block_text(inner) for row in block.get("rows", [])
@@ -2586,10 +2647,13 @@ def structure(theirs: dict, merged: list[dict],
                 "range": {"startIndex": start, "endIndex": end}}}]
                 + _orphan_range(theirs["blocks"][index], start, end))
             swallowed = _swallowed(theirs, reqs)
+            eaten = _eaten(theirs, index, start)
             plans.append((at, reqs,
-                          {"key": key, "after": _after_key(merged, position, swallowed),
+                          {"key": key,
+                           "after": _after_key(merged, position, swallowed, eaten),
                            "moved": True, "lines": block.get("lines"),
                            **({"swallowed": swallowed} if swallowed else {}),
+                           **({"eaten": eaten} if eaten else {}),
                            "note": f"`{key}`: moved where the source has it"}))
         elif block.get("regrid"):
             what = ", ".join(f"{how}s a {line}" for line, how, _ in block["regrid"])
@@ -2659,18 +2723,39 @@ def structure(theirs: dict, merged: list[dict],
 _END = 1 << 30  # a table appended at the end of the body: after every index there is
 
 
-def _after_key(merged: list[dict], position: int, swallowed: str | None = None) -> str | None:
+def _after_key(merged: list[dict], position: int, swallowed: str | None = None,
+               eaten: str | None = None) -> str | None:
     """The key of the nearest block in front of this one that the document already
     has — where a table written from nothing will be found again once it exists.
 
-    Never the block this very batch swallows the mark of (`_swallowed`): an anchor is
-    read back *after* the batch, and that one comes back unnamed.
+    Never a block whose name this very batch takes away: the one whose mark a new
+    table's insert swallows (`_swallowed`) and the one whose mark the delete of the
+    body's last table eats (`_eaten`). An anchor is read back *after* the batch, and
+    both of those come back unnamed.
     """
     for block in reversed(merged[:position]):
         if block.get("key") and block.get("span") and not block.get("moved"):
-            if block["key"] == swallowed:
+            if block["key"] in (swallowed, eaten):
                 continue
             return block["key"]
+    return None
+
+
+def _eaten(theirs: dict, index: int, start: int) -> str | None:
+    """The key the delete of the body's last table takes with the mark in front of it.
+
+    `_delete_range` reaches back over that mark so the trailer is not left standing
+    as a second empty paragraph, and the block it belongs to keeps its words and so
+    its named range — unless the block is *itself* an empty paragraph, which is all
+    mark: the delete then covers its range whole and Docs drops it
+    (`recover_eaten`).
+    """
+    if index == 0 or start >= theirs["blocks"][index]["span"][0]:
+        return None
+    before = theirs["blocks"][index - 1]
+    span = before.get("span")
+    if before.get("key") and span and span[0] >= start:
+        return before["key"]
     return None
 
 
