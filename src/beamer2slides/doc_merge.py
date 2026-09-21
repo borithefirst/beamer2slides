@@ -631,11 +631,23 @@ def recover_tables(base: dict, theirs: dict) -> int:
     each other's best match, above `TABLE_MATCH` and `TABLE_MARGIN` clear of the
     runner-up on both sides. So a reader who deleted one table and built another keeps
     both of those facts, and two tables that read alike pair with neither.
+
+    And a table with **no words at all** is nobody's candidate, on either side, which
+    is the same rule taken to its limit: two empty strings are each other's perfect
+    match, so a base table that never said anything paired at 1.0 with the blank table
+    `insertTable` had just built in this very batch — before `anchor_tables` ran, which
+    is the pass that knows about that one. The reader's table, beheaded and holding the
+    only word either of them had, was then the one free table left for the new table's
+    key: the merge saw its own blank grid where the reader's table should be, deleted
+    the reader's table to rebuild it and the word went (chain-12 seed 730384, shape
+    `titled`). This is a pairing on words, so a side with no words is not a pairing.
     """
     claimed = {block.get("key") for block in theirs["blocks"]}
     missing = [b for b in base["blocks"]
-               if b.get("kind") == "table" and b.get("key") and b["key"] not in claimed]
-    free = [b for b in theirs["blocks"] if b.get("kind") == "table" and not b.get("key")]
+               if b.get("kind") == "table" and b.get("key") and b["key"] not in claimed
+               and _table_words(b)]
+    free = [b for b in theirs["blocks"]
+            if b.get("kind") == "table" and not b.get("key") and _table_words(b)]
     if not missing or not free:
         return 0
     # The words, not `_match_text` — whose " | " between every cell is most of a
@@ -716,6 +728,21 @@ def anchor_tables(live: dict, shaped: list[dict]) -> int:
                     if b.get("kind") == "table" and not b.get("key")]
             free += [b for b in reversed(live["blocks"][:start])
                      if b.get("kind") == "table" and not b.get("key")]
+            # And where this batch wrote the table's grid, that grid is what the
+            # table it belongs to has: a free table of another shape is not it,
+            # whatever it follows. The reader can behead a table too — deleting the
+            # row it is anchored in, in the browser, which `recover_tables` refuses
+            # to pair when it is not sure — and then the batch's own beheaded table
+            # is not the only unkeyed one on the page. Taking the first free table
+            # after the anchor put the regridded table's key on the reader's table
+            # and left the reader's rows standing where the sync had just written
+            # two of its own (chain-6 seed 790329, shape `two_tables`). Claiming
+            # nothing is the safe half of it: the key comes back at the re-plan,
+            # where `recover_tables` has both tables in front of it at once and the
+            # words tell them apart.
+            want = _built_size(told) if told.get("lines") else None
+            if want is not None:
+                free = [b for b in free if _size(b.get("rows", [])) == want]
             built = not (told.get("ops") or told.get("lines"))
             found = next((b for b in free if _blank_table(b) == built), None) \
                 or (free[0] if free else None)
@@ -2905,6 +2932,13 @@ def refuse_nowhere(theirs: dict, merged: list[dict], notes: list[str]) -> None:
     arithmetic is right. A document that has none has nowhere for this block, so it
     is left unwritten and the report says why. Before `restore_undeletable`, which
     decides what can be deleted and must see a move this one has taken back.
+
+    A block the source *adds* there is not merely unwritten: the settle regenerates
+    the file from the document it wrote, so the paragraph goes out of the file too
+    and the next sync will not try again. "Not written" on its own reads as a thing
+    still waiting, so the note says where it went and how to get it in — a paragraph
+    between the tables in the browser, or somewhere else in the file. A refused
+    *move* keeps its block, which is why only this half says it.
     """
     for block in list(merged):
         position = next(i for i, b in enumerate(merged) if b is block)
@@ -2920,7 +2954,9 @@ def refuse_nowhere(theirs: dict, merged: list[dict], notes: list[str]) -> None:
         else:
             block["nowhere"] = True
             notes.append(f"{key}: the source adds it between two tables, where the "
-                         f"document has no paragraph to write in — not written")
+                         f"document has no paragraph to write in — not written, and "
+                         f"the settle takes it back out of the file: put a paragraph "
+                         f"between the tables in the document, or move it in the file")
 
 
 def _put_back(merged: list[dict], block: dict) -> None:

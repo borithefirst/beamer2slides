@@ -209,16 +209,34 @@ def _in_table(t: dict, start: int, index: int) -> tuple[list, int] | None:
     return None
 
 
+def splits_a_pair(cont: list[dict], offset: int) -> bool:
+    """Whether an index falls *between* the two code units of an astral character.
+
+    A judgement, not a measurement: `documents.get` answers in JSON, so a document
+    holding half a surrogate pair could not be read back at all, and no cursor can be
+    put inside one. Google therefore does something here — refuse, or move the index
+    — and refusing is the half that cannot corrupt. It matters because the alternative
+    is silent: the world would go on holding a lone surrogate, every judge would be
+    handed a document no reader could have made, and the crash would surface far away
+    (`doc_ir.utf16_len`, which encodes strictly, as the API's own JSON does).
+    """
+    return offset < len(cont) and cont[offset]["k"] == "c" \
+        and 0xDC00 <= ord(cont[offset]["c"]) < 0xE000
+
+
 def writable_spot(units: list[dict], index: int, request: dict) -> tuple[list, int]:
     """Where a request may write text, or `Refused`.
 
     Nothing can be inserted at a table's own index (measured), nor at a row's or a
-    cell's, nor past the segment's last paragraph mark, nor inside an equation.
+    cell's, nor past the segment's last paragraph mark, nor inside an equation, nor
+    between the two halves of an astral character (`splits_a_pair`).
     """
     spot = locate(units, 1, index)
     if spot is None or index < 1:
         raise Refused(request, f"index {index} is not inside a paragraph")
     cont, offset = spot
+    if splits_a_pair(cont, offset):
+        raise Refused(request, f"index {index} is inside an astral character")
     if offset == len(cont):
         raise Refused(request, f"index {index} is past the segment's last paragraph mark")
     if cont[offset]["k"] in ("t", "toc"):
@@ -423,6 +441,9 @@ class World:
             raise Refused(request, f"the range [{start}, {end}) is not one run of text")
         cont, i = low
         j = high[1]
+        if splits_a_pair(cont, i) or splits_a_pair(cont, j):
+            raise Refused(request, f"the range [{start}, {end}) ends inside an astral "
+                                   f"character")
         if j >= len(cont):
             raise Refused(request, "Invalid deletion range: the segment's last paragraph "
                                    "mark cannot be deleted")

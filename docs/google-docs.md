@@ -1472,6 +1472,11 @@ second, and is the worst of the four.
   right. `_undressed` is `_dressed_up` mirrored, condition and all. With it out, 1 of 400
   rounds at chain 4 cries wolf.
 
+  Both of those were later **retired**, and the reason is worth keeping beside them: no
+  reader can put a full stop inside a word by dragging a paragraph, and neither could the
+  harness once `read_move_block` stopped reading its drop index off the document before the
+  cut. See "A block being there at all, and the drag that made a document no reader could".
+
 Each has its test, each verified by breaking its mechanism. Two of the three merge defects
 were reachable only by chaining — the second needs the source to have reordered a body
 *and* added a block to it — which is the argument for depth over breadth: at chain 1 the
@@ -2169,13 +2174,133 @@ And two more at fresh seeds, one on each side of the line again.
   base words, which is what `_words_findings` already had.
 
 Each pinned by a test that fails with its mechanism put back in memory, and measured the same
-way: `_moved_keys` 1 of 200 at chain 6, `_restyled_words` 1 of 200 at chain 6,
+way: `_moved_keys` 1 of 200 at chain 6 (no longer reproducible, and for a reason worth
+reading — see the end of the next section), `_restyled_words` 1 of 200 at chain 6,
 `unwritten_levels` 2 of 700 at chain 4 and its widened half 1 of 900 at chain 4, the stuck
 anchor 1 of 300 at chain 10, the row note 1 of 400 at chain 10, `_orphan_range`'s cuts 1 of 700
 at chain 6, `_settles_as_item` 1 of 900 at chain 4, the shape-only lead 1 of 400 at chain 12,
 the cell judge's blindness to the tab 1 of 1,200 at chain 4. `_order_arrived` itself is what
 sees the order defects: with it and the old `_moved_keys` both in place, 300 rounds pass in
 silence. Then clean under `--strict` at thirteen fresh settings, `KNOWN` still empty.
+
+### A block being there at all, and the drag that made a document no reader could
+
+The third judge asks whether the source's changes arrived, and it asked about grids, cells,
+words, styling and order — everything except the two plainest things a source edit can say:
+**a block is new** and **a block is gone**. Neither of the other judges will ever ask. The
+loss oracle says in its own first paragraph that it is about the *reader's* work, and a
+paragraph of the source's that never arrives takes nothing of theirs; convergence is
+satisfied by any self-consistent reading, and the settle writes what the document holds into
+the file and the base alike, so the round converges on the block not being there.
+`fuzz_docs._existence_arrived` asks it, of the words rather than of the key — a key is made
+from a block's words where no range carries it, so twins can trade keys and every wordless
+block would share one — and only where the reader left the block exactly as the base has it,
+which is the case with nothing to merge.
+
+It found six things, four of them the harness's own and two the merge's, and it could not
+have found the first of them without being wrong itself to begin with:
+
+* **The file it is handed has no keys yet** (chain-4 seed 660085, its own first finding).
+  `doc_merge.plan` calls `doc_ir.key_blocks` *in place* on the file, and the campaign's
+  snapshot of the file is taken before that, so a block the source has just added had no
+  key — and the report names a refusal by that key. The one excuse there is could never be
+  looked up, and every block the merge refuses to write read as an addition lost in silence.
+  The other half was the note itself: `refuse_nowhere` said "not written", which reads as a
+  thing still waiting, when in fact the settle regenerates the file from the document and
+  the paragraph goes out of the file too. It says where it went and how to get it in.
+* **A tab the file only asks for stood in for the body.** `oracle.parts_by_tab` keyed a part
+  by `part.get("tab")`, and a `<section>` with no `data-tab` is a tab the *file* asks for
+  that the document has never had, so it has no id: it landed on `None`, where the body is,
+  and the last one written won. Every question asked of the body then got another tab's
+  part. Measured with the collision put back: **107 of 200** rounds at chain 4 fail — and
+  **0 of the same 200** with `_existence_arrived` switched off as well. It was invisible
+  until this judge existed, which is the argument for the judge as much as for the fix.
+* **The drag landed past where the reader let go** (chain-4 seed 710370). `read_move_block`
+  is a delete and a retype in two batches, and the second's index was read off the document
+  the reader saw rather than the one the first batch leaves behind: drop a block below the
+  cut and everything down there has moved up by what went. It landed inside a word, inside a
+  chip, or between the two code units of an astral character — which no cursor can be put
+  inside, and which left the document holding a lone surrogate that `doc_ir.utf16_len`
+  encodes strictly, as the API's own JSON does, so the campaign died where it stood.
+  `doc_world.splits_a_pair` refuses such an index now, a judgement rather than a measurement
+  (whether Google refuses it is owed). The crash is the smaller half: everywhere it did not
+  crash, every judge was being handed a document no reader could have made. Both of the loss
+  oracle's punctuation forgivenesses — `_dressed_up` (a full stop landing against the `1` in
+  a cell) and `_undressed` (a drag carrying a stop off a word) — had been written for damage
+  this one line was doing, and are **gone**: 0 of 800 rounds at chain 4, 0 of 500 at chain 8,
+  0 of 400 at chain 12 and 0 of the 60 regression seeds need them, and a forgiveness for
+  something that no longer happens is a blind spot waiting, which is what `_twin_unmarks`
+  was. `joined_differently`'s other two — `_welded` for a reader joining two paragraphs,
+  `_pared_down` for a reader deleting one of two joined words — are still earned.
+* **The question, sharpened three times.** A bag of words over the tab let a `collide`
+  rewording another paragraph to `ribbon` stand in for a dropped `the reader wrote ribbon`
+  (chain-8 seed 720173); counting blocks that say *at least* this one's words let `What we
+  found.` become `harbour we found.` and answer for a heading that said `harbour` (720270);
+  counting everything a block **says** let a chip put into a twin stop it saying what the new
+  copy says, so the count stood still while both blocks arrived (720074). The count is of the
+  text alone now, and it is only one of two traces — because the confound is the counting
+  itself, a question about one block asked of every *other* block that says the same thing.
+  At chain-12 seed 730061 a `collide` reworded the twin in the very step that appended the
+  copy, and no counting survives that. The other trace is the **key**: the plan gives a block
+  it writes a named range of its own, so the settle keys it back. Either excuses; the finding
+  needs no trace at all. Both are earned — blinding the key fails 1 of 400 rounds at chain
+  12, blinding the count fails 10 of the same 400.
+* **A table that never said anything is recovered onto nothing** (chain-12 seed 730384, and
+  the merge's). `recover_tables` pairs a table whose range the *reader* destroyed with the
+  base entry that names it, on the words the two hold — and two empty strings are each
+  other's perfect match. A base table that had never said anything paired at 1.0 with the
+  blank table `insertTable` had just built in the same batch, before `anchor_tables`, the
+  pass that knows about that one, had run. The reader's table — beheaded by a row delete,
+  holding the only word either of them had — was then the one free table left for the new
+  table's key: the merge saw its own blank grid where the reader's table stood, deleted it to
+  build the grid again, and the word went with no note. A pairing on words is not a pairing
+  when a side has no words. 1 of 400 rounds at chain 12 with it put back.
+
+And the same lesson one judge over, at chain-10 seed 780188 (shape `between_tables`). A key
+made from a block's words is no identity where the block has none: it is that block's number
+among the wordless ones, and the next one to lose its words takes it. Docs keeps a paragraph
+between two tables however it is deleted, so a source that dropped one there left its mark
+standing empty — the body's *first* wordless block from then on, so it took `paragraph:empty`
+and the block that had carried that name became `paragraph:empty#2`. Nothing moved and
+nothing was lost; two names changed hands under a genuine move elsewhere on the page, and
+`_order_arrived` read the renaming as the source's order undone. Wordless keys are left out
+of its question now — but **only where the four sides disagree about which keys those are**,
+which is the narrowest the exclusion can be: where the population is unchanged the numbering
+means the same block on every side, and a wordless block (a picture of its own, an empty line
+between two sections) is an ordinary thing for a source move to carry. `_existence_arrived`
+gives the same reason for asking about the words rather than the key.
+
+And one more of the merge's, at chain-6 seed 790329 (shape `two_tables`), which is the
+**reader** beheading a table seen from the other end. `anchor_tables` names the table a
+structural batch wrote by what it follows and took the first unkeyed table after that block
+— usually the only one, its own, whose named range its row delete had just taken with it.
+But a reader can behead a table too, in the browser, and `recover_tables` refuses to pair
+that one where the words leave any doubt, so two free tables stood on the page and place
+alone decided. The regridded table's key went onto the reader's, the source's rows were
+planned against the reader's grid, and the two rows the sync had just written stood under no
+name at all — the source's regrid reached the document and then went away again, with
+nothing in the report. Where the batch wrote a grid, that grid is what its table has: a free
+table of another shape is not it, whatever it follows (`_built_size`). And where none has
+that shape, nothing is claimed — the key comes back at the re-plan, where `recover_tables`
+sees both tables at once and the words tell them apart. 1 of 600 rounds at chain 6 with the
+old choice put back.
+
+Each pinned by a test that fails with its mechanism back in memory. Then clean under
+`--strict` at ten fresh settings — 800 rounds at chain 4, 700 at chain 6, 500 and 500 at
+chain 8, 400 at chain 12, and, with the order judge narrowed and the anchor fixed, 800 more
+at chain 4, 600 at chain 6, 400 at chain 8, 400 at chain 10 and 400 at chain 12 — `KNOWN`
+still empty.
+
+One measurement did not survive the campaign that found these, and it is worth saying which.
+`_moved_keys`' own defect was recorded at **1 of 200** rounds at chain 6, at seeds around
+400186; it is 0 of 200 there now, and 0 of 400 at fresh ones. The exclusion above is not the
+reason (0 of the same 200 with it disabled): a *later* fix is. The old `_moved_keys` asks for
+four moves where one would do, and since chain-10 seed 450252 `_apply_source_moves` keeps a
+`stuck` set and **says** every block whose move it could not make — so the same break now
+comes out as a report naming the table and the three blocks behind it, and this judge forgives
+a pair the report names. The defect is still there and still wrong; it is no longer silent,
+which is the only thing a loss campaign can see. What pins it is the unit test that says
+`_moved_keys` is a longest common subsequence, which needs no seed at all.
 
 ## Remaining risks
 

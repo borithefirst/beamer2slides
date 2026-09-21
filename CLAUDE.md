@@ -1966,7 +1966,8 @@ keys, named ranges), `doc_merge.py` (pure planning), `doc_sync.py` (the commands
   once more: `WORD` is `\S+`, so a reader's full stop against the `1` in a cell makes the token
   `.1`, which the base has not - but its only word is the base's, and the source rewriting that
   `1` takes the stop with it (seed 500249; `_dressed_up`, exact like `_pared_down` and asking
-  besides that the base word be gone from the tab).
+  besides that the base word be gone from the tab - since **retired**, the drag that pushed
+  that stop against the `1` having been the harness's own bug).
   **Deeper again, at fresh seeds** (800 rounds at chain 6 from 970000, 600 from 980000): seven
   findings, three the merge's and four the oracle's, and the merge's three are one wound seen
   from three sides - **the one a reader makes**. A table is anchored in its first cell, so a
@@ -2180,6 +2181,77 @@ keys, named ranges), `doc_merge.py` (pure planning), `doc_sync.py` (the commands
   a cell welded to it (`it.x`) and the source rewriting its own half read as a loss (600784).
   Each measured by breaking its mechanism (1 of 200 to 1 of 1,200 rounds) and pinned by a
   hand-built test; then clean under `--strict` at thirteen settings from 380000 to 650000.
+  **And the last two things a source edit can say** (`fuzz_docs._existence_arrived`): a block
+  is **new**, a block is **gone**. Neither other judge will ever ask - a paragraph of the
+  source's that never arrives takes nothing of the *reader's*, and the settle writes what the
+  document holds into file and base alike, so the round converges on its absence. Asked of the
+  words and not the key (a key is made from a block's words where no range carries it, so twins
+  trade keys and every wordless block shares one), and only where the reader left the block
+  exactly as the base has it. Six findings, four the harness's and two the merge's, and the
+  first needed the judge to be wrong itself: (a) `_arrived` is handed the file **as it stood
+  before the sync**, where a block the source added has no key - `doc_merge.plan` keys it in
+  place and the report names the refusal by that key, so the one excuse there is could never be
+  looked up and every block the merge refuses to write read as lost in silence (660085); with
+  it, `refuse_nowhere`'s note now says the settle takes that paragraph out of the file too,
+  rather than "not written", which reads as a thing still waiting. (b) `oracle.parts_by_tab`
+  keyed a part by `part.get("tab")`, and a `<section>` with no `data-tab` is a tab the *file*
+  asks for that has no id: it landed on `None`, where the body is, and the last one written won
+  - **107 of 200** rounds at chain 4 fail with the collision back and **0 of the same 200** with
+  the existence judge also off, so it was invisible until this judge existed. (c) The drag:
+  `read_move_block` read its drop index off the document the reader saw and not the one the cut
+  leaves behind, so a block dropped below the cut landed that far past where they let go -
+  inside a word, a chip, or between the two code units of an astral character, which left a lone
+  surrogate `doc_ir.utf16_len` encodes strictly and killed the campaign (710370, net
+  `doc_world.splits_a_pair`, a judgement: whether Google refuses such an index is owed). The
+  crash is the smaller half - everywhere else it handed every judge a document no reader could
+  have made, and **both** of the oracle's punctuation forgivenesses (`_dressed_up`, `_undressed`)
+  had been written for damage this one line was doing; a drop is a paragraph mark now, nothing
+  can land inside a token, and they are **gone** (0 of 800 at chain 4, 0 of 500 at chain 8, 0 of
+  400 at chain 12, 0 of 60 regression seeds - `_twin_unmarks`' lesson), while `_welded` and
+  `_pared_down`, which are for edits a reader really makes, stay. (d) The question itself,
+  sharpened three times: a bag of words over the tab let a `collide` stand in for a dropped
+  block (720173), counting blocks saying *at least* its words let `harbour we found.` answer for
+  `harbour` (720270), and counting everything a block **says** let a chip put into a twin stop
+  it saying what the new copy says (720074). The count is of the text alone now and is only one
+  of two traces, since the confound is the counting itself - a question about one block asked of
+  every *other* one that says the same thing, which a `collide` rewording the twin in the very
+  step that appends the copy answers wrongly (730061). The other is the **key** the settle gives
+  back to a block the plan wrote a named range for; either excuses, and both are earned (the key
+  blinded, 1 of 400 rounds at chain 12; the count blinded, 10 of the same 400). (e) The merge's
+  own: **a table that never said anything is recovered onto nothing** (730384). `recover_tables`
+  pairs a table whose range the *reader* destroyed with the base entry naming it, on the words
+  the two hold - and two empty strings are each other's perfect match, so a base table that had
+  never said anything paired at 1.0 with the blank table `insertTable` had just built in the
+  same batch, before `anchor_tables` (the pass that knows about that one) ran. The reader's
+  table, beheaded by a row delete and holding the only word either had, was then the one free
+  table left for the new table's key: the merge saw its own blank grid where the reader's table
+  stood, deleted it to build the grid again, and the word went with no note. A pairing on words
+  is not a pairing when a side has no words. 1 of 400 at chain 12. Two more came out of the
+  same campaigns, one per judge. `_order_arrived` leaves out a key a block has **no words
+  for** - it is that block's number among the wordless ones, so a source that drops the
+  paragraph Docs keeps between two tables leaves its mark standing empty, the mark takes
+  `paragraph:empty` and the block that had it becomes `paragraph:empty#2`: two names changed
+  hands under a real move elsewhere, and the judge read it as the source's order undone
+  (780188). Only where the four sides **disagree** about which keys are wordless, which is the
+  narrowest it can be - a judge gives up as little sight as it can. And `anchor_tables` names
+  the table a structural batch wrote by what it follows, taking the first unkeyed table after
+  it: usually its own, but a **reader** can behead a table too (deleting the row it is anchored
+  in, which `recover_tables` will not pair where the words leave doubt), and then the regridded
+  table's key went onto the reader's, the source's rows were planned against the reader's grid,
+  and the rows the sync had just written stood under no name - the regrid reached the document
+  and went away again, silently (790329, 1 of 600 at chain 6 with the old choice back). Where
+  the batch wrote a grid, that grid is what its table has (`_built_size`), and where no free
+  table has that shape nothing is claimed: the key comes back at the re-plan, where
+  `recover_tables` sees both tables at once and the words tell them apart. One measurement did
+  not survive: `_moved_keys`' own defect was 1 of 200 at chain 6 around seed 400186 and is 0 of
+  200 there now (0 of the same 200 with the wordless exclusion disabled, so that is not the
+  reason) - since 450252, `_apply_source_moves` **says** every block whose move it could not
+  make, so the same break comes out as a report rather than a silence, and a loss campaign can
+  only see the silences; the unit test calling `_moved_keys` a longest common subsequence needs
+  no seed. Then clean under `--strict` at ten settings (800 at chain 4 from 750000, 770000 and
+  810000, 700 at chain 6 from 740000, 600 at chain 6 from 790000, 500 at chain 8 from 720000
+  and 760000, 400 at chain 8 from 800000, 400 at chain 10 from 780000, 400 at chain 12 from
+  730000 and 820000), `KNOWN` still empty.
 - Live suite (opt-in, marker `docs`, ~5 min): `python -m pytest -m docs tests/test_docs_live.py`
   pushes a document per test, edits both sides, syncs, checks a second sync writes nothing, and
   deletes the document. Offline: `tests/test_doc_ir.py`, `test_doc_merge.py`, `test_doc_sync.py`.

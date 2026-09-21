@@ -130,8 +130,21 @@ REGRESSIONS = ((60, 1), (181, 1), (309, 4), (1031, 8), (1147, 8),
                # And two the fresh campaigns found: 600784 a paragraph the reader
                # dragged against the word standing in a cell, welded to it, and
                # 630138 an empty paragraph of the source's own promoted into the
-               # place Docs keeps in front of a body's first table.
-               (600784, 4), (630138, 12))
+               # place Docs keeps in front of a body's first table. Then 660085,
+               # the existence judge's own first: a block the merge refuses to
+               # write, asked about with no key to look the refusal up by. Then the
+               # harness's own drag, whose drop index was read off the document
+               # before the cut (710370 died on the lone surrogate it left), and the
+               # two coincidences that made the existence judge ask its question a
+               # block at a time and word for word (720173, 720270), a twin given a
+               # chip and one reworded while their copy arrived (720074, 730061),
+               # and a blank table recovered onto the blank one just built (730384).
+               # 780188 is two empty paragraphs trading names under a real move,
+               # and 790329 a regridded table anchored onto the one the reader
+               # had beheaded.
+               (600784, 4), (630138, 12), (660085, 4),
+               (710370, 4), (720074, 8), (720173, 8), (720270, 8),
+               (730061, 12), (730384, 12), (780188, 10), (790329, 6))
 
 
 def _round(seed: int, chain: int, shape: str | None = None) -> None:
@@ -2396,39 +2409,26 @@ def test_a_block_moved_to_the_end_past_a_table_goes_after_it_not_into_it():
     assert again["applied"] == []
 
 
-def test_the_oracle_lets_a_base_word_the_reader_only_dressed_in_punctuation_go():
-    """`WORD` is `\\S+`, so a reader who moves a paragraph ending in a full stop
-    against the `1` in a cell makes the token `.1`, which the base does not have and
-    `theirs - was` therefore reads as a word of theirs. It is not one: its only word
-    is the base's, and when the source rewrites that `1` the stop goes with it. Both
-    edits arrived; calling it a loss was the oracle's mistake (fresh-seed 500249).
+def test_the_oracle_forgives_nothing_for_punctuation_a_reader_cannot_move():
+    """There were two more forgivenesses here — `_dressed_up`, for a base word wearing
+    a full stop the reader had pushed against it (`.1` in a cell, fresh-seed 500249),
+    and `_undressed`, for one whose stop a drag had carried away (`section` where the
+    base said `section.`, chain-4 seed 76101). Both were written for damage the
+    *harness* was doing: `read_move_block` read its drop index off the document before
+    the cut, so a drag landed some way past where the reader let go, inside a word.
 
-    Exact, like `_pared_down`, and one thing more — the base word has to be gone from
-    the tab as well, or a base word the reader typed again somewhere new, with a stop
-    after it, would be excused too. That is the second half here.
-    """
+    The drop is a paragraph mark now and nothing a drag inserts can land inside a token
+    at all, so neither excuse fires any more — 0 of 800 rounds at chain 4, 0 of 500 at
+    chain 8, 0 of 400 at chain 12 and 0 of the 60 regression seeds — and both are gone.
+    A forgiveness for something that no longer happens is a blind spot waiting, which
+    is what `_twin_unmarks` was; this test is here to say that a bare word is a word
+    again. The two that remain, `_welded` and `_pared_down`, are for edits a reader
+    really makes, and their own tests follow."""
+    assert not hasattr(oracle, "_dressed_up") and not hasattr(oracle, "_undressed")
     was = oracle.words("a b 1 2 kestrel")
-    after = oracle.words("a b .thicket 2 kestrel")
-    assert oracle.joined_differently(".1", after, was)
-    assert not oracle.joined_differently(".kestrel", after, was), \
-        "the base's `kestrel` is still there, so the stop the reader put after it is theirs"
-    assert not oracle.joined_differently("zephyr", after, was)
-
-
-def test_the_oracle_lets_a_base_word_the_reader_only_undressed_go():
-    """The same the other way about: a drag that carries a full stop *away* leaves
-    `section` where the base said `section.`, which `theirs - was` reads as a word of
-    the reader's just as surely. The word is the base's and only the punctuation is
-    theirs, so the source may rewrite it — chain-4 seed 76101, where `collide` made
-    that word into `kestrel` and the merge said `Second kestrel`, the reader's missing
-    stop and all. And the same condition holds it in: the dressed base token has to be
-    gone from the tab too."""
+    assert not oracle.joined_differently(".1", oracle.words("a b .thicket 2"), was)
     was = oracle.words("Second section. and kestrel. stands")
-    after = oracle.words("Second kestrel. stands")
-    assert oracle.joined_differently("section", after, was)
-    assert not oracle.joined_differently("kestrel", after, was), \
-        "the base's `kestrel.` is still there, so the bare word is the reader's own"
-    assert not oracle.joined_differently("zephyr", after, was)
+    assert not oracle.joined_differently("section", oracle.words("Second kestrel."), was)
 
 
 def test_the_oracle_lets_two_base_words_a_join_welded_together_go():
@@ -2606,3 +2606,231 @@ def test_the_oracle_lets_a_pared_down_token_whose_joiner_went_too_alone():
     both = _ir(_p("k1", "a \xadhyphen here hyphen"))
     assert _kinds(oracle.check(base, both, after, NOTHING)) == {"words_lost"}, \
         "the paring is the one with the joiner still on it; the bare word is theirs"
+
+
+def test_a_block_the_merge_will_not_write_is_asked_about_by_the_key_it_is_refused_by():
+    """The existence judge's own first finding, and the judge's own fault. `_arrived`
+    is handed the file **as it stood before the sync**, where a block the source has
+    just added has no key: `doc_merge.plan` gives it one (`doc_ir.key_blocks`, in
+    place on the file it is handed) and the report names the refusal by that key. So
+    the one excuse there is — the report says so — could never be found, and every
+    block the merge refuses to write read as an addition lost in silence (offline
+    chain-4 seed 660085).
+
+    The other half is the note itself. The block is not merely unwritten: the settle
+    regenerates the file from the document, so the paragraph goes out of the file too
+    and the next sync will not try again. "Not written" reads as a thing still
+    waiting, so `refuse_nowhere` says where it went and how to get it in."""
+    world, ours, base = _push("two_tables")
+    at = [i for i, b in enumerate(ours["blocks"]) if b.get("key") == "table:c"][0]
+    ours["blocks"].insert(at, _para("The source added willow."))
+    was, mine = copy.deepcopy(base), copy.deepcopy(ours)
+    before = doc_world.settled_ir(world, ours, base)
+    report, ours, base = fuzz_docs.sync_once(world, ours, base)
+    note = next(n for n in report["notes"] if "no paragraph to write in" in n)
+    assert "takes it back out of the file" in note, note
+    assert not any("willow" in oracle.text_of(b) for b in ours["blocks"]), \
+        "the settle regenerates the file from the document, which has no such block"
+    assert fuzz_docs._arrived(was, before, copy.deepcopy(mine), ours, report, 0,
+                              Counter()) == []
+    # Asked the way it used to be — the file unkeyed — the refusal cannot be looked up.
+    assert [f["kind"] for f in fuzz_docs._existence_arrived(
+        was, before, copy.deepcopy(mine), ours, oracle.accounted(report), None, 0,
+        Counter())] == ["addition_lost"]
+
+
+class _PickKeys:
+    """An rng that picks the blocks it is told to, by key."""
+
+    def __init__(self, *keys):
+        self.keys = list(keys)
+
+    def choice(self, seq):
+        key = self.keys.pop(0)
+        return next(b for b in seq if b.get("key") == key)
+
+
+def test_a_block_dragged_below_the_cut_lands_where_the_reader_let_go_of_it():
+    """The harness's own, and the oldest of them. `read_move_block` is a drag: a
+    delete and a retype, in two batches — and the second's index was read off the
+    document the reader saw, not off the one the first batch leaves behind. Drop a
+    block *below* the cut and everything down there has moved up by what went, so the
+    text landed that far past where the reader let go: inside a word, inside a chip,
+    or between the two code units of an astral character, which no cursor can be put
+    inside.
+
+    That last one killed the campaign outright — the world keeps the lone surrogate a
+    cut pair leaves, as it should, and `doc_ir.utf16_len` encodes strictly, as the
+    API's own JSON does (seed 710370, shape `astral`). The rest of it never crashed
+    and is the worse half: every judge was being handed a document no reader could
+    have made, and both of the loss oracle's punctuation forgivenesses — `_dressed_up`
+    and `_undressed` — were written for damage this line was doing.
+    `doc_world.splits_a_pair` is the net under it."""
+    world, ours, base = _build([_para("First one."), _para("Second one."),
+                                _para("Third one \U0001d538."), _para("Fourth one.")])
+    part = doc_ir.from_document(world.read(), None)
+    doc_ir.apply_keys(part, doc_ir.named_ranges_of(world.read(), None))
+    batches, _ = fuzz_docs.read_move_block(
+        _PickKeys("paragraph:second-one", "paragraph:third-one"), part, None)
+    for batch in batches:
+        world.apply(batch)
+    assert [oracle.text_of(b) for b in doc_world.read_ir(world, ours, base)["blocks"]] \
+        == ["First one.", "Third one \U0001d538.", "Second one.", "Fourth one."]
+
+
+def test_a_tab_the_file_only_asks_for_does_not_stand_in_for_the_body():
+    """`parts_by_tab` keyed a part by `part.get("tab")`, and a `<section>` with no
+    `data-tab` is a tab the *file* asks for that the document has never had
+    (`fuzz_docs._fresh_asks`), so it has no id: it landed on `None`, where the body
+    is, and the last one written won. Every question asked of the body then got
+    another tab's part — the file side of it in `oracle.check`, and all four sides in
+    `fuzz_docs._arrived`.
+
+    Measured with the collision put back: 107 of 200 rounds at chain 4 fail, and 0 of
+    the same 200 with `_existence_arrived` switched off. So it was invisible until
+    the existence judge existed, which is the argument for that judge as much as for
+    this fix."""
+    ir = {"blocks": [_para("The body.")],
+          "tabs": [{"tab": "t.1", "blocks": [_para("A named tab.")]},
+                   {"title": "New", "blocks": [_para("A tab the file asks for.")]}]}
+    by_tab = oracle.parts_by_tab(ir)
+    assert set(by_tab) == {None, "t.1", "?2"}
+    assert oracle.part_text(by_tab[None]) == "The body."
+    assert oracle.part_text(by_tab["?2"]) == "A tab the file asks for."
+
+
+def test_anything_at_all_happening_to_a_twin_does_not_lose_the_copy_that_arrived():
+    """The existence judge counts blocks saying what this one says, which handles twins
+    for free — but the count is a question about *this* block asked of every other one
+    that says the same thing, so anything at all happening to a twin answers it wrongly.
+    The source appended the same paragraph twice over two steps and then, in the second,
+    gave the first copy a person chip (offline chain-8 seed 720074) or reworded it with
+    a `collide` (chain-12 seed 730061): the twin stopped saying what the new one says,
+    the count stood still, and an addition that had arrived read as lost.
+
+    Two fixes, one per case. A chip is content but not words, and existence is about
+    existence, so the count is of the text alone — which the first assertion here is.
+    A rewording changes the text, and no counting survives that: the second trace is
+    the key the settle gives back to a block the plan wrote a named range for. Either
+    one excuses; the finding needs no trace at all."""
+    chip = {"chip": "person", "frozen": True, "text": "Grace", "value": "grace@example.com"}
+    base = {"blocks": [_para("One paragraph of it."), _para("the source added lantern")]}
+    for i, block in enumerate(base["blocks"]):
+        block["key"] = f"paragraph:b{i}"
+    added = dict(_para("the source added lantern"), key="paragraph:lantern#2")
+    chipped = {"kind": "paragraph", "key": "paragraph:b1",
+               "runs": [{"text": "the source added lantern"}, chip]}
+    file_p = {"blocks": [base["blocks"][0], chipped, added]}
+    end_p = copy.deepcopy(file_p)
+    seen = Counter()
+    assert fuzz_docs._saying(end_p, "the source added lantern") \
+        > fuzz_docs._saying(base, "the source added lantern")
+    assert fuzz_docs._existence_arrived(base, base, file_p, end_p, "", None, 0,
+                                        seen) == []
+    assert seen["arrival/added asked"] == 1
+
+    # The twin reworded instead: nothing says what the copy says any more, and only
+    # the key it was written under says it is there.
+    reworded = dict(_para("the umbrella added harbour"), key="paragraph:b1")
+    file_p = {"blocks": [base["blocks"][0], reworded, added]}
+    end_p = copy.deepcopy(file_p)
+    assert fuzz_docs._saying(end_p, "the source added lantern") \
+        == fuzz_docs._saying(base, "the source added lantern")
+    assert fuzz_docs._existence_arrived(base, base, file_p, end_p, "", None, 0,
+                                        Counter()) == []
+    end_p["blocks"] = end_p["blocks"][:2]          # the copy really is gone
+    assert [f["kind"] for f in fuzz_docs._existence_arrived(
+        base, base, file_p, end_p, "", None, 0, Counter())] == ["addition_lost"]
+
+
+def test_a_table_that_never_said_anything_is_recovered_onto_nothing():
+    """`recover_tables` pairs a table whose range the reader destroyed with the base
+    entry that names it, on the words the two hold — and two empty strings are each
+    other's perfect match. A base table that never said anything paired at 1.0 with
+    the blank table `insertTable` had just built in the same batch, before
+    `anchor_tables` (the pass that knows about that one) had run.
+
+    What it cost is the whole of the reader's table: the beheaded one, holding the
+    only word either of them had, was then the one free table left for the new table's
+    key, so the merge saw its own blank grid where the reader's table stood, deleted
+    it to build the grid again, and the word went with no note (chain-12 seed
+    730384)."""
+    base = {"blocks": [dict(_table([[""], [""]]), key="table:empty")]}
+    built, beheaded = _table([["", ""], ["", ""]]), _table([["vellum "]])
+    theirs = {"blocks": [built, beheaded]}
+    assert doc_merge.recover_tables(base, theirs) == 0
+    assert not built.get("key") and not beheaded.get("key")
+    # A table with words is still recovered by them.
+    base = {"blocks": [dict(_table([["alpha", "beta"]]), key="table:alpha")]}
+    theirs = {"blocks": [_table([["", ""], ["", ""]]), _table([["alpha", "beta"]])]}
+    assert doc_merge.recover_tables(base, theirs) == 1
+    assert theirs["blocks"][1]["key"] == "table:alpha"
+
+
+def test_a_table_the_batch_regridded_is_not_the_one_the_reader_beheaded():
+    """`anchor_tables` names the table a structural batch wrote by what it follows,
+    and took the first unkeyed table after that block. Usually there is only one —
+    the batch's own, whose named range its row delete took with it. But a reader can
+    behead a table too, in the browser, by deleting the row it is anchored in, and
+    `recover_tables` refuses to pair that one when the words leave any doubt
+    (`TABLE_MATCH`): two free tables then stand on the page and the anchor decides by
+    place alone. It picked the reader's, so the regridded table's key went onto it,
+    the source's rows were planned against the reader's grid, and the two the sync
+    had just written stood there under no name at all (chain-6 seed 790329).
+
+    Where the batch wrote a grid, that grid is what its table has: a free table of
+    another shape is not it, whatever it follows. And where none of them has that
+    shape, nothing is claimed — the key comes back at the re-plan, where
+    `recover_tables` sees both tables at once and the words tell them apart."""
+    lines = {"row": [doc_merge._Line(0, 0, None, True), doc_merge._Line(1, 1, 0),
+                     doc_merge._Line(2, 2, 1)],
+             "column": [doc_merge._Line(0, 0, 0)]}
+    told = {"key": "table:c", "after": "paragraph:before-both",
+            "ops": [{"deleteTableRow": {}}], "lines": lines}
+    beheaded, regridded = _table([["b"]]), _table([[""], ["4"]])
+    live = {"blocks": [_p("paragraph:before-both", "Before both."),
+                       beheaded, regridded]}
+    assert doc_merge.anchor_tables(live, [told]) == 1
+    assert regridded["key"] == "table:c" and not beheaded.get("key")
+
+    # Nothing of that shape on the page: the anchor claims nothing at all.
+    other = _table([["b"]])
+    live = {"blocks": [_p("paragraph:before-both", "Before both."), other]}
+    assert doc_merge.anchor_tables(live, [told]) == 0
+    assert not other.get("key")
+
+
+def test_two_empty_paragraphs_trading_names_is_not_an_order_undone():
+    """A key made from a block's words is no identity where the block has none: it is
+    that block's number among the wordless ones, and the next one to lose its words
+    takes it. Docs keeps a paragraph between two tables however it is deleted, so a
+    source that drops one there leaves its mark standing empty — which is then the
+    body's *first* wordless block, and the one that carried `paragraph:empty` before
+    becomes `paragraph:empty#2`. Nothing moved and nothing was lost; two names changed
+    hands under a genuine move somewhere else, and the order judge read the renaming
+    as the source's order undone (chain-10 seed 780188, shape `between_tables`).
+
+    Only where the four sides disagree about which keys are wordless, which is the
+    narrowest the exclusion can be: a wordless block — a picture of its own, an empty
+    line between two sections — is an ordinary thing for a source move to carry, and
+    a judge gives up as little sight as it can."""
+    tables = [dict(_table([["h1"]]), key="table:h1"),
+              dict(_table([["h2"]]), key="table:h1#2")]
+    tail = [_p("paragraph:moved", "moved"), _p("paragraph:tail", "tail")]
+    was = {"blocks": [tables[0], _p("paragraph:the", "The "), tables[1],
+                      _p("paragraph:empty", ""), *tail]}
+    # The source dropped "The " and moved one paragraph past the other.
+    src = {"blocks": [tables[0], tables[1], _p("paragraph:empty", ""),
+                      tail[1], tail[0]]}
+    # Docs kept the mark between the tables, so the numbering shifted along.
+    end = {"blocks": [tables[0], _p("paragraph:empty", ""), tables[1],
+                      _p("paragraph:empty#2", ""), tail[1], tail[0]]}
+    seen = Counter()
+    assert fuzz_docs._order_arrived(was, was, src, end, "", None, 0, seen) == []
+    assert seen["arrival/order asked"] == 1, "the real move is still a question"
+
+    # The same shape with the wordless population unchanged: the judge still sees it.
+    src = {"blocks": [tables[0], tail[0], _p("paragraph:the", "The "), tables[1],
+                      _p("paragraph:empty", ""), tail[1]]}
+    assert [f["kind"] for f in fuzz_docs._order_arrived(
+        was, was, src, was, "", None, 0, Counter())] == ["order_lost"]

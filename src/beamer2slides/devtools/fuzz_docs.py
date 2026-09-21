@@ -712,7 +712,21 @@ def read_insert_chip(rng, part, tab):
 
 def read_move_block(rng, part, tab):
     """A drag: the reader cuts a block and drops it somewhere else. Its named range
-    dies with the cut, which is what a drag really does."""
+    dies with the cut, which is what a drag really does.
+
+    Two batches, and the second one's index is read off the document the **first**
+    leaves behind: a drop after the cut has everything below the cut shifted up by
+    what went. Taking it from the part as read, the drop landed that far past where
+    the reader let go — in the middle of a word, of a chip, or between the two code
+    units of an astral character, which no cursor can be put inside and which left
+    the document holding a lone surrogate that `doc_ir.utf16_len` cannot encode at
+    all (the campaign died on it at 710370). Everywhere it did not crash it quietly
+    handed the judges a document no reader could have made, which is the worse half:
+    the loss oracle's two punctuation forgivenesses — `_dressed_up` (seed 500249, a
+    stop landing against the `1` in a cell) and `_undressed` (76101, a drag carrying
+    a stop away) — were both written for damage this line was doing. The drop is a
+    paragraph mark now, so nothing it inserts can land inside a token at all.
+    """
     blocks = _paragraph_blocks(part)
     if len(blocks) < 3:
         return [], []
@@ -722,9 +736,12 @@ def read_move_block(rng, part, tab):
     if not text.strip():
         return [], []
     low, high = block["span"]
+    at = target["span"][1] - 1
+    if at >= high:                     # the cut is in front of where it is dropped
+        at -= high - low
     return [[{"deleteContentRange": {"range": _span(low, high, tab)}}],
-            [{"insertText": {"location": _at(target["span"][1] - 1, tab),
-                             "text": "\n" + text}}]], [block.get("key")]
+            [{"insertText": {"location": _at(at, tab), "text": "\n" + text}}]], \
+        [block.get("key")]
 
 
 def read_rename_tab(rng, part, tab):
@@ -1217,8 +1234,15 @@ def _arrived(was: dict, before: dict, mine: dict, after: dict, report: dict,
     reader did not touch at all** must come out of the sync with the grid the file
     asks for. There is nothing to merge in that case, so no merge rule can stand in
     the way, and the only excuse is the report naming the table.
+
+    The file side is keyed first. `mine` is the file as it stood before the sync, and
+    a block the source has just added has no key there: `doc_merge.plan` gives it one
+    (`doc_ir.key_blocks`, in place on the file it is handed) and the report then names
+    it by that key. Asked with no key, the excuse "the report says so" could never be
+    found and every block the merge refuses to write read as a loss.
     """
     said = oracle.accounted(report)
+    doc_ir.key_blocks(mine)
     sides = [oracle.parts_by_tab(ir) for ir in (was, before, mine, after)]
     out = []
     for tab, part in sides[0].items():
@@ -1260,11 +1284,20 @@ def _arrived(was: dict, before: dict, mine: dict, after: dict, report: dict,
                 tab=tab, key=key))
         out += _order_arrived(part, sides[1][tab], sides[2][tab], sides[3][tab],
                               said, tab, step, seen)
+        out += _existence_arrived(part, sides[1][tab], sides[2][tab], sides[3][tab],
+                                  said, tab, step, seen)
     return out
 
 
 def _block_keys(part: dict) -> list[str]:
     return [b["key"] for b in part.get("blocks", []) if b.get("key")]
+
+
+def _wordless(part: dict) -> set:
+    """The keys of the blocks of this part that say nothing — a table with no words
+    in it among them, since `doc_ir.key_blocks` names that one `table:empty`."""
+    return {b["key"] for b in part.get("blocks", [])
+            if b.get("key") and not _says(b)[0].strip()}
 
 
 def _order_arrived(was_p, doc_p, src_p, end_p, said, tab, step,
@@ -1292,9 +1325,28 @@ def _order_arrived(was_p, doc_p, src_p, end_p, said, tab, step,
     while the file reads as though the paragraph went. The disagreement is therefore
     counted as the pairs of keys that came out the other way round, and a pair is
     explained where the report names either of its two.
+
+    And a key a block has **no words for** is left out — but only where the four sides
+    do not agree on which keys those are. Such a key is not an identity of its own: it
+    is that block's number among the wordless ones, so it means the same block on two
+    sides exactly as long as the same blocks are wordless on both. Docs keeps a
+    paragraph between two tables however it is deleted, so a source that drops one
+    there leaves its mark standing empty — which then *is* `paragraph:empty`, and the
+    block that carried that name before becomes `paragraph:empty#2`. Nothing moved and
+    nothing was lost; two names changed hands, and the judge read it as the source's
+    order undone (chain-10 seed 780188, shape `between_tables`). Where the population
+    is unchanged the numbering means the same block on every side and the keys stay
+    in, which is the whole of the narrowing: a judge gives up as little sight as it
+    can, and a wordless block is the commonest thing a source move carries — a
+    picture of its own, an empty line between two sections.
+    `_existence_arrived` gives the same reason for asking about the words rather
+    than the key.
     """
     sides = (was_p, doc_p, src_p, end_p)
     shared = set.intersection(*(set(_block_keys(p)) for p in sides))
+    wordless = [_wordless(p) for p in sides]
+    if any(each != wordless[0] for each in wordless):
+        shared -= set().union(*wordless)
     was, doc, src, end = ([k for k in _block_keys(p) if k in shared] for p in sides)
     if doc != was or src == was:
         return []                 # the reader reordered, or the source did not
@@ -1313,6 +1365,108 @@ def _order_arrived(was_p, doc_p, src_p, end_p, said, tab, step,
         f"the base has it and the file puts {first!r} in front of {second!r}, but the "
         f"sync left the document ordered {end} and the report says nothing",
         tab=tab, key=first)]
+
+
+def _existence_arrived(was_p, doc_p, src_p, end_p, said, tab, step,
+                       seen: Counter) -> list[dict]:
+    """And the same question about a block *being there at all*: where the reader left
+    it alone, a block the source dropped must be gone and one it added must be in.
+
+    The last two things a source edit can ask for, and the two the other judges step
+    around: `_words_arrived` and `_styling_arrived` want a key on both sides, and
+    `_order_arrived` looks only at the keys every side shares. The loss oracle will
+    not ask either, and for the reason it gives in its own first paragraph — a block
+    of the source's that never arrives, or one the source wanted gone that stays,
+    takes nothing of the *reader's* — and the settle then writes what the document
+    holds into file and base alike, so the round converges on it.
+
+    Both halves ask of the **words**, not of the key. A key is made from a block's
+    words where no range carries it, so two blocks that say the same thing can trade
+    keys and a wordless one (an empty paragraph, a lone picture) has a key the next
+    such block would be given too: asking whether the key is still there would accuse
+    the merge of aliasing and excuse it of real losses. So a block is gone when what
+    it said is gone, and here when what it says is said. Wordless blocks are nobody's
+    question — `_order_arrived` has them by their keys, and `oracle.block_gone` has
+    the reader's.
+
+    But **a block at a time**, word for word, and by counting (`_saying`): how many
+    blocks of the tab say exactly this one's text, before the sync and after. Two
+    looser questions were tried and both are answered by coincidence, because the
+    campaign's whole vocabulary is a few dozen words: a bag of words over the tab
+    let a `collide` rewording another paragraph to `ribbon` stand in for the dropped
+    `the reader wrote ribbon` (chain-8 seed 720173), and counting blocks that say
+    *at least* this one's words let `What we found.` become `harbour we found.` and
+    answer for a heading that said `harbour` (720270). What a drop that failed
+    leaves behind is the block itself, verbatim, which is what `_words_arrived`
+    already asks of a rewording. Counting handles twins for free, which is what the
+    first guard here was for: two blocks saying the same thing go from two to one.
+
+    The count is of the **text** alone, though the guard above — did the reader leave
+    this block as the base has it? — is of everything it says, chips included. What is
+    being counted is other blocks, and one of those may be having a chip put into it by
+    this very step: the source appended `the source added lantern` twice over two
+    steps and then gave the first copy a person chip, so the twin stopped saying what
+    the new one says and the count stood still while both blocks arrived (chain-8 seed
+    720074). A chip is content, and `_words_arrived` and the loss oracle both ask about
+    it; existence is about existence.
+
+    And the count is only **one** of two traces, because the confound is the counting
+    itself: it is a question about a block asked of every *other* block that says the
+    same thing, so anything at all happening to a twin answers it wrongly — the chip
+    above, and at chain-12 seed 730061 a `collide` rewording the twin into `the
+    umbrella added harbour` in the very step that appended the copy. The other trace
+    is the **key**: the plan gives a block it writes a named range of its own, so the
+    settle, regenerating the file from the document, keys it back — a block that
+    arrived is in `end_p` under the key the file gave it, and one the sync dropped is
+    not. Either trace excuses; a finding needs *no* trace of the block at all. The two
+    fail in different directions (the count is confounded by twins, the key by a
+    repair that re-derives one), and neither is the merge's opinion of its own work.
+
+    Tables are left to `_grid` and `_cells_arrived`, whose question is sharper than a
+    bag of words and whose own `dropped-table` defect the oracle found years of seeds
+    ago.
+    """
+    was_b, doc_b = (oracle.keyed(p) for p in (was_p, doc_p))
+    file_keys, end_keys = set(_block_keys(src_p)), set(_block_keys(end_p))
+    out = []
+    for key, block in was_b.items():
+        here, mine = doc_b.get(key), _says(block)
+        if key in file_keys or here is None or _grid(block) is not None \
+                or not mine[0].strip() or _says(here) != mine:
+            continue                  # the source kept it, or the reader wrote in it
+        seen["arrival/gone asked"] += 1
+        if key not in end_keys or _saying(end_p, mine[0]) < _saying(doc_p, mine[0]) \
+                or oracle._named(said, key):
+            continue
+        seen["arrival/gone missed"] += 1
+        out.append(oracle.finding(
+            "drop_lost", "loss",
+            f"step {step}: the source dropped {key!r} and the reader left it word for "
+            f"word as the base has it, but a block still carries that key and as many "
+            f"say {_says(block)[0][:60]!r} when the sync is over as before it, and "
+            f"the report says nothing", tab=tab, key=key))
+    for block in src_p.get("blocks", []):
+        key, mine = block.get("key"), _says(block)
+        if key in was_b or not mine[0].strip() or _grid(block) is not None:
+            continue                  # a block the source has added, and it says something
+        seen["arrival/added asked"] += 1
+        if (key and key in end_keys) \
+                or _saying(end_p, mine[0]) > _saying(doc_p, mine[0]) \
+                or oracle._named(said, key):
+            continue
+        seen["arrival/added missed"] += 1
+        out.append(oracle.finding(
+            "addition_lost", "loss",
+            f"step {step}: the source added {key!r} saying {_says(block)[0][:60]!r}, "
+            f"but nothing in {tab or 'the body'} carries that key when the sync is "
+            f"over and no more blocks of it say that than before, and the report "
+            f"says nothing", tab=tab, key=key))
+    return out
+
+
+def _saying(part: dict, text: str) -> int:
+    """How many blocks of the part say exactly this text."""
+    return sum(1 for b in part.get("blocks", []) if _says(b)[0] == text)
 
 
 def _words_arrived(key, block, here, file_b, then, said, tab, step,
@@ -1681,7 +1835,8 @@ KNOWN = (
 # named range (`doc_merge._swallowed`); a source move whose two ends are one place,
 # written anyway, which for a table means built blank and asked for again until
 # `_write_structure`'s rounds run out; and the oracle counting the base's word in
-# `.1` as one the reader typed (`_dressed_up`). A sweep of every reordering of a
+# `.1` as one the reader typed (`_dressed_up`, since retired: the drag that pushed
+# that stop against the `1` was this file's own bug). A sweep of every reordering of a
 # five-block body, written to find a scenario for the second, turned up the fourth
 # and worst: a block the source moves past a table to the end of the body was
 # written *into* the table — chain-8 seed 189's defect, whose fix a day earlier had
