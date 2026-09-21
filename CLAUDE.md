@@ -2571,6 +2571,38 @@ keys, named ranges), `doc_merge.py` (pure planning), `doc_sync.py` (the commands
   Windows re-measured (`theme_undone` 15 of 60 -> 11, `styling_restored` 5 of 240 -> 4, its window
   moved); clean at 300 rounds chain 10 `two_tables`, 600 chain 6, 800 chain 4 and two of 400
   chain 8.
+  **The bullet button, which nobody had ever pressed.** After typing, it is about the commonest
+  thing anybody does to a paragraph in a browser, and no op drew it: `read_heading` and
+  `src_retitle` walk the *named* styles, where `item` is not one, and `read_renumber_list` only
+  reglyphs a list that is one already - so a bullet was something only a corpus shape ever had.
+  `read_bullet` and `src_bullet` say it now (ordered-ness with it, that being the half of a list
+  item the file alone can carry), and four findings at chain 8 were three things, all of the same
+  family: **what a request cannot say about a list**. (1) *A level lives on a paragraph mark, and
+  a mark that survives keeps it* (7400013, 7400167, 7400363): `unwritten_levels` said so for a
+  block written from nothing and for one handed a deleted block's mark, which are the two cases
+  where the mark *went*; the plainest case is the one they are exceptions to, and a block the
+  source nests stays where it is. (2) *A glyph belongs to the list, not to the item* (7400334,
+  `unwritten_glyphs`): `createParagraphBullets` lays a preset over the list the range falls in, so
+  a source numbering one of three either reglyphs all three or has its request undone by the
+  settle putting the other two back - the file can say `<ol>` beside `<ul>`, which is two lists at
+  a push and one list ever after. Which list an item is in is the document's word and never the
+  file's, so `doc_ir` reads the `listId` back as `list`. Both are notes before the write, nothing
+  else being able to see them: the reader left the block alone, so the oracle has no question, and
+  the base agrees with the document afterwards, so the round converges. (3) *The glyph a delete in
+  front hands over* (chain-4 seed 7700184), which is Docs' merge-on-delete once more - the style
+  it hands over is the whole of it, the bullet's **list** among it, so an item the merge had just
+  numbered came back in the deleted one's list and bulleted with it. `carry_unimported` compared
+  the two sides' *kinds*, so both sides being items and disagreeing about the glyph was the one
+  case it could not see; it asks the glyph now and `restore_bullets` writes it. Its test needs a
+  **described** list to reproduce at all: over a list the importer built the file's word is taken
+  as the document's (`guessed`) and `bullet_requests` lays the right preset down anyway, and it
+  must ask `doc_ir.from_document` rather than the sync's own read, which fills a list's
+  ordered-ness in from the file - the very thing the document is failing to say. A guard written
+  with that fix went out again, `bullet_requests` grouping its runs by the glyph the settle is
+  *about* to write: 500 rounds at chains 4 and 8 never brought a described block and a guessed one
+  into one run, and a guard against nothing is how one stops noticing. Windows re-measured again
+  (`theme_undone` 15 of 80, window to the first 40; `styling_restored` 5 of 300, window to 300-380);
+  clean at 400 chain 8, 600 chain 6, 500 chain 4, 300 chain 10, then 300 chain 4 and 400 chain 6.
 - Live suite (opt-in, marker `docs`, ~5 min): `python -m pytest -m docs tests/test_docs_live.py`
   pushes a document per test, edits both sides, syncs, checks a second sync writes nothing, and
   deletes the document. Offline: `tests/test_doc_ir.py`, `test_doc_merge.py`, `test_doc_sync.py`.

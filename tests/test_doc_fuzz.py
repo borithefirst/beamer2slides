@@ -495,11 +495,11 @@ def test_the_campaign_sees_a_theme_undone(monkeypatch):
 
     `doc_merge.paragraph_style` used to give `alignment` a value always — START
     whenever the file said nothing, which is also what a heading centred by the
-    document's theme says. Measured over the first 60 `themed` seeds at chain 2, the
-    campaign catches 11 of them; these 24 hold four (6, 17, 21, 23). Every op added to
-    the campaign changes what every seed draws, so the window is measured again each
-    time: `cell_chip` left the old sixteen with one, and `split_cell` took 15 of 60 to
-    11 without moving this window's own four.
+    document's theme says. Measured over the first 80 `themed` seeds at chain 2, the
+    campaign catches 15 of them; these 40 hold five (6, 23, 24, 32, 38). Every op added
+    to the campaign changes what every seed draws, so the window is measured again each
+    time: `cell_chip` left the old sixteen with one, `split_cell` took 15 of 60 to 11
+    without moving that window's four, and `bullet` left the first 24 with two.
 
     The defect now sits behind two doors, and the probe opens both: the settle puts
     the plan's whole paragraph style back on a block this run wrote whose style the
@@ -519,7 +519,7 @@ def test_the_campaign_sees_a_theme_undone(monkeypatch):
     monkeypatch.setattr(doc_merge, "paragraph_style", broken)
     monkeypatch.setattr(doc_merge, "_unwritten", lambda mine, live: [])
     caught = 0
-    for seed in range(24):
+    for seed in range(40):
         found = fuzz_docs.offline_round(
             seed, script=fuzz_docs.draw(seed, 2, shape="themed"))
         caught += "theme_undone" in {f["kind"] for f in oracle.failures(found)}
@@ -651,12 +651,13 @@ def test_the_campaign_sees_a_mark_the_file_cannot_say_is_off(monkeypatch):
     `doc_merge._text_style` used to write a mark only when it was on, which is all the
     file could say before `doc_ir.MARK_FIELDS`: the first source edit to rewrite the
     block then names no bold, and the word goes back to wearing the theme's. Measured
-    over 240 `themed` seeds at chain 3 the campaign catches 4 (5 before `split_cell`,
-    6 before `cell_chip`, 7 before `cell_style` and `restyle_cell`, 11 before
-    `paste_block`, 13 before that: every op added to the campaign changes what every
-    seed draws, and a window that held four can come to hold none — this one did, four
-    times). Seeds 180 to 420 hold 234, 368, 412 and 414; the window is the three at
-    the end of it, the old one having been left with a single seed.
+    over 300 `themed` seeds at chain 3 the campaign catches 5 (4 before `bullet`,
+    5 before `split_cell`, 6 before `cell_chip`, 7 before `cell_style` and
+    `restyle_cell`, 11 before `paste_block`, 13 before that: every op added to the
+    campaign changes what every seed draws, and a window that held four can come to
+    hold none — this one did, five times). Seeds 180 to 480 hold 211, 300, 314, 329
+    and 369; the window is the four at the end of it, the old one having been left
+    with a single seed.
     """
     real = doc_merge._text_style
 
@@ -669,7 +670,7 @@ def test_the_campaign_sees_a_mark_the_file_cannot_say_is_off(monkeypatch):
 
     monkeypatch.setattr(doc_merge, "_text_style", broken)
     caught = 0
-    for seed in range(360, 420):
+    for seed in range(300, 380):
         found = fuzz_docs.offline_round(
             seed, script=fuzz_docs.draw(seed, 3, shape="themed"))
         caught += "styling_restored" in {f["kind"] for f in oracle.failures(found)}
@@ -2628,6 +2629,80 @@ def test_an_item_written_in_front_of_a_nested_one_takes_that_ones_level():
     live = doc_world.read_ir(world, ours, base)
     assert [(b.get("key"), b.get("level")) for b in live["blocks"] if b["kind"] == "item"] \
         == [("item:alpha", 0), ("item:beta", 1), ("item:gamma", 1)]
+    again, _, _ = fuzz_docs.sync_once(world, copy.deepcopy(ours), copy.deepcopy(base))
+    assert again["requests"] == 0
+
+
+def test_an_item_that_keeps_its_own_mark_keeps_the_level_on_it():
+    """The plainest of the three, and the one the other two are exceptions to: a level
+    lives on a paragraph mark, so a block that keeps its mark keeps its level whatever
+    the source asks. `createParagraphBullets` re-glyphs the list and says nothing about
+    a nesting level, and there is no request that does — so a source that pulls a
+    nested item out to the margin changes nothing, and until `src_bullet` existed
+    nothing in the campaign ever asked (offline chain-8 seeds 7400013, 7400167 and
+    7400363, each shrinking to one source op and no reader at all)."""
+    world, ours, base = _push("prose")
+    block = [b for b in ours["blocks"] if b.get("key") == "item:gamma"][0]
+    assert block["level"] == 1
+    block["level"] = 0
+    report, ours, base = fuzz_docs.sync_once(world, ours, base)
+    assert any("it stays at level 1, not at 0" in note for note in report["notes"]), report
+    live = doc_world.read_ir(world, ours, base)
+    assert [(b.get("key"), b.get("level")) for b in live["blocks"] if b["kind"] == "item"] \
+        == [("item:alpha", 0), ("item:beta", 0), ("item:gamma", 1)]
+
+
+def test_the_glyph_a_delete_in_front_hands_over_is_written_again():
+    """Docs merges two paragraphs keeping the first one's style, and the style is the
+    whole of it — the bullet's *list* among it, and so the glyph. `carry_unimported`
+    repaired the bullet only where one side had it and the other did not, so two items
+    disagreeing about their glyph was the one case it could not see: the merge numbers
+    the item, the delete that ends the move in front of it runs last in the same batch,
+    and the item comes back in the deleted one's list, bulleted (offline chain-4 seed
+    7700184, shape `themed`, shrunk to one reader op and one source op).
+
+    Asked of `doc_world.read_ir` this is invisible: that read is the sync's own, and
+    `restore_unreadable` fills a list's ordered-ness in from the file, which is exactly
+    what the document is failing to say. The question is the *document's*, so it is put
+    to `from_document` alone. For the same reason the list handed over is a **described**
+    one: over a list the importer built, whose glyphs nothing can report, the file's word
+    is taken as the document's (`guessed`) and `bullet_requests` writes the numbering
+    anyway, so an imported list hides the defect twice over."""
+    world, ours, base = _build([{"kind": "item", "level": 0, "glyphs": False,
+                                 "list": "kix.l1", "runs": [{"text": "alpha"}]},
+                                _para("Under it."), _para("Tail.")])
+    at = [i for i, b in enumerate(ours["blocks"]) if b.get("key") == "item:alpha"][0]
+    ours["blocks"].append(ours["blocks"].pop(at))           # a move: a delete and a write
+    under = [b for b in ours["blocks"] if "Under it." in doc_ir.runs_text(b["runs"])][0]
+    under.update(kind="item", level=0, ordered=True)
+    report, ours, base = fuzz_docs.sync_once(world, ours, base)
+    live = doc_ir.from_document(world.read(), None)
+    assert [(b.get("kind"), b.get("ordered")) for b in live["blocks"]] \
+        == [("item", True), ("paragraph", None), ("item", False)]
+    again, _, _ = fuzz_docs.sync_once(world, copy.deepcopy(ours), copy.deepcopy(base))
+    assert again["requests"] == 0
+
+
+def test_one_item_of_a_list_cannot_be_numbered_on_its_own():
+    """A glyph belongs to the list, not to the item. `createParagraphBullets` lays a
+    preset over the list the range falls in, so numbering one of three numbers all
+    three — or, as here, is undone by the settle putting the other two back the way the
+    file asks, which takes the list with it and leaves even `alpha` bulleted. Which of
+    the two happens is which request goes last, and neither is what the source asked
+    for; the note says both, since the plan cannot tell which one the settle will make.
+
+    The file can say the thing the document cannot be told, `<ol>` beside `<ul>` being
+    two lists at a push and one list ever after (offline chain-8 seed 7400334, shrunk
+    to one source op and no reader at all)."""
+    world, ours, base = _push("prose")
+    [b for b in ours["blocks"] if b.get("key") == "item:alpha"][0]["ordered"] = True
+    report, ours, base = fuzz_docs.sync_once(world, ours, base)
+    assert any("Docs cannot number item:alpha and leave item:beta, item:gamma bulleted"
+               in note for note in report["notes"]), report
+    live = doc_world.read_ir(world, ours, base)
+    assert [(b.get("key"), b.get("ordered")) for b in live["blocks"] if b["kind"] == "item"] \
+        == [("item:alpha", False), ("item:beta", False), ("item:gamma", False)]
+    # And the settle has written that back, so the file and the document agree.
     again, _, _ = fuzz_docs.sync_once(world, copy.deepcopy(ours), copy.deepcopy(base))
     assert again["requests"] == 0
 

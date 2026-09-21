@@ -2820,6 +2820,71 @@ of 240 → 4, of which the old window kept a single seed, so the window moved to
 end of the range. Clean afterwards at 300 rounds chain 10 `two_tables`, 600 chain 6, 800 chain 4
 and two runs of 400 chain 8, 2,500 rounds in all, `KNOWN` still empty.
 
+### The bullet button, which nobody had ever pressed
+
+After typing, clicking the bullet button is about the commonest thing anybody does to a
+paragraph in a browser, and the campaign had never drawn it: `read_heading` moves a block
+between the *named* styles and leaves the items alone, `read_renumber_list` only changes the
+glyph of a list that is one already, and on the source's side `src_retitle` walks the same four
+named styles — `item` is not one of them. So a bullet was something only a corpus shape ever
+had. `read_bullet` (a paragraph becomes an item, or stops being one) and `src_bullet` (the file
+writing a `<p>` as an `<li>`, ordered or not, and back) fill that in. Four findings at chain 8,
+none at chain 4 or 6 or over 300 rounds of `imported_list`, and they are two things.
+
+**A level lives on a paragraph mark, and a mark that survives keeps it.** `unwritten_levels`
+already said this twice — for a block written from nothing, and for one whose mark a delete in
+front of it hands over — and both of those are about a mark that *went*. The plainest case is the
+one they are exceptions to: the block keeps its own mark, so it keeps the level on it, whatever
+the source asks. `createParagraphBullets` re-glyphs the list and says nothing about a nesting
+level; a block the source turns into a nested item starts a list of its own at level 0. Nothing
+else could see it — the reader left the block alone, so the loss oracle has no question, and the
+base agrees with the document afterwards, so the round converges — and now the report says it
+before the write, as it does for the other two (offline chain-8 seeds 7400013, 7400167 and
+7400363, each shrinking to one source op and no reader at all).
+
+**A glyph belongs to the list, not to the item** (`doc_merge.unwritten_glyphs`, chain-8 seed
+7400334, shrunk the same way). `createParagraphBullets` lays a preset over the list the range
+falls in — which is how an imported list comes to have glyphs that can be read back at all — so
+two items of one list cannot be a bullet and a number at the same time. A source that numbers one
+of three either re-glyphs all three or has its own request undone by the settle putting the other
+two back the way the file asks, which takes the list with it and leaves even the numbered one
+bulleted; which of the two happens is which request goes last, and neither is what the source
+asked for. The file can say the thing the document cannot be told, `<ol>` beside `<ul>` being two
+lists at a push and one list ever after. Which list an item is in is the document's word and
+never the file's, so `doc_ir` now reads the `listId` back as `list` on an item — not part of a
+block's shape, nothing the file can say, and the only way to know that two items share the thing
+a glyph belongs to.
+
+**And the glyph a delete in front hands over** (chain-4 seed 7700184, shape `themed`, shrunk to
+one reader op and one source op). Docs merges two paragraphs keeping the first one's style, and
+the style is the whole of it — the bullet's *list* among it, and with the list the glyph. The
+source moves an item to the end of the tab and numbers the item behind it; the numbering is
+written, the delete that ends the move runs last in the same batch, and the numbered item comes
+back in the deleted one's list, bulleted. `carry_unimported` — the settle's repair for everything
+an import or a write cannot carry — compared the two sides' *kinds*, so it saw a bullet one side
+had and the other did not and was blind to the one case where both are items and they disagree
+about the glyph; it asks about the glyph now, and `restore_bullets` writes it. The scenario needs
+a **described** list to reproduce: over a list the importer built, whose glyphs nothing can report,
+the file's word is taken as the document's (`restore_unreadable`'s `guessed`) and `bullet_requests`
+lays the right preset down anyway, so an imported list hides the defect twice over — which is why
+the test builds the donor's list with glyphs of its own, and why it asks `doc_ir.from_document`
+rather than the sync's own read, which fills a list's ordered-ness in from the file and so answers
+with exactly the thing the document is failing to say.
+
+A guard written with that fix went out again: `bullet_requests` grouping its runs by the glyph the
+settle is *about* to write, as it already groups them by whether the block will still be an item.
+It catches nothing — a block whose bullet is being repaired is one the read-back describes, and a
+run is written only where some block in it is `guessed`, which a described block is not — and 500
+rounds at chains 4 and 8 never brought the two together. A guard against nothing is how one stops
+noticing.
+
+Both seed windows were measured again, every op added changing what every seed draws:
+`theme_undone` 15 of 80 seeds, the test's window moving to the first 40 (which hold five) from
+24 (which the new op left with two); `styling_restored` 5 of 300, the window moving to seeds 300
+to 380 (four) from 360 to 420 (one). Clean afterwards at 400 rounds chain 8 on the seeds that
+found them, and at three fresh runs — 600 chain 6, 500 chain 4, 300 chain 10 — `KNOWN` still
+empty.
+
 ## Remaining risks
 
 1. **Pictures** — retired, see "Pictures, and the chips a request can make" above. What

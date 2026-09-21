@@ -481,6 +481,13 @@ def bullet_requests(live: dict) -> list[dict]:
     the settle wrote in the same breath. A paragraph the source retitled behind an
     item the source deleted came out a plain bulleted line, the whole repair undone
     by the request after it (offline chain-4 seed 570181).
+
+    The *glyph* is read raw, though the settle may be about to change that too
+    (`restore_bullets` again): a block whose bullet is being repaired is one the
+    read-back describes, and a run is only written where some block in it is
+    `guessed`, which a described block is not — so the two never met in 500 rounds at
+    chains 4 and 8. Asking the same question of the glyph is a guard against nothing,
+    and a guard against nothing is how one stops noticing.
     """
     out, run = [], []
     for block in live["blocks"] + [{"kind": "end"}]:
@@ -1294,10 +1301,18 @@ def carry_unimported(live: dict, planned: list[dict]) -> int:
         # reader who took the bullet off in the browser for the same reason `named`
         # is — `_take_shape` gives the plan the source's shape only where the
         # document kept the base's.
+        # A glyph goes the same way, and by the same door: the style a delete hands
+        # over is the whole of it, the bullet's *list* among it, so an item the merge
+        # had just numbered came back in the deleted item's list and bulleted with it
+        # (offline chain-4 seed 7700184: the source moves the item in front of it, and
+        # the delete that ends the move is the last request in the batch). Both sides
+        # items and disagreeing is the case the line above cannot see.
         bullet = None
         if (mine["kind"] == "item") != (block["kind"] == "item"):
             bullet = ("ordered" if mine.get("ordered") else "unordered") \
                 if mine["kind"] == "item" else "none"
+        elif mine["kind"] == "item" and bool(mine.get("ordered")) != bool(block.get("ordered")):
+            bullet = "ordered" if mine.get("ordered") else "unordered"
         # And, for a paragraph this run wrote, every measurement the write did not
         # leave as the plan asked — in either direction, because Docs' merge-on-delete
         # gives as well as takes. The style goes back whole rather than as the
@@ -3493,6 +3508,7 @@ def plan(base: dict, ours: dict, theirs: dict) -> dict:
     restore_undeletable(theirs, result["blocks"], result["notes"])
     result["structure"], result["shaped"] = structure(theirs, result["blocks"], result["notes"])
     unwritten_levels(theirs, result["blocks"], result["notes"])
+    unwritten_glyphs(theirs, result["blocks"], result["notes"])
     result["requests"] = requests(theirs, result["blocks"])
     return result
 
@@ -3503,7 +3519,13 @@ def unwritten_levels(theirs: dict, merged: list[dict], notes: list[str]) -> None
     No request sets one. `createParagraphBullets` says nothing about a level: Docs
     reads it off the paragraph's leading tabs, which the merge does not write. So a
     level lives on the paragraph mark that carries it and survives exactly as long as
-    that mark does — and there are two ways for it not to.
+    that mark does. Three ways for the source not to get the level it asks for, and
+    the first is the plainest: the mark **survives**, and so does the level on it.
+    An item the source moves up or down a list is written as `createParagraphBullets`,
+    which re-glyphs the list and says nothing about a nesting level; a block the source
+    turns into a nested item starts a list of its own at level 0. Neither is reported by
+    the two below, which are both about a mark that went (offline chain-8 seeds 7400013,
+    7400167 and 7400363, each shrinking to one source op and no reader at all).
 
     A block **written from nothing** — one the source added, or moved, a move being a
     delete and a write — comes out at the level of the list it lands in, whether that
@@ -3530,7 +3552,8 @@ def unwritten_levels(theirs: dict, merged: list[dict], notes: list[str]) -> None
     moved the item standing in front of a nested one, and the nested one came out at
     the moved item's level, the reader having touched neither).
 
-    Saying so before the write is the only honest thing left: nothing else could see
+    Saying so before the write is the only honest thing left for any of the three:
+    nothing else could see
     it, the reader having left the block alone and the base agreeing with the
     document afterwards, so both the loss oracle and the convergence check are
     satisfied (`fuzz_docs._shape_arrived` is the judge that is not). Writing the tabs
@@ -3580,11 +3603,61 @@ def unwritten_levels(theirs: dict, merged: list[dict], notes: list[str]) -> None
         at = index - 1
         while at in going and not _mark_is_taken(live, at, going, True, theirs.get("lead")):
             donor, at = live[at], at - 1
-        if donor is None or level_of(donor) == level_of(want):
+        if donor is None:
+            # The plainest of the three, and the one the other two are exceptions to:
+            # the block keeps its own paragraph mark, so it keeps the level that mark
+            # carries. A block that was no item at all starts a list at level 0.
+            if want.get("kind") == "item" and level_of(want) != level_of(block):
+                notes.append(f"{want.get('key')}: it keeps the paragraph mark it stands on, "
+                             f"and with it the nesting level that mark carries — no request "
+                             f"gives a bullet one, so it stays at level {level_of(block)}, "
+                             f"not at {level_of(want)}")
+            continue
+        if level_of(donor) == level_of(want):
             continue
         notes.append(f"{want.get('key')}: the paragraph in front of it goes, and Docs hands "
                      f"its style to this one — no request gives a bullet its nesting level, "
                      f"so it comes out at level {level_of(donor)}, not at {level_of(want)}")
+
+
+def unwritten_glyphs(theirs: dict, merged: list[dict], notes: list[str]) -> None:
+    """Say when the source asks one item of a list for a glyph the list cannot give it.
+
+    A glyph belongs to the **list**, not to the item: `createParagraphBullets` takes a
+    preset and lays it over the list the range falls in, which is how an imported list
+    comes to have glyphs that can be read back at all (`bullet_requests`). So two items
+    of one list cannot be a bullet and a number at the same time, and a source that
+    numbers one of three either re-glyphs all three or has its own request undone by
+    the next item's, whichever the plan writes last.
+
+    The file can say the thing the document cannot be told — `<ol>` beside `<ul>` is
+    two lists when a push imports it, and one list afterwards however the file is
+    written — which is the shape of every note in this family. Found by the campaign's
+    `src_bullet` (offline chain-8 seed 7400334, shrunk to one source op and no reader
+    at all): the source numbers `alpha`, and `beta` and `gamma` come out numbered with
+    it while the file goes on asking for bullets.
+
+    Which list an item is in is the document's word (`doc_ir` reads the `listId` back
+    as `list`), never the file's: adjacent items the *file* separates into two lists
+    are one list in a document that already had them.
+    """
+    by_key = {b["key"]: b for b in merged if b.get("key")}
+    lists: dict[str, list[tuple[str, bool]]] = {}
+    for block in theirs.get("blocks", []):
+        want = by_key.get(block.get("key"))
+        if block.get("kind") != "item" or not block.get("list") or want is None:
+            continue
+        if want.get("kind") == "item":
+            lists.setdefault(block["list"], []).append(
+                (block["key"], bool(want.get("ordered"))))
+    for members in lists.values():
+        if len({ordered for _, ordered in members}) < 2:
+            continue
+        numbered = ", ".join(key for key, ordered in members if ordered)
+        bulleted = ", ".join(key for key, ordered in members if not ordered)
+        notes.append(f"{', '.join(key for key, _ in members)}: one list, and a list's "
+                     f"glyphs are the list's — Docs cannot number {numbered} and leave "
+                     f"{bulleted} bulleted, so all of them come out alike")
 
 
 # ---------------------------------------------------------------- tabs

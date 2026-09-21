@@ -690,6 +690,11 @@ def _block_of(element: dict, lists: dict, objects: dict | None = None,
         block["kind"] = "item"
         block["level"] = bullet.get("nestingLevel", 0)
         block["ordered"] = _ordered(lists, bullet.get("listId"), block["level"])
+        # Which list it is in. Not part of a block's shape and nothing the file can
+        # say — it is the document's own name for the thing a glyph belongs to, which
+        # `doc_merge.unwritten_glyphs` needs to know two items share.
+        if bullet.get("listId"):
+            block["list"] = bullet["listId"]
     elif style.get("namedStyleType") in HEADINGS:
         block["kind"] = "heading"
         block["level"] = HEADINGS[style["namedStyleType"]]

@@ -633,6 +633,32 @@ def read_renumber_list(rng, part, tab):
         "bulletPreset": doc_world.ORDERED_PRESET}}], [b.get("key") for b in items]
 
 
+def read_bullet(rng, part, tab):
+    """The reader clicks the bullet button: a paragraph becomes a list item, or stops
+    being one.
+
+    After typing, this is about the commonest thing anybody does to a paragraph in a
+    browser, and nothing here drew it. `read_heading` moves a block between the *named*
+    styles and leaves the items alone; `read_renumber_list` only changes the glyph of a
+    list that is one already. A bullet is neither a named style nor a measurement: it is
+    `kind` in the IR, one of `doc_merge.SHAPE_KEYS`, carried by two requests of its own
+    and repaired in three places (`carry_unimported`, `restore_bullets`,
+    `bullet_requests`) — every one of which the campaign had reached from the *source's*
+    side alone, where the file says `<li>` from the beginning.
+    """
+    blocks = _paragraph_blocks(part)
+    if not blocks:
+        return [], []
+    block = rng.choice(blocks)
+    span = _span(*block["span"], tab)
+    if block.get("kind") == "item":
+        return [{"deleteParagraphBullets": {"range": span}}], [block.get("key")]
+    preset = doc_world.ORDERED_PRESET if rng.random() < 0.4 \
+        else "BULLET_DISC_CIRCLE_SQUARE"
+    return [{"createParagraphBullets": {"range": span, "bulletPreset": preset}}], \
+        [block.get("key")]
+
+
 # What a reader may set on a paragraph *inside a table cell*. `pageBreakBefore` is
 # left out: Docs refuses it in a table, and a request the real API would reject is
 # the harness's own doing, never the sync's.
@@ -869,7 +895,8 @@ READER = {
     "bold_word": read_bold_word, "unmark_word": read_unmark_word,
     "heading": read_heading,
     "face": read_face, "measure": read_measure,
-    "renumber_list": read_renumber_list, "cell_type": read_cell_type,
+    "renumber_list": read_renumber_list, "bullet": read_bullet,
+    "cell_type": read_cell_type,
     "cell_style": read_cell_style, "cell_chip": read_cell_chip,
     "split_cell": read_split_cell,
     "add_row": read_add_row, "delete_row": read_delete_row,
@@ -1027,6 +1054,30 @@ def src_retitle(rng, ir, touched):
         block["level"] = rng.randint(1, 3)
     else:
         block.pop("level", None)
+
+
+def src_bullet(rng, ir, touched):
+    """The source writes a paragraph as a list item, or a list item as a paragraph.
+
+    `src_retitle` moves a block between the named styles and `item` is not one of
+    those, so the file's own `<li>` was something only a corpus shape ever had: no
+    round had ever asked the merge to *give* a block a bullet, or take one away, from
+    the side that can say it. Ordered-ness comes with it, that being the other half of
+    what a list item is and the one the file alone can carry (an imported list reads
+    back with no glyph at all).
+    """
+    spot = _pick(rng, ir, ("paragraph", "item"))
+    if not spot:
+        return
+    _, _, block = spot
+    if block["kind"] == "item" and rng.random() < 0.5:
+        block["kind"] = "paragraph"
+        block.pop("ordered", None)
+        block.pop("level", None)
+        return
+    block["kind"] = "item"
+    block["level"] = 0
+    block["ordered"] = rng.random() < 0.4
 
 
 def src_add_table(rng, ir, touched):
@@ -1226,7 +1277,8 @@ def src_collide(rng, ir, touched):
 
 SOURCE = {
     "reword": src_reword, "append": src_append, "drop": src_drop, "move": src_move,
-    "restyle": src_restyle, "retitle": src_retitle, "add_table": src_add_table,
+    "restyle": src_restyle, "retitle": src_retitle, "bullet": src_bullet,
+    "add_table": src_add_table,
     "regrid": src_regrid, "edit_cell": src_edit_cell, "restyle_cell": src_restyle_cell,
     "cell_chip": src_cell_chip, "split_cell": src_split_cell,
     "add_picture": src_add_picture,
