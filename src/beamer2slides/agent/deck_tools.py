@@ -31,7 +31,7 @@ from typing import Annotated, Any, NoReturn
 from .context import Job, tool
 from .types import READS, READS_GOOGLE, WRITES, WRITES_GOOGLE, Refused
 
-__all__ = ["deck_inspect", "deck_convert", "deck_sync", "tex_label"]
+__all__ = ["deck_inspect", "deck_convert", "deck_prepare", "deck_upload", "deck_sync", "tex_label"]
 
 
 # ---------------------------------------------------------------- shared pieces
@@ -261,20 +261,18 @@ def deck_convert(
 
     Classifies the PDF, renders a background picture per slide, uploads one .pptx and fills in
     the native text, tables, diagrams and pictures, then records the sync base a later merge
-    needs. Rebuilds the folder's previous deck in place at the same URL unless new_deck.
-    Costs 12-30 s for a 30-page deck and several hundred Google calls; it creates or replaces a
-    real presentation. If someone edited that deck in Slides it refuses with code `deck_edited`
-    rather than destroying their work - use deck_sync then, not force_rebuild.
+    needs; rebuilds the folder's previous deck in place at the same URL unless new_deck. Costs
+    12-30 s and several hundred Google calls, and creates or replaces a real presentation. If
+    someone edited that deck it refuses with `deck_edited` rather than destroying their work.
+    deck_prepare and deck_upload are this same journey in halves, for a caller whose local work
+    and Google write happen in different places; use this one unless you are that caller.
     """
-    from ..emit import emit, preflight_rebuild
+    from ..emit import preflight_rebuild
     from ..guard import RebuildRefused
-    from ..render import render_backgrounds
-    from ..snapshot import snapshot_after_convert
 
     started = time.time()
     _check_backup(backup)
-    if overlays not in ("last", "all"):
-        raise Refused("bad_request", f"overlays={overlays!r} is not 'last' or 'all'.", overlays=overlays)
+    _check_overlays(overlays)
     source = _pdf(j, pdf)
     out_dir = _out_dir(j, out, source)
 
@@ -285,18 +283,208 @@ def deck_convert(
     except RebuildRefused as refused:
         _refuse_rebuild(j, refused, source, out_dir)
 
+    prepared = _prepare(j, source, out_dir, overlays)
+    _upload(j, out_dir, prepared, title, new_deck, measure, force_rebuild, backup, source)
+    j.data["seconds"] = round(time.time() - started, 2)
+    j.summary = _convert_summary(j, prepared, j.data["seconds"])
+    j.suggest("deck_sync when the source changes, to merge into this deck instead of rebuilding it",
+              "deck_inspect with checks=True if anything on the slides looks wrong")
+
+
+@tool("deck_prepare", needs=(READS, WRITES))
+def deck_prepare(
+    j: Job,
+    pdf: Annotated[str, "Workspace ref of the compiled beamer PDF to prepare."],
+    out: Annotated[str | None, "Folder for deck.json, the backgrounds and prepared.json; "
+                               "default out/<pdf stem>/."] = None,
+    overlays: Annotated[str, "'last' keeps the final step of each frame (default), 'all' keeps "
+                             "every overlay page."] = "last",
+) -> None:
+    """Everything deck_convert does before it touches Google: classify, render, write the folder.
+
+    Extracts and classifies the PDF, renders one background picture per slide and writes
+    deck.json, backgrounds/, figures/ and prepared.json - the folder deck_upload builds the deck
+    from. Costs 2-10 s for a 30-page deck, makes no Google call and creates no presentation, so
+    it runs in a context that has no account at all.
+    Only worth calling on its own when the local work and the Google write happen in different
+    places (a sandbox that compiles, a service that uploads); deck_convert is the two in one
+    call and is what a single machine should use.
+    """
+    started = time.time()
+    _check_overlays(overlays)
+    source = _pdf(j, pdf)
+    out_dir = _out_dir(j, out, source)
+    prepared = _prepare(j, source, out_dir, overlays)
+
+    j.data["seconds"] = round(time.time() - started, 2)
+    facts = prepared["facts"]
+    j.summary = (f"Prepared {facts['slides']} slide(s) from {source.name} in "
+                 f"{j.data['out']}: deck.json, one background picture per slide and "
+                 f"prepared.json. {facts['native_share']:.0%} of the characters will be native "
+                 f"text. Nothing has been uploaded; deck_upload builds the deck from this "
+                 f"folder, and needs nothing else from here except the folder itself.")
+    j.suggest(f"deck_upload(out={j.data['out']!r}) to build the Google Slides deck from this folder",
+              "deck_inspect with checks=True if you want the local invariants run first")
+
+
+@tool("deck_upload", needs=(READS, WRITES, WRITES_GOOGLE))
+def deck_upload(
+    j: Job,
+    out: Annotated[str, "Folder a deck_prepare wrote (deck.json, backgrounds/, prepared.json)."],
+    pdf: Annotated[str | None, "Workspace ref of the PDF this folder was prepared from. Only "
+                               "needed if Google refuses an element and the region has to be "
+                               "cropped from the page; prepared.json names it otherwise."] = None,
+    title: Annotated[str | None, "Name for the presentation in Drive; default the PDF's title, "
+                                 "else its file name."] = None,
+    new_deck: Annotated[bool, "Create a new presentation instead of rebuilding the one this "
+                              "folder already has."] = False,
+    measure: Annotated[bool, "Place formula and overlay pictures by measuring them on scratch "
+                             "slides (2-3 s, much more accurate) rather than predicting."] = True,
+    force_rebuild: Annotated[bool, "Rebuild although the deck was edited in Slides: its content "
+                                   "is replaced, after a backup. Ask the person first."] = False,
+    backup: Annotated[str, "What to keep before replacing a deck: auto, none, file (.pptx), "
+                           "drive (a copy of the presentation), both."] = "auto",
+) -> None:
+    """Build the Google Slides deck from a folder deck_prepare wrote.
+
+    Uploads one .pptx and fills in the native text, tables, diagrams and pictures, then records
+    the sync base a later merge needs. Rebuilds the folder's previous deck in place at the same
+    URL unless new_deck, and refuses with `deck_edited` if someone edited that deck in Slides.
+    Needs only the prepared folder: the PDF itself is not read, its name and digest having been
+    measured where it was. Costs 10-25 s for a 30-page deck and several hundred Google calls.
+    """
+    started = time.time()
+    _check_backup(backup)
+    folder = j.path(out, write=True)
+    prepared = _read_prepared(j, folder, out)
+    source = _pdf(j, pdf) if pdf else None
+    _upload(j, folder, prepared, title, new_deck, measure, force_rebuild, backup, source)
+    j.data["seconds"] = round(time.time() - started, 2)
+    j.summary = _convert_summary(j, prepared, j.data["seconds"])
+    j.suggest("deck_sync when the source changes, to merge into this deck instead of rebuilding it",
+              "deck_inspect with checks=True if anything on the slides looks wrong")
+
+
+# ---------------------------------------------------------------- the two halves
+
+
+def _check_overlays(overlays: str) -> None:
+    if overlays not in ("last", "all"):
+        raise Refused("bad_request", f"overlays={overlays!r} is not 'last' or 'all'.",
+                      overlays=overlays)
+
+
+def _prepare(j: Job, source: Path, out_dir: Path, overlays: str) -> dict:
+    """The local half of a conversion: classify, render, and write down what the other half needs.
+
+    `prepared.json` is that last part, and it exists because the upload half may run where the
+    PDF does not. What it carries is exactly what `_upload` would otherwise have re-read from
+    the PDF: the deck's title, the overlay mode the base must record, the facts the summary
+    quotes - and the source's **name and digest**, which is all the guard and the base ever
+    wanted of the file (`guard.check_rebuild` compares names, `snapshot.source_info` stores a
+    sha1). The bytes stay where they were.
+    """
+    from ..render import render_backgrounds
+    from ..snapshot import source_info
+
     pdf_path, raw, deck, facts = _classify_into(j, source, out_dir, overlays, debug_images=False)
-    j.data.update(facts)
-    j.data["out"] = j.ctx.workspace.ref(out_dir)
     render_backgrounds(pdf_path, raw, deck, out_dir)
     (out_dir / "deck.json").write_text(json.dumps(deck, indent=1, ensure_ascii=False), encoding="utf-8")
     j.artifact(out_dir / "backgrounds", "folder", "one background picture per slide")
     survey = _label_survey(j, deck)
-    j.data["labels"] = survey
 
-    name = title or raw["source"]["title"] or source.stem
+    prepared = {
+        "version": 1,
+        "source": source_info(source),        # {"pdf": where it was, "sha1": what it said}
+        "name": source.name,
+        "overlays": overlays,
+        "title": raw["source"].get("title") or "",
+        "facts": facts,
+        "labels": survey,
+        "prepared": time.strftime("%Y-%m-%d %H:%M:%S"),
+    }
+    (out_dir / "prepared.json").write_text(json.dumps(prepared, indent=1, ensure_ascii=False),
+                                           encoding="utf-8")
+    j.artifact(out_dir / "prepared.json", "json",
+               "what the upload half needs about the PDF: title, overlay mode, name and digest")
+    j.data.update(facts)
+    j.data["out"] = j.ctx.workspace.ref(out_dir)
+    j.data["labels"] = survey
+    return prepared
+
+
+def _read_prepared(j: Job, folder: Path, ref: str) -> dict:
+    """What `_prepare` left behind, or as much of it as an older folder can say.
+
+    A folder written by `deck_convert` before this split has no prepared.json, and there is no
+    reason to refuse it: deck.json carries the source block classify copied out of the PDF, so
+    the title and the file name are both there. Only the digest is not, and a base that records
+    `None` for it costs a later interrupted sync one conservative branch, not a loss.
+    """
+    if not (folder / "deck.json").is_file():
+        raise Refused("not_found", f"{ref} holds no deck.json; deck_prepare writes the folder "
+                                   f"deck_upload builds from.", out=ref)
+    path = folder / "prepared.json"
+    if path.is_file():
+        try:
+            prepared = json.loads(path.read_text(encoding="utf-8"))
+        except ValueError as exc:
+            raise Refused("bad_request", f"{ref}/prepared.json could not be read ({exc}); "
+                                         f"prepare the folder again.", out=ref) from None
+        if prepared.get("version") == 1:
+            return prepared
+        raise Refused("bad_request", f"{ref}/prepared.json was written by another version of "
+                                     f"this library; prepare the folder again.", out=ref)
+    deck = json.loads((folder / "deck.json").read_text(encoding="utf-8"))
+    source = deck.get("source") or {}
+    where = str(source.get("pdf") or "")
+    j.warn(f"{ref} has no prepared.json (it was written before deck_prepare existed); the "
+           f"title and the source's name come from deck.json and the source's digest is not "
+           f"recorded in the base.", where="prepared.json")
+    return {"version": 1, "source": {"pdf": where, "sha1": None}, "name": Path(where).name,
+            "overlays": "last", "title": source.get("title") or "",
+            "facts": {"slides": len(deck.get("slides") or []), "native_share": 0.0},
+            "labels": {}, "prepared": None}
+
+
+def _upload(j: Job, out_dir: Path, prepared: dict, title: str | None, new_deck: bool,
+            measure: bool, force_rebuild: bool, backup: str, source: Path | None) -> None:
+    """The Google half: build the deck from the folder, then record the base.
+
+    `source` is the PDF when the caller has it and None when it does not. The guard is given the
+    **name** either way (it compares it with the one the base recorded, to catch a folder whose
+    deck came from another PDF), and the base is given the digest `_prepare` measured. The one
+    thing that really wants the file is `emit.fallback_pictures`, the retry that crops a refused
+    element's region out of the page - so a folder uploaded without its PDF says so rather than
+    finding out inside the retry.
+    """
+    from ..emit import emit
+    from ..guard import RebuildRefused
+    from ..snapshot import snapshot_after_convert
+
+    deck = json.loads((out_dir / "deck.json").read_text(encoding="utf-8"))
+    facts = prepared.get("facts") or {}
+    overlays = prepared.get("overlays", "last")
+    name = title or prepared.get("title") or Path(prepared.get("name") or "deck").stem
+    # The guard reads `Path(pdf).name` and nothing else; the file need not be there.
+    named = source if source is not None else (prepared.get("name") or None)
+    j.data.setdefault("out", j.ctx.workspace.ref(out_dir))
+    j.data.update({k: v for k, v in facts.items() if k not in j.data})
+    if prepared.get("labels") and "labels" not in j.data:
+        j.data["labels"] = prepared["labels"]
+    if source is not None and str((deck.get("source") or {}).get("pdf") or "") != str(source):
+        # deck.json records where the PDF was when it was classified, which on another machine
+        # is a path to nothing. The caller has just handed over the file; say where it is now,
+        # in the folder as well as in the dict, because every later journey re-reads the file.
+        deck["source"] = {**(deck.get("source") or {}), "pdf": str(source)}
+        (out_dir / "deck.json").write_text(json.dumps(deck, indent=1, ensure_ascii=False),
+                                           encoding="utf-8")
+    croppable = source is not None or (out_dir / "slides.pdf").exists() \
+        or Path(str((deck.get("source") or {}).get("pdf") or "")).is_file()
+    j.data["can_crop_refused_elements"] = croppable
+
     try:
-        state = emit(deck, out_dir, name, new_deck, measure, force_rebuild, backup, source)
+        state = emit(deck, out_dir, name, new_deck, measure, force_rebuild, backup, named)
     except RebuildRefused as refused:
         # Asked again immediately before the write, in case the deck was edited in between.
         _refuse_rebuild(j, refused, source, out_dir)
@@ -319,7 +507,9 @@ def deck_convert(
 
     base_slides = None
     try:
-        base = snapshot_after_convert(state["deck"], out_dir, state, source, overlays)
+        base = snapshot_after_convert(state["deck"], out_dir, state,
+                                      source if source is not None else prepared.get("source"),
+                                      overlays)
         base_slides = len(base["slides"])
         j.artifact(out_dir / "sync" / "base.json", "json",
                    "the sync base: what this conversion put in the deck")
@@ -327,19 +517,21 @@ def deck_convert(
         j.warn(f"could not record the sync base ({type(exc).__name__}: {exc}); a later deck_sync "
                f"will refuse with no_base until this deck is converted again.", where="sync base")
     j.data["base_slides"] = base_slides
-    j.data["seconds"] = round(time.time() - started, 2)
-
-    j.summary = (f"{'Rebuilt' if rebuilt else 'Created'} a {facts['slides']}-slide deck "
-                 f"\"{name}\" from {source.name} in {j.data['seconds']:.0f} s: {state['url']}. "
-                 f"{facts['native_share']:.0%} of the characters are native text; the rest is in "
-                 f"the per-slide background pictures."
-                 + (f" The sync base records {base_slides} slide(s), so a later source change can "
-                    f"be merged into this deck without losing edits." if base_slides else ""))
-    j.suggest("deck_sync when the source changes, to merge into this deck instead of rebuilding it",
-              "deck_inspect with checks=True if anything on the slides looks wrong")
 
 
-def _refuse_rebuild(j: Job, refused: Any, source: Path, out_dir: Path) -> NoReturn:
+def _convert_summary(j: Job, prepared: dict, seconds: float) -> str:
+    facts = prepared.get("facts") or {}
+    base_slides = j.data.get("base_slides")
+    return (f"{'Rebuilt' if j.data['rebuilt'] else 'Created'} a {facts.get('slides', 0)}-slide "
+            f"deck \"{j.data['title']}\" from {prepared.get('name') or 'the prepared folder'} in "
+            f"{seconds:.0f} s: {j.data['url']}. "
+            f"{facts.get('native_share', 0):.0%} of the characters are native text; the rest is "
+            f"in the per-slide background pictures."
+            + (f" The sync base records {base_slides} slide(s), so a later source change can "
+               f"be merged into this deck without losing edits." if base_slides else ""))
+
+
+def _refuse_rebuild(j: Job, refused: Any, source: Path | None, out_dir: Path) -> NoReturn:
     """Turn `guard.RebuildRefused` into the code an agent branches on. Always raises.
 
     The library's message names what was edited and offers three ways forward; those become
@@ -347,13 +539,18 @@ def _refuse_rebuild(j: Job, refused: Any, source: Path, out_dir: Path) -> NoRetu
     worked on rather than quoting a paragraph back at the user. The same exception is raised
     when a forced rebuild could not keep a backup, which is a different decision entirely
     (`no_way_back`: there is nothing to go back to, not somebody's work to protect).
+
+    `source` is None where the caller is `deck_upload` and the PDF stayed on the machine that
+    prepared the folder. The way forward is the same journey either way - a merge instead of a
+    rebuild - so what changes is one word of the sentence naming it, not the offer.
     """
     survey = dict(getattr(refused, "survey", {}) or {})
     reason = survey.get("reason", "edited")
     code = "no_way_back" if reason == "backup-failed" else "deck_edited"
     ref = j.ctx.workspace.ref(out_dir)
+    pdf = f"pdf={j.ctx.workspace.ref(source)!r}, " if source is not None else ""
     if code == "deck_edited":
-        j.suggest(f"deck_sync(pdf={j.ctx.workspace.ref(source)!r}, deck={ref!r}) to merge this PDF "
+        j.suggest(f"deck_sync({pdf}deck={ref!r}) to merge this PDF "
                   f"into the deck, keeping the edits",
                   "deck_convert with new_deck=True to leave that deck alone and make a new one",
                   "deck_convert with force_rebuild=True to replace its content anyway (a backup is "

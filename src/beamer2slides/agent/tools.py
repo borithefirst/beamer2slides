@@ -186,8 +186,12 @@ INSTRUCTIONS = instructions()
 #: `deck_inspect` and `doc_adopt` above `doc_push` - the two orders this file spends a section
 #: telling people not to follow. `_collect` stays the truth about *which* tools exist, so a
 #: journey added to a module and forgotten here fails loudly instead of sorting itself last.
-ORDER = ("b2s_status", "deck_inspect", "tex_label", "deck_convert", "deck_sync",
-         "deck_pull", "deck_adopt", "tex_converge", "doc_push", "doc_sync", "doc_adopt")
+#: `deck_prepare` and `deck_upload` come after `deck_convert` and not in its place: they are
+#: that one journey cut in half for a caller whose local work and Google work happen in
+#: different places, and a model reading top to bottom should meet the whole journey first.
+ORDER = ("b2s_status", "deck_inspect", "tex_label", "deck_convert", "deck_prepare", "deck_upload",
+         "deck_sync", "deck_pull", "deck_adopt", "tex_converge", "doc_push", "doc_sync",
+         "doc_adopt")
 
 
 def _ordered(found: dict[str, Callable[..., Result]]) -> dict[str, Callable[..., Result]]:

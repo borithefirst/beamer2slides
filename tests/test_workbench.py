@@ -76,7 +76,8 @@ def test_every_journey_is_offered_with_its_own_schema(base):
     assert status == 200
     names = [t["name"] for t in catalogue["tools"]]
     assert "tex_compile" in names and "deck_convert" in names and "doc_sync" in names
-    assert len(names) == 12                              # the eleven journeys plus the compile step
+    # the eleven journeys, deck_convert's two halves, and the compile step
+    assert len(names) == 14
     # The dropdown reads top to bottom, and what it reads there is the order of operations:
     # compile first, because that is where a talk in this workspace starts.
     from beamer2slides.agent import tools as registry

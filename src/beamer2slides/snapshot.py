@@ -365,7 +365,17 @@ def read_presentation(pres: dict) -> dict:
 
 # ---------------------------------------------------------------- base
 
-def source_info(pdf: Path) -> dict:
+def source_info(pdf: "Path | str | dict | None") -> dict:
+    """What the base records about the PDF a deck was converted from: where it was, and what it
+    said. A mapping is taken as those two facts already measured, which is how the upload half of
+    a split conversion (`agent.deck_tools.deck_upload`) records the same base without the PDF's
+    bytes having to cross into the workspace that does the upload - the name is all
+    `guard.check_rebuild` reads, and the digest is measured where the file is."""
+    if isinstance(pdf, dict):
+        return {"pdf": str(pdf.get("pdf") or ""), "sha1": pdf.get("sha1")}
+    if pdf is None:
+        return {"pdf": "", "sha1": None}
+    pdf = Path(pdf)
     return {"pdf": str(pdf), "sha1": identity.sha1(pdf.read_bytes()) if pdf.exists() else None}
 
 
@@ -475,7 +485,7 @@ def attach_readback(entry: dict, slide_read: dict | None, objects: list[list[str
         el["readback"] = {oid: found[oid] for oid in oids if oid in found}
 
 
-def build_base(deck: dict, out: Path, pres: dict, state: dict, pdf: Path, generation: int = 0, sign: bool = False,
+def build_base(deck: dict, out: Path, pres: dict, state: dict, pdf: "Path | dict", generation: int = 0, sign: bool = False,
                overlays: str = "last") -> dict:
     """The base after `convert`: `state` is emit's (slides with element object ids); `sign`:
     download the pictures for their signatures; `overlays`: which overlay steps the deck was made
@@ -706,8 +716,10 @@ def base_matches(base: dict, theirs: dict) -> bool:
     return any(sid in live for sid in known)
 
 
-def snapshot_after_convert(deck: dict, out: Path, state: dict, pdf: Path, overlays: str = "last") -> dict:
-    """Tag the new deck's objects and record the base (convert's last step)."""
+def snapshot_after_convert(deck: dict, out: Path, state: dict, pdf: "Path | dict",
+                           overlays: str = "last") -> dict:
+    """Tag the new deck's objects and record the base (convert's last step). `pdf`: the source,
+    or what `source_info` already measured of it."""
     from .google_auth import drive_service, slides_service
 
     slides, drive = slides_service(), drive_service()

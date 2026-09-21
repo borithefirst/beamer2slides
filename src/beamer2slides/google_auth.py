@@ -10,13 +10,22 @@ by the user who owns them.
 thing everywhere else: an agent harness, a server, a CI job. `use_provider` lets a caller
 put its own supply in front of that flow for the duration of a block, so nothing in the
 library has to learn where credentials come from (`agent/auth.py` is the caller that does).
+`use_services` is the same hook one step later: a caller that already holds a Slides, Drive
+or Docs client - with its own discovery cache, its own retries - puts it in front of
+`build(...)`, which otherwise fetches a discovery document per call.
+
+Both are **per context**, not per process: a server answering two requests at once has two
+visitors' tokens in the air, and neither may reach the other's deck.
 """
 
 import getpass
 import os
 import subprocess
+from collections.abc import Mapping
 from contextlib import contextmanager
+from contextvars import ContextVar
 from pathlib import Path
+from threading import Lock
 
 from google.auth.exceptions import RefreshError
 from google.auth.transport.requests import Request
@@ -74,27 +83,108 @@ def restrict_to_current_user(path: Path) -> None:
         path.chmod(0o600)
 
 
-_provider = None  # what supplies credentials instead of the browser flow, while a block asks for it
+class _Hook:
+    """Something a caller puts in front of a default, for the length of a block.
+
+    The value lives in a `ContextVar`, so it belongs to the thread or the async task that
+    installed it: two requests handled at once in one process each see their own, which is what
+    a server needs and what a module-level global cannot give.
+
+    A `ContextVar` has one edge, and it is the reason for everything below it: a thread started
+    inside the block runs in a *fresh* context and inherits nothing. The library's own worker
+    pools do not care - every one of them resolves `credentials()` on the calling thread and
+    hands the answer down (`emit.measure_places`, `deck_ir.slide_thumbnails`,
+    `snapshot.sign_pictures`), which is also the rule for a thread anyone else starts, since a
+    service object is not thread-safe either. But a thread that asks anyway must not fall
+    through to `InstalledAppFlow` and open a browser on a server, so it is given the one
+    installed value while there is exactly one, and told what to do when there are two. The
+    fallback is deliberately the narrowest thing that cannot be wrong: with a single block
+    active there is only one possible answer, and with several there is no guessing at all.
+    """
+
+    def __init__(self, name: str, what: str) -> None:
+        self._var: ContextVar = ContextVar(name, default=None)
+        self._what = what
+        self._active: list = []          # every block currently open, in this whole process
+        self._lock = Lock()
+
+    @contextmanager
+    def use(self, value):
+        token = self._var.set(value)
+        with self._lock:
+            self._active.append(value)
+        try:
+            yield
+        finally:
+            self._var.reset(token)
+            with self._lock:
+                for i in range(len(self._active) - 1, -1, -1):
+                    if self._active[i] is value:
+                        del self._active[i]
+                        break
+
+    def get(self):
+        value = self._var.get()
+        if value is not None:
+            return value
+        with self._lock:
+            active = list(self._active)
+        if not active or all(a is None for a in active):
+            return None
+        if all(a is active[0] for a in active):
+            return active[0]
+        raise RuntimeError(
+            f"this thread inherited no {self._what} and {len(active)} different ones are "
+            f"installed in this process, so there is no answer to give. Resolve it on the "
+            f"thread that owns the block and pass the result down (as the library's own worker "
+            f"pools do), or start the thread with `contextvars.copy_context().run(...)`.")
 
 
-@contextmanager
+#: What supplies credentials instead of the browser flow, while a block asks for it.
+_credentials_hook = _Hook("beamer2slides.credentials", "credentials provider")
+#: What builds the API clients instead of `googleapiclient.discovery.build`.
+_services_hook = _Hook("beamer2slides.services", "service builder")
+
+
 def use_provider(provider):
     """Take credentials from `provider()` inside this block, never from the browser flow.
 
-    Process-wide, like the flow it replaces, so the caller holds it for one journey at a time
-    (`agent.context.journey` owns the lock that makes that true).
+    Per context (see `_Hook`): a harness may run this around each of several requests at once,
+    and each sees its own. `agent.context.tool` holds one per journey.
     """
-    global _provider
-    before, _provider = _provider, provider
-    try:
-        yield
-    finally:
-        _provider = before
+    return _credentials_hook.use(provider)
+
+
+def use_services(services):
+    """Take the API clients from `services` inside this block, instead of building them.
+
+    `services` is either a mapping of api name ("slides", "drive", "docs") to a ready client, or
+    a callable `(api, version, creds) -> client | None` - a builder, which is the shape that can
+    answer for all three and cache the discovery document the library's `build(...)` otherwise
+    fetches per call. Anything not answered for is built as before, so a caller may hand over
+    one api and leave the rest alone, and `creds` is `None` where nobody passed any: a client
+    that carries its own credentials is never a reason to go looking for a token.
+
+    A service object is not thread-safe (`drive_service`), so a caller who hands over one client
+    is promising this block is one thread's; a builder is handed the api and may return a fresh
+    client per call.
+    """
+    return _services_hook.use(services)
+
+
+def _service(api: str, version: str, creds):
+    made = _services_hook.get()
+    if made is not None:
+        service = made.get(api) if isinstance(made, Mapping) else made(api, version, creds)
+        if service is not None:
+            return service
+    return build(api, version, credentials=creds or credentials(), cache_discovery=False)
 
 
 def credentials() -> Credentials:
-    if _provider is not None:
-        return _provider()
+    provider = _credentials_hook.get()
+    if provider is not None:
+        return provider()
     creds = None
     if TOKEN.exists():
         creds = Credentials.from_authorized_user_file(str(TOKEN), SCOPES)
@@ -121,14 +211,14 @@ def credentials() -> Credentials:
 
 
 def slides_service(creds: Credentials | None = None):
-    return build("slides", "v1", credentials=creds or credentials(), cache_discovery=False)
+    return _service("slides", "v1", creds)
 
 
 def drive_service(creds: Credentials | None = None):
     """Service objects are not thread-safe: build one per thread, sharing `creds`."""
-    return build("drive", "v3", credentials=creds or credentials(), cache_discovery=False)
+    return _service("drive", "v3", creds)
 
 
 def docs_service(creds: Credentials | None = None):
     """The Docs API must be enabled in the Cloud project; see docs/google-docs.md."""
-    return build("docs", "v1", credentials=creds or credentials(), cache_discovery=False)
+    return _service("docs", "v1", creds)

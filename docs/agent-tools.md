@@ -43,6 +43,36 @@ The eleven are the journeys a person would name, not the flags: `b2s_status`, `d
 `deck_convert`, `deck_sync`, `deck_pull`, `deck_adopt`, `tex_label`, `tex_converge`,
 `doc_push`, `doc_sync`, `doc_adopt`. Each maps to one CLI command and reuses its entry point.
 
+### One of them also comes in halves
+
+`deck_convert` is the only journey that does substantial local work *and* writes to Google, and
+a caller may not have both in one place: a sandbox that compiles and classifies, a service that
+holds the account. So the same body is also published cut in two - `deck_prepare`
+(`needs=(READS, WRITES)`, the permission vocabulary's `LOCAL_ONLY`) and `deck_upload`
+(`needs=(READS, WRITES, WRITES_GOOGLE)`) - and `deck_convert` is the two in sequence, sharing
+`_prepare` and `_upload` with them rather than restating either. There is no third code path,
+which is the point: the refusal codes, the artifacts and above all the rebuild guard are the
+same ones, instead of a caller reaching past the layer into `classify`, `render` and `emit`.
+
+What crosses between them is **the folder and nothing else**: `deck.json`, `backgrounds/`,
+`figures/`, and `prepared.json`, which carries what `_upload` would otherwise have re-read from
+the PDF - the title, the overlay mode the base must record, and the source's name and digest.
+Those last two are all anything ever wanted of the file: `guard.check_rebuild` compares the
+**name** (to catch a folder whose deck came from another PDF) and `snapshot.source_info` stores
+a sha1, so `source_info` takes those two facts already measured as readily as it takes a path.
+The PDF's *bytes* are read by exactly one code path - `emit.fallback_pictures`, the retry that
+crops a refused element's region out of the page when the API rejects it - so `deck_upload`
+takes an optional `pdf` for a caller that does have the file, reports
+`can_crop_refused_elements` either way, and `emit` says plainly which file it wanted rather
+than failing inside the retry. A folder written before this split has no `prepared.json` and is
+not refused: `deck.json` carries the source block classify copied out of the PDF, so only the
+digest is missing, which costs a later interrupted sync one conservative branch and is said out
+loud.
+
+`deck_convert` stays first in `ORDER` and in a model's tool list: the halves are for a caller
+who knows they are that caller, and a model reading top to bottom should meet the whole journey
+before its parts.
+
 ## The three seams a harness plugs into
 
 Everything a harness differs on is in `AgentContext`, and nothing in the agent layer reads the
@@ -120,6 +150,25 @@ context's source in front of the browser flow for the length of one journey. `de
 answers what an agent legitimately needs - is there access, until when - and never what the
 token is; a test asserts that the description of a token file contains none of its contents.
 
+`use_services` is the same hook one step later: a caller that already has a Slides, Drive or
+Docs client hands it over instead of having one built, which is what a server wants when
+`build()` would otherwise fetch a discovery document per call. It takes either a mapping of api
+name to a ready client or a callable `(api, version, creds) -> client | None`; anything it does
+not answer for is built as before, and `creds` is `None` where nobody passed any, a client that
+carries its own credentials never being a reason to go looking for a token.
+
+**Both are per context, not per process.** They were module-level globals, which is fine for one
+conversion at a time and wrong for a server answering two requests at once: two visitors' tokens
+are in the air and neither may reach the other's deck. They are `ContextVar`s now, so each
+request answers with its own. A `ContextVar` has one edge - a thread started inside the block
+runs in a *fresh* context and inherits nothing - and the library's own worker pools do not care,
+because every one of them (`emit.measure_places`, `deck_ir.slide_thumbnails`,
+`snapshot.sign_pictures`) resolves `credentials()` on the calling thread and hands the answer
+down. A thread that asks anyway must still never fall through to `InstalledAppFlow` and open a
+browser on a server, so while exactly one block is open in the process it is given that one, and
+where two different ones are open it gets a `RuntimeError` naming
+`contextvars.copy_context().run(...)` - guessing there would hand one visitor another's account.
+
 ### `allow` - what the agent may do
 
 Four actions: `reads`, `writes`, `reads_google`, `writes_google`. A context lists what it
@@ -169,6 +218,11 @@ share: `redirect_stdout` is global, `pdf.use_backend` sets a module variable,
 `checks.convert_locally` monkey-patches `render.save_png`, and the pure PDF backend carries
 PDFium's own process-wide multiple-master font blend, where even the order documents are opened
 in can change what is rendered. A harness that wants two journeys at once runs two processes.
+
+That is a statement about the *pipeline*, not about the seams: `use_provider` and `use_services`
+are per context precisely so that the rest of a server - the request that is waiting for the
+lock, the one that is answering out of a cache, the one that only asked what a folder holds -
+never sees another visitor's account while it waits.
 
 ## Plugging it in
 

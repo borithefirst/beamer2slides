@@ -22,9 +22,9 @@ decide. Your job is to make sure the merge is the thing that runs, rather than a
 
 ## The one rule
 
-**Never rebuild a deck somebody has edited.** `deck_convert` on an existing deck replaces its
-whole content. The library checks first and refuses with the code `deck_edited`, naming what was
-edited. When you see that refusal:
+**Never rebuild a deck somebody has edited.** `deck_convert` (or `deck_upload`) on an existing
+deck replaces its whole content. The library checks first and refuses with the code
+`deck_edited`, naming what was edited. When you see that refusal:
 
 * run `deck_sync` instead — that is what it is for; or
 * `deck_convert(new_deck=True)` to leave the old deck alone and make a second one; or
@@ -52,6 +52,11 @@ The same applies to `doc_push` on a file that already names a document, and to `
    retroactively without guessing. A duplicate label is reported and never resolved — which of
    two frames a slide came from is a question only the author can answer.
 4. **`deck_convert`** — the first conversion, or a rebuild of a deck nobody has touched.
+   (`deck_prepare` and `deck_upload` are this same journey in halves, for a caller whose local
+   work and Google write happen in different places — a sandbox that compiles, a service that
+   holds the account. `deck_prepare` needs no account at all and writes the folder;
+   `deck_upload` builds the deck from that folder and needs nothing else, not even the PDF.
+   Use `deck_convert` unless you know you are that caller.)
 5. **`deck_sync`** — every time after that. **Always `dry_run=True` first**, read the conflicts,
    then run it for real. A dry run writes a report and touches nothing.
 6. **`deck_pull`** / **`deck_adopt`** — the other direction: fold the deck's edits back into the

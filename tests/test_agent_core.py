@@ -157,13 +157,13 @@ def test_the_context_supplies_credentials_to_the_library(tmp_path):
         j.data["same"] = google_auth.credentials() is creds
 
     assert inner(ctx).data["same"] is True
-    assert google_auth._provider is None                       # and put back afterwards
+    assert google_auth._credentials_hook.get() is None         # and put back afterwards
 
 
 def test_a_journey_that_needs_no_google_leaves_the_provider_alone(tmp_path):
     @tool("local", needs=(READS,))
     def local(j):
-        j.data["provider"] = google_auth._provider is None
+        j.data["provider"] = google_auth._credentials_hook.get() is None
 
     ctx = _ctx(tmp_path, google=_Access(refusal=Refused("needs_consent", "no")))
     assert local(ctx).data["provider"] is True                 # and no credential call was made
@@ -281,6 +281,141 @@ def test_describing_access_never_says_what_the_token_is(tmp_path):
     described = json.dumps(TokenFile(token=token, client_secret=tmp_path / "c.json").describe())
     assert "SECRET-VALUE" not in described and "ALSO-SECRET" not in described
     assert "shh" not in described
+
+
+# -- the two hooks, and what a server needs of them ---------------------------------------
+
+
+def _in_its_own_thread(fn):
+    """Run `fn` on a thread of its own and give back what it returned, or raise what it raised.
+
+    `threading.Thread` starts in a *fresh* context, so this is exactly what a server's worker
+    inherits: nothing.
+    """
+    import threading
+
+    answer: list = []
+
+    def run():
+        try:
+            answer.append(("ok", fn()))
+        except BaseException as exc:                              # noqa: BLE001 - re-raised below
+            answer.append(("raised", exc))
+
+    thread = threading.Thread(target=run)
+    thread.start()
+    thread.join(10)
+    kind, value = answer[0]
+    if kind == "raised":
+        raise value
+    return value
+
+
+def test_two_requests_at_once_each_see_their_own_credentials():
+    """The question the maintainers asked: is `use_provider` safe for concurrent server use?
+
+    It is a `ContextVar`, so two threads each holding their own block answer with their own
+    visitor's token and neither can reach the other's deck. A module-level global could not.
+    """
+    import threading
+
+    first, second = object(), object()
+    ready, seen = threading.Barrier(2), {}
+
+    def visitor(name, creds):
+        def run():
+            with google_auth.use_provider(lambda: creds):
+                ready.wait(10)                    # both blocks open at once, or the test proves nothing
+                seen[name] = google_auth.credentials()
+        return run
+
+    threads = [threading.Thread(target=visitor("a", first)),
+               threading.Thread(target=visitor("b", second))]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(10)
+    assert seen == {"a": first, "b": second}
+    assert google_auth._credentials_hook.get() is None
+
+
+def test_a_worker_thread_that_inherited_nothing_is_still_never_sent_to_the_browser():
+    """A thread started inside the block runs in a fresh context and inherits nothing.
+
+    The library's own pools do not care - every one of them resolves `credentials()` on the
+    calling thread and hands the answer down - but a thread that asks anyway must not fall
+    through to `InstalledAppFlow` and open a browser on a server. While exactly one block is
+    open there is an unambiguous answer, so it is given.
+    """
+    creds = object()
+    with google_auth.use_provider(lambda: creds):
+        assert _in_its_own_thread(google_auth.credentials) is creds
+
+
+def test_two_different_providers_and_a_thread_that_inherited_neither_is_an_error():
+    """The one case with no answer: guessing would hand one visitor another's account."""
+    import threading
+
+    first, second = object(), object()
+    ready, done = threading.Barrier(2), threading.Event()
+
+    def hold(creds):
+        def run():
+            with google_auth.use_provider(lambda: creds):
+                ready.wait(10)
+                done.wait(10)
+        return run
+
+    other = threading.Thread(target=hold(second))
+    other.start()
+    try:
+        with google_auth.use_provider(lambda: first):
+            ready.wait(10)
+            with pytest.raises(RuntimeError) as exc:
+                _in_its_own_thread(google_auth.credentials)
+            assert "copy_context" in str(exc.value)              # and it says how to fix it
+    finally:
+        done.set()
+        other.join(10)
+    assert google_auth._credentials_hook.get() is None
+
+
+def test_a_prebuilt_client_is_used_and_no_token_is_ever_looked_for(monkeypatch):
+    """`use_services` is the same hook one step later: a caller with its own client builder
+    (a discovery document per `build()` is what makes them want one) hands it over, and nothing
+    goes looking for credentials at all."""
+    slides, drive = object(), object()
+    monkeypatch.setattr(google_auth, "build", _explodes("build"))
+    monkeypatch.setattr(google_auth, "credentials", _explodes("credentials"))
+    with google_auth.use_services({"slides": slides, "drive": drive}):
+        assert google_auth.slides_service() is slides
+        assert google_auth.drive_service() is drive
+
+
+def test_a_builder_is_asked_per_api_and_anything_it_declines_is_built_as_before(monkeypatch):
+    asked, made = [], object()
+
+    def builder(api, version, creds):
+        asked.append((api, version, creds))
+        return made if api == "slides" else None
+
+    monkeypatch.setattr(google_auth, "build", lambda *a, **kw: ("built", a[0]))
+    monkeypatch.setattr(google_auth, "credentials", lambda: "CREDS")
+    with google_auth.use_services(builder):
+        assert google_auth.slides_service() is made
+        assert google_auth.docs_service() == ("built", "docs")
+    assert [a for a, _, _ in asked] == ["slides", "docs"]
+    assert asked[0][1] == "v1"
+    # Nobody passed credentials in, so the builder is told so rather than being handed a token
+    # fetched on its behalf: a client that carries its own is never a reason to go looking.
+    assert asked[0][2] is None
+    assert google_auth._services_hook.get() is None
+
+
+def _explodes(what):
+    def boom(*args, **kwargs):
+        raise AssertionError(f"{what} was called")
+    return boom
 
 
 # -- the first call ----------------------------------------------------------------------

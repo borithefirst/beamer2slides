@@ -1390,6 +1390,26 @@ same functions underneath; nothing here reimplements a journey.
   all read top to bottom and what they read there is advice (collecting them from the modules put
   `deck_convert` above `deck_inspect` and `doc_adopt` above `doc_push`); the collection still says
   which tools exist, so one left out of `ORDER` raises at import.
+- **One of them also comes in halves**, because a caller may not have the local work and the Google
+  write in one place (a sandbox that compiles, a service that holds the account): `deck_prepare`
+  (`needs=LOCAL_ONLY`) classifies, renders and writes the folder, `deck_upload`
+  (`needs=(READS, WRITES, WRITES_GOOGLE)`) builds the deck from that folder, and `deck_convert` is
+  the two in sequence over the same `_prepare` / `_upload`, so there is no third code path and the
+  refusal codes, the artifacts and the rebuild guard are the same ones instead of a caller reaching
+  past the layer into `classify`, `render` and `emit`. What crosses is **the folder and nothing
+  else**: deck.json, backgrounds/, figures/ and `prepared.json`, which carries what `_upload` would
+  otherwise have re-read from the PDF - the title, the overlay mode the base records, and the
+  source's **name and digest**, which is all anything ever wanted of the file (`guard.check_rebuild`
+  compares the name to catch a folder whose deck came from another PDF, `snapshot.source_info`
+  stores a sha1 and now takes those two facts already measured). The PDF's *bytes* are read by
+  exactly one code path, `emit.fallback_pictures` - the retry that crops a refused element's region
+  out of the page - so `deck_upload` takes an optional `pdf`, says `can_crop_refused_elements`
+  either way, writes the new location into deck.json when it is handed one, and `emit` names the
+  file it wanted rather than failing inside the retry. A folder written before the split has no
+  prepared.json and is not refused: deck.json carries classify's source block, so only the digest is
+  missing (one conservative branch in a later interrupted sync), and that is said out loud.
+  `deck_convert` stays first in `ORDER`: a model reading top to bottom should meet the whole journey
+  before its parts.
 - **Three seams**, which is all a harness plugs in (`context.AgentContext`): `Workspace` (refs in,
   absolute paths out; a ref that climbs out is `outside_workspace`, a folder may be `readable` but
   never written, `stage` brings an outside file in, `out_dir` is the workspace's own - `paths.out_root()`
@@ -1399,7 +1419,19 @@ same functions underneath; nothing here reimplements a journey.
   and `allow`, four action classes (`READS`, `WRITES`, `READS_GOOGLE`, `WRITES_GOOGLE`) checked
   **before the body runs**, so a forbidden journey does no work rather than stopping halfway through
   a rebuild. `google_auth.use_provider` is the one hook added to the library: credentials injected
-  for the length of a call instead of found in the filesystem.
+  for the length of a call instead of found in the filesystem; `use_services` is the same hook one
+  step later, a ready Slides/Drive/Docs client (or a `(api, version, creds) -> client | None`
+  builder) handed over instead of one built, which is what a server wants when `build()` would
+  fetch a discovery document per call. **Both are per context, not per process** (`_Hook`, a
+  `ContextVar`): they were module-level globals, fine for one conversion at a time and wrong for a
+  server with two visitors' tokens in the air, neither of which may reach the other's deck. The one
+  edge is that a thread started inside the block runs in a *fresh* context and inherits nothing -
+  which the library's own pools do not care about, every one of them resolving `credentials()` on
+  the calling thread and handing the answer down (`emit.measure_places`,
+  `deck_ir.slide_thumbnails`, `snapshot.sign_pictures`) - but a thread that asks anyway must never
+  fall through to `InstalledAppFlow` and open a browser on a server, so while exactly one block is
+  open it is given that one, and where two differ it gets a `RuntimeError` naming
+  `contextvars.copy_context().run(...)`: guessing there would hand one visitor another's account.
 - **A harness with no filesystem to name** (`content.py`, docs/agent-tools.md): the disk the library
   needs does not go away, it leaves the interface. Every file argument also takes the file - a `data:`
   URI or `{"name", "base64"|"text"}` - which `take_in` writes into the workspace's `inbox/` and
@@ -1520,8 +1552,9 @@ Whose Drive a deck goes into decides whether the button exists at all (`server.g
 `local` = `B2S_PLAYGROUND_GOOGLE=1` and a token, the owner's Drive, for one's own machine;
 `signin` = `B2S_PLAYGROUND_GOOGLE_CLIENT_ID` (an OAuth **web** client, not a secret), the visitor's
 own - their browser gets an access token from Google's sign-in script and the server holds it for
-one `emit` call through `google_auth.use_provider` (nothing stored, no refresh token; `to_slides`
-takes a lock, since that provider is process-wide); neither = the recorded runs from `docs/media`.
+one `emit` call through `google_auth.use_provider` (nothing stored, no refresh token; that provider
+is per context, so two visitors' tokens can be in the air at once, and `to_slides` still takes a
+lock for the pipeline's own process-wide state); neither = the recorded runs from `docs/media`.
 The browser asks for `drive.file` alone (`server.WEB_SCOPES`): measured, a token carrying only that
 builds a deck end to end - and unlike `presentations`, which the command line asks for, it is not a
 *sensitive* scope, so a published playground needs no Google review.

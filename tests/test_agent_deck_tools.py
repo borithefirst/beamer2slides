@@ -19,12 +19,23 @@ from typing import Annotated, get_args, get_origin, get_type_hints
 import pytest
 
 from beamer2slides.agent import READS, READS_GOOGLE, WRITES, AgentContext, LocalWorkspace
-from beamer2slides.agent.deck_tools import deck_convert, deck_inspect, deck_sync, tex_label
+from beamer2slides.agent.deck_tools import (deck_convert, deck_inspect, deck_prepare, deck_sync,
+                                            deck_upload, tex_label)
 
 TESTS = Path(__file__).resolve().parent
 DECKS = TESTS / "decks" / "out"
-TOOLS = (deck_inspect, deck_convert, deck_sync, tex_label)
-GOOGLE_TOOLS = (deck_convert, deck_sync)
+TOOLS = (deck_inspect, deck_convert, deck_prepare, deck_upload, deck_sync, tex_label)
+GOOGLE_TOOLS = (deck_convert, deck_upload, deck_sync)
+
+
+def google_args(fn) -> dict:
+    """The least each Google journey needs to be called at all, so a test of the *gate* is not
+    a test of argument binding."""
+    if fn is deck_sync:
+        return {"pdf": "talk.pdf", "deck": "some-deck-id"}
+    if fn is deck_upload:
+        return {"out": "out/talk"}
+    return {"pdf": "talk.pdf"}
 
 
 def deck_pdf() -> Path:
@@ -130,7 +141,7 @@ def test_a_google_journey_does_nothing_at_all_in_an_offline_context(fn, tmp_path
     shutil.copy2(deck_pdf(), root / "talk.pdf")
     ctx = AgentContext.offline(root)
     before = sorted(p.name for p in root.rglob("*"))
-    result = fn(ctx, pdf="talk.pdf", **({"deck": "some-deck-id"} if fn is deck_sync else {}))
+    result = fn(ctx, **google_args(fn))
     assert not result.ok
     # The gate runs before credentials are fetched, so a context that is offline *and* forbids
     # writing says `forbidden`; one that merely has no Google says `offline`.
@@ -146,7 +157,7 @@ def test_a_google_journey_with_no_credentials_refuses_with_offline(fn, tmp_path)
     root.mkdir(parents=True)
     shutil.copy2(deck_pdf(), root / "talk.pdf")
     ctx = AgentContext(workspace=LocalWorkspace(root), google=NoGoogle(), allow=ALL_ACTIONS)
-    result = fn(ctx, pdf="talk.pdf", **({"deck": "some-deck-id"} if fn is deck_sync else {}))
+    result = fn(ctx, **google_args(fn))
     assert not result.ok and result.code == "offline", result.summary
 
 
@@ -291,6 +302,209 @@ def test_a_refusal_never_hands_the_agent_a_shell_command(tmp_path):
         assert "Nothing was written." in said
     # Forcing is still reachable - as an argument to this tool, and named as somebody's decision.
     assert any("force_rebuild=True" in s for s in job.next_steps)
+
+
+# ------------------------------------------------- deck_prepare / deck_upload: the two halves
+
+
+@pytest.fixture(scope="module")
+def prepared(tmp_path_factory):
+    """One `deck_prepare` in a context with no Google at all, reused by the tests below."""
+    root = tmp_path_factory.mktemp("agent-prepare")
+    shutil.copy2(deck_pdf(), root / "talk.pdf")
+    return root, deck_prepare(AgentContext.offline(root), pdf="talk.pdf")
+
+
+def fake_google(seen: dict):
+    """`emit` and `snapshot_after_convert` replaced by two functions that only remember what they
+    were handed. Both are imported inside `_upload`, so the module attribute is what is called."""
+
+    def emit(deck, out_dir, name, new_deck, measure, force_rebuild, backup, named):
+        seen["emit"] = {"name": name, "named": named, "slides": len(deck["slides"]),
+                        "backgrounds": sorted(p.name for p in (out_dir / "backgrounds").glob("*"))}
+        return {"url": "https://docs.google.com/presentation/d/PID123/edit",
+                "presentationId": "PID123", "deck": {"presentationId": "PID123", "slides": []}}
+
+    def snapshot_after_convert(deck, out, state, pdf, overlays="last"):
+        seen["base"] = {"pdf": pdf, "overlays": overlays}
+        return {"slides": [{}, {}]}
+
+    return emit, snapshot_after_convert
+
+
+def test_deck_prepare_writes_the_folder_the_upload_half_builds_from(prepared):
+    """The local half of a conversion, in a context that has no account and is not allowed one."""
+    import json
+
+    from beamer2slides import identity
+
+    root, result = prepared
+    assert result.ok, result.summary
+    out = root / "out" / "talk"
+    assert (out / "deck.json").is_file()
+    assert list((out / "backgrounds").glob("*.png")), "no background pictures rendered"
+    assert not (out / "emit.json").exists() and not (out / "sync").exists()
+
+    facts = json.loads((out / "prepared.json").read_text(encoding="utf-8"))
+    assert facts["version"] == 1 and facts["overlays"] == "last"
+    assert facts["name"] == "talk.pdf"
+    assert facts["source"]["sha1"] == identity.sha1((root / "talk.pdf").read_bytes())
+    assert facts["facts"]["slides"] == result.data["slides"] > 0
+    assert "deck_upload" in " ".join(result.next_steps)
+
+
+def test_deck_upload_needs_nothing_from_the_workspace_but_the_prepared_folder(prepared, tmp_path,
+                                                                              monkeypatch):
+    """The minimal input set, which is the whole point of the split: the folder and nothing else.
+
+    The PDF's *bytes* are wanted by exactly one code path - `emit.fallback_pictures`, the retry
+    that crops a refused element's region out of the page - and by neither the guard (which reads
+    the file's **name**, to catch a folder whose deck came from another PDF) nor the base (which
+    wants a name and a digest, both measured where the file was). So a workspace holding the
+    prepared folder alone converts, and says that the one retry is out of reach.
+    """
+    import json
+
+    from beamer2slides import identity
+    from beamer2slides.agent import ALL_ACTIONS
+
+    root, _ = prepared
+    lonely = tmp_path / "uploader"
+    shutil.copytree(root / "out" / "talk", lonely / "out" / "talk")
+    assert not list(lonely.rglob("*.pdf")), "the PDF must not cross the boundary"
+    # deck.json says where the PDF was on the machine that classified it; here that is nothing.
+    where = lonely / "out" / "talk" / "deck.json"
+    deck = json.loads(where.read_text(encoding="utf-8"))
+    deck["source"]["pdf"] = "/prepared/on/another/machine/talk.pdf"
+    where.write_text(json.dumps(deck), encoding="utf-8")
+
+    seen: dict = {}
+    emit, snapshot = fake_google(seen)
+    monkeypatch.setattr("beamer2slides.emit.emit", emit)
+    monkeypatch.setattr("beamer2slides.snapshot.snapshot_after_convert", snapshot)
+
+    ctx = AgentContext(workspace=LocalWorkspace(lonely), google=FakeGoogle(), allow=ALL_ACTIONS)
+    result = deck_upload(ctx, out="out/talk")
+    assert result.ok, result.summary
+
+    prepared_json = json.loads((lonely / "out" / "talk" / "prepared.json").read_text(encoding="utf-8"))
+    # The guard gets the name, not the file.
+    assert seen["emit"]["named"] == "talk.pdf"
+    assert seen["emit"]["slides"] == prepared_json["facts"]["slides"]
+    assert seen["emit"]["backgrounds"], "the pictures came with the folder"
+    # The base records the digest measured on the machine that had the PDF.
+    assert seen["base"]["pdf"] == {"pdf": prepared_json["source"]["pdf"],
+                                   "sha1": identity.sha1((root / "talk.pdf").read_bytes())}
+    assert seen["base"]["overlays"] == prepared_json["overlays"]
+    assert result.data["url"].endswith("PID123/edit") and result.data["base_slides"] == 2
+    # And the one thing the folder alone cannot do is said, rather than found out inside a retry.
+    assert result.data["can_crop_refused_elements"] is False
+
+
+def test_deck_upload_says_where_the_pdf_is_now_when_it_is_handed_one(prepared, tmp_path, monkeypatch):
+    """deck.json records where the PDF was when it was classified, which on the uploading machine
+    is a path to nothing. Handed the file, the upload half says where it is now - or
+    `fallback_pictures` would crop a refused element's region out of a file that is not there."""
+    import json
+
+    from beamer2slides.agent import ALL_ACTIONS
+
+    root, _ = prepared
+    other = tmp_path / "both"
+    shutil.copytree(root / "out" / "talk", other / "out" / "talk")
+    shutil.copy2(root / "talk.pdf", other / "slides.pdf")
+
+    seen: dict = {}
+    emit, snapshot = fake_google(seen)
+    monkeypatch.setattr("beamer2slides.emit.emit", emit)
+    monkeypatch.setattr("beamer2slides.snapshot.snapshot_after_convert", snapshot)
+
+    ctx = AgentContext(workspace=LocalWorkspace(other), google=FakeGoogle(), allow=ALL_ACTIONS)
+    result = deck_upload(ctx, out="out/talk", pdf="slides.pdf")
+    assert result.ok, result.summary
+    assert result.data["can_crop_refused_elements"] is True
+    deck = json.loads((other / "out" / "talk" / "deck.json").read_text(encoding="utf-8"))
+    assert deck["source"]["pdf"] == str(other / "slides.pdf")
+    assert seen["emit"]["named"] == other / "slides.pdf"
+
+
+def test_a_folder_prepared_before_the_split_still_uploads(prepared, tmp_path, monkeypatch):
+    """`deck_convert` wrote these folders for a year before `prepared.json` existed. deck.json
+    carries the source block classify copied out of the PDF, so the title and the name are both
+    there; only the digest is not, and that costs a later interrupted sync one conservative
+    branch, not a loss. It is said out loud and nothing is refused."""
+    from beamer2slides.agent import ALL_ACTIONS
+
+    root, _ = prepared
+    old = tmp_path / "old"
+    shutil.copytree(root / "out" / "talk", old / "out" / "talk")
+    (old / "out" / "talk" / "prepared.json").unlink()
+
+    seen: dict = {}
+    emit, snapshot = fake_google(seen)
+    monkeypatch.setattr("beamer2slides.emit.emit", emit)
+    monkeypatch.setattr("beamer2slides.snapshot.snapshot_after_convert", snapshot)
+
+    ctx = AgentContext(workspace=LocalWorkspace(old), google=FakeGoogle(), allow=ALL_ACTIONS)
+    result = deck_upload(ctx, out="out/talk")
+    assert result.ok, result.summary
+    assert seen["emit"]["named"] == "talk.pdf", "the name still comes out of deck.json"
+    assert seen["base"]["pdf"]["sha1"] is None
+    assert any("prepared.json" in d.message for d in result.diagnostics)
+
+
+def test_deck_upload_refuses_a_folder_nobody_prepared(tmp_path):
+    from beamer2slides.agent import ALL_ACTIONS
+
+    root = tmp_path / "ws"
+    (root / "out" / "talk").mkdir(parents=True)
+    ctx = AgentContext(workspace=LocalWorkspace(root), google=FakeGoogle(), allow=ALL_ACTIONS)
+    assert deck_upload(ctx, out="out/talk").code == "not_found"
+    (root / "out" / "talk" / "deck.json").write_text('{"slides": []}', encoding="utf-8")
+    (root / "out" / "talk" / "prepared.json").write_text('{"version": 99}', encoding="utf-8")
+    result = deck_upload(ctx, out="out/talk")
+    assert result.code == "bad_request" and "another version" in result.summary
+
+
+def test_deck_convert_is_those_two_halves_and_nothing_else(prepared, tmp_path, monkeypatch):
+    """The split is a refactor of `deck_convert`'s own body, so the whole journey must still write
+    the same folder - with prepared.json in it, since a folder is a folder either way."""
+    import json
+
+    from beamer2slides.agent import ALL_ACTIONS
+
+    root, _ = prepared
+    whole = tmp_path / "whole"
+    whole.mkdir()
+    shutil.copy2(root / "talk.pdf", whole / "talk.pdf")
+
+    seen: dict = {}
+    emit, snapshot = fake_google(seen)
+    monkeypatch.setattr("beamer2slides.emit.emit", emit)
+    monkeypatch.setattr("beamer2slides.snapshot.snapshot_after_convert", snapshot)
+
+    ctx = AgentContext(workspace=LocalWorkspace(whole), google=FakeGoogle(), allow=ALL_ACTIONS)
+    result = deck_convert(ctx, pdf="talk.pdf")
+    assert result.ok, result.summary
+
+    halves = json.loads((root / "out" / "talk" / "prepared.json").read_text(encoding="utf-8"))
+    once = json.loads((whole / "out" / "talk" / "prepared.json").read_text(encoding="utf-8"))
+    assert once["facts"] == halves["facts"] and once["labels"] == halves["labels"]
+    assert once["source"]["sha1"] == halves["source"]["sha1"]
+    assert json.loads((whole / "out" / "talk" / "deck.json").read_text(encoding="utf-8")) \
+        != {}, "deck.json was written"
+    assert seen["base"]["pdf"] == whole / "talk.pdf", "the whole journey has the file itself"
+    assert result.data["can_crop_refused_elements"] is True
+
+
+def test_the_split_halves_declare_the_least_each_one_does(prepared):
+    """Mail item 1's real content: `deck_prepare` must be callable where `deck_convert` is not,
+    and `deck_upload` must want Google before it does anything at all."""
+    from beamer2slides.agent.context import LOCAL_ONLY
+
+    assert set(deck_prepare.needs) == set(LOCAL_ONLY)
+    assert "writes_google" in deck_upload.needs and "writes_google" not in deck_prepare.needs
+    assert set(deck_convert.needs) == set(deck_upload.needs) | set(deck_prepare.needs)
 
 
 # ---------------------------------------------------------------- tex_label

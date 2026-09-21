@@ -156,8 +156,11 @@ clicks, Google's sign-in script (`accounts.google.com/gsi/client`, loaded only i
 hands the page an access token, the page sends it with that one request, and the server holds it
 for the one `emit` call through `google_auth.use_provider`. Nothing is stored, and no refresh
 token exists - so the host keeps no credentials of anyone's, and a visitor who closes the tab has
-left nothing behind. `use_provider` is process-wide, so `to_slides` takes a lock: two visitors
-converting at once must never build with each other's credentials. A client id is not a secret;
+left nothing behind. `use_provider` is per context (a `ContextVar`), so two visitors' tokens can
+be in the air at once without either reaching the other's Drive; `to_slides` still takes a lock,
+because the pipeline behind it is full of process-wide state - `redirect_stdout`, the PDF
+backend, the pure reader's font blend - and two conversions at once would share it. A client id
+is not a secret;
 it identifies the app to Google and belongs in the deployment's environment, not in git.
 
 The browser asks for **`drive.file` alone** (`server.WEB_SCOPES`), which reaches only the files

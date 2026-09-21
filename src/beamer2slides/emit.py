@@ -2096,6 +2096,14 @@ def fallback_pictures(deck: dict, refused: list[tuple[int, str]], out: Path) -> 
     from .render import crop_region
 
     source_pdf = out / "slides.pdf" if (out / "slides.pdf").exists() else Path(deck["source"]["pdf"])
+    if not source_pdf.exists():
+        # The one step of a conversion that needs the PDF itself rather than what was classified
+        # out of it, and the only reason `agent.deck_tools.deck_upload` asks for one at all. A
+        # folder that travelled without its source says so here rather than inside `crop_region`.
+        raise FileNotFoundError(
+            f"the API refused {len(refused)} element(s) and the region of each has to be cropped "
+            f"from the page, but the PDF this deck was built from is not at {source_pdf}. Put it "
+            f"back beside the folder (or pass it in) and build the deck again.")
     new_slides = []
     for slide in deck["slides"]:
         ids = {eid for page, eid in refused if page == slide["page"]}
