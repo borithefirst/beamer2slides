@@ -55,6 +55,31 @@ A round trip is therefore: `tex_compile` on `talk.tex`, `deck_inspect` on `talk.
 on `doc.html`. A new workspace is seeded with a talk, a canonical document and a README saying
 exactly that.
 
+### The editor never reverts a file a run rewrote
+
+A journey rewrites the files it is pointed at, and the Docs side does it every time:
+`doc_sync` writes the document and then regenerates the canonical HTML *from the document it
+has just written*, so file, document and base agree. The editor, meanwhile, holds whatever the
+file said when it was opened — and saving that buffer back is not an edit but a **revert**,
+which the next sync reads as the source having dropped everything the rewrite brought in, and
+deletes those blocks from somebody's live document.
+
+So a file carries a stamp: `GET .../file` answers with `X-B2S-Version` (a digest of the
+content, not an mtime — a byte-for-byte rewrite has taken nothing away), the page holds it
+while it types, and `PUT .../file?…&version=<stamp>` is refused with **409** and writes
+nothing when the file no longer says that (`workbench.write`). The empty stamp means "there
+was nothing of that name when I read it", so *New file* cannot land on a file a run has just
+created either. An upload names no stamp and replaces what is there, which is what an upload
+means.
+
+The other half is that the page does not sit on a stale buffer until the save is refused:
+when a run finishes, the open file is read again. An untouched buffer is replaced by what the
+run wrote and a line says so; **a buffer somebody has typed in is never thrown away** — it
+stays, with a warning that saving it would put the older text back. Measured on the live
+playground, on a real document, twice: a `doc_adopt`, an edit in the browser, a `doc_sync`
+that merged it, and then a save from a buffer older than that sync — which deleted from the
+document the very sentence the merge had just kept.
+
 **There is no shell.** The only two things the workbench executes are a TeX engine and its own
 journeys, and both are fenced:
 

@@ -17,7 +17,8 @@ journeys run inside it, one subprocess each.
   GET  /api/tools                  every journey as JSON Schema, plus the instructions
   POST /api/ws                     open a workspace -> {"id"}
   GET  /api/ws/<sid>               its files, its byte count, its limits and its runs
-  GET/PUT/DELETE /api/ws/<sid>/file?path=<ref>    one file (PUT's body is the content)
+  GET/PUT/DELETE /api/ws/<sid>/file?path=<ref>    one file (PUT's body is the content; GET's
+                                   X-B2S-Version is what PUT's &version= must still say, or 409)
   POST /api/ws/<sid>/runs          {"tool", "args", "access_token"?} -> {"id"}
   GET  /api/ws/<sid>/runs/<rid>?since=<n>         state, new log lines and, at the end, the Result
 
@@ -339,12 +340,15 @@ class Handler(BaseHTTPRequestHandler):
         # stderr: a job's stages print while the worker holds stdout (redirect_stdout is process-wide)
         sys.stderr.write(f"{self.address_string()} {fmt % args}\n")
 
-    def send(self, body: bytes, ctype: str, status: int = 200, cache: bool = False) -> None:
+    def send(self, body: bytes, ctype: str, status: int = 200, cache: bool = False,
+             headers: dict | None = None) -> None:
         self.send_response(status)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "max-age=3600" if cache else "no-store")
         self.send_header("X-Content-Type-Options", "nosniff")
+        for name, value in (headers or {}).items():
+            self.send_header(name, value)
         self.end_headers()
         self.wfile.write(body)
 
@@ -361,8 +365,11 @@ class Handler(BaseHTTPRequestHandler):
     # ---- the workbench: a folder per visitor and the journeys run in it (workbench.py)
 
     def query(self) -> dict:
+        # Blank values are kept: `&version=` is a page saying "there was nothing of that
+        # name when I read it", which is not the same as naming no version at all.
         return {k: v[0] for k, v in
-                urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query).items()}
+                urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query,
+                                      keep_blank_values=True).items()}
 
     def bench(self, method: str, path: str, body: bytes) -> None:
         """Everything the workbench answers. A `Denied` carries the status; nothing else escapes."""
@@ -391,9 +398,13 @@ class Handler(BaseHTTPRequestHandler):
                 if not here.is_file():
                     return self.json({"error": "no such file"}, 404)
                 ctype = mimetypes.guess_type(here.name)[0] or "application/octet-stream"
-                return self.send(here.read_bytes(), ctype)
+                # What the editor holds on to, and hands back when it saves: a run that
+                # rewrites this file underneath it is then refused rather than reverted.
+                return self.send(here.read_bytes(), ctype,
+                                 headers={"X-B2S-Version": workbench.version(here)})
             if method == "PUT":
-                return self.json(bench.write(session, ref, body))
+                return self.json(bench.write(session, ref, body,
+                                             self.query().get("version")))
             if method == "DELETE":
                 bench.remove(session, ref)
                 return self.json({"deleted": ref})

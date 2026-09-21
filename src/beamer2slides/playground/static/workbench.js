@@ -8,6 +8,11 @@
 (function () {
 
 let ws = null, tools = null, shown = null, catalogue = null;
+// What the open file said when it was opened, and what it said then. A journey rewrites the
+// files it is pointed at (`doc_sync` regenerates the canonical HTML from the document it has
+// just written), so a buffer opened before a run is older than the file: saving it back is a
+// revert, and the next sync reads that as the source dropping what the rewrite brought in.
+let stamp = null, loaded = "";
 
 const TEXT = /\.(tex|html|json|md|txt|sty|cls|bib|csv|log|patch|diff|xml|ya?ml|cfg|toml|aux|out)$/i;
 const IMAGE = /\.(png|jpe?g|gif|webp|svg)$/i;
@@ -90,42 +95,72 @@ async function openFile(path) {
   const r = await fetch(fileUrl(path));
   if (!r.ok) return;
   shown = path;
+  stamp = r.headers.get("X-B2S-Version");
   $("#openpath").textContent = path;
   const editable = TEXT.test(path);
   $("#filetext").hidden = !editable;
   $("#fileview").hidden = editable;
   $("#savefile").disabled = !editable;
-  if (editable) $("#filetext").value = await r.text();
+  if (editable) loaded = $("#filetext").value = await r.text();
   else $("#fileview").replaceChildren(IMAGE.test(path)
     ? Object.assign(new Image(), { src: fileUrl(path), alt: path })
     : Object.assign(document.createElement("a"),
         { href: fileUrl(path), target: "_blank", rel: "noopener", textContent: `open ${path} ↗` }));
 }
 
-async function put(path, body) {
-  await api(fileUrl(path), { method: "PUT",
-                             headers: { "Content-Type": "application/octet-stream" }, body });
+async function put(path, body, version) {
+  const url = fileUrl(path) + (version == null ? "" : `&version=${encodeURIComponent(version)}`);
+  const said = await api(url, { method: "PUT",
+                                headers: { "Content-Type": "application/octet-stream" }, body });
   await listFiles();
+  return said;
 }
 
 async function saveFile() {
   if (!shown) return;
-  try { await put(shown, $("#filetext").value); note(`${shown} saved`); }
-  catch (e) { note(e.message, true); }
+  const text = $("#filetext").value;
+  try {
+    // The stamp the file had when it was opened: the server refuses the save if a run has
+    // rewritten it since, rather than letting this buffer put the older text back.
+    const said = await put(shown, text, stamp ?? "");
+    stamp = said.version;
+    loaded = text;
+    note(`${shown} saved`);
+  } catch (e) { note(e.message, true); }
+}
+
+// A run may have rewritten the file that is open. Never discard what somebody has typed:
+// an untouched buffer is reloaded, a touched one is kept and its owner told why the save
+// that would revert the file is about to be refused.
+async function afterRun() {
+  if (!shown || !TEXT.test(shown)) return;
+  const r = await fetch(fileUrl(shown));
+  if (!r.ok) return;
+  const now = r.headers.get("X-B2S-Version");
+  if (now === stamp) return;
+  const text = await r.text();
+  if ($("#filetext").value === loaded) {          // nothing typed: show what the run wrote
+    stamp = now;
+    loaded = $("#filetext").value = text;
+    note(`${shown} was rewritten by the run and reloaded`);
+  } else {
+    note(`the run rewrote ${shown}; your unsaved edits are still here, and saving them ` +
+         `would put the older text back — copy them out and open the file again`, true);
+  }
 }
 
 async function newFile() {
   const name = prompt("A new file, named as a path in the workspace:", "notes.tex");
   if (!name) return;
-  try { await put(name, ""); await openFile(name); }
+  try { await put(name, "", ""); await openFile(name); }   // "" = nothing of that name yet
   catch (e) { note(e.message, true); }
 }
 
 async function deleteFile() {
   if (!shown || !confirm(`Delete ${shown}?`)) return;
   await api(fileUrl(shown), { method: "DELETE" });
-  shown = null;
-  $("#filetext").value = "";
+  shown = stamp = null;
+  loaded = $("#filetext").value = "";
   $("#openpath").textContent = "";
   await listFiles();
 }
@@ -302,6 +337,7 @@ async function watch(id) {
       if (state.result.code === "needs_consent") forgetToken();
       verdict(state.result, state.seconds);
       await listFiles();
+      await afterRun();
       note(state.result.ok ? `${state.result.tool} finished in ${state.seconds} s`
            : state.result.code === "needs_consent"
              ? `${state.result.tool}: the Google sign-in has run out — run it again to sign in`

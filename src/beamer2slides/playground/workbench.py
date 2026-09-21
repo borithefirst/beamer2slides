@@ -24,6 +24,7 @@ refused by the same code a journey's would be.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -200,6 +201,20 @@ def listing(root: Path) -> tuple[list[dict], int]:
     return rows, total
 
 
+def version(path: Path) -> str:
+    """What a file says, in sixteen characters: the stamp an editor holds while it types.
+
+    The content and not the mtime: a journey that writes a file back byte for byte has
+    taken nothing away, and two writes inside one clock tick are still two files. A file
+    that is not there is the empty stamp, so a page that opened nothing and a page whose
+    file a run has since created are told apart as well.
+    """
+    try:
+        return hashlib.sha256(path.read_bytes()).hexdigest()[:16]
+    except OSError:
+        return ""
+
+
 def usage(root: Path) -> tuple[int, int]:
     files = 0
     total = 0
@@ -268,10 +283,21 @@ class Workbench:
         except Refused as exc:
             raise Denied(str(exc), 403) from None
 
-    def write(self, session: Session, ref: str, data: bytes) -> dict:
+    def write(self, session: Session, ref: str, data: bytes,
+              expected: str | None = None) -> dict:
         path = self.resolve(session, ref, write=True)
         if len(data) > MAX_FILE:
             raise Denied(f"over {MAX_FILE // 2**20} MB", 413)
+        if expected is not None and expected != version(path):
+            # The editor is holding a buffer of an older file. A journey rewrites the files
+            # it is pointed at - `doc_sync` regenerates the canonical HTML from the document
+            # it has just written - and saving the older text back is not an edit but a
+            # revert, which the *next* sync reads as the source dropping whatever the
+            # rewrite brought in. Nothing is written and the page is told to reload.
+            raise Denied("a file of that name is already here: open it instead" if not expected
+                         else "this file has changed on the server since it was opened - a "
+                              "run rewrote it. Nothing was saved: reload it, and make the "
+                              "edit again on what it says now", 409)
         had = path.stat().st_size if path.is_file() else 0
         files, total = usage(session.root)
         if total - had + len(data) > MAX_BYTES:
@@ -281,7 +307,8 @@ class Workbench:
             raise Denied(f"the workspace holds {MAX_FILES} files at most", 413)
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(data)
-        return {"path": LocalWorkspace(session.root).ref(path), "bytes": len(data)}
+        return {"path": LocalWorkspace(session.root).ref(path), "bytes": len(data),
+                "version": version(path)}
 
     def remove(self, session: Session, ref: str) -> None:
         path = self.resolve(session, ref, write=True)

@@ -109,6 +109,56 @@ def test_files_are_written_read_and_deleted(ws):
     assert call(f"{ws}/file?path=notes/one.txt")[0] == 404
 
 
+def test_a_save_over_a_file_a_run_rewrote_is_refused(ws):
+    """The editor's buffer is older than the file, and saving it back is a revert.
+
+    A journey rewrites the files it is pointed at - `doc_sync` regenerates the canonical
+    HTML from the document it has just written - so a buffer opened before a run says
+    what the file said *before* it. Saving that is not an edit; the next sync reads it as
+    the source dropping whatever the rewrite brought in, and deletes those blocks from
+    somebody's document. Measured on the playground, on a live document, twice.
+    """
+    url = f"{ws}/file?path=doc.html"
+    with urllib.request.urlopen(url, timeout=60) as r:
+        opened, stamp = r.read(), r.headers["X-B2S-Version"]
+    assert stamp and len(stamp) == 16
+    request(url, "PUT", opened + b"<!-- what the run wrote -->", "text/html")   # the run
+
+    status, answer = request(f"{url}&version={stamp}", "PUT", b"<p>the stale buffer</p>",
+                             "text/html")
+    assert status == 409 and "a run rewrote it" in answer["error"]
+    assert call(url)[1].endswith(b"<!-- what the run wrote -->")     # nothing was written
+
+    with urllib.request.urlopen(url, timeout=60) as r:
+        now = r.headers["X-B2S-Version"]
+    assert now != stamp
+    status, said = request(f"{url}&version={now}", "PUT", b"<p>the stale buffer</p>",
+                           "text/html")
+    assert status == 200 and said["version"] not in (now, stamp)
+    assert call(url)[1] == b"<p>the stale buffer</p>"
+    # An upload names no stamp and replaces what is there, which is what an upload means.
+    assert request(url, "PUT", b"<p>uploaded</p>", "text/html")[0] == 200
+
+
+def test_a_new_file_never_lands_on_one_that_is_already_there(ws):
+    """The empty stamp is "there was nothing of that name when I asked"."""
+    status, answer = request(f"{ws}/file?path=talk.tex&version=", "PUT", b"", "text/plain")
+    assert status == 409 and "already here" in answer["error"]
+    assert b"\\begin{frame}" in call(f"{ws}/file?path=talk.tex")[1]
+    assert request(f"{ws}/file?path=fresh.txt&version=", "PUT", b"x", "text/plain")[0] == 200
+
+
+def test_the_page_saves_with_the_stamp_it_opened_the_file_with():
+    """The other half: the server can only refuse a save that says which file it read."""
+    js = (server.STATIC / "workbench.js").read_text(encoding="utf-8")
+    assert 'stamp = r.headers.get("X-B2S-Version")' in js
+    assert "`&version=${encodeURIComponent(version)}`" in js
+    assert "await afterRun();" in js                    # and the open file is read again
+    # What nothing may do is throw away what somebody has typed: only an untouched
+    # buffer is replaced by what the run wrote.
+    assert 'if ($("#filetext").value === loaded) {' in js
+
+
 def test_nothing_reaches_outside_the_workspace(ws, base):
     """The same boundary a journey's own path crosses: `LocalWorkspace.resolve` draws it once."""
     for ref in ("../escape.txt", "../../pyproject.toml", "/etc/passwd", "C:/Windows/win.ini"):
