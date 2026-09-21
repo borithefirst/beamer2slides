@@ -272,31 +272,43 @@ def main() -> int:
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
-    for group in ("sound", "sound, frame moved", "broken", "broken, frame moved"):
-        rounds = tally[f"{group}/rounds"]
+    groups = ("sound", "sound, frame moved", "broken", "broken, frame moved")
+
+    def show(label: str, parts: tuple[str, ...]) -> None:
+        count = lambda c, k: sum(c[f"{g}/{k}"] for g in parts)  # noqa: E731
+        rounds = count(tally, "rounds")
         if not rounds:
-            continue
-        print(f"{group}: {rounds} rounds, {frames[f'{group}/frames']} frames")
+            return
+        print(f"{label}: {rounds} rounds, {count(frames, 'frames')} frames")
         for how in ("order", "before", "now"):
-            w = frames[f"{group}/{how}"]
-            print(f"  {how:6} misidentified {w:5} frames ({100 * w / max(1, frames[f'{group}/frames']):.2f}%)")
-        costly = frames[f"{group}/costly"]
-        total = max(1, frames[f"{group}/frames"])
+            w = count(frames, how)
+            print(f"  {how:6} misidentified {w:5} frames ({100 * w / max(1, count(frames, 'frames')):.2f}%)")
+        costly = count(frames, "costly")
+        total = max(1, count(frames, "frames"))
         print(f"  of the `now` frames, {costly} a person would see "
               f"({100 * costly / total:.2f}%); the rest are frames that "
               f"say word for word what the frame they displaced says")
-        written, doubled = frames[f"{group}/written"], frames[f"{group}/doubled"]
+        written, doubled = count(frames, "written"), count(frames, "doubled")
         print(f"  of those, {written} are written onto the wrong slide ({100 * written / total:.2f}%); "
               f"{costly - written - doubled} are on a slide sync holds back and writes nothing to, "
               f"and {doubled} come back as a new slide beside the one they belong on")
-        silent = frames[f"{group}/silent writes"]
-        print(f"  and {silent} of those {written} in silence, in {tally[f'{group}/silent rounds']} rounds: "
+        silent = count(frames, "silent writes")
+        print(f"  and {silent} of those {written} in silence, in {count(tally, 'silent rounds')} rounds: "
               f"nothing in the report names that frame")
-        print("  said " + ", ".join(f"{s} in {tally[f'{group}/said:{s}']}" for s in ("moved", "unsure", "quiet")))
-        print(f"  of the rounds still wrong, {tally[f'{group}/said so']} were reported and "
-              f"{tally[f'{group}/silent']} passed in silence; {tally[f'{group}/worse']} came out worse than before")
-        print(f"  {tally[f'{group}/warned']} pairings warned about in all "
-              f"({100 * tally[f'{group}/warned'] / max(1, frames[f'{group}/frames']):.2f}% of frames)")
+        print("  said " + ", ".join(f"{s} in {count(tally, f'said:{s}')}" for s in ("moved", "unsure", "quiet")))
+        print(f"  of the rounds still wrong, {count(tally, 'said so')} were reported and "
+              f"{count(tally, 'silent')} passed in silence; {count(tally, 'worse')} came out worse than before")
+        print(f"  {count(tally, 'warned')} pairings warned about in all "
+              f"({100 * count(tally, 'warned') / max(1, count(frames, 'frames')):.2f}% of frames)")
+
+    for group in groups:
+        show(group, (group,))
+    # A group is a slice, never the answer: a figure quoted off one of these blocks alone is the
+    # figure for rounds that did or did not also move a frame. The totals are what a campaign says.
+    for kind in ("sound", "broken"):
+        both = tuple(g for g in groups if g.split(",")[0] == kind)
+        if all(tally[f"{g}/rounds"] for g in both):
+            show(f"{kind}, in all", both)
     if worst:
         print(f"\n{len(worst)} round(s) left wrong or noisy:")
         for r in worst[:args.show]:

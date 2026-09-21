@@ -626,18 +626,32 @@ that frame belongs on, and that slide keeps every word the person put there — 
 kind (`doubled`), and not this one. `written` is what is left, and counting the doubled ones with
 it counted one event twice: the slide such a frame should have had is either held back or taken by
 the frame that really did overwrite it, and *that* frame is already in the number. Over four
-adopt-shaped campaigns (1,000 rounds four deep, label-chance 1 and 0.5, seeds 0 and 1000000; 11,169
-broken rounds, 61,543 frames) the 236 costly frames are **89 written**, 104 held and 43 doubled; on
-a converted talk (1,000 rounds four deep at chance 1, seed 0; 3,352 broken rounds, 15,497 frames),
-45 costly are **3 written**, 27 held and 15 doubled. Before the split those read 132 and 18.
+adopt-shaped campaigns (1,000 rounds four deep, label-chance 1 and 0.5, seeds 0 and 1000000; 12,037
+broken rounds, 66,397 frames) the 308 costly frames are **109 written**, 112 held and 87 doubled; on
+a converted talk (1,000 rounds four deep at chance 1, seed 0; 3,578 broken rounds, 16,592 frames),
+51 costly are **3 written**, 28 held and 20 doubled. Before the split those read 196 and 23.
 
-The silence question is asked of those 89 and of nothing else, which is stricter than the round-level
-one above: a round that gets a frame onto the wrong slide and hears about *some* frame is told, while
-a frame written onto another frame's slide with nothing in the report naming it — not a `moved` or
-`unsure` verdict, not `weak_pairs`, not `near_misses`, not a changed label on the slide it landed on —
-is a frame nobody is told about. Over the four adopt-shaped campaigns **13 of the 89 go in silence, in
-11 rounds**; on the converted talk, 1 of 3. So the round-level sentence above cannot be read at frame
-size: it was true of what it counted and this is the number to quote.
+The silence question is asked of those 109 and of nothing else, which is stricter than the
+round-level one above: a round that gets a frame onto the wrong slide and hears about *some* frame is
+told, while a frame written onto another frame's slide with nothing in the report naming it — not a
+`moved` or `unsure` verdict, not `weak_pairs`, not `near_misses`, not a changed label on the slide it
+landed on — is a frame nobody is told about. Over the four adopt-shaped campaigns **21 of the 109 go
+in silence, in 17 rounds**; on the converted talk, 1 of 3. So the round-level sentence above cannot
+be read at frame size: it was true of what it counted and this is the number to quote.
+
+What those same campaigns cost in a **sound** round is 4 `unsure` verdicts and a single `moved` over
+3,963 adopt-shaped sound rounds (21,733 frames) and neither over 422 converted ones, with 3 frames
+written onto another frame's slide — all three at label-chance 0.5, all three named in the report —
+and, on the converted talk, 2 frames that come back as a duplicate and none written. (The 1366 and
+1449 above are an older campaign set and say nothing about these.)
+
+**And they were first published one group of four.** `fuzz_labels.main()` prints a block per group —
+`sound`, `sound, frame moved`, `broken`, `broken, frame moved` — because a round that really moved a
+frame asks a different question from one that did not; every figure first recorded here was read off
+the `broken` block alone, and the 11,169 broken rounds and 61,543 frames it said are exactly that one
+block's sums over the four campaigns. A group is a slice and never the answer, so `main()` now prints
+`sound, in all` and `broken, in all` wherever both halves of a kind have rounds, and a group line
+cannot be quoted as a campaign's answer again.
 
 `before` equals `order` frame for frame: `cross_pairs` and `gap_pairs`, which take 5.53% to 0.00% on
 a converted talk, **recover nothing at all** here — one leftover never explains one slide
@@ -682,8 +696,8 @@ slide and say nothing 11 → **6**; a converted talk writes 26 → **25** with i
 and no sound round on either shape gains a `moved` or an `unsure`. Those arrows are like for like
 under the count as it then was, which took a costly frame the pairing reads as **new** for a frame
 written onto somebody's slide; the count has since been split three ways and the standing figure is
-the one above — **89 written** of 236 costly, 104 held and 43 doubled, over 61,543 frames, with 13 of
-the 89 going in silence.
+the one above — **109 written** of 308 costly, 112 held and 87 doubled, over 66,397 frames, with 21
+of the 109 going in silence.
 
 What a sound round hears is the price, and it is one question: across 1524 adopt-shaped and 1524
 converted sound rounds there is a single `unsure` (seed 5179, a source that retitles one frame while
