@@ -175,6 +175,12 @@ def _exit(j: Job, exc: SystemExit, file: str | None = None) -> None:
         raise Refused("no_way_back", said, file=file)
     if "no such file" in said:
         raise Refused("not_found", said, file=file)
+    if "outside any block" in said:
+        # The file says something no block carries, so a run that went ahead would write
+        # nothing, report that both sides agree, and then take those words out of the file.
+        j.suggest("fix the tag around the quoted text (every block is a <p>, <h1>-<h6>, "
+                  "<li> or <table>) and run this again")
+        raise Refused("bad_request", said, file=file)
     raise exc
 
 

@@ -302,6 +302,8 @@ def read_file(path: Path) -> dict:
     if not path.is_file():
         raise SystemExit(f"{path}: no such file (this command reads the canonical HTML)")
     ir = doc_ir.key_blocks(doc_ir.from_html(path.read_text(encoding="utf-8")))
+    if ir.get("stray"):
+        raise SystemExit(stray_refusal(path, ir["stray"]))
     for run in _pictures(ir):
         local = picture_file(path, run.get("src", ""))
         if local is None:
@@ -314,6 +316,34 @@ def read_file(path: Path) -> dict:
                 f"<img src={run['src']!r}>: no such file beside {path.name} — "
                 f"the picture is left as the document has it")
     return ir
+
+
+STRAY_SAID = 3          # how many stray passages to quote before counting the rest
+STRAY_LONG = 60         # how much of one to quote
+
+
+def stray_refusal(path: Path, stray: list[str]) -> str:
+    """Words in the file that no block carries, and why they stop a sync.
+
+    A block is a `<p>`, an `<h1>`-`<h6>`, an `<li>` or a `<table>`; text outside one is
+    read by nothing, so it would reach the document through no request at all - and then
+    the settle writes the file again from the document, taking those words out of the
+    file too. One mistyped tag (`<it>` for `<li>`, a `<p>` never closed) and somebody's
+    sentence is dropped twice over, while the run says "0 requests, the two sides already
+    say the same thing" - which is true of everything the reader *could* read. Refusing
+    is the only honest answer, and the fix is one character away.
+    """
+    said = ", ".join(repr(_short(text)) for text in stray[:STRAY_SAID])
+    rest = f" and {len(stray) - STRAY_SAID} more" if len(stray) > STRAY_SAID else ""
+    return (f"{path.name} says {said}{rest} outside any block, so nothing would carry "
+            f"those words into the document.\n"
+            f"  Every block is a <p>, <h1>-<h6>, <li> or <table>: look at the tag around "
+            f"that text (a mistyped <it> for <li>, a tag left open).\n"
+            f"  Nothing was read and nothing written.")
+
+
+def _short(text: str) -> str:
+    return text if len(text) <= STRAY_LONG else text[:STRAY_LONG - 1] + "…"
 
 
 def _pictures(ir: dict) -> list[dict]:

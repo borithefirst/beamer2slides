@@ -318,6 +318,21 @@ def test_an_assume_base_nobody_understands_is_a_bad_request(tmp_path, monkeypatc
     assert not result.ok and result.code == "bad_request" and result.data["options"]
 
 
+def test_a_file_the_dialect_cannot_read_whole_stops_the_sync(tmp_path, monkeypatch):
+    """One mistyped tag and those words reach the document through no request at all,
+    and the settle then writes the file again from the document and takes them out of
+    the file too. Carrying on would say "0 requests, the two sides agree" about a file
+    that says something the document has never heard."""
+    _, path, _, service = _pair(tmp_path, monkeypatch)
+    path.write_text(path.read_text(encoding="utf-8").replace(
+        "</body>", "<ol><it id='item:5'>XX</li></ol></body>"), encoding="utf-8")
+    result = doc_tools.doc_sync(_ctx(tmp_path), file="doc.html", dry_run=True)
+    assert not result.ok and result.code == "bad_request", result.summary
+    assert "'XX' outside any block" in result.summary
+    assert any("<li>" in step for step in result.next_steps)
+    assert service.sent() == 0
+
+
 def test_adopt_refuses_to_write_over_a_file_that_names_another_document(tmp_path, monkeypatch):
     _pair(tmp_path, monkeypatch)
     (tmp_path / "other.html").write_text(

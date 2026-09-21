@@ -999,11 +999,21 @@ def _run_html(run: dict) -> str:
 # ---------------------------------------------------------------- canonical HTML -> IR
 
 class _Reader(HTMLParser):
-    """The dialect's parser. Anything outside the dialect is ignored, not guessed at."""
+    """The dialect's parser. Anything outside the dialect is ignored, not guessed at.
+
+    Markup, that is - never *words*. Text that lands in no block reaches the document
+    through nothing at all, and a sync writes the file again from what the document then
+    says, so it would go without a trace: one mistyped tag (`<it>` for `<li>`) and a
+    person's sentence is dropped twice over, in silence. Such text is collected in
+    `ir["stray"]` and `doc_sync.read_file` refuses the file until it is one the dialect
+    can read whole. The same rule as `checks.lost_ink` and `doc_ir.unmodelled`: what
+    nothing accounts for is said out loud.
+    """
 
     def __init__(self) -> None:
         super().__init__(convert_charrefs=True)
         self.ir: dict = {"title": "", "blocks": []}
+        self.quiet = 0                       # open <script>/<style>: markup, not words
         self.block: dict | None = None
         self.marks: list[dict] = []          # style frames pushed by b/i/u/s/code/span/a
         self.lists: list[bool] = []          # one per open ul/ol: ordered?
@@ -1048,6 +1058,8 @@ class _Reader(HTMLParser):
                 self.ir["tab_title"] = attr["content"]
         elif tag == "title":
             self.in_title = True
+        elif tag in ("script", "style"):
+            self.quiet += 1
         elif tag == "section":
             self._close()
             part = {"title": attr.get("title") or "", "blocks": []}
@@ -1130,6 +1142,8 @@ class _Reader(HTMLParser):
     def handle_endtag(self, tag: str) -> None:
         if tag == "title":
             self.in_title = False
+        elif tag in ("script", "style"):
+            self.quiet = max(0, self.quiet - 1)
         elif tag == "section":
             self._close()
             self.target = self.ir["blocks"]
@@ -1167,6 +1181,12 @@ class _Reader(HTMLParser):
             self.chip["text"] += data
             return
         if self.block is None:
+            # Words no block carries: the white space between the dialect's own lines is
+            # layout and says nothing, anything else is a tag that went wrong (see the
+            # class docstring). Kept whole here; whoever reports it decides how much of
+            # it to quote.
+            if data.strip() and not self.quiet:
+                self.ir.setdefault("stray", []).append(" ".join(data.split()))
             return
         # Newlines in the file are layout, not content: the dialect puts one block per line.
         text = data.replace("\n", " ")

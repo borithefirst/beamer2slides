@@ -68,6 +68,37 @@ def test_a_picture_file_is_digested_and_a_missing_one_is_reported(tmp_path):
     assert ir["blocks"][1]["runs"][0]["src"] == "figures/plot.png"   # the file's own is untouched
 
 
+def test_words_outside_every_block_stop_the_sync_rather_than_disappearing(tmp_path):
+    # One letter wrong - `<it>` for `<li>` - and the item is read by nothing: it reaches
+    # the document through no request, and the settle then writes the file again from the
+    # document and takes the words out of the file too. Measured on the playground, where
+    # a run said "0 requests, the two sides already say the same thing" about a list item
+    # somebody had just typed.
+    path = tmp_path / "doc.html"
+    path.write_text("<html><body><p id='paragraph:one'>Hello world</p><ol>"
+                    "<li id='item:1'>1</li><it id='item:5'>XX</li></ol></body></html>",
+                    encoding="utf-8")
+    assert doc_ir.from_html(path.read_text(encoding="utf-8"))["stray"] == ["XX"]
+    with pytest.raises(SystemExit) as refused:
+        doc_sync.read_file(path)
+    said = str(refused.value)
+    assert "'XX' outside any block" in said and "<li>" in said
+    # And a file the dialect can read whole says nothing of the kind.
+    path.write_text(path.read_text(encoding="utf-8").replace("<it ", "<li "), encoding="utf-8")
+    assert "stray" not in doc_sync.read_file(path)
+
+
+def test_the_white_space_between_the_dialects_own_lines_is_not_words(tmp_path):
+    # The writer breaks lines outside any block on purpose (`_table_html`), so the reader
+    # must not read its own layout as text nobody carries - and a `<style>` is markup too.
+    path = tmp_path / "doc.html"
+    path.write_text(doc_ir.to_html({"title": "t", "document": "d", "blocks": [
+        para("p:one", "hello"), table("t:one", [["a", "b"]])]}), encoding="utf-8")
+    assert "stray" not in doc_sync.read_file(path)
+    styled = "<html><head><style>p { color: red }</style></head><body><p>x</p></body></html>"
+    assert "stray" not in doc_ir.from_html(styled)
+
+
 def test_a_base_forgets_the_urls_that_die_within_the_hour(tmp_path):
     path = tmp_path / "doc.html"
     doc_sync.save_base(path, {"document": "d", "blocks": [{"kind": "paragraph", "runs": [

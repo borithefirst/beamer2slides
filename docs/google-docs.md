@@ -993,6 +993,25 @@ Everything else is written: text on both sides, a block's kind, level and alignm
 its bullets, the marks the source added *or took away* (the fields Docs needs named for
 a removal are listed in `doc_merge.MANAGED`), and whole new blocks with their styling.
 
+### Words the file says outside every block
+
+The dialect's reader ignores markup it does not know — that is how a file stays readable
+when a person hand-edits it — and it used to ignore the *words* inside it too. A block is
+a `<p>`, an `<h1>`-`<h6>`, an `<li>` or a `<table>`; text outside one is read by nothing,
+so it reaches the document through no request at all, and the settle then writes the file
+again from the document and takes those words out of the file as well. Dropped twice over,
+in silence, while the run reports `0 requests` and "the two sides already say the same
+thing" — which is true of everything the reader could read.
+
+Measured on the playground (2026-09-21): a list item typed into the canonical file as
+`<it id="item:5">XX</li>` — one letter — synced three times, wrote nothing and said
+nothing. `doc_ir._Reader` collects such text in `ir["stray"]` and `doc_sync.read_file`
+refuses the file, quoting the words and naming the tags a block can be; `push` and `sync`
+both go through that one door, and the agent journeys answer `bad_request` with the same
+sentence. White space between the dialect's own lines is layout, not words (the table
+writer breaks lines exactly where a parser has nowhere to put text), and a `<script>` or
+`<style>` body is markup.
+
 ### Proving nothing is lost
 
 The bargain above is only worth what it can be held to, so the Docs sync is fuzzed the

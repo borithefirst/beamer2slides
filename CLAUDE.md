@@ -1885,6 +1885,17 @@ keys, named ranges), `doc_merge.py` (pure planning), `doc_sync.py` (the commands
   nothing and is said. The file and the base then say the name *written*, not the one the next
   read gives (`settle(renamed=...)`): `documents.get` need not have caught up with Drive, and
   taking its word would undo the rename with the base agreeing, so nothing tried again.
+- **Words the file says outside every block stop the sync** (`doc_ir._Reader`'s `stray`,
+  `doc_sync.stray_refusal`): a block is a `<p>`, an `<h1>`-`<h6>`, an `<li>` or a `<table>`,
+  and text outside one is read by nothing - it reaches the document through no request at
+  all, and the settle then writes the file again from the document and takes it out of the
+  file too, dropped twice over while the run reports `0 requests` and "the two sides already
+  say the same thing", which is true of everything the reader *could* read. Measured on the
+  playground (2026-09-21): `<it id="item:5">XX</li>`, one letter, synced three times and said
+  nothing. `read_file` is the one door `push` and `sync` share, so both refuse, quoting the
+  words and naming the tags a block can be (the agent journeys answer `bad_request` with the
+  same sentence); the white space between the dialect's own lines is layout, not words, and a
+  `<script>`/`<style>` body is markup.
 - What the file cannot carry is reported too (`doc_sync.limits`): a picture file that is not
   there. And **what the dialect does not model is named** (`doc_ir.unmodelled`, `_NODES` = the
   reader's own map of `documents.get`): the convergence check is measured on the IR, so it
