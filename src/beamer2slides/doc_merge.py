@@ -781,6 +781,15 @@ def recover_swallowed(live: dict, shaped: list[dict]) -> int:
     The survivor is the empty paragraph standing right in front of the table whose
     insert swallowed it: the two are merged into one, and that one keeps neither's
     name. So this runs after `anchor_tables`, which is what gives that table its key.
+
+    It need not read as a *paragraph*: Docs' merge keeps the first one's style, so
+    an empty block wearing a named style hands it to the survivor and that one comes
+    back a subtitle, a heading, a title. Asked for the kind, this recovered nothing
+    there, and the one thing the source was asking of that block — to stop being a
+    subtitle — went nowhere, the settle keying it from its words to the very name it
+    had and file, base and document agreeing on it (offline chain-8 seed 1270233,
+    shape `between_tables`). Anything but a structural element, then: what makes it
+    the survivor is that it is empty, unnamed and right in front of the table.
     """
     have = {b.get("key") for b in live["blocks"] if b.get("key")}
     done = 0
@@ -793,8 +802,7 @@ def recover_swallowed(live: dict, shaped: list[dict]) -> int:
         if not at:                      # not found, or nothing in front of it
             continue
         before = live["blocks"][at - 1]
-        if before.get("key") or before["kind"] != "paragraph" \
-                or _match_text(before).strip():
+        if before.get("key") or _structural(before) or _match_text(before).strip():
             continue
         before["key"] = key
         have.add(key)

@@ -157,11 +157,14 @@ REGRESSIONS = ((60, 1), (181, 1), (309, 4), (1031, 8), (1147, 8),
 # (`paragraph_merged`), and a bold the theme already puts on read as a restyle that
 # vanished once the source moved the block to another named style. Then the two the
 # oracle owed at chain 10: an un-bolding on a block the source dropped, and one the
-# source reworded away that the word's own twin answered for.
+# source reworded away that the word's own twin answered for. And one more from
+# `between_tables`: the empty block a new table swallows, recovered only when it read
+# as a plain paragraph.
 SHAPED = ((870308, 8, "two_tables"), (870368, 8, "two_tables"),
           (890070, 8, "ends_on_table"), (1130023, 6, "themed"),
           (1140022, 8, "themed"), (1150196, 6, "themed"),
-          (1180145, 10, "themed"), (1180151, 10, "themed"))
+          (1180145, 10, "themed"), (1180151, 10, "themed"),
+          (1270233, 8, "between_tables"))
 
 
 def _round(seed: int, chain: int, shape: str | None = None) -> None:
@@ -2754,6 +2757,39 @@ def test_an_un_marked_word_the_source_reworded_away_is_not_owed_by_its_twin():
     back = _ir(_run_head("k1", "A heading and willow and harbour"))
     assert _kinds(oracle.check(was, read, back, NOTHING, asks,
                                theme=MARKED)) == {"styling_restored"}
+
+
+def test_the_empty_block_a_new_table_swallows_is_recovered_whatever_it_wears():
+    """`insertTable` in front of a block leaves an empty paragraph, and
+    `_new_table_requests` gets rid of it by deleting the mark of the block in front —
+    which, when that block is itself empty, is all the block there was, so its named
+    range goes with it. `recover_swallowed` gives the key back before the re-plan,
+    which otherwise reads the block as one the reader deleted.
+
+    It asked for a *paragraph*, and Docs' merge keeps the first one's style: an empty
+    subtitle hands the survivor its own named style, so the block comes back a
+    subtitle and the recovery passed it by. The one thing the source was asking of
+    it — to stop being a subtitle — then went nowhere, and the settle keyed it from
+    its words to the very name it had, so file, base and document all agreed and the
+    next sync wrote nothing (offline chain-8 seed 1270233, shape `between_tables`).
+    """
+    world = doc_world.build([{"blocks": [
+        fuzz_docs._t([["a", "b"], ["1", "2"]]), {"kind": "subtitle", "runs": []},
+        fuzz_docs._p("After it."), fuzz_docs._t([["c", "d"], ["3", "4"]])]}],
+        title="fuzz")
+    ours = fuzz_docs.bootstrap(world)
+    base = copy.deepcopy(ours)
+    assert _keys(ours)[1] == "subtitle:empty"
+    ours["blocks"][1]["kind"] = "paragraph"          # the source demotes it
+    ours["blocks"].insert(2, fuzz_docs._t([["h1", "h2"], ["quartz", "x"]]))
+    _, ours, base = fuzz_docs.sync_once(world, ours, base)
+    live = doc_world.read_ir(world, ours, base)
+    assert doc_merge.named_style(live["blocks"][1]) == "NORMAL_TEXT", \
+        "the empty block the table swallowed still wears the style the source dropped"
+    assert [doc_merge._table_words(b) for b in live["blocks"] if b["kind"] == "table"] \
+        == ["a b 1 2", "h1 h2 quartz x", "c d 3 4"]
+    again, _, _ = fuzz_docs.sync_once(world, copy.deepcopy(ours), copy.deepcopy(base))
+    assert again["requests"] == 0
 
 
 def test_a_block_the_merge_will_not_write_is_asked_about_by_the_key_it_is_refused_by():

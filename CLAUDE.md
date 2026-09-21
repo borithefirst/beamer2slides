@@ -2344,7 +2344,18 @@ keys, named ranges), `doc_merge.py` (pure planning), `doc_sync.py` (the commands
   mirror case that must stay no excuse, seed 40254). 1 of 200 rounds each.
   Clean at ten more settings (700 `themed` at chain 6, 500 and 300 at chain 8, 400, 200 and
   250 at chain 10, 700 mixed at chain 6, 500 `chips`, 500 `imported_list`, 300 `equations`
-  and 300 `tabs` at chain 8).
+  and 300 `tabs` at chain 8). Then the shapes nobody had pressed, 300 rounds each at chain 8:
+  `toc`, `opens_on_table`, `titled`, `astral`, `dropdown` and `prose` clean, and one from
+  `between_tables` (1270233). `insertTable` splits the paragraph its index is in, so a table
+  in front of a block leaves an empty paragraph that `_new_table_requests` removes by deleting
+  the mark of the block *before* - and a block that is itself empty is all mark, so its named
+  range goes whole and `recover_swallowed` has to give the key back before the re-plan. It
+  asked for a plain **paragraph**, and Docs' merge keeps the first one's style, so an empty
+  subtitle hands the survivor its named style and the recovery passed it by: the one thing the
+  source asked of that block - to stop being a subtitle - went nowhere, and the settle keyed it
+  from its words to the very name it had, file, base and document agreeing. Anything but a
+  structural element counts now; what makes it the survivor is being empty, unnamed and right
+  in front of the table. 1 of 300 rounds, `between_tables` clean at chain 8 and chain 10 after.
 - Live suite (opt-in, marker `docs`, ~5 min): `python -m pytest -m docs tests/test_docs_live.py`
   pushes a document per test, edits both sides, syncs, checks a second sync writes nothing, and
   deletes the document. Offline: `tests/test_doc_ir.py`, `test_doc_merge.py`, `test_doc_sync.py`.

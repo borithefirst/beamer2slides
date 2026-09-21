@@ -2423,6 +2423,28 @@ under `--strict` afterwards: 700 `themed` at chain 6, 500 and 300 at chain 8, 40
 at chain 10, 700 mixed at chain 6, 500 `chips`, 500 `imported_list`, 300 `equations` and
 300 `tabs` at chain 8.
 
+### And one from `between_tables`: the empty block a new table swallows
+
+Sweeping the shapes nobody had pressed — 300 rounds each at chain 8 of `toc`, `opens_on_table`,
+`titled`, `astral`, `dropdown` and `prose`, all clean — `between_tables` came back with one
+(chain-8 seed 1270233). `insertTable` splits the paragraph its index is in, so a table written
+in front of a block leaves an empty paragraph, and `_new_table_requests` gets rid of that by
+deleting the mark of the block *before* — which merges the two the way the Delete key does.
+When the block before is itself empty it is all mark, so the delete covers its named range
+whole and Docs drops it; `recover_swallowed` gives the key back before the re-plan, which
+would otherwise read the block as one the reader had deleted.
+
+It asked for a plain *paragraph*, and Docs' merge keeps the first one's style: an empty
+subtitle hands the survivor its own named style, so the block comes back a subtitle and the
+recovery passed it by. The one thing the source was asking of that block — to stop being a
+subtitle — then went nowhere, and the settle keyed it from its words to the very name it had,
+so file, base and document all agreed on it and the next sync wrote nothing. Only
+`_styling_arrived`, the campaign's own judge, could see it: nothing was deleted and no word
+moved. Anything but a structural element counts as the survivor now; what makes it one is
+that it is empty, unnamed and standing right in front of the table. 1 of 300 rounds at chain
+8, pinned by a test that fails with the kind check back, seed in `SHAPED`; 300 `between_tables`
+at chain 8 and 250 at chain 10 clean afterwards.
+
 ## Remaining risks
 
 1. **Pictures** — retired, see "Pictures, and the chips a request can make" above. What
