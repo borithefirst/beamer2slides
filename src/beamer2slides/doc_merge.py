@@ -1524,13 +1524,17 @@ def _moved_keys(was: list[str], mine: list[str]) -> list[str]:
     return [key for key in mine if key not in kept]
 
 
-def _merge_block(was: dict, mine: dict, live: dict, conflicts: list, notes: list) -> dict:
-    key = live.get("key") or "a table cell"
+def _merge_block(was: dict, mine: dict, live: dict, conflicts: list, notes: list,
+                 inside: str | None = None) -> dict:
+    key = live.get("key") or inside or "a table cell"
     # A cell has no key, and the base a cell is merged against may be a stand-in: a row
     # or a column one side has just added pairs with nothing, so every cell of it reads
     # as both sides having styled it. The styling notes below are for blocks, where the
     # base really is what that block said last time; a cell's own report is the table's
-    # (`_merge_table`), which can at least say which table.
+    # (`_merge_table`), which is what `inside` carries down: a person told their words
+    # lost a fight needs to know where, and a report that says `a table cell` names no
+    # table at all — the reader of it cannot find the cell and the loss oracle cannot
+    # tell which table was spoken for (offline chain-12 seed 1710213, shape `prose`).
     a_block = bool(live.get("key"))
     out = dict(live)
     if live.get("kind") == "table":
@@ -1674,7 +1678,8 @@ def _merge_cell(was: list, mine: list, live: list, conflicts: list, notes: list,
     """One cell, three ways: paragraph by paragraph while the three agree on how many
     there are, and as one text with its paragraph breaks in it when they do not."""
     if len(was) == len(mine) == len(live):
-        return [_merge_block(w, m, l, conflicts, notes) for w, m, l in zip(was, mine, live)]
+        return [_merge_block(w, m, l, conflicts, notes, key)
+                for w, m, l in zip(was, mine, live)]
     then, want, now = (_cell_text(cell) for cell in (was, mine, live))
     text, clashes = diff3(then, want, now)
     for clash in clashes:

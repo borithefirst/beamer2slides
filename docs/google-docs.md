@@ -1976,7 +1976,8 @@ The two notes are for **blocks**. A cell has no key of its own, and the base a c
 merged against need not be what that cell said last time: a row or a column one side has
 just added pairs with nothing, so every cell of it reads as both sides having styled and
 set it. The note would then open with "a table cell", which names neither the table nor
-the cell; a table's own report is `_merge_table`'s, which can at least say which table.
+the cell; a table's own report is `_merge_table`'s, which can at least say which table —
+and that is now what a cell's report says too (see "A cell's report is the table's").
 
 **A row's words are evidence, not the row** (chain-6 seed 260208, the oracle's). The base's
 rows say `thicket` and `meadow`, the reader deletes `thicket`, the source rewrites `meadow`
@@ -2535,6 +2536,28 @@ ending on something other than a table the trailer is no longer hidden and stand
 a plain empty block; that one is the same paragraph and takes the key in place. It runs
 after `anchor_tables`, as `recover_swallowed` does, so a table anchored on that block is
 found by the name the batch really left behind. Both campaigns clean afterwards.
+
+### A cell's report is the table's
+
+Found from the other end of the same campaign (offline chain-12 seed 1710213, shape
+`prose`), and it is not a loss but a **report** the loss oracle could not read. The reader
+deletes the row a table is anchored in and writes in another; the source writes in that
+same cell; the document wins, as it does everywhere, and the merge raises a conflict so the
+person can see the words it did not write. All three sides then have a 2×2 grid, so
+`_merge_table`'s fast path matches cells by place, `_merge_cell` merges the cell paragraph
+by paragraph — and that branch goes through `_merge_block`, whose fallback name for a
+block with no key of its own was the literal `a table cell`.
+
+Which is true, and an address for nothing: a document with three tables says it three times
+and points at none of them. `_merge_cell`'s *other* branch — the one for a cell whose three
+sides disagree on how many paragraphs it holds — has stamped the table's key on its
+conflicts since it was written; the by-paragraph branch is the commoner one by far, one
+paragraph per cell being what a table looks like, so the crisper the case the vaguer the
+report. `_merge_block` now takes the table's key as its fallback (`inside`), which also
+names the notes it can raise for a cell (a chip the source would rewrite, words the source
+restyled that the document rewrote). The oracle's `cell_lost` excuse is the report naming
+the table, so it could never be found either: 400 prose rounds at chain 12 from seed
+1710000 go 1 → 0.
 
 ## Remaining risks
 

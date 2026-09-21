@@ -166,12 +166,16 @@ REGRESSIONS = ((60, 1), (181, 1), (309, 4), (1031, 8), (1147, 8),
 # defect, seen from either side: the empty paragraph a table's delete eats the mark of
 # came back unnamed, so the source's restyle of it went nowhere (1730265, chain 16)
 # and the order it asks for was never reached (1740158, chain 14, mixed shapes).
+# And one from `prose`, which is a report rather than a loss: a cell both sides wrote
+# in raised its conflict under the name `a table cell`, so nobody — the person reading
+# the report, or the oracle looking the cell up in it — could tell which table.
 SHAPED = ((870308, 8, "two_tables"), (870368, 8, "two_tables"),
           (890070, 8, "ends_on_table"), (1130023, 6, "themed"),
           (1140022, 8, "themed"), (1150196, 6, "themed"),
           (1180145, 10, "themed"), (1180151, 10, "themed"),
           (1270233, 8, "between_tables"), (1430231, 10, "astral"),
-          (1640036, 12, "tabs"), (1740158, 14, None), (1730265, 16, "tabs"))
+          (1640036, 12, "tabs"), (1710213, 12, "prose"), (1740158, 14, None),
+          (1730265, 16, "tabs"))
 
 
 def _round(seed: int, chain: int, shape: str | None = None) -> None:
@@ -3221,3 +3225,34 @@ def test_the_empty_paragraph_a_moved_tables_delete_eats_gets_its_name_back():
         "the block is there, so the source's restyle of it has somewhere to go"
     again, _, _ = fuzz_docs.sync_once(world, copy.deepcopy(ours), copy.deepcopy(base))
     assert again["requests"] == 0
+
+
+def test_a_cell_both_sides_wrote_in_is_reported_under_the_table_it_is_in():
+    """A conflict is the one place the merge hands a person the words it did not
+    write, and it is only any use if they can find where those words were. A cell has
+    no key of its own — its identity is its place in a table — so `_merge_block` has
+    always had a fallback name for one, and the fallback was the literal
+    `a table cell`: true, and an address for nothing. A document with three tables
+    says it three times and points at none of them.
+
+    `_merge_cell`'s *other* branch, where the three sides disagree on how many
+    paragraphs a cell holds, has named the table since it was written. The branch that
+    merges a cell paragraph by paragraph is the commoner one by far — one paragraph
+    per cell is what a table looks like — and it went through `_merge_block`, which
+    had nothing to name, so the crisper the case the vaguer the report. Found from the
+    other end (offline chain-12 seed 1710213, shape `prose`): the loss oracle asks the
+    report whether a cell it misses was spoken for, and a conflict with no table's
+    name in it answers for nothing."""
+    world, ours, base = _build([_para("One."), _table([["a", "b"]])])
+    assert _keys(ours) == ["paragraph:one", "table:a"]
+
+    # The reader writes in the first cell, and the source writes something else there.
+    cell = doc_world.read_ir(world)["blocks"][1]["rows"][0][0][0]
+    world.apply([{"insertText": {"location": {"index": cell["span"][0]},
+                                 "text": "meadow "}}])
+    ours["blocks"][1]["rows"][0][0][0]["runs"] = [{"text": "thicket a"}]
+
+    report, ours, base = fuzz_docs.sync_once(world, ours, base)
+    assert [(c["ours"], c["theirs"], c["key"]) for c in report["conflicts"]] \
+        == [("thicket ", "meadow ", "table:a")], \
+        "the cell is named by the table it is in, which is the only address it has"

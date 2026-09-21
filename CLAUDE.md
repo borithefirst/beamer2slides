@@ -2434,7 +2434,15 @@ keys, named ranges), `doc_merge.py` (pure planning), `doc_sync.py` (the commands
   file's order never reached (1740158). `recover_eaten` gives the name back to **the trailer**:
   with the table in front of it gone that empty paragraph *is* the block - at the end of a body
   there is nowhere else for one to be - and `doc_ir._hide_trailer` leaves a paragraph with an
-  identity planted on it out of the scaffolding. Both campaigns clean afterwards.
+  identity planted on it out of the scaffolding. Both campaigns clean afterwards. The same
+  campaign gave one more from the other end (400 `prose` at chain 12, seed 1710213), a
+  **report** rather than a loss: where all three sides have one grid, `_merge_table` matches
+  cells by place and `_merge_cell` merges each paragraph by paragraph through `_merge_block`,
+  whose fallback name for a block with no key was the literal `a table cell` - true, and an
+  address for nothing, a document with three tables saying it three times. The other branch
+  of `_merge_cell` had stamped the table's key since it was written; `_merge_block` takes it
+  as `inside` now, so a conflict a person is handed says where their words were and the
+  oracle's `cell_lost` excuse (the report naming the table) can be found at all.
 - Live suite (opt-in, marker `docs`, ~5 min): `python -m pytest -m docs tests/test_docs_live.py`
   pushes a document per test, edits both sides, syncs, checks a second sync writes nothing, and
   deletes the document. Offline: `tests/test_doc_ir.py`, `test_doc_merge.py`, `test_doc_sync.py`.
