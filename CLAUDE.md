@@ -906,6 +906,22 @@ the base marks the element `in_table`, and `merge.plan_unit` keeps the unit with
 "kept (a cell of a table of the deck's)", plus a warning naming the door (edit those cells in
 Slides). Three answers to "no object", each with its own field and sentence: `inherited` (the
 layout draws it), `in_table` (a cell of your own table) and plain `unpaired` (nothing stands there).
+**And a drawing the converter made out of somebody's own box, which is none of the three.** An
+element tied to nothing freezes its whole *unit*, and a unit is an anchor text plus what is anchored
+to it - so a person's text box that comes back as its words *and* a picture of the icon at the head
+of a line (or of the formula in the middle of one) was frozen for good: the words pair, the picture
+pairs with nothing, and nothing on the slide is shaped like the picture alone because it was never an
+object. The box was, and the box is named by the element beside it in this very unit - so the one
+delete that member carries takes the person's box away and the unit is written whole, with nothing
+left standing. `adopt_sync.drawn_from` says which object each miss came out of, `merge.covered` asks
+whether that object belongs to a member of the *same* unit (outside it, the object would stay and the
+new picture would be the duplicate this gate is about), and `merge.blind_members` is what `plan_unit`
+and the `unpaired` refusal both read, so the two cannot drift. Over the corpus, 27 decks and 4,171
+units: **1,184 units frozen by a member tied to nothing, 40 of them no longer** (23 formula pictures,
+20 icons, 16 figures). Small on purpose - each is a box the source could never have said another word
+in for the life of that deck. The campaign draws it (`make_adopt_doc`'s anchored icon) and
+`fuzz_sync._doubled` restates the rule, which it must: the world takes an unpaired element's object
+off the slide, so the leftover box that check describes is not there to be seen.
 Then `Sync.check_plan` runs between planning and any write and **refuses** four things
 (`adopt_sync.problems` / `refusal_message`, every message asserted verbatim in `tests/test_adopt_sync.py`):
 a unit whose base members include an **unpaired** element (writing it puts a second object beside the

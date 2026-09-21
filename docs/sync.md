@@ -1512,11 +1512,11 @@ thing left by a long way, and the one place where naming the problem is the whol
 `adopt` writes a person's table as a tikz grid with measured rows (`adopt.table_block`), and the
 converter reads the compiled page back the way it reads any page: of the corpus's 42 deck tables,
 **9 come back paired, 1 as a `table` element, and 32 as loose cell texts plus the thin rule images
-between them** (`tools/probe_tables.py`). Each of those texts is a real element with real words and
+between them** (`tools/probe_deck_tables.py`). Each of those texts is a real element with real words and
 nothing on the slide to pair with, because the thing it is part of is a cell of a table, and a cell
 is not an object the Slides API hands back on its own.
 
-Putting the words back into their cells was tried and refused (`tools/probe_grid.py`): build the
+Putting the words back into their cells was tried and refused (the same probe): build the
 grid from the texts' geometry — column bounds off the x edges, rows off the y — and check it cell
 for cell against the `rows` the deck itself reports. **None of the 42 rebuilt correctly.** Merged
 cells, empty cells, a cell whose text wraps, a number right-aligned under a left-aligned heading:
@@ -1535,6 +1535,44 @@ Slides — the rest of this sync went in as usual. Three answers now, each with 
 own sentence: `inherited` (the deck's layout draws it — Slide > Edit theme), `in_table` (a cell of
 your own table — edit it in Slides), and plain `unpaired` (nothing on the slide stands there at all
 — change it in the deck, or in the source).
+
+### A drawing the converter made out of somebody's own box
+
+The three answers above are all the same decision — nothing can be written here, only said. There is
+a fourth case that looks exactly like them from the base and is not one of them at all.
+
+An element with no object freezes its whole **unit** (`merge.plan_unit`'s blind branch), and a unit
+is an anchor text plus everything anchored to it (`merge.units`). So when the converter reads one of
+the person's text boxes back and makes *two* elements of it — the words, and a picture of the icon at
+the head of a line or of the formula in the middle of it — the words pair with the box and the
+picture pairs with nothing, because nothing on the slide is shaped like the picture alone. Nothing
+ever will be: it was never an object. The box was. And the box is named, by the element beside it in
+this very unit.
+
+That changes the arithmetic the blind branch rests on. Sync deletes a recreated unit's old objects
+through the base; the one delete for the words takes the person's box away, and the unit — words and
+picture — is created whole in its place. Nothing is left standing, because there was never a second
+thing there. `adopt_sync.drawn_from` says which object each miss came out of, `merge.covered` asks
+whether that object belongs to a member of this same unit, and only what is left over is blind
+(`merge.blind_members`, used by `plan_unit` and by the `unpaired` refusal alike, so the two cannot
+drift). **Only** inside the unit: the same picture drawn out of an object some *other* unit is tied
+to would be created while that object stayed where it is, which is precisely the duplicate this gate
+exists to prevent.
+
+Measured over the corpus (27 decks that compile and pair, 4,171 units): **1,184 units were frozen by
+a member tied to nothing, and 40 of them are not any more** — held by 23 formula pictures, 20 icons
+and 16 figures. Small, and the size is the point: each of those 40 is a box of somebody's that the
+source could never have said another word in, for the whole life of that deck, because the converter
+had read a picture out of it once. The 1,144 still frozen are the real misses — a cell of a table,
+something the layout draws, a box the pairing could not tell from its twin — and every one of them
+is named in the report.
+
+The campaign draws it (`fuzz_world.make_adopt_doc`: an icon anchored to a body box, which
+`build_adopt_base` gives no object and a `drawn_from`), and `fuzz_sync._doubled` states the same rule
+a second time so that loosening one of them alone fails 400 first-sync rounds. It is a rule restated
+and not an observation, and it says so: the world takes an unpaired element's object off the slide,
+so the leftover box is not there to be seen. Keeping it — as `adopt.left_alone` records it in a real
+base — is what would turn that check into a measurement.
 
 **The refusals** (`adopt_sync.problems`, one message, `--force-adopted-deck` to go ahead anyway):
 

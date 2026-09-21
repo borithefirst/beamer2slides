@@ -219,6 +219,51 @@ def test_an_element_beside_the_table_is_no_cell_of_it():
     assert adopt_sync.inside_tables(conv, why, [grid]) == {0}
 
 
+# ---------------------------------------------- a drawing the converter made out of somebody's box
+
+def test_a_picture_inside_a_paired_box_names_the_element_that_pairs():
+    """The icon at the head of a person's line is no object of theirs - it is a picture this
+    converter made while reading their *text box* back. Nothing on the slide is shaped like it
+    alone, and nothing ever will be, but the box it came out of is right there and the words beside
+    it are tied to it."""
+    box = deck_element("gBOX", (30, 50, 230, 80), "Why it matters")
+    conv = [conv_element("a", (46, 54, 200, 70), "Why it matters"),
+            {"id": "ic", "kind": "image", "role": "icon", "bbox": [34, 56, 44, 66], "anchor": "a"}]
+    pairs, why = adopt_sync.pair_elements(conv, [box])
+    assert pairs == {0: 0} and set(why) == {1}
+    assert adopt_sync.drawn_from(conv, why, pairs, [box]) == {1: 0}
+
+
+def test_a_picture_standing_in_no_object_is_drawn_out_of_nothing():
+    box = deck_element("gBOX", (30, 50, 230, 80), "Why it matters")
+    conv = [conv_element("a", (46, 54, 200, 70), "Why it matters"),
+            {"id": "ic", "kind": "image", "role": "icon", "bbox": [400, 56, 410, 66], "anchor": "a"}]
+    pairs, why = adopt_sync.pair_elements(conv, [box])
+    assert adopt_sync.drawn_from(conv, why, pairs, [box]) == {}
+
+
+def test_a_picture_inside_a_box_nothing_is_tied_to_is_drawn_out_of_nothing():
+    """The rule is not "it stands inside one of the deck's boxes" but "inside one this conversion
+    already accounts for". An object nothing is tied to is not going anywhere when the unit is
+    written, so a picture put on top of it is the second box this whole gate is about."""
+    twin_a = deck_element("gA", (30, 50, 230, 80), "Get started")
+    twin_b = deck_element("gB", (33, 53, 233, 83), "Get started")
+    conv = [conv_element("a", (46, 54, 200, 70), "Get started"),
+            {"id": "ic", "kind": "image", "role": "icon", "bbox": [34, 56, 44, 66], "anchor": "a"}]
+    pairs, why = adopt_sync.pair_elements(conv, [twin_a, twin_b])
+    assert pairs == {}, "two boxes too alike to tell apart: the words pair with neither"
+    assert adopt_sync.drawn_from(conv, why, pairs, [twin_a, twin_b]) == {}
+
+
+def test_only_a_member_of_the_same_unit_accounts_for_a_blind_one():
+    members = [{"key": "text/body/0", "objects": ["gBOX"]},
+               {"key": "image/icon/0", "objects": [], "drawn_from": "text/body/0"}]
+    assert merge.covered(members) == {"image/icon/0"} and merge.blind_members(members) == []
+    elsewhere = [{"key": "image/icon/0", "objects": [], "drawn_from": "text/body/9"}]
+    assert merge.covered(elsewhere) == set()
+    assert merge.blind_members(elsewhere) == ["image/icon/0"]
+
+
 # ---------------------------------------------------------------- one box, read back as several
 
 def lined(eid: str, box, text: str, baseline: float, size: float = 14.0, **extra) -> dict:
@@ -484,6 +529,31 @@ def test_the_base_says_which_misses_are_cells_of_the_decks_own_tables(tmp_path):
     assert all(e["objects"] == [] and e["in_table"] is True for e in els)
     assert [u["why"] for u in base["adopt"]["unpaired"]] == [adopt_sync.IN_A_TABLE] * 3
     assert base["adopt"]["from_layout"] == []
+
+
+def test_the_base_says_which_miss_was_drawn_out_of_a_box_beside_it(tmp_path):
+    """The fourth answer, and the only one that is not "nothing can be written here": the picture
+    names the element that is tied to the box it came out of, and the merge then asks whether the
+    two are one unit."""
+    tgt = target([[deck_element("gBOX", (30, 50, 230, 80), "Why it matters")]])
+    pres = presentation([[live_shape("gBOX", (48, 80, 365, 127), "Why it matters")]])
+    conv = conversion(tgt, [[conv_element("p0e0", (46, 54, 200, 70), "Why it matters"),
+                             {"id": "p0e1", "kind": "image", "role": "icon",
+                              "bbox": [34, 56, 44, 66], "anchor": "p0e0"}]])
+    pdf = tmp_path / "main.pdf"
+    pdf.write_bytes(b"%PDF-1.4\n")
+    base = adopt_sync.build_base(conv, tmp_path, tgt, pres, pdf)
+    words, icon = base["slides"][0]["elements"]
+    assert words["objects"] == ["gBOX"] and icon["objects"] == []
+    assert icon["drawn_from"] == words["key"] and icon["anchor"] == words["key"]
+    assert base["adopt"]["unpaired"] == [] and base["adopt"]["from_layout"] == []
+    assert [(u["element"], u["why"]) for u in base["adopt"]["drawn_from"]] == \
+        [(icon["key"], adopt_sync.DRAWN_FROM)], "counted apart: this one is no miss to answer for"
+    assert merge.blind_members([words, icon]) == [], "so that box can still be edited from the source"
+    assert adopt_sync.report_lines(base) == [
+        "sync base: 1 slides, 1 of 2 elements tied to an object of the deck",
+        "  1 of them this converter drew out of a box beside them (an icon in a line, a formula in "
+        "prose): those go in with that box"]
 
 
 def test_the_base_names_the_deck_objects_the_source_does_not_draw(adopted):
@@ -769,6 +839,47 @@ def test_a_cell_of_a_table_of_the_decks_is_named_for_what_it_is(world):
     assert adopt_sync.problems(base, mplan, world["live"], KEPT) == [], "nothing left to refuse"
     assert merge.has_writes(mplan, [s["objectId"] for s in world["live"]["slides"]]), \
         "and the rest of the deck is synced as usual"
+
+
+def test_a_picture_drawn_out_of_this_units_own_box_does_not_freeze_it(world):
+    """Not a fourth voice but the end of the question. A unit whose every member names an object is
+    written; one member naming none freezes it, because sync deletes a unit's old objects through
+    the base and one that names none leaves the person's box standing under what is created. An
+    anchored picture names none and never will - it was drawn out of the box its words are in, and
+    that box *is* named, by the member beside it in this very unit. The one delete takes it away
+    and the unit goes in whole, with nothing left behind. Without this a person's box could never
+    be edited from the source once the converter had read an icon out of it."""
+    base = copy.deepcopy(world["base"])
+    doc = copy.deepcopy(world["doc"])
+    icon = next((e for s in base["slides"] for e in s["elements"] if e.get("drawn_from")), None)
+    assert icon is not None, "the world draws an adopted deck with an icon read out of a text box"
+    host = next(s for s in base["slides"] if icon in s["elements"])
+    words = next(e for e in host["elements"] if e["key"] == icon["drawn_from"])
+    ir = next(e for s in doc["slides"] for e in s["elements"] if e["id"] == words["ir"]["id"])
+    ir["paragraphs"][0]["runs"] = [W.run("the source says something else now")]
+    mplan = merge.plan_merge(base, W.build_ours(doc, base, world["out"]), world["live"])
+    unit = next(u for p in mplan["slides"] for u in p.get("units") or [] if u["key"] == words["key"])
+    assert unit["action"] == "recreate", "the person's box takes the source's new words"
+    assert not unit.get("unpaired") and not any(c["field"] == "unpaired"
+                                                for c in mplan["report"]["conflicts"])
+    assert adopt_sync.problems(base, mplan, world["live"], KEPT) == [], "and the gate agrees"
+
+
+def test_a_picture_drawn_out_of_another_units_box_still_freezes_this_one(world):
+    """Only inside the unit. The same picture drawn out of an object some other unit is tied to
+    would be created while that object stayed exactly where it is, which is the duplicate on
+    somebody's slide this whole gate is about."""
+    base = copy.deepcopy(world["base"])
+    doc = copy.deepcopy(world["doc"])
+    icon = next(e for s in base["slides"] for e in s["elements"] if e.get("drawn_from"))
+    host = next(s for s in base["slides"] if icon in s["elements"])
+    words = next(e for e in host["elements"] if e["key"] == icon["drawn_from"])
+    icon["drawn_from"] = "a box of another unit"
+    ir = next(e for s in doc["slides"] for e in s["elements"] if e["id"] == words["ir"]["id"])
+    ir["paragraphs"][0]["runs"] = [W.run("the source says something else now")]
+    mplan = merge.plan_merge(base, W.build_ours(doc, base, world["out"]), world["live"])
+    unit = next(u for p in mplan["slides"] for u in p.get("units") or [] if u["key"] == words["key"])
+    assert unit["action"] == "keep" and unit["unpaired"] == [icon["key"]]
 
 
 def test_the_gate_still_stands_behind_the_merge(world):

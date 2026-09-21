@@ -846,7 +846,15 @@ def _doubled(base: dict, live: dict, after: dict, mplan: dict) -> list[dict]:
     recreated unit's *old* objects, which it finds through the base - and an unpaired element names
     none, so nothing is deleted and nothing is lost. What happens instead is that the person's own
     box stays where it was and a second one, saying what the source now says, is created on top of
-    it. No loss, a wrecked slide: the same shape of problem as a label that moved."""
+    it. No loss, a wrecked slide: the same shape of problem as a label that moved.
+
+    `merge.blind_members`, not "names no object": a picture drawn out of a box another member of
+    this same unit is tied to leaves nothing behind, because that member's delete takes the box
+    away. The rule is stated here as well as in `plan_unit` so that loosening one of them alone
+    fails the campaign - it is a rule restated, not an observation, and it has to be: this world
+    takes an unpaired element's object off the slide (`build_adopt_base`), so the leftover box the
+    sentence above describes is not there to be seen. Keeping it there, as `adopt.left_alone`
+    records it in a real base, is what would turn this into a measurement."""
     if base.get("origin") != adopt_sync.ORIGIN:
         return []
     out = []
@@ -855,7 +863,8 @@ def _doubled(base: dict, live: dict, after: dict, mplan: dict) -> list[dict]:
         if p["action"] != "update" or p.get("base") is None:
             continue
         b = base["slides"][p["base"]]
-        blind = {e["key"] for e in b["elements"] if not e.get("objects")}
+        blind = {k for members in merge.units(b["elements"]).values()
+                 for k in merge.blind_members(members)}
         made = [s for s in after["slides"] if s["objectId"] == p.get("objectId")]
         fresh = {o for s in made for o in s["objects"] if o not in before}
         for u in p["units"]:

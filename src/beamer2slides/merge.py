@@ -350,6 +350,30 @@ def units(elements: list[dict]) -> dict[str, list[dict]]:
     return out
 
 
+def covered(members: list[dict]) -> set[str]:
+    """Of an adopted unit's members, those with no object of their own that another member of this
+    same unit accounts for (`adopt_sync.drawn_from`).
+
+    A member naming no object is what makes a unit unwritable: sync deletes a unit's old objects
+    through the base, so one that names none leaves the person's own box standing under whatever
+    is created for it. The icon at the head of a line and the picture of a formula in it name none
+    - they were never objects - but the box they came out of is named, by the words beside them,
+    and those words are in this very unit (`units`: an anchored picture belongs to its text). So
+    that one delete takes the object away and the unit is written whole, with nothing left behind.
+
+    Only inside the unit. The same picture drawn out of an object some *other* unit is tied to
+    would be created while that object stayed where it is, which is the duplicate this is about."""
+    tied = {m["key"] for m in members if m.get("objects")}
+    return {m["key"] for m in members
+            if not m.get("objects") and m.get("drawn_from") in tied}
+
+
+def blind_members(members: list[dict]) -> list[str]:
+    """The keys of an adopted unit's members that are tied to nothing and nothing accounts for."""
+    ok = covered(members)
+    return [m["key"] for m in members if not m.get("objects") and m["key"] not in ok]
+
+
 def unit_roots(members: list[dict], slide_read: dict) -> list[str]:
     """Live object ids of a base unit to delete: those not inside another of its objects."""
     objects = slide_read["objects"]
@@ -635,7 +659,7 @@ def plan_unit(skey: str, ukey: str, base_members: list[dict] | None, ours_member
         report["conflicts"].append({**where, "field": "part_deleted", "base": "element", "ours": sorted(src),
                                     "theirs": edits["part_deleted"], "resolution": "deck kept"})
         return {**action, "action": "keep"}
-    blind = [m["key"] for m in base_members if not m.get("objects")] if adopted else []
+    blind = blind_members(base_members) if adopted else []
     if blind:
         # A person's deck, and this element is one the pairing could not tie to any object of it
         # (`adopt_sync.pair_elements`). Sync deletes a recreated unit's old objects through the
@@ -658,8 +682,13 @@ def plan_unit(skey: str, ukey: str, base_members: list[dict] | None, ours_member
         # loose words, so the cell is there in front of the person and the pairing has nothing
         # shaped like it - "nothing stands where it does" is true of the element and the wrong
         # thing to hear about a table you are looking at.
-        drawn = all(m.get("from_layout") for m in base_members if not m.get("objects"))
-        celled = not drawn and all(m.get("in_table") for m in base_members if not m.get("objects"))
+        # What is *not* here any more is the fourth kind, because it is no longer a kind of
+        # nothing: an element drawn out of an object this unit is already tied to (`covered`).
+        # The icon at the head of a person's line has no object and never had one, and freezing
+        # their whole box over it meant the source could never say another word in that box.
+        loose = [m for m in base_members if m["key"] in set(blind)]
+        drawn = all(m.get("from_layout") for m in loose)
+        celled = not drawn and all(m.get("in_table") for m in loose)
         field, why = ("inherited", "kept (the deck's layout draws this, not the slide)") if drawn else \
             ("in_table", "kept (a cell of a table of the deck's)") if celled else \
             ("unpaired", "kept (tied to no object of the deck)")

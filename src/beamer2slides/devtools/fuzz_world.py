@@ -171,6 +171,16 @@ def make_adopt_doc(rng: random.Random, out: Path) -> dict:
             x = 30 + 150 * (k % 2)
             els.append(_box(f"p{i}e{k + 3}", x, y, 130, words))
             y += 16 if k % 2 else 0
+        if rng.random() < 0.4:
+            # An icon at the head of a line: a picture the converter made while reading one of the
+            # person's own *text boxes* back, so it has no object of its own and never will - the
+            # box it came out of is the one beside it (`adopt_sync.drawn_from`). Anchored, so it is
+            # a member of that box's unit, which is what lets the unit be written at all
+            # (`merge.covered`); without it the person's box could never be edited from the source.
+            host = els[-1]
+            hx, hy = host["bbox"][0], host["bbox"][1]
+            els.append(image_ir(f"p{i}e94", (hx + 2, hy + 2, hx + 10, hy + 10), pool[0],
+                                anchor=host["id"], role="icon"))
         if rng.random() < 0.4:                        # a tikz cluster the deck groups
             els.append(shape_ir(f"p{i}g0", (200, 40, 300, 70), fill="#e8eaed", block=0))
             els.append({**_box(f"p{i}g1", 206, 48, 88, rng.choice(ADOPT_PHRASES)), "block": 0})
@@ -383,7 +393,6 @@ def build_adopt_base(doc, out: Path, rng: random.Random) -> dict:
         entry["objectId"] = sid
         entry["groups"] = []
         entry["group_readback"] = {}
-        keep = []
         for el in entry["elements"]:
             oids = [rename[o] for o in el["objects"]][:1]  # one object per element: no groups
             if oids and rng.random() < rate:
@@ -391,8 +400,16 @@ def build_adopt_base(doc, out: Path, rng: random.Random) -> dict:
             old_main = el["main"]
             el["readback"] = {oids[0]: {**el["readback"][old_main], "parent_group": None}} if oids else {}
             el["objects"], el["main"] = oids, oids[0] if oids else None
-            keep += oids
-        entry["order"] = keep
+        # An anchored picture never pairs: the icon at the head of a line and the picture of a
+        # formula in it were drawn out of the person's *text box*, and nothing in the deck is
+        # shaped like one alone. So it has no object and names the member that has the box's
+        # (`adopt_sync.drawn_from`) - the one blind member a unit may be written over.
+        tied = {el["key"] for el in entry["elements"] if el["objects"]}
+        for el in entry["elements"]:
+            if el.get("anchor") in tied and el["objects"]:
+                el["readback"], el["objects"], el["main"] = {}, [], None
+                el["drawn_from"] = el["anchor"]
+        entry["order"] = [o for el in entry["elements"] for o in el["objects"]]
     return {**base, "generation": 0, "origin": "adopt", "master_background": None,
             "adopt": {"presentationId": base["presentationId"], "deck_page_size": base["deck_page_size"],
                       "frame_width": 720.0, "slides": len(base["slides"]), "unpaired": unpaired}}

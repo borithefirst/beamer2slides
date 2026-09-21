@@ -127,6 +127,7 @@ NOT_BEST = "another element of the source explains the same object better"
 AMBIGUOUS = "two of the deck's objects are equally close: which one it is cannot be told"
 FROM_LAYOUT = "the deck's layout draws this, not the slide"
 IN_A_TABLE = "it stands inside a table of the deck, which the converter reads back as loose words"
+DRAWN_FROM = "it was drawn out of an object another element of the source is already tied to"
 
 
 def pair_elements(conv: list[dict], deck: list[dict]) -> tuple[dict[int, int], dict[int, str]]:
@@ -240,6 +241,37 @@ def inside_tables(conv: list[dict], why: dict[int, str], objects: list[dict]) ->
     if not tables:
         return set()
     return {i for i in why if any(_holds(conv[i]["bbox"], t["bbox"]) for t in tables)}
+
+
+def drawn_from(conv: list[dict], why: dict[int, str], pairs: dict[int, int],
+               objects: list[dict]) -> dict[int, int]:
+    """Of the converted elements nothing could be tied to, the ones standing inside an object that
+    **another converted element already is** tied to: `{the miss: that element}`.
+
+    The fold's twin, for what the fold cannot join. One box of a person's comes back as several
+    elements and only some of them are words: the icon at the head of a line, the picture the
+    converter made of a formula in the prose, the rule under the heading. The fold takes the words
+    (`composites`) and leaves the rest where they stand, and what is left over has no object -
+    nothing on the slide is shaped like the icon alone, because the icon alone was never an object.
+
+    That is not the same nothing as an element the pairing simply missed. An element with no object
+    is dangerous because a sync deletes a unit's old objects through the base, so one naming none
+    leaves the person's box standing and puts a second one on top of it (`merge.plan_unit`'s blind
+    branch). Here the box it came out of *is* named - by the element beside it - and if the two are
+    one unit, that one delete takes the object away and the unit is written whole. Nothing is left
+    behind, because there was never a second thing there.
+
+    The rule is only half of the answer: which elements share a unit is the merge's question, not
+    this one's (`merge.covered`). What this says is which object each miss was drawn out of; the
+    merge then asks whether that object is going anyway."""
+    tied = {k: i for i, k in pairs.items()}
+    out = {}
+    for i in why:
+        for k, mate in tied.items():
+            if _holds(conv[i]["bbox"], objects[k]["bbox"]):
+                out[i] = mate
+                break
+    return out
 
 
 # ---------------------------------------------------------------- one box, read back as several
@@ -456,7 +488,7 @@ def build_base(conv_deck: dict, conv_out: Path, target: dict, pres: dict, pdf: P
     naming the ids does the same job."""
     read = snapshot.read_presentation(pres)
     by_id = {s["objectId"]: s for s in read["slides"]}
-    state_slides, whys, layouts, celled, leftovers = [], [], [], [], []
+    state_slides, whys, layouts, celled, mates, leftovers = [], [], [], [], [], []
     for conv_slide, tgt in zip(conv_deck["slides"], target["slides"]):
         sid = tgt.get("objectId")
         live = by_id.get(sid)
@@ -464,6 +496,9 @@ def build_base(conv_deck: dict, conv_out: Path, target: dict, pres: dict, pdf: P
         pairs, why = pair_elements(conv_slide["elements"], on_slide)
         layouts.append(explained_by_layout(conv_slide["elements"], why, tgt))
         celled.append(inside_tables(conv_slide["elements"], why, on_slide) - layouts[-1])
+        mates.append({i: j for i, j in
+                      drawn_from(conv_slide["elements"], why, pairs, on_slide).items()
+                      if i not in layouts[-1] and i not in celled[-1]})
         state_slides.append({"objectId": sid, "elements": [e["id"] for e in conv_slide["elements"]],
                              "objects": [[on_slide[pairs[i]]["object"]] if i in pairs else []
                                          for i in range(len(conv_slide["elements"]))],
@@ -480,8 +515,8 @@ def build_base(conv_deck: dict, conv_out: Path, target: dict, pres: dict, pdf: P
     # (`sync.background_requests`). Every background this base writes is written explicitly.
     base["master_background"] = None
     base["origin"] = ORIGIN
-    unpaired, from_layout = [], []
-    for entry, why, lay, cells in zip(base["slides"], whys, layouts, celled):
+    unpaired, from_layout, from_box = [], [], []
+    for entry, why, lay, cells, mate in zip(base["slides"], whys, layouts, celled, mates):
         for i, el in enumerate(entry["elements"]):
             if i not in why:
                 continue
@@ -491,13 +526,16 @@ def build_base(conv_deck: dict, conv_out: Path, target: dict, pres: dict, pdf: P
                 el["from_layout"] = True
             elif i in cells:
                 el["in_table"] = True
+            elif i in mate:
+                el["drawn_from"] = entry["elements"][mate[i]]["key"]
             item = {"slide": entry["key"], "element": el["key"], "kind": el["kind"],
-                    "why": FROM_LAYOUT if i in lay else IN_A_TABLE if i in cells else why[i]}
-            (from_layout if i in lay else unpaired).append(item)
+                    "why": FROM_LAYOUT if i in lay else IN_A_TABLE if i in cells else
+                    DRAWN_FROM if i in mate else why[i]}
+            (from_layout if i in lay else from_box if i in mate else unpaired).append(item)
     paired = sum(1 for e in base["slides"] for el in e["elements"] if el.get("main"))
     base["adopt"] = {"presentationId": read["presentationId"], "deck_page_size": read["page_size"],
                      "frame_width": read["page_size"][0], "slides": len(base["slides"]), "paired": paired,
-                     "unpaired": unpaired, "from_layout": from_layout,
+                     "unpaired": unpaired, "from_layout": from_layout, "drawn_from": from_box,
                      "left_alone": [{"slide": e["key"], "objects": oids}
                                     for e, oids in zip(base["slides"], leftovers) if oids],
                      # The boxes this conversion was folded against, so that every later sync folds
@@ -650,10 +688,8 @@ def problems(base: dict, mplan: dict, theirs: dict, way_back: dict | None = None
         for u in p["units"]:
             if u["action"] not in ("recreate", "move"):
                 continue
-            for mk in u.get("base_members", []):
-                el = els.get(mk)
-                if el is not None and not el.get("objects"):
-                    blind.append({"slide": b["key"], "element": mk})
+            members = [els[mk] for mk in u.get("base_members", []) if mk in els]
+            blind += [{"slide": b["key"], "element": mk} for mk in merge.blind_members(members)]
     if blind:
         out.append({"reason": "unpaired", "elements": blind})
     if base.get("generation", 0) != 0:
@@ -731,15 +767,19 @@ def report_lines(base: dict) -> list[str]:
     """What `adopt` prints about the base it just recorded, and `sync` about the one it read."""
     info = base.get("adopt") or {}
     drawn = info.get("from_layout") or []
-    total = info.get("paired", 0) + len(info.get("unpaired") or []) + len(drawn)
+    out_of = info.get("drawn_from") or []
+    total = info.get("paired", 0) + len(info.get("unpaired") or []) + len(drawn) + len(out_of)
     lines = [f"sync base: {info.get('slides', 0)} slides, {info.get('paired', 0)} of {total} elements tied to an "
              f"object of the deck"]
     if drawn:
         lines.append(f"  {len(drawn)} of them are drawn by the deck's own layouts and master, which this "
                      f"converter never writes to: change those on the layout, in Slides")
+    if out_of:
+        lines.append(f"  {len(out_of)} of them this converter drew out of a box beside them (an icon in a "
+                     f"line, a formula in prose): those go in with that box")
     if info.get("unpaired"):
-        lines.append(f"  {len(info['unpaired'])} element(s) could not be tied to one; a sync that changes them "
-                     f"refuses rather than write beside the person's object")
+        lines.append(f"  {len(info['unpaired'])} element(s) could not be tied to one; a sync that changes one "
+                     f"keeps the deck's version of it and says so in the report")
     left = sum(len(x["objects"]) for x in info.get("left_alone") or [])
     if left:
         lines.append(f"  {left} object(s) of the deck the source does not draw: sync never touches them")
