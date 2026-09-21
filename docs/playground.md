@@ -55,7 +55,7 @@ A round trip is therefore: `tex_compile` on `talk.tex`, `deck_inspect` on `talk.
 on `doc.html`. A new workspace is seeded with a talk, a canonical document and a README saying
 exactly that.
 
-### The editor never reverts a file a run rewrote
+### The editor never reverts a file a run rewrote, it merges with it
 
 A journey rewrites the files it is pointed at, and the Docs side does it every time:
 `doc_sync` writes the document and then regenerates the canonical HTML *from the document it
@@ -66,19 +66,33 @@ deletes those blocks from somebody's live document.
 
 So a file carries a stamp: `GET .../file` answers with `X-B2S-Version` (a digest of the
 content, not an mtime — a byte-for-byte rewrite has taken nothing away), the page holds it
-while it types, and `PUT .../file?…&version=<stamp>` is refused with **409** and writes
-nothing when the file no longer says that (`workbench.write`). The empty stamp means "there
-was nothing of that name when I read it", so *New file* cannot land on a file a run has just
-created either. An upload names no stamp and replaces what is there, which is what an upload
+while it types, and hands it back on `PUT .../file?…&version=<stamp>`. The empty stamp means
+"there was nothing of that name when I read it", so *New file* cannot land on a file a run has
+just created; an upload names no stamp and replaces what is there, which is what an upload
 means.
 
-The other half is that the page does not sit on a stale buffer until the save is refused:
-when a run finishes, the open file is read again. An untouched buffer is replaced by what the
-run wrote and a line says so; **a buffer somebody has typed in is never thrown away** — it
-stays, with a warning that saving it would put the older text back. Measured on the live
-playground, on a real document, twice: a `doc_adopt`, an edit in the browser, a `doc_sync`
-that merged it, and then a save from a buffer older than that sync — which deleted from the
-document the very sentence the merge had just kept.
+Where the file no longer says that, the two are **merged** (`workbench.reconcile`). Here, and
+only here, a textual merge is the right one: the Docs side cannot have one — a paragraph in a
+document has to be recognised again after the reader reworded and dragged it, which is what
+the named ranges are for, and `files.update` would destroy them, so `doc_merge` merges blocks
+and writes requests — while between the editor and the journey the two sides are the *same
+file in the same format*, and there is a real base: the bytes this server handed the editor,
+which the stamp names. The session keeps the last `KEEP_VERSIONS` (16) of those, for files
+under `MERGE_BYTES` (512 kB). The merge is `merge.diff3`, the sync's own word-level one, so an
+edit at the start of a line and a rewrite at the end of it both land.
+
+What both sides changed is **refused**: 409, nothing written, and the clash quoted from either
+side. No conflict marker is ever left in the file — in a canonical HTML file a marker is not a
+marker, it is words outside every block, which is the one thing `doc_ir` stops a sync over.
+A stamp the server has forgotten, or a file that is not text, is refused the same way: the
+base is memory, and what is no longer there is not guessed at.
+
+The other half is that the page does not sit on a stale buffer until it saves: when a run
+finishes, the open file is read again. An untouched buffer is replaced by what the run wrote
+and a line says so; **a buffer somebody has typed in is never thrown away** — it stays, and
+saving it merges. Measured on the live playground, on a real document, twice: a `doc_adopt`,
+an edit in the browser, a `doc_sync` that merged it, and then a save from a buffer older than
+that sync — which deleted from the document the very sentence the merge had just kept.
 
 **There is no shell.** The only two things the workbench executes are a TeX engine and its own
 journeys, and both are fenced:

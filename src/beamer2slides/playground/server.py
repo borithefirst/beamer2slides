@@ -18,7 +18,9 @@ journeys run inside it, one subprocess each.
   POST /api/ws                     open a workspace -> {"id"}
   GET  /api/ws/<sid>               its files, its byte count, its limits and its runs
   GET/PUT/DELETE /api/ws/<sid>/file?path=<ref>    one file (PUT's body is the content; GET's
-                                   X-B2S-Version is what PUT's &version= must still say, or 409)
+                                   X-B2S-Version is what PUT's &version= must still say - where a
+                                   run has rewritten the file since, the two are merged, and a
+                                   clash is 409 with nothing written)
   POST /api/ws/<sid>/runs          {"tool", "args", "access_token"?} -> {"id"}
   GET  /api/ws/<sid>/runs/<rid>?since=<n>         state, new log lines and, at the end, the Result
 
@@ -236,8 +238,10 @@ class Playground:
     def to_slides(self, job: Job, token: str | None = None) -> str:
         """Build the deck. `token`: a visitor's access token, which goes no further than this call.
 
-        `google_auth.use_provider` is process-wide, so one conversion runs at a time: two
-        visitors converting at once must never build a deck with the other one's credentials.
+        One conversion runs at a time. `google_auth.use_provider` is per context now, so it is
+        no longer what makes that necessary; `contextlib.redirect_stdout` below still is, and so
+        is the pipeline behind `emit` (the pdf backend's module variable, the pure reader's
+        process-wide font blend - `agent.context` names the whole list).
         """
         from ..emit import emit
         from ..google_auth import use_provider
@@ -394,14 +398,12 @@ class Handler(BaseHTTPRequestHandler):
         if part == "file":
             ref = self.query().get("path", "")
             if method == "GET":
-                here = bench.resolve(session, ref)
-                if not here.is_file():
-                    return self.json({"error": "no such file"}, 404)
+                # The stamp the editor holds while it types, and the bytes behind it, which
+                # the session keeps: a save made against them after a run has rewritten the
+                # file is merged with what the run wrote, not refused and not reverted.
+                here, data, stamp = bench.read(session, ref)
                 ctype = mimetypes.guess_type(here.name)[0] or "application/octet-stream"
-                # What the editor holds on to, and hands back when it saves: a run that
-                # rewrites this file underneath it is then refused rather than reverted.
-                return self.send(here.read_bytes(), ctype,
-                                 headers={"X-B2S-Version": workbench.version(here)})
+                return self.send(data, ctype, headers={"X-B2S-Version": stamp})
             if method == "PUT":
                 return self.json(bench.write(session, ref, body,
                                              self.query().get("version")))

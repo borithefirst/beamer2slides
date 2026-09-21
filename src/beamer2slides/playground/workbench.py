@@ -46,6 +46,8 @@ MAX_FILES = 3000              # a 40-page conversion leaves backgrounds, debug a
 MAX_BYTES = 80 * 1024 * 1024  # the whole workspace
 MAX_FILE = 25 * 1024 * 1024   # one upload, the same as a job's
 MAX_LIST = 1200               # entries the listing shows before it says there are more
+KEEP_VERSIONS = 16            # copies of what the editor was handed, kept to merge a save against
+MERGE_BYTES = 512 * 1024      # the biggest file a stale save is merged rather than refused
 KEEP_SESSIONS = 12
 KEEP_RUNS = 30
 LOG_LINES = 800
@@ -161,11 +163,25 @@ class Session:
     def __init__(self, sid: str, root: Path) -> None:
         self.id, self.root = sid, root
         self.runs: dict[str, Run] = {}
+        #: What this server handed the editor, by file and stamp: the *base* a later save is
+        #: merged against. The last `KEEP_VERSIONS` of them, and only of files small enough
+        #: to merge - a workspace holds 80 MB and this is memory, not disk.
+        self.seen: dict[str, bytes] = {}
         self.created = self.touched = time.time()
 
     @property
     def busy(self) -> bool:
         return any(r.state != "done" for r in self.runs.values())
+
+    def remember(self, ref: str, data: bytes) -> str:
+        """Keep what a file said as it went to the editor, and give back its stamp."""
+        stamp = digest(data)
+        if len(data) <= MERGE_BYTES:
+            self.seen.pop(f"{ref}\0{stamp}", None)          # to the end: the newest stay
+            self.seen[f"{ref}\0{stamp}"] = data
+            for old in list(self.seen)[:max(0, len(self.seen) - KEEP_VERSIONS)]:
+                del self.seen[old]
+        return stamp
 
     def view(self) -> dict:
         files, total = listing(self.root)
@@ -201,6 +217,10 @@ def listing(root: Path) -> tuple[list[dict], int]:
     return rows, total
 
 
+def digest(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()[:16]
+
+
 def version(path: Path) -> str:
     """What a file says, in sixteen characters: the stamp an editor holds while it types.
 
@@ -210,9 +230,29 @@ def version(path: Path) -> str:
     file a run has since created are told apart as well.
     """
     try:
-        return hashlib.sha256(path.read_bytes()).hexdigest()[:16]
+        return digest(path.read_bytes())
     except OSError:
         return ""
+
+
+def _short(text: str, room: int = 90) -> str:
+    """A piece of somebody's file, small enough to stand in a sentence."""
+    said = " ".join(text.split())
+    return repr(said if len(said) <= room else said[:room - 1] + "…")
+
+
+def _around(whole: str, piece: str, room: int = 90) -> str:
+    """A piece one side changed, in the line it stands in.
+
+    The merge is word-level, so a clash can be one word long - and one word is not a place
+    anybody can find again. The line it sits in is.
+    """
+    at = whole.find(piece) if piece else -1
+    if at < 0:
+        return _short(piece or "(nothing)", room)
+    start = whole.rfind("\n", 0, at) + 1
+    end = whole.find("\n", at + len(piece))
+    return _short(whole[start:end if end >= 0 else len(whole)], room)
 
 
 def usage(root: Path) -> tuple[int, int]:
@@ -283,21 +323,30 @@ class Workbench:
         except Refused as exc:
             raise Denied(str(exc), 403) from None
 
+    def read(self, session: Session, ref: str) -> tuple[Path, bytes, str]:
+        """One file, and the stamp the editor is to hold while it types - remembered here,
+        because what this server handed out is the base a later save is merged against."""
+        path = self.resolve(session, ref)
+        if not path.is_file():
+            raise Denied("no such file", 404)
+        data = path.read_bytes()
+        return path, data, session.remember(ref, data)
+
     def write(self, session: Session, ref: str, data: bytes,
               expected: str | None = None) -> dict:
         path = self.resolve(session, ref, write=True)
         if len(data) > MAX_FILE:
             raise Denied(f"over {MAX_FILE // 2**20} MB", 413)
+        merged = False
         if expected is not None and expected != version(path):
             # The editor is holding a buffer of an older file. A journey rewrites the files
             # it is pointed at - `doc_sync` regenerates the canonical HTML from the document
             # it has just written - and saving the older text back is not an edit but a
             # revert, which the *next* sync reads as the source dropping whatever the
-            # rewrite brought in. Nothing is written and the page is told to reload.
-            raise Denied("a file of that name is already here: open it instead" if not expected
-                         else "this file has changed on the server since it was opened - a "
-                              "run rewrote it. Nothing was saved: reload it, and make the "
-                              "edit again on what it says now", 409)
+            # rewrite brought in. So the two are merged, or nothing is written.
+            if not expected:
+                raise Denied("a file of that name is already here: open it instead", 409)
+            data, merged = self.reconcile(session, ref, path, data, expected)
         had = path.stat().st_size if path.is_file() else 0
         files, total = usage(session.root)
         if total - had + len(data) > MAX_BYTES:
@@ -307,8 +356,54 @@ class Workbench:
             raise Denied(f"the workspace holds {MAX_FILES} files at most", 413)
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(data)
+        session.remember(ref, data)
         return {"path": LocalWorkspace(session.root).ref(path), "bytes": len(data),
-                "version": version(path)}
+                "version": digest(data), "merged": merged}
+
+    def reconcile(self, session: Session, ref: str, path: Path, data: bytes,
+                  expected: str) -> tuple[bytes, bool]:
+        """A buffer somebody typed against the file a run has since rewritten: merged.
+
+        Here, and only here, a textual merge is the right one. The Docs side cannot have it -
+        a paragraph in a document has to be recognised again after the reader reworded and
+        dragged it, which is what the named ranges are for, and `files.update` would destroy
+        them - so `doc_merge` merges blocks and writes requests. Between the editor and the
+        journey the two sides are the same file in the same format, and there is a real base:
+        the bytes this server handed the editor, which `expected` names. That is the whole of
+        what a three-way merge needs.
+
+        Word-level (`merge.diff3`, the sync's own), so an edit at the start of a line and a
+        rewrite at the end of it both land. What both sides changed is **refused**: nothing is
+        written and the clash is quoted, because a conflict marker left in a canonical HTML
+        file is not a marker to the next sync, it is content - words outside every block,
+        which `doc_ir` now stops a sync over. A person settles it by copying their version
+        out and editing the file the run wrote.
+        """
+        from ..merge import diff3          # the pipeline, imported when it is first needed
+
+        stale = (f"{ref} has changed on the server since it was opened - a run rewrote it. "
+                 f"Nothing was saved: reload it, and make the edit again on what it says now")
+        was = session.seen.get(f"{ref}\0{expected}")
+        if was is None:                    # too big to keep, or too long ago
+            raise Denied(stale, 409)
+        try:
+            base, mine, now = (b.decode("utf-8") for b in (was, data, path.read_bytes()))
+        except (UnicodeDecodeError, OSError):
+            raise Denied(stale, 409) from None
+        if max(len(base), len(mine), len(now)) > MERGE_BYTES:
+            raise Denied(stale, 409)
+        # `ours` is the buffer and `theirs` the file the run wrote, so a clash resolves the
+        # way the whole project resolves one - to the other side. It never reaches the file.
+        text, clashes = diff3(base, mine, now)
+        if clashes:
+            first = clashes[0]
+            raise Denied(
+                f"{ref} was changed here and by a run since it was opened, in "
+                f"{len(clashes)} place(s) that overlap, so nothing was saved. Yours says "
+                f"{_around(mine, first['ours'])}, the file now says "
+                f"{_around(now, first['theirs'])}. Copy your version out, reload the file, "
+                f"and make the edit again on what it says now", 409)
+        return text.encode("utf-8"), True
 
     def remove(self, session: Session, ref: str) -> None:
         path = self.resolve(session, ref, write=True)

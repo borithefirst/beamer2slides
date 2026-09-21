@@ -1553,18 +1553,29 @@ progress and the result coming back as JSON lines. A journey that needs no accou
 token, so it must not report on Google as though it had looked: `b2s_status` on a `signin` host
 said "not reachable (offline)" on a page with a sign-in button, and now says the arrangement
 (`runner.SIGN_IN`; `auth.NoGoogle` carries a `reason` and a one-sentence `fix`), which is the part
-the process can see. **The editor never reverts a file a run rewrote**: a journey rewrites what it
-is pointed at (`doc_sync` regenerates the canonical HTML from the document it has just written), so
-a buffer opened before a run is older than the file and saving it back is a revert - which the next
-sync reads as the source dropping what the rewrite brought in, and deletes those blocks from a live
-document. `GET .../file` answers with `X-B2S-Version` (a digest of the content: a byte-for-byte
-rewrite has taken nothing away), the page holds it while it types, and a `PUT ...&version=<stamp>`
-that no longer matches is refused with 409 having written nothing (`workbench.write`; the empty
-stamp is "nothing of that name when I read it", so *New file* cannot land on one a run just made,
-while an upload names no stamp and replaces what is there). And the page does not sit on a stale
-buffer until then: the open file is read again when a run finishes, an untouched buffer taking what
-the run wrote and **a buffer somebody has typed in never being thrown away** - it stays, with a
-warning. Measured on the live playground, on a real document: an adopt, an edit in the browser, a
+the process can see. **The editor never reverts a file a run rewrote, it merges with it**: a journey
+rewrites what it is pointed at (`doc_sync` regenerates the canonical HTML from the document it has
+just written), so a buffer opened before a run is older than the file and saving it back is a
+revert - which the next sync reads as the source dropping what the rewrite brought in, and deletes
+those blocks from a live document. `GET .../file` answers with `X-B2S-Version` (a digest of the
+content: a byte-for-byte rewrite has taken nothing away), the page holds it while it types, and
+hands it back on `PUT ...&version=<stamp>` (the empty stamp is "nothing of that name when I read
+it", so *New file* cannot land on one a run just made, while an upload names no stamp and replaces
+what is there). Where the file no longer says that, the two are **merged**
+(`workbench.reconcile`) - and here, and only here, a textual merge is the right one: the Docs side
+cannot have one, a paragraph having to be recognised again after the reader reworded and dragged it
+(hence the named ranges, which `files.update` would destroy), while between the editor and the
+journey the two sides are the *same file in the same format* and there is a real base, the bytes
+this server handed the editor, which the stamp names (`Session.remember`, the last
+`KEEP_VERSIONS`=16 under `MERGE_BYTES`=512 kB). It is `merge.diff3`, the sync's own word-level one,
+so an edit at the start of a line and a rewrite at the end of it both land. What both sides changed
+is **refused**: 409, nothing written, both versions quoted - no conflict marker is ever left in the
+file, since in a canonical HTML file a marker is not a marker but words outside every block, the one
+thing `doc_ir` stops a sync over; a stamp the server has forgotten and a file that is not text are
+refused the same way, the base being memory and what is gone not being guessed at. And the page
+does not sit on a stale buffer until it saves: the open file is read again when a run finishes, an
+untouched buffer taking what the run wrote and **a buffer somebody has typed in never being thrown
+away**. Measured on the live playground, on a real document: an adopt, an edit in the browser, a
 sync that merged it, then a save from a buffer older than that sync - which deleted the very
 sentence the merge had kept. Stopped after 420 s, killed by process group;
 every path goes through `LocalWorkspace.resolve`; `shell_escape=f` beside `openin_any=p` so the

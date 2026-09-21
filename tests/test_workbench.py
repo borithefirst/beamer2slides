@@ -109,35 +109,101 @@ def test_files_are_written_read_and_deleted(ws):
     assert call(f"{ws}/file?path=notes/one.txt")[0] == 404
 
 
-def test_a_save_over_a_file_a_run_rewrote_is_refused(ws):
-    """The editor's buffer is older than the file, and saving it back is a revert.
+PAGE = b"""<html>
+<body>
+<p id="a">The editor will change this sentence about hedgerows.</p>
+<p id="b">The run will change this sentence about lighthouses.</p>
+</body>
+</html>
+"""
+
+
+def opened(url):
+    with urllib.request.urlopen(url, timeout=60) as r:
+        return r.read(), r.headers["X-B2S-Version"]
+
+
+def test_a_save_over_a_file_a_run_rewrote_is_merged_with_it(ws):
+    """The editor's buffer is older than the file, and saving it back would be a revert.
 
     A journey rewrites the files it is pointed at - `doc_sync` regenerates the canonical
     HTML from the document it has just written - so a buffer opened before a run says
     what the file said *before* it. Saving that is not an edit; the next sync reads it as
     the source dropping whatever the rewrite brought in, and deletes those blocks from
     somebody's document. Measured on the playground, on a live document, twice.
+
+    So the two are merged against the bytes the editor was handed, which the session keeps.
+    Both edits land and neither side is asked anything.
     """
-    url = f"{ws}/file?path=doc.html"
-    with urllib.request.urlopen(url, timeout=60) as r:
-        opened, stamp = r.read(), r.headers["X-B2S-Version"]
-    assert stamp and len(stamp) == 16
-    request(url, "PUT", opened + b"<!-- what the run wrote -->", "text/html")   # the run
+    url = f"{ws}/file?path=page.html"
+    assert request(url, "PUT", PAGE, "text/html")[0] == 200
+    was, stamp = opened(url)
+    assert was == PAGE and stamp and len(stamp) == 16
 
-    status, answer = request(f"{url}&version={stamp}", "PUT", b"<p>the stale buffer</p>",
-                             "text/html")
-    assert status == 409 and "a run rewrote it" in answer["error"]
-    assert call(url)[1].endswith(b"<!-- what the run wrote -->")     # nothing was written
+    request(url, "PUT", PAGE.replace(b"lighthouses", b"lighthouses and harbours"),
+            "text/html")                                            # the run, underneath
+    status, said = request(f"{url}&version={stamp}", "PUT",
+                           PAGE.replace(b"hedgerows", b"hedgerows and ditches"), "text/html")
+    assert status == 200 and said["merged"] is True
+    now = call(url)[1]
+    assert b"hedgerows and ditches" in now and b"lighthouses and harbours" in now
+    assert said["version"] == workbench.digest(now)
 
-    with urllib.request.urlopen(url, timeout=60) as r:
-        now = r.headers["X-B2S-Version"]
-    assert now != stamp
-    status, said = request(f"{url}&version={now}", "PUT", b"<p>the stale buffer</p>",
-                           "text/html")
-    assert status == 200 and said["version"] not in (now, stamp)
-    assert call(url)[1] == b"<p>the stale buffer</p>"
     # An upload names no stamp and replaces what is there, which is what an upload means.
     assert request(url, "PUT", b"<p>uploaded</p>", "text/html")[0] == 200
+
+
+def test_a_part_both_sides_changed_is_refused_and_nothing_is_written(ws):
+    """What cannot be merged is not guessed at, and no marker is left in the file.
+
+    A conflict marker in a canonical HTML file is not a marker to the next sync: it is
+    words outside every block, which is the one thing `doc_ir` stops a sync over. So the
+    save comes back with both versions quoted and the file untouched.
+    """
+    url = f"{ws}/file?path=clash.html"
+    assert request(url, "PUT", PAGE, "text/html")[0] == 200
+    was, stamp = opened(url)
+    ran = PAGE.replace(b"hedgerows", b"hedgerows and quicksets")
+    request(url, "PUT", ran, "text/html")
+
+    status, answer = request(f"{url}&version={stamp}", "PUT",
+                             PAGE.replace(b"hedgerows", b"hedgerows and ditches"), "text/html")
+    assert status == 409 and "overlap" in answer["error"]
+    # Each side's version, in the line it stands in: one word is not a place anybody can find.
+    assert "about hedgerows and ditches." in answer["error"]
+    assert "about hedgerows and quicksets." in answer["error"]
+    assert call(url)[1] == ran                                  # nothing was written
+
+    # And the save that names what the file says now goes through, as it always did.
+    mine = b"<p>settled by hand</p>"
+    assert request(f"{url}&version={opened(url)[1]}", "PUT", mine, "text/html")[0] == 200
+    assert call(url)[1] == mine
+
+
+def test_a_stale_save_the_server_cannot_merge_is_refused(ws):
+    """The base is memory, and memory is bounded: what is no longer there is not guessed at.
+
+    A stamp this server has forgotten (or a file that is not text) leaves nothing to merge
+    against, and then the only safe answer is the one from before there was a merge at all.
+    """
+    bench = server.Handler.app.bench
+    session = bench.get(ws.rsplit("/", 1)[1])
+    path = session.root / "forgotten.txt"
+    path.write_bytes(b"as it was")
+    stamp = session.remember("forgotten.txt", b"as it was")
+    path.write_bytes(b"as the run left it")
+
+    session.seen.clear()
+    with pytest.raises(workbench.Denied) as refused:
+        bench.write(session, "forgotten.txt", b"as I typed it", stamp)
+    assert refused.value.status == 409 and "reload it" in str(refused.value)
+    assert path.read_bytes() == b"as the run left it"
+
+    # Bounded, and the newest kept: one file opened many times does not fill the workspace.
+    for n in range(workbench.KEEP_VERSIONS + 8):
+        session.remember("forgotten.txt", f"version {n}".encode())
+    assert len(session.seen) == workbench.KEEP_VERSIONS
+    assert f"forgotten.txt\0{workbench.digest(b'version 23')}" in session.seen
 
 
 def test_a_new_file_never_lands_on_one_that_is_already_there(ws):
@@ -149,7 +215,7 @@ def test_a_new_file_never_lands_on_one_that_is_already_there(ws):
 
 
 def test_the_page_saves_with_the_stamp_it_opened_the_file_with():
-    """The other half: the server can only refuse a save that says which file it read."""
+    """The other half: the server can only merge a save that says which file it read."""
     js = (server.STATIC / "workbench.js").read_text(encoding="utf-8")
     assert 'stamp = r.headers.get("X-B2S-Version")' in js
     assert "`&version=${encodeURIComponent(version)}`" in js
@@ -157,6 +223,8 @@ def test_the_page_saves_with_the_stamp_it_opened_the_file_with():
     # What nothing may do is throw away what somebody has typed: only an untouched
     # buffer is replaced by what the run wrote.
     assert 'if ($("#filetext").value === loaded) {' in js
+    # A merged save is not the buffer: the editor shows what the merge really put there.
+    assert "if (said.merged) {" in js
 
 
 def test_nothing_reaches_outside_the_workspace(ws, base):

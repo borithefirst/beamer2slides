@@ -10,8 +10,9 @@
 let ws = null, tools = null, shown = null, catalogue = null;
 // What the open file said when it was opened, and what it said then. A journey rewrites the
 // files it is pointed at (`doc_sync` regenerates the canonical HTML from the document it has
-// just written), so a buffer opened before a run is older than the file: saving it back is a
-// revert, and the next sync reads that as the source dropping what the rewrite brought in.
+// just written), so a buffer opened before a run is older than the file: saving it back would
+// be a revert, and the next sync reads that as the source dropping what the rewrite brought
+// in. The stamp names the bytes the server merges this buffer against instead.
 let stamp = null, loaded = "";
 
 const TEXT = /\.(tex|html|json|md|txt|sty|cls|bib|csv|log|patch|diff|xml|ya?ml|cfg|toml|aux|out)$/i;
@@ -120,18 +121,26 @@ async function saveFile() {
   if (!shown) return;
   const text = $("#filetext").value;
   try {
-    // The stamp the file had when it was opened: the server refuses the save if a run has
-    // rewritten it since, rather than letting this buffer put the older text back.
+    // The stamp the file had when it was opened. Where a run has rewritten it since, the
+    // server merges this buffer with what the run wrote against those very bytes; what it
+    // cannot merge it refuses, having written nothing.
     const said = await put(shown, text, stamp ?? "");
     stamp = said.version;
     loaded = text;
-    note(`${shown} saved`);
+    if (said.merged) {
+      const r = await fetch(fileUrl(shown));   // what the merge really put there
+      if (r.ok) {
+        stamp = r.headers.get("X-B2S-Version");
+        loaded = $("#filetext").value = await r.text();
+      }
+      note(`${shown} saved — your edits merged with what the run had written`);
+    } else note(`${shown} saved`);
   } catch (e) { note(e.message, true); }
 }
 
 // A run may have rewritten the file that is open. Never discard what somebody has typed:
-// an untouched buffer is reloaded, a touched one is kept and its owner told why the save
-// that would revert the file is about to be refused.
+// an untouched buffer is reloaded, a touched one is kept - the save will merge it against
+// the bytes it was opened with, and only an overlap comes back refused.
 async function afterRun() {
   if (!shown || !TEXT.test(shown)) return;
   const r = await fetch(fileUrl(shown));
@@ -144,8 +153,8 @@ async function afterRun() {
     loaded = $("#filetext").value = text;
     note(`${shown} was rewritten by the run and reloaded`);
   } else {
-    note(`the run rewrote ${shown}; your unsaved edits are still here, and saving them ` +
-         `would put the older text back — copy them out and open the file again`, true);
+    note(`the run rewrote ${shown}; your unsaved edits are still here — saving them merges ` +
+         `the two, and says so if some part was changed on both sides`);
   }
 }
 
