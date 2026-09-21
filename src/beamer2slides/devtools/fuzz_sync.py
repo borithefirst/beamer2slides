@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor
 from difflib import SequenceMatcher
 from pathlib import Path
 
-from beamer2slides import adopt_sync, merge
+from beamer2slides import adopt_sync, merge, snapshot
 from beamer2slides.paths import CHECKOUT as ROOT  # live rounds build tests/decks/sync from the checkout
 
 from . import fuzz_world as W
@@ -848,13 +848,19 @@ def _doubled(base: dict, live: dict, after: dict, mplan: dict) -> list[dict]:
     box stays where it was and a second one, saying what the source now says, is created on top of
     it. No loss, a wrecked slide: the same shape of problem as a label that moved.
 
-    `merge.blind_members`, not "names no object": a picture drawn out of a box another member of
-    this same unit is tied to leaves nothing behind, because that member's delete takes the box
-    away. The rule is stated here as well as in `plan_unit` so that loosening one of them alone
-    fails the campaign - it is a rule restated, not an observation, and it has to be: this world
-    takes an unpaired element's object off the slide (`build_adopt_base`), so the leftover box the
-    sentence above describes is not there to be seen. Keeping it there, as `adopt.left_alone`
-    records it in a real base, is what would turn this into a measurement."""
+    It is asked of the slide, not of the plan. The base's rule is `merge.blind_members`, which
+    `plan_unit` and `adopt_sync.problems` both read; stating it a third time here would only fail
+    the campaign whenever somebody changed one of the two, which is a lint and not a measurement.
+    What is counted instead is the outcome: the person's box was still standing when this sync
+    finished, and beside it stands an object this sync created *for that very element* (the alt
+    text `sync.tag_requests` writes says which one it is). Two boxes where the deck had one.
+
+    This world used to take an unpaired element's object off the slide, so there was nothing to
+    count and the check had to be the rule restated; `fuzz_world.build_adopt_base` leaves it
+    standing now, the way `adopt.left_alone` records it in a real base, and `left_object` says
+    which box it is. A picture drawn out of a box another member of the unit is tied to has no
+    box of its own (it was never an object of the person's), so a unit written over one of those
+    leaves nothing behind - and this check stays silent about it without being told to."""
     if base.get("origin") != adopt_sync.ORIGIN:
         return []
     out = []
@@ -863,19 +869,24 @@ def _doubled(base: dict, live: dict, after: dict, mplan: dict) -> list[dict]:
         if p["action"] != "update" or p.get("base") is None:
             continue
         b = base["slides"][p["base"]]
-        blind = {k for members in merge.units(b["elements"]).values()
-                 for k in merge.blind_members(members)}
-        made = [s for s in after["slides"] if s["objectId"] == p.get("objectId")]
-        fresh = {o for s in made for o in s["objects"] if o not in before}
-        for u in p["units"]:
-            if u["action"] in ("recreate", "move") and fresh and blind & set(u.get("base_members") or []):
-                # `report`, not `loss`: the sync reported the source change as applied, and what the
-                # slide shows is both versions of it.
-                out.append(loss_oracle.finding(
-                    "adopt_double", "report",
-                    f"unit {u['key']} was {u['action']}d although {sorted(blind & set(u['base_members']))} "
-                    f"is tied to no object of the deck: the person's own object is still there",
-                    slide=b["key"], element=u["key"]))
+        made = next((s for s in after["slides"] if s["objectId"] == p.get("objectId")), None)
+        if made is None:
+            continue
+        standing = {el["key"]: el["left_object"] for el in b["elements"]
+                    if el.get("left_object") in made["objects"]}
+        # what this sync created, each saying which element it is (`snapshot.tag`); the slide key
+        # in front of it is the source's, which a renamed label makes not the base's
+        written = [rb.get("title") or "" for oid, rb in made["objects"].items() if oid not in before]
+        for ek, oid in sorted(standing.items()):
+            if not any(t.startswith(snapshot.TAG_PREFIX) and t.endswith(f"/{ek}") for t in written):
+                continue
+            # `report`, not `loss`: the sync reported the source change as applied, and what the
+            # slide shows is both versions of it.
+            out.append(loss_oracle.finding(
+                "adopt_double", "report",
+                f"element {ek} was written into this deck although the base ties it to no object of "
+                f"it: the person's own {oid} is still standing beside what was created",
+                slide=b["key"], element=ek))
     return out
 
 

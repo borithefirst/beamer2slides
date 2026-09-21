@@ -724,6 +724,25 @@ def test_a_slide_of_the_adopted_deck_no_frame_accounts_for_is_kept(world):
         assert adopt_sync.problems(base, mplan, world["live"], KEPT) == []
 
 
+def test_a_box_adopt_could_tie_to_nothing_is_not_an_object_the_person_added(world):
+    """The slide above is kept whatever happens - the question is what the person is told, and the
+    two sentences send them to different places. A deck somebody built is *made* of objects no
+    element of the source is tied to (`adopt.left_alone`, 10-80% of them), and to
+    `merge.user_objects` every one of those is an object this converter did not make. Read as an
+    edit, that says "objects added" about a slide nobody has touched since adopt read it - and,
+    since a foreign deck has them nearly everywhere, it says it about the whole deck and the
+    sentence that is actually true ("the deck's own") is never reached at all.
+
+    What a person really added is still an edit, and still says so."""
+    b = next(s for s in world["base"]["slides"] if s.get("left_alone"))
+    read = next(s for s in world["live"]["slides"] if s["objectId"] == b["objectId"])
+    assert [o["objectId"] for o in merge.user_objects(b, read)] == b["left_alone"], \
+        "the person's own boxes are on their slide, and no element of the source names one"
+    assert merge.slide_touched(b, read) == [], "none of which is a thing they did to it"
+    read["objects"]["theirs"] = W.readback("shape", [10.0, 10.0, 60.0, 30.0])
+    assert merge.slide_touched(b, read) == ["objects added"]
+
+
 def test_a_frame_put_back_finds_the_slide_that_was_kept_for_it(world):
     """What keeping costs: `sync.new_base`'s `keep_removed` takes the label off that base entry - a
     slide the source no longer describes must not hold a live label hostage - so when the author
@@ -841,6 +860,21 @@ def test_a_cell_of_a_table_of_the_decks_is_named_for_what_it_is(world):
         "and the rest of the deck is synced as usual"
 
 
+def an_icon_over_a_tied_box(base):
+    """An icon the converter read out of a text box, on a slide where that box really is tied to one
+    of the person's objects.
+
+    The world refuses a share of every deck's pairings (`fuzz_world.build_adopt_base`), so some of
+    its icons hang off a box that went unpaired itself - a unit frozen by the words, which is not
+    what the two tests below are about."""
+    for s in base["slides"]:
+        for el in s["elements"]:
+            host = next((e for e in s["elements"] if e["key"] == el.get("drawn_from")), None)
+            if host is not None and host.get("objects"):
+                return el, host
+    return None, None
+
+
 def test_a_picture_drawn_out_of_this_units_own_box_does_not_freeze_it(world):
     """Not a fourth voice but the end of the question. A unit whose every member names an object is
     written; one member naming none freezes it, because sync deletes a unit's old objects through
@@ -851,10 +885,8 @@ def test_a_picture_drawn_out_of_this_units_own_box_does_not_freeze_it(world):
     be edited from the source once the converter had read an icon out of it."""
     base = copy.deepcopy(world["base"])
     doc = copy.deepcopy(world["doc"])
-    icon = next((e for s in base["slides"] for e in s["elements"] if e.get("drawn_from")), None)
+    icon, words = an_icon_over_a_tied_box(base)
     assert icon is not None, "the world draws an adopted deck with an icon read out of a text box"
-    host = next(s for s in base["slides"] if icon in s["elements"])
-    words = next(e for e in host["elements"] if e["key"] == icon["drawn_from"])
     ir = next(e for s in doc["slides"] for e in s["elements"] if e["id"] == words["ir"]["id"])
     ir["paragraphs"][0]["runs"] = [W.run("the source says something else now")]
     mplan = merge.plan_merge(base, W.build_ours(doc, base, world["out"]), world["live"])
@@ -871,9 +903,7 @@ def test_a_picture_drawn_out_of_another_units_box_still_freezes_this_one(world):
     somebody's slide this whole gate is about."""
     base = copy.deepcopy(world["base"])
     doc = copy.deepcopy(world["doc"])
-    icon = next(e for s in base["slides"] for e in s["elements"] if e.get("drawn_from"))
-    host = next(s for s in base["slides"] if icon in s["elements"])
-    words = next(e for e in host["elements"] if e["key"] == icon["drawn_from"])
+    icon, words = an_icon_over_a_tied_box(base)
     icon["drawn_from"] = "a box of another unit"
     ir = next(e for s in doc["slides"] for e in s["elements"] if e["id"] == words["ir"]["id"])
     ir["paragraphs"][0]["runs"] = [W.run("the source says something else now")]

@@ -380,10 +380,21 @@ def build_adopt_base(doc, out: Path, rng: random.Random) -> dict:
       and the campaign's whole job here is the deck that is not gentle.
 
     Groups are gone as well: adopt records none (`groups: []`), because a group on an adopted slide
-    was made by the person and is theirs to keep."""
+    was made by the person and is theirs to keep.
+
+    **And the box an unpaired element could not be tied to is still on the slide.** That is the
+    whole shape of an adopted deck and this world used to take it off the page: an element the
+    pairing refused had its object deleted along with the pairing, so the campaign ran against a
+    deck where the person's own unpaired content simply did not exist - 10-80% of a real one.
+    Everything that reads the live deck was blind to it. `merge.user_objects` saw none, so the
+    loss oracle guarded none, so nothing could observe a created object landing on somebody's box
+    or a second box appearing beside it, which is exactly the harm the first sync into a person's
+    deck can do. `adopt.left_alone` is what a real base calls these, and they are what
+    `fuzz_sync._doubled` watches; `left_object` on the element is this world saying which box it
+    was, a fact about the deck it drew and not a rule about what may be written to it."""
     base = build_base(doc, out)
     rate = rng.uniform(0.0, 0.9)   # this deck's own (see above); 0 is a deck that paired throughout
-    unpaired = 0
+    unpaired, alone = 0, []
     for n, entry in enumerate(base["slides"]):
         sid = f"gx{n:x}{h6(str(n))}"
         rename = {entry["objectId"]: sid}
@@ -393,26 +404,38 @@ def build_adopt_base(doc, out: Path, rng: random.Random) -> dict:
         entry["objectId"] = sid
         entry["groups"] = []
         entry["group_readback"] = {}
+        # An anchored picture never pairs and leaves nothing behind either: the icon at the head of
+        # a line and the picture of a formula in it were drawn out of the person's *text box*, and
+        # nothing in the deck is shaped like one alone. So it has no object of its own and names the
+        # member that has the box's (`adopt_sync.drawn_from`) - the one blind member a unit may be
+        # written over, and only while that member really is tied to something: where the box itself
+        # went unpaired below, `merge.covered` finds no object to delete and the unit stays frozen.
+        keys = {el["key"] for el in entry["elements"]}
+        drawn = {el["key"] for el in entry["elements"] if el.get("anchor") in keys}
+        left, order = {}, []
         for el in entry["elements"]:
             oids = [rename[o] for o in el["objects"]][:1]  # one object per element: no groups
-            if oids and rng.random() < rate:
-                oids, unpaired = [], unpaired + 1        # a pairing adopt refused to make
-            old_main = el["main"]
-            el["readback"] = {oids[0]: {**el["readback"][old_main], "parent_group": None}} if oids else {}
-            el["objects"], el["main"] = oids, oids[0] if oids else None
-        # An anchored picture never pairs: the icon at the head of a line and the picture of a
-        # formula in it were drawn out of the person's *text box*, and nothing in the deck is
-        # shaped like one alone. So it has no object and names the member that has the box's
-        # (`adopt_sync.drawn_from`) - the one blind member a unit may be written over.
-        tied = {el["key"] for el in entry["elements"] if el["objects"]}
-        for el in entry["elements"]:
-            if el.get("anchor") in tied and el["objects"]:
-                el["readback"], el["objects"], el["main"] = {}, [], None
+            rb = {**el["readback"][el["main"]], "parent_group": None} if oids else None
+            refused = bool(oids) and rng.random() < rate   # a pairing adopt refused to make
+            if el["key"] in drawn:
+                oids, rb = [], None
                 el["drawn_from"] = el["anchor"]
-        entry["order"] = [o for el in entry["elements"] for o in el["objects"]]
+            elif refused:
+                left[oids[0]] = rb                        # the person's box, standing where it is
+                el["left_object"] = oids[0]
+                oids, rb, unpaired = [], None, unpaired + 1
+            el["readback"] = {oids[0]: rb} if oids else {}
+            el["objects"], el["main"] = oids, oids[0] if oids else None
+            order += oids or ([el["left_object"]] if el.get("left_object") else [])
+        entry["left_readback"] = left   # (fuzz world only: what `live_of` puts on the page)
+        entry["order"] = order
+        if left:
+            entry["left_alone"] = list(left)   # (a real base says this too: `adopt_sync.build_base`)
+            alone.append({"slide": entry["key"], "objects": list(left)})
     return {**base, "generation": 0, "origin": "adopt", "master_background": None,
             "adopt": {"presentationId": base["presentationId"], "deck_page_size": base["deck_page_size"],
-                      "frame_width": 720.0, "slides": len(base["slides"]), "unpaired": unpaired}}
+                      "frame_width": 720.0, "slides": len(base["slides"]), "unpaired": unpaired,
+                      "left_alone": alone}}
 
 
 def build_ours(doc, base, out: Path) -> dict:
@@ -455,6 +478,9 @@ def live_of(base) -> dict:
             for oid, rb in el["readback"].items():
                 objects[oid] = copy.deepcopy(rb)
         objects.update(copy.deepcopy(s.get("group_readback") or {}))
+        # the person's own boxes an adopted base could tie to nothing: on the page, named by no
+        # element, and nothing this converter writes may take them away (`build_adopt_base`)
+        objects.update(copy.deepcopy(s.get("left_readback") or {}))
         slides.append({"objectId": s["objectId"], "layoutObjectId": "L",
                        "background": copy.deepcopy(s["background_readback"]), "notes": s["notes_readback"],
                        "notes_id": f"{s['objectId']}_notes", "order": list(s["order"]), "objects": objects})
@@ -876,6 +902,12 @@ def rebase(base, ours, after, mplan, tok="2zz") -> dict:
                 # delete / none: gone
             entry.update(objectId=sid, layoutObjectId=b.get("layoutObjectId"), groups=list(b.get("groups", [])),
                          order=list(read.get("order") or b.get("order", [])))
+            if b.get("left_readback"):
+                # the person's unpaired boxes are still theirs a sync later (`build_adopt_base`,
+                # `sync.new_base`); `left_object` rides along on the kept members, which carry
+                # their old base entry
+                entry["left_readback"] = copy.deepcopy(b["left_readback"])
+                entry["left_alone"] = list(b.get("left_alone") or ())
             if p.get("background"):
                 entry["background_readback"] = read.get("background")
             else:

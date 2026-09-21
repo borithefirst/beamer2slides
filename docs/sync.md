@@ -1568,11 +1568,45 @@ something the layout draws, a box the pairing could not tell from its twin — a
 is named in the report.
 
 The campaign draws it (`fuzz_world.make_adopt_doc`: an icon anchored to a body box, which
-`build_adopt_base` gives no object and a `drawn_from`), and `fuzz_sync._doubled` states the same rule
-a second time so that loosening one of them alone fails 400 first-sync rounds. It is a rule restated
-and not an observation, and it says so: the world takes an unpaired element's object off the slide,
-so the leftover box is not there to be seen. Keeping it — as `adopt.left_alone` records it in a real
-base — is what would turn that check into a measurement.
+`build_adopt_base` gives no object and a `drawn_from`), and `fuzz_sync._doubled` watches the slide
+for what it costs to get this wrong.
+
+### The boxes an adopted deck is made of
+
+For a while that check could only restate the rule, because the world it ran in had nothing to
+observe. `fuzz_world.build_adopt_base` drew the pairing adopt refuses — and then took the person's
+object off the slide along with it, so an element tied to nothing was an element standing over
+nothing. A real adopted deck is the opposite: the pairing fails for 10-80% of the elements and
+**every one of those boxes is still on the slide**, holding somebody's words, recorded as
+`adopt.left_alone` and never touched. The campaign's deck had none of them, and so:
+
+- `merge.user_objects` found no work of the person's on any slide, so the loss oracle guarded none
+  of it — nothing could disappear, because nothing was there;
+- `fuzz_sync._doubled` had no leftover box to see, so it had to state `merge.blind_members` a second
+  time, which fails the campaign when somebody changes one of the two rules and never when a deck is
+  wrecked;
+- and **`sync.would_hide` was unmeasured here entirely** — the rule that nothing this converter
+  writes ends up over words only the deck has, on the one shape of deck where "words only the deck
+  has" is not the exception but most of the slide.
+
+The world leaves them standing now (`left_readback` on the slide, `left_object` on the element it
+was refused for), and the three follow. The oracle guards them like any other object of the person's.
+`_doubled` is an observation: the box was still there when the sync finished and beside it stands an
+object this sync created *for that very element* — two boxes where the deck had one — with nothing
+in it about `blind_members`, so it stays silent of its own accord about a picture read out of a box,
+which never was an object and leaves nothing behind. With `blind_members` answering "nothing is
+blind", **100 of 200 chained first-sync rounds fail** on it. And the occlusion rule is reached at
+last: with `fuzz_world._not_over_kept` doing nothing, **2 of 120 rounds at chain 4 hide words a
+person could read**, where the same 120 rounds in the old world found **none at all**.
+
+One sentence changed with them. `merge.slide_touched` asks why a slide counts as edited, and
+"objects added" was every object on it the converter did not make — which in an adopted deck is the
+deck itself. So a slide no frame accounts for was kept and the person told they had added objects to
+it, about a slide nobody had touched since adopt read it, and the sentence that is true there ("the
+deck's own", with the door it names) was never reached at all. The base records the boxes per slide
+(`adopt_sync.build_base`, carried by `sync.new_base` at every generation: they are never adopted, so
+a base that forgot them would start calling them added at generation 2) and `slide_touched` leaves
+them out. What a person really added is still an edit and still says so.
 
 **The refusals** (`adopt_sync.problems`, one message, `--force-adopted-deck` to go ahead anyway):
 
@@ -1593,7 +1627,8 @@ base — is what would turn that check into a measurement.
 - **unpaired.** The source changed an element the base could not tie to any object. Sync deletes a
   recreated unit's old objects through the base, and an unpaired element names none — so the
   person's box would stay where it is and a second one would appear beside it. Nothing is lost, and
-  that is why the loss oracle cannot see it; `fuzz_sync._doubled` is what does.
+  that is why the loss oracle cannot see it; `fuzz_sync._doubled` is what does — by looking at the
+  slide the sync left behind (above).
   This one is no longer the *sync's* answer, only its last gate: **`merge.plan_unit` keeps that one
   unit** as the deck has it and reports a conflict (`field: unpaired`, plus one warning per sync
   saying what to do), and everything else goes in. Refusing the whole sync was the wrong size of

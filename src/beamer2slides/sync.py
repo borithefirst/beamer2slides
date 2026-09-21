@@ -1953,6 +1953,10 @@ class Sync:
                 doomed = w.get("doomed") or set()
                 entry.update(objectId=sid, layoutObjectId=b.get("layoutObjectId"), groups=b.get("groups", []),
                              order=[x for x in read["order"] if x not in doomed] if read else b.get("order", []))
+                if b.get("left_alone"):
+                    # the person's own unpaired objects stay theirs at every generation
+                    # (`adopt_sync.build_base`, `merge.slide_touched`)
+                    entry["left_alone"] = list(b["left_alone"])
                 if p.get("background"):
                     entry["background_readback"] = read["background"] if read else None
                 else:

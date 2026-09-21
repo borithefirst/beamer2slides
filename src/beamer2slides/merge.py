@@ -1119,7 +1119,13 @@ def slide_touched(b: dict, read: dict) -> list[str]:
     why = []
     if any(deck_edits(e, read) for e in b["elements"]):
         why.append("elements edited")
-    if user_objects(b, read):
+    # An adopted deck's slide is full of objects this converter did not make and nobody added:
+    # what the pairing could not tie to any element of the source (`adopt.left_alone`). Counting
+    # those as "objects added" says the person edited a slide they have not touched since adopt
+    # read it - and, since a foreign deck has them nearly everywhere, it says that about the whole
+    # deck and hides the sentence below it ("the deck's own").
+    left = set(b.get("left_alone") or ())
+    if any(o["objectId"] not in left for o in user_objects(b, read)):
         why.append("objects added")
     if b.get("notes_readback", "") != read.get("notes", ""):
         why.append("notes edited")

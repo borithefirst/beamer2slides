@@ -21,6 +21,7 @@ The live campaign (real decks, marker `sync`) is opt-in:
 
 import copy
 import os
+import random
 import re
 from pathlib import Path
 
@@ -28,7 +29,9 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 
+from beamer2slides import merge
 from beamer2slides.devtools import fuzz_sync
+from beamer2slides.devtools import fuzz_world as W
 from beamer2slides.devtools import loss_oracle
 from beamer2slides import snapshot
 
@@ -65,6 +68,38 @@ def test_offline_round_on_an_adopt_shaped_deck_loses_nothing(seed):
         small = fuzz_sync.shrink_offline(result, shape="adopt")
         pytest.fail(f"adopt seed {seed} lost something\n{loss_oracle.describe(small['failures'])}\n"
                     f"  deck:   {'; '.join(small['deck'])}\n  source: {'; '.join(small['source'])}")
+
+
+def test_the_first_sync_world_leaves_the_persons_unpaired_boxes_on_their_slide(tmp_path):
+    """What a deck a person built is made of, and what the campaign was blind to until it had them.
+
+    `adopt` ties an element of the conversion to an object of the deck or to nothing, and a real
+    deck answers "nothing" for 10-80% of them - but the *box* is still there, on the slide, saying
+    what the person wrote (`adopt.left_alone`). This world used to delete it along with the
+    pairing, so everything that reads the live deck saw an adopted deck as an empty one:
+    `merge.user_objects` found none of the person's work, the loss oracle guarded none of it, and
+    `sync.would_hide` - the rule that nothing this converter writes ends up over words only the
+    deck has - had nothing on any slide to be measured against.
+
+    The one element that really leaves nothing behind is the picture read out of somebody's text
+    box: it was never an object of theirs (`adopt_sync.drawn_from`, `merge.covered`)."""
+    rng = random.Random(11)
+    doc = W.make("adopt", rng, tmp_path)
+    base = W.build_adopt_base(doc, tmp_path, rng)
+    live = {s["objectId"]: s for s in W.live_of(base)["slides"]}
+    left = [el for s in base["slides"] for el in s["elements"] if el.get("left_object")]
+    drawn = [el for s in base["slides"] for el in s["elements"] if el.get("drawn_from")]
+    assert left and drawn, "the world draws both kinds of element tied to no object"
+    assert not any(el.get("objects") for el in left + drawn)
+    for s in base["slides"]:
+        read = live[s["objectId"]]
+        theirs = {o["objectId"] for o in merge.user_objects(s, read)}
+        assert theirs == set(s.get("left_alone") or ()), "the person's own boxes, and only those"
+        assert all(el["left_object"] in read["objects"] and el["left_object"] in read["order"]
+                   for el in s["elements"] if el.get("left_object"))
+        tied = {el["main"] for el in s["elements"] if el.get("main")}
+        assert set(read["objects"]) == tied | theirs, \
+            "and nothing standing for a picture the converter read out of one of them"
 
 
 def test_a_broken_label_invariant_sends_far_fewer_slides_to_the_wrong_frame(tmp_path):

@@ -919,9 +919,26 @@ new picture would be the duplicate this gate is about), and `merge.blind_members
 and the `unpaired` refusal both read, so the two cannot drift. Over the corpus, 27 decks and 4,171
 units: **1,184 units frozen by a member tied to nothing, 40 of them no longer** (23 formula pictures,
 20 icons, 16 figures). Small on purpose - each is a box the source could never have said another word
-in for the life of that deck. The campaign draws it (`make_adopt_doc`'s anchored icon) and
-`fuzz_sync._doubled` restates the rule, which it must: the world takes an unpaired element's object
-off the slide, so the leftover box that check describes is not there to be seen.
+in for the life of that deck. The campaign draws it (`make_adopt_doc`'s anchored icon).
+**And the boxes the rest of them stand over are on the slide now.** `fuzz_world.build_adopt_base`
+used to take an unpaired element's object off the page along with the pairing, so the campaign's
+adopted deck was one where the person's own unpaired content - 10-80% of a real one - did not exist:
+`merge.user_objects` found none of it, the loss oracle guarded none of it, and `sync.would_hide`, the
+rule that nothing this converter writes ends up over words only the deck has, was unmeasured on the
+one shape of deck where such words are most of the slide. They stand now (`left_readback`,
+`left_object`, `adopt.left_alone` as a real base records it), and three things follow. The oracle
+guards them like any other object of the person's. `fuzz_sync._doubled` is an **observation** rather
+than `merge.blind_members` restated - the box was still there when the sync finished and beside it
+stands an object this sync created for that very element - and with `blind_members` answering
+"nothing is blind", 100 of 200 chained first-sync rounds fail on it. And with `_not_over_kept` doing
+nothing, 2 of 120 rounds at chain 4 hide words a person could read, where the same 120 rounds in the
+old world found none at all. One sentence changed with them: `merge.slide_touched`'s "objects added"
+counted every object the converter did not make, which in an adopted deck is the deck itself, so a
+slide no frame accounts for was kept and the person told they had added objects to a slide nobody had
+touched - and "the deck's own", the sentence that names the door, was never reached. The base records
+those objects per slide (`adopt_sync.build_base`, carried by `sync.new_base`: they are never adopted,
+so a base that forgot them would call them added at generation 2) and `slide_touched` leaves them
+out; what a person really added is still an edit.
 Then `Sync.check_plan` runs between planning and any write and **refuses** four things
 (`adopt_sync.problems` / `refusal_message`, every message asserted verbatim in `tests/test_adopt_sync.py`):
 a unit whose base members include an **unpaired** element (writing it puts a second object beside the

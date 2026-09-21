@@ -516,6 +516,15 @@ def build_base(conv_deck: dict, conv_out: Path, target: dict, pres: dict, pdf: P
     base["master_background"] = None
     base["origin"] = ORIGIN
     unpaired, from_layout, from_box = [], [], []
+    for entry, oids in zip(base["slides"], leftovers):
+        # The person's own objects this conversion draws nothing for. They are on the slide and
+        # they are not an edit: `merge.slide_touched` would otherwise read a deck a person built
+        # as one they had just added objects to, and say so about every slide of it. Recorded per
+        # slide and not only in the summary below, because that is where the merge reads, and
+        # carried by every later base (`sync.new_base`): they are never adopted, so a sync that
+        # forgot them would start calling them added at generation 2.
+        if oids:
+            entry["left_alone"] = oids
     for entry, why, lay, cells, mate in zip(base["slides"], whys, layouts, celled, mates):
         for i, el in enumerate(entry["elements"]):
             if i not in why:
