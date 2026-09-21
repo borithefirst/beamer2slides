@@ -7,10 +7,16 @@ pip install beamer2slides          # from a checkout: pip install -e .
 beamer2slides convert talk.pdf
 ```
 
-The wheel is pure Python. Its dependencies (pypdfium2, numpy, pillow, python-pptx and the
-Google API client) all ship wheels, so no compiler and no TeX distribution are needed: the
-input is the compiled PDF. A TeX distribution is only needed for the test decks and for
+The wheel is pure Python. Its dependencies (pypdfium2, numpy, pillow, python-pptx, fontTools
+and the Google API client) all ship wheels, so no compiler and no TeX distribution are needed:
+the input is the compiled PDF. A TeX distribution is only needed for the test decks and for
 `pull`/`converge`, which recompile the source.
+
+fontTools was the `[pure]` extra alone until it turned out that `adopt` cannot do without it
+either - it reads which faces a machine has and what they cover, how wide a stand-in sets the
+deck's words, and the static instances cut out of a variable font fetched from google/fonts. An
+install without it read a foreign deck, fetched its fonts and then died on `import fontTools`
+with the source tree unwritten. `[pure]` still names it, so an older command line still works.
 
 The measured font substitutes (`calibration/fonts.json`, `fonts_serif.json`) ship inside the
 package, so an installed beamer2slides places text exactly like the checkout does.

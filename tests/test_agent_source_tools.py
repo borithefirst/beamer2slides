@@ -120,6 +120,16 @@ def test_adopt_refuses_a_source_that_is_already_there(tmp_path):
     assert res.data["tex"] == "main.tex"
 
 
+def test_adopt_writes_into_a_file_somebody_made_to_name_it(tmp_path):
+    """Making the file first is what a person does when a form asks them to name one - and in the
+    workbench's editor it is the only way to name one at all. The refusal used to fire on it, so
+    the one journey that cannot be re-aimed refused its own target (2026-09-21). It gets past the
+    gate here and stops at the deck, which is the next thing wrong and not this one."""
+    (tmp_path / "main.tex").write_text("", encoding="utf-8")
+    res = deck_adopt(with_google(tmp_path), deck="nosuch.json", tex="main.tex")
+    assert not res.ok and res.code == "not_found", res.json()
+
+
 def test_pull_refuses_a_deck_that_names_nothing(tmp_path):
     """A ref with a path in it is a folder that has to be there; a bare word is a presentation id."""
     (tmp_path / "main.tex").write_text("\\documentclass{beamer}\n", encoding="utf-8")

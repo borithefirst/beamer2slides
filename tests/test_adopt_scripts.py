@@ -292,3 +292,25 @@ def test_a_glyph_bullet_is_text_its_face_must_draw():
     dot = {**para, "bullet": {"kind": "glyph", "text": "\u25cf"}}
     got = list(scripts.deck_text({"slides": [{"elements": [{"paragraphs": [para, dot]}]}]}))
     assert ("\u2794", "Alegreya", "sans") in got and not any(t == "\u25cf" for t, _, _ in got)
+
+
+def test_a_machine_without_fonttools_loses_the_fallback_chain_and_not_the_source(
+        font_folder, tmp_path, monkeypatch, capsys):
+    """It is a plain dependency now (pyproject.toml), and where it is missing anyway what goes is
+    the chain, not the tree: the playground's own image had none, so `deck_adopt` read the deck,
+    fetched its fonts, wrote figures, shapes and fonts, and then died on `import fontTools` with
+    main.tex unwritten - minutes of Google thumbnails for nothing (2026-09-21)."""
+    import builtins
+    make_font(font_folder, "Segoe UI Symbol", "\u2192")
+    real = builtins.__import__
+
+    def refuse(name, *a, **k):
+        if name.split(".")[0] == "fontTools":
+            raise ModuleNotFoundError("No module named 'fontTools'", name=name)
+        return real(name, *a, **k)
+
+    scripts._FACES.clear()
+    scripts._SAID = False
+    monkeypatch.setattr(builtins, "__import__", refuse)
+    assert scripts.script_preamble(target_with("go \u2192 on"), tmp_path / "tree") == []
+    assert "fontTools is not installed" in capsys.readouterr().out

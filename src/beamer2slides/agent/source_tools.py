@@ -167,8 +167,10 @@ def deck_adopt(
     keepable that source is - sources people wrote score 0.6-1.0. A `.json` deck is read locally,
     but `needs` is static, so credentials are fetched anyway and an offline context refuses.
     """
+    from ..adopt import written_already
+
     tex_path = j.path(tex, write=True)
-    if tex_path.exists():
+    if written_already(tex_path):
         # adopt's own refusal, made before the minutes of thumbnails rather than after them.
         j.suggest("deck_pull to refine an existing source instead")
         raise Refused("source_exists",

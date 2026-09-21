@@ -33,7 +33,8 @@ a per-slide background picture.
   (19 s vs 25 s). PDFium's text and path output reproduces what the MuPDF-based extraction gave (span
   splitting at word gaps, `re`/`qu` path items, char boxes from font ascent/descent), so classify's
   thresholds still hold.
-- **A PDF reader from scratch** (`pdf/pure/`, docs/pdf-from-scratch.md, extra `[pure]` = fontTools):
+- **A PDF reader from scratch** (`pdf/pure/`, docs/pdf-from-scratch.md, fontTools - a plain
+  dependency since `adopt` turned out to need it too, `[pure]` still naming it):
   a pure Python port of the PDFium parts the pipeline reads (syntax, filters, xref/repair, colour
   spaces, fonts, content stream, CPDF_TextPage with bidi over PDFium's own Unicode tables,
   `tools/pdfium_unicode_data.py`), answering the contract *as PDFium does*,
@@ -874,7 +875,15 @@ Linked charts are their `contentUrl` picture, videos their poster frame (YouTube
 letterbox cut; Drive: a play panel) inside an `\href`, WordArt its `renderedText` in a `\resizebox*`;
 a page beamer has no ratio for is written with `\geometry{papersize}`; fonts the machine lacks are
 fetched from google/fonts into a user cache and variable ones cut into static instances
-(`fontfetch.py`, `$B2S_FONT_FETCH=0` / `$B2S_FONTS` turn it off). Tests: `tests/test_adopt_media.py`.
+(`fontfetch.py`, `$B2S_FONT_FETCH=0` / `$B2S_FONTS` turn it off). Every one of those reads font
+files with fontTools, which is why it is a plain dependency and no longer the `[pure]` extra alone:
+the playground's image had none, so `deck_adopt` read the deck, fetched its fonts, wrote figures,
+shapes and fonts and then died on `import fontTools` with main.tex unwritten - minutes of Google
+thumbnails for nothing. Where it is missing anyway, what goes is the fallback chain and not the
+tree (`scripts.faces` says so once). A `tex` that exists but is **empty** is a name and not a
+source (`adopt.written_already`): making the file first is what a person does when a form asks
+them to name one, and in the workbench's editor it is the only way to name one at all.
+Tests: `tests/test_adopt_media.py`.
 Text boxes follow Slides' text model line by line (`adopt.text_box_latex`: `\vbox to` the box height
 for TOP/MIDDLE/BOTTOM, Slides' pitch per paragraph through `\prevdepth`, spaceAbove/Below with
 COLLAPSE_LISTS, indents, ● ○ ■ drawn at their measured size, no hyphenation or space shrink, each

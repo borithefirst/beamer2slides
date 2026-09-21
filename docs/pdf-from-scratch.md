@@ -6,7 +6,7 @@ does**, rendering excepted:
 
 ```
 B2S_PDF_BACKEND=pure python -m beamer2slides classify deck.pdf
-pip install beamer2slides[pure]      # fontTools
+pip install beamer2slides[pure]      # fontTools, a plain dependency since adopt needed it too
 ```
 
 It exists to answer "could we replace PDFium with our own code?" with a measurement instead of a

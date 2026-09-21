@@ -12,11 +12,19 @@ dependencies = [
     "python-pptx>=1.0",
     "google-api-python-client>=2.0",
     "google-auth-oauthlib>=1.2",
+    # Font files, which `adopt` cannot do without: which faces this machine has and what they cover
+    # (scripts.py), how wide a stand-in sets the deck's words (adopt.font_widths, deck_thumbs), and
+    # the static instances cut out of a variable font fetched from google/fonts (fontfetch.py). It
+    # was the `[pure]` extra alone, for the pure PDF backend - and an install without it read a
+    # foreign deck, fetched its fonts and then died on `import fontTools` with the source tree
+    # unwritten (the playground's own image, 2026-09-21).
+    "fonttools>=4.40",
 ]
 
 [project.optional-dependencies]
 # The pure Python PDF backend (B2S_PDF_BACKEND=pure, docs/pdf-from-scratch.md) reads embedded font
-# programs and the Adobe Glyph List through fontTools.
+# programs and the Adobe Glyph List through fontTools. A plain dependency since the day adopt
+# needed it too; the name stays, so what the docs and older installs ask for still resolves.
 pure = ["fonttools>=4.40"]
 # The MCP server (`beamer2slides.agent.mcp`) speaks the protocol through the reference SDK.
 # Everything else in beamer2slides.agent - the tools, the schemas, `mcp.dispatch` - works without it.

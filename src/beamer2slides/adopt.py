@@ -3524,6 +3524,14 @@ def record_base(target: dict, pres: dict | None, tex: Path, work: Path, engine: 
     return base
 
 
+def written_already(tex: Path) -> bool:
+    """Whether `tex` is a source adopt must not write over - which an **empty** file is not.
+
+    Making the file first is what a person does when something asks them to name one, and it is
+    the only way to name one in the playground's editor; a nothing there is a name, not work."""
+    return Path(tex).exists() and Path(tex).stat().st_size > 0
+
+
 def cmd_adopt(deck: str, tex: Path, work: Path | None, apply: bool, out: Path | None, max_iter: int,
               engine: str | None, flow: bool, target_path: Path | None = None, base: bool = True,
               base_in_drive: bool = False, log=print):
@@ -3541,7 +3549,7 @@ def cmd_adopt(deck: str, tex: Path, work: Path | None, apply: bool, out: Path | 
         target = read_deck(deck, images=work / "target-images", foreign=True, keep=kept)
         pres = kept.get("presentation")
     log(f"deck: {len(target['slides'])} slides read")
-    if tex.exists():
+    if written_already(tex):
         raise SystemExit(f"{tex} exists already: adopt writes a new source tree (use `pull` to refine one)")
     bootstrap(target, tex, flow)
     log(f"wrote {tex} ({len(target['slides'])} frames)")

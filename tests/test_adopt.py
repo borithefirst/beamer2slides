@@ -434,6 +434,16 @@ def test_adopt_refuses_to_write_over_a_source(tmp_path):
         raise AssertionError("adopt overwrote a source that was already there")
 
 
+def test_a_file_with_nothing_in_it_is_a_name_and_not_a_source(tmp_path):
+    """Making the file first is what a person does when asked to name one - and in the
+    playground's editor it is the only way to name one. An empty file is no work to lose."""
+    (tmp_path / "main.tex").write_text("", encoding="utf-8")
+    assert not adopt.written_already(tmp_path / "main.tex")
+    assert not adopt.written_already(tmp_path / "nothing-here.tex")
+    (tmp_path / "main.tex").write_text("%\n", encoding="utf-8")
+    assert adopt.written_already(tmp_path / "main.tex")
+
+
 def test_lengths_are_written_in_pdf_points_and_the_deck_words_are_left_alone():
     """The IR is in bp; TeX's pt is 72.27 to the inch, so written as pt every element came out 0.37%
     too close to the page corner. A "12pt" typed on a slide is words, not a length."""

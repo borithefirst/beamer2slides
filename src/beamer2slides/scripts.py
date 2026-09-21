@@ -122,6 +122,16 @@ class Face:
 
 _FACES: dict[tuple, list[Face]] = {}
 _CMAPS: dict[tuple, frozenset] = {}
+_SAID = False
+
+
+def _warn_no_fonttools() -> None:
+    """Said once per process, where the library says everything else: into adopt's own log."""
+    global _SAID
+    if not _SAID:
+        _SAID = True
+        print("  fontTools is not installed, so no font on this machine can be read: the deck's "
+              "symbols and non-Latin letters get no fallback font (pip install fonttools)")
 
 
 def flatten(name: str) -> str:
@@ -130,12 +140,23 @@ def flatten(name: str) -> str:
 
 def faces() -> list[Face]:
     """Every face in the font folders adopt looks in (`adopt.font_dirs`), by the names it gives
-    itself (a family name is what a deck says: "MS PGothic" is face 2 of msgothic.ttc). Read once."""
+    itself (a family name is what a deck says: "MS PGothic" is face 2 of msgothic.ttc). Read once.
+
+    Nothing on a machine with no fontTools: the fallback chain is then empty and the deck's
+    symbols and non-Latin letters are set in whatever the main font has. It is a plain dependency
+    (pyproject.toml), so this is the stripped install nobody meant to make - and losing a fallback
+    chain is a source of lesser fidelity, while raising here loses the source tree altogether,
+    after the minutes of thumbnails adopt has already spent."""
     from .adopt import font_dirs
     dirs = tuple(font_dirs())
     if dirs in _FACES:
         return _FACES[dirs]
-    from fontTools.ttLib import TTFont, TTCollection
+    try:
+        from fontTools.ttLib import TTFont, TTCollection
+    except ImportError:
+        _warn_no_fonttools()
+        _FACES[dirs] = []
+        return []
     out: list[Face] = []
     for folder in dirs:
         files = [f for pat in ("*.tt[fc]", "*.otf", "*.TT[FC]", "*.OTF", "*/*.tt[fc]", "*/*.otf")
@@ -164,8 +185,8 @@ def faces() -> list[Face]:
 def coverage(face: Face) -> frozenset:
     key = (face.path, face.index)
     if key not in _CMAPS:
-        from fontTools.ttLib import TTFont
         try:
+            from fontTools.ttLib import TTFont
             font = TTFont(face.path, fontNumber=face.index, lazy=True)
             _CMAPS[key] = frozenset(font.getBestCmap() or {})
             font.close()
