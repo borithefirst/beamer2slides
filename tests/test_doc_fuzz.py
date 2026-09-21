@@ -1831,6 +1831,100 @@ def test_a_block_whose_only_change_was_a_mark_is_not_one_the_source_may_delete()
     assert again["applied"] == []
 
 
+def test_a_bold_the_source_grew_over_the_word_before_it_is_written():
+    """`marks_of` drops a block's words so that a chip splitting a run says nothing
+    about marks — and drops the boundaries with them.
+
+    So a source that takes its bold one word further left asks for a restyle whose
+    alternation of mark sets is the one that was already there, the merge read the
+    file as saying nothing, and the sync wrote nothing and reported nothing
+    (offline chain-10 seed 2040246, shape `equations`). `_remarked` asks the words
+    both sides have, which is where a boundary lives.
+    """
+    world, ours, base = _build([_para("the value holds everywhere"), _para("The end.")])
+    part = doc_world.read_ir(world, ours, base)
+    start = part["blocks"][0]["span"][0]
+    world.apply([{"updateTextStyle": {                    # the reader bolds the last word
+        "range": {"startIndex": start + 16, "endIndex": start + 26},
+        "textStyle": {"bold": True}, "fields": "bold"}}])
+    was, mine = copy.deepcopy(base), copy.deepcopy(ours)
+    report, ours, base = fuzz_docs.sync_once(world, ours, base)
+    assert not oracle.failures(oracle.check(was, doc_world.settled_ir(world, mine, was),
+                                            base, report, mine))
+    # The source now asks for the bold one word wider, and for nothing else at all.
+    ours["blocks"][0]["runs"] = [{"text": "the value"},
+                                 {"text": " holds everywhere", "bold": True}]
+    was, mine = copy.deepcopy(base), copy.deepcopy(ours)
+    before = doc_world.settled_ir(world, ours, base)
+    report, ours, base = fuzz_docs.sync_once(world, ours, base)
+    assert not oracle.failures(oracle.check(was, before, base, report, mine))
+    live = doc_world.read_ir(world, ours, base)
+    assert [(r["text"], r.get("bold")) for r in live["blocks"][0]["runs"]] == \
+        [("the value", None), (" holds everywhere", True)]
+    again, _, _ = fuzz_docs.sync_once(world, copy.deepcopy(ours), copy.deepcopy(base))
+    assert again["applied"] == []
+
+
+def test_a_word_the_reader_marked_is_not_a_restyle_when_the_source_only_rewords():
+    """And the noise `_remarked` must not make: it is asked of the words both sides
+    have, so a source that only rewords says nothing about marks.
+
+    Were it asked of the text as it stands, a reader who bolds a word in a
+    paragraph the source is rewording elsewhere would come back as both sides
+    restyling it — a note in the report about a restyle the source never asked
+    for, and the merge's word-by-word path taken for nothing.
+    """
+    world, ours, base = _build([_para("alpha beta gamma"), _para("The end.")])
+    part = doc_world.read_ir(world, ours, base)
+    start = part["blocks"][0]["span"][0]
+    world.apply([{"updateTextStyle": {
+        "range": {"startIndex": start + 6, "endIndex": start + 10},
+        "textStyle": {"bold": True}, "fields": "bold"}}])
+    was, mine = copy.deepcopy(base), copy.deepcopy(ours)
+    ours["blocks"][0]["runs"][0]["text"] = "alpha beta epsilon"
+    before = doc_world.settled_ir(world, ours, base)
+    report, ours, base = fuzz_docs.sync_once(world, ours, base)
+    assert not oracle.failures(oracle.check(was, before, base, report, mine))
+    assert not [note for note in report["notes"] if "restyled" in note]
+    live = doc_world.read_ir(world, ours, base)
+    assert [(r["text"], r.get("bold")) for r in live["blocks"][0]["runs"]] == \
+        [("alpha ", None), ("beta", True), (" epsilon", None)]
+
+
+def test_a_block_the_reader_only_centred_is_not_one_the_source_may_delete():
+    """And the same one size up: how the paragraph is *set*.
+
+    `_edited` learned to ask the marks (the test above) and still did not ask
+    `_shape` — the block's kind, its heading or list level, its bullets'
+    ordered-ness, its alignment, its indents, its spacing, its shading, its rules.
+    A reader who centres a line has chosen something as deliberate as bolding a
+    word, and the whole of that choice lives in properties no word of the block
+    carries, so a block changed that way and no other read as untouched and the
+    source's delete took it, with nothing in the report (offline chain-6 seed
+    2050019, shape `imported_list`: the reader centres `item:bake` while the same
+    step's source drops it).
+    """
+    world, ours, base = _build([_para("alpha beta gamma"), _para("The end.")])
+    part = doc_world.read_ir(world, ours, base)
+    start, end = part["blocks"][0]["span"]
+    world.apply([{"updateParagraphStyle": {
+        "range": {"startIndex": start, "endIndex": end},
+        "paragraphStyle": {"alignment": "CENTER"}, "fields": "alignment"}}])
+    was, mine = copy.deepcopy(base), copy.deepcopy(ours)
+    ours["blocks"].pop(0)                          # the source drops that very block
+    before = doc_world.settled_ir(world, ours, base)
+    report, ours, base = fuzz_docs.sync_once(world, ours, base)
+    assert not oracle.failures(oracle.check(was, before, base, report, mine))
+    live = doc_world.read_ir(world, ours, base)
+    assert [doc_merge.block_text(b) for b in live["blocks"]] == \
+        ["alpha beta gamma", "The end."]
+    assert live["blocks"][0].get("align") == "center"
+    assert any("dropped by the source but edited in the document" in note
+               for note in report["notes"])
+    again, _, _ = fuzz_docs.sync_once(world, copy.deepcopy(ours), copy.deepcopy(base))
+    assert again["applied"] == []
+
+
 def test_a_styled_word_the_source_replaced_is_reported_with_the_styling():
     """A word the reader styled and the source then rewrote: the styling has nowhere
     to go, which is right, but nothing said so and the oracle called it lost in

@@ -2466,6 +2466,24 @@ keys, named ranges), `doc_merge.py` (pure planning), `doc_sync.py` (the commands
   key was on, and the settle keys the copy by its words to the name that went, so
   `_inherited_findings` compared two different blocks. `_twin_already` forgives it, asked of the
   words the key names *afterwards*, so a twin saying something else answers for nothing.
+  **The first campaigns run with that judge** (300 @ chain 10 from 2040000, 500 @ 6 from
+  2050000) each came back with one finding, and both were the sync's. (a) *A boundary has to be
+  a word* (2040246, `equations`): `marks_of` drops a block's words to stay deaf to a chip
+  splitting a run, and drops the **boundaries** with them, so a source taking its bold one word
+  further left - `((), 'the value  holds '), (bold, 'everywhere')` -> `((), 'the value '),
+  (bold, ' holds everywhere')` - is the alternation of mark sets that was already there: the
+  merge read the file as asking nothing and the sync wrote and said nothing. `doc_merge._remarked`
+  asks the words, and only the ones both sides have, a word one side typed or deleted being the
+  text merge's business. Only the **source's** side may be asked it: "did the reader restyle?"
+  guards a branch that gives up on the whole block, and asked as finely a reader moving a bold
+  from one word to another takes the source's italic on a third word with it, where
+  `_restyled_words` merges both (seed 400044's test fails the moment it is). (b) *A centring has
+  to be an edit* (2050019, `imported_list`): `_edited`, the test that outranks a source delete,
+  learned the marks at seed 90175 and still never asked `_shape` - kind, level, ordered-ness,
+  alignment, indents, spacing, shading, rules - the whole of which lives in properties no word
+  carries, so a block the reader had only centred read as untouched and the delete took it.
+  `ordered` counts here though the oracle leaves it out: what an import cannot *report* is
+  neither side's fault, but both readings `_edited` compares are the document's own.
 - Live suite (opt-in, marker `docs`, ~5 min): `python -m pytest -m docs tests/test_docs_live.py`
   pushes a document per test, edits both sides, syncs, checks a second sync writes nothing, and
   deletes the document. Offline: `tests/test_doc_ir.py`, `test_doc_merge.py`, `test_doc_sync.py`.

@@ -2605,6 +2605,44 @@ doing: nothing was written to the copy, and the block that really wore the theme
 source dropped and the reader left alone. `_twin_already` is the forgiveness, asked of the
 words the key names *afterwards*, so a twin saying something else answers for nothing.
 
+### A boundary has to be a word, and a centring has to be an edit
+
+The first campaigns run *with* the new paragraph-shape judge came back with one finding each
+(300 at chain 10 from 2040000, 500 at chain 6 from 2050000), and both were the sync's.
+
+**The mark whose boundary moved** (2040246, shape `equations`). `marks_of` is the question
+"did somebody change what these words are marked with", and it drops the words to stay deaf
+to a chip splitting a run in two — which drops the *boundaries* with them. So the source
+taking its bold one word further left, `((), 'the value  holds '), (bold, 'everywhere')`
+becoming `((), 'the value '), (bold, ' holds everywhere')`, is the same alternation of mark
+sets it always was: the merge read the file as asking for nothing, wrote nothing and said
+nothing. The boundary lives in the words, so `doc_merge._remarked` asks the words — and only
+the ones both sides have, since a word one side typed or deleted is the text merge's business
+and reading a changed word as a changed mark is exactly the noise `marks_of` exists to keep
+out.
+
+The two sides are then not asked the same question, and that asymmetry is the whole of the
+fix. "Is the source asking for different marks?" decides whether its restyle is written at
+all, so it must hear a moved boundary. "Did the reader restyle?" guards a branch that gives
+up on the **whole block**, and asked as finely it loses work: a reader who moves a bold from
+one word to another would take the source's italic on a third word down with it, where
+`_restyled_words` merges the two perfectly well — which is chain-6 seed 400044's test, three
+sections up, failing again the moment the finer question is asked on that side.
+
+**The centring the delete took** (2050019, shape `imported_list`). `_edited` is the test that
+outranks a source delete, the last thing standing between a reader's work and a
+`deleteContentRange`, and fresh-seed 90175 taught it to ask the marks. It still did not ask
+`_shape`: the block's kind, its heading or list level, its bullets' ordered-ness, its
+alignment, its indents, its spacing, its shading, its rules. Every one of those is a choice
+as deliberate as bolding a word, and the whole of the choice lives in properties no word of
+the block carries — so a block the reader had only centred read as untouched, and the source's
+drop took it. `ordered` counts here although `doc_loss_oracle.SHAPE_FIELDS` leaves it out:
+what an import cannot *report* is neither side's fault, but both readings `_edited` compares
+are the document's own, one sync apart, so a list the reader renumbered says so.
+
+Each was put back on purpose to see the campaign fail again, and each is pinned by a test of
+its own. Both campaigns clean afterwards, 1 → 0.
+
 ## Remaining risks
 
 1. **Pictures** — retired, see "Pictures, and the chips a request can make" above. What

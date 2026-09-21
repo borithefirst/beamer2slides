@@ -117,9 +117,21 @@ def _edited(live: dict, was: dict) -> bool:
     delete went through and took the reader's styling with the block (fresh-seed
     90175: the reader bolds a word, `collide` drops that very block in the same
     step).
+
+    And the same one size up, which is `_shape`: how the paragraph is *set*. A
+    reader who centres a line, shades it, spaces it out, makes it a heading or an
+    item, or turns a list's bullets into numbers has made a choice exactly as
+    deliberate as bolding a word — and the whole of it fits in properties no word
+    of the block carries, so a block changed that way and no other read as
+    untouched here too and the delete took it (offline chain-6 seed 2050019, shape
+    `imported_list`: the reader centres `item:bake` and the source drops it).
+    `ordered` counts, unlike in `doc_loss_oracle.SHAPE_FIELDS`: what an import
+    cannot *report* is neither side's fault, but both readings here are the
+    document's own, one sync apart, so a list the reader renumbered says so.
     """
     return (_match_text(live) != _match_text(was) or _grid(live) != _grid(was)
-            or frozen_of(live) != frozen_of(was) or _styled(live) != _styled(was))
+            or frozen_of(live) != frozen_of(was) or _styled(live) != _styled(was)
+            or _shape(live) != _shape(was))
 
 
 def _styled(block: dict) -> tuple:
@@ -508,6 +520,11 @@ def marks_of(block: dict) -> tuple:
     So this is the question "did somebody change what these words are marked
     with", and `styles_of` stays the question "is this block's styling untouched"
     that a rewrite has to ask (`_merge_block`'s frozen-content path).
+
+    It answers it too coarsely to answer it alone: with the words gone there is
+    nothing left to say *where* a mark starts, so a bold that grew leftwards over
+    the word before it reads as the same alternation of mark sets it always was.
+    `_remarked` is the other half, and `_merge_block` asks both.
     """
     out: list[frozenset] = []
     for run in block.get("runs", []):
@@ -517,6 +534,31 @@ def marks_of(block: dict) -> tuple:
         if not out or out[-1] != marks:
             out.append(marks)
     return tuple(out)
+
+
+def _remarked(was: dict, now: dict) -> bool:
+    """Whether a word both blocks have is marked differently in them.
+
+    `marks_of` drops the words to stay deaf to a chip splitting a run, and drops
+    the boundaries with them: two blocks whose bold begins at different words read
+    alike whenever the alternation of mark sets is the same. So a source that took
+    its bold one word further left — `((), 'the value  holds '), (bold,
+    'everywhere')` becoming `((), 'the value '), (bold, ' holds everywhere')` —
+    asked for a restyle the merge could not see, and the sync wrote nothing and
+    said nothing (offline chain-10 seed 2040246, shape `equations`).
+
+    The words are what carries the boundary, so the question is asked of them, and
+    only of the ones both sides have: a word one side typed or deleted is the text
+    merge's business, and reading a changed word as a changed mark is exactly the
+    noise `marks_of` exists to keep out — a reader who bolds a word while the
+    source rewords the same paragraph would come back as both sides restyling it.
+    `_restyled_words` asks its own half of this the same way and for the same
+    reason.
+    """
+    was_styles, now_styles = _char_styles(was), _char_styles(now)
+    now_text = block_text(now)
+    return any(now_text[i] != FROZEN and now_styles[i] != was_styles[w]
+               for w, i in _word_pairs(block_text(was), now_text))
 
 
 def _shape(block: dict) -> tuple:
@@ -1610,7 +1652,16 @@ def _merge_block(was: dict, mine: dict, live: dict, conflicts: list, notes: list
     # the source changed them and the document's styling is as the base has it. Where
     # the words differ too, the marks follow the words — each word of the merged text
     # the file also has takes the file's marks, the rest keep the document's.
-    if marks_of(mine) != marks_of(was):
+    # The two sides are not asked the same question, and only the source's may be
+    # asked the finer one. "Is the source asking for different marks?" decides
+    # whether its restyle is written at all, so a boundary it moved has to be heard
+    # (`_remarked`). "Did the reader restyle?" guards the branch below, which gives
+    # up on the *whole block* — asked as finely, a reader who moved a bold from one
+    # word to another would take the source's italic on a third word down with it,
+    # where `_restyled_words` merges the two perfectly well (chain-6 seed 400044,
+    # the test below it). Where that branch is not taken, a boundary the reader
+    # moved is decided downstream, as it is today.
+    if marks_of(mine) != marks_of(was) or _remarked(was, mine):
         if marks_of(live) != marks_of(was):
             # And the same the other way round: a reader who marked one word of a
             # paragraph the source has just made italic keeps their mark and the whole
