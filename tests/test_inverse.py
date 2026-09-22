@@ -378,3 +378,49 @@ def test_an_outline_file_that_came_out_empty_asks_for_no_second_pass():
     assert not needs_rerun(EMPTY_OUTLINES)
     assert needs_rerun(EMPTY_OUTLINES.replace("D41D8CD98F00B204E9800998ECF8427E;0.", "0A1B2C;42."))
     assert needs_rerun(EMPTY_OUTLINES + "LaTeX Warning: Label(s) may have changed. Rerun to get cross-references right.\n")
+
+
+TWO_FRAMES = """\\documentclass{beamer}
+\\usetheme{Madrid}
+\\begin{document}
+\\begin{frame}{A}x\\end{frame}
+\\begin{frame}{B}y\\end{frame}
+\\end{document}
+"""
+
+
+def compiles(monkeypatch, build, states):
+    """A TeX engine that writes `states[n]` into the build folder on its n-th run, and a log that
+    never asks for anything - which is what a talk with no sections really produces."""
+    import subprocess as sp
+    runs = []
+
+    def run(cmd, **kw):
+        for name, text in states[min(len(runs), len(states) - 1)].items():
+            (build / name).write_text(text, encoding="utf-8")
+        (build / "main.log").write_text(EMPTY_OUTLINES, encoding="utf-8")
+        runs.append(cmd)
+        return sp.CompletedProcess(cmd, 0, "", "")
+
+    monkeypatch.setattr("beamer2slides.inverse.subprocess.run", run)
+    return runs
+
+
+def test_a_compile_runs_again_while_the_auxiliary_files_move(tmp_path, monkeypatch):
+    """The log is not the whole rule. A talk with no sections asks for no rerun after its first
+    pass - rightly, there are no bookmarks to settle - while Madrid's footline still reads `2/1`,
+    beamer's \\inserttotalframenumber coming out of the .nav the *next* pass reads. Measured: with
+    the log alone, the pull loop's own compile of such a talk hands the page a wrong frame total
+    and the loop then reads it as a residual."""
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "main.tex").write_text(TWO_FRAMES, encoding="utf-8")
+    ws = Workspace(src / "main.tex", tmp_path / "work")
+    runs = compiles(monkeypatch, ws.build_dir, [{"main.nav": "one"}, {"main.nav": "two"},
+                                                {"main.nav": "two"}])
+    ws.compile()
+    assert len(runs) == 3
+    # and a folder the turn before left settled costs one pass, which is the loop's common case
+    runs = compiles(monkeypatch, ws.build_dir, [{"main.nav": "two"}])
+    ws.compile()
+    assert len(runs) == 1

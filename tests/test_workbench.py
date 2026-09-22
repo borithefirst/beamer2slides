@@ -299,7 +299,8 @@ def test_a_compile_stops_when_the_auxiliary_files_stop_moving(tmp_path, monkeypa
 
 def test_a_compile_runs_again_while_they_move(tmp_path, monkeypatch):
     # A fresh folder: the first pass writes the .nav from nothing, and beamer's frame total comes
-    # out of the .nav the *next* pass reads - which no line of the log asks for.
+    # out of the .nav the *next* pass reads - which no line of the log asks for
+    # (`inverse.aux_state`, the rule the pull loop's own compile goes by).
     (tmp_path / "talk.tex").write_text(r"\documentclass{beamer}", encoding="utf-8")
     runs = fake_engine(monkeypatch, tmp_path,
                        [{"talk.nav": "one"}, {"talk.nav": "two"}, {"talk.nav": "two"}])

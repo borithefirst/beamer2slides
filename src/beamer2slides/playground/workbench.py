@@ -34,7 +34,6 @@ import sys
 import threading
 import time
 import uuid
-import zlib
 from pathlib import Path
 
 from ..agent.types import Refused
@@ -108,17 +107,6 @@ def tex_engine(source: str, engines: list[str]) -> str:
         and "lualatex" in engines else engines[0]
 
 
-#: What a pass reads at its start and writes at its end; while any of them moves, the next run
-#: draws something different (labels, beamer's navigation and frame total, the TOC, bookmarks).
-AUX_SUFFIXES = (".aux", ".toc", ".nav", ".snm", ".out", ".lof", ".lot", ".bbl", ".vrb")
-
-
-def aux_state(folder: Path) -> dict[str, int]:
-    """A digest of every auxiliary file under `folder`, for telling one pass from the next."""
-    return {str(p.relative_to(folder)): zlib.crc32(p.read_bytes())
-            for p in folder.rglob("*") if p.suffix in AUX_SUFFIXES and p.is_file()}
-
-
 def run_latex(folder: Path, main: str, engines: list[str], timeout: int = TEX_TIMEOUT,
               passes: int = 3) -> Path:
     """Run a TeX engine on `main` inside `folder` and return the PDF it wrote.
@@ -128,13 +116,13 @@ def run_latex(folder: Path, main: str, engines: list[str], timeout: int = TEX_TI
     to compile at all (docs/playground.md).
 
     Up to `passes` runs, and **one more only while the auxiliary files are still moving**
-    (`aux_state`, latexmk's rule). This is the step an agent pays on every turn of edit ->
-    compile -> `deck_sync`, where the folder's .aux and .nav are settled before the turn begins
-    and a second pass draws the same PDF for nothing. The log alone is not the rule: a talk with
-    no sections asks for no rerun after its first pass (`inverse.needs_rerun`, rightly - there
-    are no bookmarks to settle) while Madrid's footline still reads `2/1`, beamer's
-    \\inserttotalframenumber coming out of the .nav the *next* pass reads.
+    (`inverse.aux_state`, latexmk's rule, which is what the pull loop's own compile goes by).
+    This is the step an agent pays on every turn of edit -> compile -> `deck_sync`, where the
+    folder's .aux and .nav are settled before the turn begins and a second pass draws the same
+    PDF for nothing.
     """
+    from ..inverse import aux_state
+
     path = folder / main
     if not path.is_file():
         raise TexError(f"there is no {main} in the workspace")

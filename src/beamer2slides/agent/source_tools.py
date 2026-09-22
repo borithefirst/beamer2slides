@@ -73,15 +73,20 @@ def deck_pull(
     out_path = j.path(out, write=True) if out else None
 
     from ..deck_ir import read_deck
-    from ..inverse import run_pull
+    from ..inverse import Later, run_pull
 
     log = _logger(j)
-    target = read_deck(target_ref, images=work_path / "target-images")
-    log(f"deck: {len(target['slides'])} slides read")
-    j.data["slides"] = len(target["slides"])
     j.data["deck"] = target_ref
 
-    result = _loop(lambda: run_pull(target, tex_path, work_path, apply, out_path, max_iter,
+    def read():
+        # On a thread of its own while the source first compiles (`inverse.converge`): the read
+        # needs no PDF and the compile needs no deck.
+        target = read_deck(target_ref, images=work_path / "target-images")
+        log(f"deck: {len(target['slides'])} slides read")
+        j.data["slides"] = len(target["slides"])
+        return target
+
+    result = _loop(lambda: run_pull(Later(read), tex_path, work_path, apply, out_path, max_iter,
                                     handout, engine, log=log))
     _finish(j, result, work_path, out_path, apply, max_iter, "deck_pull")
 

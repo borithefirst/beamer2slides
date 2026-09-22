@@ -603,12 +603,24 @@ code. Two things were settled by measurement rather than guessed: gzipping the b
 (a `files.update` **with media** costs ~1.8-2.0 s whether it carries 7 bytes or 147 kB, while a
 metadata-only one costs ~0.29 s), and reusing the live deck's own `contentUrl`s instead of a staging
 deck would break the lossless-picture promise `pull` relies on - `createImage` accepts them and
-Google **re-encodes** the file (same pixels, different bytes). And the compile between the edit and
-the sync stops when the auxiliary files stop moving (`playground/workbench.aux_state`, latexmk's
-rule) rather than running a fixed two passes: 2.0 → 1.0 s per turn on a settled folder, unchanged
-on a fresh one. The log alone is not the rule - a talk with no sections asks for no rerun after its
-first pass (rightly: no bookmarks to settle) while Madrid's footline still reads `2/1`, beamer's
-`\inserttotalframenumber` coming out of the .nav the *next* pass reads.
+Google **re-encodes** the file (same pixels, different bytes).
+
+**And the compile between the edit and the sync**, which is the other thing the loop pays on every
+turn: it stops when the auxiliary files stop moving (`inverse.aux_state`, latexmk's rule, used by
+`Workspace.compile` and `playground/workbench.run_latex` alike) rather than running a fixed two
+passes - 2.0 → 1.0 s per turn on a folder the turn before left settled, unchanged on a fresh one.
+The log alone is not the rule, and that half is a **correctness** fix: a talk with no sections asks
+for no rerun after its first pass (`needs_rerun`, rightly - there are no bookmarks to settle) while
+Madrid's footline still reads `2/1`, beamer's `\inserttotalframenumber` coming out of the .nav the
+*next* pass reads, so the pull loop's own first compile handed the page a wrong frame total and
+then read it as a residual (measured both ways on a two-frame Madrid talk).
+**And the export at the head of the round trip**: a `pull` read the deck and only then compiled,
+two things that need nothing of each other, so the read is now made on a thread of its own while
+the source compiles for the first time (`inverse.Later`, `converge`'s `ready`, `Workspace.build`'s
+`compiled` - taken only when the workspace stood at the same options, so a caller cannot hand over
+a PDF of another document; `agent.deck_pull` passes the same `Later`). Interleaved A/B, four pairs,
+a work folder of its own per round so a warm cache favours neither: **5.34 → 3.20 s**, every pair
+favouring the overlap - the deck read disappears behind the compile entirely.
 
 **A conflict a person can settle** (`--take-source`, docs/sync.md "Taking the source's version"):
 the deck keeping what it has is right as a default and is not always what the author wants, and the

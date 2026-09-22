@@ -36,6 +36,8 @@ import os
 import re
 import shutil
 import subprocess
+import zlib
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -340,25 +342,32 @@ class Workspace:
         cmd = [exe,"-interaction=nonstopmode", "-halt-on-error", "-synctex=1", "-file-line-error",
                f"-jobname={job}", f"-output-directory={self.build_dir}", prefix + r"\input{" + rel + "}"]
         log = ""
+        before = aux_state(self.build_dir)
         for attempt in range(3):
             r = subprocess.run(cmd, cwd=self.src, capture_output=True, text=True, errors="replace", env=tex_env())
             log_path = self.build_dir / f"{job}.log"
             log = log_path.read_text(errors="replace") if log_path.exists() else r.stdout
             if r.returncode != 0:
                 return None, error_excerpt(log)
-            if not needs_rerun(log) or attempt == 2:
+            before, after = aux_state(self.build_dir), before
+            if (before == after and not needs_rerun(log)) or attempt == 2:
                 break
         return self.build_dir / f"{job}.pdf", ""
 
-    def build(self, out: Path, target_has_notes: bool = False) -> Candidate | str:
+    def build(self, out: Path, target_has_notes: bool = False, compiled=None) -> Candidate | str:
         """Compile, extract and classify like `convert` (overlays: last step of each frame), and
-        map every slide to its frame. A string is a compile error."""
+        map every slide to its frame. A string is a compile error.
+
+        `compiled`: what `compile` already returned, where the caller ran it while it had nothing
+        else to do (`converge` reads the deck meanwhile). Taken only when this workspace stood at
+        the same options then, so a caller cannot hand over a PDF of another document."""
         from .classify import classify
         from .extract import extract, select_overlays
         from .notes import prepare as prepare_notes
 
+        reuse = compiled is not None and self.notes == target_has_notes
         self.notes = target_has_notes
-        pdf, err = self.compile()
+        pdf, err = compiled if reuse else self.compile()
         if pdf is None:
             return err
         out.mkdir(parents=True, exist_ok=True)
@@ -428,6 +437,26 @@ def needs_rerun(log: str) -> bool:
     # rerunfilecheck's own lines are settled above; anything else asking for a pass still counts
     other = "\n".join(l for l in log.splitlines() if not l.startswith("(rerunfilecheck)"))
     return bool(re.search(r"Rerun to get|may have changed\. Rerun", other))
+
+
+#: What a pass reads at its start and writes at its end; while any of them moves, the next run
+#: draws something different (labels, beamer's navigation and frame total, the TOC, bookmarks).
+AUX_SUFFIXES = (".aux", ".toc", ".nav", ".snm", ".out", ".lof", ".lot", ".bbl", ".vrb")
+
+
+def aux_state(folder: Path) -> dict[str, int]:
+    """A digest of every auxiliary file under `folder`, for telling one pass from the next.
+
+    The rule `needs_rerun` cannot state: a talk with no sections asks for no rerun after its first
+    pass (rightly - there are no bookmarks to settle) while Madrid's footline still reads `2/1`,
+    beamer's \\inserttotalframenumber coming out of the .nav the *next* pass reads. So a compile
+    runs again while the auxiliary files are still moving (latexmk's rule), which on a folder the
+    turn before left settled - what an agent's edit -> compile -> sync loop hands it - is no second
+    pass at all.
+    """
+    return {str(p.relative_to(folder)): zlib.crc32(p.read_bytes())
+            for p in (folder.rglob("*") if folder.is_dir() else ())
+            if p.suffix in AUX_SUFFIXES and p.is_file()}
 
 
 def error_excerpt(log: str) -> str:
@@ -2249,9 +2278,32 @@ def picture_hashes(cand: Candidate, target: dict, comp_out: Path) -> dict:
     return hashes
 
 
-def converge(tex: Path, target: dict, work: Path, max_iter: int = 10, handout: bool = False,
+class Later:
+    """A target fetched on demand, once, and remembered: `converge` calls it on a thread of its own
+    while the source compiles for the first time, and the caller reads `value` afterwards."""
+
+    def __init__(self, fn):
+        self.fn, self.value = fn, None
+
+    def __call__(self) -> dict:
+        self.value = self.fn()
+        return self.value
+
+
+def converge(tex: Path, target, work: Path, max_iter: int = 10, handout: bool = False,
              engine: str | None = None, tol: dict | None = None, log=print) -> Result:
+    """`target`: the deck to converge to, or a `Later` fetching it - which is read on a thread of
+    its own while the first compile runs, the two needing nothing of each other."""
     ws = Workspace(tex, work, handout, engine)
+    ready = None
+    if callable(target):
+        ws.notes = uses_notes(ws.source)   # what the first compile can know without the deck
+        with ThreadPoolExecutor(1, thread_name_prefix="b2s-pull") as pool:
+            reading = pool.submit(target)
+            try:
+                ready = ws.compile()
+            finally:
+                target = reading.result()
     ctx = Context(pt_option=class_pt_option(ws.source))
     has_notes = any(s.get("notes") for s in target["slides"]) or uses_notes(ws.source)
     iterations: list[dict] = []
@@ -2264,7 +2316,8 @@ def converge(tex: Path, target: dict, work: Path, max_iter: int = 10, handout: b
     comp = None
     cand = None
     for it in range(max_iter + 1):
-        built = ws.build(work / "classify", has_notes)
+        built = ws.build(work / "classify", has_notes, compiled=ready)
+        ready = None
         if isinstance(built, str):
             raise RuntimeError(f"the source does not compile:\n{built}")
         cand = built
@@ -2535,12 +2588,15 @@ def write_outputs(result: Result, target: dict, tex: Path, work: Path, apply: bo
         f"report {work / 'edits.md'}")
 
 
-def run_pull(target: dict, tex: Path, work: Path, apply: bool = False, out: Path | None = None, max_iter: int = 10,
+def run_pull(target, tex: Path, work: Path, apply: bool = False, out: Path | None = None, max_iter: int = 10,
              handout: bool = False, engine: str | None = None, log=print) -> Result:
+    """`target`: the deck, or a `Later` that fetches it - read while the source first compiles."""
     work = Path(work).resolve()
     work.mkdir(parents=True, exist_ok=True)
-    (work / "target.json").write_text(json.dumps(target, indent=1, ensure_ascii=False), encoding="utf-8")
     result = converge(Path(tex), target, work / "loop", max_iter, handout, engine, log=log)
+    if isinstance(target, Later):
+        target = target.value
+    (work / "target.json").write_text(json.dumps(target, indent=1, ensure_ascii=False), encoding="utf-8")
     write_outputs(result, target, Path(tex), work, apply, out, log)
     return result
 
@@ -2553,9 +2609,16 @@ def cmd_pull(deck: str, tex: Path, work: Path | None, apply: bool, out: Path | N
     if work is None:
         work = ref / "pull" if ref.is_dir() else Path(tex).resolve().parent / "out" / "pull"
     work = Path(work).resolve()
-    target = read_deck(deck, images=work / "target-images")
-    print(f"deck: {len(target['slides'])} slides read")
-    return run_pull(target, tex, work, apply, out, max_iter, handout, engine)
+
+    def read():
+        # On a thread of its own while the source compiles for the first time (`converge`): the
+        # deck read needs no PDF and the compile needs no deck, and this is the one place in a
+        # pull where a Google round trip and a TeX run stand in each other's way.
+        target = read_deck(deck, images=work / "target-images")
+        print(f"deck: {len(target['slides'])} slides read")
+        return target
+
+    return run_pull(Later(read), tex, work, apply, out, max_iter, handout, engine)
 
 
 def cmd_converge(target_path: Path, tex: Path, work: Path | None, apply: bool, out: Path | None, max_iter: int,
