@@ -610,7 +610,20 @@ code. Two things were settled by measurement rather than guessed: gzipping the b
 (a `files.update` **with media** costs ~1.8-2.0 s whether it carries 7 bytes or 147 kB, while a
 metadata-only one costs ~0.29 s), and reusing the live deck's own `contentUrl`s instead of a staging
 deck would break the lossless-picture promise `pull` relies on - `createImage` accepts them and
-Google **re-encodes** the file (same pixels, different bytes).
+Google **re-encodes** the file (same pixels, different bytes). (7) And the **head**, which was the
+one part of a sync that ran before the sync had made a call of its own: the way back a destructive
+write keeps (`__main__.record_sync_point` - the deck's revisionId, its modifiedTime and a .pptx
+export, 3.4 s of a 20 s sync) promises only to be finished *before the deck is first written to*,
+not before the planning starts, so it is made on a thread (`guard.WayBack`) and every write site
+collects it (`Sync.before_write`: the leftovers of an interrupted run, `measure_places`' scratch
+slides and the batches themselves). Worth about **a second**, not the 3.4 s it costs, and the gap
+is the finding: what it now runs beside is the source's own conversion and the deck's first read,
+which want this machine and this connection too. Nine interleaved pairs: 18.97 → 18.00 s over the
+last six (five of six favouring the thread), 0.60 s over all nine (six of nine) - small enough that
+only the pairs say it at all, the same unchanged sync running 16.5 to 21.7 s with the day. Kept for
+its second half as much as its first: `sync` is the one that knows when the first write happens, so
+handing the note over is what lets an adopted deck's first sync ask whether a way back was kept
+instead of being refused although one was (`agent.deck_tools.deck_sync` never passed it at all).
 
 **And the compile between the edit and the sync**, which is the other thing the loop pays on every
 turn: it stops when the auxiliary files stop moving (`inverse.aux_state`, latexmk's rule, used by

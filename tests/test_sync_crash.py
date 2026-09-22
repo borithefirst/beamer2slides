@@ -426,6 +426,39 @@ def test_an_untouched_placeholder_is_left_as_it_is():
     assert sync.restore_in_place(theirs, saved) == []
 
 
+# ---------------------------------------------------------------- the way back
+
+class _Note:
+    """A `guard.WayBack` that only says when it was asked for."""
+
+    def __init__(self):
+        self.asked = 0
+
+    def result(self) -> dict:
+        self.asked += 1
+        return {}
+
+
+def test_every_write_collects_the_way_back_before_it_goes_out():
+    """The deck's revision and its .pptx backup are made on a thread while the sync reads and
+    plans (`guard.WayBack`), and what makes that safe is that they are collected before anything
+    in the deck moves - so every place that writes asks first."""
+    api, note = FakeSlidesApi(), _Note()
+    s = bare_sync(slides=api, pid="P1", way_back=note, sent={}, revision=lambda: "rev1")
+    s.delete_leftovers(["A"])
+    assert note.asked == 1 and api.batches == [["A"]], "an interrupted run's leftovers are a write"
+    s.delete_scratch(["b2s_m000"])
+    assert note.asked == 2, "measure_places' scratch slides are a write"
+    s.send("content", [{"deleteObject": {"objectId": "B"}}], None)
+    assert note.asked == 3, "and so is the content batch"
+
+
+def test_a_sync_with_no_way_back_to_collect_writes_as_it_always_did():
+    api = FakeSlidesApi()
+    bare_sync(slides=api, pid="P1").delete_leftovers(["A"])   # no way_back attribute at all
+    assert api.batches == [["A"]]
+
+
 class FakeSlidesApi:
     """A Slides service that refuses a batch naming an object it doesn't know (as Google does)."""
 

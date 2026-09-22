@@ -7,6 +7,7 @@ import io
 import json
 import os
 import re
+import threading
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -501,6 +502,54 @@ def test_way_back_kept_needs_a_file_with_something_in_it(tmp_path):
     empty.write_bytes(b"PPTX")
     assert guard.way_back_kept({"file": str(empty)})
     assert guard.way_back_kept({"drive": {"presentationId": "COPY1"}})
+
+
+def a_way_back(monkeypatch, *, lent: bool, creds="CREDS"):
+    from beamer2slides import google_auth
+    monkeypatch.setattr(google_auth, "shared_service", lambda *a, **k: lent)
+    monkeypatch.setattr(google_auth, "credentials_for_threads", lambda: creds)
+    monkeypatch.setattr(google_auth, "slides_service", lambda c=None: ("slides", c))
+    monkeypatch.setattr(google_auth, "drive_service", lambda c=None: ("drive", c))
+
+
+def test_the_way_back_is_made_on_a_thread_with_clients_of_its_own(monkeypatch):
+    """`record_sync_point` is three round trips that need nothing of the sync's planning and must
+    be finished before its first write. They go on a thread, with credentials resolved on the
+    calling thread (a worker inherits no context) and a client per thread."""
+    a_way_back(monkeypatch, lent=False)
+    made = []
+
+    def make(slides, drive):
+        made.append((slides, drive, threading.current_thread().name))
+        return {"entry": {"backup": {"file": "x.pptx"}}}
+
+    point = guard.WayBack(make)
+    assert point.backup() == {"file": "x.pptx"}
+    assert point.result() is point.result(), "made once and remembered"
+    assert len(made) == 1 and made[0][:2] == (("slides", "CREDS"), ("drive", "CREDS"))
+    assert made[0][2].startswith("b2s-back")
+
+
+def test_a_lent_client_makes_the_way_back_on_the_asking_thread(monkeypatch):
+    """A service object a caller handed over is that caller's, used on one thread at a time
+    (`emit.measure_places`' rule): no thread, and the work happens on the first ask."""
+    a_way_back(monkeypatch, lent=True)
+    made = []
+    point = guard.WayBack(lambda slides, drive: made.append(threading.current_thread().name) or {})
+    assert made == [], "nothing is done until somebody is about to write"
+    point.result()
+    assert made == [threading.current_thread().name]
+
+
+def test_a_way_back_that_could_not_be_made_is_no_reason_not_to_sync(monkeypatch, capsys):
+    a_way_back(monkeypatch, lent=True)
+
+    def boom(slides, drive):
+        raise RuntimeError("Drive said no")
+
+    point = guard.WayBack(boom)
+    assert point.result() is None and point.backup() == {}
+    assert "Drive said no" in capsys.readouterr().out
 
 
 def test_record_appends_and_restore_hint_reads(tmp_path):

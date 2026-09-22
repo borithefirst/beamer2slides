@@ -98,18 +98,25 @@ def cmd_convert(pdf: Path, out: Path, title: str | None, new_deck: bool, overlay
         print(f"warning: could not record the sync base ({type(e).__name__}: {e})")
 
 
-def record_sync_point(pdf: Path, deck: str, out: Path | None, backup: str) -> dict | None:
+def record_sync_point(pdf: Path, deck: str, out: Path | None, backup: str):
     """Before sync's first write: the deck's revision (and a backup, `--backup`) so the state
-    sync is about to change can be restored (docs/sync.md). Never fails the sync."""
+    sync is about to change can be restored (docs/sync.md). Never fails the sync.
+
+    Returns a `guard.WayBack`, which starts the three round trips on a thread of its own: they
+    need nothing of the sync's reading and planning, and `sync` collects them at the one moment
+    they are a promise about - before anything in the deck moves."""
+    from .guard import WayBack
+    return WayBack(lambda slides, drive: sync_point(pdf, deck, out, backup, slides, drive))
+
+
+def sync_point(pdf: Path, deck: str, out: Path | None, backup: str, slides, drive) -> dict | None:
     from .guard import backup_deck, deck_url, record
-    from .google_auth import drive_service, slides_service
     from .gslides import execute
     from .sync import resolve_deck
     try:
         pid, folder = resolve_deck(str(deck))
         out = out or folder or out_root() / pdf.stem
-        rev = execute(slides_service().presentations().get(presentationId=pid, fields="revisionId"))["revisionId"]
-        drive = drive_service()
+        rev = execute(slides.presentations().get(presentationId=pid, fields="revisionId"))["revisionId"]
         info = execute(drive.files().get(fileId=pid, fields="modifiedTime"))
         # A sync only ever rewrites the parts the source changed, but the deck as a whole can only
         # be recovered from a file: Drive's version history is not readable back (docs/sync.md).
@@ -371,12 +378,11 @@ def main() -> None:
             # read in one go and typed back in one go.
             take = [p.strip() for arg in args.take_source for p in str(arg).split(",") if p.strip()]
             info = sync(args.pdf, args.deck, args.out, args.dry_run, args.overlays, not args.predict_places,
-                        (note or {}).get("entry", {}).get("backup"), args.backup, args.force_adopted,
-                        args.follow_labels, take)
+                        note, args.backup, args.force_adopted, args.follow_labels, take)
         except FirstSyncRefused as refused:
             raise SystemExit(str(refused)) from None
-        if note:
-            add_recovery(note, info)
+        if note and note.result():
+            add_recovery(note.result(), info)
         r = info["report"]
         sent = info["requests"] or {}          # Sync.sent counts them per phase, not in total
         held = r["slides"].get("held") or []

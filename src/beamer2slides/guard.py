@@ -346,6 +346,67 @@ def backup_deck(drive, pid: str, out: Path, mode: str, note: str = "", fallback:
     return result
 
 
+class WayBack:
+    """The way back a sync keeps before its first write, made while the sync reads and plans.
+
+    `__main__.record_sync_point` is three round trips - the deck's revisionId, its modifiedTime and
+    a .pptx export - and it used to run before the sync had made a single call of its own, 3.4 s of
+    a 20 s sync with nothing else in the air. None of it reads anything the planning writes, and
+    all of it has to be finished before the deck is first written to: so it goes on a thread here
+    and `sync` collects it at that one point (`Sync.before_write`), which is where the promise is.
+
+    Worth about a second, not the 3.4 s it costs, and that gap is the measurement's whole point:
+    what it now runs beside is the source's own conversion and the deck's first read, which want
+    this machine and this connection too. Interleaved A/B on a 13-frame talk, nine pairs: 18.97 s
+    against 18.00 s over the last six (five of six favouring the thread), 0.60 s over all nine (six
+    of nine). Small enough that only the pairs say it at all - the same unchanged sync runs 16.5 to
+    21.7 s with the day - and it is kept for the second reason as much as the first: `sync` is the
+    one that knows when the first write happens, so handing the note over is also what lets an
+    adopted deck's first sync ask whether a way back was kept, instead of being refused although one
+    was (`agent.deck_tools.deck_sync` never passed it at all).
+
+    Where a caller lent its own client there is no thread - a service object is that caller's and
+    belongs to one thread at a time (`emit.measure_places`' rule) - and the work happens on the
+    first ask, which is the order it always ran in. `result` never raises: a missing recovery note
+    is no reason not to sync, and it is asked for in places that are about to write."""
+
+    def __init__(self, fn, name: str = "b2s-back"):
+        from .google_auth import credentials_for_threads, drive_service, shared_service, slides_service
+
+        self.note: dict | None = None
+        self.asked = False
+        self.job = None
+        self.make = lambda: fn(slides_service(), drive_service())
+        if shared_service("slides", "v1") or shared_service("drive", "v3"):
+            return
+        try:
+            creds = credentials_for_threads()   # resolved here: a worker inherits no context
+        except Exception:  # noqa: BLE001 (no token: the old order, which says so where it fails)
+            return
+        self.make = lambda: fn(slides_service(creds), drive_service(creds))
+        pool = ThreadPoolExecutor(1, thread_name_prefix=name)
+        try:
+            self.job = pool.submit(self.make)
+        finally:
+            pool.shutdown(wait=False)
+
+    def result(self) -> dict | None:
+        """The recovery note, made once and remembered."""
+        if not self.asked:
+            self.asked = True
+            try:
+                self.note = self.job.result() if self.job is not None else self.make()
+            except Exception as e:  # noqa: BLE001 (a missing recovery note is no reason not to sync)
+                print(f"warning: could not record the deck's revision before syncing "
+                      f"({type(e).__name__}: {e})")
+            self.job = None
+        return self.note
+
+    def backup(self) -> dict:
+        """What was kept, for the refusal that asks whether there is any way back at all."""
+        return ((self.result() or {}).get("entry") or {}).get("backup") or {}
+
+
 def way_back_kept(backup: dict) -> bool:
     """Whether this backup can actually be put back: a .pptx file that is there and not empty, or
     a Drive copy. `backup_deck` only warns when Drive refuses the export or the copy."""

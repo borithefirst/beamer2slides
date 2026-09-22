@@ -669,11 +669,15 @@ def deck_sync(
     out_dir.mkdir(parents=True, exist_ok=True)
 
     # Lives in the CLI, not in `sync.sync`: without it there is no .pptx backup and no recovery
-    # block, and Drive's revision history cannot give the old content back (docs/sync.md).
+    # block, and Drive's revision history cannot give the old content back (docs/sync.md). It is
+    # made on a thread of its own and handed over, because `sync` is the one that knows when the
+    # first write happens - which is both what it promises and when it has to be finished
+    # (`guard.WayBack`). Handing it over is also what lets an adopted deck's first sync ask
+    # whether there is a way back at all, instead of being refused although one was kept.
     note = None if dry_run else _cli().record_sync_point(source, target, out_dir, backup)
 
     try:
-        info = run_sync(source, target, out_dir, dry_run, overlays, measure,
+        info = run_sync(source, target, out_dir, dry_run, overlays, measure, note, backup,
                         follow_labels=follow_labels, take_source=take_source or ())
     except SystemExit as exc:
         # `sync.sync` says no by exiting. Without a base there is nothing to merge against: the
@@ -683,8 +687,8 @@ def deck_sync(
         raise Refused("no_base", str(exc.code) if exc.code not in (0, None) else
                       f"there is no sync base for {deck}, so a three-way merge is impossible",
                       deck=deck, out=j.ctx.workspace.ref(out_dir)) from None
-    if note:
-        _cli().add_recovery(note, info)
+    if note and note.result():
+        _cli().add_recovery(note.result(), info)
 
     report = info["report"]
     for clash in report["conflicts"]:

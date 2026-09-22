@@ -611,9 +611,12 @@ def matrix_request(oid: str, m: list[float]) -> dict:
 # ---------------------------------------------------------------- the sync
 
 class Sync:
+    way_back = None   # the recovery note being made meanwhile; None where there is none to collect
+
     def __init__(self, slides, drive, pid: str, base: dict, ours: dict, out: Path, dry_run: bool = False,
                  measure: bool = True, trust_generation: bool = True, check_plan=None,
-                 follow_labels: bool = False, take_source=(), facts: dict | None = None):
+                 follow_labels: bool = False, take_source=(), facts: dict | None = None,
+                 way_back=None):
         # check_plan(mplan, theirs): raises instead of letting the write go ahead. It sits between
         # planning and preparing because that is the last point at which nothing has been sent and
         # the whole of what would be written is known (adopt_sync.problems).
@@ -638,6 +641,16 @@ class Sync:
         self.facts = facts              # the deck's Drive facts, read once (snapshot.deck_info)
         self.first_read: dict | None = None  # a `presentations.get` a caller made while we planned
         self.deleting: list = []        # staging decks on their way out (drop_staging)
+        self.way_back = way_back        # made meanwhile, collected before the first write (guard.WayBack)
+
+    def before_write(self) -> None:
+        """Collect the way back (`guard.WayBack`): the deck's revision and the .pptx backup are
+        made on a thread while this sync reads and plans, and the promise they carry is that they
+        are finished before anything in the deck moves. So every place that writes asks here
+        first - the leftovers of an interrupted run, `measure_places`' scratch slides and the
+        batches themselves - and the answer is made once."""
+        if self.way_back is not None:
+            self.way_back.result()
 
     def token(self) -> str:
         """The two letters that make this sync's object ids unique. Never the token of a sync that
@@ -680,6 +693,7 @@ class Sync:
         """Batches with requiredRevisionId, chained through the revisions they return. A batch is
         cut at a slide boundary where it can (`batches`), so a run that dies between two batches
         leaves whole slides written, never half of one."""
+        self.before_write()
         for n, chunk in enumerate(batches(reqs)):
             try:
                 body = {"requests": chunk}
@@ -824,6 +838,7 @@ class Sync:
         group takes its children with it) doesn't save every other leftover from being swept."""
         if not ids:
             return set()
+        self.before_write()
         reqs = [{"deleteObject": {"objectId": oid}} for oid in ids]
         try:
             execute(self.slides.presentations().batchUpdate(presentationId=self.pid, body={"requests": reqs}))
@@ -1130,6 +1145,7 @@ class Sync:
                 slides.append(slide)
         if not slides:
             return {}, []
+        self.before_write()   # it adds scratch slides to the deck (b2s_mNNN)
         live_ids = {s["objectId"] for s in theirs["slides"]}
         first = theirs["slides"][0]["objectId"]
         page_slide = {k: v if v in live_ids else first for k, v in self.plan.page_slide.items()}
@@ -1137,6 +1153,7 @@ class Sync:
                               self.plan.placed, page_slide, self.ours["out"], self.plan.page_width)
 
     def delete_scratch(self, scratch: list[str]) -> None:
+        self.before_write()
         try:
             execute(self.slides.presentations().batchUpdate(presentationId=self.pid, body={
                 "requests": [{"deleteObject": {"objectId": s}} for s in scratch]}))
@@ -2182,8 +2199,10 @@ def overlay_mode(asked: str | None, recorded: str | None) -> tuple[str, str | No
 
 
 def sync(pdf: Path, deck: str, out: Path | None = None, dry_run: bool = False, overlays: str | None = None,
-         measure: bool = True, way_back: dict | None = None, backup_mode: str = "auto",
+         measure: bool = True, way_back=None, backup_mode: str = "auto",
          force_adopted: bool = False, follow_labels: bool = False, take_source=()) -> dict:
+    """`way_back`: the backup a caller kept before this sync, as a dict - or a `guard.WayBack`
+    still making one on a thread of its own, which is collected before the first write."""
     from . import adopt_sync
     from .google_auth import drive_service, shared_service, slides_service
 
@@ -2230,7 +2249,8 @@ def sync(pdf: Path, deck: str, out: Path | None = None, dry_run: bool = False, o
         """An adopted deck's objects are a person's, not ours: refuse rather than write beside
         them (adopt_sync.problems). A dry run plans and reports; it writes nothing, so it never
         refuses - that is how a person sees what the sync wanted to do."""
-        found = adopt_sync.problems(base, mplan, theirs, way_back, backup_mode)
+        kept = way_back.backup() if hasattr(way_back, "backup") else way_back
+        found = adopt_sync.problems(base, mplan, theirs, kept, backup_mode)
         if found:
             raise adopt_sync.FirstSyncRefused(adopt_sync.refusal_message(pid, out, pdf, found), found)
 
@@ -2239,7 +2259,8 @@ def sync(pdf: Path, deck: str, out: Path | None = None, dry_run: bool = False, o
         check = check_plan
     # A base that may be behind the deck never decides on its own that an object is a leftover.
     s = Sync(slides, drive, pid, base, ours, out, dry_run, measure, trust_generation=stale is None,
-             check_plan=check, follow_labels=follow_labels, take_source=take_source, facts=facts)
+             check_plan=check, follow_labels=follow_labels, take_source=take_source, facts=facts,
+             way_back=way_back if hasattr(way_back, "result") else None)
     try:
         s.first_read = reading.result() if reading is not None else None
     except (HttpError, OSError):
