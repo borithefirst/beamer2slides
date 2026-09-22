@@ -526,7 +526,18 @@ a per-slide background picture.
   `--backup none` is how one asks for a rebuild with no way back. Tests: `tests/test_guard.py`
   (offline), `tools/rebuild_guard_proof.py` (live, `out/agent-guard/`) - which also proves the way
   back end to end: `restore --in-place` brings the deck back at its own URL with no word lost
-  (slide text and speaker notes compared), and a sync of the recovered deck writes nothing.
+  (slide text and speaker notes compared), and no sync afterwards writes over it. **Content comes
+  back, identity does not**: Drive's .pptx import numbers the pages `p1`...`pN` of its own, so a
+  converted deck's `b2s_s000`... is gone and the base names none of its slides - measured
+  2026-09-22 by exporting a deck and putting the same bytes back, while the archived proof of
+  2026-09-18 shows the sync of a recovered deck running and writing nothing, so this changed under
+  us. Sync therefore refuses a recovered deck (`snapshot.base_matches`) instead of reporting every
+  element as deleted, `deck_backup restore --in-place` says so and names `--new-deck`, and the
+  proof checks the half that is a promise: the recovery stands and the deck's revisionId does not
+  move. Re-keying the base from the `b2s:` tags that do survive (45 of 65 objects) would make it
+  whole and is not done - they name only each element's main object, never a group or an element's
+  other objects, and a base nearly right about identity is how a sync writes over the edits a
+  recovery has just saved.
 
 ## Usage
 ```

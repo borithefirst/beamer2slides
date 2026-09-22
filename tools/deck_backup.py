@@ -10,7 +10,9 @@ backups `convert --backup` / `sync --backup` wrote, with what they take up on di
 one revision as a .pptx. `restore` uploads a .pptx (a local backup, or a revision exported on the
 fly) as a **new** presentation and prints its URL; `--in-place` puts it back into the same file
 instead (the same `files.update` a rebuild uses, so the current content becomes a revision of its
-own).
+own) - which brings the deck's content back at its own URL, links and embeds included, but not its
+object ids: Drive's import numbers every page `p1`...`pN` of its own (measured 2026-09-22), so a
+sync base older than the restore describes none of the deck and `sync` refuses it.
 
 `prune` is the only destructive action here: every sync of a deck writes a .pptx of it, so a folder
 that is synced often grows without end. It keeps the newest `--keep` backups (and everything newer
@@ -190,6 +192,10 @@ def main() -> None:
     if args.in_place:
         upload(drive, data, name, pid)
         print(f"{what} written back into {deck_url(pid)} (the content it had is now a revision of its own)")
+        print("  Drive's import gives every object of the deck a new id, so a sync base recorded before this "
+              "restore describes none of it any more: sync refuses such a deck rather than reporting every "
+              "element as deleted. The deck is yours to edit in Slides; to convert the PDF again, use "
+              "--new-deck, which leaves this one alone.")
     else:
         new = upload(drive, data, f"{name} (restored from {what})")
         print(f"{what} -> a new presentation: {deck_url(new)}")

@@ -1911,7 +1911,11 @@ are appended to `<out>/backups/backups.json` (and the rebuild's entry goes into 
 
 `tools/deck_backup.py` lists (`list`), exports (`export`) and restores (`restore --from FILE`, or
 from a revision). A restore creates a **new** presentation by default; `--in-place` writes the
-backup back over the deck, so every link to it keeps working.
+backup back over the deck, so every link to it keeps working - the content comes back, the **object
+ids do not**: Drive's .pptx import numbers the pages `p1`...`pN` of its own (measured 2026-09-22,
+see the proof below), so a sync base older than the restore describes none of that deck and `sync`
+refuses it. The restore says so and names the way on (`--new-deck`, which leaves the recovered deck
+alone).
 
 Every sync writes one, so a folder synced often grows without end (the live suites left 110 files,
 53 MB in one night). `prune --deck <out> [--keep 10] [--older-than-days N]` says what it would
@@ -1969,11 +1973,23 @@ affected (there is nothing to lose).
   rebuilds and records the backup → the backup restores into a deck that still shows the edit →
   Drive history recorded as evidence → **`restore --in-place`**, whose result is compared with the
   deck from before the rebuild word for word, speaker notes included (`lost_words`) → **a sync of
-  the recovered deck**, because a recovery one cannot work with afterwards is only half a way back
+  the recovered deck**, which may run or be refused but may never write over the recovery
   → `--new-deck` leaves the old deck alone → a trashed deck reads back as trashed. Evidence in
   `out/agent-guard/proof.json` and `proof.log`.
 
   Measured on 2026-09-18: the deck came back at its own URL with all 10 slides and **no word
   lost**, and the sync that followed wrote nothing at all (0 changes, 0 conflicts, integrity
-  clean) - the object identity in the deck survives the `.pptx` round trip, so a recovered deck is
-  an ordinary deck again.
+  clean) - object ids survived the `.pptx` round trip, so a recovered deck was an ordinary deck
+  again. **On 2026-09-22 they do not**: a converted deck's `b2s_s000`... came back as `p1`...`p10`
+  (measured directly - export the deck, `files.update` the same bytes back, read the ids), so the
+  base names none of the deck's slides and sync refuses with "the sync base (generation 0)
+  describes none of the slides in presentation …" (the proof records both sides and the outcome:
+  `base_names` `b2s_s000`…, `deck_has` `p1`…, `wrote_to_the_deck` false, `holds_the_edit` true,
+  `lost_words` none; 125 s, `out/agent-guard-0922c/proof.json`). Nothing in this repo asks Drive to keep them and
+  nothing here can make it: the import assigns them. What the way back still promises, and what the
+  proof now checks, is the half that matters - the content comes back at its own URL, word for word,
+  and no sync afterwards writes over it (a refused sync leaves the deck's `revisionId` where it was).
+  Re-keying the base from the surviving `b2s:` alt-text tags (45 of 65 objects keep theirs) would
+  make it whole; it is not done, because the tags name only each element's main object, never a
+  group or an element's other objects, and a base that is nearly right about identity is exactly how
+  a sync writes over the edits a recovery has just saved.

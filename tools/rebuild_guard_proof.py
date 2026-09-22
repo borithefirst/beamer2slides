@@ -13,8 +13,9 @@ It converts a deck, then:
      back for every revision, see tools/probe_revision_history.py);
   4b. recovers at the same URL (`restore --in-place`) and compares the deck with what it showed
      before the rebuild, word for word, notes included: nothing may be missing;
-  4c. syncs the recovered deck against the same source, because a recovery that can't be worked
-     with afterwards is only half a way back: the recovered edits must still be there;
+  4c. syncs the recovered deck against the same source: whether that sync runs or is refused
+     (Drive's import renumbers every object, so the base may no longer describe the deck), the
+     recovered edits must still be there and nothing may have been written over them;
   5. --new-deck leaves the old deck alone, and a trashed deck is never resurrected.
 The new decks this makes (the restored copy, the --new-deck one) are trashed again at the end.
 Evidence: <out>/proof.json, and every command's output in <out>/proof.log.
@@ -55,6 +56,11 @@ def tool(log, *args) -> subprocess.CompletedProcess:
 
 def revision(slides, pid: str) -> str:
     return execute(slides.presentations().get(presentationId=pid, fields="revisionId"))["revisionId"]
+
+
+def slide_ids(slides, pid: str) -> list[str]:
+    pres = execute(slides.presentations().get(presentationId=pid, fields="slides.objectId"))
+    return [s["objectId"] for s in pres.get("slides", [])]
 
 
 def pptx_holds(path: Path, text: str) -> bool:
@@ -206,27 +212,48 @@ def main() -> int:
                 problems.append(f"the deck restored in place lost words on {len(lost)} slide(s): "
                                 f"{json.dumps(lost, ensure_ascii=False)[:300]}")
 
-        # 4c. recovery is not a dead end: the recovered deck goes back into the normal workflow.
-        # Its content is older than the base the forced rebuild left behind, so sync sees the
-        # recovered edits as deck edits - and deck edits win, so nothing of them may go again.
+        # 4c. a sync of the recovered deck never writes over the recovery. It may do one of two
+        # things, and this measures which: sync it (the recovered edits are deck edits, and deck
+        # edits win), or refuse - because Drive's .pptx import gives every object a new id
+        # (b2s_sNNN -> p1...pN, measured 2026-09-22; on 2026-09-18 the same proof synced), so the
+        # base the forced rebuild left behind describes none of the slides it names any more.
+        # What may never happen either way is a write: the recovered deck must come out of this
+        # word for word as the recovery left it.
         if recovered is not None:
+            base = json.loads((out / "sync" / "base.json").read_text(encoding="utf-8"))
+            named = [s.get("objectId") for s in base.get("slides", []) if s.get("objectId")]
+            live = slide_ids(slides, pid)
+            was = revision(slides, pid)
             synced = cli(log, "sync", args.pdf, "--deck", out)
             after = sc.read(pid)
-            report = json.loads((out / "sync" / "sync-report.json").read_text(encoding="utf-8"))
-            notes["sync_after_recovery"] = {
-                "returncode": synced.returncode, "changes": sc.changes(report),
-                "conflicts": len(sc.section(report, "conflicts")),
+            report_file = out / "sync" / "sync-report.json"
+            report = json.loads(report_file.read_text(encoding="utf-8")) \
+                if not synced.returncode and report_file.exists() else None
+            note = notes["sync_after_recovery"] = {
+                "returncode": synced.returncode,
+                "base_names": named[:3], "deck_has": live[:3],
+                "base_describes_the_deck": bool(set(named) & set(live)),
+                "refusal": (synced.stderr or synced.stdout).strip().splitlines()[-1][:200]
+                           if synced.returncode else None,
+                "changes": sc.changes(report) if report else None,
+                "conflicts": len(sc.section(report, "conflicts")) if report else None,
+                "wrote_to_the_deck": revision(slides, pid) != was,
                 "slides": len(after.slides),
                 "holds_the_edit": "HANDWRITTEN" in " ".join(s.all_text for s in after.slides),
                 "lost_words": lost_words(recovered, after),
-                "integrity": sc.integrity(after)}
-            if synced.returncode:
-                problems.append("syncing the recovered deck failed")
-            elif not notes["sync_after_recovery"]["holds_the_edit"]:
+                "integrity": sc.integrity(after) if report else []}
+            if not note["holds_the_edit"]:
                 problems.append("the sync after the recovery undid the recovered edit")
-            elif notes["sync_after_recovery"]["lost_words"]:
+            if note["lost_words"]:
                 problems.append("the sync after the recovery lost words: "
-                                f"{json.dumps(notes['sync_after_recovery']['lost_words'], ensure_ascii=False)[:300]}")
+                                f"{json.dumps(note['lost_words'], ensure_ascii=False)[:300]}")
+            if synced.returncode and note["wrote_to_the_deck"]:
+                problems.append("the sync refused the recovered deck and wrote to it anyway")
+            if synced.returncode and note["base_describes_the_deck"]:
+                problems.append(f"syncing the recovered deck failed although the base describes it: "
+                                f"{note['refusal']}")
+            if not synced.returncode and report is None:
+                problems.append("the sync of the recovered deck wrote no report")
 
         # 5. --new-deck leaves the old deck alone; a trashed deck is never written to again.
         before, state_file = revision(slides, pid), (out / "emit.json").read_text(encoding="utf-8")
