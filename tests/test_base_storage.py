@@ -229,3 +229,122 @@ def test_a_drive_that_refuses_everything_leaves_the_cache_in_charge(tmp_path, st
     snapshot.save_local(base(generation=2), tmp_path)
     got, where = snapshot.load_base(PID, tmp_path, Broken())
     assert (where, got["generation"]) == ("local", 2)
+
+
+# ---------------------------------------------------------------- the last step of a conversion
+#
+# `snapshot_after_convert` reads the deck, tags its objects and records the base. Two things it
+# used to do it no longer does: read the deck a second time to learn the titles it had just
+# written, and download the pictures after the tags instead of while they were being written.
+
+
+def element(oid: str, title: str | None = None) -> dict:
+    return {"objectId": oid, "title": title,
+            "size": {"width": {"magnitude": 100, "unit": "PT"}, "height": {"magnitude": 20, "unit": "PT"}},
+            "transform": {"scaleX": 1, "scaleY": 1, "translateX": 0, "translateY": 0, "unit": "PT"},
+            "shape": {"shapeType": "TEXT_BOX", "text": {"textElements": []}}}
+
+
+def alt_text(oid: str, title: str) -> dict:
+    return {"updatePageElementAltText": {"objectId": oid, "title": title}}
+
+
+def read_deck() -> dict:
+    group = {"objectId": "g", "elementGroup": {"children": [element("b")]},
+             "size": element("g")["size"], "transform": element("g")["transform"]}
+    return {"presentationId": PID, "revisionId": "r1",
+            "slides": [{"objectId": "s1", "pageElements": [element("a"), group]}]}
+
+
+def titles_of(pres: dict) -> dict:
+    found = {}
+    stack = list(pres["slides"][0]["pageElements"])
+    while stack:
+        e = stack.pop()
+        found[e["objectId"]] = e.get("title")
+        stack += e.get("elementGroup", {}).get("children", [])
+    return found
+
+
+def test_the_titles_a_tag_batch_wrote_are_put_in_rather_than_read_back():
+    """What a second presentations.get would say, said locally - measured against the real thing
+    on the 48-slide ambiguous deck (181 tags): the two bases are equal field for field."""
+    pres = read_deck()
+    after = snapshot.tagged(pres, [alt_text("a", "b2s:one/text/0"), alt_text("b", "b2s:one/image/0")], "r2")
+    assert titles_of(after) == {"a": "b2s:one/text/0", "g": None, "b": "b2s:one/image/0"}
+    assert after["revisionId"] == "r2"                       # the batch's own answer says it
+    assert titles_of(pres) == {"a": None, "g": None, "b": None}   # the read it was made from is left alone
+
+
+def test_a_revision_the_batch_did_not_answer_with_leaves_the_read_as_it_was():
+    after = snapshot.tagged(read_deck(), [alt_text("a", "b2s:one/text/0")], None)
+    assert after["revisionId"] == "r1"
+
+
+class TaggingSlides:
+    """A Slides client that refuses whole batches, and one request inside them."""
+
+    def __init__(self, refuses: str | None = None):
+        self.refuses, self.batches, self.revision = refuses, [], 1
+
+    def presentations(self):
+        return self
+
+    def batchUpdate(self, presentationId, body):
+        reqs = body["requests"]
+        self.batches.append(len(reqs))
+        if len(reqs) > 1 and self.refuses:
+            raise http_error(400)
+        if any(r["updatePageElementAltText"]["objectId"] == self.refuses for r in reqs):
+            raise http_error(400)
+        self.revision += 1
+        return FakeDrive._request({"writeControl": {"requiredRevisionId": f"r{self.revision}"}})
+
+
+def test_only_the_tags_that_landed_are_put_into_the_read():
+    """The API refuses an alt text on some placeholders; those titles are not in the deck, so they
+    must not be in the base either."""
+    slides = TaggingSlides(refuses="b")
+    landed, revision = snapshot.write_tags(slides, PID, [alt_text("a", "b2s:one/text/0"),
+                                                         alt_text("b", "b2s:one/image/0")])
+    assert [r["updatePageElementAltText"]["objectId"] for r in landed] == ["a"]
+    assert titles_of(snapshot.tagged(read_deck(), landed, revision)) == {"a": "b2s:one/text/0", "g": None, "b": None}
+    assert slides.batches == [2, 1, 1]                        # the batch, then one request at a time
+
+
+def test_nothing_to_tag_costs_no_call():
+    slides = TaggingSlides()
+    assert snapshot.write_tags(slides, PID, []) == ([], None) and slides.batches == []
+
+
+def picture_deck() -> tuple[dict, dict]:
+    read = {"slides": [{"objectId": "s1", "background": {"picture": "h0"},
+                        "objects": {"a": {"image": {"contentHash": "h1"}}}}]}
+    pres = {"slides": [{"objectId": "s1",
+                        "pageProperties": {"pageBackgroundFill": {"stretchedPictureFill": {"contentUrl": "u-bg"}}},
+                        "pageElements": [{"objectId": "a", "image": {"contentUrl": "u-a"}}]}]}
+    return read, pres
+
+
+def test_pictures_signed_while_the_tags_were_written_are_not_fetched_again(monkeypatch):
+    read, pres = picture_deck()
+    monkeypatch.setattr(snapshot, "_download", lambda url: pytest.fail(f"downloaded {url} again"))
+    assert snapshot.sign_pictures(read, pres, ready={"a": "sig-a", "s1": "sig-bg"}) == 2
+    assert read["slides"][0]["objects"]["a"]["image"]["signature"] == "sig-a"
+    assert read["slides"][0]["background"]["signature"] == "sig-bg"
+
+
+def test_a_picture_the_download_missed_is_simply_unsigned(monkeypatch):
+    """`ready` comes from another thread; a picture it could not fetch leaves no signature, which
+    is what a failed download has always left (sync then compares the contentHash alone)."""
+    read, pres = picture_deck()
+    monkeypatch.setattr(snapshot, "_download", lambda url: pytest.fail(f"downloaded {url} again"))
+    snapshot.sign_pictures(read, pres, ready={"a": "sig-a"})
+    assert "signature" not in read["slides"][0]["background"]
+
+
+def test_the_signatures_are_by_the_id_that_owns_the_picture(monkeypatch):
+    _, pres = picture_deck()
+    monkeypatch.setattr(snapshot, "_download", lambda url: url.encode())
+    monkeypatch.setattr(snapshot, "signature", lambda data: f"sig({data.decode()})")
+    assert snapshot.picture_signatures(pres) == {"a": "sig(u-a)", "s1": "sig(u-bg)"}

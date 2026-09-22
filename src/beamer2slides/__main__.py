@@ -86,9 +86,9 @@ def cmd_convert(pdf: Path, out: Path, title: str | None, new_deck: bool, overlay
     pdf, raw, deck = cmd_classify(pdf, out, overlays, check)  # pdf: without note pages, if there were any
     render_backgrounds(pdf, raw, deck, out)
     (out / "deck.json").write_text(json.dumps(deck, indent=1, ensure_ascii=False), encoding="utf-8")
-    preflight()  # RebuildRefused comes out here, with nothing yet written to Drive
+    checked = preflight()  # RebuildRefused comes out here, with nothing yet written to Drive
     title = title or raw["source"]["title"] or source.stem
-    state = emit(deck, out, title, new_deck, measure, force_rebuild, backup, source)
+    state = emit(deck, out, title, new_deck, measure, force_rebuild, backup, source, checked)
     print(f"Google Slides: {state['url']}")
     from .snapshot import snapshot_after_convert
     try:

@@ -1851,8 +1851,10 @@ happen silently. `guard.py` now stands in front of it.
 ### What convert does now
 
 Before any work (and again immediately before the write, in case someone typed in the deck while
-the PDF was being converted), `guard.check_rebuild` reads the live deck with `presentations.get`
-and compares it with the sync base (`<out>/sync/base.json`, or Drive `appProperties.b2sBase` -
+the PDF was being converted - that second ask is `guard.recheck`, which confirms the first answer
+with one field of one read where the deck is still at the revision it was read at, and asks the
+whole question again where it is not), `guard.check_rebuild` reads the live deck with
+`presentations.get` and compares it with the sync base (`<out>/sync/base.json`, or Drive `appProperties.b2sBase` -
 whichever `snapshot.load_base` finds; Drive wins). It refuses for three reasons:
 
 | reason | when | message says |

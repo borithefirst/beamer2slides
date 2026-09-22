@@ -2,6 +2,7 @@
 created, recorded right after the deck was written, in `<out>/sync/base.json` and in Drive."""
 
 import contextlib
+import copy
 import io
 import json
 import os
@@ -244,24 +245,47 @@ def picture_urls(pres: dict) -> tuple[dict[str, str], dict[str, str]]:
     return images, backgrounds
 
 
-def sign_pictures(read: dict, pres: dict, objects=None, slides=None, workers: int = 8) -> int:
+def picture_signatures(pres: dict, workers: int = 8) -> dict[str, str]:
+    """Every picture of a presentations.get signed by its pixels, by the id that owns it (an
+    image's own objectId, a slide's own for its background picture).
+
+    Downloading them costs about as much as a round trip, and a read's contentUrls stay good while
+    the deck is being tagged, so `snapshot_after_convert` starts this and writes the tags meanwhile
+    (`sign_pictures`' `ready`)."""
+    images, backgrounds = picture_urls(pres)
+    urls = {**images, **backgrounds}
+    if not urls:
+        return {}
+    ids = list(urls)
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        data = list(pool.map(lambda i: _download(urls[i]), ids))
+    return {i: signature(d) for i, d in zip(ids, data) if d}
+
+
+def sign_pictures(read: dict, pres: dict, objects=None, slides=None, workers: int = 8,
+                  ready: dict[str, str] | None = None) -> int:
     """Adds pixel signatures to the image read-backs and picture backgrounds of `read`
     (read_presentation of `pres`); `objects` / `slides`: only these ids (None: all). Returns how
-    many pictures were downloaded."""
-    from concurrent.futures import ThreadPoolExecutor
+    many pictures were downloaded. `ready`: signatures somebody has already downloaded
+    (`picture_signatures`), so nothing is fetched here."""
     images, backgrounds = picture_urls(pres)
     jobs = []
     for s in read["slides"]:
         bg = s.get("background") or {}
         if "picture" in bg and s["objectId"] in backgrounds and (slides is None or s["objectId"] in slides):
-            jobs.append((bg, backgrounds[s["objectId"]]))
+            jobs.append((s["objectId"], bg, backgrounds[s["objectId"]]))
         for oid, rb in s["objects"].items():
             if "image" in rb and oid in images and (objects is None or oid in objects):
-                jobs.append((rb["image"], images[oid]))
+                jobs.append((oid, rb["image"], images[oid]))
     if not jobs:
         return 0
+    if ready is not None:
+        for oid, target, _ in jobs:
+            if oid in ready:
+                target["signature"] = ready[oid]
+        return len(jobs)
     with ThreadPoolExecutor(max_workers=workers) as pool:
-        for (target, _), data in zip(jobs, pool.map(lambda j: _download(j[1]), jobs)):
+        for (_, target, _), data in zip(jobs, pool.map(lambda j: _download(j[2]), jobs)):
             if data:
                 target["signature"] = signature(data)
     return len(jobs)
@@ -488,17 +512,18 @@ def attach_readback(entry: dict, slide_read: dict | None, objects: list[list[str
 
 
 def build_base(deck: dict, out: Path, pres: dict, state: dict, pdf: "Path | dict", generation: int = 0, sign: bool = False,
-               overlays: str = "last") -> dict:
+               overlays: str = "last", signatures: dict[str, str] | None = None) -> dict:
     """The base after `convert`: `state` is emit's (slides with element object ids); `sign`:
-    download the pictures for their signatures; `overlays`: which overlay steps the deck was made
-    from, so a later sync uses the same ones (a sync with fewer would delete the deck's slides)."""
+    download the pictures for their signatures (`signatures`: unless these were downloaded
+    already); `overlays`: which overlay steps the deck was made from, so a later sync uses the
+    same ones (a sync with fewer would delete the deck's slides)."""
     infos = [identity.slide_info(s) for s in deck["slides"]]
     keys = identity.slide_keys(infos)
     ekeys, fps = zip(*[identity.slide_element_keys(s["elements"], out) for s in deck["slides"]]) if deck["slides"] else ((), ())
     entries = slide_entries(deck, out, keys, list(ekeys), list(fps))
     read = read_presentation(pres)
     if sign:
-        sign_pictures(read, pres)
+        sign_pictures(read, pres, ready=signatures)
     by_id = {s["objectId"]: s for s in read["slides"]}
     for entry, s in zip(entries, state["slides"]):
         attach_readback(entry, by_id.get(s["objectId"]), s.get("objects") or [[o] for o in s["elements"]], s.get("groups", []))
@@ -536,22 +561,54 @@ def tag_requests(base: dict) -> list[dict]:
     return reqs
 
 
-def write_tags(slides, pid: str, reqs: list[dict]) -> int:
-    """Sends tag requests; the ones the API refuses (some placeholders) are skipped."""
+def write_tags(slides, pid: str, reqs: list[dict]) -> tuple[list[dict], str | None]:
+    """Sends tag requests; the ones the API refuses (some placeholders) are skipped. Returns the
+    ones that landed and the deck's revision afterwards, which the batch's own answer says
+    (`writeControl.requiredRevisionId`), so nothing has to read the deck again to learn it."""
     if not reqs:
-        return 0
+        return [], None
+
+    def revision(answer: dict) -> str | None:
+        return (answer.get("writeControl") or {}).get("requiredRevisionId")
+
     try:
-        execute(slides.presentations().batchUpdate(presentationId=pid, body={"requests": reqs}))
-        return len(reqs)
+        return reqs, revision(execute(slides.presentations().batchUpdate(
+            presentationId=pid, body={"requests": reqs})))
     except HttpError:
-        sent = 0
+        sent, at = [], None
         for r in reqs:
             try:
-                execute(slides.presentations().batchUpdate(presentationId=pid, body={"requests": [r]}))
-                sent += 1
+                at = revision(execute(slides.presentations().batchUpdate(presentationId=pid, body={"requests": [r]})))
+                sent.append(r)
             except HttpError:
                 pass
-        return sent
+        return sent, at
+
+
+def tagged(pres: dict, reqs: list[dict], revision: str | None) -> dict:
+    """A presentations.get with the alt-text titles `reqs` have just written put into it, and the
+    revision the batch answered with.
+
+    The only news a second read of the deck would bring is exactly this - measured on the 48-slide
+    ambiguous deck (181 tags): the base built from here is equal, field for field, to the base
+    built from reading the deck again, whose revisionId is the one the batch already gave us. So
+    the read is not made (it is most of a second, at the end of a conversion where nothing else is
+    left to overlap it with)."""
+    titles = {r["updatePageElementAltText"]["objectId"]: r["updatePageElementAltText"].get("title")
+              for r in reqs if "updatePageElementAltText" in r}
+    if not titles:
+        return pres
+    out = copy.deepcopy(pres)
+
+    def walk(elements: list[dict]) -> None:
+        for e in elements:
+            if e["objectId"] in titles:
+                e["title"] = titles[e["objectId"]]
+            walk(e.get("elementGroup", {}).get("children", []))
+
+    for page in out.get("slides", []):
+        walk(page.get("pageElements", []))
+    return {**out, "revisionId": revision or out.get("revisionId")}
 
 
 # ---------------------------------------------------------------- storage
@@ -731,20 +788,27 @@ def snapshot_after_convert(deck: dict, out: Path, state: dict, pdf: "Path | dict
 
     slides, drive = slides_service(), drive_service()
     pid = state["presentationId"]
+    pool = ThreadPoolExecutor(2, thread_name_prefix="b2s-base")
     # Where the base file goes needs nothing but the id, so it is looked up while the deck is
     # being read and tagged, on a thread with a client of its own (`save_drive`'s `info`).
     where_to_put_it = None
     if not shared_service("drive", "v3"):
         creds = credentials_for_threads()  # here: a worker thread inherits no context
-        pool = ThreadPoolExecutor(1, thread_name_prefix="b2s-base")
         where_to_put_it = pool.submit(lambda: execute(drive_service(creds).files().get(
             fileId=pid, fields="name,parents,appProperties")))
-        pool.shutdown(wait=False)
     pres = execute(slides.presentations().get(presentationId=pid))
+    # The pictures are downloaded (for their signatures) while the tags are written: they hang off
+    # contentUrls, not off a Google client, so this thread needs nothing of anybody's.
+    signing = pool.submit(picture_signatures, pres)
+    pool.shutdown(wait=False)
     base = build_base(deck, out, pres, state, pdf, overlays=overlays)
-    if write_tags(slides, pid, tag_requests(base)):
-        pres = execute(slides.presentations().get(presentationId=pid))
-    base = build_base(deck, out, pres, state, pdf, sign=True, overlays=overlays)
+    landed, revision = write_tags(slides, pid, tag_requests(base))
+    if landed:
+        pres = tagged(pres, landed, revision)  # what a second read would say, measured (`tagged`)
+    signatures = None
+    with contextlib.suppress(Exception):  # then build_base downloads them itself
+        signatures = signing.result()
+    base = build_base(deck, out, pres, state, pdf, sign=True, overlays=overlays, signatures=signatures)
     save_local(base, out)
     try:
         info = None

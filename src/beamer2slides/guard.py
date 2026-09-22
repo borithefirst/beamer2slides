@@ -269,6 +269,26 @@ def check_rebuild(slides, drive, pid: str, out: Path, pdf: Path | str | None = N
     return found
 
 
+def recheck(slides, pid: str, found: dict | None) -> dict | None:
+    """`found` again, where the deck is still at the revision it was found at - one field of one
+    read instead of the whole deck, the sync base and the survey (None: ask the question again).
+
+    `convert` asks the guard twice: once while the PDF is being converted, and once immediately
+    before the write, because the deck may be edited in between. Only what changed in between is
+    really in question, and a revisionId that has not moved is a deck nobody has touched - so the
+    second ask is a `presentations.get` of that one field. A finding with a reason is never
+    reused: that one raised where it was made."""
+    if not found or found.get("presentationId") != pid or not found.get("revisionId") or found.get("reason"):
+        return None
+    try:
+        now = execute(slides.presentations().get(presentationId=pid, fields="revisionId"))
+    except HttpError:
+        return None
+    if now.get("revisionId") != found["revisionId"]:
+        return None
+    return {**found, "checked": time.strftime("%Y-%m-%d %H:%M:%S"), "rechecked": "revision unchanged"}
+
+
 # ---------------------------------------------------------------- backups
 
 

@@ -319,7 +319,7 @@ def fake_google(seen: dict):
     """`emit` and `snapshot_after_convert` replaced by two functions that only remember what they
     were handed. Both are imported inside `_upload`, so the module attribute is what is called."""
 
-    def emit(deck, out_dir, name, new_deck, measure, force_rebuild, backup, named):
+    def emit(deck, out_dir, name, new_deck, measure, force_rebuild, backup, named, checked=None):
         seen["emit"] = {"name": name, "named": named, "slides": len(deck["slides"]),
                         "backgrounds": sorted(p.name for p in (out_dir / "backgrounds").glob("*"))}
         return {"url": "https://docs.google.com/presentation/d/PID123/edit",

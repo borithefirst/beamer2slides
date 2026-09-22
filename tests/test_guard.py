@@ -335,6 +335,95 @@ def test_a_folder_holding_another_pdfs_deck_is_not_rebuilt(tmp_path):
                                Path("C:/elsewhere/other-talk.pdf"))["reason"] == ""
 
 
+# ---------------------------------------------------------------- the second ask
+#
+# `convert` asks the guard twice: once while the PDF is being converted and once immediately
+# before the write, because the deck may be edited in between. The second ask is about that
+# in-between and nothing else, so where the deck is still at the revision the first one read, the
+# first one's finding stands (guard.recheck) and the deck and the base are not read again.
+
+
+class CountingSlides:
+    """A Slides client that remembers what was asked of it."""
+
+    def __init__(self, revision: str | dict = "rev1"):
+        self.revision, self.asked = revision, []
+
+    def presentations(self):
+        return SimpleNamespace(get=self._get)
+
+    def _get(self, presentationId, fields=None):
+        self.asked.append(fields)
+        return Request(self.revision if isinstance(self.revision, Exception) else {"revisionId": self.revision})
+
+
+def a_finding(tmp_path: Path, **change) -> dict:
+    pres = presentation()
+    out = out_with_base(tmp_path, base_of(pres))
+    return {**guard.check_rebuild(FakeSlides(pres), FakeDrive(), "P1", out, Path("talk.pdf")), **change}
+
+
+def test_a_deck_still_at_its_revision_is_not_surveyed_again(tmp_path):
+    first = a_finding(tmp_path)
+    slides = CountingSlides("rev1")
+    again = guard.recheck(slides, "P1", first)
+    assert again["reason"] == "" and again["revisionId"] == "rev1" and again["rechecked"] == "revision unchanged"
+    assert slides.asked == ["revisionId"], "one field of one read, and no base"
+    assert again["checked"] >= first["checked"]
+
+
+def test_a_deck_edited_since_the_first_ask_is_asked_the_whole_question_again(tmp_path):
+    assert guard.recheck(CountingSlides("rev2"), "P1", a_finding(tmp_path)) is None
+
+
+def test_a_finding_about_another_deck_is_never_reused(tmp_path):
+    assert guard.recheck(CountingSlides("rev1"), "P2", a_finding(tmp_path)) is None
+
+
+def test_a_finding_with_a_reason_is_never_reused(tmp_path):
+    """One with a reason raised where it was made (or was forced); it says nothing about now."""
+    assert guard.recheck(CountingSlides("rev1"), "P1", a_finding(tmp_path, reason="edited")) is None
+    assert guard.recheck(CountingSlides("rev1"), "P1", None) is None
+
+
+def test_a_read_that_fails_asks_the_whole_question_again(tmp_path):
+    assert guard.recheck(CountingSlides(http_error(404, "not found")), "P1", a_finding(tmp_path)) is None
+
+
+def test_the_preflight_hands_its_finding_to_the_write(tmp_path, monkeypatch):
+    """emit.preflight_rebuild -> emit.plan_rebuild: the journey `convert` and `deck_convert` make."""
+    from beamer2slides import emit
+
+    pres = presentation()
+    out = out_with_base(tmp_path, base_of(pres))
+    checked = emit.preflight_rebuild(out, Path("talk.pdf"), slides=FakeSlides(pres), drive=FakeDrive())
+    assert checked["presentationId"] == "P1" and checked["found"]["revisionId"] == "rev1"
+
+    slides = CountingSlides("rev1")
+    monkeypatch.setattr(emit, "credentials_for_threads", lambda: None)
+    monkeypatch.setattr(emit, "slides_service", lambda creds=None: slides)
+    monkeypatch.setattr(guard, "check_rebuild", lambda *a, **kw: pytest.fail("asked the whole question again"))
+    pid, entry = emit.plan_rebuild(slides, FakeDrive(), out, False, False, "auto", Path("talk.pdf"), checked)
+    assert pid == "P1" and entry["reason"] == "no deck edits" and entry["revisionId"] == "rev1"
+    assert slides.asked == ["revisionId"]
+
+
+def test_a_deck_that_left_the_folder_between_the_two_asks_is_looked_at_properly(tmp_path, monkeypatch):
+    """The folder's deck is in the trash now: the preflight's finding is about a deck this run is
+    no longer replacing, so it is dropped and the question asked again."""
+    from beamer2slides import emit
+
+    pres = presentation()
+    out = out_with_base(tmp_path, base_of(pres))
+    checked = emit.preflight_rebuild(out, Path("talk.pdf"), slides=FakeSlides(pres), drive=FakeDrive())
+    monkeypatch.setattr(emit, "credentials_for_threads", lambda: None)
+    monkeypatch.setattr(emit, "slides_service", lambda creds=None: CountingSlides("rev1"))
+    drive = FakeDrive(file={"id": "P1", "name": "Talk", "trashed": True,
+                            "mimeType": "application/vnd.google-apps.presentation"})
+    previous, found = emit.look_again(CountingSlides("rev1"), drive, out, checked)
+    assert previous["state"] == "trashed" and found is None
+
+
 # ---------------------------------------------------------------- backups and records
 
 def test_backup_modes(tmp_path):

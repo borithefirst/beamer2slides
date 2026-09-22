@@ -276,15 +276,17 @@ def deck_convert(
     source = _pdf(j, pdf)
     out_dir = _out_dir(j, out, source)
 
+    checked = None
     try:
         # Asked before any work, so a deck that must not be replaced costs a second, not a
-        # conversion. `emit` asks again immediately before the write.
-        preflight_rebuild(out_dir, source, new_deck, force_rebuild)
+        # conversion. `emit` asks again immediately before the write - of what it found here,
+        # so that second ask is one field of one read (emit.plan_rebuild's `checked`).
+        checked = preflight_rebuild(out_dir, source, new_deck, force_rebuild)
     except RebuildRefused as refused:
         _refuse_rebuild(j, refused, source, out_dir)
 
     prepared = _prepare(j, source, out_dir, overlays)
-    _upload(j, out_dir, prepared, title, new_deck, measure, force_rebuild, backup, source)
+    _upload(j, out_dir, prepared, title, new_deck, measure, force_rebuild, backup, source, checked)
     j.data["seconds"] = round(time.time() - started, 2)
     j.summary = _convert_summary(j, prepared, j.data["seconds"])
     j.suggest("deck_sync when the source changes, to merge into this deck instead of rebuilding it",
@@ -448,7 +450,8 @@ def _read_prepared(j: Job, folder: Path, ref: str) -> dict:
 
 
 def _upload(j: Job, out_dir: Path, prepared: dict, title: str | None, new_deck: bool,
-            measure: bool, force_rebuild: bool, backup: str, source: Path | None) -> None:
+            measure: bool, force_rebuild: bool, backup: str, source: Path | None,
+            checked: dict | None = None) -> None:
     """The Google half: build the deck from the folder, then record the base.
 
     `source` is the PDF when the caller has it and None when it does not. The guard is given the
@@ -484,7 +487,7 @@ def _upload(j: Job, out_dir: Path, prepared: dict, title: str | None, new_deck: 
     j.data["can_crop_refused_elements"] = croppable
 
     try:
-        state = emit(deck, out_dir, name, new_deck, measure, force_rebuild, backup, named)
+        state = emit(deck, out_dir, name, new_deck, measure, force_rebuild, backup, named, checked)
     except RebuildRefused as refused:
         # Asked again immediately before the write, in case the deck was edited in between.
         _refuse_rebuild(j, refused, source, out_dir)

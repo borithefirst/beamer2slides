@@ -418,10 +418,25 @@ a per-slide background picture.
   unchanged conversion, so every figure is an **interleaved** A/B in one sitting (`pure_bench`'s
   lesson): the two `emit` changes are worth 9.2 s of the run (38.4 -> 29.2 s mean over four pairs,
   every pair favouring threads) and the content batches alone 6.6 s (28.9 -> 22.3, three pairs of
-  four). What is left is the tail: `snapshot_after_convert` is ~6 s of its own (two
-  `presentations.get` around the tag batch, then a 0.9 MB base into Drive) and the guard is asked
-  twice, the second ask 2.1 s to re-derive what a single `files.get` of the deck's revision would
-  settle. Charts: https://claude.ai/artifact/MsF5T7Kxo9R3LKcLqAGRTt
+  four). Then the **tail**, which is the one place with nothing left to overlap it with, and the
+  **second ask**, which was the whole question twice. A tag batch's own answer says the revision it
+  left the deck at (`writeControl.requiredRevisionId`) and the only other news a second
+  `presentations.get` brings is the alt text that batch has just written, so that read is not made:
+  it is patched (`snapshot.tagged`, `write_tags` returning what landed), and the base built from
+  the patch is equal to the base built from really reading the deck again, field for field and
+  revisionId included - measured on the 48-slide `ambiguous.pdf` (181 tags), which is what lets the
+  read go. The pictures are signed meanwhile (`picture_signatures`, `sign_pictures`' `ready`): they
+  hang off contentUrls, not off a Google client, so that thread needs nothing of anybody's. And the
+  guard is asked once and *confirmed* the second time: the preflight hands its finding on
+  (`preflight_rebuild` returns it, `emit.plan_rebuild`'s `checked`) and `guard.recheck` is one field
+  of one read - a revisionId that has not moved is a deck nobody has touched - made beside the
+  folder's Drive lookup (`emit.look_again`), while a revision that moved, a finding with a reason,
+  a deck the folder no longer points at and a read that failed all ask the whole question again.
+  The one rule is the one thing that may not move for a second, so it is proved live as well as in
+  `tests/test_guard.py`: two characters typed into the deck *between* the two asks, and the rebuild
+  is refused naming them. Interleaved A/B again, four pairs: 21.9 -> 20.1 s mean, every pair
+  favouring the new tail, of which the tail itself is 5.6 -> 4.3 s and the second ask 1.55 -> 0.74.
+  Charts: https://claude.ai/artifact/MsF5T7Kxo9R3LKcLqAGRTt
 - Speaker notes: beamer note pages (`show notes`) or `show notes on second screen`
   (`notes.py`), written to the slide's speaker notes.
 - Everything else (display math, theme decoration, header/footer text) stays in the
@@ -1531,6 +1546,15 @@ same functions underneath; nothing here reimplements a journey.
   scores a transcript made in any harness (`agent_bench bundle` prints what one needs).
   `run --tier all --tag T`, `report --tag T`, `tasks`. Baseline: 20/20 correct, HARM 0; 37 wrong
   policies, all failing, 12 of them harmful.
+  **And what a run cost sits in the same table**, so choosing a smaller model is a measurement and
+  not a hope: a `Recorded` transcript may carry `model` and `usage` (top-level or per step, several
+  harnesses' spellings; `bundle` asks for both), which `summarise` totals per task and for the
+  suite, and the answer to "is the cheap model good enough here" is read off one table - the pass
+  rate held **and** HARM stayed 0, at this many tokens; a model that costs half as much and harms
+  once is not cheaper. Nothing here calls a model, so a cost is only ever what the transcript
+  reports: a task nobody priced reads `-` and never 0 (an unmeasured suite must not look free), and
+  the total carries how many tasks it covers, so a figure measured on 3 of 20 cannot be quoted as
+  the bill. The column is the instrument; no A/B has been run yet (docs/agent-bench.md).
 - **The round trip, live** (`devtools/agent_tasks_google.py`, tier `live_google`, 2 tasks): the one
   question the other tiers cannot answer - can an agent edit a **real** Slides deck and a **real**
   Google Doc through the text representation, the beamer `.tex` and the canonical `.html`, which is

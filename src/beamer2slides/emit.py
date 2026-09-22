@@ -2143,24 +2143,31 @@ def fallback_pictures(deck: dict, refused: list[tuple[int, str]], out: Path) -> 
 
 
 def preflight_rebuild(out: Path, source_pdf: Path | None, new_deck: bool = False, force_rebuild: bool = False,
-                      slides=None, drive=None) -> None:
+                      slides=None, drive=None) -> dict | None:
     """The guard's question (guard.check_rebuild) before the conversion work starts, so a refusal
     comes in a second instead of after extract, classify and render. `emit` asks again - and backs
-    the deck up - immediately before the write, in case the deck is edited in between."""
+    the deck up - immediately before the write, in case the deck is edited in between.
+
+    Returns what it found ({"presentationId", "found"}), which that second ask confirms with one
+    field of one read instead of asking the whole question again (`plan_rebuild`'s `checked`);
+    None where there was nothing to ask."""
     from . import guard
 
     if new_deck or force_rebuild or not (out / "emit.json").exists():
-        return
+        return None
     drive = drive or drive_service()
     previous = guard.previous_deck(drive, out)
-    if previous and previous["state"] == "live":
-        guard.check_rebuild(slides or slides_service(), drive, previous["presentationId"], out, source_pdf, False)
+    if not previous or previous["state"] != "live":
+        return None
+    pid = previous["presentationId"]
+    return {"presentationId": pid,
+            "found": guard.check_rebuild(slides or slides_service(), drive, pid, out, source_pdf, False)}
 
 
 def preflight_in_background(out: Path, source_pdf: Path | None, new_deck: bool = False,
                             force_rebuild: bool = False):
     """`preflight_rebuild` on a thread of its own. Returns the function that asks for its answer:
-    it raises whatever the check raised, and returns nothing.
+    it raises whatever the check raised, and gives back what it found (`emit`'s `checked`).
 
     The check is three Drive reads and a whole `presentations.get` - three seconds that need
     nothing the conversion produces and answer a question only the first write to Drive really
@@ -2171,31 +2178,58 @@ def preflight_in_background(out: Path, source_pdf: Path | None, new_deck: bool =
     if new_deck or force_rebuild or not (out / "emit.json").exists() \
             or shared_service("slides", "v1") or shared_service("drive", "v3"):
         # Nothing to ask, or a caller's own clients, which are that caller's one thread's.
-        preflight_rebuild(out, source_pdf, new_deck, force_rebuild)
-        return lambda: None
+        found = preflight_rebuild(out, source_pdf, new_deck, force_rebuild)
+        return lambda: found
     creds = credentials_for_threads()  # here: a worker thread inherits no context (google_auth)
     pool = ThreadPoolExecutor(1, thread_name_prefix="b2s-preflight")
     work = pool.submit(lambda: preflight_rebuild(out, source_pdf, new_deck, force_rebuild,
                                                  slides_service(creds), drive_service(creds)))
     pool.shutdown(wait=False)
 
-    def answer() -> None:
-        work.result()
+    def answer() -> dict | None:
+        return work.result()
     return answer
 
 
+def look_again(slides, drive, out: Path, checked: dict | None) -> tuple[dict | None, dict | None]:
+    """What the output folder points at, and the preflight's finding where it still stands.
+
+    Two reads that need nothing of each other - the deck's place in Drive and its revision - so
+    they are made at once, one client per thread. `guard.recheck` is the cheap half of the second
+    ask; a deck that has moved since the preflight (or one the folder no longer points at, or one
+    now in the trash) gets the whole question again, in `plan_rebuild`."""
+    from . import guard
+
+    pid = (checked or {}).get("presentationId")
+    if not pid or shared_service("slides", "v1"):
+        return guard.previous_deck(drive, out), None
+    creds = credentials_for_threads()  # here: a worker thread inherits no context (google_auth)
+    with ThreadPoolExecutor(1, thread_name_prefix="b2s-recheck") as pool:
+        again = pool.submit(lambda: guard.recheck(slides_service(creds), pid, checked["found"]))
+        previous = guard.previous_deck(drive, out)
+        found = again.result()
+    if previous and previous["presentationId"] == pid and previous["state"] == "live":
+        return previous, found
+    return previous, None
+
+
 def plan_rebuild(slides, drive, out: Path, new_deck: bool, force_rebuild: bool, backup: str,
-                 source_pdf: Path | None) -> tuple[str | None, dict | None]:
+                 source_pdf: Path | None, checked: dict | None = None) -> tuple[str | None, dict | None]:
     """Decide what happens to the deck this output folder already has: rebuild it in place (the id
     is returned), or leave it alone and make a new one. Nothing destructive happens before this:
     `guard.check_rebuild` raises `guard.RebuildRefused` when the deck was edited in Slides, and a
     forced rebuild keeps a backup and records the deck's revision first
     (`<out>/backups/backups.json`, printed too) - and is refused in turn when that backup could
     not be kept (`guard.demand_way_back`), because then nothing could bring the deck back. The
-    second value goes into emit.json as "previous"."""
+    second value goes into emit.json as "previous".
+
+    `checked`: what the preflight found a few seconds ago (`preflight_rebuild`). The question is
+    asked again here because the deck may have been edited in between - but only what could have
+    changed since is really in question, so where the deck is still at the revision the preflight
+    read, that finding stands and the deck and the base are not read again."""
     from . import guard
 
-    previous = guard.previous_deck(drive, out)
+    previous, found = look_again(slides, drive, out, None if new_deck or force_rebuild else checked)
     if previous is None:
         return None, None
     pid, url = previous["presentationId"], guard.deck_url(previous["presentationId"])
@@ -2208,7 +2242,7 @@ def plan_rebuild(slides, drive, out: Path, new_deck: bool, force_rebuild: bool, 
         print(f"--new-deck: the previous deck is left as it is at {url}\n"
               f"  (this folder tracks the new deck from now on; the old one is only reachable by that link)")
         return None, {"presentationId": pid, "state": "kept", "action": "new deck", "url": url}
-    found = guard.check_rebuild(slides, drive, pid, out, source_pdf, force_rebuild)
+    found = found or guard.check_rebuild(slides, drive, pid, out, source_pdf, force_rebuild)
     mode = backup if backup != "auto" else ("file" if found["reason"] else "none")
     entry = {"presentationId": pid, "url": url, "action": "rebuilt in place", "revisionId": found.get("revisionId"),
              "modifiedTime": previous.get("modifiedTime"), "out": str(out),  # Drive's clock, and where to restore from
@@ -2229,15 +2263,17 @@ def plan_rebuild(slides, drive, out: Path, new_deck: bool, force_rebuild: bool, 
 
 
 def emit(deck: dict, out: Path, title: str, new_deck: bool = False, measure: bool = True,
-         force_rebuild: bool = False, backup: str = "auto", source_pdf: Path | None = None) -> dict:
+         force_rebuild: bool = False, backup: str = "auto", source_pdf: Path | None = None,
+         checked: dict | None = None) -> dict:
     """Build the deck. An output folder that already has a deck is rebuilt in place unless
     `new_deck`; that replaces the deck's whole content, so `guard.check_rebuild` refuses when
-    the deck was edited in Slides (`force_rebuild` goes ahead, after a backup)."""
+    the deck was edited in Slides (`force_rebuild` goes ahead, after a backup). `checked`: what
+    the preflight found (`preflight_rebuild`), which saves the second ask a read of the deck."""
     from . import guard
 
     slides, drive = slides_service(), drive_service()
     deck = {**deck, "slides": [{**s, "elements": merge_blocks(s["elements"])} for s in deck["slides"]]}
-    existing, previous_entry = plan_rebuild(slides, drive, out, new_deck, force_rebuild, backup, source_pdf)
+    existing, previous_entry = plan_rebuild(slides, drive, out, new_deck, force_rebuild, backup, source_pdf, checked)
     state, refused = build_deck(slides, drive, deck, out, title, existing, measure)
     if refused:
         # A picture can only come with the imported .pptx (the API inserts images from public

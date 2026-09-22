@@ -27,10 +27,8 @@ import sys
 import time
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-
-from beamer2slides.google_auth import drive_service, slides_service  # noqa: E402
-from beamer2slides.gslides import execute  # noqa: E402
+from beamer2slides.google_auth import drive_service, slides_service
+from beamer2slides.gslides import execute
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -66,7 +64,7 @@ def pptx_holds(path: Path, text: str) -> bool:
 
 
 def deck_text(slides, pid: str) -> str:
-    import sync_check as sc
+    from beamer2slides.devtools import sync_check as sc
     return " ".join(s.all_text for s in sc.read(pid).slides)
 
 
@@ -97,8 +95,8 @@ def main() -> int:
     problems, notes = [], {}
     started = time.time()
     with open(args.out / "proof.log", "w", encoding="utf-8") as log:
-        import deck_edits
-        import sync_check as sc
+        from beamer2slides.devtools import deck_edits  # (tools/<name>.py is a shim that runs one)
+        from beamer2slides.devtools import sync_check as sc
 
         # 1. convert, then convert again: a deck nobody touched is rebuilt without a word of warning.
         if cli(log, "convert", args.pdf, "--out", out).returncode:
