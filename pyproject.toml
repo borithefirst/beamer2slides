@@ -1,6 +1,6 @@
 [project]
 name = "beamer2slides"
-version = "0.2.0"
+version = "0.3.0"
 description = "Convert beamer PDFs into editable Google Slides decks"
 readme = "README.md"
 license = {text = "MIT"}
