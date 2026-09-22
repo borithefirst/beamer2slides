@@ -647,6 +647,16 @@ def test_sync_deletes_only_the_staging_deck_it_just_created(tmp_path):
 
     source = (SRC / "sync.py").read_text(encoding="utf-8")
     deletes = set(re.findall(r"files\(\)\.delete\(fileId=([\w.]+)\)", source))
-    assert deletes == {"staging", "fid"}  # never self.pid, and never an id read from a file
-    assert re.search(r"fid = execute\(self\.drive\.files\(\)\.create\(", source)
+    assert deletes == {"fid"}  # never self.pid, and never an id read from a file
+    assert re.search(r"fid = execute\(drive\.files\(\)\.create\(", source)
     assert re.search(r"staging = self\.stage\(work\)", source)
+    # Staged on a thread of its own, with clients of its own: the id still comes from that create
+    # and nowhere else, and the future is collected whatever happens (run's own `finally`).
+    assert re.search(r"self\.in_background\(lambda slides, drive: self\.stage\(work, drive, slides\), \"b2s-stage\"\)",
+                     source)
+    assert re.search(r"staging = staged\.result\(\)", source)
+    # Sent away on a thread at the end of the write, and `drop_staging`'s only caller hands it the
+    # id that create returned; nobody leaves before the file is really gone.
+    assert set(re.findall(r"self\.drop_staging\((\w+)\)", source)) == {"staging"}
+    assert re.search(r"def drop_staging\(self, fid: str\)", source)
+    assert re.search(r"s\.await_deletes\(\)", source)

@@ -575,6 +575,41 @@ sync keeps it unless `--overlays` says otherwise (`sync.overlay_mode`), or a dec
 `--overlays all` would lose its in-between steps. `pull --apply` and `pull --out DIR` keep every
 file they replace (`inverse.keep_backup`: `.bak`, `.bak2`, …, pictures included).
 
+**The round trip an agent pays for** (deck → `.tex` → edit → compile → `sync` → the same deck):
+the merge back is the half that repeats, and it is round trips, not work - the conversion's own
+lesson at the other end of the pipe. Six changes, each falling back to the old serial order when a
+caller lent its own client (`google_auth.shared_service`), measured **interleaved** in one sitting
+against a worktree of the commit before them (`scratchpad/ab.py`: the same folder driven back and
+forth between two sources, arms alternating and roles swapped so the direction of the edit is not
+the explanation). (1) The deck is read while the base is loaded and the new PDF is converted -
+three things that need nothing of each other - and `Sync.read` spends that answer once
+(`first_read`; every later read, after a write or on a second attempt, is a fresh one). (2) The
+deck's Drive facts are read once and handed to `load_base`, `stale_base_warning` and every
+`store_base` (`snapshot.deck_info`, four reads to one). (3) The staging deck is built on a thread
+of its own beside `measure_places`' scratch slides and thumbnails - a file of its own against pages
+nothing else looks at, neither reading what the other writes - and `stage` takes the clients to use,
+a service object carrying one connection. (4) The revision the write will require is asked for while
+that staging deck is still being made: the scratch slides were the last thing to move the deck, and
+somebody typing meanwhile is what the refusal and the re-plan are for. (5) The staging deck is sent
+away on a thread at the end of the write (`drop_staging`), the one thing there nothing waits for -
+collected before `sync` returns (`await_deletes`), never left to the interpreter, since a file
+nobody deletes is one somebody finds in their Drive. (6) The third base upload is a **flag**: once
+the leftovers are gone the `cleanup` list must stop being read, which is all it says, and
+`snapshot.mark_cleaned` says it in one field of the deck's own appProperties for a third of a second
+where a media update costs about two - `load_base`'s `swept()` drops a list the deck says is done,
+and where the flag will not land the base goes up as it always did. Measured on a 13-frame talk,
+three pairs each: **23.7 → 18.7 s** and then **22.9 → 16.4 s**, every pair of six favouring the new
+code. Two things were settled by measurement rather than guessed: gzipping the base buys nothing
+(a `files.update` **with media** costs ~1.8-2.0 s whether it carries 7 bytes or 147 kB, while a
+metadata-only one costs ~0.29 s), and reusing the live deck's own `contentUrl`s instead of a staging
+deck would break the lossless-picture promise `pull` relies on - `createImage` accepts them and
+Google **re-encodes** the file (same pixels, different bytes). And the compile between the edit and
+the sync stops when the auxiliary files stop moving (`playground/workbench.aux_state`, latexmk's
+rule) rather than running a fixed two passes: 2.0 → 1.0 s per turn on a settled folder, unchanged
+on a fresh one. The log alone is not the rule - a talk with no sections asks for no rerun after its
+first pass (rightly: no bookmarks to settle) while Madrid's footline still reads `2/1`, beamer's
+`\inserttotalframenumber` coming out of the .nav the *next* pass reads.
+
 **A conflict a person can settle** (`--take-source`, docs/sync.md "Taking the source's version"):
 the deck keeping what it has is right as a default and is not always what the author wants, and the
 only ways to say otherwise were editing the deck by hand or rebuilding it - the one thing this

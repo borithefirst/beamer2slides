@@ -614,6 +614,7 @@ def tagged(pres: dict, reqs: list[dict], revision: str | None) -> dict:
 # ---------------------------------------------------------------- storage
 
 BASE_PROPERTY = "b2sBase"
+CLEANED_PROPERTY = "b2sCleaned"   # the generation whose `cleanup` list has been carried out
 
 
 def local_path(out: Path) -> Path:
@@ -659,18 +660,26 @@ def read_local(out: Path | None, pid: str | None) -> tuple[dict | None, str | No
     return (None, f"{local_path(out)}: {problem}") if problem else (data, None)
 
 
+def deck_info(drive, pid: str) -> dict:
+    """The presentation's name, parents and appProperties: everything `load_drive` and `save_drive`
+    ask Drive before they can touch the base, and nothing a sync does changes it. A caller that
+    reads it once and hands it on (`sync`) pays that round trip once instead of four times."""
+    return execute(drive.files().get(fileId=pid, fields="name,parents,appProperties"))
+
+
 def save_drive(drive, base: dict, title: str | None = None, info: dict | None = None) -> str:
     """The base as a JSON file next to the presentation (drive.file scope), its id in the
     presentation's appProperties.b2sBase. Returns the file id.
 
     `info`: the presentation's name, parents and appProperties, where a caller has already read
-    them (they need nothing but the id, so a caller may fetch them while it is doing something
-    else: `snapshot_after_convert`)."""
+    them (`deck_info` - they need nothing but the id, so a caller may fetch them while it is doing
+    something else: `snapshot_after_convert`). A base file created here is written back into it, so
+    a caller that stores the base several times keeps naming the same file."""
     from googleapiclient.http import MediaIoBaseUpload
 
     pid = base["presentationId"]
     if info is None:
-        info = execute(drive.files().get(fileId=pid, fields="name,parents,appProperties"))
+        info = deck_info(drive, pid)
     data = json.dumps(base, ensure_ascii=False).encode("utf-8")
     fid = (info.get("appProperties") or {}).get(BASE_PROPERTY)
     if fid:
@@ -687,12 +696,38 @@ def save_drive(drive, base: dict, title: str | None = None, info: dict | None = 
         fid = execute(drive.files().create(body=body, fields="id", media_body=MediaIoBaseUpload(
             io.BytesIO(data), mimetype="application/json")))["id"]
         execute(drive.files().update(fileId=pid, body={"appProperties": {BASE_PROPERTY: fid}}, fields="id"))
+        info["appProperties"] = {**(info.get("appProperties") or {}), BASE_PROPERTY: fid}
     return fid
 
 
-def load_drive(drive, pid: str) -> dict | None:
+def mark_cleaned(drive, pid: str, generation: int, info: dict | None = None) -> str | None:
+    """Say that generation `generation`'s `cleanup` list has been carried out, without writing the
+    base to Drive again. Returns why Drive would not take it (None: it did).
+
+    The third store of a sync says one thing: the objects the second one named are gone. Storing a
+    base is a Drive *media* update, which costs about 1.8 s whatever it carries (measured on one
+    file, interleaved: 7 bytes and 147 kB cost the same), while one field of the deck's own
+    appProperties - which every later `deck_info` reads anyway - costs a third of a second. Nothing
+    about the ordering moves: the list is still in the base before the deletions and no longer read
+    after them. A flag that does not land leaves the list standing, which is exactly what a sync
+    whose cleanup failed leaves, and the next sync sweeps ids that are already gone
+    (`delete_leftovers` takes "could not be found" for gone)."""
+    if drive is None:
+        return "no Drive service"
     try:
-        info = execute(drive.files().get(fileId=pid, fields="appProperties"))
+        execute(drive.files().update(fileId=pid, body={"appProperties": {CLEANED_PROPERTY: str(generation)}},
+                                     fields="id"))
+    except (HttpError, OSError) as e:
+        return f"{type(e).__name__}: {e}"
+    if info is not None:
+        info["appProperties"] = {**(info.get("appProperties") or {}), CLEANED_PROPERTY: str(generation)}
+    return None
+
+
+def load_drive(drive, pid: str, info: dict | None = None) -> dict | None:
+    try:
+        if info is None:
+            info = execute(drive.files().get(fileId=pid, fields="appProperties"))
         fid = (info.get("appProperties") or {}).get(BASE_PROPERTY)
         if not fid:
             return None
@@ -702,7 +737,7 @@ def load_drive(drive, pid: str) -> dict | None:
         return None
 
 
-def stale_base_warning(where: str, drive, pid: str) -> str | None:
+def stale_base_warning(where: str, drive, pid: str, info: dict | None = None) -> str | None:
     """The deck names a base file in Drive that we cannot read (deleted, or owned by someone else)
     while we sync against the folder's copy: another checkout may have synced this deck since, so
     the copy can be older than the deck. Nothing is lost when it is - deck edits win, and the
@@ -710,7 +745,8 @@ def stale_base_warning(where: str, drive, pid: str) -> str | None:
     if where != "local" or drive is None:
         return None
     try:
-        info = execute(drive.files().get(fileId=pid, fields="appProperties"))
+        if info is None:
+            info = deck_info(drive, pid)
     except HttpError:
         return None
     fid = (info.get("appProperties") or {}).get(BASE_PROPERTY)
@@ -724,20 +760,35 @@ def stale_base_warning(where: str, drive, pid: str) -> str | None:
     return None
 
 
-def load_base(pid: str, out: Path | None, drive=None, problems: list[str] | None = None) -> tuple[dict | None, str]:
+def load_base(pid: str, out: Path | None, drive=None, problems: list[str] | None = None,
+              info: dict | None = None) -> tuple[dict | None, str]:
     """(base, where it came from): Drive is authoritative, the local copy a cache - except when the
     local one is newer, which is what a sync whose Drive upload failed leaves behind. A base that is
     truncated, from another deck or from a newer schema is not used at all; `problems` collects why
     (the caller reports them: a silently ignored base would sync against nothing and rewrite the
     whole deck)."""
     problems = problems if problems is not None else []
-    remote = load_drive(drive, pid) if drive is not None else None
+    if info is None and drive is not None:
+        # The same round trip `load_drive` would make, asked a little wider: the deck's own
+        # appProperties say which generation's cleanup is done (`mark_cleaned`).
+        with contextlib.suppress(HttpError, OSError):
+            info = deck_info(drive, pid)
+
+    def swept(base: dict | None) -> dict | None:
+        """A `cleanup` list the deck says has been carried out names nothing (`mark_cleaned`)."""
+        done = ((info or {}).get("appProperties") or {}).get(CLEANED_PROPERTY)
+        if base is not None and done and str(base.get("generation", 0)) == done:
+            base.pop("cleanup", None)
+        return base
+
+    remote = swept(load_drive(drive, pid, info)) if drive is not None else None
     if remote is not None:
         problem = base_problem(remote, pid)
         if problem:
             problems.append(f"the base stored in Drive was ignored: {problem}")
             remote = None
     local, why = read_local(out, pid)
+    local = swept(local)
     if why:
         problems.append(f"the local base was ignored: {why}")
     if remote is not None and local is not None and local.get("generation", 0) > remote.get("generation", 0):
@@ -751,10 +802,13 @@ def load_base(pid: str, out: Path | None, drive=None, problems: list[str] | None
     return None, "none"
 
 
-def store_base(base: dict, out: Path, drive=None, label: str = "base") -> str | None:
+def store_base(base: dict, out: Path, drive=None, label: str = "base", info: dict | None = None) -> str | None:
     """Store the base where the next sync will look for it: locally first (atomically), then in
     Drive. Returns why Drive could not take it (None: it did). The caller decides what to do about
-    a base that only reached the local folder - sync keeps the objects it would have deleted."""
+    a base that only reached the local folder - sync keeps the objects it would have deleted.
+
+    `info`: the deck's Drive facts, where the caller has them (`deck_info`); a sync stores the base
+    three times and they are the same three times."""
     from .faults import fail_at
 
     fail_at(f"{label}:save")
@@ -763,7 +817,7 @@ def store_base(base: dict, out: Path, drive=None, label: str = "base") -> str | 
         return "no Drive service"
     fail_at(f"{label}:drive")
     try:
-        save_drive(drive, base)
+        save_drive(drive, base, info=info)
     except (HttpError, OSError) as e:
         return f"{type(e).__name__}: {e}"
     return None

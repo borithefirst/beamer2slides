@@ -7,6 +7,7 @@ the converter wrote last time (snapshot). merge.plan_merge decides; this module 
 requests (emit's builders under fresh object ids), writes them with requiredRevisionId and
 records the new base."""
 
+import contextlib
 import copy
 import json
 import os
@@ -15,6 +16,7 @@ import re
 import string
 import subprocess
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from googleapiclient.errors import HttpError
@@ -611,7 +613,7 @@ def matrix_request(oid: str, m: list[float]) -> dict:
 class Sync:
     def __init__(self, slides, drive, pid: str, base: dict, ours: dict, out: Path, dry_run: bool = False,
                  measure: bool = True, trust_generation: bool = True, check_plan=None,
-                 follow_labels: bool = False, take_source=()):
+                 follow_labels: bool = False, take_source=(), facts: dict | None = None):
         # check_plan(mplan, theirs): raises instead of letting the write go ahead. It sits between
         # planning and preparing because that is the last point at which nothing has been sent and
         # the whole of what would be written is known (adopt_sync.problems).
@@ -633,6 +635,9 @@ class Sync:
         self.cleanup_requests: list[dict] = []
         self.in_place_readback: dict[str, dict] = {}  # objects rewritten in place, before the write
         self.final_revision: str | None = None
+        self.facts = facts              # the deck's Drive facts, read once (snapshot.deck_info)
+        self.first_read: dict | None = None  # a `presentations.get` a caller made while we planned
+        self.deleting: list = []        # staging decks on their way out (drop_staging)
 
     def token(self) -> str:
         """The two letters that make this sync's object ids unique. Never the token of a sync that
@@ -647,10 +652,29 @@ class Sync:
     # ---- reading and writing
 
     def read(self) -> dict:
+        """The deck, whole. The first one may have been fetched while the base was loaded and the
+        PDF converted (`sync`); it is used once and never again, so every later read - after a
+        write, or on a second attempt - is a fresh one."""
+        if self.first_read is not None:
+            pres, self.first_read = self.first_read, None
+            return pres
         return execute(self.slides.presentations().get(presentationId=self.pid))
 
-    def revision(self) -> str:
-        return execute(self.slides.presentations().get(presentationId=self.pid, fields="revisionId"))["revisionId"]
+    def revision(self, slides=None) -> str:
+        """`slides`: the client to ask with, where this runs on a thread of its own (`in_background`)."""
+        return execute((slides or self.slides).presentations().get(
+            presentationId=self.pid, fields="revisionId"))["revisionId"]
+
+    def asked_revision(self, asking) -> str:
+        """The revision a worker went to fetch, or one fetched here: a question that failed on the
+        thread is asked again rather than carried into the write, where an empty
+        `requiredRevisionId` would mean "whatever the deck says now"."""
+        if asking is not None:
+            try:
+                return asking.result()
+            except (HttpError, OSError, KeyError):
+                pass
+        return self.revision()
 
     def send(self, phase: str, reqs: list[dict], rev: str | None) -> str:
         """Batches with requiredRevisionId, chained through the revisions they return. A batch is
@@ -708,13 +732,28 @@ class Sync:
             hook = os.environ.pop("B2S_SYNC_BEFORE_WRITE", None)  # (tests: someone edits the deck now)
             if hook:
                 subprocess.run(hook, shell=True, check=False)
-            self.staging = staging = self.stage(work)  # noted in the pending marker: a run that
-            scratch = []                                # dies leaves it for the next one to delete
+            if self.revision() != theirs["revisionId"]:
+                continue  # edited while we planned: plan again
+            faults.fail_at("plan")
+            # The staging deck and the scratch slides are two things Google can do at once: the
+            # staging deck is a file of its own, the scratch slides are pages nothing else here
+            # looks at, and neither reads what the other writes. The worker builds clients of its
+            # own, since a service object is one connection - unless a caller lent us one, which
+            # is that caller's and is used on this thread alone (`emit.measure_places`' rule).
+            staging, scratch = None, []               # noted in the pending marker: a run that
+            staged = self.stage_in_background(work)   # dies leaves it for the next one to delete
+            asking = None
             try:
-                if self.revision() != theirs["revisionId"]:
-                    continue  # edited while we planned: plan again
-                faults.fail_at("plan")
+                if staged is None:
+                    self.staging = staging = self.stage(work)
                 moves, scratch = self.measure_places(work, theirs)
+                # The revision the write will require, asked for while the staging deck is still
+                # being made: the scratch slides were the last thing to move the deck, so from here
+                # it is the same answer whenever it is asked - and if somebody types meanwhile, the
+                # write is refused and planned again, which is what an older revision is for.
+                asking = self.in_background(lambda slides, drive: self.revision(slides), "b2s-rev")
+                if staged is not None:
+                    self.staging = staging = staged.result()
                 faults.fail_at("measure")
                 content, cleanup = self.main_requests(work, theirs, pres, moves, scratch)
                 self.cleanup_requests = cleanup
@@ -722,17 +761,22 @@ class Sync:
                 # dies leaves its objects behind, and the next one knows they are its own.
                 self.mark_pending(work, theirs)
                 faults.fail_at("journal")
-                rev = self.send("content", content, self.revision())
+                rev = self.send("content", content, self.asked_revision(asking))
+                asking = None
                 scratch = []
             except RevisionMismatch:
                 continue
             finally:
+                if staging is None and staged is not None:
+                    # Whatever went wrong here, a staging deck the worker did make is ours to delete.
+                    with contextlib.suppress(Exception):
+                        self.staging = staging = staged.result()
+                if asking is not None:
+                    asking.cancel()
                 if scratch:
                     self.delete_scratch(scratch)
                 if staging:  # (its pictures are only needed until the live deck has them)
-                    execute(self.drive.files().delete(fileId=staging))
-                    self.staging = None
-                    self.urls.clear()
+                    self.drop_staging(staging)
             rev = self.finish(work, mplan, theirs, pres, rev)
             result["revisionId"] = rev
             return result
@@ -822,7 +866,7 @@ class Sync:
             "revisionId": theirs.get("revisionId"), "started": time.strftime("%Y-%m-%dT%H:%M:%S"),
             "source": snapshot.source_info(self.ours["source"]), "objects": objects, "slides": slides,
             "in_place": self.in_place_readback, "staging": getattr(self, "staging", None)}
-        why = snapshot.store_base(self.base, self.out, self.drive, label="pending")
+        why = snapshot.store_base(self.base, self.out, self.drive, label="pending", info=self.facts)
         if why:
             self.warnings.append(f"could not note the started sync in Drive ({why}); noted locally only")
 
@@ -968,13 +1012,61 @@ class Sync:
 
     # ---- pictures
 
-    def stage(self, work: dict) -> str | None:
+    def in_background(self, fn, name: str = "b2s-work"):
+        """`fn(slides, drive)` on a thread of its own with clients of its own, or None where it has
+        to be run here: a client a caller lent us is that caller's and this thread is about to use
+        it (`emit.measure_places`' rule). The pool is left to the interpreter; every future this
+        returns is collected by its caller, in `run`'s own `finally` if nowhere else."""
+        from .google_auth import credentials_for_threads, drive_service, shared_service, slides_service
+
+        if shared_service("drive", "v3") or shared_service("slides", "v1"):
+            return None
+        creds = credentials_for_threads()   # resolved here: a worker inherits no context
+        pool = ThreadPoolExecutor(1, thread_name_prefix=name)
+        try:
+            return pool.submit(lambda: fn(slides_service(creds), drive_service(creds)))
+        finally:
+            pool.shutdown(wait=False)
+
+    def stage_in_background(self, work: dict):
+        """`stage` on a thread of its own, or None where there is nothing to stage or it has to be
+        run here (`in_background`)."""
+        if not [f for f in work["pictures"] if f not in self.urls]:
+            return None
+        return self.in_background(lambda slides, drive: self.stage(work, drive, slides), "b2s-stage")
+
+    def drop_staging(self, fid: str) -> None:
+        """The staging deck has done its work once the live deck holds the pictures, and deleting it
+        is the one thing at the end of a write nothing waits for - so it goes on a thread and this
+        run carries on. Collected before `sync` returns (`await_deletes`), never left to the
+        interpreter: a file nobody deletes is one somebody finds in their Drive."""
+        self.urls.clear()
+        self.staging = None
+        fut = self.in_background(lambda slides, drive: execute(drive.files().delete(fileId=fid)), "b2s-drop")
+        if fut is None:
+            execute(self.drive.files().delete(fileId=fid))
+        else:
+            self.deleting.append(fut)
+
+    def await_deletes(self) -> None:
+        """Wait for the staging decks this run sent away (`drop_staging`); their failures are the
+        caller's to hear about, not to stop on - the deck is written either way."""
+        for fut in self.deleting:
+            with contextlib.suppress(Exception):
+                fut.result()
+        self.deleting = []
+
+    def stage(self, work: dict, drive=None, slides=None) -> str | None:
         """Pictures go through a staging deck imported from a .pptx; its images' contentUrls are
         then used in the live deck. Returns the staging file's id: delete it once the live deck
-        has the pictures (the URLs stop working with it)."""
+        has the pictures (the URLs stop working with it).
+
+        `drive` / `slides`: the clients to use, where this runs on a thread of its own
+        (`stage_in_background`) and may not touch the ones this sync is using meanwhile."""
         from googleapiclient.http import MediaIoBaseUpload
         from .emit import PPTX_MIME, build_pptx
 
+        drive, slides = drive or self.drive, slides or self.slides
         needed = [f for f in work["pictures"] if f not in self.urls]
         if not needed:
             return None
@@ -991,19 +1083,19 @@ class Sync:
         pptx = build_pptx(page_w, page_h, [], pages, {"color": "#ffffff"})
         # The marker outlives a killed sync: nothing deletes a staging deck from a file's word, so
         # `tools/drive_usage.py` needs to be able to say which files are certainly leftovers.
-        fid = execute(self.drive.files().create(body={"name": "beamer2slides sync staging (temporary)",
-                                                      "mimeType": "application/vnd.google-apps.presentation",
-                                                      "appProperties": {"b2sStaging": self.pid}},
-                                                media_body=MediaIoBaseUpload(pptx, mimetype=PPTX_MIME), fields="id"))["id"]
+        fid = execute(drive.files().create(body={"name": "beamer2slides sync staging (temporary)",
+                                                 "mimeType": "application/vnd.google-apps.presentation",
+                                                 "appProperties": {"b2sStaging": self.pid}},
+                                           media_body=MediaIoBaseUpload(pptx, mimetype=PPTX_MIME), fields="id"))["id"]
         try:
-            staged = execute(self.slides.presentations().get(presentationId=fid))
-            slides = staged.get("slides", [])
-            for s in slides[:len(pages) - len(backgrounds)]:
+            staged = execute(slides.presentations().get(presentationId=fid))
+            made = staged.get("slides", [])
+            for s in made[:len(pages) - len(backgrounds)]:
                 for e in s.get("pageElements", []):
                     d = e.get("description") or ""
                     if "image" in e and d.startswith("b2s-stage:"):
                         self.urls[pictures[int(d[10:])]] = e["image"]["contentUrl"]
-            for s, f in zip(slides[len(pages) - len(backgrounds):], backgrounds):
+            for s, f in zip(made[len(pages) - len(backgrounds):], backgrounds):
                 fill = s.get("pageProperties", {}).get("pageBackgroundFill", {})
                 if "stretchedPictureFill" in fill:
                     self.urls[f] = fill["stretchedPictureFill"]["contentUrl"]
@@ -1011,7 +1103,7 @@ class Sync:
             if missing:
                 raise RuntimeError(f"the staging deck brought no picture for {missing[:3]}")
         except Exception:
-            execute(self.drive.files().delete(fileId=fid))
+            execute(drive.files().delete(fileId=fid))
             raise
         return fid
 
@@ -2093,22 +2185,37 @@ def sync(pdf: Path, deck: str, out: Path | None = None, dry_run: bool = False, o
          measure: bool = True, way_back: dict | None = None, backup_mode: str = "auto",
          force_adopted: bool = False, follow_labels: bool = False, take_source=()) -> dict:
     from . import adopt_sync
-    from .google_auth import drive_service, slides_service
+    from .google_auth import drive_service, shared_service, slides_service
 
     started = time.monotonic()
     pid, folder = resolve_deck(deck)
     out = out or folder or out_root() / pdf.stem
     slides, drive = slides_service(), drive_service()
     problems: list[str] = []
-    base, where = snapshot.load_base(pid, folder or out, drive, problems)
+    # The deck is read while the base is loaded and the new PDF is converted: three things that
+    # need nothing of each other, and a round trip costs about the same whatever else is in the
+    # air. The worker uses the Slides client and this thread the Drive one - a service object
+    # carries one connection and belongs to one thread at a time - unless a caller lent us its
+    # own, which is that caller's and is used here alone (`emit.measure_places`' rule).
+    alone = shared_service("slides", "v1") or shared_service("drive", "v3")
+    pool = None if alone else ThreadPoolExecutor(1, thread_name_prefix="b2s-sync")
+    reading = pool.submit(lambda: execute(slides.presentations().get(presentationId=pid))) if pool else None
+    facts = None
+    with contextlib.suppress(HttpError, OSError):
+        facts = snapshot.deck_info(drive, pid)  # name, parents, appProperties: read once, used four times
+    base, where = snapshot.load_base(pid, folder or out, drive, problems, facts)
     if base is None:
+        if reading is not None:
+            reading.cancel()
+        if pool is not None:
+            pool.shutdown(wait=False)
         raise SystemExit("\n".join([f"no sync base for presentation {pid}: convert the deck with this version first",
                                     "  A deck this converter never made has one only where `adopt` wrote it: sync it "
                                     "with `--deck <the adopt work folder>`,",
                                     "  not with the deck's URL. `convert` would make a second deck and leave this one "
                                     "with its comments and history behind.",
                                     *problems]))
-    stale = snapshot.stale_base_warning(where, drive, pid)
+    stale = snapshot.stale_base_warning(where, drive, pid, facts)
     warnings = problems + ([stale] if stale else [])
     overlays, mismatch = overlay_mode(overlays, base.get("overlays"))
     warnings += [mismatch] if mismatch else []
@@ -2132,14 +2239,25 @@ def sync(pdf: Path, deck: str, out: Path | None = None, dry_run: bool = False, o
         check = check_plan
     # A base that may be behind the deck never decides on its own that an object is a leftover.
     s = Sync(slides, drive, pid, base, ours, out, dry_run, measure, trust_generation=stale is None,
-             check_plan=check, follow_labels=follow_labels, take_source=take_source)
-    result = s.run()
+             check_plan=check, follow_labels=follow_labels, take_source=take_source, facts=facts)
+    try:
+        s.first_read = reading.result() if reading is not None else None
+    except (HttpError, OSError):
+        s.first_read = None   # it is read again on the main thread, as it always was
+    finally:
+        if pool is not None:
+            pool.shutdown()
+    try:
+        result = s.run()
+    except BaseException:
+        s.await_deletes()   # (a run that ends badly still owns the file it sent away)
+        raise
     report = result["plan"]["report"]
     report["warnings"] += s.warnings + warnings
     report["converged"] += [{**r, "field": "image", "how": "the same picture, written differently"} for r in refreshed]
     info = {"pdf": str(pdf), "presentationId": pid, "url": f"https://docs.google.com/presentation/d/{pid}/edit",
             "dry_run": dry_run, "base_from": where, "generation": base.get("generation", 0), "overlays": overlays,
-            "attempts": result["attempts"], "requests": s.sent, "seconds": round(time.monotonic() - started, 1),
+            "attempts": result["attempts"], "requests": s.sent, "seconds": 0.0,
             "report": report,
             "actions": [{"slide": p["key"], "action": p["action"],
                          "units": [{k: u[k] for k in ("key", "action", "source", "deck", "unpaired", "inherited",
@@ -2160,7 +2278,7 @@ def sync(pdf: Path, deck: str, out: Path | None = None, dry_run: bool = False, o
             # Stored before the old objects are deleted: whatever happens next, the base that the
             # next sync finds either still points at them or knows they have to go.
             new["cleanup"] = list(s.cleanup_ids)
-        why = snapshot.store_base(new, out, drive)
+        why = snapshot.store_base(new, out, drive, info=facts)
         if why:
             report["warnings"].append(
                 f"could not store the new base in Drive ({why}); kept locally. The {len(s.cleanup_ids)} object(s) this "
@@ -2173,10 +2291,20 @@ def sync(pdf: Path, deck: str, out: Path | None = None, dry_run: bool = False, o
                 report["warnings"].append(f"the objects this sync replaced could not be deleted ({e}); "
                                           f"the next sync removes them")
             else:
+                # The objects are gone, so the list naming them must stop being read. That is all
+                # this says, and a flag on the deck's own appProperties says it in a third of a
+                # second where writing the base again costs about two (`snapshot.mark_cleaned`);
+                # where the flag will not land, the base goes up again as it always did.
                 new.pop("cleanup", None)
-                snapshot.store_base(new, out, drive)
+                snapshot.save_local(new, out)
+                if snapshot.mark_cleaned(drive, pid, new["generation"], facts):
+                    snapshot.store_base(new, out, drive, info=facts)
         info["generation"] = new["generation"]
     elif not dry_run and where == "drive":
         snapshot.save_local(base, out)  # (refresh the cache)
+    s.await_deletes()   # the staging deck went on a thread; nobody leaves before it is gone
+    # Measured where the run really ends: storing the base is Drive round trips of the sync's own,
+    # and a number that stopped before them was a number about something else.
+    info["seconds"] = round(time.monotonic() - started, 1)
     write_reports(out, info)
     return info

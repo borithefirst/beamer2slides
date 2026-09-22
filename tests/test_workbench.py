@@ -4,6 +4,7 @@ No Google (the server is not given any), so the tools that need it must come bac
 rather than failing - which is the whole point of the agent layer's vocabulary reaching the page.
 """
 import json
+import subprocess
 import sys
 import threading
 import time
@@ -266,6 +267,49 @@ def test_a_compile_with_no_tex_engine_is_refused_in_the_result(ws, monkeypatch):
     monkeypatch.setattr(server.Handler.app.bench, "engines", [])
     state = run(ws, "tex_compile", {"tex": "talk.tex"})
     assert state["result"]["ok"] is False and "no TeX distribution" in state["result"]["summary"]
+
+
+def fake_engine(monkeypatch, folder, writes):
+    """A TeX engine that writes `writes[n]` into the folder on its n-th run (the last one over)."""
+    runs = []
+
+    def run(cmd, **kw):
+        state = writes[min(len(runs), len(writes) - 1)]
+        for name, text in state.items():
+            (folder / name).write_text(text, encoding="utf-8")
+        (folder / "talk.pdf").write_bytes(b"%PDF-1.4\n")
+        runs.append(cmd)
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    monkeypatch.setattr(workbench.subprocess, "run", run)
+    return runs
+
+
+def test_a_compile_stops_when_the_auxiliary_files_stop_moving(tmp_path, monkeypatch):
+    # The loop an agent runs: the folder's .aux and .nav are settled before the turn begins, so
+    # one pass draws the PDF and a second would draw the same one.
+    (tmp_path / "talk.tex").write_text(r"\documentclass{beamer}", encoding="utf-8")
+    settled = {"talk.aux": "settled", "talk.nav": "settled"}
+    for name, text in settled.items():        # what the turn before this one left
+        (tmp_path / name).write_text(text, encoding="utf-8")
+    runs = fake_engine(monkeypatch, tmp_path, [settled])
+    workbench.run_latex(tmp_path, "talk.tex", ["pdflatex"])
+    assert len(runs) == 1
+
+
+def test_a_compile_runs_again_while_they_move(tmp_path, monkeypatch):
+    # A fresh folder: the first pass writes the .nav from nothing, and beamer's frame total comes
+    # out of the .nav the *next* pass reads - which no line of the log asks for.
+    (tmp_path / "talk.tex").write_text(r"\documentclass{beamer}", encoding="utf-8")
+    runs = fake_engine(monkeypatch, tmp_path,
+                       [{"talk.nav": "one"}, {"talk.nav": "two"}, {"talk.nav": "two"}])
+    workbench.run_latex(tmp_path, "talk.tex", ["pdflatex"])
+    assert len(runs) == 3
+    # and never past the cap, however long they keep moving
+    runs = fake_engine(monkeypatch, tmp_path,
+                       [{"talk.nav": "a"}, {"talk.nav": "b"}, {"talk.nav": "c"}])
+    workbench.run_latex(tmp_path, "talk.tex", ["pdflatex"], passes=2)
+    assert len(runs) == 2
 
 
 @pytest.mark.skipif(not server.tex_engines(), reason="no TeX distribution")

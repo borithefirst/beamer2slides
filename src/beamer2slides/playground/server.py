@@ -281,8 +281,8 @@ def compile_tex(job: Job, tex: str) -> Path:
     if not engines:
         raise JobError("no TeX distribution on this server: upload a compiled PDF instead")
     (job.dir / "talk.tex").write_text(tex, encoding="utf-8")
-    try:                                     # the second run settles navigation
-        return workbench.run_latex(job.dir, "talk.tex", engines, TEX_TIMEOUT, passes=2)
+    try:              # a fresh folder, so the second run settles navigation and the third is rare
+        return workbench.run_latex(job.dir, "talk.tex", engines, TEX_TIMEOUT)
     except workbench.TexError as e:
         raise JobError(str(e)) from None
 

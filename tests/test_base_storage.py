@@ -123,6 +123,60 @@ def test_without_a_drive_client_the_cache_still_works(tmp_path):
     assert (where, got["generation"]) == ("local", 7)
 
 
+# ------------------------------------------------- the cleanup a sync has carried out
+
+def cleaning(generation: int) -> dict:
+    return {**base(generation=generation), "cleanup": ["b2s_old1", "b2s_old2"]}
+
+
+def test_a_cleanup_the_deck_says_is_done_is_not_read_again(tmp_path):
+    """The last thing a sync does is delete the objects it replaced, and the only news afterwards
+    is that they are gone. That is one field of the deck's own appProperties, not the whole base
+    again (`mark_cleaned`): a media update costs about 1.8 s whatever it carries."""
+    drive = drive_with_base(cleaning(4))
+    drive.props[PID][snapshot.CLEANED_PROPERTY] = "4"
+    got, where = snapshot.load_base(PID, tmp_path, drive)
+    assert (where, "cleanup" in got) == ("drive", False)
+
+
+def test_a_cleanup_of_another_generation_still_names_its_leftovers(tmp_path):
+    """The flag is about one generation: a sync that died after this one left real leftovers."""
+    drive = drive_with_base(cleaning(5))
+    drive.props[PID][snapshot.CLEANED_PROPERTY] = "4"
+    got, _ = snapshot.load_base(PID, tmp_path, drive)
+    assert got["cleanup"] == ["b2s_old1", "b2s_old2"]
+
+
+def test_the_cache_is_read_by_the_same_flag(tmp_path):
+    snapshot.save_local(cleaning(2), tmp_path)
+    drive = FakeDrive(props={PID: {snapshot.CLEANED_PROPERTY: "2"}})
+    got, where = snapshot.load_base(PID, tmp_path, drive)
+    assert (where, "cleanup" in got) == ("local", False)
+
+
+def test_marking_the_cleanup_done_writes_no_base(tmp_path):
+    drive = drive_with_base(cleaning(4))
+    info = snapshot.deck_info(drive, PID)
+    assert snapshot.mark_cleaned(drive, PID, 4, info) is None
+    assert drive.written == []                                   # no media update at all
+    assert drive.props[PID][snapshot.CLEANED_PROPERTY] == "4"
+    assert info["appProperties"][snapshot.CLEANED_PROPERTY] == "4"  # (the caller's facts follow)
+
+
+def test_a_flag_drive_will_not_take_is_said_so_the_base_can_go_up_instead(tmp_path):
+    class Refuses(FakeDrive):
+        def update(self, fileId, body=None, media_body=None, fields=None):
+            if body and "appProperties" in body:
+                raise http_error(403)
+            return super().update(fileId, body, media_body, fields)
+
+    drive = Refuses(props={PID: {snapshot.BASE_PROPERTY: "base-0"}},
+                    blobs={"base-0": json.dumps(cleaning(4)).encode("utf-8")})
+    why = snapshot.mark_cleaned(drive, PID, 4, None)
+    assert why and "HttpError" in why
+    assert snapshot.mark_cleaned(None, PID, 4, None) == "no Drive service"
+
+
 # ---------------------------------------------------------------- save
 
 

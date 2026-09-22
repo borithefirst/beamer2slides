@@ -34,6 +34,7 @@ import sys
 import threading
 import time
 import uuid
+import zlib
 from pathlib import Path
 
 from ..agent.types import Refused
@@ -71,9 +72,12 @@ COMPILE_TOOL = {
         "properties": {
             "tex": {"type": "string",
                     "description": "The .tex file to compile, relative to the workspace."},
-            "passes": {"type": "integer", "default": 2,
-                       "description": "How many times to run the engine; beamer needs two for "
-                                      "its navigation and labels to settle."},
+            "passes": {"type": "integer", "default": 3,
+                       "description": "At most how many times to run the engine. It stops as "
+                                      "soon as the auxiliary files stop moving, so a source "
+                                      "compiled again in the same folder costs one pass and a "
+                                      "fresh one costs the two beamer needs to settle its "
+                                      "navigation and labels."},
         },
         "required": ["tex"],
         "additionalProperties": False,
@@ -104,19 +108,39 @@ def tex_engine(source: str, engines: list[str]) -> str:
         and "lualatex" in engines else engines[0]
 
 
+#: What a pass reads at its start and writes at its end; while any of them moves, the next run
+#: draws something different (labels, beamer's navigation and frame total, the TOC, bookmarks).
+AUX_SUFFIXES = (".aux", ".toc", ".nav", ".snm", ".out", ".lof", ".lot", ".bbl", ".vrb")
+
+
+def aux_state(folder: Path) -> dict[str, int]:
+    """A digest of every auxiliary file under `folder`, for telling one pass from the next."""
+    return {str(p.relative_to(folder)): zlib.crc32(p.read_bytes())
+            for p in folder.rglob("*") if p.suffix in AUX_SUFFIXES and p.is_file()}
+
+
 def run_latex(folder: Path, main: str, engines: list[str], timeout: int = TEX_TIMEOUT,
-              passes: int = 2) -> Path:
+              passes: int = 3) -> Path:
     """Run a TeX engine on `main` inside `folder` and return the PDF it wrote.
 
     The fence is the same wherever a compile happens on this server: no shell escape, no file
     outside the folder, and a time limit - which is what makes a source from a stranger safe
     to compile at all (docs/playground.md).
+
+    Up to `passes` runs, and **one more only while the auxiliary files are still moving**
+    (`aux_state`, latexmk's rule). This is the step an agent pays on every turn of edit ->
+    compile -> `deck_sync`, where the folder's .aux and .nav are settled before the turn begins
+    and a second pass draws the same PDF for nothing. The log alone is not the rule: a talk with
+    no sections asks for no rerun after its first pass (`inverse.needs_rerun`, rightly - there
+    are no bookmarks to settle) while Madrid's footline still reads `2/1`, beamer's
+    \\inserttotalframenumber coming out of the .nav the *next* pass reads.
     """
     path = folder / main
     if not path.is_file():
         raise TexError(f"there is no {main} in the workspace")
     engine = tex_engine(path.read_text(encoding="utf-8", errors="replace"), engines)
     env = {**os.environ, **FENCE}
+    before = aux_state(folder)
     for _ in range(max(1, passes)):
         try:
             r = subprocess.run([engine, "-interaction=nonstopmode", "-halt-on-error",
@@ -128,6 +152,9 @@ def run_latex(folder: Path, main: str, engines: list[str], timeout: int = TEX_TI
         if r.returncode:
             errors = [l for l in r.stdout.splitlines() if l.startswith("!") or l.startswith("l.")]
             raise TexError(f"{engine} failed:\n" + ("\n".join(errors[:12]) or r.stdout[-1500:]))
+        before, after = aux_state(folder), before
+        if before == after:
+            break
     pdf = path.with_suffix(".pdf")
     if not pdf.is_file():
         raise TexError(f"{engine} wrote no {pdf.name}")
@@ -454,7 +481,7 @@ class Workbench:
         self.resolve(session, ref)            # the boundary, before anything runs
         try:
             pdf = run_latex(session.root, ref, self.engines,
-                            passes=int(run.args.get("passes") or 2))
+                            passes=int(run.args.get("passes") or 3))
         except TexError as exc:
             return failed(run.tool, str(exc), code="compile_failed")
         name = LocalWorkspace(session.root).ref(pdf)
