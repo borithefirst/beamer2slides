@@ -1212,7 +1212,9 @@ _INSTALLED: "DocsFixture | None" = None
 
 
 def _http(status: int):
-    from googleapiclient.errors import HttpError
+    """A refusal shaped like Google's. Through `gapi`, never `googleapiclient` directly: the
+    library catches the class *it* bound, and a second binding would be a different class."""
+    from ..gapi import HttpError
 
     return HttpError(type("R", (), {"status": status, "reason": "no"})(), b"{}")
 

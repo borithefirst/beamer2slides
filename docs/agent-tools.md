@@ -155,7 +155,19 @@ Docs client hands it over instead of having one built, which is what a server wa
 `build()` would otherwise fetch a discovery document per call. It takes either a mapping of api
 name to a ready client or a callable `(api, version, creds) -> client | None`; anything it does
 not answer for is built as before, and `creds` is `None` where nobody passed any, a client that
-carries its own credentials never being a reason to go looking for a token.
+carries its own credentials never being a reason to go looking for a token. That last sentence
+has an edge a caller hit: on the main path *nobody* passes any - `emit()` opens with
+`slides_service(), drive_service()` and the built-in fallback resolves them itself - so a builder
+that trusted the argument built an unauthenticated client. Either do `creds or
+google_auth.credentials()`, or say `use_services(make, needs_credentials=True)` and be handed the
+library's (resolved once, however many clients are asked for).
+
+With that seam in place the client library itself is optional: `gapi.py` is the only module that
+imports it, so a harness that injects everything - or runs only `deck_prepare`, `deck_inspect`,
+`tex_label`, `tex_converge`, which talk to nobody - needs neither `pip install
+"beamer2slides[google]"` nor an account. A host that has a token and not the package hears
+`offline` with the one-line fix, not a traceback (docs/install.md, "Injecting your own API
+clients").
 
 **Both are per context, not per process.** They were module-level globals, which is fine for one
 conversion at a time and wrong for a server answering two requests at once: two visitors' tokens

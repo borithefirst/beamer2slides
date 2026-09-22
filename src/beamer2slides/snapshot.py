@@ -10,10 +10,9 @@ import re
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-from googleapiclient.errors import HttpError
-
 from . import identity
 from .emit import background_key as emit_background_key, slide_layout
+from .gapi import HttpError
 from .gslides import EMU_PER_PT, execute
 
 VERSION = 1
@@ -675,7 +674,7 @@ def save_drive(drive, base: dict, title: str | None = None, info: dict | None = 
     them (`deck_info` - they need nothing but the id, so a caller may fetch them while it is doing
     something else: `snapshot_after_convert`). A base file created here is written back into it, so
     a caller that stores the base several times keeps naming the same file."""
-    from googleapiclient.http import MediaIoBaseUpload
+    from .gapi import media_upload
 
     pid = base["presentationId"]
     if info is None:
@@ -684,7 +683,7 @@ def save_drive(drive, base: dict, title: str | None = None, info: dict | None = 
     fid = (info.get("appProperties") or {}).get(BASE_PROPERTY)
     if fid:
         try:
-            execute(drive.files().update(fileId=fid, media_body=MediaIoBaseUpload(io.BytesIO(data), mimetype="application/json"),
+            execute(drive.files().update(fileId=fid, media_body=media_upload(io.BytesIO(data), "application/json"),
                                          fields="id"))
         except HttpError:
             fid = None
@@ -693,8 +692,8 @@ def save_drive(drive, base: dict, title: str | None = None, info: dict | None = 
                 "appProperties": {"b2sBaseOf": pid}}
         if info.get("parents"):
             body["parents"] = info["parents"]
-        fid = execute(drive.files().create(body=body, fields="id", media_body=MediaIoBaseUpload(
-            io.BytesIO(data), mimetype="application/json")))["id"]
+        fid = execute(drive.files().create(body=body, fields="id", media_body=media_upload(
+            io.BytesIO(data), "application/json")))["id"]
         execute(drive.files().update(fileId=pid, body={"appProperties": {BASE_PROPERTY: fid}}, fields="id"))
         info["appProperties"] = {**(info.get("appProperties") or {}), BASE_PROPERTY: fid}
     return fid

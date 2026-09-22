@@ -1,6 +1,6 @@
 [project]
 name = "beamer2slides"
-version = "0.3.0"
+version = "0.4.0"
 description = "Convert beamer PDFs into editable Google Slides decks"
 readme = "README.md"
 # An SPDX string, not `{text = "MIT"}`: setuptools deprecated the table in 77 and stops building
@@ -12,8 +12,6 @@ dependencies = [
     "numpy>=2.0",
     "pillow>=10.1",
     "python-pptx>=1.0",
-    "google-api-python-client>=2.0",
-    "google-auth-oauthlib>=1.2",
     # Font files, which `adopt` cannot do without: which faces this machine has and what they cover
     # (scripts.py), how wide a stand-in sets the deck's words (adopt.font_widths, deck_thumbs), and
     # the static instances cut out of a variable font fetched from google/fonts (fontfetch.py). It
@@ -24,6 +22,14 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# Talking to Google. An extra rather than a dependency since 0.4.0, because a caller may have its
+# own client - `google_auth.use_services` takes ready Slides/Drive/Docs clients, or a builder that
+# answers from a bundled discovery document - and a journey that talks to nobody (`deck_prepare`,
+# `deck_inspect`, `tex_label`, `tex_converge`) needs neither the package nor an account. Every use
+# of it is behind a function in `gapi.py`, which is the only module that imports it; without it the
+# local journeys run and anything reaching Google says so in one sentence (`gapi.MISSING`).
+# Anyone converting a deck from this machine's own token wants `beamer2slides[google]`.
+google = ["google-api-python-client>=2.0", "google-auth-oauthlib>=1.2"]
 # The pure Python PDF backend (B2S_PDF_BACKEND=pure, docs/pdf-from-scratch.md) reads embedded font
 # programs and the Adobe Glyph List through fontTools. A plain dependency since the day adopt
 # needed it too; the name stays, so what the docs and older installs ask for still resolves.
@@ -36,7 +42,10 @@ mcp = ["mcp>=1.2"]
 # What the tests need beyond the package itself. pytest-xdist is what makes `-n auto` work;
 # the suite runs without it, one worker, about three times slower (tests/conftest.py).
 dev = ["pytest>=8", "pytest-xdist>=3",
-       "fonttools>=4.40"]  # themes/google/fonts/build_fonts.py cuts the theme's fonts
+       "fonttools>=4.40",  # themes/google/fonts/build_fonts.py cuts the theme's fonts
+       # The offline suite runs without the client library (tests/test_gapi.py proves it in a
+       # subprocess where the import fails); the live suites - markers slides, sync, docs - do not.
+       "google-api-python-client>=2.0", "google-auth-oauthlib>=1.2"]
 
 [project.urls]
 Homepage = "https://github.com/borithefirst/beamer2slides"

@@ -25,9 +25,8 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-from googleapiclient.errors import HttpError
-
 from . import merge, snapshot
+from .gapi import HttpError, message_of
 from .gslides import execute
 
 SCRATCH = re.compile(r"b2s_m\d{3}")  # emit.measure_places' scratch slides
@@ -444,10 +443,7 @@ def demand_way_back(pid: str, out: Path, pdf: Path | str | None, entry: dict, mo
 
 
 def api_message(e: HttpError) -> str:
-    try:
-        return json.loads(e.content)["error"]["message"][:200]
-    except (ValueError, KeyError, TypeError):
-        return str(e)[:200]
+    return message_of(e)
 
 
 def record(out: Path, entry: dict) -> Path:

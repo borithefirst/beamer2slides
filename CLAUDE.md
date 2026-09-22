@@ -489,6 +489,37 @@ a per-slide background picture.
   An installed (pip) beamer2slides finds them in `%APPDATA%\beamer2slides` /
   `~/.config/beamer2slides` instead; `$B2S_CLIENT_SECRET` / `$B2S_TOKEN` override both
   (`google_auth.credential_file`). Packaging notes: `docs/install.md`.
+- **The client library is a dependency of one module** (`gapi.py`, `pip install
+  "beamer2slides[google]"` since 0.4.0, docs/install.md "Injecting your own API clients"):
+  `use_services` already let a caller hand over its own Slides/Drive/Docs clients - a harness
+  whose builder answers from a bundled discovery document, `discovery.build()` otherwise fetching
+  one per call - and the injection was complete except for the **imports**. `googleapiclient` sat
+  at module scope in six modules, so `deck_prepare`, which needs no account at all, pulled it in
+  through `snapshot` -> `emit` -> `gslides` and could not be *imported* in a gVisor sandbox that
+  has no account and therefore no Google libraries (reported by a caller running exactly that,
+  2026-09-22). Every use of the package is behind a function in `gapi` now (`build`,
+  `media_upload`, `installed`), and the one piece that cannot be deferred - `HttpError`, which
+  ~45 `except` clauses name - is bound **once**, there and nowhere else: two independent
+  `try/except ImportError` fallbacks would bind two different classes and an `except` naming the
+  other would quietly stop matching, which would cost a rebuild guard or a retry. With the
+  package absent the stand-in is a class nothing raises, so every clause simply never matches;
+  it carries Google's two fields all the same, since a harness that fabricates a refusal
+  (`devtools.agent_tasks._http`) raises it. What the call sites want of an error is asked through
+  functions rather than `e.resp.status` (`status_of`, `message_of`, `is_transient`), so a client
+  of another shape could answer. `agent/auth.py` turns a missing package into a refusal
+  (`offline`) rather than a traceback: a host with a token and no client library has a one-line
+  fix, and `gapi.MISSING` always offers both ways out. Tests: `tests/test_gapi.py` - an AST walk
+  for module-scope imports, one binding of the error class, and the library imported and driven
+  in a subprocess where those imports fail.
+- **A builder is handed the credentials the call site passed, which is usually nothing**
+  (reported with the above): `emit()` opens with `slides_service(), drive_service()` and passes
+  none, because the built-in fallback does `creds or credentials()` itself - so a builder that
+  trusted the argument built an *unauthenticated* client. Either it does `creds or
+  google_auth.credentials()`, or it says `use_services(make, needs_credentials=True)` once and is
+  handed the library's (`_Services`, `_for_builder`; resolved once, so `shared_service`'s two
+  builder calls cost one token). Left out, an injected client is still never a reason to go
+  looking for a token - which is also what `credentials_for_threads` answers for a worker thread,
+  a `ContextVar` not being inherited by one started inside the block.
 - Smoke test: `tools/slides_smoke.py`.
 - **`presentations.create` ignores `pageSize`**: new decks are always 720 × 405 pt (16:9).
   4:3 decks need another route (e.g. upload a blank 4:3 .pptx with Drive conversion).
@@ -1560,7 +1591,9 @@ same functions underneath; nothing here reimplements a journey.
   for the length of a call instead of found in the filesystem; `use_services` is the same hook one
   step later, a ready Slides/Drive/Docs client (or a `(api, version, creds) -> client | None`
   builder) handed over instead of one built, which is what a server wants when `build()` would
-  fetch a discovery document per call. **Both are per context, not per process** (`_Hook`, a
+  fetch a discovery document per call (and, with `[google]` an extra, what lets such a caller do
+  without the package altogether - `gapi`, "Google side" above, where `needs_credentials` is too).
+  **Both are per context, not per process** (`_Hook`, a
   `ContextVar`): they were module-level globals, fine for one conversion at a time and wrong for a
   server with two visitors' tokens in the air, neither of which may reach the other's deck. The one
   edge is that a thread started inside the block runs in a *fresh* context and inherits nothing -

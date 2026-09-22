@@ -37,10 +37,8 @@ import time
 import urllib.request
 from pathlib import Path
 
-from googleapiclient.errors import HttpError
-from googleapiclient.http import MediaIoBaseUpload
-
 from . import doc_ir, doc_merge
+from .gapi import HttpError, media_upload, status_of
 from .google_auth import credentials, docs_service, drive_service
 
 DOC_MIME = "application/vnd.google-apps.document"
@@ -150,8 +148,8 @@ def save_drive(drive, document: str, base: dict, title: str | None = None) -> st
     fid = (info.get("appProperties") or {}).get(BASE_PROPERTY)
     if fid:
         try:
-            drive.files().update(fileId=fid, fields="id", media_body=MediaIoBaseUpload(
-                io.BytesIO(data), mimetype=JSON_MIME)).execute()
+            drive.files().update(fileId=fid, fields="id", media_body=media_upload(
+                io.BytesIO(data), JSON_MIME)).execute()
         except HttpError:
             fid = None  # deleted, or somebody else's now: a new one is made below
     if not fid:
@@ -159,8 +157,8 @@ def save_drive(drive, document: str, base: dict, title: str | None = None) -> st
                 "mimeType": JSON_MIME, "appProperties": {"b2sBaseOf": document}}
         if info.get("parents"):
             body["parents"] = info["parents"]
-        fid = drive.files().create(body=body, fields="id", media_body=MediaIoBaseUpload(
-            io.BytesIO(data), mimetype=JSON_MIME)).execute()["id"]
+        fid = drive.files().create(body=body, fields="id", media_body=media_upload(
+            io.BytesIO(data), JSON_MIME)).execute()["id"]
         drive.files().update(fileId=document, fields="id",
                              body={"appProperties": {BASE_PROPERTY: fid}}).execute()
     return fid
@@ -179,7 +177,7 @@ def rename_document(drive, document: str, name: str, problems: list[str]) -> str
         drive.files().update(fileId=document, fields="id", body={"name": name}).execute()
         return name
     except HttpError as err:
-        problems.append(f"the document could not be renamed {name!r} ({err.resp.status}); "
+        problems.append(f"the document could not be renamed {name!r} ({status_of(err)}); "
                         f"it keeps the name it has")
         return None
 
@@ -455,7 +453,7 @@ def open_comments(drive, ident: str) -> list[str]:
             fields="comments(content,resolved,author/displayName,"
                    "quotedFileContent/value,replies/content)").execute().get("comments", [])
     except HttpError as err:
-        return [f"the document's comments could not be read ({err.resp.status})"]
+        return [f"the document's comments could not be read ({status_of(err)})"]
     out = []
     for comment in found:
         if comment.get("resolved"):
@@ -641,7 +639,7 @@ def _batch(docs, ident: str, requests: list[dict], revision: str | None) -> dict
 
 def moved_on(error: HttpError) -> bool:
     """Whether a refused write means the document changed under the plan."""
-    return error.resp.status in (400, 409) and "revision" in str(error).lower()
+    return status_of(error) in (400, 409) and "revision" in str(error).lower()
 
 
 class Stager:
@@ -685,8 +683,8 @@ class Stager:
                        for n, src in enumerate(sources))
         ident = self.drive.files().create(
             body={"name": self.NAME, "mimeType": DOC_MIME, "appProperties": {"b2sStaging": "docs"}},
-            media_body=MediaIoBaseUpload(io.BytesIO(f"<html><body>{body}</body></html>".encode()),
-                                         mimetype="text/html"), fields="id").execute()["id"]
+            media_body=media_upload(io.BytesIO(f"<html><body>{body}</body></html>".encode()),
+                                    "text/html"), fields="id").execute()["id"]
         self.files.append(ident)
         staged = doc_ir.from_document(
             self.docs.documents().get(documentId=ident, includeTabsContent=True).execute())
@@ -704,7 +702,7 @@ class Stager:
             try:
                 self.drive.files().delete(fileId=ident).execute()
             except HttpError as err:
-                print(f"  the staging document {ident} could not be deleted ({err.resp.status})")
+                print(f"  the staging document {ident} could not be deleted ({status_of(err)})")
         self.files = []
 
 
@@ -750,7 +748,7 @@ def plant_ranges(docs, ident: str, ir: dict, tab: str | None = None) -> int:
         send(docs, ident, requests)
         return len(requests)
     except HttpError as err:
-        print(f"  the batch of {len(requests)} named ranges was refused ({err.resp.status}); "
+        print(f"  the batch of {len(requests)} named ranges was refused ({status_of(err)}); "
               f"trying them one at a time")
     done = 0
     for request in requests:
@@ -760,7 +758,7 @@ def plant_ranges(docs, ident: str, ir: dict, tab: str | None = None) -> int:
         except HttpError as err:
             what = next(iter(request.values()))
             print(f"  no anchor for {what.get('name') or what.get('namedRangeId')}: "
-                  f"{err.resp.status}")
+                  f"{status_of(err)}")
     return done
 
 
@@ -828,7 +826,7 @@ def equation_latex(drive, ident: str, doc: dict, live: dict) -> int:
     try:
         markdown = drive.files().export(fileId=ident, mimeType="text/markdown").execute()
     except HttpError as err:
-        print(f"  no LaTeX for the equations: the Markdown export was refused ({err.resp.status})")
+        print(f"  no LaTeX for the equations: the Markdown export was refused ({status_of(err)})")
         return 0
     if isinstance(markdown, bytes):
         markdown = markdown.decode("utf-8")
@@ -925,7 +923,7 @@ def push(path: Path, name: str | None = None, new_doc: bool = False) -> dict:
     html = doc_ir.to_html(first)
     ident = drive.files().create(
         body={"name": name or source.get("title") or path.stem, "mimeType": DOC_MIME},
-        media_body=MediaIoBaseUpload(io.BytesIO(html.encode("utf-8")), mimetype="text/html"),
+        media_body=media_upload(io.BytesIO(html.encode("utf-8")), "text/html"),
         fields="id").execute()["id"]
 
     doc, live = read_document(docs, ident)
@@ -1291,7 +1289,7 @@ def backup_document(drive, document: str, path: Path) -> Path:
         data = drive.files().export(fileId=document, mimeType="text/html").execute()
     except HttpError as err:
         raise SystemExit(
-            f"the document could not be exported as a backup ({err.resp.status}), and\n"
+            f"the document could not be exported as a backup ({status_of(err)}), and\n"
             f"  --assume-base source-wins writes the file over it with no base to merge\n"
             f"  against. Nothing was written. Pass --no-backup to ask for that anyway.")
     out.write_bytes(data if isinstance(data, bytes) else str(data).encode("utf-8"))

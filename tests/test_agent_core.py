@@ -6,6 +6,7 @@ or raises crosses the boundary as anything but data. Each one is tested by break
 """
 
 import json
+import sys
 
 import pytest
 
@@ -253,7 +254,14 @@ def test_a_missing_token_asks_for_consent_and_never_opens_a_browser(tmp_path, mo
     """The whole point of the source: a harness hangs forever on `run_local_server`."""
     secret = tmp_path / "client_secret.json"
     secret.write_text("{}", encoding="utf-8")
-    monkeypatch.setattr(google_auth, "InstalledAppFlow", None)  # any use of it would explode
+    # The flow is imported where it is used (`gapi`: the Google packages are optional now), so the
+    # guard is the import itself - reaching for it at all is the failure this test is about.
+    class _NoBrowser:
+        def __getattr__(self, name):
+            raise AssertionError(f"the browser consent flow was reached ({name})")
+
+    monkeypatch.setitem(sys.modules, "google_auth_oauthlib", _NoBrowser())
+    monkeypatch.setitem(sys.modules, "google_auth_oauthlib.flow", _NoBrowser())
     source = TokenFile(token=tmp_path / "absent.json", client_secret=secret)
     with pytest.raises(Refused) as exc:
         source.credentials()
@@ -385,7 +393,7 @@ def test_a_prebuilt_client_is_used_and_no_token_is_ever_looked_for(monkeypatch):
     (a discovery document per `build()` is what makes them want one) hands it over, and nothing
     goes looking for credentials at all."""
     slides, drive = object(), object()
-    monkeypatch.setattr(google_auth, "build", _explodes("build"))
+    monkeypatch.setattr(google_auth.gapi, "build", _explodes("build"))
     monkeypatch.setattr(google_auth, "credentials", _explodes("credentials"))
     with google_auth.use_services({"slides": slides, "drive": drive}):
         assert google_auth.slides_service() is slides
@@ -399,7 +407,7 @@ def test_a_builder_is_asked_per_api_and_anything_it_declines_is_built_as_before(
         asked.append((api, version, creds))
         return made if api == "slides" else None
 
-    monkeypatch.setattr(google_auth, "build", lambda *a, **kw: ("built", a[0]))
+    monkeypatch.setattr(google_auth.gapi, "build", lambda *a, **kw: ("built", a[0]))
     monkeypatch.setattr(google_auth, "credentials", lambda: "CREDS")
     with google_auth.use_services(builder):
         assert google_auth.slides_service() is made

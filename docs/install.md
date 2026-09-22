@@ -3,16 +3,24 @@
 ## Install
 
 ```
-pip install git+https://github.com/borithefirst/beamer2slides   # or, in a checkout: pip install .
+pip install "beamer2slides[google] @ git+https://github.com/borithefirst/beamer2slides"
 beamer2slides convert talk.pdf
 ```
 
 Nothing is published on PyPI yet, so `pip install beamer2slides` finds no distribution: the wheel
 is built from the repository (`pip install build; python -m build` writes an sdist and a wheel into
-`dist/`, and both install). `pip install -e .` is the editable install a checkout wants.
+`dist/`, and both install). `pip install -e .[google]` is the editable install a checkout wants.
 
-The wheel is pure Python. Its dependencies (pypdfium2, numpy, pillow, python-pptx, fontTools
-and the Google API client) all ship wheels, so no compiler and no TeX distribution are needed:
+**`[google]` is the half that talks to Google** (`google-api-python-client`, `google-auth-oauthlib`),
+and since 0.4.0 it is an extra rather than a dependency. Anyone converting a deck from this
+machine's own token wants it. Leaving it out is for two kinds of caller: one that has its own
+client (below), and one that runs only the local journeys — `beamer2slides classify`,
+`deck_prepare`, `deck_inspect`, `tex_label`, `tex_converge` — in a sandbox with no account and
+therefore no Google libraries at all. Without it those work as they always did and anything
+reaching Google says so in one sentence, naming both ways out.
+
+The wheel is pure Python. Its dependencies (pypdfium2, numpy, pillow, python-pptx, fontTools)
+all ship wheels, so no compiler and no TeX distribution are needed:
 the input is the compiled PDF. A TeX distribution is only needed for the test decks and for
 `pull`/`converge`, which recompile the source.
 
@@ -27,7 +35,7 @@ package, so an installed beamer2slides places text exactly like the checkout doe
 `agent/INSTRUCTIONS.md`, and so does the playground's page; all three are read through
 `importlib.resources`, never from a path beside `__file__`, so a zip import finds them too.
 
-Extras: `[mcp]` brings the MCP SDK the `beamer2slides-mcp` server speaks through - either
+Extras: `[google]` is the client library above. `[mcp]` brings the MCP SDK the `beamer2slides-mcp` server speaks through - either
 generation of it, 1.x taking its handlers through decorators and 2.x through the constructor
 (`agent/mcp.py` wires itself to whichever is installed; the wire protocol is the same, so a client
 cannot tell). `[dev]` is what the tests need, and `[pure]` names fontTools, which is a plain
@@ -76,6 +84,62 @@ Two ways to ship this, not yet decided:
   clicks consent. This needs the consent screen published and, for `presentations`, Google's
   verification if the app passes the unverified-app cap; the project's API quota is then shared
   by all users.
+
+## Injecting your own API clients
+
+A caller that already holds Slides/Drive/Docs clients — with a bundled discovery document, its
+own retries, its own transport — hands them over for the length of a block, and the library never
+builds one (nor needs `[google]` installed at all):
+
+```python
+from beamer2slides import google_auth
+
+with google_auth.use_services({"slides": my_slides, "drive": my_drive, "docs": my_docs}):
+    ...                                   # convert, sync, pull, adopt: the same journeys
+```
+
+A mapping is by API name; a callable is asked per client and may answer `None` to let the library
+build that one itself:
+
+```python
+def make(api, version, creds):            # creds is None wherever nobody passed any
+    return my_pool.client(api, version, creds or google_auth.credentials())
+
+with google_auth.use_services(make):
+    ...
+```
+
+`creds` is the credentials the *call site* passed, which on the main path is nothing: `emit()`
+opens with `slides_service(), drive_service()` and passes none, because the built-in fallback
+resolves them itself. A builder that trusts the argument therefore builds an unauthenticated
+client. Either do `creds or google_auth.credentials()` as above, or say so once:
+
+```python
+with google_auth.use_services(make, needs_credentials=True):   # creds is never None
+    ...
+```
+
+`needs_credentials=True` is also what makes `credentials_for_threads()` answer, which is how the
+library's own pools (`emit.measure_places`, `deck_ir.slide_thumbnails`, `snapshot.sign_pictures`)
+hand credentials to a worker thread — a `ContextVar` is not inherited by a thread started inside
+the block. Left out, an injected client is never a reason for the library to go looking for a
+token.
+
+Credentials alone, with the library building the clients, are `use_provider`:
+
+```python
+with google_auth.use_provider(lambda: my_credentials):
+    ...
+```
+
+Both hooks are per context, not per process: a server answering two requests at once has two
+visitors' tokens in the air and neither may reach the other's deck.
+
+`gapi.py` is the only module that imports the client library, so what a journey asks of it is one
+file: `build`, `media_upload`, and `status_of` / `message_of` / `is_transient` over an error. The
+error class is bound there once and nowhere else — two independent `try/except ImportError`
+fallbacks would bind two different classes, and an `except` clause naming the other one would
+quietly stop matching.
 
 ## Checking an install
 

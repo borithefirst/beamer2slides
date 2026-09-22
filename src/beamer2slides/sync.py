@@ -19,9 +19,8 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-from googleapiclient.errors import HttpError
-
 from . import faults, identity, merge, snapshot
+from .gapi import HttpError, status_of
 from .gslides import EMU_PER_PT, emu, execute, pt
 from .paths import out_root
 
@@ -705,7 +704,7 @@ class Sync:
             except HttpError as e:
                 from .emit import api_error
                 message = api_error(e)
-                if e.resp.status == 400 and "revision" in message.lower() and n == 0:
+                if status_of(e) == 400 and "revision" in message.lower() and n == 0:
                     raise RevisionMismatch(message)
                 raise RuntimeError(f"sync {phase}: batch refused ({message})") from e
             rev = res.get("writeControl", {}).get("requiredRevisionId") or self.revision()
@@ -1146,8 +1145,8 @@ class Sync:
 
         `drive` / `slides`: the clients to use, where this runs on a thread of its own
         (`stage_in_background`) and may not touch the ones this sync is using meanwhile."""
-        from googleapiclient.http import MediaIoBaseUpload
         from .emit import PPTX_MIME, build_pptx
+        from .gapi import media_upload
 
         drive, slides = drive or self.drive, slides or self.slides
         needed = [f for f in work["pictures"] if f not in self.urls]
@@ -1169,7 +1168,7 @@ class Sync:
         fid = execute(drive.files().create(body={"name": "beamer2slides sync staging (temporary)",
                                                  "mimeType": "application/vnd.google-apps.presentation",
                                                  "appProperties": {"b2sStaging": self.pid}},
-                                           media_body=MediaIoBaseUpload(pptx, mimetype=PPTX_MIME), fields="id"))["id"]
+                                           media_body=media_upload(pptx, PPTX_MIME), fields="id"))["id"]
         try:
             staged = execute(slides.presentations().get(presentationId=fid))
             made = staged.get("slides", [])

@@ -12,12 +12,11 @@ from importlib import resources
 from pathlib import Path
 
 import numpy as np
-from googleapiclient.errors import HttpError
-from googleapiclient.http import MediaIoBaseUpload
 
 from . import bidi
 from .classify import HOLE_PAD
 from .fonts import font_info, google_font
+from .gapi import HttpError, media_upload, message_of
 from .google_auth import credentials_for_threads, drive_service, shared_service, slides_service
 from .gslides import EMU_PER_PT, emu, execute, per_thread, pt
 
@@ -1862,7 +1861,7 @@ PICTURE_TITLES = {"math": "Formula", "icon": "Icon", "fallback": "Picture"}
 def import_presentation(slides, drive, title: str, page_w: float, page_h: float, pptx: io.BytesIO,
                         existing: str | None) -> dict:
     """A new deck from the .pptx, or an existing one (same URL) with its content replaced by it."""
-    media = MediaIoBaseUpload(pptx, mimetype=PPTX_MIME)
+    media = media_upload(pptx, PPTX_MIME)
     if existing:
         execute(drive.files().update(fileId=existing, media_body=media, fields="id"))
         pid = existing
@@ -2101,10 +2100,7 @@ def write_layouts(client, pid: str, deck: dict, scale: float, fonts: FontMapper,
 
 
 def api_error(e: HttpError) -> str:
-    try:
-        return json.loads(e.content)["error"]["message"][:200]
-    except (ValueError, KeyError, TypeError):
-        return str(e)[:200]
+    return message_of(e)
 
 
 def batch(slides, pid: str, reqs: list[dict]) -> None:

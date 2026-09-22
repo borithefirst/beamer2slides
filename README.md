@@ -81,14 +81,17 @@ slide.
   every step; `sync` then keeps the same steps, so a deck made that way stays whole).
 
 ## Setup
-1. Python 3.12: `pip install beamer2slides`, or from a checkout `python -m venv .venv` then
-   `.venv\Scripts\pip install -e . pytest`. No TeX needed: the input is the compiled PDF.
+1. Python 3.12: `pip install "beamer2slides[google]"`, or from a checkout `python -m venv .venv`
+   then `.venv\Scripts\pip install -e .[google,dev]`. No TeX needed: the input is the compiled
+   PDF. `[google]` is the client library that talks to Slides and Drive; without it the local
+   journeys still run, and a caller with its own client injects it (`docs/install.md`).
 2. A Google Cloud project with the Slides and Drive APIs enabled and an OAuth client of type
    *Desktop app*. Save its JSON as `client_secret.json` in this folder (git-ignored) or, for an
    installed beamer2slides, in `%APPDATA%\beamer2slides` / `~/.config/beamer2slides`.
    The first run opens a browser for consent and caches `token.json` beside it.
 
-See `docs/install.md` for the credential search order and the scopes asked for.
+See `docs/install.md` for the credential search order, the scopes asked for, and how to hand the
+library your own API clients.
 
 ## Usage
 ```

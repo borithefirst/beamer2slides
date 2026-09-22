@@ -6,7 +6,7 @@ import time
 import urllib.request
 from pathlib import Path
 
-from googleapiclient.errors import HttpError
+from .gapi import HttpError, is_transient
 
 EMU_PER_PT = 12700
 
@@ -41,7 +41,7 @@ def execute(request, retries: int = 6):
         try:
             return request.execute()
         except HttpError as e:
-            if e.resp.status not in (429, 500, 502, 503) or attempt == retries - 1:
+            if not is_transient(e) or attempt == retries - 1:
                 raise
             time.sleep(min(60, 2 ** attempt * 2) + random.random())
         except OSError:  # SSL EOFs and connection resets happen now and then

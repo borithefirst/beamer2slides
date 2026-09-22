@@ -16,7 +16,13 @@ or Docs client - with its own discovery cache, its own retries - puts it in fron
 
 Both are **per context**, not per process: a server answering two requests at once has two
 visitors' tokens in the air, and neither may reach the other's deck.
+
+Google's own packages are imported where they are used, never at module scope, so a process
+that injects everything (or converts nothing) needs none of them installed: `gapi` says what
+the library asks of them and what to do when they are absent.
 """
+
+from __future__ import annotations
 
 import getpass
 import os
@@ -24,15 +30,12 @@ import subprocess
 from collections.abc import Mapping
 from contextlib import contextmanager
 from contextvars import ContextVar
+from dataclasses import dataclass
 from pathlib import Path
 from threading import Lock
+from typing import Any
 
-from google.auth.exceptions import RefreshError
-from google.auth.transport.requests import Request
-from google.oauth2.credentials import Credentials
-from google_auth_oauthlib.flow import InstalledAppFlow
-from googleapiclient.discovery import build
-
+from . import gapi
 from .paths import CHECKOUT, in_checkout
 
 ROOT = CHECKOUT  # where a checkout keeps its credentials
@@ -155,21 +158,44 @@ def use_provider(provider):
     return _credentials_hook.use(provider)
 
 
-def use_services(services):
+@dataclass(frozen=True)
+class _Services:
+    """What `use_services` installed: the mapping or builder, and whether it wants credentials."""
+
+    make: Any
+    needs_credentials: bool = False
+
+
+def use_services(services, needs_credentials: bool = False):
     """Take the API clients from `services` inside this block, instead of building them.
 
     `services` is either a mapping of api name ("slides", "drive", "docs") to a ready client, or
     a callable `(api, version, creds) -> client | None` - a builder, which is the shape that can
     answer for all three and cache the discovery document the library's `build(...)` otherwise
     fetches per call. Anything not answered for is built as before, so a caller may hand over
-    one api and leave the rest alone, and `creds` is `None` where nobody passed any: a client
-    that carries its own credentials is never a reason to go looking for a token.
+    one api and leave the rest alone.
+
+    `creds` is **None wherever nobody passed any**, and that is the one sharp edge here: a client
+    that carries its own credentials is no reason to go looking for a token, so the library does
+    not resolve any - but the built-in fallback does `creds or credentials()`, and a builder that
+    trusts the argument therefore builds an unauthenticated client on the main path
+    (`emit()` opens with `slides_service(), drive_service()`, passing nothing). A builder either
+    does `creds or google_auth.credentials()` itself, or says `needs_credentials=True` and is
+    handed the library's - resolved once, on the thread that asks, and given to the worker pools
+    through `credentials_for_threads` as usual. Reported by a caller who hit it, 2026-09-22.
 
     A service object is not thread-safe (`drive_service`), so a caller who hands over one client
     is promising this block is one thread's; a builder is handed the api and may return a fresh
     client per call.
     """
-    return _services_hook.use(services)
+    return _services_hook.use(_Services(services, needs_credentials))
+
+
+def _for_builder(made: _Services, creds):
+    """The credentials to hand a builder: the caller's, else ours where it asked for them."""
+    if creds is None and made.needs_credentials:
+        return credentials()
+    return creds
 
 
 def shared_service(api: str, version: str = "v1", creds=None) -> bool:
@@ -184,10 +210,11 @@ def shared_service(api: str, version: str = "v1", creds=None) -> bool:
     made = _services_hook.get()
     if made is None:
         return False
-    if isinstance(made, Mapping):
-        return made.get(api) is not None
-    first = made(api, version, creds)
-    return first is not None and first is made(api, version, creds)
+    if isinstance(made.make, Mapping):
+        return made.make.get(api) is not None
+    creds = _for_builder(made, creds)   # resolved once: the builder is about to be asked twice
+    first = made.make(api, version, creds)
+    return first is not None and first is made.make(api, version, creds)
 
 
 def credentials_for_threads():
@@ -195,24 +222,34 @@ def credentials_for_threads():
 
     Resolved on the calling thread, because a thread inherits no context (`_Hook`) - and only
     where they are wanted: where a caller's own `use_services` answers for the client, one that
-    carries its own credentials is never a reason to go looking for a token.
+    carries its own credentials is never a reason to go looking for a token. A builder that asked
+    for them (`needs_credentials`) is one that does want them, on every thread.
     """
-    return None if _services_hook.get() is not None else credentials()
+    made = _services_hook.get()
+    return credentials() if made is None or made.needs_credentials else None
 
 
 def _service(api: str, version: str, creds):
     made = _services_hook.get()
     if made is not None:
-        service = made.get(api) if isinstance(made, Mapping) else made(api, version, creds)
+        service = (made.make.get(api) if isinstance(made.make, Mapping)
+                   else made.make(api, version, _for_builder(made, creds)))
         if service is not None:
             return service
-    return build(api, version, credentials=creds or credentials(), cache_discovery=False)
+    return gapi.build(api, version, creds or credentials())
 
 
-def credentials() -> Credentials:
+def credentials():
+    """The OAuth credentials to call Google with: a caller's provider, else the cached token."""
     provider = _credentials_hook.get()
     if provider is not None:
         return provider()
+    try:
+        from google.auth.exceptions import RefreshError
+        from google.auth.transport.requests import Request
+        from google.oauth2.credentials import Credentials
+    except ImportError:
+        raise ModuleNotFoundError(gapi.MISSING) from None
     creds = None
     if TOKEN.exists():
         creds = Credentials.from_authorized_user_file(str(TOKEN), SCOPES)
@@ -230,6 +267,7 @@ def credentials() -> Credentials:
                 f"OAuth client secret not found: {CLIENT_SECRET}. Create a desktop-app OAuth client "
                 f"in a Google Cloud project with the Slides and Drive APIs enabled, download its JSON "
                 f"and save it there (or point $B2S_CLIENT_SECRET at it). See docs/install.md.")
+        from google_auth_oauthlib.flow import InstalledAppFlow  # the browser flow, and only here
         flow = InstalledAppFlow.from_client_secrets_file(str(CLIENT_SECRET), SCOPES)
         creds = flow.run_local_server(port=0, open_browser=True)
     TOKEN.parent.mkdir(parents=True, exist_ok=True)
@@ -238,15 +276,15 @@ def credentials() -> Credentials:
     return creds
 
 
-def slides_service(creds: Credentials | None = None):
+def slides_service(creds: Any = None):
     return _service("slides", "v1", creds)
 
 
-def drive_service(creds: Credentials | None = None):
+def drive_service(creds: Any = None):
     """Service objects are not thread-safe: build one per thread, sharing `creds`."""
     return _service("drive", "v3", creds)
 
 
-def docs_service(creds: Credentials | None = None):
+def docs_service(creds: Any = None):
     """The Docs API must be enabled in the Cloud project; see docs/google-docs.md."""
     return _service("docs", "v1", creds)

@@ -24,6 +24,13 @@ from .types import Refused
 CONSENT_COMMAND = "python -m beamer2slides.agent.auth"
 
 
+def _no_client() -> str:
+    """A token is no use without the package that speaks to Google. Say so as a refusal, not a
+    traceback: a host with credentials and no client library has a one-line fix (`gapi`)."""
+    from ..gapi import MISSING
+    return f"A Google token is installed, but {MISSING}"
+
+
 @runtime_checkable
 class GoogleAccess(Protocol):
     """Where a journey's Google credentials come from. Never interactive."""
@@ -86,9 +93,12 @@ class TokenFile:
         return secret, token
 
     def credentials(self) -> Any:
-        from google.auth.exceptions import RefreshError
-        from google.auth.transport.requests import Request
-        from google.oauth2.credentials import Credentials
+        try:
+            from google.auth.exceptions import RefreshError
+            from google.auth.transport.requests import Request
+            from google.oauth2.credentials import Credentials
+        except ImportError:
+            raise Refused("offline", _no_client()) from None
 
         secret, token = self._paths()
         if not token.exists():
@@ -159,8 +169,11 @@ class InjectedToken:
         self._info = dict(info)
 
     def credentials(self) -> Any:
-        from google.oauth2.credentials import Credentials
-        from google.auth.transport.requests import Request
+        try:
+            from google.oauth2.credentials import Credentials
+            from google.auth.transport.requests import Request
+        except ImportError:
+            raise Refused("offline", _no_client()) from None
         from .. import google_auth
 
         try:

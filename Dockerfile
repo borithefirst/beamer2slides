@@ -15,7 +15,7 @@ RUN useradd --create-home --uid 1000 player
 WORKDIR /app
 COPY --chown=player pyproject.toml README.md ./
 COPY --chown=player src ./src
-RUN pip install --no-cache-dir .
+RUN pip install --no-cache-dir ".[google]"
 # What the page shows besides the talks it is given: the examples and the recorded runs.
 COPY --chown=player examples/demo/demo.tex ./examples/demo/
 COPY --chown=player tests/decks/11_research_talk.tex tests/decks/13_inline_math.tex \
