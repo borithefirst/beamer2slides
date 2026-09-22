@@ -819,6 +819,64 @@ batches before it in the document, where a single batch could not. The sync repo
 so whenever chunking actually happened. The structure pass (`_write_structure`) is
 unaffected — it is already a batch of its own, for its own reasons.
 
+### What a sync waits for
+
+The round trip an agent pays for here is the same shape as the Slides one (CLAUDE.md, "A
+conversion is round trips, not work"), one dimension smaller: a document becomes canonical
+HTML, something edits the HTML, `docs sync` merges it back. So it was profiled the same
+way, by wrapping `HttpRequest.execute` and asking not what the sync *does* but how much of
+its wall clock has a request open (`devtools/docs_bench.py`: `prepare`, `sync`, `adopt`,
+`calls`, against one document reused in `out/docs-bench/`). On a 50-block document the
+answer was **7.0-7.5 s over 10 Google calls, 95-97% of it with a request open** — about
+0.4 s of that clock is this machine. There is nothing to make faster; there are calls to
+stop waiting for, and each one is worth about a second.
+
+Five, each falling back to the old serial order when a caller lent its own client
+(`doc_sync.lent_clients`, which asks `google_auth.shared_service` *and* whether this
+module's own `docs_service`/`drive_service` are still the library's — a bench or a harness
+that rebinds them is lending too), with `credentials_for_threads()` resolved on the calling
+thread, a worker inheriting no context:
+
+1. **The head is three reads that need nothing of each other** — the base, the document and
+   the comments — so the document and the comments go on threads of their own
+   (`in_background`) while the base stays here, it being the one that reads a file and
+   appends to `troubles`.
+2. **The comments are waited for at report time**, not at the head: nothing between the two
+   wants them, so that read overlaps the write rather than the planning.
+3. **The base file is written to the id the read already learned** (`save_drive`'s
+   `known_fid`), instead of asking the document again where its base is.
+4. **And the cache beside the file remembers that id** (`BASE_FID`), so `load_base` fetches
+   the base without Drive's own lookup; a hint that turns out to name another document's
+   base, or nothing, falls back to the lookup as before.
+5. **The planted anchors are patched from the batch's own answer** (`adopt_replies`): a
+   `createNamedRange` reply carries the `namedRangeId` and the request carries the key and
+   the span, so the read after the plant asks for what is already in hand. `adopt` hands
+   `settle` the read it made a moment earlier for the same reason — nothing has been written
+   in between, so the document cannot have moved.
+
+A steady-state sync is now **7 calls**, and they are the five serial steps there is no
+getting under: the head (base ∥ document ∥ comments), the words `batchUpdate`, the settle
+read, the plant `batchUpdate`, and the base upload. Measured **interleaved** in one sitting
+against a worktree of the commit before them — two documents, alternating order, a
+subprocess per arm — because Google's own latency swings with the day: over ten pairs,
+**old 6.2-16.6 s (means 9.86 and 8.39) against new 4.5-5.4 s (means 5.02 and 4.93), ten of
+ten pairs favouring the new code**; against the old code's own clean rounds alone it is
+about 6.5 → 4.9 s. The floor is ~95% "a request is open", of which the biggest single item
+is the base's `files.update` **with media** — ~1.6-1.9 s whatever it carries, the Slides
+side's measurement again — and it is the one thing with nothing left to overlap it with.
+Sending it before the plant was considered and refused: the base records the planted range
+ids, and "nobody reads that field today" is not a thing to make a durable artifact depend
+on.
+
+One defect came out of measuring rather than out of the suite. `store_base` writes the
+cache before it writes Drive, so it stripped the id out of the base, wrote the cache, and
+put the id back **only when Drive answered with a different one** — which in the steady
+state it does not. The cache therefore lost the hint on every run that used it, the call
+count alternated 7, 8, 7, 8, and the A/B reported both numbers without either arm being
+wrong. The cache keeps what it believed (`known`), and
+`test_the_cache_remembers_where_the_base_is_and_keeps_remembering` stores twice and asks
+the second cache for it.
+
 ### Order: a section the source moved
 
 The merged list follows the **document's** order — a reader who moved a paragraph in the

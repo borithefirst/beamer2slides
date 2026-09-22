@@ -1820,6 +1820,39 @@ wins. `python -m beamer2slides docs push doc.html` imports the file through Driv
 hook) and then **regenerates the file from the document it just wrote**, so file, document and
 base agree and the next sync writes 0 requests. Modules: `doc_ir.py` (IR ↔ canonical HTML ↔ `documents.get`,
 keys, named ranges), `doc_merge.py` (pure planning), `doc_sync.py` (the commands).
+- **And here too it is round trips, not work** (docs/google-docs.md, "What a sync waits for"):
+  profiled call by call (`devtools/docs_bench.py`, wrapping `HttpRequest.execute` as the Slides
+  side does), a steady sync of a 50-block document was **7.0-7.5 s over 10 Google calls, 95-97%
+  of it with a request open** - 0.4 s of that clock is this machine, so the lever is how many
+  calls are in the air. Five changes, each falling back to the old serial order when a caller
+  lent its own client (`doc_sync.lent_clients` asks `shared_service` *and* whether this module's
+  `docs_service`/`drive_service` are still the library's, since a harness that rebinds them is
+  lending too; `credentials_for_threads` resolved on the calling thread): the head's three reads
+  need nothing of each other, so the document and the comments go on threads of their own
+  (`in_background`) while the base stays here, it being the one that reads a file and appends to
+  `troubles`; the **comments** are waited for at report time, so that read overlaps the write
+  rather than the planning; the base file is written to the id the read already learned
+  (`save_drive`'s `known_fid`) instead of asking the document again; the **cache remembers that
+  id** (`BASE_FID`), so `load_base` fetches the base without Drive's own lookup, falling back
+  where the hint names another document's base or none; and the planted anchors are patched from
+  the batch's own answer (`adopt_replies`: a `createNamedRange` reply carries the id and the
+  request carries the key and the span), the read after the plant asking for what is in hand -
+  `adopt` hands `settle` the read it made a moment earlier for the same reason, nothing having
+  been written in between. **10 calls -> 7**, which are the five serial steps there is no getting
+  under: the head (base ∥ document ∥ comments), the words `batchUpdate`, the settle read, the
+  plant `batchUpdate`, the base upload. Interleaved A/B against a worktree of the commit before
+  them, two documents, alternating order, a subprocess per arm: over ten pairs **old 6.2-16.6 s
+  (means 9.86 and 8.39) against new 4.5-5.4 s (means 5.02 and 4.93), ten of ten favouring the new
+  code**, ~6.5 -> 4.9 s against the old arm's clean rounds alone. The floor is ~95% "a request is
+  open" and its biggest item is the base's `files.update` **with media** (~1.6-1.9 s whatever it
+  carries, the Slides side's own measurement), which has nothing left to overlap it with; sending
+  it before the plant was refused, the base recording the planted range ids and "nobody reads
+  that field today" being no thing to make a durable artifact depend on. One defect came out of
+  the measurement rather than the suite: `store_base` writes the cache before Drive and put the
+  id back only where Drive answered with a *different* one, which in the steady state it does
+  not, so the cache lost the hint on every run that used it and the call count alternated 7, 8,
+  7, 8 with neither arm wrong (`known`;
+  `test_the_cache_remembers_where_the_base_is_and_keeps_remembering`).
 - **The base is Drive-first**: it is a JSON file in Drive beside the document, its id in the
   document's own `appProperties.b2sBase`, and `.b2s/<stem>.base.json` is a cache (the Slides
   arrangement, `snapshot.save_drive`; `.b2s/` is scratch state a fresh clone, a colleague or a

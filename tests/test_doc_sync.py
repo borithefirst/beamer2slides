@@ -285,6 +285,33 @@ def test_a_stored_base_goes_to_both_places_and_the_count_rises(tmp_path):
     assert doc_sync.load_drive(drive, "doc-1")["generation"] == 6
 
 
+def test_the_cache_remembers_where_the_base_is_and_keeps_remembering(tmp_path):
+    """The base file is the same file for the document's life, so the cache beside the
+    file can say which one it is and save the next sync Drive's own lookup. It has to
+    keep saying it: a run that writes the base and leaves the id out of the cache makes
+    the run after it ask again, and the saving alternates away."""
+    path = tmp_path / "doc.html"
+    drive = _Storage()
+    doc_sync.store_base(path, _base(0, "p:one"), drive, "doc-1")
+    fid = doc_sync.load_local(path, "doc-1")[doc_sync.BASE_FID]
+    assert fid == "base-1" and doc_sync.BASE_FID not in doc_sync.load_drive(drive, "doc-1")
+    doc_sync.store_base(path, _base(0, "p:two"), drive, "doc-1", base_fid=fid)
+    assert doc_sync.load_local(path, "doc-1")[doc_sync.BASE_FID] == fid
+
+    # And with it, the base is fetched without asking the document where it is.
+    def never(*a, **kw):
+        raise AssertionError("the base was looked up although the cache knew where it is")
+
+    was, doc_sync.base_file_id = doc_sync.base_file_id, never
+    try:
+        found: dict = {}
+        base, where = doc_sync.load_base(path, "doc-1", drive, [], found)
+    finally:
+        doc_sync.base_file_id = was
+    assert where == "drive" and base["blocks"][0]["key"] == "p:two"
+    assert found["fid"] == fid
+
+
 def test_a_drive_write_that_fails_keeps_the_cache_and_says_why(tmp_path):
     """A Drive write that fails must never fail the sync: the document has already
     been written by then, and the cache is a base the next run can still use."""

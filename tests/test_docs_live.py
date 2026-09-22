@@ -648,6 +648,76 @@ def test_a_checkout_with_no_local_state_syncs_from_the_base_in_drive(paper):
     paper.settled()
 
 
+def test_the_anchors_a_batch_answers_with_are_what_a_read_would_say(paper):
+    """The tail of a sync: what the plant batch answered is what a read would have said.
+
+    `settle` used to read the document a third time after planting its named ranges,
+    only to learn where they went — the last round trip of a sync, with nothing left to
+    overlap it with (the Slides side's lesson, CLAUDE.md "the **tail**"). A
+    `createNamedRange` answers with the id of the range it made, and the request carries
+    the block's key and the span it went on, so the two facts the read brought back are
+    in the batch's own answer (`doc_sync.adopt_replies`). This is the claim that lets
+    that read go, and it can only be made against the live API.
+    """
+    from beamer2slides import doc_sync
+    from beamer2slides.google_auth import credentials, docs_service
+
+    reads = []
+    real = doc_sync._get
+    doc_sync._get = lambda docs, ident: (reads.append(ident), real(docs, ident))[1]
+    try:
+        paper.edit("The closing paragraph.", "The closing paragraph, rewritten whole.")
+        paper.edit("the second point", "the second point, and more of it")
+        info = paper.sync()
+    finally:
+        doc_sync._get = real
+    assert info["requests"] > 0
+    # Twice: the read the plan is made against, and the read `settle` builds the file
+    # and the base from. The third one is the one this test is about.
+    assert len(reads) == 2, f"the document was read {len(reads)} times"
+
+    base = doc_sync.load_local(paper.path, paper.ident)
+    _, fresh = doc_sync.read_document(docs_service(credentials()), paper.ident)
+    anchors = lambda ir: {b["key"]: (b.get("rangeId"), tuple(b.get("range") or ()))
+                          for b in ir["blocks"] if b.get("key")}
+    patched, read = anchors(base), anchors(fresh)
+    assert patched and all(rid for rid, _ in patched.values()), patched
+    assert patched == read
+    assert base.get("orphans") == fresh.get("orphans")
+    paper.settled()
+
+
+def test_the_base_is_fetched_from_the_id_the_cache_remembers(paper):
+    """The head of a sync: the base comes back without asking the document where it is.
+
+    The document's base file is the same file for the document's life — `save_drive`
+    makes a new one only where the old one is gone, and then writes its id into the
+    document — so the id the cache beside the file remembers is the id Drive's own
+    lookup would answer with. Proved by making that lookup fail: what comes back is
+    still this document's base.
+    """
+    from beamer2slides import doc_sync
+    from beamer2slides.google_auth import credentials, drive_service
+
+    cached = doc_sync.load_local(paper.path, paper.ident)
+    hint = cached.get(doc_sync.BASE_FID)
+    assert hint, "a push should leave the base file's id beside the file"
+
+    def never(*args, **kwargs):
+        raise AssertionError("the document was asked where its base is")
+
+    drive = drive_service(credentials())
+    was, doc_sync.base_file_id = doc_sync.base_file_id, never
+    try:
+        found: dict = {}
+        stored = doc_sync.load_drive(drive, paper.ident, found, hint)
+    finally:
+        doc_sync.base_file_id = was
+    assert stored and stored["document"] == paper.ident
+    assert found["fid"] == hint
+    assert doc_sync.base_file_id(drive, paper.ident) == hint, "and it is the one Drive names"
+
+
 ADOPTED = """<html><body>
 <h1>A document nobody pushed</h1>
 <p>The opening paragraph, with <b>bold words</b> in it.</p>

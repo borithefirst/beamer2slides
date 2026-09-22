@@ -35,11 +35,13 @@ import re
 import subprocess
 import time
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-from . import doc_ir, doc_merge
+from . import doc_ir, doc_merge, google_auth
 from .gapi import HttpError, media_upload, status_of
-from .google_auth import credentials, docs_service, drive_service
+from .google_auth import (credentials, credentials_for_threads, docs_service, drive_service,
+                          shared_service)
 
 DOC_MIME = "application/vnd.google-apps.document"
 JSON_MIME = "application/json"
@@ -48,6 +50,10 @@ ATTEMPTS = 3  # how often a write may be re-planned when the document moved unde
 DOC_ID = re.compile(r"/document/d/([a-zA-Z0-9_-]+)")
 # The document's own `appProperties` key holding the id of its base file in Drive.
 BASE_PROPERTY = "b2sBase"
+# What the *cache* beside the file remembers of that id, so the next sync can fetch the
+# base without asking the document where it is (`load_drive`'s `hint`). The cache only:
+# the copy in Drive is read by a checkout that had to look the file up to read it at all.
+BASE_FID = "base_fid"
 # Above this many requests one `batchUpdate` is cut into several (`send`).
 CHUNK = 500
 
@@ -123,28 +129,73 @@ def base_file_id(drive, document: str) -> str | None:
     return (info.get("appProperties") or {}).get(BASE_PROPERTY)
 
 
-def load_drive(drive, document: str) -> dict | None:
-    """The base Drive holds for this document, or None (no base, or unreadable)."""
+def load_drive(drive, document: str, found: dict | None = None,
+               hint: str | None = None) -> dict | None:
+    """The base Drive holds for this document, or None (no base, or unreadable).
+
+    `found` is filled with the base file's id where there is one: the document's
+    `appProperties` said so, and `save_drive` would otherwise ask for them again at
+    the end of the same run - a round trip for a fact this call already has.
+
+    `hint` is the base file the copy beside this file remembers (`store_base`). The
+    document's base file is the same file for the document's life — `save_drive`
+    makes a new one only where the old one is gone, and then writes its id into the
+    document — so a file that comes back under that id and says it belongs to this
+    document *is* the document's base, and the lookup that would have said so is a
+    round trip saved at the one end of a sync where nothing can overlap it. A hint
+    that does not answer, or answers with another document's base, is no worse than
+    none: the lookup happens after all.
+    """
+    if hint:
+        found_it = _read_base_file(drive, hint)
+        if found_it is not None and base_problem(found_it, document) is None:
+            if found is not None:
+                found["fid"] = hint
+            return found_it
     try:
         fid = base_file_id(drive, document)
-        if not fid:
-            return None
+    except HttpError:
+        return None
+    if not fid:
+        return None
+    data = _read_base_file(drive, fid)
+    if data is not None and found is not None:
+        found["fid"] = fid
+    return data
+
+
+def _read_base_file(drive, fid: str) -> dict | None:
+    """The JSON one Drive file holds, or None where it cannot be read as JSON at all."""
+    try:
         data = drive.files().get_media(fileId=fid).execute()
         return json.loads(data.decode("utf-8") if isinstance(data, bytes) else data)
     except (HttpError, ValueError, OSError):
         return None
 
 
-def save_drive(drive, document: str, base: dict, title: str | None = None) -> str:
+def save_drive(drive, document: str, base: dict, title: str | None = None,
+               known_fid: str | None = None) -> str:
     """The base as a JSON file in the document's own folder, its id in the
     document's `appProperties.b2sBase`. Returns the file id.
 
     `drive.file` reaches both: the document because this tool created it (or was
     given it), the base file because this tool created it. Nothing here asks for a
     wider scope, and no link is ever made public.
+
+    `known_fid` is the base file this run already found (`load_drive`), which is the
+    common case and saves the lookup below - a whole round trip at the end of a sync,
+    where there is nothing left to overlap it with. A stale one costs nothing: the
+    update is refused, and the lookup happens after all.
     """
-    info = drive.files().get(fileId=document, fields="name,parents,appProperties").execute()
     data = json.dumps(base, ensure_ascii=False).encode("utf-8")
+    if known_fid:
+        try:
+            drive.files().update(fileId=known_fid, fields="id", media_body=media_upload(
+                io.BytesIO(data), JSON_MIME)).execute()
+            return known_fid
+        except HttpError:
+            pass  # deleted, or somebody else's now: ask the document below
+    info = drive.files().get(fileId=document, fields="name,parents,appProperties").execute()
     fid = (info.get("appProperties") or {}).get(BASE_PROPERTY)
     if fid:
         try:
@@ -204,7 +255,8 @@ def stale_base_warning(where: str, drive, document: str) -> str | None:
 
 
 def load_base(path: Path, document: str, drive=None,
-              problems: list[str] | None = None) -> tuple[dict | None, str]:
+              problems: list[str] | None = None,
+              found: dict | None = None) -> tuple[dict | None, str]:
     """(the base, where it came from: `drive`, `local` or `none`).
 
     Drive is authoritative and the copy beside the file is a cache — except when
@@ -213,17 +265,22 @@ def load_base(path: Path, document: str, drive=None,
     or belongs to another document is not used at all; why goes into `problems`,
     which the caller reports, because a base ignored in silence would make the next
     sync treat every difference as somebody's change.
+
+    `found` is filled with the id of the base file in Drive (`load_drive`), so the
+    sync that ends by storing the base again need not ask the document for it twice.
     """
     problems = problems if problems is not None else []
-    remote = load_drive(drive, document) if drive is not None else None
+    local, why = read_local(path, document)
+    if why:
+        problems.append(f"the base beside the file was ignored: {why}")
+    # The cache is read first for its `base_fid` alone, which saves Drive's own lookup.
+    remote = (load_drive(drive, document, found, (local or {}).get(BASE_FID))
+              if drive is not None else None)
     if remote is not None:
         problem = base_problem(remote, document)
         if problem:
             problems.append(f"the base stored in Drive was ignored: {problem}")
             remote = None
-    local, why = read_local(path, document)
-    if why:
-        problems.append(f"the base beside the file was ignored: {why}")
     if remote is not None and local is not None:
         here, there = int(local.get("generation", 0)), int(remote.get("generation", 0))
         if here > there:
@@ -248,7 +305,7 @@ def load_base(path: Path, document: str, drive=None,
 
 
 def store_base(path: Path, base: dict, drive=None, document: str | None = None,
-               previous: int = 0) -> str | None:
+               previous: int = 0, base_fid: str | None = None) -> str | None:
     """Store the base where the next sync will look for it: beside the file first
     (atomically), then in Drive, which is where it is looked for first.
 
@@ -262,16 +319,25 @@ def store_base(path: Path, base: dict, drive=None, document: str | None = None,
     # overtaken from one whose Drive write failed. The cache beside the file counts
     # too: an `--assume-base` run has no base to take the number from.
     stamped["generation"] = max(previous, int((cached or {}).get("generation", 0))) + 1
-    save_base(path, stamped)
+    stamped.pop(BASE_FID, None)   # what goes to Drive is the base and nothing of ours
+    # The cache keeps what it believed, or the sync would drop the hint it was just given
+    # and the run after this one would have to look the base up again.
+    known = base_fid or (cached or {}).get(BASE_FID)
+    save_base(path, stamped | ({BASE_FID: known} if known else {}))
     if drive is None:
         return "no Drive service"
     document = document or stamped.get("document")
     if not document:
         return "the base does not say which document it belongs to"
     try:
-        save_drive(drive, document, _without(stamped, "uri"))
+        fid = save_drive(drive, document, _without(stamped, "uri"), known_fid=base_fid)
     except (HttpError, OSError) as err:
         return f"{type(err).__name__}: {err}"
+    if fid and fid != known:
+        # Where the base landed, for the next sync to fetch it without a lookup. Written
+        # after the Drive call, because only its answer says where that was; a local write,
+        # so a base is never left half-saved by it.
+        save_base(path, stamped | {BASE_FID: fid})
     return None
 
 
@@ -464,6 +530,45 @@ def open_comments(drive, ident: str) -> list[str]:
                    f"on {about[:40]!r}: {comment.get('content', '')[:80]!r}"
                    + (f", and {replies} repl{'y' if replies == 1 else 'ies'}" if replies else ""))
     return out
+
+
+def lent_clients() -> bool:
+    """True where the clients this module answers with are somebody else's.
+
+    A service object carries one connection and is not thread-safe, so a client that was
+    handed over rather than built here stays on the thread it was handed to. Two ways of
+    handing one over: `google_auth.use_services`, and putting one in place of this module's
+    own `docs_service` / `drive_service` — which is what the Docs benchmark's world and the
+    live tests do, and a fake world driven from two threads is no more thread-safe than a
+    real client.
+    """
+    return bool(shared_service("docs", "v1") or shared_service("drive", "v3")
+                or docs_service is not google_auth.docs_service
+                or drive_service is not google_auth.drive_service)
+
+
+def in_background(fn, name: str = "b2s-docs"):
+    """`fn(docs, drive)` on a thread of its own with clients of its own, or None where it
+    has to be run here (`lent_clients`).
+
+    `sync.Sync.in_background`'s rule, one API over: a worker builds its own clients from
+    credentials resolved *here*, a thread inheriting no context (`google_auth._Hook`).
+    Every future this returns is collected by its caller; the pool is left to the
+    interpreter.
+    """
+    if lent_clients():
+        return None
+    creds = credentials_for_threads()   # resolved here: a worker inherits no context
+    pool = ThreadPoolExecutor(1, thread_name_prefix=name)
+    try:
+        return pool.submit(lambda: fn(docs_service(creds), drive_service(creds)))
+    finally:
+        pool.shutdown(wait=False)
+
+
+def collect(future, otherwise):
+    """What a background read answered, or what it answers when there was no thread."""
+    return future.result() if future is not None else otherwise()
 
 
 def limits(ours: dict) -> list[str]:
@@ -740,12 +845,15 @@ def plant_ranges(docs, ident: str, ir: dict, tab: str | None = None) -> int:
 
     One batch, and on a refusal one request at a time, so a range the API will not
     take names itself in the output instead of costing the rest their anchors.
+
+    The blocks take what the batch answered (`adopt_replies`), so `settle` need not
+    read the document again to learn where the anchors it has just planted are.
     """
     requests = doc_merge.on_tab(doc_ir.name_requests(ir), tab)
     if not requests:
         return 0
     try:
-        send(docs, ident, requests)
+        adopt_replies(ir, requests, send(docs, ident, requests))
         return len(requests)
     except HttpError as err:
         print(f"  the batch of {len(requests)} named ranges was refused ({status_of(err)}); "
@@ -753,7 +861,7 @@ def plant_ranges(docs, ident: str, ir: dict, tab: str | None = None) -> int:
     done = 0
     for request in requests:
         try:
-            send(docs, ident, [request])
+            adopt_replies(ir, [request], send(docs, ident, [request]))
             done += 1
         except HttpError as err:
             what = next(iter(request.values()))
@@ -762,9 +870,45 @@ def plant_ranges(docs, ident: str, ir: dict, tab: str | None = None) -> int:
     return done
 
 
+def adopt_replies(ir: dict, requests: list[dict], answer: dict) -> int:
+    """Give each block the id of the named range just planted on it.
+
+    A `createNamedRange` answers with the id of the range it made, and the request
+    says which block that was for - its name *is* the block's key - and the span it
+    went on. So the read that would learn those two things is a read this batch has
+    already paid for: the last round trip of a sync, with nothing left to overlap it
+    with (the Slides tail's lesson, CLAUDE.md "the **tail**"). A range this batch
+    deleted is gone from the document, so the orphans it names are no longer orphans.
+
+    Only the ids move. Everything else in `ir` came from the read this batch was
+    planned against, and a named range moves no text, so nothing else can have
+    changed - which is what `test_the_anchors_a_batch_answers_with_are_what_a_read_
+    would_say` proves against the live API.
+    """
+    replies = answer.get("replies") or []
+    by_key = {b["key"]: b for b in ir["blocks"] if b.get("key")}
+    done = 0
+    for n, request in enumerate(requests):
+        ask = request.get("createNamedRange")
+        made = (replies[n] if n < len(replies) else {}) or {}
+        planted = (made.get("createNamedRange") or {}).get("namedRangeId")
+        if not ask or not planted:
+            continue
+        block = by_key.get(ask["name"][len(doc_ir.KEY_PREFIX):])
+        if block is None:
+            continue
+        block["rangeId"] = planted
+        block["range"] = [ask["range"]["startIndex"], ask["range"]["endIndex"]]
+        done += 1
+    if any(r.get("deleteNamedRange") for r in requests):
+        ir.pop("orphans", None)
+    return done
+
+
 def settle(docs, ident: str, path: Path, ours: dict, base: dict,
            planned: dict | None = None, drive=None, problems: list[str] | None = None,
-           name_unmodelled: bool = False, renamed: str | None = None) -> dict:
+           name_unmodelled: bool = False, renamed: str | None = None,
+           base_fid: str | None = None, read: tuple[dict, dict] | None = None) -> dict:
     """After a write: read the document, anchor what is new, and let that read be both
     the new base and the new canonical file. File, document and base agree from here.
 
@@ -776,9 +920,14 @@ def settle(docs, ident: str, path: Path, ours: dict, base: dict,
     those, which is what `adopt` and `push` want and a sync does not. `renamed` is a
     name Drive has just been given for the document, which `documents.get` need not
     have caught up with — the file and the base must say the name that was written,
-    or the next read would put the old one back and the rename would be undone."""
+    or the next read would put the old one back and the rename would be undone.
+
+    `read` is a read of the document still current, for a caller that has just made
+    one and written nothing since (`adopt`): the document cannot have moved, so
+    reading it twice in a row is a round trip for nothing. `base_fid` is the base
+    file in Drive this run already found (`load_base`)."""
     planned = planned or {}
-    doc, live = read_document(docs, ident, ours, base)
+    doc, live = read if read is not None else read_document(docs, ident, ours, base)
     for line in unmodelled_notes(doc, name_unmodelled):
         print(f"  {line}")
         if problems is not None:
@@ -791,7 +940,10 @@ def settle(docs, ident: str, path: Path, ours: dict, base: dict,
         send(docs, ident, tidy)
     for part in doc_ir.parts(live):
         named += plant_ranges(docs, ident, part, stamp_of(live, part))
-    if named or tidy:
+    if tidy:
+        # What the anchors did, the batch itself answered (`adopt_replies`); what
+        # `tidy_requests` did - a named style, a bullet, a list's glyph - it did not,
+        # and the block it left behind is what the file and the base must say.
         doc, live = read_document(docs, ident, ours, base)
     for part in doc_ir.parts(live):
         if planned.get(stamp_of(live, part)):
@@ -802,7 +954,8 @@ def settle(docs, ident: str, path: Path, ours: dict, base: dict,
         live["title"] = renamed
     fetch_pictures(path, live)
     write_file(path, live, ident)
-    refused = store_base(path, live, drive, ident, int((base or {}).get("generation", 0)))
+    refused = store_base(path, live, drive, ident, int((base or {}).get("generation", 0)),
+                         base_fid=base_fid)
     if refused and drive is not None:
         line = (f"the base could not be stored in Drive ({refused}); the copy in {STATE_DIR}/ "
                 f"beside the file is the only one, so another checkout has no base to sync from")
@@ -985,7 +1138,9 @@ def adopt(document: str, path: Path | None = None, force: bool = False,
                 f"  Give another path, or --force to overwrite this one.")
     path.parent.mkdir(parents=True, exist_ok=True)
     notes = limits(live)
-    live = settle(docs, ident, path, None, {}, None, drive, notes, True)
+    # Nothing has been written since that read, so the document cannot have moved:
+    # `settle` reading it again would be a round trip for the same answer.
+    live = settle(docs, ident, path, None, {}, None, drive, notes, True, read=(doc, live))
     blocks = [b for part in doc_ir.parts(live) for b in part["blocks"]]
     return {"document": ident, "url": url(ident), "file": str(path), "blocks": len(blocks),
             "anchored": sum(1 for b in blocks if b.get("rangeId")),
@@ -1003,10 +1158,18 @@ def sync(path: Path, document: str | None = None, dry_run: bool = False,
     creds = credentials()
     docs, drive = docs_service(creds), drive_service(creds)
     troubles: list[str] = []
-    base, where = load_base(path, ident, drive, troubles)
+    found: dict = {}
+    # The three reads a sync opens with need nothing of each other: the base, the
+    # document, and the comments — which nothing before the report wants at all, so that
+    # one is waited for after the write rather than here. The base stays on this thread,
+    # being the one that reads a file and appends to `troubles`.
+    reading = in_background(lambda d, _: _get(d, ident), "b2s-doc")
+    asking = in_background(lambda _, d: open_comments(d, ident), "b2s-comments")
+    base, where = load_base(path, ident, drive, troubles, found)
+    doc = collect(reading, lambda: _get(docs, ident))
     for trouble in troubles:
         print(f"  {trouble}")
-    doc, theirs = read_document(docs, ident, ours, base or {"blocks": []})
+    theirs = document_ir(doc, ident, ours, base or {"blocks": []})
     kept = None
     if base is None:
         base, kept = _no_base(path, ours, theirs, assume_base, drive, ident, backup,
@@ -1017,7 +1180,6 @@ def sync(path: Path, document: str | None = None, dry_run: bool = False,
             print("  a real run would export the document to "
                   f"{STATE_DIR}/backups/ before writing over it")
     tabs = doc_merge.pair_tabs(base, ours, theirs)
-    asked = open_comments(drive, ident)
 
     if dry_run:
         planned = [{"stamp": None, "label": None, "result": doc_merge.plan(base, ours, theirs)}]
@@ -1030,7 +1192,8 @@ def sync(path: Path, document: str | None = None, dry_run: bool = False,
                             doc_merge.plan({"blocks": []}, mine, {"blocks": [], "trailer": [1, 2]})})
         for each in planned:
             each["shaped"] = each["result"]["shaped"]
-        info = _report(ident, True, ours, tabs, planned, asked)
+        info = _report(ident, True, ours, tabs, planned,
+                       collect(asking, lambda: open_comments(drive, ident)))
         info["plan"] = tabs["requests"] + [
             r for each in planned for r in doc_merge.on_tab(
                 each["result"]["structure"] + each["result"]["requests"], each["stamp"])]
@@ -1051,14 +1214,17 @@ def sync(path: Path, document: str | None = None, dry_run: bool = False,
                           notes=batched)
     renamed = (rename_document(drive, ident, tabs["rename"], batched)
                if tabs.get("rename") else None)
-    info = _report(ident, False, ours, tabs, written, asked)
+    # The comments are the report's, and nothing before this point wanted them: the read
+    # has been running beside the planning and the write it is only now waited for.
+    info = _report(ident, False, ours, tabs, written,
+                   collect(asking, lambda: open_comments(drive, ident)))
     info["base"] = where
     if kept:
         info["backup"] = str(kept)
     info["notes"] = troubles + info["notes"] + batched + rewrite_losses(doc, written)
     live = settle(docs, ident, path, ours, base,
                   {each["stamp"]: each["result"]["blocks"] for each in written}, drive,
-                  info["notes"], renamed=renamed)
+                  info["notes"], renamed=renamed, base_fid=found.get("fid"))
     info["blocks"] = sum(len(part["blocks"]) for part in doc_ir.parts(live))
     info["report"] = str(write_report(path, info))
     return info
