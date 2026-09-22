@@ -88,6 +88,30 @@ def test_words_outside_every_block_stop_the_sync_rather_than_disappearing(tmp_pa
     assert "stray" not in doc_sync.read_file(path)
 
 
+def test_a_table_the_file_left_open_loses_no_words_in_silence(tmp_path):
+    # The rule above, one level down. A table is the one block the dialect writes over
+    # several lines, so half a move (or half a paste) leaves rows with no `<table>` to
+    # go in - and their words sit inside `<p>` tags, where `handle_data` sees a block
+    # and says nothing, while `</tr>` drops the row. The sync would then read the table
+    # as one the source dropped and delete it from the document, which is the one change
+    # there is no way back from.
+    path = tmp_path / "doc.html"
+    whole = doc_ir.to_html({"title": "t", "document": "d", "blocks": [
+        para("p:one", "hello"), table("t:one", [["Region", "Sales"], ["North", "1200"]])]})
+    lines = whole.split("\n")
+    beheaded = [l for l in lines if not l.lstrip().startswith("<table")]
+    path.write_text("\n".join(beheaded), encoding="utf-8")
+    assert doc_ir.from_html("\n".join(beheaded))["stray"] == [
+        "Region", "Sales", "North", "1200"]
+    with pytest.raises(SystemExit) as refused:
+        doc_sync.read_file(path)
+    assert "'Region', 'Sales', 'North' and 1 more outside any block" in str(refused.value)
+    # And the other half: a table whose `</table>` never comes keeps every row it read.
+    open_ended = "\n".join(l for l in lines if "</table>" not in l)
+    assert doc_ir.from_html(open_ended)["stray"] == ["Region", "Sales", "North", "1200"]
+    assert "stray" not in doc_ir.from_html(whole)
+
+
 def test_the_white_space_between_the_dialects_own_lines_is_not_words(tmp_path):
     # The writer breaks lines outside any block on purpose (`_table_html`), so the reader
     # must not read its own layout as text nobody carries - and a `<style>` is markup too.
@@ -120,6 +144,40 @@ class _Reply:
 
     def execute(self):
         return self.run()
+
+
+def test_a_read_is_made_again_through_a_blip_and_a_write_never_is(monkeypatch):
+    # An SSL EOF or a 429 in the middle of a read ends the run otherwise - after the
+    # write batch that leaves the document written and the file and base not settled,
+    # and in `load_base` it leaves a sync with no base, which is the `--assume-base`
+    # dialog where both answers throw work away. Reading twice costs a round trip.
+    import inspect
+    import ssl
+    monkeypatch.setattr(doc_sync.time, "sleep", lambda seconds: None)
+    calls: list[int] = []
+
+    def flaky(*errors):
+        left = list(errors)
+
+        def run():
+            calls.append(len(left))
+            if left:
+                raise left.pop(0)
+            return {"ok": True}
+        return _Reply(run)
+
+    assert doc_sync._read(flaky(ssl.SSLEOFError("EOF"), _http(503))) == {"ok": True}
+    assert len(calls) == 3                        # two blips, then the answer
+    calls.clear()
+    with pytest.raises(Exception):
+        doc_sync._read(flaky(_http(403)))         # not transient: asked once, and out
+    assert len(calls) == 1
+    calls.clear()
+    with pytest.raises(ssl.SSLEOFError):
+        doc_sync._read(flaky(*[ssl.SSLEOFError("EOF")] * 9), tries=3)
+    assert len(calls) == 3                        # and it gives up rather than looping
+    # A write is never made again: a batch whose answer was lost may have been applied.
+    assert "_read(" not in inspect.getsource(doc_sync.send)
 
 
 class _Storage:

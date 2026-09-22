@@ -1553,6 +1553,23 @@ def test_a_tab_request_carries_its_tab_in_every_location_and_range():
     assert "tabId" not in requests[0]["insertText"]["location"]      # the plan is untouched
 
 
+def test_a_named_range_deleted_on_another_tab_says_which_tab_it_is_on():
+    # `deleteNamedRange` carries no Range, so nothing in it can hold a `tabId`: it takes
+    # `tabsCriteria` instead. Without one the live API answers "No named range with ID"
+    # for a range on any tab but the first, and a refusal throws out the whole batch -
+    # so every anchor that tab was about to be given goes with it, and the drifted or
+    # orphaned range the delete was for can never be repaired at all.
+    requests = [{"deleteNamedRange": {"namedRangeId": "kix.1"}},
+                {"createNamedRange": {"name": "b2s:p:one",
+                                      "range": {"startIndex": 1, "endIndex": 4}}}]
+    assert doc_merge.on_tab(requests, None) is requests          # the first tab: as they are
+    sent = doc_merge.on_tab(requests, "t.5")
+    assert sent[0]["deleteNamedRange"] == {"namedRangeId": "kix.1",
+                                           "tabsCriteria": {"tabIds": ["t.5"]}}
+    assert sent[1]["createNamedRange"]["range"]["tabId"] == "t.5"  # a Range says it itself
+    assert "tabsCriteria" not in requests[0]["deleteNamedRange"]   # the plan is untouched
+
+
 def test_tabs_pair_by_id_and_the_source_can_add_rename_and_delete_them():
     base = tabbed(tab("t.1", "Notes", "a"), tab("t.2", "Old", "b"), tab("t.3", "Busy", "c"))
     ours = tabbed(tab("t.1", "Notes, renamed", "a", "more"), tab(None, "Appendix", "z"))

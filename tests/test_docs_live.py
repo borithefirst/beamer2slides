@@ -88,6 +88,15 @@ def find(ir: dict, starts: str) -> dict:
     return found
 
 
+def surprises(info: dict) -> list[str]:
+    """The notes a test is about. Every live document carries properties the dialect
+    never reads - a section break, `direction`, `borderBetween`, the theme's own named
+    styles - so `doc_sync.unmodelled_notes` is in every report there is and says nothing
+    about the sync under test. It is a caution, not a finding.
+    """
+    return [note for note in info["notes"] if "this file cannot say" not in note]
+
+
 class Paper:
     """A canonical file and the document it was pushed to."""
 
@@ -130,17 +139,22 @@ class Paper:
     def moved(self, key: str, after: str | None = None) -> None:
         """What moving a section in the canonical file does.
 
-        `to_html` writes one block per line, so a reorder in the file is exactly this:
-        a line taken out and put back somewhere else. `after` names the block it should
-        follow; None puts it at the end of the body.
+        `to_html` writes one block per line - except a table, which is one line per row,
+        so a reorder in the file is a *run* of lines taken out and put back somewhere
+        else. `after` names the block it should follow; None puts it at the end of the
+        body. (Moving only the `<table>` line leaves its rows behind, which is a mangled
+        file rather than a move, and `doc_ir` refuses one.)
         """
         lines = self.text.split("\n")
-        which = next(i for i, line in enumerate(lines) if f'id="{key}"' in line)
-        line = lines.pop(which)
+        first = next(i for i, line in enumerate(lines) if f'id="{key}"' in line)
+        last = first
+        while "</table>" not in lines[last] and lines[first].lstrip().startswith("<table"):
+            last += 1
+        block, lines = lines[first:last + 1], lines[:first] + lines[last + 1:]
         where = (next(i for i, l in enumerate(lines) if l == "</body>") if after is None
                  else next(i for i, l in enumerate(lines) if f'id="{after}"' in l) + 1)
-        lines.insert(where, line)
-        self.path.write_text("\n".join(lines), encoding="utf-8")
+        self.path.write_text("\n".join(lines[:where] + block + lines[where:]),
+                             encoding="utf-8")
 
     def sync(self, **kwargs) -> dict:
         return self.sync_module.sync(self.path, **kwargs)
@@ -415,7 +429,7 @@ def test_pictures_go_in_follow_the_source_and_come_back_from_the_reader(paper, r
                f'<p id="paragraph:figure"><img src="{src}" alt="a red square" width="60" '
                f'height="40"></p>\n<p id="paragraph:closing">')
     info = paper.sync()
-    assert info["conflicts"] == [] and not info["notes"], info["notes"]
+    assert info["conflicts"] == [] and not surprises(info), info["notes"]
     img = re.search(r'<img src="([^"]+)" alt="a red square" width="60" height="40" '
                     r'data-object="([^"]+)">', paper.text)
     assert img and img.group(1) == src, paper.text
@@ -576,7 +590,7 @@ def test_a_block_the_source_added_with_a_date_and_a_person_gets_them(paper):
                'data-chip="person" data-value="someone@example.com"></span></p>\n'
                '<p id="paragraph:closing">')
     info = paper.sync()
-    assert not info["notes"], info["notes"]
+    assert not surprises(info), info["notes"]
     text = paper.text
     assert 'data-chip="date" data-value="2026-10-01T12:00:00Z"' in text, text
     assert 'data-chip="person" data-value="someone@example.com"' in text
@@ -829,7 +843,7 @@ def test_tabs_the_source_adds_renames_edits_and_deletes(paper):
     `tabId`, created, renamed or deleted by the three-way rule one level up."""
     paper.edit("</body>", APPENDIX)
     info = paper.sync()
-    assert not info["notes"], info["notes"]
+    assert not surprises(info), info["notes"]
     assert tabs(paper) == [("Appendix", "An appendix line. / point a / point b / table / "
                                         "after the table"),
                            ("Scratch", "scratch words")]

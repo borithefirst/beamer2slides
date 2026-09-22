@@ -2186,7 +2186,38 @@ keys, named ranges), `doc_merge.py` (pure planning), `doc_sync.py` (the commands
   nothing. `read_file` is the one door `push` and `sync` share, so both refuse, quoting the
   words and naming the tags a block can be (the agent journeys answer `bad_request` with the
   same sentence); the white space between the dialect's own lines is layout, not words, and a
-  `<script>`/`<style>` body is markup.
+  `<script>`/`<style>` body is markup. **And the same rule one level down**, which the
+  dialect's own table makes reachable: a table is the one block written over several lines -
+  one per row - so moving it in the file moves a *run* of lines, and moving one of them leaves
+  a `<tr>` with no `<table>`, or a `<table>` the file never closes. The words are inside `<p>`
+  tags, so `handle_data` saw a block and said nothing while the row they were in was dropped:
+  the sync read the table as one the source had deleted and **took it out of the document**,
+  rows and all, reporting `0 requests` for words it never read. `_Reader._lost` (a cell, a row)
+  and `finish()` (a table still open at the end of the file) put them in `stray`, so the file
+  is refused by the same door. Found the other way round, by a live test whose own helper moved
+  one line of a multi-line table - a mistake a person hand-editing the file makes as readily.
+- **A request with no range still has to name its tab** (`doc_merge.TABS_CRITERIA`): three
+  requests carry no `Range` and take `tabsCriteria` instead (`deleteNamedRange`,
+  `replaceAllText`, `replaceNamedRangeContent`; the sync sends the first). The reference says
+  an omitted criteria applies to every tab, so `on_tab` never stamped it - and the live API
+  answers "No named range with ID kix.…" for a range on any tab but the first (measured
+  2026-09-22). A refusal throws out the whole batch, and the batch a `deleteNamedRange` is in
+  is the one that *plants anchors*, so on a second tab a drifted or orphaned range could never
+  be repaired at all and every anchor that tab was to be given went down with it. Found by the
+  live tabs test; `doc_world._do_deleteNamedRange` models the measured rule now (an id with no
+  criteria reaches the first tab only), so the offline campaign would catch it too.
+- **A read is made again through a blip, a write never is** (`doc_sync._read`): the Slides side
+  has retried since the beginning (`gslides.execute`) and the Docs side called `.execute()`
+  directly everywhere, so one `ssl.SSLEOFError` on `documents.get` (which ended a live tabs run
+  on 2026-09-22) or one 429 ended the sync - and where it ends matters, since after the write
+  batch the document is written and the file and base are not, so the next run reads this
+  sync's own changes as the reader's work. Four tries with backoff and jitter on Google's
+  transient codes (`gapi.is_transient`) and on `OSError`, over every read there is: the
+  document, the comments, the base file and its metadata, the markdown export an equation's
+  LaTeX comes from, the HTML export a backup takes. **No write goes through it**, and that is
+  correctness rather than caution: a `batchUpdate` whose answer was lost may well have been
+  applied, so sending it again applies it twice - `requiredRevisionId` is what makes a write
+  safe. A test asserts the counts and that `send`'s source never names `_read`.
 - What the file cannot carry is reported too (`doc_sync.limits`): a picture file that is not
   there. And **what the dialect does not model is named** (`doc_ir.unmodelled`, `_NODES` = the
   reader's own map of `documents.get`): the convergence check is measured on the IR, so it

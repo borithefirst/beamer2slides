@@ -31,6 +31,7 @@ import io
 import json
 import mimetypes
 import os
+import random
 import re
 import subprocess
 import time
@@ -39,7 +40,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from . import doc_ir, doc_merge, google_auth
-from .gapi import HttpError, media_upload, status_of
+from .gapi import HttpError, is_transient, media_upload, status_of
 from .google_auth import (credentials, credentials_for_threads, docs_service, drive_service,
                           shared_service)
 
@@ -56,6 +57,32 @@ BASE_PROPERTY = "b2sBase"
 BASE_FID = "base_fid"
 # Above this many requests one `batchUpdate` is cut into several (`send`).
 CHUNK = 500
+
+
+def _read(request, tries: int = 4):
+    """One read, made again through a transient failure.
+
+    A read can be made twice for the price of a round trip and nothing else, so every
+    read a sync makes goes through here. An SSL EOF or a 429 in the middle of one ends
+    the run otherwise - after the write batch that leaves the document written and the
+    file and the base not settled, and in `load_base` it leaves a sync that cannot read
+    the base, which is the `--assume-base` dialog where both answers throw work away.
+
+    A *write* never comes here: a batch whose answer was lost may well have been
+    applied, and sending it again would apply it twice. What makes a write safe to
+    repeat is `send`'s own `requiredRevisionId`, and that is the sync's business, not
+    a retry loop's.
+    """
+    for attempt in range(tries):
+        try:
+            return request.execute()
+        except HttpError as err:
+            if not is_transient(err) or attempt == tries - 1:
+                raise
+        except OSError:      # an SSL EOF or a reset connection, seen on `documents.get`
+            if attempt == tries - 1:
+                raise
+        time.sleep(min(8.0, 2 ** attempt) + random.random())
 
 
 # ---------------------------------------------------------------- state: Drive first
@@ -123,7 +150,7 @@ def save_base(path: Path, base: dict) -> Path:
 def base_file_id(drive, document: str) -> str | None:
     """The id of the document's base file in Drive, off its own appProperties."""
     try:
-        info = drive.files().get(fileId=document, fields="appProperties").execute()
+        info = _read(drive.files().get(fileId=document, fields="appProperties"))
     except HttpError:
         return None
     return (info.get("appProperties") or {}).get(BASE_PROPERTY)
@@ -167,7 +194,7 @@ def load_drive(drive, document: str, found: dict | None = None,
 def _read_base_file(drive, fid: str) -> dict | None:
     """The JSON one Drive file holds, or None where it cannot be read as JSON at all."""
     try:
-        data = drive.files().get_media(fileId=fid).execute()
+        data = _read(drive.files().get_media(fileId=fid))
         return json.loads(data.decode("utf-8") if isinstance(data, bytes) else data)
     except (HttpError, ValueError, OSError):
         return None
@@ -195,7 +222,7 @@ def save_drive(drive, document: str, base: dict, title: str | None = None,
             return known_fid
         except HttpError:
             pass  # deleted, or somebody else's now: ask the document below
-    info = drive.files().get(fileId=document, fields="name,parents,appProperties").execute()
+    info = _read(drive.files().get(fileId=document, fields="name,parents,appProperties"))
     fid = (info.get("appProperties") or {}).get(BASE_PROPERTY)
     if fid:
         try:
@@ -246,7 +273,7 @@ def stale_base_warning(where: str, drive, document: str) -> str | None:
     if not fid:
         return None
     try:
-        drive.files().get_media(fileId=fid).execute()
+        _read(drive.files().get_media(fileId=fid))
     except HttpError:
         return (f"the document names a sync base in Drive that cannot be read; syncing against "
                 f"the copy in {STATE_DIR}/ beside the file, which may be older than the "
@@ -462,7 +489,7 @@ def read_document(docs, ident: str, *sources: dict) -> tuple[dict, dict]:
 
 
 def _get(docs, ident: str) -> dict:
-    return docs.documents().get(documentId=ident, includeTabsContent=True).execute()
+    return _read(docs.documents().get(documentId=ident, includeTabsContent=True))
 
 
 def document_ir(doc: dict, ident: str, ours: dict | None = None,
@@ -514,10 +541,10 @@ def open_comments(drive, ident: str) -> list[str]:
     Nothing here writes or resolves one: that is the reader's to do, in the browser.
     """
     try:
-        found = drive.comments().list(
+        found = _read(drive.comments().list(
             fileId=ident, includeDeleted=False, pageSize=100,
             fields="comments(content,resolved,author/displayName,"
-                   "quotedFileContent/value,replies/content)").execute().get("comments", [])
+                   "quotedFileContent/value,replies/content)")).get("comments", [])
     except HttpError as err:
         return [f"the document's comments could not be read ({status_of(err)})"]
     out = []
@@ -791,8 +818,7 @@ class Stager:
             media_body=media_upload(io.BytesIO(f"<html><body>{body}</body></html>".encode()),
                                     "text/html"), fields="id").execute()["id"]
         self.files.append(ident)
-        staged = doc_ir.from_document(
-            self.docs.documents().get(documentId=ident, includeTabsContent=True).execute())
+        staged = doc_ir.from_document(_get(self.docs, ident))
         for block in staged["blocks"]:
             label = doc_ir.runs_text(block["runs"]).split(":")[0]
             uris = [r.get("uri") for r in block["runs"] if r.get("chip") == "image"]
@@ -977,7 +1003,7 @@ def equation_latex(drive, ident: str, doc: dict, live: dict) -> int:
     if not spots:
         return 0
     try:
-        markdown = drive.files().export(fileId=ident, mimeType="text/markdown").execute()
+        markdown = _read(drive.files().export(fileId=ident, mimeType="text/markdown"))
     except HttpError as err:
         print(f"  no LaTeX for the equations: the Markdown export was refused ({status_of(err)})")
         return 0
@@ -1452,7 +1478,7 @@ def backup_document(drive, document: str, path: Path) -> Path:
     folder.mkdir(parents=True, exist_ok=True)
     out = folder / f"{path.stem}-{time.strftime('%Y%m%d-%H%M%S')}.html"
     try:
-        data = drive.files().export(fileId=document, mimeType="text/html").execute()
+        data = _read(drive.files().export(fileId=document, mimeType="text/html"))
     except HttpError as err:
         raise SystemExit(
             f"the document could not be exported as a backup ({status_of(err)}), and\n"

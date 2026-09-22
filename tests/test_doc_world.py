@@ -24,13 +24,24 @@ def _ranges(world: doc_world.World, name: str = "b2s:x") -> list[tuple[str, str]
     return [(t.id, r["id"]) for t in world.tabs for r in t.named if r["name"] == name]
 
 
-def test_a_named_range_is_deleted_by_its_id_wherever_it_is():
-    """A range id is the document's, not a tab's: deleting by id needs no tab and takes
-    only that one range, however many tabs carry the same name."""
+def test_a_named_range_on_another_tab_is_deleted_only_where_the_request_says_so():
+    """A range id names one range and one tab's, and a `deleteNamedRange` carries no
+    Range to say which tab — it takes `tabsCriteria` instead. The reference says an
+    omitted one applies to every tab; the live API answers "No named range with ID" for
+    a range on a second tab (measured, `doc_merge.on_tab`), and a refusal throws out the
+    whole batch — which for a plant batch is every anchor that tab was to be given.
+    """
     world = _world()
     (body, first), (other, second) = _ranges(world)
-    world.apply([{"deleteNamedRange": {"namedRangeId": second}}])
+    with pytest.raises(doc_world.Refused):
+        world.apply([{"deleteNamedRange": {"namedRangeId": second}}])
+    assert _ranges(world) == [(body, first), (other, second)]   # nothing was deleted
+    world.apply([{"deleteNamedRange": {"namedRangeId": second,
+                                       "tabsCriteria": {"tabIds": [other]}}}])
     assert _ranges(world) == [(body, first)]
+    # The first tab's own needs no criteria: a request without one goes there.
+    world.apply([{"deleteNamedRange": {"namedRangeId": first}}])
+    assert _ranges(world) == []
 
 
 def test_deleting_a_name_takes_every_tab_unless_told_which():

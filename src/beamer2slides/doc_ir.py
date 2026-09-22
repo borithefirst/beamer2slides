@@ -1038,6 +1038,18 @@ class _Reader(HTMLParser):
         else:
             self.target.append(block)
 
+    def _lost(self, cell: list[dict]) -> None:
+        """The words of a cell no table takes. A `<td>` outside a `<tr>`, a `<tr>` whose
+        `<table>` line is missing, a table the file never closes: the words are inside
+        `<p>` tags, so `handle_data` sees a block and says nothing, and the row they are
+        in is dropped - the class docstring's rule one level down, and the one the
+        dialect's own multi-line table makes reachable (moving a table in the file is
+        moving several lines, and moving one of them leaves exactly this).
+        """
+        for block in cell:
+            if text := runs_text(block.get("runs", [])).strip():
+                self.ir.setdefault("stray", []).append(" ".join(text.split()))
+
     def _open(self, block: dict) -> None:
         self.block = block
 
@@ -1155,10 +1167,15 @@ class _Reader(HTMLParser):
         elif tag == "td":
             if self.row is not None:
                 self.row.append(self.cell or [])
+            else:
+                self._lost(self.cell or [])
             self.cell = None
         elif tag == "tr":
             if self.table is not None and self.row is not None:
                 self.table["rows"].append(self.row)
+            elif self.row is not None:
+                for cell in self.row:
+                    self._lost(cell)
             self.row = None
         elif tag == "table":
             if self.table is not None:
@@ -1193,6 +1210,23 @@ class _Reader(HTMLParser):
         if not text.strip() and not self.block["runs"]:
             return
         self.block["runs"].append({"text": text} | self._style())
+
+    def finish(self) -> None:
+        """What the end of the file leaves open. A `<table>` that is never closed keeps
+        every row it has read, so its words go the way `_lost` describes - and so do an
+        open `<td>` and `<tr>`, whose own end tags never came.
+        """
+        self._close()
+        if self.cell is not None:
+            self._lost(self.cell)
+            self.cell = None
+        for cell in self.row or []:
+            self._lost(cell)
+        self.row = None
+        for row in (self.table or {}).get("rows", []):
+            for cell in row:
+                self._lost(cell)
+        self.table = None
 
 
 def _pixels(value: str | None) -> int | None:
@@ -1288,7 +1322,7 @@ def from_html(html: str) -> dict:
     reader = _Reader()
     reader.feed(html)
     reader.close()
-    reader._close()
+    reader.finish()
     return reader.ir
 
 

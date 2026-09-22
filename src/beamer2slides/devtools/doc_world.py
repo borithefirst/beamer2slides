@@ -682,13 +682,19 @@ class World:
 
     def _do_deleteNamedRange(self, arg: dict, request: dict) -> None:
         """By id, or every range of a name: the two the API takes, one of them required.
-        A range id is the document's, not a tab's, so it is looked for everywhere; a
-        name goes by `tabsCriteria` where the request gives one, else every tab."""
+        Which tabs it reaches is `tabsCriteria` where the request gives one. Where it
+        does not, a *name* goes to every tab (the reference; unmeasured, and nothing
+        here sends one) and an **id** to the first tab and no other - measured, against
+        the reference, which says an omitted criteria applies to every tab: the live API
+        answers "No named range with ID" for a range on a second tab whose id had just
+        been read back from that tab (`doc_merge.on_tab`). A refusal throws out the
+        whole batch, so that is the rule a plan has to be written for."""
         ident, name = arg.get("namedRangeId"), arg.get("name")
         if not ident and not name:
             raise Refused(request, "deleteNamedRange needs a namedRangeId or a name")
         wanted = set((arg.get("tabsCriteria") or {}).get("tabIds", []))
-        tabs = [t for t in self.tabs if not wanted or t.id in wanted]
+        tabs = ([t for t in self.tabs if t.id in wanted] if wanted
+                else self.tabs[:1] if ident else self.tabs)
         hit = False
         for tab in tabs:
             kept = [r for r in tab.named

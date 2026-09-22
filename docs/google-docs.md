@@ -464,6 +464,19 @@ like this:
 - **Tab by tab** (`doc_sync._write_tabs`): each tab is its own three-way plan, its own
   structure pass and its own batch, with every location and range stamped with its `tabId`
   (`doc_merge.on_tab`). Keys are unique per tab, as named ranges are.
+- **And a request with no range at all still has to name its tab.** Three requests carry
+  no `Range` and take `tabsCriteria` instead (`deleteNamedRange`, `replaceAllText`,
+  `replaceNamedRangeContent`; we send the first). The reference says an omitted criteria
+  applies to *all* tabs, so nothing stamped it — and the live API answers
+  `"No named range with ID kix.… "` for a range on any tab but the first (measured
+  2026-09-22). A refused request throws out the whole batch, and the batch a
+  `deleteNamedRange` is in is the one that plants anchors: so on a second tab a drifted
+  or orphaned range could never be repaired at all, and every anchor that tab was to be
+  given went down with the refusal. `doc_merge.TABS_CRITERIA` names the three and
+  `on_tab` stamps them like any other. Found by the live tabs test, which had never had a
+  range drift on a second tab before; `doc_world._do_deleteNamedRange` models the measured
+  rule (an id with no criteria reaches the first tab only), so the offline campaign would
+  now catch it too.
 - **The tabs themselves** follow the three-way rule one level up (`doc_merge.pair_tabs`),
   with the tab id as identity: a tab the source added is created (`addDocumentTab`, under
   its parent if it has one and at the index the file puts it at) and written like any tab
@@ -819,6 +832,26 @@ batches before it in the document, where a single batch could not. The sync repo
 so whenever chunking actually happened. The structure pass (`_write_structure`) is
 unaffected — it is already a batch of its own, for its own reasons.
 
+### A read is made again through a blip, and a write never is
+
+The Slides side has retried its calls since the beginning (`gslides.execute`); the Docs
+side called `.execute()` directly everywhere, so one `ssl.SSLEOFError` on a
+`documents.get` — which is what ended a live tabs run on 2026-09-22 — or one 429 ended
+the whole sync. Where it ends matters: after the write batch the document is written and
+the file and the base are not, so the next run reads a document that has already had this
+sync's changes and a base that says it has not, and everything those changes touched
+looks like the reader's own work.
+
+`doc_sync._read` makes one read again through a transient failure (Google's 429/5xx by
+`gapi.is_transient`, and `OSError` for a dropped connection), four tries with exponential
+backoff and jitter. Every read goes through it: the document, the comments, the base file
+and its metadata, the markdown export an equation's LaTeX comes from, and the .pptx-side
+HTML export a backup takes. **No write does**, and the rule is not caution but
+correctness: a `batchUpdate` whose answer was lost may well have been applied, so sending
+it again would apply it twice — `requiredRevisionId` is what makes a write safe, not a
+retry loop. A test asserts the retry counts and that `send`'s source does not mention
+`_read` at all.
+
 ### What a sync waits for
 
 The round trip an agent pays for here is the same shape as the Slides one (CLAUDE.md, "A
@@ -1090,6 +1123,19 @@ both go through that one door, and the agent journeys answer `bad_request` with 
 sentence. White space between the dialect's own lines is layout, not words (the table
 writer breaks lines exactly where a parser has nowhere to put text), and a `<script>` or
 `<style>` body is markup.
+
+**The same rule one level down, which the dialect's own table makes reachable.** A table
+is the one block written over several lines — one per row — so moving a table in the file
+means moving a *run* of lines, and moving one of them leaves a `<tr>` with no `<table>`,
+or a `<table>` the file never closes. The words are then inside `<p>` tags, so
+`handle_data` saw a block and said nothing, and the row they were in was dropped on the
+floor: the sync read the table as one the source had deleted and **took it out of the
+document**, words and all, with `0 requests` for the rows that were never read. The cell,
+row and table flushes (`doc_ir._Reader._lost`, and `finish()` for a table still open at
+the end of the file) put those words into `ir["stray"]`, so the file is refused by the
+same door as any other stray text. Found the other way round, by a live test whose own
+helper moved a single line of a multi-line table — a mistake a person hand-editing the
+file makes as readily.
 
 ### Proving nothing is lost
 

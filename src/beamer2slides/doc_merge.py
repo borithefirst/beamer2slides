@@ -3797,12 +3797,26 @@ def _landing_lists(theirs: dict, merged: list[dict]) -> list[object]:
 
 # ---------------------------------------------------------------- tabs
 
+# The requests that carry no Range and name a tab through `tabsCriteria` instead
+# (the whole of that set in the v1 discovery document; we send the first).
+TABS_CRITERIA = ("deleteNamedRange", "replaceAllText", "replaceNamedRangeContent")
+
+
 def on_tab(requests: list[dict], tab: str | None) -> list[dict]:
     """The requests aimed at one tab: `tabId` in every location and range.
 
     A request without one goes to the first tab (measured), so the first tab's are
     sent as they are and every other tab's are stamped: an `index` is a Location,
     a `startIndex` a Range, and `endOfSegmentLocation` names no index at all.
+
+    A request that names no index at all is the exception, and the one we send is
+    `deleteNamedRange`: it takes a `tabsCriteria` instead (the API's own field, for
+    the three requests that have no Range to carry a `tabId`), and although the
+    reference says an omitted one applies to every tab, the live API answers "No
+    named range with ID" for a range on any tab but the first — so the whole batch
+    is refused, and with it every anchor that tab was about to be given. Which
+    means that until this was stamped, a drifted or orphaned range on a second tab
+    could never be repaired at all (`doc_ir.replant_requests`, `orphan_requests`).
     """
     if not tab:
         return requests
@@ -3817,7 +3831,14 @@ def on_tab(requests: list[dict], tab: str | None) -> list[dict]:
             out["tabId"] = tab
         return out
 
-    return [stamp(r) for r in requests]
+    out = []
+    for request in requests:
+        aimed = stamp(request)
+        for name in aimed:
+            if name in TABS_CRITERIA:
+                aimed[name]["tabsCriteria"] = {"tabIds": [tab]}
+        out.append(aimed)
+    return out
 
 
 def pair_tabs(base: dict, ours: dict, theirs: dict) -> dict:
