@@ -7,6 +7,7 @@ import math
 import re
 import time
 from collections import Counter
+from concurrent.futures import ThreadPoolExecutor
 from importlib import resources
 from pathlib import Path
 
@@ -17,8 +18,8 @@ from googleapiclient.http import MediaIoBaseUpload
 from . import bidi
 from .classify import HOLE_PAD
 from .fonts import font_info, google_font
-from .google_auth import drive_service, slides_service
-from .gslides import EMU_PER_PT, emu, execute, pt
+from .google_auth import credentials_for_threads, drive_service, shared_service, slides_service
+from .gslides import EMU_PER_PT, emu, execute, per_thread, pt
 
 # Found through the package, never through the checkout: an installed wheel, a zip import and
 # a build that stages sources elsewhere all keep the data beside the module, not beside __file__.
@@ -26,6 +27,12 @@ CALIBRATION_DIR = resources.files("beamer2slides") / "calibration"
 CALIBRATION = CALIBRATION_DIR / "fonts.json"
 SLIDE_W = 720.0
 BATCH_MAX_REQUESTS = 400  # slides are sent together until a batch reaches this size
+# A round trip to Google costs about a second whatever it carries, so the wall clock of a
+# conversion is round trips and not work (measured: tools/probe_batch_parallelism.py). Several
+# batches may be in flight on one presentation at once - Google takes them and loses nothing -
+# and four is where the curve flattens: 8 batches of 200 requests take 9.4 s one at a time,
+# 6.1 s two at a time, 3.6 s four at a time and 3.1 s eight at a time.
+CONTENT_WORKERS = 4
 PPTX_MIME ="application/vnd.openxmlformats-officedocument.presentationml.presentation"
 
 # Slides text box model, measured by tools/calibrate.py and the spacing probes
@@ -1759,9 +1766,7 @@ def measure_places(slides, pid: str, deck: dict, scale: float, fonts: FontMapper
 
     `page_width`: how wide the deck being measured is, in slide pt. A thumbnail is a fixed number
     of pixels wide whatever the page is, so it alone says how many pixels a point is."""
-    from concurrent.futures import ThreadPoolExecutor
     from PIL import Image
-    from .google_auth import credentials, slides_service
     from .gslides import save_thumbnail
 
     started = time.monotonic()
@@ -1774,14 +1779,19 @@ def measure_places(slides, pid: str, deck: dict, scale: float, fonts: FontMapper
         print(f"warning: could not measure the picture places ({api_error(e)}); keeping the predicted places")
         return {}, []  # (a refused batch created nothing)
 
-    creds = credentials()
+    # One client per worker thread, not one per slide: `build(...)` fetches a discovery document
+    # every time it is called. Where a caller handed its own client over there is only that one,
+    # which is not thread-safe, so the thumbnails are fetched one at a time.
+    creds = credentials_for_threads()
+    client = per_thread(lambda: slides_service(creds))
+    workers = 1 if shared_service("slides", "v1") else 6
     tables = {}
 
     def measure(job):
         sid, n, found, overlays = job
         path = out / "holes" / f"marks-{n + 1:03}.png"
         try:
-            save_thumbnail(slides_service(creds), pid, sid, path)
+            save_thumbnail(client(), pid, sid, path)
         except (HttpError, OSError) as e:
             print(f"warning: slide {n + 1}: no thumbnail to measure the picture places ({e})")
             return {}
@@ -1810,7 +1820,7 @@ def measure_places(slides, pid: str, deck: dict, scale: float, fonts: FontMapper
         return moves
 
     moves = {}
-    with ThreadPoolExecutor(max_workers=6) as pool:
+    with ThreadPoolExecutor(max_workers=workers) as pool:
         for result in pool.map(measure, jobs):
             moves.update(result)
     (out / "holes" / "moves.json").write_text(json.dumps({k: [round(v, 4) for v in m] for k, m in moves.items()},
@@ -2065,6 +2075,16 @@ def style_layout_placeholders(slides, pid: str, deck: dict, scale: float, fonts:
             print(f"warning: could not style the layouts ({api_error(e)})")
 
 
+def write_layouts(client, pid: str, deck: dict, scale: float, fonts: FontMapper, ground) -> None:
+    """The whole of the layout and master work, as one job: what a deck's own look gives a slide
+    somebody adds later in Slides. It reads and writes layout and master pages only - never the
+    slides `build_deck` is filling in beside it - which is what lets it run on a thread of its
+    own. `client()` gives that thread its own Slides client (`gslides.per_thread`)."""
+    slides = client()
+    write_layout_texts(slides, pid, deck.get("layout_texts", []), scale, fonts)
+    style_layout_placeholders(slides, pid, deck, scale, fonts, PPTX_TITLE_DY, ground)
+
+
 def api_error(e: HttpError) -> str:
     try:
         return json.loads(e.content)["error"]["message"][:200]
@@ -2122,19 +2142,46 @@ def fallback_pictures(deck: dict, refused: list[tuple[int, str]], out: Path) -> 
     return {**deck, "slides": new_slides}
 
 
-def preflight_rebuild(out: Path, source_pdf: Path | None, new_deck: bool = False, force_rebuild: bool = False) -> None:
+def preflight_rebuild(out: Path, source_pdf: Path | None, new_deck: bool = False, force_rebuild: bool = False,
+                      slides=None, drive=None) -> None:
     """The guard's question (guard.check_rebuild) before the conversion work starts, so a refusal
     comes in a second instead of after extract, classify and render. `emit` asks again - and backs
     the deck up - immediately before the write, in case the deck is edited in between."""
     from . import guard
-    from .google_auth import drive_service, slides_service
 
     if new_deck or force_rebuild or not (out / "emit.json").exists():
         return
-    drive = drive_service()
+    drive = drive or drive_service()
     previous = guard.previous_deck(drive, out)
     if previous and previous["state"] == "live":
-        guard.check_rebuild(slides_service(), drive, previous["presentationId"], out, source_pdf, False)
+        guard.check_rebuild(slides or slides_service(), drive, previous["presentationId"], out, source_pdf, False)
+
+
+def preflight_in_background(out: Path, source_pdf: Path | None, new_deck: bool = False,
+                            force_rebuild: bool = False):
+    """`preflight_rebuild` on a thread of its own. Returns the function that asks for its answer:
+    it raises whatever the check raised, and returns nothing.
+
+    The check is three Drive reads and a whole `presentations.get` - three seconds that need
+    nothing the conversion produces and answer a question only the first write to Drive really
+    asks - so it is made while the PDF is being converted and collected just before `emit`. The
+    price is that a refusal now comes after the local conversion instead of in a second, and what
+    that writes is the output folder's own files: the deck itself is still never touched.
+    """
+    if new_deck or force_rebuild or not (out / "emit.json").exists() \
+            or shared_service("slides", "v1") or shared_service("drive", "v3"):
+        # Nothing to ask, or a caller's own clients, which are that caller's one thread's.
+        preflight_rebuild(out, source_pdf, new_deck, force_rebuild)
+        return lambda: None
+    creds = credentials_for_threads()  # here: a worker thread inherits no context (google_auth)
+    pool = ThreadPoolExecutor(1, thread_name_prefix="b2s-preflight")
+    work = pool.submit(lambda: preflight_rebuild(out, source_pdf, new_deck, force_rebuild,
+                                                 slides_service(creds), drive_service(creds)))
+    pool.shutdown(wait=False)
+
+    def answer() -> None:
+        work.result()
+    return answer
 
 
 def plan_rebuild(slides, drive, out: Path, new_deck: bool, force_rebuild: bool, backup: str,
@@ -2255,8 +2302,25 @@ def build_deck(slides, drive, deck: dict, out: Path, title: str, existing: str |
         template_sizes = template_sizes or sizes
         reqs.append(request)
     batch(slides, pid, reqs)
-    write_layout_texts(slides, pid, deck.get("layout_texts", []), scale, fonts)
-    style_layout_placeholders(slides, pid, deck, scale, fonts, PPTX_TITLE_DY, master_ground(shared, bg_file, page_w))
+
+    # A round trip to Google costs about a second whatever it carries, so what a conversion
+    # spends is round trips and not work, and two of them may be in the air at once. The layouts
+    # and the master are nobody else's business - neither pass reads the slides being filled in
+    # beside them - so they go on a thread of their own, and the content batches below go out
+    # CONTENT_WORKERS at a time, each thread with its own client. A caller that handed one ready
+    # Slides client over (google_auth.use_services with a mapping) keeps the old serial order:
+    # that client is its own, and a service object is not thread-safe.
+    threaded = not shared_service("slides", "v1")
+    creds = credentials_for_threads() if threaded else None  # here: a worker inherits no context
+    client = per_thread(lambda: slides_service(creds)) if threaded else (lambda: slides)
+    pool = ThreadPoolExecutor(CONTENT_WORKERS, thread_name_prefix="b2s-content") if threaded else None
+    ground = master_ground(shared, bg_file, page_w)
+    layout_pool, layout_work = None, None
+    if threaded:
+        layout_pool = ThreadPoolExecutor(1, thread_name_prefix="b2s-layout")
+        layout_work = layout_pool.submit(write_layouts, client, pid, deck, scale, fonts, ground)
+    else:
+        write_layouts(client, pid, deck, scale, fonts, ground)
 
     state = {"presentationId": pid, "url": f"https://docs.google.com/presentation/d/{pid}/edit",
              "scale": scale, "slides": []}
@@ -2284,7 +2348,7 @@ def build_deck(slides, drive, deck: dict, out: Path, title: str, existing: str |
         if not reqs:
             return
         try:
-            batch(slides, pid, reqs)
+            batch(client(), pid, reqs)
             return
         except HttpError as e:
             if len(items) > 1:
@@ -2296,12 +2360,21 @@ def build_deck(slides, drive, deck: dict, out: Path, title: str, existing: str |
         for el, rs in parts:
             try:
                 if rs:
-                    batch(slides, pid, rs)
+                    batch(client(), pid, rs)
             except HttpError as e:
                 print(f"warning: {slide_id}: {el['kind'] + ' ' + el['id'] if el else 'request'} rejected "
                       f"({api_error(e)})" + ("; using a picture of it instead" if el and el["kind"] != "image" else ""))
                 if el and el["kind"] != "image":
                     refused.append((page, el["id"]))
+
+    # A full batch is sent while the next slides are still being planned, several at a time.
+    sent = []
+
+    def dispatch(items: list) -> None:
+        if pool:
+            sent.append(pool.submit(send, items))
+        else:
+            send(items)
 
     pending: list[tuple[str, int, list]] = []
     pending_size = 0
@@ -2312,7 +2385,7 @@ def build_deck(slides, drive, deck: dict, out: Path, title: str, existing: str |
         size = sum(len(rs) for _, rs in parts)
         # Several slides per round trip; a slide's requests are never split across batches.
         if pending and pending_size + size > BATCH_MAX_REQUESTS:
-            send(pending)
+            dispatch(pending)
             pending, pending_size = [], 0
         pending.append((slide_id, n, parts))
         pending_size += size
@@ -2323,7 +2396,17 @@ def build_deck(slides, drive, deck: dict, out: Path, title: str, existing: str |
         print(f"  slide {n + 1}: {kinds.count('text')} text boxes, {kinds.count('image')} pictures, "
               f"{kinds.count('shape')} shapes, {kinds.count('table')} tables")
     if pending:
-        send(pending)
+        dispatch(pending)
+    try:
+        for job in sent:             # every content batch has landed
+            job.result()
+        if layout_work is not None:  # and the layouts, whose refusal still stops the conversion
+            layout_work.result()
+    finally:
+        for p in (pool, layout_pool):
+            if p:
+                p.shutdown()
+    refused.sort()                   # several threads appended to it
     batch(slides, pid, [{"deleteObject": {"objectId": oid}} for oid in [s["objectId"] for s in sources] + scratch])
     state["deck"] = deck  # (what was built, for the sync snapshot; not written to emit.json)
     return state, refused

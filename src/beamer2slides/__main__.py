@@ -74,16 +74,19 @@ def cmd_classify(pdf: Path, out: Path, overlays: str = "last", check: str = "off
 
 def cmd_convert(pdf: Path, out: Path, title: str | None, new_deck: bool, overlays: str, measure: bool = True,
                 force_rebuild: bool = False, backup: str = "auto", check: str = "off") -> None:
-    from .emit import emit, preflight_rebuild
+    from .emit import emit, preflight_in_background
     from .render import render_backgrounds
 
     source = pdf
-    # Whether this folder's deck may be replaced is decided before any work (and again in emit).
-    preflight_rebuild(out, source, new_deck, force_rebuild)
+    # Whether this folder's deck may be replaced is asked while the PDF is converted (three Drive
+    # reads and a whole presentations.get, needing nothing the conversion makes) and answered
+    # before the first write to Drive. `emit` asks again immediately before that write.
+    preflight = preflight_in_background(out, source, new_deck, force_rebuild)
     # (--check-labels error refuses here, before anything is written to Drive)
     pdf, raw, deck = cmd_classify(pdf, out, overlays, check)  # pdf: without note pages, if there were any
     render_backgrounds(pdf, raw, deck, out)
     (out / "deck.json").write_text(json.dumps(deck, indent=1, ensure_ascii=False), encoding="utf-8")
+    preflight()  # RebuildRefused comes out here, with nothing yet written to Drive
     title = title or raw["source"]["title"] or source.stem
     state = emit(deck, out, title, new_deck, measure, force_rebuild, backup, source)
     print(f"Google Slides: {state['url']}")

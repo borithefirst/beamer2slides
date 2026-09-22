@@ -1,10 +1,12 @@
 """The sync base (docs/sync.md): the converter's IR plus Google's read-back of every object it
 created, recorded right after the deck was written, in `<out>/sync/base.json` and in Drive."""
 
+import contextlib
 import io
 import json
 import os
 import re
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from googleapiclient.errors import HttpError
@@ -600,13 +602,18 @@ def read_local(out: Path | None, pid: str | None) -> tuple[dict | None, str | No
     return (None, f"{local_path(out)}: {problem}") if problem else (data, None)
 
 
-def save_drive(drive, base: dict, title: str | None = None) -> str:
+def save_drive(drive, base: dict, title: str | None = None, info: dict | None = None) -> str:
     """The base as a JSON file next to the presentation (drive.file scope), its id in the
-    presentation's appProperties.b2sBase. Returns the file id."""
+    presentation's appProperties.b2sBase. Returns the file id.
+
+    `info`: the presentation's name, parents and appProperties, where a caller has already read
+    them (they need nothing but the id, so a caller may fetch them while it is doing something
+    else: `snapshot_after_convert`)."""
     from googleapiclient.http import MediaIoBaseUpload
 
     pid = base["presentationId"]
-    info = execute(drive.files().get(fileId=pid, fields="name,parents,appProperties"))
+    if info is None:
+        info = execute(drive.files().get(fileId=pid, fields="name,parents,appProperties"))
     data = json.dumps(base, ensure_ascii=False).encode("utf-8")
     fid = (info.get("appProperties") or {}).get(BASE_PROPERTY)
     if fid:
@@ -720,10 +727,19 @@ def snapshot_after_convert(deck: dict, out: Path, state: dict, pdf: "Path | dict
                            overlays: str = "last") -> dict:
     """Tag the new deck's objects and record the base (convert's last step). `pdf`: the source,
     or what `source_info` already measured of it."""
-    from .google_auth import drive_service, slides_service
+    from .google_auth import credentials_for_threads, drive_service, shared_service, slides_service
 
     slides, drive = slides_service(), drive_service()
     pid = state["presentationId"]
+    # Where the base file goes needs nothing but the id, so it is looked up while the deck is
+    # being read and tagged, on a thread with a client of its own (`save_drive`'s `info`).
+    where_to_put_it = None
+    if not shared_service("drive", "v3"):
+        creds = credentials_for_threads()  # here: a worker thread inherits no context
+        pool = ThreadPoolExecutor(1, thread_name_prefix="b2s-base")
+        where_to_put_it = pool.submit(lambda: execute(drive_service(creds).files().get(
+            fileId=pid, fields="name,parents,appProperties")))
+        pool.shutdown(wait=False)
     pres = execute(slides.presentations().get(presentationId=pid))
     base = build_base(deck, out, pres, state, pdf, overlays=overlays)
     if write_tags(slides, pid, tag_requests(base)):
@@ -731,7 +747,11 @@ def snapshot_after_convert(deck: dict, out: Path, state: dict, pdf: "Path | dict
     base = build_base(deck, out, pres, state, pdf, sign=True, overlays=overlays)
     save_local(base, out)
     try:
-        save_drive(drive, base)
+        info = None
+        if where_to_put_it is not None:
+            with contextlib.suppress(HttpError, OSError):  # then save_drive reads it itself
+                info = where_to_put_it.result()
+        save_drive(drive, base, info=info)
     except HttpError as e:
         print(f"warning: could not store the sync base in Drive ({e}); kept locally")
     return base

@@ -84,7 +84,10 @@ def test_scoring_twice_says_the_same_thing(tmp_path):
     run_dir = tmp_path / "run"
     _, first = play_through(task, task.correct, run_dir)
     _, second = play.score(run_dir)
-    assert first == second
+    # Everything but the clock: `seconds` is measured afresh by each scoring, and under a loaded
+    # machine the two measurements of the same replay differ in the second decimal.
+    assert {k: v for k, v in first.items() if k != "seconds"} == \
+           {k: v for k, v in second.items() if k != "seconds"}
     assert (run_dir / "verdict.txt").read_text(encoding="utf-8").startswith(f"{task.id}: PASSED")
 
 

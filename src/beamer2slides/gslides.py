@@ -1,6 +1,7 @@
 """Small helpers around the Google Slides API."""
 
 import random
+import threading
 import time
 import urllib.request
 from pathlib import Path
@@ -8,6 +9,22 @@ from pathlib import Path
 from googleapiclient.errors import HttpError
 
 EMU_PER_PT = 12700
+
+
+def per_thread(make):
+    """A client per thread, built on first use. A googleapiclient service object carries one
+    connection and is not thread-safe, so every thread that talks to Google builds its own from
+    credentials resolved on the calling thread (`credentials()` itself must not be called on a
+    thread that inherited no context: google_auth's ContextVar). A client a caller handed over
+    through `google_auth.use_services` is that caller's own and comes back for every thread -
+    handing one over says it may be called from several threads at once."""
+    local = threading.local()
+
+    def client():
+        if not hasattr(local, "client"):
+            local.client = make()
+        return local.client
+    return client
 
 
 def pt(v: float) -> dict:

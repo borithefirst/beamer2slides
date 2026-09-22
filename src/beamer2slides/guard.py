@@ -22,6 +22,7 @@ import io
 import json
 import re
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from googleapiclient.errors import HttpError
@@ -240,10 +241,16 @@ def check_rebuild(slides, drive, pid: str, out: Path, pdf: Path | str | None = N
     """Look at the live deck before replacing its content. Returns the finding
     ({"reason", "revisionId", ...}); raises RebuildRefused unless `force`."""
     if base is None:
-        base, where = snapshot.load_base(pid, out, drive)
+        # Two reads that need nothing but the id, so they are made at once: the base out of Drive
+        # on a thread of its own while the live deck comes down here. One client per thread, which
+        # is all a service object asks - these two are different services.
+        with ThreadPoolExecutor(1, thread_name_prefix="b2s-guard") as pool:
+            loading = pool.submit(snapshot.load_base, pid, out, drive)
+            pres = execute(slides.presentations().get(presentationId=pid))
+            base, where = loading.result()
     else:
         where = "given"
-    pres = execute(slides.presentations().get(presentationId=pid))
+        pres = execute(slides.presentations().get(presentationId=pid))
     found = {"presentationId": pid, "revisionId": pres.get("revisionId"), "base_from": where,
              "checked": time.strftime("%Y-%m-%d %H:%M:%S"), "reason": "", "edited": False, "examples": [],
              "counts": {}, "slides": [], "slides_added": 0, "slides_deleted": 0, "reordered": False}

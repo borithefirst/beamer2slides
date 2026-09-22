@@ -172,6 +172,34 @@ def use_services(services):
     return _services_hook.use(services)
 
 
+def shared_service(api: str, version: str = "v1", creds=None) -> bool:
+    """True where every thread asking for an `api` client would be handed the *same* object.
+
+    A service object is not thread-safe, so a pass that would run on several threads has to know
+    whether it may (`emit.build_deck`). Nothing installed, or a mapping that does not answer for
+    this api, means `build(...)` makes a fresh one per call; a mapping that does answer is one
+    ready client a caller handed over, which `use_services` says is that caller's own; and a
+    builder is asked twice, since one may cache its clients as readily as its discovery document.
+    """
+    made = _services_hook.get()
+    if made is None:
+        return False
+    if isinstance(made, Mapping):
+        return made.get(api) is not None
+    first = made(api, version, creds)
+    return first is not None and first is made(api, version, creds)
+
+
+def credentials_for_threads():
+    """The credentials worker threads should build their clients from, or None.
+
+    Resolved on the calling thread, because a thread inherits no context (`_Hook`) - and only
+    where they are wanted: where a caller's own `use_services` answers for the client, one that
+    carries its own credentials is never a reason to go looking for a token.
+    """
+    return None if _services_hook.get() is not None else credentials()
+
+
 def _service(api: str, version: str, creds):
     made = _services_hook.get()
     if made is not None:

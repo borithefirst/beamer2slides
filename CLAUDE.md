@@ -392,6 +392,36 @@ a per-slide background picture.
   the background via the text element's `strokes`.
 - Performance: one .pptx upload, then slide content in batches of up to 400 requests; the test
   decks convert in 12-20 s (extract + classify + render of a 30-page deck take about 2 s).
+  **A conversion is round trips, not work** (profiled call by call by wrapping
+  `HttpRequest.execute`; the 48-slide `ambiguous.pdf` is 31 calls either way): 84% of the wall
+  clock has a request open and 3.9 s of it is this machine, because a round trip costs ~0.8 s
+  whatever it carries - a `batchUpdate` of 400 requests comes back in about the same second as one
+  of 49, and narrowing `fields` on a read moved it 0.76 -> 0.69 s. So the lever is how many are in
+  the air at once, and it is **threads only** (the harness this runs inside at Google has no room
+  for processes). Measured before any of it was written: several `batchUpdate` calls may be in
+  flight on one presentation and nothing is lost (`tools/probe_batch_parallelism.py`: 8 batches of
+  200 requests take 9.37 s one at a time, 6.10 two, 3.61 four, 3.07 eight, 3640/3640 objects
+  landing every time; a layout batch beside four slide batches is fine), while **PDFium is not
+  thread-safe** - four threads with their own `Document`s crash with `Failed to load page` - so
+  every PDF read stays on the main thread. Six changes, each falling back to the old serial order
+  when a caller handed its own client over (`google_auth.shared_service`: a service object is not
+  thread-safe and a lent client is that caller's), with `credentials_for_threads` resolving
+  credentials on the calling thread because a worker inherits no context: content batches
+  `CONTENT_WORKERS` (4) at a time with a client per thread (`gslides.per_thread`), the layout and
+  master pass on a thread of its own (`emit.write_layouts` - it reads and writes no slide the
+  batches beside it touch), the rebuild guard asked while the PDF is converted
+  (`emit.preflight_in_background`, collected before the first write to Drive; the agent layer's
+  `deck_convert` keeps the synchronous one, its docstring promising a refusal costs a second),
+  `guard.check_rebuild` fetching the base and the live deck at once, one client per thread rather
+  than per slide in `measure_places`, and the base file's Drive place looked up while the deck is
+  read and tagged (`snapshot.save_drive`'s `info`). Google's own latency swings 21-44 s on the same
+  unchanged conversion, so every figure is an **interleaved** A/B in one sitting (`pure_bench`'s
+  lesson): the two `emit` changes are worth 9.2 s of the run (38.4 -> 29.2 s mean over four pairs,
+  every pair favouring threads) and the content batches alone 6.6 s (28.9 -> 22.3, three pairs of
+  four). What is left is the tail: `snapshot_after_convert` is ~6 s of its own (two
+  `presentations.get` around the tag batch, then a 0.9 MB base into Drive) and the guard is asked
+  twice, the second ask 2.1 s to re-derive what a single `files.get` of the deck's revision would
+  settle. Charts: https://claude.ai/artifact/MsF5T7Kxo9R3LKcLqAGRTt
 - Speaker notes: beamer note pages (`show notes`) or `show notes on second screen`
   (`notes.py`), written to the slide's speaker notes.
 - Everything else (display math, theme decoration, header/footer text) stays in the
