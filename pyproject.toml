@@ -3,7 +3,9 @@ name = "beamer2slides"
 version = "0.3.0"
 description = "Convert beamer PDFs into editable Google Slides decks"
 readme = "README.md"
-license = {text = "MIT"}
+# An SPDX string, not `{text = "MIT"}`: setuptools deprecated the table in 77 and stops building
+# it in February 2027, which is why the build requirement below is 77 and not 69.
+license = "MIT"
 requires-python = ">=3.12"
 dependencies = [
     "pypdfium2>=5.0",
@@ -28,18 +30,24 @@ dependencies = [
 pure = ["fonttools>=4.40"]
 # The MCP server (`beamer2slides.agent.mcp`) speaks the protocol through the reference SDK.
 # Everything else in beamer2slides.agent - the tools, the schemas, `mcp.dispatch` - works without it.
+# Either generation: 1.x takes its handlers through decorators, 2.x through the constructor, and
+# `serve` wires itself to whichever is there (the wire protocol is the same either way).
 mcp = ["mcp>=1.2"]
 # What the tests need beyond the package itself. pytest-xdist is what makes `-n auto` work;
 # the suite runs without it, one worker, about three times slower (tests/conftest.py).
 dev = ["pytest>=8", "pytest-xdist>=3",
        "fonttools>=4.40"]  # themes/google/fonts/build_fonts.py cuts the theme's fonts
 
+[project.urls]
+Homepage = "https://github.com/borithefirst/beamer2slides"
+Repository = "https://github.com/borithefirst/beamer2slides"
+
 [project.scripts]
 beamer2slides = "beamer2slides.__main__:main"
 beamer2slides-mcp = "beamer2slides.agent.mcp:main"
 
 [build-system]
-requires = ["setuptools>=69"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]

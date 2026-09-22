@@ -3,9 +3,13 @@
 ## Install
 
 ```
-pip install beamer2slides          # from a checkout: pip install -e .
+pip install git+https://github.com/borithefirst/beamer2slides   # or, in a checkout: pip install .
 beamer2slides convert talk.pdf
 ```
+
+Nothing is published on PyPI yet, so `pip install beamer2slides` finds no distribution: the wheel
+is built from the repository (`pip install build; python -m build` writes an sdist and a wheel into
+`dist/`, and both install). `pip install -e .` is the editable install a checkout wants.
 
 The wheel is pure Python. Its dependencies (pypdfium2, numpy, pillow, python-pptx, fontTools
 and the Google API client) all ship wheels, so no compiler and no TeX distribution are needed:
@@ -19,7 +23,16 @@ install without it read a foreign deck, fetched its fonts and then died on `impo
 with the source tree unwritten. `[pure]` still names it, so an older command line still works.
 
 The measured font substitutes (`calibration/fonts.json`, `fonts_serif.json`) ship inside the
-package, so an installed beamer2slides places text exactly like the checkout does.
+package, so an installed beamer2slides places text exactly like the checkout does. So does
+`agent/INSTRUCTIONS.md`, and so does the playground's page; all three are read through
+`importlib.resources`, never from a path beside `__file__`, so a zip import finds them too.
+
+Extras: `[mcp]` brings the MCP SDK the `beamer2slides-mcp` server speaks through - either
+generation of it, 1.x taking its handlers through decorators and 2.x through the constructor
+(`agent/mcp.py` wires itself to whichever is installed; the wire protocol is the same, so a client
+cannot tell). `[dev]` is what the tests need, and `[pure]` names fontTools, which is a plain
+dependency now. Without the SDK, `beamer2slides-mcp` says how to install it and everything else in
+`beamer2slides.agent` works as it is.
 
 Not in the wheel yet: the `themes/google` beamer theme (a `.sty` plus its Google Sans Flex
 fonts, whose licence has to be checked before redistribution) and the `tools/` probes.

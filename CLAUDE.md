@@ -1607,7 +1607,15 @@ same functions underneath; nothing here reimplements a journey.
 - `schema.py` / `mcp.py`: JSON Schema straight off `typing.Annotated` parameter descriptions, plus
   `needs` and an `effects` block saying whether a call wants approval; `anthropic_tools` /
   `openai_tools` for the two wire formats, `dispatch` (validates, never raises), and an MCP server
-  (`beamer2slides-mcp`, extra `[mcp]`; everything else works without the SDK).
+  (`beamer2slides-mcp`, extra `[mcp]`; everything else works without the SDK). `serve` wires itself
+  to **either generation** of that SDK: 1.x takes its handlers through decorators, 2.x took the
+  decorators away and takes them in the constructor, so `pip install beamer2slides[mcp]` - which
+  resolves to 2.x - fetched a server this one died on with an `AttributeError` before the first
+  message. The protocol is the same either way, so it is a binding difference and nothing else
+  (a refusal says `is_error` itself there rather than being raised, which is what the `Result`
+  meant in the first place), and both shapes are pinned by fakes
+  (`test_the_server_speaks_to_either_generation_of_the_sdk`), the real SDK being an optional extra
+  the suite cannot count on.
 - Tests are offline and fast: `tests/test_agent_core.py` (each promise broken on purpose),
   `test_agent_deck_tools.py`, `test_agent_source_tools.py`, `test_agent_doc_tools.py` (a whole
   `doc_sync` end to end against `devtools/doc_world.py` - plan, write, settle, regenerate, and the

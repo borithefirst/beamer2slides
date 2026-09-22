@@ -165,7 +165,6 @@ def serve(root: str | Path | None = None, *, read_only: bool = False, offline: b
     guide = instructions(tools)
     published = schema.all_schemas(known)                      # raises now if a tool is unpublishable
 
-    server = _make_server(Server, guide)
     session: dict[str, Any] = {"current": None}
 
     def progress(line: str) -> None:                           # pragma: no cover - needs the SDK
@@ -179,39 +178,82 @@ def serve(root: str | Path | None = None, *, read_only: bool = False, offline: b
 
     ctx = build_context(root, read_only=read_only, offline=offline, allow=allow, progress=progress)
 
-    @server.list_tools()
-    async def list_tools() -> list[Any]:                       # pragma: no cover - needs the SDK
-        return [mcp_types.Tool(name=s["name"], description=s["description"],
-                               inputSchema=s["input_schema"]) for s in published]
+    async def call(name: str, arguments: dict | None,
+                   live: Any) -> tuple[list[Any], bool]:       # pragma: no cover - needs the SDK
+        """One tool call, whichever SDK asked for it: the content blocks and `isError`.
 
-    @server.call_tool()
-    async def call_tool(name: str, arguments: dict | None = None) -> list[Any]:
-        # pragma: no cover - needs the SDK
+        `dispatch` is ordinary blocking Python - a conversion takes half a minute - so it goes to
+        a worker thread and the session is held for `progress` while it runs.
+        """
+        session["current"] = live
         try:
-            session["current"] = server.request_context.session
-        except Exception:
+            result = await anyio.to_thread.run_sync(lambda: dispatch(ctx, name, arguments, known))
+        finally:
             session["current"] = None
-        result = await anyio.to_thread.run_sync(lambda: dispatch(ctx, name, arguments, known))
-        session["current"] = None
         blocks, is_error = tool_response(result)
-        content = [mcp_types.TextContent(**b) for b in blocks]
-        if is_error:
-            # The low-level server turns a raised exception into `isError: True`; the whole
-            # Result rides along as the message, so nothing the model needs is lost.
-            raise _ToolRefused(content[0].text)
-        return content
+        return [mcp_types.TextContent(**b) for b in blocks], is_error
 
-    @server.list_resources()
-    async def list_resources() -> list[Any]:                   # pragma: no cover - needs the SDK
-        return [mcp_types.Resource(uri=INSTRUCTIONS_URI, name="beamer2slides instructions",
-                                   description="The rules these tools have to be used by.",
-                                   mimeType="text/markdown")]
+    resource = {"uri": INSTRUCTIONS_URI, "name": "beamer2slides instructions",
+                "description": "The rules these tools have to be used by."}
 
-    @server.read_resource()
-    async def read_resource(uri: Any) -> str:                  # pragma: no cover - needs the SDK
-        if str(uri) != INSTRUCTIONS_URI:
-            raise ValueError(f"No such resource: {uri}")
-        return guide
+    if hasattr(Server, "list_tools"):                          # pragma: no cover - needs the SDK
+        server = _make_server(Server, guide)
+
+        @server.list_tools()
+        async def list_tools() -> list[Any]:
+            return [mcp_types.Tool(name=s["name"], description=s["description"],
+                                   inputSchema=s["input_schema"]) for s in published]
+
+        @server.call_tool()
+        async def call_tool(name: str, arguments: dict | None = None) -> list[Any]:
+            try:
+                live = server.request_context.session
+            except Exception:
+                live = None
+            content, is_error = await call(name, arguments, live)
+            if is_error:
+                # The low-level server turns a raised exception into `isError: True`; the whole
+                # Result rides along as the message, so nothing the model needs is lost.
+                raise _ToolRefused(content[0].text)
+            return content
+
+        @server.list_resources()
+        async def list_resources() -> list[Any]:
+            return [mcp_types.Resource(mimeType="text/markdown", **resource)]
+
+        @server.read_resource()
+        async def read_resource(uri: Any) -> str:
+            if str(uri) != INSTRUCTIONS_URI:
+                raise ValueError(f"No such resource: {uri}")
+            return guide
+    else:                                                      # pragma: no cover - needs the SDK
+        # SDK 2.x: the handlers are constructor arguments, each taking the request's own context
+        # and its params and answering with the whole result model. The protocol is the same, so
+        # this is a binding difference and nothing else - and a refusal says `is_error` itself
+        # rather than being raised, which is what that Result meant in the first place.
+        async def on_list_tools(rctx: Any, params: Any) -> Any:
+            return mcp_types.ListToolsResult(
+                tools=[mcp_types.Tool(name=s["name"], description=s["description"],
+                                      input_schema=s["input_schema"]) for s in published])
+
+        async def on_call_tool(rctx: Any, params: Any) -> Any:
+            content, is_error = await call(params.name, params.arguments,
+                                           getattr(rctx, "session", None))
+            return mcp_types.CallToolResult(content=content, is_error=is_error)
+
+        async def on_list_resources(rctx: Any, params: Any) -> Any:
+            return mcp_types.ListResourcesResult(
+                resources=[mcp_types.Resource(mime_type="text/markdown", **resource)])
+
+        async def on_read_resource(rctx: Any, params: Any) -> Any:
+            if str(params.uri) != INSTRUCTIONS_URI:
+                raise ValueError(f"No such resource: {params.uri}")
+            return mcp_types.ReadResourceResult(
+                contents=[mcp_types.TextResourceContents(uri=params.uri, mime_type="text/markdown",
+                                                         text=guide)])
+
+        server = _make_server(Server, guide, on_list_tools=on_list_tools, on_call_tool=on_call_tool,
+                              on_list_resources=on_list_resources, on_read_resource=on_read_resource)
 
     async def run() -> None:                                   # pragma: no cover - needs the SDK
         async with stdio_server() as (read, write):
@@ -224,11 +266,19 @@ class _ToolRefused(Exception):
     """Carries a refused `Result`'s JSON to the SDK, which turns it into `isError: True`."""
 
 
-def _make_server(Server: Any, guide: str) -> Any:              # pragma: no cover - needs the SDK
-    """`Server(name, instructions=...)`, falling back for SDK versions that have no such field."""
+def _make_server(Server: Any, guide: str, **handlers: Any) -> Any:
+    # pragma: no cover - needs the SDK
+    """`Server(name, instructions=..., **handlers)`, giving up each field the SDK has not got.
+
+    `instructions` is where half the point of this server lives (the rules travel with the tools),
+    so it is asked for on every SDK; the handlers are 2.x's way of taking what 1.x takes through
+    decorators, and are passed only on the branch that built them.
+    """
     try:
-        return Server(SERVER_NAME, instructions=guide)
+        return Server(SERVER_NAME, instructions=guide, **handlers)
     except TypeError:
+        if handlers:                    # an SDK that takes neither is one neither branch fits
+            raise
         return Server(SERVER_NAME)
 
 

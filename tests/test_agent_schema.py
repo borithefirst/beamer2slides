@@ -10,6 +10,9 @@ tools written in this file, which is also the only way to test the refusal paths
 Offline, no Google, no files touched.
 """
 
+import asyncio
+import sys
+from types import ModuleType
 from typing import Annotated
 
 import pytest
@@ -355,6 +358,147 @@ def test_the_root_falls_back_to_the_environment(tmp_path, monkeypatch):
 def test_instructions_are_there_even_before_the_registry_is():
     said = mcp.instructions(STUBS)
     assert "beamer2slides" in said and len(said) > 80
+
+
+class _Thing:
+    """Any of the SDK's models: what it was handed, and nothing else."""
+
+    def __init__(self, **kw):
+        self.__dict__.update(kw)
+
+
+class _ServerV1:
+    """The 1.x low-level server: the handlers arrive through decorators."""
+
+    made: list = []
+
+    def __init__(self, name, instructions=None):
+        self.name, self.instructions, self.handlers = name, instructions, {}
+        self.request_context = None                            # asked outside a request
+        _ServerV1.made.append(self)
+
+    def _take(self, kind):
+        def deco(fn):
+            self.handlers[kind] = fn
+            return fn
+        return deco
+
+    def list_tools(self):
+        return self._take("list_tools")
+
+    def call_tool(self):
+        return self._take("call_tool")
+
+    def list_resources(self):
+        return self._take("list_resources")
+
+    def read_resource(self):
+        return self._take("read_resource")
+
+    def create_initialization_options(self):
+        return {}
+
+
+class _ServerV2:
+    """The 2.x low-level server: the handlers are constructor arguments, and there is no
+    `list_tools` on the class at all - which is how `serve` tells the two apart."""
+
+    made: list = []
+
+    def __init__(self, name, *, instructions=None, on_list_tools=None, on_call_tool=None,
+                 on_list_resources=None, on_read_resource=None):
+        self.name, self.instructions = name, instructions
+        self.handlers = {"list_tools": on_list_tools, "call_tool": on_call_tool,
+                         "list_resources": on_list_resources, "read_resource": on_read_resource}
+        _ServerV2.made.append(self)
+
+    def create_initialization_options(self):
+        return {}
+
+
+def _fake_sdk(monkeypatch, Server):
+    """`mcp` and `anyio` enough for `serve` to wire itself up, with neither installed.
+
+    `anyio.run` records the coroutine rather than running it: what is being tested is the wiring,
+    so the test then calls the handlers itself.
+    """
+    models = ["Tool", "Resource", "TextContent", "ListToolsResult", "CallToolResult",
+              "ListResourcesResult", "ReadResourceResult", "TextResourceContents"]
+    types_mod = ModuleType("mcp.types")
+    for name in models:
+        setattr(types_mod, name, type(name, (_Thing,), {}))
+    sdk = ModuleType("mcp")
+    sdk.types = types_mod
+    server_mod = ModuleType("mcp.server")
+    lowlevel = ModuleType("mcp.server.lowlevel")
+    lowlevel.Server = Server
+    stdio = ModuleType("mcp.server.stdio")
+    stdio.stdio_server = None                                  # never reached: `run` is not run
+
+    class _ToThread:
+        @staticmethod
+        async def run_sync(fn):
+            return fn()
+
+    anyio_mod = ModuleType("anyio")
+    anyio_mod.to_thread = _ToThread
+    anyio_mod.from_thread = _Thing(run=lambda *a, **k: None)
+    served: list = []
+    anyio_mod.run = served.append
+    for name, module in [("mcp", sdk), ("mcp.types", types_mod), ("mcp.server", server_mod),
+                         ("mcp.server.lowlevel", lowlevel), ("mcp.server.stdio", stdio),
+                         ("anyio", anyio_mod)]:
+        monkeypatch.setitem(sys.modules, name, module)
+    return served
+
+
+def test_the_server_speaks_to_either_generation_of_the_sdk(tmp_path, monkeypatch):
+    # The SDK's 2.x took the decorators away and takes the handlers in the constructor instead,
+    # so `pip install beamer2slides[mcp]` fetched an SDK this server died on. Both shapes are
+    # wired here from fakes, since the real one is an optional extra the suite cannot count on.
+    for Server, v1 in ((_ServerV1, True), (_ServerV2, False)):
+        Server.made = []
+        served = _fake_sdk(monkeypatch, Server)
+        mcp.serve(tmp_path, offline=True, tools=STUBS)
+        assert served, "the server was built but never run"
+        [server] = Server.made
+        assert "beamer2slides" in server.instructions       # the rules travel with the tools
+        handlers = server.handlers
+        assert set(handlers) == {"list_tools", "call_tool", "list_resources", "read_resource"}
+        assert all(handlers.values())
+
+        listed = asyncio.run(handlers["list_tools"]() if v1 else handlers["list_tools"](None, None))
+        tools = listed if v1 else listed.tools
+        assert sorted(t.name for t in tools) == sorted(STUBS)
+        assert all(getattr(t, "inputSchema" if v1 else "input_schema")["type"] == "object"
+                   for t in tools)
+
+        held = asyncio.run(handlers["read_resource"](mcp.INSTRUCTIONS_URI) if v1 else
+                           handlers["read_resource"](None, _Thing(uri=mcp.INSTRUCTIONS_URI)))
+        assert "beamer2slides" in (held if v1 else held.contents[0].text)
+        with pytest.raises(ValueError):
+            asyncio.run(handlers["read_resource"]("b2s://nowhere") if v1 else
+                        handlers["read_resource"](None, _Thing(uri="b2s://nowhere")))
+
+        def call(name, arguments):
+            if v1:
+                return asyncio.run(handlers["call_tool"](name, arguments))
+            return asyncio.run(handlers["call_tool"](None, _Thing(name=name,
+                                                                  arguments=arguments)))
+
+        good = call("stub_local_write", {})
+        blocks = good if v1 else good.content
+        assert "stub_local_write" in blocks[0].text
+        assert v1 or good.is_error is False
+
+        # A refusal is `isError` and carries the whole Result, whichever way the SDK says it.
+        if v1:
+            with pytest.raises(Exception) as caught:
+                call("stub_refuses", {"deck": "talk"})
+            assert "deck_edited" in str(caught.value)
+        else:
+            bad = call("stub_refuses", {"deck": "talk"})
+            assert bad.is_error is True and "deck_edited" in bad.content[0].text
 
 
 def test_serving_without_the_sdk_says_how_to_install_it(tmp_path):
