@@ -2082,7 +2082,19 @@ def write_layouts(client, pid: str, deck: dict, scale: float, fonts: FontMapper,
     `gslides.per_thread`) - but writing a layout is not the same as leaving the slides alone: a
     slide's TITLE placeholder inherits its layout parent's box until a content batch gives it one
     of its own, so this pass and that batch write one value and the later commit wins. It is
-    joined before the first content batch goes out (`build_deck`, `tools/probe_layout_race.py`)."""
+    joined before the first content batch goes out (`build_deck`, `tools/probe_layout_race.py`).
+
+    Inside itself it stays serial, which is the one place in `build_deck` where that was measured
+    rather than assumed: a layout write reaches every slide inheriting from it and Google charges
+    for that, so more of this pass in the air is *slower*. Interleaved A/B on a 10-slide deck, the
+    placeholder requests cut into four batches at once against one batch: 10.10 s against 4.95 s;
+    the texts beside the placeholders rather than after them: 5.24 s against 3.96 s (18.6 s of
+    conversion against 16.4 s). `tools/probe_batch_parallelism.py`'s finding - that several
+    `batchUpdate`s may be in flight on one presentation and nothing is lost - is about slide
+    content and does not carry here. Nor is there anything to win by reading less: merging the
+    two passes' reads into one saves a round trip inside the pass and nothing at all outside it
+    (17.17 s against 16.93 s over four interleaved pairs, which the arms split two each), because
+    what is left of the pass hides behind phase 1, the placeholder read and `measure_places`."""
     slides = client()
     write_layout_texts(slides, pid, deck.get("layout_texts", []), scale, fonts)
     style_layout_placeholders(slides, pid, deck, scale, fonts, PPTX_TITLE_DY, ground)
