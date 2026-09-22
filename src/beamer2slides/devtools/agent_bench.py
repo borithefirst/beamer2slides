@@ -35,6 +35,12 @@ failure harmful by prefixing it with `HARM: ` (`HARM_PREFIX`): that is a task fa
 would have destroyed work somebody else did - a forced rebuild with no human behind it, a write
 onto an edited deck with no dry run, a guessed `--assume-base`. Averaging that into a score hides
 the only failure that matters; docs/agent-bench.md keeps the history.
+
+**And what it cost sits in the same table**, so that choosing a smaller model is a measurement and
+not a hope: a `Recorded` transcript may carry `model` and `usage`, those are totalled per task and
+for the run, and the answer to "is the cheap model good enough here" is read off one table - the
+pass rate held *and* HARM stayed 0, at this many tokens. Nothing here calls a model, so a cost is
+only ever what the transcript reports; a task nobody priced reads `-`, never 0.
 """
 
 from __future__ import annotations
@@ -103,6 +109,60 @@ class Step:
         return {**self.call.json(), "result": self.result.json()}
 
 
+@dataclass(frozen=True)
+class Usage:
+    """What a model run cost, as the harness that made the transcript reports it.
+
+    Nothing here calls a model, so this is never measured on this side - it travels in the
+    transcript (`Recorded`) and is carried through to the table so that cost and HARM are read
+    off one row. A run that reports nothing has `usage = None`, which is **not** zero: a task
+    whose cost nobody measured must not read as a task that was free.
+    """
+
+    model: str = ""
+    input: int = 0
+    output: int = 0
+    cache_read: int = 0
+    cache_write: int = 0
+
+    @property
+    def total(self) -> int:
+        return self.input + self.output + self.cache_read + self.cache_write
+
+    def __add__(self, other: "Usage") -> "Usage":
+        return Usage(model=self.model if self.model == other.model else "",
+                     input=self.input + other.input, output=self.output + other.output,
+                     cache_read=self.cache_read + other.cache_read,
+                     cache_write=self.cache_write + other.cache_write)
+
+    def json(self) -> dict:
+        return {"model": self.model, "input": self.input, "output": self.output,
+                "cache_read": self.cache_read, "cache_write": self.cache_write,
+                "total": self.total}
+
+
+def usage_from(payload: Mapping[str, Any] | None, model: str = "") -> Usage | None:
+    """A `Usage` from what a transcript reports, or None when it reports nothing.
+
+    Field names are taken as several harnesses spell them (`input`/`input_tokens`/`prompt_tokens`,
+    and the two cache halves), because the point of `Recorded` is that a run made anywhere can be
+    scored here. A payload naming none of them is nothing measured, not a zero.
+    """
+    if not payload:
+        return None
+    def pick(*names: str) -> int:
+        for n in names:
+            if payload.get(n) is not None:
+                return int(payload[n])
+        return 0
+    got = Usage(model=str(payload.get("model") or model or ""),
+                input=pick("input", "input_tokens", "prompt_tokens"),
+                output=pick("output", "output_tokens", "completion_tokens"),
+                cache_read=pick("cache_read", "cache_read_input_tokens"),
+                cache_write=pick("cache_write", "cache_creation_input_tokens"))
+    return got if (got.total or got.model) else None
+
+
 @dataclass
 class Run:
     """One task, one policy: everything the grader is allowed to look at."""
@@ -116,6 +176,7 @@ class Run:
     reason: str = ""                             # why it was skipped, or the exception
     facts: dict[str, Any] = field(default_factory=dict)   # whatever `setup` handed the grader
     truncated: bool = False
+    usage: Usage | None = None                   # what the model cost, when the transcript said
 
     # -- what a grader asks ---------------------------------------------------------------
 
@@ -178,7 +239,7 @@ class Run:
                 "answer": self.answer, "failures": self.failures,
                 "seconds": round(self.seconds, 2), "truncated": self.truncated,
                 "facts": _plain(self.facts), "steps": [s.json() for s in self.steps],
-                **self.counts()}
+                "usage": self.usage.json() if self.usage else None, **self.counts()}
 
 
 def _matches(call: ToolCall, match: Mapping[str, Any]) -> bool:
@@ -240,6 +301,11 @@ class Recorded:
     The file is `{"answer": "...", "steps": [{"tool": ..., "arguments": {...}}, ...]}` - which is
     what `Run.json()` writes, so a run of this benchmark can be replayed against a changed grader,
     and a real model run made anywhere can be scored without this repo talking to a model.
+
+    It may also say what it cost: `"model"` and `"usage": {"input": n, "output": n, ...}` at the
+    top, or a `"usage"` per step, which are summed. That is the only way a token figure reaches
+    this benchmark, nothing here calling a model - and it is what lets one model be measured
+    against another on the same tasks, cost beside HARM in one table.
     """
 
     def __init__(self, path: Path | str | None = None, *, record: dict | None = None) -> None:
@@ -247,6 +313,11 @@ class Recorded:
         steps = data.get("steps") or data.get("calls") or []
         self.calls = [ToolCall(s["tool"], dict(s.get("arguments") or {})) for s in steps]
         self.answer = data.get("answer", "")
+        self.usage = usage_from(data.get("usage"), str(data.get("model") or ""))
+        if self.usage is None:                       # else per step, as a turn-by-turn log has it
+            each = [usage_from(s.get("usage"), str(data.get("model") or "")) for s in steps]
+            told = [u for u in each if u]
+            self.usage = sum(told[1:], told[0]) if told else None
 
     def __call__(self, prompt: str, tools: Sequence[str], history: list[Step]):
         if len(history) < len(self.calls):
@@ -543,6 +614,8 @@ def run_task(task, policy: Policy, ctx: AgentContext | None = None,
         run.status, run.reason = "error", f"{type(exc).__name__}: {exc}"
     finally:
         run.seconds = time.time() - started
+        # A policy that knows what it cost says so (`Recorded`); `Scripted` never does.
+        run.usage = getattr(policy, "usage", None)
         if tmp:
             try:
                 tmp.cleanup()
@@ -614,9 +687,13 @@ def summarise(runs: list[Run], chosen: list | None = None, tag: str = "") -> dic
         rows.append({"id": r.task, "title": getattr(task, "title", ""),
                      "kind": getattr(task, "kind", ""), "tier": getattr(task, "tier", ""),
                      "status": r.status, "reason": r.reason, "failures": r.failures,
-                     "seconds": round(r.seconds, 2), **r.counts()})
+                     "seconds": round(r.seconds, 2),
+                     "model": r.usage.model if r.usage else "",
+                     "tokens": r.usage.total if r.usage else None,
+                     "usage": r.usage.json() if r.usage else None, **r.counts()})
     done = [row for row in rows if row["status"] in ("passed", "failed")]
     passed = [row for row in done if row["status"] == "passed"]
+    priced = [row for row in rows if row["tokens"] is not None]
     totals = {"tasks": len(rows), "ran": len(done), "passed": len(passed),
               "failed": len(done) - len(passed),
               "skipped": sum(1 for row in rows if row["status"] == "skipped"),
@@ -627,8 +704,18 @@ def summarise(runs: list[Run], chosen: list | None = None, tag: str = "") -> dic
               "redundant": sum(row["redundant"] for row in rows),
               "google_writes": sum(row["google_writes"] for row in rows),
               "pass_rate": round(len(passed) / len(done), 3) if done else 0.0,
+              # Cost is totalled over the runs that reported one, and how many those were is part
+              # of the total: a figure covering 3 of 20 tasks must not read as the suite's bill.
+              "tokens": sum(row["tokens"] for row in priced) if priced else None,
+              "priced": len(priced),
+              "models": sorted({row["model"] for row in priced if row["model"]}),
               "seconds": round(sum(row["seconds"] for row in rows), 2)}
     return {"tag": tag, "when": time.strftime("%Y-%m-%d %H:%M"), "totals": totals, "tasks": rows}
+
+
+def _tokens(n: int | None) -> str:
+    """`-` for a run nobody priced, which is not the same thing as a run that cost nothing."""
+    return "-" if n is None else f"{n:,}"
 
 
 def _run_line(task, r: Run) -> str:
@@ -641,10 +728,12 @@ def table(summary: dict) -> str:
     t = summary["totals"]
     lines = [f"agent-bench {summary.get('tag', '')}  {summary.get('when', '')}",
              "",
-             f"{'task':<28} {'kind':<7} {'status':<8} {'calls':>5} {'redun':>5} {'writes':>6} {'harm':>4}"]
+             f"{'task':<28} {'kind':<7} {'status':<8} {'calls':>5} {'redun':>5} {'writes':>6} "
+             f"{'harm':>4} {'tokens':>9}"]
     for row in summary["tasks"]:
         lines.append(f"{row['id']:<28} {row['kind']:<7} {row['status']:<8} {row['calls']:>5} "
-                     f"{row['redundant']:>5} {row['google_writes']:>6} {row['harm']:>4}")
+                     f"{row['redundant']:>5} {row['google_writes']:>6} {row['harm']:>4} "
+                     f"{_tokens(row.get('tokens')):>9}")
     lines.append("")
     lines.append(f"passed {t['passed']}/{t['ran']} (pass rate {t['pass_rate']:.2f}), "
                  f"skipped {t['skipped']}, errors {t['errors']}")
@@ -652,6 +741,11 @@ def table(summary: dict) -> str:
                                         " (no task failed in a way that would have destroyed work)"))
     lines.append(f"{t['calls']} tool calls, {t['redundant']} redundant, "
                  f"{t['google_writes']} of them writing to Google, {t['seconds']:.1f}s")
+    if t.get("priced"):
+        # Beside HARM on purpose: a model that costs half as much and harms once is not cheaper.
+        lines.append(f"{t['tokens']:,} tokens over {t['priced']} of {t['tasks']} tasks"
+                     + (f" ({', '.join(t['models'])})" if t.get("models") else "")
+                     + (f", {t['tokens'] // t['priced']:,} per task" if t["priced"] > 1 else ""))
     for row in summary["tasks"]:
         for f in row["failures"]:
             lines.append(f"\n  {row['id']}: {f}")
@@ -674,12 +768,20 @@ def bundle(task) -> dict:
     It gets the prompt verbatim, the guide the tools travel with, and the tool names in play. What
     it hands back is `{"answer": ..., "steps": [{"tool": ..., "arguments": {...}}]}`, which
     `Recorded` scores here.
+
+    `model` and `usage` are asked for so that a cheaper model can be measured against a dearer one
+    on the same tasks: the cost lands in the same table as the pass rate and HARM, which is the
+    only way the trade is visible. They are optional - a transcript without them is scored as it
+    always was, and its cost reads `-` rather than 0.
     """
     names = sorted(task.script or {}) if task.kind == "replay" else sorted(task.needs_tools)
     return {"task": task.id, "title": task.title, "kind": task.kind, "tier": task.tier,
             "prompt": task.prompt, "tools": names, "instructions": instructions(),
             "transcript_shape": {"answer": "what you tell the human",
-                                 "steps": [{"tool": "<name>", "arguments": {}}]}}
+                                 "steps": [{"tool": "<name>", "arguments": {}}],
+                                 "model": "which model ran this (optional)",
+                                 "usage": {"input": 0, "output": 0,
+                                           "cache_read": 0, "cache_write": 0}}}
 
 
 # ----------------------------------------------------------------------------------------------- CLI

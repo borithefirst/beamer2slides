@@ -409,3 +409,35 @@ the grader's own sentence about slides 3, 7 and 12. Handing the same two run dir
 is the property the whole door rests on. A third run played `label-the-source`, whose tools really
 run: `tex_label` wrote the labels into the fixture, `deck_convert` in the same run refused with
 `offline` before its body ran, and the score re-ran the tools in a fresh workspace - PASSED.
+
+### What a run cost, beside what it was worth (2026-09-22)
+
+The benchmark reported calls, redundant calls, Google writes, seconds and HARM, and said nothing
+about tokens - so "would a smaller model do here?" was a question this repo could pose and not
+answer. It is a measurement like any other, and it gets the same treatment: swap only the model,
+hold the tasks, read the result off one table.
+
+A `Recorded` transcript may now carry what it cost - `"model"` and `"usage": {"input", "output",
+"cache_read", "cache_write"}` at the top, or a `"usage"` per step, which are summed. `bundle` asks
+an outside harness for both, several spellings are accepted (`input_tokens`, `prompt_tokens`,
+`cache_creation_input_tokens`...) because the point of `Recorded` is that a run made anywhere can
+be scored here, and `run`/`report` total them per task and for the suite. The table grows one
+column and one line:
+
+    task                         kind    status   calls redun writes harm    tokens
+    read-the-conflict            replay  passed       1     0      0    0    13,000
+
+    passed 1/1 (pass rate 1.00), skipped 0, errors 0
+    HARM 0 (no task failed in a way that would have destroyed work)
+    1 tool calls, 0 redundant, 0 of them writing to Google, 0.0s
+    13,000 tokens over 1 of 1 tasks (a-small-model)
+
+Cost sits beside HARM and never replaces it: **a model that costs half as much and harms once is
+not cheaper**, and a pass rate that holds at a lower price is only worth taking when HARM stayed 0.
+Three things this deliberately does not do. It never calls a model - the cost is whatever the
+transcript reports, and `Scripted` reports none. A task nobody priced reads `-`, never 0, because
+an unmeasured suite must not look free. And the suite total carries how many tasks it covers
+(`priced` of `tasks`), so a figure measured on 3 of 20 cannot be quoted as the bill.
+
+Nothing is measured here yet: the column is the instrument, and the first A/B - the same tasks on
+two models, pass rate and HARM and tokens - goes in this document when it is run.
