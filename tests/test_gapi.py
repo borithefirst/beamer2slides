@@ -20,7 +20,13 @@ import pytest
 
 from beamer2slides import gapi, google_auth
 
-SRC = Path(google_auth.__file__).resolve().parent
+#: The package as it is laid out *where this test runs*, and deliberately not `.resolve()`d:
+#: these two tests are the only ones that walk the library's own source files, and under a
+#: runfiles tree `__file__` is a symlink into a content store that holds files by hash rather
+#: than as a package - follow it and `rglob("*.py")` has the wrong tree, or none, to walk. The
+#: parent of the link is the directory where the modules really stand beside each other, which
+#: is what both tests are asking about.
+SRC = Path(google_auth.__file__).parent
 #: What the library must not need until it really calls Google.
 GOOGLE = ("googleapiclient", "google_auth_oauthlib", "google.auth", "google.oauth2", "google")
 
