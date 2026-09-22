@@ -13,7 +13,12 @@ this machine, 2026-09-22:
     objects: 3640/3640 written objects are there
 
 Four is where the curve flattens, and a batch written to the layouts rides beside batches
-written to slides without either losing anything.
+written to slides without either losing a *request*: every object both of them create is there.
+That is the whole of what this probe asks, and it was read as more than it says - what two
+batches can lose without dropping a request is a value two of their requests both write, and a
+slide placeholder that has not got a box of its own yet inherits its layout parent's, so the two
+halves are writing one box and the later commit wins (`tools/probe_layout_race.py`, which is why
+`build_deck` joins the layout pass before it dispatches a single content batch).
 
 Makes a scratch deck in the owner's Drive, measures, and deletes it. Nothing else is touched.
 Run it with `.venv\\Scripts\\python.exe tools/probe_batch_parallelism.py`.

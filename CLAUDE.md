@@ -408,8 +408,15 @@ a per-slide background picture.
   thread-safe and a lent client is that caller's), with `credentials_for_threads` resolving
   credentials on the calling thread because a worker inherits no context: content batches
   `CONTENT_WORKERS` (4) at a time with a client per thread (`gslides.per_thread`), the layout and
-  master pass on a thread of its own (`emit.write_layouts` - it reads and writes no slide the
-  batches beside it touch), the rebuild guard asked while the PDF is converted
+  master pass on a thread of its own (`emit.write_layouts`, overlapping the placeholder read and
+  `measure_places` and **nothing below them**: it is joined before the first content batch is
+  dispatched, because a slide's TITLE placeholder inherits its layout parent's box until that
+  batch gives it one of its own, so the two are writing one box and the one Google commits *last*
+  wins - a layout batch landing second takes every title's own box away again, silently, every
+  request accepted and no warning anywhere, which is what broke 10 of 45 live sync scenarios;
+  `tools/probe_layout_race.py`, and what `tools/probe_batch_parallelism.py` measured is that two
+  batches in flight lose no *request*, which is a smaller promise than it reads as),
+  the rebuild guard asked while the PDF is converted
   (`emit.preflight_in_background`, collected before the first write to Drive; the agent layer's
   `deck_convert` keeps the synchronous one, its docstring promising a refusal costs a second),
   `guard.check_rebuild` fetching the base and the live deck at once, one client per thread rather

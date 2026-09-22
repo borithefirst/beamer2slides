@@ -2077,9 +2077,12 @@ def style_layout_placeholders(slides, pid: str, deck: dict, scale: float, fonts:
 
 def write_layouts(client, pid: str, deck: dict, scale: float, fonts: FontMapper, ground) -> None:
     """The whole of the layout and master work, as one job: what a deck's own look gives a slide
-    somebody adds later in Slides. It reads and writes layout and master pages only - never the
-    slides `build_deck` is filling in beside it - which is what lets it run on a thread of its
-    own. `client()` gives that thread its own Slides client (`gslides.per_thread`)."""
+    somebody adds later in Slides. It reads and writes layout and master pages only, which is
+    what lets it run on a thread of its own (`client()` gives that thread its own Slides client,
+    `gslides.per_thread`) - but writing a layout is not the same as leaving the slides alone: a
+    slide's TITLE placeholder inherits its layout parent's box until a content batch gives it one
+    of its own, so this pass and that batch write one value and the later commit wins. It is
+    joined before the first content batch goes out (`build_deck`, `tools/probe_layout_race.py`)."""
     slides = client()
     write_layout_texts(slides, pid, deck.get("layout_texts", []), scale, fonts)
     style_layout_placeholders(slides, pid, deck, scale, fonts, PPTX_TITLE_DY, ground)
@@ -2414,30 +2417,38 @@ def build_deck(slides, drive, deck: dict, out: Path, title: str, existing: str |
 
     pending: list[tuple[str, int, list]] = []
     pending_size = 0
-    for slide in deck["slides"]:
-        n = slide["page"]
-        slide_id = f"b2s_s{n:03}"
-        parts, element_ids = plan.slide_parts(slide, page_elements, speaker_notes, moves, template_sizes)
-        size = sum(len(rs) for _, rs in parts)
-        # Several slides per round trip; a slide's requests are never split across batches.
-        if pending and pending_size + size > BATCH_MAX_REQUESTS:
-            dispatch(pending)
-            pending, pending_size = [], 0
-        pending.append((slide_id, n, parts))
-        pending_size += size
-        objects, groups = element_objects(parts, element_ids)
-        state["slides"].append({"page": n, "objectId": slide_id, "elements": element_ids, "objects": objects,
-                                "groups": groups})
-        kinds = [el["kind"] for el in slide["elements"]]
-        print(f"  slide {n + 1}: {kinds.count('text')} text boxes, {kinds.count('image')} pictures, "
-              f"{kinds.count('shape')} shapes, {kinds.count('table')} tables")
-    if pending:
-        dispatch(pending)
     try:
+        # The layouts first, and never beside the slides: a slide's title placeholder inherits
+        # the layout's box until we give it one of its own, and while the layout batch is in the
+        # air together with the content batch that does that, the one Google commits LAST wins -
+        # a layout batch landing second takes every title's own box away again and the deck's
+        # titles all sit at the layout's, silently. Measured with three conversions at once
+        # (`tools/probe_layout_race.py`): the deck whose layout batch landed after its first
+        # content batch lost all ten titles, the two that landed first kept theirs. So the
+        # layout pass overlaps the read and `measure_places` above it, and nothing below.
+        if layout_work is not None:
+            layout_work.result()
+        for slide in deck["slides"]:
+            n = slide["page"]
+            slide_id = f"b2s_s{n:03}"
+            parts, element_ids = plan.slide_parts(slide, page_elements, speaker_notes, moves, template_sizes)
+            size = sum(len(rs) for _, rs in parts)
+            # Several slides per round trip; a slide's requests are never split across batches.
+            if pending and pending_size + size > BATCH_MAX_REQUESTS:
+                dispatch(pending)
+                pending, pending_size = [], 0
+            pending.append((slide_id, n, parts))
+            pending_size += size
+            objects, groups = element_objects(parts, element_ids)
+            state["slides"].append({"page": n, "objectId": slide_id, "elements": element_ids, "objects": objects,
+                                    "groups": groups})
+            kinds = [el["kind"] for el in slide["elements"]]
+            print(f"  slide {n + 1}: {kinds.count('text')} text boxes, {kinds.count('image')} pictures, "
+                  f"{kinds.count('shape')} shapes, {kinds.count('table')} tables")
+        if pending:
+            dispatch(pending)
         for job in sent:             # every content batch has landed
             job.result()
-        if layout_work is not None:  # and the layouts, whose refusal still stops the conversion
-            layout_work.result()
     finally:
         for p in (pool, layout_pool):
             if p:
