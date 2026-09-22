@@ -624,6 +624,21 @@ only the pairs say it at all, the same unchanged sync running 16.5 to 21.7 s wit
 its second half as much as its first: `sync` is the one that knows when the first write happens, so
 handing the note over is what lets an adopted deck's first sync ask whether a way back was kept
 instead of being refused although one was (`agent.deck_tools.deck_sync` never passed it at all).
+(8) And the **pending marker**, which is the last thing on that chain with nothing beside it: it has
+to be durable before the first write and that is *all* it has to be, so it goes up while the staging
+deck is still being imported (`Sync.pending_in_background`, collected before `send`). What it records
+is the objects this run is about to create, and their ids are the elements' own - the **one** field
+in a sync's requests that waits for the staging deck is a picture's URL, so the requests are built
+first and the URLs put in afterwards (`picture_url` leaves a `b2s-pending:` marker, `fill_urls`
+replaces it, and `send` fills again so nothing can go out carrying one; a picture the staging deck
+did not bring is a loud failure there rather than a URL Google fetches nothing from). The marker's
+`staging` field is then usually empty, which costs nothing: nothing reads it, the staging deck naming
+itself in Drive (`appProperties.b2sStaging`, which is what `tools/drive_usage.py` queries). Worth a
+whole media upload, ~1.9 s whatever it carries: **17.3 → 14.2 s** over five interleaved pairs, every
+one of six favouring it (the sixth is a round where the old code stalled at 57 s, dropped rather than
+counted). A sync of that talk is now 92% "a request is open" - what is left is barriers, each there
+for a reason: the staging import, the marker, the content batch, the read-back, the base that must
+land before the cleanup, and the flag that says the cleanup is done.
 
 **And the compile between the edit and the sync**, which is the other thing the loop pays on every
 turn: it stops when the auxiliary files stop moving (`inverse.aux_state`, latexmk's rule, used by

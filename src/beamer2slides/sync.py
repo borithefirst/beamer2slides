@@ -573,6 +573,7 @@ def folded_hiders(read: dict, made: set[str], ours: set[str]) -> list[tuple[str,
 
 
 BREAK = {"__b2s_break__": True}  # where a batch may be cut: between slides
+PENDING_URL = "b2s-pending:"     # a picture whose staging URL is still on its way (`Sync.fill_urls`)
 
 
 def batches(reqs: list[dict], size: int = CHUNK) -> list[list[dict]]:
@@ -694,6 +695,7 @@ class Sync:
         cut at a slide boundary where it can (`batches`), so a run that dies between two batches
         leaves whole slides written, never half of one."""
         self.before_write()
+        self.fill_urls(reqs)   # nothing goes out carrying a marker, whoever built it (`picture_url`)
         for n, chunk in enumerate(batches(reqs)):
             try:
                 body = {"requests": chunk}
@@ -756,7 +758,7 @@ class Sync:
             # is that caller's and is used on this thread alone (`emit.measure_places`' rule).
             staging, scratch = None, []               # noted in the pending marker: a run that
             staged = self.stage_in_background(work)   # dies leaves it for the next one to delete
-            asking = None
+            asking, pending = None, None
             try:
                 if staged is None:
                     self.staging = staging = self.stage(work)
@@ -766,14 +768,23 @@ class Sync:
                 # it is the same answer whenever it is asked - and if somebody types meanwhile, the
                 # write is refused and planned again, which is what an older revision is for.
                 asking = self.in_background(lambda slides, drive: self.revision(slides), "b2s-rev")
-                if staged is not None:
-                    self.staging = staging = staged.result()
                 faults.fail_at("measure")
+                # The requests are built while the staging deck is still being imported: the only
+                # thing in them that waits for it is a picture's URL (`picture_url`), and every
+                # object id is the element's own - so what the marker has to record is known now.
                 content, cleanup = self.main_requests(work, theirs, pres, moves, scratch)
                 self.cleanup_requests = cleanup
                 # What this sync is about to create, recorded before the first write: a run that
-                # dies leaves its objects behind, and the next one knows they are its own.
-                self.mark_pending(work, theirs)
+                # dies leaves its objects behind, and the next one knows they are its own. Its
+                # upload rides beside the staging deck; both are collected before anything is sent.
+                pending = self.pending_in_background(work, theirs)
+                if staged is not None:
+                    self.staging = staging = staged.result()
+                self.fill_urls(content)
+                if pending is not None:
+                    pending.result()      # durable before the first write, which is the whole of it
+                else:
+                    self.store_pending(self.drive)
                 faults.fail_at("journal")
                 rev = self.send("content", content, self.asked_revision(asking))
                 asking = None
@@ -787,6 +798,10 @@ class Sync:
                         self.staging = staging = staged.result()
                 if asking is not None:
                     asking.cancel()
+                if pending is not None:
+                    # However this ended, the marker is on its way and nobody else will collect it.
+                    with contextlib.suppress(Exception):
+                        pending.result()
                 if scratch:
                     self.delete_scratch(scratch)
                 if staging:  # (its pictures are only needed until the live deck has them)
@@ -858,8 +873,30 @@ class Sync:
                                      f"interrupted sync: {first}")
             return gone
 
+    def pending_in_background(self, work: dict, theirs: dict):
+        """`mark_pending` on a thread while the staging deck is still being imported, or None where
+        it has to be run here (`in_background`).
+
+        The marker is the one thing that has to be **durable before the first write**, and that is
+        all it has to be: what it records - the objects this run is about to create - comes from the
+        requests, which no longer wait for the staging deck (`picture_url`). So it goes up beside it
+        and `write` collects it before `send`. Worth the whole of a media upload, which is ~1.9 s
+        whatever it carries (docs/sync.md): interleaved A/B on a 13-frame talk, **17.3 -> 14.2 s**
+        over five pairs, every one of six favouring it (the sixth is a round where the old code
+        stalled at 57 s, dropped rather than counted).
+
+        The block is built here, on this thread, so the worker only serialises and uploads a base
+        nothing else touches until it is joined."""
+        self.pending_block(work, theirs)
+        return self.in_background(lambda slides, drive: self.store_pending(drive), "b2s-pend")
+
     def mark_pending(self, work: dict, theirs: dict) -> None:
-        """Store the base with a `pending` block before the first write: the generation and token of
+        """The marker built and stored here and now (`pending_in_background` is the other order)."""
+        self.pending_block(work, theirs)
+        self.store_pending(self.drive)
+
+    def pending_block(self, work: dict, theirs: dict) -> None:
+        """The base's `pending` block before the first write: the generation and token of
         this run, the objects it is about to create and the read-back of the objects it rewrites in
         place. The base itself is unchanged, so a run that dies leaves a valid base of the old
         generation plus a note of what it started. Only a run that gets to the end removes it."""
@@ -881,7 +918,13 @@ class Sync:
             "revisionId": theirs.get("revisionId"), "started": time.strftime("%Y-%m-%dT%H:%M:%S"),
             "source": snapshot.source_info(self.ours["source"]), "objects": objects, "slides": slides,
             "in_place": self.in_place_readback, "staging": getattr(self, "staging", None)}
-        why = snapshot.store_base(self.base, self.out, self.drive, label="pending", info=self.facts)
+
+    def store_pending(self, drive) -> None:
+        """The marker to disk and to Drive. `staging` is whatever this run knows of its staging deck
+        when the marker goes up, which where the two are made at once is nothing: it is a note for a
+        person and nothing reads it, the staging deck naming itself in Drive
+        (`appProperties.b2sStaging`, which is what `tools/drive_usage.py` queries)."""
+        why = snapshot.store_base(self.base, self.out, drive, label="pending", info=self.facts)
         if why:
             self.warnings.append(f"could not note the started sync in Drive ({why}); noted locally only")
 
@@ -1042,6 +1085,31 @@ class Sync:
             return pool.submit(lambda: fn(slides_service(creds), drive_service(creds)))
         finally:
             pool.shutdown(wait=False)
+
+    def picture_url(self, path) -> str:
+        """The staging deck's URL for a picture, or a marker `fill_urls` replaces before the batch
+        goes out.
+
+        The requests are built while the staging deck is still being imported (`write`), and this is
+        the **one** field in them that waits for it: every object id a picture brings is the
+        element's own (`new_oid`), so what the pending marker has to record - the objects this run
+        is about to create - does not wait for Drive at all."""
+        return self.urls.get(str(path)) or f"{PENDING_URL}{path}"
+
+    def fill_urls(self, reqs: list[dict]) -> None:
+        """Put the staging deck's URLs into the requests built before it existed. A picture the
+        staging deck did not bring fails here, loudly, rather than as a batch Google refuses:
+        nothing goes out carrying a marker."""
+        def fill(node):
+            if isinstance(node, dict):
+                for k, v in node.items():
+                    node[k] = self.urls[v[len(PENDING_URL):]] \
+                        if isinstance(v, str) and v.startswith(PENDING_URL) else fill(v)
+            elif isinstance(node, list):
+                node[:] = [fill(v) for v in node]
+            return node
+
+        fill(reqs)   # every marker, wherever it sits: a picture's URL and a slide background's
 
     def stage_in_background(self, work: dict):
         """`stage` on a thread of its own, or None where there is nothing to stage or it has to be
@@ -1260,7 +1328,7 @@ class Sync:
                 path = self.ours["out"] / el["file"]
                 box = [v * self.scale for v in self.plan.placed(slide["elements"][i], n)["bbox"]]
                 x0, y0, x1, y1 = box
-                rs = [{"createImage": {"objectId": new_oid[i], "url": self.urls[str(path)], "elementProperties": {
+                rs = [{"createImage": {"objectId": new_oid[i], "url": self.picture_url(path), "elementProperties": {
                     "pageObjectId": sid, "size": {"width": emu(x1 - x0), "height": emu(y1 - y0)},
                     "transform": {"scaleX": 1, "scaleY": 1, "unit": "EMU", "translateX": round(x0 * EMU_PER_PT),
                                   "translateY": round(y0 * EMU_PER_PT)}}}},
@@ -1607,7 +1675,7 @@ class Sync:
             return [{"updatePageProperties": {"objectId": sid, "fields": "pageBackgroundFill.solidFill.color",
                                               "pageProperties": {"pageBackgroundFill": {"solidFill": {
                                                   "color": api_colour(key[6:])}}}}}]
-        url = self.urls[str(self.ours["out"] / slide["background"])]
+        url = self.picture_url(self.ours["out"] / slide["background"])
         return [{"updatePageProperties": {"objectId": sid, "fields": "pageBackgroundFill.stretchedPictureFill.contentUrl",
                                           "pageProperties": {"pageBackgroundFill": {"stretchedPictureFill": {"contentUrl": url}}}}}]
 

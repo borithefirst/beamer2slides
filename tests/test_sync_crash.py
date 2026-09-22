@@ -459,6 +459,65 @@ def test_a_sync_with_no_way_back_to_collect_writes_as_it_always_did():
     assert api.batches == [["A"]]
 
 
+# ---------------------------------------------------------------- the staging deck's URLs
+#
+# The requests are built while the staging deck is still being imported, so the pending marker -
+# which records the objects this run is about to create, and has to be durable before the first
+# write - can go up beside it. A picture's URL is the one field in them that waits.
+
+
+def test_a_picture_url_is_a_marker_until_the_staging_deck_brings_it():
+    s = bare_sync(urls={})
+    fig = Path("out") / "fig-1.png"
+    assert s.picture_url(fig) == f"{sync.PENDING_URL}{fig}"
+    s.urls[str(fig)] = "https://staging/1"
+    assert s.picture_url(fig) == "https://staging/1", "once it is known it is used, as it always was"
+
+
+def test_the_staging_urls_are_filled_in_wherever_they_sit():
+    """A picture's URL and a slide background's are two different shapes of request, so `fill_urls`
+    walks the batch rather than knowing where to look."""
+    s = bare_sync(urls={"a.png": "https://staging/a", "bg.png": "https://staging/bg"})
+    reqs = [{"createImage": {"objectId": "x", "url": f"{sync.PENDING_URL}a.png"}},
+            {"updatePageProperties": {"objectId": "S1", "pageProperties": {"pageBackgroundFill": {
+                "stretchedPictureFill": {"contentUrl": f"{sync.PENDING_URL}bg.png"}}}}}]
+    s.fill_urls(reqs)
+    assert reqs[0]["createImage"]["url"] == "https://staging/a"
+    assert reqs[1]["updatePageProperties"]["pageProperties"]["pageBackgroundFill"][
+        "stretchedPictureFill"]["contentUrl"] == "https://staging/bg"
+
+
+def test_nothing_goes_out_carrying_a_marker():
+    """A picture the staging deck did not bring fails here, loudly, rather than reaching the deck as
+    a URL Google fetches nothing from."""
+    api = FakeSlidesApi()
+    s = bare_sync(slides=api, pid="P1", sent={}, urls={}, revision=lambda: "rev1")
+    with pytest.raises(KeyError, match="gone.png"):   # the picture, not whatever the batch trips on
+        s.send("content", [{"createImage": {"objectId": "x", "url": f"{sync.PENDING_URL}gone.png"}}], None)
+    assert api.batches == [], "and before the batch, not after it"
+
+
+def test_the_pending_marker_does_not_wait_for_the_staging_deck():
+    """What it records is the objects this run is about to create, and their ids are the elements'
+    own - so a marker built before the staging deck exists says exactly what one built after it
+    would, but for the staging deck's own id, which is a note for a person that nothing reads (the
+    file names itself in Drive: `appProperties.b2sStaging`)."""
+    work = {"slides": [{"plan": {"action": "update", "ours": 0, "objectId": "S1"},
+                        "objects": {0: ["b2s_a_b_t1", "b2s_a_b_t1_g"]}, "groups": ["G1"]}]}
+    ours = {"slides": [{"key": "why", "elements": [{"key": "text/body/0"}]}], "source": SYNC_DECKS / "v1.pdf"}
+
+    def block(staging):
+        s = bare_sync(base={"generation": 3}, ours=ours, tok="t1", in_place_readback={}, staging=staging)
+        s.pending_block(work, {"revisionId": "r7"})
+        return s.base["pending"]
+
+    early, late = block(None), block("STAGE1")
+    assert early["objects"] == {"why/text/body/0": ["b2s_a_b_t1", "b2s_a_b_t1_g"], "why/~groups": ["G1"]}
+    assert early["generation"] == 4 and early["token"] == "t1" and early["revisionId"] == "r7"
+    assert {k: v for k, v in early.items() if k not in ("staging", "started")} == \
+           {k: v for k, v in late.items() if k not in ("staging", "started")}
+
+
 class FakeSlidesApi:
     """A Slides service that refuses a batch naming an object it doesn't know (as Google does)."""
 
