@@ -5,7 +5,7 @@ import re
 import unicodedata
 from pathlib import Path
 
-from .pdf import NO_OBJECT, Char, Document, Page, char_box
+from .pdf import NO_OBJECT, OBJ_IMAGE, Char, Document, Page, char_box
 
 LIGATURES = str.maketrans({"ﬀ": "ff", "ﬁ": "fi", "ﬂ": "fl", "ﬃ": "ffi", "ﬄ": "ffl",
                            "ﬅ": "st", "ﬆ": "st"})
@@ -96,11 +96,156 @@ def combining_mark(c: str) -> bool:
     return bool(c) and all(unicodedata.combining(u) for u in c)
 
 
-def spans(page: Page) -> list[dict]:
-    """Runs of glyphs on one line with the same font, size and colour, split at word gaps."""
+#  Where a character is sampled to tell whether it shows: 3 x 3 points across its box. It is
+# hidden when most of them are (a word cut at a clip's edge keeps the letters mostly inside).
+SAMPLES = (0.2, 0.5, 0.8)
+HIDDEN_SAMPLES = 5
+CURVE_STEPS = 8
+GRID = 24.0  # pt, cells of the index of covering objects
+
+
+def _flatten(items: list) -> list[list[tuple[float, float]]]:
+    """A filled path's items as closed polygons: chains of items that join end to start (a
+    filled subpath is closed whether or not the PDF closes it), curves in straight steps."""
+    polys: list[list] = []
+    chain: list | None = None  # the subpath being followed
+    for item in items:
+        op = item[0]
+        if op in ("re", "qu"):
+            if op == "re":
+                x0, y0, x1, y1 = item[1]
+                polys.append([(x0, y0), (x1, y0), (x1, y1), (x0, y1)])
+            else:
+                polys.append([tuple(p) for p in item[1]])
+            chain = None
+            continue
+        start = tuple(item[1])
+        if op == "l":
+            pts = [tuple(item[2])]
+        else:
+            p0, p1, p2, p3 = item[1:5]
+            pts = []
+            for k in range(1, CURVE_STEPS + 1):
+                t = k / CURVE_STEPS
+                u = 1 - t
+                pts.append(tuple(u ** 3 * p0[i] + 3 * u * u * t * p1[i] + 3 * u * t * t * p2[i] + t ** 3 * p3[i]
+                                 for i in (0, 1)))
+        if chain is not None and chain[-1] == start:
+            chain.extend(pts)
+        else:
+            chain = [start, *pts]
+            polys.append(chain)
+    return [p for p in polys if len(p) >= 3]
+
+
+def _winding(polys: list, x: float, y: float, even_odd: bool) -> bool:
+    """Whether (x, y) is inside the polygons under the path's fill rule."""
+    wind = crossings = 0
+    for poly in polys:
+        n = len(poly)
+        for i in range(n):
+            (ax, ay), (bx, by) = poly[i], poly[(i + 1) % n]
+            if (ay <= y) != (by <= y):
+                cx = ax + (y - ay) * (bx - ax) / (by - ay)
+                if cx > x:
+                    crossings += 1
+                    wind += 1 if by > ay else -1
+    return crossings % 2 == 1 if even_odd else wind != 0
+
+
+def _in(box, x: float, y: float) -> bool:
+    return box[0] <= x <= box[2] and box[1] <= y <= box[3]
+
+
+class Visibility:
+    """Which characters a reader of the page sees. PDFium's text page reports every glyph drawn,
+    also those that never show: outside their clip (the other panel of an `\\includegraphics[trim,
+    clip]`, a tikz spy's magnified copy, a pgfplots pin beyond the axis), under an opaque fill or
+    image painted after them (Boadilla's author box running under the title box, a caption under
+    the footline, a legend under a white callout) or at alpha 0 (`opacity=0`). Such a character
+    is not text of the slide. It stays in the page's rendering, where it is as hidden as in the
+    PDF: render only switches off what classify made native."""
+
+    def __init__(self, page: Page):
+        self.page = page
+        objects = page.objects()
+        self.clips = {po.id: po.clip for po in objects if getattr(po, "clip", None) is not None}
+        self.rect = page.rect
+        # What paints over what came before it: opaque fills and images, in page space. The clip
+        # is known only by its box, which may promise more than the clip path lets through (a
+        # mindmap's connection bar is clipped to the space between two circles), so something
+        # its clip cuts does not count.
+        self.covers: list[tuple] = []  # (object id, bbox, polygons, "image" or None for a box, even_odd)
+        for d in page.drawings():
+            if d["type"] not in ("f", "fs") or d.get("fill") is None or d.get("soft_mask") \
+                    or d.get("fill_opacity", 1.0) < 1.0 or self._cut(d["object"], d["rect"]):
+                continue
+            items = d["items"]
+            box_only = len(items) == 1 and items[0][0] == "re"
+            self.covers.append((d["object"], d["rect"], None if box_only else _flatten(items),
+                                d.get("even_odd", False)))
+        kinds = {po.id: po.type for po in objects}
+        for info in page.images():
+            if kinds.get(info["object"]) == OBJ_IMAGE:  # its box is what its clips let show
+                self.covers.append((info["object"], info["bbox"], "image", False))
+        self.grid: dict[tuple[int, int], list[int]] = {}
+        for k, (_, (x0, y0, x1, y1), _, _) in enumerate(self.covers):
+            if x1 - x0 > 4 * self.rect[2] or y1 - y0 > 4 * self.rect[3]:
+                continue  # a runaway coordinate: nothing to index
+            for gx in range(math.floor(x0 / GRID), math.floor(x1 / GRID) + 1):
+                for gy in range(math.floor(y0 / GRID), math.floor(y1 / GRID) + 1):
+                    self.grid.setdefault((gx, gy), []).append(k)
+        self._opaque: dict[int, bool] = {}
+
+    def _cut(self, obj: int, rect) -> bool:
+        clip = self.clips.get(obj)
+        return clip is not None and not (clip[0] <= rect[0] + 0.5 and clip[1] <= rect[1] + 0.5
+                                         and clip[2] >= rect[2] - 0.5 and clip[3] >= rect[3] - 0.5)
+
+    def _image_opaque(self, obj: int) -> bool:
+        """An image paints over what is under it when nothing in it is see-through and no clip
+        cuts it (a clip path is known only by its box)."""
+        if obj not in self._opaque:
+            im = self.page.embedded_image(obj)
+            self._opaque[obj] = im is not None and not (im.transparent or im.blended or im.clipped)
+        return self._opaque[obj]
+
+    def _covered(self, obj: int, x: float, y: float) -> bool:
+        for k in self.grid.get((math.floor(x / GRID), math.floor(y / GRID)), ()):
+            cover, box, polys, even_odd = self.covers[k]
+            if cover <= obj or not _in(box, x, y):
+                continue
+            if polys == "image":
+                if self._image_opaque(cover):
+                    return True
+            elif polys is None or _winding(polys, x, y, even_odd):
+                return True
+        return False
+
+    def hidden(self, ch: Char) -> bool:
+        if ch.synthetic or ch.obj == NO_OBJECT:
+            return False
+        if ch.alpha == 0:
+            return True
+        x0, y0, x1, y1 = ch.box
+        clip = self.clips.get(ch.obj)
+        hidden = 0
+        for fx in SAMPLES:
+            for fy in SAMPLES:
+                x, y = x0 + (x1 - x0) * fx, y0 + (y1 - y0) * fy
+                if not _in(self.rect, x, y) or clip is not None and not _in(clip, x, y) \
+                        or self._covered(ch.obj, x, y):
+                    hidden += 1
+        return hidden >= HIDDEN_SAMPLES
+
+
+def spans(page: Page, visibility: Visibility | None = None, hidden: bool = False) -> list[dict]:
+    """Runs of glyphs on one line with the same font, size and colour, split at word gaps. Only
+    glyphs that show (`Visibility`), or with `hidden` only those on the page that don't."""
     out = []
     run: list[Char] = []
     x0, y0, x1, y1 = page.rect
+    visibility = visibility or Visibility(page)
 
     def flush():
         if run and any(not ch.synthetic for ch in run):
@@ -121,7 +266,8 @@ def spans(page: Page) -> list[dict]:
     prev: Char | None = None
     for ch in page.chars():
         # characters outside the page (e.g. the cut-off half of a notes-on-second-screen page)
-        if ch.box[2] <= x0 or ch.box[0] >= x1 or ch.box[3] <= y0 or ch.box[1] >= y1:
+        if ch.box[2] <= x0 or ch.box[0] >= x1 or ch.box[3] <= y0 or ch.box[1] >= y1 or \
+                visibility.hidden(ch) != hidden:
             continue
         space = None
         if prev is not None:
@@ -154,6 +300,26 @@ def spans(page: Page) -> list[dict]:
     return out
 
 
+def _opacity(d: dict, key: str) -> float:
+    """A drawing's fill or stroke opacity; 1 when the backend says nothing (0 is fully transparent)."""
+    v = d.get(key)
+    return 1.0 if v is None else v
+
+
+def _visible(d: dict) -> dict | None:
+    """What of a drawing shows: a fill or stroke at opacity 0 (a tikz node drawn with opacity=0
+    on an overlay step) is left out, and a drawing with neither is none."""
+    fill = d["type"] in ("f", "fs") and _opacity(d, "fill_opacity") > 0
+    stroke = d["type"] in ("s", "fs") and _opacity(d, "stroke_opacity") > 0
+    if fill and stroke or d["type"] == ("f" if fill else "s" if stroke else None):
+        return d
+    if not (fill or stroke):
+        return None
+    if fill:
+        return {k: v for k, v in d.items() if k not in ("color", "stroke_opacity", "width")} | {"type": "f"}
+    return {k: v for k, v in d.items() if k not in ("fill", "fill_opacity", "even_odd")} | {"type": "s"}
+
+
 def _shadow_pieces(drawings: list[dict]) -> list[tuple]:
     """Beamer's block shadows: a black rectangle under a soft mask whose shadings fade its
     edges, offset right and down from the panel painted over it. The mask contents are not
@@ -165,7 +331,7 @@ def _shadow_pieces(drawings: list[dict]) -> list[tuple]:
             continue
         mx0, my0, mx1, my1 = m["rect"]
         for p in drawings[i + 1:]:
-            if p["type"] not in ("f", "fs") or p.get("soft_mask") or (p.get("fill_opacity") or 1.0) < 1.0:
+            if p["type"] not in ("f", "fs") or p.get("soft_mask") or _opacity(p, "fill_opacity") < 1.0:
                 continue
             px0, py0, px1, py1 = p["rect"]
             dx, dy = mx1 - px1, my1 - py1
@@ -179,7 +345,8 @@ def _shadow_pieces(drawings: list[dict]) -> list[tuple]:
 def extract_page(page: Page, label: str) -> dict:
     n = page.index
     out_spans = []
-    for s in spans(page):
+    visibility = Visibility(page)
+    for s in spans(page, visibility):
         if not s["text"].strip():
             continue
         out_spans.append({
@@ -196,14 +363,16 @@ def extract_page(page: Page, label: str) -> dict:
     found += [(b, [b[2] - b[0], b[3] - b[1]]) for b in _shadow_pieces(page_drawings)]
     images = [{"id": f"p{n}i{i}", "bbox": _r(b), "px": px} for i, (b, px) in enumerate(found)]
 
+    # ids are indices into page.drawings() (render.crop_overlay finds the objects by them), so a
+    # drawing that does not show leaves a gap
     drawings = [{
         "id": f"p{n}d{i}", "type": d["type"], "items": "".join(item[0] for item in d["items"]),
         "bbox": _r(d["rect"]), "fill": _hex(d.get("fill")), "stroke": _hex(d.get("color")),
         "width": round(d["width"], 2) if d.get("width") else None,
-        "fill_opacity": round(d.get("fill_opacity") or 1.0, 3),
+        "fill_opacity": round(_opacity(d, "fill_opacity"), 3),
         "corners": _rounded_corners(d),
         "path": _path(d),
-    } for i, d in enumerate(page_drawings)]
+    } for i, d in ((i, _visible(d)) for i, d in enumerate(page_drawings)) if d is not None]
 
     links = [{"bbox": _r(link["bbox"]), **({"uri": link["uri"]} if "uri" in link else {"page": link["page"]})}
              for link in page.links()]
@@ -216,10 +385,15 @@ def extract_page(page: Page, label: str) -> dict:
     drawings = [d for d in drawings if inside(d["bbox"])]
     links = [l for l in links if inside(l["bbox"])]
 
+    # The words drawn but not seen are still the frame's: beamer draws what a later overlay step
+    # uncovers at alpha 0 (transparent mode), and select_overlays tells steps apart by their words.
+    hidden = [t for s in spans(page, visibility, hidden=True) if (t := s["text"].translate(LIGATURES).strip())]
+
     return {
         "index": n, "label": label,
         "size": _r((page.width, page.height)),
         "spans": out_spans, "images": images, "drawings": drawings, "links": links,
+        **({"hidden_text": hidden} if hidden else {}),
     }
 
 
@@ -235,8 +409,8 @@ def select_overlays(raw: dict, mode: str) -> dict:
         return " ".join(s["text"].strip() for s in sorted(p["spans"], key=lambda s: s["bbox"][0])
                         if s["bbox"][3] < 0.2 * p["size"][1])
 
-    def words(p: dict) -> list[str]:
-        return [w for s in p["spans"] for w in s["text"].split()]
+    def words(p: dict) -> list[str]:  # what is drawn, seen or not (`hidden_text`)
+        return [w for t in [s["text"] for s in p["spans"]] + p.get("hidden_text", []) for w in t.split()]
 
     def same_frame(a: dict, b: dict) -> bool:
         """Overlay steps share the frame number, the heading and most of their text (a later

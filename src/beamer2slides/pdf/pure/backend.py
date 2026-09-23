@@ -137,6 +137,10 @@ class Page:
                     out[parent].children.append(k)
             self._ids = ids
             self._objects = out
+            for po in out:  # as pdfium_backend.Page.objects: the form's clip, then its contents'
+                own = self._clip_box(po)
+                outer = out[po.parent].clip if po.parent is not None else None
+                po.clip = own if outer is None else outer if own is None else _intersect(own, outer)
         return self._objects
 
     def _obj(self, obj: int) -> PObj:

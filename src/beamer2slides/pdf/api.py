@@ -82,6 +82,10 @@ class PageObject:
     matrix: Matrix      # object space -> page space (y down)
     parent: int | None = None       # id of the form it is drawn in
     children: list[int] = field(default_factory=list)  # ids, for a form
+    # What its clip paths and those of the forms it is drawn in leave of the page: the bounding
+    # boxes of the clip paths (their points), intersected, page space; None when nothing clips it.
+    # An empty box (x1 <= x0 or y1 <= y0): nothing of the object shows.
+    clip: Box | None = None
 
 
 @dataclass
@@ -169,7 +173,8 @@ class PdfPage(Protocol):
 
     def objects(self) -> list[PageObject]:
         """All page objects in painting order, form XObject contents included (the forms
-        themselves too, before their contents). The list and the ids never change."""
+        themselves too, before their contents), each with its clip box. The list and the ids
+        never change."""
 
     def object_bounds(self) -> list[Box]:
         """Each object's bounding box in page space, aligned with `objects()`: stroke widths

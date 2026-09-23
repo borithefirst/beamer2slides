@@ -148,6 +148,10 @@ class Page:
             walk(R.FPDFPage_CountObjects(self.raw), lambda i: R.FPDFPage_GetObject(self.raw, i), self.to_page, None)
             self._ids = {_addr(h): k for k, h in enumerate(self._handles)}
             self._objects = out
+            for po in out:  # a form comes before its contents: its clip is known
+                own = self._clip_box(po)
+                outer = out[po.parent].clip if po.parent is not None else None
+                po.clip = own if outer is None else outer if own is None else _intersect(own, outer)
         return self._objects
 
     def _handle(self, obj: int):
