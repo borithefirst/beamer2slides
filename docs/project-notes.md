@@ -4144,3 +4144,31 @@ campaigns at once are over the write quota even at 600 per minute per user. What
   whole unit by one step and the person did not move it.
 - The number ball over its text (7400, 7403) was seen on a thumbnail; no oracle kind covers a
   ball over its own line, so these campaigns could not say whether it is still there.
+
+## Title page role changes under the loss oracle (r8009, 2026-09-23)
+
+Live fuzz r8009 (`--focus layout`, on 9aac0e6) failed the title slide twice: step 1 (variant
+`subtitle`) and step 2 (`deletions`) `geometry_not_carried title / text/body/0`, and step 2
+`reported_remove_not_done title / text/body/1`. One edit is enough (the shrink said so): the
+person moved the authors' lines ("University of Examples", text/body/0) down 30 pt. In `subtitle`
+the source moves them up 5.65 PDF pt and a longer line (text/body/1) takes the subtitle role from
+them; in `deletions` that line is gone and the authors take the role back. All three were the
+**oracle's**; the sync did what the report says.
+
+- **The frame around the words is the placeholder's or a box's.** Sync carries the person's step
+  onto the frame the new conversion writes (`sync.carried`: new box minus base box), and emit
+  sets a placeholder's frame `PPTX_TITLE_DY` (3.9 pt) lower around the same words than a text
+  box's. Out of the placeholder (step 1) the frame moves by the bbox step less 3.9, back in
+  (step 2) by the step plus 3.9; the words land at the fresh place plus the person's 30 pt both
+  times. The oracle took the bbox step for the frame's and was 3.88 pt off each way. It now
+  compares the words' corners (`loss_oracle._corner`: a placeholder's corner less the drop).
+- **The placeholder is handed on, object id and all.** Sync gives the live SUBTITLE placeholder
+  to the text that has the role now and retitles it (`Sync.update_slide`, `in_place`).
+  `element_objects` still counted it as the old element's because it is in that element's base
+  `objects`: step 1 printed the other text's box under text/body/0's name, and step 2 said the
+  removed text/body/1 was still there. An own object that carries another element's tag of the
+  slide now counts as that element's.
+- Rejudged offline (`build_ours` on the variants, the archived snapshots): r8009 steps 0-2 clean;
+  the old oracle gives back the three findings. Pinned in `tests/test_sync_fuzz.py`
+  (`test_a_carried_move_is_judged_where_the_words_are`, `test_element_objects_...`). The offline
+  fuzz world has no placeholders, so it cannot reach either.

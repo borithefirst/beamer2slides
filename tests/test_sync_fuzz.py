@@ -502,6 +502,90 @@ def test_element_objects_finds_created_and_tagged_objects():
                         "adopted": {"title": snapshot.tag(skey, ekey)}, "other": {"title": "b2s:results/text/body/1"}}}
     base_el = {"objects": ["old"]}
     assert loss_oracle.element_objects(skey, ekey, base_el, read) == {"old", made, "adopted"}
+    # its own object, retitled for another element of the slide, is that one's now: a sync handed the
+    # live subtitle placeholder on to the text that took the role over (live fuzz r8009)
+    read["objects"]["old"]["title"] = "b2s:results/text/body/1"
+    assert loss_oracle.element_objects(skey, ekey, base_el, read) == {made, "adopted"}
+    read["objects"]["old"]["title"] = snapshot.tag(skey, ekey)
+    assert loss_oracle.element_objects(skey, ekey, base_el, read) == {"old", made, "adopted"}
+
+
+def _title_page(first: str, second: str):
+    """A title page as live fuzz r8009 had it, at scale 2: a title placeholder, the authors' lines
+    (text/body/0) and a longer line (text/body/1), one of the two in the SUBTITLE placeholder
+    (`first`/`second`: "SUBTITLE" or None), and a figure for `deck_placement`. A placeholder's frame
+    stands `emit.PPTX_TITLE_DY` lower around its words than a text box's."""
+    from beamer2slides.emit import PPTX_TITLE_DY as dy
+
+    def frame(bb, placeholder, title):
+        box = [2 * bb[0], 2 * bb[1] + (dy if placeholder else 0), 2 * bb[2], 2 * bb[3] + (dy if placeholder else 0)]
+        rb = {"box": box, "transform": [2, 0, 0, 2, box[0], box[1]], "title": title}
+        return {**rb, "placeholder": placeholder} if placeholder else rb
+    els = [("text/title/0", "t", [10, 5, 110, 15], "CENTERED_TITLE"), ("text/body/0", "a", [40, 40, 80, 60], first),
+           ("text/body/1", "b", [20, 100, 140, 110], second), ("image/figure/0", "f", [150, 40, 200, 90], None)]
+    return {"slides": [{"key": "title", "objectId": "s1", "elements": [
+        {"key": k, "main": o, "objects": [o], "fingerprint": {"bbox": bb},
+         "readback": {o: frame(bb, ph, snapshot.tag("title", k))}} for k, o, bb, ph in els]}]}, frame
+
+
+def test_a_carried_move_is_judged_where_the_words_are():
+    """Live fuzz r8009: the person moved the authors' lines down 30 pt, and the source moved them up
+    while a longer line took the title page's subtitle role from them (variant subtitle) - and gave it
+    back one sync later (variant deletions). Sync makes the authors a box of their own and hands the
+    placeholder, object id and all, to the text that has the role now, and carries the person's step
+    onto the frame the new conversion writes. That frame is a placeholder's or a box's, emit setting
+    the first `PPTX_TITLE_DY` lower around the same words: the words land at their new place plus the
+    person's step, which is what the report promises. The oracle judged the frame's corner by the
+    bbox step alone (3.9 pt off, both ways) and took the placeholder, now the other text's, for the
+    authors' object."""
+    from beamer2slides.emit import PPTX_TITLE_DY as dy
+    promised = loss_oracle.normalise_report({"conflicts": [
+        {"slide": "title", "element": "text/body/0", "field": "geometry", "resolution": merge.GEOMETRY_CARRIED}]})
+    made = f"b2s_{loss_oracle.h6('title')}_{loss_oracle.h6('text/body/0')}_2dm"
+
+    # subtitle: out of the placeholder into a box of its own; the source moved it up 5 (10 deck pt)
+    base, frame = _title_page("SUBTITLE", None)
+    live = {oid: rb for el in base["slides"][0]["elements"] for oid, rb in el["readback"].items()}
+    moved = {**live["a"], "box": [80, 110 + dy, 160, 150 + dy], "transform": [2, 0, 0, 2, 80, 110 + dy]}
+    before = {"slides": [{"objectId": "s1", "objects": {**live, "a": moved}}]}
+    ours = {"slides": [{"key": "title", "elements": [{"key": "text/body/0", "fingerprint": {"bbox": [40, 35, 80, 55]}}]}]}
+
+    def after(authors_top):
+        box = [80, authors_top, 160, authors_top + 40]
+        return {"slides": [{"objectId": "s1", "objects": {   # (the longer line replaces text/body/1's)
+            **{k: v for k, v in live.items() if k != "b"},
+            "a": frame([10, 100, 150, 110], "SUBTITLE", snapshot.tag("title", "text/body/1")),
+            made: {"box": box, "transform": [2, 0, 0, 2, 80, authors_top], "title": snapshot.tag("title", "text/body/0")}}}]}
+    assert loss_oracle.geometry_findings(base, before, after(100), promised, ours) == []        # 110 - 10
+    wrong = loss_oracle.geometry_findings(base, before, after(100 + dy), promised, ours)      # the frame by the bbox alone
+    assert [(f["kind"], f["element"]) for f in wrong] == [("geometry_not_carried", "text/body/0")]
+
+    # deletions: the longer line is gone and the authors (a box the person moved) go back into the
+    # placeholder, which moves down 5 (10 deck pt) with them
+    base, frame = _title_page(None, "SUBTITLE")
+    live = {oid: rb for el in base["slides"][0]["elements"] for oid, rb in el["readback"].items()}
+    base["slides"][0]["elements"][1]["main"] = base["slides"][0]["elements"][1]["objects"][0] = made
+    base["slides"][0]["elements"][1]["readback"] = {made: live.pop("a")}
+    live[made] = base["slides"][0]["elements"][1]["readback"][made]
+    moved = {**live[made], "box": [80, 110, 160, 150], "transform": [2, 0, 0, 2, 80, 110]}
+    before = {"slides": [{"objectId": "s1", "objects": {**live, made: moved}}]}
+    ours = {"slides": [{"key": "title", "elements": [{"key": "text/body/0", "fingerprint": {"bbox": [40, 45, 80, 65]}}]}]}
+    report = loss_oracle.normalise_report({**promised, "applied": [
+        {"slide": "title", "element": "text/body/1", "fields": ["removed"]}]})
+
+    def handed(top):
+        ph = {"box": [80, top, 160, top + 40], "transform": [2, 0, 0, 2, 80, top], "placeholder": "SUBTITLE",
+              "title": snapshot.tag("title", "text/body/0")}
+        return {"slides": [{"objectId": "s1", "objects": {
+            **{k: v for k, v in live.items() if k != made}, "b": ph}}]}
+    assert loss_oracle.geometry_findings(base, before, handed(120 + dy), report, ours) == []   # 110 + 10
+    assert [f["kind"] for f in loss_oracle.geometry_findings(base, before, handed(120), report, ours)] \
+        == ["geometry_not_carried"]
+    # text/body/1 is gone from the slide: its placeholder carries the authors now
+    assert loss_oracle.report_findings(base, before, handed(120 + dy), report) == []
+    kept = handed(120 + dy)
+    kept["slides"][0]["objects"]["b"]["title"] = snapshot.tag("title", "text/body/1")
+    assert [f["kind"] for f in loss_oracle.report_findings(base, before, kept, report)] == ["reported_remove_not_done"]
 
 
 def test_catches_a_picture_the_person_chose_being_overwritten():
