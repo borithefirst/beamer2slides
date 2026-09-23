@@ -297,6 +297,25 @@ def test_titles_pushed_off_a_plot_are_the_plots_but_its_caption_is_text():
     assert all(w in words for w in ("Phase", "Temperature", "Pressure"))
 
 
+def test_an_underscore_the_page_draws_as_a_rule_is_a_character():
+    # OT1 draws \_ as a 0.3 em rule: "x86\_64" came out as a hole, the typewriter line as pictures.
+    slide = deck("27_text_fit")["slides"][17]
+    assert [e for e in slide["elements"] if e["kind"] == "image"] == []
+    words = " ".join(body_texts(slide))
+    assert "x86_64" in words and "0x7fff_ffff" in words
+    body = next(e for e in texts(slide) if e.get("role") == "body")
+    assert len(body["strokes"]) == 2  # the rules leave the background with the text
+
+
+def test_an_inline_sum_between_words_is_part_of_its_formula_hole():
+    # A CMEX glyph hangs from its origin, 8 pt above the words' baseline: it was a line of its
+    # own, left in the background while the words around it moved.
+    slide = deck("27_text_fit")["slides"][16]
+    assert slide["left_in_background"] == []
+    holes_in = [e for e in slide["elements"] if e["kind"] == "image" and e.get("role") == "math"]
+    assert len(holes_in) == 2 and all(e.get("anchor") for e in holes_in)
+
+
 def test_tabular_without_rules_is_a_borderless_table():
     slide = deck("15_plain_tabular")["slides"][0]
     tables = [e for e in slide["elements"] if e["kind"] == "table"]

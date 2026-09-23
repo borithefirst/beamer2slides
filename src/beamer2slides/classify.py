@@ -140,6 +140,7 @@ class Span:
     underline: bool = False
     strike: bool = False          # \sout
     highlight: str | None = None  # background colour (\colorbox)
+    drawn: bool = False           # a character the PDF draws as a rule, not a glyph (underscores)
 
 
 @dataclass(eq=False)
@@ -641,6 +642,38 @@ class PageClassifier:
             for s in words:
                 self.decor_rects.setdefault(s.id, []).append(r)
 
+    def underscores(self, spans: list[Span]) -> None:
+        """OT1, beamer's default encoding, has no underscore glyph: `\\_` is a rule TeX draws
+        0.3 em long on the baseline (`\\kern.06em\\vbox{\\hrule width.3em}`), so "x86\\_64"
+        reaches the PDF as two words with a line between them, which read as a word on a small
+        graphic (a hole, `graphic_holes`) or as a formula. A rule that short, level with the
+        baseline and right beside a glyph of that line, is an underscore: a span "_" joins the
+        words (`drawn`: it has no page object), and the rule leaves the background with the
+        text as an underline does (`decor_rects`)."""
+        # (never beside a radical sign, which hangs from its origin like a CMEX glyph: its overbar
+        # is level with that origin, and has its radicand right under it where an underscore
+        # has nothing)
+        flat = [s for s in spans if s.horizontal and s.text.strip()]
+        signs = [s for s in flat if s.font.startswith("CMEX") or "√" in s.text]
+        flat = [s for s in flat if s not in signs]
+        for d in self.page["drawings"]:
+            r = Rect.of(d["bbox"])
+            if d["id"] in self.decor_ids or r.h > 0.8 or \
+                    not ((d["type"] == "s" and d["items"] == "l") or (d["type"] == "f" and d["items"] == "re")):
+                continue
+            beside = [s for s in flat if 0.2 * s.size <= r.w <= 0.7 * s.size and abs(r.cy - s.baseline) <= 0.12 * s.size
+                      and (-0.5 <= r.x0 - s.rect.x1 <= 0.25 * s.size or -0.5 <= s.rect.x0 - r.x1 <= 0.25 * s.size)]
+            if not beside or any(s.rect.x0 < r.x1 and r.x0 < s.rect.x1 and r.cy < s.rect.cy < r.cy + beside[0].size
+                                 for s in flat) or \
+                    any(abs(s.rect.x1 - r.x0) <= 1 or abs(r.x1 - s.rect.x0) <= 1 for s in signs):
+                continue  # an overbar or a fraction bar: something is set under it
+            like = beside[0]
+            span = Span(f"{d['id']}u", "_", like.font, like.size, like.color, Rect(r.x0, like.rect.y0, r.x1, like.rect.y1),
+                        like.baseline, True, like.info, link=like.link, drawn=True)
+            spans.append(span)
+            self.decor_ids.add(d["id"])
+            self.decor_rects[span.id] = [r]
+
     def analyse_graphics(self) -> None:
         graphics = []
         rules: dict[tuple[int, int], list[Rect]] = {}
@@ -780,6 +813,38 @@ class PageClassifier:
             groups.setdefault(find(i), []).append(s)
         lines = sorted((Line(g) for g in groups.values()), key=lambda l: (l.baseline, l.rect.x0))
         return self.join_line_labels(lines)
+
+    @staticmethod
+    def join_hanging_operators(lines: list[Line]) -> list[Line]:
+        """A CMEX glyph hangs from its origin - an inline `\\sum`'s is 8 pt above the baseline
+        of the words it stands between - so it comes out a line of its own, which went to the
+        background while its limits and the words around it stayed text: the sign stood still
+        and the words moved. A lone CMEX glyph about as tall as a line's words, centred on them,
+        with words of that line on both sides of it, is in that line (and becomes part of a
+        formula hole there). Not a display operator at the start of its line, nor a radical
+        taller than the line, nor a brace piece under it."""
+        out = list(lines)
+        for g_line in lines:
+            if len(g_line.spans) != 1 or not g_line.spans[0].font.startswith("CMEX"):
+                continue
+            g = g_line.spans[0]
+            for host in out:
+                if host is g_line:
+                    continue
+                words = [w for w in host.spans if not w.font.startswith("CMEX")]
+                level = [w for w in words if 0.6 * w.rect.h <= g.rect.h <= 1.5 * w.rect.h
+                         and abs(g.rect.cy - w.rect.cy) <= 0.35 * w.size]
+                before = [w for w in words if 0 <= g.rect.x0 - w.rect.x1 <= 1.5 * w.size]
+                after = [w for w in words if 0 <= w.rect.x0 - g.rect.x1 <= 1.5 * w.size]
+                prose = lambda w: w.info.family != "math" and not w.info.italic and not w.font.startswith(("CMSY", "CMMI"))
+                # (next to an upright word of prose: inside a formula - between a relation and a
+                # bracket, or its variables, which beamer's sans math sets in a text italic - it
+                # goes with that formula wherever the formula goes)
+                if level and before and after and any(map(prose, before + after)):
+                    out.remove(g_line)
+                    out[out.index(host)] = Line(host.spans + [g])
+                    break
+        return out
 
     @staticmethod
     def gutter(spans: list[Span], a: Span, b: Span, size: float) -> bool:
@@ -2552,7 +2617,7 @@ class PageClassifier:
                 "runs": self.runs(p, code_indent(p, rect.x0) if code else "", soft_breaks=unbalanced(p)),
             } for p in box],
             "code": code,
-            "spans": [s.id for p in box for s in p.spans if s.info.family != "icon"
+            "spans": [s.id for p in box for s in p.spans if s.info.family != "icon" and not s.drawn
                       and not any(s in h for l in p.lines for h in l.holes)],
             # Fraction bars now written as text, underlines and highlight boxes now text
             # styles: they leave the background with the glyphs.
@@ -2563,10 +2628,12 @@ class PageClassifier:
 
     def classify(self) -> dict:
         spans = self.spans()
-        self.spans_by_id = {s.id: s for s in spans}
         self.text_decorations(spans)
+        self.underscores(spans)
+        self.spans_by_id = {s.id: s for s in spans}
         self.analyse_graphics()
-        lines = self.join_braces(self.build_lines(spans))
+        # (after the braces: a brace's CMEX pieces go with their label, see join_braces)
+        lines = self.join_hanging_operators(self.join_braces(self.build_lines(spans)))
         self.assign_reasons(lines)
         plain_tables = self.plain_tables(lines)
         body_lines = [l for l in lines if l.reason is None and abs(l.size - self.body) < 1]
@@ -2654,6 +2721,13 @@ class PageClassifier:
 
         chars_total = sum(len(s["text"].strip()) for s in self.page["spans"])
         chars_native = sum(len(s["text"].strip()) for s in self.page["spans"] if s["id"] in text_spans)
+        # Span ids name page objects (render switches them off, checks look them up): a character
+        # the page draws as a rule has none, and is in the text through its runs alone.
+        drawn = {s.id for s in spans if s.drawn}
+        if drawn:
+            for holder in elements + left + theme_texts + [e["bullet"] for e in elements if isinstance(e.get("bullet"), dict)]:
+                if isinstance(holder.get("spans"), list):
+                    holder["spans"] = [i for i in holder["spans"] if i not in drawn]
         return {
             "page": n, "frame": self.page["label"], "label": self.page.get("frame_label"), "size": self.page["size"],
             "notes": self.page.get("notes"),

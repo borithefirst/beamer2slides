@@ -3299,3 +3299,43 @@ keys, named ranges), `doc_merge.py` (pure planning), `doc_sync.py` (the commands
   (alignment, sync_check, deck_edits, loss_oracle, fuzz_*) lives in `beamer2slides.devtools`, with
   `tools/<name>.py` kept as runpy shims; data is reached through `importlib.resources` or a module's
   `__file__`, never through `src/` or a checkout path.
+
+## Text fit (torture deck, 2026-09-23)
+`tests/decks/27_text_fit.tex` has one frame per way a line can come out of Slides wider or narrower
+than the PDF drew it: every size from `\tiny` to `\huge` left/centred/right, serif, typewriter,
+bold, italic, small caps, wide and narrow letters, full-width justified paragraphs, two columns,
+items and description labels near the edge, blocks, tight/numeric/bold-header/merged tables with
+captions, a chart with long ticks, text beside a figure, text against the frame's edges, inline
+math in a full line, numbers and signs. `tools/text_fit.py` (`devtools/text_fit.py`) measures a
+converted deck on Google's thumbnails (saved by `fidelity`) against the PDF page: `wrap` (line
+count and height both changed), `drift` (the edge a line's paragraph is aligned to, or the top),
+`width` (a line more than 8% wider or narrower), `crowded` (Slides' deeper subscripts join two
+lines of ink), `grown` (a table ends lower; a text's pitch is larger), `touch` (the white space
+between two elements closed to under a quarter of itself and under 1.5 pt). How it tells an
+element's ink from its neighbours' is the part that took the work: a window per element that stops
+at the nearest neighbour's box, ink against the ground inside the element's own box (a block's
+title bar, not the body panel), rules and rims dropped, and in each line only the runs of words that
+reach into the element's own columns. Validated by the conversion made before the table fix:
+5 tables grown ~12 pt there (the Monitor wrap), 1 after it (3.6 pt, a `\small` table under Slides'
+row minimum). `--crops` saves each finding's window, the PDF's ink above and Slides' below.
+
+What the deck found, and what was done:
+- **Fixed**: OT1 draws `\_` as a 0.3 em rule, so `x86\_64` became a hole (picture 3 pt wider than
+  its hole, predicted 83 pt off) and a typewriter line with `0x7fff\_ffff` four unanchored math
+  pictures. `classify.underscores` reads such a rule - level with the baseline, a glyph right
+  beside it, nothing set under it, never beside a radical - as a `_` span (`drawn`, no page object,
+  kept out of every element's `spans`); the rule leaves the background as a stroke.
+- **Fixed**: an inline `\sum` (CMEX10, text U+FFFD) hangs from its origin 8 pt above the words'
+  baseline, so it was a line of its own sent to the background while `i w_i x_i` stayed text: in
+  Slides the words moved and the sign stood still (`stray_ink`). `join_hanging_operators` (after
+  `join_braces`, whose brace pieces it must not take) joins a lone CMEX glyph as tall as the words,
+  centred on them, with words on both sides and an *upright* word of prose among them - not the
+  radicals inside Cauchy-Schwarz, whose neighbours are the formula's own CMSSI letters. The native
+  text of the other 53 test and theme PDFs is unchanged.
+- **Open**: small caps come out 22% narrower (the substitute sets them smaller; slide 4); CMTT in
+  Courier New 9% narrower (slide 18); digits and bold headers 9-12% wider in table columns; the
+  three captioned tables at `\footnotesize`/`\large`/`\small` are refused as native tables (Slides'
+  row minimum would grow them over the caption) and fall back to a text box per column, which for
+  the `p{}` table joins the wrapped cell with the numbers beside it and reflows across the BLEU
+  column (slide 12); Slides sets subscripts deeper than TeX, so consecutive lines of inline math
+  touch (slide 17).

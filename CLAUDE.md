@@ -48,7 +48,9 @@ Details, measurements and edge cases: docs/project-notes.md "What becomes native
   size, `emit.BULLET_SHAPES`, `emit.bullet_level`), inline math as runs with scripts and Unicode,
   links, code. Frame titles use the layout's TITLE placeholder. Hanging labels are `label<TAB>text`.
   RTL (Hebrew/Arabic) is turned into logical order (`bidi.py`) and written `RIGHT_TO_LEFT` with
-  mirrored alignment.
+  mirrored alignment. OT1's `\_` is a rule, read back as `_` (`classify.underscores`, span
+  `drawn`: no page object); a CMEX glyph hangs from its origin, so an inline `\sum` between words
+  is joined to their line (`join_hanging_operators`) and becomes part of its formula hole.
 - `image`: figure regions (TikZ, plots, raster images with their labels) as pictures. A bare
   `\includegraphics` keeps the author's file byte for byte when it decodes identically
   (`classify.bare_image`, `render.image_file`). A chart's tick rows and centred titles belong to its
@@ -205,6 +207,10 @@ markers.
   `-m docs`, `-m inverse`. Delete `out/sync-tests/_fresh` after a converter change.
 - Tools that answer questions on the live renderer: `tools/alignment.py` (holes, number balls,
   bullets, overlay marks in pt), `tools/probe_*.py` (one question each, e.g. `probe_new_bullet.py`).
+- **Text fit torture**: `tests/decks/27_text_fit.tex` (one frame per way text can fit differently)
+  and `tools/text_fit.py <pdf> --out <folder> [--crops]` after `convert` + `fidelity`: wrap, drift,
+  width, crowded, grown, touch, line by line on Google's renderer (`devtools/text_fit.py`,
+  `tests/test_text_fit.py` on synthetic pages). Open findings: docs/project-notes.md "Text fit".
 - Theme robustness: `tests/themes/sweep.py` (28 beamer themes, classify only).
 
 ## Pitfalls found so far
