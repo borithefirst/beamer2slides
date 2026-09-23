@@ -25,6 +25,7 @@ LABEL_GLYPHS = BULLET_GLYPHS | set("+✗✘→⇒—♦◆⋄")
 ENUM_RE = re.compile(r"^(\(?\d{1,2}[.)]|\(?[a-z][.)]|\([a-z]\)|\(?[ivx]{1,4}[.)])$")
 LINE_LABEL_RE = re.compile(r"^(\d{1,3}:|\[\d{1,3}\])$")
 LABEL_SEP_EM = 0.4  # gap after a description label (beamer: 0.5 em; word spaces are about 0.33 em)
+GUTTER_PROSE_EM = 8.0  # a column's line beside a gutter is wider than this; ticks and table cells are not
 EM_SPACE = chr(0x2003)
 FRAME_COUNTER_RE =re.compile(r"^\d{1,4}( ?/ ?\d{1,4})?$")
 EQ_NUMBER_RE = re.compile(r"^\(\d+(\.\d+)*[a-z]?\)$")
@@ -456,13 +457,25 @@ _WIDTHS.update({" ": 278, ".": 278, ",": 278, ":": 278, ";": 278, "'": 191, "’
                 "!": 278, "|": 260, "/": 278})
 
 
+def cjk(ch: str) -> bool:
+    """A character of Chinese or Japanese text (ideograph, kana, CJK or fullwidth punctuation):
+    a line breaks between any two of them and joins with no space. (Korean breaks at spaces.)"""
+    from .scripts import script_of
+    return bool(ch) and script_of(ch) in ("han", "kana")
+
+
 def first_word_width(span: Span) -> float:
-    """Width of a span's first word: a span can hold one word or a whole line of them."""
+    """Width of a span's first word: a span can hold one word or a whole line of them. In Chinese
+    or Japanese a line can break after any character, so a word there is one character."""
     text = span.text.strip()
     if not text:
         return span.rect.w
-    weight = lambda t: sum(_WIDTHS.get(c, 556) for c in t)
-    return span.rect.w * weight(text.split()[0]) / weight(text)
+    weight = lambda t: sum(1000 if cjk(c) else _WIDTHS.get(c, 556) for c in t)
+    word = text.split()[0]
+    cut = next((i for i, c in enumerate(word) if cjk(c)), None)
+    if cut is not None:
+        word = word[:max(cut, 1)]  # up to the first ideograph, or that one alone
+    return span.rect.w * weight(word) / weight(text)
 
 
 def card_text(node: Rect, rows: list[list[Span]]) -> dict | None:
@@ -865,6 +878,15 @@ class PageClassifier:
                     big = min(a.size, b.size)
                 same_row = abs(a.baseline - b.baseline) <= 0.5 * big and \
                     min(a.rect.y1, b.rect.y1) > max(a.rect.y0, b.rect.y0)
+                small, large = (a, b) if a.size < b.size else (b, a)
+                if same_row and small.size <= 0.6 * large.size and small.rect.y0 > large.baseline - 0.1 * large.size \
+                        and not {"math", "icon"} & {small.info.family, large.info.family} \
+                        and sum(c.isalnum() for c in small.text) >= 2:
+                    # a word all below the big line's baseline: the next line, touching it (a
+                    # subtitle under a heading); a script rises above the baseline it hangs
+                    # from, and a limit under a display operator or a wavy underline is the
+                    # formula's or the words' (their own holes and pictures)
+                    same_row = False
                 gap = max(0.0, b.rect.x0 - a.rect.x1, a.rect.x0 - b.rect.x1)
                 # (text colour changes with the panel; a dark number on a light box across the
                 # edge still belongs to its line)
@@ -912,19 +934,66 @@ class PageClassifier:
     @staticmethod
     def gutter(spans: list[Span], a: Span, b: Span, size: float) -> bool:
         """The gap between two words on one baseline is the gutter between columns: no text
-        just above or below crosses it, and other lines there have words on both sides."""
+        just above or below crosses it, and other lines there have words on both sides.
+
+        That is enough after a long word. A short word left of the gap is a label or number
+        before its text (a TOC entry, a list label), a tick label or a table cell - or the last
+        word of a column's line, which ends on a short word as often as not ("for", "a"; a
+        multicol gutter is 1.3-1.8 em, under the 2 em words join at). A column needs more
+        evidence, and a long word's gap is a gutter with it too: the gap is not at the start
+        of its line; another line has as wide a gap there with one side keeping to the same
+        edge - a column starts (or a justified one ends) there; and on this line or such a
+        one the words beside the gap run on like prose, wider than a table cell or tick.
+        Words of a justified paragraph leave a channel of stretched spaces by chance, never
+        edges, and this line's own words are no evidence (a \\framebox wider than its words)."""
         left, right = (a, b) if a.rect.x0 < b.rect.x0 else (b, a)
-        if len(left.text.strip()) < 6:
-            return False  # a label or number before its text (a TOC entry, a list label)
         mid = (left.rect.x1 + right.rect.x0) / 2
         y0, y1 = min(a.rect.y0, b.rect.y0) - 4 * size, max(a.rect.y1, b.rect.y1) + 4 * size
         band = [s for s in spans if s is not a and s is not b and s.rect.y1 > y0 and s.rect.y0 < y1
                 and s.size <= 1.5 * size]  # (a frame title above spans all columns)
         if any(s.rect.x0 < mid < s.rect.x1 for s in band):
             return False
-        rows_left = {round(s.baseline) for s in band if s.rect.x1 <= mid}
-        rows_right = {round(s.baseline) for s in band if s.rect.x0 >= mid}
-        return len(rows_left & rows_right) >= 1
+        if len(left.text.strip()) >= 6:
+            rows_left = {round(s.baseline) for s in band if s.rect.x1 <= mid}
+            rows_right = {round(s.baseline) for s in band if s.rect.x0 >= mid}
+            if rows_left & rows_right:
+                return True
+        # (as build_lines has it: a script, a table cell a little off the paragraph's baseline)
+        same_line = lambda s, t: abs(s.baseline - t.baseline) <= 0.5 * size and \
+            min(s.rect.y1, t.rect.y1) > max(s.rect.y0, t.rect.y0)
+        pool = band + [a, b]
+        if not any(s.rect.x1 <= left.rect.x0 + 0.5 and same_line(s, left) for s in band):
+            return False  # a label at the start of its line
+        if len(left.text.strip()) < 6 and len(right.text.strip()) < 6 and \
+                not any(s.rect.x0 >= right.rect.x1 - 0.5 and same_line(s, right) for s in band):
+            return False  # (right to left: its number ball, at the end)
+
+        def run(start: Span, step: int) -> float:
+            """Width of the words that follow on from `start` away from the gap."""
+            words = sorted((s for s in pool if s is start or same_line(s, start)), key=lambda s: s.rect.x0)[::step]
+            k = next(i for i, s in enumerate(words) if s is start)
+            edge = start
+            for s in words[k + 1:]:
+                if max(s.rect.x0 - edge.rect.x1, edge.rect.x0 - s.rect.x1) > 0.8 * size:
+                    break
+                edge = s
+            return max(start.rect.x1, edge.rect.x1) - min(start.rect.x0, edge.rect.x0)
+
+        others = [s for s in band if not (same_line(s, left) or same_line(s, right))]
+        on_left = [s for s in others if s.rect.x1 <= mid]
+        on_right = [s for s in others if s.rect.x0 >= mid]
+        pairs = []
+        for l in on_left:
+            if any(s.rect.x1 > l.rect.x1 for s in on_left if same_line(s, l)):
+                continue  # (l: the last word left of the gap on its line)
+            across = [r for r in on_right if same_line(r, l)]
+            if not across:
+                continue
+            r = min(across, key=lambda s: s.rect.x0)
+            if r.rect.x0 - l.rect.x1 > 0.8 * size and \
+                    (abs(r.rect.x0 - right.rect.x0) <= 1 or abs(l.rect.x1 - left.rect.x1) <= 1):
+                pairs.append((l, r))
+        return bool(pairs) and max(max(run(l, -1), run(r, 1)) for l, r in pairs + [(left, right)]) >= GUTTER_PROSE_EM * size
 
     @staticmethod
     def join_line_labels(lines: list[Line]) -> list[Line]:
@@ -1456,6 +1525,29 @@ class PageClassifier:
         others = [l.rect for l in self.all_lines if l is not a and l is not b] + list(self.regions)
         return any(r.y0 < y1 and y0 < r.y1 and r.x0 > x1 + 5 for r in others)
 
+    def column_edge(self, par: Paragraph, line: Line) -> float | None:
+        """The right edge of the column `line` is in - the widest of the lines stacked above it at
+        the paragraph's left edge (a list's items one after another) - when text or a picture
+        stands right of that edge beside one of them; else None: nothing says the text is narrow.
+        (A table's next cells beside its first column start left of the table's wide rows.)"""
+        above = sorted((l for l in self.all_lines if l.baseline < line.baseline and abs(l.x0 - par.x0) <= 1.5
+                        and abs(l.size - par.size) <= 0.5 and l.reason is None),  # (not a figure's label)
+                       key=lambda l: -l.baseline)
+        stack, at = [], line.baseline
+        for l in above:
+            if at - l.baseline > 3 * par.size:
+                break
+            stack.append(l)
+            at = l.baseline
+        if not stack:
+            return None
+        edge = max(l.x1 for l in stack)
+        mine = {id(l) for l in stack} | {id(line)}
+        others = [l.rect for l in self.all_lines if id(l) not in mine] + list(self.regions)
+        if any(r.x0 > edge + 5 and r.y0 < l.rect.y1 and l.rect.y0 < r.y1 for l in stack for r in others):
+            return edge
+        return None
+
     def continues(self, par: Paragraph, line: Line) -> str | None:
         """How `line` continues `par` ('left' | 'center' | 'right'), or None."""
         last = par.last
@@ -1485,7 +1577,11 @@ class PageClassifier:
             if not self.has_side_content(last, line) and not justified:
                 # Full-width text: beamer's margins are symmetric, so the text block ends
                 # where the left margin mirrors. Short paragraphs never reach col_right.
-                col_right = max(col_right, self.W - self.text_margin)
+                # Unless the lines stacked above at this left edge sat beside a picture or
+                # another column: then this is the column's text below it, as narrow.
+                column = self.column_edge(par, line)
+                if column is None or column < col_right - 4 * par.size:  # (a column's lines end a word or so apart)
+                    col_right = max(col_right, self.W - self.text_margin)
             first_word = line.content[0].rect.w
             if not right and last.x1 + 0.3 * par.size + first_word < col_right - 0.5:
                 return None
@@ -1496,7 +1592,19 @@ class PageClassifier:
             return "right"  # (a TOC section and its first subsection may end together by chance)
         return None
 
-    def single_line_align(self, line: Line, margin: float) -> str:
+    def single_line_align(self, line: Line, margin: float, neighbours: list["Paragraph"] = ()) -> str:
+        """A line alone is centred when it is centred on the page, right-aligned when it ends at
+        the right margin - unless it starts where text next to it starts (the other items of
+        its list, the block title above it, the column it is in): then it is left-aligned and
+        its centre or end is a coincidence of its length (a centred item puts its bullet
+        against its words and leaves its siblings' edge)."""
+        # (a neighbour as long, or centred itself, says nothing: stacked centred lines of a
+        # title page, equation numbers; nor does a formula's limit under it)
+        near = [l for p in neighbours if p.first is not line and abs(p.size - line.size) <= 1 for l in p.lines
+                if abs(l.baseline - line.baseline) <= 4 * line.size and abs(l.x0 - line.x0) <= 1
+                and abs(l.x1 - line.x1) > 1 and abs(l.rect.cx - self.W / 2) > 2]
+        if near:
+            return "left"
         if abs(line.rect.cx - self.W / 2) <= 2 and line.x0 > 0.12 * self.W:
             return "center"
         if abs(line.x1 - (self.W - margin)) <= 2 and line.x0 > self.W / 2:
@@ -1529,7 +1637,7 @@ class PageClassifier:
         margin = min((l.x0 for l in body_lines), default=0.08 * self.W)
         for par in paragraphs:
             if len(par.lines) == 1:
-                par.align = self.single_line_align(par.first, margin)
+                par.align = self.single_line_align(par.first, margin, paragraphs)
             if any(l.reason == "math" for l in par.lines):
                 par.reason = "math"
             if par.size >= 1.15 * self.body and par.rect.y0 < 0.2 * self.H:
@@ -1668,6 +1776,8 @@ class PageClassifier:
                             sep = ""
                         elif par.role == "title" or soft_breaks:
                             sep = chr(11)  # titles keep their line breaks (a soft break in Slides)
+                        elif cjk(tail.rstrip()[-1:]) and cjk(text.lstrip()[:1]):
+                            sep = ""  # Chinese and Japanese break lines between characters, no space
                         else:
                             sep = " "
                     elif span is line.tab:
