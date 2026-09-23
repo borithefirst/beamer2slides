@@ -106,8 +106,14 @@ storage), `merge.py` (pure planning and diff3), `sync.py` (requests and the writ
                                              title, description, placeholder?, text, text_styles,
                                              paragraph_styles, text_style_hash, shape_style,
                                              shape_style_hash, image: {contentHash, sourceUrl, signature}?,
-                                             children?, table?}}}]}]}
+                                             children?, table?}}}]}]},
+ theme?: {fill, shared, master: {objectId, readback},
+          pages: {"M" | layoutObjectId: {name, group, decoration: {oid, picture: {sha1, thumb, signature},
+                                                                   readback} | null,
+                                         placeholders: {objectId: {kind, spec, readback}}}}}}
 ```
+`theme` (optional, schema still 1) is what convert wrote on the master and the layouts; see
+"Layouts and the master" below. A base without it is an older one: sync leaves the layouts alone.
 `ir_hash` hashes the element's IR without ids, spans and files, with `#page=N` links as slide keys
 and floats to 0.01; `fields` hash its parts (position = top-left to 0.5 pt, size, the set of style
 values, plain text, image), so a reworded line changes `text` and `size`, not `position`. An
@@ -277,6 +283,34 @@ which is what `sync.override_requests` really does, so a take cannot look like a
   Placeholders are refilled in place, and so is a table convert brought with the .pptx whose new
   version its recorded cell margins still fit (`table_refill`, docs/calibration.md "Table cells"):
   a new table could only be an API one, whose padding moves the rows.
+- **Layouts and the master** (`theme_sync.py`). Convert puts the most common background on the
+  master, the shared theme decoration on the layouts as a full-page picture described "Theme
+  decoration" at the back, and the deck's title/body style on the TITLE, CENTERED_TITLE and BODY
+  placeholders of the master and every layout (`emit.plan_theme`, `style_layout_placeholders`). The
+  base's `theme` records all of it (`theme_sync.record`): the master fill, and per page its
+  decoration group (`TITLE`, `*`, a `*_V1` variant), the picture's sha1 and a 32 x 18 thumbnail, the
+  placeholder specs (box, style, fields, alignment, `emit.layout_style_spec`) and their read-back
+  (box, a style hash that also counts the "\n"-only runs `snapshot.read_text` drops, content hash).
+  Sync computes the same for the new PDF (`theme_sync.ours_side`) and merges three ways per item:
+  the master fill, each page's decoration, each placeholder. The source changed and the deck did
+  not: written (`replaceImage` CENTER_INSIDE keeps the id and box, alt text written again after;
+  a new decoration is `createImage` + send to back; a placeholder gets its transform,
+  `updateTextStyle` ALL and the alignment, never `insertText`; then the converter's slide
+  placeholders that inherited the old style get it written onto them, `inherited_pins`, because
+  Google's import dropped every run property equal to the inherited one and the title page's
+  title would otherwise grow with a retheme's frame titles). The deck changed and the source did
+  not: kept. Both: the deck's is kept and a conflict is reported (`slide: "layout <name>"` or
+  `"master"`, field `theme decoration` / `title style` / `title page title style` / `body style` /
+  `master background`, with `moved`/`deleted` in the why). A picture the deck swapped counts as
+  changed by pixels, not URL. The theme batch goes first in the content chain, before any slide
+  batch (a layout batch in flight beside a slide batch can undo the slide's placeholder boxes).
+  A slide that showed its own copy of the old shared background and now shows the new one goes
+  back to INHERIT (`pageBackgroundFill.propertyState`; only on slides, layouts refuse it). A layout
+  serves the decoration group most of its live slides want (`page_group`); a slide that wants
+  another is reported, not moved to another layout. New slides take the layout serving their group.
+  The pending marker lists placeholder specs being written, so an interrupted run's own writes do
+  not come back as the person's edit. An old base (no `theme`) writes nothing there and warns
+  when the new shared background differs from what the master shows.
 - Template shapes (native shadows, exact corner radii, diagram nodes and elbow connectors) can't
   be copied across decks: a live object with the same template key is duplicated if there is one,
   else a plain 100 pt shape stands in and the report warns.
@@ -1135,8 +1169,13 @@ hold for every sync, including the combinations nobody thought of.
   non-issue.
 - diff3 inside diagrams (a text edit there on both sides keeps the deck); tables merge per cell,
   but a row or column added in the deck keeps the deck's table.
-- Layout texts and placeholder styles (`write_layout_texts`) aren't synced; nor are
-  `fallback_pictures` rebuilds.
+- Layout texts (headers and footers shared by every slide, `write_layout_texts`) aren't synced; nor
+  are `fallback_pictures` rebuilds. Layout decoration, placeholder styles and the master fill are
+  (see "Layouts and the master"), except on a base recorded before them.
+- A slide whose decoration variant changed stays on its layout (reported): the right layout for it
+  may not exist in the deck, and moving a slide to another layout re-parents its placeholders.
+- A variant layout emit would newly clone (a background group the old conversion did not have) is
+  not created; its slides keep the layout they are on.
 - Z-order edits in the deck aren't detected; a recreated unit goes back to its old z position.
 
 ## Pull: deck edits back to the source

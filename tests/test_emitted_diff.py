@@ -215,12 +215,11 @@ def test_a_new_text_on_a_block_changes_its_grouping_which_sync_cannot_write():
         {"shape/panel/0": ["grouping"], "shape/panel/1": ["grouping"], "text/body/0": ["grouping"]}
 
 
-def test_a_longer_text_below_the_title_takes_the_subtitle_placeholder_which_sync_cannot_write():
+def test_a_longer_text_below_the_title_takes_the_subtitle_placeholder():
     """On the title page the biggest plain text below the title goes into the layout's subtitle
     placeholder (emit.subtitle_element). A longer one the source added takes it from the authors'
-    line, which becomes a box of its own in a fresh conversion - a placeholder change a unit's
-    recreation cannot make (`Sync.slide_requests` would create a box under the placeholder's id):
-    reported, not marked."""
+    line, which becomes a box of its own in a fresh conversion. `Sync.update_slide` hands the
+    placeholder over (test below), so the authors' line is an `emitted` change: recreated, as a box."""
     title = text_ir("A talk", [20, 20, 200, 40], "p0t0", role="title")
     authors = text_ir("Someone", [20, 60, 90, 72], "p0t1")
     base, _ = one_slide({"text/title/0": title, "text/body/0": authors}, title_page=True)
@@ -228,19 +227,55 @@ def test_a_longer_text_below_the_title_takes_the_subtitle_placeholder_which_sync
                              "text/body/1": text_ir("A much longer institute line", [20, 90, 200, 102], "p0t2")},
                             title_page=True)
     found, unwritten = marks({"slides": [base]}, [ours], slide)
+    assert found.get("text/body/0") == {"emitted"}
+    assert unwritten == []
+
+
+def test_a_slide_that_changes_layout_is_a_placeholder_change_sync_cannot_write():
+    """A slide that stops being the title page (the TITLE layout, a centred title and a subtitle
+    placeholder) keeps its layout in the deck whatever units are recreated: the subtitle's move out
+    of its placeholder is reported, not marked."""
+    title = text_ir("A talk", [20, 20, 200, 40], "p0t0", role="title")
+    authors = text_ir("Someone", [20, 60, 90, 72], "p0t1")
+    base, _ = one_slide({"text/title/0": title, "text/body/0": authors}, title_page=True)
+    ours, slide = one_slide({"text/title/0": title, "text/body/0": authors}, title_page=False)
+    found, unwritten = marks({"slides": [base]}, [ours], slide)
     assert "text/body/0" not in found
     assert [u for u in unwritten if u["element"] == "text/body/0"] == [
         {"slide": "s", "element": "text/body/0", "fields": ["placeholder"]}]
 
 
-@pytest.mark.xfail(strict=True, reason="Sync.update_slide: a recreated old subtitle is created under the live "
-                                        "SUBTITLE placeholder's id when another text takes the subtitle role")
-def test_a_reworded_subtitle_that_lost_the_placeholder_is_not_created_under_its_id():
-    """Why a subtitle change is reported and not marked: the source rewords the authors' line and
-    adds a longer line below it, which is the subtitle now. The recreated authors' line goes into
-    its old placeholder (`in_place`) but is emitted as a box of its own, so the request is a
-    createShape under the live placeholder's object id, which Slides refuses with the whole batch.
-    (Found writing this file; the fix belongs to `Sync.update_slide`/`slide_requests`.)"""
+def test_what_sync_cannot_write_is_a_warning_in_words():
+    """`context_unwritten` reaches the sync report (`sync.unwritten_warnings`, added to
+    `report["warnings"]`, which the agent's deck_sync relays one by one): one line per slide and kind,
+    naming the elements by their words, not their keys."""
+    bar, body = {**shape_ir([10, 40, 200, 55], "p0s0"), "block": 0}, {**shape_ir([10, 55, 200, 120], "p0s1"), "block": 0}
+    first = text_ir("Inside the block", [20, 60, 90, 72], "p0t2")
+    base, _ = one_slide({"shape/panel/0": bar, "shape/panel/1": body, "text/body/0": first})
+    ours, slide = one_slide({"shape/panel/0": bar, "shape/panel/1": body, "text/body/0": first,
+                             "text/body/1": text_ir("Also inside", [20, 90, 100, 102], "p0t3")})
+    _, unwritten = marks({"slides": [base]}, [ours], slide)
+    ours["title"] = "Policy"
+    said = sync.unwritten_warnings(unwritten, {"slides": [ours]})
+    assert len(said) == 1
+    assert said[0].startswith("slide s (Policy): the new version groups the shape shape/panel/0, the shape "
+                              "shape/panel/1 and \"Inside the block\" differently")
+    assert "they stayed grouped as before" in said[0]
+    title = text_ir("A talk", [20, 20, 200, 40], "p0t0", role="title")
+    base, _ = one_slide({"text/title/0": title, "text/body/0": text_ir("Someone", [20, 60, 90, 72], "p0t1")}, title_page=True)
+    ours, slide = one_slide({"text/title/0": title, "text/body/0": text_ir("Someone", [20, 60, 90, 72], "p0t1")})
+    _, unwritten = marks({"slides": [base]}, [ours], slide)
+    said = sync.unwritten_warnings(unwritten, {"slides": [ours]})
+    assert said == ["slide s: the new version puts \"Someone\" into another layout placeholder or out of one, "
+                    "because the slide changes layout; a sync cannot change a live slide's layout, so it stayed "
+                    "where it was"]
+    assert sync.unwritten_warnings([], {"slides": [ours]}) == []
+
+
+def subtitle_page(authors_action: str) -> tuple:
+    """(Sync, work item, live objects, requests) of `update_slide` on a title page whose source
+    reworded the authors' line (in the SUBTITLE placeholder) and added a longer line below it: the
+    authors' unit as the merge decided (`authors_action`), the new line created."""
     from collections import defaultdict
 
     title = text_ir("A talk", [20, 20, 200, 40], "p0t0", role="title")
@@ -256,10 +291,40 @@ def test_a_reworded_subtitle_that_lost_the_placeholder_is_not_created_under_its_
     s.plan, s.scale, s.tok, s.warnings, s.base = plan, plan.scale, "1zz", [], {"slides": [b]}
     s.recovery, s.urls = {"restore": {}}, defaultdict(lambda: "https://example.com/x.png")
     w = {"plan": {"key": "s", "base": 0, "ours": 0, "objectId": "LIVE", "units": [
-        {"key": "text/body/0", "action": "recreate", "ours_members": ["text/body/0"], "base_members": ["text/body/0"], "overrides": {}},
+        {"key": "text/body/0", "action": authors_action, "ours_members": ["text/body/0"], "base_members": ["text/body/0"],
+         "overrides": {}},
         {"key": "text/body/1", "action": "create", "ours_members": ["text/body/1"]}]}, "units": []}
     reqs = s.update_slide(w, {"objects": objects, "notes": "", "notes_id": None}, {}, {})
+    return s, w, objects, reqs
+
+
+def test_a_subtitle_the_deck_keeps_keeps_its_placeholder():
+    """The person's edit to the authors' line conflicted and the deck's version stays (`keep`): the
+    placeholder is theirs, so the longer line the source added is a box of its own, not written
+    into it - and not created under its id either."""
+    s, w, objects, reqs = subtitle_page("keep")
+    assert w["in_place"] == {}
+    assert not [r for r in reqs if any(v.get("objectId") in objects for v in r.values() if isinstance(v, dict))]
+    assert any(r.get("createShape", {}).get("objectId") == w["new_oid"][2] for r in reqs)
+    assert "SUB_PH" not in s.cleanup_ids
+
+
+def test_a_reworded_subtitle_that_lost_the_placeholder_is_not_created_under_its_id():
+    """The source rewords the authors' line and adds a longer line below it, which is the subtitle
+    now. The recreated authors' line used to go into its old placeholder (`in_place`) but was
+    emitted as a box of its own: a createShape under the live placeholder's object id, which Slides
+    refuses with the whole batch. Now the authors' line is a box under a new id and the longer line,
+    the subtitle, is written into the placeholder (emptied first), as a fresh conversion has it."""
+    s, w, objects, reqs = subtitle_page("recreate")
     assert not [r for r in reqs if r.get("createShape", {}).get("objectId") in objects]
+    assert w["in_place"] == {2: {"id": "SUB_PH", "size": objects["SUB_PH"]["size"], "text": "Someone"}}
+    authors = w["new_oid"][1]
+    assert authors != "SUB_PH" and any(r.get("createShape", {}).get("objectId") == authors for r in reqs)
+    inserted = [r["insertText"]["text"] for r in reqs if r.get("insertText", {}).get("objectId") == "SUB_PH"]
+    assert "".join(inserted) == "A much longer institute line"
+    assert reqs.index({"deleteText": {"objectId": "SUB_PH", "textRange": {"type": "ALL"}}}) < \
+        min(i for i, r in enumerate(reqs) if r.get("insertText", {}).get("objectId") == "SUB_PH")
+    assert "SUB_PH" not in s.cleanup_ids and "SUB_PH" not in w["doomed"]
 
 
 def test_an_old_base_emit_cannot_read_marks_nothing():
