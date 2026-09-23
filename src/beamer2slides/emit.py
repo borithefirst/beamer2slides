@@ -102,7 +102,9 @@ DESIGN_WIDTH = {
 # serif size these substitute small caps are 1.27-1.30 times too narrow over any sentence
 # (probe advances + CMCSC10.afm), so the size makes up the width, as the size factors do for
 # every other face. (Only for Computer Modern / EC / Latin Modern small caps, the ones measured.)
-SMALL_CAPS_WIDTH = {"serif": 1.28}
+# The full 1.28 made the capitals ~30% taller than CMCSC's; 1.13 (about the square root) is the
+# chosen compromise: the line comes out ~12% narrower than the PDF's and ~13% taller.
+SMALL_CAPS_WIDTH = {"serif": 1.13}
 
 # Advance widths (em) of the characters a number is written with in Computer Modern (the
 # fonts' AFM files; EC and Latin Modern share them): its digits are 0.5 em where Slides' Lato

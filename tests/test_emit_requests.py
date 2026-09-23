@@ -897,13 +897,14 @@ CMCSC10 = {"S": 0.611, "m": 0.746, "a": 0.613, "l": 0.513, "c": 0.591, "p": 0.55
            "f": 0.535, "e": 0.557, " ": 0.3333}
 
 
-def test_small_caps_are_as_wide_as_the_pdfs():
+def test_small_caps_split_the_difference_between_width_and_height():
     # 27_text_fit, frame `faces`: Slides draws a small capital at 0.70 of its capital where CMCSC
     # draws it at 0.755, and CMCSC is an extended face - the line came out 0.777 of the PDF's width.
+    # Full width (1.28x) made the capitals 30% too tall; the compromise leaves it ~11% narrow.
     text = "Small caps: Monitor Workstation Mainframe"
     run = run_of(text, font="CMCSC10", family="serif", smallcaps=True)
     pdf = sum(CMCSC10[c] for c in text) * 10.91 * SCALE
-    assert emit.slides_width([run], SCALE, FONTS) == pytest.approx(pdf, rel=0.03)
+    assert emit.slides_width([run], SCALE, FONTS) == pytest.approx(0.89 * pdf, rel=0.03)
     plain = FONTS(run_of(text, font="CMR10", family="serif"), SCALE)[1]
     assert FONTS(run, SCALE)[1] == pytest.approx(plain * emit.SMALL_CAPS_WIDTH["serif"], abs=0.1)
 

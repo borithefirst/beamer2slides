@@ -122,10 +122,11 @@ Google's renderer (advances as in `tools/probe_advances.py`, one reference row p
   CMCSC10 draws it at 0.755 - and CMCSC is an extended face (M 0.988 em against CMR10's 0.916),
   while PT Serif's capitals are 11% narrower than CMR's. A CMCSC line therefore came out **0.777**
   of the PDF's width. Over any sentence the substitute small caps are 1.27-1.30 times too narrow
-  (probe advances against CMCSC10.afm), so a Computer Modern small-caps run is set at
-  **1.28 x** the serif size (`emit.SMALL_CAPS_WIDTH`): width 0.777 -> 0.996 on the torture line.
-  The price is height: the capitals of such a line stand ~30% taller than CMCSC's, its small
-  capitals ~20% taller - the face cannot be both as wide and as tall as TeX's.
+  (probe advances against CMCSC10.afm). Setting the run at 1.28 x the serif size gave the
+  torture line 0.996 of the PDF's width, but its capitals stood ~30% taller than CMCSC's and its
+  small capitals ~20% taller - the face cannot be both as wide and as tall as TeX's. The chosen
+  compromise is **1.13 x** (`emit.SMALL_CAPS_WIDTH`, about the square root): ~12% narrower than
+  the PDF, ~13% taller.
   How Slides lays out a line holding a small-caps run (`line_size_pt`, PT Serif 26 small caps in a
   Lato 20 line): lowercase letters only - the run is drawn wholly in the small font and the line
   takes 0.70 of its size (`mm` 20.3, and 24.0 for 34 pt); one space, capital or comma in the run
