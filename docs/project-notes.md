@@ -3771,9 +3771,8 @@ Judges:
   `geometry_not_carried`); on the archive (618 steps) that prediction held within 2 pt for 1,522 of
   1,556 elements the source moved and nobody else did, and every one the report only lists as
   `applied` within 0.3 pt; the 34 others (3 to 18 pt off) all carry a conflict: kept, not written. A
-  person's resize
-  that comes back at the converter's size on an object the sync made, while the source left the
-  size alone, is `geometry_reverted` wherever the element went (`_resize_dropped`; objects the sync
+  person's resize that comes back at the converter's size on an object the sync made, while the
+  source left the size alone, is `geometry_reverted` wherever the element went (`_resize_dropped`; objects the sync
   made only - a person's copy keeps the element's tag and the converter's size, which the archive's
   r1101 step5 and r801 step4 showed). `deck_placement` asks pictures alone when there are three:
   with text boxes in the median it read a real deck's 1.59 as 3.09.
@@ -3786,3 +3785,12 @@ Judges:
   code), but found no new conversion for any step: `ours_from_folder` imports `sync.mark_widths`,
   renamed `mark_emitted` by 401cb35, and the ImportError is caught per step. With the name aliased
   the same 11 fails come out and every step has `ours`.
+
+The one live scenario that held the old rule: many-edits moves "Later the source changes again" down
+15 pt while the source rewrites that box and moves it up 2.9 pt. Its generic `move` check wanted the
+deck's absolute place (y 143.4); the box now lands at 140.5, the source's new place plus the
+person's 15. The scenario drops the `move` check and asks for the fresh conversion's corner + 15
+instead (the first sync still reports the geometry conflict; the report the test reads last is the
+idempotence sync's, where nothing is left to conflict). Passing live with the new rule: disjoint,
+same-element, chain, table-moved, pull-wording, many-edits, layout-grown-box, layout-group-moved
+and the three probes above.

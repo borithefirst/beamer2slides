@@ -491,8 +491,15 @@ def scenario_many_edits(run: Run):
         E("set_background", slide=WHY, color="#eef5ff"),
         E("set_notes", slide=WHY, text="Keep this slide short."))
     pdf = build("many-edits")
-    run.check("many-edits", pdf, run.sync(pdf), exps, skip_source=("show of hands",),
-              conflicts=[["Keep this slide short", "show of hands"]])
+    # The source rewrites that box and moves it up (~3 pt): both moved it, so the person's 15 pt
+    # lands on the source's new place, not on the deck's old absolute one (docs/project-notes.md
+    # "Both-moved geometry").
+    later = {"text": "Later the source changes again"}
+    fresh = fresh_conversion("many-edits")[1]
+    x, y = fresh.element(fresh.one(WHY), later).box[:2]
+    run.check("many-edits", pdf, run.sync(pdf), exps, drop=("move",), skip_source=("show of hands",),
+              conflicts=[["Keep this slide short", "show of hands"]],
+              checks=[{"check": "box", "slide": WHY, "target": later, "origin": [x, y + 15]}])
 
 
 @scenario
