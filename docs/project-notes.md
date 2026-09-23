@@ -4283,3 +4283,38 @@ fidelity, text_fit, invariants), `judgements/`, `verified/<hunter>.json`, `crops
     framed listings, bullet glyph substitutes, `select_overlays`' top-fifth heading band.
 - **What it cannot see**: thumbnails at 1600 px, not editing behaviour; agent-written decks, with
   prevalence estimated from eight controls only.
+
+### Fixes, wave 1 (2026-09-24, five fixers in worktrees, merged 7486d64..3c5d2ca)
+Each fixer reproduced its family offline (`classify --out`, `emit.plan_offline`), pinned it in a test
+that fails with the fix reverted, and fixed the mechanism; suite 3,094 passed after the last merge.
+- **E, hidden text** (`tests/test_hidden_text.py`): `extract.Visibility` samples each glyph at 9
+  points and drops it when 5 are off the page, outside `PageObject.clip` (new in the backend
+  contract, both backends) or under a later opaque fill or image; alpha 0 text is dropped and
+  opacity-0 drawings left out. Raw `hidden_text` keeps what was dropped for `select_overlays`. Side
+  effect, correct: r2_figures_v2 s9's title is under a photo in the PDF and goes; a character mostly
+  off the page is lost in four decks.
+- **A, columns** (`tests/test_columns.py`): `gutter` needs `GUTTER_PROSE_EM` (8 em) and an edge
+  aligned on another line; `column_edge`; `single_line_align` left-aligns a lone line that starts
+  where its neighbours start (it centred on a 2 pt coincidence); `classify.cjk` breaks and joins CJK
+  without spaces; `build_lines` makes a small word below a larger line's baseline its own line.
+  Open: list continuations read as a plain table (belongs in `plain_tables`).
+- **B, charts and diagrams** (`tests/test_charts_diagrams.py`): `body_size` ignores repeated
+  footline text; tick rows, `axis_label_column`, `release_stranded_labels`; `box_outline` panels;
+  a legend box is never a highlight; `upright_ellipse` (a four-curve path must close and be upright);
+  labels of a redrawn node go on the top copy; `diagram_from` refuses nodes holding other text,
+  crossing nodes and labels with scripts. Open: a refused panel in r2_themes_v3 s8, thin bars in
+  r1_econ_v3 s8, tiny end marks of four-curve paths.
+- **C, fonts and encodings** (`tests/test_fonts_encodings.py`, 51 tests): `fonts.font_info` family
+  tables (`SANS_FAMILIES`, `TEX_TT_RE`, `LIBERTINE_RE`), Roboto Mono for 0.6 em monospace,
+  TeXGyreTermesX -> Times New Roman; `math_pieces` styles each piece (italic per glyph, NFKC letters,
+  script capitals via Unicode, `\|` -> `||`); `compose_accents` (OT1), `negate` (`\not`); TS1 Type 3
+  mapping only on pages whose words are not Type 3. Open: stacked fractions as slashes, the stroke
+  of `\L`, Libertine small caps, a Palatino stand-in.
+- **D, emit sizing** (`tests/test_emit_hunt.py`): leader dots and ellipses leave `shape_ratio`;
+  `in_sentence` keeps a run at its paragraph's size; optical-size cap 1.13x; `emit.u16` for every
+  range (astral letters had shifted styles); `xml_text` sanitises alt text (a control character
+  crashed `build_pptx`); right alignment in tables; tables shrink onto the page, floor 0.75x
+  (`TABLE_MARGIN`); `emit.slides_lines` sizes 114 of 392 multi-line boxes from measured breaks.
+  Open: numbering restarting after a nested list (needs a live probe); `deck_ir.pdf_size` in pull
+  should skip the width correction for runs that aren't their paragraph's only run, and a table
+  shrunk more than 6% shows as pull size residuals.

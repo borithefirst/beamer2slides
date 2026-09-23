@@ -55,21 +55,39 @@ Details, measurements and edge cases: docs/project-notes.md "What becomes native
   mirrored alignment. OT1's `\_` is a rule, read back as `_` (`classify.underscores`, span
   `drawn`: no page object); a CMEX glyph hangs from its origin, so an inline `\sum` between words
   is joined to their line (`join_hanging_operators`) and becomes part of its formula hole.
+  Text the PDF hides (off the page, outside its clip, under a later opaque fill or image, alpha 0:
+  5 of 9 samples) is dropped at extract (`extract.Visibility`, `PageObject.clip`, raw `hidden_text`).
+  Side-by-side text is split only with evidence (`gutter`: `GUTTER_PROSE_EM` plus an edge aligned
+  on another line; `column_edge`); a lone line starting where its neighbours start is left-aligned
+  (`single_line_align`); CJK breaks anywhere and joins with no space (`classify.cjk`). Font names
+  map through family tables (`fonts.font_info`: `SANS_FAMILIES`, `TEX_TT_RE`, `LIBERTINE_RE`;
+  0.6 em monos -> Roboto Mono); math letters are styled per piece (`classify.math_pieces`: italic
+  per glyph, NFKC, script capitals as Unicode); OT1 accents compose (`compose_accents`), `\not`
+  negates (`negate`). Every text range emit writes is UTF-16 (`emit.u16`: astral math letters). A
+  run inside a sentence keeps its paragraph's size (`emit.in_sentence`); leader dots and ellipses
+  never set `shape_ratio`. A multi-line box is sized from where Slides breaks its lines
+  (`emit.slides_lines`).
 - `image`: figure regions (TikZ, plots, raster images with their labels) as pictures. A bare
   `\includegraphics` keeps the author's file byte for byte when it decodes identically
   (`classify.bare_image`, `render.image_file`). A chart's tick rows and centred titles belong to its
-  picture (`tick_row`, `axis_titles`); a caption ("Figure:") stays text.
+  picture (`tick_row`, `axis_titles`, `axis_label_column`, `release_stranded_labels`); a caption
+  ("Figure:") stays text. A legend box is never a highlight; a drawn frame is a panel
+  (`box_outline`).
 - `table`: text framed by rules (or rule-less `plain_tables`), with borders, merges, fills. Column
   widths come from measured Slides advances (`emit.slides_width`, `fit_columns`) so no cell wraps
   and the table does not grow over its caption; classify cuts a spanning chunk at word gaps when it
   lines up with the other rows. Rules wider than half the page with rows of cells between them are
   a table's, not theme decoration (`table_hairlines`). A wrapped `p{}` cell is one cell of several
   lines (`row_lines`, `wrapped`), its column wide enough for each PDF line (`emit.wrapped_width`).
+  A table wider than the page shrinks to fit, never below 0.75x (`emit.TABLE_MARGIN`).
   Convert brings tables empty in the .pptx with their own cell margins (`emit.pptx_table`) and
   fills them through the API, so rows keep the PDF pitch. The base records those margins
   (`table_margins`); sync refills such a table in place when its words or place changed, or rows and columns that
   inserts beside a neighbour can give (`sync.table_refill`, `table_steps`), and otherwise creates an API table (`DeckPlan(pptx_tables=False)`).
 - `diagram`: node/line/arrow clusters as grouped shapes, connectors and labels (`diagram_from`).
+  It refuses (the drawing stays a picture) when a node holds other text, nodes cross, or a label
+  has scripts; an ellipse must be upright (`upright_ellipse`), a redrawn node keeps its label on the
+  top copy.
 - `shape`: opaque panels such as beamer blocks (title bar + body built to survive resizing).
 - Decorations on words: underline/strike/highlight runs; words on small graphics and complex inline
   formulas become **holes** (no-break Roboto Mono spaces) with the picture placed over them by
