@@ -3,6 +3,7 @@ replayed on a model of the presentation, and unit tests of emit's placement help
 
 The PDFs come from `python tests/decks/build.py` and `python tests/themes/sweep.py --build`."""
 
+import json
 import re
 import tempfile
 from collections import defaultdict
@@ -945,6 +946,129 @@ def test_deck_ir_reads_a_number_and_small_caps_back_at_their_pdf_size():
         family, z = FONTS(run, SCALE)
         size, _ = pdf_size(FONTS, family, z, False, False, SCALE, text=run["text"], smallcaps=run["smallcaps"])
         assert size == pytest.approx(run["size"], rel=0.02), run["text"]
+
+
+def shape_of(run: dict) -> float:
+    """FontMapper's width correction for a run's letters (numbers aside, factor-independent)."""
+    design = emit.font_info(run["font"]).design_size or 10
+    return FONTS.shape_ratio(run, emit.FONT_FOR_FAMILY[run["family"]], 1.0, design)
+
+
+def test_computer_modern_advances_give_the_pdf_its_own_line_widths(decks):
+    # The PDF side of the prediction (CM AFM advances and kerns, TFM interword and sentence
+    # spaces) against the width of every one-line paragraph of plain Computer Modern text the
+    # test PDFs hold: within 0.3% but for lines TeX spread (\and's quads, a justified line).
+    ratios = []
+    for d in decks:
+        for slide in d.plan.deck["slides"]:
+            for el in slide["elements"]:
+                for p in el.get("paragraphs", []) if el["kind"] == "text" else []:
+                    runs = [r for r in p["runs"] if r["text"].strip()]
+                    if len(p["lines"]) != 1 or p.get("bullet") or not runs or len({r["size"] for r in runs}) > 1 \
+                            or any(r.get("script") or r.get("hole") for r in p["runs"]) \
+                            or any(emit.cm_face(r) is None or r.get("smallcaps") or "\t" in r["text"] for r in runs) \
+                            or sum(c.isalpha() for r in runs for c in r["text"]) < 8:
+                        continue
+                    em = 0.0
+                    for r in p["runs"]:
+                        s, pdf, counted, skipped = emit.advance_widths(r["text"], emit.CM_ADVANCES[emit.cm_face(r)],
+                                                                       emit.ADVANCES[emit.FONT_FOR_FAMILY[r["family"]]]["regular"])
+                        if skipped:
+                            break
+                        em += pdf
+                    else:
+                        dw = emit.design_width(emit.DESIGN_WIDTH[runs[0]["family"]],
+                                               emit.font_info(runs[0]["font"]).design_size)
+                        ratios.append(em * dw * runs[0]["size"] / (p["lines"][0]["x1"] - p["lines"][0]["x0"]))
+    ratios = np.array(ratios)
+    assert len(ratios) > 400
+    assert np.median(ratios) == pytest.approx(1.0, abs=0.001)
+    assert (np.abs(ratios - 1) < 0.003).mean() > 0.95
+
+
+def test_slides_advances_predict_the_calibrated_widths():
+    # tools/calibrate.py measured each row's width in Slides against the PDF; the prediction from
+    # the advances alone (Slides' and CM's) must say the same, relative to the running text rows.
+    rows = {"pangram": "The quick brown fox jumps over the lazy dog",
+            "lorem": "Lorem ipsum dolor sit amet, consectetur adipiscing elit",
+            "caps": "SPEAKER NOTES AND CAPITALS: WHY NOT?"}
+    for family, face, cal in (("Lato", "cmss10", "fonts.json"), ("PT Serif", "cmr10", "fonts_serif.json")):
+        measured = json.loads((emit.CALIBRATION_DIR / cal).read_text(encoding="utf-8"))["fonts"][family]["width_ratio"]
+        slides = emit.ADVANCES[family]["regular"]
+        ref = FONTS.reference_ratio(face, slides, False)
+        for key, text in rows.items():
+            s, pdf, _, _ = emit.advance_widths(text, emit.CM_ADVANCES[face], slides)
+            assert s / pdf / ref == pytest.approx(measured["by_row"][key] / measured["text_mean"], abs=0.006), (family, key)
+        for style, key, bold, italic in (("bold", "bold", True, False), ("italic", "italic", False, True)):
+            face2 = emit.CM_FACE[("sans" if family == "Lato" else "serif", bold, italic)]
+            s, pdf, _, _ = emit.advance_widths(rows["pangram"], emit.CM_ADVANCES[face2], emit.ADVANCES[family][style])
+            assert s / pdf / ref == pytest.approx(measured["by_row"][key] / measured["text_mean"], abs=0.006), (family, key)
+
+
+def test_a_run_whose_letters_are_unlike_a_sentence_is_set_at_its_pdf_width():
+    # PT Serif's capitals are 11% narrower than CMR's against a sentence (calibration: 0.891):
+    # a line of serif capitals is sized up to the PDF's width; so is bold, and a line of w.
+    def pdf_width(run: dict) -> float:
+        slides = emit.ADVANCES[emit.FONT_FOR_FAMILY[run["family"]]][emit.STYLE_KEY[(run["bold"], run["italic"])]]
+        em = emit.advance_widths(run["text"], emit.CM_ADVANCES[emit.cm_face(run)], slides)[1]
+        return em * emit.design_width(emit.DESIGN_WIDTH[run["family"]], 10) * run["size"] * SCALE
+
+    for run in (run_of("SPEAKER NOTES AND CAPITALS: WHY NOT?", font="CMR10", family="serif"),
+                run_of("THE QUICK BROWN FOX JUMPS OVER", font="CMBX10", family="serif", bold=True),
+                run_of("wwwwwwww wwwwwwww wwwwwwww", font="CMSS10")):
+        assert abs(shape_of(run) - 1) > emit.SHAPE_TOL, run["text"]
+        # as wide against the PDF as the sentences the size factor was calibrated on (bold keeps
+        # its half correction)
+        sentences = dict(run, text=" ".join(emit.SHAPE_REFERENCE))
+        ordinary = emit.slides_width([sentences], SCALE, FONTS) / pdf_width(sentences)
+        assert emit.slides_width([run], SCALE, FONTS) / pdf_width(run) == pytest.approx(ordinary, rel=0.01), run["text"]
+
+
+def test_ordinary_text_keeps_the_size_factor():
+    # Within tolerance, too short to judge, or not Computer Modern: the deck-wide size.
+    prose = FONTS(run_of("Monitor"), SCALE)[1]
+    for run in (run_of("SPEAKER NOTES AND CAPITALS: WHY NOT?"),  # Lato's capitals: 0.945, ordinary
+                run_of("WWWW MMMM"), run_of("wwwwwwww"),        # short: a word's own spread
+                run_of("Wide letters: WWWWWWWW MMMMMMMM mmmmmmmm wwwwwwww"),  # 1.024 over the paragraph
+                run_of("The quick brown fox jumps over the lazy dog, twice"),
+                run_of("SPEAKER NOTES AND CAPITALS", script="super")):
+        assert shape_of(run) == 1.0, run["text"]
+        if not run.get("script"):
+            assert FONTS(run, SCALE)[1] == prose, run["text"]
+    fira = run_of("SPEAKER NOTES AND CAPITALS: WHY NOT?", font="FiraSans-Regular")
+    assert FONTS(fira, SCALE)[1] == round(10.91 * SCALE, 1)
+
+
+def test_no_run_of_the_test_decks_leaves_the_size_factor(decks):
+    # The tolerance sits outside the spread of every run of text in the test PDFs (the widest
+    # of 15 characters or more is 6.3% off): a converted deck changes only where a run is an
+    # outlier, and none of these is. Numbers keep their own correction.
+    moved = []
+    for d in decks:
+        for slide in d.plan.deck["slides"]:
+            for el in slide["elements"]:
+                paragraphs = [p["runs"] for p in el.get("paragraphs", [])] if el["kind"] == "text" else \
+                    [c for row in el["cells"] for c in row if c] if el["kind"] == "table" else \
+                    [runs for n in el["nodes"] for runs in n.get("paragraphs") or []] if el["kind"] == "diagram" else []
+                for runs in paragraphs:
+                    for r in runs:
+                        number = "".join(r["text"].split())
+                        if any(c in emit.DIGITS for c in number) and all(c in emit.NUMBER_CHARS for c in number):
+                            continue
+                        if emit.cm_face(r) and not r.get("smallcaps") and shape_of(r) != 1.0:
+                            moved.append((d.name, el["id"], r["text"][:40]))
+    assert not moved
+
+
+def test_deck_ir_reads_an_outlier_run_back_at_its_pdf_size():
+    from beamer2slides.deck_ir import pdf_size
+    for run in (run_of("SPEAKER NOTES AND CAPITALS: WHY NOT?", font="CMR10", family="serif"),
+                run_of("SPEAKER NOTES AND CAPITALS: WHY NOT?", 8.97, font="CMR9", family="serif"),
+                run_of("THE QUICK BROWN FOX JUMPS OVER", font="CMBX10", family="serif", bold=True)):
+        family, z = FONTS(run, SCALE)
+        assert z != FONTS(dict(run, text="The quick brown fox jumps over"), SCALE)[1]
+        size, _ = pdf_size(FONTS, family, z, run["bold"], False, SCALE, text=run["text"])
+        assert size == pytest.approx(run["size"], rel=0.01), run["text"]
 
 
 def number_table(x1: float) -> dict:
