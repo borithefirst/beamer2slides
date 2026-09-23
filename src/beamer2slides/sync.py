@@ -2126,7 +2126,72 @@ class Sync:
         overrides = self.override_requests(work, theirs, now, raw_objects(pres), raw_objects(raw))
         if overrides:
             rev = self.send("overrides", overrides, rev)
+            rev = self.refit(work, theirs, now, rev)
         self.final_revision = rev
+        return rev
+
+    def refit_jobs(self, work: dict, theirs: dict, created: dict) -> dict[str, list[dict]]:
+        """Slide id -> the recreated text units whose deck edits `override_requests` wrote over
+        them (`refit.plan`'s jobs). Only text boxes the layout model can read (explicit sizes: what
+        emit makes); placeholders and tables refilled in place are not recreated boxes."""
+        from . import text_layout as tl
+        pre = {s["objectId"]: s for s in created["slides"]}
+        before = {s["objectId"]: s for s in theirs["slides"]}
+        jobs: dict[str, list[dict]] = {}
+        for w in work["slides"]:
+            p = w["plan"]
+            s = pre.get(p.get("objectId"))
+            if p["action"] != "update" or s is None:
+                continue
+            o = self.ours["slides"][p["ours"]]
+            ounits, bunits = merge.units(o["elements"]), merge.units(self.base["slides"][p["base"]]["elements"])
+            index = {e["key"]: k for k, e in enumerate(o["elements"])}
+            for u in p["units"]:
+                if u["action"] != "recreate" or not u.get("overrides") or u["key"] not in index:
+                    continue
+                i = index[u["key"]]
+                main = w["new_oid"].get(i)
+                rb = s["objects"].get(main)
+                if (w.get("in_place") or {}).get(i) or not rb or not tl.text_box(rb) or rb.get("placeholder") \
+                        or tl.layout(rb) is None:
+                    continue
+                members = [m for m in ounits.get(u["key"], []) if m["key"] in index]
+                pics = [w["new_oid"][index[m["key"]]] for m in members[1:]
+                        if m.get("role") == "math" and index[m["key"]] in w["new_oid"]]
+                own = {x for m in members for x in w["objects"].get(index[m["key"]], [])} | {main}
+                old_main = (bunits.get(u["key"]) or [{}])[0].get("main")
+                jobs.setdefault(s["objectId"], []).append({
+                    "key": f"slide {p['key']}: {u['key']}", "text": main, "pictures": pics, "own": own,
+                    "doomed": set(w.get("doomed") or ()),
+                    "theirs": before.get(p["objectId"], {}).get("objects", {}).get(old_main)})
+        return jobs
+
+    def refit(self, work: dict, theirs: dict, created: dict, rev: str) -> str:
+        """The recreated boxes fitted to the words written into them (`refit`, docs/project-notes.md
+        "Merged text into recreated boxes"): formula pictures back over their holes, the box and a
+        block panel under it as tall as the merged text needs. What moved is recorded for the base
+        (`self.reshaped`, `refit.reshape_base`)."""
+        from . import refit
+        self.reshaped = {}
+        jobs = self.refit_jobs(work, theirs, created)
+        if not jobs:
+            return rev
+        final = snapshot.read_presentation(self.read())
+        fin = {s["objectId"]: s for s in final["slides"]}
+        pre = {s["objectId"]: s for s in created["slides"]}
+        before = {s["objectId"]: s for s in theirs["slides"]}
+        reqs, reshaped = [], {}
+        for sid, js in jobs.items():
+            if sid not in fin:
+                continue
+            r, shaped, warnings = refit.plan(js, pre[sid], fin[sid], final.get("page_size"), before.get(sid))
+            if r:
+                reqs += r + [BREAK]
+            reshaped.update(shaped)
+            self.warnings += warnings
+        if reqs:
+            rev = self.send("refit", reqs, rev)
+            self.reshaped = reshaped
         return rev
 
     def warn_about_folded_hiders(self, work: dict, now: dict) -> None:
@@ -2567,6 +2632,9 @@ class Sync:
             entries[sid] = entry
         slides = [entries.pop(sid) for sid in base_order(mplan, by_plan, [s["objectId"] for s in self.created["slides"]])
                   if sid in entries] + list(entries.values())
+        # what `refit` moved or grew is the converter's doing, not the person's (`refit.reshape_base`)
+        from .refit import reshape_base
+        slides = reshape_base(slides, getattr(self, "reshaped", None) or {})
         new = {**self.base, "generation": self.base.get("generation", 0) + 1, "revisionId": self.final_revision,
                "source": snapshot.source_info(self.ours["source"]), "slides": slides}
         pinned = set((self.theme_plan or {}).get("pinned") or ())
