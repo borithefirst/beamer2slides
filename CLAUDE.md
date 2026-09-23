@@ -174,6 +174,11 @@ Debugging classification locally: `debug/slide-NNN.png` (element boxes over the 
   fuzz steps offline; `LiveRound.step` writes `layout.json`. Live ground truth: the `layout-*`
   scenarios in `test_sync_live.py`, measured by `devtools/probe_layout.py` (docs/project-notes.md
   "Layout probes", "Layout oracle").
+- Live fuzz: `tools/fuzz_sync.py live --reuse [--focus layout|probes]` (a Drive copy of one
+  converted deck per round; edits batched, `--edits reread` the old way). `round.json` has cost,
+  reach and layout per step; keep `--parallel` at 3-4 under the write quota. Subprocesses never go
+  interactive (`devtools/counted.py`). `tools/fuzz_reach.py <archive>`: how often steps set up each
+  layout precondition (docs/project-notes.md "Live fuzzer efficiency").
 
 ## Agent tools (`src/beamer2slides/agent/`, docs/agent-tools.md)
 - Eleven tools, one per journey (`agent.tools.TOOLS`, ordered by `tools.ORDER`): `b2s_status`,

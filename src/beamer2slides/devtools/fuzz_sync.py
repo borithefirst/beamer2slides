@@ -1298,8 +1298,12 @@ def _free_box(rng, s, candidates, kind):
     return rng.choice(free) if free else None
 
 
-def random_spec(model, rng, donor=None):
-    """One human-like edit spec for the live deck, found by content (tools/deck_edits.py kinds)."""
+def random_spec(model, rng, donor=None, focus=None, aim=()):
+    """One human-like edit spec for the live deck, found by content (tools/deck_edits.py kinds).
+    `focus`: a name in FOCUS - draw one of its aims instead of a uniform kind (`focus_spec`), on
+    one of the slides in `aim` (objectIds) most of the time."""
+    if focus:
+        return focus_spec(model, rng, donor, FOCUS[focus], aim)
     slides = [s for s in model.slides if s.elements]
     if not slides:
         return None
@@ -1399,6 +1403,223 @@ def random_spec(model, rng, donor=None):
     return {"edit": "set_background", "args": {"slide": sel, "color": rng.choice(["#fff2cc", "#eaf1dd"])}}
 
 
+# ---------------------------------------------------------------- focused generation (--focus)
+#
+# The uniform draw above spreads a step over twenty kinds, and more than half of them (slides,
+# notes, backgrounds, font sizes, colours) can never set up a *layout* defect: that needs the
+# person's change and the source's re-layout on the same slide, and the same unit (devtools/
+# fuzz_reach.py measures which steps got there). A focused draw picks an aim - an edit made for one
+# of those preconditions - and, most of the time, a slide the step's source variant changes
+# (`variant_slides`), which is `src_collide`'s argument made live: the author revises the frame the
+# reader was editing. The recorded spec carries its `aim`, so the reach tables can tell them apart.
+
+FOOTER = re.compile(r"^\s*\d+\s*/\s*\d+\s*$")
+REMARKS = ("this is a longer remark the person typed, long enough to wrap onto another line of the box",
+           "a sentence added in the deck that runs on well past the width the converter measured")
+
+
+def _placeholder(e) -> str | None:
+    return (e.obj.get("shape", {}).get("placeholder") or {}).get("type") if e.kind == "shape" else None
+
+
+def _body_texts(s):
+    """Text boxes of a slide the person would write in: not its title, not the frame counter."""
+    return [e for e in s.elements if e.kind == "shape" and e.texts and _lines(e)
+            and _placeholder(e) not in ("TITLE", "CENTERED_TITLE") and not FOOTER.match(e.text)]
+
+
+def _aim_long_text(rng, model, s, sel, donor):
+    el = rng.choice(_body_texts(s) or [None])
+    return el and {"edit": "append_sentence", "args": {"slide": sel, "text": rng.choice(_lines(el)),
+                                                       "sentence": f"{rng.choice(REMARKS)} ({rng.randrange(1000)})."}}
+
+
+def _aim_new_paragraph(rng, model, s, sel, donor):
+    el = rng.choice(_body_texts(s) or [None])
+    return el and {"edit": "add_paragraph", "args": {"slide": sel, "text": rng.choice(_lines(el)),
+                                                     "paragraph": f"A point the person added, number {rng.randrange(1000)}"}}
+
+
+def _aim_hole(rng, model, s, sel, donor):
+    """Words typed or changed right in front of an inline formula (a run of no-break spaces)."""
+    lines = [l for e in _body_texts(s) for l in _lines(e) if "\xa0" in l]
+    if not lines:
+        return None
+    line = rng.choice(lines)
+    if rng.random() < 0.5:
+        return {"edit": "insert_before_hole", "args": {"slide": sel, "text": line,
+                                                       "words": f"{rng.choice(('roughly', 'exactly', 'plainly'))} {rng.randrange(1000)}"}}
+    words = line.split("\xa0")[0].split()
+    if not words or not words[-1].isalpha():
+        return None
+    return {"edit": "replace_word", "args": {"slide": sel, "text": line, "old": words[-1],
+                                             "new": words[-1] + "-considerably-longer"}}
+
+
+def _aim_move_text(rng, model, s, sel, donor):
+    el = rng.choice(_body_texts(s) or [None])
+    return el and {"edit": "move", "args": {"slide": sel, "target": {"text": rng.choice(_lines(el))},
+                                            "dx": rng.choice([-30, 0, 30]), "dy": rng.choice([-30, 30, 60])}}
+
+
+def _aim_note_below(rng, model, s, sel, donor):
+    """The person's own note just under a text or a table - where a list grows when the source adds
+    to it, and where a table grows when it gains a row."""
+    options = _body_texts(s) + [e for e in s.elements if e.kind == "table"]
+    if not options:
+        return None
+    el = rng.choice(options)
+    y = el.box[3] + rng.choice([2, 8, 16])
+    if y > 370:
+        return None
+    return {"edit": "add_text_box", "args": {"slide": sel, "text": f"note under it {rng.randrange(10 ** 6)}",
+                                             "box": [round(el.box[0] + rng.choice([0, 30]), 1), round(y, 1), 220, 28]}}
+
+
+def _grouped(s):
+    return [e for e in s.elements if e.groups and e.kind in ("shape", "table") and e.text and not FOOTER.match(e.text)]
+
+
+def _aim_group_move(rng, model, s, sel, donor):
+    el = rng.choice(_grouped(s) or [None])
+    return el and {"edit": "move", "args": {"slide": sel, "target": {"text": el.text[:50]},
+                                            "dx": rng.choice([-20, 20]), "dy": rng.choice([-20, 20, 40])}}
+
+
+def _aim_group_resize(rng, model, s, sel, donor):
+    el = rng.choice(_grouped(s) or [None])
+    return el and {"edit": "resize", "args": {"slide": sel, "target": {"text": el.text[:50]},
+                                              "sx": rng.choice([0.85, 1.15]), "sy": rng.choice([0.85, 1.0, 1.15])}}
+
+
+def _aim_group_pair(rng, model, s, sel, donor):
+    """The person groups a text of the converter's with its neighbour."""
+    tops = [e for e in s.elements if not e.groups and e.kind in ("shape", "image") and (e.text or e.kind == "image")
+            and not FOOTER.match(e.text) and _placeholder(e) not in ("TITLE", "CENTERED_TITLE")]
+    texts = [e for e in tops if e.text]
+    if len(tops) < 2 or not texts:
+        return None
+    a = rng.choice(texts)
+    b = rng.choice([e for e in tops if e is not a])
+    return {"edit": "group", "args": {"slide": sel, "targets": [
+        {"text": a.text[:50]}, {"text": b.text[:50]} if b.text else {"image_near": [round(v, 1) for v in b.center]}]}}
+
+
+def _aim_narrow(rng, model, s, sel, donor):
+    el = rng.choice(_body_texts(s) or [None])
+    return el and {"edit": "resize", "args": {"slide": sel, "target": {"text": rng.choice(_lines(el))},
+                                              "sx": rng.choice([0.7, 0.8]), "sy": 1.0}}
+
+
+def _aim_cell(rng, model, s, sel, donor):
+    """A table cell made long enough to wrap: the row grows, and the table with it."""
+    tables = [e for e in s.elements if e.kind == "table"]
+    if not tables:
+        return None
+    cells = [" ".join(raw.split()) for raw, _ in rng.choice(tables).texts if raw.strip()]
+    if not cells:
+        return None
+    return {"edit": "append_sentence", "args": {"slide": sel, "text": rng.choice(cells),
+                                                "sentence": f"(measured again by hand, {rng.randrange(1000)} runs)"}}
+
+
+def _table_anchor(rng, s):
+    tables = [e for e in s.elements if e.kind == "table"]
+    if len(tables) != 1:
+        return None, None
+    cells = [" ".join(raw.split()) for raw, c in tables[0].texts if raw.strip() and c]
+    return (tables[0], rng.choice(cells)) if cells else (None, None)
+
+
+def _aim_row(rng, model, s, sel, donor):
+    """A row the person added: the table is taller than the source's before the source moves it."""
+    table, text = _table_anchor(rng, s)
+    if not table:
+        return None
+    n = rng.randrange(1000)
+    words = [f"Case {n}", f"{rng.randint(50, 100)}%", f"{rng.randint(10, 99) / 10} s", "by hand"]
+    return {"edit": "insert_table_row", "args": {"slide": sel, "text": text,
+                                                 "cells": words[:table.obj["table"]["columns"]]}}
+
+
+def _aim_column(rng, model, s, sel, donor):
+    table, text = _table_anchor(rng, s)
+    if not table:
+        return None
+    n = rng.randrange(1000)
+    cells = [f"Note {n}"] + [f"r{n}-{i}" for i in range(1, table.obj["table"]["rows"])]
+    return {"edit": "insert_table_column", "args": {"slide": sel, "text": text, "cells": cells}}
+
+
+AIMS = {"long_text": _aim_long_text, "new_paragraph": _aim_new_paragraph, "hole": _aim_hole,
+        "move_text": _aim_move_text, "note_below": _aim_note_below, "group_move": _aim_group_move,
+        "group_resize": _aim_group_resize, "group_pair": _aim_group_pair, "narrow": _aim_narrow,
+        "cell": _aim_cell, "row": _aim_row, "column": _aim_column}
+# aim -> weight; "uniform" is one draw of the default generator, so a focused campaign still
+# touches everything the general one does, only less often.
+FOCUS = {"layout": {"long_text": 3, "new_paragraph": 2, "hole": 3, "move_text": 2, "note_below": 3,
+                    "group_move": 2, "group_resize": 1, "group_pair": 1, "narrow": 1, "cell": 2,
+                    "row": 2, "column": 1, "uniform": 3}}
+# the same aims, on a round that starts from the layout probe frames (`start_variant`)
+FOCUS["probes"] = FOCUS["layout"]
+AIMED = 0.75   # how often a focused edit goes to a slide the step's variant changes
+
+
+def focus_spec(model, rng, donor, weights: dict, aim=()):
+    """One edit drawn for an aim (`FOCUS`), on a slide of `aim` (objectIds) with probability AIMED."""
+    names = sorted(weights)
+    name = rng.choices(names, [weights[n] for n in names])[0]
+    if name == "uniform":
+        return random_spec(model, rng, donor)
+    slides = [s for s in model.slides if s.elements]
+    aimed = [s for s in slides if s.id in set(aim)]
+    if not slides:
+        return None
+    s = rng.choice(aimed) if aimed and rng.random() < AIMED else rng.choice(slides)
+    spec = AIMS[name](rng, model, s, _unique_slide(model, s), donor)
+    if spec:
+        spec["aim"] = name
+    return spec
+
+
+# Variants and the slides they change, for the focused draw. A flag that re-lays text on a slide
+# (rewords it, adds or removes a line, changes a formula, a block, a table) is what a layout defect
+# needs from the source side; one that only renames, reorders or notes is worth less to it.
+REFLOWS = {"reword": 1, "addbullet": 1, "removebullet": 1, "formula": 1, "blockedit": 1, "tablemove": 1,
+           "tablerow": 1, "numbers": 1, "tablecell": 0.5, "figure": 0.5, "retitle": 0.25, "untitled": 0.25}
+
+
+def start_variant(focus: str | None) -> str:
+    """The variant a round converts first: v1, or `probes` for --focus probes (the layout probe
+    frames of tests/decks/sync, which only its probes-* variants change)."""
+    return "probes" if focus == "probes" else "v1"
+
+
+def variant_weights(build, focus: str | None) -> dict[str, float]:
+    """variant -> weight of being drawn: uniform by default, by what it re-lays when focused."""
+    if focus == "probes":
+        return {v: 1.0 for v in build.VARIANTS if v.startswith("probes-")}
+    variants = [v for v in build.VARIANTS if v != "v1"]
+    if not focus:
+        return {v: 1.0 for v in variants}
+    return {v: 0.25 + sum(REFLOWS.get(f, 0) for f in build.VARIANTS[v]) for v in variants}
+
+
+def variant_slides(build, variant: str) -> set[str]:
+    """The titles of the slides `variant` changes (build.INTENDED, whose items are "<title>: ...",
+    and PROBE_INTENDED for the probe edits; a slide it adds or deletes is no place for the
+    person's edit)."""
+    out = set()
+    intended = {**build.INTENDED, **{k: v for k, v in getattr(build, "PROBE_INTENDED", {}).items() if v}}
+    for flag in build.VARIANTS[variant]:
+        for item in intended.get(flag, []):
+            if ": " in item and not item.startswith(("slide+", "slide-", "order ")):
+                out.add(item.split(": ", 1)[0])
+    if "reorder" in build.VARIANTS[variant]:
+        out |= {"Merge policy", "Results"}
+    return out
+
+
 # Failures whose cause is already known and pinned by a test, so a live round that hits one says
 # what it is instead of leaving a reviewer with a stack trace.
 KNOWN_CAUSES = (
@@ -1416,20 +1637,144 @@ def known_cause(log: Path) -> str | None:
     return next((why for sign, why in KNOWN_CAUSES if sign in text), None)
 
 
+SLIDE_EDITS = ("add_slide", "duplicate_slide", "delete_slide", "move_slide")
+
+
+def stale(deck, spec: dict) -> bool:
+    """Whether a deferred `deck` must send what it queued and read again before `spec` can be found
+    the way a fresh read would find it: the edit's slide has queued changes, slides came, went or
+    moved and the edit is about slide order, or its selector cannot be told apart without a read
+    (a `contains` selector reads text on every slide, an index counts slides)."""
+    if not getattr(deck, "defer", False) or not deck.pending:
+        return False
+    args = spec.get("args") or {}
+    sels = [args[k] for k in ("slide", "after") if k in args]
+    if deck.reshaped and (spec["edit"] in SLIDE_EDITS or any(isinstance(s, dict) and "index" in s for s in sels)):
+        return True
+    for sel in sels:
+        if isinstance(sel, dict) and "contains" in sel and deck.dirty:
+            return True
+        found = deck.model.find(sel)
+        if len(found) != 1 or found[0].id in deck.dirty:
+            return True
+    return False
+
+
+class Cost:
+    """Where a live round's time goes: seconds, Google calls, retries and the seconds slept backing
+    off, per phase. What this thread calls is counted by `gslides.count_thread`; what a `convert` or
+    `sync` subprocess calls comes back in the file `devtools.counted` writes (`subprocess`). Each
+    phase is also added to the step it ran in, so round.json says both."""
+
+    KEYS = ("calls", "retries", "backoff_s", "rate_limited")
+
+    def __init__(self):
+        from beamer2slides.gslides import count_thread
+        self.api = count_thread()   # (a round runs on one thread of the pool, start to end)
+        self.phases: dict[str, Counter] = {}
+        self.step: dict[str, Counter] | None = None
+
+    @classmethod
+    def kept(cls, key: str) -> bool:
+        # (call <methodId>: what was asked - writes are what the per-user quota counts; retry
+        #  <methodId> <status>: who was refused)
+        return key in cls.KEYS or key.startswith(("call ", "retry "))
+
+    def start(self, name: str):
+        return name, time.monotonic(), Counter({k: v for k, v in self.api.items() if self.kept(k)})
+
+    def stop(self, mark, extra: dict | None = None, **counts) -> None:
+        name, t0, was = mark
+        d = Counter({"s": time.monotonic() - t0, "n": 1})
+        d.update({k: v - was[k] for k, v in list(self.api.items()) if self.kept(k)})
+        d.update({k: v for k, v in (extra or {}).items() if self.kept(k)})
+        d.update(counts)
+        for into in (self.phases, self.step):
+            if into is not None:
+                into.setdefault(name, Counter()).update(d)
+
+    @staticmethod
+    def subprocess(path: Path) -> dict:
+        try:
+            return json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return {}
+
+    @staticmethod
+    def plain(phases: dict) -> dict:
+        return {k: {f: round(v, 2) if isinstance(v, float) else v for f, v in c.items() if v}
+                for k, c in phases.items()}
+
+
+class Template:
+    """One converted v1 deck that rounds copy (`--reuse`) instead of each converting its own.
+
+    Drive's `files.copy` of a Slides file keeps every objectId - slides, their notes pages, the
+    elements, the layouts - so the base `convert` wrote describes the copy as well as it describes
+    the original once its presentationId is replaced. The two things that must not come along are
+    the original's *Drive* base (`appProperties.b2sBase`: the copy would sync against, and write
+    into, the template's base file) and its cleanup marker; they are cleared on the copy, and the
+    copy's first sync stores a base file of its own from the folder's copy (snapshot.load_base
+    reads the local one when Drive names none). Measured and checked in docs/project-notes.md,
+    "Live fuzzer efficiency"."""
+
+    def __init__(self, out: Path, log):
+        self.out, self.log = out, log
+
+    def make(self, build, variant: str = "v1"):
+        """Convert `variant` into `out` once (the deck is kept until the run drops it)."""
+        self.out.mkdir(parents=True, exist_ok=True)
+        done = subprocess.run([sys.executable, "-m", "beamer2slides.devtools.counted", "convert", str(build.build(variant)),
+                               "--out", str(self.out)], env=ENV, cwd=ROOT, stdout=self.log, stderr=subprocess.STDOUT)
+        if done.returncode:
+            raise RuntimeError(f"the template conversion failed, see {self.log.name}")
+        self.pid = json.loads((self.out / "emit.json").read_text(encoding="utf-8"))["presentationId"]
+        return self
+
+    def copy_into(self, out: Path, name: str) -> str:
+        """A copy of the template deck, and `out` set up as its convert folder. Returns its id."""
+        from beamer2slides import snapshot
+        from beamer2slides.google_auth import drive_service
+        from beamer2slides.gslides import execute
+        drive = drive_service()
+        pid = execute(drive.files().copy(fileId=self.pid, fields="id,appProperties", body={"name": name}))["id"]
+        execute(drive.files().update(fileId=pid, fields="id", body={"appProperties": {
+            snapshot.BASE_PROPERTY: None, snapshot.CLEANED_PROPERTY: None}}))
+        for p in self.out.rglob("*"):
+            if p.is_file() and p.suffix != ".log":
+                to = out / p.relative_to(self.out)
+                to.parent.mkdir(parents=True, exist_ok=True)
+                if p.suffix == ".json":
+                    to.write_text(p.read_text(encoding="utf-8").replace(self.pid, pid), encoding="utf-8")
+                else:
+                    shutil.copyfile(p, to)
+        return pid
+
+
 class LiveRound:
-    def __init__(self, seed: int, out: Path, chain: int, keep_decks: bool):
+    def __init__(self, seed: int, out: Path, chain: int, keep_decks: bool, edits: str = "batched",
+                 focus: str | None = None, template: Template | None = None):
         self.seed, self.out, self.chain, self.keep = seed, out, chain, keep_decks
+        self.edits, self.focus, self.template = edits, focus, template
         self.out.mkdir(parents=True, exist_ok=True)
         self.log = open(self.out / "fuzz.log", "w", encoding="utf-8")
         self.problems: list[str] = []
-        self.record: dict = {"seed": seed, "steps": []}
+        self.record: dict = {"seed": seed, "steps": [], "edits_mode": edits, "focus": focus,
+                             "reuse": template is not None}
         self.loose: set[str] = set()  # slides whose groups the person took apart, in any step so far
+        self.cost = Cost()
+        self.pres_after = None        # the last read of the deck after a sync (the next step's model)
 
     def cli(self, *args, check=True):
         self.log.write(f"\n$ beamer2slides {' '.join(map(str, args))}\n")
         self.log.flush()
-        done = subprocess.run([sys.executable, "-m", "beamer2slides", *map(str, args)], env=ENV, cwd=ROOT,
+        stats = self.out / f"api-{args[0]}.json"
+        stats.unlink(missing_ok=True)
+        mark = self.cost.start(args[0])
+        done = subprocess.run([sys.executable, "-m", "beamer2slides.devtools.counted", *map(str, args)],
+                              env={**ENV, "B2S_API_STATS": str(stats)}, cwd=ROOT,
                               stdout=self.log, stderr=subprocess.STDOUT)
+        self.cost.stop(mark, Cost.subprocess(stats))
         if check and done.returncode:
             raise RuntimeError(f"beamer2slides {args[0]} failed, see {self.out / 'fuzz.log'}")
         return done
@@ -1445,50 +1790,124 @@ class LiveRound:
         snapshot.sign_pictures(read, pres)
         return pres, read
 
-    def run(self, specs: list[list[dict]] | None = None):
-        from .deck_edits import LiveDeck, apply as apply_edit
+    def start_deck(self, build):
+        """The round's v1 deck: converted, or copied from the template (`--reuse`)."""
+        from .deck_edits import LiveDeck
+        if self.template is None:
+            self.cli("convert", build.build(start_variant(self.focus)), "--out", self.out)
+            pid = None
+        else:
+            mark = self.cost.start("copy")
+            pid = self.template.copy_into(self.out, f"b2s fuzz {self.out.parent.name}/{self.out.name}")
+            self.cost.stop(mark)
+        pid = pid or json.loads((self.out / "emit.json").read_text(encoding="utf-8"))["presentationId"]
+        mark = self.cost.start("edits")
+        self.deck = LiveDeck(pid, defer=self.edits == "batched")
+        self.cost.stop(mark, reads=1)
+        base = json.loads((self.out / "sync" / "base.json").read_text(encoding="utf-8"))
+        self.slide_ids = {s.get("title"): s.get("objectId") for s in base["slides"]}  # v1 title -> slide
+        if self.template is not None:
+            # The copy is only a converted deck if every object the base names is in it by that id.
+            have = {s.id for s in self.deck.model.slides} | {e.id for s in self.deck.model.slides for e in s.elements}
+            named = {s["objectId"] for s in base["slides"]} | {
+                o for s in base["slides"] for e in s.get("elements") or [] for o in e.get("objects") or []}
+            missing = sorted(named - have)
+            self.record["reuse_ids"] = {"named": len(named), "missing": len(missing)}
+            if missing:
+                raise RuntimeError(f"the copy of the template lacks {len(missing)} ids the base names: {missing[:5]}")
+        self.record["deck"] = f"https://docs.google.com/presentation/d/{self.deck.pid}/edit"
+
+    def run(self, specs: list[list[dict]] | None = None, replay_variants: list[str] | None = None):
         build = sync_build()
         rng = random.Random(self.seed)
-        variants = [v for v in build.VARIANTS if v != "v1"]
+        weights = variant_weights(build, self.focus)
+        variants = sorted(weights)
         self.clear_previous()
-        self.cli("convert", build.build("v1"), "--out", self.out)
-        self.deck = LiveDeck(json.loads((self.out / "emit.json").read_text(encoding="utf-8"))["presentationId"])
-        self.record["deck"] = f"https://docs.google.com/presentation/d/{self.deck.pid}/edit"
+        started = time.monotonic()
+        self.start_deck(build)
         for step in range(self.chain):
-            self.deck.read()
-            donor = self._donor()
-            done = []
-            if specs is not None and step < len(specs):
-                for spec in specs[step]:
-                    try:
-                        apply_edit(self.deck, spec)
-                        done.append(spec)
-                    except Exception as e:  # noqa: BLE001 (a replayed edit may no longer fit)
-                        self.log.write(f"replay skipped {json.dumps(spec)}: {e}\n")
-            else:
-                wanted = rng.randint(MIN_EDITS, MAX_EDITS)
-                for _ in range(wanted * 4):
-                    if len(done) >= wanted:
-                        break
-                    spec = random_spec(self.deck.model, rng, donor)
-                    if not spec:
-                        continue
-                    try:
-                        apply_edit(self.deck, spec)
-                        done.append(spec)
-                    except Exception as e:  # noqa: BLE001 (an edit that doesn't fit this deck)
-                        self.log.write(f"skipped {json.dumps(spec)}: {e}\n")
-                        self.deck.read()
-            variant = rng.choice(variants)
+            self.cost.step = {}
+            # A focused round knows its source before the person edits, so the edits can go where
+            # the source will change things; the default draws it after, as it always has.
+            variant = rng.choices(variants, [weights[v] for v in variants])[0] if self.focus else None
+            aim = {self.slide_ids.get(t) for t in variant_slides(build, variant)} - {None} if variant else set()
+            mark = self.cost.start("edits")
+            reads, writes = self.deck.reads, self.deck.writes
+            done = self.edit_step(rng, specs[step] if specs is not None and step < len(specs) else None, aim)
+            self.cost.stop(mark, reads=self.deck.reads - reads, writes=self.deck.writes - writes, edits=len(done))
+            variant = variant or rng.choice(variants)
+            if replay_variants and step < len(replay_variants):
+                variant = replay_variants[step]   # (a replay's edits drew nothing: the dice moved on)
             self.step(step, done, variant, build)
+        self.record["cost"] = {"seconds": round(time.monotonic() - started, 1), "phases": Cost.plain(self.cost.phases)}
         return self.problems
 
-    def _donor(self):
-        from .deck_edits import donor_image_url
+    def edit_step(self, rng, replay: list[dict] | None, aim=()) -> list[dict]:
+        """The person's edits of one step: replayed, or drawn (`random_spec`) and applied.
+
+        `edits="reread"` is the way it always was: the deck read at the start, an edit sent as its
+        own batchUpdate, the deck read again after each. `"batched"` (`LiveDeck(defer=True)`) reads
+        once - the read the last sync step already made, when there is one - queues the edits, and
+        reads again only when a drawn edit falls on a slide a queued one has touched (it is then
+        drawn again from the new read: every edit is found in a read that is current for its slide,
+        which is what the reread way gives too). A step is one or two batchUpdates instead of eight."""
+        from .deck_edits import apply as apply_edit, donor_from
+        deck = self.deck
+        if deck.defer and self.pres_after is not None:
+            deck.adopt(self.pres_after)
+        elif deck.defer and deck.pending:
+            deck.flush()
+        else:
+            deck.read()
         try:
-            return donor_image_url(self.deck.api, self.deck.pid)
-        except Exception:  # noqa: BLE001
-            return None
+            donor = donor_from(deck.model.pres)
+        except Exception:  # noqa: BLE001 (a deck with no picture left to borrow)
+            donor = None
+        done, queued = [], []
+
+        def flush():
+            refused = set(deck.flush())
+            for i, spec in enumerate(queued):
+                if i in refused:
+                    self.log.write(f"refused {json.dumps(spec)}\n")
+                else:
+                    done.append(spec)
+            queued.clear()
+
+        def attempt(spec, what):
+            n = len(deck.pending)
+            try:
+                apply_edit(deck, spec)
+            except Exception as e:  # noqa: BLE001 (an edit that doesn't fit this deck)
+                self.log.write(f"{what} {json.dumps(spec)}: {e}\n")
+                if not deck.defer:
+                    deck.read()
+                return
+            if deck.defer:
+                queued.extend([spec] * (len(deck.pending) - n))
+            else:
+                done.append(spec)
+
+        if replay is not None:
+            for spec in replay:
+                if stale(deck, spec):
+                    flush()
+                    deck.read()
+                attempt(spec, "replay skipped")
+        else:
+            wanted = rng.randint(MIN_EDITS, MAX_EDITS)
+            for _ in range(wanted * 4):
+                if len(done) + len(queued) >= wanted:
+                    break
+                spec = random_spec(deck.model, rng, donor, self.focus, aim)
+                if spec and stale(deck, spec):
+                    flush()
+                    deck.read()
+                    spec = random_spec(deck.model, rng, donor, self.focus, aim)
+                if spec:
+                    attempt(spec, "skipped")
+        flush()
+        return done
 
     def step(self, step: int, specs: list[dict], variant: str, build):
         from beamer2slides import snapshot
@@ -1496,15 +1915,22 @@ class LiveRound:
         folder.mkdir(exist_ok=True)
         base = json.loads((self.out / "sync" / "base.json").read_text(encoding="utf-8"))
         (folder / "base.json").write_text(json.dumps(base), encoding="utf-8")
+        mark = self.cost.start("snapshot")
         pres_before, before = self.snapshot()
+        self.cost.stop(mark)
         (folder / "before.json").write_text(json.dumps(before), encoding="utf-8")
         (folder / "edits.json").write_text(json.dumps(specs, indent=1, ensure_ascii=False), encoding="utf-8")
+        mark = self.cost.start("build")
         pdf = build.build(variant)
+        self.cost.stop(mark)
         self.cli("sync", pdf, "--deck", self.out)
         report = json.loads((self.out / "sync" / "sync-report.json").read_text(encoding="utf-8"))
         (folder / "report.json").write_text(json.dumps(report), encoding="utf-8")
+        mark = self.cost.start("snapshot")
         pres_after, after = self.snapshot()
+        self.cost.stop(mark)
         (folder / "after.json").write_text(json.dumps(after), encoding="utf-8")
+        judged = self.cost.start("judge")
         ours = self.ours(pdf, base, folder)
         findings = loss_oracle.check(base, before, after, report, ours)
         (folder / "findings.json").write_text(json.dumps(findings, indent=1, ensure_ascii=False), encoding="utf-8")
@@ -1517,6 +1943,29 @@ class LiveRound:
         self.problems += [f"step {step} ({variant}): layout: {layout_oracle.describe([f]).strip()}"
                           for f in layout_oracle.failures(layout)]
         self.problems += [f"step {step} ({variant}): integrity: {p}" for p in self.integrity(pres_before, pres_after, specs)]
+        self.cost.stop(judged)
+        self.after_step(base, before, after, report, pres_after, folder)
+
+    def after_step(self, base, before, after, report, pres_after, folder: Path):
+        """What a step cost, which layout preconditions it reached (`fuzz_reach`) and what the layout
+        oracle said of it (`layout.json`, written by the judging lines above: kind -> severity
+        counts), onto the step record; and the read after the sync kept as the next step's model.
+        The reach is the proxy, the oracle the verdict: a campaign whose reach is high and whose
+        findings stay at zero is one whose oracle to question next."""
+        from . import fuzz_reach
+        rec = self.record["steps"][-1]
+        rec["cost"] = Cost.plain(self.cost.step or {})
+        try:
+            layout = json.loads((folder / "layout.json").read_text(encoding="utf-8"))
+            rec["layout"] = {f"{f['kind']}:{f['severity']}": sum(1 for g in layout if (g["kind"], g["severity"]) ==
+                                                                   (f["kind"], f["severity"])) for f in layout}
+        except (OSError, ValueError, KeyError, TypeError):
+            pass
+        try:
+            rec["reach"] = {k: v for k, v in fuzz_reach.step_reach(base, before, after, report).items() if v}
+        except Exception as e:  # noqa: BLE001 (a proxy must never fail a round)
+            self.log.write(f"reach: {type(e).__name__}: {e}\n")
+        self.pres_after = pres_after
 
     def ours(self, pdf: Path, base: dict, folder: Path):
         """The new conversion the sync used, rebuilt offline (no Google call) so the oracle can tell
@@ -1595,10 +2044,12 @@ class LiveRound:
                 p.unlink(missing_ok=True)
 
 
-def live_round(seed: int, out_root: Path, chain: int, keep_decks: bool, specs=None) -> dict:
-    r = LiveRound(seed, out_root / f"r{seed:03}", chain, keep_decks)
+def live_round(seed: int, out_root: Path, chain: int, keep_decks: bool, specs=None, variants=None, **opts) -> dict:
+    """One live round; `opts` are LiveRound's (edits, focus, template). A replay passes the recorded
+    `specs` and `variants` (without them the replayed steps would draw other variants)."""
+    r = LiveRound(seed, out_root / f"r{seed:03}", chain, keep_decks, **opts)
     try:
-        problems = r.run(specs)
+        problems = r.run(specs, variants)
         r.record["problems"] = problems
         (r.out / "round.json").write_text(json.dumps(r.record, indent=1, ensure_ascii=False, default=str), encoding="utf-8")
         if not problems and not keep_decks:
@@ -1609,13 +2060,14 @@ def live_round(seed: int, out_root: Path, chain: int, keep_decks: bool, specs=No
         r.log.flush()
         why = known_cause(r.out / "fuzz.log")
         r.record["problems"] = [f"{type(e).__name__}: {e}" + (f" [{why}]" if why else "")]
+        r.record.setdefault("cost", {"phases": Cost.plain(r.cost.phases)})
         (r.out / "round.json").write_text(json.dumps(r.record, indent=1, ensure_ascii=False, default=str), encoding="utf-8")
         return r.record
     finally:
         r.log.close()
 
 
-def shrink_live(record: dict, out_root: Path, chain: int) -> dict:
+def shrink_live(record: dict, out_root: Path, chain: int, **opts) -> dict:
     """Replay the round with one edit dropped at a time (the last failing step only)."""
     steps = [s["edits"] for s in record["steps"]]
     failing = next((i for i, s in enumerate(record["steps"]) if s["findings"]), None)
@@ -1627,7 +2079,8 @@ def shrink_live(record: dict, out_root: Path, chain: int) -> dict:
     while i < len(steps[failing]):
         trial = [list(x) for x in steps]
         dropped = trial[failing].pop(i)
-        got = live_round(record["seed"], out_root / "shrink", failing + 1, True, trial)
+        got = live_round(record["seed"], out_root / "shrink", failing + 1, True, trial,
+                         [s["variant"] for s in record["steps"]], **opts)
         if any(s["findings"] for s in got["steps"]):
             steps, best = trial, got
             print(f"  shrink: dropping {dropped['edit']} keeps it failing ({len(steps[failing])} edits left)")
@@ -1637,19 +2090,69 @@ def shrink_live(record: dict, out_root: Path, chain: int) -> dict:
     return best
 
 
-def run_live(rounds: int, seed0: int, parallel: int, chain: int, keep_decks: bool, out_root: Path, shrink: bool):
+WRITE = "call slides.presentations.batchUpdate"   # what the per-user write quota counts
+
+
+def summary(records: list[dict], wall: float, parallel: int) -> str:
+    """What the run cost and reached: rounds/hour at this --parallel, seconds per step, each
+    phase's seconds per step, Google calls, retries and backoff (all threads and subprocesses),
+    and how many steps reached each layout precondition (devtools/fuzz_reach.py)."""
+    phases: dict[str, Counter] = {}
+    for r in records:
+        for name, c in ((r.get("cost") or {}).get("phases") or {}).items():
+            phases.setdefault(name, Counter()).update(c)
+    steps = sum(len(r.get("steps") or []) for r in records) or 1
+    total = Counter()
+    for c in phases.values():
+        total.update({k: c.get(k, 0) for k in ("calls", "retries", "backoff_s", "rate_limited", WRITE)})
+    busy = sum((r.get("cost") or {}).get("seconds", 0) for r in records)
+    order = ("convert", "copy", "edits", "snapshot", "build", "sync", "judge")
+    per = "  ".join(f"{k} {phases[k]['s'] / steps:.1f}" for k in order if k in phases)
+    reach = Counter(p for r in records for s in r.get("steps") or [] for p in (s.get("reach") or {}))
+    layout = Counter(k for r in records for s in r.get("steps") or [] for k in (s.get("layout") or {}))
+    from .fuzz_reach import PRECONDITIONS
+    return (f"cost: {len(records)} rounds, {steps} steps in {wall:.0f} s at --parallel {parallel}: "
+            f"{3600 * len(records) / max(wall, 1):.1f} rounds/h, {busy / steps:.1f} s per step (one round's clock)\n"
+            f"  s per step by phase: {per}\n"
+            f"  Google: {total['calls']:.0f} calls ({total['calls'] / steps:.0f}/step), {total['retries']:.0f} retries, "
+            f"{total['rate_limited']:.0f} rate-limited, {total['backoff_s']:.0f} s backing off, "
+            f"{60 * total[WRITE] / max(wall, 1):.0f} batchUpdates/min\n"
+            f"  reach (steps): " + ", ".join(f"{p} {reach[p]}" for p in PRECONDITIONS) + "\n"
+            f"  layout oracle (steps with a finding): " + (", ".join(f"{k} {n}" for k, n in sorted(layout.items())) or "none"))
+
+
+def run_live(rounds: int, seed0: int, parallel: int, chain: int, keep_decks: bool, out_root: Path, shrink: bool,
+             edits: str = "batched", focus: str | None = None, reuse: bool = False):
     out_root.mkdir(parents=True, exist_ok=True)
     seeds = list(range(seed0, seed0 + rounds))
-    with ThreadPoolExecutor(max_workers=parallel) as pool:
-        records = list(pool.map(lambda s: live_round(s, out_root, chain, keep_decks), seeds))
-    bad = [r for r in records if r.get("problems")]
-    for r in bad:
-        print(f"\nseed {r['seed']}: {len(r['problems'])} problem(s), {r.get('deck')}")
-        for p in r["problems"]:
-            print(f"  {p}")
-        if shrink and r.get("steps"):
-            shrink_live(r, out_root, chain)
+    started = time.monotonic()
+    template = None
+    if reuse:
+        with open(out_root / "template.log", "w", encoding="utf-8") as log:
+            template = Template(out_root / "_template", log).make(sync_build(), start_variant(focus))
+    opts = {"edits": edits, "focus": focus, "template": template}
+    try:
+        with ThreadPoolExecutor(max_workers=parallel) as pool:
+            records = list(pool.map(lambda s: live_round(s, out_root, chain, keep_decks, **opts), seeds))
+        wall = time.monotonic() - started
+        bad = [r for r in records if r.get("problems")]
+        for r in bad:
+            print(f"\nseed {r['seed']}: {len(r['problems'])} problem(s), {r.get('deck')}")
+            for p in r["problems"]:
+                print(f"  {p}")
+            if shrink and r.get("steps"):
+                shrink_live(r, out_root, chain, **opts)
+    finally:
+        if template is not None and not keep_decks:
+            dropper = LiveRound.__new__(LiveRound)
+            dropper.log = sys.stderr
+            dropper.drop_deck(template.pid)
     print(f"\n{len(records) - len(bad)}/{len(records)} live rounds clean")
+    line = summary(records, wall, parallel)
+    print(line)
+    (out_root / "summary.json").write_text(json.dumps({"rounds": len(records), "wall": round(wall, 1), "parallel": parallel,
+                                                        "chain": chain, "edits": edits, "focus": focus, "reuse": reuse,
+                                                        "seeds": seeds, "summary": line}, indent=1), encoding="utf-8")
     return bad
 
 
@@ -1671,6 +2174,17 @@ def main() -> int:
                          "deck has never been written to, its objects are a person's, and some of them are "
                          "not paired with the source (implies --shape adopt)")
     ap.add_argument("--keep-decks", action="store_true", help="live: don't delete the decks of passing rounds")
+    ap.add_argument("--edits", choices=["batched", "reread"], default="batched",
+                    help="live: queue a step's edits into one batchUpdate and read only when an edit falls on a "
+                         "slide a queued one touched (batched), or send each edit and read the deck after it "
+                         "(reread, the old way)")
+    ap.add_argument("--focus", choices=sorted(FOCUS),
+                    help="live: draw edits aimed at layout preconditions, on the slides the step's variant "
+                         "changes, and variants by how much they re-lay (default: uniform, as always); "
+                         "probes: the same aims on rounds that start from the layout probe frames and sync "
+                         "probes-reword / probes-push")
+    ap.add_argument("--reuse", action="store_true",
+                    help="live: convert v1 once and give each round a Drive copy of that deck (and its base)")
     ap.add_argument("--out", type=Path, default=Path(os.environ.get("B2S_FUZZ_OUT", ROOT / "out" / "sync-fuzz")))
     args = ap.parse_args()
 
@@ -1690,15 +2204,26 @@ def main() -> int:
         print(f"{args.rounds - len(bad)}/{args.rounds} offline rounds clean in {time.monotonic() - started:.1f} s")
         return 1 if bad else 0
 
+    # A live campaign runs unattended: a token that can no longer be refreshed stops it here, not in
+    # a browser tab per round (`counted.never_interactive`; its subprocesses run under it too).
+    from .counted import NeedsConsent, never_interactive, quiet_credentials
+    try:
+        quiet_credentials()
+    except NeedsConsent as e:
+        print(f"live fuzzing needs Google: {e}", file=sys.stderr)
+        return 2
+    never_interactive()
     if args.replay is not None:
         folder = args.out / f"r{args.replay:03}"
-        specs = None
+        specs = variants = None
         if (folder / "round.json").exists():
-            specs = [s["edits"] for s in json.loads((folder / "round.json").read_text(encoding="utf-8"))["steps"]]
-        record = live_round(args.replay, args.out, args.chain, True, specs)
+            steps = json.loads((folder / "round.json").read_text(encoding="utf-8"))["steps"]
+            specs, variants = [s["edits"] for s in steps], [s["variant"] for s in steps]
+        record = live_round(args.replay, args.out, args.chain, True, specs, variants, edits=args.edits, focus=args.focus)
         print(json.dumps(record.get("problems"), indent=1))
         return 1 if record.get("problems") else 0
-    bad = run_live(args.rounds, args.seed, args.parallel, args.chain, args.keep_decks, args.out, not args.no_shrink)
+    bad = run_live(args.rounds, args.seed, args.parallel, args.chain, args.keep_decks, args.out, not args.no_shrink,
+                   edits=args.edits, focus=args.focus, reuse=args.reuse)
     return 1 if bad else 0
 
 

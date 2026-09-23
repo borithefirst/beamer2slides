@@ -24,23 +24,97 @@ from .sync_check import (EMU_PER_PT, CheckError, Model, check_all, norm, phrase_
 
 
 class LiveDeck:
-    """A presentation being edited: the API and the latest read-back."""
+    """A presentation being edited: the API and the latest read-back.
 
-    def __init__(self, pid: str, api=None):
+    By default every `batch` is sent at once and the deck read again, so `model` is always the
+    deck as it stands. `defer=True` is the fuzzer's cheaper way (devtools/fuzz_sync.py): a batch is
+    queued, `model` stays the read it was, and `dirty` / `reshaped` say what the queued requests
+    touched - the slides whose objects or text they change, and whether slides came, went or moved
+    (which is what makes an index stale). An edit found by content on a slide nothing queued has
+    touched is found exactly as a fresh read would find it, so the caller only has to `flush()` and
+    `read()` before an edit on a dirty slide. `flush` sends the queue as one batchUpdate and, when
+    Google refuses it, each queued edit alone, so one edit that no longer fits costs only itself.
+    No edit reads the model after its own batch: every expectation is worked out from the read
+    the edit was found in, which is what makes the two ways give the same answers."""
+
+    def __init__(self, pid: str, api=None, pres: dict | None = None, defer: bool = False):
         from beamer2slides.google_auth import slides_service
-        self.pid, self.api = pid, api or slides_service()
-        self.model = self.read()
+        self.pid, self.api, self.defer = pid, api or slides_service(), defer
+        self.pending: list[list[dict]] = []
+        self.dirty: set[str] = set()
+        self.reshaped = False
+        self.reads = self.writes = 0
+        self.model = Model(pres) if pres is not None else self.read()
 
     def read(self) -> Model:
         from beamer2slides.gslides import execute
-        self.model = Model(execute(self.api.presentations().get(presentationId=self.pid)))
+        if self.pending:
+            self.flush()
+        self.reads += 1
+        return self.adopt(execute(self.api.presentations().get(presentationId=self.pid)))
+
+    def adopt(self, pres: dict) -> Model:
+        """Take a presentations.get somebody else made of this deck as the current read."""
+        self.model = Model(pres)
+        self.dirty, self.reshaped = set(), False
         return self.model
 
     def batch(self, requests: list[dict]) -> dict:
         from beamer2slides.gslides import execute
+        if self.defer:
+            self.pending.append(requests)
+            self._touched(requests)
+            return {}
+        self.writes += 1
         done = execute(self.api.presentations().batchUpdate(presentationId=self.pid, body={"requests": requests}))
         self.read()
         return done
+
+    def flush(self) -> list[int]:
+        """Send what `batch` queued. Returns the indices (in queue order) of the batches Google
+        refused, which were not applied; everything else was."""
+        from beamer2slides.gapi import HttpError
+        from beamer2slides.gslides import execute
+        queue, self.pending = self.pending, []
+        if not queue:
+            return []
+
+        def send(reqs):
+            self.writes += 1
+            execute(self.api.presentations().batchUpdate(presentationId=self.pid, body={"requests": reqs}))
+        try:
+            send([r for reqs in queue for r in reqs])
+            return []
+        except HttpError:
+            if len(queue) == 1:
+                return [0]
+        refused = []   # (a refused batch changed nothing: each edit is sent again on its own)
+        for i, reqs in enumerate(queue):
+            try:
+                send(reqs)
+            except HttpError:
+                refused.append(i)
+        return refused
+
+    def _touched(self, requests: list[dict]) -> None:
+        """Mark the slides `requests` change (and `reshaped` for slides added, removed or moved)."""
+        slide_ids = {s.id for s in self.model.slides}
+        where = {e.id: s.id for s in self.model.slides for e in s.elements}
+        for r in requests:
+            (name, body), = r.items()
+            ids = [body.get("objectId"), body.get("pageObjectId"), body.get("groupObjectId"), body.get("tableObjectId"),
+                   (body.get("elementProperties") or {}).get("pageObjectId"),
+                   *(body.get("childrenObjectIds") or []), *(body.get("objectIds") or []),
+                   *(body.get("slideObjectIds") or [])]
+            for oid in filter(None, ids):
+                if oid in slide_ids:
+                    self.dirty.add(oid)
+                    if name in ("deleteObject", "duplicateObject"):
+                        self.reshaped = True
+                elif oid in where:
+                    self.dirty.add(where[oid])
+            if name in ("createSlide", "updateSlidesPosition"):
+                self.reshaped = True
 
 
 def new_id() -> str:
@@ -81,11 +155,16 @@ def _word(raw: str, span: tuple[int, int], word: str) -> tuple[int, int]:
     return span[0] + m.start(), span[0] + m.end()
 
 
-def _target_check(el, target: dict) -> dict:
-    """A target that finds the element again after sync: its text, or the picture's centre."""
+def _target_check(center, target: dict) -> dict:
+    """A target that finds the element again after sync: its text, or the picture's centre (where
+    the edit puts it - worked out, not read back: see `LiveDeck`)."""
     if "text" in target:
         return {"text": target["text"]}
-    return {"image_near": [round(v, 1) for v in el.center]}
+    return {"image_near": [round(v, 1) for v in center]}
+
+
+def _box_center(box) -> tuple[float, float]:
+    return (box[0] + box[2]) / 2, (box[1] + box[3]) / 2
 
 
 # ---------------------------------------------------------------- text
@@ -110,6 +189,79 @@ def append_sentence(deck: LiveDeck, slide, text: str, sentence: str) -> dict:
     deck.batch([{"insertText": {**_where(el, cell), "text": " " + sentence, "insertionIndex": utf16(raw, end)}}])
     return expectation("append_sentence", {"slide": slide, "text": text, "sentence": sentence}, [slide],
                        [{"check": "text", "slide": slide, "text": f"{text} {sentence}", "count": 1}])
+
+
+def add_paragraph(deck: LiveDeck, slide, text: str, paragraph: str) -> dict:
+    """Press Enter at the end of the paragraph holding `text` and type a new one: the box's text
+    grows by a line (a new bullet, in a list) while the box keeps the size the converter gave it."""
+    s, el, raw, cell, span = locate(deck, slide, text)
+    end = raw.find("\n", span[1])
+    end = len(raw.rstrip("\n")) if end < 0 else end
+    deck.batch([{"insertText": {**_where(el, cell), "text": "\n" + paragraph, "insertionIndex": utf16(raw, end)}}])
+    return expectation("add_paragraph", {"slide": slide, "text": text, "paragraph": paragraph}, [slide],
+                       [{"check": "text", "slide": slide, "text": paragraph, "count": 1},
+                        {"check": "text", "slide": slide, "text": text, "count": 1}])
+
+
+HOLE = re.compile("\xa0+")
+
+
+def insert_before_hole(deck: LiveDeck, slide, text: str, words: str) -> dict:
+    """Type `words` right in front of the first inline-formula hole of the paragraph holding `text`
+    (a hole is a run of no-break spaces with the formula's picture over it, emit's `holes`): every
+    letter typed there moves the hole, and the picture is placed by where the hole was."""
+    s, el, raw, cell, span = locate(deck, slide, text)
+    start, end = raw.rfind("\n", 0, span[0]) + 1, raw.find("\n", span[1])
+    end = len(raw) if end < 0 else end
+    hole = HOLE.search(raw, start, end)
+    if not hole:
+        raise CheckError(f"no formula hole in the paragraph holding {text!r}")
+    before = raw[start:hole.start()].split()
+    deck.batch([{"insertText": {**_where(el, cell), "text": words + " ", "insertionIndex": utf16(raw, hole.start())}}])
+    checks = [{"check": "text", "slide": slide, "text": words, "count": 1}]
+    if before:
+        checks.append({"check": "text", "slide": slide, "text": f"{before[-1]} {words}", "count": 1})
+    return expectation("insert_before_hole", {"slide": slide, "text": text, "words": words}, [slide], checks)
+
+
+def _table_cell(deck, slide, text, nth):
+    """(table, cellLocation) of the cell holding `text`; with several tables holding it (a copy the
+    person made), `nth` picks one, top to bottom."""
+    s = deck.model.one(slide)
+    tables = sorted((e for e in s.elements if e.kind == "table" and norm(text) in e.text), key=lambda e: (e.box[1], e.box[0]))
+    if nth is None and len(tables) != 1 or nth is not None and nth >= len(tables):
+        raise CheckError(f"slide {s.index + 1}: {len(tables)} tables hold {text!r}")
+    el = tables[nth or 0]
+    cell = next((c for raw, c in el.texts if c and phrase_span(raw, text)), None)
+    if not cell:
+        raise CheckError(f"{text!r} is not inside one cell")
+    return el, cell
+
+
+def insert_table_row(deck: LiveDeck, slide, text: str, cells: list[str], nth: int | None = None) -> dict:
+    """Insert a row below the one holding `text` (right-click > Insert row below) and type `cells`
+    into it, left to right: the table grows down by a row towards whatever is under it."""
+    el, cell = _table_cell(deck, slide, text, nth)
+    row, cols = cell["rowIndex"] + 1, el.obj["table"]["columns"]
+    reqs = [{"insertTableRows": {"tableObjectId": el.id, "cellLocation": cell, "insertBelow": True, "number": 1}}]
+    reqs += [{"insertText": {"objectId": el.id, "cellLocation": {"rowIndex": row, "columnIndex": i},
+                             "text": t, "insertionIndex": 0}} for i, t in enumerate(cells[:cols]) if t]
+    deck.batch(reqs)
+    return expectation("insert_table_row", {"slide": slide, "text": text, "cells": cells, "nth": nth}, [slide],
+                       [{"check": "text", "slide": slide, "text": t, "count": 1} for t in cells[:cols] if t])
+
+
+def insert_table_column(deck: LiveDeck, slide, text: str, cells: list[str], nth: int | None = None) -> dict:
+    """Insert a column right of the one holding `text` and type `cells` into it, top to bottom:
+    the table grows to the right, over whatever is beside it."""
+    el, cell = _table_cell(deck, slide, text, nth)
+    col, rows = cell["columnIndex"] + 1, el.obj["table"]["rows"]
+    reqs = [{"insertTableColumns": {"tableObjectId": el.id, "cellLocation": cell, "insertRight": True, "number": 1}}]
+    reqs += [{"insertText": {"objectId": el.id, "cellLocation": {"rowIndex": i, "columnIndex": col},
+                             "text": t, "insertionIndex": 0}} for i, t in enumerate(cells[:rows]) if t]
+    deck.batch(reqs)
+    return expectation("insert_table_column", {"slide": slide, "text": text, "cells": cells, "nth": nth}, [slide],
+                       [{"check": "text", "slide": slide, "text": t, "count": 1} for t in cells[:rows] if t])
 
 
 def delete_paragraph(deck: LiveDeck, slide, text: str) -> dict:
@@ -174,9 +326,8 @@ def move(deck: LiveDeck, slide, target: dict, dx: float, dy: float) -> dict:
     el = deck.model.element(s, target)
     x0, y0 = el.box[:2]
     deck.batch([_relative(el.top, [1, 1, dx, dy])])
-    moved = deck.model.element(deck.model.one(slide), {"id": el.id})
     return expectation("move", {"slide": slide, "target": target, "dx": dx, "dy": dy}, [slide],
-                       [{"check": "box", "slide": slide, "target": _target_check(moved, target),
+                       [{"check": "box", "slide": slide, "target": _target_check((el.center[0] + dx, el.center[1] + dy), target),
                          "origin": [round(x0 + dx, 2), round(y0 + dy, 2)]}])
 
 
@@ -190,9 +341,9 @@ def resize(deck: LiveDeck, slide, target: dict, sx: float, sy: float | None = No
     w, h = el.box[2] - el.box[0], el.box[3] - el.box[1]
     ox, oy = el.box[0] - x0, el.box[1] - y0
     deck.batch([_relative(el.top, [sx, sy, x0 * (1 - sx), y0 * (1 - sy)])])
-    moved = deck.model.element(deck.model.one(slide), {"id": el.id})
+    center = x0 + (el.center[0] - x0) * sx, y0 + (el.center[1] - y0) * sy
     return expectation("resize", {"slide": slide, "target": target, "sx": sx, "sy": sy}, [slide],
-                       [{"check": "box", "slide": slide, "target": _target_check(moved, target),
+                       [{"check": "box", "slide": slide, "target": _target_check(center, target),
                          "origin": [round(x0 + ox * sx, 2), round(y0 + oy * sy, 2)],
                          "size": [round(w * sx, 2), round(h * sy, 2)]}])
 
@@ -236,10 +387,9 @@ def add_text_box(deck: LiveDeck, slide, text: str, box: list[float]) -> dict:
     s, oid = deck.model.one(slide), new_id()
     deck.batch([{"createShape": {"objectId": oid, "shapeType": "TEXT_BOX", "elementProperties": _props(s.id, box)}},
                 {"insertText": {"objectId": oid, "text": text}}])
-    el = deck.model.element(deck.model.one(slide), {"id": oid})
     return expectation("add_text_box", {"slide": slide, "text": text, "box": box}, [slide],
                        [{"check": "text", "slide": slide, "text": text, "count": 1},
-                        {"check": "box", "slide": slide, "target": {"text": text}, "origin": [round(v, 2) for v in el.box[:2]]}])
+                        {"check": "box", "slide": slide, "target": {"text": text}, "origin": [round(v, 2) for v in box[:2]]}])
 
 
 def add_shape(deck: LiveDeck, slide, shape_type: str, box: list[float], color: str) -> dict:
@@ -247,16 +397,19 @@ def add_shape(deck: LiveDeck, slide, shape_type: str, box: list[float], color: s
     deck.batch([{"createShape": {"objectId": oid, "shapeType": shape_type, "elementProperties": _props(s.id, box)}},
                 {"updateShapeProperties": {"objectId": oid, "fields": "shapeBackgroundFill.solidFill.color",
                                            "shapeProperties": {"shapeBackgroundFill": {"solidFill": {"color": rgb(color)}}}}}])
-    el = deck.model.element(deck.model.one(slide), {"id": oid})
     return expectation("add_shape", {"slide": slide, "shape_type": shape_type, "box": box, "color": color}, [slide],
                        [{"check": "shape", "slide": slide, "shape_type": shape_type, "color": color.lower(),
-                         "near": [round(v, 1) for v in el.center], "count": 1}])
+                         "near": [round(box[0] + box[2] / 2, 1), round(box[1] + box[3] / 2, 1)], "count": 1}])
 
 
 def donor_image_url(api, pid: str) -> str:
     """contentUrl of a picture in another deck (createImage accepts it; it expires after a while)."""
     from beamer2slides.gslides import execute
-    pres = execute(api.presentations().get(presentationId=pid, fields="slides(pageElements)"))
+    return donor_from(execute(api.presentations().get(presentationId=pid, fields="slides(pageElements)")), pid)
+
+
+def donor_from(pres: dict, pid: str | None = None) -> str:
+    """contentUrl of the first picture of a presentations.get already made."""
     for s in pres.get("slides", []):
         stack = list(s.get("pageElements", []))
         while stack:
@@ -264,15 +417,16 @@ def donor_image_url(api, pid: str) -> str:
             if "image" in e and e["image"].get("contentUrl"):
                 return e["image"]["contentUrl"]
             stack += e.get("elementGroup", {}).get("children", [])
-    raise CheckError(f"no picture in {pid}")
+    raise CheckError(f"no picture in {pid or pres.get('presentationId')}")
 
 
 def add_image(deck: LiveDeck, slide, url: str, box: list[float]) -> dict:
     s, oid = deck.model.one(slide), new_id()
     deck.batch([{"createImage": {"objectId": oid, "url": url, "elementProperties": _props(s.id, box)}}])
-    el = deck.model.element(deck.model.one(slide), {"id": oid})
+    # (createImage letterboxes a picture into the box it is given, about the box's centre)
     return expectation("add_image", {"slide": slide, "box": box}, [slide],
-                       [{"check": "image", "slide": slide, "near": [round(v, 1) for v in el.center], "count": 1}])
+                       [{"check": "image", "slide": slide, "near": [round(box[0] + box[2] / 2, 1), round(box[1] + box[3] / 2, 1)],
+                         "count": 1}])
 
 
 def duplicate(deck: LiveDeck, slide, target: dict, dx: float = 12, dy: float = 12) -> dict:
@@ -310,8 +464,7 @@ def group(deck: LiveDeck, slide, targets: list[dict]) -> dict:
     els = [deck.model.element(s, t) for t in targets]
     tops = list(dict.fromkeys(e.top for e in els))
     deck.batch([{"groupObjects": {"groupObjectId": new_id(), "childrenObjectIds": tops}}])
-    s = deck.model.one(slide)
-    members = [_member(deck.model.element(s, {"id": e.id})) for e in els]
+    members = [_member(e) for e in els]   # (grouping moves nothing: text and centres stay)
     return expectation("group", {"slide": slide, "targets": targets}, [slide],
                        [{"check": "grouped", "slide": slide, "members": members, "grouped": True}])
 
@@ -372,16 +525,18 @@ def duplicate_slide(deck: LiveDeck, slide, new_title: str | None = None) -> dict
     """Duplicate a slide (the copy comes right after it), optionally retitling the copy."""
     s = deck.model.one(slide)
     sid = new_id()
-    deck.batch([{"duplicateObject": {"objectId": s.id, "objectIds": {s.id: sid}}}])
     if not new_title:
+        deck.batch([{"duplicateObject": {"objectId": s.id, "objectIds": {s.id: sid}}}])
         return expectation("duplicate_slide", {"slide": slide}, [],
                            [{"check": "slide_count", "slide": slide, "count": 2}])
-    copy = next(x for x in deck.model.slides if x.id == sid)
-    title = next(e for e in copy.elements if e.kind == "shape" and e.obj["shape"].get("placeholder", {}).get("type") in ("TITLE", "CENTERED_TITLE"))
-    raw = title.texts[0][0]
+    # The copy's title is named in the duplication itself (`objectIds` maps the children of what is
+    # duplicated too), so the retitling goes in the same batch and needs no read of the copy.
+    title = next(e for e in s.elements if e.kind == "shape" and e.obj["shape"].get("placeholder", {}).get("type") in ("TITLE", "CENTERED_TITLE"))
+    tid, raw = new_id(), title.texts[0][0]
     first = raw.split("\n")[0]
-    deck.batch([{"deleteText": {"objectId": title.id, "textRange": _range(raw, 0, len(first))}},
-                {"insertText": {"objectId": title.id, "text": new_title, "insertionIndex": 0}}])
+    deck.batch([{"duplicateObject": {"objectId": s.id, "objectIds": {s.id: sid, title.id: tid}}},
+                {"deleteText": {"objectId": tid, "textRange": _range(raw, 0, len(first))}},
+                {"insertText": {"objectId": tid, "text": new_title, "insertionIndex": 0}}])
     sel = {"title": new_title}
     return expectation("duplicate_slide", {"slide": slide, "new_title": new_title}, [slide, sel],
                        [{"check": "slides", "order": [slide, sel], "adjacent": True},
@@ -421,7 +576,9 @@ def set_background(deck: LiveDeck, slide, color: str) -> dict:
                        [{"check": "background", "slide": slide, "color": color.lower()}])
 
 
-EDITS = {f.__name__: f for f in (replace_word, append_sentence, delete_paragraph, bold, recolour, resize_font, move,
+EDITS = {f.__name__: f for f in (replace_word, append_sentence, add_paragraph, insert_before_hole, delete_paragraph,
+                                 insert_table_row, insert_table_column,
+                                 bold, recolour, resize_font, move,
                                  resize, delete_element, delete_group, add_text_box, add_shape, add_image, duplicate, group, ungroup,
                                  add_slide, duplicate_slide, delete_slide, move_slide, set_notes, set_background)}
 
@@ -452,6 +609,9 @@ def catalogue(donor_url: str | None) -> list[dict]:
         ("delete_paragraph", dict(slide=why, text="adding their own slides")),
         ("append_sentence", dict(slide=merging, text="writes the merged paragraph back into the deck.",
                                  sentence="Nothing is lost.")),
+        ("insert_before_hole", dict(slide=merging, text="The merge is clean when the changed words",
+                                    words="quite literally")),
+        ("add_paragraph", dict(slide=algo, text="Merge and write the changes", paragraph="Check the result by hand")),
         ("bold", dict(slide=concl, word="survive", context="Deck edits survive every sync")),
         ("recolour", dict(slide=concl, word="both versions", context="Conflicts are reported with both versions",
                           color="#c00000")),
@@ -462,6 +622,9 @@ def catalogue(donor_url: str | None) -> list[dict]:
         ("add_text_box", dict(slide=results, text="Measured on the test decks", box=[460, 60, 220, 30])),
         ("add_shape", dict(slide=results, shape_type="STAR_5", box=[640, 100, 50, 50], color="#ffc000")),
         ("duplicate", dict(slide=results, target={"text": "Same element"}, dx=0, dy=110)),
+        # (after the copy: two tables hold every cell's words, `nth` picks one from the top)
+        ("insert_table_row", dict(slide=results, text="Conflicts", cells=["Renames", "97%", "5.5 s"], nth=0)),
+        ("insert_table_column", dict(slide=results, text="Time", cells=["Repeats", "x12", "x9", "x30"], nth=1)),
         ("group", dict(slide=policy, targets=[{"text": "Both versions go into the report."}, {"text": "Deck edits win"}])),
         ("ungroup", dict(slide=algo, target={"text": "Read the base snapshot"})),
         ("delete_group", dict(slide=versions, target={"text": "Merged"})),
