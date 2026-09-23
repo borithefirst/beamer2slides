@@ -146,7 +146,10 @@ Debugging classification locally: `debug/slide-NNN.png` (element boxes over the 
   pictures follow their holes into the words as written, and the box and a block panel under it
   grow as emit would size them (a panel only as far as the strip below is clear, else reported);
   only the text change is corrected, never the person's geometry. The base records these steps as
-  the converter's (`reshape_base`). `text_layout` is also the layout oracle's line model.
+  the converter's (`reshape_base`, noted `refit` on the read-back; the report lists them under
+  `refit`). Slides applies a RELATIVE transform to a group's child **in page space**, so a step is
+  written as it is; a picture's move is measured in the converter's box and the person's edit put on
+  top (`refit.carried_step`). `text_layout` is also the layout oracle's line model.
 - **Theme sync** (`theme_sync.py`): `base["theme"]` records what convert wrote on the master and
   layouts (fill, decoration pictures, placeholder styles); sync merges them three ways, the theme
   batch first. Slides drops a run property equal to the inherited one, so old placeholder styles
