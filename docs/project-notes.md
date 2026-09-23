@@ -4145,6 +4145,14 @@ campaigns at once are over the write quota even at 600 per minute per user. What
   whole unit by one step and the person did not move it.
 - The number ball over its text (7400, 7403) was seen on a thumbnail; no oracle kind covers a
   ball over its own line, so these campaigns could not say whether it is still there.
+- **An old deep overlap hid a new one.** r7411 on the fixed code: the person's note already ran
+  15.6 pt over the frame counter, so `overruns` (deepest meet before vs after) missed the paragraph
+  now 7.8 pt into it. Each other object is judged against its own meet before (2b6c5a1).
+- **Re-run on 9f88dd2** (all of the above, r8009 and r8006/r8011 below), from a clean worktree:
+  layout seeds 8000-8011 12/12 clean (was 7/12), probes 7408-7415 8/8 (was 5/8); the three
+  layout notes are overruns the report names (r7411-r7414). At `--parallel 3`: 18 and 25
+  rate-limited calls, against 75 at 4 - one campaign at a time, three rounds, fits the quota.
+  Archives: `out/fuzz-verify-layout`, `out/fuzz-verify-probes`.
 
 ## Title page role changes under the loss oracle (r8009, 2026-09-23)
 
