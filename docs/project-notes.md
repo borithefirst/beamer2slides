@@ -3405,4 +3405,21 @@ all test and theme PDFs is a code comment in `26_truetype_fonts` aligned with sp
 em space). Open, and out of the API's reach: SUBSCRIPT/SUPERSCRIPT set the run at 0.665 of its size
 and move it 0.37-0.38 em, where TeX lowers a subscript 0.15 em (0.25 beside a superscript) and raises
 a superscript 0.41 em - superscripts agree, subscripts sit 0.2 em low, and `baselineOffset` has no
-other value; the `crowded` finding on slide 17 stays.
+other value; the `crowded` finding on slide 17 stays. (Both since changed: see below.)
+
+### Text fit follow-up: small caps at 1.13, subscripts after all (2026-09-23, 50e97c9, a35bbad)
+Small caps went to **1.13 x** (about the square root of 1.28), the user's choice between width and
+height: the torture line is 0.878 of the PDF's width and its capitals ~13% taller than CMCSC's; the
+`width` finding on slide 4 is that compromise, recorded in the baseline.
+The `crowded` subscripts turned out not to be the API's offset alone. FontMapper set the CMSSI8
+subscript (10.9 pt) at 23.4 pt against a 21.2 pt body, so Slides lowered it 8.7 pt (TeX: 3.3), and the
+vertical model laid out every wrapped line with the paragraph's largest run, so the pitch came out
+24.3-24.75 pt against the PDF's 26.9. A subscript is now no larger than its paragraph's body size
+(`emit.run_sizes`) and the pitch is solved per line (`emit.line_sizes`, `inner_pitch`). Rejected, by
+`tools/probe_subscripts.py`: Unicode subscripts (empty boxes in Lato, PT Serif and Arial), a .pptx
+`baseline` offset (imported as plain SUBSCRIPT), extra line spacing (moves every line). Result: white
+gap between the lines 1 -> 6 px (PDF 12), line 3's baseline 162 -> 169 px (PDF 168), finding gone;
+13_inline_math p2 overlap 0.408 -> 0.562 and its `width` finding gone, alignment unchanged. Left:
+the same paragraph's line 2 wraps differently (`width` 0.912: TeX's math spacing around = and -
+against Lato runs), subscripts in table cells, CMMI letters sized above the body enlarging their
+line, and `deck_ir` taking a paragraph's first baseline from its largest run.

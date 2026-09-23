@@ -151,14 +151,22 @@ Google's renderer (advances as in `tools/probe_advances.py`, one reference row p
   a proportional font inside code; in monospaced text the gap is `round(gap / advance)` plain
   spaces, which is classify's to write. Lato's and PT Serif's em spaces are 1.00 em (their spaces
   0.19 and 0.25 em).
-- **Scripts.** `baselineOffset` SUBSCRIPT and SUPERSCRIPT set the run at **0.665** of its size
-  and move it by **0.37-0.38 em** of the nominal size (Lato H at 40 and 20 pt: down 14.85 / 7.65 pt,
-  up 15.3 pt). TeX sets a text-style script at 0.73 of the size and lowers a subscript by 0.15 em
-  (0.25 em with a superscript beside it), raising a superscript 0.41 em - so superscripts agree and
-  subscripts sit 0.2 em lower, which is what makes two lines of inline math touch (torture frame
-  `inline-math`, `crowded`). The API has no other offset: the offset follows the nominal size, so
-  bringing it to TeX's would leave the glyph at a third of the text size, and a smaller run with
-  no offset is no longer a subscript to the person editing it (nor to `deck_ir`). Left as it is.
+- **Scripts** (`tools/probe_subscripts.py`). `baselineOffset` has only SUBSCRIPT and SUPERSCRIPT:
+  either draws the run at **0.665** of its nominal size and moves it **0.371 em** of that size
+  (Lato 40, a subscript 1 drops 14.85 pt at x1.0, 12.6 at x0.85, 11.25 at x0.75, 9.45 at x0.65,
+  8.1 at x0.55), and the nominal size counts toward the line's height. TeX lowers a subscript
+  0.15 em (0.25 with a superscript beside it) and raises a superscript 0.41 em, so superscripts
+  agree and subscripts hang lower. A .pptx `baseline` of -15000/-25000/-40000 imports as plain
+  SUBSCRIPT and 30000 as SUPERSCRIPT (the offset asked for is not kept); Unicode subscript letters
+  (ₕₖₗₘₙₚₛₜⱼ) are empty boxes in Lato, PT Serif and Arial, and Lato's subscript digits are
+  0.315 em tall; extra lineSpacing moves every line. What made two lines of inline math touch
+  (torture `inline-math`, `crowded`) was that FontMapper sized a CMSSI8 subscript at 23.4 pt
+  against a 21.2 pt body, and that the vertical model used the paragraph's largest run for every
+  line. So a subscript is set no larger than its paragraph's body size (`emit.run_sizes`,
+  `body_size`; subscript digits 10.0 pt against TeX's 10.3, still a real SUBSCRIPT for the person
+  editing it and for `deck_ir`), and the pitch between wrapped lines i and i+1 is
+  0.227 z_i + 0.968 z_(i+1) + extra_below(r, z_i) + extra_above(r, z_(i+1)), z being each line's own
+  largest run (`emit.line_sizes`, `inner_pitch`).
 
 ## 3. Choice
 - **Default for CM Sans: Lato** at size × 1/1.020. Humanist like CM Sans, cap height matches
