@@ -43,7 +43,8 @@ from beamer2slides.devtools import alignment
 pytestmark = pytest.mark.slides
 
 DECKS = ["19_labels_on_graphics", "20_marks_edge_cases", "21_bullet_shapes", "22_overlays_on_text",
-         "25_hole_placement", "13_inline_math", "demo"]
+         "25_hole_placement", "13_inline_math", "demo", "27_text_fit"]
+TEXT_FIT = ["27_text_fit"]  # also measured with devtools.text_fit: wraps, drift, width, collisions
 OUT = Path(os.environ.get("B2S_SLIDES_TESTS_OUT", MAIN / "out" / "slides-tests"))
 BASELINE = ROOT / "tests" / "slides_baseline.json"
 GROWTH = 0.75  # pt (ΔE and size ratios likewise) an error may grow over its baseline
@@ -161,3 +162,30 @@ def test_alignment(deck, reports):
         warnings.warn(f"{deck}: known failures no longer fail, update the baseline: {fixed}")
     if problems:
         pytest.fail(f"{deck} ({report['url']}):\n  " + "\n  ".join(problems), pytrace=False)
+
+
+@pytest.mark.parametrize("deck", TEXT_FIT)
+def test_text_fit(deck, reports):
+    """Text in Slides takes the room it takes in the PDF (tools/text_fit.py): every finding is
+    either in the baseline's `text_fit_known` with a reason, or a failure. Keys are
+    `page:element kind`, element ids being classify's (stable while the deck is)."""
+    from beamer2slides.devtools import text_fit
+    report = reports[deck]
+    if isinstance(report, Exception):
+        raise report
+    found = text_fit.measure(pdf_for(deck), OUT / deck, crops=True)
+    current = {f"{s['page'] + 1}:{f['element'].split()[0]} {f['kind']}": f
+               for s in found["slides"] for f in s["findings"]}
+    base = json.loads(BASELINE.read_text(encoding="utf-8")) if BASELINE.exists() else {"known_failures": {}, "decks": {}}
+    known = base.get("text_fit_known", {}).get(deck, {})
+    if os.environ.get("B2S_UPDATE_BASELINE"):
+        base.setdefault("text_fit_known", {})[deck] = {k: known.get(k, f"UNVERIFIED: {json.dumps(f, ensure_ascii=False)}")
+                                                      for k, f in current.items()}
+        BASELINE.write_text(json.dumps(base, indent=1, ensure_ascii=False, sort_keys=True) + "\n", encoding="utf-8")
+        return
+    fixed = sorted(set(known) - set(current))
+    if fixed:
+        warnings.warn(f"{deck}: known text-fit findings are gone, update the baseline: {fixed}")
+    new = [f"{k}: {json.dumps(f, ensure_ascii=False)}" for k, f in current.items() if k not in known]
+    if new:
+        pytest.fail(f"{deck} (crops in {OUT / deck / 'text_fit'}):\n  " + "\n  ".join(new), pytrace=False)

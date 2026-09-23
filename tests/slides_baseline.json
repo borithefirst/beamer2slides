@@ -594,6 +594,49 @@
     "hole_gap": 0.1
    }
   },
+  "27_text_fit": {
+   "17:p16h0": {
+    "hole_gap": 0.2
+   },
+   "17:p16h1": {
+    "hole_gap": 0.12
+   },
+   "18:p17t1.0": {
+    "bullet_delta_e": 2.4,
+    "bullet_size": 0.03
+   },
+   "18:p17t1.1": {
+    "bullet_delta_e": 3.2,
+    "bullet_size": 0.05
+   },
+   "18:p17t1.2": {
+    "bullet_delta_e": 0.9,
+    "bullet_size": 0.14
+   },
+   "7:p6t1.0": {
+    "bullet_delta_e": 2.9,
+    "bullet_size": 0.05
+   },
+   "7:p6t1.1": {
+    "bullet_delta_e": 2.1,
+    "bullet_size": 0.05
+   },
+   "7:p6t1.2": {
+    "bullet_delta_e": 0.6,
+    "bullet_size": 0.09
+   },
+   "7:p6t1.3": {
+    "bullet_delta_e": 2.9,
+    "bullet_size": 0.09
+   },
+   "7:p6t1.4": {
+    "bullet_delta_e": 0.8,
+    "bullet_size": 0.0
+   },
+   "7:p6t2b0": {
+    "number_offset": 0.32
+   }
+  },
   "demo": {
    "2:p1t1b0": {
     "number_offset": 0.37
@@ -648,6 +691,20 @@
   "21_bullet_shapes": {},
   "22_overlays_on_text": {},
   "25_hole_placement": {},
+  "27_text_fit": {},
   "demo": {}
+ },
+ "text_fit_known": {
+  "27_text_fit": {
+   "10:p9t4 width": "bold/digit column text 9% wider in Lato than in CM (open)",
+   "10:p9t5 width": "digits 10% wider in Lato than in CM (open)",
+   "11:p10t2 width": "bold header 10% wider in the bold substitute (open)",
+   "12:p11t3 drift": "refused p{} table: the wrapped cell joined with the numbers beside it reflows across columns (open)",
+   "12:p11t3 width": "refused p{} table: the same joined cell (open)",
+   "12:p11t5 width": "digits in a refused table 12% wider (open)",
+   "17:p16t1 crowded": "Slides sets subscripts deeper than TeX: two lines of inline math touch (open)",
+   "18:p17t1 width": "typewriter line 9% narrower: CMTT in Courier New (open)",
+   "4:p3t2 width": "small caps line 22% narrower: the substitute sets small caps smaller (open, docs/project-notes.md Text fit)"
+  }
  }
 }

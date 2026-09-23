@@ -168,6 +168,50 @@ def test_a_new_content_url_for_the_same_picture_is_not_an_edit(monkeypatch):
     assert found["edited"] and found["counts"]["image"] == 2
 
 
+def test_a_base_older_than_picture_signatures_cannot_clear_a_new_url_but_says_so(monkeypatch):
+    """Bases written before pixel signatures (2026-09-17) hold only the URL hash, and Google
+    reissues URLs for pictures nobody touched: the rule does not bend - still refused - but the
+    finding is a picture that cannot be compared, and the message says what that means."""
+    pres = presentation()
+    base = base_of(pres)
+    for s in base["slides"]:
+        for el in s["elements"]:
+            for rb in el["readback"].values():
+                if "image" in rb:
+                    rb["image"].pop("signature", None)
+    live = copy.deepcopy(pres)
+    for s in live["slides"]:
+        for e in s["pageElements"]:
+            if "image" in e:
+                e["image"]["contentUrl"] = f"https://lh3.google.com/reissued-{e['objectId']}=s0"
+    monkeypatch.setattr(snapshot, "_download", lambda url: png((240, 240, 240)))
+    found = guard.survey(base, live)
+    assert found["edited"] and found["counts"] == {"image_unverified": 2}
+    message = guard.refusal_message(pres["presentationId"], Path("out/x"), "x.pdf", found, "edited")
+    assert message.startswith("refusing to rebuild: this deck's sync base was written before beamer2slides "
+                              "recorded picture signatures")
+    assert "2 uncomparable pictures; nothing else differs" in message
+    assert "picture replaced" not in message
+
+
+def test_a_group_emit_named_and_slides_never_made_is_not_a_deletion():
+    """A diagram of one node gets no group (Slides groups two objects or more), yet bases named
+    that group as the element's main object: every rebuild of such a deck was refused as edited
+    (19_labels_on_graphics, slide 11). A main object the base did have and the deck lost still is."""
+    pres = presentation()
+    base = base_of(pres)
+    el = next(e for s in base["slides"] for e in s["elements"] if e.get("readback"))
+    el["objects"] = ["never_made_g"] + el["objects"]
+    el["main"] = "never_made_g"
+    assert guard.survey(base, pres)["edited"] is False
+    real = next(iter(el["readback"]))
+    el["main"] = real
+    live = copy.deepcopy(pres)
+    for s in live["slides"]:
+        s["pageElements"] = [e for e in s["pageElements"] if e["objectId"] != real]
+    assert guard.survey(base, live)["edited"] is True
+
+
 # ---------------------------------------------------------------- what is an edit
 
 def test_reworded_text_is_an_edit_with_a_readable_example():

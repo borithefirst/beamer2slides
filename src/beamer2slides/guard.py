@@ -40,6 +40,7 @@ FIELD_WORDS = {
     "geometry": "moved or resized",
     "shape_style": "fill or outline changed",
     "image": "picture replaced",
+    "image_unverified": "picture cannot be compared",
     "group": "group taken apart",
     "deleted": "deleted",
     "part_deleted": "partly deleted",
@@ -105,6 +106,29 @@ def sign_changed(base: dict, theirs: dict, pres: dict) -> None:
         snapshot.sign_pictures(theirs, pres, objects, slides)
 
 
+UNVERIFIABLE = ("image_unverified", "background_unverified")
+
+
+def _unverifiable(field: str, el: dict, oids: list[str]) -> str:
+    """A picture edit that is only a new URL against a base with no pixel signature: bases
+    written before signatures were recorded (2026-09-17 and older) cannot say whether a picture
+    Google re-issued is the same one, so it counts - the rule does not bend - but as a picture
+    that cannot be compared, not as one somebody replaced."""
+    if field != "image":
+        return field
+    old = [el.get("readback", {}).get(oid, {}).get("image") or {} for oid in oids]
+    return "image_unverified" if old and all(o and not o.get("signature") for o in old) else field
+
+
+def _never_made(el: dict, oids: list[str], read: dict) -> bool:
+    """A "deleted" main object the base's own read-back never had, while the element's other
+    objects stand: a group emit named and Slides never made (a diagram of one node). Bases
+    written before `snapshot.attach_readback` left such ids out still name them."""
+    readback = el.get("readback", {})
+    return bool(readback) and all(oid not in readback for oid in oids) and \
+        all(oid in read.get("objects", {}) for oid in readback)
+
+
 def _snippet(text: str | None, length: int = 40) -> str:
     text = " ".join((text or "").split())
     return text if len(text) <= length else text[:length - 1] + "…"
@@ -133,6 +157,9 @@ def survey(base: dict, pres: dict, sign: bool = True) -> dict:
         entry = {"slide": b["key"], "page": n, "why": [], "edits": []}
         for el in b["elements"]:
             for field, oids in merge.deck_edits(el, read).items():
+                if field == "deleted" and _never_made(el, oids, read):
+                    continue
+                field = _unverifiable(field, el, oids)
                 counts[field] = counts.get(field, 0) + 1
                 entry["edits"].append({"element": el["key"], "field": field, "objects": oids})
                 if len(examples) < EXAMPLES:
@@ -153,10 +180,14 @@ def survey(base: dict, pres: dict, sign: bool = True) -> dict:
             if len(examples) < EXAMPLES:
                 examples.append(f"slide {n} \"{_snippet(titles.get(b.get('objectId')), 30)}\": speaker notes edited")
         if merge.background_edited(b, read):
-            counts["background"] = counts.get("background", 0) + 1
-            entry["why"].append("background changed")
+            old, new = b.get("background_readback") or {}, read.get("background") or {}
+            unknown = "picture" in old and "picture" in new and not old.get("signature")
+            kind = "background_unverified" if unknown else "background"
+            words = "background picture cannot be compared" if unknown else "background changed"
+            counts[kind] = counts.get(kind, 0) + 1
+            entry["why"].append(words)
             if len(examples) < EXAMPLES:
-                examples.append(f"slide {n} \"{_snippet(titles.get(b.get('objectId')), 30)}\": background changed")
+                examples.append(f"slide {n} \"{_snippet(titles.get(b.get('objectId')), 30)}\": {words}")
         if entry["edits"]:
             entry["why"].insert(0, f"{len(entry['edits'])} element edit(s)")
         if entry["why"]:
@@ -184,6 +215,8 @@ SUMMARY_WORDS = {"text": "text edit", "text_style": "style change", "geometry": 
                  "shape_style": "fill or outline change", "image": "picture replaced", "group": "group taken apart",
                  "deleted": "element deleted", "part_deleted": "element partly deleted", "notes": "notes edit",
                  "background": "background change", "objects_added": "object added in Slides",
+                 "image_unverified": "uncomparable picture",
+                 "background_unverified": "uncomparable background",
                  "slides_added": "slide added", "slides_deleted": "slide deleted"}
 
 
@@ -208,7 +241,17 @@ def command_line(command: str, pdf: Path | str | None, out: Path, extra: str = "
 
 def refusal_message(pid: str, out: Path, pdf: Path | str | None, found: dict, reason: str) -> str:
     lines = []
-    if reason == "edited":
+    only_unknown = reason == "edited" and found["counts"] and set(found["counts"]) <= set(UNVERIFIABLE)
+    if only_unknown:
+        lines.append("refusing to rebuild: this deck's sync base was written before beamer2slides recorded "
+                     "picture signatures, so its pictures cannot be compared with the live deck (Google gives "
+                     "unchanged pictures new URLs).")
+        lines.append(f"  {deck_url(pid)}")
+        lines.append(f"  {summary_line(found)}; nothing else differs.")
+        lines += [f"    - {e}" for e in found["examples"]]
+        lines.append("  If nobody replaced a picture or a background in Slides, a forced rebuild loses nothing "
+                     "(the base it writes carries signatures, so the next rebuild is checked in full).")
+    elif reason == "edited":
         lines.append("refusing to rebuild: this deck was edited in Google Slides after beamer2slides wrote it.")
         lines.append(f"  {deck_url(pid)}")
         lines.append(f"  {summary_line(found)}")

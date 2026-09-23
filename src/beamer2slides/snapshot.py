@@ -505,6 +505,11 @@ def attach_readback(entry: dict, slide_read: dict | None, objects: list[list[str
     entry["order"] = slide_read["order"] if slide_read else []
     found = slide_read["objects"] if slide_read else {}
     for el, oids in zip(entry["elements"], objects):
+        if slide_read and any(oid in found for oid in oids):
+            # What emit meant to create, less what the deck does not have: a diagram of one node
+            # gets no group (Slides groups two objects or more), and a group id the base names
+            # but the deck never had reads as deleted to every later sync and rebuild guard.
+            oids = [oid for oid in oids if oid in found]
         el["objects"] = oids
         el["main"] = oids[0] if oids else None
         el["readback"] = {oid: found[oid] for oid in oids if oid in found}

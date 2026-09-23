@@ -89,7 +89,8 @@ Details, measurements and edge cases: docs/project-notes.md "What becomes native
   makes another. **The rebuild guard** (`guard.py`, docs/sync.md "Never lose deck edits") refuses
   when the deck was edited, has no base, or came from another PDF, and a forced rebuild keeps a
   backup first (`--backup`, `tools/deck_backup.py`). A .pptx restore brings content back but not
-  object ids, so sync refuses a recovered deck.
+  object ids, so sync refuses a recovered deck. A base older than picture signatures (2026-09-17)
+  cannot clear a reissued picture URL: still refused, but said as such (`guard._unverifiable`).
 
 ## Usage
 ```

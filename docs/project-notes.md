@@ -3339,3 +3339,30 @@ What the deck found, and what was done:
   the `p{}` table joins the wrapped cell with the numbers beside it and reflows across the BLEU
   column (slide 12); Slides sets subscripts deeper than TeX, so consecutive lines of inline math
   touch (slide 17).
+
+## The live suite and bases older than picture signatures (2026-09-23)
+`python -m pytest -m slides` failed on every deck: each convert into its fixed folder
+(`out/slides-tests/<deck>`) was refused by the rebuild guard, "6 slides edited: 1 background change,
+10 picture replaced", on decks nobody touches. Their bases were written on 2026-09-17, before bases
+recorded pixel signatures. Google reissues `contentUrl`s for pictures nobody touched, so a picture
+is judged by its pixels (`snapshot.same_picture`); with no signature on the base side it cannot be,
+and every picture read as replaced. The rule does not bend - a picture that cannot be compared may
+have been replaced, so the rebuild is still refused - but the finding and the message now say
+what is true: `guard._unverifiable` counts such a picture (and a background picture) as
+`image_unverified` / `background_unverified`, and when nothing else differs the refusal says the
+base predates signatures and that a forced rebuild loses nothing if nobody replaced a picture
+(`test_a_base_older_than_picture_signatures_cannot_clear_a_new_url_but_says_so`). The suite's seven
+decks were rebuilt once with `--force-rebuild --backup none` (they are its own fixtures), so their
+bases carry signatures and are checked in full from now on. The suite also converts
+`27_text_fit` and runs `devtools.text_fit` on it (`test_text_fit`): every finding must be listed in
+`tests/slides_baseline.json` `text_fit_known` with a reason, and a listed one that goes away asks for
+the baseline to be updated.
+The first full run after that found one more, on a deck rebuilt twenty minutes earlier: "slide 11:
+deleted (diagram/figure/0)" on `19_labels_on_graphics`. A diagram of one node gets no group
+(Slides groups two objects or more), yet the base listed the group emit had named as the element's
+main object, so every sync and rebuild guard after it read that group as deleted. The base now
+records only the objects the deck really has when it is written (`snapshot.attach_readback`), and
+the guard reads bases written before that correctly: a "deleted" main object the base's own
+read-back never had, while the element's other objects stand, is no deletion (`guard._never_made`,
+`test_a_group_emit_named_and_slides_never_made_is_not_a_deletion`, which also checks that a main
+object the base did have and the deck lost still counts).
