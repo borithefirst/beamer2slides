@@ -885,6 +885,7 @@ def matrix_request(oid: str, m: list[float]) -> dict:
 
 class Sync:
     way_back = None   # the recovery note being made meanwhile; None where there is none to collect
+    theme_side = theme_plan = raw_after = None   # theme_sync's part (set in __init__ / plan_theme)
 
     def __init__(self, slides, drive, pid: str, base: dict, ours: dict, out: Path, dry_run: bool = False,
                  measure: bool = True, trust_generation: bool = True, check_plan=None,
@@ -915,6 +916,9 @@ class Sync:
         self.first_read: dict | None = None  # a `presentations.get` a caller made while we planned
         self.deleting: list = []        # staging decks on their way out (drop_staging)
         self.way_back = way_back        # made meanwhile, collected before the first write (guard.WayBack)
+        self.theme_side: dict | None = None   # what a fresh conversion writes on the master and layouts (theme_sync)
+        self.theme_plan: dict | None = None   # what this sync writes there (None: nothing, an old base)
+        self.raw_after: dict | None = None    # the deck as `finish` last read it
 
     def before_write(self) -> None:
         """Collect the way back (`guard.WayBack`): the deck's revision and the .pptx backup are
@@ -1020,6 +1024,7 @@ class Sync:
                                      follow_labels=self.follow_labels, take_source=self.take_source)
             if self.check_plan is not None:
                 self.check_plan(mplan, theirs)  # (adopt_sync: an adopted deck this may not be written to)
+            self.plan_theme(mplan, pres)
             work = self.prepare(mplan, pres, theirs)
             result = {"attempts": attempt, "plan": mplan, "work": work, "theirs": theirs}
             if self.dry_run or not work["writes"]:
@@ -1198,6 +1203,10 @@ class Sync:
             "revisionId": theirs.get("revisionId"), "started": time.strftime("%Y-%m-%dT%H:%M:%S"),
             "source": snapshot.source_info(self.ours["source"]), "objects": objects, "slides": slides,
             "in_place": self.in_place_readback, "staging": getattr(self, "staging", None)}
+        if self.theme_plan and self.theme_plan["pending"]:
+            # the layout placeholder styles about to be written: a run that dies after them finds
+            # its own writes there next time, not a person's (theme_sync.plan)
+            self.base["pending"]["theme"] = self.theme_plan["pending"]
 
     def store_pending(self, drive) -> None:
         """The marker to disk and to Drive. `staging` is whatever this run knows of its staging deck
@@ -1311,6 +1320,42 @@ class Sync:
             return best
         return adopt
 
+    # ---- the master and the layouts (theme_sync)
+
+    def plan_theme(self, mplan: dict, pres: dict) -> None:
+        """The theme's part of the merge, planned beside the slides' and reported with them. A
+        deck `adopt` took over has a theme of the person's own and is left alone; a base from
+        before theme sync records nothing of the layouts, so they are left alone too (said so when
+        the source's theme changed)."""
+        from . import theme_sync
+        from .adopt_sync import ORIGIN
+
+        self.theme_plan = None
+        if self.base.get("origin") == ORIGIN:
+            return
+        if self.theme_side is None:
+            self.theme_side = theme_sync.ours_side(self.ours)
+        report = mplan["report"]
+        if not self.base.get("theme"):
+            why = theme_sync.old_base_warning(self.base, self.theme_side)
+            if why:
+                report["warnings"].append(why)
+            return
+        tp = theme_sync.plan(self.base, self.theme_side, self.ours, pres, self.tok, self.picture_url,
+                             lambda page: f"b2s_th_{h6(page)}_{self.tok}")
+        self.theme_plan = tp
+        report["applied"] += tp["applied"]
+        report["conflicts"] += tp["conflicts"]
+        report["warnings"] += tp["warnings"]
+
+    def master_key(self) -> str | None:
+        """The background a slide shows by inheriting the master: the new source's shared one once
+        the base records the theme (this sync writes it there, or the person's own stays, which a
+        slide inheriting it shows either way), else what convert put there."""
+        if self.base.get("theme") and self.theme_side is not None:
+            return self.theme_side["shared"]
+        return self.base.get("master_background")
+
     def prepare(self, mplan: dict, pres: dict, theirs: dict) -> dict:
         """What to write, per slide: units to (re)create with their requests' inputs, deletions,
         moves, backgrounds, notes; pictures needed from the staging deck."""
@@ -1324,9 +1369,12 @@ class Sync:
             for page in range(kept[-1][0] + 1):
                 page_slide[page] = next(sid for pg, sid in kept if pg >= page)
         self.plan.page_slide = page_slide
-        master = self.base.get("master_background")
+        master = self.master_key()
         work = {"slides": [], "pictures": {}, "new_ids": new_ids, "page_slide": page_slide,
                 "writes": merge.has_writes(mplan, [s["objectId"] for s in theirs["slides"]])}
+        if self.theme_plan:
+            work["pictures"].update(self.theme_plan["stage"])
+            work["writes"] = work["writes"] or bool(self.theme_plan["requests"] or self.theme_plan["cleanup"])
         for p in mplan["slides"]:
             w = {"plan": p, "units": []}
             if p["action"] == "create":
@@ -1521,6 +1569,13 @@ class Sync:
         layouts = {l.get("layoutProperties", {}).get("name"): l for l in pres.get("layouts", [])}
         reqs: list[dict] = []
         doomed_slides: list[str] = []
+        if self.theme_plan:
+            # The master and the layouts first, in the same chain of batches: a layout write and a
+            # slide batch in flight together can undo each other's placeholder boxes (the last
+            # commit wins), and these go out one after another.
+            if self.theme_plan["requests"]:
+                reqs += [*self.theme_plan["requests"], BREAK]
+            self.cleanup_ids = list(dict.fromkeys([*getattr(self, "cleanup_ids", ()), *self.theme_plan["cleanup"]]))
         for w in work["slides"]:
             p = w["plan"]
             if p["action"] == "delete":
@@ -1683,7 +1738,19 @@ class Sync:
         converted slides with that background - found by object id, since the copies' names in the
         deck are the .pptx ones ("Title Only (no theme)"), not the b2s names."""
         key = snapshot.background_key(slide, self.ours["out"])
-        if key != self.base.get("master_background"):
+        served = (self.theme_plan or {}).get("page_group") or {}
+        if served and self.theme_side:
+            # The layout that serves the decoration a fresh conversion gives this slide now
+            # (theme_sync.plan), of the kind it needs: the plain one first, then its copies.
+            want = self.theme_side["groups"].get(slide["page"])
+            kinds = {b.get("layoutObjectId"): b.get("layout") for b in self.base["slides"]}
+            plain = layouts.get(layout_name)
+            if plain is not None and served.get(plain["objectId"]) == want:
+                return plain
+            for l in pres.get("layouts", []):
+                if served.get(l["objectId"]) == want and kinds.get(l["objectId"]) == layout_name:
+                    return l
+        if key != self.master_key():
             by_id = {l["objectId"]: l for l in pres.get("layouts", [])}
             same = [b for b in self.base["slides"] if b.get("background") == key
                     and b.get("layout") == layout_name and b.get("layoutObjectId") in by_id]
@@ -1979,10 +2046,20 @@ class Sync:
         return reqs
 
     def background_requests(self, sid: str, key: str, slide: dict, pres: dict, created: bool = False) -> list[dict]:
-        master = self.base.get("master_background")
+        master = self.master_key()
         if key == master:
             if created:
                 return []  # emit leaves these slides inheriting the master, and a new slide already does
+            if self.base.get("theme"):
+                # The master may be getting a new background in this very sync (theme_sync), so the
+                # slide goes back to inheriting it rather than copying today's. A layout page refuses
+                # INHERIT; a slide takes it, named by `propertyState` alone (tools/probe: the whole
+                # `pageBackgroundFill` as the field is refused).
+                page = next((s for s in pres.get("slides", []) if s["objectId"] == sid), None)
+                if page is not None and snapshot.background(page) == {"state": "INHERIT"}:
+                    return []
+                return [{"updatePageProperties": {"objectId": sid, "fields": "pageBackgroundFill.propertyState",
+                                                  "pageProperties": {"pageBackgroundFill": {"propertyState": "INHERIT"}}}}]
             fill = pres["masters"][0].get("pageProperties", {}).get("pageBackgroundFill", {})
             if "stretchedPictureFill" in fill:
                 return [{"updatePageProperties": {"objectId": sid, "fields": "pageBackgroundFill.stretchedPictureFill.contentUrl",
@@ -2024,6 +2101,7 @@ class Sync:
             raw = self.read()
             now = snapshot.read_presentation(raw)
         self.warn_about_folded_hiders(work, now)
+        self.raw_after = raw   # (the layouts and the master as written: theme_sync.new_record)
         # read-back of objects as the converter created them, with the new pictures' signatures
         created = {x for w in work["slides"] for oids in (w.get("objects") or {}).values() for x in oids}
         repainted = {w.get("sid") for w in work["slides"] if w["plan"]["action"] == "create" or w["plan"].get("background")}
@@ -2476,8 +2554,31 @@ class Sync:
             entries[sid] = entry
         slides = [entries.pop(sid) for sid in base_order(mplan, by_plan, [s["objectId"] for s in self.created["slides"]])
                   if sid in entries] + list(entries.values())
-        return {**self.base, "generation": self.base.get("generation", 0) + 1, "revisionId": self.final_revision,
-                "source": snapshot.source_info(self.ours["source"]), "slides": slides}
+        new = {**self.base, "generation": self.base.get("generation", 0) + 1, "revisionId": self.final_revision,
+               "source": snapshot.source_info(self.ours["source"]), "slides": slides}
+        pinned = set((self.theme_plan or {}).get("pinned") or ())
+        if pinned:
+            # The style theme_sync pinned onto placeholders (`inherited_pins`) looks the same and is
+            # converter output: where the person had not restyled the object, the base takes it, or
+            # the next sync reads the pins as the person's style edit.
+            keys = ("text_styles", "paragraph_styles", "run_spans", "text_style_hash")
+            pre = {oid: o for s in theirs["slides"] for oid, o in s.get("objects", {}).items() if oid in pinned}
+            post = {oid: o for s in self.created["slides"] for oid, o in s.get("objects", {}).items() if oid in pinned}
+            for entry in slides:
+                elements = list(entry.get("elements", []))
+                for i, el in enumerate(elements):   # (copies: a kept element is the old base's own dict)
+                    rbs = el.get("readback") or {}
+                    for oid in pinned & set(rbs):
+                        if oid in pre and oid in post and all(rbs[oid].get(k) == pre[oid].get(k) for k in keys):
+                            rbs = {**rbs, oid: {**rbs[oid], **{k: post[oid][k] for k in keys if k in post[oid]}}}
+                            elements[i] = {**el, "readback": rbs}
+                entry["elements"] = elements
+        if self.base.get("theme") and self.theme_side is not None:
+            from . import theme_sync
+            new["master_background"] = self.master_key()
+            new["theme"] = theme_sync.new_record(self.base["theme"], self.theme_side,
+                                                 (self.theme_plan or {}).get("written") or {}, self.raw_after)
+        return new
 
     def _element(self, e: dict, oids: list[str], read: dict | None) -> dict:
         objects = (read or {}).get("objects", {})

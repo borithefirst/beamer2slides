@@ -2543,6 +2543,106 @@ def write_layouts(client, pid: str, deck: dict, scale: float, fonts: FontMapper,
     style_layout_placeholders(slides, pid, deck, scale, fonts, PPTX_TITLE_DY, ground)
 
 
+# ---------------------------------------------------------------- the same, as data (theme_sync)
+
+def master_plan(deck: dict, out: Path, theme="plan") -> dict:
+    """`build_deck`'s decisions about the master and the layouts, as data, for a sync that has to
+    compare them with what convert wrote (`theme_sync`): {"bg_key": page -> background key,
+    "bg_file": key -> file, "shared": the key most slides share (None: none shared), "theme":
+    plan_theme's answer, "fill": the key on the master, "ground": master_ground}. `theme="plan"`
+    plans the theme (and so rewrites out/backgrounds/theme-*.png, as plan_theme does); a theme
+    passed in is taken as it is, None as no theme."""
+    bg_key = {s["page"]: background_key(s, out) for s in deck["slides"]}
+    bg_file = {bg_key[s["page"]]: out / s["background"] for s in deck["slides"] if not s.get("background_color")}
+    counts = Counter(bg_key.values())
+    shared = counts.most_common(1)[0][0] if counts and counts.most_common(1)[0][1] >= 2 else None
+    if theme == "plan":
+        theme = plan_theme(deck, out, bg_key)
+    fill = shared or ("color", "#ffffff")
+    if theme and theme.get("exact") is not None:
+        group = lambda s: "TITLE" if slide_layout(s)[0] == "TITLE" else "*"
+        if shared is None or all(theme["exact"].get(group(s)) == shared for s in deck["slides"] if bg_key[s["page"]] == shared):
+            fill = ("color", theme["ground"])
+    page_w = deck["slides"][0]["size"][0] if deck["slides"] else SLIDE_W
+    return {"bg_key": bg_key, "bg_file": bg_file, "shared": shared, "theme": theme, "fill": fill,
+            "ground": master_ground(shared, bg_file, page_w)}
+
+
+def layout_style_spec(deck: dict, scale: float, fonts: FontMapper, dy: float, ground=None) -> dict:
+    """What `style_layout_placeholders` writes into each kind of placeholder, as data a base can
+    hold: {"TITLE" / "CENTERED_TITLE" / "BODY": {"box": [x, y, w, h] (slide pt; None for the
+    body, whose box is left alone), "style", "fields", "align"}, or None where nothing is written}.
+    `layout_placeholder_requests` turns one entry into the requests for one placeholder;
+    tests/test_theme_sync.py holds the two to the requests `style_layout_placeholders` sends."""
+    texts = [(s, e) for s in deck["slides"] for e in s["elements"] if e["kind"] == "text" and e["paragraphs"][0]["runs"]]
+    frame = next(((s, e) for s, e in texts if e["role"] == "title" and not s.get("title_page")), None)
+    page = next(((s, e) for s, e in texts if e["role"] == "title" and s.get("title_page")), None) or frame
+    frame_title, page_title = (frame or (None, None))[1], (page or (None, None))[1]
+    title_runs = {id(e): readable_run(e["paragraphs"][0]["runs"][0], s, e["bbox"], ground)
+                  for s, e in (pair for pair in (frame, page) if pair)}
+    body_runs = Counter((r["font"], r["size"], r["color"], r["family"]) for s, e in texts if e["role"] == "body"
+                        for p in e["paragraphs"] for r in p["runs"] for _ in range(len(r["text"])))
+    body = None
+    if body_runs:
+        font, size, color, family = body_runs.most_common(1)[0][0]
+        body = {"font": font, "size": size, "color": color, "family": family, "bold": False, "italic": False}
+        w, h = deck["slides"][0]["size"]
+        body = readable_run(body, {"elements": []}, [0.1 * w, 0.3 * h, 0.9 * w, 0.8 * h], ground)
+
+    def styled(run: dict) -> tuple[dict, str]:
+        style, fields = fonts.text_style(run, scale)
+        style["foregroundColor"] = rgb(run["color"])
+        if "bold" not in fields:
+            style["bold"], fields = False, fields + ["bold"]
+        return style, ",".join(fields + ["foregroundColor"])
+
+    spec: dict = {}
+    for kind, el in (("TITLE", frame_title), ("CENTERED_TITLE", page_title)):
+        if el is None:
+            spec[kind] = None
+            continue
+        p = el["paragraphs"][0]
+        run = title_runs[id(el)]
+        z = fonts(run, scale)[1]
+        x = p["text_x0"] * scale - PAD_X
+        if p["align"] == "center":
+            x = min(x, 0.1 * SLIDE_W)
+        w = SLIDE_W - 2 * max(x, 10)
+        h = 2 * LINE_EM * z + 2 * BASELINE_A
+        y = p["lines"][0]["baseline"] * scale - (BASELINE_A + ASCENT_EM * z) + dy
+        style, fields = styled(run)
+        spec[kind] = {"box": [max(x, 10), max(0.0, y), w, h], "style": style, "fields": fields,
+                      "align": {"left": "START", "center": "CENTER", "right": "END"}[p["align"]]}
+    if body:
+        style, fields = styled(body)
+        spec["BODY"] = {"box": None, "style": style, "fields": fields, "align": "START"}
+    else:
+        spec["BODY"] = None
+    return json.loads(json.dumps(spec))  # (plain data: nothing shared with the caller's runs)
+
+
+def layout_placeholder_requests(entry: dict, pe: dict) -> list[dict]:
+    """The requests `style_layout_placeholders` sends for one placeholder `pe` (a layout or master
+    page element as presentations.get gives it) from its `layout_style_spec` entry."""
+    reqs = []
+    if entry.get("box") is not None:
+        x, y, w, h = entry["box"]
+        reqs.append({"updatePageElementTransform": {"objectId": pe["objectId"], "applyMode": "ABSOLUTE", "transform": {
+            "scaleX": w / (pe["size"]["width"]["magnitude"] / EMU_PER_PT),
+            "scaleY": h / (pe["size"]["height"]["magnitude"] / EMU_PER_PT), "unit": "EMU",
+            "translateX": round(x * EMU_PER_PT), "translateY": round(y * EMU_PER_PT)}}})
+        reqs.append({"updateShapeProperties": {"objectId": pe["objectId"], "fields": "contentAlignment",
+                                               "shapeProperties": {"contentAlignment": "TOP"}}})
+    if pe.get("shape", {}).get("text", {}).get("textElements"):
+        reqs += [
+            {"updateTextStyle": {"objectId": pe["objectId"], "textRange": {"type": "ALL"},
+                                 "style": json.loads(json.dumps(entry["style"])), "fields": entry["fields"]}},
+            {"updateParagraphStyle": {"objectId": pe["objectId"], "textRange": {"type": "ALL"},
+                                      "style": {"alignment": entry["align"]}, "fields": "alignment"}},
+        ]
+    return reqs
+
+
 def api_error(e: HttpError) -> str:
     return message_of(e)
 
