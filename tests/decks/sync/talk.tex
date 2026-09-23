@@ -7,6 +7,8 @@
 \documentclass[aspectratio=169]{beamer}
 \usetheme{Madrid}
 \setbeamertemplate{navigation symbols}{}
+%<retheme>\setbeamerfont{frametitle}{size=\huge}
+%<retheme>\setbeamercolor{frametitle}{bg=red!20, fg=red!50!black}
 \setbeameroption{show notes}
 \usepackage{amsmath,amssymb,booktabs}
 \usepackage{tikz}
@@ -174,4 +176,36 @@
   \end{itemize}
 \end{frame}
 
+%<*probes>
+\begin{frame}[label=grow,t]{Room to grow}
+%<probepush>  \vspace*{1.5em}
+%<!probereword>  The person writes a longer version of this paragraph than the converter
+%<probereword>  The person types a longer version of this paragraph than the converter
+  made room for, so its box has to grow downwards.
+
+  \medskip
+  \centering
+  \begin{tikzpicture}
+    \draw[thick, teal] (0,0) rectangle (7,1.4);
+    \draw[very thick, orange] plot[smooth, domain=0:7] (\x, {0.7+0.5*sin(\x*100)});
+  \end{tikzpicture}
+\end{frame}
+
+\begin{frame}[label=twoboxes,t]{Two boxes}
+%<probepush>  The source adds this line above both boxes.\par\medskip
+  The first box holds two lines of text, written so that it wraps once at the
+  right margin of the frame.
+
+  \medskip
+  \hspace*{2cm}\parbox{7cm}{The second box stands below it, indented, on its own.}
+\end{frame}
+
+\begin{frame}[label=display,t]{Display math}
+%<probepush>  The source adds this line above the equation.\par\medskip
+  The equation below stands between two paragraphs:
+  \[ \sum_{k=1}^{n} \frac{d_k^2}{\sigma_k} = \int_0^1 f(x)\,dx \]
+  and this paragraph comes after it.
+\end{frame}
+
+%</probes>
 \end{document}

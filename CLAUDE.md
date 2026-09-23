@@ -128,9 +128,11 @@ Debugging classification locally: `debug/slide-NNN.png` (element boxes over the 
   creates, the next sync sweeps duplicates. Fault injection: `B2S_FAIL_AT` (`faults.py`).
 - **A decision the base does not record reverses itself**: whatever a sync decided to keep (a unit
   or slide the source removed, the deck's own slide) must be written into the base.
-- **A box can change with its neighbours**: a one-line text reaches to the mirror of the slide's
-  leftmost body text, so an unchanged element whose emitted frame moved is a `width` source change
-  (`sync.mark_widths`, `emit.text_box_frame`), worked out from both sides' IR at sync time.
+- **A box can change with its neighbours**: sync diffs what emit would write, not only the IR.
+  `sync.mark_emitted` emits each changed slide from the base's IR and the new one
+  (`emit.slide_emission`; ids, links, z-order normalised, measured places left out) and marks an
+  unchanged or moved element `width`/`placed`/`emitted` (`identity.CONTEXT_FIELDS`). Group or
+  placeholder-role changes can't be written by recreating a unit: `build_ours()["context_unwritten"]`.
 - **Frame labels** (`\begin{frame}[label=x]`) are the only slide identity that survives compiling.
   A label written twice reaches the PDF as *no* label (hyperref keeps the first). `label` writes
   missing labels; it never renames or resolves duplicates. When a label moved between frames,
@@ -152,6 +154,12 @@ Debugging classification locally: `debug/slide-NNN.png` (element boxes over the 
 - Proving nothing is lost: `tools/loss_oracle.py` judges one sync; `tools/fuzz_sync.py offline`
   fuzzes the merge through a reference applier (`fuzz_world.py`), `live` against real decks;
   `tools/fuzz_labels.py` measures label pairing. Fixed seeds in `tests/test_sync_fuzz.py`.
+- Proving nothing *looks* broken: `devtools/layout_oracle.py` lays text out like emit (exact line
+  counts on converter boxes) and fails `text_overlap` / `text_overflow` / `stranded_picture` /
+  `off_page` a sync introduced; `tools/layout_oracle.py <archive> [--json]` replays recorded live
+  fuzz steps offline; `LiveRound.step` writes `layout.json`. Live ground truth: the `layout-*`
+  scenarios in `test_sync_live.py`, measured by `devtools/probe_layout.py` (docs/project-notes.md
+  "Layout probes", "Layout oracle").
 
 ## Agent tools (`src/beamer2slides/agent/`, docs/agent-tools.md)
 - Eleven tools, one per journey (`agent.tools.TOOLS`, ordered by `tools.ORDER`): `b2s_status`,
