@@ -1774,6 +1774,21 @@ def text_right_limit(el: dict, slide: dict) -> float | None:
     return limit if limit > x1 else None
 
 
+def text_box_frame(el: dict, slide: dict, scale: float, fonts: FontMapper) -> list[float] | None:
+    """[x, y, w, h] (slide pt) of the box emit gives a text element on `slide`, None for another
+    kind. Not the element's own business alone: how far a one-line box reaches depends on the
+    slide's leftmost body text (`text_right_limit`) and a title bar under it (`title_bar_under`),
+    so a neighbour the source added or moved changes it (sync.mark_widths)."""
+    if el.get("kind") != "text" or not el.get("paragraphs"):
+        return None
+    reqs = text_box_requests(el, "s", "o", scale, fonts, None, None, title_bar_under(el, slide),
+                             text_right_limit(el, slide))
+    props = reqs[0]["createShape"]["elementProperties"]
+    t = props["transform"]
+    return [t["translateX"] / EMU_PER_PT, t["translateY"] / EMU_PER_PT,
+            props["size"]["width"]["magnitude"] / EMU_PER_PT, props["size"]["height"]["magnitude"] / EMU_PER_PT]
+
+
 def earlier_holes(p: dict, run: dict) -> list[tuple[float, float]]:
     """(x0, width) of the holes before `run` on its line (PDF pt)."""
     words = [b[6] for b in run.get("before", []) if len(b) >= 7]

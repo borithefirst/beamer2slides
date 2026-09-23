@@ -3473,10 +3473,18 @@ base from before this change has no margins: its tables (API tables then) are st
 `table-moved` (variant flag `tablemove` in tests/decks/sync/talk.tex). That scenario found a gap
 that is not the table's: a title's box is emitted up to the mirror of the slide's leftmost body text
 (`emit.text_right_limit`), so the centred line the variant adds narrows a *fresh* conversion's
-title to 474 pt where the synced deck keeps v1's 707. Sync does not resize a title the source did
-not change; the box is wider than its words and invisible in the thumbnail, so the scenario lets
-that one compare_fresh difference through. An element whose emitted box depends on its neighbours
-is not re-derived by sync when only a neighbour changed.
+title to 474 pt where the synced deck kept v1's 707: the title's IR was the same, so the merge saw
+no source change. Now `sync.mark_widths` (in `build_ours`) works out the frame emit would give each
+paired text element (`emit.text_box_frame`) on the base's slide and on the new one, with today's
+fonts, whenever what the box depends on around it (`text_right_limit`, `title_bar_under`) moved; a
+frame more than 0.5 pt off marks both sides `fields["width"]`, which `identity.source_changes`
+reports as a `width` change only when both carry it. It is worked out from the base's own IR, so an
+old base needs nothing new, and a mark new_base copies into the saved base is cleared by the next
+sync before it compares. Only elements whose IR is otherwise unchanged (or only moved - a `move`
+would keep the old width) are marked. The unit is then recreated like any source change (a title
+placeholder is refilled in place with the new frame; the deck's edits win as usual).
+`test_a_title_whose_box_a_new_neighbour_narrowed_is_a_source_change`, live `table-moved` with no
+allowance.
 
 Rows and columns: a table without merges or fills whose grid the source changed is refilled too
 when `table_steps` finds row inserts (insertBelow the row whose margins the new one needs) and

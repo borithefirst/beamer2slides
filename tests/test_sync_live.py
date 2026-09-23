@@ -440,11 +440,8 @@ def scenario_table_moved(run: Run):
     run.convert(build("v1"))
     pdf = build("table-moved")
     run.check("table-moved", pdf, run.sync(pdf), [])
-    # The added line is the slide's leftmost body text, so a fresh conversion stops the title's box
-    # at the mirrored margin (emit.text_right_limit: 474 pt wide, 707 before). Sync leaves a title
-    # the source didn't change as it is: a box the short title doesn't fill, invisible in the
-    # thumbnail comparison, which stays.
-    run.problems = [p for p in run.problems if not re.fullmatch(r"fresh Results: (missing|extra) shape:TEXT_BOX:Results .*", p)]
+    # (the added line is the slide's leftmost body text, so the title's box narrows from 707 to
+    # 474 pt in a fresh conversion: sync.mark_widths makes that a source change of the title)
     run.problems += tables_kept(run)
 
 

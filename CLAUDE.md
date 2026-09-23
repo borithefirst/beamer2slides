@@ -128,6 +128,9 @@ Debugging classification locally: `debug/slide-NNN.png` (element boxes over the 
   creates, the next sync sweeps duplicates. Fault injection: `B2S_FAIL_AT` (`faults.py`).
 - **A decision the base does not record reverses itself**: whatever a sync decided to keep (a unit
   or slide the source removed, the deck's own slide) must be written into the base.
+- **A box can change with its neighbours**: a one-line text reaches to the mirror of the slide's
+  leftmost body text, so an unchanged element whose emitted frame moved is a `width` source change
+  (`sync.mark_widths`, `emit.text_box_frame`), worked out from both sides' IR at sync time.
 - **Frame labels** (`\begin{frame}[label=x]`) are the only slide identity that survives compiling.
   A label written twice reaches the PDF as *no* label (hyperref keeps the first). `label` writes
   missing labels; it never renames or resolves duplicates. When a label moved between frames,

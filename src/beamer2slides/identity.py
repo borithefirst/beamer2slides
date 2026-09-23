@@ -855,8 +855,12 @@ def ir_fields(el: dict, out: Path | None = None, anchor_key: str | None = None, 
 
 def source_changes(base_el: dict, ours_el: dict) -> set[str]:
     """Fields the source changed ({"text", "position", "size", "style", "image"}, or {"layout"} when only
-    something else in the IR differs); empty when the IR hash is the same."""
+    something else in the IR differs); empty when the IR hash is the same. {"width"} too when the
+    box emit gives a text moved because of what stands around it (`sync.mark_widths`), which only
+    counts when both sides carry the mark."""
+    wb, wo = base_el["fields"].get("width"), ours_el["fields"].get("width")
+    widened = {"width"} if wb is not None and wo is not None and wb != wo else set()
     if base_el["ir_hash"] == ours_el["ir_hash"]:
-        return set()
-    changed = {k for k, v in ours_el["fields"].items() if base_el["fields"].get(k) != v}
-    return changed or {"layout"}
+        return widened
+    changed = {k for k, v in ours_el["fields"].items() if k != "width" and base_el["fields"].get(k) != v}
+    return (changed or {"layout"}) | widened

@@ -110,7 +110,10 @@ storage), `merge.py` (pure planning and diff3), `sync.py` (requests and the writ
 ```
 `ir_hash` hashes the element's IR without ids, spans and files, with `#page=N` links as slide keys
 and floats to 0.01; `fields` hash its parts (position = top-left to 0.5 pt, size, the set of style
-values, plain text, image), so a reworded line changes `text` and `size`, not `position`. Read-back
+values, plain text, image), so a reworded line changes `text` and `size`, not `position`. A text
+whose own IR is the same can still change `width`: a one-line box reaches to the mirror of the
+slide's leftmost body text, so a neighbour the source added or moved changes the frame emit gives
+it; `sync.mark_widths` compares both frames at sync time and marks both sides in memory. Read-back
 values are normalised (EMU→pt rounded to 0.01, scale to 1e-4, colours to hex or `theme:NAME`, group
 children composed to absolute transforms, image hash = contentUrl path) so an untouched object
 compares equal. Google issues new contentUrls for unchanged pictures now and then, so pictures and

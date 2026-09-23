@@ -40,6 +40,7 @@ IN_PLACE_FIELDS = ("text", "text_styles", "paragraph_styles", "text_style_hash",
 # Google's words when it could not fetch a createImage URL, and the waits before sending again (s).
 PICTURE_FETCH = "problem retrieving the image"
 FETCH_RETRY = (3, 10)
+WIDTH_MOVED = 0.5  # slide pt: a text box emit now places further than this has moved (mark_widths)
 
 
 class RevisionMismatch(Exception):
@@ -361,8 +362,45 @@ def build_ours(pdf: Path, work: Path, base: dict, overlays: str = "last",
         ekeys.append(k)
         fps.append(f)
     entries = snapshot.slide_entries(deck, work, keys, ekeys, fps)
+    mark_widths(base, entries, deck, pairs, plan.scale, plan.fonts)
     return {"source": pdf, "pdf": prepared.pdf, "out": work, "plan": plan, "deck": deck, "slides": entries,
             "pairs": pairs, "label_moves": moves, "weak_pairs": weak, "near_misses": near}
+
+
+def mark_widths(base: dict, entries: list[dict], deck: dict, pairs: dict, scale: float, fonts) -> None:
+    """Give a text element whose own IR the source left alone a `width` field change when the box
+    emit gives it moved all the same, because of what stands around it (`emit.text_box_frame`).
+
+    A one-line box reaches to the mirror of the slide's leftmost body text, so a centred line the
+    source added below a title narrowed a fresh conversion's title from 707 to 474 pt while sync,
+    seeing the title's IR unchanged, kept the old box (live scenario table-moved). Both frames are
+    worked out here, with today's fonts, from the base's IR of the slide and the new one's, so an
+    old base needs nothing it lacks; `identity.source_changes` compares the field only when both
+    sides carry it. The base is marked in memory only, and a stale mark from an earlier sync is
+    cleared: the mark says "these two differ", never what either width is."""
+    from .emit import text_box_frame, text_right_limit, title_bar_under
+    for j, i in pairs.items():
+        b, o, slide = base["slides"][i], entries[j], deck["slides"][j]
+        if any("ir" not in e for e in b["elements"]):
+            continue
+        was_slide = {"elements": [e["ir"] for e in b["elements"]], "size": slide["size"]}
+        base_by = {e["key"]: e for e in b["elements"]}
+        for e in b["elements"]:
+            if "width" in e.get("fields", {}):
+                e["fields"] = {k: v for k, v in e["fields"].items() if k != "width"}
+        for oe, el in zip(o["elements"], slide["elements"]):
+            be = base_by.get(oe["key"])
+            if be is None or oe["kind"] != "text" or be["kind"] != "text":
+                continue
+            if not identity.source_changes(be, oe) <= {"position"}:
+                continue  # (rewritten anyway: its box is made again where the new conversion puts it)
+            if text_right_limit(be["ir"], was_slide) == text_right_limit(el, slide) and \
+                    title_bar_under(be["ir"], was_slide) == title_bar_under(el, slide):
+                continue  # (nothing around it that the box depends on moved)
+            was, now = text_box_frame(be["ir"], was_slide, scale, fonts), text_box_frame(el, slide, scale, fonts)
+            if was and now and max(abs(a - c) for a, c in zip(was, now)) > WIDTH_MOVED:
+                be["fields"] = {**be["fields"], "width": "base"}
+                oe["fields"] = {**oe["fields"], "width": "ours"}
 
 
 # ---------------------------------------------------------------- requests
