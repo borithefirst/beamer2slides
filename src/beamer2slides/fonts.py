@@ -18,7 +18,13 @@ MATH_PREFIXES = (
     "CMMI", "CMSY", "CMEX", "CMBSY", "CMMIB", "MSAM", "MSBM", "EUFM", "EUFB", "EUSM", "EUSB",
     "EURM", "EURB", "RSFS", "STMARY", "WASY", "LASY", "LATINMODERNMATH", "STIXMATH",
     "STIXTWOMATH", "XITSMATH", "CAMBRIAMATH", "FIRAMATH", "NEWCMMATH",
+    # newtx / newpx / txfonts / pxfonts math: letters (NewTXMI, txmiaX), symbols (txsys), extension
+    "NEWTXMI", "NEWTXBMI", "NEWPXMI", "NEWPXBMI", "NTXMI", "NTXBMI", "NTXSY", "NTXEX", "TXMI",
+    "TXBMI", "TXSY", "TXBSY", "TXEX", "PXMI", "PXBMI", "PXSY", "PXBSY", "PXEX",
 )  # plus any name containing MATH
+# Math fonts whose letters are italic (math_text): CMMI and its cousins; PazoMath-Italic and
+# the like say so in their name.
+MATH_ITALIC_RE = re.compile(r"^(CMMI|LMMATHITALIC|NEWTXB?MI|NEWPXB?MI|NTXB?MI|TXB?MI|PXB?MI)|ITALIC")
 # Symbol fonts whose glyphs are pictures, not letters (ccicons, fontawesome, pifont, marvosym, ...;
 # LaTeX's picture-mode line and circle pieces: \cancel strokes, \circle)
 ICON_FONT_RE = re.compile(r"CCICONS|FONTAWESOME|DINGBAT|ZAPF|MARVOSYM|WEBDINGS|WINGDINGS|ACADEMICONS|BBDING|"
@@ -78,7 +84,35 @@ GOOGLE_FAMILIES = {
     "Courier": "Courier New", "CourierNew": "Courier New", "NimbusMonL": "Courier New",
     "NimbusMonoPS": "Courier New", "TeXGyreCursor": "Courier New", "LiberationMono": "Courier New",
     "Calibri": "Carlito", "Cambria": "Caladea", "Georgia": "Georgia", "Verdana": "Verdana",
+    # newtx's text face is TeX Gyre Termes with extra glyphs ("…X", peeled in google_font).
+    # Math fonts drawn to match a text face: their letters are that face's.
+    "FiraMath": "Fira Sans", "CambriaMath": "Caladea",
+    # Monospaced faces 0.6 em wide (measured on their PDFs: every glyph one advance): any 0.6 em
+    # monospaced Google font sets them at the PDF's widths, at the PDF's size. Roboto Mono is the
+    # one whose advances emit knows (emit.slides_width). (CMTT-like 0.525 em faces - t1xtt, txtt -
+    # stay family mono, sized by the CMTT factor.)
+    "BeraSansMono": "Roboto Mono", "DejaVuSansMono": "Roboto Mono", "VeraSansMono": "Roboto Mono",
+    "BitstreamVeraSansMono": "Roboto Mono", "LinLibertineMT": "Roboto Mono", "LinLibertineM": "Roboto Mono",
 }
+# Families a name does not say the class of (no "Sans", "Mono" in it), by the start of the family
+# part of the name, lower case without spaces. Unknown faces get the calibrated substitute of
+# their class (emit.FONT_FOR_FAMILY): a sans deck stays sans, code stays monospaced.
+SANS_FAMILIES = (
+    "segoe", "tahoma", "trebuchet", "verdana", "calibri", "carlito", "candara", "corbel", "arial",
+    "arimo", "helvet", "nimbussan", "texgyreheros", "texgyreadventor", "urwgothic", "avant", "futura",
+    "gill", "optima", "myriad", "frutiger", "univers", "avenir", "lucidagrande", "lucidasans",
+    "cantarell", "inter", "fira", "roboto", "lato", "montserrat", "raleway", "poppins", "nunito", "ubuntu",
+    "cabin", "karla", "mulish", "rubik", "manrope", "quicksand", "oswald", "worksans", "ibmplexsans",
+    "opensans", "sourcesans", "notosans", "dejavusans", "liberationsans", "googlesans", "biolinum",
+    "linbiolinum", "meiryo", "malgun", "pingfang", "simhei", "microsoftyahei", "hiraginokaku",
+    "hiraginosans", "sourcehansans",
+)
+MONO_FAMILIES = ("menlo", "monaco", "lucidaconsole", "andale", "cousine", "inconsolata", "ptmono", "sfmono")
+# TeX's own typewriter font names: t1xtt, txtt, newtxtt, pxtt (CMTT-like, 0.525 em)
+TEX_TT_RE = re.compile(r"(T1X|NEWTX|TX|PX)TT[A-Z]*\d*")
+# The libertine package's Type 1 names: LinLibertine / LinBiolinum, a variant (Display, Mono,
+# Initials, Keyboard, C...), T (Type 1) or O (OpenType), then B / Z (bold, semibold), I / O (slant).
+LIBERTINE_RE = re.compile(r"LIN(LIBERTINE|BIOLINUM)(DISPLAY|M|I|K|C)?([TO])([BZ])?([IO])?")
 WEIGHTS = [("thin", 100), ("hairline", 100), ("extralight", 200), ("ultralight", 200), ("light", 300),
            ("book", 400), ("regular", 400), ("medium", 500), ("semibold", 600), ("demibold", 600),
            ("extrabold", 800), ("ultrabold", 800), ("bold", 700), ("black", 900), ("heavy", 900)]
@@ -97,6 +131,8 @@ def google_font(name: str) -> tuple[str, int, bool] | None:
     family_part = canonical.get(family_part.lower(), family_part)
     style_l = style.lower()
     # "FiraSansLight" style names without a hyphen: peel a known weight suffix off the family.
+    if family_part not in GOOGLE_FAMILIES and family_part[-1:] in "xX" and family_part[:-1].lower() in canonical:
+        family_part = canonical[family_part[:-1].lower()]  # newtx's TeXGyreTermesX: Termes with extra glyphs
     if family_part not in GOOGLE_FAMILIES:
         for word, _ in WEIGHTS:
             if family_part.lower().endswith(word) and family_part[:-len(word)] in GOOGLE_FAMILIES:
@@ -130,19 +166,35 @@ def font_info(name: str) -> FontInfo:
         return FontInfo(*EC_VARIANTS[m.group(1)], design_size=int(m.group(2)) / 100)
 
     # Latin Modern (LMSans10-Bold, LMRomanCaps10-Regular, LMMono10-Italic, ...) and
-    # anything else: read the style from keywords in the name.
+    # anything else: read the class and the style from the name.
     size = re.search(r"(\d+(?:\.\d+)?)", base)
+    design = float(size.group(1)) if size and base.startswith("LM") else None
     lower = base.lower()
-    if any(k in lower for k in ("mono", "courier", "code", "consol", "typewriter")) or key.startswith("LMTT"):
+    family_part, _, style = lower.partition("-")
+    family_part = family_part.replace(" ", "").replace("_", "")
+    m = LIBERTINE_RE.fullmatch(key)
+    if m:  # LinBiolinumTBO: Type 1 (T), bold (B), oblique (O)
+        face, variant, _, weight, slant = m.groups()
+        return FontInfo("mono" if variant == "M" else "sans" if face == "BIOLINUM" else "serif",
+                        bold=bool(weight), italic=bool(slant))
+    if any(k in lower for k in ("mono", "courier", "consol", "typewriter")) or re.search(r"(?<!uni)code", lower) \
+            or family_part.startswith(MONO_FAMILIES) or key.startswith("LMTT") or TEX_TT_RE.fullmatch(key):
         family = "mono"
-    elif any(k in lower for k in ("sans", "helvet", "arial", "fira", "roboto", "lato", "source sans")):
+    elif (any(k in lower for k in ("sans", "gothic", "grotesk", "grotesque")) or family_part.startswith(SANS_FAMILIES)) \
+            and "slab" not in family_part and "serif" not in family_part:  # Roboto Slab, Noto Serif
         family = "sans"
     else:
         family = "serif"
+    words = re.findall(r"[a-z]+", style)
     return FontInfo(
         family,
-        bold=any(k in lower for k in ("bold", "black", "heavy", "demi", "semibold", "dark")),
-        italic=any(k in lower for k in ("italic", "oblique", "slant")),
-        smallcaps="caps" in lower,
-        design_size=float(size.group(1)) if size and base.startswith("LM") else None,
+        bold=any(k in lower for k in ("bold", "black", "heavy", "demi", "semibold", "dark"))
+        # URW's Medi is Times' bold (NimbusRomNo9L-Medi, -MediItal); Medium is not bold
+        or any(w.startswith("medi") and not w.startswith("medium") for w in words),
+        # URW's Ital / Obli (URWPalladioL-Ital, NimbusSanL-ReguItal), Adobe's It (MinionPro-BoldIt)
+        italic=any(k in lower for k in ("italic", "oblique", "slant", "kursiv"))
+        or any(k in style for k in ("ital", "obli")) or style.endswith("it"),
+        # LMRomanCaps10, TeXPalladioL-SC, Palatino-RomanSC, MinionPro-SmallCaps
+        smallcaps="caps" in lower or style.endswith("sc") or "smcp" in lower,
+        design_size=design,
     )
