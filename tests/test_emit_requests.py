@@ -1198,6 +1198,117 @@ def test_a_cell_spanning_columns_is_as_wide_as_its_words():
     assert sum(widths) >= words + 2 * emit.TABLE_CELL_PAD + emit.WRAP_MARGIN
 
 
+TIGHT_SCALE = SLIDE_W / 364.19  # 27_text_fit is a 4:3 beamer page
+
+
+def tight_table() -> dict:
+    """27_text_fit, frame `table-tight`: a \\footnotesize booktabs table, rows 10.96 pt apart."""
+    rows = [["Dataset", "Split", "Images", "Classes"], ["ImageNet-1k", "train", "1,281,167", "1000"],
+            ["ImageNet-1k", "val", "50,000", "1000"], ["Places365", "train", "1,803,460", "365"],
+            ["Monitor", "Workstation", "12,345,678", "99"]]
+    rule = lambda row, position, weight, y: {"row": row, "position": position, "color": "#000000", "weight": weight, "y": y}
+    return {"id": "p9tab0", "kind": "table", "frame": [80.99, 89.16, 281.84, 155.55], "size": 8.97,
+            "row_baselines": [100.42, 117.01, 127.97, 138.93, 149.89], "row_heights": [16.59, 10.96, 10.96, 10.96, 10.96],
+            "columns": [{"x0": 80.99, "x1": 130.08, "align": "left"}, {"x0": 142.03, "x1": 188.67, "align": "left"},
+                        {"x0": 200.63, "x1": 242.62, "align": "right"}, {"x0": 254.57, "x1": 281.76, "align": "right"}],
+            "bounds": [80.99, 136.06, 194.65, 248.59, 281.84], "merges": [], "borders": [], "fills": [],
+            "rules": [rule(0, "TOP", 0.87, 89.16), rule(1, "TOP", 0.55, 105.91), rule(4, "BOTTOM", 0.87, 155.55)],
+            "cells": [[[run_of(t, 8.97, font="CMSS9")] for t in row] for row in rows]}
+
+
+def test_a_table_from_the_pptx_keeps_the_pdf_row_pitch():
+    # A createTable table has 7.2 pt of padding above and below every row, which the API cannot
+    # set: a \footnotesize booktabs table came out 4 pt taller than the PDF's and ran towards its
+    # caption. The .pptx brings the table with margins of its own (tools/probe_pptx_table_margins.py).
+    el, scale = tight_table(), TIGHT_SCALE
+    lay = emit.table_layout(el, scale, FONTS, imported=True)
+    assert lay["y"] == pytest.approx(89.16 * scale) and lay["y"] + sum(lay["heights"]) == pytest.approx(155.55 * scale, abs=0.05)
+    assert lay["ratios"] == pytest.approx([1.0] * 5)  # the text keeps its own line spacing
+    # Every baseline where the PDF has it: the top inset takes booktabs' space under a rule.
+    y = lay["y"]
+    for b, h, inset in zip(el["row_baselines"], lay["heights"], lay["insets"]):
+        assert inset >= 0 and y + inset + emit.TABLE_TEXT_TOP + emit.ASCENT_EM * lay["z"] == pytest.approx(b * scale, abs=0.05)
+        y += h
+    assert lay["insets"][1] > 1.0 and lay["insets"][2] == pytest.approx(0.0, abs=1e-6)  # under \midrule / no rule
+    api = emit.table_layout(el, scale, FONTS)
+    assert sum(api["heights"]) > sum(lay["heights"]) + 3  # what an API-made table grows by
+
+
+def test_a_table_from_the_pptx_is_filled_not_created():
+    el, scale = tight_table(), TIGHT_SCALE
+    reqs = table_requests(el, "b2s_s009", "b2s_s009_tab3", scale, FONTS, imported=True)
+    assert not any("createTable" in r for r in reqs)
+    assert reqs[0] == {"updatePageElementsZOrder": {"pageElementObjectIds": ["b2s_s009_tab3"], "operation": "BRING_TO_FRONT"}}
+    assert any("createTable" in r for r in table_requests(el, "b2s_s009", "b2s_s009_tab3", scale, FONTS))  # sync's way
+    table = emit.pptx_table(el, scale, FONTS)
+    lay = emit.table_layout(el, scale, FONTS, imported=True)
+    assert table["margins"] == [(emit.TABLE_CELL_PAD, round(t, 2), emit.TABLE_CELL_PAD, 0.0) for t in lay["insets"]]
+    heights = [r["updateTableRowProperties"]["tableRowProperties"]["minRowHeight"]["magnitude"] / EMU_PER_PT
+               for r in reqs if "updateTableRowProperties" in r]
+    assert heights == pytest.approx(table["heights"], abs=0.01)
+
+
+def test_the_pptx_carries_each_table_empty_with_its_margins():
+    from pptx import Presentation
+    el, scale = tight_table(), TIGHT_SCALE
+    table = emit.pptx_table(el, scale, FONTS)
+    page = {"layout": "BLANK", "fill": None, "pictures": [], "tables": [table], "templates": False}
+    prs = Presentation(emit.build_pptx(364.19, 273.14, [], [page], {"color": "#ffffff"}))
+    frames = [s for s in prs.slides[0].shapes if s.has_table]
+    assert len(frames) == 1
+    grid = frames[0].table
+    assert (len(grid.rows), len(grid.columns)) == (5, 4)
+    assert [round(c.width / EMU_PER_PT, 2) for c in grid.columns] == pytest.approx(table["widths"], abs=0.01)
+    assert [round(r.height / EMU_PER_PT, 2) for r in grid.rows] == pytest.approx(table["heights"], abs=0.01)
+    for r, (left, top, right, bottom) in enumerate(table["margins"]):
+        cell = grid.cell(r, 3)
+        assert (cell.margin_left, cell.margin_top, cell.margin_right, cell.margin_bottom) == \
+            tuple(round(v * EMU_PER_PT) for v in (left, top, right, bottom))
+        assert cell.text == ""
+    pr = frames[0]._element.graphic.graphicData.tbl.tblPr
+    assert pr.get("firstRow") is None and pr.get("bandRow") is None  # no header look, no bands
+    assert pr.find(f"{{{emit.NS_A}}}tableStyleId").text == emit.NO_TABLE_STYLE
+
+
+def test_a_wrapped_cell_wraps_in_its_column():
+    # 27_text_fit, frame `table-merged`: a p{3.2cm} cell is one cell of three lines, and its row
+    # holds them. Its column holds each of the PDF's lines, a hyphenated word whole ("A cell set
+    # in a para-" became "A cell set in a" in Slides, and the cell four lines): not the whole
+    # paragraph on one line.
+    el = tight_table()
+    long = "A cell set in a paragraph column, which wraps in the PDF too"
+    el["cells"][2][1] = [run_of(long, 8.97, font="CMSS9")]
+    starts = [long.index("graph"), long.index("wraps")]
+    el["wrapped"], el["row_lines"] = [[2, 1, starts]], [1, 1, 3, 1, 1]
+    el["row_baselines"] = [100.42, 117.01, 127.97, 160.85, 171.81]
+    el["row_heights"] = [16.59, 10.96, 32.88, 10.96, 10.96]
+    el["frame"][3] = el["rules"][2]["y"] = 177.47
+    lay = emit.table_layout(el, TIGHT_SCALE, FONTS, imported=True)
+    widest = emit.slides_width([run_of("A cell set in a paragraph", 8.97, font="CMSS9")], TIGHT_SCALE, FONTS)
+    assert lay["cell_width"][(2, 1)] == pytest.approx(widest)
+    assert widest + 2 * emit.TABLE_CELL_PAD <= lay["widths"][1] < emit.slides_width(el["cells"][2][1], TIGHT_SCALE, FONTS)
+    assert lay["heights"][2] >= 3 * emit.LINE_EM * lay["z"] - 1 and lay["ratios"][2] == pytest.approx(1.0)
+    assert lay["y"] + sum(lay["heights"]) == pytest.approx(177.47 * TIGHT_SCALE, abs=0.05)
+
+
+def test_a_subscript_in_a_cell_is_no_larger_than_its_text():
+    # 16_colored_table, `Math in cells`: lambda_max's subscript hung 3 pt under the table's last row.
+    table = number_table(188.0)
+    runs = inline_math()["paragraphs"][0]["runs"]
+    table["cells"][0][0] = runs
+    reqs = table_requests(table, "b2s_s001", "b2s_s001_b0", SCALE, FONTS, imported=True)
+    text = "".join(r["text"] for r in runs).strip()
+    sizes = {}
+    for r in reqs:
+        st = r.get("updateTextStyle")
+        if st and st.get("cellLocation") == {"rowIndex": 0, "columnIndex": 0} and "baselineOffset" in st["style"]:
+            rng = st["textRange"]
+            sizes[text[rng["startIndex"]:rng["endIndex"]]] = (st["style"]["baselineOffset"], pt_of(st["style"]["fontSize"]))
+    body = FONTS(runs[0], SCALE)[1]
+    for piece in ("t", "+1"):
+        assert sizes[piece] == ("SUBSCRIPT", body)
+
+
 def test_a_hebrew_table_cell_reads_right_to_left_and_stays_where_it_is_drawn():
     reqs = table_requests(hebrew_table(), "b2s_s001", "b2s_s001_b0", SCALE, FONTS)
     styles = {r["updateParagraphStyle"]["cellLocation"]["columnIndex"]: r["updateParagraphStyle"]["style"]

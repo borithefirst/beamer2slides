@@ -371,6 +371,29 @@ def span_runs(spans: list[Span]) -> list[dict]:
     return runs
 
 
+def cell_runs(lines: list[list[Span]]) -> tuple[list[dict], list[int]]:
+    """Runs of a table cell given as its lines of spans (a paragraph column wraps): one paragraph,
+    the lines joined by a space, or by nothing where TeX hyphenated a word at the line's end.
+    And where in the runs' text each line after the first starts."""
+    runs: list[dict] = []
+    starts = []
+    for spans in lines:
+        more = span_runs(spans)
+        if runs and more:
+            tail, head = runs[-1]["text"], more[0]["text"].lstrip()
+            if len(tail) >= 2 and tail.endswith("-") and tail[-2].isalpha() and head[:1].islower():
+                runs[-1] = {**runs[-1], "text": tail[:-1]}
+                more[0] = {**more[0], "text": head}
+            else:
+                more[0] = {**more[0], "text": " " + head}
+            starts.append(sum(len(r["text"]) for r in runs) + len(more[0]["text"]) - len(head))
+            if all(runs[-1][k] == v for k, v in more[0].items() if k != "text"):
+                runs[-1] = {**runs[-1], "text": runs[-1]["text"] + more[0]["text"]}
+                more = more[1:]
+        runs += more
+    return runs, starts
+
+
 def polygon_shape(points: list, r: "Rect") -> str | None:
     """Slides shape for a closed polygon path: a diamond touching the middle of each side of its
     bounding box, or a triangle with its apex centred on the top or bottom side."""
@@ -2230,6 +2253,7 @@ class PageClassifier:
         # chunks tangled the columns and the table was refused, and as text boxes the cell's
         # first line joined the numbers beside it and reflowed across their column in Slides.
         wrapped: dict[int, tuple[float, float]] = {}  # row index -> the cell's (x0, x1)
+        continued: set[int] = set()  # rows holding nothing but the next line of the cell above
 
         def phrase(spans: list[Span], x0: float) -> list[Span]:
             out = []
@@ -2252,6 +2276,7 @@ class PageClassifier:
             if x1 < nxt[-1].rect.x1 - 0.5:
                 continue  # a paragraph's first line is full; this one ends short of the next
             wrapped[i] = wrapped[j] = (x0, max(x1, nxt[-1].rect.x1))
+            continued.add(j)
 
         def chunks_of(row: list[Span], i: int) -> list[list[Span]]:
             chunks: list[list[Span]] = []
@@ -2386,9 +2411,40 @@ class PageClassifier:
             else:
                 align = "center"
             col_info.append({"x0": round(x0, 2), "x1": round(x1, 2), "align": align})
+
+        def line_base(row: list[Span]) -> float:
+            return statistics.fmean(s.baseline for s in row if s.size >= 0.9 * max(x.size for x in row))
+
+        # A wrapped cell's next lines were rows of their own up to here (columns, merges and
+        # alignments are found line by line); now they join the cell they continue, one cell of
+        # several lines that Slides wraps in its column as TeX did - and wraps again when a person
+        # types into it. Not across a merged cell: that grid is not one we understand line by line.
+        row_lines = [1] * n_rows
+        last_line = [line_base(row) for row in grid_rows]  # a row's last baseline
+        cell_lines = [[[cell] if cell else [] for cell in row] for row in cells]
+        cont = {sum(1 for j in range(i) if j not in between) for i in continued}
+        merged_rows = {g for m in merges for g in range(m["row"], m["row"] + m["rows"])}
+        if cont and not cont & merged_rows and 0 not in cont:
+            keep, head_of = [], {}
+            for g in range(n_rows):
+                if g in cont:
+                    head_of[g] = keep[-1]
+                else:
+                    keep.append(g)
+            for g, h in sorted(head_of.items()):
+                row_lines[h] += 1
+                last_line[h] = last_line[g]
+                for cc in range(n_cols):
+                    if cells[g][cc]:
+                        cell_lines[h][cc].append(cells[g][cc])
+            at = {g: k for k, g in enumerate(keep)}
+            merges = [{**m, "row": at[m["row"]]} for m in merges]
+            grid_rows, cell_lines = [grid_rows[g] for g in keep], [cell_lines[g] for g in keep]
+            row_lines, last_line = [row_lines[g] for g in keep], [last_line[g] for g in keep]
+            n_rows = len(keep)
         rows = grid_rows
 
-        baselines = [statistics.fmean(s.baseline for s in row if s.size >= 0.9 * max(x.size for x in row)) for row in rows]
+        baselines = [line_base(row) for row in rows]
 
         # Borders: rules across the whole table stay row rules; partial rules (\cline,
         # \cmidrule) and vertical rules become the borders of the cells they run along.
@@ -2418,28 +2474,40 @@ class PageClassifier:
                     borders.append({"row": rr, "col": min(k, n_cols - 1), "position": "LEFT" if k < n_cols else "RIGHT",
                                     "color": v["color"], "weight": round(v["weight"], 2)})
         pitches = [b - a for a, b in zip(baselines, baselines[1:])] or [1.4 * size]
-        # Slides rows are at least one line plus 7.2 pt padding above and below, even with the
-        # tightest line spacing emit uses (docs/calibration.md); refuse if the taller table
-        # would run into content below.
+        # The last row: as tall as the one before it (as a line of a wrapped cell, when that one
+        # wraps), plus its own further lines.
+        lead = min([(e - b) / (k - 1) for b, e, k in zip(baselines, last_line, row_lines) if k > 1] or pitches)
+        last = (pitches[-1] if n_rows < 2 or row_lines[-2] == 1 else lead) + last_line[-1] - baselines[-1]
+        heights = pitches + [last] if n_rows > 1 else [last]
+        # A Slides row is at least its lines, 1.195 em x lineSpacing for the first and 1.2 em for
+        # each further one: emit's tables come with the .pptx, without the 7.2 pt of padding above
+        # and below an API-made table has (emit.table_rows). Refuse if the table would grow into
+        # content below all the same.
         scale = 720.0 / self.W
         z = size * scale / 1.02
-        ratio = min(1.0, max(0.5, (min(pitches) * scale - 14.4) / (1.195 * z)))  # emit.table_rows
-        row_h = [max(p * scale, 1.195 * z * ratio + 14.4) / scale for p in pitches + [pitches[-1]]]
-        top = baselines[0] - (6.48 + 0.968 * z - (1 - ratio) * 0.9 * z) / scale
+        body = [(1.195 + (k - 1) * 1.2) * z for k in row_lines]
+        ratio = min(1.0, max(0.5, min(h * scale / b for h, b in zip(heights, body))))
+        row_h = [max(h * scale, b * ratio) / scale for h, b in zip(heights, body)]
+        top = baselines[0] - (0.968 * z - 0.72 - (1 - ratio) * 0.9 * z) / scale
         bottom = top + sum(row_h)
         grown = Rect(frame.x0, frame.y1, frame.x1, bottom)
         if bottom > self.H - 2 or any(t.intersects(grown) for t in text_rects) or \
                 any(reg.intersects(grown) and not c.expand(0.5).contains_rect(reg) for reg in self.regions):
             return None
 
+        cell_text = [[cell_runs(lines) for lines in row] for row in cell_lines]
+        # [row, col, where each line after the first starts in the cell's text]: emit makes the
+        # column wide enough for every line of the PDF, a hyphenated word whole.
+        wrapped_cells = [[r, cc, starts] for r, row in enumerate(cell_text) for cc, (_, starts) in enumerate(row) if starts]
         return {
             "id": f"p{self.page['index']}tab{index}", "kind": "table", "role": "table",
             "bbox": c.expand(1.0).as_list(), "frame": frame.as_list(), "size": round(size, 2),
             "row_baselines": [round(b, 2) for b in baselines],
-            "row_heights": [round(p, 2) for p in pitches + [pitches[-1]]],
+            "row_heights": [round(p, 2) for p in heights],
+            **({"row_lines": row_lines, "wrapped": wrapped_cells} if wrapped_cells else {}),
             "columns": col_info,
             "bounds": [round(b, 2) for b in bounds],
-            "cells": [[span_runs(cell) for cell in row] for row in cells],
+            "cells": [[runs for runs, _ in row] for row in cell_text],
             "merges": merges,
             "rules": [{"row": min(k, len(rows) - 1), "position": "TOP" if k < len(rows) else "BOTTOM",
                        "color": r["color"], "weight": round(r["weight"], 2), "y": round(r["rect"].cy, 2)}
