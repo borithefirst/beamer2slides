@@ -314,7 +314,10 @@ def user_object_findings(base: dict, before: dict, after: dict, rep: dict) -> li
             if norm(rb.get("text")) != norm(now.get("text")):
                 out.append(finding("user_text_changed", "loss", f"{norm(rb.get('text'))!r} became {norm(now.get('text'))!r}",
                                    slide=skey, object=oid))
-            if not same_box(rb, now):
+            if rb["kind"] != "elementGroup" and not same_box(rb, now):
+                # A group's box is its children's union: converter children that follow the
+                # source move it (live fuzz r7403, r7407). Every child is judged on its own -
+                # the person's here, the converter's by geometry_reverted.
                 out.append(finding("user_object_moved", "undo", f"box {rb.get('box')} became {now.get('box')}",
                                    slide=skey, object=oid))
             same = same_image(rb, now)

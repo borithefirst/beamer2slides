@@ -341,6 +341,21 @@ def test_catches_a_user_object_put_back_where_it_was(clean):
     assert "user_object_moved" in kinds(checked(clean, after=after))
 
 
+def test_a_person_s_group_follows_its_children(clean):
+    """A group the person made of converter objects moves when the source moves them (live fuzz
+    r7403: a paragraph and its equation pushed down 31 pt). Its box is not the person's placement."""
+    sid, oid = user_object(clean)
+    group ={"kind": "elementGroup", "children": [oid, "converter_child"], "box": [0, 0, 100, 50],
+             "transform": [1, 0, 0, 1, 0, 0], "parent_group": None}
+    before, after = copy.deepcopy(clean["before"]), copy.deepcopy(clean["after"])
+    slide_of(before, sid)["objects"]["user_group"] = group
+    slide_of(after, sid)["objects"]["user_group"] = {**group, "box": [0, 31, 100, 81],
+                                                    "transform": [1, 0, 0, 1, 0, 31]}
+    for read in (before, after):
+        slide_of(read, sid)["objects"][oid]["parent_group"] = "user_group"
+    assert "user_object_moved" not in kinds(checked(clean, before=before, after=after))
+
+
 def test_catches_a_user_object_taken_out_of_a_group_that_is_still_there(clean):
     """The person's object leaving a group is their work undone - unless the group itself is gone,
     which Slides does on its own once a group is down to one child."""
