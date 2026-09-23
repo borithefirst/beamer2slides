@@ -15,7 +15,7 @@ Only what THIS sync introduced is judged: a look that was already broken in `bef
 converter's own or the person's) is not the sync's, and neither is one the new conversion draws
 itself. Those come back separately, from `existing(before)`, never as failures.
 
-How a text is laid out
+How a text is laid out (`beamer2slides.text_layout`, shared with sync)
 ----------------------
 A read-back says what a text box holds and how big it is, not where Slides puts the lines, and
 Slides boxes do not autofit. So the lines are laid out here the way emit predicts them: the
@@ -70,18 +70,13 @@ from pathlib import Path
 
 from beamer2slides import emit
 from beamer2slides.devtools import loss_oracle
+# the layout model lives in the library now (sync lays out merged text with it); names kept here
+from beamer2slides.text_layout import (  # noqa: F401
+    CAP_EM, DESC_EM, INSET_X, INSET_Y, NBSP, SOFT_BREAK, TAB_EM, UNKNOWN_EM, _para, _style_name, advance,
+    char_styles, filled, layout, para_style, para_styles, text_box, upright, wrap)
 
 SEVERITIES = ("fail", "note")
 FAIL = ("fail",)
-
-INSET_X = emit.PAD_X            # box edge -> text, left and right
-INSET_Y = 7.2                   # Slides' top and bottom text insets
-CAP_EM = 0.72                   # ink above the baseline (Lato's capitals)
-DESC_EM = 0.2                   # ink below it
-NBSP = "\u00a0"
-SOFT_BREAK = emit.SOFT_BREAK
-UNKNOWN_EM = 0.5                # a character nobody measured
-TAB_EM = 2.0
 
 REACHED = collections.Counter()   # what check() saw and what excused it, over a whole run (`replay`)
 
@@ -94,223 +89,6 @@ def finding(kind: str, severity: str, detail: str, slide=None, element=None, obj
     out = {"kind": kind, "severity": severity, "slide": slide, "element": element, "object": object, "detail": detail}
     out.update(more)
     return out
-
-
-# ---------------------------------------------------------------- laying a text out
-
-def _style_name(st: dict) -> str:
-    return {(False, False): "regular", (True, False): "bold", (False, True): "italic",
-            (True, True): "bold_italic"}[(bool(st.get("bold")), bool(st.get("italic")))]
-
-
-def advance(ch: str, st: dict, size: float) -> float:
-    """Slides' advance of one character (pt) in a read-back run style at `size`."""
-    family = st.get("fontFamily") or "Lato"
-    if st.get("baselineOffset") in ("SUPERSCRIPT", "SUBSCRIPT"):
-        size *= emit.SCRIPT_SIZE
-    if ch == "\t":
-        return TAB_EM * size
-    if family == emit.FONT_FOR_FAMILY["mono"]:
-        return emit.ROBOTO_MONO_ADVANCE_EM * size
-    table = (emit.ADVANCES.get(family) or emit.ADVANCES["Lato"])[_style_name(st)]
-    if ch == NBSP:
-        ch = " "
-    if st.get("smallCaps") and ch.islower():
-        return table.get(ch.upper(), UNKNOWN_EM) * size * emit.SMALL_CAPS_SIZE
-    em = table.get(ch)
-    if em is None:
-        em = emit.SYMBOL_ADVANCE_EM.get(ch, UNKNOWN_EM)
-    return em * size
-
-
-def char_styles(rb: dict, size: "float | list[float] | None") -> list[dict]:
-    """The run style of every character of the read-back's text (a newline between runs takes the
-    style before it). `size`: the font size where the read-back has none (a placeholder inherits
-    its layout's), one for all or one per paragraph; None when no size can be known."""
-    text = rb.get("text") or ""
-    out: list[dict | None] = [None] * len(text)
-    for a, b, st in rb.get("run_spans") or []:
-        for i in range(max(0, a), min(b, len(text))):
-            out[i] = st
-    last = next((s for s in out if s is not None), {})
-    for i, s in enumerate(out):
-        if s is None:
-            out[i] = last
-        else:
-            last = s
-    if size:
-        sizes = size if isinstance(size, list) else [size]
-        para, filled_ = 0, []
-        for ch, s in zip(text, out):
-            filled_.append(s if s.get("fontSize") else {**s, "fontSize": sizes[min(para, len(sizes) - 1)]})
-            para += ch == "\n"
-        out = filled_
-    return out
-
-
-def _para(s: dict) -> dict:
-    return {"lineSpacing": (s.get("lineSpacing") or 100) / 100, "indentStart": s.get("indentStart") or 0.0,
-            "indentFirstLine": s.get("indentFirstLine") or 0.0, "spaceAbove": s.get("spaceAbove") or 0.0,
-            "spaceBelow": s.get("spaceBelow") or 0.0, "bullet": bool(s.get("bullet")),
-            "alignment": s.get("alignment") or "START"}
-
-
-def para_style(rb: dict) -> dict:
-    """The paragraph style that lays the text out shortest: the read-back lists its distinct
-    paragraph styles, not which paragraph has which, and an estimate that errs should err towards
-    "it fits"."""
-    styles = rb.get("paragraph_styles") or [{}]
-    aligns = {s.get("alignment") or "START" for s in styles}
-    return {"lineSpacing": min((s.get("lineSpacing") or 100) for s in styles) / 100,
-            "indentStart": min((s.get("indentStart") or 0.0) for s in styles),
-            "indentFirstLine": min((s.get("indentFirstLine") or 0.0) for s in styles),
-            "spaceAbove": min((s.get("spaceAbove") or 0.0) for s in styles),
-            "spaceBelow": min((s.get("spaceBelow") or 0.0) for s in styles),
-            "bullet": any(s.get("bullet") for s in styles),
-            "alignment": aligns.pop() if len(aligns) == 1 else "START"}
-
-
-def para_styles(rb: dict, n: int) -> list[dict]:
-    """Each of the text's `n` paragraphs' style, as far as the read-back says it: it lists the
-    distinct styles in the order they first appear, so one style is everybody's, as many styles as
-    paragraphs is one each, and the first paragraph always has the first. Anywhere else the
-    shortest (`para_style`) stands in."""
-    styles = rb.get("paragraph_styles") or [{}]
-    if len(styles) == 1 or len(styles) == n:
-        return [_para(styles[min(i, len(styles) - 1)]) for i in range(n)]
-    least = para_style(rb)
-    return [_para(styles[0])] + [least] * (n - 1)
-
-
-def upright(rb: dict) -> bool:
-    t = rb.get("transform") or [1, 0, 0, 1]
-    return abs(t[1]) < 1e-6 and abs(t[2]) < 1e-6 and t[0] > 0 and t[3] > 0
-
-
-def wrap(chars: str, styles: list[dict], width: float) -> list[tuple[int, int, float]]:
-    """Greedy line breaks of one paragraph: (start, end, ink width) per line. Breaks at spaces and
-    after hyphens, never at a no-break space; a soft break ends a line; a word wider than the line
-    is cut where it no longer fits, as Slides does."""
-    lines = []
-    start, n = 0, len(chars)
-    while start <= n:
-        w, last_break, i = 0.0, None, start
-        ink_at_break = 0.0
-        ink = 0.0
-        end = None
-        while i < n:
-            ch = chars[i]
-            if ch == SOFT_BREAK:
-                end, nxt = i, i + 1
-                break
-            adv = advance(ch, styles[i], styles[i].get("fontSize") or 0.0)
-            if ch == " ":
-                w += adv
-                last_break, ink_at_break = i + 1, ink
-                i += 1
-                continue
-            if w + adv > width and i > start:
-                if last_break is not None and last_break > start:
-                    end, nxt, ink = last_break, last_break, ink_at_break
-                else:
-                    end, nxt = i, i
-                break
-            w += adv
-            ink = w
-            if ch == "-":
-                last_break, ink_at_break = i + 1, ink
-            i += 1
-        if end is None:
-            lines.append((start, n, ink))
-            break
-        lines.append((start, end, ink))
-        start = nxt
-        if start >= n and (end == n or chars[end:end + 1] != SOFT_BREAK):
-            break
-    return lines
-
-
-def layout(rb: dict, size: float | None = None) -> dict | None:
-    """Where Slides sets the lines of a text box (see the module docstring): {"lines": [{"box",
-    "baseline", "size", "para", "start", "end"}], "holes": [{"box", "start", "end"}], "bottom":
-    ink bottom}. None for no text, a turned box, or a text whose size can't be known."""
-    text = (rb.get("text") or "")
-    if text.endswith("\n"):
-        text = text[:-1]
-    if not text.strip() or not rb.get("box") or not upright(rb):
-        return None
-    styles = char_styles({**rb, "text": text}, size)
-    if any(not s.get("fontSize") for s in styles):
-        return None
-    x0, y0, x1, y1 = rb["box"]
-    left = x0 + INSET_X
-    right = x1 - INSET_X
-    lines = []
-    at = 0
-    paras = text.split("\n")
-    pss = para_styles(rb, len(paras))
-    previous = None   # size of the last line so far
-    baseline = None
-    r_prev, below, bullet_prev = None, 0.0, False
-    for pi, para in enumerate(paras):
-        ps = pss[pi]
-        r = ps["lineSpacing"]
-        pst = styles[at:at + len(para)] or [styles[min(at, len(styles) - 1)]]
-        indent = ps["indentStart"]
-        broken = wrap(para, pst, max(1.0, right - left - indent)) if para else [(0, 0, 0.0)]
-        for li, (a, b, ink) in enumerate(broken):
-            sizes = [pst[k]["fontSize"] for k in range(a, b) if not para[k].isspace()] if b > a else []
-            z = max(sizes) if sizes else pst[min(a, len(pst) - 1)]["fontSize"]
-            if baseline is None:
-                baseline = y0 + emit.BASELINE_A + emit.ASCENT_EM * z + emit.extra_above(r, z)
-            elif li == 0:
-                # Slides ignores the space between two bulleted items
-                gap = 0.0 if ps["bullet"] and bullet_prev else ps["spaceAbove"] + below
-                baseline += emit.pitch_between(previous, r_prev, z, r) + gap
-            else:
-                baseline += emit.line_pitch(previous, r, z)
-            previous, r_prev = z, r
-            if ps["alignment"] == "CENTER":
-                lx = left + indent + (right - left - indent - ink) / 2
-            elif ps["alignment"] == "END":
-                lx = right - ink
-            else:
-                lx = left + indent
-            bx = left + min(ps["indentFirstLine"], indent) if ps["bullet"] and li == 0 and ink > 0 else lx
-            lines.append({"box": [min(bx, lx), baseline - CAP_EM * z, lx + ink, baseline + DESC_EM * z],
-                          "baseline": baseline, "size": z, "para": pi, "start": at + a, "end": at + b,
-                          "x": lx})
-        at += len(para) + 1
-        below, bullet_prev = ps["spaceBelow"], ps["bullet"]
-    if not lines:
-        return None
-    align = (rb.get("shape_style") or {}).get("align")
-    if align in ("MIDDLE", "BOTTOM"):
-        top = lines[0]["baseline"] - emit.ASCENT_EM * lines[0]["size"]
-        bottom = lines[-1]["baseline"] + emit.DESCENT_EM * lines[-1]["size"]
-        want = (y0 + y1) / 2 - (bottom - top) / 2 if align == "MIDDLE" else y1 - emit.BASELINE_A - (bottom - top)
-        shift = want - top
-        for ln in lines:
-            ln["baseline"] += shift
-            ln["box"][1] += shift
-            ln["box"][3] += shift
-    holes = []
-    for ln in lines:
-        k = ln["start"]
-        while k < ln["end"]:
-            if text[k] == NBSP and styles[k].get("fontFamily") == emit.HOLE_FONT:
-                j = k
-                while j < ln["end"] and text[j] == NBSP and styles[j].get("fontFamily") == emit.HOLE_FONT:
-                    j += 1
-                hx = ln["x"] + sum(advance(text[m], styles[m], styles[m]["fontSize"]) for m in range(ln["start"], k))
-                hw = sum(advance(text[m], styles[m], styles[m]["fontSize"]) for m in range(k, j))
-                holes.append({"box": [hx, ln["baseline"] - CAP_EM * ln["size"], hx + hw, ln["baseline"] + DESC_EM * ln["size"]],
-                              "start": k, "end": j, "line": lines.index(ln)})
-                k = j
-            else:
-                k += 1
-    return {"lines": lines, "holes": holes, "bottom": max(ln["box"][3] for ln in lines),
-            "box": list(rb["box"])}
 
 
 # ---------------------------------------------------------------- what is drawn where on a slide
@@ -335,16 +113,6 @@ def _size_hint(el: dict | None, scale: float) -> list[float] | None:
     out = [max((r.get("size") or p.get("size") or 0.0 for r in p.get("runs") or [{}]), default=0.0) * scale
            for p in paras]
     return out if out and all(out) else None
-
-
-def text_box(rb: dict) -> bool:
-    st = rb.get("shape_style") or {}
-    return rb.get("kind") == "shape" and (st.get("type") == "TEXT_BOX" or bool(rb.get("placeholder")))
-
-
-def filled(rb: dict) -> bool:
-    fill = (rb.get("shape_style") or {}).get("fill") or {}
-    return rb.get("kind") == "shape" and not text_box(rb) and fill.get("color") is not None and (fill.get("alpha") or 0) > 0.5
 
 
 class View:
@@ -653,12 +421,19 @@ def hole_offsets(view: View, text_oid: str) -> dict[str, tuple[float, float, flo
         dx, dy, z = off(o, hole)
         return abs(dx) + abs(dy)
     if len(pics) <= 6 and len(holes) <= 8:
+        # more pictures than holes (the person deleted words holding one): which pictures get the
+        # holes is part of the choice - a picture left over has no hole to be judged against
         best = None
-        for perm in itertools.permutations(range(len(holes)), min(len(pics), len(holes))):
-            c = sum(cost(o, holes[k]) for o, k in zip(pics, perm))
+        if len(pics) <= len(holes):
+            choices = (list(zip(pics, perm)) for perm in itertools.permutations(range(len(holes)), len(pics)))
+        else:
+            choices = (list(zip((pics[i] for i in perm), range(len(holes))))
+                       for perm in itertools.permutations(range(len(pics)), len(holes)))
+        for pairs_ in choices:
+            c = sum(cost(o, holes[k]) for o, k in pairs_)
             if best is None or c < best[0]:
-                best = (c, perm)
-        return {o: off(o, holes[k]) for o, k in zip(pics, best[1])}
+                best = (c, pairs_)
+        return {o: off(o, holes[k]) for o, k in best[1]}
     return {o: off(o, min(holes, key=lambda hh: cost(o, hh))) for o in pics}
 
 
@@ -805,7 +580,7 @@ def ours_from_folder(folder: Path, base: dict) -> dict | None:
     extract, classify and render halves are what the folder already holds)."""
     from beamer2slides import identity, snapshot
     from beamer2slides.emit import SLIDE_W, DeckPlan, merge_blocks
-    from beamer2slides.sync import mark_widths
+    from beamer2slides.sync import mark_emitted
     path = folder / "deck.json"
     if not path.exists():
         return None
@@ -829,7 +604,7 @@ def ours_from_folder(folder: Path, base: dict) -> dict | None:
         ekeys.append(k)
         fps.append(f)
     entries = snapshot.slide_entries(deck, folder, keys, ekeys, fps)
-    mark_widths(base, entries, deck, pairs_, plan.scale, plan.fonts)
+    mark_emitted(base, entries, deck, pairs_, plan.scale, plan.fonts)
     return {"slides": entries, "pairs": pairs_, "label_moves": moves, "weak_pairs": weak}
 
 

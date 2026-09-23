@@ -901,7 +901,9 @@ def scenario_layout_stranded_formula(run: Run):
     exps = run.edit(E("replace_word", slide=MERGING, text="is clean when the changed words", old="clean",
                       new="perfectly clean"))
     formula_places(run, lay, "before")
-    run.sync(build("formula"))
+    base = base_now(run)
+    report = run.sync(build("formula"))
+    oracle_verdict(run, lay, base, report)
     rows = formula_places(run, lay, "after")
     lay.vs_fresh("formula", MERGING)
     for i, r in enumerate(rows):
@@ -974,6 +976,104 @@ def scenario_layout_retheme(run: Run):
     lay.sanity("retheme", exps)
 
 
+def base_now(run: Run) -> dict:
+    """The base the next sync starts from (the one convert or the last sync wrote)."""
+    return json.loads((run.out / "sync" / "base.json").read_text(encoding="utf-8"))
+
+
+def oracle_verdict(run: Run, lay: Layout, base: dict, report: dict) -> None:
+    """The layout oracle (devtools/layout_oracle.py) over the sync just run: anything that looks broken
+    after it that did not before it and that the new conversion does not draw is a problem."""
+    from beamer2slides import snapshot
+    from beamer2slides.devtools import layout_oracle as L
+    before = snapshot.read_presentation(run.before.pres)
+    after = snapshot.read_presentation(run.deck.read().pres)
+    try:
+        ours = L.ours_from_folder(run.out / "sync" / "ours", base)
+    except Exception:  # noqa: BLE001 (judged without the conversion then)
+        ours = None
+    found = L.failures(L.check(base, before, after, report, ours))
+    lay.data["oracle"] = [L.describe([f]) for f in found]
+    lay._save()
+    run.problems += [f"layout oracle: {L.describe([f]).strip()}" for f in found]
+
+
+BLOCK_BODY = {"text": "as a conflict"}               # the block body, before and after the source rewords it
+BLOCK_NEXT = {"text": "Both versions go into the report"}  # the words below the block
+
+
+def block_panel(run: Run, body_target: dict) -> dict:
+    """The block body's panel on Merge policy: the smallest filled shape without words under the
+    body's centre."""
+    model = run.deck.read()
+    s = model.one(POLICY)
+    body = model.element(s, body_target)
+    cx, cy = body.center
+    under = [e for e in s.elements if e.kind == "shape" and e.id != body.id and not e.text
+             and "placeholder" not in e.obj["shape"]
+             and e.obj["shape"].get("shapeProperties", {}).get("shapeBackgroundFill", {}).get("solidFill")
+             and e.box[0] <= cx <= e.box[2] and e.box[1] <= cy <= e.box[3]]
+    if not under:
+        raise RuntimeError(f"{run.name}: no panel under the block body")
+    return {"id": min(under, key=lambda e: (e.box[2] - e.box[0]) * (e.box[3] - e.box[1])).id}
+
+
+def block_verdict(run: Run, lay: Layout, exps: list[dict]) -> None:
+    """The person made the block body's words need more room (a sentence, a larger font), the source
+    rewords the same body: the unit is recreated for the source's words and the merged words written
+    in. Do they fit their box, and does the block's panel still hold them without running into the
+    words below?"""
+    targets = {"body": BLOCK_BODY, "panel": block_panel(run, BLOCK_BODY), "next": BLOCK_NEXT}
+    els, inks = lay.ink("before", POLICY, targets)
+    lay.overflow("before", "body", els["body"], inks["body"])
+    lay.overlap("before", "panel", "next", inks)
+    base = base_now(run)
+    report = run.sync(build("blockedit"))
+    targets["panel"] = block_panel(run, BLOCK_BODY)
+    els, inks = lay.ink("after", POLICY, targets)
+    over = lay.overflow("after", "body", els["body"], inks["body"])
+    hit = lay.overlap("after", "panel", "next", inks)
+    lay.vs_fresh("blockedit", POLICY)
+    warned = [w for w in report.get("warnings", []) if "panel" in w]
+    lay.data["warnings"] = report.get("warnings", [])
+    lay._save()
+    if over > LAYOUT_TOL:
+        run.problems.append(f"{POLICY}: the merged block body runs {over} pt past the bottom of its box "
+                            f"({els['body'].box[3] - els['body'].box[1]:.1f} pt tall)")
+    past = round(inks["body"].box[3] - els["panel"].box[3], 1) if inks["body"].box else 0.0
+    lay.data["after"]["body past panel"] = past
+    lay._save()
+    if past > 0.5 and not warned:
+        run.problems.append(f"{POLICY}: the merged block body's words run {past} pt past the bottom of the "
+                            "block's panel and the report says nothing")
+    if collide(hit):
+        run.problems.append(f"{POLICY}: the block's panel comes within {hit['clearance_pt']} pt of the words below "
+                            f"({lay.data['before']['panel x next']['clearance_pt']} pt before the sync)")
+    oracle_verdict(run, lay, base, report)
+    lay.sanity("blockedit", exps)
+
+
+@scenario
+def scenario_layout_block_sentence(run: Run):
+    """H7: the person types a sentence at the end of the block body, which takes it onto another
+    line; the source rewords the same body. Box and panel were sized for the source's words
+    (Sync.override_requests writes the merged ones): refit grows both (refit.py)."""
+    lay = Layout(run)
+    run.convert(build("v1"))
+    exps = run.edit(E("append_sentence", slide=POLICY, text="as a conflict.", sentence="Both are kept."))
+    block_verdict(run, lay, exps)
+
+
+@scenario
+def scenario_layout_block_font(run: Run):
+    """H8: the person sets the block body to 20 pt (it wraps onto more lines); the source rewords the
+    same body: the merged words keep the person's size, box and panel grow to hold them."""
+    lay = Layout(run)
+    run.convert(build("v1"))
+    exps = run.edit(E("resize_font", slide=POLICY, text="as a conflict", size=20))
+    block_verdict(run, lay, exps)
+
+
 # Confirmed on Google's renderer (docs/project-notes.md "Layout probes"); each goes when sync handles it.
 XFAIL.update({
     "layout-grown-box-moved": "geometry mode 'theirs' (both moved it) writes the person's position and not their "
@@ -982,8 +1082,6 @@ XFAIL.update({
                      "the person's absolute place, nothing gives way (ink clearance 29.7 pt -> -1.3 pt)",
     "layout-display-math": "the equation picture follows the source down, the paragraph the person moved stays: "
                            "the equation lands on its words (clearance 20.2 pt -> -10.8 pt)",
-    "layout-stranded-formula": "Sync.measure_places places formula pictures for the source's text, the person's "
-                               "words are merged in afterwards (override_requests): the picture stands 72 pt from its hole",
     "layout-retheme": "sync never writes layouts: the old theme's title bar (a layout picture) stays over the new "
                       "slides, the new title colour on the old bar (thumbnails 10.5% off a fresh conversion)",
 })

@@ -3718,3 +3718,90 @@ real overflow can be missed); pictures and shapes meeting each other (only pairs
 judged); anything the offline fuzz world does, since its read-backs have no run styles, no box
 types and boxes not sized by emit's metrics - running the oracle there needs the world to size
 and style its text boxes like emit first.
+
+## Merged text into recreated boxes
+
+The two failure classes the layout oracle found have the same cause. When sync recreates a unit
+whose words both sides changed, it builds the unit for the *source's* words: the box is sized for
+them, and `measure_places` puts each formula picture over the source's hole. `override_requests`
+then writes the merged words into it (the person's sentence, the person's 20 pt) and nothing looks
+again. So a picture stays where the source's hole was (live `layout-stranded-formula`: 72 pt short
+of its hole), and the merged words run out of the box and off the block's panel (fuzz-live-refill
+r2700 step1, 22 pt; sync-fuzz r908 step7, 14.7 pt).
+
+**The layout model is the library's now** (`text_layout.py`: `layout`, `needed_bottom`,
+`span_box`, `text_box`, `filled`). It is the oracle's model moved out of
+`devtools/layout_oracle.py`, which imports it back. Sync and the oracle predict lines the same way,
+from emit's own numbers (`emit.ADVANCES`, `line_pitch`, `DESCENT_EM`, `extra_below`).
+
+**Refit** (`refit.py`, `Sync.refit`): one more batch after the overrides, and only when some
+overrides were sent. `refit_jobs` picks the recreated, non-placeholder TEXT_BOX units whose words
+were overridden, with their formula pictures (the unit's `math` members). It reads the deck back
+and lays each text out three times: *pre* (the source's words in the box as created), *geo* (the
+source's words in the box as it is now, after the geometry override) and *final* (the merged words
+as written). Refit makes up only for what the **text** change did (geo -> final). What the
+geometry alone did stays the person's: a person who scaled the group rewrapped the words
+themselves. The first design used absolute offsets and moved pictures the person had stranded
+(r1008, r800, r1002: one picture by 295 pt).
+- *Pictures*: each picture is paired with its pre hole (`pair_pictures`: the cheapest assignment
+  within tolerance, with the most pairs). The geo hole with the same start is mapped to the final
+  hole through a SequenceMatcher of the two texts. The picture moves by the difference of hole
+  centre x and of baselines, as a RELATIVE translation; inside a group it is conjugated by the
+  group's transform, G^-1 S G (`local_step`). A hole the merged words no longer have is warned
+  about, not guessed.
+- *Box*: it grows by what the final words need beyond the box (`needed_bottom`), minus the
+  overflow the source's own words, the geo layout or the person's text before the sync already
+  had. That overflow is nobody's new problem: a person's 20 pt footer that already wrapped
+  "1 / 10" is left as it was (r1010, r501, r702). A box grows only when it is top-anchored,
+  scaled about its top, and never past the page bottom; otherwise the report says so.
+- *Panel*: the smallest filled upright shape the text sits on (`sits_on`) that is not the unit's
+  own and not being deleted. It grows by what the words need below it plus the padding the
+  converter left (measured on pre), minus what already overran before (the same rule; a person's
+  20 pt block title grew the title bar 5% before it, r906, r710). It grows only as far as the strip
+  below is clear of other objects' ink (a backdrop holding the panel and things drawn on the panel
+  don't count). What it cannot give is reported: "... run X pt past the bottom of the panel they sit
+  on, which could only grow Y pt: '<words>' is in the way".
+- *Base*: the refit steps are the converter's doing, so the new base records them.
+  `reshape_base` sets R' = R . F^-1 . S . F for each object and re-derives group boxes. The
+  person's own step E (deck = E . base) stays the same on every member of the unit, so
+  `geometry_writable` still holds and the next sync writes nothing.
+
+Offline, the fuzz world's read-backs have no run spans and no TEXT_BOX type, so `refit_jobs`
+finds nothing and the fuzz is unchanged (300/300 clean, `--chain 3`). `tests/test_refit.py` covers
+the planner on synthetic read-backs: a picture following its hole along a line and onto the next,
+the conjugation inside a group, a deleted hole, geometry alone, box and panel growth for a
+sentence and for a font, a panel blocked by the words below, the person's own overflow, the page
+bottom, the base, and a stray picture.
+
+**Replayed** over the archives (the next step's base gives the pre read-back of the created
+objects, `after` is the final one; refit's steps are applied to it and both oracles are run). The
+layout oracle's fails went from {text_overflow 2, stranded_picture 12} to {stranded_picture 2}, and
+the loss oracle is unchanged on every step. The two left are shrink/r903 step5. That run was
+recorded at 17:20, before ed8f458 (17:42) fixed the move of ungrouped units that stranded those
+pictures, so it is not a text case and can't be replayed. r2700 step1: box x1.777, panel x1.466.
+r908 step7: the panel can give 16.9 of the 20.2 pt it needs, because 'Both versions go into the
+report' is 3.3 pt below; the words still end inside the grown box, the oracle is clean, and the
+report says it.
+
+**Live** (`test_sync_live.py`). `layout-stranded-formula` is out of XFAIL: the recreated picture
+now stands (-1.7, 1.5) pt from its hole, as a fresh conversion's does (-1.7, 1.0); it was
+(-72.2, 1.0). Two new scenarios on Merge policy sync to `blockedit`:
+- `layout-block-sentence`: the person appends "Both are kept.", and the merged body needs a second
+  line. Box 30.9 -> 51.1 pt, panel bottom 201.9 -> 222.2, words end 5.7 pt inside it, panel to the
+  words below 8.1 pt (28.3 before).
+- `layout-block-font`: the person sets the body to 20 pt. Box -> 54.9 pt, panel bottom 225.9,
+  words 5.4 pt inside it, clearance 4.5 pt.
+
+Both also run the layout oracle over the sync (`oracle_verdict`, as does the stranded one), and it
+is clean. With refit switched off, all three fail. The picture stands (-72.1, 1.5) pt from its
+hole. The merged body runs 15.5 pt (sentence) and 19.5 pt (font) past its 30.9 pt box, and the
+oracle calls both `text_overflow` off the panel: 14.7 and 22.0 pt, the same numbers as r908 and
+r2700.
+
+**Open.**
+- Overlays (tikzmark arrows, braces anchored to words) are not refitted.
+- Placeholders are not refitted at all (the IR does not give their size). A middle- or
+  bottom-anchored box is not grown, and the report says so.
+- A panel blocked by what is below grows only as far as it can, and the rest is reported
+  (r908: 3.3 pt short). Moving what is below is a reflow, and sync does not reflow.
+- Text in tables is not refitted.
