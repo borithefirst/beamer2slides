@@ -411,6 +411,48 @@ def polygon_shape(points: list, r: "Rect") -> str | None:
     return None
 
 
+def upright_ellipse(path: list, r: Rect) -> bool:
+    """Four curves closing an ellipse whose axes are the box's: they join end to start, and
+    meet the box at the middle of each side. A sine wave is four curves too (TikZ's sin cos
+    sin cos), and a rotated or sheared ellipse touches its box elsewhere: as an ELLIPSE of the
+    box they came out a closed upright ring."""
+    if [op for op, _ in path] != ["c"] * 4:
+        return False
+    tol = 0.05 * max(r.w, r.h) + 0.1
+    ends = [pts[-1] for _, pts in path]
+    if any(math.dist(pts[0], prev) > tol for (_, pts), prev in zip(path, ends[-1:] + ends[:-1])):
+        return False  # open (a wave), or pieces of different outlines
+    mids = [(r.cx, r.y0), (r.x1, r.cy), (r.cx, r.y1), (r.x0, r.cy)]
+    return all(any(math.dist(e, m) <= tol for e in ends) for m in mids)
+
+
+def box_outline(d: dict, r: Rect) -> bool:
+    """A path that outlines its own bounding box: one rectangle, or one outline of axis-aligned
+    edges with rounded corners (a beamer block). A panel is rebuilt as a shape of its box, so
+    a funnel's trapezium, a band between two curves or a bar series (one path, a rectangle per
+    bar) would turn into one big rectangle."""
+    path = d.get("path")
+    if not path:
+        return False
+    if [op for op, _ in path] == ["re"]:
+        return True
+    ops = {op for op, _ in path}
+    if not ops <= {"l", "c"} or "l" not in ops:
+        return False
+    tol = max(0.1, 0.01 * max(r.w, r.h))
+    on_border = lambda x, y: min(abs(x - r.x0), abs(x - r.x1)) <= tol or min(abs(y - r.y0), abs(y - r.y1)) <= tol
+    end = None
+    for op, pts in path:
+        if end is not None and math.dist(pts[0], end) > tol:
+            return False  # a second outline (another bar)
+        if not all(on_border(x, y) for x, y in pts):
+            return False
+        if op == "l" and abs(pts[0][0] - pts[-1][0]) > tol and abs(pts[0][1] - pts[-1][1]) > tol:
+            return False  # a slanted edge
+        end = pts[-1]
+    return True
+
+
 def label_of(spans: list[Span]) -> dict | None:
     """Where and how a list number is drawn, to write it as literal text if Slides can't number it."""
     if not spans:
@@ -538,14 +580,31 @@ def code_indent(par: Paragraph, box_x0: float) -> str:
     return " " * max(0, round((par.x0 - box_x0) / advance))
 
 
+# A tick label that is a number, or several touching ("1,0001,0501,100"; "10%", "−0.5").
+TICK_NUMBER_RE = re.compile(r"[-−+]?\d[\d.,−%]*")
+
+
 # ---------------------------------------------------------------- document-level statistics
 
 def body_size(raw: dict) -> float:
-    counts = Counter()
+    """The deck's most common text size, not counting theme furniture: a piece of text drawn at
+    the same place on at least half the frames (and three of them) is a footline or headline
+    ("Author (Inst.)  Short title  date"). In a Madrid/Boadilla deck with little prose - a deck
+    of charts - the \\tiny footline outweighed the words, the body came out 6 pt, and every
+    size gate measured against it (tick labels belong to their chart) failed on 11 pt ticks."""
+    key = lambda s: (s["text"].strip(), round(s["bbox"][0]), round(s["bbox"][1]), round(s["size"], 1))
+    frames_of: dict[tuple, set] = {}
+    for page in raw["pages"]:
+        for s in page["spans"]:
+            frames_of.setdefault(key(s), set()).add(page.get("label"))
+    frames = len({page.get("label") for page in raw["pages"]})
+    counts, furniture = Counter(), Counter()
     for page in raw["pages"]:
         for s in page["spans"]:
             if font_info(s["font"]).family != "math":
-                counts[round(s["size"], 1)] += len(s["text"].strip())
+                repeated = frames >= 3 and len(frames_of[key(s)]) >= max(3, 0.5 * frames)
+                (furniture if repeated else counts)[round(s["size"], 1)] += len(s["text"].strip())
+    counts = counts or furniture
     return counts.most_common(1)[0][0] if counts else 10.0
 
 
@@ -656,6 +715,9 @@ class PageClassifier:
                         any(o not in group and ro.expand(1).intersects(r) and not r.contains_rect(ro, tol=0)
                             for o, ro in drawings if ro.w * ro.h < 0.95 * self.W * self.H):
                     continue  # part of a figure (a filled TikZ node with lines attached)
+                if any(o not in group and not is_rule(o, ro) and r.contains_rect(ro, tol=0) and not ro.contains_rect(r)
+                       for o, ro in drawings):
+                    continue  # a box holding marks besides its words: a legend's swatches
                 for s in inside:
                     s.highlight = d["fill"]
                 words = inside
@@ -751,10 +813,11 @@ class PageClassifier:
             if r.w * r.h >= 0.95 * self.W * self.H:
                 continue  # page background
             fill_only = d["type"] == "f" and set(d["items"]) <= set("relcq")
-            if self.is_decoration(r) and not (fill_only and r.h >= 3 and r.w >= 0.25 * self.W) and d["id"] not in table_rules:
+            panel = fill_only and r.w >= 0.25 * self.W and r.h >= 3
+            if self.is_decoration(r) and not (panel and box_outline(d, r)) and d["id"] not in table_rules:
                 self.decorations.append(r)
                 continue
-            if fill_only and r.w >= 0.25 * self.W and r.h >= 3:
+            if panel and box_outline(d, r):
                 self.panels.append({"bbox": r, "fill": d["fill"], "id": d["id"],
                                     "rounded": "c" in d["items"], "corners": d.get("corners", {}),
                                     "opacity": d.get("fill_opacity", 1.0), "image": False})
@@ -774,6 +837,13 @@ class PageClassifier:
                     rules.setdefault((round(r.x0), round(r.x1)), []).append({
                         "rect": r, "color": (d["fill"] if fill_rule else d["stroke"]) or "#000000",
                         "weight": r.h if fill_rule else (d["width"] or 0.4)})
+        for p in [p for p in self.panels if self.legend_box(p["bbox"], graphics)]:
+            # A chart's legend box is part of the chart: as a panel, its swatches became bullets
+            # of labels set on a native box, one per line, and the others were lost.
+            self.panels.remove(p)
+            graphics.append(p["bbox"])
+            self.graphic_drawings[p["id"]] = p["bbox"]
+            self.graphic_paths.setdefault(tuple(p["bbox"].as_list()), next(d for d in self.page["drawings"] if d["id"] == p["id"]))
         # Two or more horizontal rules of equal extent frame a table: the whole span is one
         # figure (or a native table, see table_from).
         self.table_rules = [g for g in rules.values() if len(g) >= 2]
@@ -800,6 +870,16 @@ class PageClassifier:
         self.graphics = graphics
         self.regions = cluster_rects(graphics, gap=3.0) if graphics else []
         self.title_bridges: list[Rect] = []  # see axis_titles
+        self.column_bridges: list[Rect] = []  # see axis_label_column
+
+    def legend_box(self, box: Rect, graphics: list[Rect]) -> bool:
+        """A box holding a row of key marks, each right before its label ("[■] EMEA  [■] Americas"):
+        a legend. (A list's bullets stand one above the other, and the first items of two
+        columns side by side are a column apart.)"""
+        spans = [Rect.of(s["bbox"]) for s in self.page["spans"] if s["text"].strip()]
+        marks = [g for g in graphics if box.contains_rect(g) and max(g.w, g.h) <= 15 and
+                 any(0 <= s.x0 - g.x1 <= 12 and s.y0 < g.cy < s.y1 for s in spans)]
+        return any(a is not b and abs(a.cy - b.cy) <= 1 and 0 < b.x0 - a.x1 <= 100 for a in marks for b in marks)
 
     def on_edge_artwork(self, r: Rect) -> bool:
         edge_panels = [p["bbox"] for p in self.panels
@@ -1103,15 +1183,32 @@ class PageClassifier:
         x0 = min(s.rect.x0 for s in spans)
         for g in self.graphics:
             if 0.25 * line.size <= g.w <= 1.3 * line.size and 0.25 * line.size <= g.h <= 1.6 * line.size \
+                    and 0.5 <= g.w / g.h <= 2.0 \
                     and g.x1 <= x0 + 0.5 and x0 - g.x1 <= 2.0 * line.size \
-                    and line.baseline - 0.9 * line.size <= g.cy <= line.baseline + 0.1 * line.size:
+                    and line.baseline - 0.9 * line.size <= g.cy <= line.baseline + 0.1 * line.size \
+                    and self.stands_alone(g, spans[0].rect):
                 shape = bullet_shape(self.graphic_paths.get(tuple(g.as_list())))
-                if shape:
+                # (a mark with parts drawn inside it - a globe's meridians in its disc - is no glyph)
+                if shape and not any(g.contains_rect(o) and not o.contains_rect(g) for o in self.graphics if o is not g):
                     line.bullet = {"kind": "shape", "text": "", "bbox": g.as_list(), "patch": True, **shape}
                 else:  # no Slides glyph looks like it (beamer's bibliography icon): a picture
                     icon = union_all([g] + [ir for _, ir in self.small_images if ir.intersects(g)])
                     line.bullet = {"kind": "icon", "text": "", "bbox": icon.as_list(), "spans": []}
                 return
+
+    def stands_alone(self, g: Rect, word: Rect) -> bool:
+        """A graphic that can be an item's bullet: nothing else is drawn at it but its own
+        parts and what lies behind the whole item (a box around the list). A dot on a
+        timeline's rail, a scatter mark whose label runs out of the plot frame, an arch of a
+        logo drawn on its disc beside the wordmark: part of a drawing, which a native bullet
+        patched out of the background broke. (A rail running over half the page is taken
+        for theme decoration.)"""
+        for o in self.graphics + self.decorations:
+            if o is g or not o.intersects(g.expand(1.0)) or g.contains_rect(o) or \
+                    (o.contains_rect(g) and o.contains_rect(word)):
+                continue
+            return False
+        return True
 
     @staticmethod
     def label_tabs(lines: list[Line]) -> None:
@@ -1331,18 +1428,30 @@ class PageClassifier:
         # a row of widely spaced short pieces however long it is: an axis's tick labels
         # ("200  400  600  800  1,000"). Left as text, such a row turned the chart into an overlay
         # anchored to it, and emit moved and stretched the chart after Slides' words.
-        regions = list(self.regions)
+        # (An ornament of the header/footer band - a title's accent bar, navigation symbols -
+        # becomes no picture, and a bare vertical rule - a column separator, a listing's frame,
+        # a quote bar - labels no words, only numbers: a listing's line numbers go with its
+        # gutter, a scale's with its axis, and they are no figure for the code beside them.)
+        regions = [r for r in self.regions if not self.band_ornament(r)] + \
+            [l.rect for l in self.axis_label_column(lines)]
+        bare_rule = lambda r: r.w <= 4 and r.h >= 25
+        joined: list[Line] = []
         changed = True
         while changed:
             changed = False
             for line in lines:
-                if line.reason is None and not line.bullet and line.tab is None and \
-                        (len(line.text.replace(" ", "")) <= 12 or self.tick_row(line)) and \
-                        line.size <= 1.15 * self.body and \
-                        any(reg.distance(line.rect) <= 0.8 * line.size for reg in regions):
+                if line.reason is not None or line.bullet or line.tab is not None or line.size > 1.15 * self.body or \
+                        not (len(line.text.replace(" ", "")) <= 12 or self.tick_row(line)):
+                    continue
+                words = [s for s in line.content if s.text.strip() and not TICK_NUMBER_RE.fullmatch(s.text.strip())]
+                near = [reg for reg in regions if reg.distance(line.rect) <= 0.8 * line.size]
+                if any(not bare_rule(reg) for reg in near) or (near and not words):
                     line.reason = "figure"
-                    regions.append(line.rect)
+                    if any(not bare_rule(reg) for reg in near):
+                        regions.append(line.rect)
+                    joined.append(line)
                     changed = True
+        self.release_stranded_labels(lines, joined)
         self.axis_titles(lines)
 
         for line in lines:
@@ -1383,10 +1492,49 @@ class PageClassifier:
                     line.reason = "math"
                     changed = True
 
+    def axis_label_column(self, lines: list[Line]) -> list[Line]:
+        """A bar chart's category labels on its y axis ("Carrier handover delayed at hub"):
+        three or more lines set flush right against a plot, one above the other, ragged on the
+        left - too long for a tick label, but as text boxes they re-wrapped in a wider font and
+        grew over the next label, and a chart drawn at them became an overlay stretched after
+        their words. A value printed inside the first bar that line building joined to its
+        label ends the line inside the plot; the label still ends at the axis. A paragraph
+        beside a figure starts its lines together."""
+        def inside(s: Span) -> bool:
+            return any(reg.expand(0.5).contains(s.rect.cx, s.rect.cy) for reg in self.regions)
+
+        rows = []
+        for line in lines:
+            outside = [s for s in line.content if s.text.strip() and not inside(s)]
+            if line.reason is not None or line.bullet or line.tab is not None or not outside or \
+                    len(line.text.split()) > 8 or line.size > 1.15 * self.body:
+                continue
+            x1 = max(s.rect.x1 for s in outside)
+            plot = [reg for reg in self.regions if x1 - 1 <= reg.x0 <= x1 + line.size and
+                    reg.y0 - line.size <= line.rect.cy <= reg.y1 + line.size]
+            if plot:
+                rows.append((line, x1, plot))
+        out = []
+        self.column_bridges = []  # a label up to an em off its plot: what `figures` clusters by
+        for line, x1, plot in rows:
+            column = [(l, e) for l, e, _ in rows if abs(e - x1) <= 0.6]
+            starts = [min(s.rect.x0 for s in l.content) for l, _ in column]
+            # (short labels only - "Q1" "Q2" beside a timeline - are left to the tick-label rule)
+            if len({round(l.baseline) for l, _ in column}) >= 3 and max(starts) - min(starts) >= 2 and \
+                    any(len(l.text.replace(" ", "")) > 12 for l, _ in column):
+                line.reason = "figure"
+                out.append(line)
+                self.column_bridges.append(union_all([line.rect] + plot))
+        return out
+
     @staticmethod
     def tick_row(line: Line) -> bool:
-        """Three or more short pieces, most of them far more than a word space apart: tick
-        labels. (Not all: centred ticks close up where a label is wider, "800 1,000".)"""
+        """Short pieces far more than a word space apart: tick labels. Three or more, most of
+        them apart by 0.8 em (not all: centred ticks close up where a label is wider, "800
+        1,000"); or four or more at one pitch, centre to centre, wider apart than a word space
+        (month names, years: "Jan Feb Mar" sit half an em apart under their bars); or two a
+        whole em apart (the part of a date axis that joined up, "01/2026   03/2026"). A number
+        is one label however long ("1,0001,0501,100": labels that touch)."""
         pieces: list[list] = []  # [text, x0, x1]: spans that touch are one label ("1" "," "000")
         for s in (s for s in line.content if s.text.strip()):
             if pieces and s.rect.x0 - pieces[-1][2] < 0.25 * line.size:
@@ -1394,10 +1542,21 @@ class PageClassifier:
                 pieces[-1][2] = max(pieces[-1][2], s.rect.x1)
             else:
                 pieces.append([s.text.strip(), s.rect.x0, s.rect.x1])
+        if len(pieces) < 2 or not all(len(p[0]) <= 10 or TICK_NUMBER_RE.fullmatch(p[0]) for p in pieces):
+            return False
         gaps = [b[1] - a[2] for a, b in zip(pieces, pieces[1:])]
         wide = sum(g >= 0.8 * line.size for g in gaps)
-        return len(pieces) >= 3 and all(len(p[0]) <= 10 for p in pieces) and \
-            wide >= 2 and wide >= 0.6 * len(gaps)
+        if len(pieces) == 2:
+            return gaps[0] >= 1.0 * line.size
+        if wide >= 2 and wide >= 0.6 * len(gaps):
+            return True
+        # (labels that ran together at the end of a row, "1,0001,0501,100", break the pitch
+        # once: four in five pitches on the beat is a row)
+        pitches = [(b[1] + b[2] - a[1] - a[2]) / 2 for a, b in zip(pieces, pieces[1:])]
+        middle = statistics.median(pitches)
+        beat = [g for p, g in zip(pitches, gaps) if abs(p - middle) <= max(0.75, 0.04 * middle)]
+        return len(pieces) >= 4 and len(beat) >= 3 and len(beat) >= 0.8 * len(pitches) and \
+            min(beat) >= 0.45 * line.size
 
     def axis_titles(self, lines: list[Line]) -> None:
         """A plot's title and axis titles ("Month of the year 2026", "Temperature") stand further
@@ -1813,7 +1972,12 @@ class PageClassifier:
         if not regions:
             return out
         # Cluster word by word: one "line" of labels can span two neighbouring figures.
-        rects = regions + [s.rect for s in label_spans] + self.title_bridges
+        # Navigation symbols and ornaments in the header/footer band bridge nothing (they would
+        # join a \logo above them into one picture).
+        regions = [r for r in regions if not self.band_ornament(r)]
+        if not regions:
+            return out
+        rects = regions + [s.rect for s in label_spans] + self.title_bridges + self.column_bridges
         for c in cluster_rects(rects, gap=0.8 * self.body):
             if max(c.w, c.h) < 25 or c.w * c.h > 0.8 * self.W * self.H:
                 continue
@@ -1886,8 +2050,20 @@ class PageClassifier:
                     and not any(t.contains_rect(self.graphic_drawings[d["id"]]) for t in taken)]
         if not drawings or any(box.intersects(Rect.of(im["bbox"])) for im in self.page["images"]):
             return None
+        def on_node(s: Span, l: Line) -> bool:
+            # Words well inside a filled shape of the cluster are that node's label (a "?" on
+            # a disc), not words the drawing is made for: stretched after them as Slides sets
+            # them, the disc came out an ellipse. (A highlight box is tight around its words.)
+            for d in drawings:
+                g = self.graphic_drawings[d["id"]]
+                if "f" in d["type"] and d.get("fill") and g.contains_rect(s.rect, tol=0):
+                    label = union_all([o.rect for o in l.content if o.text.strip() and g.contains_rect(o.rect, tol=0)])
+                    if g.w >= 2 * label.w and g.h >= 1.5 * label.h:
+                        return True
+            return False
+
         words = [(s, l) for l in lines if id(l) in self.line_owner for s in l.content
-                 if s.text.strip() and s.info.family != "icon" and not any(s in h for h in l.holes)]
+                 if s.text.strip() and s.info.family != "icon" and not any(s in h for h in l.holes) and not on_node(s, l)]
         if not over_text and any(box.contains_rect(s.rect) and s not in label_spans for l in lines
                                  if id(l) not in self.line_owner for s in l.spans):
             return None  # math set inside a figure: one picture of everything in its box
@@ -1906,9 +2082,15 @@ class PageClassifier:
             return s.rect.x0 - 0.1 * s.size <= x <= s.rect.x1 + 0.1 * s.size and \
                 s.rect.y0 - 0.35 * s.size <= y <= s.rect.y1 + 0.35 * s.size
 
-        # The words its line ends, corners and tips touch; else those it is drawn across.
-        ends = [p for d in drawings for p in points(d)]
-        met = [(s, l) for s, l in words if any(near(s, x, y) for x, y in ends)]
+        # The words its line ends, corners and tips touch; else those it is drawn across. A
+        # closed curve has no ends: it meets the words it circles, not those its rim passes (a
+        # Venn circle under the title of its set).
+        def rim_only(d: dict) -> bool:
+            path = d.get("path") or []
+            return len(path) >= 2 and all(op == "c" for op, _ in path) and math.dist(path[0][1][0], path[-1][1][-1]) <= 0.5
+        ends = [(p, d) for d in drawings for p in points(d)]
+        met = [(s, l) for s, l in words if any(near(s, x, y) and (not rim_only(d) or self.graphic_drawings[d["id"]].contains(s.rect.cx, s.rect.cy))
+                                                for (x, y), d in ends)]
         if not met and over_text:
             met = [(s, l) for s, l in words if any(s.rect.intersects(self.graphic_drawings[d["id"]]) for d in drawings)]
         if not over_text:
@@ -2016,11 +2198,40 @@ class PageClassifier:
                         "bbox": c.expand(1.0).as_list(), "spans": []})
         return out
 
+    def release_stranded_labels(self, lines: list[Line], joined: list[Line]) -> None:
+        """Labels joined to graphics that `figures` will make no picture of - a cluster under
+        25 pt (a timeline's tick mark and its year), or one in the header/footer band - stay
+        text: as a figure's they were left in the background, where no one can edit them."""
+        if not joined:
+            return
+        labels = [s.rect for l in lines if l.reason in ("figure", "rotated") for s in l.spans]
+        regions = [r for r in self.regions if not self.band_ornament(r)]
+        for c in cluster_rects(regions + labels + self.column_bridges, gap=0.8 * self.body):
+            if max(c.w, c.h) < 25 or ((c.y1 <= 0.15 * self.H or c.y0 >= 0.88 * self.H) and c.h <= 0.1 * self.H):
+                for l in joined:
+                    if c.expand(0.1).contains_rect(l.rect):
+                        l.reason = None
+
+    def band_ornament(self, r: Rect) -> bool:
+        """A small graphic in the header or footer band (navigation symbols, a title's accent
+        bar): theme furniture that stays in the background and joins nothing into a figure."""
+        return (r.y1 <= 0.15 * self.H or r.y0 >= 0.88 * self.H) and max(r.w, r.h) < 25
+
+    def holds_other_text(self, c: Rect, label_spans: list[Span]) -> bool:
+        """Text drawn inside a figure cluster that is none of its labels stays in the
+        background (a section number in a filled node, read with its heading as one formula):
+        native shapes rebuilt from the cluster would be drawn over it and hide it."""
+        labels = {s.id for s in label_spans}
+        box = c.expand(0.5)
+        centre = lambda r: (r.cx, r.cy)
+        return any(s["id"] not in labels and s["text"].strip() and box.contains(*centre(Rect.of(s["bbox"])))
+                   for s in self.page["spans"])
+
     def plain_rectangles(self, c: Rect, label_spans: list[Span], index: int) -> list[dict]:
         """A figure cluster that is only opaque filled rectangles without text (progress bars,
         colour swatches, \\rule): native rectangle shapes."""
         box = c.expand(0.5)
-        if any(box.contains_rect(s.rect) for s in label_spans) or \
+        if any(box.contains_rect(s.rect) for s in label_spans) or self.holds_other_text(c, label_spans) or \
                 any(box.intersects(Rect.of(im["bbox"])) for im in self.page["images"]):
             return []
         out = []
@@ -2088,7 +2299,7 @@ class PageClassifier:
         with their text inside, straight lines and arrow tips: rebuilt from native Slides
         shapes and lines. Anything else (curves, images, math, loose labels) keeps it a picture."""
         box = c.expand(0.5)
-        if any(box.contains_rect(Rect.of(im["bbox"])) for im in self.page["images"]):
+        if any(box.contains_rect(Rect.of(im["bbox"])) for im in self.page["images"]) or self.holds_other_text(c, label_spans):
             return None
         nodes, lines, tips = [], [], []
         for d in self.page["drawings"]:
@@ -2100,7 +2311,7 @@ class PageClassifier:
                 return None
             ops = "".join(op for op, _ in path)
             shape = {"re": "RECTANGLE", "lclclclc": "ROUND_RECTANGLE", "clclclcl": "ROUND_RECTANGLE",
-                     "cccc": "ELLIPSE"}.get(ops)
+                     "cccc": "ELLIPSE" if upright_ellipse(path, r) else None}.get(ops)
             points = [p for _, pts in path for p in pts]
             if shape is None and max(r.w, r.h) > 6 and ops in ("llll", "lll") and "f" in d["type"] + "f":
                 shape = polygon_shape(points, r)  # decision diamonds, triangles
@@ -2135,6 +2346,14 @@ class PageClassifier:
         self.closed_frames(nodes, lines)
         if not nodes:
             return None
+        # Shapes that cross each other (a Venn diagram): its words are placed by region - the
+        # lens, one circle's own part - and a node's text is set centred in all of it.
+        for i, a in enumerate(nodes):
+            for b in nodes[i + 1:]:
+                ra, rb = a["rect"], b["rect"]
+                if overlap(ra, rb) > 0.05 * min(ra.w * ra.h, rb.w * rb.h) and \
+                        not ra.contains_rect(rb) and not rb.contains_rect(ra):
+                    return None
         for tip, style, points in tips:
             ends = [(ln, end) for ln in lines for end in ("from", "to") if tip.expand(1).contains(*ln[end])]
             if not ends:
@@ -2153,13 +2372,29 @@ class PageClassifier:
                     ln[end] = [round(ln[end][0] + reach * ux, 2), round(ln[end][1] + reach * uy, 2)]
 
         spans = [s for s in label_spans if box.contains_rect(s.rect)]
+        # A label with a script (R_s, C_dl in a circuit) is a formula: set as one run of plain
+        # text it read "Rs", and a free label ran into the next ("ct Z").
+        if any(b is not a and -0.05 * a.size <= b.rect.x0 - a.rect.x1 <= 0.15 * a.size and b.size < 0.85 * a.size
+               and 0.1 * a.size < abs(b.baseline - a.baseline) < 0.6 * a.size for a in spans for b in spans):
+            return None
         free: list[Span] = []
+        area = lambda n: n["rect"].w * n["rect"].h
+        seen: list[Span] = []
         for s in spans:
             if s.info.family == "math" or not s.horizontal:
                 return None
+            # A node drawn again on a later overlay step (\node<2->[fill=yellow] at (a) {A})
+            # paints its label a second time on the same spot: one label, and it goes to the
+            # copy on top - the last drawn of the smallest nodes around it. Given to the first,
+            # it came out doubled ("LexerLexer") under an empty filled box.
+            if any(o.text == s.text and abs(o.rect.x0 - s.rect.x0) <= 0.1 and abs(o.baseline - s.baseline) <= 0.1
+                   and abs(o.size - s.size) <= 0.1 for o in seen):
+                continue
+            seen.append(s)
             owners = [n for n in nodes if n["rect"].contains(s.rect.cx, s.rect.cy)]
             if owners:
-                min(owners, key=lambda n: n["rect"].w * n["rect"].h)["spans"].append(s)
+                smallest = min(map(area, owners))
+                [n for n in owners if area(n) <= 1.02 * smallest + 0.01][-1]["spans"].append(s)
             else:
                 free.append(s)  # edge labels and captions: a text box in the group
         # Free labels on one baseline and close together are one label.
