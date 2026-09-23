@@ -2185,39 +2185,7 @@ def _table_sync(tmp_path, variant: str):
     return run, first, second, j
 
 
-def test_a_title_whose_box_a_new_neighbour_narrowed_is_a_source_change(tmp_path):
-    """A one-line box reaches to the mirror of the slide's leftmost body text (emit.text_right_limit),
-    so the centred line the table-moved variant adds narrows the Results title a fresh conversion
-    makes, though the title's own IR is the same: sync kept the old box (live scenario table-moved,
-    707 against 474 pt). The title is now a `width` change - and nothing is where nothing moved."""
-    from beamer2slides import identity
-    from beamer2slides.sync import build_ours
-    v1, moved = SYNC_DECKS / "v1.pdf", SYNC_DECKS / "table-moved.pdf"
-    if not v1.exists() or not moved.exists():
-        pytest.skip("build the sync test talk first (tests/decks/sync/build.py)")
-    first = build_ours(v1, tmp_path / "v1", {"slides": []})
-
-    def changes(pdf, name):
-        base = {"slides": copy.deepcopy(first["slides"])}
-        ours = build_ours(pdf, tmp_path / name, base)
-        out = {}
-        for j, i in ours["pairs"].items():
-            base_by = {e["key"]: e for e in base["slides"][i]["elements"]}
-            for oe in ours["slides"][j]["elements"]:
-                if oe["key"] in base_by and "width" in identity.source_changes(base_by[oe["key"]], oe):
-                    out[(ours["slides"][j]["title"], oe["key"])] = identity.source_changes(base_by[oe["key"]], oe)
-        return out
-
-    assert changes(moved, "moved") == {("Results", "text/title/0"): {"width"}}
-    assert changes(v1, "same") == {}
-    # a mark an earlier sync left in the base (new_base copies ours' fields) says nothing by itself
-    base = {"slides": copy.deepcopy(first["slides"])}
-    for s in base["slides"]:
-        for e in s["elements"]:
-            e["fields"] = {**e["fields"], "width": "ours"}
-    again = build_ours(v1, tmp_path / "again", base)
-    assert not any("width" in identity.source_changes(b, o) for j, i in again["pairs"].items()
-                   for o in again["slides"][j]["elements"] for b in base["slides"][i]["elements"] if b["key"] == o["key"])
+# (a text box a new neighbour narrowed: tests/test_emitted_diff.py)
 
 
 def test_a_table_whose_words_changed_is_refilled_in_place(tmp_path):

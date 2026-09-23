@@ -853,14 +853,20 @@ def ir_fields(el: dict, out: Path | None = None, anchor_key: str | None = None, 
     return whole, fields
 
 
+# Fields `sync.mark_emitted` gives both sides of an element whose own IR the source left alone but
+# which emit now writes differently because of what stands around it: "width" (a text box's frame),
+# "placed" (a picture's predicted place), "emitted" (anything else of its requests).
+CONTEXT_FIELDS = ("width", "placed", "emitted")
+
+
 def source_changes(base_el: dict, ours_el: dict) -> set[str]:
     """Fields the source changed ({"text", "position", "size", "style", "image"}, or {"layout"} when only
-    something else in the IR differs); empty when the IR hash is the same. {"width"} too when the
-    box emit gives a text moved because of what stands around it (`sync.mark_widths`), which only
-    counts when both sides carry the mark."""
-    wb, wo = base_el["fields"].get("width"), ours_el["fields"].get("width")
-    widened = {"width"} if wb is not None and wo is not None and wb != wo else set()
+    something else in the IR differs); empty when the IR hash is the same. A `CONTEXT_FIELDS` one
+    too when emit writes the element differently because of what stands around it
+    (`sync.mark_emitted`), which only counts when both sides carry the mark."""
+    marked = {f for f in CONTEXT_FIELDS if base_el["fields"].get(f) is not None
+              and ours_el["fields"].get(f) is not None and base_el["fields"][f] != ours_el["fields"][f]}
     if base_el["ir_hash"] == ours_el["ir_hash"]:
-        return widened
-    changed = {k for k, v in ours_el["fields"].items() if k != "width" and base_el["fields"].get(k) != v}
-    return (changed or {"layout"}) | widened
+        return marked
+    changed = {k for k, v in ours_el["fields"].items() if k not in CONTEXT_FIELDS and base_el["fields"].get(k) != v}
+    return (changed or {"layout"}) | marked

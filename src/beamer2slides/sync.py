@@ -40,7 +40,7 @@ IN_PLACE_FIELDS = ("text", "text_styles", "paragraph_styles", "text_style_hash",
 # Google's words when it could not fetch a createImage URL, and the waits before sending again (s).
 PICTURE_FETCH = "problem retrieving the image"
 FETCH_RETRY = (3, 10)
-WIDTH_MOVED = 0.5  # slide pt: a text box emit now places further than this has moved (mark_widths)
+WIDTH_MOVED = 0.5  # slide pt: a box emit now places further than this has moved (mark_emitted)
 
 
 class RevisionMismatch(Exception):
@@ -362,45 +362,145 @@ def build_ours(pdf: Path, work: Path, base: dict, overlays: str = "last",
         ekeys.append(k)
         fps.append(f)
     entries = snapshot.slide_entries(deck, work, keys, ekeys, fps)
-    mark_widths(base, entries, deck, pairs, plan.scale, plan.fonts)
+    unwritten = mark_emitted(base, entries, deck, pairs, plan.scale, plan.fonts)
     return {"source": pdf, "pdf": prepared.pdf, "out": work, "plan": plan, "deck": deck, "slides": entries,
-            "pairs": pairs, "label_moves": moves, "weak_pairs": weak, "near_misses": near}
+            "pairs": pairs, "label_moves": moves, "weak_pairs": weak, "near_misses": near,
+            "context_unwritten": unwritten}
 
 
-def mark_widths(base: dict, entries: list[dict], deck: dict, pairs: dict, scale: float, fonts) -> None:
-    """Give a text element whose own IR the source left alone a `width` field change when the box
-    emit gives it moved all the same, because of what stands around it (`emit.text_box_frame`).
+def mark_emitted(base: dict, entries: list[dict], deck: dict, pairs: dict, scale: float, fonts,
+                 fast: bool = True) -> list[dict]:
+    """Give an element whose own IR the source left alone (or only moved) a source change when emit
+    now writes it differently all the same, because of what stands around it.
 
-    A one-line box reaches to the mirror of the slide's leftmost body text, so a centred line the
-    source added below a title narrowed a fresh conversion's title from 707 to 474 pt while sync,
-    seeing the title's IR unchanged, kept the old box (live scenario table-moved). Both frames are
-    worked out here, with today's fonts, from the base's IR of the slide and the new one's, so an
-    old base needs nothing it lacks; `identity.source_changes` compares the field only when both
-    sides carry it. The base is marked in memory only, and a stale mark from an earlier sync is
-    cleared: the mark says "these two differ", never what either width is."""
-    from .emit import text_box_frame, text_right_limit, title_bar_under
+    Sync decides what the source changed element by element (`identity.source_changes`), but where
+    emit puts an element is not its own business alone. A one-line box reaches to the mirror of the
+    slide's leftmost body text (`emit.text_right_limit`), so a centred line the source added below a
+    title narrowed a fresh conversion's title from 707 to 474 pt while sync, seeing the title's IR
+    unchanged, kept the old box (live scenario table-moved). So for every paired slide on which
+    anything changed, what emit would write for it (`emitted_elements`) is worked out twice with
+    today's code - from the base's IR of the slide and from the new one - and compared element by
+    element, a moved element's requests less its own step (`_close`). Both sides are marked, in
+    memory only, with the `identity.CONTEXT_FIELDS` that differ; `source_changes` counts a field
+    only when both carry it, so a stale mark an earlier sync saved into the base says nothing (and
+    is cleared here). An old base needs nothing it lacks.
+
+    What recreating the unit cannot write is not marked but returned, [{"slide", "element",
+    "fields"}]: "placeholder" (the element goes into another layout placeholder, or out of one:
+    the title page's subtitle is its biggest plain text, `emit.subtitle_element`) and "grouping"
+    (the block or rule groups it belongs to, `emit.block_groups` / `rule_groups`: a recreated unit
+    goes back into its old group, `Sync.regroups`). `fast`: skip slides on which nothing changed
+    (the tests turn it off to prove two emissions of the same slide compare equal)."""
+    unwritten = []
     for j, i in pairs.items():
         b, o, slide = base["slides"][i], entries[j], deck["slides"][j]
-        if any("ir" not in e for e in b["elements"]):
-            continue
-        was_slide = {"elements": [e["ir"] for e in b["elements"]], "size": slide["size"]}
-        base_by = {e["key"]: e for e in b["elements"]}
         for e in b["elements"]:
-            if "width" in e.get("fields", {}):
-                e["fields"] = {k: v for k, v in e["fields"].items() if k != "width"}
-        for oe, el in zip(o["elements"], slide["elements"]):
-            be = base_by.get(oe["key"])
-            if be is None or oe["kind"] != "text" or be["kind"] != "text":
-                continue
-            if not identity.source_changes(be, oe) <= {"position"}:
-                continue  # (rewritten anyway: its box is made again where the new conversion puts it)
-            if text_right_limit(be["ir"], was_slide) == text_right_limit(el, slide) and \
-                    title_bar_under(be["ir"], was_slide) == title_bar_under(el, slide):
-                continue  # (nothing around it that the box depends on moved)
-            was, now = text_box_frame(be["ir"], was_slide, scale, fonts), text_box_frame(el, slide, scale, fonts)
-            if was and now and max(abs(a - c) for a, c in zip(was, now)) > WIDTH_MOVED:
-                be["fields"] = {**be["fields"], "width": "base"}
-                oe["fields"] = {**oe["fields"], "width": "ours"}
+            if any(f in e.get("fields", {}) for f in identity.CONTEXT_FIELDS):
+                e["fields"] = {k: v for k, v in e["fields"].items() if k not in identity.CONTEXT_FIELDS}
+        # (an element the deck keeps though the source dropped it is not what emit wrote the others beside)
+        was = [e for e in b["elements"] if not e.get("removed")]
+        if any("ir" not in e for e in was):
+            continue
+        base_by = {e["key"]: e for e in was}
+        title_page = b.get("layout") == "TITLE" if b.get("layout") in ("TITLE", "TITLE_ONLY") else bool(slide.get("title_page"))
+        if fast and title_page == bool(slide.get("title_page")) and len(base_by) == len(o["elements"]) and \
+                all(oe["key"] in base_by and base_by[oe["key"]]["ir_hash"] == oe["ir_hash"] for oe in o["elements"]):
+            continue  # (nothing on the slide changed, so nothing emit writes for it did)
+        candidates = [k for k, oe in enumerate(o["elements"])
+                      if oe["key"] in base_by and identity.source_changes(base_by[oe["key"]], oe) <= {"position"}]
+        if not candidates:
+            continue  # (whatever else changed is rewritten anyway, where the new conversion puts it)
+        try:
+            before = dict(zip(base_by, emitted_elements({**slide, "title_page": title_page, "elements": [e["ir"] for e in was]},
+                                                        list(base_by), scale, fonts)))
+        except Exception:  # noqa: BLE001 - an IR an older converter wrote that today's emit cannot read
+            continue       # says nothing either way: no marks
+        now = emitted_elements(slide, [oe["key"] for oe in o["elements"]], scale, fonts)
+        for k in candidates:
+            oe, el = o["elements"][k], slide["elements"][k]
+            be = base_by[oe["key"]]
+            step = [(el["bbox"][q] - be["ir"]["bbox"][q]) * scale for q in (0, 1)]
+            marks, cannot = context_changes(before[oe["key"]], now[k], step, el["kind"])
+            for f in marks:
+                be["fields"] = {**be["fields"], f: "base"}
+                oe["fields"] = {**oe["fields"], f: "ours"}
+            if cannot:
+                unwritten.append({"slide": o["key"], "element": oe["key"], "fields": sorted(cannot)})
+    return unwritten
+
+
+def emitted_elements(slide: dict, names: list[str], scale: float, fonts) -> list[dict]:
+    """Per element of `slide` (a DeckPlan slide), what emit writes for it there, with nothing in it
+    that says which deck the slide stands in: object ids by the element's name (`names`, its key),
+    the slide's as `@slide`, the template shapes' copies by their template key (`emit.slide_emission`
+    also takes links and placeholder sizes out). Z-order requests are left out: a rewritten unit
+    goes where the source's order puts it (`Sync.restack`), whatever emit asks for.
+    {"requests", "box": a picture's predicted place (slide pt), "role": "title" / "subtitle" (the
+    layout placeholder it goes into), "groups": the block and rule groups it is in, as [kind,
+    members' names]}. A text's own group with its anchored pictures is left out: those are one unit,
+    and a picture added or dropped is a change of the unit itself."""
+    from .emit import slide_emission
+    e = slide_emission(slide, scale, fonts)
+    sid, ids = e["slide_id"], e["element_ids"]
+    mapping = [(oid, f"@{name}") for oid, name in zip(ids, names)] + \
+        [(oid, f"@template{key!r}") for oid, key in e["templates"].items()] + [(sid, "@slide")]
+    order = sorted(mapping, key=lambda kv: -len(kv[0]))
+    out = [{"requests": [r for r in rename(rs, order) if "updatePageElementsZOrder" not in r], "box": e["boxes"][i],
+            "role": "title" if i == e["title"] else "subtitle" if i == e["subtitle"] else None, "groups": []}
+           for i, (_, rs) in enumerate(e["parts"][1:1 + len(ids)])]
+    at = {f"@{name}": i for i, name in enumerate(names)}
+    for _, rs in e["parts"][1 + len(ids):]:
+        for r in rs:
+            gid = r.get("groupObjects", {}).get("groupObjectId", "")
+            kind = "block" if gid.startswith(f"{sid}_blk") else "rules" if gid.startswith(f"{sid}_rules") else None
+            if kind:
+                members = sorted(c[:-2] if c.endswith("_g") else c for c in rename(r["groupObjects"]["childrenObjectIds"], order))
+                for c in members:
+                    if c in at:
+                        out[at[c]]["groups"].append([kind, members])
+    for x in out:
+        x["groups"].sort()
+    return out
+
+
+def context_changes(was: dict, now: dict, step: list[float], kind: str) -> tuple[set[str], set[str]]:
+    """(fields recreating the unit writes, fields it cannot) in which two `emitted_elements` entries
+    of one element differ; `step`: slide pt the source moved the element by, which its requests
+    may differ by and still say the same."""
+    marks, cannot = set(), set()
+    if was["role"] != now["role"]:
+        cannot.add("placeholder")  # (and every request differs: a placeholder is transformed, a box created)
+    elif not _close(was["requests"], now["requests"], [v * EMU_PER_PT for v in step]):
+        marks.add("width" if kind == "text" else "emitted")
+    if (was["box"] is None) != (now["box"] is None) or was["box"] is not None and \
+            any(abs(a + step[q % 2] - c) > WIDTH_MOVED for q, (a, c) in enumerate(zip(was["box"], now["box"]))):
+        marks.add("placed")
+    if was["groups"] != now["groups"]:
+        cannot.add("grouping")
+    return marks, cannot
+
+
+def _close(a, b, step: list[float], key: str | None = None) -> bool:
+    """Two request trees say the same: equal but for float noise, with EMU lengths within
+    WIDTH_MOVED and translations less `step` (EMU) - the source moving an element moves its box."""
+    if isinstance(a, dict) and isinstance(b, dict):
+        if a.keys() != b.keys():
+            return False
+        if a.get("unit") == "EMU" and isinstance(a.get("magnitude"), (int, float)):
+            return abs(a["magnitude"] - b["magnitude"]) <= WIDTH_MOVED * EMU_PER_PT and \
+                all(_close(a[k], b[k], step, k) for k in a if k != "magnitude")
+        return all(_close(a[k], b[k], step, k) for k in a)
+    if isinstance(a, list) and isinstance(b, list):
+        return len(a) == len(b) and all(_close(x, y, step) for x, y in zip(a, b))
+    if isinstance(a, (int, float)) and isinstance(b, (int, float)) and not isinstance(a, bool) and not isinstance(b, bool):
+        if key in ("translateX", "translateY"):
+            return abs(a + step[key == "translateY"] - b) <= WIDTH_MOVED * EMU_PER_PT
+        if key in ("scaleX", "scaleY", "shearX", "shearY"):  # (a placeholder's size is its scale)
+            return abs(a - b) <= 1e-3 * max(abs(a), abs(b)) + 1e-9
+        if isinstance(a, int) and isinstance(b, int):
+            return a == b  # (text indices)
+        return abs(a - b) <= 0.05 + 1e-3 * max(abs(a), abs(b))
+    return a == b
 
 
 # ---------------------------------------------------------------- requests

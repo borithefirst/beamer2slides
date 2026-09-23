@@ -3495,3 +3495,66 @@ them. A booktabs table growing a data row at the end is the common case (the new
 `test_a_table_the_source_added_a_row_to_is_grown_in_place`, `test_table_steps_*`, live scenario
 `table-row` (flag `tablerow`). That a row inserted below another takes *its* margins is what the
 live scenario's thumbnail comparison checks; the probe only grew a table of equal margins.
+
+
+## Emitted-output diff
+
+Sync decides what the source changed per element (`identity.source_changes` over the element's
+own IR), but where emit puts an element also depends on its neighbours. `sync.mark_emitted`
+(called at the end of `build_ours`, replacing `mark_widths`) works out, for every paired slide on
+which anything changed, what emit would write for the slide twice with today's code - from the
+base's IR of the slide and from the new one (`emit.slide_emission`: one slide through
+`DeckPlan.slide_parts`, no deck-wide work) - and compares element by element
+(`sync.emitted_elements`, `context_changes`, `_close`). Only elements whose own IR is unchanged or
+only moved are compared; a moved one is compared less its own step (translations and picture boxes
+shifted by the IR's bbox step, EMU lengths within WIDTH_MOVED = 0.5 pt, other floats within
+0.05 + 0.1%, integers such as text indices exactly).
+
+Normalised away: object ids (element ids by the element's key, the slide's as `@slide`, template
+copies by their template key, `_blk`/`_rules` group ids), links to other slides (all to one stand-in
+page: which slide a link names is the element's own IR, `ir_fields` keys it), placeholder and
+template sizes (made up, as `plan_offline`), z-order requests (sync restacks from the source's
+order). Left out: `measure_places` moves - they are measured on Google's scratch slides, so pictures
+keep their predicted places (`DeckPlan.placed`); a recreated unit with holes is re-measured anyway.
+Base elements the deck keeps though the source dropped them (`removed`) are not in the base's
+context. A base IR today's emit cannot read (an older converter's) gives no marks.
+
+Fields (`identity.CONTEXT_FIELDS`, counted only when both sides carry them, so a mark saved into
+a base says nothing; stale ones are cleared): `width` (a text's requests differ - in practice its
+frame: `text_right_limit`, `title_bar_under`), `placed` (a picture's predicted box: formula
+shifts, overlay boxes - always inside a unit that changed anyway), `emitted` (any other kind's
+requests; none found). `merge.plan_unit` treats them as any unknown field: recreate, deck overrides
+re-applied (geometry as a delta). A title recreated for `width` goes back into its live placeholder
+(`in_place`), which the live table-moved scenario exercises.
+
+Not marked, returned as `build_ours(...)["context_unwritten"]` ([{slide, element, fields}]),
+because recreating the unit cannot write them:
+- `grouping`: the block or rule groups emit would put the element in (`block_groups`,
+  `rule_groups`). A recreated unit goes back into its old group (`Sync.regroups`) and
+  `update_slide` drops emit's slide-level group requests, so a text the source added onto a block
+  is never grouped with it. Writing it needs a slide-level step: compare emit's block groups for
+  the new slide with the live groups and ungroup/regroup the block with its new members.
+- `placeholder`: the element goes into another layout placeholder or out of one (the title page's
+  subtitle is its biggest plain text, `subtitle_element`, so a longer line added below the title
+  takes it). Worse, the path is broken today whatever the marks say: an old subtitle the source
+  reworded while a longer line took the role is recreated `in_place` into the SUBTITLE placeholder
+  but emitted as a box of its own, so sync sends a createShape under the live placeholder's id
+  (pinned as strict xfail `test_a_reworded_subtitle_that_lost_the_placeholder_is_not_created_under_its_id`).
+  Writing it needs `update_slide` to hand the placeholder to the new subtitle (refill in place)
+  and create the old one as a box.
+
+Measured (2026-09-23): the 54 built decks (286 slides, 1,376 elements) and the 29 sync-talk PDFs
+against bases of their own entries - renumbered 7 pages on, JSON round-tripped, fast path off -
+emit element by element exactly the same (every one of the 286 raw emissions differed before the
+normalisation); nothing marked (`tests/test_emitted_diff.py`). Sync talk variants against v1: only
+table-moved and tablemove mark anything, the Results title's `width` - the same as `mark_widths`.
+Dropping each element of every built deck in turn: `width` on titles when the leftmost body text
+goes (188), on texts when their panel, a margin-setting text or a picture beside them goes (124),
+`placed` inside changed units (60), and `grouping` (≈400) / `placeholder` (12) as unwritten.
+Cost: nothing changed on the slide → skipped (0.1 ms per deck); a changed slide costs two
+emissions, ~2 ms each (mixed or addframe vs v1: 18 ms in a 0.75 s `build_ours`).
+
+Known limit: the base's context is its slides' IR, which after a sync mixes the new IR with units
+kept in conflict (their old IR). A neighbour whose emission depends on such a unit is marked and
+rewritten on every sync while that conflict stands (nothing lost, requests repeated). Fixing it
+needs the base to record the context each element was written in.

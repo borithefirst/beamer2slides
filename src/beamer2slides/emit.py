@@ -1774,21 +1774,6 @@ def text_right_limit(el: dict, slide: dict) -> float | None:
     return limit if limit > x1 else None
 
 
-def text_box_frame(el: dict, slide: dict, scale: float, fonts: FontMapper) -> list[float] | None:
-    """[x, y, w, h] (slide pt) of the box emit gives a text element on `slide`, None for another
-    kind. Not the element's own business alone: how far a one-line box reaches depends on the
-    slide's leftmost body text (`text_right_limit`) and a title bar under it (`title_bar_under`),
-    so a neighbour the source added or moved changes it (sync.mark_widths)."""
-    if el.get("kind") != "text" or not el.get("paragraphs"):
-        return None
-    reqs = text_box_requests(el, "s", "o", scale, fonts, None, None, title_bar_under(el, slide),
-                             text_right_limit(el, slide))
-    props = reqs[0]["createShape"]["elementProperties"]
-    t = props["transform"]
-    return [t["translateX"] / EMU_PER_PT, t["translateY"] / EMU_PER_PT,
-            props["size"]["width"]["magnitude"] / EMU_PER_PT, props["size"]["height"]["magnitude"] / EMU_PER_PT]
-
-
 def earlier_holes(p: dict, run: dict) -> list[tuple[float, float]]:
     """(x0, width) of the holes before `run` on its line (PDF pt)."""
     words = [b[6] for b in run.get("before", []) if len(b) >= 7]
@@ -3191,3 +3176,46 @@ def plan_offline(deck: dict, placeholder_size: tuple[float, float] = (612.0, 90.
     return {"plan": plan, "pictures": {s["page"]: plan.pictures(s) for s in plan.deck["slides"]}, "copies": copies,
             "page_elements": page_elements, "speaker_notes": speaker_notes,
             "measure": measure_jobs(plan.deck, plan.scale, plan.fonts, plan.placed, plan.page_slide)[0], "slides": slides}
+
+
+class _OnePage(dict):
+    """`page_slide` for `slide_emission`: every internal link goes to one stand-in slide. Which
+    slide a link names is the element's own IR (`identity.ir_fields` keys it), not its neighbours'."""
+
+    def __bool__(self) -> bool:
+        return True
+
+    def get(self, page, default=None):
+        return "b2s_link"
+
+
+def slide_emission(slide: dict, scale: float, fonts: FontMapper, placeholder_size: tuple[float, float] = (612.0, 90.0),
+                   template_size: tuple[float, float] = (100.0, 100.0)) -> dict:
+    """What emit writes for one slide of a DeckPlan (blocks merged, holes fitted: `DeckPlan.deck`),
+    worked out from that slide alone, so the same slide gives the same answer in whichever deck it
+    stands: {"slide_id", "parts" and "element_ids" (`DeckPlan.slide_parts`), "boxes" (each
+    picture's predicted place in slide pt, None for other kinds), "title" and "subtitle" (element
+    indices of the layout placeholders' texts), "templates" ({object id of the slide's copy: its
+    template key})}. As in `plan_offline` the layout's placeholders and the template shapes have
+    made-up sizes; unlike it, links to other slides all go to one page and measure_places' moves
+    are left out (only Google's renderer knows them), so pictures keep their predicted places.
+    For sync.mark_emitted, which compares a base slide's emission with the new one's."""
+    n = slide["page"]
+    slide_id = f"b2s_s{n:03}"
+    keys = list(dict.fromkeys(k for e in slide["elements"] for k in element_template_keys(e, scale)))
+    plan = DeckPlan.__new__(DeckPlan)  # (one slide: none of the deck-wide work __init__ does)
+    plan.page_width, plan.pptx_tables, plan.scale, plan.fonts = slide["size"][0] * scale, False, scale, fonts
+    plan.deck = {"slides": [slide]}
+    plan.keys, plan.uses_templates = keys, {n: bool(keys)}
+    plan.shifts = {n: formula_shifts(slide, scale, fonts)}
+    plan.overlays = {n: overlay_boxes(slide, scale, fonts)}
+    plan.page_slide = _OnePage()
+    title = title_element(slide)
+    subtitle = subtitle_element(slide, title) if title is not None else None
+    w, h = placeholder_size
+    page_elements = {slide_id: [{"objectId": f"{slide_id}_t{i}", "size": {"width": emu(w), "height": emu(h)}}
+                                for i in (title, subtitle) if i is not None]}
+    parts, element_ids = plan.slide_parts(slide, page_elements, {}, {}, [template_size] * len(keys))
+    boxes = [[v * scale for v in plan.placed(e, n)["bbox"]] if e["kind"] == "image" else None for e in slide["elements"]]
+    return {"slide_id": slide_id, "parts": parts, "element_ids": element_ids, "boxes": boxes, "title": title,
+            "subtitle": subtitle, "templates": {f"{slide_id}_k{j}": k for j, k in enumerate(keys)}}
