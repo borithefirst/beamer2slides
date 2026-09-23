@@ -3794,3 +3794,103 @@ instead (the first sync still reports the geometry conflict; the report the test
 idempotence sync's, where nothing is left to conflict). Passing live with the new rule: disjoint,
 same-element, chain, table-moved, pull-wording, many-edits, layout-grown-box, layout-group-moved
 and the three probes above.
+
+## Layouts and placeholders in sync
+
+Three defects of 2026-09-23, fixed in that order.
+
+**The subtitle placeholder.** `Sync.update_slide` handed the live SUBTITLE placeholder to whatever
+element had the subtitle role, and emit gives the title page's subtitle line and the author block
+different homes depending on what the page holds (the `subtitle` variant of `tests/decks/sync`
+adds a subtitle line). The placeholder now goes to the element emit itself would put in it
+(`context_changes`, `same_layout`), and the others become boxes of their own. Live:
+`subtitle-role`.
+
+**`context_unwritten` said nowhere.** What `build_ours()["context_unwritten"]` lists (a group
+membership or a placeholder role that recreating a unit cannot change) becomes a report warning
+in words (`sync.UNWRITTEN_SAYS`, `unwritten_warnings`). The agent tools' `Result` carries it with
+the other warnings.
+
+**A theme change never reached the deck** (probe H5, `layout-retheme`). Before the fix, the
+synced frames showed the old blue title bar with the new, taller one peeking out from under it.
+Merging text, Convergence and Conclusions differed from a fresh conversion in 10.5-10.8% of
+pixels. `theme_sync.py` now merges the master and the layouts three ways.
+
+- **Base.** `base["theme"]` records the following. The schema stays version 1, because the key is
+  optional.
+  - `fill`: the master's fill key, with its read-back and, for a picture fill, its signature.
+  - `shared`: the shared background key.
+  - Per page (the master as `M` and each layout by id):
+    - its decoration group. `TITLE` and `*` are emit's `plan_theme` names, and a `*_V1` clone's
+      name gives its group.
+    - the decoration picture's id, sha1 and a 32 x 18 RGB thumbnail. The thumbnail tells "the
+      same picture re-encoded" (Google does that) from "another picture".
+    - its read-back box and content hash.
+    - each TITLE / CENTERED_TITLE / BODY placeholder's spec, as `emit.layout_style_spec` gives it,
+      with its read-back box and style hash.
+- **Why the style hash.** `snapshot.read_text` skips runs that are only "\n", and a layout
+  placeholder holds nothing else. So `theme_sync.style_hash` hashes every run's and paragraph's
+  style. With the old hash, a person's recolour of a layout title was invisible (caught by the
+  offline test before any live run).
+- **What a fresh conversion writes.** `emit.master_plan`, `layout_style_spec` and
+  `layout_placeholder_requests` are new helpers that make the same decisions as `build_deck` and
+  `style_layout_placeholders`. `test_theme_sync.py` holds the requests equal to what convert
+  sends. `theme_sync.ours_side` computes the fill, the shared key, the specs and one picture per
+  decoration group from the new PDF.
+- **Per item.** Each item (the master fill, each page's decoration, each placeholder) is
+  written when only the source changed it, and kept when only the deck changed it. When both
+  changed it, the deck's version is kept and the conflict is reported with an id:
+  - `layout Title Only / title style`;
+  - `layout Blank / theme decoration`, with why `moved to [...]`, `deleted` or `another picture`.
+- **Pending.** The pending marker lists the placeholder specs being written. A run that died
+  after the theme batch therefore finds its own write, not a person's edit.
+- **Probes on the live API (2026-09-23).**
+  - `replaceImage` CENTER_INSIDE keeps the id and the box, but drops the description, so the alt
+    text is written again.
+  - `createImage` on a layout followed by `SEND_TO_BACK` works.
+  - A slide goes back to inheriting the master only through fields
+    `pageBackgroundFill.propertyState`. Fields `pageBackgroundFill` with INHERIT is refused.
+  - The master accepts both solid and picture fills.
+- **Slides drops a run property equal to the one the run inherits**, on writes as on the .pptx
+  import. Beamer sets the title page's title and the frame titles at one size (`\Large`), so the
+  imported title-page title has no size of its own. Restyling the master's TITLE for a retheme's
+  `\huge` frame titles grew it too: the title slide differed from a fresh conversion in 1.59% of
+  pixels.
+  - `theme_sync.inherited_pins` writes the old inherited values onto the converter's slide
+    placeholders.
+  - The pins go *after* the layout requests in the same batch. Written before, they equal the
+    inherited value and vanish. That happened in the first live run.
+  - The frame titles the merge refills with the new style fold back into inheriting, exactly as
+    in a fresh conversion.
+  - `Sync.new_base` takes the pinned read-back into the base for objects the person had not
+    restyled. Otherwise the next sync reads the pins as a deck edit.
+  - A slide the person added keeps following the theme.
+- **Which decoration a layout serves.** A layout serves the decoration group that most of its
+  live slides want (`page_group`). A slide that wants another one is a warning, not a layout
+  change: moving a slide to another layout re-parents its placeholders.
+- **Order and backgrounds.**
+  - The theme batch opens the content chain, so no layout write is in flight beside a slide batch.
+  - Slides that showed a copy of the old shared background go back to INHERIT when they show the
+    new one.
+  - New slides take the layout that serves their group.
+- **Old base** (no `theme`): nothing is written on the layouts, as before. When the new shared
+  background differs from the one the base records, a warning says the layouts were left as they
+  are and a slide whose background changed got the new one as a picture of its own
+  (`old_base_warning`). The next sync of that base still has no `theme`: only `convert` records it.
+
+After the fix:
+- `layout-retheme`: the title page, Merging text and Convergence are the same as a fresh
+  conversion. Conclusions carries the person's word, so only its title box is compared, and that
+  box is equal. The sync applied 53 source changes with 0 conflicts in 464 requests, and the
+  strict xfail is gone.
+- `layout-edited-retheme` (new): the person recolours the TITLE_ONLY title placeholder and moves
+  the BLANK decoration by 20 pt, and the source rethemes.
+  - The sync applied 51 source changes and reported 2 conflicts. The green title and the moved
+    picture stay, and the TITLE_ONLY decoration is the new one.
+  - The idempotence sync sends 0 requests and reports the same 2 conflicts.
+- `untouched`, `slides` and `subtitle-role` pass.
+
+Still open:
+- Layout texts (`write_layout_texts`, shared headers and footers) are not synced.
+- A variant layout that a fresh conversion would newly clone is not created.
+- A slide whose decoration variant changed stays on its layout.
