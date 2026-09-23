@@ -649,6 +649,79 @@ def test_catches_an_element_put_back_at_the_converters_box():
     assert loss_oracle.geometry_findings(base, before, pinned, empty, there) == []
 
 
+def _refit_round(person, pic_note=None, source_dy=10.0):
+    """A block body and its formula picture, the person's edit `person` on both (their group), the
+    source moving the unit `source_dy` down; the base's picture maybe noted with the last sync's
+    `refit`. Returns base, before, ours and a function giving the after read-back from the text's
+    and the picture's corners."""
+    def rb(box):
+        return {"box": list(box), "transform": [1, 0, 0, 1, box[0], box[1]], "size": [box[2] - box[0], box[3] - box[1]]}
+    t_box, p_box, title = [10, 100, 700, 140], [400, 110, 430, 130], [20, 10, 220, 30]
+    pic = {**rb(p_box), **({"refit": pic_note} if pic_note else {})}
+    base = {"slides": [{"key": "f1", "objectId": "s1", "elements": [
+        {"key": "text/title/0", "main": "h", "objects": ["h"], "fingerprint": {"bbox": title}, "readback": {"h": rb(title)}},
+        {"key": "text/body/0", "main": "t", "objects": ["t"], "fingerprint": {"bbox": t_box}, "readback": {"t": rb(t_box)}},
+        {"key": "image/math/0", "main": "p", "objects": ["p"], "anchor": "text/body/0",
+         "fingerprint": {"bbox": [p_box[0] - (pic_note or [0, 0])[0], p_box[1], p_box[2] - (pic_note or [0, 0])[0], p_box[3]]},
+         "readback": {"p": pic}}]}]}
+
+    def edited(r):
+        m = snapshot.compose(person, r["transform"])
+        return {"transform": m, "box": snapshot.box(m, *r["size"])}
+    before = {"slides": [{"objectId": "s1", "objects": {"t": edited(rb(t_box)), "p": edited(pic)}}]}
+    shifted = lambda b: [b[0], b[1] + source_dy, b[2], b[3] + source_dy]
+    ours = {"slides": [{"key": "f1", "elements": [
+        {"key": "text/title/0", "fingerprint": {"bbox": title}},
+        {"key": "text/body/0", "fingerprint": {"bbox": shifted(t_box)}},
+        {"key": "image/math/0", "fingerprint": {"bbox": shifted(base["slides"][0]["elements"][2]["fingerprint"]["bbox"])}}]}]}
+
+    def after(t_at, p_at):
+        return {"slides": [{"objectId": "s1", "objects": {"t": {"box": [*t_at, t_at[0] + 1, t_at[1] + 1]},
+                                                          "p": {"box": [*p_at, p_at[0] + 1, p_at[1] + 1]}}}]}
+    return base, before, ours, after
+
+
+def _carried_report(*refit):
+    return loss_oracle.normalise_report({
+        "conflicts": [{"slide": "f1", "element": "text/body/0", "field": "geometry", "resolution": merge.GEOMETRY_CARRIED}],
+        "refit": [{"slide": "f1", "element": "image/math/0", "object": "p", "what": "picture", "shift": s} for s in refit]})
+
+
+def test_a_picture_refit_moved_is_held_to_what_the_sync_recorded():
+    """r8006: the person moved the block (+20, -20) and wrote words that stranded its formula; the
+    source moved the unit 10 pt down; refit took the picture 154.1 pt right, onto its hole in the
+    words as merged. The oracle learns that move from the report's `refit` - never forgives a
+    picture for being one: without the report's word, or at another place, it is still found."""
+    base, before, ours, after = _refit_round([1, 0, 0, 1, 20.0, -20.0])
+    t_at = [30.0, 90.0]                                            # (10, 100) + person + source
+    right = after(t_at, [420.0 + 154.1, 100.0])
+    kinds = lambda rep, aft: [(f["kind"], f["element"]) for f in loss_oracle.geometry_findings(base, before, aft, rep, ours)]
+    assert kinds(_carried_report([154.1, 0.0]), right) == []
+    assert kinds(_carried_report(), right) == [("geometry_not_carried", "image/math/0")]
+    assert kinds(_carried_report([154.1, 0.0]), after(t_at, [420.0 + 134.0, 100.0])) == \
+        [("geometry_not_carried", "image/math/0")]
+    assert kinds(_carried_report(), after(t_at, [420.0, 100.0])) == []    # no refit: carried with its unit
+
+
+def test_a_refit_the_last_sync_recorded_is_the_converters_under_the_persons_scale():
+    """r8011: last sync's refit moved the picture 154.1 pt in the converter's frame (the base's
+    `refit` note) and the person had scaled the unit's group 1.15. This sync's refit moves it the
+    same 154.1 again (the merged words did not change): the picture stays where the person had it,
+    plus the source's move. A refit that moves it further is judged through the person's scale."""
+    person = [1.15, 0, 0, 1.15, -4.23, -18.82]
+    base, before, ours, after = _refit_round(person, pic_note=[154.1, 0.0], source_dy=-7.6)
+    was_t, was_p = (before["slides"][0]["objects"][o]["box"] for o in ("t", "p"))
+    t_at = [was_t[0], was_t[1] - 7.6]
+    kinds = lambda rep, aft: [(f["kind"], f["element"]) for f in loss_oracle.geometry_findings(base, before, aft, rep, ours)]
+    assert kinds(_carried_report([154.1, 0.0]), after(t_at, [was_p[0], was_p[1] - 7.6])) == []
+    assert kinds(_carried_report([184.1, 0.0]), after(t_at, [was_p[0] + 34.5, was_p[1] - 7.6])) == []
+    assert kinds(_carried_report([184.1, 0.0]), after(t_at, [was_p[0] + 30.0, was_p[1] - 7.6])) == \
+        [("geometry_not_carried", "image/math/0")]
+    # r8011 as it was: the page moved 134.0 of a planned 154.1 x 1.15 (the conjugated step)
+    assert kinds(_carried_report([154.1, 0.0]), after(t_at, [was_p[0] - 43.2, was_p[1] - 7.6])) == \
+        [("geometry_not_carried", "image/math/0")]
+
+
 def test_catches_a_resize_dropped_where_the_source_moved_the_element():
     """layout-grown-box-moved: the person made a box taller, the source moved it down, and the sync
     put it at the source's new place with the converter's height. Its place is not the base's, so the
