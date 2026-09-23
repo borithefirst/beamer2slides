@@ -452,16 +452,38 @@ CARRIED_PLACE = 2.0  # pt: how close a carried corner must land (in the archive 
                      # moved and the report lists as applied stood within 0.3 pt of its corner plus that move)
 
 
+def _frame_drop(rb: dict) -> float:
+    """How much lower than a text box emit sets a text's frame when the text goes into a layout
+    placeholder (`emit.PPTX_TITLE_DY`: an imported placeholder's top inset is that much smaller), so
+    that its words stand where a box's would."""
+    from beamer2slides.emit import PPTX_TITLE_DY
+    return PPTX_TITLE_DY if rb.get("placeholder") else 0.0
+
+
+def _corner(rb: dict) -> list[float]:
+    """Where a text object's words start, as the corner of the text box that would hold them there:
+    a placeholder's corner less `_frame_drop`."""
+    return [rb["box"][0], rb["box"][1] - _frame_drop(rb)]
+
+
 def _carried_to(place, base_el: dict, ours_el: dict, now: dict) -> list[float] | None:
     """Where the corner of an element both sides moved belongs after a sync that carried the
     person's edit (`sync.carried`): the person's corner plus the source's move of the element's IR
     corner, in deck pt. Taken from the person's own box, so a text box's frame around its words
-    (wider and taller than the bbox) does not enter into it. None without `ours` or a placement."""
+    (wider and taller than the bbox) does not enter into it. None without `ours` or a placement.
+
+    Corners are the words' (`_corner`): the source can move a text into the title page's subtitle
+    placeholder or out of it (a longer line taking the role over, or losing it again), and emit sets a
+    placeholder's frame `_frame_drop` lower around the same words. The sync carries the person's step
+    onto the frame the new conversion writes, so the words land at their new place plus that step
+    whichever frame holds them; the frame itself moves by the bbox step and the drop (live fuzz
+    r8009, variants subtitle and deletions: 3.9 pt off both ways)."""
     bb, ob = (base_el.get("fingerprint") or {}).get("bbox"), (ours_el.get("fingerprint") or {}).get("bbox")
     if not place or not bb or not ob or not now.get("box"):
         return None
     s = place[0]
-    return [now["box"][0] + s * (ob[0] - bb[0]), now["box"][1] + s * (ob[1] - bb[1])]
+    x, y = _corner(now)
+    return [x + s * (ob[0] - bb[0]), y + s * (ob[1] - bb[1])]
 
 
 def _size(rb: dict) -> list[float]:
@@ -536,8 +558,8 @@ def geometry_findings(base: dict, before: dict, after: dict, rep: dict, ours: di
                 continue
             to = _carried_to(place, el, ours_el, now)
             if promised and objects and to is not None and \
-                    not any(max(abs(rb["box"][0] - to[0]), abs(rb["box"][1] - to[1])) <= CARRIED_PLACE
-                            for rb in objects if rb.get("box")):
+                    not any(max(abs(c[0] - to[0]), abs(c[1] - to[1])) <= CARRIED_PLACE
+                            for c in (_corner(rb) for rb in objects if rb.get("box"))):
                 out.append(finding("geometry_not_carried", "undo",
                                    f"at {objects[0].get('box')}; the person's move on top of the source's puts its "
                                    f"corner at {[round(v, 2) for v in to]}, as the report promises",
@@ -688,12 +710,24 @@ def _ours_text(el: dict | None) -> str:
 
 def element_objects(skey: str, ekey: str, base_el: dict | None, slide_read: dict) -> set[str]:
     """The live objects that carry one element after a sync: its own, ones the sync made for it, or
-    ones tagged with its key."""
+    ones tagged with its key.
+
+    One of its own that now carries *another* element's tag of this slide is that element's: a sync
+    hands a live layout placeholder, object id and all, to the text that has its role now (the
+    subtitle of a title page, `sync.Sync.update_slide`'s `in_place`) and retitles it. Counting it
+    still as the old element's put the other text's box under this one's name (a subtitle taken over
+    by a longer line read as `geometry_not_carried`) and a removed element as still there
+    (`reported_remove_not_done`, live fuzz r8009)."""
     prefix = f"b2s_{h6(skey)}_{h6(ekey)}_"
     tag = snapshot.tag(skey, ekey)
+    others = f"{snapshot.TAG_PREFIX}{skey}/"
     mine = set(base_el.get("objects", [])) if base_el else set()
+
+    def handed_on(rb: dict) -> bool:
+        title = rb.get("title") or ""
+        return title.startswith(others) and title != tag
     return {oid for oid, rb in slide_read["objects"].items()
-            if oid in mine or oid.startswith(prefix) or rb.get("title") == tag}
+            if (oid in mine and not handed_on(rb)) or oid.startswith(prefix) or rb.get("title") == tag}
 
 
 def content_findings(base: dict, before: dict, after: dict, rep: dict, ours: dict | None) -> list[dict]:
