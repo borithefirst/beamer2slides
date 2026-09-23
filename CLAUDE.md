@@ -58,7 +58,8 @@ Details, measurements and edge cases: docs/project-notes.md "What becomes native
 - `table`: text framed by rules (or rule-less `plain_tables`), with borders, merges, fills. Column
   widths come from measured Slides advances (`emit.slides_width`, `fit_columns`) so no cell wraps
   and the table does not grow over its caption; classify cuts a spanning chunk at word gaps when it
-  lines up with the other rows.
+  lines up with the other rows. Rules wider than half the page with rows of cells between them are
+  a table's, not theme decoration (`table_hairlines`); a wrapped `p{}` cell is one chunk per line.
 - `diagram`: node/line/arrow clusters as grouped shapes, connectors and labels (`diagram_from`).
 - `shape`: opaque panels such as beamer blocks (title bar + body built to survive resizing).
 - Decorations on words: underline/strike/highlight runs; words on small graphics and complex inline

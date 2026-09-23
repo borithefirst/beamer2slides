@@ -3366,3 +3366,20 @@ the guard reads bases written before that correctly: a "deleted" main object the
 read-back never had, while the element's other objects stand, is no deletion (`guard._never_made`,
 `test_a_group_emit_named_and_slides_never_made_is_not_a_deletion`, which also checks that a main
 object the base did have and the deck lost still counts).
+
+### Text fit follow-up: the three captioned tables (merged 2026-09-23, 864070b)
+The open item above was misdiagnosed: the three captioned tables (slides 10-12) were not refused
+for growth, they were never tables. A centred booktabs table in a 4:3 frame is 0.55-0.7 of the page
+wide, and `is_decoration` takes every thin rule across half the page for theme decoration, so the
+rules stayed in the background and the cells became text boxes joined across columns ("Monitor
+Workstation Mainframe" in one box, the `p{}` cell's first line with the numbers beside it, which
+reflowed across the BLEU column: drift 110 pt, width 1.8x). `classify.table_hairlines` keeps two or
+more rules of one width, touching no page edge, as a table's rules when rows of text stand between
+them (one with words more than an em apart) and nothing runs past their ends. In `table_from`, a
+justified `p{}` cell, whose word spaces are wider than the half em that separates cells, is one chunk
+per line, each line a row of its own; a `\cmidrule(l)` trimmed at its left end borders every column
+whose text it covers. On Google's renderer slide 10 is a table grown 4.8 pt and slide 12 one grown
+3.2 pt, both clear of their captions; slide 11 has no finding; the header words slide 12 left in the
+background are native; slide 13's rules follow its table. The native text of the other 79 test and
+theme PDFs is unchanged. Open: a wrapped cell could be one multi-line cell if emit left a wrapping
+column out of `fit_columns`' one-line width (each line is a row now, keeping TeX's hyphen).
