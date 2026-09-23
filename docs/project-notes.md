@@ -4221,3 +4221,65 @@ unit's group and a refit in the same sync. Replayed offline from the archives
   `tests/test_sync_fuzz.py` (`test_a_picture_refit_moved_is_held_to_what_the_sync_recorded`,
   `test_a_refit_the_last_sync_recorded_is_the_converters_under_the_persons_scale`). The offline
   fuzz world runs no refit, so it writes no `refit` entries and no notes.
+
+## Visual hunt (2026-09-23/24)
+
+An adversarial campaign for slides that look right in beamer and mangled in Google Slides. Nothing
+in the converter was changed by it (except `fidelity.ink_box` on rows of specks, found by a hunter:
+`tests/test_fidelity.py`); it is a list of what to fix. Report with crops per family:
+https://claude.ai/artifact/BLgc6bCF7rPqzLr6vnLwxM. Data under `out/hunt/` (git-ignored): `decks/`
+(every .tex), `archive/<stem>/` (PDF and Slides renderings side by side, deck.json, emit.json,
+fidelity, text_fit, invariants), `judgements/`, `verified/<hunter>.json`, `crops/`, `KNOWN.md`.
+
+- **Harness**: `devtools/visual_hunt.py run <tex> --slot S` compiles (engine from a first-line
+  `% !engine = x`, until the .aux settles), converts into `out/hunt/<slot>` with the PDF copied to
+  `out/hunt/pdfs/<slot>.pdf` (the rebuild guard pairs a deck with a PDF *name*, so a slot reuses one
+  Drive deck), runs fidelity, text_fit and the offline invariants, and archives per slide
+  `pdf-NNN.png`, `slides-NNN.png` (1600 px, same geometry) and `cmp-NNN.png`. At most 4 Google runs at
+  once (lock files, `B2S_HUNT_GOOGLE`). `ledger [--verified]` groups confirmed findings by class.
+- **Roles** (the measurement-loops skill): 18 hunters, 3-5 realistic decks each over four rounds,
+  steered away from repeats by `KNOWN.md`; a **blind judge** per hunter (images only, zoom before
+  claiming); a **skeptic** per hunter that merges both lists, crops each claim, rejects what is the
+  PDF's own, invisible at presentation size or only a substitute's letter shapes, re-scores severity
+  and realism 1-3 and names the mechanism. A **canary** (r0_smoke with a table row erased, a bullet
+  moved onto a block title, a red number turned black) went to every judge: all caught all three.
+  **Controls**: eight ordinary talks by writers told not to hunt, judged and verified the same way.
+- **Result**: 77 decks, 714 slides, 377 confirmed findings, 99 severity 3. Controls: 36 of 105
+  slides with a severity 2+ defect, 5 broken; 24 of the 36 are two deck-wide footline defects (a
+  clipped Boadilla author box, OT1 "Schr¨odinger"), the rest about one slide in eight.
+- **Environment confound**: MiKTeX regenerated `pdftex.map` at 00:31 mid-campaign (cause unknown).
+  Before, T1 text without cm-super compiled to bitmap Type 3 fonts; after, to Type 1. Four decks
+  recompiled unchanged (`r5_t1_*`): of 25 findings 13 persist, 11 gone (all Type 3 classes), 1
+  changed (`verified/ab_type3.json`). The Type 3 family is real input but over-represented.
+- **Families, worst first, with the mechanisms the skeptics found** (file:line as of 9f88dd2):
+  - Columns joined: `build_lines` joins words on one baseline up to 2 em apart; `gutter()`
+    (classify.py:917) refuses when the left word has < 6 characters. Removing that test fixed all
+    three layout slides in memory.
+  - Charts: `body_size()` is the deck-wide mode, the 6 pt Madrid/Boadilla footline; the tick gate
+    `line.size <= 1.15 * self.body` (classify.py:1334-1345) then keeps 11 pt ticks native, and
+    `overlay` (1875-1930) stretches the plot to follow them while fills stay in the background. A
+    legend's white box is read as a highlight and render.py:472 erases its swatches.
+  - Hidden text shown: `pdfium_backend.Page.chars()` never tests clips; nothing compares text with
+    later opaque fills; extract.py:203 `fill_opacity or 1.0` makes opacity 0 opaque.
+  - Display math half native: `formula_like` counts only italic-flagged letters (CMMI never is);
+    `same_formula`, the limit cap and `fraction_part` fail to rejoin; CMEX crops to the font box;
+    U+0338 is never combined (`\neq` -> "/=").
+  - Fonts: unknown names (newtx, Palatino, Libertine, Segoe UI, Bera Mono, Yu Gothic) fall back to
+    PT Serif, styles lost; OpenType math Greek -> Unicode-name words (`math_text` ~311); astral
+    letters shift styles (emit.py:775 counts code points, Slides UTF-16); OT1 accents not composed.
+  - Width inflation: `FontMapper.shape_ratio` counts each ". " of a `\dotfill` leader or `\ldots`
+    as a sentence space, sizing leaders up to 29 pt.
+  - Tables: ruled grids refused (classify.py ~2199/2390/2471) become diagrams; `fit_columns` has no
+    page cap; `emit.table_requests` (1481-1489) clamps right alignment per cell.
+  - Diagrams: `diagram_from` maps any four-curve path to ELLIPSE with no closure test
+    (classify.py:2102); the vector-bullet search (1101-1114) has no aspect test.
+  - RTL: PDFium's text is right, the IR is wrong: extract's content-order sort plus `bidi.py`
+    scramble whole-RTL lines and reverse digit runs. CJK: the wrap limit adds the next line's
+    "first word" (classify.py ~2767), the whole line without spaces, so boxes are 117 pt too wide.
+  - Type 3: `TYPE3_SYMBOLS` maps only `\x88`; a control character in alt text crashes
+    `build_pptx` (emit.py:1092).
+  - Also: numbering restarts after nested lists, merged lines, `single_line_align` centring by a
+    2 pt coincidence, `\fcolorbox`/tcolorbox frames, decorations across line breaks erasing words,
+    framed listings, bullet glyph substitutes, `select_overlays`' top-fifth heading band.
+- **What it cannot see**: thumbnails at 1600 px, not editing behaviour; agent-written decks, with
+  prevalence estimated from eight controls only.

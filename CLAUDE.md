@@ -264,6 +264,10 @@ markers.
   and `tools/text_fit.py <pdf> --out <folder> [--crops]` after `convert` + `fidelity`: wrap, drift,
   width, crowded, grown, touch, line by line on Google's renderer (`devtools/text_fit.py`,
   `tests/test_text_fit.py` on synthetic pages). Open findings: docs/project-notes.md "Text fit".
+- **Visual hunt** (`tools/visual_hunt.py run <tex> --slot S`, `ledger`): compile, convert, fidelity,
+  text_fit and invariants, archived as PDF | Slides side by side for hunter / blind judge / skeptic
+  campaigns under `out/hunt/`. 377 open findings by family with mechanisms: docs/project-notes.md
+  "Visual hunt".
 - Theme robustness: `tests/themes/sweep.py` (28 beamer themes, classify only).
 
 ## Pitfalls found so far
