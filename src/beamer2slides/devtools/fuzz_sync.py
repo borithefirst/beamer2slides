@@ -1511,6 +1511,11 @@ class LiveRound:
         self.record["steps"].append({"step": step, "variant": variant, "edits": specs,
                                      "findings": loss_oracle.failures(findings)})
         self.problems += [f"step {step} ({variant}): {loss_oracle.describe([f])}" for f in loss_oracle.failures(findings)]
+        from beamer2slides.devtools import layout_oracle
+        layout = layout_oracle.check(base, before, after, report, ours)
+        (folder / "layout.json").write_text(json.dumps(layout, indent=1, ensure_ascii=False), encoding="utf-8")
+        self.problems += [f"step {step} ({variant}): layout: {layout_oracle.describe([f]).strip()}"
+                          for f in layout_oracle.failures(layout)]
         self.problems += [f"step {step} ({variant}): integrity: {p}" for p in self.integrity(pres_before, pres_after, specs)]
 
     def ours(self, pdf: Path, base: dict, folder: Path):

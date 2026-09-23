@@ -3495,3 +3495,78 @@ them. A booktabs table growing a data row at the end is the common case (the new
 `test_a_table_the_source_added_a_row_to_is_grown_in_place`, `test_table_steps_*`, live scenario
 `table-row` (flag `tablerow`). That a row inserted below another takes *its* margins is what the
 live scenario's thumbnail comparison checks; the probe only grew a table of equal margins.
+
+## Layout oracle (2026-09-23)
+
+`loss_oracle` asks whether the person's work survived a sync; `devtools/layout_oracle.py` asks
+whether the slide *looks* broken after it where it did not before: words over words, a text out of
+its box or its block, a formula picture off its hole, something pushed off the page. Same inputs
+(base, before, after, report, ours) and finding shape, `check()` for what this sync introduced and
+`existing(before)` (all notes, `by` converter or person) for what was already so.
+`tools/layout_oracle.py <archive> [...] [--json] [--out f] [--existing] [--notes]` replays recorded
+fuzz steps (the new conversion rebuilt from `<step>/ours/deck.json` without the PDF,
+`ours_from_folder`: 618 steps in ~25 s) and prints counts per kind, each finding with its step's
+edits and variant, and which edit kinds and variants precede fail findings (`correlate`).
+`LiveRound.step` writes `layout.json` per step and adds fails to the round's problems as `layout:`.
+
+**The model.** A read-back has no line positions and Slides boxes do not autofit, so the lines are
+laid out the way emit predicts them: `emit.ADVANCES`, greedy wrap inside the insets, `emit.line_pitch`
+/ `pitch_between` plus spaceAbove/spaceBelow (none between two bulleted items). The read-back lists
+*distinct* paragraph styles in first-appearance order: one style is everybody's, as many as
+paragraphs is one each, else the shortest stands in (errs towards "fits"). Before per-paragraph
+styles the model put a formula hole 14 pt off on a two-paragraph text; with them, on the 72 unedited
+converter boxes of the archive, it predicts the PDF line count of all 117 paragraphs and finds every
+converter-placed formula picture within 1.9 pt of its hole. Ink is a band per line (0.72 em above
+the baseline, 0.2 below) as wide as the words, so boxes that overlap with their words clear of each
+other are fine (the archive has 68 such pairs of a moved box and a re-laid one).
+
+**Kinds.** `text_overlap` (two inks meet by 2 pt each way after, did not before, and the new
+conversion does not draw them meeting; 2 pt of two texts' bands is a fail, a picture's box needs 4
+because it has margins); `text_overflow` (the same where the meeting line is laid out below its own
+box, or a text sits on a filled panel and its ink runs out of the panel's bottom); `stranded_picture`
+(an anchored formula picture more than 8 pt across or 0.6 of a line off its hole: judged when it
+was over it before, or when the sync created, recreated or moved it and the person had not put it
+there themselves); `off_page` (more than 6 pt outside the page, on the page before). Excuses are all
+"it was so before": a pair that met before is excused even when it now meets deeper (in the archive
+that is a person's copy of a text laid over the original, which then gains a line). Notes: an
+uncertain slide, a new element with no `ours` to ask, a thin overlap. `table_growth` was dropped: a
+table read-back has no column widths or row heights, so no cell can be laid out.
+
+**Archive (618 steps under out/sync-fuzz with its shrink folder, fuzz-live-refill, fuzz-live-widths):**
+14 fails, 0 notes, 1,819 existing notes. text_overflow 2 fails / 20 existing; stranded_picture
+12 / 245; text_overlap 0 / 729; off_page 0 / 825. What happened to the candidates: all 822 text
+overlaps already met before the sync; all 819 off-page objects were already off the page before (the
+person's footers with appended sentences); of 157 stranded pictures, 113 were already stranded and
+not touched by the sync, and 32 were stranded where the person had moved them. Two defect classes,
+both real:
+- *A formula picture rewritten at the source's place, not over the hole in the deck's text.*
+  shrink/r903 step5: the person had moved the formula paragraph down 15 pt with its pictures; the
+  sync kept the text there and recreated both pictures at the source's place, 15 and 16 pt above
+  their holes. sync-fuzz r905 steps 6-7, r1104 steps 5-7, r619 step2, fuzz-live-refill r2703
+  steps 0-1: the pictures were already off (the person had moved and retyped the text) and the
+  sync recreated them at the same wrong place. Agent D's live `layout-stranded-formula`: the person wrote "perfectly" before the hole,
+  and the recreated picture lands 72 pt short of it.
+- *Merged words overflowing a box sized for the source's words.* fuzz-live-refill r2700 step1
+  (blockedit; the person's resize_font to 20 pt merged into the recreated body box) runs 22 pt
+  out of the bottom of its block; sync-fuzz r908 step7 (the source reworded, the person had
+  appended a sentence) wraps to a second line 14.7 pt out of it.
+Agent D's live `layout-reflow` is the third shape (a source's added line grows box 1 into box 2
+that the person moved; deck position kept, ink bands meet by 3.2 pt, D measured 2.7 on pixels):
+it fires as `text_overlap`, and nothing in the archive has that shape. Too few fails (11 steps)
+for the per-edit correlation table to say much; the finding's `history` says more: in 13 of the
+14 fails the text involved carries `person_moved` (and mostly `person_text`) from an earlier step,
+and the 14th (r2700) the person's font size from the same step. Every fail is on a unit the sync
+recreated.
+
+**Sensitivity**, by breaking each archived `after` on purpose (one per step): a converter text moved
+onto another's first line is caught 618/618, words appended to a text on a panel 607/607, a formula
+picture pushed one line down 540/545 (the 5 were already stranded where the person had put them,
+excused by design), a text pushed 20 pt past the right edge 559/618 (the 59 were already off before).
+
+**Blind spots.** Tables (no geometry in the read-back); text in groups and turned boxes (not laid
+out); a picture moved onto *another* hole of its own text; placeholder text whose size the IR does
+not give; paragraphs whose style the distinct list cannot assign (the shortest is assumed, so a
+real overflow can be missed); pictures and shapes meeting each other (only pairs with a text are
+judged); anything the offline fuzz world does, since its read-backs have no run styles, no box
+types and boxes not sized by emit's metrics - running the oracle there needs the world to size
+and style its text boxes like emit first.
