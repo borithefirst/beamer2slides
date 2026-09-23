@@ -530,6 +530,48 @@ def test_catches_an_element_put_back_at_the_converters_box():
     assert loss_oracle.geometry_findings(base, before, after, empty, there) == []
     # ... but the person's step still has to be on top of it.
     assert [f["kind"] for f in loss_oracle.geometry_findings(base, before, after, empty, None)] == ["geometry_reverted"]
+    # A conflict excuses it - except the one that promises the person's move was carried onto the
+    # source's new place (both moved it): that is a promise to keep, not an excuse.
+    def said(resolution):
+        return loss_oracle.normalise_report({"conflicts": [
+            {"slide": "f1", "element": "text/body/0", "field": "geometry", "resolution": resolution}]})
+    assert loss_oracle.geometry_findings(base, before, after, said("deck kept"), still) == []
+    assert [f["kind"] for f in loss_oracle.geometry_findings(base, before, after, said(merge.GEOMETRY_CARRIED), None)] \
+        == ["geometry_reverted"]
+    # ... and it says where: the person's corner plus the source's move of the IR corner.
+    promised = said(merge.GEOMETRY_CARRIED)
+    assert loss_oracle.geometry_findings(base, before, after, promised, there) == []   # (-10, +20) from (30, 0)
+    assert [f["kind"] for f in loss_oracle.geometry_findings(base, before, after, promised, still)] \
+        == ["geometry_not_carried"]
+    # the deck's absolute place, which geometry mode `theirs` wrote, is not what was promised either
+    pinned = {"slides": [{"objectId": "s1", "objects": {"o": dict(moved)}}]}
+    assert [f["kind"] for f in loss_oracle.geometry_findings(base, before, pinned, promised, there)] \
+        == ["geometry_not_carried"]
+    assert loss_oracle.geometry_findings(base, before, pinned, empty, there) == []
+
+
+def test_catches_a_resize_dropped_where_the_source_moved_the_element():
+    """layout-grown-box-moved: the person made a box taller, the source moved it down, and the sync
+    put it at the source's new place with the converter's height. Its place is not the base's, so the
+    place check alone is silent; the size is the converter's again."""
+    base = {"slides": [{"key": "f1", "objectId": "s1", "elements": [
+        {"key": "text/body/0", "main": "o", "objects": ["o"], "fingerprint": {"bbox": [10, 10, 110, 40]},
+         "readback": {"o": {"box": [10, 10, 110, 40], "transform": [1, 0, 0, 1, 10, 10]}}}]}]}
+    taller = {"box": [10, 10, 110, 55], "transform": [1, 0, 0, 1.5, 10, 10]}
+    before = {"slides": [{"objectId": "s1", "objects": {"o": taller}}]}
+    ours = {"slides": [{"key": "f1", "elements": [{"key": "text/body/0", "fingerprint": {"bbox": [10, 41, 110, 71]}}]}]}
+    report = loss_oracle.normalise_report({"conflicts": [
+        {"slide": "f1", "element": "text/body/0", "field": "geometry", "resolution": merge.GEOMETRY_CARRIED}]})
+
+    def after(box):
+        return {"slides": [{"objectId": "s1", "objects": {"new": {"box": box, "transform": [1, 0, 0, 1, box[0], box[1]],
+                                                                  "title": snapshot.tag("f1", "text/body/0")}}}]}
+    dropped = loss_oracle.geometry_findings(base, before, after([10, 41, 110, 71]), report, ours)
+    assert [f["kind"] for f in dropped] == ["geometry_reverted"] and "size" in dropped[0]["detail"]
+    assert loss_oracle.geometry_findings(base, before, after([10, 41, 110, 86]), report, ours) == []
+    # the source resized it too: nothing to hold the converter's size against
+    grown = {"slides": [{"key": "f1", "elements": [{"key": "text/body/0", "fingerprint": {"bbox": [10, 41, 110, 90]}}]}]}
+    assert loss_oracle.geometry_findings(base, before, after([10, 41, 110, 71]), report, grown) == []
 
 
 def test_catches_styling_put_back_the_way_the_converter_had_it():

@@ -49,7 +49,10 @@ merge policy of docs/sync.md says it is not the person's work. Concretely:
   that rewrites the unit re-applies the deck's transform, so afterwards it stands where the person
   put it, or - when the source moved it too - at the conversion's new box with the person's move on
   top of it (`deck_placement` works that box out from `ours`; the old box can fall on it by
-  coincidence, and then nothing was reverted).
+  coincidence, and then nothing was reverted). A person's resize must not be back at the converter's
+  size either, wherever the element went, when the source left that size alone. When the report
+  says both moved it and the person's move was carried (`merge.GEOMETRY_CARRIED`), its corner must
+  be the person's plus the source's move (`geometry_not_carried`).
 * **A picture the person put into a converter element** (the read-back's picture differing from the
   base's, compared by `snapshot.signature`, never by URL) must still be on one of that element's
   objects afterwards.
@@ -58,7 +61,8 @@ merge policy of docs/sync.md says it is not the person's work. Concretely:
   sync at least one of that element's objects must still show the person's hash.
   These three are excused by a `conflicts` or a `converged` entry for the element, and by nothing
   else - in particular not by `overrides`, which *claims* the deck's version was kept: a sync that
-  reverts what it lists as an override is exactly the silent loss this oracle looks for.
+  reverts what it lists as an override is exactly the silent loss this oracle looks for. Nor, for
+  the place and size, by the geometry conflict that promises them (`merge.GEOMETRY_CARRIED`).
 * **Speaker notes and slide backgrounds** follow the same rules, per slide. On a slide the person
   added themselves the base has nothing to merge against, so the notes and the background must come
   through the sync word for word.
@@ -406,27 +410,30 @@ def deck_placement(base: dict) -> tuple[float, float, float] | None:
     """How a conversion's coordinates (`fingerprint.bbox`) land in the deck: `x_deck = s*x + tx`.
     Read off the base itself - every element the converter wrote stands at its own bbox - as the
     median over all of them, so the few boxes a person has since moved don't move the estimate.
-    (1, 0, 0 in a real deck; the fuzz world uses a different scale on purpose, so that a confusion
-    between the two coordinate systems cannot pass unnoticed.)"""
-    scales, xs, ys = [], [], []
-    for s in base["slides"]:
-        for el in s.get("elements", []):
-            bb = (el.get("fingerprint") or {}).get("bbox")
-            box = ((el.get("readback") or {}).get(el.get("main")) or {}).get("box")
-            if not bb or not box or bb[2] - bb[0] < 1 or bb[3] - bb[1] < 1:
-                continue
-            scales.append(((box[2] - box[0]) / (bb[2] - bb[0]) + (box[3] - box[1]) / (bb[3] - bb[1])) / 2)
-    if len(scales) < 3:
+    (the deck's width over the PDF's, 0, 0 in a real deck; the fuzz world uses its own scale on
+    purpose, so that a confusion between the two coordinate systems cannot pass unnoticed.)
+
+    Pictures, when there are three, are asked alone: emit draws a picture at its bbox, but a text
+    box is wider than its words (up to the mirror of the slide's leftmost text) and taller (insets),
+    and with them in the median a real deck read 3.09 for 1.59 (archived live fuzz, 2026-09-23)."""
+    def measured(only_pictures: bool):
+        for sl in base["slides"]:
+            for el in sl.get("elements", []):
+                if only_pictures and el.get("kind") != "image":
+                    continue
+                bb = (el.get("fingerprint") or {}).get("bbox")
+                box = ((el.get("readback") or {}).get(el.get("main")) or {}).get("box")
+                if bb and box and bb[2] - bb[0] >= 1 and bb[3] - bb[1] >= 1:
+                    yield bb, box
+    pairs = list(measured(True))
+    if len(pairs) < 3:
+        pairs = list(measured(False))
+    if len(pairs) < 3:
         return None
-    s = sorted(scales)[len(scales) // 2]
-    for sl in base["slides"]:
-        for el in sl.get("elements", []):
-            bb = (el.get("fingerprint") or {}).get("bbox")
-            box = ((el.get("readback") or {}).get(el.get("main")) or {}).get("box")
-            if bb and box:
-                xs.append(box[0] - s * bb[0])
-                ys.append(box[1] - s * bb[1])
-    return s, sorted(xs)[len(xs) // 2], sorted(ys)[len(ys) // 2]
+    scales = sorted(((box[2] - box[0]) / (bb[2] - bb[0]) + (box[3] - box[1]) / (bb[3] - bb[1])) / 2 for bb, box in pairs)
+    s = scales[len(scales) // 2]
+    xs, ys = sorted(box[0] - s * bb[0] for bb, box in pairs), sorted(box[1] - s * bb[1] for bb, box in pairs)
+    return s, xs[len(xs) // 2], ys[len(ys) // 2]
 
 
 def _fresh_box(place, bbox) -> list[float] | None:
@@ -434,6 +441,47 @@ def _fresh_box(place, bbox) -> list[float] | None:
         return None
     s, tx, ty = place
     return [s * bbox[0] + tx, s * bbox[1] + ty, s * bbox[2] + tx, s * bbox[3] + ty]
+
+
+RESIZED = 1.0      # pt: a person's resize the oracle holds a sync to
+SAME_SIZE = 0.5    # pt: a recreated box this close to the base's size is the converter's size again
+CARRIED_PLACE = 2.0  # pt: how close a carried corner must land (in the archive every element the source
+                     # moved and the report lists as applied stood within 0.3 pt of its corner plus that move)
+
+
+def _carried_to(place, base_el: dict, ours_el: dict, now: dict) -> list[float] | None:
+    """Where the corner of an element both sides moved belongs after a sync that carried the
+    person's edit (`sync.carried`): the person's corner plus the source's move of the element's IR
+    corner, in deck pt. Taken from the person's own box, so a text box's frame around its words
+    (wider and taller than the bbox) does not enter into it. None without `ours` or a placement."""
+    bb, ob = (base_el.get("fingerprint") or {}).get("bbox"), (ours_el.get("fingerprint") or {}).get("bbox")
+    if not place or not bb or not ob or not now.get("box"):
+        return None
+    s = place[0]
+    return [now["box"][0] + s * (ob[0] - bb[0]), now["box"][1] + s * (ob[1] - bb[1])]
+
+
+def _size(rb: dict) -> list[float]:
+    box = rb.get("box") or (0, 0, 0, 0)
+    return [round(box[2] - box[0], 2), round(box[3] - box[1], 2)]
+
+
+def _resize_dropped(was: dict, now: dict, made: list[dict], base_el: dict, ours_el: dict) -> bool:
+    """The person resized the element, the source left its size alone, and of the objects the sync
+    made for it none has the person's size while one is back at the converter's: the resize was
+    dropped wherever the element went (a place check alone misses it when the source moved the
+    element, as geometry mode `theirs` once did, layout-grown-box-moved). Only objects the sync made
+    count: a copy the person made keeps the element's tag and the converter's size. Without `ours`
+    nothing is said."""
+    bb, ob = (base_el.get("fingerprint") or {}).get("bbox"), (ours_el.get("fingerprint") or {}).get("bbox")
+    if not bb or not ob or any(abs((ob[i + 2] - ob[i]) - (bb[i + 2] - bb[i])) > 0.01 for i in (0, 1)):
+        return False
+    w, n = _size(was), _size(now)
+    if all(abs(x - y) <= RESIZED for x, y in zip(w, n)):
+        return False
+    sizes = [_size(rb) for rb in made]
+    return not any(all(abs(x - y) <= SAME_SIZE for x, y in zip(s, n)) for s in sizes) and \
+        any(all(abs(x - y) <= SAME_SIZE for x, y in zip(s, w)) for s in sizes)
 
 
 def geometry_findings(base: dict, before: dict, after: dict, rep: dict, ours: dict | None = None) -> list[dict]:
@@ -446,7 +494,13 @@ def geometry_findings(base: dict, before: dict, after: dict, rep: dict, ours: di
     rewritten element lands at the conversion's new box *plus* the step the person moved it by, and
     that can fall exactly on the base's old box by coincidence. With `ours` the oracle works that
     place out (`deck_placement`) and lets the element stand there; without it, such a round reads as
-    a revert."""
+    a revert.
+
+    A conflict on the element excuses it, except the geometry conflict `merge.GEOMETRY_CARRIED`: that
+    one says the person's move and size went on top of the source's move, so the element is held to
+    it - its corner where `_carried_to` says (`geometry_not_carried`; the deck's absolute place,
+    which geometry mode `theirs` used to write, is not it). A person's resize is judged apart from
+    the place (`_resize_dropped`)."""
     out = []
     place = deck_placement(base)
     ours_by_key = _ours_by_key(base, ours)
@@ -463,13 +517,32 @@ def geometry_findings(base: dict, before: dict, after: dict, rep: dict, ours: di
             if not main or was is None or now is None or not was.get("box") or same_box(was, now):
                 continue  # the person left it where it was
             objects = [a["objects"][o] for o in element_objects(skey, el["key"], el, a)]
+            keys = {el["key"], unit_key(el)}
+            ours_el = ours_by_key.get(skey, {}).get(el["key"]) or {}
+            # A conflict excuses the element, except the one that says the person's move and size were
+            # carried onto the source's new place (both moved it): that one promises them.
+            conflicts = _at(rep["conflicts"], skey, keys)
+            promised = [c for c in conflicts if c.get("field") == "geometry" and c.get("resolution") == merge.GEOMETRY_CARRIED]
+            if len(promised) < len(conflicts) or _at(rep["converged"], skey, keys):
+                continue
+            made = [a["objects"][o] for o in element_objects(skey, el["key"], el, a) if o not in bs["objects"]]
+            if made and _resize_dropped(was, now, made, el, ours_el):
+                out.append(finding("geometry_reverted", "undo",
+                                   f"back at the converter's size {_size(was)}, the person had made it {_size(now)}",
+                                   slide=skey, element=el["key"], object=main))
+                continue
+            to = _carried_to(place, el, ours_el, now)
+            if promised and objects and to is not None and \
+                    not any(max(abs(rb["box"][0] - to[0]), abs(rb["box"][1] - to[1])) <= CARRIED_PLACE
+                            for rb in objects if rb.get("box")):
+                out.append(finding("geometry_not_carried", "undo",
+                                   f"at {objects[0].get('box')}; the person's move on top of the source's puts its "
+                                   f"corner at {[round(v, 2) for v in to]}, as the report promises",
+                                   slide=skey, element=el["key"], object=main))
+                continue
             if not objects or any(same_box(now, rb) for rb in objects) or not any(same_box(was, rb) for rb in objects):
                 continue  # still where the person put it, or somewhere the source asked for
-            keys = {el["key"], unit_key(el)}
-            if _at(rep["conflicts"], skey, keys) or _at(rep["converged"], skey, keys):
-                continue
-            fresh = _fresh_box(place, ((ours_by_key.get(skey, {}).get(el["key"]) or {})
-                                       .get("fingerprint") or {}).get("bbox"))
+            fresh = _fresh_box(place, (ours_el.get("fingerprint") or {}).get("bbox"))
             if fresh is not None:
                 step = [n - w for n, w in zip(now["box"], was["box"])]
                 moved = [f + d for f, d in zip(fresh, step)]

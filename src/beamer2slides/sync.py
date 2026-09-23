@@ -831,6 +831,21 @@ def matrix_request(oid: str, m: list[float]) -> dict:
         "translateX": round(m[4] * EMU_PER_PT), "translateY": round(m[5] * EMU_PER_PT)}}}
 
 
+def carried(base_rb: dict, theirs_rb: dict, new_rb: dict) -> list[float]:
+    """The RELATIVE transform that puts the person's edit of a unit (base -> theirs: a move, a
+    resize) onto its recreation `new_rb`, carried along by the source's move of it (base -> new).
+
+    `theirs * base^-1` alone is a page-space step: right for a move, but a resize in it scales about
+    the page origin, so it would scale the source's move too. Taken about the unit's corner instead -
+    conjugated by the source's step `s` of that corner, `T(s) * d * T(-s)` - a move lands at the
+    source's new place plus the person's offset and a resize keeps the person's proportions of the
+    source's new box, from its new corner. When the source did not move the unit, `s` is 0 and this
+    is `d` itself."""
+    d = snapshot.compose(theirs_rb["transform"], snapshot.invert(base_rb["transform"]))
+    sx, sy = new_rb["box"][0] - base_rb["box"][0], new_rb["box"][1] - base_rb["box"][1]
+    return d[:4] + [d[4] + sx - (d[0] * sx + d[1] * sy), d[5] + sy - (d[2] * sx + d[3] * sy)]
+
+
 # ---------------------------------------------------------------- the sync
 
 class Sync:
@@ -1741,9 +1756,10 @@ class Sync:
                 i = index[u["ours_members"][0]]
                 refill = table_refill(bunits[u["key"]][0], slide["elements"][i], objects, self.scale, self.plan.fonts)
                 if refill:
-                    if "geometry" in (u.get("overrides") or {}):
-                        # The deck moved it: where it is now is what a recreation's geometry override
-                        # would give (merge: "delta" when the source left it, "theirs" when both moved).
+                    if "geometry" in (u.get("overrides") or {}) and "position" not in u.get("source", ()):
+                        # The deck moved it and the source did not: where it is now is what a
+                        # recreation's geometry override would give. When both moved it, the source's
+                        # move goes on top of the person's place, as `carried` does for a recreation.
                         refill["shift"] = (0.0, 0.0)
                     in_place[i] = {**refill, "table": True}
 
@@ -2339,10 +2355,7 @@ class Sync:
                     new_rb = n_read["objects"][top]
                     if not base_rb or not theirs_rb:
                         continue
-                    if ov["geometry"]["mode"] == "delta":
-                        d = snapshot.compose(theirs_rb["transform"], snapshot.invert(base_rb["transform"]))
-                    else:
-                        d = [1, 0, 0, 1, theirs_rb["box"][0] - new_rb["box"][0], theirs_rb["box"][1] - new_rb["box"][1]]
+                    d = carried(base_rb, theirs_rb, new_rb)  # (merge: mode "delta", also when both moved it)
                     if any(abs(x - y) > 1e-4 for x, y in zip(d, [1, 0, 0, 1, 0, 0])):
                         # A group carries its children, so one request on it moves the whole unit.
                         # Without one - the person took this unit's group apart, and a recreation
