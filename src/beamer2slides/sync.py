@@ -386,8 +386,9 @@ def mark_emitted(base: dict, entries: list[dict], deck: dict, pairs: dict, scale
     is cleared here). An old base needs nothing it lacks.
 
     What recreating the unit cannot write is not marked but returned, [{"slide", "element",
-    "fields"}]: "placeholder" (the element goes into another layout placeholder, or out of one:
-    the title page's subtitle is its biggest plain text, `emit.subtitle_element`) and "grouping"
+    "fields"}]: "placeholder" (the element goes into another layout placeholder, or out of one,
+    because the slide changes layout; the subtitle role moving between texts of a title page that
+    stays one is written, `context_changes`) and "grouping"
     (the block or rule groups it belongs to, `emit.block_groups` / `rule_groups`: a recreated unit
     goes back into its old group, `Sync.regroups`). `fast`: skip slides on which nothing changed
     (the tests turn it off to prove two emissions of the same slide compare equal)."""
@@ -420,13 +421,52 @@ def mark_emitted(base: dict, entries: list[dict], deck: dict, pairs: dict, scale
             oe, el = o["elements"][k], slide["elements"][k]
             be = base_by[oe["key"]]
             step = [(el["bbox"][q] - be["ir"]["bbox"][q]) * scale for q in (0, 1)]
-            marks, cannot = context_changes(before[oe["key"]], now[k], step, el["kind"])
+            marks, cannot = context_changes(before[oe["key"]], now[k], step, el["kind"],
+                                            same_layout=title_page == bool(slide.get("title_page")))
             for f in marks:
                 be["fields"] = {**be["fields"], f: "base"}
                 oe["fields"] = {**oe["fields"], f: "ours"}
             if cannot:
                 unwritten.append({"slide": o["key"], "element": oe["key"], "fields": sorted(cannot)})
     return unwritten
+
+
+UNWRITTEN_SAYS = {
+    "placeholder": "the new version puts {what} into another layout placeholder or out of one, because the "
+                   "slide changes layout; a sync cannot change a live slide's layout, so {it} stayed where "
+                   "{it_was}",
+    "grouping": "the new version groups {what} differently with the shapes around {them} (a beamer block or "
+                "rules {it} now lies on, or no longer does); a sync keeps the deck's groups, so {it} stayed "
+                "grouped as before",
+}
+
+
+def unwritten_warnings(unwritten: list[dict], ours: dict) -> list[str]:
+    """The report's words for `mark_emitted`'s changes a sync cannot write: one warning per slide and
+    kind, naming the elements by their words (a person does not know "text/body/1"). Nothing is lost
+    by them - the deck keeps what it has - but the deck no longer looks like a fresh conversion there,
+    and nothing else says so."""
+    slides = {s["key"]: s for s in ours.get("slides", [])}
+    by: dict[tuple, list[str]] = {}
+    for u in unwritten:
+        slide = slides.get(u["slide"]) or {}
+        el = next((e for e in slide.get("elements", []) if e["key"] == u["element"]), None)
+        words = " ".join(identity.plain_text(el["ir"]).split()) if el and el.get("ir") and el["ir"].get("kind") == "text" else ""
+        name = f"\"{words[:40]}{'...' if len(words) > 40 else ''}\"" if words else \
+            f"the {el['kind'] if el else 'element'} {u['element']}"
+        for f in u["fields"]:
+            by.setdefault((u["slide"], f), []).append(name)
+    out = []
+    for (key, field), names in by.items():
+        title = (slides.get(key) or {}).get("title")
+        one = len(names) == 1
+        what = names[0] if one else ", ".join(names[:-1]) + " and " + names[-1]
+        says = UNWRITTEN_SAYS.get(field, "the new version writes {what} differently in a way a sync cannot "
+                                         "write ({field}); {it} stayed as {it_was}")
+        out.append(f"slide {key}" + (f" ({title})" if title and title != key else "") + ": " +
+                   says.format(what=what, field=field, it="it" if one else "they", them="it" if one else "them",
+                               it_was="it was" if one else "they were"))
+    return out
 
 
 def emitted_elements(slide: dict, names: list[str], scale: float, fonts) -> list[dict]:
@@ -463,13 +503,23 @@ def emitted_elements(slide: dict, names: list[str], scale: float, fonts) -> list
     return out
 
 
-def context_changes(was: dict, now: dict, step: list[float], kind: str) -> tuple[set[str], set[str]]:
+def context_changes(was: dict, now: dict, step: list[float], kind: str,
+                    same_layout: bool = False) -> tuple[set[str], set[str]]:
     """(fields recreating the unit writes, fields it cannot) in which two `emitted_elements` entries
     of one element differ; `step`: slide pt the source moved the element by, which its requests
-    may differ by and still say the same."""
+    may differ by and still say the same.
+
+    A text that took the title page's subtitle role or lost it (`emit.subtitle_element`: the biggest
+    plain text below the title) is written by recreating it when the slide keeps its layout
+    (`same_layout`): `Sync.update_slide` hands the live SUBTITLE placeholder to the element that has
+    the role now and makes the other a box. Any other role change (the slide changing layout) is not."""
     marks, cannot = set(), set()
     if was["role"] != now["role"]:
-        cannot.add("placeholder")  # (and every request differs: a placeholder is transformed, a box created)
+        # (and every request differs: a placeholder is transformed, a box created)
+        if same_layout and {was["role"], now["role"]} <= {None, "subtitle"}:
+            marks.add("emitted")
+        else:
+            cannot.add("placeholder")
     elif not _close(was["requests"], now["requests"], [v * EMU_PER_PT for v in step]):
         marks.add("width" if kind == "text" else "emitted")
     if (was["box"] is None) != (now["box"] is None) or was["box"] is not None and \
@@ -1714,21 +1764,32 @@ class Sync:
                 main = base_el.get("main") if base_el else None
                 if main and main in objects and objects[main].get("placeholder"):
                     in_place[i] = {"id": main, "size": objects[main]["size"], "text": (objects[main].get("text") or "").strip()}
-        # A new title element (the source's title changed beyond recognition) goes into the
-        # placeholder of the title element it replaces.
-        from .emit import title_element
+        from .emit import subtitle_element, title_element
         title_idx = title_element(slide)
-        if title_idx is not None and title_idx not in in_place and \
-                any(title_idx == index[mk] for u in recreated for mk in u["ours_members"]):
+        sub_idx = subtitle_element(slide, title_idx) if title_idx is not None else None
+        # Only what emit writes into a placeholder goes into one: the title, and on the title page
+        # the subtitle (its biggest plain text, `emit.subtitle_element`). Anything else emit makes a
+        # box of, and a box made under a live placeholder's id is a createShape Slides refuses with
+        # the whole batch - which a reworded authors' line that a longer line below it took the
+        # subtitle role from used to be. It is made a box of its own; the placeholder goes to the
+        # element that has the role now (below), or out with the old unit.
+        for i in [i for i, v in in_place.items()
+                  if i != (title_idx if objects[v["id"]].get("placeholder") in ("TITLE", "CENTERED_TITLE") else
+                           sub_idx if objects[v["id"]].get("placeholder") == "SUBTITLE" else None)]:
+            del in_place[i]
+        # A new title (the source's title changed beyond recognition) or a text that took the
+        # subtitle role goes into the placeholder of the element it replaces, when that one goes.
+        for role, kinds in ((title_idx, ("TITLE", "CENTERED_TITLE")), (sub_idx, ("SUBTITLE",))):
+            if role is None or role in in_place or not any(role == index[mk] for u in recreated for mk in u["ours_members"]):
+                continue
             taken = {v["id"] for v in in_place.values()}
             for u in p["units"]:
                 if u["action"] not in ("delete", "recreate"):
                     continue
                 main = next((m.get("main") for m in bunits.get(u["key"], [])[:1]), None)
-                if main and main in objects and main not in taken and \
-                        objects[main].get("placeholder") in ("TITLE", "CENTERED_TITLE"):
-                    in_place[title_idx] = {"id": main, "size": objects[main]["size"],
-                                           "text": (objects[main].get("text") or "").strip()}
+                if main and main in objects and main not in taken and objects[main].get("placeholder") in kinds:
+                    in_place[role] = {"id": main, "size": objects[main]["size"],
+                                      "text": (objects[main].get("text") or "").strip()}
                     break
         # A table whose words alone changed is refilled where it is (`table_refill`) - but not one an
         # interrupted sync already rewrote: what the merge compares against is then the person's
@@ -2607,7 +2668,10 @@ def sync(pdf: Path, deck: str, out: Path | None = None, dry_run: bool = False, o
         s.await_deletes()   # (a run that ends badly still owns the file it sent away)
         raise
     report = result["plan"]["report"]
-    report["warnings"] += s.warnings + warnings
+    # (a slide the deck deleted or the source dropped is nobody's business any more)
+    updated = {p["key"] for p in result["plan"]["slides"] if p["action"] == "update"}
+    report["warnings"] += s.warnings + warnings + unwritten_warnings(
+        [u for u in ours.get("context_unwritten") or [] if u["slide"] in updated], ours)
     report["converged"] += [{**r, "field": "image", "how": "the same picture, written differently"} for r in refreshed]
     info = {"pdf": str(pdf), "presentationId": pid, "url": f"https://docs.google.com/presentation/d/{pid}/edit",
             "dry_run": dry_run, "base_from": where, "generation": base.get("generation", 0), "overlays": overlays,

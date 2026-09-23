@@ -974,6 +974,28 @@ def scenario_layout_retheme(run: Run):
     lay.sanity("retheme", exps)
 
 
+@scenario
+def scenario_subtitle_role(run: Run):
+    """The source adds a long line under the title page, which takes the subtitle placeholder from
+    the authors (emit.subtitle_element picks the longest text below the title). The authors, which
+    the person recoloured, move out of the placeholder into a box of their own - keeping the
+    colour - and the new line is written into the placeholder, never created under its id."""
+    run.convert(build("v1"))
+    exps = run.edit(E("recolour", slide=TITLE, word="Alice", color="#aa0000", context="Alice Author"))
+    pdf = build("subtitle")
+    report = run.sync(pdf)
+    model = run.deck.read()
+    s = model.one(TITLE)
+    kind = lambda e: e.obj.get("shape", {}).get("placeholder", {}).get("type") if e.kind == "shape" else None
+    subtitles = [e for e in s.elements if kind(e) == "SUBTITLE"]
+    if len(subtitles) != 1 or "how one sync reconciles all three" not in subtitles[0].text:
+        run.problems.append(f"{TITLE}: subtitle placeholders {[e.text[:60] for e in subtitles]}, expected the new line")
+    authors = [e for e in s.elements if "Alice Author" in e.text]
+    if len(authors) != 1 or kind(authors[0]):
+        run.problems.append(f"{TITLE}: the authors are in {[kind(e) or 'a box' for e in authors]}, expected one box of their own")
+    run.check("subtitle", pdf, report, exps)
+
+
 # Confirmed on Google's renderer (docs/project-notes.md "Layout probes"); each goes when sync handles it.
 XFAIL.update({
     "layout-grown-box-moved": "geometry mode 'theirs' (both moved it) writes the person's position and not their "
