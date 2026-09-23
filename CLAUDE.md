@@ -137,6 +137,11 @@ Debugging classification locally: `debug/slide-NNN.png` (element boxes over the 
   move and size on top of the source's new place (`sync.carried`, geometry mode `delta` always); a
   reported conflict (`merge.GEOMETRY_CARRIED`), held by the loss oracle (`geometry_not_carried`).
   An absolute "deck position kept" let the source's reflow run into the person's box.
+- **Theme sync** (`theme_sync.py`): `base["theme"]` records what convert wrote on the master and
+  layouts (fill, decoration pictures, placeholder styles); sync merges them three ways, the theme
+  batch first. Slides drops a run property equal to the inherited one, so old placeholder styles
+  are pinned onto converted slides *after* the layout write (`inherited_pins`). An old base leaves
+  layouts alone with a warning. Group or placeholder-role changes sync can't write are warnings.
 - **Frame labels** (`\begin{frame}[label=x]`) are the only slide identity that survives compiling.
   A label written twice reaches the PDF as *no* label (hyperref keeps the first). `label` writes
   missing labels; it never renames or resolves duplicates. When a label moved between frames,

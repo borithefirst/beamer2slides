@@ -386,8 +386,9 @@ def mark_emitted(base: dict, entries: list[dict], deck: dict, pairs: dict, scale
     is cleared here). An old base needs nothing it lacks.
 
     What recreating the unit cannot write is not marked but returned, [{"slide", "element",
-    "fields"}]: "placeholder" (the element goes into another layout placeholder, or out of one:
-    the title page's subtitle is its biggest plain text, `emit.subtitle_element`) and "grouping"
+    "fields"}]: "placeholder" (the element goes into another layout placeholder, or out of one,
+    because the slide changes layout; the subtitle role moving between texts of a title page that
+    stays one is written, `context_changes`) and "grouping"
     (the block or rule groups it belongs to, `emit.block_groups` / `rule_groups`: a recreated unit
     goes back into its old group, `Sync.regroups`). `fast`: skip slides on which nothing changed
     (the tests turn it off to prove two emissions of the same slide compare equal)."""
@@ -420,13 +421,52 @@ def mark_emitted(base: dict, entries: list[dict], deck: dict, pairs: dict, scale
             oe, el = o["elements"][k], slide["elements"][k]
             be = base_by[oe["key"]]
             step = [(el["bbox"][q] - be["ir"]["bbox"][q]) * scale for q in (0, 1)]
-            marks, cannot = context_changes(before[oe["key"]], now[k], step, el["kind"])
+            marks, cannot = context_changes(before[oe["key"]], now[k], step, el["kind"],
+                                            same_layout=title_page == bool(slide.get("title_page")))
             for f in marks:
                 be["fields"] = {**be["fields"], f: "base"}
                 oe["fields"] = {**oe["fields"], f: "ours"}
             if cannot:
                 unwritten.append({"slide": o["key"], "element": oe["key"], "fields": sorted(cannot)})
     return unwritten
+
+
+UNWRITTEN_SAYS = {
+    "placeholder": "the new version puts {what} into another layout placeholder or out of one, because the "
+                   "slide changes layout; a sync cannot change a live slide's layout, so {it} stayed where "
+                   "{it_was}",
+    "grouping": "the new version groups {what} differently with the shapes around {them} (a beamer block or "
+                "rules {it} now lies on, or no longer does); a sync keeps the deck's groups, so {it} stayed "
+                "grouped as before",
+}
+
+
+def unwritten_warnings(unwritten: list[dict], ours: dict) -> list[str]:
+    """The report's words for `mark_emitted`'s changes a sync cannot write: one warning per slide and
+    kind, naming the elements by their words (a person does not know "text/body/1"). Nothing is lost
+    by them - the deck keeps what it has - but the deck no longer looks like a fresh conversion there,
+    and nothing else says so."""
+    slides = {s["key"]: s for s in ours.get("slides", [])}
+    by: dict[tuple, list[str]] = {}
+    for u in unwritten:
+        slide = slides.get(u["slide"]) or {}
+        el = next((e for e in slide.get("elements", []) if e["key"] == u["element"]), None)
+        words = " ".join(identity.plain_text(el["ir"]).split()) if el and el.get("ir") and el["ir"].get("kind") == "text" else ""
+        name = f"\"{words[:40]}{'...' if len(words) > 40 else ''}\"" if words else \
+            f"the {el['kind'] if el else 'element'} {u['element']}"
+        for f in u["fields"]:
+            by.setdefault((u["slide"], f), []).append(name)
+    out = []
+    for (key, field), names in by.items():
+        title = (slides.get(key) or {}).get("title")
+        one = len(names) == 1
+        what = names[0] if one else ", ".join(names[:-1]) + " and " + names[-1]
+        says = UNWRITTEN_SAYS.get(field, "the new version writes {what} differently in a way a sync cannot "
+                                         "write ({field}); {it} stayed as {it_was}")
+        out.append(f"slide {key}" + (f" ({title})" if title and title != key else "") + ": " +
+                   says.format(what=what, field=field, it="it" if one else "they", them="it" if one else "them",
+                               it_was="it was" if one else "they were"))
+    return out
 
 
 def emitted_elements(slide: dict, names: list[str], scale: float, fonts) -> list[dict]:
@@ -463,13 +503,23 @@ def emitted_elements(slide: dict, names: list[str], scale: float, fonts) -> list
     return out
 
 
-def context_changes(was: dict, now: dict, step: list[float], kind: str) -> tuple[set[str], set[str]]:
+def context_changes(was: dict, now: dict, step: list[float], kind: str,
+                    same_layout: bool = False) -> tuple[set[str], set[str]]:
     """(fields recreating the unit writes, fields it cannot) in which two `emitted_elements` entries
     of one element differ; `step`: slide pt the source moved the element by, which its requests
-    may differ by and still say the same."""
+    may differ by and still say the same.
+
+    A text that took the title page's subtitle role or lost it (`emit.subtitle_element`: the biggest
+    plain text below the title) is written by recreating it when the slide keeps its layout
+    (`same_layout`): `Sync.update_slide` hands the live SUBTITLE placeholder to the element that has
+    the role now and makes the other a box. Any other role change (the slide changing layout) is not."""
     marks, cannot = set(), set()
     if was["role"] != now["role"]:
-        cannot.add("placeholder")  # (and every request differs: a placeholder is transformed, a box created)
+        # (and every request differs: a placeholder is transformed, a box created)
+        if same_layout and {was["role"], now["role"]} <= {None, "subtitle"}:
+            marks.add("emitted")
+        else:
+            cannot.add("placeholder")
     elif not _close(was["requests"], now["requests"], [v * EMU_PER_PT for v in step]):
         marks.add("width" if kind == "text" else "emitted")
     if (was["box"] is None) != (now["box"] is None) or was["box"] is not None and \
@@ -850,6 +900,7 @@ def carried(base_rb: dict, theirs_rb: dict, new_rb: dict) -> list[float]:
 
 class Sync:
     way_back = None   # the recovery note being made meanwhile; None where there is none to collect
+    theme_side = theme_plan = raw_after = None   # theme_sync's part (set in __init__ / plan_theme)
 
     def __init__(self, slides, drive, pid: str, base: dict, ours: dict, out: Path, dry_run: bool = False,
                  measure: bool = True, trust_generation: bool = True, check_plan=None,
@@ -880,6 +931,9 @@ class Sync:
         self.first_read: dict | None = None  # a `presentations.get` a caller made while we planned
         self.deleting: list = []        # staging decks on their way out (drop_staging)
         self.way_back = way_back        # made meanwhile, collected before the first write (guard.WayBack)
+        self.theme_side: dict | None = None   # what a fresh conversion writes on the master and layouts (theme_sync)
+        self.theme_plan: dict | None = None   # what this sync writes there (None: nothing, an old base)
+        self.raw_after: dict | None = None    # the deck as `finish` last read it
 
     def before_write(self) -> None:
         """Collect the way back (`guard.WayBack`): the deck's revision and the .pptx backup are
@@ -985,6 +1039,7 @@ class Sync:
                                      follow_labels=self.follow_labels, take_source=self.take_source)
             if self.check_plan is not None:
                 self.check_plan(mplan, theirs)  # (adopt_sync: an adopted deck this may not be written to)
+            self.plan_theme(mplan, pres)
             work = self.prepare(mplan, pres, theirs)
             result = {"attempts": attempt, "plan": mplan, "work": work, "theirs": theirs}
             if self.dry_run or not work["writes"]:
@@ -1163,6 +1218,10 @@ class Sync:
             "revisionId": theirs.get("revisionId"), "started": time.strftime("%Y-%m-%dT%H:%M:%S"),
             "source": snapshot.source_info(self.ours["source"]), "objects": objects, "slides": slides,
             "in_place": self.in_place_readback, "staging": getattr(self, "staging", None)}
+        if self.theme_plan and self.theme_plan["pending"]:
+            # the layout placeholder styles about to be written: a run that dies after them finds
+            # its own writes there next time, not a person's (theme_sync.plan)
+            self.base["pending"]["theme"] = self.theme_plan["pending"]
 
     def store_pending(self, drive) -> None:
         """The marker to disk and to Drive. `staging` is whatever this run knows of its staging deck
@@ -1276,6 +1335,42 @@ class Sync:
             return best
         return adopt
 
+    # ---- the master and the layouts (theme_sync)
+
+    def plan_theme(self, mplan: dict, pres: dict) -> None:
+        """The theme's part of the merge, planned beside the slides' and reported with them. A
+        deck `adopt` took over has a theme of the person's own and is left alone; a base from
+        before theme sync records nothing of the layouts, so they are left alone too (said so when
+        the source's theme changed)."""
+        from . import theme_sync
+        from .adopt_sync import ORIGIN
+
+        self.theme_plan = None
+        if self.base.get("origin") == ORIGIN:
+            return
+        if self.theme_side is None:
+            self.theme_side = theme_sync.ours_side(self.ours)
+        report = mplan["report"]
+        if not self.base.get("theme"):
+            why = theme_sync.old_base_warning(self.base, self.theme_side)
+            if why:
+                report["warnings"].append(why)
+            return
+        tp = theme_sync.plan(self.base, self.theme_side, self.ours, pres, self.tok, self.picture_url,
+                             lambda page: f"b2s_th_{h6(page)}_{self.tok}")
+        self.theme_plan = tp
+        report["applied"] += tp["applied"]
+        report["conflicts"] += tp["conflicts"]
+        report["warnings"] += tp["warnings"]
+
+    def master_key(self) -> str | None:
+        """The background a slide shows by inheriting the master: the new source's shared one once
+        the base records the theme (this sync writes it there, or the person's own stays, which a
+        slide inheriting it shows either way), else what convert put there."""
+        if self.base.get("theme") and self.theme_side is not None:
+            return self.theme_side["shared"]
+        return self.base.get("master_background")
+
     def prepare(self, mplan: dict, pres: dict, theirs: dict) -> dict:
         """What to write, per slide: units to (re)create with their requests' inputs, deletions,
         moves, backgrounds, notes; pictures needed from the staging deck."""
@@ -1289,9 +1384,12 @@ class Sync:
             for page in range(kept[-1][0] + 1):
                 page_slide[page] = next(sid for pg, sid in kept if pg >= page)
         self.plan.page_slide = page_slide
-        master = self.base.get("master_background")
+        master = self.master_key()
         work = {"slides": [], "pictures": {}, "new_ids": new_ids, "page_slide": page_slide,
                 "writes": merge.has_writes(mplan, [s["objectId"] for s in theirs["slides"]])}
+        if self.theme_plan:
+            work["pictures"].update(self.theme_plan["stage"])
+            work["writes"] = work["writes"] or bool(self.theme_plan["requests"] or self.theme_plan["cleanup"])
         for p in mplan["slides"]:
             w = {"plan": p, "units": []}
             if p["action"] == "create":
@@ -1486,6 +1584,13 @@ class Sync:
         layouts = {l.get("layoutProperties", {}).get("name"): l for l in pres.get("layouts", [])}
         reqs: list[dict] = []
         doomed_slides: list[str] = []
+        if self.theme_plan:
+            # The master and the layouts first, in the same chain of batches: a layout write and a
+            # slide batch in flight together can undo each other's placeholder boxes (the last
+            # commit wins), and these go out one after another.
+            if self.theme_plan["requests"]:
+                reqs += [*self.theme_plan["requests"], BREAK]
+            self.cleanup_ids = list(dict.fromkeys([*getattr(self, "cleanup_ids", ()), *self.theme_plan["cleanup"]]))
         for w in work["slides"]:
             p = w["plan"]
             if p["action"] == "delete":
@@ -1648,7 +1753,19 @@ class Sync:
         converted slides with that background - found by object id, since the copies' names in the
         deck are the .pptx ones ("Title Only (no theme)"), not the b2s names."""
         key = snapshot.background_key(slide, self.ours["out"])
-        if key != self.base.get("master_background"):
+        served = (self.theme_plan or {}).get("page_group") or {}
+        if served and self.theme_side:
+            # The layout that serves the decoration a fresh conversion gives this slide now
+            # (theme_sync.plan), of the kind it needs: the plain one first, then its copies.
+            want = self.theme_side["groups"].get(slide["page"])
+            kinds = {b.get("layoutObjectId"): b.get("layout") for b in self.base["slides"]}
+            plain = layouts.get(layout_name)
+            if plain is not None and served.get(plain["objectId"]) == want:
+                return plain
+            for l in pres.get("layouts", []):
+                if served.get(l["objectId"]) == want and kinds.get(l["objectId"]) == layout_name:
+                    return l
+        if key != self.master_key():
             by_id = {l["objectId"]: l for l in pres.get("layouts", [])}
             same = [b for b in self.base["slides"] if b.get("background") == key
                     and b.get("layout") == layout_name and b.get("layoutObjectId") in by_id]
@@ -1729,21 +1846,32 @@ class Sync:
                 main = base_el.get("main") if base_el else None
                 if main and main in objects and objects[main].get("placeholder"):
                     in_place[i] = {"id": main, "size": objects[main]["size"], "text": (objects[main].get("text") or "").strip()}
-        # A new title element (the source's title changed beyond recognition) goes into the
-        # placeholder of the title element it replaces.
-        from .emit import title_element
+        from .emit import subtitle_element, title_element
         title_idx = title_element(slide)
-        if title_idx is not None and title_idx not in in_place and \
-                any(title_idx == index[mk] for u in recreated for mk in u["ours_members"]):
+        sub_idx = subtitle_element(slide, title_idx) if title_idx is not None else None
+        # Only what emit writes into a placeholder goes into one: the title, and on the title page
+        # the subtitle (its biggest plain text, `emit.subtitle_element`). Anything else emit makes a
+        # box of, and a box made under a live placeholder's id is a createShape Slides refuses with
+        # the whole batch - which a reworded authors' line that a longer line below it took the
+        # subtitle role from used to be. It is made a box of its own; the placeholder goes to the
+        # element that has the role now (below), or out with the old unit.
+        for i in [i for i, v in in_place.items()
+                  if i != (title_idx if objects[v["id"]].get("placeholder") in ("TITLE", "CENTERED_TITLE") else
+                           sub_idx if objects[v["id"]].get("placeholder") == "SUBTITLE" else None)]:
+            del in_place[i]
+        # A new title (the source's title changed beyond recognition) or a text that took the
+        # subtitle role goes into the placeholder of the element it replaces, when that one goes.
+        for role, kinds in ((title_idx, ("TITLE", "CENTERED_TITLE")), (sub_idx, ("SUBTITLE",))):
+            if role is None or role in in_place or not any(role == index[mk] for u in recreated for mk in u["ours_members"]):
+                continue
             taken = {v["id"] for v in in_place.values()}
             for u in p["units"]:
                 if u["action"] not in ("delete", "recreate"):
                     continue
                 main = next((m.get("main") for m in bunits.get(u["key"], [])[:1]), None)
-                if main and main in objects and main not in taken and \
-                        objects[main].get("placeholder") in ("TITLE", "CENTERED_TITLE"):
-                    in_place[title_idx] = {"id": main, "size": objects[main]["size"],
-                                           "text": (objects[main].get("text") or "").strip()}
+                if main and main in objects and main not in taken and objects[main].get("placeholder") in kinds:
+                    in_place[role] = {"id": main, "size": objects[main]["size"],
+                                      "text": (objects[main].get("text") or "").strip()}
                     break
         # A table whose words alone changed is refilled where it is (`table_refill`) - but not one an
         # interrupted sync already rewrote: what the merge compares against is then the person's
@@ -1934,10 +2062,20 @@ class Sync:
         return reqs
 
     def background_requests(self, sid: str, key: str, slide: dict, pres: dict, created: bool = False) -> list[dict]:
-        master = self.base.get("master_background")
+        master = self.master_key()
         if key == master:
             if created:
                 return []  # emit leaves these slides inheriting the master, and a new slide already does
+            if self.base.get("theme"):
+                # The master may be getting a new background in this very sync (theme_sync), so the
+                # slide goes back to inheriting it rather than copying today's. A layout page refuses
+                # INHERIT; a slide takes it, named by `propertyState` alone (tools/probe: the whole
+                # `pageBackgroundFill` as the field is refused).
+                page = next((s for s in pres.get("slides", []) if s["objectId"] == sid), None)
+                if page is not None and snapshot.background(page) == {"state": "INHERIT"}:
+                    return []
+                return [{"updatePageProperties": {"objectId": sid, "fields": "pageBackgroundFill.propertyState",
+                                                  "pageProperties": {"pageBackgroundFill": {"propertyState": "INHERIT"}}}}]
             fill = pres["masters"][0].get("pageProperties", {}).get("pageBackgroundFill", {})
             if "stretchedPictureFill" in fill:
                 return [{"updatePageProperties": {"objectId": sid, "fields": "pageBackgroundFill.stretchedPictureFill.contentUrl",
@@ -1979,6 +2117,7 @@ class Sync:
             raw = self.read()
             now = snapshot.read_presentation(raw)
         self.warn_about_folded_hiders(work, now)
+        self.raw_after = raw   # (the layouts and the master as written: theme_sync.new_record)
         # read-back of objects as the converter created them, with the new pictures' signatures
         created = {x for w in work["slides"] for oids in (w.get("objects") or {}).values() for x in oids}
         repainted = {w.get("sid") for w in work["slides"] if w["plan"]["action"] == "create" or w["plan"].get("background")}
@@ -2428,8 +2567,31 @@ class Sync:
             entries[sid] = entry
         slides = [entries.pop(sid) for sid in base_order(mplan, by_plan, [s["objectId"] for s in self.created["slides"]])
                   if sid in entries] + list(entries.values())
-        return {**self.base, "generation": self.base.get("generation", 0) + 1, "revisionId": self.final_revision,
-                "source": snapshot.source_info(self.ours["source"]), "slides": slides}
+        new = {**self.base, "generation": self.base.get("generation", 0) + 1, "revisionId": self.final_revision,
+               "source": snapshot.source_info(self.ours["source"]), "slides": slides}
+        pinned = set((self.theme_plan or {}).get("pinned") or ())
+        if pinned:
+            # The style theme_sync pinned onto placeholders (`inherited_pins`) looks the same and is
+            # converter output: where the person had not restyled the object, the base takes it, or
+            # the next sync reads the pins as the person's style edit.
+            keys = ("text_styles", "paragraph_styles", "run_spans", "text_style_hash")
+            pre = {oid: o for s in theirs["slides"] for oid, o in s.get("objects", {}).items() if oid in pinned}
+            post = {oid: o for s in self.created["slides"] for oid, o in s.get("objects", {}).items() if oid in pinned}
+            for entry in slides:
+                elements = list(entry.get("elements", []))
+                for i, el in enumerate(elements):   # (copies: a kept element is the old base's own dict)
+                    rbs = el.get("readback") or {}
+                    for oid in pinned & set(rbs):
+                        if oid in pre and oid in post and all(rbs[oid].get(k) == pre[oid].get(k) for k in keys):
+                            rbs = {**rbs, oid: {**rbs[oid], **{k: post[oid][k] for k in keys if k in post[oid]}}}
+                            elements[i] = {**el, "readback": rbs}
+                entry["elements"] = elements
+        if self.base.get("theme") and self.theme_side is not None:
+            from . import theme_sync
+            new["master_background"] = self.master_key()
+            new["theme"] = theme_sync.new_record(self.base["theme"], self.theme_side,
+                                                 (self.theme_plan or {}).get("written") or {}, self.raw_after)
+        return new
 
     def _element(self, e: dict, oids: list[str], read: dict | None) -> dict:
         objects = (read or {}).get("objects", {})
@@ -2620,7 +2782,10 @@ def sync(pdf: Path, deck: str, out: Path | None = None, dry_run: bool = False, o
         s.await_deletes()   # (a run that ends badly still owns the file it sent away)
         raise
     report = result["plan"]["report"]
-    report["warnings"] += s.warnings + warnings
+    # (a slide the deck deleted or the source dropped is nobody's business any more)
+    updated = {p["key"] for p in result["plan"]["slides"] if p["action"] == "update"}
+    report["warnings"] += s.warnings + warnings + unwritten_warnings(
+        [u for u in ours.get("context_unwritten") or [] if u["slide"] in updated], ours)
     report["converged"] += [{**r, "field": "image", "how": "the same picture, written differently"} for r in refreshed]
     info = {"pdf": str(pdf), "presentationId": pid, "url": f"https://docs.google.com/presentation/d/{pid}/edit",
             "dry_run": dry_run, "base_from": where, "generation": base.get("generation", 0), "overlays": overlays,

@@ -42,6 +42,7 @@ FLAGS = {
     "probereword": "reword the paragraph of Room to grow",
     "probepush": "push each probe frame's content down (a line added on top; Room to grow: vertical space)",
     "retheme": "a different frame title bar (larger title font, another colour)",
+    "subtitle": "add a long line under the title page, which takes the subtitle placeholder from the authors",
 }
 PROBE_EDITS = ("probereword", "probepush")  # (no variant of their own: they edit the probe frames)
 MIXED = ["reword", "addbullet", "formula", "figure", "addframe", "reorder", "tablecell", "notes"]
@@ -63,6 +64,7 @@ VARIANTS = {"v1": [], **{f: [f] for f in FLAGS if f not in PROBE_EDITS}, "mixed"
             "probes-push": ["probes", "probereword", "probepush"]}
 
 MOTIVATION = {"contains": "Later the source changes again"}  # (no scenario edits these words)
+TITLE_PAGE = {"title": "Keeping Slides and Source in Sync"}
 CHECKS = {
     "reword": [{"check": "text", "slide": MOTIVATION, "text": "by an AI assistant and converted once", "count": 1},
                {"check": "text", "slide": MOTIVATION, "text": "by an author and converted once", "count": 0}],
@@ -104,6 +106,8 @@ CHECKS = {
     "probepush": [{"check": "text", "slide": {"title": "Two boxes"}, "text": "The source adds this line above both boxes.",
                    "count": 1}],
     "retheme": [],
+    "subtitle": [{"check": "text", "slide": TITLE_PAGE, "text": "how one sync reconciles all three", "count": 1},
+                 {"check": "text", "slide": TITLE_PAGE, "text": "University of Examples", "count": 1}],
 }
 
 
@@ -137,6 +141,8 @@ INTENDED = {  # classification_diff(v1, variant) items per flag
     "probereword": [],
     "probepush": [],
     "retheme": [],
+    "subtitle": ["Keeping Slides and Source in Sync: text+ Slides, source and base: what each one says, and how one "
+                 "sync reconciles all three"],
 }
 PROBE_INTENDED = {  # classification_diff(probes, variant) items per probe edit
     "probereword": ["Room to grow: text- The person writes a longer version of this paragraph than the converter "
