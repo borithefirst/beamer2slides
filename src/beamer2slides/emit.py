@@ -865,16 +865,62 @@ def table_line_spacing(pitch: float, z: float) -> float:
 
 
 TABLE_CELL_PAD = 7.2  # cell padding left and right
+# Advance widths (em) of text characters on Slides' own renderer, per substitute font and
+# style (tools/probe_advances.py). Slides' Lato is not the Lato on google/fonts (its space is
+# 0.19 em, its slash 0.31), so these are measured, not read out of a font file.
+ADVANCES = json.loads((CALIBRATION_DIR / "advances.json").read_text(encoding="utf-8"))["fonts"]
+UNMEASURED_ADVANCE_EM = 0.6  # a character the probe did not measure: as wide as the widest digits
+SCRIPT_SIZE = 2 / 3          # super- and subscripts in Slides (not measured; errs wide)
+WRAP_MARGIN = 1.0            # Slides pt kept free in a cell so kerning or rounding cannot wrap it
+SMALL_CAPS_SIZE = 0.8        # Slides draws a small capital at about 80% of a capital (not measured)
 
 
-def fit_columns(bounds: list[float], cols: list[dict], scale: float) -> list[float]:
+def slides_width(runs: list[dict], scale: float, fonts: "FontMapper") -> float | None:
+    """Advance width (Slides pt) of one line of these runs as Slides sets them, or None when a
+    run is in a font the probe did not measure (a Google font the PDF itself uses).
+
+    The calibrated size factors make a *sentence* as wide in Slides as in the PDF; a number is
+    not a sentence - Lato's digits are tabular at 0.58 em where Computer Modern's are 0.5 - so a
+    number column comes out ~14% wider than the PDF's, more than a column's slack."""
+    total = 0.0
+    for run in runs:
+        family, size = fonts(run, scale)
+        style = {(False, False): "regular", (True, False): "bold", (False, True): "italic",
+                 (True, True): "bold_italic"}[(bool(run["bold"]), bool(run["italic"]))]
+        if family == FONT_FOR_FAMILY["mono"]:
+            table = {}
+            unmeasured = ROBOTO_MONO_ADVANCE_EM
+        elif family in ADVANCES:
+            table, unmeasured = ADVANCES[family][style], UNMEASURED_ADVANCE_EM
+        else:
+            return None
+        if run.get("script"):
+            size *= SCRIPT_SIZE
+        for ch in run["text"]:
+            if run.get("smallcaps") and ch.islower():
+                total += table.get(ch.upper(), unmeasured) * size * SMALL_CAPS_SIZE
+            else:
+                total += table.get(ch, unmeasured) * size
+    return total
+
+
+def fit_columns(bounds: list[float], cols: list[dict], scale: float, need: list[float | None] | None = None) -> list[float]:
     """Column boundaries (PDF pt) moved just enough that every column's text fits inside the
-    Slides cell padding, with a little room for the substitute font. Tables typeset with
-    @{} have text touching the frame, which would otherwise wrap in Slides."""
+    Slides cell padding, with room for the substitute font. Tables typeset with @{} have text
+    touching the frame, which would otherwise wrap in Slides.
+
+    need[i] is the width (PDF pt) column i's widest one-column cell takes in Slides
+    (slides_width), when it is known. A cell that wraps in Slides doubles its row and pushes the
+    table down over whatever stands under it - a caption - so where the PDF left less room
+    between two columns than their text needs, the table grows sideways instead: the columns
+    after move right."""
     pad = TABLE_CELL_PAD / scale
     # Text grows away from its alignment edge: room on the right of left-aligned columns, on
     # the left of right-aligned ones, half on each side of centred ones.
-    room = [0.08 * (c["x1"] - c["x0"]) + 1 / scale for c in cols]
+    width = [c["x1"] - c["x0"] for c in cols]
+    need = need or [None] * len(cols)
+    room = [max(0.08 * w + 1 / scale, (n - w + (1 + WRAP_MARGIN) / scale) if n is not None else 0.0)
+            for w, n in zip(width, need)]
     right = [r if c["align"] == "left" else r / 2 if c["align"] == "center" else 0.0 for c, r in zip(cols, room)]
     left = [r if c["align"] == "right" else r / 2 if c["align"] == "center" else 0.0 for c, r in zip(cols, room)]
     out = list(bounds)
@@ -883,6 +929,13 @@ def fit_columns(bounds: list[float], cols: list[dict], scale: float) -> list[flo
     for i in range(1, len(cols)):
         lo, hi = cols[i - 1]["x1"] + pad + right[i - 1], cols[i]["x0"] - pad - left[i]
         out[i] = min(max(out[i], lo), hi) if lo <= hi else (lo + hi) / 2
+    # Crowded columns: a column narrower than its text, its room and both paddings pushes every
+    # boundary after it along (table_requests then caps the cell's alignment indent).
+    for i in range(len(cols)):
+        least = width[i] + room[i] + 2 * pad
+        if out[i + 1] - out[i] < least:
+            shift = least - (out[i + 1] - out[i])
+            out[i + 1:] = [x + shift for x in out[i + 1:]]
     return out
 
 
@@ -937,7 +990,22 @@ def table_requests(el: dict, slide_id: str, object_id: str, scale: float, fonts:
     cols = el["columns"]
     fx0, _, fx1, _ = el["frame"]
     bounds = el.get("bounds") or [fx0] + [(a["x1"] + b["x0"]) / 2 for a, b in zip(cols, cols[1:])] + [fx1]
-    bounds = fit_columns(bounds, cols, scale)
+    spanned = {(m["row"], m["col"]) for m in el.get("merges", []) if m["cols"] > 1}
+    cell_width = {(r, c): slides_width(runs, scale, fonts)
+                  for r, row in enumerate(el["cells"]) for c, runs in enumerate(row) if runs}
+    need: list[float | None] = []
+    for c in range(len(cols)):
+        ws = [w for (r, cc), w in cell_width.items() if cc == c and (r, c) not in spanned]
+        need.append(None if not ws or None in ws else max(ws) / scale)
+    bounds = fit_columns(bounds, cols, scale, need)
+    # A cell spanning columns wraps as readily as one that does not: the columns it spans grow.
+    for m in el.get("merges", []):
+        w = cell_width.get((m["row"], m["col"]))
+        end = m["col"] + m["cols"]
+        if m["cols"] > 1 and w is not None:
+            short = (w + 2 * TABLE_CELL_PAD + 1 + WRAP_MARGIN) / scale - (bounds[end] - bounds[m["col"]])
+            if short > 0:
+                bounds[end:] = [x + short for x in bounds[end:]]
     widths = [max(TABLE_MIN_COLUMN_PT, (b - a) * scale) for a, b in zip(bounds, bounds[1:])]
     first_run = next((r for row in el["cells"] for cell in row for r in cell), None)
     z = fonts(first_run, scale)[1] if first_run else el["size"] * scale
@@ -1043,6 +1111,11 @@ def table_requests(el: dict, slide_id: str, object_id: str, scale: float, fonts:
             right_pad = max(0.0, (bounds[c + 1] - col["x1"]) * scale - PAD_X) if align == "right" else 0.0
             if (r, c) in merged and merged[(r, c)]["cols"] > 1:
                 align, left_pad, right_pad = merged[(r, c)]["align"], 0.0, 0.0
+            # The indent puts the text where the PDF has it, but never so far that the cell's
+            # text no longer fits on one line: a wrapped cell doubles its row.
+            if cell_width.get((r, c)) is not None and (r, c) not in merged:
+                spare = widths[c] - 2 * TABLE_CELL_PAD - WRAP_MARGIN - cell_width[(r, c)]
+                left_pad, right_pad = min(left_pad, max(0.0, spare)), min(right_pad, max(0.0, spare))
             # A cell that reads right to left starts at its right edge, so its alignment and
             # its two indents are mirrored (the text element's rule, one cell wide).
             rtl = bidi.reads_rtl(text)

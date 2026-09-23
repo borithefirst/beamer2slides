@@ -32,4 +32,29 @@
   \end{tabular}
 \end{frame}
 
+% Columns set closer than a word space apart: each row's cells read as one phrase at first.
+\begin{frame}{Tight columns}
+  \centering
+  \begin{tabular}{@{}l@{\hspace{4pt}}l@{\hspace{4pt}}l@{}}
+    \toprule
+    Monitor & Workstation & Mainframe \\
+    Mouse & Webcam & Microwave \\
+    \bottomrule
+  \end{tabular}
+\end{frame}
+
+% A header centred over two equal columns: its word space sits on the column gap.
+\begin{frame}{Spanning header}
+  \centering
+  \begin{tabular}{lcc}
+    \toprule
+    & \multicolumn{2}{c}{Test results} \\
+    Method & 00000 & 00000 \\
+    \midrule
+    Baseline & 71.2 & 3.1 \\
+    Ours & 89.4 & 2.7 \\
+    \bottomrule
+  \end{tabular}
+\end{frame}
+
 \end{document}

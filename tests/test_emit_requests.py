@@ -877,6 +877,62 @@ def hebrew_table() -> dict:
             "row_baselines": [60.0], "row_heights": [20.0], "rules": []}
 
 
+def column_widths(reqs: list[dict]) -> list[float]:
+    return [r["updateTableColumnProperties"]["tableColumnProperties"]["columnWidth"]["magnitude"] / EMU_PER_PT
+            for r in reqs if "updateTableColumnProperties" in r]
+
+
+def test_slides_width_reads_measured_advances():
+    size = FONTS(run_of("0"), SCALE)[1]
+    lato = emit.ADVANCES["Lato"]["regular"]
+    assert emit.slides_width([run_of("12,000")], SCALE, FONTS) == pytest.approx((5 * lato["0"] + lato[","]) * size)
+    # Lato's digits are tabular and wider than Computer Modern's 0.5 em: a number is no sentence.
+    assert lato["0"] > 0.55
+    assert emit.slides_width([run_of("x", font="FiraSans-Regular")], SCALE, FONTS) is None  # not measured
+
+
+def number_table(x1: float) -> dict:
+    """A PDF table whose right-aligned number column ends at x1: TeX's 'Compute | 12,000'."""
+    return {"id": "p0b0", "kind": "table", "frame": [100.0, 50.0, x1 + 6, 90.0], "size": 10.91,
+            "columns": [{"x0": 106.0, "x1": 146.0, "align": "left"},
+                        {"x0": x1 - 30.0, "x1": x1, "align": "right"}],
+            "cells": [[[run_of("Compute")], [run_of("12,000")]], [[run_of("Storage")], [run_of("900")]]],
+            "row_baselines": [60.0, 75.0], "row_heights": [15.0, 15.0], "rules": []}
+
+
+def test_a_number_column_is_as_wide_as_its_widest_number_in_slides():
+    # A cell that wraps in Slides doubles its row and pushes the table over the caption below.
+    reqs = table_requests(number_table(188.0), "b2s_s001", "b2s_s001_b0", SCALE, FONTS)
+    need = emit.slides_width([run_of("12,000")], SCALE, FONTS)
+    widths = column_widths(reqs)
+    assert widths[1] >= need + 2 * emit.TABLE_CELL_PAD + emit.WRAP_MARGIN
+    assert widths[0] >= emit.slides_width([run_of("Compute")], SCALE, FONTS) + 2 * emit.TABLE_CELL_PAD
+    # The right alignment indent never eats into the room the number needs.
+    for r in reqs:
+        style = r.get("updateParagraphStyle", {})
+        if style and style["cellLocation"] == {"rowIndex": 0, "columnIndex": 1}:
+            end = style["style"].get("indentEnd", {"magnitude": 0})["magnitude"]
+            assert widths[1] - 2 * emit.TABLE_CELL_PAD - end >= need
+
+
+def test_a_crowded_column_pushes_the_columns_after_it_along():
+    # Only 12 pt between the columns: they cannot both fit where TeX put them, so the table grows.
+    reqs = table_requests(number_table(176.0), "b2s_s001", "b2s_s001_b0", SCALE, FONTS)
+    need = [emit.slides_width([run_of(t)], SCALE, FONTS) for t in ("Compute", "12,000")]
+    assert all(w >= n + 2 * emit.TABLE_CELL_PAD for w, n in zip(column_widths(reqs), need))
+
+
+def test_a_cell_spanning_columns_is_as_wide_as_its_words():
+    table = number_table(188.0)
+    table["cells"].insert(0, [[run_of("Monthly running costs in francs")], []])
+    table["merges"] = [{"row": 0, "col": 0, "rows": 1, "cols": 2, "align": "center"}]
+    table["row_baselines"].insert(0, 45.0)
+    table["row_heights"].insert(0, 15.0)
+    widths = column_widths(table_requests(table, "b2s_s001", "b2s_s001_b0", SCALE, FONTS))
+    words = emit.slides_width([run_of("Monthly running costs in francs")], SCALE, FONTS)
+    assert sum(widths) >= words + 2 * emit.TABLE_CELL_PAD + emit.WRAP_MARGIN
+
+
 def test_a_hebrew_table_cell_reads_right_to_left_and_stays_where_it_is_drawn():
     reqs = table_requests(hebrew_table(), "b2s_s001", "b2s_s001_b0", SCALE, FONTS)
     styles = {r["updateParagraphStyle"]["cellLocation"]["columnIndex"]: r["updateParagraphStyle"]["style"]

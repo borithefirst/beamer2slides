@@ -254,6 +254,26 @@ def test_simple_math_in_table_cells():
     assert scripts == [("max", {"sub"}), ("−3", {"super"}), ("−4", {"super"})]
 
 
+def table_cells(slide: dict) -> tuple[list[list[str]], list[dict]]:
+    table = [e for e in slide["elements"] if e["kind"] == "table"]
+    assert len(table) == 1
+    return [[paragraph_text({"runs": c}) for c in row] for row in table[0]["cells"]], table[0]["merges"]
+
+
+def test_columns_closer_than_a_word_space_are_still_columns():
+    # 4 pt between columns: a row reads as one phrase, which spanned the table as one merged
+    # cell - and wrapped in Slides, being wider than any column.
+    cells, merges = table_cells(deck("16_colored_table")["slides"][2])
+    assert cells == [["Monitor", "Workstation", "Mainframe"], ["Mouse", "Webcam", "Microwave"]] and merges == []
+
+
+def test_a_header_centred_over_two_columns_stays_one_cell():
+    # Its word space sits on the column gap, which is what cutting a tight row asks for.
+    cells, merges = table_cells(deck("16_colored_table")["slides"][3])
+    assert cells[0] == ["", "Test results", ""]
+    assert merges == [{"row": 0, "col": 1, "rows": 1, "cols": 2, "align": "center"}]
+
+
 def test_tabular_without_rules_is_a_borderless_table():
     slide = deck("15_plain_tabular")["slides"][0]
     tables = [e for e in slide["elements"] if e["kind"] == "table"]

@@ -2073,6 +2073,42 @@ class PageClassifier:
                     return True
             return False
 
+        # Columns set closer than half an em (\tabcolsep cut down, @{\hspace{4pt}}) join a row's
+        # cells into one chunk as if they were words of one phrase, and that chunk spans the
+        # table - in Slides one merged cell, too narrow for its words, which wraps. Cut such a
+        # chunk between two words where no other row has anything, and every other row reaching
+        # both sides has a gap there, when every piece lines up with the cell under it in every
+        # other row (left, right or centre edge: a \multicolumn header centred over two columns has
+        # its word gap on the column gap too, and its words line up with nothing - or with one
+        # cell somewhere by chance, which is why it is every row) and no piece spans anything.
+        def cut(item) -> list:
+            r, rs, ch = item
+            others = [extent(it[2]) for it in items if it[0] != r]
+            rows_of = [[extent(it[2]) for it in items if it[0] == r2] for r2 in {it[0] for it in items if it[0] != r}]
+            pieces, start = [], 0
+            for k in range(1, len(ch)):
+                a, b = ch[k - 1].rect.x1, ch[k].rect.x0
+                x = (a + b) / 2
+                if not any(x0 - 0.5 < x < x1 + 0.5 for x0, x1 in others) and \
+                        any(x1 <= a for x0, x1 in others) and any(x0 >= b for x0, x1 in others):
+                    pieces.append(ch[start:k])
+                    start = k
+            pieces.append(ch[start:])
+
+            def lined_up(p) -> bool:
+                x0, x1 = extent(p)
+                under = [(o0, o1) for row in rows_of for o0, o1 in row if o0 < x1 and x0 < o1]
+                return bool(under) and all(abs(x0 - o0) <= 0.5 or abs(x1 - o1) <= 0.5 or abs(x0 + x1 - o0 - o1) <= 1
+                                           for o0, o1 in under)
+            return [(r, rs, p) for p in pieces] if all(map(lined_up, pieces)) else [item]
+
+        for it in [it for it in items if len(it[2]) > 1 and spanning(it)]:
+            parts = cut(it)
+            if len(parts) > 1:
+                at = items.index(it)
+                items[at:at + 1] = parts
+                if any(spanning(p) for p in parts):
+                    items[at:at + len(parts)] = [it]
         wide = [it for it in items if spanning(it)]
         intervals = sorted(extent(it[2]) for it in items if it not in wide)
         columns: list[list[float]] = []
