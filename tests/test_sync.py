@@ -2474,10 +2474,9 @@ def test_the_deck_picture_the_source_now_draws_is_no_conflict(tmp_path):
     assert [(c["element"], c["field"]) for c in mplan["report"]["converged"]] == [("image/figure/0", "image")]
 
 
-def test_the_adopter_matches_by_bytes_and_by_look(tmp_path, monkeypatch):
+def test_the_adopter_matches_by_bytes_and_by_look(tmp_path, fetcher):
     """sync.picture_adopter on a live slide: the same bytes or the same look in the right place,
     and never a converter object, a copy or a picture inside a group."""
-    from beamer2slides import snapshot
     from beamer2slides.sync import Sync, box_overlap
     ours_out = _picture_files(tmp_path / "ours", transparent=False)
     scaled = _picture_files(tmp_path / "scaled", transparent=False)  # (the same drawing at twice the size)
@@ -2491,7 +2490,7 @@ def test_the_adopter_matches_by_bytes_and_by_look(tmp_path, monkeypatch):
         padded.resize((132, 48), Image.LANCZOS).save(crop / "figures" / "f1.png")
     other = _picture_files(tmp_path / "other", transparent=False, mark=(2, 2, 58, 18))
     files = {"u_same": ours_out, "u_look": scaled, "u_crop": crop, "u_other": other}
-    monkeypatch.setattr(snapshot, "_download", lambda url: (files[url] / "figures" / "f1.png").read_bytes())
+    fetcher(lambda url: (files[url] / "figures" / "f1.png").read_bytes())
     pres = {"slides": [{"objectId": "S", "pageElements": [{"objectId": oid, "image": {"contentUrl": url}}
                                                           for oid, url in [("SAME", "u_same"), ("LOOK", "u_look"),
                                                                            ("CROP", "u_crop"),

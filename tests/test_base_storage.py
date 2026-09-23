@@ -380,25 +380,109 @@ def picture_deck() -> tuple[dict, dict]:
     return read, pres
 
 
-def test_pictures_signed_while_the_tags_were_written_are_not_fetched_again(monkeypatch):
+def test_pictures_signed_while_the_tags_were_written_are_not_fetched_again(fetcher):
     read, pres = picture_deck()
-    monkeypatch.setattr(snapshot, "_download", lambda url: pytest.fail(f"downloaded {url} again"))
+    fetcher(lambda url: pytest.fail(f"downloaded {url} again"))
     assert snapshot.sign_pictures(read, pres, ready={"a": "sig-a", "s1": "sig-bg"}) == 2
     assert read["slides"][0]["objects"]["a"]["image"]["signature"] == "sig-a"
     assert read["slides"][0]["background"]["signature"] == "sig-bg"
 
 
-def test_a_picture_the_download_missed_is_simply_unsigned(monkeypatch):
+def test_a_picture_the_download_missed_is_simply_unsigned(fetcher):
     """`ready` comes from another thread; a picture it could not fetch leaves no signature, which
     is what a failed download has always left (sync then compares the contentHash alone)."""
     read, pres = picture_deck()
-    monkeypatch.setattr(snapshot, "_download", lambda url: pytest.fail(f"downloaded {url} again"))
+    fetcher(lambda url: pytest.fail(f"downloaded {url} again"))
     snapshot.sign_pictures(read, pres, ready={"a": "sig-a"})
     assert "signature" not in read["slides"][0]["background"]
 
 
-def test_the_signatures_are_by_the_id_that_owns_the_picture(monkeypatch):
+def test_the_signatures_are_by_the_id_that_owns_the_picture(monkeypatch, fetcher):
     _, pres = picture_deck()
-    monkeypatch.setattr(snapshot, "_download", lambda url: url.encode())
+    fetcher(lambda url: url.encode())
     monkeypatch.setattr(snapshot, "signature", lambda data: f"sig({data.decode()})")
     assert snapshot.picture_signatures(pres) == {"a": "sig(u-a)", "s1": "sig(u-bg)"}
+
+
+def test_the_installed_fetcher_reaches_the_worker_threads(monkeypatch, fetcher):
+    """Eight workers download the pictures, and a worker inherits no context: the fetcher is
+    resolved on the calling thread and handed down, so urllib is never reached."""
+    import threading
+
+    from beamer2slides import net
+
+    monkeypatch.setattr(net, "urllib_fetch", lambda url: pytest.fail(f"urllib fetched {url}"))
+    threads = set()
+
+    def fetch(url):
+        threads.add(threading.current_thread().name)
+        return url.encode()
+
+    fetcher(fetch)
+    monkeypatch.setattr(snapshot, "signature", lambda data: f"sig({data.decode()})")
+    _, pres = picture_deck()
+    assert snapshot.picture_signatures(pres) == {"a": "sig(u-a)", "s1": "sig(u-bg)"}
+    assert threading.current_thread().name not in threads, "the downloads ran on the pool"
+    read, pres = picture_deck()
+    assert snapshot.sign_pictures(read, pres) == 2
+    assert read["slides"][0]["objects"]["a"]["image"]["signature"] == "sig(u-a)"
+
+
+def test_a_fetcher_that_raises_leaves_the_pictures_unsigned_and_the_base_whole(monkeypatch, fetcher):
+    """A harness's client raises its own types; none of them may escape the signing. A
+    PermissionError - "not allowed" - is asked once, not three times with a sleep between."""
+    from beamer2slides import net
+
+    monkeypatch.setattr(net.time, "sleep", lambda s: None)
+    asked = []
+
+    class Refused(Exception):
+        pass
+
+    def refuse(url):
+        asked.append(url)
+        raise Refused(url)
+
+    fetcher(refuse)
+    _, pres = picture_deck()
+    assert snapshot.picture_signatures(pres) == {}
+    assert sorted(asked) == ["u-a", "u-a", "u-a", "u-bg", "u-bg", "u-bg"]  # (three tries each)
+
+    asked.clear()
+
+    def forbid(url):
+        asked.append(url)
+        raise PermissionError(url)
+
+    fetcher(forbid)
+    read, pres = picture_deck()
+    assert snapshot.sign_pictures(read, pres) == 2
+    assert "signature" not in read["slides"][0]["objects"]["a"]["image"]
+    assert sorted(asked) == ["u-a", "u-bg"]
+
+
+def test_a_failed_drive_save_of_the_base_is_said_not_only_printed(monkeypatch, tmp_path, capsys):
+    """Convert's last step keeps the base locally when Drive refuses it, and says so through
+    `problems` - where the agent layer turns it into a warning - instead of only printing."""
+    from beamer2slides import google_auth
+
+    class Refusing(FakeDrive):
+        def files(self):
+            raise http_error(403)
+
+    monkeypatch.setattr(snapshot, "build_base", lambda *a, **k: {"slides": [], "generation": 0,
+                                                                   "presentationId": PID})
+    monkeypatch.setattr(snapshot, "write_tags", lambda *a: ([], None))
+    monkeypatch.setattr("beamer2slides.theme_sync.record", lambda *a: None)
+    slides = type("S", (), {"presentations": lambda self: self,
+                            "get": lambda self, presentationId: FakeDrive._request(read_deck())})()
+    with google_auth.use_services({"slides": slides, "drive": Refusing()}):
+        problems: list[str] = []
+        snapshot.snapshot_after_convert({"slides": []}, tmp_path, {"presentationId": PID}, {"pdf": "x",
+                                        "sha1": None}, problems=problems)
+        assert len(problems) == 1 and "could not store the sync base in Drive" in problems[0]
+        assert "no_base" in problems[0] and snapshot.local_path(tmp_path).exists()
+        assert capsys.readouterr().out == ""
+        snapshot.snapshot_after_convert({"slides": []}, tmp_path, {"presentationId": PID}, {"pdf": "x",
+                                        "sha1": None})
+        assert "warning: could not store the sync base in Drive" in capsys.readouterr().out

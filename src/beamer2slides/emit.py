@@ -18,7 +18,7 @@ from . import bidi
 from .classify import HOLE_PAD
 from .fonts import font_info, google_font
 from .gapi import HttpError, media_upload, message_of
-from .google_auth import credentials_for_threads, drive_service, shared_service, slides_service
+from .google_auth import credentials_for_threads, drive_service, fetcher_for_threads, shared_service, slides_service
 from .gslides import EMU_PER_PT, emu, execute, per_thread, pt
 
 # Found through the package, never through the checkout: an installed wheel, a zip import and
@@ -2225,7 +2225,7 @@ def measure_places(slides, pid: str, deck: dict, scale: float, fonts: FontMapper
     # One client per worker thread, not one per slide: `build(...)` fetches a discovery document
     # every time it is called. Where a caller handed its own client over there is only that one,
     # which is not thread-safe, so the thumbnails are fetched one at a time.
-    creds = credentials_for_threads()
+    creds, fetch = credentials_for_threads(), fetcher_for_threads()
     client = per_thread(lambda: slides_service(creds))
     workers = 1 if shared_service("slides", "v1") else 6
     tables = {}
@@ -2234,8 +2234,8 @@ def measure_places(slides, pid: str, deck: dict, scale: float, fonts: FontMapper
         sid, n, found, overlays = job
         path = out / "holes" / f"marks-{n + 1:03}.png"
         try:
-            save_thumbnail(client(), pid, sid, path)
-        except (HttpError, OSError) as e:
+            save_thumbnail(client(), pid, sid, path, fetch)
+        except Exception as e:  # noqa: BLE001 - HttpError, OSError, or a harness fetcher's own
             print(f"warning: slide {n + 1}: no thumbnail to measure the picture places ({e})")
             return {}
         img = np.asarray(Image.open(path).convert("RGB"))

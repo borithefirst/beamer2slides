@@ -325,8 +325,10 @@ def fake_google(seen: dict):
         return {"url": "https://docs.google.com/presentation/d/PID123/edit",
                 "presentationId": "PID123", "deck": {"presentationId": "PID123", "slides": []}}
 
-    def snapshot_after_convert(deck, out, state, pdf, overlays="last"):
+    def snapshot_after_convert(deck, out, state, pdf, overlays="last", problems=None):
         seen["base"] = {"pdf": pdf, "overlays": overlays}
+        if problems is not None:
+            problems.extend(seen.get("base_problems", []))
         return {"slides": [{}, {}]}
 
     return emit, snapshot_after_convert
@@ -505,6 +507,200 @@ def test_the_split_halves_declare_the_least_each_one_does(prepared):
     assert set(deck_prepare.needs) == set(LOCAL_ONLY)
     assert "writes_google" in deck_upload.needs and "writes_google" not in deck_prepare.needs
     assert set(deck_convert.needs) == set(deck_upload.needs) | set(deck_prepare.needs)
+
+
+def test_a_base_drive_would_not_take_is_a_warning_not_a_line_in_the_log(prepared, tmp_path, monkeypatch):
+    """A conversion that kept its base only in the folder used to report plain success: the
+    warning was a print, and prints are the log. Drive is where the next sync looks first, so in a
+    detached context the person's first edit came back `no_base` with nothing here to say why."""
+    from beamer2slides.agent import ALL_ACTIONS
+
+    root, _ = prepared
+    ws = tmp_path / "ws"
+    shutil.copytree(root / "out" / "talk", ws / "out" / "talk")
+    seen: dict = {"base_problems": ["could not store the sync base in Drive (HttpError 403); it was "
+                                    "kept only in out/talk/sync/base.json"]}
+    emit, snapshot = fake_google(seen)
+    monkeypatch.setattr("beamer2slides.emit.emit", emit)
+    monkeypatch.setattr("beamer2slides.snapshot.snapshot_after_convert", snapshot)
+    result = deck_upload(AgentContext(workspace=LocalWorkspace(ws), google=FakeGoogle(), allow=ALL_ACTIONS),
+                         out="out/talk")
+    assert result.ok, result.summary
+    warned = [d for d in result.diagnostics if d.where == "sync base"]
+    assert len(warned) == 1 and "HttpError 403" in warned[0].message
+
+
+def test_a_forced_rebuild_in_a_detached_context_keeps_its_way_back_in_drive(prepared, monkeypatch):
+    """`auto` is a .pptx in the workspace, which a detached context deletes when the call returns:
+    the backup that makes a forced rebuild acceptable would be written and destroyed."""
+    from beamer2slides.agent import ALL_ACTIONS
+
+    root, _ = prepared
+    seen: dict = {}
+    emit, snapshot = fake_google(seen)
+
+    def remembering(deck, out_dir, name, new_deck, measure, force_rebuild, backup, named, checked=None):
+        seen["backup"] = backup
+        return emit(deck, out_dir, name, new_deck, measure, force_rebuild, backup, named, checked)
+
+    monkeypatch.setattr("beamer2slides.emit.emit", remembering)
+    monkeypatch.setattr("beamer2slides.snapshot.snapshot_after_convert", snapshot)
+    with AgentContext.detached(google=FakeGoogle(), allow=ALL_ACTIONS) as ctx:
+        assert ctx.ephemeral
+        shutil.copytree(root / "out" / "talk", ctx.workspace.root / "out" / "talk")
+        assert deck_upload(ctx, out="out/talk", force_rebuild=True).ok
+        assert seen["backup"] == "drive"
+        assert deck_upload(ctx, out="out/talk").ok          # not forced: auto keeps its meaning
+        assert seen["backup"] == "auto"
+        assert deck_upload(ctx, out="out/talk", force_rebuild=True, backup="file").ok
+        assert seen["backup"] == "file", "a mode somebody named is never changed"
+    local = AgentContext(workspace=LocalWorkspace(root), google=FakeGoogle(), allow=ALL_ACTIONS)
+    assert not local.ephemeral
+
+
+# ---------------------------------------------------------------- deck_sync's refusals and way back
+
+
+class Point:
+    """What `record_sync_point` hands `sync`: a way back, collected when asked."""
+
+    def __init__(self, note):
+        self.note = note
+
+    def result(self):
+        return self.note
+
+
+def sync_world(monkeypatch, *, raises=None, note=None):
+    """`sync.sync` and `record_sync_point` replaced; returns what they were handed."""
+    seen: dict = {}
+
+    def record_sync_point(pdf, deck, out, backup):
+        seen["point_backup"] = backup
+        return Point(note)
+
+    def run_sync(pdf, deck, out, dry_run, overlays, measure, way_back, backup, **kw):
+        seen["sync_backup"] = backup
+        if raises is not None:
+            raise raises
+        return {"report": {"conflicts": [], "warnings": [], "applied": [], "overrides": [], "slides": {}},
+                "url": "https://docs.google.com/presentation/d/PID/edit", "presentationId": "PID",
+                "requests": {"text": 3}}
+
+    monkeypatch.setattr("beamer2slides.__main__.record_sync_point", record_sync_point)
+    monkeypatch.setattr("beamer2slides.sync.sync", run_sync)
+    return seen
+
+
+def sync_ctx(root: Path) -> AgentContext:
+    from beamer2slides.agent import ALL_ACTIONS
+
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "talk.pdf").write_bytes(b"%PDF-1.5 stand-in")
+    return AgentContext(workspace=LocalWorkspace(root), google=FakeGoogle(), allow=ALL_ACTIONS)
+
+
+def test_only_a_missing_base_is_no_base(tmp_path, monkeypatch):
+    """Three places in sync say no by exiting, and each wants a different next step. `no_base`
+    suggests converting; for a base that describes another copy of the deck that is the one move
+    that makes a second deck beside somebody's edited one."""
+    from beamer2slides.sync import BaseMismatch, NoSyncBase
+
+    sync_world(monkeypatch, raises=NoSyncBase("no sync base for presentation PID"))
+    missing = deck_sync(sync_ctx(tmp_path / "a"), pdf="talk.pdf", deck="PID")
+    assert missing.code == "no_base"
+    assert any("deck_convert" in s for s in missing.next_steps)
+
+    sync_world(monkeypatch, raises=BaseMismatch("the sync base describes none of the slides... Convert "
+                                                "the PDF again (python -m beamer2slides convert)"))
+    other = deck_sync(sync_ctx(tmp_path / "b"), pdf="talk.pdf", deck="PID")
+    assert other.code == "base_mismatch"
+    assert not any("deck_convert" in s for s in other.next_steps)
+    assert "python -m beamer2slides" not in other.summary, "the CLI's advice is not relayed"
+    assert "Do not convert" in other.summary
+
+    # Still what the CLI stops on.
+    assert issubclass(NoSyncBase, SystemExit) and issubclass(BaseMismatch, SystemExit)
+
+
+def test_a_folder_that_names_no_deck_is_not_found_rather_than_no_base(tmp_path, monkeypatch):
+    sync_world(monkeypatch)
+    ctx = sync_ctx(tmp_path / "ws")
+    (tmp_path / "ws" / "empty").mkdir()
+    result = deck_sync(ctx, pdf="talk.pdf", deck="empty")
+    assert result.code == "not_found" and "names no deck" in result.summary
+
+
+def test_the_way_back_is_reported_where_a_caller_can_branch_on_it(tmp_path, monkeypatch):
+    root = tmp_path / "ws"
+    kept = root / "out" / "talk" / "backups" / "20260923-before.pptx"
+    kept.parent.mkdir(parents=True)
+    kept.write_bytes(b"pptx")
+    note = {"out": str(root / "out" / "talk"),
+            "entry": {"presentationId": "PID", "revisionId": "r7",
+                      "backup": {"mode": "both", "file": str(kept),
+                                 "drive": {"presentationId": "COPY", "url": "https://copy"},
+                                 "warnings": ["could not copy the deck in Drive (quota)"]}}}
+    sync_world(monkeypatch, note=note)
+    result = deck_sync(sync_ctx(root), pdf="talk.pdf", deck="PID")
+    assert result.ok, result.summary
+    assert [d.message for d in result.diagnostics if d.where == "backup"] == \
+        ["could not copy the deck in Drive (quota)"]
+    pptx = [a for a in result.artifacts if a.kind == "pptx"]
+    assert [a.ref for a in pptx] == ["out/talk/backups/20260923-before.pptx"]
+    assert result.data["backup_copy"]["url"] == "https://copy" and result.data["backup_mode"] == "both"
+    assert result.data["recovery"]["revisionId"] == "r7"
+
+
+def test_a_sync_that_recorded_no_way_back_says_so(tmp_path, monkeypatch):
+    sync_world(monkeypatch, note=None)
+    result = deck_sync(sync_ctx(tmp_path / "ws"), pdf="talk.pdf", deck="PID")
+    assert result.ok, result.summary
+    assert any(d.where == "backup" and "no way back was recorded" in d.message for d in result.diagnostics)
+    dry = deck_sync(sync_ctx(tmp_path / "dry"), pdf="talk.pdf", deck="PID", dry_run=True)
+    assert not [d for d in dry.diagnostics if d.where == "backup"], "a dry run keeps none and writes none"
+
+
+def test_auto_means_a_drive_copy_where_the_workspace_goes_away(tmp_path, monkeypatch):
+    from beamer2slides.agent import ALL_ACTIONS
+
+    seen = sync_world(monkeypatch, note=None)
+    with AgentContext.detached(google=FakeGoogle(), allow=ALL_ACTIONS) as ctx:
+        pdf = ctx.workspace.put("talk.pdf", b"%PDF-1.5 stand-in")
+        assert deck_sync(ctx, pdf=pdf, deck="PID").ok
+        assert seen["point_backup"] == seen["sync_backup"] == "drive"
+        assert deck_sync(ctx, pdf=pdf, deck="PID", backup="none").ok
+        assert seen["point_backup"] == "none"
+    assert deck_sync(sync_ctx(tmp_path / "ws"), pdf="talk.pdf", deck="PID").ok
+    assert seen["point_backup"] == "auto", "a workspace that stays keeps its .pptx"
+
+
+# ---------------------------------------------------------------- the content fetcher
+
+
+def test_the_wrapper_installs_the_context_s_content_fetcher_and_never_the_model_s(tmp_path):
+    """`fetch_google_content` is what the library downloads Google's pictures with; `fetch` is
+    what a *model's* URL argument is fetched with, and a harness that refuses those must not have
+    to open that door to download pictures. The wrapper installs the first and only the first."""
+    from beamer2slides import google_auth, net
+    from beamer2slides.agent.context import tool
+
+    seen = []
+
+    @tool("probe_fetcher", needs=(READS,))
+    def probe(j):
+        seen.append(google_auth.fetcher_for_threads())
+
+    def pictures(url):
+        return b"picture"
+
+    def models(url):
+        return b"model"
+
+    probe(AgentContext.offline(tmp_path, fetch=models, fetch_google_content=pictures))
+    probe(AgentContext.offline(tmp_path, fetch=models))
+    assert seen == [pictures, net.urllib_fetch]
+    assert google_auth.fetcher_for_threads() is net.urllib_fetch, "nothing is left installed"
 
 
 # ---------------------------------------------------------------- tex_label

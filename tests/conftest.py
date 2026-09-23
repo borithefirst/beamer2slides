@@ -1,6 +1,9 @@
 """Test-run settings shared by every test file.
 
-Only one thing so far: how the suite splits across `pytest -n N` workers. The default `--dist load`
+`fetcher`: a test's downloads go through the function it installs, by the same seam a harness uses
+(`google_auth.use_fetcher`, `net`) rather than by patching a module's private helper.
+
+And how the suite splits across `pytest -n N` workers. The default `--dist load`
 hands out one test at a time, which is wrong here - several files build their decks once in a
 module-scoped fixture (`test_emit_requests`, `test_raster_images`, `test_sync_fuzz`, ...), and
 spreading their tests would build those decks again on every worker. `--dist loadfile` would fix
@@ -11,7 +14,19 @@ So: a file is a group unless a test says otherwise, and `test_invariants` says o
 Run it with `-n auto --dist loadgroup`; without `-n` nothing here changes anything.
 """
 
+import contextlib
+
 import pytest
+
+
+@pytest.fixture
+def fetcher():
+    """`fetcher(fn)` installs `fn(url) -> bytes` for the rest of the test; installing another
+    replaces it."""
+    from beamer2slides import google_auth
+
+    with contextlib.ExitStack() as stack:
+        yield lambda fn: stack.enter_context(google_auth.use_fetcher(fn))
 
 
 def pytest_collection_modifyitems(items):

@@ -12,9 +12,10 @@ put its own supply in front of that flow for the duration of a block, so nothing
 library has to learn where credentials come from (`agent/auth.py` is the caller that does).
 `use_services` is the same hook one step later: a caller that already holds a Slides, Drive
 or Docs client - with its own discovery cache, its own retries - puts it in front of
-`build(...)`, which otherwise fetches a discovery document per call.
+`build(...)`, which otherwise fetches a discovery document per call. `use_fetcher` is the third:
+what downloads the pictures and thumbnails those clients point at (`net`).
 
-Both are **per context**, not per process: a server answering two requests at once has two
+All three are **per context**, not per process: a server answering two requests at once has two
 visitors' tokens in the air, and neither may reach the other's deck.
 
 Google's own packages are imported where they are used, never at module scope, so a process
@@ -227,6 +228,31 @@ def credentials_for_threads():
     """
     made = _services_hook.get()
     return credentials() if made is None or made.needs_credentials else None
+
+
+#: What downloads Google's content (pictures, thumbnails) instead of `urllib` (`net`).
+_fetch_hook = _Hook("beamer2slides.fetch", "content fetcher")
+
+
+def use_fetcher(fetch):
+    """Download every picture, thumbnail and picture source through `fetch(url) -> bytes` inside
+    this block, instead of opening a socket of our own (`net`).
+
+    Per context like the other two hooks, and a pool's worker inherits nothing: every pool in the
+    library resolves `fetcher_for_threads()` on the calling thread and hands it down, as it does
+    credentials. `fetch` says no by raising; a `PermissionError` is taken as "not allowed" and not
+    retried. Installing one that always refuses is not a safe default, only a slower and weaker
+    sync: an unsigned picture is compared by its URL alone, which Google reissues, and sync's
+    picture pairing reads a picture it could not download as a different one.
+    """
+    return _fetch_hook.use(fetch)
+
+
+def fetcher_for_threads():
+    """The fetcher downloads should go through: the caller's (`use_fetcher`), else `urllib`'s.
+    Resolve it on the calling thread and pass it into a pool (`_Hook`)."""
+    from . import net
+    return _fetch_hook.get() or net.urllib_fetch
 
 
 def _service(api: str, version: str, creds):

@@ -143,7 +143,7 @@ def png(colour: tuple[int, int, int], size=(8, 8)) -> bytes:
     return buf.getvalue()
 
 
-def test_a_new_content_url_for_the_same_picture_is_not_an_edit(monkeypatch):
+def test_a_new_content_url_for_the_same_picture_is_not_an_edit(fetcher):
     """Google issues new contentUrls for pictures nobody touched: the pixels decide."""
     pres = presentation()
     base = base_of(pres)
@@ -161,14 +161,14 @@ def test_a_new_content_url_for_the_same_picture_is_not_an_edit(monkeypatch):
     assert snapshot.read_presentation(live)["slides"][0]["objects"]["b2s_s000_f0"]["image"]["contentHash"] != \
         base["slides"][0]["elements"][2]["readback"]["b2s_s000_f0"]["image"]["contentHash"]
 
-    monkeypatch.setattr(snapshot, "_download", lambda url: same)
+    fetcher(lambda url: same)
     assert guard.survey(base, live)["edited"] is False
-    monkeypatch.setattr(snapshot, "_download", lambda url: other)
+    fetcher(lambda url: other)
     found = guard.survey(base, live)
     assert found["edited"] and found["counts"]["image"] == 2
 
 
-def test_a_base_older_than_picture_signatures_cannot_clear_a_new_url_but_says_so(monkeypatch):
+def test_a_base_older_than_picture_signatures_cannot_clear_a_new_url_but_says_so(fetcher):
     """Bases written before pixel signatures (2026-09-17) hold only the URL hash, and Google
     reissues URLs for pictures nobody touched: the rule does not bend - still refused - but the
     finding is a picture that cannot be compared, and the message says what that means."""
@@ -184,7 +184,7 @@ def test_a_base_older_than_picture_signatures_cannot_clear_a_new_url_but_says_so
         for e in s["pageElements"]:
             if "image" in e:
                 e["image"]["contentUrl"] = f"https://lh3.google.com/reissued-{e['objectId']}=s0"
-    monkeypatch.setattr(snapshot, "_download", lambda url: png((240, 240, 240)))
+    fetcher(lambda url: png((240, 240, 240)))
     found = guard.survey(base, live)
     assert found["edited"] and found["counts"] == {"image_unverified": 2}
     message = guard.refusal_message(pres["presentationId"], Path("out/x"), "x.pdf", found, "edited")
@@ -594,6 +594,50 @@ def test_a_way_back_that_could_not_be_made_is_no_reason_not_to_sync(monkeypatch,
     point = guard.WayBack(boom)
     assert point.result() is None and point.backup() == {}
     assert "Drive said no" in capsys.readouterr().out
+
+
+class TaggedCopies:
+    """A Drive holding the copies `copy_in_drive` tagged, listed over two pages."""
+
+    def __init__(self, copies, refuse=()):
+        self.copies, self.refuse, self.queries, self.trashed = copies, set(refuse), [], []
+
+    def files(self):
+        return self
+
+    def list(self, q, pageToken=None, **kw):
+        self.queries.append(q)
+        half = len(self.copies) // 2
+        if pageToken is None:
+            return Request({"files": self.copies[:half], "nextPageToken": "p2"})
+        return Request({"files": self.copies[half:]})
+
+    def update(self, fileId, body=None, fields=None):
+        assert body == {"trashed": True}, "a prune only ever moves to the trash"
+        if fileId in self.refuse:
+            return Request(http_error(403, "insufficientFilePermissions"))
+        self.trashed.append(fileId)
+        return Request({"id": fileId})
+
+    def delete(self, fileId):
+        pytest.fail("a prune never deletes for good")
+
+
+def test_a_prune_of_drive_backups_keeps_the_newest_and_only_ever_trashes():
+    copies = [{"id": f"C{i}", "name": f"backup {i}", "createdTime": f"2026-09-{10 + i:02d}T00:00:00Z"}
+              for i in (4, 1, 3, 0, 2)]
+    drive = TaggedCopies(copies, refuse={"C1"})
+    looked = guard.prune_drive_backups(drive, "P1", keep=2)
+    assert "key='b2sBackupOf' and value='P1'" in drive.queries[0] and "trashed = false" in drive.queries[0]
+    assert [c["id"] for c in looked["doomed"]] == ["C0", "C1", "C2"], "oldest first, the newest two kept"
+    assert looked["copies"] == 5 and not looked["trashed"] and drive.trashed == [], "looking trashes nothing"
+
+    done = guard.prune_drive_backups(drive, "P1", keep=2, trash=True)
+    assert drive.trashed == ["C0", "C2"] and done["trashed"]
+    assert len(done["warnings"]) == 1 and "backup 1" in done["warnings"][0]
+
+    young = guard.prune_drive_backups(TaggedCopies(copies), "P1", keep=0, older_than_days=365 * 100)
+    assert young["doomed"] == [], "nothing is older than a century"
 
 
 def test_record_appends_and_restore_hint_reads(tmp_path):

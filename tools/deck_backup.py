@@ -3,7 +3,7 @@
     python tools/deck_backup.py list    --deck <url|id|out folder>
     python tools/deck_backup.py export  --deck ... [--revision ID] [--to FILE]
     python tools/deck_backup.py restore --deck ... [--revision ID | --from FILE] [--in-place]
-    python tools/deck_backup.py prune   --deck ... [--keep 10] [--older-than-days N] [--yes]
+    python tools/deck_backup.py prune   --deck ... [--keep 10] [--older-than-days N] [--yes] [--drive]
 
 `list` shows what Drive keeps of the presentation (its revisions, newest last) and the local
 backups `convert --backup` / `sync --backup` wrote, with what they take up on disk. `export` saves
@@ -19,7 +19,8 @@ that is synced often grows without end. It keeps the newest `--keep` backups (an
 than `--older-than-days`, when given) and deletes the rest - but only files `backups.json` says
 this program wrote, never anything else in the folder, and never without `--yes`. The log entries
 stay, with `deleted` on the ones whose file is gone: what the deck was, and when, is evidence worth
-keeping even when the way back is not kept.
+keeping even when the way back is not kept. `prune --drive` does the same for the Drive copies
+`--backup drive` makes (tagged `b2sBackupOf`), moving the older ones to Drive's trash.
 
 Only the app's own files are reachable (drive.file scope): a deck this tool made or opened.
 """
@@ -131,6 +132,22 @@ def prune(folder: Path | None, keep: int, older_than_days: float | None, yes: bo
               f"way back to the deck as it was at that revision.")
 
 
+def prune_drive(pid: str, keep: int, older_than_days: float | None, yes: bool) -> None:
+    r = guard.prune_drive_backups(drive_service(), pid, keep, older_than_days, trash=yes)
+    print(f"{r['copies']} backup copy(ies) of {deck_url(pid)} in Drive")
+    if not r["doomed"]:
+        print(f"nothing to prune (the newest {keep} are kept)")
+        return
+    for c in r["doomed"]:
+        print(f"  {'moved to the trash' if yes else 'would move to the trash'}: {c.get('name')} "
+              f"({c.get('createdTime', '?')[:19].replace('T', ' ')})  {deck_url(c['id'])}")
+    for w in r["warnings"]:
+        print(f"  warning: {w}")
+    if not yes:
+        print(f"{len(r['doomed'])} copy(ies). Add --yes to move them to Drive's trash (recoverable there "
+              f"for 30 days); each one is a way back to the deck as it was.")
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(prog="deck_backup", description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -144,8 +161,13 @@ def main() -> None:
     ap.add_argument("--keep", type=int, default=10, help="prune: how many of the newest backups to keep (default 10)")
     ap.add_argument("--older-than-days", type=float, help="prune: only delete backups older than this")
     ap.add_argument("--yes", action="store_true", help="prune: actually delete (without it, nothing is touched)")
+    ap.add_argument("--drive", action="store_true",
+                    help="prune: the tagged Drive copies (--backup drive) instead of the .pptx files; "
+                         "they go to Drive's trash, not away")
     args = ap.parse_args()
     pid, folder = resolve_deck(args.deck)
+    if args.action == "prune" and args.drive:
+        return prune_drive(pid, args.keep, args.older_than_days, args.yes)
     if args.action == "prune":  # no Google call: this is about files on disk
         return prune(folder, args.keep, args.older_than_days, args.yes)
     drive = drive_service()

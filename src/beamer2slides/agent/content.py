@@ -97,6 +97,9 @@ class MemoryWorkspace(LocalWorkspace):
     a lifetime that ends, not isolation from the process it runs in.
     """
 
+    #: Nothing written here outlives the call (`AgentContext.ephemeral`).
+    ephemeral = True
+
     def __init__(self, prefix: str = "b2s-agent-") -> None:
         self._temp = Path(tempfile.mkdtemp(prefix=prefix))
         super().__init__(self._temp)

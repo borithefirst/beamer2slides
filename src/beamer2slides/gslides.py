@@ -3,7 +3,6 @@
 import random
 import threading
 import time
-import urllib.request
 from collections import Counter
 from pathlib import Path
 
@@ -94,21 +93,17 @@ def text_box(object_id: str, page_id: str, x: float, y: float, w: float, h: floa
     }}
 
 
-def save_thumbnail(slides, presentation_id: str, page_id: str, path: Path) -> tuple[int, int]:
-    """Export one slide as a LARGE (1600 px wide) PNG rendered by Google."""
+def save_thumbnail(slides, presentation_id: str, page_id: str, path: Path, fetch=None) -> tuple[int, int]:
+    """Export one slide as a LARGE (1600 px wide) PNG rendered by Google. `fetch`: what downloads
+    it (`net`); pass it on a worker thread, which inherits no context."""
+    from . import net
     thumb = execute(slides.presentations().pages().getThumbnail(
         presentationId=presentation_id, pageObjectId=page_id,
         thumbnailProperties_mimeType="PNG", thumbnailProperties_thumbnailSize="LARGE",
     ))
+    data = net.download(thumb["contentUrl"], fetch, tries=5)
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + ".part")
-    for attempt in range(5):
-        try:
-            urllib.request.urlretrieve(thumb["contentUrl"], tmp)
-            break
-        except OSError:  # URLError and SSL errors are OSErrors
-            if attempt == 4:
-                raise
-            time.sleep(2 ** attempt)
+    tmp.write_bytes(data)
     tmp.replace(path)  # never leave a truncated PNG under the final name
     return thumb["width"], thumb["height"]

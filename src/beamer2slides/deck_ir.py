@@ -11,13 +11,13 @@ Slide keys: the `b2s:<slide key>/<element key>` alt-text title of our objects, e
 snapshot's object map, else none (compare aligns slides by title and text).
 """
 
+import functools
 import hashlib
 import json
 import math
 import os
 import re
 import time
-import urllib.request
 from pathlib import Path
 
 from .emit import (ASCENT_EM, BASELINE_A, FONT_FOR_FAMILY, MIDDLE_BASELINE_EM, PAD_X, PPTX_TITLE_DY, SLIDE_W,
@@ -635,7 +635,7 @@ def stash_picture(url: str, fetch, images: Path) -> dict:
         if not path.exists():
             path.write_bytes(data)
         return {"file": str(path), "sha1": sha, "format": fmt}
-    except OSError as e:
+    except Exception as e:  # noqa: BLE001 - a harness's fetcher raises its own types
         return {"error": str(e)[:120]}
 
 
@@ -1284,15 +1284,10 @@ def picture_props(pe: dict, m: list[float], w: float, h: float, scale: float, sc
     return out
 
 
-def fetch_url(url: str) -> bytes:
-    for attempt in range(4):
-        try:
-            with urllib.request.urlopen(url, timeout=60) as r:
-                return r.read()
-        except OSError:
-            if attempt == 3:
-                raise
-    return b""
+def fetch_url(url: str, fetch=None) -> bytes:
+    """A picture's bytes through the installed fetcher (`net`); raises when it cannot be had."""
+    from . import net
+    return net.download(url, fetch, tries=4)
 
 
 def presentation_id(ref: str) -> str:
@@ -1329,8 +1324,11 @@ def read_deck(ref: str, images: Path | None = None, base: dict | None = None, pd
     thumbnails = None
     if foreign and images is not None and os.environ.get("B2S_ADOPT_THUMBNAILS", "1") != "0":
         thumbnails = slide_thumbnails(pid, pres, Path(images).parent / "thumbnails")
-    return deck_ir(pres, pdf_size or (base or {}).get("page_size"), base, fetch_url if images else None, images,
-                   foreign, thumbnails)
+    fetch = None
+    if images:
+        from .google_auth import fetcher_for_threads
+        fetch = functools.partial(fetch_url, fetch=fetcher_for_threads())
+    return deck_ir(pres, pdf_size or (base or {}).get("page_size"), base, fetch, images, foreign, thumbnails)
 
 
 def slide_thumbnails(pid: str, pres: dict, folder: Path):
@@ -1338,9 +1336,9 @@ def slide_thumbnails(pid: str, pres: dict, folder: Path):
     minute, and a 429 waits) and return `deck_ir`'s `thumbnails` callback over them. A slide whose
     thumbnail could not be read is None there: its unreported fills stay out, as without any."""
     from concurrent.futures import ThreadPoolExecutor
-    from .google_auth import credentials, slides_service
+    from .google_auth import credentials, fetcher_for_threads, slides_service
     from .gslides import save_thumbnail
-    creds = credentials()
+    creds, fetch = credentials(), fetcher_for_threads()   # here: a worker inherits no context
     folder.mkdir(parents=True, exist_ok=True)
 
     def one(item):
@@ -1348,7 +1346,7 @@ def slide_thumbnails(pid: str, pres: dict, folder: Path):
         path = folder / f"{i + 1:03d}.png"             # read again every time: the deck may have changed
         for attempt in range(6):
             try:
-                save_thumbnail(slides_service(creds), pid, s["objectId"], path)
+                save_thumbnail(slides_service(creds), pid, s["objectId"], path, fetch)
                 return path
             except Exception as exc:                                  # noqa: BLE001
                 if "429" not in str(exc) or attempt == 5:

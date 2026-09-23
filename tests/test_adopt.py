@@ -468,21 +468,30 @@ def test_a_see_through_page_background_is_blended_over_white():
     assert page_background(page, {}, {}) == ("#d3eaf1", None)
 
 
-def test_adopt_reads_every_slide_thumbnail_and_gives_up_on_one_quietly(monkeypatch, tmp_path):
+def test_adopt_reads_every_slide_thumbnail_and_gives_up_on_one_quietly(monkeypatch, tmp_path, fetcher):
     """Fills the API cannot say come from Google's picture of the slide (deck_fills.py), so a live
-    adopt reads one per slide; a slide Google would not render leaves its fills out, nothing more."""
-    from beamer2slides import deck_ir as ir, google_auth, gslides
+    adopt reads one per slide; a slide Google would not render leaves its fills out, nothing more.
+    The thumbnails are downloaded on three workers, through the fetcher the caller installed."""
+    from beamer2slides import deck_ir as ir, google_auth, net
 
-    def save(_service, _pid, page, path):
-        if page == "bad":
-            raise RuntimeError("HttpError 500")
-        path.write_bytes(b"png")
-        return 1600, 900
+    class Pages:
+        def pages(self):
+            return self
 
-    monkeypatch.setattr(gslides, "save_thumbnail", save)
+        def presentations(self):
+            return self
+
+        def getThumbnail(self, presentationId, pageObjectId, **_):
+            if pageObjectId == "bad":
+                raise RuntimeError("HttpError 500")
+            return type("R", (), {"execute": staticmethod(lambda: {
+                "contentUrl": f"https://thumbs/{pageObjectId}", "width": 1600, "height": 900})})()
+
     monkeypatch.setattr(google_auth, "credentials", lambda: None)
-    monkeypatch.setattr(google_auth, "slides_service", lambda creds=None: None)
+    monkeypatch.setattr(google_auth, "slides_service", lambda creds=None: Pages())
+    monkeypatch.setattr(net, "urllib_fetch", lambda url: pytest.fail(f"urllib fetched {url}"))
+    fetcher(lambda url: f"png of {url}".encode())
     pres = {"slides": [{"objectId": "a"}, {"objectId": "bad"}, {"objectId": "c"}]}
     get = ir.slide_thumbnails("pid", pres, tmp_path / "thumbnails")
     assert get(0) == tmp_path / "thumbnails" / "001.png" and get(1) is None
-    assert get(2).read_bytes() == b"png" and get(3) is None
+    assert get(2).read_bytes() == b"png of https://thumbs/c" and get(3) is None

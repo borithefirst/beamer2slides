@@ -28,6 +28,8 @@ CODES = {
     "deck_edited": "Someone edited the deck in Slides; rebuilding would destroy that work.",
     "no_way_back": "A forced rebuild was asked for but no backup could be made.",
     "no_base": "There is no sync base for this deck, so a three-way merge is impossible.",
+    "base_mismatch": "The sync base describes none of this deck's slides: another copy's, or the "
+                     "deck was rebuilt outside sync. Converting would make a second deck.",
     "base_choice_needed": "The document has no base; say which side to assume.",
     "already_pushed": "That file already names a document; pushing would make a second one.",
     "source_exists": "The source file is already there; adopt writes a new one.",

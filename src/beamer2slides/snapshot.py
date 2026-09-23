@@ -214,18 +214,14 @@ def same_background(a: dict | None, b: dict | None) -> bool:
     return a == b
 
 
-def _download(url: str) -> bytes | None:
-    import time
-    import urllib.request
-    for attempt in range(3):
-        try:
-            with urllib.request.urlopen(url, timeout=60) as r:
-                return r.read()
-        except OSError:
-            if attempt == 2:
-                return None
-            time.sleep(1 + attempt)
-    return None
+def _download(url: str, fetch=None) -> bytes | None:
+    """A picture's bytes, or None: a picture that cannot be downloaded stays unsigned, and is
+    compared by its URL alone (`same_picture`). `fetch`: see `net.download`."""
+    from . import net
+    try:
+        return net.download(url, fetch, tries=3)
+    except Exception:  # noqa: BLE001 - a harness's fetcher raises its own types
+        return None
 
 
 def picture_urls(pres: dict) -> tuple[dict[str, str], dict[str, str]]:
@@ -244,29 +240,39 @@ def picture_urls(pres: dict) -> tuple[dict[str, str], dict[str, str]]:
     return images, backgrounds
 
 
-def picture_signatures(pres: dict, workers: int = 8) -> dict[str, str]:
+def _fetcher(fetch):
+    """The fetcher a pool's workers are handed: resolved here, on the calling thread."""
+    if fetch is not None:
+        return fetch
+    from .google_auth import fetcher_for_threads
+    return fetcher_for_threads()
+
+
+def picture_signatures(pres: dict, workers: int = 8, fetch=None) -> dict[str, str]:
     """Every picture of a presentations.get signed by its pixels, by the id that owns it (an
     image's own objectId, a slide's own for its background picture).
 
     Downloading them costs about as much as a round trip, and a read's contentUrls stay good while
     the deck is being tagged, so `snapshot_after_convert` starts this and writes the tags meanwhile
-    (`sign_pictures`' `ready`)."""
+    (`sign_pictures`' `ready`). `fetch`: what downloads them (`net`); pass it when this runs on a
+    worker thread, which inherits no context."""
     images, backgrounds = picture_urls(pres)
     urls = {**images, **backgrounds}
     if not urls:
         return {}
     ids = list(urls)
+    fetch = _fetcher(fetch)
     with ThreadPoolExecutor(max_workers=workers) as pool:
-        data = list(pool.map(lambda i: _download(urls[i]), ids))
+        data = list(pool.map(lambda i: _download(urls[i], fetch), ids))
     return {i: signature(d) for i, d in zip(ids, data) if d}
 
 
 def sign_pictures(read: dict, pres: dict, objects=None, slides=None, workers: int = 8,
-                  ready: dict[str, str] | None = None) -> int:
+                  ready: dict[str, str] | None = None, fetch=None) -> int:
     """Adds pixel signatures to the image read-backs and picture backgrounds of `read`
     (read_presentation of `pres`); `objects` / `slides`: only these ids (None: all). Returns how
     many pictures were downloaded. `ready`: signatures somebody has already downloaded
-    (`picture_signatures`), so nothing is fetched here."""
+    (`picture_signatures`), so nothing is fetched here. `fetch`: as `picture_signatures`'."""
     images, backgrounds = picture_urls(pres)
     jobs = []
     for s in read["slides"]:
@@ -283,8 +289,9 @@ def sign_pictures(read: dict, pres: dict, objects=None, slides=None, workers: in
             if oid in ready:
                 target["signature"] = ready[oid]
         return len(jobs)
+    fetch = _fetcher(fetch)
     with ThreadPoolExecutor(max_workers=workers) as pool:
-        for (_, target, _), data in zip(jobs, pool.map(lambda j: _download(j[2]), jobs)):
+        for (_, target, _), data in zip(jobs, pool.map(lambda j: _download(j[2], fetch), jobs)):
             if data:
                 target["signature"] = signature(data)
     return len(jobs)
@@ -843,10 +850,24 @@ def base_matches(base: dict, theirs: dict) -> bool:
 
 
 def snapshot_after_convert(deck: dict, out: Path, state: dict, pdf: "Path | dict",
-                           overlays: str = "last") -> dict:
+                           overlays: str = "last", problems: list[str] | None = None) -> dict:
     """Tag the new deck's objects and record the base (convert's last step). `pdf`: the source,
-    or what `source_info` already measured of it."""
-    from .google_auth import credentials_for_threads, drive_service, shared_service, slides_service
+    or what `source_info` already measured of it.
+
+    `problems` collects what went wrong short of failing (`load_base`'s convention): the base
+    kept only in the folder because Drive would not take it, the theme left unrecorded. The first
+    one matters more than it looks - Drive is where a later sync looks first, and a caller whose
+    folder does not outlive the call (a detached agent context) has no other copy, so its next
+    sync refuses with `no_base` and nothing in this conversion's output would say why. Left None,
+    they are printed, as the CLI always did."""
+    from .google_auth import (credentials_for_threads, drive_service, fetcher_for_threads, shared_service,
+                              slides_service)
+
+    def problem(text: str) -> None:
+        if problems is None:
+            print(f"warning: {text}")
+        else:
+            problems.append(text)
 
     slides, drive = slides_service(), drive_service()
     pid = state["presentationId"]
@@ -860,8 +881,8 @@ def snapshot_after_convert(deck: dict, out: Path, state: dict, pdf: "Path | dict
             fileId=pid, fields="name,parents,appProperties")))
     pres = execute(slides.presentations().get(presentationId=pid))
     # The pictures are downloaded (for their signatures) while the tags are written: they hang off
-    # contentUrls, not off a Google client, so this thread needs nothing of anybody's.
-    signing = pool.submit(picture_signatures, pres)
+    # contentUrls, not off a Google client - only the fetcher, resolved here (`net`).
+    signing = pool.submit(picture_signatures, pres, fetch=fetcher_for_threads())
     pool.shutdown(wait=False)
     base = build_base(deck, out, pres, state, pdf, overlays=overlays)
     landed, revision = write_tags(slides, pid, tag_requests(base))
@@ -879,14 +900,15 @@ def snapshot_after_convert(deck: dict, out: Path, state: dict, pdf: "Path | dict
         if theme:
             base["theme"] = theme
     except Exception as e:  # noqa: BLE001 (a missing record costs theme sync, never the conversion)
-        print(f"warning: could not record the deck's theme for sync ({e})")
-    save_local(base, out)
-    try:
-        info = None
-        if where_to_put_it is not None:
-            with contextlib.suppress(HttpError, OSError):  # then save_drive reads it itself
-                info = where_to_put_it.result()
-        save_drive(drive, base, info=info)
-    except HttpError as e:
-        print(f"warning: could not store the sync base in Drive ({e}); kept locally")
+        problem(f"could not record the deck's theme for sync ({e}); a later sync leaves the "
+                f"master and layouts alone")
+    info = None
+    if where_to_put_it is not None:
+        with contextlib.suppress(Exception):  # then save_drive reads it itself
+            info = where_to_put_it.result()
+    failed = store_base(base, out, drive, label="convert-base", info=info)
+    if failed:
+        problem(f"could not store the sync base in Drive ({failed}); it was kept only in "
+                f"{local_path(out)}, and a later sync that cannot see that folder refuses with "
+                f"no_base until the deck is converted again")
     return base

@@ -35,7 +35,6 @@ import random
 import re
 import subprocess
 import time
-import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -845,18 +844,19 @@ def fetch_pictures(path: Path, live: dict) -> int:
     object id, in `<stem>.media/`, and from then on the file carries it like any other
     picture — which is what makes a reader's picture something git can keep.
     """
+    from . import net
+
     done = 0
     for run in _pictures(live):
         if run.get("src") or not run.get("uri") or not run.get("value"):
             continue
         try:
-            with urllib.request.urlopen(run["uri"], timeout=60) as reply:
-                data, mime = reply.read(), reply.headers.get_content_type()
-        except OSError as err:
+            data = net.download(run["uri"])   # through the caller's fetcher, where there is one
+        except Exception as err:  # noqa: BLE001 - a harness's fetcher raises its own types
             print(f"  the picture {run['value']} could not be fetched: {err}")
             continue
-        suffix = mimetypes.guess_extension(mime) or ".png"
-        suffix = ".jpg" if suffix in (".jpe", ".jpeg") else suffix
+        # A fetcher hands over bytes and nothing else, so the picture names its own type.
+        suffix = net.picture_suffix(data)
         folder = path.parent / f"{path.stem}.media"
         folder.mkdir(parents=True, exist_ok=True)
         name = re.sub(r"[^A-Za-z0-9_.-]", "_", run["value"]) + suffix

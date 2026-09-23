@@ -181,6 +181,19 @@ browser on a server, so while exactly one block is open in the process it is giv
 where two different ones are open it gets a `RuntimeError` naming
 `contextvars.copy_context().run(...)` - guessing there would hand one visitor another's account.
 
+**Downloads have a door of their own.** What the library downloads besides API answers - picture
+signatures for the sync base, thumbnails, a read deck's pictures, a picture's original
+`source_url`, a Doc's inserted pictures - goes through `net.download`, and `google_auth.use_fetcher`
+(a third hook, per context like the other two, resolved on the calling thread and handed to the
+pools) lets a caller own it. `AgentContext.fetch_google_content` installs it for a journey. It is
+**not** `fetch`: that one answers a model's `{"url": …}` argument, this one the URLs Google hands
+back (`contentUrl`, `lh*.googleusercontent.com`) plus whatever host a person inserted a picture
+from - two egress policies a harness may well want to differ. A fetcher takes a URL and returns
+bytes, or raises: `PermissionError` means "not allowed" and is not retried, anything else is
+retried like a network blip. A signature that cannot be fetched is left out of the base (the
+guard then says it cannot verify that picture); nothing falls back to urllib behind the caller's
+back. Tests: `tests/test_net.py`, `tests/test_base_storage.py`.
+
 ### `allow` - what the agent may do
 
 Four actions: `reads`, `writes`, `reads_google`, `writes_google`. A context lists what it

@@ -23,6 +23,7 @@ import json
 import re
 import time
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from . import merge, snapshot
@@ -548,6 +549,45 @@ def prune_backups(out: Path, keep: int = 10, older_than_days: float | None = Non
         (backup_dir(out) / "backups.json").write_text(json.dumps(entries, indent=1, ensure_ascii=False),
                                                       encoding="utf-8")
         result["deleted"] = True
+    return result
+
+
+def drive_backups(drive, pid: str) -> list[dict]:
+    """The Drive copies `copy_in_drive` made of this presentation, oldest first. Found by their
+    `b2sBackupOf` tag, so a copy somebody made by hand is never among them (and drive.file only
+    lists what this app made anyway)."""
+    found, token = [], None
+    query = (f"appProperties has {{ key='b2sBackupOf' and value='{pid}' }} and trashed = false")
+    while True:
+        r = execute(drive.files().list(q=query, spaces="drive", pageSize=100, pageToken=token,
+                                       fields="nextPageToken,files(id,name,createdTime)"))
+        found += r.get("files", [])
+        token = r.get("nextPageToken")
+        if not token:
+            return sorted(found, key=lambda f: f.get("createdTime", ""))
+
+
+def prune_drive_backups(drive, pid: str, keep: int = 10, older_than_days: float | None = None,
+                        trash: bool = False) -> dict:
+    """`prune_backups` for the Drive copies: every sync with `backup="drive"` (a detached agent
+    context's `auto`) leaves one, so they accumulate like the .pptx files do. The newest `keep`
+    are kept, and with `older_than_days` everything younger; the rest go to Drive's **trash**
+    when asked - never a permanent delete, so a copy pruned by mistake comes back from there for
+    30 days."""
+    copies = drive_backups(drive, pid)
+    doomed = copies[:-keep] if keep else list(copies)
+    if older_than_days is not None:
+        # datetime, not time.gmtime: Windows refuses a negative timestamp (a cutoff before 1970).
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=older_than_days)).strftime("%Y-%m-%dT%H:%M:%S")
+        doomed = [c for c in doomed if c.get("createdTime", "") < cutoff]
+    result = {"copies": len(copies), "doomed": doomed, "trashed": False, "warnings": []}
+    if trash and doomed:
+        for c in doomed:
+            try:
+                execute(drive.files().update(fileId=c["id"], body={"trashed": True}, fields="id"))
+            except HttpError as e:
+                result["warnings"].append(f"could not move {c.get('name', c['id'])} to the trash ({api_message(e)})")
+        result["trashed"] = True
     return result
 
 

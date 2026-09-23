@@ -21,7 +21,9 @@ have to repeat:
   refuses the journey instead of discovering the policy halfway through a rebuild.
 * **Supplies credentials.** Acquired up front, so a dead token is `needs_consent` in a
   millisecond rather than a traceback after a two-minute conversion, and injected into the
-  library through `google_auth.use_provider` for the length of the call.
+  library through `google_auth.use_provider` for the length of the call - and with them, where
+  the context has one, the fetcher every download of Google's content goes through
+  (`fetch_google_content`, `google_auth.use_fetcher`).
 """
 
 from __future__ import annotations
@@ -29,7 +31,7 @@ from __future__ import annotations
 import functools
 import io
 import time
-from contextlib import redirect_stdout
+from contextlib import ExitStack, redirect_stdout
 from dataclasses import dataclass, field
 from pathlib import Path
 from threading import RLock
@@ -67,6 +69,20 @@ class AgentContext:
     #: never opens a socket to a host a model chose. A harness that wants URL inputs passes the
     #: client it already trusts, with its own allow-list.
     fetch: Callable[[str], bytes] | None = None
+    #: How the library downloads what Google answered with - a deck's pictures (signed into
+    #: every sync base, so a plain conversion downloads them), slide thumbnails, a Doc's inserted
+    #: pictures - and the original of a picture inserted by URL. None: `urllib`, as at a terminal.
+    #: A backend whose egress must go through its own reviewed client sets it; installed through
+    #: `google_auth.use_fetcher` for the length of each call (`net`). Deliberately not `fetch`:
+    #: that one fetches a *model's* URL, and a harness that refuses those must not have to open
+    #: that door merely to download pictures.
+    fetch_google_content: Callable[[str], bytes] | None = None
+
+    @property
+    def ephemeral(self) -> bool:
+        """Whether the workspace goes away with the call (`detached`): a file kept there as the
+        way back before a destructive write would be deleted with it."""
+        return bool(getattr(self.workspace, "ephemeral", False))
 
     @classmethod
     def local(cls, root: Path | str, **kw: Any) -> "AgentContext":
@@ -217,13 +233,14 @@ def tool(name: str, needs: tuple[str, ...] = (READS,)):
                     kw = _take_in(job, kw)
                     _gate(job, needs)
                     creds = job.credentials() if _wants_google(needs) else None
-                    with redirect_stdout(_Tee(job)):
-                        if creds is None:
-                            fn(job, *args, **kw)
-                        else:
+                    with redirect_stdout(_Tee(job)), ExitStack() as hooks:
+                        if creds is not None or ctx.fetch_google_content is not None:
                             from .. import google_auth
-                            with google_auth.use_provider(lambda: creds):
-                                fn(job, *args, **kw)
+                            if creds is not None:
+                                hooks.enter_context(google_auth.use_provider(lambda: creds))
+                            if ctx.fetch_google_content is not None:
+                                hooks.enter_context(google_auth.use_fetcher(ctx.fetch_google_content))
+                        fn(job, *args, **kw)
                 except Refused as exc:
                     _refuse(job, exc.code, str(exc), exc.data)
                 except FileNotFoundError as exc:

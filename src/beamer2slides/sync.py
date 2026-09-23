@@ -47,6 +47,18 @@ class RevisionMismatch(Exception):
     pass
 
 
+class NoSyncBase(SystemExit):
+    """There is no base for this presentation: nothing to merge against. Still a `SystemExit`,
+    so the CLI says it and stops as before; a caller that branches (`agent.deck_tools`) can tell
+    it from the refusal below, whose way forward is the opposite."""
+
+
+class BaseMismatch(SystemExit):
+    """There is a base, and it describes none of the deck's slides: it belongs to another copy of
+    the deck, or the deck was rebuilt outside sync. The deck exists and may be edited, so
+    converting - the way forward from `NoSyncBase` - would make a second deck beside it."""
+
+
 def resolve_deck(arg: str) -> tuple[str, Path | None]:
     """--deck as a URL, a presentation id or an output folder of `convert` (its emit.json)."""
     path = Path(arg)
@@ -1026,7 +1038,7 @@ class Sync:
                 pres = self.read()
             pres = {**pres, "slides": [s for s in pres.get("slides", []) if not SCRATCH.fullmatch(s["objectId"])]}
             if attempt == 1 and not snapshot.base_matches(self.base, snapshot.read_presentation(pres)):
-                raise SystemExit(
+                raise BaseMismatch(
                     f"the sync base (generation {self.base.get('generation', 0)}) describes none of the slides in "
                     f"presentation {self.pid}: it belongs to another copy of this deck, or the deck was rebuilt "
                     f"outside sync. Syncing would report every element as deleted. Convert the PDF again "
@@ -1275,8 +1287,11 @@ class Sync:
         from .compare import TOL, picture_differs, picture_hash
         from .inverse import picture_look, same_look
 
+        from .google_auth import fetcher_for_threads
+
         images, _ = snapshot.picture_urls(pres)
-        base_ids = {oid for s in self.base["slides"] for e in s["elements"] for oid in (e.get("objects") or [])}
+        fetch = fetcher_for_threads()
+        base_ids ={oid for s in self.base["slides"] for e in s["elements"] for oid in (e.get("objects") or [])}
         scale = self.scale or merge.deck_scale(self.base) or 1.0
         folder = self.ours["out"] / "deck-pictures"
         deck, mine, taken = {}, {}, set()
@@ -1288,7 +1303,7 @@ class Sync:
             """(sha1, look, thumbnail) of a live picture, downloaded once."""
             if oid not in deck:
                 deck[oid] = None
-                data = snapshot._download(images[oid]) if oid in images else None
+                data = snapshot._download(images[oid], fetch) if oid in images else None
                 if data:
                     folder.mkdir(parents=True, exist_ok=True)
                     path = folder / f"{oid}.img"
@@ -2841,7 +2856,7 @@ def sync(pdf: Path, deck: str, out: Path | None = None, dry_run: bool = False, o
             reading.cancel()
         if pool is not None:
             pool.shutdown(wait=False)
-        raise SystemExit("\n".join([f"no sync base for presentation {pid}: convert the deck with this version first",
+        raise NoSyncBase("\n".join([f"no sync base for presentation {pid}:convert the deck with this version first",
                                     "  A deck this converter never made has one only where `adopt` wrote it: sync it "
                                     "with `--deck <the adopt work folder>`,",
                                     "  not with the deck's URL. `convert` would make a second deck and leave this one "

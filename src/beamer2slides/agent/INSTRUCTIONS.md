@@ -86,6 +86,10 @@ Every tool returns the same shape and never raises:
   an artifact also carries its own content (`text` or `base64`), its size and its `sha256`; one
   marked `"truncated": true` was over the cap and has to be asked for by `ref`.
 * `ok: false` always carries a `code`. Branch on the code, not on the words.
+* A `deck_sync` that wrote says how to undo it: the `.pptx` of the deck as it was is an artifact
+  of kind `pptx`, a Drive copy is `data["backup_copy"]`, and a way back that could not be made is
+  a diagnostic at `where: "backup"`. Tell the person when there is none. Where the workspace goes
+  away after the call, `backup="auto"` makes a Drive copy, since a file would go with it.
 
 ## Files: a name, or the file itself
 
@@ -111,6 +115,7 @@ by name if not - nothing here opens a socket to a host you chose.
 | --- | --- | --- |
 | `deck_edited` | Someone edited the deck; a rebuild would destroy that. | `deck_sync`, or `new_deck=True`, or ask. Never force. |
 | `no_base` | No record of what was last converted, so no three-way merge. | `deck_convert` creates one. Do not force a rebuild instead. |
+| `base_mismatch` | There is a base, but it describes none of this deck's slides: another copy's, or a deck rebuilt outside sync. | Check that `deck` names the deck you meant; otherwise ask the person how the deck came to be. Converting would make a second deck, not fix this one. |
 | `base_choice_needed` | A document with no base; one side must be assumed. | Ask the person which side. Guessing loses the other. |
 | `already_pushed` | The file already names a document. | `doc_sync`. |
 | `source_exists` | `deck_adopt` will not write over a source. | `deck_pull` refines an existing one. |

@@ -76,6 +76,20 @@ def _check_backup(mode: str) -> str:
     return mode
 
 
+def _way_back(j: Job, backup: str, needed: bool = True) -> str:
+    """The backup mode to pass the library: `backup`, except that `auto` in a context whose
+    workspace goes away with the call means a Drive copy.
+
+    `auto` is a .pptx under `<out>/backups/`, the way back that was measured to work - at a
+    terminal. In a detached context that folder is deleted when the call returns, so the file
+    would be written and then destroyed, silently, leaving a destructive write with no way back
+    at all. A Drive copy is a deck of its own with its own URL, which outlives any workspace.
+    `needed`: whether this write keeps one at all under `auto` (a rebuild only when forced)."""
+    if backup == "auto" and needed and j.ctx.ephemeral:
+        return "drive"
+    return backup
+
+
 def _classify_into(j: Job, source: Path, out: Path, overlays: str, debug_images: bool) -> tuple:
     """`__main__.cmd_classify`, without the printing and with the debug render made optional.
 
@@ -485,6 +499,7 @@ def _upload(j: Job, out_dir: Path, prepared: dict, title: str | None, new_deck: 
     croppable = source is not None or (out_dir / "slides.pdf").exists() \
         or Path(str((deck.get("source") or {}).get("pdf") or "")).is_file()
     j.data["can_crop_refused_elements"] = croppable
+    backup = _way_back(j, backup, needed=force_rebuild)
 
     try:
         state = emit(deck, out_dir, name, new_deck, measure, force_rebuild, backup, named, checked)
@@ -509,13 +524,18 @@ def _upload(j: Job, out_dir: Path, prepared: dict, title: str | None, new_deck: 
     })
 
     base_slides = None
+    problems: list[str] = []
     try:
         base = snapshot_after_convert(state["deck"], out_dir, state,
                                       source if source is not None else prepared.get("source"),
-                                      overlays)
+                                      overlays, problems=problems)
         base_slides = len(base["slides"])
         j.artifact(out_dir / "sync" / "base.json", "json",
                    "the sync base: what this conversion put in the deck")
+        # Printed, these were only the log: a conversion reported success with no base in Drive,
+        # and the person's first edit after it came back `no_base` with nothing here to say why.
+        for problem in problems:
+            j.warn(problem, where="sync base")
     except Exception as exc:  # noqa: BLE001 - the deck is complete; only a later sync needs the base
         j.warn(f"could not record the sync base ({type(exc).__name__}: {exc}); a later deck_sync "
                f"will refuse with no_base until this deck is converted again.", where="sync base")
@@ -649,10 +669,11 @@ def deck_sync(
     Costs 20-60 s and many Google calls. dry_run=True plans the whole merge and writes nothing,
     which is the right first call on any deck you did not just convert.
     """
-    from ..sync import sync as run_sync
+    from ..sync import BaseMismatch, NoSyncBase, sync as run_sync
 
     started = time.time()
     _check_backup(backup)
+    backup = _way_back(j, backup)
     if overlays not in (None, "last", "all"):
         raise Refused("bad_request", f"overlays={overlays!r} is not 'last', 'all' or unset.", overlays=overlays)
     if not dry_run:
@@ -679,16 +700,34 @@ def deck_sync(
     try:
         info = run_sync(source, target, out_dir, dry_run, overlays, measure, note, backup,
                         follow_labels=follow_labels, take_source=take_source or ())
-    except SystemExit as exc:
-        # `sync.sync` says no by exiting. Without a base there is nothing to merge against: the
-        # deck's own edits cannot be told apart from what the last conversion put there.
+    except NoSyncBase as exc:
+        # Without a base there is nothing to merge against: the deck's own edits cannot be told
+        # apart from what the last conversion put there.
         j.suggest("deck_convert to create the deck and its base, then sync from the next change on",
                   "check that `deck` names the folder or URL of a deck this workspace converted")
         raise Refused("no_base", str(exc.code) if exc.code not in (0, None) else
                       f"there is no sync base for {deck}, so a three-way merge is impossible",
                       deck=deck, out=j.ctx.workspace.ref(out_dir)) from None
+    except BaseMismatch:
+        # The opposite case, and the reason it has a code of its own: the deck exists and may
+        # well be edited, so `deck_convert` - the way forward from `no_base` - would make a
+        # second deck beside it, exactly what "never rebuild a deck somebody edited" is for.
+        # The library's own message says `convert` to a person at a terminal; not relayed.
+        j.suggest("check that `deck` names the deck this folder or base was converted into, not "
+                  "a copy of it",
+                  "ask the person whether this deck was copied or rebuilt outside sync; which deck "
+                  "the source belongs to is theirs to say")
+        raise Refused("base_mismatch",
+                      f"The sync base found for {deck} describes none of that deck's slides: it "
+                      f"belongs to another copy of the deck, or the deck was rebuilt outside sync. "
+                      f"Syncing would report every element as deleted, so nothing was written. Do "
+                      f"not convert to fix this - the deck exists, may hold someone's edits, and a "
+                      f"conversion would make a second one.",
+                      deck=deck, out=j.ctx.workspace.ref(out_dir)) from None
     if note and note.result():
         _cli().add_recovery(note.result(), info)
+    if note is not None:
+        _report_way_back(j, note.result())
 
     report = info["report"]
     for clash in report["conflicts"]:
@@ -763,6 +802,28 @@ def deck_sync(
                   "change the source where a conflict shows the deck is right")
 
 
+def _report_way_back(j: Job, note: dict | None) -> None:
+    """Say what was kept before this sync wrote, where a caller can branch on it.
+
+    `sync_point` collects its failures into the recovery note and prints the rest, and at a
+    terminal that is read. Here prints are the log, so a sync whose backup failed - or that
+    recorded no way back at all - would look exactly like one that kept it. The note goes into
+    `data["recovery"]` as before; this adds the diagnostics and the .pptx as an artifact, which is
+    also how a detached caller gets the file out before its workspace is removed."""
+    if note is None:
+        j.warn("no way back was recorded before this sync wrote to the deck: neither its revision "
+               "nor a backup (see the log)", where="backup")
+        return
+    backup = (note.get("entry") or {}).get("backup") or {}
+    for warning in backup.get("warnings", []):
+        j.warn(warning, where="backup")
+    if backup.get("file"):
+        j.artifact(backup["file"], "pptx", "the deck as it was before this sync")
+    if backup.get("drive"):
+        j.data["backup_copy"] = backup["drive"]
+    j.data["backup_mode"] = backup.get("mode")
+
+
 def _deck_arg(j: Job, deck: str) -> tuple[str, Path | None]:
     """A deck given as a workspace folder, or as a URL/id the workspace knows nothing about.
 
@@ -776,6 +837,12 @@ def _deck_arg(j: Job, deck: str) -> tuple[str, Path | None]:
     except Refused:
         return deck, None
     if path.is_dir():
+        if not (path / "emit.json").exists() and not (path / "sync" / "base.json").exists():
+            # `sync.resolve_deck` would exit; this is a folder that names no deck, not a deck
+            # with no base, and `no_base`'s advice (convert) would be a guess.
+            raise Refused("not_found", f"{deck} is a folder, but no conversion was written there "
+                                       f"(no emit.json, no sync/base.json), so it names no deck.",
+                          deck=deck)
         return str(path), path
     return deck, None
 

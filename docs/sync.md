@@ -1975,6 +1975,10 @@ Every sync writes one, so a folder synced often grows without end (the live suit
 delete and deletes nothing without `--yes`; it only ever touches files `backups.json` says this
 program wrote, and the log entry of a deleted file stays with `backup.deleted` - what the deck was,
 and when, is evidence worth keeping even when the way back is not (`guard.prune_backups`).
+`prune --drive` does the same for the Drive copies `--backup drive` leaves (an agent in a detached
+workspace makes one per sync): found by their `b2sBackupOf` tag, never a hand-made copy, and moved
+to Drive's trash rather than deleted, so a mistake comes back for 30 days
+(`guard.prune_drive_backups`).
 
 **A backup that did not happen stops the rebuild** (`guard.demand_way_back`). Drive can refuse both
 kinds: the `.pptx` export over 10 MB, the copy when the Drive is full or over quota; `backup_deck`
