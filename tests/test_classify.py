@@ -316,6 +316,47 @@ def test_an_inline_sum_between_words_is_part_of_its_formula_hole():
     assert len(holes_in) == 2 and all(e.get("anchor") for e in holes_in)
 
 
+def cell_texts(table: dict) -> list[list[str]]:
+    return [[paragraph_text({"runs": c}) for c in row] for row in table["cells"]]
+
+
+def test_a_booktabs_table_wider_than_half_the_page_is_a_table():
+    # Its rules looked like theme hairlines (is_decoration), so they stayed in the background
+    # and the cells became text boxes: "Monitor Workstation Mainframe" in one box, the "val"
+    # of one row inside the first column's box.
+    d = deck("27_text_fit")
+    for index, first, last in ((9, ["Dataset", "Split", "Images", "Classes"], ["Monitor", "Workstation", "12,345,678", "99"]),
+                               (10, ["Monitor", "Workstation", "Mainframe", "Total"], ["iii", "lll", "9,999", "0,000"]),
+                               (12, ["Quarter", "Revenue", "Cost", "Margin"], ["Q2 2026", "13,579,246.80", "10,864,197.53", "19.99%"])):
+        slide = d["slides"][index]
+        tables = [e for e in slide["elements"] if e["kind"] == "table"]
+        assert len(tables) == 1 and len(tables[0]["rules"]) == 3, index
+        assert cell_texts(tables[0])[0] == first and cell_texts(tables[0])[-1] == last
+        assert body_texts(slide)[:1] and all(t.startswith(("Table", "Text right")) for t in body_texts(slide)), body_texts(slide)
+        assert slide["left_in_background"] == []
+
+
+def test_a_wrapped_paragraph_cell_keeps_to_its_column():
+    # A p{3.2cm} cell wraps, justified: its word spaces are wider than the half em that parts
+    # two cells, so the table was refused (overlapping cells) and, as text boxes, the cell's
+    # first line joined the numbers beside it and reflowed across their column in Slides.
+    slide = deck("27_text_fit")["slides"][11]
+    tables = [e for e in slide["elements"] if e["kind"] == "table"]
+    assert len(tables) == 1
+    assert cell_texts(tables[0]) == [
+        ["", "", "Test results", ""],
+        ["Method", "Notes (wrapped on", "BLEU", "Time"],
+        ["", "purpose)", "", ""],
+        ["Baseline", "A cell set in a para-", "27.3", "12h"],
+        ["", "graph column, which", "", ""],
+        ["", "wraps in the PDF too", "", ""],
+        ["Ours", "Short note", "31.0", "14h"]]
+    assert tables[0]["merges"] == [{"row": 0, "col": 2, "rows": 1, "cols": 2, "align": "center"}]
+    assert [b["col"] for b in tables[0]["borders"]] == [2, 3]  # the \cmidrule under "Test results"
+    assert [e["kind"] for e in slide["elements"] if e["kind"] == "image"] == []
+    assert body_texts(slide) == ["Table 3: Translation quality on newstest2014, with a caption long enough to fill the line."]
+
+
 def test_tabular_without_rules_is_a_borderless_table():
     slide = deck("15_plain_tabular")["slides"][0]
     tables = [e for e in slide["elements"] if e["kind"] == "table"]

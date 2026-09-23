@@ -674,6 +674,45 @@ class PageClassifier:
             self.decor_ids.add(d["id"])
             self.decor_rects[span.id] = [r]
 
+    def table_hairlines(self) -> set[str]:
+        """Rules of a table wider than half the page, which `is_decoration` would take for theme
+        hairlines: two or more rules of one extent, touching no page edge, with rows of text
+        between them - at least two rows, one of them cells set more than an em apart - and no
+        text running out past their ends. (A \\centering booktabs table in a 4:3 frame is often
+        0.55-0.7 of the page wide; left as decoration its rules stayed in the background and its
+        cells became text boxes that overlapped and reflowed across columns.)"""
+        rules: dict[tuple[int, int], list[tuple[str, Rect]]] = {}
+        for d in self.page["drawings"]:
+            r = Rect.of(d["bbox"])
+            if d["id"] in self.decor_ids or r.w < 0.5 * self.W or \
+                    r.x0 <= 1 or r.y0 <= 1 or r.x1 >= self.W - 1 or r.y1 >= self.H - 1:
+                continue
+            if (d["type"] == "s" and d["items"] == "l" and r.h <= 1.0) or \
+                    (d["type"] == "f" and d["items"] == "re" and r.h <= 1.5):
+                rules.setdefault((round(r.x0), round(r.x1)), []).append((d["id"], r))
+        out: set[str] = set()
+        for group in rules.values():
+            if len(group) < 2:
+                continue
+            x0, x1 = min(r.x0 for _, r in group), max(r.x1 for _, r in group)
+            y0, y1 = min(r.cy for _, r in group), max(r.cy for _, r in group)
+            inside = [s for s in self.page["spans"] if s["text"].strip() and y0 < (s["bbox"][1] + s["bbox"][3]) / 2 < y1
+                      and s["bbox"][0] < x1 and x0 < s["bbox"][2]]
+            if not inside or any(s["bbox"][0] < x0 - 1 or s["bbox"][2] > x1 + 1 for s in inside):
+                continue
+            rows: list[list[dict]] = []
+            for s in sorted(inside, key=lambda s: s["origin"][1]):
+                if rows and abs(rows[-1][0]["origin"][1] - s["origin"][1]) <= 0.3 * s["size"]:
+                    rows[-1].append(s)
+                else:
+                    rows.append([s])
+            def cells_apart(row: list[dict]) -> bool:
+                row = sorted(row, key=lambda s: s["bbox"][0])
+                return any(b["bbox"][0] - a["bbox"][2] >= max(a["size"], b["size"]) for a, b in zip(row, row[1:]))
+            if len(rows) >= 2 and any(map(cells_apart, rows)):
+                out |= {i for i, _ in group}
+        return out
+
     def analyse_graphics(self) -> None:
         graphics = []
         rules: dict[tuple[int, int], list[Rect]] = {}
@@ -681,6 +720,7 @@ class PageClassifier:
         self.graphic_drawings: dict[str, Rect] = {}  # drawing id -> box, for the drawings among the graphics
         bar_ids: list[tuple[str, Rect]] = []
         self.graphic_paths: dict[tuple, dict] = {}  # graphic box -> its drawing
+        table_rules = self.table_hairlines()
         for d in self.page["drawings"]:
             if d["id"] in self.decor_ids:
                 continue
@@ -688,7 +728,7 @@ class PageClassifier:
             if r.w * r.h >= 0.95 * self.W * self.H:
                 continue  # page background
             fill_only = d["type"] == "f" and set(d["items"]) <= set("relcq")
-            if self.is_decoration(r) and not (fill_only and r.h >= 3 and r.w >= 0.25 * self.W):
+            if self.is_decoration(r) and not (fill_only and r.h >= 3 and r.w >= 0.25 * self.W) and d["id"] not in table_rules:
                 self.decorations.append(r)
                 continue
             if fill_only and r.w >= 0.25 * self.W and r.h >= 3:
@@ -2176,21 +2216,56 @@ class PageClassifier:
             return None
         grid_rows = [row for i, row in enumerate(rows) if i not in between]
 
-        def chunks_of(row: list[Span]) -> list[list[Span]]:
+        # A cell set in a paragraph column (p{3cm}) wraps: its next lines are rows of their own
+        # holding nothing but words in that column, starting where the cell starts, and its lines
+        # are justified, their word spaces stretched past the half em that parts two cells. Each
+        # such line is one chunk from the cell's left edge to its right: its words cut into
+        # chunks tangled the columns and the table was refused, and as text boxes the cell's
+        # first line joined the numbers beside it and reflowed across their column in Slides.
+        wrapped: dict[int, tuple[float, float]] = {}  # row index -> the cell's (x0, x1)
+
+        def phrase(spans: list[Span], x0: float) -> list[Span]:
+            out = []
+            for s in sorted(spans, key=lambda s: s.rect.x0):
+                if not out and abs(s.rect.x0 - x0) <= 0.5 or out and s.rect.x0 - out[-1].rect.x1 <= s.size:
+                    out.append(s)
+                elif out:
+                    break
+            return out
+
+        for i in range(len(rows) - 1):
+            j = i + 1
+            if i in between or j in between or base[j] - base[i] > 1.35 * size:
+                continue
+            x0 = min(s.rect.x0 for s in rows[j])
+            nxt, first = phrase(rows[j], x0), phrase(rows[i], x0)
+            if len(nxt) != len(rows[j]) or not first:
+                continue
+            x1 = max(first[-1].rect.x1, wrapped.get(i, (0, 0))[1])
+            if x1 < nxt[-1].rect.x1 - 0.5:
+                continue  # a paragraph's first line is full; this one ends short of the next
+            wrapped[i] = wrapped[j] = (x0, max(x1, nxt[-1].rect.x1))
+
+        def chunks_of(row: list[Span], i: int) -> list[list[Span]]:
             chunks: list[list[Span]] = []
+            cell = []
+            if i in wrapped:
+                x0, x1 = wrapped[i]
+                cell = sorted((s for s in row if s.rect.x0 >= x0 - 0.5 and s.rect.x1 <= x1 + 0.5), key=lambda s: s.rect.x0)
+                row = [s for s in row if s not in cell]
             for s in sorted(row, key=lambda s: s.rect.x0):
                 if chunks and s.rect.x0 - chunks[-1][-1].rect.x1 <= 0.5 * size and \
                         not any(chunks[-1][-1].rect.x1 < v["rect"].cx < s.rect.x0 for v in vertical):
                     chunks[-1].append(s)
                 else:
                     chunks.append([s])
-            return chunks
+            return sorted(chunks + [cell], key=lambda ch: ch[0].rect.x0) if cell else chunks
 
         # (row index in grid_rows, row span, chunk)
         items = []
         for i, row in enumerate(rows):
             r = sum(1 for j in range(i) if j not in between)
-            for ch in chunks_of(row):
+            for ch in chunks_of(row, i):
                 items.append((r - 1, 2, ch) if i in between else (r, 1, ch))
 
         def extent(ch):
@@ -2321,7 +2396,10 @@ class PageClassifier:
                 continue
             k = row_boundary(h["rect"].cy)
             for cc in range(n_cols):
-                if h["rect"].x0 <= bounds[cc] + 2.5 and h["rect"].x1 >= bounds[cc + 1] - 2.5:
+                # (\cmidrule(l) is trimmed by half an em at its left end: it still underlines
+                # every word of the column)
+                if (h["rect"].x0 <= bounds[cc] + 2.5 or h["rect"].x0 <= columns[cc][0] + 1) and \
+                        (h["rect"].x1 >= bounds[cc + 1] - 2.5 or h["rect"].x1 >= columns[cc][1] - 1):
                     borders.append({"row": min(k, n_rows - 1), "col": cc, "position": "TOP" if k < n_rows else "BOTTOM",
                                     "color": h["color"], "weight": round(h["weight"], 2), "y": round(h["rect"].cy, 2)})
         for v in vertical:
