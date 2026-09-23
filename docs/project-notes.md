@@ -4103,7 +4103,10 @@ What they found:
 - text_overflow of the policy slide's second text (7400, 7408, 7411).
 - The probe overlaps and overflows (7400-7405).
 - A person's own note box moved by 26-31 pt (loss oracle, user_object_moved, 7403 and 7407: the
-  box moved one way on probes-reword, then back on probes-push).
+  box moved one way on probes-reword, then back on probes-push). Resolved as an oracle false
+  positive: the "box" was a group the person made of a paragraph and its picture, and the source
+  moved both. A group's box is its children's union, so the oracle no longer judges it; each child
+  is judged on its own.
 
 **Blind spots.** `fuzz_reach` is a proxy: it says the stage was set, not that anything went
 wrong. `moved_overlapped` needs the boxes the person's objects carry after the sync, so a
