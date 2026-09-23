@@ -240,6 +240,10 @@ markers.
 - Slides table rows are at least 1.195 em x lineSpacing + 14.4 pt (7.2 pt cell padding, not
   settable); empty cells count with the default font unless given a styled space. A cell that
   wraps doubles its row and the table grows downwards over what is below.
+- Slides lowers a SUBSCRIPT 0.371 em of its *own* size (no other offset; a .pptx `baseline` is
+  rounded to SUBSCRIPT on import), so a subscript is set no larger than its paragraph's body text
+  (`emit.run_sizes`); a wrapped paragraph's pitch comes from each line's own largest run
+  (`emit.line_sizes`, `inner_pitch`).
 - Title placeholders exist before any other element: bring them to front after adding shapes.
 - Layout pages reject `pageBackgroundFill.propertyState = INHERIT`. Imported layout/master
   placeholders hold "\n" per list level: updateTextStyle works on them, insertText is refused. A
