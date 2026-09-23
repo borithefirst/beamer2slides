@@ -4,9 +4,10 @@ import random
 import threading
 import time
 import urllib.request
+from collections import Counter
 from pathlib import Path
 
-from .gapi import HttpError, is_transient
+from .gapi import HttpError, is_transient, status_of
 
 EMU_PER_PT = 12700
 
@@ -35,19 +36,48 @@ def emu(v_pt: float) -> dict:
     return {"magnitude": round(v_pt * EMU_PER_PT), "unit": "EMU"}
 
 
+# What `execute` did, for a harness to read (devtools/fuzz_sync.py): calls (attempts), retries, the
+# seconds slept backing off, how many retries were rate limits (429), and `call <methodId>` per
+# method. Observation only - nothing reads it to decide anything. `STATS` is the process's;
+# `count_thread()` hands a thread a Counter of its own that its calls add to as well, for a harness
+# running several jobs in threads.
+STATS: Counter = Counter()
+_STATS_LOCK = threading.Lock()
+_THREAD = threading.local()
+
+
+def count_thread() -> Counter:
+    """A fresh Counter that this thread's `execute` calls add to from now on."""
+    _THREAD.stats = Counter()
+    return _THREAD.stats
+
+
+def _count(by: dict) -> None:
+    mine = getattr(_THREAD, "stats", None)
+    with _STATS_LOCK:
+        STATS.update(by)
+        if mine is not None:
+            mine.update(by)
+
+
 def execute(request, retries: int = 6):
     """Run an API request, backing off on rate limits and transient server errors."""
     for attempt in range(retries):
+        _count({"calls": 1, f"call {getattr(request, 'methodId', None) or '?'}": 1})
         try:
             return request.execute()
         except HttpError as e:
             if not is_transient(e) or attempt == retries - 1:
                 raise
-            time.sleep(min(60, 2 ** attempt * 2) + random.random())
+            pause = min(60, 2 ** attempt * 2) + random.random()
+            _count({"retries": 1, "backoff_s": pause, "rate_limited": int(status_of(e) == 429)})
+            time.sleep(pause)
         except OSError:  # SSL EOFs and connection resets happen now and then
             if attempt == retries - 1:
                 raise
-            time.sleep(2 ** attempt + random.random())
+            pause = 2 ** attempt + random.random()
+            _count({"retries": 1, "backoff_s": pause})
+            time.sleep(pause)
 
 
 def text_box(object_id: str, page_id: str, x: float, y: float, w: float, h: float) -> dict:
