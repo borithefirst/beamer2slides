@@ -59,6 +59,13 @@ from the font's ascent and descent, `re`/`qu` path items, curves bounded by thei
 content order for characters, shadings reported as images on whole points) are part of the
 contract, and `api.trace` implements the path ones for any backend that can list path segments.
 
+Every `PageObject` carries its `clip`: the bounding box of its clip paths' points (as PDFium
+stores them, float32), intersected with the clips of the forms it is drawn in, page space; None
+when nothing clips it. PDFium drops a single-rectangle clip that holds the whole object
+(`CPDF_ContentParser::CheckClip`), so such an object's clip is None too. `extract.Visibility`
+uses it with the opaque fills and images painted later to leave out the text nobody sees
+(outside its clip, under a later opaque cover, at alpha 0); `pure` answers the same boxes.
+
 The requests are batched where the pipeline would otherwise make one call per item:
 `object_bounds()` gives every object's box at once (render's eraser looks at all of them) and
 `glyph_widths` takes a list (small-caps detection asks per character).

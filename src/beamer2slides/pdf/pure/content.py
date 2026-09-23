@@ -824,11 +824,10 @@ class _Run:
             self.add(obj, True, True)
             obj.rect = path_rect(obj)
         if clip_type != FILL_NONE:
-            pts = [transform(matrix, x, y) for x, y, _, _ in points]
-            box = point_bbox(pts) if pts else (0.0, 0.0, 0.0, 0.0)
-            s.clips = s.clips + (box,)
-            if not is_identity(matrix):
+            if not is_identity(matrix):  # the clip path's points as PDFium stores them: floats
                 points = [(*transform32(matrix, x, y), k, c) for x, y, k, c in points]
+            box = point_bbox(points) if points else (0.0, 0.0, 0.0, 0.0)
+            s.clips = s.clips + (box,)
             s.clip_paths = append_clip(s.clip_paths, tuple(points), clip_type)
 
     def op_f(self, args):
@@ -1245,9 +1244,9 @@ def check_clip(objects) -> None:
     """CPDF_ContentParser::CheckClip, run over one holder's objects (a page's top level, a form's
     direct children) when its content is parsed: an object whose only clip path is a rectangle
     containing the object's rectangle loses that clip. It changes pixels where the object's edge
-    lies on the clip's: an antialiased edge is then covered once, not twice. Only the clip the
-    renderer uses (`clip_paths`) is dropped; `clips`, which the extraction reads, is kept.
-    A clip with texts in it is kept whole."""
+    lies on the clip's: an antialiased edge is then covered once, not twice. The object has no
+    clip path left for FPDFPageObj_GetClipPath either (`clips`, PageObject.clip). A clip with
+    texts in it is kept whole."""
     for o in objects:
         if not o.active or len(o.clip_paths) != 1 or o.clip_texts or o.type == OBJ_SHADING:
             continue
@@ -1260,6 +1259,7 @@ def check_clip(objects) -> None:
         ol, orr, ob, ot = min(ol, orr), max(ol, orr), min(ob, ot), max(ob, ot)
         if ol >= l and orr <= r and ob >= b and ot <= t:
             o.clip_paths = ()
+            o.clips = None
 
 
 def form_rect(obj: PObj) -> tuple:
