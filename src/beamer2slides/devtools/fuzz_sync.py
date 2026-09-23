@@ -1560,6 +1560,8 @@ AIMS = {"long_text": _aim_long_text, "new_paragraph": _aim_new_paragraph, "hole"
 FOCUS = {"layout": {"long_text": 3, "new_paragraph": 2, "hole": 3, "move_text": 2, "note_below": 3,
                     "group_move": 2, "group_resize": 1, "group_pair": 1, "narrow": 1, "cell": 2,
                     "row": 2, "column": 1, "uniform": 3}}
+# the same aims, on a round that starts from the layout probe frames (`start_variant`)
+FOCUS["probes"] = FOCUS["layout"]
 AIMED = 0.75   # how often a focused edit goes to a slide the step's variant changes
 
 
@@ -1587,8 +1589,16 @@ REFLOWS = {"reword": 1, "addbullet": 1, "removebullet": 1, "formula": 1, "blocke
            "tablerow": 1, "numbers": 1, "tablecell": 0.5, "figure": 0.5, "retitle": 0.25, "untitled": 0.25}
 
 
+def start_variant(focus: str | None) -> str:
+    """The variant a round converts first: v1, or `probes` for --focus probes (the layout probe
+    frames of tests/decks/sync, which only its probes-* variants change)."""
+    return "probes" if focus == "probes" else "v1"
+
+
 def variant_weights(build, focus: str | None) -> dict[str, float]:
     """variant -> weight of being drawn: uniform by default, by what it re-lays when focused."""
+    if focus == "probes":
+        return {v: 1.0 for v in build.VARIANTS if v.startswith("probes-")}
     variants = [v for v in build.VARIANTS if v != "v1"]
     if not focus:
         return {v: 1.0 for v in variants}
@@ -1596,11 +1606,13 @@ def variant_weights(build, focus: str | None) -> dict[str, float]:
 
 
 def variant_slides(build, variant: str) -> set[str]:
-    """The v1 titles of the slides `variant` changes (build.INTENDED, whose items are
-    "<v1 title>: ..."; a slide it adds or deletes is no place for the person's edit)."""
+    """The titles of the slides `variant` changes (build.INTENDED, whose items are "<title>: ...",
+    and PROBE_INTENDED for the probe edits; a slide it adds or deletes is no place for the
+    person's edit)."""
     out = set()
+    intended = {**build.INTENDED, **{k: v for k, v in getattr(build, "PROBE_INTENDED", {}).items() if v}}
     for flag in build.VARIANTS[variant]:
-        for item in build.INTENDED.get(flag, []):
+        for item in intended.get(flag, []):
             if ": " in item and not item.startswith(("slide+", "slide-", "order ")):
                 out.add(item.split(": ", 1)[0])
     if "reorder" in build.VARIANTS[variant]:
@@ -1703,10 +1715,10 @@ class Template:
     def __init__(self, out: Path, log):
         self.out, self.log = out, log
 
-    def make(self, build):
-        """Convert v1 into `out` once (the deck is kept until `drop`)."""
+    def make(self, build, variant: str = "v1"):
+        """Convert `variant` into `out` once (the deck is kept until the run drops it)."""
         self.out.mkdir(parents=True, exist_ok=True)
-        done = subprocess.run([sys.executable, "-m", "beamer2slides", "convert", str(build.build("v1")),
+        done = subprocess.run([sys.executable, "-m", "beamer2slides", "convert", str(build.build(variant)),
                                "--out", str(self.out)], env=ENV, cwd=ROOT, stdout=self.log, stderr=subprocess.STDOUT)
         if done.returncode:
             raise RuntimeError(f"the template conversion failed, see {self.log.name}")
@@ -1776,7 +1788,7 @@ class LiveRound:
         """The round's v1 deck: converted, or copied from the template (`--reuse`)."""
         from .deck_edits import LiveDeck
         if self.template is None:
-            self.cli("convert", build.build("v1"), "--out", self.out)
+            self.cli("convert", build.build(start_variant(self.focus)), "--out", self.out)
             pid = None
         else:
             mark = self.cost.start("copy")
@@ -1929,13 +1941,20 @@ class LiveRound:
         self.after_step(base, before, after, report, pres_after, folder)
 
     def after_step(self, base, before, after, report, pres_after, folder: Path):
-        """What a step cost and which layout preconditions it reached (`fuzz_reach`), onto the step
-        record the judging lines above appended; and the read after the sync kept as the next
-        step's model. THE HOOK FOR THE LAYOUT ORACLE: it gets the same (base, before, after, report)
-        and `folder`, and belongs here or in the judging lines, with its failures in `problems`."""
+        """What a step cost, which layout preconditions it reached (`fuzz_reach`) and what the layout
+        oracle said of it (`layout.json`, written by the judging lines above: kind -> severity
+        counts), onto the step record; and the read after the sync kept as the next step's model.
+        The reach is the proxy, the oracle the verdict: a campaign whose reach is high and whose
+        findings stay at zero is one whose oracle to question next."""
         from . import fuzz_reach
         rec = self.record["steps"][-1]
         rec["cost"] = Cost.plain(self.cost.step or {})
+        try:
+            layout = json.loads((folder / "layout.json").read_text(encoding="utf-8"))
+            rec["layout"] = {f"{f['kind']}:{f['severity']}": sum(1 for g in layout if (g["kind"], g["severity"]) ==
+                                                                   (f["kind"], f["severity"])) for f in layout}
+        except (OSError, ValueError, KeyError, TypeError):
+            pass
         try:
             rec["reach"] = {k: v for k, v in fuzz_reach.step_reach(base, before, after, report).items() if v}
         except Exception as e:  # noqa: BLE001 (a proxy must never fail a round)
@@ -2081,13 +2100,15 @@ def summary(records: list[dict], wall: float, parallel: int) -> str:
     order = ("convert", "copy", "edits", "snapshot", "build", "sync", "judge")
     per = "  ".join(f"{k} {phases[k]['s'] / steps:.1f}" for k in order if k in phases)
     reach = Counter(p for r in records for s in r.get("steps") or [] for p in (s.get("reach") or {}))
+    layout = Counter(k for r in records for s in r.get("steps") or [] for k in (s.get("layout") or {}))
     from .fuzz_reach import PRECONDITIONS
     return (f"cost: {len(records)} rounds, {steps} steps in {wall:.0f} s at --parallel {parallel}: "
             f"{3600 * len(records) / max(wall, 1):.1f} rounds/h, {busy / steps:.1f} s per step (one round's clock)\n"
             f"  s per step by phase: {per}\n"
             f"  Google: {total['calls']:.0f} calls ({total['calls'] / steps:.0f}/step), {total['retries']:.0f} retries, "
             f"{total['rate_limited']:.0f} rate-limited, {total['backoff_s']:.0f} s backing off\n"
-            f"  reach (steps): " + ", ".join(f"{p} {reach[p]}" for p in PRECONDITIONS))
+            f"  reach (steps): " + ", ".join(f"{p} {reach[p]}" for p in PRECONDITIONS) + "\n"
+            f"  layout oracle (steps with a finding): " + (", ".join(f"{k} {n}" for k, n in sorted(layout.items())) or "none"))
 
 
 def run_live(rounds: int, seed0: int, parallel: int, chain: int, keep_decks: bool, out_root: Path, shrink: bool,
@@ -2098,7 +2119,7 @@ def run_live(rounds: int, seed0: int, parallel: int, chain: int, keep_decks: boo
     template = None
     if reuse:
         with open(out_root / "template.log", "w", encoding="utf-8") as log:
-            template = Template(out_root / "_template", log).make(sync_build())
+            template = Template(out_root / "_template", log).make(sync_build(), start_variant(focus))
     opts = {"edits": edits, "focus": focus, "template": template}
     try:
         with ThreadPoolExecutor(max_workers=parallel) as pool:
@@ -2149,7 +2170,9 @@ def main() -> int:
                          "(reread, the old way)")
     ap.add_argument("--focus", choices=sorted(FOCUS),
                     help="live: draw edits aimed at layout preconditions, on the slides the step's variant "
-                         "changes, and variants by how much they re-lay (default: uniform, as always)")
+                         "changes, and variants by how much they re-lay (default: uniform, as always); "
+                         "probes: the same aims on rounds that start from the layout probe frames and sync "
+                         "probes-reword / probes-push")
     ap.add_argument("--reuse", action="store_true",
                     help="live: convert v1 once and give each round a Drive copy of that deck (and its base)")
     ap.add_argument("--out", type=Path, default=Path(os.environ.get("B2S_FUZZ_OUT", ROOT / "out" / "sync-fuzz")))

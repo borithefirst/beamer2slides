@@ -197,6 +197,9 @@ def test_variant_weights_prefer_reflow_and_stay_uniform_by_default():
     focused = F.variant_weights(build, "layout")
     assert focused["table-row"] > focused.get("notes", 0.25)
     assert "Results" in F.variant_slides(build, "table-row")
+    assert F.start_variant("layout") == F.start_variant(None) == "v1" and F.start_variant("probes") == "probes"
+    assert set(F.variant_weights(build, "probes")) == {"probes-reword", "probes-push"}
+    assert F.variant_slides(build, "probes-push") == {"Room to grow", "Two boxes", "Display math"}
 
 
 def _unit(key, action="recreate", source=(), deck=()):
