@@ -531,6 +531,10 @@ def build_base(deck: dict, out: Path, pres: dict, state: dict, pdf: "Path | dict
     by_id = {s["objectId"]: s for s in read["slides"]}
     for entry, s in zip(entries, state["slides"]):
         attach_readback(entry, by_id.get(s["objectId"]), s.get("objects") or [[o] for o in s["elements"]], s.get("groups", []))
+        # The cell margins of a table the .pptx brought (emit.pptx_table), which the API can
+        # neither read nor set: a sync refills such a table in place (sync.table_refill).
+        for i, margins in (s.get("table_margins") or {}).items():
+            entry["elements"][int(i)]["table_margins"] = [list(m) for m in margins]
     return {"version": VERSION, "generation": generation, "presentationId": read["presentationId"],
             "revisionId": read["revisionId"], "source": source_info(pdf), "overlays": overlays,
             "scale": state.get("scale"),

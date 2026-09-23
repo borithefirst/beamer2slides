@@ -3451,3 +3451,15 @@ to 0; 16_colored_table pages 1-4 +0.02..0.05, bottom 0.9 -> 0; 11_research_talk 
 bottom 1.8 -> 0; 12_metropolis unchanged. What remains on 16's "Math in cells" (grown 3.9 -> 3.2 pt)
 is λ_max's subscript depth, not row height. Sync still creates API tables (a table cannot be copied
 across presentations; `DeckPlan(pptx_tables=False)`), so a table sync adds has the old padding.
+
+The live sync scenario `untouched` (v1 -> chain, whose `tablecell` changes 3.9 s to 4.7 s) then
+failed on Results: the synced thumbnail differed from a fresh conversion in 1.37% of pixels, rows
+~7 pt apart. A unit the source changed is recreated, and the recreated table was an API table
+beside the fresh conversion's .pptx one. Fix: emit's state and the base carry each imported
+table's margins (`table_margins`), and `sync.table_refill` keeps the table's object when the grid,
+merges, fills, margins (`emit.pptx_table` of the new IR) and corner are unchanged: the cells with
+text are emptied (deleteText per cell) and `table_requests(imported=True)` fills them. The object
+is treated like a placeholder refilled in place (kept out of the cleanup, its read-back saved in
+`pending.in_place`, no geometry override since it stays where the deck has it) and the new base
+keeps its margins. A base from before this change has none: its tables (API tables then) are
+still recreated. `tests/test_sync.py::test_a_table_whose_words_changed_is_refilled_in_place`.

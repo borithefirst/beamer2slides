@@ -2895,6 +2895,9 @@ def build_deck(slides, drive, deck: dict, out: Path, title: str, existing: str |
             objects, groups = element_objects(parts, element_ids)
             state["slides"].append({"page": n, "objectId": slide_id, "elements": element_ids, "objects": objects,
                                     "groups": groups})
+            if plan.pptx_tables:  # the base records them: a sync refills such a table in place (sync.table_refill)
+                state["slides"][-1]["table_margins"] = {str(i): pptx_table(el, plan.scale, plan.fonts)["margins"]
+                                                        for i, el in enumerate(slide["elements"]) if el["kind"] == "table"}
             kinds = [el["kind"] for el in slide["elements"]]
             print(f"  slide {n + 1}: {kinds.count('text')} text boxes, {kinds.count('image')} pictures, "
                   f"{kinds.count('shape')} shapes, {kinds.count('table')} tables")

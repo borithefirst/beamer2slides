@@ -2141,6 +2141,58 @@ def test_unit_rebuilt_inside_a_group_nested_in_a_user_group(tmp_path):
             assert all(x["updatePageElementsZOrder"]["operation"] == "BRING_TO_FRONT" for x in before)
 
 
+def test_a_table_whose_words_changed_is_refilled_in_place(tmp_path):
+    """The source changed one cell of a table convert brought with the .pptx: the table keeps its
+    object (and the cell margins the API can't set) and only its cells are rewritten; a table
+    whose margins no longer fit (or with no margins recorded: made by createTable) is made again."""
+    from collections import defaultdict
+    from beamer2slides.emit import pptx_table
+    from beamer2slides.sync import Sync, build_ours
+    v1, new = SYNC_DECKS / "v1.pdf", SYNC_DECKS / "tablecell.pdf"
+    if not v1.exists() or not new.exists():
+        pytest.skip("build the sync test talk first (tests/decks/sync/build.py)")
+    first = build_ours(v1, tmp_path / "v1", {"slides": []})
+    second = build_ours(new, tmp_path / "new", {"slides": []})
+    j = next(k for k, o in enumerate(second["slides"]) if o["title"] == "Results")
+    jb = next(k for k, o in enumerate(first["slides"]) if o["title"] == "Results")
+    scale, fonts = first["plan"].scale, first["plan"].fonts
+
+    def run(margins):
+        s = Sync.__new__(Sync)
+        s.ours, s.plan, s.scale, s.tok, s.warnings = second, second["plan"], second["plan"].scale, "1zz", []
+        s.urls = defaultdict(lambda: "https://example.com/staged.png")
+        base_slide_ = copy.deepcopy(first["slides"][jb])
+        objects = {}
+        for e in base_slide_["elements"]:
+            oid = f"OLD_{e['key'].replace('/', '_')}"
+            rb = readback([0, 0, 10, 10], "x")
+            if e["kind"] == "table":
+                cells = [["".join(r["text"] for r in cell).strip() for cell in row] for row in e["ir"]["cells"]]
+                rb = {**readback([0, 0, 10, 10], "\n".join("\t".join(row) for row in cells), kind="table"),
+                      "table": [len(cells), len(cells[0])]}
+                e["table_margins"] = margins(e)
+            e.update(main=oid, objects=[oid], readback={oid: rb})
+            objects[oid] = rb
+        s.base = {"slides": [base_slide_]}
+        key = next(e["key"] for e in base_slide_["elements"] if e["kind"] == "table")
+        plan = {"key": "results", "base": 0, "ours": j, "objectId": "LIVE", "units": [
+            {"key": key, "action": "recreate", "ours_members": [key], "base_members": [key], "overrides": {}}]}
+        w = {"plan": plan, "units": []}
+        return s, w, s.update_slide(w, {"objects": objects, "notes": "", "notes_id": None}, {}, {}), f"OLD_{key.replace('/', '_')}"
+
+    s, w, reqs, old = run(lambda e: [list(m) for m in pptx_table(e["ir"], scale, fonts)["margins"]])
+    assert not [r for r in reqs if "createTable" in r]
+    assert old not in s.cleanup_ids and old in w["new_oid"].values()
+    cleared = [r["deleteText"] for r in reqs if "deleteText" in r]
+    assert cleared and all(d["objectId"] == old and "cellLocation" in d for d in cleared)
+    assert any(r["insertText"]["text"] == "4.7 s" for r in reqs if "insertText" in r and r["insertText"]["objectId"] == old)
+    assert not [r for r in reqs if "updateTableRowProperties" in r and r["updateTableRowProperties"]["objectId"] != old]
+
+    for margins in (lambda e: None, lambda e: [[m[0], m[1] + 3, m[2], m[3]] for m in pptx_table(e["ir"], scale, fonts)["margins"]]):
+        s, w, reqs, old = run(margins)
+        assert [r for r in reqs if "createTable" in r] and old in s.cleanup_ids
+
+
 def _picture_files(folder: Path, transparent: bool, mark=(10, 5, 40, 15), ground=(255, 255, 255)):
     """A small picture on a transparent or a painted ground, written to <folder>/figures/f1.png."""
     from PIL import Image, ImageDraw

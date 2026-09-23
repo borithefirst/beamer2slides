@@ -199,6 +199,42 @@ def restore_in_place(theirs: dict, saved: dict) -> list[str]:
     return back
 
 
+def table_refill(base_el: dict | None, el: dict, objects: dict, scale: float, fonts) -> dict | None:
+    """A table the source rewrote that can be refilled where it is: {"id", "margins", "cells"}, or
+    None when it has to be made again.
+
+    A table `convert` wrote came with the .pptx and carries cell margins (`emit.pptx_table`) the API
+    can neither read nor set, and that keep the PDF's row pitch; one made by createTable has 7.2 pt
+    above and below every line (docs/calibration.md "Table cells"), so a recreated table's rows sit
+    up to ~7 pt from where a fresh conversion puts them. The base records the margins
+    (`table_margins`), and when the grid, the merges, the fills, the margins and the table's corner
+    are what the source's new version needs, only the words change: the cells are emptied and
+    filled as emit fills an imported table. `cells`: the (row, column) of cells with text now."""
+    from .emit import pptx_table
+    if not base_el or el.get("kind") != "table" or base_el.get("kind") != "table":
+        return None
+    old, margins = base_el.get("ir") or {}, base_el.get("table_margins")
+    live = objects.get(base_el.get("main"))
+    if not margins or not live or "cells" not in old:
+        return None
+    dims = [len(el["cells"]), len(el["columns"])]
+    if list(live.get("table") or []) != dims or [len(old["cells"]), len(old["columns"])] != dims:
+        return None  # (a row or column added on either side)
+    if old.get("merges", []) != el.get("merges", []) or old.get("fills", []) != el.get("fills", []):
+        return None  # (a merge or a fill can't be taken back by filling cells)
+    grid = merge.table_grid(live.get("text"), live.get("table"))
+    if grid is None:
+        return None
+    new, was = pptx_table(el, scale, fonts), pptx_table(old, scale, fonts)
+    if len(new["margins"]) != len(margins) or \
+            any(abs(a - b) > 0.05 for m, n in zip(new["margins"], margins) for a, b in zip(m, n)):
+        return None
+    if abs(new["x"] - was["x"]) > 0.5 or abs(new["y"] - was["y"]) > 0.5:
+        return None  # (the source moved it: made again where it now goes)
+    return {"id": base_el["main"], "margins": new["margins"],
+            "cells": [(r, c) for r, row in enumerate(grid) for c, text in enumerate(row) if text]}
+
+
 def drop_objects(pres: dict, objects, slides) -> dict:
     """A presentations.get without these page elements and slides (leftovers of an interrupted
     sync): everything downstream then plans as if they had never been created."""
@@ -1289,7 +1325,7 @@ class Sync:
         if sub_idx is not None and sub_idx not in in_place:
             slide_copy["title_page"] = False
         page_elements = {vsid: [{"objectId": f"{vsid}_t{i}", "size": {"width": emu(v["size"][0]), "height": emu(v["size"][1])}}
-                                for i, v in in_place.items()]}
+                                for i, v in in_place.items() if not v.get("table")]}
         keys = self.plan.keys
         sizes = [(templates[k]["w"], templates[k]["h"]) if k in templates else (STAND_IN, STAND_IN) for k in keys]
         parts, element_ids = self.plan.slide_parts(slide_copy, page_elements, {}, moves, sizes)
@@ -1332,7 +1368,15 @@ class Sync:
                     "transform": {"scaleX": 1, "scaleY": 1, "unit": "EMU", "translateX": round(x0 * EMU_PER_PT),
                                   "translateY": round(y0 * EMU_PER_PT)}}}},
                       letterbox_fix(new_oid[i], box, png_size(path))] + rs
-            if i in in_place and in_place[i].get("text"):
+            if i in in_place and in_place[i].get("table"):
+                # Refilled where it is (`table_refill`): its cells emptied, then filled as emit
+                # fills a table the .pptx brought, whose margins this one has.
+                from .emit import table_requests
+                rs = [{"deleteText": {"objectId": new_oid[i], "cellLocation": {"rowIndex": r, "columnIndex": c},
+                                      "textRange": {"type": "ALL"}}} for r, c in in_place[i]["cells"]] + \
+                     [r for r in table_requests(self.plan.placed(slide["elements"][i], n), sid, new_oid[i], self.scale,
+                                                self.plan.fonts, imported=True) if "updatePageElementsZOrder" not in r]
+            elif i in in_place and in_place[i].get("text"):
                 rs = [{"deleteText": {"objectId": new_oid[i], "textRange": {"type": "ALL"}}}] + rs
             out = []
             for r in rs:  # a duplicated live object brings its text along: clear it
@@ -1485,6 +1529,13 @@ class Sync:
                     in_place[title_idx] = {"id": main, "size": objects[main]["size"],
                                            "text": (objects[main].get("text") or "").strip()}
                     break
+        # A table whose words alone changed is refilled where it is (`table_refill`).
+        for u in recreated:
+            if u["action"] == "recreate" and len(u["ours_members"]) == 1 and len(bunits.get(u["key"], [])) == 1:
+                i = index[u["ours_members"][0]]
+                refill = table_refill(bunits[u["key"]][0], slide["elements"][i], objects, self.scale, self.plan.fonts)
+                if refill:
+                    in_place[i] = {**refill, "table": True}
 
         # Template shapes: duplicate a live object with the same key on this slide, else a stand-in.
         needed = {k for u in recreated for mk in u["ours_members"] for k in element_template_keys(slide["elements"][index[mk]], self.scale)}
@@ -2005,7 +2056,8 @@ class Sync:
                             self.warnings.append(f"slide {p['key']}: {u['key']}: the deck's word styles could not be re-applied")
                 if "shape_style" in ov and ov["shape_style"]:
                     reqs += shape_style_requests(main, ov["shape_style"])
-                if "geometry" in ov and top in n_read["objects"]:
+                if "geometry" in ov and top in n_read["objects"] and not (w.get("in_place") or {}).get(i, {}).get("table"):
+                    # (a table refilled in place is still where, and as large as, the deck has it)
                     old_top = merge.unit_top(bunits[u["key"]], t_read) or old_main
                     base_rb = next((m["readback"].get(old_top) for m in bunits[u["key"]] if old_top in m.get("readback", {})), None)
                     theirs_rb = t_read["objects"].get(old_top)
@@ -2091,6 +2143,8 @@ class Sync:
                         for mk in u["ours_members"]:
                             i = index[mk]
                             elements.append(self._element(o["elements"][i], w["objects"].get(i, [w["new_oid"][i]]), read))
+                            if (w.get("in_place") or {}).get(i, {}).get("table"):  # (still the .pptx's table: `table_refill`)
+                                elements[-1]["table_margins"] = [list(m) for m in w["in_place"][i]["margins"]]
                     elif a == "move":
                         for m in ounits[u["key"]]:
                             old = next((x for x in bunits[u["key"]] if x["key"] == m["key"]), None)
@@ -2098,7 +2152,8 @@ class Sync:
                                 continue
                             rb = {oid: {**v, **{k: read["objects"][oid][k] for k in ("box", "transform")}}
                                   if read and oid in read["objects"] else v for oid, v in old["readback"].items()}
-                            elements.append({**m, "objects": old["objects"], "main": old["main"], "readback": rb})
+                            elements.append({**m, "objects": old["objects"], "main": old["main"], "readback": rb,
+                                             **{k: old[k] for k in ("table_margins",) if k in old}})
                     elif a == "adopt_object":
                         # the deck's own object is what the source now draws (a picture pull put in the source)
                         for mk in u["ours_members"]:
@@ -2117,7 +2172,8 @@ class Sync:
                             if live_obj and old.get("main") in rb:
                                 for f in u.get("adopt", []):
                                     rb[old["main"]].update({k: live_obj[k] for k in fields.get(f, ()) if k in live_obj})
-                            elements.append({**m, "objects": old["objects"], "main": old["main"], "readback": rb})
+                            elements.append({**m, "objects": old["objects"], "main": old["main"], "readback": rb,
+                                             **{k: old[k] for k in ("table_margins",) if k in old}})
                     elif a in ("keep",):
                         # A unit kept because the source dropped it says so, or the next sync reads
                         # a deck that no longer differs from the base and deletes it (merge.plan_unit).
