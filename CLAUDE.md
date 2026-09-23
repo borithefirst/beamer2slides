@@ -165,6 +165,10 @@ Debugging classification locally: `debug/slide-NNN.png` (element boxes over the 
   such. Benchmark: `devtools/adopt_bench.py` (29 public decks).
 - **Occlusion**: nothing a sync creates may end up over words only the deck has
   (`sync.would_hide`, `Sync.restack`); the fuzz applier mirrors it and must be fixed together.
+  The person's own objects are never moved: when the source's words or pictures now run over one,
+  the report says so (`Sync.warn_about_overruns`, `text_layout.overruns`, report `overruns`).
+- A unit kept for a conflict (the deck's words win) still goes where the source moved it
+  (`merge.plan_unit` -> `move`); only a person's own move of it outranks the source's.
 - Proving nothing is lost: `tools/loss_oracle.py` judges one sync; `tools/fuzz_sync.py offline`
   fuzzes the merge through a reference applier (`fuzz_world.py`), `live` against real decks;
   `tools/fuzz_labels.py` measures label pairing. Fixed seeds in `tests/test_sync_fuzz.py`.

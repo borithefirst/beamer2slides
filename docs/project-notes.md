@@ -4112,3 +4112,35 @@ What they found:
 wrong. `moved_overlapped` needs the boxes the person's objects carry after the sync, so a
 recreated user object is not seen. `table_grows` has no table geometry, like the layout oracle.
 Per-variant attribution is mixed after step 0, because the base is then the previous variant.
+
+## Live fuzz on merged main (2026-09-23)
+
+After the layout campaign merged (2d7a791; full live sync suite 69/69), two focused live
+campaigns ran on main: `--focus probes --reuse`, 8 rounds x 3 steps (seeds 7408-7415), and
+`--focus layout --reuse`, 12 rounds x 3 steps (seeds 8000-8011). About 30 s per step at
+parallel 3+4 together, with 45 rate-limited calls and 287 s of backoff over the probes run: two
+campaigns at once are over the write quota even at 600 per minute per user. What they found:
+
+- **The person's arrangement carried back (oracle).** r7413: the person moved a paragraph up 30 pt
+  onto the title; probes-push moved it down (apart), probes-reword back up, and carried geometry
+  put it exactly where the person had it. The oracle compared against `before` only and called
+  it introduced. Now a pair of converter elements, one of which carries the person's move, is
+  excused when their `before` ink moved by the source's own move of each (`Pair.carried_rects`,
+  in the oracle's own layout model; the title placeholder is laid out 5 pt lower than the PDF
+  draws it, so the PDF ink could not be used) meets already.
+- **The source running over the person's own note (sync reports it).** r7411, r7414, r8002: a
+  note the person put under a paragraph or a figure; the source adds a line or lengthens the words
+  and they run 8-16 pt over it. Sync never moves the person's own objects (docs/sync.md), and
+  guessing what a note belongs to is the kind of guess the project refuses, so it is said:
+  `Sync.warn_about_overruns` reads the deck once after the last write (only when a written slide
+  has such an object) and `text_layout.overruns` finds each one the source's text or pictures now
+  meet by 2 pt that they did not meet before. The report lists them under `overruns`, and the
+  layout oracle makes such a finding a note only when the report names the object. Over the old
+  archives the check names 22 such cases, 19 of which the oracle had excused as already touching.
+- **A kept unit dropped the source's move (sync bug).** r8006 (table-moved): the source moved the
+  results table and changed a cell, the person inserted a row; the text conflict kept the deck's
+  table, and `plan_unit`'s `keep` kept its place too, so the caption the source added where the
+  table had stood landed on it (5.1 pt). A keep now becomes a `move` when the source moved the
+  whole unit by one step and the person did not move it.
+- The number ball over its text (7400, 7403) was seen on a thumbnail; no oracle kind covers a
+  ball over its own line, so these campaigns could not say whether it is still there.

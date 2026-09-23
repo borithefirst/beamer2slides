@@ -936,6 +936,21 @@ def anchored_picture_base():
     return base, pic
 
 
+def test_a_unit_kept_for_a_conflict_still_moves_where_the_source_moved_it():
+    """Live fuzz r8006 (table-moved): the source moved the results table and changed a cell, the
+    person added a row; the table's words were the deck's to keep, and the unit kept where it stood,
+    under the caption the source now puts where the table was. Where it stands is the source's alone."""
+    base = three_slides()
+    ours, theirs = triple(base)
+    ours["slides"][1]["elements"][1] = ours_entry("text/body/0", text_ir("First point, as the source says\nSecond point of results",
+                                                                         (20, 80, 200, 110), "p1t1"))
+    edit_text(theirs["slides"][1], "b2s_s001_t1", "First point, as the deck says\nSecond point of results\n")
+    mplan = merge.plan_merge(base, ours, theirs)
+    u = unit(mplan, "results", "text/body/0")
+    assert u["action"] == "move" and u["delta"] == [0, 20]
+    assert [c["field"] for c in mplan["report"]["conflicts"] if c["element"] == "text/body/0"] == ["text"]
+
+
 def test_member_moved_alone_is_recreated_not_moved():
     """Found by the offline fuzz (tools/fuzz_sync.py, seeds 252 and 430): the source re-placed the
     inline formula picture inside its line while the deck edited that paragraph. Sync writes a

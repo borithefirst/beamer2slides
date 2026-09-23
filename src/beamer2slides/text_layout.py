@@ -275,6 +275,67 @@ def text_box(rb: dict) -> bool:
     return rb.get("kind") == "shape" and (st.get("type") == "TEXT_BOX" or bool(rb.get("placeholder")))
 
 
+def ink(rb: dict) -> list[list[float]] | None:
+    """Where an object puts ink, slide pt: a text box's laid-out lines, a picture's box; None for
+    anything else or what the model cannot lay out."""
+    if not rb.get("box") or not upright(rb):
+        return None
+    if rb.get("kind") == "image":
+        return [list(rb["box"])]
+    if text_box(rb):
+        lay = layout(rb)
+        return None if lay is None else [ln["box"] for ln in lay["lines"] if ln["box"][2] - ln["box"][0] > 0.5]
+    return None
+
+
+def meet(ra: list, rb: list, tol: float) -> tuple[float, int, int] | None:
+    """The deepest overlap of two lists of rectangles: (its lesser side in pt, index in ra, index in
+    rb), or None when no two overlap by `tol` pt each way."""
+    best = None
+    for i, a in enumerate(ra):
+        for j, b in enumerate(rb):
+            w = min(a[2], b[2]) - max(a[0], b[0])
+            h = min(a[3], b[3]) - max(a[1], b[1])
+            if w >= tol and h >= tol and (best is None or min(w, h) > best[0]):
+                best = (min(w, h), i, j)
+    return best
+
+
+OVERRUN_MIN = 2.0   # pt each way before the source's ink counts as over a person's object
+
+
+def overruns(before: dict, after: dict, users: set[str], skip: set[str] = frozenset()) -> list[dict]:
+    """The person's own objects (`users`, untouched by the sync) that the source's text or pictures
+    now run over, where they did not before: {"object", "other", "depth"}, the deepest per object.
+    One side is always text (a picture on a picture is a collage, not an accident). `skip`: objects
+    about to be deleted."""
+    def deepest(read: dict, inks: dict, u: str) -> tuple[float, str] | None:
+        picture = read["objects"][u].get("kind") == "image"
+        best = None
+        for o, r in inks.items():
+            if o == u or o in users or not r or (picture and read["objects"][o].get("kind") == "image"):
+                continue
+            m = meet(inks[u], r, OVERRUN_MIN)
+            if m and (best is None or m[0] > best[0]):
+                best = (m[0], o)
+        return best
+
+    out = []
+    inks_a = {o: ink(rb) for o, rb in after["objects"].items() if o not in skip}
+    inks_b = {o: ink(rb) for o, rb in before["objects"].items()}
+    for u in sorted(users):
+        ua, ub = after["objects"].get(u), before["objects"].get(u)
+        if ua is None or ub is None or not inks_a.get(u) or ua.get("box") != ub.get("box"):
+            continue
+        now = deepest(after, inks_a, u)
+        if now is None:
+            continue
+        was = deepest(before, inks_b, u) if inks_b.get(u) else None
+        if was is None or now[0] > was[0] + OVERRUN_MIN:
+            out.append({"object": u, "other": now[1], "depth": round(now[0], 1)})
+    return out
+
+
 def filled(rb: dict) -> bool:
     """A shape that hides what is under it (a block's panel): an opaque fill, and not a text box."""
     fill = (rb.get("shape_style") or {}).get("fill") or {}

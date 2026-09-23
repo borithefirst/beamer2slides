@@ -201,6 +201,8 @@ class Pair:
                  ours_slide: list | None, have_ours: bool, unsure: bool, scale: float, place, page):
         from beamer2slides import merge
         self.skey, self.base_slide, self.page = skey, base_slide, page
+        self.ours_slide, self.place = ours_slide, place
+        self.told: set[str] = set()    # the person's objects the report says the source ran over
         if before is None:
             user = set()
         elif base_slide is None:
@@ -225,6 +227,34 @@ class Pair:
     def ours_rects(self, oid: str) -> list | None:
         k = self.va.key(oid)
         return self.inks.get(k) if k else None
+
+    def source_shift(self, oid: str) -> tuple[float, float] | None:
+        """How far the source moved `oid`'s element (its IR frame, base -> ours, deck pt); None when
+        either side has no frame for it."""
+        k = self.va.key(oid)
+        if not k or self.base_slide is None or not self.ours_slide or self.place is None:
+            return None
+
+        def frame(els):
+            ir = (next((e for e in els if e["key"] == k), None) or {}).get("ir") or {}
+            return ir.get("frame") or ir.get("bbox")
+        fb, fo = frame(self.base_slide["elements"]), frame(self.ours_slide)
+        if not fb or not fo:
+            return None
+        s = self.place[0]
+        return s * (fo[0] - fb[0]), s * (fo[1] - fb[1])
+
+    def carried_rects(self, oid: str) -> list | None:
+        """Where carrying the deck as it was onto the source's move puts `oid`'s ink: its `before`
+        ink moved as the source moved its element (a person's own object: not at all). What sync
+        writes for a unit the person moved (`sync.carried`), in this oracle's own layout model."""
+        olds = self.before_parties(self.va.name[oid])
+        if not olds:
+            return None
+        d = (0.0, 0.0) if self.va.name[oid].startswith("obj:") else self.source_shift(oid)
+        if d is None:
+            return None
+        return [[r[0] + d[0], r[1] + d[1], r[2] + d[0], r[3] + d[1]] for p in olds for r in p["rects"]]
 
     def history(self, oid: str) -> dict:
         """What happened to one object in this sync, for the finding's reader (and the fuzzer)."""
@@ -298,11 +328,25 @@ def overlap_findings(sp: Pair) -> list[dict]:
             if ra and rb_ and meet(ra, rb_, 0.5):
                 sp.reached["overlap: the conversion draws it"] += 1
                 continue  # the new conversion draws them so
+            hist = [sp.history(a), sp.history(b)]
+            if all(h["was"] == "converter" for h in hist) and any("person_moved" in h["how"] for h in hist):
+                ca, cb = sp.carried_rects(a), sp.carried_rects(b)
+                if ca and cb and meet(ca, cb, 0.5):
+                    # the person's own arrangement carried onto the source's moves, as sync must:
+                    # live fuzz r7413, a paragraph the person moved up onto the title, which the
+                    # source moved away and then back.
+                    sp.reached["overlap: the person's move draws it"] += 1
+                    continue
             sp.reached["overlap: judged"] += 1
             new = olds_a is None or olds_b is None
             beyond = pa["beyond"][i] or (pb["kind"] == "text" and pb["beyond"][j])
             # two texts' ink bands are glyphs (a picture's box has margins): 2 pt of them is touching
             sev, why = sp.severity(depth, needs_ours=new, least=OVERLAP_MIN if pb["kind"] == "text" else None)
+            if sev == "fail" and {a, b} & sp.told:
+                # the source ran over the person's own object, which sync never moves: the report
+                # says so (`sync.warn_about_overruns`), and that is all it can do
+                sev, why = "note", " - the report says so"
+                sp.reached["overlap: reported overrun"] += 1
             kind = "text_overflow" if beyond else "text_overlap"
             ra_, rb2 = va.read["objects"][a], va.read["objects"][b]
             detail = (f"{_text(ra_)!r} and {pb['kind']} {(_text(rb2) or b)!r} overlap by {depth:.1f} pt"
@@ -512,10 +556,13 @@ def pairs(base: dict, before: dict | None, after: dict, report: dict | None, our
     base_by_id = {s["objectId"]: s for s in base["slides"] if s.get("objectId")}
     before_by_id = {s["objectId"]: s for s in (before or {}).get("slides", [])}
     ours_by_key = {s["key"]: s["elements"] for s in (ours or {}).get("slides", [])}
+    told = {o["object"] for o in (report or {}).get("overruns") or []}
     for a in after["slides"]:
         skey = _slide_key(a, base_by_id, list(ours_by_key))
-        yield Pair(skey, base_by_id.get(a["objectId"]), before_by_id.get(a["objectId"]) if before else None, a,
-                   ours_by_key.get(skey), ours is not None, skey in unsure, scale, place, page)
+        sp = Pair(skey, base_by_id.get(a["objectId"]), before_by_id.get(a["objectId"]) if before else None, a,
+                  ours_by_key.get(skey), ours is not None, skey in unsure, scale, place, page)
+        sp.told = told
+        yield sp
 
 
 def check(base: dict, before: dict, after: dict, report: dict | None = None, ours: dict | None = None,

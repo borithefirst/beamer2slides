@@ -921,6 +921,7 @@ class Sync:
         self.tok = self.token()
         self.sent: dict[str, int] = {}
         self.warnings: list[str] = []
+        self.overruns: list[dict] = []        # warn_about_overruns, for the report
         self.urls: dict[str, str] = {}  # picture file (str) -> contentUrl from the staging deck
         self.recovery: dict = {}        # what an interrupted earlier sync left (plan_recovery)
         self.cleanup_ids: list[str] = []      # old objects and slides, deleted after everything else
@@ -2128,7 +2129,43 @@ class Sync:
             rev = self.send("overrides", overrides, rev)
             rev = self.refit(work, theirs, now, rev)
         self.final_revision = rev
+        self.warn_about_overruns(work, theirs)
         return rev
+
+    def warn_about_overruns(self, work: dict, theirs: dict) -> None:
+        """The person's own objects, which sync never moves, that the source's words or pictures
+        now run over (`text_layout.overruns`): the source reflowed onto a note the person put under a
+        paragraph. Moving the note would guess at what it belongs to, so it is said instead (live
+        fuzz r7411, r7414). One read of the deck, only when a written slide holds such an object."""
+        from . import text_layout as tl
+        before = {s["objectId"]: s for s in theirs["slides"]}
+        todo = {}
+        for w in work["slides"]:
+            p = w["plan"]
+            b = before.get(p.get("objectId"))
+            if p["action"] != "update" or b is None or \
+                    all(u["action"] in ("keep", "none") for u in p.get("units", [])):
+                continue
+            users = {u["objectId"] for u in merge.user_objects(self.base["slides"][p["base"]], b)}
+            if any(tl.ink(b["objects"][u]) for u in users if u in b["objects"]):
+                todo[p["objectId"]] = (p["key"], users)
+        if not todo:
+            return
+        def say(rb: dict) -> str:
+            words = (rb.get("text") or "").strip().replace("\n", " ")[:40]
+            return f"text {words!r}" if words else "picture"
+
+        final = snapshot.read_presentation(self.read())
+        for s in final["slides"]:
+            if s["objectId"] not in todo:
+                continue
+            key, users = todo[s["objectId"]]
+            for o in tl.overruns(before[s["objectId"]], s, users, set(self.cleanup_ids)):
+                self.overruns.append({"slide": key, **o})
+                mine, theirs_ = before[s["objectId"]]["objects"][o["object"]], s["objects"][o["other"]]
+                self.warnings.append(
+                    f"slide {key}: the source's {say(theirs_)} now runs {o['depth']:.0f} pt over your {say(mine)}, "
+                    "which stays where you put it (sync never moves your own objects): move one of them")
 
     def refit_jobs(self, work: dict, theirs: dict, created: dict) -> dict[str, list[dict]]:
         """Slide id -> the recreated text units whose deck edits `override_requests` wrote over
@@ -2855,6 +2892,7 @@ def sync(pdf: Path, deck: str, out: Path | None = None, dry_run: bool = False, o
     report["warnings"] += s.warnings + warnings + unwritten_warnings(
         [u for u in ours.get("context_unwritten") or [] if u["slide"] in updated], ours)
     report["converged"] += [{**r, "field": "image", "how": "the same picture, written differently"} for r in refreshed]
+    report["overruns"] = s.overruns
     info = {"pdf": str(pdf), "presentationId": pid, "url": f"https://docs.google.com/presentation/d/{pid}/edit",
             "dry_run": dry_run, "base_from": where, "generation": base.get("generation", 0), "overlays": overlays,
             "attempts": result["attempts"], "requests": s.sent, "seconds": 0.0,

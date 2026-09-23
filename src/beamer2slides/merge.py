@@ -902,6 +902,13 @@ def plan_unit(skey: str, ukey: str, base_members: list[dict] | None, ours_member
     if keep:
         if edited:
             report["overrides"].append({**where, "fields": sorted(edited)})
+        if "position" in src and "geometry" not in edited and shift:
+            # The deck's version of what the unit says stands, but where it stands is the source's
+            # alone to change: the source moved the table the person had added a row to, and the
+            # unit kept in place left the source's new caption over it (live fuzz r8006,
+            # table-moved). The deck's objects move as they are, like a unit only the source moved.
+            report["applied"].append({**where, "fields": ["position"], "how": "deck object moved"})
+            return {**action, "action": "move", "delta": list(shift)}
         return {**action, "action": "keep"}
     report["applied"].append({**where, "fields": sorted(src)})
     if edited:

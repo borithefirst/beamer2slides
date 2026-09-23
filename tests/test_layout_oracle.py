@@ -75,9 +75,9 @@ class Deck:
     def conversion(self):
         return {"slides": [{"key": SKEY, "elements": self.ours}], "pairs": {}, "label_moves": [], "weak_pairs": {}}
 
-    def check(self, before: dict, after: dict, ours=True):
+    def check(self, before: dict, after: dict, ours=True, report=None):
         read = lambda objs: {"page_size": [720.0, 405.0], "slides": [{"objectId": "p1", "objects": objs}]}
-        return L.check(self.base(), read(before), read(after), None, self.conversion() if ours else None)
+        return L.check(self.base(), read(before), read(after), report, self.conversion() if ours else None)
 
     def existing(self, before: dict):
         return L.existing(self.base(), {"page_size": [720.0, 405.0], "slides": [{"objectId": "p1", "objects": before}]})
@@ -170,6 +170,55 @@ def test_without_the_new_conversion_only_a_new_elements_overlap_is_a_note():
     assert kinds(d.check(before, {"t1": grown, "t2": person}, ours=False)) == ["text_overlap"]
     fs = d.check({"t1": before["t1"]}, {"t1": grown, "t2": person}, ours=False)   # box 2 is new
     assert kinds(fs) == [] and kinds(fs, "note") == ["text_overlap"]
+
+
+def note_deck():
+    """Live fuzz r7411: the person put a note of their own under a paragraph; the source adds a line
+    to the paragraph, which grows onto the note. Sync never moves the person's own objects."""
+    d = Deck()
+    para = d.add("text/body/0", "text", "t1", text_rb("text/body/0", [10.62, 55.66, 720.6, 90.0], "The paragraph, one line."))
+    note = {**text_rb("x", [40.0, 78.0, 260.0, 106.0], "note under it"), "title": None}
+    grown = text_rb("text/body/0", [10.62, 55.66, 720.6, 110.0], "The source adds this line.\nThe paragraph, one line.")
+    return d, {"t1": para, "u1": note}, {"n1": grown, "u1": note}
+
+
+def test_the_source_running_over_the_persons_own_note_fails_unless_the_report_says_so():
+    d, before, after = note_deck()
+    assert kinds(d.check(before, after)) == ["text_overlap"]
+    told = {"overruns": [{"slide": SKEY, "object": "u1", "other": "n1", "depth": 7.8}]}
+    fs = d.check(before, after, report=told)
+    assert kinds(fs) == [] and kinds(fs, "note") == ["text_overlap"]
+
+
+def test_overruns_names_the_persons_object_the_source_now_runs_over():
+    from beamer2slides import text_layout
+    d, before, after = note_deck()
+    found = text_layout.overruns({"objects": before}, {"objects": after}, {"u1"})
+    assert [(o["object"], o["other"]) for o in found] == [("u1", "n1")] and found[0]["depth"] > 2
+    # already over it before the sync: not this sync's doing; about to be deleted: not there
+    assert text_layout.overruns({"objects": after}, {"objects": after}, {"u1"}) == []
+    assert text_layout.overruns({"objects": before}, {"objects": after}, {"u1"}, skip={"n1"}) == []
+
+
+def test_the_persons_own_arrangement_carried_onto_the_sources_move_is_theirs():
+    """Live fuzz r7413: the person moved a paragraph up 30 pt onto the title; the source had moved
+    it down, which kept them apart, and now moves it back up: sync carries the person's move on top
+    of the source's (`sync.carried`), so the paragraph is where the person put it over the title."""
+    d = Deck()
+    title = d.add("text/title/0", "text", "t0", text_rb("text/title/0", [6.8, 14.0, 702.7, 50.0], "Room to grow"))
+    at_source = text_rb("text/body/0", [10.62, 81.65, 720.6, 110.0], "The paragraph the person moved.")
+    para = d.add("text/body/0", "text", "t1", at_source, ours_rb=moved(at_source, dy=-26.0))
+    for el, ours, rb in ((d.elements[0], d.ours[0], title), (d.elements[1], d.ours[1], at_source)):
+        el["ir"]["bbox"] = list(rb["box"])
+        ours["ir"]["bbox"] = list(moved(rb, dy=-26.0 if rb is at_source else 0.0)["box"])
+    before = {"t0": title, "t1": moved(para, dy=-30.0)}
+    after = {"t0": title, "n1": moved(para, dy=-56.0)}
+    from beamer2slides import text_layout
+    assert L.meet(text_layout.ink(after["n1"]), text_layout.ink(title), 2.0)     # they do meet now
+    assert d.check(before, after) == []
+    # the same overlap where the source did not move it back is the sync's
+    d.ours[1]["ir"]["bbox"] = list(at_source["box"])
+    assert kinds(d.check(before, after)) == ["text_overlap"]
 
 
 # ---------------------------------------------------------------- text_overflow out of a panel
