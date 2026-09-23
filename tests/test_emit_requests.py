@@ -1071,6 +1071,91 @@ def test_deck_ir_reads_an_outlier_run_back_at_its_pdf_size():
         assert size == pytest.approx(run["size"], rel=0.01), run["text"]
 
 
+def inline_math(lines=((117.98, 10.91, 349.03), (131.53, 10.91, 277.31))) -> dict:
+    """27_text_fit, frame `inline-math`: `and $\\alpha_{t+1} = x^2$ in the same line, ...` wrapped
+    in two lines. A script run carries its text's size and a small optical cut (CMSSI8)."""
+    runs = [run_of("With and "), run_of("α", font="CMMI10", italic=True),
+            run_of("t", font="CMSSI8", italic=True, script="sub"), run_of("+1", font="CMSS8", script="sub"),
+            run_of(" = x"), run_of("2", font="CMSS8", script="super"),
+            run_of(" in the same line, the scripts and symbols are set in other fonts, and the line is still full.")]
+    para = {"align": "left", "level": 0, "bullet": None, "size": 10.91, "text_x0": 10.91, "tab_x0": None,
+            "wrap_limit": 368.25, "runs": runs,
+            "lines": [{"baseline": b, "x0": x0, "x1": x1} for b, x0, x1 in lines]}
+    return {"id": "p16t1", "kind": "text", "role": "body", "code": False,
+            "bbox": [10.91, lines[0][0] - 10, 349.03, lines[-1][0] + 3], "paragraphs": [para]}
+
+
+def run_styles(el: dict) -> dict[str, dict]:
+    reqs = emit.text_box_requests(el, "b2s_s001", "b2s_s001_t0", SCALE, FONTS)
+    text = next(r["insertText"]["text"] for r in reqs if "insertText" in r)
+    out = {}
+    for r in reqs:
+        st = r.get("updateTextStyle")
+        if st and "baselineOffset" in st["style"]:
+            rng = st["textRange"]
+            out[text[rng["startIndex"]:rng["endIndex"]]] = st["style"]
+    return out
+
+
+def test_a_subscript_is_no_larger_than_its_text():
+    # Slides lowers a SUBSCRIPT run 0.371 em of its own size (TeX: 0.15 em), and FontMapper gave
+    # the subscript more than the text (the text's size in a small optical cut): 23.4 pt against
+    # 21.2 at the torture's scale, so it hung into the next line (text_fit `crowded`). At the
+    # text's size it is what a person typing a subscript gets, and still a SUBSCRIPT.
+    el = inline_math()
+    styles = run_styles(el)
+    runs = {r["text"]: r for r in el["paragraphs"][0]["runs"]}
+    body = FONTS(runs["With and "], SCALE)[1]
+    for text in ("t", "+1"):
+        assert FONTS(runs[text], SCALE)[1] > body  # what it was set at
+        assert styles[text]["baselineOffset"] == "SUBSCRIPT"
+        assert pt_of(styles[text]["fontSize"]) == body, text
+    # a superscript already stands where TeX's does: its size is FontMapper's
+    assert styles["2"]["baselineOffset"] == "SUPERSCRIPT"
+    assert pt_of(styles["2"]["fontSize"]) == FONTS(runs["2"], SCALE)[1]
+    # a subscript already smaller than its text keeps its own size
+    small = run_of("i", 6.0, font="CMSS6", script="sub")
+    sizes = emit.run_sizes([run_of("w "), small], SCALE, FONTS)
+    assert sizes[1] == FONTS(small, SCALE)[1] < body
+
+
+def test_a_run_lies_on_the_line_it_is_drawn_on():
+    # The formula (the italic α and the superscript, larger Slides sizes than the text) is on the
+    # first line: only that line is laid out at their size.
+    el = inline_math()
+    p = el["paragraphs"][0]
+    sizes = emit.run_sizes(p["runs"], SCALE, FONTS)
+    alpha, body = FONTS(p["runs"][1], SCALE)[1], FONTS(p["runs"][0], SCALE)[1]
+    assert alpha > body
+    assert emit.line_sizes(p, sizes, SCALE, FONTS) == [max(sizes[:6]), body]
+    # moved to the end of the paragraph, it is on the last line
+    p2 = {**p, "runs": [run_of("With and the same line, the scripts and symbols are set in other fonts, and the "
+                               "line is still full ")] + [p["runs"][1]]}
+    assert emit.line_sizes(p2, emit.run_sizes(p2["runs"], SCALE, FONTS), SCALE, FONTS) == [body, alpha]
+    # one size throughout: every line has it
+    p3 = {**p, "runs": [run_of("plain words " * 12)]}
+    assert emit.line_sizes(p3, [body], SCALE, FONTS) == [body, body]
+
+
+def test_lines_of_different_sizes_keep_the_pdf_pitch():
+    # Slides' pitch from one wrapped line to the next is the first one's descent and the next
+    # one's ascent (tools/probe_subscripts.py `crowding`): with one size for every line (the
+    # largest run's), a line without that run came 2.2 pt too close to the one above it.
+    paras = [{"bullet": None}]
+    (r,), _ = emit.vertical_layout(paras, [[100.0, 126.9]], [[22.1, 21.2]])
+    assert emit.inner_pitch(22.1, r, 21.2) == pytest.approx(26.9, abs=0.01)
+    (old,), _ = emit.vertical_layout(paras, [[100.0, 126.9]], [22.1])
+    assert emit.inner_pitch(22.1, old, 21.2) < 26.9 - 0.8
+    # one size on every line is laid out as before
+    for sizes in ([[14.0, 14.0, 14.0]], [14.0]):
+        assert emit.vertical_layout(paras, [[100.0, 117.0, 134.0]], sizes) == ([round(17 / 16.8, 4)], [0.0])
+    # a bulleted item followed by another: the item's own lines and the gap to the next
+    items = [{"bullet": {"kind": "glyph"}}, {"bullet": {"kind": "glyph"}}]
+    (r1, _), _ = emit.vertical_layout(items, [[100.0, 126.9], [155.0]], [[22.1, 21.2], [21.2]])
+    first_to_next = emit.inner_pitch(22.1, r1, 21.2) + emit.LINE_EM * 21.2 + emit.extra_below(r1, 21.2)
+    assert first_to_next == pytest.approx(55.0, abs=0.05)
+
+
 def number_table(x1: float) -> dict:
     """A PDF table whose right-aligned number column ends at x1: TeX's 'Compute | 12,000'."""
     return {"id": "p0b0", "kind": "table", "frame": [100.0, 50.0, x1 + 6, 90.0], "size": 10.91,

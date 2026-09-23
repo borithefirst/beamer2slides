@@ -387,6 +387,72 @@ def line_size(run: dict, z: float) -> float:
     return z
 
 
+def body_size(runs: list[dict], sizes: list[float]) -> float | None:
+    """The Slides size most of a paragraph's characters are set at (its scripts and holes aside)."""
+    count: dict[float, int] = {}
+    for run, z in zip(runs, sizes):
+        if not run.get("script") and not run.get("hole") and not run.get("hole_size") and run["text"].strip():
+            count[z] = count.get(z, 0) + len(run["text"].strip())
+    return max(count, key=lambda z: (count[z], z)) if count else None
+
+
+def run_sizes(runs: list[dict], scale: float, fonts: "FontMapper") -> list[float]:
+    """The Slides size of each run. A subscript is set no larger than the text around it
+    (`body_size`): Slides lowers a SUBSCRIPT run 0.371 em of its own size, where TeX lowers one
+    0.15 em (0.25 beside a superscript), so every point it grows reaches further into the line
+    below; and FontMapper would give it more than the text (the size is the text's, the font a
+    small optical cut, which FontMapper reads as wider per em - 23.4 pt against 21.2). At the
+    text's size Slides draws its digits as tall as TeX's (0.665 x 0.71 em against cmss8's) and
+    it is what a person typing a subscript gets (tools/probe_subscripts.py)."""
+    sizes = [fonts(r, scale)[1] for r in runs]
+    body = body_size(runs, sizes)
+    if body is None:
+        return sizes
+    return [min(z, body) if r.get("script") == "sub" else z for r, z in zip(runs, sizes)]
+
+
+def run_width(run: dict, z: float, scale: float, fonts: "FontMapper") -> float:
+    """About how wide Slides sets a run (pt): measured advances where there are some."""
+    if run.get("hole_size"):
+        return len(run["text"]) * HOLE_SPACE_EM * run["hole_size"]
+    width = slides_width([run], scale, fonts)
+    return width if width is not None else len(run["text"]) * 0.5 * z * (SCRIPT_SIZE if run.get("script") else 1.0)
+
+
+def line_sizes(p: dict, sizes: list[float], scale: float, fonts: "FontMapper") -> list[float]:
+    """The size Slides lays out each of a paragraph's lines at: the largest run *on that line*
+    (`line_size`). A wrapped paragraph whose runs differ in size - an inline formula's italic
+    letters, a larger word - does not have that size on every line, and Slides' pitch from one
+    line to the next is the first one's descent and the next one's ascent (0.227 and 0.968 of
+    each's own size, tools/probe_subscripts.py `crowding`). Which runs land on which line is
+    estimated from the PDF's line widths, the runs laid end to end at their Slides widths."""
+    n = len(p["lines"])
+    sized = [line_size(r, z) for r, z in zip(p["runs"], sizes)]
+    if not sized:
+        return [p["size"] * scale] * n
+    if n == 1 or len(set(sized)) == 1:
+        return [max(sized)] * n
+    widths = [run_width(r, z, scale, fonts) for r, z in zip(p["runs"], sizes)]
+    total = sum(widths)
+    spans = [max(1e-6, (ln.get("x1") or 0.0) - (ln.get("x0") or 0.0)) for ln in p["lines"]]
+    bounds = [0.0]
+    for w in spans:
+        bounds.append(bounds[-1] + w * total / sum(spans))
+    out = [0.0] * n
+    pos = 0.0
+    for s, w in zip(sized, widths):
+        a, b = pos, pos + w
+        pos = b
+        mid = (a + b) / 2
+        for j in range(n):
+            lo, hi = bounds[j], bounds[j + 1]
+            # a run lies on the line holding its middle, and on any line it covers half an em of
+            if lo <= mid < hi or (j == n - 1 and mid >= hi) or min(b, hi) - max(a, lo) > 0.5 * s:
+                out[j] = max(out[j], s)
+    common = body_size(p["runs"], sized) or max(sized)
+    return [z or common for z in out]
+
+
 def extra_below(r: float, z: float) -> float:
     """Extra space lineSpacing r adds under a line of size z (negative when r < 1)."""
     return (r - 1) * LINE_EM * z if r >= 1 else -(1 - r) * 0.25 * LINE_EM * z
@@ -402,9 +468,17 @@ def snap(v: float) -> float:
     return round(v / PX_PT) * PX_PT
 
 
-def line_pitch(z: float, r: float) -> float:
-    """Baseline distance between wrapped lines of one paragraph."""
-    return snap(LINE_EM * z * r)
+def line_pitch(z: float, r: float, z2: float | None = None) -> float:
+    """Baseline distance between wrapped lines of one paragraph (from a line of size z to one of
+    size z2, by default the same)."""
+    return snap(inner_pitch(z, r, z if z2 is None else z2))
+
+
+def inner_pitch(z1: float, r: float, z2: float) -> float:
+    """Unsnapped baseline distance between two wrapped lines of one paragraph, of sizes z1 and z2."""
+    if z1 == z2:
+        return LINE_EM * z1 * r
+    return DESCENT_EM * z1 + ASCENT_EM * z2 + extra_below(r, z1) + extra_above(r, z2)
 
 
 def pitch_between(z1: float, r1: float, z2: float, r2: float) -> float:
@@ -432,8 +506,9 @@ def hole_run(run: dict, scale: float, fonts: FontMapper) -> dict:
     return {**run, "text": " " * n, "hole_size": round(width / (HOLE_SPACE_EM * n), 2)}
 
 
-def vertical_layout(paras: list[dict], baselines: list[list[float]], sizes: list[float]):
+def vertical_layout(paras: list[dict], baselines: list[list[float]], sizes: list):
     """lineSpacing ratio and spaceAbove per paragraph so Slides baselines land on the PDF's.
+    `sizes` holds a paragraph's size, or the size of each of its lines (`line_sizes`).
 
     Slides ignores spaceAbove/spaceBelow between items of a bulleted list, so there the gap
     to the next item has to come from the item's own lineSpacing; for a wrapped item one
@@ -441,47 +516,54 @@ def vertical_layout(paras: list[dict], baselines: list[list[float]], sizes: list
 
     Pitches snap to whole pixels, so each paragraph aims at the original position measured
     from where Slides will actually have put the previous one: rounding errors don't add up."""
+    lines = [list(s) if isinstance(s, (list, tuple)) else [s] * len(bl) for s, bl in zip(sizes, baselines)]
     estimate = None
     for _ in range(4):  # a paragraph's ratio depends on the next one's (below 100% it moves up)
-        ratios, space_above = _vertical_pass(paras, baselines, sizes, estimate)
+        ratios, space_above = _vertical_pass(paras, baselines, lines, estimate)
         if ratios == estimate:
             break
         estimate = ratios
     return ratios, space_above
 
 
-def _vertical_pass(paras, baselines, sizes, estimate):
+def _vertical_pass(paras, baselines, lines, estimate):
     ratios: list[float] = []
     space_above = [0.0] * len(paras)
     pulled: dict[int, float] = {}  # paragraph -> lineSpacing < 1 that pulls it up to its target
     first = baselines[0][0]  # predicted Slides baseline of the current paragraph's first line
-    for i, (p, bl, z) in enumerate(zip(paras, baselines, sizes)):
+    for i, (p, bl, zs) in enumerate(zip(paras, baselines, lines)):
         n = len(bl)
+        z = zs[-1]  # the last line's size: what the next paragraph is spaced from
+        uniform = len(set(zs)) == 1
+
+        def inner(r: float) -> float:  # first to last baseline of this paragraph, unsnapped
+            return (n - 1) * LINE_EM * z * r if uniform else sum(inner_pitch(a, r, b) for a, b in zip(zs, zs[1:]))
+
         has_next = i + 1 < len(paras)
         list_link = has_next and p["bullet"] and paras[i + 1]["bullet"]
         next_r = estimate[i + 1] if estimate and has_next else 1.0
         if list_link:
             target = baselines[i + 1][0] - first
-            zn = sizes[i + 1]
-            r = solve_increasing(lambda r: (n - 1) * LINE_EM * z * r + DESCENT_EM * z + ASCENT_EM * zn +
+            zn = lines[i + 1][0]
+            r = solve_increasing(lambda r: inner(r) + DESCENT_EM * z + ASCENT_EM * zn +
                                  extra_below(r, z) + extra_above(next_r, zn), target)
         elif n > 1:
-            r = (bl[-1] - bl[0]) / (n - 1) / (LINE_EM * z)
+            r = (bl[-1] - bl[0]) / (n - 1) / (LINE_EM * z) if uniform else solve_increasing(inner, bl[-1] - bl[0])
         else:
             r = pulled.get(i, 1.0)
         r = round(min(3.0, max(0.5, r)), 4)
         ratios.append(r)
-        last = first + (n - 1) * line_pitch(z, r)
+        last = first + ((n - 1) * line_pitch(z, r) if uniform else sum(line_pitch(a, r, b) for a, b in zip(zs, zs[1:])))
         if has_next:
-            natural = pitch_between(z, r, sizes[i + 1], next_r)
+            zn = lines[i + 1][0]
+            natural = pitch_between(z, r, zn, next_r)
             if not list_link:
-                gap = baselines[i + 1][0] - last - pitch_between(z, r, sizes[i + 1], 1.0)
+                gap = baselines[i + 1][0] - last - pitch_between(z, r, zn, 1.0)
                 nxt = paras[i + 1]
                 free = len(baselines[i + 1]) == 1 and not (nxt["bullet"] and i + 2 < len(paras) and paras[i + 2]["bullet"])
                 if gap < -PX_PT and free:
                     # Tighter than Slides' natural pitch (block title right above its body):
                     # a lineSpacing below 100% moves the next single line up.
-                    zn = sizes[i + 1]
                     rn = max(0.5, 1 + gap / (0.75 * LINE_EM * zn))
                     pulled[i + 1] = rn
                     natural = pitch_between(z, r, zn, rn)
@@ -515,10 +597,12 @@ def text_box_requests(el: dict, slide_id: str, object_id: str, scale: float, fon
     marks = list(marks or [])
     paras = [{**p, "runs": [hole_run(r, scale, fonts) if r.get("hole") else r for r in p["runs"]]}
              for p in el["paragraphs"]]
-    # A line is as tall as its largest run, as Slides lays it out (line_size: small caps).
-    base_sizes = [max(fonts(r, scale)[1] for r in p["runs"]) if p["runs"] else p["size"] * scale for p in paras]
-    sizes = [max(line_size(r, fonts(r, scale)[1]) for r in p["runs"])
-             if p["runs"] else p["size"] * scale for p in paras]
+    # A line is as tall as its largest run, as Slides lays it out (line_size: small caps), and a
+    # subscript is no larger than its text (run_sizes).
+    sized = [run_sizes(p["runs"], scale, fonts) for p in paras]
+    base_sizes = [max(zs) if p["runs"] else p["size"] * scale for p, zs in zip(paras, sized)]
+    per_line = [line_sizes(p, zs, scale, fonts) for p, zs in zip(paras, sized)]
+    sizes = [max(ls) for ls in per_line]
 
     edges = [hugs(p) for p in paras]
     # (a centred or right-aligned paragraph's longest line can start left of its first line)
@@ -533,7 +617,7 @@ def text_box_requests(el: dict, slide_id: str, object_id: str, scale: float, fon
     last_baseline = paras[-1]["lines"][-1]["baseline"] * scale
 
     baselines = [[line["baseline"] * scale for line in p["lines"]] for p in paras]
-    ratios, space_above = vertical_layout(paras, baselines, sizes)
+    ratios, space_above = vertical_layout(paras, baselines, per_line)
 
     inner_w = (right_pdf - left_pdf) * scale
     # Titles carry their line breaks as soft breaks (SOFT_BREAK) and need no tight width.
@@ -556,9 +640,10 @@ def text_box_requests(el: dict, slide_id: str, object_id: str, scale: float, fon
         x -= slack / 2
     elif aligns == {"right"}:
         x -= slack
-    y = first_baseline - (BASELINE_A + ASCENT_EM * sizes[0] + extra_above(ratios[0], sizes[0]))
+    z_first, z_last = per_line[0][0], per_line[-1][-1]
+    y = first_baseline - (BASELINE_A + ASCENT_EM * z_first + extra_above(ratios[0], z_first))
     w = inner_w + 2 * PAD_X + slack
-    h = last_baseline - y + DESCENT_EM * sizes[-1] + extra_below(ratios[-1], sizes[-1]) + 4
+    h = last_baseline - y + DESCENT_EM * z_last + extra_below(ratios[-1], z_last) + 4
     if right_limit and not multiline and aligns == {"left"} and not any(SOFT_BREAK in r["text"] for p in paras for r in p["runs"]):
         # Room up to the block edge or the next element: text typed later wraps where a user
         # expects, not a few points after the converted words.
@@ -655,14 +740,16 @@ def text_box_requests(el: dict, slide_id: str, object_id: str, scale: float, fon
 
     # From here on indices refer to the final text, without tabs.
     pos = 0
-    for p, t, ratio, above, base, edge in zip(paras, texts, ratios, space_above, base_sizes, edges):
+    for p, t, ratio, above, base, edge, zs in zip(paras, texts, ratios, space_above, base_sizes, edges, sized):
         p_start, p_end = pos, pos + len(t)
         pos = p_end + 1
         start = p_start
-        for run in p["runs"]:
+        for run, z in zip(p["runs"], zs):
             if not run["text"]:
                 continue
             style, fields = fonts.text_style(run, scale)
+            if "fontSize" in style:
+                style["fontSize"] = pt(z)  # (a subscript no larger than its text: run_sizes)
             if run.get("hole_size"):
                 style, fields = {"fontFamily": HOLE_FONT, "fontSize": pt(run["hole_size"]), "bold": False,
                                  "italic": False}, ["fontFamily", "fontSize", "bold", "italic"]
