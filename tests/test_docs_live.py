@@ -667,7 +667,7 @@ def test_the_anchors_a_batch_answers_with_are_what_a_read_would_say(paper):
 
     `settle` used to read the document a third time after planting its named ranges,
     only to learn where they went — the last round trip of a sync, with nothing left to
-    overlap it with (the Slides side's lesson, CLAUDE.md "the **tail**"). A
+    overlap it with (the Slides side's lesson, docs/project-notes.md "the **tail**"). A
     `createNamedRange` answers with the id of the range it made, and the request carries
     the block's key and the span it went on, so the two facts the read brought back are
     in the batch's own answer (`doc_sync.adopt_replies`). This is the claim that lets

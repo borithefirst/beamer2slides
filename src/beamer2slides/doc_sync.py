@@ -903,7 +903,7 @@ def adopt_replies(ir: dict, requests: list[dict], answer: dict) -> int:
     says which block that was for - its name *is* the block's key - and the span it
     went on. So the read that would learn those two things is a read this batch has
     already paid for: the last round trip of a sync, with nothing left to overlap it
-    with (the Slides tail's lesson, CLAUDE.md "the **tail**"). A range this batch
+    with (the Slides tail's lesson, docs/project-notes.md "the **tail**"). A range this batch
     deleted is gone from the document, so the orphans it names are no longer orphans.
 
     Only the ids move. Everything else in `ir` came from the read this batch was
