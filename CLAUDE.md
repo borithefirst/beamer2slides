@@ -63,7 +63,11 @@ Details, measurements and edge cases: docs/project-notes.md "What becomes native
   widths come from measured Slides advances (`emit.slides_width`, `fit_columns`) so no cell wraps
   and the table does not grow over its caption; classify cuts a spanning chunk at word gaps when it
   lines up with the other rows. Rules wider than half the page with rows of cells between them are
-  a table's, not theme decoration (`table_hairlines`); a wrapped `p{}` cell is one chunk per line.
+  a table's, not theme decoration (`table_hairlines`). A wrapped `p{}` cell is one cell of several
+  lines (`row_lines`, `wrapped`), its column wide enough for each PDF line (`emit.wrapped_width`).
+  Convert brings tables empty in the .pptx with their own cell margins (`emit.pptx_table`) and
+  fills them through the API, so rows keep the PDF pitch; sync creates API tables
+  (`DeckPlan(pptx_tables=False)`).
 - `diagram`: node/line/arrow clusters as grouped shapes, connectors and labels (`diagram_from`).
 - `shape`: opaque panels such as beamer blocks (title bar + body built to survive resizing).
 - Decorations on words: underline/strike/highlight runs; words on small graphics and complex inline
@@ -241,8 +245,10 @@ markers.
   keeps the bullet's font and size and drops its colour (rgb or theme, API-made or .pptx-imported),
   and a list's `nestingLevel.bulletStyle` stays Arial 14 black whatever is written. No converter-side
   fix exists (`tools/probe_new_bullet.py`); the person uses paint format or the list options.
-- Slides table rows are at least 1.195 em x lineSpacing + 14.4 pt (7.2 pt cell padding, not
-  settable); empty cells count with the default font unless given a styled space. A cell that
+- An API-made table row is at least 1.195 em x lineSpacing + 14.4 pt (7.2 pt padding the API
+  cannot set); a .pptx table's `a:tcPr` margins survive import, duplication, text/style edits and
+  row/column inserts, its row being top + bottom margin + 1.195 em x lineSpacing
+  (`tools/probe_pptx_table_margins.py`). Empty cells count with the default font unless given a styled space. A cell that
   wraps doubles its row and the table grows downwards over what is below.
 - Slides lowers a SUBSCRIPT 0.371 em of its *own* size (no other offset; a .pptx `baseline` is
   rounded to SUBSCRIPT on import), so a subscript is set no larger than its paragraph's body text

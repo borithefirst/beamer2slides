@@ -3437,3 +3437,17 @@ italic x 0.469 em against CMMI's 0.571, L 0.473 against 0.68, plus TeX's spacing
 the formula is ~79 pt in Slides against ~105-150 pt in the PDF. Lone CMMI letters get the italic
 half correction (x1.037) and so stand at 22.1 pt in a 21.2 pt body, enlarging their line for no
 width gain; capping them in `run_sizes` would need `pdf_size` to know the run is math.
+
+### Tables from the .pptx (2026-09-23, 6208676, 60ad0fd)
+The table-tight (4.3 pt) and table-merged (3.2 pt) `grown` findings are closed: an API table's
+7.2 pt cell padding cannot be set, but a .pptx table's margins survive import and every edit the
+converter and a person make (docs/calibration.md "Table cells"), so convert puts each table into the
+.pptx empty with per-row top margins that put the baseline on the PDF's, duplicates it in phase 1
+(`b2s_sNNN_tabI`) and fills it as before. A `p{}` cell is one cell of several lines (`row_lines`,
+`wrapped`, `cell_runs` rejoining hyphenated words), the column sized per PDF line: in table-merged
+Slides wrapped "paragraph" whole where TeX hyphenated it. Table cells take `run_sizes` too. Same
+decks with the parent commit and this one: 15_plain_tabular overlap 0.727 -> 0.738 and table edges
+to 0; 16_colored_table pages 1-4 +0.02..0.05, bottom 0.9 -> 0; 11_research_talk p3 0.581 -> 0.697,
+bottom 1.8 -> 0; 12_metropolis unchanged. What remains on 16's "Math in cells" (grown 3.9 -> 3.2 pt)
+is λ_max's subscript depth, not row height. Sync still creates API tables (a table cannot be copied
+across presentations; `DeckPlan(pptx_tables=False)`), so a table sync adds has the old padding.

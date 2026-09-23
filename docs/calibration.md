@@ -62,6 +62,17 @@ Model used by `emit.vertical_layout`, for a line of size z with lineSpacing r:
   Otherwise tables grow by about half their height.
 - An empty cell still holds a line in the default font (a larger minimum), so it gets a
   space in the table's font.
+- **All of the above is an API-made table (`createTable`). A table imported from the .pptx keeps
+  its `a:tcPr` cell margins** (`tools/probe_pptx_table_margins.py`, 10 pt text, rendered row pitch):
+  default margins 19.35/18.9, margins 0 12.15/11.7 (1.195 x 10 = 11.95), 0,1,0,1 13.95/14.4,
+  margins 0 at lineSpacing 70 8.55/8.1, createTable 26.55/26.1. The margins survive
+  `duplicateObject` (table or slide), text and style edits and row/column inserts (new rows and
+  columns inherit them); the API exposes no margin field and reads `rowHeight` 1.0 for every table.
+  So convert brings each table into the .pptx empty (`emit.pptx_table`), margins 7.2 / top / 7.2 / 0
+  per row with the top margin the row's room less the text's offset, so the baseline lands on the
+  PDF's (booktabs' space under a rule becomes margin); line spacing stays 100% unless a row is too
+  short. Sync still creates API tables (`DeckPlan(pptx_tables=False)`: a table cannot be copied
+  between presentations) and keeps the 14.4 pt padding.
 
 ## 2. Horizontal: width vs CM Sans at the same nominal size
 `text` = ink width of running text relative to CMSS10 (size correction = 1/text).
