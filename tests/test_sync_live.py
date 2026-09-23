@@ -663,6 +663,332 @@ def scenario_pull_picture(run: Run):
         run.problems.append("the new base doesn't own the adopted picture")
 
 
+# ---------------------------------------------------------------- layout probes
+# How a synced deck can *look* broken with nothing lost (docs/project-notes.md "Layout probes").
+# Each scenario measures the slide on Google's renderer before and after the sync
+# (devtools/probe_layout.py: the ink of each object alone, where each formula hole is set) and
+# reports the breakage in pt; one that is confirmed is in XFAIL (strict) until sync handles it, so
+# the scenario is the regression test of the fix. Numbers go to <scenario>/layout.json, thumbnails
+# to <scenario>/layout/<stage>/ (slide.png; vs-fresh-synced.png / vs-fresh-fresh.png after the sync).
+
+GROW, TWO, DISPLAY = "Room to grow", "Two boxes", "Display math"
+LAYOUT_TOL = 1.5  # pt: a box this far off is where it should be
+CLEARANCE = 1.0   # pt: two inks closer than this in some column touch (words on words, words on a figure)
+
+
+def collide(hit: dict) -> bool:
+    return hit["clearance_pt"] is not None and hit["clearance_pt"] < CLEARANCE
+
+
+class Layout:
+    """The measurements of one layout scenario."""
+
+    def __init__(self, run: Run):
+        self.run, self.data = run, {}
+
+    def _save(self) -> None:
+        (self.run.out / "layout.json").write_text(json.dumps(self.data, indent=1), encoding="utf-8")
+
+    def ink(self, stage: str, title: str, targets: dict) -> tuple[dict, dict]:
+        """(name -> element, name -> Ink) of the targets on slide `title`, each measured alone."""
+        from beamer2slides.devtools import probe_layout as pl
+        from beamer2slides.gslides import save_thumbnail
+        model = self.run.deck.read()
+        s = model.one(title)
+        els = {name: model.element(s, t) for name, t in targets.items()}
+        folder = self.run.out / "layout" / stage
+        save_thumbnail(self.run.deck.api, self.run.deck.pid, s.id, folder / "slide.png")
+        inks = pl.inks(self.run.deck.api, self.run.deck.pid, s.id, {n: {e.id} for n, e in els.items()}, folder)
+        self.data.setdefault(stage, {}).update({n: {"id": e.id, "box": [round(v, 2) for v in e.box], "ink": inks[n].box}
+                                                for n, e in els.items()})
+        self._save()
+        return els, inks
+
+    def overflow(self, stage: str, name: str, el, ink) -> float:
+        """How far a text's ink runs past the bottom of its box (pt, negative: room left)."""
+        value = round(ink.box[3] - el.box[3], 1) if ink.box else 0.0
+        self.data[stage][name]["overflow"] = value
+        self._save()
+        return value
+
+    def overlap(self, stage: str, a: str, b: str, inks: dict) -> dict:
+        from beamer2slides.devtools import probe_layout as pl
+        value = pl.overlap(inks[a], inks[b])
+        self.data[stage][f"{a} x {b}"] = value
+        self._save()
+        return value
+
+    def vs_fresh(self, variant: str, title: str) -> None:
+        """Google's thumbnails of the synced slide and of a fresh conversion's, side by side."""
+        from beamer2slides.devtools import sync_check as sc
+        fresh = fresh_conversion(variant)[1]
+        model = self.run.deck.read()
+        problem = sc.thumbnail_diff(self.run.deck.api, (self.run.deck.pid, model.one(title).id),
+                                    (fresh.pres["presentationId"], fresh.one(title).id),
+                                    self.run.out / "layout" / "after" / f"vs-fresh-{title.replace(' ', '-').lower()}.png")
+        self.data.setdefault("vs_fresh", {})[title] = problem or "same as a fresh conversion"
+        self._save()
+
+    def sanity(self, variant: str, exps: list[dict]) -> None:
+        """The sync did what it is for (the deck's words kept, the source's applied): a layout verdict
+        on a sync that wrote nothing would mean nothing."""
+        from beamer2slides.devtools import sync_check as sc
+        text_checks = [c for e in exps for c in e["checks"] if c["check"] == "text"]
+        self.run.problems += [f"sanity: {p}" for p in sc.check_all(self.run.deck.read(),
+                                                                    text_checks + sync_build.checks(sync_build.VARIANTS[variant]))]
+
+
+@pytest.mark.parametrize("variant", [v for v, flags in sync_build.VARIANTS.items() if "probes" in flags and v != "probes"])
+def test_probe_variants_classify_as_intended(variant):
+    """The probe edits change the probe frames as intended (against the `probes` base)."""
+    if reason := pdflatex_missing():
+        pytest.skip(reason)
+    folders = {}
+    for v in ("probes", variant):
+        pdf = build(v)
+        folders[v] = sync_build.OUT / "classified" / v
+        if not (folders[v] / "deck.json").exists() or (folders[v] / "deck.json").stat().st_mtime < pdf.stat().st_mtime:
+            subprocess.run([sys.executable, "-m", "beamer2slides", "classify", str(pdf), "--out", str(folders[v])],
+                           env=ENV, cwd=ROOT, check=True, capture_output=True)
+    got = set(sync_build.classification_diff(sync_build.summary(folders["probes"]), sync_build.summary(folders[variant])))
+    want = {d for f in sync_build.VARIANTS[variant] for d in sync_build.PROBE_INTENDED.get(f, [])}
+    assert got == want, f"unintended: {sorted(got - want)}\nmissing: {sorted(want - got)}"
+
+
+GROW_TEXT = {"text": "longer version of this paragraph"}
+GROW_SENTENCE = "The deck adds this sentence, which takes the paragraph onto a third line of its own."
+
+
+def grow_edits(run: Run, lay: Layout) -> list[dict]:
+    """Room to grow, as a careful person lengthens a paragraph: a sentence typed at its end (the box
+    does not grow with it: no autofit survives the import), the box made a line taller to hold it
+    and the figure below moved down a line to make room."""
+    exps = run.edit(E("append_sentence", slide=GROW, text="so its box has to grow downwards.", sentence=GROW_SENTENCE))
+    els, inks = lay.ink("typed", GROW, {"text": GROW_TEXT, "figure": {"image": "largest"}})
+    lay.overflow("typed", "text", els["text"], inks["text"])
+    lay.overlap("typed", "text", "figure", inks)
+    exps += run.edit(E("resize", slide=GROW, target=GROW_TEXT, sx=1.0, sy=1.5),
+                     E("move", slide=GROW, target={"image": "largest"}, dx=0, dy=27))
+    return exps
+
+
+def grow_verdict(run: Run, lay: Layout, variant: str) -> None:
+    before_els, before = lay.ink("before", GROW, {"text": GROW_TEXT, "figure": {"image": "largest"}})
+    lay.overflow("before", "text", before_els["text"], before["text"])
+    if collide(lay.overlap("before", "text", "figure", before)):
+        run.problems.append(f"the edits themselves left the words on the figure: {lay.data['before']}")
+    pdf = build(variant)
+    report = run.sync(pdf)
+    els, inks = lay.ink("after", GROW, {"text": GROW_TEXT, "figure": {"image": "largest"}})
+    over = lay.overflow("after", "text", els["text"], inks["text"])
+    hit = lay.overlap("after", "text", "figure", inks)
+    lay.vs_fresh(variant, GROW)
+    lay.data["report"] = {k: [x for x in report.get(k, []) if "grow" in json.dumps(x)] for k in ("applied", "overrides", "conflicts")}
+    lay._save()
+    height = els["text"].box[3] - els["text"].box[1]
+    person = before_els["text"].box[3] - before_els["text"].box[1]
+    if over > LAYOUT_TOL:
+        run.problems.append(f"{GROW}: the merged paragraph runs {over} pt past the bottom of its box "
+                            f"({height:.1f} pt tall after the sync, {person:.1f} pt as the person made it)")
+    if collide(hit):
+        run.problems.append(f"{GROW}: the paragraph's words come within {hit['clearance_pt']} pt of the figure below "
+                            f"({lay.data['before']['text x figure']['clearance_pt']} pt before the sync; {hit})")
+
+
+@scenario
+def scenario_layout_grown_box(run: Run):
+    """H1: the person lengthens a paragraph (and makes its box a line taller, moving the figure below
+    down), the source rewords the same paragraph: the box is recreated for the source's text and the
+    merged words written in (Sync.override_requests) - does the text still fit?"""
+    lay = Layout(run)
+    run.convert(build("probes"))
+    exps = grow_edits(run, lay)
+    grow_verdict(run, lay, "probes-reword")
+    lay.sanity("probes-reword", exps)
+
+
+@scenario
+def scenario_layout_grown_box_moved(run: Run):
+    """H1, with the source moving the paragraph too (space added above): both moved it, so the
+    geometry override is mode 'theirs' - which writes the person's position and not their size."""
+    lay = Layout(run)
+    run.convert(build("probes"))
+    exps = grow_edits(run, lay)
+    grow_verdict(run, lay, "probes-push")
+    lay.sanity("probes-push", exps)
+
+
+@scenario
+def scenario_layout_reflow(run: Run):
+    """H2: the person moves the second box aside; the source adds a line to the box above it, which
+    pushes the second box down - the person's position of it is kept (mode 'theirs'), the box above
+    grows into it?"""
+    lay = Layout(run)
+    run.convert(build("probes"))
+    first, second = {"text": "The first box holds two lines"}, {"text": "The second box stands below it"}
+    exps = run.edit(E("move", slide=TWO, target=second, dx=40, dy=0))
+    _, inks = lay.ink("before", TWO, {"first": first, "second": second})
+    if collide(lay.overlap("before", "first", "second", inks)):
+        run.problems.append(f"the edit itself put the boxes over each other: {lay.data['before']}")
+    run.sync(build("probes-push"))
+    _, inks = lay.ink("after", TWO, {"first": first, "second": second})
+    hit = lay.overlap("after", "first", "second", inks)
+    lay.vs_fresh("probes-push", TWO)
+    if collide(hit):
+        run.problems.append(f"{TWO}: the first box's words come within {hit['clearance_pt']} pt of the second box's "
+                            f"({lay.data['before']['first x second']['clearance_pt']} pt before the sync; {hit})")
+    lay.sanity("probes-push", exps)
+
+
+@scenario
+def scenario_layout_display_math(run: Run):
+    """H6: a display equation (a picture of its own, role math: not the background) between two
+    paragraphs; the person moves the paragraph below it aside, the source adds a line above the
+    equation, which pushes both down - the equation follows the source, the paragraph the person?"""
+    lay = Layout(run)
+    run.convert(build("probes"))
+    after_it = {"text": "and this paragraph comes after it."}
+    targets = {"above": {"text": "The equation below stands"}, "equation": {"image": "largest"}, "after": after_it}
+    exps = run.edit(E("move", slide=DISPLAY, target=after_it, dx=40, dy=0))
+    _, inks_before = lay.ink("before", DISPLAY, targets)
+    if collide(lay.overlap("before", "equation", "after", inks_before)):
+        run.problems.append(f"the edit itself put the paragraph on the equation: {lay.data['before']}")
+    run.sync(build("probes-push"))
+    _, inks = lay.ink("after", DISPLAY, targets)
+    lay.vs_fresh("probes-push", DISPLAY)
+    lay.overlap("before", "above", "equation", inks_before)
+    for a, b in (("equation", "after"), ("above", "equation")):
+        hit = lay.overlap("after", a, b, inks)
+        if collide(hit):
+            run.problems.append(f"{DISPLAY}: the {a} comes within {hit['clearance_pt']} pt of the {b} "
+                                f"({lay.data['before'][f'{a} x {b}']['clearance_pt']} pt before the sync; {hit})")
+    lay.sanity("probes-push", exps)
+
+
+def formula_places(run: Run, lay: Layout, stage: str) -> list[dict]:
+    """Merging text: each formula hole as Slides sets it against the picture meant to cover it."""
+    from beamer2slides.devtools import probe_layout as pl
+    model = run.deck.read()
+    s = model.one(MERGING)
+    text = model.element(s, {"text": "merged word by word"})
+    folder = run.out / "layout" / stage
+    from beamer2slides.gslides import save_thumbnail
+    save_thumbnail(run.deck.api, run.deck.pid, s.id, folder / "slide.png")
+    holes = pl.holes(run.deck.api, run.deck.pid, s.id, text.id, folder)
+    pictures = pl.pictures_on(model, s.id, text.id)
+    rows = []
+    for i, (hole, pic) in enumerate(zip(holes, pictures)):
+        rows.append({"hole": hole, "picture": [round(v, 2) for v in pic.box], "picture_id": pic.id,
+                     "dx": round((pic.box[0] + pic.box[2]) / 2 - (hole[0] + hole[2]) / 2, 1) if hole else None,
+                     "dy": round((pic.box[1] + pic.box[3]) / 2 - (hole[1] + hole[3]) / 2, 1) if hole else None})
+    if len(holes) != len(pictures):
+        rows.append({"holes": len(holes), "pictures": len(pictures)})
+    lay.data[stage] = rows
+    lay._save()
+    return rows
+
+
+@scenario
+def scenario_layout_stranded_formula(run: Run):
+    """H3: the person rewords words before an inline formula (a hole the picture is placed over by
+    measuring, emit.measure_places) while the source changes the formula in the same paragraph. The
+    unit is recreated and measured for the source's text, then the person's words are written in -
+    does the picture still cover its hole? (Before the sync: the person's edit alone, Slides moving
+    the words and not the picture.)"""
+    lay = Layout(run)
+    run.convert(build("v1"))
+    formula_places(run, lay, "converted")
+    exps = run.edit(E("replace_word", slide=MERGING, text="is clean when the changed words", old="clean",
+                      new="perfectly clean"))
+    formula_places(run, lay, "before")
+    run.sync(build("formula"))
+    rows = formula_places(run, lay, "after")
+    lay.vs_fresh("formula", MERGING)
+    for i, r in enumerate(rows):
+        if "hole" not in r:
+            run.problems.append(f"{MERGING}: {r['holes']} holes and {r['pictures']} pictures")
+        elif r["dx"] is None or max(abs(r["dx"]), abs(r["dy"])) > 4:
+            run.problems.append(f"{MERGING}: formula picture {i + 1} stands ({r['dx']}, {r['dy']}) pt from the hole it "
+                                f"covers (hole {r['hole']}, picture {r['picture']})")
+    lay.sanity("formula", exps)
+
+
+@scenario
+def scenario_layout_group_moved(run: Run):
+    """H4: the person groups the figure with the text beside it, then moves and shrinks the group;
+    the source redraws the figure. The recreated figure is regrouped into the person's group
+    (Sync.regroup_requests) - at the person's place and size, or at the converter's?"""
+    lay = Layout(run)
+    run.convert(build("v1"))
+    words = {"text": "Conflicts disappear once"}
+    exps = run.edit(E("group", slide=CONV, targets=[{"image": "largest"}, words]),
+                    E("move", slide=CONV, target=words, dx=-20, dy=30),
+                    E("resize", slide=CONV, target=words, sx=0.8))
+    before, _ = lay.ink("before", CONV, {"figure": {"image": "largest"}, "words": words})
+    run.sync(build("figure"))
+    after, inks = lay.ink("after", CONV, {"figure": {"image": "largest"}, "words": words})
+    lay.vs_fresh("figure", CONV)
+    # (the figure's PDF box is the same in v1 and `figure`: the new picture belongs where the old one stood)
+    for name in ("figure", "words"):
+        d = max(abs(a - b) for a, b in zip(after[name].box, before[name].box))
+        if d > LAYOUT_TOL:
+            run.problems.append(f"{CONV}: the {name} stands at {[round(v, 1) for v in after[name].box]} after the sync, "
+                                f"the person had it at {[round(v, 1) for v in before[name].box]} ({d:.1f} pt off)")
+    if after["figure"].parent is None or after["figure"].parent != after["words"].parent:
+        run.problems.append(f"{CONV}: the figure is no longer in the person's group")
+    lay.sanity("figure", exps)
+
+
+@scenario
+def scenario_layout_retheme(run: Run):
+    """H5: the source changes the theme (a taller frame title bar of another colour). Theme decoration
+    lives on the layouts (emit.plan_theme), which sync never writes - do the synced slides show the
+    new bar, with their titles on it?"""
+    from beamer2slides.devtools import sync_check as sc
+    from beamer2slides.gslides import execute
+    lay = Layout(run)
+    run.convert(build("v1"))
+    exps = run.edit(E("replace_word", slide=CONCL, text="Deck edits survive every sync", old="survive", new="outlive"))
+    layouts_before = execute(run.deck.api.presentations().get(presentationId=run.deck.pid, fields="layouts(objectId,pageElements(objectId,image(contentUrl)))"))
+    run.sync(build("retheme"))
+    layouts_after = execute(run.deck.api.presentations().get(presentationId=run.deck.pid, fields="layouts(objectId,pageElements(objectId,image(contentUrl)))"))
+    pictures = lambda ls: sorted(e["objectId"] for l in ls.get("layouts", []) for e in l.get("pageElements", []) if "image" in e)
+    lay.data["layout_pictures"] = {"before": pictures(layouts_before), "after": pictures(layouts_after)}
+    fresh = fresh_conversion("retheme")[1]
+    model = run.deck.read()
+    titles = {}
+    for t in (MERGING, CONV, CONCL):
+        s, f = model.one(t), fresh.one(t)
+        title = next(e for e in s.elements if e.kind == "shape" and e.obj["shape"].get("placeholder", {}).get("type") == "TITLE")
+        ftitle = next(e for e in f.elements if e.kind == "shape" and e.obj["shape"].get("placeholder", {}).get("type") == "TITLE")
+        titles[t] = {"synced": [round(v, 1) for v in title.box], "fresh": [round(v, 1) for v in ftitle.box]}
+        problem = sc.thumbnail_diff(run.deck.api, (run.deck.pid, s.id), (fresh.pres["presentationId"], f.id),
+                                    run.out / "layout" / "after" / f"vs-fresh-{t.replace(' ', '-').lower()}.png")
+        lay.data.setdefault("vs_fresh", {})[t] = problem or "same as a fresh conversion"
+        if problem:
+            run.problems.append(f"{t}: {problem}")
+        if max(abs(a - b) for a, b in zip(title.box, ftitle.box)) > LAYOUT_TOL:
+            run.problems.append(f"{t}: title box {titles[t]['synced']}, a fresh conversion's {titles[t]['fresh']}")
+    lay.data["titles"] = titles
+    lay._save()
+    lay.sanity("retheme", exps)
+
+
+# Confirmed on Google's renderer (docs/project-notes.md "Layout probes"); each goes when sync handles it.
+XFAIL.update({
+    "layout-grown-box-moved": "geometry mode 'theirs' (both moved it) writes the person's position and not their "
+                              "size: the merged paragraph runs 13 pt past its box, the person's resize is gone",
+    "layout-reflow": "the source's reflow grows the box above into the one the person moved: mode 'theirs' keeps "
+                     "the person's absolute place, nothing gives way (ink clearance 29.7 pt -> -1.3 pt)",
+    "layout-display-math": "the equation picture follows the source down, the paragraph the person moved stays: "
+                           "the equation lands on its words (clearance 20.2 pt -> -10.8 pt)",
+    "layout-stranded-formula": "Sync.measure_places places formula pictures for the source's text, the person's "
+                               "words are merged in afterwards (override_requests): the picture stands 72 pt from its hole",
+    "layout-retheme": "sync never writes layouts: the old theme's title bar (a layout picture) stays over the new "
+                      "slides, the new title colour on the old bar (thumbnails 10.5% off a fresh conversion)",
+})
+
+
 @pytest.fixture(scope="module")
 def outcomes(request):
     """scenario -> problems (or the exception, or a skip reason) for the scenarios selected."""

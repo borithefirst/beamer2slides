@@ -36,9 +36,16 @@ FLAGS = {
     "notes": "change the speaker notes of two frames",
     "numbers": "insert a numbered step and reword the last one",
     "untitled": "rename the unlabelled frame's title",
+    # layout probes (tests/test_sync_live.py, the `layout-*` scenarios): three frames at the end,
+    # and the source changes made to them (which only mean something together with `probes`)
+    "probes": "add the layout probe frames (Room to grow, Two boxes, Display math)",
+    "probereword": "reword the paragraph of Room to grow",
+    "probepush": "push each probe frame's content down (a line added on top; Room to grow: vertical space)",
+    "retheme": "a different frame title bar (larger title font, another colour)",
 }
+PROBE_EDITS = ("probereword", "probepush")  # (no variant of their own: they edit the probe frames)
 MIXED = ["reword", "addbullet", "formula", "figure", "addframe", "reorder", "tablecell", "notes"]
-VARIANTS = {"v1": [], **{f: [f] for f in FLAGS}, "mixed": MIXED,
+VARIANTS = {"v1": [], **{f: [f] for f in FLAGS if f not in PROBE_EDITS}, "mixed": MIXED,
             "chain": MIXED + ["blockedit", "deleteframe", "untitled", "numbers", "retitle", "removebullet"],
             # sources of the scenarios in tests/test_sync_live.py
             "disjoint": ["tablecell", "blockedit", "figure", "notes", "numbers"],
@@ -50,7 +57,10 @@ VARIANTS = {"v1": [], **{f: [f] for f in FLAGS}, "mixed": MIXED,
             "table-moved": ["tablemove", "tablecell"],
             "table-row": ["tablerow", "tablecell"],
             "many-edits": ["retitle", "reword", "addbullet", "removebullet", "notes"],
-            "groups": ["figure", "blockedit", "numbers"]}
+            "groups": ["figure", "blockedit", "numbers"],
+            # the layout probes: `probes` is their base, converted first
+            "probes-reword": ["probes", "probereword"],
+            "probes-push": ["probes", "probereword", "probepush"]}
 
 MOTIVATION = {"contains": "Later the source changes again"}  # (no scenario edits these words)
 CHECKS = {
@@ -87,6 +97,13 @@ CHECKS = {
                 {"check": "fresh", "slide": {"title": "The sync algorithm"}}],
     "untitled": [{"check": "slide_count", "slide": {"title": "Takeaways"}, "count": 1},
                  {"check": "slide_count", "slide": {"title": "Conclusions"}, "count": 0}],
+    "probes": [{"check": "slide_count", "slide": {"title": t}, "count": 1}
+               for t in ("Room to grow", "Two boxes", "Display math")],
+    "probereword": [{"check": "text", "slide": {"title": "Room to grow"}, "text": "The person types a longer version",
+                     "count": 1}],
+    "probepush": [{"check": "text", "slide": {"title": "Two boxes"}, "text": "The source adds this line above both boxes.",
+                   "count": 1}],
+    "retheme": [],
 }
 
 
@@ -114,6 +131,20 @@ INTENDED = {  # classification_diff(v1, variant) items per flag
     "numbers": [f"{ALGO}: text- Merge and write the changes", f"{ALGO}: text+ Match slides by their frame labels",
                 f"{ALGO}: text+ Merge the changes and write them back", f"{ALGO}: pictures 4 -> 5 changed"],
     "untitled": ["Conclusions: title -> Takeaways"],
+    "probes": ["slide+ Room to grow", "slide+ Two boxes", "slide+ Display math"],
+    # (against v1 the probe frames are simply added: what the probe edits change is in PROBE_INTENDED,
+    #  against the `probes` variant)
+    "probereword": [],
+    "probepush": [],
+    "retheme": [],
+}
+PROBE_INTENDED = {  # classification_diff(probes, variant) items per probe edit
+    "probereword": ["Room to grow: text- The person writes a longer version of this paragraph than the converter "
+                    "made room for, so its box has to grow downwards.",
+                    "Room to grow: text+ The person types a longer version of this paragraph than the converter "
+                    "made room for, so its box has to grow downwards."],
+    "probepush": ["Two boxes: text+ The source adds this line above both boxes.",
+                  "Display math: text+ The source adds this line above the equation."],
 }
 
 
@@ -137,7 +168,8 @@ def titles(flags: list[str]) -> list[str]:
              "The sync algorithm", "Merging text", "Convergence"]
     order += ["Results", "Merge policy"] if "reorder" in flags else ["Merge policy", "Results"]
     order += ["Pulling edits back"] * ("addframe" in flags) + ["Three versions"] * ("deleteframe" not in flags)
-    return order + ["Finding the same slide", "Takeaways" if "untitled" in flags else "Conclusions"]
+    order += ["Finding the same slide", "Takeaways" if "untitled" in flags else "Conclusions"]
+    return order + ["Room to grow", "Two boxes", "Display math"] * ("probes" in flags)
 
 
 def _runs_text(runs: list[dict]) -> str:
