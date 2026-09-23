@@ -871,6 +871,15 @@ def snapshot_after_convert(deck: dict, out: Path, state: dict, pdf: "Path | dict
     with contextlib.suppress(Exception):  # then build_base downloads them itself
         signatures = signing.result()
     base = build_base(deck, out, pres, state, pdf, sign=True, overlays=overlays, signatures=signatures)
+    # What convert wrote on the master and the layouts, so a sync can carry a new theme there and
+    # tell a person's layout edits from its own (theme_sync). A deck without it syncs as before.
+    try:
+        from . import theme_sync
+        theme = theme_sync.record(deck, out, pres, state)
+        if theme:
+            base["theme"] = theme
+    except Exception as e:  # noqa: BLE001 (a missing record costs theme sync, never the conversion)
+        print(f"warning: could not record the deck's theme for sync ({e})")
     save_local(base, out)
     try:
         info = None

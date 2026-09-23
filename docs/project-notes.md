@@ -3718,3 +3718,179 @@ real overflow can be missed); pictures and shapes meeting each other (only pairs
 judged); anything the offline fuzz world does, since its read-backs have no run styles, no box
 types and boxes not sized by emit's metrics - running the oracle there needs the world to size
 and style its text boxes like emit first.
+
+## Both-moved geometry (2026-09-23)
+
+The rule: a unit the source rewrote and the person moved or resized is recreated at the source's
+new place and then takes the person's edit, **whether or not the source moved it too**. Merge says
+geometry mode `delta` in both cases; sync writes `sync.carried(base, theirs, new)`: the person's
+transform change `theirs * base^-1`, conjugated by the source's step `s` of the unit's corner
+(`T(s) * d * T(-s)`). A move lands at the source's new place plus the person's offset; a resize
+keeps the person's proportions of the source's new box, from its new corner (before, `delta` scaled
+about the page origin, so a resize scaled the source's move with it - harmless while `delta` only ran
+when the source had not moved the unit, and `s` was 0). When the source moved it too it is still a
+reported geometry conflict, resolution `merge.GEOMETRY_CARRIED` ("the deck's move and size kept, on
+top of the source's move"); `--take-source` on it writes the source's place and size, as before.
+
+Why the old rule (`theirs`: a pure translation to the deck's absolute top-left) went:
+- History: it came with the first sync commit (53739b9, 2026-09-17) as the obvious "deck wins" for
+  a field both sides changed. No test, fuzz seed, live scenario or note ever depended on the
+  absolute place; the only test named it (`test_both_moved_deck_position_wins`), and the loss
+  oracle's docstring already described the carried place ("at the conversion's new box with the
+  person's move on top of it") - the oracle was simply excused by the conflict.
+- It dropped the person's size silently: the translation carried no scale, while the report said the
+  deck's geometry was kept (H1b).
+- An absolute place ignores the reflow around it. A source's reflow moves the converter's
+  neighbours; pinning one unit makes the neighbours run into it (H2, H6). "Deck wins" is about what
+  the person *did*, which was an offset and a size, not a coordinate.
+- The case where the absolute place would matter is a unit the person placed against something only
+  the deck has (their own box or picture), which the source's reflow does not move. Nothing in the
+  history shows it. It is not special-cased: "placed against" cannot be read off a deck without
+  guessing, and the words the person owns are already protected where it counts, by occlusion
+  (`sync.would_hide` restacks a recreated unit under words only the deck has). A carried unit can
+  also be pushed further towards the page edge than the person had it; the layout oracle's
+  `off_page` judges that. Both are residual, reported (it is a conflict), and undoable in one drag.
+
+The same rule for a .pptx table refilled in place (`update_slide`, `table_refill`): its object stays
+where the person has it; when the source moved it too, the source's shift is applied on top (it was
+zeroed for any geometry override before, `u["source"]` now tells the two apart).
+
+Live, the three probes that were strict xfails (numbers from `layout.json`, before -> after the fix):
+
+| scenario | old code | now |
+|---|---|---|
+| layout-grown-box-moved (H1b) | box back to 53.5 pt, words 13.2 pt past its bottom | box 80.3 pt (the person's), 13.4 pt of room left, moved down with the source; clearance to the figure 38.7 pt as before |
+| layout-reflow (H2) | ink clearance 29.7 -> -1.3 pt | 29.7 -> 29.7 pt: the second box keeps the person's 40 pt to the right and goes down 31 pt with the source |
+| layout-display-math (H6) | clearance equation/paragraph 20.2 -> -10.8 pt | 20.2 -> 20.2 pt (above/equation 20.7 -> 20.7) |
+
+Judges:
+- `devtools/fuzz_world._place_unit`: the person's step on top of wherever the source put the unit,
+  also when both moved it (its deck edits are moves, never resizes, so the translation is all of it).
+- `devtools/loss_oracle.geometry_findings`: the carried conflict is no longer an excuse. Its corner
+  must be the person's plus the source's move of the IR corner (`_carried_to`, 2 pt,
+  `geometry_not_carried`); on the archive (618 steps) that prediction held within 2 pt for 1,522 of
+  1,556 elements the source moved and nobody else did, and every one the report only lists as
+  `applied` within 0.3 pt; the 34 others (3 to 18 pt off) all carry a conflict: kept, not written. A
+  person's resize that comes back at the converter's size on an object the sync made, while the
+  source left the size alone, is `geometry_reverted` wherever the element went (`_resize_dropped`; objects the sync
+  made only - a person's copy keeps the element's tag and the converter's size, which the archive's
+  r1101 step5 and r801 step4 showed). `deck_placement` asks pictures alone when there are three:
+  with text boxes in the median it read a real deck's 1.59 as 3.09.
+- Sensitivity: the offline campaign with the applier put back to the absolute place (merge reporting
+  the carried conflict) fails every round that had a both-moved unit (5 of 100 three-step rounds,
+  all `geometry_not_carried`). With today's applier: 300 three-step rounds on each of converted,
+  adopt and `--first-sync`, and 300 twelve-step converted chains, clean. The archive replay gives
+  the same geometry findings as main's oracle (none new).
+- `tools/layout_oracle.py` on out/sync-fuzz still runs (590 steps, 11 fails, as recorded by the old
+  code), but found no new conversion for any step: `ours_from_folder` imports `sync.mark_widths`,
+  renamed `mark_emitted` by 401cb35, and the ImportError is caught per step. With the name aliased
+  the same 11 fails come out and every step has `ours`.
+
+The one live scenario that held the old rule: many-edits moves "Later the source changes again" down
+15 pt while the source rewrites that box and moves it up 2.9 pt. Its generic `move` check wanted the
+deck's absolute place (y 143.4); the box now lands at 140.5, the source's new place plus the
+person's 15. The scenario drops the `move` check and asks for the fresh conversion's corner + 15
+instead (the first sync still reports the geometry conflict; the report the test reads last is the
+idempotence sync's, where nothing is left to conflict). Passing live with the new rule: disjoint,
+same-element, chain, table-moved, pull-wording, many-edits, layout-grown-box, layout-group-moved
+and the three probes above.
+
+## Layouts and placeholders in sync
+
+Three defects of 2026-09-23, fixed in that order.
+
+**The subtitle placeholder.** `Sync.update_slide` handed the live SUBTITLE placeholder to whatever
+element had the subtitle role, and emit gives the title page's subtitle line and the author block
+different homes depending on what the page holds (the `subtitle` variant of `tests/decks/sync`
+adds a subtitle line). The placeholder now goes to the element emit itself would put in it
+(`context_changes`, `same_layout`), and the others become boxes of their own. Live:
+`subtitle-role`.
+
+**`context_unwritten` said nowhere.** What `build_ours()["context_unwritten"]` lists (a group
+membership or a placeholder role that recreating a unit cannot change) becomes a report warning
+in words (`sync.UNWRITTEN_SAYS`, `unwritten_warnings`). The agent tools' `Result` carries it with
+the other warnings.
+
+**A theme change never reached the deck** (probe H5, `layout-retheme`). Before the fix, the
+synced frames showed the old blue title bar with the new, taller one peeking out from under it.
+Merging text, Convergence and Conclusions differed from a fresh conversion in 10.5-10.8% of
+pixels. `theme_sync.py` now merges the master and the layouts three ways.
+
+- **Base.** `base["theme"]` records the following. The schema stays version 1, because the key is
+  optional.
+  - `fill`: the master's fill key, with its read-back and, for a picture fill, its signature.
+  - `shared`: the shared background key.
+  - Per page (the master as `M` and each layout by id):
+    - its decoration group. `TITLE` and `*` are emit's `plan_theme` names, and a `*_V1` clone's
+      name gives its group.
+    - the decoration picture's id, sha1 and a 32 x 18 RGB thumbnail. The thumbnail tells "the
+      same picture re-encoded" (Google does that) from "another picture".
+    - its read-back box and content hash.
+    - each TITLE / CENTERED_TITLE / BODY placeholder's spec, as `emit.layout_style_spec` gives it,
+      with its read-back box and style hash.
+- **Why the style hash.** `snapshot.read_text` skips runs that are only "\n", and a layout
+  placeholder holds nothing else. So `theme_sync.style_hash` hashes every run's and paragraph's
+  style. With the old hash, a person's recolour of a layout title was invisible (caught by the
+  offline test before any live run).
+- **What a fresh conversion writes.** `emit.master_plan`, `layout_style_spec` and
+  `layout_placeholder_requests` are new helpers that make the same decisions as `build_deck` and
+  `style_layout_placeholders`. `test_theme_sync.py` holds the requests equal to what convert
+  sends. `theme_sync.ours_side` computes the fill, the shared key, the specs and one picture per
+  decoration group from the new PDF.
+- **Per item.** Each item (the master fill, each page's decoration, each placeholder) is
+  written when only the source changed it, and kept when only the deck changed it. When both
+  changed it, the deck's version is kept and the conflict is reported with an id:
+  - `layout Title Only / title style`;
+  - `layout Blank / theme decoration`, with why `moved to [...]`, `deleted` or `another picture`.
+- **Pending.** The pending marker lists the placeholder specs being written. A run that died
+  after the theme batch therefore finds its own write, not a person's edit.
+- **Probes on the live API (2026-09-23).**
+  - `replaceImage` CENTER_INSIDE keeps the id and the box, but drops the description, so the alt
+    text is written again.
+  - `createImage` on a layout followed by `SEND_TO_BACK` works.
+  - A slide goes back to inheriting the master only through fields
+    `pageBackgroundFill.propertyState`. Fields `pageBackgroundFill` with INHERIT is refused.
+  - The master accepts both solid and picture fills.
+- **Slides drops a run property equal to the one the run inherits**, on writes as on the .pptx
+  import. Beamer sets the title page's title and the frame titles at one size (`\Large`), so the
+  imported title-page title has no size of its own. Restyling the master's TITLE for a retheme's
+  `\huge` frame titles grew it too: the title slide differed from a fresh conversion in 1.59% of
+  pixels.
+  - `theme_sync.inherited_pins` writes the old inherited values onto the converter's slide
+    placeholders.
+  - The pins go *after* the layout requests in the same batch. Written before, they equal the
+    inherited value and vanish. That happened in the first live run.
+  - The frame titles the merge refills with the new style fold back into inheriting, exactly as
+    in a fresh conversion.
+  - `Sync.new_base` takes the pinned read-back into the base for objects the person had not
+    restyled. Otherwise the next sync reads the pins as a deck edit.
+  - A slide the person added keeps following the theme.
+- **Which decoration a layout serves.** A layout serves the decoration group that most of its
+  live slides want (`page_group`). A slide that wants another one is a warning, not a layout
+  change: moving a slide to another layout re-parents its placeholders.
+- **Order and backgrounds.**
+  - The theme batch opens the content chain, so no layout write is in flight beside a slide batch.
+  - Slides that showed a copy of the old shared background go back to INHERIT when they show the
+    new one.
+  - New slides take the layout that serves their group.
+- **Old base** (no `theme`): nothing is written on the layouts, as before. When the new shared
+  background differs from the one the base records, a warning says the layouts were left as they
+  are and a slide whose background changed got the new one as a picture of its own
+  (`old_base_warning`). The next sync of that base still has no `theme`: only `convert` records it.
+
+After the fix:
+- `layout-retheme`: the title page, Merging text and Convergence are the same as a fresh
+  conversion. Conclusions carries the person's word, so only its title box is compared, and that
+  box is equal. The sync applied 53 source changes with 0 conflicts in 464 requests, and the
+  strict xfail is gone.
+- `layout-edited-retheme` (new): the person recolours the TITLE_ONLY title placeholder and moves
+  the BLANK decoration by 20 pt, and the source rethemes.
+  - The sync applied 51 source changes and reported 2 conflicts. The green title and the moved
+    picture stay, and the TITLE_ONLY decoration is the new one.
+  - The idempotence sync sends 0 requests and reports the same 2 conflicts.
+- `untouched`, `slides` and `subtitle-role` pass.
+
+Still open:
+- Layout texts (`write_layout_texts`, shared headers and footers) are not synced.
+- A variant layout that a fresh conversion would newly clone is not created.
+- A slide whose decoration variant changed stays on its layout.

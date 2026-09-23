@@ -949,7 +949,7 @@ def _rebased_element(el: dict, oids: list[str], read: dict) -> dict:
 def _place_unit(u, members, theirs, made, base_by):
     """Re-apply the deck's move or resize to a rewritten unit: the whole unit takes the step, its
     anchored pictures with their text. The step comes from the old top's base and live read-backs
-    (`delta`), or puts the new unit where the deck's object stands. This is the outcome, not the
+    (`delta`) and lands on the new unit wherever the source put it. This is the outcome, not the
     mechanism - sync writes one RELATIVE transform on the unit's group and, when the person has
     taken that group apart, one per member - and modelling the outcome is why the offline campaign
     could not see the step reaching only the top object (live seed 903,
@@ -963,11 +963,9 @@ def _place_unit(u, members, theirs, made, base_by):
     theirs_rb = theirs["objects"].get(old_top)
     if not base_rb or not theirs_rb:
         return
-    if ov["mode"] == "delta":
-        dx, dy = theirs_rb["box"][0] - base_rb["box"][0], theirs_rb["box"][1] - base_rb["box"][1]
-    else:  # "theirs": both sides moved it, the deck's place wins
-        ref = next((rb for m, rb in made if m["key"] == u["key"]), made[0][1])
-        dx, dy = theirs_rb["box"][0] - ref["box"][0], theirs_rb["box"][1] - ref["box"][1]
+    # The person's step goes on top of wherever the source put the rewritten unit - also when the
+    # source moved it too (`sync.carried`; this world's deck edits are moves, never resizes).
+    dx, dy = theirs_rb["box"][0] - base_rb["box"][0], theirs_rb["box"][1] - base_rb["box"][1]
     for _, rb in made:
         rb["box"] = [rb["box"][0] + dx, rb["box"][1] + dy, rb["box"][2] + dx, rb["box"][3] + dy]
         rb["transform"] = rb["transform"][:4] + [rb["transform"][4] + dx, rb["transform"][5] + dy]

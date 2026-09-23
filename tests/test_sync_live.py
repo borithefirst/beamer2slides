@@ -491,8 +491,15 @@ def scenario_many_edits(run: Run):
         E("set_background", slide=WHY, color="#eef5ff"),
         E("set_notes", slide=WHY, text="Keep this slide short."))
     pdf = build("many-edits")
-    run.check("many-edits", pdf, run.sync(pdf), exps, skip_source=("show of hands",),
-              conflicts=[["Keep this slide short", "show of hands"]])
+    # The source rewrites that box and moves it up (~3 pt): both moved it, so the person's 15 pt
+    # lands on the source's new place, not on the deck's old absolute one (docs/project-notes.md
+    # "Both-moved geometry").
+    later = {"text": "Later the source changes again"}
+    fresh = fresh_conversion("many-edits")[1]
+    x, y = fresh.element(fresh.one(WHY), later).box[:2]
+    run.check("many-edits", pdf, run.sync(pdf), exps, drop=("move",), skip_source=("show of hands",),
+              conflicts=[["Keep this slide short", "show of hands"]],
+              checks=[{"check": "box", "slide": WHY, "target": later, "origin": [x, y + 15]}])
 
 
 @scenario
@@ -809,8 +816,9 @@ def scenario_layout_grown_box(run: Run):
 
 @scenario
 def scenario_layout_grown_box_moved(run: Run):
-    """H1, with the source moving the paragraph too (space added above): both moved it, so the
-    geometry override is mode 'theirs' - which writes the person's position and not their size."""
+    """H1, with the source moving the paragraph too (space added above): both moved it - the person's
+    resize has to survive the source's move (geometry mode 'theirs' once wrote the person's position
+    and not their size)."""
     lay = Layout(run)
     run.convert(build("probes"))
     exps = grow_edits(run, lay)
@@ -821,8 +829,8 @@ def scenario_layout_grown_box_moved(run: Run):
 @scenario
 def scenario_layout_reflow(run: Run):
     """H2: the person moves the second box aside; the source adds a line to the box above it, which
-    pushes the second box down - the person's position of it is kept (mode 'theirs'), the box above
-    grows into it?"""
+    pushes the second box down - does the second box go down with it, the person's move on top, or
+    does the box above grow into it (as it did when mode 'theirs' kept the person's absolute place)?"""
     lay = Layout(run)
     run.convert(build("probes"))
     first, second = {"text": "The first box holds two lines"}, {"text": "The second box stands below it"}
@@ -942,8 +950,8 @@ def scenario_layout_group_moved(run: Run):
 @scenario
 def scenario_layout_retheme(run: Run):
     """H5: the source changes the theme (a taller frame title bar of another colour). Theme decoration
-    lives on the layouts (emit.plan_theme), which sync never writes - do the synced slides show the
-    new bar, with their titles on it?"""
+    lives on the layouts (emit.plan_theme), which sync carries over as three-way merged theme
+    (theme_sync) - do the synced slides show the new bar, with their titles on it?"""
     from beamer2slides.devtools import sync_check as sc
     from beamer2slides.gslides import execute
     lay = Layout(run)
@@ -957,16 +965,21 @@ def scenario_layout_retheme(run: Run):
     fresh = fresh_conversion("retheme")[1]
     model = run.deck.read()
     titles = {}
+    # The whole slide as a fresh conversion draws it - the title page too, whose title inherits the
+    # master's title size unless sync pins it (theme_sync.inherited_pins) - except Conclusions,
+    # which carries the person's word; its title box is compared all the same.
+    for t in (TITLE, MERGING, CONV):
+        s, f = model.one(t), fresh.one(t)
+        problem = sc.thumbnail_diff(run.deck.api, (run.deck.pid, s.id), (fresh.pres["presentationId"], f.id),
+                                    run.out / "layout" / "after" / f"vs-fresh-{t[:24].replace(' ', '-').lower()}.png")
+        lay.data.setdefault("vs_fresh", {})[t] = problem or "same as a fresh conversion"
+        if problem:
+            run.problems.append(f"{t}: {problem}")
     for t in (MERGING, CONV, CONCL):
         s, f = model.one(t), fresh.one(t)
         title = next(e for e in s.elements if e.kind == "shape" and e.obj["shape"].get("placeholder", {}).get("type") == "TITLE")
         ftitle = next(e for e in f.elements if e.kind == "shape" and e.obj["shape"].get("placeholder", {}).get("type") == "TITLE")
         titles[t] = {"synced": [round(v, 1) for v in title.box], "fresh": [round(v, 1) for v in ftitle.box]}
-        problem = sc.thumbnail_diff(run.deck.api, (run.deck.pid, s.id), (fresh.pres["presentationId"], f.id),
-                                    run.out / "layout" / "after" / f"vs-fresh-{t.replace(' ', '-').lower()}.png")
-        lay.data.setdefault("vs_fresh", {})[t] = problem or "same as a fresh conversion"
-        if problem:
-            run.problems.append(f"{t}: {problem}")
         if max(abs(a - b) for a, b in zip(title.box, ftitle.box)) > LAYOUT_TOL:
             run.problems.append(f"{t}: title box {titles[t]['synced']}, a fresh conversion's {titles[t]['fresh']}")
     lay.data["titles"] = titles
@@ -974,18 +987,86 @@ def scenario_layout_retheme(run: Run):
     lay.sanity("retheme", exps)
 
 
+@scenario
+def scenario_subtitle_role(run: Run):
+    """The source adds a long line under the title page, which takes the subtitle placeholder from
+    the authors (emit.subtitle_element picks the longest text below the title). The authors, which
+    the person recoloured, move out of the placeholder into a box of their own - keeping the
+    colour - and the new line is written into the placeholder, never created under its id."""
+    run.convert(build("v1"))
+    exps = run.edit(E("recolour", slide=TITLE, word="Alice", color="#aa0000", context="Alice Author"))
+    pdf = build("subtitle")
+    report = run.sync(pdf)
+    model = run.deck.read()
+    s = model.one(TITLE)
+    kind = lambda e: e.obj.get("shape", {}).get("placeholder", {}).get("type") if e.kind == "shape" else None
+    subtitles = [e for e in s.elements if kind(e) == "SUBTITLE"]
+    if len(subtitles) != 1 or "how one sync reconciles all three" not in subtitles[0].text:
+        run.problems.append(f"{TITLE}: subtitle placeholders {[e.text[:60] for e in subtitles]}, expected the new line")
+    authors = [e for e in s.elements if "Alice Author" in e.text]
+    if len(authors) != 1 or kind(authors[0]):
+        run.problems.append(f"{TITLE}: the authors are in {[kind(e) or 'a box' for e in authors]}, expected one box of their own")
+    run.check("subtitle", pdf, report, exps)
+
+
+def layouts_read(run: Run) -> dict:
+    """layout name -> the layout page, as the deck holds it now."""
+    from beamer2slides.gslides import execute
+    pres = execute(run.deck.api.presentations().get(presentationId=run.deck.pid))
+    return {l["layoutProperties"]["name"]: l for l in pres["layouts"]}
+
+
+@scenario
+def scenario_layout_edited_retheme(run: Run):
+    """The person edits the layouts - recolours the frame title placeholder of TITLE_ONLY (what a
+    frame added later in Slides gets) and moves the theme decoration of BLANK - and the source
+    rethemes (theme_sync). The new decoration reaches the layouts nobody edited and so the frames;
+    both of the person's layout edits stay, each reported as a conflict; a second sync writes nothing."""
+    from beamer2slides import snapshot
+    from beamer2slides.gslides import execute
+    run.convert(build("v1"))
+    exps = run.edit(E("replace_word", slide=CONCL, text="Deck edits survive every sync", old="survive", new="outlive"))
+    lay = layouts_read(run)
+    title = next(e for e in lay["TITLE_ONLY"]["pageElements"] if e.get("shape", {}).get("placeholder", {}).get("type") == "TITLE")
+    blank = next(e for e in lay["BLANK"]["pageElements"] if (e.get("description") or "") == "Theme decoration")
+    frames = next(e for e in lay["TITLE_ONLY"]["pageElements"] if (e.get("description") or "") == "Theme decoration")
+    execute(run.deck.api.presentations().batchUpdate(presentationId=run.deck.pid, body={"requests": [
+        {"updateTextStyle": {"objectId": title["objectId"], "textRange": {"type": "ALL"}, "fields": "foregroundColor",
+                             "style": {"foregroundColor": {"opaqueColor": {"rgbColor": {"green": 0.5}}}}}},
+        {"updatePageElementTransform": {"objectId": blank["objectId"], "applyMode": "RELATIVE", "transform": {
+            "scaleX": 1, "scaleY": 1, "translateX": 20 * 12700, "translateY": 0, "unit": "EMU"}}}]}))
+    run.log.write("edit the TITLE_ONLY layout's title placeholder green, the BLANK layout's decoration 20 pt right\n")
+    moved_to = layouts_read(run)["BLANK"]
+    moved_to = next(e for e in moved_to["pageElements"] if e["objectId"] == blank["objectId"])["transform"].get("translateX", 0)
+    pdf = build("retheme")
+    report = run.sync(pdf)
+    lay = layouts_read(run)
+    title_now = next((e for e in lay["TITLE_ONLY"]["pageElements"] if e["objectId"] == title["objectId"]), None)
+    colours = {json.dumps({k: round(v, 2) for k, v in te["textRun"].get("style", {}).get("foregroundColor", {})
+                           .get("opaqueColor", {}).get("rgbColor", {}).items()}, sort_keys=True)
+               for te in (title_now or {}).get("shape", {}).get("text", {}).get("textElements", []) if "textRun" in te}
+    if colours != {json.dumps({"green": 0.5})}:   # (Google gives back 0.5019608)
+        run.problems.append(f"the TITLE_ONLY layout's title placeholder lost the person's colour: {colours}")
+    signature = lambda e: snapshot.signature(snapshot._download(e["image"]["contentUrl"]) or b"")
+    blank_now = next((e for e in lay["BLANK"]["pageElements"] if e["objectId"] == blank["objectId"]), None)
+    if blank_now is None or blank_now["transform"].get("translateX", 0) != moved_to:
+        run.problems.append(f"the BLANK layout's decoration is not where the person put it: {blank_now and blank_now['transform']}")
+    elif not snapshot.signatures_match(signature(blank_now), signature(blank)):
+        run.problems.append("the BLANK layout's decoration, which the person moved, was replaced")
+    frames_now = next((e for e in lay["TITLE_ONLY"]["pageElements"] if e["objectId"] == frames["objectId"]), None)
+    if frames_now is None or snapshot.signatures_match(signature(frames_now), signature(frames)):
+        run.problems.append("the TITLE_ONLY layout's decoration is still the old theme's")
+    run.check("retheme", pdf, report, exps, conflicts=[["layout", "title style", title["objectId"]],
+                                                       ["layout", "theme decoration", blank["objectId"], "moved"]])
+
+
 # Confirmed on Google's renderer (docs/project-notes.md "Layout probes"); each goes when sync handles it.
+# (layout-grown-box-moved, layout-reflow and layout-display-math were one mechanism, geometry mode
+#  'theirs', and pass since both-moved units carry the person's move: docs/project-notes.md
+#  "Both-moved geometry")
 XFAIL.update({
-    "layout-grown-box-moved": "geometry mode 'theirs' (both moved it) writes the person's position and not their "
-                              "size: the merged paragraph runs 13 pt past its box, the person's resize is gone",
-    "layout-reflow": "the source's reflow grows the box above into the one the person moved: mode 'theirs' keeps "
-                     "the person's absolute place, nothing gives way (ink clearance 29.7 pt -> -1.3 pt)",
-    "layout-display-math": "the equation picture follows the source down, the paragraph the person moved stays: "
-                           "the equation lands on its words (clearance 20.2 pt -> -10.8 pt)",
     "layout-stranded-formula": "Sync.measure_places places formula pictures for the source's text, the person's "
                                "words are merged in afterwards (override_requests): the picture stands 72 pt from its hole",
-    "layout-retheme": "sync never writes layouts: the old theme's title bar (a layout picture) stays over the new "
-                      "slides, the new title colour on the old bar (thumbnails 10.5% off a fresh conversion)",
 })
 
 

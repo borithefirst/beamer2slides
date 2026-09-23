@@ -106,8 +106,14 @@ storage), `merge.py` (pure planning and diff3), `sync.py` (requests and the writ
                                              title, description, placeholder?, text, text_styles,
                                              paragraph_styles, text_style_hash, shape_style,
                                              shape_style_hash, image: {contentHash, sourceUrl, signature}?,
-                                             children?, table?}}}]}]}
+                                             children?, table?}}}]}]},
+ theme?: {fill, shared, master: {objectId, readback},
+          pages: {"M" | layoutObjectId: {name, group, decoration: {oid, picture: {sha1, thumb, signature},
+                                                                   readback} | null,
+                                         placeholders: {objectId: {kind, spec, readback}}}}}}
 ```
+`theme` (optional, schema still 1) is what convert wrote on the master and the layouts; see
+"Layouts and the master" below. A base without it is an older one: sync leaves the layouts alone.
 `ir_hash` hashes the element's IR without ids, spans and files, with `#page=N` links as slide keys
 and floats to 0.01; `fields` hash its parts (position = top-left to 0.5 pt, size, the set of style
 values, plain text, image), so a reworded line changes `text` and `size`, not `position`. An
@@ -165,7 +171,7 @@ Z-order changes are not detected.
 | unchanged | anything | keep the deck (edited fields reported as overrides) |
 | changed | unchanged | recreate the unit's objects from ours (same place in z-order and grouping) |
 | position/size only | text or style, not geometry | `move`: shift the deck's objects by the source delta - only when every member of the unit moved by the same step (`merge.unit_shift`), since sync moves the unit's top object; a formula picture the source re-placed inside its line is recreated instead |
-| changed | geometry | recreate, then re-apply the deck's transform change (`delta`: theirs · base⁻¹); if the source moved it too, the deck's position wins and it's a conflict. Only when the whole unit went with its top object (`merge.geometry_writable`): sync transforms the unit's top, so a member the person dragged on its own - a formula picture out of its line - would be put back where the converter had it, and such a unit is kept as the deck has it, with a conflict. The top is the unit's group, which carries its children; when the person has taken that group apart, a recreation does not put it back, so the step is written on each member instead (`sync.Sync._unit_oids`) |
+| changed | geometry | recreate, then re-apply the deck's transform change (`delta`: theirs · base⁻¹, taken about the unit's corner and carried to where the source now has that corner, `sync.carried`). If the source moved it too, it is the same write - the person's offset and size on top of the source's new place, so the unit travels with the source's reflow - reported as a geometry conflict (`merge.GEOMETRY_CARRIED`; `--take-source` on it writes the source's place and size). Until 2026-09-23 the deck's absolute position won there (mode `theirs`), which dropped the person's resize and let the source's reflow run into the unit (docs/project-notes.md "Both-moved geometry"). Only when the whole unit went with its top object (`merge.geometry_writable`): sync transforms the unit's top, so a member the person dragged on its own - a formula picture out of its line - would be put back where the converter had it, and such a unit is kept as the deck has it, with a conflict. The top is the unit's group, which carries its children; when the person has taken that group apart, a recreation does not put it back, so the step is written on each member instead (`sync.Sync._unit_oids`) |
 | changed | text style / shape style | recreate, re-apply the deck's change: uniform over all runs → over all the text; some words (or a table) → the deck's run attributes onto the same words of the new text (character alignment, `sync.style_range_requests`); non-uniform paragraph styles → keep the deck, conflict - but a style list that only got *shorter* while the deck also edited the text is a paragraph the person deleted, not a restyle (`merge.uniform_changes`, `text_changed`): the converter gives every paragraph the line spacing of its own PDF pitch, so deleting one bullet used to make every later source change to that box a conflict the deck won. A conflict is reported when the source changed the same style attributes - and when a styled word is not in the new text at all (`merge.styling_lost`): the styling of words the source replaced ends there, and the report says so rather than promising it was kept |
 | text changed | text changed | word-level diff3; clean → recreate and write the merged text; overlapping → keep the deck, conflict. In a table the diff3 runs per cell (`merge.table_merge`, applied with `cellLocation`); a row or column added on either side, or a cell holding a line break, makes the whole table a conflict |
 | text / position changed | the deck shows exactly that (same text; a move the source now reproduces within 2 pt) | `adopt`: nothing written, reported as converged; the base takes ours IR and the deck's version of those fields (e.g. after `pull`) |
@@ -277,6 +283,34 @@ which is what `sync.override_requests` really does, so a take cannot look like a
   Placeholders are refilled in place, and so is a table convert brought with the .pptx whose new
   version its recorded cell margins still fit (`table_refill`, docs/calibration.md "Table cells"):
   a new table could only be an API one, whose padding moves the rows.
+- **Layouts and the master** (`theme_sync.py`). Convert puts the most common background on the
+  master, the shared theme decoration on the layouts as a full-page picture described "Theme
+  decoration" at the back, and the deck's title/body style on the TITLE, CENTERED_TITLE and BODY
+  placeholders of the master and every layout (`emit.plan_theme`, `style_layout_placeholders`). The
+  base's `theme` records all of it (`theme_sync.record`): the master fill, and per page its
+  decoration group (`TITLE`, `*`, a `*_V1` variant), the picture's sha1 and a 32 x 18 thumbnail, the
+  placeholder specs (box, style, fields, alignment, `emit.layout_style_spec`) and their read-back
+  (box, a style hash that also counts the "\n"-only runs `snapshot.read_text` drops, content hash).
+  Sync computes the same for the new PDF (`theme_sync.ours_side`) and merges three ways per item:
+  the master fill, each page's decoration, each placeholder. The source changed and the deck did
+  not: written (`replaceImage` CENTER_INSIDE keeps the id and box, alt text written again after;
+  a new decoration is `createImage` + send to back; a placeholder gets its transform,
+  `updateTextStyle` ALL and the alignment, never `insertText`; then the converter's slide
+  placeholders that inherited the old style get it written onto them, `inherited_pins`, because
+  Google's import dropped every run property equal to the inherited one and the title page's
+  title would otherwise grow with a retheme's frame titles). The deck changed and the source did
+  not: kept. Both: the deck's is kept and a conflict is reported (`slide: "layout <name>"` or
+  `"master"`, field `theme decoration` / `title style` / `title page title style` / `body style` /
+  `master background`, with `moved`/`deleted` in the why). A picture the deck swapped counts as
+  changed by pixels, not URL. The theme batch goes first in the content chain, before any slide
+  batch (a layout batch in flight beside a slide batch can undo the slide's placeholder boxes).
+  A slide that showed its own copy of the old shared background and now shows the new one goes
+  back to INHERIT (`pageBackgroundFill.propertyState`; only on slides, layouts refuse it). A layout
+  serves the decoration group most of its live slides want (`page_group`); a slide that wants
+  another is reported, not moved to another layout. New slides take the layout serving their group.
+  The pending marker lists placeholder specs being written, so an interrupted run's own writes do
+  not come back as the person's edit. An old base (no `theme`) writes nothing there and warns
+  when the new shared background differs from what the master shows.
 - Template shapes (native shadows, exact corner radii, diagram nodes and elbow connectors) can't
   be copied across decks: a live object with the same template key is duplicated if there is one,
   else a plain 100 pt shape stands in and the report warns.
@@ -792,7 +826,10 @@ hold for every sync, including the combinations nobody thought of.
   or is reproduced verbatim in a `conflicts` entry; a word the person deleted doesn't come back into
   that element; an element the person moved stands afterwards where they put it, or - when the source
   moved it too - at the conversion's new box with the person's step on top of it (`deck_placement`
-  works that box out, so the base's old box is never mistaken for it); its picture and its styling
+  works that box out, so the base's old box is never mistaken for it; a geometry conflict saying
+  the move was carried, `merge.GEOMETRY_CARRIED`, is no excuse: the corner must be the person's plus
+  the source's move, `geometry_not_carried`), and a person's resize is not back at the converter's
+  size wherever the element went; its picture and its styling
   are the person's unless a conflict says otherwise; notes and backgrounds likewise (on a slide the
   person added, word for word); slides only vanish when reported *and* untouched,
   user-added slides never; taking the reported moves out of the order before and after - and
@@ -1132,8 +1169,13 @@ hold for every sync, including the combinations nobody thought of.
   non-issue.
 - diff3 inside diagrams (a text edit there on both sides keeps the deck); tables merge per cell,
   but a row or column added in the deck keeps the deck's table.
-- Layout texts and placeholder styles (`write_layout_texts`) aren't synced; nor are
-  `fallback_pictures` rebuilds.
+- Layout texts (headers and footers shared by every slide, `write_layout_texts`) aren't synced; nor
+  are `fallback_pictures` rebuilds. Layout decoration, placeholder styles and the master fill are
+  (see "Layouts and the master"), except on a base recorded before them.
+- A slide whose decoration variant changed stays on its layout (reported): the right layout for it
+  may not exist in the deck, and moving a slide to another layout re-parents its placeholders.
+- A variant layout emit would newly clone (a background group the old conversion did not have) is
+  not created; its slides keep the layout they are on.
 - Z-order edits in the deck aren't detected; a recreated unit goes back to its old z position.
 
 ## Pull: deck edits back to the source
