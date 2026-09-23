@@ -274,6 +274,29 @@ def test_a_header_centred_over_two_columns_stays_one_cell():
     assert merges == [{"row": 0, "col": 1, "rows": 1, "cols": 2, "align": "center"}]
 
 
+def body_texts(slide: dict) -> list[str]:
+    return [paragraph_text(p) for e in texts(slide) if e.get("role") not in ("title", "footer")
+            for p in e["paragraphs"]]
+
+
+def test_a_long_tick_row_belongs_to_its_chart():
+    # "200  400  600  800  1,000" is longer than a short label; as text it drew the chart after it.
+    slide = deck("03_figures")["slides"][4]
+    assert body_texts(slide) == []
+    figures = [e for e in slide["elements"] if e["kind"] == "image"]
+    assert len(figures) == 1 and not figures[0].get("overlay")
+
+
+def test_titles_pushed_off_a_plot_are_the_plots_but_its_caption_is_text():
+    raw = select_overlays(extract(DECKS / "03_figures-handout.pdf"), "last")
+    slide = classify(raw)["slides"][5]
+    assert body_texts(slide) == ["Figure: Measured in the cold room."]
+    figure = next(e for e in slide["elements"] if e["kind"] == "image")
+    by_id = {s["id"]: s["text"] for s in raw["pages"][5]["spans"]}
+    words = " ".join(by_id[i] for i in figure["spans"])  # in its picture, not left in the background
+    assert all(w in words for w in ("Phase", "Temperature", "Pressure"))
+
+
 def test_tabular_without_rules_is_a_borderless_table():
     slide = deck("15_plain_tabular")["slides"][0]
     tables = [e for e in slide["elements"] if e["kind"] == "table"]

@@ -28,6 +28,8 @@ LABEL_SEP_EM = 0.4  # gap after a description label (beamer: 0.5 em; word spaces
 EM_SPACE = chr(0x2003)
 FRAME_COUNTER_RE =re.compile(r"^\d{1,4}( ?/ ?\d{1,4})?$")
 EQ_NUMBER_RE = re.compile(r"^\(\d+(\.\d+)*[a-z]?\)$")
+# A caption's label: "Figure:", "Figure 3:", "Fig. 2.", "Table IV:" (beamer's caption templates).
+CAPTION_RE = re.compile(r"^\S+\.?(\s+[\dIVXivx]+(\.\d+)*)?\s*[:.](\s|$)")
 MATH_OPERATORS = set("=+−<>≤≥×·/∑∏∫∈∉⊂⊆∪∩→←⇒⇔≈≠±∞")
 # Lone glyphs of bitmap (Type 3) text companion fonts come back as their TS1 code, a control
 # character: \textbullet (metropolis' itemize item under pdflatex without cm-super).
@@ -701,6 +703,7 @@ class PageClassifier:
         graphics += [Rect.of(s["bbox"]) for s in self.page["spans"] if font_info(s["font"]).family == "icon"]
         self.graphics = graphics
         self.regions = cluster_rects(graphics, gap=3.0) if graphics else []
+        self.title_bridges: list[Rect] = []  # see axis_titles
 
     def on_edge_artwork(self, r: Rect) -> bool:
         edge_panels = [p["bbox"] for p in self.panels
@@ -1196,18 +1199,23 @@ class PageClassifier:
                 self.detect_bullet(line)
         self.label_tabs(lines)
 
-        # Short labels next to figures (axis ticks, axis labels) belong to the figure.
+        # Short labels next to figures (axis ticks, axis labels) belong to the figure, and so does
+        # a row of widely spaced short pieces however long it is: an axis's tick labels
+        # ("200  400  600  800  1,000"). Left as text, such a row turned the chart into an overlay
+        # anchored to it, and emit moved and stretched the chart after Slides' words.
         regions = list(self.regions)
         changed = True
         while changed:
             changed = False
             for line in lines:
-                if line.reason is None and not line.bullet and line.tab is None and len(line.text.replace(" ", "")) <= 12 and \
+                if line.reason is None and not line.bullet and line.tab is None and \
+                        (len(line.text.replace(" ", "")) <= 12 or self.tick_row(line)) and \
                         line.size <= 1.15 * self.body and \
                         any(reg.distance(line.rect) <= 0.8 * line.size for reg in regions):
                     line.reason = "figure"
                     regions.append(line.rect)
                     changed = True
+        self.axis_titles(lines)
 
         for line in lines:
             if line.reason is None:
@@ -1246,6 +1254,69 @@ class PageClassifier:
                 if (near and small and len(txt) <= 6) or eqno or same_formula or fraction_part:
                     line.reason = "math"
                     changed = True
+
+    @staticmethod
+    def tick_row(line: Line) -> bool:
+        """Three or more short pieces, most of them far more than a word space apart: tick
+        labels. (Not all: centred ticks close up where a label is wider, "800 1,000".)"""
+        pieces: list[list] = []  # [text, x0, x1]: spans that touch are one label ("1" "," "000")
+        for s in (s for s in line.content if s.text.strip()):
+            if pieces and s.rect.x0 - pieces[-1][2] < 0.25 * line.size:
+                pieces[-1][0] += s.text.strip()
+                pieces[-1][2] = max(pieces[-1][2], s.rect.x1)
+            else:
+                pieces.append([s.text.strip(), s.rect.x0, s.rect.x1])
+        gaps = [b[1] - a[2] for a, b in zip(pieces, pieces[1:])]
+        wide = sum(g >= 0.8 * line.size for g in gaps)
+        return len(pieces) >= 3 and all(len(p[0]) <= 10 for p in pieces) and \
+            wide >= 2 and wide >= 0.6 * len(gaps)
+
+    def axis_titles(self, lines: list[Line]) -> None:
+        """A plot's title and axis titles ("Month of the year 2026", "Temperature") stand further
+        off than a tick label, often pushed away on purpose, and are longer than one: short lines
+        centred on a *plot* - a drawing that carries at least three tick labels - belong to its
+        picture. As text boxes they are set left-aligned in a wider font and lean off the axis
+        they name, and they would stay behind when the chart is moved. A caption ("Figure 2:")
+        and a sentence stay text, and so does anything by a drawing no labels mark as a plot."""
+        # What joins each title to its plot, for `figures` to cluster by: a title stands further
+        # off than the clustering gap, and a label no picture holds would stay in the background.
+        self.title_bridges = []
+        labels = [l for l in lines if l.reason in ("figure", "rotated")]
+        plots = []
+        for reg in self.regions:
+            box, marks, grown = reg, 0, True
+            members = set()
+            while grown:
+                grown = False
+                for l in labels:
+                    if id(l) not in members and box.distance(l.rect) <= 0.8 * l.size:
+                        members.add(id(l))
+                        box = union_all([box, l.rect])
+                        marks += max(1, len([s for s in l.content if s.text.strip()]))
+                        grown = True
+            if marks >= 3:
+                plots.append((reg, box))
+        if not plots:
+            return
+        for line in lines:
+            text = line.text.strip()
+            turned = line.reason == "rotated"  # a y axis title, read bottom to top
+            if (line.reason is not None and not turned) or line.bullet or line.tab is not None or not text or \
+                    len(text.split()) > 6 or line.size > 1.3 * self.body or CAPTION_RE.match(text) or \
+                    (text.endswith(".") and len(text.split()) >= 4):
+                continue
+            r = line.rect
+            for reg, box in plots:
+                if turned:
+                    centred = abs(reg.cy - r.cy) <= max(2.0, 0.03 * reg.h) and r.h <= reg.h
+                    gap = max(box.x0 - r.x1, r.x0 - box.x1)
+                else:
+                    centred = abs(reg.cx - r.cx) <= max(2.0, 0.03 * reg.w) and r.w <= reg.w
+                    gap = max(box.y0 - r.y1, r.y0 - box.y1)
+                if centred and -0.5 * line.size <= gap <= 2.5 * line.size:
+                    line.reason = "figure"
+                    self.title_bridges.append(union_all([r, box]))
+                    break
 
     # -- paragraphs -------------------------------------------------------------
 
@@ -1607,7 +1678,7 @@ class PageClassifier:
         if not regions:
             return out
         # Cluster word by word: one "line" of labels can span two neighbouring figures.
-        rects = regions + [s.rect for s in label_spans]
+        rects = regions + [s.rect for s in label_spans] + self.title_bridges
         for c in cluster_rects(rects, gap=0.8 * self.body):
             if max(c.w, c.h) < 25 or c.w * c.h > 0.8 * self.W * self.H:
                 continue

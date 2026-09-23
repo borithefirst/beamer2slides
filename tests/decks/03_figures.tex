@@ -54,4 +54,29 @@
   \includegraphics[width=0.45\textwidth]{example-image-c}
 \end{frame}
 
+% A tick row longer than a short label: left as text it made the chart an overlay that emit
+% moved and stretched after Slides' words.
+\begin{frame}{Long tick labels}
+  \begin{tikzpicture}
+    \begin{axis}[width=7cm, height=5cm, label style={font=\large},
+        xlabel={Sequence length}, ylabel={Memory (GB)}]
+      \addplot coordinates {(128,1) (256,2) (512,4.5) (1024,10)};
+    \end{axis}
+  \end{tikzpicture}
+\end{frame}
+
+% Titles pushed off their axes are the chart's; the caption under it stays text.
+\begin{frame}{Titles pushed away}
+  \begin{figure}
+    \begin{tikzpicture}
+      \begin{axis}[width=7cm, height=4.2cm, xlabel={Temperature}, ylabel={Pressure},
+          xlabel style={yshift=-10pt}, ylabel style={yshift=10pt},
+          title={Phase diagram of the sample}, title style={yshift=8pt}]
+        \addplot[domain=0:5] {x^1.5};
+      \end{axis}
+    \end{tikzpicture}
+    \caption{Measured in the cold room.}
+  \end{figure}
+\end{frame}
+
 \end{document}

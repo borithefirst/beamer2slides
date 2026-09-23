@@ -208,6 +208,17 @@ a per-slide background picture.
   to ~2046 px on the long side, so `pull` gets the author's file back (`tools/probe_pdf_images.py`
   prints the decision table for a PDF, `tools/lossless_images_proof.py` proves it on a live deck).
   Test decks: `07_images`, `23_raster_images` (one case per frame, `tests/test_raster_images.py`).
+  **A chart's labels are the chart's** (user report: axis labels in the wrong spot). A tick row
+  longer than a short label ("200  400  600  800  1,000", `PageClassifier.tick_row`: pieces far
+  more than a word space apart, touching spans joined) stayed text, so the chart became an
+  *overlay* anchored to it and emit moved and stretched the chart after Slides' words. Titles and
+  axis titles pushed off the axis (`title style={yshift}`), too far for the 0.8 em label rule,
+  became left-aligned text boxes that lean off their axis in the wider stand-in font
+  (`axis_titles`). Now a short line centred on a *plot* - a drawing carrying three or more tick
+  labels - is the plot's, sideways for a turned y label. `title_bridges` pull it into the
+  picture's cluster, since a label no picture holds stays in the background. A caption
+  (`CAPTION_RE`, "Figure:") and a sentence stay text. Nothing changed on the 54 test and theme PDFs;
+  `03_figures` pages 5-6, `tests/test_classify.py`.
 - `table`: text framed by equal-width horizontal rules (`\hline`/booktabs), with optional
   vertical and partial rules (→ per-cell `borders`) and merged cells (`merges`: chunks
   crossing columns, rows halfway between rows). Cell lineSpacing is tightened so rows keep
