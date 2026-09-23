@@ -17,7 +17,7 @@ from collections import Counter
 from dataclasses import dataclass, field, replace
 
 from . import bidi
-from .fonts import FontInfo, font_info
+from .fonts import MATH_ITALIC_RE, FontInfo, font_info
 
 BULLET_GLYPHS = set("▶►▸‣•◦▪■□○●★⋆✓∗–")
 PRESET_GLYPHS = set("▶►▸‣•●")  # glyphs with a close Slides bullet preset (see emit.bullet_preset)
@@ -32,9 +32,35 @@ EQ_NUMBER_RE = re.compile(r"^\(\d+(\.\d+)*[a-z]?\)$")
 # A caption's label: "Figure:", "Figure 3:", "Fig. 2.", "Table IV:" (beamer's caption templates).
 CAPTION_RE = re.compile(r"^\S+\.?(\s+[\dIVXivx]+(\.\d+)*)?\s*[:.](\s|$)")
 MATH_OPERATORS = set("=+−<>≤≥×·/∑∏∫∈∉⊂⊆∪∩→←⇒⇔≈≠±∞")
-# Lone glyphs of bitmap (Type 3) text companion fonts come back as their TS1 code, a control
-# character: \textbullet (metropolis' itemize item under pdflatex without cm-super).
+# Lone glyphs of bitmap (Type 3) text companion fonts come back as their TS1 code read as
+# Latin-1 (the glyph names are /aNNN): \textbullet (metropolis' itemize item under pdflatex
+# without cm-super) a control character, \texteuro an inverted question mark. TS1's codes
+# 0xA2-0xBE are Latin-1's own characters but for these.
 TYPE3_SYMBOLS = {"\x88": "•"}
+TS1_SYMBOLS = {
+    "\x84": "†", "\x85": "‡", "\x86": "‖", "\x87": "‰", "\x89": "℃", "\x8c": "ƒ", "\x8d": "₡",
+    "\x8e": "₩", "\x8f": "₦", "\x90": "₲", "\x91": "₱", "\x92": "₤", "\x93": "℞", "\x94": "‽",
+    "\x96": "₫", "\x97": "™", "\x98": "‱", "\x99": "¶", "\x9a": "฿", "\x9b": "№", "\x9d": "℮",
+    "\x9e": "◦", "\x9f": "℠", "\xad": "℗", "\xb8": "※", "\xbb": "√", "\xbf": "€",
+}
+
+
+def type3_text_page(spans: list[dict]) -> bool:
+    """The page's text itself is in bitmap fonts (T1 without cm-super): Type 3 words. Then a lone
+    Type 3 glyph may be a letter of that encoding (T1's 0xBF is £), not a TS1 symbol."""
+    return any(s["font"] == "Type3" and sum(c.isalpha() for c in s["text"]) >= 2 for s in spans)
+
+
+def type3_symbol(text: str, type3_words: bool) -> str:
+    """A Type 3 span's text: a lone TS1 glyph as its character (TYPE3_SYMBOLS always, the other
+    TS1 symbols where the page's words are not Type 3 themselves, so the lone glyph can only be a
+    companion-font symbol)."""
+    if text in TYPE3_SYMBOLS:
+        return TYPE3_SYMBOLS[text]
+    glyph = text.strip()
+    if type3_words or glyph not in TS1_SYMBOLS:
+        return text
+    return text.replace(glyph, TS1_SYMBOLS[glyph])
 SMALL_IMAGE_PT = 12
 HOLE_PAD = 1.0  # pt of page around an inline formula picture (antialiasing, italic overhang)
 
@@ -295,27 +321,117 @@ def script_of(span: Span, line: "Line") -> str | None:
 
 
 DOUBLE_STRUCK = {"C": "ℂ", "H": "ℍ", "N": "ℕ", "P": "ℙ", "Q": "ℚ", "R": "ℝ", "Z": "ℤ"}
-# Accents TeX sets as glyphs of their own over a letter (\bar{X}): combining marks in Slides.
+# \mathcal / \mathscr capitals as Unicode's script letters (the Letterlike Symbols ones where
+# Unicode has them there), \mathfrak as Fraktur. Slides draws them from its fallback font, as it
+# does the double-struck ones: a calligraphic letter, not a plain capital.
+SCRIPT = {"B": "ℬ", "E": "ℰ", "F": "ℱ", "H": "ℋ", "I": "ℐ", "L": "ℒ", "M": "ℳ", "R": "ℛ"}
+FRAKTUR = {"C": "ℭ", "H": "ℌ", "I": "ℑ", "R": "ℜ", "Z": "ℨ"}
+SCRIPT_FONTS = ("CMSY", "CMBSY", "LMMATHSYMBOLS", "RSFS", "EUSM", "EUSB", "TXSY", "PXSY", "NTXSY")
+FRAKTUR_FONTS = ("EUFM", "EUFB")
+# Unicode math letters (unicode-math, OpenType math fonts) that are plain letters set italic.
+MATH_ITALIC_NAMES = ("MATHEMATICAL ITALIC ", "PLANCK CONSTANT")  # ℎ is the italic h
+# Characters no Slides text face has, drawn by a fallback font slanted and ~1 em wide (norm bars
+# read as "//"): the upright ASCII bars say the same.
+MATH_SUBSTITUTES = {"∥": "||", "‖": "||", "∣": "|"}
+NEGATION = "̸"  # TeX's \not: a slash laid over the relation after it (\neq, \not\subseteq)
+# Accents TeX sets as glyphs of their own over a letter (\bar{X}, and every accent in the OT1
+# encoding, pdflatex's default: Schr¨odinger): combining marks in Slides.
 ACCENTS = {"¯": "̄", "ˆ": "̂", "˜": "̃", "˙": "̇", "¨": "̈", "´": "́",
-           "`": "̀", "ˇ": "̌", "˘": "̆"}
+           "`": "̀", "ˇ": "̌", "˘": "̆", "˚": "̊", "˝": "̋", "¸": "̧", "˛": "̨"}
+BELOW_ACCENTS = set("¸˛")  # \c{S} is set letter first, then its cedilla (\ooalign)
+
+
+def with_accent(letter: str, mark: str) -> str:
+    """A letter with a combining mark, precomposed where Unicode has the pair (e + ´ -> é). An
+    accent over a dotless i or j (OT1's \\'{\\i}) is over an i or j."""
+    if unicodedata.combining(mark) == 230 and letter in "ıȷ":  # a mark above
+        letter = "ij"["ıȷ".index(letter)]
+    return unicodedata.normalize("NFC", letter + mark)
+
+
+def compose_accents(text: str, mono: bool = False) -> str:
+    """Spacing accents built with their letter (OT1: accent glyph, then the letter under it;
+    a cedilla after a tall letter) as the accented letter: "Schr¨odinger" -> "Schrödinger",
+    "Garc´ıa" -> "García", "S¸." -> "Ş.". In a monospaced face ` is a backquote, not an accent."""
+    if not any(c in ACCENTS for c in text):
+        return text
+    out: list[str] = []
+    i = 0
+    while i < len(text):
+        c = text[i]
+        if c in ACCENTS and not (mono and c == "`"):
+            nxt = text[i + 1] if i + 1 < len(text) else ""
+            if nxt.isalpha():
+                out.append(with_accent(nxt, ACCENTS[c]))
+                i += 2
+                continue
+            if c in BELOW_ACCENTS and out and out[-1][-1:].isalpha():
+                out[-1] = with_accent(out[-1], ACCENTS[c])
+                i += 1
+                continue
+        out.append(c)
+        i += 1
+    return "".join(out)
+
+
+def negate(text: str) -> str:
+    """TeX's \\not before its relation as the negated relation: " ̸ =" -> " ≠", "̸⊆" -> "⊈" (the
+    relation with a combining long solidus where Unicode has no precomposed one)."""
+    if NEGATION not in text:
+        return text
+    return re.sub(NEGATION + r"\s*(\S)", lambda m: unicodedata.normalize("NFC", m.group(1) + NEGATION), text)
+
+
+def math_pieces(font: str, text: str) -> list[tuple[str, bool]]:
+    """Unicode text of a span set in a math font, as pieces with their italic flag. A TeX math
+    italic font (CMMI, Latin Modern's LMMathItalic, newtx's NewTXMI...) makes the span italic
+    where it has letters; an OpenType math font's span mixes italic letters (𝑥, 𝜆: plain
+    letters set italic) with upright operators and digits, piece by piece."""
+    key = re.sub(r"[^A-Z0-9]", "", font.split("+", 1)[-1].upper())
+    text = negate(text)
+    if key.startswith("MSBM"):  # \mathbb
+        return [("".join(DOUBLE_STRUCK.get(c, chr(0x1D538 + ord(c) - 65) if "A" <= c <= "Z" else c)
+                         for c in text), False)]
+    if key.startswith(SCRIPT_FONTS):  # \mathcal, \mathscr
+        text = "".join(SCRIPT.get(c, chr(0x1D49C + ord(c) - 65)) if "A" <= c <= "Z" else c for c in text)
+    elif key.startswith(FRAKTUR_FONTS):  # \mathfrak
+        text = "".join(FRAKTUR.get(c, chr(0x1D504 + ord(c) - 65)) if "A" <= c <= "Z" else
+                       chr(0x1D51E + ord(c) - 97) if "a" <= c <= "z" else c for c in text)
+    text = "".join(MATH_SUBSTITUTES.get(c, c) for c in text)
+    if MATH_ITALIC_RE.search(key):
+        return [(text, any(c.isalpha() for c in text))]
+    pieces: list[tuple[str, bool]] = []
+    for c in text:
+        italic = unicodedata.name(c, "").startswith(MATH_ITALIC_NAMES)
+        if italic:  # 𝜆 -> λ, 𝜕 -> ∂, 𝜙 -> ϕ
+            c = unicodedata.normalize("NFKC", c)
+        if pieces and (pieces[-1][1] == italic or c.isspace() or unicodedata.combining(c)):
+            pieces[-1] = (pieces[-1][0] + c, pieces[-1][1])
+        elif pieces and not pieces[-1][0].strip():  # the span's leading space goes with its first piece
+            pieces[-1] = (pieces[-1][0] + c, italic)
+        else:
+            pieces.append((c, italic))
+    return pieces or [("", False)]
 
 
 def math_text(font: str, text: str) -> tuple[str, bool]:
-    """Unicode text and italic flag for a span set in a math font."""
-    name = font.upper()
-    if name.startswith("MSBM"):  # \mathbb
-        return "".join(DOUBLE_STRUCK.get(c, chr(0x1D538 + ord(c) - 65) if "A" <= c <= "Z" else c)
-                       for c in text), False
-    out, italic = [], name.startswith("CMMI") and any(c.isalpha() for c in text)
-    for c in text:
-        uname = unicodedata.name(c, "")
-        if uname.startswith("MATHEMATICAL ITALIC "):  # OpenType math fonts: 𝑥 -> x, italic
-            letter = uname.rsplit(" ", 1)[-1]
-            out.append(letter.lower() if "SMALL" in uname else letter)
-            italic = True
-        else:
-            out.append(c)
-    return "".join(out), italic
+    """Unicode text and italic flag for a span set in a math font (italic: any of it is)."""
+    pieces = math_pieces(font, text)
+    return "".join(t for t, _ in pieces), any(i for _, i in pieces)
+
+
+def math_family(line: "Line", par: "Paragraph | None" = None) -> str:
+    """The text family math is shown in: the family most of the words around it are set in -
+    on its line, else in its paragraph - never a monospaced one (a formula after \\texttt{x} is
+    not code), and serif when there are no words (TeX's math is Computer Modern's)."""
+    for spans in ([line.content], [l.content for l in par.lines] if par else []):
+        weight = Counter()
+        for s in (s for group in spans for s in group):
+            if s.info.family in ("sans", "serif"):
+                weight[s.info.family] += len(s.text.strip())
+        if weight:
+            return weight.most_common(1)[0][0]
+    return "serif"
 
 
 FRACTION_SLASH = "⁄"
@@ -356,19 +472,21 @@ def span_runs(spans: list[Span]) -> list[dict]:
         if i and gap_between(spans[i - 1], s) > 0.15 * s.size and not text.startswith(" "):
             text = " " + text
         family, italic, script = s.info.family, s.info.italic, None
+        pieces = [(text, italic)]
         if family == "math":
             family = base_family
-            text, italic = math_text(s.font, text)
+            pieces = math_pieces(s.font, text)
         if s.size < 0.85 * main.size:
             shift = s.baseline - main.baseline
             script = "super" if shift < -0.12 * main.size else "sub" if shift > 0.12 * main.size else None
-        style = {"font": s.font, "family": family, "size": round(main.size if script else s.size, 2),
-                 "bold": s.info.bold, "italic": italic, "smallcaps": s.info.smallcaps, "color": s.color,
-                 "link": s.link, "script": script, "underline": s.underline, "strike": s.strike, "highlight": s.highlight}
-        if runs and all(runs[-1][k] == v for k, v in style.items()):
-            runs[-1]["text"] += text
-        else:
-            runs.append({"text": text, **style})
+        for text, italic in pieces:
+            style = {"font": s.font, "family": family, "size": round(main.size if script else s.size, 2),
+                     "bold": s.info.bold, "italic": italic, "smallcaps": s.info.smallcaps, "color": s.color,
+                     "link": s.link, "script": script, "underline": s.underline, "strike": s.strike, "highlight": s.highlight}
+            if runs and all(runs[-1][k] == v for k, v in style.items()):
+                runs[-1]["text"] += text
+            else:
+                runs.append({"text": text, **style})
     return runs
 
 
@@ -915,6 +1033,7 @@ class PageClassifier:
         # External links keep their URL; internal ones become "#page=N" (PDF page index).
         links = [(Rect.of(l["bbox"]), l.get("uri") or f"#page={l['page']}") for l in self.page["links"]]
         out = []
+        type3_words = type3_text_page(self.page["spans"])
         for s in self.page["spans"]:
             r = Rect.of(s["bbox"])
             dx, dy = s["dir"]
@@ -924,11 +1043,13 @@ class PageClassifier:
                 # opacity, so show the colour it takes over a white page.
                 a = s["alpha"] / 255
                 color = "#" + "".join(f"{round(int(color[i:i + 2], 16) * a + 255 * (1 - a)):02x}" for i in (1, 3, 5))
-            text = TYPE3_SYMBOLS.get(s["text"], s["text"]) if s["font"] == "Type3" else s["text"]
+            info = font_info(s["font"])
+            text = type3_symbol(s["text"], type3_words) if s["font"] == "Type3" else \
+                compose_accents(s["text"], info.family == "mono") if info.family not in ("math", "icon") else s["text"]
             # The page draws right-to-left text left to right (bidi.py): put its letters back.
             text = bidi.logical_text(text)
             span = Span(s["id"], text, s["font"].split("+", 1)[-1], s["size"], color, r,
-                        s["origin"][1], abs(dy) < 0.01 and dx > 0, font_info(s["font"]))
+                        s["origin"][1], abs(dy) < 0.01 and dx > 0, info)
             if s.get("smallcaps"):  # OpenType small caps, found from glyph ids (extract.small_caps_spans)
                 span.info = replace(span.info, smallcaps=True)
             span.link = next((uri for lr, uri in links if lr.contains(r.cx, r.cy)), None)
@@ -1915,11 +2036,14 @@ class PageClassifier:
                 text = span.text
                 if text.strip() in ACCENTS and prev is not None and runs and not runs[-1].get("hole") and \
                         span.rect.x0 < prev.rect.x1 - 0.2 and prev.rect.x0 < span.rect.x1:
-                    runs[-1]["text"] += ACCENTS[text.strip()]  # over the letter before it
+                    tail = runs[-1]["text"]  # over the letter before it
+                    runs[-1]["text"] = tail[:-1] + with_accent(tail[-1], ACCENTS[text.strip()]) \
+                        if tail[-1:].isalpha() else tail + ACCENTS[text.strip()]
                     continue
                 if accent:
                     lead = len(text) - len(text.lstrip())
-                    text, accent = text[:lead + 1] + accent + text[lead + 1:], ""
+                    letter = with_accent(text[lead], accent) if text[lead:lead + 1].isalpha() else text[lead:lead + 1] + accent
+                    text, accent = text[:lead] + letter + text[lead + 1:], ""
                 body = text.rstrip()
                 nxt = order[si + 1][0] if si + 1 < len(order) else None
                 if len(body) >= 2 and body[-1] in ACCENTS and isinstance(nxt, Span) and nxt.rect.x0 < span.rect.x1 - 0.2:
@@ -1966,32 +2090,38 @@ class PageClassifier:
                             text = sep + text  # keep the space out of the raised/lowered run and the gap
                         else:
                             runs[-1]["text"] += sep
+                if runs and not runs[-1].get("hole") and runs[-1]["text"].rstrip().endswith(NEGATION) and text.strip():
+                    # \not in one font, its relation in another (CMSY's slash, CMR's =): one ≠
+                    tail = runs[-1]["text"].rstrip()
+                    runs[-1]["text"] = tail[:-1] + runs[-1]["text"][len(tail):]
+                    text = negate(NEGATION + text)
                 script = forced or script_of(span, line)
                 family, italic = span.info.family, span.info.italic
+                pieces = [(text, italic)]
                 if family == "math":
                     # Math fonts carry symbols and variables; show them in the text family.
-                    base = line.main.info.family
-                    family = base if base != "math" else "serif"
-                    text, italic = math_text(span.font, text)
-                style = {
-                    "font": span.font, "family": family,
-                    # Slides shrinks sub/superscripts itself: give them the line's size.
-                    "size": round(line.size if script else span.size, 2),
-                    "bold": span.info.bold, "italic": italic, "smallcaps": span.info.smallcaps,
-                    "color": span.color, "link": span.link, "script": script,
-                    "underline": span.underline, "strike": span.strike, "highlight": span.highlight,
-                }
-                marks = lambda r: (r["underline"], r.get("strike", False), r["highlight"])
-                if runs and runs[-1]["text"].endswith(" ") and marks(runs[-1]) != marks(style) and any(marks(runs[-1])):
-                    runs[-1]["text"] = runs[-1]["text"][:-1]  # an underline, strike or highlight ends at the word
-                    if any(marks(style)):  # and the next one starts at its word: the space between is plain
-                        runs.append({**runs[-1], "text": " ", "underline": False, "strike": False, "highlight": None})
+                    family = math_family(line, par)
+                    pieces = math_pieces(span.font, text)
+                for text, italic in pieces:
+                    style = {
+                        "font": span.font, "family": family,
+                        # Slides shrinks sub/superscripts itself: give them the line's size.
+                        "size": round(line.size if script else span.size, 2),
+                        "bold": span.info.bold, "italic": italic, "smallcaps": span.info.smallcaps,
+                        "color": span.color, "link": span.link, "script": script,
+                        "underline": span.underline, "strike": span.strike, "highlight": span.highlight,
+                    }
+                    marks = lambda r: (r["underline"], r.get("strike", False), r["highlight"])
+                    if runs and runs[-1]["text"].endswith(" ") and marks(runs[-1]) != marks(style) and any(marks(runs[-1])):
+                        runs[-1]["text"] = runs[-1]["text"][:-1]  # an underline, strike or highlight ends at the word
+                        if any(marks(style)):  # and the next one starts at its word: the space between is plain
+                            runs.append({**runs[-1], "text": " ", "underline": False, "strike": False, "highlight": None})
+                        else:
+                            text = " " + text
+                    if runs and not runs[-1].get("hole") and all(runs[-1].get(k) == v for k, v in style.items()):
+                        runs[-1]["text"] += text
                     else:
-                        text = " " + text
-                if runs and not runs[-1].get("hole") and all(runs[-1].get(k) == v for k, v in style.items()):
-                    runs[-1]["text"] += text
-                else:
-                    runs.append({"text": text, **style})
+                        runs.append({"text": text, **style})
                 prev = span
         # A word space at the edge of inline code belongs to the surrounding text: in a
         # monospaced font it would be twice as wide.
