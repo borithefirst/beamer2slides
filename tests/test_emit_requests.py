@@ -174,24 +174,32 @@ class Emitted:
             self.edit_text(kind, body, where)
 
     def edit_text(self, kind: str, body: dict, where: str) -> None:
+        # Slides counts text indices in UTF-16 code units (an astral 𝔼 is two): so does the model.
         oid, text = body["objectId"], self.texts[body["objectId"]]
+        units = text.encode("utf-16-le", "surrogatepass")
+        n = len(units) // 2
         rng = body.get("textRange", {})
         if rng.get("type") == "FIXED_RANGE":
             start, end = rng["startIndex"], rng["endIndex"]
-            if not 0 <= start < end <= len(text) + 1:  # (+1: the implicit newline ending the text)
-                self.flag("ranges", where, f"{kind} range {start}..{end} outside {oid}'s {len(text)} characters")
+            if not 0 <= start < end <= n + 1:  # (+1: the implicit newline ending the text)
+                self.flag("ranges", where, f"{kind} range {start}..{end} outside {oid}'s {n} UTF-16 units")
+            for i in (start, end):  # an index between the halves of a surrogate pair
+                if 0 < i < n and 0xDC00 <= int.from_bytes(units[2 * i:2 * i + 2], "little") <= 0xDFFF:
+                    self.flag("ranges", where, f"{kind} range {start}..{end} splits a surrogate pair in {oid}")
         if kind == "insertText":
             i = body.get("insertionIndex", 0)
-            self.texts[oid] = text[:i] + body["text"] + text[i:]
+            units = units[:2 * i] + body["text"].encode("utf-16-le", "surrogatepass") + units[2 * i:]
         elif kind == "deleteText":
-            self.texts[oid] = text[:rng["startIndex"]] + text[rng["endIndex"]:]
+            units = units[:2 * rng["startIndex"]] + units[2 * rng["endIndex"]:]
         elif kind == "createParagraphBullets":
             out, pos = [], 0
             for para in text.split("\n"):  # (paragraphs in the range lose their leading tabs)
-                inside = pos < rng["endIndex"] and pos + len(para) + 1 > rng["startIndex"]
+                size = len(para.encode("utf-16-le", "surrogatepass")) // 2
+                inside = pos < rng["endIndex"] and pos + size + 1 > rng["startIndex"]
                 out.append(para.lstrip("\t") if inside else para)
-                pos += len(para) + 1
-            self.texts[oid] = "\n".join(out)
+                pos += size + 1
+            units = "\n".join(out).encode("utf-16-le", "surrogatepass")
+        self.texts[oid] = units.decode("utf-16-le", "surrogatepass")
 
     def check_values(self, body, where: str) -> None:
         """Font sizes, weights and element sizes positive; colours and alphas in [0, 1]."""

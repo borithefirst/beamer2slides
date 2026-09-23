@@ -12,9 +12,20 @@ GLYPHS = {"BULLET_DISC_CIRCLE_SQUARE": "●", "BULLET_ARROW3D_CIRCLE_SQUARE": "�
           "NUMBERED_DIGIT_ALPHA_ROMAN_PARENS": "1)"}
 
 
+def units(text: str) -> list[str]:
+    """A text's UTF-16 code units, one string each, as Slides indexes text (an astral 𝔼 is two)."""
+    data = text.encode("utf-16-le", "surrogatepass")
+    return [chr(int.from_bytes(data[i:i + 2], "little")) for i in range(0, len(data), 2)]
+
+
+def joined(chars: list[str]) -> str:
+    """Code units back into text; a surrogate pair split by a style range stays two halves."""
+    return "".join(chars).encode("utf-16-le", "surrogatepass").decode("utf-16-le", "surrogatepass")
+
+
 class Text:
-    """Characters with their styles; a paragraph's marker sits on its closing newline (the last
-    paragraph's in `end`)."""
+    """Characters (UTF-16 code units: `units`) with their styles; a paragraph's marker sits on its
+    closing newline (the last paragraph's in `end`)."""
 
     def __init__(self):
         self.chars: list[str] = []
@@ -33,9 +44,10 @@ class Text:
 
     def insert(self, at: int, text: str) -> None:
         style = dict(self.styles[at - 1]) if at > 0 and self.styles else {}
-        self.chars[at:at] = list(text)
-        self.styles[at:at] = [dict(style) for _ in text]
-        self.marks[at:at] = [{"style": {}, "bullet": None} if c == "\n" else None for c in text]
+        chars = units(text)
+        self.chars[at:at] = chars
+        self.styles[at:at] = [dict(style) for _ in chars]
+        self.marks[at:at] = [{"style": {}, "bullet": None} if c == "\n" else None for c in chars]
 
     def remove(self, a: int, b: int) -> None:
         self.chars[a:b] = []
@@ -59,7 +71,7 @@ class Text:
                 e = k
                 while e < b and self.styles[e] == self.styles[k]:
                     e += 1
-                out.append({"textRun": {"content": "".join(self.chars[k:e]), "style": copy.deepcopy(self.styles[k])}})
+                out.append({"textRun": {"content": joined(self.chars[k:e]), "style": copy.deepcopy(self.styles[k])}})
                 k = e
             out.append({"textRun": {"content": "\n", "style": copy.deepcopy(self.styles[b - 1]) if b > a else {}}})
         return {"textElements": out}
