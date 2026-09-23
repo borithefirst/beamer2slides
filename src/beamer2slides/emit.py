@@ -94,6 +94,34 @@ DESIGN_WIDTH = {
     "serif": {5: 1.3758, 6: 1.2291, 7: 1.1424, 8: 1.0629, 9: 1.0277, 10: 1.0, 12: 0.9786, 17: 0.9136},
     "mono": {8: 1.0114, 9: 1.0, 10: 1.0, 12: 0.979},
 }
+# A small optical cut is wider per em than the 10 pt one, not taller (cmr5's x-height is cmr10's
+# per em), so a substitute sized to its width grows its letters as much: a 5 pt LMRoman5 footline
+# (1.38x) came out 1.4 times as tall as the PDF's and filled its bar. The width is matched up to
+# the small-caps compromise (SMALL_CAPS_WIDTH) and no further: at 5 pt the line comes out ~18%
+# narrower than the PDF's and ~13% taller. 8 and 9 pt cuts (1.03-1.06) are matched in full.
+OPTICAL_WIDTH_MAX = 1.13
+
+
+def optical_width(family: str, design: float) -> float:
+    """How much wider per em than its 10 pt cut the size factor takes a run's optical size to be."""
+    return min(OPTICAL_WIDTH_MAX, design_width(DESIGN_WIDTH.get(family, DESIGN_WIDTH["sans"]), design))
+
+
+def u16(text: str) -> int:
+    """Length in UTF-16 code units, which is what every Slides text index counts: an astral
+    character (𝔼 U+1D53C from amssymb's \\mathbb, 𝛽 U+1D6FD) is two. Counting code points put
+    every style range after one a unit early and split the next one's surrogate pair (two tofu)."""
+    return len(text.encode("utf-16-le", "surrogatepass")) // 2
+
+
+# XML 1.0 refuses C0 controls other than tab, newline and return, lone surrogates and U+FFFE/F:
+# a Type 3 T1 font's raw glyph codes (quotes, dashes, ligatures at 0x10-0x1d) reach alt texts.
+XML_REFUSED = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\ud800-\udfff\ufffe\uffff]")
+
+
+def xml_text(text: str) -> str:
+    """A string lxml accepts as an attribute value (build_pptx): refused characters dropped."""
+    return XML_REFUSED.sub("", text)
 
 
 # Small caps (tools/probe_text_fit_fonts.py): Slides draws a smallCaps lowercase letter as its
@@ -143,6 +171,12 @@ SHAPE_REFERENCE = ("The quick brown fox jumps over the lazy dog",
                    "Another first level item that is long enough to wrap",
                    "Lorem ipsum dolor sit amet, consectetur adipiscing elit")
 SHAPE_TITLE_REFERENCE = ("Itemize, nested and frame titles",)  # the title factor's row (CMSS12)
+# Dots set apart from words: \dotfill and \dots leaders, \ldots (". . ." in the text layer) and
+# "...". TeX sets them as fixed boxes or thin spaces, not as sentence ends; read as periods with
+# interword and sentence spaces they made a leader line look 30-40% too wide for Slides, and the
+# run was set 1.3-1.7 times too large. Their width is neither the PDF's letters' nor a sentence's,
+# so they count on neither side, with the spaces around them (advance_widths).
+LEADER = re.compile(r"[   ]*\.(?:[   ]*\.)+[   ]*")
 STYLE_KEY = {(False, False): "regular", (True, False): "bold", (False, True): "italic", (True, True): "bold_italic"}
 SLANTED = re.compile(r"CMB?X?SL\d|SFSL\d|SFBL\d|LMROMANSLANT")  # slanted roman: upright widths
 
@@ -167,14 +201,20 @@ def advance_widths(text: str, cm: dict, slides: dict) -> tuple[float, float, int
     """(Slides em, PDF em, characters counted, characters skipped) of a text set in a Computer
     Modern face (`cm`, a CM_ADVANCES entry) and in its Slides substitute (`slides`, an ADVANCES
     entry). The PDF side is what TeX set: ligatures, kerning pairs, interword space and the extra
-    space after a sentence. A character either table lacks counts on neither side."""
+    space after a sentence. A character either table lacks counts on neither side, and so do dot
+    leaders and ellipses (LEADER): each of their dots is a skipped character."""
     for seq, lig in CM_LIGATURES:
         if lig in cm["advances"]:
             text = text.replace(seq, lig)
+    text = LEADER.sub(lambda m: "\0" * m.group().count("."), text)
     s_em = p_em = 0.0
     counted = skipped = 0
     factor, prev = 1000, None
     for ch in text:
+        if ch == "\0":  # a leader's dot
+            skipped += 1
+            factor, prev = 1000, None
+            continue
         if ch in "  ":
             s_em += slides.get(" ", 0.0)
             p_em += cm["space"] + (cm["extra_space"] if factor >= 2000 else 0.0)
@@ -265,8 +305,9 @@ class FontMapper:
             if run["family"] != "serif" and 11.5 <= design < 14:
                 factor = title  # calibrated directly on CMSS12 titles
             else:
-                # Other optical sizes: CM's small cuts are wider per em, its large ones narrower.
-                factor = text / design_width(DESIGN_WIDTH.get(run["family"], DESIGN_WIDTH["sans"]), design)
+                # Other optical sizes: CM's small cuts are wider per em (up to OPTICAL_WIDTH_MAX),
+                # its large ones narrower.
+                factor = text / optical_width(run["family"], design)
             # Bold and italic substitutes run 4-8% narrower than CM's; correct half of that, so
             # widths come closer without emphasised words looking visibly larger.
             style = self.style.get(run["family"], self.style["sans"])
@@ -288,7 +329,8 @@ class FontMapper:
         A run that is only a number (a digit, nothing but digits and a number's punctuation)
         gets the whole ratio at the size `factor` gives it, when it comes out wider. Any other
         run of SHAPE_MIN_CHARS counted characters or more is judged against the calibration
-        sentences in its own face and gets the ratio when it is off by more than SHAPE_TOL."""
+        sentences in its own face and gets the ratio when it is off by more than SHAPE_TOL, unless
+        it shares its paragraph with other runs (`in_sentence`: sized like them)."""
         text = run.get("text", "")
         cm = CM_ADVANCES.get(cm_face(run) or "")
         if cm is None or not text.strip() or run.get("script") or run.get("hole") or family not in ADVANCES:
@@ -298,8 +340,9 @@ class FontMapper:
         if any(c in DIGITS for c in number) and all(c in NUMBER_CHARS for c in number):
             s_em = sum(slides.get(c, UNMEASURED_ADVANCE_EM) for c in number)
             p_em = sum(cm["advances"][c] for c in number)
-            dw = design_width(DESIGN_WIDTH.get(run["family"], DESIGN_WIDTH["sans"]), design)
-            return max(1.0, s_em / factor / (p_em * dw))
+            return max(1.0, s_em / factor / (p_em * optical_width(run["family"], design)))
+        if run.get("in_sentence"):  # (a run among others keeps their size: in_sentence)
+            return 1.0
         s_em, p_em, counted, skipped = advance_widths(text, cm, slides)
         if counted < SHAPE_MIN_CHARS or skipped > 0.1 * counted or p_em <= 0:
             return 1.0
@@ -496,6 +539,18 @@ def solve_increasing(f, target: float, lo: float = 0.5, hi: float = 3.0) -> floa
 HOLE_FONT, HOLE_SPACE_EM = "Roboto Mono", 0.6  # monospaced: a space is exactly 0.6 em
 
 
+def in_sentence(runs: list[dict]) -> list[dict]:
+    """A paragraph's runs, each marked `in_sentence` when another run with words or a formula
+    shares the paragraph (a table cell, a node's line): FontMapper then leaves its letters' shape
+    alone (`shape_ratio`). Sized to its own PDF width, a reference's author list ("J. Park, W.
+    Zhang, et al. ", 0.905) or a journal abbreviation came out 10% larger than the title beside
+    it, and a bullet with it: one size across a line matters more than one run's width. Copies,
+    never the IR (sync diffs it)."""
+    if sum(1 for r in runs if r.get("text", "").strip() or r.get("hole")) < 2:
+        return runs
+    return [r if r.get("in_sentence") else {**r, "in_sentence": True} for r in runs]
+
+
 def hole_run(run: dict, scale: float, fonts: FontMapper) -> dict:
     """The gap under an inline formula picture (and the word space after it): no-break spaces
     in a monospaced font, sized so they are exactly as wide as the formula and no taller than
@@ -585,6 +640,18 @@ def hugs(p: dict) -> str:
     return p["align"]
 
 
+def box_lines(paras: list[dict], edges: list[str], scale: float, fonts: FontMapper) -> tuple[float, float] | None:
+    """(right edge of the widest line, the least right edge at which a line would take its next
+    word) in Slides pt over a left-aligned box's paragraphs as Slides sets their PDF lines
+    (slides_lines); None when a paragraph cannot be measured."""
+    if set(edges) != {"left"} or any(p.get("direction") == "rtl" or not p["runs"] for p in paras):
+        return None
+    got = [slides_lines(p, scale, fonts) for p in paras]
+    if None in got:
+        return None
+    return max(g[0] for g in got), min(g[1] for g in got)
+
+
 def text_box_requests(el: dict, slide_id: str, object_id: str, scale: float, fonts: FontMapper,
                       placeholder: dict | None = None, page_slide: dict[int, str] | None = None,
                       bar: list[float] | None = None, right_limit: float | None = None,
@@ -595,7 +662,7 @@ def text_box_requests(el: dict, slide_id: str, object_id: str, scale: float, fon
     how far a box of unwrapped left-aligned text may extend. `marks` highlights the hole runs,
     one colour each (measure_places)."""
     marks = list(marks or [])
-    paras = [{**p, "runs": [hole_run(r, scale, fonts) if r.get("hole") else r for r in p["runs"]]}
+    paras = [{**p, "runs": [hole_run(r, scale, fonts) if r.get("hole") else r for r in in_sentence(p["runs"])]}
              for p in el["paragraphs"]]
     # A line is as tall as its largest run, as Slides lays it out (line_size: small caps), and a
     # subscript is no larger than its text (run_sizes).
@@ -628,8 +695,16 @@ def text_box_requests(el: dict, slide_id: str, object_id: str, scale: float, fon
     # that a slightly wider font never wraps them.
     limits = [p["wrap_limit"] for p in paras if p.get("wrap_limit") and not any(SOFT_BREAK in r["text"] for r in p["runs"])]
     room = (min(limits) - right_pdf) * scale if limits else 0.0
+    measured = box_lines(paras, edges, scale, fonts) if multiline else None
     if not multiline:
         slack = max(0.15 * inner_w, 2 * max(sizes))
+    elif measured:
+        # Each PDF line as Slides sets its words: a TeX-full line in a narrow column comes out a
+        # few points wider in Lato, more than the room the PDF leaves before the next word.
+        widest, joins = measured
+        inner_w = widest - left_pdf * scale
+        room = joins - widest
+        slack = room / 2 if room > 2 * WRAP_MARGIN else WRAP_MARGIN
     elif room > 4:
         slack = room / 2
     else:
@@ -707,14 +782,14 @@ def text_box_requests(el: dict, slide_id: str, object_id: str, scale: float, fon
             pos += 2
         starts_tabbed.append(pos)
         parts.append("\t" * levels[i] + t)
-        pos += levels[i] + len(t) + 1
+        pos += levels[i] + u16(t) + 1  # (every index below counts UTF-16 units, as Slides does: u16)
     reqs.append({"insertText": {"objectId": object_id, "text": "\n".join(parts), "insertionIndex": 0}})
     # A bullet keeps the text style it was created with, unless a later style request covers
     # its whole paragraph. So every paragraph first gets its base family and size, bulleted
     # ones the bullet's size and colour, and the runs are styled below in parts.
     for i, (p, start, level, size) in enumerate(zip(paras, starts_tabbed, levels, base_sizes)):
         family = fonts(p["runs"][0], scale)[0] if p["runs"] else "Lato"
-        length = level + len("".join(r["text"] for r in p["runs"]))
+        length = level + u16("".join(r["text"] for r in p["runs"]))
         style = {"fontFamily": family, "fontSize": pt(size)}
         if p["bullet"]:
             style["fontSize"] = pt(bullet_size(p["bullet"], size, scale))
@@ -729,7 +804,7 @@ def text_box_requests(el: dict, slide_id: str, object_id: str, scale: float, fon
             }})
     for first, last, preset in reversed(ranges):
         start = starts_tabbed[first] - (2 if first in dummies else 0)
-        end = starts_tabbed[last] + levels[last] + len(texts[last])
+        end = starts_tabbed[last] + levels[last] + u16(texts[last])
         reqs.append({"createParagraphBullets": {
             "objectId": object_id, "bulletPreset": preset,
             "textRange": {"type": "FIXED_RANGE", "startIndex": start, "endIndex": end},
@@ -741,7 +816,7 @@ def text_box_requests(el: dict, slide_id: str, object_id: str, scale: float, fon
     # From here on indices refer to the final text, without tabs.
     pos = 0
     for p, t, ratio, above, base, edge, zs in zip(paras, texts, ratios, space_above, base_sizes, edges, sized):
-        p_start, p_end = pos, pos + len(t)
+        p_start, p_end = pos, pos + u16(t)
         pos = p_end + 1
         start = p_start
         for run, z in zip(p["runs"], zs):
@@ -772,9 +847,11 @@ def text_box_requests(el: dict, slide_id: str, object_id: str, scale: float, fon
             elif run["link"]:
                 style["link"] = {"url": run["link"]}
                 fields += ",link"
-            end = start + len(run["text"])
-            # (one request over the whole paragraph would restyle its bullet too)
-            cuts = [start, end - 1, end] if p["bullet"] and start == p_start and end == p_end and end - start > 1 else [start, end]
+            end = start + u16(run["text"])
+            # (one request over the whole paragraph would restyle its bullet too; the cut before
+            # the last character, never inside its surrogate pair)
+            cuts = [start, end - u16(run["text"][-1]), end] \
+                if p["bullet"] and start == p_start and end == p_end and len(run["text"]) > 1 else [start, end]
             for c0, c1 in zip(cuts, cuts[1:]):
                 reqs.append({"updateTextStyle": {
                     "objectId": object_id, "style": style, "fields": fields,
@@ -1088,9 +1165,9 @@ def build_pptx(page_w: float, page_h: float, keys: list[tuple], pages: list[dict
             x0, y0, x1, y1 = pic["bbox"]
             shape = slide.shapes.add_picture(str(pic["file"]), Emu(round(x0 * EMU_PER_PT)), Emu(round(y0 * EMU_PER_PT)),
                                              Emu(round((x1 - x0) * EMU_PER_PT)), Emu(round((y1 - y0) * EMU_PER_PT)))
-            if pic.get("alt"):
-                shape._element.nvPicPr.cNvPr.set("descr", pic["alt"])
-                shape._element.nvPicPr.cNvPr.set("title", pic["title"])
+            if pic.get("alt"):  # (text from the PDF: raw Type 3 T1 codes are C0 controls, xml_text)
+                shape._element.nvPicPr.cNvPr.set("descr", xml_text(pic["alt"]))
+                shape._element.nvPicPr.cNvPr.set("title", xml_text(pic["title"]))
         for table in page.get("tables", []):
             _add_table(slide, table)
         if page["templates"]:
@@ -1189,8 +1266,15 @@ def slides_width(runs: list[dict], scale: float, fonts: "FontMapper") -> float |
             if run.get("smallcaps") and ch.islower():
                 total += table.get(ch.upper(), unmeasured) * size * SMALL_CAPS_SIZE
             else:
-                total += table.get(ch, unmeasured) * size
+                total += table.get(ch, wide_advance(ch, unmeasured)) * size
     return total
+
+
+def wide_advance(ch: str, unmeasured: float) -> float:
+    """The advance (em) of a character the probe did not measure: a CJK ideograph, kana or
+    full-width form is a whole em in every fallback font (unicodedata's East Asian Width W / F).
+    At 0.6 em a Japanese header came out 40% narrower than Slides sets it and wrapped its cell."""
+    return 1.0 if unicodedata.east_asian_width(ch) in "WF" else unmeasured
 
 
 def runs_between(runs: list[dict], a: int, b: int) -> list[dict]:
@@ -1222,7 +1306,99 @@ def wrapped_width(runs: list[dict], starts: list[int], scale: float, fonts: "Fon
     return None if None in widths else max(widths)
 
 
-def fit_columns(bounds: list[float], cols: list[dict], scale: float, need: list[float | None] | None = None) -> list[float]:
+def pdf_width(runs: list[dict]) -> float | None:
+    """Width (PDF pt) TeX sets these Computer Modern runs at, from CM's own advances (within
+    0.3% on one-line paragraphs: test_computer_modern_advances_give_the_pdf_its_own_line_widths),
+    or None for a run in another font or with characters the tables lack."""
+    total = 0.0
+    for run in runs:
+        face, info = cm_face(run), font_info(run["font"])
+        if face is None or run.get("hole") or run.get("smallcaps"):
+            return None
+        slides = ADVANCES.get(FONT_FOR_FAMILY.get(run["family"], ""), ADVANCES["Lato"])["regular"]
+        _, em, _, skipped = advance_widths(run["text"], CM_ADVANCES[face], slides)
+        if skipped:
+            return None
+        total += em * design_width(DESIGN_WIDTH.get(run["family"], DESIGN_WIDTH["sans"]), info.design_size) * run["size"]
+    return total
+
+
+LINE_FIT_TOL = 0.06  # a PDF line may be this much wider than its words (a justified line's spaces)
+
+
+def pdf_line_breaks(p: dict) -> list[int] | None:
+    """Where each of a paragraph's PDF lines after the first starts (indices into its runs'
+    joined text, at a word), found by setting its words with CM's advances into the lines'
+    extents; None when the paragraph's words cannot be measured or do not come out as its lines
+    (a hyphenated line end, a font without CM metrics)."""
+    runs, lines = p["runs"], p["lines"]
+    text = "".join(r["text"] for r in runs)
+    if any(SOFT_BREAK in r["text"] or "\t" in r["text"] for r in runs):
+        return None
+    spaces = [i for i, ch in enumerate(text) if ch == " "]
+    starts, a = [], 0
+    while text[a:a + 1] == " ":
+        a += 1
+    for k, line in enumerate(lines):
+        extent = line["x1"] - line["x0"]
+        if k == len(lines) - 1:
+            end = len(text.rstrip())
+        else:
+            end = None
+            for b in (s for s in spaces if s > a):
+                w = pdf_width(runs_between(runs, a, b))
+                if w is None:
+                    return None
+                if w > extent * (1 + 0.01) + 0.5:
+                    break
+                end = b
+            if end is None:
+                return None
+        w = pdf_width(runs_between(runs, a, end))
+        if w is None or not extent * (1 - LINE_FIT_TOL) - 0.5 <= w <= extent * 1.01 + 0.5:
+            return None
+        if k < len(lines) - 1:
+            a = end
+            while text[a:a + 1] == " ":
+                a += 1
+            starts.append(a)
+    return starts
+
+
+def slides_lines(p: dict, scale: float, fonts: "FontMapper") -> tuple[float, float] | None:
+    """(right edge of the widest line, the least right edge at which a line's next word would
+    join it) in Slides pt, of a left-aligned paragraph's PDF lines as Slides sets their words
+    (measured advances: slides_width); None when that is not known. A text box whose text ends
+    between the two breaks the paragraph where TeX did."""
+    runs, lines = p["runs"], p["lines"]
+    text = "".join(r["text"] for r in runs)
+    if any(r.get("hole") or SOFT_BREAK in r["text"] or "\t" in r["text"] for r in runs) or not text.strip():
+        return None
+    starts = [] if len(lines) == 1 else pdf_line_breaks(p)
+    if starts is None:
+        return None
+    end = len(text.rstrip())
+    bounds = [len(text) - len(text.lstrip()), *starts, end]
+    widest, joins = 0.0, math.inf
+    for k, (a, b) in enumerate(zip(bounds, bounds[1:])):
+        x0 = lines[k]["x0"] * scale
+        b = a + len(text[a:b].rstrip())  # (Slides lets a line's last space hang past the edge)
+        w = slides_width(runs_between(runs, a, b), scale, fonts)
+        if w is None:
+            return None
+        widest = max(widest, x0 + w)
+        if k + 1 < len(lines):
+            nxt = text.find(" ", bounds[k + 1])
+            nxt = end if nxt < 0 or nxt > end else nxt
+            j = slides_width(runs_between(runs, a, nxt), scale, fonts)
+            if j is None:
+                return None
+            joins = min(joins, x0 + j)
+    return widest, joins
+
+
+def fit_columns(bounds: list[float], cols: list[dict], scale: float, need: list[float | None] | None = None,
+                tight: bool = False) -> list[float]:
     """Column boundaries (PDF pt) moved just enough that every column's text fits inside the
     Slides cell padding, with room for the substitute font. Tables typeset with @{} have text
     touching the frame, which would otherwise wrap in Slides.
@@ -1231,13 +1407,25 @@ def fit_columns(bounds: list[float], cols: list[dict], scale: float, need: list[
     (slides_width), when it is known. A cell that wraps in Slides doubles its row and pushes the
     table down over whatever stands under it - a caption - so where the PDF left less room
     between two columns than their text needs, the table grows sideways instead: the columns
-    after move right."""
+    after move right.
+
+    `tight`, for a table that would otherwise run off the page (table_layout): a measured column
+    is as wide as its text in Slides and WRAP_MARGIN, lined up on its alignment edge - narrower
+    than the PDF's when the text is set smaller."""
     pad = TABLE_CELL_PAD / scale
+    need = need or [None] * len(cols)
+    if tight:
+        def extent(c: dict, n: float | None) -> dict:
+            if n is None:
+                return c
+            x0 = c["x0"] if c["align"] == "left" else c["x1"] - n if c["align"] == "right" else (c["x0"] + c["x1"] - n) / 2
+            return {**c, "x0": x0, "x1": x0 + n}
+        cols = [extent(c, n) for c, n in zip(cols, need)]
     # Text grows away from its alignment edge: room on the right of left-aligned columns, on
     # the left of right-aligned ones, half on each side of centred ones.
     width = [c["x1"] - c["x0"] for c in cols]
-    need = need or [None] * len(cols)
-    room = [max(0.08 * w + 1 / scale, (n - w + (1 + WRAP_MARGIN) / scale) if n is not None else 0.0)
+    room = [(1 + WRAP_MARGIN) / scale if tight and n is not None else
+            max(0.08 * w + 1 / scale, (n - w + (1 + WRAP_MARGIN) / scale) if n is not None else 0.0)
             for w, n in zip(width, need)]
     right = [r if c["align"] == "left" else r / 2 if c["align"] == "center" else 0.0 for c, r in zip(cols, room)]
     left = [r if c["align"] == "right" else r / 2 if c["align"] == "center" else 0.0 for c, r in zip(cols, room)]
@@ -1323,11 +1511,10 @@ def table_rows(el: dict, z: float, scale: float, imported: bool = False
     return top, heights, ratios, insets
 
 
-def table_layout(el: dict, scale: float, fonts: FontMapper, imported: bool = False) -> dict:
-    """Where a table goes in Slides (Slides pt): {"x", "y", "widths", "heights", "ratios" (per-row
-    lineSpacing), "insets" (per-row top cell inset), "bounds" (column boundaries, PDF pt),
-    "cell_width" ((row, col) -> the text's Slides width where known), "z", "first_run"}.
-    `imported`: the table comes with the .pptx (table_rows)."""
+def table_columns(el: dict, cells: list[list[list[dict]]], scale: float, fonts: FontMapper,
+                  tight: bool = False) -> tuple[list[float], dict]:
+    """Column boundaries (PDF pt) of a table whose cells hold `cells`, and each cell's Slides
+    width where it is known (slides_width, wrapped_width). `tight`: see fit_columns."""
     cols = el["columns"]
     fx0, _, fx1, _ = el["frame"]
     bounds = el.get("bounds") or [fx0] + [(a["x1"] + b["x0"]) / 2 for a, b in zip(cols, cols[1:])] + [fx1]
@@ -1337,12 +1524,12 @@ def table_layout(el: dict, scale: float, fonts: FontMapper, imported: bool = Fal
     wrapped = {(r, c): starts for r, c, starts in el.get("wrapped", [])}
     cell_width = {(r, c): wrapped_width(runs, wrapped[(r, c)], scale, fonts) if (r, c) in wrapped else
                   slides_width(runs, scale, fonts)
-                  for r, row in enumerate(el["cells"]) for c, runs in enumerate(row) if runs}
+                  for r, row in enumerate(cells) for c, runs in enumerate(row) if runs}
     need: list[float | None] = []
     for c in range(len(cols)):
         ws = [w for (r, cc), w in cell_width.items() if cc == c and (r, c) not in spanned]
         need.append(None if not ws or None in ws else max(ws) / scale)
-    bounds = fit_columns(bounds, cols, scale, need)
+    bounds = fit_columns(bounds, cols, scale, need, tight)
     # A cell spanning columns wraps as readily as one that does not: the columns it spans grow.
     for m in el.get("merges", []):
         w = cell_width.get((m["row"], m["col"]))
@@ -1351,28 +1538,88 @@ def table_layout(el: dict, scale: float, fonts: FontMapper, imported: bool = Fal
             short = (w + 2 * TABLE_CELL_PAD + 1 + WRAP_MARGIN) / scale - (bounds[end] - bounds[m["col"]])
             if short > 0:
                 bounds[end:] = [x + short for x in bounds[end:]]
+    return bounds, cell_width
+
+
+# A table fit_columns widens past the page (eleven \scriptsize columns, each given room for the
+# substitute and both cell paddings; a full-width tabularx) lost its last column off the slide.
+# It may reach into the right margin by TABLE_MARGIN of the room left of it; past that, it first
+# keeps only the room its measured text needs, then its text is set smaller - down to
+# TABLE_MIN_SHRINK of its size - until it ends there (or, if the margin is out of reach, at the
+# page edge). A table still on the page that would shrink by less than 2% keeps its size.
+TABLE_MARGIN = 0.5
+TABLE_MIN_SHRINK = 0.75
+TABLE_KEEP_SIZE = 0.98
+
+
+def table_layout(el: dict, scale: float, fonts: FontMapper, imported: bool = False,
+                 page_w: float | None = None) -> dict:
+    """Where a table goes in Slides (Slides pt): {"x", "y", "widths", "heights", "ratios" (per-row
+    lineSpacing), "insets" (per-row top cell inset), "bounds" (column boundaries, PDF pt),
+    "cell_width" ((row, col) -> the text's Slides width where known), "z", "first_run", "cells"
+    (the runs as they are written: in_sentence, shrunk), "shrink" (the share of its size the text
+    is set at)}. `imported`: the table comes with the .pptx (table_rows). `page_w`: the PDF page's
+    width, by default that of a deck SLIDE_W wide (what every Slides page size is)."""
+    page_w = SLIDE_W / scale if page_w is None else page_w
+    cells = [[in_sentence(runs) for runs in row] for row in el["cells"]]
+    bounds, cell_width = table_columns(el, cells, scale, fonts)
+    shrink = 1.0
+    # Into the right margin at most half as far as the table stands from the left edge (TABLE_MARGIN),
+    # unless the PDF's own table reaches further.
+    limit = min(page_w, max(page_w - TABLE_MARGIN * max(0.0, bounds[0]), el["frame"][2], (el.get("bounds") or [0.0])[-1]))
+    if bounds[-1] > limit + 0.01:
+        roomy = bounds, cell_width
+        tight = table_columns(el, cells, scale, fonts, tight=True)
+
+        def shrunk(s: float) -> list[list[list[dict]]]:
+            return [[[{**r, "size": r["size"] * s} for r in runs] for runs in row] for row in cells]
+
+        least = table_columns(el, shrunk(TABLE_MIN_SHRINK), scale, fonts, tight=True)
+        # The margin if the smallest size reaches it, else the page edge; a table that does not
+        # fit even then keeps its size (smaller words would not bring its last column back).
+        goal = next((g for g in (limit, page_w) if least[0][-1] <= g + 0.01), None)
+        best = None
+        if tight[0][-1] > limit + 0.01 and goal is not None:
+            lo, hi, best = TABLE_MIN_SHRINK, 1.0, (TABLE_MIN_SHRINK, least)
+            for _ in range(12):
+                mid = (lo + hi) / 2
+                got = table_columns(el, shrunk(mid), scale, fonts, tight=True)
+                if got[0][-1] <= goal + 0.01:
+                    lo, best = mid, (mid, got)
+                else:
+                    hi = mid
+        if tight[0][-1] <= limit + 0.01:
+            bounds, cell_width = tight
+        elif best and (best[0] < TABLE_KEEP_SIZE or roomy[0][-1] > page_w + 0.01):
+            shrink, (bounds, cell_width) = best[0], best[1]
+            cells = shrunk(shrink)
+        else:
+            # A table on the page that a smaller size would pull back only a little from the
+            # margin keeps its size and its room (every size step is a residual for pull).
+            bounds, cell_width = roomy if roomy[0][-1] <= page_w + 0.01 else tight
     widths = [max(TABLE_MIN_COLUMN_PT, (b - a) * scale) for a, b in zip(bounds, bounds[1:])]
-    first_run = next((r for row in el["cells"] for cell in row for r in cell), None)
-    z = fonts(first_run, scale)[1] if first_run else el["size"] * scale
+    first_run = next((r for row in cells for cell in row for r in cell), None)
+    z = fonts(first_run, scale)[1] if first_run else el["size"] * scale * shrink
     y, heights, ratios, insets = table_rows(el, z, scale, imported)
     return {"x": bounds[0] * scale, "y": y, "widths": widths, "heights": heights, "ratios": ratios, "insets": insets,
-            "bounds": bounds, "cell_width": cell_width, "z": z, "first_run": first_run}
+            "bounds": bounds, "cell_width": cell_width, "z": z, "first_run": first_run, "cells": cells,
+            "shrink": round(shrink, 3)}
 
 
-def pptx_table(el: dict, scale: float, fonts: FontMapper) -> dict:
+def pptx_table(el: dict, scale: float, fonts: FontMapper, page_w: float | None = None) -> dict:
     """The empty table the .pptx carries for a table element (build_pptx): its box, grid and
     per-row cell margins (left, top, right, bottom; Slides pt). The API fills it in (table_requests)."""
-    lay = table_layout(el, scale, fonts, imported=True)
+    lay = table_layout(el, scale, fonts, imported=True, page_w=page_w)
     return {"x": lay["x"], "y": lay["y"], "widths": lay["widths"], "heights": lay["heights"],
             "margins": [(TABLE_CELL_PAD, round(t, 2), TABLE_CELL_PAD, 0.0) for t in lay["insets"]]}
 
 
 def table_requests(el: dict, slide_id: str, object_id: str, scale: float, fonts: FontMapper,
-                   imported: bool = False) -> list[dict]:
+                   imported: bool = False, page_w: float | None = None) -> list[dict]:
     """A table filled in through the API. `imported`: the table (`object_id`) came with the .pptx,
     empty and with the cell margins `pptx_table` gave it; else it is made here by createTable."""
     cols = el["columns"]
-    lay = table_layout(el, scale, fonts, imported)
+    lay = table_layout(el, scale, fonts, imported, page_w)
     x, y, widths, heights, row_ratio = lay["x"], lay["y"], lay["widths"], lay["heights"], lay["ratios"]
     bounds, cell_width, first_run = lay["bounds"], lay["cell_width"], lay["first_run"]
     n_rows, n_cols = len(el["cells"]), len(cols)
@@ -1437,7 +1684,19 @@ def table_requests(el: dict, slide_id: str, object_id: str, scale: float, fonts:
 
     hidden = {(m["row"] + i, m["col"] + j) for m in merged.values()
               for i in range(m["rows"]) for j in range(m["cols"])} - set(merged)
-    for r, row in enumerate(el["cells"]):
+    # The indent puts the text where the PDF has it, but never so far that a cell's text no
+    # longer fits on one line (a wrapped cell doubles its row): at most what the column's widest
+    # cell leaves, the same for every cell of the column so that they stay aligned. Capped cell
+    # by cell, a tight right-aligned column of signed numbers came out left-aligned. A width
+    # nothing measured (a font the probe did not measure: Arial, Calibri) is the PDF's.
+    spare = []
+    for c, col in enumerate(cols):
+        ws = [(cell_width.get((r, c)) if cell_width.get((r, c)) is not None else
+               (col["x1"] - col["x0"]) * scale * lay["shrink"])
+              for r, row in enumerate(el["cells"]) if c < len(row) and row[c] and (r, c) not in merged
+              and (r, c) not in hidden]
+        spare.append(max(0.0, widths[c] - 2 * TABLE_CELL_PAD - WRAP_MARGIN - max(ws)) if ws else None)
+    for r, row in enumerate(lay["cells"]):
         for c, runs in enumerate(row):
             text = "".join(run["text"] for run in runs).strip()
             loc = {"rowIndex": r, "columnIndex": c}
@@ -1471,10 +1730,10 @@ def table_requests(el: dict, slide_id: str, object_id: str, scale: float, fonts:
                 style.update({"smallCaps": run["smallcaps"], "foregroundColor": rgb(run["color"]),
                               "baselineOffset": {"super": "SUPERSCRIPT", "sub": "SUBSCRIPT"}.get(run.get("script"), "NONE")})
                 reqs.append({"updateTextStyle": {
-                    "objectId": object_id, "cellLocation": loc,
-                    "textRange": {"type": "FIXED_RANGE", "startIndex": start, "endIndex": min(len(text), start + len(piece))},
+                    "objectId": object_id, "cellLocation": loc,  # (UTF-16 units: u16)
+                    "textRange": {"type": "FIXED_RANGE", "startIndex": start, "endIndex": min(u16(text), start + u16(piece))},
                     "style": style, "fields": ",".join(fields + ["smallCaps", "foregroundColor", "baselineOffset"])}})
-                start += len(piece)
+                start += u16(piece)
             col = cols[c]
             align = col["align"]
             # Line the text up with the original inside the (contiguous) Slides columns.
@@ -1482,11 +1741,8 @@ def table_requests(el: dict, slide_id: str, object_id: str, scale: float, fonts:
             right_pad = max(0.0, (bounds[c + 1] - col["x1"]) * scale - PAD_X) if align == "right" else 0.0
             if (r, c) in merged and merged[(r, c)]["cols"] > 1:
                 align, left_pad, right_pad = merged[(r, c)]["align"], 0.0, 0.0
-            # The indent puts the text where the PDF has it, but never so far that the cell's
-            # text no longer fits on one line: a wrapped cell doubles its row.
-            if cell_width.get((r, c)) is not None and (r, c) not in merged:
-                spare = widths[c] - 2 * TABLE_CELL_PAD - WRAP_MARGIN - cell_width[(r, c)]
-                left_pad, right_pad = min(left_pad, max(0.0, spare)), min(right_pad, max(0.0, spare))
+            if spare[c] is not None and (r, c) not in merged:  # (the column's: see `spare` above)
+                left_pad, right_pad = min(left_pad, spare[c]), min(right_pad, spare[c])
             # A cell that reads right to left starts at its right edge, so its alignment and
             # its two indents are mirrored (the text element's rule, one cell wide).
             rtl = bidi.reads_rtl(text)
@@ -1668,7 +1924,7 @@ def diagram_requests(el: dict, slide_id: str, object_id: str, scale: float, font
             target = oid if inside else label
             reqs.append({"insertText": {"objectId": target, "text": text}})
             start = 0
-            for runs in node["paragraphs"]:
+            for runs in map(in_sentence, node["paragraphs"]):
                 line_text = "".join(r["text"] for r in runs).strip()
                 offset = 0
                 for run in runs:
@@ -1679,12 +1935,12 @@ def diagram_requests(el: dict, slide_id: str, object_id: str, scale: float, font
                         continue
                     style, sfields = fonts.text_style(run, scale)
                     style["foregroundColor"] = rgb(run["color"])
-                    reqs.append({"updateTextStyle": {
+                    reqs.append({"updateTextStyle": {  # (UTF-16 units: u16)
                         "objectId": target, "style": style, "fields": ",".join(sfields + ["foregroundColor"]),
                         "textRange": {"type": "FIXED_RANGE", "startIndex": start + offset,
-                                      "endIndex": min(start + len(line_text), start + offset + len(piece))}}})
-                    offset += len(piece)
-                start += len(line_text) + 1
+                                      "endIndex": min(start + u16(line_text), start + offset + u16(piece))}}})
+                    offset += u16(piece)
+                start += u16(line_text) + 1
             reqs.append({"updateParagraphStyle": {
                 "objectId": target, "textRange": {"type": "ALL"}, "fields": "alignment,lineSpacing,spaceAbove,spaceBelow",
                 "style": {"alignment": "CENTER", "lineSpacing": 100, "spaceAbove": pt(0), "spaceBelow": pt(0)}}})
@@ -2040,8 +2296,9 @@ def mark_words(overlay: dict, text: dict, scale: float, fonts: FontMapper) -> li
     on its line finds it); a left edge starts the word a right edge on the same line ends, or else
     the word after the ones before it. Marks whose words aren't found are left out."""
     paras = slides_texts(text, scale, fonts)
-    starts = [sum(len(t) + 1 for t in paras[:i]) for i in range(len(paras))]
-    tokens = [[(m.start(), m.end(), m.group()) for m in re.finditer(r"\S+", t)] for t in paras]
+    # (ranges in UTF-16 units, as Slides counts: u16)
+    starts = [sum(u16(t) + 1 for t in paras[:i]) for i in range(len(paras))]
+    tokens = [[(u16(t[:m.start()]), u16(t[:m.end()]), m.group()) for m in re.finditer(r"\S+", t)] for t in paras]
 
     def locate(want: list[str]) -> tuple[int, int] | None:
         """(paragraph, index of the last token) of a run of words; shorter tails if unique."""
