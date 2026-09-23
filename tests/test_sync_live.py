@@ -809,8 +809,9 @@ def scenario_layout_grown_box(run: Run):
 
 @scenario
 def scenario_layout_grown_box_moved(run: Run):
-    """H1, with the source moving the paragraph too (space added above): both moved it, so the
-    geometry override is mode 'theirs' - which writes the person's position and not their size."""
+    """H1, with the source moving the paragraph too (space added above): both moved it - the person's
+    resize has to survive the source's move (geometry mode 'theirs' once wrote the person's position
+    and not their size)."""
     lay = Layout(run)
     run.convert(build("probes"))
     exps = grow_edits(run, lay)
@@ -821,8 +822,8 @@ def scenario_layout_grown_box_moved(run: Run):
 @scenario
 def scenario_layout_reflow(run: Run):
     """H2: the person moves the second box aside; the source adds a line to the box above it, which
-    pushes the second box down - the person's position of it is kept (mode 'theirs'), the box above
-    grows into it?"""
+    pushes the second box down - does the second box go down with it, the person's move on top, or
+    does the box above grow into it (as it did when mode 'theirs' kept the person's absolute place)?"""
     lay = Layout(run)
     run.convert(build("probes"))
     first, second = {"text": "The first box holds two lines"}, {"text": "The second box stands below it"}
@@ -975,13 +976,10 @@ def scenario_layout_retheme(run: Run):
 
 
 # Confirmed on Google's renderer (docs/project-notes.md "Layout probes"); each goes when sync handles it.
+# (layout-grown-box-moved, layout-reflow and layout-display-math were one mechanism, geometry mode
+#  'theirs', and pass since both-moved units carry the person's move: docs/project-notes.md
+#  "Both-moved geometry")
 XFAIL.update({
-    "layout-grown-box-moved": "geometry mode 'theirs' (both moved it) writes the person's position and not their "
-                              "size: the merged paragraph runs 13 pt past its box, the person's resize is gone",
-    "layout-reflow": "the source's reflow grows the box above into the one the person moved: mode 'theirs' keeps "
-                     "the person's absolute place, nothing gives way (ink clearance 29.7 pt -> -1.3 pt)",
-    "layout-display-math": "the equation picture follows the source down, the paragraph the person moved stays: "
-                           "the equation lands on its words (clearance 20.2 pt -> -10.8 pt)",
     "layout-stranded-formula": "Sync.measure_places places formula pictures for the source's text, the person's "
                                "words are merged in afterwards (override_requests): the picture stands 72 pt from its hole",
     "layout-retheme": "sync never writes layouts: the old theme's title bar (a layout picture) stays over the new "

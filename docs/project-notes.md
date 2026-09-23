@@ -3718,3 +3718,71 @@ real overflow can be missed); pictures and shapes meeting each other (only pairs
 judged); anything the offline fuzz world does, since its read-backs have no run styles, no box
 types and boxes not sized by emit's metrics - running the oracle there needs the world to size
 and style its text boxes like emit first.
+
+## Both-moved geometry (2026-09-23)
+
+The rule: a unit the source rewrote and the person moved or resized is recreated at the source's
+new place and then takes the person's edit, **whether or not the source moved it too**. Merge says
+geometry mode `delta` in both cases; sync writes `sync.carried(base, theirs, new)`: the person's
+transform change `theirs * base^-1`, conjugated by the source's step `s` of the unit's corner
+(`T(s) * d * T(-s)`). A move lands at the source's new place plus the person's offset; a resize
+keeps the person's proportions of the source's new box, from its new corner (before, `delta` scaled
+about the page origin, so a resize scaled the source's move with it - harmless while `delta` only ran
+when the source had not moved the unit, and `s` was 0). When the source moved it too it is still a
+reported geometry conflict, resolution `merge.GEOMETRY_CARRIED` ("the deck's move and size kept, on
+top of the source's move"); `--take-source` on it writes the source's place and size, as before.
+
+Why the old rule (`theirs`: a pure translation to the deck's absolute top-left) went:
+- History: it came with the first sync commit (53739b9, 2026-09-17) as the obvious "deck wins" for
+  a field both sides changed. No test, fuzz seed, live scenario or note ever depended on the
+  absolute place; the only test named it (`test_both_moved_deck_position_wins`), and the loss
+  oracle's docstring already described the carried place ("at the conversion's new box with the
+  person's move on top of it") - the oracle was simply excused by the conflict.
+- It dropped the person's size silently: the translation carried no scale, while the report said the
+  deck's geometry was kept (H1b).
+- An absolute place ignores the reflow around it. A source's reflow moves the converter's
+  neighbours; pinning one unit makes the neighbours run into it (H2, H6). "Deck wins" is about what
+  the person *did*, which was an offset and a size, not a coordinate.
+- The case where the absolute place would matter is a unit the person placed against something only
+  the deck has (their own box or picture), which the source's reflow does not move. Nothing in the
+  history shows it. It is not special-cased: "placed against" cannot be read off a deck without
+  guessing, and the words the person owns are already protected where it counts, by occlusion
+  (`sync.would_hide` restacks a recreated unit under words only the deck has). A carried unit can
+  also be pushed further towards the page edge than the person had it; the layout oracle's
+  `off_page` judges that. Both are residual, reported (it is a conflict), and undoable in one drag.
+
+The same rule for a .pptx table refilled in place (`update_slide`, `table_refill`): its object stays
+where the person has it; when the source moved it too, the source's shift is applied on top (it was
+zeroed for any geometry override before, `u["source"]` now tells the two apart).
+
+Live, the three probes that were strict xfails (numbers from `layout.json`, before -> after the fix):
+
+| scenario | old code | now |
+|---|---|---|
+| layout-grown-box-moved (H1b) | box back to 53.5 pt, words 13.2 pt past its bottom | box 80.3 pt (the person's), 13.4 pt of room left, moved down with the source; clearance to the figure 38.7 pt as before |
+| layout-reflow (H2) | ink clearance 29.7 -> -1.3 pt | 29.7 -> 29.7 pt: the second box keeps the person's 40 pt to the right and goes down 31 pt with the source |
+| layout-display-math (H6) | clearance equation/paragraph 20.2 -> -10.8 pt | 20.2 -> 20.2 pt (above/equation 20.7 -> 20.7) |
+
+Judges:
+- `devtools/fuzz_world._place_unit`: the person's step on top of wherever the source put the unit,
+  also when both moved it (its deck edits are moves, never resizes, so the translation is all of it).
+- `devtools/loss_oracle.geometry_findings`: the carried conflict is no longer an excuse. Its corner
+  must be the person's plus the source's move of the IR corner (`_carried_to`, 2 pt,
+  `geometry_not_carried`); on the archive (618 steps) that prediction held within 2 pt for 1,522 of
+  1,556 elements the source moved and nobody else did, and every one the report only lists as
+  `applied` within 0.3 pt; the 34 others (3 to 18 pt off) all carry a conflict: kept, not written. A
+  person's resize
+  that comes back at the converter's size on an object the sync made, while the source left the
+  size alone, is `geometry_reverted` wherever the element went (`_resize_dropped`; objects the sync
+  made only - a person's copy keeps the element's tag and the converter's size, which the archive's
+  r1101 step5 and r801 step4 showed). `deck_placement` asks pictures alone when there are three:
+  with text boxes in the median it read a real deck's 1.59 as 3.09.
+- Sensitivity: the offline campaign with the applier put back to the absolute place (merge reporting
+  the carried conflict) fails every round that had a both-moved unit (5 of 100 three-step rounds,
+  all `geometry_not_carried`). With today's applier: 300 three-step rounds on each of converted,
+  adopt and `--first-sync`, and 300 twelve-step converted chains, clean. The archive replay gives
+  the same geometry findings as main's oracle (none new).
+- `tools/layout_oracle.py` on out/sync-fuzz still runs (590 steps, 11 fails, as recorded by the old
+  code), but found no new conversion for any step: `ours_from_folder` imports `sync.mark_widths`,
+  renamed `mark_emitted` by 401cb35, and the ImportError is caught per step. With the name aliased
+  the same 11 fails come out and every step has `ours`.
