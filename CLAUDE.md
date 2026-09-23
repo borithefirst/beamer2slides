@@ -133,6 +133,10 @@ Debugging classification locally: `debug/slide-NNN.png` (element boxes over the 
   (`emit.slide_emission`; ids, links, z-order normalised, measured places left out) and marks an
   unchanged or moved element `width`/`placed`/`emitted` (`identity.CONTEXT_FIELDS`). Group or
   placeholder-role changes can't be written by recreating a unit: `build_ours()["context_unwritten"]`.
+- **Both moved it**: a unit the source rewrote and the person moved or resized takes the person's
+  move and size on top of the source's new place (`sync.carried`, geometry mode `delta` always); a
+  reported conflict (`merge.GEOMETRY_CARRIED`), held by the loss oracle (`geometry_not_carried`).
+  An absolute "deck position kept" let the source's reflow run into the person's box.
 - **Frame labels** (`\begin{frame}[label=x]`) are the only slide identity that survives compiling.
   A label written twice reaches the PDF as *no* label (hyperref keeps the first). `label` writes
   missing labels; it never renames or resolves duplicates. When a label moved between frames,

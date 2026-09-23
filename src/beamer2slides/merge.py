@@ -22,6 +22,9 @@ TAKEN_SAYS = "the source's version was written (asked for by `--take-source`)"
 # Fields whose conflict is about what something *says*, and so can be settled for the source.
 # Existence and identity are not among them on purpose: see `Resolutions`.
 TAKEABLE_FIELDS = ("text", "text_style", "shape_style", "image", "geometry", "background", "notes")
+# How a unit both sides moved is written (`plan_unit`): the person's move and resize, carried to where
+# the source now has it. The loss oracle holds sync to this wording's promise.
+GEOMETRY_CARRIED = "the deck's move and size kept, on top of the source's move"
 
 
 # ---------------------------------------------------------------- conflicts a person can settle
@@ -881,10 +884,16 @@ def plan_unit(skey: str, ukey: str, base_members: list[dict] | None, ours_member
         keep = not taken("geometry", anchor["fingerprint"]["bbox"], first["fingerprint"]["bbox"],
                          theirs_rb.get("box"), "deck kept (the deck moved a part of the element on its own)")
     if "geometry" in edited and not keep:
-        both = "position" in src
-        overrides["geometry"] = {"mode": "theirs" if both else "delta"}
-        if both and taken("geometry", anchor["fingerprint"]["bbox"], first["fingerprint"]["bbox"],
-                          theirs_rb.get("box"), "deck position kept"):
+        # The person's move and resize (base -> theirs) go on top of wherever the source now puts the
+        # unit (`sync.carried`), whether or not the source moved it too. When it did, it is still a
+        # conflict - both sides moved one thing - but the deck's absolute place is not what wins: that
+        # dropped the person's size (the recreated box came back at the converter's height, the words
+        # ran out of it) and ignored the source's reflow around it (a box that grew by a line ran into
+        # the one the person had moved, an equation came down onto the paragraph the person had moved;
+        # docs/project-notes.md "Both-moved geometry").
+        overrides["geometry"] = {"mode": "delta"}
+        if "position" in src and taken("geometry", anchor["fingerprint"]["bbox"], first["fingerprint"]["bbox"],
+                                       theirs_rb.get("box"), GEOMETRY_CARRIED):
             overrides.pop("geometry", None)
     report["conflicts"] += conflicts
     # `edited` can be empty by now: `taken` takes a field out of it when the person asked for the

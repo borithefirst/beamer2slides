@@ -380,7 +380,10 @@ def test_source_text_and_deck_geometry_recreate_at_deck_place():
     assert u["action"] == "recreate" and u["overrides"] == {"geometry": {"mode": "delta"}}
 
 
-def test_both_moved_deck_position_wins():
+def test_both_moved_carries_the_person_move_onto_the_source_place():
+    """Both sides moved the unit: still a conflict, but what is written is the person's move (and
+    size) on top of the source's new place, not the deck's absolute place (docs/project-notes.md
+    "Both-moved geometry": that dropped the person's resize and ignored the source's reflow)."""
     base = three_slides()
     ours, theirs = triple(base)
     ours["slides"][0]["elements"][1] = ours_entry("text/body/0", text_ir("First point of intro\nSecond point, changed",
@@ -388,8 +391,34 @@ def test_both_moved_deck_position_wins():
     obj = theirs["slides"][0]["objects"]["b2s_s000_t1"]
     obj["box"] = [v + 30 for v in obj["box"]]
     mplan = merge.plan_merge(base, ours, theirs)
-    assert unit(mplan, "intro", "text/body/0")["overrides"] == {"geometry": {"mode": "theirs"}}
-    assert [c["field"] for c in mplan["report"]["conflicts"]] == ["geometry"]
+    assert unit(mplan, "intro", "text/body/0")["overrides"] == {"geometry": {"mode": "delta"}}
+    clash, = mplan["report"]["conflicts"]
+    assert clash["field"] == "geometry" and clash["resolution"] == merge.GEOMETRY_CARRIED
+    # --take-source on it: the source's place and size, nothing of the person's written.
+    again = merge.plan_merge(base, ours, theirs, take_source=[clash["id"]])
+    assert unit(again, "intro", "text/body/0")["overrides"] == {}
+
+
+def test_carried_puts_the_person_edit_on_the_source_place():
+    """`sync.carried`, the RELATIVE transform written on a recreated unit: the person's move lands on
+    the source's new place, and the person's resize keeps its proportions from the new corner
+    instead of scaling the source's move with it."""
+    from beamer2slides import snapshot
+    from beamer2slides.sync import carried
+    base_rb = {"box": [100, 100, 300, 150], "transform": [2, 0, 0, 0.5, 100, 100]}   # 100 x 100 at 2 x 0.5
+    # the person moved it 40 right and made it 1.5x as tall (from its top edge)
+    theirs_rb = {"box": [140, 100, 340, 175], "transform": [2, 0, 0, 0.75, 140, 100]}
+    # the source recreated it 31 pt lower, with the converter's size
+    new_rb = {"box": [100, 131, 300, 181], "transform": [2, 0, 0, 0.5, 100, 131]}
+    d = carried(base_rb, theirs_rb, new_rb)
+    t = snapshot.compose(d, new_rb["transform"])
+    assert snapshot.box(t, 100, 100) == [140, 131, 340, 206]
+    # the source did not move it: the person's edit as it is (`delta`, theirs * base^-1)
+    same = carried(base_rb, theirs_rb, base_rb)
+    assert same == pytest.approx(snapshot.compose(theirs_rb["transform"], snapshot.invert(base_rb["transform"])))
+    # a pure move is the same step wherever the source put it
+    moved = {"box": [140, 100, 340, 150], "transform": [2, 0, 0, 0.5, 140, 100]}
+    assert carried(base_rb, moved, new_rb) == pytest.approx([1, 0, 0, 1, 40, 0])
 
 
 def test_both_text_clean_diff3():
@@ -2158,7 +2187,7 @@ def _table_sync(tmp_path, variant: str):
     j = next(k for k, o in enumerate(second["slides"]) if o["title"] == "Results")
     jb = next(k for k, o in enumerate(first["slides"]) if o["title"] == "Results")
 
-    def run(margins, overrides=None, restored=()):
+    def run(margins, overrides=None, restored=(), source=None):
         s = Sync.__new__(Sync)
         s.ours, s.plan, s.scale, s.tok, s.warnings = second, second["plan"], second["plan"].scale, "1zz", []
         s.recovery = {"restore": {oid: {} for oid in restored}}
@@ -2178,7 +2207,8 @@ def _table_sync(tmp_path, variant: str):
         s.base = {"slides": [base_slide_]}
         key = next(e["key"] for e in base_slide_["elements"] if e["kind"] == "table")
         plan = {"key": "results", "base": 0, "ours": j, "objectId": "LIVE", "units": [
-            {"key": key, "action": "recreate", "ours_members": [key], "base_members": [key], "overrides": overrides or {}}]}
+            {"key": key, "action": "recreate", "ours_members": [key], "base_members": [key], "overrides": overrides or {},
+             **({"source": source} if source is not None else {})}]}
         w = {"plan": plan, "units": []}
         return s, w, s.update_slide(w, {"objects": objects, "notes": "", "notes_id": None}, {}, {}), f"OLD_{key.replace('/', '_')}"
 
@@ -2210,7 +2240,8 @@ def test_a_table_whose_words_changed_is_refilled_in_place(tmp_path):
     assert [r for r in reqs if "createTable" in r] and old in s.cleanup_ids
 
     # The source moved it down 20 pt as well (a line added above): refilled, then moved by as much -
-    # unless the deck moved it itself, whose position then stands (merge's geometry override).
+    # also when the deck moved it itself (merge's geometry override): the source's move goes on top
+    # of the person's place, as `sync.carried` does for a recreated unit.
     table = next(e for e in second["plan"].deck["slides"][j]["elements"] if e["kind"] == "table")
     table["bbox"][1] += 20
     table["bbox"][3] += 20
@@ -2227,7 +2258,12 @@ def test_a_table_whose_words_changed_is_refilled_in_place(tmp_path):
     assert len(moved) == 1 and moved[0]["objectId"] == old and moved[0]["applyMode"] == "RELATIVE"
     assert moved[0]["transform"]["translateY"] == pytest.approx(20 * scale * 12700, abs=2)
     assert abs(moved[0]["transform"]["translateX"]) <= 1
-    s, w, reqs, old = run(margins, {"geometry": {"mode": "theirs"}})
+    s, w, reqs, old = run(margins, {"geometry": {"mode": "delta"}}, source=["position", "text"])
+    moved = [r["updatePageElementTransform"] for r in reqs if "updatePageElementTransform" in r]
+    assert len(moved) == 1 and moved[0]["objectId"] == old and old not in s.cleanup_ids
+    assert moved[0]["transform"]["translateY"] == pytest.approx(20 * scale * 12700, abs=2)
+    # ... and a plan that says the source did not move it leaves the person's place alone.
+    s, w, reqs, old = run(margins, {"geometry": {"mode": "delta"}}, source=["text"])
     assert not [r for r in reqs if "updatePageElementTransform" in r] and old not in s.cleanup_ids
 
     for margins in (lambda e: None, lambda e: [[m[0], m[1] + 3, m[2], m[3]] for m in pptx_table(e["ir"], scale, fonts)["margins"]]):
