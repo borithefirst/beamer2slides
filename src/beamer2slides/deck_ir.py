@@ -21,7 +21,7 @@ import urllib.request
 from pathlib import Path
 
 from .emit import (ASCENT_EM, BASELINE_A, FONT_FOR_FAMILY, MIDDLE_BASELINE_EM, PAD_X, PPTX_TITLE_DY, SLIDE_W,
-                   FontMapper, extra_above)
+                   FontMapper, extra_above, line_size)
 from .deck_thumbs import (SNAP_PAGE, ink_widths, pptx_insets, side_gap, side_inset, thumbnail_cell_pad,
                           thumbnail_cell_text, thumbnail_insets, thumbnail_rows, thumbnail_weights, top_drift)
 from .gslides import EMU_PER_PT
@@ -151,8 +151,10 @@ def family_of(font: str) -> str:
 
 
 def pdf_size(fonts: FontMapper, family: str, slides_size: float, bold: bool, italic: bool, scale: float,
-             font: str | None = None) -> tuple[float, str]:
-    """Inverse of FontMapper: (PDF font size, a TeX font name that maps like it)."""
+             font: str | None = None, text: str = "", smallcaps: bool = False,
+             script: bool = False) -> tuple[float, str]:
+    """Inverse of FontMapper: (PDF font size, a TeX font name that maps like it). The run's
+    text, small caps and script say what FontMapper sized it by (a number, a small-caps face)."""
     tex_family = FAMILY_FOR_FONT.get(family)
     if tex_family is None:  # a Google font used as-is (or Arial for a box the user added)
         return round(slides_size / scale, 2), font or family.replace(" ", "")
@@ -162,7 +164,8 @@ def pdf_size(fonts: FontMapper, family: str, slides_size: float, bold: bool, ita
         if font is None:
             prefix = {"sans": "CMSS", "serif": "CMR", "mono": "CMTT"}[tex_family]
             name = f"{prefix}{design_for(size)}"
-        run = {"font": name, "family": tex_family, "size": size, "bold": bold, "italic": italic}
+        run = {"font": name, "family": tex_family, "size": size, "bold": bold, "italic": italic,
+               "text": text, "smallcaps": smallcaps, "script": "sub" if script else None}
         z = fonts(run, scale)[1]
         if z <= 0:
             break
@@ -359,7 +362,9 @@ def text_paragraphs(pe: dict, text: dict, resolver: StyleResolver, fonts: FontMa
             if foreign:
                 psize, font = round(size / scale, 2), family.replace(" ", "")
             else:
-                psize, font = pdf_size(fonts, family, size, bold, italic, scale)
+                psize, font = pdf_size(fonts, family, size, bold, italic, scale, text=content,
+                                       smallcaps=bool(st.get("smallCaps")),
+                                       script=st.get("baselineOffset") in ("SUPERSCRIPT", "SUBSCRIPT"))
             link = st.get("link") or {}
             text_part = content.rstrip("\n") if content.endswith("\n") else content
             if not text_part:
@@ -479,7 +484,7 @@ def zero_insets(paragraphs: list[dict], height: float) -> bool:
     for p in paragraphs:
         if not p["runs"]:
             continue
-        z = max(r["slides_size"] for r in p["runs"])
+        z = max(line_size(r, r["slides_size"]) for r in p["runs"])
         need += PITCH_EM * z * p["line_spacing"] + p["space_above"] + p["space_below"]
     return need > 0 and height - need < ZERO_INSET_SLACK
 
@@ -544,7 +549,7 @@ def text_element(pe: dict, m: list[float], resolver: StyleResolver, fonts: FontM
     x0, y0, x1, y1 = box(m, w, h)
     placeholder = shape.get("placeholder", {}).get("type")
     first = next(p for p in paragraphs if p["runs"])
-    z = max(r["slides_size"] for r in first["runs"])
+    z = max(line_size(r, r["slides_size"]) for r in first["runs"])
     aligns = {p["align"] for p in paragraphs if p["runs"]}
     align = aligns.pop() if len(aligns) == 1 else "left"
     # only a foreign deck: the converter's own boxes are created by the API, with Slides' insets

@@ -46,7 +46,6 @@ BULLET_GAP = 1.9     # bullet glyph's right edge sits this far before indentFirs
 PPTX_TITLE_DY = 3.9  # title placeholders of pptx-imported decks have a smaller top inset
 MIDDLE_BASELINE_EM = ASCENT_EM - LINE_EM / 2  # contentAlignment MIDDLE: baseline below the box middle (tools/probe_middle.py: 0.362)
 SOFT_BREAK = chr(11)  # vertical tab: a line break inside a paragraph
-SMALL_CAPS_LINE = 0.9  # a line of only smallCaps text is laid out as if 90% of its size
 
 FONT_FOR_FAMILY = {"sans": "Lato", "serif": "PT Serif", "mono": "Roboto Mono"}
 # Advance widths in Slides text (Lato and its fallback fonts), measured by tools/probe_symbols.py.
@@ -94,6 +93,40 @@ DESIGN_WIDTH = {
     "serif": {5: 1.3758, 6: 1.2291, 7: 1.1424, 8: 1.0629, 9: 1.0277, 10: 1.0, 12: 0.9786, 17: 0.9136},
     "mono": {8: 1.0114, 9: 1.0, 10: 1.0, 12: 0.979},
 }
+
+
+# Small caps (tools/probe_text_fit_fonts.py): Slides draws a smallCaps lowercase letter as its
+# capital at 0.70 of the size (PT Serif and Lato alike, advance and ink height), where TeX's
+# CMCSC10 draws it at 0.755 - and CMCSC is an extended face, its capitals 8% wider than CMR's,
+# while PT Serif's are 11% narrower. A CMCSC line came out 0.777 of the PDF's width; at the
+# serif size these substitute small caps are 1.27-1.30 times too narrow over any sentence
+# (probe advances + CMCSC10.afm), so the size makes up the width, as the size factors do for
+# every other face. (Only for Computer Modern / EC / Latin Modern small caps, the ones measured.)
+SMALL_CAPS_WIDTH = {"serif": 1.28}
+
+# Advance widths (em) of the characters a number is written with in Computer Modern (the
+# fonts' AFM files; EC and Latin Modern share them): its digits are 0.5 em where Slides' Lato
+# draws tabular digits at 0.577 em, 13% wider after the size correction, which is calibrated on
+# sentences (and they stand at cap height, 7% taller than CM's). A run that is only a number -
+# a table cell, a number column, a frame counter - is therefore set at the size that gives it
+# the PDF's width (FontMapper.number_ratio); a number inside a sentence keeps the sentence's size.
+CM_NUMBER_EM = {  # (family, bold, italic): digit, then the other characters of a number
+    ("sans", False, False): (0.5, {",": 0.277, ".": 0.277, ":": 0.277, "%": 0.833, "/": 0.5, "-": 0.333,
+                                   "(": 0.388, ")": 0.388, "+": 0.777}),
+    ("sans", True, False): (0.55, {",": 0.305, ".": 0.305, ":": 0.305, "%": 1.029, "/": 0.55, "-": 0.366,
+                                   "(": 0.427, ")": 0.427, "+": 0.855}),
+    ("serif", False, False): (0.5, {",": 0.277, ".": 0.277, ":": 0.277, "%": 0.833, "/": 0.5, "-": 0.333,
+                                    "(": 0.388, ")": 0.388, "+": 0.777}),
+    ("serif", True, False): (0.575, {",": 0.319, ".": 0.319, ":": 0.319, "%": 0.958, "/": 0.575, "-": 0.383,
+                                     "(": 0.447, ")": 0.447, "+": 0.894}),
+    ("serif", False, True): (0.511, {",": 0.306, ".": 0.306, ":": 0.306, "%": 0.817, "/": 0.511, "-": 0.357,
+                                     "(": 0.408, ")": 0.408, "+": 0.766}),
+    ("serif", True, True): (0.591, {",": 0.355, ".": 0.355, ":": 0.355, "%": 0.944, "/": 0.591, "-": 0.414,
+                                    "(": 0.473, ")": 0.473, "+": 0.885}),
+}
+DIGITS = "0123456789"
+CM_NUMBER_EM[("sans", False, True)] = CM_NUMBER_EM[("sans", False, False)]  # CMSSI: CMSS slanted
+CM_NUMBER_EM[("sans", True, True)] = CM_NUMBER_EM[("sans", True, False)]    # beamer's bold italic sans is CMSSBX
 
 
 def design_width(table: dict[int, float], design: float) -> float:
@@ -168,7 +201,30 @@ class FontMapper:
             for key in ("bold", "italic"):
                 if run[key]:
                     factor *= 1 + (style[key] - 1) / 2
+            if info.design_size is not None:  # Computer Modern metrics (CM, EC, Latin Modern)
+                if run.get("smallcaps"):
+                    factor /= SMALL_CAPS_WIDTH.get(run["family"], 1.0)
+                else:
+                    factor *= self.number_ratio(run, family, factor, design)
         return family, round(run["size"] * scale / factor, 1)
+
+    @staticmethod
+    def number_ratio(run: dict, family: str, factor: float, design: float) -> float:
+        """How much wider than the PDF's Slides sets a run that is only a number (at least one
+        digit, nothing but digits and a number's punctuation), at the size `factor` gives it;
+        1.0 for anything else, and for a number that comes out narrower. Scripts keep theirs."""
+        text = "".join(run.get("text", "").split())
+        cm = CM_NUMBER_EM.get((run["family"], bool(run["bold"]), bool(run["italic"])))
+        if not text or cm is None or run.get("script") or run.get("hole") or family not in ADVANCES \
+                or not any(c in DIGITS for c in text) or any(c not in DIGITS and c not in cm[1] for c in text):
+            return 1.0
+        style = {(False, False): "regular", (True, False): "bold", (False, True): "italic",
+                 (True, True): "bold_italic"}[(bool(run["bold"]), bool(run["italic"]))]
+        advances = ADVANCES[family][style]
+        slides = sum(advances.get(c, UNMEASURED_ADVANCE_EM) for c in text) / factor
+        pdf = sum(cm[0] if c in DIGITS else cm[1][c] for c in text) * \
+            design_width(DESIGN_WIDTH.get(run["family"], DESIGN_WIDTH["sans"]), design)
+        return max(1.0, slides / pdf)
 
 
 def bullet_shape(bullet: dict) -> str | None:
@@ -225,6 +281,18 @@ def rgb(hex_color: str) -> dict:
 
 
 # ---------------------------------------------------------------- text boxes
+
+def line_size(run: dict, z: float) -> float:
+    """The size Slides lays out a line holding this run at, when the run is its largest: its
+    own - except a smallCaps run of lowercase letters only, which Slides draws wholly in the
+    small font, at SMALL_CAPS_SIZE. One space, capital or comma in the run and the line takes
+    the full size (tools/probe_text_fit_fonts.py, `line_size_pt`: PT Serif 26 small caps in a
+    Lato 20 line - 'mm' lays out at 20.3, 'mm mm' and 'Mm' at 26.3; 34 pt 'mm' at 24.0)."""
+    text = run.get("text", "")
+    if run.get("smallcaps") and text and all(c.islower() for c in text):
+        return z * SMALL_CAPS_SIZE
+    return z
+
 
 def extra_below(r: float, z: float) -> float:
     """Extra space lineSpacing r adds under a line of size z (negative when r < 1)."""
@@ -354,9 +422,9 @@ def text_box_requests(el: dict, slide_id: str, object_id: str, scale: float, fon
     marks = list(marks or [])
     paras = [{**p, "runs": [hole_run(r, scale, fonts) if r.get("hole") else r for r in p["runs"]]}
              for p in el["paragraphs"]]
-    # A line is as tall as its largest run; small caps runs count at their reduced size.
+    # A line is as tall as its largest run, as Slides lays it out (line_size: small caps).
     base_sizes = [max(fonts(r, scale)[1] for r in p["runs"]) if p["runs"] else p["size"] * scale for p in paras]
-    sizes = [max(fonts(r, scale)[1] * (SMALL_CAPS_LINE if r.get("smallcaps") else 1) for r in p["runs"])
+    sizes = [max(line_size(r, fonts(r, scale)[1]) for r in p["runs"])
              if p["runs"] else p["size"] * scale for p in paras]
 
     edges = [hugs(p) for p in paras]
@@ -870,9 +938,9 @@ TABLE_CELL_PAD = 7.2  # cell padding left and right
 # 0.19 em, its slash 0.31), so these are measured, not read out of a font file.
 ADVANCES = json.loads((CALIBRATION_DIR / "advances.json").read_text(encoding="utf-8"))["fonts"]
 UNMEASURED_ADVANCE_EM = 0.6  # a character the probe did not measure: as wide as the widest digits
-SCRIPT_SIZE = 2 / 3          # super- and subscripts in Slides (not measured; errs wide)
+SCRIPT_SIZE = 2 / 3          # super- and subscripts in Slides (measured 0.665: tools/probe_text_fit_fonts.py)
 WRAP_MARGIN = 1.0            # Slides pt kept free in a cell so kerning or rounding cannot wrap it
-SMALL_CAPS_SIZE = 0.8        # Slides draws a small capital at about 80% of a capital (not measured)
+SMALL_CAPS_SIZE = 0.70       # Slides draws a small capital at 70% of its capital (tools/probe_text_fit_fonts.py)
 
 
 def slides_width(runs: list[dict], scale: float, fonts: "FontMapper") -> float | None:
