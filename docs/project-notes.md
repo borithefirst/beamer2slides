@@ -3924,7 +3924,8 @@ themselves. The first design used absolute offsets and moved pictures the person
   hole through a SequenceMatcher of the two texts. The picture moves by the difference of hole
   centre x and of baselines, as a RELATIVE translation; inside a group it is conjugated by the
   group's transform, G^-1 S G (`local_step`). A hole the merged words no longer have is warned
-  about, not guessed.
+  about, not guessed. (Superseded 2026-09-24: the move is measured in pre's box and written as a
+  page step E . T . E^-1, no conjugation; see "Refit in a person's group" at the end.)
 - *Box*: it grows by what the final words need beyond the box (`needed_bottom`), minus the
   overflow the source's own words, the geo layout or the person's text before the sync already
   had. That overflow is nobody's new problem: a person's 20 pt footer that already wrapped
@@ -4144,3 +4145,43 @@ campaigns at once are over the write quota even at 600 per minute per user. What
   whole unit by one step and the person did not move it.
 - The number ball over its text (7400, 7403) was seen on a thumbnail; no oracle kind covers a
   ball over its own line, so these campaigns could not say whether it is still there.
+
+### Refit in a person's group (r8006, r8011)
+
+Two `geometry_not_carried` findings of the layout campaign, both on slide motivation's
+`text/body/0` block and its formula picture `image/math/0`, both with the person's edit on the
+unit's group and a refit in the same sync. Replayed offline from the archives
+(`out/fuzz-main-layout/r80xx/step2`).
+
+- **Slides applies a RELATIVE transform to a group's child in page space** (new = M . absolute),
+  whatever the group's transform. Refit conjugated its steps by the group's (G^-1 S G,
+  `local_step`), which is the same thing only on the converter's identity groups. r8006 (sync bug):
+  the person moved the block (+20, -20); the body grown k = 1.199 about its top came out with its
+  top 4.0 pt higher, (1 - k) x 20: 101.5 for 105.48. r8011 (sync bug): the group scaled 1.15; the
+  picture moved 134.0 pt of the 154.1 x 1.15 = 177.2 planned, and the deck no longer equalled
+  E . base. Steps are now written as the page step itself (`refit._step_request`).
+- **The picture's move is measured in the converter's box** (`pre`), between the source's words
+  and the merged words, and the person's edit put on top of it: page step E . T . E^-1 with
+  E = F_pic . P_pic^-1 (`refit.carried_step`). A group's scale is its box's size, not its text's,
+  so measured in the person's wider box the move came out unscaled and slid the picture 0.15 of it
+  against its unit every sync (r8011: 23 pt against its own unchanged words). Now the deck stays
+  E times what the converter would make of the merged words, and a second sync with the same words
+  lands the picture where it was (plus the source's move). How far the person's resize alone
+  strands a picture stays theirs, as before.
+- **The oracle learns refit's moves from what the sync records, not by forgiving pictures.** r8006
+  (oracle wrong): refit rightly took the picture 154.1 pt right, onto its hole in the person's
+  words; the oracle expected it at the person's place plus the source's move. The report now lists
+  every refit step under `refit` ({slide, element, object, what, shift, grown}; `refit.moves`,
+  shift in the converter's frame) and the md report says "Fitted to the words as merged". The new
+  base notes the same shift on the read-back (`refit` on the object, `reshape_base` via `_noted`),
+  because the base read-back already contains the last sync's refit. `loss_oracle._carried_to`
+  puts the person's edit D (was -> now, linear part) on apart + r_new - r_old, where apart is the
+  member's IR move less its anchor's (the source's move of the unit's top is added unscaled, as
+  `sync.carried` writes it). r8011: r_new = r_old = 154.1, expected 435.72, the new code puts it at
+  435.73; r8006: r_new = 154.1, r_old = 0, the new code puts the picture at 402.58 and the text top
+  at 105.48. A picture the report says nothing about, or at another place, is still found.
+- Pinned: `tests/test_refit.py` (`test_a_groups_child_takes_the_step_in_page_space`,
+  `test_in_a_group_the_person_scaled_a_picture_keeps_the_persons_scale`) and
+  `tests/test_sync_fuzz.py` (`test_a_picture_refit_moved_is_held_to_what_the_sync_recorded`,
+  `test_a_refit_the_last_sync_recorded_is_the_converters_under_the_persons_scale`). The offline
+  fuzz world runs no refit, so it writes no `refit` entries and no notes.

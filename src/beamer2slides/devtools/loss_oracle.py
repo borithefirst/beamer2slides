@@ -52,7 +52,9 @@ merge policy of docs/sync.md says it is not the person's work. Concretely:
   coincidence, and then nothing was reverted). A person's resize must not be back at the converter's
   size either, wherever the element went, when the source left that size alone. When the report
   says both moved it and the person's move was carried (`merge.GEOMETRY_CARRIED`), its corner must
-  be the person's plus the source's move (`geometry_not_carried`).
+  be the person's plus the source's move (`geometry_not_carried`) - plus, for a formula picture the
+  sync's refit moved to follow its hole into the merged words, the move the report names (`refit`)
+  in place of the one the base had recorded, both under the person's own edit.
 * **A picture the person put into a converter element** (the read-back's picture differing from the
   base's, compared by `snapshot.signature`, never by URL) must still be on one of that element's
   objects afterwards.
@@ -452,16 +454,45 @@ CARRIED_PLACE = 2.0  # pt: how close a carried corner must land (in the archive 
                      # moved and the report lists as applied stood within 0.3 pt of its corner plus that move)
 
 
-def _carried_to(place, base_el: dict, ours_el: dict, now: dict) -> list[float] | None:
+def _carried_to(place, base_el: dict, ours_el: dict, now: dict, was: dict | None = None,
+                anchor: tuple[dict, dict] | None = None, refit_new=None) -> list[float] | None:
     """Where the corner of an element both sides moved belongs after a sync that carried the
     person's edit (`sync.carried`): the person's corner plus the source's move of the element's IR
     corner, in deck pt. Taken from the person's own box, so a text box's frame around its words
-    (wider and taller than the bbox) does not enter into it. None without `ours` or a placement."""
+    (wider and taller than the bbox) does not enter into it. None without `ours` or a placement.
+
+    `sync.carried` adds the source's move of the unit's *top* as it is, and the person's edit D
+    (was -> now) acts on the rest: on how far this member moved apart from its unit's anchor
+    (`anchor`: its base and ours elements), and on what `refit` moved it by in the converter's frame
+    - this sync's step (`refit_new`, the report's `refit`) in place of the one the base had recorded
+    (`refit` on the base read-back). With D a move both are plain additions; a group the person had
+    scaled scales them (r8011: 1.15)."""
     bb, ob = (base_el.get("fingerprint") or {}).get("bbox"), (ours_el.get("fingerprint") or {}).get("bbox")
     if not place or not bb or not ob or not now.get("box"):
         return None
     s = place[0]
-    return [now["box"][0] + s * (ob[0] - bb[0]), now["box"][1] + s * (ob[1] - bb[1])]
+    move = [s * (ob[0] - bb[0]), s * (ob[1] - bb[1])]
+    if anchor is not None:
+        ab, ao = ((anchor[0].get("fingerprint") or {}).get("bbox"), (anchor[1].get("fingerprint") or {}).get("bbox"))
+        top = [s * (ao[0] - ab[0]), s * (ao[1] - ab[1])] if ab and ao else move
+    else:
+        top = move
+    apart = [move[0] - top[0], move[1] - top[1]]
+    old, new = (was or {}).get("refit") or [0.0, 0.0], refit_new or [0.0, 0.0]
+    extra = [apart[0] + new[0] - old[0], apart[1] + new[1] - old[1]]
+    d = [1.0, 0.0, 0.0, 1.0]
+    if was and was.get("transform") and now.get("transform"):
+        d = snapshot.compose(now["transform"], snapshot.invert(was["transform"]))[:4]
+    return [now["box"][0] + top[0] + d[0] * extra[0] + d[1] * extra[1],
+            now["box"][1] + top[1] + d[2] * extra[0] + d[3] * extra[1]]
+
+
+def _refit_shift(rep: dict, skey: str, ekey: str) -> list[float] | None:
+    """The report's word on what `refit` moved this element by, in the converter's frame."""
+    for m in rep.get("refit") or []:
+        if isinstance(m, dict) and m.get("slide") == skey and m.get("element") == ekey and m.get("shift"):
+            return m["shift"]
+    return None
 
 
 def _size(rb: dict) -> list[float]:
@@ -502,7 +533,10 @@ def geometry_findings(base: dict, before: dict, after: dict, rep: dict, ours: di
     A conflict on the element excuses it, except the geometry conflict `merge.GEOMETRY_CARRIED`: that
     one says the person's move and size went on top of the source's move, so the element is held to
     it - its corner where `_carried_to` says (`geometry_not_carried`; the deck's absolute place,
-    which geometry mode `theirs` used to write, is not it). A person's resize is judged apart from
+    which geometry mode `theirs` used to write, is not it). What refit moved is taken from what the
+    sync recorded - the report's `refit` for this sync, the base read-back's `refit` for the last
+    one - never forgiven for being a formula picture: a picture refit moved to the wrong place, or
+    one it says nothing about, is still found (r8006, r8011). A person's resize is judged apart from
     the place (`_resize_dropped`)."""
     out = []
     place = deck_placement(base)
@@ -534,7 +568,10 @@ def geometry_findings(base: dict, before: dict, after: dict, rep: dict, ours: di
                                    f"back at the converter's size {_size(was)}, the person had made it {_size(now)}",
                                    slide=skey, element=el["key"], object=main))
                 continue
-            to = _carried_to(place, el, ours_el, now)
+            a_base = next((x for x in b["elements"] if x["key"] == el.get("anchor")), None) if el.get("anchor") else None
+            a_ours = ours_by_key.get(skey, {}).get(el.get("anchor")) if a_base else None
+            to = _carried_to(place, el, ours_el, now, was, (a_base, a_ours) if a_base and a_ours else None,
+                             _refit_shift(rep, skey, el["key"]))
             if promised and objects and to is not None and \
                     not any(max(abs(rb["box"][0] - to[0]), abs(rb["box"][1] - to[1])) <= CARRIED_PLACE
                             for rb in objects if rb.get("box")):

@@ -922,6 +922,7 @@ class Sync:
         self.sent: dict[str, int] = {}
         self.warnings: list[str] = []
         self.overruns: list[dict] = []        # warn_about_overruns, for the report
+        self.refit_moves: list[dict] = []     # what `refit` moved or grew, for the report
         self.urls: dict[str, str] = {}  # picture file (str) -> contentUrl from the staging deck
         self.recovery: dict = {}        # what an interrupted earlier sync left (plan_recovery)
         self.cleanup_ids: list[str] = []      # old objects and slides, deleted after everything else
@@ -2197,8 +2198,10 @@ class Sync:
                         if m.get("role") == "math" and index[m["key"]] in w["new_oid"]]
                 own = {x for m in members for x in w["objects"].get(index[m["key"]], [])} | {main}
                 old_main = (bunits.get(u["key"]) or [{}])[0].get("main")
+                names = {w["new_oid"][index[m["key"]]]: m["key"] for m in members if index[m["key"]] in w["new_oid"]}
                 jobs.setdefault(s["objectId"], []).append({
-                    "key": f"slide {p['key']}: {u['key']}", "text": main, "pictures": pics, "own": own,
+                    "key": f"slide {p['key']}: {u['key']}", "slide": p["key"], "names": names,
+                    "text": main, "pictures": pics, "own": own,
                     "doomed": set(w.get("doomed") or ()),
                     "theirs": before.get(p["objectId"], {}).get("objects", {}).get(old_main)})
         return jobs
@@ -2207,7 +2210,9 @@ class Sync:
         """The recreated boxes fitted to the words written into them (`refit`, docs/project-notes.md
         "Merged text into recreated boxes"): formula pictures back over their holes, the box and a
         block panel under it as tall as the merged text needs. What moved is recorded for the base
-        (`self.reshaped`, `refit.reshape_base`)."""
+        (`self.reshaped`, `refit.reshape_base`), and said in the report (`self.refit_moves`, report
+        `refit`): which object moved how far in the converter's frame - the place the person's
+        carried geometry then stands on, which the loss oracle holds the sync to."""
         from . import refit
         self.reshaped = {}
         jobs = self.refit_jobs(work, theirs, created)
@@ -2217,7 +2222,7 @@ class Sync:
         fin = {s["objectId"]: s for s in final["slides"]}
         pre = {s["objectId"]: s for s in created["slides"]}
         before = {s["objectId"]: s for s in theirs["slides"]}
-        reqs, reshaped = [], {}
+        reqs, reshaped, moves = [], {}, []
         for sid, js in jobs.items():
             if sid not in fin:
                 continue
@@ -2226,9 +2231,11 @@ class Sync:
                 reqs += r + [BREAK]
             reshaped.update(shaped)
             self.warnings += warnings
+            moves += refit.moves(js, shaped, pre[sid], fin[sid])
         if reqs:
             rev = self.send("refit", reqs, rev)
             self.reshaped = reshaped
+            self.refit_moves = moves
         return rev
 
     def warn_about_folded_hiders(self, work: dict, now: dict) -> None:
@@ -2786,6 +2793,9 @@ def write_reports(out: Path, info: dict) -> tuple[Path, Path]:
             lambda x: f"- `{x['id']}` {loc(x)}: **{x['field']}**. The deck said, and this sync wrote over:\n"
                       f"{_quote(x['was'])}")
     section("Converged", r["converged"], lambda x: f"- {loc(x)}: {x['field']}")
+    section("Fitted to the words as merged", r.get("refit") or [],
+            lambda x: f"- {loc(x)}: " + (f"the formula picture follows its hole, {x['shift'][0]:+.1f} / {x['shift'][1]:+.1f} pt"
+                                         if x["what"] == "picture" else f"the {x['what']} grown {x['grown']:.1f} pt"))
     s = r["slides"]
     lines += ["## Slides", f"- created: {s['created'] or 'none'}", f"- deleted: {s['deleted'] or 'none'}",
               f"- moved: {s['moved'] or 'none'}", f"- kept (removed from the source, edited in the deck): {s['kept'] or 'none'}",
@@ -2893,6 +2903,7 @@ def sync(pdf: Path, deck: str, out: Path | None = None, dry_run: bool = False, o
         [u for u in ours.get("context_unwritten") or [] if u["slide"] in updated], ours)
     report["converged"] += [{**r, "field": "image", "how": "the same picture, written differently"} for r in refreshed]
     report["overruns"] = s.overruns
+    report["refit"] = s.refit_moves
     info = {"pdf": str(pdf), "presentationId": pid, "url": f"https://docs.google.com/presentation/d/{pid}/edit",
             "dry_run": dry_run, "base_from": where, "generation": base.get("generation", 0), "overlays": overlays,
             "attempts": result["attempts"], "requests": s.sent, "seconds": 0.0,

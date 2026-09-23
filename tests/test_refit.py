@@ -99,17 +99,83 @@ def test_a_picture_follows_onto_the_next_line():
     assert max(map(abs, offset(fin_t, moved))) < 0.5
 
 
-def test_inside_a_group_the_step_is_written_in_the_groups_frame():
-    """A picture in the unit's group (or in a group the person scaled): RELATIVE composes with the
-    child's own transform inside the group's, so the page step is conjugated by the group's."""
-    group = [0.8, 0.0, 0.0, 0.8, 30.0, 12.0]
-    step = [1, 0, 0, 1, 120.0, -7.0]
-    local = refit.local_step(step, group)
-    child = [1.0, 0.0, 0.0, 1.0, 5.0, 9.0]
-    got = snapshot.compose(group, snapshot.compose(local, child))
-    want = snapshot.compose(step, snapshot.compose(group, child))
-    assert all(abs(a - b) < 1e-9 for a, b in zip(got, want))
-    assert refit.local_step(step, None) == step
+def request_matrix(r):
+    t = r["updatePageElementTransform"]["transform"]
+    return [t["scaleX"], t["shearX"], t["shearY"], t["scaleY"],
+            t["translateX"] / snapshot.EMU_PER_PT, t["translateY"] / snapshot.EMU_PER_PT]
+
+
+def close(a, b, tol=1e-3):
+    return all(abs(x - y) <= tol for x, y in zip(a, b))
+
+
+def in_group(slide, group_t, members):
+    """The slide's members as children of a group whose transform is `group_t` (read-backs are
+    absolute: `snapshot.read_slide` composes the group's in)."""
+    out = {oid: {**stepped(rb, group_t), "parent_group": "g"} if oid in members else rb
+           for oid, rb in slide["objects"].items()}
+    kids = [out[m]["box"] for m in members]
+    out["g"] = {"kind": "elementGroup", "transform": list(group_t), "size": [0, 0], "children": list(members),
+                "box": [min(k[0] for k in kids), min(k[1] for k in kids), max(k[2] for k in kids), max(k[3] for k in kids)]}
+    return {"objects": out}
+
+
+def test_a_groups_child_takes_the_step_in_page_space():
+    """Slides applies a RELATIVE transform to a group's child on its absolute transform, in page
+    space, whatever the group's own transform. Conjugated by the group's (G^-1 . S . G), as refit
+    once wrote it, it was right only on the converter's identity groups: live fuzz r8006, a block
+    body grown about its top in a group the person had moved (+20, -20) had its top rise 4.0 pt
+    (101.5 for the promised 105.48); r8011, a picture in a group scaled 1.15 moved 134.0 pt of a
+    planned 154.1. The request is the page step itself, for a picture and for a growing box."""
+    person = [1, 0, 0, 1, 20.0, -20.0]
+    pre = block(SOURCE)
+    pre["objects"]["p"] = picture_over(pre["objects"]["t"])
+    fin = in_group(pre, person, ["t", "p", "panel"])
+    longer = MERGED[:2] + [(MERGED[2][0] + " And a sentence of the person's, long enough to take the words"
+                            " onto a second line of the box.", False)]
+    fin["objects"]["t"] = {**text_rb(longer, fin["objects"]["t"]["box"]), "parent_group": "g"}
+    reqs, reshaped, warnings = refit.plan([job(pictures=["p"], own={"t", "p", "g"})], pre, fin, [720, 405])
+    assert not warnings and set(reshaped) == {"t", "p", "panel"}
+    deck = dict(fin["objects"])
+    for r in reqs:                                   # what Slides does with each: M . absolute
+        oid = r["updatePageElementTransform"]["objectId"]
+        assert close(request_matrix(r), reshaped[oid][0])
+        deck[oid] = stepped(deck[oid], request_matrix(r))
+    assert deck["t"]["transform"][3] > 1.05                                  # it did grow
+    assert abs(deck["t"]["box"][1] - fin["objects"]["t"]["box"][1]) < 0.01   # about its own top
+    assert abs(deck["panel"]["box"][1] - fin["objects"]["panel"]["box"][1]) < 0.01
+    assert max(map(abs, offset(deck["t"], deck["p"]["box"]))) < 0.5
+
+
+def test_in_a_group_the_person_scaled_a_picture_keeps_the_persons_scale():
+    """r8011: the person scaled the unit's group 1.15; the merge moves the hole. The hole's move is
+    measured in the converter's box and the person's scale put on top of it (E . T . E^-1), so the
+    deck stays E times what the converter would have made of the merged words. A group's scale is
+    its box's size, not its text's (Slides keeps a shape's size in its scale): measured in the
+    person's wider box, the move comes out unscaled and the picture slides 0.15 of it against the
+    unit, sync after sync (r8011: 23 pt). How far the person's resize alone strands it stays theirs."""
+    person = [1.15, 0, 0, 1.15, -4.23, -18.82]
+    pre_t = text_rb(SOURCE, BOX)
+    pre = {"objects": {"t": pre_t, "p": picture_over(pre_t)}}
+    fin = in_group(pre, person, ["t", "p"])
+    fin["objects"]["t"] = {**stepped(text_rb(MERGED, BOX), person), "parent_group": "g"}
+    reqs, reshaped, warnings = refit.plan([job(pictures=["p"], own={"t", "p", "g"})], pre, fin, [720, 405])
+    assert not warnings and list(reshaped) == ["p"] and len(reqs) == 1
+    moved = stepped(fin["objects"]["p"], request_matrix(reqs[0]))
+    dx = offset(text_rb(MERGED, BOX), pre["objects"]["p"]["box"])[0]       # the hole's move, converter's frame
+    want = snapshot.compose(person, snapshot.compose([1, 0, 0, 1, -dx, 0], pre["objects"]["p"]["transform"]))
+    assert abs(dx) > 80 and close(moved["transform"], want, 0.05)
+    converters = picture_over(text_rb(MERGED, BOX))                          # emit's, for the merged words
+    assert close(moved["transform"], snapshot.compose(person, converters["transform"]), 0.05)
+    note = refit.reshape_base([{"key": "s", "elements": [{"key": "image/math/0", "main": "p", "objects": ["p"],
+                                                          "readback": {"p": pre["objects"]["p"]}}]}],
+                              reshaped)[0]["elements"][0]["readback"]["p"]
+    assert abs(note["refit"][0] + dx) < 0.05 and abs(note["refit"][1]) < 0.05   # the base frame's shift
+    assert close(snapshot.compose(person, note["transform"]), moved["transform"], 0.05)
+    said = refit.moves([job(pictures=["p"], slide="s", names={"t": "text/body/0", "p": "image/math/0"})],
+                       reshaped, pre, fin)                                  # the report's `refit`
+    assert said == [{"slide": "s", "element": "image/math/0", "object": "p", "what": "picture",
+                     "shift": note["refit"], "grown": 0.0}]
 
 
 def test_a_hole_the_person_deleted_leaves_its_picture_and_says_so():
