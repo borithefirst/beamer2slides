@@ -1368,13 +1368,15 @@ def table_requests(el: dict, slide_id: str, object_id: str, scale: float, fonts:
                 continue
             reqs.append({"insertText": {"objectId": object_id, "cellLocation": loc, "text": text}})
             start = 0
-            for run in runs:
+            for run, z in zip(runs, run_sizes(runs, scale, fonts)):
                 piece = run["text"].strip() if len(runs) == 1 else run["text"]
                 if start == 0:
                     piece = piece.lstrip()
                 if not piece:
                     continue
                 style, fields = fonts.text_style(run, scale)
+                if "fontSize" in style:
+                    style["fontSize"] = pt(z)  # (a subscript no larger than its text: run_sizes)
                 style.update({"smallCaps": run["smallcaps"], "foregroundColor": rgb(run["color"]),
                               "baselineOffset": {"super": "SUPERSCRIPT", "sub": "SUBSCRIPT"}.get(run.get("script"), "NONE")})
                 reqs.append({"updateTextStyle": {

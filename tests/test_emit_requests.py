@@ -1167,6 +1167,24 @@ def test_a_wrapped_cell_wraps_in_its_column():
     assert lay["y"] + sum(lay["heights"]) == pytest.approx(177.47 * TIGHT_SCALE, abs=0.05)
 
 
+def test_a_subscript_in_a_cell_is_no_larger_than_its_text():
+    # 16_colored_table, `Math in cells`: lambda_max's subscript hung 3 pt under the table's last row.
+    table = number_table(188.0)
+    runs = inline_math()["paragraphs"][0]["runs"]
+    table["cells"][0][0] = runs
+    reqs = table_requests(table, "b2s_s001", "b2s_s001_b0", SCALE, FONTS, imported=True)
+    text = "".join(r["text"] for r in runs).strip()
+    sizes = {}
+    for r in reqs:
+        st = r.get("updateTextStyle")
+        if st and st.get("cellLocation") == {"rowIndex": 0, "columnIndex": 0} and "baselineOffset" in st["style"]:
+            rng = st["textRange"]
+            sizes[text[rng["startIndex"]:rng["endIndex"]]] = (st["style"]["baselineOffset"], pt_of(st["style"]["fontSize"]))
+    body = FONTS(runs[0], SCALE)[1]
+    for piece in ("t", "+1"):
+        assert sizes[piece] == ("SUBSCRIPT", body)
+
+
 def test_a_hebrew_table_cell_reads_right_to_left_and_stays_where_it_is_drawn():
     reqs = table_requests(hebrew_table(), "b2s_s001", "b2s_s001_b0", SCALE, FONTS)
     styles = {r["updateParagraphStyle"]["cellLocation"]["columnIndex"]: r["updateParagraphStyle"]["style"]
