@@ -31,7 +31,11 @@ decorations) is a picture, or baked into a per-slide background picture.
 - **No public links**: pictures reach Slides inside the imported .pptx, never as shared Drive files.
 - **Fidelity is measured on Google's own renderer** (`getThumbnail` vs the PDF page), never a local
   preview. Font substitutes are calibrated (`tools/calibrate.py`, `calibration/fonts.json`,
-  per-character advances in `calibration/advances.json` via `tools/probe_advances.py`).
+  per-character advances in `calibration/advances.json` via `tools/probe_advances.py`). A run of
+  15+ characters whose letters are unlike a sentence's (serif capitals, a line of w) is sized to
+  its PDF width when more than 7% off: Slides advances against Computer Modern's
+  (`calibration/cm_advances.json` from `tools/cm_advances.py`, `FontMapper.shape_ratio`; numbers
+  too). Small caps are a deliberate compromise at 1.13x (`SMALL_CAPS_WIDTH`).
 - **Never destroy what a person did in the deck or the document.** A rebuild of an edited deck is
   refused (`guard.py`); sync is a three-way merge where the deck's edits win and conflicts are
   reported; a destructive write keeps a way back first. `--force-rebuild`, `--follow-labels`,

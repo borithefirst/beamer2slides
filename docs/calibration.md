@@ -136,11 +136,24 @@ Google's renderer (advances as in `tools/probe_advances.py`, one reference row p
   0.5 (CMSSBX 0.55, CMBX 0.575), and stand at cap height, 7% taller than CM's. The size factor is
   calibrated on sentences, so a number column came out 8-14% wider than the PDF's. A run that is
   only a number (digits and `, . : % / - ( ) +`, no letter; not a script) is set at the size that
-  gives it the PDF's width from those advances (`emit.CM_NUMBER_EM`, `FontMapper.number_ratio`):
+  gives it the PDF's width from those advances (`emit.CM_ADVANCES`, `FontMapper.shape_ratio`):
   torture table columns 1.03-1.14 -> 0.97-1.02, prose unchanged to 0.004. A number inside a
   sentence keeps the sentence's size (a mixed-size word would be what a person types after).
   Bold header words are *not* wider: 0.96 (the `width` findings on the header table's elements
   were the digits under the header).
+- **Letters unlike a sentence.** `FontMapper.shape_ratio` predicts a run's width from Slides'
+  advances (`advances.json`) against Computer Modern's (AFM advances and kerns, TFM interword and
+  sentence spaces: `calibration/cm_advances.json`, `tools/cm_advances.py`), relative to the
+  calibration sentences in the same face, so bold and italic keep their half corrections. The PDF
+  side matches every one-line CM paragraph of the test decks at median 1.0001 (p5-p95
+  0.9988-1.0013); the Slides side matches `fonts.json`'s rows within 0.006. Over the test decks,
+  runs of 15+ characters sit at 0.957-1.063 (paragraphs: p5 0.971, p95 1.059; short ones spread up
+  to 1.14), so only a run of 15+ characters more than **7%** off is set at its PDF width: CMR
+  capitals (0.88-0.90), CMBX capitals (0.87-0.89), CMTI capitals (0.91), a line of w (1.07-1.10).
+  Probe deck: serif capitals 0.891 -> 0.999, w line 1.077 -> 1.004; Lato capitals (0.94-0.96) are
+  ordinary and stay. No run of the test decks moves (`plan_offline` identical over 84 decks). One
+  wrapped line inside an ordinary paragraph (torture p3t2, "wwwwwwww" at 1.10 in a paragraph at
+  1.024) cannot be reached at run level.
 - **Em spaces in typewriter text.** Roboto Mono draws every space - U+0020, U+2003, U+2002, U+2009,
   U+00A0 - at its one advance, 0.600 em, as its digits and letters: the CMTT -> Roboto Mono size
   factor (0.6 / 0.525, with the optical sizes) is exact, and a typewriter line with no wide gap

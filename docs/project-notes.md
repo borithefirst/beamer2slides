@@ -3423,3 +3423,17 @@ gap between the lines 1 -> 6 px (PDF 12), line 3's baseline 162 -> 169 px (PDF 1
 the same paragraph's line 2 wraps differently (`width` 0.912: TeX's math spacing around = and -
 against Lato runs), subscripts in table cells, CMMI letters sized above the body enlarging their
 line, and `deck_ir` taking a paragraph's first baseline from its largest run.
+
+### Width prediction (2026-09-23, d14d631, `FontMapper.shape_ratio` replaces `number_ratio`)
+Measured the Slides/PDF width ratio d of every run and paragraph relative to the calibration
+sentences (826 runs, 521 paragraphs over 84 PDFs). Runs changed per rule, at 15 characters and at 10:
+tolerance 0.05 -> 5 / 32, 0.06 -> 1 / 17, 0.07 -> 0 / 10. Chosen: 15 characters and 0.07, so today's
+decks are unchanged and only outliers (serif, bold and italic capitals, repeated wide letters) move.
+Per run, not per paragraph, so that `deck_ir.pdf_size` can invert it from text and style alone; a
+paragraph with one outlier run gets mixed sizes. Still open: torture p3t2 line 7 (a wrapped line of
+w, predicted 1.095, measured 1.103, hidden behind the small-caps line at 0.878) needs per-line
+knowledge; p16t1 wraps differently because inline math is much narrower in Lato than in TeX (Lato
+italic x 0.469 em against CMMI's 0.571, L 0.473 against 0.68, plus TeX's spacing around = and -):
+the formula is ~79 pt in Slides against ~105-150 pt in the PDF. Lone CMMI letters get the italic
+half correction (x1.037) and so stand at 22.1 pt in a 21.2 pt body, enlarging their line for no
+width gain; capping them in `run_sizes` would need `pdf_size` to know the run is math.
