@@ -308,31 +308,31 @@ def overruns(before: dict, after: dict, users: set[str], skip: set[str] = frozen
     """The person's own objects (`users`, untouched by the sync) that the source's text or pictures
     now run over, where they did not before: {"object", "other", "depth"}, the deepest per object.
     One side is always text (a picture on a picture is a collage, not an accident). `skip`: objects
-    about to be deleted."""
-    def deepest(read: dict, inks: dict, u: str) -> tuple[float, str] | None:
-        picture = read["objects"][u].get("kind") == "image"
-        best = None
-        for o, r in inks.items():
-            if o == u or o in users or not r or (picture and read["objects"][o].get("kind") == "image"):
-                continue
-            m = meet(inks[u], r, OVERRUN_MIN)
-            if m and (best is None or m[0] > best[0]):
-                best = (m[0], o)
-        return best
-
+    about to be deleted. Each other object is judged against its own meet before (a recreated one
+    found by its b2s title): a note already over the frame counter still counts the paragraph that
+    now reaches it (live fuzz r7411)."""
     out = []
     inks_a = {o: ink(rb) for o, rb in after["objects"].items() if o not in skip}
     inks_b = {o: ink(rb) for o, rb in before["objects"].items()}
+    by_title = {rb["title"]: o for o, rb in before["objects"].items() if (rb.get("title") or "").startswith("b2s:")}
     for u in sorted(users):
         ua, ub = after["objects"].get(u), before["objects"].get(u)
         if ua is None or ub is None or not inks_a.get(u) or ua.get("box") != ub.get("box"):
             continue
-        now = deepest(after, inks_a, u)
-        if now is None:
-            continue
-        was = deepest(before, inks_b, u) if inks_b.get(u) else None
-        if was is None or now[0] > was[0] + OVERRUN_MIN:
-            out.append({"object": u, "other": now[1], "depth": round(now[0], 1)})
+        picture = ua.get("kind") == "image"
+        best = None
+        for o, r in inks_a.items():
+            if o == u or o in users or not r or (picture and after["objects"][o].get("kind") == "image"):
+                continue
+            now = meet(inks_a[u], r, OVERRUN_MIN)
+            if now is None:
+                continue
+            old = o if o in before["objects"] else by_title.get(after["objects"][o].get("title"))
+            was = meet(inks_b[u], inks_b[old], OVERRUN_MIN) if old and inks_b.get(u) and inks_b.get(old) else None
+            if (was is None or now[0] > was[0] + OVERRUN_MIN) and (best is None or now[0] > best[0]):
+                best = (now[0], o)
+        if best:
+            out.append({"object": u, "other": best[1], "depth": round(best[0], 1)})
     return out
 
 

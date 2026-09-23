@@ -198,6 +198,19 @@ def test_overruns_names_the_persons_object_the_source_now_runs_over():
     # already over it before the sync: not this sync's doing; about to be deleted: not there
     assert text_layout.overruns({"objects": after}, {"objects": after}, {"u1"}) == []
     assert text_layout.overruns({"objects": before}, {"objects": after}, {"u1"}, skip={"n1"}) == []
+    # recreated under a new id but over it as far before: found by its title, not new
+    was_over = {"t1": after["n1"], "u1": after["u1"]}
+    assert text_layout.overruns({"objects": was_over}, {"objects": after}, {"u1"}) == []
+
+
+def test_an_old_deep_overlap_does_not_hide_the_new_one():
+    """Live fuzz r7411: the person's note already ran over the frame counter, deeper than the
+    paragraph now runs over it; the paragraph's overrun is still this sync's."""
+    from beamer2slides import text_layout
+    d, before, after = note_deck()
+    counter = {**text_rb("x", [40.0, 80.0, 260.0, 104.0], "slide 3 of 9 in words"), "title": "b2s:s/counter"}
+    found = text_layout.overruns({"objects": {**before, "c1": counter}}, {"objects": {**after, "c1": counter}}, {"u1"})
+    assert [(o["object"], o["other"]) for o in found] == [("u1", "n1")]
 
 
 def test_the_persons_own_arrangement_carried_onto_the_sources_move_is_theirs():
