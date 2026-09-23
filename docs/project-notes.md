@@ -1569,7 +1569,10 @@ another page element the source's order across the two is unrealisable, and hono
 not what hid the words, so the oracle calls it a **note**
 (`loss_oracle._folded_into_a_group_of_their_own`, the `uncertain_slides` precedent: not a loss *in
 silence*) and `Sync.finish` names it in the report, which nothing else would - nothing was deleted
-and every write went through (`sync.folded_hiders`: ungroup it, or move the shape). The excuse is
+and every write went through (`sync.folded_hiders`: ungroup it, or move the shape; `finish` reads
+the order before the cleanup, so words the cleanup deletes - the old version of a block the source
+redrew inside the person's group - are left out, `w["doomed"]`: the live nested-group scenario had
+warned about v1's block title since the warning came in). The excuse is
 exactly that shape and no wider - the same panel standing on the page itself is a loss again, since
 `restack` could have ordered it. It lives in the oracle and not in `merge.plan_merge` because the
 offline campaign never runs `Sync.finish`, and predicting the final z-order at plan time would mean
@@ -3457,9 +3460,30 @@ failed on Results: the synced thumbnail differed from a fresh conversion in 1.37
 ~7 pt apart. A unit the source changed is recreated, and the recreated table was an API table
 beside the fresh conversion's .pptx one. Fix: emit's state and the base carry each imported
 table's margins (`table_margins`), and `sync.table_refill` keeps the table's object when the grid,
-merges, fills, margins (`emit.pptx_table` of the new IR) and corner are unchanged: the cells with
-text are emptied (deleteText per cell) and `table_requests(imported=True)` fills them. The object
-is treated like a placeholder refilled in place (kept out of the cleanup, its read-back saved in
-`pending.in_place`, no geometry override since it stays where the deck has it) and the new base
-keeps its margins. A base from before this change has none: its tables (API tables then) are
-still recreated. `tests/test_sync.py::test_a_table_whose_words_changed_is_refilled_in_place`.
+merges, fills and margins (`emit.pptx_table` of the new IR, within 0.05 pt) are unchanged: the
+cells with text are emptied (deleteText per cell) and `table_requests(imported=True)` fills them.
+The object is treated like a placeholder refilled in place (kept out of the cleanup, its read-back
+saved in `pending.in_place`, no geometry override since it stays where the deck has it) and the new
+base keeps the margins the table *has* (a new conversion's can differ by a rounding: 5.03 against
+5.01 when a line was added above). A table the source moved too (a line added above it) gets one
+RELATIVE translation by the source's move, unless the deck moved it (a geometry override: merge's
+"delta" when the source left it, "theirs" when both moved; either way the deck's place stands). A
+base from before this change has no margins: its tables (API tables then) are still recreated.
+`tests/test_sync.py::test_a_table_whose_words_changed_is_refilled_in_place`, live scenario
+`table-moved` (variant flag `tablemove` in tests/decks/sync/talk.tex). That scenario found a gap
+that is not the table's: a title's box is emitted up to the mirror of the slide's leftmost body text
+(`emit.text_right_limit`), so the centred line the variant adds narrows a *fresh* conversion's
+title to 474 pt where the synced deck keeps v1's 707. Sync does not resize a title the source did
+not change; the box is wider than its words and invisible in the thumbnail, so the scenario lets
+that one compare_fresh difference through. An element whose emitted box depends on its neighbours
+is not re-derived by sync when only a neighbour changed.
+
+Rows and columns: a table without merges or fills whose grid the source changed is refilled too
+when `table_steps` finds row inserts (insertBelow the row whose margins the new one needs) and
+deletes that give every row the margins the new conversion asks for; columns come and go at the
+right edge (a cell's margins are its row's). The steps go between emptying the cells and filling
+them. A booktabs table growing a data row at the end is the common case (the new row copies the
+0-margin row above). A new first row (a new rule above it) finds no neighbour and is recreated.
+`test_a_table_the_source_added_a_row_to_is_grown_in_place`, `test_table_steps_*`, live scenario
+`table-row` (flag `tablerow`). That a row inserted below another takes *its* margins is what the
+live scenario's thumbnail comparison checks; the probe only grew a table of equal margins.

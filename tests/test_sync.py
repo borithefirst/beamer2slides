@@ -1402,6 +1402,9 @@ def test_words_a_grouping_the_person_made_keeps_covered_are_named_in_the_report(
     together = {"order": ["ug"], "objects": {**read["objects"],
                                              "ug": {**read["objects"]["ug"], "children": ["new_t", "new_s"]}}}
     assert S.folded_hiders(together, made, ours) == []
+    # ... nor words the cleanup is about to delete: the order is read before it, and the old block's
+    # words still stand under the new one (live scenario nested-group warned about v1's block title)
+    assert S.folded_hiders(read, made, ours, doomed={"new_t"}) == []
     # and the report says it, in the person's words: the sync's own `ours`/`made` come from the base
     sync = S.Sync.__new__(S.Sync)
     sync.warnings = []
@@ -2141,25 +2144,24 @@ def test_unit_rebuilt_inside_a_group_nested_in_a_user_group(tmp_path):
             assert all(x["updatePageElementsZOrder"]["operation"] == "BRING_TO_FRONT" for x in before)
 
 
-def test_a_table_whose_words_changed_is_refilled_in_place(tmp_path):
-    """The source changed one cell of a table convert brought with the .pptx: the table keeps its
-    object (and the cell margins the API can't set) and only its cells are rewritten; a table
-    whose margins no longer fit (or with no margins recorded: made by createTable) is made again."""
+def _table_sync(tmp_path, variant: str):
+    """(run, first, second, j) for the Results table of the sync talk, v1 -> `variant`: run(margins,
+    overrides) drives Sync.update_slide on it as a recreated unit, `margins(base element)` giving
+    the base's table_margins, and returns (sync, work, requests, the table's old object id)."""
     from collections import defaultdict
-    from beamer2slides.emit import pptx_table
     from beamer2slides.sync import Sync, build_ours
-    v1, new = SYNC_DECKS / "v1.pdf", SYNC_DECKS / "tablecell.pdf"
+    v1, new = SYNC_DECKS / "v1.pdf", SYNC_DECKS / f"{variant}.pdf"
     if not v1.exists() or not new.exists():
         pytest.skip("build the sync test talk first (tests/decks/sync/build.py)")
     first = build_ours(v1, tmp_path / "v1", {"slides": []})
     second = build_ours(new, tmp_path / "new", {"slides": []})
     j = next(k for k, o in enumerate(second["slides"]) if o["title"] == "Results")
     jb = next(k for k, o in enumerate(first["slides"]) if o["title"] == "Results")
-    scale, fonts = first["plan"].scale, first["plan"].fonts
 
-    def run(margins):
+    def run(margins, overrides=None, restored=()):
         s = Sync.__new__(Sync)
         s.ours, s.plan, s.scale, s.tok, s.warnings = second, second["plan"], second["plan"].scale, "1zz", []
+        s.recovery = {"restore": {oid: {} for oid in restored}}
         s.urls = defaultdict(lambda: "https://example.com/staged.png")
         base_slide_ = copy.deepcopy(first["slides"][jb])
         objects = {}
@@ -2176,9 +2178,21 @@ def test_a_table_whose_words_changed_is_refilled_in_place(tmp_path):
         s.base = {"slides": [base_slide_]}
         key = next(e["key"] for e in base_slide_["elements"] if e["kind"] == "table")
         plan = {"key": "results", "base": 0, "ours": j, "objectId": "LIVE", "units": [
-            {"key": key, "action": "recreate", "ours_members": [key], "base_members": [key], "overrides": {}}]}
+            {"key": key, "action": "recreate", "ours_members": [key], "base_members": [key], "overrides": overrides or {}}]}
         w = {"plan": plan, "units": []}
         return s, w, s.update_slide(w, {"objects": objects, "notes": "", "notes_id": None}, {}, {}), f"OLD_{key.replace('/', '_')}"
+
+    return run, first, second, j
+
+
+def test_a_table_whose_words_changed_is_refilled_in_place(tmp_path):
+    """The source changed one cell of a table convert brought with the .pptx: the table keeps its
+    object (and the cell margins the API can't set) and only its cells are rewritten; a table
+    whose margins no longer fit (or with no margins recorded: made by createTable) is made again.
+    A table the source moved as well is refilled and moved."""
+    from beamer2slides.emit import pptx_table
+    run, first, second, j = _table_sync(tmp_path, "tablecell")
+    scale, fonts = first["plan"].scale, first["plan"].fonts
 
     s, w, reqs, old = run(lambda e: [list(m) for m in pptx_table(e["ir"], scale, fonts)["margins"]])
     assert not [r for r in reqs if "createTable" in r]
@@ -2187,10 +2201,82 @@ def test_a_table_whose_words_changed_is_refilled_in_place(tmp_path):
     assert cleared and all(d["objectId"] == old and "cellLocation" in d for d in cleared)
     assert any(r["insertText"]["text"] == "4.7 s" for r in reqs if "insertText" in r and r["insertText"]["objectId"] == old)
     assert not [r for r in reqs if "updateTableRowProperties" in r and r["updateTableRowProperties"]["objectId"] != old]
+    assert not [r for r in reqs if "updatePageElementTransform" in r]
+    # An interrupted sync already rewrote it (its read-back is the person's version put back): made again.
+    s, w, reqs, old = run(lambda e: [list(m) for m in pptx_table(e["ir"], scale, fonts)["margins"]], restored=[old])
+    assert [r for r in reqs if "createTable" in r] and old in s.cleanup_ids
+
+    # The source moved it down 20 pt as well (a line added above): refilled, then moved by as much -
+    # unless the deck moved it itself, whose position then stands (merge's geometry override).
+    table = next(e for e in second["plan"].deck["slides"][j]["elements"] if e["kind"] == "table")
+    table["bbox"][1] += 20
+    table["bbox"][3] += 20
+    table["frame"][1] += 20
+    table["frame"][3] += 20
+    table["row_baselines"] = [b + 20 for b in table["row_baselines"]]
+    for rule in table.get("rules", []) + table.get("borders", []):
+        if "y" in rule:
+            rule["y"] += 20
+    margins = lambda e: [list(m) for m in pptx_table(e["ir"], scale, fonts)["margins"]]  # noqa: E731
+    s, w, reqs, old = run(margins)
+    moved = [r["updatePageElementTransform"] for r in reqs if "updatePageElementTransform" in r]
+    assert not [r for r in reqs if "createTable" in r] and old not in s.cleanup_ids
+    assert len(moved) == 1 and moved[0]["objectId"] == old and moved[0]["applyMode"] == "RELATIVE"
+    assert moved[0]["transform"]["translateY"] == pytest.approx(20 * scale * 12700, abs=2)
+    assert abs(moved[0]["transform"]["translateX"]) <= 1
+    s, w, reqs, old = run(margins, {"geometry": {"mode": "theirs"}})
+    assert not [r for r in reqs if "updatePageElementTransform" in r] and old not in s.cleanup_ids
 
     for margins in (lambda e: None, lambda e: [[m[0], m[1] + 3, m[2], m[3]] for m in pptx_table(e["ir"], scale, fonts)["margins"]]):
         s, w, reqs, old = run(margins)
         assert [r for r in reqs if "createTable" in r] and old in s.cleanup_ids
+
+
+def test_a_table_the_source_added_a_row_to_is_grown_in_place(tmp_path):
+    """A row added at the end of the table: one insertTableRows below the last row (whose margins
+    the new row takes), between emptying the cells and filling them; the base keeps the margins."""
+    from beamer2slides.emit import pptx_table
+    run, first, second, j = _table_sync(tmp_path, "table-row")
+    scale, fonts = first["plan"].scale, first["plan"].fonts
+    s, w, reqs, old = run(lambda e: [list(m) for m in pptx_table(e["ir"], scale, fonts)["margins"]])
+    assert not [r for r in reqs if "createTable" in r] and old not in s.cleanup_ids
+    kinds = [next(iter(r)) for r in reqs]
+    grown = [r["insertTableRows"] for r in reqs if "insertTableRows" in r]
+    assert grown == [{"tableObjectId": old, "cellLocation": {"rowIndex": 3, "columnIndex": 0}, "insertBelow": True, "number": 1}]
+    assert kinds.index("insertTableRows") > max(k for k, x in enumerate(kinds) if x == "deleteText")
+    assert kinds.index("insertTableRows") < kinds.index("insertText")
+    assert any(r["insertText"]["text"] == "4.2 s" and r["insertText"]["cellLocation"]["rowIndex"] == 4
+               for r in reqs if "insertText" in r and r["insertText"]["objectId"] == old)
+    i = next(k for k, e in enumerate(second["plan"].deck["slides"][j]["elements"]) if e["kind"] == "table")
+    assert len(w["in_place"][i]["margins"]) == 5
+
+
+def test_table_steps_give_a_table_the_rows_and_columns_it_needs():
+    from beamer2slides.sync import table_steps
+
+    def m(*tops):
+        return [[7.2, t, 7.2, 0.0] for t in tops]
+
+    def kinds(reqs):
+        return [(next(iter(r)), next(iter(r.values()))["cellLocation"]) for r in reqs]
+
+    # A row added at the end of a booktabs table takes the margins of the row above it.
+    reqs, cur = table_steps(m(5.0, 4.8, 0, 0), m(5.0, 4.8, 0, 0, 0), 3, 3)
+    assert kinds(reqs) == [("insertTableRows", {"rowIndex": 3, "columnIndex": 0})] and cur == m(5.0, 4.8, 0, 0, 0)
+    # ... and in the middle, below the row it copies; the margins stay the table's own.
+    reqs, cur = table_steps(m(5.0, 4.8, 0), m(5.01, 4.8, 4.8, 0), 3, 3)
+    assert kinds(reqs) == [("insertTableRows", {"rowIndex": 1, "columnIndex": 0})] and cur == m(5.0, 4.8, 4.8, 0)
+    # A row removed; a column added and two removed at the right edge.
+    reqs, _ = table_steps(m(5.0, 4.8, 0, 0), m(5.0, 4.8, 0), 3, 4)
+    assert kinds(reqs) == [("deleteTableRow", {"rowIndex": 3, "columnIndex": 0}),
+                           ("insertTableColumns", {"rowIndex": 0, "columnIndex": 2})]
+    reqs, _ = table_steps(m(5.0, 0), m(5.0, 0), 4, 2)
+    assert kinds(reqs) == [("deleteTableColumn", {"rowIndex": 0, "columnIndex": 3}),
+                           ("deleteTableColumn", {"rowIndex": 0, "columnIndex": 2})]
+    # A first row no row can give its margins to (a new rule above it): made again.
+    assert table_steps(m(5.0, 0), m(3.0, 5.0, 0), 3, 3) is None
+    assert table_steps(m(5.0, 0), m(5.0, 2.0), 3, 3) is None
+    assert table_steps(m(5.0, 0), m(5.0, 0), 3, 3) == ([], m(5.0, 0))
 
 
 def _picture_files(folder: Path, transparent: bool, mark=(10, 5, 40, 15), ground=(255, 255, 255)):

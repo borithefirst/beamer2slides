@@ -36,7 +36,10 @@ STAND_IN = 3_000_000 / 12700
 # Object ids sync gives what it creates: b2s_<h6 slide>[_<h6 element>|_k<n>]_<generation><2 letters>
 # plus emit's own suffixes (_g, n, _n0). Nothing a person can make in Slides looks like this.
 SYNC_ID = re.compile(r"b2s_[0-9a-f]{6}(?:_(?:[0-9a-f]{6}|k\d+))?_(\d+)[a-z]{2}[a-z0-9_]*")
-IN_PLACE_FIELDS = ("text", "text_styles", "paragraph_styles", "text_style_hash")
+IN_PLACE_FIELDS = ("text", "text_styles", "paragraph_styles", "text_style_hash", "table")  # (table: its grid)
+# Google's words when it could not fetch a createImage URL, and the waits before sending again (s).
+PICTURE_FETCH = "problem retrieving the image"
+FETCH_RETRY = (3, 10)
 
 
 class RevisionMismatch(Exception):
@@ -207,9 +210,16 @@ def table_refill(base_el: dict | None, el: dict, objects: dict, scale: float, fo
     can neither read nor set, and that keep the PDF's row pitch; one made by createTable has 7.2 pt
     above and below every line (docs/calibration.md "Table cells"), so a recreated table's rows sit
     up to ~7 pt from where a fresh conversion puts them. The base records the margins
-    (`table_margins`), and when the grid, the merges, the fills, the margins and the table's corner
-    are what the source's new version needs, only the words change: the cells are emptied and
-    filled as emit fills an imported table. `cells`: the (row, column) of cells with text now."""
+    (`table_margins`), and when the grid, the merges, the fills and the margins are what the
+    source's new version needs, only the words change: the cells are emptied and filled as emit
+    fills an imported table. `cells`: the (row, column) of cells with text now; `shift`: how far the
+    source moved the table's corner (Slides pt), which the caller applies unless the deck's own
+    position wins (`update_slide`).
+
+    A table without merges or fills whose rows or columns the source added or removed is refilled
+    too when inserted and deleted rows can give it the margins it needs (`table_steps`: a new row
+    or column takes those of the one it is inserted beside, tools/probe_pptx_table_margins.py);
+    `steps` are those requests, sent after the cells are emptied and before they are filled."""
     from .emit import pptx_table
     if not base_el or el.get("kind") != "table" or base_el.get("kind") != "table":
         return None
@@ -217,22 +227,59 @@ def table_refill(base_el: dict | None, el: dict, objects: dict, scale: float, fo
     live = objects.get(base_el.get("main"))
     if not margins or not live or "cells" not in old:
         return None
-    dims = [len(el["cells"]), len(el["columns"])]
-    if list(live.get("table") or []) != dims or [len(old["cells"]), len(old["columns"])] != dims:
-        return None  # (a row or column added on either side)
-    if old.get("merges", []) != el.get("merges", []) or old.get("fills", []) != el.get("fills", []):
-        return None  # (a merge or a fill can't be taken back by filling cells)
+    was_dims, dims = [len(old["cells"]), len(old["columns"])], [len(el["cells"]), len(el["columns"])]
+    if list(live.get("table") or []) != was_dims:
+        return None  # (the deck added or removed a row or column)
+    if was_dims == dims:
+        if old.get("merges", []) != el.get("merges", []) or old.get("fills", []) != el.get("fills", []):
+            return None  # (a merge or a fill can't be taken back by filling cells)
+    elif old.get("merges") or el.get("merges") or old.get("fills") or el.get("fills"):
+        return None  # (they are placed by row and column: another grid moves them)
     grid = merge.table_grid(live.get("text"), live.get("table"))
     if grid is None:
         return None
     new, was = pptx_table(el, scale, fonts), pptx_table(old, scale, fonts)
-    if len(new["margins"]) != len(margins) or \
-            any(abs(a - b) > 0.05 for m, n in zip(new["margins"], margins) for a, b in zip(m, n)):
+    steps = table_steps(margins, new["margins"], was_dims[1], dims[1])
+    if steps is None:
         return None
-    if abs(new["x"] - was["x"]) > 0.5 or abs(new["y"] - was["y"]) > 0.5:
-        return None  # (the source moved it: made again where it now goes)
-    return {"id": base_el["main"], "margins": new["margins"],
-            "cells": [(r, c) for r, row in enumerate(grid) for c, text in enumerate(row) if text]}
+    # (the margins the table has - nothing can change them - not the new conversion's, a rounding off)
+    return {"id": base_el["main"], "margins": steps[1], "shift": (new["x"] - was["x"], new["y"] - was["y"]),
+            "cells": [(r, c) for r, row in enumerate(grid) for c, text in enumerate(row) if text],
+            "steps": steps[0]}
+
+
+def table_steps(have: list, need: list, cols: int, want_cols: int, tol: float = 0.05
+                ) -> tuple[list[dict], list] | None:
+    """Row and column requests (with the table's id left as None) turning a table whose rows have
+    the cell margins `have` into one of len(need) rows with the margins `need` and `want_cols`
+    columns, and the margins it then has; None when no such steps exist. A row inserted below
+    another takes its margins; a column's cells take those of their row whatever it is inserted
+    beside, so columns go and come at the right edge."""
+    def same(a, b):
+        return all(abs(x - y) <= tol for x, y in zip(a, b))
+
+    cur, reqs = [list(m) for m in have], []
+    while True:
+        i = next((k for k in range(min(len(cur), len(need))) if not same(cur[k], need[k])), min(len(cur), len(need)))
+        if len(cur) == len(need):
+            if i < len(cur):
+                return None
+            break
+        if len(cur) > len(need):
+            reqs.append({"deleteTableRow": {"tableObjectId": None, "cellLocation": {"rowIndex": i, "columnIndex": 0}}})
+            del cur[i]
+        elif i > 0 and same(cur[i - 1], need[i]):
+            reqs.append({"insertTableRows": {"tableObjectId": None, "cellLocation": {"rowIndex": i - 1, "columnIndex": 0},
+                                             "insertBelow": True, "number": 1}})
+            cur.insert(i, list(cur[i - 1]))
+        else:
+            return None
+    if want_cols > cols:
+        reqs.append({"insertTableColumns": {"tableObjectId": None, "cellLocation": {"rowIndex": 0, "columnIndex": cols - 1},
+                                            "insertRight": True, "number": want_cols - cols}})
+    for c in range(cols - 1, want_cols - 1, -1):
+        reqs.append({"deleteTableColumn": {"tableObjectId": None, "cellLocation": {"rowIndex": 0, "columnIndex": c}}})
+    return reqs, cur
 
 
 def drop_objects(pres: dict, objects, slides) -> dict:
@@ -572,7 +619,7 @@ def drawn_order(objects: dict, order: list[str]) -> tuple[list[str], dict[str, s
     return out, top
 
 
-def folded_hiders(read: dict, made: set[str], ours: set[str]) -> list[tuple[str, str]]:
+def folded_hiders(read: dict, made: set[str], ours: set[str], doomed: set[str] = frozenset()) -> list[tuple[str, str]]:
     """(text, shape) pairs this sync could not order its way out of, for the report to name.
 
     Z-order is written in two places: the page's element order (`Sync.restack`) and the children of a
@@ -584,7 +631,9 @@ def folded_hiders(read: dict, made: set[str], ours: set[str]) -> list[tuple[str,
     (`loss_oracle.text_hidden`, converted seed 670146 at chain 6: 2 of 2,600 rounds).
 
     `ours` is what the converter's own containers are (the base's groups and its elements' objects),
-    `made` what this sync created, whose containers are its own too."""
+    `made` what this sync created, whose containers are its own too. `doomed`: what the cleanup is
+    about to delete (`w["doomed"]`) - the order is read before it, and the words of a block the
+    source redrew, still under the new block, are going (live scenario nested-group)."""
     objects = read.get("objects") or {}
     order, top = drawn_order(objects, read.get("order") or [])
     out = []
@@ -597,7 +646,7 @@ def folded_hiders(read: dict, made: set[str], ours: set[str]) -> list[tuple[str,
             continue
         for under in order[:i]:
             u = objects[under]
-            if top[under] == stands_in or not u.get("box") or not (u.get("text") or "").strip():
+            if top[under] == stands_in or under in doomed or not u.get("box") or not (u.get("text") or "").strip():
                 continue
             area = (u["box"][2] - u["box"][0]) * (u["box"][3] - u["box"][1])
             w = min(u["box"][2], rb["box"][2]) - max(u["box"][0], rb["box"][0])
@@ -732,17 +781,25 @@ class Sync:
         self.before_write()
         self.fill_urls(reqs)   # nothing goes out carrying a marker, whoever built it (`picture_url`)
         for n, chunk in enumerate(batches(reqs)):
-            try:
-                body = {"requests": chunk}
-                if rev:
-                    body["writeControl"] = {"requiredRevisionId": rev}
-                res = execute(self.slides.presentations().batchUpdate(presentationId=self.pid, body=body))
-            except HttpError as e:
-                from .emit import api_error
-                message = api_error(e)
-                if status_of(e) == 400 and "revision" in message.lower() and n == 0:
-                    raise RevisionMismatch(message)
-                raise RuntimeError(f"sync {phase}: batch refused ({message})") from e
+            for attempt in range(len(FETCH_RETRY) + 1):
+                try:
+                    body = {"requests": chunk}
+                    if rev:
+                        body["writeControl"] = {"requiredRevisionId": rev}
+                    res = execute(self.slides.presentations().batchUpdate(presentationId=self.pid, body=body))
+                    break
+                except HttpError as e:
+                    from .emit import api_error
+                    message = api_error(e)
+                    if status_of(e) == 400 and "revision" in message.lower() and n == 0:
+                        raise RevisionMismatch(message)
+                    if status_of(e) == 400 and PICTURE_FETCH in message and attempt < len(FETCH_RETRY):
+                        # Google could not fetch a staged picture this time (live fuzz seed 2603: the
+                        # same sync run again went through). A refused batch applied nothing - a
+                        # batchUpdate is all or nothing - so the same batch is sent again.
+                        time.sleep(FETCH_RETRY[attempt])
+                        continue
+                    raise RuntimeError(f"sync {phase}: batch refused ({message})") from e
             rev = res.get("writeControl", {}).get("requiredRevisionId") or self.revision()
             self.sent[phase] = self.sent.get(phase, 0) + len(chunk)
             faults.fail_at(phase)
@@ -1374,8 +1431,14 @@ class Sync:
                 from .emit import table_requests
                 rs = [{"deleteText": {"objectId": new_oid[i], "cellLocation": {"rowIndex": r, "columnIndex": c},
                                       "textRange": {"type": "ALL"}}} for r, c in in_place[i]["cells"]] + \
+                     [{k: {**v, "tableObjectId": new_oid[i]} for k, v in step.items()} for step in in_place[i].get("steps", [])] + \
                      [r for r in table_requests(self.plan.placed(slide["elements"][i], n), sid, new_oid[i], self.scale,
                                                 self.plan.fonts, imported=True) if "updatePageElementsZOrder" not in r]
+                dx, dy = in_place[i].get("shift") or (0.0, 0.0)
+                if abs(dx) > 0.01 or abs(dy) > 0.01:  # (the source moved it)
+                    rs.append({"updatePageElementTransform": {"objectId": new_oid[i], "applyMode": "RELATIVE", "transform": {
+                        "scaleX": 1, "scaleY": 1, "unit": "EMU",
+                        "translateX": round(dx * EMU_PER_PT), "translateY": round(dy * EMU_PER_PT)}}})
             elif i in in_place and in_place[i].get("text"):
                 rs = [{"deleteText": {"objectId": new_oid[i], "textRange": {"type": "ALL"}}}] + rs
             out = []
@@ -1529,12 +1592,21 @@ class Sync:
                     in_place[title_idx] = {"id": main, "size": objects[main]["size"],
                                            "text": (objects[main].get("text") or "").strip()}
                     break
-        # A table whose words alone changed is refilled where it is (`table_refill`).
+        # A table whose words alone changed is refilled where it is (`table_refill`) - but not one an
+        # interrupted sync already rewrote: what the merge compares against is then the person's
+        # version put back (`restore_in_place`), not what the table holds, and cells emptied or rows
+        # inserted by that picture would double words or rows. Made again, it is right whatever it holds.
+        restored = set((getattr(self, "recovery", None) or {}).get("restore") or ())
         for u in recreated:
-            if u["action"] == "recreate" and len(u["ours_members"]) == 1 and len(bunits.get(u["key"], [])) == 1:
+            if u["action"] == "recreate" and len(u["ours_members"]) == 1 and len(bunits.get(u["key"], [])) == 1 \
+                    and bunits[u["key"]][0].get("main") not in restored:
                 i = index[u["ours_members"][0]]
                 refill = table_refill(bunits[u["key"]][0], slide["elements"][i], objects, self.scale, self.plan.fonts)
                 if refill:
+                    if "geometry" in (u.get("overrides") or {}):
+                        # The deck moved it: where it is now is what a recreation's geometry override
+                        # would give (merge: "delta" when the source left it, "theirs" when both moved).
+                        refill["shift"] = (0.0, 0.0)
                     in_place[i] = {**refill, "table": True}
 
         # Template shapes: duplicate a live object with the same key on this slide, else a stand-in.
@@ -1776,7 +1848,7 @@ class Sync:
             b = self.base["slides"][p["base"]]
             ours = {o for el in b["elements"] for o in el.get("objects", [])} | set(b.get("groups") or [])
             made = {x for oids in w["objects"].values() for x in oids} | set(w.get("groups") or [])
-            for text, shape in folded_hiders(s, made, ours):
+            for text, shape in folded_hiders(s, made, ours, w.get("doomed") or set()):
                 words = (s["objects"][text].get("text") or "").strip().replace("\n", " ")[:40]
                 self.warnings.append(
                     f"slide {b['key']}: {words!r} is now under a shape the source redrew, which stands in a "

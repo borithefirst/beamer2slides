@@ -20,6 +20,7 @@ after planning and before its first write.
 import importlib.util
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -429,6 +430,41 @@ def scenario_concurrent(run: Run):
     if not exp_file.exists():
         pytest.skip("sync doesn't run the B2S_SYNC_BEFORE_WRITE hook")
     run.check("tablecell", pdf, report, exps + json.loads(exp_file.read_text(encoding="utf-8")))
+
+
+@scenario
+def scenario_table_moved(run: Run):
+    """The source adds a line above the table (which moves it down) and changes a cell: the table
+    the .pptx brought is refilled and moved, not made again by createTable, whose cell padding
+    would put its rows ~7 pt from a fresh conversion's (sync.table_refill)."""
+    run.convert(build("v1"))
+    pdf = build("table-moved")
+    run.check("table-moved", pdf, run.sync(pdf), [])
+    # The added line is the slide's leftmost body text, so a fresh conversion stops the title's box
+    # at the mirrored margin (emit.text_right_limit: 474 pt wide, 707 before). Sync leaves a title
+    # the source didn't change as it is: a box the short title doesn't fill, invisible in the
+    # thumbnail comparison, which stays.
+    run.problems = [p for p in run.problems if not re.fullmatch(r"fresh Results: (missing|extra) shape:TEXT_BOX:Results .*", p)]
+    run.problems += tables_kept(run)
+
+
+@scenario
+def scenario_table_row(run: Run):
+    """The source adds a row at the end of the table and changes a cell: the table grows by an
+    insertTableRows (the new row takes the margins of the one above) and is refilled."""
+    run.convert(build("v1"))
+    pdf = build("table-row")
+    run.check("table-row", pdf, run.sync(pdf), [])
+    run.problems += tables_kept(run)
+
+
+def tables_kept(run: Run) -> list[str]:
+    """The deck's tables are still the ones convert brought with the .pptx (`sync.table_refill`)."""
+    base = json.loads((run.out / "sync" / "base.json").read_text(encoding="utf-8"))
+    tables = [el for s in base["slides"] for el in s["elements"] if el["kind"] == "table"]
+    if tables and all(re.fullmatch(r"b2s_s\d{3}_tab\d+", el["main"] or "") and el.get("table_margins") for el in tables):
+        return []
+    return [f"a table was made again: {[(el['main'], bool(el.get('table_margins'))) for el in tables]}"]
 
 
 @scenario

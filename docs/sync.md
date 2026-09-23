@@ -267,7 +267,9 @@ which is what `sync.override_requests` really does, so a take cannot look like a
   (outermost first, since a group inside a group can't be ungrouped) and regrouped under the same
   ids (innermost first), and the new objects are brought into the old z position (`restack`).
   A group that would be left with one child disappears, its child taking its place.
-  Placeholders are refilled in place.
+  Placeholders are refilled in place, and so is a table convert brought with the .pptx whose new
+  version its recorded cell margins still fit (`table_refill`, docs/calibration.md "Table cells"):
+  a new table could only be an API one, whose padding moves the rows.
 - Template shapes (native shadows, exact corner radii, diagram nodes and elbow connectors) can't
   be copied across decks: a live object with the same template key is duplicated if there is one,
   else a plain 100 pt shape stands in and the report warns.
@@ -306,10 +308,12 @@ uninterrupted one would have. What makes that true:
   generation (it still describes the deck) and gains `pending` = this run's generation and id token,
   the revision it planned against, the source's sha1, the object ids it is about to create, the
   slides it is about to add, the staging deck's file id, and the read-back of every placeholder it
-  is about to rewrite **in place**. The last one matters: rewriting a title placeholder is the only
-  destructive content write, and `pending.in_place` lets the next sync put the person's text back
-  into what it compares against (`restore_in_place`), so their edit is merged again instead of
-  quietly adopted. The marker is written with the base, so a run that dies leaves a valid base of
+  is about to rewrite **in place**. The last one matters: rewriting a title placeholder or refilling
+  a table are the only destructive content writes, and `pending.in_place` lets the next sync put
+  the person's text (and a table's grid) back into what it compares against (`restore_in_place`),
+  so their edit is merged again instead of quietly adopted. A table put back that way is made again
+  rather than refilled: the cells to empty and the rows to insert would be read off the version
+  put back, not off what the table now holds. The marker is written with the base, so a run that dies leaves a valid base of
   the old generation plus a note of what it started; a run that finishes removes it.
 - **Leftovers are swept, and only leftovers** (`plan_recovery`, run before anything is planned).
   An object is deleted only if the base's `cleanup`/`pending` names it, or its id was minted by a

@@ -497,6 +497,47 @@ def test_nothing_goes_out_carrying_a_marker():
     assert api.batches == [], "and before the batch, not after it"
 
 
+class _Flaky:
+    """A Slides service that refuses the first `fails` batches as Google does when it could not
+    fetch a createImage URL, then accepts."""
+
+    def __init__(self, fails: int, message: str = "Invalid requests[0].createImage: There was a problem "
+                 "retrieving the image. The provided image should be publicly accessible, within size limit, "
+                 "and in supported formats."):
+        self.fails, self.message, self.bodies = fails, message, []
+
+    def presentations(self):
+        return self
+
+    def batchUpdate(self, presentationId=None, body=None):
+        return self
+
+    def execute(self):
+        self.bodies.append(True)
+        if len(self.bodies) <= self.fails:
+            raise http_error(self.message)
+        return {"writeControl": {"requiredRevisionId": "rev2"}}
+
+
+def test_a_picture_google_could_not_fetch_is_asked_for_again(monkeypatch):
+    """Live fuzz seed 2603: a content batch refused because Google could not fetch a staged picture
+    went through when the same sync was run again. A refused batch applied nothing, so it is sent
+    again after a wait, and only for that refusal."""
+    monkeypatch.setattr(sync.time, "sleep", lambda s: None)
+    reqs = [{"createImage": {"objectId": "x", "url": "https://staging/a"}}]
+    api = _Flaky(2)
+    s = bare_sync(slides=api, pid="P1", sent={}, urls={}, revision=lambda: "rev1")
+    assert s.send("content", reqs, "rev1") == "rev2" and len(api.bodies) == 3 and s.sent == {"content": 1}
+    api = _Flaky(3)
+    with pytest.raises(RuntimeError, match="problem retrieving the image"):
+        bare_sync(slides=api, pid="P1", sent={}, urls={}, revision=lambda: "rev1").send("content", reqs, "rev1")
+    assert len(api.bodies) == 1 + len(sync.FETCH_RETRY)
+    api = _Flaky(1, "Invalid requests[0].deleteObject: The object (B) could not be found.")
+    with pytest.raises(RuntimeError, match="could not be found"):
+        bare_sync(slides=api, pid="P1", sent={}, urls={}, revision=lambda: "rev1").send("content", reqs, "rev1")
+    assert len(api.bodies) == 1, "any other refusal is not sent again"
+
+
 def test_the_pending_marker_does_not_wait_for_the_staging_deck():
     """What it records is the objects this run is about to create, and their ids are the elements'
     own - so a marker built before the staging deck exists says exactly what one built after it

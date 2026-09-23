@@ -67,8 +67,8 @@ Details, measurements and edge cases: docs/project-notes.md "What becomes native
   lines (`row_lines`, `wrapped`), its column wide enough for each PDF line (`emit.wrapped_width`).
   Convert brings tables empty in the .pptx with their own cell margins (`emit.pptx_table`) and
   fills them through the API, so rows keep the PDF pitch. The base records those margins
-  (`table_margins`); sync refills such a table in place when only its words changed
-  (`sync.table_refill`), and otherwise creates an API table (`DeckPlan(pptx_tables=False)`).
+  (`table_margins`); sync refills such a table in place when its words or place changed, or rows and columns that
+  inserts beside a neighbour can give (`sync.table_refill`, `table_steps`), and otherwise creates an API table (`DeckPlan(pptx_tables=False)`).
 - `diagram`: node/line/arrow clusters as grouped shapes, connectors and labels (`diagram_from`).
 - `shape`: opaque panels such as beamer blocks (title bar + body built to survive resizing).
 - Decorations on words: underline/strike/highlight runs; words on small graphics and complex inline

@@ -73,9 +73,11 @@ Model used by `emit.vertical_layout`, for a line of size z with lineSpacing r:
   PDF's (booktabs' space under a rule becomes margin); line spacing stays 100% unless a row is too
   short. A table cannot be copied between presentations, so a table sync creates is an API table
   (`DeckPlan(pptx_tables=False)`) with the 14.4 pt padding; but the base records each imported
-  table's margins (`table_margins`), and when the source changed only a table's words (same grid,
-  merges, fills, margins and corner) sync empties and refills the table the deck has
-  (`sync.table_refill`), which keeps them.
+  table's margins (`table_margins`), and when the source changed only a table's words or its place
+  (same grid, merges, fills and margins) sync empties, refills and if need be moves the table the
+  deck has (`sync.table_refill`), which keeps them. Rows and columns the source added or removed
+  (no merges or fills) are inserted and deleted when that gives each row its margins: a row
+  inserted below another takes its margins (`sync.table_steps`).
 
 ## 2. Horizontal: width vs CM Sans at the same nominal size
 `text` = ink width of running text relative to CMSS10 (size correction = 1/text).
