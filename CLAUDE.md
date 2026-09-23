@@ -137,6 +137,11 @@ Debugging classification locally: `debug/slide-NNN.png` (element boxes over the 
   move and size on top of the source's new place (`sync.carried`, geometry mode `delta` always); a
   reported conflict (`merge.GEOMETRY_CARRIED`), held by the loss oracle (`geometry_not_carried`).
   An absolute "deck position kept" let the source's reflow run into the person's box.
+- **Merged text into a recreated box** (`refit.py`, `text_layout.py`): after the overrides, formula
+  pictures follow their holes into the words as written, and the box and a block panel under it
+  grow as emit would size them (a panel only as far as the strip below is clear, else reported);
+  only the text change is corrected, never the person's geometry. The base records these steps as
+  the converter's (`reshape_base`). `text_layout` is also the layout oracle's line model.
 - **Theme sync** (`theme_sync.py`): `base["theme"]` records what convert wrote on the master and
   layouts (fill, decoration pictures, placeholder styles); sync merges them three ways, the theme
   batch first. Slides drops a run property equal to the inherited one, so old placeholder styles
