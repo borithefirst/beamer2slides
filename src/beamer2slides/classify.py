@@ -1653,7 +1653,14 @@ class PageClassifier:
                         # (after a hole, from the end of its graphic: a frame wider than its words)
                         gap = (span.rect.x0 - hole_x1) if runs[-1].get("hole") else gap_between(prev, span)
                         sep = " " if gap > 0.15 * line.size else ""
-                        if gap >= 1.0 * line.size:
+                        mono = prev.info.family == "mono" and span.info.family == "mono" and span.text.strip()
+                        if sep and mono:
+                            # In a monospaced face every space is one advance (Roboto Mono: 0.600 em,
+                            # an em space too), so a \quad is so many plain spaces, as in code_indent;
+                            # em spaces there were half of CMTT's \quad each (text_fit, slide 18).
+                            advance = span.rect.w / max(1, len(span.text))
+                            sep = " " * max(1, round(gap / advance))
+                        elif gap >= 1.0 * line.size:
                             # \quad and wider (\and between authors): em spaces keep the gap
                             sep += EM_SPACE * max(1, round((gap - 0.33 * line.size) / line.size))
                     if si and sep == " " and runs[-1].get("hole"):

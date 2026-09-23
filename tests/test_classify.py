@@ -307,6 +307,13 @@ def test_an_underscore_the_page_draws_as_a_rule_is_a_character():
     assert len(body["strokes"]) == 2  # the rules leave the background with the text
 
 
+def test_a_quad_in_typewriter_text_is_plain_spaces():
+    # Roboto Mono draws every space at one advance, an em space too: a \quad written as em spaces
+    # came out half as wide (text_fit: the typewriter line 0.912 of the PDF's width).
+    slide = deck("27_text_fit")["slides"][17]
+    assert "0x7fff_ffff   1e-9   [0, 1)   a->b" in body_texts(slide)
+
+
 def test_an_inline_sum_between_words_is_part_of_its_formula_hole():
     # A CMEX glyph hangs from its origin, 8 pt above the words' baseline: it was a line of its
     # own, left in the background while the words around it moved.

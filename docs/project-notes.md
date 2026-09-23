@@ -3383,3 +3383,26 @@ whose text it covers. On Google's renderer slide 10 is a table grown 4.8 pt and 
 background are native; slide 13's rules follow its table. The native text of the other 79 test and
 theme PDFs is unchanged. Open: a wrapped cell could be one multi-line cell if emit left a wrapping
 column out of `fit_columns`' one-line width (each line is a row now, keeping TeX's hyphen).
+
+### Text fit follow-up: small caps, numbers, typewriter gaps, subscripts (merged 2026-09-23, 240bd3c)
+Measured with `tools/probe_text_fit_fonts.py` (docs/calibration.md 2c). Slides draws a `smallCaps`
+lowercase letter as its capital at 0.70 of the size, where CMCSC10 draws it at 0.755, and CMCSC is an
+extended face while PT Serif's capitals are narrow: a Computer Modern small-caps run is now set at
+1.28 x the serif size (`emit.SMALL_CAPS_WIDTH`), slide 4 from 0.777 to 0.996 of the PDF's width - at
+the price of capitals about 30% taller than CMCSC's (a face cannot be both as wide and as tall; 1.13
+would halve the gap). A small-caps run lays its line out at 0.70 of its size only when it is lowercase
+letters alone; one space, capital or comma and the line takes the full size (`emit.line_size`, also
+`deck_ir.pdf_size`, which inverts both corrections for pull). Lato's tabular digits are 0.577 em
+against CM's 0.5, so a run that is only a number is set at the size that gives the PDF's width
+(`FontMapper.number_ratio`, `CM_NUMBER_EM`): number columns 1.03-1.14 -> 0.97-1.02, prose lines moved
+by at most 0.004, fidelity overlap up (table-tight 58.2 -> 67.4%, table-wide 48.0 -> 55.7%); the
+"bold header" findings were the digits under the headers, bold words being 0.96. Roboto Mono draws
+every character and every space at 0.600 em, so CMTT's size factor was already exact: slide 18's
+0.912 was the em spaces classify wrote for a `\quad` (0.525 PDF em in Roboto Mono against CMTT's
+1.05). A gap between two monospaced pieces is now `round(gap / advance)` plain spaces, as
+`code_indent` does (`test_a_quad_in_typewriter_text_is_plain_spaces`; the only other change over
+all test and theme PDFs is a code comment in `26_truetype_fonts` aligned with spaces instead of an
+em space). Open, and out of the API's reach: SUBSCRIPT/SUPERSCRIPT set the run at 0.665 of its size
+and move it 0.37-0.38 em, where TeX lowers a subscript 0.15 em (0.25 beside a superscript) and raises
+a superscript 0.41 em - superscripts agree, subscripts sit 0.2 em low, and `baselineOffset` has no
+other value; the `crowded` finding on slide 17 stays.
