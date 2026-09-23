@@ -3224,6 +3224,16 @@ keys, named ranges), `doc_merge.py` (pure planning), `doc_sync.py` (the commands
 - A transparent PNG as a page background fill shows white under its alpha (not the master); pictures on
   a layout draw over any slide background.
 - Pixel checks on hairline shapes need a high zoom (`render._fill_fraction`).
+- **An item added with Enter gets a bullet in its text's colour** (user report: a theme's blue dots
+  came out black). Splitting a bulleted paragraph (`insertText "\n"`, then typing) copies the
+  bullet's font and size but drops its colour - an rgb colour, a theme colour, a bullet made
+  through the API or imported from a .pptx `a:buClr`, per paragraph or in `a:lstStyle`, and with
+  the item's newline painted in the bullet colour - so the new bullet follows the new text (bold
+  text, bold bullet). A list's `nestingLevel.bulletStyle` stays Slides' default (Arial 14, black)
+  whatever is written, and no request sets it. Nothing the converter writes survives, so the fix
+  lies in Slides itself (the paint format tool, or the list options' colour). Inserting "\n" plus
+  text in one request keeps the colour, which is why the first probe saw nothing. Measured with
+  `tools/probe_new_bullet.py`.
 - Bullet colour/size can be set independently only through creation order: style the paragraph
   like the bullet, create bullets, then style the text in two or more requests (a single request
   over the whole paragraph restyles its bullet too). See docs/calibration.md.
