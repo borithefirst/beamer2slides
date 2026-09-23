@@ -988,6 +988,19 @@ pictures in text lines are only reported. Tests: `tests/test_inverse.py` and `te
 (compile loop on the `b_*.tex` pairs, synthetic edits and picture edits, iterations in
 `tests/decks/inverse/out/results.json`).
 
+**Editing a deck as beamer with no work folder** is explored in `docs/direct-editing.md` and
+**not built**: a design, its measurements and the decisions it would need, nothing more. What is
+measured there and is load-bearing for anything else: `adopt.bootstrap` needs **no LaTeX** (0.1-1.7 s
+over five corpus decks, `tools/probe_deck_view.py`), so a deck can be read as beamer for the price of
+writing text; a median adopted frame is **749 bytes** and carries the slide's objectId as its
+`label=`, which is the identity `sync` follows; and the **text of a deck is ~1% of its tree by
+weight** (10-27 kB gzipped against 6-52 MB of pictures and fonts), because a figure is named by the
+sha1 of the bytes the deck handed back and fonts already live in `fontfetch.cache_dir()`. So what
+would have to travel between two calls is the `.tex` texts, whatever binary an edit itself brings in,
+and the base - and `texmap.Source.texts` is already a `dict[Path, str]` of the first. What cannot be
+wished away is the compile: the Slides IR comes from classifying a rendered PDF, where the Docs IR
+comes from parsing the file.
+
 Adopt a deck nobody converted (`adopt.py`, docs/sync.md "Adopt"): `python -m beamer2slides adopt
 --deck <url|id|deck.json> --tex main.tex` writes the source `pull` never had, then converges it. Pull
 refines a source and a **foreign** deck - one a person built in Slides - has none; the loop cannot make
