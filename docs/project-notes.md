@@ -3558,3 +3558,88 @@ Known limit: the base's context is its slides' IR, which after a sync mixes the 
 kept in conflict (their old IR). A neighbour whose emission depends on such a unit is marked and
 rewritten on every sync while that conflict stands (nothing lost, requests repeated). Fixing it
 needs the base to record the context each element was written in.
+
+## Layout probes (2026-09-23)
+Losing nothing is not the same as looking right. These probes ask how a synced deck can *look*
+broken, with every word and picture still there: things moved, overlapping, or running out of
+their boxes. Each hypothesis is a live scenario, `layout-*` in `tests/test_sync_live.py`. Most use
+three `[t]` probe frames in `tests/decks/sync/talk.tex` behind the flag `probes`, and their source
+edits are the flags `probereword`, `probepush` and `retheme` (variants `probes`, `probes-reword`,
+`probes-push`, `retheme`). The existing variants' .tex files are byte-identical.
+`test_probe_variants_classify_as_intended` checks the probe edits against the `probes` base
+(`build.PROBE_INTENDED`).
+
+Measuring (`devtools/probe_layout.py`, shim `tools/probe_layout.py`):
+- A read-back box is not where the ink is. A text box does not grow with its text: no autofit
+  survives the .pptx import.
+- `inks` duplicates the slide once per set of objects, deletes everything else on the copy, and
+  diffs its thumbnail against an empty copy (pixel difference > 48). What is left is those objects'
+  own ink in slide pt (720 pt wide, LARGE thumbnails, 2.22 px/pt).
+- `overlap` cuts the page into 6 pt strips. In every strip where both inks sit, it takes the
+  vertical gap between them. `clearance_pt` is the smallest of those gaps, negative when they
+  overlap. A pixel intersection undercounts words on words, because lines interleave: a visible
+  collision measured only 2.7 pt.
+- The scenarios call it a collision when the clearance is under 1 pt (`CLEARANCE`).
+- `holes` paints each formula hole of a text (a Roboto Mono NBSP run) its own background colour on
+  a copy, and finds where Slides sets it.
+- Every copy is deleted before returning.
+- Numbers go to `<scenario>/layout.json`, thumbnails to `<scenario>/layout/<stage>/slide.png`, and
+  after the sync `vs-fresh-<title>-synced.png` / `-fresh.png` against a fresh conversion of the new
+  source.
+
+| | scenario | verdict | numbers |
+|---|---|---|---|
+| H1 merged text overflows its box | `layout-grown-box` (probes -> probes-reword) | refuted | box kept at the person's 80.3 pt height (mode `delta` keeps their resize): ink 13.5 pt inside it, clearance to the figure 38.7 pt as before |
+| H1b the same, source moved it too | `layout-grown-box-moved` (-> probes-push) | **confirmed** | box back to 53.5 pt (the person made it 80.3): the words run 13.2 pt past its bottom |
+| H2 person's position vs a source reflow | `layout-reflow` (-> probes-push) | **confirmed** | clearance between the two boxes' words 29.7 pt -> -1.3 pt (glyphs touch across 52.6 pt); the second box stands inside the first's box [10.6, 55.7, 720.6, 140.2] |
+| H3 stranded formula picture | `layout-stranded-formula` (v1 -> formula) | **confirmed** (see below) | hole vs picture dx: -1.7 pt converted, -72.2 pt after the person's edit alone, -72.1 pt after the sync that recreated and re-measured the unit |
+| H4 recreated child of a moved group | `layout-group-moved` (v1 -> figure) | refuted | the new figure lands exactly on the person's box [48.9, 170.3, 262.0, 283.8], in the person's group |
+| H5 theme change vs layouts | `layout-retheme` (v1 -> retheme) | **confirmed** | layout pictures unchanged (the same 12 ids); Merging text, Convergence and Conclusions differ from a fresh conversion in 10.5-10.8% of pixels |
+| H6 display math vs a moved paragraph | `layout-display-math` (-> probes-push) | **confirmed** | clearance between the equation and the paragraph after it 20.2 pt -> -10.8 pt |
+
+The five confirmed ones are strict xfails (`XFAIL` in test_sync_live.py, reason in words); the two
+refuted ones stay as passing guards.
+
+Mechanisms:
+- **H1b, H2 and H6 are one mechanism**: geometry mode `theirs`. When the source moved a unit the
+  person also moved, `merge.plan_unit` (merge.py:883-888, `both = "position" in src`) keeps the
+  person's place, reported as the conflict "deck position kept". `Sync.override_requests`
+  (sync.py:2177-2180) writes it as a pure translation to the person's top-left
+  (`[1,0,0,1, theirs.x - new.x, theirs.y - new.y]`).
+  - The person's **size** is lost (H1b, `out/sync-tests/layout-grown-box-moved/layout/after/slide.png`):
+    the recreated box has the converter's height. This is also a quiet edit loss: the report says
+    the deck's geometry was kept.
+  - The person's absolute place ignores what the source did around it: nothing gives way.
+    - H2 (`layout-reflow/layout/after/slide.png`): the first box grew by a line into the second.
+    - H6 (`layout-display-math/layout/after/slide.png`): the equation picture (an image of its own,
+      role math, recreated at the converter's coordinates, 31 pt lower) lands on "and this
+      paragraph comes after it.", which stayed where the person put it.
+  - A fix would carry the source's move along with the person's offset (base -> theirs applied on
+    top of base -> ours), and keep the person's scale, as `delta` does.
+- **H3**: `Sync.measure_places` (sync.py:895, 1330-1351) measures the holes on scratch slides for
+  the *source's* slide (`self.plan.deck`). `override_requests` (sync.py:2143-2153) then writes the
+  merged text, which carries the person's words. Nothing measures again, so the formula picture
+  stays where the source's text had its hole.
+  - Thumbnails: `layout-stranded-formula/layout/{converted,before,after}/slide.png` and
+    `holes-*.png`.
+  - Caveat: the person's own edit strands the picture just as far (Slides moves the words, not the
+    picture). The sync does not cause the 72 pt; it recreates and re-measures the unit and still
+    does not repair it.
+  - The second formula (the circled 2, in an unedited paragraph) stays at -1.7 pt.
+- **H5**: sync never writes layouts or the master.
+  - `new_layout` (sync.py:1527) only picks among the existing layouts. `background_requests`
+    (sync.py:1820) writes each slide's new background picture.
+  - The old theme's frame-title bar is a layout picture, and it draws over any slide background.
+  - What the synced slides show: the old blue bar (to ~43.6 pt), the lower ~7 pt of the new, taller
+    pink bar peeking out from under it (to ~50.4 pt), and the new dark red title colour on the old
+    dark blue bar.
+  - Thumbnails: `layout-retheme/layout/after/vs-fresh-conclusions-{synced,fresh}.png`.
+  - The title placeholder boxes are the same as a fresh conversion's.
+  - This is not a person-edit case: any theme change that sync applies looks like this.
+
+Side notes:
+- **H4**: after the person's 0.8 resize of the group, the words' ink (bottom 265 pt) runs past their
+  box (238 pt). Scaling a group scales the boxes, not the font size. That is the person's edit and
+  Slides' behaviour, not sync's.
+- **H6's premise**: "display math in the background picture" does not hold for the current
+  converter. A display equation is an image element (role math) and is recreated like a figure.
