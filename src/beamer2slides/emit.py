@@ -6,6 +6,7 @@ import json
 import math
 import re
 import time
+import unicodedata
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from importlib import resources
@@ -106,29 +107,97 @@ DESIGN_WIDTH = {
 # chosen compromise: the line comes out ~12% narrower than the PDF's and ~13% taller.
 SMALL_CAPS_WIDTH = {"serif": 1.13}
 
-# Advance widths (em) of the characters a number is written with in Computer Modern (the
-# fonts' AFM files; EC and Latin Modern share them): its digits are 0.5 em where Slides' Lato
-# draws tabular digits at 0.577 em, 13% wider after the size correction, which is calibrated on
-# sentences (and they stand at cap height, 7% taller than CM's). A run that is only a number -
-# a table cell, a number column, a frame counter - is therefore set at the size that gives it
-# the PDF's width (FontMapper.number_ratio); a number inside a sentence keeps the sentence's size.
-CM_NUMBER_EM = {  # (family, bold, italic): digit, then the other characters of a number
-    ("sans", False, False): (0.5, {",": 0.277, ".": 0.277, ":": 0.277, "%": 0.833, "/": 0.5, "-": 0.333,
-                                   "(": 0.388, ")": 0.388, "+": 0.777}),
-    ("sans", True, False): (0.55, {",": 0.305, ".": 0.305, ":": 0.305, "%": 1.029, "/": 0.55, "-": 0.366,
-                                   "(": 0.427, ")": 0.427, "+": 0.855}),
-    ("serif", False, False): (0.5, {",": 0.277, ".": 0.277, ":": 0.277, "%": 0.833, "/": 0.5, "-": 0.333,
-                                    "(": 0.388, ")": 0.388, "+": 0.777}),
-    ("serif", True, False): (0.575, {",": 0.319, ".": 0.319, ":": 0.319, "%": 0.958, "/": 0.575, "-": 0.383,
-                                     "(": 0.447, ")": 0.447, "+": 0.894}),
-    ("serif", False, True): (0.511, {",": 0.306, ".": 0.306, ":": 0.306, "%": 0.817, "/": 0.511, "-": 0.357,
-                                     "(": 0.408, ")": 0.408, "+": 0.766}),
-    ("serif", True, True): (0.591, {",": 0.355, ".": 0.355, ":": 0.355, "%": 0.944, "/": 0.591, "-": 0.414,
-                                    "(": 0.473, ")": 0.473, "+": 0.885}),
-}
+# Computer Modern's own advance widths, kerning pairs and interword spaces (em; the AFM and TFM
+# files, tools/cm_advances.py; EC and Latin Modern share them), per 10 pt face. With Slides'
+# advances (ADVANCES) they predict how wide a run comes out in Slides against the PDF - within
+# 0.5% of Google's renderer on the calibration rows and the text-fit torture lines.
+CM_ADVANCES = json.loads((CALIBRATION_DIR / "cm_advances.json").read_text(encoding="utf-8"))["fonts"]
+CM_FACE = {("sans", False, False): "cmss10", ("sans", True, False): "cmssbx10", ("sans", False, True): "cmssi10",
+           ("sans", True, True): "cmssbx10",  # beamer's bold italic sans is CMSSBX
+           ("serif", False, False): "cmr10", ("serif", True, False): "cmbx10", ("serif", False, True): "cmti10",
+           ("serif", True, True): "cmbxti10"}
+CM_LIGATURES = (("ffi", "ﬃ"), ("ffl", "ﬄ"), ("ff", "ﬀ"), ("fi", "ﬁ"), ("fl", "ﬂ"))
+# TeX's space factor codes (plain/LaTeX \nonfrenchspacing): a space after a factor of 2000 or
+# more gets the font's extra space; a capital (999) keeps "A." from ending a sentence.
+SPACE_FACTOR = {".": 3000, "?": 3000, "!": 3000, ":": 2000, ";": 1500, ",": 1250}
+KEEPS_SPACE_FACTOR = ")]'’”"
+# Numbers: Computer Modern's digits are 0.5 em where Slides' Lato draws tabular digits at
+# 0.577 em, 13% wider after the size correction, which is calibrated on sentences (and they
+# stand at cap height, 7% taller than CM's). A run that is only a number - a table cell, a
+# number column, a frame counter - is set at the size that gives it the PDF's width
+# (FontMapper.shape_ratio); a number inside a sentence keeps the sentence's size.
 DIGITS = "0123456789"
-CM_NUMBER_EM[("sans", False, True)] = CM_NUMBER_EM[("sans", False, False)]  # CMSSI: CMSS slanted
-CM_NUMBER_EM[("sans", True, True)] = CM_NUMBER_EM[("sans", True, False)]    # beamer's bold italic sans is CMSSBX
+NUMBER_CHARS = DIGITS + ",.:%/-()+"
+# Any other run: the calibrated factor makes an average sentence as wide as the PDF's, and a
+# text whose letters are unlike a sentence's is off by what its own advances say (serif capitals
+# 0.87-0.92, a line of w 1.10). Short texts vary the most - across the 84 test PDFs, a word or a
+# label of under 10 letters spreads over 0.92-1.14 - so only a run of at least SHAPE_MIN_CHARS
+# counted characters whose width is predicted off by more than SHAPE_TOL is resized: no run of
+# 15 characters or more in the test decks is (the widest ordinary one is 6.3% off, "Somewhere
+# University"), and text_fit calls a line off at 8%. Ordinary prose keeps the deck-wide size.
+SHAPE_MIN_CHARS = 15
+SHAPE_TOL = 0.07
+# The sentences the size factors were calibrated on (tools/calibrate.py WIDTH_ROWS): a run is
+# judged against them in its own face, so bold and italic keep their half correction.
+SHAPE_REFERENCE = ("The quick brown fox jumps over the lazy dog",
+                   "Another first level item that is long enough to wrap",
+                   "Lorem ipsum dolor sit amet, consectetur adipiscing elit")
+SHAPE_TITLE_REFERENCE = ("Itemize, nested and frame titles",)  # the title factor's row (CMSS12)
+STYLE_KEY = {(False, False): "regular", (True, False): "bold", (False, True): "italic", (True, True): "bold_italic"}
+SLANTED = re.compile(r"CMB?X?SL\d|SFSL\d|SFBL\d|LMROMANSLANT")  # slanted roman: upright widths
+
+
+def cm_face(run: dict) -> str | None:
+    """The CM_ADVANCES face a Computer Modern (EC, Latin Modern) run is set in, or None."""
+    if font_info(run["font"]).design_size is None:
+        return None
+    slanted = bool(SLANTED.match(re.sub(r"[^A-Z0-9]", "", run["font"].split("+", 1)[-1].upper())))
+    return CM_FACE.get((run["family"], bool(run["bold"]), bool(run["italic"]) and not slanted))
+
+
+def _advance(table: dict, ch: str) -> float | None:
+    """A character's advance in a table, or its base letter's (é -> e: an accent adds no width)."""
+    w = table.get(ch)
+    if w is None and ch.isalpha():
+        w = table.get(unicodedata.normalize("NFD", ch)[0])
+    return w
+
+
+def advance_widths(text: str, cm: dict, slides: dict) -> tuple[float, float, int, int]:
+    """(Slides em, PDF em, characters counted, characters skipped) of a text set in a Computer
+    Modern face (`cm`, a CM_ADVANCES entry) and in its Slides substitute (`slides`, an ADVANCES
+    entry). The PDF side is what TeX set: ligatures, kerning pairs, interword space and the extra
+    space after a sentence. A character either table lacks counts on neither side."""
+    for seq, lig in CM_LIGATURES:
+        if lig in cm["advances"]:
+            text = text.replace(seq, lig)
+    s_em = p_em = 0.0
+    counted = skipped = 0
+    factor, prev = 1000, None
+    for ch in text:
+        if ch in "  ":
+            s_em += slides.get(" ", 0.0)
+            p_em += cm["space"] + (cm["extra_space"] if factor >= 2000 else 0.0)
+            factor, prev = 1000, None
+            continue
+        parts = next((seq for seq, lig in CM_LIGATURES if lig == ch), ch)  # Slides sets no ligature
+        p = _advance(cm["advances"], ch)
+        ws = [_advance(slides, c) for c in parts]
+        if p is None or None in ws:
+            skipped += len(parts)
+            prev = None
+            continue
+        p_em += p + (cm["kerns"].get(prev + ch, 0.0) if prev else 0.0)
+        s_em += sum(ws)
+        counted += len(parts)
+        prev = ch
+        if ch.isupper():
+            factor = 999
+        elif ch in SPACE_FACTOR:
+            factor = SPACE_FACTOR[ch] if factor >= 1000 else 1000
+        elif ch not in KEEPS_SPACE_FACTOR:
+            factor = 1000
+    return s_em, p_em, counted, skipped
 
 
 def design_width(table: dict[int, float], design: float) -> float:
@@ -151,6 +220,7 @@ class FontMapper:
     def __init__(self):
         self.factors = {}  # family -> (running text factor, title factor)
         self.style = {}    # family -> {"bold": ratio, "italic": ratio} relative to running text
+        self._reference = {}  # reference_ratio's answers
         for family, path in (("sans", CALIBRATION), ("serif", CALIBRATION_DIR / "fonts_serif.json")):
             cal = json.loads(path.read_text(encoding="utf-8"))["fonts"]
             ratios = cal[FONT_FOR_FAMILY[family]]["width_ratio"]
@@ -207,26 +277,47 @@ class FontMapper:
                 if run.get("smallcaps"):
                     factor /= SMALL_CAPS_WIDTH.get(run["family"], 1.0)
                 else:
-                    factor *= self.number_ratio(run, family, factor, design)
+                    factor *= self.shape_ratio(run, family, factor, design)
         return family, round(run["size"] * scale / factor, 1)
 
-    @staticmethod
-    def number_ratio(run: dict, family: str, factor: float, design: float) -> float:
-        """How much wider than the PDF's Slides sets a run that is only a number (at least one
-        digit, nothing but digits and a number's punctuation), at the size `factor` gives it;
-        1.0 for anything else, and for a number that comes out narrower. Scripts keep theirs."""
-        text = "".join(run.get("text", "").split())
-        cm = CM_NUMBER_EM.get((run["family"], bool(run["bold"]), bool(run["italic"])))
-        if not text or cm is None or run.get("script") or run.get("hole") or family not in ADVANCES \
-                or not any(c in DIGITS for c in text) or any(c not in DIGITS and c not in cm[1] for c in text):
+    def shape_ratio(self, run: dict, family: str, factor: float, design: float) -> float:
+        """How much wider than the PDF's Slides sets this run for its letters, beyond what the
+        size factor corrects; 1.0 when that is within tolerance (ordinary prose, a word), not
+        known (a character neither table has) or not this run's to fix (scripts, holes).
+
+        A run that is only a number (a digit, nothing but digits and a number's punctuation)
+        gets the whole ratio at the size `factor` gives it, when it comes out wider. Any other
+        run of SHAPE_MIN_CHARS counted characters or more is judged against the calibration
+        sentences in its own face and gets the ratio when it is off by more than SHAPE_TOL."""
+        text = run.get("text", "")
+        cm = CM_ADVANCES.get(cm_face(run) or "")
+        if cm is None or not text.strip() or run.get("script") or run.get("hole") or family not in ADVANCES:
             return 1.0
-        style = {(False, False): "regular", (True, False): "bold", (False, True): "italic",
-                 (True, True): "bold_italic"}[(bool(run["bold"]), bool(run["italic"]))]
-        advances = ADVANCES[family][style]
-        slides = sum(advances.get(c, UNMEASURED_ADVANCE_EM) for c in text) / factor
-        pdf = sum(cm[0] if c in DIGITS else cm[1][c] for c in text) * \
-            design_width(DESIGN_WIDTH.get(run["family"], DESIGN_WIDTH["sans"]), design)
-        return max(1.0, slides / pdf)
+        slides = ADVANCES[family][STYLE_KEY[(bool(run["bold"]), bool(run["italic"]))]]
+        number = "".join(text.split())
+        if any(c in DIGITS for c in number) and all(c in NUMBER_CHARS for c in number):
+            s_em = sum(slides.get(c, UNMEASURED_ADVANCE_EM) for c in number)
+            p_em = sum(cm["advances"][c] for c in number)
+            dw = design_width(DESIGN_WIDTH.get(run["family"], DESIGN_WIDTH["sans"]), design)
+            return max(1.0, s_em / factor / (p_em * dw))
+        s_em, p_em, counted, skipped = advance_widths(text, cm, slides)
+        if counted < SHAPE_MIN_CHARS or skipped > 0.1 * counted or p_em <= 0:
+            return 1.0
+        title = run["family"] != "serif" and 11.5 <= design < 14  # sized by the title factor
+        ratio = s_em / p_em / self.reference_ratio(cm_face(run), slides, title)
+        return ratio if abs(ratio - 1) > SHAPE_TOL else 1.0
+
+    def reference_ratio(self, face: str, slides: dict, title: bool) -> float:
+        """Slides em / PDF em of the calibration sentences in a face: where its size factor
+        puts the widths of ordinary text."""
+        key = (face, id(slides), title)  # `slides` is one of ADVANCES' tables, which live as long
+        if key not in self._reference:
+            s_em = p_em = 0.0
+            for sentence in SHAPE_TITLE_REFERENCE if title else SHAPE_REFERENCE:
+                s, p, _, _ = advance_widths(sentence, CM_ADVANCES[face], slides)
+                s_em, p_em = s_em + s, p_em + p
+            self._reference[key] = s_em / p_em
+        return self._reference[key]
 
 
 def bullet_shape(bullet: dict) -> str | None:
