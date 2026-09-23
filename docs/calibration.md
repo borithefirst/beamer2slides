@@ -113,9 +113,56 @@ comes out wider than the original, except titles, which have their own factor. G
 the most consistent, but its italic is 3.4% wider. The vertical model is font-independent
 here too (baseline offset 6.5–7.2 pt + 0.945–0.971 em).
 
+## 2c. Small caps, numbers, em spaces, scripts (`tools/probe_text_fit_fonts.py`)
+What `tools/text_fit.py` found on the torture deck `tests/decks/27_text_fit.tex`, measured on
+Google's renderer (advances as in `tools/probe_advances.py`, one reference row per font):
+
+- **Small caps.** Slides draws a `smallCaps` lowercase letter as its capital at **0.70** of the
+  size, advance and ink height alike (PT Serif m/M 0.700, a/A 0.705, w/W 0.699; Lato 0.695), where
+  CMCSC10 draws it at 0.755 - and CMCSC is an extended face (M 0.988 em against CMR10's 0.916),
+  while PT Serif's capitals are 11% narrower than CMR's. A CMCSC line therefore came out **0.777**
+  of the PDF's width. Over any sentence the substitute small caps are 1.27-1.30 times too narrow
+  (probe advances against CMCSC10.afm), so a Computer Modern small-caps run is set at
+  **1.28 x** the serif size (`emit.SMALL_CAPS_WIDTH`): width 0.777 -> 0.996 on the torture line.
+  The price is height: the capitals of such a line stand ~30% taller than CMCSC's, its small
+  capitals ~20% taller - the face cannot be both as wide and as tall as TeX's.
+  How Slides lays out a line holding a small-caps run (`line_size_pt`, PT Serif 26 small caps in a
+  Lato 20 line): lowercase letters only - the run is drawn wholly in the small font and the line
+  takes 0.70 of its size (`mm` 20.3, and 24.0 for 34 pt); one space, capital or comma in the run
+  and the line takes its full size (`mm mm`, `Mm`: 26.3). `emit.line_size` is that rule (it
+  replaces a flat 0.9).
+- **Numbers.** Lato's digits are tabular at 0.577 em (bold 0.581) where Computer Modern's are
+  0.5 (CMSSBX 0.55, CMBX 0.575), and stand at cap height, 7% taller than CM's. The size factor is
+  calibrated on sentences, so a number column came out 8-14% wider than the PDF's. A run that is
+  only a number (digits and `, . : % / - ( ) +`, no letter; not a script) is set at the size that
+  gives it the PDF's width from those advances (`emit.CM_NUMBER_EM`, `FontMapper.number_ratio`):
+  torture table columns 1.03-1.14 -> 0.97-1.02, prose unchanged to 0.004. A number inside a
+  sentence keeps the sentence's size (a mixed-size word would be what a person types after).
+  Bold header words are *not* wider: 0.96 (the `width` findings on the header table's elements
+  were the digits under the header).
+- **Em spaces in typewriter text.** Roboto Mono draws every space - U+0020, U+2003, U+2002, U+2009,
+  U+00A0 - at its one advance, 0.600 em, as its digits and letters: the CMTT -> Roboto Mono size
+  factor (0.6 / 0.525, with the optical sizes) is exact, and a typewriter line with no wide gap
+  comes out at 0.996. What classify writes for a gap of an em or more is `" " + n em spaces`
+  (`classify.py`, the em space counted as one PDF em), and in Roboto Mono an em space is 0.525
+  PDF em where CMTT's `\quad` is 1.05: a `\quad` loses 5.7 pt at 10.9 pt, three of them made the
+  torture's typewriter line 0.912 wide. Emit cannot fix that without changing the text or putting
+  a proportional font inside code; in monospaced text the gap is `round(gap / advance)` plain
+  spaces, which is classify's to write. Lato's and PT Serif's em spaces are 1.00 em (their spaces
+  0.19 and 0.25 em).
+- **Scripts.** `baselineOffset` SUBSCRIPT and SUPERSCRIPT set the run at **0.665** of its size
+  and move it by **0.37-0.38 em** of the nominal size (Lato H at 40 and 20 pt: down 14.85 / 7.65 pt,
+  up 15.3 pt). TeX sets a text-style script at 0.73 of the size and lowers a subscript by 0.15 em
+  (0.25 em with a superscript beside it), raising a superscript 0.41 em - so superscripts agree and
+  subscripts sit 0.2 em lower, which is what makes two lines of inline math touch (torture frame
+  `inline-math`, `crowded`). The API has no other offset: the offset follows the nominal size, so
+  bringing it to TeX's would leave the glyph at a third of the text size, and a smaller run with
+  no offset is no longer a subscript to the person editing it (nor to `deck_ir`). Left as it is.
+
 ## 3. Choice
 - **Default for CM Sans: Lato** at size × 1/1.020. Humanist like CM Sans, cap height matches
   within 1%, and nothing gets wider than the original (titles use their own factor).
 - **Arial** is the closest match in proportions across all categories (worst 3.9%), but it
   looks less like CM Sans.
-- Serif (CMR) and monospace (CMTT) decks are not calibrated yet.
+- Serif (CMR): PT Serif, section 2b. Monospace (CMTT): Roboto Mono at 0.525 / 0.600 of the size
+  (with CMTT's optical sizes), exact since both are monospaced (section 2c).

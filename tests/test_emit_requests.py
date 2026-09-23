@@ -883,12 +883,67 @@ def column_widths(reqs: list[dict]) -> list[float]:
 
 
 def test_slides_width_reads_measured_advances():
-    size = FONTS(run_of("0"), SCALE)[1]
+    size = FONTS(run_of("12,000"), SCALE)[1]  # a number's own size (test_a_number_is_set_at_its_pdf_width)
     lato = emit.ADVANCES["Lato"]["regular"]
     assert emit.slides_width([run_of("12,000")], SCALE, FONTS) == pytest.approx((5 * lato["0"] + lato[","]) * size)
     # Lato's digits are tabular and wider than Computer Modern's 0.5 em: a number is no sentence.
     assert lato["0"] > 0.55
     assert emit.slides_width([run_of("x", font="FiraSans-Regular")], SCALE, FONTS) is None  # not measured
+
+
+# Advance widths (em) from CMCSC10.afm, and TeX's interword space in it: what the PDF measures.
+CMCSC10 = {"S": 0.611, "m": 0.746, "a": 0.613, "l": 0.513, "c": 0.591, "p": 0.557, "s": 0.457, ":": 0.319,
+           "M": 0.988, "o": 0.635, "n": 0.613, "i": 0.302, "t": 0.591, "r": 0.602, "W": 1.105, "k": 0.635,
+           "f": 0.535, "e": 0.557, " ": 0.3333}
+
+
+def test_small_caps_are_as_wide_as_the_pdfs():
+    # 27_text_fit, frame `faces`: Slides draws a small capital at 0.70 of its capital where CMCSC
+    # draws it at 0.755, and CMCSC is an extended face - the line came out 0.777 of the PDF's width.
+    text = "Small caps: Monitor Workstation Mainframe"
+    run = run_of(text, font="CMCSC10", family="serif", smallcaps=True)
+    pdf = sum(CMCSC10[c] for c in text) * 10.91 * SCALE
+    assert emit.slides_width([run], SCALE, FONTS) == pytest.approx(pdf, rel=0.03)
+    plain = FONTS(run_of(text, font="CMR10", family="serif"), SCALE)[1]
+    assert FONTS(run, SCALE)[1] == pytest.approx(plain * emit.SMALL_CAPS_WIDTH["serif"], abs=0.1)
+
+
+def test_a_small_caps_run_lays_its_line_out_at_the_size_slides_does():
+    # tools/probe_text_fit_fonts.py: lowercase letters only are drawn in the small font; a space,
+    # a capital or a comma in the run and the line takes the run's full size.
+    sc = lambda text: run_of(text, font="CMCSC10", family="serif", smallcaps=True)
+    assert emit.line_size(sc("caps"), 20.0) == pytest.approx(20.0 * emit.SMALL_CAPS_SIZE)
+    assert emit.line_size(sc("small caps"), 20.0) == 20.0
+    assert emit.line_size(sc("Caps"), 20.0) == 20.0
+    assert emit.line_size(run_of("caps"), 20.0) == 20.0
+
+
+def test_a_number_is_set_at_its_pdf_width():
+    # 27_text_fit, frame `table-tight`: Lato's tabular digits are 0.577 em where Computer Modern's
+    # are 0.5, so a number column came out 8-14% wider than the PDF's (and its digits taller).
+    cmss = {False: {**dict.fromkeys("0123456789", 0.5), ",": 0.277, ".": 0.277},  # CMSS10.afm, CMSSBX10.afm
+            True: {**dict.fromkeys("0123456789", 0.55), ",": 0.305, ".": 0.305}}
+    for text, font, size, bold in (("1,281,167", "CMSS9", 8.97, False), ("1000", "CMSS9", 8.97, False),
+                                   ("0,000", "CMSS12", 11.96, False), ("27.3", "CMSS10", 10.91, False),
+                                   ("2026", "CMSSBX10", 10.91, True)):
+        design = int(re.sub(r"\D", "", font))
+        pdf = sum(cmss[bold][c] for c in text) * emit.design_width(emit.DESIGN_WIDTH["sans"], design) * size * SCALE
+        run = run_of(text, size, font=font, bold=bold)
+        assert emit.slides_width([run], SCALE, FONTS) == pytest.approx(pdf, rel=0.012), text
+    # A sentence keeps its size, numbers in it or not, and so do a unit, a script and a word.
+    prose = FONTS(run_of("Monitor"), SCALE)[1]
+    for run in (run_of("Monitor 12,345.67"), run_of("12h"), run_of("x86"), run_of("2", script="super"),
+                run_of("Classes")):
+        assert FONTS(run, SCALE)[1] == prose, run["text"]
+    assert FONTS(run_of("1,281,167"), SCALE)[1] < prose
+
+
+def test_deck_ir_reads_a_number_and_small_caps_back_at_their_pdf_size():
+    from beamer2slides.deck_ir import pdf_size
+    for run in (run_of("1,281,167", 8.97, font="CMSS9"), run_of("Small caps", font="CMCSC10", family="serif", smallcaps=True)):
+        family, z = FONTS(run, SCALE)
+        size, _ = pdf_size(FONTS, family, z, False, False, SCALE, text=run["text"], smallcaps=run["smallcaps"])
+        assert size == pytest.approx(run["size"], rel=0.02), run["text"]
 
 
 def number_table(x1: float) -> dict:
