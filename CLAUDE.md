@@ -133,6 +133,10 @@ Debugging classification locally: `debug/slide-NNN.png` (element boxes over the 
   (`emit.slide_emission`; ids, links, z-order normalised, measured places left out) and marks an
   unchanged or moved element `width`/`placed`/`emitted` (`identity.CONTEXT_FIELDS`). Group or
   placeholder-role changes can't be written by recreating a unit: `build_ours()["context_unwritten"]`.
+- **Both moved it**: a unit the source rewrote and the person moved or resized takes the person's
+  move and size on top of the source's new place (`sync.carried`, geometry mode `delta` always); a
+  reported conflict (`merge.GEOMETRY_CARRIED`), held by the loss oracle (`geometry_not_carried`).
+  An absolute "deck position kept" let the source's reflow run into the person's box.
 - **Frame labels** (`\begin{frame}[label=x]`) are the only slide identity that survives compiling.
   A label written twice reaches the PDF as *no* label (hyperref keeps the first). `label` writes
   missing labels; it never renames or resolves duplicates. When a label moved between frames,
@@ -154,6 +158,12 @@ Debugging classification locally: `debug/slide-NNN.png` (element boxes over the 
 - Proving nothing is lost: `tools/loss_oracle.py` judges one sync; `tools/fuzz_sync.py offline`
   fuzzes the merge through a reference applier (`fuzz_world.py`), `live` against real decks;
   `tools/fuzz_labels.py` measures label pairing. Fixed seeds in `tests/test_sync_fuzz.py`.
+- Proving nothing *looks* broken: `devtools/layout_oracle.py` lays text out like emit (exact line
+  counts on converter boxes) and fails `text_overlap` / `text_overflow` / `stranded_picture` /
+  `off_page` a sync introduced; `tools/layout_oracle.py <archive> [--json]` replays recorded live
+  fuzz steps offline; `LiveRound.step` writes `layout.json`. Live ground truth: the `layout-*`
+  scenarios in `test_sync_live.py`, measured by `devtools/probe_layout.py` (docs/project-notes.md
+  "Layout probes", "Layout oracle").
 
 ## Agent tools (`src/beamer2slides/agent/`, docs/agent-tools.md)
 - Eleven tools, one per journey (`agent.tools.TOOLS`, ordered by `tools.ORDER`): `b2s_status`,

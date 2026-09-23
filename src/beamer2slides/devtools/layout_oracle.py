@@ -805,7 +805,7 @@ def ours_from_folder(folder: Path, base: dict) -> dict | None:
     extract, classify and render halves are what the folder already holds)."""
     from beamer2slides import identity, snapshot
     from beamer2slides.emit import SLIDE_W, DeckPlan, merge_blocks
-    from beamer2slides.sync import mark_widths
+    from beamer2slides.sync import mark_emitted
     path = folder / "deck.json"
     if not path.exists():
         return None
@@ -829,7 +829,7 @@ def ours_from_folder(folder: Path, base: dict) -> dict | None:
         ekeys.append(k)
         fps.append(f)
     entries = snapshot.slide_entries(deck, folder, keys, ekeys, fps)
-    mark_widths(base, entries, deck, pairs_, plan.scale, plan.fonts)
+    mark_emitted(base, entries, deck, pairs_, plan.scale, plan.fonts)
     return {"slides": entries, "pairs": pairs_, "label_moves": moves, "weak_pairs": weak}
 
 
@@ -874,6 +874,8 @@ def replay_step(step: Path, want_ours: bool = True) -> dict:
     if want_ours:
         try:
             ours = ours_from_folder(step / "ours", base)
+        except ImportError:
+            raise  # (our own code moved: never a property of the archived step)
         except Exception as e:  # noqa: BLE001 (an archived conversion today's code cannot key)
             print(f"{step}: no ours ({type(e).__name__}: {e})", file=sys.stderr)
     return {"round": step.parent.name, "archive": step.parent.parent.name, "step": n, "folder": str(step),
