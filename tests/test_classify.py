@@ -347,17 +347,22 @@ def test_a_wrapped_paragraph_cell_keeps_to_its_column():
     # A p{3.2cm} cell wraps, justified: its word spaces are wider than the half em that parts
     # two cells, so the table was refused (overlapping cells) and, as text boxes, the cell's
     # first line joined the numbers beside it and reflowed across their column in Slides.
+    # Its lines are one cell, one paragraph (a hyphenated word whole again) that Slides wraps in
+    # its column - also when a person types into it - and not a row per line.
     slide = deck("27_text_fit")["slides"][11]
     tables = [e for e in slide["elements"] if e["kind"] == "table"]
     assert len(tables) == 1
     assert cell_texts(tables[0]) == [
         ["", "", "Test results", ""],
-        ["Method", "Notes (wrapped on", "BLEU", "Time"],
-        ["", "purpose)", "", ""],
-        ["Baseline", "A cell set in a para-", "27.3", "12h"],
-        ["", "graph column, which", "", ""],
-        ["", "wraps in the PDF too", "", ""],
+        ["Method", "Notes (wrapped on purpose)", "BLEU", "Time"],
+        ["Baseline", "A cell set in a paragraph column, which wraps in the PDF too", "27.3", "12h"],
         ["Ours", "Short note", "31.0", "14h"]]
+    notes, cell = cell_texts(tables[0])[1][1], cell_texts(tables[0])[2][1]
+    assert tables[0]["row_lines"] == [1, 2, 3, 1]
+    assert tables[0]["wrapped"] == [[1, 1, [notes.index("purpose")]], [2, 1, [cell.index("graph"), cell.index("wraps")]]]
+    # Each row as tall as its lines in the PDF; the last one as one line of the wrapped cells.
+    heights, lead = tables[0]["row_heights"], 11.95
+    assert heights[2] == pytest.approx(3 * lead, abs=0.3) and heights[3] == pytest.approx(lead, abs=0.1)
     assert tables[0]["merges"] == [{"row": 0, "col": 2, "rows": 1, "cols": 2, "align": "center"}]
     assert [b["col"] for b in tables[0]["borders"]] == [2, 3]  # the \cmidrule under "Test results"
     assert [e["kind"] for e in slide["elements"] if e["kind"] == "image"] == []

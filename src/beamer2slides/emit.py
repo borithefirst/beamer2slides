@@ -779,6 +779,40 @@ def _add_template_shapes(slide, keys: list[tuple]) -> None:
         shape.element.spPr.append(etree.fromstring(f'<a:effectLst xmlns:a="{a}">{effects}</a:effectLst>'))
 
 
+NO_TABLE_STYLE = "{2D5ABB26-0587-4C30-8999-92F81FD0307C}"  # PowerPoint's "No Style, No Grid"
+
+
+def _add_table(slide, table: dict) -> None:
+    """An empty table (pptx_table) on a source slide. Its cell margins are what the API can't
+    set: a table made by createTable has 7.2 pt above and below every line, one from a .pptx the
+    file's (tools/probe_pptx_table_margins.py); duplicating the slide, inserting rows and columns
+    and filling or styling cells through the API all keep them."""
+    from lxml import etree
+    from pptx.util import Emu
+
+    def e(v: float) -> Emu:
+        return Emu(round(v * EMU_PER_PT))
+
+    rows, cols = len(table["heights"]), len(table["widths"])
+    frame = slide.shapes.add_table(rows, cols, e(table["x"]), e(table["y"]), e(sum(table["widths"])),
+                                   e(sum(table["heights"])))
+    pr = frame._element.graphic.graphicData.tbl.tblPr
+    for flag in ("firstRow", "bandRow"):  # (python-pptx's default look: a header row and bands)
+        pr.attrib.pop(flag, None)
+    style = pr.find(f"{{{NS_A}}}tableStyleId")
+    if style is None:
+        style = etree.SubElement(pr, f"{{{NS_A}}}tableStyleId")
+    style.text = NO_TABLE_STYLE
+    for c, w in enumerate(table["widths"]):
+        frame.table.columns[c].width = e(w)
+    for r, h in enumerate(table["heights"]):
+        frame.table.rows[r].height = e(h)
+        left, top, right, bottom = table["margins"][r]
+        for c in range(cols):
+            cell = frame.table.cell(r, c)
+            cell.margin_left, cell.margin_top, cell.margin_right, cell.margin_bottom = e(left), e(top), e(right), e(bottom)
+
+
 VARIANT = "_V"      # layout name suffix: a copy of the layout with another theme decoration (plan_theme)
 THEME_VARIANTS = 3
 
@@ -834,8 +868,9 @@ def build_pptx(page_w: float, page_h: float, keys: list[tuple], pages: list[dict
     - the theme decoration (`decorations`, see plan_theme) at the bottom of the layouts; a page
       layout named with the VARIANT suffix is a copy of its layout with that variant's decoration;
     - one source slide per deck slide (`pages`: {"layout", "fill" (None: inherit),
-      "pictures": [{"file", "bbox" (slide pt), "alt", "title"}], "templates" (bool)}), holding its
-      pictures and, if it needs any, the template shapes (shadows, exact corner radii).
+      "pictures": [{"file", "bbox" (slide pt), "alt", "title"}], "tables": [pptx_table(...)],
+      "templates" (bool)}), holding its pictures, its tables (empty, with the cell margins the API
+      cannot set) and, if it needs any, the template shapes (shadows, exact corner radii).
 
     emit copies each source slide under our own object IDs and then deletes it."""
     from pptx import Presentation
@@ -878,6 +913,8 @@ def build_pptx(page_w: float, page_h: float, keys: list[tuple], pages: list[dict
             if pic.get("alt"):
                 shape._element.nvPicPr.cNvPr.set("descr", pic["alt"])
                 shape._element.nvPicPr.cNvPr.set("title", pic["title"])
+        for table in page.get("tables", []):
+            _add_table(slide, table)
         if page["templates"]:
             _add_template_shapes(slide, keys)
     buf = io.BytesIO()
@@ -924,14 +961,18 @@ def shape_requests(el: dict, slide_id: str, object_id: str, scale: float, templa
 
 
 TABLE_MIN_COLUMN_PT = 32.0  # the API refuses narrower columns
-TABLE_ROW_PAD = 14.4        # cell padding above and below, not settable through the API
-TABLE_ROW_EM = 1.195
+# A table made by createTable has 7.2 pt of cell padding above and below that the API cannot
+# change; a table the .pptx brings keeps the file's `a:tcPr` margins, down to 0
+# (tools/probe_pptx_table_margins.py). emit's own tables come with the .pptx (`build_pptx`).
+TABLE_ROW_PAD = 14.4        # an API-made table's padding above and below
+TABLE_ROW_EM = 1.195        # a row of one line is at least its insets + 1.195·z·lineSpacing
 TABLE_MIN_SPACING = 0.5
+TABLE_TEXT_TOP = BASELINE_A - TABLE_ROW_PAD / 2  # cell top inset -> first baseline, less ASCENT_EM·z
 
 
-def table_line_spacing(pitch: float, z: float) -> float:
+def table_line_spacing(pitch: float, z: float, pad: float = TABLE_ROW_PAD) -> float:
     """lineSpacing ratio at which a row of text size z fits into the given row pitch."""
-    return min(1.0, max(TABLE_MIN_SPACING, (pitch - TABLE_ROW_PAD) / (TABLE_ROW_EM * z)))
+    return min(1.0, max(TABLE_MIN_SPACING, (pitch - pad) / (TABLE_ROW_EM * z)))
 
 
 TABLE_CELL_PAD = 7.2  # cell padding left and right
@@ -974,6 +1015,35 @@ def slides_width(runs: list[dict], scale: float, fonts: "FontMapper") -> float |
     return total
 
 
+def runs_between(runs: list[dict], a: int, b: int) -> list[dict]:
+    """The runs' characters a to b (indices into their joined text)."""
+    out, at = [], 0
+    for run in runs:
+        text = run["text"]
+        lo, hi = max(a, at), min(b, at + len(text))
+        if lo < hi:
+            out.append({**run, "text": text[lo - at:hi - at]})
+        at += len(text)
+    return out
+
+
+def wrapped_width(runs: list[dict], starts: list[int], scale: float, fonts: "FontMapper") -> float | None:
+    """Slides width of the widest of a wrapped cell's PDF lines (`starts`: where each line after
+    the first begins), a word TeX hyphenated at a line's end taken whole: Slides does not
+    hyphenate, and a column that holds each of the PDF's lines so wraps the cell in as many lines
+    or fewer - never more, which would grow its row."""
+    text = "".join(r["text"] for r in runs)
+    bounds = [0, *starts, len(text)]
+    widths = []
+    for a, b in zip(bounds, bounds[1:]):
+        while b < len(text) and not text[b - 1].isspace() and not text[b].isspace():
+            b += 1  # (the line ended inside a word)
+        while b > a and text[b - 1].isspace():
+            b -= 1
+        widths.append(slides_width(runs_between(runs, a, b), scale, fonts))
+    return None if None in widths else max(widths)
+
+
 def fit_columns(bounds: list[float], cols: list[dict], scale: float, need: list[float | None] | None = None) -> list[float]:
     """Column boundaries (PDF pt) moved just enough that every column's text fits inside the
     Slides cell padding, with room for the substitute font. Tables typeset with @{} have text
@@ -1009,20 +1079,32 @@ def fit_columns(bounds: list[float], cols: list[dict], scale: float, need: list[
     return out
 
 
-def table_rows(el: dict, z: float, scale: float) -> tuple[float, list[float], list[float]]:
-    """Table top, row heights and per-row lineSpacing (Slides pt).
+def table_rows(el: dict, z: float, scale: float, imported: bool = False
+               ) -> tuple[float, list[float], list[float], list[float]]:
+    """Table top, row heights, per-row lineSpacing and per-row top cell inset (Slides pt).
 
-    A row is at least TABLE_ROW_PAD + 1.195·z·lineSpacing tall (tools/probe_table_rows.py), so
-    the line spacing is tightened until rows keep the original pitch. Row boundaries sit on
-    the PDF's rules where there are any (booktabs puts extra space around them) and else just
-    above the next row's text; each row's lineSpacing then moves its baseline to the PDF's."""
+    A row is at least its top and bottom insets + 1.195·z·lineSpacing tall (+ LINE_EM·z·lineSpacing
+    per further line of a wrapped cell, `row_lines`). Row boundaries sit on the PDF's rules where
+    there are any (booktabs puts extra space around them) and else just above the next row's text.
+
+    An API-made table (`imported` False) has 7.2 pt insets above and below, which TeX's rows are
+    too tight for (tools/probe_table_rows.py): the line spacing is tightened until rows keep the
+    original pitch, and each row's lineSpacing then moves its baseline to the PDF's. A table the
+    .pptx brings (`build_pptx`) has no inset below and a top inset of its own per row: the text
+    keeps its natural line spacing and the inset moves the baseline down to the PDF's (booktabs'
+    space under a rule), so a row keeps the PDF's pitch down to 1.195 em."""
     baselines = [b * scale for b in el["row_baselines"]]
     n = len(baselines)
     pitches = [h * scale for h in el["row_heights"]]
-    default = table_line_spacing(min(pitches), z)
+    lines = el.get("row_lines") or [1] * n
+    pad_top = pad_bottom = 0.0 if imported else TABLE_ROW_PAD / 2
+    default = 1.0 if imported else table_line_spacing(min(pitches), z)
 
-    def offset(r: float) -> float:  # row top -> baseline
-        return BASELINE_A + ASCENT_EM * z + extra_above(r, z)
+    def offset(r: float) -> float:  # row top -> baseline, with the fixed top inset
+        return pad_top + TABLE_TEXT_TOP + ASCENT_EM * z + extra_above(r, z)
+
+    def body(i: int) -> float:  # the height of row i's text at lineSpacing 100
+        return (TABLE_ROW_EM + (lines[i] - 1) * LINE_EM) * z
 
     ruled: dict[int, float] = {}
     for rule in el.get("rules", []) + [b for b in el.get("borders", []) if b["position"] in ("TOP", "BOTTOM")]:
@@ -1038,30 +1120,45 @@ def table_rows(el: dict, z: float, scale: float) -> tuple[float, list[float], li
     def clamp(r: float) -> float:
         return min(1.0, max(TABLE_MIN_SPACING, r))
 
+    # \multirow heads are centred in their rows (contentAlignment MIDDLE): no inset of their own.
+    middle = {m["row"] for m in el.get("merges", []) if m["rows"] > 1}
     # Row by row from the actual top: a row's baseline offset and its minimum height both grow
     # with lineSpacing, so when the room above the text (from a rule) asks for more height than
     # the row has, the error is split between this baseline and the rows below.
     top = target(0)
-    y, heights, ratios = top, [], []
+    y, heights, ratios, insets = top, [], [], []
     for i in range(n):
         room = baselines[i] - y  # offset(r) = offset(1) - (1 - r)·0.9·z
-        r_room = clamp(1.0 if room >= offset(1.0) else 1 - (offset(1.0) - room) / (0.75 * LINE_EM * z))
         h_target = target(i + 1) - y
-        r_fit = clamp((h_target - TABLE_ROW_PAD) / (TABLE_ROW_EM * z))
+        inset = pad_top
+        if imported and i not in middle:
+            # The inset takes the room above the text, as far as the row's height allows.
+            inset = max(0.0, min(room - offset(1.0), h_target - pad_bottom - body(i)))
+        r_room = clamp(1.0 if room >= offset(1.0) + inset else 1 - (offset(1.0) + inset - room) / (0.75 * LINE_EM * z))
+        r_fit = clamp((h_target - inset - pad_bottom) / body(i))
         r = r_room if r_room <= r_fit else (r_room + r_fit) / 2
-        h = max(h_target, TABLE_ROW_PAD + TABLE_ROW_EM * z * r)
+        h = max(h_target, inset + pad_bottom + body(i) * r)
         ratios.append(r)
         heights.append(h)
+        insets.append(inset)
         y += h
-    return top, heights, ratios
+    return top, heights, ratios, insets
 
 
-def table_requests(el: dict, slide_id: str, object_id: str, scale: float, fonts: FontMapper) -> list[dict]:
+def table_layout(el: dict, scale: float, fonts: FontMapper, imported: bool = False) -> dict:
+    """Where a table goes in Slides (Slides pt): {"x", "y", "widths", "heights", "ratios" (per-row
+    lineSpacing), "insets" (per-row top cell inset), "bounds" (column boundaries, PDF pt),
+    "cell_width" ((row, col) -> the text's Slides width where known), "z", "first_run"}.
+    `imported`: the table comes with the .pptx (table_rows)."""
     cols = el["columns"]
     fx0, _, fx1, _ = el["frame"]
     bounds = el.get("bounds") or [fx0] + [(a["x1"] + b["x0"]) / 2 for a, b in zip(cols, cols[1:])] + [fx1]
     spanned = {(m["row"], m["col"]) for m in el.get("merges", []) if m["cols"] > 1}
-    cell_width = {(r, c): slides_width(runs, scale, fonts)
+    # A cell set in a paragraph column (p{3cm}) wraps in Slides as in the PDF (classify
+    # `wrapped`): it takes as much room as its widest line.
+    wrapped = {(r, c): starts for r, c, starts in el.get("wrapped", [])}
+    cell_width = {(r, c): wrapped_width(runs, wrapped[(r, c)], scale, fonts) if (r, c) in wrapped else
+                  slides_width(runs, scale, fonts)
                   for r, row in enumerate(el["cells"]) for c, runs in enumerate(row) if runs}
     need: list[float | None] = []
     for c in range(len(cols)):
@@ -1079,16 +1176,40 @@ def table_requests(el: dict, slide_id: str, object_id: str, scale: float, fonts:
     widths = [max(TABLE_MIN_COLUMN_PT, (b - a) * scale) for a, b in zip(bounds, bounds[1:])]
     first_run = next((r for row in el["cells"] for cell in row for r in cell), None)
     z = fonts(first_run, scale)[1] if first_run else el["size"] * scale
+    y, heights, ratios, insets = table_rows(el, z, scale, imported)
+    return {"x": bounds[0] * scale, "y": y, "widths": widths, "heights": heights, "ratios": ratios, "insets": insets,
+            "bounds": bounds, "cell_width": cell_width, "z": z, "first_run": first_run}
+
+
+def pptx_table(el: dict, scale: float, fonts: FontMapper) -> dict:
+    """The empty table the .pptx carries for a table element (build_pptx): its box, grid and
+    per-row cell margins (left, top, right, bottom; Slides pt). The API fills it in (table_requests)."""
+    lay = table_layout(el, scale, fonts, imported=True)
+    return {"x": lay["x"], "y": lay["y"], "widths": lay["widths"], "heights": lay["heights"],
+            "margins": [(TABLE_CELL_PAD, round(t, 2), TABLE_CELL_PAD, 0.0) for t in lay["insets"]]}
+
+
+def table_requests(el: dict, slide_id: str, object_id: str, scale: float, fonts: FontMapper,
+                   imported: bool = False) -> list[dict]:
+    """A table filled in through the API. `imported`: the table (`object_id`) came with the .pptx,
+    empty and with the cell margins `pptx_table` gave it; else it is made here by createTable."""
+    cols = el["columns"]
+    lay = table_layout(el, scale, fonts, imported)
+    x, y, widths, heights, row_ratio = lay["x"], lay["y"], lay["widths"], lay["heights"], lay["ratios"]
+    bounds, cell_width, first_run = lay["bounds"], lay["cell_width"], lay["first_run"]
     n_rows, n_cols = len(el["cells"]), len(cols)
-    y, heights, row_ratio = table_rows(el, z, scale)
-    x = bounds[0] * scale
 
     reqs: list[dict] = [
+        # (it lies where the .pptx put it, below what the slide's elements before it made)
+        {"updatePageElementsZOrder": {"pageElementObjectIds": [object_id], "operation": "BRING_TO_FRONT"}}
+    ] if imported else [
         {"createTable": {"objectId": object_id, "rows": n_rows, "columns": n_cols, "elementProperties": {
             "pageObjectId": slide_id,
             "size": {"width": emu(sum(widths)), "height": emu(sum(heights))},
             "transform": {"scaleX": 1, "scaleY": 1, "unit": "EMU",
                           "translateX": round(x * EMU_PER_PT), "translateY": round(y * EMU_PER_PT)}}}},
+    ]
+    reqs += [
         # No grid: only the rules of the original are drawn.
         {"updateTableBorderProperties": {
             "objectId": object_id, "borderPosition": "ALL",
@@ -2449,7 +2570,7 @@ def build_deck(slides, drive, deck: dict, out: Path, title: str, existing: str |
     elements the API refused ((PDF page, element id)). `measure`: hole and overlay pictures go
     where a thumbnail shows their gaps and words (measure_places), not only where they are predicted."""
     page_w, page_h = deck["slides"][0]["size"]
-    plan = DeckPlan(deck)
+    plan = DeckPlan(deck, pptx_tables=True)
     deck, scale, fonts = plan.deck, plan.scale, plan.fonts
 
     # Backgrounds: the most common one becomes the master's (the deck's theme): layouts and
@@ -2474,6 +2595,7 @@ def build_deck(slides, drive, deck: dict, out: Path, title: str, existing: str |
         "fill": None if bg_key[s["page"]] == shared else fill(bg_key[s["page"]]),
         "pictures": [{"file": out / e["file"], "bbox": bbox, "alt": e.get("alt"),
                       "title": PICTURE_TITLES.get(e.get("role"), "Figure")} for e, bbox in plan.pictures(s)],
+        "tables": plan.tables(s),
         "templates": plan.uses_templates[s["page"]],
     } for s in deck["slides"]]
     pptx = build_pptx(page_w, page_h, plan.keys, pages, master_fill, theme and theme["decorations"])
@@ -2651,12 +2773,15 @@ class DeckPlan:
     object IDs, placeholder and template sizes, measured hole moves): pure, so tests can check
     them offline (plan_offline)."""
 
-    def __init__(self, deck: dict, page_width: float = SLIDE_W):
+    def __init__(self, deck: dict, page_width: float = SLIDE_W, pptx_tables: bool = False):
         # `page_width`: the width of the deck this plan is for, in slide pt. A deck `convert` makes
         # is always SLIDE_W wide (it uploads the .pptx that says so), but `sync` may be writing into
         # a deck a person built at any size (`adopt_sync`), and every box, font size and hole width
         # below is this converter's PDF pt times `scale`.
+        # `pptx_tables`: tables come with the imported .pptx, empty and with their cell margins
+        # (`tables`, build_pptx), and are filled in; else (sync) they are made by createTable.
         self.page_width = page_width
+        self.pptx_tables = pptx_tables
         self.scale = scale = page_width / deck["slides"][0]["size"][0]
         self.fonts = fonts = FontMapper()
         self.deck = deck = {**deck, "slides": [fit_holes(s, scale, fonts) for s in deck["slides"]]}
@@ -2686,6 +2811,12 @@ class DeckPlan:
         return [(e, [v * self.scale for v in self.placed(e, slide["page"])["bbox"]])
                 for e in slide["elements"] if e["kind"] == "image"]
 
+    def tables(self, slide: dict) -> list[dict]:
+        """The slide's tables as the .pptx carries them (pptx_table), when it does."""
+        if not self.pptx_tables:
+            return []
+        return [pptx_table(e, self.scale, self.fonts) for e in slide["elements"] if e["kind"] == "table"]
+
     def copy_request(self, slide: dict, source: dict) -> tuple[dict, list[tuple[float, float]]]:
         """Phase 1: the duplicateObject copying a slide's imported source under our object IDs,
         and the sizes of the template shapes on the source."""
@@ -2695,13 +2826,18 @@ class DeckPlan:
         els = source.get("pageElements", [])
         placeholders = {e["shape"]["placeholder"]["type"]: e["objectId"] for e in els if "placeholder" in e.get("shape", {})}
         pictures = [e["objectId"] for e in els if "image" in e]
-        shapes = [e for e in els if "image" not in e and "placeholder" not in e.get("shape", {})]
+        tables = [e["objectId"] for e in els if "table" in e]
+        shapes = [e for e in els if "image" not in e and "table" not in e and "placeholder" not in e.get("shape", {})]
         picture_idx = [i for i, e in enumerate(slide["elements"]) if e["kind"] == "image"]
-        if len(pictures) != len(picture_idx) or len(shapes) != (len(keys) if uses_templates[n] else 0):
-            raise RuntimeError(f"slide {n + 1}: the import brought {len(pictures)} pictures and {len(shapes)} "
-                               f"template shapes, expected {len(picture_idx)} and {len(keys) if uses_templates[n] else 0}")
+        table_idx = [i for i, e in enumerate(slide["elements"]) if e["kind"] == "table"] if self.pptx_tables else []
+        if len(pictures) != len(picture_idx) or len(tables) != len(table_idx) or \
+                len(shapes) != (len(keys) if uses_templates[n] else 0):
+            raise RuntimeError(f"slide {n + 1}: the import brought {len(pictures)} pictures, {len(tables)} tables and "
+                               f"{len(shapes)} template shapes, expected {len(picture_idx)}, {len(table_idx)} and "
+                               f"{len(keys) if uses_templates[n] else 0}")
         ids = {source["objectId"]: slide_id}
         ids.update({oid: f"{slide_id}_f{i}" for oid, i in zip(pictures, picture_idx)})
+        ids.update({oid: f"{slide_id}_tab{i}" for oid, i in zip(tables, table_idx)})
         ids.update({e["objectId"]: f"{slide_id}_k{j}" for j, e in enumerate(shapes)})
         title_idx = title_element(slide)
         if title_idx is not None:
@@ -2734,7 +2870,7 @@ class DeckPlan:
         title_oid = f"{slide_id}_t{title_idx}" if title_idx is not None else None
         sub_idx = subtitle_element(slide, title_idx) if title_idx is not None else None
         subtitle_oid = f"{slide_id}_t{sub_idx}" if sub_idx is not None else None
-        ours = (f"{slide_id}_k", f"{slide_id}_f")  # template shapes and pictures from the .pptx
+        ours = (f"{slide_id}_k", f"{slide_id}_f", f"{slide_id}_tab")  # template shapes, pictures, tables from the .pptx
         parts: list[tuple[dict | None, list[dict]]] = [(None, [
             {"deleteObject": {"objectId": e["objectId"]}}
             for e in page_elements.get(slide_id, [])
@@ -2748,7 +2884,7 @@ class DeckPlan:
                 reqs = shape_requests(el, slide_id, oid, scale, template_on_slide(slide_id, key) if key else None)
             elif el["kind"] == "table":
                 oid = f"{slide_id}_tab{i}"
-                reqs = table_requests(el, slide_id, oid, scale, fonts)
+                reqs = table_requests(el, slide_id, oid, scale, fonts, self.pptx_tables)
             elif el["kind"] == "diagram":
                 oid = f"{slide_id}_dg{i}"
                 reqs = diagram_requests(el, slide_id, oid, scale, fonts,
@@ -2827,7 +2963,8 @@ def plan_offline(deck: dict, placeholder_size: tuple[float, float] = (612.0, 90.
     pictures keep their predicted places. {"plan": DeckPlan, "pictures": {page: [(element, .pptx
     box)]}, "copies": phase 1 requests, "page_elements" and "speaker_notes": the copied slides,
     "measure": measure_places' scratch slide requests, "slides": [(slide id, page, parts, element ids)]}."""
-    plan = DeckPlan({**deck, "slides": [{**s, "elements": merge_blocks(s["elements"])} for s in deck["slides"]]})
+    plan = DeckPlan({**deck, "slides": [{**s, "elements": merge_blocks(s["elements"])} for s in deck["slides"]]},
+                    pptx_tables=True)
 
     def size(w: float, h: float) -> dict:
         return {"width": emu(w), "height": emu(h)}
@@ -2838,6 +2975,8 @@ def plan_offline(deck: dict, placeholder_size: tuple[float, float] = (612.0, 90.
         els = [{"objectId": f"{source}_{kind}", "size": size(*placeholder_size), "shape": {"placeholder": {"type": kind}}}
                for kind in LAYOUT_PLACEHOLDERS[slide_layout(slide)[0]]]
         els += [{"objectId": f"{source}_p{i}", "size": size(1, 1), "image": {}} for i, _ in enumerate(plan.pictures(slide))]
+        els += [{"objectId": f"{source}_tb{i}", "size": size(sum(t["widths"]), sum(t["heights"])), "table": {}}
+                for i, t in enumerate(plan.tables(slide))]
         els += [{"objectId": f"{source}_k{j}", "size": size(*template_size), "shape": {}}
                 for j in range(len(plan.keys) if plan.uses_templates[n] else 0)]
         request, sizes = plan.copy_request(slide, {"objectId": source, "pageElements": els})
