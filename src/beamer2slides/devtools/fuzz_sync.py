@@ -1674,14 +1674,20 @@ class Cost:
         self.phases: dict[str, Counter] = {}
         self.step: dict[str, Counter] | None = None
 
+    @classmethod
+    def kept(cls, key: str) -> bool:
+        # (call <methodId>: what was asked - writes are what the per-user quota counts; retry
+        #  <methodId> <status>: who was refused)
+        return key in cls.KEYS or key.startswith(("call ", "retry "))
+
     def start(self, name: str):
-        return name, time.monotonic(), Counter({k: self.api[k] for k in self.KEYS})
+        return name, time.monotonic(), Counter({k: v for k, v in self.api.items() if self.kept(k)})
 
     def stop(self, mark, extra: dict | None = None, **counts) -> None:
         name, t0, was = mark
         d = Counter({"s": time.monotonic() - t0, "n": 1})
-        d.update({k: self.api[k] - was[k] for k in self.KEYS})
-        d.update({k: v for k, v in (extra or {}).items() if k in self.KEYS})
+        d.update({k: v - was[k] for k, v in list(self.api.items()) if self.kept(k)})
+        d.update({k: v for k, v in (extra or {}).items() if self.kept(k)})
         d.update(counts)
         for into in (self.phases, self.step):
             if into is not None:
@@ -1718,7 +1724,7 @@ class Template:
     def make(self, build, variant: str = "v1"):
         """Convert `variant` into `out` once (the deck is kept until the run drops it)."""
         self.out.mkdir(parents=True, exist_ok=True)
-        done = subprocess.run([sys.executable, "-m", "beamer2slides", "convert", str(build.build(variant)),
+        done = subprocess.run([sys.executable, "-m", "beamer2slides.devtools.counted", "convert", str(build.build(variant)),
                                "--out", str(self.out)], env=ENV, cwd=ROOT, stdout=self.log, stderr=subprocess.STDOUT)
         if done.returncode:
             raise RuntimeError(f"the template conversion failed, see {self.log.name}")
@@ -2084,6 +2090,9 @@ def shrink_live(record: dict, out_root: Path, chain: int, **opts) -> dict:
     return best
 
 
+WRITE = "call slides.presentations.batchUpdate"   # what the per-user write quota counts
+
+
 def summary(records: list[dict], wall: float, parallel: int) -> str:
     """What the run cost and reached: rounds/hour at this --parallel, seconds per step, each
     phase's seconds per step, Google calls, retries and backoff (all threads and subprocesses),
@@ -2095,7 +2104,7 @@ def summary(records: list[dict], wall: float, parallel: int) -> str:
     steps = sum(len(r.get("steps") or []) for r in records) or 1
     total = Counter()
     for c in phases.values():
-        total.update({k: c.get(k, 0) for k in ("calls", "retries", "backoff_s", "rate_limited")})
+        total.update({k: c.get(k, 0) for k in ("calls", "retries", "backoff_s", "rate_limited", WRITE)})
     busy = sum((r.get("cost") or {}).get("seconds", 0) for r in records)
     order = ("convert", "copy", "edits", "snapshot", "build", "sync", "judge")
     per = "  ".join(f"{k} {phases[k]['s'] / steps:.1f}" for k in order if k in phases)
@@ -2106,7 +2115,8 @@ def summary(records: list[dict], wall: float, parallel: int) -> str:
             f"{3600 * len(records) / max(wall, 1):.1f} rounds/h, {busy / steps:.1f} s per step (one round's clock)\n"
             f"  s per step by phase: {per}\n"
             f"  Google: {total['calls']:.0f} calls ({total['calls'] / steps:.0f}/step), {total['retries']:.0f} retries, "
-            f"{total['rate_limited']:.0f} rate-limited, {total['backoff_s']:.0f} s backing off\n"
+            f"{total['rate_limited']:.0f} rate-limited, {total['backoff_s']:.0f} s backing off, "
+            f"{60 * total[WRITE] / max(wall, 1):.0f} batchUpdates/min\n"
             f"  reach (steps): " + ", ".join(f"{p} {reach[p]}" for p in PRECONDITIONS) + "\n"
             f"  layout oracle (steps with a finding): " + (", ".join(f"{k} {n}" for k, n in sorted(layout.items())) or "none"))
 
@@ -2194,6 +2204,15 @@ def main() -> int:
         print(f"{args.rounds - len(bad)}/{args.rounds} offline rounds clean in {time.monotonic() - started:.1f} s")
         return 1 if bad else 0
 
+    # A live campaign runs unattended: a token that can no longer be refreshed stops it here, not in
+    # a browser tab per round (`counted.never_interactive`; its subprocesses run under it too).
+    from .counted import NeedsConsent, never_interactive, quiet_credentials
+    try:
+        quiet_credentials()
+    except NeedsConsent as e:
+        print(f"live fuzzing needs Google: {e}", file=sys.stderr)
+        return 2
+    never_interactive()
     if args.replay is not None:
         folder = args.out / f"r{args.replay:03}"
         specs = variants = None

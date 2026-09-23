@@ -70,7 +70,8 @@ def execute(request, retries: int = 6):
             if not is_transient(e) or attempt == retries - 1:
                 raise
             pause = min(60, 2 ** attempt * 2) + random.random()
-            _count({"retries": 1, "backoff_s": pause, "rate_limited": int(status_of(e) == 429)})
+            _count({"retries": 1, "backoff_s": pause, "rate_limited": int(status_of(e) == 429),
+                    f"retry {getattr(request, 'methodId', None) or '?'} {status_of(e)}": 1})
             time.sleep(pause)
         except OSError:  # SSL EOFs and connection resets happen now and then
             if attempt == retries - 1:

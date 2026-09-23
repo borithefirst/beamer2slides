@@ -251,6 +251,21 @@ def test_reach_needs_the_persons_side():
     assert not any(R.step_reach(base, before, after, report).values())
 
 
+def test_the_fuzzer_never_asks_for_a_browser(monkeypatch, tmp_path):
+    """A campaign outliving its token failed each round's sync into a browser consent tab and
+    waited there (2026-09-23); `counted` makes a dead token an error instead."""
+    pytest.importorskip("google.oauth2.credentials")
+    from beamer2slides import google_auth
+    from beamer2slides.devtools import counted
+    monkeypatch.setattr(google_auth, "TOKEN", tmp_path / "token.json")
+    monkeypatch.setattr(google_auth, "credentials", google_auth.credentials)   # (restored afterwards)
+    with pytest.raises(counted.NeedsConsent):
+        counted.quiet_credentials()
+    counted.never_interactive()
+    with pytest.raises(counted.NeedsConsent):
+        google_auth.credentials()
+
+
 def test_execute_counts_without_changing_what_it_does(monkeypatch):
     from beamer2slides import gslides
     from beamer2slides.gapi import HttpError
@@ -269,4 +284,5 @@ def test_execute_counts_without_changing_what_it_does(monkeypatch):
 
     assert gslides.execute(Req()) == {"ok": 1}
     assert mine["calls"] == 2 and mine["retries"] == 1 and mine["rate_limited"] == 1 and mine["backoff_s"] > 0
-    assert mine["call slides.presentations.get"] == 2
+    assert mine["call slides.presentations.get"] == 2 and mine["retry slides.presentations.get 429"] == 1
+    assert F.Cost.kept("retry slides.presentations.get 429") and F.Cost.kept(F.WRITE) and not F.Cost.kept("other")

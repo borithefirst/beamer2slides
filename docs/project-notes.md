@@ -3894,3 +3894,131 @@ Still open:
 - Layout texts (`write_layout_texts`, shared headers and footers) are not synced.
 - A variant layout that a fresh conversion would newly clone is not created.
 - A slide whose decoration variant changed stays on its layout.
+
+## Live fuzzer efficiency
+
+2026-09-23. The goal was for `tools/fuzz_sync.py live` to reach layout cases sooner and more
+cheaply. Each round now records what it cost and what it reached. `round.json` holds, per step
+and per round, `cost` (seconds, Google calls, retries, 429s, backoff seconds and calls per method,
+per phase), `reach` (the layout preconditions of `devtools/fuzz_reach.py`) and `layout` (the
+layout oracle's findings, kind:severity). `run_live` ends with a summary: rounds/h, s per step by
+phase, calls, backoff, batchUpdates/min, reach and oracle counts. Calls are counted in
+`gslides.execute` (`STATS`, `count_thread`), which only observes and changes nothing. The
+convert/sync subprocesses run through `devtools/counted.py`, which dumps their counts.
+
+**Never interactive.** A campaign outlived its 7-day testing token. Each round's sync subprocess
+fell into `google_auth`'s browser consent flow and waited there, so a round hung for 8 minutes
+until it was killed. `counted.never_interactive` now replaces `google_auth.credentials` with the
+cached token, refreshed when it expires, and raises `NeedsConsent` when the token is dead. It
+replaces the module function rather than using a `use_provider` block, because worker threads
+inherit no context. `fuzz_sync live` checks the token before it starts and exits 2 when it is
+dead.
+
+**Cheaper steps.**
+- `--edits batched`, the default, uses `LiveDeck(defer=True)`. Edits are queued and sent as one
+  batchUpdate; when Google refuses the lot, each is sent again on its own, so a refused edit costs
+  only itself. The step starts from the read the previous sync step already made. The deck is read
+  again only when a drawn edit lands on a slide a queued edit touched, or when slide order matters
+  after slides came or went (`fuzz_sync.stale`); the edit is then drawn again from the fresh read.
+- Expectations are worked out from the read the edit was found in and never read the deck back.
+- `--edits reread` is the old way.
+- `--reuse` converts v1 once. Each round gets a Drive `files.copy` of that deck, with
+  `b2sBase`/`b2sCleaned` cleared and the folder's JSON rewritten to the new id. Every copy kept all
+  72 object ids the base names (checked per round, `reuse_ids`), and every round on a copy was
+  clean.
+
+Measured interleaved in one sitting (A, then C). Numbers are per step, except the round means.
+
+| | edits s | edits calls (reads/writes) | calls/step | round mean s |
+|---|---|---|---|---|
+| reread (A, chain 3, 4 rounds, p2, twice) | 6.5 / 5.0 | 11.5 (6.3/5.0) | 35 | 82 / 74 |
+| batched (same seeds, twice) | 2.7 / 2.4 | 4.3 (1.8/2.4) | 26 | 64 / 59 |
+
+| | first deck per round | calls | round mean s (chain 2) |
+|---|---|---|---|
+| convert (C, twice) | 20.7 s | 19 | 58 / 60 |
+| reuse, a copy (twice) | 4.4 s | 2 | 44 / 51 |
+
+Before this work, the main session measured 75-94 s per round at chain 3 and p2, and ~100 s at
+chain 2 and p3. After it, a chain-2 round takes 44-51 s. Sync is now ~65% of a step (13-17 s).
+
+**Parallel sweep**: 12 rounds, chain 2, batched + reuse, interleaved 3-5-8-12-12-8-5-3, from
+21:03 to 21:33. The raised write quota (600/min) had not reached this token yet. Every 429 was
+on `presentations.batchUpdate` (edits 53, sync 51 in one p12 run).
+
+| --parallel | rounds/h | s per step | 429s | backoff s |
+|---|---|---|---|---|
+| 3 | 193 / 211 | 22.0 / 20.5 | 0 / 2 | 0 / 7 |
+| 5 | 149 / 139 | 40.9 / 45.8 | 48 / 38 | 480 / 295 |
+| 8 | 221 / 265 | 31.0 / 35.9 | 32 / 52 | 214 / 317 |
+| 12 | 247 / 208 | 58.7 / 65.2 | 79 / 104 | 830 / 993 |
+
+- p3 is clean at ~43 batchUpdates/min.
+- Beyond p3, rounds start in lockstep and burst past the per-user write limit. Backoff then eats
+  the gain: at 8-12, rounds/h rises about 15% while each round takes twice as long.
+- p5 loses to p3 because of the last partial wave as well as the backoff.
+- Until the quota raise shows in these counts, p3 (p4 at most) is the setting. Rerun the sweep when
+  a p8 run shows no 429s.
+
+**Aimed steps.** `fuzz_reach` reads a step's base, before, after and report files. It says
+whether the step set up a layout defect's preconditions:
+- `text_into_relaid`: the person's longer text recreated into a re-laid unit.
+- `hole_reworded`: words changed in front of a formula hole.
+- `moved_vs_reflow` / `moved_overlapped`: the person's moved or added box on a slide the source
+  re-laid, and whether they overlap afterwards.
+- `recreated_in_group`: a unit recreated in a group the person made, moved or resized.
+- `table_grows`: a changed table the person edited, or has something near.
+
+`python tools/fuzz_reach.py <archive>` gives the table per variant and per edit kind.
+
+Over the 568 archived steps of out/sync-fuzz (uniform draw), expected steps to the first hit
+(1/rate):
+
+| | text_into_relaid | hole_reworded | moved_vs_reflow | moved_overlapped | recreated_in_group | table_grows |
+|---|---|---|---|---|---|---|
+| archive, uniform | 6.4 | 43.7 | 2.3 | 12.6 | 5.6 | never |
+| live uniform (48 steps) | 24 | never | 2.7 | 3.4 | 16 | never |
+| `--focus layout` (48 steps) | 1.7 | 3.7 | 1.7 | 16 | 1.8 | 2.7 |
+| `--focus probes` (24 steps) | 6.0 | never | 1.2 | 1.4 | 8.0 | never |
+
+The live rows are chain 3, 8 rounds, p4, seeds 7400-7415 (probes: 7400-7407).
+
+Why the uniform draw reaches so little:
+- About 55% of its edits can never set up a layout defect: slides, notes, backgrounds, bold,
+  colours and font sizes.
+- It never edits a table, and it edits footers and titles.
+
+**What focus changes.**
+- `--focus layout` draws aims (`FOCUS`, `AIMS`): long text, a new paragraph, words before a hole,
+  moved text, a note under a text or a table, grouped moves and resizes, narrowed boxes, table
+  cells, rows and columns. Three draws in 16 are still uniform.
+- It aims at the slides the step's variant changes 75% of the time (`variant_slides`), drawing the
+  variant first. Variants are weighted by what they re-lay (`REFLOWS`, `variant_weights`).
+- `--focus probes` starts from the `probes` variant and syncs `probes-reword`/`probes-push`.
+  That is where moved-and-overlapped lives.
+- The default draw is unchanged, draw for draw.
+- The new deck edit kinds are `add_paragraph`, `insert_before_hole`, `insert_table_row` and
+  `insert_table_column`. They are in the catalogue and were applied live without a refusal
+  (41/11/9/7 times).
+
+Rounds with a layout-oracle failure:
+
+| draw | rounds failing |
+|---|---|
+| uniform | 3 of 16 |
+| `--focus layout` | 9 of 16 |
+| `--focus probes` | 7 of 8 |
+
+What they found:
+- stranded_picture on merge/motivation formulas (7402-7415). Most were "it was N pt off before,
+  and the sync rewrote it there".
+- A number ball overlapping its text on "The sync algorithm" after `chain` (7400, 7403).
+- text_overflow of the policy slide's second text (7400, 7408, 7411).
+- The probe overlaps and overflows (7400-7405).
+- A person's own note box moved by 26-31 pt (loss oracle, user_object_moved, 7403 and 7407: the
+  box moved one way on probes-reword, then back on probes-push).
+
+**Blind spots.** `fuzz_reach` is a proxy: it says the stage was set, not that anything went
+wrong. `moved_overlapped` needs the boxes the person's objects carry after the sync, so a
+recreated user object is not seen. `table_grows` has no table geometry, like the layout oracle.
+Per-variant attribution is mixed after step 0, because the base is then the previous variant.
