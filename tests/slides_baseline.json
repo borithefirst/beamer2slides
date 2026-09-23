@@ -699,7 +699,7 @@
    "10:p9tab0 grown": "a native table at footnotesize: Slides rows are at least 14.4 pt + a line, so it grows 4.3 pt; classify predicts it and it stays clear of the caption",
    "12:p11tab0 grown": "a native table at small size: Slides row minimum, grows 3.2 pt, clear of the caption",
    "17:p16t1 crowded": "Slides sets subscripts 0.37 em low where TeX uses 0.15 em, and baselineOffset has no other value: lines of inline math touch (docs/calibration.md 2c)",
-   "4:p3t2 width": "line 7, the stress line of only W, M, m and w: Lato draws those letters ~10% wider than CM (small caps, the old finding here, are fixed); prose stays within a few per cent"
+   "4:p3t2 width": "line 4, small caps: set at 1.13x the serif size on purpose (emit.SMALL_CAPS_WIDTH), a compromise between width and height - the line is 0.88 of the PDF width, its capitals ~13% taller than CMCSC's; full width (1.28x) stood them 30% taller (docs/calibration.md 2c)"
   }
  }
 }
