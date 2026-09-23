@@ -634,7 +634,7 @@
     "bullet_size": 0.0
    },
    "7:p6t2b0": {
-    "number_offset": 0.32
+    "number_offset": 0.19
    }
   },
   "demo": {
@@ -696,15 +696,10 @@
  },
  "text_fit_known": {
   "27_text_fit": {
-   "10:p9t4 width": "bold/digit column text 9% wider in Lato than in CM (open)",
-   "10:p9t5 width": "digits 10% wider in Lato than in CM (open)",
-   "11:p10t2 width": "bold header 10% wider in the bold substitute (open)",
-   "12:p11t3 drift": "refused p{} table: the wrapped cell joined with the numbers beside it reflows across columns (open)",
-   "12:p11t3 width": "refused p{} table: the same joined cell (open)",
-   "12:p11t5 width": "digits in a refused table 12% wider (open)",
-   "17:p16t1 crowded": "Slides sets subscripts deeper than TeX: two lines of inline math touch (open)",
-   "18:p17t1 width": "typewriter line 9% narrower: CMTT in Courier New (open)",
-   "4:p3t2 width": "small caps line 22% narrower: the substitute sets small caps smaller (open, docs/project-notes.md Text fit)"
+   "10:p9tab0 grown": "a native table at footnotesize: Slides rows are at least 14.4 pt + a line, so it grows 4.3 pt; classify predicts it and it stays clear of the caption",
+   "12:p11tab0 grown": "a native table at small size: Slides row minimum, grows 3.2 pt, clear of the caption",
+   "17:p16t1 crowded": "Slides sets subscripts 0.37 em low where TeX uses 0.15 em, and baselineOffset has no other value: lines of inline math touch (docs/calibration.md 2c)",
+   "4:p3t2 width": "line 7, the stress line of only W, M, m and w: Lato draws those letters ~10% wider than CM (small caps, the old finding here, are fixed); prose stays within a few per cent"
   }
  }
 }
