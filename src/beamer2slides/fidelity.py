@@ -53,7 +53,7 @@ def bands(mask: np.ndarray, min_gap: int) -> int:
 def ink_box(mask: np.ndarray):
     rows = np.flatnonzero(mask.sum(axis=1) >= MIN_ROW_PX)
     cols = np.flatnonzero(mask.sum(axis=0) >= MIN_COL_PX)
-    if rows.size == 0:
+    if rows.size == 0 or cols.size == 0:  # rows of specks thinner than a column: no ink box
         return None
     return cols[0], rows[0], cols[-1] + 1, rows[-1] + 1
 

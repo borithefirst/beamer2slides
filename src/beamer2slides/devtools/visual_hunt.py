@@ -241,6 +241,21 @@ def run(tex: Path, slot: str, skip_convert: bool = False) -> int:
     return 0
 
 
+def ledger(verified: Path) -> list[dict]:
+    """Confirmed findings of every skeptic file, grouped by class, worst first."""
+    classes: dict[str, dict] = {}
+    for f in sorted(verified.glob("*.json")):
+        for x in json.loads(f.read_text(encoding="utf-8")):
+            if x.get("verdict") != "CONFIRMED":
+                continue
+            c = classes.setdefault(x.get("class") or "?", {"class": x.get("class") or "?", "findings": []})
+            c["findings"].append({"hunter": f.stem, **{k: x.get(k) for k in
+                                  ("id", "deck", "slide", "severity", "realism", "title", "mechanism")}})
+    for c in classes.values():
+        c["worst"] = max((int(x["severity"] or 0) * int(x["realism"] or 0) for x in c["findings"]), default=0)
+    return sorted(classes.values(), key=lambda c: (-c["worst"], -len(c["findings"]), c["class"]))
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -252,9 +267,18 @@ def main(argv: list[str] | None = None) -> int:
     c.add_argument("out", type=Path)
     c.add_argument("--pdf", type=Path, required=True)
     c.add_argument("--into", type=Path, required=True)
+    g = sub.add_parser("ledger", help="confirmed findings of out/hunt/verified/*.json by class")
+    g.add_argument("--verified", type=Path, default=HUNT / "verified")
     a = p.parse_args(argv)
     if a.cmd == "run":
         return run(a.tex, a.slot, a.skip_convert)
+    if a.cmd == "ledger":
+        rows = ledger(a.verified)
+        (a.verified.parent / "ledger.json").write_text(json.dumps(rows, indent=1, ensure_ascii=False), encoding="utf-8")
+        for c in rows:
+            where = ", ".join(sorted({f"{x['deck']}#{x['slide']}" for x in c["findings"]}))[:90]
+            print(f"{c['worst']:>2} {len(c['findings']):>2}  {c['class'][:44]:<44} {where}")
+        return 0
     compose(a.out, a.pdf, a.into)
     return 0
 
