@@ -741,7 +741,7 @@ def text_box_requests(el: dict, slide_id: str, object_id: str, scale: float, fon
 
     edges = [hugs(p) for p in paras]
     # (a centred or right-aligned paragraph's longest line can start left of its first line)
-    left_pdf = min(p["bullet"]["bbox"][0] if p["bullet"] else
+    left_pdf = min(p["bullet"]["bbox"][0] if p["bullet"] and p.get("direction") != "rtl" else
                    min([p["text_x0"]] + ([l["x0"] for l in p["lines"]] if e != "left" else []))
                    for p, e in zip(paras, edges))
     # (a right-to-left paragraph's bullet hangs right of its text, as a left-to-right one's
@@ -1372,7 +1372,10 @@ def slides_width(runs: list[dict], scale: float, fonts: "FontMapper") -> float |
 def wide_advance(ch: str, unmeasured: float) -> float:
     """The advance (em) of a character the probe did not measure: a CJK ideograph, kana or
     full-width form is a whole em in every fallback font (unicodedata's East Asian Width W / F).
-    At 0.6 em a Japanese header came out 40% narrower than Slides sets it and wrapped its cell."""
+    At 0.6 em a Japanese header came out 40% narrower than Slides sets it and wrapped its cell.
+    A bidi mark (`bidi.MARKS`: the LRM or RLM `bidi.logical_line` writes) draws nothing."""
+    if ch in bidi.MARKS:
+        return 0.0
     return 1.0 if unicodedata.east_asian_width(ch) in "WF" else unmeasured
 
 

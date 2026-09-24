@@ -60,6 +60,8 @@ _CLOSING = {v: k for k, v in _OPENING.items()}
 # The left-to-right and right-to-left marks: invisible strong letters, which is all a logical
 # text can say where the page shows a left-to-right island Unicode's rules would cut in two.
 LRM, RLM = "‎", "‏"
+# (and the Arabic letter mark: all three draw nothing and take no room on a line)
+MARKS = frozenset((LRM, RLM, "؜"))
 
 
 def _class(c: str) -> int:
