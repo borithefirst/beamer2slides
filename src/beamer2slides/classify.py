@@ -1815,8 +1815,11 @@ class PageClassifier:
                     same_row = False
                 gap = max(0.0, b.rect.x0 - a.rect.x1, a.rect.x0 - b.rect.x1)
                 # (text colour changes with the panel; a dark number on a light box across the
-                # edge still belongs to its line)
-                if same_row and gap <= 2.0 * big and (panel[i] == panel[j] or a.color == b.color) and artwork[i] == artwork[j] \
+                # edge still belongs to its line; so does a piece running over its panel's edge
+                # right after a word in it - an overfull listing line's closing comma)
+                if same_row and gap <= 2.0 * big and (panel[i] == panel[j] or a.color == b.color
+                                                      or self.over_panel_edge(a, b, panel[i], panel[j], gap, big)) \
+                        and artwork[i] == artwork[j] \
                         and not (gap > 0.8 * big and self.gutter(spans, a, b, big)) \
                         and not self.figure_label_apart(spans, a, b, gap, big):
                     parent[find(i)] = find(j)
@@ -2034,6 +2037,21 @@ class PageClassifier:
                     s.text = text
                 s.reading = (n, rank, base, widths[spaced[i]] if i in spaced else 0.0)
 
+    def over_panel_edge(self, a: Span, b: Span, pa: int | None, pb: int | None, gap: float, size: float) -> bool:
+        """Two pieces nearly touching where one's panel ends: the other starts inside that panel
+        and runs over its edge (its centre outside). A listing line overfull by a character
+        ('"order-service",' against its frame) left the comma a box of its own, set 70 px away."""
+        if pa == pb or gap > 0.3 * size:
+            return False
+        for inner, outer, p in ((a, b, pa), (b, a, pb)):
+            if p is None:
+                continue
+            box = self.panels[p]["bbox"]
+            r = outer.rect
+            if box.contains(r.x0 + 0.1, r.cy) and not box.contains(r.cx, r.cy) and r.w <= 1.5 * size:
+                return True
+        return False
+
     def figure_label_apart(self, spans: list[Span], a: Span, b: Span, gap: float, size: float) -> bool:
         """A figure's label beside a column of words right of the figure (a pie's pin label
         on the baseline of a list item's second line, 0.8 em from it): the label is next to
@@ -2045,6 +2063,11 @@ class PageClassifier:
             return False
         left, right = (a, b) if a.rect.x0 < b.rect.x0 else (b, a)
         if sum(c.isalnum() for c in left.text) < 2 or re.fullmatch(r"\(?\w{1,3}[.):]", left.text.strip()):
+            return False
+        # The column's piece is words too: a lone number right of a line is the label of an item
+        # read right to left, its ball's digit ('1' hanging right of a Hebrew item, the balls
+        # below it the same column), and apart from its item the ball lost its number.
+        if sum(c.isalnum() for c in right.text) < 2:
             return False
         near = lambda s: any(r.distance(s.rect) <= 0.5 * size for r in self.regions)
         if not near(left) or near(right):
