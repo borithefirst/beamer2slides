@@ -95,6 +95,39 @@ def test_text_italic_letters_inside_a_formula_are_in_its_hole():
     assert holes[0]["hole_x0"] + holes[0]["hole"] >= 184.0, holes
 
 
+def test_a_display_crop_leaves_out_the_hanging_ink_of_a_hole_above(tmp_path):
+    """r1_math_v2 s5: 'As ∫2g dμ' over the display 'lim sup ∫|f_n − f| dμ ≤ 0.'; the display's
+    picture reached into the line above and showed the tail of the inline integral's hook at
+    the PDF place, a piece floating under the hole's own integral once Slides set the words a
+    few points off. A glyph another picture owns is left out of a crop when one of them is a
+    hole. (Here a 'g' hangs into the box of an 'x' below it.)"""
+    import numpy as np
+    from PIL import Image
+    from beamer2slides.render import render_backgrounds
+    from .test_hidden_text import one_page
+    from .test_pictures_hunt import raw_of
+
+    content = (b"BT /F1 12 Tf 10 120 Td (As) Tj ET\nBT /F1 30 Tf 60 120 Td (g) Tj ET\n"
+               b"BT /F1 20 Tf 60 95 Td (x) Tj ET\n")
+    path = tmp_path / "hook.pdf"
+    path.write_bytes(one_page(content))
+    raw = raw_of(path)
+    words, g, x = raw["pages"][0]["spans"]
+    assert (g["text"], x["text"]) == ("g", "x")
+    text_el = {"id": "t0", "kind": "text", "role": "body", "bbox": words["bbox"], "spans": [words["id"]],
+               "paragraphs": []}
+    hole = {"id": "h0", "kind": "image", "role": "math", "anchor": "t0", "bbox": list(g["bbox"]), "spans": [g["id"]]}
+    top = g["bbox"][3] - 3.0  # the display's box reaches 3 pt into the g's descender
+    display = {"id": "m0", "kind": "image", "role": "math", "bbox": [50.0, top, 120.0, x["bbox"][3] + 1],
+               "spans": [x["id"]]}
+    deck = {"slides": [{"page": 0, "size": [400, 200], "elements": [display, hole, text_el], "on_layout": []}]}
+    render_backgrounds(path, raw, deck, tmp_path / "out")
+    crop = np.array(Image.open(tmp_path / "out" / display["file"]).convert("L")).astype(int)
+    zoom = crop.shape[1] / (display["bbox"][2] - display["bbox"][0])
+    rows = crop[:max(1, int((x["bbox"][1] - display["bbox"][1]) * zoom) - 2)]  # above the x
+    assert rows.size and (rows > 200).all(), rows.min()
+
+
 def test_one_math_letter_among_words_keeps_the_word_spaces_around_it():
     spans = [span("each of", 30.0, 100.0, 11.0, w=40.0), span("c", 73.0, 100.0, 11.0, w=5.0, font=MI),
              span("physicians treats", 81.0, 100.0, 11.0, w=90.0)]
