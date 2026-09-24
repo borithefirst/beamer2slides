@@ -5,6 +5,7 @@ import re
 import unicodedata
 from pathlib import Path
 
+from .fonts import font_info
 from .pdf import NO_OBJECT, OBJ_IMAGE, Char, Document, Page, char_box
 
 LIGATURES = str.maketrans({"ﬀ": "ff", "ﬁ": "fi", "ﬂ": "fl", "ﬃ": "ffi", "ﬄ": "ffl",
@@ -89,6 +90,16 @@ NEW_LINE_GAP = 1.0
 BACK_GAP = -0.6
 SAME_BASELINE = 0.05
 NEW_BASELINE = 0.8
+# In a monospaced face a space is a whole advance (0.525 em in CMTT), and listings' default
+# columns=fixed spreads each token's glyphs over a basewidth grid wider than that advance: the
+# pen moves between two tokens with no space between them ("self" ",", "llama" "-") reach 0.2-0.42
+# advances, over JOIN_GAP, while a real space is 1.0 (flexible, verbatim) to 1.6 (fixed). Measured
+# on the hunt's listings (r1_ml_v1, r2_code_v1/v4, r4_control_d1): nothing lies between 0.45 and 0.95.
+MONO_JOIN_GAP = 0.5  # in advances of the glyph before
+
+
+def _mono(font: str) -> bool:
+    return font_info(font).family == "mono"
 
 
 def combining_mark(c: str) -> bool:
@@ -280,7 +291,8 @@ def spans(page: Page, visibility: Visibility | None = None, hidden: bool = False
             new_line = ch.dir != prev.dir or offset > NEW_BASELINE or gap > NEW_LINE_GAP or gap < BACK_GAP
             if new_line or gap >= WORD_GAP:
                 flush()
-            elif gap >= JOIN_GAP and offset < SAME_BASELINE and prev.c != " " and ch.c != " ":
+            elif gap >= JOIN_GAP and offset < SAME_BASELINE and prev.c != " " and ch.c != " " \
+                    and not (_mono(prev.font) and _mono(ch.font) and gap * size < MONO_JOIN_GAP * prev.advance):
                 if style:
                     flush()
                 width = gap * size

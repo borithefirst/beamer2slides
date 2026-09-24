@@ -1179,7 +1179,7 @@ def build_pptx(page_w: float, page_h: float, keys: list[tuple], pages: list[dict
 
 
 def shape_requests(el: dict, slide_id: str, object_id: str, scale: float, template: dict | None = None) -> list[dict]:
-    """A filled shape without outline. With a template ({"id", "w", "h"}: a template shape
+    """A filled shape, outlined only with the frame it carries (`outline`). With a template ({"id", "w", "h"}: a template shape
     on this slide and its size in pt) the shape is a duplicate of it, else a new shape."""
     x0, y0, x1, y1 = (v * scale for v in el["bbox"])
     # ROUND_2_SAME_RECTANGLE rounds the top corners; for bottom corners flip both axes
@@ -1204,13 +1204,22 @@ def shape_requests(el: dict, slide_id: str, object_id: str, scale: float, templa
                               "translateX": round(tx * EMU_PER_PT), "translateY": round(ty * EMU_PER_PT)},
             },
         }}]
+    # A framed panel (classify.frame_of, framed_panels: \fcolorbox, tcolorbox, a listing's
+    # frame=single) carries its frame as the outline, on the frame's centre line; the rules
+    # themselves left the background with the panel.
+    frame = el.get("outline")
+    outline = {"outlineFill": {"solidFill": {"color": rgb(frame["color"])["opaqueColor"]}},
+               "weight": pt(round(max(0.25, frame["width"] * scale), 2)), "propertyState": "RENDERED"} \
+        if frame else {"propertyState": "NOT_RENDERED"}
+    outline_fields = "outline.outlineFill.solidFill.color,outline.weight,outline.propertyState" if frame \
+        else "outline.propertyState"
     return reqs + [
         {"updateShapeProperties": {
             "objectId": object_id,
             "shapeProperties": {"shapeBackgroundFill": {"solidFill": {"color": rgb(el["fill"])["opaqueColor"],
                                                                       "alpha": el.get("opacity", 1.0)}},
-                                "outline": {"propertyState": "NOT_RENDERED"}},
-            "fields": "shapeBackgroundFill.solidFill.color,shapeBackgroundFill.solidFill.alpha,outline.propertyState",
+                                "outline": outline},
+            "fields": "shapeBackgroundFill.solidFill.color,shapeBackgroundFill.solidFill.alpha," + outline_fields,
         }},
     ]
 
@@ -2355,6 +2364,68 @@ def pick_word(marks: list[tuple[float, float, float, float]], x0: float, width: 
     return min(fits, key=lambda m: abs(m[0] - x0)) if fits else None
 
 
+def grown_panels(slide: dict, scale: float, fonts: FontMapper) -> dict:
+    """The slide with each panel shape widened rightwards by as much as the words on it come
+    out wider in Slides than in the PDF, so that they keep the PDF's inner margin (a block
+    body in Lato runs a few points longer than in LM Sans, and its last word sat on the
+    panel's edge or past it). A block's title bar and body grow together, never past the
+    page's right edge; left-aligned text only (centred text grows both ways: its box does)."""
+    els = slide["elements"]
+    panels = [(i, e) for i, e in enumerate(els) if e["kind"] == "shape" and e.get("role") == "panel"]
+    if not panels:
+        return slide
+    over: dict[int, float] = {}
+    for el in els:
+        if el["kind"] != "text" or el.get("role") == "title" or el.get("rotation") or not el["paragraphs"]:
+            continue
+        x0, y0, x1, y1 = el["bbox"]
+        cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
+        home = [(i, e) for i, e in panels if e["bbox"][0] <= cx <= e["bbox"][2] and e["bbox"][1] <= cy <= e["bbox"][3]]
+        if not home:
+            continue
+        i, panel = home[-1]  # (the topmost: creation order is z-order, and a block's shadow lies under it)
+        paras = [{**p, "runs": [hole_run(r, scale, fonts) if r.get("hole") else r for r in in_sentence(p["runs"])]}
+                 for p in el["paragraphs"]]
+        measured = box_lines(paras, [hugs(p) for p in paras], scale, fonts)
+        if not measured:
+            continue
+        right = max(line["x1"] for p in paras for line in p["lines"])
+        grow = measured[0] / scale - right
+        if grow > 0.5 and right < panel["bbox"][2]:
+            over[i] = max(over.get(i, 0.0), grow)
+    blocks: dict[int, float] = {}
+    for i, g in over.items():
+        if els[i].get("block") is not None:
+            blocks[els[i]["block"]] = max(blocks.get(els[i]["block"], 0.0), g)
+    for i, e in panels:
+        if e.get("block") in blocks:
+            over[i] = blocks[e["block"]]
+    # (a block's shadow panel lies under the whole block, a few points right and down: it grows too)
+    for b, g in blocks.items():
+        box = [e["bbox"] for _, e in panels if e.get("block") == b]
+        ux0, uy0, ux1, uy1 = min(r[0] for r in box), min(r[1] for r in box), max(r[2] for r in box), max(r[3] for r in box)
+        for i, e in panels:
+            x0, y0, x1, y1 = e["bbox"]
+            if e.get("block") is None and i not in over and all(0 <= d <= 5 for d in (x0 - ux0, y0 - uy0, x1 - ux1, y1 - uy1)):
+                over[i] = g
+    if not over:
+        return slide
+    page_w = slide["size"][0]
+    out = list(els)
+    for i, g in over.items():
+        e = els[i]
+        g = min(g, page_w - 1 - e["bbox"][2])
+        if g <= 0.5:
+            continue
+        wider = {**e, "bbox": [e["bbox"][0], e["bbox"][1], round(e["bbox"][2] + g, 2), e["bbox"][3]]}
+        if e.get("title_bar"):
+            bar = e["title_bar"]
+            wider["title_bar"] = [bar[0], bar[1], round(bar[2] + g, 2), bar[3]]
+        if template_key(wider, scale) == template_key(e, scale):  # (the template shapes are fixed)
+            out[i] = wider
+    return {**slide, "elements": out}
+
+
 def title_bar_under(el: dict, slide: dict) -> list[float] | None:
     """The PDF box of the block title bar a text element sits on, if any."""
     cx, cy = (el["bbox"][0] + el["bbox"][2]) / 2, (el["bbox"][1] + el["bbox"][3]) / 2
@@ -3405,6 +3476,7 @@ class DeckPlan:
             return {"id": f"{slide_id}_k{j}", "w": w, "h": h}
 
         n = slide["page"]
+        slide = grown_panels(slide, scale, fonts)
         slide_id = f"b2s_s{n:03}"
         title_idx = title_element(slide)
         title_oid = f"{slide_id}_t{title_idx}" if title_idx is not None else None

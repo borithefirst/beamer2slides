@@ -1,0 +1,91 @@
+% Framed boxes and code listings: frames kept as outlines or rules, code kept in its columns.
+\documentclass{beamer}
+\usetheme{Madrid}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage{listings}
+\usepackage{fancyvrb}
+\usepackage{xcolor}
+\usepackage{tcolorbox}
+
+\definecolor{codebg}{RGB}{245,245,245}
+\lstset{
+  basicstyle=\ttfamily\small,
+  keywordstyle=\bfseries\color{blue!70!black},
+  showstringspaces=false,
+  frame=single,
+  rulecolor=\color{black!40},
+}
+
+\begin{document}
+
+\begin{frame}{Framed boxes}
+\fcolorbox{blue}{blue!10}{\parbox{0.8\linewidth}{A colour box with a frame keeps its frame as the
+outline of its panel, and its words stay one text box inside it.}}
+
+\vspace{1em}
+\begin{tcolorbox}[colback=red!5,colframe=red!60!black,boxrule=1pt,arc=0pt,sharp corners]
+A tcolorbox is one panel with a red frame around its words.
+\end{tcolorbox}
+\end{frame}
+
+\begin{frame}[fragile]{Numbered listing on a panel}
+\begin{lstlisting}[language=C,backgroundcolor=\color{codebg},numbers=left,numberstyle=\tiny\color{gray},
+                   xleftmargin=2em,framexleftmargin=1.5em]
+static long memo[N + 1];   /* zero */
+
+long fib(int n) {
+    if (n < 2) return n;
+    return memo[n] = fib(n - 1) + fib(n - 2);
+}
+\end{lstlisting}
+\end{frame}
+
+\begin{frame}[fragile]{Rules above and below}
+\begin{lstlisting}[language=C,frame=lines,backgroundcolor=\color{white}]
+int main(void) {
+    printf("%d\n", fib(N));
+    return 0;
+}
+\end{lstlisting}
+\end{frame}
+
+\begin{frame}[fragile]{A frame and no fill}
+\begin{lstlisting}[language=Python]
+def discount(price, percent):
+    if percent  < 0:
+        raise ValueError(percent)
+    return price * (1 - percent / 100)
+\end{lstlisting}
+\end{frame}
+
+\begin{frame}[fragile]{A labelled Verbatim}
+\begin{Verbatim}[frame=single,fontsize=\small,commandchars=\\\{\},label={money.py}]
+     def add(self, other):
+\textcolor{red!70!black}{-        return Money(self.amount)}
+\textcolor{green!45!black}{+        return Money(self.amount, self.currency)}
+\end{Verbatim}
+\end{frame}
+
+\begin{frame}[fragile]{Code in a block}
+\begin{block}{Memoised}
+\begin{lstlisting}[frame=none,language=Python]
+def fib(n):
+    if n < 2:
+        return n
+
+    return fib(n - 1) + fib(n - 2)
+\end{lstlisting}
+\end{block}
+\end{frame}
+
+\begin{frame}{Code words in a table}
+\begin{tabular}{ll}
+\hline
+Call \texttt{fib(n)} twice & slow \\
+Cache in \texttt{memo} & fast \\
+\hline
+\end{tabular}
+\end{frame}
+
+\end{document}

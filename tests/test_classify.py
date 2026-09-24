@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from beamer2slides.classify import classify
+from beamer2slides.classify import Rect, classify
 from beamer2slides.extract import extract, select_overlays
 from beamer2slides.notes import prepare
 
@@ -617,12 +617,14 @@ def test_braces_join_their_formula():
 
 def test_framed_paragraphs_are_shapes_with_wrapped_text():
     slide = deck("20_marks_edge_cases")["slides"][4]
-    d = [e for e in slide["elements"] if e["kind"] == "diagram"][0]
-    assert not d["lines"], "the four sides of each frame are one rectangle"
-    styles = sorted((n["fill"] or "", n["stroke"]) for n in d["nodes"])
-    assert styles == [("", "#000000"), ("#e6e6ff", "#0000ff")]
-    boxes = [n["text"] for n in d["nodes"]]
-    assert all(len(b) == 1 and len(b[0]["paragraphs"]) == 1 and b[0]["paragraphs"][0]["align"] == "left" for b in boxes)
+    # \fcolorbox: a panel with its frame as the outline, its words a text box on it
+    panel = [e for e in slide["elements"] if e["kind"] == "shape"]
+    assert [(p["fill"], p["outline"]["color"]) for p in panel] == [("#e6e6ff", "#0000ff")]
+    words = [e for e in texts(slide) if Rect.of(panel[0]["bbox"]).contains_rect(Rect.of(e["bbox"]))]
+    assert len(words) == 1 and [p["align"] for p in words[0]["paragraphs"]] == ["left", "left"]
+    # \fbox: a one-cell table framed by its rules, the paragraph wrapped in its cell
+    table = [e for e in slide["elements"] if e["kind"] == "table"]
+    assert len(table) == 1 and table[0]["row_lines"] == [2] and len(table[0]["borders"]) == 2
 
 
 # overlays on text
