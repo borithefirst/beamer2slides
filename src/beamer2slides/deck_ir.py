@@ -20,8 +20,8 @@ import re
 import time
 from pathlib import Path
 
-from .emit import (ASCENT_EM, BASELINE_A, FONT_FOR_FAMILY, MIDDLE_BASELINE_EM, PAD_X, PPTX_TITLE_DY, SLIDE_W,
-                   FontMapper, extra_above, line_size)
+from .emit import (ASCENT_EM, BASELINE_A, FONT_FOR_FAMILY, MIDDLE_BASELINE_EM, OPTICAL_WEIGHT, PAD_X, PPTX_TITLE_DY,
+                   SLIDE_W, FontMapper, extra_above, line_size)
 from .deck_thumbs import (SNAP_PAGE, ink_widths, pptx_insets, side_gap, side_inset, thumbnail_cell_pad,
                           thumbnail_cell_text, thumbnail_insets, thumbnail_rows, thumbnail_weights, top_drift)
 from .gslides import EMU_PER_PT
@@ -353,7 +353,9 @@ def text_paragraphs(pe: dict, text: dict, resolver: StyleResolver, fonts: FontMa
             weight = (st.get("weightedFontFamily") or {}).get("weight") or base.get("weight") or 400
             if st.get("bold") is not None and "weightedFontFamily" not in st:
                 weight = 700 if st["bold"] else 400
-            if weight >= 600:
+            # our own decks write OPTICAL_WEIGHT on a regular small sans cut (FontMapper.optical_weight):
+            # that is its regular face, not a bold one pull would write as \textbf
+            if weight >= 600 and (foreign or weight != OPTICAL_WEIGHT):
                 bold = True
             unsure = foreign and base["bold"] and st.get("bold") is False and \
                 (st.get("weightedFontFamily") or {}).get("weight") == 400

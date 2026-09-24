@@ -35,6 +35,19 @@ def test_an_optically_heavier_run_is_measured_in_the_face_slides_draws():
     assert emit.slides_width([tiny], SCALE, FONTS) == pytest.approx(sum(table[c] for c in tiny["text"]) * size)
 
 
+def test_an_optically_heavier_run_reads_back_regular():
+    # deck_ir counted weight 600 as bold: pull would have written the footline as \textbf
+    from beamer2slides.deck_ir import StyleResolver, text_paragraphs
+    style = FONTS.text_style(run_of("June 2026", 5.98, font="SFSS0600"), SCALE)[0]
+    text = {"textElements": [{"startIndex": 0, "endIndex": 10, "paragraphMarker": {"style": {}}},
+                             {"startIndex": 0, "endIndex": 10, "textRun": {"content": "June 2026\n", "style": style}}]}
+    pe = {"objectId": "b2s_s001_t0", "shape": {"shapeType": "TEXT_BOX", "text": text}}
+    runs = [r for p in text_paragraphs(pe, text, StyleResolver({}), FONTS, SCALE) for r in p["runs"]]
+    assert runs and not any(r["bold"] for r in runs)
+    runs = [r for p in text_paragraphs(pe, text, StyleResolver({}), FONTS, SCALE, foreign=True) for r in p["runs"]]
+    assert all(r["bold"] for r in runs)     # a semibold someone chose in another deck is bold
+
+
 def test_cm_sans_cuts_below_eight_points_have_their_own_width():
     # a 6 pt EC sans cut is 1.17 times as wide per em as the 10 pt one (sfss0600.pfb), not the
     # 8 pt cut's 1.06: the footline came out ~10% narrower than the PDF's
