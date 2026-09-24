@@ -76,6 +76,25 @@ def test_a_formula_as_wide_as_half_the_line_keeps_its_spaces():
     assert len(got) == 1 and " " not in got[0], got
 
 
+def test_text_italic_letters_inside_a_formula_are_in_its_hole():
+    """r2_fonts_helvet s3: helvet's math sets its letters in the text italic, 'b N' one span of
+    two letters; the formula hole stopped at the minus before it and ' b N)' became words, a gap
+    each side of them."""
+    size = 11.0
+    y = 100.0
+    spans = [span("We fit the capacity as", 30.0, y, size, w=110.0),
+             span("Q", 143.0, y, size, w=7.0, font=MI), span("0", 150.0, y + 2.0, 5.0, w=3.0, font=RM),
+             span("−", 156.0, y, size, w=8.0, font=SY),
+             span(" b N", 164.0, y, size, w=16.0, font="LMSans10-Oblique"),
+             span(")", 180.5, y, size, w=4.0, font=RM),
+             span(", where the time is", 184.5, y, size, w=90.0)]
+    got = paragraphs(spans)
+    assert len(got) == 1, [text(p) for p in got]
+    holes = [r for r in got[0]["runs"] if r.get("hole")]
+    assert len(holes) == 1 and "b N" not in text(got[0]), text(got[0])
+    assert holes[0]["hole_x0"] + holes[0]["hole"] >= 184.0, holes
+
+
 def test_one_math_letter_among_words_keeps_the_word_spaces_around_it():
     spans = [span("each of", 30.0, 100.0, 11.0, w=40.0), span("c", 73.0, 100.0, 11.0, w=5.0, font=MI),
              span("physicians treats", 81.0, 100.0, 11.0, w=90.0)]

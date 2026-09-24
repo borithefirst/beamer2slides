@@ -2792,6 +2792,10 @@ class PageClassifier:
             return (s.info.family == "math" or bool(script_of(s, line)) or extension_font(s.font)
                     or bool(t) and all(w in OPERATOR_NAMES for w in t.split())  # "lim sup" of a formula
                     or "�" in s.text or (s.info.italic and len(t) <= 2)
+                    # (a text italic's letters with spaces between, "b N" of helvet's math: the
+                    # formula went on past them, r2_fonts_helvet s3 held "− " in its hole and
+                    # set " b N)" as words, gaps on both sides)
+                    or (s.info.italic and bool(t) and all(len(w) == 1 and w.isalpha() for w in t.split()))
                     or any(b.expand(0.5).intersects(s.rect) and s.rect.cy > b.cy for b in bars)
                     or (bool(t) and all(ch in MATH_OPERATORS or ch in "()[]{}|∥,.;:'ˆ˜¯^0123456789 " for ch in t)))
 
