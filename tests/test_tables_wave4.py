@@ -127,10 +127,11 @@ def test_an_overfull_tables_rules_running_off_the_page_are_its_own():
     assert not tables(page.elements())
 
 
-def test_an_overfull_table_is_set_smaller_to_end_where_the_pdfs_does():
+def test_an_overfull_table_is_set_smaller_to_end_on_the_page():
     """Grown by the Slides cell padding of its twelve columns, an overfull table could reach
     neither the margin nor the page edge at TABLE_MIN_SHRINK and kept its size, running further
-    off the slide than the PDF's; it is set smaller until it ends where the PDF's does."""
+    off the slide than the PDF's; it is set smaller (and its columns closed up: wave 5,
+    test_tables_wave5) until it ends on the page, short of where the PDF's does."""
     page, _ = overfull_table()
     (t,) = tables(page.elements())
     scale = 720.0 / W
@@ -139,7 +140,7 @@ def test_an_overfull_table_is_set_smaller_to_end_where_the_pdfs_does():
     grown = E.table_columns(t, [[[{**r, "cell": True} for r in E.in_sentence(c)] for c in row] for row in t["cells"]],
                             scale, fonts, tight=True)[0]
     assert grown[-1] > t["frame"][2] + 5  # (the case: at its size it runs past the PDF's end)
-    assert lay["bounds"][-1] <= t["frame"][2] + 0.01
+    assert lay["bounds"][-1] <= W + 0.01 < t["frame"][2]
     assert E.TABLE_MIN_SHRINK <= lay["shrink"] < 1
 
 
