@@ -77,11 +77,21 @@ def test_explicit_hyphen_at_a_line_end_is_kept_without_a_space():
 def test_verse_lines_after_a_line_number_are_not_centred_together():
     """A verse in a tabular {r@{\\quad}l}: the line under an unnumbered one starts with the
     number 4, one \\quad before its words; the two lines are centred on each other only by their
-    lengths. Every verse line is its own paragraph. (The translation's lines beside it, as long
-    as the column is wide and without a tell of their own, still read as one wrapped paragraph.)"""
+    lengths. Every verse line is its own paragraph."""
     got = [paragraph_text(p) for p in paras(7)]
     assert "hu tha aethelingas ellen fremedon." in got
     assert "4 \u2003Oft Scyld Scefing sceathena threatum" in got
+
+
+def test_translation_lines_broken_by_hand_stay_apart():
+    """The translation beside the verse, a tabular {l}: its lines 2 and 3 are too long for the
+    next line's first word, yet short of the measure, under a long first line TeX ended with room
+    to spare. A run of hand-broken lines: each its own paragraph, not one wrapped paragraph whose
+    lines Slides re-wraps into each other (visual hunt r8, r1_lang_v3 s5: 'valour.Often')."""
+    got = [paragraph_text(p) for p in paras(7)]
+    for line in ("of the Spear-Danes\u2019 kings in days of old,", "how those princes did deeds of valour.",
+                 "Often Scyld Scefing from troops of foes"):
+        assert line in got, got
 
 
 def test_nested_numbers_are_labels_like_their_parents():

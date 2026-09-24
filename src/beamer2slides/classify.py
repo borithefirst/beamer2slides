@@ -3150,6 +3150,9 @@ class PageClassifier:
             first_word = head.rect.w if thin_span(head, line, par.lines + [line]) else first_word_width(head)
             if not right and last.x1 + 0.3 * par.size + first_word < col_right - 0.5:
                 return None
+            if not right and not par.bullet and par.first.tab is None and col_right - last.x1 > 1.5 and \
+                    self.hand_broken(par, pitch, col_right):
+                return None
             return "left"
         if center and par.align in ("left", "center") and len(par.lines) == 1 and line.main.color == last.main.color \
                 or par.align == "center" and center:
@@ -3159,6 +3162,35 @@ class PageClassifier:
         if right and (len(par.lines) > 1 or not par.bullet and line.main.color == last.main.color):
             return "right"  # (a TOC section and its first subsection may end together by chance)
         return None
+
+    def hand_broken(self, par: Paragraph, pitch: float, col_right: float) -> bool:
+        """Is `par` in a run of lines broken by hand (a verse, a tabular's `l` column, an
+        address), so that its last line - short of the measure yet too long for the next word -
+        ended at a \\\\ too? The lines stacked above it at its left edge, one pitch apart, reach
+        up to a long line (half the measure or more) that TeX ended with room to spare for the
+        next line's first word: a forced break. Prose TeX wraps in such a run would be justified
+        to the measure (beamer's default), and none of the lines stacked above is: a paragraph
+        of wrapped prose under a heading ended by \\\\ is not a run (a heading is short). A
+        verse's lines joined as one wrapped paragraph ran together in Slides, whose words run
+        longer ("deeds of / valour.Often Scyld", visual hunt r8, r1_lang_v3 s5)."""
+        size = par.size
+        below = par.first
+        for _ in range(12):
+            above = [l for l in self.all_lines if l.reason is None and not l.bullet and l.tab is None and l.content
+                     and abs(l.size - size) <= 0.5 and abs(l.x0 - below.x0) <= 1.5
+                     and abs(below.baseline - l.baseline - pitch) <= 0.1 * size]
+            if not above:
+                return False
+            u = above[0]
+            if col_right - u.x1 <= 1.5:
+                return False  # (flush with the measure: justified prose, wrapped)
+            if any(len(p.lines) > 1 and u in p.lines for p in self.built_paragraphs):
+                return False  # (the end of a wrapped paragraph above: prose, paragraph after paragraph)
+            head = below.content[0]
+            if u.x1 - u.x0 >= 0.5 * (col_right - u.x0) and u.x1 + 0.3 * size + first_word_width(head) < col_right - 0.5:
+                return True
+            below = u
+        return False
 
     def single_line_align(self, line: Line, margin: float, neighbours: list["Paragraph"] = ()) -> str:
         """A line alone is centred when it is centred on the page, right-aligned when it ends at
@@ -3208,6 +3240,7 @@ class PageClassifier:
     def build_paragraphs(self, lines: list[Line]) -> list[Paragraph]:
         self.find_hfill_pieces(lines)
         paragraphs: list[Paragraph] = []
+        self.built_paragraphs = paragraphs  # (so far: hand_broken asks how the lines above were joined)
         for line in lines:
             if line.reason not in (None, "math"):
                 continue
