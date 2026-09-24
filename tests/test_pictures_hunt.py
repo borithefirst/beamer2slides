@@ -86,6 +86,28 @@ def test_a_logo_wordmark_set_tight_above_a_native_line_stays_in_its_overlay(tmp_
     assert (words[..., 3] > 128).sum() > 50  # the wordmark is in the picture
 
 
+def test_an_ultra_thick_arrow_reaches_the_node_its_head_touches():
+    """r2_overlays_v4 s2: `\\draw<3->[blue, ultra thick, ->] (v) -- (x)` over the black edge. The
+    Stealth head is filled and stroked 1.59 pt wide: its mitred point reaches 2.2 pt past its path,
+    to the node's outline. Ended at the path's point, the native line stopped short and the black
+    edge under it showed as a stub at the tip."""
+    from .test_charts_diagrams import Page, body_text, ellipse, lines
+    from .test_diagrams_overlays import diagram_of
+
+    p = Page()
+    for cx, name in ((145.58, "v"), (213.62, "x")):
+        p.draw(ellipse(cx, 72.02, 11.34, 11.34), type="s", stroke="#000000", width=0.8)
+        p.text(name, cx - 2.5, 75, 9.96)
+    p.draw(lines((157.32, 72.02), (201.88, 72.02)), type="s", stroke="#000000", width=0.8)
+    p.draw(lines((157.32, 72.02), (195.68, 72.02)), type="s", stroke="#0000ff", width=1.59)
+    p.draw(lines((199.61, 72.02), (194.29, 70.0), (196.07, 72.02), (194.29, 74.04), (199.61, 72.02)),
+           type="fs", fill="#0000ff", stroke="#0000ff", width=1.59)
+    body_text(p)
+    blue = next(ln for ln in diagram_of(p)["lines"] if ln["stroke"] == "#0000ff")
+    assert blue["arrow_to"] == "STEALTH_ARROW"
+    assert abs(blue["to"][0] - 201.88) < 0.1  # where the black edge ends, at the node
+
+
 def ink(path) -> np.ndarray:
     """Dark opaque pixels of a picture (an anchored one has a transparent ground)."""
     px = np.array(Image.open(path).convert("RGBA")).astype(int)

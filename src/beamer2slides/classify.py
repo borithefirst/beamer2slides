@@ -610,6 +610,35 @@ def polygon_shape(points: list, r: "Rect") -> str | None:
     return None
 
 
+MITER_LIMIT = 10.0  # PDF's default, and TikZ's
+
+
+def miter_reach(points: list, direction: tuple[float, float], width: float) -> float:
+    """How far an arrow head's outline, stroked `width` wide with mitred joins, reaches past the
+    point of its path furthest along `direction`: half the width over the sine of half the angle
+    at that point (a bevel's half width beyond the miter limit)."""
+    if width <= 0 or len(points) < 3:
+        return 0.0
+    ux, uy = direction
+    along = lambda p: (p[0] * ux + p[1] * uy)
+    corners = [tuple(p) for k, p in enumerate(points) if k == 0 or math.dist(p, points[k - 1]) > 1e-6]
+    if len(corners) > 2 and math.dist(corners[0], corners[-1]) <= 1e-6:
+        corners.pop()
+    if len(corners) < 3:
+        return 0.0
+    k = max(range(len(corners)), key=lambda i: along(corners[i]))
+    apex, a, b = corners[k], corners[k - 1], corners[(k + 1) % len(corners)]
+    va, vb = (a[0] - apex[0], a[1] - apex[1]), (b[0] - apex[0], b[1] - apex[1])
+    na, nb = math.hypot(*va), math.hypot(*vb)
+    if na < 1e-6 or nb < 1e-6:
+        return 0.0
+    cos = max(-1.0, min(1.0, (va[0] * vb[0] + va[1] * vb[1]) / (na * nb)))
+    half = math.acos(cos) / 2
+    if half < 1e-3 or 1 / math.sin(half) > MITER_LIMIT:
+        return width / 2
+    return width / 2 / math.sin(half)
+
+
 def upright_ellipse(path: list, r: Rect) -> bool:
     """Four curves closing an ellipse whose axes are the box's: they join end to start, and
     meet the box at the middle of each side. A sine wave is four curves too (TikZ's sin cos
@@ -3770,7 +3799,7 @@ class PageClassifier:
                 else:
                     style = "STEALTH_ARROW" if ops == "llll" else "FILL_ARROW"
                 points = [p for _, pts in path for p in pts]
-                tips.append((r, style, points))
+                tips.append((r, style, points, d["width"] if "s" in d["type"] and d["width"] else 0.0))
             else:
                 return None
         self.closed_frames(nodes, lines)
@@ -3784,7 +3813,7 @@ class PageClassifier:
                 if overlap(ra, rb) > 0.05 * min(ra.w * ra.h, rb.w * rb.h) and \
                         not ra.contains_rect(rb) and not rb.contains_rect(ra):
                     return None
-        for tip, style, points in tips:
+        for tip, style, points, outline in tips:
             ends = [(ln, end) for ln in lines for end in ("from", "to") if tip.expand(1).contains(*ln[end])]
             if not ends:
                 return None
@@ -3798,6 +3827,10 @@ class PageClassifier:
                 length = (ux * ux + uy * uy) ** 0.5 or 1.0
                 ux, uy = ux / length, uy / length
                 reach = max((px - ln[end][0]) * ux + (py - ln[end][1]) * uy for px, py in points)
+                # A head filled and stroked (ultra thick ->) reaches past its path by its outline's
+                # mitred point: the line stopped that short of the node, the black edge drawn
+                # under it showing as a stub at the tip.
+                reach += miter_reach(points, (ux, uy), outline)
                 if reach > 0:
                     ln[end] = [round(ln[end][0] + reach * ux, 2), round(ln[end][1] + reach * uy, 2)]
 
