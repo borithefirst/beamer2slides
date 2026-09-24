@@ -4506,3 +4506,52 @@ Probe (`tools/probe_font_weights.py`, 24 pt, ink per pt of line): Lato 300 43.4,
 Sans JP 100-500 all 74.9 (one weight served; Lato's own CJK fallback 74.7, the same face), 700 112.9;
 Noto Serif JP 300 47.0, 400 52.0; SC/KR like JP. Full-width （）？ stay full-width in Noto Sans JP.
 ▶ ▸ ► ‣ ■ □ render in Lato (fallback), Noto Sans Symbols and Noto Sans Symbols 2, each its own shape.
+
+### Fixes, wave 4 (2026-09-24, five fixers, `out/hunt/WAVE4.md`, merged f782465..88882c6)
+Aimed at the 12 r8 regressions first, then what was left.
+- **F (fonts)**: `OPTICAL_WEIGHT` 800 (the probe: 500/600 draw Regular), measured in bold widths,
+  read back regular by deck_ir (600 too, for old decks); pull leaves zero text residuals. A Type 3
+  font of only codes above 0x7F tries TS1/T2A before T1 (`µs` had become `ţs`; only that one font
+  changed over every Type 3 deck). Letterspacing of 0.14 em or more (`extract.TRACK_SPACED`) keeps
+  a no-break space between letters, one more at word gaps: textfx s8 362.2 pt vs the PDF's 361.8
+  (tight 339.3), textfx-v2 s1 235.2 vs 236.8 (181.5), v3 s5 280 vs 350 (248); small caps at 0.11 em
+  stay joined. Thin/hair spaces not used: their Slides advances are unmeasured. Not the converter's:
+  the full-width ？ is U+FF1F in Noto Serif SC at the PDF size (the GB glyph form); the Type 3
+  footline's 15% is the 1.13 width cap (4% narrower, 10% taller); β: PT Serif has no Greek, Slides
+  falls back to an unmeasured face; Japanese weight: one weight served.
+- **P (pictures, bullets)**: a figure box widened by a label reached half over a list's balls and its
+  image removal cut them (bullet colour from what was left); list balls now stay whole. Icons take
+  their whole glyph ('!' back). Painting a box out took background lines a pixel past it (white
+  nicks in a git graph, a lang_v1 axis gap): `render.picture_crossings`. A comma at a panel edge stays
+  with its word (`over_panel_edge`). Hole crops on photos were opaque and the photo cut out under
+  them: the photo stays whole, the hole's picture is its glyphs on a clear ground
+  (`on_picture_ground`). A row of like labels is no plot title (`in_label_row`). RTL flat discs left
+  as they are: LTR balls become discs the same way, and a Slides bullet cannot be shaded.
+- **L2 (code, tables)**: on 18 single-line boxes of the r8 renders (Lato, Roboto Mono, Carlito, Fira
+  Sans) Google rounds each paragraph step to whole pixels with its spaceAbove included: 0.07 pt rms,
+  against 0.30 for the old model (pitch rounded alone, space added); `pitch_between(..., gap)` and
+  `text_layout` now do that (listing numbers rode progressively high). Shaded rows sit on their own
+  bands (`bands`); a measured column gets its words plus `WRAP_MARGIN`, 8% only when unmeasured;
+  `table_shift` moves both ways; an overfull table's rules run off the right page edge and it shrinks
+  (never below 0.75x) to end where the PDF's does; a siunitx dash is a `centred` cell. tables_v2 s10
+  is Slides not hyphenating (representa-tion needs 119 pt against the PDF's 109): offline and Google
+  agree (1548 vs 1539 px).
+- **L1 (text layout)**: lines broken by hand under a long forced break stay apart (`hand_broken`,
+  verse translations); a lone line flush with a right-aligned paragraph beside it is right-aligned;
+  classify records wrapped lines' starts (`line_starts`) so emit sizes a box without TeX widths;
+  symbols a face lacks take their measured fallback advances (⊂ 0.981 em, was 0.6); a small-caps word
+  across spans is one word. Slides keeps a space and the NBSPs after it together, so the word before
+  a hole wraps with it ('but', 'than'): `text_layout.wrap` reproduces both live breaks and predicts
+  the PDF's with a ZWSP between; emit does not write it yet (a live check, and deck_ir, merge and
+  fuzz_sync assume holes are pure NBSP). Wrapped pitch: Slides' constraint, not ours: the PDF's inner
+  pitch 13.55 pt, the written lineSpacing ~1.15-1.18 gives 15.0; since Slides ignores space between
+  bulleted items one ratio must also land the next item, and matching the inner pitch would drift
+  each later item ~3.25 pt up.
+- **M (math)**: ⟶ ⟹ ⟺ and mhchem's arrows are holes at the PDF's length (`long_arrow_groups`),
+  their `\xrightarrow`/mhchem labels in the arrow's picture, a label between two arrows to the
+  nearer. A lone CMEX piece is no wrapped formula (the split matrix parenthesis). A wrapped formula
+  line with no prose holding holes, bars or unmeasured symbols is one hole (`unmeasured_symbols`),
+  and a formula wrapped alone is its own paragraph (`wrapped_formulas_apart`, the dense_v4 overprint
+  and lang_v3's verse picture). Cell accents compose (`span_runs`: β̂, ȳ). Classified all 89 r8
+  archives before/after: 22 slides and 7 tables changed, all as intended. Open: one subscript level
+  in Slides (FE_{C2H4}); V-themes-10 'If p' is one span.
