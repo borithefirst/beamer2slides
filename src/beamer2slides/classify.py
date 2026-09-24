@@ -3714,10 +3714,13 @@ class PageClassifier:
                 out += bars
                 continue
             spans = [s.id for s in label_spans if c.expand(0.5).contains_rect(s.rect)]
-            if not spans and c.h <= 1.5 and not any(c.expand(0.5).intersects(Rect.of(im["bbox"])) for im in self.page["images"]):
+            under_words = any(t.x0 < c.x1 and c.x0 < t.x1 and t.y0 < c.cy <= t.y1 + 0.3 * self.body for t in text_rects)
+            if not spans and c.h <= 1.5 and under_words and \
+                    not any(c.expand(0.5).intersects(Rect.of(im["bbox"])) for im in self.page["images"]):
                 # Only a hairline (the pieces of an underline under words left in the background):
                 # a picture adds nothing, and its box took the words above it off the background
-                # while the crop showed only the rule.
+                # while the crop showed only the rule. (A rule with no words on it - a footnote's,
+                # above its text - stays a picture: in the background it is ink by native words.)
                 continue
             el = {"id": f"p{self.page['index']}f{len(out)}", "kind": "image", "role": "figure",
                   "bbox": self.clip_to_bands(c, c.expand(1.0)).as_list(), "spans": spans}

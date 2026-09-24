@@ -294,7 +294,8 @@ def test_an_items_formula_wrapped_onto_its_own_line_stays_in_the_item():
     assert not any(e.get("role") == "math" and not e.get("anchor") for e in slide["elements"])
     text = " / ".join("".join(r["text"] for r in par["runs"]) for e in slide["elements"] if e["kind"] == "text"
                       for par in e["paragraphs"])
-    assert "now C = 1.0" in text and "Separator theorems" in text
+    # (TeX's 0.28 em space around = is narrower than a word space: thin_span may keep it no-break)
+    assert "now C = 1.0" in text.replace("\xa0", " ") and "Separator theorems" in text
 
 
 def pie_beside_a_list():
