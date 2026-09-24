@@ -35,8 +35,11 @@ BOX_ROOM = 4.0                  # pt emit leaves under the last line's descent (
 
 
 def _style_name(st: dict) -> str:
+    # (Slides draws a weight of 700 or more with the family's bold face, whatever `bold` says:
+    # emit.OPTICAL_WEIGHT's footlines)
+    bold = bool(st.get("bold")) or (st.get("weight") or 0) >= 700
     return {(False, False): "regular", (True, False): "bold", (False, True): "italic",
-            (True, True): "bold_italic"}[(bool(st.get("bold")), bool(st.get("italic")))]
+            (True, True): "bold_italic"}[(bold, bool(st.get("italic")))]
 
 
 def advance(ch: str, st: dict, size: float) -> float:
@@ -215,7 +218,7 @@ def layout(rb: dict, size: float | None = None) -> dict | None:
             elif li == 0:
                 # Slides ignores the space between two bulleted items
                 gap = 0.0 if ps["bullet"] and bullet_prev else ps["spaceAbove"] + below
-                baseline += emit.pitch_between(previous, r_prev, z, r) + gap
+                baseline += emit.pitch_between(previous, r_prev, z, r, gap)  # (snapped with its gap)
             else:
                 baseline += emit.line_pitch(previous, r, z)
             previous, r_prev = z, r

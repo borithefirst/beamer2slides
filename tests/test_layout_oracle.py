@@ -116,7 +116,8 @@ def test_each_paragraph_takes_its_own_style_when_the_read_back_can_say_which():
     rb = text_rb("text/body/0", [10, 50, 710, 150], "First.\nSecond.", paras=two)
     spaced = L.layout(rb)["lines"][1]["baseline"]
     tight = L.layout(text_rb("text/body/0", [10, 50, 710, 150], "First.\nSecond."))["lines"][1]["baseline"]
-    assert abs(spaced - tight - 10.75) < 0.01
+    # (the step snaps to whole pixels with its space, emit.pitch_between: within a pixel)
+    assert abs(spaced - tight - 10.75) < 0.75
     # three paragraphs, two distinct styles: which one has the space is unknown, so none gets it
     three = L.layout(text_rb("text/body/0", [10, 50, 710, 150], "A.\nB.\nC.", paras=two))
     assert L.para_styles(text_rb("x/y/0", [0, 0, 1, 1], "A.\nB.\nC.", paras=two), 3)[2]["spaceAbove"] == 0.0

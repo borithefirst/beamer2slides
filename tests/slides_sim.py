@@ -203,6 +203,9 @@ def apply(r: dict, elements: list[dict], objects: dict, notes: Text, slide_id: s
                 for f in fields:
                     if f in body["style"]:
                         text.styles[k][f] = copy.deepcopy(body["style"][f])
+                    if f == "weightedFontFamily" and "bold" not in fields:
+                        # a weight reads back as bold from 700 up (tools/probe_font_weights.py)
+                        text.styles[k]["bold"] = (body["style"][f].get("weight") or 400) >= 700
         elif name == "updateParagraphStyle":
             a, b = text.ranges(body["textRange"])
             for pa, pb, marker in text.paragraphs():

@@ -165,16 +165,21 @@ def identify(obs: dict, size: float, prior: dict[str, float] | None = None) -> T
     two shape letters) the page uses most elsewhere, then the family (`prior`: shape or
     "family:<serif|sans|mono>" -> characters; "text:<family>" for the page's other fonts), then
     T1 (T2A's Latin letters are T1's; without a Cyrillic code the two are one font), then the
-    everyday face: upright before its slanted twin (`slanted` tells those apart)."""
+    everyday face: upright before its slanted twin (`slanted` tells those apart).
+
+    A font of nothing but codes above 0x7F is no T1 text font: T1's accented letters come in the
+    font of the words they are in, with its ASCII letters. Such a font is a symbol (TS1) or a
+    Cyrillic (T2A) one before T1: a lone \\textmu at 0xB5, as wide as ectt's ţ, came out 'ţs'."""
     found = candidates(obs, size)
     if not found:
         return None
     prior = prior or {}
+    symbols = bool(obs) and all(c >= 0x80 for c in obs)
 
     def key(f: TexFont):
         shape = f.name[2:4]
         return (-prior.get(SLANTED_OF.get(shape, shape), 0), -prior.get("family:" + family(shape), 0),
-                -prior.get("text:" + family(shape), 0), f.encoding != "T1", _rank(f), f.name)
+                -prior.get("text:" + family(shape), 0), (f.encoding == "T1") == symbols, _rank(f), f.name)
     return min(found, key=key)
 
 

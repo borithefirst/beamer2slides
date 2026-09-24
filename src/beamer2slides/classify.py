@@ -1337,8 +1337,11 @@ class PageClassifier:
         rules: dict[tuple[int, int], list[tuple[str, Rect]]] = {}
         for d in self.page["drawings"]:
             r = Rect.of(d["bbox"])
+            # (an overfull table's rules start at its margin and run off the page's right edge,
+            # where TeX lets an overfull line go: r2_tables_v2 slide 6, r2_tables_v3 slide 2 fell
+            # apart into free text; theme hairlines touch the left edge or both)
             if d["id"] in self.decor_ids or r.w < 0.5 * self.W or \
-                    r.x0 <= 1 or r.y0 <= 1 or r.x1 >= self.W - 1 or r.y1 >= self.H - 1:
+                    r.x0 <= 1 or r.y0 <= 1 or r.y1 >= self.H - 1:
                 continue
             if (d["type"] == "s" and d["items"] == "l" and r.h <= 1.0) or \
                     (d["type"] == "f" and d["items"] == "re" and r.h <= 1.5):
@@ -1860,8 +1863,11 @@ class PageClassifier:
                     same_row = False
                 gap = max(0.0, b.rect.x0 - a.rect.x1, a.rect.x0 - b.rect.x1)
                 # (text colour changes with the panel; a dark number on a light box across the
-                # edge still belongs to its line)
-                if same_row and gap <= 2.0 * big and (panel[i] == panel[j] or a.color == b.color) and artwork[i] == artwork[j] \
+                # edge still belongs to its line; so does a piece running over its panel's edge
+                # right after a word in it - an overfull listing line's closing comma)
+                if same_row and gap <= 2.0 * big and (panel[i] == panel[j] or a.color == b.color
+                                                      or self.over_panel_edge(a, b, panel[i], panel[j], gap, big)) \
+                        and artwork[i] == artwork[j] \
                         and not (gap > 0.8 * big and self.gutter(spans, a, b, big)) \
                         and not self.figure_label_apart(spans, a, b, gap, big):
                     parent[find(i)] = find(j)
@@ -2079,6 +2085,21 @@ class PageClassifier:
                     s.text = text
                 s.reading = (n, rank, base, widths[spaced[i]] if i in spaced else 0.0)
 
+    def over_panel_edge(self, a: Span, b: Span, pa: int | None, pb: int | None, gap: float, size: float) -> bool:
+        """Two pieces nearly touching where one's panel ends: the other starts inside that panel
+        and runs over its edge (its centre outside). A listing line overfull by a character
+        ('"order-service",' against its frame) left the comma a box of its own, set 70 px away."""
+        if pa == pb or gap > 0.3 * size:
+            return False
+        for inner, outer, p in ((a, b, pa), (b, a, pb)):
+            if p is None:
+                continue
+            box = self.panels[p]["bbox"]
+            r = outer.rect
+            if box.contains(r.x0 + 0.1, r.cy) and not box.contains(r.cx, r.cy) and r.w <= 1.5 * size:
+                return True
+        return False
+
     def figure_label_apart(self, spans: list[Span], a: Span, b: Span, gap: float, size: float) -> bool:
         """A figure's label beside a column of words right of the figure (a pie's pin label
         on the baseline of a list item's second line, 0.8 em from it): the label is next to
@@ -2090,6 +2111,11 @@ class PageClassifier:
             return False
         left, right = (a, b) if a.rect.x0 < b.rect.x0 else (b, a)
         if sum(c.isalnum() for c in left.text) < 2 or re.fullmatch(r"\(?\w{1,3}[.):]", left.text.strip()):
+            return False
+        # The column's piece is words too: a lone number right of a line is the label of an item
+        # read right to left, its ball's digit ('1' hanging right of a Hebrew item, the balls
+        # below it the same column), and apart from its item the ball lost its number.
+        if sum(c.isalnum() for c in right.text) < 2:
             return False
         near = lambda s: any(r.distance(s.rect) <= 0.5 * size for r in self.regions)
         if not near(left) or near(right):
@@ -2980,7 +3006,7 @@ class PageClassifier:
             turned = line.reason == "rotated"  # a y axis title, read bottom to top
             if (line.reason is not None and not turned) or line.bullet or line.tab is not None or not text or \
                     len(text.split()) > 6 or line.size > 1.3 * self.body or CAPTION_RE.match(text) or \
-                    (text.endswith(".") and len(text.split()) >= 4):
+                    (text.endswith(".") and len(text.split()) >= 4) or self.in_label_row(line, lines):
                 continue
             r = line.rect
             for reg, box in plots:
@@ -2994,6 +3020,18 @@ class PageClassifier:
                     line.reason = "figure"
                     self.title_bridges.append(union_all([r, box]))
                     break
+
+    @staticmethod
+    def in_label_row(line: Line, lines: list[Line]) -> bool:
+        """One of a row of like short labels two or more of which stay text ('Week 0  Week 1
+        Week 2-3  Week 4' over a timeline): the row's, not the title of a drawing it happens to
+        be centred over (r1_design_v1 s5, the label above a callout box alone went into the
+        callout's picture, its row left text)."""
+        face = (line.spans[0].font, round(line.size, 1))
+        row = [o for o in lines if o is not line and o.reason is None and not o.bullet and o.spans and
+               (o.spans[0].font, round(o.size, 1)) == face and abs(o.baseline - line.baseline) <= 0.25 * line.size
+               and len(o.text.replace(" ", "")) <= 12]
+        return len(row) >= 2
 
     # -- paragraphs -------------------------------------------------------------
 
@@ -4587,6 +4625,7 @@ class PageClassifier:
         heads: list[list[Span] | None] = [None] * len(columns)  # (each column's cell in the first row)
         extent_of: dict[int, tuple[float, float]] = {}  # (a merged cell's words, by its index in merges)
         merges, covered = [], {}
+        row_of: dict[int, int] = {}  # (a single cell's words, by id: its row)
         for it in items:
             r, rs, ch = it
             x0, x1 = extent(ch)
@@ -4607,6 +4646,7 @@ class PageClassifier:
                 extent_of[len(merges) - 1] = (x0, x1)
             else:
                 placed[c0].append(ch)
+                row_of[id(ch)] = r
                 if r == 0 and rs == 1:
                     heads[c0] = ch
         col_info = []
@@ -4627,6 +4667,22 @@ class PageClassifier:
             # alignment (`head`) and the body its own, to the body's edges (`body`). As one, a
             # centred head took the body's left edge, or every number was centred.
             body = [ch for ch in chunks if ch is not head]
+            # siunitx centres what is no number (a dash for a missing value) on the column, the head's
+            # centre, while its numbers keep their decimal places, off the middle (r2_tables_v2 slide
+            # 4): such a cell is set centred over the column like the head (`centred`, its rows), the
+            # body's alignment is its numbers'.
+            if head is not None:
+                hc = (head[0].rect.x0 + head[-1].rect.x1) / 2
+                numeric = lambda ch: any(c.isdigit() for s in ch for c in s.text)
+                on_axis = lambda ch: abs((ch[0].rect.x0 + ch[-1].rect.x1) / 2 - hc) <= 1
+                odd = [ch for ch in body if not numeric(ch) and on_axis(ch)]
+                rest = [ch for ch in body if not any(ch is o for o in odd)]
+                if odd and len(rest) >= 2 and all(numeric(ch) and not on_axis(ch) for ch in rest):
+                    bx0, bx1 = min(ch[0].rect.x0 for ch in rest), max(ch[-1].rect.x1 for ch in rest)
+                    info.update(align=aligned(rest, bx0, bx1), head="center", body=[round(bx0, 2), round(bx1, 2)],
+                                centred=sorted(row_of[id(ch)] for ch in odd))
+                    col_info.append(info)
+                    continue
             if head is not None and len(body) >= 2:
                 bx0, bx1 = min(ch[0].rect.x0 for ch in body), max(ch[-1].rect.x1 for ch in body)
                 hx0, hx1 = head[0].rect.x0, head[-1].rect.x1
@@ -4747,6 +4803,17 @@ class PageClassifier:
         set_justified = {cc for cc in range(n_cols) if col_info[cc]["align"] == "left" and justified_cells(
             [cell_lines[r][c2] for r, c2, _ in wrapped_cells if c2 == cc], columns[cc][1])}
         justified = [[r, cc] for r, cc, _ in wrapped_cells if cc in set_justified]
+        # [row, top, bottom] of a row shaded by a band of its own (\rowcolor, \rowcolors: fills
+        # that hold its baseline and no other row's): emit puts the Slides row's edges there, as on
+        # a rule. Set just above its words instead, a shaded row began ~3 pt below its band and
+        # the words sat at the top of their fill (r2_tables_v1 slide 4).
+        shown = [f for f in fills if f["color"].lower() != page_color]
+        bands = []
+        for rr, b in enumerate(baselines):
+            own = [f["rect"] for f in shown if f["rect"].y0 <= b <= f["rect"].y1
+                   and sum(f["rect"].y0 <= b2 <= f["rect"].y1 for b2 in baselines) == 1]
+            if own:
+                bands.append([rr, round(min(r.y0 for r in own), 2), round(max(r.y1 for r in own), 2)])
         return {
             "id": f"p{self.page['index']}tab{index}", "kind": "table", "role": "table",
             "bbox": c.expand(1.0).as_list(), "frame": frame.as_list(), "size": round(size, 2),
@@ -4776,6 +4843,7 @@ class PageClassifier:
                       for f in fills if f["color"].lower() != page_color
                       for rr, b in enumerate(baselines) if f["rect"].y0 <= b <= f["rect"].y1
                       for cc in range(n_cols) if f["rect"].x0 <= (bounds[cc] + bounds[cc + 1]) / 2 <= f["rect"].x1],
+            **({"bands": bands} if bands else {}),
             "spans": [s.id for s in spans],
         }
 
