@@ -237,12 +237,23 @@ class Line:
                              (overlap_x(s) >= min(1.0, 0.5 * s.rect.w) and (off_baseline(s) or any(map(off_baseline, h)))))]
                 h += more
                 grown = bool(more)
+        def side_by_side(a: list, b: list) -> bool:
+            """Two holes with no word between them (\\uwave{all benchmarks}: a picture per word,
+            kerned together): Slides' text has one gap there, as wide as both, and each picture
+            was measured into the same gap, one over the other. They are one hole."""
+            ra, rb = sorted((self.hole_rect(a), self.hole_rect(b)), key=lambda r: r.x0)
+            if rb.x0 - ra.x1 > 0.5 * self.size:
+                return False
+            return not any(s not in a and s not in b and s.text.strip() and ra.x1 - 0.5 < s.rect.cx < rb.x0 + 0.5
+                           for s in self.content)
+
         merged = True
         while merged:
             merged = False
             for i, a in enumerate(holes):
                 for b in holes[i + 1:]:
-                    if set(map(id, a)) & set(map(id, b)) or self.hole_rect(a).intersects(self.hole_rect(b)):
+                    if set(map(id, a)) & set(map(id, b)) or self.hole_rect(a).intersects(self.hole_rect(b)) \
+                            or side_by_side(a, b):
                         a += [s for s in b if s not in a]
                         holes.remove(b)
                         merged = True
@@ -406,6 +417,14 @@ NEGATION = "̸"  # TeX's \not: a slash laid over the relation after it (\neq, \n
 ACCENTS = {"¯": "̄", "ˆ": "̂", "˜": "̃", "˙": "̇", "¨": "̈", "´": "́",
            "`": "̀", "ˇ": "̌", "˘": "̆", "˚": "̊", "˝": "̋", "¸": "̧", "˛": "̨"}
 BELOW_ACCENTS = set("¸˛")  # \c{S} is set letter first, then its cedilla (\ooalign)
+# Symbols TeX builds from pieces it overlaps (\cong: ∼ over =; \implies, \longrightarrow,
+# \xrightarrow and mhchem's arrows: relbars kerned under an arrow by \joinrel): one Unicode
+# symbol, since Slides sets the pieces one after the other, apart (−−→, =⇒, ∼=). A pair
+# folds left to right, so a chain of relbars of any length ends as one long arrow.
+COMPOSED = {("−", "−"): "−", ("=", "="): "=", ("−", "→"): "⟶", ("−", "⟶"): "⟶", ("←", "−"): "⟵",
+            ("⟵", "−"): "⟵", ("⟵", "→"): "⟷", ("←", "→"): "⟷", ("←", "⟶"): "⟷",
+            ("=", "⇒"): "⟹", ("=", "⟹"): "⟹", ("⇐", "="): "⟸", ("⟸", "="): "⟸", ("⟸", "⇒"): "⟺",
+            ("⇐", "⇒"): "⟺", ("⇐", "⟹"): "⟺", ("∼", "="): "≅", ("=", "∼"): "≅"}
 
 
 def with_accent(letter: str, mark: str) -> str:
@@ -414,6 +433,26 @@ def with_accent(letter: str, mark: str) -> str:
     if unicodedata.combining(mark) == 230 and letter in "ıȷ":  # a mark above
         letter = "ij"["ıȷ".index(letter)]
     return unicodedata.normalize("NFC", letter + mark)
+
+
+def accent_beside(accent: "Span", base: "Span") -> bool:
+    """True if `accent` is a TeX accent set over a letter of `base` that Slides would set it
+    beside: a letter outside the Latin script with no precomposed form with that mark (\\hat\\beta,
+    \\tilde\\mu). The combining mark comes after the letter, and no Slides face anchors a mark on
+    a Greek letter, so the hat stands to its right, over the next word (r1_econ_v4 s1); such a
+    letter is a formula hole, its picture the page's. (A Latin letter keeps its mark: its faces
+    place one, and x̄ is a precomposed ȳ's neighbour.)"""
+    mark = ACCENTS.get(accent.text.strip())
+    if not mark or not (base.rect.x0 < accent.rect.x1 - 0.2 and accent.rect.x0 < base.rect.x1 - 0.2):
+        return False
+    text = base.text
+    if not text.strip():
+        return False
+    # the letter under the accent's middle (the span's advance shared out evenly)
+    k = int((accent.rect.cx - base.rect.x0) / max(base.rect.w, 1e-6) * len(text))
+    letter = text[min(max(k, 0), len(text) - 1)]
+    return letter.isalpha() and not unicodedata.name(letter, "LATIN").startswith("LATIN") \
+        and letter not in "ıȷ" and len(unicodedata.normalize("NFC", letter + mark)) > 1
 
 
 def compose_accents(text: str, mono: bool = False) -> str:
@@ -449,13 +488,24 @@ def negate(text: str) -> str:
     return re.sub(NEGATION + r"\s*(\S)", lambda m: unicodedata.normalize("NFC", m.group(1) + NEGATION), text)
 
 
+def compose_symbols(text: str) -> str:
+    """The pieces of a composed symbol set in one math font as the symbol: "−−→" -> "⟶",
+    "⇐⇒" -> "⟺" (two relation pieces never stand side by side unspaced in TeX math unless
+    \\joinrel overlapped them). Pieces in two fonts (CMR's =, CMSY's ⇒) are joined where they
+    overlap on the page (`PageClassifier` line runs)."""
+    out = ""
+    for c in text:
+        out = out[:-1] + COMPOSED[(out[-1], c)] if out and (out[-1], c) in COMPOSED else out + c
+    return out
+
+
 def math_pieces(font: str, text: str) -> list[tuple[str, bool]]:
     """Unicode text of a span set in a math font, as pieces with their italic flag. A TeX math
     italic font (CMMI, Latin Modern's LMMathItalic, newtx's NewTXMI...) makes the span italic
     where it has letters; an OpenType math font's span mixes italic letters (𝑥, 𝜆: plain
     letters set italic) with upright operators and digits, piece by piece."""
     key = re.sub(r"[^A-Z0-9]", "", font.split("+", 1)[-1].upper())
-    text = negate(text)
+    text = compose_symbols(negate(text))
     if key.startswith("MSBM"):  # \mathbb
         return [("".join(DOUBLE_STRUCK.get(c, chr(0x1D538 + ord(c) - 65) if "A" <= c <= "Z" else c)
                          for c in text), False)]
@@ -2391,6 +2441,8 @@ class PageClassifier:
             if any(b.expand(1).intersects(rect) and not any(abs(b.x0 - sb.x0) < 0.1 and abs(b.y0 - sb.y0) < 0.1
                                                               for sb in simple_bars) for b in bars):
                 return True
+            if any(accent_beside(a, b) for a in seg for b in seg if a is not b):
+                return True
             scripts = [s for s in seg if script_of(s, line) and id(s) not in in_fraction]
             if any(s.size < 0.6 * size or abs(s.baseline - line.baseline) > 0.6 * size for s in scripts):
                 return True
@@ -3131,6 +3183,16 @@ class PageClassifier:
                     prev, hole_x1 = max(hole, key=lambda s: s.rect.x1), x1
                     continue
                 text = span.text
+                if prev is not None and runs and not runs[-1].get("hole") and text.strip() and \
+                        span.rect.x0 < prev.rect.x1 - 0.2 and prev.rect.x0 < span.rect.x1 and \
+                        (runs[-1]["text"][-1:], text.strip()[0]) in COMPOSED:
+                    # a composed symbol's pieces in two fonts, overlapped (CMSY's ∼ over CMR's =)
+                    tail = runs[-1]["text"]
+                    runs[-1]["text"] = tail[:-1] + COMPOSED[(tail[-1], text.strip()[0])]
+                    text = text.strip()[1:] + text[len(text.rstrip()):]
+                    if not text.strip():
+                        prev = max(prev, span, key=lambda s: s.rect.x1)
+                        continue
                 if text.strip() in ACCENTS and prev is not None and runs and not runs[-1].get("hole") and \
                         span.rect.x0 < prev.rect.x1 - 0.2 and prev.rect.x0 < span.rect.x1:
                     tail = runs[-1]["text"]  # over the letter before it

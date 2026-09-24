@@ -166,6 +166,70 @@ def test_words_a_thin_picture_grazes_stay_in_the_background(tmp_path):
     assert (words.min(axis=2) < 100).sum() > 200  # the words are still on the background
 
 
+def test_symbols_tex_builds_from_overlapped_pieces_are_one_character():
+    """r1_math_v2 s2/s9, r1_sci_v3 s3: \\cong is CMSY's ∼ over CMR's =, \\implies CMR's = kerned
+    under CMSY's ⇒, \\longrightarrow and mhchem's reaction arrow relbars under an arrow in one
+    CMSY span. Slides set the pieces one after the other: '∼=', '=⇒', '−−→'."""
+    from .test_charts_diagrams import Page, body_text, deck
+
+    p = Page()
+    x = p.words("Dual spaces: L", 30, 60)
+    p.text("∼", x + 3, 57, font="CMSY10", w=8.48)
+    p.text("=", x + 3, 60.5, font="CMR10", w=8.48)
+    p.words("M for every p.", x + 15, 60)
+    x = p.words("If A holds", 30, 80)
+    p.text("=", x + 3, 80, font="CMR10", w=8.48)
+    p.text("⇒", x + 9.8, 80, font="CMSY10", w=10.9)
+    p.words("B holds too.", x + 24, 80)
+    x = p.words("Oxide plus acid", 30, 100)
+    p.text("−−→", x + 3, 100, font="CMSY10", w=21.8)
+    p.words("iodide and water.", x + 28, 100)
+    body_text(p)
+    runs = lambda e: "".join(r["text"] for par in e["paragraphs"] for r in par["runs"])
+    text = " / ".join(runs(e) for e in deck(p)["slides"][0]["elements"] if e["kind"] == "text")
+    assert "L ≅ M" in text and "A holds ⟹ B" in text and "acid ⟶ iodide" in text
+
+
+def test_an_accent_over_a_greek_letter_is_a_formula_hole():
+    """r1_econ_v4 s1, r1_math_v2 s8: \\hat\\beta and \\tilde\\mu became β + U+0302: no Slides face
+    anchors a mark on a Greek letter, so the hat stood beside the letter, over the next word. The
+    letter is a hole, its picture the page's; a Latin letter keeps its combining mark."""
+    from .test_charts_diagrams import Page, body_text, deck
+
+    p = Page()
+    p.text("β", 50.17, 60, font="CMMI10", w=5.62)
+    p.text("ˆ", 51.58, 57.5, font="CMR10", w=4.99)
+    p.words("is the semi-elasticity of permits to the reform", 59.64, 60)
+    p.text("X", 50.17, 80, font="CMMI10", w=6.63)
+    p.text("˜", 51.58, 77.5, font="CMR10", w=4.99)
+    p.words("are the residualised controls of the model", 60.5, 80)
+    body_text(p)
+    slide = deck(p)["slides"][0]
+    holes = [e for e in slide["elements"] if e["kind"] == "image" and e.get("anchor")]
+    assert len(holes) == 1 and holes[0]["bbox"][1] < 60 < holes[0]["bbox"][3]
+    runs = [r for e in slide["elements"] if e["kind"] == "text" for par in e["paragraphs"] for r in par["runs"]]
+    assert not any("β" in r["text"] for r in runs) and any("X̃" in r["text"] for r in runs)
+
+
+def test_holes_with_no_word_between_them_are_one_hole():
+    """r3_textfx_v2 s7: \\uwave{all benchmarks} became a hole per word, set side by side. Slides'
+    text had one gap there, as wide as both, and measure_places put both pictures in it, one
+    over the other ('all' printed over 'be'). With a word between them they stay two."""
+    from beamer2slides.classify import Line
+
+    from .test_charts_diagrams import span
+
+    words = [span("Rejected:", 30, 10.91), span("significantly,", 84.3, 10.91), span("all", 142.3, 10.91),
+             span("benchmarks", 159.3, 10.91)]  # (1 pt of kerning apart)
+    line = Line(list(words))
+    line.add_holes([[words[2]], [words[3]]])
+    assert [[s.text for s in h] for h in line.holes] == [["all", "benchmarks"]]
+    words = [span("x", 30, 10.91), span("and", 40, 10.91), span("y", 60, 10.91)]
+    line = Line(list(words))
+    line.add_holes([[words[0]], [words[2]]])
+    assert len(line.holes) == 2
+
+
 def ink(path) -> np.ndarray:
     """Dark opaque pixels of a picture (an anchored one has a transparent ground)."""
     px = np.array(Image.open(path).convert("RGBA")).astype(int)
