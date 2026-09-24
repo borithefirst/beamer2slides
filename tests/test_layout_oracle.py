@@ -213,6 +213,19 @@ def test_an_old_deep_overlap_does_not_hide_the_new_one():
     assert [(o["object"], o["other"]) for o in found] == [("u1", "n1")]
 
 
+def test_a_paragraphs_indent_end_narrows_its_lines():
+    """emit.paragraph_ends keeps a paragraph's right edge short of the box's with indentEnd: the
+    line model breaks and aligns against that edge, not the box's."""
+    from beamer2slides import text_layout
+    words = "one two three four five six seven eight nine ten"
+    free = text_layout.layout(text_rb("x", [0.0, 0.0, 400.0, 200.0], words))
+    held = text_layout.layout(text_rb("x", [0.0, 0.0, 400.0, 200.0], words, paras=[{**PARA, "indentEnd": 300.0}]))
+    assert len(free["lines"]) == 1 and len(held["lines"]) > 1
+    end = text_layout.layout(text_rb("x", [0.0, 0.0, 400.0, 200.0], "one",
+                                     paras=[{**PARA, "alignment": "END", "indentEnd": 50.0}]))
+    assert abs(end["lines"][0]["box"][2] - (400.0 - text_layout.INSET_X - 50.0)) < 0.01
+
+
 def test_the_persons_own_arrangement_carried_onto_the_sources_move_is_theirs():
     """Live fuzz r7413: the person moved a paragraph up 30 pt onto the title; the source had moved
     it down, which kept them apart, and now moves it back up: sync carries the person's move on top

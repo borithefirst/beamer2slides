@@ -87,7 +87,8 @@ def char_styles(rb: dict, size: "float | list[float] | None") -> list[dict]:
 
 def _para(s: dict) -> dict:
     return {"lineSpacing": (s.get("lineSpacing") or 100) / 100, "indentStart": s.get("indentStart") or 0.0,
-            "indentFirstLine": s.get("indentFirstLine") or 0.0, "spaceAbove": s.get("spaceAbove") or 0.0,
+            "indentFirstLine": s.get("indentFirstLine") or 0.0, "indentEnd": s.get("indentEnd") or 0.0,
+            "spaceAbove": s.get("spaceAbove") or 0.0,
             "spaceBelow": s.get("spaceBelow") or 0.0, "bullet": bool(s.get("bullet")),
             "alignment": s.get("alignment") or "START"}
 
@@ -101,6 +102,7 @@ def para_style(rb: dict) -> dict:
     return {"lineSpacing": min((s.get("lineSpacing") or 100) for s in styles) / 100,
             "indentStart": min((s.get("indentStart") or 0.0) for s in styles),
             "indentFirstLine": min((s.get("indentFirstLine") or 0.0) for s in styles),
+            "indentEnd": min((s.get("indentEnd") or 0.0) for s in styles),
             "spaceAbove": min((s.get("spaceAbove") or 0.0) for s in styles),
             "spaceBelow": min((s.get("spaceBelow") or 0.0) for s in styles),
             "bullet": any(s.get("bullet") for s in styles),
@@ -195,7 +197,9 @@ def layout(rb: dict, size: float | None = None) -> dict | None:
         r = ps["lineSpacing"]
         pst = styles[at:at + len(para)] or [styles[min(at, len(styles) - 1)]]
         indent = ps["indentStart"]
-        broken = wrap(para, pst, max(1.0, right - left - indent)) if para else [(0, 0, 0.0)]
+        # a paragraph keeps its indentEnd free before the box's edge (emit.paragraph_ends)
+        end = right - ps["indentEnd"]
+        broken = wrap(para, pst, max(1.0, end - left - indent)) if para else [(0, 0, 0.0)]
         for li, (a, b, ink) in enumerate(broken):
             sizes = [pst[k]["fontSize"] for k in range(a, b) if not para[k].isspace()] if b > a else []
             z = max(sizes) if sizes else pst[min(a, len(pst) - 1)]["fontSize"]
@@ -209,9 +213,9 @@ def layout(rb: dict, size: float | None = None) -> dict | None:
                 baseline += emit.line_pitch(previous, r, z)
             previous, r_prev = z, r
             if ps["alignment"] == "CENTER":
-                lx = left + indent + (right - left - indent - ink) / 2
+                lx = left + indent + (end - left - indent - ink) / 2
             elif ps["alignment"] == "END":
-                lx = right - ink
+                lx = end - ink
             else:
                 lx = left + indent
             bx = left + min(ps["indentFirstLine"], indent) if ps["bullet"] and li == 0 and ink > 0 else lx
