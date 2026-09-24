@@ -167,6 +167,12 @@ per attempt. Say so before you start one; do not start two.
   than by a slide (those are changed in Slides under Slide > Edit theme, and no amount of editing
   the source will move them). Tell the person the number before they start editing: a source edit
   to an untied element is not lost, but it does not arrive either — it comes back as a conflict.
+* `deck_adopt` sets the deck in the deck's own fonts only when it has their files. A font it had
+  to replace is in `data["fonts_missing"]` (the font, how many letters use it, what it was set in
+  instead); its lines break in other places than the deck's. That is not a failure, but the fix is
+  a file only the person has: ask for the fonts named there (.ttf, .otf, .ttc, .woff or .woff2,
+  any file names) and adopt again with `fonts=[...]` into a new `tex` path. Do not look for the
+  fonts on the web yourself. A file that could not be used is a warning at `where: "fonts"`.
 * Slide order is merged, not taken wholesale: a slide a person dragged stays where they put it.
 * A sync killed halfway loses nothing — the next one sweeps up — so a timeout is not a reason to
   force anything.

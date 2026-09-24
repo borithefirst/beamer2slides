@@ -136,6 +136,11 @@ def is_content(value: Any) -> bool:
         {"base64", "text", "bytes", "url", "content"} & set(value))
 
 
+def holds_content(value: Any) -> bool:
+    """`is_content`, or a list with content among its items (`deck_adopt(fonts=[...])`)."""
+    return is_content(value) or (isinstance(value, (list, tuple)) and any(is_content(v) for v in value))
+
+
 def take_in(ws: Any, arguments: Mapping[str, Any],
             fetch: Callable[[str], bytes] | None = None) -> dict[str, Any]:
     """Materialise every inline argument into the workspace; return the arguments with refs.
@@ -143,11 +148,19 @@ def take_in(ws: Any, arguments: Mapping[str, Any],
     Idempotent, and cheap when there is nothing to do: a call whose arguments are all plain
     strings walks the dict once and returns a copy. Runs *before* the schema check, so a
     content dict never has to be a publishable parameter type - by the time a tool's schema
-    sees the argument it is the string ref the schema says it is.
+    sees the argument it is the string ref the schema says it is. A list argument is taken in
+    item by item, so a list of files may mix refs and content.
     """
     out: dict[str, Any] = {}
     for key, value in (arguments or {}).items():
-        out[key] = _one(ws, key, value, fetch) if is_content(value) else value
+        if is_content(value):
+            out[key] = _one(ws, key, value, fetch)
+        elif holds_content(value):
+            # numbered, so that two items sent with no name are not one file
+            out[key] = [_one(ws, f"{key}-{i}", v, fetch) if is_content(v) else v
+                        for i, v in enumerate(value, 1)]
+        else:
+            out[key] = value
     return out
 
 

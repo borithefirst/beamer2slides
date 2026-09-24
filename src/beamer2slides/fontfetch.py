@@ -20,24 +20,34 @@ Gyre). A family google/fonts answered "not found" for is remembered (`missing.js
 Calibri asks GitHub once, not on every build. `$B2S_FONT_FETCH=0` turns fetching off; `adopt`
 also never fetches while `$B2S_FONTS` names the only folders to use (the tests).
 
+**Where the files come from.** A local copy of the repository (`$B2S_FONT_SOURCE`, or
+`use_source(root)` per context: the folder holding `ofl/`, `apache/`, `ufl/`) is read from disk
+and nothing is downloaded - that is how a host with no internet gets the same fonts. Otherwise
+every file is downloaded through `net.download`, so a caller's fetcher (`google_auth.use_fetcher`,
+`AgentContext.fetch_google_content`) decides whether GitHub may be reached; one that refuses is
+"could not fetch", never an error. The same four static styles are cut here from font files a
+person supplies (`fontfiles.install`, which lays them out the way this cache is laid out).
+
 Cache: `$B2S_FONT_CACHE`, else %LOCALAPPDATA%\\beamer2slides\\fonts on Windows and
 ~/.cache/beamer2slides/fonts elsewhere.
 """
 
+import contextvars
 import json
 import os
 import re
 import tempfile
 import urllib.error
 import urllib.parse
-import urllib.request
+from contextlib import contextmanager
 from pathlib import Path
+
+from . import net
 
 RAW = "https://raw.githubusercontent.com/google/fonts/main/"
 LICENCE_DIRS = ("ofl", "apache", "ufl")
 LICENCE_FILES = {"ofl": "OFL.txt", "apache": "LICENSE.txt", "ufl": "UFL.txt"}
 STYLES = {"Regular": (400, False), "Bold": (700, False), "Italic": (400, True), "BoldItalic": (700, True)}
-TIMEOUT = 30
 
 
 def cache_dir() -> Path:
@@ -48,7 +58,36 @@ def cache_dir() -> Path:
     return Path(os.environ.get("XDG_CACHE_HOME") or Path.home() / ".cache") / "beamer2slides" / "fonts"
 
 
+#: A folder whose font families' own folders were built here from files a person supplied
+#: (`fontfiles.install`): `weight_file` cuts weights into it as it does into the cache.
+MANAGED = ".b2s-fonts"
+
+_SOURCE: contextvars.ContextVar[Path | None] = contextvars.ContextVar("beamer2slides.font_source", default=None)
+
+
+def source_root() -> Path | None:
+    """The local copy of google/fonts to read instead of GitHub, or None."""
+    root = _SOURCE.get() or (Path(os.environ["B2S_FONT_SOURCE"]) if os.environ.get("B2S_FONT_SOURCE") else None)
+    return root if root is not None and root.is_dir() else None
+
+
+@contextmanager
+def use_source(root):
+    """Read google/fonts from `root` (a checkout: `ofl/`, `apache/`, `ufl/`) for the length of the
+    block, in this context only; None leaves things as they were."""
+    token = _SOURCE.set(Path(root)) if root else None
+    try:
+        yield
+    finally:
+        if token is not None:
+            _SOURCE.reset(token)
+
+
 def enabled() -> bool:
+    """Whether a family may be looked for in google/fonts at all: always with a local copy, which
+    is no network; otherwise unless `$B2S_FONT_FETCH` says no."""
+    if source_root() is not None:
+        return True
     return os.environ.get("B2S_FONT_FETCH", "1").strip().lower() not in ("0", "no", "off", "false")
 
 
@@ -61,9 +100,33 @@ def stem_name(family: str) -> str:
     return "".join(c for c in family if c.isalnum())
 
 
+class FetchFailed(OSError):
+    """A download that did not happen for a reason that says nothing about the family: no
+    network, a fetcher that may not reach GitHub, whatever a harness's client raises."""
+
+
 def get(url: str) -> bytes:
-    with urllib.request.urlopen(url, timeout=TIMEOUT) as r:
-        return r.read()
+    """One file of google/fonts by its raw URL: from the local copy when there is one, else
+    downloaded through the context's fetcher (one try: a blip costs a stand-in, as it always did).
+    A file that is not there raises `FileNotFoundError` (or the `HTTPError` 404 urllib gives);
+    any other failure is `FetchFailed`."""
+    root = source_root()
+    if root is not None and url.startswith(RAW):
+        path = root / urllib.parse.unquote(url[len(RAW):])
+        if not path.is_file():
+            raise FileNotFoundError(path)
+        return path.read_bytes()
+    try:
+        return net.download(url, tries=1)
+    except OSError:
+        raise
+    except Exception as e:  # noqa: BLE001 - a harness's fetcher raises its own types
+        raise FetchFailed(f"{type(e).__name__}: {e}") from e
+
+
+def _absent(e: Exception) -> bool:
+    """Whether a failed `get` means the file does not exist (rather than that it could not be had)."""
+    return isinstance(e, FileNotFoundError) or (isinstance(e, urllib.error.HTTPError) and e.code == 404)
 
 
 def parse_metadata(text: str) -> dict:
@@ -145,7 +208,8 @@ def fetch_family(family: str, log=print) -> dict[str, Path] | None:
     base, axes = OPTICAL.get(folder, (None, {}))
     if base is not None:
         folder = folder_name(base)
-    if not folder or folder in _missing():
+    local = source_root() is not None
+    if not folder or (not local and folder in _missing()):
         return None
     meta, lic = None, None
     try:
@@ -154,11 +218,12 @@ def fetch_family(family: str, log=print) -> dict[str, Path] | None:
                 meta = parse_metadata(get(f"{RAW}{licence}/{folder}/METADATA.pb").decode("utf-8", "replace"))
                 lic = licence
                 break
-            except urllib.error.HTTPError as e:
-                if e.code != 404:
+            except OSError as e:
+                if not _absent(e):
                     raise
         if meta is None or not meta["fonts"]:
-            _remember_missing(folder)
+            if not local:                               # a partial copy on disk says nothing of GitHub
+                _remember_missing(folder)
             return None
         if base is not None and not any("[" in f["filename"] for f in meta["fonts"]):
             return None                                 # no variable font to cut the optical size from
@@ -171,11 +236,15 @@ def fetch_family(family: str, log=print) -> dict[str, Path] | None:
     return out or None
 
 
-def _build(family: str, folder: str, lic: str, meta: dict, axes: dict | None = None) -> dict[str, Path]:
+def _build(family: str, folder: str, lic: str | None, meta: dict, axes: dict | None = None,
+           root: Path | None = None) -> dict[str, Path]:
     """The four static instances of `family` from google/fonts' `folder` (its own, or the family an
-    OPTICAL name is cut from, at the axis location `axes`), into the family's own cache folder."""
-    dest = cache_dir() / folder_name(family)
-    src = cache_dir() / folder / "src"
+    OPTICAL name is cut from, at the axis location `axes`), into the family's own folder under
+    `root` (the cache by default). A file already in `<root>/<folder>/src/` is not asked for again,
+    which is also how `fontfiles` builds a family from files nobody downloaded (`lic` None)."""
+    root = cache_dir() if root is None else root
+    dest = root / folder_name(family)
+    src = root / folder / "src"
     stem = stem_name(family)
     downloaded: dict[str, Path] = {}
 
@@ -187,17 +256,25 @@ def _build(family: str, folder: str, lic: str, meta: dict, axes: dict | None = N
             downloaded[name] = path
         return downloaded[name]
 
-    try:
-        _write_atomic(dest / f"{stem}-LICENSE.txt", get(f"{RAW}{lic}/{folder}/{LICENCE_FILES[lic]}"))
-    except urllib.error.HTTPError:
-        pass
+    if lic is not None:
+        try:
+            _write_atomic(dest / f"{stem}-LICENSE.txt", get(f"{RAW}{lic}/{folder}/{LICENCE_FILES[lic]}"))
+        except urllib.error.HTTPError:
+            pass
+        except OSError as e:
+            if not _absent(e):
+                raise
     out: dict[str, Path] = {}
     for style, (weight, italic) in STYLES.items():
         files = [f for f in meta["fonts"] if (f["style"] == "italic") == italic]
         if not files:
             continue
         variable = [f for f in files if "[" in f["filename"]]
-        target = dest / f"{stem}-{style}.ttf"
+        # google/fonts is all TrueType; a person's files may be CFF, which keeps its .otf
+        suffix = Path((variable or files)[0]["filename"]).suffix.lower() or ".ttf"
+        if not variable:
+            suffix = Path(min(files, key=lambda f: abs(f["weight"] - weight))["filename"]).suffix.lower() or ".ttf"
+        target = dest / f"{stem}-{style}{suffix}"
         if variable:
             from fontTools.ttLib import TTFont
             from fontTools.varLib import instancer
@@ -238,11 +315,14 @@ def weight_file(upright: Path, weight: int, italic: bool = False) -> Path | None
     Google Sans 600 and 500, journey-maps' text Montserrat 300 and 500) where fontspec's four styles
     have only 400 and 700. None when the family is not a variable one fetched here, has no such
     weight on its axis, or has no italic when one is asked for. Written beside the four styles as
-    `<Stem>-W<weight>[Italic].ttf`, which `adopt.font_candidates` does not read as a style."""
+    `<Stem>-W<weight>[Italic].ttf`, which `adopt.font_candidates` does not read as a style.
+    The same for a family built from supplied files (a folder marked `MANAGED`), where a static
+    file of that weight may also have been given as it is."""
     upright = Path(upright)
     dest = upright.parent
     try:
-        if dest.parent.resolve() != cache_dir().resolve():
+        root = dest.parent
+        if root.resolve() != cache_dir().resolve() and not (root / MANAGED).is_file():
             return None
     except OSError:
         return None
@@ -251,7 +331,7 @@ def weight_file(upright: Path, weight: int, italic: bool = False) -> Path | None
     if target.exists():
         return target
     base, axes = OPTICAL.get(dest.name, (None, {}))
-    src = cache_dir() / (folder_name(base) if base else dest.name) / "src"
+    src = root / (folder_name(base) if base else dest.name) / "src"
     variable = [f for f in sorted(src.glob("*[[]*].ttf")) if ("Italic" in f.name) == italic] if src.is_dir() else []
     if not variable:
         return None

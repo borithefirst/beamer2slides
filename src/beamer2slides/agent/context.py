@@ -77,6 +77,11 @@ class AgentContext:
     #: that one fetches a *model's* URL, and a harness that refuses those must not have to open
     #: that door merely to download pictures.
     fetch_google_content: Callable[[str], bytes] | None = None
+    #: A local copy of github.com/google/fonts (the folder holding `ofl/`, `apache/`, `ufl/`):
+    #: `deck_adopt` reads the deck's fonts from it and downloads none (`fontfetch.use_source`).
+    #: None: they are downloaded from GitHub through `fetch_google_content` (or urllib), and a
+    #: fetcher that refuses GitHub means the deck is set in stand-ins, which the result names.
+    font_source: str | Path | None = None
 
     @property
     def ephemeral(self) -> bool:
@@ -240,6 +245,9 @@ def tool(name: str, needs: tuple[str, ...] = (READS,)):
                                 hooks.enter_context(google_auth.use_provider(lambda: creds))
                             if ctx.fetch_google_content is not None:
                                 hooks.enter_context(google_auth.use_fetcher(ctx.fetch_google_content))
+                        if ctx.font_source:
+                            from .. import fontfetch
+                            hooks.enter_context(fontfetch.use_source(ctx.font_source))
                         fn(job, *args, **kw)
                 except Refused as exc:
                     _refuse(job, exc.code, str(exc), exc.data)
@@ -275,9 +283,9 @@ def _take_in(job: Job, arguments: dict[str, Any]) -> dict[str, Any]:
     Inside the `try`, so a malformed `base64` comes back as `bad_request` with the parameter
     named rather than as a traceback the harness has to catch.
     """
-    from .content import is_content, take_in
+    from .content import holds_content, take_in
 
-    if not any(is_content(v) for v in arguments.values()):
+    if not any(holds_content(v) for v in arguments.values()):
         return arguments
     return take_in(job.ctx.workspace, arguments, job.ctx.fetch)
 

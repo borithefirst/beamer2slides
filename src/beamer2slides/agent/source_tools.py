@@ -162,18 +162,23 @@ def deck_adopt(
     flow: Annotated[bool, "Write the readable version - text that flows in lists and paragraphs - "
                           "instead of the absolute geometry a foreign deck's dragged boxes are. "
                           "Costs fidelity, gains a source a person can edit."] = False,
+    fonts: Annotated[list[str] | None, "Font files the deck is written in (.ttf, .otf, .ttc, .woff, "
+                                       ".woff2), each a workspace ref (a folder: every font in it) or "
+                                       "the file itself as content. Preferred to any other copy. "
+                                       "Give the ones a previous adopt listed in data['fonts_missing']."] = None,
 ) -> None:
     """Write the LaTeX source a foreign deck never had, then converge it onto that deck.
 
     For a deck a person built in Slides, which `deck_pull` cannot refine because there is no
     source to refine. It reads every slide, its layouts and masters and **one LARGE thumbnail
     per slide** (60 such reads a minute, a 429 sleeps 20-60 s: minutes for a big deck), writes a
-    source tree, then **compiles it in a loop** like pull. `data["readability"]` says how
-    keepable that source is - sources people wrote score 0.6-1.0. A `.json` deck is read locally,
-    but `needs` is static, so credentials are fetched anyway and an offline context refuses.
+    source tree, then **compiles it in a loop** like pull. `data["readability"]`: how keepable
+    that source is (sources people wrote: 0.6-1.0). A `.json` deck is read locally, but credentials
+    are fetched anyway. Fonts it had no file for are in `data["fonts_missing"]` - ask for them.
     """
     from ..adopt import written_already
 
+    font_paths = [_existing(j, ref, "fonts") for ref in fonts or []]
     tex_path = j.path(tex, write=True)
     if written_already(tex_path):
         # adopt's own refusal, made before the minutes of thumbnails rather than after them.
@@ -200,8 +205,16 @@ def deck_adopt(
             j.data["slides"] = int(m.group(1))
         log(line)
 
-    result = _loop(lambda: cmd_adopt(target_ref, tex_path, work_path, apply, out_path,
-                                     max_iter, engine, flow, target_path, log=watch))
+    from ..fontfiles import ForeignFolder
+
+    found: dict = {}
+    try:
+        result = _loop(lambda: cmd_adopt(target_ref, tex_path, work_path, apply, out_path,
+                                         max_iter, engine, flow, target_path, log=watch,
+                                         fonts=font_paths, found=found))
+    except ForeignFolder as exc:
+        raise Refused("bad_request", str(exc), work=j.ctx.workspace.ref(work_path)) from None
+    _fonts_report(j, found)
     if tex_path.exists():
         j.artifact(tex_path, "tex", "the bootstrapped source adopt wrote")
         _readability(j, tex_path)
@@ -217,6 +230,27 @@ SOURCE_TOOLS = (deck_pull, tex_converge, deck_adopt)
 
 
 # ---------------------------------------------------------------- arguments
+
+def _fonts_report(j: Job, found: dict) -> None:
+    """What adopt made of the fonts given, and which of the deck's fonts it had to stand in for.
+
+    A font set in a stand-in breaks lines in other places than the deck does, and every such
+    line is a residual the loop then spends rounds on; the one thing that fixes it is the font's
+    file, which only the caller can hand over. So it is data to act on, not a line in the log."""
+    supplied = found.get("supplied")
+    if supplied is not None:
+        j.data["fonts_supplied"] = {f: got["styles"] for f, got in supplied.get("families", {}).items()}
+        for s in supplied.get("skipped", []):
+            j.warn(f"{s['file']} was not used: {s['reason']}", where="fonts")
+    missing = found.get("missing") or []
+    j.data["fonts_missing"] = [dict(m) for m in missing]
+    for m in missing:
+        j.warn(f"{m['font']} ({m['letters']} letters) is not here and was set in {m['set_in']}, so its "
+               f"lines break elsewhere than the deck's", where="fonts")
+    if missing:
+        j.suggest("ask the person for the files of the fonts in data['fonts_missing'] and adopt again "
+                  "with fonts=[...] (into a new tex path), if the deck's line breaks matter")
+
 
 def _existing(j: Job, ref: str, what: str) -> Path:
     path = j.path(ref)

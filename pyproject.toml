@@ -39,10 +39,15 @@ pure = ["fonttools>=4.40"]
 # Either generation: 1.x takes its handlers through decorators, 2.x through the constructor, and
 # `serve` wires itself to whichever is there (the wire protocol is the same either way).
 mcp = ["mcp>=1.2"]
+# Font files handed to adopt as .woff2 (`adopt --fonts`, `deck_adopt(fonts=...)`, fontfiles.py):
+# fontTools unwraps them only with Brotli. .ttf, .otf, .ttc and .woff need nothing more, and a
+# .woff2 without it is reported as not used, with this line's fix, rather than failing the run.
+woff2 = ["brotli>=1.0"]
 # What the tests need beyond the package itself. pytest-xdist is what makes `-n auto` work;
 # the suite runs without it, one worker, about three times slower (tests/conftest.py).
 dev = ["pytest>=8", "pytest-xdist>=3",
        "fonttools>=4.40",  # themes/google/fonts/build_fonts.py cuts the theme's fonts
+       "brotli>=1.0",      # tests/test_fontfiles.py writes and reads a .woff2
        # The offline suite runs without the client library (tests/test_gapi.py proves it in a
        # subprocess where the import fails); the live suites - markers slides, sync, docs - do not.
        "google-api-python-client>=2.0", "google-auth-oauthlib>=1.2"]

@@ -186,10 +186,14 @@ Details, measurements and edge cases: docs/project-notes.md "What becomes native
   (ContextVar); a worker thread inherits nothing, so resolve credentials on the calling thread
   (`credentials_for_threads`).
 - **Every content download goes through `net.download`** (picture signatures, thumbnails, read-deck
-  pictures, `source_url`, Doc pictures); `google_auth.use_fetcher` / `AgentContext.fetch_google_content`
-  let a caller own it (resolve with `fetcher_for_threads` on the calling thread). No new `urlopen`
-  (`fontfetch`, fixed GitHub host, `$B2S_FONT_FETCH=0`, is the one other); tests install a
+  pictures, `source_url`, Doc pictures, `fontfetch`'s google/fonts files); `google_auth.use_fetcher` /
+  `AgentContext.fetch_google_content` let a caller own it (resolve with `fetcher_for_threads` on
+  the calling thread; a refusing fetcher is no font fetch). No new `urlopen`; tests install a
   fetcher (`fetcher` fixture), not monkeypatches.
+- **Fonts without internet**: a local google/fonts copy (`$B2S_FONT_SOURCE`, `fontfetch.use_source`,
+  `AgentContext.font_source`), or font files handed to adopt (`--fonts`, `deck_adopt(fonts=)`,
+  .ttf/.otf/.ttc/.woff/.woff2 named by their name table, `fontfiles.py`, `adopt.use_fonts`).
+  What adopt still stood in for is reported (`ctx.missing_fonts`, agent `data["fonts_missing"]`).
 - `presentations.create` ignores `pageSize` (always 16:9), hence the .pptx route. `createImage`
   needs a fetchable URL and letterboxes. Object ids are 5-50 chars. `getThumbnail` LARGE = 1600 px.
 - Emit robustness: a refused batch is retried per slide, then per element, then the deck is rebuilt

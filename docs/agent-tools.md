@@ -194,6 +194,21 @@ retried like a network blip. A signature that cannot be fetched is left out of t
 guard then says it cannot verify that picture); nothing falls back to urllib behind the caller's
 back. Tests: `tests/test_net.py`, `tests/test_base_storage.py`.
 
+**Fonts go through the same door, or come from disk.** `deck_adopt` wants the deck's own fonts,
+and `fontfetch` downloads a missing family from google/fonts on GitHub - with `net.download`, so
+the caller's fetcher decides; one that refuses GitHub simply means no fetch. A host with no
+internet has two ways to still get them. `AgentContext.font_source` (CLI: `$B2S_FONT_SOURCE`)
+names a local copy of the google/fonts tree (`ofl/`, `apache/`, `ufl/`), read in place of GitHub
+and cut exactly as a fetch would be. And `deck_adopt(fonts=[...])` (CLI: `adopt --fonts`) takes
+font files - .ttf, .otf, .ttc, .woff, .woff2, refs or content, a folder standing for every font
+under it - named by their name tables, not their file names (`fontfiles.py`): web fonts are
+unwrapped, a variable font is cut into the four styles, a static weight between them kept for
+runs set in it. A .woff2 needs `brotli` (extra `[woff2]`). What adopt still had to stand in for is
+`data["fonts_missing"]`, one entry per font with its letter count and its stand-in, so the caller
+knows which files to ask for; what was given and used is `data["fonts_supplied"]`. `deck_pull`
+needs none of this: adopt copies the fonts it set into the source tree's `fonts/`. Tests:
+`tests/test_fontfiles.py`.
+
 ### `allow` - what the agent may do
 
 Four actions: `reads`, `writes`, `reads_google`, `writes_google`. A context lists what it

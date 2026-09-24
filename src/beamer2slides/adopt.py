@@ -18,11 +18,13 @@ What the loop is left to do: the drift between where a textblock puts a baseline
 wants it (it corrects textblocks by the measured error), the words, and the pictures it can fetch.
 """
 
+import contextvars
 import hashlib
 import json
 import os
 import re
 import shutil
+from contextlib import contextmanager
 from pathlib import Path
 
 from . import labels as labels_mod
@@ -150,15 +152,44 @@ WINDOWS_STYLES = {"bi": "BoldItalicFont", "bd": "BoldFont", "z": "BoldItalicFont
                   "i": "ItalicFont"}
 
 
+_SUPPLIED: contextvars.ContextVar[tuple[Path, ...]] = contextvars.ContextVar("beamer2slides.supplied_fonts",
+                                                                             default=())
+
+
+@contextmanager
+def use_fonts(*roots):
+    """Look in `roots` (folders `fontfiles.install` laid out) before anywhere else, for the length
+    of the block and in this context only: the fonts a person handed over win over the machine's
+    and over a fetch. The folders' contents are read afresh on the way in and out."""
+    token = _SUPPLIED.set(tuple(Path(r) for r in roots if r) + _SUPPLIED.get())
+    forget_fonts()
+    try:
+        yield
+    finally:
+        _SUPPLIED.reset(token)
+        forget_fonts()
+
+
+def forget_fonts() -> None:
+    """Drop what was read of the font folders: a folder of supplied fonts is refilled per run."""
+    from . import scripts
+    _FAMILIES.clear()
+    _LACKS.clear()
+    scripts._FACES.clear()
+    scripts._CMAPS.clear()
+
+
 def font_dirs() -> list[Path]:
     """Where to look for the typefaces a deck names: the ones this repository ships with its themes,
     then the machine's own - or only `$B2S_FONTS`, when it is set, which is how one points adopt at
     a folder of the deck's own fonts (and how the tests get an answer that does not depend on what
-    this machine happens to have installed)."""
+    this machine happens to have installed). Fonts a person supplied (`use_fonts`) come first
+    either way."""
+    supplied = [p for p in _SUPPLIED.get() if p.is_dir()]
     only = [Path(p.strip()) for p in os.environ.get("B2S_FONTS", "").split(os.pathsep) if p.strip()]
     if only:
-        return [p for p in only if p.is_dir()]
-    out: list[Path] = []
+        return supplied + [p for p in only if p.is_dir()]
+    out: list[Path] = supplied
     themes = Path(__file__).resolve().parents[2] / "themes"
     if themes.is_dir():                                 # not in an installed wheel
         out += sorted(p for p in themes.glob("*/fonts") if p.is_dir())
@@ -269,7 +300,8 @@ def font_family(name: str, want: str, near: str = "") -> dict[str, Path]:
             if _have(sub) or _fetch(sub):
                 got = _font_family(sub, want)
                 if got and flatten(got["match"]) == flatten(sub):
-                    return {**got, "match": name}       # the deck's font, in all but its files
+                    # the deck's font, in all but its files (`standin` says whose)
+                    return {**got, "match": name, "standin": got["stem"]}
     return _font_family(name, want, near)
 
 
@@ -553,20 +585,33 @@ def font_preamble(target: dict, tree: Path | None, ctx: Context | None = None) -
     wanted: dict[str, str] = {fam: fonts[0] for fam, fonts in ranked.items()}
     lines, found = [], ""
     font_weights: dict[str, set[tuple[int, bool]]] = {}
+    missing: list[dict] = []
+    main_stem: dict[str, str] = {}
+
+    def lacking(font: str, fam: str, set_in: str | None) -> None:
+        # a font the deck names that is set in something else: which one, and how much of the deck
+        if font and all(m["font"] != font for m in missing):
+            missing.append({"font": font, "kind": fam, "letters": counts.get((fam, font), 0),
+                            "set_in": set_in or main_stem.get(fam) or GYRE.get(fam, "")})
+
     for fam, command in (("sans", "setsansfont"), ("serif", "setmainfont"), ("mono", "setmonofont")):
         files: dict = {}
+        tried: dict[str, dict] = {}
         # The kind's most used font, unless it has glyphs for few of the letters set in it: the letters
         # are then in a script Slides draws with a fallback of its own (hebrew-lesson's Hebrew typed
         # "in" Noto Sans Symbols, jruby-ja's Japanese "in" Arial, 7%), and a frame whose words are all
         # such letters embeds the font with no glyph, which lualatex refuses. The next font of the
         # kind is tried, then the stand-in as before.
         for font in ranked.get(fam, [])[:MAIN_CANDIDATES]:
-            files = font_family(font, fam, found)
+            files = tried[font] = font_family(font, fam, found)
             if files and font_coverage(files["UprightFont"], letters.get(font, {}), files.get("FontIndex") or 0) >= MIN_MAIN_COVERAGE:
                 wanted[fam] = font
                 break
             files = {}
         if not files:
+            top = (ranked.get(fam) or [""])[0]
+            if top and (not tried.get(top) or stood_in(top, tried[top])):
+                lacking(top, fam, GYRE[fam])            # (not a font too few of whose letters are drawn in it)
             # Always fontspec, so the source is lualatex and Unicode throughout (a deck's text is
             # any script; pdflatex stops at the first letter it has no definition for): what the
             # machine has no family for is set in TeX Gyre, the metric clones of Helvetica, Times
@@ -574,11 +619,16 @@ def font_preamble(target: dict, tree: Path | None, ctx: Context | None = None) -
             # is always declared; the others only when the deck has words in them.
             if fam != "sans" and fam not in wanted:
                 continue
-            gyre = GYRE[fam]
+            gyre = main_stem[fam] = GYRE[fam]
             lines.append(f"\\{command}{{{gyre}}}[Extension=.otf,UprightFont=*-regular,BoldFont=*-bold,"
                          "ItalicFont=*-italic,BoldItalicFont=*-bolditalic]")
             continue
+        instead = stood_in(wanted[fam], files)
+        if instead:
+            lacking(wanted[fam], fam, instead)
         stem, match = files.pop("stem"), files.pop("match")
+        files.pop("standin", None)
+        main_stem[fam] = stem
         found = found or match                          # what the rest of the deck is set in
         low, asked = flatten(match), flatten(wanted[fam])
         faces = ""
@@ -598,8 +648,13 @@ def font_preamble(target: dict, tree: Path | None, ctx: Context | None = None) -
                 continue
             files = font_family(font, fam)
             if not files:
+                lacking(font, fam, None)                # in the kind's main font, as it is
                 continue
+            instead = stood_in(font, files)
+            if instead:
+                lacking(font, fam, instead if files.get("standin") else None)
             stem, match = files.pop("stem"), files.pop("match")
+            files.pop("standin", None)
             low, asked = flatten(match), flatten(font)
             if not (low.startswith(asked) or asked.startswith(low)):
                 continue                                # a stand-in: the kind's main font already is one
@@ -615,7 +670,31 @@ def font_preamble(target: dict, tree: Path | None, ctx: Context | None = None) -
             lines.append(f"\\newfontfamily{command}{{{stem}}}[{font_files_latex(files, tree)}{faces}"
                          f"{stretch(font, stem, files, target)}]")
         ctx.font_switches = switches
+        ctx.missing_fonts = missing
     return ["\\usepackage{fontspec}"] + lines
+
+
+def stood_in(font: str, files: dict) -> str | None:
+    """The family a deck's `font` is set in when `font_family` found another (a metric twin from
+    `SUBSTITUTES`, or the nearest of the same kind), or None when the files are the font itself.
+    A CJK face Slides draws in Times New Roman is set in it on purpose and is not reported."""
+    if not files:
+        return None
+    if files.get("standin"):
+        return files["standin"]
+    low, asked = flatten(files["match"]), flatten(font)
+    return None if low.startswith(asked) or asked.startswith(low) else files["stem"]
+
+
+def missing_fonts_lines(missing: list[dict]) -> list[str]:
+    """What a log says of `ctx.missing_fonts`: which fonts, how much of the deck, set in what."""
+    if not missing:
+        return []
+    lines = ["fonts the deck is written in that are not here (give their files with --fonts, or a "
+             "local copy of google/fonts with $B2S_FONT_SOURCE, and adopt again):"]
+    for m in sorted(missing, key=lambda m: -m["letters"]):
+        lines.append(f"  {m['font']} ({m['kind']}, {m['letters']:,} letters): set in {m['set_in']}")
+    return lines
 
 
 # A stand-in set within this share of the deck's widths is left alone; outside, it is condensed or
@@ -3385,9 +3464,10 @@ def sty_block(block: str) -> str:
     return "\n".join(lines)
 
 
-def bootstrap(target: dict, tex: Path, flow: bool = False) -> str:
+def bootstrap(target: dict, tex: Path, flow: bool = False, missing: list | None = None) -> str:
     """Write `tex` (and return it): a compilable beamer source with a frame per deck slide, and the
-    `slides.sty` beside it that its frames' vocabulary comes from."""
+    `slides.sty` beside it that its frames' vocabulary comes from. The fonts the deck names that
+    were set in something else are added to `missing` (`font_preamble`'s `ctx.missing_fonts`)."""
     ctx = Context()
     deck_text_defaults(target, ctx)
     style_for = level_style(target)
@@ -3395,6 +3475,8 @@ def bootstrap(target: dict, tex: Path, flow: bool = False) -> str:
     deck_bg = background_colour(target)
     # the typefaces first: a text box whose letters are in the deck's second face switches to it
     ctx.font_lines = font_preamble(target, tex.parent, ctx)
+    if missing is not None:
+        missing.extend(getattr(ctx, "missing_fonts", []))
     if not flow:
         # what most paragraphs and list items are, said once in the preamble
         deck_text_survey(target, ctx)
@@ -3534,11 +3616,34 @@ def written_already(tex: Path) -> bool:
 
 def cmd_adopt(deck: str, tex: Path, work: Path | None, apply: bool, out: Path | None, max_iter: int,
               engine: str | None, flow: bool, target_path: Path | None = None, base: bool = True,
-              base_in_drive: bool = False, log=print):
-    """Read a foreign deck, write a source for it, then converge that source onto the deck."""
-    from .inverse import run_pull
+              base_in_drive: bool = False, log=print, fonts=None, found: dict | None = None):
+    """Read a foreign deck, write a source for it, then converge that source onto the deck.
+
+    `fonts`: font files or folders of them a person supplied (.ttf .otf .ttc .woff .woff2), laid
+    out in `<work>/fonts-supplied` (`fontfiles.install`) and preferred to any other. `found`, when
+    given, is filled with `supplied` (what was made of those files) and `missing` (the fonts the
+    deck names that were set in something else, `font_preamble`)."""
     tex = Path(tex).resolve()
     work = Path(work).resolve() if work else tex.parent / "out" / "adopt"
+    found = {} if found is None else found
+    found.setdefault("missing", [])
+    roots = []
+    if fonts:
+        from . import fontfiles
+        report = fontfiles.install(fonts, work / "fonts-supplied")
+        found["supplied"] = report
+        log("fonts supplied:")
+        for line in fontfiles.summary(report) or ["  none of the files was a font"]:
+            log(line)
+        roots.append(work / "fonts-supplied")
+    with use_fonts(*roots):
+        return _adopt(deck, tex, work, apply, out, max_iter, engine, flow, target_path, base,
+                      base_in_drive, log, found["missing"])
+
+
+def _adopt(deck, tex, work, apply, out, max_iter, engine, flow, target_path, base, base_in_drive, log,
+           missing: list):
+    from .inverse import run_pull
     pres = None
     if target_path is not None:
         target = json.loads(Path(target_path).read_text(encoding="utf-8"))
@@ -3551,8 +3656,10 @@ def cmd_adopt(deck: str, tex: Path, work: Path | None, apply: bool, out: Path | 
     log(f"deck: {len(target['slides'])} slides read")
     if written_already(tex):
         raise SystemExit(f"{tex} exists already: adopt writes a new source tree (use `pull` to refine one)")
-    bootstrap(target, tex, flow)
+    bootstrap(target, tex, flow, missing)
     log(f"wrote {tex} ({len(target['slides'])} frames)")
+    for line in missing_fonts_lines(missing):
+        log(line)
     result = run_pull(target, tex, work, apply, out, max_iter, False, engine, log=log)
     if base:
         record_base(target, pres, tex, work, engine, base_in_drive, log=log)

@@ -21,7 +21,10 @@ Not the same door as `agent.context.AgentContext.fetch`, which fetches a URL a *
 as an argument and which a careful harness leaves unset. This one only ever fetches what Google
 answered with, or what the deck itself names.
 
-Fonts are not in here: `fontfetch` has its own off switch (`B2S_FONT_FETCH=0`).
+Fonts come through here too: `fontfetch` downloads a family from google/fonts on GitHub with
+`download`, so a fetcher that refuses GitHub is simply no fetch (adopt sets the deck in stand-ins
+and names them). A host that has the fonts on disk points `fontfetch` at them instead
+(`$B2S_FONT_SOURCE`, `fontfetch.use_source`) or hands the files over (`fontfiles`).
 """
 
 from __future__ import annotations

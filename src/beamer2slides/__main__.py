@@ -309,6 +309,10 @@ def main() -> None:
     c.add_argument("--base-in-drive", action="store_true",
                    help="also store the base in the deck's own appProperties, as convert does. This WRITES to "
                         "the presentation, which adopt otherwise never does: ask for it only for a deck you own")
+    c.add_argument("--fonts", type=Path, action="append", default=[], metavar="FILE|FOLDER",
+                   help="font files the deck is written in (.ttf .otf .ttc .woff .woff2), or a folder of them; "
+                        "preferred to this machine's and to google/fonts. Repeatable. A local copy of "
+                        "google/fonts is $B2S_FONT_SOURCE instead")
     c = sub.add_parser("docs", help="a Google Doc from a canonical HTML file, and back (docs/google-docs.md)")
     docs_sub = c.add_subparsers(dest="docs_command", required=True)
     d = docs_sub.add_parser("push", help="create the document from the file and anchor its blocks")
@@ -357,7 +361,7 @@ def main() -> None:
         from .adopt import cmd_adopt
         target = Path(args.deck) if Path(args.deck).suffix == ".json" else None
         cmd_adopt(args.deck, args.tex, args.work, args.apply, args.out, args.max_iter, args.engine,
-                  args.flow, target, args.base, args.base_in_drive)
+                  args.flow, target, args.base, args.base_in_drive, fonts=args.fonts)
         return
     if args.command in ("pull", "converge"):
         from .inverse import cmd_converge, cmd_pull
