@@ -1,9 +1,15 @@
 """Visual hunt, fixer L: TikZ drawings rebuilt as native diagrams, overlay steps of one frame,
 figures against theme furniture - on synthetic pages."""
 
-from beamer2slides.extract import select_overlays
+import math
+
+from beamer2slides import pdf
+from beamer2slides.classify import classify
+from beamer2slides.extract import extract_page, select_overlays
+from beamer2slides.render import load_png, render_backgrounds
 
 from .test_charts_diagrams import H, W, Page, body_text, deck, elements, lines, rect
+from .test_hidden_text import one_page
 
 
 # ---------------------------------------------------------------- overlay steps
@@ -190,6 +196,59 @@ def test_a_box_of_a_footline_of_boxes_is_theme_not_a_figure():
     assert not any(b["reason"] == "figure" for b in slide["left_in_background"]), slide["left_in_background"]
 
 
+def chart_over_footline(band_first: bool) -> dict:
+    p = Page()
+    footline = lambda: [p.draw(rect(x0, 246.48, x1, H), fill=fill) for x0, x1, fill in
+                        ((0, 151.18, "#a30000"), (151.18, 302.36, "#ececec"), (302.36, W, "#d9d9d9"))]
+    if band_first:
+        footline()
+    p.draw(lines((111.1, 42.8), (111.1, 235.4), (390.1, 235.4)), type="s", stroke="#000000", width=0.4)
+    p.draw(lines((115, 60), (200, 150), (380, 220)), type="s", stroke="#0000ff", width=0.8)
+    p.words("10", 126.6, 248.5, size=10.9)  # an x tick label reaching under the band
+    p.words("10", 250.6, 248.5, size=10.9)
+    if not band_first:
+        footline()
+    body_text(p, 30)
+    return next(e for e in deck(p)["slides"][0]["elements"] if e["kind"] == "image")
+
+
+def test_a_figure_ends_where_a_footline_drawn_after_it_begins():
+    """The chart's tick labels reach under the footline, which the PDF draws over them: the
+    picture reached into the band and showed its colours over the footline's texts."""
+    assert chart_over_footline(band_first=False)["bbox"][3] == 246.48
+    assert chart_over_footline(band_first=True)["bbox"][3] > 250  # the chart is drawn over it
+
+
+def test_a_logo_in_the_sidebar_corner_is_not_the_first_word_of_the_title():
+    """Berkeley with a \\logo of text: the logo's word on the corner square joined the frame title
+    in the headline beside it ('UofT  Sensor network'), which then started at the sidebar."""
+    p = Page()
+    p.draw(rect(0, 44.83, 44.83, 246.75), fill="#3333b3")  # the sidebar
+    p.draw(rect(0, 0, W, 44.83), fill="#adade0")         # the headline
+    p.draw(rect(0, 0, 44.83, 44.83), fill="#8585d1")     # their corner, the logo on it
+    p.draw(rect(7.55, 15.97, 37.28, 28.86), fill="#ffffff")
+    p.text("UofT", 10.54, 26.0, size=9.96, color="#000080")
+    p.words("Sensor network", 53.34, 26.0, size=14.35)
+    body_text(p, 120)
+    titles = [e for e in elements(p) if e.get("role") == "title"]
+    assert [" ".join("".join(r["text"] for r in par["runs"]) for par in t["paragraphs"]) for t in titles] == ["Sensor network"]
+
+
+def test_a_logo_beside_the_last_line_is_no_hole_in_it():
+    """Darmstadt's \\logo of words in the bottom-right corner, right of the last references
+    line: it became a hole at that line's end, and the box as wide as the logo's right edge."""
+    p = Page()
+    body_text(p, 120)
+    p.words("[8] N. Entezari, S. A. Al-Sayouri and E. E. Papalexakis. All you", 28.35, 232, size=7.97)
+    end = p.words("need is low (rank): defending against adversarial attacks. WSDM, 2020.", 42.49, 241.5, size=7.97)
+    p.draw(rect(end + 10, 234.2, end + 25, 241.7), fill="#cc0000")
+    p.text("ETH", end + 12, 240.7, size=4.98, color="#ffffff")
+    els = elements(p)
+    assert not any(e["kind"] == "image" for e in els), [(e["kind"], e.get("role")) for e in els]
+    last = next(e for e in els if e["kind"] == "text" and "2020." in str(e["paragraphs"]))
+    assert last["bbox"][2] <= end + 1
+
+
 def rounded(x0, y0, x1, y1, r) -> list:
     k = 0.448 * r
     return [["l", [[x0 + r, y0], [x1 - r, y0]]], ["c", [[x1 - r, y0], [x1 - r + k, y0], [x1, y0 + r - k], [x1, y0 + r]]],
@@ -246,3 +305,32 @@ def test_a_horizontal_first_elbow_is_written_from_its_other_end():
     assert (heads["startArrow"], heads["endArrow"]) == ("STEALTH_ARROW", "NONE")
     ends = [r["updateLineProperties"]["lineProperties"] for r in reqs if "updateLineProperties" in r][-1]
     assert ends["startConnection"]["connectedObjectId"] == "d_n1" and ends["endConnection"]["connectedObjectId"] == "d_n0"
+
+
+def test_a_turned_stamp_keeps_its_letters_where_it_crosses_native_words(tmp_path):
+    """A pink DRAFT turned 25 degrees over the bullets (tikz overlay): a turned glyph's box is far
+    larger than its ink, and the words' x-height bands switched off the F and T it met."""
+    c, s = math.cos(math.radians(25)), math.sin(math.radians(25))
+    content = (b"BT /F1 12 Tf 20 150 Td (Native words run across the page under a stamp) Tj ET\n"
+               b"BT /F1 12 Tf 20 120 Td (A second line of native words to make a paragraph) Tj ET\n"
+               b"BT 1 0.4 0.6 rg /F1 48 Tf %.4f %.4f %.4f %.4f 90 25 Tm (DRAFT) Tj ET\n" % (c, s, -s, c))
+    path = tmp_path / "stamp.pdf"
+    path.write_bytes(one_page(content))
+    raw = {"version": 1, "source": {"pdf": str(path), "producer": "", "pages": 1, "title": ""}, "pages": []}
+    doc = pdf.Document(path)
+    try:
+        raw["pages"] = [extract_page(doc[0], "1")]
+        raw["pages"][0]["frame_label"] = None
+    finally:
+        doc.close()
+    deck = classify(raw)
+    assert [e["kind"] for e in deck["slides"][0]["elements"]] == ["text"]  # both lines native, the stamp not
+    [png] = render_backgrounds(path, raw, deck, tmp_path / "bg")
+    bg = load_png(png)
+    doc = pdf.Document(path)
+    try:
+        original = doc[0].render(bg.shape[1] / 400)
+    finally:
+        doc.close()
+    pink = lambda im: int(((im[..., 0] > 200) & (im[..., 1] < 150) & (im[..., 2] > 100) & (im[..., 2] < 200)).sum())
+    assert pink(bg) >= 0.99 * pink(original)

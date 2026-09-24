@@ -1035,6 +1035,7 @@ class PageClassifier:
         # Glyphs of symbol fonts (Creative Commons badges, FontAwesome) are artwork.
         graphics += [Rect.of(s["bbox"]) for s in self.page["spans"] if font_info(s["font"]).family == "icon"]
         self.graphics = graphics
+        self._artwork = None  # see artwork_of
         self.regions = cluster_rects(graphics, gap=3.0) if graphics else []
         self.title_bridges: list[Rect] = []  # see axis_titles
         self.column_bridges: list[Rect] = []  # see axis_label_column
@@ -1047,6 +1048,24 @@ class PageClassifier:
         marks = [g for g in graphics if box.contains_rect(g) and max(g.w, g.h) <= 15 and
                  any(0 <= s.x0 - g.x1 <= 12 and s.y0 < g.cy < s.y1 for s in spans)]
         return any(a is not b and abs(a.cy - b.cy) <= 1 and 0 < b.x0 - a.x1 <= 100 for a in marks for b in marks)
+
+    def artwork_of(self, r: Rect) -> tuple | None:
+        """The smallest filled piece of theme artwork (a decoration: corner square, sidebar,
+        band; or a small box in the header or footer band, a \\logo's) the rect's centre is on,
+        as its box. (Not strokes: a zoomed plot's lines reaching off the page are decorations
+        too, and cross the title.) A logo of words in the corner beside the last line of a
+        references frame was a hole at that line's end, and the box wider than the entries."""
+        if not hasattr(self, "decorations"):
+            return None  # (lines built before the graphics were looked at)
+        if getattr(self, "_artwork", None) is None:
+            decor = {tuple(d.as_list()) for d in self.decorations}
+            ornament = lambda d: d["id"] in self.graphic_drawings and self.band_ornament(self.graphic_drawings[d["id"]])
+            # (a logo's box holds its words; navigation symbols drawn over a footnote do not)
+            self._artwork = [(Rect.of(d["bbox"]), tuple(Rect.of(d["bbox"]).as_list()) not in decor)
+                             for d in self.page["drawings"] if "f" in d["type"] and d.get("fill")
+                             and (tuple(Rect.of(d["bbox"]).as_list()) in decor or ornament(d))]
+        on = [d for d, whole in self._artwork if (d.contains_rect(r, tol=0.5) if whole else d.contains(r.cx, r.cy))]
+        return tuple(min(on, key=lambda d: d.w * d.h).as_list()) if on else None
 
     def on_edge_artwork(self, r: Rect) -> bool:
         edge_panels = [p["bbox"] for p in self.panels
@@ -1104,6 +1123,9 @@ class PageClassifier:
 
         # Words on different panels are different texts (Bergen's label column beside the body).
         panel = [self.panel_of(s.rect) for s in spans]
+        # Likewise words on different boxes of the theme's artwork: a \logo in a sidebar theme's
+        # corner square is not the first word of the frame title in the headline beside it.
+        artwork = [self.artwork_of(s.rect) for s in spans]
         for i in range(n):
             a = spans[i]
             for j in range(i + 1, n):
@@ -1127,7 +1149,7 @@ class PageClassifier:
                 gap = max(0.0, b.rect.x0 - a.rect.x1, a.rect.x0 - b.rect.x1)
                 # (text colour changes with the panel; a dark number on a light box across the
                 # edge still belongs to its line)
-                if same_row and gap <= 2.0 * big and (panel[i] == panel[j] or a.color == b.color) \
+                if same_row and gap <= 2.0 * big and (panel[i] == panel[j] or a.color == b.color) and artwork[i] == artwork[j] \
                         and not (gap > 0.8 * big and self.gutter(spans, a, b, big)):
                     parent[find(i)] = find(j)
         groups: dict[int, list[Span]] = {}
@@ -2287,7 +2309,7 @@ class PageClassifier:
                 continue
             spans = [s.id for s in label_spans if c.expand(0.5).contains_rect(s.rect)]
             el = {"id": f"p{self.page['index']}f{len(out)}", "kind": "image", "role": "figure",
-                  "bbox": c.expand(1.0).as_list(), "spans": spans}
+                  "bbox": self.clip_to_bands(c, c.expand(1.0)).as_list(), "spans": spans}
             bare = None if spans else self.bare_image(c)
             if bare is not None:
                 # One `\includegraphics` and nothing else: the picture is the image itself, on
@@ -2497,6 +2519,31 @@ class PageClassifier:
         return any(o is not line and o.reason is None and len(o.text) >= 20 and abs(o.size - line.size) <= 0.05 * line.size
                    and 0.9 * line.size <= line.baseline - o.baseline <= 1.6 * line.size
                    and any(abs(s.rect.x0 - line.rect.x0) <= 1.0 for s in o.content) for o in lines)
+
+    def clip_to_bands(self, c: Rect, box: Rect) -> Rect:
+        """A figure's box ends where a headline or footline band drawn after it begins: the band
+        hides what of the figure reaches under it (tick labels of a chart set just above the
+        footline), and a picture reaching into it showed the band's colours over the layout's
+        footline texts, cut in half. (A band drawn first is under the figure on the page too.)"""
+        order = {d["id"]: i for i, d in enumerate(self.page["drawings"])}
+        members = [order[i] for i, r in self.graphic_drawings.items() if c.expand(0.5).contains_rect(r)]
+        if not members:
+            return box
+        last = max(members)
+        # (a band of boxes side by side is panels on the edge, see on_edge_artwork)
+        decor = {tuple(r.as_list()) for r in self.decorations}
+        panels = {p["id"] for p in self.panels if not p["image"]}
+        x0, y0, x1, y1 = box.as_list()
+        for i, d in enumerate(self.page["drawings"]):
+            r = Rect.of(d["bbox"])
+            if i < last or r.h > 0.15 * self.H or r.x1 <= box.x0 or r.x0 >= box.x1 or not (
+                    d["id"] in self.decor_ids or d["id"] in panels or tuple(r.as_list()) in decor):
+                continue
+            if r.y1 >= self.H - 1 and box.y0 + 0.5 * box.h < r.y0 < y1:
+                y1 = r.y0
+            elif r.y0 <= 1 and y0 < r.y1 < box.y1 - 0.5 * box.h:
+                y0 = r.y1
+        return Rect(x0, y0, x1, y1)
 
     def band_ornament(self, r: Rect) -> bool:
         """A small graphic in the header or footer band (navigation symbols, a title's accent

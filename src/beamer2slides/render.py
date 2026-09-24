@@ -142,6 +142,10 @@ def _band(bbox: list[float], baseline: float, size: float) -> Box:
     return x0 + 0.2, baseline - 0.45 * size, x1 - 0.2, baseline - 0.2 * size
 
 
+def _same_dir(a, b) -> bool:
+    return abs(a[0] - b[0]) <= 0.05 and abs(a[1] - b[1]) <= 0.05
+
+
 def _span_band(span: dict) -> Box:
     """_band for a raw span, also for text turned by 90° (the x-height lies beside its baseline)."""
     dx, dy = span["dir"]
@@ -465,10 +469,13 @@ def render_backgrounds(pdf: Path, raw: dict, deck: dict, out: Path) -> list[Path
         texts = [e for e in slide["elements"] if e["kind"] == "text"]
         figures = [e for e in slide["elements"] if e["kind"] == "image"]
 
-        bands = [_span_band(s)
+        # A glyph goes with a native line only when it runs the line's way: a stamp turned 25°
+        # across the bullets ("DRAFT", tikz overlay) has glyph boxes far larger than its ink,
+        # which met the words' bands and lost letters under them.
+        bands = [(_span_band(s), tuple(s["dir"]))
                  for s in (spans[sid] for sid in [sid for el in texts for sid in el["spans"]] + slide.get("on_layout", []))]
         if bands:
-            eraser.remove_chars(lambda ch: any(_intersects(ch.box, b) for b in bands))
+            eraser.remove_chars(lambda ch: any(_intersects(ch.box, b) and _same_dir(ch.dir, d) for b, d in bands))
         for x0, y0, x1, y1 in (st for el in texts for st in el.get("strokes", [])):
             eraser.remove_paths_inside((x0 - 1.5, y0 - 1.5, x1 + 1.5, y1 + 1.5))  # bars of fractions converted to text
 
