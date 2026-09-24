@@ -113,6 +113,18 @@ def test_a_lone_euro_is_the_text_companion_symbol():
     assert found[5].encoding == "TS1" and [ch.c for ch in decoded] == ["€", "€"]
 
 
+def test_a_lone_micro_sign_is_no_t1_letter():
+    """sci v3 (r8t3): textgreek's \\textmu, alone in its Type 3 font at 0xB5, is exactly as wide as
+    ectt's 0xB5 (ţ) and tctt's (µ); T1 came first and 'µs-scale' read 'ţs-scale'. A font of codes
+    above 0x7F only is no T1 text font (T1's accents are in their words' font)."""
+    body = setline(["Lifetime"], "ecss1095", 10.91, 0)
+    found, decoded = read(body + setline(["\xB5"], "ectt1095", 10.91, 9, x=73.07))
+    assert found[9].encoding == "TS1" and decoded[-1].c == "µ"
+    # a T1 accented letter among its word's letters is still T1
+    found, decoded = read(setline(["Wi\xB1niewska"], "ecrm1095", 10.95, 0))
+    assert found[0].encoding == "T1" and "".join(ch.c for ch in decoded) == "Wiśniewska"
+
+
 def test_cyrillic_t2a_is_read_as_cyrillic():
     found, decoded = read(setline(["\xCF\xF0\xE8\xEC\xE5\xF0", "\xE6\xBC\xF1\xF2\xEA\xEE\xE9",
                                    "\xE7\xE0\xE4\xE0\xF7\xE8", "\x16"], "lass1095", 10.95, 0))
