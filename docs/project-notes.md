@@ -4486,3 +4486,17 @@ Each fixer took the r7 regressions of one area first, then its still-open findin
   overhang. Open: astral and small-cap advances in the PDF backend.
 Merge fallout: a formula test assumed a plain space where TeX's 0.28 em relation space is now
 thin (`thin_span` after S made the paragraph ragged); the assertion was loosened.
+
+### Waves 1-3 on Google (r8, 2026-09-24)
+Same 76 decks and 13 Type 3 originals, five blind verifiers against the original conversion
+(`out/hunt/VERIFY3.md`, `verified/verify3_x*.json`): of 377 findings 271 FIXED, 42 IMPROVED, 60
+SAME, 2 WORSE (letterspaced SPACED now set tight; icons cropped narrower), 2 CHANGED. Numbers:
+text_fit 822 -> 487 (r7 509), invariants 296 -> 142 (176), fidelity odd 1,306 -> 861 (918), mean
+overlap 0.701 -> 0.726 (0.721). Of the 28 r7 regressions 20 are resolved; of the r6 ones 3 more.
+Still: weight (Slides draws Lato at 600 as its Regular: X's optical weight did nothing; Japanese
+still heavy in Noto), β heavier, wrapped pitch, 'but'/'than' wraps, listing numbers, a too-wide
+table, an attribution overhang. 12 new (`out/hunt/r8_regressions.json`): long arrows (`\iff`,
+`\implies`, mhchem's labelled arrows) set as one short glyph with their labels over the formula
+(sev 3), a matrix parenthesis split, formula pieces native beside pictures, a wrapped item's
+formula over its words, verse lines run together, RTL ball bullets flat discs, chart-list bullets
+in their first word's colour, a full-width ？ half-width, white nicks in a git graph.
